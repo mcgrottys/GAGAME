@@ -24,6 +24,20 @@ float3 CsToPlanet(float3 t) {   // transpose of the orthonormal rotation
     return gCsR0.xyz * t.x + gCsR1.xyz * t.y + gCsR2.xyz * t.z;
 }
 
+// Residency-map reads are CONSERVATIVE (gather + max): the M6h bilinear ramp interpolated
+// the map BELOW the locally-resident mip near boundaries, so the sampler read UNMAPPED tiles
+// -- Tier-2 null zeros -- which diluted the window's alpha toward 0 and let the coarse cube
+// bleed through in bilinear-isoline blobs (the "mottled marsh"). Never sample finer than any
+// texel under the filter footprint; smoothness comes from trilinear WITHIN resident data.
+float CsHaveCube(uint mapSrv, float3 dir) {
+    const float4 g = gTexCube[mapSrv].GatherRed(sLinearClamp, dir);
+    return max(max(g.x, g.y), max(g.z, g.w)) * 255.0f / 16.0f;
+}
+float CsHave2D(uint mapSrv, float2 uv) {
+    const float4 g = gTex[mapSrv].GatherRed(sLinearClamp, uv);
+    return max(max(g.x, g.y), max(g.z, g.w)) * 255.0f / 16.0f;
+}
+
 // The Mercator-window uv for a planet direction: every window realization (color AND height)
 // shares ONE frame (gCsMerc), so their texels describe the same ground by construction.
 float2 CsWindowUv(float3 dir) {
@@ -46,7 +60,7 @@ float3 ComposedColor(float3 dir) {
     float3 c = float3(0.5f, 0.5f, 0.5f);
     if (gCsF.x > 0.5f) {
         const float want = gTexCube[gCsU.x].CalculateLevelOfDetail(sLinearClamp, dir);
-        const float have = gTexCube[gCsU.y].SampleLevel(sLinearClamp, dir, 0).x * 255.0f / 16.0f;
+        const float have = CsHaveCube(gCsU.y, dir);
         c = gTexCube[gCsU.x].SampleLevel(sLinearClamp, dir, max(want, have)).rgb;
     }
     if (gCsF.y > 0.5f) {
@@ -54,12 +68,16 @@ float3 ComposedColor(float3 dir) {
         if (all(duv > 0.0f) && all(duv < 1.0f)) {
             const float2 fe = smoothstep(0.0f, 0.06f, duv) * smoothstep(1.0f, 0.94f, duv);
             const float want = gTex[gCsU.z].CalculateLevelOfDetail(sLinearClamp, duv);
-            const float have = gTex[gCsU.w].SampleLevel(sLinearClamp, duv, 0).x * 255.0f / 16.0f;
+            const float have = CsHave2D(gCsU.w, duv);
             const float4 w = gTex[gCsU.z].SampleLevel(sLinearClamp, duv, max(want, have));
             c = lerp(c, w.rgb, fe.x * fe.y * w.a);
         }
     }
-    return c * 1.35f;
+    // M6j final word on "conversion": NO lift at all. The 1.35 exposure compensation matched
+    // the old curve hack at mid-tones but pushed bright land cover (marsh tan) over the
+    // tonemapper's shoulder into cream. Pixels ship exactly as the hardware sRGB decode
+    // delivers them; scene brightness belongs to the lighting and gExposure alone.
+    return c;
 }
 bool ComposedColorOn() { return gCsF.x > 0.5f; }
 
@@ -70,7 +88,7 @@ bool ComposedColorOn() { return gCsF.x > 0.5f; }
 // exists. Off -> 0 (a smooth sphere).
 float ComposedHeight(float3 dir, float lod) {
     if (gCsF.z < 0.5f) return 0.0f;
-    const float have = gTexCube[gCsU2.y].SampleLevel(sLinearClamp, dir, 0).x * 255.0f / 16.0f;
+    const float have = CsHaveCube(gCsU2.y, dir);
     float h = gTexCube[gCsU2.x].SampleLevel(sLinearClamp, dir, max(lod, have)).x;
     if (gCsU2.z != 0xFFFFFFFFu) {
         const float2 duv = CsWindowUv(dir);
@@ -79,8 +97,7 @@ float ComposedHeight(float3 dir, float lod) {
             // The window pyramid runs ~6 mips finer than the cube at the same footprint
             // (611 m cube texels vs 9.55 m z14 pixels), so the matching window mip is lod+6.
             const float wantW = clamp(lod + 6.0f, 0.0f, gCsG.z);
-            const float haveW =
-                gTex[gCsU2.w].SampleLevel(sLinearClamp, duv, 0).x * 255.0f / 16.0f;
+            const float haveW = CsHave2D(gCsU2.w, duv);
             const float hw = gTex[gCsU2.z].SampleLevel(sLinearClamp, duv,
                                                        max(wantW, haveW)).x;
             h = lerp(h, hw, fe.x * fe.y);

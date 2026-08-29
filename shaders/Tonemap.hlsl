@@ -21,17 +21,22 @@ VsOut VsMain(uint vid : SV_VertexID) {
     return o;
 }
 
-// ACES-ish filmic curve (Krzysztof Narkowicz's fit). Rolls highlights off instead of clipping.
-float3 TonemapACES(float3 x) {
-    const float a = 2.51f, b = 0.03f, c = 2.43f, d = 0.59f, e = 0.14f;
-    return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
+// M6j: ACES is GONE. Its filmic mid-tone boost (0.39 -> 0.52) and desaturation are built for
+// scene-referred HDR photography -- applied to imagery Google's pipeline already tone-mapped,
+// it bleached the whole planet toward chalk (the "washed out" report). The curve was habit,
+// not need. Below the knee the data passes UNTOUCHED; only genuine HDR -- sun glint, the
+// solar disc -- takes a smooth exponential shoulder to the display ceiling.
+float3 TonemapShoulder(float3 x) {
+    const float knee = 0.85f;
+    const float3 excess = max(x - knee, 0.0f);
+    return min(x, knee) + (1.0f - knee) * (1.0f - exp(-excess / (1.0f - knee)));
 }
 
 float4 PsMain(VsOut i) : SV_Target {
     float3 hdr = gTex[gSceneColorSrv].SampleLevel(sPointClamp, i.uv, 0).rgb;
     hdr *= gExposure;
-    float3 ldr = TonemapACES(hdr);
+    float3 ldr = TonemapShoulder(max(hdr, 0.0f));
     // The target is R8G8B8A8_UNORM, not _SRGB, so the transfer function is applied here.
-    ldr = pow(max(ldr, 0.0f), 1.0f / 2.2f);
+    ldr = pow(ldr, 1.0f / 2.2f);
     return float4(ldr, 1.0f);
 }

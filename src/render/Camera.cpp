@@ -112,18 +112,37 @@ void Camera::DollyToward(const double target[3], double frac, double minDist) {
     pz += dz / dist * move;
 }
 
-XMMATRIX Camera::ViewRelative() const {
+void Camera::ViewBasis(XMFLOAT3& fwd, XMFLOAT3& right, XMFLOAT3& up) const {
     const XMFLOAT3 f = Forward();
-    const XMVECTOR eye = XMVectorZero();                       // camera-relative: always origin
     const XMVECTOR dir = XMVector3Normalize(XMLoadFloat3(&f));
-    // M6g: roll follows ANTI-GRAVITY (upHint). Near-parallel views fall back to any
-    // perpendicular so the basis never degenerates.
-    XMVECTOR up = XMVector3Normalize(XMVectorSet(upHint[0], upHint[1], upHint[2], 0));
-    const float align = std::fabs(XMVectorGetX(XMVector3Dot(dir, up)));
-    if (align > 0.999f) {
-        up = (std::fabs(f.y) > 0.999f) ? XMVectorSet(0, 0, 1, 0) : XMVectorSet(0, 1, 0, 0);
+    // M6g: roll follows ANTI-GRAVITY (upHint). M6j: the old 0.999 fallback was a CLIFF -- a
+    // straight-down orbit view drifting off centre snapped the whole planet's roll in ONE
+    // frame ("at two seconds the entire earth gets reoriented"). Near the degeneracy the up
+    // now BLENDS smoothly toward flat-north projected perpendicular to the view (defined for
+    // every view that can reach the blend: a horizontal north view has align ~ 0), so the
+    // roll transition spreads across the descent instead of popping.
+    XMVECTOR u = XMVector3Normalize(XMVectorSet(upHint[0], upHint[1], upHint[2], 0));
+    const float align = std::fabs(XMVectorGetX(XMVector3Dot(dir, u)));
+    const float t = std::clamp((align - 0.985f) / (0.9995f - 0.985f), 0.0f, 1.0f);
+    if (t > 0.0f) {
+        const XMVECTOR north = XMVectorSet(0, 0, 1, 0);
+        const XMVECTOR ref = XMVector3Normalize(
+            XMVectorSubtract(north, XMVectorScale(dir, XMVectorGetZ(dir))));
+        const float s = t * t * (3.0f - 2.0f * t);
+        u = XMVector3Normalize(XMVectorLerp(u, ref, s));
     }
-    return XMMatrixLookToLH(eye, dir, up);
+    // The exact Gram-Schmidt XMMatrixLookToLH performs; one source for every consumer.
+    const XMVECTOR r = XMVector3Normalize(XMVector3Cross(u, dir));
+    const XMVECTOR trueUp = XMVector3Cross(dir, r);
+    XMStoreFloat3(&fwd, dir);
+    XMStoreFloat3(&right, r);
+    XMStoreFloat3(&up, trueUp);
+}
+
+XMMATRIX Camera::ViewRelative() const {
+    XMFLOAT3 f, r, u;
+    ViewBasis(f, r, u);
+    return XMMatrixLookToLH(XMVectorZero(), XMLoadFloat3(&f), XMLoadFloat3(&u));
 }
 
 XMMATRIX Camera::Projection(float aspect) const {

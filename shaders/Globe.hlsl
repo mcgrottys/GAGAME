@@ -33,7 +33,7 @@ cbuffer GlobeCb : register(b1) {
     float4 gCloudA;     // x = extinction /m at density 1, y = shell top (m), z = sun boost,
                         // w = ground-shadow strength
     uint4  gTexIdx2;    // x = unused (was NE 15s relief; composed away), y = wind Mv2 bank
-                        // SRV, z = overlay on
+                        // SRV, z = overlay on, w = --albedo texture-work lens
     float4 gWindGeo;    // wind grid: lat1, lon1, 1/dlat, 1/dlon
     float4 gWindB;      // x = nx, y = ny
     uint4  gStreamU;    // Mars native streams (cube SRVs): x = surface (BC1), y = normal
@@ -55,12 +55,12 @@ cbuffer GlobeCb : register(b1) {
 // channels do the same inside Compose.hlsli; these direct forms serve Mars's native pyramids.)
 float3 StreamedSample(uint texSrv, uint mapSrv, float3 dir) {
     const float want = gTexCube[texSrv].CalculateLevelOfDetail(sLinearClamp, dir);
-    const float have = gTexCube[mapSrv].SampleLevel(sLinearClamp, dir, 0).x * 255.0f / 16.0f;
+    const float have = CsHaveCube(mapSrv, dir);   // conservative: see Compose.hlsli
     return gTexCube[texSrv].SampleLevel(sLinearClamp, dir, max(want, have)).rgb;
 }
 float2 StreamedSampleRg(uint texSrv, uint mapSrv, float3 dir) {
     const float want = gTexCube[texSrv].CalculateLevelOfDetail(sLinearClamp, dir);
-    const float have = gTexCube[mapSrv].SampleLevel(sLinearClamp, dir, 0).x * 255.0f / 16.0f;
+    const float have = CsHaveCube(mapSrv, dir);
     return gTexCube[texSrv].SampleLevel(sLinearClamp, dir, max(want, have)).rg;
 }
 
@@ -209,8 +209,8 @@ float4 PsMain(VsOut i) : SV_Target {
     if (gStreamF.z > 0.5f) {
         // MARS: the rescued sample pyramids ARE the planet -- residency-clamped diffuse +
         // BC5 surface normals in the local ENU frame.
-        alb = StreamedSample(gStreamU.x, gStreamU.z, up) * 1.3f;   // M6j: BC1_SRGB decodes in
-                                                                   // hardware; linear lift only
+        alb = StreamedSample(gStreamU.x, gStreamU.z, up);   // M6j: BC1_SRGB hardware decode,
+                                                            // no lift -- pixels as authored
         if (gStreamF.y > 0.5f) {
             const float2 nxy = StreamedSampleRg(gStreamU.y, gStreamU.w, up);   // SNORM -1..1
             n = normalize(upT + east * nxy.x * 1.2f + north * nxy.y * 1.2f);
@@ -260,6 +260,16 @@ float4 PsMain(VsOut i) : SV_Target {
     if (ComposedColorOn() && gStreamF.z < 0.5f) {
         const float3 img = ComposedColor(up);
         alb = isLand ? img : lerp(alb, img, 0.6f * saturate(1.0f + min(hp, 0.0f) / 80.0f));
+    }
+
+    // ---- M6j --albedo: the TEXTURE-WORK lens. Raw composed color (or Mars's raw pyramid) --
+    // no lighting, no atmosphere, no materials, no clouds, and NOT the shallow-water mix
+    // either (classification is presentation too; the lens must show what the TEXTURES say).
+    // The stencil still draws. Everything below this line is presentation.
+    if (gTexIdx2.w != 0u) {
+        const float3 lens =
+            (ComposedColorOn() && gStreamF.z < 0.5f) ? ComposedColor(up) : alb;
+        return float4(ApplyComposedStencil(lens, up), 1.0f);
     }
 
     // ---- M6c: the live 3D sky. One column sample shades the ground under weather...
@@ -357,9 +367,12 @@ float4 PsMain(VsOut i) : SV_Target {
         }
     }
 
-    // The atmosphere, as seen ON the disc: grazing rays cross a long air path. (The limb glow
-    // BEYOND the edge is a later shell pass.)
-    const float rim = pow(1.0f - saturate(dot(upT, v)), 3.0f);
+    // The atmosphere, as seen ON the disc: grazing rays cross a long air path. M6j: this is a
+    // FROM-SPACE effect and now fades in above 60 km -- inside the atmosphere it was pouring
+    // grey-blue over every oblique view of the imagery (the "washed out when zooming in"
+    // report; the near-field haze budget belongs to AerialPerspective alone).
+    const float rim = pow(1.0f - saturate(dot(upT, v)), 3.0f) *
+                      smoothstep(60000.0f, 250000.0f, length(gCamAbs.xyz) - gGlo.x);
     // Mars wears a THIN dusty shell, not Earth's blue one.
     const float3 rimCol = (gStreamF.z > 0.5f) ? float3(0.72f, 0.42f, 0.24f)
                                               : float3(0.42f, 0.58f, 0.92f);

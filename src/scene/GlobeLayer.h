@@ -98,6 +98,8 @@ public:
     bool msSurface = true;          // M6j: request the mesh-shader unified surface
     bool MeshPathActive() const { return m_msPath; }
     bool stencilOverlay = false;    // M6i: --stencil, the GIS alignment overlay
+    bool albedoLens = false;        // M6j: --albedo, raw composed color -- no lighting, no
+                                    // atmosphere, no materials; THE view for texture work
     // GIS survey stencil textures (GisStencil), for the --stencil overlay.
     void SetGisStencil(uint32_t winSrv, uint32_t globSrv) {
         m_gisWinSrv = winSrv;

@@ -27,3 +27,4 @@ secrets/
 *.obj
 *.raw
 merrimack_*.png
+scratch_*

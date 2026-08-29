@@ -12,8 +12,11 @@ namespace {
 
 constexpr double kPi = 3.14159265358979;
 constexpr double kMercCirc = 40075016.686;   // Web-Mercator world metres (equator)
-constexpr int kComposeVersion = 2;           // bump on any paint-math change: new cache tag
-                                             // (v2: per-tile grade normalization)
+constexpr int kComposeVersion = 3;           // bump on any paint-math change: new cache tag
+                                             // (v3: grade normalization REMOVED -- it
+                                             // bleached seasonal land cover toward the z10
+                                             // reference capture; pixels ship as Google
+                                             // made them)
 
 // Changing a stack (order, membership, version) must never serve stale composed tiles: the
 // hash lands in the cache directory name, so an edit simply starts a fresh folder.

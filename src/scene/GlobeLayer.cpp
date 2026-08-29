@@ -862,6 +862,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.texIdx2[0] = UINT32_MAX;  // was the NE 15s window; a composed height LAYER now
     m_cb.texIdx2[1] = m_windReady ? m_windBank.Srv() : UINT32_MAX;
     m_cb.texIdx2[2] = windOverlay ? 1u : 0u;
+    m_cb.texIdx2[3] = albedoLens ? 1u : 0u;
     m_cb.windGeo[0] = static_cast<float>(m_globe->WindLat1());
     m_cb.windGeo[1] = static_cast<float>(m_globe->WindLon1());
     m_cb.windGeo[2] = static_cast<float>(1.0 / std::abs(m_globe->WindDLat()));
@@ -891,16 +892,15 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         m_cb.texIdx2[2] = 0;
     }
 
-    // The sky pass rebuilds pixel rays from this basis (b2).
-    const XMFLOAT3 cf = cam.Forward();
-    const XMFLOAT3 cr = cam.Right();
+    // The sky pass rebuilds pixel rays from this basis (b2). M6j: the ONE render basis --
+    // the shell can no longer roll apart from the surface it wraps.
+    XMFLOAT3 cf, cr, cu;
+    cam.ViewBasis(cf, cr, cu);
     m_skyCb.fwd[0] = cf.x; m_skyCb.fwd[1] = cf.y; m_skyCb.fwd[2] = cf.z;
     m_skyCb.fwd[3] = std::tan(cam.fovY * 0.5f);
     m_skyCb.right[0] = cr.x; m_skyCb.right[1] = cr.y; m_skyCb.right[2] = cr.z;
     m_skyCb.right[3] = aspect;
-    m_skyCb.up[0] = cf.y * cr.z - cf.z * cr.y;   // f x r = camera up
-    m_skyCb.up[1] = cf.z * cr.x - cf.x * cr.z;
-    m_skyCb.up[2] = cf.x * cr.y - cf.y * cr.x;
+    m_skyCb.up[0] = cu.x; m_skyCb.up[1] = cu.y; m_skyCb.up[2] = cu.z;
     m_skyCb.up[3] = 0.0f;
     // (M6h: the M6b destination beacon is fully retired -- row and shader block deleted.)
 

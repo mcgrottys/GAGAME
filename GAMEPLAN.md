@@ -456,3 +456,48 @@ into the planet shader, fed by `waterNavd` per frame.
 Mars 0.2 ms. Next optimization: an amplification-shader pass for per-meshlet frustum/backface
 culling, and meshlet count tuning. Then: physics reading the height WINDOW the renderer
 streams (concurrent read/write), Flather, and the water/air channels.
+
+## 15. M6k (2026-08-29): the presentation purge — the user's three instincts, all confirmed
+
+The zoom video showed (a) the whole Earth REORIENTING in one frame at 0:02, and (b) a washed-
+out look at low altitude. The user asked whether the atmospherics were logically needed or
+"rhetoric you've trained on," said the insets should behave "like layering images in paint,"
+and told us to take the water out of the texture loop. Every one of those calls was right.
+
+**The 0:02 reorientation (fixed).** `ViewRelative`'s gravity-up had a CLIFF: looking straight
+at the planet centre, upHint is parallel to the view axis and a 0.999 fallback picked a world-
+up roll; the first frame the plunge drifted off-centre it SNAPPED to gravity-roll. And the sky
+shell + the scene-constant rays were rebuilt from `Camera::Right()` — the HORIZONTAL right —
+so every ray-reconstructing pass was roll-blind and the atmosphere detached from the surface
+under fast motion. Fix: ONE `Camera::ViewBasis()` (used by the view matrix, the scene
+constants, and the shell — they cannot disagree now), with the degeneracy BLENDED smoothly
+toward flat-north projected ⊥ view. Roll transitions now spread across the descent.
+
+**The wash (fixed, three layers deep — the user called every one).**
+1. The rim/limb tint multiplied into every oblique view INSIDE the atmosphere → now fades in
+   above 60 km (a from-space effect; near haze belongs to AerialPerspective alone).
+2. The 1.35 "exposure compensation" for the sRGB switch matched the old curve at mid-tones but
+   pushed bright land cover over the shoulder → REMOVED, pixels ship as decoded.
+3. **ACES itself** — the real chalk-maker. Narkowicz-ACES boosts mid-tones (0.39→0.52 linear)
+   and desaturates; applied to imagery Google already tone-mapped, it bleached the planet.
+   Replaced with identity-below-the-knee (0.85) + a smooth exponential shoulder: DATA passes
+   untouched; only genuine HDR (sun glint, the disc) rolls off. The cross-zoom "grade gain"
+   experiment was also removed the same hour (v3 cache tag): raw tiles proved z11–z14 captures
+   agree over the estuary; the gain was bleaching seasonal land cover toward the z10 capture.
+   Along the way the M6h bilinear residency-map ramp was found UNSOUND (it interpolates below
+   the locally-resident mip → Tier-2 null reads dilute the window's alpha) and replaced with
+   conservative gather-max reads everywhere.
+
+**The texture-work lens (`--albedo`).** Raw composed color at every altitude — no lighting, no
+atmosphere, no materials, no clouds, no SEA (per the user), stencil available. This is the
+loop texture streaming is judged in: one code path, no altitude behavior, literally layered
+images. The remaining altitude-dependent presentation flips are inventoried and gated OUT of
+this lens: sea <60 km, sky dome ↔ limb shell at 9 km, materials <2.7 km, rim >60 km. The
+composed-channel path itself has NO altitude flips — one sampler, continuous mips.
+
+**Opened by this purge (queued):** the LIT look must be retuned under the honest tonemap — the
+sea/sky constants were tuned against ACES's compression and the helm sea currently reads
+milky. That is a lighting-constant pass (sea reflectance, SkyRadiance levels, sun scale), not
+a texture problem; the water stays out of the texture loop until it lands. Also: two runs
+exited 255 with garbage readbacks (uninitialized dump = the copy never landed) that did not
+reproduce under the debug layer or in repeats — watch item, suspected teardown/TDR race.

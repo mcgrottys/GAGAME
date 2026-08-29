@@ -53,7 +53,14 @@ public:
     void DollyToward(const double target[3], double frac, double minDist);
 
     DirectX::XMFLOAT3 Forward() const;
-    DirectX::XMFLOAT3 Right() const;
+    DirectX::XMFLOAT3 Right() const;   // HORIZONTAL right: input/strafing only, NOT rendering
+    // M6j: THE render basis -- the exact orthonormal frame ViewRelative builds (gravity-up
+    // hint, smooth degeneracy blend). Every ray-reconstructing consumer (scene constants, the
+    // globe's sky shell) must take this, never Forward()/Right(): rebuilding rays from the
+    // horizontal right made every such pass roll-blind, so the planet's surface and its
+    // atmosphere disagreed whenever the up-hint rolled the view.
+    void ViewBasis(DirectX::XMFLOAT3& fwd, DirectX::XMFLOAT3& right,
+                   DirectX::XMFLOAT3& up) const;
 
     // View with translation removed: the camera sits at the origin of the render frame.
     DirectX::XMMATRIX ViewRelative() const;

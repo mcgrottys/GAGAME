@@ -86,6 +86,7 @@ struct Options {
     bool viz = false;                 // start with the atlas residency visualizer on
     bool stencil = false;             // M6i --stencil: coast/graticule alignment overlay
     bool msSurface = true;            // M6j: mesh-shader planet surface (--no-ms falls back)
+    bool albedo = false;              // M6j: raw-texture lens (no lighting/atmosphere)
     std::string exportSpec;           // M6j --export: composed-channel export spec
     std::wstring exportOut;
     float camAlt = -1, camAz = 246, camPitch = -5;   // --cam alt,az,pitch override
@@ -182,6 +183,7 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--viz") o.viz = true;
         else if (a == "--stencil") o.stencil = true;
         else if (a == "--no-ms") o.msSurface = false;
+        else if (a == "--albedo") o.albedo = true;
         else if (a == "--export") {
             // M6j utility: pull a composed channel OUT through the manager -- the same
             // provider path the renderer streams. <channel>[:mip] <out.(png|raw|obj)>
@@ -785,6 +787,7 @@ int main(int argc, char** argv) {
             globe->marsReliefValid = marsMode && marsModel.Ready();
             globe->windOverlay = opt.viz;
             globe->msSurface = opt.msSurface;
+            globe->albedoLens = opt.albedo;
             globe->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             renderer.AddLayer(std::move(globeOwned));
             // M6j: with the unified mesh surface active, the terrain layer stops rendering
@@ -909,6 +912,7 @@ int main(int argc, char** argv) {
                 auto mkOwned = std::make_unique<MarkerLayer>();
                 mkOwned->Configure(opt.shaderDir, &exchange, "markers.stations");
                 mkOwned->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
+                mkOwned->enabled = !opt.albedo;   // the lens shows textures, nothing else
                 renderer.AddLayer(std::move(mkOwned));
             }
             globe->SetResidency(&resMgr, surf, norm, marsMode);
@@ -972,7 +976,7 @@ int main(int argc, char** argv) {
         auto applyMode = [&](int m) {
             sky->enabled = (m != 1);   // world mode gates the sky per frame by altitude
             tide->enabled = (m == 0);
-            if (sea) sea->enabled = (m == 1) && !marsMode;      // no Merrimack on Mars
+            if (sea) sea->enabled = (m == 1) && !marsMode && !opt.albedo;
             if (terrain) terrain->enabled = (m == 1) && !marsMode;
             if (gulf) gulf->enabled = (m == 2);
             if (globe) globe->enabled = (m == 1);
@@ -1697,10 +1701,13 @@ int main(int argc, char** argv) {
                 if (altV > 6000.0) {
                     cam.speed = static_cast<float>(std::clamp(altV * 0.45, 60.0, 2.5e6));
                 }
-                if (sea) sea->enabled = altV < 60000.0 && !marsMode;
-                sky->enabled = altV < 9000.0 && !marsMode;   // low haze dome...
-                if (globe) globe->skyPassEnabled = !sky->enabled;   // ...or the limb shell,
-                                                                    // never both at once
+                if (sea) sea->enabled = altV < 60000.0 && !marsMode && !opt.albedo;
+                // (--albedo: the water stands down too -- textures judged as layered images,
+                // nothing else in the frame; the lit look retunes separately.)
+                sky->enabled = altV < 9000.0 && !marsMode && !opt.albedo;   // low haze dome...
+                if (globe) globe->skyPassEnabled = !sky->enabled && !opt.albedo;   // ...or the
+                                                            // limb shell, never both at once
+                                                            // (--albedo: neither -- textures)
             } else {
                 cam.upHint[0] = 0.0f;
                 cam.upHint[1] = 1.0f;

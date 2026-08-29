@@ -257,11 +257,13 @@ void Renderer::RenderFrame(const Camera& cam, float timeSec, float dt) {
     sc.eyeRelWorld[1] = static_cast<float>(cam.py);
     sc.eyeRelWorld[2] = static_cast<float>(cam.pz);
 
-    const XMFLOAT3 fwd = cam.Forward();
-    const XMFLOAT3 rgt = cam.Right();
-    const XMVECTOR vf = XMVector3Normalize(XMLoadFloat3(&fwd));
-    const XMVECTOR vr = XMVector3Normalize(XMLoadFloat3(&rgt));
-    const XMVECTOR vu = XMVector3Normalize(XMVector3Cross(vf, vr));
+    // M6j: the ONE render basis (gravity-up aware) -- rays rebuilt from these constants now
+    // agree with gViewProj by construction.
+    XMFLOAT3 fwd, rgt, upv;
+    cam.ViewBasis(fwd, rgt, upv);
+    const XMVECTOR vf = XMLoadFloat3(&fwd);
+    const XMVECTOR vr = XMLoadFloat3(&rgt);
+    const XMVECTOR vu = XMLoadFloat3(&upv);
     const float tanH = std::tan(cam.fovY * 0.5f);
     const float aspect = static_cast<float>(m_width) / static_cast<float>(m_height);
     XMStoreFloat3(reinterpret_cast<XMFLOAT3*>(sc.camFwd), vf);
