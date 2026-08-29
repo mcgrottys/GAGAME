@@ -1,0 +1,366 @@
+#!/usr/bin/env python3
+"""GAGAME Harvester, M1: NOAA CO-OPS tides for the lower Merrimack, fetched ONCE, politely.
+
+Per station:
+  1. metadata (name, lat, lon)      mdapi /stations/{id}.json                 [cached forever]
+  2. harmonic constituents          mdapi /stations/{id}/harcon.json          [cached forever]
+  3. official hourly predictions for one whole year, 12 monthly requests
+     (product=predictions, datum=MLLW, units=metric, time_zone=gmt)          [cached forever]
+  4. least-squares fit of amplitude+phase AT THE EXACT HARCON FREQUENCIES to that year
+  5. emit  data/tides/stations.json  +  official_{id}_{year}.f32 sidecars
+
+WHY FIT rather than compute nodal factors: the fit reproduces NOAA's official predictions to
+millimetres BY CONSTRUCTION -- which is M1's acceptance gate -- while the engine stays a pure
+stateless sum of cosines, and no Schureman astronomy gets transcribed (a classic source of silent
+sign/epoch bugs). The cost: the fitted phases absorb the fit year's nodal state, so accuracy
+degrades by a few cm/year outside that year. Re-running with --year refits from cache for free.
+
+POLITENESS (GAMEPLAN.md section 6.3): every request carries application=GAGAME and a contact
+User-Agent; every response is cached forever under cache/coops/ and never re-fetched; network
+hits are spaced >= 0.4 s with capped exponential backoff on failure. Total for the default six
+stations: ~90 small requests, once ever. Offline afterwards.
+"""
+
+import json
+import math
+import os
+import struct
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+
+try:
+    import numpy as np
+except ImportError:
+    np = None
+
+UA = "GAGAME/0.1 (hobby ocean simulator; contact: marksmcgrotty@gmail.com)"
+API = "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter"
+MDAPI = "https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi"
+
+# Mouth -> upriver, then the Boston reference (river=False keeps it off the ribbon profile).
+# IDs verified live against the CO-OPS metadata API on 2026-08-28.
+STATIONS = [
+    ("8440452", True,  "Merrimack Entrance"),   # Plum Island, Merrimack River Entrance
+    ("8440466", True,  "Newburyport"),
+    ("8440273", True,  "Salisbury Point"),
+    ("8440369", True,  "Merrimacport"),
+    ("8440889", True,  "Riverside"),
+    ("8443970", False, "Boston"),
+]
+
+MIN_AMP_M = 0.001      # constituents below 1 mm are dropped from the fit
+_last_fetch = [0.0]
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def fetch_json(url, cache_path):
+    """Cache-forever GET. Only genuinely new URLs ever touch the network."""
+    if os.path.exists(cache_path):
+        with open(cache_path, "r", encoding="utf-8") as f:
+            return json.load(f), True
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+
+    for attempt in range(4):
+        wait = 0.4 - (time.monotonic() - _last_fetch[0])
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": UA})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = json.loads(r.read().decode("utf-8"))
+            _last_fetch[0] = time.monotonic()
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            return data, False
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
+            _last_fetch[0] = time.monotonic()
+            if attempt == 3:
+                raise
+            backoff = 2.0 * (2 ** attempt)
+            log(f"    retry in {backoff:.0f}s ({e})")
+            time.sleep(backoff)
+
+
+def month_days(year, month):
+    if month == 12:
+        return 31
+    return (datetime(year, month + 1, 1) - datetime(year, month, 1)).days
+
+
+def get_station_meta(sid, cache_dir):
+    data, cached = fetch_json(f"{MDAPI}/stations/{sid}.json",
+                              os.path.join(cache_dir, sid, "meta.json"))
+    st = data["stations"][0] if "stations" in data else data
+    return {"name": st.get("name", sid), "lat": float(st.get("lat", 0)),
+            "lon": float(st.get("lng", st.get("lon", 0)))}, cached
+
+
+def get_datums(sid, cache_dir):
+    """Station datum elevations (metric). Returns MLLW - NAVD88 in metres (the offset that turns
+    a tide height in MLLW into NAVD88, the CUDEM terrain's datum), or None if the station has no
+    NAVD link."""
+    try:
+        data, _ = fetch_json(f"{MDAPI}/stations/{sid}/datums.json?units=metric",
+                             os.path.join(cache_dir, sid, "datums_metric.json"))
+    except Exception as e:  # noqa: BLE001
+        log(f"    datums unavailable for {sid} ({e})")
+        return None
+    vals = {d.get("name"): d.get("value") for d in data.get("datums", [])}
+    if "MLLW" in vals and "NAVD88" in vals and vals["NAVD88"] is not None:
+        return float(vals["MLLW"]) - float(vals["NAVD88"])
+    return None
+
+
+def get_harcon(sid, cache_dir):
+    data, cached = fetch_json(f"{MDAPI}/stations/{sid}/harcon.json?units=metric",
+                              os.path.join(cache_dir, sid, "harcon_metric.json"))
+    cons = data.get("HarmonicConstituents", [])
+    out = []
+    for c in cons:
+        amp = float(c.get("amplitude", 0.0))
+        out.append({"name": c.get("name", "?"), "speed_dph": float(c["speed"]),
+                    "amp_m": amp, "phase_gmt_deg": float(c.get("phase_GMT", 0.0))})
+    # Unit sanity: M2 at these stations is ~1.2 m (Merrimack) / ~1.4 m (Boston). If it looks like
+    # feet (~4), the units param was ignored -- convert rather than trust.
+    m2 = next((c for c in out if c["name"] == "M2"), None)
+    if m2 and m2["amp_m"] > 2.5:
+        log(f"    harcon for {sid} looks like feet (M2={m2['amp_m']:.2f}); converting to metres")
+        for c in out:
+            c["amp_m"] *= 0.3048
+    return out, cached
+
+
+def get_predictions_year(sid, year, cache_dir):
+    """One year of official hourly predictions, datum MLLW, metric, GMT. 12 monthly requests."""
+    times, values = [], []
+    for month in range(1, 13):
+        nd = month_days(year, month)
+        params = {
+            "product": "predictions", "application": "GAGAME", "station": sid,
+            "begin_date": f"{year}{month:02d}01", "end_date": f"{year}{month:02d}{nd:02d}",
+            "datum": "MLLW", "units": "metric", "time_zone": "gmt",
+            "interval": "h", "format": "json",
+        }
+        url = API + "?" + urllib.parse.urlencode(params)
+        cache = os.path.join(cache_dir, sid, f"pred_{year}_{month:02d}.json")
+        data, cached = fetch_json(url, cache)
+        if "error" in data:
+            raise RuntimeError(f"{sid} {year}-{month:02d}: CO-OPS error: "
+                               f"{data['error'].get('message', data['error'])}")
+        preds = data.get("predictions", [])
+        if not preds:
+            raise RuntimeError(f"{sid} {year}-{month:02d}: empty predictions")
+        for p in preds:
+            t = datetime.strptime(p["t"], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+            times.append(t.timestamp())
+            values.append(float(p["v"]))
+        if not cached:
+            log(f"    fetched {year}-{month:02d}: {len(preds)} h")
+    return times, values
+
+
+def cholesky_solve(g, r):
+    """Solve G x = r for symmetric positive-definite G, pure Python. ~75x75: instant."""
+    n = len(r)
+    l = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(i + 1):
+            s = g[i][j] - sum(l[i][k] * l[j][k] for k in range(j))
+            if i == j:
+                if s <= 0:
+                    raise RuntimeError(f"normal matrix not SPD at {i} (s={s:g}); "
+                                       "duplicate constituent frequencies?")
+                l[i][i] = math.sqrt(s)
+            else:
+                l[i][j] = s / l[j][j]
+    y = [0.0] * n
+    for i in range(n):
+        y[i] = (r[i] - sum(l[i][k] * y[k] for k in range(i))) / l[i][i]
+    x = [0.0] * n
+    for i in range(n - 1, -1, -1):
+        x[i] = (y[i] - sum(l[k][i] * x[k] for k in range(i + 1, n))) / l[i][i]
+    return x
+
+
+def fit_station(times, values, omegas, epoch):
+    """Least squares of v ~ mean + sum_i a_i cos(w_i tau) + b_i sin(w_i tau), tau = t - epoch.
+    Returns (mean, [(a_i, b_i)...], rms, maxerr)."""
+    n_c = len(omegas)
+    m = 1 + 2 * n_c
+    n_s = len(times)
+
+    if np is not None:
+        tau = np.asarray(times) - epoch
+        a = np.empty((n_s, m))
+        a[:, 0] = 1.0
+        for i, w in enumerate(omegas):
+            a[:, 1 + 2 * i] = np.cos(w * tau)
+            a[:, 2 + 2 * i] = np.sin(w * tau)
+        v = np.asarray(values)
+        x, *_ = np.linalg.lstsq(a, v, rcond=None)
+        resid = v - a @ x
+        rms = float(np.sqrt(np.mean(resid ** 2)))
+        mx = float(np.max(np.abs(resid)))
+        x = x.tolist()
+    else:
+        g = [[0.0] * m for _ in range(m)]
+        r = [0.0] * m
+        row = [0.0] * m
+        row[0] = 1.0
+        t0 = time.monotonic()
+        for s in range(n_s):
+            tau = times[s] - epoch
+            for i, w in enumerate(omegas):
+                wt = w * tau
+                row[1 + 2 * i] = math.cos(wt)
+                row[2 + 2 * i] = math.sin(wt)
+            v = values[s]
+            for i in range(m):
+                ri = row[i]
+                r[i] += ri * v
+                gi = g[i]
+                for j in range(i, m):
+                    gi[j] += ri * row[j]
+            if s % 2000 == 1999:
+                log(f"    accumulating {s + 1}/{n_s} ({time.monotonic() - t0:.0f}s)")
+        for i in range(m):
+            for j in range(i):
+                g[i][j] = g[j][i]
+        x = cholesky_solve(g, r)
+        sq = 0.0
+        mx = 0.0
+        for s in range(n_s):
+            tau = times[s] - epoch
+            h = x[0]
+            for i, w in enumerate(omegas):
+                h += x[1 + 2 * i] * math.cos(w * tau) + x[2 + 2 * i] * math.sin(w * tau)
+            e = h - values[s]
+            sq += e * e
+            mx = max(mx, abs(e))
+        rms = math.sqrt(sq / n_s)
+
+    mean = x[0]
+    ab = [(x[1 + 2 * i], x[2 + 2 * i]) for i in range(n_c)]
+    return mean, ab, rms, mx
+
+
+def haversine_km(lat0, lon0, lat1, lon1):
+    rl0, rl1 = math.radians(lat0), math.radians(lat1)
+    dlat = rl1 - rl0
+    dlon = math.radians(lon1 - lon0)
+    a = math.sin(dlat / 2) ** 2 + math.cos(rl0) * math.cos(rl1) * math.sin(dlon / 2) ** 2
+    return 2 * 6371.0 * math.asin(math.sqrt(a))
+
+
+def main():
+    year = datetime.now(timezone.utc).year
+    out_dir = os.path.join("data", "tides")
+    cache_dir = os.path.join("cache", "coops")
+    args = sys.argv[1:]
+    while args:
+        a = args.pop(0)
+        if a == "--year":
+            year = int(args.pop(0))
+        elif a == "--out":
+            out_dir = args.pop(0)
+        elif a == "--cache":
+            cache_dir = args.pop(0)
+        else:
+            log(f"ignoring '{a}'")
+
+    epoch = datetime(year, 1, 1, tzinfo=timezone.utc).timestamp()
+    os.makedirs(out_dir, exist_ok=True)
+    log(f"harvest_tides: year {year}, epoch {epoch:.0f}, "
+        f"{'numpy' if np is not None else 'pure-python'} solver")
+
+    stations_out = []
+    prev = None
+    river_km = 0.0
+
+    for sid, on_river, short in STATIONS:
+        log(f"[{sid}] {short}")
+        meta, _ = get_station_meta(sid, cache_dir)
+        harcon, _ = get_harcon(sid, cache_dir)
+        mllw_minus_navd = get_datums(sid, cache_dir)
+        if mllw_minus_navd is not None:
+            log(f"    MLLW - NAVD88 = {mllw_minus_navd:+.3f} m")
+        times, values = get_predictions_year(sid, year, cache_dir)
+        log(f"    {meta['name']} ({meta['lat']:.4f}, {meta['lon']:.4f}): "
+            f"{len(harcon)} constituents, {len(times)} official hours")
+
+        # Fit at the exact harcon frequencies (dropping sub-millimetre and duplicate speeds).
+        use = []
+        seen = set()
+        for c in harcon:
+            if c["amp_m"] < MIN_AMP_M or c["speed_dph"] in seen:
+                continue
+            seen.add(c["speed_dph"])
+            use.append(c)
+        omegas = [c["speed_dph"] * math.pi / 180.0 / 3600.0 for c in use]
+        mean, ab, rms, mx = fit_station(times, values, omegas, epoch)
+        log(f"    fit: {len(use)} constituents, mean {mean:.3f} m MLLW, "
+            f"rms {rms * 1000:.1f} mm, max {mx * 1000:.1f} mm")
+
+        coeffs = []
+        warn = []
+        for c, (a, b) in zip(use, ab):
+            amp = math.hypot(a, b)
+            phase = math.atan2(-b, a)   # h = amp * cos(w tau + phase)
+            coeffs.append({"name": c["name"], "speed_dph": c["speed_dph"],
+                           "amp_m": round(amp, 6), "phase_rad": round(phase, 6)})
+            # Fitted amplitude vs published harcon amplitude: the ratio is the nodal factor for
+            # the fit year and must sit in its physical range. Outside it, something is wrong.
+            if c["amp_m"] > 0.05:
+                ratio = amp / c["amp_m"]
+                if not (0.70 <= ratio <= 1.30):
+                    warn.append(f"{c['name']} fitted/harcon = {ratio:.2f}")
+        if warn:
+            log("    WARNING amplitude ratios out of nodal range: " + ", ".join(warn))
+        top = sorted(zip(use, ab), key=lambda p: -math.hypot(*p[1]))[:4]
+        log("    top: " + "  ".join(
+            f"{c['name']}={math.hypot(a, b):.3f}m(x{math.hypot(a, b) / c['amp_m']:.3f})"
+            for c, (a, b) in top))
+
+        if on_river:
+            if prev is not None:
+                river_km += haversine_km(prev[0], prev[1], meta["lat"], meta["lon"])
+            prev = (meta["lat"], meta["lon"])
+
+        off_file = f"official_{sid}_{year}.f32"
+        with open(os.path.join(out_dir, off_file), "wb") as f:
+            f.write(struct.pack(f"<{len(values)}f", *values))
+
+        stations_out.append({
+            "id": sid, "name": short, "full_name": meta["name"],
+            "lat": meta["lat"], "lon": meta["lon"],
+            "mllw_minus_navd_m": mllw_minus_navd,
+            "river_km": round(river_km, 3) if on_river else None,
+            "mean_mllw_m": round(mean, 5),
+            "fit_rms_m": round(rms, 5), "fit_max_m": round(mx, 5),
+            "official_file": off_file,
+            "official_start_unix": times[0], "official_dt_s": 3600, "official_n": len(values),
+            "coeffs": coeffs,
+        })
+
+    out = {
+        "generated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "source": "NOAA CO-OPS harcon frequencies + least-squares fit to official hourly "
+                  "predictions (see this script's docstring)",
+        "year": year, "epoch_unix": epoch,
+        "stations": stations_out,
+    }
+    path = os.path.join(out_dir, "stations.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(out, f, indent=1)
+    log(f"wrote {path} ({len(stations_out)} stations) -- the engine is now network-free")
+
+
+if __name__ == "__main__":
+    main()

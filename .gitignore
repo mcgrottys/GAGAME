@@ -1,0 +1,18 @@
+# Build output and one-time-fetch caches (NOAA data re-fetches politely via harvester/).
+build/
+cache/
+__pycache__/
+
+# Generated engine data -- regenerable by the harvesters (see README); keeping the repo lean
+# beats shipping 100 MB of decimated public-domain rasters.
+data/
+
+# Renders, debug dumps, PIX captures, and the rails recording.
+*.png
+!docs/**/*.png
+*.wpix
+*.mp4
+rail_frames/
+swe_events.txt
+helm_events.csv
+data/swe_cycle.csv
