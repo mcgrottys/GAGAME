@@ -32,7 +32,12 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
                 for (uint32_t y = ty * bank.TileH(); y < y1 && !wet; ++y) {
                     for (uint32_t x = tx * bank.TileW(); x < x1; ++x) {
                         const float e = elev[y * nx + x];
-                        if (e > -9000.0f && e < 4.0f) {
+                        // < 1.2 NAVD: subtidal + the flats that actually wet at normal ranges.
+                        // The marsh PLATEAU above stays NULL: its creeks are subgrid at 13.7 m,
+                        // so sheet-flooding those cells fills real storage on a fake clock
+                        // (+80 min aggregate lag in the M6d validation). Rejoins the domain
+                        // when subgrid channel conveyance exists.
+                        if (e > -9000.0f && e < 1.2f) {
                             wet = true;
                             break;
                         }
@@ -80,7 +85,13 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
                                           // prism's demand (hundreds of m^3/s), not trickle
     // M6d: the south strip exists only when the window actually reaches Plum Island Sound
     // (the sound's real entrance is south of the window; its tide must enter as data).
-    const bool hasSound = bathy.WorldZ0() < -9000.0f;
+    // RETIRED pending a throttled treatment: pinning the sound's south edge to the ocean clock
+    // turned it into an infinite reservoir 2 km from the harbor basin -- the basin then filled
+    // through the BACK DOOR (Plum Island River) instead of the inlet, the throat current
+    // collapsed to the west-boundary residual, and the validation lag blew out to +80 min.
+    // The --swe-west-off diagnostic pinned it: gap flow went to ZERO with west off. The sound
+    // now rides passively (fills via its narrow river; imperfect but bounded and honest).
+    const bool hasSound = false;
     m_cb.riverBox[2] = hasSound ? static_cast<float>(ny - 8) : 1.0e9f;
     if (hasSound) {
         Log("[swe] south boundary strip active (Plum Island Sound rows %u..%u)", ny - 8, ny - 1);

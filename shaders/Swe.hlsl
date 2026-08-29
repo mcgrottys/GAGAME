@@ -118,7 +118,9 @@ float FaceUpdate(float q, int2 t, int2 nbr) {
     // a whisper of linear damping for numerical hygiene.
     q += gDt * gGravity * hface * (eta - etan);   // (g * hface * dEta/dx) * dx face width
     const float uf = q / max(hface * gDx, 1e-3f);
-    q *= gDamp / (1.0f + gDt * 0.0025f * abs(uf) / max(hface, 0.3f));
+    // Cd 0.0015: sandy-estuary range. 0.0025 was fine over the 5 km mouth window; across the
+    // M6d wide window's 15 km reach the extra friction accumulated ~40 min of phase lag.
+    q *= gDamp / (1.0f + gDt * 0.0015f * abs(uf) / max(hface, 0.3f));
 
     // Positivity: no face may move more than a quarter of its DONOR cell's volume per step.
     const float Vself = h * gDx * gDx;

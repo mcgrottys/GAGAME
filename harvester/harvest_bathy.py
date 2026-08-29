@@ -122,22 +122,53 @@ def main():
             continue
         log(f"    decoding window {w} x {h} px")
         vals = tif.read_window(x0, y0, w, h)
-        copied = 0
-        for yy in range(0, h, STEP):
+        # THALWEG-PRESERVING box resampling (M6d). Plain point-sampling (the first cut) aliases
+        # a 100 m channel at 13.7 m cells; plain box MEANS smear the deep thread shallow, which
+        # slows the tidal wave (sqrt(gh)) and throttled the solved currents (+80 min phase lag
+        # in the validation cycle). Hydraulic grids keep CONVEYANCE: wet-majority boxes take
+        # half mean-of-wet, half deepest-sample; bank/land boxes take the plain mean.
+        cnt = array("H", [0]) * (nx * ny)
+        ssum = array("d", [0.0]) * (nx * ny)
+        wcnt = array("H", [0]) * (nx * ny)
+        wsum = array("d", [0.0]) * (nx * ny)
+        vmin = array("f", [1e9]) * (nx * ny)
+        colmap = array("i", [0]) * w
+        for xx in range(w):
+            lon = tif.lon0 + (x0 + xx) * tif.sx
+            gx = int((lon - WIN["lon0"]) / dlon)
+            colmap[xx] = gx if 0 <= gx < nx else -1
+        for yy in range(h):
             lat = tif.lat0 - (y0 + yy) * tif.sy
             gy = int((WIN["lat1"] - lat) / dlat)          # row 0 = north in the OUTPUT too
             if not (0 <= gy < ny):
                 continue
-            for xx in range(0, w, STEP):
-                v = vals[yy * w + xx]
+            base = gy * nx
+            row = vals[yy * w:(yy + 1) * w]
+            for xx in range(w):
+                v = row[xx]
                 if math.isnan(v):
                     continue
-                lon = tif.lon0 + (x0 + xx) * tif.sx
-                gx = int((lon - WIN["lon0"]) / dlon)
-                if 0 <= gx < nx:
-                    grid[gy * nx + gx] = v
-                    copied += 1
-        log(f"    copied {copied} samples")
+                gx = colmap[xx]
+                if gx < 0:
+                    continue
+                i = base + gx
+                cnt[i] += 1
+                ssum[i] += v
+                if v < -1.0:                # genuinely SUBTIDAL: the channel thread. Flats and
+                    wcnt[i] += 1            # marsh (v ~ -1..+1) keep plain means -- deep-biasing
+                    wsum[i] += v            # them inflates the basin's storage and ADDS lag,
+                    if v < vmin[i]:         # which is exactly what the first cut of this rule
+                        vmin[i] = v         # did to the validation cycle.
+        copied = 0
+        for i in range(nx * ny):
+            if not cnt[i]:
+                continue
+            if wcnt[i] * 2 >= cnt[i]:
+                grid[i] = 0.5 * (wsum[i] / wcnt[i]) + 0.5 * vmin[i]
+            else:
+                grid[i] = ssum[i] / cnt[i]
+            copied += 1
+        log(f"    filled {copied} cells from {sum(cnt)} samples (thalweg-preserving)")
 
     valid = [v for v in grid if not math.isnan(v)]
     if not valid:

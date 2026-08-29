@@ -79,6 +79,7 @@ struct Options {
     float datumOff = -1.30f;          // tide (m MLLW) + this = water level in NAVD88
     bool datumSet = false;            // --datum given: overrides the CO-OPS datum resolution
     bool sweOff = false;              // --swe-off: analytic tide plane only (pre-M5c behaviour)
+    bool sweWestOff = false;          // --swe-west-off: zero the west-boundary deviation
     double sweSpinupH = 0.25;         // solver history integrated before the first frame
     double sweCycleH = 0;             // --swe-cycle N: headless validation over N hours -> CSV
     double riverQ = -1;               // --river q overrides data/river/river.json
@@ -174,6 +175,7 @@ Options ParseArgs(int argc, char** argv) {
             o.datumSet = true;
         }
         else if (a == "--swe-off") o.sweOff = true;
+        else if (a == "--swe-west-off") o.sweWestOff = true;   // diagnostic: west strip = ocean clock
         else if (a == "--swe-uv") o.sweUvDump = Widen(next("swe_uv.png").c_str());
         else if (a == "--swe-gain") o.sweGain = static_cast<float>(atof(next("3.2").c_str()));
         else if (a == "--swe-spinup") o.sweSpinupH = atof(next("0.25").c_str());
@@ -825,13 +827,13 @@ int main(int argc, char** argv) {
             if (bestB > 1e8) westB = westA;
         }
         const double wT = (model.S(westB).riverKm > model.S(westA).riverKm)
-                              ? (6.0 - model.S(westA).riverKm) /
+                              ? (kWestKm - model.S(westA).riverKm) /
                                     (model.S(westB).riverKm - model.S(westA).riverKm)
                               : 0.0;
         auto oceanAt = [&](double t) { return model.Height(entSta, t) + datumOff; };
         // The sound's tide: the entrance clock ~10 min later (its Ipswich mouth is a few km
         // down an open coast). Active only when the window holds the sound.
-        const bool hasSound = bathy.Ready() && bathy.WorldZ0() < -9000.0f;
+        const bool hasSound = false;   // retired with the solver's south strip (see SweSolver)
         auto southAt = [&, hasSound](double t) {
             return hasSound ? model.Height(entSta, t - 600.0) - model.Height(entSta, t) : 0.0;
         };
@@ -840,6 +842,7 @@ int main(int argc, char** argv) {
         // was a permanent 19 cm seaward slope -- an artificial ever-ebb). The true NAVD river
         // slope at this reach is cm-scale; call it zero and let the tide be the signal.
         auto westAt = [&](double t) {
+            if (opt.sweWestOff) return 0.0;
             const double tw = (model.Height(westA, t) - model.S(westA).meanMllwM) * (1.0 - wT) +
                               (model.Height(westB, t) - model.S(westB).meanMllwM) * wT;
             return tw - (model.Height(entSta, t) - model.S(entSta).meanMllwM);

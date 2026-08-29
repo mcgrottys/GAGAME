@@ -19,3 +19,6 @@ data/swe_cycle.csv
 
 # The user's nested GeoAlgFun clone (redundant once GAGAME itself is published there).
 GeoAlgFun/
+
+# Local API keys and the 3 GB Mars pyramids (data/ already covers them, but be explicit).
+secrets/
