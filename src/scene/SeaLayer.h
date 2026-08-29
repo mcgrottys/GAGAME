@@ -51,6 +51,8 @@ public:
     // each frame) and the CPU bathy grid the swell-shadow march walks.
     void SetSwe(SweSolver* swe) { m_swe = swe; }
     void SetBathyCpu(const BathyModel* bm) { m_bathyCpu = bm; }
+    uint32_t ChurnTiles() const { return m_churnReady ? m_churn.ResidentCount() : 0; }
+    uint64_t ChurnBytes() const { return m_churnReady ? m_churn.ResidentBytes() : 0; }
 
     const char* Name() const override { return "sea"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,

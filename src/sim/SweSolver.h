@@ -85,6 +85,8 @@ public:
     ID3D12Resource* BathyRes() const { return m_bathyRes; }   // the churn kernel reads both
     uint32_t Nx() const { return m_cb.nx; }
     uint32_t Ny() const { return m_cb.ny; }
+    uint32_t ResidentTiles() const { return m_eta.ResidentCount() + m_flux.ResidentCount(); }
+    uint64_t ResidentBytes() const { return m_eta.ResidentBytes() + m_flux.ResidentBytes(); }
     float PadW() const { return static_cast<float>(m_eta.TilesX() * m_eta.TileW()); }
     float PadH() const { return static_cast<float>(m_eta.TilesY() * m_eta.TileH()); }
 

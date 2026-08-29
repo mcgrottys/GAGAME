@@ -358,6 +358,32 @@ rigidity) before any GPU work runs. The pivot itself comes from a ray-march agai
 bed + live water level, so you can grab the jetty, the bar, or the sea. M7's vessels will ride
 the same motors.
 
+## M6e — two planets, one residency manager
+
+`src/core/Residency.h` unifies every tiled tenant, descended from the classic D3D11
+TiledResources sample's ResidencyManager (studied from a rescued copy of the extinct original)
+and split along the project's own fault line: **fields** (churn, SWE, wind, clouds -- NULL tile
+MEANS zero, sampled unconditionally, residency decided by physics) versus **textures** (NULL
+means absence: an R8 residency-map cube clamps sampling to the finest RESIDENT mip, so misses
+blur instead of breaking, under the classic's coarse-before-fine invariant). Tiles stream
+through worker threads into `CopyTiles(LINEAR_BUFFER_TO_SWIZZLED)`, mapped in budgeted batches,
+LRU-evicted only past the frame-overlap window, prefetched along the camera's PGA screw
+(`PredictNextPose = M Exp(dt Log(~M0 M1))`), with grade-signature demand derivation
+(`Cl2ProductSignature`) deciding where derived fields can even be non-zero.
+
+Two providers feed it: **Mars** — the sample's own 16k-per-face BC1/BC5 cube pyramids (format
+decoded from its TileLoader: headerless 64KB tiles, face-major mip-major), placed in
+`data/earth/*.bin`; and **Earth** — Google Map Tiles 2D imagery, cache-forever
+(`cache/google/`), session-token reuse across runs, >=80 ms between fetches and a hard per-run
+budget (`--tile-budget`, default 1000), reprojected Web-Mercator -> cube faces at fetch time.
+Set the key once with `setx GAGAME_GOOGLE_MAPS_KEY "..."` (never committed; read from env or
+HKCU). Imagery (c) Google.
+
+```bat
+build\bin\gagame.exe --planet mars
+build\bin\gagame.exe --globe
+```
+
 ## Layout
 
 - `src/core` — device layer (carried from vqview-inlet), DXC hot reload, tiled-resource self-test,

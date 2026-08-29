@@ -19,6 +19,8 @@ add_executable(gagame
   src/core/Window.cpp
   src/core/Image.cpp
   src/core/TileAtlas.cpp
+  src/core/Residency.cpp
+  src/core/TileProviders.cpp
   src/core/OceanFft.cpp
   src/render/Renderer.cpp
   src/render/Camera.cpp

@@ -26,6 +26,7 @@
 #include "scene/TideLayer.h"
 #include "core/Json.h"
 #include "core/Pga.h"
+#include "core/TileProviders.h"
 #include "sim/BathyModel.h"
 #include "sim/GlobeModel.h"
 #include "sim/CurrentModel.h"
@@ -60,6 +61,8 @@ struct Options {
     bool globeStart = false;          // begin on the planet (M6)
     float gcamLat = 1e9f, gcamLon = 0, gcamAltKm = 13000;   // --globe-cam override
     std::wstring rail;                // --rail DIR: record the debug camera rails to PNGs
+    std::string planet = "earth";     // M6e: earth | mars (the rescued sample's pyramids)
+    uint32_t tileBudget = 1000;       // --tile-budget: hard cap on Google fetches per run
     double startUnix = -1;            // < 0 = now
     double timeScale = 1.0;           // sim seconds per wall second. REAL TIME by default --
                                       // waves at 900x looked like a kettle at full boil; the
@@ -153,6 +156,8 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--start") o.startUnix = ParseStartTime(next("0"));
         else if (a == "--scale") o.timeScale = atof(next("1").c_str());
         else if (a == "--rail") o.rail = Widen(next("rail_frames").c_str());
+        else if (a == "--planet") o.planet = next("earth");
+        else if (a == "--tile-budget") o.tileBudget = static_cast<uint32_t>(atoi(next("1000").c_str()));
         else if (a == "--exagg") o.exaggeration = static_cast<float>(atof(next("60").c_str()));
         else if (a == "--window-days") o.windowDays = atof(next("7").c_str());
         else if (a == "--fov") o.fovDeg = static_cast<float>(atof(next("55").c_str()));
@@ -198,6 +203,7 @@ Options ParseArgs(int argc, char** argv) {
         o.frames = 25 * 30;
         o.timeScale = 1.0;
     }
+    if (o.planet == "mars") o.globeStart = true;   // there is only orbit on Mars (for now)
     return o;
 }
 
@@ -607,6 +613,86 @@ int main(int argc, char** argv) {
             Log("[main] no globe data (run: py -3 harvester\\harvest_globe.py)");
         }
 
+        // ---- M6e: the unified residency manager + the streamed planet surfaces. Two worlds,
+        // one machine: Mars streams the rescued sample's BC1/BC5 pyramids from disk; Earth
+        // streams Google 2D tiles (cache-first, throttled, budget-capped) reprojected onto the
+        // same cube faces. Residency is driven by the CDLOD walk, clamped by residency-map
+        // cubes, prefetched along the camera's screw.
+        const bool marsMode = (opt.planet == "mars");
+        const double planetR = marsMode ? 3389500.0 : GlobeModel::kR;
+        ResidencyManager resMgr;
+        MarsBinProvider marsDiff, marsNorm;
+        GoogleTileProvider googleTiles;
+        if (globe) {
+            resMgr.Init(gpu);
+            int surf = -1, norm = -1;
+            if (marsMode) {
+                if (marsDiff.Open(L"data/earth/diffuse.bin", DXGI_FORMAT_BC1_UNORM)) {
+                    surf = resMgr.AddTextureCube(gpu, L"mars.diffuse (the rescued sample)",
+                                                 16384, DXGI_FORMAT_BC1_UNORM, marsDiff.Fn());
+                }
+                if (marsNorm.Open(L"data/earth/normal.bin", DXGI_FORMAT_BC5_SNORM)) {
+                    norm = resMgr.AddTextureCube(gpu, L"mars.normal", 16384,
+                                                 DXGI_FORMAT_BC5_SNORM, marsNorm.Fn());
+                }
+            } else if (googleTiles.Init("satellite", opt.tileBudget)) {
+                surf = resMgr.AddTextureCube(gpu, L"earth.google2d", 16384,
+                                             DXGI_FORMAT_R8G8B8A8_UNORM,
+                                             googleTiles.Fn(&resMgr.fetchesThisRun));
+            }
+            globe->SetResidency((surf >= 0 || norm >= 0) ? &resMgr : nullptr, surf, norm,
+                                marsMode);
+            globe->SetPlanetRadius(planetR);
+
+            // Field adapters: the whole tiled economy reports on one stats line.
+            if (swe.Ready()) {
+                resMgr.RegisterField("swe", [&swe] { return swe.ResidentBytes(); },
+                                     [&swe] { return swe.ResidentTiles(); });
+            }
+            if (sea) {
+                resMgr.RegisterField("churn", [sea] { return sea->ChurnBytes(); },
+                                     [sea] { return sea->ChurnTiles(); });
+                resMgr.RegisterField("air", [globe] { return globe->AirBytes(); },
+                                     [globe] { return globe->AirTiles(); });
+            }
+
+            // The grade-signature registry's first demand derivation: wind published as a
+            // Cl(2) field (vector where it blows, bivector where it curls), and the Cayley
+            // closure says WHERE any wind-product field (enstrophy, OW, advection terms) can
+            // be non-zero -- residency for derived tenants decided by algebra, no data read.
+            if (!marsMode && globeModel.WindNx() > 0) {
+                const int tx = 6, ty = 6;
+                std::vector<uint8_t> sig(tx * ty, 0);
+                const int nx = globeModel.WindNx(), ny = globeModel.WindNy();
+                for (int y = 0; y < ny; ++y) {
+                    for (int x = 0; x < nx; ++x) {
+                        const float u = globeModel.WindU()[y * nx + x];
+                        const float v = globeModel.WindV()[y * nx + x];
+                        const int i = (y * ty / ny) * tx + (x * tx / nx);
+                        if (u * u + v * v > 36.0f) sig[i] |= 0b010;          // grade 1: wind
+                        const int xr = (std::min)(nx - 1, x + 1);
+                        const int yd = (std::min)(ny - 1, y + 1);
+                        const float curl = (globeModel.WindV()[y * nx + xr] - v) -
+                                           (globeModel.WindU()[yd * nx + x] - u);
+                        if (std::abs(curl) > 2.5f) sig[i] |= 0b100;          // grade 2: curl
+                    }
+                }
+                resMgr.PublishSignatures("wind10m", tx, ty, sig);
+                std::vector<uint8_t> derived;
+                uint32_t dx = 0, dy = 0;
+                if (resMgr.DeriveDemand("wind10m", "wind10m", derived, dx, dy)) {
+                    int need = 0;
+                    for (uint8_t s : derived) {
+                        if (s) ++need;
+                    }
+                    Log("[residency] Cayley-derived demand for wind-product fields: %d/%d "
+                        "tiles (the rest are ALGEBRAICALLY zero -- never allocated, never "
+                        "dispatched)",
+                        need, dx * dy);
+                }
+            }
+        }
+
         int mode = (opt.globeStart && globe) ? 3
                  : (opt.gulfStart && gulf)   ? 2
                  : (opt.seaStart && sea)     ? 1 : 0;
@@ -649,9 +735,9 @@ int main(int argc, char** argv) {
         {
             const double gLat = (opt.gcamLat < 1e8f) ? opt.gcamLat : 34.0;
             const double gLon = (opt.gcamLat < 1e8f) ? opt.gcamLon : -52.0;
-            const double gR = GlobeModel::kR +
+            const double gR = planetR +
                               ((opt.gcamLat < 1e8f) ? opt.gcamAltKm * 1000.0
-                                                    : GlobeModel::kR * 2.1);
+                                                    : planetR * 2.1);
             double d[3];
             GlobeModel::LatLonDir(gLat, gLon, d);
             camGlobe.px = d[0] * gR;
@@ -713,6 +799,7 @@ int main(int argc, char** argv) {
             return g;
         };
         auto autoHandoff = [&]() {
+            if (marsMode) return;   // the estuary is an Earth feature
             if (!(globe && sea && bathy.Ready())) return;
             if (mode == 3) {
                 const Camera f = planetToFlatPose(cam);
@@ -762,7 +849,7 @@ int main(int argc, char** argv) {
         //  10-15 s  descend to the north-jetty helm
         //  15-25 s  hold the helm while the real-time sea runs
         std::vector<std::pair<double, Motor>> railKeys;
-        if (globe && sea && bathy.Ready()) {
+        if (globe && sea && bathy.Ready() && !marsMode) {
             const Motor k0 = poseMotor(camGlobe);
             Camera cMid;
             {
@@ -863,6 +950,7 @@ int main(int argc, char** argv) {
                             haveCurrents ? &currents : nullptr, ctSta, bathy, simUnix,
                             opt.sweCycleH);
                 gpu.WaitIdle();
+                resMgr.Shutdown();
                 gpu.Shutdown();
                 return 0;
             }
@@ -963,7 +1051,7 @@ int main(int argc, char** argv) {
             pixelRay(sxPx, syPx, d);
             const double b = cam.px * d[0] + cam.py * d[1] + cam.pz * d[2];
             const double c = cam.px * cam.px + cam.py * cam.py + cam.pz * cam.pz -
-                             GlobeModel::kR * GlobeModel::kR;
+                             planetR * planetR;
             const double disc = b * b - c;
             if (disc < 0.0) return false;
             const double t = -b - std::sqrt(disc);
@@ -1042,7 +1130,7 @@ int main(int argc, char** argv) {
                                                       // planet-centre line takes now -> grabbed
                             double nowPt[3];
                             if (pickGlobe(in.mouseX, in.mouseY, nowPt)) {
-                                const double R = GlobeModel::kR;
+                                const double R = planetR;
                                 double a[3] = {nowPt[0] / R, nowPt[1] / R, nowPt[2] / R};
                                 double b[3] = {dragPivot[0] / R, dragPivot[1] / R,
                                                dragPivot[2] / R};
@@ -1130,16 +1218,18 @@ int main(int argc, char** argv) {
             // and the camera never sinks beneath the (exaggerated) terrain.
             if (mode == 3 && globe) {
                 const double r = std::sqrt(cam.px * cam.px + cam.py * cam.py + cam.pz * cam.pz);
-                const double alt = r - GlobeModel::kR;
+                const double alt = r - planetR;
                 cam.speed = static_cast<float>(std::clamp(alt * 0.45, 60.0, 2.5e6));
                 globe->reliefExagg =
                     static_cast<float>(std::clamp(alt / 250000.0, 1.0, 20.0));
                 const double r2d = 180.0 / 3.14159265358979;
                 const double lat = std::asin(std::clamp(cam.py / r, -1.0, 1.0)) * r2d;
                 const double lon = std::atan2(cam.pz, cam.px) * r2d;
-                const double minR = GlobeModel::kR +
-                                    (std::max)(0.0, globeModel.ElevAt(lat, lon)) *
-                                        globe->reliefExagg + 800.0;
+                const double minR = planetR +
+                                    (marsMode ? 0.0
+                                              : (std::max)(0.0, globeModel.ElevAt(lat, lon)) *
+                                                    globe->reliefExagg) +
+                                    800.0;
                 if (r < minR) {
                     const double s = minR / r;
                     cam.px *= s;
@@ -1152,6 +1242,11 @@ int main(int argc, char** argv) {
                 const float aspect =
                     (opt.headless ? static_cast<float>(opt.width) : window.Width()) / viewH;
                 globe->SetView(cam, aspect, viewH, simUnix - startUnix);
+                // M6e screw-prefetch: extrapolate the pose ~0.8 s ahead along its own screw and
+                // let the walk under THAT camera queue tiles early (predicted priority).
+                Camera pred = cam;
+                motorPose(resMgr.PredictNextPose(poseMotor(cam), 24.0), pred);
+                globe->PredictWants(pred, aspect);
             }
 
             tide->SetTime(simUnix, windowSec);
@@ -1209,6 +1304,7 @@ int main(int argc, char** argv) {
         if (!opt.dump.empty()) renderer.DumpPng(opt.dump);
 
         gpu.WaitIdle();
+        resMgr.Shutdown();
         renderer.Shutdown();
         gpu.Shutdown();
         window.Destroy();

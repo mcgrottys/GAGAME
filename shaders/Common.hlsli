@@ -67,6 +67,8 @@ StructuredBuffer<FieldDesc> gFields : register(t0, space0);
 #endif
 Texture2D gTex[] : register(t0, space1);      // unbounded; needs resource binding tier 3
 Texture3D gTex3D[] : register(t0, space2);    // M6c: the SAME heap as volumes (cloud banks)
+TextureCube gTexCube[] : register(t0, space3);   // M6e: streamed planet surfaces + their
+                                                 // residency-map cubes (read only cube slots)
 
 SamplerState sLinearClamp : register(s0);
 SamplerState sLinearWrap  : register(s1);

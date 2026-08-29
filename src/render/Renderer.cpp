@@ -33,7 +33,9 @@ void Renderer::CreateRootSignature() {
     // t0, space2 (M6c): the SAME heap again, viewed as Texture3D -- both ranges start at table
     // offset 0, so any heap slot is addressable as whichever dimensionality its descriptor
     // really is (reading a 2D slot through gTex3D would be invalid; nothing does).
-    D3D12_DESCRIPTOR_RANGE1 ranges[2]{};
+    // t0, space3 (M6e): the heap a third time, as TextureCube -- the streamed planet surfaces
+    // (Mars's rescued pyramids, Google's Earth) and their residency-map cubes live there.
+    D3D12_DESCRIPTOR_RANGE1 ranges[3]{};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     ranges[0].NumDescriptors = UINT_MAX;   // unbounded; requires resource binding tier 3
     ranges[0].BaseShaderRegister = 0;
@@ -42,6 +44,8 @@ void Renderer::CreateRootSignature() {
     ranges[0].OffsetInDescriptorsFromTableStart = 0;
     ranges[1] = ranges[0];
     ranges[1].RegisterSpace = 2;
+    ranges[2] = ranges[0];
+    ranges[2].RegisterSpace = 3;
 
     D3D12_ROOT_PARAMETER1 params[5]{};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -58,7 +62,7 @@ void Renderer::CreateRootSignature() {
     params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[3].DescriptorTable.NumDescriptorRanges = 2;
+    params[3].DescriptorTable.NumDescriptorRanges = 3;
     params[3].DescriptorTable.pDescriptorRanges = ranges;
     params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 

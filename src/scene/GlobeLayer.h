@@ -10,6 +10,7 @@
 // ================================================================================================
 #pragma once
 
+#include "core/Residency.h"
 #include "core/TileAtlas.h"
 #include "render/Camera.h"
 #include "scene/Layer.h"
@@ -40,6 +41,26 @@ public:
     // viewport height in pixels (the relief-mip selector needs the pixel's angular size).
     void SetView(const Camera& cam, float aspect, float viewportH, double simTime);
 
+    // M6e: streamed planet surface. surf/norm are ResidencyManager tenant ids (-1 = none);
+    // isMars switches the whole shading path (no relief, no live-Earth fields, BC5 normals).
+    void SetResidency(ResidencyManager* rm, int surf, int norm, bool isMars) {
+        m_res = rm;
+        m_surfT = surf;
+        m_normT = norm;
+        m_streamMars = isMars;
+    }
+    void SetPlanetRadius(double r) { m_radius = r; }
+    uint32_t AirTiles() const {
+        return (m_windReady ? m_windBank.ResidentCount() : 0) +
+               (m_cloudReady ? m_cloud.ResidentCount() : 0);
+    }
+    uint64_t AirBytes() const {
+        return (m_windReady ? m_windBank.ResidentBytes() : 0) +
+               (m_cloudReady ? m_cloud.ResidentBytes() : 0);
+    }
+    // Screw-prefetch: run the node walk for a PREDICTED camera, emitting Want(predicted) only.
+    void PredictWants(const Camera& cam, float aspect);
+
     float reliefExagg = 1.0f;       // set per frame by main (altitude-scaled display choice)
     bool windOverlay = false;       // V key: tint the Mv2 wind bank's curl (violet cyclonic)
     std::string stats;              // "globe 214 nodes  alt 3520 km" for the title bar
@@ -65,6 +86,8 @@ private:
         float neGeo[4];       // NE window: lon0, lat1, 1/lonSpan, 1/latSpan (degrees)
         float windGeo[4];     // wind grid: lat1, lon1, 1/dlat, 1/dlon
         float windB[4];       // nx, ny, unused, unused
+        uint32_t streamU[4];  // M6e: surface cube SRV, normal cube SRV, their residency maps
+        float streamF[4];     // surface on, normal on, planet-is-Mars, unused
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -117,6 +140,14 @@ private:
     Com<ID3D12PipelineState> m_cloudBuild;
     uint32_t m_cloudTable = UINT32_MAX;   // [t1 source SRV, u0 volume UAV]
     bool m_cloudReady = false;
+
+    // M6e: streaming.
+    ResidencyManager* m_res = nullptr;
+    int m_surfT = -1, m_normT = -1;
+    bool m_streamMars = false;
+    bool m_predictPass = false;
+    double m_radius = GlobeModel::kR;
+    float m_pixAng = 1.0e-3f;
 
     std::vector<NodeData> m_nodes;
     GlobeCbData m_cb{};

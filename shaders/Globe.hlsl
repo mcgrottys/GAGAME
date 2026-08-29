@@ -33,7 +33,24 @@ cbuffer GlobeCb : register(b1) {
     float4 gNeGeo;      // NE window: lon0, lat1 (deg), 1/lonSpan, 1/latSpan
     float4 gWindGeo;    // wind grid: lat1, lon1, 1/dlat, 1/dlon
     float4 gWindB;      // x = nx, y = ny
+    uint4  gStreamU;    // M6e streamed surfaces (cube SRVs): x = surface, y = normal (Mars BC5),
+                        // z = surface residency map, w = normal residency map
+    float4 gStreamF;    // x = surface on, y = normal on, z = planet is Mars, w unused
 };
+
+// M6e: sample a streamed cube with the classic residency clamp -- the R8 residency-map cube
+// carries (finest resident mip * 16) per base tile; clamping the LOD there means a miss
+// degrades to the best RESIDENT ancestor (blur), never to unmapped garbage.
+float3 StreamedSample(uint texSrv, uint mapSrv, float3 dir) {
+    const float want = gTexCube[texSrv].CalculateLevelOfDetail(sLinearClamp, dir);
+    const float have = gTexCube[mapSrv].SampleLevel(sPointClamp, dir, 0).x * 255.0f / 16.0f;
+    return gTexCube[texSrv].SampleLevel(sLinearClamp, dir, max(want, have)).rgb;
+}
+float2 StreamedSampleRg(uint texSrv, uint mapSrv, float3 dir) {
+    const float want = gTexCube[texSrv].CalculateLevelOfDetail(sLinearClamp, dir);
+    const float have = gTexCube[mapSrv].SampleLevel(sPointClamp, dir, 0).x * 255.0f / 16.0f;
+    return gTexCube[texSrv].SampleLevel(sLinearClamp, dir, max(want, have)).rg;
+}
 
 struct GlobeNode {      // mirrors GlobeLayer::NodeData
     float2 uv0;         // face-uv rect origin
@@ -133,7 +150,9 @@ VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
 
     const float3 dir = CubeDir(nd.face, nd.uv0 + g * nd.uvStep);
     float wNeUnused;
-    const float h = ReliefBlended(dir, 0.0f, wNeUnused);
+    // Mars streams color+normals but has no relief source yet: a true sphere (MOLA heights are
+    // a follow-up tenant; the BC5 normals carry the shape to the eye).
+    const float h = (gStreamF.z > 0.5f) ? 0.0f : ReliefBlended(dir, 0.0f, wNeUnused);
 
     VsOut o;
     o.dir = dir;
@@ -180,7 +199,16 @@ float4 PsMain(VsOut i) : SV_Target {
     float3 n = up;
     float3 alb;
     float spec = 0.0f;
-    if (i.h > 0.0f) {
+    if (gStreamF.z > 0.5f) {
+        // MARS: the rescued sample pyramids ARE the planet -- residency-clamped diffuse +
+        // BC5 surface normals in the local ENU frame.
+        alb = StreamedSample(gStreamU.x, gStreamU.z, up);
+        alb = alb * alb * 1.1f;   // sRGB-ish to linear
+        if (gStreamF.y > 0.5f) {
+            const float2 nxy = StreamedSampleRg(gStreamU.y, gStreamU.w, up);   // SNORM -1..1
+            n = normalize(up + east * nxy.x * 1.2f + north * nxy.y * 1.2f);
+        }
+    } else if (i.h > 0.0f) {
         // Relief normal from the height texture, at a fixed modest slope gain (the vertical
         // exaggeration is a display choice; shading at x25 would posterize the continents).
         // Inside the NE ring the 460 m texture supplies the derivatives instead (M6d).
@@ -238,6 +266,15 @@ float4 PsMain(VsOut i) : SV_Target {
         spec = exp(-t2 / s2) / (4.0f * kPi * s2 * max(ch * ch * ch * ch, 1e-4f));
         const float fres = 0.02f + 0.98f * pow(1.0f - saturate(dot(v, hv)), 5.0f);
         spec *= fres * saturate(dot(gSunDir.xyz, up));
+    }
+
+    // ---- M6e: streamed Earth imagery (residency-clamped). Land takes the imagery outright;
+    // water blends it into the shallows only, so the LIVE ocean (Hs whitening, Cox-Munk glint)
+    // keeps doing physics that a baked mosaic cannot.
+    if (gStreamF.x > 0.5f && gStreamF.z < 0.5f) {
+        float3 img = StreamedSample(gStreamU.x, gStreamU.z, up);
+        img = img * img * 1.2f;
+        alb = (i.h > 0.0f) ? img : lerp(alb, img, 0.6f * saturate(1.0f + i.h / 80.0f));
     }
 
     // ---- M6c: the live 3D sky. One column sample shades the ground under weather...
@@ -308,7 +345,10 @@ float4 PsMain(VsOut i) : SV_Target {
     // The atmosphere, as seen ON the disc: grazing rays cross a long air path. (The limb glow
     // BEYOND the edge is a later shell pass.)
     const float rim = pow(1.0f - saturate(dot(up, v)), 3.0f);
-    col = lerp(col, float3(0.42f, 0.58f, 0.92f) * (0.15f + 1.05f * day), rim * 0.55f);
+    // Mars wears a THIN dusty shell, not Earth's blue one.
+    const float3 rimCol = (gStreamF.z > 0.5f) ? float3(0.72f, 0.42f, 0.24f)
+                                              : float3(0.42f, 0.58f, 0.92f);
+    col = lerp(col, rimCol * (0.15f + 1.05f * day), rim * (gStreamF.z > 0.5f ? 0.18f : 0.55f));
 
     // M6d: the Mv2 wind bank's curl, on demand (V). Violet = NH-cyclonic (+), amber = anti-
     // cyclonic. NULL tiles read zero and tint nothing: calm air costs neither memory nor a
@@ -412,6 +452,9 @@ float4 PsSky(SkyVsOut i) : SV_Target {
     const float mu = dot(rd, gSunDir.xyz);
     const float phaseR = 0.0596831f * (1.0f + mu * mu);   // 3/(16 pi)
     float3 col = sum * kBetaR * phaseR * 22.0f * SUN_IRR_C;
+    if (gStreamF.z > 0.5f) {   // Mars: 1% of Earth's air, dust-toned
+        col = dot(col, float3(0.33f, 0.34f, 0.33f)) * float3(1.15f, 0.55f, 0.30f) * 0.30f;
+    }
 
     // The sun itself, when the ray leaves the shell toward it.
     col += SUN_IRR_C * smoothstep(0.9998f, 0.99995f, mu) * 4.0f;

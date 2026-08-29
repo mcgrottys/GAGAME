@@ -530,7 +530,7 @@ void GlobeLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
 }
 
 void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double size) {
-    const double R = GlobeModel::kR;
+    const double R = m_radius;
     double dir[3];
     CubeDirD(face, u0 + size * 0.5, v0 + size * 0.5, dir);
     const double arc = (kPi / 2.0) * R / (1 << level);   // ground span of this node, m
@@ -571,6 +571,27 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
         return;
     }
 
+    // M6e: this leaf's on-screen span decides which streamed-texture mip it WANTS; the
+    // residency manager turns wants into loads/mappings on its own budgets. The CDLOD walk IS
+    // the sampling feedback -- deterministic, no readback pass (the classic had to render one).
+    if (m_res && m_surfT >= 0) {
+        const double px = arc / ((std::max)(dist, 1.0) * (std::max)(m_pixAng, 1e-6f));
+        const double texAtMip0 = size * 16384.0;
+        const int mip = (std::max)(
+            0, static_cast<int>(std::ceil(std::log2((std::max)(texAtMip0 / (std::max)(px, 16.0),
+                                                               1.0)))));
+        // Node rects live in OUR CubeDir face-uv; texture tiles live in the HARDWARE cube
+        // convention. Deriving the two per face collapses to one universal rule: v -> 1 - v.
+        const float tu0 = static_cast<float>(u0), tu1 = static_cast<float>(u0 + size);
+        const float tv0 = static_cast<float>(1.0 - (v0 + size));
+        const float tv1 = static_cast<float>(1.0 - v0);
+        m_res->Want(m_surfT, face, mip, tu0, tv0, tu1, tv1, m_predictPass);
+        if (m_normT >= 0) {
+            m_res->Want(m_normT, face, mip, tu0, tv0, tu1, tv1, m_predictPass);
+        }
+    }
+    if (m_predictPass) return;   // prefetch walk: wants only, no draw nodes
+
     NodeData nd{};
     nd.uv0[0] = static_cast<float>(u0);
     nd.uv0[1] = static_cast<float>(v0);
@@ -584,9 +605,33 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
     m_nodes.push_back(nd);
 }
 
+// M6e screw-prefetch: the same walk under the PREDICTED pose, emitting predicted wants only.
+void GlobeLayer::PredictWants(const Camera& cam, float aspect) {
+    if (!m_res || m_surfT < 0) return;
+    double savedPos[3] = {m_camPos[0], m_camPos[1], m_camPos[2]};
+    double savedFrustum[6][4];
+    memcpy(savedFrustum, m_frustum, sizeof(m_frustum));
+    const int savedPlanes = m_planeCount;
+
+    m_camPos[0] = cam.px;
+    m_camPos[1] = cam.py;
+    m_camPos[2] = cam.pz;
+    m_planeCount = 0;   // no frustum cull: the predicted view is approximate by nature
+    m_predictPass = true;
+    for (int f = 0; f < 6; ++f) SelectNode(f, 0, 0.0, 0.0, 1.0);
+    m_predictPass = false;
+
+    memcpy(m_frustum, savedFrustum, sizeof(m_frustum));
+    m_planeCount = savedPlanes;
+    m_camPos[0] = savedPos[0];
+    m_camPos[1] = savedPos[1];
+    m_camPos[2] = savedPos[2];
+}
+
 void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, double simTime) {
-    if (!m_relief.Valid()) return;
+    if (!m_relief.Valid() && !m_streamMars) return;
     m_viewportH = viewportH;
+    m_pixAng = cam.fovY / (std::max)(viewportH, 1.0f);   // the walk needs it BEFORE wavesB
     m_camPos[0] = cam.px;
     m_camPos[1] = cam.py;
     m_camPos[2] = cam.pz;
@@ -615,7 +660,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
 
     const double r = std::sqrt(m_camPos[0] * m_camPos[0] + m_camPos[1] * m_camPos[1] +
                                m_camPos[2] * m_camPos[2]);
-    m_cb.glo[0] = static_cast<float>(GlobeModel::kR);
+    m_cb.glo[0] = static_cast<float>(m_radius);
     m_cb.glo[1] = reliefExagg;
     m_cb.glo[2] = static_cast<float>(m_nodes.size());
     m_cb.glo[3] = static_cast<float>(std::fmod(simTime, 3600.0));
@@ -654,6 +699,22 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.windB[0] = static_cast<float>(m_globe->WindNx());
     m_cb.windB[1] = static_cast<float>(m_globe->WindNy());
 
+    // ---- M6e: streamed surfaces. On Mars, the live-Earth fields all stand down.
+    const bool surfOn = m_res && m_surfT >= 0;
+    const bool normOn = m_res && m_normT >= 0;
+    m_cb.streamU[0] = surfOn ? m_res->TextureSrv(m_surfT) : UINT32_MAX;
+    m_cb.streamU[1] = normOn ? m_res->TextureSrv(m_normT) : UINT32_MAX;
+    m_cb.streamU[2] = surfOn ? m_res->ResidencySrv(m_surfT) : UINT32_MAX;
+    m_cb.streamU[3] = normOn ? m_res->ResidencySrv(m_normT) : UINT32_MAX;
+    m_cb.streamF[0] = surfOn ? 1.0f : 0.0f;
+    m_cb.streamF[1] = normOn ? 1.0f : 0.0f;
+    m_cb.streamF[2] = m_streamMars ? 1.0f : 0.0f;
+    if (m_streamMars) {
+        m_cb.texIdx[1] = m_cb.texIdx[2] = m_cb.texIdx[3] = UINT32_MAX;   // waves/wind/clouds
+        m_cb.texIdx2[0] = m_cb.texIdx2[1] = UINT32_MAX;                  // NE ring / wind bank
+        m_cb.texIdx2[2] = 0;
+    }
+
     // The sky pass rebuilds pixel rays from this basis (b2).
     const XMFLOAT3 cf = cam.Forward();
     const XMFLOAT3 cr = cam.Right();
@@ -670,17 +731,22 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.beacon[0] = static_cast<float>(nby[0]);
     m_cb.beacon[1] = static_cast<float>(nby[1]);
     m_cb.beacon[2] = static_cast<float>(nby[2]);
-    m_cb.beacon[3] = 1.0f;
+    m_cb.beacon[3] = m_streamMars ? 0.0f : 1.0f;   // no Newburyport on Mars (yet)
 
     char s[96];
     snprintf(s, sizeof(s), "globe %zu nodes  alt %.0f km", m_nodes.size(),
-             (r - GlobeModel::kR) / 1000.0);
+             (r - m_radius) / 1000.0);
     stats = s;
+    if (m_res) stats += "  " + m_res->stats;
 }
 
 void GlobeLayer::Render(const FrameContext& ctx) {
     if (!m_pso || m_nodes.empty()) return;
     PixScope scope(ctx.cl, "globe (atmosphere shell + quad-sphere CDLOD + sparse cloud volume)");
+
+    // M6e: the residency manager's per-frame turn -- loads started, budgeted tiles mapped and
+    // filled, residency maps refreshed -- BEFORE the surface samples any of it.
+    if (m_res) m_res->ProcessQueues(*ctx.gpu, ctx.cl);
 
     const D3D12_GPU_VIRTUAL_ADDRESS cbVa = ctx.gpu->PushConstants(&m_cb, sizeof(m_cb));
 
