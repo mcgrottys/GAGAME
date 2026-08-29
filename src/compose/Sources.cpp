@@ -170,6 +170,7 @@ bool AerialOrthoSource::Load(const std::string& jsonPath) {
         tile.n0 = t.Num("utm_n0", 0);
         tile.e1 = t.Num("utm_e1", 0);
         tile.n1 = t.Num("utm_n1", 0);
+        tile.channels = static_cast<uint32_t>(t.Num("channels", 3));
         const std::string path = dir + t.Str("file");
         const std::wstring wpath(path.begin(), path.end());
         HANDLE file = CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
@@ -210,11 +211,15 @@ bool AerialOrthoSource::Load(const std::string& jsonPath) {
         m_tiles.push_back(std::move(tile));
     }
     if (m_tiles.empty()) return false;
-    m_info = {"massgis.coq2023", "jp2 ortho, 1500 m USNG tiles, plane-flown leaf-off",
-              "EPSG:6348 NAD83(2011)/UTM 19N (~1 m vs WGS84, uncorrected)", 15.0, lonMin,
-              latMin, lonMax, latMax};
-    Log("[aerial] %zu ortho tiles mapped (UTM E %.0f..%.0f, N %.0f..%.0f, 15 cm/px)",
-        m_tiles.size(), m_ue0, m_ue1, m_un0, m_un1);
+    // Identity from the json when present, so one class serves both the MassGIS orthos and
+    // any user GeoTIFF overlay ("highlights") dropped through harvest_overlay.py.
+    m_info = {v.Str("name", "massgis.coq2023"),
+              v.Str("structure", "jp2 ortho, 1500 m USNG tiles, plane-flown leaf-off"),
+              v.Str("crs", "EPSG:6348 NAD83(2011)/UTM 19N (~1 m vs WGS84, uncorrected)"),
+              v.Num("cm_per_px", 15.0), lonMin, latMin, lonMax, latMax};
+    Log("[aerial] %s: %zu tiles mapped (UTM E %.0f..%.0f, N %.0f..%.0f, %uch)",
+        m_info.name.c_str(), m_tiles.size(), m_ue0, m_ue1, m_un0, m_un1,
+        m_tiles[0].channels);
     return true;
 }
 
@@ -229,10 +234,13 @@ float AerialOrthoSource::Sample(double latRad, double lonRad, double groundResM,
         if (E < t.e0 || E >= t.e1 || N < t.n0 || N >= t.n1) continue;
         // Meters-per-pixel contract: pick the mip whose GROUND resolution matches the paint
         // footprint (groundResM is Mercator-equatorial; x cos(lat) makes it true metres).
+        // The tile's own native m/px anchors the pick -- 15 cm orthos and 50 cm overlays
+        // ride the same code.
+        const double nativeM = (t.e1 - t.e0) / t.mips[0].px;
         const double wantM = groundResM * std::cos(latRad);
         const int lvl = std::clamp(
-            static_cast<int>(std::floor(std::log2((std::max)(wantM, 0.15) / 0.15))), 0,
-            static_cast<int>(t.mips.size()) - 1);
+            static_cast<int>(std::floor(std::log2((std::max)(wantM, nativeM) / nativeM))),
+            0, static_cast<int>(t.mips.size()) - 1);
         const MipLevel& mp = t.mips[lvl];
         const double pxPerM = mp.px / (t.e1 - t.e0);
         const double fx = (E - t.e0) * pxPerM - 0.5;
@@ -243,15 +251,21 @@ float AerialOrthoSource::Sample(double latRad, double lonRad, double groundResM,
                                   static_cast<int>(mp.px) - 2);
         const double tx = std::clamp(fx - x0, 0.0, 1.0), ty = std::clamp(fy - y0, 0.0, 1.0);
         const uint8_t* base = t.data + mp.offset;
-        auto texel = [&](int x, int y) { return base + (static_cast<size_t>(y) * mp.px + x) * 3; };
+        const uint32_t nc = t.channels;
+        auto texel = [&](int x, int y) {
+            return base + (static_cast<size_t>(y) * mp.px + x) * nc;
+        };
         const uint8_t* p00 = texel(x0, y0);
         const uint8_t* p10 = texel(x0 + 1, y0);
         const uint8_t* p01 = texel(x0, y0 + 1);
         const uint8_t* p11 = texel(x0 + 1, y0 + 1);
-        for (int c = 0; c < 3; ++c) {
+        auto bilerp = [&](uint32_t c) {
             const double a = p00[c] * (1 - tx) + p10[c] * tx;
             const double b = p01[c] * (1 - tx) + p11[c] * tx;
-            rgba[c] = static_cast<uint8_t>(a * (1 - ty) + b * ty + 0.5);
+            return a * (1 - ty) + b * ty;
+        };
+        for (uint32_t c = 0; c < 3; ++c) {
+            rgba[c] = static_cast<uint8_t>(bilerp(c) + 0.5);
         }
         rgba[3] = 255;
         // Feather against the UNION boundary (interior tile seams stay seamless -- one
@@ -259,7 +273,13 @@ float AerialOrthoSource::Sample(double latRad, double lonRad, double groundResM,
         const double dm = (std::min)((std::min)(E - m_ue0, m_ue1 - E),
                                      (std::min)(N - m_un0, m_un1 - N));
         const double tfe = std::clamp(dm / 25.0, 0.0, 1.0);
-        return static_cast<float>(tfe * tfe * (3.0 - 2.0 * tfe));
+        float w = static_cast<float>(tfe * tfe * (3.0 - 2.0 * tfe));
+        // ALPHA IS FIBER: a 4-channel plane's per-pixel alpha multiplies the paint weight,
+        // so a mostly-transparent overlay (a GeoTIFF of highlights) bleeds through the
+        // composed quadtree pixel by pixel -- flat image and quad tree meet in the paint
+        // loop's lerp, never in a special case.
+        if (nc >= 4) w *= static_cast<float>(bilerp(3) / 255.0);
+        return w;
     }
     return 0.0f;
 }

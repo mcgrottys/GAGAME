@@ -96,6 +96,11 @@ private:
     struct Tile {
         double e0 = 0, n0 = 0, e1 = 0, n1 = 0;   // UTM19N bounds
         const uint8_t* data = nullptr;           // mapped view of the mip chain
+        uint32_t channels = 3;                   // 3 = rgb; 4 = rgba -- ALPHA IS FIBER:
+                                                 // per-pixel alpha multiplies the paint
+                                                 // weight, so a mostly-transparent overlay
+                                                 // (highlights) bleeds through the quadtree
+                                                 // pixel by pixel
         std::vector<MipLevel> mips;
     };
     std::vector<Tile> m_tiles;

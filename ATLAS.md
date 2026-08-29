@@ -150,6 +150,16 @@ ask only the sources that touch it, each source answers at its own best (box-fil
 bilinear up), and cache identity tracks the subset. Fidelity diversity costs exactly the
 tiles it changes.
 
+**Alpha is fiber.** Quad trees and flat images (GeoTIFFs) never meet in a special case —
+they meet in the paint loop's per-pixel lerp, and a plane's own alpha channel multiplies
+its paint weight texel by texel. A mostly-transparent GeoTIFF of highlights bleeds through
+the final composed quadtree exactly as much as each pixel's alpha says (weight = footprint
+feather × per-pixel alpha; RGBA mip chains reduce alpha-weighted so transparent pixels
+never darken neighbours; the soak then carries the highlight up-LOD in proportion to its
+alpha × area — a thin stroke honestly fades from orbit). Drop any UTM-19N GeoTIFF into
+`cache/overlay/` and `harvest_overlay.py` ingests it from its own GeoTIFF tags; pinned in
+`--selftest` (the alpha-ramp contract).
+
 One distinction the ladder must keep sacred: **conservative vs. perceptual resampling**.
 Heights, depths, fluxes, charge — quantities physics integrates — reduce by *plain box
 means* (mass preserved). Radiance reduces through the correct transfer function (the sRGB

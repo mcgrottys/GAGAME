@@ -15,6 +15,7 @@
 #include "compose/Compositor.h"
 #include "compose/Projections.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -203,6 +204,49 @@ bool RunComposeSelfTest() {
             }
         }
         Check(checked > 6, "height spot-checks ran");
+    }
+
+    // ---- ALPHA IS FIBER: a source whose per-pixel alpha VARIES across the tile must land
+    // in the composition as a per-pixel weight -- a translucent highlight bleeds through
+    // exactly as much as its alpha says, texel by texel, never tile by tile.
+    {
+        class AlphaRamp : public ColorSource {
+        public:
+            AlphaRamp() { m_info = {"test.ramp", "analytic", "EPSG:4326", 1, -180, -90, 180, 90}; }
+            const SourceInfo& Info() const override { return m_info; }
+            float Sample(double lat, double, double, const PaintCtx&,
+                         uint8_t rgba[4]) override {
+                rgba[0] = 200; rgba[1] = 0; rgba[2] = 0; rgba[3] = 255;
+                // alpha ramps north-south: 0 at lat 0 to 1 at lat 1 rad
+                return static_cast<float>(std::clamp(lat, 0.0, 1.0));
+            }
+            SourceInfo m_info;
+        } aramp;
+        Compositor comp5;
+        const int c5 = comp5.AddColorChannel("selftest.alpha", {&base, &aramp});
+        auto fn = comp5.CubeColor(c5);
+        TileRequest r{0, 5, 1, 0};   // face +x top row: lats ~0.42..0.62 rad, ramp mid-band
+        std::vector<uint8_t> tile;
+        Check(fn(r, tile), "alpha-ramp paint");
+        const uint32_t faceTexels = Compositor::kFaceDim >> r.mip;
+        int checked = 0;
+        for (uint32_t py = 5; py < 128; py += 39) {
+            for (uint32_t px = 7; px < 128; px += 33) {
+                const double u = (r.x * 128.0 + px + 0.5) / faceTexels;
+                const double v = (r.y * 128.0 + py + 0.5) / faceTexels;
+                double d[3];
+                ComposeCubeDir(r.face, u, v, d);
+                const double lat = std::asin((std::max)(-1.0, (std::min)(1.0, d[1])));
+                const double lon = std::atan2(d[2], d[0]);
+                const double a = std::clamp(lat, 0.0, 1.0);
+                const double baseR = (lon / (2.0 * kPi) + 0.5) * 255.0;
+                const double expR = baseR + (200.0 - baseR) * a;
+                Check(std::abs(tile[(py * 128 + px) * 4] - expR) <= 1.5,
+                      "per-pixel alpha weights the paint texel by texel");
+                ++checked;
+            }
+        }
+        Check(checked > 8, "alpha-ramp spot-checks ran");
     }
 
     // ---- the soak rule's SHORT CIRCUIT: a source whose footprint spans less than ~2 texels

@@ -818,7 +818,10 @@ int main(int argc, char** argv) {
         // sees channels only: earth color is earth color, earth height is earth height.
         Compositor compositor;
         GoogleColorSource srcGoogle(&googleTiles);
-        AerialOrthoSource srcAerial;   // M6l: MassGIS 15 cm orthos (loads if harvested)
+        AerialOrthoSource srcAerial;    // M6l: MassGIS 15 cm orthos (loads if harvested)
+        AerialOrthoSource srcOverlay;   // M6o: user GeoTIFF overlays -- ALPHA IS FIBER: a
+                                        // mostly-transparent highlights plane bleeds through
+                                        // the composed quadtree pixel by pixel
         EquirectHeightSource srcEtopo("noaa.etopo2022", "equirect-grid int16 8192x4096",
                                       489200.0, &globeModel.Elev(), globeModel.Nx(),
                                       globeModel.Ny());
@@ -892,6 +895,9 @@ int main(int argc, char** argv) {
                     std::vector<ColorSource*> colorStack{&srcGoogle};
                     if (srcAerial.Load("data/aerial/aerial.json")) {
                         colorStack.push_back(&srcAerial);
+                    }
+                    if (srcOverlay.Load("data/overlay/overlay.json")) {
+                        colorStack.push_back(&srcOverlay);
                     }
                     colCh = compositor.AddColorChannel("earth.color", std::move(colorStack));
                     colorCubeT = resMgr.AddTextureCube(gpu, L"earth.color (composed)",
