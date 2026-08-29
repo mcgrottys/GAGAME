@@ -4,8 +4,15 @@ cache/
 __pycache__/
 
 # Generated engine data -- regenerable by the harvesters (see README); keeping the repo lean
-# beats shipping 100 MB of decimated public-domain rasters.
-data/
+# beats shipping 100 MB of decimated public-domain rasters. EXCEPT the survey law: hand
+# edits and the surveyed structure vectors they were seeded from are KB-scale text and NOT
+# regenerable (the lean rule is for rasters, not the operator's authority).
+data/*
+!data/gis/
+data/gis/*
+!data/gis/edits.geojson
+!data/gis/structures.kml
+!data/gis/osm_structures.json
 
 # Renders, debug dumps, PIX captures, and the rails recording.
 *.png

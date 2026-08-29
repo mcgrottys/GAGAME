@@ -68,8 +68,9 @@ private:
     const VectorPack* m_pack = nullptr;
     ID3D12RootSignature* m_rootSig = nullptr;
     Com<ID3D12PipelineState> m_pso;
-    Batch m_coast, m_rivers, m_global;
-    int m_coastCh = -1, m_riversCh = -1, m_globalCh = -1;   // Exchange ids for republish
+    Batch m_coast, m_rivers, m_global, m_structs;
+    int m_coastCh = -1, m_riversCh = -1, m_globalCh = -1,   // Exchange ids for republish
+        m_structsCh = -1;
     float m_bucket = -1.0f;
     ComposedSurfaceCb m_cs{};
 };

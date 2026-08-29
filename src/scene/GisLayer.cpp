@@ -54,11 +54,16 @@ void GisLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSignature
         m_coast = reg("gis.coast.ne", 0.15f, 1.0f, 0.25f, 4.0f);
         m_rivers = reg("gis.rivers.ne", 1.0f, 0.20f, 1.0f, 4.0f);
         m_global = reg("gis.coast.global", 0.15f, 1.0f, 0.25f, 40.0f);
+        // Charted coastal STRUCTURES (jetties, groins, dikes -- KML-ingested footprints):
+        // amber, so surveyed riprap reads apart from the natural shoreline.
+        m_structs = reg("gis.structures", 1.0f, 0.65f, 0.10f, 4.0f);
         const GaBufferLayout lay{8, 0b010,
                                  "lonlat-degrees line-list (wedge-filtered at view LOD)"};
         m_coastCh = m_exchange->Register(m_coast.channel, lay, "gis.vpack");
         m_riversCh = m_exchange->Register(m_rivers.channel, lay, "gis.vpack");
         m_globalCh = m_exchange->Register(m_global.channel, lay, "gis.vpack");
+        if (m_pack->Find("structures"))
+            m_structsCh = m_exchange->Register(m_structs.channel, lay, "gis.vpack");
         PublishAtTolerance(gpu, 0.0f);
         return;
     }
@@ -79,6 +84,7 @@ void GisLayer::PublishAtTolerance(Gpu& gpu, float tol) {
     pub(m_coastCh, "coast_ne");
     pub(m_riversCh, "rivers_ne");
     pub(m_globalCh, "coast_global");
+    pub(m_structsCh, "structures");
     m_bucket = tol;
 }
 
@@ -142,6 +148,7 @@ void GisLayer::Render(const FrameContext& ctx) {
     draw(m_global);
     draw(m_coast);
     draw(m_rivers);
+    draw(m_structs);
 }
 
 }  // namespace ga

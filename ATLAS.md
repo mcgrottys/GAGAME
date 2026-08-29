@@ -291,7 +291,7 @@ signal a schema registry is for.
 
 ## 9a. The survey order — vectors, lossless, LOD by the wedge
 
-Vector data (SHP, GeoJSON, the GSHHG bins) joins as first-class manuscripts with three
+Vector data (SHP, GeoJSON, KML, the GSHHG bins) joins as first-class manuscripts with three
 commitments:
 
 **Lossless with LOD in one structure.** Every vertex is kept forever, tagged with the
@@ -316,8 +316,24 @@ them over the survey mask at load *and* the classifier treats flagged texels as
 authoritative over the live tide (the window mask is R8G8: mask + edit flag), *and* a land
 edit floors the display geometry so the structure stands above the tide. This is how the
 Merrimack jetties came back from the sea: the survey shoreline predates them, the
-stabilized height classifier smeared their 20 m ridges — three hand-typed polygons settled
-it. Refine the outlines by editing the file; the engine re-rasterizes on the next run.
+stabilized height classifier smeared their 20 m ridges. Refine the outlines by editing the
+file; the engine re-rasterizes on the next run.
+
+**But seed the law from surveys, not from eyeballs.** The first jetty polygons were
+digitized off renders — twice wrong (the second attempt confidently traced the ebb-shoal
+classification smear as the "south jetty"). The charted structures already existed as
+surveyed footprint outlines: OSM carries the Merrimack North/South Jetty, spur, the old
+south jetty, a dozen groins and the mid-river dike as `man_made=breakwater|groyne` ways.
+One cached Overpass fetch (`data/gis/osm_structures.json`, ODbL) now seeds `edits.geojson`
+with true footprints and exports the whole inventory as `data/gis/structures.kml` — which
+round-trips: the harvester ingests any KML dropped into `data/gis/` or `cache/vectors/`
+(Placemark LineString/Polygon/Point → a vpack layer, name + description as attrs), so
+Google-Earth-drawn overlays enter the survey order like any shapefile. The structures layer
+draws amber on the GIS vector overlay — vectors on their own layer, never painted into the
+surface textures (masks are the one sanctioned raster use). These three files are the one
+versioned exception to the "data/ is regenerable" gitignore rule: hand edits and their
+surveyed seeds are authority, not cache. NOAA CUSP remains the named upgrade for the whole
+shoreline.
 
 ## 10. The Scriptorium — the .NET/MCP keeper
 

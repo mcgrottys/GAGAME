@@ -13,6 +13,7 @@
 #    data/gis/*.bin            the GSHHG coast/river polylines already harvested (converted)
 #    cache/vectors/*.shp(+dbf) any ESRI shapefile (polyline/polygon/point, Z/M tolerated)
 #    cache/vectors/*.geojson   any GeoJSON (Feature/FeatureCollection)
+#    data/gis/*.kml, cache/vectors/*.kml   any KML (Placemark LineString/Polygon/Point)
 #
 #  Output: data/vectors/vectors.vpack + vectors.json (attribute sidecars per layer).
 #  Format VPK1 (little-endian):
@@ -189,6 +190,58 @@ def read_geojson(path):
     return kind, lines, attrs
 
 
+def read_kml(path):
+    """Placemark LineString/LinearRing/Polygon/Point; name + description become attrs.
+    Namespaces vary across exporters, so match tags by local name."""
+    import xml.etree.ElementTree as ET
+    root = ET.parse(path).getroot()
+
+    def local(el):
+        return el.tag.rsplit("}", 1)[-1]
+
+    def parse_coords(el):
+        pts = []
+        for tok in (el.text or "").split():
+            parts = tok.split(",")
+            if len(parts) >= 2:
+                pts.append((float(parts[0]), float(parts[1])))
+        return pts
+
+    lines, points, kind, attrs = [], [], 0, []
+    for pm in root.iter():
+        if local(pm) != "Placemark":
+            continue
+        a = {}
+        for ch in pm:
+            if local(ch) in ("name", "description") and ch.text:
+                a[local(ch)] = ch.text.strip()
+        for el in pm.iter():
+            t = local(el)
+            if t == "Point":
+                for c in el.iter():
+                    if local(c) == "coordinates":
+                        points += parse_coords(c)
+            elif t == "LineString":
+                for c in el.iter():
+                    if local(c) == "coordinates":
+                        pts = parse_coords(c)
+                        if len(pts) >= 2:
+                            lines.append(pts)
+            elif t == "Polygon":
+                kind = 1
+                for ring in el.iter():
+                    if local(ring) == "LinearRing":
+                        for c in ring.iter():
+                            if local(c) == "coordinates":
+                                pts = parse_coords(c)
+                                if len(pts) >= 2:
+                                    lines.append(pts)
+        attrs.append(a)
+    if points and not lines:
+        return 2, [[p] for p in points], attrs
+    return kind, lines, attrs
+
+
 # ---------------------------------------------------------------- writer
 
 def write_vpack(layers, path):
@@ -212,20 +265,11 @@ DEFAULT_EDITS = {
         "HAND-EDITABLE mask overrides. Each polygon forces the land/water classifier:",
         "properties.mask = 'land' | 'water'. Coordinates are WGS84 lon/lat. The engine",
         "rasterizes these OVER the survey mask AND over the in-window live-tide classifier",
-        "at load -- edit, save, rerun. Refine the jetty outlines against --albedo renders.",
+        "at load -- edit, save, rerun. DON'T hand-digitize charted structures: seed them",
+        "from surveyed vectors (the repo copy carries the Merrimack jetty footprints from",
+        "OSM ways 640430599/640430601/256125510/559887262 -- see data/gis/structures.kml).",
     ],
-    "features": [
-        {"type": "Feature",
-         "properties": {"mask": "land", "name": "merrimack north jetty"},
-         "geometry": {"type": "Polygon", "coordinates": [[
-             [-70.8102, 42.81755], [-70.8037, 42.81555], [-70.8033, 42.81625],
-             [-70.8098, 42.81830], [-70.8102, 42.81755]]]}},
-        {"type": "Feature",
-         "properties": {"mask": "land", "name": "merrimack south jetty"},
-         "geometry": {"type": "Polygon", "coordinates": [[
-             [-70.8085, 42.81300], [-70.8031, 42.81480], [-70.8028, 42.81410],
-             [-70.8082, 42.81230], [-70.8085, 42.81300]]]}},
-    ],
+    "features": [],
 }
 
 
@@ -265,6 +309,20 @@ def main():
         layers.append((name, kind, polys))
         registry.append({"layer": name, "kind": ["polyline", "polygon", "points"][kind],
                          "source": "geojson", "polys": len(polys),
+                         "verts": sum(len(x) for x in polys)})
+
+    for p in sorted(glob.glob(os.path.join(GIS, "*.kml")) +
+                    glob.glob(os.path.join(CACHE, "*.kml"))):
+        name = os.path.splitext(os.path.basename(p))[0]
+        kind, polys, attrs = read_kml(p)
+        if not polys:
+            print(f"[vectors] {name}.kml: no geometry")
+            continue
+        if attrs:
+            json.dump(attrs, open(os.path.join(OUT, f"{name}.attrs.json"), "w"), indent=0)
+        layers.append((name, kind, polys))
+        registry.append({"layer": name, "kind": ["polyline", "polygon", "points"][kind],
+                         "source": "kml", "polys": len(polys),
                          "verts": sum(len(x) for x in polys)})
 
     write_vpack(layers, os.path.join(OUT, "vectors.vpack"))
