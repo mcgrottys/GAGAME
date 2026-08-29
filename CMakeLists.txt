@@ -22,8 +22,10 @@ add_executable(gagame
   src/core/Residency.cpp
   src/core/TileProviders.cpp
   src/compose/Compositor.cpp
+  src/compose/ComposeTest.cpp
   src/compose/Sources.cpp
   src/compose/GisStencil.cpp
+  src/compose/Exchange.cpp
   src/core/OceanFft.cpp
   src/render/Renderer.cpp
   src/render/Camera.cpp
@@ -34,6 +36,7 @@ add_executable(gagame
   src/scene/GulfLayer.cpp
   src/scene/TerrainLayer.cpp
   src/scene/GisLayer.cpp
+  src/scene/MarkerLayer.cpp
   src/sim/TideModel.cpp
   src/sim/SeaState.cpp
   src/sim/CurrentModel.cpp

@@ -20,7 +20,8 @@ namespace ga {
 
 bool MarsBinProvider::Open(const std::wstring& binPath, DXGI_FORMAT fmt) {
     switch (fmt) {
-        case DXGI_FORMAT_BC1_UNORM: m_tileW = 512; m_tileH = 256; break;
+        case DXGI_FORMAT_BC1_UNORM:
+        case DXGI_FORMAT_BC1_UNORM_SRGB: m_tileW = 512; m_tileH = 256; break;
         case DXGI_FORMAT_BC5_SNORM: m_tileW = 256; m_tileH = 256; break;
         default: return false;
     }

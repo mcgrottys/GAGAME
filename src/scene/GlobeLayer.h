@@ -94,6 +94,9 @@ public:
     void PredictWants(const Camera& cam, float aspect);
 
     float reliefExagg = 1.0f;       // set per frame by main (altitude-scaled display choice)
+    float waterNavd = 0.0f;         // M6j: live water level, for the close-up material model
+    bool msSurface = true;          // M6j: request the mesh-shader unified surface
+    bool MeshPathActive() const { return m_msPath; }
     bool stencilOverlay = false;    // M6i: --stencil, the GIS alignment overlay
     // GIS survey stencil textures (GisStencil), for the --stencil overlay.
     void SetGisStencil(uint32_t winSrv, uint32_t globSrv) {
@@ -112,6 +115,16 @@ private:
         float uvStep[2];
         uint32_t face;
         float morphStart, morphEnd, pad;
+    };
+    // Mirrors MeshletRec in GlobeMesh.hlsl (96 B; structured-buffer raw layout).
+    struct MeshletRec {
+        float uv0[2], uvStepCell[2];
+        uint32_t face, cell0;
+        float morphStart, morphEnd;
+        float anchorRel[3], arc;
+        float dPdu[3], pad0;
+        float dPdv[3], pad1;
+        float upT[3], pad2;
     };
     // Mirrors GlobeCb in Globe.hlsl. (Count float4 rows on BOTH sides after any edit.)
     struct GlobeCbData {
@@ -152,7 +165,10 @@ private:
     };
 
     void SelectNode(int face, int level, double u0, double v0, double size);
+    void EmitMeshlets(int face, double u0, double v0, double size, double arc,
+                      float morphStart, float morphEnd);
     bool BuildPso(Gpu& gpu, ShaderCompiler& sc);
+    bool BuildMeshPso(Gpu& gpu, ShaderCompiler& sc);
 
     void InitClouds(Gpu& gpu, ShaderCompiler& sc);
     void InitNeAndWind(Gpu& gpu, ShaderCompiler& sc);
@@ -199,6 +215,13 @@ private:
     double m_estGeo[4] = {0, 0, 0, 0};
 
     std::vector<NodeData> m_nodes;
+    // M6j: the mesh-shader path.
+    static constexpr uint32_t kMaxMeshlets = 65536;
+    bool m_msPath = false;
+    Com<ID3D12PipelineState> m_msPso;
+    Com<ID3D12GraphicsCommandList6> m_cl6;
+    std::vector<MeshletRec> m_meshlets;
+    GpuBuffer m_recBuf[Gpu::kFrameCount];
     GlobeCbData m_cb{};
     SkyCbData m_skyCb{};
     float m_viewportH = 900.0f;

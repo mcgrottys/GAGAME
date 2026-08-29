@@ -8,9 +8,10 @@
 namespace ga {
 
 GisLayer::Batch GisLayer::MakeBatch(Gpu& gpu, const std::vector<GisStencil::Polyline>& lines,
-                                    const wchar_t* name, float r, float g, float b,
+                                    const char* channel, float r, float g, float b,
                                     float lift) {
     Batch batch{};
+    batch.channel = channel;
     batch.color[0] = r;
     batch.color[1] = g;
     batch.color[2] = b;
@@ -30,24 +31,21 @@ GisLayer::Batch GisLayer::MakeBatch(Gpu& gpu, const std::vector<GisStencil::Poly
             pts.push_back(line[i + 1].second);
         }
     }
-    batch.buf = gpu.CreateUploadBuffer(pts.size() * sizeof(float), name);
-    memcpy(batch.buf.cpu, pts.data(), pts.size() * sizeof(float));
-    batch.verts = static_cast<uint32_t>(segs * 2);
+    const int ch = m_exchange->Register(
+        channel, {8, 0b010, "lonlat-degrees line-list (float2 per vertex, 2 per segment)"},
+        "gis.vectors");
+    m_exchange->Publish(gpu, ch, pts.data(), pts.size() * sizeof(float));
     return batch;
 }
 
 void GisLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSignature* rootSig) {
     m_rootSig = rootSig;
-    if (!m_gis) return;
+    if (!m_gis || !m_exchange) return;
     if (!BuildPso(gpu, sc)) throw std::runtime_error("gis PSO failed");
-    m_coast = MakeBatch(gpu, m_gis->CoastNe(), L"gis.coastNe (GSHHG f)", 0.15f, 1.0f, 0.25f,
-                        4.0f);
-    m_rivers = MakeBatch(gpu, m_gis->RiversNe(), L"gis.riversNe (WDBII)", 1.0f, 0.20f, 1.0f,
-                         4.0f);
-    m_global = MakeBatch(gpu, m_gis->CoastGlobal(), L"gis.coastGlobal (GSHHG l)", 0.15f, 1.0f,
-                         0.25f, 40.0f);
-    Log("[gis] vector layer: %u + %u + %u line vertices", m_coast.verts, m_rivers.verts,
-        m_global.verts);
+    m_coast = MakeBatch(gpu, m_gis->CoastNe(), "gis.coast.ne", 0.15f, 1.0f, 0.25f, 4.0f);
+    m_rivers = MakeBatch(gpu, m_gis->RiversNe(), "gis.rivers.ne", 1.0f, 0.20f, 1.0f, 4.0f);
+    m_global = MakeBatch(gpu, m_gis->CoastGlobal(), "gis.coast.global", 0.15f, 1.0f, 0.25f,
+                         40.0f);
 }
 
 bool GisLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
@@ -90,13 +88,14 @@ void GisLayer::Render(const FrameContext& ctx) {
     ctx.cl->SetPipelineState(m_pso.Get());
     ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
     auto draw = [&](const Batch& b) {
-        if (b.verts == 0) return;
+        const Exchange::View v = m_exchange->Query(b.channel);
+        if (!v.valid || v.elements == 0) return;
         GisCbData cb{};
         cb.cs = m_cs;
         memcpy(cb.color, b.color, sizeof(cb.color));
         ctx.cl->SetGraphicsRootConstantBufferView(1, ctx.gpu->PushConstants(&cb, sizeof(cb)));
-        ctx.cl->SetGraphicsRootShaderResourceView(2, b.buf.res->GetGPUVirtualAddress());
-        ctx.cl->DrawInstanced(b.verts, 1, 0, 0);
+        ctx.cl->SetGraphicsRootShaderResourceView(2, v.va);
+        ctx.cl->DrawInstanced(v.elements, 1, 0, 0);
     };
     draw(m_global);
     draw(m_coast);

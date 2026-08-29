@@ -69,9 +69,12 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
     // has somewhere to land.
     uint32_t tileW = 128, tileH = 128;   // texels per 64KB tile
     switch (fmt) {
-        case DXGI_FORMAT_BC1_UNORM: tileW = 512; tileH = 256; break;
+        case DXGI_FORMAT_BC1_UNORM:
+        case DXGI_FORMAT_BC1_UNORM_SRGB: tileW = 512; tileH = 256; break;
         case DXGI_FORMAT_BC5_SNORM: tileW = 256; tileH = 256; break;
-        case DXGI_FORMAT_R8G8B8A8_UNORM: tileW = 128; tileH = 128; break;
+        case DXGI_FORMAT_R8G8B8A8_UNORM:
+        case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB: tileW = 128; tileH = 128; break;   // M6j: color
+                                              // is sRGB -- HARDWARE decode, no shader hack
         case DXGI_FORMAT_R16_FLOAT: tileW = 256; tileH = 128; break;   // M6i composed height
         default: GA_CHECK(E_INVALIDARG);
     }

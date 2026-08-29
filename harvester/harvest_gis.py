@@ -154,6 +154,12 @@ def bake_mask(levelled, rows, cols, row_to_lat, lon_to_col, lon_min, lon_max):
                 continue
             r0 = row_of(max(lat0, lat1))
             r1 = row_of(min(lat0, lat1))
+            # GSHHG levels 5/6 are Antarctica's ice front / grounding line: the ice front IS
+            # the coast for a land mask; the grounding line under it would XOR the shelf back
+            # to water. Fold 5 -> land, drop 6.
+            lv = 1 if level == 5 else level
+            if lv == 6:
+                continue
             for r in range(max(r0, 0), min(r1 + 1, rows)):
                 lat = row_lats[r]
                 lo, hi = (lat0, lat1) if lat0 < lat1 else (lat1, lat0)
@@ -161,7 +167,7 @@ def bake_mask(levelled, rows, cols, row_to_lat, lon_to_col, lon_min, lon_max):
                 if not (lo <= lat < hi):
                     continue
                 t = (lat - lat0) / (lat1 - lat0)
-                crossings[r].append((lon0 + (lon1 - lon0) * t, level))
+                crossings[r].append((lon0 + (lon1 - lon0) * t, lv))
     for r in range(rows):
         if not crossings[r]:
             continue

@@ -26,6 +26,10 @@ public:
     void Render(const FrameContext& ctx) override;
 
     float waterNavd = 0.0f;    // current water level in the terrain's datum, set per frame
+    // M6j: when the mesh-shader planet surface is active, this layer keeps its OTHER jobs
+    // (the heightfield texture physics reads, the sea's bed) but stops rendering -- one
+    // planet, one description on screen.
+    bool renderEnabled = true;
     uint32_t HeightSrv() const { return m_tex.srv; }
     GpuTexture& HeightTex() { return m_tex; }   // M5c: the SWE solver reads the bed directly
 

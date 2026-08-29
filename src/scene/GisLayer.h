@@ -10,6 +10,7 @@
 #pragma once
 
 #include "compose/Compositor.h"
+#include "compose/Exchange.h"
 #include "compose/GisStencil.h"
 #include "scene/Layer.h"
 
@@ -19,9 +20,10 @@ namespace ga {
 
 class GisLayer : public Layer {
 public:
-    void Configure(const std::wstring& shaderDir, const GisStencil* gis) {
+    void Configure(const std::wstring& shaderDir, const GisStencil* gis, Exchange* exchange) {
         m_shaderDir = shaderDir;
         m_gis = gis;
+        m_exchange = exchange;
     }
 
     const char* Name() const override { return "gis"; }
@@ -39,17 +41,20 @@ private:
         ComposedSurfaceCb cs;
         float color[4];
     };
+    // Each batch is an EXCHANGE CHANNEL: the polylines publish once as lon/lat segment
+    // buffers (the vector authority), and this layer -- or any other consumer, including an
+    // exporter -- resolves them by name.
     struct Batch {
-        GpuBuffer buf;      // float2 lon/lat, two per segment
-        uint32_t verts = 0;
+        std::string channel;
         float color[4];     // rgb + lift m
     };
     bool BuildPso(Gpu& gpu, ShaderCompiler& sc);
-    static Batch MakeBatch(Gpu& gpu, const std::vector<GisStencil::Polyline>& lines,
-                           const wchar_t* name, float r, float g, float b, float lift);
+    Batch MakeBatch(Gpu& gpu, const std::vector<GisStencil::Polyline>& lines,
+                    const char* channel, float r, float g, float b, float lift);
 
     std::wstring m_shaderDir;
     const GisStencil* m_gis = nullptr;
+    Exchange* m_exchange = nullptr;
     ID3D12RootSignature* m_rootSig = nullptr;
     Com<ID3D12PipelineState> m_pso;
     Batch m_coast, m_rivers, m_global;

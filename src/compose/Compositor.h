@@ -62,11 +62,22 @@ struct SourceInfo {
 // A source answers point queries in lat/lon and returns a WEIGHT: 0 = no coverage here, 1 =
 // full ownership, in between = the paint-time feather at its edges. groundResM is the composed
 // texel's Mercator-equatorial metres-per-texel, so tile-tree sources can pick a zoom level.
+//
+// PaintCtx is PER-TILE, PER-SOURCE state owned by the REALIZATION (sources are shared across
+// worker threads and must stay stateless): BeginTile sees the tile's lat/lon box once and may
+// stash tile-scoped corrections -- the grade-normalization gain lives here.
+struct PaintCtx {
+    float gain[3] = {1.0f, 1.0f, 1.0f};
+};
+
 class ColorSource {
 public:
     virtual ~ColorSource() = default;
     virtual const SourceInfo& Info() const = 0;
-    virtual float Sample(double latRad, double lonRad, double groundResM, uint8_t rgba[4]) = 0;
+    virtual void BeginTile(double, double, double, double, double, PaintCtx&) {}
+    // (latMin, latMax, lonMin, lonMax radians, groundResM)
+    virtual float Sample(double latRad, double lonRad, double groundResM, const PaintCtx& ctx,
+                         uint8_t rgba[4]) = 0;
 };
 
 class HeightSource {
@@ -147,6 +158,11 @@ struct ComposedSurfaceCb {
     float r1[4];
     float r2[4];
 };
+
+// The compositor's --selftest gate (ComposeTest.cpp): paint order, per-pixel weights, alpha,
+// cache identity, transient-never-cached, cube/window addressing vs closed forms, stack-hash
+// isolation. Returns false (and logs FAILs) if any contract is broken.
+bool RunComposeSelfTest();
 
 void FillComposedCb(ComposedSurfaceCb& cb, const ResidencyManager* rm, int colorCube,
                     int window, int heightCube, int heightWindow, double orgPxX,

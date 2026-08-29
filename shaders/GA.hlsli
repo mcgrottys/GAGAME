@@ -67,6 +67,20 @@ float3 RotorApply(float4 R, float3 v) {
     return v + R.x * t + cross(R.yzw, t);
 }
 
+// M6j: PGA motors on the GPU, in the SAME dual-quaternion coordinates as ga::Motor on the CPU
+// (real = (s, r23, r31, r12), dual = (q, t01, t02, t03); conventions pinned by the CPU
+// selftest). A plugin computes motors CPU-side (data organization, physics), publishes them
+// through the Exchange as a GA product buffer, and a shader applies the sandwich here -- the
+// formulas are line-for-line translations of Pga.h TransformPoint/TransformDir, so the two
+// sides cannot drift.
+float3 MotorPoint(float4 re, float4 du, float3 p) {
+    const float3 rotated = RotorApply(re, p);
+    // translation = 2 * Vec(dual * ~real)
+    const float3 t = re.x * du.yzw - du.x * re.yzw - cross(du.yzw, re.yzw);
+    return rotated + 2.0f * t;
+}
+float3 MotorDir(float4 re, float3 d) { return RotorApply(re, d); }
+
 // ** TRAP. ** Hardware bilinear filtering interpolates CHANNELS, not geometric objects. A
 // componentwise lerp of two rotors is not a rotor. Rotor fields must be point-sampled and
 // renormalised, or slerped by hand.

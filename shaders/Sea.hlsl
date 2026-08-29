@@ -300,7 +300,8 @@ float4 PsMain(VsOut i) : SV_Target {
         const bool surveyed =
             gBathyU.x != 0xFFFFFFFFu && all(buv > 0.002f) && all(buv < 0.998f);
         if (!surveyed && ComposedHeightOn() &&
-            ComposedIsLand(SeaPlanetDir(i.worldXZ), gSea.x - depth) && depth < 0.75f) {
+            ComposedIsLand(SeaPlanetDir(i.worldXZ), gSea.x - depth, gSea.x) &&
+            depth < 0.75f) {
             discard;
         }
     }

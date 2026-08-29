@@ -12,7 +12,8 @@ namespace {
 
 constexpr double kPi = 3.14159265358979;
 constexpr double kMercCirc = 40075016.686;   // Web-Mercator world metres (equator)
-constexpr int kComposeVersion = 1;           // bump on any paint-math change: new cache tag
+constexpr int kComposeVersion = 2;           // bump on any paint-math change: new cache tag
+                                             // (v2: per-tile grade normalization)
 
 // Changing a stack (order, membership, version) must never serve stale composed tiles: the
 // hash lands in the cache directory name, so an edit simply starts a fresh folder.
@@ -124,6 +125,26 @@ TileProviderFn Compositor::CubeColor(int channel) {
         const uint32_t faceTexels = kFaceDim >> r.mip;
         const double invFace = 1.0 / faceTexels;
         const double groundRes = kMercCirc / (4.0 * faceTexels);
+        // Tile lat/lon box (corners + centre: a gnomonic tile's extremes live on its edge
+        // midpoints only at the poles, where a loose box is harmless) for BeginTile.
+        double latMin = 10, latMax = -10, lonMin = 10, lonMax = -10;
+        for (int cy = 0; cy < 3; ++cy) {
+            for (int cx = 0; cx < 3; ++cx) {
+                double d[3];
+                ComposeCubeDir(r.face, (r.x * 128.0 + cx * 64.0) * invFace,
+                               (r.y * 128.0 + cy * 64.0) * invFace, d);
+                const double la = std::asin((std::max)(-1.0, (std::min)(1.0, d[1])));
+                const double lo = std::atan2(d[2], d[0]);
+                latMin = (std::min)(latMin, la);
+                latMax = (std::max)(latMax, la);
+                lonMin = (std::min)(lonMin, lo);
+                lonMax = (std::max)(lonMax, lo);
+            }
+        }
+        std::vector<PaintCtx> ctxs(ch.color.size());
+        for (size_t i = 0; i < ch.color.size(); ++i) {
+            ch.color[i]->BeginTile(latMin, latMax, lonMin, lonMax, groundRes, ctxs[i]);
+        }
         out.assign(65536, 0);
         bool complete = true;   // a transient source failure (fetch budget/network) shows as
                                 // a hole THIS run but is never cached: the next run repaints
@@ -138,9 +159,9 @@ TileProviderFn Compositor::CubeColor(int channel) {
                 uint8_t* dst = &out[(py * 128 + px) * 4];
                 float acc[3] = {0, 0, 0};
                 float cover = 0.0f;
-                for (ColorSource* s : ch.color) {   // bottom -> top
+                for (size_t i = 0; i < ch.color.size(); ++i) {   // bottom -> top
                     uint8_t rgba[4];
-                    const float w = s->Sample(lat, lon, groundRes, rgba);
+                    const float w = ch.color[i]->Sample(lat, lon, groundRes, ctxs[i], rgba);
                     if (w < 0.0f) { complete = false; continue; }
                     if (w == 0.0f) continue;
                     for (int c = 0; c < 3; ++c) acc[c] += (rgba[c] - acc[c]) * w;
@@ -177,6 +198,14 @@ TileProviderFn Compositor::WindowColor(int channel, long long orgPxX, long long 
         const double groundRes = kMercCirc / worldPx;
         const long long gx0 = (orgPxX >> r.mip) + static_cast<long long>(r.x) * 128;
         const long long gy0 = (orgPxY >> r.mip) + static_cast<long long>(r.y) * 128;
+        const double lat0 = std::atan(std::sinh(kPi * (1.0 - 2.0 * (gy0 + 128.0) / worldPx)));
+        const double lat1 = std::atan(std::sinh(kPi * (1.0 - 2.0 * gy0 / worldPx)));
+        const double lon0 = (gx0 / worldPx - 0.5) * 2.0 * kPi;
+        const double lon1 = ((gx0 + 128.0) / worldPx - 0.5) * 2.0 * kPi;
+        std::vector<PaintCtx> ctxs(ch.color.size());
+        for (size_t i = 0; i < ch.color.size(); ++i) {
+            ch.color[i]->BeginTile(lat0, lat1, lon0, lon1, groundRes, ctxs[i]);
+        }
         out.assign(65536, 0);
         bool complete = true;
         for (uint32_t py = 0; py < 128; ++py) {
@@ -188,9 +217,9 @@ TileProviderFn Compositor::WindowColor(int channel, long long orgPxX, long long 
                 uint8_t* dst = &out[(py * 128 + px) * 4];
                 float acc[3] = {0, 0, 0};
                 float cover = 0.0f;
-                for (ColorSource* s : ch.color) {
+                for (size_t i = 0; i < ch.color.size(); ++i) {
                     uint8_t rgba[4];
-                    const float w = s->Sample(lat, lon, groundRes, rgba);
+                    const float w = ch.color[i]->Sample(lat, lon, groundRes, ctxs[i], rgba);
                     if (w < 0.0f) { complete = false; continue; }
                     if (w == 0.0f) continue;
                     for (int c = 0; c < 3; ++c) acc[c] += (rgba[c] - acc[c]) * w;

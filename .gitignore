@@ -22,3 +22,8 @@ GeoAlgFun/
 
 # Local API keys and the 3 GB Mars pyramids (data/ already covers them, but be explicit).
 secrets/
+
+# composed-channel exports (--export artifacts)
+*.obj
+*.raw
+merrimack_*.png

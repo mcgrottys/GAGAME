@@ -39,6 +39,21 @@ void GlobeLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSignatu
     if (!m_globe || !m_globe->Ready()) throw std::runtime_error("GlobeLayer needs globe data");
     if (!BuildPso(gpu, sc)) throw std::runtime_error("globe PSO failed");
 
+    // M6j: the unified mesh-shader surface (orbit to helm, one pipeline). Falls back to the
+    // classic VS path -- and the terrain layer -- if the device or compile says no.
+    if (msSurface && BuildMeshPso(gpu, sc)) {
+        for (uint32_t i = 0; i < Gpu::kFrameCount; ++i) {
+            m_recBuf[i] = gpu.CreateUploadBuffer(
+                static_cast<uint64_t>(kMaxMeshlets) * sizeof(MeshletRec),
+                L"globe.meshlets (per-frame records)");
+        }
+        m_msPath = true;
+        Log("[globe] mesh-shader surface ACTIVE (unified orbit-to-helm; terrain layer "
+            "retires as a renderer)");
+    } else if (msSurface) {
+        Log("[globe] mesh-shader surface unavailable; classic VS path + terrain layer");
+    }
+
     // M6i: no committed relief texture any more -- the composed height cube (ETOPO + NE 15s +
     // CUDEM, or MOLA) streams the same data through the residency manager, painted once and
     // cached. The CPU-side equirect grid stays in GlobeModel for picking and camera clamps.
@@ -483,6 +498,71 @@ bool GlobeLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
 
 void GlobeLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
     BuildPso(gpu, sc);
+    if (m_msPath) BuildMeshPso(gpu, sc);
+}
+
+// The mesh PSO rides the subobject STREAM (no d3dx12 in this repo): every subobject is
+// { type, payload }, each aligned to a pointer boundary -- exactly what the runtime parses.
+namespace {
+template <typename T, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE Tag>
+struct alignas(void*) StreamSub {
+    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type = Tag;
+    T val{};
+};
+}  // namespace
+
+bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
+    Com<ID3D12Device2> dev2;
+    if (FAILED(gpu.Device()->QueryInterface(IID_PPV_ARGS(&dev2)))) return false;
+    D3D12_FEATURE_DATA_D3D12_OPTIONS7 o7{};
+    if (FAILED(gpu.Device()->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &o7,
+                                                 sizeof(o7))) ||
+        o7.MeshShaderTier == D3D12_MESH_SHADER_TIER_NOT_SUPPORTED) {
+        return false;
+    }
+    const std::wstring path = m_shaderDir + L"/GlobeMesh.hlsl";
+    ShaderBlob ms = sc.Compile(path, L"MsMain", L"ms_6_5");
+    ShaderBlob ps = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"PsMain", L"ps_6_5");
+    if (!ms.Valid() || !ps.Valid()) return false;
+
+    struct {
+        StreamSub<ID3D12RootSignature*, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE> rs;
+        StreamSub<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS> ms;
+        StreamSub<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS> ps;
+        StreamSub<D3D12_BLEND_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND> blend;
+        StreamSub<UINT, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK> mask;
+        StreamSub<D3D12_RASTERIZER_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER> rast;
+        StreamSub<D3D12_DEPTH_STENCIL_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL>
+            ds;
+        StreamSub<DXGI_FORMAT, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT> dsv;
+        StreamSub<D3D12_RT_FORMAT_ARRAY, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS>
+            rtv;
+        StreamSub<DXGI_SAMPLE_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC> sample;
+    } stream;
+    stream.rs.val = m_rootSig;
+    stream.ms.val = {ms.Data(), ms.Size()};
+    stream.ps.val = {ps.Data(), ps.Size()};
+    stream.blend.val.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    stream.mask.val = UINT_MAX;
+    stream.rast.val.FillMode = D3D12_FILL_MODE_SOLID;
+    stream.rast.val.CullMode = D3D12_CULL_MODE_NONE;   // cube faces mix winding
+    stream.rast.val.DepthClipEnable = TRUE;
+    stream.ds.val.DepthEnable = TRUE;
+    stream.ds.val.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+    stream.ds.val.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;   // reversed-Z
+    stream.dsv.val = DXGI_FORMAT_D32_FLOAT;
+    stream.rtv.val.NumRenderTargets = 1;
+    stream.rtv.val.RTFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    stream.sample.val = {1, 0};
+
+    D3D12_PIPELINE_STATE_STREAM_DESC sd{sizeof(stream), &stream};
+    Com<ID3D12PipelineState> pso;
+    if (FAILED(dev2->CreatePipelineState(&sd, IID_PPV_ARGS(&pso)))) {
+        Log("[globe] mesh PSO creation failed");
+        return false;
+    }
+    m_msPso = pso;
+    return true;
 }
 
 void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double size) {
@@ -522,7 +602,10 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
         if (d < -radius) return;
     }
 
-    if (level < kMaxDepth && dist < arc * kLodFactor) {
+    // M6j: the mesh path walks all the way to CUDEM scale (level 16 = 4.75 m vertex spacing);
+    // the fallback VS path keeps its classic depth (the terrain layer covers the near field).
+    const int maxDepth = m_msPath ? 16 : kMaxDepth;
+    if (level < maxDepth && dist < arc * kLodFactor) {
         const double h = size * 0.5;
         SelectNode(face, level + 1, u0, v0, h);
         SelectNode(face, level + 1, u0 + h, v0, h);
@@ -602,17 +685,86 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
     }
     if (m_predictPass) return;   // prefetch walk: wants only, no draw nodes
 
+    // Per-LEVEL morph ramp (identical on both sides of every seam = crack-free): fade this LOD
+    // out across the band where its parent would still be split.
+    const float morphStart = static_cast<float>(arc * kLodFactor * 1.35);
+    const float morphEnd = static_cast<float>(arc * kLodFactor * 1.95);
+    if (m_msPath) {
+        EmitMeshlets(face, u0, v0, size, arc, morphStart, morphEnd);
+        return;
+    }
     NodeData nd{};
     nd.uv0[0] = static_cast<float>(u0);
     nd.uv0[1] = static_cast<float>(v0);
     nd.uvStep[0] = static_cast<float>(size / 32.0);
     nd.uvStep[1] = static_cast<float>(size / 32.0);
     nd.face = static_cast<uint32_t>(face);
-    // Per-LEVEL morph ramp (identical on both sides of every seam = crack-free): fade this LOD
-    // out across the band where its parent would still be split.
-    nd.morphStart = static_cast<float>(arc * kLodFactor * 1.35);
-    nd.morphEnd = static_cast<float>(arc * kLodFactor * 1.95);
+    nd.morphStart = morphStart;
+    nd.morphEnd = morphEnd;
     m_nodes.push_back(nd);
+}
+
+// M6j: one leaf -> 16 mesh-shader records (4x4 sub-meshlets of 8x8 cells). Fine meshlets
+// (arc <= 650 m) get a DOUBLE-precision camera-relative anchor + the position Jacobian, so
+// vertices reconstruct from small numbers only -- the float wall the estuary layers dodged by
+// staying flat falls here, and the one surface reaches walking height.
+void GlobeLayer::EmitMeshlets(int face, double u0, double v0, double size, double arc,
+                              float morphStart, float morphEnd) {
+    if (m_meshlets.size() + 16 > kMaxMeshlets) return;
+    const double R = m_radius;
+    const double step = size / 32.0;
+    auto tangent = [&](const double d[3], double out[3]) {
+        const double px = d[0] * R, py = d[1] * R, pz = d[2] * R;
+        out[0] = m_frameE[0] * px + m_frameE[1] * py + m_frameE[2] * pz;
+        out[1] = m_frameU[0] * px + m_frameU[1] * py + m_frameU[2] * pz - R;
+        out[2] = m_frameN[0] * px + m_frameN[1] * py + m_frameN[2] * pz;
+    };
+    for (int my = 0; my < 4; ++my) {
+        for (int mx = 0; mx < 4; ++mx) {
+            MeshletRec rec{};
+            rec.uv0[0] = static_cast<float>(u0);
+            rec.uv0[1] = static_cast<float>(v0);
+            rec.uvStepCell[0] = static_cast<float>(step);
+            rec.uvStepCell[1] = static_cast<float>(step);
+            rec.face = static_cast<uint32_t>(face);
+            rec.cell0 = static_cast<uint32_t>(mx * 8) | (static_cast<uint32_t>(my * 8) << 8);
+            rec.morphStart = morphStart;
+            rec.morphEnd = morphEnd;
+            rec.arc = static_cast<float>(arc);
+            const double cu = u0 + (mx * 8 + 4) * step;
+            const double cv = v0 + (my * 8 + 4) * step;
+            double dc[3], tc[3];
+            CubeDirD(face, cu, cv, dc);
+            tangent(dc, tc);
+            rec.anchorRel[0] = static_cast<float>(tc[0] - m_camPos[0]);
+            rec.anchorRel[1] = static_cast<float>(tc[1] - m_camPos[1]);
+            rec.anchorRel[2] = static_cast<float>(tc[2] - m_camPos[2]);
+            // Jacobian by central difference in doubles; per face-uv UNIT.
+            const double e = (std::max)(step * 0.25, 1e-7);
+            double dA[3], dB[3], tA[3], tB[3];
+            CubeDirD(face, cu + e, cv, dA);
+            CubeDirD(face, cu - e, cv, dB);
+            tangent(dA, tA);
+            tangent(dB, tB);
+            for (int i = 0; i < 3; ++i) {
+                rec.dPdu[i] = static_cast<float>((tA[i] - tB[i]) / (2.0 * e));
+            }
+            CubeDirD(face, cu, cv + e, dA);
+            CubeDirD(face, cu, cv - e, dB);
+            tangent(dA, tA);
+            tangent(dB, tB);
+            for (int i = 0; i < 3; ++i) {
+                rec.dPdv[i] = static_cast<float>((tA[i] - tB[i]) / (2.0 * e));
+            }
+            rec.upT[0] = static_cast<float>(m_frameE[0] * dc[0] + m_frameE[1] * dc[1] +
+                                            m_frameE[2] * dc[2]);
+            rec.upT[1] = static_cast<float>(m_frameU[0] * dc[0] + m_frameU[1] * dc[1] +
+                                            m_frameU[2] * dc[2]);
+            rec.upT[2] = static_cast<float>(m_frameN[0] * dc[0] + m_frameN[1] * dc[1] +
+                                            m_frameN[2] * dc[2]);
+            m_meshlets.push_back(rec);
+        }
+    }
 }
 
 // M6e screw-prefetch: the same walk under the PREDICTED pose, emitting predicted wants only.
@@ -672,6 +824,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_planeCount = 5;
 
     m_nodes.clear();
+    m_meshlets.clear();
     for (int f = 0; f < 6; ++f) SelectNode(f, 0, 0.0, 0.0, 1.0);
 
     const double r = std::sqrt(m_camPos[0] * m_camPos[0] + m_camPos[1] * m_camPos[1] +
@@ -700,7 +853,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.wavesB[0] = static_cast<float>(m_globe->WavesNx());
     m_cb.wavesB[1] = static_cast<float>(m_globe->WavesNy());
     m_cb.wavesB[2] = cam.fovY / (std::max)(m_viewportH, 1.0f);   // pixel angular size
-    m_cb.wavesB[3] = 0.0f;
+    m_cb.wavesB[3] = waterNavd;   // M6j: the live waterline for the close-up material model
     m_cb.texIdx[3] = m_cloudReady ? m_cloud.Srv() : UINT32_MAX;
     m_cb.cloudA[0] = 2.4e-3f;      // extinction /m at density 1 (stratiform-effective)
     m_cb.cloudA[1] = kShellTopM;
@@ -752,14 +905,19 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     // (M6h: the M6b destination beacon is fully retired -- row and shader block deleted.)
 
     char s[96];
-    snprintf(s, sizeof(s), "globe %zu nodes  alt %.0f km", m_nodes.size(),
-             (r - m_radius) / 1000.0);
+    if (m_msPath) {
+        snprintf(s, sizeof(s), "globe %zu meshlets (MS)  alt %.0f km", m_meshlets.size(),
+                 (r - m_radius) / 1000.0);
+    } else {
+        snprintf(s, sizeof(s), "globe %zu nodes  alt %.0f km", m_nodes.size(),
+                 (r - m_radius) / 1000.0);
+    }
     stats = s;
     if (m_res) stats += "  " + m_res->stats;
 }
 
 void GlobeLayer::Render(const FrameContext& ctx) {
-    if (!m_pso || m_nodes.empty()) return;
+    if (!m_pso || (m_nodes.empty() && m_meshlets.empty())) return;
     PixScope scope(ctx.cl, "globe (atmosphere shell + quad-sphere CDLOD + sparse cloud volume)");
 
     // M6e: the residency manager's per-frame turn -- loads started, budgeted tiles mapped and
@@ -780,6 +938,22 @@ void GlobeLayer::Render(const FrameContext& ctx) {
     }
 
     // 2) The surface (which marches the sparse cloud bank on its way down).
+    if (m_msPath && m_msPso && !m_meshlets.empty()) {
+        // M6j: the unified surface -- meshlet records ride a frame-indexed upload buffer,
+        // one DispatchMesh amplifies them from the composed channels.
+        if (!m_cl6 && FAILED(ctx.cl->QueryInterface(IID_PPV_ARGS(&m_cl6)))) {
+            m_msPath = false;
+            return;
+        }
+        GpuBuffer& rec = m_recBuf[ctx.gpu->FrameIndex()];
+        const size_t bytes = m_meshlets.size() * sizeof(MeshletRec);
+        memcpy(rec.cpu, m_meshlets.data(), bytes);
+        ctx.cl->SetPipelineState(m_msPso.Get());
+        ctx.cl->SetGraphicsRootConstantBufferView(1, cbVa);
+        ctx.cl->SetGraphicsRootShaderResourceView(2, rec.res->GetGPUVirtualAddress());
+        m_cl6->DispatchMesh(static_cast<UINT>(m_meshlets.size()), 1, 1);
+        return;
+    }
     ctx.cl->SetPipelineState(m_pso.Get());
     ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx.cl->SetGraphicsRootConstantBufferView(1, cbVa);

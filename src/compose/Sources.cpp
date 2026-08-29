@@ -49,14 +49,16 @@ GoogleColorSource::GoogleColorSource(GoogleTileProvider* prov) : m_prov(prov) {
               955.0 /* z14 politeness cap at the equator */, -180, -85, 180, 85};
 }
 
-float GoogleColorSource::Sample(double latRad, double lonRad, double groundResM,
-                                uint8_t rgba[4]) {
-    if (!m_prov || !m_prov->Ready()) return 0.0f;
-    // Zoom from the requested footprint: z such that Mercator metres/px matches groundResM.
-    // Capped at 14 -- deeper zooms are a budget decision a REALIZATION makes by asking for a
-    // finer groundRes only inside a window it owns; the global cube can never demand them.
-    const int z = std::clamp(
-        static_cast<int>(std::lround(std::log2(kMercCirc / (256.0 * groundResM)))), 0, 14);
+// Zoom from the requested footprint: z such that Mercator metres/px matches groundResM.
+// Capped at 14 -- deeper zooms are a budget decision a REALIZATION makes by asking for a
+// finer groundRes only inside a window it owns; the global cube can never demand them.
+static int ZoomFor(double groundResM) {
+    constexpr double kCirc = 40075016.686;
+    return std::clamp(static_cast<int>(std::lround(std::log2(kCirc / (256.0 * groundResM)))),
+                      0, 14);
+}
+
+bool GoogleColorSource::Pixel(int z, double latRad, double lonRad, uint8_t rgb[3]) {
     const double n = static_cast<double>(1u << z) * 256.0;
     const double latC = std::clamp(latRad, -1.4844, 1.4844);   // Mercator band; poles clamp
     const double mx = (lonRad / kPi * 0.5 + 0.5) * n;
@@ -64,11 +66,58 @@ float GoogleColorSource::Sample(double latRad, double lonRad, double groundResM,
     const int gx = std::clamp(static_cast<int>(mx), 0, static_cast<int>(n) - 1);
     const int gy = std::clamp(static_cast<int>(my), 0, static_cast<int>(n) - 1);
     const auto tile = m_prov->Decoded(z, gx / 256, gy / 256);
-    if (!tile) return -1.0f;   // TRANSIENT: coverage exists, fetch failed -- do not cache
+    if (!tile) return false;
     const uint8_t* s = &(*tile)[((gy & 255) * 256 + (gx & 255)) * 4];
-    rgba[0] = s[0];
-    rgba[1] = s[1];
-    rgba[2] = s[2];
+    rgb[0] = s[0];
+    rgb[1] = s[1];
+    rgb[2] = s[2];
+    return true;
+}
+
+void GoogleColorSource::BeginTile(double latMin, double latMax, double lonMin, double lonMax,
+                                  double groundResM, PaintCtx& ctx) {
+    if (!m_prov || !m_prov->Ready()) return;
+    const int z = ZoomFor(groundResM);
+    // Grade normalization: mean color of this zoom vs ONE ABSOLUTE REFERENCE zoom (z10) over
+    // a sparse grid of the tile footprint, so every deep zoom shares a single grading and
+    // resident-mip boundaries stop being color steps. (Normalizing to the immediate parent
+    // would only SHIFT the step down a level -- the reference must be common.) Clamped so a
+    // real land-cover change cannot over-drive the correction.
+    if (z <= 10) return;
+    const int zr = 10;
+    double sumC[3] = {0, 0, 0}, sumP[3] = {0, 0, 0};
+    int n = 0;
+    for (int gy = 0; gy < 5; ++gy) {
+        for (int gx = 0; gx < 5; ++gx) {
+            const double lat = latMin + (latMax - latMin) * (gy + 0.5) / 5.0;
+            const double lon = lonMin + (lonMax - lonMin) * (gx + 0.5) / 5.0;
+            uint8_t c[3], p[3];
+            if (!Pixel(z, lat, lon, c) || !Pixel(zr, lat, lon, p)) continue;
+            for (int k = 0; k < 3; ++k) {
+                sumC[k] += c[k];
+                sumP[k] += p[k];
+            }
+            ++n;
+        }
+    }
+    if (n < 8) return;
+    for (int k = 0; k < 3; ++k) {
+        ctx.gain[k] = static_cast<float>(
+            std::clamp((sumP[k] + 4.0) / (sumC[k] + 4.0), 0.75, 1.35));
+    }
+}
+
+float GoogleColorSource::Sample(double latRad, double lonRad, double groundResM,
+                                const PaintCtx& ctx, uint8_t rgba[4]) {
+    if (!m_prov || !m_prov->Ready()) return 0.0f;
+    uint8_t rgb[3];
+    if (!Pixel(ZoomFor(groundResM), latRad, lonRad, rgb)) {
+        return -1.0f;   // TRANSIENT: coverage exists, fetch failed -- do not cache
+    }
+    for (int k = 0; k < 3; ++k) {
+        rgba[k] = static_cast<uint8_t>(
+            (std::min)(255.0f, static_cast<float>(rgb[k]) * ctx.gain[k]));
+    }
     rgba[3] = 255;
     return 1.0f;
 }

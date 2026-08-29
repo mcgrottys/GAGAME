@@ -38,7 +38,10 @@ float2 CsWindowUv(float3 dir) {
 // BILINEAR so mip seams ramp instead of snapping (M6h); the window overlay feathers over the
 // cube across 6% of its span AND rides its own per-texel ALPHA -- a texel the paint did not
 // cover keeps the cube underneath, pixel by pixel, never tile by tile.
-// Returned LINEAR (one sRGB-ish lift, applied here and only here).
+// M6j: the tenants are *_SRGB now -- the HARDWARE decodes to linear exactly (the old
+// img*img*1.2 curve hack is gone; the user called the conversion, and the user was right).
+// One LINEAR exposure constant remains: display-referred mosaics sit darker than the scene
+// lighting expects, and scaling exposure is honest where bending the curve was not.
 float3 ComposedColor(float3 dir) {
     float3 c = float3(0.5f, 0.5f, 0.5f);
     if (gCsF.x > 0.5f) {
@@ -56,7 +59,7 @@ float3 ComposedColor(float3 dir) {
             c = lerp(c, w.rgb, fe.x * fe.y * w.a);
         }
     }
-    return c * c * 1.2f;
+    return c * 1.35f;
 }
 bool ComposedColorOn() { return gCsF.x > 0.5f; }
 
@@ -103,17 +106,17 @@ float ComposedLandMask(float3 dir) {
     return -1.0f;
 }
 
-// THE land/sea classifier: survey polygons decide by default; the height channel refines only
-// where fine height truth exists (inside the z14 window: tidal creeks the 38 m mask cannot
-// see, flats the survey calls land that the tide covers). No mask -> height sign, as before.
-bool ComposedIsLand(float3 dir, float hp) {
+// THE land/sea classifier: survey polygons decide by default; inside the fine z14 window the
+// height channel takes over COMPLETELY against the LIVE waterline -- tidal flats emerge and
+// drown with the actual tide, which no static survey polygon can know. No mask, no window ->
+// height sign vs the waterline (Mars: waterLevel 0).
+bool ComposedIsLand(float3 dir, float hp, float waterLevel) {
     const float lm = ComposedLandMask(dir);
-    bool land = (lm >= 0.0f) ? (lm > 0.5f) : (hp > 0.0f);
+    bool land = (lm >= 0.0f) ? (lm > 0.5f) : (hp > waterLevel);
     if (gCsU2.z != 0xFFFFFFFFu) {
         const float2 duv = CsWindowUv(dir);
         if (all(duv > 0.0f) && all(duv < 1.0f)) {
-            if (hp < -0.6f) land = false;
-            if (hp > 2.5f) land = true;
+            land = hp > waterLevel + 0.05f;
         }
     }
     return land;

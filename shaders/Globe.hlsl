@@ -64,6 +64,7 @@ float2 StreamedSampleRg(uint texSrv, uint mapSrv, float3 dir) {
     return gTexCube[texSrv].SampleLevel(sLinearClamp, dir, max(want, have)).rg;
 }
 
+#ifndef GA_MESH_PATH
 struct GlobeNode {      // mirrors GlobeLayer::NodeData
     float2 uv0;         // face-uv rect origin
     float2 uvStep;      // face-uv per grid CELL (rect size / 32)
@@ -73,6 +74,7 @@ struct GlobeNode {      // mirrors GlobeLayer::NodeData
     float pad;
 };
 StructuredBuffer<GlobeNode> gNodes : register(t0, space0);
+#endif
 
 static const uint kGrid = 32;
 static const float kPi = 3.14159265358979f;
@@ -108,6 +110,7 @@ struct VsOut {
     float  h   : TEXCOORD2;    // relief metres (negative = ocean floor)
 };
 
+#ifndef GA_MESH_PATH
 VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
     const GlobeNode nd = gNodes[inst];
     const uint quad = vid / 6u;
@@ -158,6 +161,7 @@ VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
     o.pos = mul(float4(o.rel, 1.0f), gViewProj);
     return o;
 }
+#endif  // GA_MESH_PATH
 
 // ------------------------------------------------------------------ pixel
 
@@ -196,17 +200,17 @@ float4 PsMain(VsOut i) : SV_Target {
     // in the estuary window -- gating on it smeared whole towns below sea level. hp is what
     // the data says HERE, at this pixel's own resolution.
     const float hp = ComposedHeightOn() ? ComposedHeight(up, lod) : i.h;
-    // M6i: classification by SURVEY (the GIS land-mask realization), refined by fine heights;
-    // height-sign alone only where no mask exists (Mars).
-    const bool isLand = ComposedIsLand(up, hp);
+    // M6i/M6j: classification by SURVEY far afield, by fine heights vs the LIVE waterline in
+    // the window; height-sign alone where no mask exists (Mars).
+    const bool isLand = ComposedIsLand(up, hp, gWavesB.w);
     float3 n = upT;
     float3 alb;
     float spec = 0.0f;
     if (gStreamF.z > 0.5f) {
         // MARS: the rescued sample pyramids ARE the planet -- residency-clamped diffuse +
         // BC5 surface normals in the local ENU frame.
-        alb = StreamedSample(gStreamU.x, gStreamU.z, up);
-        alb = alb * alb * 1.1f;   // sRGB-ish to linear
+        alb = StreamedSample(gStreamU.x, gStreamU.z, up) * 1.3f;   // M6j: BC1_SRGB decodes in
+                                                                   // hardware; linear lift only
         if (gStreamF.y > 0.5f) {
             const float2 nxy = StreamedSampleRg(gStreamU.y, gStreamU.w, up);   // SNORM -1..1
             n = normalize(upT + east * nxy.x * 1.2f + north * nxy.y * 1.2f);
@@ -271,6 +275,34 @@ float4 PsMain(VsOut i) : SV_Target {
     float3 col = alb * (0.030f + ndl * SUN_IRR_C * 1.15f);
     col += spec * SUN_IRR_C * 0.85f * (1.0f - overhead);
     col += alb * float3(0.010f, 0.014f, 0.028f) * (1.0f - day);   // moonlit-blue night side
+
+    // ---- M6j: the CLOSE-UP material model, now in the planet shader -- wet sand at the LIVE
+    // waterline, dunes, riprap on steep rock, lit the way the terrain layer lit them (sun +
+    // sky ambient + near haze). This block is what let TerrainLayer retire as a renderer:
+    // physics that a mosaic cannot know owns the last few hundred metres, the mosaic owns the
+    // aerial, and the crossfade between them is the ONE distance ramp.
+    const float distC = length(i.rel);
+    if (gStreamF.z < 0.5f && isLand && distC < 2700.0f && gCsU2.z != 0xFFFFFFFFu) {
+        const float2 wuv = CsWindowUv(up);
+        if (all(wuv > 0.0f) && all(wuv < 1.0f)) {
+            const float2 grF = ComposedHeightGrad(up, -8.0f);   // true slope, finest resident
+            const float slope = length(grF);
+            const float3 nM = normalize(upT - east * grF.x - north * grF.y);
+            const float water = gWavesB.w;
+            float3 matAlb;
+            if (hp - water < 0.35f) matAlb = float3(0.38f, 0.34f, 0.27f);   // wet sand band
+            else if (hp < 3.6f) matAlb = float3(0.70f, 0.64f, 0.50f);       // beach and flats
+            else matAlb = float3(0.28f, 0.37f, 0.20f);                      // dune grass
+            if (slope > 0.42f && hp > water - 1.5f) {
+                matAlb = lerp(matAlb, float3(0.36f, 0.35f, 0.34f),
+                              saturate((slope - 0.42f) * 3.0f));            // riprap
+            }
+            const float ndlM = saturate(dot(nM, gSunDir.xyz));
+            float3 colNear = matAlb * (SUN_IRR_C * ndlM + SkyRadiance(nM.y) * 0.55f);
+            colNear = AerialPerspective(colNear, normalize(i.rel), distC);
+            col = lerp(col, colNear, (1.0f - saturate((distC - 500.0f) / 2200.0f)) * 0.92f);
+        }
+    }
 
     // ...and a short march through the volume bank renders the clouds themselves. NULL tiles
     // read zero: over clear air every sample is the hardware's answer, not a branch's.

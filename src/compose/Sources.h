@@ -23,13 +23,20 @@ class GoogleTileProvider;
 // Web-Mercator session tiles, resolved per query: the zoom is picked from the requested
 // metres-per-texel (capped at z14 -- deeper zooms stay a deliberate, budgeted choice), the
 // pixel is a nearest copy so a Mercator-aligned realization degenerates to exact pixel moves.
+// BeginTile computes a per-tile GRADE gain (mean color of this zoom vs its parent zoom over
+// the same footprint): each level inherits the grading of its ancestors, so resident-mip
+// boundaries stop being color-grade seams -- normalization at PAINT time, never at render.
 class GoogleColorSource : public ColorSource {
 public:
     explicit GoogleColorSource(GoogleTileProvider* prov);
     const SourceInfo& Info() const override { return m_info; }
-    float Sample(double latRad, double lonRad, double groundResM, uint8_t rgba[4]) override;
+    void BeginTile(double latMin, double latMax, double lonMin, double lonMax,
+                   double groundResM, PaintCtx& ctx) override;
+    float Sample(double latRad, double lonRad, double groundResM, const PaintCtx& ctx,
+                 uint8_t rgba[4]) override;
 
 private:
+    bool Pixel(int z, double latRad, double lonRad, uint8_t rgb[3]);
     GoogleTileProvider* m_prov;
     SourceInfo m_info;
 };

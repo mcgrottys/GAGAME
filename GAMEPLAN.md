@@ -374,21 +374,85 @@ startup so a reflection can never impersonate a rotation again. Lesson recorded:
 is built from crosses, assert its determinant** — a versor sanity check PGA would have given us
 for free had the basis been constructed as a motor.
 
-**Deferred / next:**
-- **Grade normalization as a compositor layer**: Google's per-zoom color grading shows as
-  banding between resident-mip regions; fix at PAINT time (histogram/gain matching between
-  zoom levels — the first "fun raster-kernel" layer, and a natural GA toy: color ops as rotors
-  in a chromaticity algebra).
+**Deferred / next (see §14 for what M6j closed):**
 - **DirectStorage** for the composed-tile folder (the layout is already right).
 - **water / air channels** through the same registry (SWE eta and the cloud bank become
   channel realizations; sudden weather updates = a new stack version = a fresh cache folder).
 - **Octrees**: the 3-D banks join the compositor the way the quadtrees did.
-- **The mesh-shader unification (user call, the endgame)**: one planet surface pipeline where
-  mesh shaders amplify geometry straight from the composed height tiles (tier confirmed on
-  this GPU), and TerrainLayer stops existing as a separate description of the same Earth. The
-  height-window realization is the prerequisite and now exists; the SWE solver can read the
-  same window the renderer streams (concurrent read/write is the design constraint to carry).
 - **Shoreline upgrade path**: GSHHG f (~100 m fidelity) → NOAA CUSP where finer survey truth
   is wanted; the registry makes that a one-line stack swap.
-- Antarctica's grounding-line levels (5/6) are folded crudely into the global mask; irrelevant
-  to the estuary, noted for honesty.
+
+## 14. M6j (2026-08-29): trust, utility, plugins — and the unified mesh-shader surface
+
+The user's directive: clear the backlogs FIRST (skipping prep states has cost debugging loops
+before), make the manager trustworthy AND useful enough to serve as the data interface — for
+exports, for physics, for plugins — then build the unification on it.
+
+**Backlog triage (every item accounted for):**
+- DONE **compositor selftest gate** (`RunComposeSelfTest`, in --selftest beside pga/tile/atlas):
+  paint order, per-pixel weights, alpha, transient-never-cached, cache byte-identity, cube AND
+  window addressing vs closed forms, stack-hash isolation.
+- DONE **--export**: any composed channel, pulled through the exact provider path the renderer
+  streams, as .png / .raw / .obj (`--export earth.height.window:4 out.obj` hands you the same
+  tiles the mesh shaders eat as a 1 M-vert inspectable mesh; a 4096² window PNG of the whole
+  NH-coast-to-Boston footprint exports offline from a warmed cache). Seed of the manager-as-MCP
+  idea.
+- DONE **the color "grading" question — the user was right to challenge it.** Measured with
+  ffmpeg straight off the cached JPEGs (no engine code in the path): same-footprint luma across
+  z12→z14 differs only ~2.5%. The loud banding had been OUR bugs (terrain lighting fork, VS
+  classification smear — both fixed in M6i). The real conversion sin found instead: sRGB JPEG
+  bytes stored in linear UNORM + a hand-tuned img*img*1.2 curve hack. Now: *_SRGB formats
+  decode in HARDWARE (Google RGBA8 + Mars BC1), the curve hack is deleted, one linear exposure
+  constant remains. Grade normalization survives only as a clamped per-tile trim against an
+  absolute z10 reference (BeginTile/PaintCtx — sources stay stateless across worker threads).
+- DONE Antarctica mask levels (5=ice front→land, 6=grounding→dropped).
+- DONE Mars face-orientation calibration (was the M6g reflection), committed-relief retirement,
+  anisotropic residency-map fix (all landed M6i).
+- DEFERRED, explicitly: **Flather west boundary + per-axis metric** (top SOLVER leg — physics
+  formulation, orthogonal to the manager; unchanged design in §... the M6d diagnosis),
+  z15/16 imagery rings (budget policy), WinPixEventRuntime, ephemeris sun, DirectStorage,
+  CUSP, octrees, wavelets/bore/M7. M6f's 594-vs-334 fetch question is OBSOLETE (that code
+  path no longer exists; the composed cache changed the flow).
+
+**The Exchange (`src/compose/Exchange.h`) — the plugin bus.** Named, versioned GPU buffer
+channels with DECLARED layouts: stride + a grade-signature byte (the atlas's Cl bits) + a
+human semantic. Producers Publish, consumers Query BY NAME — the buffer sibling of "earth
+color is earth color". Two plugins prove it end to end:
+- the GIS vectors publish as `gis.coast.ne` / `gis.rivers.ne` / `gis.coast.global`
+  (lonlat line-lists) and GisLayer renders whatever the channels hold;
+- `markers.stations`: the CPU builds one **PGA motor** per tide station (Pga.h — placement =
+  data organization, the CPU's job), publishes {motor dq8, scale, color} as a GA product
+  buffer, and Markers.hlsl applies the SAME sandwich on the GPU (GA.hlsli MotorPoint/MotorDir,
+  line-for-line translations of the selftest-pinned CPU formulas). CPU-GA organizes → Exchange
+  carries → GPU-GA renders: exactly the socket the user's physics plugins will drive with
+  mesh/vertex buffers inside larger GA product buffers.
+
+**The unified mesh-shader surface (`GlobeMesh.hlsl`, tier confirmed).** One pipeline, orbit to
+helm, both planets; TerrainLayer keeps the physics heightfield but stops rendering. The CPU
+CDLOD walk (still the residency feedback) deepens to level 16 (4.75 m vertices) and emits one
+record per 8×8-cell meshlet; DispatchMesh amplifies them from the composed channels at
+CONTINUOUS lod. **How the float wall fell:** fine meshlets (arc ≤ 650 m) carry a double-
+precision camera-relative anchor + the position Jacobian; vertices reconstruct as
+anchor + J·Δuv with Δuv from small integer cell offsets — no 6.4e6-magnitude float subtraction,
+millimetre-stable at walking height (linearization error at 650 m span ≈ 3 cm). Coarse
+meshlets keep the classic exact-float path (their ≥2 km viewing distance hides the ~0.6 m dir
+jitter). The close-up material model (wet sand at the LIVE waterline, riprap by slope) moved
+into the planet shader, fed by `waterNavd` per frame.
+
+**Two hard-won rules from the bring-up (stencil-diagnosed, baseline-compared):**
+1. *Water-classified geometry rides ~2 m BELOW the live waterline, never at the geoid.* At low
+   tide the geoid stands PROUD of the real sea; without the (now unnecessary) foundation sink
+   the globe's water plane buried the FFT surface. Classification itself follows
+   `ComposedIsLand(dir, h, waterLevel)`: survey mask far afield, fine heights vs the LIVE tide
+   inside the window (flats emerge and drown with the actual tide — no static polygon knows
+   that), height sign on Mars.
+2. *Vertex heights near the camera sample the FINEST RESIDENT data — the same the per-pixel
+   classifier reads* — or geometry and classification disagree into vertex-land/pixel-water
+   plates; and the CDLOD morph must blend the height SOURCE along with the grid.
+   (Also learned: compare against the --no-ms baseline before chasing "artifacts" — the glassy
+   sheet over the bar is the sea's honest dry-guard, present in both paths.)
+
+**Perf:** helm 5.5 ms (vs 1.8 ms classic — no meshlet culling yet), 8 km 2.7 ms, orbit 1.2 ms,
+Mars 0.2 ms. Next optimization: an amplification-shader pass for per-meshlet frustum/backface
+culling, and meshlet count tuning. Then: physics reading the height WINDOW the renderer
+streams (concurrent read/write), Flather, and the water/air channels.

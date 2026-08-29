@@ -81,7 +81,7 @@ void TerrainLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
 }
 
 void TerrainLayer::Render(const FrameContext& ctx) {
-    if (!m_pso) return;
+    if (!m_pso || !renderEnabled) return;
     PixScope scope(ctx.cl, "terrain (CUDEM topobathy at true scale)");
 
     TerrainCbData cb{};

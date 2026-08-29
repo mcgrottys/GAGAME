@@ -20,12 +20,14 @@
 #include "scene/FieldSet.h"
 #include "scene/GisLayer.h"
 #include "scene/GlobeLayer.h"
+#include "scene/MarkerLayer.h"
 #include "scene/GulfLayer.h"
 #include "scene/SeaLayer.h"
 #include "scene/SkyLayer.h"
 #include "scene/TerrainLayer.h"
 #include "scene/TideLayer.h"
 #include "compose/Compositor.h"
+#include "compose/Exchange.h"
 #include "compose/GisStencil.h"
 #include "compose/Sources.h"
 #include "core/Json.h"
@@ -83,6 +85,9 @@ struct Options {
     bool seaVerify = false;           // measure rendered Hs from the displacement textures
     bool viz = false;                 // start with the atlas residency visualizer on
     bool stencil = false;             // M6i --stencil: coast/graticule alignment overlay
+    bool msSurface = true;            // M6j: mesh-shader planet surface (--no-ms falls back)
+    std::string exportSpec;           // M6j --export: composed-channel export spec
+    std::wstring exportOut;
     float camAlt = -1, camAz = 246, camPitch = -5;   // --cam alt,az,pitch override
     float camX = 1e9f, camZ = 1e9f;   // --campos x,z world override (sea mode)
     std::string bathyPath = "data/bathy/merrimack.json";
@@ -176,6 +181,13 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--sea-verify") o.seaVerify = true;
         else if (a == "--viz") o.viz = true;
         else if (a == "--stencil") o.stencil = true;
+        else if (a == "--no-ms") o.msSurface = false;
+        else if (a == "--export") {
+            // M6j utility: pull a composed channel OUT through the manager -- the same
+            // provider path the renderer streams. <channel>[:mip] <out.(png|raw|obj)>
+            o.exportSpec = next("earth.color.window:2");
+            o.exportOut = Widen(next("export.png").c_str());
+        }
         else if (a == "--cam") {
             const std::string v = next("12,246,-5");
             sscanf_s(v.c_str(), "%f,%f,%f", &o.camAlt, &o.camAz, &o.camPitch);
@@ -258,6 +270,151 @@ double LoadRiverDischarge(const std::string& path) {
 // NAVD88 = local MSL + delta, calibrated from whichever harvested station carries both datums
 // (Boston: delta = +0.09 m) -- picking the smallest |delta| candidate, since NAVD tracks MSL on
 // the open coast while upriver stations drift.
+// ================================================================================================
+// M6j --export: the manager as a DATA INTERFACE, not just a renderer's feeder. A composed
+// channel is pulled tile by tile through the exact provider path the renderer streams
+// (cache-first: a warmed machine exports offline) and written as:
+//   .png  color RGBA, or height normalized to grayscale
+//   .raw  height as row-major float32 (plus dims in the log)
+//   .obj  height triangulated as a mesh in local metres -- the same tiles the mesh-shader
+//         surface consumes, hand-inspectable in any DCC tool
+// ================================================================================================
+static int RunChannelExport(const std::string& spec, const std::wstring& outPath,
+                            Compositor& comp, int colCh, int hgtCh) {
+    std::string name = spec;
+    uint32_t mip = 2;
+    if (const size_t c = spec.find(':'); c != std::string::npos) {
+        name = spec.substr(0, c);
+        mip = static_cast<uint32_t>(atoi(spec.c_str() + c + 1));
+    }
+    TileProviderFn fn;
+    bool height = false;
+    uint32_t tileW = 128, tileH = 128, face = 0;
+    if (name == "earth.color.window" && colCh >= 0) {
+        fn = comp.WindowColor(colCh, 1263360, 1538048, 16384, 14);
+    } else if (name == "earth.height.window" && hgtCh >= 0) {
+        fn = comp.WindowHeight(hgtCh, 1263360, 1538048, 16384, 14);
+        height = true;
+        tileW = 256;
+    } else if (name.rfind("earth.color.cube.f", 0) == 0 && colCh >= 0) {
+        face = static_cast<uint32_t>(name.back() - '0') % 6;
+        fn = comp.CubeColor(colCh);
+    } else if ((name.rfind("earth.height.cube.f", 0) == 0 ||
+                name.rfind("mars.height.cube.f", 0) == 0) &&
+               hgtCh >= 0) {
+        face = static_cast<uint32_t>(name.back() - '0') % 6;
+        fn = comp.CubeHeight(hgtCh);
+        height = true;
+        tileW = 256;
+    } else {
+        Log("[export] unknown channel '%s' (or its stack is not configured). Channels: "
+            "earth.color.window, earth.height.window, earth.color.cube.f0..5, "
+            "earth|mars.height.cube.f0..5",
+            name.c_str());
+        return 1;
+    }
+    const uint32_t dim = Compositor::kFaceDim >> mip;
+    if (dim > 4096) {
+        Log("[export] mip %u is %ux%u -- use mip >= 2 (<= 4096 wide)", mip, dim, dim);
+        return 1;
+    }
+    const uint32_t tilesX = dim / tileW, tilesY = dim / tileH;
+    Log("[export] %s mip %u: %ux%u texels, %u tiles (cache-first through the manager)",
+        name.c_str(), mip, dim, dim, tilesX * tilesY);
+
+    std::vector<float> hgtData;
+    std::vector<uint8_t> rgba;
+    if (height) hgtData.resize(static_cast<size_t>(dim) * dim);
+    else rgba.resize(static_cast<size_t>(dim) * dim * 4);
+    std::vector<uint8_t> tile;
+    for (uint32_t ty = 0; ty < tilesY; ++ty) {
+        for (uint32_t tx = 0; tx < tilesX; ++tx) {
+            if (!fn({face, mip, tx, ty}, tile) || tile.size() != 65536) continue;
+            for (uint32_t py = 0; py < tileH; ++py) {
+                const size_t row = static_cast<size_t>(ty) * tileH + py;
+                if (height) {
+                    const uint16_t* src = reinterpret_cast<const uint16_t*>(tile.data());
+                    for (uint32_t px = 0; px < tileW; ++px) {
+                        hgtData[row * dim + tx * tileW + px] =
+                            HalfToFloat(src[py * tileW + px]);
+                    }
+                } else {
+                    memcpy(&rgba[(row * dim + tx * tileW) * 4], &tile[py * tileW * 4],
+                           static_cast<size_t>(tileW) * 4);
+                }
+            }
+        }
+    }
+
+    const std::wstring ext =
+        outPath.size() > 4 ? outPath.substr(outPath.size() - 4) : std::wstring();
+    if (ext == L".obj") {
+        if (!height) {
+            Log("[export] .obj export needs a HEIGHT channel");
+            return 1;
+        }
+        if (dim > 1024) {
+            Log("[export] .obj at %u^2 would be %u M verts -- use mip >= 4", dim,
+                dim * dim / 1000000);
+            return 1;
+        }
+        const double worldPx = static_cast<double>((1ll << 14) * 256ll >> mip);
+        const double ground = 40075016.686 / worldPx * std::cos(42.8 * 3.14159265 / 180.0);
+        FILE* f = nullptr;
+        _wfopen_s(&f, outPath.c_str(), L"w");
+        if (!f) return 1;
+        fprintf(f, "# GAGAME composed-channel export: %s mip %u (%u^2, %.2f m/px)\n",
+                name.c_str(), mip, dim, ground);
+        for (uint32_t y = 0; y < dim; ++y) {
+            for (uint32_t x = 0; x < dim; ++x) {
+                fprintf(f, "v %.2f %.2f %.2f\n", (static_cast<double>(x) - dim / 2.0) * ground,
+                        hgtData[static_cast<size_t>(y) * dim + x],
+                        (dim / 2.0 - static_cast<double>(y)) * ground);
+            }
+        }
+        for (uint32_t y = 0; y + 1 < dim; ++y) {
+            for (uint32_t x = 0; x + 1 < dim; ++x) {
+                const uint32_t a = y * dim + x + 1, b = a + 1, c = a + dim, d = c + 1;
+                fprintf(f, "f %u %u %u\nf %u %u %u\n", a, b, c, b, d, c);
+            }
+        }
+        fclose(f);
+        Log("[export] wrote %S (%u verts, %u tris)", outPath.c_str(), dim * dim,
+            (dim - 1) * (dim - 1) * 2);
+    } else if (ext == L".raw") {
+        if (!height) {
+            Log("[export] .raw export is for height channels; color goes to .png");
+            return 1;
+        }
+        FILE* f = nullptr;
+        _wfopen_s(&f, outPath.c_str(), L"wb");
+        if (!f) return 1;
+        fwrite(hgtData.data(), 4, hgtData.size(), f);
+        fclose(f);
+        Log("[export] wrote %S (float32 row-major, %ux%u, row 0 north)", outPath.c_str(), dim,
+            dim);
+    } else {
+        if (height) {
+            float lo = 1e9f, hi = -1e9f;
+            for (const float v : hgtData) {
+                lo = (std::min)(lo, v);
+                hi = (std::max)(hi, v);
+            }
+            rgba.resize(static_cast<size_t>(dim) * dim * 4);
+            const float inv = hi > lo ? 255.0f / (hi - lo) : 0.0f;
+            for (size_t i = 0; i < hgtData.size(); ++i) {
+                const uint8_t g = static_cast<uint8_t>((hgtData[i] - lo) * inv);
+                rgba[i * 4] = rgba[i * 4 + 1] = rgba[i * 4 + 2] = g;
+                rgba[i * 4 + 3] = 255;
+            }
+            Log("[export] height range %.1f .. %.1f m (normalized to grayscale)", lo, hi);
+        }
+        SavePng(outPath, rgba.data(), dim, dim, dim * 4, rgba.size());
+        Log("[export] wrote %S", outPath.c_str());
+    }
+    return 0;
+}
+
 float ResolveDatum(const TideModel& model) {
     const TideStation& fs = model.S(model.Focus());
     if (fs.mllwMinusNavdM > -900.0) {
@@ -498,6 +655,7 @@ int main(int argc, char** argv) {
             ShaderCompiler sc;
             sc.Init();
             bool ok = RunPgaSelfTest();   // pure CPU: the motor conventions, pinned first
+            ok &= RunComposeSelfTest();   // pure CPU: the layer compositor's contracts
             ok &= RunTileSelfTest(gpu, sc, opt.shaderDir);
             ok &= RunAtlasSelfTest(gpu, sc, opt.shaderDir);
             gpu.Shutdown();
@@ -626,8 +784,12 @@ int main(int argc, char** argv) {
             globe->Configure(opt.shaderDir, &activeGlobe);
             globe->marsReliefValid = marsMode && marsModel.Ready();
             globe->windOverlay = opt.viz;
+            globe->msSurface = opt.msSurface;
             globe->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             renderer.AddLayer(std::move(globeOwned));
+            // M6j: with the unified mesh surface active, the terrain layer stops rendering
+            // (it keeps the heightfield the SWE physics and the sea's bed read).
+            if (terrain && globe->MeshPathActive()) terrain->renderEnabled = false;
         } else {
             Log("[main] no globe data (run: py -3 harvester\\harvest_globe.py)");
         }
@@ -659,8 +821,10 @@ int main(int argc, char** argv) {
         std::unique_ptr<CudemHeightSource> srcCudem;
         GisStencil gisStencil;   // survey vectors + mask realizations (GSHHG/WDBII)
         GisLayer* gisLayer = nullptr;
+        Exchange exchange;       // M6j: the plugin bus -- named GA buffer channels
         const double winOrgX = 4935.0 * 256.0, winOrgY = 6008.0 * 256.0;   // Merrimack z14 px
         int colorCubeT = -1, winTenant = -1, hgtTenant = -1, hgtWinTenant = -1;
+        int colCh = -1, hgtCh = -1;   // compositor channel ids (also serve --export)
         if (globe) {
             resMgr.Init(gpu);
             int surf = -1, norm = -1;
@@ -668,20 +832,21 @@ int main(int argc, char** argv) {
                 // Mars: color/normal stay NATIVE streams (the rescued sample's pyramids are
                 // already tile-shaped truth); height composes from MOLA through the same
                 // machinery Earth uses -- one relief path in the shader for both planets.
-                if (marsDiff.Open(L"data/earth/diffuse.bin", DXGI_FORMAT_BC1_UNORM)) {
+                if (marsDiff.Open(L"data/earth/diffuse.bin", DXGI_FORMAT_BC1_UNORM_SRGB)) {
                     surf = resMgr.AddTextureCube(gpu, L"mars.diffuse (the rescued sample)",
-                                                 16384, DXGI_FORMAT_BC1_UNORM, marsDiff.Fn());
+                                                 16384, DXGI_FORMAT_BC1_UNORM_SRGB,
+                                                 marsDiff.Fn());
                 }
                 if (marsNorm.Open(L"data/earth/normal.bin", DXGI_FORMAT_BC5_SNORM)) {
                     norm = resMgr.AddTextureCube(gpu, L"mars.normal", 16384,
                                                  DXGI_FORMAT_BC5_SNORM, marsNorm.Fn());
                 }
                 if (marsModel.Ready()) {
-                    const int ch = compositor.AddHeightChannel("mars.height", {&srcMola});
+                    hgtCh = compositor.AddHeightChannel("mars.height", {&srcMola});
                     hgtTenant = resMgr.AddTextureCube(gpu, L"mars.height (composed: MOLA)",
                                                       Compositor::kFaceDim,
                                                       DXGI_FORMAT_R16_FLOAT,
-                                                      compositor.CubeHeight(ch));
+                                                      compositor.CubeHeight(hgtCh));
                 }
                 globe->SetComposed(-1, -1, hgtTenant, -1, 0.0, 0.0, 1.0);
             } else {
@@ -699,8 +864,7 @@ int main(int argc, char** argv) {
                     srcCudem = std::make_unique<CudemHeightSource>(&bathy);
                     hstack.push_back(srcCudem.get());
                 }
-                const int hgtCh = compositor.AddHeightChannel("earth.height",
-                                                              std::move(hstack));
+                hgtCh = compositor.AddHeightChannel("earth.height", std::move(hstack));
                 hgtTenant = resMgr.AddTextureCube(gpu, L"earth.height (composed)",
                                                   Compositor::kFaceDim, DXGI_FORMAT_R16_FLOAT,
                                                   compositor.CubeHeight(hgtCh));
@@ -714,14 +878,14 @@ int main(int argc, char** argv) {
                 // and the Merrimack z14 window (same stack, deeper footprint).
                 if (googleTiles.Init("satellite", opt.tileBudget)) {
                     googleTiles.SetFetchCounter(&resMgr.fetchesThisRun);
-                    const int colCh = compositor.AddColorChannel("earth.color", {&srcGoogle});
+                    colCh = compositor.AddColorChannel("earth.color", {&srcGoogle});
                     colorCubeT = resMgr.AddTextureCube(gpu, L"earth.color (composed)",
                                                        Compositor::kFaceDim,
-                                                       DXGI_FORMAT_R8G8B8A8_UNORM,
+                                                       DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
                                                        compositor.CubeColor(colCh));
                     winTenant = resMgr.AddTexture2D(
                         gpu, L"earth.color.window (composed, Merrimack z14)",
-                        Compositor::kFaceDim, DXGI_FORMAT_R8G8B8A8_UNORM,
+                        Compositor::kFaceDim, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
                         compositor.WindowColor(colCh, 1263360, 1538048, 16384, 14));
                 }
                 globe->SetComposed(colorCubeT, winTenant, hgtTenant, hgtWinTenant, winOrgX,
@@ -736,10 +900,16 @@ int main(int argc, char** argv) {
                 globe->SetGisStencil(gisStencil.MaskWinSrv(), gisStencil.MaskGlobSrv());
                 auto gisOwned = std::make_unique<GisLayer>();
                 gisLayer = gisOwned.get();
-                gisLayer->Configure(opt.shaderDir, &gisStencil);
+                gisLayer->Configure(opt.shaderDir, &gisStencil, &exchange);
                 gisLayer->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
                 gisLayer->enabled = opt.stencil;
                 renderer.AddLayer(std::move(gisOwned));
+            }
+            if (!marsMode) {
+                auto mkOwned = std::make_unique<MarkerLayer>();
+                mkOwned->Configure(opt.shaderDir, &exchange, "markers.stations");
+                mkOwned->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
+                renderer.AddLayer(std::move(mkOwned));
             }
             globe->SetResidency(&resMgr, surf, norm, marsMode);
             globe->SetPlanetRadius(planetR);
@@ -943,6 +1113,61 @@ int main(int argc, char** argv) {
             if (terrain) terrain->SetComposed(cs);
             if (sea) sea->SetComposed(cs);
             if (gisLayer) gisLayer->SetComposed(cs);
+        }
+        // ---- M6j: the first GA-product-buffer plugin, end to end. The CPU ORGANIZES: one
+        // PGA motor per tide station, placing and orienting a pylon on the sphere (Pga.h --
+        // conventions pinned by selftest). The Exchange CARRIES: a typed, versioned channel.
+        // The GPU RENDERS: Markers.hlsl applies the same sandwich (GA.hlsli). This is the
+        // socket a physics plugin drives with real mesh/vertex buffers later.
+        if (!marsMode && globe && model.Count() > 0) {
+            struct MarkerRec {
+                float re[4], du[4], scaleColor[4];
+            };
+            std::vector<MarkerRec> recs;
+            for (size_t i = 0; i < model.Count(); ++i) {
+                const TideStation& st = model.S(i);
+                double d[3];
+                GlobeModel::LatLonDir(st.lat, st.lon, d);
+                const double upF[3] = {east0[0] * d[0] + east0[1] * d[1] + east0[2] * d[2],
+                                       oDir[0] * d[0] + oDir[1] * d[1] + oDir[2] * d[2],
+                                       north0[0] * d[0] + north0[1] * d[1] + north0[2] * d[2]};
+                const double fx = upF[0] * planetR;
+                const double fy = upF[1] * planetR - planetR + 2.0;   // base ~2 m above geoid
+                const double fz = upF[2] * planetR;
+                // Align the pylon's +y with the LOCAL up: rotate about y x up.
+                double axis[3] = {upF[2], 0.0, -upF[0]};   // cross((0,1,0), upF), y term 0
+                const double axLen =
+                    std::sqrt(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]);
+                Motor m = Motor::Translation(fx, fy, fz);
+                if (axLen > 1e-9) {
+                    axis[0] /= axLen;
+                    axis[1] /= axLen;
+                    axis[2] /= axLen;
+                    const double org[3] = {0, 0, 0};
+                    const double ang = std::atan2(axLen, upF[1]);
+                    m = m * Motor::Rotation(org, axis, ang);
+                }
+                MarkerRec r{};
+                r.re[0] = static_cast<float>(m.s);
+                r.re[1] = static_cast<float>(m.r23);
+                r.re[2] = static_cast<float>(m.r31);
+                r.re[3] = static_cast<float>(m.r12);
+                r.du[0] = static_cast<float>(m.q);
+                r.du[1] = static_cast<float>(m.t01);
+                r.du[2] = static_cast<float>(m.t02);
+                r.du[3] = static_cast<float>(m.t03);
+                r.scaleColor[0] = 8.0f;    // half-width m
+                r.scaleColor[1] = 45.0f;   // height m
+                r.scaleColor[2] = static_cast<float>(i);
+                recs.push_back(r);
+            }
+            const int ch = exchange.Register(
+                "markers.stations",
+                {48, 0b10101, "pga-motor (dq8: re s/r23/r31/r12, du q/t01/t02/t03) + "
+                              "halfwidth/height/colorIdx"},
+                "plugin.tideStations");
+            exchange.Publish(gpu, ch, recs.data(), recs.size() * sizeof(MarkerRec));
+            exchange.LogRegistry();
         }
         // Altitude above the geoid, valid at any longitude (flat y is NOT altitude far from
         // the origin): |flat + (0,R,0)| - R, in doubles.
@@ -1310,6 +1535,15 @@ int main(int argc, char** argv) {
                 resMgr.stats.c_str());
         }
 
+        // ---- M6j: channel export mode -- pull data OUT through the manager and exit.
+        if (!opt.exportSpec.empty()) {
+            const int rc =
+                RunChannelExport(opt.exportSpec, opt.exportOut, compositor, colCh, hgtCh);
+            gpu.WaitIdle();
+            resMgr.Shutdown();
+            return rc;
+        }
+
         using Clock = std::chrono::steady_clock;
         auto last = Clock::now();
         auto lastTitle = last;
@@ -1505,6 +1739,7 @@ int main(int argc, char** argv) {
             if (sea) sea->SetTime(simUnix, bathy.Ready() ? waterNavd : tide->focusHeight,
                                   cam.px, cam.pz);
             if (terrain) terrain->waterNavd = static_cast<float>(waterNavd);
+            if (globe) globe->waterNavd = static_cast<float>(waterNavd);   // M6j materials
 
             renderer.RenderFrame(cam, static_cast<float>(simUnix - startUnix), dt);
 
