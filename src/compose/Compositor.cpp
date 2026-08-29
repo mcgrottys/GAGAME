@@ -61,9 +61,6 @@ int Compositor::AddColorChannel(const std::string& name, std::vector<ColorSource
     Channel ch;
     ch.name = name;
     ch.color = std::move(stack);
-    uint64_t h = Fnv1a(14695981039346656037ull, name + "#" + std::to_string(kComposeVersion));
-    for (const auto* s : ch.color) h = Fnv1a(h, s->Info().name + "|" + s->Info().structure);
-    ch.stackHash = h;
     m_channels.push_back(std::move(ch));
     return static_cast<int>(m_channels.size()) - 1;
 }
@@ -72,19 +69,62 @@ int Compositor::AddHeightChannel(const std::string& name, std::vector<HeightSour
     Channel ch;
     ch.name = name;
     ch.height = std::move(stack);
-    uint64_t h = Fnv1a(14695981039346656037ull, name + "#" + std::to_string(kComposeVersion));
-    for (const auto* s : ch.height) h = Fnv1a(h, s->Info().name + "|" + s->Info().structure);
-    ch.stackHash = h;
     m_channels.push_back(std::move(ch));
     return static_cast<int>(m_channels.size()) - 1;
 }
 
+// The soak rule's membership test (see Compositor.h). Global sources always belong; a window
+// source belongs where its footprint overlaps the tile by at least ~2 texels in SOME axis (a
+// one-texel-wide strip 100 texels long is a meaningful paint; a sub-texel speck is not).
+// Dateline caution: cube tiles on the +-pi faces get loose lon boxes from atan2 -- global
+// sources are immune (always in) and every regional source of ours sits far from the seam.
+namespace {
+bool SourceTouches(const SourceInfo& si, const Compositor::TileBox& b) {
+    const double d2r = kPi / 180.0;
+    const double sLatMin = si.lat0 * d2r, sLatMax = si.lat1 * d2r;
+    const double sLonMin = si.lon0 * d2r, sLonMax = si.lon1 * d2r;
+    if (si.lon1 - si.lon0 >= 359.0 && si.lat1 - si.lat0 >= 179.0) return true;   // global
+    const double iLat = (std::min)(sLatMax, b.latMax) - (std::max)(sLatMin, b.latMin);
+    const double iLon = (std::min)(sLonMax, b.lonMax) - (std::max)(sLonMin, b.lonMin);
+    if (iLat <= 0.0 || iLon <= 0.0) return false;
+    return iLat >= 2.0 * b.texLat || iLon >= 2.0 * b.texLon;
+}
+uint64_t SubsetSeed(const std::string& channelName) {
+    return Fnv1a(14695981039346656037ull,
+                 channelName + "#" + std::to_string(kComposeVersion));
+}
+}  // namespace
+
+uint64_t Compositor::ColorSubset(const Channel& ch, const TileBox& box,
+                                 std::vector<size_t>& included) const {
+    uint64_t h = SubsetSeed(ch.name);
+    for (size_t i = 0; i < ch.color.size(); ++i) {
+        const SourceInfo& si = ch.color[i]->Info();
+        if (!SourceTouches(si, box)) continue;
+        included.push_back(i);
+        h = Fnv1a(h, si.name + "|" + si.structure);
+    }
+    return h;
+}
+
+uint64_t Compositor::HeightSubset(const Channel& ch, const TileBox& box,
+                                  std::vector<size_t>& included) const {
+    uint64_t h = SubsetSeed(ch.name);
+    for (size_t i = 0; i < ch.height.size(); ++i) {
+        const SourceInfo& si = ch.height[i]->Info();
+        if (!SourceTouches(si, box)) continue;
+        included.push_back(i);
+        h = Fnv1a(h, si.name + "|" + si.structure);
+    }
+    return h;
+}
+
 std::string Compositor::CachePath(const Channel& ch, const char* realization,
-                                  const TileRequest& r) const {
+                                  const TileRequest& r, uint64_t subset) const {
     char buf[320];
-    snprintf(buf, sizeof(buf), "cache\\composed\\%s\\%s_v%08x\\f%u_m%u_x%u_y%u.bin",
-             ch.name.c_str(), realization, static_cast<uint32_t>(ch.stackHash & 0xFFFFFFFFu),
-             r.face, r.mip, r.x, r.y);
+    snprintf(buf, sizeof(buf), "cache\\composed\\%s\\%s\\f%u_m%u_x%u_y%u_%08x.bin",
+             ch.name.c_str(), realization, r.face, r.mip, r.x, r.y,
+             static_cast<uint32_t>(subset & 0xFFFFFFFFu));
     return buf;
 }
 
@@ -106,13 +146,14 @@ void Compositor::WriteCached(const std::string& path, const std::vector<uint8_t>
 }
 
 void Compositor::EnsureCacheDir(const Channel& ch, const char* realization) {
+    // M6k: identity moved from the DIRECTORY (whole-stack hash) into each tile's FILENAME
+    // (per-tile source-subset hash) -- the soak rule's short circuit lives in that rename.
     char buf[320];
     CreateDirectoryA("cache", nullptr);
     CreateDirectoryA("cache\\composed", nullptr);
     snprintf(buf, sizeof(buf), "cache\\composed\\%s", ch.name.c_str());
     CreateDirectoryA(buf, nullptr);
-    snprintf(buf, sizeof(buf), "cache\\composed\\%s\\%s_v%08x", ch.name.c_str(), realization,
-             static_cast<uint32_t>(ch.stackHash & 0xFFFFFFFFu));
+    snprintf(buf, sizeof(buf), "cache\\composed\\%s\\%s", ch.name.c_str(), realization);
     CreateDirectoryA(buf, nullptr);
 }
 
@@ -122,15 +163,12 @@ TileProviderFn Compositor::CubeColor(int channel) {
     EnsureCacheDir(m_channels[channel], "cube16k");
     return [this, channel](const TileRequest& r, std::vector<uint8_t>& out) {
         const Channel& ch = m_channels[channel];
-        const std::string path = CachePath(ch, "cube16k", r);
-        if (ReadCached(path, out)) return true;
-
         const uint32_t faceTexels = kFaceDim >> r.mip;
         const double invFace = 1.0 / faceTexels;
         const double groundRes = kMercCirc / (4.0 * faceTexels);
         // Tile lat/lon box (corners + centre: a gnomonic tile's extremes live on its edge
-        // midpoints only at the poles, where a loose box is harmless) for BeginTile.
-        double latMin = 10, latMax = -10, lonMin = 10, lonMax = -10;
+        // midpoints only at the poles, where a loose box is harmless).
+        TileBox box{10, -10, 10, -10, 0, 0};
         for (int cy = 0; cy < 3; ++cy) {
             for (int cx = 0; cx < 3; ++cx) {
                 double d[3];
@@ -138,15 +176,23 @@ TileProviderFn Compositor::CubeColor(int channel) {
                                (r.y * 128.0 + cy * 64.0) * invFace, d);
                 const double la = std::asin((std::max)(-1.0, (std::min)(1.0, d[1])));
                 const double lo = std::atan2(d[2], d[0]);
-                latMin = (std::min)(latMin, la);
-                latMax = (std::max)(latMax, la);
-                lonMin = (std::min)(lonMin, lo);
-                lonMax = (std::max)(lonMax, lo);
+                box.latMin = (std::min)(box.latMin, la);
+                box.latMax = (std::max)(box.latMax, la);
+                box.lonMin = (std::min)(box.lonMin, lo);
+                box.lonMax = (std::max)(box.lonMax, lo);
             }
         }
-        std::vector<PaintCtx> ctxs(ch.color.size());
-        for (size_t i = 0; i < ch.color.size(); ++i) {
-            ch.color[i]->BeginTile(latMin, latMax, lonMin, lonMax, groundRes, ctxs[i]);
+        box.texLat = (box.latMax - box.latMin) / 128.0;
+        box.texLon = (box.lonMax - box.lonMin) / 128.0;
+        std::vector<size_t> inc;
+        const uint64_t subset = ColorSubset(ch, box, inc);
+        const std::string path = CachePath(ch, "cube16k", r, subset);
+        if (ReadCached(path, out)) return true;
+
+        std::vector<PaintCtx> ctxs(inc.size());
+        for (size_t k = 0; k < inc.size(); ++k) {
+            ch.color[inc[k]]->BeginTile(box.latMin, box.latMax, box.lonMin, box.lonMax,
+                                        groundRes, ctxs[k]);
         }
         out.assign(65536, 0);
         bool complete = true;   // a transient source failure (fetch budget/network) shows as
@@ -162,9 +208,10 @@ TileProviderFn Compositor::CubeColor(int channel) {
                 uint8_t* dst = &out[(py * 128 + px) * 4];
                 float acc[3] = {0, 0, 0};
                 float cover = 0.0f;
-                for (size_t i = 0; i < ch.color.size(); ++i) {   // bottom -> top
+                for (size_t k = 0; k < inc.size(); ++k) {   // bottom -> top, subset only
                     uint8_t rgba[4];
-                    const float w = ch.color[i]->Sample(lat, lon, groundRes, ctxs[i], rgba);
+                    const float w =
+                        ch.color[inc[k]]->Sample(lat, lon, groundRes, ctxs[k], rgba);
                     if (w < 0.0f) { complete = false; continue; }
                     if (w == 0.0f) continue;
                     for (int c = 0; c < 3; ++c) acc[c] += (rgba[c] - acc[c]) * w;
@@ -191,9 +238,6 @@ TileProviderFn Compositor::WindowColor(int channel, long long orgPxX, long long 
     return [this, channel, orgPxX, orgPxY, zBase](const TileRequest& r,
                                                   std::vector<uint8_t>& out) {
         const Channel& ch = m_channels[channel];
-        const std::string path = CachePath(ch, "window", r);
-        if (ReadCached(path, out)) return true;
-
         // Window texels ARE Mercator pixels of zoom (zBase - mip): the lat/lon roundtrip
         // through a Mercator-tree source lands back on the same pixel, so fills remain the
         // straight pixel moves the M6f DetailFn did -- now with the whole stack above them.
@@ -201,13 +245,22 @@ TileProviderFn Compositor::WindowColor(int channel, long long orgPxX, long long 
         const double groundRes = kMercCirc / worldPx;
         const long long gx0 = (orgPxX >> r.mip) + static_cast<long long>(r.x) * 128;
         const long long gy0 = (orgPxY >> r.mip) + static_cast<long long>(r.y) * 128;
-        const double lat0 = std::atan(std::sinh(kPi * (1.0 - 2.0 * (gy0 + 128.0) / worldPx)));
-        const double lat1 = std::atan(std::sinh(kPi * (1.0 - 2.0 * gy0 / worldPx)));
-        const double lon0 = (gx0 / worldPx - 0.5) * 2.0 * kPi;
-        const double lon1 = ((gx0 + 128.0) / worldPx - 0.5) * 2.0 * kPi;
-        std::vector<PaintCtx> ctxs(ch.color.size());
-        for (size_t i = 0; i < ch.color.size(); ++i) {
-            ch.color[i]->BeginTile(lat0, lat1, lon0, lon1, groundRes, ctxs[i]);
+        TileBox box{};
+        box.latMin = std::atan(std::sinh(kPi * (1.0 - 2.0 * (gy0 + 128.0) / worldPx)));
+        box.latMax = std::atan(std::sinh(kPi * (1.0 - 2.0 * gy0 / worldPx)));
+        box.lonMin = (gx0 / worldPx - 0.5) * 2.0 * kPi;
+        box.lonMax = ((gx0 + 128.0) / worldPx - 0.5) * 2.0 * kPi;
+        box.texLat = (box.latMax - box.latMin) / 128.0;
+        box.texLon = (box.lonMax - box.lonMin) / 128.0;
+        std::vector<size_t> inc;
+        const uint64_t subset = ColorSubset(ch, box, inc);
+        const std::string path = CachePath(ch, "window", r, subset);
+        if (ReadCached(path, out)) return true;
+
+        std::vector<PaintCtx> ctxs(inc.size());
+        for (size_t k = 0; k < inc.size(); ++k) {
+            ch.color[inc[k]]->BeginTile(box.latMin, box.latMax, box.lonMin, box.lonMax,
+                                        groundRes, ctxs[k]);
         }
         out.assign(65536, 0);
         bool complete = true;
@@ -220,9 +273,10 @@ TileProviderFn Compositor::WindowColor(int channel, long long orgPxX, long long 
                 uint8_t* dst = &out[(py * 128 + px) * 4];
                 float acc[3] = {0, 0, 0};
                 float cover = 0.0f;
-                for (size_t i = 0; i < ch.color.size(); ++i) {
+                for (size_t k = 0; k < inc.size(); ++k) {
                     uint8_t rgba[4];
-                    const float w = ch.color[i]->Sample(lat, lon, groundRes, ctxs[i], rgba);
+                    const float w =
+                        ch.color[inc[k]]->Sample(lat, lon, groundRes, ctxs[k], rgba);
                     if (w < 0.0f) { complete = false; continue; }
                     if (w == 0.0f) continue;
                     for (int c = 0; c < 3; ++c) acc[c] += (rgba[c] - acc[c]) * w;
@@ -246,15 +300,33 @@ TileProviderFn Compositor::CubeHeight(int channel) {
     EnsureCacheDir(m_channels[channel], "cube16k");
     return [this, channel](const TileRequest& r, std::vector<uint8_t>& out) {
         const Channel& ch = m_channels[channel];
-        const std::string path = CachePath(ch, "cube16k", r);
-        if (ReadCached(path, out)) return true;
-
         // R16F: 256x128 texels per 64KB tile. Every mip is painted straight from the sources
         // at its own ground resolution (independent paints; trilinear blends cousins -- close
         // enough for display relief, and each level is honest about its own footprint).
         const uint32_t faceTexels = kFaceDim >> r.mip;
         const double invFace = 1.0 / faceTexels;
         const double groundRes = kMercCirc / (4.0 * faceTexels);
+        TileBox box{10, -10, 10, -10, 0, 0};
+        for (int cy = 0; cy < 3; ++cy) {
+            for (int cx = 0; cx < 3; ++cx) {
+                double d[3];
+                ComposeCubeDir(r.face, (r.x * 256.0 + cx * 128.0) * invFace,
+                               (r.y * 128.0 + cy * 64.0) * invFace, d);
+                const double la = std::asin((std::max)(-1.0, (std::min)(1.0, d[1])));
+                const double lo = std::atan2(d[2], d[0]);
+                box.latMin = (std::min)(box.latMin, la);
+                box.latMax = (std::max)(box.latMax, la);
+                box.lonMin = (std::min)(box.lonMin, lo);
+                box.lonMax = (std::max)(box.lonMax, lo);
+            }
+        }
+        box.texLat = (box.latMax - box.latMin) / 128.0;
+        box.texLon = (box.lonMax - box.lonMin) / 256.0;
+        std::vector<size_t> inc;
+        const uint64_t subset = HeightSubset(ch, box, inc);
+        const std::string path = CachePath(ch, "cube16k", r, subset);
+        if (ReadCached(path, out)) return true;
+
         out.assign(65536, 0);
         uint16_t* dst16 = reinterpret_cast<uint16_t*>(out.data());
         for (uint32_t py = 0; py < 128; ++py) {
@@ -266,9 +338,9 @@ TileProviderFn Compositor::CubeHeight(int channel) {
                 const double lat = std::asin((std::max)(-1.0, (std::min)(1.0, d[1])));
                 const double lon = std::atan2(d[2], d[0]);
                 float h = 0.0f;
-                for (HeightSource* s : ch.height) {   // bottom -> top
+                for (size_t k = 0; k < inc.size(); ++k) {   // bottom -> top, subset only
                     float m = 0.0f;
-                    const float w = s->Sample(lat, lon, groundRes, m);
+                    const float w = ch.height[inc[k]]->Sample(lat, lon, groundRes, m);
                     if (w <= 0.0f) continue;
                     h += (m - h) * w;
                 }
@@ -288,14 +360,23 @@ TileProviderFn Compositor::WindowHeight(int channel, long long orgPxX, long long
     return [this, channel, orgPxX, orgPxY, zBase](const TileRequest& r,
                                                   std::vector<uint8_t>& out) {
         const Channel& ch = m_channels[channel];
-        const std::string path = CachePath(ch, "windowH", r);
-        if (ReadCached(path, out)) return true;
-
         // R16F 256x128 tiles of the same Mercator window frame the color window uses.
         const double worldPx = static_cast<double>((1ll << zBase) * 256ll >> r.mip);
         const double groundRes = kMercCirc / worldPx;
         const long long gx0 = (orgPxX >> r.mip) + static_cast<long long>(r.x) * 256;
         const long long gy0 = (orgPxY >> r.mip) + static_cast<long long>(r.y) * 128;
+        TileBox box{};
+        box.latMin = std::atan(std::sinh(kPi * (1.0 - 2.0 * (gy0 + 128.0) / worldPx)));
+        box.latMax = std::atan(std::sinh(kPi * (1.0 - 2.0 * gy0 / worldPx)));
+        box.lonMin = (gx0 / worldPx - 0.5) * 2.0 * kPi;
+        box.lonMax = ((gx0 + 256.0) / worldPx - 0.5) * 2.0 * kPi;
+        box.texLat = (box.latMax - box.latMin) / 128.0;
+        box.texLon = (box.lonMax - box.lonMin) / 256.0;
+        std::vector<size_t> inc;
+        const uint64_t subset = HeightSubset(ch, box, inc);
+        const std::string path = CachePath(ch, "windowH", r, subset);
+        if (ReadCached(path, out)) return true;
+
         out.assign(65536, 0);
         uint16_t* dst16 = reinterpret_cast<uint16_t*>(out.data());
         for (uint32_t py = 0; py < 128; ++py) {
@@ -305,9 +386,9 @@ TileProviderFn Compositor::WindowHeight(int channel, long long orgPxX, long long
                 const double X = (gx0 + px + 0.5) / worldPx;
                 const double lon = (X - 0.5) * 2.0 * kPi;
                 float h = 0.0f;
-                for (HeightSource* s : ch.height) {
+                for (size_t k = 0; k < inc.size(); ++k) {
                     float m = 0.0f;
-                    const float w = s->Sample(lat, lon, groundRes, m);
+                    const float w = ch.height[inc[k]]->Sample(lat, lon, groundRes, m);
                     if (w <= 0.0f) continue;
                     h += (m - h) * w;
                 }
@@ -323,8 +404,8 @@ TileProviderFn Compositor::WindowHeight(int channel, long long orgPxX, long long
 void Compositor::LogRegistry() const {
     for (const auto& ch : m_channels) {
         const size_t n = ch.color.size() + ch.height.size();
-        Log("[compose] channel %s: %zu layer%s (stack v%08x)", ch.name.c_str(), n,
-            n == 1 ? "" : "s", static_cast<uint32_t>(ch.stackHash & 0xFFFFFFFFu));
+        Log("[compose] channel %s: %zu layer%s (identity: per-tile source subsets, v%d)",
+            ch.name.c_str(), n, n == 1 ? "" : "s", kComposeVersion);
         int i = 0;
         auto row = [&](const SourceInfo& s) {
             Log("[compose]   L%d %-22s %-38s %-26s %9.0f cm/px  [%.2f..%.2f]x[%.2f..%.2f]",

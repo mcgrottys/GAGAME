@@ -205,6 +205,56 @@ bool RunComposeSelfTest() {
         Check(checked > 6, "height spot-checks ran");
     }
 
+    // ---- the soak rule's SHORT CIRCUIT: a source whose footprint spans less than ~2 texels
+    // at a LOD drops out of that tile's subset -- the tile's cache identity REVERTS to the
+    // without-it tag, so the "repaint" is a byte-identical cache hit. Painting that cannot
+    // change more than ~a pixel never runs (the user's redundancy rule, as a contract).
+    {
+        class SpeckSource : public ColorSource {
+        public:
+            SpeckSource() {
+                m_info = {"test.speck", "analytic", "EPSG:4326", 1,
+                          -70.001, 42.0, -70.0, 42.001};   // ~100 m footprint
+            }
+            const SourceInfo& Info() const override { return m_info; }
+            float Sample(double, double, double, const PaintCtx&, uint8_t rgba[4]) override {
+                rgba[0] = rgba[1] = rgba[2] = rgba[3] = 255;
+                return 1.0f;
+            }
+            SourceInfo m_info;
+        } speck;
+        Compositor comp4;
+        const int without = comp4.AddColorChannel("selftest.soak", {&base});
+        const int with = comp4.AddColorChannel("selftest.soak", {&base, &speck});
+        auto fw = comp4.CubeColor(without);
+        auto fs = comp4.CubeColor(with);
+        // A COARSE tile covering the speck (face -z holds lon -70; mip 6: ~40 km texels):
+        // the speck spans far under 2 texels -> excluded -> ONE shared cache identity.
+        TileRequest coarse{5, 6, 0, 0};
+        std::vector<uint8_t> ta, tb;
+        fw(coarse, ta);
+        const uint32_t hitsBefore = comp4.cacheHits.load();
+        fs(coarse, tb);
+        Check(comp4.cacheHits.load() == hitsBefore + 1 && ta == tb,
+              "sub-texel source short-circuits into the without-it cache identity");
+        // A FINE tile over the speck (mip 0: ~600 m texels... still > 2 texels? the speck is
+        // ~0.001 deg ~ 2 texels of mip 0's ~0.0005-deg texels): it must now BE in the subset
+        // and actually paint white where it covers.
+        // Locate a mip-0 tile containing lon -70.0005, lat 42.0005 on face +x.
+        // dir for (lat,lon): the +x face spans lon -45..45 -- -70 is NOT on face +x; use the
+        // subset hash difference instead, realization-agnostic:
+        Compositor::TileBox fine{42.0 * 3.14159265358979 / 180.0,
+                                 42.001 * 3.14159265358979 / 180.0,
+                                 -70.001 * 3.14159265358979 / 180.0,
+                                 -70.0 * 3.14159265358979 / 180.0,
+                                 8e-6, 8e-6};   // ~0.5-texel spans -> speck covers >= 2 texels
+        std::vector<size_t> incA, incB;
+        const uint64_t hA = comp4.ColorSubset(comp4.ChannelAt(without), fine, incA);
+        const uint64_t hB = comp4.ColorSubset(comp4.ChannelAt(with), fine, incB);
+        Check(hA != hB && incB.size() == incA.size() + 1,
+              "the same source RE-ENTERS the subset at a LOD fine enough to see it");
+    }
+
     // ---- stack identity: reordering the SAME sources composes differently AND lands in a
     // different cache tag (if either failed -- e.g. the reordered fn read the other order's
     // cache -- the tiles would come back byte-identical).

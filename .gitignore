@@ -28,3 +28,6 @@ secrets/
 *.raw
 merrimack_*.png
 scratch_*
+
+data/aerial/*.rgb
+cache/aerial/

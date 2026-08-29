@@ -92,6 +92,12 @@ class Compositor {
 public:
     static constexpr uint32_t kFaceDim = 16384;   // every composed pyramid realization today
 
+    // One paint tile's angular footprint (radians) + per-texel span, for the soak rule below.
+    struct TileBox {
+        double latMin, latMax, lonMin, lonMax;
+        double texLat, texLon;
+    };
+
     // Channels: an ordered stack, bottom -> top. Pointers are borrowed (main owns sources).
     int AddColorChannel(const std::string& name, std::vector<ColorSource*> stack);
     int AddHeightChannel(const std::string& name, std::vector<HeightSource*> stack);
@@ -115,18 +121,35 @@ public:
     // The schema table, logged at startup: what feeds each channel, in what structure.
     void LogRegistry() const;
 
-    std::atomic<uint32_t> painted{0};     // tiles composed this run
-    std::atomic<uint32_t> cacheHits{0};   // tiles served from the composed cache
-
-private:
     struct Channel {
         std::string name;
         std::vector<ColorSource*> color;
         std::vector<HeightSource*> height;
-        uint64_t stackHash = 0;   // names + structures + version: changing the stack
-                                  // invalidates the composed cache, never poisons it
     };
-    std::string CachePath(const Channel& ch, const char* realization, const TileRequest& r) const;
+    // Public for the selftest: the soak rule is a CONTRACT, and contracts get pinned.
+    const Channel& ChannelAt(int id) const { return m_channels[id]; }
+    uint64_t ColorSubset(const Channel& ch, const TileBox& box,
+                         std::vector<size_t>& included) const;
+    uint64_t HeightSubset(const Channel& ch, const TileBox& box,
+                          std::vector<size_t>& included) const;
+
+    std::atomic<uint32_t> painted{0};     // tiles composed this run
+    std::atomic<uint32_t> cacheHits{0};   // tiles served from the composed cache
+
+private:
+    // M6k: THE SOAK RULE. A tile's cache identity hashes only the sources that MEANINGFULLY
+    // touch it: footprint intersects the tile AND spans >= ~2 texels at this LOD (in at least
+    // one axis). Everything the user asked of multi-LOD painting falls out by construction:
+    //  * a new source repaints exactly the tiles it can change -- at every LOD, coarser
+    //    (box-filtered 4->1, recursively: each LOD averages the source over its OWN texel
+    //    footprint) and finer (bilinear 1->4) alike;
+    //  * at a LOD so coarse the source would touch less than ~a texel, it drops OUT of the
+    //    subset, the tag reverts to the without-it identity, and the repaint short-circuits
+    //    into a cache HIT -- redundant paints never run;
+    //  * tiles a source never touched keep their identity forever.
+    // (ColorSubset/HeightSubset implement it; declared public above for the selftest.)
+    std::string CachePath(const Channel& ch, const char* realization, const TileRequest& r,
+                          uint64_t subset) const;
     bool ReadCached(const std::string& path, std::vector<uint8_t>& out);
     void WriteCached(const std::string& path, const std::vector<uint8_t>& data);
     void EnsureCacheDir(const Channel& ch, const char* realization);
