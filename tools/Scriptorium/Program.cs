@@ -246,9 +246,14 @@ static class McpServer
         string? line;
         while ((line = Console.ReadLine()) != null)
         {
+            // A BOM on the very first line (PowerShell pipes, some launchers) made Parse
+            // throw and the silent catch DROPPED the handshake -- the whole server looked
+            // dead to any client whose first message was initialize. Strip it.
+            line = line.TrimStart('\uFEFF', ' ', '\t');
             if (string.IsNullOrWhiteSpace(line)) continue;
             JsonNode? msg;
-            try { msg = JsonNode.Parse(line); } catch { continue; }
+            try { msg = JsonNode.Parse(line); }
+            catch (Exception e) { Console.Error.WriteLine($"[scriptorium] bad json: {e.Message}"); continue; }
             var method = msg?["method"]?.GetValue<string>();
             var id = msg?["id"];
             if (method == null) continue;

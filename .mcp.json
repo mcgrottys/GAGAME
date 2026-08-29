@@ -2,7 +2,7 @@
   "mcpServers": {
     "scriptorium": {
       "command": "dotnet",
-      "args": ["run", "--project", "tools/Scriptorium", "-c", "Release"],
+      "args": ["tools/Scriptorium/bin/Release/net10.0/Scriptorium.dll"],
       "env": {}
     }
   }
