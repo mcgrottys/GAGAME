@@ -16,3 +16,6 @@ rail_frames/
 swe_events.txt
 helm_events.csv
 data/swe_cycle.csv
+
+# The user's nested GeoAlgFun clone (redundant once GAGAME itself is published there).
+GeoAlgFun/
