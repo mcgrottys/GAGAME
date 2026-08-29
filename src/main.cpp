@@ -63,6 +63,8 @@ struct Options {
     std::wstring rail;                // --rail DIR: record the debug camera rails to PNGs
     std::string planet = "earth";     // M6e: earth | mars (the rescued sample's pyramids)
     uint32_t tileBudget = 1000;       // --tile-budget: hard cap on Google fetches per run
+    bool warmInlet = false;           // --warm-inlet: pre-cache the Merrimack detail pyramid
+    bool railZoom = false;            // --rail-zoom DIR: orbit -> inlet imagery zoom -> estuary
     double startUnix = -1;            // < 0 = now
     double timeScale = 1.0;           // sim seconds per wall second. REAL TIME by default --
                                       // waves at 900x looked like a kettle at full boil; the
@@ -156,6 +158,8 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--start") o.startUnix = ParseStartTime(next("0"));
         else if (a == "--scale") o.timeScale = atof(next("1").c_str());
         else if (a == "--rail") o.rail = Widen(next("rail_frames").c_str());
+        else if (a == "--rail-zoom") { o.rail = Widen(next("rail_frames").c_str()); o.railZoom = true; }
+        else if (a == "--warm-inlet") o.warmInlet = true;
         else if (a == "--planet") o.planet = next("earth");
         else if (a == "--tile-budget") o.tileBudget = static_cast<uint32_t>(atoi(next("1000").c_str()));
         else if (a == "--exagg") o.exaggeration = static_cast<float>(atof(next("60").c_str()));
@@ -197,10 +201,11 @@ Options ParseArgs(int argc, char** argv) {
     if (!o.dump.empty()) o.headless = true;
     if (o.sweCycleH > 0) o.headless = true;   // the validation cycle never opens a window
     if (!o.rail.empty()) {
-        // The rails demo: 25 s at 30 fps, headless, deterministic real-time waves.
+        // The rails demos: headless, deterministic real-time waves, 30 fps. Classic = 25 s;
+        // the zoom and Mars flyover run 30 s.
         o.headless = true;
         o.globeStart = true;
-        o.frames = 25 * 30;
+        o.frames = (o.railZoom || o.planet == "mars") ? 30 * 30 : 25 * 30;
         o.timeScale = 1.0;
     }
     if (o.planet == "mars") o.globeStart = true;   // there is only orbit on Mars (for now)
@@ -600,12 +605,20 @@ int main(int argc, char** argv) {
         }
 
         // M6: the planet (registered LAST -- it borrows root param 2 for its node list).
+        // M6f: which planet is a MODEL choice -- Mars loads MOLA into the same relief fields
+        // and the whole pipeline (texture, mips, camera clamps) serves it unchanged.
+        const bool marsMode = (opt.planet == "mars");
         GlobeModel globeModel;
+        GlobeModel marsModel;
+        if (marsMode) marsModel.LoadMars("data/globe/globe.json");
+        GlobeModel& activeGlobe =
+            (marsMode && marsModel.Ready()) ? marsModel : globeModel;
         GlobeLayer* globe = nullptr;
         if (globeModel.Load("data/globe/globe.json")) {
             auto globeOwned = std::make_unique<GlobeLayer>();
             globe = globeOwned.get();
-            globe->Configure(opt.shaderDir, &globeModel);
+            globe->Configure(opt.shaderDir, &activeGlobe);
+            globe->marsReliefValid = marsMode && marsModel.Ready();
             globe->windOverlay = opt.viz;
             globe->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             renderer.AddLayer(std::move(globeOwned));
@@ -618,11 +631,11 @@ int main(int argc, char** argv) {
         // streams Google 2D tiles (cache-first, throttled, budget-capped) reprojected onto the
         // same cube faces. Residency is driven by the CDLOD walk, clamped by residency-map
         // cubes, prefetched along the camera's screw.
-        const bool marsMode = (opt.planet == "mars");
         const double planetR = marsMode ? 3389500.0 : GlobeModel::kR;
         ResidencyManager resMgr;
         MarsBinProvider marsDiff, marsNorm;
         GoogleTileProvider googleTiles;
+        int detTenant = -1;
         if (globe) {
             resMgr.Init(gpu);
             int surf = -1, norm = -1;
@@ -639,6 +652,14 @@ int main(int argc, char** argv) {
                 surf = resMgr.AddTextureCube(gpu, L"earth.google2d", 16384,
                                              DXGI_FORMAT_R8G8B8A8_UNORM,
                                              googleTiles.Fn(&resMgr.fetchesThisRun));
+                // M6f: the Merrimack detail window -- a 64x64 block of z14 tiles (~9.5 m/px)
+                // centred on the inlet, mip m == zoom 14-m, fills are straight pixel copies.
+                const double orgX = 4935.0 * 256.0, orgY = 6008.0 * 256.0;
+                detTenant = resMgr.AddTexture2D(gpu, L"earth.merrimackDetail", 16384,
+                                                DXGI_FORMAT_R8G8B8A8_UNORM,
+                                                googleTiles.DetailFn(&resMgr.fetchesThisRun,
+                                                                     1263360, 1538048));
+                globe->SetDetail(detTenant, orgX, orgY, 16384.0);
             }
             globe->SetResidency((surf >= 0 || norm >= 0) ? &resMgr : nullptr, surf, norm,
                                 marsMode);
@@ -849,7 +870,40 @@ int main(int argc, char** argv) {
         //  10-15 s  descend to the north-jetty helm
         //  15-25 s  hold the helm while the real-time sea runs
         std::vector<std::pair<double, Motor>> railKeys;
-        if (globe && sea && bathy.Ready() && !marsMode) {
+        // A pose on any planet: stand at (lat, lon, alt), aim at a surface target.
+        auto orbPose = [&](double lat, double lon, double altM, double tLat, double tLon) {
+            Camera c;
+            double d[3];
+            GlobeModel::LatLonDir(lat, lon, d);
+            const double rr = planetR + altM;
+            c.px = d[0] * rr;
+            c.py = d[1] * rr;
+            c.pz = d[2] * rr;
+            double t[3];
+            GlobeModel::LatLonDir(tLat, tLon, t);
+            c.LookAt(t[0] * planetR, t[1] * planetR, t[2] * planetR);
+            return c;
+        };
+        if (globe && marsMode) {
+            // The Mars flyover: fall in over Valles Marineris, run the canyon west along its
+            // 4000 km, then climb toward Tharsis with Olympus Mons on the horizon.
+            railKeys.push_back({0.0, poseMotor(orbPose(10, -25, planetR * 1.1, -12, -58))});
+            railKeys.push_back({7.0, poseMotor(orbPose(-7, -40, 800e3, -13, -62))});
+            railKeys.push_back({13.0, poseMotor(orbPose(-11, -52, 220e3, -13, -72))});
+            railKeys.push_back({19.0, poseMotor(orbPose(-13, -68, 150e3, -11, -90))});
+            railKeys.push_back({26.0, poseMotor(orbPose(-6, -98, 600e3, 18.6, -133.8))});
+            railKeys.push_back({30.0, poseMotor(orbPose(-4, -104, 900e3, 18.6, -133.8))});
+        } else if (globe && opt.railZoom && bathy.Ready()) {
+            // The inlet zoom: orbit -> the warmed Google pyramid over the Merrimack -> low
+            // enough that the M6b handoff swaps in the CUDEM estuary. One unbroken shot,
+            // imagery LODs walking in under the residency clamp the whole way down.
+            railKeys.push_back({0.0, poseMotor(camGlobe)});
+            railKeys.push_back({8.0, poseMotor(orbPose(41.9, -71.6, 800e3, 42.8183, -70.81))});
+            railKeys.push_back({16.0, poseMotor(orbPose(42.55, -70.98, 80e3, 42.8183, -70.81))});
+            railKeys.push_back({23.0, poseMotor(orbPose(42.74, -70.87, 7e3, 42.8183, -70.81))});
+            railKeys.push_back({27.0, poseMotor(orbPose(42.79, -70.84, 2400.0, 42.8183, -70.81))});
+            railKeys.push_back({30.0, poseMotor(orbPose(42.80, -70.835, 2200.0, 42.8183, -70.81))});
+        } else if (globe && sea && bathy.Ready() && !marsMode) {
             const Motor k0 = poseMotor(camGlobe);
             Camera cMid;
             {
@@ -1073,6 +1127,35 @@ int main(int argc, char** argv) {
             }
         }
 
+        // M6f: pre-warm the Merrimack detail pyramid -- the whole window coarse, the inner
+        // rings progressively deeper, the inlet itself at z14 -- so a zoom NEVER waits on the
+        // network mid-flight. Everything fetched lands in the forever-cache: warming is a
+        // once-per-machine cost (re-runs drain instantly from disk).
+        if (opt.warmInlet && detTenant >= 0) {
+            struct WarmRing {
+                float a, b;
+                uint32_t mip;
+            };
+            const WarmRing rings[] = {
+                {0.00f, 1.00f, 3}, {0.28f, 0.72f, 2}, {0.38f, 0.62f, 1}, {0.44f, 0.56f, 0}};
+            for (const auto& w : rings) resMgr.Want(detTenant, 0, w.mip, w.a, w.a, w.b, w.b);
+            Log("[warm] pre-caching the Merrimack pyramid (%u budget; tiles land in "
+                "cache/google forever)",
+                opt.tileBudget);
+            for (int it = 0; it < 12000 && resMgr.PendingCount() > 0; ++it) {
+                ID3D12GraphicsCommandList* cl = gpu.BeginUpload();
+                resMgr.ProcessQueues(gpu, cl);
+                gpu.EndUpload();
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));   // loads need time
+                if (it % 150 == 0) {
+                    Log("[warm] pending %u, fetched %u", resMgr.PendingCount(),
+                        resMgr.fetchesThisRun);
+                }
+            }
+            Log("[warm] done: %u fetches this run, %s", resMgr.fetchesThisRun,
+                resMgr.stats.c_str());
+        }
+
         using Clock = std::chrono::steady_clock;
         auto last = Clock::now();
         auto lastTitle = last;
@@ -1225,11 +1308,12 @@ int main(int argc, char** argv) {
                 const double r2d = 180.0 / 3.14159265358979;
                 const double lat = std::asin(std::clamp(cam.py / r, -1.0, 1.0)) * r2d;
                 const double lon = std::atan2(cam.pz, cam.px) * r2d;
-                const double minR = planetR +
-                                    (marsMode ? 0.0
-                                              : (std::max)(0.0, globeModel.ElevAt(lat, lon)) *
-                                                    globe->reliefExagg) +
-                                    800.0;
+                const double minR =
+                    planetR +
+                    (activeGlobe.Ready()
+                         ? (std::max)(0.0, activeGlobe.ElevAt(lat, lon)) * globe->reliefExagg
+                         : 0.0) +
+                    800.0;
                 if (r < minR) {
                     const double s = minR / r;
                     cam.px *= s;

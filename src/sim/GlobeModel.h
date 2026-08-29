@@ -20,6 +20,10 @@ public:
     static constexpr double kR = 6371000.0;
 
     bool Load(const std::string& jsonPath);
+    // M6f: MOLA relief into the SAME fields (nx/ny/elev) so the whole relief pipeline --
+    // texture init, mips, ElevAt camera clamps -- serves Mars unchanged. Earth-only fields
+    // (waves, clouds, NE ring, wind) stay empty and their consumers gate on that.
+    bool LoadMars(const std::string& jsonPath);
     bool Ready() const { return m_nx > 0; }
 
     int Nx() const { return m_nx; }

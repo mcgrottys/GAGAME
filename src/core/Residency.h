@@ -77,7 +77,21 @@ public:
     // cube + SRV, and registers the provider. Packed mips are loaded and mapped up front (the
     // planet is never bald). Returns the tenant id.
     int AddTextureCube(Gpu& gpu, const wchar_t* name, uint32_t faceDim, DXGI_FORMAT fmt,
-                       TileProviderFn provider);
+                       TileProviderFn provider) {
+        return AddTextureInternal(gpu, name, faceDim, fmt, std::move(provider), 6);
+    }
+    // M6f: a single-face detail WINDOW (the Merrimack imagery pyramid) -- same machinery,
+    // arraySize 1, callers pass face 0.
+    int AddTexture2D(Gpu& gpu, const wchar_t* name, uint32_t dim, DXGI_FORMAT fmt,
+                     TileProviderFn provider) {
+        return AddTextureInternal(gpu, name, dim, fmt, std::move(provider), 1);
+    }
+
+    // Tiles known but not yet mapped (seen + loading + in flight). The warm-cache loop drains
+    // this to zero before the camera ever moves.
+    uint32_t PendingCount() const {
+        return static_cast<uint32_t>(m_seen.size() + m_loading.size());
+    }
 
     uint32_t TextureSrv(int tenant) const { return m_tenants[tenant].srv; }
     uint32_t ResidencySrv(int tenant) const { return m_tenants[tenant].resMapSrv; }
@@ -119,7 +133,7 @@ private:
         std::wstring name;
         Com<ID3D12Resource> res;
         DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
-        uint32_t faceDim = 0, mips = 0, packedMips = 0;
+        uint32_t faceDim = 0, mips = 0, packedMips = 0, faces = 6;
         uint32_t srv = UINT32_MAX;
         std::vector<D3D12_SUBRESOURCE_TILING> tilings;   // per subresource (face*mips + mip)
         TileProviderFn provider;
@@ -158,6 +172,8 @@ private:
         std::vector<uint8_t> sig;
     };
 
+    int AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t faceDim, DXGI_FORMAT fmt,
+                           TileProviderFn provider, uint32_t faces);
     void LoaderThread();
     uint32_t AcquirePoolTile(Gpu& gpu);
     void UpdateResidencyByte(Tenant& t, const TileRequest& r, bool mapped);

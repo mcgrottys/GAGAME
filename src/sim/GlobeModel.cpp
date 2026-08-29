@@ -28,6 +28,28 @@ bool ReadBin(const std::string& path, size_t count, std::vector<T>* out) {
 
 }  // namespace
 
+bool GlobeModel::LoadMars(const std::string& jsonPath) {
+    std::string text;
+    if (!ReadAll(jsonPath, &text)) return false;
+    std::string err;
+    const JsonValue js = JsonParser::Parse(text, &err);
+    if (!err.empty()) return false;
+    const std::string dir = jsonPath.substr(0, jsonPath.find_last_of("/\\") + 1);
+    m_nx = static_cast<int>(js.Num("mars_nx", 0));
+    m_ny = static_cast<int>(js.Num("mars_ny", 0));
+    const std::string relief = js.Str("mars_file");
+    if (m_nx <= 0 || m_ny <= 0 || relief.empty() ||
+        !ReadBin(dir + relief, static_cast<size_t>(m_nx) * m_ny, &m_elev)) {
+        Log("[globe] no MOLA relief (run: py -3 harvester\\harvest_globe.py); Mars stays a "
+            "textured sphere");
+        m_nx = 0;
+        return false;
+    }
+    Log("[globe] MOLA relief %dx%d loaded (%s)", m_nx, m_ny,
+        js.Str("mars_source", "MOLA").c_str());
+    return true;
+}
+
 bool GlobeModel::Load(const std::string& jsonPath) {
     std::string text;
     if (!ReadAll(jsonPath, &text)) return false;

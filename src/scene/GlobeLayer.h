@@ -50,6 +50,13 @@ public:
         m_streamMars = isMars;
     }
     void SetPlanetRadius(double r) { m_radius = r; }
+    // M6f: the Merrimack detail window (Mercator z14-pixel frame).
+    void SetDetail(int tenant, double orgPxX, double orgPxY, double sizePx) {
+        m_detT = tenant;
+        m_detOrg[0] = orgPxX;
+        m_detOrg[1] = orgPxY;
+        m_detSize = sizePx;
+    }
     uint32_t AirTiles() const {
         return (m_windReady ? m_windBank.ResidentCount() : 0) +
                (m_cloudReady ? m_cloud.ResidentCount() : 0);
@@ -63,6 +70,7 @@ public:
 
     float reliefExagg = 1.0f;       // set per frame by main (altitude-scaled display choice)
     bool windOverlay = false;       // V key: tint the Mv2 wind bank's curl (violet cyclonic)
+    bool marsReliefValid = false;   // M6f: the configured model's relief IS Mars (MOLA)
     std::string stats;              // "globe 214 nodes  alt 3520 km" for the title bar
 
 private:
@@ -87,7 +95,9 @@ private:
         float windGeo[4];     // wind grid: lat1, lon1, 1/dlat, 1/dlon
         float windB[4];       // nx, ny, unused, unused
         uint32_t streamU[4];  // M6e: surface cube SRV, normal cube SRV, their residency maps
-        float streamF[4];     // surface on, normal on, planet-is-Mars, unused
+        float streamF[4];     // surface on, normal on, planet-is-Mars, MOLA present
+        uint32_t detU[4];     // M6f: detail-window texture SRV, residency map SRV, on
+        float detGeo[4];      // Mercator z14-px window: org x, org y, 1/sizePx
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -143,7 +153,9 @@ private:
 
     // M6e: streaming.
     ResidencyManager* m_res = nullptr;
-    int m_surfT = -1, m_normT = -1;
+    int m_surfT = -1, m_normT = -1, m_detT = -1;
+    double m_detOrg[2] = {0, 0};
+    double m_detSize = 1;
     bool m_streamMars = false;
     bool m_predictPass = false;
     double m_radius = GlobeModel::kR;

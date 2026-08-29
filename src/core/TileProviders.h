@@ -46,13 +46,19 @@ public:
     // mapType: "satellite" (imagery). Reads the key, restores or creates the tile session.
     bool Init(const std::string& mapType, uint32_t fetchBudget);
     TileProviderFn Fn(uint32_t* fetchCounter);
+    // M6f: a Mercator-aligned detail WINDOW (the Merrimack pyramid). The window is a 64x64
+    // block of z14 tiles (16384 px, ~9.5 m/px at this latitude); mip m maps 1:1 onto zoom
+    // 14-m, so tile fills are straight pixel copies -- no resampling, no trig.
+    TileProviderFn DetailFn(uint32_t* fetchCounter, long long orgPxX, long long orgPxY);
     bool Ready() const { return !m_session.empty(); }
     const std::string& Attribution() const { return m_attribution; }
 
 private:
     bool EnsureSession();
     bool FetchTile(int z, int x, int y, std::vector<uint8_t>& jpg);
-    bool DecodedTile(int z, int x, int y, std::vector<uint8_t>** rgba);
+    // shared_ptr on purpose: workers hold decoded tiles across LRU evictions by other workers
+    // (a raw pointer here was a use-after-free that deadlocked the first warm run).
+    std::shared_ptr<std::vector<uint8_t>> DecodedTile(int z, int x, int y);
 
     std::string m_key, m_session, m_mapType = "satellite", m_attribution;
     uint32_t m_budget = 1000;
@@ -60,7 +66,7 @@ private:
     bool m_budgetLogged = false;
     long long m_lastFetchMs = 0;
     std::mutex m_mx;                     // guards cache map + throttle clock
-    std::map<uint64_t, std::vector<uint8_t>> m_decoded;   // small LRU of 256x256 RGBA tiles
+    std::map<uint64_t, std::shared_ptr<std::vector<uint8_t>>> m_decoded;
     std::vector<uint64_t> m_decodedOrder;
     uint32_t* m_counter = nullptr;
 };

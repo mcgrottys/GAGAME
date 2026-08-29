@@ -589,6 +589,47 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
         if (m_normT >= 0) {
             m_res->Want(m_normT, face, mip, tu0, tv0, tu1, tv1, m_predictPass);
         }
+        // M6f: the detail window's demand -- the node's corners in Mercator z14-pixel space,
+        // intersected with the window; its mip matches the same on-screen texel math against
+        // the window's OWN pyramid (mip 0 = z14).
+        if (m_detT >= 0) {
+            double mmin[2] = {1e18, 1e18}, mmax[2] = {-1e18, -1e18};
+            for (int cy = 0; cy < 3; ++cy) {
+                for (int cx = 0; cx < 3; ++cx) {
+                    double d[3];
+                    CubeDirD(face, u0 + size * cx * 0.5, v0 + size * cy * 0.5, d);
+                    const double lat = std::asin(std::clamp(d[1], -1.0, 1.0));
+                    const double lon = std::atan2(d[2], d[0]);
+                    const double n14 = 16384.0 * 256.0;
+                    const double mx = (lon / 3.14159265358979 * 0.5 + 0.5) * n14;
+                    const double latC = std::clamp(lat, -1.4844, 1.4844);
+                    const double my =
+                        (0.5 - std::log(std::tan(0.7853981634 + latC * 0.5)) /
+                                   (2.0 * 3.14159265358979)) *
+                        n14;
+                    mmin[0] = (std::min)(mmin[0], mx);
+                    mmin[1] = (std::min)(mmin[1], my);
+                    mmax[0] = (std::max)(mmax[0], mx);
+                    mmax[1] = (std::max)(mmax[1], my);
+                }
+            }
+            const double du0 = (mmin[0] - m_detOrg[0]) / m_detSize;
+            const double dv0 = (mmin[1] - m_detOrg[1]) / m_detSize;
+            const double du1 = (mmax[0] - m_detOrg[0]) / m_detSize;
+            const double dv1 = (mmax[1] - m_detOrg[1]) / m_detSize;
+            if (du1 > 0.0 && dv1 > 0.0 && du0 < 1.0 && dv0 < 1.0) {
+                const double px = arc / ((std::max)(dist, 1.0) * (std::max)(m_pixAng, 1e-6f));
+                const double span = (std::max)(du1 - du0, dv1 - dv0);
+                const double texAtMip0 = span * 16384.0;
+                const int dmip = (std::max)(
+                    0, static_cast<int>(std::ceil(
+                           std::log2((std::max)(texAtMip0 / (std::max)(px, 16.0), 1.0)))));
+                m_res->Want(m_detT, 0, dmip, static_cast<float>((std::max)(du0, 0.0)),
+                            static_cast<float>((std::max)(dv0, 0.0)),
+                            static_cast<float>((std::min)(du1, 1.0)),
+                            static_cast<float>((std::min)(dv1, 1.0)), m_predictPass);
+            }
+        }
     }
     if (m_predictPass) return;   // prefetch walk: wants only, no draw nodes
 
@@ -709,6 +750,14 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.streamF[0] = surfOn ? 1.0f : 0.0f;
     m_cb.streamF[1] = normOn ? 1.0f : 0.0f;
     m_cb.streamF[2] = m_streamMars ? 1.0f : 0.0f;
+    m_cb.streamF[3] = marsReliefValid ? 1.0f : 0.0f;   // MOLA present: displace + shade it
+    const bool detOn = m_res && m_detT >= 0 && !m_streamMars;
+    m_cb.detU[0] = detOn ? m_res->TextureSrv(m_detT) : UINT32_MAX;
+    m_cb.detU[1] = detOn ? m_res->ResidencySrv(m_detT) : UINT32_MAX;
+    m_cb.detU[2] = detOn ? 1u : 0u;
+    m_cb.detGeo[0] = static_cast<float>(m_detOrg[0]);
+    m_cb.detGeo[1] = static_cast<float>(m_detOrg[1]);
+    m_cb.detGeo[2] = static_cast<float>(1.0 / m_detSize);
     if (m_streamMars) {
         m_cb.texIdx[1] = m_cb.texIdx[2] = m_cb.texIdx[3] = UINT32_MAX;   // waves/wind/clouds
         m_cb.texIdx2[0] = m_cb.texIdx2[1] = UINT32_MAX;                  // NE ring / wind bank

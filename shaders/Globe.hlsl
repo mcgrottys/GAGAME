@@ -35,7 +35,9 @@ cbuffer GlobeCb : register(b1) {
     float4 gWindB;      // x = nx, y = ny
     uint4  gStreamU;    // M6e streamed surfaces (cube SRVs): x = surface, y = normal (Mars BC5),
                         // z = surface residency map, w = normal residency map
-    float4 gStreamF;    // x = surface on, y = normal on, z = planet is Mars, w unused
+    float4 gStreamF;    // x = surface on, y = normal on, z = planet is Mars, w = MOLA present
+    uint4  gDetU;       // M6f detail window: x = texture SRV (2D), y = residency map, z = on
+    float4 gDetGeo;     // Mercator z14-pixel window: org x, org y, 1/sizePx, unused
 };
 
 // M6e: sample a streamed cube with the classic residency clamp -- the R8 residency-map cube
@@ -150,9 +152,11 @@ VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
 
     const float3 dir = CubeDir(nd.face, nd.uv0 + g * nd.uvStep);
     float wNeUnused;
-    // Mars streams color+normals but has no relief source yet: a true sphere (MOLA heights are
-    // a follow-up tenant; the BC5 normals carry the shape to the eye).
-    const float h = (gStreamF.z > 0.5f) ? 0.0f : ReliefBlended(dir, 0.0f, wNeUnused);
+    // M6f: Mars displaces MOLA when the harvester has delivered it (streamF.w); a Mars run
+    // without MOLA stays a textured sphere rather than wearing Earth's relief.
+    const float h = (gStreamF.z > 0.5f && gStreamF.w < 0.5f)
+                        ? 0.0f
+                        : ReliefBlended(dir, 0.0f, wNeUnused);
 
     VsOut o;
     o.dir = dir;
@@ -275,6 +279,30 @@ float4 PsMain(VsOut i) : SV_Target {
         float3 img = StreamedSample(gStreamU.x, gStreamU.z, up);
         img = img * img * 1.2f;
         alb = (i.h > 0.0f) ? img : lerp(alb, img, 0.6f * saturate(1.0f + i.h / 80.0f));
+    }
+
+    // ---- M6f: the Merrimack detail window -- deeper imagery inside a Mercator-aligned rect,
+    // CONTINUOUS by construction: a feathered edge blend, and the residency clamp inside (its
+    // coarsest always-resident mip matches the global cube's quality, so an unstreamed region
+    // just looks like the globe). No LOD branches; the manager makes every sample defined.
+    if (gDetU.z != 0u && gStreamF.z < 0.5f) {
+        const float n14 = 16384.0f * 256.0f;
+        const float mx = (lonDegPx + 180.0f) / 360.0f * n14;
+        const float my =
+            (0.5f - log(tan(0.785398163f + lat * 0.5f)) / (2.0f * kPi)) * n14;
+        const float2 duv = (float2(mx, my) - gDetGeo.xy) * gDetGeo.z;
+        if (all(duv > 0.0f) && all(duv < 1.0f)) {
+            const float2 fe = smoothstep(0.0f, 0.06f, duv) * smoothstep(1.0f, 0.94f, duv);
+            const float wantD = gTex[gDetU.x].CalculateLevelOfDetail(sLinearClamp, duv);
+            const float haveD =
+                gTex[gDetU.y].SampleLevel(sPointClamp, duv, 0).x * 255.0f / 16.0f;
+            float3 img = gTex[gDetU.x].SampleLevel(sLinearClamp, duv, max(wantD, haveD)).rgb;
+            img = img * img * 1.2f;
+            const float w = fe.x * fe.y;
+            const float3 target =
+                (i.h > 0.0f) ? img : lerp(alb, img, 0.6f * saturate(1.0f + i.h / 80.0f));
+            alb = lerp(alb, target, w);
+        }
     }
 
     // ---- M6c: the live 3D sky. One column sample shades the ground under weather...

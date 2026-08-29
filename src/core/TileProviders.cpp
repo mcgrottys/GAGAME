@@ -106,6 +106,7 @@ static bool Http(const wchar_t* method, const std::wstring& host, const std::wst
                                 WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
                                 WINHTTP_NO_PROXY_BYPASS, 0);
     if (!ses) return false;
+    WinHttpSetTimeouts(ses, 10000, 10000, 15000, 30000);
     HINTERNET con = WinHttpConnect(ses, host.c_str(), INTERNET_DEFAULT_HTTPS_PORT, 0);
     HINTERNET req = con ? WinHttpOpenRequest(con, method, path.c_str(), nullptr,
                                              WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
@@ -245,19 +246,16 @@ bool GoogleTileProvider::FetchTile(int z, int x, int y, std::vector<uint8_t>& jp
 }
 
 // Decode (or serve from the small in-memory LRU) one 256x256 google tile as RGBA.
-bool GoogleTileProvider::DecodedTile(int z, int x, int y, std::vector<uint8_t>** rgba) {
+std::shared_ptr<std::vector<uint8_t>> GoogleTileProvider::DecodedTile(int z, int x, int y) {
     const uint64_t key = (static_cast<uint64_t>(z) << 48) | (static_cast<uint64_t>(x) << 24) |
                          static_cast<uint64_t>(y);
     {
         std::lock_guard<std::mutex> lk(m_mx);
         auto it = m_decoded.find(key);
-        if (it != m_decoded.end()) {
-            *rgba = &it->second;
-            return true;
-        }
+        if (it != m_decoded.end()) return it->second;
     }
     std::vector<uint8_t> jpg;
-    if (!FetchTile(z, x, y, jpg)) return false;
+    if (!FetchTile(z, x, y, jpg)) return nullptr;
 
     // WIC decode on this worker thread (COM per-thread init).
     thread_local bool comInit = false;
@@ -268,7 +266,7 @@ bool GoogleTileProvider::DecodedTile(int z, int x, int y, std::vector<uint8_t>**
     Com<IWICImagingFactory> fac;
     if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
                                 IID_PPV_ARGS(&fac)))) {
-        return false;
+        return nullptr;
     }
     Com<IWICStream> stream;
     fac->CreateStream(&stream);
@@ -276,7 +274,7 @@ bool GoogleTileProvider::DecodedTile(int z, int x, int y, std::vector<uint8_t>**
     Com<IWICBitmapDecoder> dec;
     if (FAILED(fac->CreateDecoderFromStream(stream.Get(), nullptr,
                                             WICDecodeMetadataCacheOnDemand, &dec))) {
-        return false;
+        return nullptr;
     }
     Com<IWICBitmapFrameDecode> frame;
     dec->GetFrame(0, &frame);
@@ -285,21 +283,20 @@ bool GoogleTileProvider::DecodedTile(int z, int x, int y, std::vector<uint8_t>**
     if (FAILED(conv->Initialize(frame.Get(), GUID_WICPixelFormat32bppRGBA,
                                 WICBitmapDitherTypeNone, nullptr, 0.0,
                                 WICBitmapPaletteTypeCustom))) {
-        return false;
+        return nullptr;
     }
-    std::vector<uint8_t> px(256 * 256 * 4);
-    if (FAILED(conv->CopyPixels(nullptr, 256 * 4, static_cast<UINT>(px.size()), px.data()))) {
-        return false;
+    auto px = std::make_shared<std::vector<uint8_t>>(256 * 256 * 4);
+    if (FAILED(conv->CopyPixels(nullptr, 256 * 4, static_cast<UINT>(px->size()), px->data()))) {
+        return nullptr;
     }
     std::lock_guard<std::mutex> lk(m_mx);
     if (m_decoded.size() >= 96) {   // small LRU: neighbours reuse heavily during reprojection
         m_decoded.erase(m_decodedOrder.front());
         m_decodedOrder.erase(m_decodedOrder.begin());
     }
-    m_decoded[key] = std::move(px);
+    m_decoded[key] = px;
     m_decodedOrder.push_back(key);
-    *rgba = &m_decoded[key];
-    return true;
+    return px;
 }
 
 // The HARDWARE cubemap convention (D3D spec), NOT our CDLOD CubeDir: TextureCube.Sample
@@ -356,14 +353,41 @@ TileProviderFn GoogleTileProvider::Fn(uint32_t* fetchCounter) {
                                           (std::max)(0, static_cast<int>(mx)));
                 const int gy = (std::min)(static_cast<int>(n) - 1,
                                           (std::max)(0, static_cast<int>(my)));
-                std::vector<uint8_t>* tile = nullptr;
-                if (!DecodedTile(z, gx / 256, gy / 256, &tile)) continue;   // stays black
+                const auto tile = DecodedTile(z, gx / 256, gy / 256);
+                if (!tile) continue;   // stays black
                 const uint8_t* s = &(*tile)[((gy & 255) * 256 + (gx & 255)) * 4];
                 uint8_t* dpx = &out[(py * 128 + px) * 4];
                 dpx[0] = s[0];
                 dpx[1] = s[1];
                 dpx[2] = s[2];
                 dpx[3] = 255;
+            }
+        }
+        return true;
+    };
+}
+
+TileProviderFn GoogleTileProvider::DetailFn(uint32_t* fetchCounter, long long orgPxX,
+                                            long long orgPxY) {
+    m_counter = fetchCounter;
+    return [this, orgPxX, orgPxY](const TileRequest& r, std::vector<uint8_t>& out) {
+        const int z = (std::max)(0, 14 - static_cast<int>(r.mip));
+        const long long gx0 = (orgPxX >> r.mip) + static_cast<long long>(r.x) * 128;
+        const long long gy0 = (orgPxY >> r.mip) + static_cast<long long>(r.y) * 128;
+        out.assign(65536, 0);
+        for (uint32_t py = 0; py < 128; ++py) {
+            const long long gy = gy0 + py;
+            for (uint32_t px = 0; px < 128; ++px) {
+                const long long gx = gx0 + px;
+                const auto tile =
+                    DecodedTile(z, static_cast<int>(gx >> 8), static_cast<int>(gy >> 8));
+                if (!tile) continue;
+                const uint8_t* s = &(*tile)[((gy & 255) * 256 + (gx & 255)) * 4];
+                uint8_t* d = &out[(py * 128 + px) * 4];
+                d[0] = s[0];
+                d[1] = s[1];
+                d[2] = s[2];
+                d[3] = 255;
             }
         }
         return true;

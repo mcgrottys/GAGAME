@@ -352,11 +352,56 @@ def do_wind_vec():
     return {}
 
 
+MOLA_URLS = [
+    "https://pds-geosciences.wustl.edu/mgs/mgs-m-mola-5-megdr-l3-v1/mgsl_300x/meg016/"
+    "megt90n000eb.img",
+    "https://planetarymaps.usgs.gov/mosaic/Mars_MGS_MOLA_DEM_mosaic_global_463m.tif",  # fallback
+]
+
+
+def do_mars():
+    """MOLA MEGDR global topography, 16 px/degree (5760x2880 big-endian int16, ~32 MB, one
+    cached download) -- Mars's bones for the globe's relief pipeline. Metres about the areoid,
+    Hellas -8 km to Olympus +21 km."""
+    img_path = os.path.join(CACHE, "megt90n000eb.img")
+    fetch_big(MOLA_URLS[:1], img_path)
+    with open(img_path, "rb") as f:
+        raw = f.read()
+    nx, ny = 5760, 2880
+    if len(raw) != nx * ny * 2:
+        raise RuntimeError(f"MEGDR size {len(raw)} != {nx * ny * 2}; layout assumption broken")
+    vals = array("h")
+    vals.frombytes(raw)
+    vals.byteswap()   # PDS MSB -> LE
+    # MEGDR rows start at lon 0; the engine's equirect convention (ETOPO) starts at -180.
+    rolled = array("h", [0]) * (nx * ny)
+    half = nx // 2
+    for y in range(ny):
+        row = vals[y * nx:(y + 1) * nx]
+        rolled[y * nx:y * nx + half] = row[half:]
+        rolled[y * nx + half:(y + 1) * nx] = row[:half]
+    vals = rolled
+    os.makedirs(OUT, exist_ok=True)
+    with open(os.path.join(OUT, "mars_relief.i16"), "wb") as f:
+        vals.tofile(f)
+    lo, hi = min(vals), max(vals)
+    log(f"  wrote data/globe/mars_relief.i16 ({nx}x{ny} int16, range {lo}..{hi} m)")
+    return {"mars_file": "mars_relief.i16", "mars_nx": nx, "mars_ny": ny,
+            "mars_lon0": 0.0, "mars_lat0": 90.0,
+            "mars_source": "MOLA MEGDR 16ppd (PDS Geosciences)"}
+
+
 def main():
     meta = {}
     if "--skip-etopo" not in sys.argv:
         log("[etopo] global relief")
         meta.update(do_etopo())
+    if "--skip-mars" not in sys.argv:
+        log("[mars] MOLA relief")
+        try:
+            meta.update(do_mars())
+        except Exception as e:  # noqa: BLE001
+            log(f"  MOLA unavailable ({e}); Mars stays a textured sphere")
     if "--skip-ne" not in sys.argv:
         log("[ne15] New England 15-arc-second window")
         meta.update(do_ne15())

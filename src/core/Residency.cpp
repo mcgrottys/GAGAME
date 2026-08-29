@@ -52,12 +52,14 @@ void ResidencyManager::LoaderThread() {
     }
 }
 
-int ResidencyManager::AddTextureCube(Gpu& gpu, const wchar_t* name, uint32_t faceDim,
-                                     DXGI_FORMAT fmt, TileProviderFn provider) {
+int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t faceDim,
+                                         DXGI_FORMAT fmt, TileProviderFn provider,
+                                         uint32_t faces) {
     Tenant t;
     t.name = name;
     t.fmt = fmt;
     t.faceDim = faceDim;
+    t.faces = faces;
     t.provider = std::move(provider);
 
     // Mip chain stops at the ONE-TILE level, so there are no packed mips and every tile takes
@@ -79,7 +81,7 @@ int ResidencyManager::AddTextureCube(Gpu& gpu, const wchar_t* name, uint32_t fac
     rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     rd.Width = faceDim;
     rd.Height = faceDim;
-    rd.DepthOrArraySize = 6;
+    rd.DepthOrArraySize = static_cast<UINT16>(faces);
     rd.MipLevels = static_cast<UINT16>(mips);
     rd.Format = fmt;
     rd.SampleDesc.Count = 1;
@@ -89,7 +91,7 @@ int ResidencyManager::AddTextureCube(Gpu& gpu, const wchar_t* name, uint32_t fac
     t.res->SetName(name);
     t.mips = mips;
 
-    UINT numSub = mips * 6;
+    UINT numSub = mips * faces;
     t.tilings.resize(numSub);
     UINT totalTiles = 0;
     D3D12_PACKED_MIP_INFO packed{};
@@ -101,25 +103,30 @@ int ResidencyManager::AddTextureCube(Gpu& gpu, const wchar_t* name, uint32_t fac
         name, faceDim, faceDim, mips, totalTiles, totalTiles / 16.0, shape.WidthInTexels,
         shape.HeightInTexels);
 
-    // Whole-chain cube SRV.
+    // Whole-chain SRV (cube for 6 faces, plain 2D for a window).
     t.srv = gpu.SrvHeap().Alloc();
     D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sv.Format = fmt;
-    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
-    sv.TextureCube.MipLevels = mips;
+    if (faces == 6) {
+        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+        sv.TextureCube.MipLevels = mips;
+    } else {
+        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+        sv.Texture2D.MipLevels = mips;
+    }
     gpu.Device()->CreateShaderResourceView(t.res.Get(), &sv, gpu.SrvHeap().Cpu(t.srv));
 
-    // Residency map: R8 cube at base-tile granularity, initialized to "coarsest only".
+    // Residency map: R8 at base-tile granularity, initialized to "coarsest only".
     const uint32_t rw = t.tilings[0].WidthInTiles, rh = t.tilings[0].HeightInTiles;
     const uint32_t rdim = (std::max)(rw, rh);
-    for (int f = 0; f < 6; ++f) t.resCpu[f].assign(rdim * rdim, (mips - 1) * 16);
+    for (uint32_t f = 0; f < faces; ++f) t.resCpu[f].assign(rdim * rdim, (mips - 1) * 16);
     {
         D3D12_RESOURCE_DESC md{};
         md.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
         md.Width = rdim;
         md.Height = rdim;
-        md.DepthOrArraySize = 6;
+        md.DepthOrArraySize = static_cast<UINT16>(faces);
         md.MipLevels = 1;
         md.Format = DXGI_FORMAT_R8_UNORM;
         md.SampleDesc.Count = 1;
@@ -137,8 +144,13 @@ int ResidencyManager::AddTextureCube(Gpu& gpu, const wchar_t* name, uint32_t fac
         D3D12_SHADER_RESOURCE_VIEW_DESC rv{};
         rv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         rv.Format = DXGI_FORMAT_R8_UNORM;
-        rv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
-        rv.TextureCube.MipLevels = 1;
+        if (faces == 6) {
+            rv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
+            rv.TextureCube.MipLevels = 1;
+        } else {
+            rv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            rv.Texture2D.MipLevels = 1;
+        }
         gpu.Device()->CreateShaderResourceView(t.resMap.res.Get(), &rv,
                                                gpu.SrvHeap().Cpu(t.resMapSrv));
         t.resDirty = true;
@@ -149,7 +161,7 @@ int ResidencyManager::AddTextureCube(Gpu& gpu, const wchar_t* name, uint32_t fac
 
     // Seed: the coarsest mip of every face wanted immediately (and pinned by construction --
     // eviction never touches the last mip).
-    for (uint32_t f = 0; f < 6; ++f) Want(id, f, mips - 1, 0, 0, 1, 1);
+    for (uint32_t f = 0; f < faces; ++f) Want(id, f, mips - 1, 0, 0, 1, 1);
     return id;
 }
 
@@ -315,10 +327,10 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         // upload ring slab (tiles never fill it completely because batch <= kMaxMapsPerFrame).
         GpuBuffer& ring = m_uploadRing[gpu.FrameIndex()];
         const uint64_t tail = static_cast<uint64_t>(kMaxMapsPerFrame) * 65536 -
-                              static_cast<uint64_t>(pitch) * rdim * 6;
+                              static_cast<uint64_t>(pitch) * rdim * t.faces;
         uint8_t* dst = ring.cpu + tail;
         gpu.Transition(cl, t.resMap, D3D12_RESOURCE_STATE_COPY_DEST);
-        for (uint32_t f = 0; f < 6; ++f) {
+        for (uint32_t f = 0; f < t.faces; ++f) {
             for (uint32_t y = 0; y < rdim; ++y) {
                 memcpy(dst + (static_cast<uint64_t>(f) * rdim + y) * pitch,
                        &t.resCpu[f][y * rdim], rdim);
