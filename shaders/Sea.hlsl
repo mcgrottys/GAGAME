@@ -249,7 +249,11 @@ VsOut DsMain(HsPatch hs, float2 uv : SV_DomainLocation, const OutputPatch<VsCtl,
         d.xz *= 0.85f;
     }
 
-    const float3 world = float3(xz.x + d.x, lvl + d.y, xz.y + d.z);
+    // M6g one-world: the flat frame is the tangent at the estuary origin; the sea rides the
+    // SPHERE, so far vertices take the curvature drop (28 m by the window edge). Physics stays
+    // flat -- only the rendered position bends.
+    const float drop = dot(xz, xz) / (2.0f * 6371000.0f);
+    const float3 world = float3(xz.x + d.x, lvl + d.y - drop, xz.y + d.z);
     o.worldXZ = xz;
     o.sh = float2(depth, dryGuard);
     o.rel = world - gEyeRel.xyz;

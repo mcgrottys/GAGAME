@@ -33,7 +33,10 @@ VsOut VsMain(uint vid : SV_VertexID) {
     const float2 uv = float2(ix + cc[corner].x, iz + cc[corner].y) / float2(qx, qz);
     float h = HeightAt(uv);
     if (h < -9000.0f) h = -35.0f;   // nodata: drop to deep floor, far below every camera
-    const float3 world = float3(gTGeo.x + uv.x * gTGeo.z, h, gTGeo.y + uv.y * gTGeo.w);
+    float3 world = float3(gTGeo.x + uv.x * gTGeo.z, h, gTGeo.y + uv.y * gTGeo.w);
+    // M6g one-world: the CUDEM patch rides the SPHERE -- far corners take the curvature drop
+    // so the window sits ON the globe instead of hovering 28 m above it at the edges.
+    world.y -= (world.x * world.x + world.z * world.z) / (2.0f * 6371000.0f);
     o.uv = uv;
     o.elev = h;
     o.rel = world - gEyeRel.xyz;

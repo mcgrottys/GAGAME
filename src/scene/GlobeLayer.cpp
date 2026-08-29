@@ -484,7 +484,12 @@ bool GlobeLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
         d.SampleMask = UINT_MAX;
         d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
         d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        d.DepthStencilState.DepthEnable = FALSE;
+        // M6g: the backdrop touches ONLY untouched pixels (VsSky emits z=0 = reversed-Z
+        // infinity; cleared depth is 0, drawn geometry is > 0, so GREATER_EQUAL passes only
+        // where the frame is still empty). No write: it stays a backdrop.
+        d.DepthStencilState.DepthEnable = TRUE;
+        d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
         d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
         d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
         d.NumRenderTargets = 1;
@@ -535,18 +540,22 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
     CubeDirD(face, u0 + size * 0.5, v0 + size * 0.5, dir);
     const double arc = (kPi / 2.0) * R / (1 << level);   // ground span of this node, m
 
-    const double rel[3] = {dir[0] * R - m_camPos[0], dir[1] * R - m_camPos[1],
-                           dir[2] * R - m_camPos[2]};
+    // M6g: node position in the TANGENT frame (doubles; the same frame the camera lives in).
+    const double px = dir[0] * R, py = dir[1] * R, pz = dir[2] * R;
+    const double tx = m_frameE[0] * px + m_frameE[1] * py + m_frameE[2] * pz;
+    const double ty = m_frameU[0] * px + m_frameU[1] * py + m_frameU[2] * pz - R;
+    const double tz = m_frameN[0] * px + m_frameN[1] * py + m_frameN[2] * pz;
+    const double rel[3] = {tx - m_camPos[0], ty - m_camPos[1], tz - m_camPos[2]};
     const double dist =
         std::sqrt(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]);
 
-    // Horizon cull: a node whose whole extent lies past the limb cannot be seen. (Angles, not
-    // dots: both can exceed 90 degrees.)
-    const double r = std::sqrt(m_camPos[0] * m_camPos[0] + m_camPos[1] * m_camPos[1] +
-                               m_camPos[2] * m_camPos[2]);
+    // Horizon cull in the planet frame (angles, not dots: both can exceed 90 degrees).
+    const double r =
+        std::sqrt(m_camPlanet[0] * m_camPlanet[0] + m_camPlanet[1] * m_camPlanet[1] +
+                  m_camPlanet[2] * m_camPlanet[2]);
     if (r > R + 10000.0) {
-        const double cosA = (dir[0] * m_camPos[0] + dir[1] * m_camPos[1] +
-                             dir[2] * m_camPos[2]) / r;
+        const double cosA = (dir[0] * m_camPlanet[0] + dir[1] * m_camPlanet[1] +
+                             dir[2] * m_camPlanet[2]) / r;
         const double ang = std::acos(std::clamp(cosA, -1.0, 1.0));
         const double horizon = std::acos(std::clamp(R / r, 0.0, 1.0));
         const double nodeAng = arc * 0.80 / R;   // generous half-diagonal
@@ -673,9 +682,15 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     if (!m_relief.Valid() && !m_streamMars) return;
     m_viewportH = viewportH;
     m_pixAng = cam.fovY / (std::max)(viewportH, 1.0f);   // the walk needs it BEFORE wavesB
+    // M6g: cam is the FLAT (tangent-frame) camera. Keep it for node culling, and derive the
+    // planet-frame position (doubles) for the horizon test.
     m_camPos[0] = cam.px;
     m_camPos[1] = cam.py;
     m_camPos[2] = cam.pz;
+    const double ry = m_radius + cam.py;
+    for (int i = 0; i < 3; ++i) {
+        m_camPlanet[i] = m_frameU[i] * ry + m_frameE[i] * cam.px + m_frameN[i] * cam.pz;
+    }
 
     // Frustum planes from the camera-relative view-projection (reversed-Z: use the 4 side
     // planes + near; there is no far plane).
@@ -705,9 +720,21 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.glo[1] = reliefExagg;
     m_cb.glo[2] = static_cast<float>(m_nodes.size());
     m_cb.glo[3] = static_cast<float>(std::fmod(simTime, 3600.0));
+    // M6g: gCamAbs = sphere-CENTRED tangent camera (flat + (0,R,0); the sum in doubles).
     m_cb.camAbs[0] = static_cast<float>(m_camPos[0]);
-    m_cb.camAbs[1] = static_cast<float>(m_camPos[1]);
+    m_cb.camAbs[1] = static_cast<float>(m_camPos[1] + m_radius);
     m_cb.camAbs[2] = static_cast<float>(m_camPos[2]);
+    for (int i = 0; i < 3; ++i) {
+        m_cb.frameR0[i] = static_cast<float>(m_frameE[i]);
+        m_cb.frameR1[i] = static_cast<float>(m_frameU[i]);
+        m_cb.frameR2[i] = static_cast<float>(m_frameN[i]);
+    }
+    m_cb.estGeo[0] = static_cast<float>(m_estGeo[0]);
+    m_cb.estGeo[1] = static_cast<float>(m_estGeo[1]);
+    m_cb.estGeo[2] =
+        m_estGeo[2] > 0.0 ? static_cast<float>(1.0 / m_estGeo[2]) : 0.0f;
+    m_cb.estGeo[3] =
+        (m_estGeo[3] > 0.0 && !m_streamMars) ? static_cast<float>(1.0 / m_estGeo[3]) : 0.0f;
     m_cb.texIdx[0] = m_relief.srv;
     m_cb.texIdx[1] = m_hs.Valid() ? m_hs.srv : UINT32_MAX;
     m_cb.texIdx[2] = m_wind.Valid() ? m_wind.srv : UINT32_MAX;
@@ -800,7 +827,7 @@ void GlobeLayer::Render(const FrameContext& ctx) {
     const D3D12_GPU_VIRTUAL_ADDRESS cbVa = ctx.gpu->PushConstants(&m_cb, sizeof(m_cb));
 
     // 1) The atmosphere backdrop: limb scatter + sun for every ray that misses the planet.
-    if (m_skyPso) {
+    if (m_skyPso && skyPassEnabled) {
         PixMarker(ctx.cl, "globe.sky (single-scatter shell: the limb past the disc)");
         ctx.cl->SetPipelineState(m_skyPso.Get());
         ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);

@@ -714,16 +714,19 @@ int main(int argc, char** argv) {
             }
         }
 
-        int mode = (opt.globeStart && globe) ? 3
-                 : (opt.gulfStart && gulf)   ? 2
-                 : (opt.seaStart && sea)     ? 1 : 0;
+        // M6g: THREE views, not four -- 0 chart, 1 THE WORLD (estuary and planet, one
+        // continuous scene), 2 gulf map. --sea and --globe both open the world; they differ
+        // only in the starting camera. Per-frame altitude gates refine world-mode layer
+        // enables continuously (sky hands to the limb shell, the FFT sea sheds at height).
+        int mode = ((opt.globeStart || opt.seaStart) && (sea || globe)) ? 1
+                 : (opt.gulfStart && gulf)                              ? 2 : 0;
         auto applyMode = [&](int m) {
-            sky->enabled = (m != 3);   // in space, space is the backdrop
+            sky->enabled = (m != 1);   // world mode gates the sky per frame by altitude
             tide->enabled = (m == 0);
-            if (sea) sea->enabled = (m == 1);
-            if (terrain) terrain->enabled = (m == 1);
+            if (sea) sea->enabled = (m == 1) && !marsMode;      // no Merrimack on Mars
+            if (terrain) terrain->enabled = (m == 1) && !marsMode;
             if (gulf) gulf->enabled = (m == 2);
-            if (globe) globe->enabled = (m == 3);
+            if (globe) globe->enabled = (m == 1);
         };
         applyMode(mode);
 
@@ -769,15 +772,16 @@ int main(int argc, char** argv) {
             camGlobe.speed = 800000.0f;
         }
         Camera camChart = cam;
-        if (mode == 1) cam = camSea;
-        if (mode == 3) cam = camGlobe;
+        if (mode == 1) cam = camSea;   // camGlobe start applies below, after frame conversion
 
-        // ---- M6b: the two frames JOINED. The estuary's flat world is the local tangent frame
-        // at the ACT0816 origin; below ~3 km near home the estuary takes over, above ~4 km the
-        // planet does. Both directions map position AND aim exactly, so crossing the seam is a
-        // continuous camera move (hysteresis keeps it from flapping).
+        // ---- M6g: ONE WORLD, ONE FRAME. Everything renders in the estuary's tangent frame
+        // (the planet's centre sits at flat (0, -R, 0)); the globe rotates into it, the
+        // estuary layers were always in it, and the old mode-switch handoff -- the last
+        // smoke-and-mirror in the engine -- is DELETED. The pose maps below survive only to
+        // express orbit keyframes and cull volumes. (Mars anchors its frame at (0N, 0E).)
         double oDir[3], east0[3], north0[3];
-        GlobeModel::LatLonDir(BathyModel::kOrgLat, BathyModel::kOrgLon, oDir);
+        GlobeModel::LatLonDir(marsMode ? 0.0 : BathyModel::kOrgLat,
+                              marsMode ? 0.0 : BathyModel::kOrgLon, oDir);
         {
             const double yl = std::sqrt(oDir[0] * oDir[0] + oDir[2] * oDir[2]);
             east0[0] = -oDir[2] / yl; east0[1] = 0.0; east0[2] = oDir[0] / yl;   // y-hat x up
@@ -789,7 +793,7 @@ int main(int argc, char** argv) {
             Camera f = g;
             const double p[3] = {g.px, g.py, g.pz};
             f.px = p[0] * east0[0] + p[1] * east0[1] + p[2] * east0[2];
-            f.py = p[0] * oDir[0] + p[1] * oDir[1] + p[2] * oDir[2] - GlobeModel::kR;
+            f.py = p[0] * oDir[0] + p[1] * oDir[1] + p[2] * oDir[2] - planetR;
             f.pz = p[0] * north0[0] + p[1] * north0[1] + p[2] * north0[2];
             const DirectX::XMFLOAT3 ff = g.Forward();
             const double d[3] = {ff.x, ff.y, ff.z};
@@ -804,7 +808,7 @@ int main(int argc, char** argv) {
         };
         auto flatToPlanetPose = [&](const Camera& f) -> Camera {
             Camera g = f;
-            const double r = GlobeModel::kR + f.py;
+            const double r = planetR + f.py;
             g.px = oDir[0] * r + east0[0] * f.px + north0[0] * f.pz;
             g.py = oDir[1] * r + east0[1] * f.px + north0[1] * f.pz;
             g.pz = oDir[2] * r + east0[2] * f.px + north0[2] * f.pz;
@@ -819,24 +823,25 @@ int main(int argc, char** argv) {
                 static_cast<float>(std::atan2(gy, std::sqrt(gx * gx + gz * gz))), -lim, lim);
             return g;
         };
-        auto autoHandoff = [&]() {
-            if (marsMode) return;   // the estuary is an Earth feature
-            if (!(globe && sea && bathy.Ready())) return;
-            if (mode == 3) {
-                const Camera f = planetToFlatPose(cam);
-                if (f.py < 3000.0 && std::abs(f.px) < 12000.0 && std::abs(f.pz) < 12000.0) {
-                    camGlobe = cam;
-                    cam = f;
-                    cam.speed = 150.0f;
-                    mode = 1;
-                    applyMode(mode);
-                }
-            } else if (mode == 1 && cam.py > 4000.0 && globe) {
-                camSea = cam;
-                cam = flatToPlanetPose(cam);
-                mode = 3;
-                applyMode(mode);
+        // The camera bookmarks live in the ONE frame now: convert the orbit start pose, and
+        // hand the globe its frame + the CUDEM window (for the foundation sink).
+        camGlobe = planetToFlatPose(camGlobe);
+        if (mode == 1 && opt.globeStart) cam = camGlobe;
+        if (globe) {
+            globe->SetFrame(east0, oDir, north0);
+            if (bathy.Ready()) {
+                const double lon0 = BathyModel::kOrgLon + bathy.WorldX0() / BathyModel::kMPerLon;
+                const double lat1 = BathyModel::kOrgLat +
+                                    (bathy.WorldZ0() + bathy.WorldSizeZ()) / BathyModel::kMPerLat;
+                globe->SetEstuaryWindow(lon0, lat1, bathy.WorldSizeX() / BathyModel::kMPerLon,
+                                        bathy.WorldSizeZ() / BathyModel::kMPerLat);
             }
+        }
+        // Altitude above the geoid, valid at any longitude (flat y is NOT altitude far from
+        // the origin): |flat + (0,R,0)| - R, in doubles.
+        auto altOf = [&](const Camera& c) {
+            const double y = c.py + planetR;
+            return std::sqrt(c.px * c.px + y * y + c.pz * c.pz) - planetR;
         };
 
         // ---- M6b: the camera ON RAILS -- the debug flight, as GA. Each keyframe pose is a
@@ -884,46 +889,41 @@ int main(int argc, char** argv) {
             c.LookAt(t[0] * planetR, t[1] * planetR, t[2] * planetR);
             return c;
         };
+        // M6g: every key is a FLAT-frame pose now -- the rails never change frames, because
+        // there is only one. orbPose builds in planet terms for readability and converts.
+        auto orbKey = [&](double lat, double lon, double altM, double tLat, double tLon) {
+            return poseMotor(planetToFlatPose(orbPose(lat, lon, altM, tLat, tLon)));
+        };
         if (globe && marsMode) {
             // The Mars flyover: fall in over Valles Marineris, run the canyon west along its
             // 4000 km, then climb toward Tharsis with Olympus Mons on the horizon.
-            railKeys.push_back({0.0, poseMotor(orbPose(10, -25, planetR * 1.1, -12, -58))});
-            railKeys.push_back({7.0, poseMotor(orbPose(-7, -40, 800e3, -13, -62))});
-            railKeys.push_back({13.0, poseMotor(orbPose(-11, -52, 220e3, -13, -72))});
-            railKeys.push_back({19.0, poseMotor(orbPose(-13, -68, 150e3, -11, -90))});
-            railKeys.push_back({26.0, poseMotor(orbPose(-6, -98, 600e3, 18.6, -133.8))});
-            railKeys.push_back({30.0, poseMotor(orbPose(-4, -104, 900e3, 18.6, -133.8))});
+            railKeys.push_back({0.0, orbKey(10, -25, planetR * 1.1, -12, -58)});
+            railKeys.push_back({7.0, orbKey(-7, -40, 800e3, -13, -62)});
+            railKeys.push_back({13.0, orbKey(-11, -52, 220e3, -13, -72)});
+            railKeys.push_back({19.0, orbKey(-13, -68, 150e3, -11, -90)});
+            railKeys.push_back({26.0, orbKey(-6, -98, 600e3, 18.6, -133.8)});
+            railKeys.push_back({30.0, orbKey(-4, -104, 900e3, 18.6, -133.8)});
         } else if (globe && opt.railZoom && bathy.Ready()) {
-            // The inlet zoom: orbit -> the warmed Google pyramid over the Merrimack -> low
-            // enough that the M6b handoff swaps in the CUDEM estuary. One unbroken shot,
-            // imagery LODs walking in under the residency clamp the whole way down.
+            // The inlet zoom: orbit -> the warmed Google pyramid -> the CUDEM estuary, with NO
+            // handoff to hide behind any more: the same scene refines the whole way down.
             railKeys.push_back({0.0, poseMotor(camGlobe)});
-            railKeys.push_back({8.0, poseMotor(orbPose(41.9, -71.6, 800e3, 42.8183, -70.81))});
-            railKeys.push_back({16.0, poseMotor(orbPose(42.55, -70.98, 80e3, 42.8183, -70.81))});
-            railKeys.push_back({23.0, poseMotor(orbPose(42.74, -70.87, 7e3, 42.8183, -70.81))});
-            railKeys.push_back({27.0, poseMotor(orbPose(42.79, -70.84, 2400.0, 42.8183, -70.81))});
-            railKeys.push_back({30.0, poseMotor(orbPose(42.80, -70.835, 2200.0, 42.8183, -70.81))});
+            railKeys.push_back({8.0, orbKey(41.9, -71.6, 800e3, 42.8183, -70.81)});
+            railKeys.push_back({16.0, orbKey(42.55, -70.98, 80e3, 42.8183, -70.81)});
+            railKeys.push_back({23.0, orbKey(42.74, -70.87, 7e3, 42.8183, -70.81)});
+            railKeys.push_back({27.0, orbKey(42.79, -70.84, 2400.0, 42.8183, -70.81)});
+            railKeys.push_back({30.0, orbKey(42.80, -70.835, 2200.0, 42.8183, -70.81)});
         } else if (globe && sea && bathy.Ready() && !marsMode) {
-            const Motor k0 = poseMotor(camGlobe);
-            Camera cMid;
-            {
-                double d[3];
-                GlobeModel::LatLonDir(41.2, -66.5, d);
-                const double r = GlobeModel::kR + 500000.0;
-                cMid.px = d[0] * r; cMid.py = d[1] * r; cMid.pz = d[2] * r;
-                cMid.LookAt(oDir[0] * GlobeModel::kR, oDir[1] * GlobeModel::kR,
-                            oDir[2] * GlobeModel::kR);
-            }
             Camera cHover;
             cHover.SetFromCompass(-200.0, 1800.0, -2500.0, 22.0f, -46.0f);
             Camera cHelm;
             cHelm.SetFromCompass(522.0, 7.0, 72.0, 246.0f, -4.0f);
-            railKeys.push_back({0.0, k0});
-            railKeys.push_back({3.0, poseMotor(cMid)});
-            railKeys.push_back({5.0, poseMotor(flatToPlanetPose(cHover))});
-            railKeys.push_back({10.0, poseMotor(flatToPlanetPose(cHover))});
-            railKeys.push_back({15.0, poseMotor(flatToPlanetPose(cHelm))});
-            railKeys.push_back({25.0, poseMotor(flatToPlanetPose(cHelm))});
+            railKeys.push_back({0.0, poseMotor(camGlobe)});
+            railKeys.push_back({3.0, orbKey(41.2, -66.5, 500000.0,
+                                            BathyModel::kOrgLat, BathyModel::kOrgLon)});
+            railKeys.push_back({5.0, poseMotor(cHover)});
+            railKeys.push_back({10.0, poseMotor(cHover)});
+            railKeys.push_back({15.0, poseMotor(cHelm)});
+            railKeys.push_back({25.0, poseMotor(cHelm)});
         }
         auto railPose = [&](double t, Camera& out) {
             size_t i = 0;
@@ -1041,9 +1041,34 @@ int main(int argc, char** argv) {
         double lastWaterNavd = 0;  // last frame's level; the pivot ray tests against it
 
         auto groundAt = [&](double x, double z) -> double {
-            if (mode == 1 && bathy.Ready()) {
+            if (mode == 1 && bathy.Ready() && !marsMode) {
                 const float b = bathy.SampleWorld(static_cast<float>(x), static_cast<float>(z));
-                return std::max(static_cast<double>(b > -9000.0f ? b : -30.0f), lastWaterNavd);
+                if (b > -9000.0f) {
+                    return std::max(static_cast<double>(b), lastWaterNavd);
+                }
+            }
+            if (mode == 1 && globe) {
+                // M6g: beyond the CUDEM window the ground is the SPHERE (+ relief), in flat
+                // coordinates: y = sqrt(R^2 - x^2 - z^2) - R (limb-clamped past the horizon).
+                const double h2 = x * x + z * z;
+                const double rr = planetR * planetR;
+                const double sy =
+                    (h2 < rr * 0.9999) ? std::sqrt(rr - h2) - planetR : -planetR;
+                double elev = 0.0;
+                if (activeGlobe.Ready()) {
+                    const double py = sy + planetR;
+                    double p[3];
+                    for (int i = 0; i < 3; ++i) {
+                        p[i] = oDir[i] * py + east0[i] * x + north0[i] * z;
+                    }
+                    const double pr = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+                    const double r2d = 180.0 / 3.14159265358979;
+                    elev = (std::max)(0.0, activeGlobe.ElevAt(
+                                               std::asin(std::clamp(p[1] / pr, -1.0, 1.0)) * r2d,
+                                               std::atan2(p[2], p[0]) * r2d)) *
+                           globe->reliefExagg;
+                }
+                return sy + elev;
             }
             return 0.0;   // chart mode: the ribbon's ground plane
         };
@@ -1101,11 +1126,12 @@ int main(int argc, char** argv) {
         // Globe mode: analytic ray-sphere at sea level (5 km texels make terrain-precise
         // picking pointless from orbit; the pivot is for orbiting, not surveying).
         auto pickGlobe = [&](float sxPx, float syPx, double out[3]) -> bool {
+            // M6g: the sphere lives in the ONE flat frame, centred at (0, -R, 0).
             double d[3];
             pixelRay(sxPx, syPx, d);
-            const double b = cam.px * d[0] + cam.py * d[1] + cam.pz * d[2];
-            const double c = cam.px * cam.px + cam.py * cam.py + cam.pz * cam.pz -
-                             planetR * planetR;
+            const double oy = cam.py + planetR;
+            const double b = cam.px * d[0] + oy * d[1] + cam.pz * d[2];
+            const double c = cam.px * cam.px + oy * oy + cam.pz * cam.pz - planetR * planetR;
             const double disc = b * b - c;
             if (disc < 0.0) return false;
             const double t = -b - std::sqrt(disc);
@@ -1116,7 +1142,8 @@ int main(int argc, char** argv) {
             return true;
         };
         auto pickAny = [&](float sx, float sy, double out[3]) {
-            return (mode == 3) ? pickGlobe(sx, sy, out) : pickGround(sx, sy, out);
+            return (mode == 1 && altOf(cam) > 6000.0) ? pickGlobe(sx, sy, out)
+                                                      : pickGround(sx, sy, out);
         };
 
         if (!opt.rail.empty()) {
@@ -1190,32 +1217,37 @@ int main(int argc, char** argv) {
                     if (!in.lmb) dragMode = 0;
                     lmbWas = in.lmb;
 
+                    // M6g: gesture flavour follows ALTITUDE, continuously in one frame -- no
+                    // mode split. High = orbital (radial verticals, planet-centre grab);
+                    // low = ground (terrain pivots). The 6 km threshold only picks WHICH line
+                    // a motor rotates about; the world never changes under the camera.
+                    const bool orbital = (mode == 1) && altOf(cam) > 6000.0;
                     if (dragMode != 0 && (in.mouseDx != 0.0f || in.mouseDy != 0.0f)) {
                         constexpr double kOrbitRate = 0.006;   // rad per pixel
                         const double minAlt =
-                            (mode == 3) ? -1.0e30 : groundAt(cam.px, cam.pz) + 1.2;
+                            orbital ? -1.0e30 : groundAt(cam.px, cam.pz) + 1.2;
                         if (dragMode == 3) {          // ALT: rotate about the local vertical
                             double up[3] = {0, 1, 0};
-                            if (mode == 3) {          // ...which on a planet is the radial line
-                                const double pr = std::sqrt(dragPivot[0] * dragPivot[0] +
-                                                            dragPivot[1] * dragPivot[1] +
-                                                            dragPivot[2] * dragPivot[2]);
-                                up[0] = dragPivot[0] / pr;
-                                up[1] = dragPivot[1] / pr;
-                                up[2] = dragPivot[2] / pr;
+                            if (orbital) {            // ...which on a planet is the radial line
+                                up[0] = dragPivot[0];
+                                up[1] = dragPivot[1] + planetR;   // sphere centre (0,-R,0)
+                                up[2] = dragPivot[2];
+                                const double pr = std::sqrt(up[0] * up[0] + up[1] * up[1] +
+                                                            up[2] * up[2]);
+                                up[0] /= pr; up[1] /= pr; up[2] /= pr;
                             }
                             cam.OrbitAboutLine(dragPivot, up, in.mouseDx * kOrbitRate, minAlt);
                         } else if (dragMode == 2) {   // SHIFT: tilt about the horizontal line
                             const DirectX::XMFLOAT3 r = cam.Right();
                             const double ax[3] = {r.x, 0.0, r.z};
                             cam.OrbitAboutLine(dragPivot, ax, -in.mouseDy * kOrbitRate, minAlt);
-                        } else if (mode == 3) {       // grab the GLOBE: one motor about the
+                        } else if (orbital) {         // grab the GLOBE: one motor about the
                                                       // planet-centre line takes now -> grabbed
                             double nowPt[3];
                             if (pickGlobe(in.mouseX, in.mouseY, nowPt)) {
                                 const double R = planetR;
-                                double a[3] = {nowPt[0] / R, nowPt[1] / R, nowPt[2] / R};
-                                double b[3] = {dragPivot[0] / R, dragPivot[1] / R,
+                                double a[3] = {nowPt[0] / R, (nowPt[1] + R) / R, nowPt[2] / R};
+                                double b[3] = {dragPivot[0] / R, (dragPivot[1] + R) / R,
                                                dragPivot[2] / R};
                                 double ax[3] = {a[1] * b[2] - a[2] * b[1],
                                                 a[2] * b[0] - a[0] * b[2],
@@ -1224,8 +1256,8 @@ int main(int argc, char** argv) {
                                                            ax[2] * ax[2]);
                                 const double cdot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
                                 if (s > 1e-9) {
-                                    const double org[3] = {0, 0, 0};
-                                    cam.OrbitAboutLine(org, ax,
+                                    const double ctr[3] = {0, -planetR, 0};
+                                    cam.OrbitAboutLine(ctr, ax,
                                                        std::atan2(s, cdot), -1.0e30);
                                 }
                             }
@@ -1240,14 +1272,13 @@ int main(int argc, char** argv) {
                     if (in.wheel != 0.0f && !in.keyDown[VK_CONTROL]) {
                         double tgt[3];
                         if (pickAny(in.mouseX, in.mouseY, tgt)) {
-                            cam.DollyToward(tgt, in.wheel * 0.18, mode == 3 ? 2500.0 : 3.0);
+                            cam.DollyToward(tgt, in.wheel * 0.18, orbital ? 2500.0 : 3.0);
                             in.wheel = 0;   // consumed; Update() keeps its speed dial off it
                         }
                     }
                 }
 
                 cam.Update(in, dt);
-                autoHandoff();   // M6b: descend into the estuary / climb back to the planet
                 if (in.keyPressed['R']) renderer.ReloadShaders();
                 if (in.keyPressed[VK_SPACE]) paused = !paused;
                 if (in.keyPressed[VK_UP]) timeScale = std::min(timeScale * 10.0, 864000.0);
@@ -1263,63 +1294,62 @@ int main(int argc, char** argv) {
                                        : (tide->contourStepM > 0.2f) ? 0.0f : 0.5f;
                 }
                 if (in.keyPressed['V']) {
-                    if (mode == 3 && globe) globe->windOverlay = !globe->windOverlay;
-                    else if (sea) sea->atlasVisualize = !sea->atlasVisualize;
+                    if (mode == 1 && globe && altOf(cam) > 6000.0) {
+                        globe->windOverlay = !globe->windOverlay;
+                    } else if (sea) {
+                        sea->atlasVisualize = !sea->atlasVisualize;
+                    }
                 }
                 if (in.keyPressed[VK_TAB] && (sea || gulf || globe)) {
                     int next = mode;
                     do {
-                        next = (next + 1) % 4;
-                    } while ((next == 1 && !sea) || (next == 2 && !gulf) ||
-                             (next == 3 && !globe));
+                        next = (next + 1) % 3;
+                    } while ((next == 1 && !(sea || globe)) || (next == 2 && !gulf));
                     if (mode == 0) camChart = cam;
                     else if (mode == 1) camSea = cam;
-                    else if (mode == 3) camGlobe = cam;
                     mode = next;
                     applyMode(mode);
                     if (mode == 0) cam = camChart;
                     else if (mode == 1) cam = camSea;
-                    else if (mode == 3) cam = camGlobe;
                 }
                 if (!paused) simUnix += dt * timeScale;
             } else {
                 // Deterministic time in headless mode so a dump sequence is reproducible.
                 simUnix = startUnix + static_cast<double>(frame) * (timeScale / 30.0);
                 if (!opt.rail.empty() && !railKeys.empty()) {
-                    // The rails drive the PLANET-frame pose; the same handoff as interactive
-                    // flight decides which world renders it. One unbroken shot -- the M6 gate.
-                    if (mode != 3) {
-                        mode = 3;
-                        applyMode(mode);
-                    }
+                    // M6g: the rails just set a pose in the ONE frame. Nothing switches.
                     railPose(static_cast<double>(frame) / 30.0, cam);
-                    autoHandoff();
                 }
             }
 
-            // M6 globe housekeeping: fly speed and relief exaggeration scale with altitude,
-            // and the camera never sinks beneath the (exaggerated) terrain.
-            if (mode == 3 && globe) {
-                const double r = std::sqrt(cam.px * cam.px + cam.py * cam.py + cam.pz * cam.pz);
-                const double alt = r - planetR;
-                cam.speed = static_cast<float>(std::clamp(alt * 0.45, 60.0, 2.5e6));
-                globe->reliefExagg =
-                    static_cast<float>(std::clamp(alt / 250000.0, 1.0, 20.0));
-                const double r2d = 180.0 / 3.14159265358979;
-                const double lat = std::asin(std::clamp(cam.py / r, -1.0, 1.0)) * r2d;
-                const double lon = std::atan2(cam.pz, cam.px) * r2d;
-                const double minR =
-                    planetR +
-                    (activeGlobe.Ready()
-                         ? (std::max)(0.0, activeGlobe.ElevAt(lat, lon)) * globe->reliefExagg
-                         : 0.0) +
-                    800.0;
-                if (r < minR) {
-                    const double s = minR / r;
-                    cam.px *= s;
-                    cam.py *= s;
-                    cam.pz *= s;
+            // M6g world housekeeping, all continuous in altitude: gravity-up for the view
+            // basis, speed and relief exaggeration scale with height, the camera never sinks
+            // under the ground (terrain near home, sphere+relief elsewhere), and the layer
+            // set sheds by altitude the way residency sheds by distance.
+            const double altV = altOf(cam);
+            if (mode == 1) {
+                const double gy = cam.py + planetR;   // anti-gravity = radial from (0,-R,0)
+                const double gl = std::sqrt(cam.px * cam.px + gy * gy + cam.pz * cam.pz);
+                cam.upHint[0] = static_cast<float>(cam.px / gl);
+                cam.upHint[1] = static_cast<float>(gy / gl);
+                cam.upHint[2] = static_cast<float>(cam.pz / gl);
+                if (altV > 6000.0) {
+                    cam.speed = static_cast<float>(std::clamp(altV * 0.45, 60.0, 2.5e6));
                 }
+                if (sea) sea->enabled = altV < 60000.0 && !marsMode;
+                sky->enabled = altV < 9000.0 && !marsMode;   // low haze dome...
+                if (globe) globe->skyPassEnabled = !sky->enabled;   // ...or the limb shell,
+                                                                    // never both at once
+            } else {
+                cam.upHint[0] = 0.0f;
+                cam.upHint[1] = 1.0f;
+                cam.upHint[2] = 0.0f;
+            }
+            if (mode == 1 && globe) {
+                globe->reliefExagg =
+                    static_cast<float>(std::clamp(altV / 250000.0, 1.0, 20.0));
+                const double g = groundAt(cam.px, cam.pz);
+                if (cam.py < g + 1.2) cam.py = g + 1.2;
                 const float viewH = opt.headless ? static_cast<float>(opt.height)
                                                  : static_cast<float>(
                                                        std::max(1u, window.Height()));
@@ -1364,7 +1394,8 @@ int main(int argc, char** argv) {
                 FormatTitle(title, 512, simUnix, timeScale, paused, model, *tide,
                             windowSec / 86400.0, sea, seaState,
                             gulf ? gulf->validation.c_str() : nullptr,
-                            globe ? globe->stats.c_str() : nullptr, mode);
+                            globe ? globe->stats.c_str() : nullptr,
+                            (mode == 1 && altV > 60000.0) ? 3 : mode);   // title by altitude
                 window.SetTitle(title);
             }
 

@@ -38,7 +38,26 @@ cbuffer GlobeCb : register(b1) {
     float4 gStreamF;    // x = surface on, y = normal on, z = planet is Mars, w = MOLA present
     uint4  gDetU;       // M6f detail window: x = texture SRV (2D), y = residency map, z = on
     float4 gDetGeo;     // Mercator z14-pixel window: org x, org y, 1/sizePx, unused
+    // M6g: ONE WORLD. The globe renders in the estuary's tangent frame (x east, y up at the
+    // origin, z north; sphere centre at flat (0,-R,0)). gFrameR* are rows of the
+    // planet->tangent rotation; gCamAbs is REDEFINED as the sphere-CENTRED tangent-frame
+    // camera (flat camera + (0,R,0), the doubles cancelled on the CPU). Texturing keeps the
+    // PLANET-frame direction; lighting rotates into the tangent frame so the globe shares the
+    // sea's sun -- the terminator is the real local sun, not a second one.
+    float4 gFrameR0;    // rotation row 0 (east basis)
+    float4 gFrameR1;    // rotation row 1 (up/radial-at-origin basis)
+    float4 gFrameR2;    // rotation row 2 (north basis)
+    float4 gEstGeo;     // estuary CUDEM window (deg): lon0, lat1, 1/lonSpan, 1/latSpan
+                        // (w also gates: 0 = absent). The globe FOUNDATION-SINKS a few metres
+                        // inside it so the sharp CUDEM surface owns the depth buffer there.
 };
+
+float3 ToTangent(float3 p) {
+    return float3(dot(gFrameR0.xyz, p), dot(gFrameR1.xyz, p), dot(gFrameR2.xyz, p));
+}
+float3 ToPlanet(float3 t) {   // transpose of the orthonormal rotation
+    return gFrameR0.xyz * t.x + gFrameR1.xyz * t.y + gFrameR2.xyz * t.z;
+}
 
 // M6e: sample a streamed cube with the classic residency clamp -- the R8 residency-map cube
 // carries (finest resident mip * 16) per base tile; clamping the LOD there means a miss
@@ -146,7 +165,7 @@ VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
     // their even neighbours as this LOD hands over to its parent. Both sides of every seam
     // evaluate the same per-LEVEL ramp, which is what makes it crack-free.
     const float3 dir0 = CubeDir(nd.face, nd.uv0 + g * nd.uvStep);
-    const float d0 = length(dir0 * gGlo.x - gCamAbs.xyz);
+    const float d0 = length(ToTangent(dir0) * gGlo.x - gCamAbs.xyz);   // M6g: one frame
     const float k = saturate((d0 - nd.morphStart) / max(nd.morphEnd - nd.morphStart, 1.0f));
     g -= frac(g * 0.5f) * 2.0f * k;
 
@@ -154,15 +173,32 @@ VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
     float wNeUnused;
     // M6f: Mars displaces MOLA when the harvester has delivered it (streamF.w); a Mars run
     // without MOLA stays a textured sphere rather than wearing Earth's relief.
-    const float h = (gStreamF.z > 0.5f && gStreamF.w < 0.5f)
-                        ? 0.0f
-                        : ReliefBlended(dir, 0.0f, wNeUnused);
+    float h = (gStreamF.z > 0.5f && gStreamF.w < 0.5f)
+                  ? 0.0f
+                  : ReliefBlended(dir, 0.0f, wNeUnused);
+
+    // M6g foundation sink: inside the CUDEM window the ESTUARY mesh is this same surface at
+    // 13.7 m; the globe dips a few metres under it (feathered -- continuous) so the sharp data
+    // owns the depth buffer and there is no z-fight between two descriptions of one earth.
+    if (gEstGeo.w > 0.5f) {
+        const float latDegV = degrees(asin(clamp(dir.y, -1.0f, 1.0f)));
+        const float lonDegV = degrees(atan2(dir.z, dir.x));
+        const float2 wuv = float2((lonDegV - gEstGeo.x) * gEstGeo.z,
+                                  (gEstGeo.y - latDegV) * abs(gEstGeo.w));
+        if (all(wuv > 0.0f) && all(wuv < 1.0f)) {
+            const float2 fe = smoothstep(0.0f, 0.12f, wuv) * smoothstep(1.0f, 0.88f, wuv);
+            h -= 14.0f * fe.x * fe.y;
+        }
+    }
 
     VsOut o;
-    o.dir = dir;
+    o.dir = dir;   // PLANET frame: texturing (cube samples, lat/lon) stays untouched
     o.h = h;
     // The ocean surface renders AT the geoid; land rides the (altitude-scaled) exaggeration.
-    o.rel = dir * (gGlo.x + max(h, 0.0f) * gGlo.y) - gCamAbs.xyz;
+    // M6g: rotate the unit direction (exact in float), scale, subtract the sphere-centred
+    // camera -- the same cancellation profile the planet frame had, now in ONE shared frame.
+    const float3 dirT = ToTangent(dir);
+    o.rel = dirT * (gGlo.x + max(h, 0.0f) * gGlo.y) - gCamAbs.xyz;
     o.pos = mul(float4(o.rel, 1.0f), gViewProj);
     return o;
 }
@@ -184,23 +220,24 @@ float3 Hypsometric(float h, float lat) {
 }
 
 float4 PsMain(VsOut i) : SV_Target {
-    const float3 up = normalize(i.dir);
-    const float3 v = normalize(-i.rel);
+    const float3 up = normalize(i.dir);   // PLANET frame: lat/lon + every texture fetch
+    const float3 v = normalize(-i.rel);   // TANGENT frame: geometry + lighting (M6g)
     const float lat = asin(clamp(up.y, -1.0f, 1.0f));
     const float lonDeg = degrees(atan2(up.z, up.x));
-    const float day = saturate(dot(gSunDir.xyz, up) * 3.0f + 0.12f);
 
-    // Local ENU frame (guarded at the poles).
-    const float3 axis = float3(0.0f, 1.0f, 0.0f);
-    float3 east = cross(axis, up);
+    // M6g: lighting happens in the tangent frame so the globe shares the sea's ONE sun.
+    const float3 upT = ToTangent(up);
+    const float3 axisT = float3(gFrameR0.y, gFrameR1.y, gFrameR2.y);   // planet north pole
+    float3 east = cross(axisT, upT);
     east = (dot(east, east) < 1e-8f) ? float3(1.0f, 0.0f, 0.0f) : normalize(east);
-    const float3 north = cross(up, east);
+    const float3 north = cross(upT, east);
+    const float day = saturate(dot(gSunDir.xyz, upT) * 3.0f + 0.12f);
 
     const float lod = ReliefLod(length(i.rel));
     const float latDegPx = degrees(lat);
     const float lonDegPx = degrees(atan2(up.z, up.x));
     const float wNe = NeWeight(lonDegPx, latDegPx, lod);
-    float3 n = up;
+    float3 n = upT;
     float3 alb;
     float spec = 0.0f;
     if (gStreamF.z > 0.5f) {
@@ -210,7 +247,7 @@ float4 PsMain(VsOut i) : SV_Target {
         alb = alb * alb * 1.1f;   // sRGB-ish to linear
         if (gStreamF.y > 0.5f) {
             const float2 nxy = StreamedSampleRg(gStreamU.y, gStreamU.w, up);   // SNORM -1..1
-            n = normalize(up + east * nxy.x * 1.2f + north * nxy.y * 1.2f);
+            n = normalize(upT + east * nxy.x * 1.2f + north * nxy.y * 1.2f);
         }
     } else if (i.h > 0.0f) {
         // Relief normal from the height texture, at a fixed modest slope gain (the vertical
@@ -239,8 +276,8 @@ float4 PsMain(VsOut i) : SV_Target {
             hS = gTex[gTexIdx.x].SampleLevel(sLinearWrap, uv + float2(0, ts.y), lod).x;
         }
         const float kSlopeGain = 4.0f;
-        n = normalize(up - east * ((hE - hW) * kSlopeGain / (2.0f * texMx))
-                         - north * ((hN - hS) * kSlopeGain / (2.0f * texMy)));
+        n = normalize(upT - east * ((hE - hW) * kSlopeGain / (2.0f * texMx))
+                          - north * ((hN - hS) * kSlopeGain / (2.0f * texMy)));
         alb = Hypsometric(i.h, lat);
     } else {
         // The live sea. Depth tints the shelves; GFS-Wave whitens the storms.
@@ -265,11 +302,11 @@ float4 PsMain(VsOut i) : SV_Target {
         // Cox-Munk: slope variance from wind speed; the glint lobe IS the far-field BRDF.
         const float s2 = 0.003f + 0.00512f * wind;
         const float3 hv = normalize(v + gSunDir.xyz);
-        const float ch = saturate(dot(hv, up));
+        const float ch = saturate(dot(hv, upT));
         const float t2 = max(1.0f - ch * ch, 0.0f) / max(ch * ch, 1e-4f);
         spec = exp(-t2 / s2) / (4.0f * kPi * s2 * max(ch * ch * ch * ch, 1e-4f));
         const float fres = 0.02f + 0.98f * pow(1.0f - saturate(dot(v, hv)), 5.0f);
-        spec *= fres * saturate(dot(gSunDir.xyz, up));
+        spec *= fres * saturate(dot(gSunDir.xyz, upT));
     }
 
     // ---- M6e: streamed Earth imagery (residency-clamped). Land takes the imagery outright;
@@ -347,19 +384,21 @@ float4 PsMain(VsOut i) : SV_Target {
                     const float pr = length(p);
                     const float alt = pr - gGlo.x;
                     if (alt < 0.0f || alt > gCloudA.y) continue;
-                    const float3 pd = p / pr;
+                    const float3 pd = ToPlanet(p / pr);   // texturing needs planet lat/lon
                     const float3 uvw = float3(ReliefUv(pd), alt / gCloudA.y);
                     const float dens = gTex3D[gTexIdx.w].SampleLevel(sLinearClamp, uvw, 0).x;
                     if (dens <= 0.0f) continue;
                     const float sigma = dens * gCloudA.x;
                     const float stepT = exp(-sigma * dt);
-                    // One sun-ward sample above approximates self-shadowing.
-                    const float3 lp = pd * (pr + 900.0f) + gSunDir.xyz * 900.0f;
-                    const float3 luvw = float3(ReliefUv(normalize(lp)),
-                                               (length(lp) - gGlo.x) / gCloudA.y);
+                    // One sun-ward sample above approximates self-shadowing. Geometry stays
+                    // tangent (shared sun); only the texture lookup rotates to planet.
+                    const float3 pdT = p / pr;
+                    const float3 lpT = pdT * (pr + 900.0f) + gSunDir.xyz * 900.0f;
+                    const float3 luvw = float3(ReliefUv(ToPlanet(normalize(lpT))),
+                                               (length(lpT) - gGlo.x) / gCloudA.y);
                     const float lDens = gTex3D[gTexIdx.w].SampleLevel(sLinearClamp, luvw, 0).x;
                     const float sunT = exp(-lDens * gCloudA.x * 1500.0f) *
-                                       saturate(dot(pd, gSunDir.xyz) * 3.0f + 0.1f);
+                                       saturate(dot(pdT, gSunDir.xyz) * 3.0f + 0.1f);
                     const float3 cloudCol =
                         SUN_IRR_C * (sunT * phase * gCloudA.z + 0.06f) + 0.02f;
                     scat += T * (1.0f - stepT) * cloudCol;
@@ -372,7 +411,7 @@ float4 PsMain(VsOut i) : SV_Target {
 
     // The atmosphere, as seen ON the disc: grazing rays cross a long air path. (The limb glow
     // BEYOND the edge is a later shell pass.)
-    const float rim = pow(1.0f - saturate(dot(up, v)), 3.0f);
+    const float rim = pow(1.0f - saturate(dot(upT, v)), 3.0f);
     // Mars wears a THIN dusty shell, not Earth's blue one.
     const float3 rimCol = (gStreamF.z > 0.5f) ? float3(0.72f, 0.42f, 0.24f)
                                               : float3(0.42f, 0.58f, 0.92f);
@@ -427,7 +466,10 @@ SkyVsOut VsSky(uint vid : SV_VertexID) {
     // NDC coordinate rides through here.
     const float2 xy = float2((vid == 1) ? 3.0f : -1.0f, (vid == 2) ? 3.0f : -1.0f);
     SkyVsOut o;
-    o.pos = float4(xy, 0.5f, 1.0f);
+    // M6g: z = 0 (reversed-Z infinity) + a GREATER_EQUAL depth test in the PSO means this
+    // backdrop touches ONLY pixels nothing has drawn -- it can no longer stomp the estuary
+    // layers that render before the globe in the one-world scene.
+    o.pos = float4(xy, 0.0f, 1.0f);
     o.dir = float3(xy, 1.0f);
     return o;
 }

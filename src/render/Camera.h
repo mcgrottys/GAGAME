@@ -33,6 +33,10 @@ public:
     float fovY = 0.9f;  // radians, VERTICAL
     float nearZ = 0.25f;
     float speed = 30.0f;   // metres per second
+    // M6g: the view's roll reference is ANTI-GRAVITY -- a field, not an axis. main updates it
+    // each frame (radial from the planet centre; identical to +y at the estuary, alive in
+    // orbit; a second body's term joins the sum when the sun gets a position).
+    float upHint[3] = {0.0f, 1.0f, 0.0f};
 
     void SetFromCompass(double eastM, double altM, double northM, float azimuthDeg,
                         float pitchDeg);

@@ -50,6 +50,23 @@ public:
         m_streamMars = isMars;
     }
     void SetPlanetRadius(double r) { m_radius = r; }
+    // M6g: ONE WORLD. The globe renders in the estuary tangent frame; rows are the
+    // planet->tangent rotation (east, up-at-origin, north). SetView now receives the FLAT
+    // (tangent-frame) camera; the sphere centre sits at flat (0, -R, 0).
+    void SetFrame(const double east[3], const double up[3], const double north[3]) {
+        for (int i = 0; i < 3; ++i) {
+            m_frameE[i] = east[i];
+            m_frameU[i] = up[i];
+            m_frameN[i] = north[i];
+        }
+    }
+    // The CUDEM window in degrees, for the foundation sink (0 span = absent).
+    void SetEstuaryWindow(double lon0, double lat1, double lonSpan, double latSpan) {
+        m_estGeo[0] = lon0;
+        m_estGeo[1] = lat1;
+        m_estGeo[2] = lonSpan;
+        m_estGeo[3] = latSpan;
+    }
     // M6f: the Merrimack detail window (Mercator z14-pixel frame).
     void SetDetail(int tenant, double orgPxX, double orgPxY, double sizePx) {
         m_detT = tenant;
@@ -69,6 +86,7 @@ public:
     void PredictWants(const Camera& cam, float aspect);
 
     float reliefExagg = 1.0f;       // set per frame by main (altitude-scaled display choice)
+    bool skyPassEnabled = true;     // M6g: off while SkyLayer owns the low-altitude backdrop
     bool windOverlay = false;       // V key: tint the Mv2 wind bank's curl (violet cyclonic)
     bool marsReliefValid = false;   // M6f: the configured model's relief IS Mars (MOLA)
     std::string stats;              // "globe 214 nodes  alt 3520 km" for the title bar
@@ -98,6 +116,10 @@ private:
         float streamF[4];     // surface on, normal on, planet-is-Mars, MOLA present
         uint32_t detU[4];     // M6f: detail-window texture SRV, residency map SRV, on
         float detGeo[4];      // Mercator z14-px window: org x, org y, 1/sizePx
+        float frameR0[4];     // M6g: planet->tangent rotation rows (east / up / north)
+        float frameR1[4];
+        float frameR2[4];
+        float estGeo[4];      // CUDEM window deg: lon0, lat1, 1/lonSpan, 1/latSpan (0 = none)
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -160,6 +182,9 @@ private:
     bool m_predictPass = false;
     double m_radius = GlobeModel::kR;
     float m_pixAng = 1.0e-3f;
+    double m_frameE[3] = {1, 0, 0}, m_frameU[3] = {0, 1, 0}, m_frameN[3] = {0, 0, 1};
+    double m_camPlanet[3] = {0, 0, 2.0e7};   // for the horizon cull (doubles, per SetView)
+    double m_estGeo[4] = {0, 0, 0, 0};
 
     std::vector<NodeData> m_nodes;
     GlobeCbData m_cb{};

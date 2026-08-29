@@ -116,9 +116,13 @@ XMMATRIX Camera::ViewRelative() const {
     const XMFLOAT3 f = Forward();
     const XMVECTOR eye = XMVectorZero();                       // camera-relative: always origin
     const XMVECTOR dir = XMVector3Normalize(XMLoadFloat3(&f));
-    // Near-nadir views need an up vector that is not parallel to the view direction.
-    const XMVECTOR up = (std::fabs(f.y) > 0.999f) ? XMVectorSet(0, 0, 1, 0)
-                                                  : XMVectorSet(0, 1, 0, 0);
+    // M6g: roll follows ANTI-GRAVITY (upHint). Near-parallel views fall back to any
+    // perpendicular so the basis never degenerates.
+    XMVECTOR up = XMVector3Normalize(XMVectorSet(upHint[0], upHint[1], upHint[2], 0));
+    const float align = std::fabs(XMVectorGetX(XMVector3Dot(dir, up)));
+    if (align > 0.999f) {
+        up = (std::fabs(f.y) > 0.999f) ? XMVectorSet(0, 0, 1, 0) : XMVectorSet(0, 1, 0, 0);
+    }
     return XMMatrixLookToLH(eye, dir, up);
 }
 
