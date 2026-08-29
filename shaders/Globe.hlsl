@@ -4,72 +4,63 @@
 //  A quad-sphere CDLOD earth: the CPU walks a quadtree per cube face and emits visible nodes;
 //  every node draws the same 32x32 grid, morphing odd vertices toward their even neighbours as
 //  a node approaches the distance where its parent takes over (Strugar's CDLOD), so LOD rings
-//  cross-fade with no cracks and no stitching. Relief is ETOPO 2022 in one equirect texture;
-//  the ocean is shaded with the live GFS-Wave field: Cox-Munk slope variance from 10 m wind
-//  drives the sun-glint lobe (the BRDF-LOD far field -- waves too small to resolve become
-//  ROUGHNESS), significant height drives the storm-whitening.
+//  cross-fade with no cracks and no stitching.
+//
+//  M6i: surface DATA arrives through the layer compositor's channels (Compose.hlsli): color is
+//  ComposedColor (Google cube + Mercator window, painted per stack), height is ComposedHeight
+//  (ETOPO + NE 15s + CUDEM for Earth, MOLA for Mars -- painted per stack). The equirect relief
+//  texture, the NE-window blend (NeWeight/ReliefBlended) and the inline detail-window block are
+//  all GONE from render time; the ocean is still shaded with the live GFS-Wave field (physics a
+//  baked mosaic cannot know). Mars's native BC1/BC5 pyramids stay direct streams (gStreamU).
 //
 //  Precision contract: positions are dir * (R + h) - camAbs in float. Both terms are ~6.4e6 m,
 //  so the difference carries ~0.5-1 m of noise -- static per vertex, invisible above the 2 km
-//  minimum altitude this mode allows. The metre-precise near field is the estuary's job (M6b
-//  hands off); the planet frame is its own mode with the planet centre at the world origin,
-//  y through the north pole, x through (0N, 0E).
+//  minimum altitude this mode allows. The metre-precise near field is the estuary's job; both
+//  render in ONE shared tangent frame (M6g).
 // ================================================================================================
 #define GA_NO_FIELD_BUFFER
 #include "Common.hlsli"
 
 cbuffer GlobeCb : register(b1) {
     float4 gGlo;        // x = R (m), y = relief exaggeration, z = node count, w = sim time s
-    float4 gCamAbs;     // xyz = camera position in the planet frame (float: constant sub-metre
-                        // offset only -- the jitter analysis lives in the header comment)
-    uint4  gTexIdx;     // x = relief SRV, y = Hs SRV, z = wind SRV, w = CLOUD VOLUME SRV
-                        // (0xFFFFFFFF = absent; the volume is a TileAtlas3D -- null = clear air)
+    float4 gCamAbs;     // xyz = sphere-centred TANGENT-frame camera (flat cam + (0,R,0), the
+                        // doubles cancelled on the CPU)
+    uint4  gTexIdx;     // x = unused (was equirect relief; the composed height cube retired
+                        // it), y = Hs SRV, z = wind SRV, w = CLOUD VOLUME SRV (0xFFFFFFFF =
+                        // absent; the volume is a TileAtlas3D -- null = clear air)
     float4 gWavesA;     // Hs/wind grid: lat1 (deg, row 0), lon1, 1/dlat, 1/dlon (rows N->S)
-    float4 gWavesB;     // x = nx, y = ny, z = pixel angular size (rad), w = max relief mip
-    float4 gBeacon;     // xyz = unit direction to the Merrimack entrance, w = enabled
+    float4 gWavesB;     // x = nx, y = ny, z = pixel angular size (rad), w = unused
     float4 gCloudA;     // x = extinction /m at density 1, y = shell top (m), z = sun boost,
                         // w = ground-shadow strength
-    uint4  gTexIdx2;    // M6d: x = NE 15s relief SRV, y = wind Mv2 bank SRV, z = overlay on
-    float4 gNeGeo;      // NE window: lon0, lat1 (deg), 1/lonSpan, 1/latSpan
+    uint4  gTexIdx2;    // x = unused (was NE 15s relief; composed away), y = wind Mv2 bank
+                        // SRV, z = overlay on
     float4 gWindGeo;    // wind grid: lat1, lon1, 1/dlat, 1/dlon
     float4 gWindB;      // x = nx, y = ny
-    uint4  gStreamU;    // M6e streamed surfaces (cube SRVs): x = surface, y = normal (Mars BC5),
-                        // z = surface residency map, w = normal residency map
-    float4 gStreamF;    // x = surface on, y = normal on, z = planet is Mars, w = MOLA present
-    uint4  gDetU;       // M6f detail window: x = texture SRV (2D), y = residency map, z = on
-    float4 gDetGeo;     // Mercator z14-pixel window: org x, org y, 1/sizePx, unused
-    // M6g: ONE WORLD. The globe renders in the estuary's tangent frame (x east, y up at the
-    // origin, z north; sphere centre at flat (0,-R,0)). gFrameR* are rows of the
-    // planet->tangent rotation; gCamAbs is REDEFINED as the sphere-CENTRED tangent-frame
-    // camera (flat camera + (0,R,0), the doubles cancelled on the CPU). Texturing keeps the
-    // PLANET-frame direction; lighting rotates into the tangent frame so the globe shares the
-    // sea's sun -- the terminator is the real local sun, not a second one.
-    float4 gFrameR0;    // rotation row 0 (east basis)
-    float4 gFrameR1;    // rotation row 1 (up/radial-at-origin basis)
-    float4 gFrameR2;    // rotation row 2 (north basis)
+    uint4  gStreamU;    // Mars native streams (cube SRVs): x = surface (BC1), y = normal
+                        // (BC5), z = surface residency map, w = normal residency map
+    float4 gStreamF;    // x = surface on, y = normal on, z = planet is Mars, w = unused
+    // M6i: the composed channels (color cube + window, height cube) + the M6g one-world frame
+    // rows, shared VERBATIM with every other layer that samples this planet's surface.
+    GA_COMPOSED_CB_ROWS
     float4 gEstGeo;     // estuary CUDEM window (deg): lon0, lat1, 1/lonSpan, 1/latSpan
                         // (w also gates: 0 = absent). The globe FOUNDATION-SINKS a few metres
                         // inside it so the sharp CUDEM surface owns the depth buffer there.
 };
 
-float3 ToTangent(float3 p) {
-    return float3(dot(gFrameR0.xyz, p), dot(gFrameR1.xyz, p), dot(gFrameR2.xyz, p));
-}
-float3 ToPlanet(float3 t) {   // transpose of the orthonormal rotation
-    return gFrameR0.xyz * t.x + gFrameR1.xyz * t.y + gFrameR2.xyz * t.z;
-}
+#include "Compose.hlsli"
 
 // M6e: sample a streamed cube with the classic residency clamp -- the R8 residency-map cube
 // carries (finest resident mip * 16) per base tile; clamping the LOD there means a miss
-// degrades to the best RESIDENT ancestor (blur), never to unmapped garbage.
+// degrades to the best RESIDENT ancestor (blur), never to unmapped garbage. (Earth's composed
+// channels do the same inside Compose.hlsli; these direct forms serve Mars's native pyramids.)
 float3 StreamedSample(uint texSrv, uint mapSrv, float3 dir) {
     const float want = gTexCube[texSrv].CalculateLevelOfDetail(sLinearClamp, dir);
-    const float have = gTexCube[mapSrv].SampleLevel(sPointClamp, dir, 0).x * 255.0f / 16.0f;
+    const float have = gTexCube[mapSrv].SampleLevel(sLinearClamp, dir, 0).x * 255.0f / 16.0f;
     return gTexCube[texSrv].SampleLevel(sLinearClamp, dir, max(want, have)).rgb;
 }
 float2 StreamedSampleRg(uint texSrv, uint mapSrv, float3 dir) {
     const float want = gTexCube[texSrv].CalculateLevelOfDetail(sLinearClamp, dir);
-    const float have = gTexCube[mapSrv].SampleLevel(sPointClamp, dir, 0).x * 255.0f / 16.0f;
+    const float have = gTexCube[mapSrv].SampleLevel(sLinearClamp, dir, 0).x * 255.0f / 16.0f;
     return gTexCube[texSrv].SampleLevel(sLinearClamp, dir, max(want, have)).rg;
 }
 
@@ -99,47 +90,13 @@ float3 CubeDir(uint face, float2 uv) {
     return normalize(p);
 }
 
+// Equirect uv for a planet-frame direction -- the CLOUD VOLUME's addressing (the relief
+// texture that shared it is gone; the volume bank keeps the scheme).
 float2 ReliefUv(float3 dir) {
     const float lat = asin(clamp(dir.y, -1.0f, 1.0f));
     const float lon = atan2(dir.z, dir.x);
-    // v is clamped a half-texel short of the poles so the WRAP sampler (which fixes the
-    // dateline seam) can never drag the poles across each other.
     return float2(lon / (2.0f * kPi) + 0.5f,
                   clamp(0.5f - lat / kPi, 0.5f / 4096.0f, 1.0f - 0.5f / 4096.0f));
-}
-
-float ReliefAt(float3 dir, float lod) {
-    return gTex[gTexIdx.x].SampleLevel(sLinearWrap, ReliefUv(dir), lod).x;
-}
-
-// Mip level so a relief texel never shrinks much below a screen pixel: kills the far-zoom
-// coastline shimmer the single-mip first slice had.
-float ReliefLod(float dist) {
-    const float texelM = 2.0f * kPi * gGlo.x / 8192.0f;
-    const float pixM = dist * gWavesB.z;
-    return clamp(log2(max(pixM / texelM, 1.0f)), 0.0f, gWavesB.w);
-}
-
-// M6d: the New England 15-arc-second ring. Inside its window and close enough that the global
-// texture is running out of texels, the regional relief takes over (edge-feathered, lod-faded).
-float NeWeight(float lonDeg, float latDeg, float lod) {
-    if (gTexIdx2.x == 0xFFFFFFFFu) return 0.0f;
-    const float u = (lonDeg - gNeGeo.x) * gNeGeo.z;
-    const float v = (gNeGeo.y - latDeg) * gNeGeo.w;
-    if (any(float2(u, v) < 0.0f) || any(float2(u, v) > 1.0f)) return 0.0f;
-    const float edge = min(min(u, 1.0f - u), min(v, 1.0f - v));
-    return smoothstep(0.0f, 0.04f, edge) * saturate(2.5f - lod);
-}
-
-float ReliefBlended(float3 dir, float lod, out float wNe) {
-    const float latDeg = degrees(asin(clamp(dir.y, -1.0f, 1.0f)));
-    const float lonDeg = degrees(atan2(dir.z, dir.x));
-    wNe = NeWeight(lonDeg, latDeg, lod);
-    const float g = ReliefAt(dir, lod);
-    if (wNe <= 0.0f) return g;
-    const float2 uv = float2((lonDeg - gNeGeo.x) * gNeGeo.z, (gNeGeo.y - latDeg) * gNeGeo.w);
-    const float n = gTex[gTexIdx2.x].SampleLevel(sLinearClamp, uv, 0).x;
-    return lerp(g, n, wNe);
 }
 
 // ------------------------------------------------------------------ vertex
@@ -165,17 +122,16 @@ VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
     // their even neighbours as this LOD hands over to its parent. Both sides of every seam
     // evaluate the same per-LEVEL ramp, which is what makes it crack-free.
     const float3 dir0 = CubeDir(nd.face, nd.uv0 + g * nd.uvStep);
-    const float d0 = length(ToTangent(dir0) * gGlo.x - gCamAbs.xyz);   // M6g: one frame
+    const float d0 = length(CsToTangent(dir0) * gGlo.x - gCamAbs.xyz);   // M6g: one frame
     const float k = saturate((d0 - nd.morphStart) / max(nd.morphEnd - nd.morphStart, 1.0f));
     g -= frac(g * 0.5f) * 2.0f * k;
 
     const float3 dir = CubeDir(nd.face, nd.uv0 + g * nd.uvStep);
-    float wNeUnused;
-    // M6f: Mars displaces MOLA when the harvester has delivered it (streamF.w); a Mars run
-    // without MOLA stays a textured sphere rather than wearing Earth's relief.
-    float h = (gStreamF.z > 0.5f && gStreamF.w < 0.5f)
-                  ? 0.0f
-                  : ReliefBlended(dir, 0.0f, wNeUnused);
+    // M6i: displacement from the composed height cube, both planets, one code path. The lod
+    // floor of 3 keeps the displacement footprint at the ~5 km the 32x32 grids can actually
+    // articulate (the deepest vertex spacing); finer height texels feed PIXEL normals instead.
+    const float vlod = max(ComposedHeightLod(d0, gWavesB.z), 3.0f);
+    float h = ComposedHeight(dir, vlod);
 
     // M6g foundation sink: inside the CUDEM window the ESTUARY mesh is this same surface at
     // 13.7 m; the globe dips a few metres under it (feathered -- continuous) so the sharp data
@@ -197,7 +153,7 @@ VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
     // The ocean surface renders AT the geoid; land rides the (altitude-scaled) exaggeration.
     // M6g: rotate the unit direction (exact in float), scale, subtract the sphere-centred
     // camera -- the same cancellation profile the planet frame had, now in ONE shared frame.
-    const float3 dirT = ToTangent(dir);
+    const float3 dirT = CsToTangent(dir);
     o.rel = dirT * (gGlo.x + max(h, 0.0f) * gGlo.y) - gCamAbs.xyz;
     o.pos = mul(float4(o.rel, 1.0f), gViewProj);
     return o;
@@ -206,7 +162,8 @@ VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
 // ------------------------------------------------------------------ pixel
 
 float3 Hypsometric(float h, float lat) {
-    // Land tints by elevation, biased toward rock/snow at high latitude.
+    // Land tints by elevation, biased toward rock/snow at high latitude. (The fallback and
+    // the no-imagery look; with the color channel on, the mosaic owns the albedo.)
     const float3 shore = float3(0.62f, 0.60f, 0.42f);
     const float3 low   = float3(0.22f, 0.38f, 0.18f);
     const float3 mid   = float3(0.48f, 0.42f, 0.28f);
@@ -226,17 +183,22 @@ float4 PsMain(VsOut i) : SV_Target {
     const float lonDeg = degrees(atan2(up.z, up.x));
 
     // M6g: lighting happens in the tangent frame so the globe shares the sea's ONE sun.
-    const float3 upT = ToTangent(up);
-    const float3 axisT = float3(gFrameR0.y, gFrameR1.y, gFrameR2.y);   // planet north pole
+    const float3 upT = CsToTangent(up);
+    const float3 axisT = float3(gCsR0.y, gCsR1.y, gCsR2.y);   // planet north pole
     float3 east = cross(axisT, upT);
     east = (dot(east, east) < 1e-8f) ? float3(1.0f, 0.0f, 0.0f) : normalize(east);
     const float3 north = cross(upT, east);
     const float day = saturate(dot(gSunDir.xyz, upT) * 3.0f + 0.12f);
 
-    const float lod = ReliefLod(length(i.rel));
-    const float latDegPx = degrees(lat);
-    const float lonDegPx = degrees(atan2(up.z, up.x));
-    const float wNe = NeWeight(lonDegPx, latDegPx, lod);
+    const float lod = ComposedHeightLod(length(i.rel), gWavesB.z);
+    // M6i: land/sea CLASSIFICATION resamples the height channel PER PIXEL at screen lod. The
+    // vertex height (i.h) is footprint-floored for displacement (~5 km) and foundation-sunk
+    // in the estuary window -- gating on it smeared whole towns below sea level. hp is what
+    // the data says HERE, at this pixel's own resolution.
+    const float hp = ComposedHeightOn() ? ComposedHeight(up, lod) : i.h;
+    // M6i: classification by SURVEY (the GIS land-mask realization), refined by fine heights;
+    // height-sign alone only where no mask exists (Mars).
+    const bool isLand = ComposedIsLand(up, hp);
     float3 n = upT;
     float3 alb;
     float spec = 0.0f;
@@ -249,39 +211,17 @@ float4 PsMain(VsOut i) : SV_Target {
             const float2 nxy = StreamedSampleRg(gStreamU.y, gStreamU.w, up);   // SNORM -1..1
             n = normalize(upT + east * nxy.x * 1.2f + north * nxy.y * 1.2f);
         }
-    } else if (i.h > 0.0f) {
-        // Relief normal from the height texture, at a fixed modest slope gain (the vertical
-        // exaggeration is a display choice; shading at x25 would posterize the continents).
-        // Inside the NE ring the 460 m texture supplies the derivatives instead (M6d).
-        float hE, hW, hN, hS, texMx, texMy;
-        if (wNe > 0.5f) {
-            const float2 uv = float2((lonDegPx - gNeGeo.x) * gNeGeo.z,
-                                     (gNeGeo.y - latDegPx) * gNeGeo.w);
-            const float2 ts = float2(1.0f / 1440.0f, 1.0f / 1200.0f);
-            texMx = 461.0f * max(cos(lat), 0.05f);
-            texMy = 461.0f;
-            hE = gTex[gTexIdx2.x].SampleLevel(sLinearClamp, uv + float2(ts.x, 0), 0).x;
-            hW = gTex[gTexIdx2.x].SampleLevel(sLinearClamp, uv - float2(ts.x, 0), 0).x;
-            hN = gTex[gTexIdx2.x].SampleLevel(sLinearClamp, uv - float2(0, ts.y), 0).x;
-            hS = gTex[gTexIdx2.x].SampleLevel(sLinearClamp, uv + float2(0, ts.y), 0).x;
-        } else {
-            const float mipScale = exp2(lod);
-            const float2 ts = float2(mipScale / 8192.0f, mipScale / 4096.0f);
-            const float2 uv = ReliefUv(up);
-            texMx = 2.0f * kPi * gGlo.x * max(cos(lat), 0.05f) * mipScale / 8192.0f;
-            texMy = kPi * gGlo.x * mipScale / 4096.0f;
-            hE = gTex[gTexIdx.x].SampleLevel(sLinearWrap, uv + float2(ts.x, 0), lod).x;
-            hW = gTex[gTexIdx.x].SampleLevel(sLinearWrap, uv - float2(ts.x, 0), lod).x;
-            hN = gTex[gTexIdx.x].SampleLevel(sLinearWrap, uv - float2(0, ts.y), lod).x;
-            hS = gTex[gTexIdx.x].SampleLevel(sLinearWrap, uv + float2(0, ts.y), lod).x;
-        }
+    } else if (isLand) {
+        // M6i: land normals from the composed height cube -- one gradient, no equirect/NE
+        // fork, no pole singularity. Modest slope gain (the vertical exaggeration is a
+        // display choice; shading at x25 would posterize the continents).
+        const float2 gr = ComposedHeightGrad(up, lod);
         const float kSlopeGain = 4.0f;
-        n = normalize(upT - east * ((hE - hW) * kSlopeGain / (2.0f * texMx))
-                          - north * ((hN - hS) * kSlopeGain / (2.0f * texMy)));
-        alb = Hypsometric(i.h, lat);
+        n = normalize(upT - east * (gr.x * kSlopeGain) - north * (gr.y * kSlopeGain));
+        alb = Hypsometric(max(hp, 0.0f), lat);
     } else {
         // The live sea. Depth tints the shelves; GFS-Wave whitens the storms.
-        const float shelf = saturate(1.0f + i.h / 160.0f);      // 1 at the beach, 0 by -160 m
+        const float shelf = saturate(1.0f + hp / 160.0f);       // 1 at the beach, 0 by -160 m
         alb = lerp(float3(0.013f, 0.055f, 0.115f), float3(0.06f, 0.30f, 0.34f),
                    shelf * shelf);
         float hs = 0.0f, wind = 6.0f;
@@ -309,37 +249,13 @@ float4 PsMain(VsOut i) : SV_Target {
         spec *= fres * saturate(dot(gSunDir.xyz, upT));
     }
 
-    // ---- M6e: streamed Earth imagery (residency-clamped). Land takes the imagery outright;
-    // water blends it into the shallows only, so the LIVE ocean (Hs whitening, Cox-Munk glint)
-    // keeps doing physics that a baked mosaic cannot.
-    if (gStreamF.x > 0.5f && gStreamF.z < 0.5f) {
-        float3 img = StreamedSample(gStreamU.x, gStreamU.z, up);
-        img = img * img * 1.2f;
-        alb = (i.h > 0.0f) ? img : lerp(alb, img, 0.6f * saturate(1.0f + i.h / 80.0f));
-    }
-
-    // ---- M6f: the Merrimack detail window -- deeper imagery inside a Mercator-aligned rect,
-    // CONTINUOUS by construction: a feathered edge blend, and the residency clamp inside (its
-    // coarsest always-resident mip matches the global cube's quality, so an unstreamed region
-    // just looks like the globe). No LOD branches; the manager makes every sample defined.
-    if (gDetU.z != 0u && gStreamF.z < 0.5f) {
-        const float n14 = 16384.0f * 256.0f;
-        const float mx = (lonDegPx + 180.0f) / 360.0f * n14;
-        const float my =
-            (0.5f - log(tan(0.785398163f + lat * 0.5f)) / (2.0f * kPi)) * n14;
-        const float2 duv = (float2(mx, my) - gDetGeo.xy) * gDetGeo.z;
-        if (all(duv > 0.0f) && all(duv < 1.0f)) {
-            const float2 fe = smoothstep(0.0f, 0.06f, duv) * smoothstep(1.0f, 0.94f, duv);
-            const float wantD = gTex[gDetU.x].CalculateLevelOfDetail(sLinearClamp, duv);
-            const float haveD =
-                gTex[gDetU.y].SampleLevel(sPointClamp, duv, 0).x * 255.0f / 16.0f;
-            float3 img = gTex[gDetU.x].SampleLevel(sLinearClamp, duv, max(wantD, haveD)).rgb;
-            img = img * img * 1.2f;
-            const float w = fe.x * fe.y;
-            const float3 target =
-                (i.h > 0.0f) ? img : lerp(alb, img, 0.6f * saturate(1.0f + i.h / 80.0f));
-            alb = lerp(alb, target, w);
-        }
+    // ---- M6i: the composed color channel -- ONE call covers what used to be the streamed
+    // cube block plus the detail-window block. Land takes the imagery outright; water blends
+    // it into the shallows only, so the LIVE ocean (Hs whitening, Cox-Munk glint) keeps doing
+    // physics that a baked mosaic cannot.
+    if (ComposedColorOn() && gStreamF.z < 0.5f) {
+        const float3 img = ComposedColor(up);
+        alb = isLand ? img : lerp(alb, img, 0.6f * saturate(1.0f + min(hp, 0.0f) / 80.0f));
     }
 
     // ---- M6c: the live 3D sky. One column sample shades the ground under weather...
@@ -384,7 +300,7 @@ float4 PsMain(VsOut i) : SV_Target {
                     const float pr = length(p);
                     const float alt = pr - gGlo.x;
                     if (alt < 0.0f || alt > gCloudA.y) continue;
-                    const float3 pd = ToPlanet(p / pr);   // texturing needs planet lat/lon
+                    const float3 pd = CsToPlanet(p / pr);   // texturing needs planet lat/lon
                     const float3 uvw = float3(ReliefUv(pd), alt / gCloudA.y);
                     const float dens = gTex3D[gTexIdx.w].SampleLevel(sLinearClamp, uvw, 0).x;
                     if (dens <= 0.0f) continue;
@@ -394,7 +310,7 @@ float4 PsMain(VsOut i) : SV_Target {
                     // tangent (shared sun); only the texture lookup rotates to planet.
                     const float3 pdT = p / pr;
                     const float3 lpT = pdT * (pr + 900.0f) + gSunDir.xyz * 900.0f;
-                    const float3 luvw = float3(ReliefUv(ToPlanet(normalize(lpT))),
+                    const float3 luvw = float3(ReliefUv(CsToPlanet(normalize(lpT))),
                                                (length(lpT) - gGlo.x) / gCloudA.y);
                     const float lDens = gTex3D[gTexIdx.w].SampleLevel(sLinearClamp, luvw, 0).x;
                     const float sunT = exp(-lDens * gCloudA.x * 1500.0f) *
@@ -422,8 +338,8 @@ float4 PsMain(VsOut i) : SV_Target {
     // branch -- sparse structure carried as algebra, which is the atlas's whole thesis.
     if (gTexIdx2.z != 0u && gTexIdx2.y != 0xFFFFFFFFu) {
         const float2 wuv = float2(
-            frac((lonDegPx - gWindGeo.y) * gWindGeo.w / gWindB.x),
-            saturate(((gWindGeo.x - latDegPx) * gWindGeo.z + 0.5f) / gWindB.y));
+            frac((lonDeg - gWindGeo.y) * gWindGeo.w / gWindB.x),
+            saturate(((gWindGeo.x - degrees(lat)) * gWindGeo.z + 0.5f) / gWindB.y));
         const float4 mv = gTex[gTexIdx2.y].SampleLevel(sLinearClamp, wuv, 0);
         const float s = smoothstep(0.35f, 2.2f, abs(mv.w));   // curl stored x1e4; synoptic
                                                               // systems sit ~0.3-1, cores 2+
@@ -432,14 +348,7 @@ float4 PsMain(VsOut i) : SV_Target {
         col = lerp(col, tint * (0.25f + day), s * 0.4f);
     }
 
-    // Home beacon: the Merrimack entrance, so the M6b zoom has a destination.
-    if (gBeacon.w > 0.5f) {
-        const float chord2 = dot(up - gBeacon.xyz, up - gBeacon.xyz);
-        const float distM2 = chord2 * gGlo.x * gGlo.x;
-        const float glow = exp(-distM2 / (2.0f * 9000.0f * 9000.0f));
-        col += float3(1.4f, 0.55f, 0.10f) * glow *
-               (0.6f + 0.4f * sin(gGlo.w * 2.5f));
-    }
+    col = ApplyComposedStencil(col, up);   // M6i: --stencil alignment overlay (off = no-op)
     return float4(col, 1.0f);
 }
 

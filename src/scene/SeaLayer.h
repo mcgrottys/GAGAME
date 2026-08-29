@@ -9,6 +9,7 @@
 // ================================================================================================
 #pragma once
 
+#include "compose/Compositor.h"
 #include "core/OceanFft.h"
 #include "core/TileAtlas.h"
 #include "scene/Layer.h"
@@ -51,6 +52,8 @@ public:
     // each frame) and the CPU bathy grid the swell-shadow march walks.
     void SetSwe(SweSolver* swe) { m_swe = swe; }
     void SetBathyCpu(const BathyModel* bm) { m_bathyCpu = bm; }
+    // M6i: composed channels + survey masks -- the same fill the globe and terrain use.
+    void SetComposed(const ComposedSurfaceCb& cs) { m_seaCb.cs = cs; }
     uint32_t ChurnTiles() const { return m_churnReady ? m_churn.ResidentCount() : 0; }
     uint64_t ChurnBytes() const { return m_churnReady ? m_churn.ResidentBytes() : 0; }
 
@@ -105,6 +108,7 @@ private:
         uint32_t sweU[4];   // M5c: eta SRV, uv SRV, solver on, swell-shadow mask SRV
         float sweF[4];      // bathy grid dims xy, 1 / eta-atlas padded dims zw
         float sweG[4];      // x = prism-truncation current gain
+        ComposedSurfaceCb cs;   // M6i: composed channels + survey masks (9 rows)
     };
     // Mirrored in shaders/SeaChurn.hlsl. (Count float4 rows on BOTH sides after any edit -- a
     // shader field without its mirror here reads garbage past the push; see the gSweG incident.)

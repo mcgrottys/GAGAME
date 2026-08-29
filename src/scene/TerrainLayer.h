@@ -4,6 +4,7 @@
 // ================================================================================================
 #pragma once
 
+#include "compose/Compositor.h"
 #include "scene/Layer.h"
 #include "sim/BathyModel.h"
 
@@ -28,13 +29,19 @@ public:
     uint32_t HeightSrv() const { return m_tex.srv; }
     GpuTexture& HeightTex() { return m_tex; }   // M5c: the SWE solver reads the bed directly
 
+    // M6i: the composed color channel -- filled by FillComposedCb in main, the SAME function
+    // and constants the globe uses, so the two layers agree texel for texel.
+    void SetComposed(const ComposedSurfaceCb& cs) { m_cs = cs; }
+
 private:
     bool BuildPso(Gpu& gpu, ShaderCompiler& sc);
 
+    // Mirrored in shaders/Terrain.hlsl (count float4 rows on BOTH sides after any edit).
     struct TerrainCbData {
         float geo[4];
-        uint32_t srv[4];
+        uint32_t srv[4];      // heightfield, quadsX, quadsZ
         float params[4];
+        ComposedSurfaceCb cs; // M6i: the composed channels (8 rows)
     };
 
     std::wstring m_shaderDir;
@@ -43,6 +50,7 @@ private:
     Com<ID3D12PipelineState> m_pso;
     GpuTexture m_tex;
     uint32_t m_quadsX = 0, m_quadsZ = 0;
+    ComposedSurfaceCb m_cs{};   // zero until SetComposed: every channel reads "off"
 };
 
 }  // namespace ga

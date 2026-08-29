@@ -155,6 +155,23 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
     return lerp(col, SkyRadiance(viewDir.y), saturate(t));
 }
 
+// M6i: the composed-surface constants -- 9 float4 rows a layer embeds in its OWN cbuffer to
+// sample a planet's composed channels through Compose.hlsli. Mirrors ga::ComposedSurfaceCb
+// (count rows on BOTH sides after any edit); filled by FillComposedCb ALONE so the globe and
+// the terrain cannot disagree about the math. Include Compose.hlsli AFTER the cbuffer.
+#define GA_COMPOSED_CB_ROWS \
+    uint4  gCsU;    /* color cube SRV, color cube residency, window SRV, window residency */ \
+    uint4  gCsU2;   /* height cube SRV + residency, height WINDOW SRV + residency */ \
+    uint4  gCsU3;   /* GIS land masks (raster realizations of the survey vectors): x = window \
+                       R8 in the shared Mercator frame, y = global R8 equirect */ \
+    float4 gCsF;    /* color cube on, window on, height on, planet radius (m) */ \
+    float4 gCsMerc; /* window org px x, org px y, 1/sizePx, full-world px at window zoom */ \
+    float4 gCsG;    /* height cube max lod, height texel arc (rad), height window max lod, \
+                       stencil overlay on */ \
+    float4 gCsR0;   /* planet->tangent rotation rows (east / up / north) */ \
+    float4 gCsR1; \
+    float4 gCsR2;
+
 // The geometric-algebra toolkit lives in GA.hlsli (M3 moved it out so compute shaders with
 // their own root signatures can share it). Note for surface fields: the grade-2 part of
 // grad(eta) is identically zero because curl(grad(f)) == 0 -- the algebra pays on CURRENT

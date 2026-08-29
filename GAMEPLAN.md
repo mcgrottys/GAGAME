@@ -288,3 +288,107 @@ the managers ARE already shared. What §4's grade-signature machinery adds next:
 as paravectors) · Han/Kim/Noz, the Lorentz group in polarization optics (J. Opt. Soc. Am.) ·
 Dorst/Fontijne/Mann, *GA for Computer Science* (CGA versors, stereographic maps) · NanoVDB +
 OptiX sparse-volume ray tracing (NVIDIA) as prior art for tile-BVH volume traversal.
+
+## 13. The layer compositor (added M6i, 2026-08-29) — "the logical evolution of the mars sample"
+
+The problem it retired: every data source used to reach the renderer through its OWN path — the
+global Google cube had one shader block, the Mercator detail window another, ETOPO a third, the
+NE 15s ring a fourth — each with its own uv math, feathering and blend weights evaluated per
+pixel per frame, and two layers (globe, terrain) re-deriving that math independently. That is
+how they came to disagree about what the Earth looks like (the M6h glitch report), and why a
+frame-handedness bug could hide for three milestones (see the postmortem below).
+
+**The architecture (user-specified, implemented in `src/compose/`):**
+
+1. **Schema registry** (`SourceInfo`): every source declares its name, structure
+   ("mercator-tile-tree jpeg 256px", "equirect-grid int16", "geotiff-window float32"), its
+   native **CRS** (the alignment contract — GeoTIFFs carry theirs, Google is EPSG:3857, CUDEM
+   is a local-tangent frame anchored at ACT0816), its honest cm/px, and its coverage box.
+   Logged as a table at startup. Every `Sample()` resolves its CRS to WGS84 lat/lon — the
+   exchange frame — so two sources can only disagree by being wrong, not by speaking different
+   coordinates.
+
+2. **Channels = ordered layer stacks, per planet, per meaning.** `earth.color` = [google],
+   `earth.height` = [etopo ← ne15s ← cudem], `mars.height` = [mola]. Upper layers paint over
+   lower with per-texel WEIGHTS (0..1, edge-feathered at paint time — "bathymetry overwrites
+   imagery softly"). Compositing is per PIXEL, never per tile: a texel a source does not cover
+   keeps what is beneath it, and the realization's alpha rides into the shader so even a
+   transient paint hole shows the layer below instead of black.
+
+3. **Realizations = composed quadtrees.** A channel is realized as tile pyramids: a 16k cube
+   for the planet (color RGBA8 128² tiles, height R16F 256×128 tiles), plus Mercator-aligned
+   z14 WINDOWS where a region needs depth the cube cannot carry — and color and height windows
+   share ONE window frame, so their texels describe the same ground by construction. The
+   provider fn handed to the residency manager IS the paint: it runs on the worker threads,
+   walks the stack per texel, and caches every finished 64KB tile to
+   `cache/composed/<channel>/<realization>_v<stackhash>/` — raw tiles laid out for CopyTiles,
+   i.e. the DirectStorage-ready folder. Paint once per machine per stack version; a second run
+   streams composed tiles off disk with zero HTTP, zero reprojection (measured: first warm
+   1367 paints / 0 fetches from the raw-tile cache; second warm 0 paints / 1367 cache hits).
+   Changing a stack changes its hash and simply starts a fresh folder — stale tiles cannot be
+   served.
+
+4. **One render path** (`shaders/Compose.hlsli` + `GA_COMPOSED_CB_ROWS`): the renderer knows
+   CHANNELS — earth color is earth color, earth height is earth height. Globe, terrain, and
+   sea embed the same 9 CB rows, filled by `FillComposedCb` alone, and call the same
+   `ComposedColor` / `ComposedHeight` / `ComposedIsLand` functions — the class of bug where two
+   layers disagree about the planet's surface is structurally gone. The LOD is CONTINUOUS and
+   allowed negative: the cube clamps at its mip 0 and the window realization picks up exactly
+   where the cube runs out (lod −6 = z14 texels) — the climb-the-quadtree rule, in the sampler,
+   with no branch. What this deleted from render time: NeWeight/ReliefBlended (the equirect/NE
+   blend), the inline detail-window block, the committed 89 MB equirect relief + NE textures,
+   the Mars-vs-Earth relief branch (both planets now displace from composed height cubes), and
+   the M6b beacon.
+
+5. **Classification by survey** (user call: "get a stencil/shp of ocean water as the default
+   fallback"): GSHHG full-res shorelines + WDBII rivers (one 113 MB cached download) are the
+   land/sea AUTHORITY. The harvester parity-fills their closed polygons into land masks (window
+   4096² in the shared Mercator frame + global equirect); `ComposedIsLand` consults the mask
+   first and lets fine height data refine only the intertidal margin; the sea's `BedAt` uses
+   the composed height channel outside the surveyed CUDEM window (the "pretend 30 m ocean" is
+   gone — waves feel the real shelf) and discards per pixel where the survey says land.
+
+6. **Vector-first GIS** (user call): the polylines stay resident as the authority; the masks
+   are merely their raster realization. `GisLayer`/`GisVec.hlsl` renders the SAME polylines as
+   line geometry — raw lon/lat pairs projected in-shader through the shared rows — crisp at
+   every zoom (--stencil). The GA thesis fits here: spherical polygons are chains of great
+   arcs; point-in-polygon is winding/incidence (meets and joins); CGA versors are the natural
+   home for projection chains. Vector/mesh GIS and raster GIS as two realizations of one
+   source is exactly §12's graph-of-projections, made concrete.
+
+**The debug stencil doctrine:** `--stencil` overlays surveyed truth on rendered claims — green
+survey coast + magenta rivers (vectors), red composed-height zero contour (fwidth-thin), blue
+window frame, white graticule. Where green disagrees with the photo the color channel is
+misregistered; where red disagrees with green the height stack is; the survey settles the
+argument, so two of our own layers can never again vouch for each other.
+
+**Postmortem — the M6g reflection (found by the stencil, 2026-08-29):** the one-world frame
+computed `north0 = up × east`. In OUR planet frame (x at 0N0E, **y at the pole**, z at 90E — an
+odd permutation of ECEF) that identity flips sign: the result was SOUTH, the planet→tangent map
+had determinant −1, and every lat/lon-registered layer (imagery, GIS, composed heights, the
+foundation-sink window, MOLA vs the sample's diffuse on Mars) rendered N/S-MIRRORED about the
+anchor latitude relative to every world-metre layer (terrain, sea, SWE). Invisible while those
+families never shared a pixel; the moment the terrain wore imagery, the user's screenshots
+showed rivers mirroring themselves. Fix: `north0 = east × up`, plus a determinant guard at
+startup so a reflection can never impersonate a rotation again. Lesson recorded: **when a frame
+is built from crosses, assert its determinant** — a versor sanity check PGA would have given us
+for free had the basis been constructed as a motor.
+
+**Deferred / next:**
+- **Grade normalization as a compositor layer**: Google's per-zoom color grading shows as
+  banding between resident-mip regions; fix at PAINT time (histogram/gain matching between
+  zoom levels — the first "fun raster-kernel" layer, and a natural GA toy: color ops as rotors
+  in a chromaticity algebra).
+- **DirectStorage** for the composed-tile folder (the layout is already right).
+- **water / air channels** through the same registry (SWE eta and the cloud bank become
+  channel realizations; sudden weather updates = a new stack version = a fresh cache folder).
+- **Octrees**: the 3-D banks join the compositor the way the quadtrees did.
+- **The mesh-shader unification (user call, the endgame)**: one planet surface pipeline where
+  mesh shaders amplify geometry straight from the composed height tiles (tier confirmed on
+  this GPU), and TerrainLayer stops existing as a separate description of the same Earth. The
+  height-window realization is the prerequisite and now exists; the SWE solver can read the
+  same window the renderer streams (concurrent read/write is the design constraint to carry).
+- **Shoreline upgrade path**: GSHHG f (~100 m fidelity) → NOAA CUSP where finer survey truth
+  is wanted; the registry makes that a one-line stack swap.
+- Antarctica's grounding-line levels (5/6) are folded crudely into the global mask; irrelevant
+  to the estuary, noted for honesty.

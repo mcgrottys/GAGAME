@@ -10,6 +10,7 @@
 // ================================================================================================
 #pragma once
 
+#include "compose/Compositor.h"
 #include "core/Residency.h"
 #include "core/TileAtlas.h"
 #include "render/Camera.h"
@@ -67,9 +68,16 @@ public:
         m_estGeo[2] = lonSpan;
         m_estGeo[3] = latSpan;
     }
-    // M6f: the Merrimack detail window (Mercator z14-pixel frame).
-    void SetDetail(int tenant, double orgPxX, double orgPxY, double sizePx) {
-        m_detT = tenant;
+    // M6i: the composed channels -- the tenants realized from the layer compositor's stacks.
+    // colorCube/window carry the color channel (cube + Mercator z14 window), heightCube and
+    // heightWindow the height channel (same window FRAME as color); -1 = absent. Wants for
+    // all of them come from the SAME CDLOD walk.
+    void SetComposed(int colorCube, int window, int heightCube, int heightWindow,
+                     double orgPxX, double orgPxY, double sizePx) {
+        m_colorT = colorCube;
+        m_winT = window;
+        m_hgtT = heightCube;
+        m_hgtWinT = heightWindow;
         m_detOrg[0] = orgPxX;
         m_detOrg[1] = orgPxY;
         m_detSize = sizePx;
@@ -86,6 +94,12 @@ public:
     void PredictWants(const Camera& cam, float aspect);
 
     float reliefExagg = 1.0f;       // set per frame by main (altitude-scaled display choice)
+    bool stencilOverlay = false;    // M6i: --stencil, the GIS alignment overlay
+    // GIS survey stencil textures (GisStencil), for the --stencil overlay.
+    void SetGisStencil(uint32_t winSrv, uint32_t globSrv) {
+        m_gisWinSrv = winSrv;
+        m_gisGlobSrv = globSrv;
+    }
     bool skyPassEnabled = true;     // M6g: off while SkyLayer owns the low-altitude backdrop
     bool windOverlay = false;       // V key: tint the Mv2 wind bank's curl (violet cyclonic)
     bool marsReliefValid = false;   // M6f: the configured model's relief IS Mars (MOLA)
@@ -103,22 +117,16 @@ private:
     struct GlobeCbData {
         float glo[4];
         float camAbs[4];
-        uint32_t texIdx[4];   // relief, hs, wind, cloud VOLUME
+        uint32_t texIdx[4];   // unused (was relief), hs, wind, cloud VOLUME
         float wavesA[4];
-        float wavesB[4];      // nx, ny, pixel angular, max relief mip
-        float beacon[4];
+        float wavesB[4];      // nx, ny, pixel angular, unused
         float cloudA[4];      // extinction, shell top m, sun boost, ground-shadow strength
-        uint32_t texIdx2[4];  // M6d: NE relief SRV, wind Mv2 bank SRV, overlay on, unused
-        float neGeo[4];       // NE window: lon0, lat1, 1/lonSpan, 1/latSpan (degrees)
+        uint32_t texIdx2[4];  // unused (was NE relief), wind Mv2 bank SRV, overlay on
         float windGeo[4];     // wind grid: lat1, lon1, 1/dlat, 1/dlon
         float windB[4];       // nx, ny, unused, unused
-        uint32_t streamU[4];  // M6e: surface cube SRV, normal cube SRV, their residency maps
-        float streamF[4];     // surface on, normal on, planet-is-Mars, MOLA present
-        uint32_t detU[4];     // M6f: detail-window texture SRV, residency map SRV, on
-        float detGeo[4];      // Mercator z14-px window: org x, org y, 1/sizePx
-        float frameR0[4];     // M6g: planet->tangent rotation rows (east / up / north)
-        float frameR1[4];
-        float frameR2[4];
+        uint32_t streamU[4];  // M6e: Mars native surface/normal cubes + their residency maps
+        float streamF[4];     // surface on, normal on, planet-is-Mars, unused
+        ComposedSurfaceCb cs; // M6i: the composed channels + the one-world frame (8 rows)
         float estGeo[4];      // CUDEM window deg: lon0, lat1, 1/lonSpan, 1/latSpan (0 = none)
     };
     // Mirrors WindCb in GlobeWind.hlsl.
@@ -153,7 +161,9 @@ private:
     const GlobeModel* m_globe = nullptr;
     ID3D12RootSignature* m_rootSig = nullptr;
     Com<ID3D12PipelineState> m_pso, m_skyPso;
-    GpuTexture m_relief, m_hs, m_wind, m_cloudSrc, m_ne, m_windSrc;
+    // M6i: m_relief and m_ne retired -- the composed height cube streams what they carried
+    // (and returns ~90 MB of committed equirect memory to the pool).
+    GpuTexture m_hs, m_wind, m_cloudSrc, m_windSrc;
 
     // M6d: the sparse Mv2 wind bank (div, u, v, curl) -- resident where storms live.
     TileAtlas2D m_windBank;
@@ -173,9 +183,11 @@ private:
     uint32_t m_cloudTable = UINT32_MAX;   // [t1 source SRV, u0 volume UAV]
     bool m_cloudReady = false;
 
-    // M6e: streaming.
+    // M6e/M6i: streaming -- Mars's native pyramids (surf/norm) + the composed channels.
     ResidencyManager* m_res = nullptr;
-    int m_surfT = -1, m_normT = -1, m_detT = -1;
+    int m_surfT = -1, m_normT = -1;
+    int m_colorT = -1, m_winT = -1, m_hgtT = -1, m_hgtWinT = -1;
+    uint32_t m_gisWinSrv = UINT32_MAX, m_gisGlobSrv = UINT32_MAX;
     double m_detOrg[2] = {0, 0};
     double m_detSize = 1;
     bool m_streamMars = false;

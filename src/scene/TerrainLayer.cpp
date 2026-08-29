@@ -94,6 +94,7 @@ void TerrainLayer::Render(const FrameContext& ctx) {
     cb.srv[2] = m_quadsZ;
     cb.params[0] = waterNavd;
     cb.params[1] = m_bathy->WorldSizeX() / m_bathy->Nx();   // texel world size
+    cb.cs = m_cs;
     ctx.cl->SetPipelineState(m_pso.Get());
     ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx.cl->SetGraphicsRootConstantBufferView(1, ctx.gpu->PushConstants(&cb, sizeof(cb)));

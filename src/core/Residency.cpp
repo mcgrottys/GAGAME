@@ -72,6 +72,7 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
         case DXGI_FORMAT_BC1_UNORM: tileW = 512; tileH = 256; break;
         case DXGI_FORMAT_BC5_SNORM: tileW = 256; tileH = 256; break;
         case DXGI_FORMAT_R8G8B8A8_UNORM: tileW = 128; tileH = 128; break;
+        case DXGI_FORMAT_R16_FLOAT: tileW = 256; tileH = 128; break;   // M6i composed height
         default: GA_CHECK(E_INVALIDARG);
     }
     uint32_t mips = 1;
@@ -245,15 +246,27 @@ void ResidencyManager::UpdateResidencyByte(Tenant& t, const TileRequest& r, bool
     const auto& cur = t.tilings[r.face * t.mips + r.mip];
     const uint32_t bw = base.WidthInTiles, bh = base.HeightInTiles;
     const uint32_t rdim = (std::max)(bw, bh);
+    // The residency map is SQUARE (rdim x rdim: it is uv-addressed by the sampler) while the
+    // base tile grid need not be (BC1 tiles are 512x256, R16F 256x128). Each base tile spans
+    // sx x sy MAP texels -- writing only (x, y) left the map's far half stale on anisotropic
+    // grids, silently clamping those uv ranges to the coarsest mip (M6i fix; Mars's right
+    // half of every face rode that bug from M6e until now).
+    const uint32_t sx = rdim / (std::max)(1u, bw);
+    const uint32_t sy = rdim / (std::max)(1u, bh);
     const uint32_t cw = bw / (std::max)(1u, static_cast<uint32_t>(cur.WidthInTiles));
     const uint32_t ch = bh / (std::max)(1u, static_cast<uint32_t>(cur.HeightInTiles));
     for (uint32_t y = r.y * ch; y < (r.y + 1) * ch && y < bh; ++y) {
         for (uint32_t x = r.x * cw; x < (r.x + 1) * cw && x < bw; ++x) {
-            uint8_t& v = t.resCpu[r.face][y * rdim + x];
-            const int nv = mapped ? (std::min)(static_cast<int>(v), static_cast<int>(r.mip) * 16)
-                                  : (std::max)(static_cast<int>(v),
-                                               (static_cast<int>(r.mip) + 1) * 16);
-            v = static_cast<uint8_t>(nv);
+            for (uint32_t my = y * sy; my < (y + 1) * sy; ++my) {
+                for (uint32_t mx = x * sx; mx < (x + 1) * sx; ++mx) {
+                    uint8_t& v = t.resCpu[r.face][my * rdim + mx];
+                    const int nv =
+                        mapped ? (std::min)(static_cast<int>(v), static_cast<int>(r.mip) * 16)
+                               : (std::max)(static_cast<int>(v),
+                                            (static_cast<int>(r.mip) + 1) * 16);
+                    v = static_cast<uint8_t>(nv);
+                }
+            }
         }
     }
     t.resDirty = true;
@@ -400,8 +413,8 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
     std::vector<std::shared_ptr<Tracked>> toFill;
     for (const auto& tile : batch) {
         Tenant& t = m_tenants[tile->tenant];
-        if (m_freePool.empty() && m_heaps.size() * kPoolChunkTiles >= 4096) {
-            // Pool at budget (256 MB): evict.
+        if (m_freePool.empty() && m_heaps.size() * kPoolChunkTiles >= kPoolCapTiles) {
+            // Pool at budget: evict.
             std::sort(m_mapped.begin(), m_mapped.end(), [](const auto& a, const auto& b) {
                 if (a->lastSeen != b->lastSeen) return a->lastSeen < b->lastSeen;
                 return a->req.mip < b->req.mip;

@@ -18,12 +18,16 @@
 #include "core/Window.h"
 #include "render/Renderer.h"
 #include "scene/FieldSet.h"
+#include "scene/GisLayer.h"
 #include "scene/GlobeLayer.h"
 #include "scene/GulfLayer.h"
 #include "scene/SeaLayer.h"
 #include "scene/SkyLayer.h"
 #include "scene/TerrainLayer.h"
 #include "scene/TideLayer.h"
+#include "compose/Compositor.h"
+#include "compose/GisStencil.h"
+#include "compose/Sources.h"
 #include "core/Json.h"
 #include "core/Pga.h"
 #include "core/TileProviders.h"
@@ -78,6 +82,7 @@ struct Options {
     float stormHs = 0, stormTp = 10, stormDir = 90;   // --storm sandbox override
     bool seaVerify = false;           // measure rendered Hs from the displacement textures
     bool viz = false;                 // start with the atlas residency visualizer on
+    bool stencil = false;             // M6i --stencil: coast/graticule alignment overlay
     float camAlt = -1, camAz = 246, camPitch = -5;   // --cam alt,az,pitch override
     float camX = 1e9f, camZ = 1e9f;   // --campos x,z world override (sea mode)
     std::string bathyPath = "data/bathy/merrimack.json";
@@ -170,6 +175,7 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--height-scale") o.heightScale = static_cast<float>(atof(next("1.15").c_str()));
         else if (a == "--sea-verify") o.seaVerify = true;
         else if (a == "--viz") o.viz = true;
+        else if (a == "--stencil") o.stencil = true;
         else if (a == "--cam") {
             const std::string v = next("12,246,-5");
             sscanf_s(v.c_str(), "%f,%f,%f", &o.camAlt, &o.camAz, &o.camPitch);
@@ -635,11 +641,33 @@ int main(int argc, char** argv) {
         ResidencyManager resMgr;
         MarsBinProvider marsDiff, marsNorm;
         GoogleTileProvider googleTiles;
-        int detTenant = -1;
+
+        // ---- M6i: THE LAYER COMPOSITOR. Sources register their schemas; channels stack them
+        // in order (bathymetry overwrites imagery overwrites the global base, feathered at
+        // paint time); realizations paint composed quadtrees ONCE on the residency workers and
+        // cache every tile to cache/composed/ (the DirectStorage-ready folder). The renderer
+        // sees channels only: earth color is earth color, earth height is earth height.
+        Compositor compositor;
+        GoogleColorSource srcGoogle(&googleTiles);
+        EquirectHeightSource srcEtopo("noaa.etopo2022", "equirect-grid int16 8192x4096",
+                                      489200.0, &globeModel.Elev(), globeModel.Nx(),
+                                      globeModel.Ny());
+        EquirectHeightSource srcMola("nasa.mola.megdr16", "equirect-grid int16 5760x2880",
+                                     369700.0, &marsModel.Elev(), marsModel.Nx(),
+                                     marsModel.Ny());
+        std::unique_ptr<WindowHeightSource> srcNe15;
+        std::unique_ptr<CudemHeightSource> srcCudem;
+        GisStencil gisStencil;   // survey vectors + mask realizations (GSHHG/WDBII)
+        GisLayer* gisLayer = nullptr;
+        const double winOrgX = 4935.0 * 256.0, winOrgY = 6008.0 * 256.0;   // Merrimack z14 px
+        int colorCubeT = -1, winTenant = -1, hgtTenant = -1, hgtWinTenant = -1;
         if (globe) {
             resMgr.Init(gpu);
             int surf = -1, norm = -1;
             if (marsMode) {
+                // Mars: color/normal stay NATIVE streams (the rescued sample's pyramids are
+                // already tile-shaped truth); height composes from MOLA through the same
+                // machinery Earth uses -- one relief path in the shader for both planets.
                 if (marsDiff.Open(L"data/earth/diffuse.bin", DXGI_FORMAT_BC1_UNORM)) {
                     surf = resMgr.AddTextureCube(gpu, L"mars.diffuse (the rescued sample)",
                                                  16384, DXGI_FORMAT_BC1_UNORM, marsDiff.Fn());
@@ -648,21 +676,72 @@ int main(int argc, char** argv) {
                     norm = resMgr.AddTextureCube(gpu, L"mars.normal", 16384,
                                                  DXGI_FORMAT_BC5_SNORM, marsNorm.Fn());
                 }
-            } else if (googleTiles.Init("satellite", opt.tileBudget)) {
-                surf = resMgr.AddTextureCube(gpu, L"earth.google2d", 16384,
-                                             DXGI_FORMAT_R8G8B8A8_UNORM,
-                                             googleTiles.Fn(&resMgr.fetchesThisRun));
-                // M6f: the Merrimack detail window -- a 64x64 block of z14 tiles (~9.5 m/px)
-                // centred on the inlet, mip m == zoom 14-m, fills are straight pixel copies.
-                const double orgX = 4935.0 * 256.0, orgY = 6008.0 * 256.0;
-                detTenant = resMgr.AddTexture2D(gpu, L"earth.merrimackDetail", 16384,
-                                                DXGI_FORMAT_R8G8B8A8_UNORM,
-                                                googleTiles.DetailFn(&resMgr.fetchesThisRun,
-                                                                     1263360, 1538048));
-                globe->SetDetail(detTenant, orgX, orgY, 16384.0);
+                if (marsModel.Ready()) {
+                    const int ch = compositor.AddHeightChannel("mars.height", {&srcMola});
+                    hgtTenant = resMgr.AddTextureCube(gpu, L"mars.height (composed: MOLA)",
+                                                      Compositor::kFaceDim,
+                                                      DXGI_FORMAT_R16_FLOAT,
+                                                      compositor.CubeHeight(ch));
+                }
+                globe->SetComposed(-1, -1, hgtTenant, -1, 0.0, 0.0, 1.0);
+            } else {
+                // earth.height: ETOPO base, the NE 15s ring over it, CUDEM topobathy on top.
+                std::vector<HeightSource*> hstack{&srcEtopo};
+                if (globeModel.NeNx() > 0) {
+                    srcNe15 = std::make_unique<WindowHeightSource>(
+                        "noaa.etopo15s.ne", "window-grid int16 1440x1200", 46100.0,
+                        &globeModel.NeElev(), globeModel.NeNx(), globeModel.NeNy(),
+                        globeModel.NeLon0(), globeModel.NeLat1(), globeModel.NeDLon(),
+                        globeModel.NeDLat());
+                    hstack.push_back(srcNe15.get());
+                }
+                if (bathy.Ready()) {
+                    srcCudem = std::make_unique<CudemHeightSource>(&bathy);
+                    hstack.push_back(srcCudem.get());
+                }
+                const int hgtCh = compositor.AddHeightChannel("earth.height",
+                                                              std::move(hstack));
+                hgtTenant = resMgr.AddTextureCube(gpu, L"earth.height (composed)",
+                                                  Compositor::kFaceDim, DXGI_FORMAT_R16_FLOAT,
+                                                  compositor.CubeHeight(hgtCh));
+                // The height WINDOW: the same Mercator frame as the color window, so the
+                // globe's near-field land/sea gate and normals ride CUDEM truth.
+                hgtWinTenant = resMgr.AddTexture2D(
+                    gpu, L"earth.height.window (composed, Merrimack z14)",
+                    Compositor::kFaceDim, DXGI_FORMAT_R16_FLOAT,
+                    compositor.WindowHeight(hgtCh, 1263360, 1538048, 16384, 14));
+                // earth.color: the Google mercator tree, realized twice -- the global cube
+                // and the Merrimack z14 window (same stack, deeper footprint).
+                if (googleTiles.Init("satellite", opt.tileBudget)) {
+                    googleTiles.SetFetchCounter(&resMgr.fetchesThisRun);
+                    const int colCh = compositor.AddColorChannel("earth.color", {&srcGoogle});
+                    colorCubeT = resMgr.AddTextureCube(gpu, L"earth.color (composed)",
+                                                       Compositor::kFaceDim,
+                                                       DXGI_FORMAT_R8G8B8A8_UNORM,
+                                                       compositor.CubeColor(colCh));
+                    winTenant = resMgr.AddTexture2D(
+                        gpu, L"earth.color.window (composed, Merrimack z14)",
+                        Compositor::kFaceDim, DXGI_FORMAT_R8G8B8A8_UNORM,
+                        compositor.WindowColor(colCh, 1263360, 1538048, 16384, 14));
+                }
+                globe->SetComposed(colorCubeT, winTenant, hgtTenant, hgtWinTenant, winOrgX,
+                                   winOrgY, 16384.0);
             }
-            globe->SetResidency((surf >= 0 || norm >= 0) ? &resMgr : nullptr, surf, norm,
-                                marsMode);
+            globe->stencilOverlay = opt.stencil;
+            compositor.LogRegistry();
+            // The survey pack loads whenever it exists: the land MASKS are the default
+            // classifier (always on); the VECTOR overlay draws only under --stencil.
+            if (!marsMode && gisStencil.Load("data/gis/gis.json")) {
+                gisStencil.BuildMasks(gpu);
+                globe->SetGisStencil(gisStencil.MaskWinSrv(), gisStencil.MaskGlobSrv());
+                auto gisOwned = std::make_unique<GisLayer>();
+                gisLayer = gisOwned.get();
+                gisLayer->Configure(opt.shaderDir, &gisStencil);
+                gisLayer->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
+                gisLayer->enabled = opt.stencil;
+                renderer.AddLayer(std::move(gisOwned));
+            }
+            globe->SetResidency(&resMgr, surf, norm, marsMode);
             globe->SetPlanetRadius(planetR);
 
             // Field adapters: the whole tiled economy reports on one stats line.
@@ -784,10 +863,26 @@ int main(int argc, char** argv) {
                               marsMode ? 0.0 : BathyModel::kOrgLon, oDir);
         {
             const double yl = std::sqrt(oDir[0] * oDir[0] + oDir[2] * oDir[2]);
-            east0[0] = -oDir[2] / yl; east0[1] = 0.0; east0[2] = oDir[0] / yl;   // y-hat x up
-            north0[0] = oDir[1] * east0[2] - oDir[2] * east0[1];                 // up x east
-            north0[1] = oDir[2] * east0[0] - oDir[0] * east0[2];
-            north0[2] = oDir[0] * east0[1] - oDir[1] * east0[0];
+            east0[0] = -oDir[2] / yl; east0[1] = 0.0; east0[2] = oDir[0] / yl;   // d(dir)/dlon
+            // M6i: north = east x up -- NOT up x east. This planet frame (x at 0N0E, y at the
+            // POLE, z at 90E) is an odd permutation of ECEF, so the familiar identity flips
+            // sign; the old cross order produced SOUTH, making the planet->tangent map a
+            // REFLECTION (det -1). Every lat/lon-registered layer rendered N/S-mirrored about
+            // the anchor relative to the world-metre layers -- the "inverted textures" of the
+            // M6h report, invisible until the terrain wore imagery. The det check below makes
+            // a reflection impossible to reintroduce silently.
+            north0[0] = east0[1] * oDir[2] - east0[2] * oDir[1];
+            north0[1] = east0[2] * oDir[0] - east0[0] * oDir[2];
+            north0[2] = east0[0] * oDir[1] - east0[1] * oDir[0];
+            const double det =
+                east0[0] * (oDir[1] * north0[2] - oDir[2] * north0[1]) -
+                east0[1] * (oDir[0] * north0[2] - oDir[2] * north0[0]) +
+                east0[2] * (oDir[0] * north0[1] - oDir[1] * north0[0]);
+            if (det < 0.999) {
+                Log("FATAL: frame basis det %.3f -- planet->tangent must be a proper rotation",
+                    det);
+                return 1;
+            }
         }
         auto planetToFlatPose = [&](const Camera& g) -> Camera {
             Camera f = g;
@@ -836,6 +931,18 @@ int main(int argc, char** argv) {
                 globe->SetEstuaryWindow(lon0, lat1, bathy.WorldSizeX() / BathyModel::kMPerLon,
                                         bathy.WorldSizeZ() / BathyModel::kMPerLat);
             }
+        }
+        // M6i: the terrain samples the SAME composed color the globe does -- one fill
+        // function, one frame, one answer (its geometry stays the CUDEM grid the physics
+        // reads, so its height channel is off).
+        if (!marsMode && globe) {
+            ComposedSurfaceCb cs{};
+            FillComposedCb(cs, &resMgr, colorCubeT, winTenant, hgtTenant, hgtWinTenant,
+                           winOrgX, winOrgY, 16384.0, 14, planetR, east0, oDir, north0,
+                           opt.stencil, gisStencil.MaskWinSrv(), gisStencil.MaskGlobSrv());
+            if (terrain) terrain->SetComposed(cs);
+            if (sea) sea->SetComposed(cs);
+            if (gisLayer) gisLayer->SetComposed(cs);
         }
         // Altitude above the geoid, valid at any longitude (flat y is NOT altitude far from
         // the origin): |flat + (0,R,0)| - R, in doubles.
@@ -1154,20 +1261,38 @@ int main(int argc, char** argv) {
             }
         }
 
-        // M6f: pre-warm the Merrimack detail pyramid -- the whole window coarse, the inner
-        // rings progressively deeper, the inlet itself at z14 -- so a zoom NEVER waits on the
-        // network mid-flight. Everything fetched lands in the forever-cache: warming is a
-        // once-per-machine cost (re-runs drain instantly from disk).
-        if (opt.warmInlet && detTenant >= 0) {
+        // M6f/M6i: pre-warm the composed pyramids -- the Merrimack window coarse-to-z14 in
+        // rings, plus the planet-wide height cube at a working mip (height paints are LOCAL:
+        // no network, just source reads). Everything lands in the composed forever-cache:
+        // warming is a once-per-machine cost (re-runs drain instantly from disk).
+        if (opt.warmInlet && (winTenant >= 0 || hgtTenant >= 0)) {
             struct WarmRing {
                 float a, b;
                 uint32_t mip;
             };
+            // Mip 2 covers the WHOLE window (one zoom level = one color grading across the
+            // view -- the patchwork of per-zoom gradings was half of the "uneven shading"
+            // report); deeper rings tighten on the inlet.
             const WarmRing rings[] = {
-                {0.00f, 1.00f, 3}, {0.28f, 0.72f, 2}, {0.38f, 0.62f, 1}, {0.44f, 0.56f, 0}};
-            for (const auto& w : rings) resMgr.Want(detTenant, 0, w.mip, w.a, w.a, w.b, w.b);
-            Log("[warm] pre-caching the Merrimack pyramid (%u budget; tiles land in "
-                "cache/google forever)",
+                {0.00f, 1.00f, 3}, {0.00f, 1.00f, 2}, {0.38f, 0.62f, 1}, {0.44f, 0.56f, 0}};
+            if (winTenant >= 0) {
+                for (const auto& w : rings) {
+                    resMgr.Want(winTenant, 0, w.mip, w.a, w.a, w.b, w.b);
+                }
+            }
+            if (hgtWinTenant >= 0) {
+                // Height paints are pure local math: warm the WHOLE window at mip 2 (~32 MB)
+                // so land/sea classification is never a coarse-mip smear anywhere in view.
+                resMgr.Want(hgtWinTenant, 0, 2, 0, 0, 1, 1);
+                for (const auto& w : rings) {
+                    resMgr.Want(hgtWinTenant, 0, w.mip, w.a, w.a, w.b, w.b);
+                }
+            }
+            if (hgtTenant >= 0) {
+                for (uint32_t f = 0; f < 6; ++f) resMgr.Want(hgtTenant, f, 4, 0, 0, 1, 1);
+            }
+            Log("[warm] pre-caching composed pyramids (%u fetch budget; composed tiles land "
+                "in cache/composed forever)",
                 opt.tileBudget);
             for (int it = 0; it < 12000 && resMgr.PendingCount() > 0; ++it) {
                 ID3D12GraphicsCommandList* cl = gpu.BeginUpload();
@@ -1175,11 +1300,13 @@ int main(int argc, char** argv) {
                 gpu.EndUpload();
                 std::this_thread::sleep_for(std::chrono::milliseconds(20));   // loads need time
                 if (it % 150 == 0) {
-                    Log("[warm] pending %u, fetched %u", resMgr.PendingCount(),
-                        resMgr.fetchesThisRun);
+                    Log("[warm] pending %u, fetched %u, painted %u (+%u cached)",
+                        resMgr.PendingCount(), resMgr.fetchesThisRun,
+                        compositor.painted.load(), compositor.cacheHits.load());
                 }
             }
-            Log("[warm] done: %u fetches this run, %s", resMgr.fetchesThisRun,
+            Log("[warm] done: %u fetches, %u tiles painted, %u from composed cache, %s",
+                resMgr.fetchesThisRun, compositor.painted.load(), compositor.cacheHits.load(),
                 resMgr.stats.c_str());
         }
 

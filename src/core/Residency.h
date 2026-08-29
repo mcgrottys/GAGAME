@@ -65,8 +65,9 @@ using TileProviderFn = std::function<bool(const TileRequest&, std::vector<uint8_
 class ResidencyManager {
 public:
     static constexpr uint32_t kPoolChunkTiles = 128;     // 8 MB heap chunks
-    static constexpr uint32_t kMaxLoadsInFlight = 6;
-    static constexpr uint32_t kMaxMapsPerFrame = 48;     // tiles mapped+filled per frame
+    static constexpr uint32_t kMaxLoadsInFlight = 12;    // M6i: composed paints are local+cheap
+    static constexpr uint32_t kMaxMapsPerFrame = 96;     // tiles mapped+filled per frame
+    static constexpr uint32_t kPoolCapTiles = 8192;      // 512 MB ceiling before eviction
     static constexpr uint32_t kEvictAgeFrames = 4;       // > frame overlap: no in-flight reads
 
     void Init(Gpu& gpu);

@@ -32,17 +32,6 @@ void CubeDirD(int face, double u, double v, double out[3]) {
     out[2] = p[2] / len;
 }
 
-// Convert int16 metres to fp16 rows for the relief upload.
-uint16_t FloatToHalf(float f) {
-    const uint32_t x = *reinterpret_cast<const uint32_t*>(&f);
-    const uint32_t sign = (x >> 16) & 0x8000u;
-    int32_t e = static_cast<int32_t>((x >> 23) & 0xFF) - 127 + 15;
-    uint32_t m = (x >> 13) & 0x3FFu;
-    if (e <= 0) return static_cast<uint16_t>(sign);
-    if (e >= 31) return static_cast<uint16_t>(sign | 0x7BFFu);
-    return static_cast<uint16_t>(sign | (static_cast<uint32_t>(e) << 10) | m);
-}
-
 }  // namespace
 
 void GlobeLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSignature* rootSig) {
@@ -50,38 +39,10 @@ void GlobeLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSignatu
     if (!m_globe || !m_globe->Ready()) throw std::runtime_error("GlobeLayer needs globe data");
     if (!BuildPso(gpu, sc)) throw std::runtime_error("globe PSO failed");
 
-    // Relief: int16 metres -> R16F equirect with a 6-level mip chain (box-reduced CPU-side;
-    // M6c -- the single-mip first slice shimmered coastlines from orbit).
+    // M6i: no committed relief texture any more -- the composed height cube (ETOPO + NE 15s +
+    // CUDEM, or MOLA) streams the same data through the residency manager, painted once and
+    // cached. The CPU-side equirect grid stays in GlobeModel for picking and camera clamps.
     const int nx = m_globe->Nx(), ny = m_globe->Ny();
-    {
-        constexpr uint16_t kMips = 6;
-        m_relief = gpu.CreateTexture2D(nx, ny, DXGI_FORMAT_R16_FLOAT, D3D12_RESOURCE_FLAG_NONE,
-                                       D3D12_RESOURCE_STATE_COPY_DEST,
-                                       L"globe.relief (ETOPO 2022)", nullptr, kMips);
-        std::vector<float> level(m_globe->Elev().begin(), m_globe->Elev().end());
-        int lw = nx, lh = ny;
-        for (uint16_t mip = 0; mip < kMips; ++mip) {
-            std::vector<uint16_t> hw(static_cast<size_t>(lw) * lh);
-            for (size_t i = 0; i < hw.size(); ++i) hw[i] = FloatToHalf(level[i]);
-            gpu.UploadTexture(m_relief, hw.data(), lw * 2, mip);
-            if (mip + 1 < kMips) {
-                std::vector<float> next(static_cast<size_t>(lw / 2) * (lh / 2));
-                for (int y = 0; y < lh / 2; ++y) {
-                    for (int x = 0; x < lw / 2; ++x) {
-                        next[static_cast<size_t>(y) * (lw / 2) + x] =
-                            0.25f * (level[static_cast<size_t>(2 * y) * lw + 2 * x] +
-                                     level[static_cast<size_t>(2 * y) * lw + 2 * x + 1] +
-                                     level[static_cast<size_t>(2 * y + 1) * lw + 2 * x] +
-                                     level[static_cast<size_t>(2 * y + 1) * lw + 2 * x + 1]);
-                    }
-                }
-                level.swap(next);
-                lw /= 2;
-                lh /= 2;
-            }
-        }
-        m_relief.srv = gpu.CreateSrv(m_relief.res.Get(), DXGI_FORMAT_R16_FLOAT);
-    }
     if (m_globe->WavesNx() > 0 && !m_globe->Hs().empty()) {
         const int wn = m_globe->WavesNx(), wm = m_globe->WavesNy();
         m_hs = gpu.CreateTexture2D(wn, wm, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_NONE,
@@ -98,8 +59,8 @@ void GlobeLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSignatu
     if (m_globe->CloudsNx() > 0) InitClouds(gpu, sc);
     InitNeAndWind(gpu, sc);
 
-    Log("[globe] layer ready (relief %dx%d R16F x6 mips, waves %s, clouds %s)", nx, ny,
-        m_hs.Valid() ? m_globe->WavesCycle().c_str() : "absent",
+    Log("[globe] layer ready (relief %dx%d via composed height cube, waves %s, clouds %s)",
+        nx, ny, m_hs.Valid() ? m_globe->WavesCycle().c_str() : "absent",
         m_cloudReady ? m_globe->CloudsCycle().c_str() : "absent");
 }
 
@@ -300,19 +261,9 @@ void GlobeLayer::InitClouds(Gpu& gpu, ShaderCompiler& sc) {
     m_cloudReady = true;
 }
 
-// M6d: the New England 15-arc-second relief ring, and the sparse Mv2 wind bank.
+// M6d: the sparse Mv2 wind bank. (The NE 15s relief window that used to load here is a LAYER
+// in the composed earth.height stack now -- painted at compose time, not blended per pixel.)
 void GlobeLayer::InitNeAndWind(Gpu& gpu, ShaderCompiler& sc) {
-    if (m_globe->NeNx() > 0) {
-        const int nx = m_globe->NeNx(), ny = m_globe->NeNy();
-        std::vector<uint16_t> hw(static_cast<size_t>(nx) * ny);
-        const auto& e = m_globe->NeElev();
-        for (size_t i = 0; i < hw.size(); ++i) hw[i] = FloatToHalf(static_cast<float>(e[i]));
-        m_ne = gpu.CreateTexture2D(nx, ny, DXGI_FORMAT_R16_FLOAT, D3D12_RESOURCE_FLAG_NONE,
-                                   D3D12_RESOURCE_STATE_COPY_DEST,
-                                   L"globe.neRelief (ETOPO 15s New England)");
-        gpu.UploadTexture(m_ne, hw.data(), nx * 2);
-        m_ne.srv = gpu.CreateSrv(m_ne.res.Get(), DXGI_FORMAT_R16_FLOAT);
-    }
     if (m_globe->WindNx() <= 0 || m_globe->WindU().empty()) return;
 
     const int wn = m_globe->WindNx(), wm = m_globe->WindNy();
@@ -583,7 +534,9 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
     // M6e: this leaf's on-screen span decides which streamed-texture mip it WANTS; the
     // residency manager turns wants into loads/mappings on its own budgets. The CDLOD walk IS
     // the sampling feedback -- deterministic, no readback pass (the classic had to render one).
-    if (m_res && m_surfT >= 0) {
+    // M6i: the same rects feed every tenant riding this planet -- Mars's native pyramids and
+    // the composed color/height cubes alike (Want clamps to each tenant's own mip count).
+    if (m_res && (m_surfT >= 0 || m_colorT >= 0 || m_hgtT >= 0)) {
         const double px = arc / ((std::max)(dist, 1.0) * (std::max)(m_pixAng, 1e-6f));
         const double texAtMip0 = size * 16384.0;
         const int mip = (std::max)(
@@ -594,14 +547,15 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
         const float tu0 = static_cast<float>(u0), tu1 = static_cast<float>(u0 + size);
         const float tv0 = static_cast<float>(1.0 - (v0 + size));
         const float tv1 = static_cast<float>(1.0 - v0);
-        m_res->Want(m_surfT, face, mip, tu0, tv0, tu1, tv1, m_predictPass);
-        if (m_normT >= 0) {
-            m_res->Want(m_normT, face, mip, tu0, tv0, tu1, tv1, m_predictPass);
-        }
-        // M6f: the detail window's demand -- the node's corners in Mercator z14-pixel space,
+        if (m_surfT >= 0) m_res->Want(m_surfT, face, mip, tu0, tv0, tu1, tv1, m_predictPass);
+        if (m_normT >= 0) m_res->Want(m_normT, face, mip, tu0, tv0, tu1, tv1, m_predictPass);
+        if (m_colorT >= 0) m_res->Want(m_colorT, face, mip, tu0, tv0, tu1, tv1, m_predictPass);
+        if (m_hgtT >= 0) m_res->Want(m_hgtT, face, mip, tu0, tv0, tu1, tv1, m_predictPass);
+        // M6f: the window's demand -- the node's corners in Mercator z14-pixel space,
         // intersected with the window; its mip matches the same on-screen texel math against
-        // the window's OWN pyramid (mip 0 = z14).
-        if (m_detT >= 0) {
+        // the window's OWN pyramid (mip 0 = z14). Color and height windows share the frame,
+        // so one rect feeds both.
+        if (m_winT >= 0 || m_hgtWinT >= 0) {
             double mmin[2] = {1e18, 1e18}, mmax[2] = {-1e18, -1e18};
             for (int cy = 0; cy < 3; ++cy) {
                 for (int cx = 0; cx < 3; ++cx) {
@@ -633,10 +587,16 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
                 const int dmip = (std::max)(
                     0, static_cast<int>(std::ceil(
                            std::log2((std::max)(texAtMip0 / (std::max)(px, 16.0), 1.0)))));
-                m_res->Want(m_detT, 0, dmip, static_cast<float>((std::max)(du0, 0.0)),
-                            static_cast<float>((std::max)(dv0, 0.0)),
-                            static_cast<float>((std::min)(du1, 1.0)),
-                            static_cast<float>((std::min)(dv1, 1.0)), m_predictPass);
+                const float wu0 = static_cast<float>((std::max)(du0, 0.0));
+                const float wv0 = static_cast<float>((std::max)(dv0, 0.0));
+                const float wu1 = static_cast<float>((std::min)(du1, 1.0));
+                const float wv1 = static_cast<float>((std::min)(dv1, 1.0));
+                if (m_winT >= 0) {
+                    m_res->Want(m_winT, 0, dmip, wu0, wv0, wu1, wv1, m_predictPass);
+                }
+                if (m_hgtWinT >= 0) {
+                    m_res->Want(m_hgtWinT, 0, dmip, wu0, wv0, wu1, wv1, m_predictPass);
+                }
             }
         }
     }
@@ -657,7 +617,7 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
 
 // M6e screw-prefetch: the same walk under the PREDICTED pose, emitting predicted wants only.
 void GlobeLayer::PredictWants(const Camera& cam, float aspect) {
-    if (!m_res || m_surfT < 0) return;
+    if (!m_res || (m_surfT < 0 && m_colorT < 0 && m_hgtT < 0)) return;
     double savedPos[3] = {m_camPos[0], m_camPos[1], m_camPos[2]};
     double savedFrustum[6][4];
     memcpy(savedFrustum, m_frustum, sizeof(m_frustum));
@@ -679,7 +639,7 @@ void GlobeLayer::PredictWants(const Camera& cam, float aspect) {
 }
 
 void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, double simTime) {
-    if (!m_relief.Valid() && !m_streamMars) return;
+    if (!m_globe || !m_globe->Ready()) return;
     m_viewportH = viewportH;
     m_pixAng = cam.fovY / (std::max)(viewportH, 1.0f);   // the walk needs it BEFORE wavesB
     // M6g: cam is the FLAT (tangent-frame) camera. Keep it for node culling, and derive the
@@ -724,18 +684,13 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.camAbs[0] = static_cast<float>(m_camPos[0]);
     m_cb.camAbs[1] = static_cast<float>(m_camPos[1] + m_radius);
     m_cb.camAbs[2] = static_cast<float>(m_camPos[2]);
-    for (int i = 0; i < 3; ++i) {
-        m_cb.frameR0[i] = static_cast<float>(m_frameE[i]);
-        m_cb.frameR1[i] = static_cast<float>(m_frameU[i]);
-        m_cb.frameR2[i] = static_cast<float>(m_frameN[i]);
-    }
     m_cb.estGeo[0] = static_cast<float>(m_estGeo[0]);
     m_cb.estGeo[1] = static_cast<float>(m_estGeo[1]);
     m_cb.estGeo[2] =
         m_estGeo[2] > 0.0 ? static_cast<float>(1.0 / m_estGeo[2]) : 0.0f;
     m_cb.estGeo[3] =
         (m_estGeo[3] > 0.0 && !m_streamMars) ? static_cast<float>(1.0 / m_estGeo[3]) : 0.0f;
-    m_cb.texIdx[0] = m_relief.srv;
+    m_cb.texIdx[0] = UINT32_MAX;   // was the equirect relief; the composed height cube owns it
     m_cb.texIdx[1] = m_hs.Valid() ? m_hs.srv : UINT32_MAX;
     m_cb.texIdx[2] = m_wind.Valid() ? m_wind.srv : UINT32_MAX;
     m_cb.wavesA[0] = static_cast<float>(m_globe->WavesLat1());
@@ -745,21 +700,15 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.wavesB[0] = static_cast<float>(m_globe->WavesNx());
     m_cb.wavesB[1] = static_cast<float>(m_globe->WavesNy());
     m_cb.wavesB[2] = cam.fovY / (std::max)(m_viewportH, 1.0f);   // pixel angular size
-    m_cb.wavesB[3] = 5.0f;                                       // deepest relief mip
+    m_cb.wavesB[3] = 0.0f;
     m_cb.texIdx[3] = m_cloudReady ? m_cloud.Srv() : UINT32_MAX;
     m_cb.cloudA[0] = 2.4e-3f;      // extinction /m at density 1 (stratiform-effective)
     m_cb.cloudA[1] = kShellTopM;
     m_cb.cloudA[2] = 1.0f;         // sun boost
     m_cb.cloudA[3] = 0.75f;        // ground-shadow strength
-    m_cb.texIdx2[0] = m_ne.Valid() ? m_ne.srv : UINT32_MAX;
+    m_cb.texIdx2[0] = UINT32_MAX;  // was the NE 15s window; a composed height LAYER now
     m_cb.texIdx2[1] = m_windReady ? m_windBank.Srv() : UINT32_MAX;
     m_cb.texIdx2[2] = windOverlay ? 1u : 0u;
-    if (m_ne.Valid()) {
-        m_cb.neGeo[0] = static_cast<float>(m_globe->NeLon0());
-        m_cb.neGeo[1] = static_cast<float>(m_globe->NeLat1());
-        m_cb.neGeo[2] = static_cast<float>(1.0 / (m_globe->NeNx() * m_globe->NeDLon()));
-        m_cb.neGeo[3] = static_cast<float>(1.0 / (m_globe->NeNy() * std::abs(m_globe->NeDLat())));
-    }
     m_cb.windGeo[0] = static_cast<float>(m_globe->WindLat1());
     m_cb.windGeo[1] = static_cast<float>(m_globe->WindLon1());
     m_cb.windGeo[2] = static_cast<float>(1.0 / std::abs(m_globe->WindDLat()));
@@ -767,7 +716,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.windB[0] = static_cast<float>(m_globe->WindNx());
     m_cb.windB[1] = static_cast<float>(m_globe->WindNy());
 
-    // ---- M6e: streamed surfaces. On Mars, the live-Earth fields all stand down.
+    // ---- M6e: Mars's native streams. On Mars, the live-Earth fields all stand down.
     const bool surfOn = m_res && m_surfT >= 0;
     const bool normOn = m_res && m_normT >= 0;
     m_cb.streamU[0] = surfOn ? m_res->TextureSrv(m_surfT) : UINT32_MAX;
@@ -777,17 +726,15 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.streamF[0] = surfOn ? 1.0f : 0.0f;
     m_cb.streamF[1] = normOn ? 1.0f : 0.0f;
     m_cb.streamF[2] = m_streamMars ? 1.0f : 0.0f;
-    m_cb.streamF[3] = marsReliefValid ? 1.0f : 0.0f;   // MOLA present: displace + shade it
-    const bool detOn = m_res && m_detT >= 0 && !m_streamMars;
-    m_cb.detU[0] = detOn ? m_res->TextureSrv(m_detT) : UINT32_MAX;
-    m_cb.detU[1] = detOn ? m_res->ResidencySrv(m_detT) : UINT32_MAX;
-    m_cb.detU[2] = detOn ? 1u : 0u;
-    m_cb.detGeo[0] = static_cast<float>(m_detOrg[0]);
-    m_cb.detGeo[1] = static_cast<float>(m_detOrg[1]);
-    m_cb.detGeo[2] = static_cast<float>(1.0 / m_detSize);
+    m_cb.streamF[3] = 0.0f;
+    // ---- M6i: the composed channels + the one-world frame, through the ONE fill function
+    // the terrain also uses -- the two layers cannot disagree about this math.
+    FillComposedCb(m_cb.cs, m_res, m_colorT, m_winT, m_hgtT, m_hgtWinT, m_detOrg[0],
+                   m_detOrg[1], m_detSize, 14, m_radius, m_frameE, m_frameU, m_frameN,
+                   stencilOverlay, m_gisWinSrv, m_gisGlobSrv);
     if (m_streamMars) {
         m_cb.texIdx[1] = m_cb.texIdx[2] = m_cb.texIdx[3] = UINT32_MAX;   // waves/wind/clouds
-        m_cb.texIdx2[0] = m_cb.texIdx2[1] = UINT32_MAX;                  // NE ring / wind bank
+        m_cb.texIdx2[1] = UINT32_MAX;                                    // wind bank
         m_cb.texIdx2[2] = 0;
     }
 
@@ -802,12 +749,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_skyCb.up[1] = cf.z * cr.x - cf.x * cr.z;
     m_skyCb.up[2] = cf.x * cr.y - cf.y * cr.x;
     m_skyCb.up[3] = 0.0f;
-    double nby[3];
-    GlobeModel::LatLonDir(42.81833, -70.81, nby);
-    m_cb.beacon[0] = static_cast<float>(nby[0]);
-    m_cb.beacon[1] = static_cast<float>(nby[1]);
-    m_cb.beacon[2] = static_cast<float>(nby[2]);
-    m_cb.beacon[3] = m_streamMars ? 0.0f : 1.0f;   // no Newburyport on Mars (yet)
+    // (M6h: the M6b destination beacon is fully retired -- row and shader block deleted.)
 
     char s[96];
     snprintf(s, sizeof(s), "globe %zu nodes  alt %.0f km", m_nodes.size(),

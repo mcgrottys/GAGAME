@@ -40,16 +40,39 @@ cbuffer SeaCb : register(b1) {
     float4 gSweG;       // x = prism-truncation current gain (the CUDEM window holds ~1/3 of the
                         // real tidal prism; the solver supplies the SHAPE, this ACT-calibrated
                         // gain restores the MAGNITUDE until the M6 domain widens), yzw unused
+    // M6i: the composed channels + the survey land masks -- the sea consults the SAME planet
+    // description every other layer does (bed outside the survey, land classification).
+    GA_COMPOSED_CB_ROWS
 };
+
+#include "Compose.hlsli"
 
 static const uint kPatches = 64;    // patches per side
 
-// M5: the bottom. Outside the surveyed window pretend deep ocean; inside it, the real bed.
+// The world position's planet direction, one-world style (curvature drop + frame rows).
+float3 SeaPlanetDir(float2 xz) {
+    const float drop = dot(xz, xz) / (2.0f * gCsF.w);
+    return CsToPlanet(normalize(float3(xz.x, -drop + gCsF.w, xz.y)));
+}
+
+// M5: the bottom. Inside the surveyed CUDEM window, the real bed (physics-grade). M6i: outside
+// it, the COMPOSED HEIGHT CHANNEL -- the NE 15s shelf, ETOPO beyond -- instead of a pretend
+// 30 m ocean. The sea now feels the real shelf everywhere it renders, and land is land.
+float BedAt(float2 xz, out bool surveyed) {
+    surveyed = false;
+    if (gBathyU.x != 0xFFFFFFFFu) {
+        const float2 uv = (xz - gBathyGeo.xy) * gBathyGeo.zw;
+        if (all(uv > 0.002f) && all(uv < 0.998f)) {
+            surveyed = true;
+            return gTex[gBathyU.x].SampleLevel(sLinearClamp, float2(uv.x, 1.0f - uv.y), 0).x;
+        }
+    }
+    if (ComposedHeightOn()) return ComposedHeight(SeaPlanetDir(xz), -2.0f);
+    return -30.0f;
+}
 float BedAt(float2 xz) {
-    if (gBathyU.x == 0xFFFFFFFFu) return -30.0f;
-    const float2 uv = (xz - gBathyGeo.xy) * gBathyGeo.zw;
-    if (any(uv < 0.002f) || any(uv > 0.998f)) return -30.0f;
-    return gTex[gBathyU.x].SampleLevel(sLinearClamp, float2(uv.x, 1.0f - uv.y), 0).x;
+    bool s;
+    return BedAt(xz, s);
 }
 
 float2 BathyUv(float2 xz) {
@@ -269,6 +292,18 @@ float4 PsMain(VsOut i) : SV_Target {
     const float2 Upx = JetU(i.worldXZ);
     const float2 adv = JetUAdvect(i.worldXZ) * gWaveC.w;   // must match the DS sampling exactly
     const float depth = i.sh.x;
+    // M6i: OUTSIDE the surveyed window the survey mask classifies per pixel -- the ocean sheet
+    // simply is not drawn over land (inside the window the SWE wet/dry + terrain depth own
+    // this, so the gate stays out of the estuary's way).
+    {
+        const float2 buv = (i.worldXZ - gBathyGeo.xy) * gBathyGeo.zw;
+        const bool surveyed =
+            gBathyU.x != 0xFFFFFFFFu && all(buv > 0.002f) && all(buv < 0.998f);
+        if (!surveyed && ComposedHeightOn() &&
+            ComposedIsLand(SeaPlanetDir(i.worldXZ), gSea.x - depth) && depth < 0.75f) {
+            discard;
+        }
+    }
     const float shadow = SweShadow(i.worldXZ);
 
     float hx = 0, hz = 0, foam = 0, chopFoam = 0, blockC2 = 0;

@@ -1,0 +1,158 @@
+// ================================================================================================
+//  Compositor - M6i: the layer compositor. "The logical evolution of the mars sample."
+//
+//  The problem it retires: every data source used to reach the renderer through its OWN path --
+//  the global Google cube had one shader block, the Mercator detail window another, the ETOPO
+//  equirect a third, the NE 15s ring a fourth -- each with its own uv math, feathering and
+//  blend weights evaluated PER PIXEL, PER FRAME. Two layers (globe, terrain) each re-derived
+//  that math independently, which is exactly how they came to disagree about what the Earth
+//  looks like (the M6h glitch report).
+//
+//  The architecture (the user's design, near verbatim):
+//    1. SCHEMA REGISTRY -- for each source, its structure (mercator tile tree, equirect grid,
+//       geotiff-derived window), format, and centimetres per pixel. SourceInfo below.
+//    2. CHANNELS -- per planet, per meaning: earth.color, earth.height, mars.height (water and
+//       air follow the same shape later). A channel is an ORDERED layer stack, bottom to top;
+//       an upper layer paints over a lower one wherever it has coverage, with paint-time edge
+//       feathering (bathymetry overwrites imagery softly, the NE ring fades into ETOPO).
+//    3. COMPOSED QUADTREES -- a channel is REALIZED as tile pyramids: a cube-face pyramid for
+//       the whole planet, a Mercator-aligned window pyramid where one region needs depth the
+//       16k cube cannot carry. Tiles are painted ONCE, on the residency manager's worker
+//       threads (the provider fn IS the paint), and cached to disk forever:
+//       cache/composed/<channel>/<realization>/... -- an ephemeral-but-cached store of raw
+//       64KB tiles, laid out exactly for CopyTiles, which is the DirectStorage-ready folder.
+//       A second run streams composed tiles straight off disk: no HTTP, no reprojection, no
+//       resampling -- the paint cost is once per machine per stack version.
+//    4. ONE RENDER PATH -- shaders/Compose.hlsli. The renderer knows CHANNELS, not sources:
+//       earth color is earth color, earth height is earth height. The globe and the terrain
+//       call the SAME ComposedColor/ComposedHeight functions on the SAME constants
+//       (ComposedSurfaceCb, filled by FillComposedCb alone), so they CANNOT disagree.
+//
+//  GA hook: a layer is any object with a Sample(); the stack walk is an ordered composition of
+//  operators. Raster operators over multivector-valued layers (contrast amplification, fades,
+//  past/present morphs) drop in as ordinary layers -- that is where the fun kernel work lands.
+// ================================================================================================
+#pragma once
+
+#include "core/Residency.h"
+
+#include <atomic>
+#include <memory>
+#include <string>
+#include <vector>
+
+namespace ga {
+
+// ---- 1. the schema registry entry ----------------------------------------------------------
+// Structure is a human-readable contract ("what shape is this data"), resolution is honest
+// (centimetres per pixel at the finest level), coverage is a lat/lon box in degrees.
+struct SourceInfo {
+    std::string name;         // "google.satellite", "noaa.cudem.merrimack", ...
+    std::string structure;    // "mercator-tile-tree jpeg 256px", "equirect-grid int16", ...
+    std::string crs;          // the source's native projection -- the ALIGNMENT contract.
+                              // GeoTIFF-derived sources carry theirs from the file; every
+                              // Sample() resolves it to WGS84 lat/lon, the exchange frame,
+                              // so two sources can only disagree by being WRONG, not by
+                              // speaking different coordinates.
+    double cmPerPixel = 0;    // finest ground resolution
+    double lon0 = -180, lat0 = -90, lon1 = 180, lat1 = 90;   // coverage (degrees)
+};
+
+// ---- 2. sources ----------------------------------------------------------------------------
+// A source answers point queries in lat/lon and returns a WEIGHT: 0 = no coverage here, 1 =
+// full ownership, in between = the paint-time feather at its edges. groundResM is the composed
+// texel's Mercator-equatorial metres-per-texel, so tile-tree sources can pick a zoom level.
+class ColorSource {
+public:
+    virtual ~ColorSource() = default;
+    virtual const SourceInfo& Info() const = 0;
+    virtual float Sample(double latRad, double lonRad, double groundResM, uint8_t rgba[4]) = 0;
+};
+
+class HeightSource {
+public:
+    virtual ~HeightSource() = default;
+    virtual const SourceInfo& Info() const = 0;
+    virtual float Sample(double latRad, double lonRad, double groundResM, float& metres) = 0;
+};
+
+// ---- 3. the compositor ---------------------------------------------------------------------
+class Compositor {
+public:
+    static constexpr uint32_t kFaceDim = 16384;   // every composed pyramid realization today
+
+    // Channels: an ordered stack, bottom -> top. Pointers are borrowed (main owns sources).
+    int AddColorChannel(const std::string& name, std::vector<ColorSource*> stack);
+    int AddHeightChannel(const std::string& name, std::vector<HeightSource*> stack);
+
+    // Realizations: each returns a TileProviderFn for one residency tenant. The fn paints
+    // (or reads back from the composed cache) one 64KB tile on a worker thread.
+    //  * CubeColor: RGBA8 tiles (128x128) on the HARDWARE cube convention, mip m at
+    //    Mercator-equivalent zoom (8 - m) for a 16k face.
+    //  * WindowColor: RGBA8 tiles of a Mercator-aligned window; org/size in zBase pixels,
+    //    mip m == zoom (zBase - m), texels are exact Mercator pixels.
+    //  * CubeHeight: R16F tiles (256x128), metres, same cube convention.
+    TileProviderFn CubeColor(int channel);
+    TileProviderFn WindowColor(int channel, long long orgPxX, long long orgPxY, uint32_t sizePx,
+                               int zBase);
+    TileProviderFn CubeHeight(int channel);
+    //  * WindowHeight: R16F tiles of the SAME Mercator window frame the color window uses --
+    //    one frame, two channels, so near-field land/sea gates and normals ride CUDEM truth.
+    TileProviderFn WindowHeight(int channel, long long orgPxX, long long orgPxY,
+                                uint32_t sizePx, int zBase);
+
+    // The schema table, logged at startup: what feeds each channel, in what structure.
+    void LogRegistry() const;
+
+    std::atomic<uint32_t> painted{0};     // tiles composed this run
+    std::atomic<uint32_t> cacheHits{0};   // tiles served from the composed cache
+
+private:
+    struct Channel {
+        std::string name;
+        std::vector<ColorSource*> color;
+        std::vector<HeightSource*> height;
+        uint64_t stackHash = 0;   // names + structures + version: changing the stack
+                                  // invalidates the composed cache, never poisons it
+    };
+    std::string CachePath(const Channel& ch, const char* realization, const TileRequest& r) const;
+    bool ReadCached(const std::string& path, std::vector<uint8_t>& out);
+    void WriteCached(const std::string& path, const std::vector<uint8_t>& data);
+    void EnsureCacheDir(const Channel& ch, const char* realization);
+
+    std::vector<Channel> m_channels;
+};
+
+// The hardware cubemap convention (D3D spec) -- the ONE cube addressing every composed cube
+// realization writes and every TextureCube sample reads. Moved here from the Google provider:
+// it belongs to the ADDRESSING, not to any one source.
+//   +X: dir = ( 1, -t, -s)   -X: dir = (-1, -t,  s)
+//   +Y: dir = ( s,  1,  t)   -Y: dir = ( s, -1, -t)
+//   +Z: dir = ( s, -t,  1)   -Z: dir = (-s, -t, -1)     with s = 2u-1, t = 2v-1.
+void ComposeCubeDir(uint32_t face, double u, double v, double out[3]);
+
+// ---- 4. the one render path's constants ----------------------------------------------------
+// Mirrors GA_COMPOSED_CB_ROWS in Common.hlsli (8 float4 rows -- count on BOTH sides after any
+// edit). Every layer that samples a planet's composed channels embeds these rows and fills
+// them through FillComposedCb ALONE, so no two layers can disagree on the math.
+struct ComposedSurfaceCb {
+    uint32_t u[4];    // color cube SRV, color cube residency map, window SRV, window res map
+    uint32_t u2[4];   // height cube SRV + residency map, height WINDOW SRV + residency map
+    uint32_t u3[4];   // GIS survey stencil: window SRV (R8G8 coast,river), global SRV (R8)
+    float f[4];       // color cube on, window on, height on, planet radius (m)
+    float merc[4];    // window org px x, org px y, 1/sizePx, full-world px at window zBase
+    float g[4];       // height cube max lod, height texel arc (rad), height window max lod,
+                      // stencil overlay on
+    float r0[4];      // planet->tangent rotation rows (east / up / north)
+    float r1[4];
+    float r2[4];
+};
+
+void FillComposedCb(ComposedSurfaceCb& cb, const ResidencyManager* rm, int colorCube,
+                    int window, int heightCube, int heightWindow, double orgPxX,
+                    double orgPxY, double sizePx, int zBase, double planetR,
+                    const double east[3], const double up[3], const double north[3],
+                    bool stencilOverlay, uint32_t gisWinSrv = UINT32_MAX,
+                    uint32_t gisGlobSrv = UINT32_MAX);
+
+}  // namespace ga

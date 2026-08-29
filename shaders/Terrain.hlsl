@@ -6,9 +6,14 @@
 
 cbuffer TerrainCb : register(b1) {
     float4 gTGeo;      // world x0, z0, sizeX, sizeZ
-    uint4  gTSrv;      // x = heightfield SRV, y = grid quads X, z = grid quads Z, w = unused
-    float4 gTParams;   // x = water level (NAVD88 m), y = texel world size, zw = unused
+    uint4  gTSrv;      // x = heightfield SRV, y = grid quads X, z = grid quads Z
+    float4 gTParams;   // x = water level (NAVD88 m), y = texel world size
+    // M6i: the composed channels -- the SAME rows, functions and constants the globe samples,
+    // so the terrain and the globe agree about the Earth's color by construction.
+    GA_COMPOSED_CB_ROWS
 };
+
+#include "Compose.hlsli"
 
 struct VsOut {
     float4 pos : SV_Position;
@@ -74,7 +79,27 @@ float4 PsMain(VsOut i) : SV_Target {
 
     const float ndl = saturate(dot(n, gSunDir.xyz));
     float3 col = albedo * (SUN_IRR_C * ndl + SkyRadiance(n.y) * 0.55f);
-
     col = AerialPerspective(col, normalize(i.rel), length(i.rel));
+
+    // M6i: from altitude the terrain crossfades to the GLOBE'S EXACT land shading of the
+    // SAME composed imagery -- the whole lighting model, not just the albedo. The material
+    // physics (wet sand, riprap, sky ambient, near haze) owns the close-up; at range the
+    // window pixel converges on what the globe would have drawn there, so the window's edge
+    // has nothing left to disagree about. One frame, one fill function, one answer.
+    float3 dirP = float3(0.0f, 1.0f, 0.0f);
+    bool haveDirP = false;
+    if (ComposedColorOn() || gCsG.w > 0.5f) {
+        const float2 wxz = float2(gTGeo.x + i.uv.x * gTGeo.z, gTGeo.y + i.uv.y * gTGeo.w);
+        const float drop = dot(wxz, wxz) / (2.0f * gCsF.w);
+        dirP = CsToPlanet(normalize(float3(wxz.x, i.elev - drop + gCsF.w, wxz.y)));
+        haveDirP = true;
+    }
+    if (ComposedColorOn()) {
+        const float3 img = ComposedColor(dirP);
+        const float3 colFar = img * (0.030f + ndl * SUN_IRR_C * 1.15f);   // Globe.hlsl's land
+        const float w = saturate((length(i.rel) - 500.0f) / 2200.0f) * 0.92f;
+        col = lerp(col, colFar, w);
+    }
+    if (haveDirP) col = ApplyComposedStencil(col, dirP);   // --stencil overlay (off = no-op)
     return float4(col, 1.0f);
 }
