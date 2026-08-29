@@ -531,6 +531,23 @@ Diagnosis pattern that worked (twice now): render the SAME view repeatedly and v
 — if the artifact does not move, it is not that input. The pale mid-tide marsh that remains
 is honest: Google's own photo of a flooded sound is the same sky-grey.
 
+## 15a. THE DOCTRINE (2026-08-29, the fork before the water work): see ATLAS.md
+
+The texture-handling writeup graduated into its own document — **[ATLAS.md](ATLAS.md)** —
+and it is doctrine, not description: rasters are PLANES (frame + metric + lattice + value
+fiber); the lingua franca is three tiers (the WGS84 exchange frame, the multivector value
+algebra, the resolution ladder), never one master grid; the rung rule answers granularity
+(a 10 cm and a 7 cm source realize at 5 cm — the first rung strictly finer than the finest
+source, so undersampling can only happen in the coarsening direction where box means make
+it a measurement); conservative vs perceptual resampling is law; and the monastery pattern
+is the architecture vocabulary (monasteries = channel families that never import each
+other's internals; the bible = the shared algebra; the Vatican = any client where they
+convene; cardinals = the kernels that paint). Water, air, and Maxwell enter through the
+same five steps (ATLAS §9). Decoupling is staged toward AtlasD, the background sim service
+the renderer peeks into (§8). The Scriptorium (tools/Scriptorium, .NET 10 MCP + SQLite)
+keeps the growing repo navigable: symbols, harvester registry, provenance, monastery
+registry — registered in .mcp.json.
+
 ## 16. M6l (2026-08-29): the painting verified — a plane-flown ortho through the registry
 
 The user's test: bring in an INDEPENDENT high-res aerial of the Merrimack inlet and see if the

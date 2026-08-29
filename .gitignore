@@ -31,3 +31,7 @@ scratch_*
 
 data/aerial/*.rgb
 cache/aerial/
+
+tools/Scriptorium/scriptorium.db
+tools/Scriptorium/bin/
+tools/Scriptorium/obj/
