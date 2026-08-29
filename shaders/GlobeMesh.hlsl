@@ -90,7 +90,10 @@ void MsMain(uint gtid : SV_GroupThreadID, uint gid : SV_GroupID,
         // smoothly instead of popping plateau edges (the flats speckle, geometry side).
         const float landness =
             ComposedLandness(dir, ComposedHeight(dir, max(vl, -4.0f)), gWavesB.w);
-        const float dispLand = max(h, 0.0f) * gGlo.y;
+        // M6p: an operator's LAND edit floors the display height -- the jetty stands as a
+        // continuous ridge above the tide even where the height channel's smear dips.
+        const float editFloor = ComposedEditLand(dir) * max(gWavesB.w + 1.2f, 1.2f);
+        const float dispLand = max(max(h, 0.0f) * gGlo.y, editFloor * gGlo.y);
         const float dispWater = min(gWavesB.w - 2.0f, -2.0f);
         const float disp = lerp(dispWater, dispLand, landness);
 

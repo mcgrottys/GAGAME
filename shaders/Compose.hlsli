@@ -144,11 +144,35 @@ float ComposedLandness(float3 dir, float hp, float waterLevel) {
             land = smoothstep(waterLevel - 0.15f, waterLevel + 0.25f, hp);
         }
     }
+    // M6p: HAND EDITS ARE LAW. The window mask is R8G8 -- g flags texels painted by
+    // data/gis/edits.geojson, and a flagged texel's mask value overrides survey and the
+    // live tide alike (the survey shoreline predates the jetties, and the stabilized height
+    // classifier smears their thin ridges -- the operator's polygon settles it). Bilinear g
+    // blends the override's own edge.
+    if (gCsU3.x != 0xFFFFFFFFu) {
+        const float2 duvE = CsWindowUv(dir);
+        if (all(duvE > 0.0f) && all(duvE < 1.0f)) {
+            const float2 me = gTex[gCsU3.x].SampleLevel(sLinearClamp, duvE, 0).xy;
+            land = lerp(land, (me.x > 0.5f) ? 1.0f : 0.0f,
+                        smoothstep(0.2f, 0.8f, me.y));
+        }
+    }
     return land;
 }
 // The binary view, for consumers that ARE bits (the sea's discard).
 bool ComposedIsLand(float3 dir, float hp, float waterLevel) {
     return ComposedLandness(dir, hp, waterLevel) > 0.5f;
+}
+
+// M6p: strength of a hand-edit declaring LAND here (0 where unedited or edited to water).
+// Geometry consumers floor their display height with it: an operator's jetty stands as a
+// continuous ridge even where the smeared height channel dips under the tide.
+float ComposedEditLand(float3 dir) {
+    if (gCsU3.x == 0xFFFFFFFFu) return 0.0f;
+    const float2 duv = CsWindowUv(dir);
+    if (any(duv < 0.0f) || any(duv > 1.0f)) return 0.0f;
+    const float2 me = gTex[gCsU3.x].SampleLevel(sLinearClamp, duv, 0).xy;
+    return smoothstep(0.2f, 0.8f, me.y) * ((me.x > 0.5f) ? 1.0f : 0.0f);
 }
 
 // M6i debug: the alignment overlay (--stencil). The survey VECTORS render as real line

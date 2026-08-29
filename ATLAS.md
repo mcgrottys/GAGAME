@@ -289,6 +289,36 @@ Every future dataset — earth, water, air, electromagnetic — enters the same 
 If a step can't be followed, the dataset isn't understood yet — which is precisely the
 signal a schema registry is for.
 
+## 9a. The survey order — vectors, lossless, LOD by the wedge
+
+Vector data (SHP, GeoJSON, the GSHHG bins) joins as first-class manuscripts with three
+commitments:
+
+**Lossless with LOD in one structure.** Every vertex is kept forever, tagged with the
+Visvalingam effective area at which decimation would remove it — and that area *is the
+wedge product*, ½|(B−A)∧(C−A)|, the bivector magnitude of the vertex's triangle. Stored as
+√area in meters, querying any LOD is a filter: `importance ≥ tolerance` reproduces exactly
+the VW simplification at that tolerance, tolerance 0 is the input bit for bit. No
+precomputed levels, no duplication; the renderer republishes its line buffers only when the
+view's ×8 tolerance bucket changes (91 k coast vertices at the helm, ~8 k from altitude,
+one file). Format `VPK1` (`data/vectors/vectors.vpack`), reader `src/compose/VectorPack`,
+contract pinned in `--selftest`.
+
+**Tracks and profiles are the same format.** Kind (polyline / polygon / points) plus flag
+bits for per-vertex `z` (depth profiles) and `t` (tracks) — ships, wildlife, planes are
+point/track layers with attribute sidecars (`.attrs.json`, read from DBF or GeoJSON
+properties). Temporal decimation (a VW over space-time) is the named upgrade when live
+feeds arrive; the container already carries it.
+
+**Hand edits are law.** `data/gis/edits.geojson` — plain text, editable in any editor or
+GIS tool — holds polygons with `properties.mask = "land" | "water"`. The engine rasterizes
+them over the survey mask at load *and* the classifier treats flagged texels as
+authoritative over the live tide (the window mask is R8G8: mask + edit flag), *and* a land
+edit floors the display geometry so the structure stands above the tide. This is how the
+Merrimack jetties came back from the sea: the survey shoreline predates them, the
+stabilized height classifier smeared their 20 m ridges — three hand-typed polygons settled
+it. Refine the outlines by editing the file; the engine re-rasterizes on the next run.
+
 ## 10. The Scriptorium — the .NET/MCP keeper
 
 The project crossed the size (≈13 k lines C++, ≈3 k HLSL, 11 harvesters, dozens of data

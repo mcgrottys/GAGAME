@@ -28,7 +28,11 @@ public:
     using Polyline = std::vector<std::pair<float, float>>;   // (lon, lat) degrees
 
     bool Load(const std::string& jsonPath);
-    void BuildMasks(Gpu& gpu);   // the raster realizations (R8 textures + SRVs)
+    // The raster realizations. The WINDOW mask is R8G8: r = land mask with data/gis/
+    // edits.geojson baked over the survey, g = EDIT FLAG -- flagged texels are law, they
+    // override the survey and the live-tide classifier alike (the jetties came back from
+    // the sea by three hand-typed polygons). Needs the shared Mercator window frame.
+    void BuildMasks(Gpu& gpu, double orgPxX, double orgPxY, double sizePx);
     bool Ready() const { return m_ready; }
     uint32_t MaskWinSrv() const { return m_maskWin.srv; }
     uint32_t MaskGlobSrv() const { return m_maskGlob.srv; }

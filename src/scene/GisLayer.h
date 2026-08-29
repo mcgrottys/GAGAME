@@ -12,6 +12,7 @@
 #include "compose/Compositor.h"
 #include "compose/Exchange.h"
 #include "compose/GisStencil.h"
+#include "compose/VectorPack.h"
 #include "scene/Layer.h"
 
 #include <string>
@@ -20,11 +21,19 @@ namespace ga {
 
 class GisLayer : public Layer {
 public:
-    void Configure(const std::wstring& shaderDir, const GisStencil* gis, Exchange* exchange) {
+    void Configure(const std::wstring& shaderDir, const GisStencil* gis, Exchange* exchange,
+                   const VectorPack* pack) {
         m_shaderDir = shaderDir;
         m_gis = gis;
         m_exchange = exchange;
+        m_pack = pack;
     }
+
+    // M6p: LOD by the wedge filter. main sets the view's ground-pixel size per frame; the
+    // layer republishes its Exchange buffers only when the TOLERANCE BUCKET changes (x8
+    // steps + hysteresis by construction), so orbit views draw thousands of segments, not
+    // hundreds of thousands, from the SAME lossless pack.
+    float tolMeters = 0.0f;
 
     const char* Name() const override { return "gis"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
@@ -51,13 +60,17 @@ private:
     bool BuildPso(Gpu& gpu, ShaderCompiler& sc);
     Batch MakeBatch(Gpu& gpu, const std::vector<GisStencil::Polyline>& lines,
                     const char* channel, float r, float g, float b, float lift);
+    void PublishAtTolerance(Gpu& gpu, float tol);
 
     std::wstring m_shaderDir;
     const GisStencil* m_gis = nullptr;
     Exchange* m_exchange = nullptr;
+    const VectorPack* m_pack = nullptr;
     ID3D12RootSignature* m_rootSig = nullptr;
     Com<ID3D12PipelineState> m_pso;
     Batch m_coast, m_rivers, m_global;
+    int m_coastCh = -1, m_riversCh = -1, m_globalCh = -1;   // Exchange ids for republish
+    float m_bucket = -1.0f;
     ComposedSurfaceCb m_cs{};
 };
 

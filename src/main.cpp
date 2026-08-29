@@ -831,6 +831,7 @@ int main(int argc, char** argv) {
         std::unique_ptr<WindowHeightSource> srcNe15;
         std::unique_ptr<CudemHeightSource> srcCudem;
         GisStencil gisStencil;   // survey vectors + mask realizations (GSHHG/WDBII)
+        VectorPack vectors;      // M6p: lossless vector layers, LOD by wedge importance
         GisLayer* gisLayer = nullptr;
         Exchange exchange;       // M6j: the plugin bus -- named GA buffer channels
         const double winOrgX = 4935.0 * 256.0, winOrgY = 6008.0 * 256.0;   // Merrimack z14 px
@@ -917,11 +918,12 @@ int main(int argc, char** argv) {
             // The survey pack loads whenever it exists: the land MASKS are the default
             // classifier (always on); the VECTOR overlay draws only under --stencil.
             if (!marsMode && gisStencil.Load("data/gis/gis.json")) {
-                gisStencil.BuildMasks(gpu);
+                gisStencil.BuildMasks(gpu, winOrgX, winOrgY, 16384.0);
                 globe->SetGisStencil(gisStencil.MaskWinSrv(), gisStencil.MaskGlobSrv());
+                vectors.Load("data/vectors/vectors.vpack");
                 auto gisOwned = std::make_unique<GisLayer>();
                 gisLayer = gisOwned.get();
-                gisLayer->Configure(opt.shaderDir, &gisStencil, &exchange);
+                gisLayer->Configure(opt.shaderDir, &gisStencil, &exchange, &vectors);
                 gisLayer->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
                 gisLayer->enabled = opt.stencil;
                 renderer.AddLayer(std::move(gisOwned));
@@ -1720,6 +1722,14 @@ int main(int argc, char** argv) {
                     cam.speed = static_cast<float>(std::clamp(altV * 0.45, 60.0, 2.5e6));
                 }
                 if (sea) sea->enabled = altV < 60000.0 && !marsMode && !opt.albedo;
+                // M6p: the survey vectors decimate to the view -- tolerance = one ground
+                // pixel; the layer republishes only when the x8 bucket changes.
+                if (gisLayer) {
+                    const float vh = opt.headless
+                                         ? static_cast<float>(opt.height)
+                                         : static_cast<float>(std::max(1u, window.Height()));
+                    gisLayer->tolMeters = static_cast<float>(altV * cam.fovY / vh);
+                }
                 // (--albedo: the water stands down too -- textures judged as layered images,
                 // nothing else in the frame; the lit look retunes separately.)
                 sky->enabled = altV < 9000.0 && !marsMode && !opt.albedo;   // low haze dome...

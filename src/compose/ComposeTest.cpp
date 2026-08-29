@@ -14,6 +14,9 @@
 // ================================================================================================
 #include "compose/Compositor.h"
 #include "compose/Projections.h"
+#include "compose/VectorPack.h"
+
+#include <fstream>
 
 #include <algorithm>
 #include <cmath>
@@ -204,6 +207,44 @@ bool RunComposeSelfTest() {
             }
         }
         Check(checked > 6, "height spot-checks ran");
+    }
+
+    // ---- THE SURVEY ORDER: one lossless vector structure serves every LOD -- the wedge
+    // filter (importance >= tolerance) reproduces decimation without precomputed levels,
+    // and tolerance 0 returns the geometry bit for bit.
+    {
+        struct V { float lon, lat, imp; };
+        const V verts[5] = {{0, 0, 1e9f}, {0.1f, 0.01f, 5.0f}, {0.2f, -0.02f, 50.0f},
+                            {0.3f, 0.01f, 500.0f}, {0.4f, 0, 1e9f}};
+        std::vector<uint8_t> pack;
+        auto put = [&](const void* p, size_t n) {
+            pack.insert(pack.end(), static_cast<const uint8_t*>(p),
+                        static_cast<const uint8_t*>(p) + n);
+        };
+        put("VPK1", 4);
+        const uint32_t one = 1, five = 5;
+        put(&one, 4);
+        const uint16_t nameLen = 4;
+        put(&nameLen, 2);
+        put("test", 4);
+        const uint8_t kind = 0, flags = 0;
+        put(&kind, 1);
+        put(&flags, 1);
+        put(&one, 4);
+        put(&five, 4);
+        put(verts, sizeof(verts));
+        const char* path = "cache\\composed\\selftest.vpack";
+        std::ofstream(path, std::ios::binary)
+            .write(reinterpret_cast<const char*>(pack.data()), pack.size());
+        VectorPack vp;
+        Check(vp.Load(path) && vp.Find("test"), "vpack round-trip");
+        if (const VectorPack::Layer* L = vp.Find("test")) {
+            Check(vp.Segments(*L, 0.0f).size() == 4 * 4, "tolerance 0 is LOSSLESS");
+            Check(vp.Segments(*L, 10.0f).size() == 3 * 4,
+                  "tol 10 m drops exactly the 5 m vertex");
+            Check(vp.Segments(*L, 1000.0f).size() == 1 * 4,
+                  "tol 1 km keeps only the endpoints");
+        }
     }
 
     // ---- ALPHA IS FIBER: a source whose per-pixel alpha VARIES across the tile must land
