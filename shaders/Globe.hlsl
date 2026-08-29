@@ -200,9 +200,20 @@ float4 PsMain(VsOut i) : SV_Target {
     // in the estuary window -- gating on it smeared whole towns below sea level. hp is what
     // the data says HERE, at this pixel's own resolution.
     const float hp = ComposedHeightOn() ? ComposedHeight(up, lod) : i.h;
-    // M6i/M6j: classification by SURVEY far afield, by fine heights vs the LIVE waterline in
-    // the window; height-sign alone where no mask exists (Mars).
-    const bool isLand = ComposedIsLand(up, hp, gWavesB.w);
+    // M6i/M6j/M6n: classification by SURVEY far afield; inside the window the LIVE waterline
+    // decides through an ANALOG shore band (ComposedLandness) -- the binary cut flickered
+    // tile-shaped speckle over the flats whenever the height data's resident level changed
+    // mid-stream. Both shading sides are evaluated and MIXED by landness: a half-emerged flat
+    // is half wet, in color, in glint, and (in the mesh shader) in geometry.
+    // The classifier's INPUT is residency-stable: a fixed ~38 m level (window mip 2, fully
+    // warmed) rather than "finest resident" -- neighbouring tiles streaming at different
+    // depths were reading heights that disagreed by more than the shore band and cutting
+    // hard seams. Fine data still drives shading; only the land/water QUESTION reads the
+    // stable level.
+    const float hpC = ComposedHeightOn() ? ComposedHeight(up, max(lod, -4.0f)) : i.h;
+    const float landness =
+        (gStreamF.z > 0.5f) ? ((hp > 0.0f) ? 1.0f : 0.0f)
+                            : ComposedLandness(up, hpC, gWavesB.w);
     float3 n = upT;
     float3 alb;
     float spec = 0.0f;
@@ -215,19 +226,20 @@ float4 PsMain(VsOut i) : SV_Target {
             const float2 nxy = StreamedSampleRg(gStreamU.y, gStreamU.w, up);   // SNORM -1..1
             n = normalize(upT + east * nxy.x * 1.2f + north * nxy.y * 1.2f);
         }
-    } else if (isLand) {
-        // M6i: land normals from the composed height cube -- one gradient, no equirect/NE
+    } else {
+        // LAND side: normals from the composed height cube -- one gradient, no equirect/NE
         // fork, no pole singularity. Modest slope gain (the vertical exaggeration is a
         // display choice; shading at x25 would posterize the continents).
         const float2 gr = ComposedHeightGrad(up, lod);
         const float kSlopeGain = 4.0f;
-        n = normalize(upT - east * (gr.x * kSlopeGain) - north * (gr.y * kSlopeGain));
-        alb = Hypsometric(max(hp, 0.0f), lat);
-    } else {
-        // The live sea. Depth tints the shelves; GFS-Wave whitens the storms.
+        const float3 nLand =
+            normalize(upT - east * (gr.x * kSlopeGain) - north * (gr.y * kSlopeGain));
+        const float3 albLand = Hypsometric(max(hp, 0.0f), lat);
+
+        // SEA side: depth tints the shelves; GFS-Wave whitens the storms.
         const float shelf = saturate(1.0f + hp / 160.0f);       // 1 at the beach, 0 by -160 m
-        alb = lerp(float3(0.013f, 0.055f, 0.115f), float3(0.06f, 0.30f, 0.34f),
-                   shelf * shelf);
+        float3 albSea = lerp(float3(0.013f, 0.055f, 0.115f), float3(0.06f, 0.30f, 0.34f),
+                             shelf * shelf);
         float hs = 0.0f, wind = 6.0f;
         if (gTexIdx.y != 0xFFFFFFFFu) {
             const float2 wuv = float2(
@@ -241,7 +253,7 @@ float4 PsMain(VsOut i) : SV_Target {
             }
         }
         // Dupuy-Bruneton in spirit: unresolved whitecap coverage brightens the storm belts.
-        alb = lerp(alb, float3(0.55f, 0.62f, 0.68f), saturate((hs - 2.5f) / 9.0f) * 0.55f);
+        albSea = lerp(albSea, float3(0.55f, 0.62f, 0.68f), saturate((hs - 2.5f) / 9.0f) * 0.55f);
 
         // Cox-Munk: slope variance from wind speed; the glint lobe IS the far-field BRDF.
         const float s2 = 0.003f + 0.00512f * wind;
@@ -251,6 +263,11 @@ float4 PsMain(VsOut i) : SV_Target {
         spec = exp(-t2 / s2) / (4.0f * kPi * s2 * max(ch * ch * ch * ch, 1e-4f));
         const float fres = 0.02f + 0.98f * pow(1.0f - saturate(dot(v, hv)), 5.0f);
         spec *= fres * saturate(dot(gSunDir.xyz, upT));
+
+        // The analog mix: glint dies as the flat emerges, the land normal takes over.
+        n = normalize(lerp(upT, nLand, landness));
+        alb = lerp(albSea, albLand, landness);
+        spec *= 1.0f - landness;
     }
 
     // ---- M6i: the composed color channel -- ONE call covers what used to be the streamed
@@ -259,7 +276,8 @@ float4 PsMain(VsOut i) : SV_Target {
     // physics that a baked mosaic cannot.
     if (ComposedColorOn() && gStreamF.z < 0.5f) {
         const float3 img = ComposedColor(up);
-        alb = isLand ? img : lerp(alb, img, 0.6f * saturate(1.0f + min(hp, 0.0f) / 80.0f));
+        const float3 albWet = lerp(alb, img, 0.6f * saturate(1.0f + min(hp, 0.0f) / 80.0f));
+        alb = lerp(albWet, img, landness);
     }
 
     // ---- M6j --albedo: the TEXTURE-WORK lens. Raw composed color (or Mars's raw pyramid) --
@@ -292,7 +310,7 @@ float4 PsMain(VsOut i) : SV_Target {
     // physics that a mosaic cannot know owns the last few hundred metres, the mosaic owns the
     // aerial, and the crossfade between them is the ONE distance ramp.
     const float distC = length(i.rel);
-    if (gStreamF.z < 0.5f && isLand && distC < 2700.0f && gCsU2.z != 0xFFFFFFFFu) {
+    if (gStreamF.z < 0.5f && landness > 0.0f && distC < 2700.0f && gCsU2.z != 0xFFFFFFFFu) {
         const float2 wuv = CsWindowUv(up);
         if (all(wuv > 0.0f) && all(wuv < 1.0f)) {
             const float2 grF = ComposedHeightGrad(up, -8.0f);   // true slope, finest resident
@@ -310,7 +328,10 @@ float4 PsMain(VsOut i) : SV_Target {
             const float ndlM = saturate(dot(nM, gSunDir.xyz));
             float3 colNear = matAlb * (SUN_IRR_C * ndlM + SkyRadiance(nM.y) * 0.55f);
             colNear = AerialPerspective(colNear, normalize(i.rel), distC);
-            col = lerp(col, colNear, (1.0f - saturate((distC - 500.0f) / 2200.0f)) * 0.92f);
+            // M6n: the material weight rides landness too -- a half-emerged flat takes half
+            // the wet-sand treatment, and the shore band grades instead of popping.
+            col = lerp(col, colNear,
+                       (1.0f - saturate((distC - 500.0f) / 2200.0f)) * 0.92f * landness);
         }
     }
 

@@ -124,19 +124,31 @@ float ComposedLandMask(float3 dir) {
 }
 
 // THE land/sea classifier: survey polygons decide by default; inside the fine z14 window the
-// height channel takes over COMPLETELY against the LIVE waterline -- tidal flats emerge and
-// drown with the actual tide, which no static survey polygon can know. No mask, no window ->
-// height sign vs the waterline (Mars: waterLevel 0).
-bool ComposedIsLand(float3 dir, float hp, float waterLevel) {
+// height channel takes over against the LIVE waterline -- tidal flats emerge and drown with
+// the actual tide, which no static survey polygon can know.
+//
+// M6n: the in-window answer is ANALOG. Flats sit within centimetres of the tide line, and a
+// hard threshold there turned every residency change of the height data into land/water
+// SPECKLE (tile-shaped patches flickering during streaming). A ~40 cm shore band -- 15 cm
+// below the waterline to 25 cm above -- classifies a half-emerged flat as half-emerged:
+// shading mixes, geometry blends, and data-level changes modulate a gradient the eye reads
+// as wet sand instead of flipping a bit. Outside the window the mask stays binary (a survey
+// polygon IS a bit); no mask, no window -> height sign vs the waterline (Mars: 0).
+float ComposedLandness(float3 dir, float hp, float waterLevel) {
     const float lm = ComposedLandMask(dir);
-    bool land = (lm >= 0.0f) ? (lm > 0.5f) : (hp > waterLevel);
+    float land = (lm >= 0.0f) ? ((lm > 0.5f) ? 1.0f : 0.0f)
+                              : ((hp > waterLevel) ? 1.0f : 0.0f);
     if (gCsU2.z != 0xFFFFFFFFu) {
         const float2 duv = CsWindowUv(dir);
         if (all(duv > 0.0f) && all(duv < 1.0f)) {
-            land = hp > waterLevel + 0.05f;
+            land = smoothstep(waterLevel - 0.15f, waterLevel + 0.25f, hp);
         }
     }
     return land;
+}
+// The binary view, for consumers that ARE bits (the sea's discard).
+bool ComposedIsLand(float3 dir, float hp, float waterLevel) {
+    return ComposedLandness(dir, hp, waterLevel) > 0.5f;
 }
 
 // M6i debug: the alignment overlay (--stencil). The survey VECTORS render as real line

@@ -85,12 +85,14 @@ void MsMain(uint gtid : SV_GroupThreadID, uint gid : SV_GroupID,
         // Geometry obeys the same classifier the pixels use: WATER rides ~2 m BELOW the live
         // waterline (not the geoid -- at low tide the geoid stands PROUD of the real sea and
         // buries the FFT surface; this was the M6j flat-sea bug). Land keeps its height.
-        float disp;
-        if (ComposedIsLand(dir, h, gWavesB.w)) {
-            disp = max(h, 0.0f) * gGlo.y;
-        } else {
-            disp = min(gWavesB.w - 2.0f, -2.0f);
-        }
+        // M6n: the mix is ANALOG (ComposedLandness): a half-emerged flat sits halfway between
+        // the drowned plane and its true height, so streaming height data slides shorelines
+        // smoothly instead of popping plateau edges (the flats speckle, geometry side).
+        const float landness =
+            ComposedLandness(dir, ComposedHeight(dir, max(vl, -4.0f)), gWavesB.w);
+        const float dispLand = max(h, 0.0f) * gGlo.y;
+        const float dispWater = min(gWavesB.w - 2.0f, -2.0f);
+        const float disp = lerp(dispWater, dispLand, landness);
 
         VsOut o;
         o.dir = dir;

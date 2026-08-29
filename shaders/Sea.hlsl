@@ -336,7 +336,14 @@ float4 PsMain(VsOut i) : SV_Target {
     if (gBathyU.x != 0xFFFFFFFFu) {
         const float dd = max(depth, 0.04f);
         const float3 T = exp(-2.2f * gSigmaW.rgb * dd);
-        const float3 bedCol = float3(0.42f, 0.38f, 0.28f) * (0.35f + 0.75f * ndl) * SUN_IRR_C;
+        // M6n: the bed the thin water reveals is the IMAGERY's bed, not an analytic sand
+        // tone. Flooded marsh shows brown marsh through centimetres of tide, sandbars show
+        // sand, and the dry-guard's glassy sheet stops reading as grey SPECKLE from altitude
+        // -- it reads as what is under it. (ComposedColor returns linear; lit like the old
+        // constant so deep-water behaviour is untouched.)
+        float3 bedAlb = float3(0.42f, 0.38f, 0.28f);
+        if (ComposedColorOn()) bedAlb = ComposedColor(SeaPlanetDir(i.worldXZ));
+        const float3 bedCol = bedAlb * (0.35f + 0.75f * ndl) * SUN_IRR_C;
         col = lerp(col, bedCol, T);
     }
 
@@ -356,8 +363,13 @@ float4 PsMain(VsOut i) : SV_Target {
                                          0.55f * saturate(chopFoam * 3.0f + slopeMag * 0.6f));
     float shoreFoam = 0.0f;
     if (gBathyU.x != 0xFFFFFFFFu) {
-        shoreFoam = saturate(i.brk * 1.5f + smoothstep(0.9f, 0.25f, depth) * 0.4f) * i.sh.y
-                    * saturate(0.35f + chopFoam * 2.0f + slopeMag * 0.8f);
+        // M6n: the shallow-DEPTH foam term is gated by BREAKING ENERGY (i.brk), not depth
+        // alone -- depth alone painted a 40% white wash across every acre of quietly flooded
+        // marsh (the last layer of the "flats speckle"). Foam is surf: it appears where waves
+        // actually break, and the sheltered creeks stay glassy over their imagery bed.
+        const float surf = saturate(i.brk * 6.0f);
+        shoreFoam = saturate(i.brk * 1.5f + smoothstep(0.9f, 0.25f, depth) * 0.4f * surf) *
+                    i.sh.y * saturate(0.35f + chopFoam * 2.0f + slopeMag * 0.8f);
     }
 
     float churn = 0.0f;

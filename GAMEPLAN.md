@@ -502,6 +502,35 @@ a texture problem; the water stays out of the texture loop until it lands. Also:
 exited 255 with garbage readbacks (uninitialized dump = the copy never landed) that did not
 reproduce under the debug layer or in repeats — watch item, suspected teardown/TDR race.
 
+## 16a. M6n (2026-08-29): the flats speckle — three layers deep, all named
+
+The ragged land/water patches over the tidal flats turned out to be THREE stacked causes, and
+each fix is a principle worth keeping:
+
+1. **A binary classifier asking an analog question.** Flats sit within centimetres of the
+   tide line; `hp > water + 0.05` flipped a bit per residency change and cut tile-shaped
+   patches. Now `ComposedLandness` returns a 0..1 through a ~40 cm shore band (15 cm below
+   the waterline to 25 cm above) inside the window: shading mixes (albedo, glint dies as the
+   flat emerges, the land normal takes over), the near-material weight rides it, and the MESH
+   displacement lerps between the drowned plane and true height — shorelines slide, never
+   pop. Outside the window the survey mask stays binary (a polygon IS a bit); the sea's
+   discard keeps the boolean view.
+2. **A residency-dependent classifier input.** Neighbouring tiles streaming at different
+   height-data levels disagreed by more than the band and cut seams ALONG TILE EDGES. The
+   land/water QUESTION now reads a fixed ~38 m level (window mip 2, fully warmed) —
+   `ComposedHeight(up, max(lod, -4))` — while fine data keeps driving shading detail.
+3. **Presentation painting where physics said "calm".** What remained was not classification
+   at all: the sea's shallow sheet showed an ANALYTIC sand bed and a depth-triggered 40%
+   shore-foam wash. Now thin water goes transparent to the COMPOSED IMAGERY bed
+   (`ComposedColor` at the bed point — flooded marsh shows brown marsh through the tide), and
+   the depth foam term is gated by BREAKING ENERGY (`i.brk`): foam is surf, and sheltered
+   creeks stay glassy. The helm's bar now carries one energy-driven breaking patch instead of
+   a painted band.
+
+Diagnosis pattern that worked (twice now): render the SAME view repeatedly and vary one input
+— if the artifact does not move, it is not that input. The pale mid-tide marsh that remains
+is honest: Google's own photo of a flooded sound is the same sky-grey.
+
 ## 16. M6l (2026-08-29): the painting verified — a plane-flown ortho through the registry
 
 The user's test: bring in an INDEPENDENT high-res aerial of the Merrimack inlet and see if the
