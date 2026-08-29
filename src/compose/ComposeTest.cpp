@@ -13,6 +13,7 @@
 //    7. reordering a stack changes its cache tag (stale tiles are unreachable)
 // ================================================================================================
 #include "compose/Compositor.h"
+#include "compose/Projections.h"
 
 #include <cmath>
 #include <cstdio>
@@ -220,7 +221,25 @@ bool RunComposeSelfTest() {
         Check(ta != tb, "stack ORDER changes the composition (and cache tags stay isolated)");
     }
 
-    if (g_ok) Log("[composetest] ---- PASS: paint order, weights, alpha, cache, addressing ----");
+    // ---- projections: the alignment contract's math, pinned at the ACT0816 anchor against
+    // independently computed references (python, Snyder). A layer that declares EPSG:6348 or
+    // EPSG:26986 aligns because THESE numbers are right, not because a render looked right.
+    {
+        const double lat = 42.81833 * kPi / 180.0, lon = -70.81 * kPi / 180.0;
+        double e = 0, n = 0;
+        TransverseMercator::Utm(19).Forward(lat, lon, e, n);
+        Check(std::abs(e - 352034.1) < 0.5 && std::abs(n - 4742229.8) < 0.5,
+              "UTM 19N forward matches the reference at the anchor");
+        double x = 0, y = 0;
+        LambertConformalConic::MassMainland().Forward(lat, lon, x, y);
+        Check(std::abs(x - 256429.4) < 0.5 && std::abs(y - 952196.8) < 0.5,
+              "MA State Plane LCC forward matches the reference at the anchor");
+    }
+
+    if (g_ok) {
+        Log("[composetest] ---- PASS: paint order, weights, alpha, cache, addressing, "
+            "projections ----");
+    }
     return g_ok;
 }
 

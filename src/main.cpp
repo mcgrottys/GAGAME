@@ -294,6 +294,10 @@ static int RunChannelExport(const std::string& spec, const std::wstring& outPath
     uint32_t tileW = 128, tileH = 128, face = 0;
     if (name == "earth.color.window" && colCh >= 0) {
         fn = comp.WindowColor(colCh, 1263360, 1538048, 16384, 14);
+    } else if (name == "earth.color.inlet" && colCh >= 0) {
+        // M6l: a z19 export-only realization (~22 cm ground at this latitude) centred on the
+        // MassGIS ortho coverage -- deep enough to JUDGE the 15 cm aerial layer's painting.
+        fn = comp.WindowColor(colCh, 40699567, 49405858, 16384, 19);
     } else if (name == "earth.height.window" && hgtCh >= 0) {
         fn = comp.WindowHeight(hgtCh, 1263360, 1538048, 16384, 14);
         height = true;
@@ -310,8 +314,8 @@ static int RunChannelExport(const std::string& spec, const std::wstring& outPath
         tileW = 256;
     } else {
         Log("[export] unknown channel '%s' (or its stack is not configured). Channels: "
-            "earth.color.window, earth.height.window, earth.color.cube.f0..5, "
-            "earth|mars.height.cube.f0..5",
+            "earth.color.window, earth.color.inlet (z19), earth.height.window, "
+            "earth.color.cube.f0..5, earth|mars.height.cube.f0..5",
             name.c_str());
         return 1;
     }
@@ -814,6 +818,7 @@ int main(int argc, char** argv) {
         // sees channels only: earth color is earth color, earth height is earth height.
         Compositor compositor;
         GoogleColorSource srcGoogle(&googleTiles);
+        AerialOrthoSource srcAerial;   // M6l: MassGIS 15 cm orthos (loads if harvested)
         EquirectHeightSource srcEtopo("noaa.etopo2022", "equirect-grid int16 8192x4096",
                                       489200.0, &globeModel.Elev(), globeModel.Nx(),
                                       globeModel.Ny());
@@ -881,7 +886,14 @@ int main(int argc, char** argv) {
                 // and the Merrimack z14 window (same stack, deeper footprint).
                 if (googleTiles.Init("satellite", opt.tileBudget)) {
                     googleTiles.SetFetchCounter(&resMgr.fetchesThisRun);
-                    colCh = compositor.AddColorChannel("earth.color", {&srcGoogle});
+                    // M6l: the MassGIS 15 cm plane orthos paint ABOVE Google wherever they
+                    // have coverage -- the compositor's first independent high-res layer,
+                    // aligned by its own declared projection (EPSG:6348), not by luck.
+                    std::vector<ColorSource*> colorStack{&srcGoogle};
+                    if (srcAerial.Load("data/aerial/aerial.json")) {
+                        colorStack.push_back(&srcAerial);
+                    }
+                    colCh = compositor.AddColorChannel("earth.color", std::move(colorStack));
                     colorCubeT = resMgr.AddTextureCube(gpu, L"earth.color (composed)",
                                                        Compositor::kFaceDim,
                                                        DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,

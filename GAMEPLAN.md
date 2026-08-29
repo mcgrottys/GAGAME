@@ -501,3 +501,33 @@ milky. That is a lighting-constant pass (sea reflectance, SkyRadiance levels, su
 a texture problem; the water stays out of the texture loop until it lands. Also: two runs
 exited 255 with garbage readbacks (uninitialized dump = the copy never landed) that did not
 reproduce under the debug layer or in repeats — watch item, suspected teardown/TDR race.
+
+## 16. M6l (2026-08-29): the painting verified — a plane-flown ortho through the registry
+
+The user's test: bring in an INDEPENDENT high-res aerial of the Merrimack inlet and see if the
+painting aligns "accounting for meters per pixel and projections." Source found: **MassGIS
+2023 statewide orthos** — 15 cm, leaf-off, plane-flown, 1500 m USNG-named tiles, lossless JP2,
+**EPSG:6348 (NAD83(2011)/UTM 19N)** straight from the GeoJP2 header. Two tiles cover the mouth
+(19TCH510415/510400; MassGIS stops at the shoreline column, so the jetty TIPS lie beyond
+coverage). `harvest_aerial.py` decodes via Pillow/OpenJPEG (ffmpeg's j2k chokes on the TLM
+markers), builds an 8-level box-filtered mip chain per tile, and writes raw RGB + a
+georeferencing json (the index shapefile's LCC bboxes located the tiles; the .prj is
+EPSG:26986 — parsed by hand, stdlib only).
+
+The contract, in code: `src/compose/Projections.h` — EXACT Snyder transverse-Mercator and
+Lambert-conformal-conic forwards (GRS80), **pinned in --selftest against independently
+computed references at the ACT0816 anchor** (UTM 352034.1/4742229.8; LCC 256429.4/952196.8,
+±0.5 m). `AerialOrthoSource` declares its native CRS in the registry, memory-maps the mip
+chains, resolves WGS84→UTM per sample, and picks the mip whose GROUND m/px (Mercator-
+equatorial × cos lat) matches the paint footprint; 25 m feather against the coverage UNION
+(interior tile seams stay seamless — one flight). NAD83↔WGS84 (~1 m) left uncorrected and
+DOCUMENTED — it is part of what the comparison measures.
+
+Verification: `--export earth.color.inlet:2` (a z19 export-only realization, ~22 cm ground)
+painted the ortho over Google — the north jetty, roads and shoreline run CONTINUOUSLY across
+the feathered boundary at 0.9 m/px (subpixel registration), the footprint's slight rotation is
+honest UTM grid convergence vs Mercator north, and the tone step is the spring-2023 flight vs
+Google's summer mosaic (a capture difference, deliberately NOT color-matched after the M6k
+lesson). The live path streams the same layer through the z14 window (--albedo at 2.5 km).
+Next for this layer: a streamed z18/z19 window realization so the 15 cm detail reaches the
+renderer, not just the exporter; and the user's opt-in per-layer color-adjust ops.
