@@ -107,6 +107,8 @@ struct Options {
     std::wstring waterMap;            // --water-map out.png: the REPROJECTION PROOF -- the
                                       // water atlas + survey printed through a custom Lambert
                                       // conformal sheet (paper-chart foundation)
+    std::wstring bathyMap;            // --bathy-map out.png: the same sheet, hypsometric
+                                      // channel bathymetry (M6w: the chart IS the stack)
     double riverQ = -1;               // --river q overrides data/river/river.json
     std::wstring sweUvDump;           // --swe-uv f.png: dump the solved current field after
                                       // spin-up (debug picture: red east, blue west)
@@ -223,6 +225,7 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--swe-spinup") o.sweSpinupH = atof(next("0.25").c_str());
         else if (a == "--swe-cycle") o.sweCycleH = atof(next("13").c_str());
         else if (a == "--water-map") o.waterMap = Widen(next("water_map.png").c_str());
+        else if (a == "--bathy-map") o.bathyMap = Widen(next("bathy_map.png").c_str());
         else if (a == "--river") o.riverQ = atof(next("70").c_str());
         else if (a == "--storm") {
             // hs,tp,fromdeg -- sandbox sea state override
@@ -556,8 +559,13 @@ void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G westAt, H southAt, Q wes
 // model changes -- a projection is just another realization, which is the whole foundation
 // the user asked for ("print maps onto paper" without breaking anything). M2 amplitude as
 // the field (co-amplitude chart), GSHHG parity-filled land, coast + structures + stations.
+// bathyChannel >= 0 switches the sheet to HYPSOMETRIC BATHYMETRY: every pixel is
+// SampleHeightStack -- the same painted stack the renderer's tiles and the solver's bed
+// come from, so the chart IS the channel (all three CUDEM insets, the NE-15s base, the
+// hand-edit structures, one surface).
 void RenderWaterMap(Compositor& comp, const WaterAtlas& wa, VectorPack& vec,
-                    const GlobeModel& gm, const std::wstring& outPath) {
+                    const GlobeModel& gm, const std::wstring& outPath,
+                    int bathyChannel = -1) {
     const int H = 1500;
     int W = 1800;   // trimmed to the sheet's true aspect below
     const double kD2R = 3.14159265358979 / 180.0;
@@ -635,7 +643,22 @@ void RenderWaterMap(Compositor& comp, const WaterAtlas& wa, VectorPack& vec,
             fromPx(px, py, latD, lonD);
             uint8_t* p = &img[(static_cast<size_t>(py) * W + px) * 4];
             if (latD < lat0 || latD > lat1 || lonD < lon0 || lonD > lon1) continue;
-            if (isLand(latD, lonD)) {
+            if (bathyChannel >= 0) {
+                const float h =
+                    comp.SampleHeightStack(bathyChannel, latD * kD2R, lonD * kD2R, 60.0);
+                if (h > 0.0f) {                       // hypsometric land from the SAME stack
+                    const double t = std::clamp(h / 60.0, 0.0, 1.0);
+                    p[0] = static_cast<uint8_t>(196 + 40 * t);
+                    p[1] = static_cast<uint8_t>(206 - 60 * t);
+                    p[2] = static_cast<uint8_t>(178 - 80 * t);
+                } else {                              // depth ramp: light flats -> dark deep
+                    const double t = std::clamp(-h / 60.0, 0.0, 1.0);
+                    const double s = std::sqrt(t);
+                    p[0] = static_cast<uint8_t>(190 - 165 * s);
+                    p[1] = static_cast<uint8_t>(222 - 150 * s);
+                    p[2] = static_cast<uint8_t>(236 - 110 * s);
+                }
+            } else if (isLand(latD, lonD)) {
                 p[0] = 238; p[1] = 234; p[2] = 222;                      // chart-paper land
             } else {
                 float ph[2];
@@ -1109,10 +1132,16 @@ int main(int argc, char** argv) {
         // RG16F window tiles on demand. The sim manager consumes these next.
         WaterAtlas waterAtlas;
         waterAtlas.Init(compositor, model, "data/water");
-        if (!opt.waterMap.empty()) {
+        if (!opt.waterMap.empty() || !opt.bathyMap.empty()) {
             VectorPack mapVec;
             mapVec.Load("data/vectors/vectors.vpack");
-            RenderWaterMap(compositor, waterAtlas, mapVec, globeModel, opt.waterMap);
+            if (!opt.waterMap.empty()) {
+                RenderWaterMap(compositor, waterAtlas, mapVec, globeModel, opt.waterMap);
+            }
+            if (!opt.bathyMap.empty()) {
+                RenderWaterMap(compositor, waterAtlas, mapVec, globeModel, opt.bathyMap,
+                               hgtCh);
+            }
             gpu.WaitIdle();
             gpu.Shutdown();
             return 0;
