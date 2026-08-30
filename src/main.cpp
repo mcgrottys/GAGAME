@@ -2210,10 +2210,18 @@ int main(int argc, char** argv) {
                 if (!paused) simUnix += dt * timeScale;
             } else {
                 // Deterministic time in headless mode so a dump sequence is reproducible.
-                simUnix = startUnix + static_cast<double>(frame) * (timeScale / 30.0);
+                // M7h: rail SETTLE -- the first recorded frame used to be the coldest:
+                // the height window still streaming, the classifier reading coarse
+                // fallback and calling half the channel LAND (the flat grey panels at
+                // t=0). The rail now holds its opening pose for kRailSettle unrecorded
+                // frames so residency, the solver mirror, and the composed caches are
+                // warm before the camera rolls.
+                const uint32_t settle = opt.rail.empty() ? 0u : 150u;
+                const uint32_t recFrame = (frame > settle) ? frame - settle : 0u;
+                simUnix = startUnix + static_cast<double>(recFrame) * (timeScale / 30.0);
                 if (!opt.rail.empty() && !railKeys.empty()) {
                     // M6g: the rails just set a pose in the ONE frame. Nothing switches.
-                    railPose(static_cast<double>(frame) / 30.0, cam);
+                    railPose(static_cast<double>(recFrame) / 30.0, cam);
                 }
             }
 
@@ -2321,9 +2329,9 @@ int main(int argc, char** argv) {
 
             renderer.RenderFrame(cam, static_cast<float>(simUnix - startUnix), dt);
 
-            if (!opt.rail.empty()) {
+            if (!opt.rail.empty() && frame >= 150u) {
                 wchar_t rp[512];
-                swprintf(rp, 512, L"%s\\rail_%04u.png", opt.rail.c_str(), frame);
+                swprintf(rp, 512, L"%s\\rail_%04u.png", opt.rail.c_str(), frame - 150u);
                 renderer.DumpPng(rp);
             }
 
@@ -2344,7 +2352,10 @@ int main(int argc, char** argv) {
                 ++frameMsN;
             }
             ++frame;
-            if (opt.frames && frame >= opt.frames) break;
+            if (opt.frames &&
+                frame >= opt.frames + (opt.rail.empty() ? 0u : 150u)) {
+                break;
+            }
         }
         if (frameMsN > 30) {
             Log("[perf] mean frame %.2f ms over %u frames (%.0f fps)", frameMsSum / frameMsN,

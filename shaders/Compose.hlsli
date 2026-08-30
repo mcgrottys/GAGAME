@@ -70,7 +70,12 @@ float3 ComposedColor(float3 dir) {
             const float want = gTex[gCsU.z].CalculateLevelOfDetail(sLinearClamp, duv);
             const float have = CsHave2D(gCsU.w, duv);
             const float4 w = gTex[gCsU.z].SampleLevel(sLinearClamp, duv, max(want, have));
-            c = lerp(c, w.rgb, fe.x * fe.y * w.a);
+            // M7h: the window HANDS OFF to the cube when the view outresolves even its
+            // pinned floor (want past ~mip 6): a rung that cannot add detail must vanish,
+            // or its different-zoom capture sits as a vintage RECTANGLE on the planet.
+            // Symmetric with the z17 rung's finer-only gate below.
+            const float hand = 1.0f - smoothstep(5.5f, 7.0f, want);
+            c = lerp(c, w.rgb, fe.x * fe.y * w.a * hand);
             // M7f: the DETAIL window (z17, ~1.2 m px) -- the ladder's third rung, in the
             // same Mercator frame, so the near field stops being capped at 9.5 m texels.
             if (gCsU4.x != 0xFFFFFFFFu) {

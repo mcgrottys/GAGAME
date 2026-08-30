@@ -1018,6 +1018,20 @@ residency-map-true); where it outresolves ~1.5 m the generic constants fade to 1
 tide's wet band and the surveyed rock keep full authority — they know what no photo can.
 Five gates green.
 
+**M7h (2026-08-30): THE HANDOFF AND THE SETTLE — "I wonder if the compositor has a
+bug."** It did — a one-directional ladder. The z14 window never yielded to the cube: even
+when the view outresolved everything it had (want past its pinned floor), it kept
+painting its own different-zoom capture over the cube's coherent mosaic, and its
+footprint sat on the planet as a vintage RECTANGLE (the persistent tan block in every
+high frame). The rule that fixed the z17 rung in M7f is now symmetric: EVERY rung earns
+its place by adding detail, and where it cannot, it vanishes — the window fades to the
+cube across want mips 5.5..7. The second bug wore the compositor's clothes but was the
+RAIL's: frame 0 recorded the coldest instant of the run, with the height window still
+streaming, so the classifier read coarse fallback and called half the channel LAND (the
+flat grey panels and 150 m terraced wedges at t=0, different every run). Rails now hold
+their opening pose for 150 unrecorded settle frames — residency, the solver mirror, and
+the composed caches are warm before the camera rolls. Five gates green.
+
 Named next: amplification-shader subdivision for sub-meter helm vertex density (also the
 jetty-wall clipping fix), breaker individuation in the surf zone (churn saturation), the
 bank as an Exchange channel (water.surface for plugins), a
