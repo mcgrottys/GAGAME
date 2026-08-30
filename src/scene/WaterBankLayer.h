@@ -56,11 +56,16 @@ public:
 
     uint32_t DispSrv() const { return m_disp.Srv(); }
     uint32_t ParamSrv() const { return m_param.Srv(); }
+    uint32_t DetailSrv() const { return m_detail.Srv(); }
     // Ring georef for consumers: per-mip window origin (world m) + base texel size.
     void RingOrigin(int m, float& x, float& z) const { x = m_orgX[m]; z = m_orgZ[m]; }
     float BaseTexelM() const { return m_baseTexelM; }
-    uint32_t ResidentTiles() const { return m_disp.ResidentCount() + m_param.ResidentCount(); }
-    uint64_t ResidentBytes() const { return m_disp.ResidentBytes() + m_param.ResidentBytes(); }
+    uint32_t ResidentTiles() const {
+        return m_disp.ResidentCount() + m_param.ResidentCount() + m_detail.ResidentCount();
+    }
+    uint64_t ResidentBytes() const {
+        return m_disp.ResidentBytes() + m_param.ResidentBytes() + m_detail.ResidentBytes();
+    }
 
     bool enabled = true;
     std::string stats;
@@ -101,7 +106,9 @@ private:
     const GlobeModel* m_globe = nullptr;
     const SeaState* m_seaState = nullptr;
 
-    TileAtlas2D m_disp, m_param;
+    TileAtlas2D m_disp, m_param, m_detail;   // detail: per-tile sea-state context the PS
+                                             // needs to recover sub-ring sparkle (hsScale;
+                                             // churn joins it next)
     Com<ID3D12RootSignature> m_rs;
     Com<ID3D12PipelineState> m_fill;
     float m_baseTexelM = 4.8f;

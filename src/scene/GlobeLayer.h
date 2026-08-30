@@ -73,10 +73,19 @@ public:
     // heightWindow the height channel (same window FRAME as color); -1 = absent. Wants for
     // all of them come from the SAME CDLOD walk.
     // M7: per-frame wave-bank binding (SRVs + ring origins), and the one-water switch.
-    void SetWaterBank(uint32_t dispSrv, uint32_t paramSrv, float baseTexelM,
+    void SetWaterBank(uint32_t dispSrv, uint32_t paramSrv, uint32_t detailSrv,
+                      const uint32_t derivSrv[3], const float patchL[3],
+                      const float bandK[3], float heightScale, float baseTexelM,
                       const float* org12, bool oneWater) {
         m_bankSrv[0] = dispSrv;
         m_bankSrv[1] = paramSrv;
+        m_bankSrv[2] = detailSrv;
+        for (int i = 0; i < 3; ++i) {
+            m_bankDeriv[i] = derivSrv[i];
+            m_bankPatch[i] = patchL[i];
+            m_bankK[i] = bandK[i];
+        }
+        m_bankExag = heightScale;
         m_bankBase = baseTexelM;
         for (int i = 0; i < 12; ++i) m_bankOrg[i] = org12[i];
         m_oneWater = oneWater;
@@ -159,6 +168,9 @@ private:
         float bankOrg01[4];   // ring origins (world m): r0.xy, r1.xy
         float bankOrg23[4];
         float bankOrg45[4];
+        uint32_t bankU2[4];   // M7a: detail bank SRV, cascade deriv SRVs x3
+        float bankB[4];       // cascade patch sizes x3, height exaggeration
+        float bankC[4];       // representative wavenumber per cascade
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -231,7 +243,11 @@ private:
     double m_frameE[3] = {1, 0, 0}, m_frameU[3] = {0, 1, 0}, m_frameN[3] = {0, 0, 1};
     double m_camPlanet[3] = {0, 0, 2.0e7};   // for the horizon cull (doubles, per SetView)
     double m_estGeo[4] = {0, 0, 0, 0};
-    uint32_t m_bankSrv[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
+    uint32_t m_bankSrv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    uint32_t m_bankDeriv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    float m_bankPatch[3] = {756.0f, 186.0f, 47.0f};
+    float m_bankK[3] = {0.03f, 0.15f, 1.0f};
+    float m_bankExag = 1.15f;
     float m_bankBase = 4.8f;
     float m_bankOrg[12] = {};
     bool m_oneWater = false;

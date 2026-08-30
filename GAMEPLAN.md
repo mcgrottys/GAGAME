@@ -882,8 +882,26 @@ hybrid is the plan: tiled resources where hardware filtering over moderate domai
 (cubes, z14 windows, this bank); array+indirection for z18+ (the MassGIS 15 cm streaming,
 future cm bathymetry). Named M7b.
 
-Named next: a derivative/normal side-plane in the bank (band-2 sparkle at the helm without
-geometry), churn/foam into the bank params, amplification-shader subdivision for sub-meter
-helm vertex density, the bank as an Exchange channel (water.surface for plugins), and the
-GPU-side GA engine growing out of this kernel (the tide rotors evaluated on-GPU from the
-realized phasor windows).
+**M7a (2026-08-30): the derivative side-plane — the helm gets its sparkle back.** The
+bank's ring texel caps what geometry can carry (4.8 m at the camera), but a helm-height
+PIXEL footprints millimetres — the bands in between were falling into sigma^2 and the
+glint trail smeared into milk. The fold now splits THREE ways per band: wRing (the tile's
+fold, geometry in the bank), wPix (the same smoothstep on the pixel's own ground
+footprint), and the difference wDetail = saturate(wPix - wRing) — bands the pixel resolves
+but the ring cannot. The PS reads those straight from the FFT cascade DERIVATIVE textures
+(full 256^2 resolution; PS-stage SampleLevel is the one place the driver's bindless
+sampler path works, conveniently the one place we need it), scaled by a third bank plane
+`detail = (hsScale, dry, -, -)` so the local sea state and the flats guard ride along, and
+hands the same energy back out of sigma^2 (the M6t constants, hsScale^2-scaled, floor
+kept). The three tiers TELESCOPE: at altitude wPix <= wRing and every term vanishes
+untouched; at the helm the storm glint shatters into real glints (PNG entropy 2.6x at
+identical framing — the decisive diff). Calm stays glassy and that is CORRECT: the ×8
+probe proved the path fires (storm diff 370k pixels, calm 121) — a lone 0.5 m Gaussian
+swell partition simply has no band-2 energy; sparkle is a property of the SPECTRUM, not a
+decoration. All five gates green.
+
+Named next: churn/foam into the bank params, amplification-shader subdivision for
+sub-meter helm vertex density, the bank as an Exchange channel (water.surface for
+plugins), a light wind-chop tail partition so calm water carries its capillary glitter,
+and the GPU-side GA engine growing out of this kernel (the tide rotors evaluated on-GPU
+from the realized phasor windows).

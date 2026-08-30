@@ -27,7 +27,7 @@ cbuffer BankCb : register(b0) {
     float4 gSweDims;    // xy = swe grid nx/ny, zw = 1 / eta-atlas padded dims
     float4 gMisc;       // x = tile texels, y = seaLevel fallback, zw unused
     uint4  gSlotsA;     // cascade disp SRV slots x3, swe eta SRV slot
-    uint4  gSlotsB;     // swe uv SRV slot, disp bank UAV slot, param bank UAV slot, unused
+    uint4  gSlotsB;     // swe uv SRV slot, disp/param/detail bank UAV slots
 };
 
 struct BankTile {
@@ -138,4 +138,8 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     const uint2 dst = uint2(t.dstX + id.x, t.dstY + id.y);
     gU[gSlotsB.y][dst] = float4(d, saturate(foam * dry));
     gU[gSlotsB.z][dst] = float4(lvl, sig2, cur.x, cur.y);
+    // The DETAIL plane: what the PS needs to recover sub-ring sparkle -- the tile's local
+    // sea-state scale (cascade derivs are unit-sea) and the dry guard (no sparkle on the
+    // flats). Churn memory joins this fiber next.
+    gU[gSlotsB.w][dst] = float4(t.hsScale, dry, 0.0f, 0.0f);
 }

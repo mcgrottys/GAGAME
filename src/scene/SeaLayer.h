@@ -90,6 +90,7 @@ public:
     // renderEnabled pattern, applied to the sea.
     bool drawEnabled = true;
     uint32_t FftDispSrv(int c) const { return m_fft.DispSrv(c); }
+    uint32_t FftDerivSrv(int c) const { return m_fft.DerivSrv(c); }
     float FftPatchL(int c) const { return m_fft.PatchL(c); }
     bool atlasVisualize = false;   // V key: draw the tile grid + residency over the water
 

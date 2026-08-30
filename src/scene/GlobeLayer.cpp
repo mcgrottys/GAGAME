@@ -853,6 +853,13 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     memcpy(m_cb.bankOrg01, &m_bankOrg[0], 16);
     memcpy(m_cb.bankOrg23, &m_bankOrg[4], 16);
     memcpy(m_cb.bankOrg45, &m_bankOrg[8], 16);
+    m_cb.bankU2[0] = m_bankSrv[2];
+    for (int i = 0; i < 3; ++i) {
+        m_cb.bankU2[i + 1] = m_bankDeriv[i];
+        m_cb.bankB[i] = m_bankPatch[i];
+        m_cb.bankC[i] = m_bankK[i];
+    }
+    m_cb.bankB[3] = m_bankExag;
     m_cb.texIdx[0] = UINT32_MAX;   // was the equirect relief; the composed height cube owns it
     m_cb.texIdx[1] = m_hs.Valid() ? m_hs.srv : UINT32_MAX;
     m_cb.texIdx[2] = m_wind.Valid() ? m_wind.srv : UINT32_MAX;

@@ -37,6 +37,8 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSig
                 L"water.disp (the wave vertex bank)");
     m_param.Init(gpu, kMips * kRingTexels, kRingTexels, DXGI_FORMAT_R16G16B16A16_FLOAT,
                  L"water.param (level + sigma2 + current)");
+    m_detail.Init(gpu, kMips * kRingTexels, kRingTexels, DXGI_FORMAT_R16G16B16A16_FLOAT,
+                  L"water.detail (hsScale + sparkle context)");
 
     // Root signature: b0 CB, t0 tile list, then the BINDLESS pair -- one unbounded SRV range
     // and one unbounded UAV range over the shared heap, so this kernel reaches every texture
@@ -182,9 +184,11 @@ void WaterBankLayer::ReanchorRing(Gpu& gpu, int m, double camX, double camZ) {
                 if (wet) {
                     m_disp.RequestMap(htx, hty0 + k);
                     m_param.RequestMap(htx, hty0 + k);
+                    m_detail.RequestMap(htx, hty0 + k);
                 } else {
                     m_disp.RequestUnmap(htx, hty0 + k);
                     m_param.RequestUnmap(htx, hty0 + k);
+                    m_detail.RequestUnmap(htx, hty0 + k);
                 }
             }
             if (state != (wet ? 1 : 0)) changed = true;
@@ -195,6 +199,8 @@ void WaterBankLayer::ReanchorRing(Gpu& gpu, int m, double camX, double camZ) {
     m_disp.CommitMappings(gpu, &fresh);
     fresh.clear();
     m_param.CommitMappings(gpu, &fresh);
+    fresh.clear();
+    m_detail.CommitMappings(gpu, &fresh);
     (void)changed;
 }
 
@@ -285,6 +291,7 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     for (int c = 0; c < 3; ++c) cb.slotsA[c] = m_sea->FftDispSrv(c);
     cb.slotsB[1] = m_disp.Uav();
     cb.slotsB[2] = m_param.Uav();
+    cb.slotsB[3] = m_detail.Uav();
 
     auto toUav = [&](TileAtlas2D& bank) {
         if (m_state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) return;
@@ -298,6 +305,7 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     };
     toUav(m_disp);
     toUav(m_param);
+    toUav(m_detail);
     m_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
     ctx.cl->SetComputeRootSignature(m_rs.Get());
@@ -322,6 +330,7 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     };
     toSrv(m_disp);
     toSrv(m_param);
+    toSrv(m_detail);
     m_state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 

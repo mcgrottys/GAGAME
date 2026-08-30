@@ -100,10 +100,10 @@ void MsMain(uint gtid : SV_GroupThreadID, uint gid : SV_GroupID,
         // SeaLayer grid can cover it, and in one-water mode that grid is retired.
         float dispWater = min(gWavesB.w - 8.0f, -8.0f);
         if (gBankU.z != 0u) {
-            float4 bD, bP;
+            float4 bD, bP, bDet;
             const float2 bankXZ = (CsToTangent(dir) * gGlo.x).xz;
             float bT;
-            dispWater = BankSample(bankXZ, bD, bP, bT) ? (bP.x + bD.y) : 0.0f;
+            dispWater = BankSample(bankXZ, bD, bP, bDet, bT) ? (bP.x + bD.y) : 0.0f;
         }
         const float disp = lerp(dispWater, dispLand, landness);
 

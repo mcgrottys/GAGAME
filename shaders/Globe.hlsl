@@ -54,13 +54,20 @@ cbuffer GlobeCb : register(b1) {
     float4 gBankOrg01;  // ring origins (world m): r0.xy, r1.zw
     float4 gBankOrg23;
     float4 gBankOrg45;
+    // M7a: THE SPARKLE ROWS -- the detail plane + the cascade derivative textures, so the
+    // pixel stage can recover bands its footprint resolves but the ring texel does not.
+    uint4  gBankU2;     // detail bank SRV, cascade deriv SRVs x3
+    float4 gBankB;      // cascade patch sizes x3, height exaggeration
+    float4 gBankC;      // representative wavenumber per cascade, unused
 };
 
 // Sample the bank at a world-frame XZ: finest ring containing the point wins. Returns false
 // beyond every ring (the far field: sub-pixel waves, level ~ the plane).
-bool BankSample(float2 worldXZ, out float4 disp, out float4 param, out float texelOut) {
+bool BankSample(float2 worldXZ, out float4 disp, out float4 param, out float4 detail,
+                out float texelOut) {
     disp = 0.0f;
     param = 0.0f;
+    detail = 0.0f;
     texelOut = 0.0f;
     if (gBankU.z == 0u) return false;
     [unroll] for (uint m = 0; m < 6; ++m) {
@@ -85,6 +92,7 @@ bool BankSample(float2 worldXZ, out float4 disp, out float4 param, out float tex
             const float wgt = ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y);
             disp += wgt * gTex[gBankU.x][int2(xoff + tc.x, tc.y)];
             param += wgt * gTex[gBankU.y][int2(xoff + tc.x, tc.y)];
+            detail += wgt * gTex[gBankU2.x][int2(xoff + tc.x, tc.y)];
         }
         texelOut = texel;
         return true;
@@ -307,19 +315,43 @@ float4 PsMain(VsOut i) : SV_Target {
         float s2 = 0.003f + 0.00512f * wind;
         float3 nWater = upT;
         {
-            float4 bD, bP, bDx, bDz, tmp;
+            float4 bD, bP, bDet, bDx, bDz, tmp, tmp2;
             float bT, t2u;
             const float2 wxz = (CsToTangent(up) * gGlo.x).xz;
-            if (BankSample(wxz, bD, bP, bT)) {
+            if (BankSample(wxz, bD, bP, bDet, bT)) {
                 s2 = max(bP.y, 0.0015f);
                 albSea = lerp(albSea, float3(0.92f, 0.95f, 0.97f), saturate(bD.w) * 0.65f);
                 // Per-pixel wave normals, finite-differenced from the bank at its own ring
                 // texel: geometry alone is nearly invisible from above -- the normal is what
                 // makes the sea READ (the M6t glint then rides real wave faces).
-                BankSample(wxz + float2(bT, 0.0f), bDx, tmp, t2u);
-                BankSample(wxz + float2(0.0f, bT), bDz, tmp, t2u);
-                const float sx = (bDx.y - bD.y) / bT;
-                const float sz = (bDz.y - bD.y) / bT;
+                BankSample(wxz + float2(bT, 0.0f), bDx, tmp, tmp2, t2u);
+                BankSample(wxz + float2(0.0f, bT), bDz, tmp, tmp2, t2u);
+                float sx = (bDx.y - bD.y) / bT;
+                float sz = (bDz.y - bD.y) / bT;
+                // M7a: THE SPARKLE -- bands this PIXEL resolves but the ring texel does not,
+                // read straight from the cascade DERIVATIVE textures at full FFT resolution,
+                // weighted by the fold difference (wPix - wRing) and the tile's local sea
+                // state (detail plane: hsScale, dry). Sigma^2 hands the same energy back, so
+                // the three tiers stay telescoped; at altitude wPix <= wRing and every term
+                // vanishes -- the far field is untouched.
+                const float footPx = length(i.rel) * gWavesB.z;
+                [unroll] for (uint c = 0; c < 3; ++c) {
+                    const float lam = 6.2831853f / gBankC[c];
+                    const float wRing = 1.0f - smoothstep(lam * 0.12f, lam * 0.5f, bT);
+                    const float wPix = 1.0f - smoothstep(lam * 0.12f, lam * 0.5f, footPx);
+                    const float wDet = saturate(wPix - wRing) * bDet.y;
+                    if (wDet <= 0.002f) continue;
+                    const float2 duv = wxz / gBankB[c];
+                    const float4 dv =
+                        gTex[gBankU2[c + 1u]].SampleLevel(sLinearWrap, duv, 0);
+                    sx += dv.x * wDet * bDet.x * gBankB.w;
+                    sz += dv.y * wDet * bDet.x * gBankB.w;
+                    albSea = lerp(albSea, float3(0.92f, 0.95f, 0.97f),
+                                  saturate(dv.w * wDet) * (c == 2 ? 0.30f : 0.15f));
+                    s2 = max(s2 - wDet * bDet.x * bDet.x *
+                                      (c == 0 ? 0.0004f : (c == 1 ? 0.0018f : 0.0060f)),
+                             0.0015f);
+                }
                 nWater = normalize(upT - east * sx - north * sz);
             }
         }
