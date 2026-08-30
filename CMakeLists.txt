@@ -44,6 +44,7 @@ add_executable(gagame
   src/sim/CurrentModel.cpp
   src/sim/BathyModel.cpp
   src/sim/SweSolver.cpp
+  src/sim/WeatherManager.cpp
   src/sim/GlobeModel.cpp
   src/scene/GlobeLayer.cpp
 )

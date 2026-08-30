@@ -792,3 +792,43 @@ Named next: solver windows over the new insets (a Boston Harbor SWE is now a geo
 CUDEM land for chart-scale coastlines in --water-map, DirectStorage for the composed
 folder, and THE GLOBAL WEATHER/OCEAN SIM MANAGER — its bathymetry API already exists
 (SampleHeightStack at any rung, RealizeFromChannel for any lattice).
+
+## 22. M6x (2026-08-30): THE GLOBAL WEATHER/PHYSICS MANAGER — residency rises on zoom
+
+The convergence of M6v/M6w: `src/sim/WeatherManager` — ONE query surface over every water
+and near-surface product. Query(lat, lon, t, groundResM) → { level, current, Hs/Tp/dir,
+wind, bed, depth }, each component answered by the FINEST RESIDENT RUNG that covers the
+point, each carrying PROVENANCE (heterogeneity is queryable, not hidden). Stateless global
+fields carry the world — the tide atlas' constituent rotors, GFS 10 m wind vectors,
+GFS-Wave global Hs, the Gulf point partitions, GoMOFS surface currents, the one composed
+bed. STATEFUL solver windows are the sparse exception: the Merrimack SWE registers as an
+EXTERNAL window (the render loop drives it; the manager mirrors its eta/uv banks to CPU at
+2 s cadence); BOSTON HARBOR registers DORMANT and spins up when the camera (or a probe)
+enters its footprint below 30 km — bed realized from the one channel on activation, solver
+parameterized by SweConfig (spongeX0 in Mass Bay, west boundary = wall: the Charles is
+dammed), 0.5 h of history, mirrors live. Detail rises on zoom because RESIDENCY rises on
+zoom — the tiled-atlas statement, applied to physics.
+
+Verified by --ocean-probe (the harness IS the zoom rule, headless):
+  mid-Atlantic: bed −3374 m (ETOPO), Hs 1.50 (global grid), GFS wind, tide from the
+  global constituent stack, currents honestly absent; Boston Harbor: the window ACTIVATES,
+  level answers from swe.boston (gate vs the full-harmonic station: 110 mm), solved
+  currents, bed −17.1 m from noaa.cudem.boston — the shipping channel. Station gates
+  PASS (≤ 0.25 m; the ~120 mm baseline error is the honest 5-of-25-constituent
+  truncation). Debug find: ReadProbes' padded eta wrap dims were cosmetic lies (the
+  reserved texture's desc is the LOGICAL grid); a mirror loop that trusted them ran off
+  the readback buffer — ReadFields now uses nx/ny truth.
+
+**THE RENDER PRODUCT (the user's contract, M7):** the manager's output for rendering is
+ONE 2D TILED RESOURCE of wave vertexes with parameter side-buffers (level, current, foam,
+sigma^2, provenance flags) — no piecewise water anywhere; LOD handled by tiled residency /
+amplification / tessellation. The bank composes exactly what the manager already owns:
+the tide rotors, the solver eta/flux banks (already TileAtlas2D), the FFT cascade
+displacement, the one bed. The M6t/M6u BRDF+color unification was the shading half; this
+bank is the geometry half, and it retires SeaLayer's private grid the way GlobeMesh
+retired TerrainLayer's renderer.
+
+Named next: the wave-vertex bank itself (M7); GoMOFS 3D fields + ESTOFS water levels as
+the Gulf's mid rungs; a Boston current-station prediction harvest for a proper currents
+gate; async window spin-up (the activation hitch is ~5 s, logged); windows as Exchange
+channels (water.eta.<window> for plugins).

@@ -41,6 +41,7 @@
 #include "sim/SeaState.h"
 #include "sim/SweSolver.h"
 #include "sim/TideModel.h"
+#include "sim/WeatherManager.h"
 
 #include <chrono>
 #include <cmath>
@@ -109,6 +110,8 @@ struct Options {
                                       // conformal sheet (paper-chart foundation)
     std::wstring bathyMap;            // --bathy-map out.png: the same sheet, hypsometric
                                       // channel bathymetry (M6w: the chart IS the stack)
+    std::string oceanProbe;           // --ocean-probe lat,lon: the weather manager's
+                                      // verification harness (rungs + provenance + gates)
     double riverQ = -1;               // --river q overrides data/river/river.json
     std::wstring sweUvDump;           // --swe-uv f.png: dump the solved current field after
                                       // spin-up (debug picture: red east, blue west)
@@ -226,6 +229,7 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--swe-cycle") o.sweCycleH = atof(next("13").c_str());
         else if (a == "--water-map") o.waterMap = Widen(next("water_map.png").c_str());
         else if (a == "--bathy-map") o.bathyMap = Widen(next("bathy_map.png").c_str());
+        else if (a == "--ocean-probe") o.oceanProbe = next("42.35,-70.65");
         else if (a == "--river") o.riverQ = atof(next("70").c_str());
         else if (a == "--storm") {
             // hs,tp,fromdeg -- sandbox sea state override
@@ -1680,6 +1684,90 @@ int main(int argc, char** argv) {
                 model.S(westB).name.c_str(), wT, riverQ, kUpriverAreaM2 / 1.0e6);
         }
 
+        // ---- M6x: THE GLOBAL WEATHER/PHYSICS MANAGER -- one query surface over every water
+        // and near-surface product, each component answered by the finest resident rung.
+        // The Merrimack solver registers as an EXTERNAL window (the render loop drives it);
+        // Boston Harbor registers DORMANT and spins up when the camera arrives -- detail
+        // rises on zoom because residency rises on zoom. The manager's RENDER product (the
+        // user's contract): ONE 2D tiled resource of wave vertexes + parameter buffers, LOD
+        // by tiled residency / amplification / tessellation -- no piecewise water. That bank
+        // composes exactly what the manager already owns (tide rotors, solver eta/uv banks,
+        // cascade displacement, the one bed) and is the M7 milestone.
+        WeatherManager weather;
+        weather.Init(&compositor, hgtCh, &waterAtlas, &model, &globeModel, &seaState,
+                     haveCurrents ? &currents : nullptr);
+        if (swe.Ready()) weather.AddExternalWindow("merrimack", &swe, &bathy, oceanAt);
+        if (bathyBoston.Ready()) {
+            int iBos = -1;
+            for (size_t i = 0; i < model.Count(); ++i) {
+                if (model.S(i).id == "8443970") iBos = static_cast<int>(i);
+            }
+            if (iBos >= 0 && model.S(iBos).mllwMinusNavdM > -900.0) {
+                const double bosOff = model.S(iBos).mllwMinusNavdM;
+                auto oceanAtBoston = [&model, iBos, bosOff](double t) {
+                    return model.Height(static_cast<size_t>(iBos), t) + bosOff;
+                };
+                SweConfig bcfg;
+                bcfg.spongeX0 = -2500.0f;   // Mass Bay, east of the outer harbor islands
+                bcfg.westBoundary = false;  // the Charles is dammed; the west edge is a wall
+                weather.AddDormantWindow("boston", &bathyBoston, bcfg, oceanAtBoston, 0.5);
+            }
+        }
+
+        // --ocean-probe lat,lon: the manager's verification harness. Standing at the point
+        // below the activation altitude IS the zoom -- dormant windows containing it spin up
+        // through the same rule the camera uses; then the sample prints at three rungs with
+        // full provenance, plus consistency gates against the station truth.
+        if (!opt.oceanProbe.empty()) {
+            double plat = 0, plon = 0;
+            if (sscanf_s(opt.oceanProbe.c_str(), "%lf,%lf", &plat, &plon) == 2) {
+                // The external merrimack window needs its history before it can be mirrored
+                // (interactive runs spin it up right after this block).
+                Log("[wx] probe: spinning the merrimack window");
+                if (swe.Ready()) swe.Spinup(gpu, simUnix, 0.5, oceanAt, westAt, southAt,
+                                            westQAt);
+                Log("[wx] probe: manager update at the probe point");
+                weather.Update(gpu, renderer.Shaders(), opt.shaderDir, simUnix, plat, plon,
+                               1000.0);
+                auto show = [&](double res) {
+                    const WeatherSample ws = weather.Query(plat, plon, simUnix, res);
+                    Log("[wx] res %6.0f m: level %+6.2f  cur %+5.2f,%+5.2f  Hs %4.2f Tp %4.1f "
+                        "dir %3.0f  wind %+5.1f,%+5.1f  bed %+7.1f  depth %6.1f",
+                        res, ws.levelNavd, ws.u, ws.v, ws.hs, ws.tp, ws.dirDeg, ws.windU,
+                        ws.windV, ws.bedNavd, ws.depthM);
+                    Log("[wx]   level=%s | current=%s | waves=%s | wind=%s | bed=%s",
+                        ws.levelSrc, ws.currentSrc, ws.waveSrc, ws.windSrc, ws.bedSrc);
+                };
+                Log("[wx] probe (%.4f, %.4f) t=now -- three rungs:", plat, plon);
+                show(20000.0);
+                show(500.0);
+                show(15.0);
+                // Consistency gates: the manager's level vs the fitted station truth.
+                bool ok = true;
+                for (const char* sid : {"8443970", "8441841"}) {
+                    for (size_t i = 0; i < model.Count(); ++i) {
+                        if (model.S(i).id != sid) continue;
+                        const TideStation& st = model.S(i);
+                        if (st.mllwMinusNavdM < -900.0) continue;
+                        const double direct = model.Height(i, simUnix) + st.mllwMinusNavdM;
+                        const WeatherSample q = weather.Query(st.lat, st.lon, simUnix, 200.0);
+                        const double err = std::abs(q.levelNavd - direct);
+                        Log("[wx] gate %s (%s): manager %+.3f vs station %+.3f -- err %.0f mm "
+                            "(%s)",
+                            sid, st.name.c_str(), q.levelNavd, direct, err * 1000.0,
+                            q.levelSrc);
+                        if (err > 0.25) ok = false;
+                    }
+                }
+                Log("[wx] ---- %s: %d windows active ----", ok ? "PASS" : "FAIL",
+                    weather.ActiveWindows());
+                gpu.WaitIdle();
+                resMgr.Shutdown();
+                gpu.Shutdown();
+                return ok ? 0 : 1;
+            }
+        }
+
         // M5c: give the solver history before the first frame, and run the validation cycle if
         // asked (headless CSV; the ebb/flood-asymmetry and basin-lag gates read from it).
         if (swe.Ready()) {
@@ -2059,6 +2147,15 @@ int main(int argc, char** argv) {
                                          ? static_cast<float>(opt.height)
                                          : static_cast<float>(std::max(1u, window.Height()));
                     gisLayer->tolMeters = static_cast<float>(altV * cam.fovY / vh);
+                }
+                // M6x: the weather manager's residency clock -- the camera's ground position
+                // is the demand signal; dormant windows spin up as it arrives, mirrors
+                // refresh, owned solvers advance. All in the flat one-world frame.
+                if (!marsMode) {
+                    weather.Update(gpu, renderer.Shaders(), opt.shaderDir, simUnix,
+                                   BathyModel::kOrgLat + cam.pz / BathyModel::kMPerLat,
+                                   BathyModel::kOrgLon + cam.px / BathyModel::kMPerLon,
+                                   altV);
                 }
                 // (--albedo: the water stands down too -- textures judged as layered images,
                 // nothing else in the frame; the lit look retunes separately.)

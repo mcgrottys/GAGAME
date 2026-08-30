@@ -33,12 +33,22 @@
 
 namespace ga {
 
+// M6x: the solver is a WINDOW TYPE now, not the Merrimack. Per-window knobs that used to be
+// hardcoded Merrimack-isms; defaults preserve the validated estuary behavior.
+struct SweConfig {
+    const char* name = "merrimack";
+    float spongeX0 = 1400.0f;   // world-x where the offshore sponge ramps in (open sea east)
+    bool westBoundary = true;   // the Flather river boundary (Boston's rivers are dammed:
+                                // off, and the west edge is a wall like any land)
+};
+
 class SweSolver {
 public:
     static constexpr uint32_t kMaxSubsteps = 16;
 
     void Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
-              const BathyModel& bathy, ID3D12Resource* bathyRes);
+              const BathyModel& bathy, ID3D12Resource* bathyRes,
+              const SweConfig& cfg = {});
     bool Ready() const { return m_ready; }
 
     // Boundary targets, as DEVIATIONS from the ocean tide plane (NAVD m). West = the
@@ -103,6 +113,10 @@ public:
         bool valid;
     };
     void ReadProbes(Gpu& gpu, const float* xzPairs, int count, Probe* out);
+    // M6x: the full-field CPU MIRROR for the weather manager -- eta (PADDED atlas dims) and
+    // the derived currents (exact bathy dims, xyzw = u, v, speed, valid), one readback each.
+    void ReadFields(Gpu& gpu, std::vector<float>& etaOut, uint32_t& etaW, uint32_t& etaH,
+                    std::vector<float>& uv4Out, uint32_t& uvW, uint32_t& uvH);
     // Debug: raw readback of the flux bank (padded dims, RGBA32F). outW/outH = padded texels.
     std::vector<uint8_t> ReadFluxRaw(Gpu& gpu, uint32_t* outW, uint32_t* outH, uint32_t* outPitch);
     Probe ReadProbe(Gpu& gpu, float wx, float wz) {

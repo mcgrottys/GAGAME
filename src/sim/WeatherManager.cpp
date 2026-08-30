@@ -1,0 +1,269 @@
+#include "sim/WeatherManager.h"
+
+#include "core/Common.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+
+namespace ga {
+
+namespace {
+constexpr double kD2R = 3.14159265358979 / 180.0;
+
+// lon/lat (deg) -> the flat world frame (the ACT0816 tangent). The same linear constants
+// every window's georef was built with, so the round trip is exact by construction.
+void WorldOf(double latDeg, double lonDeg, double& x, double& z) {
+    x = (lonDeg - BathyModel::kOrgLon) * BathyModel::kMPerLon;
+    z = (latDeg - BathyModel::kOrgLat) * BathyModel::kMPerLat;
+}
+}  // namespace
+
+void WeatherManager::Init(Compositor* comp, int heightChannel, const WaterAtlas* atlas,
+                          const TideModel* tides, const GlobeModel* globe,
+                          const SeaState* sea, const CurrentModel* currents) {
+    m_comp = comp;
+    m_hgtCh = heightChannel;
+    m_atlas = atlas;
+    m_tides = tides;
+    m_globe = globe;
+    m_sea = sea;
+    m_currents = currents;
+}
+
+void WeatherManager::AddExternalWindow(const char* name, SweSolver* solver,
+                                       const BathyModel* bathy,
+                                       std::function<double(double)> oceanAt) {
+    Window w;
+    w.name = name;
+    w.solver = solver;
+    w.bathy = bathy;
+    w.oceanAt = std::move(oceanAt);
+    w.active = solver && solver->Ready();
+    snprintf(w.levelTag, sizeof(w.levelTag), "swe.%s + stations", name);
+    snprintf(w.currentTag, sizeof(w.currentTag), "swe.%s (solved)", name);
+    m_windows.push_back(std::move(w));
+}
+
+void WeatherManager::AddDormantWindow(const char* name, BathyModel* bathy,
+                                      const SweConfig& cfg,
+                                      std::function<double(double)> oceanAt,
+                                      double spinupHours) {
+    Window w;
+    w.name = name;
+    w.bathy = bathy;
+    w.bathyMut = bathy;
+    w.cfg = cfg;
+    w.cfg.name = nullptr;   // points at the caller's literal; rebound on activation
+    w.oceanAt = std::move(oceanAt);
+    w.spinupHours = spinupHours;
+    snprintf(w.levelTag, sizeof(w.levelTag), "swe.%s + stations", name);
+    snprintf(w.currentTag, sizeof(w.currentTag), "swe.%s (solved)", name);
+    m_windows.push_back(std::move(w));
+}
+
+bool WeatherManager::Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
+                              const char* name, double simUnix) {
+    for (Window& w : m_windows) {
+        if (w.name != name) continue;
+        if (w.active) return true;
+        if (!w.bathy || !w.bathy->Ready()) return false;
+        Log("[weather] spinning up the %s window (%dx%d cells, %.1f h of history -- a "
+            "one-time cost as the region becomes RESIDENT)",
+            w.name.c_str(), w.bathy->Nx(), w.bathy->Ny(), w.spinupHours);
+        // The window's bed realizes from the ONE height channel first (M6w): CUDEM inset,
+        // shelf beyond, hand edits on top -- lazily, as part of the activation cost.
+        if (w.bathyMut && m_comp && m_hgtCh >= 0) {
+            w.bathyMut->RealizeFromChannel(*m_comp, m_hgtCh);
+        }
+        // The window's bed rides the same GPU pattern the terrain uses (M5b lesson: the
+        // compute kernels need NON_PIXEL access).
+        w.ownedBathyTex = std::make_unique<GpuTexture>(gpu.CreateTexture2D(
+            w.bathy->Nx(), w.bathy->Ny(), DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_NONE,
+            D3D12_RESOURCE_STATE_COPY_DEST, L"weather.window.bed"));
+        gpu.UploadTexture(*w.ownedBathyTex, w.bathy->Elev().data(), w.bathy->Nx() * 4);
+        {
+            ID3D12GraphicsCommandList* cl = gpu.BeginUpload();
+            gpu.Transition(cl, *w.ownedBathyTex,
+                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+            gpu.EndUpload();
+        }
+        w.owned = std::make_unique<SweSolver>();
+        SweConfig cfg = w.cfg;
+        cfg.name = w.name.c_str();
+        w.owned->Init(gpu, sc, shaderDir, *w.bathy, w.ownedBathyTex->res.Get(), cfg);
+        w.solver = w.owned.get();
+        auto zero = [](double) { return 0.0; };
+        w.solver->Spinup(gpu, simUnix, w.spinupHours, w.oceanAt, zero, zero, zero);
+        w.active = true;
+        RefreshMirror(gpu, w, simUnix);
+        return true;
+    }
+    return false;
+}
+
+void WeatherManager::RefreshMirror(Gpu& gpu, Window& w, double simUnix) {
+    if (!w.solver || !w.solver->Ready()) return;
+    w.solver->ReadFields(gpu, w.eta, w.etaW, w.etaH, w.uv4, w.uvW, w.uvH);
+    w.mirrorT = simUnix;
+}
+
+void WeatherManager::Update(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
+                            double simUnix, double camLatDeg, double camLonDeg,
+                            double camAltM) {
+    int active = 0;
+    for (Window& w : m_windows) {
+        if (!w.active && w.bathy && w.bathy->Ready() && camAltM < kActivateAltM) {
+            // Residency rises on zoom: the camera entering a dormant window's footprint IS
+            // the demand signal, exactly as a CDLOD node entering the frustum demands tiles.
+            double x, z;
+            WorldOf(camLatDeg, camLonDeg, x, z);
+            if (x > w.bathy->WorldX0() && x < w.bathy->WorldX0() + w.bathy->WorldSizeX() &&
+                z > w.bathy->WorldZ0() && z < w.bathy->WorldZ0() + w.bathy->WorldSizeZ()) {
+                Activate(gpu, sc, shaderDir, w.name.c_str(), simUnix);
+            }
+        }
+        if (w.active && w.owned) {
+            // Owned windows advance on their own submits; at real time this is one 64-substep
+            // batch every ~13 sim-seconds -- background noise.
+            auto zero = [](double) { return 0.0; };
+            w.solver->AdvanceTo(gpu, simUnix, w.oceanAt, zero, zero, zero);
+        }
+        if (w.active && simUnix - w.mirrorT > kMirrorDt) RefreshMirror(gpu, w, simUnix);
+        if (w.active) ++active;
+    }
+    char s[96];
+    snprintf(s, sizeof(s), "wx %d/%d windows", active, static_cast<int>(m_windows.size()));
+    stats = s;
+}
+
+int WeatherManager::ActiveWindows() const {
+    int n = 0;
+    for (const Window& w : m_windows) n += w.active ? 1 : 0;
+    return n;
+}
+
+const WeatherManager::Window* WeatherManager::WindowAt(double latDeg, double lonDeg) const {
+    double x, z;
+    WorldOf(latDeg, lonDeg, x, z);
+    for (const Window& w : m_windows) {
+        if (!w.active || !w.bathy) continue;
+        if (x > w.bathy->WorldX0() && x < w.bathy->WorldX0() + w.bathy->WorldSizeX() &&
+            z > w.bathy->WorldZ0() && z < w.bathy->WorldZ0() + w.bathy->WorldSizeZ()) {
+            return &w;
+        }
+    }
+    return nullptr;
+}
+
+WeatherSample WeatherManager::Query(double latDeg, double lonDeg, double unixT,
+                                    double groundResM) const {
+    WeatherSample s;
+    const double latRad = latDeg * kD2R, lonRad = lonDeg * kD2R;
+
+    // ---- the bed: the one composed stack, provenance = the topmost covering source.
+    if (m_comp && m_hgtCh >= 0) {
+        s.bedNavd = m_comp->SampleHeightStack(m_hgtCh, latRad, lonRad, groundResM);
+        s.bedSrc = "earth.height base";
+        const auto& ch = m_comp->ChannelAt(m_hgtCh);
+        for (const auto* src : ch.height) {
+            const SourceInfo& si = src->Info();
+            if (lonDeg >= si.lon0 && lonDeg <= si.lon1 && latDeg >= si.lat0 &&
+                latDeg <= si.lat1 && si.lon1 - si.lon0 < 359.0) {
+                s.bedSrc = si.name.c_str();   // topmost regional source wins the label
+            }
+        }
+    }
+
+    // ---- the level: the tide atlas everywhere; a resident solver window refines.
+    if (m_atlas && m_atlas->Ready()) {
+        s.levelNavd = m_atlas->MslNavd(latDeg, lonDeg) +
+                      m_atlas->Level(latDeg, lonDeg, unixT, groundResM);
+        s.levelSrc = "water.tide atlas";
+    }
+    const Window* w = WindowAt(latDeg, lonDeg);
+    if (w && w->etaW > 0) {
+        // dEta mirror (padded atlas dims: the window's grid starts at texel 0,0).
+        double x, z;
+        WorldOf(latDeg, lonDeg, x, z);
+        const double fx = (x - w->bathy->WorldX0()) / w->bathy->WorldSizeX() * w->uvW;
+        const double fy =
+            (1.0 - (z - w->bathy->WorldZ0()) / w->bathy->WorldSizeZ()) * w->uvH;
+        const int ix = static_cast<int>(fx), iy = static_cast<int>(fy);
+        if (ix >= 0 && iy >= 0 && ix < static_cast<int>(w->uvW) &&
+            iy < static_cast<int>(w->uvH)) {
+            s.levelNavd = w->oceanAt(unixT) +
+                          w->eta[static_cast<size_t>(iy) * w->etaW + ix];
+            s.levelSrc = w->levelTag;
+            const float* uv = &w->uv4[(static_cast<size_t>(iy) * w->uvW + ix) * 4];
+            if (uv[3] > 0.5f) {
+                s.u = uv[0];
+                s.v = uv[1];
+                s.currentSrc = w->currentTag;
+            }
+        }
+    }
+
+    // ---- currents: solver already claimed it, else the GoMOFS Gulf field.
+    if (s.currentSrc[0] == '-' && m_currents && m_currents->Field().Valid()) {
+        float u = 0, v = 0;
+        if (m_currents->Field().Sample(lonDeg, latDeg, u, v)) {
+            s.u = u;
+            s.v = v;
+            s.currentSrc = "gomofs.surface (700 m)";
+        }
+    }
+
+    // ---- waves: the global Hs grid carries the world; the Gulf point forecast adds
+    // period + direction inside its box (a POINT product -- declared, not hidden).
+    if (m_globe && m_globe->WavesNx() > 0) {
+        const auto& hs = m_globe->Hs();
+        const int nx = m_globe->WavesNx(), ny = m_globe->WavesNy();
+        double lonS = lonDeg;
+        if (m_globe->WavesLon1() > 180.0 && lonS < 0.0) lonS += 360.0;
+        const double fx =
+            (lonS - (m_globe->WavesLon1() - nx * m_globe->WavesDLon())) / m_globe->WavesDLon();
+        const double fy = (m_globe->WavesLat1() - latDeg) / m_globe->WavesDLat();
+        const int ix = static_cast<int>(fx), iy = static_cast<int>(fy);
+        if (ix >= 0 && iy >= 0 && ix < nx && iy < ny) {
+            const float v = hs[static_cast<size_t>(iy) * nx + ix];
+            if (v >= 0.0f) {
+                s.hs = v;
+                s.waveSrc = "gfswave.global 0p25 (Hs)";
+            }
+        }
+    }
+    if (m_sea && m_sea->Ready() && latDeg > 41.5 && latDeg < 44.5 && lonDeg > -71.2 &&
+        lonDeg < -68.5) {
+        const int hi = m_sea->HourIndex(unixT);
+        const SeaHour& h = m_sea->Hour(hi);
+        if (!h.parts.empty()) {
+            s.tp = static_cast<float>(h.combinedTp);
+            s.dirDeg = static_cast<float>(h.combinedFromDeg);
+            if (s.hs <= 0.0f) s.hs = static_cast<float>(h.combinedHs);
+            s.waveSrc = "gfswave gulf point (Hs/Tp/dir)";
+        }
+    }
+
+    // ---- wind: the global GFS 10 m vector grid.
+    if (m_globe && m_globe->WindNx() > 0) {
+        const int nx = m_globe->WindNx(), ny = m_globe->WindNy();
+        double lonS = lonDeg;
+        if (m_globe->WindLon1() > 180.0 && lonS < 0.0) lonS += 360.0;
+        const double fx =
+            (lonS - (m_globe->WindLon1() - nx * m_globe->WindDLon())) / m_globe->WindDLon();
+        const double fy = (m_globe->WindLat1() - latDeg) / m_globe->WindDLat();
+        const int ix = static_cast<int>(fx), iy = static_cast<int>(fy);
+        if (ix >= 0 && iy >= 0 && ix < nx && iy < ny) {
+            s.windU = m_globe->WindU()[static_cast<size_t>(iy) * nx + ix];
+            s.windV = m_globe->WindV()[static_cast<size_t>(iy) * nx + ix];
+            s.windSrc = "gfs.wind 0p5 (10 m)";
+        }
+    }
+
+    s.depthM = static_cast<float>(s.levelNavd - s.bedNavd);
+    return s;
+}
+
+}  // namespace ga

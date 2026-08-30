@@ -10,7 +10,8 @@
 namespace ga {
 
 void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
-                     const BathyModel& bathy, ID3D12Resource* bathyRes) {
+                     const BathyModel& bathy, ID3D12Resource* bathyRes,
+                     const SweConfig& cfg) {
     m_bathy = &bathy;
     m_bathyRes = bathyRes;
     const uint32_t nx = bathy.Nx(), ny = bathy.Ny();
@@ -81,23 +82,29 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     m_cb.dy = dyM;
     m_cb.dt = m_dt;
     m_cb.damp = 0.99995f;   // background linear part only; the real friction is quadratic drag
-    m_cb.spongeX0 = 1400.0f;              // ramp start: past the bar, before the open sea
+    m_cb.spongeX0 = cfg.spongeX0;         // ramp start: past the bar, before the open sea
     m_cb.spongeRate = m_dt / 10.0f;       // full-strength deviations die in ~10 s
     m_cb.gravity = 9.81f;
     // M6r: the west boundary is FLATHER now -- one exterior column pinned to the river-tide
     // data, its east face radiating at the gravity-wave speed (Swe.hlsl). The 24-texel
     // Dirichlet strip is retired: it was a soft wall (transients reflected off the pinned
     // eta), and its relax rate was a tuning knob the radiation condition does not need.
-    m_cb.riverBox[0] = 1.0f;              // exterior column width, texels
+    // M6x: windows without a truncated river (Boston: dammed) turn it off -- the west edge
+    // is then a wall like any land.
+    m_cb.riverBox[0] = cfg.westBoundary ? 1.0f : 0.0f;   // exterior column width, texels
     m_cb.riverBox[1] = m_dt / 2.0f;       // relax rate: SOUTH strip only (retired, below)
-    // The exterior column's bed profile: Record turns the west TRANSPORT into Flather's u_ext
-    // by dividing by the live wet section area (level changes every substep batch).
-    for (uint32_t y = 0; y < ny; ++y) {
-        const float e = elev[static_cast<size_t>(y) * nx];
-        if (e > -9000.0f && e < 2.0f) m_westBed.push_back(e);
+    if (cfg.westBoundary) {
+        // The exterior column's bed profile: Record turns the west TRANSPORT into Flather's
+        // u_ext by dividing by the live wet section area (level moves every substep batch).
+        for (uint32_t y = 0; y < ny; ++y) {
+            const float e = elev[static_cast<size_t>(y) * nx];
+            if (e > -9000.0f && e < 2.0f) m_westBed.push_back(e);
+        }
+        Log("[swe] %s west boundary: FLATHER, %zu wet-capable section cells (dy %.2f m)",
+            cfg.name, m_westBed.size(), dyM);
+    } else {
+        Log("[swe] %s west boundary: wall (no truncated river)", cfg.name);
     }
-    Log("[swe] west boundary: FLATHER, %zu wet-capable section cells (dy %.2f m)",
-        m_westBed.size(), dyM);
     // M6d: the south strip exists only when the window actually reaches Plum Island Sound
     // (the sound's real entrance is south of the window; its tide must enter as data).
     // RETIRED pending a throttled treatment: pinning the sound's south edge to the ocean clock
@@ -355,6 +362,46 @@ std::vector<uint8_t> SweSolver::ReadFluxRaw(Gpu& gpu, uint32_t* outW, uint32_t* 
     *outW = wrap.width;
     *outH = wrap.height;
     return gpu.ReadbackTexture(wrap, outPitch);
+}
+
+void SweSolver::ReadFields(Gpu& gpu, std::vector<float>& etaOut, uint32_t& etaW,
+                           uint32_t& etaH, std::vector<float>& uv4Out, uint32_t& uvW,
+                           uint32_t& uvH) {
+    etaW = etaH = uvW = uvH = 0;
+    if (!m_ready) return;
+    uint32_t etaPitch = 0, uvPitch = 0;
+    GpuTexture wrap;
+    wrap.res = m_eta.Res();
+    wrap.format = DXGI_FORMAT_R32_FLOAT;
+    wrap.width = m_eta.TilesX() * m_eta.TileW();
+    wrap.height = m_eta.TilesY() * m_eta.TileH();
+    wrap.state = m_etaState;
+    const std::vector<uint8_t> etaData = gpu.ReadbackTexture(wrap, &etaPitch);
+    m_etaState = wrap.state;
+    const std::vector<uint8_t> uvData = gpu.ReadbackTexture(m_uv, &uvPitch);
+    m_uvState = m_uv.state;
+
+    // The eta RESOURCE desc is the LOGICAL grid (nx x ny) -- the tile-multiple padding lives
+    // in the atlas' addressing, not the texture dims. (ReadProbes' padded wrap dims were
+    // cosmetic; a row loop that trusts them runs off the readback buffer.)
+    etaW = m_cb.nx;
+    etaH = m_cb.ny;
+    etaOut.resize(static_cast<size_t>(etaW) * etaH);
+    for (uint32_t y = 0; y < etaH; ++y) {
+        memcpy(&etaOut[static_cast<size_t>(y) * etaW], &etaData[y * etaPitch], etaW * 4);
+    }
+    uvW = m_cb.nx;
+    uvH = m_cb.ny;
+    uv4Out.resize(static_cast<size_t>(uvW) * uvH * 4);
+    for (uint32_t y = 0; y < uvH; ++y) {
+        const uint16_t* px = reinterpret_cast<const uint16_t*>(&uvData[y * uvPitch]);
+        for (uint32_t x = 0; x < uvW; ++x) {
+            for (int c = 0; c < 4; ++c) {
+                uv4Out[(static_cast<size_t>(y) * uvW + x) * 4 + c] =
+                    HalfToFloat(px[x * 4 + c]);
+            }
+        }
+    }
 }
 
 void SweSolver::ReadProbes(Gpu& gpu, const float* xzPairs, int count, Probe* out) {
