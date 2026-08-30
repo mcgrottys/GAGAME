@@ -44,10 +44,14 @@ public:
     // Boundary targets, as DEVIATIONS from the ocean tide plane (NAVD m). West = the
     // station-interpolated river tide (the truncated upriver prism arrives through the M1
     // fits); south = the sound's tide where the window cuts its real Ipswich entrance (M6d).
-    // Update per frame.
-    void SetBoundaries(float westDEtaM, float southDEtaM) {
+    // M6r: westQm3s is the TRANSPORT the Flather boundary must carry (+east; river discharge
+    // minus the upriver prism demand) -- radiation alone cannot supply a prescribed prism,
+    // it would throttle behind the standing dEta it needs to sustain the flow. Update per
+    // frame.
+    void SetBoundaries(float westDEtaM, float southDEtaM, float westQm3s = 0.0f) {
         m_westDEta = westDEtaM;
         m_southDEta = southDEtaM;
+        m_westQ = westQm3s;
     }
 
     // Advance toward simUnix (records compute onto cl) and leave eta + uv sampleable.
@@ -56,13 +60,14 @@ public:
 
     // Solver-only advancement (own submits; no rendering): integrate up to targetUnix in
     // batches of 64 substeps per command list. tideAt(unix) supplies the ocean boundary level,
-    // westAt/southAt the boundary deviations.
-    template <typename F, typename G, typename H>
-    void AdvanceTo(Gpu& gpu, double targetUnix, F tideAt, G westAt, H southAt) {
+    // westAt/southAt the boundary deviations, westQAt the west transport (m^3/s, +east).
+    template <typename F, typename G, typename H, typename Q>
+    void AdvanceTo(Gpu& gpu, double targetUnix, F tideAt, G westAt, H southAt, Q westQAt) {
         while (m_simTime < targetUnix - m_dt) {
             const double target = (std::min)(m_simTime + 64.0 * m_dt, targetUnix);
             m_westDEta = static_cast<float>(westAt(m_simTime));
             m_southDEta = static_cast<float>(southAt(m_simTime));
+            m_westQ = static_cast<float>(westQAt(m_simTime));
             ID3D12GraphicsCommandList* cl = gpu.BeginUpload();
             Record(cl, gpu, target, static_cast<float>(tideAt(m_simTime)), 9999);
             gpu.EndUpload();
@@ -72,11 +77,12 @@ public:
 
     // Spin-up: reset to the analytic plane `hours` before startUnix and integrate forward, so
     // the first rendered frame carries real basin history instead of a flat start.
-    template <typename F, typename G, typename H>
-    void Spinup(Gpu& gpu, double startUnix, double hours, F tideAt, G westAt, H southAt) {
+    template <typename F, typename G, typename H, typename Q>
+    void Spinup(Gpu& gpu, double startUnix, double hours, F tideAt, G westAt, H southAt,
+                Q westQAt) {
         m_simTime = startUnix - hours * 3600.0;
         m_pendingReset = true;
-        AdvanceTo(gpu, startUnix, tideAt, westAt, southAt);
+        AdvanceTo(gpu, startUnix, tideAt, westAt, southAt, westQAt);
     }
 
     uint32_t EtaSrv() const { return m_eta.Srv(); }    // dEta from the tide plane, R32F
@@ -121,10 +127,18 @@ private:
         uint32_t etaTileW, etaTileH, fluxTileW, fluxTileH;
         uint32_t listCount;
         float worldX0;
-        uint32_t pad1, pad2;
+        float dy;   // M6r: north-south texel size -- the CUDEM grid is EQUIANGULAR, so
+                    // dy = dlat*mPerLat (13.65 m) != dx = dlon*mPerLon (10.08 m)
+        float westUext;   // M6r: Flather's u_ext (m/s, +east) = westQ / live west section area
         float dx, dt, damp, tideNavd;
         float spongeX0, spongeRate, riverDEta, gravity;
         float riverBox[4];
+        // M6r: d(tideNavd)/dt. The eta bank stores deviation from a MOVING plane; the plane's
+        // rise is booked as debt in every wet-capable interior cell so the prism must actually
+        // ARRIVE through the boundaries (without it the basin filled by construction and the
+        // gap carried only the deviation dynamics).
+        float tideRate;
+        float padA, padB, padC;
     };
 
     bool m_ready = false;
@@ -143,6 +157,10 @@ private:
     double m_simTime = 0;
     float m_westDEta = 0;
     float m_southDEta = 0;
+    float m_westQ = 0;                 // west transport target, m^3/s (+east)
+    std::vector<float> m_westBed;      // exterior-column bed depths: the live section area
+    float m_lastTideNavd = 0;          // for the tide-plane rate (prism source term)
+    double m_lastTideTime = 0;
     float m_dt = 0.25f;
     bool m_pendingReset = true;
 };

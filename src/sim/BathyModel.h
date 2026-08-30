@@ -28,6 +28,13 @@ public:
     bool Load(const std::string& jsonPath);
     bool Ready() const { return m_nx > 0; }
 
+    // M6r: the survey law reaches the physics. mask=land polygons from edits.geojson (the
+    // OSM-seeded jetty footprints) rasterize into this grid as riprap walls: the 3 m CUDEM
+    // knows the structures but 13.7 m box means smear them into leaky sills, and the solver's
+    // flood then crosses the crest line instead of concentrating through the gap. CPU-side
+    // masking only, per the vector doctrine. Returns cells raised.
+    int ApplyMaskEdits(const std::string& geojsonPath, float crestNavd);
+
     int Nx() const { return m_nx; }
     int Ny() const { return m_ny; }
     const std::vector<float>& Elev() const { return m_elev; }   // NAVD88 m; -9999 = nodata

@@ -58,12 +58,15 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     }
 
     // Timestep from the deepest resident water (pipe scheme + damping tolerate ~0.6 dx / c).
+    // M6r: the CUDEM grid is equiangular, so texels are ANISOTROPIC in metres (dlon*mPerLon =
+    // 10.08 east vs dlat*mPerLat = 13.65 north); the CFL rides the smaller axis.
+    const float dyM = bathy.WorldSizeZ() / ny;
     float deepest = 0.0f;
     for (float e : elev) {
         if (e > -9000.0f) deepest = (std::min)(deepest, e);
     }
     const float hmax = -deepest + 3.0f;
-    m_dt = 0.45f * dx / std::sqrt(9.81f * (std::max)(hmax, 5.0f));
+    m_dt = 0.45f * (std::min)(dx, dyM) / std::sqrt(9.81f * (std::max)(hmax, 5.0f));
 
     m_cb.nx = nx;
     m_cb.ny = ny;
@@ -75,14 +78,26 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     m_cb.fluxTileH = m_flux.TileH();
     m_cb.worldX0 = bathy.WorldX0();
     m_cb.dx = dx;
+    m_cb.dy = dyM;
     m_cb.dt = m_dt;
     m_cb.damp = 0.99995f;   // background linear part only; the real friction is quadratic drag
     m_cb.spongeX0 = 1400.0f;              // ramp start: past the bar, before the open sea
     m_cb.spongeRate = m_dt / 10.0f;       // full-strength deviations die in ~10 s
     m_cb.gravity = 9.81f;
-    m_cb.riverBox[0] = 24.0f;             // west Dirichlet strip width, texels (~120 m)
-    m_cb.riverBox[1] = m_dt / 2.0f;       // hard clamp: the strip must SUPPLY the upriver
-                                          // prism's demand (hundreds of m^3/s), not trickle
+    // M6r: the west boundary is FLATHER now -- one exterior column pinned to the river-tide
+    // data, its east face radiating at the gravity-wave speed (Swe.hlsl). The 24-texel
+    // Dirichlet strip is retired: it was a soft wall (transients reflected off the pinned
+    // eta), and its relax rate was a tuning knob the radiation condition does not need.
+    m_cb.riverBox[0] = 1.0f;              // exterior column width, texels
+    m_cb.riverBox[1] = m_dt / 2.0f;       // relax rate: SOUTH strip only (retired, below)
+    // The exterior column's bed profile: Record turns the west TRANSPORT into Flather's u_ext
+    // by dividing by the live wet section area (level changes every substep batch).
+    for (uint32_t y = 0; y < ny; ++y) {
+        const float e = elev[static_cast<size_t>(y) * nx];
+        if (e > -9000.0f && e < 2.0f) m_westBed.push_back(e);
+    }
+    Log("[swe] west boundary: FLATHER, %zu wet-capable section cells (dy %.2f m)",
+        m_westBed.size(), dyM);
     // M6d: the south strip exists only when the window actually reaches Plum Island Sound
     // (the sound's real entrance is south of the window; its tide must enter as data).
     // RETIRED pending a throttled treatment: pinning the sound's south edge to the ocean clock
@@ -170,8 +185,9 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     gpu.Device()->CreateUnorderedAccessView(m_uv.res.Get(), nullptr, &uv,
                                             gpu.SrvHeap().Cpu(m_table + 3));
 
-    Log("[swe] grid %ux%u dx %.2f m  dt %.3f s  eta %u/%u t  flux %u/%u t  resident %.1f MB",
-        nx, ny, dx, m_dt, m_eta.ResidentCount(), m_eta.TilesX() * m_eta.TilesY(),
+    Log("[swe] grid %ux%u dx %.2f x dy %.2f m  dt %.3f s  eta %u/%u t  flux %u/%u t  "
+        "resident %.1f MB",
+        nx, ny, dx, dyM, m_dt, m_eta.ResidentCount(), m_eta.TilesX() * m_eta.TilesY(),
         m_flux.ResidentCount(), m_flux.TilesX() * m_flux.TilesY(),
         (m_eta.ResidentBytes() + m_flux.ResidentBytes()) / 1048576.0);
     m_ready = true;
@@ -250,9 +266,25 @@ int SweSolver::Record(ID3D12GraphicsCommandList* cl, Gpu& gpu, double simUnix, f
         RecordReset(cl, gpu);
         m_simTime = simUnix;
         m_pendingReset = false;
+        m_lastTideTime = 0;   // no rate across a reset
     } else if (drift > 900.0) {
         m_simTime = simUnix - maxSub * static_cast<double>(m_dt);
+        m_lastTideTime = 0;
     }
+
+    // M6r, the prism source: the tide plane's rate of rise, finite-differenced across batch
+    // starts on the SIM clock. Booked as per-substep debt in the height kernel so the basin's
+    // filling volume must arrive through the gap instead of appearing by construction.
+    // Clamp: M2 at this range peaks near 2.2e-4 m/s; anything past 6e-4 is a scrub artifact.
+    float tideRate = 0.0f;
+    if (m_lastTideTime > 0 && m_simTime > m_lastTideTime + 1.0e-6) {
+        tideRate = std::clamp(
+            static_cast<float>((tideNavd - m_lastTideNavd) / (m_simTime - m_lastTideTime)),
+            -6.0e-4f, 6.0e-4f);
+    }
+    m_lastTideNavd = tideNavd;
+    m_lastTideTime = m_simTime;
+    m_cb.tideRate = tideRate;
 
     int n = static_cast<int>((simUnix - m_simTime) / m_dt);
     n = (std::max)(0, (std::min)(n, maxSub));
@@ -260,6 +292,13 @@ int SweSolver::Record(ID3D12GraphicsCommandList* cl, Gpu& gpu, double simUnix, f
     m_cb.tideNavd = tideNavd;
     m_cb.riverDEta = m_westDEta;   // west-boundary target deviation (river tide - ocean tide)
     m_cb.riverBox[3] = m_southDEta;
+    // M6r: Flather's u_ext = the prescribed transport over the LIVE wet section. The clamp is
+    // a sanity rail (real river-tide currents at this reach peak near 1 m/s).
+    float area = 0.0f;
+    const float lvl = tideNavd + m_westDEta;
+    for (const float bed : m_westBed) area += (std::max)(lvl - bed, 0.0f) * m_cb.dy;
+    m_cb.westUext =
+        (area > 1.0f) ? std::clamp(m_westQ / area, -1.5f, 1.5f) : 0.0f;
 
     cl->SetComputeRootSignature(m_rs.Get());
     cl->SetComputeRootConstantBufferView(0, gpu.PushConstants(&m_cb, sizeof(m_cb)));

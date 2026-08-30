@@ -22,14 +22,21 @@ cbuffer SweCb : register(b0) {
     uint  gEtaTileW, gEtaTileH, gFluxTileW, gFluxTileH;
     uint  gListCount;
     float gWorldX0;
-    uint  gPad1, gPad2;
+    float gDy;                   // M6r: north-south texel metres (equiangular CUDEM grid:
+                                 // dy = 13.65 != dx = 10.08 -- the per-axis metric)
+    float gWestUext;             // M6r: Flather's u_ext (m/s, +east): the west TRANSPORT
+                                 // (river Q minus the upriver prism demand) over the live
+                                 // section area -- radiation alone cannot carry a prism
     float gDx, gDt, gDamp, gTideNavd;
     float gSpongeX0, gSpongeRate, gRiverDEta, gGravity;   // gRiverDEta = west-boundary target
                                                           // DEVIATION (river tide - ocean tide)
-    float4 gRiverBox;            // x = west strip width (texels), y = relax rate per substep,
+    float4 gRiverBox;            // x = west EXTERIOR column width (texels; Flather pin, M6r),
+                                 // y = relax rate per substep (south strip only),
                                  // z = SOUTH strip start row (>= ny disables), w = south target
                                  // deviation -- Plum Island Sound's Ipswich entrance lies
                                  // outside the window, so its tide enters as data too (M6d)
+    float gTideRate;             // M6r: d(tide plane)/dt, m/s -- the prism source term
+    float gPadA, gPadB, gPadC;
 };
 
 StructuredBuffer<uint> gTileList : register(t0);
@@ -106,7 +113,10 @@ void CsSweUvClear(uint3 id : SV_DispatchThreadID) {
 // honest ocean-scale friction, passing gravity waves pump both opposing pipes up and nothing
 // drains them -- a ratchet that filled the offshore with ~30 m^3/s phantom fluxes and froze
 // eta. Signed staggered faces cannot ratchet.
-float FaceUpdate(float q, int2 t, int2 nbr) {
+// M6r, the per-axis metric: the grid is equiangular, so a face is faceLen metres LONG and its
+// gradient acts over span metres -- (faceLen, span) = (dy, dx) for east faces, (dx, dy) for
+// south faces. The old isotropic gDx overdrove every north-south term by dy/dx = 1.35.
+float FaceUpdate(float q, int2 t, int2 nbr, float faceLen, float span) {
     float h, hn;
     const float eta = SurfaceAt(t, h);
     const float etan = SurfaceAt(nbr, hn);
@@ -116,15 +126,15 @@ float FaceUpdate(float q, int2 t, int2 nbr) {
 
     // Accelerate down the surface gradient; implicit quadratic bottom drag (Cd = 0.0025);
     // a whisper of linear damping for numerical hygiene.
-    q += gDt * gGravity * hface * (eta - etan);   // (g * hface * dEta/dx) * dx face width
-    const float uf = q / max(hface * gDx, 1e-3f);
+    q += gDt * gGravity * hface * (eta - etan) * faceLen / span;   // g*hface*(dEta/span)*faceLen
+    const float uf = q / max(hface * faceLen, 1e-3f);
     // Cd 0.0015: sandy-estuary range. 0.0025 was fine over the 5 km mouth window; across the
     // M6d wide window's 15 km reach the extra friction accumulated ~40 min of phase lag.
     q *= gDamp / (1.0f + gDt * 0.0015f * abs(uf) / max(hface, 0.3f));
 
     // Positivity: no face may move more than a quarter of its DONOR cell's volume per step.
-    const float Vself = h * gDx * gDx;
-    const float Vnbr = hn * gDx * gDx;
+    const float Vself = h * gDx * gDy;
+    const float Vnbr = hn * gDx * gDy;
     return clamp(q, -0.25f * Vnbr / gDt, 0.25f * Vself / gDt);
 }
 
@@ -135,8 +145,32 @@ void CsSweFlux(uint3 id : SV_DispatchThreadID) {
     if (t.x >= (int)gNx || t.y >= (int)gNy) return;
 
     float2 q = gFlux[t];
-    q.x = FaceUpdate(q.x, t, t + int2(1, 0));   // east face
-    q.y = FaceUpdate(q.y, t, t + int2(0, 1));   // south face (texture +y)
+    q.x = FaceUpdate(q.x, t, t + int2(1, 0), gDy, gDx);   // east face (dy long, dx span)
+    q.y = FaceUpdate(q.y, t, t + int2(0, 1), gDx, gDy);   // south face (texture +y)
+
+    // M6r: FLATHER west boundary -- the open boundary RADIATES. The exterior column rides the
+    // station river tide as pinned data; the flux across its east face is the Flather
+    // condition  u_b = u_ext + sqrt(g/h) * (eta_ext - eta_int),  so an interior surplus flows
+    // OUT at the gravity-wave speed instead of reflecting off a relaxed strip (the Dirichlet
+    // strip was a soft wall: transients bounced, and the basin's phase carried the echo).
+    // u_ext is the PRESCRIBED transport (USGS river Q minus the upriver prism demand) over
+    // the live section: radiation alone cannot carry a prism -- without u_ext the through-
+    // flow throttles behind the standing dEta it needs to sustain itself (measured: the gap
+    // current lost a third of its amplitude).
+    if (t.x < (int)gRiverBox.x && BedAt(t) < 2.0f) {
+        float hI;
+        const float etaI = SurfaceAt(t + int2(1, 0), hI);
+        const float etaX = gTideNavd + gRiverDEta;          // exterior = the river-tide data
+        const float sill = max(BedAt(t), BedAt(t + int2(1, 0)));
+        const float hf = max(max(etaX, etaI) - sill, 0.0f);
+        q.x = 0.0f;
+        if (hf > 0.05f) {
+            const float ub = gWestUext + sqrt(gGravity / hf) * (etaX - etaI);
+            const float V = gDx * gDy / gDt;                // positivity, as everywhere
+            q.x = clamp(hf * gDy * ub, -0.25f * hI * V, 0.25f * hf * V);
+        }
+    }
+
     // Kill reflections off the sponge: waves entering the analytic ocean just fade.
     const float sp = SpongeAt(t);
     if (sp > 0.0f) q *= 1.0f - 0.5f * sp * gSpongeRate;
@@ -153,19 +187,28 @@ void CsSweHeight(uint3 id : SV_DispatchThreadID) {
     const float2 qc = gFlux[t];
     const float qw = gFlux[int2(t.x - 1, t.y)].x;   // across my west face (+ = into me)
     const float qn = gFlux[int2(t.x, t.y - 1)].y;   // across my north face (+ = into me)
-    float dEta = gEta[t] + gDt * ((qw - qc.x) + (qn - qc.y)) / (gDx * gDx);
+    float dEta = gEta[t] + gDt * ((qw - qc.x) + (qn - qc.y)) / (gDx * gDy);
+
+    // M6r, THE PRISM TERM. The eta bank stores deviation from a MOVING plane: when the plane
+    // rises the volume must still ARRIVE, so every resident cell books the rise as debt. The
+    // debt's gradient against the free boundaries (the sponge = the analytic ocean, the pinned
+    // west column = the river data) IS the flood current; the ebb is the debt paid back. This
+    // also makes wet/dry hydrodynamic: a flat's surface no longer rides the plane for free --
+    // it waits for the water. (Measured before this term: 43 m^3/s of storage flux across the
+    // whole harbor at peak flood, ~5% of the real prism; the x5 render gain was compensation.)
+    dEta -= gTideRate * gDt;
 
     // Offshore sponge: the open sea IS the analytic tide; deviations die here. This is also the
     // tidal forcing -- the basin drains into / fills from a boundary pinned to the real clock.
     dEta *= 1.0f - SpongeAt(t) * gSpongeRate;
 
-    // West boundary: the upriver tide from the M1 station fits, interpolated to this edge
-    // (Newburyport <-> Salisbury Point). The CUDEM window ends here but the DATA keeps going:
-    // relaxing this strip to the real lagged river tide routes the entire upriver prism's
-    // demand through the modelled channel. The truncation error becomes a boundary condition,
-    // and the boundary condition is NOAA's.
+    // M6r west boundary, the Flather pair's other half: the EXTERIOR column is the upriver
+    // tide from the M1 station fits, interpolated to this edge, held as data (hard pin -- the
+    // radiation lives in the face flux, not in a relax rate). The CUDEM window ends here but
+    // the DATA keeps going: the truncation error becomes a boundary condition, and the
+    // boundary condition is NOAA's.
     if (t.x < (int)gRiverBox.x && BedAt(t) < 2.0f) {
-        dEta += (gRiverDEta - dEta) * gRiverBox.y;
+        dEta = gRiverDEta;
     }
     // South boundary: the sound's tide (entrance clock, slightly lagged) enters where the
     // window truncates its real mouth -- but ONLY through the deep channel. Pinning the whole
@@ -194,11 +237,13 @@ void CsSweDerive(uint3 id : SV_DispatchThreadID) {
         gUv[t] = float4(0, 0, 0, 0);
         return;
     }
-    // Cell-centred velocity: the mean of the two faces in each axis.
+    // Cell-centred velocity: the mean of the two faces in each axis, each over its OWN face
+    // area (M6r: east faces are dy long, south faces dx -- the isotropic gDx overstated v
+    // by 35%).
     const float2 qc = gFlux[t];
     const float qw = gFlux[int2(t.x - 1, t.y)].x;
     const float qn = gFlux[int2(t.x, t.y - 1)].y;
-    const float u = 0.5f * (qc.x + qw) / (h * gDx);
+    const float u = 0.5f * (qc.x + qw) / (h * gDy);
     const float v = -0.5f * (qc.y + qn) / (h * gDx);   // texture +y is south; world v is north
     gUv[t] = float4(u, v, length(float2(u, v)), 1.0f);
 }

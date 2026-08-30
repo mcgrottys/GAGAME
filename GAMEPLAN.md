@@ -577,3 +577,74 @@ Google's summer mosaic (a capture difference, deliberately NOT color-matched aft
 lesson). The live path streams the same layer through the z14 window (--albedo at 2.5 km).
 Next for this layer: a streamed z18/z19 window realization so the 15 cm detail reaches the
 renderer, not just the exporter; and the user's opt-in per-layer color-adjust ops.
+
+## 17. M6q (2026-08-29): seed the law from surveys — and KML round-trips
+
+The user caught me hand-digitizing jetty polygons off my own renders (twice wrong — the
+second attempt confidently traced the ebb-shoal classification smear as the "south jetty";
+their red-line annotation was the correction) and asked the right question: "are you making
+up your own GIS? Why not just overlay a coastal one?" One cached Overpass fetch
+(`data/gis/osm_structures.json`, ODbL) brought every charted structure at the mouth as
+surveyed `man_made=breakwater|groyne` footprint OUTLINES — North/South Jetty, spur, Old
+South Jetty, a dozen groins, the Low-crested Dike. `edits.geojson` is seeded from those
+true footprints; `structures.kml` exports the inventory for Google Earth; and the harvester
+now INGESTS any KML dropped into `data/gis/` or `cache/vectors/` (Placemark walk → vpack
+layer with wedge importance), so hand-drawn overlays enter the survey order like any
+shapefile. The structures draw amber on the GIS vector overlay — lines live on their OWN
+layer (user rule), never painted into surface textures; masks are the one sanctioned raster
+use. The three survey-law files are the one versioned exception to the data/ gitignore.
+
+## 18. M6r (2026-08-29): the water speaks — the prism term, Flather, and the per-axis metric
+
+Back to the water, at the top deferred solver item — and the validation harness turned a
+boundary-condition chore into the biggest physics fix since the signed-staggered rewrite.
+Method: pin a baseline (14 h `--swe-cycle` vs the ACT0816 prediction, scored for r, phase,
+amplitude, dominance), change one thing, re-run.
+
+**The per-axis metric (measured, not assumed).** The CUDEM grid is EQUIANGULAR: dlon = dlat
+= 0.44″, so texels are 10.08 m east × 13.65 m north — and the solver ran both axes on dx.
+Every north-south face length, cell volume, and derived v carried a 26–35% metric error.
+Now (faceLen, span) per axis, volumes dx·dy, CFL on the min axis.
+
+**Flather west boundary.** The 24-texel Dirichlet relax strip was a soft wall — transients
+reflected, and the basin's phase carried the echo. Now: ONE exterior column pinned to the
+station river tide (data), its east face radiating at the gravity-wave speed
+(u_b = u_ext + √(g/h)(η_ext − η_int)). First cut with u_ext = 0 LOST amplitude — radiation
+alone cannot carry a prescribed prism; it throttles behind the standing Δη it needs. u_ext
+is the prescribed transport (USGS river Q minus the upriver prism demand, A_up·dη/dt with
+A_up ≈ 3.9 km² for the reach to the head of tide; NHD-integrated area is the named
+refinement) over the LIVE wet section (bed profile cached at init).
+
+**THE PRISM TERM — the real find.** A continuity audit (net east transport summed down full
+N-S sections, now printed by `--swe-uv`) showed ~520 m³/s flat along the entire channel at
+peak flood with only 43 m³/s of storage flux across the whole harbor: the basin was filling
+BY CONSTRUCTION. The eta bank stores deviation from a MOVING plane — when gTideNavd rose,
+every cell's absolute surface rose with it, no transport required; the gap only ever carried
+the deviation dynamics, and the ×5 render gain had been compensating for missing physics.
+The fix is one line with a section of comment: `dEta -= gTideRate·gDt` — every resident
+cell books the plane's rise as DEBT, and the debt's gradient against the free boundaries
+(sponge = the analytic ocean, pinned west column = the river data) IS the flood current;
+the ebb is the debt paid back. Wet/dry becomes hydrodynamic for free: a flat's surface no
+longer rides the plane — it waits for the water to arrive.
+
+**The survey law reaches the solver.** `BathyModel::ApplyMaskEdits` rasterizes the
+mask=land edit polygons (the OSM jetty footprints, M6q) into the physics bathymetry as
++2.5 m NAVD riprap walls (254 cells) — the 3 m CUDEM knows the jetties but 13.7 m box means
+smear them into leaky sills, and the jet crossed the crest line instead of concentrating.
+CPU-side masking, per the vector doctrine.
+
+**Validation, baseline → final** (14 h vs ACT0816, same clock, same scorer):
+r 0.72 → **0.95** (best-lag 0.92 @ −88 min → **0.96 @ −24 min**), transect-mean amplitude
+ratio 0.22 → **0.60** (throat CORE 0.93 vs ACT 1.06 — ACT predicts the jet core), flood
+dominance 0.72 (wrong side) → **1.06** (ACT 1.48), sponge residual ≤ 0.2 cm, basin lag 0,
+attenuation 1.00. Continuity now reads like an estuary: −400 m³/s entering at the west
+boundary growing section-by-section to −4600 at the gap. **The ×5 sweGain is RETIRED**
+(default 1.0): the physics carries the magnitude. Spinup default 0.25 → 1 h (the debt field
+needs the history; ~1 s).
+
+Named next for the water: flood dominance (ours 1.06 vs 1.48 — likely bar/ebb-shoal
+geometry + the missing overtide steepening), subgrid channel conveyance (the M6d tracked
+item, still real upriver), NHD-integrated upriver prism area, the sound's real Ipswich
+entrance, and eta-aware shoreline classification (the wet line now truly lags the analytic
+tide on the flats — the renderer should read the solved eta, which is the water/air-channel
+Exchange step of ATLAS §7).

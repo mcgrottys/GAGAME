@@ -96,15 +96,20 @@ struct Options {
     bool datumSet = false;            // --datum given: overrides the CO-OPS datum resolution
     bool sweOff = false;              // --swe-off: analytic tide plane only (pre-M5c behaviour)
     bool sweWestOff = false;          // --swe-west-off: zero the west-boundary deviation
-    double sweSpinupH = 0.25;         // solver history integrated before the first frame
+    double sweSpinupH = 1.0;          // solver history integrated before the first frame
+                                      // (M6r: the prism-debt field needs ~an hour to settle;
+                                      // costs ~1 s at startup)
     double sweCycleH = 0;             // --swe-cycle N: headless validation over N hours -> CSV
     double riverQ = -1;               // --river q overrides data/river/river.json
     std::wstring sweUvDump;           // --swe-uv f.png: dump the solved current field after
                                       // spin-up (debug picture: red east, blue west)
-    float sweGain = 5.0f;             // solved-current gain (see SeaLayer). Recalibrated for
-                                      // the M6d wide window: the 13.7 m box-averaged channel
-                                      // under-conveys (throat point 0.16 vs ACT 1.08); the
-                                      // subgrid-conveyance fix is the tracked next step
+    float sweGain = 1.0f;             // solved-current gain (see SeaLayer). M6r RETIRED the
+                                      // x5 compensation: the old deviation formulation let
+                                      // the basin fill by construction (the moving tide
+                                      // plane), so the gap only carried ~1/5 of the prism.
+                                      // With the prism source term + Flather + per-axis
+                                      // metric + walled jetties the solver's throat core
+                                      // reads 0.93 vs ACT 1.06 -- honest at gain 1
 };
 
 std::wstring Widen(const char* s) {
@@ -451,8 +456,8 @@ float ResolveDatum(const TideModel& model) {
 // ocean sponge (must track the analytic tide), the entrance throat AT the ACT0816 station
 // (solved current vs the CO-OPS prediction, the real gate), the Joppa Flats basin (lag +
 // attenuation must EMERGE), and the river's standing slope upstream.
-template <typename F, typename G, typename H>
-void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G westAt, H southAt,
+template <typename F, typename G, typename H, typename Q>
+void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G westAt, H southAt, Q westQAt,
                  const CurrentModel* currents, int ctSta, const BathyModel& bathy,
                  double startUnix, double hours) {
     auto tideAt = oceanAt;
@@ -500,7 +505,7 @@ void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G westAt, H southAt,
     const double endUnix = startUnix + hours * 3600.0;
     int rows = 0;
     for (double t = startUnix; t <= endUnix; t += 120.0) {
-        swe.AdvanceTo(gpu, t, tideAt, westAt, southAt);
+        swe.AdvanceTo(gpu, t, tideAt, westAt, southAt, westQAt);
         // 4 named probes + a 6-point transect across the jetty gap (x = 350) whose valid-point
         // mean is the fair section current to hold against ACT0816.
         const float pts[20] = {2600.0f, 0.0f,   throatX, throatZ, -2500.0f, -900.0f,
@@ -601,6 +606,20 @@ void DumpSweUv(Gpu& gpu, SweSolver& swe, const BathyModel& bathy, const std::wst
         }
     }
     SavePng(path + L".flux.png", rgba.data(), nx, ny, nx * 4, rgba.size());
+
+    // M6r continuity audit: NET eastward transport through full N-S sections (sum of raw east
+    // face fluxes down a column, m^3/s -- land and NULL faces are exact zeros). Continuity says
+    // consecutive sections differ only by the storage filling between them; a jump reveals a
+    // leak, a flat profile with a weak gap says the demand never concentrated.
+    for (const float wx : {-12000.0f, -5000.0f, -2500.0f, 0.0f, 350.0f, 900.0f, 1600.0f}) {
+        const int ix = static_cast<int>((wx - bathy.WorldX0()) / bathy.WorldSizeX() * nx);
+        if (ix < 0 || ix >= static_cast<int>(nx)) continue;
+        double q = 0.0;
+        for (uint32_t y = 0; y < ny; ++y) {
+            q += reinterpret_cast<const float*>(&flux[y * fpitch + ix * 8])[0];
+        }
+        Log("[swe] section x=%+6.0f m: net east transport %+8.1f m^3/s", wx, q);
+    }
 }
 
 void FormatTitle(wchar_t* buf, size_t n, double simUnix, double timeScale, bool paused,
@@ -741,6 +760,10 @@ int main(int argc, char** argv) {
         BathyModel bathy;
         TerrainLayer* terrain = nullptr;
         if (bathy.Load(opt.bathyPath)) {
+            // M6r: bake the surveyed structure footprints (edits.geojson, mask=land) into the
+            // physics bathymetry as riprap walls BEFORE the terrain uploads it -- the jet must
+            // meet real jetties, not box-averaged sills. Crest +2.5 NAVD ~ the real riprap.
+            bathy.ApplyMaskEdits("data/gis/edits.geojson", 2.5f);
             auto terrOwned = std::make_unique<TerrainLayer>();
             terrain = terrOwned.get();
             terrain->Configure(opt.shaderDir, &bathy);
@@ -757,11 +780,12 @@ int main(int argc, char** argv) {
         // M5c: the sparse shallow-water solver -- the estuary's own hydrodynamics, tide-forced
         // offshore and river-forced upstream, feeding the sea's mean surface and currents.
         SweSolver swe;
+        double riverQ = 70.0;
         if (terrain && sea && !opt.sweOff) {
             swe.Init(gpu, renderer.Shaders(), opt.shaderDir, bathy, terrain->HeightTex().res.Get());
-            // Logged for the record; the west boundary's station tides already carry the river
-            // stage (their fitted means include it), so no explicit injection is needed.
-            LoadRiverDischarge("data/river/river.json");
+            // M6r: the discharge is LIVE again -- it rides the Flather boundary's u_ext (the
+            // station stage still carries it into eta; the prism term dwarfs it either way).
+            riverQ = (opt.riverQ > 0) ? opt.riverQ : LoadRiverDischarge("data/river/river.json");
             sea->SetSwe(&swe);
             sea->SetBathyCpu(&bathy);
         }
@@ -1344,19 +1368,32 @@ int main(int argc, char** argv) {
                               (model.Height(westB, t) - model.S(westB).meanMllwM) * wT;
             return tw - (model.Height(entSta, t) - model.S(entSta).meanMllwM);
         };
+        // M6r: the transport the Flather west boundary must CARRY (+east): river discharge
+        // minus the upriver prism demand. The reach beyond the window (km ~15.5 to the head
+        // of tide at Haverhill, ~km 35) fills and drains THROUGH this boundary; its surface
+        // area is the prism knob (~19.5 km of ~200 m river; an NHD-integrated area is the
+        // named refinement). d(eta_west)/dt by central difference of the station-fit clocks.
+        const double kUpriverAreaM2 = 3.9e6;
+        auto westQAt = [&, riverQ](double t) {
+            if (opt.sweWestOff) return 0.0;
+            const double dh = (oceanAt(t + 300.0) + westAt(t + 300.0) - oceanAt(t - 300.0) -
+                               westAt(t - 300.0)) / 600.0;
+            return riverQ - kUpriverAreaM2 * dh;
+        };
         if (swe.Ready()) {
-            Log("[swe] boundaries: ocean=%s, west=lerp(%s,%s,%.2f)",
+            Log("[swe] boundaries: ocean=%s, west=lerp(%s,%s,%.2f) Flather "
+                "(Q %.0f m^3/s, prism area %.1f km^2)",
                 model.S(entSta).name.c_str(), model.S(westA).name.c_str(),
-                model.S(westB).name.c_str(), wT);
+                model.S(westB).name.c_str(), wT, riverQ, kUpriverAreaM2 / 1.0e6);
         }
 
         // M5c: give the solver history before the first frame, and run the validation cycle if
         // asked (headless CSV; the ebb/flood-asymmetry and basin-lag gates read from it).
         if (swe.Ready()) {
             if (opt.sweCycleH > 0) {
-                swe.Spinup(gpu, simUnix, 2.0, oceanAt, westAt, southAt);
+                swe.Spinup(gpu, simUnix, 2.0, oceanAt, westAt, southAt, westQAt);
                 const int ctSta = haveCurrents ? currents.StationIndex("ACT0816") : -1;
-                RunSweCycle(gpu, swe, oceanAt, westAt, southAt,
+                RunSweCycle(gpu, swe, oceanAt, westAt, southAt, westQAt,
                             haveCurrents ? &currents : nullptr, ctSta, bathy, simUnix,
                             opt.sweCycleH);
                 gpu.WaitIdle();
@@ -1366,7 +1403,7 @@ int main(int argc, char** argv) {
             }
             if (opt.sweSpinupH > 0) {
                 const auto t0 = std::chrono::steady_clock::now();
-                swe.Spinup(gpu, simUnix, opt.sweSpinupH, oceanAt, westAt, southAt);
+                swe.Spinup(gpu, simUnix, opt.sweSpinupH, oceanAt, westAt, southAt, westQAt);
                 Log("[swe] spun up %.2f h of history in %.1f s", opt.sweSpinupH,
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
             }
@@ -1769,7 +1806,8 @@ int main(int argc, char** argv) {
             lastWaterNavd = waterNavd;   // next frame's camera-pivot rays test against it
             if (swe.Ready()) {
                 swe.SetBoundaries(static_cast<float>(westAt(simUnix)),
-                                  static_cast<float>(southAt(simUnix)));
+                                  static_cast<float>(southAt(simUnix)),
+                                  static_cast<float>(westQAt(simUnix)));
             }
             if (sea) sea->SetTime(simUnix, bathy.Ready() ? waterNavd : tide->focusHeight,
                                   cam.px, cam.pz);

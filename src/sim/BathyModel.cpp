@@ -68,6 +68,71 @@ bool BathyModel::Load(const std::string& jsonPath) {
     return true;
 }
 
+namespace {
+bool PointInRing(double x, double y, const std::vector<std::pair<double, double>>& r) {
+    bool in = false;
+    for (size_t i = 0, j = r.size() - 1; i < r.size(); j = i++) {
+        if ((r[i].second > y) != (r[j].second > y) &&
+            x < (r[j].first - r[i].first) * (y - r[i].second) / (r[j].second - r[i].second) +
+                    r[i].first) {
+            in = !in;
+        }
+    }
+    return in;
+}
+}  // namespace
+
+int BathyModel::ApplyMaskEdits(const std::string& geojsonPath, float crestNavd) {
+    if (!Ready()) return 0;
+    const std::string text = ReadFile(geojsonPath);
+    if (text.empty()) return 0;
+    std::string err;
+    const JsonValue root = JsonParser::Parse(text, &err);
+    if (!err.empty()) return 0;
+    const JsonValue* feats = root.Get("features");
+    if (!feats) return 0;
+
+    int cells = 0;
+    for (const JsonValue& ft : feats->arr) {
+        const JsonValue* props = ft.Get("properties");
+        const JsonValue* geom = ft.Get("geometry");
+        if (!props || !geom) continue;
+        if (props->Str("mask") != "land") continue;   // water edits stay classifier-only
+        const JsonValue* coords = geom->Get("coordinates");
+        if (!coords || coords->arr.empty()) continue;
+        // Outer ring, lon/lat -> grid cells (row 0 = north).
+        std::vector<std::pair<double, double>> ring;
+        double x0 = 1e18, x1 = -1e18, y0 = 1e18, y1 = -1e18;
+        for (const JsonValue& pt : coords->arr[0].arr) {
+            if (pt.arr.size() < 2) continue;
+            const double px = (pt.arr[0].number - m_lon0) / m_dlon;
+            const double py = (m_lat1 - pt.arr[1].number) / m_dlat;
+            ring.push_back({px, py});
+            x0 = (std::min)(x0, px); x1 = (std::max)(x1, px);
+            y0 = (std::min)(y0, py); y1 = (std::max)(y1, py);
+        }
+        if (ring.size() < 3) continue;
+        for (int y = (std::max)(0, static_cast<int>(y0));
+             y <= (std::min)(m_ny - 1, static_cast<int>(y1)); ++y) {
+            for (int x = (std::max)(0, static_cast<int>(x0));
+                 x <= (std::min)(m_nx - 1, static_cast<int>(x1)); ++x) {
+                if (!PointInRing(x + 0.5, y + 0.5, ring)) continue;
+                float& e = m_elev[static_cast<size_t>(y) * m_nx + x];
+                if (e > -9000.0f && e < crestNavd) {
+                    e = crestNavd;
+                    ++cells;
+                }
+            }
+        }
+    }
+    if (cells) {
+        Log("[bathy] %d cells walled to %+.1f m NAVD from mask=land edits (%s -- the survey "
+            "law reaches the solver)",
+            cells, crestNavd, geojsonPath.c_str());
+    }
+    return cells;
+}
+
 float BathyModel::SampleWorld(float x, float z) const {
     if (!Ready()) return -9999.0f;
     // Row 0 = north: v grows southward.
