@@ -900,8 +900,32 @@ probe proved the path fires (storm diff 370k pixels, calm 121) — a lone 0.5 m 
 swell partition simply has no band-2 energy; sparkle is a property of the SPECTRUM, not a
 decoration. All five gates green.
 
+**M7c (2026-08-30): THE TWO RAYS — ray tracing against our own quadtrees.** The user
+asked for ray/path tracing that shades well from space AND the helm. The answer is not a
+BLAS: a water pixel is a Fresnel split between two rays, and both are answered by data
+the atlas already realizes. The REFLECTED ray is the sandwich r = −n d n against the
+analytic sky (SkyRadianceDirDiscless — the horizon now mirrors the sky, the term every
+tuning pass before was missing). The REFRACTED ray bends by Snell — a rotor in the
+incidence bivector (d ∧ n), the closed form in the shader IS R d ~R expanded — then
+casts into the water and lands on the BED: two secant steps against ComposedHeight (the
+one height stack), wearing ComposedColor (the one imagery stack) as albedo. Beer-Lambert
+attenuates per channel over the real path (Jerlov-ish Kd, red dies first — which is
+exactly why shoals read turquoise from orbit); deep water collapses to the shelf scatter
+color the globe always drew, so the far field stays converged with no altitude branch.
+Depth = live level − bed per pixel, so the bars stand out at LOW TIDE and drown at high —
+the tide owns the chart. The march runs only under 30 m pixel footprints (past that the
+refracted hit IS the pixel's own bed and the vertical closed form takes over; they agree
+where they meet). LESSON (seen, fixed): a Fresnel term on the M7a sparkle normals
+aliases into grey per-pixel speckle — Fresnel and the two ray DIRECTIONS ride the
+band-limited ring normal (nSmooth); the sparkle normal feeds only the sun glint, whose
+microfacet math averages sub-pixel slopes statistically. DXR stays a named experiment
+(inline RayQuery over resident-tile AABBs, M6c note): at 2 secant steps against a
+heightfield we own, there is nothing for RT cores to save. --rail-jetty: tip → tip →
+bird's eye, shot at a low-tide --start.
+
 Named next: churn/foam into the bank params, amplification-shader subdivision for
 sub-meter helm vertex density, the bank as an Exchange channel (water.surface for
 plugins), a light wind-chop tail partition so calm water carries its capillary glitter,
-and the GPU-side GA engine growing out of this kernel (the tide rotors evaluated on-GPU
-from the realized phasor windows).
+underwater caustic modulation of the bed term from the cascade derivs, and the GPU-side
+GA engine growing out of this kernel (the tide rotors evaluated on-GPU from the realized
+phasor windows).

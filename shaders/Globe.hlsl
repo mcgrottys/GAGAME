@@ -270,6 +270,7 @@ float4 PsMain(VsOut i) : SV_Target {
     float3 n = upT;
     float3 alb;
     float spec = 0.0f;
+    float3 skyReflAdd = 0.0f;   // M7c: Fresnel-weighted sky on the reflected ray (water only)
     if (gStreamF.z > 0.5f) {
         // MARS: the rescued sample pyramids ARE the planet -- residency-clamped diffuse +
         // BC5 surface normals in the local ENU frame.
@@ -313,14 +314,23 @@ float4 PsMain(VsOut i) : SV_Target {
         // shed variance, locally sea-state true), and its foam whitens the water -- the
         // shading now reads the same tiled resource the geometry displaces from.
         float s2 = 0.003f + 0.00512f * wind;
-        float3 nWater = upT;
+        float3 nWater = upT;    // with M7a sparkle detail: feeds the sun glint (microfacet
+                                // math averages sub-pixel slopes statistically)
+        float3 nSmooth = upT;   // band-limited to the ring texel: feeds Fresnel + the two
+                                // rays -- per-pixel detail slopes under a Fresnel term alias
+                                // into grey speckle (seen, fixed)
+        float lvlW = 0.0f;    // live water level here (bank: tide + solver); 0 = geoid far afield
+        float foamW = 0.0f;   // whitening accumulator -- painted AFTER the refraction mix so
+                              // foam rides ON the water, not under it
+        const float footPx = length(i.rel) * gWavesB.z;
         {
             float4 bD, bP, bDet, bDx, bDz, tmp, tmp2;
             float bT, t2u;
             const float2 wxz = (CsToTangent(up) * gGlo.x).xz;
             if (BankSample(wxz, bD, bP, bDet, bT)) {
                 s2 = max(bP.y, 0.0015f);
-                albSea = lerp(albSea, float3(0.92f, 0.95f, 0.97f), saturate(bD.w) * 0.65f);
+                lvlW = bP.x;
+                foamW = saturate(bD.w) * 0.65f;
                 // Per-pixel wave normals, finite-differenced from the bank at its own ring
                 // texel: geometry alone is nearly invisible from above -- the normal is what
                 // makes the sea READ (the M6t glint then rides real wave faces).
@@ -328,13 +338,13 @@ float4 PsMain(VsOut i) : SV_Target {
                 BankSample(wxz + float2(0.0f, bT), bDz, tmp, tmp2, t2u);
                 float sx = (bDx.y - bD.y) / bT;
                 float sz = (bDz.y - bD.y) / bT;
+                nSmooth = normalize(upT - east * sx - north * sz);
                 // M7a: THE SPARKLE -- bands this PIXEL resolves but the ring texel does not,
                 // read straight from the cascade DERIVATIVE textures at full FFT resolution,
                 // weighted by the fold difference (wPix - wRing) and the tile's local sea
                 // state (detail plane: hsScale, dry). Sigma^2 hands the same energy back, so
                 // the three tiers stay telescoped; at altitude wPix <= wRing and every term
                 // vanishes -- the far field is untouched.
-                const float footPx = length(i.rel) * gWavesB.z;
                 [unroll] for (uint c = 0; c < 3; ++c) {
                     const float lam = 6.2831853f / gBankC[c];
                     const float wRing = 1.0f - smoothstep(lam * 0.12f, lam * 0.5f, bT);
@@ -346,8 +356,7 @@ float4 PsMain(VsOut i) : SV_Target {
                         gTex[gBankU2[c + 1u]].SampleLevel(sLinearWrap, duv, 0);
                     sx += dv.x * wDet * bDet.x * gBankB.w;
                     sz += dv.y * wDet * bDet.x * gBankB.w;
-                    albSea = lerp(albSea, float3(0.92f, 0.95f, 0.97f),
-                                  saturate(dv.w * wDet) * (c == 2 ? 0.30f : 0.15f));
+                    foamW = max(foamW, saturate(dv.w * wDet) * (c == 2 ? 0.30f : 0.15f));
                     s2 = max(s2 - wDet * bDet.x * bDet.x *
                                       (c == 0 ? 0.0004f : (c == 1 ? 0.0018f : 0.0060f)),
                              0.0015f);
@@ -355,6 +364,55 @@ float4 PsMain(VsOut i) : SV_Target {
                 nWater = normalize(upT - east * sx - north * sz);
             }
         }
+        // ---- M7c: THE TWO RAYS. A water pixel is a Fresnel split between two rays, and
+        // both are answered by data this atlas already realizes -- ray tracing against our
+        // own quadtrees, no BLAS, no second scene description. The REFLECTED ray asks the
+        // analytic sky (below, on the true wave normal: the sandwich r = -n d n). The
+        // REFRACTED ray bends by Snell -- a ROTOR in the incidence bivector (d ^ n); the
+        // closed form below IS R d ~R expanded -- then marches into the water and lands on
+        // the BED: the composed height quadtree, found by secant cast, wearing the composed
+        // IMAGERY as its albedo. Beer-Lambert attenuates per channel over the REAL path
+        // (down along the ray + diffuse up), so deep water collapses to the shelf scatter
+        // color the globe always drew and the far field stays converged, while shallow
+        // water shows the bar through the surface -- scaled by the LIVE tide, because
+        // depth = level - bed at this pixel. Space and helm are the same formula; the
+        // tiers telescope by physics, not by altitude branches.
+        const float depthW = max(lvlW - hp, 0.0f);
+        const float3 dIn = -v;                                   // camera -> surface
+        const float ci = saturate(-dot(dIn, nSmooth));
+        const float etaR = 1.0f / 1.34f;
+        const float st2 = etaR * etaR * max(1.0f - ci * ci, 0.0f);
+        const float3 tDir = normalize(
+            etaR * dIn + (etaR * ci - sqrt(max(1.0f - st2, 0.0f))) * nSmooth);
+        float sDown = depthW;    // vertical closed form: exact where parallax is subpixel
+        float3 bedDir = up;
+        if (footPx < 30.0f && depthW > 0.01f && depthW < 90.0f) {
+            // The cast: 2 secant steps against ComposedHeight. Under 30 m footprints the
+            // march matters (looking through a wave face shifts the bar); past that the
+            // refracted hit is the pixel's own bed and the closed form takes over -- the
+            // two agree where they meet, so there is no seam to hide.
+            const float3 Pw = gCamAbs.xyz + i.rel;
+            const float muD = max(-dot(tDir, upT), 0.10f);
+            float sP = depthW / muD;
+            [unroll] for (int itr = 0; itr < 2; ++itr) {
+                const float3 Pb = Pw + tDir * sP;
+                const float gap =
+                    (length(Pb) - gGlo.x) - ComposedHeight(CsToPlanet(normalize(Pb)), lod);
+                sP = clamp(sP + gap / muD, 0.3f, 140.0f);
+            }
+            bedDir = CsToPlanet(normalize(Pw + tDir * sP));
+            sDown = sP;
+        }
+        // Coastal-water diffuse attenuation (Jerlov-ish, per channel): red dies first --
+        // which is exactly why the shoals read turquoise from orbit.
+        const float3 Kd = float3(0.36f, 0.105f, 0.06f);
+        const float3 Tw = exp(-Kd * (sDown + depthW));
+        const float3 bedAlb = (ComposedColorOn() && gStreamF.z < 0.5f)
+                                  ? ComposedColor(bedDir)
+                                  : float3(0.44f, 0.40f, 0.31f);
+        albSea = lerp(albSea, bedAlb, Tw);
+        albSea = lerp(albSea, float3(0.92f, 0.95f, 0.97f), saturate(foamW));
+
         const float3 hv = normalize(v + gSunDir.xyz);
         const float ch = saturate(dot(hv, nWater));
         const float t2 = max(1.0f - ch * ch, 0.0f) / max(ch * ch, 1e-4f);
@@ -362,20 +420,27 @@ float4 PsMain(VsOut i) : SV_Target {
         const float fres = 0.02f + 0.98f * pow(1.0f - saturate(dot(v, hv)), 5.0f);
         spec *= fres * saturate(dot(gSunDir.xyz, nWater));
 
+        // The reflected ray: sky radiance on the sandwich -n d n, Fresnel-weighted on the
+        // TRUE wave normal; the refracted side scales by 1-F so energy splits, not doubles.
+        // From straight above F ~ 0.02 (space view untouched); toward the horizon the sea
+        // mirrors the sky, which is the term every previous tuning pass was missing.
+        const float fresN = 0.02f + 0.98f * pow(1.0f - saturate(dot(v, nSmooth)), 5.0f);
+        const float3 rDir = normalize(dIn - 2.0f * dot(dIn, nSmooth) * nSmooth);
+        skyReflAdd = SkyRadianceDirDiscless(rDir) * (fresN * 0.9f * (1.0f - landness));
+        albSea *= 1.0f - fresN;
+
         // The analog mix: glint dies as the flat emerges, the land normal takes over.
         n = normalize(lerp(nWater, nLand, landness));
         alb = lerp(albSea, albLand, landness);
         spec *= 1.0f - landness;
     }
 
-    // ---- M6i: the composed color channel -- ONE call covers what used to be the streamed
-    // cube block plus the detail-window block. Land takes the imagery outright; water blends
-    // it into the shallows only, so the LIVE ocean (Hs whitening, Cox-Munk glint) keeps doing
-    // physics that a baked mosaic cannot.
+    // ---- M6i/M7c: the composed color channel. Land takes the imagery outright; the water
+    // side already carries it in through the REFRACTED ray (bed albedo, attenuated by the
+    // real underwater path) -- the old fixed 0.6 shallow blend is retired.
     if (ComposedColorOn() && gStreamF.z < 0.5f) {
         const float3 img = ComposedColor(up);
-        const float3 albWet = lerp(alb, img, 0.6f * saturate(1.0f + min(hp, 0.0f) / 80.0f));
-        alb = lerp(albWet, img, landness);
+        alb = lerp(alb, img, landness);
     }
 
     // ---- M6j --albedo: the TEXTURE-WORK lens. Raw composed color (or Mars's raw pyramid) --
@@ -400,6 +465,7 @@ float4 PsMain(VsOut i) : SV_Target {
     const float ndl = saturate(dot(n, gSunDir.xyz)) * (1.0f - 0.75f * overhead);
     float3 col = alb * (0.030f + ndl * SUN_IRR_C * 1.15f);
     col += spec * SUN_IRR_C * 0.85f * (1.0f - overhead);
+    col += skyReflAdd * day * (1.0f - 0.6f * overhead);   // M7c: the reflected ray, skyward
     col += alb * float3(0.010f, 0.014f, 0.028f) * (1.0f - day);   // moonlit-blue night side
 
     // ---- M6j: the CLOSE-UP material model, now in the planet shader -- wet sand at the LIVE

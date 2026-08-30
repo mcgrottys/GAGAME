@@ -76,6 +76,7 @@ struct Options {
     bool warmInlet = false;           // --warm-inlet: pre-cache the Merrimack detail pyramid
     bool railZoom = false;            // --rail-zoom DIR: orbit -> inlet imagery zoom -> estuary
     bool railFlood = false;           // --rail-flood DIR: orbit -> zoom -> the throat at helm
+    bool railJetty = false;           // --rail-jetty DIR: jetty tip -> jetty tip -> bird's eye
                                       // height, facing the entrance (shoot at max flood)
     double startUnix = -1;            // < 0 = now
     double timeScale = 1.0;           // sim seconds per wall second. REAL TIME by default --
@@ -191,6 +192,7 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--rail") o.rail = Widen(next("rail_frames").c_str());
         else if (a == "--rail-zoom") { o.rail = Widen(next("rail_frames").c_str()); o.railZoom = true; }
         else if (a == "--rail-flood") { o.rail = Widen(next("rail_frames").c_str()); o.railFlood = true; }
+        else if (a == "--rail-jetty") { o.rail = Widen(next("rail_frames").c_str()); o.railJetty = true; }
         else if (a == "--warm-inlet") o.warmInlet = true;
         else if (a == "--planet") o.planet = next("earth");
         else if (a == "--tile-budget") o.tileBudget = static_cast<uint32_t>(atoi(next("1000").c_str()));
@@ -250,7 +252,8 @@ Options ParseArgs(int argc, char** argv) {
         // the zoom and Mars flyover run 30 s; the flood ride holds the helm for 40 s total.
         o.headless = true;
         o.globeStart = true;
-        o.frames = o.railFlood                             ? 40 * 30
+        o.frames = o.railJetty                             ? 27 * 30
+                   : o.railFlood                           ? 40 * 30
                    : (o.railZoom || o.planet == "mars")    ? 30 * 30
                                                            : 25 * 30;
         o.timeScale = 1.0;
@@ -1604,6 +1607,32 @@ int main(int argc, char** argv) {
             railKeys.push_back({26.0, poseMotor(cOver)});
             railKeys.push_back({32.0, poseMotor(cHelmIn)});
             railKeys.push_back({40.0, poseMotor(cHelmGap)});
+        } else if (globe && opt.railJetty && bathy.Ready()) {
+            // M7c: THE JETTY PASS -- the shot the refracted ray was built for. Tip to tip
+            // across the entrance at helm height (the surveyed jetties: world z +60..+155
+            // north, -225..-76 south, tips near x 640), the bar and the channel reading
+            // through the surface the whole way, then a climb to a bird's eye where the
+            // same formula turns into the chart: the ebb shoal, the throat, the flats,
+            // depth as color. Shoot at a LOW-TIDE hour (--start) so the bars stand proud.
+            Camera cN0;      // approach: north of the north tip, looking down the jetty line
+            cN0.SetFromCompass(950.0, 28.0, 430.0, 212.0f, -16.0f);
+            Camera cNTip;    // over the north tip, the gap ahead
+            cNTip.SetFromCompass(680.0, 14.0, 200.0, 192.0f, -10.0f);
+            Camera cMid;     // mid-gap, swung to look west up the channel
+            cMid.SetFromCompass(650.0, 12.0, -30.0, 262.0f, -8.0f);
+            Camera cSTip;    // over the south tip, looking back northwest across the gap
+            cSTip.SetFromCompass(680.0, 16.0, -290.0, 300.0f, -13.0f);
+            Camera cRise;    // climbing, the whole entrance opening below
+            cRise.SetFromCompass(520.0, 420.0, -140.0, 284.0f, -56.0f);
+            Camera cBird;    // bird's eye over the entrance: depth as color
+            cBird.SetFromCompass(380.0, 1500.0, 10.0, 272.0f, -88.0f);
+            railKeys.push_back({0.0, poseMotor(cN0)});
+            railKeys.push_back({5.0, poseMotor(cNTip)});
+            railKeys.push_back({11.0, poseMotor(cMid)});
+            railKeys.push_back({16.0, poseMotor(cSTip)});
+            railKeys.push_back({20.5, poseMotor(cRise)});
+            railKeys.push_back({24.0, poseMotor(cBird)});
+            railKeys.push_back({27.0, poseMotor(cBird)});
         } else if (globe && opt.railZoom && bathy.Ready()) {
             // The inlet zoom: orbit -> the warmed Google pyramid -> the CUDEM estuary, with NO
             // handoff to hide behind any more: the same scene refines the whole way down.
