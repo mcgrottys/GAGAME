@@ -71,6 +71,8 @@ struct Options {
     uint32_t tileBudget = 1000;       // --tile-budget: hard cap on Google fetches per run
     bool warmInlet = false;           // --warm-inlet: pre-cache the Merrimack detail pyramid
     bool railZoom = false;            // --rail-zoom DIR: orbit -> inlet imagery zoom -> estuary
+    bool railFlood = false;           // --rail-flood DIR: orbit -> zoom -> the throat at helm
+                                      // height, facing the entrance (shoot at max flood)
     double startUnix = -1;            // < 0 = now
     double timeScale = 1.0;           // sim seconds per wall second. REAL TIME by default --
                                       // waves at 900x looked like a kettle at full boil; the
@@ -175,6 +177,7 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--scale") o.timeScale = atof(next("1").c_str());
         else if (a == "--rail") o.rail = Widen(next("rail_frames").c_str());
         else if (a == "--rail-zoom") { o.rail = Widen(next("rail_frames").c_str()); o.railZoom = true; }
+        else if (a == "--rail-flood") { o.rail = Widen(next("rail_frames").c_str()); o.railFlood = true; }
         else if (a == "--warm-inlet") o.warmInlet = true;
         else if (a == "--planet") o.planet = next("earth");
         else if (a == "--tile-budget") o.tileBudget = static_cast<uint32_t>(atoi(next("1000").c_str()));
@@ -227,10 +230,12 @@ Options ParseArgs(int argc, char** argv) {
     if (o.sweCycleH > 0) o.headless = true;   // the validation cycle never opens a window
     if (!o.rail.empty()) {
         // The rails demos: headless, deterministic real-time waves, 30 fps. Classic = 25 s;
-        // the zoom and Mars flyover run 30 s.
+        // the zoom and Mars flyover run 30 s; the flood ride holds the helm for 40 s total.
         o.headless = true;
         o.globeStart = true;
-        o.frames = (o.railZoom || o.planet == "mars") ? 30 * 30 : 25 * 30;
+        o.frames = o.railFlood                             ? 40 * 30
+                   : (o.railZoom || o.planet == "mars")    ? 30 * 30
+                                                           : 25 * 30;
         o.timeScale = 1.0;
     }
     if (o.planet == "mars") o.globeStart = true;   // there is only orbit on Mars (for now)
@@ -1283,6 +1288,24 @@ int main(int argc, char** argv) {
             railKeys.push_back({19.0, orbKey(-13, -68, 150e3, -11, -90)});
             railKeys.push_back({26.0, orbKey(-6, -98, 600e3, 18.6, -133.8)});
             railKeys.push_back({30.0, orbKey(-4, -104, 900e3, 18.6, -133.8)});
+        } else if (globe && opt.railFlood && bathy.Ready()) {
+            // M6s: THE FLOOD RIDE -- orbit to the throat, ending at a boat's-helm pose
+            // mid-channel WEST of the gap, facing the entrance: the surveyed jetties (world
+            // z +60..+155 north, -225..-76 south, tips near x 640) frame the incoming tide.
+            // Shoot with --start at a max-flood hour so the jet pours toward the camera.
+            Camera cOver;    // 1.5 km over the harbor, aimed down-channel at the gap
+            cOver.SetFromCompass(-1400.0, 1500.0, 0.0, 93.0f, -40.0f);
+            Camera cHelmIn;  // helm height in the channel, the entrance dead ahead
+            cHelmIn.SetFromCompass(-250.0, 9.0, -15.0, 92.0f, -2.0f);
+            Camera cHelmGap; // ...then a ~3 kn push to between the jetty roots, gap 500 m out
+            cHelmGap.SetFromCompass(120.0, 7.0, -10.0, 92.5f, -1.5f);
+            railKeys.push_back({0.0, poseMotor(camGlobe)});
+            railKeys.push_back({8.0, orbKey(41.9, -71.6, 800e3, 42.8183, -70.81)});
+            railKeys.push_back({15.0, orbKey(42.55, -70.98, 80e3, 42.8183, -70.81)});
+            railKeys.push_back({21.0, orbKey(42.74, -70.87, 7e3, 42.8183, -70.81)});
+            railKeys.push_back({26.0, poseMotor(cOver)});
+            railKeys.push_back({32.0, poseMotor(cHelmIn)});
+            railKeys.push_back({40.0, poseMotor(cHelmGap)});
         } else if (globe && opt.railZoom && bathy.Ready()) {
             // The inlet zoom: orbit -> the warmed Google pyramid -> the CUDEM estuary, with NO
             // handoff to hide behind any more: the same scene refines the whole way down.
