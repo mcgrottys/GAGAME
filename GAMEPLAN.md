@@ -1102,6 +1102,20 @@ three rounds of visual review could not localize it. Named next for the trace: a
 celestial step (the sun disc renders suspiciously EAST in an 18:15 EDT helm shot — sun
 azimuth wants a hypervisor line and a gatest pin), and a churn/bank texel diff.
 
+**THE ALGEBRA-FIRST DOCTRINE (user, same day — how every session works from now on):**
+sessions on this project are Geometric/Clifford/other-algebra FIRST. The pipeline for any
+new leg: (1) WRITE THE MATH OUT — the derivation in algebra, on paper/markdown/sympy;
+(2) PROVE IT — the identities become assertions (gatest is the proof's permanent home);
+(3) RENDER A SMALL EXAMPLE — a standalone 2D/3D prototype in any cheap medium
+(matplotlib, canvas, a 128-cell grid) that shows the behavior with the SAME numbers the
+proof used, committed under proofs/; (4) ONLY THEN into this renderer — where the same
+visualization returns at higher fidelity, framerate, and solar scale, and the hypervisor
+(--trace) verifies the engine reproduces the prototype's numbers step by step. The AST
+edge for the new field registers at integration time and its `code` anchor names the
+proof. What this buys: the math maps cleanly (each stage is small enough to hold whole),
+axis/scaling bugs die in the 2D prototype where they cost minutes, and a future session
+can re-read the proof instead of reverse-engineering the shader.
+
 Named next: amplification-shader subdivision for sub-meter helm vertex density (also the
 jetty-wall clipping fix), breaker individuation in the surf zone (churn saturation), the
 bank as an Exchange channel (water.surface for plugins), a
