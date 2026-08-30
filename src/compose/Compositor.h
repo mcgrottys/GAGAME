@@ -140,6 +140,11 @@ public:
     // math the paint loop runs, so a field queried on the CPU cannot disagree with its tiles.
     void SampleFieldStack(int channel, double latRad, double lonRad, double groundResM,
                           float out[2]) const;
+    // M6w: the same contract for HEIGHT -- the physics-facing bed query. The SWE lattice, the
+    // weather manager's products, and the renderer's tiles all evaluate THIS stack; there is
+    // one bed, sampled at rungs.
+    float SampleHeightStack(int channel, double latRad, double lonRad,
+                            double groundResM) const;
 
     // The schema table, logged at startup: what feeds each channel, in what structure.
     void LogRegistry() const;

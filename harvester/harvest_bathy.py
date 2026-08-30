@@ -31,9 +31,20 @@ BASE = "https://coast.noaa.gov/htdata/raster2/elevation/NCEI_ninth_Topobathy_201
 # M6d: the WIDE window -- the river to Rocks Village (~km 15), the mouth, and Plum Island
 # Sound, so the SWE solver holds most of the real tidal prism instead of borrowing it through
 # a gain. Two tiles stitch along 42.75.
-WIN = {"lon0": -71.000, "lon1": -70.770, "lat0": 42.700, "lat1": 42.845}
+# M6w: the window is a PARAMETER -- harvest any focus region into its own CUDEM plane, each
+# registered as a source in the earth.height stack (HQ static insets, per the user's rule).
+WINDOWS = {
+    "merrimack": {"lon0": -71.000, "lon1": -70.770, "lat0": 42.700, "lat1": 42.845},
+    "capeann":   {"lon0": -70.950, "lon1": -70.560, "lat0": 42.480, "lat1": 42.700},
+    "boston":    {"lon0": -71.100, "lon1": -70.780, "lat0": 42.250, "lat1": 42.480},
+}
+WIN = WINDOWS["merrimack"]
 STEP = 4   # every 4th sample: ~13.7 m -- 2.2x the old area at the old cell count; the jetties
            # stay 2+ texels wide and the tessellated waves carry the close-up detail anyway
+
+# Raw NCEI tiles are 100-400 MB each: cache them on the user-granted big-data drive when it
+# exists (offline forever), fall back to the repo cache.
+BIGCACHE = r"D:\DataCache\GAGAME\cudem"
 
 
 def list_tiles(cache_dir):
@@ -77,9 +88,21 @@ def write_png_gray(path, pix, w, h):
 
 
 def main():
+    global WIN
+    win_name = "merrimack"
+    for i, a in enumerate(sys.argv):
+        if a == "--window" and i + 1 < len(sys.argv):
+            win_name = sys.argv[i + 1]
+    if win_name not in WINDOWS:
+        raise SystemExit(f"unknown window '{win_name}' (have: {list(WINDOWS)})")
+    WIN = WINDOWS[win_name]
+
     out_dir = os.path.join("data", "bathy")
-    cache_dir = os.path.join("cache", "bathy")
+    cache_dir = cache_dir = (BIGCACHE if os.path.isdir(os.path.dirname(BIGCACHE))
+                             else os.path.join("cache", "bathy"))
+    os.makedirs(cache_dir, exist_ok=True)
     os.makedirs(out_dir, exist_ok=True)
+    log(f"window '{win_name}' {WIN} (tile cache: {cache_dir})")
 
     tiles = list_tiles(cache_dir)
     needed = []
@@ -178,18 +201,18 @@ def main():
     log(f"elevation range [{lo:.1f}, {hi:.1f}] m, {100.0 * below / len(valid):.0f}% below datum, "
         f"{100.0 * len(valid) / (nx * ny):.0f}% coverage")
 
-    with open(os.path.join(out_dir, "merrimack.f32"), "wb") as f:
+    with open(os.path.join(out_dir, f"{win_name}.f32"), "wb") as f:
         enc = array("f", (v if not math.isnan(v) else -9999.0 for v in grid))
         f.write(struct.pack(f"<{len(enc)}f", *enc))
     meta = {
         "generated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "source": "NOAA NCEI CUDEM ninth-arc topobathy (2014_8483 MA_NH_ME)",
-        "file": "merrimack.f32", "nx": nx, "ny": ny,
+        "file": f"{win_name}.f32", "nx": nx, "ny": ny,
         "lon0": WIN["lon0"], "lat1": WIN["lat1"], "dlon": dlon, "dlat": dlat,
         "row0": "north", "nodata": -9999.0,
         "min_m": lo, "max_m": hi,
     }
-    with open(os.path.join(out_dir, "merrimack.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(out_dir, f"{win_name}.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=1)
 
     # Hypsometric preview: dark deep -> light shallow -> mid gray at 0 -> bright land.
@@ -201,8 +224,8 @@ def main():
             pix[i] = max(16, min(120, int(120 + v * 8)))      # -13 m .. 0 -> 16..120
         else:
             pix[i] = max(140, min(255, int(140 + v * 10)))    # land ramp
-    write_png_gray(os.path.join(out_dir, "preview.png"), pix, nx, ny)
-    log(f"wrote data/bathy/merrimack.json + .f32 + preview.png ({nx}x{ny})")
+    write_png_gray(os.path.join(out_dir, f"preview_{win_name}.png"), pix, nx, ny)
+    log(f"wrote data/bathy/{win_name}.json + .f32 + preview ({nx}x{ny})")
 
 
 if __name__ == "__main__":

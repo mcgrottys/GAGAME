@@ -14,6 +14,7 @@
 // ================================================================================================
 #include "compose/Compositor.h"
 #include "compose/Projections.h"
+#include "compose/Sources.h"
 #include "compose/VectorPack.h"
 
 #include <fstream>
@@ -369,6 +370,36 @@ bool RunComposeSelfTest() {
         LambertConformalConic::MassMainland().Forward(lat, lon, x, y);
         Check(std::abs(x - 256429.4) < 0.5 && std::abs(y - 952196.8) < 0.5,
               "MA State Plane LCC forward matches the reference at the anchor");
+    }
+
+    {
+        // M6w: THE EDITS-IDENTITY CONTRACT. A hand-edit source's cache identity is its file
+        // CONTENT -- editing the geojson must change Info().structure (and with it every
+        // touched tile's cache tag), and the polygon must actually paint its crest. The M6r
+        // pre-bake broke this silently: content changed under a fixed identity, and tiles
+        // painted earlier served the un-walled bed forever.
+        const char* p1 = "cache\\composed\\_edits_test1.geojson";
+        const char* p2 = "cache\\composed\\_edits_test2.geojson";
+        auto writeEdits = [](const char* path, double lon) {
+            std::ofstream f(path);
+            f << "{\"type\":\"FeatureCollection\",\"features\":[{\"type\":\"Feature\","
+                 "\"properties\":{\"mask\":\"land\"},\"geometry\":{\"type\":\"Polygon\","
+                 "\"coordinates\":[[["
+              << lon << ",42.0],[" << lon + 0.01 << ",42.0],[" << lon + 0.01
+              << ",42.01],[" << lon << ",42.01],[" << lon << ",42.0]]]}}]}";
+        };
+        writeEdits(p1, -70.5);
+        writeEdits(p2, -70.6);
+        EditsHeightSource e1, e2;
+        Check(e1.Load(p1, 2.5f) && e2.Load(p2, 2.5f), "edit sources load");
+        Check(e1.Info().structure != e2.Info().structure,
+              "edit identity follows CONTENT (different files, different cache tags)");
+        float m = 0.0f;
+        const double d2r = 3.14159265358979 / 180.0;
+        Check(e1.Sample(42.005 * d2r, -70.495 * d2r, 10.0, m) > 0.5f && m == 2.5f,
+              "edit polygon paints its crest inside");
+        Check(e1.Sample(42.005 * d2r, -70.7 * d2r, 10.0, m) == 0.0f,
+              "edit polygon silent outside");
     }
 
     if (g_ok) {

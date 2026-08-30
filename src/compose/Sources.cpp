@@ -286,15 +286,86 @@ float AerialOrthoSource::Sample(double latRad, double lonRad, double groundResM,
 
 // ------------------------------------------------------------------------------ CUDEM
 
-CudemHeightSource::CudemHeightSource(const BathyModel* bathy, double featherFrac)
+CudemHeightSource::CudemHeightSource(const BathyModel* bathy, double featherFrac,
+                                     const char* name)
     : m_bathy(bathy), m_feather(featherFrac) {
     const double lon0 = BathyModel::kOrgLon + bathy->WorldX0() / BathyModel::kMPerLon;
     const double lat0 = BathyModel::kOrgLat + bathy->WorldZ0() / BathyModel::kMPerLat;
-    m_info = {"noaa.cudem.merrimack",
+    m_info = {name,
               "geotiff-window float32 (thalweg-preserving resample)",
               "local tangent metres @ ACT0816 (from EPSG:4326 GeoTIFF)", 1370.0, lon0, lat0,
               lon0 + bathy->WorldSizeX() / BathyModel::kMPerLon,
               lat0 + bathy->WorldSizeZ() / BathyModel::kMPerLat};
+}
+
+// ------------------------------------------------------------------------------ hand edits
+
+bool EditsHeightSource::Load(const std::string& geojsonPath, float crestNavd) {
+    m_crest = crestNavd;
+    std::ifstream f(geojsonPath, std::ios::binary);
+    if (!f) return false;
+    const std::string text((std::istreambuf_iterator<char>(f)),
+                           std::istreambuf_iterator<char>());
+    std::string err;
+    const JsonValue root = JsonParser::Parse(text, &err);
+    if (!err.empty()) return false;
+    const JsonValue* feats = root.Get("features");
+    if (!feats) return false;
+    double L0 = 1e9, A0 = 1e9, L1 = -1e9, A1 = -1e9;
+    for (const JsonValue& ft : feats->arr) {
+        const JsonValue* props = ft.Get("properties");
+        const JsonValue* geom = ft.Get("geometry");
+        if (!props || !geom) continue;
+        const JsonValue* coords = geom->Get("coordinates");
+        if (!coords || coords->arr.empty()) continue;
+        Ring r;
+        r.land = props->Str("mask") != "water";
+        for (const JsonValue& pt : coords->arr[0].arr) {
+            if (pt.arr.size() < 2) continue;
+            const double lon = pt.arr[0].number, lat = pt.arr[1].number;
+            r.pts.push_back({lon, lat});
+            r.lon0 = (std::min)(r.lon0, lon); r.lon1 = (std::max)(r.lon1, lon);
+            r.lat0 = (std::min)(r.lat0, lat); r.lat1 = (std::max)(r.lat1, lat);
+        }
+        if (r.pts.size() < 3) continue;
+        L0 = (std::min)(L0, r.lon0); L1 = (std::max)(L1, r.lon1);
+        A0 = (std::min)(A0, r.lat0); A1 = (std::max)(A1, r.lat1);
+        m_rings.push_back(std::move(r));
+    }
+    if (m_rings.empty()) return false;
+    // THE IDENTITY IS THE CONTENT: hash the file bytes into the structure string, so an
+    // operator edit changes exactly the touched tiles' cache identity (the soak rule then
+    // repaints them at every rung and leaves the rest of the planet immortal).
+    uint64_t h = 14695981039346656037ull;
+    for (const char c : text) h = (h ^ static_cast<uint8_t>(c)) * 1099511628211ull;
+    char structure[96];
+    snprintf(structure, sizeof(structure), "hand-edit polygons (crest %.1f m) v%08x",
+             crestNavd, static_cast<uint32_t>(h & 0xFFFFFFFFu));
+    m_info = {"survey.edits", structure, "EPSG:4326 (edits.geojson -- THE LAW)", 500.0,
+              L0 - 0.001, A0 - 0.001, L1 + 0.001, A1 + 0.001};
+    return true;
+}
+
+float EditsHeightSource::Sample(double latRad, double lonRad, double, float& metres) {
+    const double lon = lonRad * 180.0 / kPi, lat = latRad * 180.0 / kPi;
+    for (const Ring& r : m_rings) {
+        if (lon < r.lon0 || lon > r.lon1 || lat < r.lat0 || lat > r.lat1) continue;
+        bool in = false;
+        const auto& p = r.pts;
+        for (size_t i = 0, j = p.size() - 1; i < p.size(); j = i++) {
+            if ((p[i].second > lat) != (p[j].second > lat) &&
+                lon < (p[j].first - p[i].first) * (lat - p[i].second) /
+                          (p[j].second - p[i].second) +
+                          p[i].first) {
+                in = !in;
+            }
+        }
+        if (in) {
+            metres = r.land ? m_crest : -1.0f;   // riprap crest, or dredged subtidal
+            return 1.0f;
+        }
+    }
+    return 0.0f;
 }
 
 float CudemHeightSource::Sample(double latRad, double lonRad, double, float& metres) {

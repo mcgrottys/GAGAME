@@ -109,17 +109,42 @@ private:
     SourceInfo m_info;
 };
 
-// The CUDEM topobathy window through BathyModel's already-loaded, thalweg-preserving grid.
-// The top of the earth.height stack: bathymetry overwrites everything else, softly.
+// A CUDEM topobathy window through an already-loaded, thalweg-preserving BathyModel grid.
+// M6w: any number of focus windows (merrimack, capeann, boston...) stack as separate
+// sources -- the HQ static insets over the NE-15s / ETOPO base.
 class CudemHeightSource : public HeightSource {
 public:
-    explicit CudemHeightSource(const BathyModel* bathy, double featherFrac = 0.04);
+    explicit CudemHeightSource(const BathyModel* bathy, double featherFrac = 0.04,
+                               const char* name = "noaa.cudem.merrimack");
     const SourceInfo& Info() const override { return m_info; }
     float Sample(double latRad, double lonRad, double groundResM, float& metres) override;
 
 private:
     const BathyModel* m_bathy;
     double m_feather;
+    SourceInfo m_info;
+};
+
+// M6w: HAND EDITS AS A STACK SOURCE. The mask=land polygons (the OSM-seeded jetty
+// footprints) paint their crest INTO the height channel; mask=water polygons dredge. The
+// source's cache identity hashes the geojson CONTENT, so editing the file repaints exactly
+// the touched tiles at every rung -- the soak rule working FOR the operator. This retires
+// the M6r pre-bake into BathyModel (which changed source content without changing cache
+// identity: tiles painted before it silently served the un-walled bed).
+class EditsHeightSource : public HeightSource {
+public:
+    bool Load(const std::string& geojsonPath, float crestNavd = 2.5f);
+    const SourceInfo& Info() const override { return m_info; }
+    float Sample(double latRad, double lonRad, double groundResM, float& metres) override;
+
+private:
+    struct Ring {
+        bool land = true;
+        double lon0 = 1e9, lat0 = 1e9, lon1 = -1e9, lat1 = -1e9;
+        std::vector<std::pair<double, double>> pts;   // lon, lat (degrees)
+    };
+    std::vector<Ring> m_rings;
+    float m_crest = 2.5f;
     SourceInfo m_info;
 };
 

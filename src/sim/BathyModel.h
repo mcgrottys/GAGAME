@@ -18,6 +18,8 @@
 
 namespace ga {
 
+class Compositor;
+
 class BathyModel {
 public:
     static constexpr double kOrgLon = -70.81;
@@ -33,7 +35,15 @@ public:
     // knows the structures but 13.7 m box means smear them into leaky sills, and the solver's
     // flood then crosses the crest line instead of concentrating through the gap. CPU-side
     // masking only, per the vector doctrine. Returns cells raised.
+    // (M6w: superseded on the main path by RealizeFromChannel -- edits are a STACK SOURCE
+    // now, so the walls arrive through the channel; this stays for tools/fallback.)
     int ApplyMaskEdits(const std::string& geojsonPath, float crestNavd);
+
+    // M6w: THE ONE BED. Re-fill this grid (same georef) from the composed height channel --
+    // CUDEM where it covers, NE-15s/ETOPO beyond, hand-edit structures on top. The solver's
+    // bed, the renderer's tiles, and every physics product become the same stack sampled at
+    // rungs; a bathymetry disagreement between them is no longer expressible.
+    bool RealizeFromChannel(const Compositor& comp, int heightChannel);
 
     int Nx() const { return m_nx; }
     int Ny() const { return m_ny; }

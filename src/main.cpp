@@ -947,15 +947,83 @@ int main(int argc, char** argv) {
         // M5c: the MLLW -> NAVD88 join, now resolved from CO-OPS datums unless --datum forces it.
         const float datumOff = opt.datumSet ? opt.datumOff : ResolveDatum(model);
 
+        // ---- M6w: THE ONE BED. The planets' CPU models, the raw CUDEM planes, and the
+        // composed HEIGHT channel all come up BEFORE the solver -- because the solver's bed
+        // is no longer a private file: it is REALIZED from the same painted stack the
+        // renderer's tiles come from (ETOPO <- NE-15s <- the CUDEM windows <- hand edits).
+        const bool marsMode = (opt.planet == "mars");
+        GlobeModel globeModel;
+        GlobeModel marsModel;
+        if (marsMode) marsModel.LoadMars("data/globe/globe.json");
+        const bool globeDataOk = globeModel.Load("data/globe/globe.json");
+        GlobeModel& activeGlobe =
+            (marsMode && marsModel.Ready()) ? marsModel : globeModel;
+
+        // The raw CUDEM planes are SOURCES (immutable after load -- their bytes are part of
+        // the tile-cache identity). capeann/boston are the M6w HQ insets: channel-only, no
+        // solver of their own yet.
+        BathyModel bathyRaw, bathyCapeAnn, bathyBoston;
+        const bool haveBathyRaw = bathyRaw.Load(opt.bathyPath);
+        bathyCapeAnn.Load("data/bathy/capeann.json");
+        bathyBoston.Load("data/bathy/boston.json");
+
+        Compositor compositor;
+        EquirectHeightSource srcEtopo("noaa.etopo2022", "equirect-grid int16 8192x4096",
+                                      489200.0, &globeModel.Elev(), globeModel.Nx(),
+                                      globeModel.Ny());
+        EquirectHeightSource srcMola("nasa.mola.megdr16", "equirect-grid int16 5760x2880",
+                                     369700.0, &marsModel.Elev(), marsModel.Nx(),
+                                     marsModel.Ny());
+        std::unique_ptr<WindowHeightSource> srcNe15;
+        std::unique_ptr<CudemHeightSource> srcCudem, srcCudemCA, srcCudemBos;
+        EditsHeightSource srcEdits;   // M6w: the hand edits ARE a stack layer now -- their
+                                      // cache identity is the geojson content, so an operator
+                                      // edit repaints exactly the touched tiles at every rung
+        int hgtCh = -1;
+        if (marsMode && marsModel.Ready()) {
+            hgtCh = compositor.AddHeightChannel("mars.height", {&srcMola});
+        } else if (globeDataOk) {
+            std::vector<HeightSource*> hstack{&srcEtopo};
+            if (globeModel.NeNx() > 0) {
+                srcNe15 = std::make_unique<WindowHeightSource>(
+                    "noaa.etopo15s.ne", "window-grid int16 1440x1200", 46100.0,
+                    &globeModel.NeElev(), globeModel.NeNx(), globeModel.NeNy(),
+                    globeModel.NeLon0(), globeModel.NeLat1(), globeModel.NeDLon(),
+                    globeModel.NeDLat());
+                hstack.push_back(srcNe15.get());
+            }
+            if (bathyCapeAnn.Ready()) {
+                srcCudemCA = std::make_unique<CudemHeightSource>(&bathyCapeAnn, 0.04,
+                                                                 "noaa.cudem.capeann");
+                hstack.push_back(srcCudemCA.get());
+            }
+            if (bathyBoston.Ready()) {
+                srcCudemBos = std::make_unique<CudemHeightSource>(&bathyBoston, 0.04,
+                                                                  "noaa.cudem.boston");
+                hstack.push_back(srcCudemBos.get());
+            }
+            if (haveBathyRaw) {
+                srcCudem = std::make_unique<CudemHeightSource>(&bathyRaw);
+                hstack.push_back(srcCudem.get());
+            }
+            if (srcEdits.Load("data/gis/edits.geojson", 2.5f)) {
+                hstack.push_back(&srcEdits);
+            }
+            hgtCh = compositor.AddHeightChannel("earth.height", std::move(hstack));
+        }
+
         // M5: the CUDEM terrain. Registered AFTER tide (chart) and BEFORE sea so the opaque
         // land draws first and the water covers only what it actually stands above.
+        // M6w: the SOLVER'S grid realizes from the channel -- one bed for the solver, the
+        // renderer, and every future physics product. Fallback (no channel): raw + walls.
         BathyModel bathy;
         TerrainLayer* terrain = nullptr;
-        if (bathy.Load(opt.bathyPath)) {
-            // M6r: bake the surveyed structure footprints (edits.geojson, mask=land) into the
-            // physics bathymetry as riprap walls BEFORE the terrain uploads it -- the jet must
-            // meet real jetties, not box-averaged sills. Crest +2.5 NAVD ~ the real riprap.
-            bathy.ApplyMaskEdits("data/gis/edits.geojson", 2.5f);
+        if (haveBathyRaw && bathy.Load(opt.bathyPath)) {
+            if (hgtCh >= 0 && !marsMode) {
+                bathy.RealizeFromChannel(compositor, hgtCh);
+            } else {
+                bathy.ApplyMaskEdits("data/gis/edits.geojson", 2.5f);
+            }
             auto terrOwned = std::make_unique<TerrainLayer>();
             terrain = terrOwned.get();
             terrain->Configure(opt.shaderDir, &bathy);
@@ -993,14 +1061,10 @@ int main(int argc, char** argv) {
         // M6: the planet (registered LAST -- it borrows root param 2 for its node list).
         // M6f: which planet is a MODEL choice -- Mars loads MOLA into the same relief fields
         // and the whole pipeline (texture, mips, camera clamps) serves it unchanged.
-        const bool marsMode = (opt.planet == "mars");
-        GlobeModel globeModel;
-        GlobeModel marsModel;
-        if (marsMode) marsModel.LoadMars("data/globe/globe.json");
-        GlobeModel& activeGlobe =
-            (marsMode && marsModel.Ready()) ? marsModel : globeModel;
+        // (M6w: the models + the compositor's height side were HOISTED above the bathy/solver
+        // block -- the solver's bed realizes from the channel.)
         GlobeLayer* globe = nullptr;
-        if (globeModel.Load("data/globe/globe.json")) {
+        if (globeDataOk) {
             auto globeOwned = std::make_unique<GlobeLayer>();
             globe = globeOwned.get();
             globe->Configure(opt.shaderDir, &activeGlobe);
@@ -1027,25 +1091,14 @@ int main(int argc, char** argv) {
         MarsBinProvider marsDiff, marsNorm;
         GoogleTileProvider googleTiles;
 
-        // ---- M6i: THE LAYER COMPOSITOR. Sources register their schemas; channels stack them
-        // in order (bathymetry overwrites imagery overwrites the global base, feathered at
-        // paint time); realizations paint composed quadtrees ONCE on the residency workers and
-        // cache every tile to cache/composed/ (the DirectStorage-ready folder). The renderer
-        // sees channels only: earth color is earth color, earth height is earth height.
-        Compositor compositor;
+        // ---- M6i: THE LAYER COMPOSITOR's color side (the height side moved above the
+        // solver, M6w). Sources register their schemas; channels stack them in order;
+        // realizations paint composed quadtrees ONCE and cache every 64KB tile.
         GoogleColorSource srcGoogle(&googleTiles);
         AerialOrthoSource srcAerial;    // M6l: MassGIS 15 cm orthos (loads if harvested)
         AerialOrthoSource srcOverlay;   // M6o: user GeoTIFF overlays -- ALPHA IS FIBER: a
                                         // mostly-transparent highlights plane bleeds through
                                         // the composed quadtree pixel by pixel
-        EquirectHeightSource srcEtopo("noaa.etopo2022", "equirect-grid int16 8192x4096",
-                                      489200.0, &globeModel.Elev(), globeModel.Nx(),
-                                      globeModel.Ny());
-        EquirectHeightSource srcMola("nasa.mola.megdr16", "equirect-grid int16 5760x2880",
-                                     369700.0, &marsModel.Elev(), marsModel.Nx(),
-                                     marsModel.Ny());
-        std::unique_ptr<WindowHeightSource> srcNe15;
-        std::unique_ptr<CudemHeightSource> srcCudem;
         GisStencil gisStencil;   // survey vectors + mask realizations (GSHHG/WDBII)
         VectorPack vectors;      // M6p: lossless vector layers, LOD by wedge importance
         GisLayer* gisLayer = nullptr;
@@ -1067,7 +1120,7 @@ int main(int argc, char** argv) {
         Exchange exchange;       // M6j: the plugin bus -- named GA buffer channels
         const double winOrgX = 4935.0 * 256.0, winOrgY = 6008.0 * 256.0;   // Merrimack z14 px
         int colorCubeT = -1, winTenant = -1, hgtTenant = -1, hgtWinTenant = -1;
-        int colCh = -1, hgtCh = -1;   // compositor channel ids (also serve --export)
+        int colCh = -1;   // color channel id (hgtCh registered above the solver, M6w)
         if (globe) {
             resMgr.Init(gpu);
             int surf = -1, norm = -1;
@@ -1084,8 +1137,7 @@ int main(int argc, char** argv) {
                     norm = resMgr.AddTextureCube(gpu, L"mars.normal", 16384,
                                                  DXGI_FORMAT_BC5_SNORM, marsNorm.Fn());
                 }
-                if (marsModel.Ready()) {
-                    hgtCh = compositor.AddHeightChannel("mars.height", {&srcMola});
+                if (marsModel.Ready() && hgtCh >= 0) {
                     hgtTenant = resMgr.AddTextureCube(gpu, L"mars.height (composed: MOLA)",
                                                       Compositor::kFaceDim,
                                                       DXGI_FORMAT_R16_FLOAT,
@@ -1093,21 +1145,8 @@ int main(int argc, char** argv) {
                 }
                 globe->SetComposed(-1, -1, hgtTenant, -1, 0.0, 0.0, 1.0);
             } else {
-                // earth.height: ETOPO base, the NE 15s ring over it, CUDEM topobathy on top.
-                std::vector<HeightSource*> hstack{&srcEtopo};
-                if (globeModel.NeNx() > 0) {
-                    srcNe15 = std::make_unique<WindowHeightSource>(
-                        "noaa.etopo15s.ne", "window-grid int16 1440x1200", 46100.0,
-                        &globeModel.NeElev(), globeModel.NeNx(), globeModel.NeNy(),
-                        globeModel.NeLon0(), globeModel.NeLat1(), globeModel.NeDLon(),
-                        globeModel.NeDLat());
-                    hstack.push_back(srcNe15.get());
-                }
-                if (bathy.Ready()) {
-                    srcCudem = std::make_unique<CudemHeightSource>(&bathy);
-                    hstack.push_back(srcCudem.get());
-                }
-                hgtCh = compositor.AddHeightChannel("earth.height", std::move(hstack));
+                // earth.height REGISTERED above the solver (M6w) -- here it becomes GPU
+                // tenants: the global cube and the Merrimack z14 window.
                 hgtTenant = resMgr.AddTextureCube(gpu, L"earth.height (composed)",
                                                   Compositor::kFaceDim, DXGI_FORMAT_R16_FLOAT,
                                                   compositor.CubeHeight(hgtCh));

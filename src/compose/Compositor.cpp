@@ -471,6 +471,19 @@ TileProviderFn Compositor::WindowField(int channel, long long orgPxX, long long 
     };
 }
 
+float Compositor::SampleHeightStack(int channel, double latRad, double lonRad,
+                                    double groundResM) const {
+    const Channel& ch = m_channels[channel];
+    float h = 0.0f;
+    for (size_t i = 0; i < ch.height.size(); ++i) {
+        float m = 0.0f;
+        const float w = ch.height[i]->Sample(latRad, lonRad, groundResM, m);
+        if (w <= 0.0f) continue;
+        h += (m - h) * w;
+    }
+    return h;
+}
+
 void Compositor::SampleFieldStack(int channel, double latRad, double lonRad,
                                   double groundResM, float out[2]) const {
     const Channel& ch = m_channels[channel];

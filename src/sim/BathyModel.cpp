@@ -1,5 +1,6 @@
 #include "sim/BathyModel.h"
 
+#include "compose/Compositor.h"
 #include "core/Common.h"
 #include "core/Json.h"
 
@@ -131,6 +132,37 @@ int BathyModel::ApplyMaskEdits(const std::string& geojsonPath, float crestNavd) 
             cells, crestNavd, geojsonPath.c_str());
     }
     return cells;
+}
+
+bool BathyModel::RealizeFromChannel(const Compositor& comp, int heightChannel) {
+    if (!Ready()) return false;
+    const double d2r = 3.14159265358979 / 180.0;
+    // The rung: sample at this grid's own cell size (the finer channel data arrives as the
+    // stack's box means -- coarsening is measurement, per the resampling doctrine).
+    const double resM = m_dlat * kMPerLat;
+    int filled = 0, moved = 0, big = 0;
+    float worst = 0.0f;
+    for (int y = 0; y < m_ny; ++y) {
+        const double lat = (m_lat1 - (y + 0.5) * m_dlat) * d2r;
+        for (int x = 0; x < m_nx; ++x) {
+            const double lon = (m_lon0 + (x + 0.5) * m_dlon) * d2r;
+            const float v = comp.SampleHeightStack(heightChannel, lat, lon, resM);
+            float& e = m_elev[static_cast<size_t>(y) * m_nx + x];
+            if (e < -9000.0f) {
+                ++filled;                        // nodata -> the stack's base (NE15/ETOPO)
+            } else if (std::abs(e - v) > 1e-4f) {
+                ++moved;                         // feather bands, edits, resample drift
+                if (std::abs(e - v) > 0.5f) ++big;
+                worst = (std::max)(worst, std::abs(e - v));
+            }
+            e = v;
+        }
+    }
+    Log("[bathy] realized from the height channel: %dx%d cells -- %d nodata filled, %d moved "
+        "(%d by >0.5 m, worst %.1f m: feathers + hand-edit structures). One bed for solver, "
+        "renderer, and products.",
+        m_nx, m_ny, filled, moved, big, worst);
+    return true;
 }
 
 float BathyModel::SampleWorld(float x, float z) const {

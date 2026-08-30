@@ -751,3 +751,44 @@ Named next: the GLOBAL WEATHER/OCEAN SIM MANAGER consuming these channels (detai
 on zoom — GoMOFS 700 m FVCOM fields as the Gulf's L1.5, current-ellipse constituent
 channels from the 229 stations, buoy spectra as live transient sources); CUDEM land for
 chart-scale coastlines; more EOT20 constituents (the zip is cached, conversion is free).
+
+## 21. M6w (2026-08-30): THE ONE BED — bathymetry through the painted stack, for everyone
+
+The user's charge before the physics manager: bathymetry must paint through LODs like the
+textures AND serve the renderer and the weather/physics manager alike. The audit found the
+bed had TWO owners drifting apart: the renderer read the composed height channel
+(ETOPO←NE15″←CUDEM, cached tiles), the physics read a private flat CUDEM grid — and the
+M6r jetty walls existed only on the physics side. Worse, a live STALE-CACHE bug: baking
+walls into BathyModel changed the channel's source CONTENT without changing its cache
+identity, so height tiles painted before M6r silently served the un-walled bed forever.
+
+**Hand edits are a stack source now (EditsHeightSource).** mask=land polygons paint their
+riprap crest INTO earth.height; mask=water dredges. The source's cache identity is the
+geojson CONTENT hash — an operator edit repaints exactly the touched tiles at every rung
+(the soak rule finally works FOR the operator), and the old pre-M6r caches become correct
+again rather than stale (the raw CUDEM source reverts to un-walled). Pinned in composetest
+(the edits-identity contract).
+
+**The solver's bed realizes from the channel.** BathyModel::RealizeFromChannel +
+Compositor::SampleHeightStack (the physics-facing twin of SampleFieldStack): the SWE grid
+re-fills from the SAME stack the renderer's tiles paint from — CUDEM where it covers,
+NE-15″/ETOPO beyond, edits on top. A bathymetry disagreement between solver, renderer, and
+any future product is no longer expressible. main.cpp hoists the planets' CPU models + the
+height channel ABOVE the solver; raw planes stay immutable sources (bathyRaw), the solver
+grid is a realization (bathy).
+
+**Physics blessed it:** the 14 h validation cycle IMPROVED — r 0.945→**0.959**, best-lag
+−24→**+4 min**, flood dominance 1.06→**1.16** (ACT 1.48) — the honest NE-15″ shelf beyond
+the CUDEM edges beats the old nodata walls. 395 K cells moved vs the raw grid: the edge
+feathers + the edit structures, quantified in the startup log.
+
+**The focus coast got its HQ insets:** harvest_bathy is windowed (--window merrimack|
+capeann|boston; raw NCEI tiles cached on D:\DataCache); Cape Ann (3159×1782) and Boston
+Harbor (2591×1862) CUDEM planes at 13.7 m now stack in earth.height as
+noaa.cudem.capeann/.boston — Gloucester and Boston bathymetry is channel-truth for the
+manager, six layers total with the edits on top.
+
+Named next: solver windows over the new insets (a Boston Harbor SWE is now a georef away),
+CUDEM land for chart-scale coastlines in --water-map, DirectStorage for the composed
+folder, and THE GLOBAL WEATHER/OCEAN SIM MANAGER — its bathymetry API already exists
+(SampleHeightStack at any rung, RealizeFromChannel for any lattice).
