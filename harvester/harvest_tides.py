@@ -52,6 +52,16 @@ STATIONS = [
     ("8443970", False, "Boston"),
 ]
 
+# M6v: the water atlas widens the survey -- harvest_water.py discovers harmonic stations in
+# the focus region (Gloucester, Rockport, Boston Light, Salem, ...) and lists them here.
+# Same fit machinery, same politeness; river=False keeps them off the ribbon profile.
+_extra = os.path.join("data", "water", "extra_tide_stations.json")
+if os.path.exists(_extra):
+    with open(_extra, encoding="utf-8") as _f:
+        for _st in json.load(_f):
+            if not any(s[0] == _st["id"] for s in STATIONS):
+                STATIONS.append((_st["id"], False, _st["name"]))
+
 MIN_AMP_M = 0.001      # constituents below 1 mm are dropped from the fit
 _last_fetch = [0.0]
 

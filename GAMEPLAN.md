@@ -699,3 +699,55 @@ the handoff band the two renderers emit the same pixel; the quadtree's promise (
 ever pops) now holds for the water's color as well as its energy. The remaining single
 owner-swap (globe mesh sampling the FFT bank, retiring the second geometry entirely)
 stays the M7 unification.
+
+## 20. M6v (2026-08-30): THE WATER ATLAS — heterogeneous water data through the one registry
+
+The user's charge: confirm the texture treatment extends to water — "different LODs and
+sparseness… not the same measurements in the deep ocean as the coasts… some inlets record
+more parameters than others… GIS-encoded data… single point measurements from buoys…
+easily queryable… aligned heights, geopositions, projections and altitudes… low-medium
+quality default global data that the HQ New England enhances… easily reprojectable — print
+maps onto paper without breaking the physics." Focus: Merrimack / Gloucester / Boston.
+Plus a 200 GB big-data grant at D:\DataCache (static datasets = offline HQ insets).
+
+**The fiber is the phasor.** water.tide.{M2,S2,N2,K1,O1} are FieldChannels in the SAME
+compositor: a new two-component fiber (FieldSource / AddFieldChannel / WindowField RG16F
+128² tiles, soak-rule cache identity, one paint loop). A constituent is a Cl(2)+ spinor
+(re, im); h(x,t) = msl(x) + Σc Re[P_c(x)·e^{iωc(t−T0)}] — rotor application, the same
+statement the wave bands made in M6t. Interpolation happens IN THE PLANE (amp/phase
+bilinear collapses amplitude across a phase gradient; re/im cannot).
+
+**The stack is the user's rule embodied** (ETOPO←NE15s←CUDEM, for water):
+  L0 equilibrium tide (analytic, global, LOW — zero download, honest structure)
+  L1 EOT20 (1/8°, global, MEDIUM — SEANOE 2 GB once into D:\DataCache, CC-BY 4.0,
+     netCDF4→flat rg32; validated raw: M2 at buoy 44013 = 1.293 m @ 108° — textbook
+     Gulf of Maine; one Fundy artifact cell clamped)
+  L2 the NE station field (point harmonics, phasor IDW, ~2 km, feathered 20→90 km) — the
+     survey WIDENED from 6 to 20 fitted stations (harvest_water.py discovers the region:
+     Gloucester Harbor 8441841, Rockport, Annisquam, Essex, Beverly, Salem, Lynn, Boston
+     Light, Nut Island, Scituate…, all M1-fit to sub-mm RMS), 229 current stations and 3
+     buoys registered, 265 survey points folded into the vpack as a points layer.
+
+**THE EPOCH LADDER** (the phase version of the M6d datum lesson): station fits carry
+fit-epoch phases; global atlases carry Greenwich lags; mixing them raw smuggles a phase
+cliff into the seam. Every global source is re-referenced per constituent by the
+amplitude-weighted circular consensus of the stations it overlaps — no astronomy
+transcribed; the stations are the epoch authority. Measured: the offshore seam steps
+2.1 mm across the L2→L1 feather (raw mixing would step decimetres).
+
+**Audited in --selftest (watertest):** Mercator round-trip of every station geoposition;
+the datum ladder (MSL-in-NAVD within ±0.6 m at every linked station); the composed stack
+reproduces all 20 station fits to 0.0 mm; seam continuity; the field soak contract
+(a mid-Atlantic tile keeps only global sources); paint-vs-CPU-stack tile identity.
+
+**THE REPROJECTION PROOF:** --water-map prints the same sources through a CUSTOM Lambert
+conformal sheet built for the page (analytic inverse per pixel): M2 co-amplitude field,
+GSHHG ink coastline, NE-15″ relief land, the whole station survey, the OSM jetties, a
+graticule. No physics touched — a projection is just another realization. (Two dead ends
+recorded: vpack coast parity fill is unsound — the polylines are CLIPPED, false closure
+chords flipped the Atlantic to land; relief is the honest land authority at chart scale.)
+
+Named next: the GLOBAL WEATHER/OCEAN SIM MANAGER consuming these channels (detail rising
+on zoom — GoMOFS 700 m FVCOM fields as the Gulf's L1.5, current-ellipse constituent
+channels from the 229 stations, buoy spectra as live transient sources); CUDEM land for
+chart-scale coastlines; more EOT20 constituents (the zip is cached, conversion is free).

@@ -73,6 +73,14 @@ int Compositor::AddHeightChannel(const std::string& name, std::vector<HeightSour
     return static_cast<int>(m_channels.size()) - 1;
 }
 
+int Compositor::AddFieldChannel(const std::string& name, std::vector<FieldSource*> stack) {
+    Channel ch;
+    ch.name = name;
+    ch.field = std::move(stack);
+    m_channels.push_back(std::move(ch));
+    return static_cast<int>(m_channels.size()) - 1;
+}
+
 // The soak rule's membership test (see Compositor.h). Global sources always belong; a window
 // source belongs where its footprint overlaps the tile by at least ~2 texels in SOME axis (a
 // one-texel-wide strip 100 texels long is a meaningful paint; a sub-texel speck is not).
@@ -112,6 +120,18 @@ uint64_t Compositor::HeightSubset(const Channel& ch, const TileBox& box,
     uint64_t h = SubsetSeed(ch.name);
     for (size_t i = 0; i < ch.height.size(); ++i) {
         const SourceInfo& si = ch.height[i]->Info();
+        if (!SourceTouches(si, box)) continue;
+        included.push_back(i);
+        h = Fnv1a(h, si.name + "|" + si.structure);
+    }
+    return h;
+}
+
+uint64_t Compositor::FieldSubset(const Channel& ch, const TileBox& box,
+                                 std::vector<size_t>& included) const {
+    uint64_t h = SubsetSeed(ch.name);
+    for (size_t i = 0; i < ch.field.size(); ++i) {
+        const SourceInfo& si = ch.field[i]->Info();
         if (!SourceTouches(si, box)) continue;
         included.push_back(i);
         h = Fnv1a(h, si.name + "|" + si.structure);
@@ -399,6 +419,69 @@ TileProviderFn Compositor::WindowHeight(int channel, long long orgPxX, long long
         ++painted;
         return true;
     };
+}
+
+TileProviderFn Compositor::WindowField(int channel, long long orgPxX, long long orgPxY,
+                                       uint32_t sizePx, int zBase) {
+    EnsureCacheDir(m_channels[channel], "windowF");
+    (void)sizePx;
+    return [this, channel, orgPxX, orgPxY, zBase](const TileRequest& r,
+                                                  std::vector<uint8_t>& out) {
+        const Channel& ch = m_channels[channel];
+        // RG16F 128x128 tiles: the phasor fiber (re, im) in the Mercator window frame.
+        const double worldPx = static_cast<double>((1ll << zBase) * 256ll >> r.mip);
+        const double groundRes = kMercCirc / worldPx;
+        const long long gx0 = (orgPxX >> r.mip) + static_cast<long long>(r.x) * 128;
+        const long long gy0 = (orgPxY >> r.mip) + static_cast<long long>(r.y) * 128;
+        TileBox box{};
+        box.latMin = std::atan(std::sinh(kPi * (1.0 - 2.0 * (gy0 + 128.0) / worldPx)));
+        box.latMax = std::atan(std::sinh(kPi * (1.0 - 2.0 * gy0 / worldPx)));
+        box.lonMin = (gx0 / worldPx - 0.5) * 2.0 * kPi;
+        box.lonMax = ((gx0 + 128.0) / worldPx - 0.5) * 2.0 * kPi;
+        box.texLat = (box.latMax - box.latMin) / 128.0;
+        box.texLon = (box.lonMax - box.lonMin) / 128.0;
+        std::vector<size_t> inc;
+        const uint64_t subset = FieldSubset(ch, box, inc);
+        const std::string path = CachePath(ch, "windowF", r, subset);
+        if (ReadCached(path, out)) return true;
+
+        out.assign(65536, 0);
+        uint16_t* dst16 = reinterpret_cast<uint16_t*>(out.data());
+        for (uint32_t py = 0; py < 128; ++py) {
+            const double Y = (gy0 + py + 0.5) / worldPx;
+            const double lat = std::atan(std::sinh(kPi * (1.0 - 2.0 * Y)));
+            for (uint32_t px = 0; px < 128; ++px) {
+                const double X = (gx0 + px + 0.5) / worldPx;
+                const double lon = (X - 0.5) * 2.0 * kPi;
+                float v[2] = {0.0f, 0.0f};
+                for (size_t k = 0; k < inc.size(); ++k) {
+                    float s[2] = {0.0f, 0.0f};
+                    const float w = ch.field[inc[k]]->Sample(lat, lon, groundRes, s);
+                    if (w <= 0.0f) continue;
+                    v[0] += (s[0] - v[0]) * w;   // per-pixel paint in the PLANE: re and im
+                    v[1] += (s[1] - v[1]) * w;   // blend together -- amplitude survives
+                }
+                dst16[(py * 128 + px) * 2 + 0] = FloatToHalf(v[0]);
+                dst16[(py * 128 + px) * 2 + 1] = FloatToHalf(v[1]);
+            }
+        }
+        WriteCached(path, out);
+        ++painted;
+        return true;
+    };
+}
+
+void Compositor::SampleFieldStack(int channel, double latRad, double lonRad,
+                                  double groundResM, float out[2]) const {
+    const Channel& ch = m_channels[channel];
+    out[0] = out[1] = 0.0f;
+    for (size_t i = 0; i < ch.field.size(); ++i) {
+        float s[2] = {0.0f, 0.0f};
+        const float w = ch.field[i]->Sample(latRad, lonRad, groundResM, s);
+        if (w <= 0.0f) continue;
+        out[0] += (s[0] - out[0]) * w;
+        out[1] += (s[1] - out[1]) * w;
+    }
 }
 
 void Compositor::LogRegistry() const {

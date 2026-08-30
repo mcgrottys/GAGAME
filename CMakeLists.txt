@@ -27,6 +27,7 @@ add_executable(gagame
   src/compose/GisStencil.cpp
   src/compose/VectorPack.cpp
   src/compose/Exchange.cpp
+  src/compose/WaterAtlas.cpp
   src/core/OceanFft.cpp
   src/render/Renderer.cpp
   src/render/Camera.cpp

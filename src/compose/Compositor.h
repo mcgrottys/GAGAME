@@ -87,6 +87,19 @@ public:
     virtual float Sample(double latRad, double lonRad, double groundResM, float& metres) = 0;
 };
 
+// M6v: the two-component fiber -- a WATER-parameter field sample. The value algebra is a
+// Cl(2)+ SPINOR (re, im): a tidal constituent's phasor, a current ellipse component, any
+// quantity whose interpolation must happen in the plane (bilinear on amp/phase collapses
+// amplitude across a phase gradient; bilinear on re/im is the geometrically sound blend).
+// Same contract as every source: declare CRS/coverage/resolution, answer in the WGS84
+// exchange frame, return a paint weight.
+class FieldSource {
+public:
+    virtual ~FieldSource() = default;
+    virtual const SourceInfo& Info() const = 0;
+    virtual float Sample(double latRad, double lonRad, double groundResM, float out[2]) = 0;
+};
+
 // ---- 3. the compositor ---------------------------------------------------------------------
 class Compositor {
 public:
@@ -101,6 +114,7 @@ public:
     // Channels: an ordered stack, bottom -> top. Pointers are borrowed (main owns sources).
     int AddColorChannel(const std::string& name, std::vector<ColorSource*> stack);
     int AddHeightChannel(const std::string& name, std::vector<HeightSource*> stack);
+    int AddFieldChannel(const std::string& name, std::vector<FieldSource*> stack);
 
     // Realizations: each returns a TileProviderFn for one residency tenant. The fn paints
     // (or reads back from the composed cache) one 64KB tile on a worker thread.
@@ -117,6 +131,15 @@ public:
     //    one frame, two channels, so near-field land/sea gates and normals ride CUDEM truth.
     TileProviderFn WindowHeight(int channel, long long orgPxX, long long orgPxY,
                                 uint32_t sizePx, int zBase);
+    //  * WindowField (M6v): RG16F 128x128 tiles of a Mercator window -- the water-parameter
+    //    realizations (per-constituent tide phasors today; current ellipses next). Same
+    //    soak-rule cache identity, same frame math, a different fiber.
+    TileProviderFn WindowField(int channel, long long orgPxX, long long orgPxY,
+                               uint32_t sizePx, int zBase);
+    // The CPU stack sample -- physics, audits, and print realizations walk the SAME per-texel
+    // math the paint loop runs, so a field queried on the CPU cannot disagree with its tiles.
+    void SampleFieldStack(int channel, double latRad, double lonRad, double groundResM,
+                          float out[2]) const;
 
     // The schema table, logged at startup: what feeds each channel, in what structure.
     void LogRegistry() const;
@@ -125,6 +148,7 @@ public:
         std::string name;
         std::vector<ColorSource*> color;
         std::vector<HeightSource*> height;
+        std::vector<FieldSource*> field;
     };
     // Public for the selftest: the soak rule is a CONTRACT, and contracts get pinned.
     const Channel& ChannelAt(int id) const { return m_channels[id]; }
@@ -132,6 +156,8 @@ public:
                          std::vector<size_t>& included) const;
     uint64_t HeightSubset(const Channel& ch, const TileBox& box,
                           std::vector<size_t>& included) const;
+    uint64_t FieldSubset(const Channel& ch, const TileBox& box,
+                         std::vector<size_t>& included) const;
 
     std::atomic<uint32_t> painted{0};     // tiles composed this run
     std::atomic<uint32_t> cacheHits{0};   // tiles served from the composed cache
