@@ -1032,6 +1032,29 @@ flat grey panels and 150 m terraced wedges at t=0, different every run). Rails n
 their opening pose for 150 unrecorded settle frames — residency, the solver mirror, and
 the composed caches are warm before the camera rolls. Five gates green.
 
+**M7i (2026-08-30): EXPOSURE, AND THE ORIENTATION LEDGER — "is the water inverted on the
+north/south axis?"** It was not — the full chain was audited edge by edge and every
+crossing agrees — but the report was RIGHT that the whitecaps disobeyed the terrain: the
+FFT sea is fetch-blind, so the sheltered harbor basin whitecapped as hard as the open
+bar, and sheltered-water foam reads exactly like a mirrored ocean. Three fixes: bank
+corner hsScale now attenuates west of the throat on the same x-ramp the jet and churn
+already use (0.18 floor for local chop, full sea seaward of the tips, solver-window
+gated); the kernel's cascade foam rides saturate(hsScale) (it folded the WAVES down in
+sheltered water but deposited foam at full strength); the PS detail speckle rides the
+detail plane's hsScale the same way. Foam now hugs exposure geography. THE ORIENTATION
+LEDGER (the audit, recorded so the next edge is checked against a table, not re-derived):
+world +x = east, +z = north (z = (lat − orgLat)·mPerLat); bank atlas texel row +v = +z,
+write and read agree by construction; churn atlas texel row +v = +z flat mapping
+(SeaChurn TileTexel ↔ Sea.hlsl cuv ↔ bank LoadBilinearClamp all direct); CUDEM/bathy
+textures row 0 = NORTH — every sampler MUST flip (Sea.hlsl:71 float2(uv.x, 1−uv.y),
+SeaChurn:75 suv, bank kernel SWE reads (1−uv.y)); SWE eta/uv atlases row 0 = north, flip
+required and present in all three readers; FFT cascades wrap-sample world/patchL
+unflipped everywhere (kernel, Sea.hlsl PS, Globe.hlsl detail loop). The user's deeper
+ask — an AST for the math so axes cannot be silently crossed — is named for the GPU GA
+engine leg: when the tide rotors move on-GPU, field access goes through TYPED frame
+handles (world / atlas-v-up / raster-v-down) whose conversions are explicit nodes in the
+state diagram, and the ledger above becomes code instead of prose. Five gates green.
+
 Named next: amplification-shader subdivision for sub-meter helm vertex density (also the
 jetty-wall clipping fix), breaker individuation in the surf zone (churn saturation), the
 bank as an Exchange channel (water.surface for plugins), a

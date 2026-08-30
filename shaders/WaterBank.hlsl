@@ -122,7 +122,9 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         const float2 cuv = frac(xz / gPatch[c]);
         const float4 s = LoadBilinearWrap(gSlotsA[c], cuv, 256.0f);
         d += s.xyz * (w * t.hsScale);
-        foam += s.w * w * (c == 2 ? 1.0f : 0.4f);
+        // M7i: foam rides the LOCAL sea state -- a sheltered tile folds its waves down,
+        // and its whitecaps must fold with them.
+        foam += s.w * w * saturate(t.hsScale) * (c == 2 ? 1.0f : 0.4f);
         // shed variance rides the local sea state too (amp^2)
         sig2 += (1.0f - w) * t.hsScale * t.hsScale *
                 (c == 0 ? 0.0004f : (c == 1 ? 0.0018f : 0.0060f));

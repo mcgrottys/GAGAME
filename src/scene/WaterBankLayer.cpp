@@ -256,7 +256,24 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
                         }
                     }
                 }
-                t.hsScale = hsScale;
+                // M7i: EXPOSURE. The FFT sea is fetch-blind -- without this, the harbor
+                // basin whitecaps as hard as the open bar, and sheltered-water foam reads
+                // as a mirrored ocean (the user's "is the water inverted?" report: it was
+                // not inverted, it was un-sheltered). Inside the solver window, ocean
+                // swell attenuates west of the throat on the same x-ramp the jet and the
+                // churn already use; locally generated chop keeps an 0.18 floor.
+                if (m_sweBathy && m_sweBathy->Ready()) {
+                    const double cx = t.orgXZ[0] + tileSpan * 0.5;
+                    const double cz = t.orgXZ[1] + tileSpan * 0.5;
+                    if (cx > m_sweBathy->WorldX0() &&
+                        cx < m_sweBathy->WorldX0() + m_sweBathy->WorldSizeX() &&
+                        cz > m_sweBathy->WorldZ0() &&
+                        cz < m_sweBathy->WorldZ0() + m_sweBathy->WorldSizeZ()) {
+                        const double s = std::clamp((cx - 250.0) / 800.0, 0.0, 1.0);
+                        t.hsScale = hsScale * static_cast<float>(
+                            0.18 + 0.82 * s * s * (3.0 - 2.0 * s));
+                    }
+                }
                 tiles.push_back(t);
             }
         }

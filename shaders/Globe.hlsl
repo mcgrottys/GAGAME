@@ -369,7 +369,8 @@ float4 PsMain(VsOut i) : SV_Target {
                     if (wDet <= 0.002f) continue;
                     sx += dv.x * wDet * bDet.x * gBankB.w;
                     sz += dv.y * wDet * bDet.x * gBankB.w;
-                    foamW = max(foamW, saturate(dv.w * wDet) * (c == 2 ? 0.30f : 0.15f));
+                    foamW = max(foamW, saturate(dv.w * wDet) * saturate(bDet.x) *
+                                           (c == 2 ? 0.30f : 0.15f));
                     s2 = max(s2 - wDet * bDet.x * bDet.x *
                                       (c == 0 ? 0.0004f : (c == 1 ? 0.0018f : 0.0060f)),
                              0.0015f);
