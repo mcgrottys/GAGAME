@@ -25,6 +25,7 @@
 #include "scene/SeaLayer.h"
 #include "scene/SkyLayer.h"
 #include "scene/TerrainLayer.h"
+#include "scene/WaterBankLayer.h"
 #include "scene/TideLayer.h"
 #include "compose/Compositor.h"
 #include "compose/Exchange.h"
@@ -112,6 +113,8 @@ struct Options {
                                       // channel bathymetry (M6w: the chart IS the stack)
     std::string oceanProbe;           // --ocean-probe lat,lon: the weather manager's
                                       // verification harness (rungs + provenance + gates)
+    bool oneWater = false;            // --one-water: M7 -- water geometry from the wave
+                                      // vertex bank alone (SeaLayer's grid retires)
     double riverQ = -1;               // --river q overrides data/river/river.json
     std::wstring sweUvDump;           // --swe-uv f.png: dump the solved current field after
                                       // spin-up (debug picture: red east, blue west)
@@ -230,6 +233,7 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--water-map") o.waterMap = Widen(next("water_map.png").c_str());
         else if (a == "--bathy-map") o.bathyMap = Widen(next("bathy_map.png").c_str());
         else if (a == "--ocean-probe") o.oceanProbe = next("42.35,-70.65");
+        else if (a == "--one-water") o.oneWater = true;
         else if (a == "--river") o.riverQ = atof(next("70").c_str());
         else if (a == "--storm") {
             // hs,tp,fromdeg -- sandbox sea state override
@@ -1039,6 +1043,27 @@ int main(int argc, char** argv) {
             hgtCh = compositor.AddHeightChannel("earth.height", std::move(hstack));
         }
 
+        // M6v: THE WATER ATLAS -- water parameters through the same registry. Five phasor
+        // channels (water.tide.M2..O1): equilibrium base <- EOT20 global medium <- the NE
+        // station field (20 CO-OPS fits, Merrimack to Scituate), epoch-laddered, cached as
+        // RG16F window tiles on demand. The sim manager consumes these next.
+        WaterAtlas waterAtlas;
+        waterAtlas.Init(compositor, model, "data/water");
+        if (!opt.waterMap.empty() || !opt.bathyMap.empty()) {
+            VectorPack mapVec;
+            mapVec.Load("data/vectors/vectors.vpack");
+            if (!opt.waterMap.empty()) {
+                RenderWaterMap(compositor, waterAtlas, mapVec, globeModel, opt.waterMap);
+            }
+            if (!opt.bathyMap.empty()) {
+                RenderWaterMap(compositor, waterAtlas, mapVec, globeModel, opt.bathyMap,
+                               hgtCh);
+            }
+            gpu.WaitIdle();
+            gpu.Shutdown();
+            return 0;
+        }
+
         // M5: the CUDEM terrain. Registered AFTER tide (chart) and BEFORE sea so the opaque
         // land draws first and the water covers only what it actually stands above.
         // M6w: the SOLVER'S grid realizes from the channel -- one bed for the solver, the
@@ -1083,6 +1108,25 @@ int main(int argc, char** argv) {
             gulf->Configure(opt.shaderDir, &currents);
             gulf->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             renderer.AddLayer(std::move(gulfOwned));
+        }
+
+        // M7: THE WAVE VERTEX BANK -- the water's geometry as ONE tiled resource, filled
+        // per frame from everything the weather manager federates, sampled by the globe in
+        // one-water mode. Registered BEFORE the planet so the rings are recomposed (and the
+        // cascades already advanced by SeaLayer) when the globe's meshlets sample them.
+        WaterBankLayer* waterBank = nullptr;
+        if (sea && bathy.Ready() && !marsMode) {
+            auto wbOwned = std::make_unique<WaterBankLayer>();
+            waterBank = wbOwned.get();
+            waterBank->Configure(opt.shaderDir, sea, &swe, &bathy, &waterAtlas, &compositor,
+                                 hgtCh, &globeModel, &seaState);
+            waterBank->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
+            renderer.AddLayer(std::move(wbOwned));
+            sea->drawEnabled = !opt.oneWater;
+            if (opt.oneWater) {
+                Log("[waterbank] ONE-WATER: the SeaLayer grid retires; the globe's meshlets "
+                    "displace from the bank");
+            }
         }
 
         // M6: the planet (registered LAST -- it borrows root param 2 for its node list).
@@ -1130,26 +1174,6 @@ int main(int argc, char** argv) {
         VectorPack vectors;      // M6p: lossless vector layers, LOD by wedge importance
         GisLayer* gisLayer = nullptr;
 
-        // M6v: THE WATER ATLAS -- water parameters through the same registry. Five phasor
-        // channels (water.tide.M2..O1): equilibrium base <- EOT20 global medium <- the NE
-        // station field (20 CO-OPS fits, Merrimack to Scituate), epoch-laddered, cached as
-        // RG16F window tiles on demand. The sim manager consumes these next.
-        WaterAtlas waterAtlas;
-        waterAtlas.Init(compositor, model, "data/water");
-        if (!opt.waterMap.empty() || !opt.bathyMap.empty()) {
-            VectorPack mapVec;
-            mapVec.Load("data/vectors/vectors.vpack");
-            if (!opt.waterMap.empty()) {
-                RenderWaterMap(compositor, waterAtlas, mapVec, globeModel, opt.waterMap);
-            }
-            if (!opt.bathyMap.empty()) {
-                RenderWaterMap(compositor, waterAtlas, mapVec, globeModel, opt.bathyMap,
-                               hgtCh);
-            }
-            gpu.WaitIdle();
-            gpu.Shutdown();
-            return 0;
-        }
         Exchange exchange;       // M6j: the plugin bus -- named GA buffer channels
         const double winOrgX = 4935.0 * 256.0, winOrgY = 6008.0 * 256.0;   // Merrimack z14 px
         int colorCubeT = -1, winTenant = -1, hgtTenant = -1, hgtWinTenant = -1;
@@ -2156,6 +2180,17 @@ int main(int argc, char** argv) {
                                    BathyModel::kOrgLat + cam.pz / BathyModel::kMPerLat,
                                    BathyModel::kOrgLon + cam.px / BathyModel::kMPerLon,
                                    altV);
+                }
+                // M7: the bank's rings follow the camera; the globe binds THIS frame's
+                // origins (residency committed in SetFrame, content recomposed in Render).
+                if (waterBank && globe) {
+                    waterBank->SetFrame(gpu, simUnix, cam.px, cam.pz);
+                    float orgs[12];
+                    for (int mR = 0; mR < WaterBankLayer::kMips; ++mR) {
+                        waterBank->RingOrigin(mR, orgs[mR * 2], orgs[mR * 2 + 1]);
+                    }
+                    globe->SetWaterBank(waterBank->DispSrv(), waterBank->ParamSrv(),
+                                        waterBank->BaseTexelM(), orgs, opt.oneWater);
                 }
                 // (--albedo: the water stands down too -- textures judged as layered images,
                 // nothing else in the frame; the lit look retunes separately.)

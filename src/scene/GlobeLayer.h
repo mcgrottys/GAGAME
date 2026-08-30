@@ -72,6 +72,15 @@ public:
     // colorCube/window carry the color channel (cube + Mercator z14 window), heightCube and
     // heightWindow the height channel (same window FRAME as color); -1 = absent. Wants for
     // all of them come from the SAME CDLOD walk.
+    // M7: per-frame wave-bank binding (SRVs + ring origins), and the one-water switch.
+    void SetWaterBank(uint32_t dispSrv, uint32_t paramSrv, float baseTexelM,
+                      const float* org12, bool oneWater) {
+        m_bankSrv[0] = dispSrv;
+        m_bankSrv[1] = paramSrv;
+        m_bankBase = baseTexelM;
+        for (int i = 0; i < 12; ++i) m_bankOrg[i] = org12[i];
+        m_oneWater = oneWater;
+    }
     void SetComposed(int colorCube, int window, int heightCube, int heightWindow,
                      double orgPxX, double orgPxY, double sizePx) {
         m_colorT = colorCube;
@@ -143,6 +152,13 @@ private:
         float streamF[4];     // surface on, normal on, planet-is-Mars, unused
         ComposedSurfaceCb cs; // M6i: the composed channels + the one-world frame (8 rows)
         float estGeo[4];      // CUDEM window deg: lon0, lat1, 1/lonSpan, 1/latSpan (0 = none)
+        // M7: the wave vertex bank (one-water mode): water geometry + params from ONE tiled
+        // resource, sampled by ring (camera-anchored mip ladder).
+        uint32_t bankU[4];    // disp SRV, param SRV, one-water on, ring texels
+        float bankA[4];       // base texel m, mip count, unused, unused
+        float bankOrg01[4];   // ring origins (world m): r0.xy, r1.xy
+        float bankOrg23[4];
+        float bankOrg45[4];
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -215,6 +231,10 @@ private:
     double m_frameE[3] = {1, 0, 0}, m_frameU[3] = {0, 1, 0}, m_frameN[3] = {0, 0, 1};
     double m_camPlanet[3] = {0, 0, 2.0e7};   // for the horizon cull (doubles, per SetView)
     double m_estGeo[4] = {0, 0, 0, 0};
+    uint32_t m_bankSrv[2] = {0xFFFFFFFFu, 0xFFFFFFFFu};
+    float m_bankBase = 4.8f;
+    float m_bankOrg[12] = {};
+    bool m_oneWater = false;
 
     std::vector<NodeData> m_nodes;
     // M6j: the mesh-shader path.

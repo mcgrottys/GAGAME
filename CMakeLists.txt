@@ -47,6 +47,7 @@ add_executable(gagame
   src/sim/WeatherManager.cpp
   src/sim/GlobeModel.cpp
   src/scene/GlobeLayer.cpp
+  src/scene/WaterBankLayer.cpp
 )
 
 target_include_directories(gagame PRIVATE src)

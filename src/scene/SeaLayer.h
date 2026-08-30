@@ -85,6 +85,12 @@ public:
     // ACT / peak solved) restores the magnitude while the solver keeps the spatial shape.
     float sweCurrentGain = 3.2f;
     float heightScale = 1.15f;   // vertical exaggeration; vqview shipped 1.15 as its look
+    // M7: the wave bank consumes the cascade textures; --one-water retires this layer's own
+    // grid DRAW while the compute chain (FFT, SWE, churn) keeps running -- the TerrainLayer
+    // renderEnabled pattern, applied to the sea.
+    bool drawEnabled = true;
+    uint32_t FftDispSrv(int c) const { return m_fft.DispSrv(c); }
+    float FftPatchL(int c) const { return m_fft.PatchL(c); }
     bool atlasVisualize = false;   // V key: draw the tile grid + residency over the water
 
 private:

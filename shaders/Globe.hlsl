@@ -45,7 +45,52 @@ cbuffer GlobeCb : register(b1) {
     float4 gEstGeo;     // estuary CUDEM window (deg): lon0, lat1, 1/lonSpan, 1/latSpan
                         // (w also gates: 0 = absent). The globe FOUNDATION-SINKS a few metres
                         // inside it so the sharp CUDEM surface owns the depth buffer there.
+    // M7: THE WAVE VERTEX BANK -- water geometry + params from ONE tiled resource: a camera-
+    // anchored mip ladder of rings (m of 6, ring m at atlas x offset m*512). one-water mode
+    // displaces water VERTEXES from it and shades from its params; a NULL tile reads zero =
+    // the calm plane, which is the correct absence.
+    uint4  gBankU;      // disp SRV, param SRV, one-water on, ring texels
+    float4 gBankA;      // base texel m, mip count, unused, unused
+    float4 gBankOrg01;  // ring origins (world m): r0.xy, r1.zw
+    float4 gBankOrg23;
+    float4 gBankOrg45;
 };
+
+// Sample the bank at a world-frame XZ: finest ring containing the point wins. Returns false
+// beyond every ring (the far field: sub-pixel waves, level ~ the plane).
+bool BankSample(float2 worldXZ, out float4 disp, out float4 param, out float texelOut) {
+    disp = 0.0f;
+    param = 0.0f;
+    texelOut = 0.0f;
+    if (gBankU.z == 0u) return false;
+    [unroll] for (uint m = 0; m < 6; ++m) {
+        const float texel = gBankA.x * (float)(1u << m);
+        const float2 org = (m == 0) ? gBankOrg01.xy
+                          : (m == 1) ? gBankOrg01.zw
+                          : (m == 2) ? gBankOrg23.xy
+                          : (m == 3) ? gBankOrg23.zw
+                          : (m == 4) ? gBankOrg45.xy
+                                     : gBankOrg45.zw;
+        const float2 local = (worldXZ - org) / texel;
+        if (any(local < 1.0f) || any(local > 511.0f)) continue;
+        // Manual bilinear via Load: the static-sampler SampleLevel path reads ZERO from the
+        // MESH stage on this driver (stage-bisected); Load is stage-proof and the vertex
+        // density matches the texel density anyway.
+        const float2 tf = local - 0.5f;
+        const int2 t0 = int2(floor(tf));
+        const float2 fr = tf - float2(t0);
+        const int xoff = (int)m * 512;
+        [unroll] for (int k = 0; k < 4; ++k) {
+            const int2 tc = t0 + int2(k & 1, k >> 1);
+            const float wgt = ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y);
+            disp += wgt * gTex[gBankU.x][int2(xoff + tc.x, tc.y)];
+            param += wgt * gTex[gBankU.y][int2(xoff + tc.x, tc.y)];
+        }
+        texelOut = texel;
+        return true;
+    }
+    return false;
+}
 
 #include "Compose.hlsli"
 
@@ -256,16 +301,37 @@ float4 PsMain(VsOut i) : SV_Target {
         albSea = lerp(albSea, float3(0.55f, 0.62f, 0.68f), saturate((hs - 2.5f) / 9.0f) * 0.55f);
 
         // Cox-Munk: slope variance from wind speed; the glint lobe IS the far-field BRDF.
-        const float s2 = 0.003f + 0.00512f * wind;
+        // M7: inside the wave bank's rings the sigma^2 comes from the BANK (the M6t fold's
+        // shed variance, locally sea-state true), and its foam whitens the water -- the
+        // shading now reads the same tiled resource the geometry displaces from.
+        float s2 = 0.003f + 0.00512f * wind;
+        float3 nWater = upT;
+        {
+            float4 bD, bP, bDx, bDz, tmp;
+            float bT, t2u;
+            const float2 wxz = (CsToTangent(up) * gGlo.x).xz;
+            if (BankSample(wxz, bD, bP, bT)) {
+                s2 = max(bP.y, 0.0015f);
+                albSea = lerp(albSea, float3(0.92f, 0.95f, 0.97f), saturate(bD.w) * 0.65f);
+                // Per-pixel wave normals, finite-differenced from the bank at its own ring
+                // texel: geometry alone is nearly invisible from above -- the normal is what
+                // makes the sea READ (the M6t glint then rides real wave faces).
+                BankSample(wxz + float2(bT, 0.0f), bDx, tmp, t2u);
+                BankSample(wxz + float2(0.0f, bT), bDz, tmp, t2u);
+                const float sx = (bDx.y - bD.y) / bT;
+                const float sz = (bDz.y - bD.y) / bT;
+                nWater = normalize(upT - east * sx - north * sz);
+            }
+        }
         const float3 hv = normalize(v + gSunDir.xyz);
-        const float ch = saturate(dot(hv, upT));
+        const float ch = saturate(dot(hv, nWater));
         const float t2 = max(1.0f - ch * ch, 0.0f) / max(ch * ch, 1e-4f);
         spec = exp(-t2 / s2) / (4.0f * kPi * s2 * max(ch * ch * ch * ch, 1e-4f));
         const float fres = 0.02f + 0.98f * pow(1.0f - saturate(dot(v, hv)), 5.0f);
-        spec *= fres * saturate(dot(gSunDir.xyz, upT));
+        spec *= fres * saturate(dot(gSunDir.xyz, nWater));
 
         // The analog mix: glint dies as the flat emerges, the land normal takes over.
-        n = normalize(lerp(upT, nLand, landness));
+        n = normalize(lerp(nWater, nLand, landness));
         alb = lerp(albSea, albLand, landness);
         spec *= 1.0f - landness;
     }

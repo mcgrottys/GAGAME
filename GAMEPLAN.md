@@ -832,3 +832,58 @@ Named next: the wave-vertex bank itself (M7); GoMOFS 3D fields + ESTOFS water le
 the Gulf's mid rungs; a Boston current-station prediction harvest for a proper currents
 gate; async window spin-up (the activation hitch is ~5 s, logged); windows as Exchange
 channels (water.eta.<window> for plugins).
+
+## 23. M7 (2026-08-30): THE WAVE VERTEX BANK — one tiled water, and the state-diagram architecture
+
+**The user's render contract, delivered:** water geometry as ONE 2D tiled resource. Two
+RGBA16F TileAtlas2D banks — disp = (dx, dy, dz, foam), param = (levelNavd, sigma^2, u, v) —
+laid out as SIX camera-anchored mip rings (4.8 m texels at the camera to 154 m at 79 km,
+each ring 4x4 logical tiles of 128^2). Every wet tile recomposes EVERY FRAME by one
+list-driven kernel (WaterBank.hlsl) from everything the weather manager federates: the FFT
+cascades folded by each ring's own texel footprint (the M6t grade shedding — a coarse ring
+carries as sigma^2 what a fine ring carries as vertexes, so ring handovers conserve energy
+by construction), the SWE banks where resident (eta + solved currents), and per-tile corner
+params the CPU samples from the atlas stacks (tide level by constituent rotors, local Hs
+from the global wave grid so mid-ocean seas track their OWN storm, the one bed). LAND TILES
+ARE NULL — unmapped in the tiled resource, never dispatched (74/96 resident at the inlet).
+Re-anchoring is free because content is stateless-recomputed. ~0.5 ms/frame.
+
+**--one-water:** the SeaLayer grid RETIRES (drawEnabled=false — the TerrainLayer pattern;
+its FFT/SWE/churn compute keeps running as the bank's source) and the globe's meshlets
+displace water vertexes from the bank (level + folded waves), with per-pixel normals
+finite-differenced from the same texels — the glint rides real wave faces, the sigma^2 and
+foam come from the bank params. One geometry, one shading, no piecewise water, orbit to
+helm. Verified: storm helm shows rolling swell with the glitter bending along wave
+contours; calm helm subtle honest undulation; aerials seamless; all gates green; 4.8 ms.
+
+**Bring-up traps (both stage-bisected):** static-sampler SampleLevel on bindless arrays
+silently returns ZERO outside the pixel stage on this driver — the mesh stage AND the
+compute kernel both hit it; every bank read is now manual-bilinear Load (stage-proof, and
+the vertex density matches the texel density anyway). And the M6x padded-vs-logical dims
+trap struck again in the kernel's SWE sampling (normalize by PADDED dims against a LOGICAL
+resource = shifted reads) — Loads with logical dims retired it.
+
+**THE STATE-DIAGRAM ARCHITECTURE (the user's formalization, adopted as doctrine):** the
+system is a state-transition diagram whose NODES are GA engines — the texture compositor,
+the water atlas, the weather manager, the FFT, the SWE solvers, this bank's kernel — and
+whose EDGES carry GEOMETRIC PRODUCTS: constituent phasors rotated by e^{iwt}, motor
+sandwiches placing markers, wedge filters decimating surveys, the fold moving energy
+between grades. The ACCEPTING STATE is a realization: the renderer's frame is one, the LCC
+paper charts are others, --export's meshes a third. The wave vertex bank is the edge into
+the render-accepting state; nothing downstream asks who computed what.
+
+**The precision fork (user question, recorded):** our quadtrees realize into RESERVED
+(tiled) Texture2Ds — hardware-filtered but capped at 16384^2 per resource, with global
+float UVs that lose precision as virtual domains deepen (whence windows and re-anchoring).
+The alternative for the cm rungs: a Texture2DArray of tile SLICES + an indirection table —
+tile-local UVs keep full float precision at ANY depth (genuine cm pixels, no smoke and
+mirrors), domains unbounded, cost = one indirection + 1-texel gutters for filtering. The
+hybrid is the plan: tiled resources where hardware filtering over moderate domains wins
+(cubes, z14 windows, this bank); array+indirection for z18+ (the MassGIS 15 cm streaming,
+future cm bathymetry). Named M7b.
+
+Named next: a derivative/normal side-plane in the bank (band-2 sparkle at the helm without
+geometry), churn/foam into the bank params, amplification-shader subdivision for sub-meter
+helm vertex density, the bank as an Exchange channel (water.surface for plugins), and the
+GPU-side GA engine growing out of this kernel (the tide rotors evaluated on-GPU from the
+realized phasor windows).

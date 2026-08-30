@@ -727,7 +727,7 @@ void SeaLayer::Render(const FrameContext& ctx) {
     m_fft.Record(ctx.cl, *ctx.gpu, m_tSec);
     RecordChurn(ctx);
 
-    {
+    if (drawEnabled) {
         PixScope scope(ctx.cl, "sea.surface (tessellated: screen-space edge density)");
         ctx.cl->SetPipelineState(m_seaPso.Get());
         ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_4_CONTROL_POINT_PATCHLIST);
@@ -735,7 +735,7 @@ void SeaLayer::Render(const FrameContext& ctx) {
             1, ctx.gpu->PushConstants(&m_seaCb, sizeof(m_seaCb)));
         ctx.cl->DrawInstanced(4 * kPatches * kPatches, 1, 0, 0);
     }
-    {
+    if (drawEnabled) {
         PixScope scope(ctx.cl, "sea.spectrum (solid=model, dashed=buoy 44013)");
         ctx.cl->SetPipelineState(m_specPso.Get());
         ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINESTRIP);

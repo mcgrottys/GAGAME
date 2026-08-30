@@ -843,6 +843,16 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         m_estGeo[2] > 0.0 ? static_cast<float>(1.0 / m_estGeo[2]) : 0.0f;
     m_cb.estGeo[3] =
         (m_estGeo[3] > 0.0 && !m_streamMars) ? static_cast<float>(1.0 / m_estGeo[3]) : 0.0f;
+    // M7: the wave vertex bank rows (one-water mode).
+    m_cb.bankU[0] = m_bankSrv[0];
+    m_cb.bankU[1] = m_bankSrv[1];
+    m_cb.bankU[2] = (m_oneWater && m_bankSrv[0] != 0xFFFFFFFFu) ? 1u : 0u;
+    m_cb.bankU[3] = 512u;
+    m_cb.bankA[0] = m_bankBase;
+    m_cb.bankA[1] = 6.0f;
+    memcpy(m_cb.bankOrg01, &m_bankOrg[0], 16);
+    memcpy(m_cb.bankOrg23, &m_bankOrg[4], 16);
+    memcpy(m_cb.bankOrg45, &m_bankOrg[8], 16);
     m_cb.texIdx[0] = UINT32_MAX;   // was the equirect relief; the composed height cube owns it
     m_cb.texIdx[1] = m_hs.Valid() ? m_hs.srv : UINT32_MAX;
     m_cb.texIdx[2] = m_wind.Valid() ? m_wind.srv : UINT32_MAX;

@@ -94,11 +94,17 @@ void MsMain(uint gtid : SV_GroupThreadID, uint gid : SV_GroupID,
         // continuous ridge above the tide even where the height channel's smear dips.
         const float editFloor = ComposedEditLand(dir) * max(gWavesB.w + 1.2f, 1.2f);
         const float dispLand = max(max(h, 0.0f) * gGlo.y, editFloor * gGlo.y);
-        // M6t: 8 m below the live waterline (was 2). The plane must clear the DEEPEST trough
-        // the FFT sea can dig, or it pokes through as facet-shaped patches of the wrong water
-        // (diagnosed on storm aerials: Hs 2.5 x 1.15 exaggeration x ~3 shoaling ~ -8 m). The
-        // true fix -- the globe sampling the same displacement bank -- is the M7 unification.
-        const float dispWater = min(gWavesB.w - 8.0f, -8.0f);
+        // M7: ONE WATER. In one-water mode the vertex samples THE WAVE VERTEX BANK -- level
+        // (tide + solver) plus the folded cascade displacement, one tiled resource, ring LOD.
+        // Beyond every ring (or bank off) the M6t sunk plane remains: it exists only so the
+        // SeaLayer grid can cover it, and in one-water mode that grid is retired.
+        float dispWater = min(gWavesB.w - 8.0f, -8.0f);
+        if (gBankU.z != 0u) {
+            float4 bD, bP;
+            const float2 bankXZ = (CsToTangent(dir) * gGlo.x).xz;
+            float bT;
+            dispWater = BankSample(bankXZ, bD, bP, bT) ? (bP.x + bD.y) : 0.0f;
+        }
         const float disp = lerp(dispWater, dispLand, landness);
 
         VsOut o;
