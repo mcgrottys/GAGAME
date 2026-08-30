@@ -81,6 +81,8 @@ private:
         float misc[4];
         uint32_t slotsA[4];
         uint32_t slotsB[4];
+        uint32_t slotsC[4];   // x = churn atlas SRV (M7e foam memory)
+        float churn[4];       // xy origin, z 1/domain, w atlas texels
     };
     struct BankTile {
         float orgXZ[2];

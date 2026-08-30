@@ -291,8 +291,10 @@ float4 PsMain(VsOut i) : SV_Target {
         const float3 albLand = Hypsometric(max(hp, 0.0f), lat);
 
         // SEA side: depth tints the shelves; GFS-Wave whitens the storms.
-        const float shelf = saturate(1.0f + hp / 160.0f);       // 1 at the beach, 0 by -160 m
-        float3 albSea = lerp(float3(0.013f, 0.055f, 0.115f), float3(0.06f, 0.30f, 0.34f),
+        // M7e: the reference photos say the green band is NARROW -- open water reads navy
+        // just past the bar, and the emerald belongs to the shallows alone.
+        const float shelf = saturate(1.0f + hp / 45.0f);        // 1 at the beach, 0 by -45 m
+        float3 albSea = lerp(float3(0.008f, 0.030f, 0.080f), float3(0.055f, 0.28f, 0.31f),
                              shelf * shelf);
         float hs = 0.0f, wind = 6.0f;
         if (gTexIdx.y != 0xFFFFFFFFu) {
@@ -345,15 +347,23 @@ float4 PsMain(VsOut i) : SV_Target {
                 // state (detail plane: hsScale, dry). Sigma^2 hands the same energy back, so
                 // the three tiers stay telescoped; at altitude wPix <= wRing and every term
                 // vanishes -- the far field is untouched.
+                float env = 0.0f;
                 [unroll] for (uint c = 0; c < 3; ++c) {
                     const float lam = 6.2831853f / gBankC[c];
                     const float wRing = 1.0f - smoothstep(lam * 0.12f, lam * 0.5f, bT);
                     const float wPix = 1.0f - smoothstep(lam * 0.12f, lam * 0.5f, footPx);
                     const float wDet = saturate(wPix - wRing) * bDet.y;
-                    if (wDet <= 0.002f) continue;
+                    if (wPix <= 0.01f) continue;
                     const float2 duv = wxz / gBankB[c];
                     const float4 dv =
                         gTex[gBankU2[c + 1u]].SampleLevel(sLinearWrap, duv, 0);
+                    // M7e: THE GROUPS. From altitude the eye never sees the wave -- it sees
+                    // the ENVELOPE: groups, streaks, glitter grain. The fold's flat sigma^2
+                    // erased that spatial variance (the "lame" aerial water). The local
+                    // slope magnitude, weighted by what the PIXEL resolves, restores it --
+                    // and it telescopes: by ~10 km footprints wPix folds it away again.
+                    env += length(dv.xy) * wPix;
+                    if (wDet <= 0.002f) continue;
                     sx += dv.x * wDet * bDet.x * gBankB.w;
                     sz += dv.y * wDet * bDet.x * gBankB.w;
                     foamW = max(foamW, saturate(dv.w * wDet) * (c == 2 ? 0.30f : 0.15f));
@@ -361,6 +371,9 @@ float4 PsMain(VsOut i) : SV_Target {
                                       (c == 0 ? 0.0004f : (c == 1 ? 0.0018f : 0.0060f)),
                              0.0015f);
                 }
+                const float envN = saturate(env * bDet.x * 4.0f);
+                s2 = max(s2 * (0.70f + 0.60f * envN), 0.0015f);
+                albSea = lerp(albSea, float3(0.52f, 0.58f, 0.60f), envN * envN * 0.08f);
                 nWater = normalize(upT - east * sx - north * sz);
             }
         }
@@ -441,6 +454,20 @@ float4 PsMain(VsOut i) : SV_Target {
     if (ComposedColorOn() && gStreamF.z < 0.5f) {
         const float3 img = ComposedColor(up);
         alb = lerp(alb, img, landness);
+        // M7e: a surveyed STRUCTURE wears rock, not the photo under it -- beneath a jetty
+        // footprint the imagery is a smear of foam and water, which rendered the jetties as
+        // grey blobs. Boulder-scale hash grain, cell size folded to the pixel footprint so
+        // the rock never shimmers from altitude.
+        const float elp = ComposedEditLand(up);
+        if (elp > 0.01f && landness > 0.0f) {
+            const float2 rxz = (CsToTangent(up) * gGlo.x).xz;
+            const float cellM = max(0.7f, length(i.rel) * gWavesB.z);
+            const float2 rc = floor(rxz / cellM);
+            const float rn = frac(sin(dot(rc, float2(127.1f, 311.7f))) * 43758.5453f);
+            const float3 rock =
+                lerp(float3(0.15f, 0.14f, 0.13f), float3(0.33f, 0.30f, 0.26f), rn);
+            alb = lerp(alb, rock, saturate(elp * 1.5f) * landness);
+        }
     }
 
     // ---- M6j --albedo: the TEXTURE-WORK lens. Raw composed color (or Mars's raw pyramid) --
@@ -488,6 +515,19 @@ float4 PsMain(VsOut i) : SV_Target {
             if (slope > 0.42f && hp > water - 1.5f) {
                 matAlb = lerp(matAlb, float3(0.36f, 0.35f, 0.34f),
                               saturate((slope - 0.42f) * 3.0f));            // riprap
+            }
+            // M7e: a surveyed structure is DARK rock at every distance -- the near-material
+            // pale riprap was overriding the edit-land boulder paint inside 2.7 km.
+            const float elm = ComposedEditLand(up);
+            if (elm > 0.01f) {
+                const float2 rxz2 = (CsToTangent(up) * gGlo.x).xz;
+                const float cell2 = max(0.7f, distC * gWavesB.z);
+                const float rn2 =
+                    frac(sin(dot(floor(rxz2 / cell2), float2(127.1f, 311.7f))) * 43758.5453f);
+                matAlb = lerp(matAlb,
+                              lerp(float3(0.15f, 0.14f, 0.13f), float3(0.33f, 0.30f, 0.26f),
+                                   rn2),
+                              saturate(elm * 1.5f));
             }
             const float ndlM = saturate(dot(nM, gSunDir.xyz));
             float3 colNear = matAlb * (SUN_IRR_C * ndlM + SkyRadiance(nM.y) * 0.55f);

@@ -28,6 +28,8 @@ cbuffer BankCb : register(b0) {
     float4 gMisc;       // x = tile texels, y = seaLevel fallback, zw unused
     uint4  gSlotsA;     // cascade disp SRV slots x3, swe eta SRV slot
     uint4  gSlotsB;     // swe uv SRV slot, disp/param/detail bank UAV slots
+    uint4  gSlotsC;     // x = churn atlas SRV (foam memory), yzw unused
+    float4 gChurn;      // xy = churn world origin, z = 1/domain, w = atlas texels
 };
 
 struct BankTile {
@@ -126,6 +128,17 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
                 (c == 0 ? 0.0004f : (c == 1 ? 0.0018f : 0.0060f));
     }
     d *= dry * gPatch.w;
+
+    // M7e: THE FOAM MEMORY. The churn atlas remembers where water has been aerated (breaking
+    // deposits advected by the solved current -- the seaward streaks off an ebbing entrance).
+    // The bank carries it in the same foam fiber the breaking clamp writes, so the one water
+    // shows its history at every altitude, not just where waves break this instant.
+    if (gSlotsC.x != 0xFFFFFFFFu) {
+        const float2 cuv = (xz - gChurn.xy) * gChurn.z;
+        if (all(cuv > 0.001f) && all(cuv < 0.999f)) {
+            foam += LoadBilinearClamp(gSlotsC.x, cuv * gChurn.w, gChurn.ww).x * 1.05f;
+        }
+    }
 
     // Depth-limited breaking (the Sea.hlsl clamp, bank-side): the excess becomes foam.
     const float hmax = 0.55f * max(depth, 0.05f);

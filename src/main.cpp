@@ -252,7 +252,7 @@ Options ParseArgs(int argc, char** argv) {
         // the zoom and Mars flyover run 30 s; the flood ride holds the helm for 40 s total.
         o.headless = true;
         o.globeStart = true;
-        o.frames = o.railJetty                             ? 27 * 30
+        o.frames = o.railJetty                             ? 40 * 30
                    : o.railFlood                           ? 40 * 30
                    : (o.railZoom || o.planet == "mars")    ? 30 * 30
                                                            : 25 * 30;
@@ -1621,8 +1621,10 @@ int main(int argc, char** argv) {
             // through the surface the whole way, then a climb to a bird's eye where the
             // same formula turns into the chart: the ebb shoal, the throat, the flats,
             // depth as color. Shoot at a LOW-TIDE hour (--start) so the bars stand proud.
-            Camera cN0;      // approach: north of the north tip, looking down the jetty line
-            cN0.SetFromCompass(950.0, 28.0, 430.0, 212.0f, -16.0f);
+            // M7e: GROUND TO SPACE -- helm water at the gap, tip-to-tip pass, then one
+            // continuous climb to orbit: the same water, the same formula, every altitude.
+            Camera cHelm;    // on the water mid-channel, the entrance dead ahead
+            cHelm.SetFromCompass(250.0, 5.0, 40.0, 94.0f, -1.0f);
             Camera cNTip;    // over the north tip, the gap ahead
             cNTip.SetFromCompass(680.0, 14.0, 200.0, 192.0f, -10.0f);
             Camera cMid;     // mid-gap, swung to look west up the channel
@@ -1633,13 +1635,18 @@ int main(int argc, char** argv) {
             cRise.SetFromCompass(520.0, 420.0, -140.0, 284.0f, -56.0f);
             Camera cBird;    // bird's eye over the entrance: depth as color
             cBird.SetFromCompass(380.0, 1500.0, 10.0, 272.0f, -88.0f);
-            railKeys.push_back({0.0, poseMotor(cN0)});
-            railKeys.push_back({5.0, poseMotor(cNTip)});
-            railKeys.push_back({11.0, poseMotor(cMid)});
-            railKeys.push_back({16.0, poseMotor(cSTip)});
-            railKeys.push_back({20.5, poseMotor(cRise)});
-            railKeys.push_back({24.0, poseMotor(cBird)});
-            railKeys.push_back({27.0, poseMotor(cBird)});
+            railKeys.push_back({0.0, poseMotor(cHelm)});
+            railKeys.push_back({4.0, poseMotor(cHelm)});
+            railKeys.push_back({9.0, poseMotor(cNTip)});
+            railKeys.push_back({14.0, poseMotor(cMid)});
+            railKeys.push_back({18.0, poseMotor(cSTip)});
+            railKeys.push_back({21.5, poseMotor(cRise)});
+            railKeys.push_back({25.0, poseMotor(cBird)});
+            railKeys.push_back({28.0, poseMotor(cBird)});
+            railKeys.push_back({31.0, orbKey(42.79, -70.84, 7e3, 42.8183, -70.81)});
+            railKeys.push_back({34.5, orbKey(42.62, -70.95, 80e3, 42.8183, -70.81)});
+            railKeys.push_back({38.0, orbKey(41.9, -71.6, 800e3, 42.8183, -70.81)});
+            railKeys.push_back({40.0, orbKey(41.9, -71.6, 800e3, 42.8183, -70.81)});
         } else if (globe && opt.railZoom && bathy.Ready()) {
             // The inlet zoom: orbit -> the warmed Google pyramid -> the CUDEM estuary, with NO
             // handoff to hide behind any more: the same scene refines the whole way down.

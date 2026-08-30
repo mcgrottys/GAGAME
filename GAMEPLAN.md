@@ -950,11 +950,37 @@ thesis, recorded: bathymetry + the water simulation + the two rays + future atmo
 should rival the satellite photo, especially in lighting. Registry line: L1 synth.bed,
 wgs84.synthesis (height-stack product). Five gates green.
 
-Named next: churn/foam into the bank params, amplification-shader subdivision for
-sub-meter helm vertex density, the bank as an Exchange channel (water.surface for
-plugins), a light wind-chop tail partition so calm water carries its capillary glitter,
-underwater caustic modulation of the bed term from the cascade derivs, the GPU-side
-GA engine growing out of this kernel (the tide rotors evaluated on-GPU from the realized
-phasor windows), more synthesis nodes (wetland/eelgrass classifier, a render-vs-photo
-residual gate), and the terrain-building tool proper: an agent or UX writing bed_rules /
+**M7e (2026-08-30): THE REFERENCE PASS — the photos said what was missing.** The user
+brought aerial photos of the inlet (calm evening, top-down, and a storm-surf frame) and
+called the aerial water "lame." Four causes, four fixes. (1) THE GROUPS: from altitude the
+eye never sees the wave — it sees the ENVELOPE (groups, wind streaks, glitter grain), and
+the fold's spatially-FLAT sigma^2 was erasing exactly that variance. The PS now
+accumulates |deriv| per band weighted by wPix (what the pixel resolves) and modulates the
+glint width (s2 *= 0.70 + 0.60*envN) plus a faint streak albedo — spatial glitter grain
+that telescopes away by ~10 km footprints like everything else. (2) NAVY, NOT TEAL: the
+references show the green band is NARROW — open water reads deep blue just past the bar.
+The shelf ramp tightened from -160 m to -45 m and the deep endpoint darkened to
+(0.008, 0.030, 0.080). (3) ROCK, NOT THE PHOTO: under a jetty footprint the imagery is a
+smear of foam, which rendered the surveyed jetties as pale blobs. Edit-flagged land now
+wears boulder-scale hash-grain rock (cell folded to the pixel footprint so it never
+shimmers) — in BOTH the far path and the near-material block, which was quietly
+overriding the first fix inside 2.7 km with its pale slope-riprap. (4) THE FOAM MEMORY:
+the storm reference is the churn regime — breaking over the whole ebb shoal with foam
+STREAMING seaward on the jet. The churn atlas (M4/M5, advected by the solved current) now
+feeds the bank kernel's foam channel (gSlotsC + gChurn rows, manual-bilinear Load, 16384 m
+domain at 2 m texels), so the one water carries its history at every altitude — the
+named-next "churn into the bank" landed under reference pressure. --rail-jetty extended
+GROUND TO SPACE: 40 s, helm at the gap -> tip-to-tip -> bird's eye -> 7 km -> 80 km ->
+800 km orbit, one formula the whole way. Known residue: mesh vertex density at the jetty
+walls still lets wave crests clip through the sloped side triangles between land and
+water vertexes — the amplification-shader leg owns that; imagery z-boundary rectangles
+still show through the refracted bed in the channel where google is the only authority.
+
+Named next: amplification-shader subdivision for sub-meter helm vertex density (also the
+jetty-wall clipping fix), the bank as an Exchange channel (water.surface for plugins), a
+light wind-chop tail partition so calm water carries its capillary glitter, underwater
+caustic modulation of the bed term from the cascade derivs, the GPU-side GA engine
+growing out of this kernel (the tide rotors evaluated on-GPU from the realized phasor
+windows), more synthesis nodes (wetland/eelgrass classifier, a render-vs-photo residual
+gate), and the terrain-building tool proper: an agent or UX writing bed_rules /
 bed_zones / edits.geojson through a common "program file" contract.

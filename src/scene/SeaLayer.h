@@ -55,6 +55,8 @@ public:
     // M6i: composed channels + survey masks -- the same fill the globe and terrain use.
     void SetComposed(const ComposedSurfaceCb& cs) { m_seaCb.cs = cs; }
     uint32_t ChurnTiles() const { return m_churnReady ? m_churn.ResidentCount() : 0; }
+    // M7e: the bank reads the foam MEMORY -- advected churn joins the one water's fiber.
+    uint32_t ChurnAtlasSrv() const { return m_churnReady ? m_churn.Srv() : 0xFFFFFFFFu; }
     uint64_t ChurnBytes() const { return m_churnReady ? m_churn.ResidentBytes() : 0; }
 
     const char* Name() const override { return "sea"; }

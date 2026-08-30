@@ -292,6 +292,14 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.slotsB[1] = m_disp.Uav();
     cb.slotsB[2] = m_param.Uav();
     cb.slotsB[3] = m_detail.Uav();
+    // M7e: the foam memory -- the churn atlas joins the bank's inputs (16384 m domain
+    // centred on the anchor, 2 m texels, no padding: 8192 square).
+    cb.slotsC[0] = m_sea ? m_sea->ChurnAtlasSrv() : 0xFFFFFFFFu;
+    cb.slotsC[1] = cb.slotsC[2] = cb.slotsC[3] = 0xFFFFFFFFu;
+    cb.churn[0] = -8192.0f;
+    cb.churn[1] = -8192.0f;
+    cb.churn[2] = 1.0f / 16384.0f;
+    cb.churn[3] = 8192.0f;
 
     auto toUav = [&](TileAtlas2D& bank) {
         if (m_state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) return;
