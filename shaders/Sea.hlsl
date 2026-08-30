@@ -23,7 +23,9 @@ cbuffer SeaCb : register(b1) {
     uint4  gDispSrv;    // xyz = displacement SRVs per cascade
     uint4  gDerivSrv;   // xyz = derivative SRVs per cascade
     float4 gPatchL;     // xyz = cascade patch sizes m, w = target tessellated edge, PIXELS
-    float4 gFadeD;      // xyz = per-cascade fade-out distance m, w unused
+    float4 gFadeD;      // M6u: x = model Hs (far-field whitening); yzw spare (the per-cascade
+                        // fade DISTANCES that lived here are retired -- folds are footprint-
+                        // based in CascadeFade now)
     float4 gJet;        // x signed speed m/s (+flood -ebb), y half-width m, z seaward decay m,
                         // w enabled
     float4 gJetDir;     // xy = flood-toward unit, zw = ebb-toward unit (x east, z north)
@@ -385,6 +387,33 @@ float4 PsMain(VsOut i) : SV_Target {
     const float f = 0.02f + 0.98f * pow(1.0f - saturate(dot(n, v)), 5.0f);
     col = lerp(col, SkyRadianceDirDiscless(refl), f);
 
+    // M6u: THE OTHER HALF OF ONE WATER. M6t unified the ENERGY (glint sigma^2 telescopes to
+    // Cox-Munk); the mode handoff still swapped the water's COLOR -- the globe paints its
+    // ocean from the shelf-tinted albedo + composed imagery with NO near-field haze, the sea
+    // painted a scattering asymptote under a hazed sky mirror, and at the switch the whole
+    // ocean snapped (the user's frame pair, 0:16 vs 0:17). Convergence: above the estuary's
+    // own altitudes this pixel evaluates THE GLOBE'S EXACT WATER FORMULA -- same composed
+    // channels, same lod the globe would pick, same lighting constants -- and the sky mirror
+    // and haze fade out with it. By the handoff band the two renderers emit the same pixel.
+    const float kFar = smoothstep(700.0f, 2800.0f, gEyeRel.y);
+    if (kFar > 0.0f) {
+        const float3 dirP = SeaPlanetDir(i.worldXZ);
+        const float pixAng = 2.0f * length(gCamUp.xyz) * gViewport.w;
+        const float lodFar = ComposedHeightLod(distCam, pixAng);
+        const float hp = ComposedHeightOn() ? ComposedHeight(dirP, lodFar) : -30.0f;
+        const float shelf = saturate(1.0f + hp / 160.0f);
+        float3 albSea = lerp(float3(0.013f, 0.055f, 0.115f), float3(0.06f, 0.30f, 0.34f),
+                             shelf * shelf);
+        albSea = lerp(albSea, float3(0.55f, 0.62f, 0.68f),
+                      saturate((gFadeD.x - 2.5f) / 9.0f) * 0.55f);
+        if (ComposedColorOn()) {
+            const float3 img = ComposedColor(dirP);
+            albSea = lerp(albSea, img, 0.6f * saturate(1.0f + min(hp, 0.0f) / 80.0f));
+        }
+        const float ndlG = saturate(gSunDir.y);   // the globe lights water on upT; flat up = +y
+        col = lerp(col, albSea * (0.030f + ndlG * SUN_IRR_C * 1.15f), kFar);
+    }
+
     // M6t: THE ONE GLINT -- the globe's exact Cox-Munk lobe, on the RESOLVED normal, with
     // sigma^2 = floor + shed bands. Near: sharp glitter riding wave faces (the missing sun
     // glint at the helm). Far: n flattens, sigma^2 telescopes to Cox-Munk(wind), and this
@@ -437,7 +466,9 @@ float4 PsMain(VsOut i) : SV_Target {
                          0.88f);
     col = lerp(col, float3(1.05f, 1.10f, 1.15f) * (0.55f + 0.6f * ndl), fm);
 
-    col = AerialPerspective(col, normalize(i.rel), distCam);
+    // M6u: the globe applies NO near-field haze to its ocean below the space rim; the haze
+    // fades with the same convergence or the handoff keeps an 18% pale step at 3.5 km.
+    col = lerp(AerialPerspective(col, normalize(i.rel), distCam), col, kFar);
 
     // Residency visualizer (V): green = resident churn tiles, red grid = NULL.
     if (gChurnU.z != 0u && gChurnU.x != 0xFFFFFFFFu) {

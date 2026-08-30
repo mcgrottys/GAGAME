@@ -686,3 +686,16 @@ M7's wavelets). Churn's froth fade became footprint-based like everything else.
 Named next: Hs-whitening parity in the sea's far field (storm color convergence), the
 globe mesh sampling the FFT bank directly (one geometry path as well as one BRDF), and
 per-band DIRECTIONAL σ² (Cox-Munk's up/crosswind anisotropy from the same integrals).
+
+**M6u addendum (same day): the other half of one water.** The user's frame pair (0:16 vs
+0:17 of the flood ride) showed the handoff still SNAPPING -- M6t had unified the energy,
+but the sea grid replaced the globe's whole ocean with a different COLOR MODEL (scattering
+asymptote under a hazed sky mirror vs shelf-tinted albedo + composed imagery, unhazed).
+Convergence: above the estuary's own altitudes (kFar over 700-2800 m camera height) the
+sea pixel evaluates THE GLOBE'S EXACT water formula -- same composed channels, same
+ComposedHeightLod the globe would pick, same lighting constants, Hs whitening via the
+retired fadeD slot -- while the sky mirror and the near-field haze fade out with it. At
+the handoff band the two renderers emit the same pixel; the quadtree's promise (no LOD
+ever pops) now holds for the water's color as well as its energy. The remaining single
+owner-swap (globe mesh sampling the FFT bank, retiring the second geometry entirely)
+stays the M7 unification.

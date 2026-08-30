@@ -369,7 +369,10 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
     // M6t: the hand-tuned per-cascade fade DISTANCES are retired -- CascadeFade now folds each
     // band by the pixel's ground FOOTPRINT vs the band's wavelength (screen-resolution- and
     // zoom-aware), and the folded variance moves into the glint lobe instead of vanishing.
-    m_seaCb.fadeD[0] = m_seaCb.fadeD[1] = m_seaCb.fadeD[2] = 0.0f;
+    // M6u: the row carries the model Hs instead (the far field's storm whitening -- the same
+    // term the globe's ocean applies).
+    m_seaCb.fadeD[0] = static_cast<float>(hsModel);
+    m_seaCb.fadeD[1] = m_seaCb.fadeD[2] = 0.0f;
 
     // ---- M3: the entrance jet, live from the ACT0816 prediction clock
     double signedMs = 0.0;
