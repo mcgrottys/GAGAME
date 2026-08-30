@@ -247,9 +247,24 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
         m_fft.SetSeaState(parts, activeParts, seed);
         hsModel = SeaState::SignificantHeight(parts, activeParts);
         if (activeParts > 0) {
-            m_cPeak = static_cast<float>(9.81 / (2.0 * 3.14159265 * parts[0].fp));
-            m_peakDirX = parts[0].dirToX;
-            m_peakDirZ = parts[0].dirToZ;
+            // M7j: the hypervisor's second catch -- parts[0] is FILE order, not energy
+            // order, and at calm hours the first entry can be the 0.05 m westerly wind
+            // chop: the swell shadow then marched TOWARD the dunes from every ocean cell
+            // and the whole sea read as sheltered. The peak is the most ENERGETIC
+            // partition; cPeak and the shadow direction both ride it.
+            int pk = 0;
+            double best = -1.0;
+            for (int i = 0; i < activeParts; ++i) {
+                const double hsI = SeaState::SignificantHeight(&parts[i], 1);
+                if (hsI > best) {
+                    best = hsI;
+                    pk = i;
+                }
+            }
+            m_cPeak = static_cast<float>(9.81 / (2.0 * 3.14159265 * parts[pk].fp));
+            m_peakDirX = parts[pk].dirToX;
+            m_peakDirZ = parts[pk].dirToZ;
+            m_peakDirValid = true;   // M7j: the shadow may only march a REAL direction
         }
 
         char note[32];
@@ -439,7 +454,11 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
     // ---- M5c: swell-shadow mask -- rebuilt when the peak wave direction or the water level
     // moves enough to change what blocks the sea (a bar that shadows at low water drowns at
     // high water).
-    if (m_bathyCpu && m_bathyCpu->Ready()) {
+    // M7j: the hypervisor's first catch -- the mask could build from the DEFAULT peak
+    // direction (toward east) before partitions loaded: marching "toward the source" then
+    // walked WEST into the dunes from every ocean cell, and the whole sea read as deep
+    // shadow. No real direction, no shadow (exposure 1 until the swell is known).
+    if (m_bathyCpu && m_bathyCpu->Ready() && m_peakDirValid) {
         const float lvl = static_cast<float>(seaLevelM);
         const float dirDot = m_peakDirX * m_shadowDirX + m_peakDirZ * m_shadowDirZ;
         if (!m_shadowBuilt || dirDot < 0.98f || std::abs(lvl - m_shadowLevel) > 0.5f) {

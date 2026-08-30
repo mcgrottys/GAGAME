@@ -14,6 +14,8 @@ endif()
 
 add_executable(gagame
   src/main.cpp
+  src/core/GaAst.cpp
+  src/core/GaTest.cpp
   src/core/Gpu.cpp
   src/core/Shader.cpp
   src/core/Window.cpp

@@ -59,6 +59,9 @@ public:
     uint32_t DetailSrv() const { return m_detail.Srv(); }
     // Ring georef for consumers: per-mip window origin (world m) + base texel size.
     void RingOrigin(int m, float& x, float& z) const { x = m_orgX[m]; z = m_orgZ[m]; }
+    // M7j --trace: read the ACTUAL bank texel at a world point -- the hypervisor's
+    // cross-check between the CPU's expectation and what the GPU wrote.
+    void TraceProbe(Gpu& gpu, double wx, double wz);
     float BaseTexelM() const { return m_baseTexelM; }
     uint32_t ResidentTiles() const {
         return m_disp.ResidentCount() + m_param.ResidentCount() + m_detail.ResidentCount();

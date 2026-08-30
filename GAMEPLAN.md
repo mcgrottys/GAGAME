@@ -1055,6 +1055,53 @@ engine leg: when the tide rotors move on-GPU, field access goes through TYPED fr
 handles (world / atlas-v-up / raster-v-down) whose conversions are explicit nodes in the
 state diagram, and the ledger above becomes code instead of prose. Five gates green.
 
+**M7j (2026-08-30): THE GA AST — the state diagram becomes data, and it found the bug
+before it compiled.** The user, after three sessions of axis archaeology: "do the AST now
+— it should hold all the domains, units, scales, ranges or whatever we are chaining or
+folding together." Built: src/core/GaAst.h/.cpp — every edge of the state diagram
+registered as data {from, to, field, src/dst Frame(space, +v direction, org, m/unit),
+flip-applied, units, range, gain, code anchor}, PRINTED every run ([gaast] — the workflow
+as an AST that cannot go stale because the wiring builds it), and VALIDATED: the FLIP
+RULE (frames that disagree about +v need exactly one declared flip) and the ORPHAN RULE
+(a producer whose consumers are all inactive is dead physics walking). And the payoff
+came while REGISTERING the edges, before the code even ran: encoding Sea.hlsl's rows
+surfaced SweShadow — the solver's line-of-sight swell-exposure field (CPU march toward
+the peak-wave source, rebuilt when direction or level moves) — feeding ONLY the retired
+SeaLayer draw path. One-water had lost the shelter edge silently; that was the basin
+whitecap bug M7i mis-patched with a hand-drawn x-ramp (which then flattened the channel
+and beaches: "worse"). Fix: the ramp died; the bank kernel consumes the TRUE shadow
+(same SWE frame, same (1−v) flip, floor 0.18), folds displacement, foam, and shed σ² by
+it (amplitude², exposure²), and writes hsScale·expo into the detail plane so the PS
+sparkle/envelope tiers inherit shelter for free. NEW GATE gatest (src/core/GaTest.cpp,
+gate 2 of 6): the sandwich (−n v n, twice = identity), the refraction rotor vs the
+shader's closed form (+ Snell pinned), the fold telescope's endpoints (footprint==ring
+adds zero; full pixel adds exactly the shortfall), the Cl(2)+ spinor blend (mean phase
+exact, amplitude folds as cos(Δφ/2)), and the AST's flip rule + the orientation ledger's
+ground truths asserted edge by edge. Six gates green. The doctrine: NEW EDGES REGISTER
+OR THEY DON'T SHIP — a frame mismatch is now a boot-time report, not a debugging session.
+
+**THE HYPERVISOR (same day, user: "a debug function that prints all the work and
+transformations for some steps... validate against other tools... know the exact step
+something is going wrong even before we hit the GPU").** --trace lat,lon walks ONE sample
+through the whole chain and prints every transformation with its AST edge: frame
+conversion (with the org/scale constants), bed (with provenance), level, current, depth
+and the breaking threshold, sea state -> hsScale law, exposure, the fold weights per
+ring, and — the cross-check — 9b: a READBACK of the actual bank texel (disp, foam,
+level, sigma2, current, hsScale*expo) against the CPU's expectation. Plus
+trace_shadow.pgm so the exposure field can be LOOKED at. It caught three real bugs in
+its first hour: (1) the swell shadow could build from the DEFAULT direction (toward
+east) before partitions loaded — the march then walked west into the dunes from every
+ocean cell and the entire sea read as deep shadow (fix: m_peakDirValid — no real
+direction, no shadow); (2) parts[0] is FILE order, not energy order — at calm hours the
+peak direction came from the 0.05 m westerly wind chop instead of the easterly swell
+(fix: the peak is the most energetic partition; cPeak rides it too); (3) THE LOST LINE —
+M7i's ramp edit had swallowed the unconditional t.hsScale assignment and every bank tile
+had shipped hsScale = 0 since: the "water seems worse" report was a dead-flat sea, and
+the 9b cross-check found it in one probe (CPU expected 0.42, the bank said 0.00) after
+three rounds of visual review could not localize it. Named next for the trace: a
+celestial step (the sun disc renders suspiciously EAST in an 18:15 EDT helm shot — sun
+azimuth wants a hypervisor line and a gatest pin), and a churn/bank texel diff.
+
 Named next: amplification-shader subdivision for sub-meter helm vertex density (also the
 jetty-wall clipping fix), breaker individuation in the surf zone (churn saturation), the
 bank as an Exchange channel (water.surface for plugins), a

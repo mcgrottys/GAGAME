@@ -28,7 +28,7 @@ cbuffer BankCb : register(b0) {
     float4 gMisc;       // x = tile texels, y = seaLevel fallback, zw unused
     uint4  gSlotsA;     // cascade disp SRV slots x3, swe eta SRV slot
     uint4  gSlotsB;     // swe uv SRV slot, disp/param/detail bank UAV slots
-    uint4  gSlotsC;     // x = churn atlas SRV (foam memory), yzw unused
+    uint4  gSlotsC;     // x = churn atlas SRV (foam memory), y = swell-shadow SRV
     float4 gChurn;      // xy = churn world origin, z = 1/domain, w = atlas texels
 };
 
@@ -110,6 +110,23 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     const float depth = lvl - bed;
     const float dry = smoothstep(0.05f, 0.65f, depth);
 
+    // M7j: THE SWELL SHADOW. The solver's line-of-sight exposure field (CPU march toward
+    // the peak-wave source) always sheltered the OLD renderer; one-water lost the edge
+    // silently and whitecapped the harbor basin -- the GA AST's orphan rule exists because
+    // of this bug. Ocean bands fold by exposure; sigma^2 rides the same amplitude-squared
+    // law; local chop keeps a floor. The shadow shares the SWE window's frame (row 0 =
+    // north), so the same (1 - v) flip applies.
+    float expo = 1.0f;
+    if (gSlotsC.y != 0xFFFFFFFFu && gSwe.z > 0.0f) {
+        const float2 suv = (xz - gSwe.xy) * float2(gSwe.z, gSwe.w);
+        if (all(suv > 0.001f) && all(suv < 0.999f)) {
+            expo = max(LoadBilinearClamp(gSlotsC.y,
+                                         float2(suv.x * 160.0f, (1.0f - suv.y) * 160.0f),
+                                         float2(160.0f, 160.0f)).x,
+                       0.18f);
+        }
+    }
+
     // THE FOLD, per ring (M6t): a band is geometry while THIS tile's texels resolve its
     // phase; past its Nyquist it sheds to sigma^2. Coarse rings carry the same energy as
     // statistics that fine rings carry as vertexes -- no popping between rings possible.
@@ -121,12 +138,12 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         const float w = 1.0f - smoothstep(lam * 0.12f, lam * 0.5f, t.texelM);
         const float2 cuv = frac(xz / gPatch[c]);
         const float4 s = LoadBilinearWrap(gSlotsA[c], cuv, 256.0f);
-        d += s.xyz * (w * t.hsScale);
-        // M7i: foam rides the LOCAL sea state -- a sheltered tile folds its waves down,
-        // and its whitecaps must fold with them.
-        foam += s.w * w * saturate(t.hsScale) * (c == 2 ? 1.0f : 0.4f);
-        // shed variance rides the local sea state too (amp^2)
-        sig2 += (1.0f - w) * t.hsScale * t.hsScale *
+        d += s.xyz * (w * t.hsScale * expo);
+        // M7i/M7j: foam rides the LOCAL sea state AND its exposure -- a sheltered tile
+        // folds its waves down, and its whitecaps must fold with them.
+        foam += s.w * w * saturate(t.hsScale * expo) * (c == 2 ? 1.0f : 0.4f);
+        // shed variance: amplitude squared, exposure squared
+        sig2 += (1.0f - w) * t.hsScale * t.hsScale * expo * expo *
                 (c == 0 ? 0.0004f : (c == 1 ? 0.0018f : 0.0060f));
     }
     d *= dry * gPatch.w;
@@ -156,5 +173,5 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // The DETAIL plane: what the PS needs to recover sub-ring sparkle -- the tile's local
     // sea-state scale (cascade derivs are unit-sea) and the dry guard (no sparkle on the
     // flats). Churn memory joins this fiber next.
-    gU[gSlotsB.w][dst] = float4(t.hsScale, dry, 0.0f, 0.0f);
+    gU[gSlotsB.w][dst] = float4(t.hsScale * expo, dry, 0.0f, 0.0f);
 }

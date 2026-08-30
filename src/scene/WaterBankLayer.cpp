@@ -204,6 +204,50 @@ void WaterBankLayer::ReanchorRing(Gpu& gpu, int m, double camX, double camZ) {
     (void)changed;
 }
 
+namespace {
+float HalfF(uint16_t h) {
+    const uint32_t s = (h >> 15) & 1u, e = (h >> 10) & 31u, m = h & 1023u;
+    if (e == 0) return (s ? -1.0f : 1.0f) * m * 5.9604645e-8f;
+    if (e == 31) return s ? -1e30f : 1e30f;
+    float v = std::ldexp(1.0f + m / 1024.0f, static_cast<int>(e) - 15);
+    return s ? -v : v;
+}
+}  // namespace
+
+void WaterBankLayer::TraceProbe(Gpu& gpu, double wx, double wz) {
+    for (int m = 0; m < kMips; ++m) {
+        if (!m_orgValid[m]) continue;
+        const double texel = m_baseTexelM * (1 << m);
+        const int tx = static_cast<int>((wx - m_orgX[m]) / texel);
+        const int ty = static_cast<int>((wz - m_orgZ[m]) / texel);
+        if (tx < 1 || ty < 1 || tx >= 511 || ty >= 511) continue;
+        auto read4 = [&](TileAtlas2D& bank, float out[4]) {
+            GpuTexture wrap;
+            wrap.res = bank.Res();
+            wrap.format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            wrap.width = 3072;
+            wrap.height = 512;
+            wrap.state = m_state;
+            uint32_t pitch = 0;
+            const std::vector<uint8_t> data = gpu.ReadbackTexture(wrap, &pitch);
+            const uint16_t* px = reinterpret_cast<const uint16_t*>(
+                data.data() + static_cast<size_t>(pitch) * ty) + (m * 512 + tx) * 4;
+            for (int i = 0; i < 4; ++i) out[i] = HalfF(px[i]);
+        };
+        float d[4], p[4], det[4];
+        read4(m_disp, d);
+        read4(m_param, p);
+        read4(m_detail, det);
+        Log("[trace] 9b bank ring %d texel %.1f m at (%d,%d): disp (%+.2f,%+.2f,%+.2f) "
+            "foam %.2f | level %+.2f sigma2 %.4f cur (%+.2f,%+.2f) | hsScale*expo %.2f "
+            "dry %.2f",
+            m, texel, tx, ty, d[0], d[1], d[2], d[3], p[0], p[1], p[2], p[3], det[0],
+            det[1]);
+        return;
+    }
+    Log("[trace] 9b bank: point outside every resident ring");
+}
+
 void WaterBankLayer::Render(const FrameContext& ctx) {
     if (!m_ready || !enabled || !m_sea) return;
     PixScope scope(ctx.cl, "waterbank (the wave vertex bank: rings recomposed per frame)");
@@ -256,24 +300,14 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
                         }
                     }
                 }
-                // M7i: EXPOSURE. The FFT sea is fetch-blind -- without this, the harbor
-                // basin whitecaps as hard as the open bar, and sheltered-water foam reads
-                // as a mirrored ocean (the user's "is the water inverted?" report: it was
-                // not inverted, it was un-sheltered). Inside the solver window, ocean
-                // swell attenuates west of the throat on the same x-ramp the jet and the
-                // churn already use; locally generated chop keeps an 0.18 floor.
-                if (m_sweBathy && m_sweBathy->Ready()) {
-                    const double cx = t.orgXZ[0] + tileSpan * 0.5;
-                    const double cz = t.orgXZ[1] + tileSpan * 0.5;
-                    if (cx > m_sweBathy->WorldX0() &&
-                        cx < m_sweBathy->WorldX0() + m_sweBathy->WorldSizeX() &&
-                        cz > m_sweBathy->WorldZ0() &&
-                        cz < m_sweBathy->WorldZ0() + m_sweBathy->WorldSizeZ()) {
-                        const double s = std::clamp((cx - 250.0) / 800.0, 0.0, 1.0);
-                        t.hsScale = hsScale * static_cast<float>(
-                            0.18 + 0.82 * s * s * (3.0 - 2.0 * s));
-                    }
-                }
+                // M7j: exposure moved to the KERNEL, from the solver's own swell-shadow
+                // field (the M7i x-ramp killed the channel and the open beaches -- a
+                // hand-drawn boundary where a marched line-of-sight field already existed).
+                // THE LOST LINE: M7i's ramp edit swallowed this unconditional assignment
+                // and every tile shipped hsScale 0 -- the "water seems worse" report was
+                // a dead-flat sea, found by the hypervisor's CPU-vs-GPU cross-check
+                // (expected 0.42, bank said 0.00) in one probe.
+                t.hsScale = hsScale;
                 tiles.push_back(t);
             }
         }
@@ -312,7 +346,8 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     // M7e: the foam memory -- the churn atlas joins the bank's inputs (16384 m domain
     // centred on the anchor, 2 m texels, no padding: 8192 square).
     cb.slotsC[0] = m_sea ? m_sea->ChurnAtlasSrv() : 0xFFFFFFFFu;
-    cb.slotsC[1] = cb.slotsC[2] = cb.slotsC[3] = 0xFFFFFFFFu;
+    cb.slotsC[1] = m_sea ? m_sea->ShadowSrv() : 0xFFFFFFFFu;   // M7j: the swell shadow
+    cb.slotsC[2] = cb.slotsC[3] = 0xFFFFFFFFu;
     cb.churn[0] = -8192.0f;
     cb.churn[1] = -8192.0f;
     cb.churn[2] = 1.0f / 16384.0f;

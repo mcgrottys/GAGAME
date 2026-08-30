@@ -34,6 +34,7 @@
 #include "compose/Sources.h"
 #include "compose/WaterAtlas.h"
 #include "core/Json.h"
+#include "core/GaAst.h"
 #include "core/Pga.h"
 #include "core/TileProviders.h"
 #include "sim/BathyModel.h"
@@ -59,6 +60,8 @@ struct Options {
     uint32_t width = 1600, height = 900;
     bool headless = false;
     bool selftest = false;
+    bool trace = false;               // --trace lat,lon: the hypervisor walk (M7j)
+    double traceLat = 42.816, traceLon = -70.81;
     bool debugLayer = false;
     uint32_t frames = 0;              // 0 = run until the window closes
     std::wstring dump;
@@ -193,6 +196,16 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--rail-zoom") { o.rail = Widen(next("rail_frames").c_str()); o.railZoom = true; }
         else if (a == "--rail-flood") { o.rail = Widen(next("rail_frames").c_str()); o.railFlood = true; }
         else if (a == "--rail-jetty") { o.rail = Widen(next("rail_frames").c_str()); o.railJetty = true; }
+        else if (a == "--trace") {
+            // M7j: THE HYPERVISOR. One sample walked through the whole one-water chain on
+            // the CPU, every transformation printed with its AST edge -- validate against
+            // external tools, find the failing step BEFORE the GPU is involved.
+            if (swscanf(Widen(next("42.816,-70.81").c_str()).c_str(), L"%lf,%lf",
+                        &o.traceLat, &o.traceLon) != 2) {
+                o.traceLat = 42.816; o.traceLon = -70.81;
+            }
+            o.trace = true;
+        }
         else if (a == "--warm-inlet") o.warmInlet = true;
         else if (a == "--planet") o.planet = next("earth");
         else if (a == "--tile-budget") o.tileBudget = static_cast<uint32_t>(atoi(next("1000").c_str()));
@@ -905,6 +918,8 @@ int main(int argc, char** argv) {
             ShaderCompiler sc;
             sc.Init();
             bool ok = RunPgaSelfTest();   // pure CPU: the motor conventions, pinned first
+            ok &= RunGaSelfTest();        // pure CPU: GA products + the frame/orientation
+                                          // ledger as executable contract (M7j)
             ok &= RunComposeSelfTest();   // pure CPU: the layer compositor's contracts
             ok &= RunWaterSelfTest();     // pure CPU: the water atlas' datum/epoch/field gates
             ok &= RunTileSelfTest(gpu, sc, opt.shaderDir);
@@ -1276,6 +1291,13 @@ int main(int argc, char** argv) {
             }
             globe->stencilOverlay = opt.stencil;
             compositor.LogRegistry();
+            // M7j: the GA AST -- the state diagram printed and validated EVERY run, so a
+            // frame mismatch or an orphaned field is a boot-time report, not a debugging
+            // session. (The workflow as an AST: domains, axes, units, scales, ranges.)
+            ga::ast::RegisterKnownWaterEdges();
+            ga::ast::SetActive("sea.ps", !opt.oneWater);
+            ga::ast::Print();
+            ga::ast::Validate();
             // The survey pack loads whenever it exists: the land MASKS are the default
             // classifier (always on); the VECTOR overlay draws only under --stencil.
             if (!marsMode && gisStencil.Load("data/gis/gis.json")) {
@@ -2354,6 +2376,66 @@ int main(int argc, char** argv) {
             ++frame;
             if (opt.frames &&
                 frame >= opt.frames + (opt.rail.empty() ? 0u : 150u)) {
+                // M7j: THE HYPERVISOR -- one sample, every transformation, each hop tagged
+                // with the AST edge it exercises. CPU-derivable steps print values; fields
+                // that live only on the GPU print their frame contract and where to look.
+                if (opt.trace && !marsMode && sea && waterBank) {
+                    const double tlat = opt.traceLat, tlon = opt.traceLon;
+                    const double wx = (tlon - BathyModel::kOrgLon) * BathyModel::kMPerLon;
+                    const double wz = (tlat - BathyModel::kOrgLat) * BathyModel::kMPerLat;
+                    Log("[trace] ==== ONE SAMPLE THROUGH THE STATE DIAGRAM ====");
+                    Log("[trace] input       lat %.5f lon %.5f  t %.0f unix", tlat, tlon,
+                        simUnix);
+                    Log("[trace] 1 frame     latlon.deg -> world.m: x %+.1f z %+.1f  "
+                        "(org %.5f,%.5f; mPerLon %.0f mPerLat %.0f; +x=east +z=north)",
+                        wx, wz, BathyModel::kOrgLat, BathyModel::kOrgLon,
+                        BathyModel::kMPerLon, BathyModel::kMPerLat);
+                    const WeatherSample wq = weather.Query(tlat, tlon, simUnix, 30.0);
+                    Log("[trace] 2 bed       compose.stack SampleHeightStack: %+.2f m NAVD "
+                        "[%s]  (edge compose.stack->water.bank corners)",
+                        wq.bedNavd, wq.bedSrc);
+                    Log("[trace] 3 level     water.atlas rotors + swe mirror: %+.2f m NAVD "
+                        "[%s]", wq.levelNavd, wq.levelSrc);
+                    Log("[trace] 4 current   swe.solver (row0N raster, FLIP into +v=N): "
+                        "u %+.2f v %+.2f m/s [%s]  (edge swe.solver->water.bank uv)",
+                        wq.u, wq.v, wq.currentSrc);
+                    Log("[trace] 5 depth     level - bed = %.2f m  dry %.2f  breaking clamp "
+                        "0.55*depth = %.2f m", wq.depthM,
+                        std::clamp((wq.depthM - 0.05) / 0.6, 0.0, 1.0),
+                        0.55 * (std::max)(static_cast<double>(wq.depthM), 0.05));
+                    const double hsRefT = 0.8;
+                    const double hsScaleT =
+                        wq.hs > 0.0f ? std::clamp(wq.hs / hsRefT, 0.15, 3.0) : 1.0;
+                    Log("[trace] 6 sea state Hs %.2f m Tp %.1f s dir %.0f [%s] -> hsScale "
+                        "%.2f  (Hs/gulfRef %.2f, clamp 0.15..3)",
+                        wq.hs, wq.tp, wq.dirDeg, wq.waveSrc, hsScaleT, hsRefT);
+                    const float expoT = sea->ShadowAtWorld(static_cast<float>(wx),
+                                                           static_cast<float>(wz));
+                    Log("[trace] 7 exposure  swe.solver shadow (row0N, FLIP, floor 0.18): "
+                        "%.2f  (edge swe.solver->water.bank shadow)",
+                        (std::max)(expoT, 0.18f));
+                    for (int m = 0; m < 3; ++m) {
+                        const double texel = 4.8 * (1 << m);
+                        const double lam[3] = {213.0, 26.9, 2.2};
+                        Log("[trace] 8 fold r%d  texel %.1f m: w(213m) %.2f  w(26.9m) %.2f  "
+                            "w(2.2m) %.2f  (geometry vs sigma2 split, M6t)",
+                            m, texel,
+                            1.0 - std::clamp((texel - lam[0] * 0.12) / (lam[0] * 0.38), 0.0, 1.0),
+                            1.0 - std::clamp((texel - lam[1] * 0.12) / (lam[1] * 0.38), 0.0, 1.0),
+                            1.0 - std::clamp((texel - lam[2] * 0.12) / (lam[2] * 0.38), 0.0, 1.0));
+                    }
+                    Log("[trace] 9 gpu fibers cascades (patch.wrap, no flip) + churn "
+                        "(atlas.texel flat, x1.05) + bank write ring texels: GPU-resident; "
+                        "contracts printed by [gaast] at boot");
+                    Log("[trace] 10 render   bank -> globe BankSample (no flip) -> two rays "
+                        "(sandwich -n d n, refraction rotor; gatest-pinned)");
+                    Log("[trace] ==== cross-check: NOAA tides at 8440452, GoMOFS currents, "
+                        "GFS-Wave Hs -- the provenance strings above name the rungs ====");
+                    waterBank->TraceProbe(gpu, wx, wz);
+                    if (sea->DumpShadowPgm("trace_shadow.pgm")) {
+                        Log("[trace] shadow mask dumped: trace_shadow.pgm (row 0 = north)");
+                    }
+                }
                 break;
             }
         }

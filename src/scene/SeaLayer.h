@@ -58,6 +58,34 @@ public:
     // M7e: the bank reads the foam MEMORY -- advected churn joins the one water's fiber.
     uint32_t ChurnAtlasSrv() const { return m_churnReady ? m_churn.Srv() : 0xFFFFFFFFu; }
     uint64_t ChurnBytes() const { return m_churnReady ? m_churn.ResidentBytes() : 0; }
+    // M7j: the bank reads the SWELL SHADOW -- the line-of-sight exposure field (CPU march,
+    // rebuilt when the peak direction or level moves). One-water lost this edge silently;
+    // the GA AST's orphan rule exists because of it.
+    uint32_t ShadowSrv() const { return m_shadowBuilt ? m_shadowTex.srv : 0xFFFFFFFFu; }
+    // M7j --trace: the CPU mirror of the kernel's shadow read -- SAME frame, SAME
+    // row0-north flip, so the hypervisor prints exactly what the GPU will see.
+    float ShadowAtWorld(float x, float z) const {
+        if (!m_shadowBuilt || m_shadowCpu.empty()) return 1.0f;
+        const float u = (x - m_bathyGeo[0]) * m_bathyGeo[2];
+        const float v = (z - m_bathyGeo[1]) * m_bathyGeo[3];
+        if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) return 1.0f;
+        const int sx = (std::min)((std::max)(static_cast<int>(u * kShadowN), 0),
+                                  static_cast<int>(kShadowN) - 1);
+        const int sy = (std::min)((std::max)(static_cast<int>((1.0f - v) * kShadowN), 0),
+                                  static_cast<int>(kShadowN) - 1);
+        return m_shadowCpu[static_cast<size_t>(sy) * kShadowN + sx] / 255.0f;
+    }
+    // M7j --trace: dump the shadow mask as PGM (row 0 = north, like the storage) so the
+    // hypervisor's user can LOOK at the field against the coastline.
+    bool DumpShadowPgm(const char* path) const {
+        if (!m_shadowBuilt || m_shadowCpu.empty()) return false;
+        FILE* f = fopen(path, "wb");
+        if (!f) return false;
+        fprintf(f, "P5 %u %u 255 ", kShadowN, kShadowN);
+        fwrite(m_shadowCpu.data(), 1, m_shadowCpu.size(), f);
+        fclose(f);
+        return true;
+    }
 
     const char* Name() const override { return "sea"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
@@ -184,6 +212,7 @@ private:
     GpuTexture m_shadowTex;
     std::vector<uint8_t> m_shadowCpu;
     float m_shadowDirX = 0, m_shadowDirZ = 0, m_shadowLevel = 0;
+    bool m_peakDirValid = false;   // M7j: never march the default direction
     bool m_shadowBuilt = false;
     double m_simUnix = 0;
 
