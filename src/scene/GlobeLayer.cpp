@@ -920,6 +920,15 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.streamF[3] = 0.0f;
     // ---- M6i: the composed channels + the one-world frame, through the ONE fill function
     // the terrain also uses -- the two layers cannot disagree about this math.
+    // M7g: THE MIP FLOOR. The top of every window pyramid (mips 4..7, ~85 tiles, a few
+    // MB) is wanted EVERY frame: high-altitude views sample one consistent capture instead
+    // of a residency-shaped patchwork of vintages, and a fast ascent can never outrun the
+    // loader into grey -- the coarse rung is always there to fall back on.
+    for (int fm = 4; fm <= 7; ++fm) {
+        if (m_winT >= 0) m_res->Want(m_winT, 0, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
+        if (m_hgtWinT >= 0) m_res->Want(m_hgtWinT, 0, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
+        if (m_detWinT >= 0) m_res->Want(m_detWinT, 0, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
+    }
     FillComposedCb(m_cb.cs, m_res, m_colorT, m_winT, m_hgtT, m_hgtWinT, m_detOrg[0],
                    m_detOrg[1], m_detSize, 14, m_radius, m_frameE, m_frameU, m_frameN,
                    stencilOverlay, m_gisWinSrv, m_gisGlobSrv, m_detWinT, m_det17Org, 17,

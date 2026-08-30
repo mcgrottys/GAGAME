@@ -532,6 +532,15 @@ float4 PsMain(VsOut i) : SV_Target {
                                    rn2),
                               saturate(elm * 1.5f));
             }
+            // M7g: the generic beach/dune constants were painted when the near field was
+            // a 9.5 m blur; with the z17 rung resident the ORTHO is the better beach. The
+            // tide's wet band and the surveyed rock keep full authority -- they know what
+            // no photo can (the live waterline, the edit polygons).
+            const float imgTexM = ComposedColorTexelM(up);
+            const float imgFine = 1.0f - smoothstep(1.5f, 6.0f, imgTexM);
+            const float generic =
+                (hp - water < 0.35f || elm > 0.01f) ? 0.0f : 1.0f;
+            matAlb = lerp(matAlb, alb, imgFine * generic * 0.85f);
             const float ndlM = saturate(dot(nM, gSunDir.xyz));
             float3 colNear = matAlb * (SUN_IRR_C * ndlM + SkyRadiance(nM.y) * 0.55f);
             colNear = AerialPerspective(colNear, normalize(i.rel), distC);

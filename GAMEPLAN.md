@@ -1000,6 +1000,24 @@ Two rules edits, zero code — the M7d thesis doing its job. Known residue: the 
 zone over the bar fuses into a flat white sheet (churn + breaking clamp saturate
 together) — breaker individuation belongs to the churn leg. Five gates green.
 
+**M7g (2026-08-30): THE RESIDENCY REFINEMENT — "the grey pops in and out at different
+angles."** Two authority bugs wearing residency's clothes. (1) THE MIP FLOOR: the
+patchwork of vintages at altitude was want-vs-have divergence — regions short of their
+wanted mip fell back per PIXEL to whatever coarser rung was resident, and adjacent
+regions sampled different google captures. The top of every window pyramid (mips 4..7,
+~85 tiles, a few MB per tenant) is now wanted EVERY frame: never evicted, warm from the
+first frames, so a high view samples ONE capture uniformly and a fast ascent cannot
+outrun the loader into grey. What patchwork remains is google's own capture geography
+inside a single zoom — the M6j doctrine (pixels ship as google made them) accepts that,
+and the M6j postmortem in Sources.cpp stays the law: no paint-time re-grading. (2) THE
+MATERIAL MODEL YIELDS: the close-up beach/dune constants (M6j, born when the near field
+was a 9.5 m blur) were REPLACING the imagery at 92% inside 500 m — the flat grey slab at
+the helm, popping with the distance ramp as the camera turned. New ComposedColorTexelM()
+reports how fine the imagery is actually RESIDENT at a pixel (window and detail rungs,
+residency-map-true); where it outresolves ~1.5 m the generic constants fade to 15%. The
+tide's wet band and the surveyed rock keep full authority — they know what no photo can.
+Five gates green.
+
 Named next: amplification-shader subdivision for sub-meter helm vertex density (also the
 jetty-wall clipping fix), breaker individuation in the surf zone (churn saturation), the
 bank as an Exchange channel (water.surface for plugins), a
