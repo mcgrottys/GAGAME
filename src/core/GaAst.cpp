@@ -87,7 +87,46 @@ bool Validate() {
     return ok;
 }
 
+void RegisterKnownComposeEdges() {
+    const Frame latlon{"latlon.deg", true, 0, 0, 0};
+    const Frame mercPx{"mercator.px", false, 0, 0, 0};   // web-mercator y grows SOUTH
+    const Frame uvS{"uv01.vS", false, 0, 0, 0};
+    const Frame cube{"cube.face", true, 0, 0, 0};        // per-face D3D spec dirs
+    const Frame resMap{"resmap.texel", false, 0, 0, 0};
+    // THE COMPOSITOR PILLAR. The paint loop iterates raster rows (merc y south) and
+    // resolves each texel to lat/lon -- that inversion IS the flip. The shader-side window
+    // uv keeps mercator orientation, so sampling needs NO flip (unlike the water atlases:
+    // this asymmetry is exactly what the table exists to keep straight).
+    Register({"compose.stack", "window.z14", "paint", latlon, mercPx, true,
+              "sRGB bytes / m NAVD", "tile 128^2", 1.0,
+              "Compositor::WindowColor/WindowHeight (merc inverse per texel)"});
+    Register({"compose.stack", "window.z17", "paint", latlon, mercPx, true, "sRGB bytes",
+              "tile 128^2", 1.0, "Compositor::WindowColor zBase 17"});
+    Register({"compose.stack", "cube.color", "paint", latlon, cube, false, "sRGB bytes",
+              "16k faces", 1.0, "ComposeCubeDir (D3D cube convention, composetest-pinned)"});
+    Register({"window.z14", "globe.ps", "window-sample", mercPx, uvS, false,
+              "sRGB / m NAVD", "uv 0..1", 1.0, "Compose.hlsli CsWindowUv (no flip: both vS)"});
+    Register({"window.z17", "globe.ps", "detail-sample", mercPx, uvS, false, "sRGB",
+              "finer-only gate", 1.0, "Compose.hlsli detail rung (M7f/M7h handoff)"});
+    Register({"google.tiles", "window.z14", "fetch", mercPx, mercPx, false, "sRGB bytes",
+              "zoom = f(groundResM)", 1.0, "GoogleColorSource::ZoomFor"});
+    Register({"massgis.ortho", "window.z14", "fetch", latlon, mercPx, true, "sRGB bytes",
+              "EPSG:6348 UTM19N declared", 1.0, "AerialOrthoSource (TM forward)"});
+    Register({"height.stack", "synth.bed", "classify", latlon, latlon, false,
+              "m NAVD -> dry albedo", "3 samples/texel", 1.0,
+              "BedSynthSource::Sample (M7d cross-channel edge)"});
+    // THE RESIDENCY PILLAR. Wants come from the CDLOD walk in each frame's uv boxes; the
+    // CPU map (byte = mip*16) is uploaded and sampled by every composed consumer as the
+    // resolution CLAMP -- want vs have divergence is the vintage-patchwork mechanism the
+    // M7g mip floor bounded.
+    Register({"globe.walk", "residency.mgr", "wants", uvS, uvS, false, "mip requests",
+              "mips 0..7 + floor 4..7", 1.0, "GlobeLayer node walk + M7g mip floor"});
+    Register({"residency.mgr", "globe.ps", "have-map", resMap, uvS, false,
+              "finest mip * 16 (R8)", "0..7*16", 1.0, "CsHave2D residency clamp"});
+}
+
 void RegisterKnownWaterEdges() {
+    RegisterKnownComposeEdges();
     const Frame worldM{"world.m", true, 0, 0, 0};
     const Frame wrap{"patch.wrap", true, 0, 0, 0};
     const Frame atlasN{"atlas.texel", true, 0, 0, 0};

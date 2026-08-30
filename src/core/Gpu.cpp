@@ -471,6 +471,56 @@ void Gpu::EndUpload() {
     m_uploadKeepAlive.clear();   // safe: WaitIdle above guarantees the copies retired
 }
 
+bool Gpu::ReadbackTexel(ID3D12Resource* res, uint32_t subresource, uint32_t x, uint32_t y,
+                        D3D12_RESOURCE_STATES state, uint8_t out[16]) {
+    const D3D12_RESOURCE_DESC d = res->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+    fp.Footprint.Format = d.Format;
+    fp.Footprint.Width = 1;
+    fp.Footprint.Height = 1;
+    fp.Footprint.Depth = 1;
+    fp.Footprint.RowPitch = 256;   // minimum alignment; one texel fits any format we use
+
+    Com<ID3D12Resource> rb;
+    const auto hp = HeapProps(D3D12_HEAP_TYPE_READBACK);
+    const auto rd = BufferDesc(256);
+    if (FAILED(m_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                                 D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                 IID_PPV_ARGS(&rb)))) {
+        return false;
+    }
+    auto* cl = BeginUpload();
+    D3D12_RESOURCE_BARRIER br{};
+    br.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    br.Transition.pResource = res;
+    br.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    if (state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+        br.Transition.StateBefore = state;
+        br.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        cl->ResourceBarrier(1, &br);
+    }
+    D3D12_TEXTURE_COPY_LOCATION dst{}, src{};
+    dst.pResource = rb.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint = fp;
+    src.pResource = res;
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = subresource;
+    D3D12_BOX box{x, y, 0, x + 1, y + 1, 1};
+    cl->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+    if (state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+        br.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        br.Transition.StateAfter = state;
+        cl->ResourceBarrier(1, &br);
+    }
+    EndUpload();
+    void* p = nullptr;
+    if (FAILED(rb->Map(0, nullptr, &p))) return false;
+    std::memcpy(out, p, 16);
+    rb->Unmap(0, nullptr);
+    return true;
+}
+
 std::vector<uint8_t> Gpu::ReadbackTexture(GpuTexture& tex, uint32_t* outRowPitch) {
     D3D12_RESOURCE_DESC d = tex.res->GetDesc();
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};

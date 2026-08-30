@@ -62,6 +62,9 @@ public:
     // M7j --trace: read the ACTUAL bank texel at a world point -- the hypervisor's
     // cross-check between the CPU's expectation and what the GPU wrote.
     void TraceProbe(Gpu& gpu, double wx, double wz);
+    // M7k --dump-fibers: export the three bank planes as PNGs + validate the value
+    // ranges against the AST's declarations -- the hypervisor for whole fields.
+    void DumpFibers(Gpu& gpu);
     float BaseTexelM() const { return m_baseTexelM; }
     uint32_t ResidentTiles() const {
         return m_disp.ResidentCount() + m_param.ResidentCount() + m_detail.ResidentCount();

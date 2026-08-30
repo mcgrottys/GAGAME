@@ -65,6 +65,7 @@ const std::vector<Edge>& Edges();
 // Called by gatest so --selftest validates the contract even before any scene exists, and
 // by main at boot so the printed diagram always carries every known edge.
 void RegisterKnownWaterEdges();
+void RegisterKnownComposeEdges();   // the compositor + residency pillars (M7l)
 
 }  // namespace ga::ast
 

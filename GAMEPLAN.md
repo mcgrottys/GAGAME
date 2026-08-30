@@ -1102,6 +1102,55 @@ three rounds of visual review could not localize it. Named next for the trace: a
 celestial step (the sun disc renders suspiciously EAST in an 18:15 EDT helm shot — sun
 azimuth wants a hypervisor line and a gatest pin), and a churn/bank texel diff.
 
+**M7l (2026-08-30): THE PILLARS JOIN THE DIAGRAM — debug tools as the product, not the
+byproduct.** The user's program: every pillar gets its AST, its proof, and its hypervisor
+check, with a report each debug session ("the free biproducts mathematicians get from
+GA"). Landed: (1) the COMPOSITOR and RESIDENCY pillars registered (24 edges total now) —
+including the asymmetry the table exists to keep straight: the window uv is v-SOUTH
+(mercator order, sampled with NO flip) while every water atlas is v-NORTH (flip at each
+row-0-north raster); the paint loop's merc-inverse-per-texel IS the compositor's flip.
+(2) THE COMPOSED-TILE CROSS-CHECK (--trace step 11): same point, three answers that must
+agree — the CPU stack (the law), the RESIDENT GPU texel of the height window (read back
+one texel at the mip the CPU residency map names), and the map itself. First run: GPU
+-9.58 m vs stack -9.59 m, MATCH at 8 mm. stack -> cache -> GPU, end to end. (3) THE
+SESSION REPORT: every run ends with [report] — AST edge count + flip verdict, compose
+painted/cache-hit, fetches, pending. (4) PIX programmatic captures: --pix N loads the
+INSTALLED PIX's WinPixGpuCapturer.dll (no NuGet — and the export drifted: modern PIX
+exports CaptureNextFrame, not PIXGpuCaptureNextFrames; we parse for both) and writes
+gagame.wpix with every pass already named by its state-diagram node via PixScope.
+--dump-fibers exports the three bank planes as PNGs and gates their VALUE RANGES against
+the AST declarations (first run: all five in range — and the numbers themselves verified
+the healed water: disp.y +-1.3 m for a 1.2 m sea, level -1.28 at low tide). Named next:
+pixtool automation (diff a capture's bank dispatch outputs against fiber PNGs), a
+cube-face texel cross-check (step 11 for the color cube), CsSweDerive/eta writer edges.
+
+**THE DX12 GOTCHAS LEDGER (and the non-GA-workaround audit the user asked for: every
+workaround marked, with whether a GA formulation would have needed it at all):**
+1. Bindless static-sampler SampleLevel returns ZERO outside the pixel stage on this
+   driver (RTX 5060) — mesh AND compute. Workaround: manual-bilinear Loads everywhere a
+   kernel samples bindlessly (LoadBilinearWrap/Clamp). NON-GA WORKAROUND — and arguably
+   GA never needed the sampler: the fold treats a texture as a FIBER over the base space,
+   and gathering four fiber values and blending them IS the geometric product we wanted;
+   filtering hardware was a convenience, not a requirement. The GA formulation sidesteps
+   the trap by construction.
+2. Padded-vs-logical dims of tiled atlases: reserved texture desc = LOGICAL grid; TilesX
+   * TileW padding is atlas ADDRESSING only. Normalizing by padded dims reads garbage
+   (bit twice: ReadFields M6x, kernel SWE M7). The AST's metersPerUnit + range rows exist
+   so this class dies at boot.
+3. Reserved-tile NULL reads return zero BY SPEC — not a workaround, the atlas thesis:
+   sparse structure carried as algebra ("no water here costs nothing").
+4. RGBA16F hardware tile = 128x64: one logical 128^2 tile is a 1x2 hardware pair.
+5. R16F window pyramids stop at the one-tile-ish mip (16384 -> 256, max lod 6); the g[2]
+   clamp in FillComposedCb is that fact, not a tuning choice.
+6. GetCopyableFootprints row pitch is 256-aligned; a WIC writer fed unpadded rows crashed
+   at widths that weren't multiples of 64 texels (Image.h carries the scar).
+7. PIX capturer export drift: PIXGpuCaptureNextFrames (pix3 name) vs CaptureNextFrame
+   (the DLL's real export in current releases, same signature) — resolve both.
+8. Static samplers live in the root signature and cannot be indexed bindlessly — another
+   push toward Load-based fibers (see 1).
+9. Command-list BeginEvent metadata 1 (legacy ANSI) is decoded by PIX and RenderDoc with
+   no runtime DLL — markers need no dependency.
+
 **THE ALGEBRA-FIRST DOCTRINE (user, same day — how every session works from now on):**
 sessions on this project are Geometric/Clifford/other-algebra FIRST. The pipeline for any
 new leg: (1) WRITE THE MATH OUT — the derivation in algebra, on paper/markdown/sympy;

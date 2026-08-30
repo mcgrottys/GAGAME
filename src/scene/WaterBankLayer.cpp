@@ -1,5 +1,6 @@
 #include "scene/WaterBankLayer.h"
 
+#include "core/Image.h"
 #include "core/PixEvents.h"
 #include "scene/SeaLayer.h"
 
@@ -246,6 +247,92 @@ void WaterBankLayer::TraceProbe(Gpu& gpu, double wx, double wz) {
         return;
     }
     Log("[trace] 9b bank: point outside every resident ring");
+}
+
+void WaterBankLayer::DumpFibers(Gpu& gpu) {
+    auto read = [&](TileAtlas2D& bank, std::vector<float>& out) {
+        GpuTexture wrap;
+        wrap.res = bank.Res();
+        wrap.format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        wrap.width = 3072;
+        wrap.height = 512;
+        wrap.state = m_state;
+        uint32_t pitch = 0;
+        const std::vector<uint8_t> data = gpu.ReadbackTexture(wrap, &pitch);
+        out.resize(3072ull * 512 * 4);
+        for (uint32_t y = 0; y < 512; ++y) {
+            const uint16_t* px =
+                reinterpret_cast<const uint16_t*>(data.data() + static_cast<size_t>(pitch) * y);
+            for (uint32_t x = 0; x < 3072u * 4; ++x) {
+                out[static_cast<size_t>(y) * 3072 * 4 + x] = HalfF(px[x]);
+            }
+        }
+    };
+    std::vector<float> disp, param, det;
+    read(m_disp, disp);
+    read(m_param, param);
+    read(m_detail, det);
+    auto save = [&](const wchar_t* path, auto shade) {
+        std::vector<uint8_t> img(3072ull * 512 * 4);
+        for (size_t i = 0; i < 3072ull * 512; ++i) {
+            shade(i, &img[i * 4]);
+            img[i * 4 + 3] = 255;
+        }
+        SavePng(path, img.data(), 3072, 512, 3072 * 4, img.size());
+    };
+    auto tone = [](float v, float scale) {
+        return static_cast<uint8_t>(
+            std::clamp(0.5f + 0.5f * v / scale, 0.0f, 1.0f) * 255.0f + 0.5f);
+    };
+    save(L"fiber_disp.png", [&](size_t i, uint8_t* o) {
+        o[0] = tone(disp[i * 4 + 0], 2.0f);
+        o[1] = tone(disp[i * 4 + 1], 2.0f);
+        o[2] = tone(disp[i * 4 + 2], 2.0f);
+    });
+    save(L"fiber_foam.png", [&](size_t i, uint8_t* o) {
+        const uint8_t g = static_cast<uint8_t>(std::clamp(disp[i * 4 + 3], 0.0f, 1.0f) * 255);
+        o[0] = o[1] = o[2] = g;
+    });
+    save(L"fiber_param.png", [&](size_t i, uint8_t* o) {
+        o[0] = tone(param[i * 4 + 0], 3.0f);
+        o[1] = static_cast<uint8_t>(std::clamp(param[i * 4 + 1] * 24.0f, 0.0f, 1.0f) * 255);
+        o[2] = tone(param[i * 4 + 2], 2.5f);
+    });
+    save(L"fiber_detail.png", [&](size_t i, uint8_t* o) {
+        o[0] = static_cast<uint8_t>(std::clamp(det[i * 4] / 3.0f, 0.0f, 1.0f) * 255);
+        o[1] = static_cast<uint8_t>(std::clamp(det[i * 4 + 1], 0.0f, 1.0f) * 255);
+        o[2] = 0;
+    });
+    // The AST's declared ranges, enforced over the whole plane (zeros are NULL tiles and
+    // legal everywhere; the check watches the extremes).
+    struct RangeCheck {
+        const char* what;
+        float lo, hi, seenLo, seenHi;
+        int idx;
+        const std::vector<float>* buf;
+    } checks[] = {
+        {"disp.y (m, +-Hs/2*3)", -6.0f, 6.0f, 0, 0, 1, &disp},
+        {"param.level (m NAVD)", -4.0f, 4.0f, 0, 0, 0, &param},
+        {"param.sigma2", 0.0f, 0.12f, 0, 0, 1, &param},
+        {"param.u (m/s)", -4.0f, 4.0f, 0, 0, 2, &param},
+        {"detail.hsScale*expo", 0.0f, 3.0f, 0, 0, 0, &det},
+    };
+    bool ok = true;
+    for (auto& c : checks) {
+        c.seenLo = 1e9f;
+        c.seenHi = -1e9f;
+        for (size_t i = 0; i < 3072ull * 512; ++i) {
+            const float v = (*c.buf)[i * 4 + c.idx];
+            c.seenLo = (std::min)(c.seenLo, v);
+            c.seenHi = (std::max)(c.seenHi, v);
+        }
+        const bool bad = c.seenLo < c.lo || c.seenHi > c.hi;
+        if (bad) ok = false;
+        Log("[fibers] %-22s seen [%+.3f, %+.3f]  declared [%+.1f, %+.1f]  %s", c.what,
+            c.seenLo, c.seenHi, c.lo, c.hi, bad ? "OUT OF RANGE" : "ok");
+    }
+    Log("[fibers] exported fiber_disp/foam/param/detail.png (3072x512, rings left to "
+        "right)%s", ok ? "" : " -- RANGE VIOLATIONS above");
 }
 
 void WaterBankLayer::Render(const FrameContext& ctx) {

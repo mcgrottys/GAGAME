@@ -8,6 +8,8 @@
 #pragma once
 
 #include <d3d12.h>
+
+#include <cstdint>
 #include <cstring>
 
 namespace ga {
@@ -19,6 +21,13 @@ inline void PixEnd(ID3D12GraphicsCommandList* cl) { cl->EndEvent(); }
 inline void PixMarker(ID3D12GraphicsCommandList* cl, const char* name) {
     cl->SetMarker(1u, name, static_cast<UINT>(std::strlen(name) + 1));
 }
+
+// M7k: programmatic GPU captures via the INSTALLED PIX's WinPixGpuCapturer.dll, loaded
+// dynamically (no NuGet, no redistributable). Load BEFORE device creation; then any
+// frame can be exported as a .wpix the PIX UI opens with every pass named by its
+// state-diagram node.
+bool PixLoadGpuCapturer();
+bool PixGpuCaptureFrames(const wchar_t* wpixPath, uint32_t frameCount);
 
 struct PixScope {
     ID3D12GraphicsCommandList* cl;

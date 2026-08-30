@@ -131,6 +131,10 @@ public:
 
     // ---- readback: copies a texture to system memory. Synchronous; only used by --dump.
     std::vector<uint8_t> ReadbackTexture(GpuTexture& tex, uint32_t* outRowPitch);
+    // M7l: one texel of one subresource -- the hypervisor's compose-tile cross-check.
+    // Returns up to 16 bytes of the texel in out; true on success.
+    bool ReadbackTexel(ID3D12Resource* res, uint32_t subresource, uint32_t x, uint32_t y,
+                       D3D12_RESOURCE_STATES state, uint8_t out[16]);
     // Readback for a plain buffer (self-test results). Synchronous.
     std::vector<uint8_t> ReadbackBuffer(ID3D12Resource* buf, uint64_t bytes,
                                         D3D12_RESOURCE_STATES currentState);

@@ -95,6 +95,20 @@ public:
     }
 
     uint32_t TextureSrv(int tenant) const { return m_tenants[tenant].srv; }
+    // M7l: the hypervisor asks what is ACTUALLY resident at a uv -- the same CPU-side map
+    // the GPU residency clamp samples (byte = finest resident mip * 16).
+    uint32_t ResidentMipAt(int tenant, uint32_t face, float u, float v) const {
+        const Tenant& t = m_tenants[tenant];
+        if (face >= t.faces || t.resCpu[face].empty() || t.resMap.width == 0) return 255u;
+        const uint32_t rdim = t.resMap.width;
+        uint32_t x = static_cast<uint32_t>(u * rdim);
+        uint32_t y = static_cast<uint32_t>(v * rdim);
+        if (x >= rdim) x = rdim - 1;
+        if (y >= rdim) y = rdim - 1;
+        return t.resCpu[face][static_cast<size_t>(y) * rdim + x] / 16u;
+    }
+    ID3D12Resource* TextureRes(int tenant) const { return m_tenants[tenant].res.Get(); }
+    D3D12_RESOURCE_STATES TextureState(int tenant) const { return m_tenants[tenant].state; }
     uint32_t ResidencySrv(int tenant) const { return m_tenants[tenant].resMapSrv; }
 
     // The renderer's per-frame demand: face-uv rect (of THIS tenant's cube) wanted at `mip`.

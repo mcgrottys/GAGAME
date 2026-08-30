@@ -14,6 +14,7 @@
 // ================================================================================================
 #include "core/Gpu.h"
 #include "core/Image.h"
+#include "core/PixEvents.h"
 #include "core/TileAtlas.h"
 #include "core/Window.h"
 #include "render/Renderer.h"
@@ -61,6 +62,8 @@ struct Options {
     bool headless = false;
     bool selftest = false;
     bool trace = false;               // --trace lat,lon: the hypervisor walk (M7j)
+    uint32_t pixFrames = 0;           // --pix N: programmatic .wpix capture of N frames
+    bool dumpFibers = false;          // --dump-fibers: bank planes as PNGs + range gate
     double traceLat = 42.816, traceLon = -70.81;
     bool debugLayer = false;
     uint32_t frames = 0;              // 0 = run until the window closes
@@ -206,6 +209,11 @@ Options ParseArgs(int argc, char** argv) {
             }
             o.trace = true;
         }
+        else if (a == "--pix") {
+            o.pixFrames = static_cast<uint32_t>(_wtoi(Widen(next("1").c_str()).c_str()));
+            if (o.pixFrames == 0) o.pixFrames = 1;
+        }
+        else if (a == "--dump-fibers") o.dumpFibers = true;
         else if (a == "--warm-inlet") o.warmInlet = true;
         else if (a == "--planet") o.planet = next("earth");
         else if (a == "--tile-budget") o.tileBudget = static_cast<uint32_t>(atoi(next("1000").c_str()));
@@ -942,6 +950,8 @@ int main(int argc, char** argv) {
             if (!window.Create(opt.width, opt.height, L"GAGAME")) return 1;
         }
 
+        // M7k: the PIX capturer must be resident BEFORE device creation.
+        if (opt.pixFrames > 0) PixLoadGpuCapturer();
         Gpu gpu;
         gpu.Init(opt.headless ? nullptr : window.Handle(), opt.width, opt.height, opt.debugLayer);
 
@@ -2344,6 +2354,12 @@ int main(int argc, char** argv) {
                                   static_cast<float>(southAt(simUnix)),
                                   static_cast<float>(westQAt(simUnix)));
             }
+            // M7k: arm the programmatic .wpix capture so it records the run's LAST warm
+            // frames -- every pass named by its state-diagram node.
+            if (opt.pixFrames > 0 && opt.frames > 0 && opt.frames + (opt.rail.empty() ? 0u : 150u) >= opt.pixFrames + 4 &&
+                frame + opt.pixFrames + 4 == opt.frames + (opt.rail.empty() ? 0u : 150u)) {
+                PixGpuCaptureFrames(L"gagame.wpix", opt.pixFrames);
+            }
             if (sea) sea->SetTime(simUnix, bathy.Ready() ? waterNavd : tide->focusHeight,
                                   cam.px, cam.pz);
             if (terrain) terrain->waterNavd = static_cast<float>(waterNavd);
@@ -2379,6 +2395,7 @@ int main(int argc, char** argv) {
                 // M7j: THE HYPERVISOR -- one sample, every transformation, each hop tagged
                 // with the AST edge it exercises. CPU-derivable steps print values; fields
                 // that live only on the GPU print their frame contract and where to look.
+                if (opt.dumpFibers && waterBank) waterBank->DumpFibers(gpu);
                 if (opt.trace && !marsMode && sea && waterBank) {
                     const double tlat = opt.traceLat, tlon = opt.traceLon;
                     const double wx = (tlon - BathyModel::kOrgLon) * BathyModel::kMPerLon;
@@ -2432,6 +2449,71 @@ int main(int argc, char** argv) {
                     Log("[trace] ==== cross-check: NOAA tides at 8440452, GoMOFS currents, "
                         "GFS-Wave Hs -- the provenance strings above name the rungs ====");
                     waterBank->TraceProbe(gpu, wx, wz);
+                    // Step 11: THE COMPOSED TILES THEMSELVES. Same point, three answers
+                    // that must agree: the CPU stack (the law), the resident GPU texel of
+                    // the height window (what the renderer actually reads), and the
+                    // residency map that says which mip that is. stack -> cache -> GPU,
+                    // end to end.
+                    if (hgtWinTenant >= 0 && hgtCh >= 0) {
+                        const double piT = 3.14159265358979;
+                        const double n14 = 16384.0 * 256.0;
+                        const double mxT = (tlon + 180.0) / 360.0 * n14;
+                        const double myT =
+                            (0.5 - std::log(std::tan(piT * 0.25 + tlat * piT / 360.0)) /
+                                       (2.0 * piT)) *
+                            n14;
+                        const double uT = (mxT - winOrgX) / 16384.0;
+                        const double vT = (myT - winOrgY) / 16384.0;
+                        if (uT > 0.0 && uT < 1.0 && vT > 0.0 && vT < 1.0) {
+                            const uint32_t mipT = resMgr.ResidentMipAt(
+                                hgtWinTenant, 0, static_cast<float>(uT),
+                                static_cast<float>(vT));
+                            if (mipT <= 7) {
+                                const uint32_t dimT = 16384u >> mipT;
+                                uint32_t txT = static_cast<uint32_t>(uT * dimT);
+                                uint32_t tyT = static_cast<uint32_t>(vT * dimT);
+                                if (txT >= dimT) txT = dimT - 1;
+                                if (tyT >= dimT) tyT = dimT - 1;
+                                uint8_t pxT[16] = {};
+                                float gpuH = 0.0f;
+                                if (gpu.ReadbackTexel(resMgr.TextureRes(hgtWinTenant),
+                                                      mipT, txT, tyT,
+                                                      resMgr.TextureState(hgtWinTenant),
+                                                      pxT)) {
+                                    const uint16_t h16 =
+                                        static_cast<uint16_t>(pxT[0] | (pxT[1] << 8));
+                                    const uint32_t sT = (h16 >> 15) & 1u,
+                                                   eT = (h16 >> 10) & 31u,
+                                                   mT2 = h16 & 1023u;
+                                    gpuH = (eT == 0)
+                                               ? 0.0f
+                                               : std::ldexp(1.0f + mT2 / 1024.0f,
+                                                            static_cast<int>(eT) - 15) *
+                                                     (sT ? -1.0f : 1.0f);
+                                }
+                                // CPU stack at the TEXEL CENTRE, at the texel's own res.
+                                const double pxC = winOrgX + (txT + 0.5) * (1 << mipT);
+                                const double pyC = winOrgY + (tyT + 0.5) * (1 << mipT);
+                                const double lonC = pxC / n14 * 360.0 - 180.0;
+                                const double latC =
+                                    std::atan(std::sinh(piT * (1.0 - 2.0 * pyC / n14)));
+                                const float cpuH = compositor.SampleHeightStack(
+                                    hgtCh, latC, lonC * piT / 180.0,
+                                    9.55 * (1 << mipT));
+                                const float dH = std::abs(gpuH - cpuH);
+                                const float tol =
+                                    0.06f + 0.02f * std::abs(cpuH);
+                                Log("[trace] 11 compose  height.window mip %u texel "
+                                    "(%u,%u): GPU %+.2f m vs CPU stack %+.2f m  %s "
+                                    "(edge compose.stack->window.z14, |d| %.3f tol %.3f)",
+                                    mipT, txT, tyT, gpuH, cpuH,
+                                    dH <= tol ? "MATCH" : "MISMATCH", dH, tol);
+                            } else {
+                                Log("[trace] 11 compose  height.window: nothing resident "
+                                    "at this uv yet");
+                            }
+                        }
+                    }
                     if (sea->DumpShadowPgm("trace_shadow.pgm")) {
                         Log("[trace] shadow mask dumped: trace_shadow.pgm (row 0 = north)");
                     }
@@ -2443,6 +2525,14 @@ int main(int argc, char** argv) {
             Log("[perf] mean frame %.2f ms over %u frames (%.0f fps)", frameMsSum / frameMsN,
                 frameMsN, 1000.0 / (frameMsSum / frameMsN));
         }
+        // M7l: THE DEBUG SESSION REPORT -- the free byproducts, printed every run: what the
+        // diagram holds, what the compositor did, what streaming did. The gates print their
+        // own PASS lines under --selftest; the trace and fibers print theirs when asked.
+        Log("[report] ---- session: %zu AST edges (%s) | compose %u painted %u cache-hit | "
+            "fetches %u | pending %u ----",
+            ga::ast::Edges().size(), ga::ast::Validate() ? "frames hold" : "FLIP FAILURES",
+            compositor.painted.load(), compositor.cacheHits.load(),
+            resMgr.fetchesThisRun, resMgr.PendingCount());
 
         if (opt.seaVerify && sea) {
             const double hr = sea->MeasureRenderedHs(gpu);
