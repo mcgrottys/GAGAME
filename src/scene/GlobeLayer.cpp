@@ -681,6 +681,26 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
                     m_res->Want(m_hgtWinT, 0, dmip, wu0, wv0, wu1, wv1, m_predictPass);
                 }
             }
+            // M7f: the z17 DETAIL window rides the same node box, 8x finer frame.
+            if (m_detWinT >= 0) {
+                const double eu0 = (mmin[0] * 8.0 - m_det17Org[0]) / 16384.0;
+                const double ev0 = (mmin[1] * 8.0 - m_det17Org[1]) / 16384.0;
+                const double eu1 = (mmax[0] * 8.0 - m_det17Org[0]) / 16384.0;
+                const double ev1 = (mmax[1] * 8.0 - m_det17Org[1]) / 16384.0;
+                if (eu1 > 0.0 && ev1 > 0.0 && eu0 < 1.0 && ev0 < 1.0) {
+                    const double px =
+                        arc / ((std::max)(dist, 1.0) * (std::max)(m_pixAng, 1e-6f));
+                    const double spanD = (std::max)(eu1 - eu0, ev1 - ev0);
+                    const int emip = (std::max)(
+                        0, static_cast<int>(std::ceil(std::log2(
+                               (std::max)(spanD * 16384.0 / (std::max)(px, 16.0), 1.0)))));
+                    m_res->Want(m_detWinT, 0, emip,
+                                static_cast<float>((std::max)(eu0, 0.0)),
+                                static_cast<float>((std::max)(ev0, 0.0)),
+                                static_cast<float>((std::min)(eu1, 1.0)),
+                                static_cast<float>((std::min)(ev1, 1.0)), m_predictPass);
+                }
+            }
         }
     }
     if (m_predictPass) return;   // prefetch walk: wants only, no draw nodes
@@ -902,7 +922,8 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     // the terrain also uses -- the two layers cannot disagree about this math.
     FillComposedCb(m_cb.cs, m_res, m_colorT, m_winT, m_hgtT, m_hgtWinT, m_detOrg[0],
                    m_detOrg[1], m_detSize, 14, m_radius, m_frameE, m_frameU, m_frameN,
-                   stencilOverlay, m_gisWinSrv, m_gisGlobSrv);
+                   stencilOverlay, m_gisWinSrv, m_gisGlobSrv, m_detWinT, m_det17Org, 17,
+                   m_gisEditSrv, m_gisEditOn ? m_gisEditBox : nullptr);
     if (m_streamMars) {
         m_cb.texIdx[1] = m_cb.texIdx[2] = m_cb.texIdx[3] = UINT32_MAX;   // waves/wind/clouds
         m_cb.texIdx2[1] = UINT32_MAX;                                    // wind bank

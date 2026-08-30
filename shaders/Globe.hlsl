@@ -263,7 +263,10 @@ float4 PsMain(VsOut i) : SV_Target {
     // depths were reading heights that disagreed by more than the shore band and cutting
     // hard seams. Fine data still drives shading; only the land/water QUESTION reads the
     // stable level.
-    const float hpC = ComposedHeightOn() ? ComposedHeight(up, max(lod, -4.0f)) : i.h;
+    // M7f: classification input sharpens one rung, 38 m -> 19 m (window mip 1): the fine
+    // edit mask owns the structures now, so the height-driven shoreline can afford the
+    // finer level -- half the staircase, same residency-stable contract.
+    const float hpC = ComposedHeightOn() ? ComposedHeight(up, max(lod, -5.0f)) : i.h;
     const float landness =
         (gStreamF.z > 0.5f) ? ((hp > 0.0f) ? 1.0f : 0.0f)
                             : ComposedLandness(up, hpC, gWavesB.w);

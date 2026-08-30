@@ -181,7 +181,10 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
                        stencil overlay on */ \
     float4 gCsR0;   /* planet->tangent rotation rows (east / up / north) */ \
     float4 gCsR1; \
-    float4 gCsR2;
+    float4 gCsR2; \
+    uint4  gCsU4;   /* M7f: DETAIL color window (z17) SRV + residency, fine edit mask SRV */ \
+    float4 gCsDet;  /* detail uv from window uv: offset xy, scale z; w = fine edit mask on */ \
+    float4 gCsEd;   /* fine edit mask box in window uv: offset xy, scale zw */
 
 // The geometric-algebra toolkit lives in GA.hlsli (M3 moved it out so compute shaders with
 // their own root signatures can share it). Note for surface fields: the grade-2 part of

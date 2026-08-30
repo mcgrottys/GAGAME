@@ -86,6 +86,12 @@ void GisStencil::BuildMasks(Gpu& gpu, double orgPxX, double orgPxY, double sizeP
 
         std::ifstream ef(m_dir + "edits.geojson", std::ios::binary);
         int nEdits = 0;
+        struct EditRing {
+            std::vector<std::pair<double, double>> pts;   // window px
+            uint8_t val;
+            double x0, x1, y0, y1;
+        };
+        std::vector<EditRing> editRings;
         if (ef) {
             std::string text((std::istreambuf_iterator<char>(ef)),
                              std::istreambuf_iterator<char>());
@@ -122,6 +128,7 @@ void GisStencil::BuildMasks(Gpu& gpu, double orgPxX, double orgPxY, double sizeP
                     }
                     if (ring.size() < 3) continue;
                     ++nEdits;
+                    editRings.push_back({ring, val, x0, x1, y0, y1});
                     for (int y = (std::max)(0, static_cast<int>(y0));
                          y <= (std::min)(static_cast<int>(dim) - 1, static_cast<int>(y1));
                          ++y) {
@@ -140,6 +147,54 @@ void GisStencil::BuildMasks(Gpu& gpu, double orgPxX, double orgPxY, double sizeP
                 Log("[gis] %d mask edit polygon%s baked (edits.geojson overrides survey AND "
                     "the live-tide classifier)",
                     nEdits, nEdits == 1 ? "" : "s");
+            }
+            // M7f: THE FINE EDIT MASK. The same polygons again, rasterized over their own
+            // bbox at whatever a 4096^2 raster buys there (~1 m for the jetty cluster) --
+            // the coarse mask keeps answering for the coastline, the fine mask keeps the
+            // structures' EDGES: a surveyed jetty is a 25 m ridge, not a 38 m staircase.
+            if (!editRings.empty()) {
+                double bx0 = 1e18, bx1 = -1e18, by0 = 1e18, by1 = -1e18;
+                for (const auto& er : editRings) {
+                    bx0 = (std::min)(bx0, er.x0); bx1 = (std::max)(bx1, er.x1);
+                    by0 = (std::min)(by0, er.y0); by1 = (std::max)(by1, er.y1);
+                }
+                const double padPx = 12.0;
+                bx0 -= padPx; by0 -= padPx; bx1 += padPx; by1 += padPx;
+                const double bw = (std::max)(bx1 - bx0, by1 - by0);   // square: one scale
+                const uint32_t fdim = 4096;
+                std::vector<uint8_t> frg(static_cast<size_t>(fdim) * fdim * 2, 0);
+                const double fscale = fdim / bw;
+                for (const auto& er : editRings) {
+                    const int fx0 = (std::max)(0, static_cast<int>((er.x0 - bx0) * fscale));
+                    const int fx1 = (std::min)(static_cast<int>(fdim) - 1,
+                                               static_cast<int>((er.x1 - bx0) * fscale) + 1);
+                    const int fy0 = (std::max)(0, static_cast<int>((er.y0 - by0) * fscale));
+                    const int fy1 = (std::min)(static_cast<int>(fdim) - 1,
+                                               static_cast<int>((er.y1 - by0) * fscale) + 1);
+                    for (int y = fy0; y <= fy1; ++y) {
+                        for (int x = fx0; x <= fx1; ++x) {
+                            const double px = bx0 + (x + 0.5) / fscale;
+                            const double py = by0 + (y + 0.5) / fscale;
+                            if (!PointInRing(px, py, er.pts)) continue;
+                            frg[(static_cast<size_t>(y) * fdim + x) * 2] = er.val;
+                            frg[(static_cast<size_t>(y) * fdim + x) * 2 + 1] = 255;
+                        }
+                    }
+                }
+                m_maskEdit = gpu.CreateTexture2D(fdim, fdim, DXGI_FORMAT_R8G8_UNORM,
+                                                 D3D12_RESOURCE_FLAG_NONE,
+                                                 D3D12_RESOURCE_STATE_COPY_DEST,
+                                                 L"gis.editmaskFine (structures at ~1 m)");
+                gpu.UploadTexture(m_maskEdit, frg.data(), fdim * 2);
+                m_maskEdit.srv = gpu.CreateSrv(m_maskEdit.res.Get(), DXGI_FORMAT_R8G8_UNORM);
+                // Ring coords are in COARSE-MASK px (dim-scaled window px): the box uv
+                // divides by dim, so window uv 0..1 maps through it exactly.
+                m_editBox[0] = static_cast<float>(bx0 / dim);
+                m_editBox[1] = static_cast<float>(by0 / dim);
+                m_editBox[2] = static_cast<float>(dim / bw);
+                m_editBox[3] = static_cast<float>(dim / bw);
+                Log("[gis] fine edit mask: %u^2 over %.0f window px (%.2f m/texel)", fdim,
+                    bw * sizePx / dim, bw * (sizePx / dim) * 9.55 / fdim);
             }
         }
         m_maskWin = gpu.CreateTexture2D(dim, dim, DXGI_FORMAT_R8G8_UNORM,

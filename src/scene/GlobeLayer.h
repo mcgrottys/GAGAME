@@ -91,7 +91,8 @@ public:
         m_oneWater = oneWater;
     }
     void SetComposed(int colorCube, int window, int heightCube, int heightWindow,
-                     double orgPxX, double orgPxY, double sizePx) {
+                     double orgPxX, double orgPxY, double sizePx, int detailWin = -1,
+                     double detOrgPxX = 0.0, double detOrgPxY = 0.0) {
         m_colorT = colorCube;
         m_winT = window;
         m_hgtT = heightCube;
@@ -99,6 +100,9 @@ public:
         m_detOrg[0] = orgPxX;
         m_detOrg[1] = orgPxY;
         m_detSize = sizePx;
+        m_detWinT = detailWin;               // M7f: the z17 detail color window
+        m_det17Org[0] = detOrgPxX;
+        m_det17Org[1] = detOrgPxY;
     }
     uint32_t AirTiles() const {
         return (m_windReady ? m_windBank.ResidentCount() : 0) +
@@ -119,9 +123,13 @@ public:
     bool albedoLens = false;        // M6j: --albedo, raw composed color -- no lighting, no
                                     // atmosphere, no materials; THE view for texture work
     // GIS survey stencil textures (GisStencil), for the --stencil overlay.
-    void SetGisStencil(uint32_t winSrv, uint32_t globSrv) {
+    void SetGisStencil(uint32_t winSrv, uint32_t globSrv, uint32_t editSrv = 0xFFFFFFFFu,
+                       const float* editBox = nullptr) {
         m_gisWinSrv = winSrv;
         m_gisGlobSrv = globSrv;
+        m_gisEditSrv = editSrv;              // M7f: the ~1 m fine edit mask
+        for (int i = 0; i < 4; ++i) m_gisEditBox[i] = editBox ? editBox[i] : 0.0f;
+        m_gisEditOn = editSrv != 0xFFFFFFFFu && editBox != nullptr;
     }
     bool skyPassEnabled = true;     // M6g: off while SkyLayer owns the low-altitude backdrop
     bool windOverlay = false;       // V key: tint the Mv2 wind bank's curl (violet cyclonic)
@@ -233,6 +241,11 @@ private:
     ResidencyManager* m_res = nullptr;
     int m_surfT = -1, m_normT = -1;
     int m_colorT = -1, m_winT = -1, m_hgtT = -1, m_hgtWinT = -1;
+    uint32_t m_gisEditSrv = 0xFFFFFFFFu;
+    float m_gisEditBox[4] = {0, 0, 0, 0};
+    bool m_gisEditOn = false;
+    int m_detWinT = -1;
+    double m_det17Org[2] = {0.0, 0.0};
     uint32_t m_gisWinSrv = UINT32_MAX, m_gisGlobSrv = UINT32_MAX;
     double m_detOrg[2] = {0, 0};
     double m_detSize = 1;

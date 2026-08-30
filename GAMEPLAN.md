@@ -976,8 +976,33 @@ walls still lets wave crests clip through the sloped side triangles between land
 water vertexes — the amplification-shader leg owns that; imagery z-boundary rectangles
 still show through the refracted bed in the channel where google is the only authority.
 
+**M7f (2026-08-30): THE RESOLUTION PASS — "a bit blocky/low res."** Three quanta were
+lying about the data. (1) THE z17 DETAIL WINDOW: the renderer's near-field imagery ceiling
+was the z14 window's 9.5 m texels — google z17 and the MassGIS orthos were being thrown
+away at realization. A third live tenant (earth.color.detail, 16384^2 at z17, ~1.2 m px,
+~14 km centred on the inlet mouth) joins the compose ladder as its third rung: same
+Mercator frame, same channel stack, want emission riding the same node walk 8x finer, and
+a FINER-ONLY gate (z17 mip m == z14 mip m-3) so a half-warmed detail tile can never
+replace sharper coarse truth with mush. The CB grew three rows (gCsU4/gCsDet/gCsEd) —
+macro and struct append together, every composed consumer recompiles consistently.
+(2) THE FINE EDIT MASK: every land/water decision and the jetty flag sampled a 4096^2
+mask over the whole 16 km window — 38 m texels; a 25 m jetty was one texel of staircase.
+The same edit polygons now rasterize AGAIN over their own bbox (4096^2 over ~2.3 km =
+0.56 m/texel); the coarse mask keeps the coastline, the fine mask keeps the structures.
+The jetties render at true width — and the OLD SOUTH JETTY (OSM 559887262), a buried
+remnant crossing the beach, became visible for the first time: surveyed truth the 38 m
+mask had been erasing. Classification height input sharpened one rung too (38 m -> 19 m,
+window mip 1). (3) THE PROGRAM DEEPENED: google's blocky water photo still leaked into
+the refracted ray between the classifier's old -14 m fade and the ~-25 m transmittance
+floor — bed_rules.json alpha now runs full to -24, off at -38, so everywhere the ray can
+see bottom it sees the CLASSIFIER, and the photo's mip rectangles never touch the water.
+Two rules edits, zero code — the M7d thesis doing its job. Known residue: the storm surf
+zone over the bar fuses into a flat white sheet (churn + breaking clamp saturate
+together) — breaker individuation belongs to the churn leg. Five gates green.
+
 Named next: amplification-shader subdivision for sub-meter helm vertex density (also the
-jetty-wall clipping fix), the bank as an Exchange channel (water.surface for plugins), a
+jetty-wall clipping fix), breaker individuation in the surf zone (churn saturation), the
+bank as an Exchange channel (water.surface for plugins), a
 light wind-chop tail partition so calm water carries its capillary glitter, underwater
 caustic modulation of the bed term from the cascade derivs, the GPU-side GA engine
 growing out of this kernel (the tide rotors evaluated on-GPU from the realized phasor

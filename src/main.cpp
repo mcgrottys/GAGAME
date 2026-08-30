@@ -1182,6 +1182,8 @@ int main(int argc, char** argv) {
         Exchange exchange;       // M6j: the plugin bus -- named GA buffer channels
         const double winOrgX = 4935.0 * 256.0, winOrgY = 6008.0 * 256.0;   // Merrimack z14 px
         int colorCubeT = -1, winTenant = -1, hgtTenant = -1, hgtWinTenant = -1;
+        int detTenant = -1;   // M7f: z17 detail color window
+        double det17OrgX = 0.0, det17OrgY = 0.0;
         int colCh = -1;   // color channel id (hgtCh registered above the solver, M6w)
         if (globe) {
             resMgr.Init(gpu);
@@ -1246,9 +1248,31 @@ int main(int argc, char** argv) {
                         gpu, L"earth.color.window (composed, Merrimack z14)",
                         Compositor::kFaceDim, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
                         compositor.WindowColor(colCh, 1263360, 1538048, 16384, 14));
+                    // M7f: the z17 DETAIL window -- 1.2 m px, ~14 km centred on the inlet
+                    // mouth: the near field stops being capped at the z14 window's 9.5 m.
+                    // Same channel, same stack (massgis where harvested, google's own z17
+                    // ladder elsewhere), the compose ladder's third rung.
+                    {
+                        const double n17 = 16384.0 * 256.0 * 8.0;
+                        const double piD = 3.14159265358979;
+                        const double lonC = -70.8125, latC = 42.8160 * piD / 180.0;
+                        const double mx = (lonC + 180.0) / 360.0 * n17;
+                        const double my =
+                            (0.5 - std::log(std::tan(piD * 0.25 + latC * 0.5)) /
+                                       (2.0 * piD)) *
+                            n17;
+                        det17OrgX = std::floor(mx - 8192.0);
+                        det17OrgY = std::floor(my - 8192.0);
+                        detTenant = resMgr.AddTexture2D(
+                            gpu, L"earth.color.detail (composed, Merrimack z17)",
+                            Compositor::kFaceDim, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+                            compositor.WindowColor(
+                                colCh, static_cast<long long>(det17OrgX),
+                                static_cast<long long>(det17OrgY), 16384, 17));
+                    }
                 }
                 globe->SetComposed(colorCubeT, winTenant, hgtTenant, hgtWinTenant, winOrgX,
-                                   winOrgY, 16384.0);
+                                   winOrgY, 16384.0, detTenant, det17OrgX, det17OrgY);
             }
             globe->stencilOverlay = opt.stencil;
             compositor.LogRegistry();
@@ -1256,7 +1280,8 @@ int main(int argc, char** argv) {
             // classifier (always on); the VECTOR overlay draws only under --stencil.
             if (!marsMode && gisStencil.Load("data/gis/gis.json")) {
                 gisStencil.BuildMasks(gpu, winOrgX, winOrgY, 16384.0);
-                globe->SetGisStencil(gisStencil.MaskWinSrv(), gisStencil.MaskGlobSrv());
+                globe->SetGisStencil(gisStencil.MaskWinSrv(), gisStencil.MaskGlobSrv(),
+                                     gisStencil.MaskEditSrv(), gisStencil.EditBox());
                 vectors.Load("data/vectors/vectors.vpack");
                 auto gisOwned = std::make_unique<GisLayer>();
                 gisLayer = gisOwned.get();

@@ -517,7 +517,9 @@ void FillComposedCb(ComposedSurfaceCb& cb, const ResidencyManager* rm, int color
                     int window, int heightCube, int heightWindow, double orgPxX,
                     double orgPxY, double sizePx, int zBase, double planetR,
                     const double east[3], const double up[3], const double north[3],
-                    bool stencilOverlay, uint32_t gisWinSrv, uint32_t gisGlobSrv) {
+                    bool stencilOverlay, uint32_t gisWinSrv, uint32_t gisGlobSrv,
+                    int detailWin, const double* detOrgPx, int detailZ,
+                    uint32_t editMaskSrv, const float* editBox) {
     const bool cubeOn = rm && colorCube >= 0;
     const bool winOn = rm && window >= 0;
     const bool hgtOn = rm && heightCube >= 0;
@@ -553,6 +555,22 @@ void FillComposedCb(ComposedSurfaceCb& cb, const ResidencyManager* rm, int color
         cb.r2[i] = static_cast<float>(north[i]);
     }
     cb.r0[3] = cb.r1[3] = cb.r2[3] = 0.0f;
+    // M7f: the DETAIL color window (z17) -- the third rung of the one ladder -- plus the
+    // fine edit mask (surveyed structures at ~1 m over their own bbox).
+    const bool detOn = rm && detailWin >= 0 && detOrgPx;
+    cb.u4[0] = detOn ? rm->TextureSrv(detailWin) : UINT32_MAX;
+    cb.u4[1] = detOn ? rm->ResidencySrv(detailWin) : UINT32_MAX;
+    cb.u4[2] = editMaskSrv;
+    cb.u4[3] = UINT32_MAX;
+    cb.det[0] = cb.det[1] = cb.det[2] = 0.0f;
+    if (detOn && zBase > 0 && sizePx > 0.0) {
+        const double f = static_cast<double>(1ll << (detailZ - zBase));
+        cb.det[0] = static_cast<float>((orgPxX * f - detOrgPx[0]) / 16384.0);
+        cb.det[1] = static_cast<float>((orgPxY * f - detOrgPx[1]) / 16384.0);
+        cb.det[2] = static_cast<float>(sizePx * f / 16384.0);
+    }
+    cb.det[3] = (editMaskSrv != UINT32_MAX && editBox) ? 1.0f : 0.0f;
+    for (int i = 0; i < 4; ++i) cb.ed[i] = editBox ? editBox[i] : 0.0f;
 }
 
 }  // namespace ga

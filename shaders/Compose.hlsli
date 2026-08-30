@@ -71,6 +71,25 @@ float3 ComposedColor(float3 dir) {
             const float have = CsHave2D(gCsU.w, duv);
             const float4 w = gTex[gCsU.z].SampleLevel(sLinearClamp, duv, max(want, have));
             c = lerp(c, w.rgb, fe.x * fe.y * w.a);
+            // M7f: the DETAIL window (z17, ~1.2 m px) -- the ladder's third rung, in the
+            // same Mercator frame, so the near field stops being capped at 9.5 m texels.
+            if (gCsU4.x != 0xFFFFFFFFu) {
+                const float2 tuv = duv * gCsDet.z + gCsDet.xy;
+                if (all(tuv > 0.0f) && all(tuv < 1.0f)) {
+                    const float2 fd =
+                        smoothstep(0.0f, 0.04f, tuv) * smoothstep(1.0f, 0.96f, tuv);
+                    const float wantD =
+                        gTex[gCsU4.x].CalculateLevelOfDetail(sLinearClamp, tuv);
+                    const float haveD = CsHave2D(gCsU4.y, tuv);
+                    const float lodD = max(wantD, haveD);
+                    const float4 d = gTex[gCsU4.x].SampleLevel(sLinearClamp, tuv, lodD);
+                    // Take the detail rung only where it is actually FINER than what the
+                    // z14 window just delivered (z17 mip m == z14 mip m-3): a half-warmed
+                    // detail tile must never replace sharper coarse truth with mush.
+                    const float finer = saturate(max(want, have) + 3.0f - lodD);
+                    c = lerp(c, d.rgb, fd.x * fd.y * d.a * finer);
+                }
+            }
         }
     }
     // M6j final word on "conversion": NO lift at all. The 1.35 exposure compensation matched
@@ -134,6 +153,19 @@ float ComposedLandMask(float3 dir) {
 // shading mixes, geometry blends, and data-level changes modulate a gradient the eye reads
 // as wet sand instead of flipping a bit. Outside the window the mask stays binary (a survey
 // polygon IS a bit); no mask, no window -> height sign vs the waterline (Mars: 0).
+// M7f: the fine edit mask -- surveyed structures rasterized at ~1 m over their own bbox.
+// The 38 m survey mask keeps the coastline; the fine mask keeps the jetties. Falls back to
+// the coarse window mask outside the fine box (or when no fine mask exists).
+float2 CsEditMask(float2 duv) {
+    if (gCsDet.w > 0.5f) {
+        const float2 euv = (duv - gCsEd.xy) * gCsEd.zw;
+        if (all(euv > 0.0f) && all(euv < 1.0f)) {
+            return gTex[gCsU4.z].SampleLevel(sLinearClamp, euv, 0).xy;
+        }
+    }
+    return gTex[gCsU3.x].SampleLevel(sLinearClamp, duv, 0).xy;
+}
+
 float ComposedLandness(float3 dir, float hp, float waterLevel) {
     const float lm = ComposedLandMask(dir);
     float land = (lm >= 0.0f) ? ((lm > 0.5f) ? 1.0f : 0.0f)
@@ -152,7 +184,7 @@ float ComposedLandness(float3 dir, float hp, float waterLevel) {
     if (gCsU3.x != 0xFFFFFFFFu) {
         const float2 duvE = CsWindowUv(dir);
         if (all(duvE > 0.0f) && all(duvE < 1.0f)) {
-            const float2 me = gTex[gCsU3.x].SampleLevel(sLinearClamp, duvE, 0).xy;
+            const float2 me = CsEditMask(duvE);
             land = lerp(land, (me.x > 0.5f) ? 1.0f : 0.0f,
                         smoothstep(0.2f, 0.8f, me.y));
         }
@@ -171,7 +203,7 @@ float ComposedEditLand(float3 dir) {
     if (gCsU3.x == 0xFFFFFFFFu) return 0.0f;
     const float2 duv = CsWindowUv(dir);
     if (any(duv < 0.0f) || any(duv > 1.0f)) return 0.0f;
-    const float2 me = gTex[gCsU3.x].SampleLevel(sLinearClamp, duv, 0).xy;
+    const float2 me = CsEditMask(duv);
     return smoothstep(0.2f, 0.8f, me.y) * ((me.x > 0.5f) ? 1.0f : 0.0f);
 }
 

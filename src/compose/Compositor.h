@@ -211,6 +211,9 @@ struct ComposedSurfaceCb {
     float r0[4];      // planet->tangent rotation rows (east / up / north)
     float r1[4];
     float r2[4];
+    uint32_t u4[4];   // M7f: detail color window (z17) SRV + residency, fine edit mask SRV
+    float det[4];     // detail uv from window uv: offset xy, scale z; w = fine edit mask on
+    float ed[4];      // fine edit mask box in window uv: offset xy, scale zw
 };
 
 // The compositor's --selftest gate (ComposeTest.cpp): paint order, per-pixel weights, alpha,
@@ -223,6 +226,8 @@ void FillComposedCb(ComposedSurfaceCb& cb, const ResidencyManager* rm, int color
                     double orgPxY, double sizePx, int zBase, double planetR,
                     const double east[3], const double up[3], const double north[3],
                     bool stencilOverlay, uint32_t gisWinSrv = UINT32_MAX,
-                    uint32_t gisGlobSrv = UINT32_MAX);
+                    uint32_t gisGlobSrv = UINT32_MAX, int detailWin = -1,
+                    const double* detOrgPx = nullptr, int detailZ = 17,
+                    uint32_t editMaskSrv = UINT32_MAX, const float* editBox = nullptr);
 
 }  // namespace ga

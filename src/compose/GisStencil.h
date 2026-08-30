@@ -35,6 +35,10 @@ public:
     void BuildMasks(Gpu& gpu, double orgPxX, double orgPxY, double sizePx);
     bool Ready() const { return m_ready; }
     uint32_t MaskWinSrv() const { return m_maskWin.srv; }
+    // M7f: the FINE edit mask -- edits.geojson rasterized at ~1 m over the edits' own bbox
+    // (the 4096^2 window mask answers at 38 m texels; a 25 m jetty is one texel there).
+    uint32_t MaskEditSrv() const { return m_maskEdit.Valid() ? m_maskEdit.srv : 0xFFFFFFFFu; }
+    const float* EditBox() const { return m_editBox; }   // window-uv offset xy, scale zw
     uint32_t MaskGlobSrv() const { return m_maskGlob.srv; }
 
     const std::vector<Polyline>& CoastNe() const { return m_coastNe; }
@@ -47,7 +51,8 @@ private:
     std::vector<Polyline> m_coastNe, m_riversNe, m_coastGlob;
     std::string m_dir, m_maskNePath, m_maskGlobPath;
     uint32_t m_maskNeDim = 0, m_maskGw = 0, m_maskGh = 0;
-    GpuTexture m_maskWin, m_maskGlob;
+    GpuTexture m_maskWin, m_maskGlob, m_maskEdit;
+    float m_editBox[4] = {0, 0, 0, 0};
     bool m_ready = false;
 };
 
