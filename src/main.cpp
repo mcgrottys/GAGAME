@@ -64,6 +64,8 @@ struct Options {
     bool trace = false;               // --trace lat,lon: the hypervisor walk (M7j)
     uint32_t pixFrames = 0;           // --pix N: programmatic .wpix capture of N frames
     bool dumpFibers = false;          // --dump-fibers: bank planes as PNGs + range gate
+    int lens = 0;                     // --lens worldxz|winuv|mip|ring: value-as-color
+    bool inject = false;              // --inject: bank writes a world-aligned test card
     double traceLat = 42.816, traceLon = -70.81;
     bool debugLayer = false;
     uint32_t frames = 0;              // 0 = run until the window closes
@@ -214,6 +216,12 @@ Options ParseArgs(int argc, char** argv) {
             if (o.pixFrames == 0) o.pixFrames = 1;
         }
         else if (a == "--dump-fibers") o.dumpFibers = true;
+        else if (a == "--lens") {
+            const std::string n = next("worldxz");
+            o.lens = n == "worldxz" ? 1 : n == "winuv" ? 2 : n == "mip" ? 3
+                     : n == "ring" ? 4 : 1;
+        }
+        else if (a == "--inject") o.inject = true;
         else if (a == "--warm-inlet") o.warmInlet = true;
         else if (a == "--planet") o.planet = next("earth");
         else if (a == "--tile-budget") o.tileBudget = static_cast<uint32_t>(atoi(next("1000").c_str()));
@@ -1300,6 +1308,7 @@ int main(int argc, char** argv) {
                                    winOrgY, 16384.0, detTenant, det17OrgX, det17OrgY);
             }
             globe->stencilOverlay = opt.stencil;
+            globe->debugLens = opt.lens;
             compositor.LogRegistry();
             // M7j: the GA AST -- the state diagram printed and validated EVERY run, so a
             // frame mismatch or an orphaned field is a boot-time report, not a debugging
@@ -1308,6 +1317,7 @@ int main(int argc, char** argv) {
             ga::ast::SetActive("sea.ps", !opt.oneWater);
             ga::ast::Print();
             ga::ast::Validate();
+            ga::ast::WriteMarkdown("docs/GA_AST.md");   // the scriptorium indexes this
             // The survey pack loads whenever it exists: the land MASKS are the default
             // classifier (always on); the VECTOR overlay draws only under --stencil.
             if (!marsMode && gisStencil.Load("data/gis/gis.json")) {
@@ -2307,6 +2317,7 @@ int main(int argc, char** argv) {
                         patchS[c] = sea->FftPatchL(c);
                         bandKS[c] = static_cast<float>(std::sqrt(kCutB[c] * kCutB[c + 1]));
                     }
+                    waterBank->injectPattern = opt.inject;
                     globe->SetWaterBank(waterBank->DispSrv(), waterBank->ParamSrv(),
                                         waterBank->DetailSrv(), derivS, patchS, bandKS,
                                         sea->heightScale, waterBank->BaseTexelM(), orgs,

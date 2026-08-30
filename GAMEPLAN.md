@@ -1124,6 +1124,21 @@ the healed water: disp.y +-1.3 m for a 1.2 m sea, level -1.28 at low tide). Name
 pixtool automation (diff a capture's bank dispatch outputs against fiber PNGs), a
 cube-face texel cross-check (step 11 for the color cube), CsSweDerive/eta writer edges.
 
+**M7m (2026-08-30): THE SANITY LENSES, THE TEST CARD, AND THE SCRIPTORIUM.** The
+session's pivot completed: debug tooling is the product. (1) --lens
+worldxz|winuv|mip|ring — values as COLOR: the world checker (a frame or scale error is a
+seam), the window uv gradient (its v-SOUTH direction visible), the residency heat map,
+the bank rings with their 4-texel checker. A domain error stops being an argument and
+becomes a broken pattern. (2) --inject — EDGE PATTERN INJECTION: the bank kernel writes a
+world-aligned test card (50 m checker + north wedges every 500 m) into the foam fiber
+instead of physics; if the card arrives on screen continuous across rings, unmirrored,
+wedges north — the bank->render edge is clean by inspection. First run: clean, and the
+card also demonstrated the dry gate and the fold eating sub-texel wedges at coarse rings
+(honest attenuation, visible). (3) THE SCRIPTORIUM INTEGRATION: the AST writes
+docs/GA_AST.md every boot (the diagram as a markdown table, generated never hand-edited)
+and the scriptorium reindexed it — a future session QUERIES the edge table instead of
+re-deriving conventions from shader archaeology. Six gates green.
+
 **THE DX12 GOTCHAS LEDGER (and the non-GA-workaround audit the user asked for: every
 workaround marked, with whether a GA formulation would have needed it at all):**
 1. Bindless static-sampler SampleLevel returns ZERO outside the pixel stage on this

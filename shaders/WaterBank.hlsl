@@ -167,6 +167,21 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         d.xz *= 0.85f;
     }
 
+    // M7m: EDGE PATTERN INJECTION. Flip the switch and this kernel writes a WORLD-ALIGNED
+    // test card into the foam fiber instead of physics: a 50 m checker and a wedge that
+    // points NORTH every 500 m. If the pattern arrives on screen continuous across rings,
+    // unmirrored, wedges northward -- the bank -> render edge is clean; any flip,
+    // rotation, or scale error draws itself.
+    if (gMisc.z > 0.5f) {
+        const float chk = fmod(floor(xz.x / 50.0f) + floor(xz.y / 50.0f) + 400000.0f, 2.0f);
+        const float2 cell = frac(xz / 500.0f);
+        const float wedge = (abs(cell.x - 0.5f) < 0.05f * (1.0f - cell.y) && cell.y > 0.4f)
+                                ? 1.0f
+                                : 0.0f;
+        foam = chk * 0.30f + wedge;
+        d = 0.0f;
+    }
+
     const uint2 dst = uint2(t.dstX + id.x, t.dstY + id.y);
     gU[gSlotsB.y][dst] = float4(d, saturate(foam * dry));
     gU[gSlotsB.z][dst] = float4(lvl, sig2, cur.x, cur.y);

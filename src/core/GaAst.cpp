@@ -87,6 +87,27 @@ bool Validate() {
     return ok;
 }
 
+void WriteMarkdown(const char* path) {
+    FILE* f = fopen(path, "wb");
+    if (!f) return;
+    const char nl = '\n';
+    fprintf(f, "# THE GA AST -- the state diagram's edges (generated every run; do not "
+               "hand-edit)%c%c", nl, nl);
+    fprintf(f, "Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is "
+               "the second axis' compass direction; FLIP marks where the sampling code "
+               "inverts v. The flip rule (frames that disagree need exactly one flip) and "
+               "the orphan rule are enforced by gatest and at every boot.%c%c", nl, nl);
+    fprintf(f, "| from | field | to | src frame | dst frame | flip | units | range | gain "
+               "| code anchor |%c|---|---|---|---|---|---|---|---|---|---|%c", nl, nl);
+    for (const Edge& e : Reg()) {
+        fprintf(f, "| %s | %s | %s%s | %s %s | %s %s | %s | %s | %s | x%.3g | %s |%c",
+                e.from, e.field, e.to, e.active ? "" : " (inactive)", e.src.space,
+                e.src.vNorth ? "+v=N" : "+v=S", e.dst.space, e.dst.vNorth ? "+v=N" : "+v=S",
+                e.flip ? "FLIP" : "-", e.units, e.range, e.gain, e.code, nl);
+    }
+    fclose(f);
+}
+
 void RegisterKnownComposeEdges() {
     const Frame latlon{"latlon.deg", true, 0, 0, 0};
     const Frame mercPx{"mercator.px", false, 0, 0, 0};   // web-mercator y grows SOUTH

@@ -66,6 +66,9 @@ const std::vector<Edge>& Edges();
 // by main at boot so the printed diagram always carries every known edge.
 void RegisterKnownWaterEdges();
 void RegisterKnownComposeEdges();   // the compositor + residency pillars (M7l)
+// M7m: persist the diagram as markdown (docs/GA_AST.md) so the scriptorium indexes it --
+// a future session QUERIES the edge table instead of rereading shaders out of context.
+void WriteMarkdown(const char* path);
 
 }  // namespace ga::ast
 

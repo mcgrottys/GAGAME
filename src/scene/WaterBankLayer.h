@@ -65,6 +65,7 @@ public:
     // M7k --dump-fibers: export the three bank planes as PNGs + validate the value
     // ranges against the AST's declarations -- the hypervisor for whole fields.
     void DumpFibers(Gpu& gpu);
+    bool injectPattern = false;   // M7m: kernel writes the edge test card into foam
     float BaseTexelM() const { return m_baseTexelM; }
     uint32_t ResidentTiles() const {
         return m_disp.ResidentCount() + m_param.ResidentCount() + m_detail.ResidentCount();

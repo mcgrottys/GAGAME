@@ -484,6 +484,55 @@ float4 PsMain(VsOut i) : SV_Target {
         return float4(ApplyComposedStencil(lens, up), 1.0f);
     }
 
+    // ---- M7m: THE SANITY LENSES -- values as color, so a domain error is a broken
+    // pattern instead of an argument. worldxz: a 100 m world checker (any frame/scale
+    // error shows as a seam across LOD or ring boundaries). winuv: the window uv gradient
+    // (its v is SOUTH -- the gradient direction proves it). mip: the height window's
+    // residency heat. ring: the bank's rings with a 4-texel checker (bank addressing on
+    // screen). These test the GA the cheap way: patterns survive correct products.
+    if (gBankA.z > 0.5f) {
+        const float2 wxzL = (CsToTangent(up) * gGlo.x).xz;
+        const int lensId = (int)(gBankA.z + 0.5f);
+        float3 lc = float3(0.05f, 0.05f, 0.08f);
+        if (lensId == 1) {
+            const float chk = fmod(floor(wxzL.x / 100.0f) + floor(wxzL.y / 100.0f) +
+                                       200000.0f,
+                                   2.0f);
+            lc = float3(frac(wxzL / 100.0f) * 0.75f + 0.1f, chk * 0.7f);
+        } else if (lensId == 2) {
+            const float2 duvL = CsWindowUv(up);
+            if (all(duvL > 0.0f) && all(duvL < 1.0f)) lc = float3(duvL, 0.0f);
+        } else if (lensId == 3) {
+            const float2 duvL = CsWindowUv(up);
+            if (gCsU2.w != 0xFFFFFFFFu && all(duvL > 0.0f) && all(duvL < 1.0f)) {
+                const float mL = CsHave2D(gCsU2.w, duvL);
+                lc = lerp(float3(0.1f, 0.85f, 0.25f), float3(0.9f, 0.12f, 0.1f),
+                          saturate(mL / 7.0f));
+            }
+        } else if (lensId == 4) {
+            [unroll] for (uint mR = 0u; mR < 6u; ++mR) {
+                const float texelL = gBankA.x * float(1u << mR);
+                const float2 orgL =
+                    (mR == 0u)   ? gBankOrg01.xy
+                    : (mR == 1u) ? gBankOrg01.zw
+                    : (mR == 2u) ? gBankOrg23.xy
+                    : (mR == 3u) ? gBankOrg23.zw
+                    : (mR == 4u) ? gBankOrg45.xy
+                                 : gBankOrg45.zw;
+                const float2 localL = (wxzL - orgL) / texelL;
+                if (all(localL >= 1.0f) && all(localL < 511.0f)) {
+                    const float chk =
+                        fmod(floor(localL.x / 4.0f) + floor(localL.y / 4.0f), 2.0f);
+                    lc = lerp(float3(0.15f, 0.35f, 1.0f), float3(1.0f, 0.75f, 0.15f),
+                              float(mR) / 5.0f) *
+                         (0.45f + 0.55f * chk);
+                    break;
+                }
+            }
+        }
+        return float4(lc, 1.0f);
+    }
+
     // ---- M6c: the live 3D sky. One column sample shades the ground under weather...
     float overhead = 0.0f;
     if (gTexIdx.w != 0xFFFFFFFFu) {
