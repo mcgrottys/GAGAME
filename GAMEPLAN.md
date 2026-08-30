@@ -923,9 +923,38 @@ microfacet math averages sub-pixel slopes statistically. DXR stays a named exper
 heightfield we own, there is nothing for RT cores to save. --rail-jetty: tip → tip →
 bird's eye, shot at a low-tide --start.
 
+**M7d (2026-08-30): THE BED CLASSIFIER — the compositor's first SYNTHESIS NODE, and the
+seed of the terrain-building tool.** The user named the architecture: a node in the state
+diagram (or a state diagram within the compositor) that BUILDS textures, underwater or
+above, "with what the client or agent decides." The shape it took: **a synthesis source is
+a state-diagram node living inside a channel stack; its EDGE pulls sibling channels (here:
+the height stack — depth and slope, three SampleHeightStack calls per texel); its PROGRAM
+is a data file.** BedSynthSource paints into earth.color BETWEEN google and massgis —
+stack order is the authority ranking: Google's photo of open water loses to the
+classifier, the classifier loses to an ortho that actually saw the bed. The program is
+data/bed/bed_rules.json + bed_zones.geojson (authored with defaults if absent, never
+clobbered — the M6p law): ordered rules gated on slope (rock/sand), shallow/deep dry
+albedos, folded two-octave grain (an octave a rung cannot resolve is SHED, not aliased —
+M6t wearing a color hat), an alpha ramp that fades where transmittance kills the bed
+term anyway (−9→−14) and where land imagery takes over (+0.4→+1.2), and zone polygons
+(properties.bed names a rule, properties.albedo overrides paint) as the surface a future
+agentic tool or UX edits. THE IDENTITY IS THE PROGRAM PLUS ITS INPUTS: the content hash
+covers rules + zones + the height stack's signature, so editing the program (or reshaping
+the bed) repaints exactly the touched tiles at every rung — an agent iterating on the
+rules file gets exact incremental repaints for free. Colors are DRY bed albedo: the
+renderer's refracted ray applies the water's own attenuation, so the satellite look is
+REPRODUCED by physics, not quoted — the ebb-shoal fan now reads sand-bright at low tide,
+drowns back to teal at high, and the photo becomes a VALIDATION TARGET (render at the
+photo's own tide and sun, compare — the buoy-gate doctrine, for pixels). The user's
+thesis, recorded: bathymetry + the water simulation + the two rays + future atmospherics
+should rival the satellite photo, especially in lighting. Registry line: L1 synth.bed,
+wgs84.synthesis (height-stack product). Five gates green.
+
 Named next: churn/foam into the bank params, amplification-shader subdivision for
 sub-meter helm vertex density, the bank as an Exchange channel (water.surface for
 plugins), a light wind-chop tail partition so calm water carries its capillary glitter,
-underwater caustic modulation of the bed term from the cascade derivs, and the GPU-side
+underwater caustic modulation of the bed term from the cascade derivs, the GPU-side
 GA engine growing out of this kernel (the tide rotors evaluated on-GPU from the realized
-phasor windows).
+phasor windows), more synthesis nodes (wetland/eelgrass classifier, a render-vs-photo
+residual gate), and the terrain-building tool proper: an agent or UX writing bed_rules /
+bed_zones / edits.geojson through a common "program file" contract.

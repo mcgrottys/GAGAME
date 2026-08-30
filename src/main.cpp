@@ -1169,6 +1169,8 @@ int main(int argc, char** argv) {
         // solver, M6w). Sources register their schemas; channels stack them in order;
         // realizations paint composed quadtrees ONCE and cache every 64KB tile.
         GoogleColorSource srcGoogle(&googleTiles);
+        BedSynthSource srcBed;          // M7d: the bed classifier -- the first synthesis
+                                        // node; its program is data/bed/bed_rules.json
         AerialOrthoSource srcAerial;    // M6l: MassGIS 15 cm orthos (loads if harvested)
         AerialOrthoSource srcOverlay;   // M6o: user GeoTIFF overlays -- ALPHA IS FIBER: a
                                         // mostly-transparent highlights plane bleeds through
@@ -1224,6 +1226,11 @@ int main(int argc, char** argv) {
                     // have coverage -- the compositor's first independent high-res layer,
                     // aligned by its own declared projection (EPSG:6348), not by luck.
                     std::vector<ColorSource*> colorStack{&srcGoogle};
+                    // The bed paints ABOVE google (its photo of open water) and BELOW the
+                    // surveyed orthos: stack order is the authority ranking.
+                    if (srcBed.Load("data/bed/bed_rules.json", &compositor, hgtCh)) {
+                        colorStack.push_back(&srcBed);
+                    }
                     if (srcAerial.Load("data/aerial/aerial.json")) {
                         colorStack.push_back(&srcAerial);
                     }

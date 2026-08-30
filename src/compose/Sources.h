@@ -131,6 +131,48 @@ private:
 // the touched tiles at every rung -- the soak rule working FOR the operator. This retires
 // the M6r pre-bake into BathyModel (which changed source content without changing cache
 // identity: tiles painted before it silently served the un-walled bed).
+// M7d: THE BED CLASSIFIER -- the compositor's first SYNTHESIS source: a state-diagram NODE
+// whose edge pulls the HEIGHT stack (depth + slope) and writes the COLOR fiber. Its PROGRAM
+// is a data file (data/bed/bed_rules.json + bed_zones.geojson, content-hashed into the cache
+// identity): an agent or a future terrain-building UX edits the file, and the soak rule
+// turns that edit into exactly the touched repaints -- no code, no rebuild, no manual
+// invalidation. It paints ABOVE imagery of open water (google's photo of the surface) and
+// BELOW surveyed orthos (massgis actually saw the bed) -- STACK ORDER IS THE AUTHORITY
+// RANKING. Colors are authored as DRY bed albedo: the renderer's refracted ray applies the
+// water's own attenuation, so the satellite look is REPRODUCED by physics, not quoted.
+class BedSynthSource : public ColorSource {
+public:
+    // comp/hgtChannel: the height stack this node reads (the cross-channel edge). Authors
+    // default rule/zone files if absent -- never clobbers an existing edit (M6p law).
+    bool Load(const std::string& rulesPath, const Compositor* comp, int hgtChannel);
+    const SourceInfo& Info() const override { return m_info; }
+    float Sample(double latRad, double lonRad, double groundResM, const PaintCtx& ctx,
+                 uint8_t rgba[4]) override;
+
+private:
+    struct Rule {
+        std::string name;
+        double slopeMin = -1.0, slopeMax = 1e9;
+        float shallow[3] = {0.74f, 0.68f, 0.53f};
+        float deep[3] = {0.51f, 0.49f, 0.40f};
+        float noise = 0.10f;
+    };
+    struct Zone {
+        double lon0 = 1e9, lat0 = 1e9, lon1 = -1e9, lat1 = -1e9;
+        std::vector<std::pair<double, double>> pts;   // lon, lat (degrees)
+        std::string bed;                              // names a rule...
+        float albedo[3] = {0.5f, 0.5f, 0.4f};         // ...or carries its own paint
+        bool hasAlbedo = false;
+    };
+    const Rule* PickRule(double slope) const;
+    const Compositor* m_comp = nullptr;
+    int m_hgtCh = -1;
+    std::vector<Rule> m_rules;
+    std::vector<Zone> m_zones;
+    double m_full0 = -9.0, m_full1 = 0.4, m_off0 = -14.0, m_off1 = 1.2;
+    SourceInfo m_info;
+};
+
 class EditsHeightSource : public HeightSource {
 public:
     bool Load(const std::string& geojsonPath, float crestNavd = 2.5f);

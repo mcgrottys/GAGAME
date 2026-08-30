@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <fstream>
 
 namespace ga {
@@ -382,6 +383,245 @@ float CudemHeightSource::Sample(double latRad, double lonRad, double, float& met
                       m_bathy->WorldSizeZ();
     metres = v;
     return Feather((std::min)(ex, ez), m_feather);
+}
+
+// ------------------------------------------------------------------- the bed classifier
+
+namespace {
+
+// Deterministic smooth value noise on a metric lattice: the bed's grain. Two octaves,
+// each FOLDED by the texel footprint (the M6t rule wearing a different hat): a rung too
+// coarse to resolve an octave sheds it instead of aliasing it.
+float BedHash(long long ix, long long iy) {
+    uint64_t v = static_cast<uint64_t>(ix) * 0x9E3779B97F4A7C15ull ^
+                 static_cast<uint64_t>(iy) * 0xC2B2AE3D27D4EB4Full;
+    v ^= v >> 29; v *= 0xBF58476D1CE4E5B9ull; v ^= v >> 32;
+    return static_cast<float>(v & 0xFFFFFFu) / static_cast<float>(0xFFFFFFu);
+}
+
+float BedValNoise(double x, double y) {
+    const double fx = std::floor(x), fy = std::floor(y);
+    const long long ix = static_cast<long long>(fx), iy = static_cast<long long>(fy);
+    float tx = static_cast<float>(x - fx), ty = static_cast<float>(y - fy);
+    tx = tx * tx * (3.0f - 2.0f * tx);
+    ty = ty * ty * (3.0f - 2.0f * ty);
+    const float a = BedHash(ix, iy), b = BedHash(ix + 1, iy);
+    const float c = BedHash(ix, iy + 1), d = BedHash(ix + 1, iy + 1);
+    return (a + (b - a) * tx) + ((c + (d - c) * tx) - (a + (b - a) * tx)) * ty;
+}
+
+const char* kBedRulesDefault = R"JSON({
+  "version": 1,
+  "comment": "synth.bed -- the compositor's first synthesis node. Colors are DRY bed albedo, sRGB 0..1: the renderer's refracted ray applies the water's own attenuation, so author the bed as if drained. Rules run in order; the first whose slope gates pass paints. Add polygons to bed_zones.geojson (properties.bed = a rule name, optional properties.albedo = [r,g,b]) to override by survey or by hand; every edit repaints exactly the touched tiles.",
+  "bounds": {"lon0": -71.15, "lat0": 42.15, "lon1": -70.25, "lat1": 43.10},
+  "alpha": {"full0": -9.0, "full1": 0.4, "off0": -14.0, "off1": 1.2},
+  "rules": [
+    {"name": "rock", "slopeMin": 0.05, "shallow": [0.37, 0.35, 0.31], "deep": [0.28, 0.28, 0.26], "noise": 0.16},
+    {"name": "sand", "shallow": [0.74, 0.68, 0.53], "deep": [0.51, 0.49, 0.40], "noise": 0.10}
+  ],
+  "zones": "data/bed/bed_zones.geojson"
+})JSON";
+
+const char* kBedZonesDefault =
+    "{\"type\": \"FeatureCollection\", \"features\": []}\n";
+
+}  // namespace
+
+bool BedSynthSource::Load(const std::string& rulesPath, const Compositor* comp,
+                          int hgtChannel) {
+    m_comp = comp;
+    m_hgtCh = hgtChannel;
+    if (!comp || hgtChannel < 0) return false;
+    // Author the default program if absent -- never clobber an edit (M6p law).
+    if (!std::ifstream(rulesPath)) {
+        std::filesystem::create_directories(
+            std::filesystem::path(rulesPath).parent_path());
+        std::ofstream(rulesPath, std::ios::binary) << kBedRulesDefault;
+    }
+    std::ifstream f(rulesPath, std::ios::binary);
+    if (!f) return false;
+    const std::string text((std::istreambuf_iterator<char>(f)),
+                           std::istreambuf_iterator<char>());
+    std::string err;
+    const JsonValue root = JsonParser::Parse(text, &err);
+    if (!err.empty()) return false;
+    if (const JsonValue* b = root.Get("bounds")) {
+        m_info.lon0 = b->Num("lon0", -71.15); m_info.lat0 = b->Num("lat0", 42.15);
+        m_info.lon1 = b->Num("lon1", -70.25); m_info.lat1 = b->Num("lat1", 43.10);
+    }
+    if (const JsonValue* a = root.Get("alpha")) {
+        m_full0 = a->Num("full0", -9.0); m_full1 = a->Num("full1", 0.4);
+        m_off0 = a->Num("off0", -14.0); m_off1 = a->Num("off1", 1.2);
+    }
+    m_rules.clear();
+    if (const JsonValue* rules = root.Get("rules")) {
+        for (const JsonValue& rv : rules->arr) {
+            Rule r;
+            r.name = rv.Str("name", "sand");
+            r.slopeMin = rv.Num("slopeMin", -1.0);
+            r.slopeMax = rv.Num("slopeMax", 1e9);
+            r.noise = static_cast<float>(rv.Num("noise", 0.10));
+            if (const JsonValue* c = rv.Get("shallow")) {
+                for (int i = 0; i < 3 && i < static_cast<int>(c->arr.size()); ++i)
+                    r.shallow[i] = static_cast<float>(c->arr[i].number);
+            }
+            if (const JsonValue* c = rv.Get("deep")) {
+                for (int i = 0; i < 3 && i < static_cast<int>(c->arr.size()); ++i)
+                    r.deep[i] = static_cast<float>(c->arr[i].number);
+            }
+            m_rules.push_back(std::move(r));
+        }
+    }
+    if (m_rules.empty()) return false;
+    // The zone overlay: survey or hand polygons, same grammar as edits.geojson.
+    std::string zonesText;
+    const std::string zonesPath = root.Str("zones", "data/bed/bed_zones.geojson");
+    if (!std::ifstream(zonesPath)) {
+        std::filesystem::create_directories(
+            std::filesystem::path(zonesPath).parent_path());
+        std::ofstream(zonesPath, std::ios::binary) << kBedZonesDefault;
+    }
+    m_zones.clear();
+    if (std::ifstream zf(zonesPath, std::ios::binary); zf) {
+        zonesText.assign((std::istreambuf_iterator<char>(zf)),
+                         std::istreambuf_iterator<char>());
+        std::string zerr;
+        const JsonValue zroot = JsonParser::Parse(zonesText, &zerr);
+        const JsonValue* feats = zerr.empty() ? zroot.Get("features") : nullptr;
+        if (feats) {
+            for (const JsonValue& ft : feats->arr) {
+                const JsonValue* props = ft.Get("properties");
+                const JsonValue* geom = ft.Get("geometry");
+                if (!props || !geom) continue;
+                const JsonValue* coords = geom->Get("coordinates");
+                if (!coords || coords->arr.empty()) continue;
+                Zone z;
+                z.bed = props->Str("bed", "sand");
+                if (const JsonValue* c = props->Get("albedo")) {
+                    for (int i = 0; i < 3 && i < static_cast<int>(c->arr.size()); ++i)
+                        z.albedo[i] = static_cast<float>(c->arr[i].number);
+                    z.hasAlbedo = true;
+                }
+                for (const JsonValue& pt : coords->arr[0].arr) {
+                    if (pt.arr.size() < 2) continue;
+                    const double lon = pt.arr[0].number, lat = pt.arr[1].number;
+                    z.pts.push_back({lon, lat});
+                    z.lon0 = (std::min)(z.lon0, lon); z.lon1 = (std::max)(z.lon1, lon);
+                    z.lat0 = (std::min)(z.lat0, lat); z.lat1 = (std::max)(z.lat1, lat);
+                }
+                if (z.pts.size() >= 3) m_zones.push_back(std::move(z));
+            }
+        }
+    }
+    // THE IDENTITY IS THE PROGRAM + ITS INPUTS: hash the rules, the zones, and the height
+    // stack's signature (this node READS that channel -- if the bed data changes shape, the
+    // synthesized tiles must change identity with it).
+    uint64_t h = 14695981039346656037ull;
+    auto mix = [&h](const std::string& t) {
+        for (const char c : t) h = (h ^ static_cast<uint8_t>(c)) * 1099511628211ull;
+    };
+    mix(text);
+    mix(zonesText);
+    for (const HeightSource* hs : m_comp->ChannelAt(m_hgtCh).height) {
+        mix(hs->Info().name);
+        mix(hs->Info().structure);
+    }
+    char structure[96];
+    snprintf(structure, sizeof(structure), "bed-classifier (rules+zones+bed) v%08x",
+             static_cast<uint32_t>(h & 0xFFFFFFFFu));
+    m_info.name = "synth.bed";
+    m_info.structure = structure;
+    m_info.crs = "wgs84.synthesis (height-stack product; bed_rules.json -- THE PROGRAM)";
+    m_info.cmPerPixel = 1000.0;
+    return true;
+}
+
+const BedSynthSource::Rule* BedSynthSource::PickRule(double slope) const {
+    for (const Rule& r : m_rules) {
+        if (slope >= r.slopeMin && slope <= r.slopeMax) return &r;
+    }
+    return &m_rules.back();
+}
+
+float BedSynthSource::Sample(double latRad, double lonRad, double groundResM,
+                             const PaintCtx&, uint8_t rgba[4]) {
+    if (!m_comp || m_rules.empty()) return 0.0f;
+    const double lon = lonRad * 180.0 / kPi, lat = latRad * 180.0 / kPi;
+    // Soft edge at the program's bounds (~700 m) so the node never cuts a seam.
+    const double fd = 0.008;
+    const double fEdge =
+        (std::min)((std::min)(lon - m_info.lon0, m_info.lon1 - lon),
+                   (std::min)(lat - m_info.lat0, m_info.lat1 - lat)) / fd;
+    if (fEdge <= 0.0) return 0.0f;
+    const float wBox = static_cast<float>((std::min)(fEdge, 1.0));
+    const float bed = m_comp->SampleHeightStack(m_hgtCh, latRad, lonRad, groundResM);
+    // Paint the band the refracted ray can SEE: fade out where the water is deep enough
+    // that transmittance kills the bed term anyway, and above the waterline band where
+    // land imagery is authoritative.
+    float a = 1.0f;
+    if (bed < m_full0) {
+        a = static_cast<float>((bed - m_off0) / (std::max)(m_full0 - m_off0, 1e-6));
+    } else if (bed > m_full1) {
+        a = static_cast<float>((m_off1 - bed) / (std::max)(m_off1 - m_full1, 1e-6));
+    }
+    a = (std::min)((std::max)(a, 0.0f), 1.0f) * wBox;
+    if (a <= 0.004f) return 0.0f;
+    // Slope from the SAME stack, at the texel's own scale: the classifier's second input.
+    const double dM = (std::max)(groundResM, 8.0);
+    const double dLatR = dM / 6371000.0;
+    const double dLonR = dM / (6371000.0 * (std::max)(std::cos(latRad), 0.2));
+    const float bE = m_comp->SampleHeightStack(m_hgtCh, latRad, lonRad + dLonR, groundResM);
+    const float bN = m_comp->SampleHeightStack(m_hgtCh, latRad + dLatR, lonRad, groundResM);
+    const double slope = std::sqrt(static_cast<double>(bE - bed) * (bE - bed) +
+                                   static_cast<double>(bN - bed) * (bN - bed)) / dM;
+    const Rule* rule = PickRule(slope);
+    const float* shallow = rule->shallow;
+    const float* deep = rule->deep;
+    float zoneCol[3];
+    for (const Zone& z : m_zones) {
+        if (lon < z.lon0 || lon > z.lon1 || lat < z.lat0 || lat > z.lat1) continue;
+        bool in = false;
+        const auto& p = z.pts;
+        for (size_t i = 0, j = p.size() - 1; i < p.size(); j = i++) {
+            if ((p[i].second > lat) != (p[j].second > lat) &&
+                lon < (p[j].first - p[i].first) * (lat - p[i].second) /
+                          (p[j].second - p[i].second) +
+                          p[i].first) {
+                in = !in;
+            }
+        }
+        if (!in) continue;
+        if (z.hasAlbedo) {
+            for (int i = 0; i < 3; ++i) zoneCol[i] = z.albedo[i];
+            shallow = zoneCol;
+            deep = zoneCol;
+        } else {
+            for (const Rule& r : m_rules) {
+                if (r.name == z.bed) { shallow = r.shallow; deep = r.deep; break; }
+            }
+        }
+        break;
+    }
+    // Depth tone + folded grain: the dry albedo the refracted ray will attenuate.
+    const float t = (std::min)((std::max)(-bed / 12.0f, 0.0f), 1.0f);
+    const double mx = lonRad * 6371000.0 * std::cos(latRad);
+    const double my = latRad * 6371000.0;
+    float grain = 0.0f;
+    const double wl[2] = {90.0, 22.0};
+    const float amp[2] = {1.0f, 0.6f};
+    for (int o = 0; o < 2; ++o) {
+        const float fold =
+            static_cast<float>((std::min)((std::max)(wl[o] / dM, 0.0), 1.0));
+        grain += (BedValNoise(mx / wl[o], my / wl[o]) * 2.0f - 1.0f) * amp[o] * fold;
+    }
+    for (int i = 0; i < 3; ++i) {
+        const float c =
+            (shallow[i] + (deep[i] - shallow[i]) * t) * (1.0f + rule->noise * grain);
+        rgba[i] = static_cast<uint8_t>(
+            (std::min)((std::max)(c, 0.0f), 1.0f) * 255.0f + 0.5f);
+    }
+    rgba[3] = 255;
+    return a;
 }
 
 }  // namespace ga
