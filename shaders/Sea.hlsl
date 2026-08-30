@@ -40,6 +40,8 @@ cbuffer SeaCb : register(b1) {
     float4 gSweG;       // x = prism-truncation current gain (the CUDEM window holds ~1/3 of the
                         // real tidal prism; the solver supplies the SHAPE, this ACT-calibrated
                         // gain restores the MAGNITUDE until the M6 domain widens), yzw unused
+    float4 gBandSig;    // M6t: xyz = per-cascade mean-square slope (exaggeration baked),
+                        // w = sub-resolved floor; xyz+w = the globe's Cox-Munk sigma^2(wind)
     // M6i: the composed channels + the survey land masks -- the sea consults the SAME planet
     // description every other layer does (bed outside the survey, land classification).
     GA_COMPOSED_CB_ROWS
@@ -146,8 +148,16 @@ float2 BandScale(uint c, float2 U, float depth, float shadow) {
     return ab;
 }
 
+// M6t: THE FOLD. A band is geometry while the pixel's ground footprint resolves its phase;
+// past its Nyquist the phase is meaningless and the band sheds to grade 0 -- its variance
+// continues in the glint lobe's sigma^2 (accumulated in PsMain), never deleted. Footprint-
+// (not distance-) based, so zoom and resolution move the split the way they move texture LOD.
+float PixFootM(float dist) {
+    return dist * 2.0f * length(gCamUp.xyz) * gViewport.w;
+}
 float CascadeFade(uint c, float dist) {
-    return saturate(1.0f - dist / gFadeD[c]);
+    const float lam = 6.2831853f / gBandK[c];   // the band's representative wavelength
+    return 1.0f - smoothstep(lam * 0.12f, lam * 0.5f, PixFootM(dist));
 }
 
 // ------------------------------------------------------------------ tessellation chain
@@ -308,6 +318,12 @@ float4 PsMain(VsOut i) : SV_Target {
     const float shadow = SweShadow(i.worldXZ);
 
     float hx = 0, hz = 0, foam = 0, chopFoam = 0, blockC2 = 0;
+    // M6t: the shed variance. Starts at the sub-resolved floor (capillary tail the FFT never
+    // synthesises) and collects every band the footprint has folded, scaled by the same local
+    // amplitude physics the geometry would have shown (shoaling, shadow, dry guard). At the
+    // helm this is a tight glitter on resolved wave faces; at altitude it telescopes to the
+    // globe's Cox-Munk sigma^2 -- the two water descriptions meet at the same pixel.
+    float sig2 = gBandSig.w;
     [unroll] for (uint c = 0; c < 3; ++c) {
         const float2 uvc = (i.worldXZ - adv) / gPatchL[c];
         const float w = CascadeFade(c, distCam) * i.att;
@@ -315,6 +331,7 @@ float4 PsMain(VsOut i) : SV_Target {
         const float4 dv = gTex[gDerivSrv[c]].SampleLevel(sLinearWrap, uvc, 0);
         hx += dv.x * w * ab.x;
         hz += dv.y * w * ab.x;
+        sig2 += gBandSig[c] * (1.0f - w) * ab.x * ab.x * i.sh.y * i.sh.y;
         // Foam follows the band's LOCAL amplitude: a swell that never reaches the lee cannot
         // whitecap there.
         foam += dv.w * w * kFoamW[c] * saturate(ab.x);
@@ -325,6 +342,14 @@ float4 PsMain(VsOut i) : SV_Target {
     }
     hx *= i.sh.y * gWaveC.x;
     hz *= i.sh.y * gWaveC.x;
+    // M6t: cap the shaded slope at the limiting steepness -- shoaling gain can push sampled
+    // slopes past any real wave face (they would be BREAKING; that physics is M7's), and the
+    // over-steep facets rendered as dark back-faces speckling storm aerials.
+    const float sm0 = length(float2(hx, hz));
+    if (sm0 > 1.1f) {
+        hx *= 1.1f / sm0;
+        hz *= 1.1f / sm0;
+    }
     const float3 n = normalize(float3(-hx, 1.0f, -hz));
     const float3 v = normalize(-i.rel);
 
@@ -347,10 +372,33 @@ float4 PsMain(VsOut i) : SV_Target {
         col = lerp(col, bedCol, T);
     }
 
-    // Fresnel sky reflection -- the one shared sky, sun disc included.
-    const float3 refl = reflect(-v, n);
+    // Fresnel sky reflection -- the one shared sky, but DISCLESS (M6t): the sun's specular
+    // now belongs entirely to the Cox-Munk lobe below, which owns it at EVERY scale (a
+    // mirror disc here plus the lobe at helm-tight sigma^2 would count the sun twice).
+    // Steep shoaling faces can send the reflection below the horizon; a real sea shows
+    // spilling whitecaps there (steepness-limited breaking -- the M7 wavelets item). Until
+    // then, CLAMP the ray to the horizon: those facets read as horizon sky (what water
+    // actually mirrors at grazing), not the near-black that speckled storm aerials -- and
+    // not the zenith blue an abs() mirror would give (tried; it traded black for teal).
+    float3 refl = reflect(-v, n);
+    refl.y = max(refl.y, 0.02f);
     const float f = 0.02f + 0.98f * pow(1.0f - saturate(dot(n, v)), 5.0f);
-    col = lerp(col, SkyRadianceDir(refl), f);
+    col = lerp(col, SkyRadianceDirDiscless(refl), f);
+
+    // M6t: THE ONE GLINT -- the globe's exact Cox-Munk lobe, on the RESOLVED normal, with
+    // sigma^2 = floor + shed bands. Near: sharp glitter riding wave faces (the missing sun
+    // glint at the helm). Far: n flattens, sigma^2 telescopes to Cox-Munk(wind), and this
+    // expression becomes literally the globe shader's ocean specular. No pop, by construction.
+    {
+        const float3 hv = normalize(v + gSunDir.xyz);
+        const float ch = saturate(dot(hv, n));
+        const float t2 = max(1.0f - ch * ch, 0.0f) / max(ch * ch, 1e-4f);
+        float glint = exp(-t2 / sig2) /
+                      (4.0f * 3.14159265f * sig2 * max(ch * ch * ch * ch, 1e-4f));
+        glint *= (0.02f + 0.98f * pow(1.0f - saturate(dot(v, hv)), 5.0f)) *
+                 saturate(dot(gSunDir.xyz, n));
+        col += glint * SUN_IRR_C * 0.85f;
+    }
 
     // Whitecaps: wind-gated Jacobian foam + current blocking of the chop + depth-limited
     // breaking (the standing-wave faces over the bar) + churn memory.
@@ -379,10 +427,9 @@ float4 PsMain(VsOut i) : SV_Target {
         // The memory says WHERE water is aerated; the chop's live texture says what it looks
         // like this instant -- without this modulation the throat renders as uniform fog.
         churn *= 0.5f + 0.5f * saturate(chopFoam * 3.0f + slopeMag);
-        // Metre-scale froth is a close-range phenomenon: real wash decorrelates into the mean
-        // albedo with distance. Without this fade a zoomed-out view shows the resident tile
-        // set as a solid white slab (M6's BRDF-LOD owns the proper far-field albedo story).
-        churn *= saturate(1.0f - distCam / 2600.0f);
+        // Metre-scale froth decorrelates into the mean albedo once the footprint outgrows the
+        // churn's 2 m texels (M6t: footprint-based like the wave bands -- zoom-aware).
+        churn *= 1.0f - smoothstep(1.5f, 7.0f, PixFootM(distCam));
     }
 
     // Cap below 1 so even the worst breaking keeps a thread of water colour.

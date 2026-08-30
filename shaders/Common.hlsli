@@ -133,6 +133,17 @@ float3 SkyRadianceDir(float3 dir) {
     return lerp(col, SKY_LO_C * 0.45f, smoothstep(0.0f, -0.06f, dir.y));
 }
 
+// M6t: the sky WITHOUT the specular sun disc (halo kept -- that is scattered skylight, not
+// the mirror image). For surfaces that carry their own explicit sun lobe: the unified water
+// BRDF owns the sun through Cox-Munk at every scale, and the mirror disc here on top of a
+// helm-tight lobe would count the sun twice.
+float3 SkyRadianceDirDiscless(float3 dir) {
+    float3 col = SkyRadiance(dir.y);
+    const float cosA = dot(dir, gSunDir.xyz);
+    col += SUN_IRR_C * (pow(saturate(cosA), 350.0f) * 0.35f + pow(saturate(cosA), 12.0f) * 0.05f);
+    return lerp(col, SKY_LO_C * 0.45f, smoothstep(0.0f, -0.06f, dir.y));
+}
+
 // Aerial perspective: exponential extinction toward the sky colour along the view ray. The 6 km
 // scale keeps mid-field wave contrast alive on the open sea; vqview's 2.5 km suited a 470 m
 // scene.

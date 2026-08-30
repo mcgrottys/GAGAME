@@ -648,3 +648,41 @@ item, still real upriver), NHD-integrated upriver prism area, the sound's real I
 entrance, and eta-aware shoreline classification (the wet line now truly lags the analytic
 tide on the flats — the renderer should read the solved eta, which is the water/air-channel
 Exchange step of ATLAS §7).
+
+## 19. M6t (2026-08-29): one water, every altitude — grade shedding with conservation
+
+The user watched the flood-ride video and called the piecewise water: "shouldn't it be seen
+from space like the textures should if we are bleeding through LODs correctly? … I was
+hoping we could find something that works well from either high or low altitudes using
+Geometric Algebra." Diagnosis confirmed: THREE disagreements at the seam. The sea layer
+faded each FFT cascade by hand-tuned camera DISTANCE (fadeD 2600/520 m) and the energy went
+NOWHERE — waves just vanished; the globe carried the whole spectrum as Cox-Munk slope
+variance; and the sea's only specular was a mirror-Fresnel sky (no sun lobe at all — the
+"glossiness"). Two halves of one BRDF that never talked, swapping at the mode handoff.
+
+**The GA statement (GAMEPLAN §107.7, now real): grade shedding with conservation.** Each
+cascade band is a rotor bank in Cl(2)+ — Tessendorf's e^{iωt} IS the rotor. When a pixel's
+ground FOOTPRINT (dist × pixel angle, zoom- and resolution-aware) passes a band's Nyquist,
+the rotor's phase becomes meaningless but its magnitude does not: the band sheds from
+resolved geometry (grade-resolved) to the BRDF's slope variance σ² (grade-0 statistics).
+Energy changes grade; it is never deleted. The bookkeeping TELESCOPES: per-band
+mean-square slope integrated on CPU from the same model spectrum the plot draws
+(∫k²S df, banded by the synthesis cuts, exaggeration baked), plus a sub-resolved floor
+calibrated as CoxMunk(wind) − Σ bands — so at full shed the sum is EXACTLY the globe's
+σ², and the two water descriptions become the same pixel. At the helm the floor alone
+remains — a tight glitter riding resolved wave faces (the missing sun glint, now present;
+the sky mirror went DISCLESS so the sun is counted once). On a calm 2 m/s day the physics
+says it plainly: the long swell's slope variance is ~1e-4 — nearly ALL glitter lives in
+the sub-resolved floor, at every altitude.
+
+Storm aerials then found three real artifacts the old distance-fades had been hiding:
+the globe mesh's water plane at −2 m POKING THROUGH shoal-amplified troughs (facet-shaped
+patches of the wrong water — sunk to −8 m; the globe sampling the displacement bank itself
+is the M7 unification), reflections dipping below the horizon on steep faces (clamped to
+horizon sky — the abs() mirror was tried first and traded black for zenith teal), and
+sampled slopes past any physical wave face (capped at 1.1 — steeper IS breaking, which is
+M7's wavelets). Churn's froth fade became footprint-based like everything else.
+
+Named next: Hs-whitening parity in the sea's far field (storm color convergence), the
+globe mesh sampling the FFT bank directly (one geometry path as well as one BRDF), and
+per-band DIRECTIONAL σ² (Cox-Munk's up/crosswind anisotropy from the same integrals).

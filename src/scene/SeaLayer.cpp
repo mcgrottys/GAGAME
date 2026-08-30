@@ -272,6 +272,42 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
         const double t = std::max(0.0, (windMs - 3.0) / 9.0);
         m_windGate = static_cast<float>(std::min(1.0, std::pow(t, 1.5)));
 
+        // ---- M6t: GRADE SHEDDING WITH CONSERVATION. Each cascade's mean-square slope,
+        // integrated from the SAME model spectrum the plot draws (deep-water k = (2 pi f)^2/g,
+        // banded by the synthesis cuts). When a pixel's footprint can no longer resolve a
+        // band's phase, the band's variance does not vanish -- it descends from geometry into
+        // the BRDF's slope variance (the rotor sheds to grade 0; energy changes grade, never
+        // disappears). The floor is calibrated so the fully-shed sum equals the globe's
+        // Cox-Munk sigma^2(wind): at altitude the two water descriptions become THE SAME
+        // pixel, and the old hand-tuned fade distances (which deleted the energy) retire.
+        {
+            const double kPiD = 3.14159265358979;
+            const double kCut[4] = {2.0 * kPiD / 756.0, 2.0 * kPiD / 60.0, 2.0 * kPiD / 12.0,
+                                    0.9 * kPiD * OceanFft::kN / 47.0};
+            double mss[3] = {0, 0, 0};
+            const double df = 0.004;
+            for (double f = df; f < 2.0; f += df) {
+                const double k = (2.0 * kPiD * f) * (2.0 * kPiD * f) / 9.81;
+                const double s = SeaState::SpectrumAt(parts, activeParts, f);
+                for (int c = 0; c < 3; ++c) {
+                    if (k >= kCut[c] && k < kCut[c + 1]) mss[c] += k * k * s * df;
+                }
+            }
+            const double ex2 = heightScale * heightScale;   // geometry is exaggerated; the
+                                                            // shed variance must match it
+            const double coxMunk = 0.003 + 0.00512 * windMs;
+            double sum = 0.0;
+            for (int c = 0; c < 3; ++c) {
+                m_seaCb.bandSig[c] = static_cast<float>(mss[c] * ex2);
+                sum += mss[c] * ex2;
+            }
+            m_seaCb.bandSig[3] = static_cast<float>(std::max(coxMunk - sum, 0.0015));
+            Log("[sea] slope variance: bands %.4f/%.4f/%.4f + floor %.4f (Cox-Munk %.4f at "
+                "%.1f m/s -- the far field is the same pixel the globe draws)",
+                m_seaCb.bandSig[0], m_seaCb.bandSig[1], m_seaCb.bandSig[2], m_seaCb.bandSig[3],
+                coxMunk, windMs);
+        }
+
         // ---- spectrum plot: model + buoy on a shared axis
         const float fMax = 0.35f;
         const BuoyObs* buoy = m_sea->Buoy("44013");
@@ -330,9 +366,10 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
         m_seaCb.patchL[c] = m_fft.PatchL(c);
     }
     m_seaCb.patchL[3] = targetEdgePx;
-    m_seaCb.fadeD[0] = 1.0e9f;
-    m_seaCb.fadeD[1] = 2600.0f;
-    m_seaCb.fadeD[2] = 520.0f;
+    // M6t: the hand-tuned per-cascade fade DISTANCES are retired -- CascadeFade now folds each
+    // band by the pixel's ground FOOTPRINT vs the band's wavelength (screen-resolution- and
+    // zoom-aware), and the folded variance moves into the glint lobe instead of vanishing.
+    m_seaCb.fadeD[0] = m_seaCb.fadeD[1] = m_seaCb.fadeD[2] = 0.0f;
 
     // ---- M3: the entrance jet, live from the ACT0816 prediction clock
     double signedMs = 0.0;

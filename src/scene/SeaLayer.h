@@ -108,6 +108,9 @@ private:
         uint32_t sweU[4];   // M5c: eta SRV, uv SRV, solver on, swell-shadow mask SRV
         float sweF[4];      // bathy grid dims xy, 1 / eta-atlas padded dims zw
         float sweG[4];      // x = prism-truncation current gain
+        float bandSig[4];   // M6t: xyz = per-cascade mean-square SLOPE (exaggeration baked),
+                            // w = the sub-resolved floor, calibrated so xyz+w sums to the
+                            // globe's Cox-Munk sigma^2(wind) -- grade shedding conserves it
         ComposedSurfaceCb cs;   // M6i: composed channels + survey masks (9 rows)
     };
     // Mirrored in shaders/SeaChurn.hlsl. (Count float4 rows on BOTH sides after any edit -- a
