@@ -23,10 +23,10 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | swe.solver | shadow | water.bank | raster.row0N +v=S | atlas.texel +v=N | FLIP | 0..1 exposure | 0.12..1 | x1 | WaterBank.hlsl CsBankFill (1-uv.y), floor 0.18 |
 | churn.kernel | churn | water.bank | atlas.texel +v=N | atlas.texel +v=N | - | 0..1 aeration | 0..1 | x1.05 | WaterBank.hlsl CsBankFill flat |
 | bathy.cudem | bed | churn.kernel | raster.row0N +v=S | atlas.texel +v=N | FLIP | m NAVD | -40..15 | x1 | SeaChurn.hlsl suv flip |
-| bathy.cudem | bed | sea.ps (inactive) | raster.row0N +v=S | atlas.texel +v=N | FLIP | m NAVD | -40..15 | x1 | Sea.hlsl:71 (uv.x, 1-uv.y) |
-| swe.solver | eta | sea.ps (inactive) | raster.row0N +v=S | atlas.texel +v=N | FLIP | m dEta | +-1.5 | x1 | Sea.hlsl SweDEta (1-uv.y) |
-| swe.solver | shadow | sea.ps (inactive) | raster.row0N +v=S | atlas.texel +v=N | FLIP | 0..1 exposure | 0.12..1 | x1 | Sea.hlsl SweShadow (uv.x, 1-uv.y) |
-| churn.kernel | churn | sea.ps (inactive) | atlas.texel +v=N | atlas.texel +v=N | - | 0..1 aeration | 0..1 | x1.05 | Sea.hlsl cuv flat |
+| bathy.cudem | bed | sea.ps | raster.row0N +v=S | atlas.texel +v=N | FLIP | m NAVD | -40..15 | x1 | Sea.hlsl:71 (uv.x, 1-uv.y) |
+| swe.solver | eta | sea.ps | raster.row0N +v=S | atlas.texel +v=N | FLIP | m dEta | +-1.5 | x1 | Sea.hlsl SweDEta (1-uv.y) |
+| swe.solver | shadow | sea.ps | raster.row0N +v=S | atlas.texel +v=N | FLIP | 0..1 exposure | 0.12..1 | x1 | Sea.hlsl SweShadow (uv.x, 1-uv.y) |
+| churn.kernel | churn | sea.ps | atlas.texel +v=N | atlas.texel +v=N | - | 0..1 aeration | 0..1 | x1.05 | Sea.hlsl cuv flat |
 | compose.stack | corners | water.bank | world.m +v=N | world.m +v=N | - | m NAVD level/bed + hsScale | hsScale 0.15..3 | x1 | WaterBankLayer CornerParams (CPU) |
 | water.bank | disp/param/detail | globe.ps | atlas.texel +v=N | atlas.texel +v=N | - | m / sigma2 / m/s / hsScale*expo | rings 4.8..154 m/texel | x1 | Globe.hlsl BankSample manual bilinear |
 | water.bank | disp+level | globe.mesh | atlas.texel +v=N | atlas.texel +v=N | - | m NAVD | +-4 | x1 | GlobeMesh.hlsl BankSample |
