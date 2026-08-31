@@ -157,6 +157,7 @@ public:
     };
     // Public for the selftest: the soak rule is a CONTRACT, and contracts get pinned.
     const Channel& ChannelAt(int id) const { return m_channels[id]; }
+    int ChannelCount() const { return static_cast<int>(m_channels.size()); }
     uint64_t ColorSubset(const Channel& ch, const TileBox& box,
                          std::vector<size_t>& included) const;
     uint64_t HeightSubset(const Channel& ch, const TileBox& box,
