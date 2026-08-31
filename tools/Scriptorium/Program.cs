@@ -328,6 +328,7 @@ static class McpServer
           {"name":"script_for","description":"Describe a harvester script: purpose and outputs.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}},
           {"name":"channels","description":"The monastery registry: channels, sources (with structure/CRS), Exchange buffers.","inputSchema":{"type":"object","properties":{}}},
           {"name":"reindex","description":"Rescan the repo and rebuild the database.","inputSchema":{"type":"object","properties":{}}},
+          {"name":"graph","description":"The GA state diagram as machine-readable JSON (docs/ga_ast.json, emitted by the engine every boot): nodes + edges with frames, units, ranges, gains, flips, code anchors. The contract a future Blueprint-style node editor loads/saves; tools/astdiagram.py renders it to docs/diagrams/*.svg.","inputSchema":{"type":"object","properties":{}}},
           {"name":"math","description":"The algebra whitepaper (docs/ALGEBRA.md), served per topic. No arg: list topics. With topic (substring): print that section's mathematics for a human or an outside expert -- GA products, wave physics, radiometry, frames, the compositor's algebra, and the PRIORS LEDGER (where measured reality diverged from textbook/training expectations; read it first when the engine surprises you).","inputSchema":{"type":"object","properties":{"topic":{"type":"string"}}}}
         ]}
         """)!;
@@ -356,6 +357,9 @@ static class McpServer
                 null,
                 r => $"{r.GetString(0),-16} {r.GetString(1),-26} {Truncate(r.GetString(2), 60),-60} {r.GetString(3)}:{r.GetInt32(4)}"),
             "reindex" => Reindex(repo, dbPath),
+            "graph" => File.Exists(Path.Combine(repo, "docs", "ga_ast.json"))
+                ? File.ReadAllText(Path.Combine(repo, "docs", "ga_ast.json"))
+                : "(docs/ga_ast.json not found -- run the engine once to emit it)",
             "math" => (args?["topic"]?.GetValue<string>() is { Length: > 0 } t)
                 ? Query(db,
                     "SELECT topic, title, body FROM math WHERE topic LIKE $q OR title LIKE $q",

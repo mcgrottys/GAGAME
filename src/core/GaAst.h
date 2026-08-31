@@ -75,6 +75,11 @@ void RegisterKnownComposeEdges();   // the compositor + residency pillars (M7l)
 // M7m: persist the diagram as markdown (docs/GA_AST.md) so the scriptorium indexes it --
 // a future session QUERIES the edge table instead of rereading shaders out of context.
 void WriteMarkdown(const char* path);
+// M7u: the graph as MACHINE-READABLE JSON (docs/ga_ast.json) -- nodes + edges with
+// frames, units, ranges, gains, anchors. This file is the contract a future node-editor
+// UI (the Blueprint ambition) loads and saves, and what tools/astdiagram.py renders to
+// the SVG catalog in docs/diagrams/.
+void WriteJson(const char* path);
 
 }  // namespace ga::ast
 

@@ -218,6 +218,86 @@ void RegisterKnownWaterEdges() {
               "Globe.hlsl BankSample manual bilinear"});
     Register({"water.bank", "globe.mesh", "disp+level", atlasN, atlasN, false, "m NAVD",
               "+-4", 1.0, "GlobeMesh.hlsl BankSample"});
+
+    // ---- M7u: THE CATALOG COMPLETION -- the atlas, the weather federation, the churn's
+    // own inputs, the shadow builder, the air, and the accepting state. With these the
+    // graph covers the engine's data flow end to end; tools/astdiagram.py draws it.
+    const Frame params{"scalar.params", true, 0, 0, 0};
+    Register({"noaa.stations", "water.atlas", "harmonic fit", latlonW, latlonW, false,
+              "phasor re/im per constituent", "sub-mm RMS (watertest)", 1.0,
+              "harvest_tides.py -> StationFieldSource IDW p=2"});
+    Register({"eot20.grid", "water.atlas", "phasor grid", latlonW, latlonW, false,
+              "phasor re/im", "|P| clamp a2>100 (Fundy)", 1.0,
+              "Eot20Source (epoch-rotated arg sum P conj Q)"});
+    Register({"water.atlas", "window.field", "tide phasors M2..O1", latlonW, mercPxW,
+              true, "phasor re/im", "RG16F tiles", 1.0, "Compositor::WindowField paint"});
+    Register({"water.atlas", "weather.mgr", "level rotors", latlonW, latlonW, false,
+              "m NAVD", "+-3", 1.0, "WeatherManager::Query h(t)=msl+Re[P e^iwt]"});
+    Register({"gfswave.grid", "weather.mgr", "hs/tp/dir", rowS, latlonW, true,
+              "m / s / deg", "0..15 m", 1.0, "WeatherManager wave grid (lat1-lat row)"});
+    Register({"weather.mgr", "compose.stack", "corner params feed", latlonW, worldM,
+              false, "level/bed/hs", "query rungs", 1.0,
+              "WeatherManager::Query -> CornerParams"});
+    Register({"gfswave.grid", "globe.ps", "hs whitening", rowS, atlasN, true, "m", "0..15",
+              1.0, "Globe.hlsl wuv (lat1-lat formula)"});
+    Register({"gfs.wind", "globe.ps", "wind10 (far sigma2)", rowS, atlasN, true, "m/s",
+              "0..40", 1.0, "Globe.hlsl wuv; sigma2 = 0.003+0.00512 U"});
+    Register({"gfs.cloud", "cloud.volume", "density bake", rowS, atlasN, true, "0..1",
+              "3D tiles 320 km col", 1.0, "GlobeLayer cloud bake (ReliefUv family)"});
+    Register({"cloud.volume", "globe.ps", "density march", rowS, atlasN, true, "sigma_t",
+              "14 steps + sun tap", 1.0, "Globe.hlsl ReliefUv (row0 north)"});
+    Register({"mv2.windbank", "globe.ps", "curl overlay", atlasN, atlasN, false,
+              "curl x1e4", "+-2.2 synoptic", 1.0, "Globe.hlsl wind overlay (V)"});
+    Register({"ocean.fft", "churn.kernel", "chop deriv (pattern)", wrap, atlasN, false,
+              "jacobian foam", "0..1", 1.0, "SeaChurn.hlsl (world - U dt)/patch"});
+    Register({"swe.solver", "churn.kernel", "uv (blocking)", rowS, atlasN, true, "m/s",
+              "+-2.5", 1.0, "SeaChurn.hlsl suv flip"});
+    Register({"sea.peakdir", "swe.solver", "shadow build (LOS march)", worldM, rowS, true,
+              "0..1 exposure", "0.12..1; rebuilt on dir/level move", 1.0,
+              "SeaLayer::BuildShadowMask (CPU)"});
+    Register({"survey.edits", "gis.masks", "polygons + fine mask", latlonW, mercPxW, true,
+              "mask + edit flag", "R8G8 4096^2 x2 (0.56 m fine)", 1.0,
+              "GisStencil::BuildMasks (M7f fine box)"});
+    Register({"gis.masks", "globe.ps", "classifier override", mercPxW, uvSW, false,
+              "land/water + edit", "hand edits are law", 1.0,
+              "Compose.hlsli CsEditMask (fine box else coarse)"});
+    Register({"globe.ps", "frame.out", "radiance (accepting state)", worldM, worldM,
+              false, "linear RGB -> tonemap", "the render", 1.0, "Renderer tonemap"});
+}
+
+// M7u: the machine-readable graph -- the contract a future Blueprint-style node editor
+// loads/saves, and the input of tools/astdiagram.py (the SVG catalog).
+void WriteJson(const char* path) {
+    FILE* f = fopen(path, "wb");
+    if (!f) return;
+    auto esc = [](const char* s) {
+        std::string o;
+        for (const char* p = s; *p; ++p) {
+            if (*p == '"' || *p == '\\') { o += '\\'; o += *p; }
+            else if (*p == '\n') o += "\\n";
+            else o += *p;
+        }
+        return o;
+    };
+    fprintf(f, "{\n  \"version\": 1,\n  \"edges\": [\n");
+    const auto& es = Edges();
+    for (size_t i = 0; i < es.size(); ++i) {
+        const Edge& e = es[i];
+        fprintf(f,
+                "    { \"from\": \"%s\", \"to\": \"%s\", \"field\": \"%s\", "
+                "\"srcSpace\": \"%s\", \"srcVNorth\": %s, \"dstSpace\": \"%s\", "
+                "\"dstVNorth\": %s, \"flip\": %s, \"units\": \"%s\", "
+                "\"range\": \"%s\", \"gain\": %.3f, \"code\": \"%s\", "
+                "\"active\": %s }%s\n",
+                esc(e.from).c_str(), esc(e.to).c_str(), esc(e.field).c_str(),
+                esc(e.src.space).c_str(), e.src.vNorth ? "true" : "false",
+                esc(e.dst.space).c_str(), e.dst.vNorth ? "true" : "false",
+                e.flip ? "true" : "false", esc(e.units).c_str(), esc(e.range).c_str(),
+                e.gain, esc(e.code).c_str(), e.active ? "true" : "false",
+                i + 1 < es.size() ? "," : "");
+    }
+    fprintf(f, "  ]\n}\n");
+    fclose(f);
 }
 
 }  // namespace ga::ast

@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1032 710" font-family="Segoe UI, Arial, sans-serif">
+<rect width="1032" height="710" fill="#f6f5f1"/>
+<text x="516" y="30" text-anchor="middle" font-size="19" font-weight="600" fill="#24292f">GAGAME — compose domain</text>
+<text x="516" y="48" text-anchor="middle" font-size="11" fill="#57606a">generated from docs/ga_ast.json — the registry gatest validates; wires carry field [units], crimson badge = v-flip in the sampling code, dashed = inactive consumer</text>
+<path d="M 246 288 C 317 288, 345 462, 416 462" fill="none" stroke="#4a9e63" stroke-width="1.6" opacity="0.75"/>
+<circle cx="246" cy="288" r="3.2" fill="#4a9e63"/>
+<circle cx="416" cy="462" r="3.2" fill="#4a9e63"/>
+<rect x="312" y="358" width="37" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="331" y="368" text-anchor="middle" font-size="9.5" fill="#454c54">paint</text>
+<circle cx="358" cy="364" r="7" fill="#c93c37"/>
+<text x="358" y="367" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
+<path d="M 246 303 C 317 303, 345 288, 416 288" fill="none" stroke="#4a9e63" stroke-width="1.6" opacity="0.75"/>
+<circle cx="246" cy="303" r="3.2" fill="#4a9e63"/>
+<circle cx="416" cy="288" r="3.2" fill="#4a9e63"/>
+<rect x="312" y="298" width="37" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="331" y="308" text-anchor="middle" font-size="9.5" fill="#454c54">paint</text>
+<circle cx="358" cy="304" r="7" fill="#c93c37"/>
+<text x="358" y="308" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
+<path d="M 246 318 C 317 318, 345 375, 416 375" fill="none" stroke="#4a9e63" stroke-width="1.6" opacity="0.75"/>
+<circle cx="246" cy="318" r="3.2" fill="#4a9e63"/>
+<circle cx="416" cy="375" r="3.2" fill="#4a9e63"/>
+<rect x="312" y="330" width="37" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="331" y="340" text-anchor="middle" font-size="9.5" fill="#454c54">paint</text>
+<path d="M 616 462 C 687 462, 715 114, 786 114" fill="none" stroke="#4a9e63" stroke-width="1.6" opacity="0.75"/>
+<circle cx="616" cy="462" r="3.2" fill="#4a9e63"/>
+<circle cx="786" cy="114" r="3.2" fill="#4a9e63"/>
+<rect x="661" y="291" width="80" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="701" y="301" text-anchor="middle" font-size="9.5" fill="#454c54">window-sample</text>
+<path d="M 616 288 C 687 288, 715 129, 786 129" fill="none" stroke="#4a9e63" stroke-width="1.6" opacity="0.75"/>
+<circle cx="616" cy="288" r="3.2" fill="#4a9e63"/>
+<circle cx="786" cy="129" r="3.2" fill="#4a9e63"/>
+<rect x="661" y="192" width="80" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="701" y="202" text-anchor="middle" font-size="9.5" fill="#454c54">detail-sample</text>
+<path d="M 246 405 C 317 405, 345 477, 416 477" fill="none" stroke="#4a9e63" stroke-width="1.6" opacity="0.75"/>
+<circle cx="246" cy="405" r="3.2" fill="#4a9e63"/>
+<circle cx="416" cy="477" r="3.2" fill="#4a9e63"/>
+<rect x="312" y="444" width="37" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="331" y="454" text-anchor="middle" font-size="9.5" fill="#454c54">fetch</text>
+<path d="M 246 492 C 317 492, 345 492, 416 492" fill="none" stroke="#4a9e63" stroke-width="1.6" opacity="0.75"/>
+<circle cx="246" cy="492" r="3.2" fill="#4a9e63"/>
+<circle cx="416" cy="492" r="3.2" fill="#4a9e63"/>
+<rect x="312" y="475" width="37" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="331" y="485" text-anchor="middle" font-size="9.5" fill="#454c54">fetch</text>
+<circle cx="358" cy="481" r="7" fill="#c93c37"/>
+<text x="358" y="484" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
+<path d="M 246 579 C 317 579, 345 579, 416 579" fill="none" stroke="#4a9e63" stroke-width="1.6" opacity="0.75"/>
+<circle cx="246" cy="579" r="3.2" fill="#4a9e63"/>
+<circle cx="416" cy="579" r="3.2" fill="#4a9e63"/>
+<rect x="304" y="582" width="53" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="331" y="592" text-anchor="middle" font-size="9.5" fill="#454c54">classify</text>
+<path d="M 246 201 C 317 201, 345 201, 416 201" fill="none" stroke="#c09a3e" stroke-width="1.6" opacity="0.75"/>
+<circle cx="246" cy="201" r="3.2" fill="#c09a3e"/>
+<circle cx="416" cy="201" r="3.2" fill="#c09a3e"/>
+<rect x="312" y="184" width="37" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="331" y="194" text-anchor="middle" font-size="9.5" fill="#454c54">wants</text>
+<path d="M 616 201 C 687 201, 715 144, 786 144" fill="none" stroke="#c09a3e" stroke-width="1.6" opacity="0.75"/>
+<circle cx="616" cy="201" r="3.2" fill="#c09a3e"/>
+<circle cx="786" cy="144" r="3.2" fill="#c09a3e"/>
+<rect x="674" y="176" width="53" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="701" y="186" text-anchor="middle" font-size="9.5" fill="#454c54">have-map</text>
+<path d="M 246 114 C 317 114, 345 114, 416 114" fill="none" stroke="#4a9e63" stroke-width="1.6" opacity="0.75"/>
+<circle cx="246" cy="114" r="3.2" fill="#4a9e63"/>
+<circle cx="416" cy="114" r="3.2" fill="#4a9e63"/>
+<rect x="272" y="97" width="118" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="331" y="107" text-anchor="middle" font-size="9.5" fill="#454c54">polygons + fine mask</text>
+<circle cx="398" cy="103" r="7" fill="#c93c37"/>
+<text x="398" y="106" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
+<path d="M 616 114 C 687 114, 715 159, 786 159" fill="none" stroke="#4a9e63" stroke-width="1.6" opacity="0.75"/>
+<circle cx="616" cy="114" r="3.2" fill="#4a9e63"/>
+<circle cx="786" cy="159" r="3.2" fill="#4a9e63"/>
+<rect x="645" y="140" width="113" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="701" y="150" text-anchor="middle" font-size="9.5" fill="#454c54">classifier override</text>
+<rect x="46" y="250" width="200" height="83" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<path d="M 46 258 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#2f8f46"/>
+<text x="146.0" y="268" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">compose.stack</text>
+<rect x="416" y="337" width="200" height="53" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<path d="M 416 345 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#2f8f46"/>
+<text x="516.0" y="355" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">cube.color</text>
+<rect x="416" y="76" width="200" height="53" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<path d="M 416 84 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#2f8f46"/>
+<text x="516.0" y="94" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">gis.masks</text>
+<rect x="786" y="76" width="200" height="98" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<path d="M 786 84 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#b8860b"/>
+<text x="886.0" y="94" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">globe.ps</text>
+<rect x="46" y="163" width="200" height="53" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<path d="M 46 171 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#b8860b"/>
+<text x="146.0" y="181" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">globe.walk</text>
+<rect x="46" y="367" width="200" height="53" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<path d="M 46 375 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#2f8f46"/>
+<text x="146.0" y="385" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">google.tiles</text>
+<rect x="46" y="541" width="200" height="53" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<path d="M 46 549 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#2f8f46"/>
+<text x="146.0" y="559" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">height.stack</text>
+<rect x="46" y="454" width="200" height="53" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<path d="M 46 462 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#2f8f46"/>
+<text x="146.0" y="472" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">massgis.ortho</text>
+<rect x="416" y="163" width="200" height="53" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<path d="M 416 171 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#b8860b"/>
+<text x="516.0" y="181" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">residency.mgr</text>
+<rect x="46" y="76" width="200" height="53" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<path d="M 46 84 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#2f8f46"/>
+<text x="146.0" y="94" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">survey.edits</text>
+<rect x="416" y="541" width="200" height="53" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<path d="M 416 549 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#2f8f46"/>
+<text x="516.0" y="559" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">synth.bed</text>
+<rect x="416" y="424" width="200" height="83" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<path d="M 416 432 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#2f8f46"/>
+<text x="516.0" y="442" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">window.z14</text>
+<rect x="416" y="250" width="200" height="53" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<path d="M 416 258 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#2f8f46"/>
+<text x="516.0" y="268" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">window.z17</text>
+<rect x="46" y="668" width="14" height="14" rx="3" fill="#1f6feb"/>
+<text x="66" y="679" font-size="11" fill="#24292f">water</text>
+<rect x="129" y="668" width="14" height="14" rx="3" fill="#2f8f46"/>
+<text x="149" y="679" font-size="11" fill="#24292f">compose</text>
+<rect x="226" y="668" width="14" height="14" rx="3" fill="#8250df"/>
+<text x="246" y="679" font-size="11" fill="#24292f">air</text>
+<rect x="295" y="668" width="14" height="14" rx="3" fill="#b8860b"/>
+<text x="315" y="679" font-size="11" fill="#24292f">render</text>
+<rect x="385" y="668" width="14" height="14" rx="3" fill="#57606a"/>
+<text x="405" y="679" font-size="11" fill="#24292f">frames</text>
+</svg>

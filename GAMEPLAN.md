@@ -1264,6 +1264,23 @@ section — the whitepaper is ingested at index time from its `## id — Title` 
 so the document in the repo IS the tool's content. A fresh session loads the mindset
 by reading ALGEBRA.md (or calling math), and reads `priors` FIRST when surprised.
 
+**M7u (2026-08-30): THE CATALOG, DRAWN — and the Blueprint seed.** "I want to catalog
+everything... SVG diagrams... at some point a UI where a user designs or modifies the GA
+nodes/edges like Unreal Blueprints." The registry grew to 43 edges / 35 nodes (the atlas
+fits, the weather federation, the churn's own inputs, the shadow builder, the air — GFS
+wind/cloud/Hs, the wind bank — the gis masks, and the accepting state), and it now emits
+TWO machine artifacts every boot: docs/GA_AST.md (the table) and **docs/ga_ast.json** —
+nodes + edges with frames, units, ranges, gains, flips, anchors. The JSON is the
+BLUEPRINT CONTRACT: the file a future node-editor UI loads and saves; when that editor
+exists, dragging a wire IS a Register() call, and the flip rule / orphan rule validate
+the user's graph exactly as they validate ours at boot. tools/astdiagram.py renders the
+JSON into blueprint-style SVG (docs/diagrams/ga_full.svg + water/compose/air pages):
+titled node boxes colored by domain, labeled wires, crimson v-flip badges, dashed
+inactive consumers — layered longest-path layout with barycenter ordering. The
+Scriptorium grew a `graph` tool serving the JSON verbatim (handshake-tested: 7 tools).
+The catalog is now: ALGEBRA.md (the math) + GA_AST.md/ga_ast.json (the graph, generated)
++ diagrams/*.svg (the drawing, generated) + math/graph (the scriptorium's serving).
+
 **THE DX12 GOTCHAS LEDGER (and the non-GA-workaround audit the user asked for: every
 workaround marked, with whether a GA formulation would have needed it at all):**
 1. Bindless static-sampler SampleLevel returns ZERO outside the pixel stage on this

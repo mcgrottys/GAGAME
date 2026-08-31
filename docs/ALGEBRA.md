@@ -16,7 +16,9 @@ Machine contract: sections are `## topic-id — Title`; do not rename ids casual
 scriptorium ingests them by id.
 
 The state diagram (nodes are engines, edges carry the products; the full frame table with
-flips and ranges is generated every run into `docs/GA_AST.md`):
+flips and ranges is generated every run into `docs/GA_AST.md`, the machine-readable graph
+into `docs/ga_ast.json` — the future node-editor's file format — and the drawn catalog
+into `docs/diagrams/ga_full.svg` + per-domain pages via `tools/astdiagram.py`):
 
 ```mermaid
 flowchart LR

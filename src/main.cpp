@@ -1341,6 +1341,7 @@ int main(int argc, char** argv) {
             ga::ast::Print();
             ga::ast::Validate();
             ga::ast::WriteMarkdown("docs/GA_AST.md");   // the scriptorium indexes this
+            ga::ast::WriteJson("docs/ga_ast.json");     // the Blueprint contract (M7u)
             // The survey pack loads whenever it exists: the land MASKS are the default
             // classifier (always on); the VECTOR overlay draws only under --stencil.
             if (!marsMode && gisStencil.Load("data/gis/gis.json")) {
