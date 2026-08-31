@@ -56,6 +56,26 @@ public:
     const std::vector<float>& CloudAltsM() const { return m_cloudAlts; }
     const std::string& CloudsCycle() const { return m_cloudsCycle; }
 
+    // M9 (docs/ALGEBRA.md "optics"): the water's QUALITY. Three gap-filled NOAA ocean-colour
+    // fields on one shared 0.25-degree grid -- log10(chl-a), Kd490, log10(SPM) -- plus GFS
+    // sea-ice concentration on the WAVE grid (they are not the same grid: ocean colour is
+    // cell-centred 1440x720 on -180..180, the GFS fields node-centred 1440x721 on 0..360).
+    // OcNull() marks "no retrieval here" -- polar night and the gap fill's own edges; it is a
+    // real answer and never a silent zero.
+    int OcNx() const { return m_ocnx; }
+    int OcNy() const { return m_ocny; }
+    double OcLat1() const { return m_oclat1; }
+    double OcLon1() const { return m_oclon1; }
+    double OcDLat() const { return m_ocdlat; }
+    double OcDLon() const { return m_ocdlon; }
+    float OcNull() const { return m_ocnull; }
+    const std::vector<float>& OcChlLog10() const { return m_ocChl; }
+    const std::vector<float>& OcKd490() const { return m_ocKd; }
+    const std::vector<float>& OcSpmLog10() const { return m_ocSpm; }
+    const std::string& OcEpoch() const { return m_ocEpoch; }
+    const std::vector<float>& Ice() const { return m_ice; }
+    const std::string& IceCycle() const { return m_iceCycle; }
+
     int WavesNx() const { return m_wnx; }
     int WavesNy() const { return m_wny; }
     double WavesLat1() const { return m_wlat1; }
@@ -88,6 +108,13 @@ private:
     int m_wvnx = 0, m_wvny = 0;
     double m_wvlat1 = 90, m_wvlon1 = 0, m_wvdlat = 0.5, m_wvdlon = 0.5;
     std::vector<float> m_windU, m_windV;
+    int m_ocnx = 0, m_ocny = 0;
+    double m_oclat1 = 90, m_oclon1 = -180, m_ocdlat = -0.25, m_ocdlon = 0.25;
+    float m_ocnull = -9.0f;
+    std::vector<float> m_ocChl, m_ocKd, m_ocSpm;
+    std::string m_ocEpoch;
+    std::vector<float> m_ice;
+    std::string m_iceCycle;
 };
 
 }  // namespace ga

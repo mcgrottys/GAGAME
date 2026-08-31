@@ -60,6 +60,11 @@ ebb — the whitewater river over the shoal); calm evening low `--start 2026-08-
   the water surprises you; validate against NOAA with the printed station numbers.
 - `--dump-fibers` — the bank's planes as PNGs + `fiber_detail.f32` + `fiber_meta.json`
   (range-checked against the AST's declared ranges; violations print).
+- `py -3 proofs/water_optics.py` — M9's water-quality forms (the Kd490→RGB transfer and the
+  two-flux deep colour) against the measured NOAA fields; renders `proofs/water_optics.png`
+  with the rendered water swatches. Toggle the feature itself with `closures.waterOptics`
+  in `data/wave_scene.json` (false restores the M7c constants byte for byte). NOTE the flag
+  is under `closures`, and it is a JSON **bool** — see priors 15 before trusting an A/B.
 - `--dump-water-state` then `py -3 proofs/inlet_storm.py` — the independent 2D physics
   figure (`proofs/inlet_storm.png`) + the MATCH REPORT holding the kernel to the same
   pure functions on the same fields (healthy: corr ≥ 0.9 per ring, mean |log ratio| < 5%).
@@ -77,10 +82,15 @@ ebb — the whitewater river over the shoal); calm evening low `--start 2026-08-
 ## launch-data — Data prerequisites & caches
 
 Harvesters (python, repo root; all cache-first and polite): `harvest_globe.py`
-(NE15/ETOPO relief), `harvest_bathy.py --window merrimack|capeann|boston` (CUDEM),
+(NE15/ETOPO relief, GFS-Wave Hs/wind, cloud volume, and — M9 — the gap-filled ocean-colour
+trio `oc_chl/oc_kd490/oc_spm.f32` plus sea ice `ice.f32`; per-section `--skip-*` flags, so
+`--skip-etopo --skip-mars --skip-ne --skip-windvec --skip-clouds` refreshes just the water's
+quality in ~15 s), `harvest_bathy.py --window merrimack|capeann|boston` (CUDEM),
 `harvest_tides.py` (constituent fits incl. the 20-station set), `harvest_water.py`
 (+`--eot20` for the 2.3 GB EOT20 grids), `harvest_waves.py` / `harvest_currents.py` /
-`harvest_gis.py` / `harvest_vectors.py` / `harvest_aerial.py` (MassGIS orthos).
+`harvest_gis.py` / `harvest_vectors.py` / `harvest_aerial.py` (MassGIS orthos) /
+`harvest_survey.py` (M7y: CUSP shoreline + NHD HR hydrography; rebakes landmask_ne.raw
+with the NHD open-water carve — run harvest_vectors.py after it to refresh the vpack).
 Large static datasets live in `D:\DataCache\GAGAME\` (300 GB granted 2026-08-31, for
 texture / GIS / topology / bathymetry / weather). `data/` holds the
 repo-sized realizations; the composed cache lives beside it and repaints exactly what a

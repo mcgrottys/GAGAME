@@ -15,6 +15,15 @@ namespace {
 
 constexpr double kPi = 3.14159265358979;
 
+// M9: the pure-water limit, in the fibers' own encodings. docs/ALGEBRA.md "optics" pins the
+// model exact here (chl -> 0, SPM -> 0, Kd490 -> Kdw(490)), so an unretrieved texel renders as
+// the clearest water there is rather than as a hole. The chl/SPM values are the retrievals'
+// own valid_min floors -- the smallest quantity either product is willing to assert.
+constexpr float kOcPureChlLog10 = -3.0f;    // 0.001 mg/m^3
+constexpr float kOcPureKd490 = 0.0224f;     // m^-1, pure seawater at the 490 nm anchor
+constexpr float kOcPureSpmLog10 = -2.0f;    // 0.01 mg/L
+constexpr float kOcDeepGain = 2.0331f;      // g, the declared albedo gain (proofs/water_optics.py)
+
 void CubeDirD(int face, double u, double v, double out[3]) {
     const double cx = u * 2.0 - 1.0, cy = v * 2.0 - 1.0;
     double p[3];
@@ -70,6 +79,50 @@ void GlobeLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSignatu
             gpu.UploadTexture(m_wind, m_globe->Wind().data(), wn * 4);
             m_wind.srv = gpu.CreateSrv(m_wind.res.Get(), DXGI_FORMAT_R32_FLOAT);
         }
+    }
+    // M9 (docs/ALGEBRA.md "optics"): the water-quality plane. Three retrievals ride up as ONE
+    // RGBA texture -- (log10 chl, Kd490, log10 SPM, retrieved?) -- because the optics model
+    // consumes them together and one fetch beats three. The log encoding is NOT about fp16
+    // range (measured: it does not bite); it is about the FILTER: ocean colour spans four
+    // decades inside one bilinear footprint at a coastal front, and linear-space blending
+    // there returns an arithmetic mean that paints a bloom the data does not contain.
+    //
+    // Where nothing was retrieved (polar night, the gap fill's own edges) the texel carries
+    // the PURE-WATER limit with alpha 0, so the hardware lerp degrades smoothly toward clear
+    // water at the data's edge instead of toward a sentinel. The proof pins that limit exact,
+    // so an absent field is a zero-regression fallback, not a hole. (Climatology is the named
+    // upgrade for that texel; pure water is what v1 declares.)
+    if (m_globe->OcNx() > 0 && !m_globe->OcChlLog10().empty()) {
+        const int on = m_globe->OcNx(), om = m_globe->OcNy();
+        const float nul = m_globe->OcNull();
+        const auto& chl = m_globe->OcChlLog10();
+        const auto& kd = m_globe->OcKd490();
+        const auto& spm = m_globe->OcSpmLog10();
+        std::vector<float> packed(static_cast<size_t>(on) * om * 4);
+        size_t retrieved = 0;
+        for (size_t i = 0; i < static_cast<size_t>(on) * om; ++i) {
+            const bool ok = chl[i] > nul && kd[i] > nul && spm[i] > nul;
+            packed[i * 4 + 0] = ok ? chl[i] : kOcPureChlLog10;
+            packed[i * 4 + 1] = ok ? kd[i] : kOcPureKd490;
+            packed[i * 4 + 2] = ok ? spm[i] : kOcPureSpmLog10;
+            packed[i * 4 + 3] = ok ? 1.0f : 0.0f;
+            retrieved += ok ? 1 : 0;
+        }
+        m_ocean = gpu.CreateTexture2D(on, om, DXGI_FORMAT_R32G32B32A32_FLOAT,
+                                      D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST,
+                                      L"globe.ocean (chl/Kd490/SPM/valid)");
+        gpu.UploadTexture(m_ocean, packed.data(), on * 16);
+        m_ocean.srv = gpu.CreateSrv(m_ocean.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+        Log("[globe] water optics %dx%d (%s): %.1f%% retrieved, the rest pure water", on, om,
+            m_globe->OcEpoch().c_str(),
+            retrieved * 100.0 / (static_cast<double>(on) * om));
+    }
+    if (!m_globe->Ice().empty()) {
+        const int wn = m_globe->WavesNx(), wm = m_globe->WavesNy();
+        m_ice = gpu.CreateTexture2D(wn, wm, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_NONE,
+                                    D3D12_RESOURCE_STATE_COPY_DEST, L"globe.ice (gfs icec)");
+        gpu.UploadTexture(m_ice, m_globe->Ice().data(), wn * 4);
+        m_ice.srv = gpu.CreateSrv(m_ice.res.Get(), DXGI_FORMAT_R32_FLOAT);
     }
     if (m_globe->CloudsNx() > 0) InitClouds(gpu, sc);
     InitNeAndWind(gpu, sc);
@@ -911,6 +964,22 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.bankE[1] = windGateVal;   // Monahan gate for the PS detail-tier whitecaps
     m_cb.bankE[2] = causticStrength;
     m_cb.bankE[3] = editFloorNavd;   // M8g: absolute edit-land floor (datum envelope)
+
+    // M9: the water's quality. The optics switch on only when the plane is actually resident
+    // -- an absent field must fall back to the M7c constants, not to an unbound descriptor.
+    const bool opticsOn = waterOptics && m_ocean.Valid();
+    m_cb.optU[0] = opticsOn ? m_ocean.srv : UINT32_MAX;
+    m_cb.optU[1] = m_ice.Valid() ? m_ice.srv : UINT32_MAX;
+    m_cb.optU[2] = opticsOn ? 1u : 0u;
+    m_cb.optU[3] = 0u;
+    m_cb.optA[0] = static_cast<float>(m_globe->OcLat1());
+    m_cb.optA[1] = static_cast<float>(m_globe->OcLon1());
+    m_cb.optA[2] = static_cast<float>(1.0 / m_globe->OcDLat());
+    m_cb.optA[3] = static_cast<float>(1.0 / m_globe->OcDLon());
+    m_cb.optB[0] = static_cast<float>(m_globe->OcNx());
+    m_cb.optB[1] = static_cast<float>(m_globe->OcNy());
+    m_cb.optB[2] = kOcDeepGain;
+    m_cb.optB[3] = 0.0f;
     m_cb.texIdx[0] = UINT32_MAX;   // was the equirect relief; the composed height cube owns it
     m_cb.texIdx[1] = m_hs.Valid() ? m_hs.srv : UINT32_MAX;
     m_cb.texIdx[2] = m_wind.Valid() ? m_wind.srv : UINT32_MAX;
@@ -968,6 +1037,8 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         m_cb.texIdx[1] = m_cb.texIdx[2] = m_cb.texIdx[3] = UINT32_MAX;   // waves/wind/clouds
         m_cb.texIdx2[1] = UINT32_MAX;                                    // wind bank
         m_cb.texIdx2[2] = 0;
+        m_cb.optU[0] = m_cb.optU[1] = UINT32_MAX;   // Mars has no ocean colour and no sea ice
+        m_cb.optU[2] = 0;
     }
 
     // The sky pass rebuilds pixel rays from this basis (b2). M6j: the ONE render basis --

@@ -1563,3 +1563,51 @@ never shows as "best data" anywhere. Named next for this tool: a realized-weight
 for the local (non-network) sources, and hue-by-stack-authority as a second reading —
 the compositor paints by stack ORDER, which is not the same question as which data is
 finest.
+
+**M9 (2026-08-31): THE WATER'S QUALITY — two constants become two fields.** The user:
+"add water chlorophyl and turbidity as a data source ... start with just a global
+dataset to see if it changes the water look from the globe view, without breaking
+things when at helm height." The ray path was already shaped for it: M7c's comment says
+the deep colour "is a ratio of scattering to extinction; nobody picked it" — and then
+picked it anyway, as `Kd = (0.36, 0.105, 0.06)` and a depth-lerped shelf tint. Both are
+MADE by chlorophyll, sediment and CDOM, so both are measurements. **ENDPOINT SURVEY
+FIRST** (the standing rule before any fetch code): NOAA CoastWatch's gap-filled DINEOF
+trio — chlor_a, Kd490, SPM — share one 17280×8640 grid, and asking ERDDAP for stride 3
+of the 4 km siblings lands EXACTLY on 720×1440 at 0.25°, the GFS-Wave grid the engine
+already maps, for 4.16 MB and ~3 s each. Sea ice came almost free: GFS `ICEC` on the
+wave grid itself, live from the 12z cycle two hours old. **THE ALGEBRA** (ALGEBRA.md
+`optics`, `proofs/water_optics.py`): (1) the Austin–Petzold spectral transfer carries
+the one measured wavelength to the shader's three, `Kd(λ) = max(Kdw(λ) + M(λ)[K490 −
+Kdw(490)], Kdw(λ))` with M(490) ≡ 1 structurally; (2) Gordon's two-flux endpoint `R =
+f·b_b/(μ_d·Kd)` reuses THAT SAME Kd as the absorption proxy, so extinction and colour
+cannot drift apart, and backscatter arbitrates two retrievals by AUTHORITY —
+`max(β_S·SPM, β_C·chl^0.63)`, coastal water SPM-carried, open ocean chl-carried. That
+`max` is what earns chlorophyll a consumer instead of decoration (priors 6). **THE
+PROOF PAID FOR ITSELF THREE TIMES.** It killed the assertion that one gain reproduces
+the shipped deep constant in all three channels (green +1%, blue −8%, red 36% low — the
+shipped red is its own tuning excess); it refuted the fp16-underflow motivation for log
+storage outright (measured: raw chl round-trips inside 0.05%; the real reason is the
+FILTER — a 500:1 coastal front blended linearly returns an arithmetic mean that paints a
+bloom the data does not contain, and log space returns the geometric mean); and it
+forced the `max(…, Kdw)` clamp by noticing the retrieval's `valid_min` (0.01) sits BELOW
+the pure-water anchor (0.0224) while blue has the steepest slope — water cannot be
+clearer than water. **THE FINDING** (priors 13): the shipped Kd triple's red and green
+match the transfer at the measured Merrimack-mouth Kd490 to −0.4% and +7.7%, but its
+blue is 2.6× too transparent. It carries the OPEN-OCEAN channel ordering and applies it
+to coastal water. Real coastal water kills blue first and **green** is the
+deepest-penetrating channel — one crossover at K490* = 0.0823 m⁻¹, and the field decides
+which side each pixel is on. Blue offshore and green inshore stop being two tunings.
+**WHAT LANDED**: the globe's Gulf of Maine, Bay of Fundy, Gulf of St. Lawrence, Georges
+Bank and the Scotian Shelf now read productive green while the deep Atlantic stays navy
+— and the navy does NOT jump, because g = 2.033 lands the model's open ocean on the
+shipped constant to +1% in blue (the shipped deep colour WAS the two-flux endpoint of
+the median ocean; nobody had checked). The old turquoise fringe along every shelf edge
+is gone: that was the depth lerp double-counting bed brightness the refracted ray
+already supplies. At helm the change is 34/255 worst-case and 1.4 mean — slightly less
+cyan in the shallows, which is the blue correction doing exactly what it should. **THE
+BUG THAT ATE TWO RENDERS**: the A/B came back byte-identical twice. First because
+`waterOptics` went in at the JSON top level while the parser reads it out of `closures`;
+then because `JsonValue::Num()` only reads NUMBERS and silently returned the default for
+a JSON `false`. Priors 9's cold-start warning made both look plausible. Law reinforced:
+when an A/B shows zero pixels changed, suspect the FLAG before the physics — a diff of
+exactly 2 pixels is not a subtle effect, it is a disconnected wire.

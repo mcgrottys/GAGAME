@@ -126,6 +126,7 @@ public:
     float ringBlendTexels = 48.0f;  // M8: bank ring cross-fade width (scene cfg)
     float windGateVal = 1.0f;       // M8: Monahan whitecap gate (per frame, from sea)
     float causticStrength = 0.6f;   // M8: bed dapple strength (scene cfg; 0 = off)
+    bool waterOptics = true;        // M9: data-driven K_d + deep colour (scene cfg)
     float editFloorNavd = 1.8f;     // M8g: edit-land geometry floor, ABSOLUTE NAVD m --
                                     // set from the datum envelope (MLLW + margin) at boot
                                     // so high water drowns the outer jetty (origin planes)
@@ -192,6 +193,11 @@ private:
         float bankC[4];       // representative wavenumber per cascade
         float bankD[4];       // M8: unit-sea rms envelope per band, w = foam opacity
         float bankE[4];       // M8: ring cross-fade width (texels), rest spare
+        // M9 (ALGEBRA "optics"): the water's quality + the sea ice. THREE rows -- keep the
+        // count in step with GlobeCb in Globe.hlsl.
+        uint32_t optU[4];     // ocean-colour SRV, ice SRV, optics on, spare
+        float optA[4];        // ocean grid: lat1, lon1, 1/dlat, 1/dlon
+        float optB[4];        // nx, ny, deep-albedo gain g, spare
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -231,6 +237,7 @@ private:
     // M6i: m_relief and m_ne retired -- the composed height cube streams what they carried
     // (and returns ~90 MB of committed equirect memory to the pool).
     GpuTexture m_hs, m_wind, m_cloudSrc, m_windSrc;
+    GpuTexture m_ocean, m_ice;   // M9: (log10 chl, Kd490, log10 SPM, valid); ICEC
 
     // M6d: the sparse Mv2 wind bank (div, u, v, curl) -- resident where storms live.
     TileAtlas2D m_windBank;

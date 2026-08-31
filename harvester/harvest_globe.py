@@ -12,10 +12,16 @@ Two fetches, both polite:
    f000 global 0.25-degree grid (~3 MB via the NOMADS filter, cached per cycle), so the
    globe renders TODAY'S ocean, not a texture.
 
-Usage:  py -3 harvester\\harvest_globe.py [--skip-etopo] [--skip-waves]
-Output: data/globe/globe.json, etopo_8192.i16, hs.f32, wind.f32
+3. The WATER'S QUALITY (M9): NOAA CoastWatch gap-filled ocean colour -- chlorophyll-a, Kd490
+   and suspended particulate matter -- strided onto that same 0.25-degree grid, plus GFS
+   sea-ice concentration. See do_ocean_colour() for the endpoint survey.
+
+Usage:  py -3 harvester\\harvest_globe.py [--skip-etopo] [--skip-waves] [--skip-ocean]
+        [--skip-ice] [--skip-clouds] [--skip-ne] [--skip-windvec] [--skip-mars]
+Output: data/globe/globe.json, etopo_8192.i16, hs.f32, wind.f32, oc_*.f32, ice.f32
 """
 import json
+import math
 import os
 import struct
 import sys
@@ -391,6 +397,152 @@ def do_mars():
             "mars_source": "MOLA MEGDR 16ppd (PDS Geosciences)"}
 
 
+# ==================================================================================================
+#  M9: THE WATER'S QUALITY. Three NOAA CoastWatch gap-filled (DINEOF) ocean-colour fields --
+#  chlorophyll-a, Kd490, and suspended particulate matter -- on ONE shared grid, plus GFS sea-ice
+#  concentration on the grid the wave field already uses. docs/ALGEBRA.md "optics" turns the first
+#  three into the shader's K_d triple and its deep-water colour; the fourth whitens the surface and
+#  kills the glint with the same number.
+#
+#  Endpoint survey, 2026-08-31 (the verification pass that precedes any fetch code):
+#    * The three DINEOF datasets share an identical 17280 x 8640 grid at 1/48 deg, row 0 = NORTH.
+#      Asking ERDDAP for stride 3 of the 4 km siblings lands EXACTLY on 720 x 1440 at 0.25 deg --
+#      the GFS-Wave grid the engine already maps -- for 4.16 MB and ~3 s per field.
+#    * Science-quality runs ~11 days behind (field 2026-08-20 on 2026-08-31). The gap fill removes
+#      cloud holes but not polar night: in-range coverage is 49.8% of the global grid, so NULL is
+#      a real answer and ships as such (fill -> NaN -> the sentinel below), never a silent zero.
+#    * Measured global medians: chl 0.141 mg/m^3, Kd490 0.0402 /m, SPM 0.122 mg/L. At the
+#      Merrimack mouth: 0.686, 0.145, 0.509 -- the two waters the proof is anchored on.
+#    * NRT gap-filled exists for CHLOROPHYLL ONLY (2-day latency, noaacwNPPN20VIIRSDINEOFDaily).
+#      The trio is kept matched rather than mixing vintages inside one optical model -- the
+#      named upgrade path, not a silent substitution.
+# ==================================================================================================
+ERDDAP = "https://coastwatch.noaa.gov/erddap/griddap"
+OCEAN_FIELDS = [
+    # (dataset id, variable, output file, log10-encoded?)
+    ("noaacwNPPN20S3ASCIDINEOFDaily", "chlor_a", "oc_chl.f32", True),
+    ("noaacwNPPN20S3AkdSCIDINEOFDaily", "kd_490", "oc_kd490.f32", False),
+    ("noaacwNPPN20S3AspmSCIDINEOFDaily", "spm", "oc_spm.f32", True),
+]
+OC_STRIDE = 3           # 4 km sibling / 3 == 0.25 deg == the wave grid, exactly
+OC_NULL = -9.0          # the sentinel for "no retrieval here" (below every valid log10 and Kd)
+
+
+def do_ocean_colour():
+    """The gap-filled ocean-colour trio, strided to the wave grid. One request per field."""
+    from netcdf3 import NetCDF3   # local: only this section needs it
+
+    os.makedirs(CACHE, exist_ok=True)
+    os.makedirs(OUT, exist_ok=True)
+    meta = {}
+    for ds, var, out_name, as_log in OCEAN_FIELDS:
+        q = (f"{var}%5B(last)%5D%5B(0.0)%5D%5B(89.9583):{OC_STRIDE}:(-89.9583)%5D"
+             f"%5B(-179.9583):{OC_STRIDE}:(179.9583)%5D")
+        cache = os.path.join(CACHE, f"oc_{var}_s{OC_STRIDE}.nc")
+        try:
+            if not (os.path.exists(cache) and os.path.getsize(cache) > 100000):
+                log(f"  GET {ds} {var} (global, stride {OC_STRIDE})")
+                req = urllib.request.Request(f"{ERDDAP}/{ds}.nc?{q}", headers={"User-Agent": UA})
+                with urllib.request.urlopen(req, timeout=300) as r:
+                    data = r.read()
+                if len(data) < 100000:
+                    raise RuntimeError(f"short response ({len(data)} B)")
+                with open(cache, "wb") as f:
+                    f.write(data)
+                time.sleep(2)     # polite: three datasets, one server
+            with open(cache, "rb") as f:
+                nc = NetCDF3(f.read())
+            lat, _ = nc.read("latitude")
+            lon, _ = nc.read("longitude")
+            vals, _ = nc.read(var)
+            atts = nc.vars[var].atts
+            vmin = float(atts.get("valid_min", 0.0))
+            vmax = float(atts.get("valid_max", 1e30))
+            nx, ny = len(lon), len(lat)
+            if nx * ny != len(vals):
+                raise RuntimeError(f"{nx}x{ny} != {len(vals)} values")
+            # The reader has already turned _FillValue into NaN. Out-of-range survivors are
+            # real -- the SPM field carries values up to 3x its own valid_max, and Kd carries
+            # the |fill| saturation value 6.5534 -- so the range mask is not optional.
+            out = array("f", [OC_NULL]) * (nx * ny)
+            kept = 0
+            for i, v in enumerate(vals):
+                if v == v and vmin <= v <= vmax:      # v == v rejects NaN
+                    out[i] = math.log10(v) if as_log else float(v)
+                    kept += 1
+            with open(os.path.join(OUT, out_name), "wb") as f:
+                out.tofile(f)
+            log(f"  {var}: {nx}x{ny} lat {lat[0]:.3f}..{lat[-1]:.3f} d={lat[1] - lat[0]:+.4f}, "
+                f"{kept * 100.0 / (nx * ny):.1f}% retrieved -> {out_name}"
+                f"{' (log10)' if as_log else ''}")
+            if not meta:
+                # Row 0 = NORTH already (latitude descends); the grid is shared by all three.
+                meta = {"oc_nx": nx, "oc_ny": ny, "oc_lat1": lat[0], "oc_lon1": lon[0],
+                        "oc_dlat": lat[1] - lat[0], "oc_dlon": lon[1] - lon[0],
+                        "oc_null": OC_NULL, "oc_source": "NOAA CoastWatch gap-filled DINEOF"}
+            meta[f"{var}_file"] = out_name
+        except Exception as e:  # noqa: BLE001
+            log(f"  {var} unavailable ({e}); the optics fall back to the pure-water limit")
+    if "chlor_a_file" in meta:
+        # The date stamp IS the cache identity for this rung (the GFS cycle's analogue).
+        try:
+            with open(os.path.join(CACHE, f"oc_kd_490_s{OC_STRIDE}.nc"), "rb") as f:
+                t, _ = NetCDF3(f.read()).read("time")
+            meta["oc_epoch_utc"] = datetime.fromtimestamp(t[0], timezone.utc).strftime("%Y-%m-%d")
+        except Exception:  # noqa: BLE001
+            pass
+    return meta
+
+
+def do_seaice():
+    """GFS surface ice cover (ICEC, 0-1) from the latest analysis -- the wave grid, live."""
+    now = datetime.now(timezone.utc)
+    for lag_h in range(5, 30, 6):
+        cyc_t = now - timedelta(hours=lag_h)
+        ymd = cyc_t.strftime("%Y%m%d")
+        cyc = f"{(cyc_t.hour // 6) * 6:02d}"
+        url = ("https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl?"
+               f"dir=%2Fgfs.{ymd}%2F{cyc}%2Fatmos&file=gfs.t{cyc}z.pgrb2.0p25.f000&"
+               "var_ICEC=on&lev_surface=on&"
+               "subregion=&toplat=90&bottomlat=-90&leftlon=0&rightlon=360")
+        cache = os.path.join(CACHE, f"gfs_{ymd}_{cyc}_f000_icec.grib2")
+        try:
+            if not (os.path.exists(cache) and os.path.getsize(cache) > 10000):
+                log(f"  GET gfs {ymd} {cyc}z f000 (sea ice)")
+                req = urllib.request.Request(url, headers={"User-Agent": UA})
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    data = r.read()
+                if len(data) < 10000:
+                    raise RuntimeError(f"short response ({len(data)} B)")
+                os.makedirs(CACHE, exist_ok=True)
+                with open(cache, "wb") as f:
+                    f.write(data)
+            with open(cache, "rb") as f:
+                msgs = read_messages(f.read())
+            ice = next(m for m in msgs if m.discipline == 10)
+            vals = array("f", [0.0]) * (ice.ni * ice.nj)
+            for i, v in enumerate(ice.values):
+                if v is not None:
+                    vals[i] = min(max(float(v), 0.0), 1.0)
+            if ice.scan & 0x40:                      # south->north: normalise to row 0 = NORTH
+                flipped = array("f", [0.0]) * (ice.ni * ice.nj)
+                for r in range(ice.nj):
+                    s = (ice.nj - 1 - r) * ice.ni
+                    flipped[r * ice.ni:(r + 1) * ice.ni] = vals[s:s + ice.ni]
+                vals = flipped
+            with open(os.path.join(OUT, "ice.f32"), "wb") as f:
+                vals.tofile(f)
+            cov = sum(1 for v in vals if v > 0.15) * 100.0 / len(vals)
+            log(f"  {ymd} {cyc}z: ice {ice.ni}x{ice.nj}, {cov:.2f}% of the globe over 15% "
+                f"concentration -> ice.f32")
+            return {"ice_cycle": f"{ymd}t{cyc}z", "ice_nx": ice.ni, "ice_ny": ice.nj,
+                    "ice_file": "ice.f32"}
+        except Exception as e:  # noqa: BLE001
+            log(f"    cycle {ymd} {cyc}z unavailable ({e}); stepping back")
+    log("  NO ice cycle reachable -- the poles render as open water")
+    return {}
+
+
 def main():
     meta = {}
     if "--skip-etopo" not in sys.argv:
@@ -414,6 +566,12 @@ def main():
     if "--skip-clouds" not in sys.argv:
         log("[clouds] live cloud layers")
         meta.update(do_clouds())
+    if "--skip-ocean" not in sys.argv:
+        log("[ocean] gap-filled ocean colour (chl / Kd490 / SPM)")
+        meta.update(do_ocean_colour())
+    if "--skip-ice" not in sys.argv:
+        log("[ice] live sea-ice concentration")
+        meta.update(do_seaice())
     meta["generated_utc"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     path = os.path.join(OUT, "globe.json")
     old = {}
