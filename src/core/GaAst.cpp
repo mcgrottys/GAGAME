@@ -161,6 +161,21 @@ void RegisterKnownComposeEdges() {
 void RegisterKnownWaterEdges() {
     RegisterKnownComposeEdges();
     const Frame worldM{"world.m", true, 0, 0, 0};
+    const Frame latlonW{"latlon.deg", true, 0, 0, 0};
+    const Frame uvSW{"uv01.vS", false, 0, 0, 0};
+    // M7r: the M7q per-texel bed chain, with its PRECISION contract. The kernel repeats
+    // CsWindowUv's formulation (absolute float mercator px minus org): ~0.25 px ulp at
+    // z14 = ~2.4 m ground -- bounded by gatest's merc-chain test, invisible under 9.55 m
+    // texels. The world->latlon step is the FLAT-ONE-WORLD map (mPerLon frozen at the
+    // anchor): absolute georegistration drifts ~0.2 km at the window's far corners, but
+    // every water consumer shares the same map, so the water cannot disagree with itself.
+    Register({"world.flat", "latlon.deg", "anchor-linear map", worldM, latlonW, false,
+              "deg", "mPerLon frozen at anchor; shared by ALL water consumers", 1.0,
+              "BathyModel::kOrgLat/kMPerLat convention"});
+    Register({"height.window", "water.bank", "bed per texel", latlonW, uvSW, false,
+              "m NAVD", "float merc ~0.25 px ulp (gatest-bounded); residency-clamped "
+              "mips 2..7",
+              1.0, "WaterBank.hlsl M7q (same formulation as CsWindowUv)"});
     const Frame wrap{"patch.wrap", true, 0, 0, 0};
     const Frame atlasN{"atlas.texel", true, 0, 0, 0};
     const Frame rowS{"raster.row0N", false, 0, 0, 0};

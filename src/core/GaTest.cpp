@@ -191,9 +191,61 @@ bool RunGaSelfTest() {
         }
     }
 
+    // ---- M7r: the world->latlon->mercator->uv chain, FLOAT (the shader/kernel path)
+    // against a DOUBLE reference. Five sites share this chain (WaterBank kernel,
+    // CsWindowUv, GisStencil, the want walk, the paint loops); the CPU sites run doubles
+    // (exact), the shader sites run float32 -- this pins the float path's ground error
+    // under a third of a bed texel over the whole window, so "is the abstraction working
+    // everywhere" has a number instead of a vibe.
+    {
+        const double n14 = 16384.0 * 256.0;
+        const double kOrgLat = 42.6017, kOrgLon = -70.8600;   // anchor family (values
+        const double mPerLat = 111132.0, mPerLon = 81800.0;   // representative; the test
+                                                              // bounds the FLOAT OPS, not
+                                                              // the survey constants)
+        const double winOrgX = 1263360.0, winOrgY = 1538048.0;
+        double worstM = 0.0;
+        for (int iz = -20; iz <= 20; ++iz) {
+            for (int ix = -20; ix <= 20; ++ix) {
+                const double wx = ix * 2000.0, wz = iz * 2000.0;
+                // double reference
+                const double latD = kOrgLat + wz / mPerLat;
+                const double lonD = kOrgLon + wx / mPerLon;
+                const double mxD = (lonD + 180.0) / 360.0 * n14;
+                const double myD =
+                    (0.5 - std::log(std::tan(0.78539816339744831 +
+                                             latD * 0.017453292519943295 * 0.5)) /
+                               (2.0 * 3.14159265358979324)) *
+                    n14;
+                // float chain, exactly as the kernel/CsWindowUv run it
+                const float latF = static_cast<float>(kOrgLat) +
+                                   static_cast<float>(wz) * static_cast<float>(1.0 / mPerLat);
+                const float lonF = static_cast<float>(kOrgLon) +
+                                   static_cast<float>(wx) * static_cast<float>(1.0 / mPerLon);
+                const float latR = latF * 0.01745329252f;
+                const float mxF = (lonF + 180.0f) / 360.0f * static_cast<float>(n14);
+                const float myF =
+                    (0.5f - std::log(std::tan(0.7853981634f + latR * 0.5f)) *
+                                0.15915494309f) *
+                    static_cast<float>(n14);
+                const double groundPerPx = 9.55 * std::cos(latD * 0.0174533);
+                const double errM =
+                    std::hypot((mxF - mxD) * groundPerPx, (myF - myD) * groundPerPx);
+                worstM = (std::max)(worstM, errM);
+                (void)winOrgX; (void)winOrgY;
+            }
+        }
+        Log("[gatest] merc chain float-vs-double: worst ground error %.2f m over "
+            "+-40 km (bed texel 13.7 m)", worstM);
+        if (worstM > 4.5) {
+            Log("[gatest] FAIL merc chain: float path drifts past a third of a bed texel");
+            ok = false;
+        }
+    }
+
     if (ok) {
         Log("[gatest] ---- PASS: sandwich, refraction rotor, fold telescope, spinor blend, "
-            "frame rules + orientation ledger ----");
+            "frame rules + orientation ledger, merc chain bound ----");
     }
     return ok;
 }
