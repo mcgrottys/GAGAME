@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2142 914" font-family="Segoe UI, Arial, sans-serif">
-<rect width="2142" height="914" fill="#f6f5f1"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2142 1046" font-family="Segoe UI, Arial, sans-serif">
+<rect width="2142" height="1046" fill="#f6f5f1"/>
 <text x="1071" y="30" text-anchor="middle" font-size="19" font-weight="600" fill="#24292f">GAGAME — water domain</text>
 <text x="1071" y="48" text-anchor="middle" font-size="11" fill="#57606a">generated from docs/ga_ast.json — the registry gatest validates; wires carry field [units], crimson badge = v-flip in the sampling code, dashed = inactive consumer</text>
 <path d="M 246 201 C 317 201, 345 114, 416 114" fill="none" stroke="#6e7781" stroke-width="1.6" opacity="0.75"/>
@@ -17,51 +17,61 @@
 <circle cx="1526" cy="129" r="3.2" fill="#3b82c4"/>
 <rect x="849" y="192" width="75" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
 <text x="886" y="202" text-anchor="middle" font-size="9.5" fill="#454c54">cascade.disp</text>
-<path d="M 246 303 C 939 303, 1203 201, 1896 201" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
+<path d="M 246 303 C 784 303, 988 144, 1526 144" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
 <circle cx="246" cy="303" r="3.2" fill="#3b82c4"/>
-<circle cx="1896" cy="201" r="3.2" fill="#3b82c4"/>
-<rect x="1031" y="255" width="80" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
-<text x="1071" y="265" text-anchor="middle" font-size="9.5" fill="#454c54">cascade.deriv</text>
-<path d="M 616 201 C 998 201, 1144 144, 1526 144" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
-<circle cx="616" cy="201" r="3.2" fill="#3b82c4"/>
 <circle cx="1526" cy="144" r="3.2" fill="#3b82c4"/>
-<rect x="1058" y="156" width="26" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
-<text x="1071" y="166" text-anchor="middle" font-size="9.5" fill="#454c54">eta</text>
-<circle cx="1092" cy="162" r="7" fill="#c93c37"/>
-<text x="1092" y="164" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
-<path d="M 616 216 C 998 216, 1144 159, 1526 159" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
-<circle cx="616" cy="216" r="3.2" fill="#3b82c4"/>
+<rect x="811" y="226" width="150" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="886" y="236" text-anchor="middle" font-size="9.5" fill="#454c54">cascade.deriv (foam union)</text>
+<path d="M 246 318 C 939 318, 1203 216, 1896 216" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
+<circle cx="246" cy="318" r="3.2" fill="#3b82c4"/>
+<circle cx="1896" cy="216" r="3.2" fill="#3b82c4"/>
+<rect x="1031" y="250" width="80" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="1071" y="260" text-anchor="middle" font-size="9.5" fill="#454c54">cascade.deriv</text>
+<path d="M 246 333 C 939 333, 1203 231, 1896 231" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
+<circle cx="246" cy="333" r="3.2" fill="#3b82c4"/>
+<circle cx="1896" cy="231" r="3.2" fill="#3b82c4"/>
+<rect x="1023" y="285" width="96" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="1071" y="295" text-anchor="middle" font-size="9.5" fill="#454c54">caustic jacobian</text>
+<path d="M 616 201 C 998 201, 1144 159, 1526 159" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
+<circle cx="616" cy="201" r="3.2" fill="#3b82c4"/>
 <circle cx="1526" cy="159" r="3.2" fill="#3b82c4"/>
-<rect x="1061" y="190" width="21" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
-<text x="1071" y="200" text-anchor="middle" font-size="9.5" fill="#454c54">uv</text>
-<circle cx="1089" cy="196" r="7" fill="#c93c37"/>
-<text x="1089" y="200" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
-<path d="M 616 231 C 998 231, 1144 174, 1526 174" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
-<circle cx="616" cy="231" r="3.2" fill="#3b82c4"/>
+<rect x="1058" y="163" width="26" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="1071" y="173" text-anchor="middle" font-size="9.5" fill="#454c54">eta</text>
+<circle cx="1092" cy="169" r="7" fill="#c93c37"/>
+<text x="1092" y="172" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
+<path d="M 616 216 C 998 216, 1144 174, 1526 174" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
+<circle cx="616" cy="216" r="3.2" fill="#3b82c4"/>
 <circle cx="1526" cy="174" r="3.2" fill="#3b82c4"/>
-<rect x="1050" y="186" width="42" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
-<text x="1071" y="196" text-anchor="middle" font-size="9.5" fill="#454c54">shadow</text>
-<circle cx="1100" cy="192" r="7" fill="#c93c37"/>
-<text x="1100" y="194" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
-<path d="M 986 114 C 1213 114, 1299 189, 1526 189" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
-<circle cx="986" cy="114" r="3.2" fill="#3b82c4"/>
+<rect x="1061" y="198" width="21" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="1071" y="208" text-anchor="middle" font-size="9.5" fill="#454c54">uv</text>
+<circle cx="1089" cy="204" r="7" fill="#c93c37"/>
+<text x="1089" y="207" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
+<path d="M 616 231 C 998 231, 1144 189, 1526 189" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
+<circle cx="616" cy="231" r="3.2" fill="#3b82c4"/>
 <circle cx="1526" cy="189" r="3.2" fill="#3b82c4"/>
-<rect x="1238" y="154" width="37" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
-<text x="1256" y="164" text-anchor="middle" font-size="9.5" fill="#454c54">churn</text>
-<path d="M 246 405 C 473 405, 559 114, 786 114" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
-<circle cx="246" cy="405" r="3.2" fill="#3b82c4"/>
+<rect x="1050" y="193" width="42" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="1071" y="203" text-anchor="middle" font-size="9.5" fill="#454c54">shadow</text>
+<circle cx="1100" cy="199" r="7" fill="#c93c37"/>
+<text x="1100" y="202" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
+<path d="M 986 114 C 1213 114, 1299 204, 1526 204" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
+<circle cx="986" cy="114" r="3.2" fill="#3b82c4"/>
+<circle cx="1526" cy="204" r="3.2" fill="#3b82c4"/>
+<rect x="1238" y="162" width="37" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="1256" y="172" text-anchor="middle" font-size="9.5" fill="#454c54">churn</text>
+<path d="M 246 435 C 473 435, 559 114, 786 114" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
+<circle cx="246" cy="435" r="3.2" fill="#3b82c4"/>
 <circle cx="786" cy="114" r="3.2" fill="#3b82c4"/>
-<rect x="503" y="242" width="26" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
-<text x="516" y="252" text-anchor="middle" font-size="9.5" fill="#454c54">bed</text>
-<circle cx="537" cy="248" r="7" fill="#c93c37"/>
-<text x="537" y="252" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
-<path d="M 246 420 C 628 420, 774 201, 1156 201" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75" stroke-dasharray="6 5"/>
-<circle cx="246" cy="420" r="3.2" fill="#3b82c4"/>
+<rect x="503" y="258" width="26" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="516" y="268" text-anchor="middle" font-size="9.5" fill="#454c54">bed</text>
+<circle cx="537" cy="264" r="7" fill="#c93c37"/>
+<text x="537" y="266" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
+<path d="M 246 450 C 628 450, 774 201, 1156 201" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75" stroke-dasharray="6 5"/>
+<circle cx="246" cy="450" r="3.2" fill="#3b82c4"/>
 <circle cx="1156" cy="201" r="3.2" fill="#3b82c4"/>
-<rect x="688" y="314" width="26" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
-<text x="701" y="324" text-anchor="middle" font-size="9.5" fill="#454c54">bed</text>
-<circle cx="722" cy="320" r="7" fill="#c93c37"/>
-<text x="722" y="322" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
+<rect x="688" y="328" width="26" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="701" y="338" text-anchor="middle" font-size="9.5" fill="#454c54">bed</text>
+<circle cx="722" cy="334" r="7" fill="#c93c37"/>
+<text x="722" y="338" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
 <path d="M 616 246 C 843 246, 929 216, 1156 216" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75" stroke-dasharray="6 5"/>
 <circle cx="616" cy="246" r="3.2" fill="#3b82c4"/>
 <circle cx="1156" cy="216" r="3.2" fill="#3b82c4"/>
@@ -81,127 +91,149 @@
 <circle cx="1156" cy="246" r="3.2" fill="#3b82c4"/>
 <rect x="1052" y="170" width="37" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
 <text x="1071" y="180" text-anchor="middle" font-size="9.5" fill="#454c54">churn</text>
-<path d="M 1356 114 C 1427 114, 1455 204, 1526 204" fill="none" stroke="#4a9e63" stroke-width="1.6" opacity="0.75"/>
+<path d="M 1356 114 C 1427 114, 1455 219, 1526 219" fill="none" stroke="#4a9e63" stroke-width="1.6" opacity="0.75"/>
 <circle cx="1356" cy="114" r="3.2" fill="#4a9e63"/>
-<circle cx="1526" cy="204" r="3.2" fill="#4a9e63"/>
-<rect x="1417" y="162" width="48" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
-<text x="1441" y="172" text-anchor="middle" font-size="9.5" fill="#454c54">corners</text>
-<path d="M 1726 114 C 1797 114, 1825 216, 1896 216" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
+<circle cx="1526" cy="219" r="3.2" fill="#4a9e63"/>
+<rect x="1417" y="170" width="48" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="1441" y="180" text-anchor="middle" font-size="9.5" fill="#454c54">corners</text>
+<path d="M 1726 114 C 1797 114, 1825 246, 1896 246" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
 <circle cx="1726" cy="114" r="3.2" fill="#3b82c4"/>
-<circle cx="1896" cy="216" r="3.2" fill="#3b82c4"/>
-<rect x="1760" y="148" width="102" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
-<text x="1811" y="158" text-anchor="middle" font-size="9.5" fill="#454c54">disp/param/detail</text>
+<circle cx="1896" cy="246" r="3.2" fill="#3b82c4"/>
+<rect x="1760" y="163" width="102" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="1811" y="173" text-anchor="middle" font-size="9.5" fill="#454c54">disp/param/detail</text>
 <path d="M 1726 129 C 1797 129, 1825 114, 1896 114" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
 <circle cx="1726" cy="129" r="3.2" fill="#3b82c4"/>
 <circle cx="1896" cy="114" r="3.2" fill="#3b82c4"/>
 <rect x="1779" y="124" width="64" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
 <text x="1811" y="134" text-anchor="middle" font-size="9.5" fill="#454c54">disp+level</text>
-<path d="M 246 783 C 317 783, 345 363, 416 363" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
-<circle cx="246" cy="783" r="3.2" fill="#3b82c4"/>
+<path d="M 246 915 C 317 915, 345 363, 416 363" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
+<circle cx="246" cy="915" r="3.2" fill="#3b82c4"/>
 <circle cx="416" cy="363" r="3.2" fill="#3b82c4"/>
-<rect x="294" y="556" width="75" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
-<text x="331" y="566" text-anchor="middle" font-size="9.5" fill="#454c54">harmonic fit</text>
-<path d="M 246 696 C 317 696, 345 378, 416 378" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
-<circle cx="246" cy="696" r="3.2" fill="#3b82c4"/>
+<rect x="294" y="622" width="75" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="331" y="632" text-anchor="middle" font-size="9.5" fill="#454c54">harmonic fit</text>
+<path d="M 246 828 C 317 828, 345 378, 416 378" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
+<circle cx="246" cy="828" r="3.2" fill="#3b82c4"/>
 <circle cx="416" cy="378" r="3.2" fill="#3b82c4"/>
-<rect x="296" y="540" width="69" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
-<text x="331" y="550" text-anchor="middle" font-size="9.5" fill="#454c54">phasor grid</text>
+<rect x="296" y="606" width="69" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="331" y="616" text-anchor="middle" font-size="9.5" fill="#454c54">phasor grid</text>
 <path d="M 616 363 C 687 363, 715 333, 786 333" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
 <circle cx="616" cy="363" r="3.2" fill="#3b82c4"/>
 <circle cx="786" cy="333" r="3.2" fill="#3b82c4"/>
-<rect x="645" y="331" width="113" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
-<text x="701" y="341" text-anchor="middle" font-size="9.5" fill="#454c54">tide phasors M2..O1</text>
-<circle cx="765" cy="337" r="7" fill="#c93c37"/>
-<text x="765" y="340" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
+<rect x="637" y="331" width="129" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="701" y="341" text-anchor="middle" font-size="9.5" fill="#454c54">tide phasors x18 (M8i)</text>
+<circle cx="773" cy="337" r="7" fill="#c93c37"/>
+<text x="773" y="340" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
 <path d="M 616 378 C 687 378, 715 231, 786 231" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
 <circle cx="616" cy="378" r="3.2" fill="#3b82c4"/>
 <circle cx="786" cy="231" r="3.2" fill="#3b82c4"/>
 <rect x="664" y="308" width="75" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
 <text x="701" y="318" text-anchor="middle" font-size="9.5" fill="#454c54">level rotors</text>
-<path d="M 246 507 C 473 507, 559 246, 786 246" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
-<circle cx="246" cy="507" r="3.2" fill="#3b82c4"/>
+<path d="M 616 393 C 1154 393, 1358 129, 1896 129" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
+<circle cx="616" cy="393" r="3.2" fill="#3b82c4"/>
+<circle cx="1896" cy="129" r="3.2" fill="#3b82c4"/>
+<rect x="1170" y="244" width="172" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="1256" y="254" text-anchor="middle" font-size="9.5" fill="#454c54">datum envelope (origin planes)</text>
+<path d="M 246 537 C 473 537, 559 246, 786 246" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
+<circle cx="246" cy="537" r="3.2" fill="#3b82c4"/>
 <circle cx="786" cy="246" r="3.2" fill="#3b82c4"/>
-<rect x="487" y="360" width="59" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
-<text x="516" y="370" text-anchor="middle" font-size="9.5" fill="#454c54">hs/tp/dir</text>
-<circle cx="553" cy="366" r="7" fill="#c93c37"/>
-<text x="553" y="368" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
+<rect x="487" y="394" width="59" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="516" y="404" text-anchor="middle" font-size="9.5" fill="#454c54">hs/tp/dir</text>
+<circle cx="553" cy="400" r="7" fill="#c93c37"/>
+<text x="553" y="404" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
 <path d="M 986 231 C 1057 231, 1085 114, 1156 114" fill="none" stroke="#6e7781" stroke-width="1.6" opacity="0.75"/>
 <circle cx="986" cy="231" r="3.2" fill="#6e7781"/>
 <circle cx="1156" cy="114" r="3.2" fill="#6e7781"/>
-<rect x="1017" y="176" width="107" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
-<text x="1071" y="186" text-anchor="middle" font-size="9.5" fill="#454c54">corner params feed</text>
-<path d="M 246 522 C 939 522, 1203 231, 1896 231" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
-<circle cx="246" cy="522" r="3.2" fill="#3b82c4"/>
-<circle cx="1896" cy="231" r="3.2" fill="#3b82c4"/>
-<rect x="1034" y="360" width="75" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
-<text x="1071" y="370" text-anchor="middle" font-size="9.5" fill="#454c54">hs whitening</text>
-<circle cx="1116" cy="366" r="7" fill="#c93c37"/>
-<text x="1116" y="368" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
-<path d="M 246 318 C 473 318, 559 129, 786 129" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
-<circle cx="246" cy="318" r="3.2" fill="#3b82c4"/>
+<rect x="1017" y="156" width="107" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="1071" y="166" text-anchor="middle" font-size="9.5" fill="#454c54">corner params feed</text>
+<path d="M 246 552 C 939 552, 1203 261, 1896 261" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
+<circle cx="246" cy="552" r="3.2" fill="#3b82c4"/>
+<circle cx="1896" cy="261" r="3.2" fill="#3b82c4"/>
+<rect x="1034" y="410" width="75" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="1071" y="420" text-anchor="middle" font-size="9.5" fill="#454c54">hs whitening</text>
+<circle cx="1116" cy="416" r="7" fill="#c93c37"/>
+<text x="1116" y="418" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
+<path d="M 246 639 C 939 639, 1203 276, 1896 276" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
+<circle cx="246" cy="639" r="3.2" fill="#3b82c4"/>
+<circle cx="1896" cy="276" r="3.2" fill="#3b82c4"/>
+<rect x="998" y="440" width="145" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="1071" y="450" text-anchor="middle" font-size="9.5" fill="#454c54">Kd490 -&gt; Kd(RGB) transfer</text>
+<circle cx="1152" cy="446" r="7" fill="#c93c37"/>
+<text x="1152" y="450" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
+<path d="M 246 654 C 939 654, 1203 291, 1896 291" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
+<circle cx="246" cy="654" r="3.2" fill="#3b82c4"/>
+<circle cx="1896" cy="291" r="3.2" fill="#3b82c4"/>
+<rect x="1007" y="476" width="129" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="1071" y="486" text-anchor="middle" font-size="9.5" fill="#454c54">chl/SPM -&gt; deep albedo</text>
+<circle cx="1143" cy="482" r="7" fill="#c93c37"/>
+<text x="1143" y="484" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
+<path d="M 246 348 C 473 348, 559 129, 786 129" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
+<circle cx="246" cy="348" r="3.2" fill="#3b82c4"/>
 <circle cx="786" cy="129" r="3.2" fill="#3b82c4"/>
-<rect x="457" y="226" width="118" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
-<text x="516" y="236" text-anchor="middle" font-size="9.5" fill="#454c54">chop deriv (pattern)</text>
+<rect x="457" y="222" width="118" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="516" y="232" text-anchor="middle" font-size="9.5" fill="#454c54">chop deriv (pattern)</text>
 <path d="M 616 276 C 687 276, 715 144, 786 144" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
 <circle cx="616" cy="276" r="3.2" fill="#3b82c4"/>
 <circle cx="786" cy="144" r="3.2" fill="#3b82c4"/>
-<rect x="661" y="193" width="80" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
-<text x="701" y="203" text-anchor="middle" font-size="9.5" fill="#454c54">uv (blocking)</text>
-<circle cx="749" cy="199" r="7" fill="#c93c37"/>
-<text x="749" y="202" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
-<path d="M 246 609 C 317 609, 345 201, 416 201" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
-<circle cx="246" cy="609" r="3.2" fill="#3b82c4"/>
+<rect x="661" y="213" width="80" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="701" y="223" text-anchor="middle" font-size="9.5" fill="#454c54">uv (blocking)</text>
+<circle cx="749" cy="219" r="7" fill="#c93c37"/>
+<text x="749" y="222" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
+<path d="M 246 741 C 317 741, 345 201, 416 201" fill="none" stroke="#3b82c4" stroke-width="1.6" opacity="0.75"/>
+<circle cx="246" cy="741" r="3.2" fill="#3b82c4"/>
 <circle cx="416" cy="201" r="3.2" fill="#3b82c4"/>
-<rect x="261" y="408" width="140" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
-<text x="331" y="418" text-anchor="middle" font-size="9.5" fill="#454c54">shadow build (LOS march)</text>
-<circle cx="409" cy="414" r="7" fill="#c93c37"/>
-<text x="409" y="417" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
-<rect x="46" y="367" width="200" height="68" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
-<path d="M 46 375 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#1f6feb"/>
-<text x="146.0" y="385" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">bathy.cudem</text>
+<rect x="261" y="454" width="140" height="13" rx="3" fill="#f6f5f1" opacity="0.9"/>
+<text x="331" y="464" text-anchor="middle" font-size="9.5" fill="#454c54">shadow build (LOS march)</text>
+<circle cx="409" cy="460" r="7" fill="#c93c37"/>
+<text x="409" y="463" text-anchor="middle" font-size="9" fill="#fff">&#8645;</text>
+<rect x="46" y="397" width="200" height="68" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<path d="M 46 405 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#1f6feb"/>
+<text x="146.0" y="415" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">bathy.cudem</text>
 <rect x="786" y="76" width="200" height="83" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
 <path d="M 786 84 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#1f6feb"/>
 <text x="886.0" y="94" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">churn.kernel</text>
 <rect x="1156" y="76" width="200" height="53" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
 <path d="M 1156 84 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#2f8f46"/>
 <text x="1256.0" y="94" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">compose.stack</text>
-<rect x="46" y="658" width="200" height="53" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
-<path d="M 46 666 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#1f6feb"/>
-<text x="146.0" y="676" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">eot20.grid</text>
-<rect x="46" y="469" width="200" height="68" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
-<path d="M 46 477 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#1f6feb"/>
-<text x="146.0" y="487" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">gfswave.grid</text>
-<rect x="1896" y="76" width="200" height="53" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<rect x="46" y="790" width="200" height="53" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<path d="M 46 798 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#1f6feb"/>
+<text x="146.0" y="808" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">eot20.grid</text>
+<rect x="46" y="499" width="200" height="68" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<path d="M 46 507 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#1f6feb"/>
+<text x="146.0" y="517" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">gfswave.grid</text>
+<rect x="1896" y="76" width="200" height="68" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
 <path d="M 1896 84 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#b8860b"/>
 <text x="1996.0" y="94" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">globe.mesh</text>
-<rect x="1896" y="163" width="200" height="83" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
-<path d="M 1896 171 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#b8860b"/>
-<text x="1996.0" y="181" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">globe.ps</text>
+<rect x="1896" y="178" width="200" height="128" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<path d="M 1896 186 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#b8860b"/>
+<text x="1996.0" y="196" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">globe.ps</text>
 <rect x="46" y="76" width="200" height="53" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
 <path d="M 46 84 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#2f8f46"/>
 <text x="146.0" y="94" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">height.window</text>
 <rect x="416" y="76" width="200" height="53" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
 <path d="M 416 84 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#57606a"/>
 <text x="516.0" y="94" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">latlon.deg</text>
-<rect x="46" y="745" width="200" height="53" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
-<path d="M 46 753 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#1f6feb"/>
-<text x="146.0" y="763" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">noaa.stations</text>
-<rect x="46" y="250" width="200" height="83" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<rect x="46" y="877" width="200" height="53" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<path d="M 46 885 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#1f6feb"/>
+<text x="146.0" y="895" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">noaa.stations</text>
+<rect x="46" y="601" width="200" height="68" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<path d="M 46 609 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#1f6feb"/>
+<text x="146.0" y="619" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">ocean.colour</text>
+<rect x="46" y="250" width="200" height="113" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
 <path d="M 46 258 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#1f6feb"/>
 <text x="146.0" y="268" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">ocean.fft</text>
-<rect x="46" y="571" width="200" height="53" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
-<path d="M 46 579 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#1f6feb"/>
-<text x="146.0" y="589" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">sea.peakdir</text>
+<rect x="46" y="703" width="200" height="53" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<path d="M 46 711 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#1f6feb"/>
+<text x="146.0" y="721" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">sea.peakdir</text>
 <rect x="1156" y="163" width="200" height="98" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
 <path d="M 1156 171 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#1f6feb"/>
 <text x="1256.0" y="181" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">sea.ps</text>
 <rect x="416" y="163" width="200" height="128" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
 <path d="M 416 171 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#1f6feb"/>
 <text x="516.0" y="181" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">swe.solver</text>
-<rect x="416" y="325" width="200" height="68" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<rect x="416" y="325" width="200" height="83" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
 <path d="M 416 333 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#1f6feb"/>
 <text x="516.0" y="343" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">water.atlas</text>
-<rect x="1526" y="76" width="200" height="143" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
+<rect x="1526" y="76" width="200" height="158" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
 <path d="M 1526 84 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#1f6feb"/>
 <text x="1626.0" y="94" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">water.bank</text>
 <rect x="786" y="193" width="200" height="68" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
@@ -213,14 +245,14 @@
 <rect x="46" y="163" width="200" height="53" rx="8" fill="#ffffff" stroke="#d0d7de" stroke-width="1.2"/>
 <path d="M 46 171 q 0 -8 8 -8 h 184 q 8 0 8 8 v 18 h -200 z" fill="#57606a"/>
 <text x="146.0" y="181" text-anchor="middle" font-size="12" font-weight="600" fill="#ffffff">world.flat</text>
-<rect x="46" y="872" width="14" height="14" rx="3" fill="#1f6feb"/>
-<text x="66" y="883" font-size="11" fill="#24292f">water</text>
-<rect x="129" y="872" width="14" height="14" rx="3" fill="#2f8f46"/>
-<text x="149" y="883" font-size="11" fill="#24292f">compose</text>
-<rect x="226" y="872" width="14" height="14" rx="3" fill="#8250df"/>
-<text x="246" y="883" font-size="11" fill="#24292f">air</text>
-<rect x="295" y="872" width="14" height="14" rx="3" fill="#b8860b"/>
-<text x="315" y="883" font-size="11" fill="#24292f">render</text>
-<rect x="385" y="872" width="14" height="14" rx="3" fill="#57606a"/>
-<text x="405" y="883" font-size="11" fill="#24292f">frames</text>
+<rect x="46" y="1004" width="14" height="14" rx="3" fill="#1f6feb"/>
+<text x="66" y="1015" font-size="11" fill="#24292f">water</text>
+<rect x="129" y="1004" width="14" height="14" rx="3" fill="#2f8f46"/>
+<text x="149" y="1015" font-size="11" fill="#24292f">compose</text>
+<rect x="226" y="1004" width="14" height="14" rx="3" fill="#8250df"/>
+<text x="246" y="1015" font-size="11" fill="#24292f">air</text>
+<rect x="295" y="1004" width="14" height="14" rx="3" fill="#b8860b"/>
+<text x="315" y="1015" font-size="11" fill="#24292f">render</text>
+<rect x="385" y="1004" width="14" height="14" rx="3" fill="#57606a"/>
+<text x="405" y="1015" font-size="11" fill="#24292f">frames</text>
 </svg>

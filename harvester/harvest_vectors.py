@@ -278,13 +278,18 @@ def main():
     os.makedirs(CACHE, exist_ok=True)
     layers, registry = [], []
 
-    for name, kind in (("coast_ne", 0), ("rivers_ne", 0), ("coast_global", 0)):
+    # M7y: the survey upgrade's layers ride the same bin format -- CUSP shoreline (polyline
+    # authority for the coast), NHD flowlines, NHD open-water rings (polygons).
+    for name, kind, src in (("coast_ne", 0, "gshhg"), ("rivers_ne", 0, "gshhg"),
+                            ("coast_global", 0, "gshhg"), ("cusp_ne", 0, "cusp"),
+                            ("nhd_rivers_ne", 0, "nhd"), ("nhd_water_ne", 1, "nhd")):
         p = os.path.join(GIS, f"{name}.bin")
         if os.path.exists(p):
             polys = read_gshhg_bin(p)
             layers.append((name, kind, polys))
-            registry.append({"layer": name, "kind": "polyline", "source": "gshhg",
-                             "polys": len(polys), "verts": sum(len(x) for x in polys)})
+            registry.append({"layer": name, "kind": ["polyline", "polygon"][kind],
+                             "source": src, "polys": len(polys),
+                             "verts": sum(len(x) for x in polys)})
 
     for p in sorted(glob.glob(os.path.join(CACHE, "*.shp"))):
         name = os.path.splitext(os.path.basename(p))[0]

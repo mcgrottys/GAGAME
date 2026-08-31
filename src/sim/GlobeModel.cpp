@@ -129,6 +129,47 @@ bool GlobeModel::Load(const std::string& jsonPath) {
         }
     }
 
+    // M9: the water's quality. All three fields share one grid; any one missing drops the
+    // whole family, because the optics model consumes them together (a Kd490 with no
+    // backscatter would render a black ocean, not a partial answer).
+    m_ocnx = static_cast<int>(js.Num("oc_nx", 0));
+    m_ocny = static_cast<int>(js.Num("oc_ny", 0));
+    m_oclat1 = js.Num("oc_lat1", 90.0);
+    m_oclon1 = js.Num("oc_lon1", -180.0);
+    m_ocdlat = js.Num("oc_dlat", -0.25);
+    m_ocdlon = js.Num("oc_dlon", 0.25);
+    m_ocnull = static_cast<float>(js.Num("oc_null", -9.0));
+    m_ocEpoch = js.Str("oc_epoch_utc", "none");
+    if (m_ocnx > 0) {
+        const size_t n = static_cast<size_t>(m_ocnx) * m_ocny;
+        if (!ReadBin(dir + js.Str("chlor_a_file", "oc_chl.f32"), n, &m_ocChl) ||
+            !ReadBin(dir + js.Str("kd_490_file", "oc_kd490.f32"), n, &m_ocKd) ||
+            !ReadBin(dir + js.Str("spm_file", "oc_spm.f32"), n, &m_ocSpm)) {
+            m_ocChl.clear();
+            m_ocKd.clear();
+            m_ocSpm.clear();
+            m_ocnx = 0;
+        }
+    }
+    // Sea ice rides the GFS grid the waves already use; refuse it if the dims disagree,
+    // rather than sampling one grid's field through another's mapping.
+    m_iceCycle = js.Str("ice_cycle", "none");
+    const int inx = static_cast<int>(js.Num("ice_nx", 0));
+    const int iny = static_cast<int>(js.Num("ice_ny", 0));
+    if (inx > 0 && inx == m_wnx && iny == m_wny) {
+        if (!ReadBin(dir + js.Str("ice_file", "ice.f32"),
+                     static_cast<size_t>(inx) * iny, &m_ice)) {
+            m_ice.clear();
+        }
+    } else if (inx > 0) {
+        Log("[globe] sea ice %dx%d does not match the wave grid %dx%d -- dropped", inx, iny,
+            m_wnx, m_wny);
+    }
+
+    Log("[globe] ocean colour %dx%d (%s) %s; sea ice %s %s", m_ocnx, m_ocny, m_ocEpoch.c_str(),
+        m_ocChl.empty() ? "ABSENT (optics fall back to pure water)" : "loaded",
+        m_iceCycle.c_str(), m_ice.empty() ? "absent" : "loaded");
+
     Log("[globe] relief %dx%d (~%.1f km/texel at the equator); waves %s %dx%d%s; clouds %s "
         "%dx%dx%d; NE 15s %dx%d; wind vec %dx%d",
         m_nx, m_ny, 2.0 * 3.14159265358979 * kR / m_nx / 1000.0, m_cycle.c_str(), m_wnx, m_wny,

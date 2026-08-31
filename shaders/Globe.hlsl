@@ -61,6 +61,13 @@ cbuffer GlobeCb : register(b1) {
     float4 gBankC;      // representative wavenumber per cascade, w = slice offset
     float4 gBankD;      // M8: unit-sea rms envelope per band (xyz), w = foam opacity
     float4 gBankE;      // M8: x = ring cross-fade width (texels), yzw spare (scene cfg)
+    // M9: THE WATER'S QUALITY (docs/ALGEBRA.md "optics"). One RGBA plane carries the NOAA
+    // gap-filled retrievals -- (log10 chl-a, Kd490, log10 SPM, retrieved?) -- and one scalar
+    // plane the GFS sea-ice concentration on the WAVE grid. gOptU.z == 0 restores the M7c
+    // constants byte for byte, so the A/B is one flag and the old look is never lost.
+    uint4  gOptU;       // ocean-colour SRV, ice SRV, optics on, spare
+    float4 gOptA;       // ocean grid: lat1, lon1, 1/dlat, 1/dlon
+    float4 gOptB;       // nx, ny, deep-albedo gain g, spare
 };
 
 // Sample the bank at a world-frame XZ: finest ring containing the point wins. Returns false
@@ -299,6 +306,70 @@ float3 Hypsometric(float h, float lat) {
     return c;
 }
 
+// ---- M9: THE WATER'S QUALITY (docs/ALGEBRA.md "optics"; proofs/water_optics.py) --------------
+// M7c left two constants in the ray path -- the K_d triple and the shelf/deep scatter colour.
+// Both are MADE by chlorophyll, sediment and CDOM, so both are measurements. Two closed forms
+// replace them, and every constant below is printed by the proof's "numbers the HLSL port must
+// reproduce" block; change them there first, never here.
+//
+//   K_d(l) = max( Kdw(l) + M(l)*[K490 - Kdw(490)], Kdw(l) )          the spectral transfer
+//   R(l)   = g * (f/mu_d) * bb(l) / K_d(l)                            the two-flux endpoint
+//
+// The SAME K_d serves as the absorption proxy in the second form, so extinction and colour
+// cannot drift apart. The max() is load-bearing: the retrieval's valid_min (0.01) sits BELOW
+// the pure-water anchor (0.0224) and blue's slope is the steepest, so blue crosses zero first.
+// Water cannot be clearer than water.
+static const float3 kKdw = float3(0.285f, 0.064f, 0.019f);   // pure seawater at 620/550/460 nm
+static const float kKdw490 = 0.0224f;                        // ...and at the 490 nm anchor
+static const float3 kMspec = float3(0.60f, 0.40f, 1.10f);    // M(490) == 1 by construction
+static const float3 kBbw = float3(0.00056857f, 0.00095399f, 0.00206442f);
+static const float3 kBbpSpec = float3(0.915211f, 1.007266f, 1.162059f);   // (555/lambda)^0.80
+static const float kFoverMu = 0.44f;                         // f = 0.33, mu_d = 0.75
+static const float kBetaSpm = 0.010f;                        // m^-1 per mg/L
+static const float kBetaChl = 0.0038f;                       // m^-1 per (mg/m^3)^0.63
+
+struct WaterOptics {
+    float3 kd;      // per-channel diffuse attenuation, m^-1
+    float3 deep;    // the deep-water albedo endpoint (< 0 in x = "use the M7c constants")
+    float ice;      // sea-ice concentration, 0-1
+};
+
+WaterOptics SampleWaterOptics(float latDeg, float lonDeg) {
+    WaterOptics o;
+    o.kd = float3(0.36f, 0.105f, 0.06f);   // M7c, byte for byte, when the plane is absent
+    o.deep = float3(-1.0f, 0.0f, 0.0f);
+    o.ice = 0.0f;
+    // Sea ice rides the WAVE grid (node-centred, 0..360) -- the same mapping the Hs fetch uses.
+    if (gOptU.y != 0xFFFFFFFFu) {
+        const float2 iuv = float2(
+            frac((lonDeg - gWavesA.y) * gWavesA.w / gWavesB.x),
+            saturate(((gWavesA.x - latDeg) * gWavesA.z + 0.5f) / gWavesB.y));
+        o.ice = saturate(gTex[gOptU.y].SampleLevel(sLinearClamp, iuv, 0).x);
+    }
+    if (gOptU.z == 0u) return o;
+    // Ocean colour is its OWN grid: cell-centred, 1440x720, on -180..180 -- not the wave grid
+    // shifted. Half-texel centres on BOTH axes here (the wave fetch above omits it on lon; that
+    // is a pre-existing 0.125 deg offset, left alone rather than silently changed under it).
+    float dLon = lonDeg - gOptA.y;
+    dLon -= 360.0f * floor(dLon / 360.0f);
+    const float2 ouv = float2(
+        frac((dLon * gOptA.w + 0.5f) / gOptB.x),
+        saturate(((latDeg - gOptA.x) * gOptA.z + 0.5f) / gOptB.y));
+    // .w is the retrieval mask (0 where polar night or the gap fill stops). The texel already
+    // carries the PURE-WATER limit there, so the hardware lerp degrades toward clear water at
+    // the data's edge; the mask is kept for the coverage lens and the climatology rung.
+    const float4 oc = gTex[gOptU.x].SampleLevel(sLinearWrap, ouv, 0);
+    const float chl = pow(10.0f, oc.x);        // stored as log10: the FILTER wants the
+    const float spm = pow(10.0f, oc.z);        // geometric mean across a coastal front
+    o.kd = max(kKdw + kMspec * (oc.y - kKdw490), kKdw);
+    // Backscatter arbitrates two retrievals by AUTHORITY -- coastal water is SPM-carried, open
+    // ocean is chlorophyll-carried, and whichever holds signal wins. The compositor's idiom.
+    const float3 bb =
+        kBbw + max(kBetaSpm * spm, kBetaChl * pow(max(chl, 1e-4f), 0.63f)) * kBbpSpec;
+    o.deep = gOptB.z * kFoverMu * bb / o.kd;
+    return o;
+}
+
 float4 PsMain(VsOut i) : SV_Target {
     const float3 up = normalize(i.dir);   // PLANET frame: lat/lon + every texture fetch
     const float3 v = normalize(-i.rel);   // TANGENT frame: geometry + lighting (M6g)
@@ -371,9 +442,16 @@ float4 PsMain(VsOut i) : SV_Target {
         // SEA side: depth tints the shelves; GFS-Wave whitens the storms.
         // M7e: the reference photos say the green band is NARROW -- open water reads navy
         // just past the bar, and the emerald belongs to the shallows alone.
+        // M9: the scatter endpoint is now a MEASUREMENT (ALGEBRA "optics"). The depth lerp it
+        // replaces was double-counting bed brightness that lerp(albSea, bedAlb, Tw) already
+        // supplies below -- with real optics the bed carries the shallows and the water carries
+        // its own colour. The M7c pair survives verbatim on the flag-off branch.
+        const WaterOptics wq = SampleWaterOptics(degrees(lat), lonDeg);
         const float shelf = saturate(1.0f + hp / 45.0f);        // 1 at the beach, 0 by -45 m
-        float3 albSea = lerp(float3(0.008f, 0.030f, 0.080f), float3(0.055f, 0.28f, 0.31f),
-                             shelf * shelf);
+        float3 albSea = wq.deep.x >= 0.0f
+                            ? wq.deep
+                            : lerp(float3(0.008f, 0.030f, 0.080f), float3(0.055f, 0.28f, 0.31f),
+                                   shelf * shelf);
         float hs = 0.0f, wind = 6.0f;
         if (gTexIdx.y != 0xFFFFFFFFu) {
             const float2 wuv = float2(
@@ -393,7 +471,9 @@ float4 PsMain(VsOut i) : SV_Target {
         // M7: inside the wave bank's rings the sigma^2 comes from the BANK (the M6t fold's
         // shed variance, locally sea-state true), and its foam whitens the water -- the
         // shading now reads the same tiled resource the geometry displaces from.
-        float s2 = 0.003f + 0.00512f * wind;
+        // M9: ice damps the capillary-gravity waves the Cox-Munk lobe is MADE of, so the glint
+        // dies with the same field that whitens the surface below -- one number, both terms.
+        float s2 = (0.003f + 0.00512f * wind) * (1.0f - 0.95f * wq.ice);
         float3 nWater = upT;    // band-limited to the PIXEL (ring slopes + cascade detail,
                                 // each band under its per-axis Gaussian prefilter): feeds
                                 // the glint AND the Fresnel split / both rays. Fresnel on
@@ -535,9 +615,13 @@ float4 PsMain(VsOut i) : SV_Target {
             bedDir = CsToPlanet(normalize(Pw + tDir * sP));
             sDown = sP;
         }
-        // Coastal-water diffuse attenuation (Jerlov-ish, per channel): red dies first --
-        // which is exactly why the shoals read turquoise from orbit.
-        const float3 Kd = float3(0.36f, 0.105f, 0.06f);
+        // Per-channel diffuse attenuation. M7c shipped one coastal constant for the whole
+        // planet, with BLUE penetrating deepest -- the open-ocean ordering, which is why the
+        // shoals read turquoise everywhere. M9 reads it from the retrieval instead: open ocean
+        // keeps that ordering, but past K490* = 0.0823 /m the crossover flips and GREEN becomes
+        // the deepest-penetrating channel, which is what makes coastal water green. One field,
+        // one crossover, no second tuning (priors ledger 13).
+        const float3 Kd = wq.kd;
         const float3 Tw = exp(-Kd * (sDown + depthW));
         float3 bedAlb = (ComposedColorOn() && gStreamF.z < 0.5f)
                             ? ComposedColor(bedDir)
@@ -598,6 +682,10 @@ float4 PsMain(VsOut i) : SV_Target {
             bedAlb *= lerp(1.0f, cg, saturate(gSunDir.y * 3.0f));
         }
         albSea = lerp(albSea, bedAlb, Tw);
+        // M9: sea ice sits ON the water -- after every water term, before foam (foam on top of
+        // ice is still foam). The concentration is the coverage fraction, so the lerp IS the
+        // physics; no threshold, no ice "texture" the data does not contain.
+        albSea = lerp(albSea, float3(0.78f, 0.82f, 0.85f), saturate(wq.ice));
 
         const float3 hv = normalize(v + gSunDir.xyz);
         const float ch = saturate(dot(hv, nWater));

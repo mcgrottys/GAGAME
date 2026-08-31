@@ -654,6 +654,90 @@ is the named follow-on proof.
 AST: synth.bed's height-stack edge gains the relief taps; the gate consumes composed
 exports through the renderer's own provider path.
 
+## optics — Water quality as radiometry: the two constants become two fields
+
+`radiometry` left two constants in the ray path: the per-channel attenuation
+K_d = (0.36, 0.105, 0.06) m⁻¹ and the shelf/deep scatter colour. Both are *made* by
+chlorophyll, suspended sediment and CDOM — so both are measurements, not choices. Two
+closed forms replace them, driven by the NOAA gap-filled ocean-colour trio (chl-a,
+Kd490, SPM) on one shared 0.25° grid.
+
+**(1) The spectral transfer** (Austin–Petzold shape). The satellite measures attenuation
+at ONE wavelength; the shader needs three. The transfer is affine in the measurement with
+the anchor pinned:
+
+    K_d(λ) = max( K_dw(λ) + M(λ)·[K490 − K_dw(490)],  K_dw(λ) )
+
+K_dw = (0.285, 0.064, 0.019) m⁻¹ at (620, 550, 460) nm, K_dw(490) = 0.0224, M = (0.60,
+0.40, 1.10) with **M(490) ≡ 1 structurally** — at the anchor the transfer is the identity
+on the field. The `max` is not cosmetic: the retrieval's `valid_min` is 0.01 m⁻¹, *below*
+the pure-water anchor, and blue (slope 1.10) crosses zero first. Water cannot be clearer
+than water.
+
+**(2) The deep endpoint** is the two-flux ratio the ray path already converges to
+(`radiometry`: "deep water: T_w → 0 and the formula collapses to the far-field"). Gordon:
+
+    R(λ) = f · b_b(λ) / (μ_d · K_d(λ)),   f = 0.33, μ_d = 0.75  ⇒  f/μ_d = 0.44
+
+using **the same K_d as the absorption proxy** — one field feeds extinction and colour, so
+they cannot drift apart. Backscatter is molecular plus particulate, and the particulate term
+**arbitrates two retrievals by authority**, the compositor's idiom in optics:
+
+    b_b(λ) = b_bw(500)(500/λ)^4.32 + max(β_S·SPM, β_C·chl^0.63)·(555/λ)^0.80
+
+β_S = 0.010 m⁻¹ per mg L⁻¹, β_C = 0.0038, b_bw(500) = 0.00144. Coastal water is
+SPM-carried, open ocean is chl-carried; whichever is actually holding signal wins. This is
+also what earns chlorophyll its place in the graph — it is a *consumer-bearing* fiber, not
+a decoration (priors rule 6).
+
+**The crossover is the whole point.** Open ocean (measured global median K490 = 0.0402):
+K_d = (0.296, 0.071, 0.039) — blue penetrates deepest, deep navy. Gulf of Maine
+(K490 = 0.145): K_d = (0.359, 0.113, 0.154) — **green** penetrates deepest. Exactly one
+crossover, at K490* = 0.0823 m⁻¹, and it lands between the two measured waters. Blue-water
+offshore and green-water inshore are then not two tunings; they are one formula and one
+field.
+
+**The gain, declared.** `albSea` is an albedo in a lit path, not an irradiance
+reflectance, so the endpoint carries one scalar: albSea_deep = g·R, g = 2.033, fitted in
+green+blue alone at the global-median water. It lands on the shipped deep constant to
++1% (blue) and −8% (green) — **the shipped deep-ocean colour IS the two-flux endpoint of
+the median ocean**, which is why the deep globe does not jump when the data arrives; only
+its variation appears. The shipped red is 36% above any two-flux endpoint of that water:
+the same tuning excess as the K_d blue below. The depth-lerp shelf constant
+(0.055, 0.28, 0.31) retires — it was double-counting bed brightness that
+`lerp(albSea, bedAlb, T_w)` already supplies.
+
+**Sea ice** rides the same pass and the same 0.25° grid (GFS `ICEC`, 0–1). It is two
+physical edits, not a colour: albedo → lerp toward (0.78, 0.82, 0.85) by concentration,
+and slope variance σ² → σ²·(1 − c) — ice damps the capillary–gravity waves the Cox–Munk
+lobe is made of, so the glint dies with the same field that whitens the surface. One
+field, both terms, no separate switch.
+
+**Storage: log10, and NOT for the reason expected.** The prior was fp16 underflow.
+Measured: it does not bite — chl's 1e-3 floor and SPM's 1e-2 sit far above fp16's smallest
+normal, and both raw fields round-trip inside 0.05%. The real reason is the texture
+FILTER. Ocean colour spans four decades inside one bilinear footprint at a coastal front;
+linear-space blending of a 0.1 / 50 mg m⁻³ pair returns 25.05 — a value that exists nowhere
+on the front, painting a bloom across open water — while log-space returns the geometric
+mean 2.24, which is what ocean-colour compositing actually does. The two midpoints differ
+by >10% in the rendered deep colour, so this is visible, not bookkeeping.
+
+**Latency and holes, declared.** The science-quality gap-filled trio runs ~11 days behind
+(field 2026-08-20 on 2026-08-31); the DINEOF fill removes cloud holes but not polar night,
+so in-range coverage is 49.8% of the global grid — NULL → climatology is the compositor's
+ordinary business, never a silent zero. Honesty note carried from the survey: the Gulf of
+Maine's signature HAB is *Alexandrium*, which is toxic without being optically loud.
+What renders is biomass and sediment; a HAB forecast would be its own advisory channel,
+never a colour these optics produce.
+
+Code: `proofs/water_optics.py`, `shaders/Globe.hlsl`, `harvester/harvest_globe.py`
+(`do_ocean_colour`, `do_seaice`), `src/sim/GlobeModel.cpp`.
+Gates: `proofs/water_optics.py` (pure-water limit exact, M(490) identity, monotonicity,
+the single crossover, the g-calibration, the shipped-triple divergence, the log-filter
+law). The pure-water limit is the zero-regression pin: at chl → 0, SPM → 0,
+K490 → K_dw(490) the forms are exact, not merely close.
+AST: `water.optics → globe.ps` feeding the K_d and scatter edges of `water.bank → globe.ps`.
+
 ## priors — The priors ledger: where reality diverged from training expectations
 
 Read this section first when the engine surprises you. Each entry: the prior a trained
@@ -710,6 +794,34 @@ model (or a textbook) would hold → what this project measured → the law now 
     coastal, kernel σ² multipliers — these are ENGINEERING CLOSURES calibrated against
     reference imagery, buoy statistics, and the 2D proof figure. They are not derivable;
     they are pinned by gates and the match report. Change them only against evidence.
+13. **The shipped K_d triple's channel ORDER.** Prior (and the shipped constant): blue
+    penetrates deepest in water, everywhere — that is why shoals read turquoise. Measured
+    (`proofs/water_optics.py` against the Austin–Petzold transfer at the retrieved
+    Kd490 = 0.145 m⁻¹ at the Merrimack mouth): red −0.4% and green +7.7% agree with the
+    transfer almost exactly, but blue is 2.6× TOO TRANSPARENT (0.06 shipped vs 0.154
+    modelled). The shipped triple carries the OPEN-OCEAN ordering and applies it to coastal
+    water; in real coastal water CDOM and detritus kill blue first and **green** is the
+    deepest-penetrating channel. Law: the ordering is a measurement, not a constant — one
+    crossover at K490* = 0.0823 m⁻¹ separates the two regimes, and the field decides which
+    side a pixel is on. The evidence rule (12) is satisfied: this constant changed against
+    a retrieval, not a preference.
+14. **fp16 and the ocean-colour fibers.** Prior (this project's own standing "store the
+    log, per the fp16-underflow law"): chlorophyll spans 0.001–100 mg m⁻³, so raw fp16
+    storage must underflow. Measured: it does not — both floors sit far above fp16's
+    smallest normal and raw round-trips inside 0.05%. The log is still right, for a
+    DIFFERENT reason: the hardware bilinear filter. A 500:1 front blended in linear space
+    returns the arithmetic mean and paints a bloom that is nowhere in the data; log space
+    returns the geometric mean. Law: justify a log by the FILTER it will pass through, and
+    re-derive the range argument rather than inheriting it.
+15. **A/B renders that agree exactly.** Prior (and priors 9's own framing): when two
+    renders differing in one flag look identical, the render is at fault — cold caches,
+    residency warm-up, too few frames. Measured (M9, twice in a row): both times the
+    FLAG was disconnected — once because the scene key was written at the JSON top level
+    while the parser reads it out of `closures`, once because `JsonValue::Num()` reads
+    only NUMBERS and silently returned the default for a JSON `false`. Law: a warm A/B
+    that differs in **0–3 pixels** is not a subtle effect and not a cold cache; it is a
+    severed wire. Prove the flag reached the GPU before spending 240 frames judging it —
+    priors 9 governs renders that differ *slightly*, not renders that differ *not at all*.
 
 ## verification — The gate map: which algebra is pinned where
 
@@ -733,6 +845,10 @@ model (or a textbook) would hold → what this project measured → the law now 
   phase + the |∇φ|/k gate the reference fails), `proofs/bed_relief.py` (extractor
   spectrum on the real composite + the waterline metric). gatest blocks 6–11 pin their
   closed forms permanently (see each section's Gates line).
+- The water-optics proof (M9) — `proofs/water_optics.py`: the spectral transfer and the
+  two-flux endpoint against the measured NOAA ocean-colour fields. The pure-water limit is
+  EXACT, so the optics leg carries zero regression by construction at chl → 0; the shipped
+  K_d blue and the log-storage law are both recorded there as ledger corrections.
 - The hypervisor (`--trace lat,lon`) — one sample walked through every edge on the CPU
   with AST annotations; `--lens waterdata/authority/...` — fields as color;
   `--dump-fibers` — the bank planes with declared ranges; PIX events per AST node.

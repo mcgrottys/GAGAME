@@ -2394,6 +2394,7 @@ int main(int argc, char** argv) {
             globe->foamOpacity = waterScene.foamOpacity;
             globe->ringBlendTexels = waterScene.ringBlendTexels;
             globe->causticStrength = waterScene.causticStrength;
+            globe->waterOptics = waterScene.waterOptics;
             // M8g THE ORIGIN PLANES: the edit-land geometry floor comes from the datum
             // envelope (MLLW + margin at the structure), not a tide-relative constant --
             // the old floor tracked the live waterline, which made the jetty unsinkable.
@@ -2416,6 +2417,7 @@ int main(int argc, char** argv) {
             globe->editFloorNavd = floorNavd;
         }
         if (sea) {
+            sea->windSeaFill = waterScene.windSeaFill;
             sea->buoyAssimAgeH = waterScene.buoyAssimAgeH;
             sea->buoyAssimGainMax = waterScene.buoyAssimGainMax;
         }
@@ -2842,6 +2844,7 @@ int main(int argc, char** argv) {
                         globe->foamOpacity = waterScene.foamOpacity;
                         globe->ringBlendTexels = waterScene.ringBlendTexels;
                         globe->causticStrength = waterScene.causticStrength;
+                        globe->waterOptics = waterScene.waterOptics;
                         if (waterScene.jettyCrestNavd > -90.0f) {
                             globe->editFloorNavd = waterScene.jettyCrestNavd;
                         }

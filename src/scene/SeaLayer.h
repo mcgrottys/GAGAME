@@ -133,6 +133,8 @@ public:
     // ACT / peak solved) restores the magnitude while the solver keeps the spatial shape.
     float sweCurrentGain = 3.2f;
     float heightScale = 1.15f;   // vertical exaggeration; vqview shipped 1.15 as its look
+    // M9a: fill the missing wind sea from the GFS wind (data/wave_scene.json; 0 = off)
+    float windSeaFill = 1.0f;
     // M8 buoy assimilation closures (data/wave_scene.json; main mirrors them here)
     float buoyAssimAgeH = 6.0f;
     float buoyAssimGainMax = 1.8f;

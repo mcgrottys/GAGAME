@@ -242,6 +242,36 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
             activeParts = 2;
         } else {
             activeParts = m_sea->BuildParams(hour, parts);
+            // M9a: THE MISSING WIND SEA. On light-wind hours GFS-Wave's partitioning hands
+            // back swell trains ONLY -- and a swell partition is a Gaussian of
+            // sigF = clamp(0.10/Tp^2, 0.004, 0.02) Hz: ~4 mHz wide, with no tail at all. So
+            // every last joule lands in cascade 0 and cascades 1-2 realize NUMERICALLY ZERO
+            // (measured at 12z f004: band Hs 0.357 / 1e-12 / 0.000 m, mss 3.0e-5 / 1.6e-25
+            // / 0). The water then renders as poured glass -- no short faces to carry
+            // normals, and the only sub-cascade roughness left is bandSig[3], which widens
+            // the glint lobe and never moves a normal (priors 8: normals sell amplitude).
+            // But the wind that raises those ripples is already sitting in the same file.
+            // So synthesise the fully-developed sea for it and let it ride the partition
+            // list like any other train -- the shapes, the spreading, the plot, the buoy
+            // assimilation and the GPU all pick it up unchanged. Capped at the forecast's
+            // own combined Hs: PM is the fetch-UNLIMITED answer and no coastal hour is that.
+            bool hasWindSea = false;
+            for (int i = 0; i < activeParts; ++i) hasWindSea |= parts[i].gamma > 0.0f;
+            const SeaHour& hr = m_sea->Hour(hour);
+            double pmHs = 0.0, pmTp = 0.0;
+            if (!hasWindSea && activeParts < 4 && windSeaFill > 0.0f &&
+                SeaState::WindSeaPm(hr.windMs, &pmHs, &pmTp)) {
+                pmHs *= windSeaFill;
+                if (hr.combinedHs > 0.02) pmHs = std::min(pmHs, hr.combinedHs);
+                if (pmHs > 0.02) {
+                    parts[activeParts++] =
+                        SeaState::MakePartition(pmHs, pmTp, hr.windFromDeg, true);
+                    Log("[sea] f%03d has no wind-sea partition (wind %.1f m/s): filled with "
+                        "Pierson-Moskowitz Hs %.2f m Tp %.1f s (lambda %.1f m) -- cascades "
+                        "1-2 were exactly zero",
+                        static_cast<int>(hr.fh), hr.windMs, pmHs, pmTp, 1.56 * pmTp * pmTp);
+                }
+            }
         }
         const uint32_t seed = static_cast<uint32_t>(m_sea->CycleUnix() / 3600.0) * 2654435761u;
         // M8 BUOY ASSIMILATION (the user's call: the single-point measurements should
