@@ -871,6 +871,8 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.bankA[0] = m_bankBase;
     m_cb.bankA[1] = 6.0f;
     m_cb.bankA[2] = static_cast<float>(debugLens);
+    m_cb.bankA[3] = sliceOn ? 1.0f : 0.0f;
+    m_cb.bankC[3] = sliceD;
     memcpy(m_cb.bankOrg01, &m_bankOrg[0], 16);
     memcpy(m_cb.bankOrg23, &m_bankOrg[4], 16);
     memcpy(m_cb.bankOrg45, &m_bankOrg[8], 16);

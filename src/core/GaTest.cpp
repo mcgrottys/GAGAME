@@ -141,6 +141,19 @@ bool RunGaSelfTest() {
         }
     }
 
+    // ---- 4b. THE SLICE PLANE (M7o, proofs/slice_plane.py): reflection through the
+    // plane pi = (n, d) is the sandwich P' = P - 2 s(P) n with s(P) = P.n - d, and it
+    // NEGATES the signed distance -- the discard predicate splits exactly the two halves
+    // the sandwich exchanges. Pinned before the renderer ever discards a pixel.
+    for (int i = 0; i < 64; ++i) {
+        const V3 n = rv();
+        const double dOff = U(rng) * 500.0;
+        const V3 P = {U(rng) * 900.0, U(rng) * 900.0, U(rng) * 900.0};
+        const double sP = Dot(P, n) - dOff;
+        const V3 Pr = P - 2.0 * sP * n;
+        Near(Dot(Pr, n) - dOff, -sP, 1e-9, "slice: sandwich negates signed distance", ok);
+    }
+
     // ---- 5. THE FRAME RULES: the AST's flip rule over every registered edge, then the
     // orientation ledger's ground truths asserted by name -- the conventions that BIT us,
     // pinned forever. (Row-0-north rasters demand a flip into +v=north consumers; the wrap

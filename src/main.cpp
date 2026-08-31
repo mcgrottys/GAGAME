@@ -65,6 +65,8 @@ struct Options {
     uint32_t pixFrames = 0;           // --pix N: programmatic .wpix capture of N frames
     bool dumpFibers = false;          // --dump-fibers: bank planes as PNGs + range gate
     int lens = 0;                     // --lens worldxz|winuv|mip|ring: value-as-color
+    bool sliceOn = false;             // --slice d: the cutaway plane (M7o)
+    double sliceD = 0.0;              // plane offset, world z metres
     int inject = 0;                   // --inject [bank|cascade]: edge test cards
     double traceLat = 42.816, traceLon = -70.81;
     bool debugLayer = false;
@@ -220,6 +222,10 @@ Options ParseArgs(int argc, char** argv) {
             const std::string n = next("worldxz");
             o.lens = n == "worldxz" ? 1 : n == "winuv" ? 2 : n == "mip" ? 3
                      : n == "ring" ? 4 : n == "cascade" ? 5 : 1;
+        }
+        else if (a == "--slice") {
+            o.sliceOn = true;
+            o.sliceD = _wtof(Widen(next("0").c_str()).c_str());
         }
         else if (a == "--inject") {
             const std::string n = next("bank");
@@ -1312,12 +1318,23 @@ int main(int argc, char** argv) {
             }
             globe->stencilOverlay = opt.stencil;
             globe->debugLens = opt.lens;
+            globe->sliceOn = opt.sliceOn;
+            globe->sliceD = static_cast<float>(opt.sliceD);
             compositor.LogRegistry();
             // M7j: the GA AST -- the state diagram printed and validated EVERY run, so a
             // frame mismatch or an orphaned field is a boot-time report, not a debugging
             // session. (The workflow as an AST: domains, axes, units, scales, ranges.)
             ga::ast::RegisterKnownWaterEdges();
             ga::ast::SetActive("sea.ps", !opt.oneWater);
+            if (opt.sliceOn) {
+                // M7o: the demo node registers its edge like any other -- the AST is how
+                // features arrive now. One blade, one inner product, one discard.
+                ga::ast::Register({"user.plane", "globe.ps", "slice",
+                                   {"world.m", true, 0, 0, 0}, {"world.m", true, 0, 0, 0},
+                                   false, "signed distance m", "keep s<=0", 1.0,
+                                   "Globe.hlsl slice discard (gatest: sandwich negates s; "
+                                   "proofs/slice_plane.py)"});
+            }
             ga::ast::Print();
             ga::ast::Validate();
             ga::ast::WriteMarkdown("docs/GA_AST.md");   // the scriptorium indexes this

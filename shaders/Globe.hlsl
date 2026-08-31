@@ -239,6 +239,15 @@ float4 PsMain(VsOut i) : SV_Target {
     const float lat = asin(clamp(up.y, -1.0f, 1.0f));
     const float lonDeg = degrees(atan2(up.z, up.x));
 
+    // M7o: THE SLICE PLANE -- the algebra-first demo node (proofs/slice_plane.py,
+    // gatest-pinned). The cut is the plane pi = (north, d); a pixel lives on the kept
+    // side iff the signed distance s = P.n - d <= 0 -- one inner product, one discard.
+    // The exposed silhouette along the cut IS the terrain/bathymetry profile: verify
+    // against --bathy-map.
+    if (gBankA.w > 0.5f) {
+        if ((CsToTangent(up) * gGlo.x).z > gBankC.w) discard;
+    }
+
     // M6g: lighting happens in the tangent frame so the globe shares the sea's ONE sun.
     const float3 upT = CsToTangent(up);
     const float3 axisT = float3(gCsR0.y, gCsR1.y, gCsR2.y);   // planet north pole

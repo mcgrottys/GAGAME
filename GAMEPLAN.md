@@ -1170,6 +1170,22 @@ periodic random field: harmless, documented here so nobody "fixes" one consumer 
 compose windows: painter and hardware samplers both centers (composetest-pinned). Six
 gates green.
 
+**M7o (2026-08-30): THE SLICE PLANE — the doctrine's first full lap.** The user: add a
+new GA node to see if the AST work makes features easier, with something easy to verify.
+The pipeline ran exactly as written: (1) THE MATH — the cut is a plane pi = (n, d); the
+keep predicate is the sign of the inner product s(P) = P.n - d; the correctness statement
+is that the sandwich -pi P pi negates s, so the predicate splits precisely the halves
+the reflection exchanges. (2) THE PROOF — the identity asserted numerically in
+proofs/slice_plane.py AND pinned in gatest (4b). (3) THE SMALL RENDER —
+proofs/slice_plane.png: a 2D circle-planet sliced at z = d with the profile on the cut
+edge, drawn by the same predicate. (4) THE ENGINE NODE — --slice d: ONE inner product
+and ONE discard in the globe PS; the node registers its AST edge at wiring time like
+everything else ([gaast] node user.plane). (5) THE VERIFICATION — the cut runs
+razor-straight through world z = 40 at the jetty line; the exposed silhouette is the
+terrain profile, checkable against --bathy-map. Elapsed: minutes, not sessions — the
+AST answer to "does this make adding features easier" is yes, because the new node had
+to say where it lives (frames, units, predicate) before it could ship. Six gates green.
+
 **THE DX12 GOTCHAS LEDGER (and the non-GA-workaround audit the user asked for: every
 workaround marked, with whether a GA formulation would have needed it at all):**
 1. Bindless static-sampler SampleLevel returns ZERO outside the pixel stage on this
