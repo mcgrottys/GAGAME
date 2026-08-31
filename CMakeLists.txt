@@ -17,6 +17,8 @@ add_executable(gagame
   src/core/GaAst.cpp
   src/core/PixEvents.cpp
   src/core/GaTest.cpp
+  src/core/DxTest.cpp
+  src/core/CrashTrace.cpp
   src/core/Gpu.cpp
   src/core/Shader.cpp
   src/core/Window.cpp

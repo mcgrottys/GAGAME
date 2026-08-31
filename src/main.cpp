@@ -36,6 +36,8 @@
 #include "compose/WaterAtlas.h"
 #include "core/Json.h"
 #include "core/GaAst.h"
+#include "core/CrashTrace.h"
+#include "core/DxTest.h"
 #include "core/Pga.h"
 #include "core/TileProviders.h"
 #include "sim/BathyModel.h"
@@ -180,6 +182,12 @@ Options ParseArgs(int argc, char** argv) {
             return (i + 1 < argc) ? argv[++i] : def;
         };
         if (a == "--selftest") o.selftest = true;
+        else if (a == "--crash-test") {
+            // M7v: prove the crash tracer end to end -- the only honest test of a crash
+            // handler is a crash.
+            volatile int* p = nullptr;
+            *p = 1;
+        }
         else if (a == "--headless") o.headless = true;
         else if (a == "--debug") o.debugLayer = true;
         else if (a == "--width") o.width = static_cast<uint32_t>(atoi(next("1600").c_str()));
@@ -936,6 +944,7 @@ void FormatTitle(wchar_t* buf, size_t n, double simUnix, double timeScale, bool 
 }  // namespace
 
 int main(int argc, char** argv) {
+    ga::InstallCrashTrace();   // M7v: symbolized stacks on any crash, headless
     try {
         const Options opt = ParseArgs(argc, argv);
 
@@ -946,6 +955,8 @@ int main(int argc, char** argv) {
             ShaderCompiler sc;
             sc.Init();
             bool ok = RunPgaSelfTest();   // pure CPU: the motor conventions, pinned first
+            ok &= RunDxSelfTest();        // M7v: the DX12 contract gate (CB parity via
+                                          // reflection, the sampler law, AST anchors)
             ok &= RunGaSelfTest();        // pure CPU: GA products + the frame/orientation
                                           // ledger as executable contract (M7j)
             ok &= RunComposeSelfTest();   // pure CPU: the layer compositor's contracts

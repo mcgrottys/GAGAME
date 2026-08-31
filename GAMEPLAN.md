@@ -1281,6 +1281,29 @@ Scriptorium grew a `graph` tool serving the JSON verbatim (handshake-tested: 7 t
 The catalog is now: ALGEBRA.md (the math) + GA_AST.md/ga_ast.json (the graph, generated)
 + diagrams/*.svg (the drawing, generated) + math/graph (the scriptorium's serving).
 
+**M7v (2026-08-30): THE CONTRACT GATES — "the moment you add a new data type the
+problems should be obvious."** Four new pieces of permanent alarm wiring. (1) dxtest,
+gate 7: CB PARITY holds every registered C++ CB struct (parsed from its header, nested
+ComposedSurfaceCb expanded) against DXC REFLECTION of the shader's cbuffer — the
+compiler's own truth, packing included; add a row on one side only and the gate names
+both sizes. THE SAMPLER LAW discovers every [numthreads] compute entry in shaders/
+automatically (mesh entries excluded — ComposedHeight sampling in the mesh stage
+empirically works; the proven trap is compute), compiles and reflects each, and refuses
+any whose post-DCE resources pair a sampler with an unbounded bindless array — new
+kernels are covered the day they are written, 21 covered today, 0 violations. AST
+ANCHORS verifies every edge's cited file exists. (2) CrashTrace: SetUnhandledException-
+Filter + dbghelp prints a SYMBOLIZED stack (module!symbol file:line) to the log on any
+crash, headless — proven end to end by --crash-test (the only honest test of a crash
+handler is a crash); the segfault-hunting this session did by reading code is now one
+log read. (3) tools/algebra_lint.py: the whitepaper's own gate — section ids parse
+exactly as the scriptorium ingests them, every code anchor resolves, and GA_AST.md /
+ga_ast.json must come from the SAME boot (its first run caught a real staleness: a
+--slice run had written a 44-edge md against a 43-edge json). (4) The reflection lesson,
+recorded: DXC reflection IS the free reachability analysis (post-DCE used-resource sets,
+exact cbuffer layouts) — PIX gives dynamic per-invocation paths in captures, RGA static
+ISA; the AST-dump path (dxc -ast-dump) remains if source-level call graphs are ever
+needed. Seven gates green.
+
 **THE DX12 GOTCHAS LEDGER (and the non-GA-workaround audit the user asked for: every
 workaround marked, with whether a GA formulation would have needed it at all):**
 1. Bindless static-sampler SampleLevel returns ZERO outside the pixel stage on this
