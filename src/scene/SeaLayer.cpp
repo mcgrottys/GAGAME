@@ -246,6 +246,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
         const uint32_t seed = static_cast<uint32_t>(m_sea->CycleUnix() / 3600.0) * 2654435761u;
         m_fft.SetSeaState(parts, activeParts, seed);
         hsModel = SeaState::SignificantHeight(parts, activeParts);
+        for (int i = 0; i < 4; ++i) m_parts[i] = (i < activeParts) ? parts[i] : PartParam{};
         if (activeParts > 0) {
             // M7j: the hypervisor's second catch -- parts[0] is FILE order, not energy
             // order, and at calm hours the first entry can be the 0.05 m westerly wind

@@ -227,6 +227,22 @@ void RegisterKnownWaterEdges() {
     Register({"compose.stack", "water.bank", "corners", worldM, worldM, false,
               "m NAVD level/bed + hsScale", "hsScale 0.15..3", 1.0,
               "WaterBankLayer CornerParams (CPU)"});
+    // M8 THE SOLVED WAVE FIELD (ALGEBRA.md wavefield). The solver's grid is row-0-SOUTH
+    // (+v = north, the patch.wrap family) so the bank kernel samples it with NO flip;
+    // the phase gauge (phi = 0 at the SW corner texel center, x west->east, y south->
+    // north row-mean) is declared in the whitepaper -- an undeclared gauge is an
+    // ambiguous field. Inputs: the one bed (stack, CPU, v-N), the tide level bucket,
+    // the ACT current proxy; output: per-component (a, k, cos phi, sin phi) planes.
+    Register({"compose.stack", "wave.solver", "bed (per cell)", worldM, atlasN, false,
+              "m NAVD", "-40..15", 1.0, "WaveField.h SolveNow (SampleHeightStack)"});
+    Register({"water.atlas", "wave.solver", "level bucket", worldM, worldM, false,
+              "m NAVD", "0.25 m buckets", 1.0, "WaveField.h BucketKey"});
+    Register({"act.currents", "wave.solver", "current proxy", worldM, atlasN, false,
+              "m/s (conveyance jet, x3.0 closure)", "0..2", 3.0,
+              "WaveField.h (ebb toward 105, flood 285)"});
+    Register({"wave.solver", "water.bank", "a/k/phase-spinor planes", atlasN, atlasN,
+              false, "m / rad/m / unit spinor (RGBA8, per-comp aMax kMax)",
+              "17 slices, 2-wide grid", 1.0, "WaterBank.hlsl WaveSample (no flip)"});
     Register({"water.bank", "globe.ps", "disp/param/detail", atlasN, atlasN, false,
               "m / sigma2 / m/s / band gains (g1,dry,g0,g2)", "rings 4.8..154 m/texel", 1.0,
               "Globe.hlsl BankSample manual bilinear"});

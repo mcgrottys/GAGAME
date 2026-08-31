@@ -40,8 +40,10 @@
 #include "core/DxTest.h"
 #include "core/Pga.h"
 #include "core/TileProviders.h"
+#include "core/SceneConfig.h"
 #include "sim/BathyModel.h"
 #include "sim/GlobeModel.h"
+#include "sim/WaveField.h"
 #include "sim/CurrentModel.h"
 #include "sim/SeaState.h"
 #include "sim/SweSolver.h"
@@ -1942,6 +1944,48 @@ int main(int argc, char** argv) {
             }
         }
 
+        // M8: THE SOLVED WAVE FIELD (ALGEBRA.md wavefield) -- the stationary wave BVP
+        // solved per cell over the inlet window on a worker thread, cached by content
+        // identity (solver version + buckets + spectrum + height-stack signature), and
+        // blended into the bank kernel inside its feathered window. NOAA carries the
+        // state, the solve carries the structure, the GPU carries the phase.
+        // The water scene is DATA (data/wave_scene.json, authored if absent, hot-reloaded
+        // per frame): move the solved window, retune closures, save -- no recompile.
+        WaterSceneConfig waterScene;
+        long long waterSceneMtime = 0;
+        const char* kScenePath = "data/wave_scene.json";
+        LoadWaterScene(kScenePath, waterScene);
+        WaterSceneChanged(kScenePath, &waterSceneMtime);
+        auto sceneToWaveCfg = [](const WaterSceneConfig& s) {
+            WaveFieldConfig c;
+            c.orgX = s.wfOrgX;
+            c.orgZ = s.wfOrgZ;
+            c.nx = s.wfNx;
+            c.ny = s.wfNy;
+            c.cellM = s.wfCellM;
+            c.nComp = s.wfComps;
+            c.spreadDeg = s.wfSpreadDeg;
+            c.barNormalDeg = s.wfBarNormalDeg;
+            c.gammaHs = s.wfGammaHs;
+            c.minSamplesPerLambda = s.wfMinSamplesPerLambda;
+            c.tideBucketM = s.wfTideBucketM;
+            c.currentBucketMs = s.wfCurrentBucketMs;
+            c.featherM = s.wfFeatherM;
+            return c;
+        };
+        std::unique_ptr<WaveField> waveField;
+        int wfCtSta = -1;
+        if (waterBank && hgtCh >= 0) {
+            waveField = std::make_unique<WaveField>();
+            wfCtSta = haveCurrents ? currents.StationIndex("ACT0816") : -1;
+            waveField->Configure(sceneToWaveCfg(waterScene), &compositor, hgtCh,
+                                 &waterAtlas, &model, entSta,
+                                 haveCurrents ? &currents : nullptr, wfCtSta);
+            waterBank->SetWaveField(waterScene.wfEnabled ? waveField.get() : nullptr);
+            waterBank->SetScene(&waterScene);
+        }
+        if (globe) globe->foamOpacity = waterScene.foamOpacity;
+
         // M5c: give the solver history before the first frame, and run the validation cycle if
         // asked (headless CSV; the ebb/flood-asymmetry and basin-lag gates read from it).
         if (swe.Ready()) {
@@ -2342,6 +2386,28 @@ int main(int argc, char** argv) {
                 // M7: the bank's rings follow the camera; the globe binds THIS frame's
                 // origins (residency committed in SetFrame, content recomposed in Render).
                 if (waterBank && globe) {
+                    // M8: the scene file hot-reloads -- edit, save, watch the water
+                    // change. A geometry edit re-Configures the solver (its bucket key
+                    // rolls, the cache answers or a background solve runs).
+                    if (WaterSceneChanged(kScenePath, &waterSceneMtime) &&
+                        LoadWaterScene(kScenePath, waterScene)) {
+                        if (waveField) {
+                            waveField->Configure(sceneToWaveCfg(waterScene), &compositor,
+                                                 hgtCh, &waterAtlas, &model, entSta,
+                                                 haveCurrents ? &currents : nullptr,
+                                                 wfCtSta);
+                            waterBank->SetWaveField(
+                                waterScene.wfEnabled ? waveField.get() : nullptr);
+                        }
+                        globe->foamOpacity = waterScene.foamOpacity;
+                        Log("[scene] %s hot-reloaded", kScenePath);
+                    }
+                    // M8: bucket-watch + background solve + upload/swap for the solved
+                    // wave field, BEFORE the bank recomposes so the kernel binds a whole
+                    // field or the previous one -- never a half-written atlas.
+                    if (waveField && sea && waterScene.wfEnabled) {
+                        waveField->Update(gpu, simUnix, sea->Parts(), sea->activeParts);
+                    }
                     waterBank->SetFrame(gpu, simUnix, cam.px, cam.pz);
                     float orgs[12];
                     for (int mR = 0; mR < WaterBankLayer::kMips; ++mR) {

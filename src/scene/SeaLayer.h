@@ -70,6 +70,11 @@ public:
     // the bank kernel scales by its per-texel gains for the depth-excess trigger and
     // the crest gate; the globe PS scales the same way for the tanh peak shaping.
     float BandRms(int c) const { return m_bandRms[c]; }
+    // M8 wavefield: the live partition set, for the solved-field bucket key + spectrum.
+    const PartParam* Parts() const { return m_parts; }
+    // M8: a --storm override makes the GFS grid stale by definition -- consumers that
+    // ratio local grid Hs against the reference must treat the storm AS the reference.
+    bool StormOn() const { return m_stormHs > 0.01f; }
     // M7j --trace: the CPU mirror of the kernel's shadow read -- SAME frame, SAME
     // row0-north flip, so the hypervisor prints exactly what the GPU will see.
     float ShadowAtWorld(float x, float z) const {
@@ -203,6 +208,7 @@ private:
     float m_cPeak = 10.0f;     // peak-partition phase speed for the amplification factor
     float m_peakDirX = -1.0f, m_peakDirZ = 0.0f;
     float m_bandRms[3] = {};   // M8: unit-sea rms envelope per band (sqrt(2 m0) * exag)
+    PartParam m_parts[4] = {};   // M8: the live partition set (wavefield spectrum input)
 
     // ---- M4: the churn atlas (16 x 16 km virtual at 2 m texels; resident only where breaking)
     static constexpr float kChurnDomainM = 16384.0f;

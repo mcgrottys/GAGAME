@@ -3,6 +3,8 @@
 #include "core/Image.h"
 #include "core/PixEvents.h"
 #include "scene/SeaLayer.h"
+#include "core/SceneConfig.h"
+#include "sim/WaveField.h"
 
 #include <algorithm>
 #include <cmath>
@@ -387,7 +389,12 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
                 // were synthesised for (the Gulf point) -- mid-ocean waves track their OWN
                 // storm, not ours.
                 float hsScale = 1.0f;
-                if (m_globe && m_globe->WavesNx() > 0) {
+                // M8: under a --storm override the grid is STALE by definition (the
+                // override rewrote the partitions, not the product) -- ratioing grid Hs
+                // against the storm reference painted a 17x tile-quantized staircase
+                // along the grid's land/sea edge (the pale rectangles; the top-down
+                // lens convicted it). The storm IS the reference: hsScale = 1.
+                if (!(m_sea && m_sea->StormOn()) && m_globe && m_globe->WavesNx() > 0) {
                     const double lat =
                         BathyModel::kOrgLat + (t.orgXZ[1] + tileSpan * 0.5) /
                                                   BathyModel::kMPerLat;
@@ -483,6 +490,48 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.slotsE[3] = 0xFFFFFFFFu;
     for (int c = 0; c < 3; ++c) cb.rmsRef[c] = m_sea->BandRms(c);
     cb.rmsRef[3] = 0.0f;
+    // M8 wavefield: the solved field's window + per-component table. The time rotor
+    // (cos, sin)(sigma t) is computed HERE in doubles and reduced mod 2 pi -- sigma t
+    // at unix scale would shred float precision in the kernel (the phase never wraps
+    // on the GPU; the spinor arrives pre-advanced-ready, the cl2 law).
+    // Scene closures (data/wave_scene.json, live): defaults when no scene is wired.
+    const WaterSceneConfig defScene{};
+    const WaterSceneConfig& sc2 = m_scene ? *m_scene : defScene;
+    cb.foamA[0] = sc2.churnGain;
+    cb.foamA[1] = sc2.shedSteepCap;
+    cb.foamA[2] = sc2.shedMssCeil;
+    cb.foamA[3] = sc2.crestLo;
+    cb.foamB[0] = sc2.crestHi;
+    cb.foamB[1] = sc2.depthLo;
+    cb.foamB[2] = sc2.depthHi;
+    cb.foamB[3] = 0.0f;
+    cb.waveU[0] = 0xFFFFFFFFu;
+    if (m_wave && m_wave->Ready()) {
+        const WaveField::GpuTable& wt = m_wave->Table();
+        cb.waveU[0] = m_wave->Srv();
+        cb.waveU[1] = wt.nx;
+        cb.waveU[2] = wt.ny;
+        cb.waveU[3] = WaveField::kMaxComp;
+        cb.waveA[0] = wt.orgX;
+        cb.waveA[1] = wt.orgZ;
+        cb.waveA[2] = wt.invCell;
+        cb.waveA[3] = wt.feather;
+        cb.waveB[0] = wt.envMax;
+        cb.waveB[1] = wt.sumMax;
+        cb.waveB[2] = sc2.wfChop;   // chop (scene cfg; ambient-sea lambda by default)
+        cb.waveB[3] = wt.level;
+        for (int c2 = 0; c2 < WaveField::kMaxComp; ++c2) {
+            const double ang =
+                std::fmod(static_cast<double>(wt.sigma[c2]) * m_simUnix, 2.0 * kPiD);
+            const int r4 = (c2 >> 1) * 4 + (c2 & 1) * 2;
+            cb.waveSig[r4] = static_cast<float>(std::cos(ang));
+            cb.waveSig[r4 + 1] = static_cast<float>(std::sin(ang));
+            cb.waveDirTab[r4] = wt.dirX[c2];
+            cb.waveDirTab[r4 + 1] = wt.dirZ[c2];
+            cb.waveScale[r4] = wt.aMax[c2];
+            cb.waveScale[r4 + 1] = wt.kMax[c2];
+        }
+    }
 
     auto toUav = [&](TileAtlas2D& bank) {
         if (m_state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) return;

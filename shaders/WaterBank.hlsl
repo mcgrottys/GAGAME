@@ -30,12 +30,27 @@ cbuffer BankCb : register(b0) {
     uint4  gSlotsB;     // swe uv SRV slot, disp/param/detail bank UAV slots
     uint4  gSlotsC;     // x = churn atlas SRV (foam memory), y = swell-shadow SRV
     float4 gChurn;      // xy = churn world origin, z = 1/domain, w = atlas texels
-    float4 gWaveDir;    // xy = peak propagation dir (world unit), z = valid, w unused
+    float4 gPeakDir;    // xy = peak propagation dir (world unit), z = valid, w unused
     uint4  gSlotsD;     // x = height window SRV, y = its residency-map SRV (M7q)
     float4 gGeoA;       // world->latlon: orgLat, orgLon, 1/mPerLat, 1/mPerLon
     float4 gWinA;       // height window: org px x, org px y, 1/sizePx, full-world px z14
     uint4  gSlotsE;     // M8 foamlaw: cascade DERIV SRVs x3 (hx, hz, J, foam)
     float4 gRmsRef;     // M8: unit-sea rms envelope per band (xyz), w spare
+    // ---- M8 THE SOLVED WAVE FIELD (ALGEBRA.md wavefield; src/sim/WaveField) ----
+    // One RGBA8 atlas of 17 slices in a 2-wide grid (slice s at ((s&1)*nx, (s/2)*ny)):
+    // per-component (a/aMax, k/kMax, cos*.5+.5, sin*.5+.5), slice 16 = the envelope
+    // (rms/envMax, excess/2.5, sum/sumMax, -). Inside its feathered window the solved
+    // field OWNS the structure-bearing bands (cascades 0-1 yield); the chop band and
+    // the ripple tail stay local. Time is the rotor e^{-i sigma t}, applied to the
+    // stored spinor with CPU-computed (cos, sin)(sigma t) -- phase never wraps here.
+    uint4  gWaveU;      // x = atlas SRV (0xFFFFFFFF = absent), y = nx, z = ny, w = nComp
+    float4 gWaveA;      // window org xy (world m), z = 1/cellM, w = feather m
+    float4 gWaveB;      // x = envMax, y = sumMax, z = chop, w = solved-at level (NAVD)
+    float4 gFoamA;      // scene closures: churnGain, shedSteepCap, shedMssCeil, crestLo
+    float4 gFoamB;      // crestHi, depthLo, depthHi, spare (data/wave_scene.json)
+    float4 gWaveSig[8];    // (cos, sin)(sigma_c t) packed 2 comps/row: c even .xy, odd .zw
+    float4 gWaveDir[8];    // unit propagation (east, north), same packing
+    float4 gWaveScale[8];  // (aMax, kMax) dequant scales, same packing (aMax 0 = unused)
 };
 
 struct BankTile {
@@ -69,6 +84,24 @@ float4 LoadBilinearWrap(uint slot, float2 uv, float dim) {
         const int2 tc = (int2(t0) + int2(k & 1, k >> 1) + int(dim)) % int(dim);
         acc += ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y) *
                gT[slot][tc];
+    }
+    return acc;
+}
+
+// M8: bilinear over ONE SLICE of the solved-wave atlas (slice s at ((s&1)*nx, (s/2)*ny));
+// taps clamp INSIDE the slice so components never bleed into each other. The spinor
+// channels blend componentwise in the plane -- the cl2 law; the caller renormalizes.
+float4 WaveSample(uint slot, float2 cellUv, uint s, float2 dims) {
+    const float2 org = float2(float(s & 1) * dims.x, float(s >> 1) * dims.y);
+    const float2 tf = clamp(cellUv, 0.5f, dims - 0.5f) - 0.5f;
+    const float2 t0 = floor(tf);
+    const float2 fr = tf - t0;
+    float4 acc = 0.0f;
+    [unroll] for (int k = 0; k < 4; ++k) {
+        const int2 tc = clamp(int2(t0) + int2(k & 1, k >> 1), int2(0, 0),
+                              int2(dims) - int2(1, 1));
+        acc += ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y) *
+               gT[slot][int2(org) + tc];
     }
     return acc;
 }
@@ -219,6 +252,21 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         }
     }
 
+    // M8: the solved wave field's window weight -- inside it the solved field OWNS the
+    // structure-bearing bands (cascades 0-1 yield by (1 - wWin)); the chop band and the
+    // foam machinery stay local. Feathered so the handover is invisible (every rung
+    // earns its place and VANISHES where it cannot -- the M7h symmetric-ladder doctrine).
+    float wWin = 0.0f;
+    float2 wcell = 0.0f;
+    if (gWaveU.x != 0xFFFFFFFFu) {
+        wcell = (xz - gWaveA.xy) * gWaveA.z;
+        const float2 dimsW = float2(gWaveU.y, gWaveU.z);
+        const float eM =
+            min(min(wcell.x, dimsW.x - wcell.x), min(wcell.y, dimsW.y - wcell.y)) /
+            gWaveA.z;
+        wWin = smoothstep(0.0f, max(gWaveA.w, 1.0f), eM);
+    }
+
     // THE FOLD, per ring (M6t): a band is geometry while THIS tile's texels resolve its
     // phase; past its Nyquist it sheds to sigma^2. Coarse rings carry the same energy as
     // statistics that fine rings carry as vertexes -- no popping between rings possible.
@@ -251,15 +299,21 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         float blocked = 0.0f;
         if (depth > 0.05f) {
             const float cB = BandPhaseSpeed(gBandK[c], max(depth, 0.3f));
-            float2 ab = (gWaveDir.z > 0.5f) ? WaveCurrentAmp(cur, gWaveDir.xy, cB)
+            float2 ab = (gPeakDir.z > 0.5f) ? WaveCurrentAmp(cur, gPeakDir.xy, cB)
                                             : float2(1.0f, 0.0f);
             ab.x *= ShoalFactor(gBandK[c], depth);
             amp *= ab.x;
             blocked = ab.y;
         }
+        // The detail-plane gains ship the FULL closure (the PS sparkle and caustic
+        // tiers key on them everywhere -- zeroing them inside the solved window killed
+        // the throat's caustics; the waterdata lens convicted it in one probe).
         if (c == 0) gain0 = amp;
         if (c == 1) gain1 = amp;
         if (c == 2) gain2 = amp;
+        // M8: inside the solved window the cascades' structure bands stand down -- the
+        // solved field carries shoaling/refraction/limiting per cell, not per band.
+        if (c != 2) amp *= 1.0f - wWin;
         const float2 cuv = frac(xz / gPatch[c]);
         const float4 s = LoadBilinearWrap(gSlotsA[c], cuv, 256.0f);
         d += s.xyz * (w * amp);
@@ -273,6 +327,56 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         sig2 += (1.0f - w) * amp * amp *
                 (c == 0 ? 0.0004f : (c == 1 ? 0.0018f : 0.0060f));
     }
+
+    // ---- M8 THE SOLVED WAVE FIELD (ALGEBRA.md wavefield): per-cell a, k, and the
+    // integrated phase spinor, advanced by the rotor e^{-i sigma t} and folded by THIS
+    // ring's texel exactly like every band -- comps the ring cannot resolve shed their
+    // slope variance (0.5 (a k)^2) to sigma^2 instead of aliasing. eta = sum a cos(phi -
+    // sigma t): the reference's surface, wearing our live gains through the window blend.
+    float rmsW = 0.0f, excW = 0.0f;
+    if (wWin > 0.001f) {
+        const float2 dimsW = float2(gWaveU.y, gWaveU.z);
+        float3 dW = 0.0f;
+        float sigW = 0.0f;
+        [loop] for (uint s = 0; s < gWaveU.w; ++s) {
+            const float4 sc = gWaveScale[s >> 1];
+            const float aMax = (s & 1) ? sc.z : sc.x;
+            if (aMax <= 0.0f) continue;
+            const float kMax = (s & 1) ? sc.w : sc.y;
+            const float4 t4 = WaveSample(gWaveU.x, wcell, s, dimsW);
+            const float aW = t4.x * aMax;
+            if (aW < 1e-4f) continue;
+            const float kW = max(t4.y * kMax, 1e-4f);
+            const float lamW = 6.2831853f / kW;
+            const float wF = 1.0f - smoothstep(lamW * 0.12f, lamW * 0.5f, t.texelM);
+            // Shed steepness rides the MICHE cap (ak <= 0.44): the limiter bounds HEIGHT
+            // by depth, but an opposing current grows k unbounded while a stays -- the
+            // raw (a k)^2 shed painted arrested zones as a white sigma^2 wash stepping
+            // at ring boundaries. A wave steeper than the limit has BROKEN (the excess
+            // gate already turns that energy into foam); the glint keeps only what a
+            // real sea can carry. Total capped below -- both closures, ALGEBRA.md.
+            const float akS = min(aW * kW, gFoamA.y);
+            sigW += (1.0f - wF) * 0.5f * akS * akS;
+            if (wF <= 0.001f) continue;
+            float2 sp = t4.zw * 2.0f - 1.0f;
+            sp /= max(length(sp), 1e-4f);          // the spinor stays unit (cl2 law)
+            const float4 rr = gWaveSig[s >> 1];
+            const float2 rot = (s & 1) ? rr.zw : rr.xy;
+            const float cT = sp.x * rot.x + sp.y * rot.y;   // cos(phi - sigma t)
+            const float sT = sp.y * rot.x - sp.x * rot.y;   // sin(phi - sigma t)
+            const float4 dd = gWaveDir[s >> 1];
+            const float2 dir2 = (s & 1) ? dd.zw : dd.xy;
+            dW.y += wF * aW * cT;
+            dW.xz -= gWaveB.z * wF * aW * sT * dir2;
+        }
+        const float4 env = WaveSample(gWaveU.x, wcell, 16u, dimsW);
+        rmsW = env.x * gWaveB.x;   // the solver's own envelope (limiter applied)
+        excW = env.y * 2.5f;       // its breaking indicator, rms_raw / rms_limit
+        d += dW * wWin;
+        // Storm-sea mss ceiling on the solved shed (default ~ hurricane Cox-Munk): past
+        // it the surface is breaking, and breaking is foam's business, not the glint's.
+        sig2 += wWin * min(sigW, gFoamA.z) * gPatch.w * gPatch.w;
+    }
     d *= dry * gPatch.w;
 
     // The local rms ENVELOPE: unit-sea band rms scaled by this texel's own gains. The
@@ -280,15 +384,19 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // and the crest gate normalizes eta by it (foam rides crests only: a Gaussian sea
     // passes ~22.6% of area through this gate; the strength noise breaks the rest).
     // (gRmsRef already carries the vertical exaggeration -- the CPU bakes it -- so it
-    // is commensurate with d.y as written; no second gPatch.w here.)
-    const float envRms =
+    // is commensurate with d.y as written; no second gPatch.w here.) Inside the solved
+    // window the solver's OWN envelope and breaking indicator take over -- they carry
+    // per-cell shoaling/refraction/limiting the band closures can only approximate.
+    const float envRmsC =
         max(sqrt(gain0 * gain0 * gRmsRef.x * gRmsRef.x +
                  gain1 * gain1 * gRmsRef.y * gRmsRef.y +
                  gain2 * gain2 * gRmsRef.z * gRmsRef.z), 1e-4f);
+    const float envRms = lerp(envRmsC, max(rmsW * gPatch.w, 1e-4f), wWin);
     const float fn = BankFoamNoise(xz, t.texelM);
-    const float excess = envRms * 2.8284271f / (0.60f * max(depth, 0.05f));
-    const float depthFoam = smoothstep(1.05f, 1.95f, excess * (0.86f + 0.30f * fn));
-    const float crest = smoothstep(0.28f, 0.80f, d.y / max(envRms, 1e-3f));
+    const float excessC = envRmsC * 2.8284271f / (0.60f * max(depth, 0.05f));
+    const float excess = lerp(excessC, excW, wWin);
+    const float depthFoam = smoothstep(gFoamB.y, gFoamB.z, excess * (0.86f + 0.30f * fn));
+    const float crest = smoothstep(gFoamA.w, gFoamB.x, d.y / max(envRms, 1e-3f));
     float foam = saturate(max(steepFoam, max(depthFoam, blockFoam)) * crest) *
                  (0.55f + 0.75f * fn);
 
@@ -302,7 +410,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         if (all(cuv > 0.001f) && all(cuv < 0.999f)) {
             const float churnV =
                 LoadBilinearClamp(gSlotsC.x, cuv * gChurn.w, gChurn.ww).x;
-            foam = max(foam, saturate(churnV) * (0.5f + 0.5f * fn));
+            foam = max(foam, saturate(churnV) * gFoamA.x * (1.0f + fn));
         }
     }
 

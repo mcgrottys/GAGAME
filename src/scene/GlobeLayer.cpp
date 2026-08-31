@@ -884,7 +884,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         m_cb.bankD[i] = m_bankRms[i];   // M8: peak-shaping envelope reference
     }
     m_cb.bankB[3] = m_bankExag;
-    m_cb.bankD[3] = 0.0f;
+    m_cb.bankD[3] = foamOpacity;   // M8: peak foam opacity (data/wave_scene.json)
     m_cb.texIdx[0] = UINT32_MAX;   // was the equirect relief; the composed height cube owns it
     m_cb.texIdx[1] = m_hs.Valid() ? m_hs.srv : UINT32_MAX;
     m_cb.texIdx[2] = m_wind.Valid() ? m_wind.srv : UINT32_MAX;

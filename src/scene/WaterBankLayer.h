@@ -75,6 +75,12 @@ public:
         m_hgtWinOrg[0] = orgPxX;
         m_hgtWinOrg[1] = orgPxY;
     }
+    // M8: the solved wave field (may be null / not Ready -- the kernel falls back to
+    // the cascade closures outside the window, which is also the fallback everywhere).
+    void SetWaveField(const class WaveField* wf) { m_wave = wf; }
+    // M8: the water scene config (data/wave_scene.json, hot-reloaded in main) -- the
+    // bank reads the LIVE values every frame, so an edit lands on the next recompose.
+    void SetScene(const struct WaterSceneConfig* sc) { m_scene = sc; }
     float BaseTexelM() const { return m_baseTexelM; }
     uint32_t ResidentTiles() const {
         return m_disp.ResidentCount() + m_param.ResidentCount() + m_detail.ResidentCount();
@@ -105,6 +111,14 @@ private:
         float winA[4];        // window: org px x, org px y, 1/sizePx, full-world px (z14)
         uint32_t slotsE[4];   // M8 foamlaw: cascade DERIV SRVs x3 (Jacobian foam union)
         float rmsRef[4];      // M8: unit-sea rms envelope per band (crest gate / excess)
+        uint32_t waveU[4];    // M8 wavefield: atlas SRV, nx, ny, nComp
+        float waveA[4];       // window org xy (world m), 1/cellM, feather m
+        float waveB[4];       // envMax, sumMax, chop, solved-at level
+        float foamA[4];       // scene closures: churnGain, shedSteepCap, shedMssCeil, crestLo
+        float foamB[4];       // crestHi, depthLo, depthHi, spare
+        float waveSig[32];     // (cos, sin)(sigma_c t), packed 2 comps per float4 row
+        float waveDirTab[32];  // unit propagation (east, north), same packing
+        float waveScale[32];   // (aMax, kMax) dequant scales, same packing
     };
     struct BankTile {
         float orgXZ[2];
@@ -131,6 +145,8 @@ private:
     double m_hgtWinOrg[2] = {0.0, 0.0};
     const GlobeModel* m_globe = nullptr;
     const SeaState* m_seaState = nullptr;
+    const class WaveField* m_wave = nullptr;   // M8: the solved wave field (optional)
+    const struct WaterSceneConfig* m_scene = nullptr;   // M8: live scene closures
 
     TileAtlas2D m_disp, m_param, m_detail;   // detail: per-tile sea-state context the PS
                                              // needs to recover sub-ring sparkle (hsScale;

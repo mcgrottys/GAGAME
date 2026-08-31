@@ -338,6 +338,14 @@ float4 PsMain(VsOut i) : SV_Target {
         float foamW = 0.0f;   // whitening accumulator -- painted AFTER the refraction mix so
                               // foam rides ON the water, not under it
         const float footPx = length(i.rel) * gWavesB.z;
+        // M8 ripple prefilter (ALGEBRA.md ripple; proofs/ripple_prefilter.py): the pixel
+        // footprint's world-space edges, computed OUTSIDE the bank branch so the screen
+        // derivatives ride uniform control flow. The footprint is a FRAME {fpx, fpz};
+        // its per-axis Gaussian at a band's wavenumber is the exact expected attenuation
+        // -- the anisotropy no scalar footPx can express (a grazing sliver resolves
+        // across-view ripples while along-view ones alias into crawling shimmer).
+        const float2 fpxW = ddx((CsToTangent(up) * gGlo.x).xz);
+        const float2 fpzW = ddy((CsToTangent(up) * gGlo.x).xz);
         float3 bankGains = 0.0f;   // per-band sea-state gains (x=b0, y=b1, z=b2) for the
         float bankEta = 0.0f;      // caustic assembly + peak shaping below; hoisted out
         bool bankOn = false;       // of the bank scope
@@ -387,13 +395,24 @@ float4 PsMain(VsOut i) : SV_Target {
                     // erased that spatial variance (the "lame" aerial water). The local
                     // slope magnitude, weighted by what the PIXEL resolves, restores it --
                     // and it telescopes: by ~10 km footprints wPix folds it away again.
-                    env += length(dv.xy) * wPix;
+                    // Per-axis Gaussian prefilter at this band's wavenumber: the x-slope
+                    // channel carries content along x-hat, the y-slope along y-hat; each
+                    // attenuates by exp(-|J^T k|^2/8) in ITS direction (sigma = half the
+                    // footprint extent). Under-recovered energy stays in sigma^2 below --
+                    // shed, never aliased. Isotropic-max here erred x3000 at grazing.
+                    const float kC = gBankC[c];
+                    const float gAx = exp(-0.125f * kC * kC *
+                                          (fpxW.x * fpxW.x + fpzW.x * fpzW.x));
+                    const float gAy = exp(-0.125f * kC * kC *
+                                          (fpxW.y * fpxW.y + fpzW.y * fpzW.y));
+                    env += length(dv.xy) * wPix * (0.5f * (gAx + gAy));
                     if (wDet <= 0.002f) continue;
-                    sx += dv.x * wDet * bDet.x * gBankB.w;
-                    sz += dv.y * wDet * bDet.x * gBankB.w;
+                    sx += dv.x * wDet * bDet.x * gBankB.w * gAx;
+                    sz += dv.y * wDet * bDet.x * gBankB.w * gAy;
                     foamW = max(foamW, saturate(dv.w * wDet) * saturate(bDet.x) *
-                                           (c == 2 ? 0.30f : 0.15f));
+                                           max(gAx, gAy) * (c == 2 ? 0.30f : 0.15f));
                     s2 = max(s2 - wDet * bDet.x * bDet.x *
+                                      (0.5f * (gAx * gAx + gAy * gAy)) *
                                       (c == 0 ? 0.0004f : (c == 1 ? 0.0018f : 0.0060f)),
                              0.0015f);
                 }
@@ -532,7 +551,7 @@ float4 PsMain(VsOut i) : SV_Target {
         // M8 foamlaw: foam rides ON the water -- painted AFTER the Fresnel split (it no
         // longer dims toward the horizon) at 0.72 peak opacity over water AND reflection:
         // whitewater is a thin aerated layer, not paint.
-        const float foamOp = saturate(foamW) * 0.72f;
+        const float foamOp = saturate(foamW) * gBankD.w;   // opacity from the scene cfg
         albSea = lerp(albSea, float3(0.945f, 0.965f, 0.975f), foamOp);
         skyReflAdd *= 1.0f - foamOp;
 
