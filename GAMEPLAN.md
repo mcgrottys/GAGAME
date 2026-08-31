@@ -1528,3 +1528,38 @@ the height stack), churn deposit discipline (crest-gated deposits so the read ga
 can rise from its 0.12 whisper), the wave cache checker run against a 2.4 m-ring
 solve, and the exit-255 teardown race — now measurable, since a 900-frame rail
 readback hits it about two runs in three.
+
+**M8j (2026-08-31): --fidelity-map — THE SCHEMA REGISTRY DRAWN.** The user: "a
+projection that covers the earth ... colored by what datasources are in said area,
+giving more color to places that have higher fidelity data." The engine could
+already answer it without one byte of new data — every source declares name /
+structure / CRS / finest cm-per-pixel / coverage box (SourceInfo), and
+`SourceTouches()` keys cache identity off that box, so a source that lies about its
+coverage paints the wrong tiles. The declaration is worth AUDITING, and an audit is
+easier to read as a picture: **hue = which source is finest here, brightness =
+log10(cm/px)** across five and a half orders, from the 500 km analytic equilibrium
+tide to the 15 cm MassGIS leaf-off ortho. THE LADDER IS THE POINT — one global sheet
+cannot show this (the ortho spans 0.018° and would occupy a third of a pixel), so the
+output is a CONTACT SHEET: rows are channels (bed / skin / rotors), columns are zoom
+rungs each ~10× tighter (global → Gulf of Maine → estuary → inlet). §The rung rule,
+photographed. Ships with a 5×7 bitmap font so the legend and each panel's
+metres-per-pixel are ON the sheet. Sources with identical structure/resolution/box
+collapse to one rung with their names folded to a common stem — the 18 tide
+constituents share three rungs, and 54 legend lines is not a legend. HONESTY, printed
+on the sheet: it draws DECLARED coverage, not realized paint weight (CUDEM feathers
+4%, the ortho 25 m, synth.bed ~700 m; equilibrium and EOT20 declare global boxes while
+EOT20 returns nodata over land). Sampling true weight would be better, but
+`ColorSource::Sample` on the Google tree ENQUEUES NETWORK FETCHES and a debug picture
+must never spend the politeness budget — and declared coverage is what the cache keys
+on anyway. TWO THINGS THE FIRST SHEET CAUGHT ON ITSELF: it rendered with earth.color
+missing (the --water-map exit runs ~200 lines before AddColorChannel — half the
+registry did not exist yet; moved to just after LogRegistry(), where completeness is
+definitional), and hand-teardown from that depth exits 9 (layers and residency tenants
+are live there), so the flag now forces headless + one frame and falls through to the
+normal path. A REGISTRY CRITIQUE the picture surfaced: `google.satellite` declares 955
+cm/px because we cap at z14 for POLITENESS — that is our throttle, not the source's
+fidelity — and at 9.55 m it outranks synth.bed's declared 10 m, so the synthesis node
+never shows as "best data" anywhere. Named next for this tool: a realized-weight mode
+for the local (non-network) sources, and hue-by-stack-authority as a second reading —
+the compositor paints by stack ORDER, which is not the same question as which data is
+finest.
