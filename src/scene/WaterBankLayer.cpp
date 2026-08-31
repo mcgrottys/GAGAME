@@ -316,6 +316,11 @@ void WaterBankLayer::DumpFibers(Gpu& gpu) {
         {"param.sigma2", 0.0f, 0.12f, 0, 0, 1, &param},
         {"param.u (m/s)", -4.0f, 4.0f, 0, 0, 2, &param},
         {"detail.hsScale*expo", 0.0f, 3.0f, 0, 0, 0, &det},
+        // M8: bands 0 and 2 join the detail plane (caustic Jacobian/Laplacian scales).
+        // Gains carry shoaling (<=1.7) and current amplification (<=2.0) on top of
+        // hsScale*expo <= 3 -- the declared ceiling is their product's practical bound.
+        {"detail.gain0", 0.0f, 8.0f, 0, 0, 2, &det},
+        {"detail.gain2", 0.0f, 8.0f, 0, 0, 3, &det},
     };
     bool ok = true;
     for (auto& c : checks) {

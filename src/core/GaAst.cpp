@@ -192,6 +192,13 @@ void RegisterKnownWaterEdges() {
               "m disp + jacobian foam", "+-Hs/2", 1.0, "WaterBank.hlsl CsBankFill wrap"});
     Register({"ocean.fft", "globe.ps", "cascade.deriv", wrap, atlasN, false, "slope",
               "+-0.3", 1.0, "Globe.hlsl detail loop"});
+    // M8 caustics: the SAME deriv fibers, sampled at the SUN ray's water entry
+    // (bed - sunRun) and assembled into the ray-map Jacobian -- J in dv.z, the
+    // Laplacian finite-differenced from the slope channels at cascade resolution,
+    // amplitude-scaled by the detail plane's per-band gains (ALGEBRA.md caustics;
+    // proofs/caustic_jacobian.py adjudicated the PHYSICAL gain form).
+    Register({"ocean.fft", "globe.ps", "caustic jacobian", wrap, atlasN, false,
+              "J / 1/m lap", "gain 0.35..2.6", 1.0, "Globe.hlsl M8 caustic block"});
     Register({"swe.solver", "water.bank", "eta", rowS, atlasN, true, "m dEta", "+-1.5", 1.0,
               "WaterBank.hlsl CsBankFill (1-uv.y)"});
     Register({"swe.solver", "water.bank", "uv", rowS, atlasN, true, "m/s", "+-2.5", 1.0,
@@ -214,7 +221,7 @@ void RegisterKnownWaterEdges() {
               "m NAVD level/bed + hsScale", "hsScale 0.15..3", 1.0,
               "WaterBankLayer CornerParams (CPU)"});
     Register({"water.bank", "globe.ps", "disp/param/detail", atlasN, atlasN, false,
-              "m / sigma2 / m/s / hsScale*expo", "rings 4.8..154 m/texel", 1.0,
+              "m / sigma2 / m/s / band gains (g1,dry,g0,g2)", "rings 4.8..154 m/texel", 1.0,
               "Globe.hlsl BankSample manual bilinear"});
     Register({"water.bank", "globe.mesh", "disp+level", atlasN, atlasN, false, "m NAVD",
               "+-4", 1.0, "GlobeMesh.hlsl BankSample"});

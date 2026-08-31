@@ -186,7 +186,13 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     float3 d = 0.0f;
     float sig2 = 0.0015f;
     float foam = 0.0f;
-    float gain1 = t.hsScale * expo;   // band-1 gain -> the detail plane (PS sparkle scale)
+    // Per-band gains -> the detail plane. Band 1 has fed the PS sparkle since M7a; M8
+    // adds bands 0 and 2 in the free fibers so the PS can amplitude-scale the caustic
+    // Jacobian and Laplacian it assembles from the cascade derivative textures
+    // (ALGEBRA.md caustics: areaJac_fold = 1 + sum w*amp*(J_c - 1); lap folds linearly).
+    float gain0 = t.hsScale * expo;
+    float gain1 = t.hsScale * expo;
+    float gain2 = t.hsScale * expo;
     [unroll] for (uint c = 0; c < 3; ++c) {
         const float lam = 6.2831853f / gBandK[c];
         const float w = 1.0f - smoothstep(lam * 0.12f, lam * 0.5f, t.texelM);
@@ -206,7 +212,9 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             amp *= ab.x;
             blocked = ab.y;
         }
+        if (c == 0) gain0 = amp;
         if (c == 1) gain1 = amp;
+        if (c == 2) gain2 = amp;
         const float2 cuv = frac(xz / gPatch[c]);
         const float4 s = LoadBilinearWrap(gSlotsA[c], cuv, 256.0f);
         d += s.xyz * (w * amp);
@@ -265,8 +273,8 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     const uint2 dst = uint2(t.dstX + id.x, t.dstY + id.y);
     gU[gSlotsB.y][dst] = float4(d, saturate(foam * dry));
     gU[gSlotsB.z][dst] = float4(lvl, sig2, cur.x, cur.y);
-    // The DETAIL plane: what the PS needs to recover sub-ring sparkle -- the tile's local
-    // sea-state scale (cascade derivs are unit-sea) and the dry guard (no sparkle on the
-    // flats). Churn memory joins this fiber next.
-    gU[gSlotsB.w][dst] = float4(gain1, dry, 0.0f, 0.0f);
+    // The DETAIL plane: what the PS needs to recover sub-ring sparkle and the caustic
+    // Jacobian -- per-band sea-state gains (cascade derivs are unit-sea) and the dry
+    // guard (no sparkle on the flats). Layout: (gain1, dry, gain0, gain2).
+    gU[gSlotsB.w][dst] = float4(gain1, dry, gain0, gain2);
 }

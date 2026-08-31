@@ -337,11 +337,15 @@ float4 PsMain(VsOut i) : SV_Target {
         float foamW = 0.0f;   // whitening accumulator -- painted AFTER the refraction mix so
                               // foam rides ON the water, not under it
         const float footPx = length(i.rel) * gWavesB.z;
+        float3 bankGains = 0.0f;   // per-band sea-state gains (x=b0, y=b1, z=b2) for the
+        bool bankOn = false;       // caustic assembly below; hoisted out of the bank scope
         {
             float4 bD, bP, bDet, bDx, bDz, tmp, tmp2;
             float bT, t2u;
             const float2 wxz = (CsToTangent(up) * gGlo.x).xz;
             if (BankSample(wxz, bD, bP, bDet, bT)) {
+                bankOn = true;
+                bankGains = float3(bDet.z, bDet.x, bDet.w);
                 s2 = max(bP.y, 0.0015f);
                 lvlW = bP.x;
                 foamW = saturate(bD.w) * 0.65f;
@@ -352,6 +356,11 @@ float4 PsMain(VsOut i) : SV_Target {
                 BankSample(wxz + float2(0.0f, bT), bDz, tmp, tmp2, t2u);
                 float sx = (bDx.y - bD.y) / bT;
                 float sz = (bDz.y - bD.y) / bT;
+                // Shoaled slopes can exceed any real wave face; cap at 1.1 (the Sea.hlsl
+                // guard) or over-steep facets render as dark back-face speckle and pin
+                // Fresnel at its ceiling (grey plateaus -- the two-sided failure mode).
+                const float slS = length(float2(sx, sz));
+                if (slS > 1.1f) { sx *= 1.1f / slS; sz *= 1.1f / slS; }
                 nSmooth = normalize(upT - east * sx - north * sz);
                 // M7a: THE SPARKLE -- bands this PIXEL resolves but the ring texel does not,
                 // read straight from the cascade DERIVATIVE textures at full FFT resolution,
@@ -387,6 +396,8 @@ float4 PsMain(VsOut i) : SV_Target {
                 const float envN = saturate(env * bDet.x * 4.0f);
                 s2 = max(s2 * (0.70f + 0.60f * envN), 0.0015f);
                 albSea = lerp(albSea, float3(0.52f, 0.58f, 0.60f), envN * envN * 0.08f);
+                const float slW = length(float2(sx, sz));
+                if (slW > 1.1f) { sx *= 1.1f / slW; sz *= 1.1f / slW; }
                 nWater = normalize(upT - east * sx - north * sz);
             }
         }
@@ -433,9 +444,63 @@ float4 PsMain(VsOut i) : SV_Target {
         // which is exactly why the shoals read turquoise from orbit.
         const float3 Kd = float3(0.36f, 0.105f, 0.06f);
         const float3 Tw = exp(-Kd * (sDown + depthW));
-        const float3 bedAlb = (ComposedColorOn() && gStreamF.z < 0.5f)
-                                  ? ComposedColor(bedDir)
-                                  : float3(0.44f, 0.40f, 0.31f);
+        float3 bedAlb = (ComposedColorOn() && gStreamF.z < 0.5f)
+                            ? ComposedColor(bedDir)
+                            : float3(0.44f, 0.40f, 0.31f);
+        // ---- M8 CAUSTICS (ALGEBRA.md caustics; proofs/caustic_jacobian.py). Sunlight
+        // refracting at the wave surface converges on the bed; the gain is the inverse
+        // ray-map Jacobian in its PHYSICAL form, gain = 1/(1 + h K lap_phys) with the
+        // crest identity lap_phys = lap/areaJac^2 and K = 1 - 1/n ~ 0.25 -- adjudicated
+        // by 2^22-ray ground truth (corr 0.999; the reference's shipped sign renders
+        // troughs bright). areaJac and lap assemble from the cascade derivative fibers
+        // (J in dv.z; lap = FD of the slope channels at cascade resolution), scaled by
+        // the detail plane's per-band gains, and sampled where the SUN entered the water
+        // (bed - sunRun): sampling at the view entry pins the pattern to the camera.
+        // The sun's 0.53-degree disc blurs the pattern by ~h*0.0093, so it fades by 20 m
+        // (smoothstep 4..20) and clamps [0.35, 2.6] -- closures, pinned by the proof.
+        if (bankOn && footPx < 30.0f && depthW > 0.05f && depthW < 20.0f &&
+            gSunDir.y > 0.02f) {
+            const float2 wxzC = (CsToTangent(up) * gGlo.x).xz;
+            const float2 bedXZ =
+                wxzC + float2(dot(tDir, east), dot(tDir, north)) * sDown;
+            const float3 sunT = refract(normalize(-gSunDir.xyz), upT, etaR);
+            const float sunDn = max(-dot(sunT, upT), 0.15f);
+            const float3 sunH = sunT + sunDn * upT;
+            const float2 causticXZ =
+                bedXZ - float2(dot(sunH, east), dot(sunH, north)) / sunDn * depthW;
+            float ajF = 1.0f;
+            float lapF = 0.0f;
+            [unroll] for (uint cc = 0; cc < 3; ++cc) {
+                const float lamC = 6.2831853f / gBankC[cc];
+                const float wPixC = 1.0f - smoothstep(lamC * 0.12f, lamC * 0.5f, footPx);
+                if (wPixC <= 0.01f) continue;
+                const float ampC = (cc == 0) ? bankGains.x
+                                             : ((cc == 1) ? bankGains.y : bankGains.z);
+                const float2 duvC = causticXZ / gBankB[cc];
+                const float du1 = 1.0f / 256.0f;                  // one cascade texel
+                const float texM = gBankB[cc] * du1;              // its metres
+                const float4 dc =
+                    gTex[gBankU2[cc + 1u]].SampleLevel(sLinearWrap, duvC, 0);
+                const float hxp = gTex[gBankU2[cc + 1u]]
+                                      .SampleLevel(sLinearWrap, duvC + float2(du1, 0), 0).x;
+                const float hxm = gTex[gBankU2[cc + 1u]]
+                                      .SampleLevel(sLinearWrap, duvC - float2(du1, 0), 0).x;
+                const float hzp = gTex[gBankU2[cc + 1u]]
+                                      .SampleLevel(sLinearWrap, duvC + float2(0, du1), 0).y;
+                const float hzm = gTex[gBankU2[cc + 1u]]
+                                      .SampleLevel(sLinearWrap, duvC - float2(0, du1), 0).y;
+                const float lapC =
+                    (hxp - hxm + hzp - hzm) / (2.0f * texM);
+                ajF += wPixC * ampC * (dc.z - 1.0f);
+                lapF += wPixC * ampC * lapC;
+            }
+            const float ajC = max(ajF, 0.05f);
+            const float lapPhys = lapF * gBankB.w / (ajC * ajC);
+            float cg = 1.0f / max(1.0f + depthW * 0.25f * lapPhys, 0.05f);
+            cg = lerp(1.0f, cg, 1.0f - smoothstep(4.0f, 20.0f, depthW));
+            cg = clamp(cg, 0.35f, 2.6f);
+            bedAlb *= lerp(1.0f, cg, saturate(gSunDir.y * 3.0f));
+        }
         albSea = lerp(albSea, bedAlb, Tw);
         albSea = lerp(albSea, float3(0.92f, 0.95f, 0.97f), saturate(foamW));
 
@@ -451,7 +516,13 @@ float4 PsMain(VsOut i) : SV_Target {
         // From straight above F ~ 0.02 (space view untouched); toward the horizon the sea
         // mirrors the sky, which is the term every previous tuning pass was missing.
         const float fresN = 0.02f + 0.98f * pow(1.0f - saturate(dot(v, nSmooth)), 5.0f);
-        const float3 rDir = normalize(dIn - 2.0f * dot(dIn, nSmooth) * nSmooth);
+        float3 rDir = normalize(dIn - 2.0f * dot(dIn, nSmooth) * nSmooth);
+        // A front-facing facet on the back of a steep wave reflects BELOW the horizon;
+        // the sky model correctly darkens there, which painted grey patches over wave
+        // backs. What such a facet actually sees is more sea and the sky above it --
+        // clamp the ray to the horizon (the Sea.hlsl refl.y guard, tangent-frame form).
+        const float rUp = dot(rDir, upT);
+        if (rUp < 0.02f) rDir = normalize(rDir + (0.02f - rUp) * upT);
         skyReflAdd = SkyRadianceDirDiscless(rDir) * (fresN * 0.9f * (1.0f - landness));
         albSea *= 1.0f - fresN;
 
