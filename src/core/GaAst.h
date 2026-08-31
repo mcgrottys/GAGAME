@@ -32,6 +32,12 @@ struct Frame {
     bool vNorth;         // does the second axis grow NORTHWARD? (rows stored north-down: false)
     double orgX = 0.0, orgY = 0.0;   // world metres of sample (0,0), when meaningful
     double metersPerUnit = 0.0;      // texel/px pitch in metres, 0 = n/a (wrap/uv)
+    // M7n: the CONVENTION -- are samples at cell CENTERS ((i+0.5)*pitch, the norm here and
+    // what hardware samplers assume) or at lattice corners (i*pitch)? A mismatch is a
+    // half-lattice TRANSLATION the flip rule cannot see: the coincidence card caught the
+    // bank kernel writing corners while BankSample reconstructed centers -- every bank
+    // field sat half a texel off (77 m at ring 5). Now it is a boot-checked rule.
+    bool centers = true;
 };
 
 struct Edge {

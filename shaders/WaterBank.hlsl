@@ -79,13 +79,27 @@ float4 LoadBilinearClamp(uint slot, float2 texel, float2 dims) {
     return acc;
 }
 
+// M7n: THE COINCIDENCE CARD. Quadrant shading (4 distinct levels -- any flip or rotation
+// permutes them visibly) + thin border lines at the wrap seams. Globe.hlsl carries the
+// SAME function for the PS half of the two-color test; the two must stay identical.
+float CardPattern(float2 uv) {
+    const float2 f = frac(uv);
+    float v = 0.20f + 0.30f * step(0.5f, f.x) + 0.40f * step(0.5f, f.y);
+    if (any(f < 0.03f) || any(f > 0.97f)) v = 1.0f;   // wrap-seam border
+    return v;
+}
+
 [numthreads(16, 16, 1)]
 void CsBankFill(uint3 id : SV_DispatchThreadID) {
     const uint texels = (uint)gMisc.x;
     if (id.x >= texels || id.y >= texels) return;
     const BankTile t = gTiles[id.z];
     const float2 f = (float2(id.xy) + 0.5) / gMisc.x;
-    const float2 xz = t.orgXZ + float2(id.xy) * t.texelM;
+    // M7n: texel id holds the field at its CENTER (id + 0.5) -- the coincidence card
+    // caught this line writing CORNERS while BankSample reconstructs centers (local -
+    // 0.5): every bank field sat half a texel off, 2.4 m at ring 0 and 77 m at ring 5.
+    // The corner-lerp f above already used centers; now the whole kernel agrees.
+    const float2 xz = t.orgXZ + (float2(id.xy) + 0.5f) * t.texelM;
 
     // Corner-lerped spatial context (the CPU sampled the atlas stacks at the corners; a tile
     // spans well under the tide's or the wave grid's own resolution, so bilinear is honest).
@@ -173,12 +187,21 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // unmirrored, wedges northward -- the bank -> render edge is clean; any flip,
     // rotation, or scale error draws itself.
     if (gMisc.z > 0.5f) {
-        const float chk = fmod(floor(xz.x / 50.0f) + floor(xz.y / 50.0f) + 400000.0f, 2.0f);
-        const float2 cell = frac(xz / 500.0f);
-        const float wedge = (abs(cell.x - 0.5f) < 0.05f * (1.0f - cell.y) && cell.y > 0.4f)
-                                ? 1.0f
-                                : 0.0f;
-        foam = chk * 0.30f + wedge;
+        if (gMisc.z > 1.5f) {
+            // M7n: the CASCADE-EDGE half of the coincidence test -- the card drawn from
+            // THIS KERNEL's belief of cascade-1's wrap uv. The PS draws the same card
+            // from ITS mapping into green; on screen, agreement is pure yellow and any
+            // relative offset / flip / scale between the two samplings fringes red/green.
+            foam = CardPattern(xz / gPatch[1]);
+        } else {
+            const float chk =
+                fmod(floor(xz.x / 50.0f) + floor(xz.y / 50.0f) + 400000.0f, 2.0f);
+            const float2 cell = frac(xz / 500.0f);
+            const float wedge =
+                (abs(cell.x - 0.5f) < 0.05f * (1.0f - cell.y) && cell.y > 0.4f) ? 1.0f
+                                                                                : 0.0f;
+            foam = chk * 0.30f + wedge;
+        }
         d = 0.0f;
     }
 

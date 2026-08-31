@@ -65,7 +65,7 @@ struct Options {
     uint32_t pixFrames = 0;           // --pix N: programmatic .wpix capture of N frames
     bool dumpFibers = false;          // --dump-fibers: bank planes as PNGs + range gate
     int lens = 0;                     // --lens worldxz|winuv|mip|ring: value-as-color
-    bool inject = false;              // --inject: bank writes a world-aligned test card
+    int inject = 0;                   // --inject [bank|cascade]: edge test cards
     double traceLat = 42.816, traceLon = -70.81;
     bool debugLayer = false;
     uint32_t frames = 0;              // 0 = run until the window closes
@@ -219,9 +219,12 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--lens") {
             const std::string n = next("worldxz");
             o.lens = n == "worldxz" ? 1 : n == "winuv" ? 2 : n == "mip" ? 3
-                     : n == "ring" ? 4 : 1;
+                     : n == "ring" ? 4 : n == "cascade" ? 5 : 1;
         }
-        else if (a == "--inject") o.inject = true;
+        else if (a == "--inject") {
+            const std::string n = next("bank");
+            o.inject = n == "cascade" ? 2 : 1;
+        }
         else if (a == "--warm-inlet") o.warmInlet = true;
         else if (a == "--planet") o.planet = next("earth");
         else if (a == "--tile-budget") o.tileBudget = static_cast<uint32_t>(atoi(next("1000").c_str()));

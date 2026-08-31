@@ -1139,6 +1139,37 @@ docs/GA_AST.md every boot (the diagram as a markdown table, generated never hand
 and the scriptorium reindexed it — a future session QUERIES the edge table instead of
 re-deriving conventions from shader archaeology. Six gates green.
 
+**M7n (2026-08-30): THE COINCIDENCE CARD, THE HALF-TEXEL CATCH, AND THE CONVENTION
+RULE.** The user: "the patterns should also be used to make sure the wave tiles are
+aligned correctly too." Built the two-color coincidence test: --inject cascade makes the
+bank kernel draw a quadrant card from ITS belief of cascade-1's wrap uv into the foam
+fiber (red); --lens cascade makes the PS draw the SAME card from ITS mapping (green).
+Agreement is pure yellow; any relative flip, offset, or scale between the wave tiles'
+two consumers fringes red/green. FIRST RUN: quadrants coincided (no flip/scale between
+kernel and PS) — but a ONE-SIDED red fringe rode every seam border, the signature of a
+HALF-TEXEL TRANSLATION. The audit that followed found it: the kernel wrote texel id at
+org + id*texel (corners) while BankSample reconstructs centers (local - 0.5) — and the
+kernel was internally mixed (its corner-lerp f already used id + 0.5). Every bank field
+had sat half a ring texel off: 2.4 m at ring 0, 77 m at ring 5, invisible on waves,
+undeniable on the card. Fix: the kernel writes CENTERS; the re-run card is clean yellow
+with symmetric resolution blur only. THE GA READING (the review the user asked for):
+every sampling edge is a pullback along an affine map, and the group of errors it can
+carry is exactly {flip, scale, translation}; the flip rule caught reflections, the
+range/scale rows catch dilations, and the card exposed the TRANSLATIONS — so the AST now
+carries the missing generator: Frame.centers (samples at cell centers vs lattice
+corners) and Validate's CONVENTION RULE fails any edge whose sides disagree — an
+undeclared half-lattice translation is now a boot error. THE FULL AUDIT (each edge
+walked): bank kernel<->BankSample FIXED (centers both); kernel corner-lerp f centers ok;
+SWE reads: solver writes centers (worldX0 + (t.x+0.5)dx), all three readers reconstruct
+centers with the row flip — CORRECT; churn: writer centers (texel+0.5)*2m, both readers
+centers — CORRECT; shadow: builder centers, both readers centers + flip — CORRECT;
+cascades: FFT texel i lives at i/N*L (corners) but EVERY consumer (kernel
+LoadBilinearWrap, Sea.hlsl and Globe.hlsl hardware samplers) reads centers — a CONSTANT
+half-cascade-texel phase shift (1.5/0.36/0.09 m) identical in all consumers of a
+periodic random field: harmless, documented here so nobody "fixes" one consumer alone;
+compose windows: painter and hardware samplers both centers (composetest-pinned). Six
+gates green.
+
 **THE DX12 GOTCHAS LEDGER (and the non-GA-workaround audit the user asked for: every
 workaround marked, with whether a GA formulation would have needed it at all):**
 1. Bindless static-sampler SampleLevel returns ZERO outside the pixel stage on this

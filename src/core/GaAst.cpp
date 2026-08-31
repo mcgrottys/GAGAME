@@ -67,6 +67,18 @@ bool Validate() {
             ok = false;
         }
     }
+    // M7n: THE CONVENTION RULE -- both sides of an edge must agree where samples LIVE
+    // (cell centers vs lattice corners); disagreement is an undeclared half-lattice
+    // translation, the exact class the coincidence card caught in the bank kernel.
+    for (const Edge& e : Reg()) {
+        if (e.src.centers != e.dst.centers) {
+            Log("[gaast] FAIL convention rule: %s -> %s '%s': src %s dst %s -- undeclared "
+                "half-lattice translation  [%s]",
+                e.from, e.to, e.field, e.src.centers ? "centers" : "corners",
+                e.dst.centers ? "centers" : "corners", e.code);
+            ok = false;
+        }
+    }
     // THE ORPHAN RULE: a field someone produces that nothing active consumes is dead physics
     // walking -- the swell shadow fed only the retired SeaLayer draw for a whole milestone.
     for (const Edge& e : Reg()) {

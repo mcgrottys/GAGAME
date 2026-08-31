@@ -509,6 +509,21 @@ float4 PsMain(VsOut i) : SV_Target {
                 lc = lerp(float3(0.1f, 0.85f, 0.25f), float3(0.9f, 0.12f, 0.1f),
                           saturate(mL / 7.0f));
             }
+        } else if (lensId == 5) {
+            // M7n: cascade coincidence -- red = the BANK's foam (the kernel's card, if
+            // --inject cascade is on), green = the SAME card from the PS's own cascade-1
+            // mapping. Yellow everywhere = the two consumers of the wave tiles agree on
+            // the domain; fringes = a flip/offset/scale between them.
+            float4 bDL, bPL, bDetL;
+            float bTL;
+            const float2 fL = frac(wxzL / gBankB[1]);
+            float cardL = 0.20f + 0.30f * step(0.5f, fL.x) + 0.40f * step(0.5f, fL.y);
+            if (any(fL < 0.03f) || any(fL > 0.97f)) cardL = 1.0f;
+            if (BankSample(wxzL, bDL, bPL, bDetL, bTL)) {
+                lc = float3(saturate(bDL.w), cardL, 0.0f);
+            } else {
+                lc = float3(0.0f, cardL * 0.3f, 0.15f);
+            }
         } else if (lensId == 4) {
             [unroll] for (uint mR = 0u; mR < 6u; ++mR) {
                 const float texelL = gBankA.x * float(1u << mR);

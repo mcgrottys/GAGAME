@@ -426,7 +426,7 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
         cb.slotsB[0] = m_swe->UvSrv();
     }
     cb.misc[0] = static_cast<float>(kTileTexels);
-    cb.misc[2] = injectPattern ? 1.0f : 0.0f;
+    cb.misc[2] = static_cast<float>(injectPattern);
     for (int c = 0; c < 3; ++c) cb.slotsA[c] = m_sea->FftDispSrv(c);
     cb.slotsB[1] = m_disp.Uav();
     cb.slotsB[2] = m_param.Uav();
