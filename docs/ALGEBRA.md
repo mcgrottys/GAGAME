@@ -343,6 +343,317 @@ weights, alpha, cache identity, addressing vs closed forms), `atlastest`. AST: a
 Code: `Sources.cpp` (noise), `SeaChurn.hlsl`, `GlobeLayer.cpp` / `GlobeMesh.hlsl`.
 Gates: `tiletest` (atlas contract), composetest addressing.
 
+## wavefield — The solved wave field: dispersion under current, the limiter, the phase spinor
+
+The M8 water leg's centerpiece: instead of modulating a spatially uniform FFT sea by
+per-texel amplitude gains, solve the stationary wave boundary-value problem per cell and
+CACHE it — per spectral component i, a per-cell amplitude a_i, wavenumber k_i, and
+integrated spatial phase carried as a unit spinor (cos φ, sin φ). Time enters only as the
+rotor e^{−iσt}. Ported from the vqview-inlet reference (its wave_model, held to it by the
+twin test below at the 8-bit quantization floor).
+
+**Dispersion under current.** Per cell: (σ + k·U_opp)² = g·k·tanh(k·h), with σ the
+conserved absolute frequency, U_opp = max(−U·d̂, 0) the opposing current. Roots come in
+pairs (physical/swept) that MERGE at blocking; at the root f′ = 2σ_r(U_opp − c_g,r) → 0,
+so Newton is structurally unsafe here (the reference measured a 628 km wavelength from
+it). Scheme: 96 log-spaced candidates in [1e-4, 10^0.7] rad/m, first +→− sign change
+(provably the physical branch), 48 bisections; NO sign change ⇒ the BLOCKED mask — the
+wave is arrested, standing, breaking; flagged, never papered over. Deep-water blocking
+sits at U_opp = c₀/4 exactly — the origin of `Jet.hlsli`'s −0.245 threshold. Blocked
+cells hold k = 0.25·10^0.7 ≈ 1.2530 rad/m, a GRID-TUNED closure: k·Δ = 1.88 < π at
+Δ = 1.5 m; a different cell size must re-derive it from k·Δ < π.
+
+**Shoaling.** Ks = √(cg₀ / max(c_g + U_along, 0.15)) — energy-flux conservation, i.e.
+wave-action conservation with the factor √(σ_r/σ) dropped (underestimates opposing-current
+amplification by up to √2 ≈ 1.414 at deep blocking). The engine's factorization is
+complementary: `Jet.hlsli` WaveCurrentAmp is provably the EXACT deep-water action
+solution including σ_r/σ (verified 4e-16 over r ∈ [−0.24, 0.3]), and ShoalFactor is exact
+finite-depth action shoaling without current. The solved field supersedes both for
+DISPLAY inside its window; the closures stay for the foam/churn path and the fallback sea.
+
+**Refraction.** Snell against one fixed bar-normal frame (compass 285): per-COMPONENT
+incidence θ0_i from the component's own direction (using the mean direction gets 15 of 16
+components wrong), sin θ = sin θ0 · c/c0 with the SOLVED c, Kr = √(cos θ0 / cos θ) ≤ 1
+(spreading only — no focusing, an accepted liberty of the fixed frame). The direction
+change is a rotor in e1∧e2 (one-sided Cl(2)+ multiplication, the tide-phasor law), but the
+reference applies only the amplitude consequence: d̂ stays the offshore direction, and the
+port that diffs against the reference textures must keep it so.
+
+**The total-Hs limiter.** Depth limits the SEA, not each spectral line: per-component caps
+left the sum 6.8× over the limit in the shallows (measured 63.9% of cells at N=4, 96.8%
+at N=16); capping the coherent sum Σa bites in deep water (it dropped offshore Hs 3.12 →
+2.25 m) because Σa grows like N while Hs grows like √N. The law lives on the rms envelope:
+Hs = 2√2·rms ≤ 0.60·h, one UNIFORM scale factor on every a_i (spectral shape and
+directions survive), and excess = rms_raw/rms_limit > 1 is the breaking indicator — "does
+the sea here want to be taller than the water allows". (0.60 is the observed Hs
+saturation; the bank kernel's |η| ≤ 0.55·h is the separate Hmax-family closure at a
+different pipeline point — never conflate them.)
+
+**The phase gauge and the spinor.** Each component wants ∇φ = k·d̂; that field is curl-free
+only where depth contours ⊥ propagation, so a definite GAUGE is chosen: cumsum of k·d_e
+along x plus cumsum of the ROW-MEAN of k·d_n along y (a single reference column would
+print its depth profile as horizontal bands). Gauge anchors that must be declared or the
+field is ambiguous: φ = 0 at the northwest corner texel center; x runs west→east
+left-inclusive; y integrates the row-mean southward. Phase ships as (cos φ, sin φ) — the
+cl2 law verbatim; bilinear error of unit spinors is ≤ 0.16·δ³ with δ = k|d_axis|Δ/2
+(peak band ≈ 2e-3 rad at 18 samples/λ, below the 8-bit storage floor; worst single-axis
+case 0.131 rad at the blocked-k hold, whose 0.25 factor exists to keep δ < π/2).
+
+**The discrete spectrum.** N=16 components: f_i = geomspace(0.62·fp, 2.30·fp), JONSWAP
+γ=1 shape, w_i ∝ √(S·df) renormalized so Σw² = 1, a_tot = Hs·√2/4 (exact variance:
+σ_η² = a_tot²/2). Directions from the golden sequence g_i = frac(i·0.618034),
+dir_i = mwd + 26°·(2g_i − 1): consecutive components jump ±20-32° (a linear ramp spaces
+them 3.5° and its collinear low-frequency neighbours beat into long unbroken crest lines).
+
+**Twin test** (`proofs/wave_field.py` + `proofs/vqview_ref.py`, on the reference's own
+bathy/current/scenario): per-component k and a agree with the reference's cached textures
+to EXACTLY half an 8-bit LSB, phase spinor dot ≥ 0.999985 — the solver IS the reference,
+digit for digit. Wet 81.3%, Hs p50 2.384 m, excess>1 on 42.6% of wet cells, blocked 0.00%.
+
+Code: `proofs/wave_field.py`, `proofs/vqview_ref.py`, `shaders/Jet.hlsli`.
+Gates: `gatest` block 6 (dispersion residual, branch selection, blocking margin,
+WaveCurrentAmp≡action, Green's law, limiter invariants, spinor error bound, Nyquist hold);
+the twin test.
+AST: wave.solver edges (bed/current/spectrum in, per-component planes out) — registered at
+engine wiring; the flip table lives in the derivation (bathy row-0-north FLIP in,
+uv01.vS FLIP out, d̂ is a VALUE and never flips).
+
+## caustics — The tangent bivector: one object, the normal and the ray-map Jacobian
+
+**The Gerstner wave is a rotor field**: particle displacement = R(a·ŷ)R̃ with
+R = exp(−B·θ/2), B = d̂∧ŷ — expanding gives the (a cos θ)ŷ − (a sin θ)d̂ pair the shaders
+ship. Finite depth is the SAME rotor under an in-plane anisotropic versor
+S(v) = ½(α+β)v + ½(α−β)d̂vd̂ — chop (the engine's Λ = 1.1) is the α/β closure. The
+displacement Jacobian J = −s·Σ aᵢkᵢcos θᵢ (d̂ᵢ⊗d̂ᵢ) is SYMMETRIC because each component's
+displacement and gradient share one rotor plane — the engine's single jxz channel is that
+theorem in k-space.
+
+**The tangent bivector** T = t_z ∧ t_x of the displaced surface yields BOTH: the lighting
+normal (its dual) and the caustic ray map's first factor (its horizontal part),
+areaJac = |det(I+J)| — crests compress by 1−s·a·k, troughs stretch. heightScale multiplies
+the height gradient only, never the horizontal Jacobian.
+
+**The ray map**: a sun ray tagged by its surface entry q maps q → q + D(q) → bed, with
+Jacobian factorizing into areaJac × (1 + h·K·∇²η), K = 1 − 1/n = 0.2498 (≈ the shipped
+0.25, gap 1.9e-4). ∇²η = −Σ aᵢkᵢ² cos θᵢ — exact, analytic, no finite differences. The
+curvature must be sampled at the SUN ray's entry point e = bed − sunRun,
+sunRun = (sunW.xz/sunDown)·h — skip it and the caustics slide with the camera.
+
+**The adjudicated ledger.** The reference's shipped gain
+1/(areaJac·(1 − h·K·lap)) diverges from first principles in two ways (curvature sign;
+per-reference-area vs per-physical-area flux bookkeeping) that partially cancel in its
+regime. Ray-density ground truth (2²² full-Snell rays) settles it: the PHYSICAL form —
+gain = 1/det(I + h·K·H_phys), with the crest identity H_phys = ∇²η_param/areaJac² and the
+corrected 1-D curvature η″_phys = −a·k²(cos θ − s·a·k)/(1 − s·a·k·cos θ)³ — correlates
+0.9987–0.9993 with truth where the shipped form reaches 0.827 (and goes DARK under
+crests of a pure sinusoid where truth is bright). GAGAME ships the physical form.
+
+**Cascade assembly** (the engine has fibers, not 16 components): per cascade the
+derivative texture already carries J_c = det(I + Λ∇D_c); fold-weighted assembly
+areaJac_fold = 1 + Σ_c w_c(J_c − 1) is exact in trace and exact outright for one active
+cascade. The Laplacian is LINEAR so folding commutes exactly: ∇²η_c = iFFT(−|k|²·η̂_c),
+one spectral multiply landing in the free u0.w channel of `shaders/OceanCompute.hlsl` —
+the k̄_c² shortcut is REJECTED (k² varies ×158 inside band 0; a representative wavenumber
+serves k-weighted physics, never a k²-weighted one). Washout: sun-disc blur ≈ h·0.0093,
+fade smoothstep(4, 20, h), clamp [0.35, 2.6] — closures. The fold LOSES caustic contrast
+where bands shed (variance (hK)²⟨lap²⟩) and never invents content — the safe side of the
+folding law; per rendered bed pixel the shed-band mean gain is exactly 1.
+
+Code: `proofs/caustic_jacobian.py`, `shaders/OceanCompute.hlsl`, `shaders/Globe.hlsl`.
+Gates: `gatest` block 7 (closed forms, areaJac≡1 at s=0, corrected curvature vs numeric,
+crest identity, K gap, flat gain ≡ 1); the ray-density proof.
+AST: ocean.fft deriv (J, ∇²η) → globe.ps bed term — registered at wiring.
+
+## ripple — The analytic tail and the footprint-bivector prefilter
+
+96 normal-only components, 0.7–4 s (λ 0.78–24.5 m), a = 0.0156·√(20/N)·k^−1.25 —
+amplitudes are millimetres (invisible as geometry, dominant in Fresnel/glint). p = 1 is
+the exactly scale-free slope spectrum; −1.25 is a −1.5 dB/octave red tilt, an engineering
+closure. Amplitudes scale 1/√N because independent phases add in VARIANCE (the 1/N
+phase-locked rule understated rms slope by √(20/96) = 0.46 — the glassy-water bug); total
+mss has the closed geometric-series form 2.29679e-3 (N-invariant to 0.03%). Directions
+AND phases ride irrational rotations (golden φ̂ for directions, the plastic constant for
+phases): the three-distance theorem gives max gap 1.26/N, consecutive directions jump
+±20-32°, and Weyl sums bound cross-component interference O(1), not O(N) — phase-zero-
+at-origin instead produces a fixed herringbone lattice that no band-limit can touch
+(it is real structure, not aliasing).
+
+**The prefilter is exact, not tuned.** The pixel footprint is the frame {fpx, fpz} =
+(ddx, ddy of world position); modelling the pixel as a Gaussian of σ = ½ its extent, the
+expected attenuation of wavevector k is the footprint's Fourier transform evaluated at k:
+
+    w = exp(−|(½·k·fpx, ½·k·fpz)|²/2)
+
+— two dot products, zero thresholds, exact phase preservation (the filter never moves
+crests). The footprint's exterior square fpx∧fpz is the same grade-2 object as the
+tangent bivector one scale up; the filter's quadratic form M = JJᵀ carries the sliver
+anisotropy (tr M, det M = |fpx∧fpz|²) that NO scalar band-limit can express: at grazing
+incidence L_∥/L_⊥ = r/h reaches 10–100, and the measured failure modes are ×3000 error
+(isotropic-max: across-view ripples killed, glass) or ×7000 (unfiltered: along-view
+ripples alias into crawling low-frequency shimmer). Deep-water k = σ²/g is valid over
+h ≥ 6 m to 1.2% slope-weighted.
+
+**Engine adaptation**: wRing (texture representability, hard Nyquist wall) KEEPS its
+smoothstep; wPix (the prefilter question) upgrades to the per-axis Gaussian closure —
+and the σ² handback must switch to the variance-true pairing (w for slopes, 1−w² for σ²,
+telescoped as saturate(wPix² − wRing²)) or the Gaussian's wide tails leak energy across
+the transition. Bonus: the shed variance arrives split along the footprint axes — the
+anisotropic slope covariance a directional glint lobe wants.
+
+Code: `proofs/ripple_prefilter.py`, `shaders/Globe.hlsl`.
+Gates: `gatest` block 8 (w(0)=1, isotropic reduction, Gram bivector identity, rotation
+equivariance, mss closed form + N-invariance, golden three-gap, telescope endpoints).
+AST: ripple tail is analytic in-shader (no texture edge); the prefilter rides the
+existing ocean.fft deriv edges.
+
+## foamlaw — Foam discipline: triggers, the crest gate, breakup, and churn as memory
+
+**Peak vs rms.** rms envelope = √(Σa²), coherent peak = Σa, ratio √N (measured 1.9 at
+N=4, 3.6 at 16). Normalizing η by rms and clamping flat-bottoms every visible trough;
+shape = tanh(1.6·η/peak) is strictly monotone, never saturates (tanh(1.6) = 0.9217), and
+feeds skyVis ∈ [0.40, 1] and the ±9% crest catch-light — closures.
+
+**Two triggers, one event.** (a) Steepness: MICHE = 0.44 IS the limiting steepness
+(π·0.142 = 0.446; Stokes 120° gives 0.443); band [0.352, 0.528]. The engine's Jacobian
+foam saturate((0.80 − J)·4) detects the SAME event through an affine bijection — for one
+component min_φ J = 1 − Λ·a·k exactly, so onset sits at ak = 0.20/1.1 = 0.182 and
+saturation at ak = 0.45/1.1 = 0.409 ≈ 0.93·MICHE: breaking is the crest's area 2-blade
+degenerating, read in spectral coordinates. (b) Depth: excess = rms·2√2/(0.60·h) on the
+ENVELOPE — never instantaneous |η|, which whitecaps the whole domain as television static
+— gated smoothstep(1.05, 1.95) with a mean-neutral ±15% noise jitter of the threshold.
+
+**The crest gate** smoothstep(0.28, 0.80, η/rms): foam rides crests only. For a Gaussian
+sea the gate passes 22.6% of area (quadrature 0.2256); the reference's measured ungated
+gouache was 30.7% (surf-zone skewness raises crest occupancy) collapsing to 2.1% gated —
+coverage ratio ≥ 4 is the pinned behavior. **Breakup**: 3 value-noise octaves under
+IRRATIONAL rotations (axis-aligned octaves share lattice seams → rectangular blocks),
+range-faded per octave (the fold law in miniature) with the mean-preserving
+renormalization n/Σ(c·w) — without it foam coverage becomes a function of camera
+distance. **Composite**: foam = saturate(max(steep, depth, blocked)·crest)·(0.55+0.75·fn),
+painted at peak opacity 0.72 toward (0.945, 0.965, 0.975) AFTER the refraction mix —
+whitewater is a thin aerated layer, not paint.
+
+**The engine's combined law** (churn = the term the reference lacks): instantaneous foam
+is the crest-gated UNION of triggers (max, never + — the triggers detect one event and
+adding double-counts it; adding churn on top brightened the throat into uniform fog);
+churn is the SAME quantity remembered (deposit = foamInst, τ = 90 s decay); the composite
+is max(foamInst, modulated churn)·dry. This is the named fix for "storm surf fuses to a
+flat white sheet": each breaker deposits a distinct crest-shaped noise-broken streak that
+decays on the 90 s clock — surf individuates.
+
+Code: `proofs/foam_discipline.py`, `shaders/WaterBank.hlsl`, `shaders/SeaChurn.hlsl`,
+`shaders/OceanCompute.hlsl`.
+Gates: `gatest` block 9 (√N peak/rms, tanh bounds, crest-gate quadrature,
+Jacobian↔steepness bijection, renormalization invariance, churn half-life 62.4 s).
+AST: churn.kernel → water.bank foam edge upgrades its semantic (deposit = foamInst).
+
+## wake — Kelvin wakes: the wedge as a discriminant, and the signed stationary phase
+
+A steady wake is stationary in the ship's frame — stateless, like the swell. Station
+keeping: c = U cos θ (θ = wave normal from track) ⇒ k = K₀ sec²θ, K₀ = g/U². The phase
+φ(θ) = K₀(ξ sec θ + ζ sec θ tan θ) is stationary where 2ζt² + ξt + ζ = 0 (t = tan θ):
+O(1) per pixel, both branches (transverse |t| small, divergent large; Vieta t₊t₋ = ½).
+Real roots need ξ² − 8ζ² ≥ 0 — the famous 19.4712° half-angle IS the discriminant
+(atan(1/2√2) = arcsin(1/3) to the last bit; nothing imposes it). The cusp merges the
+branches at sec²θ = 3/2: k = 1.5·K₀, λ_cusp = ⅔λ_t. Speed is the whole character:
+λ_t = 2πU²/g gives 15.1/13.7/9.4/7.1 m for the AIS per-class speeds. Brute-force θ
+quadrature fails structurally (far-field phase decorrelation needs O(K₀R) samples);
+solving the quadratic IS the stationary-phase method, exactly.
+
+**The signed phase — where this port corrects its reference.** The stationary roots are
+NEGATIVE for ξ,ζ > 0; the phase at them is φ = K₀ sec θ·(ξ − ζ|t|), already mirror-
+symmetric. The reference shader folds |t| into φ = K₀(ξ sec + ζ sec|t|) — a
+non-stationary angle: its measured |∇φ|/k runs 1.03–6.65 across the wedge where theory
+demands exactly 1 (envelope theorem), its near-edge wavelengths collapse ~10× below what
+its own band-limit believes, and its analytic slopes are not the derivatives of its η.
+GAGAME ships the signed form with d = ∇φ/k = −(cos θ·fwd + sin θ·side·rgt) — φ and d flip
+together (η is even in the pair) — and the gate the reference fails:
+finite-difference |∇φ|/k = 1 within 1e-4 on both branches.
+
+**GA**: the offset-track geometric product Ûr carries astern (scalar part), across
+(bivector magnitude), and the side (bivector sign) in one multiplication; the vessel pose
+is one PGA motor M = T(p)·R(ŷ, −hd) (sign pinned by the +x → −z rotation convention in
+`src/core/Pga.h`), body-frame evaluation is the inverse-motor sandwich, and the chase
+camera and riding rail are constant motors composed onto it, slerped along the screw.
+Every bound (steepness cap ak ≤ 0.30, divergent damping exp(−(k/5K₀)²), mesh-Nyquist
+band-limit smoothstep(2, 5, λ/sampleM) — against the MESH, never pixels — cusp boost
+faded in over dRel 1–3.5, near fade 0.5–2.5 hull-lengths, draught amp cap, 1/√(0.6+dRel)
+spreading) is an engineering closure with its physical argument recorded.
+
+**Vessels**: attitude = least-squares plane fit over a symmetric 5×3 waterplane stencil
+(the symmetry decouples the normal equations: heave = mean, slopes = ratios; exact on
+planar input — a gate), pitch at unity, roll × 0.45 RAO (the honest stateless stand-in
+for a damped righting oscillator), rigid frame per instance. The stencil is a fold of
+ANSWERS and low-passes hull-length-vs-wavelength response for free (heave RAO
+cos(k·halfLen), pitch RAO sinc(k·halfLen)). The riding camera needs no bake: two surface
+evals (bow/stern) per frame give heave/pitch live; the pose is a motor on the arc-length-
+parameterized AIS route (waypoints are even in longitude — index stepping surges).
+
+Code: `proofs/kelvin_wake.py`, `src/core/Pga.h`.
+Gates: `gatest` block 10 (discriminant angle both forms, root stationarity + Vieta,
+|∇φ|/k = 1 on the signed phase AND > 1.5 on the folded reference form, class wavelengths,
+plane-fit exactness, motor-frame invariance).
+AST: vessel table + wake edges registered at wiring (world.flat positions, heading rad).
+
+## bedalbedo — Data-driven bed relief, the sediment model, and the waterline gate
+
+**The extractor is a CROSS, not a box**: relief = clamp(0.85·(z − mean of 4 taps at
+±6 m), ±0.45). Transfer function Ĥ = 1 − ½(cos 6k₁ + cos 6k₂): axial zeros at λ = 6/n m
+(BLIND to a pure 6 m axial bedform — honest limitation), unit axial peaks at λ = 12 and
+4 m (the tidal-inlet sand-wave band), diagonal gain 2 at λ = 8.49 m (shipped anisotropy —
+port verbatim), long-wave asymptote −7.65 m²·∇² (channel morphology suppressed ~30×).
+Resolution honesty: the 1.5 m composite resolves the full band; a 5 m grid only the 12 m
+shoulder; a 13.7 m CUDEM stack returns ≈ 0 — CORRECTLY (its compilation smoothing already
+removed the structure; do not fake it with noise beyond the declared grain). Bedform
+relief is an eHydro-class product and enters where `data/bathy` gains such a rung.
+
+**The M7s fold**: the clamp is nonlinear, so coarse rungs average the ANSWER — pointwise
+at rungs ≤ 6 m; n×n answer-subsample at ≤ 6 m spacing for 6–24 m rungs (the alpha-fold
+loop shape in `src/compose/Sources.cpp`); coarser rungs take the mean-zero theorem
+(relief → 0) and SHED the discarded variance into the procedural grain amplitude — grade
+shedding, exactly as the wave fold sheds A² to σ². The skew subtlety (caught
+adversarially, twice): any 12 m-periodic bed survives the extractor with odd harmonics
+only, so its clamp has exactly zero mean — a skew demonstration needs a fundamental whose
+SECOND harmonic the operator passes (λ = 8 m + λ = 4 m: clamped mean +0.0225 m).
+
+**Sediment = model, not optics**: base = lerp(SAND, SILT, smoothstep(2.5, 11, depth)),
+contrast fades 3→14 m — the energy-sorting argument (near-bed orbital velocity vs Shields
+threshold: swept shoals keep bright sand, quiet channels keep dark fines). Declared DRY
+albedo keyed on DATUM depth: the refracted ray's Beer–Lambert already darkens deep water
+optically (double-counting guard), and baked inputs must be tide-invariant or cache
+identity rehashes with the clock.
+
+**Rock vs sand by narrowness, not slope**: gridded products smooth structures (jetty p90
+slope 0.176 vs all-land 0.181 — no threshold exists; the same smoothing GAGAME measured
+as riprap → leaky sills). Land-fraction in a 45 m box is a COVERAGE — box means preserve
+integrals, so the footprint survives coarsening even though derivatives die. Window
+[0.28, 0.62] maps jetty (lf ≈ w/2R ≈ 0.22) → rock, beach (0.79) → sand, against the
+DATUM shoreline (structures don't move with the tide).
+
+**Split-hemisphere ambient + one-bounce** (near-field land): E = E_sky(1+n·ŷ)/2 +
+E_ground(1−n·ŷ)/2 — the view factors sum to 1 identically, and the split REDISTRIBUTES
+the calibrated flat ambient, never adds to it (weighting sky by skyVis alone raised flat
+sand 1/0.55 ≈ 1.8× to near-white). The 4-tap sunlit-neighbour bounce averages RECTIFIED
+answers (fold-compliant before the law was named), gated to shadowed facets.
+
+**The waterline gate**: a photo's waterline is an elevation contour at the flight's tide.
+Classify wet = (b − r) + (0.45 − brightness) > 0.06 on the ortho, sweep level L,
+A(L) = mean of boolean answers; the reference verified its datum at 93.2% this way.
+GAGAME upgrades it: Mode F (free fit — internal datum consistency) and Mode P (pinned —
+L predicted from the tide model at the ortho's capture epoch, |L* − L_pred| ≤ 0.3 m).
+Datum resolution, settled: MLLW − NAVD88 = −1.400 m at the entrance via the Boston MSL
+link; the reference's "1.68 m regional offset" is Boston's OWN link misapplied regionally
+— never use it outside Boston. Multiple ortho vintages at different tide stages sweep
+independent contours across the flats; excluded masks (no-data, hand edits, marsh) are
+declared, never silent.
+
+Code: `proofs/bed_relief.py`, `src/compose/Sources.cpp`.
+Gates: `gatest` block 11 (transfer-function zeros/peaks, skew vector, narrowness discrete
+count, hemisphere partition, waterline flip-metric exactness); the waterline gate harness
+is the named follow-on proof.
+AST: synth.bed's height-stack edge gains the relief taps; the gate consumes composed
+exports through the renderer's own provider path.
+
 ## priors — The priors ledger: where reality diverged from training expectations
 
 Read this section first when the engine surprises you. Each entry: the prior a trained
@@ -414,6 +725,14 @@ model (or a textbook) would hold → what this project measured → the law now 
 - `atlastest` — end-to-end atlas behaviors.
 - The M7p match report (`proofs/inlet_storm.py`) — the wave-physics chain against an
   independent implementation on the same fields: corr ≥ 0.9/ring, mean |log ratio| ≤ 4%.
+- The water-parity proof suite (M8): `proofs/wave_field.py` (the solved-field twin test —
+  half-LSB agreement with the reference bake), `proofs/caustic_jacobian.py` (ray-density
+  ground truth adjudicating the physical caustic form), `proofs/ripple_prefilter.py`
+  (anisotropic prefilter vs supersampled truth), `proofs/foam_discipline.py` (coverage
+  statistics + the churn-combined law), `proofs/kelvin_wake.py` (the signed stationary
+  phase + the |∇φ|/k gate the reference fails), `proofs/bed_relief.py` (extractor
+  spectrum on the real composite + the waterline metric). gatest blocks 6–11 pin their
+  closed forms permanently (see each section's Gates line).
 - The hypervisor (`--trace lat,lon`) — one sample walked through every edge on the CPU
   with AST annotations; `--lens waterdata/authority/...` — fields as color;
   `--dump-fibers` — the bank planes with declared ranges; PIX events per AST node.
