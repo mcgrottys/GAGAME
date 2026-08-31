@@ -888,7 +888,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.bankE[0] = ringBlendTexels;
     m_cb.bankE[1] = windGateVal;   // Monahan gate for the PS detail-tier whitecaps
     m_cb.bankE[2] = causticStrength;
-    m_cb.bankE[3] = 0.0f;
+    m_cb.bankE[3] = editFloorNavd;   // M8g: absolute edit-land floor (datum envelope)
     m_cb.texIdx[0] = UINT32_MAX;   // was the equirect relief; the composed height cube owns it
     m_cb.texIdx[1] = m_hs.Valid() ? m_hs.srv : UINT32_MAX;
     m_cb.texIdx[2] = m_wind.Valid() ? m_wind.srv : UINT32_MAX;

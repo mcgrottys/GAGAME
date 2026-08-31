@@ -41,6 +41,10 @@ struct WaterSceneConfig {
     float wfFeatherM = 120.0f;          // window edge blend into the cascades
     float wfChop = 1.1f;                // Gerstner horizontal displacement (the ambient
                                         // sea's lambda; one look for both)
+    float wfExag = 1.15f;               // M8g: solved-field DISPLAY exaggeration, applied
+                                        // to the dequant tables at upload (cache stays
+                                        // raw physics; ProbeAt reads the same table so
+                                        // the 9b/9c twin holds). vqview shipped 1.15.
 
     // ---- kernel closures (were literals; every one pinned by gates/proofs) ----
     float shedSteepCap = 0.44f;   // Miche: shed slope variance rides ak <= this
@@ -57,6 +61,10 @@ struct WaterSceneConfig {
     float buoyAssimGainMax = 1.8f;   // and the gain clamp (past it the forecast and
                                      // the buoy disagree about the WORLD)
     float causticStrength = 0.6f;    // 0 = off; the bed dapple, softened by default
+    float jettyCrestNavd = -99.0f;   // M8g: edit-land geometry floor, NAVD m.
+                                     // <= -90 = AUTO: datum envelope MLLW + 0.35 at the
+                                     // structure (the origin planes decide; high water
+                                     // then drowns the outer jetty as it should)
 
     // ---- the fleet (M8 floats): boats shuttling the AIS lane, ping-pong at the ends.
     // Classes carry the AIS climatology's mean speeds; wake character follows k = g/U^2.
@@ -94,7 +102,7 @@ inline void WriteDefaultWaterScene(const char* path) {
         "    \"comps\": 16, \"spreadDeg\": 26.0, \"barNormalDeg\": 285.0,\n"
         "    \"gammaHs\": 0.60, \"minSamplesPerLambda\": 8.0,\n"
         "    \"tideBucketM\": 0.25, \"currentBucketMs\": 0.10,\n"
-        "    \"featherM\": 120.0, \"chop\": 1.1\n"
+        "    \"featherM\": 120.0, \"chop\": 1.1, \"exag\": 1.15\n"
         "  },\n"
         "  \"closures\": {\n"
         "    \"shedSteepCap\": 0.44, \"shedMssCeil\": 0.09,\n"
@@ -104,7 +112,8 @@ inline void WriteDefaultWaterScene(const char* path) {
         "    \"foamOpacity\": 0.72,\n"
         "    \"ringBlendTexels\": 48.0,\n"
         "    \"buoyAssimAgeH\": 6.0, \"buoyAssimGainMax\": 1.8,\n"
-        "    \"causticStrength\": 0.6\n"
+        "    \"causticStrength\": 0.6,\n"
+        "    \"jettyCrestNavd\": -99.0\n"
         "  },\n"
         "  \"fleet\": {\n"
         "    \"enabled\": false,\n"
@@ -159,6 +168,7 @@ inline bool LoadWaterScene(const char* path, WaterSceneConfig& out) {
         out.wfCurrentBucketMs = w->Num("currentBucketMs", out.wfCurrentBucketMs);
         out.wfFeatherM = static_cast<float>(w->Num("featherM", out.wfFeatherM));
         out.wfChop = static_cast<float>(w->Num("chop", out.wfChop));
+        out.wfExag = static_cast<float>(w->Num("exag", out.wfExag));
     }
     if (const JsonValue* c = v.Get("closures")) {
         out.shedSteepCap = static_cast<float>(c->Num("shedSteepCap", out.shedSteepCap));
@@ -176,6 +186,8 @@ inline bool LoadWaterScene(const char* path, WaterSceneConfig& out) {
             static_cast<float>(c->Num("buoyAssimGainMax", out.buoyAssimGainMax));
         out.causticStrength =
             static_cast<float>(c->Num("causticStrength", out.causticStrength));
+        out.jettyCrestNavd =
+            static_cast<float>(c->Num("jettyCrestNavd", out.jettyCrestNavd));
     }
     if (const JsonValue* fl = v.Get("fleet")) {
         const JsonValue* en = fl->Get("enabled");

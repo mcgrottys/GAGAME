@@ -126,6 +126,9 @@ public:
     float ringBlendTexels = 48.0f;  // M8: bank ring cross-fade width (scene cfg)
     float windGateVal = 1.0f;       // M8: Monahan whitecap gate (per frame, from sea)
     float causticStrength = 0.6f;   // M8: bed dapple strength (scene cfg; 0 = off)
+    float editFloorNavd = 1.8f;     // M8g: edit-land geometry floor, ABSOLUTE NAVD m --
+                                    // set from the datum envelope (MLLW + margin) at boot
+                                    // so high water drowns the outer jetty (origin planes)
     bool sliceOn = false;           // M7o: the cutaway plane node
     float sliceD = 0.0f;            // plane offset (world z, metres)
     bool albedoLens = false;        // M6j: --albedo, raw composed color -- no lighting, no

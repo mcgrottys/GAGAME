@@ -48,16 +48,17 @@ cbuffer BankCb : register(b0) {
     float4 gWaveB;      // x = envMax, y = sumMax, z = chop, w = solved-at level (NAVD)
     float4 gFoamA;      // scene closures: churnGain, shedSteepCap, shedMssCeil, crestLo
     float4 gFoamB;      // crestHi, depthLo, depthHi, spare (data/wave_scene.json)
-    // ---- M8 THINGS THAT FLOAT (ALGEBRA.md wake; proofs/kelvin_wake.py) ----
-    // Up to 8 vessels, the reference's table: A = (x, z world m, heading rad, speed m/s),
-    // B = (wake amp m, hull half-length m, enabled, spare). The wake is STATIONARY in
-    // the ship's frame -- stateless, like the swell; it superposes linearly (no
-    // interaction, so several boats cost a loop).
-    float4 gBoatA[8];
-    float4 gBoatB[8];
     float4 gWaveSig[8];    // (cos, sin)(sigma_c t) packed 2 comps/row: c even .xy, odd .zw
     float4 gWaveDir[8];    // unit propagation (east, north), same packing
     float4 gWaveScale[8];  // (aMax, kMax) dequant scales, same packing (aMax 0 = unused)
+    // ---- M8 THINGS THAT FLOAT (ALGEBRA.md wake; proofs/kelvin_wake.py) ----
+    // Up to 8 vessels, the reference's table: A = (x, z world m, heading rad, speed m/s),
+    // B = (wake amp m, hull half-length m, enabled, spare). LAYOUT LAW (learned the hard
+    // way): new rows append at the END on BOTH sides -- a same-size permutation passes
+    // the byte-parity gate and silently offsets every later row (the solved field read
+    // boat zeros as its dequant scales and vanished from the water for three renders).
+    float4 gBoatA[8];
+    float4 gBoatB[8];
 };
 
 struct BankTile {
@@ -404,7 +405,10 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             if (aMax <= 0.0f) continue;
             const float kMax = (s & 1) ? sc.w : sc.y;
             const float4 t4 = WaveSample(gWaveU.x, wcell, s, dimsW);
-            const float aW = t4.x * aMax;
+            // The swell shadow shelters the SOLVED bands exactly as it does the
+            // cascades (the helm-in-the-lee shot exposed the asymmetry: solved comps
+            // sailed through the jetty's lee unsheltered).
+            const float aW = t4.x * aMax * expo;
             if (aW < 1e-4f) continue;
             const float kW = max(t4.y * kMax, 1e-4f);
             const float lamW = 6.2831853f / kW;
@@ -430,8 +434,8 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             dW.xz -= gWaveB.z * wF * aW * sT * dir2;
         }
         const float4 env = WaveSample(gWaveU.x, wcell, 16u, dimsW);
-        rmsW = env.x * gWaveB.x;   // the solver's own envelope (limiter applied)
-        excW = env.y * 2.5f;       // its breaking indicator, rms_raw / rms_limit
+        rmsW = env.x * gWaveB.x * expo;   // the solver's envelope, sheltered like its comps
+        excW = env.y * 2.5f * expo;       // its breaking indicator, rms_raw / rms_limit
         d += dW * wWin;
         // Storm-sea mss ceiling on the solved shed (default ~ hurricane Cox-Munk): past
         // it the surface is breaking, and breaking is foam's business, not the glint's.

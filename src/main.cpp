@@ -1972,6 +1972,7 @@ int main(int argc, char** argv) {
             c.tideBucketM = s.wfTideBucketM;
             c.currentBucketMs = s.wfCurrentBucketMs;
             c.featherM = s.wfFeatherM;
+            c.displayExag = s.wfExag;
             return c;
         };
         std::unique_ptr<WaveField> waveField;
@@ -1982,6 +1983,11 @@ int main(int argc, char** argv) {
             waveField->Configure(sceneToWaveCfg(waterScene), &compositor, hgtCh,
                                  &waterAtlas, &model, entSta,
                                  haveCurrents ? &currents : nullptr, wfCtSta);
+            // M8 flows into waves: the SWE's SOLVED current drives the dispersion when
+            // resident (the bent jet, the tip shear); the ACT proxy is the fallback.
+            if (swe.Ready() && sea) {
+                waveField->SetSweCurrent(&swe, &bathy, sea->sweCurrentGain);
+            }
             waterBank->SetWaveField(waterScene.wfEnabled ? waveField.get() : nullptr);
             waterBank->SetScene(&waterScene);
         }
@@ -1989,6 +1995,26 @@ int main(int argc, char** argv) {
             globe->foamOpacity = waterScene.foamOpacity;
             globe->ringBlendTexels = waterScene.ringBlendTexels;
             globe->causticStrength = waterScene.causticStrength;
+            // M8g THE ORIGIN PLANES: the edit-land geometry floor comes from the datum
+            // envelope (MLLW + margin at the structure), not a tide-relative constant --
+            // the old floor tracked the live waterline, which made the jetty unsinkable.
+            float floorNavd = waterScene.jettyCrestNavd;
+            if (floorNavd <= -90.0f) {
+                floorNavd = 1.8f;
+                if (waterAtlas.Ready()) {
+                    float elo = 0.0f, ehi = 0.0f;
+                    waterAtlas.EnvelopeNavd(42.8190, -70.8031, 0.0, &elo, &ehi);
+                    // Anchored to the TOP plane: a decayed structure is awash at spring
+                    // high but a continuous ridge below mid-tide. (lo + margin was the
+                    // first draft -- that floors at MLLW, which rescues the smear only
+                    // at dead low.) Surveyed crests taller than the floor still win.
+                    floorNavd = ehi - 0.45f;
+                    Log("[datum] envelope at north jetty: lo %+.2f hi %+.2f m NAVD "
+                        "(synodic-month min/max) -> edit floor %+.2f",
+                        elo, ehi, floorNavd);
+                }
+            }
+            globe->editFloorNavd = floorNavd;
         }
         if (sea) {
             sea->buoyAssimAgeH = waterScene.buoyAssimAgeH;
@@ -2417,6 +2443,9 @@ int main(int argc, char** argv) {
                         globe->foamOpacity = waterScene.foamOpacity;
                         globe->ringBlendTexels = waterScene.ringBlendTexels;
                         globe->causticStrength = waterScene.causticStrength;
+                        if (waterScene.jettyCrestNavd > -90.0f) {
+                            globe->editFloorNavd = waterScene.jettyCrestNavd;
+                        }
                         Log("[scene] %s hot-reloaded", kScenePath);
                     }
                     // M8: bucket-watch + background solve + upload/swap for the solved
@@ -2425,7 +2454,8 @@ int main(int argc, char** argv) {
                     // (frame >= 2: the first frames run on the boot clock before --start
                     // settles; solving them caches a real answer for the wrong instant.)
                     if (waveField && sea && waterScene.wfEnabled && frame >= 2) {
-                        waveField->Update(gpu, simUnix, sea->Parts(), sea->activeParts);
+                        waveField->Update(gpu, simUnix, sea->Parts(), sea->activeParts,
+                                          opt.headless);
                     }
                     // M8 fleet: advance the traffic (stateless), hand the table to the
                     // bank kernel (wakes) -- and to the vessel layer when it exists.
@@ -2641,6 +2671,14 @@ int main(int argc, char** argv) {
                         wq.bedNavd, wq.bedSrc);
                     Log("[trace] 3 level     water.atlas rotors + swe mirror: %+.2f m NAVD "
                         "[%s]", wq.levelNavd, wq.levelSrc);
+                    if (waterAtlas.Ready()) {
+                        float elo = 0.0f, ehi = 0.0f;
+                        waterAtlas.EnvelopeNavd(tlat, tlon, simUnix, &elo, &ehi);
+                        Log("[trace] 3b envelope water.atlas origin planes: lo %+.2f hi "
+                            "%+.2f m NAVD (synodic-month min/max; live level must sit "
+                            "inside; edit floor %+.2f)",
+                            elo, ehi, globe ? globe->editFloorNavd : 0.0f);
+                    }
                     Log("[trace] 4 current   swe.solver (row0N raster, FLIP into +v=N): "
                         "u %+.2f v %+.2f m/s [%s]  (edge swe.solver->water.bank uv)",
                         wq.u, wq.v, wq.currentSrc);

@@ -50,6 +50,7 @@
 
 #include "core/Gpu.h"
 #include "sim/BathyModel.h"
+#include "sim/SweSolver.h"
 
 #include <algorithm>
 #include <chrono>
@@ -663,6 +664,7 @@ uint64_t WaveField::BucketKey(double simUnix, const PartParam* parts, int nParts
                             ? m_currents->SignedSpeed(size_t(m_actSta), simUnix)
                             : 0.0;
     mixD(std::round(sRaw / m_cfg.currentBucketMs) * m_cfg.currentBucketMs);
+    mixBytes(&m_curSig, sizeof(m_curSig));   // the solved flow's content signature
 
     if (parts && nParts > 0) mixBytes(parts, sizeof(PartParam) * size_t(nParts));
     if (m_comp && m_hgtCh >= 0) {
@@ -673,6 +675,59 @@ uint64_t WaveField::BucketKey(double simUnix, const PartParam* parts, int nParts
         }
     }
     return hsh;
+}
+
+// M8 FLOWS INTO WAVES: read the SWE's solved current back (main thread -- GPU readbacks
+// never ride the worker), resample onto the solve grid with the row-0-north flip, scale
+// by the prism-truncation gain, QUANTIZE to 0.05 m/s, and hash the quantized bytes into
+// the bucket key. The solve then eats exactly the bytes the key describes -- content
+// identity, so the same flow always finds its cache and a changed flow always re-solves.
+void WaveField::RefreshSweCurrent(Gpu& gpu, double simUnix) {
+    if (!m_swe || !m_sweBathy || !m_swe->Ready()) return;
+    if (simUnix - m_curReadT < 90.0 && !m_curU.empty()) return;   // solve-cadence refresh
+    if (m_inFlight.load()) return;   // never swap planes under a running solve
+    m_curReadT = simUnix;
+    std::vector<float> eta, uv4;
+    uint32_t ew = 0, eh = 0, uw = 0, uh = 0;
+    m_swe->ReadFields(gpu, eta, ew, eh, uv4, uw, uh);
+    if (uw < 2 || uh < 2) return;
+    const size_t cells = size_t(m_cfg.nx) * size_t(m_cfg.ny);
+    m_curU.assign(cells, 0.0f);
+    m_curV.assign(cells, 0.0f);
+    const double x0 = m_sweBathy->WorldX0(), z0 = m_sweBathy->WorldZ0();
+    const double sx = m_sweBathy->WorldSizeX(), sz = m_sweBathy->WorldSizeZ();
+    for (int j = 0; j < m_cfg.ny; ++j) {
+        const double wz = m_cfg.orgZ + (double(j) + 0.5) * m_cfg.cellM;
+        const double v = (wz - z0) / sz;
+        if (v < 0.0 || v > 1.0) continue;
+        const int iy = (std::min)(int((1.0 - v) * uh), int(uh) - 1);   // row 0 = NORTH
+        const size_t row = size_t(j) * size_t(m_cfg.nx);
+        for (int i = 0; i < m_cfg.nx; ++i) {
+            const double wx = m_cfg.orgX + (double(i) + 0.5) * m_cfg.cellM;
+            const double u = (wx - x0) / sx;
+            if (u < 0.0 || u > 1.0) continue;
+            const int ix = (std::min)(int(u * uw), int(uw) - 1);
+            const float* s = &uv4[(size_t(iy) * uw + size_t(ix)) * 4];
+            if (s[3] < 0.5f) continue;   // solver-invalid: sponge or dry
+            // quantize to 0.05 m/s -- the sig hashes EXACTLY what the solve eats
+            m_curU[row + i] =
+                std::round(s[0] * m_sweGain / 0.05f) * 0.05f;
+            m_curV[row + i] =
+                std::round(s[1] * m_sweGain / 0.05f) * 0.05f;
+        }
+    }
+    uint64_t h = 14695981039346656037ull;
+    auto mixB = [&h](const void* p, size_t n) {
+        const uint8_t* b = static_cast<const uint8_t*>(p);
+        for (size_t i = 0; i < n; ++i) h = (h ^ b[i]) * 1099511628211ull;
+    };
+    mixB(m_curU.data(), m_curU.size() * sizeof(float));
+    mixB(m_curV.data(), m_curV.size() * sizeof(float));
+    if (h != m_curSig) {
+        m_curSig = h;
+        Log("[wave] swe current refreshed: sig %016llx (gain %.1f, 0.05 m/s buckets)",
+            static_cast<unsigned long long>(h), m_sweGain);
+    }
 }
 
 WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
@@ -743,7 +798,15 @@ WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
             }
         });
     }
-    wavecore::BuildCurrentPlanes(m_cfg, in.level, in.currentMs, in.bed, in.u, in.v);
+    if (!m_curU.empty() && m_curSig != 0) {
+        // M8 flows-into-waves: the SWE's solved jet (quantized planes; their hash is
+        // in this solve's key). The dispersion now sees the bent channel jet and the
+        // shear off the tips -- the proxy could only point one way.
+        in.u = m_curU;
+        in.v = m_curV;
+    } else {
+        wavecore::BuildCurrentPlanes(m_cfg, in.level, in.currentMs, in.bed, in.u, in.v);
+    }
 
     Solved out;
     out.key = key;
@@ -771,6 +834,19 @@ void WaveField::SolveAsync(uint64_t key, double simUnix, std::vector<PartParam> 
     });
 }
 
+void WaveField::AdoptTable(const GpuTable& t) {
+    // The display closure: exaggeration multiplies the DEQUANT tables, never the solve.
+    // The packed bytes stay raw physics (cache and bucket key untouched); the GPU decodes
+    // a/aMax * (exag*aMaxRaw) and ProbeAt reads this same table, so the twin holds.
+    m_table = t;
+    const float e = m_cfg.displayExag;
+    if (e > 0.0f && e != 1.0f) {
+        for (int c = 0; c < kMaxComp; ++c) m_table.aMax[c] *= e;
+        m_table.envMax *= e;    // the envelope shades what the geometry shows
+        m_table.excMax *= e;
+    }
+}
+
 bool WaveField::LoadCache(uint64_t key, Solved& out) const {
     char path[128];
     CachePathFor(key, path, sizeof(path));
@@ -790,8 +866,10 @@ void WaveField::StoreCache(const Solved& s) const {
     wavecore::WriteCache(path, s.key, in, s.atlas, s.table, false);
 }
 
-bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nParts) {
+bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nParts,
+                       bool block) {
     if (!m_comp || m_hgtCh < 0 || !m_atlas) return false;
+    RefreshSweCurrent(gpu, simUnix);   // flows into waves (throttled + inFlight-guarded)
 
     // hand over a finished background solve first: the old field stays live until the new
     // one is WHOLE (double-buffer by construction -- the renderer never sees a half solve).
@@ -802,7 +880,7 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
         const uint32_t aw = m_result.table.nx * 2;
         const uint32_t ah = uint32_t((m_result.table.nUsed + 2) / 2) * m_result.table.ny;
         m_srv = UploadAtlas(gpu, m_tex, m_result.atlas.data(), aw, ah);
-        m_table = m_result.table;
+        AdoptTable(m_result.table);
         m_liveKey = m_result.key;
         m_cpuAtlas = std::move(m_result.atlas);
         char buf[160];
@@ -820,7 +898,7 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
             const uint32_t aw = s.table.nx * 2;
             const uint32_t ah = uint32_t((s.table.nUsed + 2) / 2) * s.table.ny;
             m_srv = UploadAtlas(gpu, m_tex, s.atlas.data(), aw, ah);
-            m_table = s.table;
+            AdoptTable(s.table);
             m_liveKey = key;
             m_cpuAtlas = std::move(s.atlas);
             char buf[160];
@@ -829,6 +907,18 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
             stats = buf;
             Log("[wave] cache hit %016llx -- uploaded without a solve",
                 static_cast<unsigned long long>(key));
+        } else if (block) {
+            // headless determinism: the dump frames must see the field, so eat the
+            // ~3 s here, once per bucket. Interactive runs keep the async path.
+            std::vector<PartParam> pcopy;
+            if (parts && nParts > 0) pcopy.assign(parts, parts + nParts);
+            Solved s2 = SolveNow(key, simUnix, pcopy);
+            const uint32_t aw = s2.table.nx * 2;
+            const uint32_t ah = uint32_t((s2.table.nUsed + 2) / 2) * s2.table.ny;
+            m_srv = UploadAtlas(gpu, m_tex, s2.atlas.data(), aw, ah);
+            AdoptTable(s2.table);
+            m_liveKey = key;
+            m_cpuAtlas = std::move(s2.atlas);
         } else {
             std::vector<PartParam> pcopy;
             if (parts && nParts > 0) pcopy.assign(parts, parts + nParts);

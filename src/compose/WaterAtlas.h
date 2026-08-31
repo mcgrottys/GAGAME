@@ -53,6 +53,11 @@ public:
     double Level(double latDeg, double lonDeg, double unixT, double groundResM = 500.0) const;
     // MSL height in NAVD88: station-IDW inside the NE survey, 0 (geoid ~ MSL) beyond it.
     double MslNavd(double latDeg, double lonDeg) const;
+    // M8g: the tidal datum envelope (min/max NAVD88 level over one synodic month around
+    // aroundUnix) -- MLLW/MHHW's spatial generalization, the "origin planes". Between
+    // gauges it rides the same station graph as Level; anywhere on the globe it answers.
+    void EnvelopeNavd(double latDeg, double lonDeg, double aroundUnix, float* loM, float* hiM,
+                      double groundResM = 500.0) const;
 
     // The per-constituent phasor from the composed stack (exchange-frame query).
     void Phasor(int c, double latDeg, double lonDeg, double groundResM, float out[2]) const;

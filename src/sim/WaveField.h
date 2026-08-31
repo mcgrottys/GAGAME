@@ -55,6 +55,10 @@ struct WaveFieldConfig {
     double tideBucketM = 0.25;         // re-solve quantization
     double currentBucketMs = 0.10;
     float featherM = 120.0f;           // window edge blend into the cascades (scene cfg)
+    float displayExag = 1.15f;         // M8g: display exaggeration, applied to the dequant
+                                       // tables at ADOPTION (upload) -- the cache and the
+                                       // bucket key stay raw physics; ProbeAt reads the
+                                       // same scaled table, so 9b/9c agree with the GPU
 };
 
 class WaveField {
@@ -66,10 +70,25 @@ public:
                    const WaterAtlas* atlas, const TideModel* tides, int entranceStation,
                    const CurrentModel* currents, int actStation);
 
+    // M8 FLOWS INTO WAVES (the user's priority, verbatim: "flows affect waves"): when
+    // the SWE solver is resident its SOLVED current -- the bent jet, the shear off the
+    // tips -- drives the dispersion instead of the climatological proxy. The planes are
+    // read back on the main thread at a quantized cadence, resampled onto the solve
+    // grid (row-0-north flip declared), scaled by the prism-truncation gain, and their
+    // quantized bytes join the bucket key: content identity, not a clock.
+    void SetSweCurrent(class SweSolver* swe, const class BathyModel* bathy, float gain) {
+        m_swe = swe;
+        m_sweBathy = bathy;
+        m_sweGain = gain;
+    }
+
     // Per frame, main thread. parts/n = the live GFS-Wave partition set (SeaLayer's).
     // Kicks a background solve when a bucket rolls; uploads + swaps when one finishes.
-    // Returns true while a solve is in flight (consumers may show provenance).
-    bool Update(Gpu& gpu, double simUnix, const PartParam* parts, int nParts);
+    // block = true (headless renders): solve SYNCHRONOUSLY on a key roll instead --
+    // a deterministic dump must never race a background solve (the flat-helm catch:
+    // short runs sampled the bank before the field landed).
+    bool Update(Gpu& gpu, double simUnix, const PartParam* parts, int nParts,
+                bool block = false);
 
     bool Ready() const { return m_srv != 0xFFFFFFFFu; }
     uint32_t Srv() const { return m_srv; }
@@ -105,6 +124,8 @@ private:
     };
 
     uint64_t BucketKey(double simUnix, const PartParam* parts, int nParts) const;
+    void AdoptTable(const GpuTable& t);   // m_table = t with the display closure applied
+    void RefreshSweCurrent(Gpu& gpu, double simUnix);
     void SolveAsync(uint64_t key, double simUnix, std::vector<PartParam> parts);
     Solved SolveNow(uint64_t key, double simUnix, const std::vector<PartParam>& parts) const;
     bool LoadCache(uint64_t key, Solved& out) const;
@@ -118,6 +139,12 @@ private:
     int m_entranceSta = -1;
     const CurrentModel* m_currents = nullptr;
     int m_actSta = -1;
+    class SweSolver* m_swe = nullptr;             // M8: the real flow (optional)
+    const class BathyModel* m_sweBathy = nullptr;
+    float m_sweGain = 3.2f;                       // prism-truncation magnitude restore
+    std::vector<float> m_curU, m_curV;            // solve-grid planes, main-thread owned
+    uint64_t m_curSig = 0;                        // quantized content hash -> bucket key
+    double m_curReadT = -1e18;                    // last refresh (sim s)
 
     GpuTable m_table{};
     uint32_t m_srv = 0xFFFFFFFFu;

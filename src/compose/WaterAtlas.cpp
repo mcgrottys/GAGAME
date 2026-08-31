@@ -302,6 +302,39 @@ double WaterAtlas::Level(double latDeg, double lonDeg, double unixT, double grou
     return h;
 }
 
+void WaterAtlas::EnvelopeNavd(double latDeg, double lonDeg, double aroundUnix, float* loM,
+                              float* hiM, double groundResM) const {
+    // M8g: THE ORIGIN PLANES. The tidal datum envelope at a point: min/max of the same
+    // stateless constituent sum Level() evaluates, scanned over one synodic month
+    // (29.53 d -- the spring/neap beat closes) at 10-minute steps, referenced to NAVD88
+    // through MslNavd. This is MLLW/MHHW's spatial generalization: between gauges the
+    // envelope interpolates through the SAME station graph the live level rides, so a
+    // place with no data still knows its tidal band. The phasors are time-independent --
+    // hoisted once, the scan is a pure rotor sum (microseconds, honest extremes; the
+    // sum-of-amplitudes bound overestimates because five incommensurate rotors never
+    // quite align inside a month).
+    float p[kCon][2];
+    for (int c = 0; c < kCon; ++c) Phasor(c, latDeg, lonDeg, groundResM, p[c]);
+    // aroundUnix <= 0 = the fit epoch itself (deterministic boot-time default).
+    const double tau0 = (aroundUnix > 0.0) ? aroundUnix - m_tides->EpochUnix() : 0.0;
+    double lo = 1e18, hi = -1e18;
+    constexpr double kStepS = 600.0;
+    constexpr int kN = static_cast<int>(29.53 * 86400.0 / kStepS);
+    for (int k = 0; k < kN; ++k) {
+        const double tau = tau0 + k * kStepS;
+        double h = 0.0;
+        for (int c = 0; c < kCon; ++c) {
+            const double wt = OmegaRadS(c) * tau;
+            h += p[c][0] * std::cos(wt) - p[c][1] * std::sin(wt);
+        }
+        lo = (std::min)(lo, h);
+        hi = (std::max)(hi, h);
+    }
+    const double msl = MslNavd(latDeg, lonDeg);
+    *loM = static_cast<float>(msl + lo);
+    *hiM = static_cast<float>(msl + hi);
+}
+
 // ---------------------------------------------------------------- the selftest gate
 
 bool RunWaterSelfTest() {
@@ -453,6 +486,28 @@ bool RunWaterSelfTest() {
             }
             if (worst > 0.005) fail("tile vs stack identity");
         }
+    }
+
+    // 7. THE ORIGIN PLANES (M8g): the datum envelope must CONTAIN every sampled live
+    // level (it is the min/max of the same rotor sum -- containment is definitional,
+    // so a violation means the two code paths diverged), and at the Merrimack entrance
+    // its width must be the known great-diurnal-scale range (~2.4..3.6 m).
+    {
+        const double elat = 42.8190, elon = -70.8031;
+        float elo = 0.0f, ehi = 0.0f;
+        wa.EnvelopeNavd(elat, elon, 0.0, &elo, &ehi);
+        const double msl = wa.MslNavd(elat, elon);
+        double worstOut = 0.0;
+        for (int k = 0; k < 60; ++k) {
+            const double t = tides.EpochUnix() + k * 41231.0;   // ~29 d, incommensurate
+            const double lvl = msl + wa.Level(elat, elon, t);
+            worstOut = (std::max)(worstOut, (std::max)(elo - lvl, lvl - ehi));
+        }
+        Log("[watertest] envelope: lo %+.2f hi %+.2f m NAVD (width %.2f), worst "
+            "containment excursion %.0f mm",
+            elo, ehi, ehi - elo, worstOut * 1000.0);
+        if (worstOut > 0.02) fail("envelope containment");
+        if (ehi - elo < 2.4f || ehi - elo > 3.6f) fail("envelope width (entrance range)");
     }
 
     Log("[watertest] ---- %s: %d stations (%d NAVD-linked), eot20 %s, phasor fields "

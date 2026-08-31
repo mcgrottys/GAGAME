@@ -90,20 +90,33 @@ void MsMain(uint gtid : SV_GroupThreadID, uint gid : SV_GroupID,
         // smoothly instead of popping plateau edges (the flats speckle, geometry side).
         const float landness =
             ComposedLandness(dir, ComposedHeight(dir, max(vl, -4.0f)), gWavesB.w);
-        // M6p: an operator's LAND edit floors the display height -- the jetty stands as a
-        // continuous ridge above the tide even where the height channel's smear dips.
-        const float editFloor = ComposedEditLand(dir) * max(gWavesB.w + 1.2f, 1.2f);
+        // M6p/M8g: an operator's LAND edit floors the display height where the height
+        // channel's SMEAR dips -- but at an ABSOLUTE crest elevation (NAVD, scene
+        // jettyCrestNavd), never relative to the live tide. The old floor tracked the
+        // waterline (+1.2 m), which made the jetty unsinkable by construction; the real
+        // north jetty goes awash at high water (the user's catch). Surveyed data taller
+        // than the floor still wins through the max below.
+        const float editFloor = ComposedEditLand(dir) * gBankE.w;
         const float dispLand = max(max(h, 0.0f) * gGlo.y, editFloor * gGlo.y);
         // M7: ONE WATER. In one-water mode the vertex samples THE WAVE VERTEX BANK -- level
         // (tide + solver) plus the folded cascade displacement, one tiled resource, ring LOD.
         // Beyond every ring (or bank off) the M6t sunk plane remains: it exists only so the
         // SeaLayer grid can cover it, and in one-water mode that grid is retired.
         float dispWater = min(gWavesB.w - 8.0f, -8.0f);
+        // M8g: the FULL displacement vector. The vertex used to take level + dy only;
+        // in shallow water the ORBITAL (horizontal) displacement dominates the vertical
+        // (coth(kh) -- the trace showed dx -0.48 m against dy +0.06 m), and it is what
+        // sharpens crests and hollows troughs. Normals carried the waves, the mesh
+        // stayed flat (seen, fixed). Lateral fades with landness so shoreline verts
+        // never slide onto the rocks; the bank's world xz stays the SAMPLE point --
+        // Gerstner convention, same as the reference.
+        float2 latW = 0.0f;
         if (gBankU.z != 0u) {
             float4 bD, bP, bDet;
             const float2 bankXZ = (CsToTangent(dir) * gGlo.x).xz;
             float bT;
             dispWater = BankSample(bankXZ, bD, bP, bDet, bT) ? (bP.x + bD.y) : 0.0f;
+            latW = float2(bD.x, bD.z) * (1.0f - landness);
         }
         const float disp = lerp(dispWater, dispLand, landness);
 
@@ -116,6 +129,7 @@ void MsMain(uint gtid : SV_GroupThreadID, uint gid : SV_GroupID,
         } else {
             o.rel = CsToTangent(dir) * (gGlo.x + disp) - gCamAbs.xyz;
         }
+        o.rel += float3(latW.x, 0.0f, latW.y);
         o.pos = mul(float4(o.rel, 1.0f), gViewProj);
         verts[gtid] = o;
     }

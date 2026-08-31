@@ -237,9 +237,15 @@ void RegisterKnownWaterEdges() {
               "m NAVD", "-40..15", 1.0, "WaveField.h SolveNow (SampleHeightStack)"});
     Register({"water.atlas", "wave.solver", "level bucket", worldM, worldM, false,
               "m NAVD", "0.25 m buckets", 1.0, "WaveField.h BucketKey"});
-    Register({"act.currents", "wave.solver", "current proxy", worldM, atlasN, false,
-              "m/s (conveyance jet, x3.0 closure)", "0..2", 3.0,
+    Register({"act.currents", "wave.solver", "current proxy (fallback)", worldM, atlasN,
+              false, "m/s (conveyance jet, x3.0 closure)", "0..2", 3.0,
               "WaveField.h (ebb toward 105, flood 285)"});
+    // M8 flows into waves: the SOLVED current when the SWE window is resident -- read
+    // back row-0-north (FLIP), resampled to the solve grid, x3.2 prism gain, quantized
+    // 0.05 m/s, content-hashed into the bucket key.
+    Register({"swe.solver", "wave.solver", "current (solved)", rowS, atlasN, true,
+              "m/s (live SeaLayer gain), 0.05 buckets", "+-2.5", 1.0,
+              "WaveField.h RefreshSweCurrent (1-v flip)"});
     Register({"wave.solver", "water.bank", "a/k/phase-spinor planes", atlasN, atlasN,
               false, "m / rad/m / unit spinor (RGBA8, per-comp aMax kMax)",
               "17 slices, 2-wide grid", 1.0, "WaterBank.hlsl WaveSample (no flip)"});
@@ -263,6 +269,12 @@ void RegisterKnownWaterEdges() {
               true, "phasor re/im", "RG16F tiles", 1.0, "Compositor::WindowField paint"});
     Register({"water.atlas", "weather.mgr", "level rotors", latlonW, latlonW, false,
               "m NAVD", "+-3", 1.0, "WeatherManager::Query h(t)=msl+Re[P e^iwt]"});
+    // M8g THE ORIGIN PLANES: the datum envelope (synodic-month min/max of the same
+    // rotor sum, NAVD) -- MLLW/MHHW generalized between gauges. First consumer: the
+    // edit-land geometry floor (absolute crest, so high water drowns the outer jetty).
+    Register({"water.atlas", "globe.mesh", "datum envelope (origin planes)", latlonW,
+              atlasN, false, "m NAVD lo/hi", "containment + width 2.4..3.6 (watertest 7)",
+              1.0, "WaterAtlas::EnvelopeNavd -> gBankE.w edit floor"});
     Register({"gfswave.grid", "weather.mgr", "hs/tp/dir", rowS, latlonW, true,
               "m / s / deg", "0..15 m", 1.0, "WeatherManager wave grid (lat1-lat row)"});
     Register({"weather.mgr", "compose.stack", "corner params feed", latlonW, worldM,

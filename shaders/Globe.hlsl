@@ -394,11 +394,17 @@ float4 PsMain(VsOut i) : SV_Target {
         // shed variance, locally sea-state true), and its foam whitens the water -- the
         // shading now reads the same tiled resource the geometry displaces from.
         float s2 = 0.003f + 0.00512f * wind;
-        float3 nWater = upT;    // with M7a sparkle detail: feeds the sun glint (microfacet
-                                // math averages sub-pixel slopes statistically)
-        float3 nSmooth = upT;   // band-limited to the ring texel: feeds Fresnel + the two
-                                // rays -- per-pixel detail slopes under a Fresnel term alias
-                                // into grey speckle (seen, fixed)
+        float3 nWater = upT;    // band-limited to the PIXEL (ring slopes + cascade detail,
+                                // each band under its per-axis Gaussian prefilter): feeds
+                                // the glint AND the Fresnel split / both rays. Fresnel on
+                                // the ring-texel normal rendered a 4.8 m-blurred sea --
+                                // molten "Vaseline" at helm height (seen, fixed M8g); the
+                                // prefilter law makes this normal safe at every footprint,
+                                // because gAx/gAy fold each band away as the pixel stops
+                                // resolving it (sub-pixel energy stays in sigma^2).
+        float3 nSmooth = upT;   // band-limited to the ring texel: feeds DIFFUSE only --
+                                // per-chop diffuse rendered 2 m wavelets as dark flecks
+                                // from altitude (the leopard, rolled back by the user)
         float lvlW = 0.0f;    // live water level here (bank: tide + solver); 0 = geoid far afield
         float foamW = 0.0f;   // whitening accumulator -- painted AFTER the refraction mix so
                               // foam rides ON the water, not under it
@@ -505,11 +511,11 @@ float4 PsMain(VsOut i) : SV_Target {
         // tiers telescope by physics, not by altitude branches.
         const float depthW = max(lvlW - hp, 0.0f);
         const float3 dIn = -v;                                   // camera -> surface
-        const float ci = saturate(-dot(dIn, nSmooth));
+        const float ci = saturate(-dot(dIn, nWater));
         const float etaR = 1.0f / 1.34f;
         const float st2 = etaR * etaR * max(1.0f - ci * ci, 0.0f);
         const float3 tDir = normalize(
-            etaR * dIn + (etaR * ci - sqrt(max(1.0f - st2, 0.0f))) * nSmooth);
+            etaR * dIn + (etaR * ci - sqrt(max(1.0f - st2, 0.0f))) * nWater);
         float sDown = depthW;    // vertical closed form: exact where parallax is subpixel
         float3 bedDir = up;
         if (footPx < 30.0f && depthW > 0.01f && depthW < 90.0f) {
@@ -604,8 +610,8 @@ float4 PsMain(VsOut i) : SV_Target {
         // TRUE wave normal; the refracted side scales by 1-F so energy splits, not doubles.
         // From straight above F ~ 0.02 (space view untouched); toward the horizon the sea
         // mirrors the sky, which is the term every previous tuning pass was missing.
-        const float fresN = 0.02f + 0.98f * pow(1.0f - saturate(dot(v, nSmooth)), 5.0f);
-        float3 rDir = normalize(dIn - 2.0f * dot(dIn, nSmooth) * nSmooth);
+        const float fresN = 0.02f + 0.98f * pow(1.0f - saturate(dot(v, nWater)), 5.0f);
+        float3 rDir = normalize(dIn - 2.0f * dot(dIn, nWater) * nWater);
         // A front-facing facet on the back of a steep wave reflects BELOW the horizon;
         // the sky model correctly darkens there, which painted grey patches over wave
         // backs. What such a facet actually sees is more sea and the sky above it --
@@ -668,7 +674,21 @@ float4 PsMain(VsOut i) : SV_Target {
             const float rn = frac(sin(dot(rc, float2(127.1f, 311.7f))) * 43758.5453f);
             const float3 rock =
                 lerp(float3(0.15f, 0.14f, 0.13f), float3(0.33f, 0.30f, 0.26f), rn);
-            alb = lerp(alb, rock, saturate(elp * 1.5f) * landness);
+            const float rockW = saturate(elp * 1.5f) * landness;
+            alb = lerp(alb, rock, rockW);
+            // M8g: riprap FACETS. Albedo grain alone still lit as one continuous grease
+            // (the Vaseline jetty) -- a boulder pile's signature is per-block NORMALS.
+            // Each hash cell gets a fixed random tilt; amplitude folds away as the pixel
+            // footprint approaches the boulder size (same law as every detail band: fold,
+            // never alias), so from altitude the jetty relaxes to the smooth ridge.
+            const float fp = length(i.rel) * gWavesB.z;
+            const float facetW = rockW * (1.0f - smoothstep(0.35f, 1.4f, fp));
+            if (facetW > 0.01f) {
+                const float fx = frac(sin(dot(rc, float2(269.5f, 183.3f))) * 43758.5453f);
+                const float fz = frac(sin(dot(rc, float2(419.2f, 371.9f))) * 43758.5453f);
+                n = normalize(n + (east * (fx - 0.5f) + north * (fz - 0.5f)) *
+                                      (1.1f * facetW));
+            }
         }
     }
 
