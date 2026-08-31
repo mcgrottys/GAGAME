@@ -50,7 +50,8 @@ for tok in sorted(set(missing)):
 try:
     j = json.load(io.open(os.path.join(REPO, 'docs', 'ga_ast.json'), encoding='utf-8'))
     table = io.open(os.path.join(REPO, 'docs', 'GA_AST.md'), encoding='utf-8').read()
-    rows = len(re.findall(r'^\| [a-z]', table, re.M))
+    body = table.split('|---', 1)[-1]   # count only rows past the header separator
+    rows = len(re.findall(r'^\| [a-z]', body, re.M))
     if rows != len(j['edges']):
         print('[algebra_lint] FAIL: GA_AST.md has %d rows but ga_ast.json %d edges '
               '(stale generation?)' % (rows, len(j['edges'])))
