@@ -66,6 +66,15 @@ public:
     // ranges against the AST's declarations -- the hypervisor for whole fields.
     void DumpFibers(Gpu& gpu);
     int injectPattern = 0;   // M7m/M7n: 1 = bank world card, 2 = cascade-edge card
+    // M7q: the composed height WINDOW, per texel, in the kernel -- the corner-lerp bed
+    // quantized depth to ~600 m patches and the M7p physics inherited the blockiness (the
+    // data lens showed breaking bands cutting at tile edges; the user called it).
+    void SetHeightWindow(uint32_t srv, uint32_t resMapSrv, double orgPxX, double orgPxY) {
+        m_hgtWinSrv = srv;
+        m_hgtWinResSrv = resMapSrv;
+        m_hgtWinOrg[0] = orgPxX;
+        m_hgtWinOrg[1] = orgPxY;
+    }
     float BaseTexelM() const { return m_baseTexelM; }
     uint32_t ResidentTiles() const {
         return m_disp.ResidentCount() + m_param.ResidentCount() + m_detail.ResidentCount();
@@ -91,6 +100,9 @@ private:
         uint32_t slotsC[4];   // x = churn atlas SRV (M7e foam memory)
         float churn[4];       // xy origin, z 1/domain, w atlas texels
         float waveDir[4];     // M7p: peak propagation dir xy, z valid
+        uint32_t slotsD[4];   // M7q: height window SRV, its residency-map SRV
+        float geoA[4];        // world->latlon: orgLat, orgLon, 1/mPerLat, 1/mPerLon
+        float winA[4];        // window: org px x, org px y, 1/sizePx, full-world px (z14)
     };
     struct BankTile {
         float orgXZ[2];
@@ -113,6 +125,8 @@ private:
     const WaterAtlas* m_atlas = nullptr;
     Compositor* m_comp = nullptr;
     int m_hgtCh = -1;
+    uint32_t m_hgtWinSrv = 0xFFFFFFFFu, m_hgtWinResSrv = 0xFFFFFFFFu;
+    double m_hgtWinOrg[2] = {0.0, 0.0};
     const GlobeModel* m_globe = nullptr;
     const SeaState* m_seaState = nullptr;
 

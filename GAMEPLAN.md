@@ -1212,6 +1212,21 @@ The storm render transformed: whitewater through the entrance, organized surf ba
 both beach faces, seaward streaks over the shoal. detail plane peaks 2.67 (was capped
 1.8); disp.y +-3.3 m in the 3 m storm. Six gates green.
 
+**M7q (2026-08-30): PER-TEXEL BED — the data lens earns its keep.** The user, reading
+the waterdata lens: "whats with those weird patterns in yellow and why do they cut
+suddenly? I think a layer isn't getting composed correctly." Correct: the bank tile
+carries only FOUR corner bed samples, so depth — and with M7p, shoaling and breaking —
+was bilinear over ~600 m patches; the surf geography snapped to tile-lerp artifacts and
+CUT at tile edges. Fix: the kernel samples the COMPOSED HEIGHT WINDOW per texel
+(world→latlon→mercator→window uv in-kernel, residency-clamped via the R8 map to mips
+2..7, manual bilinear Load at the resident mip, corner-lerp as the out-of-window
+fallback). The data lens re-run shows breaking bands hugging the real bars in organic
+curves; the MATCH REPORT jumped: corr 0.91/0.94/0.95 by ring (was 0.80/0.89/0.91), mean
+|log ratio| 3.8–4.0%% (was ~5%%), p95 13–17%% (was 21–23%%) — the corner-lerp bed was
+most of the residual disagreement with the reference physics. Remaining lens seams:
+ring-boundary fold steps (foam w per ring) — visible raw, smoothed in the shaded view by
+the PS detail tier; a ring cross-fade is named next. Six gates green.
+
 **THE DX12 GOTCHAS LEDGER (and the non-GA-workaround audit the user asked for: every
 workaround marked, with whether a GA formulation would have needed it at all):**
 1. Bindless static-sampler SampleLevel returns ZERO outside the pixel stage on this

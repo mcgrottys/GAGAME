@@ -2341,6 +2341,11 @@ int main(int argc, char** argv) {
                         bandKS[c] = static_cast<float>(std::sqrt(kCutB[c] * kCutB[c + 1]));
                     }
                     waterBank->injectPattern = opt.inject;
+                    if (hgtWinTenant >= 0) {
+                        waterBank->SetHeightWindow(resMgr.TextureSrv(hgtWinTenant),
+                                                   resMgr.ResidencySrv(hgtWinTenant),
+                                                   winOrgX, winOrgY);
+                    }
                     globe->SetWaterBank(waterBank->DispSrv(), waterBank->ParamSrv(),
                                         waterBank->DetailSrv(), derivS, patchS, bandKS,
                                         sea->heightScale, waterBank->BaseTexelM(), orgs,

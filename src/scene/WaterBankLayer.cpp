@@ -460,6 +460,17 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.waveDir[1] = m_sea ? m_sea->PeakDirZ() : 0.0f;
     cb.waveDir[2] = (m_sea && m_sea->PeakDirValid()) ? 1.0f : 0.0f;
     cb.waveDir[3] = 0.0f;
+    cb.slotsD[0] = m_hgtWinSrv;
+    cb.slotsD[1] = m_hgtWinResSrv;
+    cb.slotsD[2] = cb.slotsD[3] = 0xFFFFFFFFu;
+    cb.geoA[0] = static_cast<float>(BathyModel::kOrgLat);
+    cb.geoA[1] = static_cast<float>(BathyModel::kOrgLon);
+    cb.geoA[2] = static_cast<float>(1.0 / BathyModel::kMPerLat);
+    cb.geoA[3] = static_cast<float>(1.0 / BathyModel::kMPerLon);
+    cb.winA[0] = static_cast<float>(m_hgtWinOrg[0]);
+    cb.winA[1] = static_cast<float>(m_hgtWinOrg[1]);
+    cb.winA[2] = 1.0f / 16384.0f;
+    cb.winA[3] = 16384.0f * 256.0f;
 
     auto toUav = [&](TileAtlas2D& bank) {
         if (m_state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) return;
