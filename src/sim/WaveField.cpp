@@ -787,11 +787,17 @@ WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
         (m_cfg.orgZ + 0.5 * ny * m_cfg.cellM) / BathyModel::kMPerLat + BathyModel::kOrgLat;
     const double lonC =
         (m_cfg.orgX + 0.5 * nx * m_cfg.cellM) / BathyModel::kMPerLon + BathyModel::kOrgLon;
-    const double mslDbg = m_atlas ? m_atlas->MslNavd(latC, lonC) : 0.0;
-    const double tideDbg = m_atlas ? m_atlas->Level(latC, lonC, simUnix) : 0.0;
-    const double levelRaw = mslDbg + tideDbg;
-    Log("[wave] level probe at %.4f,%.4f t %.0f: MslNavd %+.3f + Level %+.3f = %+.3f",
-        latC, lonC, simUnix, mslDbg, tideDbg, levelRaw);
+    // THE DATUM LINE (kept deliberately, once per solve): the still-water level this
+    // field was solved at, decomposed into the two rungs that make it. Every depth in
+    // the solve is bed-to-this, so a quiet bias here IS a wrong wave field -- and twice
+    // it was: the boot-clock transient that solved at +1.50 before --start settled, and
+    // the M8f MslNavd bias that charged the entrance +0.46 m of Riverside river slope.
+    // Both were invisible in the render and obvious on this line.
+    const double mslNavd = m_atlas ? m_atlas->MslNavd(latC, lonC) : 0.0;
+    const double tideNavd = m_atlas ? m_atlas->Level(latC, lonC, simUnix) : 0.0;
+    const double levelRaw = mslNavd + tideNavd;
+    Log("[wave] solve datum at %.4f,%.4f t %.0f: MslNavd %+.3f + tide %+.3f = %+.3f m",
+        latC, lonC, simUnix, mslNavd, tideNavd, levelRaw);
     in.level = std::round(levelRaw / m_cfg.tideBucketM) * m_cfg.tideBucketM;
 
     const double sRaw = (m_currents && m_actSta >= 0 &&

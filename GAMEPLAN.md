@@ -1490,8 +1490,41 @@ is ~112 MB and nothing ever asked the cache to stop). The max-ebb 2 m-eye view t
 rendered a flat sheet now shows rolling crest geometry; the jetty-ladder view carries
 marching wave trains on both sides. Delta vs the standing "named next": helm vertex
 density is 1.19 m, not yet sub-meter — the amplification-shader subdivision remains
-open if 1.19 m shows facets at wading height. Named next for M8: the per-texel
+open if 1.19 m shows facets at wading height. Plus cache/wave LRU pruning (4 GiB
+budget, live key spared — an entry is ~112 MB and nothing had ever asked the cache
+to stop).
+
+**M8i (2026-08-31): THE TIDE WIDENS — 5 constituents to 18, and units by
+declaration.** The named-next EOT20 leg. kCon 5 → 18: the five keep their indices
+(index 0 = M2 is a contract — the selftest and `--water-map` both read constituent 0
+as M2), then the EOT20-backed set (K2 P1 Q1 2N2 T2 J1 M4 SA SSA) and the
+station-only set (L2 NU2 MU2 M6 — the entrance's biggest remaining omissions at
+~0.044 m each, riding the station IDW with no global rung and fading honestly
+through the coverage feather). The harvest is one line and idempotent; the 2.33 GB
+zip was already cached. THREE TRAPS, each closed where it bit: (1) UNITS BY GUESS —
+`convert_eot20` decided centimetres by "max amplitude > 30", which read the big
+constituents right by luck and left the small ones unscaled: T2, whose global max is
+27 cm, shipped as 27 METRES. Every EOT20 file declares `units="cm"`; we read the
+attribute now, and the heuristic survives only as a warned fallback. Added a
+phase-preserving outlier clamp at 4× the 99.9th percentile (EOT20 carries a handful
+of blown-up near-coast texels — T2's p99.9 is 5 cm against that 26.9 m max); genuine
+resonance survives, M2 Fundy 4.97 m uncapped. (2) SPECIES BY INDEX — the equilibrium
+rung classified semidiurnal as `con < 3`, i.e. *the first three ARE the
+semidiurnals*; appending K2 after the diurnals would have given it a diurnal
+latitude shape and the wrong Greenwich lag, silently. Species is read from the SPEED
+now. (3) SHORT INITIALIZER — `m_channel[kCon] = {-1,-1,-1,-1,-1}` value-inits its
+tail to 0 past kCon 5, and 0 is a VALID channel id: every new constituent would have
+aliased channel 0 (M2) before Init. THE GATE HAD TO GET HONEST TOO: block 3 summed
+all kCon and charged the difference to the engine, but not every station fits every
+constituent — Salem and Scituate carry no SA/SSA, and there the atlas correctly
+answers with the neighbours' IDW. That is the field doing its job (a place with no
+data still knows its tide), and it read as 58 mm of "error"; the gate now compares
+per constituent over the set each station actually fits, and reads 0.0 mm. Verified:
+seven gates PASS + algebra lint, epoch ladder computed for all 18, seam 7.7 mm
+(gate 100 mm), envelope 3.34 m at the entrance (gate 2.4–3.6; was 3.35 — the
+widening moved the origin planes by a centimetre). Named next for M8: the per-texel
 envelope CHANNEL (the origin-planes tree proper — lo/hi as a composed channel like
-the height stack), EOT20 constituent widening (17 available, 5 converted), churn
-deposit discipline (crest-gated deposits so the read gain can rise from its 0.12
-whisper), and the wave cache checker run against a 2.4 m-ring solve.
+the height stack), churn deposit discipline (crest-gated deposits so the read gain
+can rise from its 0.12 whisper), the wave cache checker run against a 2.4 m-ring
+solve, and the exit-255 teardown race — now measurable, since a 900-frame rail
+readback hits it about two runs in three.
