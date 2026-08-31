@@ -300,13 +300,25 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
             const double kCut[4] = {2.0 * kPiD / 756.0, 2.0 * kPiD / 60.0, 2.0 * kPiD / 12.0,
                                     0.9 * kPiD * OceanFft::kN / 47.0};
             double mss[3] = {0, 0, 0};
+            double m0b[3] = {0, 0, 0};   // M8 foamlaw: banded amplitude variance too
             const double df = 0.004;
             for (double f = df; f < 2.0; f += df) {
                 const double k = (2.0 * kPiD * f) * (2.0 * kPiD * f) / 9.81;
                 const double s = SeaState::SpectrumAt(parts, activeParts, f);
                 for (int c = 0; c < 3; ++c) {
-                    if (k >= kCut[c] && k < kCut[c + 1]) mss[c] += k * k * s * df;
+                    if (k >= kCut[c] && k < kCut[c + 1]) {
+                        mss[c] += k * k * s * df;
+                        m0b[c] += s * df;
+                    }
                 }
+            }
+            // M8 foamlaw: the unit-sea rms ENVELOPE per band, rms = sqrt(sum a^2) =
+            // sqrt(2 m0), exaggerated like the geometry. The bank kernel scales it by
+            // its per-texel band gains to get the local envelope the depth-excess
+            // trigger and the crest gate normalize against (test the ENVELOPE, never
+            // instantaneous |eta| -- the television-static lesson).
+            for (int c = 0; c < 3; ++c) {
+                m_bandRms[c] = static_cast<float>(std::sqrt(2.0 * m0b[c]) * heightScale);
             }
             const double ex2 = heightScale * heightScale;   // geometry is exaggerated; the
                                                             // shed variance must match it

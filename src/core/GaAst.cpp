@@ -189,7 +189,13 @@ void RegisterKnownWaterEdges() {
     // flip into +v=north consumers; the wrap cascades and the bank/churn atlases agree
     // with world +z and demand none. These lines ARE the orientation ledger, as code.
     Register({"ocean.fft", "water.bank", "cascade.disp", wrap, atlasN, false,
-              "m disp + jacobian foam", "+-Hs/2", 1.0, "WaterBank.hlsl CsBankFill wrap"});
+              "m displacement", "+-Hs/2", 1.0, "WaterBank.hlsl CsBankFill wrap"});
+    // M8 foamlaw: the Jacobian foam lives in the DERIV fiber (the disp fiber's w is
+    // zero) -- the kernel takes the crest-gated UNION of the per-band answers, never
+    // their sum (one physical event, detected in two representations).
+    Register({"ocean.fft", "water.bank", "cascade.deriv (foam union)", wrap, atlasN,
+              false, "jacobian foam 0..1", "0..1", 1.0,
+              "WaterBank.hlsl CsBankFill foam discipline"});
     Register({"ocean.fft", "globe.ps", "cascade.deriv", wrap, atlasN, false, "slope",
               "+-0.3", 1.0, "Globe.hlsl detail loop"});
     // M8 caustics: the SAME deriv fibers, sampled at the SUN ray's water entry
@@ -206,7 +212,8 @@ void RegisterKnownWaterEdges() {
     Register({"swe.solver", "water.bank", "shadow", rowS, atlasN, true, "0..1 exposure",
               "0.12..1", 1.0, "WaterBank.hlsl CsBankFill (1-uv.y), floor 0.18"});
     Register({"churn.kernel", "water.bank", "churn", atlasN, atlasN, false,
-              "0..1 aeration", "0..1", 1.05, "WaterBank.hlsl CsBankFill flat"});
+              "0..1 aeration (remembered foam, MAX-composited)", "0..1", 1.0,
+              "WaterBank.hlsl CsBankFill flat"});
     Register({"bathy.cudem", "churn.kernel", "bed", rowS, atlasN, true, "m NAVD", "-40..15",
               1.0, "SeaChurn.hlsl suv flip"});
     Register({"bathy.cudem", "sea.ps", "bed", rowS, atlasN, true, "m NAVD", "-40..15", 1.0,

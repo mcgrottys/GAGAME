@@ -58,7 +58,8 @@ cbuffer GlobeCb : register(b1) {
     // pixel stage can recover bands its footprint resolves but the ring texel does not.
     uint4  gBankU2;     // detail bank SRV, cascade deriv SRVs x3
     float4 gBankB;      // cascade patch sizes x3, height exaggeration
-    float4 gBankC;      // representative wavenumber per cascade, unused
+    float4 gBankC;      // representative wavenumber per cascade, w = slice offset
+    float4 gBankD;      // M8: unit-sea rms envelope per band (xyz, exaggerated), w spare
 };
 
 // Sample the bank at a world-frame XZ: finest ring containing the point wins. Returns false
@@ -338,7 +339,8 @@ float4 PsMain(VsOut i) : SV_Target {
                               // foam rides ON the water, not under it
         const float footPx = length(i.rel) * gWavesB.z;
         float3 bankGains = 0.0f;   // per-band sea-state gains (x=b0, y=b1, z=b2) for the
-        bool bankOn = false;       // caustic assembly below; hoisted out of the bank scope
+        float bankEta = 0.0f;      // caustic assembly + peak shaping below; hoisted out
+        bool bankOn = false;       // of the bank scope
         {
             float4 bD, bP, bDet, bDx, bDz, tmp, tmp2;
             float bT, t2u;
@@ -346,9 +348,11 @@ float4 PsMain(VsOut i) : SV_Target {
             if (BankSample(wxz, bD, bP, bDet, bT)) {
                 bankOn = true;
                 bankGains = float3(bDet.z, bDet.x, bDet.w);
+                bankEta = bD.y;
                 s2 = max(bP.y, 0.0015f);
                 lvlW = bP.x;
-                foamW = saturate(bD.w) * 0.65f;
+                foamW = saturate(bD.w);   // M8: the bank's foam is already disciplined
+                                          // (crest-gated union, noise-broken, memory-max)
                 // Per-pixel wave normals, finite-differenced from the bank at its own ring
                 // texel: geometry alone is nearly invisible from above -- the normal is what
                 // makes the sea READ (the M6t glint then rides real wave faces).
@@ -502,7 +506,6 @@ float4 PsMain(VsOut i) : SV_Target {
             bedAlb *= lerp(1.0f, cg, saturate(gSunDir.y * 3.0f));
         }
         albSea = lerp(albSea, bedAlb, Tw);
-        albSea = lerp(albSea, float3(0.92f, 0.95f, 0.97f), saturate(foamW));
 
         const float3 hv = normalize(v + gSunDir.xyz);
         const float ch = saturate(dot(hv, nWater));
@@ -525,6 +528,23 @@ float4 PsMain(VsOut i) : SV_Target {
         if (rUp < 0.02f) rDir = normalize(rDir + (0.02f - rUp) * upT);
         skyReflAdd = SkyRadianceDirDiscless(rDir) * (fresN * 0.9f * (1.0f - landness));
         albSea *= 1.0f - fresN;
+
+        // M8 foamlaw: foam rides ON the water -- painted AFTER the Fresnel split (it no
+        // longer dims toward the horizon) at 0.72 peak opacity over water AND reflection:
+        // whitewater is a thin aerated layer, not paint.
+        const float foamOp = saturate(foamW) * 0.72f;
+        albSea = lerp(albSea, float3(0.945f, 0.965f, 0.975f), foamOp);
+        skyReflAdd *= 1.0f - foamOp;
+
+        // M8: peak-normalized shaping -- crests catch more light than troughs simply by
+        // being nearer the sky. tanh never saturates, so no flat-bottomed troughs; the
+        // peak proxy is kappa*envRms (kappa 2.8, the Gaussian expected-max closure).
+        if (bankOn) {
+            const float envR = max(
+                sqrt(dot(bankGains * bankGains, gBankD.xyz * gBankD.xyz)), 1e-4f);
+            const float shape = tanh(1.6f * bankEta / max(2.8f * envR, 1e-3f));
+            albSea *= 1.0f + 0.09f * shape;
+        }
 
         // The analog mix: glint dies as the flat emerges, the land normal takes over.
         n = normalize(lerp(nWater, nLand, landness));

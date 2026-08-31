@@ -75,8 +75,8 @@ public:
     // M7: per-frame wave-bank binding (SRVs + ring origins), and the one-water switch.
     void SetWaterBank(uint32_t dispSrv, uint32_t paramSrv, uint32_t detailSrv,
                       const uint32_t derivSrv[3], const float patchL[3],
-                      const float bandK[3], float heightScale, float baseTexelM,
-                      const float* org12, bool oneWater) {
+                      const float bandK[3], const float bandRms[3], float heightScale,
+                      float baseTexelM, const float* org12, bool oneWater) {
         m_bankSrv[0] = dispSrv;
         m_bankSrv[1] = paramSrv;
         m_bankSrv[2] = detailSrv;
@@ -84,6 +84,7 @@ public:
             m_bankDeriv[i] = derivSrv[i];
             m_bankPatch[i] = patchL[i];
             m_bankK[i] = bandK[i];
+            m_bankRms[i] = bandRms[i];   // M8: unit-sea rms envelope (peak shaping)
         }
         m_bankExag = heightScale;
         m_bankBase = baseTexelM;
@@ -182,6 +183,7 @@ private:
         uint32_t bankU2[4];   // M7a: detail bank SRV, cascade deriv SRVs x3
         float bankB[4];       // cascade patch sizes x3, height exaggeration
         float bankC[4];       // representative wavenumber per cascade
+        float bankD[4];       // M8: unit-sea rms envelope per band, w spare
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -263,6 +265,7 @@ private:
     uint32_t m_bankDeriv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
     float m_bankPatch[3] = {756.0f, 186.0f, 47.0f};
     float m_bankK[3] = {0.03f, 0.15f, 1.0f};
+    float m_bankRms[3] = {};   // M8: unit-sea rms envelope per band
     float m_bankExag = 1.15f;
     float m_bankBase = 4.8f;
     float m_bankOrg[12] = {};

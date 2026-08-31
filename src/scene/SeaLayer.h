@@ -66,6 +66,10 @@ public:
     bool PeakDirValid() const { return m_peakDirValid; }
     float PeakDirX() const { return m_peakDirX; }
     float PeakDirZ() const { return m_peakDirZ; }
+    // M8 foamlaw: unit-sea rms envelope per cascade band (sqrt(2 m0), exaggerated) --
+    // the bank kernel scales by its per-texel gains for the depth-excess trigger and
+    // the crest gate; the globe PS scales the same way for the tanh peak shaping.
+    float BandRms(int c) const { return m_bandRms[c]; }
     // M7j --trace: the CPU mirror of the kernel's shadow read -- SAME frame, SAME
     // row0-north flip, so the hypervisor prints exactly what the GPU will see.
     float ShadowAtWorld(float x, float z) const {
@@ -198,6 +202,7 @@ private:
     float m_bathyGeo[4] = {0, 0, 1, 1};
     float m_cPeak = 10.0f;     // peak-partition phase speed for the amplification factor
     float m_peakDirX = -1.0f, m_peakDirZ = 0.0f;
+    float m_bandRms[3] = {};   // M8: unit-sea rms envelope per band (sqrt(2 m0) * exag)
 
     // ---- M4: the churn atlas (16 x 16 km virtual at 2 m texels; resident only where breaking)
     static constexpr float kChurnDomainM = 16384.0f;

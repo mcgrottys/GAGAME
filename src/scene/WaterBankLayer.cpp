@@ -476,6 +476,13 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.winA[1] = static_cast<float>(m_hgtWinOrg[1]);
     cb.winA[2] = 1.0f / 16384.0f;
     cb.winA[3] = 16384.0f * 256.0f;
+    // M8 foamlaw: the deriv fibers carry the Jacobian foam (the crest's area 2-blade
+    // degenerating -- provably the same event the Miche steepness names), and the band
+    // rms envelopes let the kernel normalize eta for the crest gate and depth excess.
+    for (int c = 0; c < 3; ++c) cb.slotsE[c] = m_sea->FftDerivSrv(c);
+    cb.slotsE[3] = 0xFFFFFFFFu;
+    for (int c = 0; c < 3; ++c) cb.rmsRef[c] = m_sea->BandRms(c);
+    cb.rmsRef[3] = 0.0f;
 
     auto toUav = [&](TileAtlas2D& bank) {
         if (m_state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) return;

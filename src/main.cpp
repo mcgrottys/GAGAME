@@ -2348,7 +2348,7 @@ int main(int argc, char** argv) {
                         waterBank->RingOrigin(mR, orgs[mR * 2], orgs[mR * 2 + 1]);
                     }
                     uint32_t derivS[3];
-                    float patchS[3], bandKS[3];
+                    float patchS[3], bandKS[3], bandRmsS[3];
                     const double kPiB = 3.14159265358979;
                     const double kCutB[4] = {2.0 * kPiB / 756.0, 2.0 * kPiB / 60.0,
                                              2.0 * kPiB / 12.0, 0.9 * kPiB * 256.0 / 47.0};
@@ -2356,6 +2356,7 @@ int main(int argc, char** argv) {
                         derivS[c] = sea->FftDerivSrv(c);
                         patchS[c] = sea->FftPatchL(c);
                         bandKS[c] = static_cast<float>(std::sqrt(kCutB[c] * kCutB[c + 1]));
+                        bandRmsS[c] = sea->BandRms(c);
                     }
                     waterBank->injectPattern = opt.inject;
                     if (hgtWinTenant >= 0) {
@@ -2365,8 +2366,8 @@ int main(int argc, char** argv) {
                     }
                     globe->SetWaterBank(waterBank->DispSrv(), waterBank->ParamSrv(),
                                         waterBank->DetailSrv(), derivS, patchS, bandKS,
-                                        sea->heightScale, waterBank->BaseTexelM(), orgs,
-                                        opt.oneWater);
+                                        bandRmsS, sea->heightScale,
+                                        waterBank->BaseTexelM(), orgs, opt.oneWater);
                 }
                 // (--albedo: the water stands down too -- textures judged as layered images,
                 // nothing else in the frame; the lit look retunes separately.)

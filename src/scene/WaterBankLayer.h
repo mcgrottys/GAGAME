@@ -103,6 +103,8 @@ private:
         uint32_t slotsD[4];   // M7q: height window SRV, its residency-map SRV
         float geoA[4];        // world->latlon: orgLat, orgLon, 1/mPerLat, 1/mPerLon
         float winA[4];        // window: org px x, org px y, 1/sizePx, full-world px (z14)
+        uint32_t slotsE[4];   // M8 foamlaw: cascade DERIV SRVs x3 (Jacobian foam union)
+        float rmsRef[4];      // M8: unit-sea rms envelope per band (crest gate / excess)
     };
     struct BankTile {
         float orgXZ[2];

@@ -34,6 +34,8 @@ cbuffer BankCb : register(b0) {
     uint4  gSlotsD;     // x = height window SRV, y = its residency-map SRV (M7q)
     float4 gGeoA;       // world->latlon: orgLat, orgLon, 1/mPerLat, 1/mPerLon
     float4 gWinA;       // height window: org px x, org px y, 1/sizePx, full-world px z14
+    uint4  gSlotsE;     // M8 foamlaw: cascade DERIV SRVs x3 (hx, hz, J, foam)
+    float4 gRmsRef;     // M8: unit-sea rms envelope per band (xyz), w spare
 };
 
 struct BankTile {
@@ -83,6 +85,43 @@ float4 LoadBilinearClamp(uint slot, float2 texel, float2 dims) {
                gT[slot][tc];
     }
     return acc;
+}
+
+// ---- M8 FOAM DISCIPLINE (ALGEBRA.md foamlaw; proofs/foam_discipline.py) ----
+// Value noise in three octaves under IRRATIONAL rotations: axis-aligned octaves at 2x
+// spacing share lattice seams and sum to rectangular blocks; irrational rotors leave no
+// shared direction. The renormalization by the live fade sum keeps the MEAN exactly 1/2
+// in every fade state -- without it foam coverage becomes a function of viewing scale.
+float BankHash21(float2 p) {
+    p = frac(p * float2(123.34f, 456.21f));
+    p += dot(p, p + 45.32f);
+    return frac(p.x * p.y);
+}
+
+float BankValueNoise(float2 p) {
+    const float2 i0 = floor(p);
+    const float2 f = frac(p);
+    const float2 u = f * f * (3.0f - 2.0f * f);
+    return lerp(lerp(BankHash21(i0), BankHash21(i0 + float2(1, 0)), u.x),
+                lerp(BankHash21(i0 + float2(0, 1)), BankHash21(i0 + float2(1, 1)), u.x),
+                u.y);
+}
+
+// The octave fade keys on the TILE TEXEL (the kernel's own resolution): an octave folds
+// away once this ring cannot resolve its features -- the fold law in miniature. The fade
+// band [0.25, 0.75] of the octave wavelength is a closure; the mean-preserving
+// renormalization makes any fade choice coverage-neutral.
+float BankFoamNoise(float2 posM, float texelM) {
+    const float2x2 r1 = float2x2(0.8776f, -0.4794f, 0.4794f, 0.8776f);
+    const float2x2 r2 = float2x2(0.6062f, -0.7952f, 0.7952f, 0.6062f);
+    const float w1 = 1.0f - smoothstep(2.4f * 0.25f, 2.4f * 0.75f, texelM);
+    const float w2 = 1.0f - smoothstep(6.5f * 0.25f, 6.5f * 0.75f, texelM);
+    const float w3 = 1.0f - smoothstep(17.0f * 0.25f, 17.0f * 0.75f, texelM);
+    const float n = 0.45f * BankValueNoise(posM * 0.42f) * w1 +
+                    0.34f * BankValueNoise(mul(r1, posM) * 0.155f) * w2 +
+                    0.21f * BankValueNoise(mul(r2, posM) * 0.059f) * w3;
+    const float wsum = 0.45f * w1 + 0.34f * w2 + 0.21f * w3;
+    return (wsum > 1e-3f) ? (n / wsum) : 0.5f;
 }
 
 // M7n: THE COINCIDENCE CARD. Quadrant shading (4 distinct levels -- any flip or rotation
@@ -185,7 +224,13 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // statistics that fine rings carry as vertexes -- no popping between rings possible.
     float3 d = 0.0f;
     float sig2 = 0.0015f;
-    float foam = 0.0f;
+    // M8 FOAM DISCIPLINE: the old additive sum double-counted one physical event (the
+    // Jacobian foam and the Miche steepness are an affine bijection -- gatest block 9)
+    // and adding churn on top fused the surf into a white sheet. The new law: the
+    // crest-gated UNION of triggers, noise-broken; churn is the same quantity
+    // REMEMBERED, max-composited below.
+    float steepFoam = 0.0f;   // union over bands of Jacobian foam (the deriv fiber)
+    float blockFoam = 0.0f;   // union over bands of current-blocking foam
     // Per-band gains -> the detail plane. Band 1 has fed the PS sparkle since M7a; M8
     // adds bands 0 and 2 in the free fibers so the PS can amplitude-scale the caustic
     // Jacobian and Laplacian it assembles from the cascade derivative textures
@@ -218,8 +263,11 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         const float2 cuv = frac(xz / gPatch[c]);
         const float4 s = LoadBilinearWrap(gSlotsA[c], cuv, 256.0f);
         d += s.xyz * (w * amp);
-        foam += (s.w * w * saturate(amp) + blocked * 0.35f * w) *
-                (c == 2 ? 1.0f : 0.4f);
+        // The Jacobian foam lives in the DERIV fiber (the disp fiber's w is zero --
+        // the old additive term here read it and contributed nothing since M7).
+        const float4 dv = LoadBilinearWrap(gSlotsE[c], cuv, 256.0f);
+        steepFoam = max(steepFoam, dv.w * w * saturate(amp));
+        blockFoam = max(blockFoam, blocked * 0.35f * w * (c == 2 ? 1.0f : 0.4f));
         // shed variance: amplitude squared (gain included -- the far field sees the
         // steepened bar as a brighter glint band even when texels cannot draw it)
         sig2 += (1.0f - w) * amp * amp *
@@ -227,21 +275,42 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     }
     d *= dry * gPatch.w;
 
-    // M7e: THE FOAM MEMORY. The churn atlas remembers where water has been aerated (breaking
-    // deposits advected by the solved current -- the seaward streaks off an ebbing entrance).
-    // The bank carries it in the same foam fiber the breaking clamp writes, so the one water
-    // shows its history at every altitude, not just where waves break this instant.
+    // The local rms ENVELOPE: unit-sea band rms scaled by this texel's own gains. The
+    // depth-excess trigger tests it (never instantaneous |eta| -- television static),
+    // and the crest gate normalizes eta by it (foam rides crests only: a Gaussian sea
+    // passes ~22.6% of area through this gate; the strength noise breaks the rest).
+    // (gRmsRef already carries the vertical exaggeration -- the CPU bakes it -- so it
+    // is commensurate with d.y as written; no second gPatch.w here.)
+    const float envRms =
+        max(sqrt(gain0 * gain0 * gRmsRef.x * gRmsRef.x +
+                 gain1 * gain1 * gRmsRef.y * gRmsRef.y +
+                 gain2 * gain2 * gRmsRef.z * gRmsRef.z), 1e-4f);
+    const float fn = BankFoamNoise(xz, t.texelM);
+    const float excess = envRms * 2.8284271f / (0.60f * max(depth, 0.05f));
+    const float depthFoam = smoothstep(1.05f, 1.95f, excess * (0.86f + 0.30f * fn));
+    const float crest = smoothstep(0.28f, 0.80f, d.y / max(envRms, 1e-3f));
+    float foam = saturate(max(steepFoam, max(depthFoam, blockFoam)) * crest) *
+                 (0.55f + 0.75f * fn);
+
+    // M7e/M8: THE FOAM MEMORY. The churn atlas remembers where water has been aerated
+    // (breaking deposits advected by the solved current -- the seaward streaks off an
+    // ebbing entrance). M8: churn is the SAME quantity remembered, so it composites by
+    // MAX, never + (adding memory to fresh foam brightened the throat into uniform fog);
+    // the live noise modulates the memory so old deposits stay textured, not flat.
     if (gSlotsC.x != 0xFFFFFFFFu) {
         const float2 cuv = (xz - gChurn.xy) * gChurn.z;
         if (all(cuv > 0.001f) && all(cuv < 0.999f)) {
-            foam += LoadBilinearClamp(gSlotsC.x, cuv * gChurn.w, gChurn.ww).x * 1.05f;
+            const float churnV =
+                LoadBilinearClamp(gSlotsC.x, cuv * gChurn.w, gChurn.ww).x;
+            foam = max(foam, saturate(churnV) * (0.5f + 0.5f * fn));
         }
     }
 
-    // Depth-limited breaking (the Sea.hlsl clamp, bank-side): the excess becomes foam.
+    // Depth-limited breaking (the Sea.hlsl clamp, bank-side): the GEOMETRY constraint
+    // stays; its foam side-effect retired in M8 -- the envelope-based depthFoam above is
+    // the disciplined statement of the same physics (test the envelope, never |eta|).
     const float hmax = 0.55f * max(depth, 0.05f);
     if (abs(d.y) > hmax) {
-        foam += saturate((abs(d.y) - hmax) / max(hmax, 0.2f));
         d.y *= hmax / abs(d.y);
         d.xz *= 0.85f;
     }
