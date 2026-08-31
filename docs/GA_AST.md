@@ -46,6 +46,10 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | weather.mgr | corner params feed | compose.stack | latlon.deg +v=N | world.m +v=N | - | level/bed/hs | query rungs | x1 | WeatherManager::Query -> CornerParams |
 | gfswave.grid | hs whitening | globe.ps | raster.row0N +v=S | atlas.texel +v=N | FLIP | m | 0..15 | x1 | Globe.hlsl wuv (lat1-lat formula) |
 | gfs.wind | wind10 (far sigma2) | globe.ps | raster.row0N +v=S | atlas.texel +v=N | FLIP | m/s | 0..40 | x1 | Globe.hlsl wuv; sigma2 = 0.003+0.00512 U |
+| gfs.wind | wind-sea fill (PM, when partitions have none) | ocean.fft | latlon.deg +v=N | latlon.deg +v=N | - | m Hs / s Tp | Hs 0..2 over U10 0..9 | x1 | SeaLayer::SetTime -> SeaState::WindSeaPm (closure windSeaFill) |
+| ocean.colour | Kd490 -> Kd(RGB) transfer | globe.ps | raster.row0N +v=S | atlas.texel +v=N | FLIP | 1/m | 0.019..6 (Kdw floor) | x1 | Globe.hlsl SampleWaterOptics (Austin-Petzold; M(490)=1) |
+| ocean.colour | chl/SPM -> deep albedo | globe.ps | raster.row0N +v=S | atlas.texel +v=N | FLIP | albedo | 0.001..0.5 | x1 | Globe.hlsl SampleWaterOptics (Gordon two-flux, gain 2.0331) |
+| gfs.icec | ice albedo + glint damp | globe.ps | raster.row0N +v=S | atlas.texel +v=N | FLIP | 0..1 | concentration | x1 | Globe.hlsl wuv (wave grid); sigma2 *= 1-0.95c |
 | gfs.cloud | density bake | cloud.volume | raster.row0N +v=S | atlas.texel +v=N | FLIP | 0..1 | 3D tiles 320 km col | x1 | GlobeLayer cloud bake (ReliefUv family) |
 | cloud.volume | density march | globe.ps | raster.row0N +v=S | atlas.texel +v=N | FLIP | sigma_t | 14 steps + sun tap | x1 | Globe.hlsl ReliefUv (row0 north) |
 | mv2.windbank | curl overlay | globe.ps | atlas.texel +v=N | atlas.texel +v=N | - | curl x1e4 | +-2.2 synoptic | x1 | Globe.hlsl wind overlay (V) |

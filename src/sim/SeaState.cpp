@@ -174,6 +174,26 @@ PartParam SeaState::MakePartition(double hs, double tp, double fromDeg, bool win
     return p;
 }
 
+// M9a: Pierson-Moskowitz -- the fully-developed sea a wind raises when fetch and duration
+// stop mattering. PM is written at the 19.5 m anemometer height (the Weather Reporter's mast
+// the 1964 fits came from); GFS ships U10, and the open-water log profile puts
+// U19.5 = 1.075 U10:
+//
+//     Hs = 0.0246 U19.5^2          fp = 0.877 g / (2 pi U19.5)
+//
+// At 2.2 m/s that is Hs 0.14 m at Tp 1.7 s -- a 4.6 m wavelength, which is cascade 2's band
+// and nothing else. Textbook, not tuned: the only closure is the DECISION to apply it
+// (closures.windSeaFill) and the cap the caller puts on it.
+bool SeaState::WindSeaPm(double wind10Ms, double* hsOut, double* tpOut) {
+    if (!(wind10Ms > 0.9)) return false;   // below this PM's Hs is under the partition floor
+    const double u = 1.075 * wind10Ms;     // U10 -> U19.5
+    const double fp = 0.877 * 9.81 / (2.0 * kPi * u);
+    if (fp <= 1e-4) return false;
+    if (hsOut) *hsOut = 0.0246 * u * u;
+    if (tpOut) *tpOut = 1.0 / fp;
+    return true;
+}
+
 int SeaState::BuildParams(int hourIdx, PartParam out[4]) const {
     const SeaHour& h = m_hours[hourIdx];
     int n = 0;

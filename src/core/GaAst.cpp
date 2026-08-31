@@ -284,6 +284,25 @@ void RegisterKnownWaterEdges() {
               1.0, "Globe.hlsl wuv (lat1-lat formula)"});
     Register({"gfs.wind", "globe.ps", "wind10 (far sigma2)", rowS, atlasN, true, "m/s",
               "0..40", 1.0, "Globe.hlsl wuv; sigma2 = 0.003+0.00512 U"});
+    // M9a: the wind's SECOND consumer. The same U10 that sets the far-field glint lobe also
+    // RAISES a sea on hours where GFS-Wave's partitioning reports none -- without it those
+    // hours carry swell only (a 4 mHz Gaussian, no tail) and cascades 1-2 synthesise exactly
+    // zero. Point scalar out of seastate.json: no raster, no frame change, no flip.
+    Register({"gfs.wind", "ocean.fft", "wind-sea fill (PM, when partitions have none)",
+              latlonW, latlonW, false, "m Hs / s Tp", "Hs 0..2 over U10 0..9", 1.0,
+              "SeaLayer::SetTime -> SeaState::WindSeaPm (closure windSeaFill)"});
+    // M9 (docs/ALGEBRA.md "optics"): the water's QUALITY. Two edges into the same consumer,
+    // because the two retrievals answer two different questions about the same pixel -- how
+    // fast light dies in it, and what colour comes back out. Both land in Globe.hlsl's ray
+    // path where M7c had constants.
+    Register({"ocean.colour", "globe.ps", "Kd490 -> Kd(RGB) transfer", rowS, atlasN, true,
+              "1/m", "0.019..6 (Kdw floor)", 1.0,
+              "Globe.hlsl SampleWaterOptics (Austin-Petzold; M(490)=1)"});
+    Register({"ocean.colour", "globe.ps", "chl/SPM -> deep albedo", rowS, atlasN, true,
+              "albedo", "0.001..0.5", 1.0,
+              "Globe.hlsl SampleWaterOptics (Gordon two-flux, gain 2.0331)"});
+    Register({"gfs.icec", "globe.ps", "ice albedo + glint damp", rowS, atlasN, true, "0..1",
+              "concentration", 1.0, "Globe.hlsl wuv (wave grid); sigma2 *= 1-0.95c"});
     Register({"gfs.cloud", "cloud.volume", "density bake", rowS, atlasN, true, "0..1",
               "3D tiles 320 km col", 1.0, "GlobeLayer cloud bake (ReliefUv family)"});
     Register({"cloud.volume", "globe.ps", "density march", rowS, atlasN, true, "sigma_t",

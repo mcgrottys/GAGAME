@@ -1611,3 +1611,56 @@ then because `JsonValue::Num()` only reads NUMBERS and silently returned the def
 a JSON `false`. Priors 9's cold-start warning made both look plausible. Law reinforced:
 when an A/B shows zero pixels changed, suspect the FLAG before the physics — a diff of
 exactly 2 pixels is not a subtle effect, it is a disconnected wire.
+
+
+### M9a — the missing wind sea: why a live inlet rendered as glass
+
+**THE REPORT**: `--rail-flood` at the reference hour showed a mirror. The first
+suspicion was bathymetry — waves not feeling the bar. It was not. The bed chain is
+provably live: the trace's step-11 twin has the GPU height texel matching the CPU stack
+to 1 mm, the flip validator passes on every edge, `proofs/inlet_storm.py` reports AGREES
+against the engine's own exported fields, and a storm bird's-eye refracts crests around
+both jetty tips and breaks white on the shoals. **THE CAUSE**: at 2026-08-28 12z f004
+GFS-Wave reported *only swell partitions*, and `SeaState::ShapeOf` gives a swell
+partition a Gaussian of `sigF = clamp(0.10/Tp², 0.004, 0.02)` — about 4 mHz wide, with
+no tail whatsoever. So every joule landed in cascade 0 and cascades 1–2 realized
+**numerically zero**: measured band Hs 0.357 / 1e-12 / 0.000 m, band mss 3.0e-5 /
+1.6e-25 / 0. There were no short waves to shoal, to steepen, or to carry a normal. This
+is priors 5 again, from the other direction — missing physics reads exactly like a
+mirrored ocean, and the mirror was *literal* this time.
+
+**WHAT THE ENGINE KNEW AND COULD NOT SAY**: Cox-Munk at that wind is σ² = 0.0142, and
+the fold dutifully assigned 0.0141 of it to `bandSig[3]` — a scalar that widens the
+glint lobe and never moves a normal. Priors 8, restated as an architecture problem: the
+sub-cascade tail has nowhere to become geometry. The vqview ripple tail would have been
+that home; `proofs/ripple_prefilter.py` cites `Water.hlsl:616-675`, a file that does not
+exist in `shaders/`. We ported the anisotropic prefilter and gatest block 8's closed
+forms and left the 96-component tail behind. `Sea.hlsl:323` says so out loud
+("capillary tail the FFT never synthesises") and `WaterBank.hlsl:44` assumes a local
+ripple tail that was never written.
+
+**THE FIX** (`closures.windSeaFill`, a gain so priors 15's `Num()`-vs-`false` trap
+cannot bite): when the hour's partitions contain no wind sea, synthesise the
+fully-developed one for the wind *already sitting in the same file*.
+Pierson-Moskowitz at the 19.5 m height — `U19.5 = 1.075 U10`, `Hs = 0.0246 U19.5²`,
+`fp = 0.877 g / 2π U19.5` — textbook, not tuned; the only closures are the decision to
+apply it at all and the cap at the forecast's own combined Hs (PM is the
+fetch-UNLIMITED answer and no coastal hour is that). It joins the partition list as an
+ordinary train, so the shapes, the spreading, the spectrum plot, the buoy assimilation
+and the GPU pick it up unchanged. At U10 2.2 m/s: Hs 0.14 m, Tp 1.7 s, λ 4.6 m —
+cascade 2's band and nothing else. **MEASURED**: band mss 0.0000/0.0000/0.0000 →
+0.0000/0.0000/**0.0110**, floor 0.0141 → 0.0031, model Hs 0.36 → 0.38 m. The energy did
+not appear, it *moved* — 78% of the Cox-Munk budget out of a flat scalar and into a band
+that carries normals. New AST edge `gfs.wind → ocean.fft` (55 now); the wind's second
+consumer.
+
+**NAMED NEXT, from the same investigation**: the swell-shadow mask is `kShadowN = 160`
+over the whole 18.8 × 16 km bathy window — **117 × 100 m per texel**. Both jetties, 380 m
+apart, fall in four rows; a 15 m rubble wall is 0.13 of a texel. What the water actually
+gets is a smooth 0.35→1.0 bowl about 600 m across, multiplying cascade 0/1 amplitude with
+no relation to where the walls are — the flat halo around the entrance. Priors 7 exactly:
+a field that gates nonlinear physics, sampled far below its own feature scale. The fix is
+not a finer mask: the march is honest line-of-sight, and LOS is the wrong model at jetty
+scale, because a 15 m obstacle cannot shadow a 100 m swell while Plum Island at 2 km can.
+Scale-aware blocking — an obstacle shadows only once it is wide against λ — deletes the
+halo, keeps the sheltered basin, and costs less.

@@ -77,6 +77,11 @@ public:
     // partitions and sandbox overrides (--storm) go through identical math.
     static PartParam MakePartition(double hs, double tp, double fromDeg, bool windsea);
 
+    // M9a: the FULLY-DEVELOPED wind sea for a wind speed (Pierson-Moskowitz), for the hours
+    // where the forecast's partitioning reports no wind sea at all -- see SeaLayer::SetTime.
+    // False when the wind is too light to raise anything above the 0.02 m partition floor.
+    static bool WindSeaPm(double wind10Ms, double* hsOut, double* tpOut);
+
     // CPU-side S(f) from the same parameters (plot overlay + Hs readout).
     static double SpectrumAt(const PartParam* parts, int n, double fHz);
     static double SignificantHeight(const PartParam* parts, int n);

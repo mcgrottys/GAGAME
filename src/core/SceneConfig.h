@@ -65,10 +65,20 @@ struct WaterSceneConfig {
     float foamOpacity = 0.72f;    // peak foam opacity (a thin aerated layer, not paint)
     float ringBlendTexels = 48.0f;   // bank ring cross-fade width (the interpolation
                                      // that keeps ring handovers from tiling visibly)
+    float windSeaFill = 1.0f;        // M9a: gain on the Pierson-Moskowitz wind sea
+                                     // synthesised from the GFS wind on hours where the
+                                     // forecast's partitioning reports NO wind sea. Those
+                                     // hours hand back swell only -- a ~4 mHz Gaussian with
+                                     // no tail -- so cascades 1-2 realize EXACTLY zero and
+                                     // the inlet renders as glass. 0 = off, byte for byte.
     float buoyAssimAgeH = 6.0f;      // buoy Hs assimilation: max observation age
     float buoyAssimGainMax = 1.8f;   // and the gain clamp (past it the forecast and
                                      // the buoy disagree about the WORLD)
     float causticStrength = 0.6f;    // 0 = off; the bed dapple, softened by default
+    bool waterOptics = true;         // M9: drive K_d and the deep colour from the NOAA
+                                     // ocean-colour fields (docs/ALGEBRA.md "optics").
+                                     // false restores the M7c constants byte for byte --
+                                     // the A/B, and the fallback when the fields are absent
     float jettyCrestNavd = -99.0f;   // M8g: edit-land geometry floor, NAVD m.
                                      // <= -90 = AUTO: datum envelope MLLW + 0.35 at the
                                      // structure (the origin planes decide; high water
@@ -120,8 +130,10 @@ inline void WriteDefaultWaterScene(const char* path) {
         "    \"depthLo\": 1.05, \"depthHi\": 1.95,\n"
         "    \"foamOpacity\": 0.72,\n"
         "    \"ringBlendTexels\": 48.0,\n"
+        "    \"windSeaFill\": 1.0,\n"
         "    \"buoyAssimAgeH\": 6.0, \"buoyAssimGainMax\": 1.8,\n"
         "    \"causticStrength\": 0.6,\n"
+        "    \"waterOptics\": true,\n"
         "    \"jettyCrestNavd\": -99.0\n"
         "  },\n"
         "  \"fleet\": {\n"
@@ -191,11 +203,18 @@ inline bool LoadWaterScene(const char* path, WaterSceneConfig& out) {
         out.foamOpacity = static_cast<float>(c->Num("foamOpacity", out.foamOpacity));
         out.ringBlendTexels =
             static_cast<float>(c->Num("ringBlendTexels", out.ringBlendTexels));
+        out.windSeaFill = static_cast<float>(c->Num("windSeaFill", out.windSeaFill));
         out.buoyAssimAgeH = static_cast<float>(c->Num("buoyAssimAgeH", out.buoyAssimAgeH));
         out.buoyAssimGainMax =
             static_cast<float>(c->Num("buoyAssimGainMax", out.buoyAssimGainMax));
         out.causticStrength =
             static_cast<float>(c->Num("causticStrength", out.causticStrength));
+        // Num() only reads NUMBERS -- a JSON `false` here silently returned the default and
+        // the A/B rendered identically twice. Accept both spellings, explicitly.
+        if (const JsonValue* wo = c->Get("waterOptics")) {
+            out.waterOptics = (wo->type == JsonValue::Type::Bool) ? wo->boolean
+                                                                  : wo->number != 0.0;
+        }
         out.jettyCrestNavd =
             static_cast<float>(c->Num("jettyCrestNavd", out.jettyCrestNavd));
     }
