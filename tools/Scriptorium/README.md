@@ -21,7 +21,10 @@ dotnet run --project tools/Scriptorium -- --index    # rebuild scriptorium.db
 ```
 
 Registered in the repo's `.mcp.json`; tools: `symbols(query)`, `who_writes(path)`,
-`script_for(name)`, `channels()`, `reindex()`, and `math(topic?)` — the algebra
+`script_for(name)`, `channels()`, `reindex()`, `graph()` (docs/ga_ast.json — the
+state-diagram contract a future node editor loads), `note(name?)` (operational
+notes from `docs/LAUNCH.md`: build, run, rail videos, the verification loop, data
+prerequisites, secrets policy), and `math(topic?)` — the algebra
 whitepaper (`docs/ALGEBRA.md`) served per topic: the GA products, wave physics,
 radiometry, frame calculus, and the PRIORS LEDGER (where measured reality diverged
 from textbook/training expectations). No arg lists topics; read `priors` first when

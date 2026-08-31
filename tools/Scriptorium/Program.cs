@@ -61,8 +61,10 @@ static class Indexer
             DROP TABLE IF EXISTS products;
             DROP TABLE IF EXISTS channels;
             DROP TABLE IF EXISTS math;
+            DROP TABLE IF EXISTS notes;
             CREATE TABLE symbols(name TEXT, kind TEXT, file TEXT, line INTEGER, doc TEXT);
             CREATE TABLE math(topic TEXT PRIMARY KEY, title TEXT, body TEXT);
+            CREATE TABLE notes(name TEXT PRIMARY KEY, title TEXT, body TEXT);
             CREATE TABLE scripts(name TEXT PRIMARY KEY, path TEXT, purpose TEXT, outputs TEXT);
             CREATE TABLE products(path TEXT PRIMARY KEY, script TEXT, bytes INTEGER, mtime TEXT);
             CREATE TABLE channels(name TEXT, kind TEXT, detail TEXT, file TEXT, line INTEGER);
@@ -84,9 +86,11 @@ static class Indexer
         }
         var products = IndexProducts(db, repo);
         var math = IndexMath(db, repo);
+        var notes = IndexNotes(db, repo);
 
         tx.Commit();
         Console.WriteLine($"[scriptorium] {math} math topics from docs/ALGEBRA.md");
+        Console.WriteLine($"[scriptorium] {notes} notes from docs/LAUNCH.md");
         return (symbols, scripts, products, channels);
     }
 
@@ -234,6 +238,45 @@ static class Indexer
     // "## topic-id -- Title"; the MCP 'math' tool serves them so a human (or an outside
     // expert) can read the engine's actual mathematics, including the priors ledger:
     // the places where measured reality diverged from textbook/training expectations.
+    // The operational notes (docs/LAUNCH.md today): how to build, run, render the rail
+    // videos, and interrogate the engine -- same section grammar as the whitepaper, so a
+    // fresh session (or a new pair of hands) can ask the monastery instead of the
+    // scrollback. Served by the 'note' tool.
+    static int IndexNotes(SqliteConnection db, string repo)
+    {
+        var path = Path.Combine(repo, "docs", "LAUNCH.md");
+        if (!File.Exists(path)) return 0;
+        var lines = File.ReadAllLines(path);
+        var n = 0;
+        string? name = null, title = null;
+        var body = new StringBuilder();
+        void Flush()
+        {
+            if (name == null) return;
+            Exec(db, "INSERT OR REPLACE INTO notes(name, title, body) VALUES($n, $t, $b)",
+                 ("$n", name), ("$t", title ?? name), ("$b", body.ToString().Trim()));
+            n++;
+            body.Clear();
+        }
+        foreach (var line in lines)
+        {
+            var m = Regex.Match(line, @"^## ([a-z0-9-]+) — (.+)$");
+            if (!m.Success) m = Regex.Match(line, @"^## ([a-z0-9-]+) -- (.+)$");
+            if (m.Success)
+            {
+                Flush();
+                name = m.Groups[1].Value;
+                title = m.Groups[2].Value;
+            }
+            else if (name != null)
+            {
+                body.AppendLine(line);
+            }
+        }
+        Flush();
+        return n;
+    }
+
     static int IndexMath(SqliteConnection db, string repo)
     {
         var path = Path.Combine(repo, "docs", "ALGEBRA.md");
@@ -329,6 +372,7 @@ static class McpServer
           {"name":"channels","description":"The monastery registry: channels, sources (with structure/CRS), Exchange buffers.","inputSchema":{"type":"object","properties":{}}},
           {"name":"reindex","description":"Rescan the repo and rebuild the database.","inputSchema":{"type":"object","properties":{}}},
           {"name":"graph","description":"The GA state diagram as machine-readable JSON (docs/ga_ast.json, emitted by the engine every boot): nodes + edges with frames, units, ranges, gains, flips, code anchors. The contract a future Blueprint-style node editor loads/saves; tools/astdiagram.py renders it to docs/diagrams/*.svg.","inputSchema":{"type":"object","properties":{}}},
+          {"name":"note","description":"Operational notes (docs/LAUNCH.md): how to BUILD (vcvars64 + VS cmake + Ninja), RUN (windowed / headless renders, camera + time + storm flags), render the RAIL VIDEOS (+ the ffmpeg line), the VERIFICATION LOOP (seven gates, the --trace hypervisor, fiber dumps, the 2D proof figure + match report, data lenses), DATA prerequisites (harvesters, D:\DataCache), and SECRETS policy. No arg: list sections. With name (substring, e.g. 'build', 'videos', 'verify'): print that section.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}}}},
           {"name":"math","description":"The algebra whitepaper (docs/ALGEBRA.md), served per topic. No arg: list topics. With topic (substring): print that section's mathematics for a human or an outside expert -- GA products, wave physics, radiometry, frames, the compositor's algebra, and the PRIORS LEDGER (where measured reality diverged from textbook/training expectations; read it first when the engine surprises you).","inputSchema":{"type":"object","properties":{"topic":{"type":"string"}}}}
         ]}
         """)!;
@@ -360,6 +404,15 @@ static class McpServer
             "graph" => File.Exists(Path.Combine(repo, "docs", "ga_ast.json"))
                 ? File.ReadAllText(Path.Combine(repo, "docs", "ga_ast.json"))
                 : "(docs/ga_ast.json not found -- run the engine once to emit it)",
+            "note" => (args?["name"]?.GetValue<string>() is { Length: > 0 } nn)
+                ? Query(db,
+                    "SELECT name, title, body FROM notes WHERE name LIKE $q OR title LIKE $q",
+                    ("$q", $"%{nn}%"),
+                    r => $"## {r.GetString(0)} — {r.GetString(1)}\n\n{r.GetString(2)}\n")
+                : Query(db,
+                    "SELECT name, title FROM notes ORDER BY rowid",
+                    null,
+                    r => $"{r.GetString(0),-16} {r.GetString(1)}"),
             "math" => (args?["topic"]?.GetValue<string>() is { Length: > 0 } t)
                 ? Query(db,
                     "SELECT topic, title, body FROM math WHERE topic LIKE $q OR title LIKE $q",
