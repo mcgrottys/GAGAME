@@ -162,6 +162,7 @@ void RegisterKnownWaterEdges() {
     RegisterKnownComposeEdges();
     const Frame worldM{"world.m", true, 0, 0, 0};
     const Frame latlonW{"latlon.deg", true, 0, 0, 0};
+    const Frame mercPxW{"mercator.px", false, 0, 0, 0};
     const Frame uvSW{"uv01.vS", false, 0, 0, 0};
     // M7r: the M7q per-texel bed chain, with its PRECISION contract. The kernel repeats
     // CsWindowUv's formulation (absolute float mercator px minus org): ~0.25 px ulp at
@@ -172,7 +173,12 @@ void RegisterKnownWaterEdges() {
     Register({"world.flat", "latlon.deg", "anchor-linear map", worldM, latlonW, false,
               "deg", "mPerLon frozen at anchor; shared by ALL water consumers", 1.0,
               "BathyModel::kOrgLat/kMPerLat convention"});
-    Register({"height.window", "water.bank", "bed per texel", latlonW, uvSW, false,
+    // Declared merc->uv (both +v=SOUTH, no flip): the north/south inversion happens
+    // INSIDE the mercator closed form (the latlon->merc edge above carries flip=true),
+    // exactly as the M7l window-sample edge documents. First registration of this edge
+    // said latlon->uv/no-flip and the validator rightly refused it -- the checker's
+    // first catch of its own author.
+    Register({"height.window", "water.bank", "bed per texel", mercPxW, uvSW, false,
               "m NAVD", "float merc ~0.25 px ulp (gatest-bounded); residency-clamped "
               "mips 2..7",
               1.0, "WaterBank.hlsl M7q (same formulation as CsWindowUv)"});
