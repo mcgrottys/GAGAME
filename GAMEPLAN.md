@@ -1186,6 +1186,32 @@ terrain profile, checkable against --bathy-map. Elapsed: minutes, not sessions �
 AST answer to "does this make adding features easier" is yes, because the new node had
 to say where it lives (frames, units, predicate) before it could ship. Six gates green.
 
+**M7p (2026-08-30): THE 2D STORM PROOF, AND THE WATER STANDS UP.** The user: the water
+disappoints — build a fresh 2D visualization of the inlet in a storm from ALL the real
+data, verify the engine feeds match it, and add a flat data-as-color water mode. The lap:
+(1) --dump-water-state exports the engine's OWN fields over the inlet box (bed, level,
+solved current, swell shadow; 420x300 at 10 m, rows south-to-north, weather.Query per
+cell — the same rungs the bank eats). (2) proofs/inlet_storm.py runs the USER'S OWN
+vqview-inlet wave model (ported with attribution: exact dispersion under opposing current
+with a BLOCKED mask, current-in-flux shoaling Ks = sqrt(cg0/cg_eff), depth-limited
+breaking at a = 0.39 h) on those fields → proofs/inlet_storm.png: the storm chart — swell
+amplifying on the ebb-shoal horseshoe, 14%% of the wet box breaking, the interior
+collapsing under the shadow, the ebb jet pouring seaward. (3) THE DIAGNOSIS the figure
+made undeniable: the bank kernel folded cascades with only hsScale*expo — SHOALING and
+WAVE-CURRENT amplification were two more edges orphaned by one-water (Sea.hlsl had
+ShoalFactor and WaveCurrentAmp per band; the bank never did). Restored: Jet.hlsli
+included in the kernel, per-band amp = hsScale * expo * ShoalFactor * WaveCurrentAmp
+(gWaveDir row carries the peak direction; blocked fraction feeds foam; sigma^2 rides
+amp^2; the detail plane now carries the BAND-1 GAIN so the PS sparkle scales with the
+physics). (4) THE MATCH REPORT: engine band-1 gain readback vs the vqview-physics gain,
+shape-normalized, per ring: corr 0.80/0.89/0.91, mean |log ratio| ~5%%, p95 ~21%% —
+AGREES (the kernel is the analytic fast form, the model is the exact dispersion; the
+structure is the contract). (5) --lens waterdata: the water shader flat and unlit — R =
+band-1 gain, G = foam, B = current speed — the 2D chart readable on the 3D geometry.
+The storm render transformed: whitewater through the entrance, organized surf bands on
+both beach faces, seaward streaks over the shoal. detail plane peaks 2.67 (was capped
+1.8); disp.y +-3.3 m in the 3 m storm. Six gates green.
+
 **THE DX12 GOTCHAS LEDGER (and the non-GA-workaround audit the user asked for: every
 workaround marked, with whether a GA formulation would have needed it at all):**
 1. Bindless static-sampler SampleLevel returns ZERO outside the pixel stage on this

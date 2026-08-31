@@ -62,6 +62,10 @@ public:
     // rebuilt when the peak direction or level moves). One-water lost this edge silently;
     // the GA AST's orphan rule exists because of it.
     uint32_t ShadowSrv() const { return m_shadowBuilt ? m_shadowTex.srv : 0xFFFFFFFFu; }
+    // M7p: the peak propagation direction, for the bank's wave-current amplification.
+    bool PeakDirValid() const { return m_peakDirValid; }
+    float PeakDirX() const { return m_peakDirX; }
+    float PeakDirZ() const { return m_peakDirZ; }
     // M7j --trace: the CPU mirror of the kernel's shadow read -- SAME frame, SAME
     // row0-north flip, so the hypervisor prints exactly what the GPU will see.
     float ShadowAtWorld(float x, float z) const {

@@ -518,6 +518,16 @@ float4 PsMain(VsOut i) : SV_Target {
                 lc = lerp(float3(0.1f, 0.85f, 0.25f), float3(0.9f, 0.12f, 0.1f),
                           saturate(mL / 7.0f));
             }
+        } else if (lensId == 6) {
+            // M7p: WATER AS DATA -- flat, unlit, comparable 1:1 with the 2D proof figure
+            // proofs/inlet_storm.png: R = band-1 amplitude gain (detail.x, /2),
+            // G = foam, B = current speed (/2.5 m/s).
+            float4 bDL6, bPL6, bDetL6;
+            float bTL6;
+            if (BankSample(wxzL, bDL6, bPL6, bDetL6, bTL6)) {
+                lc = float3(saturate(bDetL6.x * 0.5f), saturate(bDL6.w),
+                            saturate(length(bPL6.zw) * 0.4f));
+            }
         } else if (lensId == 5) {
             // M7n: cascade coincidence -- red = the BANK's foam (the kernel's card, if
             // --inject cascade is on), green = the SAME card from the PS's own cascade-1

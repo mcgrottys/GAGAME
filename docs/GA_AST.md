@@ -28,4 +28,3 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | compose.stack | corners | water.bank | world.m +v=N | world.m +v=N | - | m NAVD level/bed + hsScale | hsScale 0.15..3 | x1 | WaterBankLayer CornerParams (CPU) |
 | water.bank | disp/param/detail | globe.ps | atlas.texel +v=N | atlas.texel +v=N | - | m / sigma2 / m/s / hsScale*expo | rings 4.8..154 m/texel | x1 | Globe.hlsl BankSample manual bilinear |
 | water.bank | disp+level | globe.mesh | atlas.texel +v=N | atlas.texel +v=N | - | m NAVD | +-4 | x1 | GlobeMesh.hlsl BankSample |
-| user.plane | slice | globe.ps | world.m +v=N | world.m +v=N | - | signed distance m | keep s<=0 | x1 | Globe.hlsl slice discard (gatest: sandwich negates s; proofs/slice_plane.py) |

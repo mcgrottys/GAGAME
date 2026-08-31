@@ -30,6 +30,7 @@ cbuffer BankCb : register(b0) {
     uint4  gSlotsB;     // swe uv SRV slot, disp/param/detail bank UAV slots
     uint4  gSlotsC;     // x = churn atlas SRV (foam memory), y = swell-shadow SRV
     float4 gChurn;      // xy = churn world origin, z = 1/domain, w = atlas texels
+    float4 gWaveDir;    // xy = peak propagation dir (world unit), z = valid, w unused
 };
 
 struct BankTile {
@@ -43,6 +44,8 @@ struct BankTile {
     float pad0, pad1, pad2;
 };
 StructuredBuffer<BankTile> gTiles : register(t0);
+
+#include "Jet.hlsli"
 
 // Bindless over the shared heap (the renderer's doctrine, compute-side): textures by SLOT,
 // never by name -- the residency machinery can move data under this kernel freely. All
@@ -147,17 +150,35 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     float3 d = 0.0f;
     float sig2 = 0.0015f;
     float foam = 0.0f;
+    float gain1 = t.hsScale * expo;   // band-1 gain -> the detail plane (PS sparkle scale)
     [unroll] for (uint c = 0; c < 3; ++c) {
         const float lam = 6.2831853f / gBandK[c];
         const float w = 1.0f - smoothstep(lam * 0.12f, lam * 0.5f, t.texelM);
+        // M7p: the two ORPHANED PHYSICS EDGES, restored from the retired SeaLayer path
+        // and found by the 2D proof figure: SHOALING (Green's-law growth as the group
+        // speed drops entering shallow water) and WAVE-CURRENT amplification (the ebb
+        // standing the entrance up toward blocking -- the 7-foot-standing-wave term).
+        // proofs/inlet_storm.py runs the SAME pure functions on the SAME fields; the
+        // match report holds this kernel to it.
+        float amp = t.hsScale * expo;
+        float blocked = 0.0f;
+        if (depth > 0.05f) {
+            const float cB = BandPhaseSpeed(gBandK[c], max(depth, 0.3f));
+            float2 ab = (gWaveDir.z > 0.5f) ? WaveCurrentAmp(cur, gWaveDir.xy, cB)
+                                            : float2(1.0f, 0.0f);
+            ab.x *= ShoalFactor(gBandK[c], depth);
+            amp *= ab.x;
+            blocked = ab.y;
+        }
+        if (c == 1) gain1 = amp;
         const float2 cuv = frac(xz / gPatch[c]);
         const float4 s = LoadBilinearWrap(gSlotsA[c], cuv, 256.0f);
-        d += s.xyz * (w * t.hsScale * expo);
-        // M7i/M7j: foam rides the LOCAL sea state AND its exposure -- a sheltered tile
-        // folds its waves down, and its whitecaps must fold with them.
-        foam += s.w * w * saturate(t.hsScale * expo) * (c == 2 ? 1.0f : 0.4f);
-        // shed variance: amplitude squared, exposure squared
-        sig2 += (1.0f - w) * t.hsScale * t.hsScale * expo * expo *
+        d += s.xyz * (w * amp);
+        foam += (s.w * w * saturate(amp) + blocked * 0.35f * w) *
+                (c == 2 ? 1.0f : 0.4f);
+        // shed variance: amplitude squared (gain included -- the far field sees the
+        // steepened bar as a brighter glint band even when texels cannot draw it)
+        sig2 += (1.0f - w) * amp * amp *
                 (c == 0 ? 0.0004f : (c == 1 ? 0.0018f : 0.0060f));
     }
     d *= dry * gPatch.w;
@@ -211,5 +232,5 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // The DETAIL plane: what the PS needs to recover sub-ring sparkle -- the tile's local
     // sea-state scale (cascade derivs are unit-sea) and the dry guard (no sparkle on the
     // flats). Churn memory joins this fiber next.
-    gU[gSlotsB.w][dst] = float4(t.hsScale * expo, dry, 0.0f, 0.0f);
+    gU[gSlotsB.w][dst] = float4(gain1, dry, 0.0f, 0.0f);
 }

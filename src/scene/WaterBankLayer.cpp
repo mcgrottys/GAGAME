@@ -333,6 +333,22 @@ void WaterBankLayer::DumpFibers(Gpu& gpu) {
     }
     Log("[fibers] exported fiber_disp/foam/param/detail.png (3072x512, rings left to "
         "right)%s", ok ? "" : " -- RANGE VIOLATIONS above");
+    // M7p: raw planes + ring geometry, for proofs/inlet_storm.py's match report.
+    if (FILE* fr = fopen("fiber_detail.f32", "wb")) {
+        std::vector<float> plane(3072ull * 512);
+        for (size_t i = 0; i < plane.size(); ++i) plane[i] = det[i * 4];
+        fwrite(plane.data(), sizeof(float), plane.size(), fr);
+        fclose(fr);
+    }
+    if (FILE* fj = fopen("fiber_meta.json", "wb")) {
+        fprintf(fj, "{ \"baseTexelM\": %.3f, \"rings\": [", m_baseTexelM);
+        for (int m = 0; m < kMips; ++m) {
+            fprintf(fj, "%s{ \"org\": [%.1f, %.1f], \"texelM\": %.3f }",
+                    m ? ", " : "", m_orgX[m], m_orgZ[m], m_baseTexelM * (1 << m));
+        }
+        fprintf(fj, "] }");
+        fclose(fj);
+    }
 }
 
 void WaterBankLayer::Render(const FrameContext& ctx) {
@@ -440,6 +456,10 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.churn[1] = -8192.0f;
     cb.churn[2] = 1.0f / 16384.0f;
     cb.churn[3] = 8192.0f;
+    cb.waveDir[0] = m_sea ? m_sea->PeakDirX() : 0.0f;
+    cb.waveDir[1] = m_sea ? m_sea->PeakDirZ() : 0.0f;
+    cb.waveDir[2] = (m_sea && m_sea->PeakDirValid()) ? 1.0f : 0.0f;
+    cb.waveDir[3] = 0.0f;
 
     auto toUav = [&](TileAtlas2D& bank) {
         if (m_state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) return;

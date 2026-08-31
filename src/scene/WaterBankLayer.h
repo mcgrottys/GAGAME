@@ -90,6 +90,7 @@ private:
         uint32_t slotsB[4];
         uint32_t slotsC[4];   // x = churn atlas SRV (M7e foam memory)
         float churn[4];       // xy origin, z 1/domain, w atlas texels
+        float waveDir[4];     // M7p: peak propagation dir xy, z valid
     };
     struct BankTile {
         float orgXZ[2];

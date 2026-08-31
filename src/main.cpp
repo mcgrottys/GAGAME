@@ -65,6 +65,7 @@ struct Options {
     uint32_t pixFrames = 0;           // --pix N: programmatic .wpix capture of N frames
     bool dumpFibers = false;          // --dump-fibers: bank planes as PNGs + range gate
     int lens = 0;                     // --lens worldxz|winuv|mip|ring: value-as-color
+    bool dumpWater = false;           // --dump-water-state: inlet fields for proofs/
     bool sliceOn = false;             // --slice d: the cutaway plane (M7o)
     double sliceD = 0.0;              // plane offset, world z metres
     int inject = 0;                   // --inject [bank|cascade]: edge test cards
@@ -221,8 +222,10 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--lens") {
             const std::string n = next("worldxz");
             o.lens = n == "worldxz" ? 1 : n == "winuv" ? 2 : n == "mip" ? 3
-                     : n == "ring" ? 4 : n == "cascade" ? 5 : 1;
+                     : n == "ring" ? 4 : n == "cascade" ? 5
+                     : n == "waterdata" ? 6 : 1;
         }
+        else if (a == "--dump-water-state") o.dumpWater = true;
         else if (a == "--slice") {
             o.sliceOn = true;
             o.sliceD = _wtof(Widen(next("0").c_str()).c_str());
@@ -2427,6 +2430,59 @@ int main(int argc, char** argv) {
                 // with the AST edge it exercises. CPU-derivable steps print values; fields
                 // that live only on the GPU print their frame contract and where to look.
                 if (opt.dumpFibers && waterBank) waterBank->DumpFibers(gpu);
+                // M7p: export the inlet box's REAL fields (bed, level, current, shadow)
+                // so proofs/inlet_storm.py -- the user's own vqview wave model -- can run
+                // the independent 2D storm figure on the exact data this engine uses.
+                if (opt.dumpWater && !marsMode && sea) {
+                    const double bx0 = -1200.0, bz0 = -1600.0, cellW = 10.0;
+                    const int nxW = 420, nyW = 300;
+                    std::vector<float> bedW(nxW * nyW), lvlW2(nxW * nyW), uW(nxW * nyW),
+                        vW(nxW * nyW), shW(nxW * nyW);
+                    for (int j = 0; j < nyW; ++j) {          // row 0 = SOUTH (+v = north)
+                        for (int i2 = 0; i2 < nxW; ++i2) {
+                            const double wxD = bx0 + (i2 + 0.5) * cellW;
+                            const double wzD = bz0 + (j + 0.5) * cellW;
+                            const double latD =
+                                BathyModel::kOrgLat + wzD / BathyModel::kMPerLat;
+                            const double lonD =
+                                BathyModel::kOrgLon + wxD / BathyModel::kMPerLon;
+                            const WeatherSample q =
+                                weather.Query(latD, lonD, simUnix, cellW);
+                            const size_t at = static_cast<size_t>(j) * nxW + i2;
+                            bedW[at] = q.bedNavd;
+                            lvlW2[at] = static_cast<float>(q.levelNavd);
+                            uW[at] = q.u;
+                            vW[at] = q.v;
+                            shW[at] = sea->ShadowAtWorld(static_cast<float>(wxD),
+                                                         static_cast<float>(wzD));
+                        }
+                    }
+                    auto wr = [&](const char* pth, std::vector<float>& g) {
+                        if (FILE* f2 = fopen(pth, "wb")) {
+                            fwrite(g.data(), sizeof(float), g.size(), f2);
+                            fclose(f2);
+                        }
+                    };
+                    wr("ws_bed.f32", bedW);
+                    wr("ws_level.f32", lvlW2);
+                    wr("ws_u.f32", uW);
+                    wr("ws_v.f32", vW);
+                    wr("ws_shadow.f32", shW);
+                    const WeatherSample qc = weather.Query(42.816, -70.79, simUnix, 500.0);
+                    if (FILE* fj2 = fopen("ws_meta.json", "wb")) {
+                        fprintf(fj2,
+                                "{ \"x0\": %.1f, \"z0\": %.1f, \"cell\": %.1f, "
+                                "\"nx\": %d, \"ny\": %d, \"rows\": \"south-to-north\", "
+                                "\"hs\": %.2f, \"tp\": %.2f, \"dirFrom\": %.1f, "
+                                "\"peakDirX\": %.3f, \"peakDirZ\": %.3f }",
+                                bx0, bz0, cellW, nxW, nyW,
+                                sea->hsModel > 0.01 ? sea->hsModel : qc.hs, qc.tp,
+                                qc.dirDeg, sea->PeakDirX(), sea->PeakDirZ());
+                        fclose(fj2);
+                    }
+                    Log("[waterstate] ws_*.f32 + ws_meta.json exported (%dx%d at %.0f m)",
+                        nxW, nyW, cellW);
+                }
                 if (opt.trace && !marsMode && sea && waterBank) {
                     const double tlat = opt.traceLat, tlon = opt.traceLon;
                     const double wx = (tlon - BathyModel::kOrgLon) * BathyModel::kMPerLon;
