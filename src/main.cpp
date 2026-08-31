@@ -23,6 +23,7 @@
 #include "scene/GlobeLayer.h"
 #include "scene/MarkerLayer.h"
 #include "scene/GulfLayer.h"
+#include "scene/Route.h"
 #include "scene/SeaLayer.h"
 #include "scene/SkyLayer.h"
 #include "scene/TerrainLayer.h"
@@ -1984,7 +1985,21 @@ int main(int argc, char** argv) {
             waterBank->SetWaveField(waterScene.wfEnabled ? waveField.get() : nullptr);
             waterBank->SetScene(&waterScene);
         }
-        if (globe) globe->foamOpacity = waterScene.foamOpacity;
+        if (globe) {
+            globe->foamOpacity = waterScene.foamOpacity;
+            globe->ringBlendTexels = waterScene.ringBlendTexels;
+            globe->causticStrength = waterScene.causticStrength;
+        }
+        if (sea) {
+            sea->buoyAssimAgeH = waterScene.buoyAssimAgeH;
+            sea->buoyAssimGainMax = waterScene.buoyAssimGainMax;
+        }
+
+        // M8 THE FLEET: the AIS traffic lane (harvest_route.py) -- boats are pure
+        // f(simUnix) on it (ping-pong at the ends), so scrubbing time scrubs the
+        // traffic and headless renders are deterministic. No state anywhere.
+        Route route;
+        if (waterBank) route.Load("data/gis/route_merrimack.json");
 
         // M5c: give the solver history before the first frame, and run the validation cycle if
         // asked (headless CSV; the ebb/flood-asymmetry and basin-lag gates read from it).
@@ -2400,13 +2415,49 @@ int main(int argc, char** argv) {
                                 waterScene.wfEnabled ? waveField.get() : nullptr);
                         }
                         globe->foamOpacity = waterScene.foamOpacity;
+                        globe->ringBlendTexels = waterScene.ringBlendTexels;
+                        globe->causticStrength = waterScene.causticStrength;
                         Log("[scene] %s hot-reloaded", kScenePath);
                     }
                     // M8: bucket-watch + background solve + upload/swap for the solved
                     // wave field, BEFORE the bank recomposes so the kernel binds a whole
                     // field or the previous one -- never a half-written atlas.
-                    if (waveField && sea && waterScene.wfEnabled) {
+                    // (frame >= 2: the first frames run on the boot clock before --start
+                    // settles; solving them caches a real answer for the wrong instant.)
+                    if (waveField && sea && waterScene.wfEnabled && frame >= 2) {
                         waveField->Update(gpu, simUnix, sea->Parts(), sea->activeParts);
+                    }
+                    // M8 fleet: advance the traffic (stateless), hand the table to the
+                    // bank kernel (wakes) -- and to the vessel layer when it exists.
+                    {
+                        float bA[32] = {}, bB[32] = {};
+                        if (waterScene.fleetEnabled && route.Ready()) {
+                            const double LR = route.Length();
+                            const double kPiF = 3.14159265358979;
+                            for (int b = 0; b < waterScene.fleetCount && b < 8; ++b) {
+                                const WaterSceneConfig::Boat& fb = waterScene.fleet[b];
+                                double q = std::fmod(fb.offsetS + fb.speed * simUnix,
+                                                     2.0 * LR);
+                                if (q < 0.0) q += 2.0 * LR;
+                                double s = (q < LR) ? q : 2.0 * LR - q;
+                                bool back = q >= LR;
+                                if (fb.dir < 0) {
+                                    s = LR - s;
+                                    back = !back;
+                                }
+                                double bx, bz, hd;
+                                route.At(s, bx, bz, hd);
+                                if (back) hd += kPiF;
+                                bA[b * 4 + 0] = static_cast<float>(bx);
+                                bA[b * 4 + 1] = static_cast<float>(bz);
+                                bA[b * 4 + 2] = static_cast<float>(hd);
+                                bA[b * 4 + 3] = static_cast<float>(fb.speed);
+                                bB[b * 4 + 0] = static_cast<float>(fb.wakeAmp);
+                                bB[b * 4 + 1] = static_cast<float>(fb.halfLen);
+                                bB[b * 4 + 2] = 1.0f;
+                            }
+                        }
+                        waterBank->SetBoats(bA, bB);
                     }
                     waterBank->SetFrame(gpu, simUnix, cam.px, cam.pz);
                     float orgs[12];
@@ -2430,6 +2481,7 @@ int main(int argc, char** argv) {
                                                    resMgr.ResidencySrv(hgtWinTenant),
                                                    winOrgX, winOrgY);
                     }
+                    globe->windGateVal = sea->WindGate();
                     globe->SetWaterBank(waterBank->DispSrv(), waterBank->ParamSrv(),
                                         waterBank->DetailSrv(), derivS, patchS, bandKS,
                                         bandRmsS, sea->heightScale,

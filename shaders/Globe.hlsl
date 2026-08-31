@@ -59,11 +59,82 @@ cbuffer GlobeCb : register(b1) {
     uint4  gBankU2;     // detail bank SRV, cascade deriv SRVs x3
     float4 gBankB;      // cascade patch sizes x3, height exaggeration
     float4 gBankC;      // representative wavenumber per cascade, w = slice offset
-    float4 gBankD;      // M8: unit-sea rms envelope per band (xyz, exaggerated), w spare
+    float4 gBankD;      // M8: unit-sea rms envelope per band (xyz), w = foam opacity
+    float4 gBankE;      // M8: x = ring cross-fade width (texels), yzw spare (scene cfg)
 };
 
 // Sample the bank at a world-frame XZ: finest ring containing the point wins. Returns false
 // beyond every ring (the far field: sub-pixel waves, level ~ the plane).
+// One ring's manual-bilinear fetch (the static-sampler SampleLevel path reads ZERO from
+// the MESH stage on this driver -- Load is stage-proof). edgeD = distance to the ring's
+// valid border in texels, for the cross-fade below.
+bool BankFetch(uint m, float2 worldXZ, out float4 disp, out float4 param,
+               out float4 detail, out float texelOut, out float edgeD) {
+    disp = 0.0f;
+    param = 0.0f;
+    detail = 0.0f;
+    texelOut = 0.0f;
+    edgeD = 0.0f;
+    const float texel = gBankA.x * (float)(1u << m);
+    const float2 org = (m == 0) ? gBankOrg01.xy
+                      : (m == 1) ? gBankOrg01.zw
+                      : (m == 2) ? gBankOrg23.xy
+                      : (m == 3) ? gBankOrg23.zw
+                      : (m == 4) ? gBankOrg45.xy
+                                 : gBankOrg45.zw;
+    const float2 local = (worldXZ - org) / texel;
+    if (any(local < 1.0f) || any(local > 511.0f)) return false;
+    edgeD = min(min(local.x - 1.0f, 511.0f - local.x),
+                min(local.y - 1.0f, 511.0f - local.y));
+    const float2 tf = local - 0.5f;
+    const int2 t0 = int2(floor(tf));
+    const float2 fr = tf - float2(t0);
+    const int xoff = (int)m * 512;
+    [unroll] for (int k = 0; k < 4; ++k) {
+        const int2 tc = t0 + int2(k & 1, k >> 1);
+        const float wgt = ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y);
+        disp += wgt * gTex[gBankU.x][int2(xoff + tc.x, tc.y)];
+        param += wgt * gTex[gBankU.y][int2(xoff + tc.x, tc.y)];
+        detail += wgt * gTex[gBankU2.x][int2(xoff + tc.x, tc.y)];
+    }
+    texelOut = texel;
+    return true;
+}
+
+// ---- M8 FOAM BREAKUP (ALGEBRA.md foamlaw; the reference's range-faded octaves) ----
+// Per-pixel value noise in three IRRATIONALLY-ROTATED octaves (axis-aligned octaves at
+// 2x spacing share lattice seams and sum to rectangular blocks); each octave fades once
+// its features stop covering several pixels of RANGE (never a bank texel -- a shading
+// texture lives at shading resolution). The renormalization keeps the mean exactly 1/2
+// in every fade state, so foam coverage never becomes a function of camera distance.
+float FoamHash21(float2 p) {
+    p = frac(p * float2(123.34f, 456.21f));
+    p += dot(p, p + 45.32f);
+    return frac(p.x * p.y);
+}
+
+float FoamValueNoise(float2 p) {
+    const float2 i0 = floor(p);
+    const float2 f = frac(p);
+    const float2 u = f * f * (3.0f - 2.0f * f);
+    return lerp(lerp(FoamHash21(i0), FoamHash21(i0 + float2(1, 0)), u.x),
+                lerp(FoamHash21(i0 + float2(0, 1)), FoamHash21(i0 + float2(1, 1)), u.x),
+                u.y);
+}
+
+float FoamBreakup(float2 posM, float range) {
+    const float2x2 r1 = float2x2(0.8776f, -0.4794f, 0.4794f, 0.8776f);
+    const float2x2 r2 = float2x2(0.6062f, -0.7952f, 0.7952f, 0.6062f);
+    const float w1 = smoothstep(0.035f, 0.130f, 2.4f / max(range, 1e-3f));
+    const float w2 = smoothstep(0.035f, 0.130f, 6.5f / max(range, 1e-3f));
+    const float w3 = smoothstep(0.035f, 0.130f, 17.0f / max(range, 1e-3f));
+    const float n = 0.45f * FoamValueNoise(posM * 0.42f) * w1 +
+                    0.34f * FoamValueNoise(mul(r1, posM) * 0.155f) * w2 +
+                    0.21f * FoamValueNoise(mul(r2, posM) * 0.059f) * w3;
+    const float wsum = 0.45f * w1 + 0.34f * w2 + 0.21f * w3;
+    return (wsum > 1e-3f) ? (n / wsum) : 0.5f;
+}
+
 bool BankSample(float2 worldXZ, out float4 disp, out float4 param, out float4 detail,
                 out float texelOut) {
     disp = 0.0f;
@@ -72,30 +143,24 @@ bool BankSample(float2 worldXZ, out float4 disp, out float4 param, out float4 de
     texelOut = 0.0f;
     if (gBankU.z == 0u) return false;
     [unroll] for (uint m = 0; m < 6; ++m) {
-        const float texel = gBankA.x * (float)(1u << m);
-        const float2 org = (m == 0) ? gBankOrg01.xy
-                          : (m == 1) ? gBankOrg01.zw
-                          : (m == 2) ? gBankOrg23.xy
-                          : (m == 3) ? gBankOrg23.zw
-                          : (m == 4) ? gBankOrg45.xy
-                                     : gBankOrg45.zw;
-        const float2 local = (worldXZ - org) / texel;
-        if (any(local < 1.0f) || any(local > 511.0f)) continue;
-        // Manual bilinear via Load: the static-sampler SampleLevel path reads ZERO from the
-        // MESH stage on this driver (stage-bisected); Load is stage-proof and the vertex
-        // density matches the texel density anyway.
-        const float2 tf = local - 0.5f;
-        const int2 t0 = int2(floor(tf));
-        const float2 fr = tf - float2(t0);
-        const int xoff = (int)m * 512;
-        [unroll] for (int k = 0; k < 4; ++k) {
-            const int2 tc = t0 + int2(k & 1, k >> 1);
-            const float wgt = ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y);
-            disp += wgt * gTex[gBankU.x][int2(xoff + tc.x, tc.y)];
-            param += wgt * gTex[gBankU.y][int2(xoff + tc.x, tc.y)];
-            detail += wgt * gTex[gBankU2.x][int2(xoff + tc.x, tc.y)];
+        float eD;
+        if (!BankFetch(m, worldXZ, disp, param, detail, texelOut, eD)) continue;
+        // M8 THE RING CROSS-FADE (the user's "interpolation param", data/wave_scene.json
+        // ringBlendTexels): near this ring's border, blend toward the next coarser ring
+        // so the texture handover never pops -- the M6t fold already conserves the
+        // ENERGY across rings; this interpolates the REALIZATION too.
+        const float blendW = max(gBankE.x, 1.0f);
+        if (m < 5u && eD < blendW) {
+            float4 d2, p2, det2;
+            float t2, e2;
+            if (BankFetch(m + 1u, worldXZ, d2, p2, det2, t2, e2)) {
+                const float w = saturate(eD / blendW);
+                disp = lerp(d2, disp, w);
+                param = lerp(p2, param, w);
+                detail = lerp(det2, detail, w);
+                texelOut = lerp(t2, texelOut, w);
+            }
         }
-        texelOut = texel;
         return true;
     }
     return false;
@@ -410,7 +475,8 @@ float4 PsMain(VsOut i) : SV_Target {
                     sx += dv.x * wDet * bDet.x * gBankB.w * gAx;
                     sz += dv.y * wDet * bDet.x * gBankB.w * gAy;
                     foamW = max(foamW, saturate(dv.w * wDet) * saturate(bDet.x) *
-                                           max(gAx, gAy) * (c == 2 ? 0.30f : 0.15f));
+                                           max(gAx, gAy) * gBankE.y *
+                                           (c == 2 ? 0.30f : 0.15f));
                     s2 = max(s2 - wDet * bDet.x * bDet.x *
                                       (0.5f * (gAx * gAx + gAy * gAy)) *
                                       (c == 0 ? 0.0004f : (c == 1 ? 0.0018f : 0.0060f)),
@@ -521,7 +587,8 @@ float4 PsMain(VsOut i) : SV_Target {
             const float lapPhys = lapF * gBankB.w / (ajC * ajC);
             float cg = 1.0f / max(1.0f + depthW * 0.25f * lapPhys, 0.05f);
             cg = lerp(1.0f, cg, 1.0f - smoothstep(4.0f, 20.0f, depthW));
-            cg = clamp(cg, 0.35f, 2.6f);
+            cg = clamp(cg, 0.60f, 1.8f);
+            cg = lerp(1.0f, cg, gBankE.z);   // scene causticStrength
             bedAlb *= lerp(1.0f, cg, saturate(gSunDir.y * 3.0f));
         }
         albSea = lerp(albSea, bedAlb, Tw);
@@ -549,9 +616,16 @@ float4 PsMain(VsOut i) : SV_Target {
         albSea *= 1.0f - fresN;
 
         // M8 foamlaw: foam rides ON the water -- painted AFTER the Fresnel split (it no
-        // longer dims toward the horizon) at 0.72 peak opacity over water AND reflection:
-        // whitewater is a thin aerated layer, not paint.
-        const float foamOp = saturate(foamW) * gBankD.w;   // opacity from the scene cfg
+        // longer dims toward the horizon) at the scene's peak opacity over water AND
+        // reflection: whitewater is a thin aerated layer, not paint. The kernel shipped
+        // PURE physics coverage; the per-pixel range-faded breakup textures it here
+        // (strength 0.55 + 0.75 n: a triggered crest always shows SOME foam; noise
+        // modulates amount, never existence -- 30.7% gouache -> 2.1%, the reference's
+        // own measurement).
+        const float fnB =
+            FoamBreakup((CsToTangent(up) * gGlo.x).xz, length(i.rel));
+        const float foamOp =
+            saturate(saturate(foamW) * (0.55f + 0.75f * fnB)) * gBankD.w;
         albSea = lerp(albSea, float3(0.945f, 0.965f, 0.975f), foamOp);
         skyReflAdd *= 1.0f - foamOp;
 
@@ -566,7 +640,12 @@ float4 PsMain(VsOut i) : SV_Target {
         }
 
         // The analog mix: glint dies as the flat emerges, the land normal takes over.
-        n = normalize(lerp(nWater, nLand, landness));
+        // M8 the sparkle normal feeds ONLY the glint (the reference law, one step
+        // further than M7c): per-chop diffuse shading on nWater rendered every 2 m
+        // wavelet as a dark fleck from altitude -- the leopard the user rolled back.
+        // The body of the water shades on the band-limited normal; glitter is the
+        // microfacet lobe's job.
+        n = normalize(lerp(nSmooth, nLand, landness));
         alb = lerp(albSea, albLand, landness);
         spec *= 1.0f - landness;
     }

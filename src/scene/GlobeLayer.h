@@ -123,6 +123,9 @@ public:
     bool stencilOverlay = false;    // M6i: --stencil, the GIS alignment overlay
     int debugLens = 0;              // M7m: --lens (1 worldxz, 2 winuv, 3 mip, 4 ring)
     float foamOpacity = 0.72f;      // M8: peak foam opacity (data/wave_scene.json)
+    float ringBlendTexels = 48.0f;  // M8: bank ring cross-fade width (scene cfg)
+    float windGateVal = 1.0f;       // M8: Monahan whitecap gate (per frame, from sea)
+    float causticStrength = 0.6f;   // M8: bed dapple strength (scene cfg; 0 = off)
     bool sliceOn = false;           // M7o: the cutaway plane node
     float sliceD = 0.0f;            // plane offset (world z, metres)
     bool albedoLens = false;        // M6j: --albedo, raw composed color -- no lighting, no
@@ -184,7 +187,8 @@ private:
         uint32_t bankU2[4];   // M7a: detail bank SRV, cascade deriv SRVs x3
         float bankB[4];       // cascade patch sizes x3, height exaggeration
         float bankC[4];       // representative wavenumber per cascade
-        float bankD[4];       // M8: unit-sea rms envelope per band, w spare
+        float bankD[4];       // M8: unit-sea rms envelope per band, w = foam opacity
+        float bankE[4];       // M8: ring cross-fade width (texels), rest spare
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {

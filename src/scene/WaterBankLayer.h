@@ -27,6 +27,7 @@
 #include "sim/SeaState.h"
 #include "sim/SweSolver.h"
 
+#include <cstring>
 #include <string>
 
 namespace ga {
@@ -81,6 +82,11 @@ public:
     // M8: the water scene config (data/wave_scene.json, hot-reloaded in main) -- the
     // bank reads the LIVE values every frame, so an edit lands on the next recompose.
     void SetScene(const struct WaterSceneConfig* sc) { m_scene = sc; }
+    // M8 wakes: the fleet table (8 slots, vqview layout). Disabled slots stay zero.
+    void SetBoats(const float* a32, const float* b32) {
+        memcpy(m_boatA, a32, sizeof(m_boatA));
+        memcpy(m_boatB, b32, sizeof(m_boatB));
+    }
     float BaseTexelM() const { return m_baseTexelM; }
     uint32_t ResidentTiles() const {
         return m_disp.ResidentCount() + m_param.ResidentCount() + m_detail.ResidentCount();
@@ -119,6 +125,8 @@ private:
         float waveSig[32];     // (cos, sin)(sigma_c t), packed 2 comps per float4 row
         float waveDirTab[32];  // unit propagation (east, north), same packing
         float waveScale[32];   // (aMax, kMax) dequant scales, same packing
+        float boatA[32];       // M8 wakes: (x, z, heading rad, speed m/s) x8
+        float boatB[32];       // (wake amp m, hull half-length m, enabled, spare) x8
     };
     struct BankTile {
         float orgXZ[2];
@@ -147,6 +155,7 @@ private:
     const SeaState* m_seaState = nullptr;
     const class WaveField* m_wave = nullptr;   // M8: the solved wave field (optional)
     const struct WaterSceneConfig* m_scene = nullptr;   // M8: live scene closures
+    float m_boatA[32] = {}, m_boatB[32] = {};           // M8: the fleet (zeros = off)
 
     TileAtlas2D m_disp, m_param, m_detail;   // detail: per-tile sea-state context the PS
                                              // needs to recover sub-ring sparkle (hsScale;

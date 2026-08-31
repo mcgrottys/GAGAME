@@ -688,8 +688,11 @@ WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
         (m_cfg.orgZ + 0.5 * ny * m_cfg.cellM) / BathyModel::kMPerLat + BathyModel::kOrgLat;
     const double lonC =
         (m_cfg.orgX + 0.5 * nx * m_cfg.cellM) / BathyModel::kMPerLon + BathyModel::kOrgLon;
-    const double levelRaw =
-        m_atlas ? m_atlas->MslNavd(latC, lonC) + m_atlas->Level(latC, lonC, simUnix) : 0.0;
+    const double mslDbg = m_atlas ? m_atlas->MslNavd(latC, lonC) : 0.0;
+    const double tideDbg = m_atlas ? m_atlas->Level(latC, lonC, simUnix) : 0.0;
+    const double levelRaw = mslDbg + tideDbg;
+    Log("[wave] level probe at %.4f,%.4f t %.0f: MslNavd %+.3f + Level %+.3f = %+.3f",
+        latC, lonC, simUnix, mslDbg, tideDbg, levelRaw);
     in.level = std::round(levelRaw / m_cfg.tideBucketM) * m_cfg.tideBucketM;
 
     const double sRaw = (m_currents && m_actSta >= 0 &&

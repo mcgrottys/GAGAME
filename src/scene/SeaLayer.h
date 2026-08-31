@@ -72,6 +72,11 @@ public:
     float BandRms(int c) const { return m_bandRms[c]; }
     // M8 wavefield: the live partition set, for the solved-field bucket key + spectrum.
     const PartParam* Parts() const { return m_parts; }
+    // M8: the Monahan wind gate -- whitecap COVERAGE follows wind speed; the Jacobian
+    // only says where foam sits. The bank's steepness trigger multiplies by this (a
+    // 4 m/s breeze must not micro-break the whole sea -- the Sea.hlsl law, restored
+    // when M8b brought the long-dead cascade foam path back to life).
+    float WindGate() const { return m_windGate; }
     // M8: a --storm override makes the GFS grid stale by definition -- consumers that
     // ratio local grid Hs against the reference must treat the storm AS the reference.
     bool StormOn() const { return m_stormHs > 0.01f; }
@@ -128,6 +133,9 @@ public:
     // ACT / peak solved) restores the magnitude while the solver keeps the spatial shape.
     float sweCurrentGain = 3.2f;
     float heightScale = 1.15f;   // vertical exaggeration; vqview shipped 1.15 as its look
+    // M8 buoy assimilation closures (data/wave_scene.json; main mirrors them here)
+    float buoyAssimAgeH = 6.0f;
+    float buoyAssimGainMax = 1.8f;
     // M7: the wave bank consumes the cascade textures; --one-water retires this layer's own
     // grid DRAW while the compute chain (FFT, SWE, churn) keeps running -- the TerrainLayer
     // renderEnabled pattern, applied to the sea.

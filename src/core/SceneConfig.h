@@ -45,12 +45,37 @@ struct WaterSceneConfig {
     // ---- kernel closures (were literals; every one pinned by gates/proofs) ----
     float shedSteepCap = 0.44f;   // Miche: shed slope variance rides ak <= this
     float shedMssCeil = 0.09f;    // storm-sea mss ceiling on the solved shed
-    float churnGain = 0.5f;       // churn read modulation base (0 = churn foam off)
+    float churnGain = 0.12f;      // churn read gain (0 = off); a whisper until the deposit-side discipline lands
     float crestLo = 0.28f, crestHi = 0.80f;   // the crest gate, eta/rms units
     float depthLo = 1.05f, depthHi = 1.95f;   // the depth-excess trigger band
 
     // ---- shading ----
     float foamOpacity = 0.72f;    // peak foam opacity (a thin aerated layer, not paint)
+    float ringBlendTexels = 48.0f;   // bank ring cross-fade width (the interpolation
+                                     // that keeps ring handovers from tiling visibly)
+    float buoyAssimAgeH = 6.0f;      // buoy Hs assimilation: max observation age
+    float buoyAssimGainMax = 1.8f;   // and the gain clamp (past it the forecast and
+                                     // the buoy disagree about the WORLD)
+    float causticStrength = 0.6f;    // 0 = off; the bed dapple, softened by default
+
+    // ---- the fleet (M8 floats): boats shuttling the AIS lane, ping-pong at the ends.
+    // Classes carry the AIS climatology's mean speeds; wake character follows k = g/U^2.
+    struct Boat {
+        double speed = 4.86;      // m/s (AIS per-class mean SOG)
+        double halfLen = 7.5;     // m
+        double wakeAmp = 0.55;    // m
+        double offsetS = 0.0;     // starting arc-length offset along the lane
+        int dir = 1;              // +1 outbound (toward the sea), -1 inbound
+    };
+    bool fleetEnabled = false;   // floats stand down for now: waves and flows first
+    int fleetCount = 5;
+    Boat fleet[8] = {
+        {4.86, 7.5, 0.55, 400.0, 1},     // the recreational hero
+        {4.62, 9.0, 0.47, 1300.0, 1},    // fishing
+        {3.83, 13.0, 0.63, 2100.0, -1},  // tug, inbound
+        {3.34, 6.0, 0.38, 900.0, 1},     // commercial skiff
+        {4.86, 6.5, 0.44, 1800.0, -1},   // second recreational, inbound
+    };
 };
 
 inline void WriteDefaultWaterScene(const char* path) {
@@ -73,10 +98,23 @@ inline void WriteDefaultWaterScene(const char* path) {
         "  },\n"
         "  \"closures\": {\n"
         "    \"shedSteepCap\": 0.44, \"shedMssCeil\": 0.09,\n"
-        "    \"churnGain\": 0.5,\n"
+        "    \"churnGain\": 0.12,\n"
         "    \"crestLo\": 0.28, \"crestHi\": 0.80,\n"
         "    \"depthLo\": 1.05, \"depthHi\": 1.95,\n"
-        "    \"foamOpacity\": 0.72\n"
+        "    \"foamOpacity\": 0.72,\n"
+        "    \"ringBlendTexels\": 48.0,\n"
+        "    \"buoyAssimAgeH\": 6.0, \"buoyAssimGainMax\": 1.8,\n"
+        "    \"causticStrength\": 0.6\n"
+        "  },\n"
+        "  \"fleet\": {\n"
+        "    \"enabled\": false,\n"
+        "    \"boats\": [\n"
+        "      {\"speed\": 4.86, \"halfLen\": 7.5,  \"wakeAmp\": 0.55, \"offsetS\": 400.0,  \"dir\": 1},\n"
+        "      {\"speed\": 4.62, \"halfLen\": 9.0,  \"wakeAmp\": 0.47, \"offsetS\": 1300.0, \"dir\": 1},\n"
+        "      {\"speed\": 3.83, \"halfLen\": 13.0, \"wakeAmp\": 0.63, \"offsetS\": 2100.0, \"dir\": -1},\n"
+        "      {\"speed\": 3.34, \"halfLen\": 6.0,  \"wakeAmp\": 0.38, \"offsetS\": 900.0,  \"dir\": 1},\n"
+        "      {\"speed\": 4.86, \"halfLen\": 6.5,  \"wakeAmp\": 0.44, \"offsetS\": 1800.0, \"dir\": -1}\n"
+        "    ]\n"
         "  }\n"
         "}\n";
     fwrite(text, 1, strlen(text), f);
@@ -131,6 +169,31 @@ inline bool LoadWaterScene(const char* path, WaterSceneConfig& out) {
         out.depthLo = static_cast<float>(c->Num("depthLo", out.depthLo));
         out.depthHi = static_cast<float>(c->Num("depthHi", out.depthHi));
         out.foamOpacity = static_cast<float>(c->Num("foamOpacity", out.foamOpacity));
+        out.ringBlendTexels =
+            static_cast<float>(c->Num("ringBlendTexels", out.ringBlendTexels));
+        out.buoyAssimAgeH = static_cast<float>(c->Num("buoyAssimAgeH", out.buoyAssimAgeH));
+        out.buoyAssimGainMax =
+            static_cast<float>(c->Num("buoyAssimGainMax", out.buoyAssimGainMax));
+        out.causticStrength =
+            static_cast<float>(c->Num("causticStrength", out.causticStrength));
+    }
+    if (const JsonValue* fl = v.Get("fleet")) {
+        const JsonValue* en = fl->Get("enabled");
+        out.fleetEnabled = !en || en->type != JsonValue::Type::Bool || en->boolean;
+        if (const JsonValue* bs = fl->Get("boats")) {
+            if (bs->type == JsonValue::Type::Array) {
+                out.fleetCount = 0;
+                for (const JsonValue& b : bs->arr) {
+                    if (out.fleetCount >= 8) break;
+                    WaterSceneConfig::Boat& o = out.fleet[out.fleetCount++];
+                    o.speed = b.Num("speed", o.speed);
+                    o.halfLen = b.Num("halfLen", o.halfLen);
+                    o.wakeAmp = b.Num("wakeAmp", o.wakeAmp);
+                    o.offsetS = b.Num("offsetS", o.offsetS);
+                    o.dir = (b.Num("dir", o.dir) < 0.0) ? -1 : 1;
+                }
+            }
+        }
     }
     return true;
 }

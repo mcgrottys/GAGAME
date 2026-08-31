@@ -461,19 +461,42 @@ bool RunWaterSelfTest() {
     return ok;
 }
 
+double WaveAtlasNavdDelta(const TideModel* tides) {
+    // The regional NAVD-MSL offset, calibrated at the nearest station carrying a
+    // published link (the main.cpp ResolveDatum recipe: delta = -mllwMinusNavd -
+    // meanMllw; smallest |delta| wins -- Boston gives +0.092 m here).
+    double best = 0.0;
+    bool found = false;
+    for (size_t i = 0; i < tides->Count(); ++i) {
+        const TideStation& s = tides->S(i);
+        if (s.mllwMinusNavdM < -900.0) continue;
+        const double delta = -s.mllwMinusNavdM - s.meanMllwM;
+        if (!found || std::abs(delta) < std::abs(best)) best = delta;
+        found = true;
+    }
+    return best;
+}
+
 double WaterAtlas::MslNavd(double latDeg, double lonDeg) const {
-    // Station-IDW of (mean above MLLW + MLLW-NAVD link); stations without a resolvable link
-    // contribute nothing. Beyond the survey the geoid stands in for MSL (0).
+    // Station-IDW of MSL in NAVD88. M8 datum fix: stations WITHOUT a published NAVD
+    // link contribute through the regional MSL transfer (msl_navd = -delta) instead of
+    // being skipped -- skipping them let the one linked RIVER station (Riverside,
+    // msl +0.43 from river slope) dominate the entrance by distance and bias the
+    // solver's level +0.46 m. With the transfer, the entrance's own station answers
+    // for the entrance. Beyond the survey the geoid stands in for MSL (0).
+    const double delta = WaveAtlasNavdDelta(m_tides);
     double acc = 0, wsum = 0, dmin = 1e18;
     const double kx = 111320.0 * std::cos(latDeg * kD2R), ky = 110574.0;
     for (size_t i = 0; i < m_tides->Count(); ++i) {
         const TideStation& s = m_tides->S(i);
-        if (s.mllwMinusNavdM < -900.0) continue;
+        const bool linked = s.mllwMinusNavdM > -900.0;
+        const double mslNavd =
+            linked ? (s.meanMllwM + s.mllwMinusNavdM) : -delta;
         const double dx = (lonDeg - s.lon) * kx, dy = (latDeg - s.lat) * ky;
         const double d2 = dx * dx + dy * dy + 1.0;
         dmin = (std::min)(dmin, std::sqrt(d2));
         const double w = 1.0 / d2;
-        acc += w * (s.meanMllwM + s.mllwMinusNavdM);
+        acc += w * mslNavd;
         wsum += w;
     }
     if (wsum <= 0.0) return 0.0;

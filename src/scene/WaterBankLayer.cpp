@@ -504,7 +504,9 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.foamB[0] = sc2.crestHi;
     cb.foamB[1] = sc2.depthLo;
     cb.foamB[2] = sc2.depthHi;
-    cb.foamB[3] = 0.0f;
+    cb.foamB[3] = m_sea->WindGate();   // Monahan: wind owns whitecap coverage
+    memcpy(cb.boatA, m_boatA, sizeof(cb.boatA));   // M8: the fleet (zeros = no wake)
+    memcpy(cb.boatB, m_boatB, sizeof(cb.boatB));
     cb.waveU[0] = 0xFFFFFFFFu;
     if (m_wave && m_wave->Ready()) {
         const WaveField::GpuTable& wt = m_wave->Table();
