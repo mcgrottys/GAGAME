@@ -75,8 +75,8 @@ public:
     // M7: per-frame wave-bank binding (SRVs + ring origins), and the one-water switch.
     void SetWaterBank(uint32_t dispSrv, uint32_t paramSrv, uint32_t detailSrv,
                       const uint32_t derivSrv[3], const float patchL[3],
-                      const float bandK[3], float heightScale, float baseTexelM,
-                      const float* org12, bool oneWater) {
+                      const float bandK[3], const float bandRms[3], float heightScale,
+                      float baseTexelM, const float* org12, bool oneWater) {
         m_bankSrv[0] = dispSrv;
         m_bankSrv[1] = paramSrv;
         m_bankSrv[2] = detailSrv;
@@ -84,6 +84,7 @@ public:
             m_bankDeriv[i] = derivSrv[i];
             m_bankPatch[i] = patchL[i];
             m_bankK[i] = bandK[i];
+            m_bankRms[i] = bandRms[i];   // M8: unit-sea rms envelope (peak shaping)
         }
         m_bankExag = heightScale;
         m_bankBase = baseTexelM;
@@ -121,6 +122,13 @@ public:
     bool MeshPathActive() const { return m_msPath; }
     bool stencilOverlay = false;    // M6i: --stencil, the GIS alignment overlay
     int debugLens = 0;              // M7m: --lens (1 worldxz, 2 winuv, 3 mip, 4 ring)
+    float foamOpacity = 0.72f;      // M8: peak foam opacity (data/wave_scene.json)
+    float ringBlendTexels = 48.0f;  // M8: bank ring cross-fade width (scene cfg)
+    float windGateVal = 1.0f;       // M8: Monahan whitecap gate (per frame, from sea)
+    float causticStrength = 0.6f;   // M8: bed dapple strength (scene cfg; 0 = off)
+    float editFloorNavd = 1.8f;     // M8g: edit-land geometry floor, ABSOLUTE NAVD m --
+                                    // set from the datum envelope (MLLW + margin) at boot
+                                    // so high water drowns the outer jetty (origin planes)
     bool sliceOn = false;           // M7o: the cutaway plane node
     float sliceD = 0.0f;            // plane offset (world z, metres)
     bool albedoLens = false;        // M6j: --albedo, raw composed color -- no lighting, no
@@ -182,6 +190,8 @@ private:
         uint32_t bankU2[4];   // M7a: detail bank SRV, cascade deriv SRVs x3
         float bankB[4];       // cascade patch sizes x3, height exaggeration
         float bankC[4];       // representative wavenumber per cascade
+        float bankD[4];       // M8: unit-sea rms envelope per band, w = foam opacity
+        float bankE[4];       // M8: ring cross-fade width (texels), rest spare
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -263,6 +273,7 @@ private:
     uint32_t m_bankDeriv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
     float m_bankPatch[3] = {756.0f, 186.0f, 47.0f};
     float m_bankK[3] = {0.03f, 0.15f, 1.0f};
+    float m_bankRms[3] = {};   // M8: unit-sea rms envelope per band
     float m_bankExag = 1.15f;
     float m_bankBase = 4.8f;
     float m_bankOrg[12] = {};
@@ -271,6 +282,8 @@ private:
     std::vector<NodeData> m_nodes;
     // M6j: the mesh-shader path.
     static constexpr uint32_t kMaxMeshlets = 65536;
+    uint32_t m_meshletDrops = 0;    // M8h: leaves dropped at the record cap this frame
+    bool m_dropsReported = false;   // one report per drop episode, not per frame
     bool m_msPath = false;
     Com<ID3D12PipelineState> m_msPso;
     Com<ID3D12GraphicsCommandList6> m_cl6;

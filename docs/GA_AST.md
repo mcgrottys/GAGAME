@@ -16,24 +16,32 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | residency.mgr | have-map | globe.ps | resmap.texel +v=S | uv01.vS +v=S | - | finest mip * 16 (R8) | 0..7*16 | x1 | CsHave2D residency clamp |
 | world.flat | anchor-linear map | latlon.deg | world.m +v=N | latlon.deg +v=N | - | deg | mPerLon frozen at anchor; shared by ALL water consumers | x1 | BathyModel::kOrgLat/kMPerLat convention |
 | height.window | bed per texel | water.bank | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | float merc ~0.25 px ulp (gatest-bounded); residency-clamped mips 2..7 | x1 | WaterBank.hlsl M7q (same formulation as CsWindowUv) |
-| ocean.fft | cascade.disp | water.bank | patch.wrap +v=N | atlas.texel +v=N | - | m disp + jacobian foam | +-Hs/2 | x1 | WaterBank.hlsl CsBankFill wrap |
+| ocean.fft | cascade.disp | water.bank | patch.wrap +v=N | atlas.texel +v=N | - | m displacement | +-Hs/2 | x1 | WaterBank.hlsl CsBankFill wrap |
+| ocean.fft | cascade.deriv (foam union) | water.bank | patch.wrap +v=N | atlas.texel +v=N | - | jacobian foam 0..1 | 0..1 | x1 | WaterBank.hlsl CsBankFill foam discipline |
 | ocean.fft | cascade.deriv | globe.ps | patch.wrap +v=N | atlas.texel +v=N | - | slope | +-0.3 | x1 | Globe.hlsl detail loop |
+| ocean.fft | caustic jacobian | globe.ps | patch.wrap +v=N | atlas.texel +v=N | - | J / 1/m lap | gain 0.35..2.6 | x1 | Globe.hlsl M8 caustic block |
 | swe.solver | eta | water.bank | raster.row0N +v=S | atlas.texel +v=N | FLIP | m dEta | +-1.5 | x1 | WaterBank.hlsl CsBankFill (1-uv.y) |
 | swe.solver | uv | water.bank | raster.row0N +v=S | atlas.texel +v=N | FLIP | m/s | +-2.5 | x1 | WaterBank.hlsl CsBankFill (1-uv.y) |
 | swe.solver | shadow | water.bank | raster.row0N +v=S | atlas.texel +v=N | FLIP | 0..1 exposure | 0.12..1 | x1 | WaterBank.hlsl CsBankFill (1-uv.y), floor 0.18 |
-| churn.kernel | churn | water.bank | atlas.texel +v=N | atlas.texel +v=N | - | 0..1 aeration | 0..1 | x1.05 | WaterBank.hlsl CsBankFill flat |
+| churn.kernel | churn | water.bank | atlas.texel +v=N | atlas.texel +v=N | - | 0..1 aeration (remembered foam, MAX-composited) | 0..1 | x1 | WaterBank.hlsl CsBankFill flat |
 | bathy.cudem | bed | churn.kernel | raster.row0N +v=S | atlas.texel +v=N | FLIP | m NAVD | -40..15 | x1 | SeaChurn.hlsl suv flip |
-| bathy.cudem | bed | sea.ps | raster.row0N +v=S | atlas.texel +v=N | FLIP | m NAVD | -40..15 | x1 | Sea.hlsl:71 (uv.x, 1-uv.y) |
-| swe.solver | eta | sea.ps | raster.row0N +v=S | atlas.texel +v=N | FLIP | m dEta | +-1.5 | x1 | Sea.hlsl SweDEta (1-uv.y) |
-| swe.solver | shadow | sea.ps | raster.row0N +v=S | atlas.texel +v=N | FLIP | 0..1 exposure | 0.12..1 | x1 | Sea.hlsl SweShadow (uv.x, 1-uv.y) |
-| churn.kernel | churn | sea.ps | atlas.texel +v=N | atlas.texel +v=N | - | 0..1 aeration | 0..1 | x1.05 | Sea.hlsl cuv flat |
+| bathy.cudem | bed | sea.ps (inactive) | raster.row0N +v=S | atlas.texel +v=N | FLIP | m NAVD | -40..15 | x1 | Sea.hlsl:71 (uv.x, 1-uv.y) |
+| swe.solver | eta | sea.ps (inactive) | raster.row0N +v=S | atlas.texel +v=N | FLIP | m dEta | +-1.5 | x1 | Sea.hlsl SweDEta (1-uv.y) |
+| swe.solver | shadow | sea.ps (inactive) | raster.row0N +v=S | atlas.texel +v=N | FLIP | 0..1 exposure | 0.12..1 | x1 | Sea.hlsl SweShadow (uv.x, 1-uv.y) |
+| churn.kernel | churn | sea.ps (inactive) | atlas.texel +v=N | atlas.texel +v=N | - | 0..1 aeration | 0..1 | x1.05 | Sea.hlsl cuv flat |
 | compose.stack | corners | water.bank | world.m +v=N | world.m +v=N | - | m NAVD level/bed + hsScale | hsScale 0.15..3 | x1 | WaterBankLayer CornerParams (CPU) |
-| water.bank | disp/param/detail | globe.ps | atlas.texel +v=N | atlas.texel +v=N | - | m / sigma2 / m/s / hsScale*expo | rings 4.8..154 m/texel | x1 | Globe.hlsl BankSample manual bilinear |
+| compose.stack | bed (per cell) | wave.solver | world.m +v=N | atlas.texel +v=N | - | m NAVD | -40..15 | x1 | WaveField.h SolveNow (SampleHeightStack) |
+| water.atlas | level bucket | wave.solver | world.m +v=N | world.m +v=N | - | m NAVD | 0.25 m buckets | x1 | WaveField.h BucketKey |
+| act.currents | current proxy (fallback) | wave.solver | world.m +v=N | atlas.texel +v=N | - | m/s (conveyance jet, x3.0 closure) | 0..2 | x3 | WaveField.h (ebb toward 105, flood 285) |
+| swe.solver | current (solved) | wave.solver | raster.row0N +v=S | atlas.texel +v=N | FLIP | m/s (live SeaLayer gain), 0.05 buckets | +-2.5 | x1 | WaveField.h RefreshSweCurrent (1-v flip) |
+| wave.solver | a/k/phase-spinor planes | water.bank | atlas.texel +v=N | atlas.texel +v=N | - | m / rad/m / unit spinor (RGBA8, per-comp aMax kMax) | 17 slices, 2-wide grid | x1 | WaterBank.hlsl WaveSample (no flip) |
+| water.bank | disp/param/detail | globe.ps | atlas.texel +v=N | atlas.texel +v=N | - | m / sigma2 / m/s / band gains (g1,dry,g0,g2) | rings 4.8..154 m/texel | x1 | Globe.hlsl BankSample manual bilinear |
 | water.bank | disp+level | globe.mesh | atlas.texel +v=N | atlas.texel +v=N | - | m NAVD | +-4 | x1 | GlobeMesh.hlsl BankSample |
 | noaa.stations | harmonic fit | water.atlas | latlon.deg +v=N | latlon.deg +v=N | - | phasor re/im per constituent | sub-mm RMS (watertest) | x1 | harvest_tides.py -> StationFieldSource IDW p=2 |
 | eot20.grid | phasor grid | water.atlas | latlon.deg +v=N | latlon.deg +v=N | - | phasor re/im | |P| clamp a2>100 (Fundy) | x1 | Eot20Source (epoch-rotated arg sum P conj Q) |
-| water.atlas | tide phasors M2..O1 | window.field | latlon.deg +v=N | mercator.px +v=S | FLIP | phasor re/im | RG16F tiles | x1 | Compositor::WindowField paint |
+| water.atlas | tide phasors x18 (M8i) | window.field | latlon.deg +v=N | mercator.px +v=S | FLIP | phasor re/im | RG16F tiles | x1 | Compositor::WindowField paint |
 | water.atlas | level rotors | weather.mgr | latlon.deg +v=N | latlon.deg +v=N | - | m NAVD | +-3 | x1 | WeatherManager::Query h(t)=msl+Re[P e^iwt] |
+| water.atlas | datum envelope (origin planes) | globe.mesh | latlon.deg +v=N | atlas.texel +v=N | - | m NAVD lo/hi | containment + width 2.4..3.6 (watertest 7) | x1 | WaterAtlas::EnvelopeNavd -> gBankE.w edit floor |
 | gfswave.grid | hs/tp/dir | weather.mgr | raster.row0N +v=S | latlon.deg +v=N | FLIP | m / s / deg | 0..15 m | x1 | WeatherManager wave grid (lat1-lat row) |
 | weather.mgr | corner params feed | compose.stack | latlon.deg +v=N | world.m +v=N | - | level/bed/hs | query rungs | x1 | WeatherManager::Query -> CornerParams |
 | gfswave.grid | hs whitening | globe.ps | raster.row0N +v=S | atlas.texel +v=N | FLIP | m | 0..15 | x1 | Globe.hlsl wuv (lat1-lat formula) |

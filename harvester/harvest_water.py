@@ -206,20 +206,46 @@ def convert_eot20(constituents):
             ds = netCDF4.Dataset("inmem", memory=ncbytes)
             lat = ds.variables["lat"][:]
             lon = ds.variables["lon"][:]
+            units = str(getattr(ds.variables["real"], "units", "")).strip().lower()
             re = np.ma.filled(ds.variables["real"][:], np.nan).astype(np.float32)
             im = np.ma.filled(ds.variables["imag"][:], np.nan).astype(np.float32)
             ds.close()
-            # Normalize: row 0 = NORTH, lon ascending from lon[0]; units cm -> m if needed.
+            # Normalize: row 0 = NORTH, lon ascending from lon[0].
             if lat[0] < lat[-1]:
                 re, im = re[::-1], im[::-1]
                 lat = lat[::-1]
-            scale = 1.0
-            amax = np.nanmax(np.hypot(re, im))
-            if amax > 30.0:            # centimetres (M2 open-ocean max ~ 1.5 m)
+            # M8i UNITS BY DECLARATION, never by guess: the old >30 heuristic read
+            # "centimetres" off the big constituents by luck and left the small ones
+            # (T2 max 27 cm) unscaled -- a silent x100. Every EOT20 file carries
+            # units="cm"; the fallback heuristic survives only for a file without the
+            # attribute.
+            if units.startswith("cm") or units.startswith("centimet"):
                 scale = 0.01
+            elif units in ("m", "meter", "meters", "metre", "metres"):
+                scale = 1.0
+            else:
+                scale = 0.01 if np.nanmax(np.hypot(re, im)) > 30.0 else 1.0
+                log(f"[eot20] {con}: WARNING no units attribute, heuristic scale {scale}")
+            re = re * scale
+            im = im * scale
+            # M8i OUTLIER CLAMP: EOT20 carries a handful of blown-up near-coast texels
+            # (T2's global max is 26.9 m against a 99.9th percentile of 5 cm). Clamp
+            # amplitude to 4x the 99.9th percentile, PHASE-PRESERVING, and say so --
+            # genuine resonance survives (M2 Fundy 4.97 m vs cap ~8.9 m).
+            amp = np.hypot(re, im)
+            p999 = float(np.nanpercentile(amp, 99.9))
+            cap = max(4.0 * p999, 0.02)
+            hot = amp > cap
+            nHot = int(np.count_nonzero(hot & np.isfinite(amp)))
+            if nHot:
+                shrink = np.where(hot, cap / np.maximum(amp, 1e-12), 1.0)
+                re = re * shrink
+                im = im * shrink
+                log(f"[eot20] {con}: clamped {nHot} outlier texels to {cap:.3f} m "
+                    f"(p99.9 {p999:.3f} m)")
             rg = np.empty((re.shape[0], re.shape[1], 2), np.float32)
-            rg[:, :, 0] = np.nan_to_num(re * scale, nan=0.0)
-            rg[:, :, 1] = np.nan_to_num(im * scale, nan=0.0)
+            rg[:, :, 0] = np.nan_to_num(re, nan=0.0)
+            rg[:, :, 1] = np.nan_to_num(im, nan=0.0)
             rg.tofile(outp)
             meta = {"file": os.path.basename(outp), "rows": int(re.shape[0]),
                     "cols": int(re.shape[1]), "lat_north": float(lat[0]),
@@ -313,7 +339,11 @@ def main():
         log("[water]   -> harvest_tides.py picks up data/water/extra_tide_stations.json")
 
     if args.eot20:
-        convert_eot20(["M2", "S2", "N2", "K1", "O1"])
+        # M8i: the widened set -- every EOT20 constituent the atlas consumes. (EOT20's 17
+        # minus MF/MM/S1, which are either sub-mm here or radiational-contaminated; L2,
+        # NU2, MU2, M6 have no EOT20 grid and ride the station rung only.)
+        convert_eot20(["M2", "S2", "N2", "K1", "O1",
+                       "K2", "P1", "Q1", "2N2", "T2", "J1", "M4", "SA", "SSA"])
     else:
         log("[water] run with --eot20 for the 2 GB global constituent base (once)")
 

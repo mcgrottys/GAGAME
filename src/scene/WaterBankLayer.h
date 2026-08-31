@@ -27,6 +27,7 @@
 #include "sim/SeaState.h"
 #include "sim/SweSolver.h"
 
+#include <cstring>
 #include <string>
 
 namespace ga {
@@ -35,7 +36,8 @@ class SeaLayer;
 
 class WaterBankLayer : public Layer {
 public:
-    static constexpr int kMips = 6;         // 4.8 m .. 154 m texels, 2.5 .. 79 km spans
+    static constexpr int kMips = 6;         // texel = base * 2^m; at base 2.4: 2.4..77 m
+                                            // texels, 1.2..39 km spans (scene bankTexelM)
     static constexpr int kRingTiles = 4;    // 4x4 logical tiles per ring
     static constexpr int kTileTexels = 128;
     static constexpr int kRingTexels = kRingTiles * kTileTexels;
@@ -75,7 +77,24 @@ public:
         m_hgtWinOrg[0] = orgPxX;
         m_hgtWinOrg[1] = orgPxY;
     }
+    // M8: the solved wave field (may be null / not Ready -- the kernel falls back to
+    // the cascade closures outside the window, which is also the fallback everywhere).
+    void SetWaveField(const class WaveField* wf) { m_wave = wf; }
+    // M8: the water scene config (data/wave_scene.json, hot-reloaded in main) -- the
+    // bank reads the LIVE values every frame, so an edit lands on the next recompose.
+    void SetScene(const struct WaterSceneConfig* sc) { m_scene = sc; }
+    // M8 wakes: the fleet table (8 slots, vqview layout). Disabled slots stay zero.
+    void SetBoats(const float* a32, const float* b32) {
+        memcpy(m_boatA, a32, sizeof(m_boatA));
+        memcpy(m_boatB, b32, sizeof(m_boatB));
+    }
     float BaseTexelM() const { return m_baseTexelM; }
+    // M8h: ring density from the scene (data/wave_scene.json bankTexelM). Call BEFORE
+    // Init -- the ring spans, the kernel's fold thresholds, the 9b emulator, and the
+    // globe's gBankA.x all derive from this one number, but only at construction.
+    void SetBaseTexel(float m) {
+        if (m > 0.1f && m < 100.0f) m_baseTexelM = m;
+    }
     uint32_t ResidentTiles() const {
         return m_disp.ResidentCount() + m_param.ResidentCount() + m_detail.ResidentCount();
     }
@@ -103,6 +122,18 @@ private:
         uint32_t slotsD[4];   // M7q: height window SRV, its residency-map SRV
         float geoA[4];        // world->latlon: orgLat, orgLon, 1/mPerLat, 1/mPerLon
         float winA[4];        // window: org px x, org px y, 1/sizePx, full-world px (z14)
+        uint32_t slotsE[4];   // M8 foamlaw: cascade DERIV SRVs x3 (Jacobian foam union)
+        float rmsRef[4];      // M8: unit-sea rms envelope per band (crest gate / excess)
+        uint32_t waveU[4];    // M8 wavefield: atlas SRV, nx, ny, nComp
+        float waveA[4];       // window org xy (world m), 1/cellM, feather m
+        float waveB[4];       // envMax, sumMax, chop, solved-at level
+        float foamA[4];       // scene closures: churnGain, shedSteepCap, shedMssCeil, crestLo
+        float foamB[4];       // crestHi, depthLo, depthHi, spare
+        float waveSig[32];     // (cos, sin)(sigma_c t), packed 2 comps per float4 row
+        float waveDirTab[32];  // unit propagation (east, north), same packing
+        float waveScale[32];   // (aMax, kMax) dequant scales, same packing
+        float boatA[32];       // M8 wakes: (x, z, heading rad, speed m/s) x8
+        float boatB[32];       // (wake amp m, hull half-length m, enabled, spare) x8
     };
     struct BankTile {
         float orgXZ[2];
@@ -129,6 +160,9 @@ private:
     double m_hgtWinOrg[2] = {0.0, 0.0};
     const GlobeModel* m_globe = nullptr;
     const SeaState* m_seaState = nullptr;
+    const class WaveField* m_wave = nullptr;   // M8: the solved wave field (optional)
+    const struct WaterSceneConfig* m_scene = nullptr;   // M8: live scene closures
+    float m_boatA[32] = {}, m_boatB[32] = {};           // M8: the fleet (zeros = off)
 
     TileAtlas2D m_disp, m_param, m_detail;   // detail: per-tile sea-state context the PS
                                              // needs to recover sub-ring sparkle (hsScale;

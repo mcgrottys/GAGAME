@@ -66,6 +66,20 @@ public:
     bool PeakDirValid() const { return m_peakDirValid; }
     float PeakDirX() const { return m_peakDirX; }
     float PeakDirZ() const { return m_peakDirZ; }
+    // M8 foamlaw: unit-sea rms envelope per cascade band (sqrt(2 m0), exaggerated) --
+    // the bank kernel scales by its per-texel gains for the depth-excess trigger and
+    // the crest gate; the globe PS scales the same way for the tanh peak shaping.
+    float BandRms(int c) const { return m_bandRms[c]; }
+    // M8 wavefield: the live partition set, for the solved-field bucket key + spectrum.
+    const PartParam* Parts() const { return m_parts; }
+    // M8: the Monahan wind gate -- whitecap COVERAGE follows wind speed; the Jacobian
+    // only says where foam sits. The bank's steepness trigger multiplies by this (a
+    // 4 m/s breeze must not micro-break the whole sea -- the Sea.hlsl law, restored
+    // when M8b brought the long-dead cascade foam path back to life).
+    float WindGate() const { return m_windGate; }
+    // M8: a --storm override makes the GFS grid stale by definition -- consumers that
+    // ratio local grid Hs against the reference must treat the storm AS the reference.
+    bool StormOn() const { return m_stormHs > 0.01f; }
     // M7j --trace: the CPU mirror of the kernel's shadow read -- SAME frame, SAME
     // row0-north flip, so the hypervisor prints exactly what the GPU will see.
     float ShadowAtWorld(float x, float z) const {
@@ -119,6 +133,9 @@ public:
     // ACT / peak solved) restores the magnitude while the solver keeps the spatial shape.
     float sweCurrentGain = 3.2f;
     float heightScale = 1.15f;   // vertical exaggeration; vqview shipped 1.15 as its look
+    // M8 buoy assimilation closures (data/wave_scene.json; main mirrors them here)
+    float buoyAssimAgeH = 6.0f;
+    float buoyAssimGainMax = 1.8f;
     // M7: the wave bank consumes the cascade textures; --one-water retires this layer's own
     // grid DRAW while the compute chain (FFT, SWE, churn) keeps running -- the TerrainLayer
     // renderEnabled pattern, applied to the sea.
@@ -198,6 +215,8 @@ private:
     float m_bathyGeo[4] = {0, 0, 1, 1};
     float m_cPeak = 10.0f;     // peak-partition phase speed for the amplification factor
     float m_peakDirX = -1.0f, m_peakDirZ = 0.0f;
+    float m_bandRms[3] = {};   // M8: unit-sea rms envelope per band (sqrt(2 m0) * exag)
+    PartParam m_parts[4] = {};   // M8: the live partition set (wavefield spectrum input)
 
     // ---- M4: the churn atlas (16 x 16 km virtual at 2 m texels; resident only where breaking)
     static constexpr float kChurnDomainM = 16384.0f;

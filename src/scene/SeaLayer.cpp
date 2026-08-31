@@ -244,8 +244,32 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
             activeParts = m_sea->BuildParams(hour, parts);
         }
         const uint32_t seed = static_cast<uint32_t>(m_sea->CycleUnix() / 3600.0) * 2654435761u;
+        // M8 BUOY ASSIMILATION (the user's call: the single-point measurements should
+        // STEER the model, not just grade it). One scalar: the measured buoy Hs over
+        // the forecast's, applied to every partition's energy BEFORE synthesis -- the
+        // epoch-ladder philosophy one product over (point authority corrects the global
+        // model; the L2 stations already do this to EOT20). Guards: never under a
+        // --storm override (that is an explicit sandbox), only a fresh observation
+        // (< 3 h), gain clamped [0.6, 1.8] (a closure -- past it the forecast and the
+        // buoy disagree about the WORLD, and a scalar cannot fix that).
+        if (m_stormHs <= 0.01f && activeParts > 0) {
+            const BuoyObs* bo = m_sea->Buoy("44013");
+            const double hsFc = SeaState::SignificantHeight(parts, activeParts);
+            if (bo && bo->valid && bo->hs > 0.05 && hsFc > 0.05 &&
+                std::abs(simUnix - bo->obsUnix) < buoyAssimAgeH * 3600.0) {
+                const double g = std::clamp(bo->hs / hsFc, 1.0 / buoyAssimGainMax,
+                                            static_cast<double>(buoyAssimGainMax));
+                for (int i = 0; i < activeParts; ++i) {
+                    parts[i].specScale *= static_cast<float>(g * g);   // energy ~ Hs^2
+                }
+                Log("[sea] buoy 44013 assimilated: Hs %.2f obs vs %.2f forecast -> "
+                    "gain %.2f on every partition (age %.1f h)",
+                    bo->hs, hsFc, g, std::abs(simUnix - bo->obsUnix) / 3600.0);
+            }
+        }
         m_fft.SetSeaState(parts, activeParts, seed);
         hsModel = SeaState::SignificantHeight(parts, activeParts);
+        for (int i = 0; i < 4; ++i) m_parts[i] = (i < activeParts) ? parts[i] : PartParam{};
         if (activeParts > 0) {
             // M7j: the hypervisor's second catch -- parts[0] is FILE order, not energy
             // order, and at calm hours the first entry can be the 0.05 m westerly wind
@@ -300,13 +324,25 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
             const double kCut[4] = {2.0 * kPiD / 756.0, 2.0 * kPiD / 60.0, 2.0 * kPiD / 12.0,
                                     0.9 * kPiD * OceanFft::kN / 47.0};
             double mss[3] = {0, 0, 0};
+            double m0b[3] = {0, 0, 0};   // M8 foamlaw: banded amplitude variance too
             const double df = 0.004;
             for (double f = df; f < 2.0; f += df) {
                 const double k = (2.0 * kPiD * f) * (2.0 * kPiD * f) / 9.81;
                 const double s = SeaState::SpectrumAt(parts, activeParts, f);
                 for (int c = 0; c < 3; ++c) {
-                    if (k >= kCut[c] && k < kCut[c + 1]) mss[c] += k * k * s * df;
+                    if (k >= kCut[c] && k < kCut[c + 1]) {
+                        mss[c] += k * k * s * df;
+                        m0b[c] += s * df;
+                    }
                 }
+            }
+            // M8 foamlaw: the unit-sea rms ENVELOPE per band, rms = sqrt(sum a^2) =
+            // sqrt(2 m0), exaggerated like the geometry. The bank kernel scales it by
+            // its per-texel band gains to get the local envelope the depth-excess
+            // trigger and the crest gate normalize against (test the ENVELOPE, never
+            // instantaneous |eta| -- the television-static lesson).
+            for (int c = 0; c < 3; ++c) {
+                m_bandRms[c] = static_cast<float>(std::sqrt(2.0 * m0b[c]) * heightScale);
             }
             const double ex2 = heightScale * heightScale;   // geometry is exaggerated; the
                                                             // shed variance must match it

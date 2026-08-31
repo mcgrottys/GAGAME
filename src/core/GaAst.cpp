@@ -189,9 +189,22 @@ void RegisterKnownWaterEdges() {
     // flip into +v=north consumers; the wrap cascades and the bank/churn atlases agree
     // with world +z and demand none. These lines ARE the orientation ledger, as code.
     Register({"ocean.fft", "water.bank", "cascade.disp", wrap, atlasN, false,
-              "m disp + jacobian foam", "+-Hs/2", 1.0, "WaterBank.hlsl CsBankFill wrap"});
+              "m displacement", "+-Hs/2", 1.0, "WaterBank.hlsl CsBankFill wrap"});
+    // M8 foamlaw: the Jacobian foam lives in the DERIV fiber (the disp fiber's w is
+    // zero) -- the kernel takes the crest-gated UNION of the per-band answers, never
+    // their sum (one physical event, detected in two representations).
+    Register({"ocean.fft", "water.bank", "cascade.deriv (foam union)", wrap, atlasN,
+              false, "jacobian foam 0..1", "0..1", 1.0,
+              "WaterBank.hlsl CsBankFill foam discipline"});
     Register({"ocean.fft", "globe.ps", "cascade.deriv", wrap, atlasN, false, "slope",
               "+-0.3", 1.0, "Globe.hlsl detail loop"});
+    // M8 caustics: the SAME deriv fibers, sampled at the SUN ray's water entry
+    // (bed - sunRun) and assembled into the ray-map Jacobian -- J in dv.z, the
+    // Laplacian finite-differenced from the slope channels at cascade resolution,
+    // amplitude-scaled by the detail plane's per-band gains (ALGEBRA.md caustics;
+    // proofs/caustic_jacobian.py adjudicated the PHYSICAL gain form).
+    Register({"ocean.fft", "globe.ps", "caustic jacobian", wrap, atlasN, false,
+              "J / 1/m lap", "gain 0.35..2.6", 1.0, "Globe.hlsl M8 caustic block"});
     Register({"swe.solver", "water.bank", "eta", rowS, atlasN, true, "m dEta", "+-1.5", 1.0,
               "WaterBank.hlsl CsBankFill (1-uv.y)"});
     Register({"swe.solver", "water.bank", "uv", rowS, atlasN, true, "m/s", "+-2.5", 1.0,
@@ -199,7 +212,8 @@ void RegisterKnownWaterEdges() {
     Register({"swe.solver", "water.bank", "shadow", rowS, atlasN, true, "0..1 exposure",
               "0.12..1", 1.0, "WaterBank.hlsl CsBankFill (1-uv.y), floor 0.18"});
     Register({"churn.kernel", "water.bank", "churn", atlasN, atlasN, false,
-              "0..1 aeration", "0..1", 1.05, "WaterBank.hlsl CsBankFill flat"});
+              "0..1 aeration (remembered foam, MAX-composited)", "0..1", 1.0,
+              "WaterBank.hlsl CsBankFill flat"});
     Register({"bathy.cudem", "churn.kernel", "bed", rowS, atlasN, true, "m NAVD", "-40..15",
               1.0, "SeaChurn.hlsl suv flip"});
     Register({"bathy.cudem", "sea.ps", "bed", rowS, atlasN, true, "m NAVD", "-40..15", 1.0,
@@ -213,8 +227,30 @@ void RegisterKnownWaterEdges() {
     Register({"compose.stack", "water.bank", "corners", worldM, worldM, false,
               "m NAVD level/bed + hsScale", "hsScale 0.15..3", 1.0,
               "WaterBankLayer CornerParams (CPU)"});
+    // M8 THE SOLVED WAVE FIELD (ALGEBRA.md wavefield). The solver's grid is row-0-SOUTH
+    // (+v = north, the patch.wrap family) so the bank kernel samples it with NO flip;
+    // the phase gauge (phi = 0 at the SW corner texel center, x west->east, y south->
+    // north row-mean) is declared in the whitepaper -- an undeclared gauge is an
+    // ambiguous field. Inputs: the one bed (stack, CPU, v-N), the tide level bucket,
+    // the ACT current proxy; output: per-component (a, k, cos phi, sin phi) planes.
+    Register({"compose.stack", "wave.solver", "bed (per cell)", worldM, atlasN, false,
+              "m NAVD", "-40..15", 1.0, "WaveField.h SolveNow (SampleHeightStack)"});
+    Register({"water.atlas", "wave.solver", "level bucket", worldM, worldM, false,
+              "m NAVD", "0.25 m buckets", 1.0, "WaveField.h BucketKey"});
+    Register({"act.currents", "wave.solver", "current proxy (fallback)", worldM, atlasN,
+              false, "m/s (conveyance jet, x3.0 closure)", "0..2", 3.0,
+              "WaveField.h (ebb toward 105, flood 285)"});
+    // M8 flows into waves: the SOLVED current when the SWE window is resident -- read
+    // back row-0-north (FLIP), resampled to the solve grid, x3.2 prism gain, quantized
+    // 0.05 m/s, content-hashed into the bucket key.
+    Register({"swe.solver", "wave.solver", "current (solved)", rowS, atlasN, true,
+              "m/s (live SeaLayer gain), 0.05 buckets", "+-2.5", 1.0,
+              "WaveField.h RefreshSweCurrent (1-v flip)"});
+    Register({"wave.solver", "water.bank", "a/k/phase-spinor planes", atlasN, atlasN,
+              false, "m / rad/m / unit spinor (RGBA8, per-comp aMax kMax)",
+              "17 slices, 2-wide grid", 1.0, "WaterBank.hlsl WaveSample (no flip)"});
     Register({"water.bank", "globe.ps", "disp/param/detail", atlasN, atlasN, false,
-              "m / sigma2 / m/s / hsScale*expo", "rings 4.8..154 m/texel", 1.0,
+              "m / sigma2 / m/s / band gains (g1,dry,g0,g2)", "rings 4.8..154 m/texel", 1.0,
               "Globe.hlsl BankSample manual bilinear"});
     Register({"water.bank", "globe.mesh", "disp+level", atlasN, atlasN, false, "m NAVD",
               "+-4", 1.0, "GlobeMesh.hlsl BankSample"});
@@ -229,10 +265,16 @@ void RegisterKnownWaterEdges() {
     Register({"eot20.grid", "water.atlas", "phasor grid", latlonW, latlonW, false,
               "phasor re/im", "|P| clamp a2>100 (Fundy)", 1.0,
               "Eot20Source (epoch-rotated arg sum P conj Q)"});
-    Register({"water.atlas", "window.field", "tide phasors M2..O1", latlonW, mercPxW,
+    Register({"water.atlas", "window.field", "tide phasors x18 (M8i)", latlonW, mercPxW,
               true, "phasor re/im", "RG16F tiles", 1.0, "Compositor::WindowField paint"});
     Register({"water.atlas", "weather.mgr", "level rotors", latlonW, latlonW, false,
               "m NAVD", "+-3", 1.0, "WeatherManager::Query h(t)=msl+Re[P e^iwt]"});
+    // M8g THE ORIGIN PLANES: the datum envelope (synodic-month min/max of the same
+    // rotor sum, NAVD) -- MLLW/MHHW generalized between gauges. First consumer: the
+    // edit-land geometry floor (absolute crest, so high water drowns the outer jetty).
+    Register({"water.atlas", "globe.mesh", "datum envelope (origin planes)", latlonW,
+              atlasN, false, "m NAVD lo/hi", "containment + width 2.4..3.6 (watertest 7)",
+              1.0, "WaterAtlas::EnvelopeNavd -> gBankE.w edit floor"});
     Register({"gfswave.grid", "weather.mgr", "hs/tp/dir", rowS, latlonW, true,
               "m / s / deg", "0..15 m", 1.0, "WeatherManager wave grid (lat1-lat row)"});
     Register({"weather.mgr", "compose.stack", "corner params feed", latlonW, worldM,
