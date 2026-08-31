@@ -28,6 +28,14 @@ uint64_t Fnv1a(uint64_t h, const std::string& s) {
     return h;
 }
 
+// The frame IS the identity: a window realization's cache folder carries its zoom base and
+// Mercator origin, so two windows of one channel can never serve each other's tiles.
+std::string WindowTag(const char* kind, long long orgPxX, long long orgPxY, int zBase) {
+    char buf[96];
+    snprintf(buf, sizeof(buf), "%s_z%d_%lld_%lld", kind, zBase, orgPxX, orgPxY);
+    return buf;
+}
+
 uint16_t FloatToHalf(float f) {
     const uint32_t x = *reinterpret_cast<const uint32_t*>(&f);
     const uint32_t sign = (x >> 16) & 0x8000u;
@@ -253,10 +261,19 @@ TileProviderFn Compositor::CubeColor(int channel) {
 
 TileProviderFn Compositor::WindowColor(int channel, long long orgPxX, long long orgPxY,
                                        uint32_t sizePx, int zBase) {
-    EnsureCacheDir(m_channels[channel], "window");
+    // THE REALIZATION'S NAME IS ITS FRAME (M7x). Three color windows (z14, the z17 detail,
+    // the z19 export inlet) shared the literal folder "window": same (f,m,x,y) filenames,
+    // and the per-tile subset hash matches wherever the same sources touch both footprints
+    // -- so the z17 paint of tile (x,y) was SERVED as the z14 tile (x,y): the patchwork of
+    // displaced, wrong-scale imagery on the flood rail. A tile's content is a pure function
+    // of (org, zBase, mip, x, y) + the stack; org and zBase therefore belong in the cache
+    // identity. Identical frames still share (the export warming the live window is a
+    // feature); distinct frames now CANNOT collide by construction.
+    const std::string tag = WindowTag("window", orgPxX, orgPxY, zBase);
+    EnsureCacheDir(m_channels[channel], tag.c_str());
     (void)sizePx;
-    return [this, channel, orgPxX, orgPxY, zBase](const TileRequest& r,
-                                                  std::vector<uint8_t>& out) {
+    return [this, channel, orgPxX, orgPxY, zBase, tag](const TileRequest& r,
+                                                       std::vector<uint8_t>& out) {
         const Channel& ch = m_channels[channel];
         // Window texels ARE Mercator pixels of zoom (zBase - mip): the lat/lon roundtrip
         // through a Mercator-tree source lands back on the same pixel, so fills remain the
@@ -274,7 +291,7 @@ TileProviderFn Compositor::WindowColor(int channel, long long orgPxX, long long 
         box.texLon = (box.lonMax - box.lonMin) / 128.0;
         std::vector<size_t> inc;
         const uint64_t subset = ColorSubset(ch, box, inc);
-        const std::string path = CachePath(ch, "window", r, subset);
+        const std::string path = CachePath(ch, tag.c_str(), r, subset);
         if (ReadCached(path, out)) return true;
 
         std::vector<PaintCtx> ctxs(inc.size());
@@ -375,10 +392,11 @@ TileProviderFn Compositor::CubeHeight(int channel) {
 
 TileProviderFn Compositor::WindowHeight(int channel, long long orgPxX, long long orgPxY,
                                         uint32_t sizePx, int zBase) {
-    EnsureCacheDir(m_channels[channel], "windowH");
+    const std::string tag = WindowTag("windowH", orgPxX, orgPxY, zBase);
+    EnsureCacheDir(m_channels[channel], tag.c_str());
     (void)sizePx;
-    return [this, channel, orgPxX, orgPxY, zBase](const TileRequest& r,
-                                                  std::vector<uint8_t>& out) {
+    return [this, channel, orgPxX, orgPxY, zBase, tag](const TileRequest& r,
+                                                       std::vector<uint8_t>& out) {
         const Channel& ch = m_channels[channel];
         // R16F 256x128 tiles of the same Mercator window frame the color window uses.
         const double worldPx = static_cast<double>((1ll << zBase) * 256ll >> r.mip);
@@ -394,7 +412,7 @@ TileProviderFn Compositor::WindowHeight(int channel, long long orgPxX, long long
         box.texLon = (box.lonMax - box.lonMin) / 256.0;
         std::vector<size_t> inc;
         const uint64_t subset = HeightSubset(ch, box, inc);
-        const std::string path = CachePath(ch, "windowH", r, subset);
+        const std::string path = CachePath(ch, tag.c_str(), r, subset);
         if (ReadCached(path, out)) return true;
 
         out.assign(65536, 0);
@@ -423,10 +441,11 @@ TileProviderFn Compositor::WindowHeight(int channel, long long orgPxX, long long
 
 TileProviderFn Compositor::WindowField(int channel, long long orgPxX, long long orgPxY,
                                        uint32_t sizePx, int zBase) {
-    EnsureCacheDir(m_channels[channel], "windowF");
+    const std::string tag = WindowTag("windowF", orgPxX, orgPxY, zBase);
+    EnsureCacheDir(m_channels[channel], tag.c_str());
     (void)sizePx;
-    return [this, channel, orgPxX, orgPxY, zBase](const TileRequest& r,
-                                                  std::vector<uint8_t>& out) {
+    return [this, channel, orgPxX, orgPxY, zBase, tag](const TileRequest& r,
+                                                       std::vector<uint8_t>& out) {
         const Channel& ch = m_channels[channel];
         // RG16F 128x128 tiles: the phasor fiber (re, im) in the Mercator window frame.
         const double worldPx = static_cast<double>((1ll << zBase) * 256ll >> r.mip);
@@ -442,7 +461,7 @@ TileProviderFn Compositor::WindowField(int channel, long long orgPxX, long long 
         box.texLon = (box.lonMax - box.lonMin) / 128.0;
         std::vector<size_t> inc;
         const uint64_t subset = FieldSubset(ch, box, inc);
-        const std::string path = CachePath(ch, "windowF", r, subset);
+        const std::string path = CachePath(ch, tag.c_str(), r, subset);
         if (ReadCached(path, out)) return true;
 
         out.assign(65536, 0);

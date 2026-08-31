@@ -81,7 +81,8 @@ Harvesters (python, repo root; all cache-first and polite): `harvest_globe.py`
 `harvest_tides.py` (constituent fits incl. the 20-station set), `harvest_water.py`
 (+`--eot20` for the 2.3 GB EOT20 grids), `harvest_waves.py` / `harvest_currents.py` /
 `harvest_gis.py` / `harvest_vectors.py` / `harvest_aerial.py` (MassGIS orthos).
-Large static datasets live in `D:\DataCache\GAGAME\` (200 GB granted). `data/` holds the
+Large static datasets live in `D:\DataCache\GAGAME\` (300 GB granted 2026-08-31, for
+texture / GIS / topology / bathymetry / weather). `data/` holds the
 repo-sized realizations; the composed cache lives beside it and repaints exactly what a
 program edit touches (the soak rule — deleting it only costs a repaint).
 
