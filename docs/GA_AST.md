@@ -14,6 +14,8 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | height.stack | classify | synth.bed | latlon.deg +v=N | latlon.deg +v=N | - | m NAVD -> dry albedo | 3 samples/texel | x1 | BedSynthSource::Sample (M7d cross-channel edge) |
 | globe.walk | wants | residency.mgr | uv01.vS +v=S | uv01.vS +v=S | - | mip requests | mips 0..7 + floor 4..7 | x1 | GlobeLayer node walk + M7g mip floor |
 | residency.mgr | have-map | globe.ps | resmap.texel +v=S | uv01.vS +v=S | - | finest mip * 16 (R8) | 0..7*16 | x1 | CsHave2D residency clamp |
+| world.flat | anchor-linear map | latlon.deg | world.m +v=N | latlon.deg +v=N | - | deg | mPerLon frozen at anchor; shared by ALL water consumers | x1 | BathyModel::kOrgLat/kMPerLat convention |
+| height.window | bed per texel | water.bank | latlon.deg +v=N | uv01.vS +v=S | - | m NAVD | float merc ~0.25 px ulp (gatest-bounded); residency-clamped mips 2..7 | x1 | WaterBank.hlsl M7q (same formulation as CsWindowUv) |
 | ocean.fft | cascade.disp | water.bank | patch.wrap +v=N | atlas.texel +v=N | - | m disp + jacobian foam | +-Hs/2 | x1 | WaterBank.hlsl CsBankFill wrap |
 | ocean.fft | cascade.deriv | globe.ps | patch.wrap +v=N | atlas.texel +v=N | - | slope | +-0.3 | x1 | Globe.hlsl detail loop |
 | swe.solver | eta | water.bank | raster.row0N +v=S | atlas.texel +v=N | FLIP | m dEta | +-1.5 | x1 | WaterBank.hlsl CsBankFill (1-uv.y) |

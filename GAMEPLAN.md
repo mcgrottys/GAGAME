@@ -1227,6 +1227,21 @@ most of the residual disagreement with the reference physics. Remaining lens sea
 ring-boundary fold steps (foam w per ring) — visible raw, smoothed in the shaded view by
 the PS detail tier; a ring cross-fade is named next. Six gates green.
 
+**M7s (2026-08-30): THE SMOOTH BROWN CONFESSES — coverage folds, thresholds don't.**
+The user rejected the leaf-off-vintage explanation for the brown earth ("that isn't
+brown leaves, that's a smooth brown — use the hypervisor") and was right on both
+counts. The --albedo lens convicted synth.bed: at coarse paint LODs the classifier
+sampled the BED box-averaged (marsh +1 crossed with creeks -2 slides under the +1.2
+cutoff) and painted dry sand over low-lying LAND — smooth elevation-contour edges,
+which is why it masqueraded as hypsometric tint and got misdiagnosed as imagery
+vintage. The M6t law holds in the compositor too: NEVER threshold a box-averaged
+field — average the thresholded field. Coarse texels now subsample the alpha decision
+at ~45 m and average the ANSWERS (identity bumped "fold2" → exact repaints). Cold
+80 km frames now show green lowlands with sand only in real shallows. The NAIP
+harvest bought on the false premise is ON HOLD — the land is already green; NAIP
+remains the option if summer-vintage imagery is wanted for its own sake. Six gates
+green.
+
 **THE DX12 GOTCHAS LEDGER (and the non-GA-workaround audit the user asked for: every
 workaround marked, with whether a GA formulation would have needed it at all):**
 1. Bindless static-sampler SampleLevel returns ZERO outside the pixel stage on this

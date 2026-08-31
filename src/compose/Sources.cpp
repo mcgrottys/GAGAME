@@ -527,7 +527,7 @@ bool BedSynthSource::Load(const std::string& rulesPath, const Compositor* comp,
         mix(hs->Info().structure);
     }
     char structure[96];
-    snprintf(structure, sizeof(structure), "bed-classifier (rules+zones+bed) v%08x",
+    snprintf(structure, sizeof(structure), "bed-classifier fold2 (rules+zones+bed) v%08x",
              static_cast<uint32_t>(h & 0xFFFFFFFFu));
     m_info.name = "synth.bed";
     m_info.structure = structure;
@@ -558,13 +558,39 @@ float BedSynthSource::Sample(double latRad, double lonRad, double groundResM,
     // Paint the band the refracted ray can SEE: fade out where the water is deep enough
     // that transmittance kills the bed term anyway, and above the waterline band where
     // land imagery is authoritative.
-    float a = 1.0f;
-    if (bed < m_full0) {
-        a = static_cast<float>((bed - m_off0) / (std::max)(m_full0 - m_off0, 1e-6));
-    } else if (bed > m_full1) {
-        a = static_cast<float>((m_off1 - bed) / (std::max)(m_off1 - m_full1, 1e-6));
+    //
+    // M7s: THE ALPHA FOLDS AS COVERAGE, not as a threshold of the box-average. At a 600 m
+    // texel the averaged bed of a marsh plain (+1 crossed with -2 creeks) slid under the
+    // +1.2 cutoff and the classifier painted DRY SAND over low-lying LAND at coarse LODs
+    // only -- the "smooth brown earth" the albedo lens convicted (and the M6t law again:
+    // never threshold a box-averaged field; average the thresholded field). Coarse texels
+    // now subsample the alpha decision at ~45 m and average the ANSWERS.
+    auto alphaAt = [&](float b) {
+        double av = 1.0;
+        if (b < m_full0) {
+            av = (b - m_off0) / (std::max)(m_full0 - m_off0, 1e-6);
+        } else if (b > m_full1) {
+            av = (m_off1 - b) / (std::max)(m_off1 - m_full1, 1e-6);
+        }
+        return (std::min)((std::max)(av, 0.0), 1.0);
+    };
+    float a;
+    if (groundResM > 90.0) {
+        const int n = (std::min)(4, static_cast<int>(groundResM / 45.0));
+        const double dLat = groundResM / 6371000.0 / n;
+        const double dLon = dLat / (std::max)(std::cos(latRad), 0.2);
+        double acc = 0.0;
+        for (int sy = 0; sy < n; ++sy) {
+            for (int sx = 0; sx < n; ++sx) {
+                const double la = latRad + (sy - (n - 1) * 0.5) * dLat;
+                const double lo = lonRad + (sx - (n - 1) * 0.5) * dLon;
+                acc += alphaAt(m_comp->SampleHeightStack(m_hgtCh, la, lo, 45.0));
+            }
+        }
+        a = static_cast<float>(acc / (n * n)) * wBox;
+    } else {
+        a = static_cast<float>(alphaAt(bed)) * wBox;
     }
-    a = (std::min)((std::max)(a, 0.0f), 1.0f) * wBox;
     if (a <= 0.004f) return 0.0f;
     // Slope from the SAME stack, at the texel's own scale: the classifier's second input.
     const double dM = (std::max)(groundResM, 8.0);
