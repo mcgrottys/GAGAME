@@ -75,7 +75,8 @@ public:
     // M7: per-frame wave-bank binding (SRVs + ring origins), and the one-water switch.
     void SetWaterBank(uint32_t dispSrv, uint32_t paramSrv, uint32_t detailSrv,
                       const uint32_t derivSrv[3], const float patchL[3],
-                      const float bandK[3], const float bandRms[3], float heightScale,
+                      const float bandK[3], const float bandRms[3], const float bandFold[3],
+                      float heightScale,
                       float baseTexelM, const float* org12, bool oneWater) {
         m_bankSrv[0] = dispSrv;
         m_bankSrv[1] = paramSrv;
@@ -85,6 +86,7 @@ public:
             m_bankPatch[i] = patchL[i];
             m_bankK[i] = bandK[i];
             m_bankRms[i] = bandRms[i];   // M8: unit-sea rms envelope (peak shaping)
+            m_bankFold[i] = bandFold[i];  // M9c: the fold's own wavenumber
         }
         m_bankExag = heightScale;
         m_bankBase = baseTexelM;
@@ -127,6 +129,17 @@ public:
     float windGateVal = 1.0f;       // M8: Monahan whitecap gate (per frame, from sea)
     float causticStrength = 0.6f;   // M8: bed dapple strength (scene cfg; 0 = off)
     bool waterOptics = true;        // M9: data-driven K_d + deep colour (scene cfg)
+    // M9b: SURFACE DEBUG. Shading alone cannot tell geometry from normals (priors 8), so
+    // the raster answers instead. 0 = shipped, 1 = wireframe (every triangle: is the mesh
+    // actually moving?), 2 = meshlet tint (one flat colour per amplification record: what
+    // drew it, and where the CDLOD rings hand over -- readable at altitudes where
+    // every-triangle wireframe collapses into moire). PSO-selected; PsMain untouched.
+    int surfaceDebug = 0;
+    // M9d: --mesh-stats. The storm wireframe LOOKED like the near field carried coarser
+    // triangles than the mid field, which would be the LOD running backwards. Squinting at
+    // rasterized lines is exactly the guessing priors 8 warns about, so count the records
+    // instead: cell size (arc/32) against distance to the meshlet's own anchor.
+    bool meshStats = false;
     float editFloorNavd = 1.8f;     // M8g: edit-land geometry floor, ABSOLUTE NAVD m --
                                     // set from the datum envelope (MLLW + margin) at boot
                                     // so high water drowns the outer jetty (origin planes)
@@ -198,6 +211,7 @@ private:
         uint32_t optU[4];     // ocean-colour SRV, ice SRV, optics on, spare
         float optA[4];        // ocean grid: lat1, lon1, 1/dlat, 1/dlon
         float optB[4];        // nx, ny, deep-albedo gain g, spare
+        float bankFold[4];    // M9c: the FOLD's wavenumber per band (energy-weighted)
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -281,6 +295,7 @@ private:
     float m_bankPatch[3] = {756.0f, 186.0f, 47.0f};
     float m_bankK[3] = {0.03f, 0.15f, 1.0f};
     float m_bankRms[3] = {};   // M8: unit-sea rms envelope per band
+    float m_bankFold[3] = {0.0209f, 0.2339f, 2.8420f};   // M9c: the fold's wavenumbers
     float m_bankExag = 1.15f;
     float m_bankBase = 4.8f;
     float m_bankOrg[12] = {};
@@ -292,7 +307,9 @@ private:
     uint32_t m_meshletDrops = 0;    // M8h: leaves dropped at the record cap this frame
     bool m_dropsReported = false;   // one report per drop episode, not per frame
     bool m_msPath = false;
-    Com<ID3D12PipelineState> m_msPso;
+    uint32_t m_meshStatWalks = 0;   // M9d: --mesh-stats prints on the 8th walk
+    Com<ID3D12PipelineState> m_msPso, m_msPsoWire, m_msPsoMeshlet;
+    Com<ID3D12PipelineState> m_psoWire, m_psoMeshlet;
     Com<ID3D12GraphicsCommandList6> m_cl6;
     std::vector<MeshletRec> m_meshlets;
     GpuBuffer m_recBuf[Gpu::kFrameCount];

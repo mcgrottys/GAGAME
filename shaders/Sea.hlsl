@@ -23,9 +23,11 @@ cbuffer SeaCb : register(b1) {
     uint4  gDispSrv;    // xyz = displacement SRVs per cascade
     uint4  gDerivSrv;   // xyz = derivative SRVs per cascade
     float4 gPatchL;     // xyz = cascade patch sizes m, w = target tessellated edge, PIXELS
-    float4 gFadeD;      // M6u: x = model Hs (far-field whitening); yzw spare (the per-cascade
-                        // fade DISTANCES that lived here are retired -- folds are footprint-
-                        // based in CascadeFade now)
+    float4 gFadeD;      // M6u: x = model Hs (far-field whitening). M9c: yzw now carry the
+                        // FOLD's wavenumber per cascade (energy-weighted; gBandK keeps the
+                        // cut mean for phase speed and shoaling). The per-cascade fade
+                        // DISTANCES that lived here retired in M6t -- folds are
+                        // footprint-based in CascadeFade.
     float4 gJet;        // x signed speed m/s (+flood -ebb), y half-width m, z seaward decay m,
                         // w enabled
     float4 gJetDir;     // xy = flood-toward unit, zw = ebb-toward unit (x east, z north)
@@ -158,7 +160,10 @@ float PixFootM(float dist) {
     return dist * 2.0f * length(gCamUp.xyz) * gViewport.w;
 }
 float CascadeFade(uint c, float dist) {
-    const float lam = 6.2831853f / gBandK[c];   // the band's representative wavelength
+    // M9c: the wavelength the band's ENERGY actually sits at (gFadeD.yzw), so this path
+    // folds identically to the bank and the globe PS. Zero = a pre-M9c constant buffer.
+    const float kF = (gFadeD[c + 1] > 1e-6f) ? gFadeD[c + 1] : gBandK[c];
+    const float lam = 6.2831853f / kF;
     return 1.0f - smoothstep(lam * 0.12f, lam * 0.5f, PixFootM(dist));
 }
 

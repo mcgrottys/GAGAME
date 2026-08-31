@@ -546,6 +546,22 @@ bool GlobeLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
         return false;
     }
     m_pso = pso;
+    // M9b: wireframe twin of the CDLOD fallback, so --wireframe means the same thing on a
+    // machine without mesh shaders.
+    d.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+    Com<ID3D12PipelineState> psoWire;
+    if (SUCCEEDED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&psoWire)))) {
+        m_psoWire = psoWire;
+    }
+    ShaderBlob psM = sc.Compile(path, L"PsMeshlet", L"ps_6_0");
+    if (psM.Valid()) {
+        d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        d.PS = {psM.Data(), psM.Size()};
+        Com<ID3D12PipelineState> psoM;
+        if (SUCCEEDED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&psoM)))) {
+            m_psoMeshlet = psoM;
+        }
+    }
     return true;
 }
 
@@ -615,6 +631,29 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
         return false;
     }
     m_msPso = pso;
+    // M9b: the same pipeline in WIREFRAME. Identical shaders and identical displacement --
+    // only the raster fill differs -- so what the lines show is exactly the geometry the
+    // solid pass rasterizes, meshlet seams and all. A failure here is not fatal: the solid
+    // path stands and the toggle simply has nothing to switch to.
+    stream.rast.val.FillMode = D3D12_FILL_MODE_WIREFRAME;
+    Com<ID3D12PipelineState> psoWire;
+    if (SUCCEEDED(dev2->CreatePipelineState(&sd, IID_PPV_ARGS(&psoWire)))) {
+        m_msPsoWire = psoWire;
+    } else {
+        Log("[globe] mesh WIREFRAME PSO creation failed (solid path unaffected)");
+    }
+    // ...and solid again, with the meshlet-identity pixel shader.
+    ShaderBlob psM = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"PsMeshlet", L"ps_6_5");
+    if (psM.Valid()) {
+        stream.rast.val.FillMode = D3D12_FILL_MODE_SOLID;
+        stream.ps.val = {psM.Data(), psM.Size()};
+        Com<ID3D12PipelineState> psoM;
+        if (SUCCEEDED(dev2->CreatePipelineState(&sd, IID_PPV_ARGS(&psoM)))) {
+            m_msPsoMeshlet = psoM;
+        } else {
+            Log("[globe] mesh MESHLET-TINT PSO creation failed (solid path unaffected)");
+        }
+    }
     return true;
 }
 
@@ -921,6 +960,39 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     } else if (m_meshletDrops == 0) {
         m_dropsReported = false;
     }
+    if (meshStats && ++m_meshStatWalks == 8) {
+        // Log-spaced distance buckets from the eye. Every record carries its own
+        // camera-relative anchor and its node's ground span, so cell = arc/32 is the
+        // vertex spacing this meshlet actually emits -- no inference from pixels.
+        const double edge[9] = {0.0, 10.0, 25.0, 60.0, 150.0, 400.0, 1000.0, 3000.0, 1e30};
+        size_t n[8] = {};
+        double cmin[8], cmax[8], csum[8] = {};
+        for (int b = 0; b < 8; ++b) { cmin[b] = 1e30; cmax[b] = 0.0; }
+        for (const MeshletRec& mr : m_meshlets) {
+            const double d = std::sqrt(static_cast<double>(mr.anchorRel[0]) * mr.anchorRel[0] +
+                                       static_cast<double>(mr.anchorRel[1]) * mr.anchorRel[1] +
+                                       static_cast<double>(mr.anchorRel[2]) * mr.anchorRel[2]);
+            const double cell = mr.arc / 32.0;
+            for (int b = 0; b < 8; ++b) {
+                if (d >= edge[b] && d < edge[b + 1]) {
+                    ++n[b];
+                    csum[b] += cell;
+                    cmin[b] = (std::min)(cmin[b], cell);
+                    cmax[b] = (std::max)(cmax[b], cell);
+                    break;
+                }
+            }
+        }
+        Log("[meshstats] %zu records, %u dropped (cap %u). cell = node arc / 32:",
+            m_meshlets.size(), m_meshletDrops, kMaxMeshlets);
+        for (int b = 0; b < 8; ++b) {
+            if (!n[b]) continue;
+            Log("[meshstats]   d %6.0f-%-7.0f m  n %6zu  cell mean %7.2f  min %7.2f  "
+                "max %7.2f m",
+                edge[b], (edge[b + 1] > 1e29) ? 99999.0 : edge[b + 1], n[b],
+                csum[b] / n[b], cmin[b], cmax[b]);
+        }
+    }
 
     const double r = std::sqrt(m_camPos[0] * m_camPos[0] + m_camPos[1] * m_camPos[1] +
                                m_camPos[2] * m_camPos[2]);
@@ -957,6 +1029,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         m_cb.bankB[i] = m_bankPatch[i];
         m_cb.bankC[i] = m_bankK[i];
         m_cb.bankD[i] = m_bankRms[i];   // M8: peak-shaping envelope reference
+        m_cb.bankFold[i] = m_bankFold[i];   // M9c: the fold's own wavenumber
     }
     m_cb.bankB[3] = m_bankExag;
     m_cb.bankD[3] = foamOpacity;   // M8: peak foam opacity (data/wave_scene.json)
@@ -1097,13 +1170,19 @@ void GlobeLayer::Render(const FrameContext& ctx) {
         GpuBuffer& rec = m_recBuf[ctx.gpu->FrameIndex()];
         const size_t bytes = m_meshlets.size() * sizeof(MeshletRec);
         memcpy(rec.cpu, m_meshlets.data(), bytes);
-        ctx.cl->SetPipelineState(m_msPso.Get());
+        ID3D12PipelineState* msSel = m_msPso.Get();
+        if (surfaceDebug == 1 && m_msPsoWire) msSel = m_msPsoWire.Get();
+        else if (surfaceDebug == 2 && m_msPsoMeshlet) msSel = m_msPsoMeshlet.Get();
+        ctx.cl->SetPipelineState(msSel);
         ctx.cl->SetGraphicsRootConstantBufferView(1, cbVa);
         ctx.cl->SetGraphicsRootShaderResourceView(2, rec.res->GetGPUVirtualAddress());
         m_cl6->DispatchMesh(static_cast<UINT>(m_meshlets.size()), 1, 1);
         return;
     }
-    ctx.cl->SetPipelineState(m_pso.Get());
+    ID3D12PipelineState* sel = m_pso.Get();
+    if (surfaceDebug == 1 && m_psoWire) sel = m_psoWire.Get();
+    else if (surfaceDebug == 2 && m_psoMeshlet) sel = m_psoMeshlet.Get();
+    ctx.cl->SetPipelineState(sel);
     ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx.cl->SetGraphicsRootConstantBufferView(1, cbVa);
     // Root param 2 normally carries the FieldSet; the renderer re-binds it every frame and the

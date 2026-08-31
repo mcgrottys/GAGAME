@@ -68,6 +68,10 @@ cbuffer GlobeCb : register(b1) {
     uint4  gOptU;       // ocean-colour SRV, ice SRV, optics on, spare
     float4 gOptA;       // ocean grid: lat1, lon1, 1/dlat, 1/dlon
     float4 gOptB;       // nx, ny, deep-albedo gain g, spare
+    // M9c: the wavenumber the FOLD judges each band by (energy-weighted over the live
+    // spectrum). gBankC keeps the band's geometric midpoint for the prefilter and the
+    // caustic assembly, whose own proofs pin that number. Appended at the END.
+    float4 gBankFold;
 };
 
 // Sample the bank at a world-frame XZ: finest ring containing the point wins. Returns false
@@ -234,6 +238,11 @@ struct VsOut {
     float3 rel : TEXCOORD0;    // camera-relative position
     float3 dir : TEXCOORD1;    // unit radial (the sphere normal)
     float  h   : TEXCOORD2;    // relief metres (negative = ocean floor)
+    // M9b: which amplification unit drew this pixel -- the meshlet record on the MS path,
+    // the CDLOD node instance on the VS fallback. nointerpolation: it is an identity, not a
+    // quantity. Read only by PsMeshlet; PsMain ignores it, so the shipped shading is
+    // byte-identical.
+    nointerpolation uint mid : TEXCOORD3;
 };
 
 #ifndef GA_MESH_PATH
@@ -277,6 +286,7 @@ VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
     }
 
     VsOut o;
+    o.mid = inst;
     o.dir = dir;   // PLANET frame: texturing (cube samples, lat/lon) stays untouched
     o.h = h;
     // The ocean surface renders AT the geoid; land rides the (altitude-scaled) exaggeration.
@@ -368,6 +378,23 @@ WaterOptics SampleWaterOptics(float latDeg, float lonDeg) {
         kBbw + max(kBetaSpm * spm, kBetaChl * pow(max(chl, 1e-4f), 0.63f)) * kBbpSpec;
     o.deep = gOptB.z * kFoverMu * bb / o.kd;
     return o;
+}
+
+// M9b: THE AMPLIFICATION UNIT, made visible. Wireframe answers "is the geometry moving";
+// this answers "what drew it" -- one flat colour per meshlet record (per CDLOD node
+// instance on the VS fallback), so the 8x8-cell blocks and the CDLOD ring handovers read
+// at altitudes where every-triangle wireframe collapses into moire. A hash, not a ramp:
+// neighbours must not share a colour. Selected by its own PSO, so PsMain is untouched.
+float4 PsMeshlet(VsOut i) : SV_Target {
+    const uint h = (i.mid * 2654435761u) ^ ((i.mid * 40503u) << 13);
+    const float3 c = float3(float((h >> 16) & 255u), float((h >> 8) & 255u),
+                            float(h & 255u)) / 255.0f;
+    // Keep the terminator readable so the planet still looks like a planet under the tint.
+    // gSunDir lives in the TANGENT frame (PsMain dots it with upT), so the surface normal
+    // must cross frames too -- CsToTangent, exactly as PsMain does it. A planet-frame dir
+    // here would light the wrong hemisphere.
+    const float lam = saturate(dot(CsToTangent(normalize(i.dir)), gSunDir.xyz) * 0.5f + 0.5f);
+    return float4(c * (0.25f + 0.75f * lam), 1.0f);
 }
 
 float4 PsMain(VsOut i) : SV_Target {
@@ -533,7 +560,9 @@ float4 PsMain(VsOut i) : SV_Target {
                 // vanishes -- the far field is untouched.
                 float env = 0.0f;
                 [unroll] for (uint c = 0; c < 3; ++c) {
-                    const float lam = 6.2831853f / gBankC[c];
+                    // M9c: fold on where the band's ENERGY sits, not its midpoint. wRing
+                    // and wPix move together, so the telescope stays exact.
+                    const float lam = 6.2831853f / gBankFold[c];
                     const float wRing = 1.0f - smoothstep(lam * 0.12f, lam * 0.5f, bT);
                     const float wPix = 1.0f - smoothstep(lam * 0.12f, lam * 0.5f, footPx);
                     const float wDet = saturate(wPix - wRing) * bDet.y;

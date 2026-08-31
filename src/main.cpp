@@ -12,6 +12,8 @@
 //
 //  The window title is the HUD: sim clock (UTC), time scale, focus-station tide, fit RMS.
 // ================================================================================================
+#include <sys/stat.h>
+
 #include "core/Gpu.h"
 #include "core/Image.h"
 #include "core/PixEvents.h"
@@ -107,6 +109,12 @@ struct Options {
     float stormHs = 0, stormTp = 10, stormDir = 90;   // --storm sandbox override
     bool seaVerify = false;           // measure rendered Hs from the displacement textures
     bool viz = false;                 // start with the atlas residency visualizer on
+    int surfaceDebug = 0;             // G / --wireframe / --meshlets: 0 shipped, 1 lines,
+                                      // 2 one flat colour per amplification record
+    bool meshStats = false;           // --mesh-stats: one meshlet cell-size-vs-distance table
+    bool dumpBoth = false;            // --dump-both: write out.png AND out_wire.png from the
+                                      // SAME instant (one extra frame, sim clock frozen), so
+                                      // shading and geometry are compared without a re-run
     bool stencil = false;             // M6i --stencil: coast/graticule alignment overlay
     bool msSurface = true;            // M6j: mesh-shader planet surface (--no-ms falls back)
     bool albedo = false;              // M6j: raw-texture lens (no lighting/atmosphere)
@@ -259,6 +267,10 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--height-scale") o.heightScale = static_cast<float>(atof(next("1.15").c_str()));
         else if (a == "--sea-verify") o.seaVerify = true;
         else if (a == "--viz") o.viz = true;
+        else if (a == "--wireframe") o.surfaceDebug = 1;
+        else if (a == "--dump-both") o.dumpBoth = true;
+        else if (a == "--meshlets") o.surfaceDebug = 2;
+        else if (a == "--mesh-stats") o.meshStats = true;
         else if (a == "--stencil") o.stencil = true;
         else if (a == "--no-ms") o.msSurface = false;
         else if (a == "--albedo") o.albedo = true;
@@ -1403,6 +1415,7 @@ int main(int argc, char** argv) {
             sea->sweCurrentGain = opt.sweGain;
             sea->heightScale = opt.heightScale;
             sea->atlasVisualize = opt.viz;
+            sea->wireframe = opt.surfaceDebug == 1;
             sea->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             if (opt.stormHs > 0.01f) sea->SetStorm(opt.stormHs, opt.stormTp, opt.stormDir);
             renderer.AddLayer(std::move(seaOwned));
@@ -1594,6 +1607,8 @@ int main(int argc, char** argv) {
             globe->Configure(opt.shaderDir, &activeGlobe);
             globe->marsReliefValid = marsMode && marsModel.Ready();
             globe->windOverlay = opt.viz;
+            globe->surfaceDebug = opt.surfaceDebug;
+            globe->meshStats = opt.meshStats;
             globe->msSurface = opt.msSurface;
             globe->albedoLens = opt.albedo;
             globe->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
@@ -2418,6 +2433,7 @@ int main(int argc, char** argv) {
         }
         if (sea) {
             sea->windSeaFill = waterScene.windSeaFill;
+            sea->bandFoldWeight = waterScene.bandFoldWeight;
             sea->buoyAssimAgeH = waterScene.buoyAssimAgeH;
             sea->buoyAssimGainMax = waterScene.buoyAssimGainMax;
         }
@@ -2650,6 +2666,12 @@ int main(int argc, char** argv) {
         auto last = Clock::now();
         auto lastTitle = last;
         uint32_t frame = 0;
+        // M9b: a programmatic .wpix is serialized on a PIX background thread AFTER the
+        // capture frames present. The process used to exit ~4 frames later and the file
+        // landed as a 1 KB stub -- armed, never written. Remember that we armed, and hold
+        // the process open at the end until the file stops growing.
+        bool pixArmed = false;
+        bool dumpedSolid = false;   // --dump-both: the solid image is already on disk
         double frameMsSum = 0.0;
         uint32_t frameMsN = 0;
 
@@ -2756,6 +2778,17 @@ int main(int argc, char** argv) {
                     tide->contourStepM = (tide->contourStepM > 0.4f) ? 0.25f
                                        : (tide->contourStepM > 0.2f) ? 0.0f : 0.5f;
                 }
+                if (in.keyPressed['G']) {
+                    // M9b: THE GEOMETRY QUESTION, answered by the rasterizer. Shading sells
+                    // amplitude the geometry may not actually have (priors 8), so the honest
+                    // check is to stop filling the triangles. G cycles shipped -> wireframe
+                    // -> meshlet tint. Both surfaces flip together: in one-water mode the
+                    // globe mesh IS the sea, and off it the SeaLayer grid is what draws.
+                    const int mode = globe ? (globe->surfaceDebug + 1) % 3
+                                           : ((sea && !sea->wireframe) ? 1 : 0);
+                    if (globe) globe->surfaceDebug = mode;
+                    if (sea) sea->wireframe = (mode == 1);
+                }
                 if (in.keyPressed['V']) {
                     if (mode == 1 && globe && altOf(cam) > 6000.0) {
                         globe->windOverlay = !globe->windOverlay;
@@ -2785,7 +2818,14 @@ int main(int argc, char** argv) {
                 // frames so residency, the solver mirror, and the composed caches are
                 // warm before the camera rolls.
                 const uint32_t settle = opt.rail.empty() ? 0u : 150u;
-                const uint32_t recFrame = (frame > settle) ? frame - settle : 0u;
+                uint32_t recFrame = (frame > settle) ? frame - settle : 0u;
+                // --dump-both renders ONE extra frame in wireframe. Hold the sim clock at
+                // the solid frame's instant so the two images are the same water, not the
+                // same water 33 ms later -- otherwise the lines do not sit on the crests
+                // they are supposed to explain.
+                if (opt.dumpBoth && opt.frames && recFrame >= opt.frames) {
+                    recFrame = opt.frames - 1u;
+                }
                 simUnix = startUnix + static_cast<double>(recFrame) * (timeScale / 30.0);
                 if (!opt.rail.empty() && !railKeys.empty()) {
                     // M6g: the rails just set a pose in the ONE frame. Nothing switches.
@@ -2897,7 +2937,7 @@ int main(int argc, char** argv) {
                         waterBank->RingOrigin(mR, orgs[mR * 2], orgs[mR * 2 + 1]);
                     }
                     uint32_t derivS[3];
-                    float patchS[3], bandKS[3], bandRmsS[3];
+                    float patchS[3], bandKS[3], bandRmsS[3], bandFoldS[3];
                     const double kPiB = 3.14159265358979;
                     const double kCutB[4] = {2.0 * kPiB / 756.0, 2.0 * kPiB / 60.0,
                                              2.0 * kPiB / 12.0, 0.9 * kPiB * 256.0 / 47.0};
@@ -2906,6 +2946,7 @@ int main(int argc, char** argv) {
                         patchS[c] = sea->FftPatchL(c);
                         bandKS[c] = static_cast<float>(std::sqrt(kCutB[c] * kCutB[c + 1]));
                         bandRmsS[c] = sea->BandRms(c);
+                        bandFoldS[c] = sea->BandKFold(c);
                     }
                     waterBank->injectPattern = opt.inject;
                     if (hgtWinTenant >= 0) {
@@ -2916,7 +2957,7 @@ int main(int argc, char** argv) {
                     globe->windGateVal = sea->WindGate();
                     globe->SetWaterBank(waterBank->DispSrv(), waterBank->ParamSrv(),
                                         waterBank->DetailSrv(), derivS, patchS, bandKS,
-                                        bandRmsS, sea->heightScale,
+                                        bandRmsS, bandFoldS, sea->heightScale,
                                         waterBank->BaseTexelM(), orgs, opt.oneWater);
                 }
                 // (--albedo: the water stands down too -- textures judged as layered images,
@@ -2966,6 +3007,7 @@ int main(int argc, char** argv) {
             if (opt.pixFrames > 0 && opt.frames > 0 && opt.frames + (opt.rail.empty() ? 0u : 150u) >= opt.pixFrames + 4 &&
                 frame + opt.pixFrames + 4 == opt.frames + (opt.rail.empty() ? 0u : 150u)) {
                 PixGpuCaptureFrames(L"gagame.wpix", opt.pixFrames);
+                pixArmed = true;
             }
             if (sea) sea->SetTime(simUnix, bathy.Ready() ? waterNavd : tide->focusHeight,
                                   cam.px, cam.pz);
@@ -2997,11 +3039,57 @@ int main(int argc, char** argv) {
                 ++frameMsN;
             }
             ++frame;
+            // --dump-both: the solid frame has just been rendered. Dump it, flip BOTH
+            // surfaces to wireframe, and take one more lap -- the clock is held above, so
+            // the second image is the same instant seen as lines.
+            if (opt.dumpBoth && !opt.dump.empty() && !dumpedSolid && opt.frames &&
+                frame == opt.frames + (opt.rail.empty() ? 0u : 150u)) {
+                renderer.DumpPng(opt.dump);
+                dumpedSolid = true;
+                if (globe) globe->surfaceDebug = 1;
+                if (sea) sea->wireframe = true;
+                continue;
+            }
             if (opt.frames &&
-                frame >= opt.frames + (opt.rail.empty() ? 0u : 150u)) {
+                frame >= opt.frames + (opt.rail.empty() ? 0u : 150u) +
+                             (opt.dumpBoth ? 1u : 0u)) {
                 // M7j: THE HYPERVISOR -- one sample, every transformation, each hop tagged
                 // with the AST edge it exercises. CPU-derivable steps print values; fields
                 // that live only on the GPU print their frame contract and where to look.
+                if (pixArmed) {
+                    // The .wpix is serialized on a PIX background thread after the capture
+                    // frames PRESENT, so wait for the file to stop growing before exiting.
+                    //
+                    // MEASURED (M9b): under --headless it never grows at all. PIX's
+                    // PIXGpuCaptureNextFrames counts FRAME BOUNDARIES, and a frame boundary
+                    // is IDXGISwapChain::Present -- which Gpu::EndFrame only calls when a
+                    // swapchain exists (Gpu.cpp:206). Headless renders to an offscreen
+                    // target and never presents, so the capturer arms, sees zero frames, and
+                    // leaves a ~1 KB stub. Bail out loudly instead of waiting on it: GPU
+                    // captures need a WINDOWED run today. Making headless captures work
+                    // means the non-frame-based PIXBeginCapture/PIXEndCapture pair, which
+                    // this build does not load.
+                    uint64_t last = 0;
+                    int stable = 0, empty = 0;
+                    for (int s = 0; s < 60 && stable < 2 && empty < 3; ++s) {
+                        Sleep(1000);
+                        struct _stat64 st;
+                        const uint64_t sz =
+                            (_stat64("gagame.wpix", &st) == 0) ? st.st_size : 0;
+                        stable = (sz > 4096 && sz == last) ? stable + 1 : 0;
+                        empty = (sz <= 4096) ? empty + 1 : 0;
+                        last = sz;
+                    }
+                    if (last <= 4096) {
+                        Log("[pix] gagame.wpix is a %llu-byte STUB -- nothing was captured. "
+                            "A GPU capture needs frame boundaries (Present); --headless has "
+                            "no swapchain. Re-run WINDOWED with --pix.",
+                            static_cast<unsigned long long>(last));
+                    } else {
+                        Log("[pix] gagame.wpix settled at %.1f MB",
+                            last / (1024.0 * 1024.0));
+                    }
+                }
                 if (opt.dumpFibers && waterBank) waterBank->DumpFibers(gpu);
                 // M7p: export the inlet box's REAL fields (bed, level, current, shadow)
                 // so proofs/inlet_storm.py -- the user's own vqview wave model -- can run
@@ -3207,7 +3295,20 @@ int main(int argc, char** argv) {
             Log("[verify] sea: model Hs %.3f m, RENDERED Hs %.3f m "
                 "(one realization; agreement within ~10%% passes)", sea->hsModel, hr);
         }
-        if (!opt.dump.empty()) renderer.DumpPng(opt.dump);
+        if (!opt.dump.empty()) {
+            if (dumpedSolid) {
+                // out.png already holds the solid frame; this pass is the wireframe twin.
+                std::wstring wp = opt.dump;
+                const size_t dot = wp.find_last_of(L'.');
+                wp = (dot == std::wstring::npos) ? wp + L"_wire"
+                                                 : wp.substr(0, dot) + L"_wire" + wp.substr(dot);
+                renderer.DumpPng(wp);
+                Log("[dump] wrote %S (solid) + %S (wireframe, same instant)",
+                    opt.dump.c_str(), wp.c_str());
+            } else {
+                renderer.DumpPng(opt.dump);
+            }
+        }
 
         gpu.WaitIdle();
         resMgr.Shutdown();

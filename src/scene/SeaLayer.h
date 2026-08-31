@@ -70,6 +70,9 @@ public:
     // the bank kernel scales by its per-texel gains for the depth-excess trigger and
     // the crest gate; the globe PS scales the same way for the tanh peak shaping.
     float BandRms(int c) const { return m_bandRms[c]; }
+    // M9c: the wavenumber the FOLD should judge this band by -- energy-weighted, not the
+    // band's geometric midpoint. Only the fold weight reads it; the physics keeps gBandK.
+    float BandKFold(int c) const { return m_bandKFold[c]; }
     // M8 wavefield: the live partition set, for the solved-field bucket key + spectrum.
     const PartParam* Parts() const { return m_parts; }
     // M8: the Monahan wind gate -- whitecap COVERAGE follows wind speed; the Jacobian
@@ -135,6 +138,9 @@ public:
     float heightScale = 1.15f;   // vertical exaggeration; vqview shipped 1.15 as its look
     // M9a: fill the missing wind sea from the GFS wind (data/wave_scene.json; 0 = off)
     float windSeaFill = 1.0f;
+    // M9c: how far the fold's band wavelength follows the SPECTRUM instead of the band's
+    // geometric midpoint. 0 = the shipped constant, byte for byte; 1 = fully energy-weighted.
+    float bandFoldWeight = 1.0f;
     // M8 buoy assimilation closures (data/wave_scene.json; main mirrors them here)
     float buoyAssimAgeH = 6.0f;
     float buoyAssimGainMax = 1.8f;
@@ -146,6 +152,9 @@ public:
     uint32_t FftDerivSrv(int c) const { return m_fft.DerivSrv(c); }
     float FftPatchL(int c) const { return m_fft.PatchL(c); }
     bool atlasVisualize = false;   // V key: draw the tile grid + residency over the water
+    // M9b: G key / --wireframe. Shading cannot tell geometry from normals (priors 8); the
+    // raster fill can. Same shaders, same displacement, lines instead of faces.
+    bool wireframe = false;
 
 private:
     struct SeaCbData {
@@ -200,7 +209,7 @@ private:
     std::wstring m_shaderDir;
     const SeaState* m_sea = nullptr;
     ID3D12RootSignature* m_rootSig = nullptr;
-    Com<ID3D12PipelineState> m_seaPso, m_specPso;
+    Com<ID3D12PipelineState> m_seaPso, m_specPso, m_seaPsoWire;
     OceanFft m_fft;
 
     SeaCbData m_seaCb{};
@@ -218,6 +227,8 @@ private:
     float m_cPeak = 10.0f;     // peak-partition phase speed for the amplification factor
     float m_peakDirX = -1.0f, m_peakDirZ = 0.0f;
     float m_bandRms[3] = {};   // M8: unit-sea rms envelope per band (sqrt(2 m0) * exag)
+    float m_bandKFold[3] = {0.0209f, 0.2339f, 2.8420f};   // M9c: fold wavenumbers; the cut
+                                                          // means until the first SetTime
     PartParam m_parts[4] = {};   // M8: the live partition set (wavefield spectrum input)
 
     // ---- M4: the churn atlas (16 x 16 km virtual at 2 m texels; resident only where breaking)

@@ -347,6 +347,17 @@ void WaterBankLayer::DumpFibers(Gpu& gpu) {
         fwrite(plane.data(), sizeof(float), plane.size(), fr);
         fclose(fr);
     }
+    // M9c: the VERTICAL displacement plane, raw. The 8-bit fiber_disp.png quantizes a +-6 m
+    // declared range to 47 mm a step, which cannot resolve a 14 cm chop band, and the
+    // range statistic printed above is a MAX over every ring -- it is owned by the swell
+    // and blind to whether short waves reached geometry at all. This is the plane to
+    // measure texel-scale slope on when asking "did the fold let the chop through".
+    if (FILE* fr = fopen("fiber_dispy.f32", "wb")) {
+        std::vector<float> plane(3072ull * 512);
+        for (size_t i = 0; i < plane.size(); ++i) plane[i] = disp[i * 4 + 1];
+        fwrite(plane.data(), sizeof(float), plane.size(), fr);
+        fclose(fr);
+    }
     if (FILE* fj = fopen("fiber_meta.json", "wb")) {
         fprintf(fj, "{ \"baseTexelM\": %.3f, \"rings\": [", m_baseTexelM);
         for (int m = 0; m < kMips; ++m) {
@@ -490,6 +501,8 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.slotsE[3] = 0xFFFFFFFFu;
     for (int c = 0; c < 3; ++c) cb.rmsRef[c] = m_sea->BandRms(c);
     cb.rmsRef[3] = 0.0f;
+    for (int c = 0; c < 3; ++c) cb.bandKFold[c] = m_sea->BandKFold(c);
+    cb.bandKFold[3] = 0.0f;
     // M8 wavefield: the solved field's window + per-component table. The time rotor
     // (cos, sin)(sigma t) is computed HERE in doubles and reduced mod 2 pi -- sigma t
     // at unix scale would shred float precision in the kernel (the phase never wraps
