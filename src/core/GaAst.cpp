@@ -265,7 +265,7 @@ void RegisterKnownWaterEdges() {
     Register({"eot20.grid", "water.atlas", "phasor grid", latlonW, latlonW, false,
               "phasor re/im", "|P| clamp a2>100 (Fundy)", 1.0,
               "Eot20Source (epoch-rotated arg sum P conj Q)"});
-    Register({"water.atlas", "window.field", "tide phasors M2..O1", latlonW, mercPxW,
+    Register({"water.atlas", "window.field", "tide phasors x18 (M8i)", latlonW, mercPxW,
               true, "phasor re/im", "RG16F tiles", 1.0, "Compositor::WindowField paint"});
     Register({"water.atlas", "weather.mgr", "level rotors", latlonW, latlonW, false,
               "m NAVD", "+-3", 1.0, "WeatherManager::Query h(t)=msl+Re[P e^iwt]"});

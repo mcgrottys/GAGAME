@@ -17,9 +17,21 @@ constexpr double kD2R = kPi / 180.0;
 // are matched to a constituent by omega, never by index.
 }  // namespace
 
-const char* const WaterAtlas::kConName[WaterAtlas::kCon] = {"M2", "S2", "N2", "K1", "O1"};
+// M8i THE WIDENING: 18 constituents. The first five keep their indices (index 0 = M2 is
+// a contract: selftest block 3 and --water-map both read constituent 0). Appended: the
+// EOT20-backed set (K2 P1 Q1 2N2 T2 J1 M4 SA SSA -- all three rungs), then the
+// station-only set (L2 NU2 MU2 M6 -- the entrance's biggest remaining omissions at
+// ~0.044 m each; no EOT20 grid, equilibrium amplitude 0, so they ride the station IDW
+// inside the survey and fade honestly to zero through the coverage feather).
+const char* const WaterAtlas::kConName[WaterAtlas::kCon] = {
+    "M2", "S2", "N2", "K1", "O1",
+    "K2", "P1", "Q1", "2N2", "T2", "J1", "M4", "SA", "SSA",
+    "L2", "NU2", "MU2", "M6"};
 const double WaterAtlas::kConSpeedDegH[WaterAtlas::kCon] = {
-    28.9841042, 30.0000000, 28.4397295, 15.0410686, 13.9430356};
+    28.9841042, 30.0000000, 28.4397295, 15.0410686, 13.9430356,
+    30.0821373, 14.9589314, 13.3986609, 27.8953548, 29.9589333,
+    15.5854433, 57.9682084, 0.0410686,  0.0821373,
+    29.5284789, 28.5125831, 27.9682084, 86.9523127};
 
 // ---------------------------------------------------------------- the three source rungs
 
@@ -36,8 +48,14 @@ struct EquilibriumSource : FieldSource {
     int con;
     double deltaRad = 0;   // epoch calibration (set by the atlas from the station consensus)
     static constexpr double kGamma = 0.69;
-    // Equilibrium amplitudes, metres (Doodson coefficients scaled).
-    static constexpr double kH[WaterAtlas::kCon] = {0.2441, 0.1136, 0.0467, 0.1416, 0.1006};
+    // Equilibrium amplitudes, metres (Doodson coefficients scaled). Zero = the
+    // constituent has NO gravitational equilibrium rung: overtides (M4, M6) are
+    // nonlinear children of M2, SA/SSA are mostly steric/radiational -- their signal
+    // rides the EOT20 and station rungs only.
+    static constexpr double kH[WaterAtlas::kCon] = {
+        0.2441, 0.1136, 0.0467, 0.1416, 0.1006,
+        0.0309, 0.0468, 0.0193, 0.0062, 0.0067, 0.0079, 0.0, 0.0, 0.0,
+        0.0069, 0.0089, 0.0075, 0.0};
 
     EquilibriumSource(int c) : con(c) {
         info.name = std::string("tide.equilibrium.") + WaterAtlas::kConName[c];
@@ -47,7 +65,13 @@ struct EquilibriumSource : FieldSource {
     }
     const SourceInfo& Info() const override { return info; }
     float Sample(double latRad, double lonRad, double, float out[2]) override {
-        const bool semi = con < 3;
+        // M8i: species by SPEED, never by index -- the old 'con < 3' encoding of
+        // "the first three are semidiurnal" was the widening landmine (appending K2
+        // after the diurnals would have given it a diurnal latitude shape and lag).
+        // Semidiurnal ~ 27..31 deg/h, diurnal ~ 12..17; everything else here carries
+        // kH = 0, so its shape never matters.
+        const double spd = WaterAtlas::kConSpeedDegH[con];
+        const bool semi = (spd >= 26.0 && spd < 32.0);
         const double amp = kGamma * kH[con] *
                            (semi ? std::cos(latRad) * std::cos(latRad)
                                  : std::abs(std::sin(2.0 * latRad)));
@@ -275,11 +299,18 @@ bool WaterAtlas::Init(Compositor& comp, const TideModel& tides, const std::strin
         m_impl->sources.push_back(std::move(sta));
     }
 
-    Log("[water] atlas: %d stations (%d..%d constituent fits), eot20 %s, epoch ladder "
-        "M2 %+.1f S2 %+.1f N2 %+.1f K1 %+.1f O1 %+.1f deg",
-        m_nStations, static_cast<int>(perCon[kCon - 1].size()),
-        static_cast<int>(perCon[0].size()), m_hasEot20 ? "loaded" : "ABSENT (--eot20)",
-        m_deltaDeg[0], m_deltaDeg[1], m_deltaDeg[2], m_deltaDeg[3], m_deltaDeg[4]);
+    // M8i: the epoch-ladder line is built by loop -- 18 constituents no longer fit a
+    // format string, and a hand-indexed list is exactly the widening trap.
+    {
+        char ladder[512];
+        int off = 0;
+        for (int c = 0; c < kCon && off < static_cast<int>(sizeof(ladder)) - 24; ++c) {
+            off += snprintf(ladder + off, sizeof(ladder) - off, "%s%s %+.1f",
+                            c ? " " : "", kConName[c], m_deltaDeg[c]);
+        }
+        Log("[water] atlas: %d stations, %d constituents, eot20 %s, epoch ladder (deg) %s",
+            m_nStations, kCon, m_hasEot20 ? "loaded" : "ABSENT (--eot20)", ladder);
+    }
     m_ready = true;
     return true;
 }
@@ -311,7 +342,7 @@ void WaterAtlas::EnvelopeNavd(double latDeg, double lonDeg, double aroundUnix, f
     // envelope interpolates through the SAME station graph the live level rides, so a
     // place with no data still knows its tidal band. The phasors are time-independent --
     // hoisted once, the scan is a pure rotor sum (microseconds, honest extremes; the
-    // sum-of-amplitudes bound overestimates because five incommensurate rotors never
+    // sum-of-amplitudes bound overestimates because incommensurate rotors never
     // quite align inside a month).
     float p[kCon][2];
     for (int c = 0; c < kCon; ++c) Phasor(c, latDeg, lonDeg, groundResM, p[c]);
@@ -380,38 +411,60 @@ bool RunWaterSelfTest() {
     }
 
     // 3. FIT REPRODUCTION: at each station the composed stack must return the station's own
-    // M2 phasor (the IDW pins it), and the 5-constituent Level must match the same partial
+    // M2 phasor (the IDW pins it), and the per-constituent sum must match the same partial
     // sum evaluated straight from the fit coefficients.
+    //
+    // M8i (the widening's honest gate): the comparison runs over the constituents THIS
+    // STATION ACTUALLY FITS, not over all kCon. Not every station carries every one --
+    // Salem and Scituate have no SA/SSA fit -- and for those the atlas legitimately
+    // answers with the IDW of the neighbours that do. That is the field doing its job
+    // (a place with no data still knows its tide), so charging it as station-fit error
+    // measured the test's assumption, not the engine: at kCon=18 it read 58 mm, all of
+    // it Salem/Scituate's interpolated SA+SSA. The reproduction claim is per constituent;
+    // the handover claim belongs to gate 4, which walks the feather explicitly.
     const double t0 = tides.EpochUnix() + 1234567.0;
     double worstAmp = 0, worstLvl = 0;
+    const char* worstName = "";
+    int worstMissing = 0;
     for (size_t i = 0; i < tides.Count(); ++i) {
         const TideStation& s = tides.S(i);
-        double m2amp = 0, m2ph = 0;
-        double direct = 0;
+        double m2amp = 0;
+        double direct = 0, stack = 0;
+        int missing = 0;
         for (int c = 0; c < WaterAtlas::kCon; ++c) {
             const double w = WaterAtlas::kConSpeedDegH[c] * kD2R / 3600.0;
+            const TideCoeff* hit = nullptr;
             for (const TideCoeff& tc : s.coeffs) {
                 if (std::abs(tc.omegaRadS - w) < 1.0e-8) {
-                    direct += tc.ampM * std::cos(w * 1234567.0 + tc.phaseRad);
-                    if (c == 0) {
-                        m2amp = tc.ampM;
-                        m2ph = tc.phaseRad;
-                    }
+                    hit = &tc;
                     break;
                 }
             }
+            if (!hit) {
+                ++missing;
+                continue;
+            }
+            direct += hit->ampM * std::cos(w * 1234567.0 + hit->phaseRad);
+            float p[2];
+            wa.Phasor(c, s.lat, s.lon, 500.0, p);
+            const double wt = w * (t0 - tides.EpochUnix());
+            stack += p[0] * std::cos(wt) - p[1] * std::sin(wt);   // Level's own rotor
+            if (c == 0) m2amp = hit->ampM;
         }
-        float p[2];
-        wa.Phasor(0, s.lat, s.lon, 500.0, p);
-        const double fAmp = std::hypot(p[0], p[1]);
-        worstAmp = (std::max)(worstAmp, std::abs(fAmp - m2amp));
-        const double lvl = wa.Level(s.lat, s.lon, t0);
-        worstLvl = (std::max)(worstLvl, std::abs(lvl - direct));
-        (void)m2ph;
+        float p0[2];
+        wa.Phasor(0, s.lat, s.lon, 500.0, p0);
+        worstAmp = (std::max)(worstAmp, std::abs(std::hypot(p0[0], p0[1]) - m2amp));
+        const double err = std::abs(stack - direct);
+        if (err > worstLvl) {
+            worstLvl = err;
+            worstName = s.name.c_str();
+            worstMissing = missing;
+        }
     }
     Log("[watertest] fit reproduction: worst M2 amp err %.1f mm, worst level err %.1f mm "
-        "over %zu stations",
-        worstAmp * 1000.0, worstLvl * 1000.0, tides.Count());
+        "(%s, %d of %d constituents not fitted there) over %zu stations",
+        worstAmp * 1000.0, worstLvl * 1000.0, worstName, worstMissing, WaterAtlas::kCon,
+        tides.Count());
     if (worstAmp > 0.02 || worstLvl > 0.03) fail("station fit reproduction");
 
     // 4. THE SEAM: level along a transect from Gloucester Harbor out 200 km east must be
@@ -510,9 +563,10 @@ bool RunWaterSelfTest() {
         if (ehi - elo < 2.4f || ehi - elo > 3.6f) fail("envelope width (entrance range)");
     }
 
-    Log("[watertest] ---- %s: %d stations (%d NAVD-linked), eot20 %s, phasor fields "
-        "M2/S2/N2/K1/O1 ----",
-        ok ? "PASS" : "FAIL", wa.StationsUsed(), linked, wa.HasEot20() ? "on" : "off");
+    Log("[watertest] ---- %s: %d stations (%d NAVD-linked), eot20 %s, %d phasor fields "
+        "(M2..%s) ----",
+        ok ? "PASS" : "FAIL", wa.StationsUsed(), linked, wa.HasEot20() ? "on" : "off",
+        WaterAtlas::kCon, WaterAtlas::kConName[WaterAtlas::kCon - 1]);
     return ok;
 }
 

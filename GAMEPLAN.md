@@ -1384,6 +1384,27 @@ jetties survive as photo (their edits.geojson crests sit above the band); the ba
 throat, and ocean read as one continuous authored bed straight through the old
 footprint boundary.
 
+**M7y (2026-08-31): THE SURVEY UPGRADE — CUSP + NHD join the survey order.** The §13.5
+upgrade path, walked: NOAA CUSP (meter-class MHW shoreline, regional bulk zips found on
+the NSDE page itself — `geodesy.noaa.gov/dist_shoreline/North_Atlantic.zip`, refreshed
+four days before harvest) and USGS NHD HR (HU4 GeoPackages 0106/0107/0109 off The
+National Map's S3 staging). `harvest_survey.py` is stdlib-only in the house tradition:
+sqlite3 + a hand-rolled WKB reader (GP header envelope = the cheap clip) for the
+GeoPackages, the M6p shapefile reader for CUSP, raw archives forever-cached under
+`D:\DataCache\GAGAME\{cusp,nhd}` (300 GB grant). The mask recipe respects what each
+authority IS: CUSP is open POLYLINES (where the coast runs — not parity-fillable), NHD
+water features are CLOSED rings — so `landmask_ne.raw` (same 4096² z14 frame) rebakes
+as GSHHG land parity + NHD open-water carve, even-odd PER FEATURE (a pond's island ring
+stays land; distinct features union). Marsh/wetland FCodes are deliberately EXCLUDED —
+a marsh is land to a texture gate; the live-tide classifier owns when it drowns.
+Harvest counts: CUSP 8,675 shoreline polylines (598k pts) in the focus box; NHD 75k
+flowlines + 26.8k water rings; the carve flipped 455k mask texels (~357 km² — the
+Merrimack inland of GSHHG's estuary limit, every kettle pond, the mill impoundments).
+vectors.vpack now carries 8 layers / 2.99M lossless vertices under wedge importance.
+Named next for this thread: the photo-vs-bed gate reads the carved mask + CUSP distance
+in the intertidal band (the land/underwater texture split, surveyed); z17-frame mask
+realization; CUSP as a GisLayer stencil channel beside the GSHHG green.
+
 Named next: amplification-shader subdivision for sub-meter helm vertex density (also the
 jetty-wall clipping fix), breaker individuation in the surf zone (churn saturation), the
 bank as an Exchange channel (water.surface for plugins), a
@@ -1393,3 +1414,84 @@ growing out of this kernel (the tide rotors evaluated on-GPU from the realized p
 windows), more synthesis nodes (wetland/eelgrass classifier, a render-vs-photo residual
 gate), and the terrain-building tool proper: an agent or UX writing bed_rules /
 bed_zones / edits.geojson through a common "program file" contract.
+
+**M8 (2026-08-30/31): THE SOLVED WAVE FIELD — vqview parity, the full doctrine lap.**
+The user's ultracode program: water quality on par with vqview-inlet, algebra first.
+Six derivations landed in ALGEBRA.md (wavefield, caustics, ripple, foamlaw, wake,
+bedalbedo), each with an adversarially-reviewed proof in proofs/ and a gatest pin —
+the wavefield proof TWIN-TESTED to 0.500 LSB against the reference bake (truncating
+quantizer, (byte+0.5)/255 decode centers: identity is bytes, not intent). The engine
+port (src/sim/WaveField): per-cell current-Doppler finite-depth dispersion
+(96-bracket + 48-bisect, BLOCKED mask), shoaling Ks = sqrt(cg0/cg_eff), per-component
+Snell refraction vs the bar normal, the total-Hs limiter Γ=0.60, spatial phase as a
+unit spinor (cl2 — cumsum-x + row-mean cumsum-y gauge), time as the rotor
+e^{-i sigma t}. Solves cache to cache/wave/<fnv> keyed on solver version + geometry +
+tide bucket (0.25 m) + current signature + spectrum bytes + height-stack signature —
+identity-is-content, one directory over. 3.2 s solves, double-buffered, the renderer
+never sees a half field. Consumption: 16 comp rows in the bank kernel, fold/feather
+into the cascades (bands 0/1 yield inside the window; band 2 stays), caustics as the
+physical Jacobian gain, crest-gated foam discipline with the Monahan wind gate,
+per-axis Gaussian ripple prefilter, ring cross-fade, buoy 44013 Hs assimilation
+(energy × g², age-gated — the single-point measurements STEER the model). M8a-M8d
+taste passes under user review: caustics softened, diffuse moved to the band-limited
+normal (the leopard rolled back), foam breakup range-faded in the PS, churn a 0.12
+whisper until the deposit side is disciplined.
+
+**M8e-f (2026-08-31): FLOWS INTO WAVES, AND THE SCENE AS DATA.** The user's re-steer,
+verbatim: "skip the floats, we're doing waves and flows — because flows affect waves."
+The fleet stands down behind fleet.enabled=false; the SWE's SOLVED current (the bent
+jet, the tip shear) drives the dispersion instead of the climatological proxy: planes
+read back at 90 s cadence, row-0-north FLIP declared, ×gain, quantized 0.05 m/s, the
+content hash joining the bucket key. Solved comps take the swell-shadow exposure like
+the cascades (aW ×= expo). Headless renders solve SYNCHRONOUSLY (a deterministic dump
+must never race a background solve). The MslNavd transfer fix: unlinked stations
+contribute through the regional MSL transfer (-delta) instead of being skipped — the
+entrance's own station answers for the entrance (was +0.46 m of Riverside river-slope
+bias). data/wave_scene.json: window + closures + fleet as hot-reloaded DATA
+(authored-if-absent); tools/snapshot.py: dataset snapshots to D:\DataCache
+(save/list/restore/diff — "I can go back to a dataset I view in the past").
+
+**M8g (2026-08-31): THE CB PERMUTATION THAT ATE THE WAVES — and the origin planes.**
+Three renders of flat water traced to one cause: the boat rows were inserted
+mid-cbuffer in HLSL but appended at the END of the C++ mirror — same byte count, so
+the size-parity gate passed, while every row after gFoamB sat 256 bytes off and the
+kernel read boat zeros as the solved field's dequant scales. LAYOUT LAW, written where
+it bit: new rows append at the END, on BOTH sides (a field-ORDER hash for DxTest is
+the named gate upgrade). With the field alive: Fresnel + both rays moved to the
+PIXEL-band normal (the ring-texel normal was rendering a 4.8 m-blurred "Vaseline"
+sea); the mesh takes the FULL displacement vector (in shallow water the horizontal
+orbital term dominates — verts took level+dy only, so normals showed waves the mesh
+did not have); riprap facets (per-boulder hash normal tilt, footprint-folded). THE
+ORIGIN PLANES (the user's call, their words "like the origin planes — maybe we need
+another tree"): WaterAtlas::EnvelopeNavd — the tidal datum envelope, min/max of the
+same rotor sum over one synodic month, NAVD, riding the same station graph as the
+live level (entrance: lo -1.74 / hi +1.61, width 3.35 m, MLLW inside it; watertest 7
+pins containment + width). First consumer: the edit-land floor is ABSOLUTE (hi-0.45)
+— the old waterline+1.2 floor made the jetty unsinkable by construction; spring high
+(+1.32, Sept 12 17:10Z) now laps the smear-rescued sections. wavefield.exag: display
+exaggeration on the dequant tables at adoption — cache and key stay raw physics,
+ProbeAt reads the same table, the 9b/9c twin holds.
+
+**M8h (2026-08-31): THE DENSITY LADDER DEEPENS TWO RUNGS.** The user: "can we
+increase the number of wave vertices we sample?" The map (three parallel readers:
+CDLOD C++, meshlet HLSL, the vqview reference) said density alone was a no-op: level
+16 vertices (4.77 m) exactly saturated the 4.8 m bank ring, and the fold law was
+shedding up to HALF of the shorter solved comps at that texel (w(16 m) ≈ 0.55). Both
+rungs move together: mesh path to level 18 (1.19 m vertices, reached only within
+~115 m of the eye), bank ring-0 texel 4.8 → 2.4 m (scene bankTexelM,
+construction-time; ring spans 1.2..39 km) — lambda >= ~5 m now articulates fully as
+geometry, finer bands stay normals-only, the SAME discipline the reference used (its
+0.76-25 m ripples never displaced either; its 0.19 m triangles articulated 16 comps
+at 5-200 m — parity is content, not vertex count). Two latent meshlet bugs fixed in
+passing: the record cap could land DispatchMesh on exactly 65536 (X caps at 65535 —
+out of spec), and over-budget leaves dropped SILENTLY (now counted + reported once
+per episode). Plus cache/wave LRU pruning (4 GiB budget, live key spared — an entry
+is ~112 MB and nothing ever asked the cache to stop). The max-ebb 2 m-eye view that
+rendered a flat sheet now shows rolling crest geometry; the jetty-ladder view carries
+marching wave trains on both sides. Delta vs the standing "named next": helm vertex
+density is 1.19 m, not yet sub-meter — the amplification-shader subdivision remains
+open if 1.19 m shows facets at wading height. Named next for M8: the per-texel
+envelope CHANNEL (the origin-planes tree proper — lo/hi as a composed channel like
+the height stack), EOT20 constituent widening (17 available, 5 converted), churn
+deposit discipline (crest-gated deposits so the read gain can rise from its 0.12
+whisper), and the wave cache checker run against a 2.4 m-ring solve.

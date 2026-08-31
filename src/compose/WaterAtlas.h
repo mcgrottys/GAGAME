@@ -5,7 +5,8 @@
 //
 //  The value fiber is the constituent PHASOR (re, im), a Cl(2)+ spinor: the tide at x is
 //      h(x, t) = msl(x) + sum_c Re[ P_c(x) * e^{i w_c (t - T0)} ]
-//  -- five rotor fields (M2 S2 N2 K1 O1) whose time advance is pure rotor application, the
+//  -- 18 rotor fields (M8i: M2..O1 + K2 P1 Q1 2N2 T2 J1 M4 SA SSA + station-only
+//  L2 NU2 MU2 M6) whose time advance is pure rotor application, the
 //  same statement the wave cascades made in M6t. "NOAA carries the state" becomes literal:
 //  the constituent fields ARE the state; evaluation is stateless.
 //
@@ -38,8 +39,13 @@ namespace ga {
 
 class WaterAtlas {
 public:
-    static constexpr int kCon = 5;
-    static const char* const kConName[kCon];       // M2 S2 N2 K1 O1
+    WaterAtlas() {
+        for (int c = 0; c < kCon; ++c) m_channel[c] = -1;
+    }
+    static constexpr int kCon = 18;   // M8i: M2 S2 N2 K1 O1 + K2 P1 Q1 2N2 T2 J1 M4 SA
+                                      // SSA (EOT20-backed) + L2 NU2 MU2 M6 (station-only).
+                                      // Index 0 = M2 is a CONTRACT (selftest, --water-map).
+    static const char* const kConName[kCon];
     static const double kConSpeedDegH[kCon];       // NOAA constituent speeds, deg/hour
 
     // Registers water.tide.<C> field channels on the compositor. tides = the fitted station
@@ -72,8 +78,10 @@ private:
     struct Impl;
     std::shared_ptr<Impl> m_impl;   // owns the source objects the compositor borrows
     const TideModel* m_tides = nullptr;
-    int m_channel[kCon] = {-1, -1, -1, -1, -1};
-    double m_deltaDeg[kCon] = {0, 0, 0, 0, 0};
+    // M8i: filled in the constructor -- an aggregate initializer shorter than kCon
+    // value-inits the tail to 0, and 0 is a VALID channel id (the widening trap).
+    int m_channel[kCon];
+    double m_deltaDeg[kCon] = {};
     int m_nStations = 0;
     bool m_hasEot20 = false;
     bool m_ready = false;

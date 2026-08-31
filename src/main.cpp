@@ -1105,7 +1105,7 @@ int main(int argc, char** argv) {
             hgtCh = compositor.AddHeightChannel("earth.height", std::move(hstack));
         }
 
-        // M6v: THE WATER ATLAS -- water parameters through the same registry. Five phasor
+        // M6v/M8i: THE WATER ATLAS -- water parameters through the same registry. 18 phasor
         // channels (water.tide.M2..O1): equilibrium base <- EOT20 global medium <- the NE
         // station field (20 CO-OPS fits, Merrimack to Scituate), epoch-laddered, cached as
         // RG16F window tiles on demand. The sim manager consumes these next.

@@ -57,6 +57,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 
 namespace ga {
@@ -171,6 +172,49 @@ void ParallelRows(int ny, const std::function<void(int, int)>& fn) {
 
 void CachePathFor(uint64_t key, char* buf, size_t n) {
     snprintf(buf, n, "cache/wave/%016llx.bin", static_cast<unsigned long long>(key));
+}
+
+// M8h: LRU prune. The cache is content-addressed and an entry is ~112 MB with its input
+// planes -- a day of tide buckets mints gigabytes and nothing ever asked it to stop
+// (seen: the disk, quietly). Newest-first by write time under a byte budget; the LIVE
+// key is always spared (losing it only costs a re-solve, but the renderer would hitch).
+// Errors are ignored file-by-file: pruning is a courtesy, never a failure mode.
+void PruneWaveCache(uint64_t liveKey) {
+    namespace fs = std::filesystem;
+    constexpr uint64_t kBudgetBytes = 4ull << 30;   // 4 GiB ~ 36 buckets
+    std::error_code ec;
+    struct Entry {
+        fs::file_time_type t;
+        uint64_t bytes;
+        fs::path p;
+    };
+    std::vector<Entry> files;
+    for (fs::directory_iterator it("cache/wave", ec), end; !ec && it != end;
+         it.increment(ec)) {
+        if (!it->is_regular_file(ec) || it->path().extension() != ".bin") continue;
+        std::error_code e2;
+        files.push_back({it->last_write_time(e2), it->file_size(e2), it->path()});
+    }
+    std::sort(files.begin(), files.end(),
+              [](const Entry& a, const Entry& b) { return a.t > b.t; });
+    char livePath[128];
+    CachePathFor(liveKey, livePath, sizeof(livePath));
+    const fs::path liveName = fs::path(livePath).filename();
+    uint64_t acc = 0, freed = 0;
+    int pruned = 0;
+    for (const Entry& f : files) {
+        acc += f.bytes;
+        if (acc <= kBudgetBytes || f.p.filename() == liveName) continue;
+        std::error_code e3;
+        if (fs::remove(f.p, e3)) {
+            ++pruned;
+            freed += f.bytes;
+        }
+    }
+    if (pruned) {
+        Log("[wave] cache pruned: %d entries / %.1f GB beyond the 4 GiB budget", pruned,
+            double(freed) / (1024.0 * 1024.0 * 1024.0));
+    }
 }
 
 // One uploaded RGBA8 texture, the SeaLayer m_shadowTex pattern (create COPY_DEST, upload,
@@ -888,6 +932,7 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
                  m_table.ny, double(m_table.level),
                  static_cast<unsigned long long>(m_liveKey));
         stats = buf;
+        PruneWaveCache(m_liveKey);   // a solve just wrote ~112 MB; keep the budget
     }
 
     const uint64_t key = BucketKey(simUnix, parts, nParts);
@@ -919,6 +964,7 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
             AdoptTable(s2.table);
             m_liveKey = key;
             m_cpuAtlas = std::move(s2.atlas);
+            PruneWaveCache(m_liveKey);   // the blocking solve wrote a cache entry too
         } else {
             std::vector<PartParam> pcopy;
             if (parts && nParts > 0) pcopy.assign(parts, parts + nParts);
