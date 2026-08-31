@@ -1345,6 +1345,45 @@ proof. What this buys: the math maps cleanly (each stage is small enough to hold
 axis/scaling bugs die in the 2D prototype where they cost minutes, and a future session
 can re-read the proof instead of reverse-engineering the shader.
 
+**M7x (2026-08-31): THE FRAME IS THE IDENTITY — the tile-indexing patchwork, convicted
+and hanged.** The flood-rail patchwork (wrong-scale imagery in wrong places, giant
+watermark text, a marsh where the ocean goes) was NOT LOD-mixing and NOT the M7w loader
+starvation: the user called it — "it's the indexing of the damn tiles." Stitching the
+composed cache back into mosaics (offline, PIL over the raw 64KB tiles) convicted the
+CPU PAINT, and the mechanism fell out in one read: THREE WindowColor realizations (the
+z14 live window, the M7f z17 detail, the M6l z19 export inlet) all cached into the
+literal folder `window/` with filenames `f0_m{m}_x{x}_y{y}_{subsethash}.bin`. Same
+(m,x,y) indices, different frames — and the per-tile soak subset ({google, synth.bed}
+over open water) hashes IDENTICALLY for all three, so the z17 paint of tile (x,y) was
+SERVED as the z14 tile (x,y), persistently, across runs, in both directions. A tile's
+content is a pure function of (org, zBase, mip, x, y) + the stack — so org and zBase now
+live in the realization's cache-folder name (`window_z14_1263360_1538048`,
+`windowH_...`, `windowF_...`; Compositor::WindowTag). Identical frames still share (the
+export warming the live window remains a feature); distinct frames CANNOT collide by
+construction. The poisoned `window/` folder and every pre-M6k `*_v<stackhash>` orphan
+were deleted (1.35 GB; the raw Google JPEG cache is keyed by true z/x/y and was never
+poisoned, so repaints ran local). Verified: selftest 7/7, the z14 window re-exported
+seamless at m3/m5, the z19 inlet re-exported into its OWN folder, and the live streamed
+globe at 70 km renders one continuous coast. Lesson, doctrine-shaped: a realization IS
+frame + metric + lattice (ATLAS §1) — any cache that omits the frame from the identity
+is a collision waiting for its second tenant.
+
+**M7x+ (same session, user catch #2): PHOTOS ARE LAND AUTHORITIES, THE BED IS THE WATER
+AUTHORITY.** The z19 inlet export showed the MassGIS ortho painting its capture-day
+WATER — a hard-edged dark rectangle — over the bed classifier's drained-bed albedo,
+which the sea shader would then attenuate a second time. The M6l stack order ("bed
+below the surveyed orthos") ranked the ortho as authority over EVERYTHING it
+photographed; but the bed doctrine (author the bed as if drained; the renderer's
+refracted ray applies the water) means an imagery layer's water pixels are never
+composable data. Fix = the compositor's own grammar, one reorder in main.cpp: google
+under aerial (both photos, finer wins on land), synth.bed above both (its height-band
+alpha reclaims everything below the intertidal ramp and fades out by +1.2 m NAVD,
+handing dry land back to the photos), hand overlays on top. The soak rule made the
+migration surgical: only aerial-touched tiles changed identity and repainted. The
+jetties survive as photo (their edits.geojson crests sit above the band); the basin,
+throat, and ocean read as one continuous authored bed straight through the old
+footprint boundary.
+
 Named next: amplification-shader subdivision for sub-meter helm vertex density (also the
 jetty-wall clipping fix), breaker individuation in the surf zone (churn saturation), the
 bank as an Exchange channel (water.surface for plugins), a

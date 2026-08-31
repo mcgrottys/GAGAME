@@ -14,7 +14,11 @@ void ResidencyManager::Init(Gpu& gpu) {
         m_uploadRing[i] = gpu.CreateUploadBuffer(
             static_cast<uint64_t>(kMaxMapsPerFrame) * 65536, L"residency upload ring");
     }
-    for (int i = 0; i < 2; ++i) {
+    // M7w: 2 workers starved every descent (140 loads in 300 frames measured at the flood-rail
+    // pose -- the patchwork was coarse fallback, not bad data). Paints are local disk/CPU work.
+    const unsigned hc = std::thread::hardware_concurrency();
+    const int nWorkers = (std::min)(12, (std::max)(4, static_cast<int>(hc) - 2));
+    for (int i = 0; i < nWorkers; ++i) {
         m_workers.emplace_back([this] { LoaderThread(); });
     }
 }
@@ -45,8 +49,20 @@ void ResidencyManager::LoaderThread() {
         const bool ok = m_tenants[job->tenant].provider(job->req, data);
         {
             std::lock_guard<std::mutex> lk(m_mx);
-            job->data = ok ? std::move(data) : std::vector<uint8_t>(65536, 0);
-            job->state = TileState::Loaded;
+            // M7w: a failed load must NEVER fabricate a zero tile -- mapping zeros makes the
+            // residency map swear real data exists where the GPU holds bed=0 / black (the
+            // step-11 MISMATCH). Retry a few times; then leave the tile honestly UNMAPPED so
+            // consumers fall back to the coarser REAL mip (Tier-2 nulls never reach them,
+            // because the claim is only ever written on a true map).
+            if (ok) {
+                job->data = std::move(data);
+                job->state = TileState::Loaded;
+            } else if (++job->retries < 4) {
+                job->state = TileState::Seen;   // requeued by ProcessQueues from m_loading
+            } else {
+                job->state = TileState::Failed;
+                ++m_failedLoads;
+            }
             --m_inFlight;
         }
     }
@@ -163,9 +179,114 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
     const int id = static_cast<int>(m_tenants.size());
     m_tenants.push_back(std::move(t));
 
-    // Seed: the coarsest mip of every face wanted immediately (and pinned by construction --
-    // eviction never touches the last mip).
-    for (uint32_t f = 0; f < faces; ++f) Want(id, f, mips - 1, 0, 0, 1, 1);
+    // M7w: THE CLAIM IS MADE TRUE AT BIRTH. The residency map was constructed already
+    // claiming "coarsest mip resident" while the seed tiles streamed asynchronously --
+    // for those frames every consumer (ComposedColor's cube, ComposedHeight's window,
+    // the bank kernel's bed reads) sampled NULL tiles through a map that swore they were
+    // real: Tier-2 zeros wearing provenance. The hypervisor's step-11 cross-check caught
+    // it as GPU +0.00 vs stack -47.67. The coarsest mip is a handful of tiles per tenant
+    // and the providers are cache-first: load, map, and fill them SYNCHRONOUSLY before
+    // the tenant is visible, so there is never a moment where the map lies. A tile whose
+    // provider fails at boot writes 255 ("nothing here") into its span instead -- honest
+    // -- and stays on the async retry path.
+    {
+        Tenant& tn = m_tenants[id];
+        struct BootTile {
+            TileRequest req;
+            uint32_t slot;
+            std::vector<uint8_t> data;
+        };
+        std::vector<BootTile> boot;
+        std::vector<TileRequest> failedBoot;
+        const uint32_t coarsest = mips - 1;
+        for (uint32_t f = 0; f < faces; ++f) {
+            const auto& ti = tn.tilings[f * mips + coarsest];
+            const uint32_t tw = (std::max)(1u, static_cast<uint32_t>(ti.WidthInTiles));
+            const uint32_t th = (std::max)(1u, static_cast<uint32_t>(ti.HeightInTiles));
+            for (uint32_t y = 0; y < th; ++y) {
+                for (uint32_t x = 0; x < tw; ++x) {
+                    TileRequest r{f, coarsest, x, y};
+                    std::vector<uint8_t> data;
+                    if (tn.provider(r, data) && !data.empty()) {
+                        boot.push_back({r, AcquirePoolTile(gpu), std::move(data)});
+                    } else {
+                        // Honest "nothing": overwrite this tile's residency span with 255
+                        // and leave the async seed to retry it.
+                        const uint32_t rdim = tn.resMap.width;
+                        const uint32_t sx =
+                            rdim / (std::max)(1u, static_cast<uint32_t>(ti.WidthInTiles));
+                        const uint32_t sy =
+                            rdim / (std::max)(1u, static_cast<uint32_t>(ti.HeightInTiles));
+                        for (uint32_t my = y * sy; my < (y + 1) * sy && my < rdim; ++my) {
+                            for (uint32_t mx = x * sx; mx < (x + 1) * sx && mx < rdim; ++mx) {
+                                tn.resCpu[f][static_cast<size_t>(my) * rdim + mx] = 255;
+                            }
+                        }
+                        Log("[residency] %S: coarsest tile f%u (%u,%u) failed at boot -- "
+                            "left NULL (map says nothing; async retry queued)",
+                            tn.name.c_str(), f, x, y);
+                        failedBoot.push_back(r);
+                    }
+                }
+            }
+        }
+        if (!boot.empty()) {
+            for (const BootTile& b : boot) {
+                const D3D12_TILED_RESOURCE_COORDINATE coord{
+                    b.req.x, b.req.y, 0, b.req.face * mips + b.req.mip};
+                const D3D12_TILE_REGION_SIZE size{1, FALSE, 0, 0, 0};
+                const D3D12_TILE_RANGE_FLAGS flag = D3D12_TILE_RANGE_FLAG_NONE;
+                const UINT offset = b.slot & 0xFFFF;
+                const UINT count = 1;
+                gpu.Queue()->UpdateTileMappings(tn.res.Get(), 1, &coord, &size,
+                                                m_heaps[b.slot >> 16].Get(), 1, &flag,
+                                                &offset, &count,
+                                                D3D12_TILE_MAPPING_FLAG_NONE);
+            }
+            GpuBuffer stage = gpu.CreateUploadBuffer(
+                static_cast<uint64_t>(boot.size()) * 65536, L"residency boot tiles");
+            auto* cl = gpu.BeginUpload();
+            uint64_t off = 0;
+            for (const BootTile& b : boot) {
+                const size_t n = b.data.size() < 65536 ? b.data.size() : 65536;
+                memcpy(stage.cpu + off, b.data.data(), n);
+                const D3D12_TILED_RESOURCE_COORDINATE coord{
+                    b.req.x, b.req.y, 0, b.req.face * mips + b.req.mip};
+                const D3D12_TILE_REGION_SIZE size{1, FALSE, 0, 0, 0};
+                cl->CopyTiles(tn.res.Get(), &coord, &size, stage.res.Get(), off,
+                              D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE);
+                off += 65536;
+            }
+            D3D12_RESOURCE_BARRIER br{};
+            br.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            br.Transition.pResource = tn.res.Get();
+            br.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            br.Transition.StateBefore = tn.state;
+            br.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            cl->ResourceBarrier(1, &br);
+            tn.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            gpu.EndUpload();   // waits: the stage buffer may die, the tiles are real
+            for (const BootTile& b : boot) {
+                auto tr = std::make_shared<Tracked>();
+                tr->tenant = id;
+                tr->req = b.req;
+                tr->lastSeen = m_frame;
+                tr->pool = b.slot;
+                tr->state = TileState::Mapped;
+                m_tracked[MakeKey(id, b.req)] = tr;
+                m_mapped.push_back(tr);
+                UpdateResidencyByte(tn, b.req, true);
+            }
+        }
+        // Retry-wants AFTER registration, so a mixed face cannot double-map its healthy
+        // tiles (Want on a Mapped tracked entry only bumps lastSeen).
+        for (const TileRequest& r : failedBoot) {
+            const auto& ti = tn.tilings[r.face * mips + coarsest];
+            const float uc = (r.x + 0.5f) / (std::max)(1u, static_cast<uint32_t>(ti.WidthInTiles));
+            const float vc = (r.y + 0.5f) / (std::max)(1u, static_cast<uint32_t>(ti.HeightInTiles));
+            Want(id, r.face, coarsest, uc, vc, uc, vc);
+        }
+    }
     return id;
 }
 
@@ -282,6 +403,15 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     // ---- start loads (newest-seen first, coarse first; predicted tiles yield to real ones)
     {
         std::lock_guard<std::mutex> lk(m_mx);
+        // M7w: failed loads parked in m_loading with state Seen get their retry first.
+        for (auto& tile : m_loading) {
+            if (tile->state != TileState::Seen) continue;
+            if (m_inFlight >= static_cast<int>(kMaxLoadsInFlight)) break;
+            tile->state = TileState::Loading;
+            m_loadQueue.push_back(tile);
+            ++m_inFlight;
+            m_cv.notify_one();
+        }
         std::sort(m_seen.begin(), m_seen.end(), [](const auto& a, const auto& b) {
             if (a->predicted != b->predicted) return !a->predicted;
             if (a->lastSeen != b->lastSeen) return a->lastSeen > b->lastSeen;
@@ -312,6 +442,12 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         for (auto it = m_loading.begin();
              it != m_loading.end() && batch.size() < kMaxMapsPerFrame;) {
             auto& tile = *it;
+            if (tile->state == TileState::Failed) {
+                // Honestly unmapped forever: it stays in m_tracked (Want() only bumps
+                // lastSeen), consumers keep reading the coarser real mip.
+                it = m_loading.erase(it);
+                continue;
+            }
             if (tile->state != TileState::Loaded) {
                 ++it;
                 continue;
@@ -371,8 +507,9 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         (void)tr;
         bytes += 65536;
     }
-    snprintf(s, sizeof(s), "streams %zu res (%zu t, %.0f MB, %u fetches)", m_tenants.size(),
-             m_mapped.size(), bytes / 1048576.0, fetchesThisRun);
+    snprintf(s, sizeof(s), "streams %zu res (%zu t, %.0f MB, %u fetches%s)", m_tenants.size(),
+             m_mapped.size(), bytes / 1048576.0, fetchesThisRun,
+             m_failedLoads ? " FAILED-TILES" : "");
     stats = s;
     for (const auto& f : m_fields) {
         char fs[96];

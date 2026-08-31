@@ -65,7 +65,10 @@ using TileProviderFn = std::function<bool(const TileRequest&, std::vector<uint8_
 class ResidencyManager {
 public:
     static constexpr uint32_t kPoolChunkTiles = 128;     // 8 MB heap chunks
-    static constexpr uint32_t kMaxLoadsInFlight = 12;    // M6i: composed paints are local+cheap
+    // M7w: 12 in-flight loads on 2 workers drained ~0.5 tiles/frame -- a rail descent wants
+    // thousands, so most of the view rode coarse fallbacks for the whole flight (the vintage
+    // patchwork). Loads are disk/CPU paints; feed as many workers as the machine has.
+    static constexpr uint32_t kMaxLoadsInFlight = 48;
     static constexpr uint32_t kMaxMapsPerFrame = 96;     // tiles mapped+filled per frame
     static constexpr uint32_t kPoolCapTiles = 8192;      // 512 MB ceiling before eviction
     static constexpr uint32_t kEvictAgeFrames = 4;       // > frame overlap: no in-flight reads
@@ -160,7 +163,7 @@ private:
         D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COPY_DEST;
     };
 
-    enum class TileState : uint8_t { Seen, Loading, Loaded, Mapped };
+    enum class TileState : uint8_t { Seen, Loading, Loaded, Mapped, Failed };
     struct Tracked {
         int tenant;
         TileRequest req;
@@ -168,6 +171,7 @@ private:
         uint32_t pool = UINT32_MAX;      // (chunk << 16) | tileInChunk when mapped
         TileState state = TileState::Seen;
         bool predicted = false;
+        uint8_t retries = 0;             // M7w: failed loads retry, then go honestly NULL
         std::vector<uint8_t> data;
     };
     using Key = uint64_t;                // tenant:8 | face:3 | mip:5 | y:24 | x:24
@@ -216,6 +220,7 @@ private:
     std::condition_variable m_cv;
     std::atomic<bool> m_quit{false};
     std::atomic<int> m_inFlight{0};
+    uint32_t m_failedLoads = 0;   // M7w: terminal load failures (tiles left honestly NULL)
 
     std::vector<FieldAdapter> m_fields;
     std::map<std::string, SigGrid> m_signatures;

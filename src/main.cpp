@@ -1284,13 +1284,18 @@ int main(int argc, char** argv) {
                     // have coverage -- the compositor's first independent high-res layer,
                     // aligned by its own declared projection (EPSG:6348), not by luck.
                     std::vector<ColorSource*> colorStack{&srcGoogle};
-                    // The bed paints ABOVE google (its photo of open water) and BELOW the
-                    // surveyed orthos: stack order is the authority ranking.
-                    if (srcBed.Load("data/bed/bed_rules.json", &compositor, hgtCh)) {
-                        colorStack.push_back(&srcBed);
-                    }
+                    // M7x (user catch): the ortho was painting its capture-day WATER over the
+                    // drained-bed albedo -- a hard-edged dark rectangle the sea shader then
+                    // attenuated AGAIN. Photos are LAND authorities; the bed classifier is
+                    // the WATER authority. The stack order encodes that ranking: google under
+                    // aerial (both photos, finer wins), bed above both (its height-band alpha
+                    // reclaims everything below the intertidal ramp and hands land back to
+                    // the photos above +1.2 m NAVD), hand overlays on top of everything.
                     if (srcAerial.Load("data/aerial/aerial.json")) {
                         colorStack.push_back(&srcAerial);
+                    }
+                    if (srcBed.Load("data/bed/bed_rules.json", &compositor, hgtCh)) {
+                        colorStack.push_back(&srcBed);
                     }
                     if (srcOverlay.Load("data/overlay/overlay.json")) {
                         colorStack.push_back(&srcOverlay);
