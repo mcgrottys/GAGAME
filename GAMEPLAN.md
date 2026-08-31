@@ -1242,6 +1242,28 @@ harvest bought on the false premise is ON HOLD — the land is already green; NA
 remains the option if summer-vintage imagery is wanted for its own sake. Six gates
 green.
 
+**M7t (2026-08-30): THE ALGEBRA WHITEPAPER + THE SCRIPTORIUM'S MATH TOOL.** The user:
+"make a diagram/whitepaper of all the GA and other algebra we are using... a tool that
+goes into the scriptorium that prints out the math for a human... so we can keep track
+of things that your training doesn't cover." docs/ALGEBRA.md is now the standing
+reference: thirteen sections — the motors (Cl(3,0,1) screws and the rail slerp), the
+Cl(3) versor optics (reflection sandwich, refraction rotor and its closed form), the
+Cl(2)+ spinor law (phasor synthesis, the componentwise-blend rule, epoch alignment),
+the cascade sea, THE FOLD (grade shedding, the three-tier telescope, and the folding
+law: never threshold a box-average — average the answers), the finite-depth wave
+physics (dispersion → shoaling → wave-current blocking → breaking, with the closures
+marked as closures), the SWE solver, the two-ray radiometry, the frame calculus, the
+compositor's algebra, the small algebras, THE PRIORS LEDGER, and the gate map. The
+priors ledger is the section the user named: twelve entries where measured reality
+diverged from textbook/training expectations (the bindless sampler trap, padded dims,
+the re-grading rejection, threshold-vs-fold, "inverted water" as missing physics,
+graph rot, corner-lerp context, extreme probes, cold A/Bs, the flip declaration,
+vintage ladders, tuned constants) — each as prior → measurement → law. The Scriptorium
+grew a `math` table and MCP tool: `math()` lists topics, `math(topic)` prints the
+section — the whitepaper is ingested at index time from its `## id — Title` sections,
+so the document in the repo IS the tool's content. A fresh session loads the mindset
+by reading ALGEBRA.md (or calling math), and reads `priors` FIRST when surprised.
+
 **THE DX12 GOTCHAS LEDGER (and the non-GA-workaround audit the user asked for: every
 workaround marked, with whether a GA formulation would have needed it at all):**
 1. Bindless static-sampler SampleLevel returns ZERO outside the pixel stage on this

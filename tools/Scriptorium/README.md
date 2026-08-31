@@ -21,7 +21,11 @@ dotnet run --project tools/Scriptorium -- --index    # rebuild scriptorium.db
 ```
 
 Registered in the repo's `.mcp.json`; tools: `symbols(query)`, `who_writes(path)`,
-`script_for(name)`, `channels()`, `reindex()`.
+`script_for(name)`, `channels()`, `reindex()`, and `math(topic?)` — the algebra
+whitepaper (`docs/ALGEBRA.md`) served per topic: the GA products, wave physics,
+radiometry, frame calculus, and the PRIORS LEDGER (where measured reality diverged
+from textbook/training expectations). No arg lists topics; read `priors` first when
+the engine surprises you.
 
 SQLite over MySQL on purpose: one file, zero administration, transactional; the schema is
 plain SQL and ports to MySQL unchanged the day this becomes multi-user.

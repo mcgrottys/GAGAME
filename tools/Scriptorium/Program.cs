@@ -60,7 +60,9 @@ static class Indexer
             DROP TABLE IF EXISTS scripts;
             DROP TABLE IF EXISTS products;
             DROP TABLE IF EXISTS channels;
+            DROP TABLE IF EXISTS math;
             CREATE TABLE symbols(name TEXT, kind TEXT, file TEXT, line INTEGER, doc TEXT);
+            CREATE TABLE math(topic TEXT PRIMARY KEY, title TEXT, body TEXT);
             CREATE TABLE scripts(name TEXT PRIMARY KEY, path TEXT, purpose TEXT, outputs TEXT);
             CREATE TABLE products(path TEXT PRIMARY KEY, script TEXT, bytes INTEGER, mtime TEXT);
             CREATE TABLE channels(name TEXT, kind TEXT, detail TEXT, file TEXT, line INTEGER);
@@ -81,8 +83,10 @@ static class Indexer
             scripts++;
         }
         var products = IndexProducts(db, repo);
+        var math = IndexMath(db, repo);
 
         tx.Commit();
+        Console.WriteLine($"[scriptorium] {math} math topics from docs/ALGEBRA.md");
         return (symbols, scripts, products, channels);
     }
 
@@ -226,6 +230,43 @@ static class Indexer
         => Exec(db, "INSERT INTO symbols VALUES($n,$k,$f,$l,$d)",
                 ("$n", name), ("$k", kind), ("$f", file), ("$l", line), ("$d", doc));
 
+    // M7t: THE ALGEBRA WHITEPAPER (docs/ALGEBRA.md) ingested per topic -- sections are
+    // "## topic-id -- Title"; the MCP 'math' tool serves them so a human (or an outside
+    // expert) can read the engine's actual mathematics, including the priors ledger:
+    // the places where measured reality diverged from textbook/training expectations.
+    static int IndexMath(SqliteConnection db, string repo)
+    {
+        var path = Path.Combine(repo, "docs", "ALGEBRA.md");
+        if (!File.Exists(path)) return 0;
+        var lines = File.ReadAllLines(path);
+        var n = 0;
+        string? topic = null, title = null;
+        var body = new StringBuilder();
+        void Flush()
+        {
+            if (topic == null) return;
+            Exec(db, "INSERT OR REPLACE INTO math(topic, title, body) VALUES($t, $ti, $b)",
+                 ("$t", topic), ("$ti", title ?? topic), ("$b", body.ToString().Trim()));
+            n++;
+            body.Clear();
+        }
+        foreach (var line in lines)
+        {
+            var m = Regex.Match(line, @"^## ([a-z0-9-]+) — (.+)$");
+            if (!m.Success) m = Regex.Match(line, @"^## ([a-z0-9-]+) -- (.+)$");
+            if (m.Success)
+            {
+                Flush();
+                topic = m.Groups[1].Value;
+                title = m.Groups[2].Value.Trim();
+                continue;
+            }
+            if (topic != null) body.AppendLine(line);
+        }
+        Flush();
+        return n;
+    }
+
     static void Exec(SqliteConnection db, string sql, params (string, object)[] args)
     {
         using var cmd = db.CreateCommand();
@@ -286,7 +327,8 @@ static class McpServer
           {"name":"who_writes","description":"Which harvester script owns a data product path (substring match).","inputSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}},
           {"name":"script_for","description":"Describe a harvester script: purpose and outputs.","inputSchema":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}},
           {"name":"channels","description":"The monastery registry: channels, sources (with structure/CRS), Exchange buffers.","inputSchema":{"type":"object","properties":{}}},
-          {"name":"reindex","description":"Rescan the repo and rebuild the database.","inputSchema":{"type":"object","properties":{}}}
+          {"name":"reindex","description":"Rescan the repo and rebuild the database.","inputSchema":{"type":"object","properties":{}}},
+          {"name":"math","description":"The algebra whitepaper (docs/ALGEBRA.md), served per topic. No arg: list topics. With topic (substring): print that section's mathematics for a human or an outside expert -- GA products, wave physics, radiometry, frames, the compositor's algebra, and the PRIORS LEDGER (where measured reality diverged from textbook/training expectations; read it first when the engine surprises you).","inputSchema":{"type":"object","properties":{"topic":{"type":"string"}}}}
         ]}
         """)!;
 
@@ -314,6 +356,15 @@ static class McpServer
                 null,
                 r => $"{r.GetString(0),-16} {r.GetString(1),-26} {Truncate(r.GetString(2), 60),-60} {r.GetString(3)}:{r.GetInt32(4)}"),
             "reindex" => Reindex(repo, dbPath),
+            "math" => (args?["topic"]?.GetValue<string>() is { Length: > 0 } t)
+                ? Query(db,
+                    "SELECT topic, title, body FROM math WHERE topic LIKE $q OR title LIKE $q",
+                    ("$q", $"%{t}%"),
+                    r => $"## {r.GetString(0)} — {r.GetString(1)}\n\n{r.GetString(2)}\n")
+                : Query(db,
+                    "SELECT topic, title FROM math ORDER BY rowid",
+                    null,
+                    r => $"{r.GetString(0),-14} {r.GetString(1)}"),
             _ => $"unknown tool '{name}'"
         };
         return new JsonObject
