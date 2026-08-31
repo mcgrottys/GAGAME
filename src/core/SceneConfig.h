@@ -45,6 +45,14 @@ struct WaterSceneConfig {
                                         // to the dequant tables at upload (cache stays
                                         // raw physics; ProbeAt reads the same table so
                                         // the 9b/9c twin holds). vqview shipped 1.15.
+    float bankTexelM = 2.4f;            // M8h: wave bank ring-0 texel (m). The fold law
+                                        // sheds any band the ring undersamples, so this
+                                        // caps which wavelengths become GEOMETRY: 4.8
+                                        // half-folded the 16 m solved comps; 2.4 lets
+                                        // lambda >= ~5 m articulate fully (vqview parity
+                                        // -- its finer bands were normals-only too).
+                                        // Construction-time: needs a restart, not a
+                                        // hot-reload. Ring 0 span = 512 * this.
 
     // ---- kernel closures (were literals; every one pinned by gates/proofs) ----
     float shedSteepCap = 0.44f;   // Miche: shed slope variance rides ak <= this
@@ -102,7 +110,8 @@ inline void WriteDefaultWaterScene(const char* path) {
         "    \"comps\": 16, \"spreadDeg\": 26.0, \"barNormalDeg\": 285.0,\n"
         "    \"gammaHs\": 0.60, \"minSamplesPerLambda\": 8.0,\n"
         "    \"tideBucketM\": 0.25, \"currentBucketMs\": 0.10,\n"
-        "    \"featherM\": 120.0, \"chop\": 1.1, \"exag\": 1.15\n"
+        "    \"featherM\": 120.0, \"chop\": 1.1, \"exag\": 1.15,\n"
+        "    \"bankTexelM\": 2.4\n"
         "  },\n"
         "  \"closures\": {\n"
         "    \"shedSteepCap\": 0.44, \"shedMssCeil\": 0.09,\n"
@@ -169,6 +178,7 @@ inline bool LoadWaterScene(const char* path, WaterSceneConfig& out) {
         out.wfFeatherM = static_cast<float>(w->Num("featherM", out.wfFeatherM));
         out.wfChop = static_cast<float>(w->Num("chop", out.wfChop));
         out.wfExag = static_cast<float>(w->Num("exag", out.wfExag));
+        out.bankTexelM = static_cast<float>(w->Num("bankTexelM", out.bankTexelM));
     }
     if (const JsonValue* c = v.Get("closures")) {
         out.shedSteepCap = static_cast<float>(c->Num("shedSteepCap", out.shedSteepCap));

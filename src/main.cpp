@@ -1176,12 +1176,22 @@ int main(int argc, char** argv) {
         // per frame from everything the weather manager federates, sampled by the globe in
         // one-water mode. Registered BEFORE the planet so the rings are recomposed (and the
         // cascades already advanced by SeaLayer) when the globe's meshlets sample them.
+        // M8h: the water scene loads BEFORE the layers stand up -- the bank's ring
+        // density (bankTexelM) is a construction-time choice. Hot-reload still lives
+        // in the frame loop; geometry-of-the-bank changes need a restart (logged).
+        WaterSceneConfig waterScene;
+        long long waterSceneMtime = 0;
+        const char* kScenePath = "data/wave_scene.json";
+        LoadWaterScene(kScenePath, waterScene);
+        WaterSceneChanged(kScenePath, &waterSceneMtime);
+
         WaterBankLayer* waterBank = nullptr;
         if (sea && bathy.Ready() && !marsMode) {
             auto wbOwned = std::make_unique<WaterBankLayer>();
             waterBank = wbOwned.get();
             waterBank->Configure(opt.shaderDir, sea, &swe, &bathy, &waterAtlas, &compositor,
                                  hgtCh, &globeModel, &seaState);
+            waterBank->SetBaseTexel(waterScene.bankTexelM);   // M8h ring density (scene)
             waterBank->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             renderer.AddLayer(std::move(wbOwned));
             sea->drawEnabled = !opt.oneWater;
@@ -1952,11 +1962,6 @@ int main(int argc, char** argv) {
         // state, the solve carries the structure, the GPU carries the phase.
         // The water scene is DATA (data/wave_scene.json, authored if absent, hot-reloaded
         // per frame): move the solved window, retune closures, save -- no recompile.
-        WaterSceneConfig waterScene;
-        long long waterSceneMtime = 0;
-        const char* kScenePath = "data/wave_scene.json";
-        LoadWaterScene(kScenePath, waterScene);
-        WaterSceneChanged(kScenePath, &waterSceneMtime);
         auto sceneToWaveCfg = [](const WaterSceneConfig& s) {
             WaveFieldConfig c;
             c.orgX = s.wfOrgX;

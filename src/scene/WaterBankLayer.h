@@ -36,7 +36,8 @@ class SeaLayer;
 
 class WaterBankLayer : public Layer {
 public:
-    static constexpr int kMips = 6;         // 4.8 m .. 154 m texels, 2.5 .. 79 km spans
+    static constexpr int kMips = 6;         // texel = base * 2^m; at base 2.4: 2.4..77 m
+                                            // texels, 1.2..39 km spans (scene bankTexelM)
     static constexpr int kRingTiles = 4;    // 4x4 logical tiles per ring
     static constexpr int kTileTexels = 128;
     static constexpr int kRingTexels = kRingTiles * kTileTexels;
@@ -88,6 +89,12 @@ public:
         memcpy(m_boatB, b32, sizeof(m_boatB));
     }
     float BaseTexelM() const { return m_baseTexelM; }
+    // M8h: ring density from the scene (data/wave_scene.json bankTexelM). Call BEFORE
+    // Init -- the ring spans, the kernel's fold thresholds, the 9b emulator, and the
+    // globe's gBankA.x all derive from this one number, but only at construction.
+    void SetBaseTexel(float m) {
+        if (m > 0.1f && m < 100.0f) m_baseTexelM = m;
+    }
     uint32_t ResidentTiles() const {
         return m_disp.ResidentCount() + m_param.ResidentCount() + m_detail.ResidentCount();
     }

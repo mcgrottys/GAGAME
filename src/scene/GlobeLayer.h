@@ -282,6 +282,8 @@ private:
     std::vector<NodeData> m_nodes;
     // M6j: the mesh-shader path.
     static constexpr uint32_t kMaxMeshlets = 65536;
+    uint32_t m_meshletDrops = 0;    // M8h: leaves dropped at the record cap this frame
+    bool m_dropsReported = false;   // one report per drop episode, not per frame
     bool m_msPath = false;
     Com<ID3D12PipelineState> m_msPso;
     Com<ID3D12GraphicsCommandList6> m_cl6;

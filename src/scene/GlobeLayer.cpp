@@ -602,9 +602,13 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
         if (d < -radius) return;
     }
 
-    // M6j: the mesh path walks all the way to CUDEM scale (level 16 = 4.75 m vertex spacing);
-    // the fallback VS path keeps its classic depth (the terrain layer covers the near field).
-    const int maxDepth = m_msPath ? 16 : kMaxDepth;
+    // M6j/M8h: the mesh path walks two rungs past CUDEM scale (level 18 = 1.19 m vertex
+    // spacing -- level 16's 4.77 m exactly saturated the old 4.8 m bank ring and could
+    // not articulate what a finer ring stores; the user's call: more wave vertices).
+    // The fallback VS path keeps its classic depth (the terrain layer covers the near
+    // field). The distance split (dist < 3*arc) reaches level 18 only within ~115 m of
+    // the eye, so the record budget grows by a few hundred, not thousands.
+    const int maxDepth = m_msPath ? 18 : kMaxDepth;
     if (level < maxDepth && dist < arc * kLodFactor) {
         const double h = size * 0.5;
         SelectNode(face, level + 1, u0, v0, h);
@@ -730,7 +734,14 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
 // staying flat falls here, and the one surface reaches walking height.
 void GlobeLayer::EmitMeshlets(int face, double u0, double v0, double size, double arc,
                               float morphStart, float morphEnd) {
-    if (m_meshlets.size() + 16 > kMaxMeshlets) return;
+    // M8h: >= keeps the worst-case record count at 65520 -- DispatchMesh's X dimension
+    // caps at 65535, and the old > guard let the buffer land on exactly 65536 (out of
+    // spec). A dropped leaf is a HOLE in the surface, so it is counted and reported,
+    // never silent.
+    if (m_meshlets.size() + 16 >= kMaxMeshlets) {
+        ++m_meshletDrops;
+        return;
+    }
     const double R = m_radius;
     const double step = size / 32.0;
     auto tangent = [&](const double d[3], double out[3]) {
@@ -845,7 +856,18 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
 
     m_nodes.clear();
     m_meshlets.clear();
+    m_meshletDrops = 0;
     for (int f = 0; f < 6; ++f) SelectNode(f, 0, 0.0, 0.0, 1.0);
+    // M8h: a dropped leaf is a hole. Report on the transition (once per episode), with
+    // the count -- the fix is a coarser view or a bigger kMaxMeshlets, not silence.
+    if (m_meshletDrops > 0 && !m_dropsReported) {
+        Log("[globe] meshlet budget hit: %u leaves dropped (%zu/%u records) -- holes "
+            "until the view coarsens",
+            m_meshletDrops, m_meshlets.size(), kMaxMeshlets);
+        m_dropsReported = true;
+    } else if (m_meshletDrops == 0) {
+        m_dropsReported = false;
+    }
 
     const double r = std::sqrt(m_camPos[0] * m_camPos[0] + m_camPos[1] * m_camPos[1] +
                                m_camPos[2] * m_camPos[2]);
