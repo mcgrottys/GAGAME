@@ -819,3 +819,80 @@ handed main's own `ResolveDatum` result — an estimate that was always there, h
 
 Equal to the engine's own water level to the printed digit — through a graph that states its
 units, its datums, and which of its numbers is an assumption.
+
+## 27. The realization moved into the compositor, and the bed converged
+
+Section 25 left the GA bed **DIVERGENT at 28.3231 m** and named the cause: the engine's bed is
+not a file. `BathyModel::RealizeFromChannel` *overwrites every cell* with
+`Compositor::SampleHeightStack`, so the authoritative bed is a six-layer composite and the GA
+path had exactly one of those layers.
+
+    L0 noaa.etopo2022        4.9 km   global floor
+    L1 noaa.etopo15s.ne      461 m    regional
+    L2 noaa.cudem.capeann    13.7 m
+    L3 noaa.cudem.boston     13.7 m
+    L4 noaa.cudem.merrimack  13.7 m   <- the one layer the GA path had
+    L5 survey.edits          5 m      hand-edit polygons -- "THE LAW"
+
+`HeightStackSource.h` adapts each existing `HeightSource` into a `DomainSource`. Nothing is
+reimplemented — every layer still answers through the same `Sample()` the renderer calls — so
+there is no second copy of the resample, the feather, or the edit polygons to drift out of step.
+The fix was never "read the same bytes sparsely"; it was "make the thing that edits the bytes a
+source".
+
+### The blend rule had to move too
+
+This was the subtler half. `SampleHeightStack` is a sequential **over** in layer order:
+
+    h += (m - h) * w          for each layer, bottom to top
+
+while `DomainCompositor`'s native rule is priority-bucketed weighted **average**. Those agree
+only where every weight is 0 or 1 — and disagree *precisely across a feather*, which is where a
+survey edit meets the grid beneath it, and where the 28 m lived. Averaging would have pulled the
+edit toward the CUDEM under it instead of laying it over. Hence `Blend::LayeredOver`.
+
+### The datum: a real number, not a label
+
+The unit stage refused the stack outright, and it was right to. CUDEM and the edits are NAVD88;
+the two ETOPO layers are MSL/geoid referenced. The engine has always blended them as one height.
+
+Labelling that with a zero shift would have been documentation, not a fix. The real number turned
+out to be **already on disk** — CO-OPS publishes a station's datums on one staff, and Boston's
+cached `datums_metric.json` carries both:
+
+    MSL 2.660    NAVD88 2.752   ->   NAVD88 zero sits 0.092 m ABOVE local MSL
+
+so an MSL height becomes NAVD88 by subtracting 0.092 m. `main::ResolveDatum` already derived this
+same quantity from the same data; `NavdAboveMsl` now factors it out, so there is one derivation
+and two consumers — the tide's MLLW link and the bed's MSL link.
+
+Its limit is stated because it is real: local MSL is not the global geoid, and the separation
+varies across the domain. This is the best published number available short of GEOID18 or VDatum.
+
+### Fidelity and correctness, measured separately
+
+Two questions hide in one number, and answering them together would let each excuse the other.
+So the stack is composed **twice**:
+
+    [bed] realization fidelity: worst |GA(link=0) - committed| = 0.0000 m
+          (EQUIVALENT -- the six-layer stack is reproduced)
+    [bed] GA path: 1863x1174, 6 levels, 6 layers, 2187162/2187162 covered at L0 --
+          SAFE TO SWITCH: stack reproduced exactly, and the shipped bed adds the datum link
+    [bed] shipped GA bed vs committed: 0.0920 m, all of it the published MSL -> NAVD88 link
+          the committed bed omits (it blends MSL-referenced ETOPO as if it were NAVD88)
+    [bed] datum sensitivity: 1.000 m of MSL error moves the bed by at most 1.0000 m
+          (mean 0.0781 m)
+
+**28.3231 m → 0.0000 m.** With the link at zero the GA path reproduces the engine's bed exactly,
+which is the proof that the realization moved. The shipped bed then differs by 0.0920 m, and that
+difference is a **finding about the committed bed**, not an error in this path: the engine's bed
+carries a 9.2 cm datum error wherever ETOPO shows through.
+
+The sensitivity probe is what makes that claim quantitative rather than rhetorical. Displacing
+only the MSL-referenced layers by a whole metre moves the finished bed by at most 1.0 m and by
+0.078 m on average — so ETOPO holds full authority somewhere (outside CUDEM's footprint) and is
+painted over almost everywhere else. The datum question is settled *where it matters* by
+measurement instead of by argument.
+
+Consumers are **not** switched. That is a separate change, with the solver, the sea shader, the
+water bank and the globe all reading the bed at once.

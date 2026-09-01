@@ -49,6 +49,14 @@ public:
     int Ny() const { return m_ny; }
     const std::vector<float>& Elev() const { return m_elev; }   // NAVD88 m; -9999 = nodata
 
+    // M9n: the grid's own lat/lon lattice, so another path can sample the SAME points
+    // RealizeFromChannel does. Row 0 is north, hence Lat1() (the north edge) and a positive
+    // Dlat() that walks southward.
+    double Lon0() const { return m_lon0; }
+    double Lat1() const { return m_lat1; }
+    double Dlon() const { return m_dlon; }
+    double Dlat() const { return m_dlat; }
+
     // World-frame extent of the grid (x east, z north, metres from the origin).
     float WorldX0() const { return m_worldX0; }
     float WorldZ0() const { return m_worldZ0; }

@@ -422,6 +422,21 @@ inline std::shared_ptr<DomainSource> NormalizeToSi(std::shared_ptr<DomainSource>
 class DomainCompositor {
 public:
     void SetLadder(const LevelLadder& l) { m_ladder = l; }
+
+    // M9n: HOW SOURCES COMBINE, and it is not one rule.
+    //
+    //   PriorityAverage  the native rule: highest priority wins, ties blend by weight. Right
+    //                    when sources are RIVALS describing one quantity -- a 1.5 m survey and
+    //                    a 700 m model of the same current.
+    //   LayeredOver      h += (m - h) * w, bottom to top. Right when sources are a STACK with
+    //                    an authority order, each painting over what is under it. This is
+    //                    Compositor::SampleHeightStack exactly, and reproducing the engine's
+    //                    bed requires it: the two rules agree only where every weight is 0 or
+    //                    1, and disagree precisely across a feather -- which is where a survey
+    //                    edit meets the grid beneath it, and where the bed's 28 m lived.
+    enum class Blend : uint8_t { PriorityAverage, LayeredOver };
+    void SetBlend(Blend b) { m_blend = b; }
+    Blend BlendMode() const { return m_blend; }
     // A page's geography, EXACTLY -- not the anchor-linear approximation. That form
     // (BathyModel::kOrgLat with a frozen mPerLon) is declared valid only NEAR ITS ANCHOR and
     // is what every local water consumer shares; a planet-scale tree cannot use it, because a
@@ -481,6 +496,28 @@ public:
     // show up only where a composite fed another composite.
     bool SampleBlended(const DomainQuery& q, DomainValue& out) const {
         out = DomainValue{};
+        if (m_blend == Blend::LayeredOver) {
+            // Sequential over, in ADD order -- so a caller must add bottom-to-top or the law
+            // ends up under the grid it is supposed to overrule. Starting the accumulator at
+            // zero (rather than at "absent") is deliberate: it is what SampleHeightStack does,
+            // so a lone partial-weight layer pulls toward zero in both paths identically.
+            double acc[4] = {0, 0, 0, 0}, cov = 0.0;
+            bool any = false;
+            for (const auto& s : m_sources) {
+                DomainValue v;
+                if (!s->SampleAt(q, v) || v.weight <= 0.0f) continue;
+                any = true;
+                const double w = (std::min)(1.0, double(v.weight));
+                for (uint32_t c = 0; c < m_chan && c < 4; ++c) {
+                    acc[c] += (double(v.c[c]) - acc[c]) * w;
+                }
+                cov += (1.0 - cov) * w;   // coverage the stack itself does not track
+            }
+            if (!any) return false;
+            for (uint32_t c = 0; c < m_chan && c < 4; ++c) out.c[c] = float(acc[c]);
+            out.weight = float(cov);
+            return true;
+        }
         int bestPri = INT32_MIN;
         double acc[4] = {0, 0, 0, 0}, wsum = 0.0;
         for (const auto& s : m_sources) {
@@ -543,6 +580,7 @@ private:
     std::vector<std::shared_ptr<DomainSource>> m_sources;
     uint8_t m_grade = 0;
     UnitSpec m_unit;   // the product frame: set by the first source, enforced on every other
+    Blend m_blend = Blend::PriorityAverage;
     uint32_t m_chan = 0;
 };
 

@@ -532,6 +532,29 @@ static int RunChannelExport(const std::string& spec, const std::wstring& outPath
     return 0;
 }
 
+// M9n: NAVD88 zero above LOCAL MSL, in metres, from published CO-OPS station datums -- the same
+// staff carries MSL and NAVD88, so their difference is data, not an assumption. Boston: MSL
+// 2.660, NAVD88 2.752 -> +0.092. Returns false when no station in the table publishes both.
+//
+// The bed's ETOPO layers are MSL-referenced and need the NEGATIVE of this to reach NAVD88; the
+// tide's MLLW link is a different offset from the same table. One derivation, two consumers.
+bool NavdAboveMsl(const TideModel& model, double* outM, std::string* from) {
+    double best = 1e9;
+    bool got = false;
+    for (size_t i = 0; i < model.Count(); ++i) {
+        const TideStation& s = model.S(i);
+        if (s.mllwMinusNavdM <= -900.0) continue;
+        const double d = -s.mllwMinusNavdM - s.meanMllwM;   // NAVD88 zero above local MSL
+        if (!got || std::abs(d) < std::abs(best)) {
+            best = d;
+            got = true;
+            if (from) *from = s.name;
+        }
+    }
+    if (got && outM) *outM = best;
+    return got;
+}
+
 float ResolveDatum(const TideModel& model) {
     const TideStation& fs = model.S(model.Focus());
     if (fs.mllwMinusNavdM > -900.0) {
@@ -539,19 +562,9 @@ float ResolveDatum(const TideModel& model) {
             fs.mllwMinusNavdM);
         return static_cast<float>(fs.mllwMinusNavdM);
     }
-    double delta = 0.0, best = 1e9;
+    double delta = 0.0;
     std::string from = "NAVD=MSL assumption";
-    for (size_t i = 0; i < model.Count(); ++i) {
-        const TideStation& s = model.S(i);
-        if (s.mllwMinusNavdM > -900.0) {
-            const double d = -s.mllwMinusNavdM - s.meanMllwM;   // NAVD height above local MSL
-            if (std::abs(d) < std::abs(best)) {
-                best = d;
-                from = s.name;
-            }
-        }
-    }
-    if (best < 1e8) delta = best;
+    NavdAboveMsl(model, &delta, &from);
     const float off = static_cast<float>(-(fs.meanMllwM + delta));
     Log("[datum] no NAVD link at %s; MLLW - NAVD88 = %+.3f m via NAVD=MSL%+.3f (from %s)",
         fs.name.c_str(), off, delta, from.c_str());
@@ -1611,7 +1624,24 @@ int main(int argc, char** argv) {
             // the committed texture and compared against it. Nothing switches to it until the
             // disagreement is small: the bed feeds the solver, the sea shader, the water bank
             // and the globe, so a silent slide here moves a coastline everywhere at once.
-            terrain->BuildBedBank(gpu, "data/bathy/merrimack.json");
+            {
+                // The MSL -> NAVD88 link for the stack's ETOPO layers, from the same published
+                // station datums the tide link comes from. Negative: NAVD88 zero sits ABOVE
+                // local MSL, so an MSL height loses that much to become NAVD88.
+                double navdAboveMsl = 0.0;
+                std::string dfrom = "none";
+                char prov[192];
+                if (NavdAboveMsl(model, &navdAboveMsl, &dfrom)) {
+                    snprintf(prov, sizeof(prov),
+                             "CO-OPS published datums at %s: NAVD88 zero %+.3f m above local MSL "
+                             "(regional; not GEOID18 -- see the sensitivity probe)",
+                             dfrom.c_str(), navdAboveMsl);
+                } else {
+                    snprintf(prov, sizeof(prov),
+                             "NO station publishes both MSL and NAVD88 -- link unavailable");
+                }
+                terrain->BuildBedBank(gpu, compositor, hgtCh, -navdAboveMsl, prov);
+            }
 
             // ---- M9m: THE COMPOSE TREE, and the tide step that forced it into existence.
             //

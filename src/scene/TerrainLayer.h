@@ -7,6 +7,7 @@
 #include "compose/Compositor.h"
 #include "scene/Layer.h"
 #include "compose/DomainSource.h"
+#include "compose/HeightStackSource.h"
 #include "core/GeoGridLoader.h"
 #include "core/GradeField.h"
 #include "sim/BathyModel.h"
@@ -49,7 +50,8 @@ public:
     GradeBank& BedBank() { return m_bedBank; }
     bool BedBankReady() const { return m_bedReady; }
     // Returns the worst |GA path - committed texture| in metres, or -1 if it could not run.
-    double BuildBedBank(Gpu& gpu, const std::string& gridJson);
+    double BuildBedBank(Gpu& gpu, const Compositor& comp, int heightChannel,
+                        double mslToNavd88M, const char* datumProv);
 
     // M6i: the composed color channel -- filled by FillComposedCb in main, the SAME function
     // and constants the globe uses, so the two layers agree texel for texel.

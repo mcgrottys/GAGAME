@@ -45,3 +45,4 @@ tools/Scriptorium/obj/
 
 data/overlay/*.rgba
 cache/overlay/
+out/
