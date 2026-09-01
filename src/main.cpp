@@ -245,7 +245,7 @@ Options ParseArgs(int argc, char** argv) {
             const std::string n = next("worldxz");
             o.lens = n == "worldxz" ? 1 : n == "winuv" ? 2 : n == "mip" ? 3
                      : n == "ring" ? 4 : n == "cascade" ? 5
-                     : n == "waterdata" ? 6 : 1;
+                     : n == "waterdata" ? 6 : n == "velgrad" ? 7 : 1;
         }
         else if (a == "--dump-water-state") o.dumpWater = true;
         else if (a == "--slice") {
@@ -1746,6 +1746,12 @@ int main(int argc, char** argv) {
             }
             globe->stencilOverlay = opt.stencil;
             globe->debugLens = opt.lens;
+            // M9h: the grad(flow) bank plus the grid it lives on, for --lens velgrad. The
+            // SWE solver owns the bank; the bathy model owns the world mapping.
+            if (swe.Ready() && bathy.Ready()) {
+                globe->SetVelGradLens(swe.VelGradSrv(), bathy.WorldX0(), bathy.WorldZ0(),
+                                      bathy.WorldSizeX(), bathy.WorldSizeZ());
+            }
             globe->sliceOn = opt.sliceOn;
             globe->sliceD = static_cast<float>(opt.sliceD);
             compositor.LogRegistry();

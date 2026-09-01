@@ -123,7 +123,16 @@ public:
     bool msSurface = true;          // M6j: request the mesh-shader unified surface
     bool MeshPathActive() const { return m_msPath; }
     bool stencilOverlay = false;    // M6i: --stencil, the GIS alignment overlay
-    int debugLens = 0;              // M7m: --lens (1 worldxz, 2 winuv, 3 mip, 4 ring)
+    int debugLens = 0;              // M7m: --lens (1 worldxz, 2 winuv, 3 mip, 4 ring,
+                                    // 7 velgrad -- the derived div/curl bank)
+    // M9h: the grad(flow) bank and the grid it lives on, for lens 7.
+    void SetVelGradLens(uint32_t srv, float x0, float z0, float sizeX, float sizeZ) {
+        m_lensSrv = srv;
+        m_lensGeo[0] = x0;
+        m_lensGeo[1] = z0;
+        m_lensGeo[2] = (sizeX != 0.0f) ? 1.0f / sizeX : 0.0f;
+        m_lensGeo[3] = (sizeZ != 0.0f) ? 1.0f / sizeZ : 0.0f;
+    }
     float foamOpacity = 0.72f;      // M8: peak foam opacity (data/wave_scene.json)
     float ringBlendTexels = 48.0f;  // M8: bank ring cross-fade width (scene cfg)
     float windGateVal = 1.0f;       // M8: Monahan whitecap gate (per frame, from sea)
@@ -212,6 +221,8 @@ private:
         float optA[4];        // ocean grid: lat1, lon1, 1/dlat, 1/dlon
         float optB[4];        // nx, ny, deep-albedo gain g, spare
         float bankFold[4];    // M9c: the FOLD's wavenumber per band (energy-weighted)
+        uint32_t lensU[4];    // M9h: grad(flow) bank SRV for --lens velgrad
+        float lensA[4];       // bathy grid: org x, org z, 1/sizeX, 1/sizeZ
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -296,6 +307,8 @@ private:
     float m_bankK[3] = {0.03f, 0.15f, 1.0f};
     float m_bankRms[3] = {};   // M8: unit-sea rms envelope per band
     float m_bankFold[3] = {0.0209f, 0.2339f, 2.8420f};   // M9c: the fold's wavenumbers
+    uint32_t m_lensSrv = 0xFFFFFFFFu;   // M9h: grad(flow) bank
+    float m_lensGeo[4] = {0, 0, 0, 0};
     float m_bankExag = 1.15f;
     float m_bankBase = 4.8f;
     float m_bankOrg[12] = {};

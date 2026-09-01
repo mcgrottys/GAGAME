@@ -72,6 +72,11 @@ cbuffer GlobeCb : register(b1) {
     // spectrum). gBankC keeps the band's geometric midpoint for the prefilter and the
     // caustic assembly, whose own proofs pin that number. Appended at the END.
     float4 gBankFold;
+    // M9h: the grad(flow) lens. gLensU.x = the derived (div, curl) bank's SRV; gLensA maps
+    // world XZ onto the bathy grid the SWE solver runs on (row 0 NORTH, so v flips at the
+    // sample -- the same convention Sea.hlsl's BathyUv declares).
+    uint4  gLensU;
+    float4 gLensA;      // org x, org z, 1/sizeX, 1/sizeZ
 };
 
 // Sample the bank at a world-frame XZ: finest ring containing the point wins. Returns false
@@ -834,6 +839,27 @@ float4 PsMain(VsOut i) : SV_Target {
                                        200000.0f,
                                    2.0f);
             lc = float3(frac(wxzL / 100.0f) * 0.75f + 0.1f, chk * 0.7f);
+        } else if (lensId == 7) {
+            // GRADE PICKS THE VISUALIZATION (docs/SPARSE_GA.md 9). One bank, two grades, and
+            // they want different ramps: the divergence is a signed SCALAR, the vorticity is a
+            // signed BIVECTOR whose sign is a handedness. So curl drives a diverging red/blue
+            // -- the eddy's sense of rotation reads directly -- and |div| rides the green,
+            // where convergence and divergence both brighten because the magnitude is what
+            // the confluence looks like. Black is not "no data": a NULL tile reads zero, and
+            // zero here means the flow is irrotational and divergence-free, which is the
+            // honest answer for open water.
+            if (gLensU.x != 0xFFFFFFFFu) {
+                const float2 uvL = (wxzL - gLensA.xy) * gLensA.zw;
+                if (all(uvL > 0.0f) && all(uvL < 1.0f)) {
+                    const float2 mv = gTex[gLensU.x]
+                                          .SampleLevel(sLinearClamp,
+                                                       float2(uvL.x, 1.0f - uvL.y), 0)
+                                          .xy;
+                    const float divN = saturate(abs(mv.x) * 60.0f);
+                    const float curlN = clamp(mv.y * 60.0f, -1.0f, 1.0f);
+                    lc = float3(saturate(curlN), divN * 0.9f, saturate(-curlN));
+                }
+            }
         } else if (lensId == 2) {
             const float2 duvL = CsWindowUv(up);
             if (all(duvL > 0.0f) && all(duvL < 1.0f)) lc = float3(duvL, 0.0f);
