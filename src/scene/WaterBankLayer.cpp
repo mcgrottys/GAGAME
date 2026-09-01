@@ -503,6 +503,9 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.rmsRef[3] = 0.0f;
     for (int c = 0; c < 3; ++c) cb.bandKFold[c] = m_sea->BandKFold(c);
     cb.bandKFold[3] = 0.0f;
+    cb.debugA[0] = flatBed ? 1.0f : 0.0f;   // M9p: the A/B that proves the bed moves geometry
+    cb.debugA[1] = flatBedNavd;
+    cb.debugA[2] = cb.debugA[3] = 0.0f;
     // M8 wavefield: the solved field's window + per-component table. The time rotor
     // (cos, sin)(sigma t) is computed HERE in doubles and reduced mod 2 pi -- sigma t
     // at unix scale would shred float precision in the kernel (the phase never wraps

@@ -64,6 +64,12 @@ cbuffer BankCb : register(b0) {
     // and still drives phase speed / shoaling / wave-current. Appended at the END, per the
     // layout law above.
     float4 gBandKFold;
+    // M9p: --flat-bed. x != 0 replaces the sampled bed with y everywhere, so the SAME scene
+    // can be filled twice -- real bathymetry and a flat floor -- and the two banks diffed.
+    // Reading the code proves the bed is WIRED to the geometry (ShoalFactor on ab.x, the
+    // hmax = 0.55*depth breaking clamp); only a diff proves it MOVES it. Appended at the end
+    // on both sides, per the law twelve rows up.
+    float4 gDebugA;
 };
 
 struct BankTile {
@@ -294,6 +300,10 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             if (s.w > 0.5f) cur = s.xy;
         }
     }
+    // --flat-bed: substitute a constant floor AFTER every real sample, so the only thing that
+    // changes between the two runs is the bed itself -- same window, same residency, same
+    // solver, same instant.
+    if (gDebugA.x != 0.0f) bed = gDebugA.y;
     const float lvl = level + dEta;
     const float depth = lvl - bed;
     const float dry = smoothstep(0.05f, 0.65f, depth);

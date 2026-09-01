@@ -97,6 +97,8 @@ struct Options {
     uint32_t tileBudget = 1000;       // --tile-budget: hard cap on Google fetches per run
     bool warmInlet = false;           // --warm-inlet: pre-cache the Merrimack detail pyramid
     bool railZoom = false;            // --rail-zoom DIR: orbit -> inlet imagery zoom -> estuary
+    bool flatBed = false;             // --flat-bed N: constant bed, to A/B bathymetry
+    float flatBedNavd = -30.0f;
     bool railFlood = false;           // --rail-flood DIR: orbit -> zoom -> the throat at helm
     bool railJetty = false;           // --rail-jetty DIR: jetty tip -> jetty tip -> bird's eye
                                       // height, facing the entrance (shoot at max flood)
@@ -274,6 +276,9 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--sea-verify") o.seaVerify = true;
         else if (a == "--viz") o.viz = true;
         else if (a == "--wireframe") o.surfaceDebug = 1;
+        // M9p: replace the bed with a flat floor at this NAVD height. The A/B against a normal
+        // run isolates BATHYMETRY's contribution to the geometry from everything else.
+        else if (a == "--flat-bed") { o.flatBed = true; o.flatBedNavd = float(atof(next("-30").c_str())); }
         else if (a == "--dump-both") o.dumpBoth = true;
         else if (a == "--load-field") o.loadField = next("");
         else if (a == "--meshlets") o.surfaceDebug = 2;
@@ -1763,6 +1768,14 @@ int main(int argc, char** argv) {
             waterBank->Configure(opt.shaderDir, sea, &swe, &bathy, &waterAtlas, &compositor,
                                  hgtCh, &globeModel, &seaState);
             waterBank->SetBaseTexel(waterScene.bankTexelM);   // M8h ring density (scene)
+            waterBank->flatBed = opt.flatBed;
+            waterBank->flatBedNavd = opt.flatBedNavd;
+            if (opt.flatBed) {
+                Log("[bed] --flat-bed %.1f m NAVD: the bank fills against a CONSTANT floor. Diff "
+                    "this run's wireframe against a normal one -- whatever differs is what "
+                    "bathymetry does to the MESH, with shading held out of it.",
+                    opt.flatBedNavd);
+            }
             waterBank->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             renderer.AddLayer(std::move(wbOwned));
             sea->drawEnabled = !opt.oneWater;

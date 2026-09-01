@@ -36,6 +36,11 @@ class SeaLayer;
 
 class WaterBankLayer : public Layer {
 public:
+    // M9p: --flat-bed. Replaces the sampled bed with a constant so the same scene can be
+    // filled twice and diffed. Public because it is a debug lever, not state.
+    bool flatBed = false;
+    float flatBedNavd = -30.0f;
+
     static constexpr int kMips = 6;         // texel = base * 2^m; at base 1.2: 1.2..38 m
                                             // texels, 0.6..20 km spans (scene bankTexelM)
     static constexpr int kRingTiles = 4;    // 4x4 logical tiles per ring
@@ -107,6 +112,7 @@ public:
 
 private:
     // Mirrors BankCb in WaterBank.hlsl.
+
     struct BankCbData {
         float org[4];
         float patch[4];
@@ -137,6 +143,11 @@ private:
         float bandKFold[4];    // M9c: the FOLD's wavenumber per band (energy-weighted);
                                // bandK above keeps the cut mean for the physics closures.
                                // APPENDED at the end, per the layout law two rows up.
+        float debugA[4];       // M9p: x != 0 = flat-bed override, y = the bed (NAVD m). Sits
+                               // AFTER bandKFold because gDebugA does in the HLSL -- the two
+                               // orders are the contract, and a same-size swap passes the
+                               // byte-parity gate while silently offsetting nothing here but
+                               // reading the wrong row there.
     };
     struct BankTile {
         float orgXZ[2];
