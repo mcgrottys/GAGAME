@@ -38,6 +38,7 @@
 // ================================================================================================
 #pragma once
 
+#include "compose/TileIndex.h"
 #include "core/Gpu.h"
 #include "core/Pga.h"
 
@@ -69,6 +70,9 @@ public:
     // thousands, so most of the view rode coarse fallbacks for the whole flight (the vintage
     // patchwork). Loads are disk/CPU paints; feed as many workers as the machine has.
     static constexpr uint32_t kMaxLoadsInFlight = 48;
+    // M9af: slots held open for tiles that are NOT on disk, so preferring cached reads cannot
+    // starve the painting that fills the cache. 12 of 48 = a quarter.
+    static constexpr uint32_t kPaintReserve = 12;
     static constexpr uint32_t kMaxMapsPerFrame = 96;     // tiles mapped+filled per frame
     static constexpr uint32_t kPoolCapTiles = 8192;      // 512 MB ceiling before eviction
     static constexpr uint32_t kEvictAgeFrames = 4;       // > frame overlap: no in-flight reads
@@ -122,6 +126,26 @@ public:
     // "the hash map is slow" from "we are asking it the same question hundreds of times".
     mutable uint64_t wantTouches = 0, wantHits = 0;
     void WantStatsReset() { wantTouches = wantHits = 0; }
+
+    // M9af: hand a tenant the index of its own realization.
+    //
+    // MEASURED, AND NOT USED FOR SCHEDULING. The obvious use -- prefer loads that are a 64 KB
+    // read over loads that are a 16384-sample paint -- was implemented and made the picture
+    // WORSE: the descent seam came straight back, 33% of pixels changed for the worse against
+    // the reference frame. The reason is that only ~1% of the finest level has ever been
+    // painted, so the tiles a readiness preference demotes are exactly the ones that would fill
+    // the far field. Preferring what is cached starves the work that fills the cache. Reserving
+    // a quarter of the slots for paints recovered about a third of the loss and no more.
+    //
+    // It would pay on a WARM cache -- a repeat flight, where reads really are the whole job --
+    // so the hook stays and the policy does not. What the index is actually for here is the
+    // DirectStorage read path: knowing a tile's address, size and hash without touching the
+    // filesystem is what lets a read be issued straight to the GPU.
+    void SetTileIndex(int tenant, const TileIndex* idx) {
+        if (tenant >= 0 && tenant < static_cast<int>(m_tenants.size())) {
+            m_tenants[tenant].index = idx;
+        }
+    }
 
     void Want(int tenant, uint32_t face, uint32_t mip, float u0, float v0, float u1, float v1,
               bool predicted = false);
@@ -184,6 +208,9 @@ private:
         std::vector<uint8_t> resCpu[6];
         bool resDirty = false;
         D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COPY_DEST;
+        // M9af: what this tenant's realization already holds on the NVMe. Borrowed; main owns
+        // the indices. Null means "no information", which schedules exactly as before.
+        const TileIndex* index = nullptr;
     };
 
     enum class TileState : uint8_t { Seen, Loading, Loaded, Mapped, Failed };

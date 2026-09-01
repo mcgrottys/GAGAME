@@ -492,11 +492,26 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             ++m_inFlight;
             m_cv.notify_one();
         }
+        // M9af: READY BEFORE UNREADY. A tile already on the NVMe is a 64 KB read; one that is
+        // not is a paint of 16384 samples and, for a tile-tree source, a network fetch behind a
+        // budget. Those differ by orders of magnitude and the queue could not tell them apart,
+        // so a frame's worth of load slots could all go to painting while cached tiles that
+        // would have filled the picture immediately waited behind them.
+        //
+        // It sits UNDER the real/predicted rule -- a speculative tile being cheap is not a
+        // reason to serve it before a tile the camera is actually looking at -- and OVER
+        // recency, because among tiles the view wants now, the cheap ones should land first.
+        // Coarse-before-fine stays last, where the mapping invariant needs it.
         std::sort(m_seen.begin(), m_seen.end(), [](const auto& a, const auto& b) {
             if (a->predicted != b->predicted) return !a->predicted;
             if (a->lastSeen != b->lastSeen) return a->lastSeen > b->lastSeen;
             return a->req.mip > b->req.mip;
         });
+        // M9af: READINESS ORDERING WAS TRIED HERE AND MEASURED WORSE. See the note on
+        // ResidencyManager::SetTileIndex -- preferring tiles already on the NVMe starves the
+        // painting that puts them there, and this scene's cache is ~1% warm at the finest level.
+        // The index stays (the DirectStorage read path needs it); the scheduling preference does
+        // not, because the picture got worse and the picture decides.
         while (m_inFlight < static_cast<int>(kMaxLoadsInFlight) && !m_seen.empty()) {
             auto tile = m_seen.front();
             m_seen.pop_front();

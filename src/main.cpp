@@ -2082,6 +2082,12 @@ int main(int argc, char** argv) {
                     idxColorWin.Report();
                     idxColorDet.Report();
                     idxHeightCube.Report();
+                    // Each tenant gets the index of its OWN realization -- the scheduler then
+                    // prefers loads that are a read over loads that are a paint.
+                    resMgr.SetTileIndex(colorCubeT, &idxColorCube);
+                    resMgr.SetTileIndex(winTenant, &idxColorWin);
+                    resMgr.SetTileIndex(detTenant, &idxColorDet);
+                    resMgr.SetTileIndex(hgtTenant, &idxHeightCube);
                 }
 
             }

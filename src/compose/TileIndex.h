@@ -79,6 +79,16 @@ public:
         return added;
     }
 
+    // Address-only: is SOMETHING on disk at this address? This is the SCHEDULING hint -- it
+    // deliberately ignores the subset hash, because a stale tile still means the provider will
+    // find a file and decide cheaply, where an absent one means a full paint and possibly a
+    // network fetch. Getting that wrong costs one mis-ordered load, never a wrong pixel: the
+    // provider re-checks the hash and repaints if it does not match. Has() stays strict for
+    // anyone asking about correctness rather than cost.
+    bool HasAny(uint32_t face, uint32_t mip, uint32_t x, uint32_t y) const {
+        return m_tiles.find(MakeKey(face, mip, x, y)) != m_tiles.end();
+    }
+
     // Is this exact tile on disk, painted from the subset we would paint it from now?
     bool Has(uint32_t face, uint32_t mip, uint32_t x, uint32_t y, uint32_t subset) const {
         const auto it = m_tiles.find(MakeKey(face, mip, x, y));
