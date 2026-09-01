@@ -615,3 +615,60 @@ same address space, not because anybody matched them up.
 
 Still dense, and therefore still owed this treatment: GulfLayer's uv/Mv2/Okubo-Weiss trio,
 GlobeLayer's wave/wind/ice/ocean-colour planes, the SWE uv, TerrainLayer's bed.
+
+## 23. FieldSource: composition past imagery
+
+`src/compose/FieldSource.h`. `Compositor.h` composes sources into a raster and its model is
+right -- point query, value, WEIGHT, feather at the edges. What it cannot express is anything
+that is not a colour on a 2D mercator tile. So the same model, domain-neutral:
+
+| domain | examples |
+|---|---|
+| `Point` | buoys, tide/current stations, ADCP -- scattered, no grid |
+| `Profile` | a depth cast: one column, many depths |
+| `Raster` | GoMOFS currents, the CUDEM bed, a GeoTIFF survey |
+| `Volume` | cloud density, water column, crust composition |
+
+A source answers *"your value and your weight at this position"*. **The domain decides only how
+it answers, never what the compositor does with the answer** -- which is what lets all four
+contribute to one product. `FieldQuery` carries depth and time even for 2D sources, because a
+compositor that had to know which fields a source reads could not mix domains at all.
+
+Proven in `--selftest` on a raster plus a scattered point set:
+
+    compose: 2 sources (raster + 1-point), 2631/4096 texels covered
+
+### The rules it had to be held to
+
+**Projection.** The exchange frame is WGS84 lat/lon and a source resolves it into its OWN
+projection exactly (`RasterSource::ToSourceCrs`, via `Projections.h`). The first draft applied
+the inverse affine straight to lat/lon -- correct only for EPSG:4326, and it would have put a
+UTM survey or a 3857 tile somewhere else entirely, silently, because a wrong answer there is
+still a plausible number. A CRS the engine cannot evaluate is refused, never guessed.
+
+**Scale.** A page states its own lat/lon extent. The first draft used the anchor-linear form
+(`kOrgLat` with a frozen `mPerLon`), which the AST declares valid only NEAR ITS ANCHOR: a
+metres-per-degree frozen at 42.8N is 40% wrong at the equator and unbounded at the pole. Fine
+for the local water consumers that share it; wrong for a planet-scale tree.
+
+**Units and grade.** A product carries ONE grade and ONE unit. The first source sets the
+contract, the rest are held to it, and a mismatch is refused loudly -- averaging two different
+fields makes a number nothing downstream can detect:
+
+    scalar.intruder REFUSED: grade 1/2 channels 1/2
+
+**Absence.** A source with no coverage returns weight 0, texels nothing covers keep zero
+coverage, and a page with no covered texel is never allocated. The ingest rule survives from
+the file all the way to the page.
+
+### Priority vs weight
+
+Highest priority with any coverage wins; equal priorities blend by weight. That is how a 1.5 m
+survey beats a 700 m model without either knowing about the other, and why a point set feathers
+to its radius instead of stamping a disc.
+
+### Still to build
+
+A `VolumeSource` and a `ProfileSource` (the enum is honest about them existing; only `Point`
+and `Raster` are implemented), sparse volume files as a loader type, and the step that takes a
+composed page and puts it in the reserved array.

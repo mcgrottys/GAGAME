@@ -11,6 +11,7 @@
 #include "Common.h"
 #include "GaAst.h"
 #include "GradeField.h"   // M9h: the type-level grade algebra pins itself here
+#include "compose/FieldSource.h"
 #include "CurrentFieldLoader.h"
 #include "FieldLoader.h"
 #include "GeoRef.h"
@@ -898,6 +899,68 @@ bool RunGaSelfTest() {
                 ld->Name(), g.width, g.height, g.Describe().c_str(), withData, empty);
             if (withData == 0) {
                 Log("[gatest] FAIL loader: no tile carried a current");
+                ok = false;
+            }
+        }
+    }
+
+    // ---- M9i: MULTI-DOMAIN COMPOSITION. A raster and a scattered point set into ONE page,
+    // which is the thing the imagery compositor could not express and the reason this exists.
+    {
+        auto reg2 = LoaderRegistry();
+        reg2.Register("json", CurrentFieldLoader::Open);
+        auto ld2 = reg2.Open("data/currents/currents.json");
+        if (ld2) {
+            auto ras = std::make_shared<RasterSource>(std::move(ld2), 0);
+            // A buoy over the model, exactly the shape the sea state already uses when it
+            // assimilates 44013 over GFS-Wave -- but as a SOURCE, so it composes instead of
+            // being applied by hand downstream. 44013 sits off Boston.
+            auto pts = std::make_shared<PointSource>("ndbc.44013", kG1, 2, 0.25, 10);
+            pts->Add({-70.651, 42.346, {0.42f, -0.11f, 0, 0}});
+
+            FieldCompositor fc;
+            LevelLadder lad;
+            lad.level0MetersPerTexel = 700.0;   // the model's own scale; no upsampled lie
+            fc.SetLadder(lad);
+            const bool addedR = fc.Add(ras);
+            const bool addedP = fc.Add(pts);
+            if (!addedR || !addedP) {
+                Log("[gatest] FAIL compose: a raster and a point set are both grade 1, 2ch");
+                ok = false;
+            }
+
+            // A grade-0 source must be REFUSED: one product, one grade, one unit.
+            auto bad = std::make_shared<PointSource>("scalar.intruder", kG0, 1, 0.25, 5);
+            if (fc.Add(bad)) {
+                Log("[gatest] FAIL compose: accepted a grade-0 source into a grade-1 product");
+                ok = false;
+            }
+
+            FieldCompositor::PageGeo geo;
+            geo.lon0 = -71.0;
+            geo.lat0 = 42.0;
+            geo.dLon = 0.0064;
+            geo.dLat = 0.0070;
+            std::vector<float> outv, covv;
+            const uint32_t W = 64, H = 64;
+            const uint32_t covered =
+                fc.ComposePage(PageAddr{0, 0, 0}, geo, W, H, 2, outv, covv);
+            Log("[gatest] compose: %zu sources (raster + %zu-point), %u/%u texels covered",
+                fc.SourceCount(), pts->Count(), covered, W * H);
+            if (covered == 0) {
+                Log("[gatest] FAIL compose: nothing covered -- a page with no coverage is "
+                    "never allocated, so this would silently vanish");
+                ok = false;
+            }
+            // Absence must stay absent: a texel nothing covers keeps zero coverage, so the
+            // ingest rule survives all the way to the page.
+            uint32_t zeroCov = 0;
+            for (uint32_t i = 0; i < W * H; ++i) {
+                if (covv[i] == 0.0f) ++zeroCov;
+            }
+            if (zeroCov + covered != W * H) {
+                Log("[gatest] FAIL compose: %u covered + %u absent != %u texels", covered,
+                    zeroCov, W * H);
                 ok = false;
             }
         }
