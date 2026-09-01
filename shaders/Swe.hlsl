@@ -46,6 +46,12 @@ RWTexture2D<float2> gFlux : register(u1);        // SIGNED face fluxes, m^3/s: x
                                                  // EAST face (+east), y = across the SOUTH
                                                  // face (+south). Staggered C-grid.
 RWTexture2D<float4> gUv   : register(u2);        // derived: u east, v north, speed, valid
+// M9h: grad(flow) -- the FIRST field in this engine whose residency was decided by the Cayley
+// closure rather than by a physics policy. grad is a grade-1 operator, so nabla U is the
+// geometric product of two vectors: Cl2ProductSignature(kG1, kG1) = kG0 | kG2. The scalar part
+// is the divergence, the bivector part is the vorticity, and NOTHING else can appear -- the
+// algebra says so before a single texel is read. Two channels, exactly the two grades.
+RWTexture2D<float2> gMv   : register(u3);        // x = div (grade 0), y = curl (grade 2)
 
 float BedAt(int2 t) {
     if (any(t < 0) || t.x >= (int)gNx || t.y >= (int)gNy) return 100.0f;   // outside = wall
@@ -82,6 +88,39 @@ uint2 EtaTexel(uint3 id) {
 uint2 FluxTexel(uint3 id) {
     const uint t = gTileList[id.z];
     return uint2(t % gFluxTilesX, t / gFluxTilesX) * uint2(gFluxTileW, gFluxTileH) + id.xy;
+}
+
+// M9h: THE DERIVED FIELD. Central differences on the derived current, one dispatch over the
+// gradient bank's OWN resident list -- which is the eta bank's list dilated by one tile,
+// because this stencil reads its neighbours and a null tile would silently swallow the write
+// (GAMEPLAN 4.2, hazard 1 and hazard 3 in the same kernel).
+//
+// Land and dry cells present zero: a null tile reads zero anyway, so the two agree and the
+// consumer never has to ask which it got.
+[numthreads(16, 16, 1)]
+void CsSweVelGrad(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= gEtaTileW || id.y >= gEtaTileH) return;
+    const uint2 t = EtaTexel(id);
+    if (t.x >= gNx || t.y >= gNy) return;
+    const float4 c = gUv[t];
+    if (c.w < 0.5f) { gMv[t] = float2(0, 0); return; }
+
+    const uint2 xm = uint2(max(int(t.x) - 1, 0), t.y);
+    const uint2 xp = uint2(min(t.x + 1u, gNx - 1u), t.y);
+    const uint2 ym = uint2(t.x, max(int(t.y) - 1, 0));
+    const uint2 yp = uint2(t.x, min(t.y + 1u, gNy - 1u));
+    float4 a = gUv[xm], b = gUv[xp], d = gUv[ym], e = gUv[yp];
+    if (a.w < 0.5f) a = c;
+    if (b.w < 0.5f) b = c;
+    if (d.w < 0.5f) d = c;
+    if (e.w < 0.5f) e = c;
+
+    const float dudx = (b.x - a.x) / (2.0f * gDx);
+    const float dvdx = (b.y - a.y) / (2.0f * gDx);
+    const float dudy = (e.x - d.x) / (2.0f * gDy);
+    const float dvdy = (e.y - d.y) / (2.0f * gDy);
+    // grade 0 = div, grade 2 = curl. The wedge is the bivector coefficient in e1^e2.
+    gMv[t] = float2(dudx + dvdy, dvdx - dudy);
 }
 
 // ---- init / reset --------------------------------------------------------------------------

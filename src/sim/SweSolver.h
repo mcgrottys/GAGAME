@@ -21,6 +21,7 @@
 // ================================================================================================
 #pragma once
 
+#include "core/GradeField.h"
 #include "core/Gpu.h"
 #include "core/Shader.h"
 #include "core/TileAtlas.h"
@@ -97,6 +98,8 @@ public:
 
     uint32_t EtaSrv() const { return m_eta.Srv(); }    // dEta from the tide plane, R32F
     uint32_t UvSrv() const { return m_uv.srv; }        // dense currents, RGBA16F
+    uint32_t VelGradSrv() const { return m_velGrad.Srv(); }   // M9h: (div, curl), RG16F
+    ID3D12Resource* VelGradRes() const { return m_velGrad.Res(); }
     ID3D12Resource* UvRes() const { return m_uv.res.Get(); }
     ID3D12Resource* BathyRes() const { return m_bathyRes; }   // the churn kernel reads both
     uint32_t Nx() const { return m_cb.nx; }
@@ -159,10 +162,13 @@ private:
     const BathyModel* m_bathy = nullptr;
     ID3D12Resource* m_bathyRes = nullptr;   // borrowed from TerrainLayer; outlives the solver
     TileAtlas2D m_eta, m_flux;
+    // M9h: grad(flow) -- residency derived from the Cayley closure, not a physics policy.
+    GradeBank m_velGrad;
     GpuTexture m_uv;
     uint32_t m_uvUav = UINT32_MAX;
     Com<ID3D12RootSignature> m_rs;
     Com<ID3D12PipelineState> m_clearEta, m_clearFlux, m_uvClear, m_fluxK, m_heightK, m_deriveK;
+    Com<ID3D12PipelineState> m_velGradK;   // M9h: grad(flow) -> div + curl
     uint32_t m_table = UINT32_MAX;   // [t1 bathy SRV, u0 eta, u1 flux, u2 uv]
     D3D12_RESOURCE_STATES m_etaState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     D3D12_RESOURCE_STATES m_uvState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
