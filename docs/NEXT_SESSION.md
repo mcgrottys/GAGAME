@@ -6,6 +6,14 @@ Paste this whole file as the opening prompt. It is written to be read cold.
 
 ## 0. Hard rules, learned the hard way
 
+**CHECK THE SCRIPTORIUM FIRST.** `math('priors')`, then `math('compose')` (or the topic you are
+touching), then `symbols(<name>)` before adding any class. The user called out a whole session of
+compositor work done without opening it; priors §15 and §9 already described both traps that
+session fell into, and §18 records the correction. If the MCP tools are not loaded, the server
+was not attached at session start -- `tools/Scriptorium/bin/Release/net10.0/Scriptorium.dll` must
+exist (`dotnet build -c Release tools/Scriptorium`) and the user enables it in `/mcp`. Until then
+read `docs/ALGEBRA.md` directly; it is the same content.
+
 **BUILD ONLY THROUGH THE PowerShell TOOL.** Not Bash.
 
 ```
@@ -56,14 +64,18 @@ every later row.
 3. COMPOSE        the trees -> ONE composite sparse GA tree
                   (references into the inputs; composited tiles only where
                    they OVERLAP)                                                   DONE (colour)
-4. the same again for SEAFLOOR textures                                            SEE BELOW
+4. the same again for SEAFLOOR textures                                            DONE (earth.seafloor)
 5. the same again for a sparse GIS tree                                            DONE (vector)
 6. MEGATEXTURE    land/sea mask <- the GIS tree; final tree = land texture OVER
                   sea texture, sea mask making the earth layer transparent over
                   water, per pixel. That final tree is THE one mega earth
                   land/floor texture and it is what goes into the Tiled 2D
-                  Texture Array.                                                   NOT STARTED
+                  Texture Array.                                                   DONE (earth.color root)
 ```
+
+All six stages exist as ONE graph -- the water's graph -- with `TileTree` caching every node's
+output on the NVMe (§31 of `docs/SPARSE_GA.md`). `--color-trees` puts the root in front of the
+three colour tenants; it is still OFF by default, for the reason in item 1 below.
 
 Stages 2 and 3 landed this session for `earth.color`, measured (§29 of `docs/SPARSE_GA.md`):
 8484 tiles audited, **worst |direct − tree| = 1/255 over 139 M texels**, 52.7% of tiles are pure
@@ -71,25 +83,34 @@ references, globe still pixel-identical through the renderer.
 
 ### What landed, and what is next
 
-**Landed:** the three trees for `earth.color` (§29 of `docs/SPARSE_GA.md`), and the vector
-land/sea gate (§30). The megatexture's *shape* now exists: `synth.bed` is the seafloor layer,
-the photo layers are the land, and `gis.landsea` is the per-pixel mask deciding between them —
-composed on the CPU at paint time, on tile addresses every tree shares. Four source trees plus a
-composite, 16043 addresses warm, 52.0% of them pure references.
+**Landed:** the megatexture as the water's graph (§31): `earth.land` = [google, aerial],
+`earth.seafloor` = [bed], `gis.landsea` (vector, meridian sweep), `seafloor<gis` = GateSource,
+`earth.color` = LayeredOver(land, gated seafloor). `TileTree` caches every node; references are
+STORED as zero-byte `.ref-<childId>` entries; a node's identity is its inputs'. 21,508 addresses
+warm: root 74% references, `earth.land` 97%, `earth.seafloor` 100%. Renders pixel-identical to
+the incumbent (globe 0 px, helm 2 px by 1/255); bench 4.65–4.82 ms vs incumbent 4.75. The §29
+`SourceTree`/`ColorTreeStack` path is DELETED -- do not resurrect it; the graph is the path.
 
 **Next, in order:**
 
-1. **Pack the trees, so a reference costs zero bytes.** `TileLoc` already lets a provider return a
-   *place* — path, offset, size — and DirectStorage reads it NVMe→GPU. A reference IS a `TileLoc`
-   into the input tree's archive. What blocks it: `TileArchive::Pack` is hardwired to
-   `cache/composed/<channel>/<realization>` and to filenames carrying a subset hash; a source tree
-   has neither. Parameterize the root and make the subset optional. Note the payoff is gated
-   behind `--direct-storage`, which is also off — and that a reference currently reads 64 KB to
-   discover it is a reference, which packing plus a status in the archive directory would remove.
-2. **The seafloor as its own ingested tree.** `synth.bed` is a *synthesis* node (it classifies the
-   height stack through `bed_rules.json`), not ingested seafloor imagery. If real seafloor texture
-   is wanted, it arrives as a new `ColorSource` and joins the stack — the machinery is done.
-3. **Then delete the rungs.** See §2. This is now the largest remaining structural item.
+1. **Pack the trees and resolve a stored reference to a `TileLoc`.** The user's rule: painted
+   tiles live on disk and DirectStorage loads them. A `.ref-<childId>` entry is already the
+   address of a place in another tree; `TileLoc` already lets a provider return a place. What
+   blocks it: `TileArchive::Pack` is hardwired to `cache/composed/<channel>/<realization>` and to
+   filenames carrying a subset hash; a tree folder has `f_m_x_y.bin`, `.void`, and `.ref-*`.
+   Parameterize the root, pack `.bin` payloads, record `.void`/`.ref` in the directory as
+   zero-size records with a status, and `TileTree::Serve` returns a `TileLoc` into the child's
+   archive instead of reading 64 KB. Then `--direct-storage` has its test: the tree path, warm,
+   pixel-identical to the upload ring on the standard stills.
+2. **The popping at the inlet (the user's frames at t=12 s).** With everything on disk the
+   question is scheduling. Instrument BEFORE changing: per frame, tiles wanted-and-unmapped by
+   mip, and load slots spent on paints vs reads (time the provider call). The user's proposal --
+   request only tiles whose PARENT is mapped, so every pass advances one ring and neighbours
+   never differ by more than a mip -- is a ~15-line gate in `ResidencyManager::Want()` (a
+   half-written version was reverted this session; keep it behind `--ring-loads` and judge it
+   by the deficit histogram and the t=12 s frame, not by eye).
+3. **Then delete the rungs.** See §2. Still the largest structural item, and now the megatexture
+   root is the one provider the ladder needs.
 
 ### Rules the user has stated and re-stated
 
@@ -177,8 +198,8 @@ the unlit version.
 | `--pack-tiles` | pack the composed cache into `.gaa` archives, then exit |
 | `--direct-storage` | opt in to NVMe→GPU tile reads (**off by default**) |
 | `--color-trees` | colour through the per-source trees (**off by default**) |
-| `--tree-audit N` | compose N tiles per realization both ways, print the disagreement, exit. Skips tiles the incumbent has not repainted from today's stack, so after adding a source it compares little and warms nothing |
-| `--warm-trees` | compose every address regardless, no comparison. **This is the warm-up**, and it is what a fair render A/B needs after any stack change |
+| `--tree-audit N` | the megatexture tree vs the incumbent, N tiles per realization, exit. Skips tiles the incumbent has not repainted from today's stack |
+| `--warm-trees` | compose every address of the tree regardless, no comparison. **This is the warm-up**; ~15 min from cold for 21.5k addresses |
 | `--no-gis-gate` | drop the vector land/sea gate (on by default) — the A/B for what the survey changed |
 | `--selftest` | must stay green |
 

@@ -1211,3 +1211,101 @@ cache is not a pixel difference. `--color-trees` against the incumbent read as *
 19% of pixels* on empty trees and *0 pixels* once warm; the gated direct path read as *40% of
 pixels* while it was still repainting a region the tree path had already built. **Warm both
 sides, or use the audit, which compares tiles and cannot be fooled by residency at all.**
+
+## 31. The megatexture as the water's graph
+
+The user, twice in one afternoon: *"we should have done most of this work already for the
+water's Sparse GA tree."* Correct. `ComposeTree.h` had already made a compositor a source
+(`CompositeSource`); `DomainSource` already carried the tree, the unit stage and the blend; and
+`SampleBlended` had already been fixed (§27) to un-premultiply by coverage — the exact property
+that lets one composite feed another. §29 built a second graph beside all of it. §31 deletes that
+graph and puts the imagery where the water is.
+
+### The one new piece
+
+The water composes one page over the estuary into RAM. Imagery cannot: a page is 16384², and
+four of them eight mips deep is a billion queries (§25). So the only thing the water's path lacked
+is the **output of every node, on the NVMe, one tile at a time, on the addresses every tree
+shares**. `TileTree` (`src/compose/TileTree.h`) is that and nothing else — it has no blend rule
+of its own. The kernel is `DomainCompositor::OverStep`/`OverFinish`, factored out so the tile-wise
+compose and the point-wise one cannot drift.
+
+### The pipeline, as stated, and where each arrow lands
+
+    INGEST      raw files in a local cache                    the loaders, unchanged
+    NORMALIZE   -> each source's OWN sparse tree on disk       TileTree over a leaf
+    COMPOSE     -> a third tree of REFERENCES into the inputs  TileTree over a compose node
+                   composited tiles only where inputs OVERLAP
+    ...the same again for the seafloor, and for the GIS mask
+    MEGATEXTURE the three trees -> ONE tree for the atlas       TileTree over the root
+
+    [tree] earth.color                compose    raster  sRGB byte [colour]
+    [tree]   +- earth.land            compose
+    [tree]     +- google.satellite    normalize / load
+    [tree]     +- massgis.coq2023     normalize / load
+    [tree]   +- seafloor<gis          gate
+    [tree]     +- earth.seafloor      compose
+    [tree]       +- synth.bed         normalize / load
+    [tree]     +- gis.landsea         normalize / load
+
+Land is the base; the seafloor paints over it with weight = its own height-band alpha × the
+survey's water coverage. Over surveyed water the land goes transparent per pixel and the
+seafloor shows; inland the seafloor is gated out and the megatexture tile is a **reference** to
+the land tree's. The flat incumbent channel stays as the definition the audit compares against.
+
+### The reference is stored
+
+A compose tile that is one input's tile untouched is a zero-byte entry whose *name* carries the
+input tree's identity: `f0_m3_x12_y7_<key>.ref-<childId>`. The composite tree on disk therefore
+describes itself — an index can be built from its folder alone, and a reference resolves to a
+place in the input tree without running the compositor. That is what lets DirectStorage read it
+later: a reference *is* `(path, offset, size)` in someone else's archive.
+
+**Straight alpha makes the reference exact with no full-coverage condition.** `OverFinish`
+divides by the coverage it just multiplied by, so a single-input compose at partial weight *is*
+its input, byte for byte. The lerp-from-black form §29 inherited from the incumbent could not do
+this (a lone layer at w=0.5 composites to half its colour) — priors §18.
+
+### Identity is the inputs
+
+A node's identity folds its children's, recursively (`DomainSource::Identity`). A tile's key
+folds what each child *holds* at that address — content or void. So a composite updates when a
+source's tiles change and at no other time, and `Peek` answers from directory lookups alone.
+
+`GateSource` is a third kind of edge beside compose and subtract: the value is the layer's, only
+the weight is the product. *Absent* (outside the gate's footprint: no opinion) and *void* (inside
+it, covering nothing: blocks) stay different answers, carried in the key.
+
+### Measured
+
+Tile for tile against the incumbent, before warming:
+
+    cube16k     165 tiles, 165 byte-identical, worst 0/255
+    window z14   92 tiles, worst 1/255, 4.37% of texels by one LSB
+    window z17  106 tiles, worst 1/255, 3.80%
+    TOTAL       363 tiles, worst |direct - tree| = 1/255, 0 cover mismatches
+
+The one-LSB texels are the weight quantized at three nodes (bed, gis, gate) instead of one. The
+audit caught two real disagreements first: **27/255 on 567 texels** of one cube tile, because
+`MayCover` admitted a sub-texel ortho the incumbent's soak rule drops (priors §16, fixed with
+`DomainSource::Footprint` + `Compositor::Touches`); and 6–15% of window texels off by one from
+rounding where the reference truncates.
+
+The full warm, 21,508 addresses, is the structure on disk:
+
+    earth.color      11007 ref   3782 composed      74% references
+      earth.land     14108 ref    453 composed      97%
+      earth.seafloor  3977 ref      0 composed     100% -- a compose over one source is free
+      seafloor<gis    2562 void  3781 composed      the gate, void wherever the survey says land
+
+Through the renderer, warm: **globe 0 of 1,440,000 pixels differ; helm 2, by 1/255.** Bench,
+three passes: 4.65 / 4.69 / 4.82 ms mean against the incumbent's 4.75 — no render-time cost,
+because nothing here touches a shader.
+
+### What went wrong, in order
+
+- The graph and its `TileTree` were block-locals; the audit returned from inside the block, the
+  render path left it, and every worker thread dereferenced a freed tree at once. Hoisted.
+- The Scriptorium's Release binary — the one `.mcp.json` launches — had never been built, so the
+  server could not start in any session. Built, reindexed, verified over stdio. Priors §18 is the
+  entry that should have been read first; the memory now says so.
