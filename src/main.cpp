@@ -1822,20 +1822,21 @@ int main(int argc, char** argv) {
             // before anything binds a bed, because the consumers below now take the bank: the
             // solver, the sea shader, the churn kernel and the water bank all read one bed and
             // it has to exist before the first of them asks.
-            terrain->BuildBedBank(gpu, compositor, hgtCh);
+            // M9ar: the bed bank is NOT built. The height megatexture (the height page tenant,
+            // slice 6 = the z14 survey page) is the only bed on the GPU; the solver, the sea
+            // shader, the water bank and the globe all read it. The bank was a second
+            // realization of the same six layers -- proved equal at 0.0000 m in section 28,
+            // which is exactly why it can go.
 
             if (sea) {
                 // M9n: THE BED IS NOW THE GA BANK. Proved equal to the committed texture at
                 // 0.0000 m across all 2187162 texels, through GA Load -> normalize -> Compose
                 // (six layers, LayeredOver) -> a reserved, paged, mipped sparse array. M9an:
                 // the committed texture is GONE; the bank is the bed and there is no fallback.
-                if (!terrain->BedBankReady()) {
-                    throw std::runtime_error(
-                        "the bed bank did not build and there is no fallback texture by design");
-                }
-                const uint32_t bedSrv = terrain->BedSrv();
-                Log("[bed] consumers bound to the GA sparse bank (slice 0) -- the only bed");
-                sea->SetBathy(bedSrv, bathy.WorldX0(), bathy.WorldZ0(), bathy.WorldSizeX(),
+                // The sea keeps the survey's WORLD frame (the eta atlas is aligned to it);
+                // 0 in the SRV slot means "a survey window exists" and is never sampled.
+                Log("[bed] the sea and the solver read the height megatexture -- the only bed");
+                sea->SetBathy(0u, bathy.WorldX0(), bathy.WorldZ0(), bathy.WorldSizeX(),
                               bathy.WorldSizeZ());
             }
         } else {
@@ -1917,7 +1918,7 @@ int main(int argc, char** argv) {
                                                              : "DIVERGENT -- check the link");
                 }
             }
-            swe.Init(gpu, renderer.Shaders(), opt.shaderDir, bathy, terrain->BedRes());
+            swe.Init(gpu, renderer.Shaders(), opt.shaderDir, bathy);   // bed bound below
             // M6r: the discharge is LIVE again -- it rides the Flather boundary's u_ext (the
             // station stage still carries it into eta; the prism term dwarfs it either way).
             riverQ = (opt.riverQ > 0) ? opt.riverQ : LoadRiverDischarge("data/river/river.json");
@@ -2082,6 +2083,17 @@ int main(int argc, char** argv) {
                                                        DXGI_FORMAT_R16_FLOAT, std::move(hPages),
                                                        7);
                     hgtWinTenant = hgtTenant;   // pages mode: the window is slice 6
+                    // M9ar: the solver's bed, and the churn kernel's, is slice 6 of this tenant.
+                    if (swe.Ready()) {
+                        swe.SetHeightPage(gpu, resMgr.TextureRes(hgtTenant),
+                                          resMgr.ResidencyRes(hgtTenant), 6u,
+                                          resMgr.Mips(hgtTenant), 1263360.0, 1538048.0);
+                    }
+                    if (sea) {
+                        sea->SetHeightPage(resMgr.TextureRes(hgtTenant),
+                                           resMgr.ResidencyRes(hgtTenant), 6u,
+                                           resMgr.Mips(hgtTenant), 1263360.0, 1538048.0);
+                    }
                 }
                 // earth.color: the Google mercator tree, realized twice -- the global cube
                 // and the Merrimack z14 window (same stack, deeper footprint).
@@ -3061,6 +3073,12 @@ int main(int argc, char** argv) {
                 bcfg.spongeX0 = -2500.0f;   // Mass Bay, east of the outer harbor islands
                 bcfg.westBoundary = false;  // the Charles is dammed; the west edge is a wall
                 weather.AddDormantWindow("boston", &bathyBoston, bcfg, oceanAtBoston, 0.5);
+                // M9ar: Boston lies inside the z14 height page; its solver reads slice 6 too.
+                if (hgtTenant >= 0) {
+                    weather.SetHeightPage(resMgr.TextureRes(hgtTenant),
+                                          resMgr.ResidencyRes(hgtTenant), 6u,
+                                          resMgr.Mips(hgtTenant), 1263360.0, 1538048.0);
+                }
             }
         }
 
@@ -3790,6 +3808,37 @@ int main(int argc, char** argv) {
                 resMgr.WantStatsReset();
                 PROF_BEGIN();
                 globe->SetView(cam, aspect, viewH, simUnix - startUnix);
+                // M9ar: THE SOLVER DOMAIN STAYS RESIDENT AT MIP 0. The bed bank used to be
+                // pinned wholesale; the page tenant is demand-driven, so the solver's lattice
+                // is asked for every frame at the page's finest mip. ~110 tiles of 256x128 at
+                // 9.55 m over an 18.8 x 16 km domain -- recency keeps them mapped.
+                if (hgtTenant >= 0 && hgtWinTenant == hgtTenant && bathy.Ready()) {
+                    const double piP = 3.14159265358979, n14 = 16384.0 * 256.0;
+                    auto mercU = [&](double lonDeg) {
+                        return ((lonDeg + 180.0) / 360.0 * n14 - 1263360.0) / 16384.0;
+                    };
+                    auto mercV = [&](double latDeg) {
+                        const double l = latDeg * piP / 180.0;
+                        return ((0.5 - std::log(std::tan(piP * 0.25 + l * 0.5)) / (2.0 * piP)) *
+                                    n14 -
+                                1538048.0) /
+                               16384.0;
+                    };
+                    const double lon1 = bathy.Lon0() + bathy.Nx() * bathy.Dlon();
+                    const double lat0 = bathy.Lat1() - bathy.Ny() * bathy.Dlat();
+                    const float u0 = float(std::max(0.0, mercU(bathy.Lon0())));
+                    const float u1 = float(std::min(1.0, mercU(lon1)));
+                    const float v0 = float(std::max(0.0, mercV(bathy.Lat1())));
+                    const float v1 = float(std::min(1.0, mercV(lat0)));
+                    if (u1 > u0 && v1 > v0) resMgr.Want(hgtTenant, 6u, 0u, u0, v0, u1, v1);
+                    static bool pinLogged = false;
+                    if (!pinLogged) {
+                        pinLogged = true;
+                        Log("[swe] domain pinned on height page slice 6 mip 0: uv %.4f..%.4f x "
+                            "%.4f..%.4f (%s)",
+                            u0, u1, v0, v1, (u1 > u0 && v1 > v0) ? "inside the page" : "OUTSIDE");
+                    }
+                }
                 PROF_END(7);
                 if (!opt.rail.empty() && frame >= 150u) {
                     walkNodesAcc += globe->walkNodes;

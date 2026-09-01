@@ -146,6 +146,7 @@ public:
         return t.resCpu[face][static_cast<size_t>(y) * rdim + x] / 16u;
     }
     ID3D12Resource* TextureRes(int tenant) const { return m_tenants[tenant].res.Get(); }
+    ID3D12Resource* ResidencyRes(int tenant) const { return m_tenants[tenant].resMap.res.Get(); }
     D3D12_RESOURCE_STATES TextureState(int tenant) const { return m_tenants[tenant].state; }
     uint32_t ResidencySrv(int tenant) const { return m_tenants[tenant].resMapSrv; }
 

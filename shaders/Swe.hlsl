@@ -37,10 +37,16 @@ cbuffer SweCb : register(b0) {
                                  // outside the window, so its tide enters as data too (M6d)
     float gTideRate;             // M6r: d(tide plane)/dt, m/s -- the prism source term
     float gPadA, gPadB, gPadC;
+    float4 gGeoLL;               // M9ar: lattice -> lat/lon: lon0, lat1, dlon, -dlat (deg/texel)
+    float4 gWinA;                // M9ar: height page frame: org px x, org px y, 1/16384, world px
 };
 
 StructuredBuffer<uint> gTileList : register(t0);
-Texture2D<float> gBathy : register(t1);          // NAVD88 m; row 0 = north
+// M9ar: THE BED IS THE HEIGHT MEGATEXTURE. Slice 6 of the height page tenant (the z14 Mercator
+// page, 9.55 m/px -- the survey resolution) viewed as a one-slice array, with its residency
+// map. There is no solver-private copy of the bed any more.
+Texture2DArray<float> gBathy    : register(t1);   // NAVD88 m; the page
+Texture2DArray<float> gBathyRes : register(t2);   // R8: finest resident mip * 16
 RWTexture2D<float>  gEta  : register(u0);        // DEVIATION from the tide plane, m
 RWTexture2D<float2> gFlux : register(u1);        // SIGNED face fluxes, m^3/s: x = across the
                                                  // EAST face (+east), y = across the SOUTH
@@ -63,7 +69,29 @@ RWTexture2DArray<float4> gMv : register(u3);
 
 float BedAt(int2 t) {
     if (any(t < 0) || t.x >= (int)gNx || t.y >= (int)gNy) return 100.0f;   // outside = wall
-    return gBathy.Load(int3(t, 0));
+    // Lattice texel centre -> lat/lon -> the page Mercator uv (the same three lines the
+    // water bank uses for its per-texel bed), then a bilinear read at the resident mip.
+    const float lon = gGeoLL.x + (t.x + 0.5f) * gGeoLL.z;
+    const float lat = gGeoLL.y + (t.y + 0.5f) * gGeoLL.w;
+    const float latR = lat * 0.01745329252f;
+    const float mx = (lon + 180.0f) / 360.0f * gWinA.w;
+    const float my = (0.5f - log(tan(0.7853981634f + latR * 0.5f)) * 0.15915494309f) * gWinA.w;
+    const float2 wuv = float2(mx - gWinA.x, my - gWinA.y) * gWinA.z;
+    if (any(wuv <= 0.0f) || any(wuv >= 1.0f)) return 100.0f;   // off the page = wall
+    const float2 rdim = float2(128.0f, 128.0f);
+    const float haveV = gBathyRes.Load(int4(int2(clamp(wuv * rdim, 0.0f, rdim - 1.0f)), 0, 0)).x;
+    const float mip = clamp(round(haveV * 15.9375f), 0.0f, 6.0f);
+    const float dim = 16384.0f / exp2(mip);
+    const float2 tf = wuv * dim - 0.5f;
+    const float2 t0 = floor(tf);
+    const float2 fr = tf - t0;
+    float acc = 0.0f;
+    [unroll] for (int k = 0; k < 4; ++k) {
+        const int2 tc = clamp(int2(t0) + int2(k & 1, k >> 1), int2(0, 0), int2(dim - 1.0f, dim - 1.0f));
+        acc += ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y) *
+               gBathy.Load(int4(tc, 0, int(mip))).x;
+    }
+    return acc;
 }
 
 float EtaAt(int2 t) {

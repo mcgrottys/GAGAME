@@ -22,8 +22,8 @@ there and something named is missing; **missing** means nothing on the path exis
 | 10 | Land/sea mask from the GIS tree; land over sea with the sea mask making land transparent per pixel | **aligned** | `GateSource` (seafloor weight × survey water coverage) composed under the land tree in `earth.color`; "the GIS mask gates, the height band refines" (§30–31). |
 | 11 | That final tree is the one and only mega land/floor texture in the tiled 2D texture array | **aligned as of §34** | One tenant: `AddTexturePages`, a reserved `Texture2DArray` of 8 pages (6 cube faces + 2 Mercator pages), one SRV, one residency map, one budget. The insets are deleted. |
 | 12 | Same for water, heights, future volumetrics | **partial** | Height is **one** page tenant as of §35. Water/weather are `GradeBank` arrays (aligned in storage), composed on the GA path, but from RAM not from disk trees. |
-| 13 | Everything staged to the GPU follows the Sparse GA design: 3D → 3D tiled resource, 2D → tiled 2D texture array, 1D → one big buffer | **partial** | 2D: colour ✔ (§34), height ✔ (§35), water banks ✔ (`TileAtlas` reserved arrays). 3D: cloud banks ✔ (`TileAtlas` volumes). 1D: the fields buffer (`gFields`, `StructuredBuffer<FieldDesc>`) exists for descriptors; scalar *data* still lives in per-field textures. **Not** on the design: `GulfLayer::m_uvTex`, `SweSolver::m_uv`, `WeatherManager::ownedBathyTex`, `FieldSet` PNGs, `GisStencil`'s three raster masks (shader-side). `TerrainLayer::m_tex` was deleted (§32). |
-| 14 | GAs chain, so new composite trees (e.g. for CPU physics) are easy | **aligned for the mechanism, unproven for physics** | `CompositeSource`, `GateSource`, `BinaryFieldSource` chain; `TileTree` caches any node. `water.depth = tide − bed` runs through `BinaryFieldSource` and matches the engine to 0.0000 m (§26). No physics consumer *reads a tree from disk* yet — the SWE lattice reads the bed bank. |
+| 13 | Everything staged to the GPU follows the Sparse GA design: 3D → 3D tiled resource, 2D → tiled 2D texture array, 1D → one big buffer | **partial** | 2D: colour ✔ (§34), height ✔ (§35), water banks ✔ (`TileAtlas` reserved arrays). 3D: cloud banks ✔ (`TileAtlas` volumes). 1D: the fields buffer (`gFields`, `StructuredBuffer<FieldDesc>`) exists for descriptors; scalar *data* still lives in per-field textures. **Not** on the design: `GulfLayer::m_uvTex`, `SweSolver::m_uv`, `FieldSet` PNGs, `GisStencil`'s three raster masks (shader-side). Deleted: `TerrainLayer::m_tex` (§32), the bed `GradeBank` and `WeatherManager::ownedBathyTex` (§36). |
+| 14 | GAs chain, so new composite trees (e.g. for CPU physics) are easy | **aligned for the mechanism; the GPU physics now reads the megatexture** | `CompositeSource`, `GateSource`, `BinaryFieldSource` chain; `TileTree` caches any node. The SWE solver, the sea shader and the churn kernel read the height page tenant (§36), matched to the CPU stack by the trace probe. No consumer reads a height *tree from disk* yet — the height page is still fed by the compositor's composed cache. |
 | 15 | Only three things go to the GPU: 1 global colour GA, 1 global height GA, N water/weather GAs | **partial** | Colour: 1 ✔. Height: 1 ✔ (§35). Water/weather: N banks ✔. What keeps this partial is the strays in row 13. |
 
 ## What is genuinely on the design, measured
@@ -46,8 +46,9 @@ there and something named is missing; **missing** means nothing on the path exis
 4. **A `Host` object** (row 1): ladder + unit frame + projection + radius, one per body, that every
    `Normalize()` targets and every `TileTree` keys on. Today the earth's is implicit.
 5. **The strays** (row 13): `GulfLayer::m_uvTex`, `SweSolver::m_uv` (a Volatile bank),
-   `WeatherManager::ownedBathyTex`, `FieldSet` PNGs, and the shader's three GIS rasters, which the
-   compositor no longer needs and the classifier should read from the mask tree's pages instead.
+   `FieldSet` PNGs, and the shader's three GIS rasters, which the compositor no longer needs and
+   the classifier should read from the mask tree's pages instead. (`ownedBathyTex` and the bed
+   bank are gone, §36.)
 6. **Mip folding for GeoTIFF leaves** (row 5): fold the finest level down (§ALGEBRA `fold`) rather
    than re-sampling the source per level.
 7. **Lossless ingest format** (row 4): the 64 KB tree tile *is* the engine's lossless bitmap; a

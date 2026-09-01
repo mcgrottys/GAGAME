@@ -66,14 +66,15 @@ float3 SeaPlanetDir(float2 xz) {
 // 30 m ocean. The sea now feels the real shelf everywhere it renders, and land is land.
 float BedAt(float2 xz, out bool surveyed) {
     surveyed = false;
+    // M9ar: THE BED IS THE HEIGHT MEGATEXTURE, inside the survey window too. "Surveyed" is
+    // the survey's own footprint (the CUDEM grid the solver runs on); the height it returns
+    // there is the z14 page at its resident mip, which IS the survey at 9.55 m/px. The
+    // solver-private bank this used to sample no longer exists.
     if (gBathyU.x != 0xFFFFFFFFu) {
         const float2 uv = (xz - gBathyGeo.xy) * gBathyGeo.zw;
-        if (all(uv > 0.002f) && all(uv < 0.998f)) {
-            surveyed = true;
-            return gTex[gBathyU.x].SampleLevel(sLinearClamp, float2(uv.x, 1.0f - uv.y), 0).x;
-        }
+        if (all(uv > 0.002f) && all(uv < 0.998f)) surveyed = true;
     }
-    if (ComposedHeightOn()) return ComposedHeight(SeaPlanetDir(xz), -2.0f);
+    if (ComposedHeightOn()) return ComposedHeight(SeaPlanetDir(xz), surveyed ? -8.0f : -2.0f);
     return -30.0f;
 }
 float BedAt(float2 xz) {

@@ -129,7 +129,16 @@ the incumbent (globe 0 px, helm 2 px by 1/255); bench 4.65–4.82 ms vs incumben
 
 ---
 
-## 2. The rungs are DELETED for colour (section 34) AND height (section 35).
+## 2. One bed (section 36): the solver, the sea, the churn and the water bank all read
+##    slice 6 of the height page tenant. The bed bank and the per-window mirror are gone.
+
+The solver domain is pinned at mip 0 every frame; the trace probe (`--trace 42.8125,-70.8175`,
+200 frames) is the check -- page texel vs CPU stack, MATCH. A pixel diff is NOT a check here:
+any bed change moves the solve and the foam everywhere. Next for this line: the height page fed
+by a TileTree over BuildHeightStack (inputs ordered by ladder depth, deepest last), then the
+water/weather planes as trees.
+
+## 2b. The rungs are DELETED for colour (section 34) AND height (section 35).
 
 Colour is ONE tenant (pages 0..5 cube, 6 z14, 7 z17); height is ONE tenant (pages 0..5 cube,
 6 z14). Both select by containment and residency, no fades. The water bank reads the bed from

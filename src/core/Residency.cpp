@@ -337,7 +337,8 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
             br.Transition.pResource = tn.res.Get();
             br.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
             br.Transition.StateBefore = tn.state;
-            br.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+            br.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                                       D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
             cl->ResourceBarrier(1, &br);
             tn.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
             gpu.EndUpload();   // waits: the stage buffer may die, the tiles are real
@@ -769,7 +770,8 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             sl.PlacedFootprint.Footprint = {DXGI_FORMAT_R8_UNORM, rdim, rdim, 1, pitch};
             cl->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
         }
-        gpu.Transition(cl, t.resMap, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        gpu.Transition(cl, t.resMap, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     }
 
     // ---- stats
@@ -958,9 +960,11 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
         b.Transition.pResource = t.res.Get();
         b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         b.Transition.StateBefore = t.state;
-        b.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;   // M9ar: compute reads too
         cl->ResourceBarrier(1, &b);
-        t.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        t.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     }
 }
 

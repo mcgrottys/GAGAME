@@ -1550,3 +1550,58 @@ the truth.
     N water/weather GAs   the GradeBank arrays                       yes
     strays                GulfLayer::m_uvTex, SweSolver::m_uv, WeatherManager's bed mirror,
                           FieldSet PNGs, GisStencil's three raster masks (shader-side)
+
+## 36. The water simulation reads the height megatexture
+
+The user's requirement, verbatim: *make sure the water simulation is using the height mega
+texture for bathymetry for the water shading.* Before this section three different GPU copies of
+the bed existed: the height page tenant (read by the globe and the water bank), the bed
+`GradeBank` (read by the SWE solver, the sea shader's near field and the churn kernel), and a
+per-window bed mirror in `WeatherManager` for owned solvers. All three were the same six-layer
+height stack — §28 proved the bank equal to the composed height at 0.0000 m — which is exactly
+why two of them could go.
+
+### One bed
+
+The bed bank is not built. The per-window mirror is deleted. Every reader binds **slice 6 of the
+height page tenant** — the z14 Mercator page, 9.55 m/px, which is the survey's own resolution
+(the bank was 1863×1174 at ~10 m) — with its residency map, and reads at the resident mip:
+
+| reader | before | now |
+|---|---|---|
+| SWE solver (`Swe.hlsl` `BedAt`) | `gBathy` Texture2D from the bank, lattice-indexed | lattice → lat/lon → page uv (`gGeoLL`, `gWinA`), residency-clamped bilinear from `Texture2DArray` slice 6 |
+| sea shader (`Sea.hlsl` `BedAt`) | bank sample inside the survey, `ComposedHeight` outside | `ComposedHeight` everywhere; *surveyed* is the survey's footprint, sampled at lod −8 |
+| churn kernel (`SeaChurn.hlsl`) | `SweSolver::BathyRes()` | `PageBedAt(world)` — the water bank's mapping, residency-clamped |
+| water bank | already slice 6 | unchanged |
+| owned weather solvers (Boston) | `ownedBathyTex` per window | `WeatherManager::SetHeightPage` → the same slice; Boston lies inside the page |
+
+The residency manager now leaves tenants and maps in `PIXEL | NON_PIXEL` shader-resource state:
+compute has been reading them all along under a pixel-only state the driver forgave.
+
+### What the bank guaranteed and the page must earn
+
+The bank was pinned wholesale; the page is demand-driven. The solver's lattice is therefore
+`Want`ed every frame at mip 0 on slice 6 (~110 tiles of 256×128 over 18.8 × 16 km) so recency
+keeps it mapped. The trace probe is the check, because a pixel diff cannot be — any change in the
+bed, even the R16F quantization against the old R32F bank, moves the solve and the foam
+everywhere:
+
+    frame  60   height.window mip 1  texel (4354,3064): GPU -1.18 m vs CPU stack -1.18 m  MATCH
+    frame 200   height.window mip 0  texel (8708,6128): GPU -1.18 m vs CPU stack -1.18 m  MATCH
+
+Under ring loads the domain reaches mip 0 between those two; the value is the stack's at both.
+Helm 400 frames run-to-run: 0 pixels. Bench 4.90 ms. Selftest clean.
+
+### Compositing order, as the user stated it
+
+Highest-fidelity tree paints last. `BuildHeightStack` already returns the layers bottom-to-top by
+fidelity (ETOPO → NE 15 s → CUDEM → survey edits) and `LayeredOver` paints in that order; when
+the height `TileTree` is built (next), its inputs are ordered by ladder depth — the deeper nest
+paints over everything it intersects — rather than by hand.
+
+### Still owed
+
+The height page's provider is the compositor's `SampleHeightStack` through `cache/composed`: a
+disk cache, but not per-source trees with references. The water/weather planes compose into RAM
+at boot. Both are the "disk trees" half of this step and are next; what this section did is
+make sure there is only one bed for them to become.

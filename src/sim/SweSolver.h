@@ -47,8 +47,15 @@ class SweSolver {
 public:
     static constexpr uint32_t kMaxSubsteps = 16;
 
+    // M9ar: bind the bed -- slice `slice` of the height PAGE tenant's array, with its residency
+    // map, so the solver reads the same megatexture the water shading and the globe read, at
+    // whatever mip is resident. Must be called before the first Step; there is no bed otherwise.
+    void SetHeightPage(Gpu& gpu, ID3D12Resource* heightArr, ID3D12Resource* resMapArr,
+                       uint32_t slice, uint32_t mips, double orgPxX, double orgPxY);
+    bool BedBound() const { return m_bedBound; }
+
     void Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
-              const BathyModel& bathy, ID3D12Resource* bathyRes,
+              const BathyModel& bathy,
               const SweConfig& cfg = {});
     bool Ready() const { return m_ready; }
 
@@ -110,7 +117,7 @@ public:
     uint32_t VelGradResMapH() const { return m_velGrad.TilesY(); }
     ID3D12Resource* VelGradRes() const { return m_velGrad.Res(); }
     ID3D12Resource* UvRes() const { return m_uv.res.Get(); }
-    ID3D12Resource* BathyRes() const { return m_bathyRes; }   // the churn kernel reads both
+
     uint32_t Nx() const { return m_cb.nx; }
     float CellM() const { return m_cb.dx; }   // level-0 ground size, for a page ladder
     uint32_t Ny() const { return m_cb.ny; }
@@ -166,6 +173,11 @@ private:
         // gap carried only the deviation dynamics).
         float tideRate;
         float padA, padB, padC;
+        // M9ar: THE BED IS THE HEIGHT MEGATEXTURE. Lattice texel -> lat/lon (this grid is
+        // equiangular: lon0, lat1 (north edge), dlon, -dlat in degrees per texel), then the
+        // Mercator page frame (org px x, org px y, 1/16384, world px at z14). Appended LAST.
+        float geoLL[4];
+        float winA[4];
         // M9h: the GoMOFS ingest rows. APPENDED AT THE END on both sides -- a same-size
         // insertion in the middle passes the byte-parity gate and silently offsets every later
         // row (the lesson WaterBank.hlsl:44 records, nearly repeated here).
@@ -173,7 +185,7 @@ private:
 
     bool m_ready = false;
     const BathyModel* m_bathy = nullptr;
-    ID3D12Resource* m_bathyRes = nullptr;   // borrowed from TerrainLayer; outlives the solver
+
     TileAtlas2D m_eta, m_flux;
     // M9h: grad(flow) -- residency derived from the Cayley closure, not a physics policy.
     GradeBank m_velGrad;
@@ -194,6 +206,7 @@ private:
     float m_southDEta = 0;
     float m_westQ = 0;                 // west transport target, m^3/s (+east)
     std::vector<float> m_westBed;      // exterior-column bed depths: the live section area
+    bool m_bedBound = false;           // M9ar: SetHeightPage has run
     float m_lastTideNavd = 0;          // for the tide-plane rate (prism source term)
     double m_lastTideTime = 0;
     float m_dt = 0.25f;

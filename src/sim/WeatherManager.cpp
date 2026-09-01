@@ -76,23 +76,20 @@ bool WeatherManager::Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& 
         if (w.bathyMut && m_comp && m_hgtCh >= 0) {
             w.bathyMut->RealizeFromChannel(*m_comp, m_hgtCh);
         }
-        // The window's bed rides the same GPU pattern the terrain uses (M5b lesson: the
-        // compute kernels need NON_PIXEL access).
-        w.ownedBathyTex = std::make_unique<GpuTexture>(gpu.CreateTexture2D(
-            w.bathy->Nx(), w.bathy->Ny(), DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_NONE,
-            D3D12_RESOURCE_STATE_COPY_DEST, L"weather.window.bed"));
-        gpu.UploadTexture(*w.ownedBathyTex, w.bathy->Elev().data(), w.bathy->Nx() * 4);
-        {
-            ID3D12GraphicsCommandList* cl = gpu.BeginUpload();
-            gpu.Transition(cl, *w.ownedBathyTex,
-                           D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
-                               D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-            gpu.EndUpload();
+        // M9ar: NO per-window bed texture. The owned solver reads the height megatexture --
+        // the same page slice the Merrimack solver, the sea shader and the water bank read.
+        if (!m_hgtArr || !m_hgtRes) {
+            Log("[weather] %s: cannot activate -- no height page bound and no fallback bed by "
+                "design",
+                w.name.c_str());
+            return false;
         }
         w.owned = std::make_unique<SweSolver>();
         SweConfig cfg = w.cfg;
         cfg.name = w.name.c_str();
-        w.owned->Init(gpu, sc, shaderDir, *w.bathy, w.ownedBathyTex->res.Get(), cfg);
+        w.owned->Init(gpu, sc, shaderDir, *w.bathy, cfg);
+        w.owned->SetHeightPage(gpu, m_hgtArr, m_hgtRes, m_hgtSlice, m_hgtMips, m_hgtOrg[0],
+                               m_hgtOrg[1]);
         w.solver = w.owned.get();
         auto zero = [](double) { return 0.0; };
         w.solver->Spinup(gpu, simUnix, w.spinupHours, w.oceanAt, zero, zero, zero);
