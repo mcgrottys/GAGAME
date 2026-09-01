@@ -54,7 +54,10 @@ constexpr uint8_t kCl2GradeMul[3][3] = {
     {0b100, 0b010, 0b001},   // times g2: g2*g2 = -1 (a scalar)
 };
 
-inline uint8_t Cl2ProductSignature(uint8_t a, uint8_t b) {
+// M9h: constexpr so the TYPE algebra can run at compile time -- Field<A> * Field<B> resolves
+// to Field<Cl2ProductSignature(A, B)> with no runtime check and no declared result type. The
+// body is unchanged and still the selftest-pinned closure.
+constexpr uint8_t Cl2ProductSignature(uint8_t a, uint8_t b) {
     uint8_t out = 0;
     for (int i = 0; i < 3; ++i) {
         if (!(a & (1 << i))) continue;

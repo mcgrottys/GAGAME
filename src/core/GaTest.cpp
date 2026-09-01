@@ -10,6 +10,9 @@
 
 #include "Common.h"
 #include "GaAst.h"
+#include "GradeField.h"   // M9h: the type-level grade algebra pins itself here
+#include "FieldLoader.h"
+#include "GeoRef.h"
 #include "Pga.h"
 
 namespace ga {
