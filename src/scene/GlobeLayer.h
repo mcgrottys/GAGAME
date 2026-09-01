@@ -255,6 +255,19 @@ private:
     void InitClouds(Gpu& gpu, ShaderCompiler& sc);
     void InitNeAndWind(Gpu& gpu, ShaderCompiler& sc);
 
+public:
+    // M9h: THE CAYLEY CLOSURE, DRIVING rather than narrating. DeriveDemand answers where a
+    // wind-PRODUCT field can be non-zero, from the published grade signatures and no data.
+    // It is a CONSERVATIVE bound -- "cannot be non-zero outside here" -- so it is AND-ed with
+    // the physics policy rather than replacing it: algebra proves the outside is empty,
+    // physics decides which of the inside is worth carrying. Either alone is wrong. The
+    // algebra alone cannot know that a 3 m/s breeze is beneath notice; the physics alone has
+    // no proof it has not thrown away something a downstream product needs.
+    void ApplyWindDemand(Gpu& gpu, const std::vector<uint8_t>& derived, uint32_t dTx,
+                         uint32_t dTy);
+
+private:
+
     std::wstring m_shaderDir;
     const GlobeModel* m_globe = nullptr;
     ID3D12RootSignature* m_rootSig = nullptr;
@@ -266,6 +279,7 @@ private:
 
     // M6d: the sparse Mv2 wind bank (div, u, v, curl) -- resident where storms live.
     TileAtlas2D m_windBank;
+    std::vector<uint8_t> m_windPhys;   // M9h: the physics verdict, kept for the AND below
     Com<ID3D12RootSignature> m_windRs;
     Com<ID3D12PipelineState> m_windBuild;
     uint32_t m_windTable = UINT32_MAX;   // [t1 wind source SRV, u0 bank UAV]

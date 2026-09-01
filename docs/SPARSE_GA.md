@@ -212,3 +212,47 @@ generalisation of the existing `--lens` family:
 - Whether the compositor's existing `SourceInfo` should be *replaced* by `GeoRef` or wrap it.
 - Grade-shedding LOD (GAMEPLAN application 7) interacts with residence class: a distant tile
   dropping to grade 0 is not an eviction, it is a *different bank* going resident.
+
+## 12. The GPU must not know what is "default"
+
+A correction from the user, and it invalidates how the two-LOD lens is currently written:
+
+> the GPU shouldn't know what is default or not, it just sees a globe scale sparse structure
+> that can get to cm levels if we have that data in the sparse structure.
+
+`--lens velgrad` today holds **two SRVs and an if/else** — inlet field where it covers, global
+wind elsewhere. That works, and it demonstrated the idea, but it puts source-selection logic in
+the shader. The GPU learns there are two sources, and every new source would add a branch.
+
+The right structure is **one bank, mip-chained, with a shader-visible residency map**: the
+shader samples the finest resident level and never learns provenance. Fine levels are filled by
+surveys, coarse levels by globals, and "default" stops being a category the renderer can see —
+it is just the level that happens to be resident there.
+
+This already exists in this codebase, for the *other* tenant class. `Residency.h`: texture
+tenants carry "a shader-visible RESIDENCY MAP (R8 cube, byte = finest-resident mip * 16) and
+samplers CLAMP their LOD to what is resident: misses degrade to blur, never to garbage." Field
+banks are flat and have no mip chain, which is why the lens needed the branch.
+
+So the structural item is: **give grade banks the mip chain and residency map that texture
+tenants already have.** The branch in the lens then deletes itself, and cm-scale data is
+simply a finer resident level rather than a new code path.
+
+## 13. The closure is a bound, not a policy
+
+Measured when `DeriveDemand` was wired to actually drive the wind bank:
+
+    wind Mv2 residency DRIVEN: algebra 36, physics 36, resident 36 of 36 tiles
+
+Both agree, and both say *everything*. At 6 tiles across a planet one tile spans 60 degrees, and
+wind is non-zero somewhere in every one of them.
+
+The lesson generalises: **the Cayley closure gives a CONSERVATIVE bound** — "cannot be non-zero
+outside here" — not a tight one. It cannot know that a 3 m/s breeze is beneath notice, because
+that is a physics judgement, not an algebraic one. So the two compose as
+`And(algebra, physics)`: algebra proves the outside is empty, physics decides which of the
+inside is worth carrying. Either alone is wrong.
+
+And sparsity at a coarse lattice is illusory. The wind bank is 2 MB virtual over 6x6 tiles; it
+was never going to be sparse, and the "calm air stays NULL" comment had been aspirational since
+M6d. Sparsity needs a signature lattice fine enough to express it.

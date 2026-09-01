@@ -331,6 +331,40 @@ void GlobeLayer::InitClouds(Gpu& gpu, ShaderCompiler& sc) {
 
 // M6d: the sparse Mv2 wind bank. (The NE 15s relief window that used to load here is a LAYER
 // in the composed earth.height stack now -- painted at compose time, not blended per pixel.)
+void GlobeLayer::ApplyWindDemand(Gpu& gpu, const std::vector<uint8_t>& derived, uint32_t dTx,
+                                 uint32_t dTy) {
+    const uint32_t tX = m_windBank.TilesX(), tY = m_windBank.TilesY();
+    if (m_windPhys.empty() || dTx != tX || dTy != tY || derived.size() != size_t(tX) * tY) {
+        Log("[globe] wind demand: signature grid %ux%u != bank tiles %ux%u -- closure not "
+            "applied (a demand on the wrong lattice is worse than none)",
+            dTx, dTy, tX, tY);
+        return;
+    }
+    uint32_t alg = 0, phys = 0, both = 0;
+    for (uint32_t ty = 0; ty < tY; ++ty) {
+        for (uint32_t tx = 0; tx < tX; ++tx) {
+            const size_t i = size_t(ty) * tX + tx;
+            const bool a = derived[i] != 0, p = m_windPhys[i] != 0;
+            alg += a ? 1u : 0u;
+            phys += p ? 1u : 0u;
+            const bool want = a && p;
+            both += want ? 1u : 0u;
+            if (want && !m_windBank.IsResident(tx, ty)) m_windBank.RequestMap(tx, ty);
+            if (!want && m_windBank.IsResident(tx, ty)) m_windBank.RequestUnmap(tx, ty);
+        }
+    }
+    std::vector<uint32_t> fresh;
+    m_windBank.CommitMappings(gpu, &fresh);
+    Log("[globe] wind Mv2 residency DRIVEN: algebra %u, physics %u, resident %u of %u tiles",
+        alg, phys, both, tX * tY);
+    if (alg == tX * tY) {
+        Log("[globe]   note: the closure demands EVERY tile here. At 6 tiles across a planet "
+            "one tile spans 60 deg, and wind is non-zero somewhere in all of them -- the "
+            "bound is correct and uninformative. Sparsity needs a finer signature lattice, "
+            "not a better closure.");
+    }
+}
+
 void GlobeLayer::InitNeAndWind(Gpu& gpu, ShaderCompiler& sc) {
     if (m_globe->WindNx() <= 0 || m_globe->WindU().empty()) return;
 
@@ -355,6 +389,7 @@ void GlobeLayer::InitNeAndWind(Gpu& gpu, ShaderCompiler& sc) {
 
     m_windBank.Init(gpu, wn, wm, DXGI_FORMAT_R16G16B16A16_FLOAT,
                     L"globe.windMv2 (sparse: resident where storms live)");
+    m_windPhys.assign(size_t(m_windBank.TilesX()) * m_windBank.TilesY(), 0);
 
     // Residency from a CPU curl estimate: the sparsity pattern IS the weather.
     const auto& U = m_globe->WindU();
@@ -391,6 +426,9 @@ void GlobeLayer::InitNeAndWind(Gpu& gpu, ShaderCompiler& sc) {
                 m_windBank.RequestMap(tx, ty);
                 ++resident;
             }
+            // M9h: keep the physics verdict. The Cayley closure arrives later (it needs the
+            // published signatures) and is AND-ed with this -- algebra bounds, physics tightens.
+            m_windPhys[size_t(ty) * m_windBank.TilesX() + tx] = active ? 1u : 0u;
         }
     }
     std::vector<uint32_t> fresh;

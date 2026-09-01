@@ -1909,6 +1909,9 @@ int main(int argc, char** argv) {
                         "tiles (the rest are ALGEBRAICALLY zero -- never allocated, never "
                         "dispatched)",
                         need, dx * dy);
+                    // M9h: and now it DRIVES. Until this call the closure was a report; the
+                    // bank's residency came from a CPU curl scan alone.
+                    if (globe) globe->ApplyWindDemand(gpu, derived, dx, dy);
                 }
             }
         }
