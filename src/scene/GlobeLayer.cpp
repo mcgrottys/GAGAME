@@ -500,21 +500,23 @@ void GlobeLayer::InitNeAndWind(Gpu& gpu, ShaderCompiler& sc) {
 
     const int wn = m_globe->WindNx(), wm = m_globe->WindNy();
     {
-        std::vector<float> uv(static_cast<size_t>(wn) * wm * 2);
-        for (size_t i = 0; i < static_cast<size_t>(wn) * wm; ++i) {
-            uv[i * 2 + 0] = m_globe->WindU()[i];
-            uv[i * 2 + 1] = m_globe->WindV()[i];
-        }
-        m_windSrc = gpu.CreateTexture2D(wn, wm, DXGI_FORMAT_R32G32_FLOAT,
-                                        D3D12_RESOURCE_FLAG_NONE,
-                                        D3D12_RESOURCE_STATE_COPY_DEST,
-                                        L"globe.windSrc (GFS 10 m u,v)");
-        gpu.UploadTexture(m_windSrc, uv.data(), wn * 8);
-        // Compute reads it: PIXEL alone is not legal for that (the M5c lesson).
-        ID3D12GraphicsCommandList* cl = gpu.BeginUpload();
-        gpu.Transition(cl, m_windSrc, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
-                                          D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        gpu.EndUpload();
+        // M9r: the last committed plane. The hand interleave of u and v is gone -- packing two
+        // planes is a LOAD concern, and MemGridLoader states them. GFS 10 m wind is node-centred
+        // like the wave grids.
+        //
+        // No state transition here any more, and that is exactly why this one was left until
+        // last: a bank's resource lives in UNORDERED_ACCESS, so the kernel reads it as a UAV.
+        // Keeping the old SRV binding would have meant transitioning against the bank's own
+        // tracking on every upload.
+        GeoRef vref = GeoRef::Declared(4326, CrsKind::Geographic, m_globe->WindLon1(),
+                                       m_globe->WindLat1(), m_globe->WindDLon(),
+                                       -m_globe->WindDLat(), uint32_t(wn), uint32_t(wm));
+        vref.centers = false;
+        vref.valueUnit = "m/s";
+        BuildPlaneBank(gpu, m_windSrcB, "globe.windSrc (GFS 10 m u,v)",
+                       "equirect float32 global, u/v", vref,
+                       {{&m_globe->WindU(), -1e30f, 0.0f}, {&m_globe->WindV(), -1e30f, 0.0f}},
+                       DXGI_FORMAT_R32G32_FLOAT, 0.0f);
     }
 
     m_windBank.Init(gpu, wn, wm, DXGI_FORMAT_R16G16B16A16_FLOAT,
@@ -568,7 +570,7 @@ void GlobeLayer::InitNeAndWind(Gpu& gpu, ShaderCompiler& sc) {
 
     // Build root signature + kernel (b0 CBV, t0 list, table [t1 src, u0 bank]).
     D3D12_DESCRIPTOR_RANGE1 ranges[2]{};
-    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;   // M9r: the source is a bank now
     ranges[0].NumDescriptors = 1;
     ranges[0].BaseShaderRegister = 1;
     ranges[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
@@ -602,13 +604,13 @@ void GlobeLayer::InitNeAndWind(Gpu& gpu, ShaderCompiler& sc) {
     GA_CHECK(gpu.Device()->CreateComputePipelineState(&cd, IID_PPV_ARGS(&m_windBuild)));
 
     m_windTable = gpu.SrvHeap().Alloc(2);
-    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    sv.Format = DXGI_FORMAT_R32G32_FLOAT;
-    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    sv.Texture2D.MipLevels = 1;
-    gpu.Device()->CreateShaderResourceView(m_windSrc.res.Get(), &sv,
-                                           gpu.SrvHeap().Cpu(m_windTable + 0));
+    // A TEXTURE2D UAV over the bank's slice 0 -- the same drop-in trick as the SRV, in the
+    // state the bank already holds.
+    D3D12_UNORDERED_ACCESS_VIEW_DESC srcUav{};
+    srcUav.Format = DXGI_FORMAT_R32G32_FLOAT;
+    srcUav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    gpu.Device()->CreateUnorderedAccessView(m_windSrcB.bank->Res(), nullptr, &srcUav,
+                                            gpu.SrvHeap().Cpu(m_windTable + 0));
     D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
     uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;

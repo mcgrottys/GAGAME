@@ -372,6 +372,18 @@ void Renderer::RenderFrame(const Camera& cam, float timeSec, float dt) {
     m_gpu->EndFrame(!m_gpu->Headless());
 }
 
+// M9s: the frame as RAW RGBA8, for the recorder that pipes straight to an encoder. Same
+// readback DumpPng does; what it saves is the PNG compression, which the rail metrics measured
+// at ~90 ms per frame -- more than fifty times the 1.7 ms it takes to RENDER the frame. A
+// recording was spending 98% of its wall clock turning pictures into files nothing kept.
+bool Renderer::DumpRaw(std::vector<uint8_t>& out, uint32_t* rowPitch) {
+    m_gpu->WaitIdle();
+    uint32_t rp = 0;
+    out = m_gpu->ReadbackTexture(m_ldrTarget, &rp);
+    if (rowPitch) *rowPitch = rp;
+    return !out.empty();
+}
+
 bool Renderer::DumpPng(const std::wstring& path) {
     m_gpu->WaitIdle();
     uint32_t rowPitch = 0;

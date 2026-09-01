@@ -293,7 +293,7 @@ private:
     Com<ID3D12PipelineState> m_pso, m_skyPso;
     // M6i: m_relief and m_ne retired -- the composed height cube streams what they carried
     // (and returns ~90 MB of committed equirect memory to the pool).
-    GpuTexture m_cloudSrc, m_windSrc;
+    GpuTexture m_cloudSrc;
 
     // ---- M9q: THE GLOBAL PLANES, IN THE TREE.
     //
@@ -311,7 +311,7 @@ private:
         uint32_t srv = UINT32_MAX;
         bool Valid() const { return srv != UINT32_MAX; }
     };
-    PlaneBank m_hsB, m_windB, m_oceanB, m_iceB;
+    PlaneBank m_hsB, m_windB, m_oceanB, m_iceB, m_windSrcB;
 
     // Load -> compose -> sparse, and report the worst disagreement with the source array.
     bool BuildPlaneBank(Gpu& gpu, PlaneBank& out, const char* name, const char* structure,
