@@ -97,6 +97,7 @@ struct Options {
     uint32_t tileBudget = 1000;       // --tile-budget: hard cap on Google fetches per run
     bool warmInlet = false;           // --warm-inlet: pre-cache the Merrimack detail pyramid
     bool railZoom = false;            // --rail-zoom DIR: orbit -> inlet imagery zoom -> estuary
+    bool bench = false;               // --bench: fly the rail, capture nothing, time honestly
     std::string mp4;                  // --mp4 PATH: pipe rail frames straight to an encoder
     bool flatBed = false;             // --flat-bed N: constant bed, to A/B bathymetry
     float flatBedNavd = -30.0f;
@@ -279,6 +280,9 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--wireframe") o.surfaceDebug = 1;
         // M9s: encode the rail straight to mp4, no PNG frames at all.
         else if (a == "--mp4") o.mp4 = next("out.mp4");
+        // M9t: fly the rail and measure it, capturing NOTHING. See the note at the timing site
+        // for why this is not the same as reading renderMs out of a captured run.
+        else if (a == "--bench") o.bench = true;
         // M9p: replace the bed with a flat floor at this NAVD height. The A/B against a normal
         // run isolates BATHYMETRY's contribution to the geometry from everything else.
         else if (a == "--flat-bed") { o.flatBed = true; o.flatBedNavd = float(atof(next("-30").c_str())); }
@@ -3501,16 +3505,32 @@ int main(int argc, char** argv) {
             if (terrain) terrain->waterNavd = static_cast<float>(waterNavd);
             if (globe) globe->waterNavd = static_cast<float>(waterNavd);   // M6j materials
 
-            // M9o: the ENGINE's cost, bracketed tightly. dt (the loop interval) also carries
-            // the previous frame's PNG encode, which is the recorder's bill and not the
-            // renderer's -- reporting that as frame time would slander the engine by ~35 ms a
-            // frame. Both are kept: renderMs judges the engine, dt judges the capture.
+            // M9o/M9t: the ENGINE's cost. dt (the loop interval) also carries the recorder's
+            // bill -- PNG encode, or readback plus the encoder pipe -- so both are kept:
+            // renderMs judges the engine, dt judges the capture.
+            //
+            // AND A CAVEAT THAT COST ME A WRONG NUMBER. RenderFrame only RECORDS and submits;
+            // without a fence, the GPU is still working when the clock stops. In a captured run
+            // that GPU time was real but hidden -- DumpRaw calls WaitIdle, so execution was
+            // being paid for inside the READBACK and renderMs read as pure CPU submit. I
+            // reported 1.67 ms as the frame cost on that basis, which flattered it.
+            //
+            // --bench closes the fence here instead, so the number includes execution and is
+            // the honest answer to "what does a frame cost". It is deliberately NOT on by
+            // default: a per-frame WaitIdle destroys the CPU/GPU overlap a real run depends on,
+            // which would make the captured runs measure something nobody ships.
             const auto rf0 = Clock::now();
             renderer.RenderFrame(cam, static_cast<float>(simUnix - startUnix), dt);
+            if (opt.bench) gpu.WaitIdle();
             const float renderMs =
                 std::chrono::duration<float>(Clock::now() - rf0).count() * 1000.0f;
 
-            if (!opt.rail.empty() && frame >= 150u) {
+            if (!opt.rail.empty() && frame >= 150u && opt.bench) {
+                // Bench records the timing and nothing else -- no readback, no encode, no disk.
+                railMs.push_back(renderMs);
+                railLoopMs.push_back(dt * 1000.0f);
+                railPool.push_back(PoolCommittedBytes());
+            } else if (!opt.rail.empty() && frame >= 150u) {
                 if (recPipe.Open()) {
                     uint32_t rowPitch = 0;
                     if (renderer.DumpRaw(recPixels, &rowPitch)) {
@@ -3598,20 +3618,32 @@ int main(int argc, char** argv) {
                         double lsum = 0.0;
                         for (float m : railLoopMs) lsum += m;
                         const double lmean = lsum / double(railLoopMs.size());
-                        Log("[rail] capture overhead: loop mean %.2f ms, so %.2f ms/frame is "
-                            "readback + %s -- the recorder's bill, not the engine's",
+                        // In bench there is no capture at all, so the gap is the REST OF THE
+                        // LOOP -- sim clock, weather residency, solver advance, scene watch.
+                        // Calling that "capture overhead" would have been a second wrong label
+                        // on the same line.
+                        Log("[rail] loop mean %.2f ms, so %.2f ms/frame outside RenderFrame (%s)",
                             lmean, (lmean > mean) ? (lmean - mean) : 0.0,
-                            recPipe.Open() ? "encode" : "PNG encode and disk");
+                            opt.bench ? "sim, residency and solver -- nothing is captured"
+                                      : (recPipe.Open() ? "readback + encode: the recorder's bill"
+                                                        : "PNG encode and disk"));
                     }
+                    // THE BUDGET IS THE WHOLE FRAME, not RenderFrame. Counting renderMs
+                    // against 16.7 ms reported "0/1200 over budget" while the helm phase was
+                    // actually running a 17.2 ms LOOP -- the sim, residency and solver work
+                    // outside RenderFrame is about half the cost at low altitude, and a budget
+                    // that ignores half the frame is a budget that always passes.
+                    const std::vector<float>& budgetSrc =
+                        railLoopMs.empty() ? railMs : railLoopMs;
                     uint32_t over33 = 0, over16 = 0;
-                    for (float m : railMs) {
+                    for (float m : budgetSrc) {
                         if (m > 33.3f) ++over33;
                         if (m > 16.7f) ++over16;
                     }
-                    Log("[rail] budget: %u/%zu frames over 16.7 ms (%.1f%%), %u over 33.3 ms "
-                        "(%.1f%%)",
-                        over16, railMs.size(), 100.0 * over16 / double(railMs.size()), over33,
-                        100.0 * over33 / double(railMs.size()));
+                    Log("[rail] budget (FULL FRAME): %u/%zu over 16.7 ms (%.1f%%), %u over "
+                        "33.3 ms (%.1f%%)",
+                        over16, budgetSrc.size(), 100.0 * over16 / double(budgetSrc.size()),
+                        over33, 100.0 * over33 / double(budgetSrc.size()));
                     Log("[rail] tile pool at end: %.2f GB committed across every atlas -- the "
                         "sparse structure's real cost for this flight",
                         railPool.empty() ? 0.0 : railPool.back() / 1073741824.0);
