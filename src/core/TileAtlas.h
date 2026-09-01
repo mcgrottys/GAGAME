@@ -137,6 +137,19 @@ public:
     ID3D12Resource* Res() const { return m_res.Get(); }
     uint32_t Srv() const { return m_srv; }
     uint32_t Uav() const { return m_uav; }
+    uint32_t Uav(uint32_t mip) const {
+        return (mip < m_mipUav.size()) ? m_mipUav[mip] : UINT32_MAX;
+    }
+
+    // Map every STANDARD coarse tile (mip >= 1). Coarse levels together cost about a third of
+    // mip 0 and they are the global floor, so completeness there is worth more than sparsity:
+    // a hole in a coarse level is a hole no finer level can cover.
+    void MapAllCoarse();
+
+    // Fill the chain by 2x2 reduction, mip 0 upward, each level written through its own UAV.
+    // Needs shaders/MipReduce.hlsl; safe to call every time the fine level changes.
+    void BuildMips(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
+                   ID3D12GraphicsCommandList* cl);
 
     static constexpr uint64_t kTileBytes = D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES;
 
@@ -163,6 +176,11 @@ private:
 
     std::vector<MipInfo> m_mip;
     uint32_t m_mipCount = 1, m_standardMips = 1;
+    std::vector<uint32_t> m_mipUav;  // one UAV per mip, for the reduction's destination
+    DXGI_FORMAT m_fmt = DXGI_FORMAT_UNKNOWN;
+    uint32_t m_mipTable = UINT32_MAX;
+    Com<ID3D12RootSignature> m_mipRs;
+    Com<ID3D12PipelineState> m_mipPso;
     GpuTexture m_resMap;             // R8_UINT, tilesX(0) x tilesY(0)
     uint32_t m_resMapSrv = UINT32_MAX;
     std::vector<uint8_t> m_resMapCpu;

@@ -601,6 +601,13 @@ void TileAtlas2D::Init(Gpu& gpu, uint32_t widthTexels, uint32_t heightTexels, DX
 
     m_srv = gpu.CreateSrv(m_res.Get(), fmt);
     m_uav = gpu.CreateTextureUav(m_res.Get(), fmt, D3D12_UAV_DIMENSION_TEXTURE2D);
+    m_fmt = fmt;
+    m_mipUav.resize(m_mipCount);
+    for (uint32_t m = 0; m < m_mipCount; ++m) {
+        m_mipUav[m] = (m == 0) ? m_uav
+                               : gpu.CreateTextureUav(m_res.Get(), fmt,
+                                                      D3D12_UAV_DIMENSION_TEXTURE2D, m);
+    }
 
     // ---- PIN THE PACKED TAIL. It is a handful of tiles and it is the coarsest description of
     // the whole field. Keeping it resident forever is what makes a miss impossible: a sample
@@ -669,6 +676,119 @@ void TileAtlas2D::RebuildResidencyMap(Gpu& gpu) {
         }
     }
     if (moved) gpu.UploadTexture(m_resMap, m_resMapCpu.data(), m_tilesX);
+}
+
+
+// ---- M9h: FILLING THE CHAIN -------------------------------------------------------------
+// A pinned tail that reads zero is real memory pretending to be data. These two build the
+// levels so the floor actually carries the field.
+
+void TileAtlas2D::MapAllCoarse() {
+    for (uint32_t m = 1; m < m_standardMips; ++m) {
+        for (uint32_t ty = 0; ty < m_mip[m].tilesY; ++ty) {
+            for (uint32_t tx = 0; tx < m_mip[m].tilesX; ++tx) RequestMap(m, tx, ty);
+        }
+    }
+}
+
+void TileAtlas2D::BuildMips(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
+                            ID3D12GraphicsCommandList* cl) {
+    if (m_mipCount < 2) return;
+
+    // Which reducer: a typed UAV's format must match the resource's family, so the bank picks
+    // by what it stores. Anything else is refused loudly rather than reduced with the wrong
+    // channel count -- a mis-typed UAV reads garbage, it does not fail.
+    int channels = 0;
+    switch (m_fmt) {
+        case DXGI_FORMAT_R32_FLOAT:
+        case DXGI_FORMAT_R16_FLOAT: channels = 1; break;
+        case DXGI_FORMAT_R32G32_FLOAT:
+        case DXGI_FORMAT_R16G16_FLOAT: channels = 2; break;
+        case DXGI_FORMAT_R32G32B32A32_FLOAT:
+        case DXGI_FORMAT_R16G16B16A16_FLOAT: channels = 4; break;
+        default: break;
+    }
+    if (!channels) {
+        Log("[atlas] BuildMips: format %d has no reducer -- chain left unfilled", int(m_fmt));
+        return;
+    }
+
+    if (!m_mipPso) {
+        D3D12_DESCRIPTOR_RANGE range{};
+        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        range.NumDescriptors = 2;
+        range.BaseShaderRegister = 0;
+        D3D12_ROOT_PARAMETER rp[2]{};
+        rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        rp[0].Constants.Num32BitValues = 4;
+        rp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        rp[1].DescriptorTable.NumDescriptorRanges = 1;
+        rp[1].DescriptorTable.pDescriptorRanges = &range;
+        D3D12_ROOT_SIGNATURE_DESC rsd{};
+        rsd.NumParameters = 2;
+        rsd.pParameters = rp;
+        Com<ID3DBlob> blob, err;
+        if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &blob,
+                                               &err))) {
+            Log("[atlas] BuildMips: root signature failed");
+            return;
+        }
+        if (FAILED(gpu.Device()->CreateRootSignature(0, blob->GetBufferPointer(),
+                                                     blob->GetBufferSize(),
+                                                     IID_PPV_ARGS(&m_mipRs)))) {
+            return;
+        }
+        const std::wstring def = L"GA_MIP_CH=" + std::to_wstring(channels);
+        ShaderBlob cs =
+            sc.Compile(shaderDir + L"/MipReduce.hlsl", L"CsMipReduce", L"cs_6_0", {def});
+        if (!cs.Valid()) {
+            Log("[atlas] BuildMips: MipReduce.hlsl (%d ch) failed to compile", channels);
+            return;
+        }
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pd{};
+        pd.pRootSignature = m_mipRs.Get();
+        pd.CS = {cs.Data(), cs.Size()};
+        if (FAILED(gpu.Device()->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m_mipPso)))) {
+            Log("[atlas] BuildMips: PSO failed");
+            return;
+        }
+        // ONE DESCRIPTOR PAIR PER LEVEL. Reusing a single pair looks right and is not:
+        // descriptor writes land on the CPU immediately while the dispatches execute later,
+        // so every level would read whichever pair was written last. Caught by the mip-1
+        // value check -- the whole coarse level came back carrying one tile's stamp.
+        m_mipTable = gpu.SrvHeap().Alloc(2 * (m_mipCount - 1));
+    }
+
+    cl->SetComputeRootSignature(m_mipRs.Get());
+    cl->SetPipelineState(m_mipPso.Get());
+
+    const uint32_t w0 = m_tilesX * m_tileW, h0 = m_tilesY * m_tileH;
+    for (uint32_t m = 0; m + 1 < m_mipCount; ++m) {
+        const uint32_t sw = (w0 >> m) ? (w0 >> m) : 1u, sh = (h0 >> m) ? (h0 >> m) : 1u;
+        const uint32_t dw = (w0 >> (m + 1)) ? (w0 >> (m + 1)) : 1u;
+        const uint32_t dh = (h0 >> (m + 1)) ? (h0 >> (m + 1)) : 1u;
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC u{};
+        u.Format = m_fmt;
+        u.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        const uint32_t slot = m_mipTable + 2 * m;
+        u.Texture2D.MipSlice = m;
+        gpu.Device()->CreateUnorderedAccessView(m_res.Get(), nullptr, &u,
+                                                gpu.SrvHeap().Cpu(slot));
+        u.Texture2D.MipSlice = m + 1;
+        gpu.Device()->CreateUnorderedAccessView(m_res.Get(), nullptr, &u,
+                                                gpu.SrvHeap().Cpu(slot + 1));
+
+        const uint32_t consts[4] = {dw, dh, sw, sh};
+        cl->SetComputeRoot32BitConstants(0, 4, consts, 0);
+        cl->SetComputeRootDescriptorTable(1, gpu.SrvHeap().Gpu(slot));
+        cl->Dispatch((dw + 7) / 8, (dh + 7) / 8, 1);
+
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        b.UAV.pResource = m_res.Get();
+        cl->ResourceBarrier(1, &b);
+    }
 }
 
 void TileAtlas2D::RequestMap(uint32_t mip, uint32_t tx, uint32_t ty) {
@@ -1048,7 +1168,7 @@ bool RunAtlasSelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDi
     // A small live atlas: map three tiles, clear them, stamp the test pattern over the resident
     // list, verify pattern-inside / zero-outside, then unmap one and verify it vanishes.
     TileAtlas2D atlas;
-    atlas.Init(gpu, 1024, 512, DXGI_FORMAT_R16_FLOAT, L"atlastest.bank", 8);
+    atlas.Init(gpu, 1024, 512, DXGI_FORMAT_R16_FLOAT, L"atlastest.bank", 8, 4);
 
     ShaderBlob csClear = sc.Compile(shaderDir + L"/SeaChurn.hlsl", L"CsChurnClear", L"cs_6_0");
     ShaderBlob csStamp = sc.Compile(shaderDir + L"/SeaChurn.hlsl", L"CsChurnTestPattern",
@@ -1187,6 +1307,53 @@ bool RunAtlasSelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDi
     atlas.RequestUnmap(1, 1);
     atlas.CommitMappings(gpu, nullptr);
     pass &= verify("after-unmap", false);
+
+    // ---- M9h: THE REDUCTION, on values that are known rather than plausible. The bank is
+    // stamped so every texel of resident tile (tx,ty) carries ty*tilesX+tx+1, and tile (1,1)
+    // was just unmapped. A mip-1 texel well inside a tile's footprint averages four identical
+    // fine texels, so it must equal that tile's stamp exactly -- and inside the unmapped
+    // tile's footprint it must be 0, because a null tile reads zero and averaging zeros is
+    // still zero. That second case is the one that matters: it proves the coarse level
+    // inherits the FIELD's semantics instead of inventing coverage.
+    {
+        atlas.MapAllCoarse();
+        atlas.CommitMappings(gpu, nullptr);
+        auto* mcl = gpu.BeginUpload();
+        ID3D12DescriptorHeap* mheaps[] = {gpu.SrvHeap().Heap()};
+        mcl->SetDescriptorHeaps(1, mheaps);
+        atlas.BuildMips(gpu, sc, shaderDir, mcl);
+        gpu.EndUpload();
+
+        GpuTexture t1;
+        t1.res = atlas.Res();
+        t1.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        t1.format = DXGI_FORMAT_R16_FLOAT;
+        t1.width = 512;
+        t1.height = 256;
+        uint32_t pitch1 = 0;
+        const std::vector<uint8_t> d1 = gpu.ReadbackTexture(t1, &pitch1, 1);
+        uint32_t badM = 0;
+        for (uint32_t ty = 0; ty < atlas.TilesY(); ++ty) {
+            for (uint32_t tx = 0; tx < atlas.TilesX(); ++tx) {
+                // centre of this mip-0 tile's footprint, in mip-1 texels
+                const uint32_t px = (tx * atlas.TileW() + atlas.TileW() / 2) / 2;
+                const uint32_t py = (ty * atlas.TileH() + atlas.TileH() / 2) / 2;
+                const uint16_t* row = reinterpret_cast<const uint16_t*>(
+                    d1.data() + static_cast<size_t>(py) * pitch1);
+                const float v = HalfToFloat(row[px]);
+                const bool resident = atlas.IsResident(tx, ty);
+                const float expect =
+                    resident ? static_cast<float>(ty * atlas.TilesX() + tx + 1) : 0.0f;
+                if (v != expect) {
+                    Log("[atlastest] mip1: tile (%u,%u) = %g, expected %g", tx, ty, v, expect);
+                    ++badM;
+                }
+            }
+        }
+        Log("[atlastest] mip1 reduction: %s (null tiles averaged to 0, as the field says)",
+            badM ? "FAILED" : "every coarse texel is the mean of its four");
+        pass &= (badM == 0);
+    }
 
     Log("[atlastest] resident %u tiles = %.2f MB of %.0f MB virtual", atlas.ResidentCount(),
         atlas.ResidentBytes() / 1048576.0, atlas.VirtualBytes() / 1048576.0);
