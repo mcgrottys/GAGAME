@@ -37,13 +37,6 @@ cbuffer SweCb : register(b0) {
                                  // outside the window, so its tide enters as data too (M6d)
     float gTideRate;             // M6r: d(tide plane)/dt, m/s -- the prism source term
     float gPadA, gPadB, gPadC;
-    // M9h ingest rows (appended at the END, per the layout law):
-    float4 gIngestDim;    // xy = destination extent, zw = world m per texel at that level
-    float4 gIngestGeo;    // world->latlon: lon0, lat0, 1/mPerLon, 1/mPerLat
-    float4 gGulfGeo;      // GoMOFS grid: lon0, lat1, 1/dlon, 1/dlat
-    float4 gGulfDim;      // nx, ny, spare, spare
-    float  gIngestZ0;     // world z of the destination's row 0
-    float  gPadI0, gPadI1, gPadI2;
 };
 
 StructuredBuffer<uint> gTileList : register(t0);
@@ -65,11 +58,6 @@ RWTexture2D<float4> gUv   : register(u2);        // derived: u east, v north, sp
 // window" gets mistaken for "has data", and dry land renders as a black rectangle punched
 // through the regional field.
 RWTexture2D<float4> gMv   : register(u3);
-// M9h INGEST: the regional grad(flow) -- GulfLayer runs the SAME VelGrad kernel over GoMOFS,
-// so this is the same quantity in the same units, not a different field wearing a normalized
-// ramp. gIngest is the destination COARSE level of the same bank.
-Texture2D<float4>   gGulfMv : register(t8);
-RWTexture2D<float4> gIngest : register(u4);
 
 float BedAt(int2 t) {
     if (any(t < 0) || t.x >= (int)gNx || t.y >= (int)gNy) return 100.0f;   // outside = wall
@@ -139,36 +127,6 @@ void CsSweVelGrad(uint3 id : SV_DispatchThreadID) {
     const float dvdy = (e.y - d.y) / (2.0f * gDy);
     // grade 0 = div, grade 2 = curl. The wedge is the bivector coefficient in e1^e2.
     gMv[t] = float4(dudx + dvdy, dvdx - dudy, 1.0f, 0.0f);
-}
-
-// M9h: FILL THE COARSE END FROM THE REGION. The reduction carries the solved inlet field
-// upward, but the solve only exists inside its wet mask -- so above it the coarse levels read
-// zero, which means "irrotational and divergence-free" and is a lie about open water. GoMOFS
-// covers that ground at ~700 m, so it belongs exactly where the bank's texels are coarse
-// enough to be honest about it.
-//
-// One dispatch per destination level. gSweIngest.xy = destination extent, .zw = the level's
-// world metres per texel; gSweIngestGeo = the GoMOFS grid (lon0, lat1, 1/dlon, 1/dlat).
-[numthreads(8, 8, 1)]
-void CsSweIngestGulf(uint3 id : SV_DispatchThreadID) {
-    if (id.x >= (uint)gIngestDim.x || id.y >= (uint)gIngestDim.y) return;
-    // Destination texel -> world metres -> lat/lon, using the SAME anchor-linear map every
-    // water consumer uses (BathyModel::kOrgLat / kMPerLat -- the AST's world.flat edge).
-    const float wx = gWorldX0 + (id.x + 0.5f) * gIngestDim.z;
-    const float wz = gIngestZ0 + (id.y + 0.5f) * gIngestDim.w;
-    const float lon = gIngestGeo.x + wx * gIngestGeo.z;
-    const float lat = gIngestGeo.y + wz * gIngestGeo.w;
-    const float2 guv = float2((lon - gGulfGeo.x) * gGulfGeo.z,
-                              (gGulfGeo.y - lat) * gGulfGeo.w);
-    if (any(guv < 0.0f) || any(guv > 1.0f)) { gIngest[id.xy] = float4(0, 0, 0, 0); return; }
-    const int2 gt = int2(guv * gGulfDim.xy);
-    const float4 mv = gGulfMv.Load(int3(gt, 0));
-    // Mv2 layout from VelGrad.hlsl: (div, u, v, curl). Land reads zero there, and zero here
-    // means the same thing, so no mask has to survive the crossing.
-    // Coverage 1 where GoMOFS is water. Land reads zero there and zero here means the same,
-    // so no mask has to survive the crossing.
-    const float cov = (abs(mv.x) + abs(mv.w) > 0.0f) ? 1.0f : 0.0f;
-    gIngest[id.xy] = float4(mv.x, mv.w, cov, 0.0f);
 }
 
 // ---- init / reset --------------------------------------------------------------------------
