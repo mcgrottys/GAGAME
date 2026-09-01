@@ -97,6 +97,7 @@ struct Options {
     uint32_t tileBudget = 1000;       // --tile-budget: hard cap on Google fetches per run
     bool warmInlet = false;           // --warm-inlet: pre-cache the Merrimack detail pyramid
     bool railZoom = false;            // --rail-zoom DIR: orbit -> inlet imagery zoom -> estuary
+    bool framesSet = false;           // an explicit --frames beats a rail default
     uint32_t predictEvery = 3;        // --predict-every N: prefetch-walk cadence (1 = old)
     bool bench = false;               // --bench: fly the rail, capture nothing, time honestly
     std::string mp4;                  // --mp4 PATH: pipe rail frames straight to an encoder
@@ -217,7 +218,10 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--debug") o.debugLayer = true;
         else if (a == "--width") o.width = static_cast<uint32_t>(atoi(next("1600").c_str()));
         else if (a == "--height") o.height = static_cast<uint32_t>(atoi(next("900").c_str()));
-        else if (a == "--frames") o.frames = static_cast<uint32_t>(atoi(next("1").c_str()));
+        else if (a == "--frames") {
+            o.frames = static_cast<uint32_t>(atoi(next("1").c_str()));
+            o.framesSet = true;
+        }
         else if (a == "--dump") o.dump = Widen(next("out.png").c_str());
         else if (a == "--shaders") o.shaderDir = Widen(next("shaders").c_str());
         else if (a == "--tides") o.tidesPath = next("data/tides/stations.json");
@@ -347,10 +351,12 @@ Options ParseArgs(int argc, char** argv) {
         // the zoom and Mars flyover run 30 s; the flood ride holds the helm for 40 s total.
         o.headless = true;
         o.globeStart = true;
-        o.frames = o.railJetty                             ? 40 * 30
-                   : o.railFlood                           ? 40 * 30
-                   : (o.railZoom || o.planet == "mars")    ? 30 * 30
-                                                           : 25 * 30;
+        // An explicit --frames wins: dumping a rail at a CHOSEN moment is how you inspect
+        // something a viewer noticed at 0:12 rather than guessing camera arguments for it.
+        if (!o.framesSet) o.frames = o.railJetty                             ? 40 * 30
+                                : o.railFlood                        ? 40 * 30
+                                : (o.railZoom || o.planet == "mars") ? 30 * 30
+                                                                     : 25 * 30;
         o.timeScale = 1.0;
     }
     if (o.planet == "mars") o.globeStart = true;   // there is only orbit on Mars (for now)
