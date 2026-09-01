@@ -1509,3 +1509,44 @@ sea, **the seafloor visible through the water with its own relief and colour**, 
 the composite doing its job — land tree over a *real* seafloor tree, gated by the survey — and it
 says plainly that `synth.bed` (a classifier over the height stack) is a placeholder for an
 ingested seafloor texture tree. That is the next tree.
+
+## 35. Height pages: one height tenant
+
+Same shape as §34, for the second of the spec's three lines — *1 Sparse Global Height GA*.
+`earth.height` was a cube tenant plus a z14 window tenant with a feathered lerp between them;
+it is one `AddTexturePages` tenant now, pages 0..5 the cube faces and 6 the z14 page, one
+provider dispatching on the slice, `ComposedHeightPages` selecting by containment and residency.
+
+    [residency] earth.height (megatexture pages): 16384x16384 x7 7 mips, 76454 tiles virtual
+
+### What the two-tenant design was hiding
+
+Three readers of the height *window* had bound the second texture directly, and each had to
+learn that the window is a slice:
+
+- the globe's data lens and its near-field material gate (`Globe.hlsl`);
+- the trace probe's readback, whose subresource is now `slice × mips + mip`;
+- **the water bank**, which reads the bed per texel by integer `Load` from the window. Its own
+  root signature had no `Texture2DArray` space at all. It has one now, the slice travels in
+  `gSlotsD.z` (previously `~0` and unused, so the CB layout is unchanged), and the loads branch
+  on it.
+
+### Measured
+
+    globe 200 frames, height pages vs two tenants     0 of 1,440,000 pixels
+    helm  400 frames                                  2,148 pixels (0.15%), deterministic,
+                                                      all in the horizon band y 428..485
+
+The band is the far shore, where the old path feathered the window into the cube over 6% of its
+span and the pages path takes whichever page is resident at the finer texel. Same class of change
+as the colour fades' removal in §34, and the same argument: the pages are one height field, so
+where both are resident at a resolution they agree, and where they are not, the sharper one is
+the truth.
+
+### What is on the GPU now, against the spec's last three lines
+
+    1 global colour GA    earth.color  (megatexture pages, 8)        yes
+    1 global height GA    earth.height (megatexture pages, 7)        yes
+    N water/weather GAs   the GradeBank arrays                       yes
+    strays                GulfLayer::m_uvTex, SweSolver::m_uv, WeatherManager's bed mirror,
+                          FieldSet PNGs, GisStencil's three raster masks (shader-side)

@@ -129,14 +129,12 @@ the incumbent (globe 0 px, helm 2 px by 1/255); bench 4.65–4.82 ms vs incumben
 
 ---
 
-## 2. The three rungs: DELETED for colour (section 34). Height is next.
+## 2. The rungs are DELETED for colour (section 34) AND height (section 35).
 
-Colour is ONE tenant -- `AddTexturePages`, slices 0..5 the cube faces, 6 the z14 page, 7 the
-z17 page, one provider dispatching on the slice, `ComposedColorPages` selecting by containment
-and residency with no fades. `earth.height` still has TWO tenants (cube + z14 window) with the
-old hand-off in `ComposedHeight`; give it the same treatment -- `AddTexturePages(..., 7)`, R16F,
-the height provider dispatching on slice, and the pages path in the height shader. That is the
-"1 Sparse Global Height GA" line of the user's spec.
+Colour is ONE tenant (pages 0..5 cube, 6 z14, 7 z17); height is ONE tenant (pages 0..5 cube,
+6 z14). Both select by containment and residency, no fades. The water bank reads the bed from
+slice 6 of the height page tenant through its own root signature's new Texture2DArray space.
+What keeps "only three things on the GPU" partial is the stray list in docs/AUDIT.md row 13.
 
 DirectStorage is ON by default and PROVEN: helm 400 and globe 200 frames are 0 pixels against
 the upload ring, after the four fixes in section 34. Every earlier "not pixel-equal" was the
