@@ -746,3 +746,76 @@ and the committed texture becomes redundant rather than authoritative.
 
 That is the shape of every remaining conversion in section 22: not "read the same bytes
 sparsely", but "make the thing that edits the bytes a source".
+
+## 26. The normalization stage, and composition as a reverse tree
+
+The pipeline was always stated as five arrows:
+
+    GA Load -> GA Unit/Scale/Projection normalize -> GA Compose -> GA physics -> sparse GPU
+
+The second arrow did not exist. `GeoRef::valueUnit` was written by every loader, logged once at
+boot, and read by nothing; `DomainCompositor::Add` said *"a product carries one grade and one
+unit"* while checking only grade and channel count. A bed in `m NAVD88` and a survey in `ft MLLW`
+would have composed to full coverage and a number that is neither.
+
+`src/core/GaUnits.h` is that arrow. `Quantity` says what a number IS; `UnitSpec` parses a
+`valueUnit`, carries a factor to SI and a vertical datum, and `AcceptsFrom` converts across a
+scale but refuses across a quantity or a datum.
+
+**Why it is its own stage.** A loader must report its file faithfully, units it cannot convert
+included — converting there erases the provenance that makes a refusal explainable, and "this
+file is feet" is the useful half of the error. A compositor sees floats, by which point the unit
+is already gone. So it sits between them, and `Add()` now enforces both halves it promised —
+including refusing a *convertible but unnormalized* source, because a stage that can be skipped
+is not a stage.
+
+### The reverse tree
+
+A `DomainCompositor` was a leaf-eater: sources in, page out, nothing downstream could consume a
+composed product except the GPU. `CompositeSource` makes a compositor a source. Three things
+follow: composites **nest**; the unit check **composes with them**, so a wrong datum four levels
+down is caught at the edge that introduced it; and every node declares a **cadence**, which is
+the gantt column — the bed composes once, the tide is a function of `t`.
+
+`PrintTree` walks the live graph, so a mis-wired node shows up there before it shows up in pixels.
+
+### The tide step
+
+Depth is not a dataset anyone ships. It is water level minus bed — two quantities, two vertical
+datums, two domains, two clocks. A compositor resolves *disagreement about one quantity*;
+`BinaryFieldSource` combines *two quantities into a third*, and its coverage multiplies rather
+than averages, because a depth is meaningful only where both operands are known.
+
+Subtracting two levelled heights yields a **thickness with no datum**, and the unit algebra
+records that — so the result refuses to compose with anything still carrying one.
+
+### The datum rule caught its own author first
+
+`TideSource` originally emitted NAVD88 directly, applying each station's published CO-OPS link and
+dropping any station without one. That looked more rigorous and measured **1.7346 m worse**:
+
+    [tide-src] 2 stations usable in NAVD88 (18 dropped: no published NAVD link)
+
+Only 2 of 20 stations carry a link, and **Newburyport — the focus, whose harmonics actually
+describe this estuary — is not one of them.** The water level was being interpolated from
+Riverside and Boston. The curve came from the wrong place in order to avoid guessing a constant.
+
+So a source reports what its data says, in the frame its data is in, and a missing link is a
+reason to make somebody **declare** it rather than to discard a good tide curve.
+`DeclareDatumLink` takes the offset and a provenance string and prints both every run. It is
+handed main's own `ResolveDatum` result — an estimate that was always there, hand-carried in a
+`BathyModel` comment. It is now an edge with a type on both ends.
+
+    [datum] no NAVD link at Newburyport; MLLW - NAVD88 = -1.396 m via NAVD=MSL+0.092 (from Boston)
+    [datum-link] tide.mllw: MLLW -> NAVD88, -1.3960 m -- declared, not derived
+    [tree] node                       kind       domain  unit                       cadence
+    [tree] water.depth                subtract   point   m [length]                 per-instant
+    [tree]   +- tide.mllw             normalize  point   length NAVD88              per-instant
+    [tree]     +- tide.mllw           load       point   length MLLW                per-instant
+    [tree]   +- merrimack             load       raster  m NAVD88                   static
+    [tree] MLLW tide - NAVD88 bed: refused, as it must be
+    [tree] 24 hourly probes at Newburyport: worst |tree - engine| level 0.0000 m,
+           depth 0.0000 m (equivalent)
+
+Equal to the engine's own water level to the printed digit — through a graph that states its
+units, its datums, and which of its numbers is an assumption.
