@@ -16,6 +16,7 @@
 
 #include "compose/ColorStackSource.h"
 #include "compose/TileIndex.h"
+#include "core/TileStream.h"
 #include "compose/ComposeTree.h"
 #include "compose/DomainSource.h"
 #include "core/CurrentFieldLoader.h"
@@ -2088,6 +2089,10 @@ int main(int argc, char** argv) {
                     resMgr.SetTileIndex(winTenant, &idxColorWin);
                     resMgr.SetTileIndex(detTenant, &idxColorDet);
                     resMgr.SetTileIndex(hgtTenant, &idxHeightCube);
+                    // M9ag: the NVMe -> GPU reader. Created once; a machine without the
+                    // redist or with a driver that declines keeps the ReadFile path.
+                    static TileStream tileStream;
+                    tileStream.Init(gpu);
                 }
 
             }
