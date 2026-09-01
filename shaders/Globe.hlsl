@@ -861,60 +861,53 @@ float4 PsMain(VsOut i) : SV_Target {
             // within a source and NOT magnitude across them. Putting them on one absolute
             // ramp would make the global field look dead, which would be a lie told by a
             // colour map rather than by the data.
-            float2 mvL = float2(0, 0);
-            bool gotL = false;
+            // A COMPOSITE, not a branch. The old form asked "is this pixel inside the
+            // window" and, if so, took the fine value and stopped -- so a NULL tile's zero
+            // read as a measurement, and dry land punched a black rectangle through the
+            // regional field. "Inside the window" was never the same question as "has data".
+            //
+            // Compose.hlsli already solved this for imagery and says so: the window overlay
+            // feathers across 6% of its span AND rides its own per-texel alpha, so "a texel
+            // the paint did not cover keeps the cube underneath, pixel by pixel, never tile by
+            // tile". This is that, for a field: weight = edge feather x the bank's COVERAGE
+            // channel, and the coarse source is what shows through. A null tile carries zero
+            // coverage, which is exactly "no solve here" -- the ingest rule (nodata is
+            // absence) doing the work at composite time.
+            float2 fine = float2(0, 0), coarse = float2(0, 0);
+            float wFine = 0.0f;
             if (gLensU.x != 0xFFFFFFFFu) {
                 const float2 uvL = (wxzL - gLensA.xy) * gLensA.zw;
                 if (all(uvL > 0.0f) && all(uvL < 1.0f)) {
-                    // M9h: SAMPLE THE CHAIN, NOT MIP 0. The level wanted is the one whose
-                    // texels match this pixel's ground footprint -- log2(footprint / texel) --
-                    // and the residency map says the finest level actually present, so the
-                    // clamp can only ever make it COARSER. That is the whole no-pop contract
-                    // in two lines: a pulled-back camera reads a level sized to it instead of
-                    // point-sampling mip 0 into hard tile edges, and a level that has not
-                    // arrived degrades to blur rather than to a NULL.
-                    float lodL = 0.0f;
+                    const float footL = length(i.rel) * gWavesB.z;
+                    float lodL = log2(max(footL / max(gLensB.x, 1e-3f), 1.0f));
                     if (gLensU.y != 0xFFFFFFFFu) {
-                        // The pixel'''s ground footprint. footPx is scoped to the water block
-                        // above; the lens runs outside it, so recompute from the same terms.
-                        const float footL = length(i.rel) * gWavesB.z;
-                        const float wantL = log2(max(footL / max(gLensB.x, 1e-3f), 1.0f));
-                        const uint2 rt = uint2(uvL.x * gLensB.y,
-                                               (1.0f - uvL.y) * gLensB.z);
+                        const uint2 rt = uint2(uvL.x * gLensB.y, (1.0f - uvL.y) * gLensB.z);
                         const uint have = gTexU[gLensU.y].Load(uint3(rt, 0)).x;
-                        // Clamp to the chain's real depth. Past the last level SampleLevel
-                        // has nothing to return, and at the horizon the footprint runs far
-                        // past it -- which painted a bright band across the far field, the
-                        // colour map reporting garbage in perfectly good faith.
-                        lodL = clamp(max(wantL, (have == 0xFFu) ? 0.0f : float(have)), 0.0f,
-                                     max(gLensB.w - 1.0f, 0.0f));
+                        lodL = max(lodL, (have == 0xFFu) ? 0.0f : float(have));
                     }
-                    const float2 hq = gTex[gLensU.x]
-                                          .SampleLevel(sLinearClamp,
-                                                       float2(uvL.x, 1.0f - uvL.y), lodL)
-                                          .xy;
-                    mvL = float2(abs(hq.x) * 60.0f, hq.y * 60.0f);
-                    gotL = true;
+                    lodL = clamp(lodL, 0.0f, max(gLensB.w - 1.0f, 0.0f));
+                    const float4 hq = gTex[gLensU.x].SampleLevel(
+                        sLinearClamp, float2(uvL.x, 1.0f - uvL.y), lodL);
+                    fine = float2(abs(hq.x) * 60.0f, hq.y * 60.0f);
+                    // The same 6% feather Compose.hlsli uses, so the window edge ramps
+                    // instead of cutting.
+                    const float2 fe = smoothstep(0.0f, 0.06f, uvL) *
+                                      smoothstep(1.0f, 0.94f, uvL);
+                    wFine = saturate(hq.z) * fe.x * fe.y;
                 }
             }
-            if (!gotL && gTexIdx2.y != 0xFFFFFFFFu) {
+            if (gTexIdx2.y != 0xFFFFFFFFu) {
                 const float2 wuvL = float2(
                     frac((lonDeg - gWindGeo.y) * gWindGeo.w / gWindB.x),
                     saturate(((gWindGeo.x - degrees(lat)) * gWindGeo.z + 0.5f) / gWindB.y));
                 const float4 gm = gTex[gTexIdx2.y].SampleLevel(sLinearClamp, wuvL, 0);
-                // Mv2: x = divergence (grade 0), w = curl (grade 2). GlobeWind.hlsl stores
-                // BOTH x1e4, so they must be scaled alike -- div was on x1.6 against curl'''s
-                // /2.2, a factor of 3.5 on quantities of the same size, and the green channel
-                // flooded the whole far field. The band was the colour map shouting, not the
-                // wind blowing.
-                // ...and SUBORDINATE. These two sources are three orders apart (the caveat
-                // above), so the global field is context behind the solved one, not a peer.
-                // Rendering it at equal weight makes the far field shout over the subject --
-                // an honest ramp on an incomparable quantity is still a misleading picture.
-                mvL = float2(abs(gm.x) / 2.2f, gm.w / 2.2f) * 0.30f;
-                gotL = true;
+                // GlobeWind.hlsl stores div AND curl x1e4, so they scale alike; and this is
+                // CONTEXT, three orders from the solved field, so it stays subordinate.
+                coarse = float2(abs(gm.x) / 2.2f, gm.w / 2.2f) * 0.30f;
             }
-            if (gotL) {
+            const float2 mvL = lerp(coarse, fine, wFine);
+            {
+
                 const float divN = saturate(mvL.x);
                 const float curlN = clamp(mvL.y, -1.0f, 1.0f);
                 lc = float3(saturate(curlN), divN * 0.9f, saturate(-curlN));

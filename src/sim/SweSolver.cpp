@@ -33,7 +33,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
         d.name = "swe.velgrad (grad flow: div + curl)";
         d.width = nx;
         d.height = ny;
-        d.fmt = DXGI_FORMAT_R16G16_FLOAT;
+        d.fmt = DXGI_FORMAT_R16G16B16A16_FLOAT;   // div, curl, COVERAGE, spare
         d.gradeSig = kG0 | kG2;
         d.metersPerTexel = dx;
         d.units = "1/s";
@@ -265,7 +265,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     uv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     gpu.Device()->CreateUnorderedAccessView(m_uv.res.Get(), nullptr, &uv,
                                             gpu.SrvHeap().Cpu(m_table + 3));
-    uv.Format = DXGI_FORMAT_R16G16_FLOAT;
+    uv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     gpu.Device()->CreateUnorderedAccessView(m_velGrad.Res(), nullptr, &uv,
                                             gpu.SrvHeap().Cpu(m_table + 4));
 

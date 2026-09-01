@@ -161,6 +161,15 @@ private:
         // gap carried only the deviation dynamics).
         float tideRate;
         float padA, padB, padC;
+        // M9h: the GoMOFS ingest rows. APPENDED AT THE END on both sides -- a same-size
+        // insertion in the middle passes the byte-parity gate and silently offsets every later
+        // row (the lesson WaterBank.hlsl:44 records, nearly repeated here).
+        float ingestDim[4];   // xy destination extent, zw world m/texel at that level
+        float ingestGeo[4];   // world->latlon: lon0, lat0, 1/mPerLon, 1/mPerLat
+        float gulfGeo[4];     // GoMOFS grid: lon0, lat1, 1/dlon, 1/dlat
+        float gulfDim[4];     // nx, ny, spare, spare
+        float ingestZ0;
+        float padI0, padI1, padI2;
     };
 
     bool m_ready = false;
