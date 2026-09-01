@@ -1396,3 +1396,56 @@ here.
 
 **Ring loads are the default** as of this commit — the user's call on the frame-600 pair and the
 rail video. `--no-ring-loads` restores the whole-column queue for an A/B.
+
+## 33. The trees packed, and a reference becomes a place
+
+§32's instrument said the rail's loads were 64 KB reads at **1.8 ms each** — the per-file open,
+the cost `TileArchive`'s header names as the one that survives every other optimisation. The
+user's rule is that painted tiles live on disk and DirectStorage loads them. This section is that
+rule for the trees.
+
+### Pack any folder
+
+`TileArchive::PackDir` packs a tree node's frame folder — `f_m_x_y.bin` for a leaf,
+`f_m_x_y_<key>.bin` for a compose node; the key lands in the record's `subset`, a leaf's is 0, so
+`Find(key, subset)` is one lookup for both. The zero-byte `.void` and `.ref-*` entries are **not**
+packed: they cost a directory lookup and never a read, and a reference resolves through the
+*child's* archive, which is the point.
+
+    --pack-trees: 28,584 tiles into 21 archives, 1.79 GB, 10.7 s. Loose files kept.
+
+### A tile is a place
+
+`TileTree::Tile` takes an optional `TileLoc`. A tile that lives in an archive is answered as
+(path, offset, size) with `out` empty, and the bytes never enter the process. A **stored
+reference resolves through the child it names**, so a reference in the megatexture's folder
+becomes a `TileLoc` into `earth.land`'s archive, or `google.satellite`'s — the chain ends at
+whichever tree actually holds bytes.
+
+A caller that must have the bytes — a parent gathering children, or the upload ring when
+DirectStorage is off — reads them through the archive's **one open handle** with a positioned
+`ReadFile`, which is thread-safe on a synchronous handle. That alone is the win the instrument
+asked for:
+
+    reads on the rail   1.8 ms/tile (loose)  ->  1.2-1.3 ms/tile (archive handle)
+
+### Measured
+
+    globe still, archives vs incumbent          0 pixels
+    helm, 6 frames, loose vs archive            0 pixels
+    helm, 200 frames, loose vs archive          0 pixels
+    helm, --direct-storage vs upload ring       0 pixels   <- the test --direct-storage never had
+
+The 30-frame helm read 43% different between loose and archive on the same tree, and 52%
+different between frame 30 and frame 200 on the *same* path: a still that is not settled is a
+picture of residency in flight, not of the data (priors §9). Two hundred frames settles it.
+
+`--direct-storage` was left off because the composed-cache path was "not pixel-equal to the
+upload ring (9.14% differs) — and equality is not even the right test". Through the trees it *is*
+equal, on the same still, so the test exists now; whether to make it the default is a rail
+review, as ring loads were.
+
+### One caution recorded
+
+`<windows.h>` in a header that `Compositor.h` includes reached `SeaLayer` and broke `std::min`
+through the `min`/`max` macros — guarded with `NOMINMAX` and `#undef` in both tree headers.

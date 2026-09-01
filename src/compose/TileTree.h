@@ -44,7 +44,12 @@
 // ================================================================================================
 #pragma once
 
+#ifndef NOMINMAX
+#define NOMINMAX   // windows.h's min/max macros would break std::min in every includer
+#endif
 #include <windows.h>
+#undef min
+#undef max
 
 #include <algorithm>
 #include <atomic>
@@ -57,10 +62,14 @@
 #include <string>
 #include <vector>
 
+#include <map>
+#include <mutex>
+
 #include "compose/ColorStackSource.h"
 #include "compose/ComposeTree.h"
 #include "compose/Compositor.h"
 #include "compose/DomainSource.h"
+#include "compose/TileArchive.h"
 #include "core/Common.h"
 
 namespace ga {
@@ -201,34 +210,63 @@ public:
     }
 
     // ---- the tile ---------------------------------------------------------------------------
+    // M9ao: `loc`, when given, lets a tile that lives in an archive be answered as a PLACE --
+    // path, offset, size -- and the bytes never enter this process: Content with `out` empty and
+    // `loc` valid. A stored reference resolves through the child it names, so a reference in
+    // the megatexture's folder becomes a TileLoc into earth.land's archive, or google's. That
+    // is the user's rule made literal: painted tiles live on disk and DirectStorage loads them.
     Status Tile(const ColorFrame& frame, const std::string& tag, const TileRequest& r,
-                std::vector<uint8_t>& out) {
+                std::vector<uint8_t>& out, TileLoc* loc = nullptr) {
         Compositor::TileBox box{};
         frame.Box(r, box);
-        if (m_kids.empty()) return LeafTile(frame, tag, r, box, out);
-        return std::string(m_node->NodeKind()) == "gate" ? GateTile(frame, tag, r, box, out)
-                                                         : ComposeTile(frame, tag, r, box, out);
+        if (m_kids.empty()) return LeafTile(frame, tag, r, box, out, loc);
+        return std::string(m_node->NodeKind()) == "gate" ? GateTile(frame, tag, r, box, out, loc)
+                                                         : ComposeTile(frame, tag, r, box, out, loc);
     }
 
-    // The residency manager's view of this tree: bytes, or zeros where nothing covers.
+    // The residency manager's view of this tree: a place if it can take one, else bytes, else
+    // zeros where nothing covers.
     TileProviderFn Provider(const ColorFrame& frame) {
         const std::string tag = frame.Tag();
         EnsureFrame(tag);
-        return [this, frame, tag](const TileRequest& r, std::vector<uint8_t>& out, TileLoc*) {
-            const Status st = Tile(frame, tag, r, out);
-            if (st != Status::Content) out.assign(65536, 0);
+        return [this, frame, tag](const TileRequest& r, std::vector<uint8_t>& out, TileLoc* loc) {
+            const Status st = Tile(frame, tag, r, out, loc);
+            if (st != Status::Content) {
+                out.assign(65536, 0);
+                if (loc) *loc = TileLoc{};
+            }
             return true;
         };
     }
+
+    // M9ao: pack this node's frame folders (and the children's) into one archive per frame.
+    // The loose files stay: the archive is derived. Returns tiles packed across the tree.
+    uint32_t Pack(const std::vector<std::string>& tags) {
+        uint32_t n = 0;
+        for (const std::string& tag : tags) {
+            n += TileArchive::PackDir(m_root + "\\" + tag, ArchivePath(tag));
+        }
+        {
+            std::lock_guard<std::mutex> lk(m_arcMx);
+            m_arcs.clear();   // a fresh pack supersedes whatever was open
+        }
+        for (auto& k : m_kids) n += k->Pack(tags);
+        return n;
+    }
+    // How many tiles the archives under this node answered as places or through a handle.
+    std::atomic<uint32_t> arcPlaces{0}, arcReads{0};
 
     // ---- accounting --------------------------------------------------------------------------
     std::atomic<uint32_t> painted{0}, read{0}, voids{0}, refs{0}, composed{0}, hits{0};
     std::string Stats(int depth = 0) const {
         std::string pad(size_t(depth) * 2, ' ');
         char b[256];
-        snprintf(b, sizeof(b), "%s%s.%s: %u painted, %u read, %u void, %u ref, %u composed, %u hit",
+        snprintf(b, sizeof(b),
+                 "%s%s.%s: %u painted, %u read, %u void, %u ref, %u composed, %u hit | archive: "
+                 "%u places, %u handle reads",
                  pad.c_str(), m_node->Name(), m_id.c_str(), painted.load(), read.load(),
-                 voids.load(), refs.load(), composed.load(), hits.load());
+                 voids.load(), refs.load(), composed.load(), hits.load(), arcPlaces.load(),
+                 arcReads.load());
         std::string s = b;
         for (const auto& k : m_kids) s += "\n" + k->Stats(depth + 1);
         return s;
@@ -242,6 +280,46 @@ public:
 
 private:
     static constexpr int kBlendVersion = 3;   // v3: straight alpha, stored refs, gates
+
+    std::string ArchivePath(const std::string& tag) const { return m_root + "\\" + tag + ".gaa"; }
+
+    // The archive for one frame, opened once. Null when there is none, which is the loose path.
+    TileArchive* Archive(const std::string& tag) {
+        std::lock_guard<std::mutex> lk(m_arcMx);
+        auto it = m_arcs.find(tag);
+        if (it == m_arcs.end()) {
+            TileArchive a;
+            const bool ok = a.OpenPath(ArchivePath(tag));
+            it = m_arcs.emplace(tag, std::move(a)).first;
+            if (ok) {
+                Log("[tiletree] %s/%s: archive open, %zu tiles answer as places", m_node->Name(),
+                    tag.c_str(), it->second.Count());
+            }
+        }
+        return it->second.Valid() ? &it->second : nullptr;
+    }
+    // Try the archive for (r, subset). A caller with `loc` gets a place; one without gets the
+    // bytes through the archive's one handle. False = not archived: fall through to the files.
+    bool FromArchive(const std::string& tag, const TileRequest& r, uint32_t subset,
+                     std::vector<uint8_t>& out, TileLoc* loc) {
+        TileArchive* arc = Archive(tag);
+        if (!arc) return false;
+        const uint64_t key = (uint64_t(r.face) << 61) | (uint64_t(r.mip) << 56) |
+                             (uint64_t(r.y & 0xFFFFFFFull) << 28) | uint64_t(r.x & 0xFFFFFFFull);
+        const TileArchive::Rec* rec = arc->Find(key, subset);
+        if (!rec || rec->size == 0) return false;
+        if (loc) {
+            loc->path = arc->WPath().c_str();
+            loc->offset = rec->offset;
+            loc->size = rec->size;
+            out.clear();
+            ++arcPlaces;
+            return true;
+        }
+        if (!arc->ReadPayload(*rec, out)) return false;
+        ++arcReads;
+        return true;
+    }
 
     std::string Base(const std::string& tag, const TileRequest& r) const {
         char buf[320];
@@ -291,7 +369,13 @@ private:
     // Serve a stored tile at `cpath` if there is one: bytes, a void, or a reference resolved
     // through the child it names.
     bool Serve(const ColorFrame& frame, const std::string& tag, const TileRequest& r,
-               const std::string& cpath, std::vector<uint8_t>& out, Status& st) {
+               const std::string& cpath, uint32_t key32, std::vector<uint8_t>& out, TileLoc* loc,
+               Status& st) {
+        if (FromArchive(tag, r, key32, out, loc)) {
+            ++hits;
+            st = Status::Content;
+            return true;
+        }
         if (tree_detail::Exists(cpath + ".void")) {
             ++hits;
             st = Status::Void;
@@ -308,7 +392,7 @@ private:
                 if (k->m_id == id) {
                     ++hits;
                     ++refs;
-                    st = k->Tile(frame, tag, r, out);
+                    st = k->Tile(frame, tag, r, out, loc);   // the place is the child's
                     return true;
                 }
             }
@@ -318,8 +402,12 @@ private:
 
     // ---- leaf: paint ONE source over the frame's addresses -----------------------------------
     Status LeafTile(const ColorFrame& frame, const std::string& tag, const TileRequest& r,
-                    const Compositor::TileBox& box, std::vector<uint8_t>& out) {
+                    const Compositor::TileBox& box, std::vector<uint8_t>& out, TileLoc* loc) {
         const std::string base = Base(tag, r);
+        if (FromArchive(tag, r, 0u, out, loc)) {
+            ++read;
+            return Status::Content;
+        }
         if (tree_detail::Exists(base + ".void")) {
             ++hits;
             return Status::Void;
@@ -369,14 +457,18 @@ private:
 
     // ---- compose: the children's tiles through OverStep ---------------------------------------
     Status ComposeTile(const ColorFrame& frame, const std::string& tag, const TileRequest& r,
-                       const Compositor::TileBox& box, std::vector<uint8_t>& out) {
+                       const Compositor::TileBox& box, std::vector<uint8_t>& out, TileLoc* loc) {
         std::vector<size_t> inc;
         std::vector<Held> held;
         const bool known = KidsHeld(frame, tag, r, box, inc, held);
         const std::string base = Base(tag, r);
         Status st = Status::Void;
-        if (known && Serve(frame, tag, r, base + "_" + tree_detail::Hex8(KeyOf(inc, held)), out, st)) {
-            return st;
+        if (known) {
+            const uint64_t key = KeyOf(inc, held);
+            if (Serve(frame, tag, r, base + "_" + tree_detail::Hex8(key),
+                      static_cast<uint32_t>(key & 0xFFFFFFFFu), out, loc, st)) {
+                return st;
+            }
         }
         // Gather. A child's answer here is authoritative, so the key is rebuilt from it.
         std::vector<std::vector<uint8_t>> tiles(inc.size());
@@ -450,14 +542,18 @@ private:
 
     // ---- gate: layer tile x gate tile ----------------------------------------------------------
     Status GateTile(const ColorFrame& frame, const std::string& tag, const TileRequest& r,
-                    const Compositor::TileBox& box, std::vector<uint8_t>& out) {
+                    const Compositor::TileBox& box, std::vector<uint8_t>& out, TileLoc* loc) {
         std::vector<size_t> inc;
         std::vector<Held> held;
         const bool known = KidsHeld(frame, tag, r, box, inc, held);
         const std::string base = Base(tag, r);
         Status st = Status::Void;
-        if (known && Serve(frame, tag, r, base + "_" + tree_detail::Hex8(KeyOf(inc, held)), out, st)) {
-            return st;
+        if (known) {
+            const uint64_t key = KeyOf(inc, held);
+            if (Serve(frame, tag, r, base + "_" + tree_detail::Hex8(key),
+                      static_cast<uint32_t>(key & 0xFFFFFFFFu), out, loc, st)) {
+                return st;
+            }
         }
         TileTree& layer = *m_kids[0];
         TileTree& gate = *m_kids[1];
@@ -518,6 +614,8 @@ private:
     ColorSource* m_raw = nullptr;
     std::vector<std::unique_ptr<TileTree>> m_kids;
     std::string m_id, m_root;
+    std::map<std::string, TileArchive> m_arcs;
+    std::mutex m_arcMx;
 };
 
 // ================================================================================================

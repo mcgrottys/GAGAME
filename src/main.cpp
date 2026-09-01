@@ -113,6 +113,7 @@ struct Options {
     bool resTrace = false;            // --res-trace: residency deficit + slot accounting, per 30 f
     uint32_t treeAudit = 0;           // --tree-audit N: compare N tiles/frame, report, exit
     bool warmTrees = false;           // --warm-trees: build them without comparing, then exit
+    bool packTrees = false;           // --pack-trees: one archive per node per frame, then exit
     bool bench = false;               // --bench: fly the rail, capture nothing, time honestly
     std::string mp4;                  // --mp4 PATH: pipe rail frames straight to an encoder
     bool flatBed = false;             // --flat-bed N: constant bed, to A/B bathymetry
@@ -321,6 +322,9 @@ Options ParseArgs(int argc, char** argv) {
         // After a source is added there is nothing to compare against -- which is exactly when
         // the trees most need building. --warm-trees composes every address regardless.
         else if (a == "--warm-trees") { o.warmTrees = true; o.treeAudit = 1000000u; }
+        // M9ao: pack every node of the megatexture tree so a tile -- or a reference to one --
+        // resolves to a place DirectStorage can read. Needs the graph, so it runs after it.
+        else if (a == "--pack-trees") { o.packTrees = true; o.treeAudit = 1u; }
         else if (a == "--predict-every") o.predictEvery = uint32_t(atoi(next("1").c_str()));
         // M9p: replace the bed with a flat floor at this NAVD height. The A/B against a normal
         // run isolates BATHYMETRY's contribution to the geometry from everything else.
@@ -2215,6 +2219,16 @@ int main(int argc, char** argv) {
                             ColorFrame::Window(static_cast<long long>(det17OrgX),
                                                static_cast<long long>(det17OrgY), 17),
                         };
+                        if (opt.packTrees) {
+                            std::vector<std::string> tags;
+                            for (const ColorFrame& f : frames) tags.push_back(f.Tag());
+                            const uint32_t n = megaTree->Pack(tags);
+                            Log("[tiletree] packed %u tiles across the megatexture tree; "
+                                "references resolve into the archives they name",
+                                n);
+                            resMgr.Shutdown();
+                            return 0;
+                        }
                         TreeAudit all;
                         for (const ColorFrame& f : frames) {
                             TreeAudit a;

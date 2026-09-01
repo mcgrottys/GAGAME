@@ -93,15 +93,11 @@ the incumbent (globe 0 px, helm 2 px by 1/255); bench 4.65–4.82 ms vs incumben
 
 **Next, in order:**
 
-1. **Pack the trees and resolve a stored reference to a `TileLoc`.** The user's rule: painted
-   tiles live on disk and DirectStorage loads them. A `.ref-<childId>` entry is already the
-   address of a place in another tree; `TileLoc` already lets a provider return a place. What
-   blocks it: `TileArchive::Pack` is hardwired to `cache/composed/<channel>/<realization>` and to
-   filenames carrying a subset hash; a tree folder has `f_m_x_y.bin`, `.void`, and `.ref-*`.
-   Parameterize the root, pack `.bin` payloads, record `.void`/`.ref` in the directory as
-   zero-size records with a status, and `TileTree::Serve` returns a `TileLoc` into the child's
-   archive instead of reading 64 KB. Then `--direct-storage` has its test: the tree path, warm,
-   pixel-identical to the upload ring on the standard stills.
+1. **Pack the trees, resolve refs to places: DONE (§33).** `--pack-trees` writes one archive per node per
+   frame (28,584 tiles, 1.79 GB, 10.7 s); `TileTree::Tile` answers a `TileLoc` when the caller can take
+   one, and a stored reference resolves into the child's archive. Reads 1.8 -> 1.2 ms/tile through one
+   handle; `--direct-storage` is pixel-identical to the upload ring on the helm still. NEXT: decide the
+   `--direct-storage` default from a rail review (as ring loads were), and re-pack after any warm.
 2. **Ring loads: DONE, measured, THE DEFAULT (§32).** `--res-trace` is the instrument
    (deficit by mip, queue depths, slots as reads vs paints by provider wall time); `--ring-loads`
    admits a request only if its parent is mapped. Frame 600 of the rail is the picture: baseline
@@ -201,10 +197,11 @@ the unlit version.
 | `--wireframe` / `--dump-both` | geometry check |
 | `--flat-bed N` | constant bed at N m NAVD — A/B what bathymetry does to the MESH |
 | `--pack-tiles` | pack the composed cache into `.gaa` archives, then exit |
-| `--direct-storage` | opt in to NVMe→GPU tile reads (**off by default**) |
+| `--direct-storage` | NVMe→GPU tile reads. **Off by default**, but through the packed trees it is now pixel-identical to the upload ring (§33) — the default is a rail-review decision |
 | `--color-trees` | colour through the per-source trees (**off by default**) |
 | `--tree-audit N` | the megatexture tree vs the incumbent, N tiles per realization, exit. Skips tiles the incumbent has not repainted from today's stack |
 | `--warm-trees` | compose every address of the tree regardless, no comparison. **This is the warm-up**; ~15 min from cold for 21.5k addresses |
+| `--pack-trees` | one `.gaa` per node per frame under `cache/trees/`; refs resolve into the child's archive. Re-run after a warm; loose files are kept |
 | `--no-gis-gate` | drop the vector land/sea gate (on by default) — the A/B for what the survey changed |
 | `--res-trace` | every 30 frames: residency deficit by mip per tenant, queue depths, slots spent on reads vs paints |
 | `--no-ring-loads` | the old queue: request the whole column at once. Ring loads (parent must be mapped; the view refines one ring at a time) are the **default** |
@@ -274,9 +271,9 @@ regression.
 
 **Deliberately unfinished, with reasons:**
 
-1. **`--direct-storage` is off.** The streamed path renders correct colour but is not pixel-equal to
-   the upload ring (9.14% differs) — and equality is not the right test, since streaming timing
-   legitimately differs. It needs a test that can judge it.
+1. **`--direct-storage` is off, but it now has its test.** Through the packed trees it is
+   pixel-identical to the upload ring on the helm still (§33). The 9.14% figure was the composed-
+   cache path. Make it the default after a rail review.
 2. **`--color-trees` is off.** Proven equal to 1 LSB, but a reference still copies bytes instead of
    resolving to a `TileLoc`; do item 1 of §1 before switching the default.
 3. **`TileIndex` is not wired to residency.** The scheduler still cannot prefer ready work, and

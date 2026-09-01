@@ -29,9 +29,17 @@
 //  touched by the CPU at all when DirectStorage is doing the reading.
 // ================================================================================================
 #pragma once
+#ifndef NOMINMAX
+#define NOMINMAX   // windows.h's min/max macros would break std::min in every includer
+#endif
+#include <windows.h>
+#undef min
+#undef max
+
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -61,7 +69,16 @@ public:
     // deleted: the archive is derived, and deleting the only copy of 1.3 GB of painted work to
     // save a directory entry is not a trade worth making silently.
     static uint32_t Pack(const std::string& channel, const std::string& realization) {
-        const std::string dir = "cache\\composed\\" + channel + "\\" + realization;
+        return PackDir("cache\\composed\\" + channel + "\\" + realization,
+                       PathFor(channel, realization));
+    }
+
+    // M9ao: ANY FOLDER OF TILES, not only the composed cache. A tile tree's frame folder
+    // (TileTree.h) holds f_m_x_y.bin for a leaf and f_m_x_y_<key>.bin for a compose node; the
+    // key lands in `subset` and a leaf's is 0, so Find(key, subset) is the same lookup for both.
+    // The zero-byte .void and .ref-* entries are NOT packed: they cost a directory lookup, never
+    // a read, and the reference resolves through the CHILD's archive -- which is the point.
+    static uint32_t PackDir(const std::string& dir, const std::string& out) {
         std::vector<Rec> recs;
         std::vector<std::string> names;
         std::vector<uint64_t> stamps;   // last-write time, to pick the survivor per address
@@ -71,7 +88,8 @@ public:
         do {
             uint32_t f = 0, m = 0, x = 0, y = 0, sub = 0;
             if (sscanf_s(fd.cFileName, "f%u_m%u_x%u_y%u_%8x.bin", &f, &m, &x, &y, &sub) != 5) {
-                continue;
+                sub = 0;
+                if (sscanf_s(fd.cFileName, "f%u_m%u_x%u_y%u.bin", &f, &m, &x, &y) != 4) continue;
             }
             Rec r;
             r.key = (uint64_t(f) << 61) | (uint64_t(m) << 56) |
@@ -123,7 +141,6 @@ public:
         }
         const uint32_t distinct = uint32_t(order.size());
 
-        const std::string out = PathFor(channel, realization);
         FILE* fo = nullptr;
         if (fopen_s(&fo, out.c_str(), "wb") != 0 || !fo) {
             Log("[tilearch] cannot write %s", out.c_str());
@@ -170,7 +187,10 @@ public:
 
     // ---- reading -------------------------------------------------------------------------
     bool Open(const std::string& channel, const std::string& realization) {
-        m_path = PathFor(channel, realization);
+        return OpenPath(PathFor(channel, realization));
+    }
+    bool OpenPath(const std::string& path) {
+        m_path = path;
         FILE* f = nullptr;
         if (fopen_s(&f, m_path.c_str(), "rb") != 0 || !f) return false;
         uint32_t hdr[4] = {};
@@ -225,6 +245,29 @@ public:
         return lo < m_recs.size() && m_recs[lo].key == key;
     }
 
+    // M9ao: the bytes, when the caller cannot take a TileLoc. One handle, opened once, read at
+    // an offset -- a synchronous positioned ReadFile does not touch the file pointer, so worker
+    // threads may share it. This is what removes the 1.8 ms-per-tile open the instrument found:
+    // the tile still enters CPU memory, but through a handle that already exists.
+    bool ReadPayload(const Rec& rec, std::vector<uint8_t>& out) {
+        if (!m_h) {
+            HANDLE h = CreateFileA(m_path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (h == INVALID_HANDLE_VALUE) return false;
+            m_h.reset(h, [](void* p) { CloseHandle(p); });
+        }
+        out.resize(rec.size);
+        OVERLAPPED ov{};
+        ov.Offset = static_cast<DWORD>(rec.offset & 0xFFFFFFFFull);
+        ov.OffsetHigh = static_cast<DWORD>(rec.offset >> 32);
+        DWORD got = 0;
+        if (!ReadFile(m_h.get(), out.data(), rec.size, &got, &ov) || got != rec.size) {
+            out.clear();
+            return false;
+        }
+        return true;
+    }
+
     bool Valid() const { return !m_recs.empty(); }
     size_t Count() const { return m_recs.size(); }
     const std::wstring& WPath() const { return m_wpath; }
@@ -234,6 +277,7 @@ private:
     std::string m_path;
     std::wstring m_wpath;
     std::vector<Rec> m_recs;
+    std::shared_ptr<void> m_h;   // the read handle, shared so the archive stays copyable
 };
 
 }  // namespace ga
