@@ -976,3 +976,128 @@ clocks are kept now: `renderMs` brackets `RenderFrame` alone and judges the engi
 the capture, and their difference is printed. The per-frame series lands in `metrics.csv` beside
 the frames, because a summary answers *was it smooth* and only the series answers *where did it
 stop being smooth*.
+
+## 29. The three trees, and the reference that costs nothing
+
+The pipeline has been stated the same way for months:
+
+    1. INGEST      GeoTIFFs; Google tiles  ->  raw files in a local cache
+    2. NORMALIZE   to the body's scale, units, projection
+                   ->  cached as its OWN sparse GA tree on disk
+    3. COMPOSE     the trees  ->  ONE composite sparse GA tree
+                   (tile REFERENCES into the input trees, and genuinely composited tiles
+                    cached only where they OVERLAP)
+
+**Stage 2 had no output.** `GaUnits`/`NormalizeToSi` converted at *sample* time and nothing kept
+the result; `cache/composed/<channel>/<realization>/` held only the finished blend. Everything
+odd about that cache follows from the missing middle.
+
+### What the missing middle costs, counted
+
+A composed tile's filename carries the source-SUBSET hash it was painted from, and
+`SubsetSeed` folds in `kComposeVersion`. So a change to the **blend** re-identifies every tile in
+the channel. Reconstructing the hashes offline against the cache on this machine:
+
+    cube16k    4340 tiles   271 MB
+               2429 = google-only at compose v4
+               1792 = google-only at compose v3   <- superseded by a version bump alone
+                119 = everything else
+
+97.3% of the global cube has exactly one source in it and cannot be changed by a blend edit, and
+41% of it is a repaint that was owed to nothing.
+
+### A source tree is identified by the source
+
+`SourceTree` (`src/compose/SourceTree.h`) stores one source's tiles on the shared addresses. Its
+identity is `name | structure | kSourceTreeVersion` and **nothing about the stack above it** —
+`kSourceTreeVersion` is deliberately *not* `kComposeVersion`, because coupling them would
+reintroduce exactly the orphaning the split exists to stop.
+
+RGB is the source's own bytes. **Alpha is the paint weight**, because the stack's feather lives
+in the weight and a tree that dropped it could not be composed afterwards.
+
+A source that declares a tile in its footprint and then does not reach it writes a **zero-byte
+`.void` entry** instead of 64 KB of zeros. 1893 of those exist so far: 118 MB of nothing not
+written down. Storing zeros to say "nothing here" is the opposite of a sparse tree.
+
+### The reference is computed, not stored
+
+Where exactly one source covers a tile **and claims every texel outright**, the composite *is*
+that source's tile: the lerp from black by weight 1 is the identity, and the composite's alpha
+(255 wherever anything covers) is the weight the tree already holds. So the composite returns
+those bytes and writes nothing.
+
+A marker file per referenced tile would carry no information `ColorSubset` does not already
+produce, from declared footprints, in microseconds, with no filesystem contact. So there is one
+directory entry saved per reference and, more to the point, nothing on disk that can go stale.
+
+`fullCover` is the test, and it is **computed from the tile**, never assumed from the footprint.
+It has to be: the composite starts from black, so a *lone* source at weight 0.5 composites to
+half its own colour. A reference over a feather would be a quietly brightened coastline.
+
+### The number
+
+`--tree-audit N` walks the composed cache, keeps every tile whose filename still carries the
+subset the compositor would use **today** (a stale one would only measure an old stack), and asks
+the tree path for the same address. It strides across the whole folder rather than taking the
+first N, because directory order is dominated by the coarse mips — which are exactly the case
+that is trivially exact.
+
+    earth.color/cube16k       2454 tiles, 2441 byte-identical, 0.0041% of texels differ,
+                              2441 referenced,   13 composed
+    earth.color/window z14    2290 tiles, 1393 byte-identical, 1.4353% differ,
+                              1304 referenced,  986 composed
+    earth.color/window z17    3740 tiles, 1996 byte-identical, 2.4189% differ,
+                               729 referenced, 3011 composed
+    TOTAL                     8484 tiles, 5830 byte-identical (68.7%), 52.7% referenced,
+                              worst |direct - tree| = 1/255 over 139,001,856 texels,
+                              0 alpha mismatches
+
+**Not one texel moves by more than a single LSB**, and it is the alpha quantization and nothing
+else. The bound is analytic: the composite lerps by `w`, so half an alpha step moves a channel by
+at most `|rgba - acc| / 510` — under one LSB, and only where `0 < w < 1`. Every source that
+answers 0 or 1 round-trips exactly, which is why the cube (google alone, weight 1) is 99.5%
+byte-identical and the windows — feathered ortho, the bed's intertidal alpha ramp — are not.
+
+Through the renderer, with the trees warm:
+
+    globe still (--campos 0,0 --cam 200000,0,0 --frames 30):     0 of 1440000 pixels differ
+    helm still  (--campos 120,-10 --cam 7,92.5,-1.5 --frames 6): 2 of 1440000 differ, by 1/255
+
+### What it costs, honestly
+
+1057 MB of trees for the 8484 addresses the incumbent stores in 530 MB of current tiles. **Two
+times the bytes where sources overlap** — which is what "composited tiles cached only where they
+OVERLAP" *means*, since the overlap regions now hold each input as well as the product. Against
+the incumbent's actual on-disk state (1001 MB, 471 MB of it superseded) it is a wash today, and
+the asymmetry is in what happens next: a blend edit re-composes; it does not repaint.
+
+### The frame had to be said once first
+
+`CubeColor` and `WindowColor` each carried their own copy of the tile's lat/lon box, the
+per-texel lat/lon, and the ground resolution — and the paint loop under them was duplicated
+verbatim. Two copies of one geometry is how the globe and the terrain came to disagree about
+where the coast was (§ the M6h glitch), and a per-source tree is a *third* caller of exactly that
+math. `ColorFrame` is (kind, tile extent, and either a cube face dimension or a Mercator origin
+plus zoom base); `Compositor::ColorRealization` is both old functions with a frame filled in.
+Both standard stills came out bit-identical across that refactor.
+
+### What this buys
+
+The megatexture is the point. A land/sea mask arriving as a GIS tree and a seafloor arriving as
+its own tree compose with these by reading 64 KB and writing 64 KB — no reprojection, no HTTP, no
+resample, and no source sampled twice. Composition stops being a thing that repaints the planet
+and becomes a thing that reads it.
+
+### Not yet
+
+`--color-trees` is **off by default**. Two things are unfinished and neither is a defect in the
+above:
+
+1. **A reference still copies bytes.** `TileLoc` can hand DirectStorage a path, an offset and a
+   size, which is exactly what a reference *is* — but `TileArchive::Pack` is hardwired to
+   `cache/composed/<channel>/<realization>` and to a filename carrying a subset hash, and a
+   source tree has neither. Packing the trees turns every reference into a zero-copy NVMe read.
+2. **`TileIndex` does not know about trees.** It scans one realization folder; the composite
+   tree's readiness is the union of its inputs' readiness, which is a different question and
+   wants a different answer.
