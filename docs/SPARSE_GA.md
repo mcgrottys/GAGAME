@@ -1393,3 +1393,6 @@ backlog is the prefetch walk's, the real view's tiles are already resident, and 
 throttling speculation as much as demand. That is why the per-mip deficit column read empty
 (it excludes speculative entries) -- an instrument finding worth its own follow-up, not chased
 here.
+
+**Ring loads are the default** as of this commit — the user's call on the frame-600 pair and the
+rail video. `--no-ring-loads` restores the whole-column queue for an A/B.

@@ -102,13 +102,13 @@ the incumbent (globe 0 px, helm 2 px by 1/255); bench 4.65–4.82 ms vs incumben
    zero-size records with a status, and `TileTree::Serve` returns a `TileLoc` into the child's
    archive instead of reading 64 KB. Then `--direct-storage` has its test: the tree path, warm,
    pixel-identical to the upload ring on the standard stills.
-2. **Ring loads: DONE, measured, off by default (§32).** `--res-trace` is the instrument
+2. **Ring loads: DONE, measured, THE DEFAULT (§32).** `--res-trace` is the instrument
    (deficit by mip, queue depths, slots as reads vs paints by provider wall time); `--ring-loads`
    admits a request only if its parent is mapped. Frame 600 of the rail is the picture: baseline
    patchy, ring uniformly sharp at the same instant; 540 identical, 720 converged. Timing a wash.
    The instrument's other finding is the next lever: with the trees warm, loads are 1.8 ms READS
-   (per-file open), not paints -- which is item 1. Decide whether to make `--ring-loads` the
-   default after a full-rail video review; the code is a flag and a counter.
+   (per-file open), not paints -- which is item 1. The user made it the default after the frame-600 pair and the rail video;
+   `--no-ring-loads` is the A/B.
 3. **Then delete the rungs.** See §2. Still the largest structural item, and now the megatexture
    root is the one provider the ladder needs.
 
@@ -207,7 +207,7 @@ the unlit version.
 | `--warm-trees` | compose every address of the tree regardless, no comparison. **This is the warm-up**; ~15 min from cold for 21.5k addresses |
 | `--no-gis-gate` | drop the vector land/sea gate (on by default) — the A/B for what the survey changed |
 | `--res-trace` | every 30 frames: residency deficit by mip per tenant, queue depths, slots spent on reads vs paints |
-| `--ring-loads` | admit a tile request only if its parent is mapped: the view refines one ring at a time (**off by default**) |
+| `--no-ring-loads` | the old queue: request the whole column at once. Ring loads (parent must be mapped; the view refines one ring at a time) are the **default** |
 | `--selftest` | must stay green |
 
 **Standard stills:**

@@ -209,8 +209,10 @@ public:
     // What it changes is the QUEUE, not the invariant: coarse-before-fine MAPPING was always
     // enforced; REQUESTING was not, so on a fast descent the 48 load slots fill with finest-
     // mip tiles that are not on disk, each a paint, while the next ring of the ground the
-    // camera is actually over queues behind them. Off by default until measured.
-    bool ringLoads = false;
+    // camera is actually over queues behind them. Measured (section 32: frame 600 of the rail,
+    // baseline patchy, ring uniformly sharp; timing a wash) and made the DEFAULT by the user.
+    // --no-ring-loads is the A/B.
+    bool ringLoads = true;
     uint32_t ringHeld = 0;       // requests deferred by the gate, cumulative
     uint32_t ringHeldFrame = 0;  // ...and this frame alone
 

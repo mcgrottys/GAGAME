@@ -109,7 +109,7 @@ struct Options {
     bool directStorage = false;       // --direct-storage: NVMe -> GPU tile reads (opt-in)
     bool colorTrees = false;          // --color-trees: colour through the per-source trees
     bool gisGate = true;              // --no-gis-gate: drop the vector land/sea gate on the bed
-    bool ringLoads = false;           // --ring-loads: admit a request only if its parent is mapped
+    bool ringLoads = true;            // --no-ring-loads: the old queue, for the A/B (M9al)
     bool resTrace = false;            // --res-trace: residency deficit + slot accounting, per 30 f
     uint32_t treeAudit = 0;           // --tree-audit N: compare N tiles/frame, report, exit
     bool warmTrees = false;           // --warm-trees: build them without comparing, then exit
@@ -314,7 +314,8 @@ Options ParseArgs(int argc, char** argv) {
         // M9ak: the vector land/sea gate is ON. The flag exists to A/B what it changed.
         else if (a == "--no-gis-gate") o.gisGate = false;
         // M9al: the ring gate and its instrument. Instrument first, gate second, both off.
-        else if (a == "--ring-loads") o.ringLoads = true;
+        else if (a == "--ring-loads") o.ringLoads = true;      // the default; kept for scripts
+        else if (a == "--no-ring-loads") o.ringLoads = false;
         else if (a == "--res-trace") o.resTrace = true;
         else if (a == "--tree-audit") o.treeAudit = uint32_t(atoi(next("400").c_str()));
         // After a source is added there is nothing to compare against -- which is exactly when
