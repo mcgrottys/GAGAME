@@ -407,6 +407,19 @@ uint32_t Gpu::CreateSrv(ID3D12Resource* res, DXGI_FORMAT fmt) {
     return slot;
 }
 
+uint32_t Gpu::CreateSrvArray(ID3D12Resource* res, DXGI_FORMAT fmt, uint32_t mips,
+                             uint32_t slices) {
+    const uint32_t slot = m_srvHeap.Alloc();
+    D3D12_SHADER_RESOURCE_VIEW_DESC s{};
+    s.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    s.Format = fmt;
+    s.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    s.Texture2DArray.MipLevels = mips;
+    s.Texture2DArray.ArraySize = slices;
+    m_device->CreateShaderResourceView(res, &s, m_srvHeap.Cpu(slot));
+    return slot;
+}
+
 uint32_t Gpu::CreateSrv3D(ID3D12Resource* res, DXGI_FORMAT fmt) {
     const uint32_t slot = m_srvHeap.Alloc();
     D3D12_SHADER_RESOURCE_VIEW_DESC s{};

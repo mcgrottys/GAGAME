@@ -387,3 +387,39 @@ most reasonable.
 Fixed: when `NumPackedMips == 0`, the coarsest STANDARD mip is pinned instead, and
 `m_pinnedFloor` records which level the floor actually is. Same guarantee, same argument,
 now true for every shape rather than the ones that happened to be tested.
+
+## 17. The array dimension, plumbed
+
+`TileAtlas2D::Init` takes `arraySlices`. A slice is a **page** of the shared
+`(level, x, y)` address space: one resource, one descriptor, up to 1024 slices of 16384^2,
+each slice independently mip-chained and independently resident.
+
+That is what reaches centimetres. Coarse levels of a page cover the globe; a page whose mip 0
+sits at a survey's resolution covers a patch. Nothing about the SHADER changes between them --
+same SRV, same sampler, LOD clamped by the residency map.
+
+**Activation is on demand.** A slice costs its pinned floor the moment it activates, and 1024
+floors committed for pages carrying nothing would defeat the purpose. An un-activated slice
+has no floor, and `FinestResident` returns `kNothingResident` for it -- an honest "no data
+here" rather than naming a level that is silently NULL. Single-slice banks activate slice 0 at
+Init, because every existing caller expects one live page.
+
+**A bank with no chain makes no floor promise.** `ActivateSlice` returns immediately when
+`MipCount() == 1`: there is no coarser level to fall back to, so there is nothing to pin.
+Pinning "the coarsest standard mip" there would map mip 0 in its entirety and quietly make
+every flat bank fully resident -- the opposite of the point.
+
+### What the self-test pins
+
+Slices are pages, so the property that matters is **isolation**. Get the subresource index
+wrong -- it is `mip + slice * mipCount` -- and nothing errors: tiles still map, dispatches
+still run, and the pages simply alias each other. So it is checked directly:
+
+    array: 16 slices, 5 mips (5 standard); every slice starts INACTIVE (slice 0 finest = nothing)
+    array: slice3 floor 4 -> 0 after its own map; slice5 unmoved at 4
+    array: pages are isolated; slices do not alias
+
+That shape is also the **0-packed-mips** case (5 standard + 0 packed), so the same test covers
+the floor bug from section 16: the floor correctly lands on mip 4, the coarsest standard.
+
+Existing banks render **byte-identical** at matched frame counts.

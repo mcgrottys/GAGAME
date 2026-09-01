@@ -84,8 +84,15 @@ public:
     // mipLevels > 1 builds THE CHAIN (M9h). One reserved resource, one SRV, one shader path at
     // every altitude: zoom changes which tiles are resident, never which code runs. That is the
     // whole reason the chain lives inside the resource instead of beside it.
+    // arraySlices > 1 makes this a reserved ARRAY (M9h). Measured on this adapter: the array
+    // axis caps at 2048 per the docs, per-slice tiling is real (each mip of each slice is its
+    // own subresource, independently mapped), and the budget that actually binds is total
+    // VIRTUAL BYTES -- 512 GB accepted in one resource, 1 TB refused. So the scale lives on the
+    // slice axis: one resource, one descriptor, 1024 slices of 16384^2, each slice an
+    // independently resident page of the shared (level, x, y) address space.
     void Init(Gpu& gpu, uint32_t widthTexels, uint32_t heightTexels, DXGI_FORMAT fmt,
-              const wchar_t* name, uint32_t heapChunkTiles = 64, uint32_t mipLevels = 1);
+              const wchar_t* name, uint32_t heapChunkTiles = 64, uint32_t mipLevels = 1,
+              uint32_t arraySlices = 1);
 
     uint32_t TilesX() const { return m_tilesX; }          // mip 0
     uint32_t TilesY() const { return m_tilesY; }
@@ -105,19 +112,41 @@ public:
     // garbage, and never to a pop.
     uint32_t MipCount() const { return m_mipCount; }             // standard + packed
     uint32_t StandardMips() const { return m_standardMips; }     // per-tile mappable
+    uint32_t Slices() const { return m_slices; }
+
+    // A slice costs its pinned floor the moment it is activated, so slices are activated on
+    // demand rather than all at once: 1024 floors would be a lot of tiles committed for pages
+    // holding nothing. An inactive slice has NO floor and FinestResident says so.
+    void ActivateSlice(Gpu& gpu, uint32_t slice);
+    bool IsSliceActive(uint32_t slice) const {
+        return slice < m_sliceActive.size() && m_sliceActive[slice] != 0;
+    }
+    static constexpr uint32_t kNothingResident = 0xFFFFFFFFu;
     uint32_t TilesX(uint32_t mip) const { return m_mip[mip].tilesX; }
     uint32_t TilesY(uint32_t mip) const { return m_mip[mip].tilesY; }
     bool IsResident(uint32_t mip, uint32_t tx, uint32_t ty) const {
-        if (mip >= m_standardMips) return true;                  // packed tail: always mapped
-        const MipInfo& m = m_mip[mip];
-        return (tx < m.tilesX && ty < m.tilesY) && m_state[m.base + ty * m.tilesX + tx] == 1;
+        return IsResident(0, mip, tx, ty);
     }
-    void RequestMap(uint32_t mip, uint32_t tx, uint32_t ty);
-    void RequestUnmap(uint32_t mip, uint32_t tx, uint32_t ty);
+    bool IsResident(uint32_t slice, uint32_t mip, uint32_t tx, uint32_t ty) const {
+        if (slice >= m_slices || !IsSliceActive(slice)) return false;
+        if (mip >= m_standardMips) return true;                  // packed tail: pinned
+        const MipInfo& m = m_mip[mip];
+        if (tx >= m.tilesX || ty >= m.tilesY) return false;
+        return m_state[slice * m_tilesPerSlice + m.base + ty * m.tilesX + tx] == 1;
+    }
+    void RequestMap(uint32_t mip, uint32_t tx, uint32_t ty) { RequestMap(0, mip, tx, ty); }
+    void RequestUnmap(uint32_t mip, uint32_t tx, uint32_t ty) { RequestUnmap(0, mip, tx, ty); }
+    void RequestMap(uint32_t slice, uint32_t mip, uint32_t tx, uint32_t ty);
+    void RequestUnmap(uint32_t slice, uint32_t mip, uint32_t tx, uint32_t ty);
 
     // The finest mip resident over a mip-0 tile region, or MipCount()-1 when only the packed
     // tail covers it. This is the number the shader clamps its LOD to.
-    uint32_t FinestResident(uint32_t tx0, uint32_t ty0) const;
+    uint32_t FinestResident(uint32_t tx0, uint32_t ty0) const {
+        return FinestResident(0, tx0, ty0);
+    }
+    // kNothingResident when the slice has never been activated -- an honest "no data here"
+    // rather than a level that is silently NULL.
+    uint32_t FinestResident(uint32_t slice, uint32_t tx0, uint32_t ty0) const;
 
     // R8 residency map, one texel per mip-0 tile, value = FinestResident. Rebuilt by
     // CommitMappings; UINT32_MAX until a chain is built.
@@ -131,7 +160,7 @@ public:
     uint32_t ResidentCount() const { return static_cast<uint32_t>(m_residentList.size()); }
     uint64_t ResidentBytes() const { return ResidentCount() * kTileBytes; }
     uint64_t VirtualBytes() const {
-        return static_cast<uint64_t>(m_tilesX) * m_tilesY * kTileBytes;
+        return static_cast<uint64_t>(m_tilesX) * m_tilesY * m_slices * kTileBytes;
     }
 
     ID3D12Resource* Res() const { return m_res.Get(); }
@@ -144,12 +173,17 @@ public:
     // Map every STANDARD coarse tile (mip >= 1). Coarse levels together cost about a third of
     // mip 0 and they are the global floor, so completeness there is worth more than sparsity:
     // a hole in a coarse level is a hole no finer level can cover.
-    void MapAllCoarse();
+    void MapAllCoarse() { MapAllCoarse(0); }
+    void MapAllCoarse(uint32_t slice);
 
     // Fill the chain by 2x2 reduction, mip 0 upward, each level written through its own UAV.
     // Needs shaders/MipReduce.hlsl; safe to call every time the fine level changes.
     void BuildMips(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
-                   ID3D12GraphicsCommandList* cl);
+                   ID3D12GraphicsCommandList* cl) {
+        BuildMips(gpu, sc, shaderDir, cl, 0);
+    }
+    void BuildMips(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
+                   ID3D12GraphicsCommandList* cl, uint32_t slice);
 
     static constexpr uint64_t kTileBytes = D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES;
 
@@ -171,11 +205,14 @@ private:
         uint32_t base = 0;           // offset into m_state / m_tilePool
         uint32_t startTile = 0;      // first tile index within the resource
     };
-    void Decode(uint32_t i, uint32_t& mip, uint32_t& tx, uint32_t& ty) const;
+    void Decode(uint32_t i, uint32_t& slice, uint32_t& mip, uint32_t& tx, uint32_t& ty) const;
     void RebuildResidencyMap(Gpu& gpu);
 
     std::vector<MipInfo> m_mip;
     uint32_t m_mipCount = 1, m_standardMips = 1;
+    uint32_t m_slices = 1, m_tilesPerSlice = 0;
+    std::vector<uint8_t> m_sliceActive;
+    uint32_t m_packedTiles = 0;      // tiles the tail needs, per slice (0 = no tail)
     uint32_t m_pinnedFloor = 0;      // the always-resident level: packed tail, or, when a
                                      // shape has no packed mips at all, the coarsest standard
     std::vector<uint32_t> m_mipUav;  // one UAV per mip, for the reduction's destination

@@ -120,6 +120,9 @@ public:
     void UploadTexture(GpuTexture& tex, const void* rows, uint32_t srcRowPitchBytes,
                        uint32_t mip = 0);
     uint32_t CreateSrv(ID3D12Resource* res, DXGI_FORMAT fmt);
+    // M9h: a sliced reserved bank needs an ARRAY view, or the shader only ever sees slice 0.
+    uint32_t CreateSrvArray(ID3D12Resource* res, DXGI_FORMAT fmt, uint32_t mips,
+                            uint32_t slices);
     uint32_t CreateSrv3D(ID3D12Resource* res, DXGI_FORMAT fmt);
     uint32_t CreateStructuredBufferSrv(ID3D12Resource* res, uint32_t numElements,
                                        uint32_t strideBytes);
