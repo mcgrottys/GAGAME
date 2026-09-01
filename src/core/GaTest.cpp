@@ -11,6 +11,7 @@
 #include "Common.h"
 #include "GaAst.h"
 #include "GradeField.h"   // M9h: the type-level grade algebra pins itself here
+#include "CurrentFieldLoader.h"
 #include "FieldLoader.h"
 #include "GeoRef.h"
 #include "PageTable.h"
@@ -845,6 +846,61 @@ bool RunGaSelfTest() {
             ok = false;
         }
         Log("[gatest] pages: %s", pt.Stats().c_str());
+    }
+
+    // ---- M9i: THE PLUGIN SEAM, on a SECOND file type. The point is that nothing above the
+    // loader changed to accept it -- same registry, same interface, same three answers.
+    {
+        LoaderRegistry reg;
+        reg.Register("json", CurrentFieldLoader::Open);
+        auto ld = reg.Open("data/currents/currents.json");
+        if (!ld) {
+            Log("[gatest] pages: no data/currents/currents.json -- loader gate skipped");
+        } else {
+            const GeoRef& g = ld->Ref();
+            // Grade is declared by the SOURCE; what grad() of it becomes is the algebra's
+            // business, and the type already proved that (kG1 * kG1 = kG0 | kG2).
+            if (ld->GradeSig() != kG1) {
+                Log("[gatest] FAIL loader: a current field is grade 1, got %u", ld->GradeSig());
+                ok = false;
+            }
+            // THE FLIP, DERIVED. CurrentField::Sample uses fy = (lat - lat0)/dlat with dlat
+            // positive, so row 0 is SOUTH -- the opposite of every bathy grid here. Nothing
+            // declared that; VNorth() reads it off the affine, which is the whole reason
+            // GeoRef exists (priors 10).
+            if (!g.VNorth()) {
+                Log("[gatest] FAIL loader: current field should be row-0-south (vNorth)");
+                ok = false;
+            }
+            if (!g.NeedsFlipInto(false)) {
+                Log("[gatest] FAIL loader: a +v=N source into a +v=S consumer needs a flip");
+                ok = false;
+            }
+            if (g.provenance != CrsProvenance::Embedded) {
+                Log("[gatest] FAIL loader: georeference came from the file, not a claim");
+                ok = false;
+            }
+            // ABSENCE IS NOT A VALUE: land (<= -900) must never be handed out as a sample.
+            if (!g.IsNoData(-999.0) || g.IsNoData(0.35)) {
+                Log("[gatest] FAIL loader: nodata test does not separate land from slack water");
+                ok = false;
+            }
+            TilePayload tp;
+            uint32_t withData = 0, empty = 0;
+            const uint32_t tw = 64, th = 64;
+            for (uint32_t ty = 0; ty * th < g.height; ++ty) {
+                for (uint32_t tx = 0; tx * tw < g.width; ++tx) {
+                    if (ld->LoadTile(tx, ty, tw, th, tp)) ++withData; else ++empty;
+                }
+            }
+            Log("[gatest] loader: %s %ux%u, %s -> %u tiles carry data, %u are pure land "
+                "(never allocated)",
+                ld->Name(), g.width, g.height, g.Describe().c_str(), withData, empty);
+            if (withData == 0) {
+                Log("[gatest] FAIL loader: no tile carried a current");
+                ok = false;
+            }
+        }
     }
 
     if (ok) {

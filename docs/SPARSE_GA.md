@@ -573,3 +573,45 @@ victim and retry -- the residence class is what decides, and only the caller kno
 Resolution happens CPU-side, where residency decisions already live, and the slice index is
 handed to the shader like any other bindless index. A GPU-side page table earns its place when
 one draw must resolve many pages per pixel; before that it is machinery without a caller.
+
+## 22. The current-field loader, and the rule for 2D sources
+
+`src/core/CurrentFieldLoader.h` -- the second concrete `FieldLoader`, and it exists to show
+the seam takes a second file type with nothing above it changing: same registry, same
+interface, same three answers.
+
+    loader: noaa.gomofs.current 280x200, EPSG:4326 (embedded, row0 south, centres)
+            -> 19 tiles carry data, 1 are pure land (never allocated)
+
+**What the first attempt did wrong.** Getting GoMOFS into the tree the first time did not go
+through a loader at all: it reached into GulfLayer's private texture, added a kernel to
+`Swe.hlsl`, and wired special-case descriptors into `SweSolver` so one subsystem could feed
+one bank. Backed out. A dataset costs a loader and a grade declaration, or the design is not
+doing its job.
+
+**The flip is derived, not declared.** `CurrentField::Sample` uses `fy = (lat - lat0)/dlat`
+with dlat positive, so row 0 is the SOUTH edge -- the opposite of every bathy grid here.
+Nothing types that: `scaleY` is positive and `VNorth()` reads it off the affine, so the source
+cannot disagree with its own georeference. That is the whole reason `GeoRef` exists (priors 10,
+where a hand-declared flip WAS the bug), and the gate pins it.
+
+**Grade is declared by the source; the algebra decides the rest.** A current is grade 1. What
+`grad()` of it becomes -- kG0 | kG2, divergence and vorticity -- is computed in the type by the
+Cayley closure. The loader never has to know, and neither does any call site.
+
+### The rule for 2D sources
+
+**Every 2D raster source goes into the global sparse GA tree, and so into the one reserved
+array.** Not a dense per-source texture, not a bespoke wire to whoever consumes it. The path is
+always the same three steps:
+
+    loader -> GA object (GeoRef + grade + coverage)
+           -> page(s) in the shared (level, x, y) tree
+           -> composed on coverage weights, like every other source
+
+That is what makes the next dataset cost a loader instead of another pipeline, and it is what
+lets two trees be multiplied tile by tile at all -- they align because they are pages of the
+same address space, not because anybody matched them up.
+
+Still dense, and therefore still owed this treatment: GulfLayer's uv/Mv2/Okubo-Weiss trio,
+GlobeLayer's wave/wind/ice/ocean-colour planes, the SWE uv, TerrainLayer's bed.
