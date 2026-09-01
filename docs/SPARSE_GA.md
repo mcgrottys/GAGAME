@@ -423,3 +423,44 @@ That shape is also the **0-packed-mips** case (5 standard + 0 packed), so the sa
 the floor bug from section 16: the floor correctly lands on mip 4, the coarsest standard.
 
 Existing banks render **byte-identical** at matched frame counts.
+
+## 18. What the floor costs, and the cap that is actually missing
+
+Measured, because every active page pins a floor and that multiplies:
+
+| page shape | floor | 1024 pages |
+|---|---|---|
+| 16384^2 R16F, full chain | **1 tile / 64 KB** | 64 MB |
+| 16384^2 RGBA16F, full chain | **1 tile / 64 KB** | 64 MB |
+| 4096^2 RGBA16F, full chain | **1 tile / 64 KB** | 64 MB |
+| 4096^2 RGBA16F, **5 mips (truncated)** | 8 tiles / 512 KB | 512 MB |
+
+**With a full mip chain the floor is one tile, always** -- size and format do not matter,
+because the tail packs down to a single tile. Truncating a page's chain is the only thing that
+makes the floor expensive, and it is 8x worse. So the rule is simply: **never truncate a
+page's chain.** The floor guarantee is otherwise a rounding error.
+
+### The probe that removed the device on every run
+
+The first floor measurement returned five spurious REFUSEDs. The VA sweep immediately before
+it ended by requesting 1 TB -- which does not refuse cleanly, it returns
+`DXGI_ERROR_DEVICE_REMOVED` -- so every probe after it failed. Re-discovering a known-bad
+value on every `--selftest` run took the device down every run and would have masked any real
+failure that followed. The ceiling is now RECORDED (512 GB good, 1 TB fatal) instead of
+re-measured.
+
+### The real gap: no pool cap
+
+The D3D11.2 sample this engine's ResidencyManager descends from sets a hard budget:
+
+    PoolSizeInTiles = 256          // 16 MB, and it evicts to fit
+    MaxTilesLoadedPerFrame = 100
+
+`TileAtlas2D::CommitMappings` has **no such cap**: when `m_freeTiles` runs dry it simply
+creates another heap, in both the 2D and 3D atlas. Growth is unbounded and residency policy is
+the only thing holding it back. That -- not the floor -- is what needs the sample's
+discipline: a pool ceiling, LRU eviction against it, and a per-frame mapping budget (the
+manager already has the last one for texture tenants).
+
+Against a 1 GB pool, 1024 pinned floors would be 64 MB -- 6%, leaving the rest for detail.
+The floor was never the thing to worry about.

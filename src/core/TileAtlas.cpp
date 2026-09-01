@@ -1625,7 +1625,12 @@ bool RunAtlasSelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDi
         // Now the VA ceiling, in total virtual bytes, stopping at the first refusal.
         Log("[atlastest] virtual-address ceiling sweep (stops at first refusal):");
         const uint64_t gb = 1024ull * 1024ull * 1024ull;
-        const uint64_t want[] = {16 * gb, 64 * gb, 128 * gb, 256 * gb, 512 * gb, 1024 * gb};
+        // 1 TB is DELIBERATELY ABSENT. Measured once: 2048 slices of 16384^2 does not refuse
+        // cleanly, it returns DXGI_ERROR_DEVICE_REMOVED -- and re-discovering that on every
+        // --selftest run would take the device down every run and mask whatever ran after it
+        // (it did: the floor probe below reported five spurious REFUSEDs). The ceiling is
+        // recorded here rather than re-measured: 512 GB accepted, 1 TB removes the device.
+        const uint64_t want[] = {16 * gb, 64 * gb, 128 * gb, 256 * gb, 512 * gb};
         uint64_t okVa = 0;
         for (uint64_t bytes : want) {
             const uint32_t slices = static_cast<uint32_t>(bytes / (16384ull * 16384ull * 2ull));
@@ -1651,6 +1656,58 @@ bool RunAtlasSelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDi
         Log("[atlastest]   virtual address space is the budget, not the slice count: %llu GB "
             "accepted in one reserved array",
             okVa / gb);
+
+        // ---- WHAT DOES THE FLOOR COST? Every active page pins one, so this multiplies by the
+        // number of pages held at once and could easily become the dominant memory cost. The
+        // answer turns on whether a shape HAS a packed tail: a tail is typically a single 64 KB
+        // tile, but a shape without one pins its coarsest STANDARD mip instead, which is a
+        // whole mip level of tiles. Same guarantee, wildly different price.
+        Log("[atlastest] floor cost per active page (pinned tail, or coarsest standard mip):");
+        struct Shape { uint32_t w, h, mips; DXGI_FORMAT f; const char* n; };
+        const Shape shapes[] = {
+            {16384, 16384, 15, DXGI_FORMAT_R16_FLOAT, "16384^2 R16F   full chain"},
+            {16384, 16384, 15, DXGI_FORMAT_R16G16B16A16_FLOAT, "16384^2 RGBA16F full chain"},
+            {16384, 16384, 8, DXGI_FORMAT_R16_FLOAT, "16384^2 R16F   8 mips"},
+            {4096, 4096, 5, DXGI_FORMAT_R16G16B16A16_FLOAT, "4096^2 RGBA16F 5 mips"},
+            {4096, 4096, 12, DXGI_FORMAT_R16G16B16A16_FLOAT, "4096^2 RGBA16F full chain"},
+        };
+        for (const Shape& sp : shapes) {
+            D3D12_RESOURCE_DESC rd{};
+            rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            rd.Width = sp.w;
+            rd.Height = sp.h;
+            rd.DepthOrArraySize = 1;
+            rd.MipLevels = static_cast<UINT16>(sp.mips);
+            rd.Format = sp.f;
+            rd.SampleDesc.Count = 1;
+            rd.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
+            rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            Com<ID3D12Resource> r;
+            if (FAILED(gpu.Device()->CreateReservedResource(
+                    &rd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&r)))) {
+                Log("[atlastest]   %-28s REFUSED", sp.n);
+                continue;
+            }
+            UINT nt = 0, nsub = sp.mips;
+            D3D12_PACKED_MIP_INFO pk{};
+            D3D12_TILE_SHAPE sh{};
+            std::vector<D3D12_SUBRESOURCE_TILING> st(nsub);
+            gpu.Device()->GetResourceTiling(r.Get(), &nt, &pk, &sh, &nsub, 0, st.data());
+            const uint32_t stdMips = pk.NumStandardMips ? pk.NumStandardMips : sp.mips;
+            uint32_t floorTiles;
+            const char* which;
+            if (pk.NumPackedMips > 0) {
+                floorTiles = pk.NumTilesForPackedMips;
+                which = "tail";
+            } else {
+                floorTiles = st[stdMips - 1].WidthInTiles * st[stdMips - 1].HeightInTiles;
+                which = "coarsest std mip";
+            }
+            const double kb = floorTiles * 64.0;
+            Log("[atlastest]   %-28s floor = %4u tiles (%s) = %7.0f KB;  256 pages = %6.1f MB, "
+                "1024 pages = %6.1f MB",
+                sp.n, floorTiles, which, kb, kb * 256.0 / 1024.0, kb * 1024.0 / 1024.0);
+        }
     }
 
     Log("[atlastest] ---- %s ----", pass ? "PASS" : "FAIL");
