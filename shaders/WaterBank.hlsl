@@ -31,7 +31,8 @@ cbuffer BankCb : register(b0) {
     uint4  gSlotsC;     // x = churn atlas SRV (foam memory), y = swell-shadow SRV
     float4 gChurn;      // xy = churn world origin, z = 1/domain, w = atlas texels
     float4 gPeakDir;    // xy = peak propagation dir (world unit), z = valid, w unused
-    uint4  gSlotsD;     // x = height window SRV, y = its residency-map SRV (M7q)
+    uint4  gSlotsD;     // x = height window SRV, y = its residency-map SRV (M7q),
+                        // z = the window's SLICE when x/y are array views (M9aq), else ~0
     float4 gGeoA;       // world->latlon: orgLat, orgLon, 1/mPerLat, 1/mPerLon
     float4 gWinA;       // height window: org px x, org px y, 1/sizePx, full-world px z14
     uint4  gSlotsE;     // M8 foamlaw: cascade DERIV SRVs x3 (hx, hz, J, foam)
@@ -92,6 +93,7 @@ StructuredBuffer<BankTile> gTiles : register(t0);
 // zero on this driver for bindless arrays outside the pixel stage (stage-bisected in M7
 // bring-up; the mesh stage showed the same).
 Texture2D gT[] : register(t0, space1);
+Texture2DArray gTA[] : register(t0, space5);   // M9aq: the height PAGE tenant's array views
 RWTexture2D<float4> gU[] : register(u0, space2);
 
 float4 LoadBilinearWrap(uint slot, float2 uv, float dim) {
@@ -267,8 +269,10 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         if (all(wuv > 0.002f) && all(wuv < 0.998f)) {
             // residency map: byte = finest resident mip * 16 (R8 UNORM)
             const float2 rdim = float2(128.0f, 128.0f);
-            const float haveV =
-                gT[gSlotsD.y][int2(clamp(wuv * rdim, 0.0f, rdim - 1.0f))].x;
+            const int2 rc = int2(clamp(wuv * rdim, 0.0f, rdim - 1.0f));
+            const float haveV = (gSlotsD.z != 0xFFFFFFFFu)
+                                    ? gTA[gSlotsD.y][int3(rc, int(gSlotsD.z))].x
+                                    : gT[gSlotsD.y][rc].x;
             const float mip = clamp(round(haveV * 15.9375f), 2.0f, 7.0f);
             const float dim = 16384.0f / exp2(mip);
             const float2 tf2 = wuv * dim - 0.5f;
@@ -278,9 +282,11 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             [unroll] for (int k2 = 0; k2 < 4; ++k2) {
                 const int2 tc2 = clamp(int2(t02) + int2(k2 & 1, k2 >> 1), int2(0, 0),
                                        int2(dim - 1.0f, dim - 1.0f));
+                const float hv = (gSlotsD.z != 0xFFFFFFFFu)
+                                     ? gTA[gSlotsD.x].Load(int4(tc2, int(gSlotsD.z), int(mip))).x
+                                     : gT[gSlotsD.x].Load(int3(tc2, int(mip))).x;
                 acc += ((k2 & 1) ? fr2.x : 1.0f - fr2.x) *
-                       ((k2 >> 1) ? fr2.y : 1.0f - fr2.y) *
-                       gT[gSlotsD.x].Load(int3(tc2, int(mip))).x;
+                       ((k2 >> 1) ? fr2.y : 1.0f - fr2.y) * hv;
             }
             bed = acc;
         }

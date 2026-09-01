@@ -1096,7 +1096,8 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
                     m_res->Want(m_winT, m_winFace, dmip, wu0, wv0, wu1, wv1, m_predictPass);
                 }
                 if (m_hgtWinT >= 0) {
-                    m_res->Want(m_hgtWinT, 0, dmip, wu0, wv0, wu1, wv1, m_predictPass);
+                    m_res->Want(m_hgtWinT, m_hgtWinFace, dmip, wu0, wv0, wu1, wv1,
+                                m_predictPass);
                 }
             }
             // M7f: the z17 DETAIL window rides the same node box, 8x finer frame.
@@ -1428,14 +1429,15 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     // loader into grey -- the coarse rung is always there to fall back on.
     for (int fm = 4; fm <= 7; ++fm) {
         if (m_winT >= 0) m_res->Want(m_winT, m_winFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
-        if (m_hgtWinT >= 0) m_res->Want(m_hgtWinT, 0, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
+        if (m_hgtWinT >= 0) m_res->Want(m_hgtWinT, m_hgtWinFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
         if (m_detWinT >= 0) m_res->Want(m_detWinT, m_detFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
     }
     FillComposedCb(m_cb.cs, m_res, m_colorT, m_winT, m_hgtT, m_hgtWinT, m_detOrg[0],
                    m_detOrg[1], m_detSize, 14, m_radius, m_frameE, m_frameU, m_frameN,
                    stencilOverlay, m_gisWinSrv, m_gisGlobSrv, m_detWinT, m_det17Org, 17,
                    m_gisEditSrv, m_gisEditOn ? m_gisEditBox : nullptr,
-                   m_winFace ? m_winFace : UINT32_MAX, m_detFace ? m_detFace : UINT32_MAX);
+                   m_winFace ? m_winFace : UINT32_MAX, m_detFace ? m_detFace : UINT32_MAX,
+                   m_hgtWinFace ? m_hgtWinFace : UINT32_MAX);
     if (m_streamMars) {
         m_cb.texIdx[1] = m_cb.texIdx[2] = m_cb.texIdx[3] = UINT32_MAX;   // waves/wind/clouds
         m_cb.texIdx2[1] = UINT32_MAX;                                    // wind bank

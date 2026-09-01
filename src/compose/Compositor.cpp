@@ -681,7 +681,7 @@ void FillComposedCb(ComposedSurfaceCb& cb, const ResidencyManager* rm, int color
                     bool stencilOverlay, uint32_t gisWinSrv, uint32_t gisGlobSrv,
                     int detailWin, const double* detOrgPx, int detailZ,
                     uint32_t editMaskSrv, const float* editBox, uint32_t winSlice,
-                    uint32_t detSlice) {
+                    uint32_t detSlice, uint32_t hgtWinSlice) {
     const bool cubeOn = rm && colorCube >= 0;
     const bool winOn = rm && window >= 0;
     const bool hgtOn = rm && heightCube >= 0;
@@ -700,10 +700,19 @@ void FillComposedCb(ComposedSurfaceCb& cb, const ResidencyManager* rm, int color
                      : UINT32_MAX;
     cb.u[2] = (winOn && !pages) ? rm->TextureSrv(window) : UINT32_MAX;
     cb.u[3] = (winOn && !pages) ? rm->ResidencySrv(window) : UINT32_MAX;
-    cb.u2[0] = hgtOn ? rm->TextureSrv(heightCube) : UINT32_MAX;
-    cb.u2[1] = hgtOn ? rm->ResidencySrv(heightCube) : UINT32_MAX;
-    cb.u2[2] = hgtWinOn ? rm->TextureSrv(heightWindow) : UINT32_MAX;
-    cb.u2[3] = hgtWinOn ? rm->ResidencySrv(heightWindow) : UINT32_MAX;
+    // M9aq: height pages -- one tenant, cube views over slices 0..5, the array view carrying
+    // the z14 page. The old window SRVs are left unset so nothing can read a second texture.
+    const bool hpages = hgtOn && hgtWinOn && heightWindow == heightCube && hgtWinSlice != UINT32_MAX;
+    cb.u6[0] = hpages ? rm->TextureSrv(heightCube) : UINT32_MAX;
+    cb.u6[1] = hpages ? rm->ResidencySrv(heightCube) : UINT32_MAX;
+    cb.u6[2] = hpages ? hgtWinSlice : UINT32_MAX;
+    cb.u6[3] = UINT32_MAX;
+    cb.u2[0] = hgtOn ? (hpages ? rm->TextureSrvCube(heightCube) : rm->TextureSrv(heightCube))
+                     : UINT32_MAX;
+    cb.u2[1] = hgtOn ? (hpages ? rm->ResidencySrvCube(heightCube) : rm->ResidencySrv(heightCube))
+                     : UINT32_MAX;
+    cb.u2[2] = (hgtWinOn && !hpages) ? rm->TextureSrv(heightWindow) : UINT32_MAX;
+    cb.u2[3] = (hgtWinOn && !hpages) ? rm->ResidencySrv(heightWindow) : UINT32_MAX;
     cb.u3[0] = gisWinSrv;
     cb.u3[1] = gisGlobSrv;
     cb.u3[2] = cb.u3[3] = UINT32_MAX;

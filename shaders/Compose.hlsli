@@ -202,8 +202,39 @@ float ComposedColorTexelM(float3 dir) {
 // window; CUDEM-fine near the estuary) overlays the cube exactly the way color does, so the
 // land/sea gate and the shading normals stop being 611 m/px approximations where finer truth
 // exists. Off -> 0 (a smooth sphere).
+// M9aq: is there a height window at all, on either path? (Globe.hlsl gates its near-field
+// material on this.)
+bool CsHeightWindowOn() { return gCsU6.x != 0xFFFFFFFFu || gCsU2.z != 0xFFFFFFFFu; }
+// The height window's resident mip at a window uv, on either path.
+float CsHaveHeightWin(float2 duv) {
+    if (gCsU6.x != 0xFFFFFFFFu) return CsHavePage(gCsU6.y, duv, gCsU6.z);
+    return CsHave2D(gCsU2.w, duv);
+}
+
+// M9aq: THE HEIGHT PAGES PATH. Same rule as colour: the cube through its cube views, the z14
+// page through the array view, the page chosen by containment and by what is resident --
+// no feather, because both pages are the same height field at different ground resolutions.
+float ComposedHeightPages(float3 dir, float lod) {
+    const float haveC = CsHaveCubeArr(gCsU2.y, dir);
+    float h = gTexCubeArr[gCsU2.x].SampleLevel(sLinearClamp, float4(dir, 0.0f),
+                                               max(lod, haveC)).x;
+    const float2 duv = CsWindowUv(dir);
+    if (all(duv > 0.0f) && all(duv < 1.0f)) {
+        // The window pyramid runs ~6 mips finer than the cube at the same footprint.
+        const float wantW = clamp(lod + 6.0f, 0.0f, gCsG.z);
+        const float haveW = CsHavePage(gCsU6.y, duv, gCsU6.z);
+        const float lodW = max(wantW, haveW);
+        // Take the page where its resident texel is at least as fine as the cube's.
+        if (9.55f * exp2(haveW) <= 611.0f * exp2(haveC)) {
+            h = gTexArr[gCsU6.x].SampleLevel(sLinearClamp, float3(duv, gCsU6.z), lodW).x;
+        }
+    }
+    return h;
+}
+
 float ComposedHeight(float3 dir, float lod) {
     if (gCsF.z < 0.5f) return 0.0f;
+    if (gCsU6.x != 0xFFFFFFFFu) return ComposedHeightPages(dir, lod);
     const float have = CsHaveCube(gCsU2.y, dir);
     float h = gTexCube[gCsU2.x].SampleLevel(sLinearClamp, dir, max(lod, have)).x;
     if (gCsU2.z != 0xFFFFFFFFu) {

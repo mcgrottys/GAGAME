@@ -2062,15 +2062,27 @@ int main(int argc, char** argv) {
             } else {
                 // earth.height REGISTERED above the solver (M6w) -- here it becomes GPU
                 // tenants: the global cube and the Merrimack z14 window.
-                hgtTenant = resMgr.AddTextureCube(gpu, L"earth.height (composed)",
-                                                  Compositor::kFaceDim, DXGI_FORMAT_R16_FLOAT,
-                                                  compositor.CubeHeight(hgtCh));
-                // The height WINDOW: the same Mercator frame as the color window, so the
-                // globe's near-field land/sea gate and normals ride CUDEM truth.
-                hgtWinTenant = resMgr.AddTexture2D(
-                    gpu, L"earth.height.window (composed, Merrimack z14)",
-                    Compositor::kFaceDim, DXGI_FORMAT_R16_FLOAT,
-                    compositor.WindowHeight(hgtCh, 1263360, 1538048, 16384, 14));
+                // M9aq: ONE height tenant -- pages 0..5 the cube faces, 6 the z14 Mercator
+                // page (the frame the colour window shares, so the near-field land/sea gate
+                // and the normals ride CUDEM truth). One provider dispatching on the slice.
+                {
+                    const TileProviderFn hCube = compositor.CubeHeight(hgtCh);
+                    const TileProviderFn hWin =
+                        compositor.WindowHeight(hgtCh, 1263360, 1538048, 16384, 14);
+                    TileProviderFn hPages = [hCube, hWin](const TileRequest& r,
+                                                          std::vector<uint8_t>& out,
+                                                          TileLoc* loc) {
+                        if (r.face < 6) return hCube(r, out, loc);
+                        TileRequest w = r;
+                        w.face = 0;
+                        return hWin(w, out, loc);
+                    };
+                    hgtTenant = resMgr.AddTexturePages(gpu, L"earth.height (megatexture pages)",
+                                                       Compositor::kFaceDim,
+                                                       DXGI_FORMAT_R16_FLOAT, std::move(hPages),
+                                                       7);
+                    hgtWinTenant = hgtTenant;   // pages mode: the window is slice 6
+                }
                 // earth.color: the Google mercator tree, realized twice -- the global cube
                 // and the Merrimack z14 window (same stack, deeper footprint).
                 if (googleTiles.Init("satellite", opt.tileBudget)) {
@@ -2740,7 +2752,8 @@ int main(int argc, char** argv) {
                            opt.stencil, gisStencil.MaskWinSrv(), gisStencil.MaskGlobSrv(),
                            pagesMode ? detTenant : -1, pagesMode ? det17Org : nullptr, 17,
                            UINT32_MAX, nullptr, pagesMode ? 6u : UINT32_MAX,
-                           pagesMode ? 7u : UINT32_MAX);
+                           pagesMode ? 7u : UINT32_MAX,
+                           (hgtTenant >= 0 && hgtWinTenant == hgtTenant) ? 6u : UINT32_MAX);
             if (terrain) terrain->SetComposed(cs);
             if (sea) sea->SetComposed(cs);
             if (gisLayer) gisLayer->SetComposed(cs);
@@ -3367,9 +3380,10 @@ int main(int argc, char** argv) {
             if (hgtWinTenant >= 0) {
                 // Height paints are pure local math: warm the WHOLE window at mip 2 (~32 MB)
                 // so land/sea classification is never a coarse-mip smear anywhere in view.
-                resMgr.Want(hgtWinTenant, 0, 2, 0, 0, 1, 1);
+                const uint32_t hwf = (hgtWinTenant == hgtTenant) ? 6u : 0u;   // M9aq slice
+                resMgr.Want(hgtWinTenant, hwf, 2, 0, 0, 1, 1);
                 for (const auto& w : rings) {
-                    resMgr.Want(hgtWinTenant, 0, w.mip, w.a, w.a, w.b, w.b);
+                    resMgr.Want(hgtWinTenant, hwf, w.mip, w.a, w.a, w.b, w.b);
                 }
             }
             if (hgtTenant >= 0) {
@@ -3737,9 +3751,11 @@ int main(int argc, char** argv) {
                     }
                     waterBank->injectPattern = opt.inject;
                     if (hgtWinTenant >= 0) {
+                        // M9aq: in pages mode the window is slice 6 of the height array.
                         waterBank->SetHeightWindow(resMgr.TextureSrv(hgtWinTenant),
                                                    resMgr.ResidencySrv(hgtWinTenant),
-                                                   winOrgX, winOrgY);
+                                                   winOrgX, winOrgY,
+                                                   hgtWinTenant == hgtTenant ? 6u : UINT32_MAX);
                     }
                     globe->windGateVal = sea->WindGate();
                     globe->SetWaterBank(waterBank->DispSrv(), waterBank->ParamSrv(),
@@ -4217,8 +4233,9 @@ int main(int argc, char** argv) {
                         const double uT = (mxT - winOrgX) / 16384.0;
                         const double vT = (myT - winOrgY) / 16384.0;
                         if (uT > 0.0 && uT < 1.0 && vT > 0.0 && vT < 1.0) {
+                            const uint32_t hwfT = (hgtWinTenant == hgtTenant) ? 6u : 0u;
                             const uint32_t mipT = resMgr.ResidentMipAt(
-                                hgtWinTenant, 0, static_cast<float>(uT),
+                                hgtWinTenant, hwfT, static_cast<float>(uT),
                                 static_cast<float>(vT));
                             if (mipT <= 7) {
                                 const uint32_t dimT = 16384u >> mipT;
@@ -4229,7 +4246,8 @@ int main(int argc, char** argv) {
                                 uint8_t pxT[16] = {};
                                 float gpuH = 0.0f;
                                 if (gpu.ReadbackTexel(resMgr.TextureRes(hgtWinTenant),
-                                                      mipT, txT, tyT,
+                                                      hwfT * resMgr.Mips(hgtWinTenant) + mipT,
+                                                      txT, tyT,
                                                       resMgr.TextureState(hgtWinTenant),
                                                       pxT)) {
                                     const uint16_t h16 =

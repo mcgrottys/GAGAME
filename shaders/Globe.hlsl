@@ -935,8 +935,8 @@ float4 PsMain(VsOut i) : SV_Target {
             if (all(duvL > 0.0f) && all(duvL < 1.0f)) lc = float3(duvL, 0.0f);
         } else if (lensId == 3) {
             const float2 duvL = CsWindowUv(up);
-            if (gCsU2.w != 0xFFFFFFFFu && all(duvL > 0.0f) && all(duvL < 1.0f)) {
-                const float mL = CsHave2D(gCsU2.w, duvL);
+            if (CsHeightWindowOn() && all(duvL > 0.0f) && all(duvL < 1.0f)) {
+                const float mL = CsHaveHeightWin(duvL);
                 lc = lerp(float3(0.1f, 0.85f, 0.25f), float3(0.9f, 0.12f, 0.1f),
                           saturate(mL / 7.0f));
             }
@@ -1010,7 +1010,7 @@ float4 PsMain(VsOut i) : SV_Target {
     // physics that a mosaic cannot know owns the last few hundred metres, the mosaic owns the
     // aerial, and the crossfade between them is the ONE distance ramp.
     const float distC = length(i.rel);
-    if (gStreamF.z < 0.5f && landness > 0.0f && distC < 2700.0f && gCsU2.z != 0xFFFFFFFFu) {
+    if (gStreamF.z < 0.5f && landness > 0.0f && distC < 2700.0f && CsHeightWindowOn()) {
         const float2 wuv = CsWindowUv(up);
         if (all(wuv > 0.0f) && all(wuv < 1.0f)) {
             const float2 grF = ComposedHeightGrad(up, -8.0f);   // true slope, finest resident

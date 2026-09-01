@@ -46,7 +46,7 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSig
     // Root signature: b0 CB, t0 tile list, then the BINDLESS pair -- one unbounded SRV range
     // and one unbounded UAV range over the shared heap, so this kernel reaches every texture
     // by slot exactly the way the render path does.
-    D3D12_DESCRIPTOR_RANGE1 rs[1]{}, ru[1]{};
+    D3D12_DESCRIPTOR_RANGE1 rs[2]{}, ru[1]{};
     rs[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     rs[0].NumDescriptors = UINT_MAX;
     rs[0].BaseShaderRegister = 0;
@@ -57,6 +57,10 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSig
     ru[0].NumDescriptors = UINT_MAX;
     ru[0].BaseShaderRegister = 0;
     ru[0].RegisterSpace = 2;
+    // M9aq: t0, space5 -- the heap as Texture2DArray, so the bed can be read from slice 6 of
+    // the height PAGE tenant (one height texture; the window is a page of it).
+    rs[1] = rs[0];
+    rs[1].RegisterSpace = 5;
     ru[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
     ru[0].OffsetInDescriptorsFromTableStart = 0;
     D3D12_ROOT_PARAMETER1 params[4]{};
@@ -65,7 +69,7 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSig
     params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
     params[1].Descriptor.ShaderRegister = 0;
     params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[2].DescriptorTable.NumDescriptorRanges = 1;
+    params[2].DescriptorTable.NumDescriptorRanges = 2;
     params[2].DescriptorTable.pDescriptorRanges = rs;
     params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
     params[3].DescriptorTable.NumDescriptorRanges = 1;
@@ -485,7 +489,8 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.waveDir[3] = 0.0f;
     cb.slotsD[0] = m_hgtWinSrv;
     cb.slotsD[1] = m_hgtWinResSrv;
-    cb.slotsD[2] = cb.slotsD[3] = 0xFFFFFFFFu;
+    cb.slotsD[2] = m_hgtWinSlice;   // M9aq: the page, or ~0 for the old window
+    cb.slotsD[3] = 0xFFFFFFFFu;
     cb.geoA[0] = static_cast<float>(BathyModel::kOrgLat);
     cb.geoA[1] = static_cast<float>(BathyModel::kOrgLon);
     cb.geoA[2] = static_cast<float>(1.0 / BathyModel::kMPerLat);

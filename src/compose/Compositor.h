@@ -278,6 +278,8 @@ struct ComposedSurfaceCb {
     float ed[4];      // fine edit mask box in window uv: offset xy, scale zw
     uint32_t u5[4];   // M9ap PAGES: colour array SRV, array residency SRV, window slice,
                       // detail slice. u5[0] == ~0 means the old three-tenant path.
+    uint32_t u6[4];   // M9aq HEIGHT PAGES: height array SRV, array residency SRV, window
+                      // slice. u6[0] == ~0 means the old cube + window tenants.
 };
 
 // ================================================================================================
@@ -349,6 +351,7 @@ void FillComposedCb(ComposedSurfaceCb& cb, const ResidencyManager* rm, int color
                     uint32_t gisGlobSrv = UINT32_MAX, int detailWin = -1,
                     const double* detOrgPx = nullptr, int detailZ = 17,
                     uint32_t editMaskSrv = UINT32_MAX, const float* editBox = nullptr,
-                    uint32_t winSlice = UINT32_MAX, uint32_t detSlice = UINT32_MAX);
+                    uint32_t winSlice = UINT32_MAX, uint32_t detSlice = UINT32_MAX,
+                    uint32_t hgtWinSlice = UINT32_MAX);
 
 }  // namespace ga

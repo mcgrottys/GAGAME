@@ -132,6 +132,7 @@ public:
     }
 
     uint32_t TextureSrv(int tenant) const { return m_tenants[tenant].srv; }
+    uint32_t Mips(int tenant) const { return m_tenants[tenant].mips; }
     // M7l: the hypervisor asks what is ACTUALLY resident at a uv -- the same CPU-side map
     // the GPU residency clamp samples (byte = finest resident mip * 16).
     uint32_t ResidentMipAt(int tenant, uint32_t face, float u, float v) const {

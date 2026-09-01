@@ -76,9 +76,13 @@ public:
     // M7q: the composed height WINDOW, per texel, in the kernel -- the corner-lerp bed
     // quantized depth to ~600 m patches and the M7p physics inherited the blockiness (the
     // data lens showed breaking bands cutting at tile edges; the user called it).
-    void SetHeightWindow(uint32_t srv, uint32_t resMapSrv, double orgPxX, double orgPxY) {
+    // M9aq: `slice` != ~0 means srv/resMapSrv are Texture2DArray views of the height PAGE
+    // tenant and the window is that slice; ~0 is the old single-face window.
+    void SetHeightWindow(uint32_t srv, uint32_t resMapSrv, double orgPxX, double orgPxY,
+                         uint32_t slice = 0xFFFFFFFFu) {
         m_hgtWinSrv = srv;
         m_hgtWinResSrv = resMapSrv;
+        m_hgtWinSlice = slice;
         m_hgtWinOrg[0] = orgPxX;
         m_hgtWinOrg[1] = orgPxY;
     }
@@ -171,6 +175,7 @@ private:
     Compositor* m_comp = nullptr;
     int m_hgtCh = -1;
     uint32_t m_hgtWinSrv = 0xFFFFFFFFu, m_hgtWinResSrv = 0xFFFFFFFFu;
+    uint32_t m_hgtWinSlice = 0xFFFFFFFFu;
     double m_hgtWinOrg[2] = {0.0, 0.0};
     const GlobeModel* m_globe = nullptr;
     const SeaState* m_seaState = nullptr;

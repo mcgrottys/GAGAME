@@ -202,7 +202,9 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
     float4 gCsDet;  /* detail uv from window uv: offset xy, scale z; w = fine edit mask on */ \
     float4 gCsEd;   /* fine edit mask box in window uv: offset xy, scale zw */ \
     uint4  gCsU5;   /* M9ap PAGES: colour array SRV, array residency SRV, window slice, \
-                       detail slice. x == ~0 means the old three-tenant path. */
+                       detail slice. x == ~0 means the old three-tenant path. */ \
+    uint4  gCsU6;   /* M9aq HEIGHT PAGES: height array SRV, array residency SRV, window \
+                       slice. x == ~0 means the old cube + window tenants. */
 
 // The geometric-algebra toolkit lives in GA.hlsli (M3 moved it out so compute shaders with
 // their own root signatures can share it). Note for surface fields: the grade-2 part of
