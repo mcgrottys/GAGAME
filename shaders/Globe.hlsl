@@ -848,17 +848,44 @@ float4 PsMain(VsOut i) : SV_Target {
             // the confluence looks like. Black is not "no data": a NULL tile reads zero, and
             // zero here means the flow is irrotational and divergence-free, which is the
             // honest answer for open water.
+            // TWO LODs, ONE LENS. The low-LOD global default is the wind Mv2 bank -- global,
+            // already sparse, resident only where storms live; the high-LOD inset is the SWE
+            // grad(flow) over the inlet. Whichever covers this pixel wins, finest first, which
+            // is the whole heterogeneous story in four lines of shader.
+            //
+            // HONEST CAVEAT, and it matters for every lens that spans LODs: the two sources
+            // are NOT on one absolute scale. Synoptic wind curl lives at ~1e-5 /s over 25 km
+            // cells; a tidal jet's curl is ~1e-2 /s over 10 m cells -- three orders apart.
+            // Each is normalized against its OWN dynamic range, so colour compares structure
+            // within a source and NOT magnitude across them. Putting them on one absolute
+            // ramp would make the global field look dead, which would be a lie told by a
+            // colour map rather than by the data.
+            float2 mvL = float2(0, 0);
+            bool gotL = false;
             if (gLensU.x != 0xFFFFFFFFu) {
                 const float2 uvL = (wxzL - gLensA.xy) * gLensA.zw;
                 if (all(uvL > 0.0f) && all(uvL < 1.0f)) {
-                    const float2 mv = gTex[gLensU.x]
+                    const float2 hq = gTex[gLensU.x]
                                           .SampleLevel(sLinearClamp,
                                                        float2(uvL.x, 1.0f - uvL.y), 0)
                                           .xy;
-                    const float divN = saturate(abs(mv.x) * 60.0f);
-                    const float curlN = clamp(mv.y * 60.0f, -1.0f, 1.0f);
-                    lc = float3(saturate(curlN), divN * 0.9f, saturate(-curlN));
+                    mvL = float2(abs(hq.x) * 60.0f, hq.y * 60.0f);
+                    gotL = true;
                 }
+            }
+            if (!gotL && gTexIdx2.y != 0xFFFFFFFFu) {
+                const float2 wuvL = float2(
+                    frac((lonDeg - gWindGeo.y) * gWindGeo.w / gWindB.x),
+                    saturate(((gWindGeo.x - degrees(lat)) * gWindGeo.z + 0.5f) / gWindB.y));
+                const float4 gm = gTex[gTexIdx2.y].SampleLevel(sLinearClamp, wuvL, 0);
+                // Mv2: x = divergence (grade 0), w = curl (grade 2), curl stored x1e4.
+                mvL = float2(abs(gm.x) * 1.6f, gm.w / 2.2f);
+                gotL = true;
+            }
+            if (gotL) {
+                const float divN = saturate(mvL.x);
+                const float curlN = clamp(mvL.y, -1.0f, 1.0f);
+                lc = float3(saturate(curlN), divN * 0.9f, saturate(-curlN));
             }
         } else if (lensId == 2) {
             const float2 duvL = CsWindowUv(up);
