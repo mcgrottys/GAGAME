@@ -14,6 +14,7 @@
 // ================================================================================================
 #include <sys/stat.h>
 
+#include "compose/ComposeTree.h"
 #include "compose/DomainSource.h"
 #include "core/CurrentFieldLoader.h"
 #include "core/GeoGridLoader.h"
@@ -1611,6 +1612,77 @@ int main(int argc, char** argv) {
             // disagreement is small: the bed feeds the solver, the sea shader, the water bank
             // and the globe, so a silent slide here moves a coastline everywhere at once.
             terrain->BuildBedBank(gpu, "data/bathy/merrimack.json");
+
+            // ---- M9m: THE COMPOSE TREE, and the tide step that forced it into existence.
+            //
+            // Depth is not a dataset anyone ships. It is water level minus bed, and those two
+            // arrive in DIFFERENT VERTICAL DATUMS from different domains on different clocks --
+            // which is why it needed a tree rather than another entry in a source list. The
+            // compositor blends sources that disagree about ONE quantity; this combines two
+            // quantities into a third, so it is a different node with a different rule.
+            //
+            // The join used to be a constant in a comment in BathyModel. GaUnits made guessing
+            // it illegal, and the number it demanded turned out to already exist per station as
+            // the CO-OPS link, so the tide now carries its own frame and the graph shows it.
+            {
+                LoaderRegistry breg;
+                breg.Register("json", GeoGridLoader::Open);
+                if (auto bld = breg.Open("data/bathy/merrimack.json")) {
+                    auto bed = Normalize(std::make_shared<RasterSource>(std::move(bld), 0),
+                                         UnitSpec::Of(Quantity::Length, "NAVD88"));
+                    // The tide arrives in the frame its harmonics were fitted in, with every
+                    // station. The MLLW -> NAVD88 link is then DECLARED, using the number main
+                    // already resolved and logged -- an estimate for Newburyport, which has no
+                    // published link, and now an estimate visible in the graph instead of buried.
+                    auto tideMllw = std::make_shared<TideSource>(&model);
+                    auto tideNavd = DeclareDatumLink(tideMllw, datumOff, "NAVD88",
+                                                     "main::ResolveDatum -- see [datum] above");
+                    auto depth = std::make_shared<BinaryFieldSource>(
+                        "water.depth", BinaryFieldSource::Op::Subtract, tideNavd, bed);
+                    PrintTree("water.depth = tide - bed", depth.get());
+
+                    // The guard, demonstrated rather than asserted: the SAME subtraction with
+                    // the tide left in MLLW. Both operands are lengths, both look like metres,
+                    // and the answer would be wrong by the datum link at every texel forever.
+                    BinaryFieldSource bad("water.depth.WRONG-DATUM",
+                                          BinaryFieldSource::Op::Subtract, tideMllw, bed);
+                    Log("[tree] MLLW tide - NAVD88 bed: %s",
+                        bad.Valid() ? "accepted -- THE GUARD IS BROKEN" : "refused, as it must be");
+
+                    // Equivalence against the engine's own water level. main computes
+                    // oceanAt(t) = Height(focus,t) + datumOff with datumOff from ResolveDatum;
+                    // the tree reaches the same number through a declared per-station link.
+                    const int fs = model.Focus();
+                    double worstLvl = 0.0, worstDep = 0.0;
+                    uint32_t probed = 0;
+                    for (int k = 0; k < 24; ++k) {
+                        const double t = model.EpochUnix() + k * 3600.0;
+                        DomainQuery q;
+                        q.lon = model.S(size_t(fs)).lon;
+                        q.lat = model.S(size_t(fs)).lat;
+                        q.unixT = t;
+                        q.groundM = 10.0;
+                        DomainValue lv;
+                        if (!tideNavd->SampleAt(q, lv) || lv.weight <= 0.0f) continue;
+                        const double engine = model.Height(size_t(fs), t) + datumOff;
+                        worstLvl = (std::max)(worstLvl, std::abs(double(lv.c[0]) - engine));
+                        DomainValue dv;
+                        if (depth->SampleAt(q, dv) && dv.weight > 0.0f) {
+                            DomainValue bv;
+                            if (bed->SampleAt(q, bv) && bv.weight > 0.0f) {
+                                worstDep = (std::max)(
+                                    worstDep, std::abs(double(dv.c[0]) - (engine - bv.c[0])));
+                            }
+                        }
+                        ++probed;
+                    }
+                    Log("[tree] %u hourly probes at %s: worst |tree - engine| level %.4f m, "
+                        "depth %.4f m (%s)",
+                        probed, model.S(size_t(fs)).name.c_str(), worstLvl, worstDep,
+                        (worstLvl < 0.01 && worstDep < 0.01) ? "equivalent"
+                                                             : "DIVERGENT -- check the link");
+                }
+            }
             swe.Init(gpu, renderer.Shaders(), opt.shaderDir, bathy, terrain->HeightTex().res.Get());
             // M6r: the discharge is LIVE again -- it rides the Flather boundary's u_ext (the
             // station stage still carries it into eta; the prism term dwarfs it either way).
