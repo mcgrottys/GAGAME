@@ -539,18 +539,51 @@ bool RunTileSelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     return test.Run(gpu, sc, shaderDir);
 }
 
+namespace {
+// ---- M9h: POOL ACCOUNTING ACROSS BANKS ---------------------------------------------------
+// Budgets stay PER BANK on purpose. A shared allocator would not help the algebra: banks align
+// through the (level, x, y) ADDRESS SPACE, not through where their bytes physically sit, and
+// co-locating two operands' tiles buys nothing -- they are read through the texture unit with
+// swizzled layout and page-table translation, so adjacency removes no memory transaction, and
+// concentrating them can narrow the channel interleave that the memory controller relies on.
+//
+// What a shared pool WOULD have caught is the sum: ten banks at 2 GB each is a 20 GB ceiling on
+// a 7.9 GB card. So the sum is simply accounted and reported, which keeps banks independent and
+// still makes the one real failure mode loud.
+//
+// (The genuine cross-bank coupling is not memory at all: if C = A * B, C's tiles are only
+// useful where BOTH operands are resident, so a refusal in A wastes whatever B spent. That is
+// DeriveDemand's job -- residency correlation, not allocation.)
+uint64_t g_poolCommittedBytes = 0;
+bool g_poolWarned = false;
+
+void PoolCommitted(Gpu& gpu, uint64_t bytes) {
+    g_poolCommittedBytes += bytes;
+    const uint64_t vram = gpu.DedicatedVramBytes();
+    if (!vram || g_poolWarned) return;
+    if (g_poolCommittedBytes * 10 > vram * 7) {
+        g_poolWarned = true;
+        Log("[atlas] POOL PRESSURE: tile pools now hold %.2f GB of %.2f GB dedicated (>70%%). "
+            "Budgets are per bank; nothing enforces the SUM, so this is the warning that the "
+            "next bank to grow may be the one that fails.",
+            g_poolCommittedBytes / 1073741824.0, vram / 1073741824.0);
+    }
+}
+}   // namespace
+
 // ================================================================================ TileAtlas2D
 
 void TileAtlas2D::Init(Gpu& gpu, uint32_t widthTexels, uint32_t heightTexels, DXGI_FORMAT fmt,
-                       const wchar_t* name, uint32_t heapChunkTiles) {
+                       const wchar_t* name, uint32_t heapChunkTiles, uint32_t mipLevels,
+                       uint32_t arraySlices) {
     m_heapChunkTiles = heapChunkTiles;
 
     D3D12_RESOURCE_DESC rd{};
     rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     rd.Width = widthTexels;
     rd.Height = heightTexels;
-    rd.DepthOrArraySize = 1;
-    rd.MipLevels = 1;
+    rd.DepthOrArraySize = static_cast<UINT16>(arraySlices ? arraySlices : 1);
+    rd.MipLevels = static_cast<UINT16>(mipLevels ? mipLevels : 1);
     rd.Format = fmt;
     rd.SampleDesc.Count = 1;
     rd.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
@@ -559,41 +592,346 @@ void TileAtlas2D::Init(Gpu& gpu, uint32_t widthTexels, uint32_t heightTexels, DX
                                                  nullptr, IID_PPV_ARGS(&m_res)));
     m_res->SetName(name);
 
+    m_mipCount = rd.MipLevels;
     UINT numTiles = 0;
     D3D12_PACKED_MIP_INFO packed{};
     D3D12_TILE_SHAPE shape{};
-    UINT numSub = 1;
-    D3D12_SUBRESOURCE_TILING sub{};
-    gpu.Device()->GetResourceTiling(m_res.Get(), &numTiles, &packed, &shape, &numSub, 0, &sub);
+    UINT numSub = m_mipCount;
+    std::vector<D3D12_SUBRESOURCE_TILING> subs(m_mipCount);
+    gpu.Device()->GetResourceTiling(m_res.Get(), &numTiles, &packed, &shape, &numSub, 0,
+                                    subs.data());
     m_tileW = shape.WidthInTexels;
     m_tileH = shape.HeightInTexels;
-    m_tilesX = sub.WidthInTiles;
-    m_tilesY = sub.HeightInTiles;
-    m_state.assign(static_cast<size_t>(m_tilesX) * m_tilesY, 0);
+    // D3D12 packs every mip small enough to share tiles into a single tail. Those are not
+    // per-tile mappable, and their WidthInTiles is reported as 0.
+    m_standardMips = packed.NumStandardMips ? packed.NumStandardMips : m_mipCount;
+    if (m_standardMips > m_mipCount) m_standardMips = m_mipCount;
+
+    m_mip.assign(m_mipCount, MipInfo{});
+    uint32_t base = 0;
+    for (uint32_t m = 0; m < m_mipCount; ++m) {
+        MipInfo& mi = m_mip[m];
+        if (m < m_standardMips) {
+            mi.tilesX = subs[m].WidthInTiles;
+            mi.tilesY = subs[m].HeightInTiles;
+            mi.startTile = subs[m].StartTileIndexInOverallResource;
+        } else {
+            const uint32_t w = (widthTexels >> m) ? (widthTexels >> m) : 1u;
+            const uint32_t h = (heightTexels >> m) ? (heightTexels >> m) : 1u;
+            mi.tilesX = (w + m_tileW - 1) / m_tileW;
+            mi.tilesY = (h + m_tileH - 1) / m_tileH;
+            if (!mi.tilesX) mi.tilesX = 1;
+            if (!mi.tilesY) mi.tilesY = 1;
+            mi.startTile = packed.StartTileIndexInOverallResource;
+        }
+        mi.base = base;
+        if (m < m_standardMips) base += mi.tilesX * mi.tilesY;
+    }
+    m_tilesX = m_mip[0].tilesX;
+    m_tilesY = m_mip[0].tilesY;
+    m_slices = rd.DepthOrArraySize;
+    m_tilesPerSlice = base;
+    m_sliceActive.assign(m_slices, 0);
+    m_state.assign(static_cast<size_t>(base) * m_slices, 0);
     m_tilePool.assign(m_state.size(), 0);
+    m_packedTiles = packed.NumTilesForPackedMips;
 
-    m_srv = gpu.CreateSrv(m_res.Get(), fmt);
+    // A paged bank is sampled through a Texture2DArray view (page = slice). A flat bank keeps
+    // its plain view, because every existing consumer reads it as Texture2D.
+    m_srv = (rd.DepthOrArraySize > 1) ? gpu.CreateSrvArray(m_res.Get(), fmt, m_mipCount,
+                                                          rd.DepthOrArraySize)
+                                      : gpu.CreateSrv(m_res.Get(), fmt);
     m_uav = gpu.CreateTextureUav(m_res.Get(), fmt, D3D12_UAV_DIMENSION_TEXTURE2D);
+    m_fmt = fmt;
+    m_mipUav.resize(m_mipCount);
+    for (uint32_t m = 0; m < m_mipCount; ++m) {
+        m_mipUav[m] = (m == 0) ? m_uav
+                               : gpu.CreateTextureUav(m_res.Get(), fmt,
+                                                      D3D12_UAV_DIMENSION_TEXTURE2D, m);
+    }
 
-    Log("[atlas] %S: %ux%u texels = %ux%u tiles of %ux%u (%.0f MB virtual, resident on demand)",
-        name, widthTexels, heightTexels, m_tilesX, m_tilesY, m_tileW, m_tileH,
-        VirtualBytes() / 1048576.0);
+    // ---- PIN THE PACKED TAIL. It is a handful of tiles and it is the coarsest description of
+    // the whole field. Keeping it resident forever is what makes a miss impossible: a sample
+    // that finds nothing finer still lands on real data, so quality degrades to blur and never
+    // to garbage -- and never to a pop, because no code path appears or disappears.
+    // WHICH LEVEL IS THE FLOOR. Not every shape has a packed tail -- measured: 4096^2 x8
+    // x5mip reports 0 packed, because its coarsest mip is still larger than one tile. With no
+    // tail there is nothing pinned, so the coarsest STANDARD mip becomes the floor instead.
+    // The floor is PINNED PER SLICE by ActivateSlice, never here: pinning 1024 floors up front
+    // would commit a great deal of memory for pages that carry nothing.
+    m_pinnedFloor = packed.NumPackedMips > 0 ? (m_mipCount - 1) : (m_standardMips - 1);
+
+    if (m_mipCount > 1) {
+        // One texel per (slice, mip-0 tile); slices stack downward, so a shader that knows its
+        // slice reads row (slice * tilesY + ty). 0xFF = nothing resident, which is what an
+        // un-activated slice honestly is.
+        const uint32_t mh = m_tilesY * m_slices;
+        m_resMapCpu.assign(static_cast<size_t>(m_tilesX) * mh, 0xFFu);
+        m_resMap = gpu.CreateTexture2D(m_tilesX, mh, DXGI_FORMAT_R8_UINT,
+                                       D3D12_RESOURCE_FLAG_NONE,
+                                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                       L"atlas.residencyMap");
+        m_resMapSrv = gpu.CreateSrv(m_resMap.res.Get(), DXGI_FORMAT_R8_UINT);
+        gpu.UploadTexture(m_resMap, m_resMapCpu.data(), m_tilesX);
+    }
+
+    // Backward compatibility, and the right default: a single-slice bank has exactly one page
+    // and every existing caller expects it live from the start. Arrays activate on demand.
+    if (m_slices == 1) ActivateSlice(gpu, 0);
+
+    Log("[atlas] %S: %ux%u x%u slices = %ux%u tiles of %ux%u, %u mips (%u standard + %u "
+        "packed), floor mip %u (%.2f GB virtual, resident on demand)",
+        name, widthTexels, heightTexels, m_slices, m_tilesX, m_tilesY, m_tileW, m_tileH,
+        m_mipCount, m_standardMips, m_mipCount - m_standardMips, m_pinnedFloor,
+        VirtualBytes() / 1073741824.0);
 }
 
-void TileAtlas2D::RequestMap(uint32_t tx, uint32_t ty) {
-    const uint32_t i = ty * m_tilesX + tx;
+// The finest mip actually resident over a mip-0 tile region. Coarser mips cover proportionally
+// more ground, so mip-0 tile (tx0, ty0) lands on (tx0 >> m, ty0 >> m) at mip m.
+uint32_t TileAtlas2D::FinestResident(uint32_t slice, uint32_t tx0, uint32_t ty0) const {
+    if (!IsSliceActive(slice)) return kNothingResident;   // no floor: the page does not exist
+    for (uint32_t m = 0; m < m_standardMips; ++m) {
+        if (IsResident(slice, m, tx0 >> m, ty0 >> m)) return m;
+    }
+    return m_pinnedFloor;   // packed tail, or the coarsest standard mip
+}
+
+// Pin one slice's floor. Everything the chain promises -- a sample can never miss, quality
+// degrades to blur and never to garbage -- holds PER SLICE, and only once that slice's floor
+// exists. Activation is on demand for exactly that reason: a slice nobody has asked for
+// should cost nothing, and FinestResident reports kNothingResident for it rather than naming
+// a level that is NULL.
+void TileAtlas2D::ActivateSlice(Gpu& gpu, uint32_t slice) {
+    if (slice >= m_slices || IsSliceActive(slice)) return;
+    m_sliceActive[slice] = 1;
+    // A bank with no chain makes no floor promise -- there is no coarser level to fall back
+    // to, so there is nothing to pin. Pinning "the coarsest standard mip" here would map mip 0
+    // in its entirety and quietly make every flat bank fully resident.
+    if (m_mipCount <= 1) return;
+    if (m_packedTiles > 0) {
+        D3D12_HEAP_DESC hd{};
+        hd.SizeInBytes = static_cast<uint64_t>(m_packedTiles) * kTileBytes;
+        D3D12_HEAP_PROPERTIES hp{};
+        hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        hd.Properties = hp;
+        hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
+        Com<ID3D12Heap> heap;
+        GA_CHECK(gpu.Device()->CreateHeap(&hd, IID_PPV_ARGS(&heap)));
+        heap->SetName(L"atlas.packedTail");
+        m_heaps.push_back(heap);
+        D3D12_TILED_RESOURCE_COORDINATE c{};
+        c.Subresource = m_standardMips + slice * m_mipCount;
+        D3D12_TILE_REGION_SIZE rs{};
+        rs.NumTiles = m_packedTiles;
+        rs.UseBox = FALSE;
+        D3D12_TILE_RANGE_FLAGS rf = D3D12_TILE_RANGE_FLAG_NONE;
+        UINT st = 0, ct = m_packedTiles;
+        gpu.Queue()->UpdateTileMappings(m_res.Get(), 1, &c, &rs, heap.Get(), 1, &rf, &st, &ct,
+                                        D3D12_TILE_MAPPING_FLAG_NONE);
+    } else if (m_standardMips > 0) {
+        const MipInfo& top = m_mip[m_standardMips - 1];
+        for (uint32_t ty = 0; ty < top.tilesY; ++ty) {
+            for (uint32_t tx = 0; tx < top.tilesX; ++tx) {
+                RequestMap(slice, m_standardMips - 1, tx, ty);
+            }
+        }
+        CommitMappings(gpu, nullptr);
+    }
+}
+
+// The map the SHADER reads: one texel per mip-0 tile, value = finest resident mip there. A
+// sampler clamps its LOD to this, so a region streaming in gets sharper without any code path
+// changing -- which is the whole no-pop contract. Only uploaded when it actually moved.
+// Send a pending residency map. Safe ONLY outside command-list recording.
+void TileAtlas2D::FlushResidencyMap(Gpu& gpu) {
+    if (!m_resMapDirty || m_resMapCpu.empty()) return;
+    m_resMapDirty = false;
+    gpu.UploadTexture(m_resMap, m_resMapCpu.data(), m_tilesX);
+}
+
+void TileAtlas2D::RebuildResidencyMap(Gpu& gpu) {
+    if (m_mipCount <= 1 || m_resMapCpu.empty()) return;
+    bool moved = false;
+    for (uint32_t sl = 0; sl < m_slices; ++sl) {
+        for (uint32_t ty = 0; ty < m_tilesY; ++ty) {
+            for (uint32_t tx = 0; tx < m_tilesX; ++tx) {
+                const uint32_t f = FinestResident(sl, tx, ty);
+                const uint8_t v = (f == kNothingResident) ? 0xFFu : static_cast<uint8_t>(f);
+                uint8_t& slot =
+                    m_resMapCpu[(static_cast<size_t>(sl) * m_tilesY + ty) * m_tilesX + tx];
+                if (slot != v) { slot = v; moved = true; }
+            }
+        }
+    }
+    // DO NOT UPLOAD HERE. Gpu::UploadTexture opens its own command list, and CommitMappings
+    // is reachable from inside a frame's recording (BuildChain calls it) -- re-entering
+    // BeginUpload there crashes. Mark it and let FlushResidencyMap send it from a context
+    // that owns no open list. Discovered the hard way: the SWE spinup died on the first
+    // chained bank, with no error, right where Record started.
+    if (moved) m_resMapDirty = true;
+    (void)gpu;
+}
+
+
+// ---- M9h: FILLING THE CHAIN -------------------------------------------------------------
+// A pinned tail that reads zero is real memory pretending to be data. These two build the
+// levels so the floor actually carries the field.
+
+void TileAtlas2D::MapAllCoarse(uint32_t slice) {
+    for (uint32_t m = 1; m < m_standardMips; ++m) {
+        for (uint32_t ty = 0; ty < m_mip[m].tilesY; ++ty) {
+            for (uint32_t tx = 0; tx < m_mip[m].tilesX; ++tx) RequestMap(slice, m, tx, ty);
+        }
+    }
+}
+
+void TileAtlas2D::BuildMips(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
+                            ID3D12GraphicsCommandList* cl, uint32_t slice) {
+    if (m_mipCount < 2) return;
+
+    // Which reducer: a typed UAV's format must match the resource's family, so the bank picks
+    // by what it stores. Anything else is refused loudly rather than reduced with the wrong
+    // channel count -- a mis-typed UAV reads garbage, it does not fail.
+    int channels = 0;
+    switch (m_fmt) {
+        case DXGI_FORMAT_R32_FLOAT:
+        case DXGI_FORMAT_R16_FLOAT: channels = 1; break;
+        case DXGI_FORMAT_R32G32_FLOAT:
+        case DXGI_FORMAT_R16G16_FLOAT: channels = 2; break;
+        case DXGI_FORMAT_R32G32B32A32_FLOAT:
+        case DXGI_FORMAT_R16G16B16A16_FLOAT: channels = 4; break;
+        default: break;
+    }
+    if (!channels) {
+        Log("[atlas] BuildMips: format %d has no reducer -- chain left unfilled", int(m_fmt));
+        return;
+    }
+
+    if (!m_mipPso) {
+        D3D12_DESCRIPTOR_RANGE range{};
+        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        range.NumDescriptors = 2;
+        range.BaseShaderRegister = 0;
+        D3D12_ROOT_PARAMETER rp[2]{};
+        rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        rp[0].Constants.Num32BitValues = 4;
+        rp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        rp[1].DescriptorTable.NumDescriptorRanges = 1;
+        rp[1].DescriptorTable.pDescriptorRanges = &range;
+        D3D12_ROOT_SIGNATURE_DESC rsd{};
+        rsd.NumParameters = 2;
+        rsd.pParameters = rp;
+        Com<ID3DBlob> blob, err;
+        if (FAILED(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &blob,
+                                               &err))) {
+            Log("[atlas] BuildMips: root signature failed");
+            return;
+        }
+        if (FAILED(gpu.Device()->CreateRootSignature(0, blob->GetBufferPointer(),
+                                                     blob->GetBufferSize(),
+                                                     IID_PPV_ARGS(&m_mipRs)))) {
+            return;
+        }
+        const std::wstring def = L"GA_MIP_CH=" + std::to_wstring(channels);
+        ShaderBlob cs =
+            sc.Compile(shaderDir + L"/MipReduce.hlsl", L"CsMipReduce", L"cs_6_0", {def});
+        if (!cs.Valid()) {
+            Log("[atlas] BuildMips: MipReduce.hlsl (%d ch) failed to compile", channels);
+            return;
+        }
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pd{};
+        pd.pRootSignature = m_mipRs.Get();
+        pd.CS = {cs.Data(), cs.Size()};
+        if (FAILED(gpu.Device()->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m_mipPso)))) {
+            Log("[atlas] BuildMips: PSO failed");
+            return;
+        }
+        // ONE DESCRIPTOR PAIR PER LEVEL. Reusing a single pair looks right and is not:
+        // descriptor writes land on the CPU immediately while the dispatches execute later,
+        // so every level would read whichever pair was written last. Caught by the mip-1
+        // value check -- the whole coarse level came back carrying one tile's stamp.
+        m_mipTable = gpu.SrvHeap().Alloc(2 * (m_mipCount - 1));
+    }
+
+    cl->SetComputeRootSignature(m_mipRs.Get());
+    cl->SetPipelineState(m_mipPso.Get());
+
+    const uint32_t w0 = m_tilesX * m_tileW, h0 = m_tilesY * m_tileH;
+    for (uint32_t m = 0; m + 1 < m_mipCount; ++m) {
+        const uint32_t sw = (w0 >> m) ? (w0 >> m) : 1u, sh = (h0 >> m) ? (h0 >> m) : 1u;
+        const uint32_t dw = (w0 >> (m + 1)) ? (w0 >> (m + 1)) : 1u;
+        const uint32_t dh = (h0 >> (m + 1)) ? (h0 >> (m + 1)) : 1u;
+
+        D3D12_UNORDERED_ACCESS_VIEW_DESC u{};
+        u.Format = m_fmt;
+        u.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        const uint32_t slot = m_mipTable + 2 * m;
+        // ALWAYS array views, even for a one-slice bank: MipReduce.hlsl declares
+        // RWTexture2DArray so that one kernel serves paged and unpaged banks alike, and a
+        // plain Texture2D view against that declaration is a binding mismatch. Pinned to the
+        // slice being reduced, so a reduction can never cross a page boundary.
+        u.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+        u.Texture2DArray.FirstArraySlice = slice;
+        u.Texture2DArray.ArraySize = 1;
+        u.Texture2DArray.MipSlice = m;
+        gpu.Device()->CreateUnorderedAccessView(m_res.Get(), nullptr, &u,
+                                                gpu.SrvHeap().Cpu(slot));
+        u.Texture2DArray.MipSlice = m + 1;
+        gpu.Device()->CreateUnorderedAccessView(m_res.Get(), nullptr, &u,
+                                                gpu.SrvHeap().Cpu(slot + 1));
+
+        const uint32_t consts[4] = {dw, dh, sw, sh};
+        cl->SetComputeRoot32BitConstants(0, 4, consts, 0);
+        cl->SetComputeRootDescriptorTable(1, gpu.SrvHeap().Gpu(slot));
+        cl->Dispatch((dw + 7) / 8, (dh + 7) / 8, 1);
+
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        b.UAV.pResource = m_res.Get();
+        cl->ResourceBarrier(1, &b);
+    }
+}
+
+void TileAtlas2D::RequestMap(uint32_t slice, uint32_t mip, uint32_t tx, uint32_t ty) {
+    if (mip >= m_standardMips || slice >= m_slices) return;   // the tail is pinned, not asked
+    const MipInfo& mi = m_mip[mip];
+    if (tx >= mi.tilesX || ty >= mi.tilesY) return;
+    const uint32_t i = slice * m_tilesPerSlice + mi.base + ty * mi.tilesX + tx;
     if (m_state[i] == 0) {
         m_state[i] = 2;   // pending map
         m_pendingMap.push_back(i);
     }
 }
 
-void TileAtlas2D::RequestUnmap(uint32_t tx, uint32_t ty) {
-    const uint32_t i = ty * m_tilesX + tx;
+void TileAtlas2D::RequestUnmap(uint32_t slice, uint32_t mip, uint32_t tx, uint32_t ty) {
+    if (mip >= m_standardMips || slice >= m_slices) return;
+    const MipInfo& mi = m_mip[mip];
+    if (tx >= mi.tilesX || ty >= mi.tilesY) return;
+    const uint32_t i = slice * m_tilesPerSlice + mi.base + ty * mi.tilesX + tx;
     if (m_state[i] == 1) {
         m_state[i] = 3;   // pending unmap
         m_pendingUnmap.push_back(i);
     }
+}
+
+// Flat state index -> (mip, tx, ty). Linear over at most a dozen mips; called only while
+// building mapping batches, never per texel.
+void TileAtlas2D::Decode(uint32_t i, uint32_t& slice, uint32_t& mip, uint32_t& tx,
+                         uint32_t& ty) const {
+    slice = m_tilesPerSlice ? (i / m_tilesPerSlice) : 0;
+    const uint32_t i0 = m_tilesPerSlice ? (i % m_tilesPerSlice) : i;
+    for (uint32_t m = m_standardMips; m-- > 0;) {
+        if (i0 >= m_mip[m].base) {
+            const uint32_t r = i0 - m_mip[m].base;
+            mip = m;
+            tx = r % m_mip[m].tilesX;
+            ty = r / m_mip[m].tilesX;
+            return;
+        }
+    }
+    mip = 0;
+    tx = i0 % m_tilesX;
+    ty = i0 / m_tilesX;
 }
 
 void TileAtlas2D::RequestUnmapAll() {
@@ -614,7 +952,9 @@ void TileAtlas2D::CommitMappings(Gpu& gpu, std::vector<uint32_t>* outNewlyMapped
         std::vector<UINT> starts, counts;
         for (uint32_t i : m_pendingUnmap) {
             if (m_state[i] != 3) continue;
-            coords.push_back({i % m_tilesX, i / m_tilesX, 0, 0});
+            uint32_t sl = 0, mp = 0, cx = 0, cy = 0;
+            Decode(i, sl, mp, cx, cy);
+            coords.push_back({cx, cy, 0, mp + sl * m_mipCount});
             sizes.push_back({1, FALSE, 0, 0, 0});
             flags.push_back(D3D12_TILE_RANGE_FLAG_NULL);
             starts.push_back(0);
@@ -643,6 +983,15 @@ void TileAtlas2D::CommitMappings(Gpu& gpu, std::vector<uint32_t>* outNewlyMapped
         std::vector<Batch> batches;
         for (uint32_t i : m_pendingMap) {
             if (m_state[i] != 2) continue;
+            if (m_freeTiles.empty() && m_poolTiles >= m_poolCapTiles) {
+                // At budget. REFUSE rather than grow, and rather than evict -- this bank may
+                // be holding state nothing else can reproduce (churn and foam memory exist
+                // only here). A silent eviction would delete physics; a refusal is a hole,
+                // and holes get counted and reported.
+                m_state[i] = 0;
+                ++m_refusedMaps;
+                continue;
+            }
             if (m_freeTiles.empty()) {
                 D3D12_HEAP_DESC hd{};
                 hd.SizeInBytes = static_cast<uint64_t>(m_heapChunkTiles) * kTileBytes;
@@ -658,13 +1007,17 @@ void TileAtlas2D::CommitMappings(Gpu& gpu, std::vector<uint32_t>* outNewlyMapped
                 for (uint32_t t = m_heapChunkTiles; t > 0; --t) {
                     m_freeTiles.push_back((hIdx << 16) | (t - 1));
                 }
+                m_poolTiles += m_heapChunkTiles;
+                PoolCommitted(gpu, hd.SizeInBytes);
             }
             const uint32_t slot = m_freeTiles.back();
             m_freeTiles.pop_back();
             const uint32_t heapIdx = slot >> 16;
             if (heapIdx >= batches.size()) batches.resize(m_heaps.size());
             Batch& b = batches[heapIdx];
-            b.coords.push_back({i % m_tilesX, i / m_tilesX, 0, 0});
+            uint32_t sl = 0, mp = 0, cx = 0, cy = 0;
+            Decode(i, sl, mp, cx, cy);
+            b.coords.push_back({cx, cy, 0, mp + sl * m_mipCount});
             b.sizes.push_back({1, FALSE, 0, 0, 0});
             b.flags.push_back(D3D12_TILE_RANGE_FLAG_NONE);
             b.starts.push_back(slot & 0xFFFF);
@@ -685,6 +1038,7 @@ void TileAtlas2D::CommitMappings(Gpu& gpu, std::vector<uint32_t>* outNewlyMapped
         m_pendingMap.clear();
     }
 
+    RebuildResidencyMap(gpu);
     m_residentList.clear();
     for (uint32_t i = 0; i < m_state.size(); ++i) {
         if (m_state[i] == 1) m_residentList.push_back(i);
@@ -796,6 +1150,15 @@ void TileAtlas3D::CommitMappings(Gpu& gpu, std::vector<uint32_t>* outNewlyMapped
         std::vector<Batch> batches;
         for (uint32_t i : m_pendingMap) {
             if (m_state[i] != 2) continue;
+            if (m_freeTiles.empty() && m_poolTiles >= m_poolCapTiles) {
+                // At budget. REFUSE rather than grow, and rather than evict -- this bank may
+                // be holding state nothing else can reproduce (churn and foam memory exist
+                // only here). A silent eviction would delete physics; a refusal is a hole,
+                // and holes get counted and reported.
+                m_state[i] = 0;
+                ++m_refusedMaps;
+                continue;
+            }
             if (m_freeTiles.empty()) {
                 D3D12_HEAP_DESC hd{};
                 hd.SizeInBytes =
@@ -812,6 +1175,8 @@ void TileAtlas3D::CommitMappings(Gpu& gpu, std::vector<uint32_t>* outNewlyMapped
                 for (uint32_t t = m_heapChunkTiles; t > 0; --t) {
                     m_freeTiles.push_back((hIdx << 16) | (t - 1));
                 }
+                m_poolTiles += m_heapChunkTiles;
+                PoolCommitted(gpu, hd.SizeInBytes);
             }
             const uint32_t slot = m_freeTiles.back();
             m_freeTiles.pop_back();
@@ -929,7 +1294,7 @@ bool RunAtlasSelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDi
     // A small live atlas: map three tiles, clear them, stamp the test pattern over the resident
     // list, verify pattern-inside / zero-outside, then unmap one and verify it vanishes.
     TileAtlas2D atlas;
-    atlas.Init(gpu, 1024, 512, DXGI_FORMAT_R16_FLOAT, L"atlastest.bank", 8);
+    atlas.Init(gpu, 1024, 512, DXGI_FORMAT_R16_FLOAT, L"atlastest.bank", 8, 4);
 
     ShaderBlob csClear = sc.Compile(shaderDir + L"/SeaChurn.hlsl", L"CsChurnClear", L"cs_6_0");
     ShaderBlob csStamp = sc.Compile(shaderDir + L"/SeaChurn.hlsl", L"CsChurnTestPattern",
@@ -1069,8 +1434,366 @@ bool RunAtlasSelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDi
     atlas.CommitMappings(gpu, nullptr);
     pass &= verify("after-unmap", false);
 
+    // ---- M9h: THE REDUCTION, on values that are known rather than plausible. The bank is
+    // stamped so every texel of resident tile (tx,ty) carries ty*tilesX+tx+1, and tile (1,1)
+    // was just unmapped. A mip-1 texel well inside a tile's footprint averages four identical
+    // fine texels, so it must equal that tile's stamp exactly -- and inside the unmapped
+    // tile's footprint it must be 0, because a null tile reads zero and averaging zeros is
+    // still zero. That second case is the one that matters: it proves the coarse level
+    // inherits the FIELD's semantics instead of inventing coverage.
+    {
+        atlas.MapAllCoarse();
+        atlas.CommitMappings(gpu, nullptr);
+        auto* mcl = gpu.BeginUpload();
+        ID3D12DescriptorHeap* mheaps[] = {gpu.SrvHeap().Heap()};
+        mcl->SetDescriptorHeaps(1, mheaps);
+        atlas.BuildMips(gpu, sc, shaderDir, mcl);
+        gpu.EndUpload();
+
+        GpuTexture t1;
+        t1.res = atlas.Res();
+        t1.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        t1.format = DXGI_FORMAT_R16_FLOAT;
+        t1.width = 512;
+        t1.height = 256;
+        uint32_t pitch1 = 0;
+        const std::vector<uint8_t> d1 = gpu.ReadbackTexture(t1, &pitch1, 1);
+        uint32_t badM = 0;
+        for (uint32_t ty = 0; ty < atlas.TilesY(); ++ty) {
+            for (uint32_t tx = 0; tx < atlas.TilesX(); ++tx) {
+                // centre of this mip-0 tile's footprint, in mip-1 texels
+                const uint32_t px = (tx * atlas.TileW() + atlas.TileW() / 2) / 2;
+                const uint32_t py = (ty * atlas.TileH() + atlas.TileH() / 2) / 2;
+                const uint16_t* row = reinterpret_cast<const uint16_t*>(
+                    d1.data() + static_cast<size_t>(py) * pitch1);
+                const float v = HalfToFloat(row[px]);
+                const bool resident = atlas.IsResident(tx, ty);
+                const float expect =
+                    resident ? static_cast<float>(ty * atlas.TilesX() + tx + 1) : 0.0f;
+                if (v != expect) {
+                    Log("[atlastest] mip1: tile (%u,%u) = %g, expected %g", tx, ty, v, expect);
+                    ++badM;
+                }
+            }
+        }
+        Log("[atlastest] mip1 reduction: %s (null tiles averaged to 0, as the field says)",
+            badM ? "FAILED" : "every coarse texel is the mean of its four");
+        pass &= (badM == 0);
+    }
+
     Log("[atlastest] resident %u tiles = %.2f MB of %.0f MB virtual", atlas.ResidentCount(),
         atlas.ResidentBytes() / 1048576.0, atlas.VirtualBytes() / 1048576.0);
+
+    // ---- M9h: THE CHAIN. The no-pop contract is a claim about the RESOURCE, so it is proved
+    // on the resource rather than argued from the render. Three things must hold, and the
+    // third is the one everything else leans on.
+    {
+        TileAtlas2D chain;
+        chain.Init(gpu, 2048, 2048, DXGI_FORMAT_R16_FLOAT, L"atlastest.chain", 64, 6);
+        bool okC = true;
+
+        // 1. The chain exists and D3D12 split it where the docs say it does.
+        Log("[atlastest] chain: %u mips (%u standard + %u packed)", chain.MipCount(),
+            chain.StandardMips(), chain.MipCount() - chain.StandardMips());
+        if (chain.MipCount() < 2 || chain.StandardMips() == 0) {
+            Log("[atlastest] chain: FAILED -- no usable mip chain");
+            okC = false;
+        }
+
+        // 2. THE FLOOR. With nothing whatsoever requested, every mip-0 region must still
+        // resolve to a real resident mip -- that is the pinned packed tail doing its job, and
+        // it is what makes a miss impossible. If this fails, sampling can hit NULL and the
+        // "degrade to blur, never garbage" promise is empty.
+        uint32_t worst = 0;
+        for (uint32_t ty = 0; ty < chain.TilesY(); ++ty) {
+            for (uint32_t tx = 0; tx < chain.TilesX(); ++tx) {
+                const uint32_t f = chain.FinestResident(tx, ty);
+                if (f > worst) worst = f;
+                if (f >= chain.MipCount()) okC = false;
+            }
+        }
+        Log("[atlastest] chain: cold floor -- every region resolves, coarsest %u of %u %s",
+            worst, chain.MipCount() - 1, (worst == chain.MipCount() - 1) ? "(the pinned tail)"
+                                                                        : "");
+
+        // 3. A fine tile going resident SHARPENS exactly its own region and nothing else --
+        // residency is the only thing that changed, and it is local.
+        const uint32_t before = chain.FinestResident(0, 0);
+        chain.RequestMap(0, 0, 0);
+        chain.CommitMappings(gpu, nullptr);
+        const uint32_t after = chain.FinestResident(0, 0);
+        const uint32_t neigh = chain.FinestResident(chain.TilesX() - 1, chain.TilesY() - 1);
+        if (!(after == 0 && before > 0)) {
+            Log("[atlastest] chain: FAILED -- mapping mip 0 tile (0,0) moved finest %u -> %u",
+                before, after);
+            okC = false;
+        }
+        if (neigh != worst) {
+            Log("[atlastest] chain: FAILED -- a far region changed (%u -> %u) from a local map",
+                worst, neigh);
+            okC = false;
+        }
+        Log("[atlastest] chain: mapping one mip-0 tile moved its own region %u -> %u, far "
+            "region unchanged at %u",
+            before, after, neigh);
+
+        // 4. And it is reversible: unmapping returns that region to the coarser truth without
+        // ever passing through "nothing".
+        chain.RequestUnmap(0, 0, 0);
+        chain.CommitMappings(gpu, nullptr);
+        const uint32_t back = chain.FinestResident(0, 0);
+        if (back != before) {
+            Log("[atlastest] chain: FAILED -- unmap left finest at %u, expected %u", back,
+                before);
+            okC = false;
+        }
+        if (chain.ResidencyMapSrv() == UINT32_MAX) {
+            Log("[atlastest] chain: FAILED -- no residency map for a chained atlas");
+            okC = false;
+        }
+        Log("[atlastest] chain: %s", okC ? "the floor holds, residency is the only variable"
+                                         : "FAILED");
+        pass &= okC;
+    }
+
+    // ---- M9h: THE ARRAY. Slices are PAGES of the shared (level, x, y) address space, so the
+    // property that matters is ISOLATION: a mapping in one slice must not disturb another.
+    // Get the subresource index wrong (it is mip + slice * mipCount) and everything still
+    // runs, tiles still map, nothing errors -- the pages just quietly alias each other.
+    {
+        TileAtlas2D arr;
+        arr.Init(gpu, 4096, 4096, DXGI_FORMAT_R16_FLOAT, L"atlastest.array", 64, 5, 16);
+        bool okA = true;
+        Log("[atlastest] array: %u slices, %u mips (%u standard); every slice starts INACTIVE "
+            "(slice 0 finest = %s)",
+            arr.Slices(), arr.MipCount(), arr.StandardMips(),
+            arr.FinestResident(0, 0, 0) == TileAtlas2D::kNothingResident ? "nothing" : "?!");
+
+        // 1. An un-activated slice has NO floor and must say so, rather than naming a level
+        // that is NULL. This is the honest-absence case the whole design leans on.
+        if (arr.FinestResident(3, 0, 0) != TileAtlas2D::kNothingResident) {
+            Log("[atlastest] array: FAILED -- inactive slice 3 claims a resident level");
+            okA = false;
+        }
+
+        // 2. Activation gives that slice, and only that slice, a floor.
+        arr.ActivateSlice(gpu, 3);
+        const uint32_t f3 = arr.FinestResident(3, 0, 0);
+        const uint32_t f4 = arr.FinestResident(4, 0, 0);
+        if (f3 == TileAtlas2D::kNothingResident || f4 != TileAtlas2D::kNothingResident) {
+            Log("[atlastest] array: FAILED -- activation leaked (slice3 %u, slice4 %u)", f3, f4);
+            okA = false;
+        }
+
+        // 3. ISOLATION. Map one mip-0 tile in slice 3; slice 5 (also active) must not move.
+        arr.ActivateSlice(gpu, 5);
+        const uint32_t before5 = arr.FinestResident(5, 0, 0);
+        arr.RequestMap(3u, 0u, 0u, 0u);
+        arr.CommitMappings(gpu, nullptr);
+        const uint32_t after3 = arr.FinestResident(3, 0, 0);
+        const uint32_t after5 = arr.FinestResident(5, 0, 0);
+        if (after3 != 0) {
+            Log("[atlastest] array: FAILED -- slice 3 mip0 mapped but finest is %u", after3);
+            okA = false;
+        }
+        if (after5 != before5) {
+            Log("[atlastest] array: FAILED -- slice 5 moved %u -> %u from a slice-3 mapping",
+                before5, after5);
+            okA = false;
+        }
+        Log("[atlastest] array: slice3 floor %u -> %u after its own map; slice5 unmoved at %u",
+            f3, after3, after5);
+        Log("[atlastest] array: %s", okA ? "pages are isolated; slices do not alias" : "FAILED");
+        pass &= okA;
+    }
+
+    // ---- M9h: HOW BIG CAN A RESERVED RESOURCE ACTUALLY BE? A reserved resource buys a huge
+    // VIRTUAL memory space, but memory and EXTENT are different axes and it was not obvious
+    // (to me) which one bounds a planet-scale tree. Measured rather than asserted, because the
+    // answer decides whether one bank can span globe-to-centimetre or whether the tree has to
+    // be addressed across multiple resources. Creating these costs nothing: no tile is mapped,
+    // so nothing is committed.
+    {
+        Log("[atlastest] reserved-resource extent probe (virtual only, nothing committed):");
+        const uint32_t dims[] = {16384u, 32768u, 65536u, 131072u, 1048576u};
+        uint32_t largest = 0;
+        for (uint32_t d : dims) {
+            D3D12_RESOURCE_DESC rd{};
+            rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            rd.Width = d;
+            rd.Height = d;
+            rd.DepthOrArraySize = 1;
+            rd.MipLevels = 1;
+            rd.Format = DXGI_FORMAT_R16_FLOAT;
+            rd.SampleDesc.Count = 1;
+            rd.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
+            rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            Com<ID3D12Resource> probe;
+            const HRESULT hr = gpu.Device()->CreateReservedResource(
+                &rd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&probe));
+            const double mPerTexel = 40.0e6 / double(d);
+            Log("[atlastest]   %7u x %-7u  %s   (Earth: %.2f m/texel)", d, d,
+                SUCCEEDED(hr) ? "created" : "REFUSED ", mPerTexel);
+            if (SUCCEEDED(hr)) largest = d;
+        }
+        Log("[atlastest]   largest accepted: %u (%.2f m/texel over Earth's circumference)",
+            largest, 40.0e6 / double(largest ? largest : 1));
+
+        // ---- Arrays. The docs are explicit that the array axis caps at 2048
+        // (D3D11_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION) and that Texture2DArray tiles PER SLICE
+        // -- "each mip level at a given array slice is a subresource". They are equally
+        // explicit that "exhaustion of GPU virtual address space ... may easily occur first",
+        // and it does: 16384^2 x 2048 x 2B is a TERABYTE of VA, and asking for it REMOVED THE
+        // DEVICE on this driver rather than failing cleanly. So the budget that matters is
+        // total virtual BYTES, not slices -- and the sweep stops at the first refusal instead
+        // of walking further off the cliff.
+
+        // Tiling first, on a shape too small to be risky: does a reserved ARRAY tile per slice?
+        {
+            D3D12_RESOURCE_DESC rd{};
+            rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            rd.Width = 4096;
+            rd.Height = 4096;
+            rd.DepthOrArraySize = 8;
+            rd.MipLevels = 5;
+            rd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            rd.SampleDesc.Count = 1;
+            rd.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
+            rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            Com<ID3D12Resource> arr;
+            const HRESULT ahr = gpu.Device()->CreateReservedResource(
+                &rd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&arr));
+            if (FAILED(ahr)) {
+                Log("[atlastest] array tiling: REFUSED hr=0x%08X", static_cast<unsigned>(ahr));
+            } else {
+                UINT nt = 0, nsub = 40;
+                D3D12_PACKED_MIP_INFO pk{};
+                D3D12_TILE_SHAPE sh{};
+                std::vector<D3D12_SUBRESOURCE_TILING> st(nsub);
+                gpu.Device()->GetResourceTiling(arr.Get(), &nt, &pk, &sh, &nsub, 0, st.data());
+                Log("[atlastest] array tiling: 4096^2 x8 slices x5 mips RGBA16F -> %u tiles, "
+                    "%u subresources, tile %ux%u",
+                    nt, nsub, sh.WidthInTexels, sh.HeightInTexels);
+                Log("[atlastest]   per slice: %u standard mips, %u packed, %u tiles for the "
+                    "tail -- that tail cost MULTIPLIES by every resident slice",
+                    pk.NumStandardMips, pk.NumPackedMips, pk.NumTilesForPackedMips);
+                Log("[atlastest]   slice0 mip0 %ux%u tiles, slice1 mip0 %ux%u tiles: per-slice "
+                    "tiling %s",
+                    st[0].WidthInTiles, st[0].HeightInTiles, st[5].WidthInTiles,
+                    st[5].HeightInTiles,
+                    (st[5].WidthInTiles == st[0].WidthInTiles) ? "CONFIRMED" : "DIFFERS");
+            }
+        }
+
+        // Now the VA ceiling, in total virtual bytes, stopping at the first refusal.
+        Log("[atlastest] virtual-address ceiling sweep (stops at first refusal):");
+        const uint64_t gb = 1024ull * 1024ull * 1024ull;
+        // 1 TB is DELIBERATELY ABSENT. Measured once: 2048 slices of 16384^2 does not refuse
+        // cleanly, it returns DXGI_ERROR_DEVICE_REMOVED -- and re-discovering that on every
+        // --selftest run would take the device down every run and mask whatever ran after it
+        // (it did: the floor probe below reported five spurious REFUSEDs). The ceiling is
+        // recorded here rather than re-measured: 512 GB accepted, 1 TB removes the device.
+        const uint64_t want[] = {16 * gb, 64 * gb, 128 * gb, 256 * gb, 512 * gb};
+        uint64_t okVa = 0;
+        for (uint64_t bytes : want) {
+            const uint32_t slices = static_cast<uint32_t>(bytes / (16384ull * 16384ull * 2ull));
+            if (slices == 0 || slices > 2048) continue;
+            D3D12_RESOURCE_DESC rd{};
+            rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            rd.Width = 16384;
+            rd.Height = 16384;
+            rd.DepthOrArraySize = static_cast<UINT16>(slices);
+            rd.MipLevels = 1;
+            rd.Format = DXGI_FORMAT_R16_FLOAT;
+            rd.SampleDesc.Count = 1;
+            rd.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
+            rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            Com<ID3D12Resource> probe;
+            const HRESULT hr = gpu.Device()->CreateReservedResource(
+                &rd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&probe));
+            Log("[atlastest]   %4llu GB virtual (%u slices)  %s", bytes / gb, slices,
+                SUCCEEDED(hr) ? "created" : "REFUSED -- stopping");
+            if (FAILED(hr)) break;
+            okVa = bytes;
+        }
+        Log("[atlastest]   virtual address space is the budget, not the slice count: %llu GB "
+            "accepted in one reserved array",
+            okVa / gb);
+
+        // ---- WHAT DOES THE FLOOR COST? Every active page pins one, so this multiplies by the
+        // number of pages held at once and could easily become the dominant memory cost. The
+        // answer turns on whether a shape HAS a packed tail: a tail is typically a single 64 KB
+        // tile, but a shape without one pins its coarsest STANDARD mip instead, which is a
+        // whole mip level of tiles. Same guarantee, wildly different price.
+        // ---- M9h: THE POOL CAP. The sample this design descends from budgets its pool and lives
+    // inside it; this atlas simply created another heap whenever it ran dry. Prove the cap
+    // holds, and prove that hitting it is LOUD -- a refused mapping is a hole in the field,
+    // and a hole nobody counted is the failure mode worth preventing.
+    {
+        TileAtlas2D cap;
+        cap.Init(gpu, 2048, 2048, DXGI_FORMAT_R16_FLOAT, L"atlastest.cap", 8);
+        cap.SetPoolCapBytes(16 * 64 * 1024);   // 16 tiles, deliberately far too small
+        for (uint32_t ty = 0; ty < cap.TilesY(); ++ty) {
+            for (uint32_t tx = 0; tx < cap.TilesX(); ++tx) cap.RequestMap(tx, ty);
+        }
+        cap.CommitMappings(gpu, nullptr);
+        const uint32_t asked = cap.TilesX() * cap.TilesY();
+        const bool held = cap.PoolTiles() <= cap.PoolCapTiles();
+        const bool counted = cap.RefusedMaps() == (asked - cap.ResidentCount());
+        Log("[atlastest] pool cap: asked %u tiles, cap %u, resident %u, refused %u -- %s",
+            asked, cap.PoolCapTiles(), cap.ResidentCount(), cap.RefusedMaps(),
+            (held && counted) ? "cap held and every refusal counted" : "FAILED");
+        if (!held || !counted) pass = false;
+    }
+
+    Log("[atlastest] floor cost per active page (pinned tail, or coarsest standard mip):");
+        struct Shape { uint32_t w, h, mips; DXGI_FORMAT f; const char* n; };
+        const Shape shapes[] = {
+            {16384, 16384, 15, DXGI_FORMAT_R16_FLOAT, "16384^2 R16F   full chain"},
+            {16384, 16384, 15, DXGI_FORMAT_R16G16B16A16_FLOAT, "16384^2 RGBA16F full chain"},
+            {16384, 16384, 8, DXGI_FORMAT_R16_FLOAT, "16384^2 R16F   8 mips"},
+            {4096, 4096, 5, DXGI_FORMAT_R16G16B16A16_FLOAT, "4096^2 RGBA16F 5 mips"},
+            {4096, 4096, 12, DXGI_FORMAT_R16G16B16A16_FLOAT, "4096^2 RGBA16F full chain"},
+        };
+        for (const Shape& sp : shapes) {
+            D3D12_RESOURCE_DESC rd{};
+            rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            rd.Width = sp.w;
+            rd.Height = sp.h;
+            rd.DepthOrArraySize = 1;
+            rd.MipLevels = static_cast<UINT16>(sp.mips);
+            rd.Format = sp.f;
+            rd.SampleDesc.Count = 1;
+            rd.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
+            rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            Com<ID3D12Resource> r;
+            if (FAILED(gpu.Device()->CreateReservedResource(
+                    &rd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&r)))) {
+                Log("[atlastest]   %-28s REFUSED", sp.n);
+                continue;
+            }
+            UINT nt = 0, nsub = sp.mips;
+            D3D12_PACKED_MIP_INFO pk{};
+            D3D12_TILE_SHAPE sh{};
+            std::vector<D3D12_SUBRESOURCE_TILING> st(nsub);
+            gpu.Device()->GetResourceTiling(r.Get(), &nt, &pk, &sh, &nsub, 0, st.data());
+            const uint32_t stdMips = pk.NumStandardMips ? pk.NumStandardMips : sp.mips;
+            uint32_t floorTiles;
+            const char* which;
+            if (pk.NumPackedMips > 0) {
+                floorTiles = pk.NumTilesForPackedMips;
+                which = "tail";
+            } else {
+                floorTiles = st[stdMips - 1].WidthInTiles * st[stdMips - 1].HeightInTiles;
+                which = "coarsest std mip";
+            }
+            const double kb = floorTiles * 64.0;
+            Log("[atlastest]   %-28s floor = %4u tiles (%s) = %7.0f KB;  256 pages = %6.1f MB, "
+                "1024 pages = %6.1f MB",
+                sp.n, floorTiles, which, kb, kb * 256.0 / 1024.0, kb * 1024.0 / 1024.0);
+        }
+    }
+
     Log("[atlastest] ---- %s ----", pass ? "PASS" : "FAIL");
     return pass;
 }

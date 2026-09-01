@@ -121,6 +121,7 @@ void MsMain(uint gtid : SV_GroupThreadID, uint gid : SV_GroupID,
         const float disp = lerp(dispWater, dispLand, landness);
 
         VsOut o;
+        o.mid = gid;   // M9b: this record's index, for PsMeshlet's tint
         o.dir = dir;
         o.h = h;
         if (fine) {

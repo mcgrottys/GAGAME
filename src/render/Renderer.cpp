@@ -35,7 +35,12 @@ void Renderer::CreateRootSignature() {
     // really is (reading a 2D slot through gTex3D would be invalid; nothing does).
     // t0, space3 (M6e): the heap a third time, as TextureCube -- the streamed planet surfaces
     // (Mars's rescued pyramids, Google's Earth) and their residency-map cubes live there.
-    D3D12_DESCRIPTOR_RANGE1 ranges[3]{};
+    // t0, space4 (M9h): the heap a fourth time, as Texture2D<uint> -- residency maps are
+    // R8_UINT, and "the finest level resident here" is an INDEX. Read through the float view it
+    // would come back as a normalized fraction, so a level-3 map would sample as 0.0118 and the
+    // clamp would silently do nothing.
+    // t0, space5 (M9j): the heap as Texture2DArray -- paged GA banks, whose slices are pages.
+    D3D12_DESCRIPTOR_RANGE1 ranges[5]{};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     ranges[0].NumDescriptors = UINT_MAX;   // unbounded; requires resource binding tier 3
     ranges[0].BaseShaderRegister = 0;
@@ -46,6 +51,10 @@ void Renderer::CreateRootSignature() {
     ranges[1].RegisterSpace = 2;
     ranges[2] = ranges[0];
     ranges[2].RegisterSpace = 3;
+    ranges[3] = ranges[0];
+    ranges[3].RegisterSpace = 4;
+    ranges[4] = ranges[0];
+    ranges[4].RegisterSpace = 5;
 
     D3D12_ROOT_PARAMETER1 params[5]{};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -62,7 +71,7 @@ void Renderer::CreateRootSignature() {
     params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[3].DescriptorTable.NumDescriptorRanges = 3;
+    params[3].DescriptorTable.NumDescriptorRanges = 5;
     params[3].DescriptorTable.pDescriptorRanges = ranges;
     params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 

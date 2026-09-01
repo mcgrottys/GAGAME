@@ -331,6 +331,40 @@ void GlobeLayer::InitClouds(Gpu& gpu, ShaderCompiler& sc) {
 
 // M6d: the sparse Mv2 wind bank. (The NE 15s relief window that used to load here is a LAYER
 // in the composed earth.height stack now -- painted at compose time, not blended per pixel.)
+void GlobeLayer::ApplyWindDemand(Gpu& gpu, const std::vector<uint8_t>& derived, uint32_t dTx,
+                                 uint32_t dTy) {
+    const uint32_t tX = m_windBank.TilesX(), tY = m_windBank.TilesY();
+    if (m_windPhys.empty() || dTx != tX || dTy != tY || derived.size() != size_t(tX) * tY) {
+        Log("[globe] wind demand: signature grid %ux%u != bank tiles %ux%u -- closure not "
+            "applied (a demand on the wrong lattice is worse than none)",
+            dTx, dTy, tX, tY);
+        return;
+    }
+    uint32_t alg = 0, phys = 0, both = 0;
+    for (uint32_t ty = 0; ty < tY; ++ty) {
+        for (uint32_t tx = 0; tx < tX; ++tx) {
+            const size_t i = size_t(ty) * tX + tx;
+            const bool a = derived[i] != 0, p = m_windPhys[i] != 0;
+            alg += a ? 1u : 0u;
+            phys += p ? 1u : 0u;
+            const bool want = a && p;
+            both += want ? 1u : 0u;
+            if (want && !m_windBank.IsResident(tx, ty)) m_windBank.RequestMap(tx, ty);
+            if (!want && m_windBank.IsResident(tx, ty)) m_windBank.RequestUnmap(tx, ty);
+        }
+    }
+    std::vector<uint32_t> fresh;
+    m_windBank.CommitMappings(gpu, &fresh);
+    Log("[globe] wind Mv2 residency DRIVEN: algebra %u, physics %u, resident %u of %u tiles",
+        alg, phys, both, tX * tY);
+    if (alg == tX * tY) {
+        Log("[globe]   note: the closure demands EVERY tile here. At 6 tiles across a planet "
+            "one tile spans 60 deg, and wind is non-zero somewhere in all of them -- the "
+            "bound is correct and uninformative. Sparsity needs a finer signature lattice, "
+            "not a better closure.");
+    }
+}
+
 void GlobeLayer::InitNeAndWind(Gpu& gpu, ShaderCompiler& sc) {
     if (m_globe->WindNx() <= 0 || m_globe->WindU().empty()) return;
 
@@ -355,6 +389,7 @@ void GlobeLayer::InitNeAndWind(Gpu& gpu, ShaderCompiler& sc) {
 
     m_windBank.Init(gpu, wn, wm, DXGI_FORMAT_R16G16B16A16_FLOAT,
                     L"globe.windMv2 (sparse: resident where storms live)");
+    m_windPhys.assign(size_t(m_windBank.TilesX()) * m_windBank.TilesY(), 0);
 
     // Residency from a CPU curl estimate: the sparsity pattern IS the weather.
     const auto& U = m_globe->WindU();
@@ -391,6 +426,9 @@ void GlobeLayer::InitNeAndWind(Gpu& gpu, ShaderCompiler& sc) {
                 m_windBank.RequestMap(tx, ty);
                 ++resident;
             }
+            // M9h: keep the physics verdict. The Cayley closure arrives later (it needs the
+            // published signatures) and is AND-ed with this -- algebra bounds, physics tightens.
+            m_windPhys[size_t(ty) * m_windBank.TilesX() + tx] = active ? 1u : 0u;
         }
     }
     std::vector<uint32_t> fresh;
@@ -546,6 +584,22 @@ bool GlobeLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
         return false;
     }
     m_pso = pso;
+    // M9b: wireframe twin of the CDLOD fallback, so --wireframe means the same thing on a
+    // machine without mesh shaders.
+    d.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
+    Com<ID3D12PipelineState> psoWire;
+    if (SUCCEEDED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&psoWire)))) {
+        m_psoWire = psoWire;
+    }
+    ShaderBlob psM = sc.Compile(path, L"PsMeshlet", L"ps_6_0");
+    if (psM.Valid()) {
+        d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        d.PS = {psM.Data(), psM.Size()};
+        Com<ID3D12PipelineState> psoM;
+        if (SUCCEEDED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&psoM)))) {
+            m_psoMeshlet = psoM;
+        }
+    }
     return true;
 }
 
@@ -615,6 +669,29 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
         return false;
     }
     m_msPso = pso;
+    // M9b: the same pipeline in WIREFRAME. Identical shaders and identical displacement --
+    // only the raster fill differs -- so what the lines show is exactly the geometry the
+    // solid pass rasterizes, meshlet seams and all. A failure here is not fatal: the solid
+    // path stands and the toggle simply has nothing to switch to.
+    stream.rast.val.FillMode = D3D12_FILL_MODE_WIREFRAME;
+    Com<ID3D12PipelineState> psoWire;
+    if (SUCCEEDED(dev2->CreatePipelineState(&sd, IID_PPV_ARGS(&psoWire)))) {
+        m_msPsoWire = psoWire;
+    } else {
+        Log("[globe] mesh WIREFRAME PSO creation failed (solid path unaffected)");
+    }
+    // ...and solid again, with the meshlet-identity pixel shader.
+    ShaderBlob psM = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"PsMeshlet", L"ps_6_5");
+    if (psM.Valid()) {
+        stream.rast.val.FillMode = D3D12_FILL_MODE_SOLID;
+        stream.ps.val = {psM.Data(), psM.Size()};
+        Com<ID3D12PipelineState> psoM;
+        if (SUCCEEDED(dev2->CreatePipelineState(&sd, IID_PPV_ARGS(&psoM)))) {
+            m_msPsoMeshlet = psoM;
+        } else {
+            Log("[globe] mesh MESHLET-TINT PSO creation failed (solid path unaffected)");
+        }
+    }
     return true;
 }
 
@@ -921,6 +998,39 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     } else if (m_meshletDrops == 0) {
         m_dropsReported = false;
     }
+    if (meshStats && ++m_meshStatWalks == 8) {
+        // Log-spaced distance buckets from the eye. Every record carries its own
+        // camera-relative anchor and its node's ground span, so cell = arc/32 is the
+        // vertex spacing this meshlet actually emits -- no inference from pixels.
+        const double edge[9] = {0.0, 10.0, 25.0, 60.0, 150.0, 400.0, 1000.0, 3000.0, 1e30};
+        size_t n[8] = {};
+        double cmin[8], cmax[8], csum[8] = {};
+        for (int b = 0; b < 8; ++b) { cmin[b] = 1e30; cmax[b] = 0.0; }
+        for (const MeshletRec& mr : m_meshlets) {
+            const double d = std::sqrt(static_cast<double>(mr.anchorRel[0]) * mr.anchorRel[0] +
+                                       static_cast<double>(mr.anchorRel[1]) * mr.anchorRel[1] +
+                                       static_cast<double>(mr.anchorRel[2]) * mr.anchorRel[2]);
+            const double cell = mr.arc / 32.0;
+            for (int b = 0; b < 8; ++b) {
+                if (d >= edge[b] && d < edge[b + 1]) {
+                    ++n[b];
+                    csum[b] += cell;
+                    cmin[b] = (std::min)(cmin[b], cell);
+                    cmax[b] = (std::max)(cmax[b], cell);
+                    break;
+                }
+            }
+        }
+        Log("[meshstats] %zu records, %u dropped (cap %u). cell = node arc / 32:",
+            m_meshlets.size(), m_meshletDrops, kMaxMeshlets);
+        for (int b = 0; b < 8; ++b) {
+            if (!n[b]) continue;
+            Log("[meshstats]   d %6.0f-%-7.0f m  n %6zu  cell mean %7.2f  min %7.2f  "
+                "max %7.2f m",
+                edge[b], (edge[b + 1] > 1e29) ? 99999.0 : edge[b + 1], n[b],
+                csum[b] / n[b], cmin[b], cmax[b]);
+        }
+    }
 
     const double r = std::sqrt(m_camPos[0] * m_camPos[0] + m_camPos[1] * m_camPos[1] +
                                m_camPos[2] * m_camPos[2]);
@@ -946,6 +1056,11 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.bankA[0] = m_bankBase;
     m_cb.bankA[1] = 6.0f;
     m_cb.bankA[2] = static_cast<float>(debugLens);
+    m_cb.lensU[0] = m_lensSrv;   // M9h: grad(flow) bank for lens 7
+    m_cb.lensU[1] = m_lensResMapSrv;
+    for (int i = 0; i < 4; ++i) m_cb.lensA[i] = m_lensGeo[i];
+    for (int i = 0; i < 4; ++i) m_cb.lensB[i] = m_lensChain[i];
+    for (int i = 0; i < 4; ++i) m_cb.lensR[i] = m_lensRegion[i];
     m_cb.bankA[3] = sliceOn ? 1.0f : 0.0f;
     m_cb.bankC[3] = sliceD;
     memcpy(m_cb.bankOrg01, &m_bankOrg[0], 16);
@@ -957,6 +1072,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         m_cb.bankB[i] = m_bankPatch[i];
         m_cb.bankC[i] = m_bankK[i];
         m_cb.bankD[i] = m_bankRms[i];   // M8: peak-shaping envelope reference
+        m_cb.bankFold[i] = m_bankFold[i];   // M9c: the fold's own wavenumber
     }
     m_cb.bankB[3] = m_bankExag;
     m_cb.bankD[3] = foamOpacity;   // M8: peak foam opacity (data/wave_scene.json)
@@ -1097,13 +1213,19 @@ void GlobeLayer::Render(const FrameContext& ctx) {
         GpuBuffer& rec = m_recBuf[ctx.gpu->FrameIndex()];
         const size_t bytes = m_meshlets.size() * sizeof(MeshletRec);
         memcpy(rec.cpu, m_meshlets.data(), bytes);
-        ctx.cl->SetPipelineState(m_msPso.Get());
+        ID3D12PipelineState* msSel = m_msPso.Get();
+        if (surfaceDebug == 1 && m_msPsoWire) msSel = m_msPsoWire.Get();
+        else if (surfaceDebug == 2 && m_msPsoMeshlet) msSel = m_msPsoMeshlet.Get();
+        ctx.cl->SetPipelineState(msSel);
         ctx.cl->SetGraphicsRootConstantBufferView(1, cbVa);
         ctx.cl->SetGraphicsRootShaderResourceView(2, rec.res->GetGPUVirtualAddress());
         m_cl6->DispatchMesh(static_cast<UINT>(m_meshlets.size()), 1, 1);
         return;
     }
-    ctx.cl->SetPipelineState(m_pso.Get());
+    ID3D12PipelineState* sel = m_pso.Get();
+    if (surfaceDebug == 1 && m_psoWire) sel = m_psoWire.Get();
+    else if (surfaceDebug == 2 && m_psoMeshlet) sel = m_psoMeshlet.Get();
+    ctx.cl->SetPipelineState(sel);
     ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx.cl->SetGraphicsRootConstantBufferView(1, cbVa);
     // Root param 2 normally carries the FieldSet; the renderer re-binds it every frame and the

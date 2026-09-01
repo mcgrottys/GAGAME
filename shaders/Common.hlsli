@@ -66,6 +66,16 @@ static const float3 SUN_IRR_C = float3(1.350f, 1.283f, 1.161f);
 StructuredBuffer<FieldDesc> gFields : register(t0, space0);
 #endif
 Texture2D gTex[] : register(t0, space1);      // unbounded; needs resource binding tier 3
+// M9h: the same descriptors seen as UINT. A residency map is R8_UINT -- "the finest level
+// resident here" is an index, not a quantity, and reading it through the float view would
+// return a normalized fraction instead of the level. Same heap, same slots, different
+// interpretation; only the maps are ever read through this one.
+Texture2D<uint> gTexU[] : register(t0, space4);
+// M9j: the heap a FIFTH time, as Texture2DArray. A paged GA bank is one reserved array whose
+// SLICES are pages of the shared (level, x, y) space, so a consumer samples page and level from
+// ONE view -- which is what lets two pages composite without a second SRV or a branch on which
+// source owns the pixel.
+Texture2DArray gTexArr[] : register(t0, space5);
 Texture3D gTex3D[] : register(t0, space2);    // M6c: the SAME heap as volumes (cloud banks)
 TextureCube gTexCube[] : register(t0, space3);   // M6e: streamed planet surfaces + their
                                                  // residency-map cubes (read only cube slots)

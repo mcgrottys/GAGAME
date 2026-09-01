@@ -45,12 +45,16 @@ struct WaterSceneConfig {
                                         // to the dequant tables at upload (cache stays
                                         // raw physics; ProbeAt reads the same table so
                                         // the 9b/9c twin holds). vqview shipped 1.15.
-    float bankTexelM = 2.4f;            // M8h: wave bank ring-0 texel (m). The fold law
+    float bankTexelM = 1.2f;            // M9c: 1.2, not 2.4. The fold law
                                         // sheds any band the ring undersamples, so this
-                                        // caps which wavelengths become GEOMETRY: 4.8
-                                        // half-folded the 16 m solved comps; 2.4 lets
-                                        // lambda >= ~5 m articulate fully (vqview parity
-                                        // -- its finer bands were normals-only too).
+                                        // caps which wavelengths become GEOMETRY, and a band
+                                        // contributes nothing at all until texel < lambda/2.
+                                        // 4.8 half-folded the 16 m solved comps; 2.4 left the
+                                        // CHOP band at exactly zero even with the M9c
+                                        // energy-weighted fold wavelength (3.55 m needs
+                                        // < 1.77 m); 1.2 matches the mesh's own ~1.19 m
+                                        // vertex spacing, so neither side wastes the other,
+                                        // and puts 39% of the chop into geometry.
                                         // Construction-time: needs a restart, not a
                                         // hot-reload. Ring 0 span = 512 * this.
 
@@ -65,6 +69,11 @@ struct WaterSceneConfig {
     float foamOpacity = 0.72f;    // peak foam opacity (a thin aerated layer, not paint)
     float ringBlendTexels = 48.0f;   // bank ring cross-fade width (the interpolation
                                      // that keeps ring handovers from tiling visibly)
+    float bandFoldWeight = 1.0f;     // M9c: how far the FOLD's per-band wavelength follows
+                                     // the live spectrum instead of the band's geometric
+                                     // midpoint. Cascade 2 spans lambda 0.41..12 m; judging
+                                     // a 4.6 m wind sea as 2.2 m throws it out of geometry.
+                                     // 0 = the shipped constant, byte for byte.
     float windSeaFill = 1.0f;        // M9a: gain on the Pierson-Moskowitz wind sea
                                      // synthesised from the GFS wind on hours where the
                                      // forecast's partitioning reports NO wind sea. Those
@@ -121,7 +130,7 @@ inline void WriteDefaultWaterScene(const char* path) {
         "    \"gammaHs\": 0.60, \"minSamplesPerLambda\": 8.0,\n"
         "    \"tideBucketM\": 0.25, \"currentBucketMs\": 0.10,\n"
         "    \"featherM\": 120.0, \"chop\": 1.1, \"exag\": 1.15,\n"
-        "    \"bankTexelM\": 2.4\n"
+        "    \"bankTexelM\": 1.2\n"
         "  },\n"
         "  \"closures\": {\n"
         "    \"shedSteepCap\": 0.44, \"shedMssCeil\": 0.09,\n"
@@ -131,6 +140,7 @@ inline void WriteDefaultWaterScene(const char* path) {
         "    \"foamOpacity\": 0.72,\n"
         "    \"ringBlendTexels\": 48.0,\n"
         "    \"windSeaFill\": 1.0,\n"
+        "    \"bandFoldWeight\": 1.0,\n"
         "    \"buoyAssimAgeH\": 6.0, \"buoyAssimGainMax\": 1.8,\n"
         "    \"causticStrength\": 0.6,\n"
         "    \"waterOptics\": true,\n"
@@ -204,6 +214,8 @@ inline bool LoadWaterScene(const char* path, WaterSceneConfig& out) {
         out.ringBlendTexels =
             static_cast<float>(c->Num("ringBlendTexels", out.ringBlendTexels));
         out.windSeaFill = static_cast<float>(c->Num("windSeaFill", out.windSeaFill));
+        out.bandFoldWeight =
+            static_cast<float>(c->Num("bandFoldWeight", out.bandFoldWeight));
         out.buoyAssimAgeH = static_cast<float>(c->Num("buoyAssimAgeH", out.buoyAssimAgeH));
         out.buoyAssimGainMax =
             static_cast<float>(c->Num("buoyAssimGainMax", out.buoyAssimGainMax));

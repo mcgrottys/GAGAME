@@ -75,6 +75,11 @@ public:
     static constexpr uint32_t kFrameCount = 2;
     static constexpr uint32_t kSrvHeapCapacity = 4096;
 
+private:
+    uint64_t m_dedicatedVram = 0;
+
+public:
+
     // hwnd may be null: that is headless mode, which creates no swapchain. Headless exists so the
     // renderer (and the tile self-test) can be verified from a shell with no desktop session.
     void Init(HWND hwnd, uint32_t width, uint32_t height, bool wantDebugLayer);
@@ -93,6 +98,8 @@ public:
     D3D12_TILED_RESOURCES_TIER TiledTier() const { return m_tiledTier; }
 
     DescriptorHeap& SrvHeap() { return m_srvHeap; }
+    // What the adapter actually has, for budget accounting across banks.
+    uint64_t DedicatedVramBytes() const { return m_dedicatedVram; }
     DescriptorHeap& RtvHeap() { return m_rtvHeap; }
     DescriptorHeap& DsvHeap() { return m_dsvHeap; }
 
@@ -120,17 +127,22 @@ public:
     void UploadTexture(GpuTexture& tex, const void* rows, uint32_t srcRowPitchBytes,
                        uint32_t mip = 0);
     uint32_t CreateSrv(ID3D12Resource* res, DXGI_FORMAT fmt);
+    // M9h: a sliced reserved bank needs an ARRAY view, or the shader only ever sees slice 0.
+    uint32_t CreateSrvArray(ID3D12Resource* res, DXGI_FORMAT fmt, uint32_t mips,
+                            uint32_t slices);
     uint32_t CreateSrv3D(ID3D12Resource* res, DXGI_FORMAT fmt);
     uint32_t CreateStructuredBufferSrv(ID3D12Resource* res, uint32_t numElements,
                                        uint32_t strideBytes);
     // UAV for a texture (2D or 3D decided by `dim`). Allocated from the shader-visible heap so
     // compute passes can reach it through a descriptor table.
-    uint32_t CreateTextureUav(ID3D12Resource* res, DXGI_FORMAT fmt, D3D12_UAV_DIMENSION dim);
+    uint32_t CreateTextureUav(ID3D12Resource* res, DXGI_FORMAT fmt, D3D12_UAV_DIMENSION dim,
+                              uint32_t mipSlice = 0);
 
     void Transition(ID3D12GraphicsCommandList* cl, GpuTexture& tex, D3D12_RESOURCE_STATES to);
 
     // ---- readback: copies a texture to system memory. Synchronous; only used by --dump.
-    std::vector<uint8_t> ReadbackTexture(GpuTexture& tex, uint32_t* outRowPitch);
+    std::vector<uint8_t> ReadbackTexture(GpuTexture& tex, uint32_t* outRowPitch,
+                                         uint32_t mip = 0);
     // M7l: one texel of one subresource -- the hypervisor's compose-tile cross-check.
     // Returns up to 16 bytes of the texel in out; true on success.
     bool ReadbackTexel(ID3D12Resource* res, uint32_t subresource, uint32_t x, uint32_t y,

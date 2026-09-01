@@ -79,6 +79,7 @@ void Gpu::Init(HWND hwnd, uint32_t width, uint32_t height, bool wantDebugLayer) 
         if (ad.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) { adapter = nullptr; continue; }
         if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0,
                                         IID_PPV_ARGS(&m_device)))) {
+            m_dedicatedVram = ad.DedicatedVideoMemory;
             Log("[gpu] adapter: %S  (%llu MB dedicated)", ad.Description,
                 static_cast<uint64_t>(ad.DedicatedVideoMemory / (1024 * 1024)));
             break;
@@ -407,6 +408,19 @@ uint32_t Gpu::CreateSrv(ID3D12Resource* res, DXGI_FORMAT fmt) {
     return slot;
 }
 
+uint32_t Gpu::CreateSrvArray(ID3D12Resource* res, DXGI_FORMAT fmt, uint32_t mips,
+                             uint32_t slices) {
+    const uint32_t slot = m_srvHeap.Alloc();
+    D3D12_SHADER_RESOURCE_VIEW_DESC s{};
+    s.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    s.Format = fmt;
+    s.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    s.Texture2DArray.MipLevels = mips;
+    s.Texture2DArray.ArraySize = slices;
+    m_device->CreateShaderResourceView(res, &s, m_srvHeap.Cpu(slot));
+    return slot;
+}
+
 uint32_t Gpu::CreateSrv3D(ID3D12Resource* res, DXGI_FORMAT fmt) {
     const uint32_t slot = m_srvHeap.Alloc();
     D3D12_SHADER_RESOURCE_VIEW_DESC s{};
@@ -431,13 +445,17 @@ uint32_t Gpu::CreateStructuredBufferSrv(ID3D12Resource* res, uint32_t numElement
     return slot;
 }
 
-uint32_t Gpu::CreateTextureUav(ID3D12Resource* res, DXGI_FORMAT fmt, D3D12_UAV_DIMENSION dim) {
+uint32_t Gpu::CreateTextureUav(ID3D12Resource* res, DXGI_FORMAT fmt, D3D12_UAV_DIMENSION dim,
+                               uint32_t mipSlice) {
     const uint32_t slot = m_srvHeap.Alloc();
     D3D12_UNORDERED_ACCESS_VIEW_DESC u{};
     u.Format = fmt;
     u.ViewDimension = dim;
+    // M9h: a mip-chained reserved resource is written one LEVEL at a time, so a UAV has to be
+    // able to name which. Texture2D defaults to slice 0, which is every pre-chain call site.
+    if (dim == D3D12_UAV_DIMENSION_TEXTURE2D) u.Texture2D.MipSlice = mipSlice;
     if (dim == D3D12_UAV_DIMENSION_TEXTURE3D) {
-        u.Texture3D.MipSlice = 0;
+        u.Texture3D.MipSlice = mipSlice;
         u.Texture3D.FirstWSlice = 0;
         u.Texture3D.WSize = UINT(-1);   // all depth slices
     }
@@ -521,12 +539,15 @@ bool Gpu::ReadbackTexel(ID3D12Resource* res, uint32_t subresource, uint32_t x, u
     return true;
 }
 
-std::vector<uint8_t> Gpu::ReadbackTexture(GpuTexture& tex, uint32_t* outRowPitch) {
+std::vector<uint8_t> Gpu::ReadbackTexture(GpuTexture& tex, uint32_t* outRowPitch,
+                                          uint32_t mip) {
     D3D12_RESOURCE_DESC d = tex.res->GetDesc();
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
     UINT numRows = 0;
     UINT64 rowBytes = 0, total = 0;
-    m_device->GetCopyableFootprints(&d, 0, 1, 0, &fp, &numRows, &rowBytes, &total);
+    // M9h: a mip-chained bank is verified one LEVEL at a time, so the readback has to be
+    // able to name which subresource it means.
+    m_device->GetCopyableFootprints(&d, mip, 1, 0, &fp, &numRows, &rowBytes, &total);
 
     Com<ID3D12Resource> rb;
     const auto hp = HeapProps(D3D12_HEAP_TYPE_READBACK);
@@ -552,7 +573,7 @@ std::vector<uint8_t> Gpu::ReadbackTexture(GpuTexture& tex, uint32_t* outRowPitch
     dst.PlacedFootprint = fp;
     src.pResource = tex.res.Get();
     src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    src.SubresourceIndex = 0;
+    src.SubresourceIndex = mip;
     cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
     if (was != D3D12_RESOURCE_STATE_COPY_SOURCE) {
         D3D12_RESOURCE_BARRIER br{};

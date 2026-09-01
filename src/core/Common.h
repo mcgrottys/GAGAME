@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <wrl/client.h>
 #include <cstdint>
+#include <cstring>
 #include <cstdio>
 #include <string>
 #include <stdexcept>
@@ -55,6 +56,37 @@ inline std::string HrString(HRESULT hr) {
 template <class T> constexpr T AlignUp(T v, T a) { return (v + a - 1) & ~(a - 1); }
 
 // Half -> float, for CPU-side verification readbacks of RGBA16F/R16F targets.
+// M9j: float32 -> half, for composed pages. UploadTexture copies RAW BYTES, so handing a
+// float32 buffer to an RGBA16F bank writes garbage that still reports as a successful upload.
+//
+// NAMED APART from Compositor.cpp's file-local FloatToHalf on purpose, and it is not a
+// duplicate to be merged away: that one FLUSHES DENORMALS TO ZERO, which is fine for the
+// heights it converts and fatal here. Divergence and vorticity run around 1e-5 /s, below
+// half's smallest NORMAL (6.1e-5) -- flushed, the entire field would land on zero and the page
+// would render as "irrotational everywhere", which is a lie with no symptom.
+inline uint16_t F32ToHalf(float f) {
+    uint32_t x;
+    std::memcpy(&x, &f, 4);
+    const uint32_t sign = (x >> 16) & 0x8000u;
+    int32_t exp = int32_t((x >> 23) & 0xFF) - 127 + 15;
+    uint32_t man = x & 0x7FFFFFu;
+    if (((x >> 23) & 0xFF) == 0xFF) {          // inf / nan
+        return uint16_t(sign | 0x7C00u | (man ? 0x200u : 0u));
+    }
+    if (exp >= 31) return uint16_t(sign | 0x7C00u);   // overflow -> inf
+    if (exp <= 0) {                                   // subnormal or zero
+        if (exp < -10) return uint16_t(sign);
+        man |= 0x800000u;
+        const uint32_t shift = uint32_t(14 - exp);
+        uint32_t h = man >> shift;
+        if ((man >> (shift - 1)) & 1u) ++h;           // round to nearest
+        return uint16_t(sign | h);
+    }
+    uint16_t h = uint16_t(sign | uint32_t(exp << 10) | (man >> 13));
+    if ((man & 0x1FFFu) > 0x1000u) ++h;               // round to nearest
+    return h;
+}
+
 inline float HalfToFloat(uint16_t h) {
     const uint32_t s = static_cast<uint32_t>(h & 0x8000) << 16;
     uint32_t e = (h >> 10) & 0x1F;

@@ -12,6 +12,11 @@
 //
 //  The window title is the HUD: sim clock (UTC), time scale, focus-station tide, fit RMS.
 // ================================================================================================
+#include <sys/stat.h>
+
+#include "compose/DomainSource.h"
+#include "core/CurrentFieldLoader.h"
+#include "core/GeoGridLoader.h"
 #include "core/Gpu.h"
 #include "core/Image.h"
 #include "core/PixEvents.h"
@@ -107,6 +112,14 @@ struct Options {
     float stormHs = 0, stormTp = 10, stormDir = 90;   // --storm sandbox override
     bool seaVerify = false;           // measure rendered Hs from the displacement textures
     bool viz = false;                 // start with the atlas residency visualizer on
+    int surfaceDebug = 0;             // G / --wireframe / --meshlets: 0 shipped, 1 lines,
+                                      // 2 one flat colour per amplification record
+    std::string loadField;            // --load-field PATH: run a file through the loader
+                                      // plugin into a sparse bank and report what it cost
+    bool meshStats = false;           // --mesh-stats: one meshlet cell-size-vs-distance table
+    bool dumpBoth = false;            // --dump-both: write out.png AND out_wire.png from the
+                                      // SAME instant (one extra frame, sim clock frozen), so
+                                      // shading and geometry are compared without a re-run
     bool stencil = false;             // M6i --stencil: coast/graticule alignment overlay
     bool msSurface = true;            // M6j: mesh-shader planet surface (--no-ms falls back)
     bool albedo = false;              // M6j: raw-texture lens (no lighting/atmosphere)
@@ -237,7 +250,7 @@ Options ParseArgs(int argc, char** argv) {
             const std::string n = next("worldxz");
             o.lens = n == "worldxz" ? 1 : n == "winuv" ? 2 : n == "mip" ? 3
                      : n == "ring" ? 4 : n == "cascade" ? 5
-                     : n == "waterdata" ? 6 : 1;
+                     : n == "waterdata" ? 6 : n == "velgrad" ? 7 : 1;
         }
         else if (a == "--dump-water-state") o.dumpWater = true;
         else if (a == "--slice") {
@@ -259,6 +272,11 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--height-scale") o.heightScale = static_cast<float>(atof(next("1.15").c_str()));
         else if (a == "--sea-verify") o.seaVerify = true;
         else if (a == "--viz") o.viz = true;
+        else if (a == "--wireframe") o.surfaceDebug = 1;
+        else if (a == "--dump-both") o.dumpBoth = true;
+        else if (a == "--load-field") o.loadField = next("");
+        else if (a == "--meshlets") o.surfaceDebug = 2;
+        else if (a == "--mesh-stats") o.meshStats = true;
         else if (a == "--stencil") o.stencil = true;
         else if (a == "--no-ms") o.msSurface = false;
         else if (a == "--albedo") o.albedo = true;
@@ -1333,6 +1351,56 @@ int main(int argc, char** argv) {
         const Options opt = ParseArgs(argc, argv);
 
         // ---- M0 + M4: the self-test path needs a device and the shader compiler, nothing else.
+        // M9h: --load-field -- the plugin path, end to end and standalone. Register a loader
+        // for a file type, open a file, and the sparse bank falls out of the ingest rule:
+        // nodata is absence, absence is a NULL tile, and the tiles that were never allocated
+        // are the measurement. No renderer, no scene -- just the road.
+        if (!opt.loadField.empty()) {
+            Gpu gpu;
+            gpu.Init(nullptr, 64, 64, opt.debugLayer);
+            LoaderRegistry plugin;
+            plugin.Register("f32", GeoGridLoader::Open);
+            plugin.Register("json", GeoGridLoader::Open);
+            std::unique_ptr<FieldLoader> ld = plugin.Open(opt.loadField);
+            if (!ld) {
+                Log("[loader] cannot open %s (known types: f32, json)", opt.loadField.c_str());
+                return 1;
+            }
+            const GeoRef& gr = ld->Ref();
+            GradeBankDesc d;
+            d.name = std::string("loaded.") + ld->Name();
+            d.width = gr.width;
+            d.height = gr.height;
+            d.fmt = DXGI_FORMAT_R32_FLOAT;
+            d.gradeSig = ld->GradeSig();
+            d.metersPerTexel = gr.MetersPerTexelX();
+            d.vNorth = gr.VNorth();
+            d.units = gr.valueUnit;
+            GradeBank bank;
+            bank.Init(gpu, d, policy::None());
+            const uint32_t tX = bank.TilesX(), tY = bank.TilesY();
+            auto* grid = static_cast<GeoGridLoader*>(ld.get());
+            const std::vector<uint8_t> mask =
+                grid->CoverageMask(bank.TileW(), bank.TileH(), tX, tY);
+            bank.SetPolicy(policy::Mask(mask, tX));
+            bank.Update(gpu);
+            bank.UploadDenseTiles(gpu, reinterpret_cast<const uint8_t*>(grid->Samples().data()),
+                                  gr.width, 4u, bank.ResidentList());
+            const uint32_t all = tX * tY, res = bank.ResidentCount();
+            char sig[16];
+            snprintf(sig, sizeof(sig), "%s%s%s", (d.gradeSig & kG0) ? "g0" : "",
+                     (d.gradeSig & kG1) ? "g1" : "", (d.gradeSig & kG2) ? "g2" : "");
+            Log("[loader] %s -> bank '%s' [%s]: %u/%u tiles resident (%.1f%%), "
+                "%.1f of %.1f MB, %u tiles were pure absence",
+                opt.loadField.c_str(), d.name.c_str(), sig, res, all,
+                all ? 100.0 * res / all : 0.0, bank.ResidentBytes() / 1048576.0,
+                bank.VirtualBytes() / 1048576.0, all - res);
+            Log("[loader] georeference: %s, %.3g deg/texel (%.2f m), value %s",
+                gr.Describe().c_str(), gr.scaleX, gr.MetersPerTexelX(), gr.valueUnit);
+            gpu.WaitIdle();
+            return 0;
+        }
+
         if (opt.selftest) {
             Gpu gpu;
             gpu.Init(nullptr, 64, 64, opt.debugLayer);
@@ -1403,6 +1471,7 @@ int main(int argc, char** argv) {
             sea->sweCurrentGain = opt.sweGain;
             sea->heightScale = opt.heightScale;
             sea->atlasVisualize = opt.viz;
+            sea->wireframe = opt.surfaceDebug == 1;
             sea->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             if (opt.stormHs > 0.01f) sea->SetStorm(opt.stormHs, opt.stormTp, opt.stormDir);
             renderer.AddLayer(std::move(seaOwned));
@@ -1594,6 +1663,8 @@ int main(int argc, char** argv) {
             globe->Configure(opt.shaderDir, &activeGlobe);
             globe->marsReliefValid = marsMode && marsModel.Ready();
             globe->windOverlay = opt.viz;
+            globe->surfaceDebug = opt.surfaceDebug;
+            globe->meshStats = opt.meshStats;
             globe->msSurface = opt.msSurface;
             globe->albedoLens = opt.albedo;
             globe->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
@@ -1731,6 +1802,170 @@ int main(int argc, char** argv) {
             }
             globe->stencilOverlay = opt.stencil;
             globe->debugLens = opt.lens;
+            // M9h: the grad(flow) bank plus the grid it lives on, for --lens velgrad. The
+            // SWE solver owns the bank; the bathy model owns the world mapping.
+            if (swe.Ready() && bathy.Ready()) {
+                // The residency map and the bank's texel size ride along: the lens picks the
+                // level its footprint wants and the map clamps it to what has arrived.
+                // ---- M9i: CLOSE THE LOOP. The regional current becomes a GA object through
+                // the plugin seam, composes into a page, and lands in the bank's COARSE levels.
+                // Nothing here reaches into another layer: a loader answers where/what/where-not,
+                // a compositor answers value-and-weight, and the bank takes texels. The solver
+                // never learns that GoMOFS exists, which is exactly what the backed-out version
+                // got wrong.
+                //
+                // grad() is taken on the composed page rather than on the source, because
+                // divergence and vorticity are properties of the COMPOSITE -- taking them
+                // per-source and blending afterwards would average two different derivatives.
+                if (swe.Ready() && bathy.Ready()) {
+                    LoaderRegistry freg;
+                    freg.Register("json", CurrentFieldLoader::Open);
+                    if (auto cld = freg.Open("data/currents/currents.json")) {
+                        auto ras = std::make_shared<RasterSource>(std::move(cld), 0);
+                        DomainCompositor fc;
+                        LevelLadder lad;
+                        lad.level0MetersPerTexel = swe.CellM();
+                        fc.SetLadder(lad);
+                        fc.Add(ras);
+
+                        GradeBank& vb = swe.VelGradBank();
+                        uint32_t wrote = 0;
+                        // Levels coarse enough that a ~700 m model is honest there.
+                        for (uint32_t lvl = 3; lvl < vb.MipCount(); ++lvl) {
+                            const uint32_t w = (std::max)(1u, swe.Nx() >> lvl);
+                            const uint32_t h = (std::max)(1u, swe.Ny() >> lvl);
+                            // The page's own lat/lon extent, EXACTLY -- not the anchor-linear
+                            // form, which is declared valid only near its anchor.
+                            DomainCompositor::PageGeo geo;
+                            const double mpt = swe.CellM() * double(1u << lvl);
+                            geo.lon0 = BathyModel::kOrgLon +
+                                       (bathy.WorldX0() + 0.5 * mpt) / BathyModel::kMPerLon;
+                            geo.lat0 = BathyModel::kOrgLat +
+                                       (bathy.WorldZ0() + 0.5 * mpt) / BathyModel::kMPerLat;
+                            geo.dLon = mpt / BathyModel::kMPerLon;
+                            geo.dLat = mpt / BathyModel::kMPerLat;
+
+                            std::vector<float> uv, cov;
+                            const uint32_t covered =
+                                fc.ComposePage(PageAddr{lvl, 0, 0}, geo, w, h, 2, uv, cov);
+                            if (!covered) continue;
+
+                            // grad(flow) on the composed page: divergence to grade 0, vorticity
+                            // to grade 2, exactly what the type says kG1 * kG1 produces. Coverage
+                            // rides in .z so the shader composite can weight it, and a texel with
+                            // no current stays absent rather than reading as still water.
+                            std::vector<float> rgba(size_t(w) * h * 4, 0.0f);
+                            const double dxm = mpt, dym = mpt;
+                            for (uint32_t y = 0; y < h; ++y) {
+                                for (uint32_t x = 0; x < w; ++x) {
+                                    const size_t i = size_t(y) * w + x;
+                                    if (cov[i] <= 0.0f) continue;
+                                    const uint32_t xm = (x > 0) ? x - 1 : x;
+                                    const uint32_t xp = (x + 1 < w) ? x + 1 : x;
+                                    const uint32_t ym = (y > 0) ? y - 1 : y;
+                                    const uint32_t yp = (y + 1 < h) ? y + 1 : y;
+                                    const size_t a = (size_t(y) * w + xm) * 2;
+                                    const size_t b = (size_t(y) * w + xp) * 2;
+                                    const size_t c = (size_t(ym) * w + x) * 2;
+                                    const size_t d = (size_t(yp) * w + x) * 2;
+                                    const float dudx = (uv[b + 0] - uv[a + 0]) / float(2 * dxm);
+                                    const float dvdx = (uv[b + 1] - uv[a + 1]) / float(2 * dxm);
+                                    const float dudy = (uv[d + 0] - uv[c + 0]) / float(2 * dym);
+                                    const float dvdy = (uv[d + 1] - uv[c + 1]) / float(2 * dym);
+                                    rgba[i * 4 + 0] = dudx + dvdy;   // grade 0: divergence
+                                    rgba[i * 4 + 1] = dvdx - dudy;   // grade 2: vorticity
+                                    rgba[i * 4 + 2] = cov[i];        // coverage
+                                }
+                            }
+                            vb.UploadLevel(gpu, lvl, rgba.data(), w * 4 * sizeof(float), w, h);
+                            ++wrote;
+                        }
+                        Log("[compose] grad(GoMOFS) -> swe.velgrad slice 0 levels 3..%u: %u "
+                            "composed (loader -> source -> page -> bank)",
+                            vb.MipCount() - 1, wrote);
+
+                        // ---- SLICE 1: THE REGION. Same sources, same compositor, a page over
+                        // the REGION's own ground instead of the window's. This is what makes
+                        // the wind fallback unnecessary: outside the solve there is now a page
+                        // of the SAME quantity in the SAME units, so the consumer composites
+                        // two pages of one bank instead of blending in a foreign field.
+                        if (vb.Slices() > 1) {
+                            // Every level, not just the floor: an upload into an unmapped tile
+                            // is discarded and the page would simply not be there.
+                            vb.MapAllLevels(gpu, 1);
+                            const GeoRef& rg = ras->Ref();
+                            uint32_t rwrote = 0;
+                            // Start where the bank's texels approach the source's own scale.
+                            // Differentiating a field upsampled 8x invents structure that is
+                            // not in it -- the derivative of the interpolation, not of the
+                            // current -- so the region owns only levels it can honestly fill,
+                            // and the residency clamp keeps a sampler from asking for finer.
+                            for (uint32_t lvl = 3; lvl < vb.MipCount(); ++lvl) {
+                                const uint32_t w = (std::max)(1u, swe.Nx() >> lvl);
+                                const uint32_t h = (std::max)(1u, swe.Ny() >> lvl);
+                                // The page spans the SOURCE's extent, sampled onto this
+                                // level's grid -- the region gets its own geography, not the
+                                // window's stretched over it.
+                                DomainCompositor::PageGeo rgeo;
+                                rgeo.dLon = rg.scaleX * double(rg.width) / double(w);
+                                rgeo.dLat = rg.scaleY * double(rg.height) / double(h);
+                                rgeo.lon0 = rg.originX + 0.5 * rgeo.dLon;
+                                rgeo.lat0 = rg.originY + 0.5 * rgeo.dLat;
+
+                                std::vector<float> ruv, rcov;
+                                const uint32_t rc =
+                                    fc.ComposePage(PageAddr{lvl, 0, 0}, rgeo, w, h, 2, ruv, rcov);
+                                if (!rc) continue;
+                                std::vector<float> rr(size_t(w) * h * 4, 0.0f);
+                                // Metres per texel of THIS page: the region's degrees converted
+                                // at its own latitude, not the window's frozen anchor.
+                                const double mx = std::abs(rgeo.dLon) * 111319.49 *
+                                                  std::cos(rgeo.lat0 * 3.14159265 / 180.0);
+                                const double my = std::abs(rgeo.dLat) * 110574.0;
+                                for (uint32_t y = 0; y < h; ++y) {
+                                    for (uint32_t x = 0; x < w; ++x) {
+                                        const size_t i = size_t(y) * w + x;
+                                        if (rcov[i] <= 0.0f) continue;
+                                        const uint32_t xm = (x > 0) ? x - 1 : x;
+                                        const uint32_t xp = (x + 1 < w) ? x + 1 : x;
+                                        const uint32_t ym = (y > 0) ? y - 1 : y;
+                                        const uint32_t yp = (y + 1 < h) ? y + 1 : y;
+                                        const size_t a = (size_t(y) * w + xm) * 2;
+                                        const size_t b = (size_t(y) * w + xp) * 2;
+                                        const size_t c2 = (size_t(ym) * w + x) * 2;
+                                        const size_t d2 = (size_t(yp) * w + x) * 2;
+                                        const float dudx = float((ruv[b + 0] - ruv[a + 0]) / (2 * mx));
+                                        const float dvdx = float((ruv[b + 1] - ruv[a + 1]) / (2 * mx));
+                                        const float dudy = float((ruv[d2 + 0] - ruv[c2 + 0]) / (2 * my));
+                                        const float dvdy = float((ruv[d2 + 1] - ruv[c2 + 1]) / (2 * my));
+                                        rr[i * 4 + 0] = dudx + dvdy;
+                                        rr[i * 4 + 1] = dvdx - dudy;
+                                        rr[i * 4 + 2] = rcov[i];
+                                    }
+                                }
+                                vb.UploadLevel(gpu, lvl, rr.data(), w * 4 * sizeof(float), w, h,
+                                               1);
+                                ++rwrote;
+                            }
+                            // The lens needs the region page's geography to sample it.
+                            globe->SetVelGradRegion(
+                                rg.originX, rg.originY, rg.scaleX * double(rg.width),
+                                rg.scaleY * double(rg.height));
+                            Log("[compose] grad(GoMOFS) -> swe.velgrad slice 1 (REGION): %u "
+                                "levels over %.2f x %.2f deg -- the wind fallback is now "
+                                "unnecessary",
+                                rwrote, std::abs(rg.scaleX) * rg.width,
+                                std::abs(rg.scaleY) * rg.height);
+                        }
+                    }
+                }
+                globe->SetVelGradLens(
+                    swe.VelGradSrv(), bathy.WorldX0(), bathy.WorldZ0(), bathy.WorldSizeX(),
+                    bathy.WorldSizeZ(), swe.VelGradResMapSrv(),
+                    static_cast<float>(bathy.WorldSizeX() / (std::max)(1u, swe.Nx())),
+                    static_cast<float>(swe.VelGradResMapW()),
+                    static_cast<float>(swe.VelGradResMapH()), swe.VelGradMips());
+            }
             globe->sliceOn = opt.sliceOn;
             globe->sliceD = static_cast<float>(opt.sliceD);
             compositor.LogRegistry();
@@ -1834,6 +2069,9 @@ int main(int argc, char** argv) {
                         "tiles (the rest are ALGEBRAICALLY zero -- never allocated, never "
                         "dispatched)",
                         need, dx * dy);
+                    // M9h: and now it DRIVES. Until this call the closure was a report; the
+                    // bank's residency came from a CPU curl scan alone.
+                    if (globe) globe->ApplyWindDemand(gpu, derived, dx, dy);
                 }
             }
         }
@@ -2418,6 +2656,7 @@ int main(int argc, char** argv) {
         }
         if (sea) {
             sea->windSeaFill = waterScene.windSeaFill;
+            sea->bandFoldWeight = waterScene.bandFoldWeight;
             sea->buoyAssimAgeH = waterScene.buoyAssimAgeH;
             sea->buoyAssimGainMax = waterScene.buoyAssimGainMax;
         }
@@ -2650,6 +2889,12 @@ int main(int argc, char** argv) {
         auto last = Clock::now();
         auto lastTitle = last;
         uint32_t frame = 0;
+        // M9b: a programmatic .wpix is serialized on a PIX background thread AFTER the
+        // capture frames present. The process used to exit ~4 frames later and the file
+        // landed as a 1 KB stub -- armed, never written. Remember that we armed, and hold
+        // the process open at the end until the file stops growing.
+        bool pixArmed = false;
+        bool dumpedSolid = false;   // --dump-both: the solid image is already on disk
         double frameMsSum = 0.0;
         uint32_t frameMsN = 0;
 
@@ -2756,6 +3001,17 @@ int main(int argc, char** argv) {
                     tide->contourStepM = (tide->contourStepM > 0.4f) ? 0.25f
                                        : (tide->contourStepM > 0.2f) ? 0.0f : 0.5f;
                 }
+                if (in.keyPressed['G']) {
+                    // M9b: THE GEOMETRY QUESTION, answered by the rasterizer. Shading sells
+                    // amplitude the geometry may not actually have (priors 8), so the honest
+                    // check is to stop filling the triangles. G cycles shipped -> wireframe
+                    // -> meshlet tint. Both surfaces flip together: in one-water mode the
+                    // globe mesh IS the sea, and off it the SeaLayer grid is what draws.
+                    const int mode = globe ? (globe->surfaceDebug + 1) % 3
+                                           : ((sea && !sea->wireframe) ? 1 : 0);
+                    if (globe) globe->surfaceDebug = mode;
+                    if (sea) sea->wireframe = (mode == 1);
+                }
                 if (in.keyPressed['V']) {
                     if (mode == 1 && globe && altOf(cam) > 6000.0) {
                         globe->windOverlay = !globe->windOverlay;
@@ -2785,7 +3041,14 @@ int main(int argc, char** argv) {
                 // frames so residency, the solver mirror, and the composed caches are
                 // warm before the camera rolls.
                 const uint32_t settle = opt.rail.empty() ? 0u : 150u;
-                const uint32_t recFrame = (frame > settle) ? frame - settle : 0u;
+                uint32_t recFrame = (frame > settle) ? frame - settle : 0u;
+                // --dump-both renders ONE extra frame in wireframe. Hold the sim clock at
+                // the solid frame's instant so the two images are the same water, not the
+                // same water 33 ms later -- otherwise the lines do not sit on the crests
+                // they are supposed to explain.
+                if (opt.dumpBoth && opt.frames && recFrame >= opt.frames) {
+                    recFrame = opt.frames - 1u;
+                }
                 simUnix = startUnix + static_cast<double>(recFrame) * (timeScale / 30.0);
                 if (!opt.rail.empty() && !railKeys.empty()) {
                     // M6g: the rails just set a pose in the ONE frame. Nothing switches.
@@ -2897,7 +3160,7 @@ int main(int argc, char** argv) {
                         waterBank->RingOrigin(mR, orgs[mR * 2], orgs[mR * 2 + 1]);
                     }
                     uint32_t derivS[3];
-                    float patchS[3], bandKS[3], bandRmsS[3];
+                    float patchS[3], bandKS[3], bandRmsS[3], bandFoldS[3];
                     const double kPiB = 3.14159265358979;
                     const double kCutB[4] = {2.0 * kPiB / 756.0, 2.0 * kPiB / 60.0,
                                              2.0 * kPiB / 12.0, 0.9 * kPiB * 256.0 / 47.0};
@@ -2906,6 +3169,7 @@ int main(int argc, char** argv) {
                         patchS[c] = sea->FftPatchL(c);
                         bandKS[c] = static_cast<float>(std::sqrt(kCutB[c] * kCutB[c + 1]));
                         bandRmsS[c] = sea->BandRms(c);
+                        bandFoldS[c] = sea->BandKFold(c);
                     }
                     waterBank->injectPattern = opt.inject;
                     if (hgtWinTenant >= 0) {
@@ -2916,7 +3180,7 @@ int main(int argc, char** argv) {
                     globe->windGateVal = sea->WindGate();
                     globe->SetWaterBank(waterBank->DispSrv(), waterBank->ParamSrv(),
                                         waterBank->DetailSrv(), derivS, patchS, bandKS,
-                                        bandRmsS, sea->heightScale,
+                                        bandRmsS, bandFoldS, sea->heightScale,
                                         waterBank->BaseTexelM(), orgs, opt.oneWater);
                 }
                 // (--albedo: the water stands down too -- textures judged as layered images,
@@ -2966,6 +3230,7 @@ int main(int argc, char** argv) {
             if (opt.pixFrames > 0 && opt.frames > 0 && opt.frames + (opt.rail.empty() ? 0u : 150u) >= opt.pixFrames + 4 &&
                 frame + opt.pixFrames + 4 == opt.frames + (opt.rail.empty() ? 0u : 150u)) {
                 PixGpuCaptureFrames(L"gagame.wpix", opt.pixFrames);
+                pixArmed = true;
             }
             if (sea) sea->SetTime(simUnix, bathy.Ready() ? waterNavd : tide->focusHeight,
                                   cam.px, cam.pz);
@@ -2997,11 +3262,57 @@ int main(int argc, char** argv) {
                 ++frameMsN;
             }
             ++frame;
+            // --dump-both: the solid frame has just been rendered. Dump it, flip BOTH
+            // surfaces to wireframe, and take one more lap -- the clock is held above, so
+            // the second image is the same instant seen as lines.
+            if (opt.dumpBoth && !opt.dump.empty() && !dumpedSolid && opt.frames &&
+                frame == opt.frames + (opt.rail.empty() ? 0u : 150u)) {
+                renderer.DumpPng(opt.dump);
+                dumpedSolid = true;
+                if (globe) globe->surfaceDebug = 1;
+                if (sea) sea->wireframe = true;
+                continue;
+            }
             if (opt.frames &&
-                frame >= opt.frames + (opt.rail.empty() ? 0u : 150u)) {
+                frame >= opt.frames + (opt.rail.empty() ? 0u : 150u) +
+                             (opt.dumpBoth ? 1u : 0u)) {
                 // M7j: THE HYPERVISOR -- one sample, every transformation, each hop tagged
                 // with the AST edge it exercises. CPU-derivable steps print values; fields
                 // that live only on the GPU print their frame contract and where to look.
+                if (pixArmed) {
+                    // The .wpix is serialized on a PIX background thread after the capture
+                    // frames PRESENT, so wait for the file to stop growing before exiting.
+                    //
+                    // MEASURED (M9b): under --headless it never grows at all. PIX's
+                    // PIXGpuCaptureNextFrames counts FRAME BOUNDARIES, and a frame boundary
+                    // is IDXGISwapChain::Present -- which Gpu::EndFrame only calls when a
+                    // swapchain exists (Gpu.cpp:206). Headless renders to an offscreen
+                    // target and never presents, so the capturer arms, sees zero frames, and
+                    // leaves a ~1 KB stub. Bail out loudly instead of waiting on it: GPU
+                    // captures need a WINDOWED run today. Making headless captures work
+                    // means the non-frame-based PIXBeginCapture/PIXEndCapture pair, which
+                    // this build does not load.
+                    uint64_t last = 0;
+                    int stable = 0, empty = 0;
+                    for (int s = 0; s < 60 && stable < 2 && empty < 3; ++s) {
+                        Sleep(1000);
+                        struct _stat64 st;
+                        const uint64_t sz =
+                            (_stat64("gagame.wpix", &st) == 0) ? st.st_size : 0;
+                        stable = (sz > 4096 && sz == last) ? stable + 1 : 0;
+                        empty = (sz <= 4096) ? empty + 1 : 0;
+                        last = sz;
+                    }
+                    if (last <= 4096) {
+                        Log("[pix] gagame.wpix is a %llu-byte STUB -- nothing was captured. "
+                            "A GPU capture needs frame boundaries (Present); --headless has "
+                            "no swapchain. Re-run WINDOWED with --pix.",
+                            static_cast<unsigned long long>(last));
+                    } else {
+                        Log("[pix] gagame.wpix settled at %.1f MB",
+                            last / (1024.0 * 1024.0));
+                    }
+                }
                 if (opt.dumpFibers && waterBank) waterBank->DumpFibers(gpu);
                 // M7p: export the inlet box's REAL fields (bed, level, current, shadow)
                 // so proofs/inlet_storm.py -- the user's own vqview wave model -- can run
@@ -3207,7 +3518,20 @@ int main(int argc, char** argv) {
             Log("[verify] sea: model Hs %.3f m, RENDERED Hs %.3f m "
                 "(one realization; agreement within ~10%% passes)", sea->hsModel, hr);
         }
-        if (!opt.dump.empty()) renderer.DumpPng(opt.dump);
+        if (!opt.dump.empty()) {
+            if (dumpedSolid) {
+                // out.png already holds the solid frame; this pass is the wireframe twin.
+                std::wstring wp = opt.dump;
+                const size_t dot = wp.find_last_of(L'.');
+                wp = (dot == std::wstring::npos) ? wp + L"_wire"
+                                                 : wp.substr(0, dot) + L"_wire" + wp.substr(dot);
+                renderer.DumpPng(wp);
+                Log("[dump] wrote %S (solid) + %S (wireframe, same instant)",
+                    opt.dump.c_str(), wp.c_str());
+            } else {
+                renderer.DumpPng(opt.dump);
+            }
+        }
 
         gpu.WaitIdle();
         resMgr.Shutdown();

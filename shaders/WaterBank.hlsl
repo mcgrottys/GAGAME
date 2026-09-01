@@ -59,6 +59,11 @@ cbuffer BankCb : register(b0) {
     // boat zeros as its dequant scales and vanished from the water for three renders).
     float4 gBoatA[8];
     float4 gBoatB[8];
+    // M9c: the wavenumber the FOLD judges each band by -- energy-weighted over the live
+    // spectrum, not the geometric midpoint of the band's cuts. gBandK above is unchanged
+    // and still drives phase speed / shoaling / wave-current. Appended at the END, per the
+    // layout law above.
+    float4 gBandKFold;
 };
 
 struct BankTile {
@@ -345,7 +350,8 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     float gain1 = t.hsScale * expo;
     float gain2 = t.hsScale * expo;
     [unroll] for (uint c = 0; c < 3; ++c) {
-        const float lam = 6.2831853f / gBandK[c];
+        // M9c: the fold judges the band by the wavelength its ENERGY actually sits at.
+        const float lam = 6.2831853f / gBandKFold[c];
         const float w = 1.0f - smoothstep(lam * 0.12f, lam * 0.5f, t.texelM);
         // M7p: the two ORPHANED PHYSICS EDGES, restored from the retired SeaLayer path
         // and found by the 2D proof figure: SHOALING (Green's-law growth as the group
@@ -538,6 +544,16 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
 
     const uint2 dst = uint2(t.dstX + id.x, t.dstY + id.y);
     gU[gSlotsB.y][dst] = float4(d, saturate(foam * dry));
+    // M9e: THE STORM-SEA CEILING, applied to the WHOLE shed. The solved field has always
+    // clamped its own contribution to gFoamA.z ("past it the surface is breaking, and
+    // breaking is foam's business, not the glint's") -- but the CASCADE shed above it was
+    // uncapped, and it carries amp^2 with hsScale up to 3. Measured on --storm 3.0,10,95:
+    // param.sigma2 reached 0.139 against the AST's declared 0.1, and the fiber dump had
+    // been printing OUT OF RANGE the whole time. sqrt(0.139) = 0.37 rms slope is the glint
+    // lobe of a ~27 m/s wind on a sea whose implied wind is 10.3 -- the surface reflected
+    // the pale horizon sky over its entire area and the ebb ride went white.
+    // One ceiling, both paths, and the declared range becomes true again.
+    sig2 = min(sig2, gFoamA.z);
     gU[gSlotsB.z][dst] = float4(lvl, sig2, cur.x, cur.y);
     // The DETAIL plane: what the PS needs to recover sub-ring sparkle and the caustic
     // Jacobian -- per-band sea-state gains (cascade derivs are unit-sea) and the dry

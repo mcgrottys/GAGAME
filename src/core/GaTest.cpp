@@ -10,6 +10,12 @@
 
 #include "Common.h"
 #include "GaAst.h"
+#include "GradeField.h"   // M9h: the type-level grade algebra pins itself here
+#include "compose/DomainSource.h"
+#include "CurrentFieldLoader.h"
+#include "FieldLoader.h"
+#include "GeoRef.h"
+#include "PageTable.h"
 #include "Pga.h"
 
 namespace ga {
@@ -765,6 +771,198 @@ bool RunGaSelfTest() {
             }
             Near(1.0 - static_cast<double>(wrong) / n, 1.0 - static_cast<double>(flips) / n,
                  1e-12, "bed: waterline flip-fraction exactness", ok);
+        }
+    }
+
+    // ---- M9h: THE PAGE TABLE. The (level, x, y) address space, exercised. Three properties
+    // matter, and the third is the one the whole no-pop story rests on.
+    {
+        LevelLadder ladder;
+        ladder.level0MetersPerTexel = 0.01;   // 1 cm at the finest level
+        ladder.pageTexels = 16384;
+
+        // 1. THE LADDER REACHES CENTIMETRES, and the page count to cover ground is bounded.
+        // At 1 cm a page spans 163.84 m, so an inlet-sized window is a handful of pages, not
+        // the 6.4e10 texels a flat cm-resolution raster over the same area would need.
+        Near(ladder.MetersPerTexel(0), 0.01, 1e-12, "pages: level 0 is 1 cm", ok);
+        Near(ladder.PageGroundMeters(0), 163.84, 1e-9, "pages: a 1 cm page spans 163.84 m", ok);
+        const uint32_t lvlEarth = ladder.LevelsToSpan(40.0e6);
+        Log("[gatest] pages: 1 cm at L0; one page spans %.2f m; L%u spans %.0f km (Earth needs "
+            "L%u)",
+            ladder.PageGroundMeters(0), lvlEarth, ladder.PageGroundMeters(lvlEarth) / 1000.0,
+            lvlEarth);
+        // The inlet window (3200 x 2000 m) at centimetre resolution:
+        const double pg = ladder.PageGroundMeters(0);
+        const uint32_t inletPages = uint32_t(std::ceil(3200.0 / pg)) *
+                                    uint32_t(std::ceil(2000.0 / pg));
+        Log("[gatest] pages: the 3.2 x 2.0 km inlet at 1 cm = %u pages of %u slices",
+            inletPages, 1024u);
+        if (inletPages > 1024u) {
+            Log("[gatest] FAIL pages: inlet at 1 cm needs %u pages, more than one array holds",
+                inletPages);
+            ok = false;
+        }
+
+        PageTable pt;
+        pt.Init(8, ladder, "gatest.pages");
+
+        // 2. Reserve/Find round-trips, and the same address is the same slice.
+        const PageAddr a{0, 5, 9};
+        const uint32_t s0 = pt.Reserve(a);
+        if (s0 == PageTable::kNoSlice || pt.Find(a) != s0 || pt.Reserve(a) != s0) {
+            Log("[gatest] FAIL pages: reserve/find does not round-trip");
+            ok = false;
+        }
+        if (!(pt.AddrOf(s0) == a)) {
+            Log("[gatest] FAIL pages: slice does not report the address it holds");
+            ok = false;
+        }
+
+        // 3. FindCovering DEGRADES TO COARSER, never to nothing. This is the CPU half of the
+        // no-pop contract: ask for a fine page that was never reserved and get the coarse page
+        // describing the same ground, so detail changes and nothing else does.
+        const PageAddr coarse{4, 0, 0};
+        pt.Reserve(coarse);
+        uint32_t gotLevel = 999;
+        // (0,5,9) at level 0 sits under (4, 0, 0): 5>>4 == 0, 9>>4 == 0.
+        const PageAddr fineUnder{0, 5, 9};
+        pt.Release(fineUnder);
+        const uint32_t cov = pt.FindCovering(fineUnder, &gotLevel);
+        if (cov == PageTable::kNoSlice || gotLevel != 4) {
+            Log("[gatest] FAIL pages: covering lookup gave slice %u at level %u, expected the "
+                "level-4 parent", cov, gotLevel);
+            ok = false;
+        }
+        // And an address no page covers is honestly absent, not silently level 0.
+        if (pt.FindCovering(PageAddr{0, 900000, 900000}) != PageTable::kNoSlice) {
+            Log("[gatest] FAIL pages: uncovered address resolved to something");
+            ok = false;
+        }
+
+        // 4. Exhaustion refuses and counts, rather than evicting a page whose contents may be
+        // irreproducible (the pool cap's rule, section 19).
+        for (uint32_t i = 0; i < 32; ++i) pt.Reserve(PageAddr{0, 100u + i, 0});
+        if (pt.Refused() == 0 || pt.Resident() > pt.Slices()) {
+            Log("[gatest] FAIL pages: exhaustion neither refused nor counted");
+            ok = false;
+        }
+        Log("[gatest] pages: %s", pt.Stats().c_str());
+    }
+
+    // ---- M9i: THE PLUGIN SEAM, on a SECOND file type. The point is that nothing above the
+    // loader changed to accept it -- same registry, same interface, same three answers.
+    {
+        LoaderRegistry reg;
+        reg.Register("json", CurrentFieldLoader::Open);
+        auto ld = reg.Open("data/currents/currents.json");
+        if (!ld) {
+            Log("[gatest] pages: no data/currents/currents.json -- loader gate skipped");
+        } else {
+            const GeoRef& g = ld->Ref();
+            // Grade is declared by the SOURCE; what grad() of it becomes is the algebra's
+            // business, and the type already proved that (kG1 * kG1 = kG0 | kG2).
+            if (ld->GradeSig() != kG1) {
+                Log("[gatest] FAIL loader: a current field is grade 1, got %u", ld->GradeSig());
+                ok = false;
+            }
+            // THE FLIP, DERIVED. CurrentField::Sample uses fy = (lat - lat0)/dlat with dlat
+            // positive, so row 0 is SOUTH -- the opposite of every bathy grid here. Nothing
+            // declared that; VNorth() reads it off the affine, which is the whole reason
+            // GeoRef exists (priors 10).
+            if (!g.VNorth()) {
+                Log("[gatest] FAIL loader: current field should be row-0-south (vNorth)");
+                ok = false;
+            }
+            if (!g.NeedsFlipInto(false)) {
+                Log("[gatest] FAIL loader: a +v=N source into a +v=S consumer needs a flip");
+                ok = false;
+            }
+            if (g.provenance != CrsProvenance::Embedded) {
+                Log("[gatest] FAIL loader: georeference came from the file, not a claim");
+                ok = false;
+            }
+            // ABSENCE IS NOT A VALUE: land (<= -900) must never be handed out as a sample.
+            if (!g.IsNoData(-999.0) || g.IsNoData(0.35)) {
+                Log("[gatest] FAIL loader: nodata test does not separate land from slack water");
+                ok = false;
+            }
+            TilePayload tp;
+            uint32_t withData = 0, empty = 0;
+            const uint32_t tw = 64, th = 64;
+            for (uint32_t ty = 0; ty * th < g.height; ++ty) {
+                for (uint32_t tx = 0; tx * tw < g.width; ++tx) {
+                    if (ld->LoadTile(tx, ty, tw, th, tp)) ++withData; else ++empty;
+                }
+            }
+            Log("[gatest] loader: %s %ux%u, %s -> %u tiles carry data, %u are pure land "
+                "(never allocated)",
+                ld->Name(), g.width, g.height, g.Describe().c_str(), withData, empty);
+            if (withData == 0) {
+                Log("[gatest] FAIL loader: no tile carried a current");
+                ok = false;
+            }
+        }
+    }
+
+    // ---- M9i: MULTI-DOMAIN COMPOSITION. A raster and a scattered point set into ONE page,
+    // which is the thing the imagery compositor could not express and the reason this exists.
+    {
+        auto reg2 = LoaderRegistry();
+        reg2.Register("json", CurrentFieldLoader::Open);
+        auto ld2 = reg2.Open("data/currents/currents.json");
+        if (ld2) {
+            auto ras = std::make_shared<RasterSource>(std::move(ld2), 0);
+            // A buoy over the model, exactly the shape the sea state already uses when it
+            // assimilates 44013 over GFS-Wave -- but as a SOURCE, so it composes instead of
+            // being applied by hand downstream. 44013 sits off Boston.
+            auto pts = std::make_shared<PointSource>("ndbc.44013", kG1, 2, 0.25, 10);
+            pts->Add({-70.651, 42.346, {0.42f, -0.11f, 0, 0}});
+
+            DomainCompositor fc;
+            LevelLadder lad;
+            lad.level0MetersPerTexel = 700.0;   // the model's own scale; no upsampled lie
+            fc.SetLadder(lad);
+            const bool addedR = fc.Add(ras);
+            const bool addedP = fc.Add(pts);
+            if (!addedR || !addedP) {
+                Log("[gatest] FAIL compose: a raster and a point set are both grade 1, 2ch");
+                ok = false;
+            }
+
+            // A grade-0 source must be REFUSED: one product, one grade, one unit.
+            auto bad = std::make_shared<PointSource>("scalar.intruder", kG0, 1, 0.25, 5);
+            if (fc.Add(bad)) {
+                Log("[gatest] FAIL compose: accepted a grade-0 source into a grade-1 product");
+                ok = false;
+            }
+
+            DomainCompositor::PageGeo geo;
+            geo.lon0 = -71.0;
+            geo.lat0 = 42.0;
+            geo.dLon = 0.0064;
+            geo.dLat = 0.0070;
+            std::vector<float> outv, covv;
+            const uint32_t W = 64, H = 64;
+            const uint32_t covered =
+                fc.ComposePage(PageAddr{0, 0, 0}, geo, W, H, 2, outv, covv);
+            Log("[gatest] compose: %zu sources (raster + %zu-point), %u/%u texels covered",
+                fc.SourceCount(), pts->Count(), covered, W * H);
+            if (covered == 0) {
+                Log("[gatest] FAIL compose: nothing covered -- a page with no coverage is "
+                    "never allocated, so this would silently vanish");
+                ok = false;
+            }
+            // Absence must stay absent: a texel nothing covers keeps zero coverage, so the
+            // ingest rule survives all the way to the page.
+            uint32_t zeroCov = 0;
+            for (uint32_t i = 0; i < W * H; ++i) {
+                if (covv[i] == 0.0f) ++zeroCov;
+            }
+            if (zeroCov + covered != W * H) {
+                Log("[gatest] FAIL compose: %u covered + %u absent != %u texels", covered,
+                    zeroCov, W * H);
+                ok = false;
+            }
         }
     }
 

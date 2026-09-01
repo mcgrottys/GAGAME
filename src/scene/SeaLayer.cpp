@@ -26,9 +26,23 @@ void SeaLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
 }
 
 void SeaLayer::InitChurn(Gpu& gpu, ShaderCompiler& sc) {
-    m_churn.Init(gpu, static_cast<uint32_t>(kChurnDomainM / kChurnTexelM),
-                 static_cast<uint32_t>(kChurnDomainM / kChurnTexelM), DXGI_FORMAT_R16_FLOAT,
-                 L"sea.churn (sparse stateful G0 bank)");
+    {
+        // M9h: the bank as DATA. Aeration is one scalar, so grade 0 -- and saying so is what
+        // lets a derived field ask the Cayley closure where a product with it can be non-zero.
+        GradeBankDesc d;
+        d.name = "sea.churn (sparse stateful G0 bank)";
+        d.width = static_cast<uint32_t>(kChurnDomainM / kChurnTexelM);
+        d.height = d.width;
+        d.fmt = DXGI_FORMAT_R16_FLOAT;
+        d.gradeSig = kG0;
+        d.metersPerTexel = kChurnTexelM;
+        d.vNorth = true;
+        d.units = "0..1 aeration";
+        d.range = "0..1";
+        // policy::None(): this bank is driven by UpdateChurnResidency, not by GradeBank::Update.
+        // Declaring an unused policy that lied about the residency would be worse than none.
+        m_churn.Init(gpu, d, policy::None());
+    }
     m_lastActive.assign(static_cast<size_t>(m_churn.TilesX()) * m_churn.TilesY(), -1.0e18);
 
     // Root signature: b0 CBV, t0 root SRV (tile list from the frame arena), table
@@ -158,7 +172,7 @@ bool SeaLayer::BuildPsos(Gpu& gpu, ShaderCompiler& sc) {
     };
     // The sea itself tessellates (M5b): VS emits control points, HS sets screen-space edge
     // factors, DS displaces -- vqview's chain, ported.
-    auto makeSeaPso = [&](Com<ID3D12PipelineState>& out) -> bool {
+    auto makeSeaPso = [&](D3D12_FILL_MODE fill, Com<ID3D12PipelineState>& out) -> bool {
         const std::wstring path = m_shaderDir + L"/Sea.hlsl";
         ShaderBlob vs = sc.Compile(path, L"VsMain", L"vs_6_0");
         ShaderBlob hs = sc.Compile(path, L"HsMain", L"hs_6_0");
@@ -180,7 +194,7 @@ bool SeaLayer::BuildPsos(Gpu& gpu, ShaderCompiler& sc) {
         d.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
         d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
         d.SampleMask = UINT_MAX;
-        d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        d.RasterizerState.FillMode = fill;
         d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
         d.RasterizerState.DepthClipEnable = TRUE;
         d.DepthStencilState.DepthEnable = TRUE;
@@ -201,11 +215,15 @@ bool SeaLayer::BuildPsos(Gpu& gpu, ShaderCompiler& sc) {
         return true;
     };
 
-    Com<ID3D12PipelineState> sea, spec;
-    if (!makeSeaPso(sea)) return false;
+    Com<ID3D12PipelineState> sea, seaWire, spec;
+    if (!makeSeaPso(D3D12_FILL_MODE_SOLID, sea)) return false;
     if (!makePso(L"SpecPlot.hlsl", true, false, spec)) return false;
     m_seaPso = sea;
     m_specPso = spec;
+    // M9b: the tessellated sea in wireframe -- the DS-displaced patch grid, so the
+    // screen-space edge density and the actual vertex heave are both visible. Optional:
+    // a failure leaves the solid PSO alone.
+    if (makeSeaPso(D3D12_FILL_MODE_WIREFRAME, seaWire)) m_seaPsoWire = seaWire;
     return true;
 }
 
@@ -335,8 +353,29 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
         // visually absurd (real coverage at 4 m/s is ~0.01%).
         double windMs = m_sea->Hour(hour).windMs;
         if (m_stormHs > 0.01f) {
-            // Implied wind for the sandbox storm: the fully-developed speed for its wind sea.
-            windMs = 9.81 * (m_stormTp * 0.55) / (2.0 * 3.14159265) * 0.85 * 2.0;
+            // M9e: THE IMPLIED WIND for the sandbox storm. This drives the whitecap gate AND
+            // -- through Cox-Munk sigma^2 = 0.003 + 0.00512 U -- the width of the glint lobe,
+            // which is what a storm sea is mostly MADE of visually.
+            //
+            // The old closure was g(0.55 Tp)/2pi * 1.7, i.e. the wind-sea partition's deep
+            // phase speed times 1.70. Two things were wrong with it. It ignored Hs entirely,
+            // so --storm 0.5,10 and --storm 6.0,10 implied the SAME wind; and at Tp 10 it
+            // returned 14.6 m/s where both physical anchors for a 3 m / 10 s sea say ~9-10
+            // (PM inversion from Hs: 10.3; wave age 1 on the 5.5 s wind sea: 9.1). Cox-Munk
+            // then ran 0.0777 instead of ~0.056 and the ebb ride's steep faces reflected the
+            // pale horizon sky over their whole area -- the sea went white (measured: it is
+            // NOT foam; ring-0 foam coverage is 3.6% over 0.5).
+            //
+            // Invert Pierson-Moskowitz on the height the caller actually asked for --
+            // Hs = 0.0246 U19.5^2 -- and convert the 19.5 m anemometer height to U10 with the
+            // same 1.075 log-profile ratio SeaState::WindSeaPm uses. One anchor, the one the
+            // render is held to, and it scales with Hs the way a wind must.
+            const double u195 = std::sqrt((std::max)(m_stormHs, 0.01f) / 0.0246);
+            windMs = std::clamp(u195 / 1.075, 0.0, 40.0);
+            Log("[sea] storm %.1f m / %.0f s -> implied wind %.1f m/s (PM inversion; the old "
+                "period-only closure gave %.1f)",
+                m_stormHs, m_stormTp, windMs,
+                9.81 * (m_stormTp * 0.55) / (2.0 * 3.14159265) * 0.85 * 2.0);
         }
         const double t = std::max(0.0, (windMs - 3.0) / 9.0);
         m_windGate = static_cast<float>(std::min(1.0, std::pow(t, 1.5)));
@@ -355,6 +394,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
                                     0.9 * kPiD * OceanFft::kN / 47.0};
             double mss[3] = {0, 0, 0};
             double m0b[3] = {0, 0, 0};   // M8 foamlaw: banded amplitude variance too
+            double lnk[3] = {0, 0, 0};   // M9c: energy-weighted sum of ln k, for the FOLD
             const double df = 0.004;
             for (double f = df; f < 2.0; f += df) {
                 const double k = (2.0 * kPiD * f) * (2.0 * kPiD * f) / 9.81;
@@ -363,9 +403,48 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
                     if (k >= kCut[c] && k < kCut[c + 1]) {
                         mss[c] += k * k * s * df;
                         m0b[c] += s * df;
+                        lnk[c] += std::log(k) * s * df;
                     }
                 }
             }
+            // ---- M9c: THE FOLD'S OWN WAVELENGTH. The fold asks "can this sampler resolve
+            // the band's phase", and it has always answered with the geometric mean of the
+            // band's CUTS -- a constant. But cascade 2 spans lambda 0.41..12 m, a 30x range
+            // whose midpoint is 2.2 m, so a wind sea sitting at 4.6 m is discarded from
+            // geometry as though it were 2.2 m. Measured: at U10 2.2 m/s the PM sea is
+            // exactly there, and its band weight is 0.00 at the 2.4 m ring texel; folded on
+            // its own wavelength it is 0.69.
+            //
+            // So weight by ENERGY, in log k (the generalization of the geometric mean the
+            // cuts already gave, and the scale-free choice for a band this wide):
+            //
+            //     ln k_fold = integral(ln k . S df) / integral(S df)
+            //
+            // Clamped inside the band's own cuts, so no numerical excursion can move a band
+            // outside itself. Empty bands keep the cut mean, which is what makes this a
+            // no-op wherever there is no energy to weight by. This value feeds ONLY the fold
+            // weight -- gBandK still carries the cut mean for phase speed, shoaling, and the
+            // wave-current closure, whose gates and proofs pin the old number.
+            for (int c = 0; c < 3; ++c) {
+                const double kGeo = std::sqrt(kCut[c] * kCut[c + 1]);
+                double kF = kGeo;
+                if (m0b[c] > 1e-14) {
+                    kF = std::clamp(std::exp(lnk[c] / m0b[c]), kCut[c], kCut[c + 1]);
+                }
+                // The closure is a LERP IN LOG K, so 0 restores the cut mean byte for byte
+                // and the A/B is one number (priors 15: prove the wire, and a gain cannot
+                // be silently swallowed the way a JSON bool was).
+                const double g = std::clamp(static_cast<double>(bandFoldWeight), 0.0, 1.0);
+                m_bandKFold[c] = static_cast<float>(
+                    std::exp(std::log(kGeo) * (1.0 - g) + std::log(kF) * g));
+            }
+            Log("[sea] fold wavelength per band: %.1f / %.1f / %.2f m (cut means "
+                "%.1f / %.1f / %.2f, weight %.2f)",
+                6.283185307 / m_bandKFold[0], 6.283185307 / m_bandKFold[1],
+                6.283185307 / m_bandKFold[2],
+                6.283185307 / std::sqrt(kCut[0] * kCut[1]),
+                6.283185307 / std::sqrt(kCut[1] * kCut[2]),
+                6.283185307 / std::sqrt(kCut[2] * kCut[3]), bandFoldWeight);
             // M8 foamlaw: the unit-sea rms ENVELOPE per band, rms = sqrt(sum a^2) =
             // sqrt(2 m0), exaggerated like the geometry. The bank kernel scales it by
             // its per-texel band gains to get the local envelope the depth-excess
@@ -453,7 +532,11 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
     // M6u: the row carries the model Hs instead (the far field's storm whitening -- the same
     // term the globe's ocean applies).
     m_seaCb.fadeD[0] = static_cast<float>(hsModel);
-    m_seaCb.fadeD[1] = m_seaCb.fadeD[2] = 0.0f;
+    // M9c: yzw carry the FOLD's wavenumber per cascade (the M6u spares), so this path folds
+    // on the same number the bank and the globe PS do.
+    m_seaCb.fadeD[1] = m_bandKFold[0];
+    m_seaCb.fadeD[2] = m_bandKFold[1];
+    m_seaCb.fadeD[3] = m_bandKFold[2];
 
     // ---- M3: the entrance jet, live from the ACT0816 prediction clock
     double signedMs = 0.0;
@@ -814,7 +897,8 @@ void SeaLayer::Render(const FrameContext& ctx) {
 
     if (drawEnabled) {
         PixScope scope(ctx.cl, "sea.surface (tessellated: screen-space edge density)");
-        ctx.cl->SetPipelineState(m_seaPso.Get());
+        ctx.cl->SetPipelineState((wireframe && m_seaPsoWire) ? m_seaPsoWire.Get()
+                                                             : m_seaPso.Get());
         ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_4_CONTROL_POINT_PATCHLIST);
         ctx.cl->SetGraphicsRootConstantBufferView(
             1, ctx.gpu->PushConstants(&m_seaCb, sizeof(m_seaCb)));

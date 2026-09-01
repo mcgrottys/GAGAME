@@ -68,6 +68,17 @@ cbuffer GlobeCb : register(b1) {
     uint4  gOptU;       // ocean-colour SRV, ice SRV, optics on, spare
     float4 gOptA;       // ocean grid: lat1, lon1, 1/dlat, 1/dlon
     float4 gOptB;       // nx, ny, deep-albedo gain g, spare
+    // M9c: the wavenumber the FOLD judges each band by (energy-weighted over the live
+    // spectrum). gBankC keeps the band's geometric midpoint for the prefilter and the
+    // caustic assembly, whose own proofs pin that number. Appended at the END.
+    float4 gBankFold;
+    // M9h: the grad(flow) lens. gLensU.x = the derived (div, curl) bank's SRV; gLensA maps
+    // world XZ onto the bathy grid the SWE solver runs on (row 0 NORTH, so v flips at the
+    // sample -- the same convention Sea.hlsl's BathyUv declares).
+    uint4  gLensU;
+    float4 gLensA;      // org x, org z, 1/sizeX, 1/sizeZ
+    float4 gLensB;      // M9h: x = bank texel metres, yz = residency-map dims, w spare
+    float4 gLensR;      // M9j: region page -- lon0, lat0, 1/spanLon, 1/spanLat
 };
 
 // Sample the bank at a world-frame XZ: finest ring containing the point wins. Returns false
@@ -234,6 +245,11 @@ struct VsOut {
     float3 rel : TEXCOORD0;    // camera-relative position
     float3 dir : TEXCOORD1;    // unit radial (the sphere normal)
     float  h   : TEXCOORD2;    // relief metres (negative = ocean floor)
+    // M9b: which amplification unit drew this pixel -- the meshlet record on the MS path,
+    // the CDLOD node instance on the VS fallback. nointerpolation: it is an identity, not a
+    // quantity. Read only by PsMeshlet; PsMain ignores it, so the shipped shading is
+    // byte-identical.
+    nointerpolation uint mid : TEXCOORD3;
 };
 
 #ifndef GA_MESH_PATH
@@ -277,6 +293,7 @@ VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
     }
 
     VsOut o;
+    o.mid = inst;
     o.dir = dir;   // PLANET frame: texturing (cube samples, lat/lon) stays untouched
     o.h = h;
     // The ocean surface renders AT the geoid; land rides the (altitude-scaled) exaggeration.
@@ -368,6 +385,23 @@ WaterOptics SampleWaterOptics(float latDeg, float lonDeg) {
         kBbw + max(kBetaSpm * spm, kBetaChl * pow(max(chl, 1e-4f), 0.63f)) * kBbpSpec;
     o.deep = gOptB.z * kFoverMu * bb / o.kd;
     return o;
+}
+
+// M9b: THE AMPLIFICATION UNIT, made visible. Wireframe answers "is the geometry moving";
+// this answers "what drew it" -- one flat colour per meshlet record (per CDLOD node
+// instance on the VS fallback), so the 8x8-cell blocks and the CDLOD ring handovers read
+// at altitudes where every-triangle wireframe collapses into moire. A hash, not a ramp:
+// neighbours must not share a colour. Selected by its own PSO, so PsMain is untouched.
+float4 PsMeshlet(VsOut i) : SV_Target {
+    const uint h = (i.mid * 2654435761u) ^ ((i.mid * 40503u) << 13);
+    const float3 c = float3(float((h >> 16) & 255u), float((h >> 8) & 255u),
+                            float(h & 255u)) / 255.0f;
+    // Keep the terminator readable so the planet still looks like a planet under the tint.
+    // gSunDir lives in the TANGENT frame (PsMain dots it with upT), so the surface normal
+    // must cross frames too -- CsToTangent, exactly as PsMain does it. A planet-frame dir
+    // here would light the wrong hemisphere.
+    const float lam = saturate(dot(CsToTangent(normalize(i.dir)), gSunDir.xyz) * 0.5f + 0.5f);
+    return float4(c * (0.25f + 0.75f * lam), 1.0f);
 }
 
 float4 PsMain(VsOut i) : SV_Target {
@@ -533,7 +567,9 @@ float4 PsMain(VsOut i) : SV_Target {
                 // vanishes -- the far field is untouched.
                 float env = 0.0f;
                 [unroll] for (uint c = 0; c < 3; ++c) {
-                    const float lam = 6.2831853f / gBankC[c];
+                    // M9c: fold on where the band's ENERGY sits, not its midpoint. wRing
+                    // and wPix move together, so the telescope stays exact.
+                    const float lam = 6.2831853f / gBankFold[c];
                     const float wRing = 1.0f - smoothstep(lam * 0.12f, lam * 0.5f, bT);
                     const float wPix = 1.0f - smoothstep(lam * 0.12f, lam * 0.5f, footPx);
                     const float wDet = saturate(wPix - wRing) * bDet.y;
@@ -805,6 +841,95 @@ float4 PsMain(VsOut i) : SV_Target {
                                        200000.0f,
                                    2.0f);
             lc = float3(frac(wxzL / 100.0f) * 0.75f + 0.1f, chk * 0.7f);
+        } else if (lensId == 7) {
+            // GRADE PICKS THE VISUALIZATION (docs/SPARSE_GA.md 9). One bank, two grades, and
+            // they want different ramps: the divergence is a signed SCALAR, the vorticity is a
+            // signed BIVECTOR whose sign is a handedness. So curl drives a diverging red/blue
+            // -- the eddy's sense of rotation reads directly -- and |div| rides the green,
+            // where convergence and divergence both brighten because the magnitude is what
+            // the confluence looks like. Black is not "no data": a NULL tile reads zero, and
+            // zero here means the flow is irrotational and divergence-free, which is the
+            // honest answer for open water.
+            // TWO LODs, ONE LENS. The low-LOD global default is the wind Mv2 bank -- global,
+            // already sparse, resident only where storms live; the high-LOD inset is the SWE
+            // grad(flow) over the inlet. Whichever covers this pixel wins, finest first, which
+            // is the whole heterogeneous story in four lines of shader.
+            //
+            // HONEST CAVEAT, and it matters for every lens that spans LODs: the two sources
+            // are NOT on one absolute scale. Synoptic wind curl lives at ~1e-5 /s over 25 km
+            // cells; a tidal jet's curl is ~1e-2 /s over 10 m cells -- three orders apart.
+            // Each is normalized against its OWN dynamic range, so colour compares structure
+            // within a source and NOT magnitude across them. Putting them on one absolute
+            // ramp would make the global field look dead, which would be a lie told by a
+            // colour map rather than by the data.
+            // TWO PAGES OF ONE BANK. Both are slices of the same reserved array, read
+            // through one Texture2DArray view, and composited on coverage exactly as before.
+            // What changed is what the coarse operand IS: it was the global WIND -- a
+            // different field in different units, three orders away, only made to look
+            // comparable by normalizing each against its own range. Now it is the same
+            // quantity (grad of a current, 1/s) over wider ground, so the composite is a
+            // statement about one field at two resolutions instead of a colour map pretending
+            // two things are alike.
+            //
+            // No branch decides which source owns a pixel. Slice 1 answers everywhere it has
+            // coverage, slice 0 answers better where the solve reaches, and the weight sorts
+            // them out per pixel -- the compositor's rule, on the GPU.
+            float2 fine = float2(0, 0), coarse = float2(0, 0);
+            float wFine = 0.0f, wCoarse = 0.0f;
+            if (gLensU.x != 0xFFFFFFFFu) {
+                const float footL = length(i.rel) * gWavesB.z;
+
+                // --- slice 0: this window's page, at the solve's resolution
+                const float2 uvL = (wxzL - gLensA.xy) * gLensA.zw;
+                if (all(uvL > 0.0f) && all(uvL < 1.0f)) {
+                    float lodL = log2(max(footL / max(gLensB.x, 1e-3f), 1.0f));
+                    if (gLensU.y != 0xFFFFFFFFu) {
+                        const uint2 rt = uint2(uvL.x * gLensB.y, (1.0f - uvL.y) * gLensB.z);
+                        const uint have = gTexU[gLensU.y].Load(uint3(rt, 0)).x;
+                        lodL = max(lodL, (have == 0xFFu) ? 0.0f : float(have));
+                    }
+                    lodL = clamp(lodL, 0.0f, max(gLensB.w - 1.0f, 0.0f));
+                    const float4 hq = gTexArr[gLensU.x].SampleLevel(
+                        sLinearClamp, float3(uvL.x, 1.0f - uvL.y, 0.0f), lodL);
+                    fine = float2(abs(hq.x) * 60.0f, hq.y * 60.0f);
+                    const float2 fe = smoothstep(0.0f, 0.06f, uvL) *
+                                      smoothstep(1.0f, 0.94f, uvL);
+                    wFine = saturate(hq.z) * fe.x * fe.y;
+                }
+
+                // --- slice 1: the region's page, on its OWN geography
+                if (gLensR.z != 0.0f) {
+                    const float2 uvR = float2((lonDeg - gLensR.x) * gLensR.z,
+                                              (degrees(lat) - gLensR.y) * gLensR.w);
+                    if (all(uvR > 0.0f) && all(uvR < 1.0f)) {
+                        // Level 3 is the finest the region page OWNS -- below that it was
+                        // never written, and sampling there would read a level that is NULL.
+                        const float4 rq = gTexArr[gLensU.x].SampleLevel(
+                            sLinearClamp, float3(uvR, 1.0f), 3.0f);
+                        // The region is a coarser description of the SAME quantity, so it
+                        // shares the fine gain -- no second normalization, which is the whole
+                        // reason this can be one composite.
+                        coarse = float2(abs(rq.x) * 60.0f, rq.y * 60.0f);
+                        const float2 fr = smoothstep(0.0f, 0.04f, uvR) *
+                                          smoothstep(1.0f, 0.96f, uvR);
+                        wCoarse = saturate(rq.z) * fr.x * fr.y;
+                    }
+                }
+            }
+            // Weighted, not switched: where the solve has coverage it wins by weight;
+            // where it does not, the region carries the pixel; where neither does, the texel
+            // is absent and stays black -- which is now honest, because "no data" is a real
+            // answer rather than a missing source.
+            const float wSum = wFine + wCoarse * (1.0f - wFine);
+            const float2 mvL = (wSum > 0.0f)
+                                   ? (fine * wFine + coarse * wCoarse * (1.0f - wFine)) / wSum
+                                   : float2(0, 0);
+            {
+
+                const float divN = saturate(mvL.x);
+                const float curlN = clamp(mvL.y, -1.0f, 1.0f);
+                lc = float3(saturate(curlN), divN * 0.9f, saturate(-curlN));
+            }
         } else if (lensId == 2) {
             const float2 duvL = CsWindowUv(up);
             if (all(duvL > 0.0f) && all(duvL < 1.0f)) lc = float3(duvL, 0.0f);

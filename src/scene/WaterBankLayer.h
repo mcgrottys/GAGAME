@@ -36,8 +36,8 @@ class SeaLayer;
 
 class WaterBankLayer : public Layer {
 public:
-    static constexpr int kMips = 6;         // texel = base * 2^m; at base 2.4: 2.4..77 m
-                                            // texels, 1.2..39 km spans (scene bankTexelM)
+    static constexpr int kMips = 6;         // texel = base * 2^m; at base 1.2: 1.2..38 m
+                                            // texels, 0.6..20 km spans (scene bankTexelM)
     static constexpr int kRingTiles = 4;    // 4x4 logical tiles per ring
     static constexpr int kTileTexels = 128;
     static constexpr int kRingTexels = kRingTiles * kTileTexels;
@@ -134,6 +134,9 @@ private:
         float waveScale[32];   // (aMax, kMax) dequant scales, same packing
         float boatA[32];       // M8 wakes: (x, z, heading rad, speed m/s) x8
         float boatB[32];       // (wake amp m, hull half-length m, enabled, spare) x8
+        float bandKFold[4];    // M9c: the FOLD's wavenumber per band (energy-weighted);
+                               // bandK above keeps the cut mean for the physics closures.
+                               // APPENDED at the end, per the layout law two rows up.
     };
     struct BankTile {
         float orgXZ[2];

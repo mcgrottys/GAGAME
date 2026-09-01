@@ -14,12 +14,47 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
                      const SweConfig& cfg) {
     m_bathy = &bathy;
     m_bathyRes = bathyRes;
+    m_sc = &sc;
+    m_shaderDir = shaderDir;
     const uint32_t nx = bathy.Nx(), ny = bathy.Ny();
     const float dx = bathy.WorldSizeX() / nx;
 
     // Two grade banks over the bathy grid, padded up to tile multiples internally by the atlas.
     m_eta.Init(gpu, nx, ny, DXGI_FORMAT_R32_FLOAT, L"swe.eta (dEta from the tide plane)");
     m_flux.Init(gpu, nx, ny, DXGI_FORMAT_R32G32_FLOAT, L"swe.flux (signed face fluxes)");
+    {
+        // M9h: grad(flow). The first field here whose residency comes from the ALGEBRA rather
+        // than from a physics policy. grad is a grade-1 operator and the flow is grade 1, so
+        // the product signature is Cl2ProductSignature(kG1, kG1) = kG0 | kG2 -- divergence and
+        // vorticity, and nothing else can appear. R16G16F is exactly those two grades, and at
+        // 4 B a texel it tiles 128x128 like eta, so the derived demand maps 1:1 onto eta's
+        // tile grid with no resampling.
+        GradeBankDesc d;
+        d.name = "swe.velgrad (grad flow: div + curl)";
+        d.width = nx;
+        d.height = ny;
+        d.fmt = DXGI_FORMAT_R16G16B16A16_FLOAT;   // div, curl, COVERAGE, spare
+        d.gradeSig = kG0 | kG2;
+        d.metersPerTexel = dx;
+        d.units = "1/s";
+        d.range = "+-0.5";
+        // M9h: THE CHAIN. Six levels over a 1863x1174 window takes the field from ~10 m to
+        // ~320 m per texel, which is the range a zoom actually traverses. Without it the lens
+        // sampled mip 0 at every altitude and tile edges read as hard rectangles; with it a
+        // pulled-back camera reads a level whose texels match its footprint, and the residency
+        // map keeps the sample from ever landing on a NULL.
+        d.mipLevels = 6;
+        // M9j: TWO PAGES. Slice 0 is this window -- the solve, at the solve's resolution.
+        // Slice 1 is the REGION, composed from whatever covers the wider ground. They are
+        // pages of one address space in one resource, so the consumer reads both from a single
+        // view and composites them on coverage: no second SRV, and no branch deciding which
+        // source owns a pixel.
+        d.arraySlices = 2;
+        m_velGrad.Init(gpu, d, policy::None());
+        // A sliced bank activates nothing by itself -- an inactive slice honestly reports
+        // kNothingResident. Slice 0 is ours and must be live before any residency is asked.
+        m_velGrad.ActivateSlice(gpu, 0);
+    }
 
     // Static residency: everything that can ever be wet -- bed below max tide + surge + wave
     // margin. Land and dune tiles stay NULL forever; their reads are the hardware zero.
@@ -52,6 +87,53 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     };
     mapWet(m_eta);
     mapWet(m_flux);
+
+    // ---- M9h: THE CAYLEY CLOSURE DECIDES THE DERIVED FIELD'S RESIDENCY --------------------
+    // The flow is grade 1 wherever the solver simulates it, and NOWHERE else; nabla is grade 1
+    // by construction. So the tiles where grad(flow) can be non-zero are exactly the tiles
+    // where Cl2ProductSignature(kG1, kG1) is non-zero -- decided without reading one texel of
+    // current. This is the load-bearing claim of the whole atlas, exercised for real rather
+    // than assumed.
+    //
+    // The one thing algebra does NOT know is the stencil: a central difference reads its
+    // neighbours, so the demand is DILATED by one tile. Skipping that would not crash -- null
+    // tile writes are silently discarded (hazard 1) -- it would quietly punch holes along
+    // every tile seam, which is the failure this project keeps having to learn to see.
+    {
+        const uint32_t tX = m_eta.TilesX(), tY = m_eta.TilesY();
+        std::vector<uint8_t> flowSig(size_t(tX) * tY, 0), nablaSig(size_t(tX) * tY, kG1);
+        for (uint32_t ty = 0; ty < tY; ++ty) {
+            for (uint32_t tx = 0; tx < tX; ++tx) {
+                if (m_eta.IsResident(tx, ty)) flowSig[size_t(ty) * tX + tx] = kG1;
+            }
+        }
+        const TilePolicy derived = policy::Derived(flowSig, nablaSig, tX);
+        uint32_t core = 0;
+        std::vector<uint8_t> want(size_t(tX) * tY, 0);
+        for (uint32_t ty = 0; ty < tY; ++ty) {
+            for (uint32_t tx = 0; tx < tX; ++tx) {
+                if (!derived(tx, ty)) continue;
+                ++core;
+                for (int dy = -1; dy <= 1; ++dy) {   // the stencil apron
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const int ax = int(tx) + dx, ay = int(ty) + dy;
+                        if (ax < 0 || ay < 0 || ax >= int(tX) || ay >= int(tY)) continue;
+                        want[size_t(ay) * tX + ax] = 1;
+                    }
+                }
+            }
+        }
+        m_velGrad.SetPolicy(policy::Mask(want, tX));
+        m_velGrad.Update(gpu);
+        // Coarse levels get mapped here, outside any recording: the reduction that fills them
+        // runs on the frame list, but the MAPPING touches the queue and the residency map.
+        m_velGrad.EnsureCoarseMapped(gpu);
+        Log("[swe] grad(flow) residency BY ALGEBRA: Cl2(g1,g1) = g0|g2 -> %u core tiles, "
+            "%u with the stencil apron, of %u (%.0f%%); bank %.1f of %.1f MB",
+            core, m_velGrad.ResidentCount(), tX * tY,
+            100.0 * m_velGrad.ResidentCount() / double(tX * tY),
+            m_velGrad.ResidentBytes() / 1048576.0, m_velGrad.VirtualBytes() / 1048576.0);
+    }
     for (uint32_t ty = 0; ty < m_eta.TilesY(); ++ty) {
         for (uint32_t tx = 0; tx < m_eta.TilesX(); ++tx) {
             if (!m_eta.IsResident(tx, ty)) Log("[swe] eta NULL tile (%u,%u)", tx, ty);
@@ -135,7 +217,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     ranges[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
     ranges[0].OffsetInDescriptorsFromTableStart = 0;
     ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    ranges[1].NumDescriptors = 3;
+    ranges[1].NumDescriptors = 4;   // M9h: + gMv, the derived grad(flow) bank
     ranges[1].BaseShaderRegister = 0;
     ranges[1].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
     ranges[1].OffsetInDescriptorsFromTableStart = 1;
@@ -172,8 +254,9 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     makePso(L"CsSweFlux", m_fluxK);
     makePso(L"CsSweHeight", m_heightK);
     makePso(L"CsSweDerive", m_deriveK);
+    makePso(L"CsSweVelGrad", m_velGradK);
 
-    m_table = gpu.SrvHeap().Alloc(4);
+    m_table = gpu.SrvHeap().Alloc(5);
     D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sv.Format = DXGI_FORMAT_R32_FLOAT;
@@ -191,6 +274,16 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     uv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     gpu.Device()->CreateUnorderedAccessView(m_uv.res.Get(), nullptr, &uv,
                                             gpu.SrvHeap().Cpu(m_table + 3));
+    // The bank is an ARRAY now, so its UAV must be an array view pinned to slice 0. A plain
+    // Texture2D view of an array resource is invalid, and the solve would write nowhere.
+    uv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+    uv.Texture2DArray.MipSlice = 0;
+    uv.Texture2DArray.FirstArraySlice = 0;
+    uv.Texture2DArray.ArraySize = 1;
+    gpu.Device()->CreateUnorderedAccessView(m_velGrad.Res(), nullptr, &uv,
+                                            gpu.SrvHeap().Cpu(m_table + 4));
+    uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
 
     Log("[swe] grid %ux%u dx %.2f x dy %.2f m  dt %.3f s  eta %u/%u t  flux %u/%u t  "
         "resident %.1f MB",
@@ -336,6 +429,31 @@ int SweSolver::Record(ID3D12GraphicsCommandList* cl, Gpu& gpu, double simUnix, f
     cl->SetComputeRootShaderResourceView(1, elVa);
     cl->SetPipelineState(m_deriveK.Get());
     cl->Dispatch(m_eta.TileW() / 16, m_eta.TileH() / 16, static_cast<UINT>(el.size()));
+
+    // M9h: grad(flow), dispatched over the DERIVED bank's own resident list -- the eta list
+    // dilated by the stencil apron. uv must be readable by this kernel first, and the write
+    // target is a different bank, so the UAV barrier on uv is the whole synchronisation.
+    {
+        D3D12_RESOURCE_BARRIER ub{};
+        ub.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        ub.UAV.pResource = m_uv.res.Get();
+        cl->ResourceBarrier(1, &ub);
+        const auto& gl = m_velGrad.ResidentList();
+        if (!gl.empty()) {
+            cl->SetComputeRootShaderResourceView(1,
+                                                 gpu.PushConstants(gl.data(), gl.size() * 4));
+            cl->SetPipelineState(m_velGradK.Get());
+            cl->Dispatch(m_eta.TileW() / 16, m_eta.TileH() / 16, static_cast<UINT>(gl.size()));
+            // mip 0 just changed, so the coarse levels are stale. Refill them: an unfilled
+            // coarse level is real memory reading zero, which looks exactly like "the flow is
+            // irrotational here" -- a lie the lens would render in perfectly good faith.
+            D3D12_RESOURCE_BARRIER gb{};
+            gb.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            gb.UAV.pResource = m_velGrad.Res();
+            cl->ResourceBarrier(1, &gb);
+            if (m_sc) m_velGrad.BuildChain(gpu, *m_sc, m_shaderDir, cl);
+        }
+    }
 
     // Leave eta + uv sampleable by the domain and pixel shaders.
     etaTo(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |

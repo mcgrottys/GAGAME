@@ -158,7 +158,9 @@ private:
     // CPU copies for ProbeAt (the live field's planes)
     std::vector<uint8_t> m_cpuAtlas;
 
-    void* m_tex = nullptr;               // GpuTexture*, owned (avoids Gpu.h include here)
+    void* m_tex = nullptr;               // M9h: GradeBank*, owned -- the solved field is a
+                                         // SPARSE grade bank now. Still void* so this header
+                                         // stays free of Gpu.h, the same trick as before.
 };
 
 }  // namespace ga

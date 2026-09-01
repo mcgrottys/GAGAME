@@ -54,7 +54,10 @@ constexpr uint8_t kCl2GradeMul[3][3] = {
     {0b100, 0b010, 0b001},   // times g2: g2*g2 = -1 (a scalar)
 };
 
-inline uint8_t Cl2ProductSignature(uint8_t a, uint8_t b) {
+// M9h: constexpr so the TYPE algebra can run at compile time -- Field<A> * Field<B> resolves
+// to Field<Cl2ProductSignature(A, B)> with no runtime check and no declared result type. The
+// body is unchanged and still the selftest-pinned closure.
+constexpr uint8_t Cl2ProductSignature(uint8_t a, uint8_t b) {
     uint8_t out = 0;
     for (int i = 0; i < 3; ++i) {
         if (!(a & (1 << i))) continue;
@@ -78,20 +81,76 @@ inline uint8_t Cl2ProductSignature(uint8_t a, uint8_t b) {
 // ================================================================================================
 class TileAtlas2D {
 public:
+    // mipLevels > 1 builds THE CHAIN (M9h). One reserved resource, one SRV, one shader path at
+    // every altitude: zoom changes which tiles are resident, never which code runs. That is the
+    // whole reason the chain lives inside the resource instead of beside it.
+    // arraySlices > 1 makes this a reserved ARRAY (M9h). Measured on this adapter: the array
+    // axis caps at 2048 per the docs, per-slice tiling is real (each mip of each slice is its
+    // own subresource, independently mapped), and the budget that actually binds is total
+    // VIRTUAL BYTES -- 512 GB accepted in one resource, 1 TB refused. So the scale lives on the
+    // slice axis: one resource, one descriptor, 1024 slices of 16384^2, each slice an
+    // independently resident page of the shared (level, x, y) address space.
     void Init(Gpu& gpu, uint32_t widthTexels, uint32_t heightTexels, DXGI_FORMAT fmt,
-              const wchar_t* name, uint32_t heapChunkTiles = 64);
+              const wchar_t* name, uint32_t heapChunkTiles = 64, uint32_t mipLevels = 1,
+              uint32_t arraySlices = 1);
 
-    uint32_t TilesX() const { return m_tilesX; }
+    uint32_t TilesX() const { return m_tilesX; }          // mip 0
     uint32_t TilesY() const { return m_tilesY; }
     uint32_t TileW() const { return m_tileW; }
     uint32_t TileH() const { return m_tileH; }
-    bool IsResident(uint32_t tx, uint32_t ty) const {
-        return m_state[ty * m_tilesX + tx] == 1;
-    }
+    bool IsResident(uint32_t tx, uint32_t ty) const { return IsResident(0, tx, ty); }
 
-    void RequestMap(uint32_t tx, uint32_t ty);
-    void RequestUnmap(uint32_t tx, uint32_t ty);
+    void RequestMap(uint32_t tx, uint32_t ty) { RequestMap(0, tx, ty); }
+    void RequestUnmap(uint32_t tx, uint32_t ty) { RequestUnmap(0, tx, ty); }
     void RequestUnmapAll();
+
+    // ---- the chain (M9h) --------------------------------------------------------------------
+    // STANDARD mips are tiled per tile. The PACKED tail -- the mips small enough that D3D12
+    // packs them into shared tiles -- is mapped ONCE at Init and never evicted: it is a handful
+    // of tiles, it is the coarsest description of the whole field, and keeping it resident is
+    // what guarantees a sample can never miss entirely. Misses degrade to blur, never to
+    // garbage, and never to a pop.
+    uint32_t MipCount() const { return m_mipCount; }             // standard + packed
+    uint32_t StandardMips() const { return m_standardMips; }     // per-tile mappable
+    uint32_t Slices() const { return m_slices; }
+
+    // A slice costs its pinned floor the moment it is activated, so slices are activated on
+    // demand rather than all at once: 1024 floors would be a lot of tiles committed for pages
+    // holding nothing. An inactive slice has NO floor and FinestResident says so.
+    void ActivateSlice(Gpu& gpu, uint32_t slice);
+    bool IsSliceActive(uint32_t slice) const {
+        return slice < m_sliceActive.size() && m_sliceActive[slice] != 0;
+    }
+    static constexpr uint32_t kNothingResident = 0xFFFFFFFFu;
+    uint32_t TilesX(uint32_t mip) const { return m_mip[mip].tilesX; }
+    uint32_t TilesY(uint32_t mip) const { return m_mip[mip].tilesY; }
+    bool IsResident(uint32_t mip, uint32_t tx, uint32_t ty) const {
+        return IsResident(0, mip, tx, ty);
+    }
+    bool IsResident(uint32_t slice, uint32_t mip, uint32_t tx, uint32_t ty) const {
+        if (slice >= m_slices || !IsSliceActive(slice)) return false;
+        if (mip >= m_standardMips) return true;                  // packed tail: pinned
+        const MipInfo& m = m_mip[mip];
+        if (tx >= m.tilesX || ty >= m.tilesY) return false;
+        return m_state[slice * m_tilesPerSlice + m.base + ty * m.tilesX + tx] == 1;
+    }
+    void RequestMap(uint32_t mip, uint32_t tx, uint32_t ty) { RequestMap(0, mip, tx, ty); }
+    void RequestUnmap(uint32_t mip, uint32_t tx, uint32_t ty) { RequestUnmap(0, mip, tx, ty); }
+    void RequestMap(uint32_t slice, uint32_t mip, uint32_t tx, uint32_t ty);
+    void RequestUnmap(uint32_t slice, uint32_t mip, uint32_t tx, uint32_t ty);
+
+    // The finest mip resident over a mip-0 tile region, or MipCount()-1 when only the packed
+    // tail covers it. This is the number the shader clamps its LOD to.
+    uint32_t FinestResident(uint32_t tx0, uint32_t ty0) const {
+        return FinestResident(0, tx0, ty0);
+    }
+    // kNothingResident when the slice has never been activated -- an honest "no data here"
+    // rather than a level that is silently NULL.
+    uint32_t FinestResident(uint32_t slice, uint32_t tx0, uint32_t ty0) const;
+
+    // R8 residency map, one texel per mip-0 tile, value = FinestResident. Rebuilt by
+    // CommitMappings; UINT32_MAX until a chain is built.
+    uint32_t ResidencyMapSrv() const { return m_resMapSrv; }
 
     // Executes the batched UpdateTileMappings. Newly mapped tile indices (packed ty*tilesX+tx)
     // are appended to outNewlyMapped: their contents are UNDEFINED until cleared.
@@ -101,12 +160,50 @@ public:
     uint32_t ResidentCount() const { return static_cast<uint32_t>(m_residentList.size()); }
     uint64_t ResidentBytes() const { return ResidentCount() * kTileBytes; }
     uint64_t VirtualBytes() const {
-        return static_cast<uint64_t>(m_tilesX) * m_tilesY * kTileBytes;
+        return static_cast<uint64_t>(m_tilesX) * m_tilesY * m_slices * kTileBytes;
     }
 
     ID3D12Resource* Res() const { return m_res.Get(); }
     uint32_t Srv() const { return m_srv; }
     uint32_t Uav() const { return m_uav; }
+    uint32_t Uav(uint32_t mip) const {
+        return (mip < m_mipUav.size()) ? m_mipUav[mip] : UINT32_MAX;
+    }
+
+    // Map every STANDARD coarse tile (mip >= 1). Coarse levels together cost about a third of
+    // mip 0 and they are the global floor, so completeness there is worth more than sparsity:
+    // a hole in a coarse level is a hole no finer level can cover.
+    // ---- THE POOL CAP (M9h) -----------------------------------------------------------
+    // Until now CommitMappings simply created another heap whenever it ran dry, in both the
+    // 2D and 3D atlas: growth was unbounded and residency policy was the only thing holding
+    // it back. The D3D11.2 sample this design descends from caps its pool (256 tiles, 16 MB
+    // in 2013 money) and evicts to fit.
+    //
+    // The cap here REFUSES rather than evicts, and that is deliberate. A grade bank may be
+    // Volatile -- churn and foam memory exist only on the GPU, so evicting one does not cost
+    // a reload, it destroys simulated state. Blind LRU would silently delete physics. So the
+    // budget is enforced by refusing new mappings and SAYING SO, the same discipline the
+    // meshlet budget already uses ("a dropped leaf is a hole, reported, never silent").
+    // Banks that are safely re-fillable can layer eviction on top later; refusing first is
+    // the version that cannot corrupt anything.
+    void SetPoolCapBytes(uint64_t bytes) {
+        m_poolCapTiles = static_cast<uint32_t>(bytes / kTileBytes);
+    }
+    uint32_t PoolTiles() const { return m_poolTiles; }
+    uint32_t PoolCapTiles() const { return m_poolCapTiles; }
+    uint32_t RefusedMaps() const { return m_refusedMaps; }
+
+    void MapAllCoarse() { MapAllCoarse(0); }
+    void MapAllCoarse(uint32_t slice);
+
+    // Fill the chain by 2x2 reduction, mip 0 upward, each level written through its own UAV.
+    // Needs shaders/MipReduce.hlsl; safe to call every time the fine level changes.
+    void BuildMips(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
+                   ID3D12GraphicsCommandList* cl) {
+        BuildMips(gpu, sc, shaderDir, cl, 0);
+    }
+    void BuildMips(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
+                   ID3D12GraphicsCommandList* cl, uint32_t slice);
 
     static constexpr uint64_t kTileBytes = D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES;
 
@@ -115,12 +212,52 @@ private:
     std::vector<Com<ID3D12Heap>> m_heaps;
     uint32_t m_heapChunkTiles = 64;
     std::vector<uint32_t> m_freeTiles;        // (heapIdx << 16) | tileInHeap
+    // Default 2 GB per atlas. The old sample's 16 MB was a 2013 budget; this GPU has 7.9 GB
+    // dedicated, and a cap exists to make exhaustion LOUD, not to be stingy.
+    uint32_t m_poolCapTiles = static_cast<uint32_t>((2ull * 1024 * 1024 * 1024) /
+                                                    D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES);
+    uint32_t m_poolTiles = 0;        // tiles actually backed by a heap
+    uint32_t m_refusedMaps = 0;      // mappings the cap turned away, this episode
+    bool m_capReported = false;
     std::vector<uint32_t> m_tilePool;         // per atlas tile: pool slot when resident
     std::vector<uint8_t> m_state;             // 0 null, 1 resident
     std::vector<uint32_t> m_residentList;
     std::vector<uint32_t> m_pendingMap, m_pendingUnmap;
     uint32_t m_tilesX = 0, m_tilesY = 0, m_tileW = 0, m_tileH = 0;
     uint32_t m_srv = UINT32_MAX, m_uav = UINT32_MAX;
+
+    // ---- the chain -------------------------------------------------------------------------
+    struct MipInfo {
+        uint32_t tilesX = 0, tilesY = 0;
+        uint32_t base = 0;           // offset into m_state / m_tilePool
+        uint32_t startTile = 0;      // first tile index within the resource
+    };
+    void Decode(uint32_t i, uint32_t& slice, uint32_t& mip, uint32_t& tx, uint32_t& ty) const;
+    void RebuildResidencyMap(Gpu& gpu);
+
+public:
+    // Upload a pending residency map. MUST be called outside command-list recording --
+    // UploadTexture opens its own list.
+    void FlushResidencyMap(Gpu& gpu);
+
+private:
+
+    std::vector<MipInfo> m_mip;
+    uint32_t m_mipCount = 1, m_standardMips = 1;
+    uint32_t m_slices = 1, m_tilesPerSlice = 0;
+    std::vector<uint8_t> m_sliceActive;
+    uint32_t m_packedTiles = 0;      // tiles the tail needs, per slice (0 = no tail)
+    uint32_t m_pinnedFloor = 0;      // the always-resident level: packed tail, or, when a
+                                     // shape has no packed mips at all, the coarsest standard
+    std::vector<uint32_t> m_mipUav;  // one UAV per mip, for the reduction's destination
+    DXGI_FORMAT m_fmt = DXGI_FORMAT_UNKNOWN;
+    uint32_t m_mipTable = UINT32_MAX;
+    Com<ID3D12RootSignature> m_mipRs;
+    Com<ID3D12PipelineState> m_mipPso;
+    GpuTexture m_resMap;             // R8_UINT, tilesX(0) x tilesY(0)
+    uint32_t m_resMapSrv = UINT32_MAX;
+    std::vector<uint8_t> m_resMapCpu;
+    bool m_resMapDirty = false;
 };
 
 // ================================================================================================
@@ -131,6 +268,12 @@ private:
 // ================================================================================================
 class TileAtlas3D {
 public:
+    void SetPoolCapBytes(uint64_t bytes) {
+        m_poolCapTiles = static_cast<uint32_t>(bytes / TileAtlas2D::kTileBytes);
+    }
+    uint32_t PoolTiles() const { return m_poolTiles; }
+    uint32_t PoolCapTiles() const { return m_poolCapTiles; }
+    uint32_t RefusedMaps() const { return m_refusedMaps; }
     void Init(Gpu& gpu, uint32_t w, uint32_t h, uint32_t d, DXGI_FORMAT fmt,
               const wchar_t* name, uint32_t heapChunkTiles = 64);
 
@@ -164,6 +307,11 @@ private:
     std::vector<Com<ID3D12Heap>> m_heaps;
     uint32_t m_heapChunkTiles = 64;
     std::vector<uint32_t> m_freeTiles;
+    // Same cap, same reason: the volume bank grew without bound too.
+    uint32_t m_poolCapTiles = static_cast<uint32_t>((2ull * 1024 * 1024 * 1024) /
+                                                    D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES);
+    uint32_t m_poolTiles = 0;
+    uint32_t m_refusedMaps = 0;
     std::vector<uint32_t> m_tilePool;
     std::vector<uint8_t> m_state;
     std::vector<uint32_t> m_residentList;

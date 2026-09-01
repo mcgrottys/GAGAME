@@ -31,6 +31,12 @@ public:
     const char* Name() const override { return "gulf"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
               ID3D12RootSignature* rootSig) override;
+    // M9h: the GoMOFS grad(flow) Mv2, for ingest into the inlet bank's COARSE levels. Same
+    // kernel, same quantity, same units as the SWE grad -- which is exactly why this is the
+    // right coarse source and the wind was not: the wind's curl is three orders away and only
+    // looked comparable because each was normalized against its own range.
+    uint32_t MvSrv() const { return m_mvSrv; }
+
     void ReloadShaders(Gpu& gpu, ShaderCompiler& sc) override;
     void Render(const FrameContext& ctx) override;
 
