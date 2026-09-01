@@ -97,6 +97,7 @@ struct Options {
     uint32_t tileBudget = 1000;       // --tile-budget: hard cap on Google fetches per run
     bool warmInlet = false;           // --warm-inlet: pre-cache the Merrimack detail pyramid
     bool railZoom = false;            // --rail-zoom DIR: orbit -> inlet imagery zoom -> estuary
+    uint32_t predictEvery = 3;        // --predict-every N: prefetch-walk cadence (1 = old)
     bool bench = false;               // --bench: fly the rail, capture nothing, time honestly
     std::string mp4;                  // --mp4 PATH: pipe rail frames straight to an encoder
     bool flatBed = false;             // --flat-bed N: constant bed, to A/B bathymetry
@@ -283,6 +284,7 @@ Options ParseArgs(int argc, char** argv) {
         // M9t: fly the rail and measure it, capturing NOTHING. See the note at the timing site
         // for why this is not the same as reading renderMs out of a captured run.
         else if (a == "--bench") o.bench = true;
+        else if (a == "--predict-every") o.predictEvery = uint32_t(atoi(next("1").c_str()));
         // M9p: replace the bed with a flat floor at this NAVD height. The A/B against a normal
         // run isolates BATHYMETRY's contribution to the geometry from everything else.
         else if (a == "--flat-bed") { o.flatBed = true; o.flatBedNavd = float(atof(next("-30").c_str())); }
@@ -3154,6 +3156,23 @@ int main(int argc, char** argv) {
         // something, and it is exactly the run nobody measures because they are watching the
         // pictures. Per-frame, not averaged: a mean hides the stall that a viewer actually sees.
         std::vector<float> railMs, railLoopMs;
+        // M9u: WHERE THE OTHER HALF OF THE FRAME GOES. --bench showed render is only 7.9 of a
+        // 17.2 ms helm frame; this splits the remaining 9.4 ms by section. Accumulated in two
+        // buckets -- the whole rail, and the HELM leg alone -- because the cost is altitude
+        // dependent and a single total would average the expensive view away, which is the
+        // mistake the phase table already caught once.
+        // M9v: prefetch cadence, --predict-every. 1 = every frame (the shipped behaviour).
+        const uint32_t kPredictEvery = (std::max)(1u, opt.predictEvery);
+        double profMs[10] = {}, profHelmMs[10] = {};
+        std::vector<float> railPreMs;   // M9u: the whole pre-RenderFrame half
+        static const char* kProfName[10] = {
+            "weather.Update", "scene hot-reload stat", "waveField.Update",
+            "waterBank.SetFrame", "tide.SetTime", "sea.SetTime",
+            "groundAt (cam clamp)", "globe.SetView", "globe.PredictWants", "swe (solver step)"};
+        std::chrono::steady_clock::time_point profT0;
+        bool profHelm = false;
+#define PROF_BEGIN() profT0 = Clock::now()
+#define PROF_END(slot)                                                                         do {                                                                                           const double _e =                                                                              std::chrono::duration<double>(Clock::now() - profT0).count() * 1000.0;                  profMs[slot] += _e;                                                                        if (profHelm) profHelmMs[slot] += _e;                                                  } while (0)
         FramePipe recPipe;
         std::vector<uint8_t> recPixels;
         if (!opt.mp4.empty()) {
@@ -3176,6 +3195,7 @@ int main(int argc, char** argv) {
             const auto now = Clock::now();
             float dt = std::chrono::duration<float>(now - last).count();
             last = now;
+            const auto preT0 = Clock::now();   // M9u: everything before RenderFrame
             dt = (dt > 0.25f) ? 0.25f : dt;   // a debugger break must not teleport time
 
             if (!opt.headless) {
@@ -3318,6 +3338,8 @@ int main(int argc, char** argv) {
                     recFrame = opt.frames - 1u;
                 }
                 simUnix = startUnix + static_cast<double>(recFrame) * (timeScale / 30.0);
+                // The helm leg of --rail-flood: keys at 32 s (cHelmIn) and 40 s (cHelmGap).
+                profHelm = !opt.rail.empty() && recFrame >= 32u * 30u;
                 if (!opt.rail.empty() && !railKeys.empty()) {
                     // M6g: the rails just set a pose in the ONE frame. Nothing switches.
                     railPose(static_cast<double>(recFrame) / 30.0, cam);
@@ -3351,10 +3373,12 @@ int main(int argc, char** argv) {
                 // is the demand signal; dormant windows spin up as it arrives, mirrors
                 // refresh, owned solvers advance. All in the flat one-world frame.
                 if (!marsMode) {
+                    PROF_BEGIN();
                     weather.Update(gpu, renderer.Shaders(), opt.shaderDir, simUnix,
                                    BathyModel::kOrgLat + cam.pz / BathyModel::kMPerLat,
                                    BathyModel::kOrgLon + cam.px / BathyModel::kMPerLon,
                                    altV);
+                    PROF_END(0);
                 }
                 // M7: the bank's rings follow the camera; the globe binds THIS frame's
                 // origins (residency committed in SetFrame, content recomposed in Render).
@@ -3362,6 +3386,7 @@ int main(int argc, char** argv) {
                     // M8: the scene file hot-reloads -- edit, save, watch the water
                     // change. A geometry edit re-Configures the solver (its bucket key
                     // rolls, the cache answers or a background solve runs).
+                    PROF_BEGIN();
                     if (WaterSceneChanged(kScenePath, &waterSceneMtime) &&
                         LoadWaterScene(kScenePath, waterScene)) {
                         if (waveField) {
@@ -3381,14 +3406,17 @@ int main(int argc, char** argv) {
                         }
                         Log("[scene] %s hot-reloaded", kScenePath);
                     }
+                    PROF_END(1);
                     // M8: bucket-watch + background solve + upload/swap for the solved
                     // wave field, BEFORE the bank recomposes so the kernel binds a whole
                     // field or the previous one -- never a half-written atlas.
                     // (frame >= 2: the first frames run on the boot clock before --start
                     // settles; solving them caches a real answer for the wrong instant.)
                     if (waveField && sea && waterScene.wfEnabled && frame >= 2) {
+                        PROF_BEGIN();
                         waveField->Update(gpu, simUnix, sea->Parts(), sea->activeParts,
                                           opt.headless);
+                        PROF_END(2);
                     }
                     // M8 fleet: advance the traffic (stateless), hand the table to the
                     // bank kernel (wakes) -- and to the vessel layer when it exists.
@@ -3422,7 +3450,9 @@ int main(int argc, char** argv) {
                         }
                         waterBank->SetBoats(bA, bB);
                     }
+                    PROF_BEGIN();
                     waterBank->SetFrame(gpu, simUnix, cam.px, cam.pz);
+                    PROF_END(3);
                     float orgs[12];
                     for (int mR = 0; mR < WaterBankLayer::kMips; ++mR) {
                         waterBank->RingOrigin(mR, orgs[mR * 2], orgs[mR * 2 + 1]);
@@ -3465,22 +3495,42 @@ int main(int argc, char** argv) {
             if (mode == 1 && globe) {
                 globe->reliefExagg =
                     static_cast<float>(std::clamp(altV / 250000.0, 1.0, 20.0));
+                PROF_BEGIN();
                 const double g = groundAt(cam.px, cam.pz);
+                PROF_END(6);
                 if (cam.py < g + 1.2) cam.py = g + 1.2;
                 const float viewH = opt.headless ? static_cast<float>(opt.height)
                                                  : static_cast<float>(
                                                        std::max(1u, window.Height()));
                 const float aspect =
                     (opt.headless ? static_cast<float>(opt.width) : window.Width()) / viewH;
+                PROF_BEGIN();
                 globe->SetView(cam, aspect, viewH, simUnix - startUnix);
+                PROF_END(7);
                 // M6e screw-prefetch: extrapolate the pose ~0.8 s ahead along its own screw and
                 // let the walk under THAT camera queue tiles early (predicted priority).
-                Camera pred = cam;
-                motorPose(resMgr.PredictNextPose(poseMotor(cam), 24.0), pred);
-                globe->PredictWants(pred, aspect);
+                // M9v: THE PREFETCH WALK, AMORTIZED. Measured at 3.25 ms per frame at helm --
+                // a full six-face quadtree descent with NO frustum cull (the predicted view is
+                // approximate by design, so it walks more nodes than the real pass does). Paying
+                // that at 30 Hz to serve a prediction 0.8 SECONDS ahead is spending a whole
+                // frame budget to refine a guess whose own horizon is 24 frames wide.
+                //
+                // Every 6th frame is 5 Hz -- 0.2 s of granularity against an 0.8 s lookahead, so
+                // the prefetch still lands four times inside its own horizon. The phase is tied
+                // to the frame counter rather than a timer so a headless rail and an interactive
+                // run walk the same nodes on the same frames.
+                if ((frame % kPredictEvery) == 0) {
+                    PROF_BEGIN();
+                    Camera pred = cam;
+                    motorPose(resMgr.PredictNextPose(poseMotor(cam), 24.0), pred);
+                    globe->PredictWants(pred, aspect);
+                    PROF_END(8);
+                }
             }
 
+            PROF_BEGIN();
             tide->SetTime(simUnix, windowSec);
+            PROF_END(4);
             renderer.waterLevel = static_cast<float>(tide->focusHeight);
             // The terrain speaks NAVD88; the tide speaks MLLW. One offset joins them. In
             // estuary mode the open-water level is the ENTRANCE station's (M5c), and the west
@@ -3488,11 +3538,13 @@ int main(int argc, char** argv) {
             const double waterNavd =
                 bathy.Ready() ? oceanAt(simUnix) : tide->focusHeight + datumOff;
             lastWaterNavd = waterNavd;   // next frame's camera-pivot rays test against it
+            PROF_BEGIN();
             if (swe.Ready()) {
                 swe.SetBoundaries(static_cast<float>(westAt(simUnix)),
                                   static_cast<float>(southAt(simUnix)),
                                   static_cast<float>(westQAt(simUnix)));
             }
+            PROF_END(9);
             // M7k: arm the programmatic .wpix capture so it records the run's LAST warm
             // frames -- every pass named by its state-diagram node.
             if (opt.pixFrames > 0 && opt.frames > 0 && opt.frames + (opt.rail.empty() ? 0u : 150u) >= opt.pixFrames + 4 &&
@@ -3500,8 +3552,10 @@ int main(int argc, char** argv) {
                 PixGpuCaptureFrames(L"gagame.wpix", opt.pixFrames);
                 pixArmed = true;
             }
+            PROF_BEGIN();
             if (sea) sea->SetTime(simUnix, bathy.Ready() ? waterNavd : tide->focusHeight,
                                   cam.px, cam.pz);
+            PROF_END(5);
             if (terrain) terrain->waterNavd = static_cast<float>(waterNavd);
             if (globe) globe->waterNavd = static_cast<float>(waterNavd);   // M6j materials
 
@@ -3519,6 +3573,8 @@ int main(int argc, char** argv) {
             // the honest answer to "what does a frame cost". It is deliberately NOT on by
             // default: a per-frame WaitIdle destroys the CPU/GPU overlap a real run depends on,
             // which would make the captured runs measure something nobody ships.
+            const float preMs =
+                std::chrono::duration<float>(Clock::now() - preT0).count() * 1000.0f;
             const auto rf0 = Clock::now();
             renderer.RenderFrame(cam, static_cast<float>(simUnix - startUnix), dt);
             if (opt.bench) gpu.WaitIdle();
@@ -3529,6 +3585,7 @@ int main(int argc, char** argv) {
                 // Bench records the timing and nothing else -- no readback, no encode, no disk.
                 railMs.push_back(renderMs);
                 railLoopMs.push_back(dt * 1000.0f);
+                railPreMs.push_back(preMs);
                 railPool.push_back(PoolCommittedBytes());
             } else if (!opt.rail.empty() && frame >= 150u) {
                 if (recPipe.Open()) {
@@ -3644,6 +3701,30 @@ int main(int argc, char** argv) {
                         "33.3 ms (%.1f%%)",
                         over16, budgetSrc.size(), 100.0 * over16 / double(budgetSrc.size()),
                         over33, 100.0 * over33 / double(budgetSrc.size()));
+                    {
+                        double tot = 0.0, totH = 0.0;
+                        for (int k = 0; k < 10; ++k) { tot += profMs[k]; totH += profHelmMs[k]; }
+                        const double n = double(railMs.size());
+                        const double nH = 240.0;   // the helm leg, 8 s at 30 fps
+                        Log("[rail] outside RenderFrame, per frame -- %-22s %8s %8s",
+                            "section", "whole", "helm");
+                        for (int k = 0; k < 10; ++k) {
+                            Log("[rail]   %-22s %6.3f ms %6.3f ms", kProfName[k],
+                                profMs[k] / n, profHelmMs[k] / nH);
+                        }
+                        Log("[rail]   %-22s %6.3f ms %6.3f ms  <- measured here", "sum of the ten",
+                            tot / n, totH / nH);
+                        if (!railPreMs.empty()) {
+                            double pre = 0.0, preH = 0.0;
+                            for (size_t k = 0; k < railPreMs.size(); ++k) {
+                                pre += railPreMs[k];
+                                if (k >= 960) preH += railPreMs[k];
+                            }
+                            Log("[rail]   %-22s %6.3f ms %6.3f ms  <- ALL of it, so the "
+                                "remainder is post-render",
+                                "pre-RenderFrame total", pre / n, preH / nH);
+                        }
+                    }
                     Log("[rail] tile pool at end: %.2f GB committed across every atlas -- the "
                         "sparse structure's real cost for this flight",
                         railPool.empty() ? 0.0 : railPool.back() / 1073741824.0);
