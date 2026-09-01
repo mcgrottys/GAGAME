@@ -300,3 +300,45 @@ coordinates.
 Multiple GA objects per body (Sky / Water / Earth, §7) then compose without interfering, and
 multiple bodies — each with its own frame and bank set — is the same structure one level up.
 Nested simulations follow from that, not from anything new.
+
+## 15. How big can one bank be, measured
+
+Asserted first, measured second, and the assertion was half right in a way that mattered.
+The probe lives in `--selftest` permanently (it costs nothing -- no tile is mapped):
+
+    16384 x 16384    created   (Earth: 2441.41 m/texel)
+    32768 x 32768    REFUSED
+    largest accepted: 16384
+
+**A reserved resource buys a huge virtual MEMORY space, not a huge virtual EXTENT.** The
+sparsity is in what is committed; `D3D12_RESOURCE_DESC` dimension limits still apply and
+`CreateReservedResource` refuses past 16384 exactly as a committed texture would.
+
+**But that is not a wall, and treating it as one was the error.** The cap bounds one
+resource at one LEVEL. A tree is levels, each level is backed by however many resources it
+needs, and fine levels are sparse by premise -- so they need very few. Alignment is what
+makes this safe: level L in tree A and level L in tree B describe the same ground, and level
+L+1 nests exactly inside level L, so nothing drifts.
+
+With level 0 = Earth in one 16384 texture (2441 m/texel), 1 cm is about 18 levels down, and
+one resource at level 18 covers ~152 m of ground. The whole planet at that level is absurd;
+only regions with data are ever instantiated.
+
+The bounds, ranked by whether they actually bind:
+
+| bound | value | binding? |
+|---|---|---|
+| resource extent | 16384^2 per level | no -- levels are separate resources |
+| descriptors | 4096 self-imposed; ~1e6 on Resource Binding Tier 3 | no -- one constant |
+| **data volume** | 128 GB for 1 cm over the 3.2 x 2 km inlet | **yes, the only real one** |
+
+Centimetre data exists in PATCHES -- a survey strip, a dock -- and a patch fits in one
+resource. Bindless (`gTex[]`) is already here, so per-(level, region) resources need no new
+binding machinery. A physical tile pool with a page table is therefore an OPTIMISATION
+(fewer resources, tighter packing, less descriptor churn), not a prerequisite.
+
+### What all trees share
+
+Not a texture, and not an extent: the **`(level, x, y)` address space**. Level N means the
+same ground resolution on every tree and every body. Each tree owns its own resources and
+residency; they align by construction, globe to camera.

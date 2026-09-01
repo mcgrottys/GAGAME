@@ -1430,6 +1430,39 @@ bool RunAtlasSelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDi
         pass &= okC;
     }
 
+    // ---- M9h: HOW BIG CAN A RESERVED RESOURCE ACTUALLY BE? A reserved resource buys a huge
+    // VIRTUAL memory space, but memory and EXTENT are different axes and it was not obvious
+    // (to me) which one bounds a planet-scale tree. Measured rather than asserted, because the
+    // answer decides whether one bank can span globe-to-centimetre or whether the tree has to
+    // be addressed across multiple resources. Creating these costs nothing: no tile is mapped,
+    // so nothing is committed.
+    {
+        Log("[atlastest] reserved-resource extent probe (virtual only, nothing committed):");
+        const uint32_t dims[] = {16384u, 32768u, 65536u, 131072u, 1048576u};
+        uint32_t largest = 0;
+        for (uint32_t d : dims) {
+            D3D12_RESOURCE_DESC rd{};
+            rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            rd.Width = d;
+            rd.Height = d;
+            rd.DepthOrArraySize = 1;
+            rd.MipLevels = 1;
+            rd.Format = DXGI_FORMAT_R16_FLOAT;
+            rd.SampleDesc.Count = 1;
+            rd.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
+            rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            Com<ID3D12Resource> probe;
+            const HRESULT hr = gpu.Device()->CreateReservedResource(
+                &rd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&probe));
+            const double mPerTexel = 40.0e6 / double(d);
+            Log("[atlastest]   %7u x %-7u  %s   (Earth: %.2f m/texel)", d, d,
+                SUCCEEDED(hr) ? "created" : "REFUSED ", mPerTexel);
+            if (SUCCEEDED(hr)) largest = d;
+        }
+        Log("[atlastest]   largest accepted: %u (%.2f m/texel over Earth's circumference)",
+            largest, 40.0e6 / double(largest ? largest : 1));
+    }
+
     Log("[atlastest] ---- %s ----", pass ? "PASS" : "FAIL");
     return pass;
 }
