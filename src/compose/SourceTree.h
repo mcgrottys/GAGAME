@@ -174,6 +174,17 @@ public:
         tree_detail::MakeDir(m_root + "\\" + frameTag);
     }
 
+    // Is this tile already held, and as what? Costs two directory lookups and reads no bytes --
+    // which is what lets the composite decide whether it is still valid before touching a
+    // single 64 KB tile.
+    enum class Held : uint8_t { Absent, Void, Content };
+    Held Peek(const std::string& frameTag, const TileRequest& r) const {
+        const std::string base = Base(frameTag, r);
+        if (tree_detail::Exists(base + ".void")) return Held::Void;
+        if (tree_detail::Exists(base + ".bin")) return Held::Content;
+        return Held::Absent;
+    }
+
     const std::string& Id() const { return m_id; }
     const std::string& Name() const { return m_name; }
     const std::string& Root() const { return m_root; }
@@ -280,23 +291,56 @@ public:
         Compositor::TileBox box{};
         frame.Box(r, box);
         std::vector<size_t> inc;
-        const uint64_t subset = m_comp->ColorSubset(ch, box, inc);
+        m_comp->ColorSubset(ch, box, inc);
         if (refIdx) *refIdx = -1;
 
-        const std::string cpath = CompositePath(tag, r, subset);
-        if (tree_detail::Exists(cpath + ".void")) {
-            out.assign(65536, 0);
-            ++compositeHits;
-            return true;
+        // THE COMPOSITE'S IDENTITY IS ITS INPUTS. Not kComposeVersion, which re-identifies a
+        // whole channel whenever the BLEND changes and re-identifies nothing when a SOURCE
+        // does -- both halves of that are wrong. A composite tile is a pure function of the
+        // input tree tiles it consumed plus the rule that combined them, so its key is exactly
+        // that: each contributing tree's identity, what that tree holds at this address, the
+        // gate wiring, and a blend version for the rule itself.
+        //
+        // So it updates when new tiles appear in a source and at no other time. A source tree
+        // re-harvested under a new identity invalidates the composites that used it, and only
+        // those; a source that did not move leaves them alone.
+        //
+        // Peek reads no bytes -- two directory lookups per layer -- so a warm hit costs no tile
+        // I/O at all.
+        std::vector<SourceTree::Held> held(inc.size(), SourceTree::Held::Absent);
+        bool allKnown = true;
+        for (size_t k = 0; k < inc.size(); ++k) {
+            held[k] = m_trees[inc[k]]->Peek(tag, r);
+            if (held[k] == SourceTree::Held::Absent) allKnown = false;
         }
-        if (tree_detail::ReadTile(cpath + ".bin", out)) {
-            ++compositeHits;
-            return true;
+        if (allKnown) {
+            const std::string cpath = CompositePath(tag, r, KeyOf(ch, inc, held));
+            if (tree_detail::Exists(cpath + ".void")) {
+                out.assign(65536, 0);
+                ++compositeHits;
+                return true;
+            }
+            if (tree_detail::ReadTile(cpath + ".bin", out)) {
+                ++compositeHits;
+                return true;
+            }
         }
 
-        // Gather the covering layers from their own trees, bottom to top.
+        // Gather every layer in the subset from its own tree, bottom to top. Gates are
+        // gathered too -- a gate is a source with its own tree, which is exactly what makes
+        // "the GIS mask" a thing on disk rather than a thing inside another source.
         std::vector<std::vector<uint8_t>> tiles(inc.size());
-        std::vector<size_t> live;      // indices into inc that actually have coverage here
+        std::vector<int> posOf(ch.color.size(), -1);
+        std::vector<SourceTree::Held> got(inc.size(), SourceTree::Held::Absent);
+        // ABSENT AND EMPTY ARE OPPOSITE ANSWERS FOR A GATE, and conflating them inverts it. A
+        // gate that is not in this tile's subset has NO OPINION (factor 1). A gate that IS in
+        // the subset and came back VOID has every opinion: it covers nothing, so it permits
+        // nothing, and the layer it gates is blocked across the whole tile. An all-land mask
+        // tile is exactly that case, it costs zero bytes on disk, and read the other way it
+        // would let the bed paint over dry land -- which is the one thing the gate exists to
+        // stop.
+        std::vector<uint8_t> voidOf(ch.color.size(), 0u);
+        std::vector<size_t> live;      // in-subset layers that actually have coverage here
         std::vector<uint8_t> full;     // ...and whether each claims the tile outright
         bool complete = true;
         for (size_t k = 0; k < inc.size(); ++k) {
@@ -307,7 +351,14 @@ public:
                 complete = false;
                 continue;   // absent for this tile, exactly as a zero weight would be
             }
-            if (st == SourceTree::Status::Void) continue;
+            got[k] = (st == SourceTree::Status::Void) ? SourceTree::Held::Void
+                                                      : SourceTree::Held::Content;
+            if (st == SourceTree::Status::Void) {
+                voidOf[inc[k]] = 1u;
+                continue;
+            }
+            posOf[inc[k]] = static_cast<int>(k);
+            if (ch.gateOnly[inc[k]]) continue;   // present, indexed, but never painted
             live.push_back(k);
             full.push_back(fc ? 1u : 0u);
         }
@@ -316,12 +367,19 @@ public:
         // lerp from black by weight 1 is the identity, and the composite's alpha (255 where
         // anything covers) is the weight this tree already stored. So the composite IS that
         // tree's tile, byte for byte, and there is nothing to write down.
-        if (live.size() == 1 && full[0]) {
+        //
+        // A GATED layer is never "alone", however full it looks: its weight is its own alpha
+        // times its gate's, so its tile is not the answer. Only an ungated layer can be
+        // referenced.
+        if (live.size() == 1 && full[0] && ch.gateOf[inc[live[0]]] < 0) {
             out = std::move(tiles[live[0]]);
             if (refIdx) *refIdx = static_cast<int>(inc[live[0]]);
             ++refs;
             return true;
         }
+
+        // Now that every layer's status is known for real, the key is too.
+        const std::string cpath = CompositePath(tag, r, KeyOf(ch, inc, got));
 
         out.assign(65536, 0);
         if (live.empty()) {
@@ -339,7 +397,16 @@ public:
             for (const size_t k : live) {
                 const uint8_t* s = &tiles[k][i * 4];
                 if (s[3] == 0) continue;
-                const float w = s[3] * (1.0f / 255.0f);
+                float w = s[3] * (1.0f / 255.0f);
+                const int g = ch.gateOf[inc[k]];
+                if (g >= 0) {
+                    if (voidOf[g]) continue;   // the gate covers nothing here: nothing passes
+                    if (posOf[g] >= 0) {
+                        const uint8_t ga = tiles[posOf[g]][i * 4 + 3];
+                        if (ga == 0) continue;   // gated out at this texel
+                        w *= ga * (1.0f / 255.0f);
+                    }
+                }
                 for (int c = 0; c < 3; ++c) acc[c] += (s[c] - acc[c]) * w;
                 cover = (std::max)(cover, w);
             }
@@ -377,6 +444,26 @@ public:
     std::atomic<uint32_t> refs{0}, composed{0}, voids{0}, compositeHits{0};
 
 private:
+    // The blend RULE's own version. Bump it when the composition changes -- the lerp, the cover
+    // rule, the gate semantics -- and not when a source does.
+    static constexpr int kBlendVersion = 2;   // v2: gates
+
+    uint64_t KeyOf(const Compositor::Channel& ch, const std::vector<size_t>& inc,
+                   const std::vector<SourceTree::Held>& held) const {
+        uint64_t h = tree_detail::Fnv1a(14695981039346656037ull,
+                                        ch.name + "#" + std::to_string(kBlendVersion));
+        for (size_t k = 0; k < inc.size(); ++k) {
+            const size_t s = inc[k];
+            h = tree_detail::Fnv1a(h, m_trees[s]->Id());
+            h = tree_detail::Fnv1a(h, held[k] == SourceTree::Held::Void ? "-" : "+");
+            if (ch.gateOnly[s]) h = tree_detail::Fnv1a(h, "g");
+            if (ch.gateOf[s] >= 0) {
+                h = tree_detail::Fnv1a(h, "<" + m_trees[ch.gateOf[s]]->Id());
+            }
+        }
+        return h;
+    }
+
     std::string CompositePath(const std::string& tag, const TileRequest& r,
                               uint64_t subset) const {
         char buf[320];
@@ -414,8 +501,14 @@ struct TreeAudit {
     uint32_t refs = 0, composed = 0;   // how the composite answered
 };
 
+// `warmOnly` composes every address the folder names WITHOUT comparing, and without the stale
+// check. The comparison needs a tile the shipped path painted from today's stack; warming does
+// not, and after a source is added there IS no comparable tile -- which is exactly when the
+// trees most need building. Without this, adding the gate left every gated address unwarmed and
+// the next flight paid for all of it at 30 fps.
 inline void AuditColorTrees(Compositor& comp, int channel, ColorTreeStack& trees,
-                            const ColorFrame& frame, uint32_t maxTiles, TreeAudit& a) {
+                            const ColorFrame& frame, uint32_t maxTiles, TreeAudit& a,
+                            bool warmOnly = false) {
     const Compositor::Channel& ch = comp.ChannelAt(channel);
     const std::string tag = frame.Tag();
     trees.EnsureFrame(tag);
@@ -449,15 +542,17 @@ inline void AuditColorTrees(Compositor& comp, int channel, ColorTreeStack& trees
         frame.Box(r, box);
         std::vector<size_t> inc;
         const uint64_t subset = comp.ColorSubset(ch, box, inc);
-        if (static_cast<uint32_t>(subset & 0xFFFFFFFFu) != sub) {
+        if (!warmOnly && static_cast<uint32_t>(subset & 0xFFFFFFFFu) != sub) {
             ++a.skippedStale;   // painted from a stack that is not the one running now
             continue;
         }
-        if (!tree_detail::ReadTile(dir + "\\" + fname, direct)) continue;
+        if (!warmOnly && !tree_detail::ReadTile(dir + "\\" + fname, direct)) continue;
         int refIdx = -1;
-        if (!trees.Compose(frame, tag, r, tree, &refIdx) || tree.size() != direct.size()) continue;
+        if (!trees.Compose(frame, tag, r, tree, &refIdx)) continue;
         ++a.tiles;
         if (refIdx >= 0) ++a.refs; else ++a.composed;
+        if (warmOnly) continue;
+        if (tree.size() != direct.size()) continue;
         bool same = true;
         for (size_t i = 0; i < direct.size(); i += 4) {
             uint32_t d = 0;

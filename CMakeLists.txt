@@ -29,6 +29,7 @@ add_executable(gagame
   src/compose/Compositor.cpp
   src/compose/ComposeTest.cpp
   src/compose/Sources.cpp
+  src/compose/GisMask.cpp
   src/compose/GisStencil.cpp
   src/compose/VectorPack.cpp
   src/compose/Exchange.cpp

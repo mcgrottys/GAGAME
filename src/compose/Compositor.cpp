@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -147,8 +148,24 @@ int Compositor::AddColorChannel(const std::string& name, std::vector<ColorSource
     Channel ch;
     ch.name = name;
     ch.color = std::move(stack);
+    ch.gateOf.assign(ch.color.size(), -1);
+    ch.gateOnly.assign(ch.color.size(), 0u);
     m_channels.push_back(std::move(ch));
     return static_cast<int>(m_channels.size()) - 1;
+}
+
+void Compositor::SetColorGate(int channel, size_t layer, size_t gate) {
+    Channel& ch = m_channels[channel];
+    if (layer >= ch.color.size() || gate >= ch.color.size() || layer == gate) {
+        Log("[compose] %s: REFUSED gate %zu -> %zu (out of range, or a layer gating itself)",
+            ch.name.c_str(), gate, layer);
+        return;
+    }
+    ch.gateOf[layer] = static_cast<int>(gate);
+    ch.gateOnly[gate] = 1u;
+    Log("[compose] %s: %s GATES %s -- weight multiplied per texel; the gate paints nothing",
+        ch.name.c_str(), ch.color[gate]->Info().name.c_str(),
+        ch.color[layer]->Info().name.c_str());
 }
 
 int Compositor::AddHeightChannel(const std::string& name, std::vector<HeightSource*> stack) {
@@ -313,22 +330,41 @@ void Compositor::PaintColorTile(const Channel& ch, const ColorFrame& frame, cons
         ch.color[inc[k]]->BeginTile(box.latMin, box.latMax, box.lonMin, box.lonMax, groundRes,
                                     ctxs[k]);
     }
+    // Where each source sits in `inc`, so a gate can be found without a search per texel.
+    // -1 means the gate is not in this tile's subset, which is NO OPINION (factor 1) -- a gate
+    // whose footprint misses must never delete the layer it was meant to qualify.
+    std::vector<int> posOf(ch.color.size(), -1);
+    for (size_t k = 0; k < inc.size(); ++k) posOf[inc[k]] = static_cast<int>(k);
+
     out.assign(65536, 0);
     complete = true;
+    std::vector<float> w(inc.size());
+    std::vector<std::array<uint8_t, 4>> rgba(inc.size());
     for (uint32_t py = 0; py < frame.texH; ++py) {
         for (uint32_t px = 0; px < frame.texW; ++px) {
             double lat = 0, lon = 0;
             frame.Texel(r, px, py, lat, lon);
+            // Sample every layer in the subset ONCE, gates included -- a gate is a source and
+            // costs exactly what it did before it was given that role.
+            for (size_t k = 0; k < inc.size(); ++k) {
+                w[k] = ch.color[inc[k]]->Sample(lat, lon, groundRes, ctxs[k], rgba[k].data());
+                if (w[k] < 0.0f) complete = false;
+            }
             uint8_t* dst = &out[(py * frame.texW + px) * 4];
             float acc[3] = {0, 0, 0};
             float cover = 0.0f;
             for (size_t k = 0; k < inc.size(); ++k) {   // bottom -> top, subset only
-                uint8_t rgba[4];
-                const float w = ch.color[inc[k]]->Sample(lat, lon, groundRes, ctxs[k], rgba);
-                if (w < 0.0f) { complete = false; continue; }
-                if (w == 0.0f) continue;
-                for (int c = 0; c < 3; ++c) acc[c] += (rgba[c] - acc[c]) * w;
-                cover = (std::max)(cover, w);
+                if (ch.gateOnly[inc[k]]) continue;      // gates paint nothing
+                float wk = w[k];
+                if (wk <= 0.0f) continue;               // (-1 = transient, already recorded)
+                const int g = ch.gateOf[inc[k]];
+                if (g >= 0 && posOf[g] >= 0) {
+                    const float gw = w[posOf[g]];
+                    if (gw <= 0.0f) continue;           // gated out here entirely
+                    wk *= gw;
+                }
+                for (int c = 0; c < 3; ++c) acc[c] += (rgba[k][c] - acc[c]) * wk;
+                cover = (std::max)(cover, wk);
             }
             dst[0] = static_cast<uint8_t>(acc[0]);
             dst[1] = static_cast<uint8_t>(acc[1]);

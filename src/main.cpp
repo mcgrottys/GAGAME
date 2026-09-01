@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 
 #include "compose/ColorStackSource.h"
+#include "compose/GisMask.h"
 #include "compose/SourceTree.h"
 #include "compose/TileArchive.h"
 #include "compose/TileIndex.h"
@@ -107,7 +108,9 @@ struct Options {
     bool packTiles = false;           // --pack-tiles: pack the composed cache, then exit
     bool directStorage = false;       // --direct-storage: NVMe -> GPU tile reads (opt-in)
     bool colorTrees = false;          // --color-trees: colour through the per-source trees
+    bool gisGate = true;              // --no-gis-gate: drop the vector land/sea gate on the bed
     uint32_t treeAudit = 0;           // --tree-audit N: compare N tiles/frame, report, exit
+    bool warmTrees = false;           // --warm-trees: build them without comparing, then exit
     bool bench = false;               // --bench: fly the rail, capture nothing, time honestly
     std::string mp4;                  // --mp4 PATH: pipe rail frames straight to an encoder
     bool flatBed = false;             // --flat-bed N: constant bed, to A/B bathymetry
@@ -306,7 +309,12 @@ Options ParseArgs(int argc, char** argv) {
         // instead of from the sources; --tree-audit measures the two answers against each
         // other on tiles the shipped path already painted, then exits.
         else if (a == "--color-trees") o.colorTrees = true;
+        // M9ak: the vector land/sea gate is ON. The flag exists to A/B what it changed.
+        else if (a == "--no-gis-gate") o.gisGate = false;
         else if (a == "--tree-audit") o.treeAudit = uint32_t(atoi(next("400").c_str()));
+        // After a source is added there is nothing to compare against -- which is exactly when
+        // the trees most need building. --warm-trees composes every address regardless.
+        else if (a == "--warm-trees") { o.warmTrees = true; o.treeAudit = 1000000u; }
         else if (a == "--predict-every") o.predictEvery = uint32_t(atoi(next("1").c_str()));
         // M9p: replace the bed with a flat floor at this NAVD height. The A/B against a normal
         // run isolates BATHYMETRY's contribution to the geometry from everything else.
@@ -1997,6 +2005,10 @@ int main(int argc, char** argv) {
                                         // mostly-transparent highlights plane bleeds through
                                         // the composed quadtree pixel by pixel
         GisStencil gisStencil;   // survey vectors + mask realizations (GSHHG/WDBII)
+        // M9ak: the SAME survey, as rings rather than as a parity fill -- the compositor's
+        // land/sea gate. Neither .raw mask is opened by this one.
+        GisVectorMask gisMask;
+        GisMaskSource srcGisMask(&gisMask);
         VectorPack vectors;      // M6p: lossless vector layers, LOD by wedge importance
         GisLayer* gisLayer = nullptr;
 
@@ -2049,6 +2061,7 @@ int main(int argc, char** argv) {
                     // have coverage -- the compositor's first independent high-res layer,
                     // aligned by its own declared projection (EPSG:6348), not by luck.
                     std::vector<ColorSource*> colorStack{&srcGoogle};
+                    size_t bedLayer = SIZE_MAX, maskLayer = SIZE_MAX;
                     // M7x (user catch): the ortho was painting its capture-day WATER over the
                     // drained-bed albedo -- a hard-edged dark rectangle the sea shader then
                     // attenuated AGAIN. Photos are LAND authorities; the bed classifier is
@@ -2061,11 +2074,31 @@ int main(int argc, char** argv) {
                     }
                     if (srcBed.Load("data/bed/bed_rules.json", &compositor, hgtCh)) {
                         colorStack.push_back(&srcBed);
+                        bedLayer = colorStack.size() - 1;
                     }
                     if (srcOverlay.Load("data/overlay/overlay.json")) {
                         colorStack.push_back(&srcOverlay);
                     }
+                    // M9ak: THE GATE. The user's rule: "the GIS mask gates, the height band
+                    // refines". srcBed is the WATER authority and its alpha is a height band,
+                    // which cannot tell an inland hollow below +1.2 m NAVD from the sea; the
+                    // survey can, and cannot place a waterline to the metre. So the survey
+                    // multiplies the bed's weight and the height band decides where inside it.
+                    //
+                    // The mask is a LAYER (so it earns a cache identity and its own tree on the
+                    // same addresses as the imagery) that PAINTS NOTHING. Its footprint is the
+                    // rings' own bounds, so every tile outside New England keeps the identity
+                    // it already has -- the global cube is not repainted for this.
+                    const size_t bedIdx = bedLayer;
+                    if (opt.gisGate && bedIdx != SIZE_MAX && gisMask.Load("data/gis/")) {
+                        srcGisMask.Refresh();   // the rings are loaded: declare the real box
+                        colorStack.push_back(&srcGisMask);
+                        maskLayer = colorStack.size() - 1;
+                    }
                     colCh = compositor.AddColorChannel("earth.color", std::move(colorStack));
+                    if (maskLayer != SIZE_MAX) {
+                        compositor.SetColorGate(colCh, bedIdx, maskLayer);
+                    }
                     // M9aj: THE THREE TREES. Each source keeps its own sparse tree on disk; the
                     // composite tree references one of them wherever exactly one source claims
                     // a tile outright, and materializes bytes only where they OVERLAP. Built
@@ -2120,7 +2153,8 @@ int main(int argc, char** argv) {
                         TreeAudit all;
                         for (const ColorFrame& f : frames) {
                             TreeAudit a;
-                            AuditColorTrees(compositor, colCh, colorTrees, f, opt.treeAudit, a);
+                            AuditColorTrees(compositor, colCh, colorTrees, f, opt.treeAudit, a,
+                                            opt.warmTrees);
                             all.tiles += a.tiles;
                             all.exact += a.exact;
                             all.difTexels += a.difTexels;

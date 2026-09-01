@@ -71,6 +71,14 @@ struct SourceInfo {
 // stash tile-scoped corrections -- the grade-normalization gain lives here.
 struct PaintCtx {
     float gain[3] = {1.0f, 1.0f, 1.0f};
+    // M9ak: PER-TILE SCRATCH. A source may do work once per tile in BeginTile and read it back
+    // per texel. The vector GIS mask sweeps its rings by meridian into here -- one sweep per
+    // tile instead of a point-in-polygon against 1.26 million edges per texel -- and the sweep
+    // itself then happens only once per tile ADDRESS ever, because the mask is a layer and so
+    // gets its own tree on the same addresses as the imagery it gates.
+    std::vector<uint8_t> scratch;
+    uint32_t scratchDim = 0;
+    double sLat0 = 0, sLat1 = 0, sLon0 = 0, sLon1 = 0;   // the box `scratch` spans (radians)
 };
 
 class ColorSource {
@@ -162,7 +170,25 @@ public:
         std::vector<ColorSource*> color;
         std::vector<HeightSource*> height;
         std::vector<FieldSource*> field;
+        // M9ak: THE GATE. Parallel to `color`. A layer's paint weight is MULTIPLIED by the
+        // coverage of its gate, per texel, which is a different composition from the stack's
+        // own paint-over: the stack resolves who is on top, a gate resolves whether a layer
+        // is ALLOWED HERE AT ALL.
+        //
+        // The user's rule, in their words: "the GIS mask gates, the height band refines". The
+        // survey says where water can be; the bed classifier's height-band alpha says where
+        // exactly the waterline falls INSIDE that. Neither can do the other's job -- GSHHG at
+        // 1:250k cannot place a waterline to the metre, and a height threshold alone cannot
+        // tell an inland hollow below +1.2 m from the sea.
+        //
+        // A gate source is a member of `color` (so it earns a cache identity and its own tree)
+        // but is never painted, and a gate that does not reach a tile has NO OPINION -- factor
+        // 1, not 0. A missing gate must never delete data.
+        std::vector<int> gateOf;         // index into `color`, or -1 for ungated
+        std::vector<uint8_t> gateOnly;   // 1 = this layer only gates; it paints nothing
     };
+    // layer's weight *= gate's coverage. Both are indices into the channel's colour stack.
+    void SetColorGate(int channel, size_t layer, size_t gate);
     // Public for the selftest: the soak rule is a CONTRACT, and contracts get pinned.
     const Channel& ChannelAt(int id) const { return m_channels[id]; }
     int ChannelCount() const { return static_cast<int>(m_channels.size()); }
