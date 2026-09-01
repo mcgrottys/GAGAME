@@ -740,6 +740,13 @@ void TileAtlas2D::ActivateSlice(Gpu& gpu, uint32_t slice) {
 // The map the SHADER reads: one texel per mip-0 tile, value = finest resident mip there. A
 // sampler clamps its LOD to this, so a region streaming in gets sharper without any code path
 // changing -- which is the whole no-pop contract. Only uploaded when it actually moved.
+// Send a pending residency map. Safe ONLY outside command-list recording.
+void TileAtlas2D::FlushResidencyMap(Gpu& gpu) {
+    if (!m_resMapDirty || m_resMapCpu.empty()) return;
+    m_resMapDirty = false;
+    gpu.UploadTexture(m_resMap, m_resMapCpu.data(), m_tilesX);
+}
+
 void TileAtlas2D::RebuildResidencyMap(Gpu& gpu) {
     if (m_mipCount <= 1 || m_resMapCpu.empty()) return;
     bool moved = false;
@@ -754,7 +761,13 @@ void TileAtlas2D::RebuildResidencyMap(Gpu& gpu) {
             }
         }
     }
-    if (moved) gpu.UploadTexture(m_resMap, m_resMapCpu.data(), m_tilesX);
+    // DO NOT UPLOAD HERE. Gpu::UploadTexture opens its own command list, and CommitMappings
+    // is reachable from inside a frame's recording (BuildChain calls it) -- re-entering
+    // BeginUpload there crashes. Mark it and let FlushResidencyMap send it from a context
+    // that owns no open list. Discovered the hard way: the SWE spinup died on the first
+    // chained bank, with no error, right where Record started.
+    if (moved) m_resMapDirty = true;
+    (void)gpu;
 }
 
 

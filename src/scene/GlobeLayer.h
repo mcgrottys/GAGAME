@@ -126,12 +126,19 @@ public:
     int debugLens = 0;              // M7m: --lens (1 worldxz, 2 winuv, 3 mip, 4 ring,
                                     // 7 velgrad -- the derived div/curl bank)
     // M9h: the grad(flow) bank and the grid it lives on, for lens 7.
-    void SetVelGradLens(uint32_t srv, float x0, float z0, float sizeX, float sizeZ) {
+    void SetVelGradLens(uint32_t srv, float x0, float z0, float sizeX, float sizeZ,
+                        uint32_t resMapSrv = 0xFFFFFFFFu, float texelM = 1.0f,
+                        float resMapW = 0.0f, float resMapH = 0.0f, uint32_t mipCount = 1) {
         m_lensSrv = srv;
         m_lensGeo[0] = x0;
         m_lensGeo[1] = z0;
         m_lensGeo[2] = (sizeX != 0.0f) ? 1.0f / sizeX : 0.0f;
         m_lensGeo[3] = (sizeZ != 0.0f) ? 1.0f / sizeZ : 0.0f;
+        m_lensResMapSrv = resMapSrv;
+        m_lensChain[0] = texelM;
+        m_lensChain[1] = resMapW;
+        m_lensChain[2] = resMapH;
+        m_lensChain[3] = static_cast<float>(mipCount);
     }
     float foamOpacity = 0.72f;      // M8: peak foam opacity (data/wave_scene.json)
     float ringBlendTexels = 48.0f;  // M8: bank ring cross-fade width (scene cfg)
@@ -223,6 +230,7 @@ private:
         float bankFold[4];    // M9c: the FOLD's wavenumber per band (energy-weighted)
         uint32_t lensU[4];    // M9h: grad(flow) bank SRV for --lens velgrad
         float lensA[4];       // bathy grid: org x, org z, 1/sizeX, 1/sizeZ
+        float lensB[4];       // M9h: bank texel m, residency-map dims, spare
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -322,6 +330,8 @@ private:
     float m_bankRms[3] = {};   // M8: unit-sea rms envelope per band
     float m_bankFold[3] = {0.0209f, 0.2339f, 2.8420f};   // M9c: the fold's wavenumbers
     uint32_t m_lensSrv = 0xFFFFFFFFu;   // M9h: grad(flow) bank
+    uint32_t m_lensResMapSrv = 0xFFFFFFFFu;
+    float m_lensChain[4] = {1.0f, 0.0f, 0.0f, 0.0f};
     float m_lensGeo[4] = {0, 0, 0, 0};
     float m_bankExag = 1.15f;
     float m_bankBase = 4.8f;

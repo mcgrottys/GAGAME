@@ -235,6 +235,13 @@ private:
     void Decode(uint32_t i, uint32_t& slice, uint32_t& mip, uint32_t& tx, uint32_t& ty) const;
     void RebuildResidencyMap(Gpu& gpu);
 
+public:
+    // Upload a pending residency map. MUST be called outside command-list recording --
+    // UploadTexture opens its own list.
+    void FlushResidencyMap(Gpu& gpu);
+
+private:
+
     std::vector<MipInfo> m_mip;
     uint32_t m_mipCount = 1, m_standardMips = 1;
     uint32_t m_slices = 1, m_tilesPerSlice = 0;

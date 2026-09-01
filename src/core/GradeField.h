@@ -77,6 +77,10 @@ struct GradeBankDesc {
     uint32_t width = 0, height = 0;   // virtual domain, texels
     DXGI_FORMAT fmt = DXGI_FORMAT_R16G16B16A16_FLOAT;
     uint8_t gradeSig = kG0;           // which grades this bank carries
+    // M9h: > 1 builds the chain. A chained bank gets a pinned floor and a residency map, so a
+    // sample can never miss and detail changes without any code path changing. Costs one tile
+    // per page for the floor -- provided the chain is not truncated (docs/SPARSE_GA.md 18).
+    uint32_t mipLevels = 1;
 
     // The frame contract -- the same quantities the GA AST edge will publish, kept here so the
     // edge can be registered FROM the descriptor instead of hand-written per call site.
@@ -163,9 +167,30 @@ public:
         m_desc = std::move(desc);
         m_policy = policy ? std::move(policy) : policy::All();
         m_atlas.Init(gpu, m_desc.width, m_desc.height, m_desc.fmt,
-                     std::wstring(m_desc.name.begin(), m_desc.name.end()).c_str());
+                     std::wstring(m_desc.name.begin(), m_desc.name.end()).c_str(), 64,
+                     m_desc.mipLevels);
         m_sig.assign(size_t(m_atlas.TilesX()) * m_atlas.TilesY(), m_desc.gradeSig);
     }
+
+    // M9h: fill the chain after mip 0 changes. Coarse levels ARE the floor -- unfilled they
+    // are real memory reading zero, which looks exactly like "the field is zero here".
+    // Two halves, and they must run in different places. Mapping touches the queue and the
+    // residency map, so it belongs OUTSIDE command-list recording; the reduction is pure
+    // command-list work and belongs inside. Collapsing them crashed the SWE spinup.
+    void EnsureCoarseMapped(Gpu& gpu) {
+        if (m_desc.mipLevels < 2 || m_coarseMapped) return;
+        m_atlas.MapAllCoarse();
+        m_atlas.CommitMappings(gpu, nullptr);
+        m_atlas.FlushResidencyMap(gpu);
+        m_coarseMapped = true;
+    }
+    void BuildChain(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
+                    ID3D12GraphicsCommandList* cl) {
+        if (m_desc.mipLevels < 2 || !m_coarseMapped) return;
+        m_atlas.BuildMips(gpu, sc, shaderDir, cl);
+    }
+    uint32_t ResidencyMapSrv() const { return m_atlas.ResidencyMapSrv(); }
+    uint32_t MipCount() const { return m_atlas.MipCount(); }
 
     // One frame step: re-evaluate the policy, map/unmap the delta, clear what arrived. Returns
     // the tiles that became resident this frame (undefined contents until filled).
@@ -180,6 +205,7 @@ public:
             }
         }
         m_atlas.CommitMappings(gpu, &m_fresh);
+        m_atlas.FlushResidencyMap(gpu);
         return m_fresh;
     }
 
@@ -203,6 +229,7 @@ public:
     void RequestUnmapAll() { m_atlas.RequestUnmapAll(); }
     void CommitMappings(Gpu& gpu, std::vector<uint32_t>* fresh) {
         m_atlas.CommitMappings(gpu, fresh);
+        m_atlas.FlushResidencyMap(gpu);
     }
     uint32_t ResidentCount() const { return m_atlas.ResidentCount(); }
     // ---- CPU -> resident tiles ---------------------------------------------------------------
@@ -305,6 +332,7 @@ public:
 private:
     GradeBankDesc m_desc;
     TileAtlas2D m_atlas;
+    bool m_coarseMapped = false;
     TilePolicy m_policy;
     std::vector<uint8_t> m_sig;
     std::vector<uint32_t> m_fresh;

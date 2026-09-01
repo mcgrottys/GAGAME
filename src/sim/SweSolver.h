@@ -99,6 +99,11 @@ public:
     uint32_t EtaSrv() const { return m_eta.Srv(); }    // dEta from the tide plane, R32F
     uint32_t UvSrv() const { return m_uv.srv; }        // dense currents, RGBA16F
     uint32_t VelGradSrv() const { return m_velGrad.Srv(); }   // M9h: (div, curl), RG16F
+    uint32_t VelGradResMapSrv() const { return m_velGrad.ResidencyMapSrv(); }
+    uint32_t VelGradMips() const { return m_velGrad.MipCount(); }
+    // The residency map is one texel per mip-0 TILE, so the lens indexes it in tile space.
+    uint32_t VelGradResMapW() const { return m_velGrad.TilesX(); }
+    uint32_t VelGradResMapH() const { return m_velGrad.TilesY(); }
     ID3D12Resource* VelGradRes() const { return m_velGrad.Res(); }
     ID3D12Resource* UvRes() const { return m_uv.res.Get(); }
     ID3D12Resource* BathyRes() const { return m_bathyRes; }   // the churn kernel reads both
@@ -164,6 +169,8 @@ private:
     TileAtlas2D m_eta, m_flux;
     // M9h: grad(flow) -- residency derived from the Cayley closure, not a physics policy.
     GradeBank m_velGrad;
+    ShaderCompiler* m_sc = nullptr;   // M9h: BuildChain compiles the reducer on first use
+    std::wstring m_shaderDir;
     GpuTexture m_uv;
     uint32_t m_uvUav = UINT32_MAX;
     Com<ID3D12RootSignature> m_rs;

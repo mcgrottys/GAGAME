@@ -14,6 +14,8 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
                      const SweConfig& cfg) {
     m_bathy = &bathy;
     m_bathyRes = bathyRes;
+    m_sc = &sc;
+    m_shaderDir = shaderDir;
     const uint32_t nx = bathy.Nx(), ny = bathy.Ny();
     const float dx = bathy.WorldSizeX() / nx;
 
@@ -36,6 +38,12 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
         d.metersPerTexel = dx;
         d.units = "1/s";
         d.range = "+-0.5";
+        // M9h: THE CHAIN. Six levels over a 1863x1174 window takes the field from ~10 m to
+        // ~320 m per texel, which is the range a zoom actually traverses. Without it the lens
+        // sampled mip 0 at every altitude and tile edges read as hard rectangles; with it a
+        // pulled-back camera reads a level whose texels match its footprint, and the residency
+        // map keeps the sample from ever landing on a NULL.
+        d.mipLevels = 6;
         m_velGrad.Init(gpu, d, policy::None());
     }
 
@@ -108,6 +116,9 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
         }
         m_velGrad.SetPolicy(policy::Mask(want, tX));
         m_velGrad.Update(gpu);
+        // Coarse levels get mapped here, outside any recording: the reduction that fills them
+        // runs on the frame list, but the MAPPING touches the queue and the residency map.
+        m_velGrad.EnsureCoarseMapped(gpu);
         Log("[swe] grad(flow) residency BY ALGEBRA: Cl2(g1,g1) = g0|g2 -> %u core tiles, "
             "%u with the stencil apron, of %u (%.0f%%); bank %.1f of %.1f MB",
             core, m_velGrad.ResidentCount(), tX * tY,
@@ -417,6 +428,14 @@ int SweSolver::Record(ID3D12GraphicsCommandList* cl, Gpu& gpu, double simUnix, f
                                                  gpu.PushConstants(gl.data(), gl.size() * 4));
             cl->SetPipelineState(m_velGradK.Get());
             cl->Dispatch(m_eta.TileW() / 16, m_eta.TileH() / 16, static_cast<UINT>(gl.size()));
+            // mip 0 just changed, so the coarse levels are stale. Refill them: an unfilled
+            // coarse level is real memory reading zero, which looks exactly like "the flow is
+            // irrotational here" -- a lie the lens would render in perfectly good faith.
+            D3D12_RESOURCE_BARRIER gb{};
+            gb.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            gb.UAV.pResource = m_velGrad.Res();
+            cl->ResourceBarrier(1, &gb);
+            if (m_sc) m_velGrad.BuildChain(gpu, *m_sc, m_shaderDir, cl);
         }
     }
 

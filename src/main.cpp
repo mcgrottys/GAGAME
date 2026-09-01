@@ -1803,8 +1803,14 @@ int main(int argc, char** argv) {
             // M9h: the grad(flow) bank plus the grid it lives on, for --lens velgrad. The
             // SWE solver owns the bank; the bathy model owns the world mapping.
             if (swe.Ready() && bathy.Ready()) {
-                globe->SetVelGradLens(swe.VelGradSrv(), bathy.WorldX0(), bathy.WorldZ0(),
-                                      bathy.WorldSizeX(), bathy.WorldSizeZ());
+                // The residency map and the bank's texel size ride along: the lens picks the
+                // level its footprint wants and the map clamps it to what has arrived.
+                globe->SetVelGradLens(
+                    swe.VelGradSrv(), bathy.WorldX0(), bathy.WorldZ0(), bathy.WorldSizeX(),
+                    bathy.WorldSizeZ(), swe.VelGradResMapSrv(),
+                    static_cast<float>(bathy.WorldSizeX() / (std::max)(1u, swe.Nx())),
+                    static_cast<float>(swe.VelGradResMapW()),
+                    static_cast<float>(swe.VelGradResMapH()), swe.VelGradMips());
             }
             globe->sliceOn = opt.sliceOn;
             globe->sliceD = static_cast<float>(opt.sliceD);
