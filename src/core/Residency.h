@@ -39,6 +39,7 @@
 #pragma once
 
 #include "compose/TileIndex.h"
+#include "core/TileStream.h"
 #include "core/Gpu.h"
 #include "core/Pga.h"
 
@@ -61,7 +62,22 @@ namespace ga {
 struct TileRequest {
     uint32_t face = 0, mip = 0, x = 0, y = 0;
 };
-using TileProviderFn = std::function<bool(const TileRequest&, std::vector<uint8_t>& out64k)>;
+// M9ai: WHERE A TILE IS, instead of what it contains.
+//
+// A provider that finds its tile in an archive fills this and returns true WITHOUT touching
+// out64k. The bytes then never enter CPU address space at all: DirectStorage takes the path,
+// the offset and the mapped tile, and the read goes NVMe -> GPU. A provider that has to paint,
+// or whose tile is only a loose file, fills out64k as before and leaves this empty -- so the
+// two paths coexist per TILE, not per build.
+struct TileLoc {
+    const wchar_t* path = nullptr;   // archive path; owned by the archive, outlives the request
+    uint64_t offset = 0;
+    uint32_t size = 0;
+    bool Valid() const { return path != nullptr && size != 0; }
+};
+
+using TileProviderFn =
+    std::function<bool(const TileRequest&, std::vector<uint8_t>& out64k, TileLoc* loc)>;
 
 class ResidencyManager {
 public:
@@ -141,6 +157,9 @@ public:
     // so the hook stays and the policy does not. What the index is actually for here is the
     // DirectStorage read path: knowing a tile's address, size and hash without touching the
     // filesystem is what lets a read be issued straight to the GPU.
+    // M9ai: the NVMe -> GPU reader. Null keeps every tile on the upload-ring path.
+    void SetTileStream(TileStream* ts) { m_stream = ts; }
+
     void SetTileIndex(int tenant, const TileIndex* idx) {
         if (tenant >= 0 && tenant < static_cast<int>(m_tenants.size())) {
             m_tenants[tenant].index = idx;
@@ -213,6 +232,7 @@ private:
         const TileIndex* index = nullptr;
     };
 
+
     enum class TileState : uint8_t { Seen, Loading, Loaded, Mapped, Failed };
     struct Tracked {
         int tenant;
@@ -222,7 +242,9 @@ private:
         TileState state = TileState::Seen;
         bool predicted = false;
         uint8_t retries = 0;             // M7w: failed loads retry, then go honestly NULL
-        std::vector<uint8_t> data;
+        std::vector<uint8_t> data;       // empty when loc is valid: the bytes stayed on disk
+        TileLoc loc;
+        uint64_t stageOffset = 0;   // where its bytes landed in the device buffer
     };
     // Index of one tile in a tenant's flat stamp array. Pure arithmetic -- no hashing, no
     // indirection, and neighbours in a rect land next to each other in memory, which is the
@@ -232,6 +254,15 @@ private:
         const uint32_t plane = face * t.mips + mip;
         return size_t(t.stampBase[plane]) + size_t(y) * t.stampW[plane] + x;
     }
+
+    // M9ai: tiles whose bytes are in flight on the DirectStorage queue. They are MAPPED but not
+    // yet claimed in the residency map, so the shader keeps sampling their coarser ancestor
+    // until the fence says the read landed. That is the whole cross-queue synchronisation: no
+    // barrier, no graphics-queue wait, just not lying about what has arrived yet.
+    struct InFlightRead {
+        uint64_t fence = 0;
+        std::vector<std::shared_ptr<Tracked>> tiles;
+    };
 
     using Key = uint64_t;                // tenant:8 | face:3 | mip:5 | y:24 | x:24
     static Key MakeKey(int tenant, const TileRequest& r) {
@@ -268,6 +299,15 @@ private:
     std::vector<std::shared_ptr<Tracked>> m_loading;
     std::vector<std::shared_ptr<Tracked>> m_mapped;
     uint32_t m_frame = 0;
+    TileStream* m_stream = nullptr;
+    std::vector<InFlightRead> m_inFlightReads;
+    uint64_t m_directTiles = 0, m_ringTiles = 0, m_directLanded = 0;
+    uint32_t m_stageUsed = 0;
+    bool m_directLogged = false;
+public:
+    uint64_t DirectTiles() const { return m_directTiles; }
+    uint64_t RingTiles() const { return m_ringTiles; }
+private:
 
     // Upload ring: kFrameCount slabs of kMaxMapsPerFrame tiles, frame-indexed like the CB arena.
     GpuBuffer m_uploadRing[Gpu::kFrameCount];

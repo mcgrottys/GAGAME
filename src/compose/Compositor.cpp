@@ -149,6 +149,40 @@ uint64_t Compositor::FieldSubset(const Channel& ch, const TileBox& box,
     return h;
 }
 
+// M9ai: resolve a tile to a place in an archive rather than to bytes.
+//
+// Opened lazily and cached per realization, under a lock because providers run on the loader
+// pool. The lock is taken only on the FIRST touch of a realization -- after that the map lookup
+// is read-only and the archive's own directory is immutable for the run.
+bool Compositor::TryArchive(const Channel& ch, const char* realization, const TileRequest& r,
+                            uint64_t subset, TileLoc* loc) {
+    if (!loc) return false;
+    TileArchive* arc = nullptr;
+    {
+        std::lock_guard<std::mutex> lk(m_archiveMx);
+        auto it = m_archives.find(realization);
+        if (it == m_archives.end()) {
+            TileArchive a;
+            const bool ok = a.Open(ch.name, realization);
+            it = m_archives.emplace(realization, std::move(a)).first;
+            if (ok) {
+                Log("[tilearch] %s/%s: %zu tiles available for direct read", ch.name.c_str(),
+                    realization, it->second.Count());
+            }
+        }
+        arc = &it->second;
+    }
+    if (!arc->Valid()) return false;
+    const uint64_t key = (uint64_t(r.face) << 61) | (uint64_t(r.mip) << 56) |
+                         (uint64_t(r.y & 0xFFFFFFFull) << 28) | uint64_t(r.x & 0xFFFFFFFull);
+    const TileArchive::Rec* rec = arc->Find(key, static_cast<uint32_t>(subset & 0xFFFFFFFFu));
+    if (!rec) return false;
+    loc->path = arc->WPath().c_str();
+    loc->offset = rec->offset;
+    loc->size = rec->size;
+    return true;
+}
+
 std::string Compositor::CachePath(const Channel& ch, const char* realization,
                                   const TileRequest& r, uint64_t subset) const {
     char buf[320];
@@ -191,7 +225,8 @@ void Compositor::EnsureCacheDir(const Channel& ch, const char* realization) {
 
 TileProviderFn Compositor::CubeColor(int channel) {
     EnsureCacheDir(m_channels[channel], "cube16k");
-    return [this, channel](const TileRequest& r, std::vector<uint8_t>& out) {
+    return [this, channel](const TileRequest& r, std::vector<uint8_t>& out,
+                           TileLoc* loc) {
         const Channel& ch = m_channels[channel];
         const uint32_t faceTexels = kFaceDim >> r.mip;
         const double invFace = 1.0 / faceTexels;
@@ -216,6 +251,8 @@ TileProviderFn Compositor::CubeColor(int channel) {
         box.texLon = (box.lonMax - box.lonMin) / 128.0;
         std::vector<size_t> inc;
         const uint64_t subset = ColorSubset(ch, box, inc);
+        // M9ai: an archived tile resolves to a PLACE, and the bytes never enter this process.
+        if (TryArchive(ch, "cube16k", r, subset, loc)) return true;
         const std::string path = CachePath(ch, "cube16k", r, subset);
         if (ReadCached(path, out)) return true;
 
@@ -275,7 +312,8 @@ TileProviderFn Compositor::WindowColor(int channel, long long orgPxX, long long 
     EnsureCacheDir(m_channels[channel], tag.c_str());
     (void)sizePx;
     return [this, channel, orgPxX, orgPxY, zBase, tag](const TileRequest& r,
-                                                       std::vector<uint8_t>& out) {
+                                                       std::vector<uint8_t>& out,
+                                                       TileLoc* loc) {
         const Channel& ch = m_channels[channel];
         // Window texels ARE Mercator pixels of zoom (zBase - mip): the lat/lon roundtrip
         // through a Mercator-tree source lands back on the same pixel, so fills remain the
@@ -293,6 +331,8 @@ TileProviderFn Compositor::WindowColor(int channel, long long orgPxX, long long 
         box.texLon = (box.lonMax - box.lonMin) / 128.0;
         std::vector<size_t> inc;
         const uint64_t subset = ColorSubset(ch, box, inc);
+        // M9ai: an archived tile resolves to a PLACE, and the bytes never enter this process.
+        if (TryArchive(ch, tag.c_str(), r, subset, loc)) return true;
         const std::string path = CachePath(ch, tag.c_str(), r, subset);
         if (ReadCached(path, out)) return true;
 
@@ -337,7 +377,8 @@ TileProviderFn Compositor::WindowColor(int channel, long long orgPxX, long long 
 
 TileProviderFn Compositor::CubeHeight(int channel) {
     EnsureCacheDir(m_channels[channel], "cube16k");
-    return [this, channel](const TileRequest& r, std::vector<uint8_t>& out) {
+    return [this, channel](const TileRequest& r, std::vector<uint8_t>& out,
+                           TileLoc* loc) {
         const Channel& ch = m_channels[channel];
         // R16F: 256x128 texels per 64KB tile. Every mip is painted straight from the sources
         // at its own ground resolution (independent paints; trilinear blends cousins -- close
@@ -363,6 +404,8 @@ TileProviderFn Compositor::CubeHeight(int channel) {
         box.texLon = (box.lonMax - box.lonMin) / 256.0;
         std::vector<size_t> inc;
         const uint64_t subset = HeightSubset(ch, box, inc);
+        // M9ai: an archived tile resolves to a PLACE, and the bytes never enter this process.
+        if (TryArchive(ch, "cube16k", r, subset, loc)) return true;
         const std::string path = CachePath(ch, "cube16k", r, subset);
         if (ReadCached(path, out)) return true;
 
@@ -398,7 +441,8 @@ TileProviderFn Compositor::WindowHeight(int channel, long long orgPxX, long long
     EnsureCacheDir(m_channels[channel], tag.c_str());
     (void)sizePx;
     return [this, channel, orgPxX, orgPxY, zBase, tag](const TileRequest& r,
-                                                       std::vector<uint8_t>& out) {
+                                                       std::vector<uint8_t>& out,
+                                                       TileLoc* loc) {
         const Channel& ch = m_channels[channel];
         // R16F 256x128 tiles of the same Mercator window frame the color window uses.
         const double worldPx = static_cast<double>((1ll << zBase) * 256ll >> r.mip);
@@ -414,6 +458,8 @@ TileProviderFn Compositor::WindowHeight(int channel, long long orgPxX, long long
         box.texLon = (box.lonMax - box.lonMin) / 256.0;
         std::vector<size_t> inc;
         const uint64_t subset = HeightSubset(ch, box, inc);
+        // M9ai: an archived tile resolves to a PLACE, and the bytes never enter this process.
+        if (TryArchive(ch, tag.c_str(), r, subset, loc)) return true;
         const std::string path = CachePath(ch, tag.c_str(), r, subset);
         if (ReadCached(path, out)) return true;
 
@@ -447,7 +493,8 @@ TileProviderFn Compositor::WindowField(int channel, long long orgPxX, long long 
     EnsureCacheDir(m_channels[channel], tag.c_str());
     (void)sizePx;
     return [this, channel, orgPxX, orgPxY, zBase, tag](const TileRequest& r,
-                                                       std::vector<uint8_t>& out) {
+                                                       std::vector<uint8_t>& out,
+                                                       TileLoc* loc) {
         const Channel& ch = m_channels[channel];
         // RG16F 128x128 tiles: the phasor fiber (re, im) in the Mercator window frame.
         const double worldPx = static_cast<double>((1ll << zBase) * 256ll >> r.mip);
@@ -463,6 +510,8 @@ TileProviderFn Compositor::WindowField(int channel, long long orgPxX, long long 
         box.texLon = (box.lonMax - box.lonMin) / 128.0;
         std::vector<size_t> inc;
         const uint64_t subset = FieldSubset(ch, box, inc);
+        // M9ai: an archived tile resolves to a PLACE, and the bytes never enter this process.
+        if (TryArchive(ch, tag.c_str(), r, subset, loc)) return true;
         const std::string path = CachePath(ch, tag.c_str(), r, subset);
         if (ReadCached(path, out)) return true;
 

@@ -104,7 +104,7 @@ bool RunComposeSelfTest() {
         auto fn = comp.CubeColor(col);
         TileRequest r{0, 3, 5, 9};   // face +x, an arbitrary interior tile
         std::vector<uint8_t> tile;
-        Check(fn(r, tile) && tile.size() == 65536, "cube paint returns a 64KB tile");
+        Check(fn(r, tile, nullptr) && tile.size() == 65536, "cube paint returns a 64KB tile");
         const uint32_t faceTexels = Compositor::kFaceDim >> r.mip;
         int checked = 0;
         for (uint32_t py = 10; py < 128; py += 37) {
@@ -134,7 +134,7 @@ bool RunComposeSelfTest() {
         // cache round-trip: byte identity, no repaint
         const uint32_t paintedBefore = comp.painted.load();
         std::vector<uint8_t> tile2;
-        Check(fn(r, tile2), "cube cache read");
+        Check(fn(r, tile2, nullptr), "cube cache read");
         Check(comp.painted.load() == paintedBefore, "second call did not repaint");
         Check(comp.cacheHits.load() >= 1 && tile2 == tile, "composed cache is byte-identical");
     }
@@ -144,7 +144,7 @@ bool RunComposeSelfTest() {
         auto fn = comp.WindowColor(col, 1263360, 1538048, 16384, 14);
         TileRequest r{0, 2, 7, 11};
         std::vector<uint8_t> tile;
-        Check(fn(r, tile) && tile.size() == 65536, "window paint returns a 64KB tile");
+        Check(fn(r, tile, nullptr) && tile.size() == 65536, "window paint returns a 64KB tile");
         const double worldPx = static_cast<double>((1ll << 14) * 256ll >> r.mip);
         int checked = 0;
         for (uint32_t py = 3; py < 128; py += 41) {
@@ -176,10 +176,10 @@ bool RunComposeSelfTest() {
         // 0.5..0.6 rad (28.6..34.4 deg) transient band.
         TileRequest r{0, 5, 1, 0};
         std::vector<uint8_t> tile;
-        Check(fn(r, tile), "transient tile still paints (holes, not failure)");
+        Check(fn(r, tile, nullptr), "transient tile still paints (holes, not failure)");
         Check(comp2.painted.load() == 0, "transient tile was NOT counted as painted");
         std::vector<uint8_t> tile2;
-        fn(r, tile2);
+        fn(r, tile2, nullptr);
         Check(comp2.cacheHits.load() == 0, "transient tile was NOT served from cache");
         over.transientBand = false;
     }
@@ -189,7 +189,7 @@ bool RunComposeSelfTest() {
         auto fn = comp.CubeHeight(hgt);
         TileRequest r{0, 4, 2, 3};
         std::vector<uint8_t> tile;
-        Check(fn(r, tile), "height paint");
+        Check(fn(r, tile, nullptr), "height paint");
         const uint16_t* h16 = reinterpret_cast<const uint16_t*>(tile.data());
         const uint32_t faceTexels = Compositor::kFaceDim >> r.mip;
         int checked = 0;
@@ -269,7 +269,7 @@ bool RunComposeSelfTest() {
         auto fn = comp5.CubeColor(c5);
         TileRequest r{0, 5, 1, 0};   // face +x top row: lats ~0.42..0.62 rad, ramp mid-band
         std::vector<uint8_t> tile;
-        Check(fn(r, tile), "alpha-ramp paint");
+        Check(fn(r, tile, nullptr), "alpha-ramp paint");
         const uint32_t faceTexels = Compositor::kFaceDim >> r.mip;
         int checked = 0;
         for (uint32_t py = 5; py < 128; py += 39) {
@@ -318,9 +318,9 @@ bool RunComposeSelfTest() {
         // the speck spans far under 2 texels -> excluded -> ONE shared cache identity.
         TileRequest coarse{5, 6, 0, 0};
         std::vector<uint8_t> ta, tb;
-        fw(coarse, ta);
+        fw(coarse, ta, nullptr);
         const uint32_t hitsBefore = comp4.cacheHits.load();
-        fs(coarse, tb);
+        fs(coarse, tb, nullptr);
         Check(comp4.cacheHits.load() == hitsBefore + 1 && ta == tb,
               "sub-texel source short-circuits into the without-it cache identity");
         // A FINE tile over the speck (mip 0: ~600 m texels... still > 2 texels? the speck is
@@ -352,8 +352,8 @@ bool RunComposeSelfTest() {
         auto fb = comp3.CubeColor(b);
         TileRequest r{0, 6, 0, 0};
         std::vector<uint8_t> ta, tb;
-        fa(r, ta);
-        fb(r, tb);
+        fa(r, ta, nullptr);
+        fb(r, tb, nullptr);
         Check(ta != tb, "stack ORDER changes the composition (and cache tags stay isolated)");
     }
 

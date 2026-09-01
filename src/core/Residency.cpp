@@ -46,7 +46,20 @@ void ResidencyManager::LoaderThread() {
             m_loadQueue.pop_front();
         }
         std::vector<uint8_t> data;
-        const bool ok = m_tenants[job->tenant].provider(job->req, data);
+        TileLoc loc;
+        // The provider fills EITHER loc (archived: the bytes stay on disk) or data (painted, or
+        // a loose file). Which one it chooses is per tile, so a half-packed cache streams the
+        // packed part directly and paints the rest, with no mode to select.
+        //
+        // AND IT IS ONLY OFFERED THE CHOICE WHEN THE CALLER CAN TAKE IT. Passing &loc
+        // unconditionally was a real bug: with the reader disabled the provider still returned a
+        // LOCATION, data stayed empty, and the upload ring memcpy'd zero bytes into a mapped
+        // tile -- so the tile claimed residency over whatever the pool slot last held. It showed
+        // as 20% of the globe changing against the reference. A null here means "bytes, please",
+        // which is the contract every provider already implemented.
+        const bool canStream = m_stream && m_stream->Available();
+        const bool ok =
+            m_tenants[job->tenant].provider(job->req, data, canStream ? &loc : nullptr);
         {
             std::lock_guard<std::mutex> lk(m_mx);
             // M7w: a failed load must NEVER fabricate a zero tile -- mapping zeros makes the
@@ -55,6 +68,7 @@ void ResidencyManager::LoaderThread() {
             // consumers fall back to the coarser REAL mip (Tier-2 nulls never reach them,
             // because the claim is only ever written on a true map).
             if (ok) {
+                job->loc = loc;
                 job->data = std::move(data);
                 job->state = TileState::Loaded;
             } else if (++job->retries < 4) {
@@ -222,7 +236,7 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
                 for (uint32_t x = 0; x < tw; ++x) {
                     TileRequest r{f, coarsest, x, y};
                     std::vector<uint8_t> data;
-                    if (tn.provider(r, data) && !data.empty()) {
+                    if (tn.provider(r, data, nullptr) && !data.empty()) {
                         boot.push_back({r, AcquirePoolTile(gpu), std::move(data)});
                     } else {
                         // Honest "nothing": overwrite this tile's residency span with 255
@@ -480,6 +494,49 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     PixScope scope(cl, "residency (seen->load->map->fill; classic lists, screw prefetch)");
     ++m_frame;
 
+    // ---- M9ai: RETIRE LANDED DIRECT READS. A tile mapped last frame and read by DirectStorage
+    // becomes claimable only once its fence signals. Until then it has been mapped but NOT
+    // claimed, so every consumer has been reading its coarser ancestor -- the same degradation
+    // a not-yet-arrived tile has always produced, which is why this needs no barrier and no
+    // graphics-queue wait to be correct.
+    if (m_stream && !m_inFlightReads.empty()) {
+        for (auto it = m_inFlightReads.begin(); it != m_inFlightReads.end();) {
+            if (!m_stream->Complete(it->fence)) { ++it; continue; }
+            for (auto& tile : it->tiles) {
+                // Evicted while in flight: its slot is gone and the claim would be a lie.
+                if (tile->state != TileState::Mapped) continue;
+                Tenant& t = m_tenants[tile->tenant];
+                if (t.state != D3D12_RESOURCE_STATE_COPY_DEST) {
+                    D3D12_RESOURCE_BARRIER b{};
+                    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+                    b.Transition.pResource = t.res.Get();
+                    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+                    b.Transition.StateBefore = t.state;
+                    b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+                    cl->ResourceBarrier(1, &b);
+                    t.state = D3D12_RESOURCE_STATE_COPY_DEST;
+                }
+                const D3D12_TILED_RESOURCE_COORDINATE coord{
+                    tile->req.x, tile->req.y, 0, tile->req.face * t.mips + tile->req.mip};
+                const D3D12_TILE_REGION_SIZE size{1, FALSE, 0, 0, 0};
+                cl->CopyTiles(t.res.Get(), &coord, &size, m_stream->StagingBuffer(),
+                              tile->stageOffset,
+                              D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE);
+                UpdateResidencyByte(t, tile->req, true);
+                ++m_directLanded;
+            }
+            if (!m_directLogged && m_directLanded) {
+                m_directLogged = true;
+                Log("[dstorage] first %llu tiles landed NVMe -> GPU (fence %llu); the CPU never "
+                    "addressed their bytes",
+                    static_cast<unsigned long long>(m_directLanded),
+                    static_cast<unsigned long long>(it->fence));
+            }
+            m_stream->ReleaseCompleted(it->fence);
+            it = m_inFlightReads.erase(it);
+        }
+    }
+
     // ---- start loads (newest-seen first, coarse first; predicted tiles yield to real ones)
     {
         std::lock_guard<std::mutex> lk(m_mx);
@@ -602,8 +659,10 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         (void)tr;
         bytes += 65536;
     }
-    snprintf(s, sizeof(s), "streams %zu res (%zu t, %.0f MB, %u fetches%s)", m_tenants.size(),
-             m_mapped.size(), bytes / 1048576.0, fetchesThisRun,
+    snprintf(s, sizeof(s), "streams %zu res (%zu t, %.0f MB, %u fetches, %llu direct/%llu ring%s)",
+             m_tenants.size(), m_mapped.size(), bytes / 1048576.0, fetchesThisRun,
+             static_cast<unsigned long long>(m_directTiles),
+             static_cast<unsigned long long>(m_ringTiles),
              m_failedLoads ? " FAILED-TILES" : "");
     stats = s;
     for (const auto& f : m_fields) {
@@ -688,7 +747,14 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
         mc.counts.push_back(1);
         tile->state = TileState::Mapped;
         m_mapped.push_back(tile);
-        UpdateResidencyByte(t, tile->req, true);
+        // A ring-filled tile is readable the moment this frame's list executes, so it may claim
+        // residency now. A DIRECT-READ tile is only mapped -- its bytes are still crossing the
+        // bus on another queue -- so the claim waits for the fence. Claiming early is exactly
+        // the M7w failure in a new costume: the residency map would swear data exists where the
+        // GPU still holds whatever the pool slot had.
+        if (!(tile->loc.Valid() && m_stream && m_stream->Available())) {
+            UpdateResidencyByte(t, tile->req, true);
+        }
         toFill.push_back(tile);
     }
 
@@ -716,19 +782,46 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
             t.state = D3D12_RESOURCE_STATE_COPY_DEST;
         }
     }
+    std::vector<std::shared_ptr<Tracked>> direct;
     for (const auto& tile : toFill) {
         Tenant& t = m_tenants[tile->tenant];
-        const size_t n = tile->data.size() < 65536 ? tile->data.size() : 65536;
-        memcpy(ring.cpu + off, tile->data.data(), n);
         const D3D12_TILED_RESOURCE_COORDINATE coord{
             tile->req.x, tile->req.y, 0, tile->req.face * t.mips + tile->req.mip};
+        // ---- M9ai: NVMe -> GPU where the tile is archived. The mapping was issued above, so
+        // the destination tile exists; DirectStorage writes into it on its own queue while this
+        // command list is still being recorded.
+        // ---- M9ai: the read lands in a DEVICE buffer; the swizzle stays on the GPU where the
+        // format requires it, and happens next frame when the fence says the bytes arrived.
+        if (tile->loc.Valid() && m_stream && m_stream->Available() &&
+            m_stageUsed < TileStream::kStageSlots) {
+            const uint64_t slotOff = uint64_t(m_stageUsed) * 65536ull;
+            if (m_stream->EnqueueToBuffer(tile->loc.path, tile->loc.offset, tile->loc.size,
+                                          slotOff)) {
+                tile->stageOffset = slotOff;
+                ++m_stageUsed;
+                direct.push_back(tile);
+                ++m_directTiles;
+                continue;
+            }
+        }
         const D3D12_TILE_REGION_SIZE size{1, FALSE, 0, 0, 0};
+        const size_t n = tile->data.size() < 65536 ? tile->data.size() : 65536;
+        memcpy(ring.cpu + off, tile->data.data(), n);
         cl->CopyTiles(t.res.Get(), &coord, &size, ring.res.Get(), off,
                       D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE);
         off += 65536;
+        ++m_ringTiles;
         tile->data.clear();
         tile->data.shrink_to_fit();
     }
+    if (!direct.empty()) {
+        InFlightRead f;
+        f.fence = m_stream->Submit();
+        f.tiles = std::move(direct);
+        m_inFlightReads.push_back(std::move(f));
+    }
+    m_stageUsed = 0;   // the landing buffer is reused each frame; in-flight slots are read by
+                       // the NEXT frame's CopyTiles before anything overwrites them
     for (auto& t : m_tenants) {
         D3D12_RESOURCE_BARRIER b{};
         b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;

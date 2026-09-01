@@ -29,6 +29,7 @@
 //  touched by the CPU at all when DirectStorage is doing the reading.
 // ================================================================================================
 #pragma once
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <string>

@@ -66,9 +66,20 @@ public:
             m_factory.Reset();
             return false;
         }
+        // Device-local landing ground. DirectStorage writes here; CopyTiles swizzles from here
+        // into the reserved resource once the fence lands.
+        m_staging = gpu.CreateDefaultBuffer(nullptr, kStageSlots * 65536ull,
+                                            L"dstorage.staging");
+        if (!m_staging.res) {
+            m_queue.Reset();
+            m_factory.Reset();
+            return false;
+        }
         m_ok = true;
-        Log("[dstorage] ready: %u MB staging, queue capacity %u -- NVMe -> GPU, no CPU copy",
-            kStagingBytes / (1024u * 1024u), uint32_t(DSTORAGE_MAX_QUEUE_CAPACITY));
+        Log("[dstorage] ready: %u MB read staging, %u MB device landing buffer (%u tiles), "
+            "queue capacity %u -- NVMe -> GPU, no CPU copy",
+            kStagingBytes / (1024u * 1024u), uint32_t(kStageSlots * 65536ull / 1048576ull),
+            kStageSlots, uint32_t(DSTORAGE_MAX_QUEUE_CAPACITY));
         return true;
 #else
         (void)gpu;
@@ -79,34 +90,52 @@ public:
 
     bool Available() const { return m_ok; }
 
-    // Enqueue one 64 KB tile straight into a reserved resource's tile. The destination is a
-    // TILED REGION, which is why the cache's layout matters: the bytes are already in the
-    // hardware's tile order, so this is a copy with no swizzle and no intermediate.
-    bool EnqueueTile(const std::wstring& path, ID3D12Resource* dst,
-                     const D3D12_TILED_RESOURCE_COORDINATE& coord, uint32_t bytes) {
+    // ---- THE DESTINATION IS A BUFFER, NOT A TILE, AND THAT IS NOT AN OPTIMISATION MISSED.
+    //
+    // The first version wrote straight to DESTINATION_TILES and produced corrupt terrain --
+    // washed-out colour with diagonal streaks, which is what a linear image looks like when it
+    // is read as a swizzled one. Compositor's "laid out exactly for CopyTiles" means laid out
+    // FOR THAT CONVERSION: CopyTiles is called with LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE,
+    // so the GPU performs the swizzle during the copy and the cached blob is linear.
+    // DESTINATION_TILES writes bytes verbatim into the tile and does no such thing.
+    //
+    // Pre-swizzling at pack time is not the fix: the tile layout is vendor and format specific
+    // and not something a cache written on one machine may assume about another.
+    //
+    // So the read lands in a DEVICE-LOCAL buffer and the existing CopyTiles does the swizzle,
+    // unchanged, one frame later when the fence says the bytes are there. The CPU still never
+    // addresses them -- which was always the point -- and the swizzle stays where the hardware
+    // wants it. What this costs is a frame of latency and a staging buffer; what it buys is the
+    // read never entering CPU address space.
+    bool EnqueueToBuffer(const std::wstring& path, uint64_t srcOffset, uint32_t bytes,
+                         uint64_t dstOffset) {
 #if defined(GA_HAVE_DSTORAGE)
-        if (!m_ok) return false;
+        if (!m_ok || !m_staging.res) return false;
         Com<IDStorageFile> file;
         if (FAILED(m_factory->OpenFile(path.c_str(), IID_PPV_ARGS(&file)))) return false;
         DSTORAGE_REQUEST r{};
         r.Options.SourceType = DSTORAGE_REQUEST_SOURCE_FILE;
-        r.Options.DestinationType = DSTORAGE_REQUEST_DESTINATION_TILES;
+        r.Options.DestinationType = DSTORAGE_REQUEST_DESTINATION_BUFFER;
         r.Source.File.Source = file.Get();
-        r.Source.File.Offset = 0;
+        r.Source.File.Offset = srcOffset;
         r.Source.File.Size = bytes;
-        r.Destination.Tiles.Resource = dst;
-        r.Destination.Tiles.TiledRegionStartCoordinate = coord;
-        r.Destination.Tiles.TileRegionSize = {1, FALSE, 0, 0, 0};
+        r.Destination.Buffer.Resource = m_staging.res.Get();
+        r.Destination.Buffer.Offset = dstOffset;
+        r.Destination.Buffer.Size = bytes;
         r.UncompressedSize = bytes;
         m_queue->EnqueueRequest(&r);
         ++m_pending;
-        m_files.push_back(std::move(file));   // the queue borrows it until Submit completes
+        m_files.push_back(std::move(file));
         return true;
 #else
-        (void)path; (void)dst; (void)coord; (void)bytes;
+        (void)path; (void)srcOffset; (void)bytes; (void)dstOffset;
         return false;
 #endif
     }
+
+    ID3D12Resource* StagingBuffer() const { return m_staging.res.Get(); }
+    uint64_t StagingBytes() const { return kStageSlots * 65536ull; }
+    static constexpr uint32_t kStageSlots = 512;   // 32 MB of device-local landing ground
 
     // Submit what is queued and return the fence value to wait on. Batching matters more here
     // than anywhere else in the engine: a submit is the unit the hardware pipelines, so one
@@ -147,6 +176,7 @@ public:
 
 private:
     static constexpr uint32_t kStagingBytes = 32u * 1024u * 1024u;
+    GpuBuffer m_staging;
     bool m_ok = false;
     uint64_t m_fenceValue = 0, m_submitted = 0;
     uint32_t m_pending = 0;

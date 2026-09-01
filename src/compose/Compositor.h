@@ -34,9 +34,12 @@
 // ================================================================================================
 #pragma once
 
+#include "compose/TileArchive.h"
 #include "core/Residency.h"
 
 #include <atomic>
+#include <map>
+#include <mutex>
 #include <memory>
 #include <string>
 #include <vector>
@@ -180,6 +183,15 @@ private:
     //    into a cache HIT -- redundant paints never run;
     //  * tiles a source never touched keep their identity forever.
     // (ColorSubset/HeightSubset implement it; declared public above for the selftest.)
+    // M9ai: the archive for one realization, opened once and cached. Returns true and fills
+    // `loc` when the tile is present under the CURRENT subset -- the caller then returns
+    // without reading, and the bytes stay on disk for DirectStorage. A missing archive, or a
+    // tile painted after the last pack, simply misses and the loose-file path runs.
+    bool TryArchive(const Channel& ch, const char* realization, const TileRequest& r,
+                    uint64_t subset, TileLoc* loc);
+    std::map<std::string, TileArchive> m_archives;
+    std::mutex m_archiveMx;
+
     std::string CachePath(const Channel& ch, const char* realization, const TileRequest& r,
                           uint64_t subset) const;
     bool ReadCached(const std::string& path, std::vector<uint8_t>& out);

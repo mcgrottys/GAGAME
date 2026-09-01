@@ -104,6 +104,7 @@ struct Options {
     bool framesSet = false;           // an explicit --frames beats a rail default
     uint32_t predictEvery = 3;        // --predict-every N: prefetch-walk cadence (1 = old)
     bool packTiles = false;           // --pack-tiles: pack the composed cache, then exit
+    bool directStorage = false;       // --direct-storage: NVMe -> GPU tile reads (opt-in)
     bool bench = false;               // --bench: fly the rail, capture nothing, time honestly
     std::string mp4;                  // --mp4 PATH: pipe rail frames straight to an encoder
     bool flatBed = false;             // --flat-bed N: constant bed, to A/B bathymetry
@@ -295,6 +296,9 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--bench") o.bench = true;
         // M9ah: pack every realization's loose tiles into one archive and exit.
         else if (a == "--pack-tiles") o.packTiles = true;
+        // M9ai: route archived tile reads NVMe -> GPU. Off by default until the streamed
+        // path is proven pixel-equal to the upload-ring path it replaces.
+        else if (a == "--direct-storage") o.directStorage = true;
         else if (a == "--predict-every") o.predictEvery = uint32_t(atoi(next("1").c_str()));
         // M9p: replace the bed with a flat floor at this NAVD height. The A/B against a normal
         // run isolates BATHYMETRY's contribution to the geometry from everything else.
@@ -473,7 +477,7 @@ static int RunChannelExport(const std::string& spec, const std::wstring& outPath
     std::vector<uint8_t> tile;
     for (uint32_t ty = 0; ty < tilesY; ++ty) {
         for (uint32_t tx = 0; tx < tilesX; ++tx) {
-            if (!fn({face, mip, tx, ty}, tile) || tile.size() != 65536) continue;
+            if (!fn({face, mip, tx, ty}, tile, nullptr) || tile.size() != 65536) continue;
             for (uint32_t py = 0; py < tileH; ++py) {
                 const size_t row = static_cast<size_t>(ty) * tileH + py;
                 if (height) {
@@ -2117,7 +2121,12 @@ int main(int argc, char** argv) {
                     // M9ag: the NVMe -> GPU reader. Created once; a machine without the
                     // redist or with a driver that declines keeps the ReadFile path.
                     static TileStream tileStream;
-                    tileStream.Init(gpu);
+                    if (opt.directStorage) {
+                        if (tileStream.Init(gpu)) resMgr.SetTileStream(&tileStream);
+                    } else {
+                        Log("[dstorage] available but OFF (--direct-storage to enable): the "
+                            "streamed path is not yet proven pixel-equal to the upload ring");
+                    }
                 }
 
             }

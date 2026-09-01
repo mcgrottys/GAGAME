@@ -521,7 +521,7 @@ bool RunWaterSelfTest() {
         r.x = 0;
         r.y = 0;
         std::vector<uint8_t> tile;
-        if (!fn(r, tile) || tile.size() != 65536) {
+        if (!fn(r, tile, nullptr) || tile.size() != 65536) {
             fail("field tile paint");
         } else {
             const uint16_t* px = reinterpret_cast<const uint16_t*>(tile.data());
