@@ -2061,59 +2061,6 @@ int main(int argc, char** argv) {
                 globe->SetComposed(colorCubeT, winTenant, hgtTenant, hgtWinTenant, winOrgX,
                                    winOrgY, 16384.0, detTenant, det17OrgX, det17OrgY);
 
-                // ---- M9ac: IMAGERY ONTO THE PAGED LADDER, stage 1 -- load and compose.
-                //
-                // The three colour tenants above are a workaround for D3D12's 16384 cap on ONE
-                // texture: a cube face bottoms out at 611 m/texel, so 9.5 m and 1.2 m over the
-                // inlet needed two more textures with their own frames and hand-off gates. That
-                // cap is on a PAGE, not on the address space -- PageTable already models the
-                // planet as {level, x, y} with 16384-texel pages and a strict halving, so one
-                // ladder reaches centimetres with pages resident only where data exists.
-                //
-                // This proves the LOAD and COMPOSE arrows before anything binds: the same
-                // ColorSources, adapted to DomainSources, normalized to canonical colour, and
-                // composed LayeredOver (an imagery stack is an authority order with a feather,
-                // which is compositing, not averaging).
-                if (colCh >= 0) {
-                    auto layers = BuildColorStack(compositor, colCh);
-                    DomainCompositor cdc;
-                    LevelLadder clad;
-                    // Level 0 = 1.2 m/texel, the finest imagery on hand (z17). A 16384 page is
-                    // 19.7 km at that level; LevelsToSpan says how deep the ladder must run to
-                    // put the whole planet in one page.
-                    clad.level0MetersPerTexel = 1.2;
-                    clad.pageTexels = 16384;
-                    cdc.SetLadder(clad);
-                    cdc.SetBlend(DomainCompositor::Blend::LayeredOver);
-                    uint32_t added = 0;
-                    for (auto& l : layers) added += cdc.Add(l) ? 1u : 0u;
-                    Log("[color-ga] %u/%zu layers admitted; ladder L0 %.2f m/texel, page %.1f km, "
-                        "%u levels to span the planet",
-                        added, layers.size(), clad.level0MetersPerTexel,
-                        clad.PageGroundMeters(0) / 1000.0, clad.LevelsToSpan(40075000.0));
-                    if (added) {
-                        // One probe page over the inlet at level 3 (9.6 m/texel -- the z14
-                        // window's rung) to prove the arrows carry real pixels.
-                        const double mpt = clad.MetersPerTexel(3);
-                        DomainCompositor::PageGeo g;
-                        g.dLon = mpt / (BathyModel::kMPerLon);
-                        g.dLat = -mpt / (BathyModel::kMPerLat);
-                        g.lon0 = BathyModel::kOrgLon - 128 * g.dLon;
-                        g.lat0 = BathyModel::kOrgLat - 128 * g.dLat;
-                        std::vector<float> page, cov;
-                        const uint32_t covered =
-                            cdc.ComposePage(PageAddr{3, 0, 0}, g, 256, 256, 4, page, cov);
-                        double lum = 0.0;
-                        for (uint32_t i = 0; i < 256u * 256u; ++i) {
-                            if (cov[i] > 0.0f) lum += page[i * 4] + page[i * 4 + 1] + page[i * 4 + 2];
-                        }
-                        Log("[color-ga] probe page L3 (%.1f m/texel) at the inlet: %u/%u texels "
-                            "covered, mean RGB %.3f -- load -> normalize -> compose carries "
-                            "pixels",
-                            mpt, covered, 256u * 256u,
-                            covered ? lum / (3.0 * covered) : 0.0);
-                    }
-                }
             }
             globe->stencilOverlay = opt.stencil;
             globe->debugLens = opt.lens;

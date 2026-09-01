@@ -443,6 +443,13 @@ public:
     // metres-per-degree frozen at 42.8N is wrong by 40% at the equator and unbounded at the
     // pole. So a page states its own lat/lon extent and the compositor interpolates within it.
     struct PageGeo {
+        // M9ad: when true, lat0/dLat are NORMALIZED MERCATOR y (0 = north pole edge, 1 = south)
+        // rather than degrees, and each row is converted back to latitude before the sources are
+        // asked. A linear lat/lon page is fine over a survey and badly wrong over a continent --
+        // the coarse rungs of a planet ladder span thousands of km, where the two frames
+        // disagree by hundreds. Imagery is Mercator-native anyway, so this is also the frame
+        // that costs the sources no reprojection.
+        bool mercator = false;
         double lon0 = 0.0, lat0 = 0.0;   // texel (0,0) CENTRE
         double dLon = 0.0, dLat = 0.0;   // degrees per texel; dLat < 0 = row 0 north
     };
@@ -572,7 +579,14 @@ public:
             for (uint32_t x = 0; x < width; ++x) {
                 DomainQuery q;
                 q.lon = geo.lon0 + x * geo.dLon;
-                q.lat = geo.lat0 + y * geo.dLat;
+                if (geo.mercator) {
+                    // Inverse Web Mercator: lat = 2*atan(exp(pi*(1 - 2y))) - pi/2.
+                    const double my = geo.lat0 + y * geo.dLat;
+                    const double t = 3.14159265358979 * (1.0 - 2.0 * my);
+                    q.lat = (2.0 * std::atan(std::exp(t)) - 1.57079632679490) * 57.2957795130823;
+                } else {
+                    q.lat = geo.lat0 + y * geo.dLat;
+                }
                 q.depthM = depthM;
                 q.unixT = unixT;
                 q.groundM = mpt;

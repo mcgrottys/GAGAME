@@ -1,6 +1,8 @@
 #include "scene/GlobeLayer.h"
 
+#include "compose/ColorStackSource.h"
 #include "compose/DomainSource.h"
+#include "sim/BathyModel.h"
 
 #include "core/PixEvents.h"
 #include "core/Shader.h"
@@ -28,6 +30,109 @@ namespace ga {
 //  the committed texture was uploaded from, and print the worst disagreement. A conversion that
 //  cannot say it matches is not a conversion, it is a rewrite.
 // ================================================================================================
+// ================================================================================================
+//  M9ad: THE PLANET'S IMAGERY AS ONE PAGED BANK -- stage 2, the bank and the atlas.
+//
+//  Same five arrows every other field takes: GA Load (ColorLayerSource over the existing
+//  ColorSources), normalize (sRGB byte -> canonical colour), GA Compose (LayeredOver, because an
+//  imagery stack is an authority order with a feather, not an average), Sparse GA Bank, GA Atlas.
+//
+//  One reserved ARRAY, one slice per ladder rung, each slice a Mercator page. The slices are not
+//  "LOD tiers": they are addresses in one space that happens to need four of them to reach from
+//  1.2 m to the whole globe. Adding centimetre data later adds a page, not a subsystem.
+// ================================================================================================
+bool GlobeLayer::BuildColorBank(Gpu& gpu, const Compositor& comp, int colorChannel) {
+    auto layers = BuildColorStack(comp, colorChannel);
+    if (layers.empty()) {
+        Log("[color-ga] no colour layers -- bank not built");
+        return false;
+    }
+    LevelLadder lad;
+    lad.level0MetersPerTexel = 1.2;   // the finest imagery on hand
+    lad.pageTexels = kColorDim;
+
+    DomainCompositor dc;
+    dc.SetLadder(lad);
+    dc.SetBlend(DomainCompositor::Blend::LayeredOver);
+    uint32_t admitted = 0;
+    for (auto& l : layers) admitted += dc.Add(l) ? 1u : 0u;
+    if (!admitted) return false;
+
+    GradeBankDesc d;
+    d.name = "earth.color (one paged ladder: globe -> region -> survey -> inlet)";
+    d.width = kColorDim;
+    d.height = kColorDim;
+    d.fmt = DXGI_FORMAT_R16G16B16A16_FLOAT;   // rgb + the stack's paint weight in alpha
+    d.gradeSig = kG0;
+    d.metersPerTexel = lad.level0MetersPerTexel;
+    d.units = "1 (colour on 0..1)";
+    d.range = "0..1";
+    d.mipLevels = kColorMips;
+    d.arraySlices = kColorPages;
+    m_colorB.bank = std::make_unique<GradeBank>();
+    m_colorB.bank->Init(gpu, d, policy::None());
+
+    // Centre every page on the same ground so the rungs nest. Mercator y is normalized 0..1.
+    constexpr double kWorldM = 40075016.685578488;
+    const double lonC = BathyModel::kOrgLon, latC = BathyModel::kOrgLat;
+    const double cx = (lonC + 180.0) / 360.0;
+    const double latR = latC * 3.14159265358979 / 180.0;
+    const double cy = 0.5 - std::log(std::tan(0.78539816339745 + latR * 0.5)) /
+                                (2.0 * 3.14159265358979);
+
+    uint32_t built = 0;
+    for (int p = 0; p < kColorPages; ++p) {
+        const int lvl = kColorLevels[p];
+        const double mpt = lad.MetersPerTexel(uint32_t(lvl));
+        const double spanN = (mpt * double(kColorDim)) / kWorldM;   // page span, normalized
+        const double x0 = cx - spanN * 0.5, y0 = cy - spanN * 0.5;
+        m_colorPageGeo[p][0] = float(x0);
+        m_colorPageGeo[p][1] = float(y0);
+        m_colorPageGeo[p][2] = float(1.0 / spanN);
+        m_colorPageGeo[p][3] = float(mpt);
+
+        m_colorB.bank->ActivateSlice(gpu, uint32_t(p));
+        m_colorB.bank->MapAllLevels(gpu, uint32_t(p));
+        uint32_t levels = 0, coveredL0 = 0;
+        for (uint32_t m = 0; m < kColorMips; ++m) {
+            const uint32_t w = (kColorDim >> m) ? (kColorDim >> m) : 1u;
+            DomainCompositor::PageGeo g;
+            g.mercator = true;
+            g.dLon = spanN * 360.0 / double(w);
+            g.dLat = spanN / double(w);
+            g.lon0 = (x0 * 360.0 - 180.0) + 0.5 * g.dLon;
+            g.lat0 = y0 + 0.5 * g.dLat;
+            std::vector<float> page, cov;
+            const uint32_t covered = dc.ComposePage(PageAddr{uint32_t(lvl), 0, 0}, g, w, w, 4,
+                                                    page, cov);
+            if (!covered) continue;
+            if (!m) coveredL0 = covered;
+            m_colorB.bank->UploadLevel(gpu, m, page.data(), w * 4 * sizeof(float), w, w,
+                                       uint32_t(p));
+            ++levels;
+        }
+        Log("[color-ga] page %d = level %2d: %.1f m/texel, %.0f km span, %u mips, %u/%u covered",
+            p, lvl, mpt, mpt * double(kColorDim) / 1000.0, levels, coveredL0,
+            kColorDim * kColorDim);
+        built += levels ? 1u : 0u;
+    }
+    if (!built) {
+        m_colorB.bank.reset();
+        return false;
+    }
+    // The array's slice 0 view is not what the shader wants here -- it needs ALL the pages, so
+    // this one binds as a genuine Texture2DArray (space5) and the shader picks the finest page
+    // whose extent contains the sample. That choice is a containment test, not a hand-off gate:
+    // no feather, no smoothstep between tenants, no rung that has to know about its neighbour.
+    m_colorB.srv = gpu.CreateSrvArray(m_colorB.bank->Res(), DXGI_FORMAT_R16G16B16A16_FLOAT,
+                                      kColorMips, kColorPages);
+    Log("[color-ga] bank ready: %d pages x %u mips, one ladder from %.1f m to %.0f km -- the "
+        "cube + z14 window + z17 detail ladder, in one address space",
+        kColorPages, kColorMips, lad.MetersPerTexel(0),
+        lad.MetersPerTexel(uint32_t(kColorLevels[0])) * double(kColorDim) / 1000.0);
+    return true;
+}
+
 bool GlobeLayer::BuildPlaneBank(Gpu& gpu, PlaneBank& out, const char* name,
                                 const char* structure, const GeoRef& ref,
                                 std::vector<MemGridLoader::Plane> planes, DXGI_FORMAT fmt,

@@ -313,6 +313,31 @@ private:
     };
     PlaneBank m_hsB, m_windB, m_oceanB, m_iceB, m_windSrcB;
 
+    // ---- M9ad: THE PLANET'S IMAGERY, AS ONE PAGED BANK.
+    //
+    // Four slices of ONE reserved array, one per rung of a single ladder, each a Mercator page
+    // of 16384 texels:
+    //
+    //     level 10   1228.8 m/texel   20133 km   the globe
+    //     level  6     76.8 m/texel    1258 km   the region  <- the rung that did not exist
+    //     level  3      9.6 m/texel     157 km   (what the z14 window was)
+    //     level  0      1.2 m/texel      20 km   (what the z17 detail window was)
+    //
+    // Uniform 8x steps where the old cube -> window jump was 64x with nothing in it. Not three
+    // textures with hand-off gates and three residency budgets -- one address space, one budget,
+    // and the shader takes the finest page that contains the sample.
+    static constexpr uint32_t kColorDim = 16384;   // one page, the D3D12 per-texture cap
+    static constexpr uint32_t kColorMips = 8;
+    static constexpr int kColorPages = 4;
+    static constexpr int kColorLevels[kColorPages] = {10, 6, 3, 0};
+    PlaneBank m_colorB;
+    // Per page: Mercator x0, y0 and 1/span, so a direction resolves to page uv with two mads.
+    float m_colorPageGeo[kColorPages][4] = {};
+public:
+    bool BuildColorBank(Gpu& gpu, const Compositor& comp, int colorChannel);
+    uint32_t ColorBankSrv() const { return m_colorB.srv; }
+private:
+
     // M9w: what the CDLOD walk actually costs, split. The walk is 3.95 ms at helm and the
     // question is whether that is TRAVERSAL (cullable, parallel over six independent face
     // roots) or EMIT (m_res->Want, which funnels every leaf into one shared tracking map).
