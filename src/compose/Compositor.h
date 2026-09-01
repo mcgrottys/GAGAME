@@ -192,6 +192,11 @@ public:
     // Public for the selftest: the soak rule is a CONTRACT, and contracts get pinned.
     const Channel& ChannelAt(int id) const { return m_channels[id]; }
     int ChannelCount() const { return static_cast<int>(m_channels.size()); }
+    // THE SOAK RULE'S MEMBERSHIP TEST, public so the tile trees apply the identical rule: a
+    // footprint (degrees) belongs to a tile if it is global, or overlaps by >= ~2 texels in
+    // some axis. A tree that used a looser test painted a speck of ortho into a coarse cube
+    // tile the incumbent never painted -- 27/255 on 567 texels, found by the audit.
+    static bool Touches(double lon0, double lat0, double lon1, double lat1, const TileBox& b);
     uint64_t ColorSubset(const Channel& ch, const TileBox& box,
                          std::vector<size_t>& included) const;
     // The one colour paint loop, exposed so anything that composes must go through THIS walk

@@ -68,6 +68,25 @@ public:
     uint32_t Channels() const override { return 4; }
     const UnitSpec& Unit() const override { return m_unit; }
     const char* NodeKind() const override { return "load"; }
+    // name|structure -- the same identity Compositor's soak rule hashes, so a tree on disk and
+    // a composed cache entry agree about what a source IS.
+    std::string Identity() const override {
+        return m_src ? m_src->Info().name + "|" + m_src->Info().structure : m_name;
+    }
+    bool MayCover(double lon0, double lat0, double lon1, double lat1) const override {
+        if (!m_src) return false;
+        const SourceInfo& si = m_src->Info();
+        return !(si.lon1 < lon0 || si.lon0 > lon1 || si.lat1 < lat0 || si.lat0 > lat1);
+    }
+    bool Footprint(double& lon0, double& lat0, double& lon1, double& lat1) const override {
+        if (!m_src) return false;
+        const SourceInfo& si = m_src->Info();
+        lon0 = si.lon0; lat0 = si.lat0; lon1 = si.lon1; lat1 = si.lat1;
+        return true;
+    }
+    // The tile-wise path needs the per-tile context the point API cannot carry: BeginTile is
+    // where the vector GIS mask sweeps its rings once per tile. Exposed so TileTree can run it.
+    ColorSource* Raw() const { return m_src; }
 
     bool SampleAt(const DomainQuery& q, DomainValue& out) const override {
         out.weight = 0.0f;

@@ -206,6 +206,12 @@ uint64_t SubsetSeed(const std::string& channelName) {
 }
 }  // namespace
 
+bool Compositor::Touches(double lon0, double lat0, double lon1, double lat1, const TileBox& b) {
+    SourceInfo si;
+    si.lon0 = lon0; si.lat0 = lat0; si.lon1 = lon1; si.lat1 = lat1;
+    return SourceTouches(si, b);
+}
+
 uint64_t Compositor::ColorSubset(const Channel& ch, const TileBox& box,
                                  std::vector<size_t>& included) const {
     uint64_t h = SubsetSeed(ch.name);

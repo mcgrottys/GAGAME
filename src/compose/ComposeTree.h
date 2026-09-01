@@ -85,11 +85,99 @@ public:
         return m_comp ? m_comp->SourceAt(i) : nullptr;
     }
     const char* NodeKind() const override { return "compose"; }
+    bool MayCover(double lon0, double lat0, double lon1, double lat1) const override {
+        for (size_t i = 0; i < InputCount(); ++i) {
+            if (Input(i)->MayCover(lon0, lat0, lon1, lat1)) return true;
+        }
+        return false;
+    }
+    // A composite's identity is its rule plus its inputs', in order: change any input, or the
+    // order, or the blend, and every tile this node ever cached is correctly orphaned.
+    std::string Identity() const override {
+        std::string id = "compose|" + m_name + "|" +
+                         (m_comp && m_comp->BlendMode() == DomainCompositor::Blend::LayeredOver
+                              ? "over"
+                              : "priavg");
+        for (size_t i = 0; i < InputCount(); ++i) id += "|(" + Input(i)->Identity() + ")";
+        return id;
+    }
+    const DomainCompositor* Comp() const { return m_comp.get(); }
+    // The union of the inputs' footprints. An input with no declared footprint makes the
+    // union unknown, which the caller treats as global.
+    bool Footprint(double& lon0, double& lat0, double& lon1, double& lat1) const override {
+        bool any = false;
+        double a = 180, b = 90, c = -180, d = -90;
+        for (size_t i = 0; i < InputCount(); ++i) {
+            double p, q, r, s;
+            if (!Input(i)->Footprint(p, q, r, s)) return false;
+            a = (std::min)(a, p); b = (std::min)(b, q); c = (std::max)(c, r); d = (std::max)(d, s);
+            any = true;
+        }
+        if (!any) return false;
+        lon0 = a; lat0 = b; lon1 = c; lat1 = d;
+        return true;
+    }
 
 private:
     std::string m_name;
     std::shared_ptr<DomainCompositor> m_comp;
     int m_priority = 0;
+};
+
+// ================================================================================================
+//  GateSource -- M9ak/M9am: a layer's weight, MULTIPLIED by another source's coverage.
+//
+//  "The GIS mask gates, the height band refines." The survey says where water CAN be; the bed
+//  classifier's alpha says where the waterline actually falls inside that. A compositor resolves
+//  disagreement about ONE quantity, and BinaryFieldSource combines two quantities into a third;
+//  this is a third kind of edge again: the VALUE is the layer's, untouched, and only the WEIGHT
+//  is the product. Distinct so that it prints as what it is in the tree.
+//
+//  A gate with no coverage at a point has no opinion -- the layer passes at its own weight. A
+//  gate that IS present and says zero blocks. Absent and empty are opposite answers, and the tile
+//  cache below has to preserve that distinction too (see TileTree).
+// ================================================================================================
+class GateSource : public DomainSource {
+public:
+    GateSource(std::string name, std::shared_ptr<DomainSource> layer,
+               std::shared_ptr<DomainSource> gate)
+        : m_name(std::move(name)), m_layer(std::move(layer)), m_gate(std::move(gate)) {}
+
+    const char* Name() const override { return m_name.c_str(); }
+    SourceDomain Domain() const override { return m_layer->Domain(); }
+    uint8_t GradeSig() const override { return m_layer->GradeSig(); }
+    uint32_t Channels() const override { return m_layer->Channels(); }
+    int Priority() const override { return m_layer->Priority(); }
+    const UnitSpec& Unit() const override { return m_layer->Unit(); }
+    const char* NodeKind() const override { return "gate"; }
+    const char* Cadence() const override { return m_layer->Cadence(); }
+    size_t InputCount() const override { return 2; }
+    const DomainSource* Input(size_t i) const override {
+        return i == 0 ? m_layer.get() : (i == 1 ? m_gate.get() : nullptr);
+    }
+    bool MayCover(double a, double b, double c, double d) const override {
+        return m_layer->MayCover(a, b, c, d);
+    }
+    bool Footprint(double& a, double& b, double& c, double& d) const override {
+        return m_layer->Footprint(a, b, c, d);
+    }
+    std::string Identity() const override {
+        return "gate|(" + m_layer->Identity() + ")<(" + m_gate->Identity() + ")";
+    }
+    bool SampleAt(const DomainQuery& q, DomainValue& out) const override {
+        if (!m_layer->SampleAt(q, out) || out.weight <= 0.0f) return false;
+        DomainValue g;
+        // Outside the gate's footprint it is not consulted: no opinion, the layer passes.
+        const bool present = m_gate->MayCover(q.lon, q.lat, q.lon, q.lat);
+        if (!present) return true;
+        if (!m_gate->SampleAt(q, g)) g.weight = 0.0f;   // present and silent: blocks
+        out.weight *= g.weight;
+        return out.weight > 0.0f;
+    }
+
+private:
+    std::string m_name;
+    std::shared_ptr<DomainSource> m_layer, m_gate;
 };
 
 // ================================================================================================

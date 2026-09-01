@@ -110,6 +110,19 @@ public:
     // The gantt column. A bed composes once; a tide is a function of t and must be re-evaluated
     // every instant. Stating it is what lets one tree carry rows on different clocks.
     virtual const char* Cadence() const { return "static"; }
+    // M9am: WHAT A CACHE MAY KEY THIS NODE'S OUTPUT ON. A leaf's tiles on disk are a function of
+    // the data it reads and nothing else, so the default is name + unit; a loader that knows its
+    // structure (a tile tree, a file version) says so, and a wrapper that changes nothing
+    // identity-bearing forwards its inner's. Compose nodes derive theirs from their inputs.
+    virtual std::string Identity() const { return std::string(Name()) + "|" + Unit().Describe(); }
+    // M9am: the declared footprint in degrees, when there is one. MayCover answers "might this
+    // touch"; this answers "how much", which the soak rule needs -- a source whose footprint
+    // spans less than ~2 texels of a tile drops out of that tile's subset, so a coarse tile is
+    // not repainted for a speck. False = unknown, which the caller treats as "always in".
+    virtual bool Footprint(double& lon0, double& lat0, double& lon1, double& lat1) const {
+        (void)lon0; (void)lat0; (void)lon1; (void)lat1;
+        return false;
+    }
 };
 
 // ================================================================================================
@@ -360,8 +373,18 @@ public:
     const char* Cadence() const override { return m_inner->Cadence(); }
     size_t InputCount() const override { return 1; }
     const DomainSource* Input(size_t i) const override { return i ? nullptr : m_inner.get(); }
+    // The scale and offset are part of the tile FORMAT, not of the data, so the cache keys on
+    // the inner identity plus what was done to it.
+    std::string Identity() const override {
+        char b[64];
+        snprintf(b, sizeof(b), "|norm x%.9g %+.6g", m_scale, m_offset);
+        return m_inner->Identity() + b;
+    }
     bool MayCover(double a, double b, double c, double d) const override {
         return m_inner->MayCover(a, b, c, d);
+    }
+    bool Footprint(double& a, double& b, double& c, double& d) const override {
+        return m_inner->Footprint(a, b, c, d);
     }
     bool SampleAt(const DomainQuery& q, DomainValue& out) const override {
         if (!m_inner->SampleAt(q, out)) return false;
@@ -501,6 +524,21 @@ public:
     // the source interface, which is what makes trees possible) answers a point query through the
     // exact same code that fills a page. Two implementations would drift, and the drift would
     // show up only where a composite fed another composite.
+    // M9am: ONE STEP OF "OVER", as a function. The tile-wise compose in TileTree.h runs this on
+    // bytes already on disk; the point-wise compose below runs it on fresh samples. Two loops,
+    // one kernel -- the alternative is the drift that shows up only where a composite feeds a
+    // composite.
+    static void OverStep(double acc[4], double& cov, const float* c, float weight,
+                         uint32_t chan) {
+        const double w = (std::min)(1.0, double(weight));
+        for (uint32_t k = 0; k < chan && k < 4; ++k) acc[k] += (double(c[k]) - acc[k]) * w;
+        cov += (1.0 - cov) * w;
+    }
+    static void OverFinish(const double acc[4], double cov, uint32_t chan, DomainValue& out) {
+        for (uint32_t k = 0; k < chan && k < 4; ++k) out.c[k] = float(acc[k] / cov);
+        out.weight = float(cov);
+    }
+
     bool SampleBlended(const DomainQuery& q, DomainValue& out) const {
         out = DomainValue{};
         if (m_blend == Blend::LayeredOver) {
@@ -512,11 +550,7 @@ public:
             for (const auto& s : m_sources) {
                 DomainValue v;
                 if (!s->SampleAt(q, v) || v.weight <= 0.0f) continue;
-                const double w = (std::min)(1.0, double(v.weight));
-                for (uint32_t c = 0; c < m_chan && c < 4; ++c) {
-                    acc[c] += (double(v.c[c]) - acc[c]) * w;
-                }
-                cov += (1.0 - cov) * w;
+                OverStep(acc, cov, v.c, v.weight, m_chan);
             }
             if (cov <= 0.0) return false;   // NODATA: absent, not zero. The caller fills.
             // UN-PREMULTIPLY. Accumulating from zero is compositing over TRANSPARENT BLACK: a
@@ -528,8 +562,7 @@ public:
             // This does NOT move the bed: its bottom layer (ETOPO) covers the globe at w=1, so
             // cov is 1 everywhere and the division is by one. It matters exactly where the old
             // form was silently wrong -- a product whose stack does not reach the ground.
-            for (uint32_t c = 0; c < m_chan && c < 4; ++c) out.c[c] = float(acc[c] / cov);
-            out.weight = float(cov);
+            OverFinish(acc, cov, m_chan, out);
             return true;
         }
         int bestPri = INT32_MIN;

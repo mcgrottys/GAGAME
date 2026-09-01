@@ -16,7 +16,7 @@
 
 #include "compose/ColorStackSource.h"
 #include "compose/GisMask.h"
-#include "compose/SourceTree.h"
+#include "compose/TileTree.h"
 #include "compose/TileArchive.h"
 #include "compose/TileIndex.h"
 #include "core/TileStream.h"
@@ -2069,8 +2069,10 @@ int main(int argc, char** argv) {
                     // aerial (both photos, finer wins), bed above both (its height-band alpha
                     // reclaims everything below the intertidal ramp and hands land back to
                     // the photos above +1.2 m NAVD), hand overlays on top of everything.
+                    bool srcAerialLoaded = false, srcOverlayLoaded = false;
                     if (srcAerial.Load("data/aerial/aerial.json")) {
                         colorStack.push_back(&srcAerial);
+                        srcAerialLoaded = true;
                     }
                     if (srcBed.Load("data/bed/bed_rules.json", &compositor, hgtCh)) {
                         colorStack.push_back(&srcBed);
@@ -2078,6 +2080,7 @@ int main(int argc, char** argv) {
                     }
                     if (srcOverlay.Load("data/overlay/overlay.json")) {
                         colorStack.push_back(&srcOverlay);
+                        srcOverlayLoaded = true;
                     }
                     // M9ak: THE GATE. The user's rule: "the GIS mask gates, the height band
                     // refines". srcBed is the WATER authority and its alpha is a height band,
@@ -2099,17 +2102,70 @@ int main(int argc, char** argv) {
                     if (maskLayer != SIZE_MAX) {
                         compositor.SetColorGate(colCh, bedIdx, maskLayer);
                     }
-                    // M9aj: THE THREE TREES. Each source keeps its own sparse tree on disk; the
-                    // composite tree references one of them wherever exactly one source claims
-                    // a tile outright, and materializes bytes only where they OVERLAP. Built
-                    // beside the shipped path, selected per realization, so the two can be
-                    // compared on the same addresses (--tree-audit) before either carries a
-                    // frame.
-                    static ColorTreeStack colorTrees;
-                    if (opt.colorTrees || opt.treeAudit) colorTrees.Init(&compositor, colCh);
+                    // M9am: THE MEGATEXTURE, AS THE WATER'S GRAPH. The same nodes the bed and
+                    // the tide compose through -- ColorLayerSource, NormalizeToSi,
+                    // DomainCompositor::LayeredOver, CompositeSource -- with TileTree caching
+                    // every node's output on the NVMe on the shared tile addresses:
+                    //
+                    //     google ---+
+                    //               +-> earth.land ----------------+
+                    //     aerial ---+                              |
+                    //                                              +-> earth.color (mega)
+                    //     bed ---------> earth.seafloor --+        |
+                    //                                     +-> gate +
+                    //     gis.landsea (vector) -----------+
+                    //
+                    // Land is the base; the seafloor paints over it with weight = its own height
+                    // band x the survey's water coverage ("the GIS mask gates, the height band
+                    // refines"), so over surveyed water the land goes transparent per pixel and
+                    // the seafloor shows; inland the seafloor is gated out and the mega tile is a
+                    // stored REFERENCE to the land tree's. The flat incumbent channel above stays
+                    // as the definition the audit compares against.
+                    std::vector<std::shared_ptr<DomainSource>> keepAlive;
+                    auto leaf = [&](ColorSource* s) -> std::shared_ptr<DomainSource> {
+                        auto l = std::make_shared<ColorLayerSource>(s);
+                        auto n = NormalizeToSi(l);
+                        keepAlive.push_back(l);
+                        return n ? n : l;
+                    };
+                    auto over = [&](const char* name,
+                                    std::vector<std::shared_ptr<DomainSource>> in)
+                        -> std::shared_ptr<DomainSource> {
+                        auto dc = std::make_shared<DomainCompositor>();
+                        dc->SetBlend(DomainCompositor::Blend::LayeredOver);
+                        for (auto& s : in) {
+                            if (!dc->Add(s)) Log("[mega] %s: input %s refused", name, s->Name());
+                        }
+                        return std::make_shared<CompositeSource>(name, dc);
+                    };
+                    std::vector<std::shared_ptr<DomainSource>> landIn{leaf(&srcGoogle)};
+                    if (srcAerialLoaded) landIn.push_back(leaf(&srcAerial));
+                    std::shared_ptr<DomainSource> land = over("earth.land", landIn);
+                    std::shared_ptr<DomainSource> mega;
+                    if (bedLayer != SIZE_MAX) {
+                        std::shared_ptr<DomainSource> sea = over("earth.seafloor", {leaf(&srcBed)});
+                        std::shared_ptr<DomainSource> seaGated = sea;
+                        if (maskLayer != SIZE_MAX) {
+                            seaGated = std::make_shared<GateSource>("seafloor<gis", sea,
+                                                                    leaf(&srcGisMask));
+                        }
+                        std::vector<std::shared_ptr<DomainSource>> megaIn{land, seaGated};
+                        if (srcOverlayLoaded) megaIn.push_back(leaf(&srcOverlay));
+                        mega = over("earth.color", megaIn);
+                    } else {
+                        mega = land;
+                    }
+                    keepAlive.push_back(land);
+                    keepAlive.push_back(mega);
+                    PrintTree("earth.color (megatexture)", mega.get());
+                    std::unique_ptr<TileTree> megaTree;
+                    if (opt.colorTrees || opt.treeAudit) {
+                        megaTree = std::make_unique<TileTree>(mega.get());
+                        megaTree->Print();
+                    }
                     auto mkColor = [&](const ColorFrame& f) -> TileProviderFn {
-                        return opt.colorTrees ? colorTrees.Realization(f)
-                                              : compositor.ColorRealization(colCh, f);
+                        return (opt.colorTrees && megaTree) ? megaTree->Provider(f)
+                                                            : compositor.ColorRealization(colCh, f);
                     };
                     colorCubeT = resMgr.AddTextureCube(gpu, L"earth.color (composed)",
                                                        Compositor::kFaceDim,
@@ -2153,20 +2209,18 @@ int main(int argc, char** argv) {
                         TreeAudit all;
                         for (const ColorFrame& f : frames) {
                             TreeAudit a;
-                            AuditColorTrees(compositor, colCh, colorTrees, f, opt.treeAudit, a,
-                                            opt.warmTrees);
+                            AuditTileTree(compositor, colCh, *megaTree, f, opt.treeAudit, a,
+                                          opt.warmTrees);
                             all.tiles += a.tiles;
                             all.exact += a.exact;
                             all.difTexels += a.difTexels;
                             all.texels += a.texels;
                             all.alphaDif += a.alphaDif;
-                            all.refs += a.refs;
-                            all.composed += a.composed;
                             all.worstDelta = (std::max)(all.worstDelta, a.worstDelta);
                         }
                         Log("[tree-audit] TOTAL: %u tiles, %u byte-identical (%.1f%%), worst "
                             "|direct - tree| = %u/255, %llu of %llu texels differ (%.4f%%), "
-                            "%u alpha mismatches; %u referenced (%.1f%%), %u composed",
+                            "%u cover mismatches",
                             all.tiles, all.exact,
                             all.tiles ? 100.0 * double(all.exact) / double(all.tiles) : 0.0,
                             all.worstDelta,
@@ -2174,10 +2228,8 @@ int main(int argc, char** argv) {
                             static_cast<unsigned long long>(all.texels),
                             all.texels ? 100.0 * double(all.difTexels) / double(all.texels)
                                        : 0.0,
-                            all.alphaDif, all.refs,
-                            all.tiles ? 100.0 * double(all.refs) / double(all.tiles) : 0.0,
-                            all.composed);
-                        Log("[trees] %s", colorTrees.Stats().c_str());
+                            all.alphaDif);
+                        Log("[trees]\n%s", megaTree->Stats().c_str());
                         resMgr.Shutdown();
                         return 0;
                     }
