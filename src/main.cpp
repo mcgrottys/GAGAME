@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 
 #include "compose/ColorStackSource.h"
+#include "compose/TileIndex.h"
 #include "compose/ComposeTree.h"
 #include "compose/DomainSource.h"
 #include "core/CurrentFieldLoader.h"
@@ -2060,6 +2061,28 @@ int main(int argc, char** argv) {
                 }
                 globe->SetComposed(colorCubeT, winTenant, hgtTenant, hgtWinTenant, winOrgX,
                                    winOrgY, 16384.0, detTenant, det17OrgX, det17OrgY);
+
+                // ---- M9ae: WHAT THE DISK ALREADY HOLDS, in memory, once.
+                //
+                // The composed cache is the tree's backing store -- 64 KB tiles laid out for
+                // CopyTiles -- but nothing in RAM knew what was in it, so "is a finer level
+                // ready here?" could only be answered by building a filename and asking the
+                // filesystem. Residency could request a level; it could not prefer the levels
+                // that would be a cheap READ over the ones that mean a paint or a fetch.
+                //
+                // The index is one entry per TILE, not per texel, so the asymmetry that makes
+                // NVMe paging worth doing shows up directly: terabytes of tree, megabytes of map.
+                {
+                    static TileIndex idxColorCube, idxColorWin, idxColorDet, idxHeightCube;
+                    idxColorCube.Scan("earth.color", "cube16k");
+                    idxColorWin.Scan("earth.color", "window_z14_1263360_1538048");
+                    idxColorDet.Scan("earth.color", "window_z17_10168820_12344774");
+                    idxHeightCube.Scan("earth.height", "cube16k");
+                    idxColorCube.Report();
+                    idxColorWin.Report();
+                    idxColorDet.Report();
+                    idxHeightCube.Report();
+                }
 
             }
             globe->stencilOverlay = opt.stencil;
