@@ -59,17 +59,25 @@ float2 CsWindowUv(float3 dir) {
 float3 ComposedColor(float3 dir) {
     float3 c = float3(0.5f, 0.5f, 0.5f);
     if (gCsF.x > 0.5f) {
-        const float want = gTexCube[gCsU.x].CalculateLevelOfDetail(sLinearClamp, dir);
+        // M9z: ANISOTROPIC, and the CalculateLevelOfDetail call is GONE. It collapsed the
+        // screen-space Jacobian to ONE number -- the longest derivative -- and then took a
+        // single trilinear tap there, which is why the surface smeared along the compressed
+        // axis wherever the globe curves away. Sample()'s min-LOD clamp form hands the whole
+        // Jacobian to the hardware and still honours the residency floor, so a miss degrades
+        // to the best RESIDENT ancestor exactly as before. Fewer instructions AND the right
+        // footprint: `have` was the only value the old form needed to keep.
         const float have = CsHaveCube(gCsU.y, dir);
-        c = gTexCube[gCsU.x].SampleLevel(sLinearClamp, dir, max(want, have)).rgb;
+        c = gTexCube[gCsU.x].Sample(sAniso, dir, have).rgb;
     }
     if (gCsF.y > 0.5f) {
         const float2 duv = CsWindowUv(dir);
         if (all(duv > 0.0f) && all(duv < 1.0f)) {
             const float2 fe = smoothstep(0.0f, 0.06f, duv) * smoothstep(1.0f, 0.94f, duv);
+            // `want` survives here because it GATES the hand-off below, not just the fetch --
+            // a scalar decision genuinely needs a scalar. The fetch itself goes anisotropic.
             const float want = gTex[gCsU.z].CalculateLevelOfDetail(sLinearClamp, duv);
             const float have = CsHave2D(gCsU.w, duv);
-            const float4 w = gTex[gCsU.z].SampleLevel(sLinearClamp, duv, max(want, have));
+            const float4 w = gTex[gCsU.z].Sample(sAniso, duv, int2(0, 0), have);
             // M7h: the window HANDS OFF to the cube when the view outresolves even its
             // pinned floor (want past ~mip 6): a rung that cannot add detail must vanish,
             // or its different-zoom capture sits as a vintage RECTANGLE on the planet.
@@ -87,7 +95,7 @@ float3 ComposedColor(float3 dir) {
                         gTex[gCsU4.x].CalculateLevelOfDetail(sLinearClamp, tuv);
                     const float haveD = CsHave2D(gCsU4.y, tuv);
                     const float lodD = max(wantD, haveD);
-                    const float4 d = gTex[gCsU4.x].SampleLevel(sLinearClamp, tuv, lodD);
+                    const float4 d = gTex[gCsU4.x].Sample(sAniso, tuv, int2(0, 0), haveD);
                     // Take the detail rung only where it is actually FINER than what the
                     // z14 window just delivered (z17 mip m == z14 mip m-3): a half-warmed
                     // detail tile must never replace sharper coarse truth with mush.

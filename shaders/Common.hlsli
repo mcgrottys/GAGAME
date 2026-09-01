@@ -83,6 +83,11 @@ TextureCube gTexCube[] : register(t0, space3);   // M6e: streamed planet surface
 SamplerState sLinearClamp : register(s0);
 SamplerState sLinearWrap  : register(s1);
 SamplerState sPointClamp  : register(s2);     // for fields that must NOT be filtered; see below
+// M9z: anisotropic, for the streamed SURFACE at grazing angles. Used with Sample()'s min-LOD
+// clamp form so the hardware picks the footprint while the residency floor still holds -- a
+// miss must still degrade to the best RESIDENT ancestor, never to unmapped garbage.
+// PIXEL SHADERS ONLY: Sample() needs derivatives. The height path stays on SampleLevel.
+SamplerState sAniso       : register(s3);
 
 #ifndef GA_NO_FIELD_BUFFER
 float2 FieldUv(uint idx, float2 worldXZ) {

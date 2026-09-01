@@ -82,7 +82,7 @@ void Renderer::CreateRootSignature() {
     params[4].Descriptor.ShaderRegister = 2;   // b2
     params[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    D3D12_STATIC_SAMPLER_DESC samplers[3]{};
+    D3D12_STATIC_SAMPLER_DESC samplers[4]{};
     auto initSampler = [](D3D12_STATIC_SAMPLER_DESC& s, UINT reg, D3D12_FILTER filter,
                           D3D12_TEXTURE_ADDRESS_MODE addr) {
         s.Filter = filter;
@@ -97,6 +97,18 @@ void Renderer::CreateRootSignature() {
     // s2 is point-clamp, and it exists specifically for fields that MUST NOT be hardware-filtered
     // -- rotor fields, where a componentwise lerp silently stops being a rotation.
     initSampler(samplers[2], 2, D3D12_FILTER_MIN_MAG_MIP_POINT, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+    // M9z: s3 is ANISOTROPIC, and it exists for one specific failure. The streamed surface was
+    // sampled as CalculateLevelOfDetail + SampleLevel -- an ISOTROPIC level chosen by the
+    // LONGEST derivative, then one trilinear tap at it. That is correct looking straight down
+    // and wrong at a grazing angle, where the texel footprint is a long thin sliver: the mip
+    // gets picked for the stretched axis and everything blurs along the compressed one. It
+    // shows up on the descent as diagonal smearing exactly where the globe curves away, which
+    // is the artefact this sampler is here to remove.
+    //
+    // 8x rather than 16x: the footprint anisotropy at these angles is a few to one, 8 covers it,
+    // and the taps are paid on every surface pixel.
+    initSampler(samplers[3], 3, D3D12_FILTER_ANISOTROPIC, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
+    samplers[3].MaxAnisotropy = 8;
 
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC vd{};
     vd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
