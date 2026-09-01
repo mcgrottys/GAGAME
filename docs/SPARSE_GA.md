@@ -464,3 +464,36 @@ manager already has the last one for texture tenants).
 
 Against a 1 GB pool, 1024 pinned floors would be 64 MB -- 6%, leaving the rest for detail.
 The floor was never the thing to worry about.
+
+## 19. The pool cap
+
+`TileAtlas2D` and `TileAtlas3D` now carry a pool budget. Until now `CommitMappings` created
+another heap whenever it ran dry -- unbounded growth in both, with residency policy the only
+thing holding it back.
+
+**Default 2 GB per atlas.** The sample's 256 tiles (16 MB) was a 2013 budget; this GPU has
+7.9 GB dedicated. A cap exists to make exhaustion LOUD, not to be stingy. `SetPoolCapBytes`
+per bank.
+
+### It refuses; it does not evict
+
+Deliberate, and the important part. A grade bank may be **Volatile** -- churn and foam memory
+exist only on the GPU, so evicting one does not cost a reload, it **destroys simulated state**.
+Blind LRU would silently delete physics. So the budget is enforced by refusing new mappings and
+saying so, the same discipline the meshlet budget already uses: *a dropped leaf is a hole,
+reported, never silent.*
+
+Banks whose contents are `Streamable` or `Recomputable` (section 5) can layer eviction on top
+later -- for them a refusal really is just a reload deferred. Refusing first is the version that
+cannot corrupt anything, and the residence class is what says which banks may go further.
+
+### Pinned
+
+    pool cap: asked 128 tiles, cap 16, resident 16, refused 112
+              -- cap held and every refusal counted
+
+The second half of that check matters as much as the first: a cap that silently drops mappings
+would look identical to a cap that works, right up until a hole appears in a field and nothing
+explains it.
+
+Real renders are byte-identical at the 2 GB default -- no bank is near it.

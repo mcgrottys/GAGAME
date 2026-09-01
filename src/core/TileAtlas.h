@@ -173,6 +173,26 @@ public:
     // Map every STANDARD coarse tile (mip >= 1). Coarse levels together cost about a third of
     // mip 0 and they are the global floor, so completeness there is worth more than sparsity:
     // a hole in a coarse level is a hole no finer level can cover.
+    // ---- THE POOL CAP (M9h) -----------------------------------------------------------
+    // Until now CommitMappings simply created another heap whenever it ran dry, in both the
+    // 2D and 3D atlas: growth was unbounded and residency policy was the only thing holding
+    // it back. The D3D11.2 sample this design descends from caps its pool (256 tiles, 16 MB
+    // in 2013 money) and evicts to fit.
+    //
+    // The cap here REFUSES rather than evicts, and that is deliberate. A grade bank may be
+    // Volatile -- churn and foam memory exist only on the GPU, so evicting one does not cost
+    // a reload, it destroys simulated state. Blind LRU would silently delete physics. So the
+    // budget is enforced by refusing new mappings and SAYING SO, the same discipline the
+    // meshlet budget already uses ("a dropped leaf is a hole, reported, never silent").
+    // Banks that are safely re-fillable can layer eviction on top later; refusing first is
+    // the version that cannot corrupt anything.
+    void SetPoolCapBytes(uint64_t bytes) {
+        m_poolCapTiles = static_cast<uint32_t>(bytes / kTileBytes);
+    }
+    uint32_t PoolTiles() const { return m_poolTiles; }
+    uint32_t PoolCapTiles() const { return m_poolCapTiles; }
+    uint32_t RefusedMaps() const { return m_refusedMaps; }
+
     void MapAllCoarse() { MapAllCoarse(0); }
     void MapAllCoarse(uint32_t slice);
 
@@ -192,6 +212,13 @@ private:
     std::vector<Com<ID3D12Heap>> m_heaps;
     uint32_t m_heapChunkTiles = 64;
     std::vector<uint32_t> m_freeTiles;        // (heapIdx << 16) | tileInHeap
+    // Default 2 GB per atlas. The old sample's 16 MB was a 2013 budget; this GPU has 7.9 GB
+    // dedicated, and a cap exists to make exhaustion LOUD, not to be stingy.
+    uint32_t m_poolCapTiles = static_cast<uint32_t>((2ull * 1024 * 1024 * 1024) /
+                                                    D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES);
+    uint32_t m_poolTiles = 0;        // tiles actually backed by a heap
+    uint32_t m_refusedMaps = 0;      // mappings the cap turned away, this episode
+    bool m_capReported = false;
     std::vector<uint32_t> m_tilePool;         // per atlas tile: pool slot when resident
     std::vector<uint8_t> m_state;             // 0 null, 1 resident
     std::vector<uint32_t> m_residentList;
@@ -234,6 +261,12 @@ private:
 // ================================================================================================
 class TileAtlas3D {
 public:
+    void SetPoolCapBytes(uint64_t bytes) {
+        m_poolCapTiles = static_cast<uint32_t>(bytes / TileAtlas2D::kTileBytes);
+    }
+    uint32_t PoolTiles() const { return m_poolTiles; }
+    uint32_t PoolCapTiles() const { return m_poolCapTiles; }
+    uint32_t RefusedMaps() const { return m_refusedMaps; }
     void Init(Gpu& gpu, uint32_t w, uint32_t h, uint32_t d, DXGI_FORMAT fmt,
               const wchar_t* name, uint32_t heapChunkTiles = 64);
 
@@ -267,6 +300,11 @@ private:
     std::vector<Com<ID3D12Heap>> m_heaps;
     uint32_t m_heapChunkTiles = 64;
     std::vector<uint32_t> m_freeTiles;
+    // Same cap, same reason: the volume bank grew without bound too.
+    uint32_t m_poolCapTiles = static_cast<uint32_t>((2ull * 1024 * 1024 * 1024) /
+                                                    D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES);
+    uint32_t m_poolTiles = 0;
+    uint32_t m_refusedMaps = 0;
     std::vector<uint32_t> m_tilePool;
     std::vector<uint8_t> m_state;
     std::vector<uint32_t> m_residentList;

@@ -942,6 +942,15 @@ void TileAtlas2D::CommitMappings(Gpu& gpu, std::vector<uint32_t>* outNewlyMapped
         std::vector<Batch> batches;
         for (uint32_t i : m_pendingMap) {
             if (m_state[i] != 2) continue;
+            if (m_freeTiles.empty() && m_poolTiles >= m_poolCapTiles) {
+                // At budget. REFUSE rather than grow, and rather than evict -- this bank may
+                // be holding state nothing else can reproduce (churn and foam memory exist
+                // only here). A silent eviction would delete physics; a refusal is a hole,
+                // and holes get counted and reported.
+                m_state[i] = 0;
+                ++m_refusedMaps;
+                continue;
+            }
             if (m_freeTiles.empty()) {
                 D3D12_HEAP_DESC hd{};
                 hd.SizeInBytes = static_cast<uint64_t>(m_heapChunkTiles) * kTileBytes;
@@ -957,6 +966,7 @@ void TileAtlas2D::CommitMappings(Gpu& gpu, std::vector<uint32_t>* outNewlyMapped
                 for (uint32_t t = m_heapChunkTiles; t > 0; --t) {
                     m_freeTiles.push_back((hIdx << 16) | (t - 1));
                 }
+                m_poolTiles += m_heapChunkTiles;
             }
             const uint32_t slot = m_freeTiles.back();
             m_freeTiles.pop_back();
@@ -1098,6 +1108,15 @@ void TileAtlas3D::CommitMappings(Gpu& gpu, std::vector<uint32_t>* outNewlyMapped
         std::vector<Batch> batches;
         for (uint32_t i : m_pendingMap) {
             if (m_state[i] != 2) continue;
+            if (m_freeTiles.empty() && m_poolTiles >= m_poolCapTiles) {
+                // At budget. REFUSE rather than grow, and rather than evict -- this bank may
+                // be holding state nothing else can reproduce (churn and foam memory exist
+                // only here). A silent eviction would delete physics; a refusal is a hole,
+                // and holes get counted and reported.
+                m_state[i] = 0;
+                ++m_refusedMaps;
+                continue;
+            }
             if (m_freeTiles.empty()) {
                 D3D12_HEAP_DESC hd{};
                 hd.SizeInBytes =
@@ -1114,6 +1133,7 @@ void TileAtlas3D::CommitMappings(Gpu& gpu, std::vector<uint32_t>* outNewlyMapped
                 for (uint32_t t = m_heapChunkTiles; t > 0; --t) {
                     m_freeTiles.push_back((hIdx << 16) | (t - 1));
                 }
+                m_poolTiles += m_heapChunkTiles;
             }
             const uint32_t slot = m_freeTiles.back();
             m_freeTiles.pop_back();
@@ -1662,7 +1682,28 @@ bool RunAtlasSelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDi
         // answer turns on whether a shape HAS a packed tail: a tail is typically a single 64 KB
         // tile, but a shape without one pins its coarsest STANDARD mip instead, which is a
         // whole mip level of tiles. Same guarantee, wildly different price.
-        Log("[atlastest] floor cost per active page (pinned tail, or coarsest standard mip):");
+        // ---- M9h: THE POOL CAP. The sample this design descends from budgets its pool and lives
+    // inside it; this atlas simply created another heap whenever it ran dry. Prove the cap
+    // holds, and prove that hitting it is LOUD -- a refused mapping is a hole in the field,
+    // and a hole nobody counted is the failure mode worth preventing.
+    {
+        TileAtlas2D cap;
+        cap.Init(gpu, 2048, 2048, DXGI_FORMAT_R16_FLOAT, L"atlastest.cap", 8);
+        cap.SetPoolCapBytes(16 * 64 * 1024);   // 16 tiles, deliberately far too small
+        for (uint32_t ty = 0; ty < cap.TilesY(); ++ty) {
+            for (uint32_t tx = 0; tx < cap.TilesX(); ++tx) cap.RequestMap(tx, ty);
+        }
+        cap.CommitMappings(gpu, nullptr);
+        const uint32_t asked = cap.TilesX() * cap.TilesY();
+        const bool held = cap.PoolTiles() <= cap.PoolCapTiles();
+        const bool counted = cap.RefusedMaps() == (asked - cap.ResidentCount());
+        Log("[atlastest] pool cap: asked %u tiles, cap %u, resident %u, refused %u -- %s",
+            asked, cap.PoolCapTiles(), cap.ResidentCount(), cap.RefusedMaps(),
+            (held && counted) ? "cap held and every refusal counted" : "FAILED");
+        if (!held || !counted) pass = false;
+    }
+
+    Log("[atlastest] floor cost per active page (pinned tail, or coarsest standard mip):");
         struct Shape { uint32_t w, h, mips; DXGI_FORMAT f; const char* n; };
         const Shape shapes[] = {
             {16384, 16384, 15, DXGI_FORMAT_R16_FLOAT, "16384^2 R16F   full chain"},
