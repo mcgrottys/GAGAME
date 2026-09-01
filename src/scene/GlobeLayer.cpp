@@ -892,8 +892,27 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
     // the composed color/height cubes alike (Want clamps to each tenant's own mip count).
     ++walkLeaves;
     const auto wt0 = std::chrono::steady_clock::now();
+    // M9ab: THE MIP FOLLOWS THE NODE'S NEAREST POINT, NOT ITS CENTRE.
+    //
+    // This is where the descent-boundary seam came from. `dist` is to the node CENTRE, and a
+    // node that stopped descending is LARGE -- so its near edge sits far closer than its centre
+    // and needs a much finer mip than one centre-based number admits. Across the boundary where
+    // the walk stops splitting, the fine side kept asking for detail and the coarse side asked
+    // for several levels less, and the residency clamp turned that request gap into a hard line
+    // with sharp imagery on one side and mush on the other.
+    //
+    // Nothing about the LOD TREE changes here: no extra level, no new tier, the same nodes. The
+    // node simply asks for the resolution its closest pixel actually needs, and the mip chain
+    // plus sparse residency supply the gradient from there -- which is the point of having a
+    // mip chain in a reserved resource at all. A discrete level decides WHICH NODE; it should
+    // never have been deciding how sharp the node is allowed to be.
+    // arc is the node's full ground span, so its nearest point is about half a span closer
+    // than its centre. (0.75 is the CULLING radius -- deliberately generous, and using it here
+    // over-asked: it bought the same seam fix at double the p99, because every node in the
+    // frame requested a level finer than its geometry justifies.)
+    const double distNear = (std::max)(dist - arc * 0.5, 1.0);
     if (m_res && (m_surfT >= 0 || m_colorT >= 0 || m_hgtT >= 0)) {
-        const double px = arc / ((std::max)(dist, 1.0) * (std::max)(m_pixAng, 1e-6f));
+        const double px = arc / (distNear * (std::max)(m_pixAng, 1e-6f));
         const double texAtMip0 = size * 16384.0;
         const int mip = (std::max)(
             0, static_cast<int>(std::ceil(std::log2((std::max)(texAtMip0 / (std::max)(px, 16.0),
@@ -958,7 +977,7 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
             const double du1 = (mmax[0] - m_detOrg[0]) / m_detSize;
             const double dv1 = (mmax[1] - m_detOrg[1]) / m_detSize;
             if (du1 > 0.0 && dv1 > 0.0 && du0 < 1.0 && dv0 < 1.0) {
-                const double px = arc / ((std::max)(dist, 1.0) * (std::max)(m_pixAng, 1e-6f));
+                const double px = arc / (distNear * (std::max)(m_pixAng, 1e-6f));
                 const double span = (std::max)(du1 - du0, dv1 - dv0);
                 const double texAtMip0 = span * 16384.0;
                 const int dmip = (std::max)(
@@ -983,7 +1002,7 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
                 const double ev1 = (mmax[1] * 8.0 - m_det17Org[1]) / 16384.0;
                 if (eu1 > 0.0 && ev1 > 0.0 && eu0 < 1.0 && ev0 < 1.0) {
                     const double px =
-                        arc / ((std::max)(dist, 1.0) * (std::max)(m_pixAng, 1e-6f));
+                        arc / (distNear * (std::max)(m_pixAng, 1e-6f));
                     const double spanD = (std::max)(eu1 - eu0, ev1 - ev0);
                     const int emip = (std::max)(
                         0, static_cast<int>(std::ceil(std::log2(
