@@ -827,6 +827,10 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
     return true;
 }
 
+// sin(1.4844) -- the old latitude clamp, moved onto the sine so the Mercator bound needs no
+// asin. Monotonic, so clamping either side of it is the same statement.
+static const double kSinLatClamp = std::sin(1.4844);
+
 void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double size) {
     ++walkNodes;
     const double R = m_radius;
@@ -909,24 +913,45 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
         // so one rect feeds both.
         if (m_winT >= 0 || m_hgtWinT >= 0) {
             double mmin[2] = {1e18, 1e18}, mmax[2] = {-1e18, -1e18};
+            double s1min = 1e18, s1max = -1e18;
             for (int cy = 0; cy < 3; ++cy) {
                 for (int cx = 0; cx < 3; ++cx) {
+                    // M9y: THE SAME MERCATOR, WITHOUT asin AND tan.
+                    //
+                    // This ran nine times per leaf -- 653 leaves a frame, so ~29000
+                    // transcendental calls -- to bound a node in z14 pixel space. Four of the
+                    // five per corner were avoidable, because CubeDirD already hands back the
+                    // unit direction and d[1] IS sin(latitude):
+                    //
+                    //   tan(pi/4 + phi/2) == (1 + sin phi) / cos phi == (1 + d1) / sqrt(1 - d1^2)
+                    //
+                    // so asin (to get phi) and tan (to undo it) cancel algebraically. What is
+                    // left is one log and one sqrt. The latitude clamp moves onto the SINE,
+                    // which is exactly equivalent because asin is monotonic on [-1, 1].
                     double d[3];
                     CubeDirD(face, u0 + size * cx * 0.5, v0 + size * cy * 0.5, d);
-                    const double lat = std::asin(std::clamp(d[1], -1.0, 1.0));
                     const double lon = std::atan2(d[2], d[0]);
                     const double n14 = 16384.0 * 256.0;
                     const double mx = (lon / 3.14159265358979 * 0.5 + 0.5) * n14;
-                    const double latC = std::clamp(lat, -1.4844, 1.4844);
-                    const double my =
-                        (0.5 - std::log(std::tan(0.7853981634 + latC * 0.5)) /
-                                   (2.0 * 3.14159265358979)) *
-                        n14;
+                    // my is STRICTLY DECREASING in d[1], so its extremes over the corners are
+                    // f() of the extremes of the sine -- track the sine here and evaluate the
+                    // log exactly twice, after the loop, instead of nine times inside it.
+                    // Monotonicity, not approximation: the same two numbers come out.
+                    s1min = (std::min)(s1min, d[1]);
+                    s1max = (std::max)(s1max, d[1]);
                     mmin[0] = (std::min)(mmin[0], mx);
-                    mmin[1] = (std::min)(mmin[1], my);
                     mmax[0] = (std::max)(mmax[0], mx);
-                    mmax[1] = (std::max)(mmax[1], my);
                 }
+            }
+            // The two log evaluations the loop above no longer does nine times each. Decreasing
+            // in the sine, so the largest sine gives the smallest y.
+            {
+                const double n14 = 16384.0 * 256.0;
+                const double lo = std::clamp(s1min, -kSinLatClamp, kSinLatClamp);
+                const double hi = std::clamp(s1max, -kSinLatClamp, kSinLatClamp);
+                const double k = n14 / (2.0 * 3.14159265358979);
+                mmin[1] = 0.5 * n14 - std::log((1.0 + hi) / std::sqrt(1.0 - hi * hi)) * k;
+                mmax[1] = 0.5 * n14 - std::log((1.0 + lo) / std::sqrt(1.0 - lo * lo)) * k;
             }
             const double du0 = (mmin[0] - m_detOrg[0]) / m_detSize;
             const double dv0 = (mmin[1] - m_detOrg[1]) / m_detSize;
