@@ -67,6 +67,82 @@ void ComposeCubeDir(uint32_t face, double u, double v, double out[3]) {
     out[2] = p[2] / l;
 }
 
+// ---- the frame, said once (see ColorFrame in Compositor.h) ----------------------------------
+
+double ColorFrame::GroundRes(uint32_t mip) const {
+    if (kind == Kind::Cube) {
+        // A cube face spans a quarter of the equator, so its texel is the circumference over
+        // four face-widths -- the SAME quantity a Mercator zoom reports, which is what lets a
+        // tile-tree source pick a level from it without knowing which realization is asking.
+        return kMercCirc / (4.0 * double(faceDim >> mip));
+    }
+    return kMercCirc / double((1ll << zBase) * 256ll >> mip);
+}
+
+void ColorFrame::Box(const TileRequest& r, Compositor::TileBox& box) const {
+    if (kind == Kind::Cube) {
+        // Corners plus edge midpoints and the centre: a gnomonic tile's angular extremes live
+        // on its edge midpoints only near the poles, where a loose box is harmless (a global
+        // source is always in the subset; every regional source of ours sits far from there).
+        const double invFace = 1.0 / double(faceDim >> r.mip);
+        box = {10, -10, 10, -10, 0, 0};
+        for (int cy = 0; cy < 3; ++cy) {
+            for (int cx = 0; cx < 3; ++cx) {
+                double d[3];
+                ComposeCubeDir(r.face, (r.x * double(texW) + cx * (texW * 0.5)) * invFace,
+                               (r.y * double(texH) + cy * (texH * 0.5)) * invFace, d);
+                const double la = std::asin((std::max)(-1.0, (std::min)(1.0, d[1])));
+                const double lo = std::atan2(d[2], d[0]);
+                box.latMin = (std::min)(box.latMin, la);
+                box.latMax = (std::max)(box.latMax, la);
+                box.lonMin = (std::min)(box.lonMin, lo);
+                box.lonMax = (std::max)(box.lonMax, lo);
+            }
+        }
+    } else {
+        const double worldPx = double((1ll << zBase) * 256ll >> r.mip);
+        const long long gx0 = (orgPxX >> r.mip) + static_cast<long long>(r.x) * texW;
+        const long long gy0 = (orgPxY >> r.mip) + static_cast<long long>(r.y) * texH;
+        box = {};
+        box.latMin = std::atan(std::sinh(kPi * (1.0 - 2.0 * (gy0 + double(texH)) / worldPx)));
+        box.latMax = std::atan(std::sinh(kPi * (1.0 - 2.0 * gy0 / worldPx)));
+        box.lonMin = (gx0 / worldPx - 0.5) * 2.0 * kPi;
+        box.lonMax = ((gx0 + double(texW)) / worldPx - 0.5) * 2.0 * kPi;
+    }
+    box.texLat = (box.latMax - box.latMin) / double(texH);
+    box.texLon = (box.lonMax - box.lonMin) / double(texW);
+}
+
+void ColorFrame::Texel(const TileRequest& r, uint32_t px, uint32_t py, double& latRad,
+                       double& lonRad) const {
+    if (kind == Kind::Cube) {
+        const double invFace = 1.0 / double(faceDim >> r.mip);
+        double d[3];
+        ComposeCubeDir(r.face, (r.x * double(texW) + px + 0.5) * invFace,
+                       (r.y * double(texH) + py + 0.5) * invFace, d);
+        latRad = std::asin((std::max)(-1.0, (std::min)(1.0, d[1])));
+        lonRad = std::atan2(d[2], d[0]);
+        return;
+    }
+    // Window texels ARE Mercator pixels of zoom (zBase - mip): the lat/lon roundtrip through a
+    // Mercator-tree source lands back on the same pixel, so fills stay straight pixel moves.
+    const double worldPx = double((1ll << zBase) * 256ll >> r.mip);
+    const double X = ((orgPxX >> r.mip) + double(r.x) * texW + px + 0.5) / worldPx;
+    const double Y = ((orgPxY >> r.mip) + double(r.y) * texH + py + 0.5) / worldPx;
+    latRad = std::atan(std::sinh(kPi * (1.0 - 2.0 * Y)));
+    lonRad = (X - 0.5) * 2.0 * kPi;
+}
+
+std::string ColorFrame::Tag(const char* kindName) const {
+    char buf[96];
+    if (kind == Kind::Cube) {
+        snprintf(buf, sizeof(buf), "cube%uk", faceDim / 1024);
+        return buf;
+    }
+    snprintf(buf, sizeof(buf), "%s_z%d_%lld_%lld", kindName, zBase, orgPxX, orgPxY);
+    return buf;
+}
+
 int Compositor::AddColorChannel(const std::string& name, std::vector<ColorSource*> stack) {
     Channel ch;
     ch.name = name;
@@ -223,73 +299,68 @@ void Compositor::EnsureCacheDir(const Channel& ch, const char* realization) {
 
 // ---- realizations --------------------------------------------------------------------------
 
-TileProviderFn Compositor::CubeColor(int channel) {
-    EnsureCacheDir(m_channels[channel], "cube16k");
-    return [this, channel](const TileRequest& r, std::vector<uint8_t>& out,
-                           TileLoc* loc) {
-        const Channel& ch = m_channels[channel];
-        const uint32_t faceTexels = kFaceDim >> r.mip;
-        const double invFace = 1.0 / faceTexels;
-        const double groundRes = kMercCirc / (4.0 * faceTexels);
-        // Tile lat/lon box (corners + centre: a gnomonic tile's extremes live on its edge
-        // midpoints only at the poles, where a loose box is harmless).
-        TileBox box{10, -10, 10, -10, 0, 0};
-        for (int cy = 0; cy < 3; ++cy) {
-            for (int cx = 0; cx < 3; ++cx) {
-                double d[3];
-                ComposeCubeDir(r.face, (r.x * 128.0 + cx * 64.0) * invFace,
-                               (r.y * 128.0 + cy * 64.0) * invFace, d);
-                const double la = std::asin((std::max)(-1.0, (std::min)(1.0, d[1])));
-                const double lo = std::atan2(d[2], d[0]);
-                box.latMin = (std::min)(box.latMin, la);
-                box.latMax = (std::max)(box.latMax, la);
-                box.lonMin = (std::min)(box.lonMin, lo);
-                box.lonMax = (std::max)(box.lonMax, lo);
+// THE ONE COLOUR PAINT LOOP. Both realizations differed only in their frame, and the frame is
+// now an argument -- so the bottom-to-top stack walk, the lerp that IS "paint over", the cover
+// rule and the transient-never-cached rule exist in exactly one place. A source returning -1
+// (coverage exists, the fetch failed) leaves a hole THIS run and is never written: the next run
+// repaints it.
+void Compositor::PaintColorTile(const Channel& ch, const ColorFrame& frame, const TileRequest& r,
+                                const TileBox& box, const std::vector<size_t>& inc,
+                                std::vector<uint8_t>& out, bool& complete) const {
+    const double groundRes = frame.GroundRes(r.mip);
+    std::vector<PaintCtx> ctxs(inc.size());
+    for (size_t k = 0; k < inc.size(); ++k) {
+        ch.color[inc[k]]->BeginTile(box.latMin, box.latMax, box.lonMin, box.lonMax, groundRes,
+                                    ctxs[k]);
+    }
+    out.assign(65536, 0);
+    complete = true;
+    for (uint32_t py = 0; py < frame.texH; ++py) {
+        for (uint32_t px = 0; px < frame.texW; ++px) {
+            double lat = 0, lon = 0;
+            frame.Texel(r, px, py, lat, lon);
+            uint8_t* dst = &out[(py * frame.texW + px) * 4];
+            float acc[3] = {0, 0, 0};
+            float cover = 0.0f;
+            for (size_t k = 0; k < inc.size(); ++k) {   // bottom -> top, subset only
+                uint8_t rgba[4];
+                const float w = ch.color[inc[k]]->Sample(lat, lon, groundRes, ctxs[k], rgba);
+                if (w < 0.0f) { complete = false; continue; }
+                if (w == 0.0f) continue;
+                for (int c = 0; c < 3; ++c) acc[c] += (rgba[c] - acc[c]) * w;
+                cover = (std::max)(cover, w);
             }
+            dst[0] = static_cast<uint8_t>(acc[0]);
+            dst[1] = static_cast<uint8_t>(acc[1]);
+            dst[2] = static_cast<uint8_t>(acc[2]);
+            dst[3] = cover > 0.0f ? 255 : 0;
         }
-        box.texLat = (box.latMax - box.latMin) / 128.0;
-        box.texLon = (box.lonMax - box.lonMin) / 128.0;
+    }
+}
+
+// One realization = one frame + the cache identity that frame demands. THE REALIZATION'S NAME
+// IS ITS FRAME (M7x): three colour windows once shared the literal folder "window", so the z17
+// paint of tile (x,y) was served as the z14 tile (x,y) -- the patchwork of displaced,
+// wrong-scale imagery on the flood rail. A tile's content is a pure function of
+// (org, zBase, mip, x, y) plus the stack, so org and zBase are IN the folder name and distinct
+// frames cannot collide by construction. Identical frames still share, which is how the export
+// warms the live window.
+TileProviderFn Compositor::ColorRealization(int channel, const ColorFrame& frame) {
+    const std::string tag = frame.Tag();
+    EnsureCacheDir(m_channels[channel], tag.c_str());
+    return [this, channel, frame, tag](const TileRequest& r, std::vector<uint8_t>& out,
+                                       TileLoc* loc) {
+        const Channel& ch = m_channels[channel];
+        TileBox box{};
+        frame.Box(r, box);
         std::vector<size_t> inc;
         const uint64_t subset = ColorSubset(ch, box, inc);
         // M9ai: an archived tile resolves to a PLACE, and the bytes never enter this process.
-        if (TryArchive(ch, "cube16k", r, subset, loc)) return true;
-        const std::string path = CachePath(ch, "cube16k", r, subset);
+        if (TryArchive(ch, tag.c_str(), r, subset, loc)) return true;
+        const std::string path = CachePath(ch, tag.c_str(), r, subset);
         if (ReadCached(path, out)) return true;
-
-        std::vector<PaintCtx> ctxs(inc.size());
-        for (size_t k = 0; k < inc.size(); ++k) {
-            ch.color[inc[k]]->BeginTile(box.latMin, box.latMax, box.lonMin, box.lonMax,
-                                        groundRes, ctxs[k]);
-        }
-        out.assign(65536, 0);
-        bool complete = true;   // a transient source failure (fetch budget/network) shows as
-                                // a hole THIS run but is never cached: the next run repaints
-        for (uint32_t py = 0; py < 128; ++py) {
-            for (uint32_t px = 0; px < 128; ++px) {
-                const double u = (r.x * 128.0 + px + 0.5) * invFace;
-                const double v = (r.y * 128.0 + py + 0.5) * invFace;
-                double d[3];
-                ComposeCubeDir(r.face, u, v, d);
-                const double lat = std::asin((std::max)(-1.0, (std::min)(1.0, d[1])));
-                const double lon = std::atan2(d[2], d[0]);
-                uint8_t* dst = &out[(py * 128 + px) * 4];
-                float acc[3] = {0, 0, 0};
-                float cover = 0.0f;
-                for (size_t k = 0; k < inc.size(); ++k) {   // bottom -> top, subset only
-                    uint8_t rgba[4];
-                    const float w =
-                        ch.color[inc[k]]->Sample(lat, lon, groundRes, ctxs[k], rgba);
-                    if (w < 0.0f) { complete = false; continue; }
-                    if (w == 0.0f) continue;
-                    for (int c = 0; c < 3; ++c) acc[c] += (rgba[c] - acc[c]) * w;
-                    cover = (std::max)(cover, w);
-                }
-                dst[0] = static_cast<uint8_t>(acc[0]);
-                dst[1] = static_cast<uint8_t>(acc[1]);
-                dst[2] = static_cast<uint8_t>(acc[2]);
-                dst[3] = cover > 0.0f ? 255 : 0;
-            }
-        }
+        bool complete = true;
+        PaintColorTile(ch, frame, r, box, inc, out, complete);
         if (complete) {
             WriteCached(path, out);
             ++painted;
@@ -298,81 +369,14 @@ TileProviderFn Compositor::CubeColor(int channel) {
     };
 }
 
+TileProviderFn Compositor::CubeColor(int channel) {
+    return ColorRealization(channel, ColorFrame::Cube(kFaceDim));
+}
+
 TileProviderFn Compositor::WindowColor(int channel, long long orgPxX, long long orgPxY,
                                        uint32_t sizePx, int zBase) {
-    // THE REALIZATION'S NAME IS ITS FRAME (M7x). Three color windows (z14, the z17 detail,
-    // the z19 export inlet) shared the literal folder "window": same (f,m,x,y) filenames,
-    // and the per-tile subset hash matches wherever the same sources touch both footprints
-    // -- so the z17 paint of tile (x,y) was SERVED as the z14 tile (x,y): the patchwork of
-    // displaced, wrong-scale imagery on the flood rail. A tile's content is a pure function
-    // of (org, zBase, mip, x, y) + the stack; org and zBase therefore belong in the cache
-    // identity. Identical frames still share (the export warming the live window is a
-    // feature); distinct frames now CANNOT collide by construction.
-    const std::string tag = WindowTag("window", orgPxX, orgPxY, zBase);
-    EnsureCacheDir(m_channels[channel], tag.c_str());
     (void)sizePx;
-    return [this, channel, orgPxX, orgPxY, zBase, tag](const TileRequest& r,
-                                                       std::vector<uint8_t>& out,
-                                                       TileLoc* loc) {
-        const Channel& ch = m_channels[channel];
-        // Window texels ARE Mercator pixels of zoom (zBase - mip): the lat/lon roundtrip
-        // through a Mercator-tree source lands back on the same pixel, so fills remain the
-        // straight pixel moves the M6f DetailFn did -- now with the whole stack above them.
-        const double worldPx = static_cast<double>((1ll << zBase) * 256ll >> r.mip);
-        const double groundRes = kMercCirc / worldPx;
-        const long long gx0 = (orgPxX >> r.mip) + static_cast<long long>(r.x) * 128;
-        const long long gy0 = (orgPxY >> r.mip) + static_cast<long long>(r.y) * 128;
-        TileBox box{};
-        box.latMin = std::atan(std::sinh(kPi * (1.0 - 2.0 * (gy0 + 128.0) / worldPx)));
-        box.latMax = std::atan(std::sinh(kPi * (1.0 - 2.0 * gy0 / worldPx)));
-        box.lonMin = (gx0 / worldPx - 0.5) * 2.0 * kPi;
-        box.lonMax = ((gx0 + 128.0) / worldPx - 0.5) * 2.0 * kPi;
-        box.texLat = (box.latMax - box.latMin) / 128.0;
-        box.texLon = (box.lonMax - box.lonMin) / 128.0;
-        std::vector<size_t> inc;
-        const uint64_t subset = ColorSubset(ch, box, inc);
-        // M9ai: an archived tile resolves to a PLACE, and the bytes never enter this process.
-        if (TryArchive(ch, tag.c_str(), r, subset, loc)) return true;
-        const std::string path = CachePath(ch, tag.c_str(), r, subset);
-        if (ReadCached(path, out)) return true;
-
-        std::vector<PaintCtx> ctxs(inc.size());
-        for (size_t k = 0; k < inc.size(); ++k) {
-            ch.color[inc[k]]->BeginTile(box.latMin, box.latMax, box.lonMin, box.lonMax,
-                                        groundRes, ctxs[k]);
-        }
-        out.assign(65536, 0);
-        bool complete = true;
-        for (uint32_t py = 0; py < 128; ++py) {
-            const double Y = (gy0 + py + 0.5) / worldPx;
-            const double lat = std::atan(std::sinh(kPi * (1.0 - 2.0 * Y)));
-            for (uint32_t px = 0; px < 128; ++px) {
-                const double X = (gx0 + px + 0.5) / worldPx;
-                const double lon = (X - 0.5) * 2.0 * kPi;
-                uint8_t* dst = &out[(py * 128 + px) * 4];
-                float acc[3] = {0, 0, 0};
-                float cover = 0.0f;
-                for (size_t k = 0; k < inc.size(); ++k) {
-                    uint8_t rgba[4];
-                    const float w =
-                        ch.color[inc[k]]->Sample(lat, lon, groundRes, ctxs[k], rgba);
-                    if (w < 0.0f) { complete = false; continue; }
-                    if (w == 0.0f) continue;
-                    for (int c = 0; c < 3; ++c) acc[c] += (rgba[c] - acc[c]) * w;
-                    cover = (std::max)(cover, w);
-                }
-                dst[0] = static_cast<uint8_t>(acc[0]);
-                dst[1] = static_cast<uint8_t>(acc[1]);
-                dst[2] = static_cast<uint8_t>(acc[2]);
-                dst[3] = cover > 0.0f ? 255 : 0;
-            }
-        }
-        if (complete) {
-            WriteCached(path, out);
-            ++painted;
-        }
-        return true;
-    };
+    return ColorRealization(channel, ColorFrame::Window(orgPxX, orgPxY, zBase));
 }
 
 TileProviderFn Compositor::CubeHeight(int channel) {

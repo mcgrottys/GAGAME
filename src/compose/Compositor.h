@@ -104,6 +104,8 @@ public:
 };
 
 // ---- 3. the compositor ---------------------------------------------------------------------
+struct ColorFrame;   // the realization's geometry, defined below the class it belongs to
+
 class Compositor {
 public:
     static constexpr uint32_t kFaceDim = 16384;   // every composed pyramid realization today
@@ -129,6 +131,9 @@ public:
     TileProviderFn CubeColor(int channel);
     TileProviderFn WindowColor(int channel, long long orgPxX, long long orgPxY, uint32_t sizePx,
                                int zBase);
+    // Both of the above ARE this, with a frame filled in. A caller that has a frame -- a page of
+    // a ladder, a per-source tree, a test -- names it directly and gets the same paint.
+    TileProviderFn ColorRealization(int channel, const ColorFrame& frame);
     TileProviderFn CubeHeight(int channel);
     //  * WindowHeight: R16F tiles of the SAME Mercator window frame the color window uses --
     //    one frame, two channels, so near-field land/sea gates and normals ride CUDEM truth.
@@ -163,6 +168,11 @@ public:
     int ChannelCount() const { return static_cast<int>(m_channels.size()); }
     uint64_t ColorSubset(const Channel& ch, const TileBox& box,
                          std::vector<size_t>& included) const;
+    // The one colour paint loop, exposed so anything that composes must go through THIS walk
+    // rather than writing a second one that can drift from it.
+    void PaintColorTile(const Channel& ch, const ColorFrame& frame, const TileRequest& r,
+                        const TileBox& box, const std::vector<size_t>& inc,
+                        std::vector<uint8_t>& out, bool& complete) const;
     uint64_t HeightSubset(const Channel& ch, const TileBox& box,
                           std::vector<size_t>& included) const;
     uint64_t FieldSubset(const Channel& ch, const TileBox& box,
@@ -227,6 +237,60 @@ struct ComposedSurfaceCb {
     uint32_t u4[4];   // M7f: detail color window (z17) SRV + residency, fine edit mask SRV
     float det[4];     // detail uv from window uv: offset xy, scale z; w = fine edit mask on
     float ed[4];      // fine edit mask box in window uv: offset xy, scale zw
+};
+
+// ================================================================================================
+//  ColorFrame - M9aj: THE FRAME, SAID ONCE.
+//
+//  CubeColor and WindowColor each carried their own copy of three things: the tile's lat/lon
+//  BOX (for the soak rule), the per-texel lat/lon, and the ground resolution the sources are
+//  asked at. Two copies of one geometry is how the globe and the terrain came to disagree about
+//  where the coast was (the M6h glitch), and the per-source trees below need a THIRD caller --
+//  which is the moment to stop copying it.
+//
+//  A frame is (kind, tile extent, and either a cube face dimension or a Mercator origin+zoom).
+//  It is the whole of what a realization's addressing means, it is cheap to pass by value, and
+//  Tag() is the cache identity the frame demands: a tile's content is a pure function of
+//  (org, zBase, mip, x, y) plus the stack, so org and zBase belong in the folder name (M7x).
+// ================================================================================================
+struct ColorFrame {
+    enum class Kind : uint8_t { Cube, Window };
+    Kind kind = Kind::Cube;
+    uint32_t texW = 128, texH = 128;   // texels per 64 KB tile (RGBA8 128x128; R16F 256x128)
+    uint32_t faceDim = Compositor::kFaceDim;   // Cube
+    long long orgPxX = 0, orgPxY = 0;          // Window: origin in zBase Mercator pixels
+    int zBase = 14;
+
+    static ColorFrame Cube(uint32_t faceDim, uint32_t texW = 128, uint32_t texH = 128) {
+        ColorFrame f;
+        f.kind = Kind::Cube;
+        f.faceDim = faceDim;
+        f.texW = texW;
+        f.texH = texH;
+        return f;
+    }
+    static ColorFrame Window(long long orgPxX, long long orgPxY, int zBase,
+                             uint32_t texW = 128, uint32_t texH = 128) {
+        ColorFrame f;
+        f.kind = Kind::Window;
+        f.orgPxX = orgPxX;
+        f.orgPxY = orgPxY;
+        f.zBase = zBase;
+        f.texW = texW;
+        f.texH = texH;
+        return f;
+    }
+
+    // What a source is ASKED at. The cube's finest is bounded by the face dimension; a window's
+    // is its zoom base, which is how a realization demands detail the cube can never demand.
+    double GroundRes(uint32_t mip) const;
+    // The tile's angular box + per-texel span -- the soak rule's input.
+    void Box(const TileRequest& r, Compositor::TileBox& box) const;
+    // One texel's centre, in the WGS84 exchange frame every source answers in.
+    void Texel(const TileRequest& r, uint32_t px, uint32_t py, double& latRad,
+               double& lonRad) const;
+    // The realization's cache folder name -- "cube16k", "window_z14_1263360_1538048".
+    std::string Tag(const char* kindName = "window") const;
 };
 
 // The compositor's --selftest gate (ComposeTest.cpp): paint order, per-pixel weights, alpha,
