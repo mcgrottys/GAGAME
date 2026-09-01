@@ -2018,6 +2018,10 @@ int main(int argc, char** argv) {
         int detTenant = -1;   // M7f: z17 detail color window
         double det17OrgX = 0.0, det17OrgY = 0.0;
         int colCh = -1;   // color channel id (hgtCh registered above the solver, M6w)
+        // M9am: the megatexture graph and its on-disk tile cache. Declared HERE, beside the
+        // tenants that hold providers into them, so they cannot die first.
+        std::vector<std::shared_ptr<DomainSource>> megaKeep;
+        std::unique_ptr<TileTree> megaTree;
         if (globe) {
             resMgr.Init(gpu);
             int surf = -1, norm = -1;
@@ -2121,7 +2125,7 @@ int main(int argc, char** argv) {
                     // the seafloor shows; inland the seafloor is gated out and the mega tile is a
                     // stored REFERENCE to the land tree's. The flat incumbent channel above stays
                     // as the definition the audit compares against.
-                    std::vector<std::shared_ptr<DomainSource>> keepAlive;
+                    std::vector<std::shared_ptr<DomainSource>>& keepAlive = megaKeep;
                     auto leaf = [&](ColorSource* s) -> std::shared_ptr<DomainSource> {
                         auto l = std::make_shared<ColorLayerSource>(s);
                         auto n = NormalizeToSi(l);
@@ -2158,7 +2162,6 @@ int main(int argc, char** argv) {
                     keepAlive.push_back(land);
                     keepAlive.push_back(mega);
                     PrintTree("earth.color (megatexture)", mega.get());
-                    std::unique_ptr<TileTree> megaTree;
                     if (opt.colorTrees || opt.treeAudit) {
                         megaTree = std::make_unique<TileTree>(mega.get());
                         megaTree->Print();

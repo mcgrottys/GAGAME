@@ -319,9 +319,21 @@ bed_rules.json + zones + the height stack).
 **Coverage folding** (M7s): classification alphas at coarse LODs are computed by
 subsampling the decision at fine scale and averaging the answers (see `fold`).
 
-Code: `src/compose/Compositor.*`, `Sources.*`. Gates: `composetest` (paint order,
-weights, alpha, cache identity, addressing vs closed forms), `atlastest`. AST: all
-`compose.stack` edges.
+**The tree of trees** (M9am): a compositor is itself a source (`CompositeSource`), so
+composition nests; `TileTree` caches EVERY node's output on the NVMe on the shared tile
+addresses. Two laws make a composite a valid input: **straight alpha** — the over is
+un-premultiplied (`OverFinish` divides by coverage), so a single-input compose at partial
+weight IS its input byte for byte and is stored as a zero-byte **reference** naming the
+child tree; and **identity is the inputs** — a node's identity folds its children's, a
+tile's key folds what each child holds at that address, so a composite updates when a
+source's tiles change and at no other time. A **gate** (`GateSource`) is a third kind of
+edge: the value is the layer's, only the weight is the product; *absent* (no opinion)
+and *void* (blocks) are different answers.
+
+Code: `src/compose/Compositor.*`, `Sources.*`, `ComposeTree.h`, `TileTree.h`,
+`GisMask.*`. Gates: `composetest` (paint order, weights, alpha, cache identity,
+addressing vs closed forms), `atlastest`, `--tree-audit` (tree vs incumbent, tile for
+tile, worst |Δ| ≤ 1/255). AST: all `compose.stack` edges.
 
 ## discrete — The small algebras: noise, decay, morph, the float wall
 
@@ -822,6 +834,28 @@ model (or a textbook) would hold → what this project measured → the law now 
     that differs in **0–3 pixels** is not a subtle effect and not a cold cache; it is a
     severed wire. Prove the flag reached the GPU before spending 240 frames judging it —
     priors 9 governs renders that differ *slightly*, not renders that differ *not at all*.
+16. **Membership by overlap is not membership by soak.** Prior: a source belongs to a
+    tile if its footprint overlaps it (`MayCover`). Measured (M9am, `--tree-audit`): at
+    a coarse LOD a footprint under ~2 texels paints a speck the reference never paints —
+    27/255 on 567 texels of one cube tile, byte-identical everywhere else. Law: tile
+    membership is the SOAK rule (§compose), applied by one function
+    (`Compositor::Touches`) from every path; `MayCover` is a rejection test, not an
+    admission test.
+17. **A source's footprint is its admission ticket.** Prior: wiring a source into a
+    stack means it participates. Measured (M9ak): a source constructed before its data
+    loaded declared the empty box its class starts with (lon 180..−180), the soak rule
+    rejected it against every tile, and the gate was built, logged, and never asked a
+    question — two A/B renders agreed exactly (see 15) and a tree folder with **zero
+    files** was what caught it. Law: re-declare bounds after load; before believing any
+    A/B on a new source, check that its tree directory is non-empty.
+18. **The blend you inherit decides whether trees can nest.** Prior: any per-pixel over
+    composes. Measured: lerp-from-black is not associative for partial weights — a lone
+    layer at w=0.5 over nothing composites to half its colour, so a composite of it could
+    not feed another compose without darkening. The water's `SampleBlended` had already
+    fixed this (M9n, un-premultiply by coverage) and the imagery path duplicated the old
+    form beside it. Law: one kernel (`OverStep`/`OverFinish`) for the point path and the
+    tile path; and READ THE WATER'S PATH before building the imagery's — the user's
+    correction, and the Scriptorium's `math('compose')` would have said so first.
 
 ## verification — The gate map: which algebra is pinned where
 
