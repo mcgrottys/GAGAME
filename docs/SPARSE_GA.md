@@ -197,8 +197,8 @@ generalisation of the existing `--lens` family:
 | 1a | `constexpr` Cayley closure + `GradeField.h` (typed fields, expressions, policies, `GradeBank`) | **done** — gates 7/7 |
 | 1b | `GeoRef.h` — provenance, derived flip, the ingest rule | **done** |
 | 1c | `FieldLoader.h` — the plugin seam + registry + residence class | **done** |
-| 1d | port one existing bank to `GradeBank`, byte-identical render | next |
-| 2 | `WaveField` → sparse `GradeBank` (the architecture violation that started this) | |
+| 1d | port one existing bank to `GradeBank`, byte-identical render | **done** — churn, byte-identical |
+| 2 | `WaveField` → sparse `GradeBank` (the architecture violation that started this) | **done** — byte-identical, 1671/1775 tiles (94%) |
 | 3 | TerrainLayer bed → deviation field (null = "the stack is right") | |
 | 4 | GlobeLayer planes → banks (low value; consistency once the substrate exists) | |
 | 5 | expression materialisation + fusion; apron handling for stencils | |

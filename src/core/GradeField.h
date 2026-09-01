@@ -47,7 +47,9 @@
 #include "core/Gpu.h"
 #include "core/TileAtlas.h"
 
+#include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <string>
 #include <utility>
@@ -203,6 +205,84 @@ public:
         m_atlas.CommitMappings(gpu, fresh);
     }
     uint32_t ResidentCount() const { return m_atlas.ResidentCount(); }
+    // ---- CPU -> resident tiles ---------------------------------------------------------------
+    // Fill this bank's resident tiles from a DENSE CPU image (row-major, srcRowTexels wide).
+    // One CopyTiles per tile out of a 64 KB staging region, which is ALSO exactly one
+    // DirectStorage request -- so the same path serves a disk-backed loader unchanged when the
+    // source stops being a CPU array. Edge tiles that overhang the source are zero-filled;
+    // zero is the correct value there because it is what a NULL tile would have read anyway.
+    //
+    // The resource lives in UNORDERED_ACCESS (TileAtlas2D creates it that way), so this makes
+    // the round trip to COPY_DEST and back. Runs on the upload list, which EndUpload() waits
+    // on -- correct for a per-solve fill, not for a per-frame one.
+    void UploadDenseTiles(Gpu& gpu, const uint8_t* src, uint32_t srcRowTexels,
+                          uint32_t texelBytes, const std::vector<uint32_t>& tiles) {
+        if (tiles.empty() || src == nullptr) return;
+        const uint32_t tw = m_atlas.TileW(), th = m_atlas.TileH();
+        const uint64_t tileBytes = TileAtlas2D::kTileBytes;
+        // A tile's linear footprint must be exactly one 64 KB tile, or the format's tile shape
+        // disagrees with what this copy assumes and silence would be the worst outcome.
+        if (uint64_t(tw) * th * texelBytes != tileBytes) {
+            Log("[gradebank] %s: tile %ux%u x %uB != %llu -- dense upload skipped",
+                m_desc.name.c_str(), tw, th, texelBytes,
+                static_cast<unsigned long long>(tileBytes));
+            return;
+        }
+        constexpr uint32_t kBatch = 32;   // 2 MB of staging
+        if (!m_stage.res) {
+            m_stage = gpu.CreateUploadBuffer(tileBytes * kBatch, L"gradebank.tileStage");
+        }
+        const uint32_t rowBytes = tw * texelBytes;
+
+        for (size_t base = 0; base < tiles.size(); base += kBatch) {
+            const size_t n = (std::min)(size_t(kBatch), tiles.size() - base);
+            for (size_t k = 0; k < n; ++k) {
+                const uint32_t packed = tiles[base + k];
+                const uint32_t tx = packed % m_atlas.TilesX();
+                const uint32_t ty = packed / m_atlas.TilesX();
+                uint8_t* dst = m_stage.cpu + k * tileBytes;
+                for (uint32_t r = 0; r < th; ++r) {
+                    const uint32_t sy = ty * th + r;
+                    uint8_t* drow = dst + size_t(r) * rowBytes;
+                    if (sy >= m_desc.height) {   // overhang below the source
+                        memset(drow, 0, rowBytes);
+                        continue;
+                    }
+                    const uint32_t sx = tx * tw;
+                    const uint32_t have = (sx < srcRowTexels)
+                                              ? (std::min)(tw, srcRowTexels - sx)
+                                              : 0u;
+                    if (have) {
+                        memcpy(drow,
+                               src + (size_t(sy) * srcRowTexels + sx) * texelBytes,
+                               size_t(have) * texelBytes);
+                    }
+                    if (have < tw) memset(drow + size_t(have) * texelBytes, 0,
+                                          size_t(tw - have) * texelBytes);
+                }
+            }
+            ID3D12GraphicsCommandList* cl = gpu.BeginUpload();
+            D3D12_RESOURCE_BARRIER b{};
+            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            b.Transition.pResource = m_atlas.Res();
+            b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            b.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
+            cl->ResourceBarrier(1, &b);
+            for (size_t k = 0; k < n; ++k) {
+                const uint32_t packed = tiles[base + k];
+                const D3D12_TILED_RESOURCE_COORDINATE coord{
+                    packed % m_atlas.TilesX(), packed / m_atlas.TilesX(), 0, 0};
+                const D3D12_TILE_REGION_SIZE size{1, FALSE, 0, 0, 0};
+                cl->CopyTiles(m_atlas.Res(), &coord, &size, m_stage.res.Get(), k * tileBytes,
+                              D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE);
+            }
+            std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
+            cl->ResourceBarrier(1, &b);
+            gpu.EndUpload();
+        }
+    }
+
     uint32_t TileW() const { return m_atlas.TileW(); }
     uint32_t TileH() const { return m_atlas.TileH(); }
     ID3D12Resource* Res() const { return m_atlas.Res(); }
@@ -228,6 +308,7 @@ private:
     TilePolicy m_policy;
     std::vector<uint8_t> m_sig;
     std::vector<uint32_t> m_fresh;
+    GpuBuffer m_stage;   // 64 KB-per-tile staging for CPU-sourced fills
 };
 
 // ================================================================================================
