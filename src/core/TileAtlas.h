@@ -81,20 +81,47 @@ constexpr uint8_t Cl2ProductSignature(uint8_t a, uint8_t b) {
 // ================================================================================================
 class TileAtlas2D {
 public:
+    // mipLevels > 1 builds THE CHAIN (M9h). One reserved resource, one SRV, one shader path at
+    // every altitude: zoom changes which tiles are resident, never which code runs. That is the
+    // whole reason the chain lives inside the resource instead of beside it.
     void Init(Gpu& gpu, uint32_t widthTexels, uint32_t heightTexels, DXGI_FORMAT fmt,
-              const wchar_t* name, uint32_t heapChunkTiles = 64);
+              const wchar_t* name, uint32_t heapChunkTiles = 64, uint32_t mipLevels = 1);
 
-    uint32_t TilesX() const { return m_tilesX; }
+    uint32_t TilesX() const { return m_tilesX; }          // mip 0
     uint32_t TilesY() const { return m_tilesY; }
     uint32_t TileW() const { return m_tileW; }
     uint32_t TileH() const { return m_tileH; }
-    bool IsResident(uint32_t tx, uint32_t ty) const {
-        return m_state[ty * m_tilesX + tx] == 1;
-    }
+    bool IsResident(uint32_t tx, uint32_t ty) const { return IsResident(0, tx, ty); }
 
-    void RequestMap(uint32_t tx, uint32_t ty);
-    void RequestUnmap(uint32_t tx, uint32_t ty);
+    void RequestMap(uint32_t tx, uint32_t ty) { RequestMap(0, tx, ty); }
+    void RequestUnmap(uint32_t tx, uint32_t ty) { RequestUnmap(0, tx, ty); }
     void RequestUnmapAll();
+
+    // ---- the chain (M9h) --------------------------------------------------------------------
+    // STANDARD mips are tiled per tile. The PACKED tail -- the mips small enough that D3D12
+    // packs them into shared tiles -- is mapped ONCE at Init and never evicted: it is a handful
+    // of tiles, it is the coarsest description of the whole field, and keeping it resident is
+    // what guarantees a sample can never miss entirely. Misses degrade to blur, never to
+    // garbage, and never to a pop.
+    uint32_t MipCount() const { return m_mipCount; }             // standard + packed
+    uint32_t StandardMips() const { return m_standardMips; }     // per-tile mappable
+    uint32_t TilesX(uint32_t mip) const { return m_mip[mip].tilesX; }
+    uint32_t TilesY(uint32_t mip) const { return m_mip[mip].tilesY; }
+    bool IsResident(uint32_t mip, uint32_t tx, uint32_t ty) const {
+        if (mip >= m_standardMips) return true;                  // packed tail: always mapped
+        const MipInfo& m = m_mip[mip];
+        return (tx < m.tilesX && ty < m.tilesY) && m_state[m.base + ty * m.tilesX + tx] == 1;
+    }
+    void RequestMap(uint32_t mip, uint32_t tx, uint32_t ty);
+    void RequestUnmap(uint32_t mip, uint32_t tx, uint32_t ty);
+
+    // The finest mip resident over a mip-0 tile region, or MipCount()-1 when only the packed
+    // tail covers it. This is the number the shader clamps its LOD to.
+    uint32_t FinestResident(uint32_t tx0, uint32_t ty0) const;
+
+    // R8 residency map, one texel per mip-0 tile, value = FinestResident. Rebuilt by
+    // CommitMappings; UINT32_MAX until a chain is built.
+    uint32_t ResidencyMapSrv() const { return m_resMapSrv; }
 
     // Executes the batched UpdateTileMappings. Newly mapped tile indices (packed ty*tilesX+tx)
     // are appended to outNewlyMapped: their contents are UNDEFINED until cleared.
@@ -124,6 +151,22 @@ private:
     std::vector<uint32_t> m_pendingMap, m_pendingUnmap;
     uint32_t m_tilesX = 0, m_tilesY = 0, m_tileW = 0, m_tileH = 0;
     uint32_t m_srv = UINT32_MAX, m_uav = UINT32_MAX;
+
+    // ---- the chain -------------------------------------------------------------------------
+    struct MipInfo {
+        uint32_t tilesX = 0, tilesY = 0;
+        uint32_t base = 0;           // offset into m_state / m_tilePool
+        uint32_t startTile = 0;      // first tile index within the resource
+    };
+    void Decode(uint32_t i, uint32_t& mip, uint32_t& tx, uint32_t& ty) const;
+    void RebuildResidencyMap(Gpu& gpu);
+
+    std::vector<MipInfo> m_mip;
+    uint32_t m_mipCount = 1, m_standardMips = 1;
+    GpuTexture m_resMap;             // R8_UINT, tilesX(0) x tilesY(0)
+    uint32_t m_resMapSrv = UINT32_MAX;
+    std::vector<uint8_t> m_resMapCpu;
+    bool m_resMapDirty = false;
 };
 
 // ================================================================================================

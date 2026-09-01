@@ -256,3 +256,47 @@ inside is worth carrying. Either alone is wrong.
 And sparsity at a coarse lattice is illusory. The wind bank is 2 MB virtual over 6x6 tiles; it
 was never going to be sparse, and the "calm air stays NULL" comment had been aspirational since
 M6d. Sparsity needs a signature lattice fine enough to express it.
+
+## 14. The chain, and binding banks to a body
+
+**Terminology, corrected.** In D3D12 the object is a **Reserved Resource**
+(`CreateReservedResource`); "tiled resources" survives only as the feature-tier name
+(`D3D12_TILED_RESOURCES_TIER`). The resource is reserved; the tiles are tiles.
+
+`TileAtlas2D` now takes `mipLevels`. One reserved resource, one SRV, one shader path at every
+altitude — **zoom changes which tiles are resident, never which code runs.** No LOD in the
+traditional sense, because there is nothing to pop: no shader variant, no second buffer, no
+branch.
+
+**The packed tail is pinned.** D3D12 packs every mip small enough to share tiles into a single
+tail. That tail is a handful of tiles and it is the coarsest description of the whole field, so
+it is mapped once at Init and never evicted. This is the floor that makes a miss impossible: a
+sample finding nothing finer still lands on real data. Proved cold in `--selftest`, with
+nothing requested at all —
+
+    chain: cold floor -- every region resolves, coarsest 5 of 5 (the pinned tail)
+    chain: mapping one mip-0 tile moved its own region 5 -> 0, far region unchanged at 5
+
+**The residency map** is R8, one texel per mip-0 tile, value = finest resident mip there.
+Samplers clamp LOD to it, so a region streaming in simply gets sharper. It is the same scheme
+`ResidencyManager` already runs for texture tenants; field banks just never had it.
+
+### Binding to a body
+
+A render object (sphere/cube planet) owns a **frame**; the banks bound to it share one
+parameterisation so lookups line up without per-bank math:
+
+| bank | addressed by | carries |
+|---|---|---|
+| 3D | `(face, u, v, radial)` | fills the volume — atmosphere shell, crust to core |
+| 2D | `(face, u, v)` | the surface — colour, bed, water |
+| 1D | `(radial)` or per-face scalar | profiles, scale, per-shell constants |
+
+The cube-sphere gives the shared `(face, u, v)`; the 3D bank simply adds a radial axis, so a
+volume lookup and a surface lookup at the same `(face, u, v)` refer to the same column. That
+alignment is the requirement — the object binds a *set* of banks and every lookup shares
+coordinates.
+
+Multiple GA objects per body (Sky / Water / Earth, §7) then compose without interfering, and
+multiple bodies — each with its own frame and bank set — is the same structure one level up.
+Nested simulations follow from that, not from anything new.

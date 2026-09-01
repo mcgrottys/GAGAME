@@ -542,7 +542,7 @@ bool RunTileSelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
 // ================================================================================ TileAtlas2D
 
 void TileAtlas2D::Init(Gpu& gpu, uint32_t widthTexels, uint32_t heightTexels, DXGI_FORMAT fmt,
-                       const wchar_t* name, uint32_t heapChunkTiles) {
+                       const wchar_t* name, uint32_t heapChunkTiles, uint32_t mipLevels) {
     m_heapChunkTiles = heapChunkTiles;
 
     D3D12_RESOURCE_DESC rd{};
@@ -550,7 +550,7 @@ void TileAtlas2D::Init(Gpu& gpu, uint32_t widthTexels, uint32_t heightTexels, DX
     rd.Width = widthTexels;
     rd.Height = heightTexels;
     rd.DepthOrArraySize = 1;
-    rd.MipLevels = 1;
+    rd.MipLevels = static_cast<UINT16>(mipLevels ? mipLevels : 1);
     rd.Format = fmt;
     rd.SampleDesc.Count = 1;
     rd.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
@@ -559,41 +559,155 @@ void TileAtlas2D::Init(Gpu& gpu, uint32_t widthTexels, uint32_t heightTexels, DX
                                                  nullptr, IID_PPV_ARGS(&m_res)));
     m_res->SetName(name);
 
+    m_mipCount = rd.MipLevels;
     UINT numTiles = 0;
     D3D12_PACKED_MIP_INFO packed{};
     D3D12_TILE_SHAPE shape{};
-    UINT numSub = 1;
-    D3D12_SUBRESOURCE_TILING sub{};
-    gpu.Device()->GetResourceTiling(m_res.Get(), &numTiles, &packed, &shape, &numSub, 0, &sub);
+    UINT numSub = m_mipCount;
+    std::vector<D3D12_SUBRESOURCE_TILING> subs(m_mipCount);
+    gpu.Device()->GetResourceTiling(m_res.Get(), &numTiles, &packed, &shape, &numSub, 0,
+                                    subs.data());
     m_tileW = shape.WidthInTexels;
     m_tileH = shape.HeightInTexels;
-    m_tilesX = sub.WidthInTiles;
-    m_tilesY = sub.HeightInTiles;
-    m_state.assign(static_cast<size_t>(m_tilesX) * m_tilesY, 0);
-    m_tilePool.assign(m_state.size(), 0);
+    // D3D12 packs every mip small enough to share tiles into a single tail. Those are not
+    // per-tile mappable, and their WidthInTiles is reported as 0.
+    m_standardMips = packed.NumStandardMips ? packed.NumStandardMips : m_mipCount;
+    if (m_standardMips > m_mipCount) m_standardMips = m_mipCount;
+
+    m_mip.assign(m_mipCount, MipInfo{});
+    uint32_t base = 0;
+    for (uint32_t m = 0; m < m_mipCount; ++m) {
+        MipInfo& mi = m_mip[m];
+        if (m < m_standardMips) {
+            mi.tilesX = subs[m].WidthInTiles;
+            mi.tilesY = subs[m].HeightInTiles;
+            mi.startTile = subs[m].StartTileIndexInOverallResource;
+        } else {
+            const uint32_t w = (widthTexels >> m) ? (widthTexels >> m) : 1u;
+            const uint32_t h = (heightTexels >> m) ? (heightTexels >> m) : 1u;
+            mi.tilesX = (w + m_tileW - 1) / m_tileW;
+            mi.tilesY = (h + m_tileH - 1) / m_tileH;
+            if (!mi.tilesX) mi.tilesX = 1;
+            if (!mi.tilesY) mi.tilesY = 1;
+            mi.startTile = packed.StartTileIndexInOverallResource;
+        }
+        mi.base = base;
+        if (m < m_standardMips) base += mi.tilesX * mi.tilesY;
+    }
+    m_tilesX = m_mip[0].tilesX;
+    m_tilesY = m_mip[0].tilesY;
+    m_state.assign(base, 0);
+    m_tilePool.assign(base, 0);
 
     m_srv = gpu.CreateSrv(m_res.Get(), fmt);
     m_uav = gpu.CreateTextureUav(m_res.Get(), fmt, D3D12_UAV_DIMENSION_TEXTURE2D);
 
-    Log("[atlas] %S: %ux%u texels = %ux%u tiles of %ux%u (%.0f MB virtual, resident on demand)",
-        name, widthTexels, heightTexels, m_tilesX, m_tilesY, m_tileW, m_tileH,
-        VirtualBytes() / 1048576.0);
+    // ---- PIN THE PACKED TAIL. It is a handful of tiles and it is the coarsest description of
+    // the whole field. Keeping it resident forever is what makes a miss impossible: a sample
+    // that finds nothing finer still lands on real data, so quality degrades to blur and never
+    // to garbage -- and never to a pop, because no code path appears or disappears.
+    if (packed.NumPackedMips > 0 && packed.NumTilesForPackedMips > 0) {
+        const uint32_t n = packed.NumTilesForPackedMips;
+        D3D12_HEAP_DESC hd{};
+        hd.SizeInBytes = static_cast<uint64_t>(n) * kTileBytes;
+        D3D12_HEAP_PROPERTIES hp{};
+        hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+        hd.Properties = hp;
+        hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
+        Com<ID3D12Heap> heap;
+        GA_CHECK(gpu.Device()->CreateHeap(&hd, IID_PPV_ARGS(&heap)));
+        heap->SetName(L"atlas.packedTail");
+        m_heaps.push_back(heap);
+        D3D12_TILED_RESOURCE_COORDINATE c{};
+        c.Subresource = m_standardMips;
+        D3D12_TILE_REGION_SIZE rs{};
+        rs.NumTiles = n;
+        rs.UseBox = FALSE;
+        D3D12_TILE_RANGE_FLAGS rf = D3D12_TILE_RANGE_FLAG_NONE;
+        UINT start = 0, count = n;
+        gpu.Queue()->UpdateTileMappings(m_res.Get(), 1, &c, &rs, heap.Get(), 1, &rf, &start,
+                                        &count, D3D12_TILE_MAPPING_FLAG_NONE);
+    }
+
+    if (m_mipCount > 1) {
+        m_resMapCpu.assign(static_cast<size_t>(m_tilesX) * m_tilesY,
+                           static_cast<uint8_t>(m_mipCount - 1));
+        m_resMap = gpu.CreateTexture2D(m_tilesX, m_tilesY, DXGI_FORMAT_R8_UINT,
+                                       D3D12_RESOURCE_FLAG_NONE,
+                                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+                                       L"atlas.residencyMap");
+        m_resMapSrv = gpu.CreateSrv(m_resMap.res.Get(), DXGI_FORMAT_R8_UINT);
+        gpu.UploadTexture(m_resMap, m_resMapCpu.data(), m_tilesX);
+    }
+
+    Log("[atlas] %S: %ux%u texels = %ux%u tiles of %ux%u, %u mips (%u standard + %u packed, "
+        "tail pinned) (%.0f MB virtual, resident on demand)",
+        name, widthTexels, heightTexels, m_tilesX, m_tilesY, m_tileW, m_tileH, m_mipCount,
+        m_standardMips, m_mipCount - m_standardMips, VirtualBytes() / 1048576.0);
 }
 
-void TileAtlas2D::RequestMap(uint32_t tx, uint32_t ty) {
-    const uint32_t i = ty * m_tilesX + tx;
+// The finest mip actually resident over a mip-0 tile region. Coarser mips cover proportionally
+// more ground, so mip-0 tile (tx0, ty0) lands on (tx0 >> m, ty0 >> m) at mip m.
+uint32_t TileAtlas2D::FinestResident(uint32_t tx0, uint32_t ty0) const {
+    for (uint32_t m = 0; m < m_standardMips; ++m) {
+        if (IsResident(m, tx0 >> m, ty0 >> m)) return m;
+    }
+    return m_mipCount - 1;   // the pinned tail always covers
+}
+
+// The map the SHADER reads: one texel per mip-0 tile, value = finest resident mip there. A
+// sampler clamps its LOD to this, so a region streaming in gets sharper without any code path
+// changing -- which is the whole no-pop contract. Only uploaded when it actually moved.
+void TileAtlas2D::RebuildResidencyMap(Gpu& gpu) {
+    if (m_mipCount <= 1 || m_resMapCpu.empty()) return;
+    bool moved = false;
+    for (uint32_t ty = 0; ty < m_tilesY; ++ty) {
+        for (uint32_t tx = 0; tx < m_tilesX; ++tx) {
+            const uint8_t v = static_cast<uint8_t>(FinestResident(tx, ty));
+            uint8_t& slot = m_resMapCpu[static_cast<size_t>(ty) * m_tilesX + tx];
+            if (slot != v) { slot = v; moved = true; }
+        }
+    }
+    if (moved) gpu.UploadTexture(m_resMap, m_resMapCpu.data(), m_tilesX);
+}
+
+void TileAtlas2D::RequestMap(uint32_t mip, uint32_t tx, uint32_t ty) {
+    if (mip >= m_standardMips) return;   // the packed tail is pinned, never requested
+    const MipInfo& mi = m_mip[mip];
+    if (tx >= mi.tilesX || ty >= mi.tilesY) return;
+    const uint32_t i = mi.base + ty * mi.tilesX + tx;
     if (m_state[i] == 0) {
         m_state[i] = 2;   // pending map
         m_pendingMap.push_back(i);
     }
 }
 
-void TileAtlas2D::RequestUnmap(uint32_t tx, uint32_t ty) {
-    const uint32_t i = ty * m_tilesX + tx;
+void TileAtlas2D::RequestUnmap(uint32_t mip, uint32_t tx, uint32_t ty) {
+    if (mip >= m_standardMips) return;
+    const MipInfo& mi = m_mip[mip];
+    if (tx >= mi.tilesX || ty >= mi.tilesY) return;
+    const uint32_t i = mi.base + ty * mi.tilesX + tx;
     if (m_state[i] == 1) {
         m_state[i] = 3;   // pending unmap
         m_pendingUnmap.push_back(i);
     }
+}
+
+// Flat state index -> (mip, tx, ty). Linear over at most a dozen mips; called only while
+// building mapping batches, never per texel.
+void TileAtlas2D::Decode(uint32_t i, uint32_t& mip, uint32_t& tx, uint32_t& ty) const {
+    for (uint32_t m = m_standardMips; m-- > 0;) {
+        if (i >= m_mip[m].base) {
+            const uint32_t r = i - m_mip[m].base;
+            mip = m;
+            tx = r % m_mip[m].tilesX;
+            ty = r / m_mip[m].tilesX;
+            return;
+        }
+    }
+    mip = 0;
+    tx = i % m_tilesX;
+    ty = i / m_tilesX;
 }
 
 void TileAtlas2D::RequestUnmapAll() {
@@ -614,7 +728,9 @@ void TileAtlas2D::CommitMappings(Gpu& gpu, std::vector<uint32_t>* outNewlyMapped
         std::vector<UINT> starts, counts;
         for (uint32_t i : m_pendingUnmap) {
             if (m_state[i] != 3) continue;
-            coords.push_back({i % m_tilesX, i / m_tilesX, 0, 0});
+            uint32_t mp = 0, cx = 0, cy = 0;
+            Decode(i, mp, cx, cy);
+            coords.push_back({cx, cy, 0, mp});
             sizes.push_back({1, FALSE, 0, 0, 0});
             flags.push_back(D3D12_TILE_RANGE_FLAG_NULL);
             starts.push_back(0);
@@ -664,7 +780,9 @@ void TileAtlas2D::CommitMappings(Gpu& gpu, std::vector<uint32_t>* outNewlyMapped
             const uint32_t heapIdx = slot >> 16;
             if (heapIdx >= batches.size()) batches.resize(m_heaps.size());
             Batch& b = batches[heapIdx];
-            b.coords.push_back({i % m_tilesX, i / m_tilesX, 0, 0});
+            uint32_t mp = 0, cx = 0, cy = 0;
+            Decode(i, mp, cx, cy);
+            b.coords.push_back({cx, cy, 0, mp});
             b.sizes.push_back({1, FALSE, 0, 0, 0});
             b.flags.push_back(D3D12_TILE_RANGE_FLAG_NONE);
             b.starts.push_back(slot & 0xFFFF);
@@ -685,6 +803,7 @@ void TileAtlas2D::CommitMappings(Gpu& gpu, std::vector<uint32_t>* outNewlyMapped
         m_pendingMap.clear();
     }
 
+    RebuildResidencyMap(gpu);
     m_residentList.clear();
     for (uint32_t i = 0; i < m_state.size(); ++i) {
         if (m_state[i] == 1) m_residentList.push_back(i);
@@ -1071,6 +1190,79 @@ bool RunAtlasSelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDi
 
     Log("[atlastest] resident %u tiles = %.2f MB of %.0f MB virtual", atlas.ResidentCount(),
         atlas.ResidentBytes() / 1048576.0, atlas.VirtualBytes() / 1048576.0);
+
+    // ---- M9h: THE CHAIN. The no-pop contract is a claim about the RESOURCE, so it is proved
+    // on the resource rather than argued from the render. Three things must hold, and the
+    // third is the one everything else leans on.
+    {
+        TileAtlas2D chain;
+        chain.Init(gpu, 2048, 2048, DXGI_FORMAT_R16_FLOAT, L"atlastest.chain", 64, 6);
+        bool okC = true;
+
+        // 1. The chain exists and D3D12 split it where the docs say it does.
+        Log("[atlastest] chain: %u mips (%u standard + %u packed)", chain.MipCount(),
+            chain.StandardMips(), chain.MipCount() - chain.StandardMips());
+        if (chain.MipCount() < 2 || chain.StandardMips() == 0) {
+            Log("[atlastest] chain: FAILED -- no usable mip chain");
+            okC = false;
+        }
+
+        // 2. THE FLOOR. With nothing whatsoever requested, every mip-0 region must still
+        // resolve to a real resident mip -- that is the pinned packed tail doing its job, and
+        // it is what makes a miss impossible. If this fails, sampling can hit NULL and the
+        // "degrade to blur, never garbage" promise is empty.
+        uint32_t worst = 0;
+        for (uint32_t ty = 0; ty < chain.TilesY(); ++ty) {
+            for (uint32_t tx = 0; tx < chain.TilesX(); ++tx) {
+                const uint32_t f = chain.FinestResident(tx, ty);
+                if (f > worst) worst = f;
+                if (f >= chain.MipCount()) okC = false;
+            }
+        }
+        Log("[atlastest] chain: cold floor -- every region resolves, coarsest %u of %u %s",
+            worst, chain.MipCount() - 1, (worst == chain.MipCount() - 1) ? "(the pinned tail)"
+                                                                        : "");
+
+        // 3. A fine tile going resident SHARPENS exactly its own region and nothing else --
+        // residency is the only thing that changed, and it is local.
+        const uint32_t before = chain.FinestResident(0, 0);
+        chain.RequestMap(0, 0, 0);
+        chain.CommitMappings(gpu, nullptr);
+        const uint32_t after = chain.FinestResident(0, 0);
+        const uint32_t neigh = chain.FinestResident(chain.TilesX() - 1, chain.TilesY() - 1);
+        if (!(after == 0 && before > 0)) {
+            Log("[atlastest] chain: FAILED -- mapping mip 0 tile (0,0) moved finest %u -> %u",
+                before, after);
+            okC = false;
+        }
+        if (neigh != worst) {
+            Log("[atlastest] chain: FAILED -- a far region changed (%u -> %u) from a local map",
+                worst, neigh);
+            okC = false;
+        }
+        Log("[atlastest] chain: mapping one mip-0 tile moved its own region %u -> %u, far "
+            "region unchanged at %u",
+            before, after, neigh);
+
+        // 4. And it is reversible: unmapping returns that region to the coarser truth without
+        // ever passing through "nothing".
+        chain.RequestUnmap(0, 0, 0);
+        chain.CommitMappings(gpu, nullptr);
+        const uint32_t back = chain.FinestResident(0, 0);
+        if (back != before) {
+            Log("[atlastest] chain: FAILED -- unmap left finest at %u, expected %u", back,
+                before);
+            okC = false;
+        }
+        if (chain.ResidencyMapSrv() == UINT32_MAX) {
+            Log("[atlastest] chain: FAILED -- no residency map for a chained atlas");
+            okC = false;
+        }
+        Log("[atlastest] chain: %s", okC ? "the floor holds, residency is the only variable"
+                                         : "FAILED");
+        pass &= okC;
+    }
+
     Log("[atlastest] ---- %s ----", pass ? "PASS" : "FAIL");
     return pass;
 }
