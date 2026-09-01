@@ -161,6 +161,22 @@ private:
         uint32_t faceDim = 0, mips = 0, packedMips = 0, faces = 6;
         uint32_t srv = UINT32_MAX;
         std::vector<D3D12_SUBRESOURCE_TILING> tilings;   // per subresource (face*mips + mip)
+
+        // M9x: THE FLAT STAMP ARRAY. Want() asks "have I already seen this tile this frame"
+        // about twelve thousand times a frame, and 94% of the answers are yes. Asking an
+        // unordered_map<uint64, shared_ptr> costs a hash, a bucket probe and a pointer chase
+        // into scattered heap -- about 81 ns measured -- to retrieve a fact that fits in four
+        // bytes and whose address is pure arithmetic on (face, mip, x, y).
+        //
+        // So the answer moves into a dense array indexed by exactly that arithmetic. The map
+        // stays: it still owns the Tracked objects and everything the loader, mapper and
+        // evictor do with them. What leaves the map is the HOT QUESTION, which never needed it.
+        //
+        // Encoding: frame * 2 + predicted, so one 32-bit read carries both halves of the skip
+        // test. Zero means never seen, which is why frames are counted from 1.
+        std::vector<uint32_t> stamp;
+        std::vector<uint32_t> stampBase;   // offset of each (face, mip) plane into stamp
+        std::vector<uint32_t> stampW;      // that plane's width in tiles, for the row stride
         TileProviderFn provider;
         // Residency map (base-tile granularity, per face): byte = finest resident mip * 16.
         GpuTexture resMap;
@@ -181,6 +197,15 @@ private:
         uint8_t retries = 0;             // M7w: failed loads retry, then go honestly NULL
         std::vector<uint8_t> data;
     };
+    // Index of one tile in a tenant's flat stamp array. Pure arithmetic -- no hashing, no
+    // indirection, and neighbours in a rect land next to each other in memory, which is the
+    // half of the win the instruction count does not show.
+    static inline size_t StampIndex(const Tenant& t, uint32_t face, uint32_t mip, uint32_t x,
+                                    uint32_t y) {
+        const uint32_t plane = face * t.mips + mip;
+        return size_t(t.stampBase[plane]) + size_t(y) * t.stampW[plane] + x;
+    }
+
     using Key = uint64_t;                // tenant:8 | face:3 | mip:5 | y:24 | x:24
     static Key MakeKey(int tenant, const TileRequest& r) {
         return (static_cast<Key>(tenant) << 56) | (static_cast<Key>(r.face) << 53) |

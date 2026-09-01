@@ -3725,8 +3725,13 @@ int main(int argc, char** argv) {
                                 profMs[k] / n, profHelmMs[k] / nH);
                         }
                         if (globe && walkFrames) {
-                            Log("[rail]   walk: %.0f nodes, %.0f leaves per frame; Want() is "
-                                "%.3f ms of the %.3f ms SetView (%.0f%%)",
+                            // NOT just Want(): the bracket spans the whole leaf EMIT, which
+                            // also carries the window-rect Mercator math (nine CubeDir corners
+                            // with asin/atan2/log/tan each). Naming it "Want()" would credit
+                            // the map for trig it never touched.
+                            Log("[rail]   walk: %.0f nodes, %.0f leaves per frame; leaf emit "
+                                "(Want + window rects) is %.3f ms of the %.3f ms SetView "
+                                "(%.0f%%)",
                                 double(walkNodesAcc) / double(walkFrames),
                                 double(walkLeavesAcc) / double(walkFrames),
                                 double(walkWantNsAcc) / double(walkFrames) / 1e6,

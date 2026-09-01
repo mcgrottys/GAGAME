@@ -119,6 +119,21 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
     gpu.Device()->GetResourceTiling(t.res.Get(), &totalTiles, &packed, &shape, &numSub, 0,
                                     t.tilings.data());
     GA_CHECK(packed.NumPackedMips == 0 ? S_OK : E_UNEXPECTED);
+    // M9x: lay out the flat stamp array now that every plane's tile extent is known.
+    t.stampBase.resize(numSub);
+    t.stampW.resize(numSub);
+    {
+        uint32_t acc = 0;
+        for (UINT i = 0; i < numSub; ++i) {
+            t.stampBase[i] = acc;
+            t.stampW[i] = t.tilings[i].WidthInTiles;
+            acc += t.tilings[i].WidthInTiles * t.tilings[i].HeightInTiles;
+        }
+        t.stamp.assign(acc, 0u);
+        Log("[residency] %S: stamp array %u tiles (%.2f MB) -- Want()'s hot question leaves "
+            "the hash map",
+            name, acc, acc * 4.0 / 1048576.0);
+    }
     Log("[residency] %S: %ux%u x6 %u mips, %u tiles virtual (%.0f MB), tile %ux%u",
         name, faceDim, faceDim, mips, totalTiles, totalTiles / 16.0, shape.WidthInTexels,
         shape.HeightInTexels);
@@ -313,8 +328,16 @@ void ResidencyManager::Want(int tenant, uint32_t face, uint32_t mip, float u0, f
     // transition -- a tile the prefetch asked for and the real view then confirmed would stay
     // flagged speculative and be evicted on the wrong budget. Skipping is only safe when this
     // touch cannot change the flag.
+    // Frames are stamped OFFSET BY ONE so that a zero-initialised array reads as "never seen".
+    // m_frame starts at 0 and is incremented in ProcessQueues, i.e. AFTER this walk -- so on the
+    // very first frame a raw encoding would have made every untouched tile look already-stamped
+    // and skipped the entire frame's wants.
+    const auto kStampFrame = [this] { return m_frame + 1u; };
+    // The stamp this touch would write: frame in the high bits, predicted in bit 0.
+    const uint32_t myStamp = (kStampFrame() << 1) | (predicted ? 1u : 0u);
     {
-        const auto& fine = t.tilings[face * t.mips + mip];
+        const uint32_t plane = face * t.mips + mip;
+        const auto& fine = t.tilings[plane];
         const uint32_t tw = fine.WidthInTiles, th = fine.HeightInTiles;
         const uint32_t x0 = static_cast<uint32_t>((std::max)(0.0f, u0) * tw);
         const uint32_t y0 = static_cast<uint32_t>((std::max)(0.0f, v0) * th);
@@ -322,17 +345,19 @@ void ResidencyManager::Want(int tenant, uint32_t face, uint32_t mip, float u0, f
         const uint32_t y1 = (std::min)(th - 1, static_cast<uint32_t>((std::min)(0.9999f, v1) * th));
         bool allFresh = true;
         for (uint32_t y = y0; y <= y1 && allFresh; ++y) {
-            for (uint32_t x = x0; x <= x1 && allFresh; ++x) {
-                const Key k = MakeKey(tenant, TileRequest{face, mip, x, y});
+            const uint32_t* row = t.stamp.data() + t.stampBase[plane] + size_t(y) * t.stampW[plane];
+            for (uint32_t x = x0; x <= x1; ++x) {
                 ++wantTouches;
-                auto it = m_tracked.find(k);
-                if (it == m_tracked.end() || it->second->lastSeen != m_frame) {
+                const uint32_t s = row[x];
+                // Fresh means this frame AND not a real touch arriving on a speculative tile
+                // -- that transition must still run, or a tile the prefetch asked for and the
+                // view then confirmed stays flagged speculative and is evicted on the wrong
+                // budget.
+                if ((s >> 1) != kStampFrame() || (!predicted && (s & 1u))) {
                     allFresh = false;
-                } else if (!predicted && it->second->predicted) {
-                    allFresh = false;   // the real view confirms a speculative tile: must run
-                } else {
-                    ++wantHits;
+                    break;
                 }
+                ++wantHits;
             }
         }
         if (allFresh) return;
@@ -349,17 +374,28 @@ void ResidencyManager::Want(int tenant, uint32_t face, uint32_t mip, float u0, f
         const uint32_t y1 =
             (std::min)(th - 1, static_cast<uint32_t>((std::min)(0.9999f, v1) * th));
         for (uint32_t y = y0; y <= y1; ++y) {
+            const uint32_t plane = face * t.mips + static_cast<uint32_t>(m);
             for (uint32_t x = x0; x <= x1; ++x) {
                 TileRequest r{face, static_cast<uint32_t>(m), x, y};
-                const Key k = MakeKey(tenant, r);
                 ++wantTouches;
-                auto it = m_tracked.find(k);
-                if (it != m_tracked.end()) {
+                // The stamp answers "already handled this frame" without touching the map at
+                // all. It is written on every path below, so it stays exactly as true as
+                // lastSeen/predicted are -- they remain the authority for eviction; this is a
+                // cache of the one question the walk asks.
+                uint32_t& st = t.stamp[StampIndex(t, face, static_cast<uint32_t>(m), x, y)];
+                if ((st >> 1) == kStampFrame() && !(!predicted && (st & 1u))) {
                     ++wantHits;
-                    it->second->lastSeen = m_frame;
-                    if (!predicted) it->second->predicted = false;
                     continue;
                 }
+                const Key k = MakeKey(tenant, r);
+                auto it = m_tracked.find(k);
+                if (it != m_tracked.end()) {
+                    it->second->lastSeen = m_frame;
+                    if (!predicted) it->second->predicted = false;
+                    st = (kStampFrame() << 1) | (it->second->predicted ? 1u : 0u);
+                    continue;
+                }
+                st = myStamp;
                 auto tr = std::make_shared<Tracked>();
                 tr->tenant = tenant;
                 tr->req = r;
