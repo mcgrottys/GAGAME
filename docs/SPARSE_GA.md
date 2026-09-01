@@ -896,3 +896,83 @@ measurement instead of by argument.
 
 Consumers are **not** switched. That is a separate change, with the solver, the sea shader, the
 water bank and the globe all reading the bed at once.
+
+## 28. The datum fixed at the source, the switch, and nodata through the chain
+
+### The correction went where every consumer sees it
+
+Section 27 found the engine's bed carried a 9.2 cm error wherever ETOPO showed through.
+Correcting it only in the GA adapter would have fixed one bank and left the renderer, the cube,
+the window and every other reader of the height stack still wrong — which is *worse* than being
+consistently wrong, because then the two disagree.
+
+So `EquirectHeightSource` and `WindowHeightSource` take a `datumShiftM` and apply it in
+`Sample()`. `main` derives the link once (`NavdAboveMsl`, from CO-OPS station datums already
+cached on disk), logs its provenance, and hands it to the two ETOPO layers:
+
+    [datum] height stack: MSL -> NAVD88 = -0.092 m, from CO-OPS published datums at Boston
+            (regional, not GEOID18) -- applied to the ETOPO layers at the source
+    L0 noaa.etopo2022    EPSG:4326 equirect, vdatum -0.092 m -> NAVD88
+    L1 noaa.etopo15s.ne  EPSG:4326 window (row 0 N), vdatum -0.092 m -> NAVD88
+
+`kComposeVersion` moved 3 → 4: a datum shift is a paint-math change, so every composed height
+tile repaints once. The GA adapter then *stopped* applying its own link — with the sources
+honest it would have corrected twice — and the bed comparison became direct again at 0.0000 m.
+
+### Nodata, at the texel
+
+Two real bugs, both introduced by the compositing work itself:
+
+**Absence was being written as zero.** `ComposePage` filled uncovered texels with `0.0` — and
+zero is a *legal value* for nearly every field it composes. A bed at 0 m is sea level; a current
+at 0 m/s is slack water. Absence became indistinguishable from data, with no way to recover the
+difference downstream. It now takes a `nodata` parameter, and the bed passes `-9999`,
+`BathyModel`'s own sentinel, so both paths agree on what absence looks like.
+
+**Partial coverage was dragging values toward zero.** `LayeredOver` accumulated from zero, which
+is compositing over *transparent black*: a texel 30% covered came out as `0.3 × value`. It now
+un-premultiplies by accumulated coverage. This does not move the bed — ETOPO covers the globe at
+`w=1`, so the divisor is 1 — it matters exactly where the old form was silently wrong.
+
+### And through the chain
+
+`MipReduce.hlsl` gained a coverage-weighted variant. The plain box average is correct only when a
+null texel *means* zero. The moment a bank carries coverage, averaging four texels of which two
+are absent halves the value and reports it as fact — and the error **compounds upward**, so the
+coarsest mips (the pinned floor, which is what a distant sample actually reads) end up the most
+corrupted. That is backwards from every other error in the system.
+
+Value channels are now weighted by coverage; coverage itself averages plain, because it is the
+fraction of the coarse texel that had data. The velgrad bank declares channel 2 and uses it.
+
+### The switch, done without touching a shader
+
+A paged bank is a `Texture2DArray` and every bed consumer reads a `Texture2D` — but in D3D12
+those are the same resource type, so a `TEXTURE2D` SRV over the array views slice 0 and every
+consumer works untouched.
+
+That is worth more than tidiness. Switching the bed is the highest-blast-radius change in the
+engine — solver, sea shader, churn kernel, water bank, globe — and doing it *without editing a
+shader* means that if anything moves on screen, the bank's **content** is the only possible
+cause. And its content was already proved equal at 0.0000 m across all 2,187,162 texels.
+
+    [bed] consumers bound to the GA sparse bank (slice 0)
+
+### Recordings report their cost
+
+A rail is the only run long enough and varied enough — orbit to helm, every residency regime in
+one take — for frame time to mean anything, and it is exactly the run nobody measures because
+they are watching the pictures.
+
+Percentiles, not a mean: a rail crosses regimes deliberately, so an average describes no moment
+that ever happened. The worst frame's **index** is reported because that is the half that makes
+it actionable — a spike at frame 600 is the 80 km → 7 km descent paging in; a spike at 1100 is
+helm-height water detail, and they have different fixes.
+
+The first measurement immediately caught a comment of mine lying. `dt` spans the whole loop and
+therefore carries the *previous* frame's PNG encode, which at 1600×900 is tens of milliseconds of
+the **recorder's** cost — reporting that as frame time would have slandered the engine. Both
+clocks are kept now: `renderMs` brackets `RenderFrame` alone and judges the engine, `dt` judges
+the capture, and their difference is printed. The per-frame series lands in `metrics.csv` beside
+the frames, because a summary answers *was it smooth* and only the series answers *where did it
+stop being smooth*.
