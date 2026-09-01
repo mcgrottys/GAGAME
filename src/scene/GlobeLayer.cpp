@@ -1,5 +1,7 @@
 #include "scene/GlobeLayer.h"
 
+#include "compose/DomainSource.h"
+
 #include "core/PixEvents.h"
 #include "core/Shader.h"
 
@@ -10,6 +12,118 @@
 using namespace DirectX;
 
 namespace ga {
+
+// ================================================================================================
+//  M9q: a global plane, through the process. GA Load (MemGridLoader over the array GlobeModel
+//  already parsed) -> GA Compose (RasterSource through DomainCompositor, so coverage and the
+//  unit check apply) -> a reserved, paged, mipped GradeBank.
+//
+//  Every mip is COMPOSED at its own rung rather than reduced from the level below. That costs a
+//  few more source reads and buys the thing reduction cannot give: each level asks the source
+//  for its own footprint, so absence is resolved per level instead of being averaged in from
+//  finer texels. (MipReduce's coverage-weighted path exists for banks that must reduce; a bank
+//  built from a source that can answer at any rung should just ask.)
+//
+//  The verification is the same discipline as the bed: compose L0, compare it against the array
+//  the committed texture was uploaded from, and print the worst disagreement. A conversion that
+//  cannot say it matches is not a conversion, it is a rewrite.
+// ================================================================================================
+bool GlobeLayer::BuildPlaneBank(Gpu& gpu, PlaneBank& out, const char* name,
+                                const char* structure, const GeoRef& ref,
+                                std::vector<MemGridLoader::Plane> planes, DXGI_FORMAT fmt,
+                                float nodataFill) {
+    const std::vector<MemGridLoader::Plane> keep = planes;
+    auto ld = std::make_unique<MemGridLoader>(name, structure, ref, std::move(planes));
+    if (!ld->Valid()) {
+        Log("[globe] %s: loader rejected the planes -- not converted", name);
+        return false;
+    }
+    const uint32_t nx = ref.width, ny = ref.height, ch = uint32_t(keep.size());
+    auto ras = std::make_shared<RasterSource>(std::move(ld), 0);
+    if (!ras->Valid()) {
+        Log("[globe] %s: no samples -- not converted", name);
+        return false;
+    }
+    DomainCompositor dc;
+    LevelLadder lad;
+    lad.level0MetersPerTexel = ref.MetersPerTexelX();
+    dc.SetLadder(lad);
+    if (!dc.Add(ras)) return false;   // the unit stage refused it; the log says why
+
+    GradeBankDesc d;
+    d.name = name;
+    d.width = nx;
+    d.height = ny;
+    d.fmt = fmt;
+    d.gradeSig = kG0;
+    d.metersPerTexel = lad.level0MetersPerTexel;
+    d.units = ref.valueUnit;
+    d.range = "";
+    d.mipLevels = 5;
+    d.arraySlices = 1;
+    out.bank = std::make_unique<GradeBank>();
+    out.bank->Init(gpu, d, policy::None());
+    out.bank->ActivateSlice(gpu, 0);
+    out.bank->MapAllLevels(gpu, 0);
+
+    double worst = 0.0;
+    uint32_t levels = 0, coveredL0 = 0, holesL0 = 0;
+    for (uint32_t lvl = 0; lvl < d.mipLevels; ++lvl) {
+        const uint32_t w = (nx >> lvl) ? (nx >> lvl) : 1u;
+        const uint32_t h = (ny >> lvl) ? (ny >> lvl) : 1u;
+        DomainCompositor::PageGeo g;
+        g.dLon = ref.scaleX * double(nx) / double(w);
+        g.dLat = ref.scaleY * double(ny) / double(h);
+        g.lon0 = ref.originX + (ref.centers ? 0.5 : 0.0) * g.dLon;
+        g.lat0 = ref.originY + (ref.centers ? 0.5 : 0.0) * g.dLat;
+        std::vector<float> page, cov;
+        const uint32_t covered =
+            dc.ComposePage(PageAddr{lvl, 0, 0}, g, w, h, ch, page, cov, 0.0, 0.0, nodataFill);
+        if (!covered) continue;
+        if (lvl == 0) {
+            coveredL0 = covered;
+            holesL0 = uint32_t(size_t(w) * h) - covered;
+            for (uint32_t y = 0; y < h; ++y) {
+                for (uint32_t x = 0; x < w; ++x) {
+                    const size_t i = size_t(y) * w + x;
+                    if (cov[i] <= 0.0f) continue;
+                    // A texel is comparable only where EVERY channel retrieved, because that is
+                    // the loader's rule: the ocean model consumes chl, Kd and SPM together, so
+                    // one missing plane substitutes the pure-water limit into ALL of them. A
+                    // per-channel skip is not enough -- it leaves the retrieved channels of a
+                    // partly-missing texel being compared against a substitution that was
+                    // correct, which is what reported 6.0 here. Same statement as the loader's,
+                    // written once more because the check must not have its own opinion.
+                    bool comparable = true;
+                    for (uint32_t c = 0; c < ch && comparable; ++c) {
+                        if (!keep[c].data) continue;   // derived channel: no array of its own
+                        if ((*keep[c].data)[i] <= keep[c].nodataBelow) comparable = false;
+                    }
+                    if (!comparable) continue;
+                    for (uint32_t c = 0; c < ch; ++c) {
+                        if (!keep[c].data) continue;
+                        const double src = double((*keep[c].data)[i]);
+                        worst = (std::max)(worst, std::abs(double(page[i * ch + c]) - src));
+                    }
+                }
+            }
+        }
+        out.bank->UploadLevel(gpu, lvl, page.data(), w * ch * sizeof(float), w, h, 0);
+        ++levels;
+    }
+    if (!levels) {
+        Log("[globe] %s: composed nothing -- not converted", name);
+        out.bank.reset();
+        return false;
+    }
+    out.srv = gpu.CreateSrv(out.bank->Res(), fmt);
+    Log("[globe] %s -> sparse bank: %ux%u x%u ch, %u levels, %u/%u covered at L0 (%u nodata), "
+        "worst |GA - array| = %.6g (%s)",
+        name, nx, ny, ch, levels, coveredL0, nx * ny, holesL0, worst,
+        (worst < 1e-4) ? "equivalent" : "DIVERGENT");
+    return true;
+}
+
 
 namespace {
 
@@ -69,15 +183,24 @@ void GlobeLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSignatu
     const int nx = m_globe->Nx(), ny = m_globe->Ny();
     if (m_globe->WavesNx() > 0 && !m_globe->Hs().empty()) {
         const int wn = m_globe->WavesNx(), wm = m_globe->WavesNy();
-        m_hs = gpu.CreateTexture2D(wn, wm, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_NONE,
-                                   D3D12_RESOURCE_STATE_COPY_DEST, L"globe.hs (gfswave)");
-        gpu.UploadTexture(m_hs, m_globe->Hs().data(), wn * 4);
-        m_hs.srv = gpu.CreateSrv(m_hs.res.Get(), DXGI_FORMAT_R32_FLOAT);
+        // The GFS grids are NODE-centred on 0..360 -- stated here rather than assumed, because
+        // ocean colour below is cell-centred on -180..180 and the two differ by half a texel.
+        // gfswave writes -1 for land, which is a real answer and rides through as the nodata
+        // fill so Globe.hlsl's `hsS >= 0` test keeps working unchanged.
+        GeoRef wref = GeoRef::Declared(4326, CrsKind::Geographic, m_globe->WavesLon1(),
+                                       m_globe->WavesLat1(), m_globe->WavesDLon(),
+                                       -m_globe->WavesDLat(), uint32_t(wn), uint32_t(wm));
+        wref.centers = false;
+        wref.hasNoData = true;
+        wref.noData = -1.0f;
+        wref.valueUnit = "m";
+        BuildPlaneBank(gpu, m_hsB, "globe.hs (gfswave)", "equirect float32 global", wref,
+                       {{&m_globe->Hs(), -0.5f, -1.0f}}, DXGI_FORMAT_R32_FLOAT, -1.0f);
         if (!m_globe->Wind().empty()) {
-            m_wind = gpu.CreateTexture2D(wn, wm, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_NONE,
-                                         D3D12_RESOURCE_STATE_COPY_DEST, L"globe.wind (gfswave)");
-            gpu.UploadTexture(m_wind, m_globe->Wind().data(), wn * 4);
-            m_wind.srv = gpu.CreateSrv(m_wind.res.Get(), DXGI_FORMAT_R32_FLOAT);
+            GeoRef uref = wref;
+            uref.valueUnit = "m/s";
+            BuildPlaneBank(gpu, m_windB, "globe.wind (gfswave)", "equirect float32 global", uref,
+                           {{&m_globe->Wind(), -0.5f, -1.0f}}, DXGI_FORMAT_R32_FLOAT, -1.0f);
         }
     }
     // M9 (docs/ALGEBRA.md "optics"): the water-quality plane. Three retrievals ride up as ONE
@@ -94,41 +217,48 @@ void GlobeLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSignatu
     // upgrade for that texel; pure water is what v1 declares.)
     if (m_globe->OcNx() > 0 && !m_globe->OcChlLog10().empty()) {
         const int on = m_globe->OcNx(), om = m_globe->OcNy();
+        // M9q: the hand-rolled interleave retired. Packing four planes is composition, and
+        // doing it at the call site hard-coded the channel order where nothing declared it --
+        // MemGridLoader now states each plane and its own sentinel. The pure-water fallback is
+        // preserved exactly: an unretrieved texel carries the pure-water limit with alpha 0, so
+        // the hardware lerp still degrades toward clear water at the data's edge.
+        //
+        // Cell-centred on -180..180, unlike the GFS grids above. Half a texel, stated.
         const float nul = m_globe->OcNull();
-        const auto& chl = m_globe->OcChlLog10();
-        const auto& kd = m_globe->OcKd490();
-        const auto& spm = m_globe->OcSpmLog10();
-        std::vector<float> packed(static_cast<size_t>(on) * om * 4);
-        size_t retrieved = 0;
-        for (size_t i = 0; i < static_cast<size_t>(on) * om; ++i) {
-            const bool ok = chl[i] > nul && kd[i] > nul && spm[i] > nul;
-            packed[i * 4 + 0] = ok ? chl[i] : kOcPureChlLog10;
-            packed[i * 4 + 1] = ok ? kd[i] : kOcPureKd490;
-            packed[i * 4 + 2] = ok ? spm[i] : kOcPureSpmLog10;
-            packed[i * 4 + 3] = ok ? 1.0f : 0.0f;
-            retrieved += ok ? 1 : 0;
-        }
-        m_ocean = gpu.CreateTexture2D(on, om, DXGI_FORMAT_R32G32B32A32_FLOAT,
-                                      D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST,
-                                      L"globe.ocean (chl/Kd490/SPM/valid)");
-        gpu.UploadTexture(m_ocean, packed.data(), on * 16);
-        m_ocean.srv = gpu.CreateSrv(m_ocean.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
-        Log("[globe] water optics %dx%d (%s): %.1f%% retrieved, the rest pure water", on, om,
-            m_globe->OcEpoch().c_str(),
-            retrieved * 100.0 / (static_cast<double>(on) * om));
+        GeoRef oref = GeoRef::Declared(4326, CrsKind::Geographic, m_globe->OcLon1(),
+                                       m_globe->OcLat1(), m_globe->OcDLon(),
+                                       -m_globe->OcDLat(), uint32_t(on), uint32_t(om));
+        oref.centers = true;
+        oref.hasNoData = true;
+        oref.noData = nul;
+        // Four channels that mean four different things (log10 chl, m^-1, log10 SPM, a flag),
+        // so the product is declared dimensionless: there is exactly one source, nothing to
+        // blend it against, and claiming a single physical unit for the pack would be a lie.
+        oref.valueUnit = "1";
+        BuildPlaneBank(gpu, m_oceanB, "globe.ocean (chl/Kd490/SPM/valid)",
+                       "equirect float32 global, 4 packed retrievals", oref,
+                       {{&m_globe->OcChlLog10(), nul, kOcPureChlLog10},
+                        {&m_globe->OcKd490(), nul, kOcPureKd490},
+                        {&m_globe->OcSpmLog10(), nul, kOcPureSpmLog10},
+                        MemGridLoader::Plane{nullptr, 0.0f, 0.0f, true}},
+                       DXGI_FORMAT_R32G32B32A32_FLOAT, 0.0f);
+        Log("[globe] water optics %dx%d (%s)", on, om, m_globe->OcEpoch().c_str());
     }
     if (!m_globe->Ice().empty()) {
         const int wn = m_globe->WavesNx(), wm = m_globe->WavesNy();
-        m_ice = gpu.CreateTexture2D(wn, wm, DXGI_FORMAT_R32_FLOAT, D3D12_RESOURCE_FLAG_NONE,
-                                    D3D12_RESOURCE_STATE_COPY_DEST, L"globe.ice (gfs icec)");
-        gpu.UploadTexture(m_ice, m_globe->Ice().data(), wn * 4);
-        m_ice.srv = gpu.CreateSrv(m_ice.res.Get(), DXGI_FORMAT_R32_FLOAT);
+        GeoRef iref = GeoRef::Declared(4326, CrsKind::Geographic, m_globe->WavesLon1(),
+                                       m_globe->WavesLat1(), m_globe->WavesDLon(),
+                                       -m_globe->WavesDLat(), uint32_t(wn), uint32_t(wm));
+        iref.centers = false;
+        iref.valueUnit = "fraction";
+        BuildPlaneBank(gpu, m_iceB, "globe.ice (gfs icec)", "equirect float32 global", iref,
+                       {{&m_globe->Ice(), -1e30f, 0.0f}}, DXGI_FORMAT_R32_FLOAT, 0.0f);
     }
     if (m_globe->CloudsNx() > 0) InitClouds(gpu, sc);
     InitNeAndWind(gpu, sc);
 
     Log("[globe] layer ready (relief %dx%d via composed height cube, waves %s, clouds %s)",
-        nx, ny, m_hs.Valid() ? m_globe->WavesCycle().c_str() : "absent",
+        nx, ny, m_hsB.Valid() ? m_globe->WavesCycle().c_str() : "absent",
         m_cloudReady ? m_globe->CloudsCycle().c_str() : "absent");
 }
 
@@ -1083,9 +1213,9 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
 
     // M9: the water's quality. The optics switch on only when the plane is actually resident
     // -- an absent field must fall back to the M7c constants, not to an unbound descriptor.
-    const bool opticsOn = waterOptics && m_ocean.Valid();
-    m_cb.optU[0] = opticsOn ? m_ocean.srv : UINT32_MAX;
-    m_cb.optU[1] = m_ice.Valid() ? m_ice.srv : UINT32_MAX;
+    const bool opticsOn = waterOptics && m_oceanB.Valid();
+    m_cb.optU[0] = (opticsOn && m_oceanB.Valid()) ? m_oceanB.srv : UINT32_MAX;
+    m_cb.optU[1] = m_iceB.Valid() ? m_iceB.srv : UINT32_MAX;
     m_cb.optU[2] = opticsOn ? 1u : 0u;
     m_cb.optU[3] = 0u;
     m_cb.optA[0] = static_cast<float>(m_globe->OcLat1());
@@ -1097,8 +1227,8 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.optB[2] = kOcDeepGain;
     m_cb.optB[3] = 0.0f;
     m_cb.texIdx[0] = UINT32_MAX;   // was the equirect relief; the composed height cube owns it
-    m_cb.texIdx[1] = m_hs.Valid() ? m_hs.srv : UINT32_MAX;
-    m_cb.texIdx[2] = m_wind.Valid() ? m_wind.srv : UINT32_MAX;
+    m_cb.texIdx[1] = m_hsB.Valid() ? m_hsB.srv : UINT32_MAX;
+    m_cb.texIdx[2] = m_windB.Valid() ? m_windB.srv : UINT32_MAX;
     m_cb.wavesA[0] = static_cast<float>(m_globe->WavesLat1());
     m_cb.wavesA[1] = static_cast<float>(m_globe->WavesLon1());
     m_cb.wavesA[2] = static_cast<float>(1.0 / m_globe->WavesDLat());

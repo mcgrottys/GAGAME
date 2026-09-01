@@ -11,6 +11,8 @@
 #pragma once
 
 #include "compose/Compositor.h"
+#include "core/GradeField.h"
+#include "core/MemGridLoader.h"
 #include "core/Residency.h"
 #include "core/TileAtlas.h"
 #include "render/Camera.h"
@@ -291,8 +293,30 @@ private:
     Com<ID3D12PipelineState> m_pso, m_skyPso;
     // M6i: m_relief and m_ne retired -- the composed height cube streams what they carried
     // (and returns ~90 MB of committed equirect memory to the pool).
-    GpuTexture m_hs, m_wind, m_cloudSrc, m_windSrc;
-    GpuTexture m_ocean, m_ice;   // M9: (log10 chl, Kd490, log10 SPM, valid); ICEC
+    GpuTexture m_cloudSrc, m_windSrc;
+
+    // ---- M9q: THE GLOBAL PLANES, IN THE TREE.
+    //
+    // gfswave Hs and wind, GFS sea ice, and the packed ocean-colour retrieval were four
+    // committed Texture2Ds -- uploaded once, no georeference anything could check, no coverage,
+    // no mip chain that understands absence, and no way into the sparse structure. They are
+    // global field data, which is precisely what the tree is for.
+    //
+    // Each is now MemGridLoader -> RasterSource -> DomainCompositor -> a paged GradeBank, with a
+    // TEXTURE2D view over slice 0 so Globe.hlsl binds them exactly as before. Same drop-in trick
+    // as the bed, and for the same reason: if the picture changes, the bank's CONTENT is the
+    // only thing that can have done it.
+    struct PlaneBank {
+        std::unique_ptr<GradeBank> bank;
+        uint32_t srv = UINT32_MAX;
+        bool Valid() const { return srv != UINT32_MAX; }
+    };
+    PlaneBank m_hsB, m_windB, m_oceanB, m_iceB;
+
+    // Load -> compose -> sparse, and report the worst disagreement with the source array.
+    bool BuildPlaneBank(Gpu& gpu, PlaneBank& out, const char* name, const char* structure,
+                        const GeoRef& ref, std::vector<MemGridLoader::Plane> planes,
+                        DXGI_FORMAT fmt, float nodataFill);
 
     // M6d: the sparse Mv2 wind bank (div, u, v, curl) -- resident where storms live.
     TileAtlas2D m_windBank;
