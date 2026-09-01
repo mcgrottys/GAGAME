@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 
 #include "compose/ColorStackSource.h"
+#include "compose/TileArchive.h"
 #include "compose/TileIndex.h"
 #include "core/TileStream.h"
 #include "compose/ComposeTree.h"
@@ -102,6 +103,7 @@ struct Options {
     bool railZoom = false;            // --rail-zoom DIR: orbit -> inlet imagery zoom -> estuary
     bool framesSet = false;           // an explicit --frames beats a rail default
     uint32_t predictEvery = 3;        // --predict-every N: prefetch-walk cadence (1 = old)
+    bool packTiles = false;           // --pack-tiles: pack the composed cache, then exit
     bool bench = false;               // --bench: fly the rail, capture nothing, time honestly
     std::string mp4;                  // --mp4 PATH: pipe rail frames straight to an encoder
     bool flatBed = false;             // --flat-bed N: constant bed, to A/B bathymetry
@@ -291,6 +293,8 @@ Options ParseArgs(int argc, char** argv) {
         // M9t: fly the rail and measure it, capturing NOTHING. See the note at the timing site
         // for why this is not the same as reading renderMs out of a captured run.
         else if (a == "--bench") o.bench = true;
+        // M9ah: pack every realization's loose tiles into one archive and exit.
+        else if (a == "--pack-tiles") o.packTiles = true;
         else if (a == "--predict-every") o.predictEvery = uint32_t(atoi(next("1").c_str()));
         // M9p: replace the bed with a flat floor at this NAVD height. The A/B against a normal
         // run isolates BATHYMETRY's contribution to the geometry from everything else.
@@ -1497,6 +1501,27 @@ int main(int argc, char** argv) {
     ga::InstallCrashTrace();   // M7v: symbolized stacks on any crash, headless
     try {
         const Options opt = ParseArgs(argc, argv);
+
+        // M9ah: pack the composed cache into per-realization archives and exit. No device, no
+        // scene -- this is a disk-to-disk job. The loose tiles are kept: the archive is derived,
+        // and the compositor keeps writing loose files as it paints, so anything painted after a
+        // pack must still be findable the old way.
+        if (opt.packTiles) {
+            const char* jobs[][2] = {
+                {"earth.color", "cube16k"},
+                {"earth.color", "window_z14_1263360_1538048"},
+                {"earth.color", "window_z17_10168820_12344774"},
+                {"earth.color", "window_z19_40699567_49405858"},
+                {"earth.height", "cube16k"},
+                {"earth.height", "window_z14_1263360_1538048"},
+                {"mars.height", "cube16k"},
+            };
+            uint32_t total = 0;
+            for (const auto& j : jobs) total += TileArchive::Pack(j[0], j[1]);
+            Log("[tilearch] %u tiles packed across %zu realizations", total,
+                sizeof(jobs) / sizeof(jobs[0]));
+            return 0;
+        }
 
         // ---- M0 + M4: the self-test path needs a device and the shader compiler, nothing else.
         // M9h: --load-field -- the plugin path, end to end and standalone. Register a loader
