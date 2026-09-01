@@ -129,7 +129,26 @@ the incumbent (globe 0 px, helm 2 px by 1/255); bench 4.65–4.82 ms vs incumben
 
 ---
 
-## 2. The three rungs, and why deleting them is now the main event
+## 2. The three rungs: DELETED for colour (section 34). Height is next.
+
+Colour is ONE tenant -- `AddTexturePages`, slices 0..5 the cube faces, 6 the z14 page, 7 the
+z17 page, one provider dispatching on the slice, `ComposedColorPages` selecting by containment
+and residency with no fades. `earth.height` still has TWO tenants (cube + z14 window) with the
+old hand-off in `ComposedHeight`; give it the same treatment -- `AddTexturePages(..., 7)`, R16F,
+the height provider dispatching on slice, and the pages path in the height shader. That is the
+"1 Sparse Global Height GA" line of the user's spec.
+
+DirectStorage is ON by default and PROVEN: helm 400 and globe 200 frames are 0 pixels against
+the upload ring, after the four fixes in section 34. Every earlier "not pixel-equal" was the
+slot race, not streaming timing.
+
+THE ACCEPTANCE IMAGE the user supplied: New England from altitude, uniform resolution across
+land and sea, the SEAFLOOR VISIBLE THROUGH THE WATER with its own relief and colour, no haze.
+`synth.bed` is a classifier; the seafloor needs to be an INGESTED texture tree (bathymetry-
+derived shading + sediment colour) composed under the land tree. That, and the height pages, are
+the two builds that move the picture toward the image.
+
+### (history) The three rungs, and why deleting them was the main event
 
 `colorCubeT` (cube 16k), `winTenant` (Mercator z14 window), `detTenant` (z17 detail window) are
 three hand-picked pages of a ladder nobody wrote down as a ladder, with a **64× resolution cliff**
@@ -197,7 +216,8 @@ the unlit version.
 | `--wireframe` / `--dump-both` | geometry check |
 | `--flat-bed N` | constant bed at N m NAVD — A/B what bathymetry does to the MESH |
 | `--pack-tiles` | pack the composed cache into `.gaa` archives, then exit |
-| `--no-direct-storage` | the upload ring for every tile. NVMe→GPU reads are the **default** (§33: pixel-identical through the packed trees) |
+| `--no-direct-storage` | the upload ring for every tile. NVMe→GPU reads are the **default**, and proven: helm 400 / globe 200 frames are 0 px against the ring (§34) |
+| `--ds-serial` | diagnostic: one DirectStorage batch in flight at a time |
 | `--color-trees` | colour through the per-source trees (**off by default**) |
 | `--tree-audit N` | the megatexture tree vs the incumbent, N tiles per realization, exit. Skips tiles the incumbent has not repainted from today's stack |
 | `--warm-trees` | compose every address of the tree regardless, no comparison. **This is the warm-up**; ~15 min from cold for 21.5k addresses |

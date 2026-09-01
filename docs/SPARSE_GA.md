@@ -1453,3 +1453,59 @@ through the `min`/`max` macros — guarded with `NOMINMAX` and `#undef` in both 
 **DirectStorage is the default** as of the next commit — the user's call on the pixel-identical
 helm still. `--no-direct-storage` restores the upload ring for an A/B. A tile not yet packed
 takes the ring until `--pack-trees` runs again; nothing is wrong, it is just slower.
+
+## 34. No insets: one colour page tenant, and the DirectStorage race that hid behind them
+
+*"I swear you are using a separate inset texture in the renderer."* Correct. Three colour
+textures — the 16k cube, the z14 window, the z17 detail inset — with hand-off fades in
+`Compose.hlsli`. The megatexture tree fed all three, but they were three GPU textures, three
+budgets and shader seams: the rung ladder §2 of the handoff had named for deletion.
+
+### One tenant
+
+`AddTexturePages` creates one reserved `Texture2DArray` whose slices are pages of one ladder —
+0..5 the cube faces, 6 the z14 page, 7 the z17 page. One SRV, one residency map, one budget, one
+provider dispatching on the slice. Slices 0..5 are also viewed as a `TextureCubeArray` (bindless
+`space6`) so the globe keeps seamless cube filtering.
+
+`ComposedColorPages` selects by **containment and residency**: every page is the same
+megatexture at a different ground resolution, so the page whose resident mip gives the finest
+texel at the pixel is the answer, and where two pages are resident at the same resolution they
+hold the same pixels. There is nothing to fade between. `hand` and `finer` are gone.
+
+    [residency] earth.color (megatexture pages): 16384x16384 x8 8 mips, 174760 tiles virtual
+
+### The race
+
+The globe then came up green and magenta — only with DirectStorage. Parking one archive at a
+time named the bytes: height tiles in colour, then GIS mask tiles, then seafloor tiles, then
+*oceans next to mountains* — right bytes, wrong coordinates. Four things, found in that order:
+
+1. `ReleaseCompleted` closed **every** open file when **any** fence completed; reads queued
+   behind a later fence read from closed files. Files now travel with their batch's fence.
+2. The landing buffer was reset every frame, reusing slot 0 while last frame's slot 0 was still
+   waiting on its fence. Slots are a free list.
+3. **A drained slot was freed when its `CopyTiles` was recorded, not when it executed.** The
+   same frame's `MapAndFill` gave the slot to a new read, DirectStorage wrote it at once on its
+   own queue, and the later-executing copy put the new tile's bytes into the old coordinate.
+   Slots retire on a 4-frame delay — the overlap discipline the upload ring and eviction already
+   keep. This was the one. Every DirectStorage comparison since M9ai had shown 1.8–9% "not
+   pixel-equal, and equality is not the right test": it was this bug, not streaming timing.
+4. Nothing had ever asked DirectStorage whether a read failed. `RetrieveErrorRecord` is called per
+   completed batch. Zero failures here — which is what let the race be found instead of blamed on
+   the disk.
+
+Archive payloads are 64 KB-aligned as well (kept; DirectStorage prefers it; it was not the bug).
+
+### Measured
+
+    helm,  400 frames, DirectStorage vs upload ring    0 of 1,440,000 pixels
+    globe, 200 frames, DirectStorage vs upload ring    0 of 1,440,000 pixels
+
+### The acceptance image
+
+The user supplied the target: New England from altitude, one uniform resolution across land and
+sea, **the seafloor visible through the water with its own relief and colour**, no haze. That is
+the composite doing its job — land tree over a *real* seafloor tree, gated by the survey — and it
+says plainly that `synth.bed` (a classifier over the height stack) is a placeholder for an
+ingested seafloor texture tree. That is the next tree.

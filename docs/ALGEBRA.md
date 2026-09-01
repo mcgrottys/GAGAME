@@ -886,3 +886,11 @@ model (or a textbook) would hold → what this project measured → the law now 
 - The hypervisor (`--trace lat,lon`) — one sample walked through every edge on the CPU
   with AST annotations; `--lens waterdata/authority/...` — fields as color;
   `--dump-fibers` — the bank planes with declared ranges; PIX events per AST node.
+19. **Recording a copy is not executing it.** Prior: once `CopyTiles` from a landing slot is
+    recorded, the slot is drained and may be reused. Measured (M9ap): the copy executes when the
+    frame's list runs; a slot handed to DirectStorage in the same frame is overwritten first,
+    and the copy lands the *new* tile's bytes at the *old* coordinate — "oceans next to
+    mountains". Every DirectStorage-vs-ring difference since M9ai (1.8–9%, written off as
+    "streaming timing") was this. Law: anything a recorded command still reads retires on the
+    frame-overlap delay the upload ring and eviction already keep; and **ask the transport
+    whether it failed** (`RetrieveErrorRecord`) before reasoning about what it delivered.
