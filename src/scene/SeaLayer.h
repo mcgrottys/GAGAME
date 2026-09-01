@@ -12,6 +12,7 @@
 #include "compose/Compositor.h"
 #include "core/OceanFft.h"
 #include "core/TileAtlas.h"
+#include "core/GradeField.h"
 #include "scene/Layer.h"
 #include "sim/BathyModel.h"
 #include "sim/CurrentModel.h"
@@ -252,7 +253,12 @@ private:
     bool m_shadowBuilt = false;
     double m_simUnix = 0;
 
-    TileAtlas2D m_churn;
+    // M9h: the first bank ported to GradeBank. Driven MANUALLY -- the churn policy is
+    // hysteretic (a tile stays warm several decay constants past the last breaking, or the
+    // memory this field exists to carry is deleted the instant the surf stops) and resets
+    // wholesale on a time scrub. GradeBank carries the descriptor, the grade signature and the
+    // resident-list discipline; the loop below stays honest about its own state.
+    GradeBank m_churn;
     Com<ID3D12RootSignature> m_churnRs;
     Com<ID3D12PipelineState> m_churnClear, m_churnUpdate;
     uint32_t m_churnTable = UINT32_MAX;    // [t1 chop deriv, t2 swe uv, t3 bathy, u0 churn]

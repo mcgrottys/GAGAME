@@ -26,9 +26,23 @@ void SeaLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
 }
 
 void SeaLayer::InitChurn(Gpu& gpu, ShaderCompiler& sc) {
-    m_churn.Init(gpu, static_cast<uint32_t>(kChurnDomainM / kChurnTexelM),
-                 static_cast<uint32_t>(kChurnDomainM / kChurnTexelM), DXGI_FORMAT_R16_FLOAT,
-                 L"sea.churn (sparse stateful G0 bank)");
+    {
+        // M9h: the bank as DATA. Aeration is one scalar, so grade 0 -- and saying so is what
+        // lets a derived field ask the Cayley closure where a product with it can be non-zero.
+        GradeBankDesc d;
+        d.name = "sea.churn (sparse stateful G0 bank)";
+        d.width = static_cast<uint32_t>(kChurnDomainM / kChurnTexelM);
+        d.height = d.width;
+        d.fmt = DXGI_FORMAT_R16_FLOAT;
+        d.gradeSig = kG0;
+        d.metersPerTexel = kChurnTexelM;
+        d.vNorth = true;
+        d.units = "0..1 aeration";
+        d.range = "0..1";
+        // policy::None(): this bank is driven by UpdateChurnResidency, not by GradeBank::Update.
+        // Declaring an unused policy that lied about the residency would be worse than none.
+        m_churn.Init(gpu, d, policy::None());
+    }
     m_lastActive.assign(static_cast<size_t>(m_churn.TilesX()) * m_churn.TilesY(), -1.0e18);
 
     // Root signature: b0 CBV, t0 root SRV (tile list from the frame arena), table
