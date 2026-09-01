@@ -40,7 +40,9 @@ void Renderer::CreateRootSignature() {
     // would come back as a normalized fraction, so a level-3 map would sample as 0.0118 and the
     // clamp would silently do nothing.
     // t0, space5 (M9j): the heap as Texture2DArray -- paged GA banks, whose slices are pages.
-    D3D12_DESCRIPTOR_RANGE1 ranges[5]{};
+    // t0, space6 (M9ap): the heap as TextureCubeArray -- slices 0..5 of the colour PAGE
+    // tenant viewed as a cube, so the globe keeps seamless cube filtering from an array.
+    D3D12_DESCRIPTOR_RANGE1 ranges[6]{};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
     ranges[0].NumDescriptors = UINT_MAX;   // unbounded; requires resource binding tier 3
     ranges[0].BaseShaderRegister = 0;
@@ -55,6 +57,8 @@ void Renderer::CreateRootSignature() {
     ranges[3].RegisterSpace = 4;
     ranges[4] = ranges[0];
     ranges[4].RegisterSpace = 5;
+    ranges[5] = ranges[0];
+    ranges[5].RegisterSpace = 6;
 
     D3D12_ROOT_PARAMETER1 params[5]{};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
@@ -71,7 +75,7 @@ void Renderer::CreateRootSignature() {
     params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
     params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[3].DescriptorTable.NumDescriptorRanges = 5;
+    params[3].DescriptorTable.NumDescriptorRanges = 6;
     params[3].DescriptorTable.pDescriptorRanges = ranges;
     params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 

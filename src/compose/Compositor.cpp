@@ -680,15 +680,26 @@ void FillComposedCb(ComposedSurfaceCb& cb, const ResidencyManager* rm, int color
                     const double east[3], const double up[3], const double north[3],
                     bool stencilOverlay, uint32_t gisWinSrv, uint32_t gisGlobSrv,
                     int detailWin, const double* detOrgPx, int detailZ,
-                    uint32_t editMaskSrv, const float* editBox) {
+                    uint32_t editMaskSrv, const float* editBox, uint32_t winSlice,
+                    uint32_t detSlice) {
     const bool cubeOn = rm && colorCube >= 0;
     const bool winOn = rm && window >= 0;
     const bool hgtOn = rm && heightCube >= 0;
     const bool hgtWinOn = rm && heightWindow >= 0;
-    cb.u[0] = cubeOn ? rm->TextureSrv(colorCube) : UINT32_MAX;
-    cb.u[1] = cubeOn ? rm->ResidencySrv(colorCube) : UINT32_MAX;
-    cb.u[2] = winOn ? rm->TextureSrv(window) : UINT32_MAX;
-    cb.u[3] = winOn ? rm->ResidencySrv(window) : UINT32_MAX;
+    // M9ap: the pages path. One tenant; the cube views cover slices 0..5, the array view
+    // carries the Mercator pages. The old window/detail SRVs are left unset so nothing can
+    // read a second texture by accident.
+    const bool pages = cubeOn && winOn && window == colorCube && winSlice != UINT32_MAX;
+    cb.u5[0] = pages ? rm->TextureSrv(colorCube) : UINT32_MAX;
+    cb.u5[1] = pages ? rm->ResidencySrv(colorCube) : UINT32_MAX;
+    cb.u5[2] = pages ? winSlice : UINT32_MAX;
+    cb.u5[3] = pages ? detSlice : UINT32_MAX;
+    cb.u[0] = cubeOn ? (pages ? rm->TextureSrvCube(colorCube) : rm->TextureSrv(colorCube))
+                     : UINT32_MAX;
+    cb.u[1] = cubeOn ? (pages ? rm->ResidencySrvCube(colorCube) : rm->ResidencySrv(colorCube))
+                     : UINT32_MAX;
+    cb.u[2] = (winOn && !pages) ? rm->TextureSrv(window) : UINT32_MAX;
+    cb.u[3] = (winOn && !pages) ? rm->ResidencySrv(window) : UINT32_MAX;
     cb.u2[0] = hgtOn ? rm->TextureSrv(heightCube) : UINT32_MAX;
     cb.u2[1] = hgtOn ? rm->ResidencySrv(heightCube) : UINT32_MAX;
     cb.u2[2] = hgtWinOn ? rm->TextureSrv(heightWindow) : UINT32_MAX;
@@ -719,8 +730,8 @@ void FillComposedCb(ComposedSurfaceCb& cb, const ResidencyManager* rm, int color
     // M7f: the DETAIL color window (z17) -- the third rung of the one ladder -- plus the
     // fine edit mask (surveyed structures at ~1 m over their own bbox).
     const bool detOn = rm && detailWin >= 0 && detOrgPx;
-    cb.u4[0] = detOn ? rm->TextureSrv(detailWin) : UINT32_MAX;
-    cb.u4[1] = detOn ? rm->ResidencySrv(detailWin) : UINT32_MAX;
+    cb.u4[0] = (detOn && !pages) ? rm->TextureSrv(detailWin) : UINT32_MAX;
+    cb.u4[1] = (detOn && !pages) ? rm->ResidencySrv(detailWin) : UINT32_MAX;
     cb.u4[2] = editMaskSrv;
     cb.u4[3] = UINT32_MAX;
     cb.det[0] = cb.det[1] = cb.det[2] = 0.0f;

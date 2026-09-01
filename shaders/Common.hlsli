@@ -77,6 +77,7 @@ Texture2D<uint> gTexU[] : register(t0, space4);
 // source owns the pixel.
 Texture2DArray gTexArr[] : register(t0, space5);
 Texture3D gTex3D[] : register(t0, space2);    // M6c: the SAME heap as volumes (cloud banks)
+TextureCubeArray gTexCubeArr[] : register(t0, space6);   // M9ap: slices 0..5 of a page tenant
 TextureCube gTexCube[] : register(t0, space3);   // M6e: streamed planet surfaces + their
                                                  // residency-map cubes (read only cube slots)
 
@@ -199,7 +200,9 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
     float4 gCsR2; \
     uint4  gCsU4;   /* M7f: DETAIL color window (z17) SRV + residency, fine edit mask SRV */ \
     float4 gCsDet;  /* detail uv from window uv: offset xy, scale z; w = fine edit mask on */ \
-    float4 gCsEd;   /* fine edit mask box in window uv: offset xy, scale zw */
+    float4 gCsEd;   /* fine edit mask box in window uv: offset xy, scale zw */ \
+    uint4  gCsU5;   /* M9ap PAGES: colour array SRV, array residency SRV, window slice, \
+                       detail slice. x == ~0 means the old three-tenant path. */
 
 // The geometric-algebra toolkit lives in GA.hlsli (M3 moved it out so compute shaders with
 // their own root signatures can share it). Note for surface fields: the grade-2 part of

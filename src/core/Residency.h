@@ -110,6 +110,20 @@ public:
                      TileProviderFn provider) {
         return AddTextureInternal(gpu, name, dim, fmt, std::move(provider), 1);
     }
+    // M9ap: ONE TENANT, N PAGES. The planet's colour as a single reserved Texture2DArray whose
+    // slices are pages of one ladder: 0..5 the cube faces, 6.. the Mercator pages. One SRV, one
+    // residency map, one budget, one provider that dispatches on the slice. The three inset
+    // tenants this replaces were three pages of a ladder nobody had written down as a ladder,
+    // with hand-off fades in the shader that each rung needed to know about its neighbour to
+    // compute. A page's slice IS its `face` in every TileRequest. Slices 0..5 are also viewed
+    // as a TextureCube so the globe keeps hardware-seamless cube filtering.
+    int AddTexturePages(Gpu& gpu, const wchar_t* name, uint32_t dim, DXGI_FORMAT fmt,
+                        TileProviderFn provider, uint32_t pages) {
+        return AddTextureInternal(gpu, name, dim, fmt, std::move(provider), pages);
+    }
+    // The cube views over slices 0..5 of a page tenant (UINT32_MAX for other tenants).
+    uint32_t TextureSrvCube(int tenant) const { return m_tenants[tenant].srvCube; }
+    uint32_t ResidencySrvCube(int tenant) const { return m_tenants[tenant].resMapSrvCube; }
 
     // Tiles known but not yet mapped (seen + loading + in flight). The warm-cache loop drains
     // this to zero before the camera ever moves.
@@ -122,7 +136,7 @@ public:
     // the GPU residency clamp samples (byte = finest resident mip * 16).
     uint32_t ResidentMipAt(int tenant, uint32_t face, float u, float v) const {
         const Tenant& t = m_tenants[tenant];
-        if (face >= t.faces || t.resCpu[face].empty() || t.resMap.width == 0) return 255u;
+        if (face >= t.resCpu.size() || t.resCpu[face].empty() || t.resMap.width == 0) return 255u;
         const uint32_t rdim = t.resMap.width;
         uint32_t x = static_cast<uint32_t>(u * rdim);
         uint32_t y = static_cast<uint32_t>(v * rdim);
@@ -213,6 +227,7 @@ public:
     // baseline patchy, ring uniformly sharp; timing a wash) and made the DEFAULT by the user.
     // --no-ring-loads is the A/B.
     bool ringLoads = true;
+    bool dsSerial = false;   // M9ap diagnostic: one DirectStorage batch in flight at a time
     uint32_t ringHeld = 0;       // requests deferred by the gate, cumulative
     uint32_t ringHeldFrame = 0;  // ...and this frame alone
 
@@ -223,6 +238,7 @@ private:
         DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
         uint32_t faceDim = 0, mips = 0, packedMips = 0, faces = 6;
         uint32_t srv = UINT32_MAX;
+        uint32_t srvCube = UINT32_MAX;   // M9ap: page tenants: slices 0..5 as a cube
         std::vector<D3D12_SUBRESOURCE_TILING> tilings;   // per subresource (face*mips + mip)
 
         // M9x: THE FLAT STAMP ARRAY. Want() asks "have I already seen this tile this frame"
@@ -244,7 +260,8 @@ private:
         // Residency map (base-tile granularity, per face): byte = finest resident mip * 16.
         GpuTexture resMap;
         uint32_t resMapSrv = UINT32_MAX;
-        std::vector<uint8_t> resCpu[6];
+        uint32_t resMapSrvCube = UINT32_MAX;   // M9ap
+        std::vector<std::vector<uint8_t>> resCpu;   // per face/page
         bool resDirty = false;
         D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COPY_DEST;
         // M9af: what this tenant's realization already holds on the NVMe. Borrowed; main owns
@@ -326,7 +343,20 @@ private:
     TileStream* m_stream = nullptr;
     std::vector<InFlightRead> m_inFlightReads;
     uint64_t m_directTiles = 0, m_ringTiles = 0, m_directLanded = 0;
-    uint32_t m_stageUsed = 0;
+    uint32_t m_stageUsed = 0;   // (unused since M9ap; the free list below owns the slots)
+    // M9ap: landing slots are a FREE LIST, returned only after the CopyTiles that drains them
+    // has been recorded. The previous "reset every frame" reused slot 0 while last frame's
+    // read into slot 0 was still waiting for its fence -- a busy queue wrote one tile's bytes
+    // into another's slot, and the globe came up green and magenta.
+    std::vector<uint32_t> m_stageFree;
+    bool m_stageInit = false;
+    // M9ap: a drained slot is RETIRED, not freed. The CopyTiles that drains it is only
+    // RECORDED when the batch completes; it executes when the frame's command list runs, and
+    // DirectStorage would happily overwrite the slot before then. So a slot returns to the
+    // free list kStageRetireFrames later -- the same overlap discipline the upload ring and
+    // eviction already keep. Freeing on record put a NEW tile's bytes into an OLD coordinate.
+    static constexpr uint32_t kStageRetireFrames = 4;
+    std::deque<std::pair<uint32_t, std::vector<uint32_t>>> m_stageRetire;   // (frame, slots)
     bool m_directLogged = false;
 public:
     uint64_t DirectTiles() const { return m_directTiles; }

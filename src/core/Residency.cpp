@@ -160,11 +160,13 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
             "the hash map",
             name, acc, acc * 4.0 / 1048576.0);
     }
-    Log("[residency] %S: %ux%u x6 %u mips, %u tiles virtual (%.0f MB), tile %ux%u",
-        name, faceDim, faceDim, mips, totalTiles, totalTiles / 16.0, shape.WidthInTexels,
+    Log("[residency] %S: %ux%u x%u %u mips, %u tiles virtual (%.0f MB), tile %ux%u",
+        name, faceDim, faceDim, faces, mips, totalTiles, totalTiles / 16.0, shape.WidthInTexels,
         shape.HeightInTexels);
 
-    // Whole-chain SRV (cube for 6 faces, plain 2D for a window).
+    // Whole-chain SRV: cube for 6 faces, plain 2D for a window, Texture2DArray for a page
+    // tenant -- which ALSO gets a cube view over slices 0..5 (M9ap), so the globe keeps the
+    // hardware's seamless cube filtering while the Mercator pages ride the array view.
     t.srv = gpu.SrvHeap().Alloc();
     D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
@@ -172,15 +174,31 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
     if (faces == 6) {
         sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
         sv.TextureCube.MipLevels = mips;
-    } else {
+    } else if (faces == 1) {
         sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
         sv.Texture2D.MipLevels = mips;
+    } else {
+        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+        sv.Texture2DArray.MipLevels = mips;
+        sv.Texture2DArray.ArraySize = faces;
     }
     gpu.Device()->CreateShaderResourceView(t.res.Get(), &sv, gpu.SrvHeap().Cpu(t.srv));
+    if (faces > 6) {
+        t.srvCube = gpu.SrvHeap().Alloc();
+        D3D12_SHADER_RESOURCE_VIEW_DESC cv{};
+        cv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        cv.Format = fmt;
+        cv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+        cv.TextureCubeArray.MipLevels = mips;
+        cv.TextureCubeArray.First2DArrayFace = 0;
+        cv.TextureCubeArray.NumCubes = 1;
+        gpu.Device()->CreateShaderResourceView(t.res.Get(), &cv, gpu.SrvHeap().Cpu(t.srvCube));
+    }
 
     // Residency map: R8 at base-tile granularity, initialized to "coarsest only".
     const uint32_t rw = t.tilings[0].WidthInTiles, rh = t.tilings[0].HeightInTiles;
     const uint32_t rdim = (std::max)(rw, rh);
+    t.resCpu.assign(faces, std::vector<uint8_t>());
     for (uint32_t f = 0; f < faces; ++f) t.resCpu[f].assign(rdim * rdim, (mips - 1) * 16);
     {
         D3D12_RESOURCE_DESC md{};
@@ -208,12 +226,28 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
         if (faces == 6) {
             rv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBE;
             rv.TextureCube.MipLevels = 1;
-        } else {
+        } else if (faces == 1) {
             rv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
             rv.Texture2D.MipLevels = 1;
+        } else {
+            rv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+            rv.Texture2DArray.MipLevels = 1;
+            rv.Texture2DArray.ArraySize = faces;
         }
         gpu.Device()->CreateShaderResourceView(t.resMap.res.Get(), &rv,
                                                gpu.SrvHeap().Cpu(t.resMapSrv));
+        if (faces > 6) {
+            t.resMapSrvCube = gpu.SrvHeap().Alloc();
+            D3D12_SHADER_RESOURCE_VIEW_DESC cv{};
+            cv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            cv.Format = DXGI_FORMAT_R8_UNORM;
+            cv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
+            cv.TextureCubeArray.MipLevels = 1;
+            cv.TextureCubeArray.First2DArrayFace = 0;
+            cv.TextureCubeArray.NumCubes = 1;
+            gpu.Device()->CreateShaderResourceView(t.resMap.res.Get(), &cv,
+                                                   gpu.SrvHeap().Cpu(t.resMapSrvCube));
+        }
         t.resDirty = true;
     }
 
@@ -563,6 +597,16 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
                     static_cast<unsigned long long>(m_directLanded),
                     static_cast<unsigned long long>(it->fence));
             }
+            // Every slot of this batch is drained by the copies just RECORDED. They execute when
+            // this frame's list runs, so the slots retire and come back kStageRetireFrames
+            // later -- never in time for this frame's MapAndFill to hand them out again.
+            {
+                std::vector<uint32_t> slots;
+                for (auto& tile : it->tiles) {
+                    slots.push_back(static_cast<uint32_t>(tile->stageOffset / 65536ull));
+                }
+                m_stageRetire.push_back({m_frame, std::move(slots)});
+            }
             m_stream->ReleaseCompleted(it->fence);
             it = m_inFlightReads.erase(it);
         }
@@ -868,13 +912,25 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
         // command list is still being recorded.
         // ---- M9ai: the read lands in a DEVICE buffer; the swizzle stays on the GPU where the
         // format requires it, and happens next frame when the fence says the bytes arrived.
-        if (tile->loc.Valid() && m_stream && m_stream->Available() &&
-            m_stageUsed < TileStream::kStageSlots) {
-            const uint64_t slotOff = uint64_t(m_stageUsed) * 65536ull;
+        if (!m_stageInit) {
+            m_stageInit = true;
+            for (uint32_t s = TileStream::kStageSlots; s-- > 0;) m_stageFree.push_back(s);
+        }
+        while (!m_stageRetire.empty() &&
+               m_stageRetire.front().first + kStageRetireFrames <= m_frame) {
+            for (uint32_t s : m_stageRetire.front().second) m_stageFree.push_back(s);
+            m_stageRetire.pop_front();
+        }
+        // DIAGNOSTIC (M9ap): dsSerial allows one DirectStorage batch in flight at a time; a tile
+        // that would overlap a pending batch takes the ring instead.
+        if (tile->loc.Valid() && m_stream && m_stream->Available() && !m_stageFree.empty() &&
+            !(dsSerial && !m_inFlightReads.empty())) {
+            const uint32_t slot = m_stageFree.back();
+            const uint64_t slotOff = uint64_t(slot) * 65536ull;
             if (m_stream->EnqueueToBuffer(tile->loc.path, tile->loc.offset, tile->loc.size,
                                           slotOff)) {
+                m_stageFree.pop_back();
                 tile->stageOffset = slotOff;
-                ++m_stageUsed;
                 direct.push_back(tile);
                 ++m_directTiles;
                 continue;
@@ -896,8 +952,6 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
         f.tiles = std::move(direct);
         m_inFlightReads.push_back(std::move(f));
     }
-    m_stageUsed = 0;   // the landing buffer is reused each frame; in-flight slots are read by
-                       // the NEXT frame's CopyTiles before anything overwrites them
     for (auto& t : m_tenants) {
         D3D12_RESOURCE_BARRIER b{};
         b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;

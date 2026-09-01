@@ -100,6 +100,9 @@ public:
                      double detOrgPxX = 0.0, double detOrgPxY = 0.0) {
         m_colorT = colorCube;
         m_winT = window;
+        const bool pages = colorCube >= 0 && window == colorCube;
+        m_winFace = pages ? 6u : 0u;
+        m_detFace = pages ? 7u : 0u;
         m_hgtT = heightCube;
         m_hgtWinT = heightWindow;
         m_detOrg[0] = orgPxX;
@@ -375,6 +378,8 @@ private:
     ResidencyManager* m_res = nullptr;
     int m_surfT = -1, m_normT = -1;
     int m_colorT = -1, m_winT = -1, m_hgtT = -1, m_hgtWinT = -1;
+    // M9ap: pages mode -- window == colorT and these are its slices (6, 7). Otherwise 0.
+    uint32_t m_winFace = 0, m_detFace = 0;
     uint32_t m_gisEditSrv = 0xFFFFFFFFu;
     float m_gisEditBox[4] = {0, 0, 0, 0};
     bool m_gisEditOn = false;

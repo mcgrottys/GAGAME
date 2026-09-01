@@ -148,7 +148,10 @@ public:
         }
         const uint32_t n = uint32_t(order.size());
         const uint64_t dirBytes = uint64_t(n) * sizeof(Rec);
-        const uint64_t payload0 = 16 + dirBytes;
+        // M9ap: payloads start on a 64 KB boundary. DirectStorage file reads want aligned
+        // sources; an unaligned request can be served from the aligned-down offset, which
+        // puts a neighbouring tile's bytes into the tile -- oceans beside mountains.
+        const uint64_t payload0 = ((16 + dirBytes) + 65535ull) & ~65535ull;
         uint64_t off = payload0;
         std::vector<Rec> sorted;
         sorted.reserve(n);
@@ -161,6 +164,10 @@ public:
         const uint32_t hdr[4] = {kMagic, kVersion, n, 0u};
         fwrite(hdr, sizeof(hdr), 1, fo);
         fwrite(sorted.data(), sizeof(Rec), n, fo);
+        {
+            const std::vector<uint8_t> pad(static_cast<size_t>(payload0 - (16 + dirBytes)), 0);
+            if (!pad.empty()) fwrite(pad.data(), 1, pad.size(), fo);
+        }
         std::vector<uint8_t> buf;
         uint32_t wrote = 0;
         for (uint32_t k = 0; k < n; ++k) {

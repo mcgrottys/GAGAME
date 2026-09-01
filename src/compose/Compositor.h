@@ -276,6 +276,8 @@ struct ComposedSurfaceCb {
     uint32_t u4[4];   // M7f: detail color window (z17) SRV + residency, fine edit mask SRV
     float det[4];     // detail uv from window uv: offset xy, scale z; w = fine edit mask on
     float ed[4];      // fine edit mask box in window uv: offset xy, scale zw
+    uint32_t u5[4];   // M9ap PAGES: colour array SRV, array residency SRV, window slice,
+                      // detail slice. u5[0] == ~0 means the old three-tenant path.
 };
 
 // ================================================================================================
@@ -337,6 +339,8 @@ struct ColorFrame {
 // isolation. Returns false (and logs FAILs) if any contract is broken.
 bool RunComposeSelfTest();
 
+// M9ap: when `window == colorCube` (and detailWin likewise) the colour is ONE page tenant
+// and winSlice/detSlice name the Mercator pages inside it; the shader takes the pages path.
 void FillComposedCb(ComposedSurfaceCb& cb, const ResidencyManager* rm, int colorCube,
                     int window, int heightCube, int heightWindow, double orgPxX,
                     double orgPxY, double sizePx, int zBase, double planetR,
@@ -344,6 +348,7 @@ void FillComposedCb(ComposedSurfaceCb& cb, const ResidencyManager* rm, int color
                     bool stencilOverlay, uint32_t gisWinSrv = UINT32_MAX,
                     uint32_t gisGlobSrv = UINT32_MAX, int detailWin = -1,
                     const double* detOrgPx = nullptr, int detailZ = 17,
-                    uint32_t editMaskSrv = UINT32_MAX, const float* editBox = nullptr);
+                    uint32_t editMaskSrv = UINT32_MAX, const float* editBox = nullptr,
+                    uint32_t winSlice = UINT32_MAX, uint32_t detSlice = UINT32_MAX);
 
 }  // namespace ga

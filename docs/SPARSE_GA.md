@@ -1449,3 +1449,7 @@ review, as ring loads were.
 
 `<windows.h>` in a header that `Compositor.h` includes reached `SeaLayer` and broke `std::min`
 through the `min`/`max` macros — guarded with `NOMINMAX` and `#undef` in both tree headers.
+
+**DirectStorage is the default** as of the next commit — the user's call on the pixel-identical
+helm still. `--no-direct-storage` restores the upload ring for an A/B. A tile not yet packed
+takes the ring until `--pack-trees` runs again; nothing is wrong, it is just slower.

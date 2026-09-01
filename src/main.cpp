@@ -106,7 +106,8 @@ struct Options {
     bool framesSet = false;           // an explicit --frames beats a rail default
     uint32_t predictEvery = 3;        // --predict-every N: prefetch-walk cadence (1 = old)
     bool packTiles = false;           // --pack-tiles: pack the composed cache, then exit
-    bool directStorage = false;       // --direct-storage: NVMe -> GPU tile reads (opt-in)
+    bool directStorage = true;        // --no-direct-storage: the upload ring, for the A/B (M9ao)
+    bool dsSerial = false;            // --ds-serial: one DS batch in flight (diagnostic)
     bool colorTrees = false;          // --color-trees: colour through the per-source trees
     bool gisGate = true;              // --no-gis-gate: drop the vector land/sea gate on the bed
     bool ringLoads = true;            // --no-ring-loads: the old queue, for the A/B (M9al)
@@ -307,7 +308,9 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--pack-tiles") o.packTiles = true;
         // M9ai: route archived tile reads NVMe -> GPU. Off by default until the streamed
         // path is proven pixel-equal to the upload-ring path it replaces.
-        else if (a == "--direct-storage") o.directStorage = true;
+        else if (a == "--direct-storage") o.directStorage = true;    // the default; kept
+        else if (a == "--no-direct-storage") o.directStorage = false;
+        else if (a == "--ds-serial") o.dsSerial = true;
         // M9aj: the three trees. --color-trees composes colour FROM the per-source trees
         // instead of from the sources; --tree-audit measures the two answers against each
         // other on tiles the shipped path already painted, then exits.
@@ -2033,6 +2036,7 @@ int main(int argc, char** argv) {
         if (globe) {
             resMgr.Init(gpu);
             resMgr.ringLoads = opt.ringLoads;
+            resMgr.dsSerial = opt.dsSerial;
             resMgr.traceRes = opt.resTrace;
             int surf = -1, norm = -1;
             if (marsMode) {
@@ -2180,21 +2184,13 @@ int main(int argc, char** argv) {
                         return (opt.colorTrees && megaTree) ? megaTree->Provider(f)
                                                             : compositor.ColorRealization(colCh, f);
                     };
-                    colorCubeT = resMgr.AddTextureCube(gpu, L"earth.color (composed)",
-                                                       Compositor::kFaceDim,
-                                                       DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
-                                                       mkColor(ColorFrame::Cube(
-                                                           Compositor::kFaceDim)));
-                    winTenant = resMgr.AddTexture2D(
-                        gpu, L"earth.color.window (composed, Merrimack z14)",
-                        Compositor::kFaceDim, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
-                        mkColor(ColorFrame::Window(1263360, 1538048, 14)));
-                    // M7f: the z17 DETAIL window -- 1.2 m px, ~14 km centred on the inlet
-                    // mouth: the near field stops being capped at the z14 window's 9.5 m.
-                    // Same channel, same stack (massgis where harvested, google's own z17
-                    // ladder elsewhere), the compose ladder's third rung.
+                    // M9ap: NO INSET TEXTURES. The planet's colour is ONE tenant -- a reserved
+                    // Texture2DArray of pages: slices 0..5 the cube faces, 6 the z14 Mercator
+                    // page, 7 the z17 page -- with one SRV, one residency map, one budget, and
+                    // one provider that dispatches on the slice. The three tenants this
+                    // replaces were three pages of a ladder with hand-off fades between them.
+                    const double n17 = 16384.0 * 256.0 * 8.0;
                     {
-                        const double n17 = 16384.0 * 256.0 * 8.0;
                         const double piD = 3.14159265358979;
                         const double lonC = -70.8125, latC = 42.8160 * piD / 180.0;
                         const double mx = (lonC + 180.0) / 360.0 * n17;
@@ -2204,12 +2200,26 @@ int main(int argc, char** argv) {
                             n17;
                         det17OrgX = std::floor(mx - 8192.0);
                         det17OrgY = std::floor(my - 8192.0);
-                        detTenant = resMgr.AddTexture2D(
-                            gpu, L"earth.color.detail (composed, Merrimack z17)",
-                            Compositor::kFaceDim, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
-                            mkColor(ColorFrame::Window(static_cast<long long>(det17OrgX),
-                                                       static_cast<long long>(det17OrgY), 17)));
                     }
+                    const TileProviderFn pCube = mkColor(ColorFrame::Cube(Compositor::kFaceDim));
+                    const TileProviderFn pWin = mkColor(ColorFrame::Window(1263360, 1538048, 14));
+                    const TileProviderFn pDet = mkColor(ColorFrame::Window(
+                        static_cast<long long>(det17OrgX), static_cast<long long>(det17OrgY), 17));
+                    TileProviderFn pages = [pCube, pWin, pDet](const TileRequest& r,
+                                                               std::vector<uint8_t>& out,
+                                                               TileLoc* loc) {
+                        if (r.face < 6) return pCube(r, out, loc);
+                        TileRequest w = r;
+                        w.face = 0;   // a Mercator page is a single-face frame
+                        return r.face == 6 ? pWin(w, out, loc) : pDet(w, out, loc);
+                    };
+                    colorCubeT = resMgr.AddTexturePages(gpu, L"earth.color (megatexture pages)",
+                                                        Compositor::kFaceDim,
+                                                        DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+                                                        std::move(pages), 8);
+                    winTenant = colorCubeT;   // pages mode: window == cube, slice 6
+                    detTenant = colorCubeT;   // slice 7
+                    (void)n17;
                     // The gate. Every realization the render path uses, on tiles the shipped
                     // paint loop already wrote, with the worst per-channel disagreement printed.
                     if (opt.treeAudit) {
@@ -2289,11 +2299,14 @@ int main(int argc, char** argv) {
                     // M9ag: the NVMe -> GPU reader. Created once; a machine without the
                     // redist or with a driver that declines keeps the ReadFile path.
                     static TileStream tileStream;
+                    // M9ao: ON by default. Through the packed trees the streamed path is
+                    // pixel-identical to the upload ring (section 33); the user made it the
+                    // default. --no-direct-storage is the A/B.
                     if (opt.directStorage) {
                         if (tileStream.Init(gpu)) resMgr.SetTileStream(&tileStream);
                     } else {
-                        Log("[dstorage] available but OFF (--direct-storage to enable): the "
-                            "streamed path is not yet proven pixel-equal to the upload ring");
+                        Log("[dstorage] OFF by request (--no-direct-storage): every tile takes "
+                            "the upload ring");
                     }
                 }
 
@@ -2718,9 +2731,16 @@ int main(int argc, char** argv) {
         // reads, so its height channel is off).
         if (!marsMode && globe) {
             ComposedSurfaceCb cs{};
+            // M9ap: pages mode -- the terrain, the sea and the GIS layer sample the SAME page
+            // tenant the globe does, slices 6 and 7 included.
+            const double det17Org[2] = {det17OrgX, det17OrgY};
+            const bool pagesMode = colorCubeT >= 0 && winTenant == colorCubeT;
             FillComposedCb(cs, &resMgr, colorCubeT, winTenant, hgtTenant, hgtWinTenant,
                            winOrgX, winOrgY, 16384.0, 14, planetR, east0, oDir, north0,
-                           opt.stencil, gisStencil.MaskWinSrv(), gisStencil.MaskGlobSrv());
+                           opt.stencil, gisStencil.MaskWinSrv(), gisStencil.MaskGlobSrv(),
+                           pagesMode ? detTenant : -1, pagesMode ? det17Org : nullptr, 17,
+                           UINT32_MAX, nullptr, pagesMode ? 6u : UINT32_MAX,
+                           pagesMode ? 7u : UINT32_MAX);
             if (terrain) terrain->SetComposed(cs);
             if (sea) sea->SetComposed(cs);
             if (gisLayer) gisLayer->SetComposed(cs);

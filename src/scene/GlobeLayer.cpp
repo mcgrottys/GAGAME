@@ -1093,7 +1093,7 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
                 const float wu1 = static_cast<float>((std::min)(du1, 1.0));
                 const float wv1 = static_cast<float>((std::min)(dv1, 1.0));
                 if (m_winT >= 0) {
-                    m_res->Want(m_winT, 0, dmip, wu0, wv0, wu1, wv1, m_predictPass);
+                    m_res->Want(m_winT, m_winFace, dmip, wu0, wv0, wu1, wv1, m_predictPass);
                 }
                 if (m_hgtWinT >= 0) {
                     m_res->Want(m_hgtWinT, 0, dmip, wu0, wv0, wu1, wv1, m_predictPass);
@@ -1112,7 +1112,7 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
                     const int emip = (std::max)(
                         0, static_cast<int>(std::ceil(std::log2(
                                (std::max)(spanD * 16384.0 / (std::max)(px, 16.0), 1.0)))));
-                    m_res->Want(m_detWinT, 0, emip,
+                    m_res->Want(m_detWinT, m_detFace, emip,
                                 static_cast<float>((std::max)(eu0, 0.0)),
                                 static_cast<float>((std::max)(ev0, 0.0)),
                                 static_cast<float>((std::min)(eu1, 1.0)),
@@ -1427,14 +1427,15 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     // of a residency-shaped patchwork of vintages, and a fast ascent can never outrun the
     // loader into grey -- the coarse rung is always there to fall back on.
     for (int fm = 4; fm <= 7; ++fm) {
-        if (m_winT >= 0) m_res->Want(m_winT, 0, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
+        if (m_winT >= 0) m_res->Want(m_winT, m_winFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
         if (m_hgtWinT >= 0) m_res->Want(m_hgtWinT, 0, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
-        if (m_detWinT >= 0) m_res->Want(m_detWinT, 0, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
+        if (m_detWinT >= 0) m_res->Want(m_detWinT, m_detFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
     }
     FillComposedCb(m_cb.cs, m_res, m_colorT, m_winT, m_hgtT, m_hgtWinT, m_detOrg[0],
                    m_detOrg[1], m_detSize, 14, m_radius, m_frameE, m_frameU, m_frameN,
                    stencilOverlay, m_gisWinSrv, m_gisGlobSrv, m_detWinT, m_det17Org, 17,
-                   m_gisEditSrv, m_gisEditOn ? m_gisEditBox : nullptr);
+                   m_gisEditSrv, m_gisEditOn ? m_gisEditBox : nullptr,
+                   m_winFace ? m_winFace : UINT32_MAX, m_detFace ? m_detFace : UINT32_MAX);
     if (m_streamMars) {
         m_cb.texIdx[1] = m_cb.texIdx[2] = m_cb.texIdx[3] = UINT32_MAX;   // waves/wind/clouds
         m_cb.texIdx2[1] = UINT32_MAX;                                    // wind bank

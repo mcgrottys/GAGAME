@@ -56,7 +56,54 @@ float2 CsWindowUv(float3 dir) {
 // img*img*1.2 curve hack is gone; the user called the conversion, and the user was right).
 // One LINEAR exposure constant remains: display-referred mosaics sit darker than the scene
 // lighting expects, and scaling exposure is honest where bending the curve was not.
+// M9ap: residency of a PAGE (a slice of the page tenant's array), conservative like the rest.
+float CsHavePage(uint mapSrv, float2 uv, uint slice) {
+    const float4 g = gTexArr[mapSrv].GatherRed(sLinearClamp, float3(uv, slice));
+    return max(max(g.x, g.y), max(g.z, g.w)) * 255.0f / 16.0f;
+}
+float CsHaveCubeArr(uint mapSrv, float3 dir) {
+    const float4 g = gTexCubeArr[mapSrv].GatherRed(sLinearClamp, float4(dir, 0.0f));
+    return max(max(g.x, g.y), max(g.z, g.w)) * 255.0f / 16.0f;
+}
+
+// M9ap: THE PAGES PATH. One texture, pages selected by CONTAINMENT and by what is actually
+// resident: every page is the same megatexture at a different ground resolution, so the page
+// whose resident mip gives the finest ground texel at this pixel is the right answer and needs
+// no fade against its neighbour -- where two pages are resident at the same resolution they
+// hold the same pixels. `hand` and `finer` are gone; there is nothing to hand off between.
+float3 ComposedColorPages(float3 dir) {
+    // The cube, through the cube views over slices 0..5 (hardware-seamless across faces).
+    const float haveC = CsHaveCubeArr(gCsU.y, dir);
+    float3 c = gTexCubeArr[gCsU.x].Sample(sAniso, float4(dir, 0.0f), haveC).rgb;
+    float ground = 611.0f * exp2(haveC);
+    if (gCsF.y > 0.5f) {
+        const float2 duv = CsWindowUv(dir);
+        if (all(duv > 0.0f) && all(duv < 1.0f)) {
+            const float haveW = CsHavePage(gCsU5.y, duv, gCsU5.z);
+            const float gW = 9.55f * exp2(haveW);
+            if (gW < ground) {
+                c = gTexArr[gCsU5.x].Sample(sAniso, float3(duv, gCsU5.z), int2(0, 0), haveW).rgb;
+                ground = gW;
+            }
+            if (gCsU5.w != 0xFFFFFFFFu) {
+                const float2 tuv = duv * gCsDet.z + gCsDet.xy;
+                if (all(tuv > 0.0f) && all(tuv < 1.0f)) {
+                    const float haveD = CsHavePage(gCsU5.y, tuv, gCsU5.w);
+                    const float gD = 1.19f * exp2(haveD);
+                    if (gD < ground) {
+                        c = gTexArr[gCsU5.x].Sample(sAniso, float3(tuv, gCsU5.w), int2(0, 0),
+                                                   haveD).rgb;
+                        ground = gD;
+                    }
+                }
+            }
+        }
+    }
+    return c;
+}
+
 float3 ComposedColor(float3 dir) {
+    if (gCsU5.x != 0xFFFFFFFFu && gCsF.x > 0.5f) return ComposedColorPages(dir);
     float3 c = float3(0.5f, 0.5f, 0.5f);
     if (gCsF.x > 0.5f) {
         // M9z: ANISOTROPIC, and the CalculateLevelOfDetail call is GONE. It collapsed the
@@ -118,6 +165,23 @@ bool ComposedColorOn() { return gCsF.x > 0.5f; }
 // the near field was a 9.5 m blur) ask this and YIELD where the imagery outresolves them.
 float ComposedColorTexelM(float3 dir) {
     float t = 611.0f;   // cube-only worst case
+    if (gCsU5.x != 0xFFFFFFFFu) {
+        // M9ap: the pages path reports the same choice ComposedColorPages makes.
+        t = 611.0f * exp2(CsHaveCubeArr(gCsU.y, dir));
+        if (gCsF.y > 0.5f) {
+            const float2 duv = CsWindowUv(dir);
+            if (all(duv > 0.0f) && all(duv < 1.0f)) {
+                t = min(t, 9.55f * exp2(CsHavePage(gCsU5.y, duv, gCsU5.z)));
+                if (gCsU5.w != 0xFFFFFFFFu) {
+                    const float2 tuv = duv * gCsDet.z + gCsDet.xy;
+                    if (all(tuv > 0.001f) && all(tuv < 0.999f)) {
+                        t = min(t, 1.19f * exp2(CsHavePage(gCsU5.y, tuv, gCsU5.w)));
+                    }
+                }
+            }
+        }
+        return t;
+    }
     if (gCsF.y > 0.5f && gCsU.z != 0xFFFFFFFFu) {
         const float2 duv = CsWindowUv(dir);
         if (all(duv > 0.0f) && all(duv < 1.0f)) {

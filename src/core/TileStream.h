@@ -29,7 +29,9 @@
 // ================================================================================================
 #pragma once
 #include <cstdint>
+#include <deque>
 #include <string>
+#include <vector>
 
 #include "core/Common.h"
 #include "core/Gpu.h"
@@ -125,7 +127,7 @@ public:
         r.UncompressedSize = bytes;
         m_queue->EnqueueRequest(&r);
         ++m_pending;
-        m_files.push_back(std::move(file));
+        m_open.push_back(std::move(file));   // owned until THIS batch's fence lands
         return true;
 #else
         (void)path; (void)srcOffset; (void)bytes; (void)dstOffset;
@@ -148,6 +150,10 @@ public:
         m_queue->Submit();
         m_submitted += m_pending;
         m_pending = 0;
+        // M9ap: the files this submit reads from travel WITH its fence. Releasing them on any
+        // later fence is what let a reference into a second archive be read from a closed file.
+        m_batches.push_back({m_fenceValue, std::move(m_open)});
+        m_open.clear();
         return m_fenceValue;
 #else
         return 0;
@@ -163,28 +169,59 @@ public:
 #endif
     }
 
-    // Files can only be released once the reads that reference them have landed.
+    // Files can only be released once the reads that reference them have landed -- and ONLY
+    // those. The previous form cleared every open file when any fence completed: with one
+    // archive per tenant that was a harmless simplification; with stored references resolving
+    // into many archives it released files whose reads were still queued behind a later fence,
+    // and the tiles came back as whatever the landing slot last held. Green and magenta on the
+    // globe was that.
     void ReleaseCompleted(uint64_t value) {
 #if defined(GA_HAVE_DSTORAGE)
-        if (m_ok && m_fence->GetCompletedValue() >= value) m_files.clear();
+        (void)value;
+        if (!m_ok) return;
+        const uint64_t done = m_fence->GetCompletedValue();
+        while (!m_batches.empty() && m_batches.front().fence <= done) m_batches.pop_front();
+        // M9ap: ASK WHETHER THE READS SUCCEEDED. A failed request leaves its landing slot
+        // holding whatever tile last used it, and CopyTiles copies that stale tile into the new
+        // coordinate without complaint -- oceans beside mountains. Nothing had ever asked.
+        DSTORAGE_ERROR_RECORD rec{};
+        m_queue->RetrieveErrorRecord(&rec);
+        if (rec.FailureCount) {
+            m_failures += rec.FailureCount;
+            if (m_failLogged < 8) {
+                ++m_failLogged;
+                const auto& f = rec.FirstFailure;
+                Log("[dstorage] %u FAILED request(s) in this record; first: hr 0x%08x, cmd %d "
+                    "-- the landing slot kept a STALE tile",
+                    rec.FailureCount, static_cast<unsigned>(f.HResult),
+                    static_cast<int>(f.CommandType));
+            }
+        }
 #else
         (void)value;
 #endif
     }
 
     uint64_t Submitted() const { return m_submitted; }
+    uint64_t Failures() const { return m_failures; }
 
 private:
     static constexpr uint32_t kStagingBytes = 32u * 1024u * 1024u;
     GpuBuffer m_staging;
     bool m_ok = false;
-    uint64_t m_fenceValue = 0, m_submitted = 0;
+    uint64_t m_fenceValue = 0, m_submitted = 0, m_failures = 0;
+    uint32_t m_failLogged = 0;
     uint32_t m_pending = 0;
 #if defined(GA_HAVE_DSTORAGE)
     Com<IDStorageFactory> m_factory;
     Com<IDStorageQueue> m_queue;
     Com<ID3D12Fence> m_fence;
-    std::vector<Com<IDStorageFile>> m_files;
+    std::vector<Com<IDStorageFile>> m_open;   // enqueued, not yet submitted
+    struct Batch {
+        uint64_t fence;
+        std::vector<Com<IDStorageFile>> files;
+    };
+    std::deque<Batch> m_batches;   // submitted, oldest first; released as fences land
 #endif
 };
 
