@@ -140,6 +140,14 @@ public:
         m_lensChain[2] = resMapH;
         m_lensChain[3] = static_cast<float>(mipCount);
     }
+    // M9j: the REGION page's geography (slice 1 of the same bank). Both pages are read from
+    // one array view and composited on coverage -- which is what retires the wind fallback.
+    void SetVelGradRegion(double lon0, double lat0, double spanLon, double spanLat) {
+        m_lensRegion[0] = static_cast<float>(lon0);
+        m_lensRegion[1] = static_cast<float>(lat0);
+        m_lensRegion[2] = (spanLon != 0.0) ? static_cast<float>(1.0 / spanLon) : 0.0f;
+        m_lensRegion[3] = (spanLat != 0.0) ? static_cast<float>(1.0 / spanLat) : 0.0f;
+    }
     float foamOpacity = 0.72f;      // M8: peak foam opacity (data/wave_scene.json)
     float ringBlendTexels = 48.0f;  // M8: bank ring cross-fade width (scene cfg)
     float windGateVal = 1.0f;       // M8: Monahan whitecap gate (per frame, from sea)
@@ -231,6 +239,7 @@ private:
         uint32_t lensU[4];    // M9h: grad(flow) bank SRV for --lens velgrad
         float lensA[4];       // bathy grid: org x, org z, 1/sizeX, 1/sizeZ
         float lensB[4];       // M9h: bank texel m, residency-map dims, spare
+        float lensR[4];       // M9j: region page lon0, lat0, 1/spanLon, 1/spanLat
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -332,6 +341,7 @@ private:
     uint32_t m_lensSrv = 0xFFFFFFFFu;   // M9h: grad(flow) bank
     uint32_t m_lensResMapSrv = 0xFFFFFFFFu;
     float m_lensChain[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    float m_lensRegion[4] = {0.0f, 0.0f, 0.0f, 0.0f};   // region page: lon0, lat0, 1/dLon, 1/dLat
     float m_lensGeo[4] = {0, 0, 0, 0};
     float m_bankExag = 1.15f;
     float m_bankBase = 4.8f;

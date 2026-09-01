@@ -40,8 +40,10 @@ cbuffer MipCb : register(b0) {
     uint2 gSrcDim;      // fine level extent, for the odd-size edge clamp
 };
 
-RWTexture2D<MipT> gSrc : register(u0);
-RWTexture2D<MipT> gDst : register(u1);
+// Array views pinned to ONE slice by the caller (TileAtlas2D::BuildMips), so the reduction
+// never crosses a page boundary -- pages are independent by construction.
+RWTexture2DArray<MipT> gSrc : register(u0);
+RWTexture2DArray<MipT> gDst : register(u1);
 
 [numthreads(8, 8, 1)]
 void CsMipReduce(uint3 id : SV_DispatchThreadID) {
@@ -50,6 +52,6 @@ void CsMipReduce(uint3 id : SV_DispatchThreadID) {
     // than folding a duplicate in and biasing the border.
     const uint2 s0 = id.xy * 2u;
     const uint2 s1 = uint2(min(s0.x + 1u, gSrcDim.x - 1u), min(s0.y + 1u, gSrcDim.y - 1u));
-    gDst[id.xy] = (gSrc[s0] + gSrc[uint2(s1.x, s0.y)] + gSrc[uint2(s0.x, s1.y)] + gSrc[s1]) *
-                  0.25f;
+    gDst[uint3(id.xy, 0)] = (gSrc[uint3(s0, 0)] + gSrc[uint3(s1.x, s0.y, 0)] +
+                             gSrc[uint3(s0.x, s1.y, 0)] + gSrc[uint3(s1, 0)]) * 0.25f;
 }

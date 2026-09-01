@@ -1880,9 +1880,83 @@ int main(int argc, char** argv) {
                             vb.UploadLevel(gpu, lvl, rgba.data(), w * 4 * sizeof(float), w, h);
                             ++wrote;
                         }
-                        Log("[compose] grad(GoMOFS) -> swe.velgrad levels 3..%u: %u composed "
-                            "(loader -> source -> page -> bank; the solver never saw it)",
+                        Log("[compose] grad(GoMOFS) -> swe.velgrad slice 0 levels 3..%u: %u "
+                            "composed (loader -> source -> page -> bank)",
                             vb.MipCount() - 1, wrote);
+
+                        // ---- SLICE 1: THE REGION. Same sources, same compositor, a page over
+                        // the REGION's own ground instead of the window's. This is what makes
+                        // the wind fallback unnecessary: outside the solve there is now a page
+                        // of the SAME quantity in the SAME units, so the consumer composites
+                        // two pages of one bank instead of blending in a foreign field.
+                        if (vb.Slices() > 1) {
+                            // Every level, not just the floor: an upload into an unmapped tile
+                            // is discarded and the page would simply not be there.
+                            vb.MapAllLevels(gpu, 1);
+                            const GeoRef& rg = ras->Ref();
+                            uint32_t rwrote = 0;
+                            // Start where the bank's texels approach the source's own scale.
+                            // Differentiating a field upsampled 8x invents structure that is
+                            // not in it -- the derivative of the interpolation, not of the
+                            // current -- so the region owns only levels it can honestly fill,
+                            // and the residency clamp keeps a sampler from asking for finer.
+                            for (uint32_t lvl = 3; lvl < vb.MipCount(); ++lvl) {
+                                const uint32_t w = (std::max)(1u, swe.Nx() >> lvl);
+                                const uint32_t h = (std::max)(1u, swe.Ny() >> lvl);
+                                // The page spans the SOURCE's extent, sampled onto this
+                                // level's grid -- the region gets its own geography, not the
+                                // window's stretched over it.
+                                DomainCompositor::PageGeo rgeo;
+                                rgeo.dLon = rg.scaleX * double(rg.width) / double(w);
+                                rgeo.dLat = rg.scaleY * double(rg.height) / double(h);
+                                rgeo.lon0 = rg.originX + 0.5 * rgeo.dLon;
+                                rgeo.lat0 = rg.originY + 0.5 * rgeo.dLat;
+
+                                std::vector<float> ruv, rcov;
+                                const uint32_t rc =
+                                    fc.ComposePage(PageAddr{lvl, 0, 0}, rgeo, w, h, 2, ruv, rcov);
+                                if (!rc) continue;
+                                std::vector<float> rr(size_t(w) * h * 4, 0.0f);
+                                // Metres per texel of THIS page: the region's degrees converted
+                                // at its own latitude, not the window's frozen anchor.
+                                const double mx = std::abs(rgeo.dLon) * 111319.49 *
+                                                  std::cos(rgeo.lat0 * 3.14159265 / 180.0);
+                                const double my = std::abs(rgeo.dLat) * 110574.0;
+                                for (uint32_t y = 0; y < h; ++y) {
+                                    for (uint32_t x = 0; x < w; ++x) {
+                                        const size_t i = size_t(y) * w + x;
+                                        if (rcov[i] <= 0.0f) continue;
+                                        const uint32_t xm = (x > 0) ? x - 1 : x;
+                                        const uint32_t xp = (x + 1 < w) ? x + 1 : x;
+                                        const uint32_t ym = (y > 0) ? y - 1 : y;
+                                        const uint32_t yp = (y + 1 < h) ? y + 1 : y;
+                                        const size_t a = (size_t(y) * w + xm) * 2;
+                                        const size_t b = (size_t(y) * w + xp) * 2;
+                                        const size_t c2 = (size_t(ym) * w + x) * 2;
+                                        const size_t d2 = (size_t(yp) * w + x) * 2;
+                                        const float dudx = float((ruv[b + 0] - ruv[a + 0]) / (2 * mx));
+                                        const float dvdx = float((ruv[b + 1] - ruv[a + 1]) / (2 * mx));
+                                        const float dudy = float((ruv[d2 + 0] - ruv[c2 + 0]) / (2 * my));
+                                        const float dvdy = float((ruv[d2 + 1] - ruv[c2 + 1]) / (2 * my));
+                                        rr[i * 4 + 0] = dudx + dvdy;
+                                        rr[i * 4 + 1] = dvdx - dudy;
+                                        rr[i * 4 + 2] = rcov[i];
+                                    }
+                                }
+                                vb.UploadLevel(gpu, lvl, rr.data(), w * 4 * sizeof(float), w, h,
+                                               1);
+                                ++rwrote;
+                            }
+                            // The lens needs the region page's geography to sample it.
+                            globe->SetVelGradRegion(
+                                rg.originX, rg.originY, rg.scaleX * double(rg.width),
+                                rg.scaleY * double(rg.height));
+                            Log("[compose] grad(GoMOFS) -> swe.velgrad slice 1 (REGION): %u "
+                                "levels over %.2f x %.2f deg -- the wind fallback is now "
+                                "unnecessary",
+                                rwrote, std::abs(rg.scaleX) * rg.width,
+                                std::abs(rg.scaleY) * rg.height);
+                        }
                     }
                 }
                 globe->SetVelGradLens(

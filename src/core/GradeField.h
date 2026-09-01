@@ -81,6 +81,10 @@ struct GradeBankDesc {
     // sample can never miss and detail changes without any code path changing. Costs one tile
     // per page for the floor -- provided the chain is not truncated (docs/SPARSE_GA.md 18).
     uint32_t mipLevels = 1;
+    // M9j: > 1 makes this a PAGED bank -- one reserved array whose slices are pages of the
+    // shared address space. Slice 0 is the bank's own domain; further slices are whatever the
+    // compositor puts there (a region, a survey, a second body).
+    uint32_t arraySlices = 1;
 
     // The frame contract -- the same quantities the GA AST edge will publish, kept here so the
     // edge can be registered FROM the descriptor instead of hand-written per call site.
@@ -168,7 +172,7 @@ public:
         m_policy = policy ? std::move(policy) : policy::All();
         m_atlas.Init(gpu, m_desc.width, m_desc.height, m_desc.fmt,
                      std::wstring(m_desc.name.begin(), m_desc.name.end()).c_str(), 64,
-                     m_desc.mipLevels);
+                     m_desc.mipLevels, m_desc.arraySlices);
         m_sig.assign(size_t(m_atlas.TilesX()) * m_atlas.TilesY(), m_desc.gradeSig);
     }
 
@@ -177,6 +181,26 @@ public:
     // Two halves, and they must run in different places. Mapping touches the queue and the
     // residency map, so it belongs OUTSIDE command-list recording; the reduction is pure
     // command-list work and belongs inside. Collapsing them crashed the SWE spinup.
+    void ActivateSlice(Gpu& gpu, uint32_t slice) { m_atlas.ActivateSlice(gpu, slice); }
+
+    // Map EVERY level of a page. ActivateSlice only pins the floor, and a write into an
+    // unmapped tile is DISCARDED by the hardware -- silently, which is hazard 1 arriving by
+    // the upload path instead of the dispatch path. A composed page that is uploaded before
+    // its levels are mapped simply is not there, and nothing says so.
+    void MapAllLevels(Gpu& gpu, uint32_t slice) {
+        m_atlas.ActivateSlice(gpu, slice);
+        for (uint32_t m = 0; m < m_atlas.StandardMips(); ++m) {
+            for (uint32_t ty = 0; ty < m_atlas.TilesY(m); ++ty) {
+                for (uint32_t tx = 0; tx < m_atlas.TilesX(m); ++tx) {
+                    m_atlas.RequestMap(slice, m, tx, ty);
+                }
+            }
+        }
+        m_atlas.CommitMappings(gpu, nullptr);
+        m_atlas.FlushResidencyMap(gpu);
+    }
+    uint32_t Slices() const { return m_atlas.Slices(); }
+
     void EnsureCoarseMapped(Gpu& gpu) {
         if (m_desc.mipLevels < 2 || m_coarseMapped) return;
         m_atlas.MapAllCoarse();
@@ -197,9 +221,25 @@ public:
     // GeoTIFF, a buoy set, or all three composed. It takes a level and some texels.
     //
     // Must run OUTSIDE command-list recording -- Gpu::UploadTexture opens its own list.
+    // `rows` is float32, channels interleaved. If the bank stores RGBA16F -- most do -- the
+    // floats are converted here rather than by the caller: UploadTexture copies raw bytes, so
+    // a caller that forgot would write garbage that reports as a successful upload and only
+    // shows up as a page that renders as nothing.
     void UploadLevel(Gpu& gpu, uint32_t mip, const void* rows, uint32_t rowPitchBytes,
-                     uint32_t w, uint32_t h) {
-        if (mip >= m_atlas.MipCount()) return;
+                     uint32_t w, uint32_t h, uint32_t slice = 0) {
+        if (mip >= m_atlas.MipCount() || slice >= m_atlas.Slices()) return;
+        std::vector<uint16_t> half;
+        if (m_desc.fmt == DXGI_FORMAT_R16G16B16A16_FLOAT ||
+            m_desc.fmt == DXGI_FORMAT_R16G16_FLOAT || m_desc.fmt == DXGI_FORMAT_R16_FLOAT) {
+            const uint32_t ch = (m_desc.fmt == DXGI_FORMAT_R16G16B16A16_FLOAT) ? 4u
+                                : (m_desc.fmt == DXGI_FORMAT_R16G16_FLOAT)     ? 2u
+                                                                               : 1u;
+            const float* src = static_cast<const float*>(rows);
+            half.resize(size_t(w) * h * ch);
+            for (size_t i = 0; i < half.size(); ++i) half[i] = F32ToHalf(src[i]);
+            rows = half.data();
+            rowPitchBytes = w * ch * 2u;
+        }
         GpuTexture t;
         t.res = m_atlas.Res();
         t.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
@@ -208,7 +248,8 @@ public:
         t.height = h;
         // Com is ComPtr: assigning the raw pointer AddRef'd it, so the destructor balances
         // that. Detaching here would LEAK the reference, not protect the atlas.
-        gpu.UploadTexture(t, rows, rowPitchBytes, mip);
+        // Subresource is mip + slice * mipCount -- the same indexing the mapping path uses.
+        gpu.UploadTexture(t, rows, rowPitchBytes, mip + slice * m_atlas.MipCount());
     }
     uint32_t MipCount() const { return m_atlas.MipCount(); }
 

@@ -78,6 +78,7 @@ cbuffer GlobeCb : register(b1) {
     uint4  gLensU;
     float4 gLensA;      // org x, org z, 1/sizeX, 1/sizeZ
     float4 gLensB;      // M9h: x = bank texel metres, yz = residency-map dims, w spare
+    float4 gLensR;      // M9j: region page -- lon0, lat0, 1/spanLon, 1/spanLat
 };
 
 // Sample the bank at a world-frame XZ: finest ring containing the point wins. Returns false
@@ -861,24 +862,26 @@ float4 PsMain(VsOut i) : SV_Target {
             // within a source and NOT magnitude across them. Putting them on one absolute
             // ramp would make the global field look dead, which would be a lie told by a
             // colour map rather than by the data.
-            // A COMPOSITE, not a branch. The old form asked "is this pixel inside the
-            // window" and, if so, took the fine value and stopped -- so a NULL tile's zero
-            // read as a measurement, and dry land punched a black rectangle through the
-            // regional field. "Inside the window" was never the same question as "has data".
+            // TWO PAGES OF ONE BANK. Both are slices of the same reserved array, read
+            // through one Texture2DArray view, and composited on coverage exactly as before.
+            // What changed is what the coarse operand IS: it was the global WIND -- a
+            // different field in different units, three orders away, only made to look
+            // comparable by normalizing each against its own range. Now it is the same
+            // quantity (grad of a current, 1/s) over wider ground, so the composite is a
+            // statement about one field at two resolutions instead of a colour map pretending
+            // two things are alike.
             //
-            // Compose.hlsli already solved this for imagery and says so: the window overlay
-            // feathers across 6% of its span AND rides its own per-texel alpha, so "a texel
-            // the paint did not cover keeps the cube underneath, pixel by pixel, never tile by
-            // tile". This is that, for a field: weight = edge feather x the bank's COVERAGE
-            // channel, and the coarse source is what shows through. A null tile carries zero
-            // coverage, which is exactly "no solve here" -- the ingest rule (nodata is
-            // absence) doing the work at composite time.
+            // No branch decides which source owns a pixel. Slice 1 answers everywhere it has
+            // coverage, slice 0 answers better where the solve reaches, and the weight sorts
+            // them out per pixel -- the compositor's rule, on the GPU.
             float2 fine = float2(0, 0), coarse = float2(0, 0);
-            float wFine = 0.0f;
+            float wFine = 0.0f, wCoarse = 0.0f;
             if (gLensU.x != 0xFFFFFFFFu) {
+                const float footL = length(i.rel) * gWavesB.z;
+
+                // --- slice 0: this window's page, at the solve's resolution
                 const float2 uvL = (wxzL - gLensA.xy) * gLensA.zw;
                 if (all(uvL > 0.0f) && all(uvL < 1.0f)) {
-                    const float footL = length(i.rel) * gWavesB.z;
                     float lodL = log2(max(footL / max(gLensB.x, 1e-3f), 1.0f));
                     if (gLensU.y != 0xFFFFFFFFu) {
                         const uint2 rt = uint2(uvL.x * gLensB.y, (1.0f - uvL.y) * gLensB.z);
@@ -886,26 +889,41 @@ float4 PsMain(VsOut i) : SV_Target {
                         lodL = max(lodL, (have == 0xFFu) ? 0.0f : float(have));
                     }
                     lodL = clamp(lodL, 0.0f, max(gLensB.w - 1.0f, 0.0f));
-                    const float4 hq = gTex[gLensU.x].SampleLevel(
-                        sLinearClamp, float2(uvL.x, 1.0f - uvL.y), lodL);
+                    const float4 hq = gTexArr[gLensU.x].SampleLevel(
+                        sLinearClamp, float3(uvL.x, 1.0f - uvL.y, 0.0f), lodL);
                     fine = float2(abs(hq.x) * 60.0f, hq.y * 60.0f);
-                    // The same 6% feather Compose.hlsli uses, so the window edge ramps
-                    // instead of cutting.
                     const float2 fe = smoothstep(0.0f, 0.06f, uvL) *
                                       smoothstep(1.0f, 0.94f, uvL);
                     wFine = saturate(hq.z) * fe.x * fe.y;
                 }
+
+                // --- slice 1: the region's page, on its OWN geography
+                if (gLensR.z != 0.0f) {
+                    const float2 uvR = float2((lonDeg - gLensR.x) * gLensR.z,
+                                              (degrees(lat) - gLensR.y) * gLensR.w);
+                    if (all(uvR > 0.0f) && all(uvR < 1.0f)) {
+                        // Level 3 is the finest the region page OWNS -- below that it was
+                        // never written, and sampling there would read a level that is NULL.
+                        const float4 rq = gTexArr[gLensU.x].SampleLevel(
+                            sLinearClamp, float3(uvR, 1.0f), 3.0f);
+                        // The region is a coarser description of the SAME quantity, so it
+                        // shares the fine gain -- no second normalization, which is the whole
+                        // reason this can be one composite.
+                        coarse = float2(abs(rq.x) * 60.0f, rq.y * 60.0f);
+                        const float2 fr = smoothstep(0.0f, 0.04f, uvR) *
+                                          smoothstep(1.0f, 0.96f, uvR);
+                        wCoarse = saturate(rq.z) * fr.x * fr.y;
+                    }
+                }
             }
-            if (gTexIdx2.y != 0xFFFFFFFFu) {
-                const float2 wuvL = float2(
-                    frac((lonDeg - gWindGeo.y) * gWindGeo.w / gWindB.x),
-                    saturate(((gWindGeo.x - degrees(lat)) * gWindGeo.z + 0.5f) / gWindB.y));
-                const float4 gm = gTex[gTexIdx2.y].SampleLevel(sLinearClamp, wuvL, 0);
-                // GlobeWind.hlsl stores div AND curl x1e4, so they scale alike; and this is
-                // CONTEXT, three orders from the solved field, so it stays subordinate.
-                coarse = float2(abs(gm.x) / 2.2f, gm.w / 2.2f) * 0.30f;
-            }
-            const float2 mvL = lerp(coarse, fine, wFine);
+            // Weighted, not switched: where the solve has coverage it wins by weight;
+            // where it does not, the region carries the pixel; where neither does, the texel
+            // is absent and stays black -- which is now honest, because "no data" is a real
+            // answer rather than a missing source.
+            const float wSum = wFine + wCoarse * (1.0f - wFine);
+            const float2 mvL = (wSum > 0.0f)
+                                   ? (fine * wFine + coarse * wCoarse * (1.0f - wFine)) / wSum
+                                   : float2(0, 0);
             {
 
                 const float divN = saturate(mvL.x);

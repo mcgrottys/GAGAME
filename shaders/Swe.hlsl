@@ -57,7 +57,9 @@ RWTexture2D<float4> gUv   : register(u2);        // derived: u east, v north, sp
 // Compose.hlsli's window overlay already does with its per-texel alpha. Without it "inside the
 // window" gets mistaken for "has data", and dry land renders as a black rectangle punched
 // through the regional field.
-RWTexture2D<float4> gMv   : register(u3);
+// M9j: an ARRAY, because the bank is paged -- the view is pinned to slice 0 (this window's
+// page), so the solve writes uint3(xy, 0) and never has to know how many pages exist.
+RWTexture2DArray<float4> gMv : register(u3);
 
 float BedAt(int2 t) {
     if (any(t < 0) || t.x >= (int)gNx || t.y >= (int)gNy) return 100.0f;   // outside = wall
@@ -109,7 +111,7 @@ void CsSweVelGrad(uint3 id : SV_DispatchThreadID) {
     const uint2 t = EtaTexel(id);
     if (t.x >= gNx || t.y >= gNy) return;
     const float4 c = gUv[t];
-    if (c.w < 0.5f) { gMv[t] = float4(0, 0, 0, 0); return; }
+    if (c.w < 0.5f) { gMv[uint3(t, 0)] = float4(0, 0, 0, 0); return; }
 
     const uint2 xm = uint2(max(int(t.x) - 1, 0), t.y);
     const uint2 xp = uint2(min(t.x + 1u, gNx - 1u), t.y);
@@ -126,7 +128,7 @@ void CsSweVelGrad(uint3 id : SV_DispatchThreadID) {
     const float dudy = (e.x - d.x) / (2.0f * gDy);
     const float dvdy = (e.y - d.y) / (2.0f * gDy);
     // grade 0 = div, grade 2 = curl. The wedge is the bivector coefficient in e1^e2.
-    gMv[t] = float4(dudx + dvdy, dvdx - dudy, 1.0f, 0.0f);
+    gMv[uint3(t, 0)] = float4(dudx + dvdy, dvdx - dudy, 1.0f, 0.0f);
 }
 
 // ---- init / reset --------------------------------------------------------------------------

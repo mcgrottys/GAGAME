@@ -1060,6 +1060,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.lensU[1] = m_lensResMapSrv;
     for (int i = 0; i < 4; ++i) m_cb.lensA[i] = m_lensGeo[i];
     for (int i = 0; i < 4; ++i) m_cb.lensB[i] = m_lensChain[i];
+    for (int i = 0; i < 4; ++i) m_cb.lensR[i] = m_lensRegion[i];
     m_cb.bankA[3] = sliceOn ? 1.0f : 0.0f;
     m_cb.bankC[3] = sliceD;
     memcpy(m_cb.bankOrg01, &m_bankOrg[0], 16);

@@ -44,7 +44,16 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
         // pulled-back camera reads a level whose texels match its footprint, and the residency
         // map keeps the sample from ever landing on a NULL.
         d.mipLevels = 6;
+        // M9j: TWO PAGES. Slice 0 is this window -- the solve, at the solve's resolution.
+        // Slice 1 is the REGION, composed from whatever covers the wider ground. They are
+        // pages of one address space in one resource, so the consumer reads both from a single
+        // view and composites them on coverage: no second SRV, and no branch deciding which
+        // source owns a pixel.
+        d.arraySlices = 2;
         m_velGrad.Init(gpu, d, policy::None());
+        // A sliced bank activates nothing by itself -- an inactive slice honestly reports
+        // kNothingResident. Slice 0 is ours and must be live before any residency is asked.
+        m_velGrad.ActivateSlice(gpu, 0);
     }
 
     // Static residency: everything that can ever be wet -- bed below max tide + surge + wave
@@ -265,9 +274,16 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     uv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     gpu.Device()->CreateUnorderedAccessView(m_uv.res.Get(), nullptr, &uv,
                                             gpu.SrvHeap().Cpu(m_table + 3));
+    // The bank is an ARRAY now, so its UAV must be an array view pinned to slice 0. A plain
+    // Texture2D view of an array resource is invalid, and the solve would write nowhere.
     uv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+    uv.Texture2DArray.MipSlice = 0;
+    uv.Texture2DArray.FirstArraySlice = 0;
+    uv.Texture2DArray.ArraySize = 1;
     gpu.Device()->CreateUnorderedAccessView(m_velGrad.Res(), nullptr, &uv,
                                             gpu.SrvHeap().Cpu(m_table + 4));
+    uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
 
     Log("[swe] grid %ux%u dx %.2f x dy %.2f m  dt %.3f s  eta %u/%u t  flux %u/%u t  "
         "resident %.1f MB",

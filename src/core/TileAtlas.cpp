@@ -636,6 +636,8 @@ void TileAtlas2D::Init(Gpu& gpu, uint32_t widthTexels, uint32_t heightTexels, DX
     m_tilePool.assign(m_state.size(), 0);
     m_packedTiles = packed.NumTilesForPackedMips;
 
+    // A paged bank is sampled through a Texture2DArray view (page = slice). A flat bank keeps
+    // its plain view, because every existing consumer reads it as Texture2D.
     m_srv = (rd.DepthOrArraySize > 1) ? gpu.CreateSrvArray(m_res.Get(), fmt, m_mipCount,
                                                           rd.DepthOrArraySize)
                                       : gpu.CreateSrv(m_res.Get(), fmt);
@@ -864,23 +866,17 @@ void TileAtlas2D::BuildMips(Gpu& gpu, ShaderCompiler& sc, const std::wstring& sh
         u.Format = m_fmt;
         u.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
         const uint32_t slot = m_mipTable + 2 * m;
-        // On an array the reduction runs inside ONE slice, so these must be ARRAY views
-        // pinned to it -- a plain Texture2D view would silently address slice 0 every time.
-        if (m_slices > 1) {
-            u.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
-            u.Texture2DArray.FirstArraySlice = slice;
-            u.Texture2DArray.ArraySize = 1;
-            u.Texture2DArray.MipSlice = m;
-        } else {
-            u.Texture2D.MipSlice = m;
-        }
+        // ALWAYS array views, even for a one-slice bank: MipReduce.hlsl declares
+        // RWTexture2DArray so that one kernel serves paged and unpaged banks alike, and a
+        // plain Texture2D view against that declaration is a binding mismatch. Pinned to the
+        // slice being reduced, so a reduction can never cross a page boundary.
+        u.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+        u.Texture2DArray.FirstArraySlice = slice;
+        u.Texture2DArray.ArraySize = 1;
+        u.Texture2DArray.MipSlice = m;
         gpu.Device()->CreateUnorderedAccessView(m_res.Get(), nullptr, &u,
                                                 gpu.SrvHeap().Cpu(slot));
-        if (m_slices > 1) {
-            u.Texture2DArray.MipSlice = m + 1;
-        } else {
-            u.Texture2D.MipSlice = m + 1;
-        }
+        u.Texture2DArray.MipSlice = m + 1;
         gpu.Device()->CreateUnorderedAccessView(m_res.Get(), nullptr, &u,
                                                 gpu.SrvHeap().Cpu(slot + 1));
 

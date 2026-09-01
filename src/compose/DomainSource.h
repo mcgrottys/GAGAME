@@ -104,6 +104,9 @@ public:
         if (m_loader) CacheAll();
     }
     bool Valid() const { return m_loader != nullptr && !m_cache.empty(); }
+    // The source'''s own georeference -- a consumer placing it as a PAGE needs its extent, and
+    // getting that from the source rather than restating it is what keeps the two aligned.
+    const GeoRef& Ref() const { return m_loader->Ref(); }
 
     const char* Name() const override { return m_loader ? m_loader->Name() : "raster"; }
     SourceDomain Domain() const override { return SourceDomain::Raster; }
@@ -136,14 +139,31 @@ public:
         const double o = g.centers ? 0.5 : 0.0;
         const double fx = (px - g.originX) / g.scaleX - o;
         const double fy = (py - g.originY) / g.scaleY - o;
-        const int x = int(std::floor(fx + 0.5));
-        const int y = int(std::floor(fy + 0.5));
-        if (x < 0 || y < 0 || x >= int(g.width) || y >= int(g.height)) return false;
-        const size_t k = (size_t(y) * g.width + x) * m_chan;
-        float w = m_cov[size_t(y) * g.width + x];
-        if (w <= 0.0f) return false;   // absence: the source simply is not here
-        for (uint32_t c = 0; c < m_chan && c < 4; ++c) out.c[c] = m_cache[k + c];
-        out.weight = w;
+        // BILINEAR, and it is not a quality nicety. A consumer that differentiates this
+        // field -- and grad() is exactly that -- gets ZERO inside every source texel and a
+        // spike at each boundary if the sample is nearest. Upsampled 280x200 to 1863x1174 that
+        // renders as a grid of lines, which is the derivative of a staircase and not of the
+        // current. Corners with no coverage drop out of the blend rather than pulling it to
+        // zero, so a coastline stays a coastline instead of a ramp into land.
+        const int x0 = int(std::floor(fx)), y0 = int(std::floor(fy));
+        const double tx = fx - x0, ty = fy - y0;
+        double acc[4] = {0, 0, 0, 0}, wsum = 0.0;
+        for (int dy = 0; dy < 2; ++dy) {
+            for (int dx = 0; dx < 2; ++dx) {
+                const int xi = x0 + dx, yi = y0 + dy;
+                if (xi < 0 || yi < 0 || xi >= int(g.width) || yi >= int(g.height)) continue;
+                const float cv = m_cov[size_t(yi) * g.width + xi];
+                if (cv <= 0.0f) continue;
+                const double bw = (dx ? tx : 1.0 - tx) * (dy ? ty : 1.0 - ty);
+                if (bw <= 0.0) continue;
+                const size_t k = (size_t(yi) * g.width + xi) * m_chan;
+                for (uint32_t c = 0; c < m_chan && c < 4; ++c) acc[c] += bw * m_cache[k + c];
+                wsum += bw;
+            }
+        }
+        if (wsum <= 0.0) return false;   // absence: the source simply is not here
+        for (uint32_t c = 0; c < m_chan && c < 4; ++c) out.c[c] = float(acc[c] / wsum);
+        out.weight = float(wsum);
         return true;
     }
 
