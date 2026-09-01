@@ -3165,6 +3165,8 @@ int main(int argc, char** argv) {
         const uint32_t kPredictEvery = (std::max)(1u, opt.predictEvery);
         double profMs[10] = {}, profHelmMs[10] = {};
         std::vector<float> railPreMs;   // M9u: the whole pre-RenderFrame half
+        uint64_t walkNodesAcc = 0, walkLeavesAcc = 0, walkWantNsAcc = 0, walkFrames = 0;
+        uint64_t wantTouchAcc = 0, wantHitAcc = 0;
         static const char* kProfName[10] = {
             "weather.Update", "scene hot-reload stat", "waveField.Update",
             "waterBank.SetFrame", "tide.SetTime", "sea.SetTime",
@@ -3504,9 +3506,19 @@ int main(int argc, char** argv) {
                                                        std::max(1u, window.Height()));
                 const float aspect =
                     (opt.headless ? static_cast<float>(opt.width) : window.Width()) / viewH;
+                globe->WalkReset();
+                resMgr.WantStatsReset();
                 PROF_BEGIN();
                 globe->SetView(cam, aspect, viewH, simUnix - startUnix);
                 PROF_END(7);
+                if (!opt.rail.empty() && frame >= 150u) {
+                    walkNodesAcc += globe->walkNodes;
+                    walkLeavesAcc += globe->walkLeaves;
+                    walkWantNsAcc += globe->walkWantNs;
+                    wantTouchAcc += resMgr.wantTouches;
+                    wantHitAcc += resMgr.wantHits;
+                    ++walkFrames;
+                }
                 // M6e screw-prefetch: extrapolate the pose ~0.8 s ahead along its own screw and
                 // let the walk under THAT camera queue tiles early (predicted priority).
                 // M9v: THE PREFETCH WALK, AMORTIZED. Measured at 3.25 ms per frame at helm --
@@ -3711,6 +3723,23 @@ int main(int argc, char** argv) {
                         for (int k = 0; k < 10; ++k) {
                             Log("[rail]   %-22s %6.3f ms %6.3f ms", kProfName[k],
                                 profMs[k] / n, profHelmMs[k] / nH);
+                        }
+                        if (globe && walkFrames) {
+                            Log("[rail]   walk: %.0f nodes, %.0f leaves per frame; Want() is "
+                                "%.3f ms of the %.3f ms SetView (%.0f%%)",
+                                double(walkNodesAcc) / double(walkFrames),
+                                double(walkLeavesAcc) / double(walkFrames),
+                                double(walkWantNsAcc) / double(walkFrames) / 1e6,
+                                profMs[7] / n,
+                                100.0 * (double(walkWantNsAcc) / double(walkFrames) / 1e6) /
+                                    (std::max)(1e-6, profMs[7] / n));
+                            const double tch = double(wantTouchAcc) / double(walkFrames);
+                            const double hit = double(wantHitAcc) / double(walkFrames);
+                            Log("[rail]   Want(): %.0f tile touches/frame, %.0f already tracked "
+                                "(%.1f%% repeat) -- %.1f touches per leaf",
+                                tch, hit, 100.0 * hit / (std::max)(1.0, tch),
+                                tch / (std::max)(1.0, double(walkLeavesAcc) /
+                                                          double(walkFrames)));
                         }
                         Log("[rail]   %-22s %6.3f ms %6.3f ms  <- measured here", "sum of the ten",
                             tot / n, totH / nH);

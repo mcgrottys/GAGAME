@@ -116,6 +116,13 @@ public:
 
     // The renderer's per-frame demand: face-uv rect (of THIS tenant's cube) wanted at `mip`.
     // Internally expands to tiles, bumps lastSeen, enqueues unseen ones coarse-to-fine.
+    // M9w: is Want expensive because of the map, or because it TOUCHES THE SAME TILES over and
+    // over? The mip-tail rule re-walks every ancestor for every leaf, so a coarse tile is
+    // visited once per descendant. Counting touches against unique inserts separates
+    // "the hash map is slow" from "we are asking it the same question hundreds of times".
+    mutable uint64_t wantTouches = 0, wantHits = 0;
+    void WantStatsReset() { wantTouches = wantHits = 0; }
+
     void Want(int tenant, uint32_t face, uint32_t mip, float u0, float v0, float u1, float v1,
               bool predicted = false);
 

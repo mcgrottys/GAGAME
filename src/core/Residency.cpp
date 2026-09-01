@@ -294,8 +294,50 @@ void ResidencyManager::Want(int tenant, uint32_t face, uint32_t mip, float u0, f
                             float u1, float v1, bool predicted) {
     Tenant& t = m_tenants[tenant];
     if (mip >= t.mips) mip = t.mips - 1;
-    // The classic's mip-tail rule: wanting a fine tile implies wanting every ancestor, and
-    // ancestors are enqueued FIRST so the coarse-before-fine mapping invariant can hold.
+
+    // M9w: THE ANCESTOR RE-WALK, SHORT-CIRCUITED.
+    //
+    // The mip-tail rule below is right -- wanting a fine tile implies wanting every ancestor,
+    // and ancestors must be enqueued FIRST so the coarse-before-fine mapping invariant holds.
+    // But it was being paid PER LEAF, and a coarse tile has many descendants: measured at
+    // 23947 tile touches per frame of which 23947 -- every single one -- were already tracked.
+    // 36.7 hash lookups per leaf, inserting nothing, costing 66% of SetView's 1.78 ms.
+    //
+    // The saving observation: the tail always refreshes the WHOLE column, coarsest to finest,
+    // in one call. So if the FINEST tile of a rect already carries this frame's stamp, every
+    // ancestor of it does too, and the entire column can be skipped. The check below is that
+    // test, done once per finest tile instead of once per level per tile.
+    //
+    // The `predicted` clause is the part that would have been a silent bug. A repeat touch also
+    // DOWNGRADES a tile from predicted to real, so skipping a stamped tile must not skip that
+    // transition -- a tile the prefetch asked for and the real view then confirmed would stay
+    // flagged speculative and be evicted on the wrong budget. Skipping is only safe when this
+    // touch cannot change the flag.
+    {
+        const auto& fine = t.tilings[face * t.mips + mip];
+        const uint32_t tw = fine.WidthInTiles, th = fine.HeightInTiles;
+        const uint32_t x0 = static_cast<uint32_t>((std::max)(0.0f, u0) * tw);
+        const uint32_t y0 = static_cast<uint32_t>((std::max)(0.0f, v0) * th);
+        const uint32_t x1 = (std::min)(tw - 1, static_cast<uint32_t>((std::min)(0.9999f, u1) * tw));
+        const uint32_t y1 = (std::min)(th - 1, static_cast<uint32_t>((std::min)(0.9999f, v1) * th));
+        bool allFresh = true;
+        for (uint32_t y = y0; y <= y1 && allFresh; ++y) {
+            for (uint32_t x = x0; x <= x1 && allFresh; ++x) {
+                const Key k = MakeKey(tenant, TileRequest{face, mip, x, y});
+                ++wantTouches;
+                auto it = m_tracked.find(k);
+                if (it == m_tracked.end() || it->second->lastSeen != m_frame) {
+                    allFresh = false;
+                } else if (!predicted && it->second->predicted) {
+                    allFresh = false;   // the real view confirms a speculative tile: must run
+                } else {
+                    ++wantHits;
+                }
+            }
+        }
+        if (allFresh) return;
+    }
+
     for (int m = static_cast<int>(t.mips) - 1; m >= static_cast<int>(mip); --m) {
         const auto& ti = t.tilings[face * t.mips + m];
         const uint32_t tw = ti.WidthInTiles;
@@ -310,8 +352,10 @@ void ResidencyManager::Want(int tenant, uint32_t face, uint32_t mip, float u0, f
             for (uint32_t x = x0; x <= x1; ++x) {
                 TileRequest r{face, static_cast<uint32_t>(m), x, y};
                 const Key k = MakeKey(tenant, r);
+                ++wantTouches;
                 auto it = m_tracked.find(k);
                 if (it != m_tracked.end()) {
+                    ++wantHits;
                     it->second->lastSeen = m_frame;
                     if (!predicted) it->second->predicted = false;
                     continue;

@@ -828,6 +828,7 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
 }
 
 void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double size) {
+    ++walkNodes;
     const double R = m_radius;
     double dir[3];
     CubeDirD(face, u0 + size * 0.5, v0 + size * 0.5, dir);
@@ -885,6 +886,8 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
     // the sampling feedback -- deterministic, no readback pass (the classic had to render one).
     // M6i: the same rects feed every tenant riding this planet -- Mars's native pyramids and
     // the composed color/height cubes alike (Want clamps to each tenant's own mip count).
+    ++walkLeaves;
+    const auto wt0 = std::chrono::steady_clock::now();
     if (m_res && (m_surfT >= 0 || m_colorT >= 0 || m_hgtT >= 0)) {
         const double px = arc / ((std::max)(dist, 1.0) * (std::max)(m_pixAng, 1e-6f));
         const double texAtMip0 = size * 16384.0;
@@ -969,6 +972,8 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
             }
         }
     }
+    walkWantNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                              std::chrono::steady_clock::now() - wt0).count());
     if (m_predictPass) return;   // prefetch walk: wants only, no draw nodes
 
     // Per-LEVEL morph ramp (identical on both sides of every seam = crack-free): fade this LOD

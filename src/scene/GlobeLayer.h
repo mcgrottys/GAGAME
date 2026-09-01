@@ -313,6 +313,15 @@ private:
     };
     PlaneBank m_hsB, m_windB, m_oceanB, m_iceB, m_windSrcB;
 
+    // M9w: what the CDLOD walk actually costs, split. The walk is 3.95 ms at helm and the
+    // question is whether that is TRAVERSAL (cullable, parallel over six independent face
+    // roots) or EMIT (m_res->Want, which funnels every leaf into one shared tracking map).
+    // Those two want opposite fixes, so they are counted apart before either is attempted.
+public:
+    mutable uint64_t walkNodes = 0, walkLeaves = 0, walkWantNs = 0;
+    void WalkReset() { walkNodes = walkLeaves = walkWantNs = 0; }
+private:
+
     // Load -> compose -> sparse, and report the worst disagreement with the source array.
     bool BuildPlaneBank(Gpu& gpu, PlaneBank& out, const char* name, const char* structure,
                         const GeoRef& ref, std::vector<MemGridLoader::Plane> planes,
