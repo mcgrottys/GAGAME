@@ -613,6 +613,12 @@ void TileAtlas2D::Init(Gpu& gpu, uint32_t widthTexels, uint32_t heightTexels, DX
     // the whole field. Keeping it resident forever is what makes a miss impossible: a sample
     // that finds nothing finer still lands on real data, so quality degrades to blur and never
     // to garbage -- and never to a pop, because no code path appears or disappears.
+    // NOT EVERY SHAPE HAS A TAIL. Measured: 4096^2 x8 x5mip RGBA16F reports 0 packed mips,
+    // because its coarsest mip is still larger than one tile. With no tail there is nothing
+    // pinned, so the floor FinestResident promises would not exist and it would name a level
+    // that is NULL. When that happens, pin the coarsest STANDARD mip instead -- it is a
+    // handful of tiles and it restores the same guarantee by the same argument.
+    m_pinnedFloor = packed.NumPackedMips > 0 ? (m_mipCount - 1) : (m_standardMips - 1);
     if (packed.NumPackedMips > 0 && packed.NumTilesForPackedMips > 0) {
         const uint32_t n = packed.NumTilesForPackedMips;
         D3D12_HEAP_DESC hd{};
@@ -634,6 +640,14 @@ void TileAtlas2D::Init(Gpu& gpu, uint32_t widthTexels, uint32_t heightTexels, DX
         UINT start = 0, count = n;
         gpu.Queue()->UpdateTileMappings(m_res.Get(), 1, &c, &rs, heap.Get(), 1, &rf, &start,
                                         &count, D3D12_TILE_MAPPING_FLAG_NONE);
+    }
+
+    if (packed.NumPackedMips == 0 && m_standardMips > 0) {
+        const MipInfo& top = m_mip[m_standardMips - 1];
+        for (uint32_t ty = 0; ty < top.tilesY; ++ty) {
+            for (uint32_t tx = 0; tx < top.tilesX; ++tx) RequestMap(m_standardMips - 1, tx, ty);
+        }
+        CommitMappings(gpu, nullptr);
     }
 
     if (m_mipCount > 1) {
@@ -659,7 +673,7 @@ uint32_t TileAtlas2D::FinestResident(uint32_t tx0, uint32_t ty0) const {
     for (uint32_t m = 0; m < m_standardMips; ++m) {
         if (IsResident(m, tx0 >> m, ty0 >> m)) return m;
     }
-    return m_mipCount - 1;   // the pinned tail always covers
+    return m_pinnedFloor;   // the pinned floor: packed tail, or the coarsest standard mip
 }
 
 // The map the SHADER reads: one texel per mip-0 tile, value = finest resident mip there. A
@@ -1461,6 +1475,82 @@ bool RunAtlasSelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDi
         }
         Log("[atlastest]   largest accepted: %u (%.2f m/texel over Earth's circumference)",
             largest, 40.0e6 / double(largest ? largest : 1));
+
+        // ---- Arrays. The docs are explicit that the array axis caps at 2048
+        // (D3D11_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION) and that Texture2DArray tiles PER SLICE
+        // -- "each mip level at a given array slice is a subresource". They are equally
+        // explicit that "exhaustion of GPU virtual address space ... may easily occur first",
+        // and it does: 16384^2 x 2048 x 2B is a TERABYTE of VA, and asking for it REMOVED THE
+        // DEVICE on this driver rather than failing cleanly. So the budget that matters is
+        // total virtual BYTES, not slices -- and the sweep stops at the first refusal instead
+        // of walking further off the cliff.
+
+        // Tiling first, on a shape too small to be risky: does a reserved ARRAY tile per slice?
+        {
+            D3D12_RESOURCE_DESC rd{};
+            rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            rd.Width = 4096;
+            rd.Height = 4096;
+            rd.DepthOrArraySize = 8;
+            rd.MipLevels = 5;
+            rd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+            rd.SampleDesc.Count = 1;
+            rd.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
+            rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            Com<ID3D12Resource> arr;
+            const HRESULT ahr = gpu.Device()->CreateReservedResource(
+                &rd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&arr));
+            if (FAILED(ahr)) {
+                Log("[atlastest] array tiling: REFUSED hr=0x%08X", static_cast<unsigned>(ahr));
+            } else {
+                UINT nt = 0, nsub = 40;
+                D3D12_PACKED_MIP_INFO pk{};
+                D3D12_TILE_SHAPE sh{};
+                std::vector<D3D12_SUBRESOURCE_TILING> st(nsub);
+                gpu.Device()->GetResourceTiling(arr.Get(), &nt, &pk, &sh, &nsub, 0, st.data());
+                Log("[atlastest] array tiling: 4096^2 x8 slices x5 mips RGBA16F -> %u tiles, "
+                    "%u subresources, tile %ux%u",
+                    nt, nsub, sh.WidthInTexels, sh.HeightInTexels);
+                Log("[atlastest]   per slice: %u standard mips, %u packed, %u tiles for the "
+                    "tail -- that tail cost MULTIPLIES by every resident slice",
+                    pk.NumStandardMips, pk.NumPackedMips, pk.NumTilesForPackedMips);
+                Log("[atlastest]   slice0 mip0 %ux%u tiles, slice1 mip0 %ux%u tiles: per-slice "
+                    "tiling %s",
+                    st[0].WidthInTiles, st[0].HeightInTiles, st[5].WidthInTiles,
+                    st[5].HeightInTiles,
+                    (st[5].WidthInTiles == st[0].WidthInTiles) ? "CONFIRMED" : "DIFFERS");
+            }
+        }
+
+        // Now the VA ceiling, in total virtual bytes, stopping at the first refusal.
+        Log("[atlastest] virtual-address ceiling sweep (stops at first refusal):");
+        const uint64_t gb = 1024ull * 1024ull * 1024ull;
+        const uint64_t want[] = {16 * gb, 64 * gb, 128 * gb, 256 * gb, 512 * gb, 1024 * gb};
+        uint64_t okVa = 0;
+        for (uint64_t bytes : want) {
+            const uint32_t slices = static_cast<uint32_t>(bytes / (16384ull * 16384ull * 2ull));
+            if (slices == 0 || slices > 2048) continue;
+            D3D12_RESOURCE_DESC rd{};
+            rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+            rd.Width = 16384;
+            rd.Height = 16384;
+            rd.DepthOrArraySize = static_cast<UINT16>(slices);
+            rd.MipLevels = 1;
+            rd.Format = DXGI_FORMAT_R16_FLOAT;
+            rd.SampleDesc.Count = 1;
+            rd.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
+            rd.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            Com<ID3D12Resource> probe;
+            const HRESULT hr = gpu.Device()->CreateReservedResource(
+                &rd, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr, IID_PPV_ARGS(&probe));
+            Log("[atlastest]   %4llu GB virtual (%u slices)  %s", bytes / gb, slices,
+                SUCCEEDED(hr) ? "created" : "REFUSED -- stopping");
+            if (FAILED(hr)) break;
+            okVa = bytes;
+        }
+        Log("[atlastest]   virtual address space is the budget, not the slice count: %llu GB "
+            "accepted in one reserved array",
+            okVa / gb);
     }
 
     Log("[atlastest] ---- %s ----", pass ? "PASS" : "FAIL");

@@ -176,6 +176,8 @@ private:
 
     std::vector<MipInfo> m_mip;
     uint32_t m_mipCount = 1, m_standardMips = 1;
+    uint32_t m_pinnedFloor = 0;      // the always-resident level: packed tail, or, when a
+                                     // shape has no packed mips at all, the coarsest standard
     std::vector<uint32_t> m_mipUav;  // one UAV per mip, for the reduction's destination
     DXGI_FORMAT m_fmt = DXGI_FORMAT_UNKNOWN;
     uint32_t m_mipTable = UINT32_MAX;

@@ -342,3 +342,48 @@ binding machinery. A physical tile pool with a page table is therefore an OPTIMI
 Not a texture, and not an extent: the **`(level, x, y)` address space**. Level N means the
 same ground resolution on every tree and every body. Each tree owns its own resources and
 residency; they align by construction, globe to camera.
+
+## 16. Texture arrays are the default; VA is the budget
+
+Corrected against the MSDN docs and a clean re-probe, after a first probe that took the
+device down.
+
+**What the docs say.** `D3D11_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION` is 2048, and
+Texture2DArray tiling is explicit -- *"for a texture array, each mip level at a given array
+slice is a subresource"*. They also warn, in the same paragraph as the dimension limits, that
+*"exhaustion of GPU virtual address space, memory residency budget, and or system memory may
+easily occur first"*.
+
+**What actually happened.** The first array probe reported a 512-slice cap. That was wrong:
+16384^2 x 2048 x 2B is a TERABYTE of virtual address space, and asking for it returned
+`DXGI_ERROR_DEVICE_REMOVED` -- the driver did not refuse cleanly, it fell over, and every
+result after that point was contaminated. The sweep now stops at the first refusal.
+
+**Measured, clean:**
+
+    array tiling: 4096^2 x8 slices x5 mips RGBA16F -> 21824 tiles, 40 subresources, tile 128x64
+      per slice: 5 standard mips, 0 packed, 0 tiles for the tail
+      slice0 mip0 32x64 tiles, slice1 mip0 32x64 tiles: per-slice tiling CONFIRMED
+
+      16 GB virtual (32 slices)    created
+     256 GB virtual (512 slices)   created
+     512 GB virtual (1024 slices)  created
+    1024 GB virtual (2048 slices)  REFUSED
+    -> virtual address space is the budget, not the slice count: 512 GB in one reserved array
+
+So **arrays are the right default**: one resource, one descriptor, 1024 slices of 16384^2,
+each slice independently tiled and independently resident. The slice axis is the scale, and
+the thing to budget is total virtual BYTES (width x height x slices x bpp), not slices.
+
+### The bug this exposed
+
+That probe line -- `0 packed, 0 tiles for the tail` -- is a shape with **no packed tail at
+all**, because its coarsest mip is still larger than one tile. `FinestResident` had been
+returning `mipCount - 1` unconditionally as the floor, on the assumption that a pinned tail
+always covers. On such a shape it would name a level that is NULL, and the whole
+"degrade to blur, never garbage" guarantee would be a lie for exactly the shapes that look
+most reasonable.
+
+Fixed: when `NumPackedMips == 0`, the coarsest STANDARD mip is pinned instead, and
+`m_pinnedFloor` records which level the floor actually is. Same guarantee, same argument,
+now true for every shape rather than the ones that happened to be tested.
