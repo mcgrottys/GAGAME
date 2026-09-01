@@ -196,6 +196,24 @@ public:
     std::string stats;       // "streams: mars 212/512 t 13 MB | earth 96 t | fetches 34" etc.
     uint32_t fetchesThisRun = 0;    // HTTP providers report through their closure
 
+    // M9al: THE INSTRUMENT, before the change. --res-trace prints, every `traceEvery` frames
+    // and per texture tenant: the residency DEFICIT -- tiles wanted THIS frame that are not
+    // mapped, by mip -- the queue depths, and where the load slots went: reads (a 64 KB file)
+    // against paints (a 16384-sample composition), told apart by the provider's wall time.
+    // The picture is made of the deficit; the slots are why it is what it is.
+    bool traceRes = false;
+    uint32_t traceEvery = 30;
+    // M9al: RING LOADS. The user's proposal: do not ask for the finest mip a node needs in one
+    // go -- admit a new request only if its PARENT is already mapped, so every pass advances
+    // the whole view by one mip and neighbouring ground never differs by more than a ring.
+    // What it changes is the QUEUE, not the invariant: coarse-before-fine MAPPING was always
+    // enforced; REQUESTING was not, so on a fast descent the 48 load slots fill with finest-
+    // mip tiles that are not on disk, each a paint, while the next ring of the ground the
+    // camera is actually over queues behind them. Off by default until measured.
+    bool ringLoads = false;
+    uint32_t ringHeld = 0;       // requests deferred by the gate, cumulative
+    uint32_t ringHeldFrame = 0;  // ...and this frame alone
+
 private:
     struct Tenant {
         std::wstring name;
@@ -230,6 +248,10 @@ private:
         // M9af: what this tenant's realization already holds on the NVMe. Borrowed; main owns
         // the indices. Null means "no information", which schedules exactly as before.
         const TileIndex* index = nullptr;
+        // M9al: where this tenant's load slots went. A provider that returns in under 4 ms
+        // read a file; one that took longer painted. Updated under m_mx by the workers.
+        uint32_t loadsRead = 0, loadsPaint = 0;
+        uint64_t readUs = 0, paintUs = 0;
     };
 
 

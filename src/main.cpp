@@ -109,6 +109,8 @@ struct Options {
     bool directStorage = false;       // --direct-storage: NVMe -> GPU tile reads (opt-in)
     bool colorTrees = false;          // --color-trees: colour through the per-source trees
     bool gisGate = true;              // --no-gis-gate: drop the vector land/sea gate on the bed
+    bool ringLoads = false;           // --ring-loads: admit a request only if its parent is mapped
+    bool resTrace = false;            // --res-trace: residency deficit + slot accounting, per 30 f
     uint32_t treeAudit = 0;           // --tree-audit N: compare N tiles/frame, report, exit
     bool warmTrees = false;           // --warm-trees: build them without comparing, then exit
     bool bench = false;               // --bench: fly the rail, capture nothing, time honestly
@@ -311,6 +313,9 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--color-trees") o.colorTrees = true;
         // M9ak: the vector land/sea gate is ON. The flag exists to A/B what it changed.
         else if (a == "--no-gis-gate") o.gisGate = false;
+        // M9al: the ring gate and its instrument. Instrument first, gate second, both off.
+        else if (a == "--ring-loads") o.ringLoads = true;
+        else if (a == "--res-trace") o.resTrace = true;
         else if (a == "--tree-audit") o.treeAudit = uint32_t(atoi(next("400").c_str()));
         // After a source is added there is nothing to compare against -- which is exactly when
         // the trees most need building. --warm-trees composes every address regardless.
@@ -1814,14 +1819,14 @@ int main(int argc, char** argv) {
             if (sea) {
                 // M9n: THE BED IS NOW THE GA BANK. Proved equal to the committed texture at
                 // 0.0000 m across all 2187162 texels, through GA Load -> normalize -> Compose
-                // (six layers, LayeredOver) -> a reserved, paged, mipped sparse array. The
-                // committed m_tex stays built for one more cycle as the fallback and the thing
-                // the next run compares against; nothing reads it once the bank is up.
-                const uint32_t bedSrv =
-                    terrain->BedBankReady() ? terrain->BedSrv() : terrain->HeightSrv();
-                Log("[bed] consumers bound to %s",
-                    terrain->BedBankReady() ? "the GA sparse bank (slice 0)"
-                                            : "the committed texture (bank not built)");
+                // (six layers, LayeredOver) -> a reserved, paged, mipped sparse array. M9an:
+                // the committed texture is GONE; the bank is the bed and there is no fallback.
+                if (!terrain->BedBankReady()) {
+                    throw std::runtime_error(
+                        "the bed bank did not build and there is no fallback texture by design");
+                }
+                const uint32_t bedSrv = terrain->BedSrv();
+                Log("[bed] consumers bound to the GA sparse bank (slice 0) -- the only bed");
                 sea->SetBathy(bedSrv, bathy.WorldX0(), bathy.WorldZ0(), bathy.WorldSizeX(),
                               bathy.WorldSizeZ());
             }
@@ -1904,9 +1909,7 @@ int main(int argc, char** argv) {
                                                              : "DIVERGENT -- check the link");
                 }
             }
-            swe.Init(gpu, renderer.Shaders(), opt.shaderDir, bathy,
-                     terrain->BedBankReady() ? terrain->BedRes()
-                                             : terrain->HeightTex().res.Get());
+            swe.Init(gpu, renderer.Shaders(), opt.shaderDir, bathy, terrain->BedRes());
             // M6r: the discharge is LIVE again -- it rides the Flather boundary's u_ext (the
             // station stage still carries it into eta; the prism term dwarfs it either way).
             riverQ = (opt.riverQ > 0) ? opt.riverQ : LoadRiverDischarge("data/river/river.json");
@@ -2024,6 +2027,8 @@ int main(int argc, char** argv) {
         std::unique_ptr<TileTree> megaTree;
         if (globe) {
             resMgr.Init(gpu);
+            resMgr.ringLoads = opt.ringLoads;
+            resMgr.traceRes = opt.resTrace;
             int surf = -1, norm = -1;
             if (marsMode) {
                 // Mars: color/normal stay NATIVE streams (the rescued sample's pyramids are

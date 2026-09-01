@@ -1309,3 +1309,87 @@ because nothing here touches a shader.
 - The Scriptorium's Release binary — the one `.mcp.json` launches — had never been built, so the
   server could not start in any session. Built, reindexed, verified over stdio. Priors §18 is the
   entry that should have been read first; the memory now says so.
+
+## 32. Ring loads: the instrument first, then the gate, then the picture
+
+The user's frames at t=12 s showed low-resolution tiles popping in around the inlet on the way
+down, and a proposal: do not ask for the finest mip a node needs in one go; do one more pass so
+that neighbouring tiles never differ by more than a mip, and the view refines as an even spread.
+The rule for this repo is instrument before change, so this section is in that order.
+
+### The instrument
+
+`--res-trace` prints, every 30 frames, per texture tenant: the residency **deficit** — tiles in
+the queues (wanted and not mapped) by mip — the queue depths, how many entries are speculative
+or stale, the ring gate's holds, and **where the load slots went**: a provider that returns in
+under 4 ms read a file, one that took longer painted. The picture is made of the deficit; the
+slots are why it is what it is.
+
+Two things it said before the gate existed:
+
+- With the trees warm, **paints are rare** — 14–30 of ~2,000 loads on the rail — at ~4.5 ms
+  each. The popping is not painting.
+- **Reads cost 1.8 ms per 64 KB tile.** That is the per-file open, the cost `TileArchive`'s
+  header names as the one that survives every other optimisation, and it is the lever the
+  user's rule (painted tiles live on disk; DirectStorage loads them) points at.
+
+The instrument had a bug of its own worth recording: it filtered queue entries by a frame stamp
+whose meaning depended on call order, and printed `deficit 0` beside `seen 834`. The queues *are*
+the wanted-and-unmapped set by construction; it now counts them and reports staleness separately.
+
+### The gate
+
+`ResidencyManager::Want()` walks each node's column coarsest-first. With `--ring-loads` a **new**
+request below the coarsest level is admitted only if its parent is already mapped; otherwise it
+is left unstamped and the column stops there, so next frame's walk asks again one ring finer. It
+changes the *queue*, not the invariant — coarse-before-fine mapping was always enforced;
+requesting was not. On a fast descent the near field wanted mip 0 immediately, the whole column
+went into the queue, and the 48 slots filled with finest-mip tiles while the next ring of the
+ground the camera was actually over waited behind them.
+
+Nothing is lost: the node walk repeats every frame, and no slot is ever spent on a tile more than
+one level from being displayable. A half-written version with a `goto` was reverted rather than
+left unmeasured; this one is a flag and a counter.
+
+### The picture, at the same instants
+
+Both arms: warm megatexture trees, the standard rail, one frame dumped per run, and the only
+difference the flag.
+
+    frame 540  (t=18 s, start of the 80 km -> 7 km descent)    0 pixels differ
+    frame 600  (t=20 s, mid-descent)                       45.6% differ, worst 152/255
+    frame 720  (t=24 s, arriving at 7 km)                   0.24% differ, worst 30/255
+
+Frame 600 is the argument. Baseline: the near field — Newburyport, the lower-left land, the
+marsh — sits on a coarse ring while a few patches carry their finest mips. Ring: the whole view
+resolved one ring at a time and is uniformly sharp at the same instant. By 720 both arms have
+converged, so what the gate changes is exactly the transient, which is what was reported.
+
+Over the rail the gate held **11,852** requests; bench mean 4.61 vs 4.64 ms, p99 10.85 vs 11.00
+— timing is a wash, as it should be for a change that moves work, not adds it.
+
+### No fallback textures
+
+Also this section, because the user's rule arrived while the instrument was running: *there
+should be no fallback textures, only the megatextures.* `TerrainLayer::m_tex` — the committed
+CUDEM copy the bed bank was proved equal to at 0.0000 m (§28) — is deleted. The layer's own draw
+and the SWE solver read the bank; a bank that fails to build throws at boot instead of degrading,
+and `HeightSrv()` returns an invalid index rather than a second copy of the bed. The helm still
+is pixel-identical before and after.
+
+What remains off the atlases, from the live grep rather than the old audit: `GulfLayer::m_uvTex`
+(currents), `SweSolver::m_uv` (solver state, owed as a Volatile bank), `WeatherManager`'s
+per-window bed mirror, `FieldSet`'s PNG fields, and `GisStencil`'s three raster masks — which the
+*compositor* no longer needs (the gate is vector) but the shader classifier still samples. Those
+are conversions, not fallbacks. `WaveField`'s atlas is already a `GradeBank`.
+
+### The trace, both arms, same rail
+
+    baseline   mean 4.76 ms, p99 11.10, max 13.19   queue peaks: f300 547, f510 700, f540 746, f720 590
+    ring       mean 4.72 ms, p99 10.91, max 23.40   queue peaks: f300 495, f510 470, f720  86; held 11918 total
+
+At every sampled instant the queued entries are flagged **predicted**: during the descent the
+backlog is the prefetch walk's, the real view's tiles are already resident, and the gate is
+throttling speculation as much as demand. That is why the per-mip deficit column read empty
+(it excludes speculative entries) -- an instrument finding worth its own follow-up, not chased
+here.

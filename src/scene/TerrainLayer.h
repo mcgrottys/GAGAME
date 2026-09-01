@@ -34,8 +34,13 @@ public:
     // (the heightfield texture physics reads, the sea's bed) but stops rendering -- one
     // planet, one description on screen.
     bool renderEnabled = true;
-    uint32_t HeightSrv() const { return m_tex.srv; }
-    GpuTexture& HeightTex() { return m_tex; }   // M5c: the SWE solver reads the bed directly
+    // M9an: THERE IS NO FALLBACK TEXTURE. The bed is the GA sparse bank (BuildBedBank), which
+    // measured equivalent to the committed CUDEM texture at 0.0000 m (section 28) -- so the
+    // committed texture was a second copy of the same bytes, and the user's rule is that the
+    // megatexture is the only texture. HeightSrv() is the bank's SRV, and a caller that asks
+    // before the bank exists gets an invalid index and a logged refusal, not a quiet degrade.
+    uint32_t HeightSrv() const { return m_bedReady ? m_bedSrv : 0xFFFFFFFFu; }
+    // M5c: the SWE solver reads the bed directly -- from the bank, since M9an.
 
     // ---- M9k: THE BED AS A GA OBJECT -------------------------------------------------------
     // The same ground, arriving the way every 2D source is supposed to: GA Load (a
@@ -88,7 +93,7 @@ private:
     const BathyModel* m_bathy = nullptr;
     ID3D12RootSignature* m_rootSig = nullptr;
     Com<ID3D12PipelineState> m_pso;
-    GpuTexture m_tex;
+
     GradeBank m_bedBank;
     bool m_bedReady = false;
     uint32_t m_bedSrv = UINT32_MAX;   // TEXTURE2D view over slice 0 -- the drop-in

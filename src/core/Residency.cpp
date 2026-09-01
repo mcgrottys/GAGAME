@@ -4,6 +4,7 @@
 #include "core/TileAtlas.h"   // Cl2ProductSignature -- the proven closure drives DeriveDemand
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 
 namespace ga {
@@ -58,10 +59,21 @@ void ResidencyManager::LoaderThread() {
         // as 20% of the globe changing against the reference. A null here means "bytes, please",
         // which is the contract every provider already implemented.
         const bool canStream = m_stream && m_stream->Available();
+        const auto t0 = std::chrono::steady_clock::now();
         const bool ok =
             m_tenants[job->tenant].provider(job->req, data, canStream ? &loc : nullptr);
+        // M9al: read or paint? The provider does not say, but its clock does -- a 64 KB file
+        // is well under a millisecond, a composed tile is tens.
+        const uint64_t us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - t0).count());
         {
             std::lock_guard<std::mutex> lk(m_mx);
+            {
+                Tenant& tn = m_tenants[job->tenant];
+                if (us < 4000) { ++tn.loadsRead; tn.readUs += us; }
+                else           { ++tn.loadsPaint; tn.paintUs += us; }
+            }
             // M7w: a failed load must NEVER fabricate a zero tile -- mapping zeros makes the
             // residency map swear real data exists where the GPU holds bed=0 / black (the
             // step-11 MISMATCH). Retry a few times; then leave the tile honestly UNMAPPED so
@@ -378,6 +390,7 @@ void ResidencyManager::Want(int tenant, uint32_t face, uint32_t mip, float u0, f
     }
 
     for (int m = static_cast<int>(t.mips) - 1; m >= static_cast<int>(mip); --m) {
+        bool held = false;   // M9al: a request at this level waited for its parent
         const auto& ti = t.tilings[face * t.mips + m];
         const uint32_t tw = ti.WidthInTiles;
         const uint32_t th = ti.HeightInTiles;   // UINT16 in the D3D struct; widen once
@@ -409,6 +422,21 @@ void ResidencyManager::Want(int tenant, uint32_t face, uint32_t mip, float u0, f
                     st = (kStampFrame() << 1) | (it->second->predicted ? 1u : 0u);
                     continue;
                 }
+                // M9al: THE RING GATE. A new request below the coarsest level is admitted only
+                // if its parent is already MAPPED. The tile stays unstamped, so next frame's
+                // walk asks again -- by which time the parent has landed, or has not, and the
+                // answer is the same question one ring later. Nothing is lost, and no load slot
+                // is ever spent on a tile more than one level from being displayable.
+                if (ringLoads && m < static_cast<int>(t.mips) - 1) {
+                    const TileRequest pr{face, static_cast<uint32_t>(m + 1), x >> 1, y >> 1};
+                    const auto pit = m_tracked.find(MakeKey(tenant, pr));
+                    if (pit == m_tracked.end() || pit->second->state != TileState::Mapped) {
+                        held = true;
+                        ++ringHeld;
+                        ++ringHeldFrame;
+                        continue;
+                    }
+                }
                 st = myStamp;
                 auto tr = std::make_shared<Tracked>();
                 tr->tenant = tenant;
@@ -419,6 +447,9 @@ void ResidencyManager::Want(int tenant, uint32_t face, uint32_t mip, float u0, f
                 m_seen.push_back(tr);
             }
         }
+        // A level with a missing parent cannot have a mapped child: stop the column here and
+        // let the next frame's walk resume one ring finer.
+        if (held) return;
     }
 }
 
@@ -536,6 +567,51 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             it = m_inFlightReads.erase(it);
         }
     }
+
+    // ---- M9al: the instrument. Deficit by mip per tenant, queue depths, slots by kind.
+    if (traceRes && (m_frame % (std::max)(1u, traceEvery)) == 0) {
+        std::lock_guard<std::mutex> lk(m_mx);
+        std::vector<std::vector<uint32_t>> deficit(m_tenants.size());
+        for (size_t t = 0; t < m_tenants.size(); ++t) deficit[t].assign(m_tenants[t].mips, 0);
+        uint32_t seenNow = 0, loadingNow = 0;
+        // m_seen and m_loading ARE the wanted-and-unmapped set by construction. A frame-stamp
+        // filter here asked a question whose answer depended on call order, and printed zero
+        // beside a queue of 834; count the queues, and say how stale their entries are.
+        uint32_t stale = 0, predictedN = 0;
+        auto count = [&](const std::shared_ptr<Tracked>& tr) {
+            if (tr->predicted) { ++predictedN; return; }
+            if (m_frame - tr->lastSeen > 2) ++stale;
+            if (tr->state == TileState::Mapped) return;
+            if (tr->tenant < 0 || size_t(tr->tenant) >= deficit.size()) return;
+            if (tr->req.mip < deficit[tr->tenant].size()) ++deficit[tr->tenant][tr->req.mip];
+        };
+        for (const auto& tr : m_seen) { count(tr); ++seenNow; }
+        for (const auto& tr : m_loading) { count(tr); ++loadingNow; }
+        Log("[res-trace] f%u queue: seen %u, loading %u (%u predicted, %u unseen >2 frames), "
+            "in flight %d (of %u), ring-held %u this frame / %u total",
+            m_frame, seenNow, loadingNow, predictedN, stale, m_inFlight.load(),
+            kMaxLoadsInFlight, ringHeldFrame, ringHeld);
+        for (size_t t = 0; t < m_tenants.size(); ++t) {
+            const Tenant& tn = m_tenants[t];
+            uint32_t tot = 0;
+            std::string hist;
+            for (uint32_t m = 0; m < tn.mips; ++m) {
+                tot += deficit[t][m];
+                if (deficit[t][m]) {
+                    char b[24];
+                    snprintf(b, sizeof(b), " m%u:%u", m, deficit[t][m]);
+                    hist += b;
+                }
+            }
+            if (!tot && !tn.loadsPaint && !tn.loadsRead) continue;
+            const uint32_t rp = tn.loadsPaint, rr = tn.loadsRead;
+            Log("[res-trace]   %-44S deficit %u%s | slots: %u reads (%.2f ms avg), %u paints "
+                "(%.1f ms avg)",
+                tn.name.c_str(), tot, hist.c_str(), rr, rr ? tn.readUs / 1000.0 / rr : 0.0,
+                rp, rp ? tn.paintUs / 1000.0 / rp : 0.0);
+        }
+    }
+    ringHeldFrame = 0;
 
     // ---- start loads (newest-seen first, coarse first; predicted tiles yield to real ones)
     {

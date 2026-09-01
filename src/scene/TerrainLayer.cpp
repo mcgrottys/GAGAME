@@ -14,19 +14,8 @@ void TerrainLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
     if (!m_bathy || !m_bathy->Ready()) throw std::runtime_error("TerrainLayer needs bathymetry");
     if (!BuildPso(gpu, sc)) throw std::runtime_error("terrain PSO failed");
 
-    m_tex = gpu.CreateTexture2D(m_bathy->Nx(), m_bathy->Ny(), DXGI_FORMAT_R32_FLOAT,
-                                D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST,
-                                L"terrain.height (CUDEM NAVD88 m)");
-    gpu.UploadTexture(m_tex, m_bathy->Elev().data(), m_bathy->Nx() * 4);
-    m_tex.srv = gpu.CreateSrv(m_tex.res.Get(), DXGI_FORMAT_R32_FLOAT);
-    // The sea's DOMAIN shader and the M5c SWE compute kernels read this too; PIXEL alone was
-    // never a legal state for those reads (a latent M5b bug this driver forgave).
-    {
-        ID3D12GraphicsCommandList* cl = gpu.BeginUpload();
-        gpu.Transition(cl, m_tex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
-                                      D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        gpu.EndUpload();
-    }
+    // M9an: no committed copy of the bed is created here. BuildBedBank (called by main right
+    // after Init) is the bed; every consumer, this layer's own draw included, reads the bank.
 
     // Half-resolution grid geometry over a full-resolution normal texture: ~13 m quads carry the
     // shape, per-pixel normals carry the 6.8 m detail (the jetty riprap edge in particular).
@@ -82,6 +71,16 @@ void TerrainLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
 
 void TerrainLayer::Render(const FrameContext& ctx) {
     if (!m_pso || !renderEnabled) return;
+    if (!m_bedReady) {
+        // The rule: no fallback. A bed that is not on the bank is not drawn, and says so once.
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            Log("[terrain] REFUSED to draw: the bed bank is not built and there is no fallback "
+                "texture by design (M9an)");
+        }
+        return;
+    }
     PixScope scope(ctx.cl, "terrain (CUDEM topobathy at true scale)");
 
     TerrainCbData cb{};
@@ -89,7 +88,7 @@ void TerrainLayer::Render(const FrameContext& ctx) {
     cb.geo[1] = m_bathy->WorldZ0();
     cb.geo[2] = m_bathy->WorldSizeX();
     cb.geo[3] = m_bathy->WorldSizeZ();
-    cb.srv[0] = m_tex.srv;
+    cb.srv[0] = m_bedSrv;   // the GA bank; slice 0 is the CUDEM grid at its own resolution
     cb.srv[1] = m_quadsX;
     cb.srv[2] = m_quadsZ;
     cb.params[0] = waterNavd;

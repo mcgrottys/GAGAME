@@ -102,18 +102,23 @@ the incumbent (globe 0 px, helm 2 px by 1/255); bench 4.65–4.82 ms vs incumben
    zero-size records with a status, and `TileTree::Serve` returns a `TileLoc` into the child's
    archive instead of reading 64 KB. Then `--direct-storage` has its test: the tree path, warm,
    pixel-identical to the upload ring on the standard stills.
-2. **The popping at the inlet (the user's frames at t=12 s).** With everything on disk the
-   question is scheduling. Instrument BEFORE changing: per frame, tiles wanted-and-unmapped by
-   mip, and load slots spent on paints vs reads (time the provider call). The user's proposal --
-   request only tiles whose PARENT is mapped, so every pass advances one ring and neighbours
-   never differ by more than a mip -- is a ~15-line gate in `ResidencyManager::Want()` (a
-   half-written version was reverted this session; keep it behind `--ring-loads` and judge it
-   by the deficit histogram and the t=12 s frame, not by eye).
+2. **Ring loads: DONE, measured, off by default (§32).** `--res-trace` is the instrument
+   (deficit by mip, queue depths, slots as reads vs paints by provider wall time); `--ring-loads`
+   admits a request only if its parent is mapped. Frame 600 of the rail is the picture: baseline
+   patchy, ring uniformly sharp at the same instant; 540 identical, 720 converged. Timing a wash.
+   The instrument's other finding is the next lever: with the trees warm, loads are 1.8 ms READS
+   (per-file open), not paints -- which is item 1. Decide whether to make `--ring-loads` the
+   default after a full-rail video review; the code is a flag and a counter.
 3. **Then delete the rungs.** See §2. Still the largest structural item, and now the megatexture
    root is the one provider the ladder needs.
 
 ### Rules the user has stated and re-stated
 
+- **No fallback textures, only the megatextures.** `TerrainLayer::m_tex` is gone; a bed bank
+  that fails to build throws at boot. Remaining non-atlas DATA textures are conversions, not
+  fallbacks: `GulfLayer::m_uvTex`, `SweSolver::m_uv` (Volatile bank), `WeatherManager`'s bed
+  mirror, `FieldSet` PNGs, and `GisStencil`'s three raster masks (the shader classifier still
+  samples them; the compositor no longer does).
 - **No "regional layers".** Do not add another `AddTexture2D` tenant. The 16384 cap is a
   **per-page** limit; `PageTable` + `LevelLadder` (`src/core/PageTable.h`) already make the address
   space unbounded — pages tile it and resolve to array slices. The existing three colour tenants
@@ -201,6 +206,8 @@ the unlit version.
 | `--tree-audit N` | the megatexture tree vs the incumbent, N tiles per realization, exit. Skips tiles the incumbent has not repainted from today's stack |
 | `--warm-trees` | compose every address of the tree regardless, no comparison. **This is the warm-up**; ~15 min from cold for 21.5k addresses |
 | `--no-gis-gate` | drop the vector land/sea gate (on by default) — the A/B for what the survey changed |
+| `--res-trace` | every 30 frames: residency deficit by mip per tenant, queue depths, slots spent on reads vs paints |
+| `--ring-loads` | admit a tile request only if its parent is mapped: the view refines one ring at a time (**off by default**) |
 | `--selftest` | must stay green |
 
 **Standard stills:**
