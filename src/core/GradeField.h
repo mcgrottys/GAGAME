@@ -208,6 +208,10 @@ public:
         m_atlas.FlushResidencyMap(gpu);
         m_coarseMapped = true;
     }
+    // M9n: declare which channel holds coverage so the mip chain weights by it instead of
+    // letting absent texels drag the coarse levels toward zero. Set before the first BuildChain.
+    void SetCoverageChannel(int ch) { m_atlas.SetCoverageChannel(ch); }
+
     void BuildChain(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
                     ID3D12GraphicsCommandList* cl) {
         if (m_desc.mipLevels < 2 || !m_coarseMapped) return;

@@ -502,19 +502,26 @@ public:
             // zero (rather than at "absent") is deliberate: it is what SampleHeightStack does,
             // so a lone partial-weight layer pulls toward zero in both paths identically.
             double acc[4] = {0, 0, 0, 0}, cov = 0.0;
-            bool any = false;
             for (const auto& s : m_sources) {
                 DomainValue v;
                 if (!s->SampleAt(q, v) || v.weight <= 0.0f) continue;
-                any = true;
                 const double w = (std::min)(1.0, double(v.weight));
                 for (uint32_t c = 0; c < m_chan && c < 4; ++c) {
                     acc[c] += (double(v.c[c]) - acc[c]) * w;
                 }
-                cov += (1.0 - cov) * w;   // coverage the stack itself does not track
+                cov += (1.0 - cov) * w;
             }
-            if (!any) return false;
-            for (uint32_t c = 0; c < m_chan && c < 4; ++c) out.c[c] = float(acc[c]);
+            if (cov <= 0.0) return false;   // NODATA: absent, not zero. The caller fills.
+            // UN-PREMULTIPLY. Accumulating from zero is compositing over TRANSPARENT BLACK: a
+            // texel only 30% covered would come out as 0.3 x its value, i.e. dragged toward sea
+            // level by the absence beneath it. Dividing by the accumulated coverage removes that
+            // phantom layer and leaves "the value, known with 30% confidence", which is the only
+            // reading that survives being mipped or being blended again upstream.
+            //
+            // This does NOT move the bed: its bottom layer (ETOPO) covers the globe at w=1, so
+            // cov is 1 everywhere and the division is by one. It matters exactly where the old
+            // form was silently wrong -- a product whose stack does not reach the ground.
+            for (uint32_t c = 0; c < m_chan && c < 4; ++c) out.c[c] = float(acc[c] / cov);
             out.weight = float(cov);
             return true;
         }
@@ -547,11 +554,17 @@ public:
     // Compose one page. `out` is width*height*channels, `cov` is width*height. Returns the
     // number of texels that got any coverage -- zero means "do not allocate this page", which
     // is the ingest rule arriving at the other end of the pipeline.
+    // nodata: what an UNCOVERED texel gets. It is a parameter, not a constant zero, because
+    // zero is a legal value for nearly every field this composes -- a bed at 0 m is sea level,
+    // a current at 0 m/s is slack water -- so filling holes with it makes absence
+    // indistinguishable from data and there is no way to recover the difference later. `cov`
+    // remains the authority; this is what lands in the texel for consumers that only read the
+    // value plane.
     uint32_t ComposePage(const PageAddr& addr, const PageGeo& geo, uint32_t width,
                          uint32_t height, uint32_t channels, std::vector<float>& out,
-                         std::vector<float>& cov, double unixT = 0.0,
-                         double depthM = 0.0) const {
-        out.assign(size_t(width) * height * channels, 0.0f);
+                         std::vector<float>& cov, double unixT = 0.0, double depthM = 0.0,
+                         float nodata = 0.0f) const {
+        out.assign(size_t(width) * height * channels, nodata);
         cov.assign(size_t(width) * height, 0.0f);
         const double mpt = m_ladder.MetersPerTexel(addr.level);
         uint32_t covered = 0;

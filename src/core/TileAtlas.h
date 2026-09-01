@@ -35,6 +35,9 @@
 
 namespace ga {
 
+// Committed tile-pool bytes across all atlases (see TileAtlas.cpp).
+uint64_t PoolCommittedBytes();
+
 // Runs the whole self-test suite. Logs a detailed report; returns true only if every check on
 // every tile passed. Requires shaders/TileTest.hlsl under shaderDir.
 bool RunTileSelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir);
@@ -205,7 +208,16 @@ public:
     void BuildMips(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
                    ID3D12GraphicsCommandList* cl, uint32_t slice);
 
+    // M9n: which channel carries COVERAGE, or -1 for none. When set, the reduction weights the
+    // value channels by it so absent texels do not vote -- see MipReduce.hlsl. Must be set
+    // BEFORE the first BuildMips, because the reducer PSO is compiled once and cached.
+    void SetCoverageChannel(int ch) { m_coverageCh = ch; }
+
     static constexpr uint64_t kTileBytes = D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES;
+
+    // Total tile-pool memory committed across every atlas -- the sparse structure's real cost,
+    // and the number a recording should carry beside its frame times.
+    friend uint64_t PoolCommittedBytes();
 
 private:
     Com<ID3D12Resource> m_res;
@@ -250,6 +262,7 @@ private:
     uint32_t m_pinnedFloor = 0;      // the always-resident level: packed tail, or, when a
                                      // shape has no packed mips at all, the coarsest standard
     std::vector<uint32_t> m_mipUav;  // one UAV per mip, for the reduction's destination
+    int m_coverageCh = -1;           // channel holding coverage; -1 = plain box average
     DXGI_FORMAT m_fmt = DXGI_FORMAT_UNKNOWN;
     uint32_t m_mipTable = UINT32_MAX;
     Com<ID3D12RootSignature> m_mipRs;

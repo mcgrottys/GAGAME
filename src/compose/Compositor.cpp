@@ -12,7 +12,9 @@ namespace {
 
 constexpr double kPi = 3.14159265358979;
 constexpr double kMercCirc = 40075016.686;   // Web-Mercator world metres (equator)
-constexpr int kComposeVersion = 3;           // bump on any paint-math change: new cache tag
+constexpr int kComposeVersion = 4;           // bump on any paint-math change: new cache tag
+                                             // v4 (M9n): ETOPO carries the MSL -> NAVD88 link,
+                                             // so every composed height tile repaints once
                                              // (v3: grade normalization REMOVED -- it
                                              // bleached seasonal land cover toward the z10
                                              // reference capture; pixels ship as Google

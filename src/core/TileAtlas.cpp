@@ -571,6 +571,10 @@ void PoolCommitted(Gpu& gpu, uint64_t bytes) {
 }
 }   // namespace
 
+// Committed tile-pool bytes across every atlas. Outside the anonymous namespace above on
+// purpose: a recording reports the sparse structure's real cost, so main has to see it.
+uint64_t PoolCommittedBytes() { return g_poolCommittedBytes; }
+
 // ================================================================================ TileAtlas2D
 
 void TileAtlas2D::Init(Gpu& gpu, uint32_t widthTexels, uint32_t heightTexels, DXGI_FORMAT fmt,
@@ -832,9 +836,15 @@ void TileAtlas2D::BuildMips(Gpu& gpu, ShaderCompiler& sc, const std::wstring& sh
                                                      IID_PPV_ARGS(&m_mipRs)))) {
             return;
         }
-        const std::wstring def = L"GA_MIP_CH=" + std::to_wstring(channels);
+        std::vector<std::wstring> defs{L"GA_MIP_CH=" + std::to_wstring(channels)};
+        if (m_coverageCh >= 0 && m_coverageCh < channels && channels >= 2) {
+            // The bank declared which channel is coverage, so the reduction can weight by it.
+            defs.push_back(L"GA_MIP_COVCH=" + std::to_wstring(m_coverageCh));
+            Log("[atlas] mip reduce is COVERAGE-WEIGHTED on channel %d -- absent texels do "
+                "not vote", m_coverageCh);
+        }
         ShaderBlob cs =
-            sc.Compile(shaderDir + L"/MipReduce.hlsl", L"CsMipReduce", L"cs_6_0", {def});
+            sc.Compile(shaderDir + L"/MipReduce.hlsl", L"CsMipReduce", L"cs_6_0", defs);
         if (!cs.Valid()) {
             Log("[atlas] BuildMips: MipReduce.hlsl (%d ch) failed to compile", channels);
             return;

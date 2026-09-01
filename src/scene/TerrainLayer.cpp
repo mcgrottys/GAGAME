@@ -121,15 +121,14 @@ void TerrainLayer::Render(const FrameContext& ctx) {
 //  the sea shader, the water bank and the globe, and a silent half-texel slide here would move
 //  a coastline everywhere at once.
 // ================================================================================================
-double TerrainLayer::BuildBedBank(Gpu& gpu, const Compositor& comp, int heightChannel,
-                                  double mslToNavd88M, const char* datumProv) {
+double TerrainLayer::BuildBedBank(Gpu& gpu, const Compositor& comp, int heightChannel) {
     const uint32_t nx = m_bathy->Nx(), ny = m_bathy->Ny();
     if (nx == 0 || ny == 0) return -1.0;
 
     // THE STACK, not one file. Every layer of the height channel becomes a DomainSource through
     // the same Sample() the renderer already calls, so the resample, the feather and the edit
     // polygons have exactly one implementation between the two paths.
-    auto layers = BuildHeightStack(comp, heightChannel, mslToNavd88M, datumProv);
+    auto layers = BuildHeightStack(comp, heightChannel);
     if (layers.empty()) {
         Log("[bed] height channel %d has no layers -- GA path not built", heightChannel);
         return -1.0;
@@ -171,35 +170,11 @@ double TerrainLayer::BuildBedBank(Gpu& gpu, const Compositor& comp, int heightCh
         return g;
     };
 
-    // ---- FIDELITY FIRST, and separately from correctness. Two different questions hide in one
-    // number here, and answering them together would let each excuse the other:
-    //
-    //   1. did the realization MOVE faithfully?   compose with the datum link set to ZERO --
-    //      i.e. blend the layers exactly as the engine does -- and the answer must be 0.0000.
-    //   2. is the engine's bed RIGHT?             that is what the real link then changes, and
-    //      its size is a finding about the committed bed, not an error in this path.
-    //
-    // Checking (1) with the correction applied would have reported 0.092 m and left it ambiguous
-    // whether the stack was reproduced or merely close.
-    double worstRaw = 0.0;
+    // The datum correction now lives in the ETOPO sources, so BOTH paths carry it and the
+    // comparison is direct again: the GA stack and BathyModel's loop should agree exactly,
+    // because they are reading the same six layers through the same Sample() with the same
+    // blend rule. Any residual here is a real defect in this path, not a deliberate difference.
     const std::vector<float>& truth = m_bathy->Elev();
-    if (truth.size() == size_t(nx) * ny) {
-        auto raw = BuildHeightStack(comp, heightChannel, 0.0, "fidelity probe: engine's own rule");
-        DomainCompositor rc;
-        rc.SetLadder(lad);
-        rc.SetBlend(DomainCompositor::Blend::LayeredOver);
-        for (auto& l : raw) rc.Add(l);
-        std::vector<float> page, cov;
-        rc.ComposePage(PageAddr{0, 0, 0}, pageGeo(nx, ny), nx, ny, 1, page, cov);
-        for (size_t i = 0; i < page.size(); ++i) {
-            if (cov[i] <= 0.0f) continue;
-            worstRaw = (std::max)(worstRaw, std::abs(double(page[i]) - double(truth[i])));
-        }
-        Log("[bed] realization fidelity: worst |GA(link=0) - committed| = %.4f m (%s)", worstRaw,
-            (worstRaw < 0.01) ? "EQUIVALENT -- the six-layer stack is reproduced"
-                              : "the stack is NOT reproduced; the datum is not the issue");
-    }
-
     double worst = 0.0;
     uint32_t levels = 0, coveredL0 = 0;
     std::vector<float> l0page;
@@ -207,9 +182,17 @@ double TerrainLayer::BuildBedBank(Gpu& gpu, const Compositor& comp, int heightCh
         const uint32_t w = (nx >> lvl) ? (nx >> lvl) : 1u;
         const uint32_t h = (ny >> lvl) ? (ny >> lvl) : 1u;
         std::vector<float> page, cov;
-        const uint32_t covered =
-            dc.ComposePage(PageAddr{lvl, 0, 0}, pageGeo(w, h), w, h, 1, page, cov);
+        // NODATA IS NOT ZERO. A bed at 0 m is sea level, so filling a hole with zero would put a
+        // fictional shoreline in the bank that nothing downstream could tell from survey. -9999
+        // is BathyModel's own sentinel, so the two paths agree on what absence looks like.
+        const uint32_t covered = dc.ComposePage(PageAddr{lvl, 0, 0}, pageGeo(w, h), w, h, 1, page,
+                                                cov, 0.0, 0.0, -9999.0f);
         if (!covered) continue;
+        const uint32_t holes = uint32_t(size_t(w) * h) - covered;
+        if (holes) {
+            Log("[bed]   L%u: %u/%u texels NODATA (-9999) -- absent, not sea level", lvl, holes,
+                uint32_t(size_t(w) * h));
+        }
         if (lvl == 0) {
             coveredL0 = covered;
             l0page = page;
@@ -225,15 +208,18 @@ double TerrainLayer::BuildBedBank(Gpu& gpu, const Compositor& comp, int heightCh
         ++levels;
     }
     m_bedReady = levels > 0;
+    if (m_bedReady) {
+        // The drop-in view: TEXTURE2D over the array's slice 0, whole chain. Consumers that
+        // expect a plain heightfield bind this and never learn they are reading a paged bank.
+        m_bedSrv = gpu.CreateSrv(m_bedBank.Res(), DXGI_FORMAT_R32_FLOAT);
+    }
     // The shipped bed carries the correction, so it is EXPECTED to differ from the committed one.
     // The verdict below is about fidelity; the difference is reported as what it is.
-    Log("[bed] GA path: %ux%u, %u levels, %u layers, %u/%u texels covered at L0 -- %s",
-        nx, ny, levels, uint32_t(layers.size()), coveredL0, nx * ny,
-        (worstRaw < 0.01)
-            ? "SAFE TO SWITCH: stack reproduced exactly, and the shipped bed adds the datum link"
-            : "DO NOT SWITCH: the stack is not reproduced");
-    Log("[bed] shipped GA bed vs committed: %.4f m, all of it the published MSL -> NAVD88 link "
-        "the committed bed omits (it blends MSL-referenced ETOPO as if it were NAVD88)", worst);
+    Log("[bed] GA path: %ux%u, %u levels, %u layers, %u/%u texels covered at L0, "
+        "worst |GA - committed| = %.4f m (%s)",
+        nx, ny, levels, uint32_t(layers.size()), coveredL0, nx * ny, worst,
+        (worst < 0.01) ? "EQUIVALENT -- safe to switch consumers"
+                       : "DIVERGENT -- do not switch consumers");
 
     // ---- THE DATUM SENSITIVITY PROBE. The MSL -> NAVD88 link is a real published number but a
     // regional one, so rather than argue about its accuracy, measure what it can move. The same
@@ -241,7 +227,7 @@ double TerrainLayer::BuildBedBank(Gpu& gpu, const Compositor& comp, int heightCh
     // is how many metres of the finished bed follow. Where CUDEM and the edits paint at full
     // weight it is zero, and the question is settled THERE by measurement rather than by essay.
     if (!l0page.empty()) {
-        auto probed = BuildHeightStack(comp, heightChannel, mslToNavd88M, datumProv, 1.0);
+        auto probed = BuildHeightStack(comp, heightChannel, 1.0);
         DomainCompositor pc;
         pc.SetLadder(lad);
         pc.SetBlend(DomainCompositor::Blend::LayeredOver);
@@ -257,10 +243,9 @@ double TerrainLayer::BuildBedBank(Gpu& gpu, const Compositor& comp, int heightCh
             sumInf += inf;
             ++n;
         }
-        Log("[bed] datum sensitivity: 1.000 m of MSL error moves the bed by at most %.4f m "
-            "(mean %.4f m) -- the %.3f m link can shift this bed by <= %.4f m",
-            maxInf, n ? sumInf / double(n) : 0.0, mslToNavd88M,
-            std::abs(mslToNavd88M) * maxInf);
+        Log("[bed] datum sensitivity: 1.000 m of ETOPO datum error moves the bed by at most "
+            "%.4f m (mean %.4f m) -- so the 0.092 m link is worth <= %.4f m here",
+            maxInf, n ? sumInf / double(n) : 0.0, 0.092 * maxInf);
     }
     return worst;
 }

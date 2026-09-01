@@ -1525,9 +1525,27 @@ int main(int argc, char** argv) {
         bathyBoston.Load("data/bathy/boston.json");
 
         Compositor compositor;
+        // M9n: THE HEIGHT STACK'S VERTICAL DATUM, resolved once and applied at the sources.
+        // ETOPO is MSL/geoid referenced and everything above it in the stack is NAVD88; the two
+        // were blended as one height for as long as the stack has existed. The link is published
+        // -- CO-OPS carries MSL and NAVD88 on one station staff -- so it is derived, logged, and
+        // handed to the ETOPO sources, which means the CORRECTION REACHES EVERY CONSUMER of the
+        // stack rather than only the products that happen to know about it.
+        double navdAboveMsl = 0.0;
+        std::string datumFrom = "none";
+        const bool haveMslLink = NavdAboveMsl(model, &navdAboveMsl, &datumFrom);
+        const double mslToNavd = haveMslLink ? -navdAboveMsl : 0.0;
+        if (haveMslLink) {
+            Log("[datum] height stack: MSL -> NAVD88 = %+.3f m, from CO-OPS published datums at "
+                "%s (regional, not GEOID18) -- applied to the ETOPO layers at the source",
+                mslToNavd, datumFrom.c_str());
+        } else {
+            Log("[datum] height stack: NO station publishes both MSL and NAVD88 -- ETOPO stays "
+                "in its own datum and the stack blends two frames (pre-M9n behaviour)");
+        }
         EquirectHeightSource srcEtopo("noaa.etopo2022", "equirect-grid int16 8192x4096",
                                       489200.0, &globeModel.Elev(), globeModel.Nx(),
-                                      globeModel.Ny());
+                                      globeModel.Ny(), mslToNavd);
         EquirectHeightSource srcMola("nasa.mola.megdr16", "equirect-grid int16 5760x2880",
                                      369700.0, &marsModel.Elev(), marsModel.Nx(),
                                      marsModel.Ny());
@@ -1546,7 +1564,7 @@ int main(int argc, char** argv) {
                     "noaa.etopo15s.ne", "window-grid int16 1440x1200", 46100.0,
                     &globeModel.NeElev(), globeModel.NeNx(), globeModel.NeNy(),
                     globeModel.NeLon0(), globeModel.NeLat1(), globeModel.NeDLon(),
-                    globeModel.NeDLat());
+                    globeModel.NeDLat(), 0.04, mslToNavd);
                 hstack.push_back(srcNe15.get());
             }
             if (bathyCapeAnn.Ready()) {
@@ -1607,9 +1625,26 @@ int main(int argc, char** argv) {
             terrain->Configure(opt.shaderDir, &bathy);
             terrain->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             renderer.AddLayer(std::move(terrOwned));
+            // M9k/M9n: THE BED, through GA Load -> normalize -> GA Compose (the six-layer
+            // height stack, LayeredOver) -> a reserved, paged, mipped sparse array. Built HERE,
+            // before anything binds a bed, because the consumers below now take the bank: the
+            // solver, the sea shader, the churn kernel and the water bank all read one bed and
+            // it has to exist before the first of them asks.
+            terrain->BuildBedBank(gpu, compositor, hgtCh);
+
             if (sea) {
-                sea->SetBathy(terrain->HeightSrv(), bathy.WorldX0(), bathy.WorldZ0(),
-                              bathy.WorldSizeX(), bathy.WorldSizeZ());
+                // M9n: THE BED IS NOW THE GA BANK. Proved equal to the committed texture at
+                // 0.0000 m across all 2187162 texels, through GA Load -> normalize -> Compose
+                // (six layers, LayeredOver) -> a reserved, paged, mipped sparse array. The
+                // committed m_tex stays built for one more cycle as the fallback and the thing
+                // the next run compares against; nothing reads it once the bank is up.
+                const uint32_t bedSrv =
+                    terrain->BedBankReady() ? terrain->BedSrv() : terrain->HeightSrv();
+                Log("[bed] consumers bound to %s",
+                    terrain->BedBankReady() ? "the GA sparse bank (slice 0)"
+                                            : "the committed texture (bank not built)");
+                sea->SetBathy(bedSrv, bathy.WorldX0(), bathy.WorldZ0(), bathy.WorldSizeX(),
+                              bathy.WorldSizeZ());
             }
         } else {
             Log("[main] no bathymetry (run: py -3 harvester\\harvest_bathy.py); open-ocean sea");
@@ -1620,29 +1655,6 @@ int main(int argc, char** argv) {
         SweSolver swe;
         double riverQ = 70.0;
         if (terrain && sea && !opt.sweOff) {
-            // M9k: the bed through GA Load -> GA Compose -> sparse structure, built beside
-            // the committed texture and compared against it. Nothing switches to it until the
-            // disagreement is small: the bed feeds the solver, the sea shader, the water bank
-            // and the globe, so a silent slide here moves a coastline everywhere at once.
-            {
-                // The MSL -> NAVD88 link for the stack's ETOPO layers, from the same published
-                // station datums the tide link comes from. Negative: NAVD88 zero sits ABOVE
-                // local MSL, so an MSL height loses that much to become NAVD88.
-                double navdAboveMsl = 0.0;
-                std::string dfrom = "none";
-                char prov[192];
-                if (NavdAboveMsl(model, &navdAboveMsl, &dfrom)) {
-                    snprintf(prov, sizeof(prov),
-                             "CO-OPS published datums at %s: NAVD88 zero %+.3f m above local MSL "
-                             "(regional; not GEOID18 -- see the sensitivity probe)",
-                             dfrom.c_str(), navdAboveMsl);
-                } else {
-                    snprintf(prov, sizeof(prov),
-                             "NO station publishes both MSL and NAVD88 -- link unavailable");
-                }
-                terrain->BuildBedBank(gpu, compositor, hgtCh, -navdAboveMsl, prov);
-            }
-
             // ---- M9m: THE COMPOSE TREE, and the tide step that forced it into existence.
             //
             // Depth is not a dataset anyone ships. It is water level minus bed, and those two
@@ -1713,7 +1725,9 @@ int main(int argc, char** argv) {
                                                              : "DIVERGENT -- check the link");
                 }
             }
-            swe.Init(gpu, renderer.Shaders(), opt.shaderDir, bathy, terrain->HeightTex().res.Get());
+            swe.Init(gpu, renderer.Shaders(), opt.shaderDir, bathy,
+                     terrain->BedBankReady() ? terrain->BedRes()
+                                             : terrain->HeightTex().res.Get());
             // M6r: the discharge is LIVE again -- it rides the Flather boundary's u_ext (the
             // station stage still carries it into eta; the prism term dwarfs it either way).
             riverQ = (opt.riverQ > 0) ? opt.riverQ : LoadRiverDischarge("data/river/river.json");
@@ -3004,6 +3018,17 @@ int main(int argc, char** argv) {
         bool dumpedSolid = false;   // --dump-both: the solid image is already on disk
         double frameMsSum = 0.0;
         uint32_t frameMsN = 0;
+        // M9o: a recording carries its OWN cost. A rail is the only run long enough and varied
+        // enough -- globe to helm, every residency regime in one take -- for frame time to mean
+        // something, and it is exactly the run nobody measures because they are watching the
+        // pictures. Per-frame, not averaged: a mean hides the stall that a viewer actually sees.
+        std::vector<float> railMs, railLoopMs;
+        std::vector<uint64_t> railPool;
+        if (!opt.rail.empty()) {
+            railMs.reserve(opt.frames ? opt.frames : 1200);
+            railLoopMs.reserve(opt.frames ? opt.frames : 1200);
+            railPool.reserve(opt.frames ? opt.frames : 1200);
+        }
 
         for (;;) {
             if (!opt.headless) {
@@ -3344,12 +3369,26 @@ int main(int argc, char** argv) {
             if (terrain) terrain->waterNavd = static_cast<float>(waterNavd);
             if (globe) globe->waterNavd = static_cast<float>(waterNavd);   // M6j materials
 
+            // M9o: the ENGINE's cost, bracketed tightly. dt (the loop interval) also carries
+            // the previous frame's PNG encode, which is the recorder's bill and not the
+            // renderer's -- reporting that as frame time would slander the engine by ~35 ms a
+            // frame. Both are kept: renderMs judges the engine, dt judges the capture.
+            const auto rf0 = Clock::now();
             renderer.RenderFrame(cam, static_cast<float>(simUnix - startUnix), dt);
+            const float renderMs =
+                std::chrono::duration<float>(Clock::now() - rf0).count() * 1000.0f;
 
             if (!opt.rail.empty() && frame >= 150u) {
                 wchar_t rp[512];
                 swprintf(rp, 512, L"%s\\rail_%04u.png", opt.rail.c_str(), frame - 150u);
                 renderer.DumpPng(rp);
+                // Two clocks, because they answer different questions. renderMs is the engine
+                // alone; dt is the whole loop and therefore includes the PREVIOUS frame's PNG
+                // encode, which at 1600x900 is tens of milliseconds of the recorder's own cost.
+                // A rail reported on dt would look three times slower than the thing it shows.
+                railMs.push_back(renderMs);
+                railLoopMs.push_back(dt * 1000.0f);
+                railPool.push_back(PoolCommittedBytes());
             }
 
             if (!opt.headless &&
@@ -3383,6 +3422,78 @@ int main(int argc, char** argv) {
             if (opt.frames &&
                 frame >= opt.frames + (opt.rail.empty() ? 0u : 150u) +
                              (opt.dumpBoth ? 1u : 0u)) {
+                // ---- M9o: THE RECORDING'S OWN COST, reported with the recording.
+                //
+                // Percentiles, not a mean. A rail runs from orbit to helm height, crossing
+                // every residency regime the engine has, so its frame times are deliberately
+                // NOT a single distribution -- averaging them describes no moment that ever
+                // happened. p95 and max are what a viewer perceives as stutter; the worst
+                // frame's INDEX says where in the flight it happened, which is the half that
+                // makes it actionable (a spike at frame 600 is the 80 km -> 7 km descent
+                // paging in, a spike at 1100 is helm-height water detail, and they have different
+                // fixes).
+                if (!railMs.empty()) {
+                    std::vector<float> sorted = railMs;
+                    std::sort(sorted.begin(), sorted.end());
+                    auto pct = [&](double q) {
+                        const size_t i = (std::min)(sorted.size() - 1,
+                                                    size_t(q * double(sorted.size() - 1) + 0.5));
+                        return sorted[i];
+                    };
+                    double sum = 0.0;
+                    size_t worstI = 0;
+                    for (size_t i = 0; i < railMs.size(); ++i) {
+                        sum += railMs[i];
+                        if (railMs[i] > railMs[worstI]) worstI = i;
+                    }
+                    const double mean = sum / double(railMs.size());
+                    Log("[rail] %zu frames RENDER: mean %.2f ms (%.1f fps), p50 %.2f, "
+                        "p95 %.2f, p99 %.2f, max %.2f ms at frame %zu",
+                        railMs.size(), mean, mean > 0.0 ? 1000.0 / mean : 0.0, pct(0.50),
+                        pct(0.95), pct(0.99), double(railMs[worstI]), worstI);
+                    if (!railLoopMs.empty()) {
+                        double lsum = 0.0;
+                        for (float m : railLoopMs) lsum += m;
+                        const double lmean = lsum / double(railLoopMs.size());
+                        Log("[rail] capture overhead: loop mean %.2f ms, so %.2f ms/frame is "
+                            "PNG encode and disk -- the recorder's bill, not the engine's",
+                            lmean, (lmean > mean) ? (lmean - mean) : 0.0);
+                    }
+                    uint32_t over33 = 0, over16 = 0;
+                    for (float m : railMs) {
+                        if (m > 33.3f) ++over33;
+                        if (m > 16.7f) ++over16;
+                    }
+                    Log("[rail] budget: %u/%zu frames over 16.7 ms (%.1f%%), %u over 33.3 ms "
+                        "(%.1f%%)",
+                        over16, railMs.size(), 100.0 * over16 / double(railMs.size()), over33,
+                        100.0 * over33 / double(railMs.size()));
+                    Log("[rail] tile pool at end: %.2f GB committed across every atlas -- the "
+                        "sparse structure's real cost for this flight",
+                        railPool.empty() ? 0.0 : railPool.back() / 1073741824.0);
+
+                    // The per-frame series, next to the frames it describes. A summary answers
+                    // "was it smooth"; only the series answers "where did it stop being smooth",
+                    // and that question is the reason to record at all.
+                    std::string csv;
+                    for (const wchar_t* w = opt.rail.c_str(); *w; ++w) {
+                        csv.push_back(static_cast<char>(*w));   // rail dirs are ASCII
+                    }
+                    csv += "\\metrics.csv";
+                    if (FILE* f = nullptr; fopen_s(&f, csv.c_str(), "w") == 0 && f) {
+                        fprintf(f, "frame,render_ms,render_fps,loop_ms,pool_bytes\n");
+                        for (size_t i = 0; i < railMs.size(); ++i) {
+                            fprintf(f, "%zu,%.4f,%.2f,%.4f,%llu\n", i, double(railMs[i]),
+                                    railMs[i] > 0.0f ? 1000.0 / double(railMs[i]) : 0.0,
+                                    i < railLoopMs.size() ? double(railLoopMs[i]) : 0.0,
+                                    static_cast<unsigned long long>(
+                                        i < railPool.size() ? railPool[i] : 0));
+                        }
+                        fclose(f);
+                        Log("[rail] per-frame series -> %s", csv.c_str());
+                    }
+                }
+
                 // M7j: THE HYPERVISOR -- one sample, every transformation, each hop tagged
                 // with the AST edge it exercises. CPU-derivable steps print values; fields
                 // that live only on the GPU print their frame contract and where to look.

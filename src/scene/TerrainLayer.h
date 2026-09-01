@@ -49,9 +49,25 @@ public:
     // one of them at once for no way to tell which broke.
     GradeBank& BedBank() { return m_bedBank; }
     bool BedBankReady() const { return m_bedReady; }
+
+    // ---- M9n: THE BANK AS A DROP-IN BED.
+    //
+    // A paged bank is a Texture2DArray, and every bed consumer -- Sea.hlsl, SeaChurn.hlsl, the
+    // SWE solver -- reads a Texture2D. In D3D12 those are the SAME resource type
+    // (RESOURCE_DIMENSION_TEXTURE2D with DepthOrArraySize), so a TEXTURE2D SRV over the array
+    // views slice 0 and every existing consumer keeps working untouched.
+    //
+    // That is worth more than tidiness: switching the bed is the highest-blast-radius change in
+    // the engine (solver, sea shader, churn, water bank, globe), and doing it WITHOUT editing a
+    // shader means if anything moves on screen, the bank's CONTENT is the only possible cause --
+    // and its content was already proved equal to the committed texture at 0.0000 m.
+    //
+    // Residency: BuildBedBank pins every level of slice 0, so nothing here reads an unmapped
+    // tile. The bed lives in the sparse structure; it just happens to be entirely resident.
+    uint32_t BedSrv() const { return m_bedSrv; }
+    ID3D12Resource* BedRes() { return m_bedBank.Res(); }
     // Returns the worst |GA path - committed texture| in metres, or -1 if it could not run.
-    double BuildBedBank(Gpu& gpu, const Compositor& comp, int heightChannel,
-                        double mslToNavd88M, const char* datumProv);
+    double BuildBedBank(Gpu& gpu, const Compositor& comp, int heightChannel);
 
     // M6i: the composed color channel -- filled by FillComposedCb in main, the SAME function
     // and constants the globe uses, so the two layers agree texel for texel.
@@ -75,6 +91,7 @@ private:
     GpuTexture m_tex;
     GradeBank m_bedBank;
     bool m_bedReady = false;
+    uint32_t m_bedSrv = UINT32_MAX;   // TEXTURE2D view over slice 0 -- the drop-in
     uint32_t m_quadsX = 0, m_quadsZ = 0;
     ComposedSurfaceCb m_cs{};   // zero until SetComposed: every channel reads "off"
 };

@@ -50,6 +50,11 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
         // view and composites them on coverage: no second SRV, and no branch deciding which
         // source owns a pixel.
         d.arraySlices = 2;
+        // Channel 2 is coverage (the compose loop writes it there). Declaring it makes the mip
+        // chain weight by it: without this, a coarse texel over a half-covered region averages
+        // real divergence with the zeros of absence and reports the result as fact -- and the
+        // error is WORST at the pinned floor, which is exactly what a distant sample reads.
+        m_velGrad.SetCoverageChannel(2);
         m_velGrad.Init(gpu, d, policy::None());
         // A sliced bank activates nothing by itself -- an inactive slice honestly reports
         // kNothingResident. Slice 0 is ours and must be live before any residency is asked.
