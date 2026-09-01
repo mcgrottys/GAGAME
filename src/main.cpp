@@ -1606,6 +1606,11 @@ int main(int argc, char** argv) {
         SweSolver swe;
         double riverQ = 70.0;
         if (terrain && sea && !opt.sweOff) {
+            // M9k: the bed through GA Load -> GA Compose -> sparse structure, built beside
+            // the committed texture and compared against it. Nothing switches to it until the
+            // disagreement is small: the bed feeds the solver, the sea shader, the water bank
+            // and the globe, so a silent slide here moves a coastline everywhere at once.
+            terrain->BuildBedBank(gpu, "data/bathy/merrimack.json");
             swe.Init(gpu, renderer.Shaders(), opt.shaderDir, bathy, terrain->HeightTex().res.Get());
             // M6r: the discharge is LIVE again -- it rides the Flather boundary's u_ext (the
             // station stage still carries it into eta; the prism term dwarfs it either way).

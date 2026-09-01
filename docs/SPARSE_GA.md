@@ -711,3 +711,38 @@ yet wired to this bank.
 
 So: the pipeline is proven end to end on one page. Making the fallback unnecessary is a matter
 of pages, not of mechanism.
+
+## 25. The bed through the GA path, and what the disagreement revealed
+
+`TerrainLayer::BuildBedBank` builds the CUDEM bed the way every 2D source is supposed to
+arrive -- GA Load (`GeoGridLoader`), GA Compose (`RasterSource` through `DomainCompositor`),
+DirectX sparse structure (a paged `GradeBank`: reserved array, mip chain, pinned floor,
+residency map) -- **alongside** the committed texture, and reports the worst disagreement:
+
+    [bed] GA path: 1863x1174, 6 levels, 2187162/2187162 texels covered at L0,
+          worst |GA - committed| = 28.3231 m (DIVERGENT -- do not switch consumers)
+
+Nothing switched. The bed feeds the solver, the sea shader, the water bank and the globe, so a
+silent half-texel slide there moves a coastline everywhere at once -- which is exactly why the
+new path was built beside the old one with a number attached rather than swapped in.
+
+### The 28 m is not a bug in the GA path
+
+    [bathy] realized from the height channel: 395205 moved (152351 by >0.5 m,
+            worst 29.1 m: feathers + hand-edit structures)
+
+The GA path reproduces the FILE exactly. The engine's bed is that file **realized against the
+composed height channel** -- survey edits and feathering laid over CUDEM -- and 28.3 sits
+inside that 29.1. The two paths disagree by precisely the step the GA path does not perform.
+
+**And that step is a composition.** Survey edits over a base grid, resolved by authority, is
+what `DomainCompositor` exists to do: the edits are a second source with higher priority, and
+the feather is the weight ramp it already implements. Today it runs as a post-process inside
+`BathyModel`, which is why a compositor that has never heard of it cannot reproduce the result.
+
+So the finish is not to make the GA path imitate the realization -- it is to move the
+realization INTO the compositor as a source, at which point the disagreement should collapse
+and the committed texture becomes redundant rather than authoritative.
+
+That is the shape of every remaining conversion in section 22: not "read the same bytes
+sparsely", but "make the thing that edits the bytes a source".

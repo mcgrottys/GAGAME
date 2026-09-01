@@ -6,6 +6,9 @@
 
 #include "compose/Compositor.h"
 #include "scene/Layer.h"
+#include "compose/DomainSource.h"
+#include "core/GeoGridLoader.h"
+#include "core/GradeField.h"
 #include "sim/BathyModel.h"
 
 #include <string>
@@ -33,6 +36,21 @@ public:
     uint32_t HeightSrv() const { return m_tex.srv; }
     GpuTexture& HeightTex() { return m_tex; }   // M5c: the SWE solver reads the bed directly
 
+    // ---- M9k: THE BED AS A GA OBJECT -------------------------------------------------------
+    // The same ground, arriving the way every 2D source is supposed to: GA Load (a
+    // FieldLoader over the harvester's grid), GA Compose (a RasterSource through the
+    // DomainCompositor, coverage and all), and a DirectX sparse structure (a paged GradeBank,
+    // reserved array, mip chain, residency map).
+    //
+    // Built ALONGSIDE m_tex on purpose, and proved equal to it before anything switches. The
+    // bed is the most load-bearing texture in the engine -- SweSolver, Sea.hlsl, WaterBank and
+    // Globe.hlsl all read it -- so swapping consumers on an unverified path would risk every
+    // one of them at once for no way to tell which broke.
+    GradeBank& BedBank() { return m_bedBank; }
+    bool BedBankReady() const { return m_bedReady; }
+    // Returns the worst |GA path - committed texture| in metres, or -1 if it could not run.
+    double BuildBedBank(Gpu& gpu, const std::string& gridJson);
+
     // M6i: the composed color channel -- filled by FillComposedCb in main, the SAME function
     // and constants the globe uses, so the two layers agree texel for texel.
     void SetComposed(const ComposedSurfaceCb& cs) { m_cs = cs; }
@@ -53,6 +71,8 @@ private:
     ID3D12RootSignature* m_rootSig = nullptr;
     Com<ID3D12PipelineState> m_pso;
     GpuTexture m_tex;
+    GradeBank m_bedBank;
+    bool m_bedReady = false;
     uint32_t m_quadsX = 0, m_quadsZ = 0;
     ComposedSurfaceCb m_cs{};   // zero until SetComposed: every channel reads "off"
 };
