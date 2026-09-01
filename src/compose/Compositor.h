@@ -173,6 +173,14 @@ public:
     void PaintColorTile(const Channel& ch, const ColorFrame& frame, const TileRequest& r,
                         const TileBox& box, const std::vector<size_t>& inc,
                         std::vector<uint8_t>& out, bool& complete) const;
+    // ONE source over the same addresses -- what a per-source tree stores (SourceTree.h). RGB
+    // is the source's own bytes, untouched; ALPHA IS THE PAINT WEIGHT, quantized, because the
+    // stack's feather lives in the weight and a tree that dropped it could not be composed
+    // afterwards. `anyCover`/`fullCover` are what let the composite decide, per tile, between a
+    // REFERENCE to this tree and a genuine composition.
+    static void PaintSourceTile(ColorSource* src, const ColorFrame& frame, const TileRequest& r,
+                                const TileBox& box, std::vector<uint8_t>& out, bool& complete,
+                                bool& anyCover, bool& fullCover);
     uint64_t HeightSubset(const Channel& ch, const TileBox& box,
                           std::vector<size_t>& included) const;
     uint64_t FieldSubset(const Channel& ch, const TileBox& box,

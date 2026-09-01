@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 
 #include "compose/ColorStackSource.h"
+#include "compose/SourceTree.h"
 #include "compose/TileArchive.h"
 #include "compose/TileIndex.h"
 #include "core/TileStream.h"
@@ -105,6 +106,8 @@ struct Options {
     uint32_t predictEvery = 3;        // --predict-every N: prefetch-walk cadence (1 = old)
     bool packTiles = false;           // --pack-tiles: pack the composed cache, then exit
     bool directStorage = false;       // --direct-storage: NVMe -> GPU tile reads (opt-in)
+    bool colorTrees = false;          // --color-trees: colour through the per-source trees
+    uint32_t treeAudit = 0;           // --tree-audit N: compare N tiles/frame, report, exit
     bool bench = false;               // --bench: fly the rail, capture nothing, time honestly
     std::string mp4;                  // --mp4 PATH: pipe rail frames straight to an encoder
     bool flatBed = false;             // --flat-bed N: constant bed, to A/B bathymetry
@@ -299,6 +302,11 @@ Options ParseArgs(int argc, char** argv) {
         // M9ai: route archived tile reads NVMe -> GPU. Off by default until the streamed
         // path is proven pixel-equal to the upload-ring path it replaces.
         else if (a == "--direct-storage") o.directStorage = true;
+        // M9aj: the three trees. --color-trees composes colour FROM the per-source trees
+        // instead of from the sources; --tree-audit measures the two answers against each
+        // other on tiles the shipped path already painted, then exits.
+        else if (a == "--color-trees") o.colorTrees = true;
+        else if (a == "--tree-audit") o.treeAudit = uint32_t(atoi(next("400").c_str()));
         else if (a == "--predict-every") o.predictEvery = uint32_t(atoi(next("1").c_str()));
         // M9p: replace the bed with a flat floor at this NAVD height. The A/B against a normal
         // run isolates BATHYMETRY's contribution to the geometry from everything else.
@@ -2058,14 +2066,27 @@ int main(int argc, char** argv) {
                         colorStack.push_back(&srcOverlay);
                     }
                     colCh = compositor.AddColorChannel("earth.color", std::move(colorStack));
+                    // M9aj: THE THREE TREES. Each source keeps its own sparse tree on disk; the
+                    // composite tree references one of them wherever exactly one source claims
+                    // a tile outright, and materializes bytes only where they OVERLAP. Built
+                    // beside the shipped path, selected per realization, so the two can be
+                    // compared on the same addresses (--tree-audit) before either carries a
+                    // frame.
+                    static ColorTreeStack colorTrees;
+                    if (opt.colorTrees || opt.treeAudit) colorTrees.Init(&compositor, colCh);
+                    auto mkColor = [&](const ColorFrame& f) -> TileProviderFn {
+                        return opt.colorTrees ? colorTrees.Realization(f)
+                                              : compositor.ColorRealization(colCh, f);
+                    };
                     colorCubeT = resMgr.AddTextureCube(gpu, L"earth.color (composed)",
                                                        Compositor::kFaceDim,
                                                        DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
-                                                       compositor.CubeColor(colCh));
+                                                       mkColor(ColorFrame::Cube(
+                                                           Compositor::kFaceDim)));
                     winTenant = resMgr.AddTexture2D(
                         gpu, L"earth.color.window (composed, Merrimack z14)",
                         Compositor::kFaceDim, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
-                        compositor.WindowColor(colCh, 1263360, 1538048, 16384, 14));
+                        mkColor(ColorFrame::Window(1263360, 1538048, 14)));
                     // M7f: the z17 DETAIL window -- 1.2 m px, ~14 km centred on the inlet
                     // mouth: the near field stops being capped at the z14 window's 9.5 m.
                     // Same channel, same stack (massgis where harvested, google's own z17
@@ -2084,9 +2105,47 @@ int main(int argc, char** argv) {
                         detTenant = resMgr.AddTexture2D(
                             gpu, L"earth.color.detail (composed, Merrimack z17)",
                             Compositor::kFaceDim, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
-                            compositor.WindowColor(
-                                colCh, static_cast<long long>(det17OrgX),
-                                static_cast<long long>(det17OrgY), 16384, 17));
+                            mkColor(ColorFrame::Window(static_cast<long long>(det17OrgX),
+                                                       static_cast<long long>(det17OrgY), 17)));
+                    }
+                    // The gate. Every realization the render path uses, on tiles the shipped
+                    // paint loop already wrote, with the worst per-channel disagreement printed.
+                    if (opt.treeAudit) {
+                        const ColorFrame frames[] = {
+                            ColorFrame::Cube(Compositor::kFaceDim),
+                            ColorFrame::Window(1263360, 1538048, 14),
+                            ColorFrame::Window(static_cast<long long>(det17OrgX),
+                                               static_cast<long long>(det17OrgY), 17),
+                        };
+                        TreeAudit all;
+                        for (const ColorFrame& f : frames) {
+                            TreeAudit a;
+                            AuditColorTrees(compositor, colCh, colorTrees, f, opt.treeAudit, a);
+                            all.tiles += a.tiles;
+                            all.exact += a.exact;
+                            all.difTexels += a.difTexels;
+                            all.texels += a.texels;
+                            all.alphaDif += a.alphaDif;
+                            all.refs += a.refs;
+                            all.composed += a.composed;
+                            all.worstDelta = (std::max)(all.worstDelta, a.worstDelta);
+                        }
+                        Log("[tree-audit] TOTAL: %u tiles, %u byte-identical (%.1f%%), worst "
+                            "|direct - tree| = %u/255, %llu of %llu texels differ (%.4f%%), "
+                            "%u alpha mismatches; %u referenced (%.1f%%), %u composed",
+                            all.tiles, all.exact,
+                            all.tiles ? 100.0 * double(all.exact) / double(all.tiles) : 0.0,
+                            all.worstDelta,
+                            static_cast<unsigned long long>(all.difTexels),
+                            static_cast<unsigned long long>(all.texels),
+                            all.texels ? 100.0 * double(all.difTexels) / double(all.texels)
+                                       : 0.0,
+                            all.alphaDif, all.refs,
+                            all.tiles ? 100.0 * double(all.refs) / double(all.tiles) : 0.0,
+                            all.composed);
+                        Log("[trees] %s", colorTrees.Stats().c_str());
+                        resMgr.Shutdown();
+                        return 0;
                     }
                 }
                 globe->SetComposed(colorCubeT, winTenant, hgtTenant, hgtWinTenant, winOrgX,

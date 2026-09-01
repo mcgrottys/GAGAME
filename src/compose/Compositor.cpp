@@ -338,6 +338,51 @@ void Compositor::PaintColorTile(const Channel& ch, const ColorFrame& frame, cons
     }
 }
 
+// ONE source, over the same addresses. The difference from the loop above is the whole point of
+// the split: there is no stack walk and no lerp, so nothing here can be affected by what else is
+// in the channel. That independence IS the tree's cache identity -- a source's tiles do not
+// change when the blend above them changes, which is why they never have to be repainted for it.
+//
+// Alpha carries the paint WEIGHT, quantized to 8 bits. That quantization is the one place this
+// path is not exact, and it is bounded: the composite lerps by w, so an error of half an alpha
+// step moves a channel by at most |rgba - acc| / 510 -- under one LSB, and only on a feather
+// ramp, where w is strictly between 0 and 1. Every source that answers 0 or 1 (google always;
+// an ortho everywhere but its edge) round-trips exactly, and an overlay whose weight IS a byte
+// of per-pixel alpha round-trips exactly too.
+void Compositor::PaintSourceTile(ColorSource* src, const ColorFrame& frame, const TileRequest& r,
+                                 const TileBox& box, std::vector<uint8_t>& out, bool& complete,
+                                 bool& anyCover, bool& fullCover) {
+    const double groundRes = frame.GroundRes(r.mip);
+    PaintCtx ctx;
+    src->BeginTile(box.latMin, box.latMax, box.lonMin, box.lonMax, groundRes, ctx);
+    out.assign(65536, 0);
+    complete = true;
+    anyCover = false;
+    fullCover = true;
+    for (uint32_t py = 0; py < frame.texH; ++py) {
+        for (uint32_t px = 0; px < frame.texW; ++px) {
+            double lat = 0, lon = 0;
+            frame.Texel(r, px, py, lat, lon);
+            uint8_t* dst = &out[(py * frame.texW + px) * 4];
+            uint8_t rgba[4] = {0, 0, 0, 0};
+            const float w = src->Sample(lat, lon, groundRes, ctx, rgba);
+            if (w < 0.0f) {   // TRANSIENT: coverage exists, the fetch failed. Cache nothing.
+                complete = false;
+                fullCover = false;
+                continue;
+            }
+            if (w <= 0.0f) { fullCover = false; continue; }
+            const uint8_t a = static_cast<uint8_t>(w * 255.0f + 0.5f);
+            dst[0] = rgba[0];
+            dst[1] = rgba[1];
+            dst[2] = rgba[2];
+            dst[3] = a;
+            anyCover = true;
+            if (a != 255) fullCover = false;
+        }
+    }
+}
+
 // One realization = one frame + the cache identity that frame demands. THE REALIZATION'S NAME
 // IS ITS FRAME (M7x): three colour windows once shared the literal folder "window", so the z17
 // paint of tile (x,y) was served as the z14 tile (x,y) -- the patchwork of displaced,
