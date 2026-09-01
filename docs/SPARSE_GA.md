@@ -1101,3 +1101,113 @@ above:
 2. **`TileIndex` does not know about trees.** It scans one realization folder; the composite
    tree's readiness is the union of its inputs' readiness, which is a different question and
    wants a different answer.
+
+## 30. The land/sea gate: the survey gates, the height band refines
+
+`synth.bed` is the colour stack's **water authority** — its height-band alpha reclaims everything
+below the intertidal ramp and hands land back to the photos above +1.2 m NAVD. That is a
+threshold on elevation, and a threshold on elevation cannot tell an inland hollow below +1.2 m
+from the sea. The survey can. The survey, at GSHHG's 1:250k, cannot place a waterline to the
+metre. The bed can.
+
+So neither replaces the other, and the user's rule is a **product**:
+
+    bed weight  =  height-band alpha  x  survey water coverage
+
+which is a different composition from the stack's own paint-over. The stack resolves *who is on
+top*; a gate resolves *whether a layer is allowed here at all*. `Channel::gateOf` / `gateOnly`
+plus `SetColorGate` are that, applied identically in `PaintColorTile` and in
+`ColorTreeStack::Compose`, entirely CPU-side at paint time. No shader moved.
+
+### The GIS stays vector
+
+The first cut of this read `data/gis/landmask_ne.raw` — 16 MB of even-odd parity fill, plus 8 MB
+global. The user stopped it, and they were right: those files are a **realization** of the
+survey, at one resolution, in one frame. `GisStencil.h` has said so since it was written — the
+polylines "stay resident as the authority" — and it left a promissory note that GA earns its
+keep here because *spherical polygons are chains of great arcs; incidence and clipping are meets
+and joins*. `GisMask.cpp` cashes it. Neither `.raw` is opened.
+
+    [gismask] VECTOR land/sea: 1298 coast rings, 26788 NHD open-water rings, 4 hand-edit rings,
+              1261898 points -- no .raw parity fill opened
+
+The composition rule was already written down, in `data/gis/survey.json`, as the recipe the
+harvester used: GSHHG coast rings are **land**, NHD open-water polygons **carve** water back out
+of them, and `edits.geojson` polygons are **law** over both — with marsh and wetland deliberately
+excluded because "the live tide owns that call". The same division of labour, one level down.
+
+### Why columns, and where the algebra is real
+
+A point-in-polygon test on a sphere is a crossing count along an arc from the query point. Fill
+the grid by **rows** and that arc is a *parallel* — not a great circle — so every crossing is an
+approximation in the lon/lat chart, worse the longer the edge and the higher the latitude. Fill
+it by **columns** and the arc is a *meridian*, which is a great circle, and the test becomes
+exact incidence:
+
+    edge A->B spans the great circle   n = A ^ B          (the join of two points)
+    the meridian at longitude L is     m = (-sin L, cos L, 0)
+    it crosses iff                     sign(m . A) != sign(m . B)
+    and the crossing point is          d = n x m          (the MEET of the two circles)
+
+Four dot products, one cross product, one `asin` per crossing. No chart, no dateline special
+case, no `cos(lat)` fudge.
+
+**The index is by longitude and only by longitude.** Parity along a meridian depends on every
+edge that crosses it, however far south of the tile — so latitude cannot prune, and must not:
+
+    [gismask] meridian index: 1799 longitude buckets, 91230 coast edges, 1169694 water edges
+              (14.7 MB) -- a column touches ~737 edges, not 1260924
+
+### The grids line up, which is the whole compute saving
+
+The mask is a **layer**, so it gets its own sparse tree on the *same* `(face, mip, x, y)`
+addresses as the imagery and the bed. The meridian sweep therefore happens **once per address,
+ever**. After that the gate is a 64 KB read, and combining the bed with the land textures is a
+per-texel byte multiply — no reprojection, no resample, no second frame to reconcile.
+
+That is also why the mask oversamples its sweep only 2×: `Sample` reads only the cells under
+texel centres, so anything past the tile's own resolution is discarded work. Nearest, never
+interpolated — a gate that blurs is not a gate.
+
+### The composite is keyed by its inputs
+
+`kComposeVersion` re-identified a whole channel when the **blend** changed, and re-identified
+nothing when a **source** did. Both halves are wrong, and the second was a live bug: a
+re-harvested source tree would have been ignored by an already-cached composite.
+
+A composite tile is a pure function of the input tree tiles it consumed plus the rule that
+combined them, so its key is now exactly that — each contributing tree's identity, what that tree
+holds at the address, the gate wiring, and a `kBlendVersion` for the rule itself. **It updates
+when new tiles appear in a source and at no other time.** `SourceTree::Peek` answers from two
+directory lookups, so a warm composite hit costs no tile I/O at all.
+
+### Three bugs, found by looking
+
+1. **The gate silently never entered a single subset.** `GisMaskSource` was constructed *before*
+   `Load()`, so it declared the empty box `GisVectorMask` starts with (lon 180..−180),
+   `SourceTouches` rejected it against every tile, and the gate was built, wired, logged, and
+   never once asked a question. Two A/B renders came back byte-identical and looked like a
+   result. What caught it was a tree directory with **zero files in it**.
+2. **Absent and empty are opposite answers for a gate.** An all-land mask tile stores as a
+   zero-byte `.void`, and `Compose` read absence as *no opinion* — which would have let the bed
+   paint over dry land, the one thing the gate exists to stop.
+3. **After a source is added there is nothing to compare against**, so `--tree-audit` skipped
+   every gated address as stale and warmed none of them. `--warm-trees` composes regardless.
+
+### Measured
+
+Residency-free, tile for tile, the two gated paint loops on the same addresses:
+
+    TOTAL  2602 tiles, 2415 byte-identical (92.8%), worst |direct - tree| = 1/255 over
+           42,631,168 texels, 0 alpha mismatches, 92.7% referenced
+
+The remaining tiles are *stale skipped* — the incumbent has not repainted the region yet, and
+that asymmetry **is** the result. Adding one source cost the tree path one new tree plus a
+recompose of the tiles it touches; it costs the incumbent path a full repaint of every tile the
+new source's footprint can reach.
+
+A rendered A/B was misleading twice before it was useful, both times for the same reason: a cold
+cache is not a pixel difference. `--color-trees` against the incumbent read as *worst 131/255,
+19% of pixels* on empty trees and *0 pixels* once warm; the gated direct path read as *40% of
+pixels* while it was still repainting a region the tree path had already built. **Warm both
+sides, or use the audit, which compares tiles and cannot be fooled by residency at all.**

@@ -18,6 +18,14 @@ Get-Process -Name gagame -ErrorAction SilentlyContinue | Stop-Process -Force; cm
 
 **Python edits**: write the patch script to a file and run it with `py <file>`. Inline `py -c "..."` mangles quotes through the shell nesting and has silently corrupted source.
 
+**A SOURCE'S FOOTPRINT IS ITS ADMISSION TICKET.** `SourceTouches` rejects any source whose
+declared box does not overlap the tile, so a source constructed BEFORE its data is loaded
+declares an empty box and is silently never asked anything -- built, wired, logged, and inert.
+Two A/B renders came back byte-identical and looked like a result. What caught it was a tree
+directory with zero files in it. **After loading anything that sets bounds, re-declare them**
+(`GisMaskSource::Refresh`), and check that a new source's tree folder is non-empty before
+believing any A/B.
+
 **BACKSLASHES IN PATCH SCRIPTS BIT ME TWICE THIS SESSION.** A Windows path literal inside a
 non-raw Python string gets un-escaped once on the way in: `"cache\\\\composed"` in the heredoc
 becomes `"cache\\composed"` in Python and lands in the C++ file as `"cache\composed"`, where MSVC
@@ -48,8 +56,8 @@ every later row.
 3. COMPOSE        the trees -> ONE composite sparse GA tree
                   (references into the inputs; composited tiles only where
                    they OVERLAP)                                                   DONE (colour)
-4. the same again for SEAFLOOR textures                                            NOT STARTED
-5. the same again for a sparse GIS tree                                            NOT STARTED
+4. the same again for SEAFLOOR textures                                            SEE BELOW
+5. the same again for a sparse GIS tree                                            DONE (vector)
 6. MEGATEXTURE    land/sea mask <- the GIS tree; final tree = land texture OVER
                   sea texture, sea mask making the earth layer transparent over
                   water, per pixel. That final tree is THE one mega earth
@@ -61,20 +69,27 @@ Stages 2 and 3 landed this session for `earth.color`, measured (§29 of `docs/SP
 8484 tiles audited, **worst |direct − tree| = 1/255 over 139 M texels**, 52.7% of tiles are pure
 references, globe still pixel-identical through the renderer.
 
-### The next build, in order
+### What landed, and what is next
+
+**Landed:** the three trees for `earth.color` (§29 of `docs/SPARSE_GA.md`), and the vector
+land/sea gate (§30). The megatexture's *shape* now exists: `synth.bed` is the seafloor layer,
+the photo layers are the land, and `gis.landsea` is the per-pixel mask deciding between them —
+composed on the CPU at paint time, on tile addresses every tree shares. Four source trees plus a
+composite, 16043 addresses warm, 52.0% of them pure references.
+
+**Next, in order:**
 
 1. **Pack the trees, so a reference costs zero bytes.** `TileLoc` already lets a provider return a
    *place* — path, offset, size — and DirectStorage reads it NVMe→GPU. A reference IS a `TileLoc`
    into the input tree's archive. What blocks it: `TileArchive::Pack` is hardwired to
    `cache/composed/<channel>/<realization>` and to filenames carrying a subset hash; a source tree
-   has neither. Parameterize the root and make the subset optional. This is the single highest-value
-   next step and it is small.
-2. **The seafloor tree and the GIS tree**, through the same `SourceTree`/`ColorTreeStack`.
-   `GisStencil.cpp` already realizes coast/river masks per frame — that mask becomes a tree.
-3. **The megatexture**, which is then one more `ColorTreeStack` whose blend is not "over by weight"
-   but "land over sea, alpha from the GIS mask". `ColorTreeStack::Compose` is where that rule goes;
-   it is ~20 lines and reads three 64 KB tiles.
-4. **Then delete the rungs.** See §2.
+   has neither. Parameterize the root and make the subset optional. Note the payoff is gated
+   behind `--direct-storage`, which is also off — and that a reference currently reads 64 KB to
+   discover it is a reference, which packing plus a status in the archive directory would remove.
+2. **The seafloor as its own ingested tree.** `synth.bed` is a *synthesis* node (it classifies the
+   height stack through `bed_rules.json`), not ingested seafloor imagery. If real seafloor texture
+   is wanted, it arrives as a new `ColorSource` and joins the stack — the machinery is done.
+3. **Then delete the rungs.** See §2. This is now the largest remaining structural item.
 
 ### Rules the user has stated and re-stated
 
@@ -162,7 +177,9 @@ the unlit version.
 | `--pack-tiles` | pack the composed cache into `.gaa` archives, then exit |
 | `--direct-storage` | opt in to NVMe→GPU tile reads (**off by default**) |
 | `--color-trees` | colour through the per-source trees (**off by default**) |
-| `--tree-audit N` | compose N tiles per realization both ways, print the disagreement, exit. Also **warms the trees**, which is what a fair render comparison needs |
+| `--tree-audit N` | compose N tiles per realization both ways, print the disagreement, exit. Skips tiles the incumbent has not repainted from today's stack, so after adding a source it compares little and warms nothing |
+| `--warm-trees` | compose every address regardless, no comparison. **This is the warm-up**, and it is what a fair render A/B needs after any stack change |
+| `--no-gis-gate` | drop the vector land/sea gate (on by default) — the A/B for what the survey changed |
 | `--selftest` | must stay green |
 
 **Standard stills:**
@@ -193,8 +210,24 @@ residency, none of it paint. After `--tree-audit 100000` warmed the trees the sa
 
 ## 5. State you are inheriting
 
-**Green:** selftest passes; default render path bit-deterministic across runs; engine renders
-1.59 ms mean (627 fps) on the rail, 96 fps at helm under `--bench`.
+**Green:** selftest passes; default render path bit-deterministic across runs.
+
+**THE INHERITED "1.59 ms mean (627 fps)" DOES NOT REPRODUCE, and it is not this session's doing.**
+Measured today, all on the same machine, same rail, same instant, all converged over repeat
+passes (`--bench`, 1200 frames, RENDER only):
+
+    per-source trees + the vector gate      4.70 ms mean, p99 11.5    (3 passes: 4.70/4.69/4.71)
+    incumbent paint, gate OFF               4.75 ms mean, p99 11.3    <- the inherited config
+    incumbent paint, gate ON                8.11 ms mean, p99 27.7    <- repainting the region
+
+So the trees cost nothing against the path they replace (4.70 vs 4.75 is noise), and the gate
+costs nothing at render time by construction -- it changes tile CONTENT on worker threads and no
+shader reads it. The third row is a cache still filling, not a cost: the incumbent has to repaint
+every tile the new source's footprint touches, which is the whole argument for the trees.
+
+Do not chase the 1.59 ms. Whatever it was measured on, this machine does not do it today with
+the pre-session configuration either. Re-baseline before treating any number here as a
+regression.
 
 **Built recently, newest first:**
 
