@@ -14,6 +14,8 @@
 // ================================================================================================
 #include <sys/stat.h>
 
+#include "compose/DomainSource.h"
+#include "core/CurrentFieldLoader.h"
 #include "core/GeoGridLoader.h"
 #include "core/Gpu.h"
 #include "core/Image.h"
@@ -1805,6 +1807,84 @@ int main(int argc, char** argv) {
             if (swe.Ready() && bathy.Ready()) {
                 // The residency map and the bank's texel size ride along: the lens picks the
                 // level its footprint wants and the map clamps it to what has arrived.
+                // ---- M9i: CLOSE THE LOOP. The regional current becomes a GA object through
+                // the plugin seam, composes into a page, and lands in the bank's COARSE levels.
+                // Nothing here reaches into another layer: a loader answers where/what/where-not,
+                // a compositor answers value-and-weight, and the bank takes texels. The solver
+                // never learns that GoMOFS exists, which is exactly what the backed-out version
+                // got wrong.
+                //
+                // grad() is taken on the composed page rather than on the source, because
+                // divergence and vorticity are properties of the COMPOSITE -- taking them
+                // per-source and blending afterwards would average two different derivatives.
+                if (swe.Ready() && bathy.Ready()) {
+                    LoaderRegistry freg;
+                    freg.Register("json", CurrentFieldLoader::Open);
+                    if (auto cld = freg.Open("data/currents/currents.json")) {
+                        auto ras = std::make_shared<RasterSource>(std::move(cld), 0);
+                        DomainCompositor fc;
+                        LevelLadder lad;
+                        lad.level0MetersPerTexel = swe.CellM();
+                        fc.SetLadder(lad);
+                        fc.Add(ras);
+
+                        GradeBank& vb = swe.VelGradBank();
+                        uint32_t wrote = 0;
+                        // Levels coarse enough that a ~700 m model is honest there.
+                        for (uint32_t lvl = 3; lvl < vb.MipCount(); ++lvl) {
+                            const uint32_t w = (std::max)(1u, swe.Nx() >> lvl);
+                            const uint32_t h = (std::max)(1u, swe.Ny() >> lvl);
+                            // The page's own lat/lon extent, EXACTLY -- not the anchor-linear
+                            // form, which is declared valid only near its anchor.
+                            DomainCompositor::PageGeo geo;
+                            const double mpt = swe.CellM() * double(1u << lvl);
+                            geo.lon0 = BathyModel::kOrgLon +
+                                       (bathy.WorldX0() + 0.5 * mpt) / BathyModel::kMPerLon;
+                            geo.lat0 = BathyModel::kOrgLat +
+                                       (bathy.WorldZ0() + 0.5 * mpt) / BathyModel::kMPerLat;
+                            geo.dLon = mpt / BathyModel::kMPerLon;
+                            geo.dLat = mpt / BathyModel::kMPerLat;
+
+                            std::vector<float> uv, cov;
+                            const uint32_t covered =
+                                fc.ComposePage(PageAddr{lvl, 0, 0}, geo, w, h, 2, uv, cov);
+                            if (!covered) continue;
+
+                            // grad(flow) on the composed page: divergence to grade 0, vorticity
+                            // to grade 2, exactly what the type says kG1 * kG1 produces. Coverage
+                            // rides in .z so the shader composite can weight it, and a texel with
+                            // no current stays absent rather than reading as still water.
+                            std::vector<float> rgba(size_t(w) * h * 4, 0.0f);
+                            const double dxm = mpt, dym = mpt;
+                            for (uint32_t y = 0; y < h; ++y) {
+                                for (uint32_t x = 0; x < w; ++x) {
+                                    const size_t i = size_t(y) * w + x;
+                                    if (cov[i] <= 0.0f) continue;
+                                    const uint32_t xm = (x > 0) ? x - 1 : x;
+                                    const uint32_t xp = (x + 1 < w) ? x + 1 : x;
+                                    const uint32_t ym = (y > 0) ? y - 1 : y;
+                                    const uint32_t yp = (y + 1 < h) ? y + 1 : y;
+                                    const size_t a = (size_t(y) * w + xm) * 2;
+                                    const size_t b = (size_t(y) * w + xp) * 2;
+                                    const size_t c = (size_t(ym) * w + x) * 2;
+                                    const size_t d = (size_t(yp) * w + x) * 2;
+                                    const float dudx = (uv[b + 0] - uv[a + 0]) / float(2 * dxm);
+                                    const float dvdx = (uv[b + 1] - uv[a + 1]) / float(2 * dxm);
+                                    const float dudy = (uv[d + 0] - uv[c + 0]) / float(2 * dym);
+                                    const float dvdy = (uv[d + 1] - uv[c + 1]) / float(2 * dym);
+                                    rgba[i * 4 + 0] = dudx + dvdy;   // grade 0: divergence
+                                    rgba[i * 4 + 1] = dvdx - dudy;   // grade 2: vorticity
+                                    rgba[i * 4 + 2] = cov[i];        // coverage
+                                }
+                            }
+                            vb.UploadLevel(gpu, lvl, rgba.data(), w * 4 * sizeof(float), w, h);
+                            ++wrote;
+                        }
+                        Log("[compose] grad(GoMOFS) -> swe.velgrad levels 3..%u: %u composed "
+                            "(loader -> source -> page -> bank; the solver never saw it)",
+                            vb.MipCount() - 1, wrote);
+                    }
+                }
                 globe->SetVelGradLens(
                     swe.VelGradSrv(), bathy.WorldX0(), bathy.WorldZ0(), bathy.WorldSizeX(),
                     bathy.WorldSizeZ(), swe.VelGradResMapSrv(),

@@ -672,3 +672,42 @@ to its radius instead of stamping a disc.
 A `VolumeSource` and a `ProfileSource` (the enum is honest about them existing; only `Point`
 and `Raster` are implemented), sparse volume files as a loader type, and the step that takes a
 composed page and puts it in the reserved array.
+
+## 24. The loop closed
+
+    [compose] grad(GoMOFS) -> swe.velgrad levels 3..5: 3 composed
+              (loader -> source -> page -> bank; the solver never saw it)
+
+The path, end to end, with nothing reaching around anything:
+
+    CurrentFieldLoader   the file, its GeoRef, its grade, its absence
+      -> RasterSource    answers value+weight in the WGS84 exchange frame
+      -> ComposePage     one page of the shared ladder, with coverage
+      -> grad()          on the COMPOSITE, giving grade 0 + grade 2
+      -> UploadLevel     texels into the reserved array
+
+`grad` is taken on the composed page, not per source: divergence and vorticity are properties
+of the composite, and taking them per-source then blending would average two different
+derivatives. `GradeBank::UploadLevel` is deliberately ignorant -- it takes a level and some
+texels and does not know whether they came from GoMOFS, a GeoTIFF, a buoy set, or all three.
+
+That ignorance is the whole difference from the backed-out version, which made `SweSolver`
+import `GulfLayer`.
+
+### Naming
+
+`Compositor.h` already has a `FieldSource` -- the imagery/tide compositor's two-component
+spinor source, same contract shape, narrower scope. The generalization is therefore
+`DomainSource` / `DomainCompositor`, named apart rather than shadowing a working class.
+
+### What this does NOT yet do
+
+**The wind fallback is still there, and cannot go yet.** The velgrad bank is ONE page over the
+SWE window (18.8 x 16 km). Outside it there is no bank at all, so deleting the fallback would
+make everything beyond the window black rather than regional. GoMOFS now fills levels 3-5
+INSIDE that window; covering the ground outside needs a second page, which needs the
+multi-slice array and the page table driving residency -- both built (sections 17, 21), neither
+yet wired to this bank.
+
+So: the pipeline is proven end to end on one page. Making the fallback unnecessary is a matter
+of pages, not of mechanism.

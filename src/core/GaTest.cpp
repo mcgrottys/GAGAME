@@ -11,7 +11,7 @@
 #include "Common.h"
 #include "GaAst.h"
 #include "GradeField.h"   // M9h: the type-level grade algebra pins itself here
-#include "compose/FieldSource.h"
+#include "compose/DomainSource.h"
 #include "CurrentFieldLoader.h"
 #include "FieldLoader.h"
 #include "GeoRef.h"
@@ -918,7 +918,7 @@ bool RunGaSelfTest() {
             auto pts = std::make_shared<PointSource>("ndbc.44013", kG1, 2, 0.25, 10);
             pts->Add({-70.651, 42.346, {0.42f, -0.11f, 0, 0}});
 
-            FieldCompositor fc;
+            DomainCompositor fc;
             LevelLadder lad;
             lad.level0MetersPerTexel = 700.0;   // the model's own scale; no upsampled lie
             fc.SetLadder(lad);
@@ -936,7 +936,7 @@ bool RunGaSelfTest() {
                 ok = false;
             }
 
-            FieldCompositor::PageGeo geo;
+            DomainCompositor::PageGeo geo;
             geo.lon0 = -71.0;
             geo.lat0 = 42.0;
             geo.dLon = 0.0064;

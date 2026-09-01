@@ -1,5 +1,10 @@
 // ================================================================================================
-//  FieldSource / FieldCompositor - M9i: composition generalized past imagery.
+//  DomainSource / DomainCompositor - M9i: composition generalized past imagery.
+//
+//  NAMED APART FROM Compositor.h's FieldSource ON PURPOSE. That one is the imagery/tide
+//  compositor's two-component spinor source -- same contract shape (declare CRS, answer in the
+//  WGS84 exchange frame, return a paint weight), narrower scope. This is the generalization
+//  across DOMAINS, so it carries a distinct name rather than shadowing a working class.
 //
 //  Compositor.h already composes SOURCES into a raster: each answers a point query in lat/lon
 //  and returns a WEIGHT -- 0 no coverage, 1 full ownership, between = the paint-time feather.
@@ -27,7 +32,7 @@
 //  will not silently accept a grade-0 source. What a PRODUCT of two composed fields becomes is
 //  still the Cayley closure's business (GradeField.h), not this file's.
 //
-//  A LOADER IS NOT A SOURCE. FieldLoader decodes a file into tiles -- storage. A FieldSource
+//  A LOADER IS NOT A SOURCE. FieldLoader decodes a file into tiles -- storage. A DomainSource
 //  answers queries in the output's frame -- composition. RasterSource below adapts one into the
 //  other, which is the only place the two ideas meet.
 // ================================================================================================
@@ -47,12 +52,12 @@
 
 namespace ga {
 
-enum class FieldDomain : uint8_t { Point, Profile, Raster, Volume };
+enum class SourceDomain : uint8_t { Point, Profile, Raster, Volume };
 
 // Where a value is wanted. Depth and time are carried for every query even when a 2-D source
 // ignores them: a compositor that had to know which fields a source reads could not mix
 // domains, which is the whole point.
-struct FieldQuery {
+struct DomainQuery {
     double lon = 0.0, lat = 0.0;
     double depthM = 0.0;      // 0 = surface, positive downward
     double unixT = 0.0;
@@ -60,7 +65,7 @@ struct FieldQuery {
 };
 
 // Up to 4 channels, because a Cl(2) multivector is 4 and everything here is at most that.
-struct FieldValue {
+struct DomainValue {
     float c[4] = {0, 0, 0, 0};
     float weight = 0.0f;      // 0 = no coverage. THE thing that makes absence composable.
 };
@@ -68,16 +73,16 @@ struct FieldValue {
 // ================================================================================================
 //  A source of field values, in any domain.
 // ================================================================================================
-class FieldSource {
+class DomainSource {
 public:
-    virtual ~FieldSource() = default;
+    virtual ~DomainSource() = default;
     virtual const char* Name() const = 0;
-    virtual FieldDomain Domain() const = 0;
+    virtual SourceDomain Domain() const = 0;
     virtual uint8_t GradeSig() const = 0;
     virtual uint32_t Channels() const = 0;
     // The value and weight here. False is identical to weight 0 and exists only for callers
     // that want to skip the copy.
-    virtual bool SampleAt(const FieldQuery& q, FieldValue& out) const = 0;
+    virtual bool SampleAt(const DomainQuery& q, DomainValue& out) const = 0;
     // Cheap rejection so a compositor can skip a source over a whole page without querying it.
     virtual bool MayCover(double lon0, double lat0, double lon1, double lat1) const {
         (void)lon0; (void)lat0; (void)lon1; (void)lat1;
@@ -92,7 +97,7 @@ public:
 //  RASTER -- the adapter that turns a FieldLoader into a source. This is the only place the
 //  storage idea and the composition idea meet.
 // ================================================================================================
-class RasterSource : public FieldSource {
+class RasterSource : public DomainSource {
 public:
     RasterSource(std::unique_ptr<FieldLoader> loader, int priority = 0)
         : m_loader(std::move(loader)), m_priority(priority) {
@@ -101,7 +106,7 @@ public:
     bool Valid() const { return m_loader != nullptr && !m_cache.empty(); }
 
     const char* Name() const override { return m_loader ? m_loader->Name() : "raster"; }
-    FieldDomain Domain() const override { return FieldDomain::Raster; }
+    SourceDomain Domain() const override { return SourceDomain::Raster; }
     uint8_t GradeSig() const override { return m_loader ? m_loader->GradeSig() : 0; }
     uint32_t Channels() const override { return m_chan; }
     int Priority() const override { return m_priority; }
@@ -116,7 +121,7 @@ public:
         return !(lon1 < x0 || lon0 > x1 || lat1 < y0 || lat0 > y1);
     }
 
-    bool SampleAt(const FieldQuery& q, FieldValue& out) const override {
+    bool SampleAt(const DomainQuery& q, DomainValue& out) const override {
         const GeoRef& g = m_loader->Ref();
         // THE EXCHANGE FRAME IS WGS84 LAT/LON (Compositor.h): a source resolves it into its
         // OWN projection EXACTLY, so two sources can only disagree by being wrong, not by
@@ -223,7 +228,7 @@ private:
 //  the tide stations already use (StationFieldSource, IDW p=2), kept here so a buoy can join a
 //  raster in one product rather than being assimilated by hand somewhere downstream.
 // ================================================================================================
-class PointSource : public FieldSource {
+class PointSource : public DomainSource {
 public:
     struct Obs {
         double lon, lat;
@@ -238,12 +243,12 @@ public:
     size_t Count() const { return m_obs.size(); }
 
     const char* Name() const override { return m_name.c_str(); }
-    FieldDomain Domain() const override { return FieldDomain::Point; }
+    SourceDomain Domain() const override { return SourceDomain::Point; }
     uint8_t GradeSig() const override { return m_grade; }
     uint32_t Channels() const override { return m_chan; }
     int Priority() const override { return m_priority; }
 
-    bool SampleAt(const FieldQuery& q, FieldValue& out) const override {
+    bool SampleAt(const DomainQuery& q, DomainValue& out) const override {
         double wsum = 0.0, acc[4] = {0, 0, 0, 0};
         for (const Obs& o : m_obs) {
             const double dx = o.lon - q.lon, dy = o.lat - q.lat;
@@ -277,7 +282,7 @@ private:
 };
 
 // ================================================================================================
-//  FieldCompositor -- N sources of any domain into ONE page of a GA product.
+//  DomainCompositor -- N sources of any domain into ONE page of a GA product.
 //
 //  The rule, and it is the imagery compositor's rule unchanged: highest PRIORITY that has any
 //  coverage wins the pixel; equal priorities blend by weight; nothing anywhere means the texel
@@ -285,7 +290,7 @@ private:
 //  frame, so mixing a 700 m model raster with a scattered buoy set needs no agreement between
 //  them beyond both being asked the same question.
 // ================================================================================================
-class FieldCompositor {
+class DomainCompositor {
 public:
     void SetLadder(const LevelLadder& l) { m_ladder = l; }
     // A page's geography, EXACTLY -- not the anchor-linear approximation. That form
@@ -302,7 +307,7 @@ public:
     // no meaning that no later stage can detect. So the first source sets the contract and
     // the rest are held to it, loudly. This is the composition-time half of the frame contract
     // the AST already enforces on every edge.
-    bool Add(std::shared_ptr<FieldSource> s) {
+    bool Add(std::shared_ptr<DomainSource> s) {
         if (!s) return false;
         if (m_sources.empty()) {
             m_grade = s->GradeSig();
@@ -333,7 +338,7 @@ public:
         uint32_t covered = 0;
         for (uint32_t y = 0; y < height; ++y) {
             for (uint32_t x = 0; x < width; ++x) {
-                FieldQuery q;
+                DomainQuery q;
                 q.lon = geo.lon0 + x * geo.dLon;
                 q.lat = geo.lat0 + y * geo.dLat;
                 q.depthM = depthM;
@@ -343,7 +348,7 @@ public:
                 int bestPri = INT32_MIN;
                 double acc[4] = {0, 0, 0, 0}, wsum = 0.0;
                 for (const auto& s : m_sources) {
-                    FieldValue v;
+                    DomainValue v;
                     if (!s->SampleAt(q, v) || v.weight <= 0.0f) continue;
                     const int pri = s->Priority();
                     if (pri < bestPri) continue;
@@ -369,7 +374,7 @@ public:
 
 private:
     LevelLadder m_ladder;
-    std::vector<std::shared_ptr<FieldSource>> m_sources;
+    std::vector<std::shared_ptr<DomainSource>> m_sources;
     uint8_t m_grade = 0;
     uint32_t m_chan = 0;
 };

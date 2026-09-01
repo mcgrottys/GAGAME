@@ -101,6 +101,10 @@ public:
     uint32_t VelGradSrv() const { return m_velGrad.Srv(); }   // M9h: (div, curl), RG16F
     uint32_t VelGradResMapSrv() const { return m_velGrad.ResidencyMapSrv(); }
     uint32_t VelGradMips() const { return m_velGrad.MipCount(); }
+    // M9i: the bank itself, so a COMPOSED page can be written into its coarse levels from
+    // outside. The solver deliberately does not know where such a page came from -- that is
+    // the compositor'''s business, and the last attempt failed by making this class know.
+    GradeBank& VelGradBank() { return m_velGrad; }
     // The residency map is one texel per mip-0 TILE, so the lens indexes it in tile space.
     uint32_t VelGradResMapW() const { return m_velGrad.TilesX(); }
     uint32_t VelGradResMapH() const { return m_velGrad.TilesY(); }
@@ -108,6 +112,7 @@ public:
     ID3D12Resource* UvRes() const { return m_uv.res.Get(); }
     ID3D12Resource* BathyRes() const { return m_bathyRes; }   // the churn kernel reads both
     uint32_t Nx() const { return m_cb.nx; }
+    float CellM() const { return m_cb.dx; }   // level-0 ground size, for a page ladder
     uint32_t Ny() const { return m_cb.ny; }
     uint32_t ResidentTiles() const { return m_eta.ResidentCount() + m_flux.ResidentCount(); }
     uint64_t ResidentBytes() const { return m_eta.ResidentBytes() + m_flux.ResidentBytes(); }

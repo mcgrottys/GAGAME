@@ -190,6 +190,26 @@ public:
         m_atlas.BuildMips(gpu, sc, shaderDir, cl);
     }
     uint32_t ResidencyMapSrv() const { return m_atlas.ResidencyMapSrv(); }
+
+    // M9i: PUT A COMPOSED PAGE IN. This is the step that closes the loop -- a FieldCompositor
+    // produces a page of floats in CPU memory, and this is how it reaches the reserved array.
+    // Deliberately generic: the bank does not know or care that the page came from GoMOFS, a
+    // GeoTIFF, a buoy set, or all three composed. It takes a level and some texels.
+    //
+    // Must run OUTSIDE command-list recording -- Gpu::UploadTexture opens its own list.
+    void UploadLevel(Gpu& gpu, uint32_t mip, const void* rows, uint32_t rowPitchBytes,
+                     uint32_t w, uint32_t h) {
+        if (mip >= m_atlas.MipCount()) return;
+        GpuTexture t;
+        t.res = m_atlas.Res();
+        t.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        t.format = m_desc.fmt;
+        t.width = w;
+        t.height = h;
+        // Com is ComPtr: assigning the raw pointer AddRef'd it, so the destructor balances
+        // that. Detaching here would LEAK the reference, not protect the atlas.
+        gpu.UploadTexture(t, rows, rowPitchBytes, mip);
+    }
     uint32_t MipCount() const { return m_atlas.MipCount(); }
 
     // One frame step: re-evaluate the policy, map/unmap the delta, clear what arrived. Returns
