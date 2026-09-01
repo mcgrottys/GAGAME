@@ -529,3 +529,47 @@ If `C = A * B`, then C's tiles are only useful where **both** operands are resid
 in A wastes whatever B spent on the matching tiles. That is residency CORRELATION, and it
 belongs to `DeriveDemand` (section 13) -- the Cayley closure already answers where a product
 can be non-zero. An allocator cannot fix it and a shared pool would not have helped.
+
+## 21. The page table: the address space becomes a structure
+
+`src/core/PageTable.h`. The `(level, x, y)` space stops being a convention in these notes and
+becomes the thing that answers: **which slice holds level L at page (x, y)?**
+
+**The ladder is the alignment guarantee, in executable form.** `LevelLadder` holds one level-0
+resolution per body and halves every level. Every GA tree on that body uses it, so level L
+means the same ground resolution everywhere and page (L, x, y) means the same ground. Two trees
+asked the same address answer about the same place -- which is what lets sky, water and crust
+compose without knowing about each other, and what makes a product of two trees well-defined
+tile by tile. A tree computing its own per-level resolution could not be composed, and nothing
+would catch the drift until two fields disagreed about where the coast was.
+
+### Globe to centimetre, measured
+
+    pages: 1 cm at L0; one page spans 163.84 m; L18 spans 42950 km (Earth needs L18)
+    pages: the 3.2 x 2.0 km inlet at 1 cm = 260 pages of 1024 slices
+
+**19 levels cover the whole range.** A 16384-texel page at 1 cm spans 163.84 m; at level 18 it
+spans the planet. And the entire Merrimack window at centimetre resolution is 260 pages -- a
+quarter of one reserved array -- against the 6.4e10 texels (128 GB) a flat cm raster over the
+same ground would need. That gap is the whole argument for the structure.
+
+### FindCovering degrades, it does not fail
+
+The lookup the renderer wants walks UP the ladder: ask for a fine page that was never reserved
+and get the coarser page describing the same ground. That is the CPU half of the no-pop
+contract, the counterpart to the pinned floor inside a slice (section 14) -- detail changes,
+nothing else does. An address no page covers at any level returns `kNoSlice`, honestly absent
+rather than silently level 0.
+
+### Exhaustion refuses
+
+Same rule as the pool cap (section 19), for the same reason: a page may hold state nothing can
+rebuild, so the table will not guess which pages are safe to destroy. It refuses, counts, and
+says so once. A caller that knows its pages are Streamable or Recomputable can `Release()` a
+victim and retry -- the residence class is what decides, and only the caller knows it.
+
+### Not a GPU indirection texture
+
+Resolution happens CPU-side, where residency decisions already live, and the slice index is
+handed to the shader like any other bindless index. A GPU-side page table earns its place when
+one draw must resolve many pages per pixel; before that it is machinery without a caller.
