@@ -497,3 +497,35 @@ would look identical to a cap that works, right up until a hole appears in a fie
 explains it.
 
 Real renders are byte-identical at the 2 GB default -- no bank is near it.
+
+## 20. Why budgets stay per bank
+
+The question was whether a SHARED pool would disturb how GA products align, and whether
+co-locating banks in memory would help. Neither, and the reasoning is worth recording because
+it decides the allocator design.
+
+**Alignment is an address-space property, not a memory one.** Bank A's tile at
+`(level, x, y)` covers the same ground as bank B's because they share the ADDRESSING scheme
+(section 15). A pool decides where bytes physically live; it never decides what coordinate they
+represent. Products align identically under any allocator.
+
+**Physical co-location buys nothing.** Tiles are read through the texture unit with swizzled
+layout and page-table translation, so adjacency removes no memory transaction, and two
+resources are separate cache streams regardless of proximity. It can actively hurt: the memory
+controller interleaves across channels, and deliberately concentrating operands narrows that.
+
+So budgets stay **per bank** -- simpler, independent, and no worse.
+
+### What a shared pool would have caught, kept anyway
+
+The sum. Ten banks at 2 GB each is a 20 GB ceiling on a 7.9 GB card, and nothing enforces it.
+Rather than couple the banks, the sum is accounted and reported: once tile pools exceed 70% of
+dedicated VRAM, the atlas says so once, in as many words -- *budgets are per bank, nothing
+enforces the SUM, the next bank to grow may be the one that fails.*
+
+### The coupling that IS real, and is not allocation
+
+If `C = A * B`, then C's tiles are only useful where **both** operands are resident. A refusal
+in A wastes whatever B spent on the matching tiles. That is residency CORRELATION, and it
+belongs to `DeriveDemand` (section 13) -- the Cayley closure already answers where a product
+can be non-zero. An allocator cannot fix it and a shared pool would not have helped.

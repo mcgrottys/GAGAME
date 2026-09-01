@@ -539,6 +539,38 @@ bool RunTileSelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     return test.Run(gpu, sc, shaderDir);
 }
 
+namespace {
+// ---- M9h: POOL ACCOUNTING ACROSS BANKS ---------------------------------------------------
+// Budgets stay PER BANK on purpose. A shared allocator would not help the algebra: banks align
+// through the (level, x, y) ADDRESS SPACE, not through where their bytes physically sit, and
+// co-locating two operands' tiles buys nothing -- they are read through the texture unit with
+// swizzled layout and page-table translation, so adjacency removes no memory transaction, and
+// concentrating them can narrow the channel interleave that the memory controller relies on.
+//
+// What a shared pool WOULD have caught is the sum: ten banks at 2 GB each is a 20 GB ceiling on
+// a 7.9 GB card. So the sum is simply accounted and reported, which keeps banks independent and
+// still makes the one real failure mode loud.
+//
+// (The genuine cross-bank coupling is not memory at all: if C = A * B, C's tiles are only
+// useful where BOTH operands are resident, so a refusal in A wastes whatever B spent. That is
+// DeriveDemand's job -- residency correlation, not allocation.)
+uint64_t g_poolCommittedBytes = 0;
+bool g_poolWarned = false;
+
+void PoolCommitted(Gpu& gpu, uint64_t bytes) {
+    g_poolCommittedBytes += bytes;
+    const uint64_t vram = gpu.DedicatedVramBytes();
+    if (!vram || g_poolWarned) return;
+    if (g_poolCommittedBytes * 10 > vram * 7) {
+        g_poolWarned = true;
+        Log("[atlas] POOL PRESSURE: tile pools now hold %.2f GB of %.2f GB dedicated (>70%%). "
+            "Budgets are per bank; nothing enforces the SUM, so this is the warning that the "
+            "next bank to grow may be the one that fails.",
+            g_poolCommittedBytes / 1073741824.0, vram / 1073741824.0);
+    }
+}
+}   // namespace
+
 // ================================================================================ TileAtlas2D
 
 void TileAtlas2D::Init(Gpu& gpu, uint32_t widthTexels, uint32_t heightTexels, DXGI_FORMAT fmt,
@@ -967,6 +999,7 @@ void TileAtlas2D::CommitMappings(Gpu& gpu, std::vector<uint32_t>* outNewlyMapped
                     m_freeTiles.push_back((hIdx << 16) | (t - 1));
                 }
                 m_poolTiles += m_heapChunkTiles;
+                PoolCommitted(gpu, hd.SizeInBytes);
             }
             const uint32_t slot = m_freeTiles.back();
             m_freeTiles.pop_back();
@@ -1134,6 +1167,7 @@ void TileAtlas3D::CommitMappings(Gpu& gpu, std::vector<uint32_t>* outNewlyMapped
                     m_freeTiles.push_back((hIdx << 16) | (t - 1));
                 }
                 m_poolTiles += m_heapChunkTiles;
+                PoolCommitted(gpu, hd.SizeInBytes);
             }
             const uint32_t slot = m_freeTiles.back();
             m_freeTiles.pop_back();

@@ -79,6 +79,7 @@ void Gpu::Init(HWND hwnd, uint32_t width, uint32_t height, bool wantDebugLayer) 
         if (ad.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) { adapter = nullptr; continue; }
         if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0,
                                         IID_PPV_ARGS(&m_device)))) {
+            m_dedicatedVram = ad.DedicatedVideoMemory;
             Log("[gpu] adapter: %S  (%llu MB dedicated)", ad.Description,
                 static_cast<uint64_t>(ad.DedicatedVideoMemory / (1024 * 1024)));
             break;

@@ -75,6 +75,11 @@ public:
     static constexpr uint32_t kFrameCount = 2;
     static constexpr uint32_t kSrvHeapCapacity = 4096;
 
+private:
+    uint64_t m_dedicatedVram = 0;
+
+public:
+
     // hwnd may be null: that is headless mode, which creates no swapchain. Headless exists so the
     // renderer (and the tile self-test) can be verified from a shell with no desktop session.
     void Init(HWND hwnd, uint32_t width, uint32_t height, bool wantDebugLayer);
@@ -93,6 +98,8 @@ public:
     D3D12_TILED_RESOURCES_TIER TiledTier() const { return m_tiledTier; }
 
     DescriptorHeap& SrvHeap() { return m_srvHeap; }
+    // What the adapter actually has, for budget accounting across banks.
+    uint64_t DedicatedVramBytes() const { return m_dedicatedVram; }
     DescriptorHeap& RtvHeap() { return m_rtvHeap; }
     DescriptorHeap& DsvHeap() { return m_dsvHeap; }
 
