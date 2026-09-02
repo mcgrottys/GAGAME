@@ -159,6 +159,11 @@ public:
     // M6w: the same contract for HEIGHT -- the physics-facing bed query. The SWE lattice, the
     // weather manager's products, and the renderer's tiles all evaluate THIS stack; there is
     // one bed, sampled at rungs.
+    // M9av: the finest declared grain (metres) of any height layer whose footprint holds the
+    // point -- what a derivative of the stack may honestly be taken at. A gradient stepped finer
+    // than the data's cell reads the interpolant's facets (bilinear ETOPO at 4.9 km stepped at
+    // 1 km rendered the continental slope as terraces).
+    double HeightGrainM(int channel, double latRad, double lonRad) const;
     float SampleHeightStack(int channel, double latRad, double lonRad,
                             double groundResM) const;
 

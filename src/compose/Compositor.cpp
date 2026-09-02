@@ -632,6 +632,20 @@ TileProviderFn Compositor::WindowField(int channel, long long orgPxX, long long 
     };
 }
 
+double Compositor::HeightGrainM(int channel, double latRad, double lonRad) const {
+    const Channel& ch = m_channels[channel];
+    const double lon = lonRad * 180.0 / 3.14159265358979323846, lat = latRad * 180.0 / 3.14159265358979323846;
+    double finest = 0.0;
+    for (const HeightSource* hs : ch.height) {
+        const SourceInfo& s = hs->Info();
+        if (s.cmPerPixel <= 0.0) continue;
+        if (lon < s.lon0 || lon > s.lon1 || lat < s.lat0 || lat > s.lat1) continue;
+        const double m = s.cmPerPixel * 0.01;
+        if (finest <= 0.0 || m < finest) finest = m;
+    }
+    return finest;
+}
+
 float Compositor::SampleHeightStack(int channel, double latRad, double lonRad,
                                     double groundResM) const {
     const Channel& ch = m_channels[channel];

@@ -662,6 +662,7 @@ float4 PsMain(VsOut i) : SV_Target {
         float3 bedAlb = (ComposedColorOn() && gStreamF.z < 0.5f)
                             ? ComposedColor(bedDir)
                             : float3(0.44f, 0.40f, 0.31f);
+        const float3 floorAlb = bedAlb;   // M9av: the floor's dry albedo, before caustics
         // ---- M8 CAUSTICS (ALGEBRA.md caustics; proofs/caustic_jacobian.py). Sunlight
         // refracting at the wave surface converges on the bed; the gain is the inverse
         // ray-map Jacobian in its PHYSICAL form, gain = 1/(1 + h K lap_phys) with the
@@ -717,7 +718,13 @@ float4 PsMain(VsOut i) : SV_Target {
             cg = lerp(1.0f, cg, gBankE.z);   // scene causticStrength
             bedAlb *= lerp(1.0f, cg, saturate(gSunDir.y * 3.0f));
         }
+        const float3 albWater = albSea;   // M9av: the water's hue, before the bed term
         albSea = lerp(albSea, bedAlb, Tw);
+        // M9av: past the depth the ray resolves, the map draws the floor through this water.
+        if (ComposedColorOn() && gStreamF.z < 0.5f) {
+            albSea = SeafloorReliefMod(albSea, albWater, floorAlb, hp,
+                                       1.0f - (Tw.x + Tw.y + Tw.z) / 3.0f);
+        }
         // M9: sea ice sits ON the water -- after every water term, before foam (foam on top of
         // ice is still foam). The concentration is the coverage fraction, so the lerp IS the
         // physics; no threshold, no ice "texture" the data does not contain.

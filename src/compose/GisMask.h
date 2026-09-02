@@ -107,7 +107,9 @@ private:
         std::vector<uint32_t> edge;      // entries: indices into a/b
     };
 
-    bool ReadRings(const std::string& path, std::vector<Ring>& out);
+    // stitchClip: the file is a coastline CLIPPED to a box (open pieces ending on its edges);
+    // close them along the boundary into land polygons before they become rings (M9av).
+    bool ReadRings(const std::string& path, std::vector<Ring>& out, bool stitchClip = false);
     void LoadEdits(const std::string& path);
     void BuildIndex(const std::vector<Ring>& rings, EdgeIndex& idx);
     int Bucket(double lonDeg) const;

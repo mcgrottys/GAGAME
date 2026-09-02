@@ -112,6 +112,8 @@ struct Options {
     bool colorTrees = true;           // --no-color-trees: the incumbent providers, for the A/B.
                                       // The DEFAULT: colour AND height pages fed from the trees.
     bool gisGate = true;              // --no-gis-gate: drop the vector land/sea gate on the bed
+    bool seafloor = true;             // --no-seafloor: drop the global seafloor relief source
+    std::string gisDump;              // --gis-dump PATH: the gate over the survey box as PGM, exit
     bool ringLoads = true;            // --no-ring-loads: the old queue, for the A/B (M9al)
     bool resTrace = false;            // --res-trace: residency deficit + slot accounting, per 30 f
     uint32_t treeAudit = 0;           // --tree-audit N: compare N tiles/frame, report, exit
@@ -320,6 +322,8 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--no-color-trees") o.colorTrees = false;
         // M9ak: the vector land/sea gate is ON. The flag exists to A/B what it changed.
         else if (a == "--no-gis-gate") o.gisGate = false;
+        else if (a == "--no-seafloor") o.seafloor = false;
+        else if (a == "--gis-dump") o.gisDump = next("gis_gate.pgm");
         // M9al: the ring gate and its instrument. Instrument first, gate second, both off.
         else if (a == "--ring-loads") o.ringLoads = true;      // the default; kept for scripts
         else if (a == "--no-ring-loads") o.ringLoads = false;
@@ -2014,6 +2018,7 @@ int main(int argc, char** argv) {
         // realizations paint composed quadtrees ONCE and cache every 64KB tile.
         GoogleColorSource srcGoogle(&googleTiles);
         BedSynthSource srcBed;          // M7d: the bed classifier -- the first synthesis
+        SeafloorReliefSource srcRelief; // M9av: the seafloor's appearance from the ingested bathymetry
                                         // node; its program is data/bed/bed_rules.json
         AerialOrthoSource srcAerial;    // M6l: MassGIS 15 cm orthos (loads if harvested)
         AerialOrthoSource srcOverlay;   // M6o: user GeoTIFF overlays -- ALPHA IS FIBER: a
@@ -2154,6 +2159,15 @@ int main(int argc, char** argv) {
                         colorStack.push_back(&srcAerial);
                         srcAerialLoaded = true;
                     }
+                    // M9av: the GLOBAL seafloor under the bed classifier -- the ingested
+                    // bathymetry's hillshade x sediment ramp, every ocean texel; the classifier
+                    // keeps its authority inside its own box by painting over it.
+                    size_t reliefLayer = SIZE_MAX;
+                    if (opt.seafloor &&
+                        srcRelief.Load("data/bed/seafloor_rules.json", &compositor, hgtCh)) {
+                        colorStack.push_back(&srcRelief);
+                        reliefLayer = colorStack.size() - 1;
+                    }
                     if (srcBed.Load("data/bed/bed_rules.json", &compositor, hgtCh)) {
                         colorStack.push_back(&srcBed);
                         bedLayer = colorStack.size() - 1;
@@ -2173,14 +2187,33 @@ int main(int argc, char** argv) {
                     // rings' own bounds, so every tile outside New England keeps the identity
                     // it already has -- the global cube is not repainted for this.
                     const size_t bedIdx = bedLayer;
-                    if (opt.gisGate && bedIdx != SIZE_MAX && gisMask.Load("data/gis/")) {
+                    if (opt.gisGate && (bedIdx != SIZE_MAX || reliefLayer != SIZE_MAX) &&
+                        gisMask.Load("data/gis/")) {
                         srcGisMask.Refresh();   // the rings are loaded: declare the real box
+                        if (!opt.gisDump.empty()) {
+                            // M9av: LOOK AT THE GATE. 255 = water (or no opinion), 0 = land.
+                            double b0, a0, b1, a1;
+                            gisMask.Bounds(b0, a0, b1, a1);
+                            const uint32_t dim = 1024;
+                            std::vector<uint8_t> g;
+                            gisMask.RasterizeGate(a0, a1, b0, b1, dim, g);
+                            std::ofstream pf(opt.gisDump, std::ios::binary);
+                            pf << "P5\n" << dim << " " << dim << "\n255\n";
+                            pf.write(reinterpret_cast<const char*>(g.data()), g.size());
+                            Log("[gismask] --gis-dump: %s (%ux%u over %.3f,%.3f..%.3f,%.3f) %s",
+                                opt.gisDump.c_str(), dim, dim, b0, a0, b1, a1,
+                                pf ? "written" : "FAILED TO WRITE");
+                            std::exit(0);
+                        }
                         colorStack.push_back(&srcGisMask);
                         maskLayer = colorStack.size() - 1;
                     }
                     colCh = compositor.AddColorChannel("earth.color", std::move(colorStack));
                     if (maskLayer != SIZE_MAX) {
-                        compositor.SetColorGate(colCh, bedIdx, maskLayer);
+                        if (bedIdx != SIZE_MAX) compositor.SetColorGate(colCh, bedIdx, maskLayer);
+                        if (reliefLayer != SIZE_MAX) {
+                            compositor.SetColorGate(colCh, reliefLayer, maskLayer);
+                        }
                     }
                     // M9am: THE MEGATEXTURE, AS THE WATER'S GRAPH. The same nodes the bed and
                     // the tide compose through -- ColorLayerSource, NormalizeToSi,
@@ -2191,9 +2224,10 @@ int main(int argc, char** argv) {
                     //               +-> earth.land ----------------+
                     //     aerial ---+                              |
                     //                                              +-> earth.color (mega)
-                    //     bed ---------> earth.seafloor --+        |
-                    //                                     +-> gate +
-                    //     gis.landsea (vector) -----------+
+                    //     relief --+                              |
+                    //              +-> earth.seafloor --+          |
+                    //     bed -----+                    +-> gate --+
+                    //     gis.landsea (vector) ---------+
                     //
                     // Land is the base; the seafloor paints over it with weight = its own height
                     // band x the survey's water coverage ("the GIS mask gates, the height band
@@ -2222,8 +2256,11 @@ int main(int argc, char** argv) {
                     if (srcAerialLoaded) landIn.push_back(leaf(&srcAerial));
                     std::shared_ptr<DomainSource> land = over("earth.land", landIn);
                     std::shared_ptr<DomainSource> mega;
-                    if (bedLayer != SIZE_MAX) {
-                        std::shared_ptr<DomainSource> sea = over("earth.seafloor", {leaf(&srcBed)});
+                    std::vector<std::shared_ptr<DomainSource>> seaIn;
+                    if (reliefLayer != SIZE_MAX) seaIn.push_back(leaf(&srcRelief));
+                    if (bedLayer != SIZE_MAX) seaIn.push_back(leaf(&srcBed));
+                    if (!seaIn.empty()) {
+                        std::shared_ptr<DomainSource> sea = over("earth.seafloor", seaIn);
                         std::shared_ptr<DomainSource> seaGated = sea;
                         if (maskLayer != SIZE_MAX) {
                             seaGated = std::make_shared<GateSource>("seafloor<gis", sea,

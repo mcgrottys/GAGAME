@@ -17,19 +17,152 @@ constexpr double kD2R = kPi / 180.0;
 
 // ---- loading --------------------------------------------------------------------------------
 
-bool GisVectorMask::ReadRings(const std::string& path, std::vector<Ring>& out) {
+namespace {
+
+using GisLine = std::vector<std::pair<float, float>>;
+
+// M9av: CLOSE THE CLIP. A coastline clipped to a survey box arrives as OPEN polylines whose ends
+// lie on the box's edges. A ring test that closes each piece with a chord back to its own start
+// draws that chord across open water: the mainland's ran from New Jersey to Maine, and even-odd
+// parity called the whole Gulf of Maine inside it LAND (the wedge in the seafloor albedo). The
+// closure the data means is along the BOX: walk its boundary counter-clockwise (interior on the
+// left -- the coastline convention, land on the left of digitization) from each piece's end to
+// the next piece's start, chaining until the chain returns to where it began. Disjoint land
+// polygons come out, and their parity is the survey's.
+double PerimT(double lon, double lat, double lon0, double lat0, double lon1, double lat1) {
+    const double W = lon1 - lon0, H = lat1 - lat0, eps = 2e-3;
+    if (std::fabs(lat - lat0) < eps) return lon - lon0;                     // south, eastward
+    if (std::fabs(lon - lon1) < eps) return W + (lat - lat0);               // east, northward
+    if (std::fabs(lat - lat1) < eps) return W + H + (lon1 - lon);           // north, westward
+    if (std::fabs(lon - lon0) < eps) return 2.0 * W + H + (lat1 - lat);     // west, southward
+    return -1.0;
+}
+
+size_t StitchAlongBox(std::vector<GisLine>& lines, std::string& note) {
+    double lon0 = 1e9, lat0 = 1e9, lon1 = -1e9, lat1 = -1e9;
+    for (const GisLine& l : lines) {
+        for (const auto& p : l) {
+            lon0 = (std::min)(lon0, double(p.first));
+            lon1 = (std::max)(lon1, double(p.first));
+            lat0 = (std::min)(lat0, double(p.second));
+            lat1 = (std::max)(lat1, double(p.second));
+        }
+    }
+    if (lon1 <= lon0 || lat1 <= lat0) return 0;
+    const double W = lon1 - lon0, H = lat1 - lat0, P = 2.0 * (W + H);
+    struct Open {
+        size_t idx;
+        double tStart, tEnd;
+    };
+    std::vector<Open> opens;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const GisLine& l = lines[i];
+        if (l.size() < 2) continue;
+        const auto& a = l.front();
+        const auto& b = l.back();
+        const double chordKm =
+            std::hypot((b.first - a.first) * std::cos(a.second * kD2R), b.second - a.second) *
+            111.0;
+        if (chordKm < 0.05) continue;   // closed already
+        const double ts = PerimT(a.first, a.second, lon0, lat0, lon1, lat1);
+        const double te = PerimT(b.first, b.second, lon0, lat0, lon1, lat1);
+        if (ts < 0.0 || te < 0.0) continue;   // open, but not on the clip: the chord stands
+        opens.push_back({i, ts, te});
+    }
+    if (opens.empty()) return 0;
+    auto ccw = [&](double from, double to) {
+        double d = to - from;
+        if (d < 0.0) d += P;
+        return d;
+    };
+    auto corner = [&](double t) -> std::pair<float, float> {
+        if (std::fabs(t - W) < 1e-9) return {float(lon1), float(lat0)};
+        if (std::fabs(t - (W + H)) < 1e-9) return {float(lon1), float(lat1)};
+        if (std::fabs(t - (2.0 * W + H)) < 1e-9) return {float(lon0), float(lat1)};
+        return {float(lon0), float(lat0)};
+    };
+    const double cornersT[4] = {W, W + H, 2.0 * W + H, 0.0};
+    std::vector<uint8_t> used(opens.size(), 0);
+    std::vector<GisLine> polys;
+    size_t broken = 0;
+    for (size_t s = 0; s < opens.size(); ++s) {
+        if (used[s]) continue;
+        GisLine poly;
+        size_t cur = s, guard = 0;
+        for (;;) {
+            used[cur] = 1;
+            const GisLine& l = lines[opens[cur].idx];
+            poly.insert(poly.end(), l.begin(), l.end());
+            size_t nxt = SIZE_MAX;
+            double best = 1e18;
+            for (size_t j = 0; j < opens.size(); ++j) {
+                double d = ccw(opens[cur].tEnd, opens[j].tStart);
+                if (j == cur && d <= 1e-12) d = P;
+                if (d < best) {
+                    best = d;
+                    nxt = j;
+                }
+            }
+            // The box corners passed on the way, in walking order.
+            std::vector<std::pair<double, int>> pass;
+            for (int k = 0; k < 4; ++k) {
+                const double d = ccw(opens[cur].tEnd, cornersT[k]);
+                if (d > 1e-9 && d < best - 1e-9) pass.push_back({d, k});
+            }
+            std::sort(pass.begin(), pass.end());
+            for (const auto& pk : pass) poly.push_back(corner(cornersT[pk.second]));
+            if (nxt == s) break;
+            if (nxt == SIZE_MAX || used[nxt] || ++guard > opens.size()) {
+                ++broken;
+                break;
+            }
+            cur = nxt;
+        }
+        polys.push_back(std::move(poly));
+    }
+    std::vector<uint8_t> drop(lines.size(), 0);
+    for (const Open& o : opens) drop[o.idx] = 1;
+    std::vector<GisLine> outL;
+    for (size_t i = 0; i < lines.size(); ++i) {
+        if (!drop[i]) outL.push_back(std::move(lines[i]));
+    }
+    const size_t made = polys.size();
+    for (GisLine& p : polys) outL.push_back(std::move(p));
+    lines.swap(outL);
+    char b[200];
+    snprintf(b, sizeof(b),
+             "%zu clipped pieces stitched along box %.3f,%.3f..%.3f,%.3f into %zu land polygons"
+             "%s",
+             opens.size(), lon0, lat0, lon1, lat1, made,
+             broken ? " (A CHAIN BROKE -- inspect)" : "");
+    note = b;
+    return made;
+}
+
+}  // namespace
+
+bool GisVectorMask::ReadRings(const std::string& path, std::vector<Ring>& out, bool stitchClip) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return false;
     uint32_t n = 0;
     f.read(reinterpret_cast<char*>(&n), 4);
     if (!f || n == 0 || n > 5000000u) return false;
-    std::vector<std::pair<float, float>> line;
+    std::vector<GisLine> lines;
+    lines.reserve(n);
     for (uint32_t i = 0; i < n && f; ++i) {
         uint32_t c = 0;
         f.read(reinterpret_cast<char*>(&c), 4);
         if (!f || c > 20000000u) return false;
-        line.resize(c);
+        GisLine line(c);
         f.read(reinterpret_cast<char*>(line.data()), static_cast<std::streamsize>(c) * 8);
+        lines.push_back(std::move(line));
+    }
+    if (stitchClip) {
+        std::string note;
+        if (StitchAlongBox(lines, note)) Log("[gismask] %s: %s", path.c_str(), note.c_str());
+    }
+    for (const GisLine& line : lines) {
+        const uint32_t c = static_cast<uint32_t>(line.size());
         if (c < 3) continue;   // not a ring; a two-point line encloses nothing
         Ring r;
         r.first = static_cast<uint32_t>(m_pts.size());
@@ -110,7 +243,7 @@ void GisVectorMask::LoadEdits(const std::string& path) {
 
 bool GisVectorMask::Load(const std::string& dir) {
     m_pts.reserve(1400000);
-    const bool coast = ReadRings(dir + "coast_ne.bin", m_coast);
+    const bool coast = ReadRings(dir + "coast_ne.bin", m_coast, /*stitchClip=*/true);
     // The NHD carve. survey.json: "NHD open-water even-odd per feature", with marsh and wetland
     // excluded because the live tide owns that call -- which is the same split as this gate.
     ReadRings(dir + "nhd_water_ne.bin", m_water);
@@ -134,7 +267,7 @@ bool GisVectorMask::Load(const std::string& dir) {
     // re-harvesting the GIS changes this mask's tree identity -- and therefore every composite
     // that consumed it -- and changes nothing else.
     char fp[160];
-    snprintf(fp, sizeof(fp), "rings %zu/%zu/%zu pts %zu box %.4f,%.4f,%.4f,%.4f",
+    snprintf(fp, sizeof(fp), "stitched rings %zu/%zu/%zu pts %zu box %.4f,%.4f,%.4f,%.4f",
              m_coast.size(), m_water.size(), m_edits.size(), m_pts.size(), m_lon0, m_lat0,
              m_lon1, m_lat1);
     m_fingerprint = fp;

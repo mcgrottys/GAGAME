@@ -160,6 +160,43 @@ float3 ComposedColor(float3 dir) {
 }
 bool ComposedColorOn() { return gCsF.x > 0.5f; }
 
+// M9av: THE SEAFLOOR THROUGH OPAQUE WATER. The megatexture's ocean texels are DRY seafloor
+// albedo (synth.seafloor.relief: the bathymetry's hillshade times a sediment ramp keyed on
+// datum depth). Beer-Lambert over the measured K_d makes water past a few tens of metres
+// opaque, and the two-flux endpoint (chlorophyll, SPM) IS its colour -- that stays. The floor's
+// SHADING is carried as a modulation of that endpoint's brightness: divide the ramp's own
+// luminance back out of the texel and what remains is the hillshade, flat bed = 1. A map
+// convention, declared: the hue is the measurement, the relief is the floor's, and
+// kSeafloorRelief = 0 removes it.
+static const float kSeafloorRelief = 1.0f;          // 0 = the physical endpoint alone
+static const float kSeafloorReliefContrast = 1.0f;  // hillshade gain over the painted swing (the
+                                                    // user chose the painted swing as is; a
+                                                    // brightened "map ocean" was tried and rejected)
+float SeafloorRampLuma(float depthM) {
+    // MIRRORS src/compose/Sources.cpp SeafloorRamp: change both.
+    const float d = clamp(depthM, 0.0f, 4000.0f);
+    const float3 c0 = float3(0.66f, 0.60f, 0.46f), c1 = float3(0.56f, 0.52f, 0.42f),
+                 c2 = float3(0.46f, 0.44f, 0.39f), c3 = float3(0.39f, 0.37f, 0.34f),
+                 c4 = float3(0.32f, 0.31f, 0.30f);
+    float3 c;
+    if (d < 40.0f) c = lerp(c0, c1, d / 40.0f);
+    else if (d < 200.0f) c = lerp(c1, c2, (d - 40.0f) / 160.0f);
+    else if (d < 1000.0f) c = lerp(c2, c3, (d - 200.0f) / 800.0f);
+    else c = lerp(c3, c4, (d - 1000.0f) / 3000.0f);
+    return dot(c, float3(0.299f, 0.587f, 0.114f));
+}
+// The endpoint's HUE and brightness are the measurement's (albWater is kept in the signature
+// for the record: a version that redrew the floor through water of that hue at a declared
+// visibility was brighter, greener, and rejected -- the physical water is the look). Only the
+// floor's hillshade rides the endpoint, as a brightness modulation, where the bed term has died.
+float3 SeafloorReliefMod(float3 albSea, float3 albWater, float3 floorAlb, float hp, float opaque) {
+    const float3 L = float3(0.299f, 0.587f, 0.114f);
+    const float ref = SeafloorRampLuma(max(-hp, 0.0f));
+    const float shade0 = dot(floorAlb, L) / max(ref, 1e-3f);          // flat bed = 1
+    const float shade = clamp(1.0f + kSeafloorReliefContrast * (shade0 - 1.0f), 0.30f, 2.2f);
+    return albSea * lerp(1.0f, shade, kSeafloorRelief * saturate(opaque));
+}
+
 // M7g: the effective composed-color texel (metres) RESIDENT at this pixel. Consumers that
 // historically replaced the mosaic outright (the close-up material constants, born when
 // the near field was a 9.5 m blur) ask this and YIELD where the imagery outresolves them.

@@ -1678,3 +1678,77 @@ tenant per channel, DirectStorage, ring loads, the solver on the height megatext
 The storm costs ~0.2 ms over the flood (the sea's own work), and the trees cost ~0.1 ms mean and
 ~1 ms at p99 against the incumbent providers -- load-side, from resolving stored references
 hop by hop and the height root materializing; nothing on the shader side changed. Selftest green.
+
+## 39. The seafloor's texture, and the two bugs it exposed
+
+**The ask**: "do the ingested seafloor texture next", with the acceptance image (Google Earth over
+New England: seabed relief visible through the water, uniform resolution). The inventory said
+there is nothing to ingest -- `data/` holds bathymetry (ETOPO 2022, the NE 15 s grid, three
+CUDEM windows), no photograph of the floor, because none exists. The ocean floor's texture in
+every map is a PRODUCT of its bathymetry, and the bathymetry IS ingested: it is the height stack,
+the same one the bed classifier already reads. So the source is derived, and says so.
+
+**`synth.seafloor.relief`** (`src/compose/Sources.cpp`, program in `data/bed/seafloor_rules.json`,
+authored on first run, never clobbered):
+
+- relief = the gradient of the bed lit by one fixed cartographic sun (az 315, el 45, ambient
+  0.45), normalized so a flat bed shades to exactly 1. Central differences, stepped at
+  max(texel, the finest data grain under the point) -- `Compositor::HeightGrainM` -- and
+  exaggerated x60 (the Gulf's slopes are ~1%; at x25 the painted swing was 8%, invisible lit).
+- colour = a dry sediment ramp keyed on DATUM depth: sand 0 m, silt by 200 m, clay by 4 km
+  (`SeafloorRamp`, mirrored in HLSL as `SeafloorRampLuma`), times the shade.
+- weight = the classifier's waterline band above (full at +0.4 m, off at +1.2 m NAVD), folded
+  as coverage at coarse texels (M7s), and NO deep cutoff: every ocean texel is painted.
+- footprint global; identity = the rules text + the ramp/gradient version + the height stack's
+  signature (as `synth.bed`).
+
+It is a leaf of `earth.seafloor` UNDER `synth.bed` (the classifier keeps its authority inside its
+own box by painting over it), and the survey gates it exactly as it gates the classifier:
+
+    google ---+
+              +-> earth.land ------------------+
+    aerial ---+                                |
+    relief --+                                 +-> earth.color (mega)
+             +-> earth.seafloor --+            |
+    bed -----+                    +-> gate ----+
+    gis.landsea (vector) ---------+
+
+Its own tree on disk, its tiles referenced by the composite where nothing else paints -- the
+same three-tree process as the land (S29). `--no-seafloor` is the A/B.
+
+**Through the water.** The megatexture's ocean texels are DRY albedo, like the classifier's, so
+the water's optics stay the renderer's: Beer-Lambert over the measured K_d, the two-flux
+endpoint from chlorophyll and SPM (`optics`) -- hue AND brightness. Where the physical bed term
+has died (weight 1 - mean T_w) the floor's hillshade rides the endpoint as a brightness
+modulation only (`Compose.hlsli` `SeafloorReliefMod`: divide the ramp's own luminance back out
+of the texel, what remains is the shade, flat bed = 1). Two constants, `kSeafloorRelief` (0 =
+the endpoint alone) and a contrast gain left at 1. Tried and REJECTED on the user's frame pair:
+a brighter "map ocean" that redrew the floor through water of the measured hue at a declared
+visibility -- the physical dark water with the relief riding it is the look. What made the
+relief legible was the source, not the shader: exaggeration 25 -> 60 (an authored value, so the
+tree's identity moved with it).
+
+**Bug 1 -- the chord across the Gulf** (priors 20). The first albedo still had a solid wedge
+from the Maine coast to Cape Ann where the relief was gated OUT and Google's blue showed.
+`data/gis/coast_ne.bin` holds the coastline CLIPPED to the survey box: 1283 closed rings and 15
+open pieces, the mainland one 32,727-point piece from New Jersey (south edge) to Maine (east
+edge). The crossing test closed each piece with a chord back to its own start; that chord ran
+across the Gulf of Maine and even-odd parity called everything inside it land. Invisible for a
+week because nothing gated in deep water until the relief did. Fix (`GisVectorMask::ReadRings`,
+`StitchAlongBox`): walk the box boundary counter-clockwise (interior on the left -- the
+coastline convention) from each piece's end to the next piece's start, chaining until the chain
+closes: 14 pieces -> 9 disjoint land polygons. `--gis-dump` writes the gate as a PGM; the picture
+is the proof (water: the Gulf, the Sound, Champlain, the St Lawrence, the NHD lakes; land: the
+rest, Cape Cod and the Nova Scotia sliver included).
+
+**Bug 2 -- terraces down the slope** (priors 21). Beyond the NE grid, ETOPO's 4.9 km cells are
+sampled bilinearly; a 1 km gradient step inside a cell measured the interpolant's facet, and
+the continental slope rendered as a staircase. Derivatives are taken at the data's grain.
+
+**Measured (warm, `--warm-trees` then `--pack-trees`)**: `synth.seafloor.relief` 9308 tiles
+painted, 2855 void (land); `earth.seafloor` 4151 composed (where the classifier overlaps it),
+2302 references; `earth.color` 5912 composed, 7226 references, 12208 cache hits; the stitched
+`gis.landsea` 7079 painted. 34,999 tiles packed across the megatexture tree. Stills: frame 345
+(~250 km) lit and albedo, frame 450 (80 km); `out/rail_seafloor_720.mp4` is the flood rail.
+Bench not re-run this session (the shader change is one multiply per water pixel; the tree cost
+was measured in S38).

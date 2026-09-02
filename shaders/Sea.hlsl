@@ -414,7 +414,10 @@ float4 PsMain(VsOut i) : SV_Target {
                       saturate((gFadeD.x - 2.5f) / 9.0f) * 0.55f);
         if (ComposedColorOn()) {
             const float3 img = ComposedColor(dirP);
-            albSea = lerp(albSea, img, 0.6f * saturate(1.0f + min(hp, 0.0f) / 80.0f));
+            const float reveal = saturate(1.0f + min(hp, 0.0f) / 80.0f);
+            const float3 albWater = albSea;
+            albSea = lerp(albSea, img, 0.6f * reveal);
+            albSea = SeafloorReliefMod(albSea, albWater, img, hp, 1.0f - reveal);   // M9av
         }
         const float ndlG = saturate(gSunDir.y);   // the globe lights water on upT; flat up = +y
         col = lerp(col, albSea * (0.030f + ndlG * SUN_IRR_C * 1.15f), kFar);

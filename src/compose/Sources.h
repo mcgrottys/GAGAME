@@ -181,6 +181,33 @@ private:
     SourceInfo m_info;
 };
 
+// M9av: THE SEAFLOOR'S APPEARANCE, FROM THE BATHYMETRY THE PROJECT ALREADY INGESTS. No seafloor
+// imagery exists in data/ (the ocean floor has no photographs), so its texture is a PRODUCT of
+// the height stack -- ETOPO, the NE 15 s grid and CUDEM, whichever is finest under the texel:
+// relief = the gradient of the bed (the grade-1 part of its derivative) lit by one fixed
+// cartographic sun, times a dry sediment ramp keyed on datum depth (sand on the shelf, silt on
+// the slope, clay on the plain). Global footprint; the alpha is the same waterline band the bed
+// classifier hands land back through, with NO deep cutoff: the tree paints every ocean texel.
+// DRY albedo, like synth.bed: the water's optics (measured K_d, the two-flux endpoint) stay the
+// renderer's, and where they make the water opaque the renderer shades the endpoint by this
+// relief instead of replacing it (Compose.hlsli SeafloorReliefMod).
+class SeafloorReliefSource : public ColorSource {
+public:
+    bool Load(const std::string& rulesPath, const Compositor* comp, int hgtChannel);
+    const SourceInfo& Info() const override { return m_info; }
+    float Sample(double latRad, double lonRad, double groundResM, const PaintCtx& ctx,
+                 uint8_t rgba[4]) override;
+
+private:
+    const Compositor* m_comp = nullptr;
+    int m_hgtCh = -1;
+    double m_full1 = 0.4, m_off1 = 1.2;       // the waterline band (metres, datum)
+    double m_azDeg = 315.0, m_elDeg = 45.0;   // the cartographic sun
+    double m_exagg = 25.0;                    // vertical exaggeration on the gradient
+    double m_ambient = 0.45;
+    SourceInfo m_info;
+};
+
 class EditsHeightSource : public HeightSource {
 public:
     bool Load(const std::string& geojsonPath, float crestNavd = 2.5f);

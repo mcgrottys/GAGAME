@@ -659,6 +659,24 @@ link; the reference's "1.68 m regional offset" is Boston's OWN link misapplied r
 independent contours across the flats; excluded masks (no-data, hand edits, marsh) are
 declared, never silent.
 
+**The seafloor beyond the box (M9av)**: no photograph of the ocean floor exists to ingest, so
+the seafloor's texture is a PRODUCT of the bathymetry the project already ingests -- the height
+stack (ETOPO 4.9 km, the NE 15 s grid, CUDEM). `synth.seafloor.relief` = hillshade x dry
+sediment ramp: the gradient of the bed (the grade-1 part of its derivative, central differences
+at max(texel, data grain) -- a step finer than the grain reads the bilinear interpolant's
+facets, which rendered the continental slope as terraces) exaggerated x25 and lit by one fixed
+cartographic sun (az 315, el 45, ambient 0.45, normalized so a flat bed shades to exactly 1),
+times a ramp keyed on DATUM depth (sand 0 m, silt by 200 m, clay by 4 km -- the same
+energy-sorting argument, extended past the shelf). Global footprint, the bed classifier's
+waterline band above with no deep cutoff, gated by the survey like the classifier, painted
+UNDER the classifier in `earth.seafloor`. DRY albedo, as the classifier: the water's optics stay
+the renderer's. Through opaque water (T_w -> 0 by a few tens of metres at measured K_d) the
+two-flux endpoint IS the colour -- chlorophyll and SPM keep their say -- and the floor's shading
+rides it as a brightness modulation: the renderer divides the ramp's own luminance (mirrored in
+HLSL, `SeafloorRampLuma`) back out of the texel and what remains is the hillshade. A map
+convention, declared as one, weighted by (1 - mean T_w) so the physical bed term owns the
+shallows, removable by one constant (`kSeafloorRelief`).
+
 Code: `proofs/bed_relief.py`, `src/compose/Sources.cpp`.
 Gates: `gatest` block 11 (transfer-function zeros/peaks, skew vector, narrowness discrete
 count, hemisphere partition, waterline flip-metric exactness); the waterline gate harness
@@ -894,3 +912,22 @@ model (or a textbook) would hold → what this project measured → the law now 
     "streaming timing") was this. Law: anything a recorded command still reads retires on the
     frame-overlap delay the upload ring and eviction already keep; and **ask the transport
     whether it failed** (`RetrieveErrorRecord`) before reasoning about what it delivered.
+
+20. **A clipped ring is not a ring; close it along the clip.** Prior: the survey's coast file
+    is "rings", so even-odd parity over its edges is the land/sea answer. Reality: a coastline
+    clipped to a box arrives as OPEN polylines whose ends lie on the box's edges (the mainland
+    was one 32,727-point piece from New Jersey to Maine), and a crossing test that closes each
+    piece with a chord back to its own start draws that chord across the Gulf of Maine -- the
+    whole wedge inside it was LAND, invisible for a week because nothing gated in deep water
+    until the seafloor relief did. The closure the data means is along the box: walk its
+    boundary counter-clockwise (interior on the left -- land on the left of digitization) from
+    each piece's end to the NEXT piece's start, chain until the chain closes; 14 pieces became
+    9 disjoint land polygons and the gate raster (`--gis-dump`) is the map. Lesson: a gate you
+    have only ever seen through its consequences has not been looked at. Dump the gate.
+
+21. **A derivative is taken at the data's grain, not the texel's.** Prior: the texel's ground
+    resolution is the right step for a gradient of the height stack. Reality: under a 4.9 km
+    ETOPO cell sampled bilinearly, a 1 km step measures the interpolant's facet -- piecewise-
+    constant gradients, terraces down the continental slope. Step at max(texel, finest grain
+    covering the point) (`Compositor::HeightGrainM`), centred; the fold law's cousin: never
+    differentiate finer than the field was measured.
