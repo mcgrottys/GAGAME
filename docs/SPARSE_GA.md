@@ -1650,3 +1650,17 @@ at w = 1; over a partial base they would not, and the tree is the correct one.
 machinery applies — a `TileTree(FloatW)` per plane over its `RasterSource` — with one honest
 caveat: these are hourly forecasts, so a disk tree buys boot time, not the repaint economics
 that justify it for imagery and bathymetry.
+
+### Measured, warm and packed
+
+    warm    earth.height root 2531 composed (materialized by design); leaves: etopo 2531 content,
+            NE 15 s 1140 void, CUDEMs 2208-2480 void, edits 2525 void -- the sparse trees ARE sparse
+    pack    earth.height.62f857aa/cube16k.gaa 1320 tiles, window_z14 1372 tiles;
+            "archive open, 1320 tiles answer as places" -- DirectStorage reads the height tree
+    probe   frame 200, height.window mip 0, GPU -1.18 m vs CPU stack -1.18 m, MATCH -- the
+            solver's bed is the tree's, which is the stack's
+    helm    400 frames, tree-fed vs composed-cache-fed height page: 860 px (0.06%) -- the
+            0.25 m / 7 mm texel differences moving the solve slightly
+    globe   200 frames: 12.4% differ, 3.05% by more than 1 LSB -- relief shading under a
+            different resident height mip at frame 200 (load order), not content; the probe
+            is the content check
