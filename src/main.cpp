@@ -4515,13 +4515,13 @@ int main(int argc, char** argv) {
                                 const float dH = std::abs(gpuH - cpuH);
                                 const float tol =
                                     0.06f + 0.02f * std::abs(cpuH);
-                                Log("[trace] 11 compose  height.window mip %u texel "
+                                Log("[trace] 11 compose  height.pages z14 mip %u texel "
                                     "(%u,%u): GPU %+.2f m vs CPU stack %+.2f m  %s "
-                                    "(edge compose.stack->window.z14, |d| %.3f tol %.3f)",
+                                    "(edge compose.stack->height.pages, |d| %.3f tol %.3f)",
                                     mipT, txT, tyT, gpuH, cpuH,
                                     dH <= tol ? "MATCH" : "MISMATCH", dH, tol);
                             } else {
-                                Log("[trace] 11 compose  height.window: nothing resident "
+                                Log("[trace] 11 compose  height.pages z14: nothing resident "
                                     "at this uv yet");
                             }
                         }

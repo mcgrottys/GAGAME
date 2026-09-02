@@ -55,11 +55,11 @@ class FieldSet {
 public:
     void Init(Gpu& gpu, const std::wstring& dir, float patchWidthM, float patchHeightM);
 
-    // Registers one field from a PNG. Returns the FieldDesc index, or UINT32_MAX on failure.
-    uint32_t Add(const std::wstring& fileName, FieldLayout layout, const float scale[4],
-                 const float bias[4]);
+    // M9aw: the PNG registration path (Add + LoadPng) is deleted -- it had no caller, and a
+    // raster enters the engine as a TileTree leaf on the sparse addresses, never as a
+    // committed texture from a PNG (AUDIT rows 4, 13).
 
-    // Uploads the FieldDesc table to the GPU. Call once after all Add() calls.
+    // Uploads the FieldDesc table to the GPU.
     //
     // Always creates at least a dummy row: root parameter 2 is a root SRV, and an UNBOUND root
     // descriptor is undefined behaviour, not a no-op -- vqview measured it as outright device
