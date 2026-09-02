@@ -68,6 +68,12 @@ public:
     uint32_t ChurnTiles() const { return m_churnReady ? m_churn.ResidentCount() : 0; }
     // M7e: the bank reads the foam MEMORY -- advected churn joins the one water's fiber.
     uint32_t ChurnAtlasSrv() const { return m_churnReady ? m_churn.Srv() : 0xFFFFFFFFu; }
+    // M9az: the churn window's world origin (a tile multiple, camera-following) and the
+    // domain's inverse span -- consumers test the window with these and sample the toroidal
+    // atlas at frac(world / domain).
+    float ChurnOriginX() const { return m_churnOrgX; }
+    float ChurnOriginZ() const { return m_churnOrgZ; }
+    static float ChurnDomainM() { return kChurnDomainM; }
     uint64_t ChurnBytes() const { return m_churnReady ? m_churn.ResidentBytes() : 0; }
     // M7j: the bank reads the SWELL SHADOW -- the line-of-sight exposure field (CPU march,
     // rebuilt when the peak direction or level moves). One-water lost this edge silently;
@@ -213,6 +219,10 @@ private:
         float geoA[4];
         float winA[4];
         float pageB[4];  // M9ax: x = the z14 page's slice
+        // M9az: THE WINDOW. The atlas is addressed TOROIDALLY on a world-anchored tile lattice
+        // (slot = world tile mod atlas tiles), and the domain is the +-8 km window around the
+        // camera: x, y = the world tile index of the window's origin, z = atlas tiles in y.
+        float window[4];
     };
     struct SpecCbData {
         float rect[4];
@@ -290,6 +300,10 @@ private:
     std::vector<uint8_t> m_maskCpu;
     std::vector<double> m_lastActive;
     std::vector<uint32_t> m_pendingClear;
+    // M9az: which WORLD tile each atlas slot holds (the toroidal window). A slot whose world
+    // tile changes hands is stale: cleared if it stays resident, forgotten either way.
+    std::vector<int32_t> m_slotWorldX, m_slotWorldY;
+    float m_churnOrgX = 0.0f, m_churnOrgZ = 0.0f;
     D3D12_RESOURCE_STATES m_churnState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     ChurnCbData m_churnCb{};
     double m_prevChurnT = 0;

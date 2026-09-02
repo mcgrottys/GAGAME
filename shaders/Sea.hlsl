@@ -460,8 +460,12 @@ float4 PsMain(VsOut i) : SV_Target {
 
     float churn = 0.0f;
     if (gChurnU.x != 0xFFFFFFFFu) {
-        const float2 cuv = (i.worldXZ - gChurnF.xy) * gChurnF.z;
-        churn = gTex[gChurnU.x].SampleLevel(sLinearClamp, cuv, 0).x;
+        // M9az: the atlas is toroidal on the world lattice -- inside the window, sample at
+        // frac(world / domain) with a WRAP sampler (the wrap line runs through the window).
+        const float2 rel = (i.worldXZ - gChurnF.xy) * gChurnF.z;
+        if (all(rel > 0.0f) && all(rel < 1.0f)) {
+            churn = gTex[gChurnU.x].SampleLevel(sLinearWrap, i.worldXZ * gChurnF.z, 0).x;
+        }
         // The memory says WHERE water is aerated; the chop's live texture says what it looks
         // like this instant -- without this modulation the throat renders as uniform fog.
         churn *= 0.5f + 0.5f * saturate(chopFoam * 3.0f + slopeMag);
@@ -481,12 +485,12 @@ float4 PsMain(VsOut i) : SV_Target {
 
     // Residency visualizer (V): green = resident churn tiles, red grid = NULL.
     if (gChurnU.z != 0u && gChurnU.x != 0xFFFFFFFFu) {
-        const float2 tuv = (i.worldXZ - gChurnF.xy) / gChurnF2.xy;
+        const float2 tuv = i.worldXZ / gChurnF2.xy;   // M9az: world tile lattice
         const float2 dgrid = abs(frac(tuv) - 0.5f);
         const float2 aa = fwidth(tuv) * 1.5f;
         const float gridLine = max(smoothstep(0.5f - aa.x, 0.5f, dgrid.x),
                                    smoothstep(0.5f - aa.y, 0.5f, dgrid.y));
-        const float2 tc = (floor(tuv) + 0.5f) / gChurnF2.zw;
+        const float2 tc = frac((floor(tuv) + 0.5f) / gChurnF2.zw);   // the slot it aliases to
         const float resident = gTex[gChurnU.y].SampleLevel(sPointClamp, tc, 0).x;
         const float3 gridCol = (resident > 0.5f) ? float3(0.25f, 1.7f, 0.45f)
                                                  : float3(0.55f, 0.14f, 0.14f);

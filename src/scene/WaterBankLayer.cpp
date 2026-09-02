@@ -479,10 +479,11 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.slotsC[0] = m_sea ? m_sea->ChurnAtlasSrv() : 0xFFFFFFFFu;
     cb.slotsC[1] = m_sea ? m_sea->ShadowSrv() : 0xFFFFFFFFu;   // M7j: the swell shadow
     cb.slotsC[2] = cb.slotsC[3] = 0xFFFFFFFFu;
-    cb.churn[0] = -8192.0f;
-    cb.churn[1] = -8192.0f;
-    cb.churn[2] = 1.0f / 16384.0f;
-    cb.churn[3] = 8192.0f;
+    // M9az: the churn window follows the camera; the sea owns its origin.
+    cb.churn[0] = m_sea ? m_sea->ChurnOriginX() : 0.0f;
+    cb.churn[1] = m_sea ? m_sea->ChurnOriginZ() : 0.0f;
+    cb.churn[2] = 1.0f / SeaLayer::ChurnDomainM();
+    cb.churn[3] = SeaLayer::ChurnDomainM() / 2.0f;   // atlas texels along one axis
     cb.peakDir[0] = m_sea ? m_sea->PeakDirX() : 0.0f;
     cb.peakDir[1] = m_sea ? m_sea->PeakDirZ() : 0.0f;
     cb.peakDir[2] = (m_sea && m_sea->PeakDirValid()) ? 1.0f : 0.0f;

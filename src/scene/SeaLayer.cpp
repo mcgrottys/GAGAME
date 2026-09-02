@@ -596,17 +596,28 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
     m_seaCb.churnU[1] = m_churnReady ? m_maskTex.srv : UINT32_MAX;
     m_seaCb.churnU[2] = atlasVisualize ? 1u : 0u;
     m_seaCb.churnU[3] = 0;
-    m_seaCb.churnF[0] = -0.5f * kChurnDomainM;
-    m_seaCb.churnF[1] = -0.5f * kChurnDomainM;
-    m_seaCb.churnF[2] = 1.0f / kChurnDomainM;
-    m_seaCb.churnF[3] = 1.05f;   // churn -> foam gain
+    // M9az: THE CHURN FOLLOWS THE CAMERA. The 16 km domain used to sit on the station: memory
+    // could not exist +-8 km from Newburyport, Boston's window included. The atlas is now a
+    // toroidal clipmap on a WORLD-anchored tile lattice -- the window's origin snaps to a tile
+    // multiple like the wave bank's rings (ReanchorRing), a world tile lives at slot (tile mod
+    // atlas tiles), so re-anchoring moves no bytes: content stays where the water is, the
+    // slots whose world tile changed hands are cleared, and tiles that leave the window unmap.
     if (m_churnReady) {
-        m_seaCb.churnF2[0] = static_cast<float>(m_churn.TileW()) * kChurnTexelM;
-        m_seaCb.churnF2[1] = static_cast<float>(m_churn.TileH()) * kChurnTexelM;
+        const float spanX = static_cast<float>(m_churn.TileW()) * kChurnTexelM;
+        const float spanZ = static_cast<float>(m_churn.TileH()) * kChurnTexelM;
+        const double half = 0.5 * kChurnDomainM;
+        m_churnOrgX = static_cast<float>(std::floor((camX - half) / spanX) * spanX);
+        m_churnOrgZ = static_cast<float>(std::floor((camZ - half) / spanZ) * spanZ);
+        m_seaCb.churnF2[0] = spanX;
+        m_seaCb.churnF2[1] = spanZ;
         m_seaCb.churnF2[2] = static_cast<float>(m_churn.TilesX());
         m_seaCb.churnF2[3] = static_cast<float>(m_churn.TilesY());
-        UpdateChurnResidency(*m_gpu, simUnix, signedMs);
     }
+    m_seaCb.churnF[0] = m_churnOrgX;
+    m_seaCb.churnF[1] = m_churnOrgZ;
+    m_seaCb.churnF[2] = 1.0f / kChurnDomainM;
+    m_seaCb.churnF[3] = 1.05f;   // churn -> foam gain
+    if (m_churnReady) UpdateChurnResidency(*m_gpu, simUnix, signedMs);
 
     m_seaCb.bathyU[0] = m_bathySrv;
     memcpy(m_seaCb.bathyGeo, m_bathyGeo, sizeof(m_bathyGeo));
@@ -750,29 +761,51 @@ void SeaLayer::UpdateChurnResidency(Gpu& gpu, double simUnix, double signedMs) {
     // Deep-water chop speed as the conservative onset (shallow water only blocks EARLIER).
     const float bandC2 = 1.86f;
     const double onset = 0.16 * bandC2;
-    if (std::abs(signedMs) > onset) {
-        const float fx = m_seaCb.jetDir[0], fz = m_seaCb.jetDir[1];
-        const float ex = m_seaCb.jetDir[2], ez = m_seaCb.jetDir[3];
-        for (uint32_t ty = 0; ty < m_churn.TilesY(); ++ty) {
-            for (uint32_t tx = 0; tx < m_churn.TilesX(); ++tx) {
-                const float wx = m_seaCb.churnF[0] +
-                                 (tx + 0.5f) * m_seaCb.churnF2[0];
-                const float wz = m_seaCb.churnF[1] +
-                                 (ty + 0.5f) * m_seaCb.churnF2[1];
-                const float along = wx * ex + wz * ez;
-                const float px = wx - along * ex, pz = wz - along * ez;
-                const float cross2 = px * px + pz * pz;
-                float env = std::exp(-cross2 / (m_seaCb.jet[1] * m_seaCb.jet[1]));
-                env *= (along > 0) ? std::exp(-along / m_seaCb.jet[2]) : 1.0f;
-                (void)fx; (void)fz;
-                // M5c: a WIDE superset -- the deposit is now geographic (solved currents +
-                // depth), so an over-mapped tile just holds zeros, while an under-mapped one
-                // punches a visible NULL rectangle into the middle of real breaking.
-                if (env * std::abs(signedMs) > onset * 0.35) {
-                    const uint32_t i = ty * m_churn.TilesX() + tx;
-                    m_lastActive[i] = simUnix;
-                    if (!m_churn.IsResident(tx, ty)) m_churn.RequestMap(tx, ty);
-                }
+    // M9az: walk the WINDOW's tiles (world lattice), not the atlas' slots. Each world tile maps
+    // to one slot; a slot that held a different world tile last frame has changed hands.
+    const uint32_t NX = m_churn.TilesX(), NY = m_churn.TilesY();
+    const float spanX = m_seaCb.churnF2[0], spanZ = m_seaCb.churnF2[1];
+    const int32_t T0x = static_cast<int32_t>(std::floor(m_churnOrgX / spanX));
+    const int32_t T0y = static_cast<int32_t>(std::floor(m_churnOrgZ / spanZ));
+    if (m_slotWorldX.size() != size_t(NX) * NY) {
+        m_slotWorldX.assign(size_t(NX) * NY, INT32_MIN);
+        m_slotWorldY.assign(size_t(NX) * NY, INT32_MIN);
+    }
+    auto slotOf = [&](int32_t Tx, int32_t Ty, uint32_t& sx, uint32_t& sy) {
+        const int32_t mx = ((Tx % int32_t(NX)) + int32_t(NX)) % int32_t(NX);
+        const int32_t my = ((Ty % int32_t(NY)) + int32_t(NY)) % int32_t(NY);
+        sx = uint32_t(mx);
+        sy = uint32_t(my);
+    };
+    const bool jetOn = std::abs(signedMs) > onset;
+    const float ex = m_seaCb.jetDir[2], ez = m_seaCb.jetDir[3];
+    for (uint32_t j = 0; j < NY; ++j) {
+        for (uint32_t i = 0; i < NX; ++i) {
+            const int32_t Tx = T0x + int32_t(i), Ty = T0y + int32_t(j);
+            uint32_t sx, sy;
+            slotOf(Tx, Ty, sx, sy);
+            const uint32_t slot = sy * NX + sx;
+            if (m_slotWorldX[slot] != Tx || m_slotWorldY[slot] != Ty) {
+                // The slot changed hands: its bytes belong to water 16 km away.
+                m_slotWorldX[slot] = Tx;
+                m_slotWorldY[slot] = Ty;
+                m_lastActive[slot] = -1.0e18;
+                if (m_churn.IsResident(sx, sy)) m_pendingClear.push_back(slot);
+            }
+            if (!jetOn) continue;
+            const float wx = (float(Tx) + 0.5f) * spanX;
+            const float wz = (float(Ty) + 0.5f) * spanZ;
+            const float along = wx * ex + wz * ez;
+            const float px = wx - along * ex, pz = wz - along * ez;
+            const float cross2 = px * px + pz * pz;
+            float env = std::exp(-cross2 / (m_seaCb.jet[1] * m_seaCb.jet[1]));
+            env *= (along > 0) ? std::exp(-along / m_seaCb.jet[2]) : 1.0f;
+            // M5c: a WIDE superset -- the deposit is geographic (solved currents + depth), so
+            // an over-mapped tile just holds zeros, while an under-mapped one punches a
+            // visible NULL rectangle into the middle of real breaking.
+            if (env * std::abs(signedMs) > onset * 0.35) {
+                m_lastActive[slot] = simUnix;
+                if (!m_churn.IsResident(sx, sy)) m_churn.RequestMap(sx, sy);
             }
         }
     }
@@ -856,6 +889,10 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
 
         m_churnCb.originX = m_seaCb.churnF[0];
         m_churnCb.originZ = m_seaCb.churnF[1];
+        m_churnCb.window[0] = std::floor(m_churnOrgX / m_seaCb.churnF2[0]);
+        m_churnCb.window[1] = std::floor(m_churnOrgZ / m_seaCb.churnF2[1]);
+        m_churnCb.window[2] = static_cast<float>(m_churn.TilesY());
+        m_churnCb.window[3] = 0.0f;
         m_churnCb.texelM = kChurnTexelM;
         m_churnCb.domainM = kChurnDomainM;
         m_churnCb.tilesX = m_churn.TilesX();

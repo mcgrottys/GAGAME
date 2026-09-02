@@ -492,10 +492,11 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // MAX, never + (adding memory to fresh foam brightened the throat into uniform fog);
     // the live noise modulates the memory so old deposits stay textured, not flat.
     if (gSlotsC.x != 0xFFFFFFFFu) {
+        // M9az: toroidal atlas on the world lattice: window test on the origin, wrap sample.
         const float2 cuv = (xz - gChurn.xy) * gChurn.z;
         if (all(cuv > 0.001f) && all(cuv < 0.999f)) {
             const float churnV =
-                LoadBilinearClamp(gSlotsC.x, cuv * gChurn.w, gChurn.ww).x;
+                LoadBilinearWrap(gSlotsC.x, frac(xz * gChurn.z), gChurn.w).x;
             foam = max(foam, saturate(churnV) * gFoamA.x * 1.3f);
         }
     }

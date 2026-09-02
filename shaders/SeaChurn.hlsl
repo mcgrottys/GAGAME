@@ -1,6 +1,8 @@
 // ================================================================================================
 //  M4: the churn field -- the engine's FIRST genuinely stateful quantity, living where state
 //  belongs: in resident tiles of a sparse atlas over a 16 x 16 km virtual domain.
+//  M9az: the domain is a toroidal clipmap WINDOW around the camera on a world-anchored tile
+//  lattice (slot = world tile mod atlas tiles); it no longer sits on the station.
 //
 //  Where the ebb blocks the chop band, breaking sheds aerated water whose whiteness LINGERS --
 //  that is memory, so it cannot be stateless. But it only exists along the entrance bar, so
@@ -27,7 +29,8 @@ cbuffer ChurnCb : register(b0) {
     float4 gSweM;    // M5c: x = solved-field on, y = current gain, zw = seaward blend x-range
     float4 gGeoA;    // M9ar: world -> lat/lon: orgLat, orgLon, 1/mPerLat, 1/mPerLon
     float4 gWinA;    // M9ar: height page frame: org px x, org px y, 1/16384, world px at z14
-    float4 gPageB;   // M9ax: x = the z14 page's slice in the tenant's array
+    float4 gPageB;   // M9ax: x = the z14 page's slice
+    float4 gWindow;  // M9az: x, y = world tile index of the window's origin; z = atlas tiles in y in the tenant's array
 };
 
 #include "HeightPages.hlsli"
@@ -76,7 +79,17 @@ void CsChurnTestPattern(uint3 id : SV_DispatchThreadID) {
 void CsChurnUpdate(uint3 id : SV_DispatchThreadID) {
     if (id.x >= gTileW || id.y >= gTileH) return;
     const uint2 texel = TileTexel(id);
-    const float2 world = float2(gOriginX, gOriginZ) + (float2(texel) + 0.5f) * gTexelM;
+    // M9az: the slot's WORLD tile is the one inside the window that aliases to it -- unwrap
+    // from the window's origin tile. World then follows from the lattice, not from an origin.
+    const uint t = gTileList[id.z];
+    const int2 slot = int2(t % gTilesX, t / gTilesX);
+    const int2 N = int2(int(gTilesX), int(gWindow.z));
+    const int2 T0 = int2(gWindow.xy);
+    int2 d = slot - T0;
+    d = ((d % N) + N) % N;
+    const int2 T = T0 + d;
+    const float2 world =
+        (float2(T) * float2(gTileW, gTileH) + float2(id.xy) + 0.5f) * gTexelM;
 
     float src = 0.0f;
     if (gJetA.w > 0.5f) {
