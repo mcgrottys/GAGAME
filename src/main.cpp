@@ -2,7 +2,8 @@
 //  gagame - M0 + M1.
 //
 //  Modes:
-//    (default)     windowed viewer. WASD/QE fly, right-drag look, wheel speed, R reload shaders.
+//    (default)     windowed viewer. WASD/QE fly, right-drag look, wheel speed, R reload shaders,
+//                  F5 save the camera to data/views.json (relaunch into it with --view NAME).
 //                  Time controls: SPACE pause, UP/DOWN time-scale x10, LEFT/RIGHT nudge -/+ 1 h
 //                  (SHIFT: 1 day), HOME or N back to now, [ ] halve/double the plot window.
 //    --selftest    M0 gate: run the reserved-resource null-tile test suite headless and exit
@@ -69,6 +70,7 @@
 #include <cstdio>
 #include <ctime>
 #include <fstream>
+#include <filesystem>
 #include <string>
 
 using namespace ga;
@@ -154,6 +156,7 @@ struct Options {
     std::wstring exportOut;
     float camAlt = -1, camAz = 246, camPitch = -5;   // --cam alt,az,pitch override
     float camX = 1e9f, camZ = 1e9f;   // --campos x,z world override (sea mode)
+    std::string view;                 // --view NAME: a camera saved with F5 (data/views.json)
     std::string bathyPath = "data/bathy/merrimack.json";
     float datumOff = -1.30f;          // tide (m MLLW) + this = water level in NAVD88
     bool datumSet = false;            // --datum given: overrides the CO-OPS datum resolution
@@ -359,6 +362,51 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--campos") {
             const std::string v = next("522,72");
             sscanf_s(v.c_str(), "%f,%f", &o.camX, &o.camZ);
+        }
+        else if (a == "--view") {
+            // A camera the user saved with F5: the same five numbers --cam/--campos take,
+            // looked up by name so a pose survives the session it was found in.
+            o.view = next("view-1");
+            // Views the user asked to KEEP live here, not in the gitignored data/ folder.
+            // east, alt, north, azimuth (compass), pitch -- SetFromCompass's own order.
+            struct BuiltInView { const char* name; float x, alt, z, az, pitch; };
+            static const BuiltInView kBuiltInViews[] = {
+                // On the north jetty a little in from its tip, looking back along it toward
+                // the range tower (saved with F5 2026-09-01: "keep this!").
+                {"jetty-north", 541.20f, 7.00f, 72.52f, 246.0f, -4.0f},
+                // Off the jetty tips looking west into the entrance, three heights.
+                {"entrance-low", 900.0f, 40.0f, -10.0f, 270.0f, -10.0f},
+                {"entrance-mid", 1200.0f, 120.0f, -10.0f, 270.0f, -18.0f},
+                {"entrance-high", 1500.0f, 300.0f, -10.0f, 270.0f, -28.0f},
+            };
+            bool found = false;
+            for (const BuiltInView& b : kBuiltInViews) {
+                if (o.view != b.name) continue;
+                o.camX = b.x; o.camAlt = b.alt; o.camZ = b.z; o.camAz = b.az; o.camPitch = b.pitch;
+                found = true;
+            }
+            std::ifstream vf("data/views.json", std::ios::binary);
+            const std::string text((std::istreambuf_iterator<char>(vf)),
+                                   std::istreambuf_iterator<char>());
+            std::string err;
+            const JsonValue root = JsonParser::Parse(text, &err);
+            const JsonValue* views = err.empty() ? root.Get("views") : nullptr;
+            if (views) {   // the file may override a built-in of the same name
+                for (const JsonValue& v : views->arr) {
+                    if (v.Str("name") != o.view) continue;
+                    o.camX = static_cast<float>(v.Num("x", 0.0));
+                    o.camAlt = static_cast<float>(v.Num("alt", 2.0));
+                    o.camZ = static_cast<float>(v.Num("z", 0.0));
+                    o.camAz = static_cast<float>(v.Num("az", 90.0));
+                    o.camPitch = static_cast<float>(v.Num("pitch", 0.0));
+                    found = true;
+                }
+            }
+            if (!found) {
+                fprintf(stderr, "--view %s: not built in and not in data/views.json (press F5 "
+                        "in the viewer to save one)\n", o.view.c_str());
+                exit(2);
+            }
         }
         else if (a == "--bathy") o.bathyPath = next("data/bathy/merrimack.json");
         else if (a == "--datum") {
@@ -3670,6 +3718,54 @@ int main(int argc, char** argv) {
                 }
 
                 cam.Update(in, dt);
+                if (in.keyPressed[VK_F5]) {
+                    // SAVE THIS CAMERA. The five numbers SetFromCompass takes, inverted from
+                    // the live pose, appended to data/views.json under a generated name (rename
+                    // it in the file) and logged as the flags that reproduce it directly.
+                    float az = 90.0f - cam.yaw * 180.0f / 3.14159265f;
+                    az = std::fmod(std::fmod(az, 360.0f) + 360.0f, 360.0f);
+                    const float pitchDeg = cam.pitch * 180.0f / 3.14159265f;
+                    std::vector<std::string> kept;
+                    {
+                        std::ifstream vf("data/views.json", std::ios::binary);
+                        const std::string text((std::istreambuf_iterator<char>(vf)),
+                                               std::istreambuf_iterator<char>());
+                        std::string err;
+                        const JsonValue root = JsonParser::Parse(text, &err);
+                        const JsonValue* views = err.empty() ? root.Get("views") : nullptr;
+                        if (views) {
+                            for (const JsonValue& v : views->arr) {
+                                char line[320];
+                                snprintf(line, sizeof(line),
+                                         "  {\"name\": \"%s\", \"x\": %.2f, \"alt\": %.2f, "
+                                         "\"z\": %.2f, \"az\": %.2f, \"pitch\": %.2f, "
+                                         "\"time\": %.0f}",
+                                         v.Str("name").c_str(), v.Num("x", 0), v.Num("alt", 0),
+                                         v.Num("z", 0), v.Num("az", 0), v.Num("pitch", 0),
+                                         v.Num("time", 0));
+                                kept.push_back(line);
+                            }
+                        }
+                    }
+                    char name[32];
+                    snprintf(name, sizeof(name), "view-%zu", kept.size() + 1);
+                    char line[320];
+                    snprintf(line, sizeof(line),
+                             "  {\"name\": \"%s\", \"x\": %.2f, \"alt\": %.2f, \"z\": %.2f, "
+                             "\"az\": %.2f, \"pitch\": %.2f, \"time\": %.0f}",
+                             name, cam.px, cam.py, cam.pz, az, pitchDeg, simUnix);
+                    kept.push_back(line);
+                    std::filesystem::create_directories("data");
+                    std::ofstream vf("data/views.json", std::ios::binary);
+                    vf << "{\"views\": [\n";
+                    for (size_t k = 0; k < kept.size(); ++k) {
+                        vf << kept[k] << (k + 1 < kept.size() ? ",\n" : "\n");
+                    }
+                    vf << "]}\n";
+                    Log("[view] %s %s: --view %s   (= --cam %.2f,%.2f,%.2f --campos %.2f,%.2f)",
+                        vf ? "saved" : "FAILED TO WRITE data/views.json for", name, name,
+                        cam.py, az, pitchDeg, cam.px, cam.pz);
+                }
                 if (in.keyPressed['R']) renderer.ReloadShaders();
                 if (in.keyPressed[VK_SPACE]) paused = !paused;
                 if (in.keyPressed[VK_UP]) timeScale = std::min(timeScale * 10.0, 864000.0);
