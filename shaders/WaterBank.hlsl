@@ -298,14 +298,22 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // of this bug. Ocean bands fold by exposure; sigma^2 rides the same amplitude-squared
     // law; local chop keeps a floor. The shadow shares the SWE window's frame (row 0 =
     // north), so the same (1 - v) flip applies.
+    // M9ba: the exposure is a PAGE of the swell.exposure tenant (z14 slice, mips >= 3), read
+    // through the same lat/lon -> page frame as the bed; nothing resident = exposed.
     float expo = 1.0f;
-    if (gSlotsC.y != 0xFFFFFFFFu && gSwe.z > 0.0f) {
-        const float2 suv = (xz - gSwe.xy) * float2(gSwe.z, gSwe.w);
-        if (all(suv > 0.001f) && all(suv < 0.999f)) {
-            expo = max(LoadBilinearClamp(gSlotsC.y,
-                                         float2(suv.x * 160.0f, (1.0f - suv.y) * 160.0f),
-                                         float2(160.0f, 160.0f)).x,
-                       0.18f);
+    if (gSlotsC.y != 0xFFFFFFFFu && gSlotsC.z != 0xFFFFFFFFu && gSlotsD.z != 0xFFFFFFFFu) {
+        const float lat = gGeoA.x + xz.y * gGeoA.z;
+        const float lon = gGeoA.y + xz.x * gGeoA.w;
+        const float mx = (lon + 180.0f) / 360.0f * gWinA.w;
+        const float my = (0.5f - log(tan(0.7853981634f + lat * 0.01745329252f * 0.5f)) *
+                                     0.15915494309f) * gWinA.w;
+        const float2 wuv = float2(mx - gWinA.x, my - gWinA.y) * gWinA.z;
+        if (all(wuv > 0.0f) && all(wuv < 1.0f)) {
+            const float have = round(HpHaveMip(gTA[gSlotsC.z], wuv, gSlotsD.z));
+            if (have <= kHpMaxMip) {
+                expo = max(HpLoadBilinear(gTA[gSlotsC.y], wuv, gSlotsD.z, max(have, 3.0f)),
+                           0.18f);
+            }
         }
     }
 

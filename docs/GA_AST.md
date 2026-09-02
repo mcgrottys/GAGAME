@@ -25,13 +25,13 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | ocean.fft | caustic jacobian | globe.ps | patch.wrap +v=N | atlas.texel +v=N | - | J / 1/m lap | gain 0.35..2.6 | x1 | Globe.hlsl M8 caustic block |
 | swe.solver | eta | water.bank | raster.row0N +v=S | atlas.texel +v=N | FLIP | m dEta | +-1.5 | x1 | WaterBank.hlsl CsBankFill (1-uv.y) |
 | swe.solver | uv | water.bank | raster.row0N +v=S | atlas.texel +v=N | FLIP | m/s | +-2.5 | x1 | WaterBank.hlsl CsBankFill (1-uv.y) |
-| swe.solver | shadow | water.bank | raster.row0N +v=S | atlas.texel +v=N | FLIP | 0..1 exposure | 0.12..1 | x1 | WaterBank.hlsl CsBankFill (1-uv.y), floor 0.18 |
+| exposure.node | exposure | water.bank | mercator.px +v=S | uv01.vS +v=S | - | 0..1 exposure | 0.12..1 | x1 | WaterBank.hlsl CsBankFill (1-uv.y), floor 0.18 |
 | churn.kernel | churn | water.bank | atlas.texel +v=N | atlas.texel +v=N | - | 0..1 aeration (remembered foam, MAX-composited) | 0..1 | x1 | WaterBank.hlsl CsBankFill flat |
 | height.pages | bed | churn.kernel | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | z14 slice; -30 m off the page | x1 | SeaChurn.hlsl PageBedAt |
 | height.pages | bed | sea.ps (inactive) | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | cube + z14 page | x1 | Sea.hlsl BedAt -> ComposedHeight(SeaPlanetDir) |
 | height.pages | bed | swe.solver | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | z14 slice; +100 m wall off the page | x1 | Swe.hlsl BedAt (lattice -> lat/lon -> page uv, residency-clamped) |
 | swe.solver | eta | sea.ps (inactive) | raster.row0N +v=S | atlas.texel +v=N | FLIP | m dEta | +-1.5 | x1 | Sea.hlsl SweDEta (1-uv.y) |
-| swe.solver | shadow | sea.ps (inactive) | raster.row0N +v=S | atlas.texel +v=N | FLIP | 0..1 exposure | 0.12..1 | x1 | Sea.hlsl SweShadow (uv.x, 1-uv.y) |
+| exposure.node | exposure | sea.ps (inactive) | mercator.px +v=S | uv01.vS +v=S | - | 0..1 exposure | 0.12..1 | x1 | Sea.hlsl SweShadow (uv.x, 1-uv.y) |
 | churn.kernel | churn | sea.ps (inactive) | atlas.texel +v=N | atlas.texel +v=N | - | 0..1 aeration | 0..1 | x1.05 | Sea.hlsl cuv flat |
 | compose.stack | corners | water.bank | world.m +v=N | world.m +v=N | - | m NAVD level/bed + hsScale | hsScale 0.15..3 | x1 | WaterBankLayer CornerParams (CPU) |
 | compose.stack | bed (per cell) | wave.solver | world.m +v=N | atlas.texel +v=N | - | m NAVD | -40..15 | x1 | WaveField.h SolveNow (SampleHeightStack) |
@@ -59,7 +59,7 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | mv2.windbank | curl overlay | globe.ps | atlas.texel +v=N | atlas.texel +v=N | - | curl x1e4 | +-2.2 synoptic | x1 | Globe.hlsl wind overlay (V) |
 | ocean.fft | chop deriv (pattern) | churn.kernel | patch.wrap +v=N | atlas.texel +v=N | - | jacobian foam | 0..1 | x1 | SeaChurn.hlsl (world - U dt)/patch |
 | swe.solver | uv (blocking) | churn.kernel | raster.row0N +v=S | atlas.texel +v=N | FLIP | m/s | +-2.5 | x1 | SeaChurn.hlsl suv flip |
-| sea.peakdir | shadow build (LOS march) | swe.solver | world.m +v=N | raster.row0N +v=S | FLIP | 0..1 exposure | 0.12..1; rebuilt on dir/level move | x1 | SeaLayer::BuildShadowMask (CPU) |
+| sea.peakdir | LOS march over the height stack (M9ba) | exposure.node | world.m +v=N | world.m +v=N | - | 0..1 exposure | 0.12..1; rebuilt on dir/level move | x1 | SeaLayer::BuildShadowMask (CPU) |
 | compose.stack | paint survey mask | mask.pages | latlon.deg +v=N | mercator.px +v=S | FLIP | water coverage / edited / surveyed (bytes) | cube + z14 + z17 pages | x1 | TileTree::Provider over gis.landsea (GisMaskSource sweep) |
 | mask.pages | classifier + edit override | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | land 0..1, edited 0..1, or no opinion | finest page with an opinion | x1 | Compose.hlsli CsMaskSample / ComposedLandness |
 | mask.pages | classifier + edit override | sea.ps (inactive) | mercator.px +v=S | uv01.vS +v=S | - | land bit | ComposedIsLand | x1 | Sea.hlsl ComposedIsLand |

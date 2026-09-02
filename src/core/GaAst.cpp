@@ -229,7 +229,7 @@ void RegisterKnownWaterEdges() {
               "WaterBank.hlsl CsBankFill (1-uv.y)"});
     Register({"swe.solver", "water.bank", "uv", rowS, atlasN, true, "m/s", "+-2.5", 1.0,
               "WaterBank.hlsl CsBankFill (1-uv.y)"});
-    Register({"swe.solver", "water.bank", "shadow", rowS, atlasN, true, "0..1 exposure",
+    Register({"exposure.node", "water.bank", "exposure", mercPxW, uvSW, false, "0..1 exposure",
               "0.12..1", 1.0, "WaterBank.hlsl CsBankFill (1-uv.y), floor 0.18"});
     Register({"churn.kernel", "water.bank", "churn", atlasN, atlasN, false,
               "0..1 aeration (remembered foam, MAX-composited)", "0..1", 1.0,
@@ -247,7 +247,7 @@ void RegisterKnownWaterEdges() {
               "Swe.hlsl BedAt (lattice -> lat/lon -> page uv, residency-clamped)"});
     Register({"swe.solver", "sea.ps", "eta", rowS, atlasN, true, "m dEta", "+-1.5", 1.0,
               "Sea.hlsl SweDEta (1-uv.y)"});
-    Register({"swe.solver", "sea.ps", "shadow", rowS, atlasN, true, "0..1 exposure",
+    Register({"exposure.node", "sea.ps", "exposure", mercPxW, uvSW, false, "0..1 exposure",
               "0.12..1", 1.0, "Sea.hlsl SweShadow (uv.x, 1-uv.y)"});
     Register({"churn.kernel", "sea.ps", "churn", atlasN, atlasN, false, "0..1 aeration",
               "0..1", 1.05, "Sea.hlsl cuv flat"});
@@ -340,7 +340,7 @@ void RegisterKnownWaterEdges() {
               "jacobian foam", "0..1", 1.0, "SeaChurn.hlsl (world - U dt)/patch"});
     Register({"swe.solver", "churn.kernel", "uv (blocking)", rowS, atlasN, true, "m/s",
               "+-2.5", 1.0, "SeaChurn.hlsl suv flip"});
-    Register({"sea.peakdir", "swe.solver", "shadow build (LOS march)", worldM, rowS, true,
+    Register({"sea.peakdir", "exposure.node", "LOS march over the height stack (M9ba)", worldM, worldM, false,
               "0..1 exposure", "0.12..1; rebuilt on dir/level move", 1.0,
               "SeaLayer::BuildShadowMask (CPU)"});
     // M9ay: the survey is PAGES of its own tree (gis.landsea: rings swept per tile on the

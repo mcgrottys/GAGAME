@@ -1844,7 +1844,7 @@ water polygons overlap (SeaOcean over the estuary/river polygon at the mouth) th
 cancel and the channel is land. Since M9ak that same union parity had gated the bed classifier
 out of the river without anyone seeing it -- the raster classifier still said water, so the
 sea drew water over a Google photo of water. The crossings now carry their ring id
-(`CrossingsTagged`), each feature fills its own parity and the features OR (priors 22). The
+(`CrossingsTagged`), each feature fills its own parity and the features OR (priors 23). The
 coast set keeps union parity: GSHHG's hierarchy is nested and XOR is its semantics.
 
 **Found on the way: the flag that ate the next flag.** `--storm --rail-flood DIR --mp4 F`
@@ -1861,3 +1861,48 @@ tree (the z17 mask page alone 4215 tiles, 264 MB). Boot: `[gis] the survey is pa
 no orphan. `--selftest` passes (dxtest x5 size + layout, gatest). Stills at 80 km (lit and
 albedo) and the helm frame render as before: the coastline classifier, the edit override on
 the jetties and the sea's discard now come from the pages.
+
+## 42. The churn follows the camera; the swell shadow is a tree node
+
+Two items from the water audit (AUDIT_WATER §4), both about the same thing: a field that
+existed only inside one box near Newburyport now exists wherever the camera is.
+
+**The churn (M9az).** The foam-memory atlas was a fixed 16 km box centred on the station:
+breaking could not be remembered eight kilometres from the ACT0816 buoy, Boston's window
+included. The atlas is unchanged (8192², 2 m texels, sparse, list-driven kernels); its
+ADDRESSING is now toroidal on a world-anchored tile lattice -- a world tile (Tx, Ty) lives at
+slot (Tx mod NX, Ty mod NY), and the domain is the ±8 km window around the camera whose origin
+snaps to a tile multiple exactly as the wave bank's rings do (`ReanchorRing`). Re-anchoring
+moves no bytes: content stays where the water is; a slot whose world tile changed hands is
+cleared (its bytes belonged to water 16 km away); tiles that leave the window unmap. Consumers
+test the window on the origin and sample at `frac(world / domain)` with a WRAP sampler, since
+the wrap line runs through the window. The kernel unwraps a slot to its world tile from the
+window's origin tile (`gWindow`, appended to `ChurnCb` on both sides). Measured: the helm frame
+differs from the fixed-domain build in 296 of 1.44 M pixels by at most 6/255 -- the wrap
+sampler at tile bilinear edges, nothing else.
+
+**The swell exposure (M9ba).** The line-of-sight shadow was a 160² CPU raster marched over one
+copy of the Merrimack CUDEM and uploaded as a committed texture -- inside one 18 km box the
+sea was sheltered, everywhere else the bank's rings whitecapped every harbour. It is a field
+over the bed, so it is now a `DomainSource` (`ExposureSource`): the march runs over the height
+STACK (whatever is finest under the ray), identity = the stack's signature + the peak direction
+bucketed to 5° + the level bucketed to 0.25 m + the program version. A one-input compose root
+over it gives a `TileTree` that materializes R16F; the tree is the provider of a fourth page
+tenant, `swell.exposure (pages)`, demanded every frame at mip 3 (76 m texels) over ±20 km
+around the camera, read by the sea shader and the bank kernel through the same lat/lon →
+page frame as the bed (`SweShadow`, the bank's `expo`), residency-clamped, nothing resident =
+exposed. When the bucket rolls the tree re-keys under an atomic shared pointer (loader threads
+may be inside the old tree's provider) and the tenant DROPS its tiles: residency bytes go to
+"nothing" this frame, pool slots are NULL-mapped after the frame-overlap window (priors 19),
+loads in flight for the old identity are discarded when they land (`ResidencyManager::Drop`).
+The CPU mirror for `--trace` is the node itself.
+
+**What the tree showed that the raster hid.** Marched over the composed stack, the survey
+edits make the jetties real +2.5 m walls, and a single line of sight from mid-channel toward an
+080° swell crosses the north jetty: the whole channel went to the 0.12 floor, where the old
+raster -- marching CUDEM's smeared crests and then box-smoothing a 117 m grid -- leaked. A
+single ray cannot carry what actually puts swell in that channel, so the node marches a
+cosine-weighted FAN of five rays across the sea's declared directional spread (±26°, the
+wave-field spectrum's own) and averages their transmissions. Diffraction is not modelled and
+is not claimed; the fan is the spread the spectrum already states. The graph: `sea.peakdir →
+exposure.node → {water.bank, sea.ps}`, mercator-uv, no flip; the ledger truth re-pinned.

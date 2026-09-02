@@ -595,7 +595,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
     m_seaCb.churnU[0] = m_churnReady ? m_churn.Srv() : UINT32_MAX;
     m_seaCb.churnU[1] = m_churnReady ? m_maskTex.srv : UINT32_MAX;
     m_seaCb.churnU[2] = atlasVisualize ? 1u : 0u;
-    m_seaCb.churnU[3] = 0;
+    m_seaCb.churnU[3] = m_expRes;   // M9ba: the exposure tenant's residency map
     // M9az: THE CHURN FOLLOWS THE CAMERA. The 16 km domain used to sit on the station: memory
     // could not exist +-8 km from Newburyport, Boston's window included. The atlas is now a
     // toroidal clipmap on a WORLD-anchored tile lattice -- the window's origin snaps to a tile
@@ -622,27 +622,15 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
     m_seaCb.bathyU[0] = m_bathySrv;
     memcpy(m_seaCb.bathyGeo, m_bathyGeo, sizeof(m_bathyGeo));
 
-    // ---- M5c: swell-shadow mask -- rebuilt when the peak wave direction or the water level
-    // moves enough to change what blocks the sea (a bar that shadows at low water drowns at
-    // high water).
-    // M7j: the hypervisor's first catch -- the mask could build from the DEFAULT peak
-    // direction (toward east) before partitions loaded: marching "toward the source" then
-    // walked WEST into the dunes from every ocean cell, and the whole sea read as deep
-    // shadow. No real direction, no shadow (exposure 1 until the swell is known).
-    if (m_bathyCpu && m_bathyCpu->Ready() && m_peakDirValid) {
-        const float lvl = static_cast<float>(seaLevelM);
-        const float dirDot = m_peakDirX * m_shadowDirX + m_peakDirZ * m_shadowDirZ;
-        if (!m_shadowBuilt || dirDot < 0.98f || std::abs(lvl - m_shadowLevel) > 0.5f) {
-            BuildShadowMask(*m_gpu, lvl);
-        }
-    }
+    // M9ba: the swell exposure is a tree node driven from main (ExposureSource::Set on the
+    // peak direction and the level); nothing is built here any more.
 
     // ---- M5c: solver bindings. NULL-tile eta reads = "the tide plane is right here".
     const bool sweOn = m_swe && m_swe->Ready();
     m_seaCb.sweU[0] = sweOn ? m_swe->EtaSrv() : UINT32_MAX;
     m_seaCb.sweU[1] = sweOn ? m_swe->UvSrv() : UINT32_MAX;
     m_seaCb.sweU[2] = sweOn ? 1u : 0u;
-    m_seaCb.sweU[3] = m_shadowBuilt ? m_shadowTex.srv : UINT32_MAX;
+    m_seaCb.sweU[3] = m_expSrv;    // M9ba: the exposure page tenant's array SRV
     if (sweOn) {
         m_seaCb.sweF[0] = static_cast<float>(m_swe->Nx());
         m_seaCb.sweF[1] = static_cast<float>(m_swe->Ny());
@@ -660,88 +648,6 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
 // geometric shadow. Two box blurs give the penumbra a wavelength-ish softness. This is
 // line-of-sight, not diffraction -- honest about what it is, and it reads right: calm in the
 // lee of the north jetty while the bar outside stays violent.
-void SeaLayer::BuildShadowMask(Gpu& gpu, float waterNavd) {
-    const BathyModel& bm = *m_bathyCpu;
-    const int nx = bm.Nx(), ny = bm.Ny();
-    const float cellX = bm.WorldSizeX() / nx, cellZ = bm.WorldSizeZ() / ny;
-    const auto& elev = bm.Elev();
-
-    // March in grid space (row 0 = north). Step ~2 cells; nearest-sample the bed directly.
-    const float stepM = 13.0f;
-    const float sx = -m_peakDirX * stepM / cellX;          // grid x per step
-    const float sy = +m_peakDirZ * stepM / cellZ;          // grid y grows SOUTH; -(-dirZ)
-    const int maxSteps = static_cast<int>(4000.0f / stepM);
-
-    // Graded blocking: an awash bar (crest barely above water) BREAKS the swell and transmits a
-    // reduced sea; only real walls -- jetty crests, dunes, the island -- throw a deep shadow.
-    std::vector<float> mask(kShadowN * kShadowN, 1.0f);
-    for (uint32_t my = 0; my < kShadowN; ++my) {
-        for (uint32_t mx = 0; mx < kShadowN; ++mx) {
-            const float gx0 = (mx + 0.5f) / kShadowN * nx;
-            const float gy0 = (my + 0.5f) / kShadowN * ny;
-            const float e0 = elev[static_cast<int>(gy0) * nx + static_cast<int>(gx0)];
-            if (e0 > -9000.0f && e0 > waterNavd) continue;   // land cell; value never sampled
-            float gx = gx0, gy = gy0;
-            float excess = 0.0f;   // worst blocker height above the water line en route
-            for (int s = 0; s < maxSteps; ++s) {
-                gx += sx;
-                gy += sy;
-                const int ix = static_cast<int>(gx), iy = static_cast<int>(gy);
-                if (ix < 0 || iy < 0 || ix >= nx || iy >= ny) break;   // open water: exposed
-                const float e = elev[iy * nx + ix];
-                if (e > -9000.0f) excess = std::max(excess, e - waterNavd);
-                if (excess > 1.2f) break;   // already a full wall; no need to keep marching
-            }
-            if (excess > 0.15f) {
-                // 0.15 m awash -> 0.5 transmission, ramping down to the 0.12 deep-shadow floor
-                // by a 1.2 m wall.
-                const float t = std::min((excess - 0.15f) / 1.05f, 1.0f);
-                mask[my * kShadowN + mx] = 0.5f - 0.38f * t;
-            }
-        }
-    }
-    for (int pass = 0; pass < 2; ++pass) {
-        std::vector<float> sm = mask;
-        for (int y = 1; y < static_cast<int>(kShadowN) - 1; ++y) {
-            for (int x = 1; x < static_cast<int>(kShadowN) - 1; ++x) {
-                float a = 0;
-                for (int dy = -1; dy <= 1; ++dy) {
-                    for (int dx2 = -1; dx2 <= 1; ++dx2) {
-                        a += mask[(y + dy) * kShadowN + (x + dx2)];
-                    }
-                }
-                sm[y * kShadowN + x] = a / 9.0f;
-            }
-        }
-        mask.swap(sm);
-    }
-
-    m_shadowCpu.resize(mask.size());
-    for (size_t i = 0; i < mask.size(); ++i) {
-        m_shadowCpu[i] = static_cast<uint8_t>(std::clamp(mask[i], 0.0f, 1.0f) * 255.0f + 0.5f);
-    }
-    if (!m_shadowTex.Valid()) {
-        m_shadowTex = gpu.CreateTexture2D(kShadowN, kShadowN, DXGI_FORMAT_R8_UNORM,
-                                          D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST,
-                                          L"sea.swellShadow");
-    }
-    gpu.UploadTexture(m_shadowTex, m_shadowCpu.data(), kShadowN);
-    // The domain shader reads it too: PIXEL alone is not a legal state for that.
-    ID3D12GraphicsCommandList* cl = gpu.BeginUpload();
-    gpu.Transition(cl, m_shadowTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
-                                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    gpu.EndUpload();
-    if (m_shadowTex.srv == UINT32_MAX) {
-        m_shadowTex.srv = gpu.CreateSrv(m_shadowTex.res.Get(), DXGI_FORMAT_R8_UNORM);
-    }
-
-    m_shadowDirX = m_peakDirX;
-    m_shadowDirZ = m_peakDirZ;
-    m_shadowLevel = waterNavd;
-    m_shadowBuilt = true;
-    Log("[sea] swell-shadow mask rebuilt (dir %.2f,%.2f water %.2f NAVD)", m_peakDirX,
-        m_peakDirZ, waterNavd);
-}
 
 void SeaLayer::UpdateChurnResidency(Gpu& gpu, double simUnix, double signedMs) {
     if (!m_churnReady) return;

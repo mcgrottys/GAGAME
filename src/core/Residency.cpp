@@ -556,9 +556,46 @@ void ResidencyManager::UpdateResidencyByte(Tenant& t, const TileRequest& r, bool
     t.resDirty = true;
 }
 
+void ResidencyManager::Drop(int tenant) {
+    Tenant& t = m_tenants[tenant];
+    uint32_t mapped = 0, inflight = 0;
+    for (auto it = m_tracked.begin(); it != m_tracked.end();) {
+        auto& tr = it->second;
+        if (tr->tenant != tenant) { ++it; continue; }
+        tr->dropped = true;
+        if (tr->state == TileState::Mapped) {
+            UpdateResidencyByte(t, tr->req, false);
+            m_retiring.push_back({tr, m_frame});
+            auto mit = std::find(m_mapped.begin(), m_mapped.end(), tr);
+            if (mit != m_mapped.end()) m_mapped.erase(mit);
+            ++mapped;
+        } else {
+            ++inflight;
+        }
+        it = m_tracked.erase(it);
+    }
+    Log("[residency] %S: dropped %u mapped tiles (retire after %u frames) and %u in flight",
+        t.name.c_str(), mapped, kEvictAgeFrames, inflight);
+}
+
 void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     PixScope scope(cl, "residency (seen->load->map->fill; classic lists, screw prefetch)");
     ++m_frame;
+    // M9ba: NULL-map the dropped tiles whose overlap window has passed; free their slots.
+    for (auto it = m_retiring.begin(); it != m_retiring.end();) {
+        if (m_frame - it->frame < kEvictAgeFrames) { ++it; continue; }
+        Tenant& t = m_tenants[it->tile->tenant];
+        const D3D12_TILED_RESOURCE_COORDINATE coord{it->tile->req.x, it->tile->req.y, 0,
+                                                    it->tile->req.face * t.mips + it->tile->req.mip};
+        const D3D12_TILE_REGION_SIZE size{1, FALSE, 0, 0, 0};
+        const D3D12_TILE_RANGE_FLAGS flag = D3D12_TILE_RANGE_FLAG_NULL;
+        const UINT off = 0, cnt = 1;
+        gpu.Queue()->UpdateTileMappings(t.res.Get(), 1, &coord, &size, nullptr, 1, &flag, &off,
+                                        &cnt, D3D12_TILE_MAPPING_FLAG_NONE);
+        if (it->tile->pool != UINT32_MAX) m_freePool.push_back(it->tile->pool);
+        it->tile->state = TileState::Failed;
+        it = m_retiring.erase(it);
+    }
 
     // ---- M9ai: RETIRE LANDED DIRECT READS. A tile mapped last frame and read by DirectStorage
     // becomes claimable only once its fence signals. Until then it has been mapped but NOT
@@ -693,6 +730,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         while (m_inFlight < static_cast<int>(kMaxLoadsInFlight) && !m_seen.empty()) {
             auto tile = m_seen.front();
             m_seen.pop_front();
+            if (tile->dropped) continue;   // M9ba: identity moved before it loaded
             tile->state = TileState::Loading;
             m_loading.push_back(tile);
             m_loadQueue.push_back(tile);
@@ -715,6 +753,10 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         for (auto it = m_loading.begin();
              it != m_loading.end() && batch.size() < kMaxMapsPerFrame;) {
             auto& tile = *it;
+            if (tile->dropped) {   // M9ba: landed for an identity that no longer exists
+                it = m_loading.erase(it);
+                continue;
+            }
             if (tile->state == TileState::Failed) {
                 // Honestly unmapped forever: it stays in m_tracked (Want() only bumps
                 // lastSeen), consumers keep reading the coarser real mip.

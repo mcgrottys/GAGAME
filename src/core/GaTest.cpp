@@ -177,7 +177,7 @@ bool RunGaSelfTest() {
         {"height.pages", "bed", false, false},   // M9ar: the page, merc-uv, no flip
         {"churn.kernel", "churn", true, false},
         {"ocean.fft", "cascade.disp", true, false},
-        {"swe.solver", "shadow", false, true},
+        {"exposure.node", "exposure", false, false},   // M9ba: a page, merc-uv, no flip
     };
     for (const Truth& t : truths) {
         bool found = false;

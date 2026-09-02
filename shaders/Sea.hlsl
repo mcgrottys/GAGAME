@@ -34,12 +34,12 @@ cbuffer SeaCb : register(b1) {
     float4 gWaveC;      // x HEIGHT EXAGGERATION (look knob), yz = peak dir, w advect wrap t
     float4 gBandK;      // xyz = representative WAVENUMBER per cascade (rad/m); phase speed is
                         // derived per-vertex from the local depth
-    uint4  gChurnU;     // x churn atlas SRV, y residency-mask SRV, z visualizer on, w unused
+    uint4  gChurnU;     // x churn atlas SRV, y residency-mask SRV, z visualizer on, w exposure page residency SRV (M9ba)
     float4 gChurnF;     // xy = atlas world origin, z = 1/domain size, w = churn foam gain
     float4 gChurnF2;    // xy = tile world size (m), zw = tile count
     uint4  gBathyU;     // x = CUDEM heightfield SRV (0xFFFFFFFF = open-ocean mode)
     float4 gBathyGeo;   // world x0, z0, 1/sizeX, 1/sizeZ (row 0 of the texture = NORTH)
-    uint4  gSweU;       // M5c: x eta SRV, y uv SRV, z solver on, w swell-shadow mask SRV
+    uint4  gSweU;       // M5c: x eta SRV, y uv SRV, z solver on, w exposure PAGE array SRV (M9ba)
     float4 gSweF;       // xy = bathy grid dims, zw = 1 / eta-atlas PADDED dims
     float4 gSweG;       // x = prism-truncation current gain (the CUDEM window holds ~1/3 of the
                         // real tidal prism; the solver supplies the SHAPE, this ACT-calibrated
@@ -103,11 +103,15 @@ float SweDEta(float2 xz) {
 // M5c: swell exposure -- 1 in open water, ~0.12 in the geometric shadow of the jetties and
 // Plum Island (CPU line-of-sight march toward the peak-wave source, rebuilt when the wave
 // direction or the water level moves).
+// M9ba: the exposure is a PAGE (swell.exposure tenant, z14 slice, mips >= 3): nothing resident
+// = no opinion = exposed. Same frame as the bed's page, same residency clamp.
 float SweShadow(float2 xz) {
-    if (gSweU.w == 0xFFFFFFFFu) return 1.0f;
-    const float2 uv = BathyUv(xz);
+    if (gSweU.w == 0xFFFFFFFFu || gChurnU.w == 0xFFFFFFFFu) return 1.0f;
+    const float2 uv = CsWindowUv(SeaPlanetDir(xz));
     if (any(uv < 0.0f) || any(uv > 1.0f)) return 1.0f;
-    return gTex[gSweU.w].SampleLevel(sLinearClamp, float2(uv.x, 1.0f - uv.y), 0).x;
+    const float have = CsHavePage(gChurnU.w, uv, gCsU6.z);
+    if (have > 7.5f) return 1.0f;
+    return gTexArr[gSweU.w].SampleLevel(sLinearClamp, float3(uv, gCsU6.z), max(have, 3.0f)).x;
 }
 
 float2 JetU(float2 xz) {

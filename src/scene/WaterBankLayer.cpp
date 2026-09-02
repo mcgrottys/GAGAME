@@ -477,8 +477,10 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     // M7e: the foam memory -- the churn atlas joins the bank's inputs (16384 m domain
     // centred on the anchor, 2 m texels, no padding: 8192 square).
     cb.slotsC[0] = m_sea ? m_sea->ChurnAtlasSrv() : 0xFFFFFFFFu;
-    cb.slotsC[1] = m_sea ? m_sea->ShadowSrv() : 0xFFFFFFFFu;   // M7j: the swell shadow
-    cb.slotsC[2] = cb.slotsC[3] = 0xFFFFFFFFu;
+    // M9ba: the swell exposure PAGES (array SRV + residency map); the z14 slice, mips >= 3.
+    cb.slotsC[1] = m_sea ? m_sea->ExposureSrv() : 0xFFFFFFFFu;
+    cb.slotsC[2] = m_sea ? m_sea->ExposureResSrv() : 0xFFFFFFFFu;
+    cb.slotsC[3] = 0xFFFFFFFFu;
     // M9az: the churn window follows the camera; the sea owns its origin.
     cb.churn[0] = m_sea ? m_sea->ChurnOriginX() : 0.0f;
     cb.churn[1] = m_sea ? m_sea->ChurnOriginZ() : 0.0f;

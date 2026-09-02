@@ -916,6 +916,27 @@ model (or a textbook) would hold → what this project measured → the law now 
     same-size rotation is exactly what it exists to catch. And the general form: a check that
     passes on the failure you are worried about has not been asked the question.
 
+23. **Parity over a union is not the union of parities.** Prior: even-odd over all the rings
+    of a set is the set's inside. Reality: even-odd is the inside of a NESTED hierarchy (GSHHG
+    levels: land, lake, island-in-lake) and the XOR of OVERLAPPING polygons (NHD water areas:
+    SeaOcean over Estuary over StreamRiver at a river mouth) -- overlaps cancel, and the
+    Merrimack's channel between its jetties was land for as long as the vector gate existed.
+    The harvester said so in survey.json ("even-odd per feature"); the sweep did not read it.
+    Law: know which of the two a ring set is before choosing its parity, and when the set is
+    features, take parity per feature and OR. And the corollary of priors 20: a gate you have
+    only seen through one consumer has not been looked at either -- the bed's gate was wrong
+    for weeks because the bed was the only thing it gated.
+
+24. **A shadow is a fan, not a ray, once the walls are real.** Prior: the line-of-sight
+    exposure march ports unchanged from the CUDEM raster to the height stack. Reality: the
+    stack carries the survey edits, the jetties become +2.5 m walls instead of smeared crests,
+    and one ray from mid-channel toward an 080° swell hits the north jetty -- the whole
+    Merrimack channel went to the deep-shadow floor, where the leaky raster had let the storm
+    in. The leak was doing the work of directional spread. Law: when a closure's inputs get
+    sharper, re-derive what the closure was quietly averaging; here the sea's own ±26° spread
+    (`wavefield`) becomes a five-ray cosine-weighted fan, and the model says what it is
+    (spread, not diffraction).
+
 ## verification — The gate map: which algebra is pinned where
 
 - `pga` — motors: rotation, composition, rigidity, screw log/exp, slerp.
@@ -945,14 +966,3 @@ model (or a textbook) would hold → what this project measured → the law now 
 - The hypervisor (`--trace lat,lon`) — one sample walked through every edge on the CPU
   with AST annotations; `--lens waterdata/authority/...` — fields as color;
   `--dump-fibers` — the bank planes with declared ranges; PIX events per AST node.
-
-22. **Parity over a union is not the union of parities.** Prior: even-odd over all the rings
-    of a set is the set's inside. Reality: even-odd is the inside of a NESTED hierarchy (GSHHG
-    levels: land, lake, island-in-lake) and the XOR of OVERLAPPING polygons (NHD water areas:
-    SeaOcean over Estuary over StreamRiver at a river mouth) -- overlaps cancel, and the
-    Merrimack's channel between its jetties was land for as long as the vector gate existed.
-    The harvester said so in survey.json ("even-odd per feature"); the sweep did not read it.
-    Law: know which of the two a ring set is before choosing its parity, and when the set is
-    features, take parity per feature and OR. And the corollary of priors 20: a gate you have
-    only seen through one consumer has not been looked at either -- the bed's gate was wrong
-    for weeks because the bed was the only thing it gated.

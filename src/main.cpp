@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 
 #include "compose/ColorStackSource.h"
+#include "compose/ExposureSource.h"
 #include "compose/GisMask.h"
 #include "compose/HeightStackSource.h"
 #include "compose/TileTree.h"
@@ -2105,6 +2106,15 @@ int main(int argc, char** argv) {
         // (the user's rule) -- and the order is printed, not assumed.
         std::shared_ptr<DomainSource> heightRoot;
         std::unique_ptr<TileTree> heightTree;
+        // M9ba: THE SWELL EXPOSURE AS A TREE NODE. A DomainSource (the LOS march over the height
+        // stack), a one-input compose root so the tree materializes R16F, the tree behind a
+        // holder so a bucket roll swaps it under the tenant's provider, and the tenant itself.
+        std::shared_ptr<ExposureSource> exposureSrc;
+        std::shared_ptr<DomainSource> exposureRoot;
+        // shared_ptr, swapped ATOMICALLY: loader threads are inside the old tree's provider
+        // when a bucket rolls; they hold their own reference until their paint returns.
+        std::shared_ptr<std::shared_ptr<TileTree>> exposureTree;
+        int exposureT = -1;
         if (globe) {
             resMgr.Init(gpu);
             resMgr.ringLoads = opt.ringLoads;
@@ -2188,6 +2198,45 @@ int main(int argc, char** argv) {
                                           resMgr.ResidencyRes(hgtTenant), 6u,
                                           resMgr.Mips(hgtTenant), 1263360.0, 1538048.0);
                     }
+                        if (sea && hgtCh >= 0) {
+                            exposureSrc = std::make_shared<ExposureSource>(&compositor, hgtCh);
+                            auto xdc = std::make_shared<DomainCompositor>();
+                            xdc->SetBlend(DomainCompositor::Blend::LayeredOver);
+                            if (!xdc->Add(exposureSrc)) Log("[exposure] compose REFUSED the node");
+                            exposureRoot = std::make_shared<CompositeSource>("swell.exposure", xdc);
+                            exposureTree = std::make_shared<std::shared_ptr<TileTree>>(
+                                std::make_shared<TileTree>(exposureRoot.get(), TileTree::Fmt::Half));
+                            auto holder = exposureTree;
+                            TileProviderFn xp = [holder](const TileRequest& r,
+                                                         std::vector<uint8_t>& out, TileLoc* loc) {
+                                if (r.face != 6) {
+                                    // The cube faces are not this node's frame: answer "fully
+                                    // exposed" (R16F 1.0) so the boot's coarsest loads and any
+                                    // stray want land once instead of retrying forever.
+                                    out.assign(65536, 0);
+                                    uint16_t* h = reinterpret_cast<uint16_t*>(out.data());
+                                    for (size_t i = 0; i < 32768; ++i) h[i] = 0x3C00u;
+                                    if (loc) *loc = TileLoc{};
+                                    return true;
+                                }
+                                std::shared_ptr<TileTree> t = std::atomic_load(holder.get());
+                                if (!t) return false;
+                                TileRequest w = r;
+                                w.face = 0;
+                                return t->Provider(
+                                    ColorFrame::Window(1263360, 1538048, 14, 256, 128))(w, out, loc);
+                            };
+                            exposureT = resMgr.AddTexturePages(gpu, L"swell.exposure (pages)",
+                                                               Compositor::kFaceDim,
+                                                               DXGI_FORMAT_R16_FLOAT, std::move(xp),
+                                                               7);
+                            sea->SetExposurePage(resMgr.TextureSrv(exposureT),
+                                                 resMgr.ResidencySrv(exposureT), exposureSrc.get());
+                            Log("[exposure] swell.exposure is page tenant %d: the LOS march over "
+                                "the height stack, cached per (direction, level) bucket, read at "
+                                "page mips >= 3 (%.0f m)",
+                                exposureT, 9.55 * 8.0);
+                        }
                     if (sea) {
                         sea->SetHeightPage(resMgr.TextureRes(hgtTenant),
                                            resMgr.ResidencyRes(hgtTenant), 6u,
@@ -4108,6 +4157,38 @@ int main(int argc, char** argv) {
             PROF_BEGIN();
             if (sea) sea->SetTime(simUnix, bathy.Ready() ? waterNavd : tide->focusHeight,
                                   cam.px, cam.pz);
+            // M9ba: the exposure node's inputs; a bucket roll re-keys the tree and drops the
+            // tenant's tiles. Then demand the page at mip 3 over +-20 km around the camera --
+            // the bank's outer ring -- every frame.
+            if (sea && exposureSrc && exposureT >= 0) {
+                if (exposureSrc->Set(sea->PeakDirX(), sea->PeakDirZ(), waterNavd,
+                                     sea->PeakDirValid())) {
+                    auto fresh = std::make_shared<TileTree>(exposureRoot.get(), TileTree::Fmt::Half);
+                    std::atomic_store(exposureTree.get(), fresh);
+                    resMgr.Drop(exposureT);
+                    Log("[exposure] bucket rolled -> tree %s", fresh->Id().c_str());
+                }
+                if (exposureSrc->Valid()) {
+                    const double piP = 3.14159265358979, n14 = 16384.0 * 256.0;
+                    const double latC = BathyModel::kOrgLat + cam.pz / BathyModel::kMPerLat;
+                    const double lonC = BathyModel::kOrgLon + cam.px / BathyModel::kMPerLon;
+                    const double dLat = 20000.0 / BathyModel::kMPerLat;
+                    const double dLon = 20000.0 / BathyModel::kMPerLon;
+                    auto mU = [&](double lonDeg) {
+                        return ((lonDeg + 180.0) / 360.0 * n14 - 1263360.0) / 16384.0;
+                    };
+                    auto mV = [&](double latDeg) {
+                        const double l = latDeg * piP / 180.0;
+                        return ((0.5 - std::log(std::tan(piP * 0.25 + l * 0.5)) / (2.0 * piP)) *
+                                    n14 - 1538048.0) / 16384.0;
+                    };
+                    const float u0 = float(std::clamp(mU(lonC - dLon), 0.0, 1.0));
+                    const float u1 = float(std::clamp(mU(lonC + dLon), 0.0, 1.0));
+                    const float v0 = float(std::clamp(mV(latC + dLat), 0.0, 1.0));
+                    const float v1 = float(std::clamp(mV(latC - dLat), 0.0, 1.0));
+                    if (u1 > u0 && v1 > v0) resMgr.Want(exposureT, 6u, 3u, u0, v0, u1, v1);
+                }
+            }
             PROF_END(5);
             if (terrain) terrain->waterNavd = static_cast<float>(waterNavd);
             if (globe) globe->waterNavd = static_cast<float>(waterNavd);   // M6j materials
@@ -4457,8 +4538,8 @@ int main(int argc, char** argv) {
                         wq.hs, wq.tp, wq.dirDeg, wq.waveSrc, hsScaleT, hsRefT);
                     const float expoT = sea->ShadowAtWorld(static_cast<float>(wx),
                                                            static_cast<float>(wz));
-                    Log("[trace] 7 exposure  swe.solver shadow (row0N, FLIP, floor 0.18): "
-                        "%.2f  (edge swe.solver->water.bank shadow)",
+                    Log("[trace] 7 exposure  swell.exposure node (page z14 mips >= 3, no flip, "
+                        "floor 0.18): %.2f  (edge exposure.node->water.bank exposure)",
                         (std::max)(expoT, 0.18f));
                     for (int m = 0; m < 3; ++m) {
                         const double texel = 4.8 * (1 << m);
@@ -4545,9 +4626,7 @@ int main(int argc, char** argv) {
                             }
                         }
                     }
-                    if (sea->DumpShadowPgm("trace_shadow.pgm")) {
-                        Log("[trace] shadow mask dumped: trace_shadow.pgm (row 0 = north)");
-                    }
+                    // M9ba: the exposure field is the tree folder cache\trees\swell.exposure.*
                 }
                 break;
             }
