@@ -79,6 +79,7 @@ public:
     // 255 = the bed may paint here (water, or outside the survey: no opinion),
     //   0 = the survey says land.
     // Row 0 is latMax. Column-major internally, because a column is a meridian.
+    // M9ay: out is dim*dim*2 bytes: [value (255 water / 0 land), flags (1 surveyed, 2 edited)].
     void RasterizeGate(double latMin, double latMax, double lonMin, double lonMax, uint32_t dim,
                        std::vector<uint8_t>& out) const;
 

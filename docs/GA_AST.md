@@ -60,6 +60,7 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | ocean.fft | chop deriv (pattern) | churn.kernel | patch.wrap +v=N | atlas.texel +v=N | - | jacobian foam | 0..1 | x1 | SeaChurn.hlsl (world - U dt)/patch |
 | swe.solver | uv (blocking) | churn.kernel | raster.row0N +v=S | atlas.texel +v=N | FLIP | m/s | +-2.5 | x1 | SeaChurn.hlsl suv flip |
 | sea.peakdir | shadow build (LOS march) | swe.solver | world.m +v=N | raster.row0N +v=S | FLIP | 0..1 exposure | 0.12..1; rebuilt on dir/level move | x1 | SeaLayer::BuildShadowMask (CPU) |
-| survey.edits | polygons + fine mask | gis.masks | latlon.deg +v=N | mercator.px +v=S | FLIP | mask + edit flag | R8G8 4096^2 x2 (0.56 m fine) | x1 | GisStencil::BuildMasks (M7f fine box) |
-| gis.masks | classifier override | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | land/water + edit | hand edits are law | x1 | Compose.hlsli CsEditMask (fine box else coarse) |
+| compose.stack | paint survey mask | mask.pages | latlon.deg +v=N | mercator.px +v=S | FLIP | water coverage / edited / surveyed (bytes) | cube + z14 + z17 pages | x1 | TileTree::Provider over gis.landsea (GisMaskSource sweep) |
+| mask.pages | classifier + edit override | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | land 0..1, edited 0..1, or no opinion | finest page with an opinion | x1 | Compose.hlsli CsMaskSample / ComposedLandness |
+| mask.pages | classifier + edit override | sea.ps (inactive) | mercator.px +v=S | uv01.vS +v=S | - | land bit | ComposedIsLand | x1 | Sea.hlsl ComposedIsLand |
 | globe.ps | radiance (accepting state) | frame.out | world.m +v=N | world.m +v=N | - | linear RGB -> tonemap | the render | x1 | Renderer tonemap |

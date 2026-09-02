@@ -158,6 +158,10 @@ new architecture:
 ## Progress
 
 - Items 1 and 3: done (PR #9) -- the graph names the page tenants; the dead code is gone.
+- Items 2 and 6: done (M9ay, §41) -- the survey's tree is a third page tenant and the
+  classifier reads it (`GisStencil`'s three rasters and the `.raw` fills are gone; the gate
+  became a value gate so the mask can be read as well as gate); the solver mip pin moved
+  into `WeatherManager::PinDomains`, every active window, every frame.
 - Items 4 and 5: done (M9ax) -- `SweSolver::m_uv` is a Volatile `GradeBank` over the wet
   tiles; `shaders/HeightPages.hlsli` resolves cube-or-window per texel for the SWE, the churn
   and the bank, so the three kernels have a bed everywhere the tenant does. Found on the way:

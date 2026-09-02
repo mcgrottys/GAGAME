@@ -57,6 +57,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -220,6 +221,15 @@ public:
     const DomainSource* Node() const { return m_node; }
     size_t KidCount() const { return m_kids.size(); }
     TileTree& Kid(size_t i) { return *m_kids[i]; }
+    // M9ay: a node by name, depth-first, outermost match first (a normalize wrapper shares
+    // its leaf's name; its tiles are references into the leaf, so either answers).
+    TileTree* Find(const char* name) {
+        if (std::strcmp(Name(), name) == 0) return this;
+        for (auto& k : m_kids) {
+            if (TileTree* f = k->Find(name)) return f;
+        }
+        return nullptr;
+    }
 
     void EnsureFrame(const std::string& tag) {
         tree_detail::MakeDir(m_root + "\\" + tag);

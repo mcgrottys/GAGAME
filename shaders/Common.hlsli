@@ -189,8 +189,8 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
 #define GA_COMPOSED_CB_ROWS \
     uint4  gCsU;    /* color cube SRV, color cube residency, window SRV, window residency */ \
     uint4  gCsU2;   /* height cube SRV + residency, height WINDOW SRV + residency */ \
-    uint4  gCsU3;   /* GIS land masks (raster realizations of the survey vectors): x = window \
-                       R8 in the shared Mercator frame, y = global R8 equirect */ \
+    uint4  gCsU3;   /* M9ay survey MASK PAGES: array SRV, array residency, cube SRV, cube \
+                       residency (r = water coverage, b = edited, a = surveyed) */ \
     float4 gCsF;    /* color cube on, window on, height on, planet radius (m) */ \
     float4 gCsMerc; /* window org px x, org px y, 1/sizePx, full-world px at window zoom */ \
     float4 gCsG;    /* height cube max lod, height texel arc (rad), height window max lod, \

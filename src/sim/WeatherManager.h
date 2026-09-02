@@ -34,6 +34,8 @@
 
 namespace ga {
 
+class ResidencyManager;
+
 struct WeatherSample {
     // water
     double levelNavd = 0;             // surface elevation (tide + solver deviation)
@@ -80,6 +82,11 @@ public:
     // mirror refresh (full-field readbacks at most every kMirrorDt sim-seconds).
     void Update(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir, double simUnix,
                 double camLatDeg, double camLonDeg, double camAltM);
+    // M9ay: THE SOLVER DOMAINS STAY RESIDENT AT MIP 0 -- every ACTIVE window's lattice, on
+    // the page it reads, every frame. The pin used to live in main for the Merrimack alone
+    // (AUDIT_WATER item 6): an active Boston solver read slice 6 at whatever mip the camera
+    // had left there, and with no globe layer nothing warmed the page for anyone.
+    void PinDomains(ResidencyManager& res, int hgtTenant);
     // Force a dormant window up (the probe harness; interactive uses the camera rule).
     bool Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
                   const char* name, double simUnix);
@@ -115,6 +122,7 @@ private:
     };
     static constexpr double kMirrorDt = 2.0;      // sim-seconds between mirror refreshes
     static constexpr double kActivateAltM = 30000.0;
+    bool m_pinLogged = false;
 
     const Window* WindowAt(double latDeg, double lonDeg) const;
     void RefreshMirror(Gpu& gpu, Window& w, double simUnix);

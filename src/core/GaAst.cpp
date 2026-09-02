@@ -343,12 +343,16 @@ void RegisterKnownWaterEdges() {
     Register({"sea.peakdir", "swe.solver", "shadow build (LOS march)", worldM, rowS, true,
               "0..1 exposure", "0.12..1; rebuilt on dir/level move", 1.0,
               "SeaLayer::BuildShadowMask (CPU)"});
-    Register({"survey.edits", "gis.masks", "polygons + fine mask", latlonW, mercPxW, true,
-              "mask + edit flag", "R8G8 4096^2 x2 (0.56 m fine)", 1.0,
-              "GisStencil::BuildMasks (M7f fine box)"});
-    Register({"gis.masks", "globe.ps", "classifier override", mercPxW, uvSW, false,
-              "land/water + edit", "hand edits are law", 1.0,
-              "Compose.hlsli CsEditMask (fine box else coarse)"});
+    // M9ay: the survey is PAGES of its own tree (gis.landsea: rings swept per tile on the
+    // shared addresses; r = water coverage, b = edited, a = surveyed), a third page tenant.
+    Register({"compose.stack", "mask.pages", "paint survey mask", latlonW, mercPxW, true,
+              "water coverage / edited / surveyed (bytes)", "cube + z14 + z17 pages", 1.0,
+              "TileTree::Provider over gis.landsea (GisMaskSource sweep)"});
+    Register({"mask.pages", "globe.ps", "classifier + edit override", mercPxW, uvSW, false,
+              "land 0..1, edited 0..1, or no opinion", "finest page with an opinion", 1.0,
+              "Compose.hlsli CsMaskSample / ComposedLandness"});
+    Register({"mask.pages", "sea.ps", "classifier + edit override", mercPxW, uvSW, false, "land bit",
+              "ComposedIsLand", 1.0, "Sea.hlsl ComposedIsLand"});
     Register({"globe.ps", "frame.out", "radiance (accepting state)", worldM, worldM,
               false, "linear RGB -> tonemap", "the render", 1.0, "Renderer tonemap"});
 }

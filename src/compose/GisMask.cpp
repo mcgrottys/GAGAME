@@ -404,14 +404,20 @@ void GisVectorMask::RasterizeGate(double latMin, double latMax, double lonMin, d
                                   uint32_t dim, std::vector<uint8_t>& out) const {
     // 255 everywhere: water, or no survey here. A gate's default must be PERMISSIVE -- the one
     // thing it must never do is delete a layer because it had no opinion.
-    out.assign(static_cast<size_t>(dim) * dim, 255u);
+    // M9ay: TWO BYTES A CELL -- [value, flags]. value: 255 water, 0 land. flags bit 0 =
+    // SURVEYED (the column and row lie inside the rings' box: the mask has an opinion here);
+    // bit 1 = EDITED (a hand ring from edits.geojson decided this cell). Unsurveyed cells
+    // carry no opinion, which the source reports as weight 0 -- never as "water".
+    out.assign(static_cast<size_t>(dim) * dim * 2u, 0u);
     if (m_coast.empty()) return;
-    std::vector<uint8_t> col(dim);
+    std::vector<uint8_t> col(dim), ecol(dim);
     std::vector<double> xs;
+    const double dLat = (latMax - latMin) / double(dim);
     for (uint32_t cx = 0; cx < dim; ++cx) {
         const double lon = lonMin + (double(cx) + 0.5) * (lonMax - lonMin) / double(dim);
-        if (lon < m_lon0 || lon > m_lon1) continue;   // outside the survey: stays permissive
+        if (lon < m_lon0 || lon > m_lon1) continue;   // outside the survey: no opinion
         std::fill(col.begin(), col.end(), 255u);
+        std::fill(ecol.begin(), ecol.end(), 0u);
         xs.clear();
         Crossings(m_coastIdx, lon, xs);
         FillParity(xs, latMin, latMax, dim, col, 0u);     // inside the coast: LAND
@@ -422,9 +428,14 @@ void GisVectorMask::RasterizeGate(double latMin, double latMax, double lonMin, d
             xs.clear();
             CrossingsRing(e, lon, xs);
             FillParity(xs, latMin, latMax, dim, col, e.waterValue);
+            FillParity(xs, latMin, latMax, dim, ecol, 255u);   // (xs stays sorted)
         }
         for (uint32_t row = 0; row < dim; ++row) {
-            out[static_cast<size_t>(row) * dim + cx] = col[row];
+            const double lat = latMax - (double(row) + 0.5) * dLat;   // row 0 = latMax
+            const bool surveyed = lat >= m_lat0 && lat <= m_lat1;
+            const size_t i = (static_cast<size_t>(row) * dim + cx) * 2u;
+            out[i] = col[row];
+            out[i + 1] = static_cast<uint8_t>((surveyed ? 1u : 0u) | (ecol[row] ? 2u : 0u));
         }
     }
 }
@@ -436,7 +447,7 @@ void GisMaskSource::Refresh() {
     double lon0 = -180, lat0 = -90, lon1 = 180, lat1 = 90;
     if (mask) mask->Bounds(lon0, lat0, lon1, lat1);
     m_info = {"gis.landsea",
-              "vector rings, even-odd by great-arc meet, no raster: " +
+              "vector rings, even-odd by great-arc meet, no raster, value+flags: " +
                   (mask ? mask->Fingerprint() : std::string("none")),
               "EPSG:4326 (rings are the authority; the .raw parity fills are a realization)",
               1000.0,
@@ -466,15 +477,20 @@ float GisMaskSource::Sample(double latRad, double lonRad, double, const PaintCtx
     const uint32_t d = ctx.scratchDim;
     const int32_t x = static_cast<int32_t>(u * d);
     const int32_t y = static_cast<int32_t>(v * d);
-    if (x < 0 || y < 0 || uint32_t(x) >= d || uint32_t(y) >= d) return 1.0f;
-    const uint8_t g = ctx.scratch[static_cast<size_t>(y) * d + x];
+    if (x < 0 || y < 0 || uint32_t(x) >= d || uint32_t(y) >= d) return 0.0f;   // no opinion
+    const size_t i = (static_cast<size_t>(y) * d + x) * 2u;
+    const uint8_t g = ctx.scratch[i], fl = ctx.scratch[i + 1];
     // Nearest, never interpolated: this is a classification, and a gate that blurs is not a
     // gate. The height band is what refines the waterline inside it.
+    // M9ay: the mask is now READABLE as well as a gate. Weight = "surveyed" (an opinion
+    // exists); the VALUE carries it: r = water coverage (1 water, 0 land), b = edited. The
+    // gate multiplies by the value (ComposeTree.h GateSource); the classifier reads the pages.
+    if (!(fl & 1u)) return 0.0f;
     rgba[0] = g;
     rgba[1] = g;
-    rgba[2] = 255;
-    rgba[3] = g;
-    return g * (1.0f / 255.0f);
+    rgba[2] = (fl & 2u) ? 255 : 0;
+    rgba[3] = 255;
+    return 1.0f;
 }
 
 }  // namespace ga

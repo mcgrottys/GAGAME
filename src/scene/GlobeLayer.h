@@ -97,7 +97,8 @@ public:
     }
     void SetComposed(int colorCube, int window, int heightCube, int heightWindow,
                      double orgPxX, double orgPxY, double sizePx, int detailWin = -1,
-                     double detOrgPxX = 0.0, double detOrgPxY = 0.0) {
+                     double detOrgPxX = 0.0, double detOrgPxY = 0.0, int maskPages = -1) {
+        m_maskT = maskPages;   // M9ay: the survey mask pages (same slices as the colour)
         m_colorT = colorCube;
         m_winT = window;
         const bool pages = colorCube >= 0 && window == colorCube;
@@ -177,15 +178,6 @@ public:
     float sliceD = 0.0f;            // plane offset (world z, metres)
     bool albedoLens = false;        // M6j: --albedo, raw composed color -- no lighting, no
                                     // atmosphere, no materials; THE view for texture work
-    // GIS survey stencil textures (GisStencil), for the --stencil overlay.
-    void SetGisStencil(uint32_t winSrv, uint32_t globSrv, uint32_t editSrv = 0xFFFFFFFFu,
-                       const float* editBox = nullptr) {
-        m_gisWinSrv = winSrv;
-        m_gisGlobSrv = globSrv;
-        m_gisEditSrv = editSrv;              // M7f: the ~1 m fine edit mask
-        for (int i = 0; i < 4; ++i) m_gisEditBox[i] = editBox ? editBox[i] : 0.0f;
-        m_gisEditOn = editSrv != 0xFFFFFFFFu && editBox != nullptr;
-    }
     bool skyPassEnabled = true;     // M6g: off while SkyLayer owns the low-altitude backdrop
     bool windOverlay = false;       // V key: tint the Mv2 wind bank's curl (violet cyclonic)
     bool marsReliefValid = false;   // M6f: the configured model's relief IS Mars (MOLA)
@@ -359,12 +351,9 @@ private:
     // M9ap: pages mode -- window == colorT and these are its slices (6, 7). Otherwise 0.
     uint32_t m_winFace = 0, m_detFace = 0;
     uint32_t m_hgtWinFace = 0;   // M9aq: heightWindow == hgtT -> slice 6
-    uint32_t m_gisEditSrv = 0xFFFFFFFFu;
-    float m_gisEditBox[4] = {0, 0, 0, 0};
-    bool m_gisEditOn = false;
     int m_detWinT = -1;
     double m_det17Org[2] = {0.0, 0.0};
-    uint32_t m_gisWinSrv = UINT32_MAX, m_gisGlobSrv = UINT32_MAX;
+    int m_maskT = -1;   // M9ay: the survey mask page tenant
     double m_detOrg[2] = {0, 0};
     double m_detSize = 1;
     bool m_streamMars = false;

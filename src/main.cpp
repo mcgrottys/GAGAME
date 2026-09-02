@@ -227,8 +227,15 @@ Options ParseArgs(int argc, char** argv) {
     Options o;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
+        // M9ay: a flag with a DEFAULT must not eat the next flag. `--storm --rail-flood DIR`
+        // parsed as storm="--rail-flood" and a stray DIR: no rail, no frame cap, an encoder
+        // pipe waiting forever on stdin while the sim free-ran and re-solved the wave field
+        // every 90 s -- "the recording is stuck". A token that starts with "--" is a flag.
         auto next = [&](const char* def) -> std::string {
-            return (i + 1 < argc) ? argv[++i] : def;
+            if (i + 1 < argc && !(argv[i + 1][0] == '-' && argv[i + 1][1] == '-')) {
+                return argv[++i];
+            }
+            return def;
         };
         if (a == "--selftest") o.selftest = true;
         else if (a == "--crash-test") {
@@ -2083,6 +2090,7 @@ int main(int argc, char** argv) {
         Exchange exchange;       // M6j: the plugin bus -- named GA buffer channels
         const double winOrgX = 4935.0 * 256.0, winOrgY = 6008.0 * 256.0;   // Merrimack z14 px
         int colorCubeT = -1, winTenant = -1, hgtTenant = -1, hgtWinTenant = -1;
+        int maskTenant = -1;   // M9ay: the survey mask pages (gis.landsea's tree)
         int detTenant = -1;   // M7f: z17 detail color window
         double det17OrgX = 0.0, det17OrgY = 0.0;
         int colCh = -1;   // color channel id (hgtCh registered above the solver, M6w)
@@ -2245,9 +2253,14 @@ int main(int argc, char** argv) {
                             const uint32_t dim = 1024;
                             std::vector<uint8_t> g;
                             gisMask.RasterizeGate(a0, a1, b0, b1, dim, g);
+                            std::vector<uint8_t> v(static_cast<size_t>(dim) * dim);
+                            for (size_t i = 0; i < v.size(); ++i) {
+                                // value where surveyed; 128 (grey) where the mask has no opinion
+                                v[i] = (g[i * 2 + 1] & 1u) ? g[i * 2] : 128u;
+                            }
                             std::ofstream pf(opt.gisDump, std::ios::binary);
                             pf << "P5\n" << dim << " " << dim << "\n255\n";
-                            pf.write(reinterpret_cast<const char*>(g.data()), g.size());
+                            pf.write(reinterpret_cast<const char*>(v.data()), v.size());
                             Log("[gismask] --gis-dump: %s (%ux%u over %.3f,%.3f..%.3f,%.3f) %s",
                                 opt.gisDump.c_str(), dim, dim, b0, a0, b1, a1,
                                 pf ? "written" : "FAILED TO WRITE");
@@ -2367,6 +2380,42 @@ int main(int argc, char** argv) {
                     winTenant = colorCubeT;   // pages mode: window == cube, slice 6
                     detTenant = colorCubeT;   // slice 7
                     (void)n17;
+                    // M9ay: THE SURVEY AS A PAGE TENANT. gis.landsea's own tree -- the vector
+                    // rings swept per tile on the SAME addresses as the imagery and the bed --
+                    // feeds a third page tenant (r = water coverage, b = edited, a = surveyed).
+                    // The classifier reads it; the three committed rasters GisStencil built
+                    // from the .raw parity fills are gone (AUDIT_WATER item 2). Addresses the
+                    // survey has no opinion about have no tile: the loader marks them NULL after
+                    // its retries and the shader falls back to the height sign there.
+                    if (opt.colorTrees && megaTree && maskLayer != SIZE_MAX) {
+                        if (TileTree* gt = megaTree->Find("gis.landsea")) {
+                            const TileProviderFn gCube =
+                                gt->Provider(ColorFrame::Cube(Compositor::kFaceDim));
+                            const TileProviderFn gWin =
+                                gt->Provider(ColorFrame::Window(1263360, 1538048, 14));
+                            const TileProviderFn gDet =
+                                gt->Provider(ColorFrame::Window(static_cast<long long>(det17OrgX),
+                                                                static_cast<long long>(det17OrgY),
+                                                                17));
+                            TileProviderFn gpages = [gCube, gWin, gDet](const TileRequest& r,
+                                                                       std::vector<uint8_t>& out,
+                                                                       TileLoc* loc) {
+                                if (r.face < 6) return gCube(r, out, loc);
+                                TileRequest w = r;
+                                w.face = 0;
+                                return r.face == 6 ? gWin(w, out, loc) : gDet(w, out, loc);
+                            };
+                            maskTenant = resMgr.AddTexturePages(
+                                gpu, L"gis.landsea (survey mask pages)", Compositor::kFaceDim,
+                                DXGI_FORMAT_R8G8B8A8_UNORM, std::move(gpages), 8);
+                            Log("[gis] the survey is page tenant %d: r = water coverage, b = "
+                                "edited, a = surveyed -- no .raw raster is opened",
+                                maskTenant);
+                        } else {
+                            Log("[gis] no gis.landsea node in the megatexture tree: the "
+                                "classifier falls back to the height sign");
+                        }
+                    }
                     // The gate. Every realization the render path uses, on tiles the shipped
                     // paint loop already wrote, with the worst per-channel disagreement printed.
                     if (opt.treeAudit) {
@@ -2437,7 +2486,8 @@ int main(int argc, char** argv) {
                     }
                 }
                 globe->SetComposed(colorCubeT, winTenant, hgtTenant, hgtWinTenant, winOrgX,
-                                   winOrgY, 16384.0, detTenant, det17OrgX, det17OrgY);
+                                   winOrgY, 16384.0, detTenant, det17OrgX, det17OrgY,
+                                   maskTenant);
 
                 // ---- M9ae: WHAT THE DISK ALREADY HOLDS, in memory, once.
                 //
@@ -2683,9 +2733,7 @@ int main(int argc, char** argv) {
             // The survey pack loads whenever it exists: the land MASKS are the default
             // classifier (always on); the VECTOR overlay draws only under --stencil.
             if (!marsMode && gisStencil.Load("data/gis/gis.json")) {
-                gisStencil.BuildMasks(gpu, winOrgX, winOrgY, 16384.0);
-                globe->SetGisStencil(gisStencil.MaskWinSrv(), gisStencil.MaskGlobSrv(),
-                                     gisStencil.MaskEditSrv(), gisStencil.EditBox());
+                // M9ay: no raster is built here any more; the classifier reads the mask pages.
                 vectors.Load("data/vectors/vectors.vpack");
                 auto gisOwned = std::make_unique<GisLayer>();
                 gisLayer = gisOwned.get();
@@ -2906,9 +2954,9 @@ int main(int argc, char** argv) {
             const bool pagesMode = colorCubeT >= 0 && winTenant == colorCubeT;
             FillComposedCb(cs, &resMgr, colorCubeT, winTenant, hgtTenant, hgtWinTenant,
                            winOrgX, winOrgY, 16384.0, 14, planetR, east0, oDir, north0,
-                           opt.stencil, gisStencil.MaskWinSrv(), gisStencil.MaskGlobSrv(),
+                           opt.stencil, maskTenant,
                            pagesMode ? detTenant : -1, pagesMode ? det17Org : nullptr, 17,
-                           UINT32_MAX, nullptr, pagesMode ? 6u : UINT32_MAX,
+                           pagesMode ? 6u : UINT32_MAX,
                            pagesMode ? 7u : UINT32_MAX,
                            (hgtTenant >= 0 && hgtWinTenant == hgtTenant) ? 6u : UINT32_MAX);
             if (terrain) terrain->SetComposed(cs);
@@ -3869,6 +3917,8 @@ int main(int argc, char** argv) {
                                    BathyModel::kOrgLat + cam.pz / BathyModel::kMPerLat,
                                    BathyModel::kOrgLon + cam.px / BathyModel::kMPerLon,
                                    altV);
+                    // M9ay: every ACTIVE window's lattice at mip 0, from the manager that owns them.
+                    weather.PinDomains(resMgr, hgtTenant);
                     PROF_END(0);
                 }
                 // M7: the bank's rings follow the camera; the globe binds THIS frame's
@@ -4001,37 +4051,6 @@ int main(int argc, char** argv) {
                 resMgr.WantStatsReset();
                 PROF_BEGIN();
                 globe->SetView(cam, aspect, viewH, simUnix - startUnix);
-                // M9ar: THE SOLVER DOMAIN STAYS RESIDENT AT MIP 0. The bed bank used to be
-                // pinned wholesale; the page tenant is demand-driven, so the solver's lattice
-                // is asked for every frame at the page's finest mip. ~110 tiles of 256x128 at
-                // 9.55 m over an 18.8 x 16 km domain -- recency keeps them mapped.
-                if (hgtTenant >= 0 && hgtWinTenant == hgtTenant && bathy.Ready()) {
-                    const double piP = 3.14159265358979, n14 = 16384.0 * 256.0;
-                    auto mercU = [&](double lonDeg) {
-                        return ((lonDeg + 180.0) / 360.0 * n14 - 1263360.0) / 16384.0;
-                    };
-                    auto mercV = [&](double latDeg) {
-                        const double l = latDeg * piP / 180.0;
-                        return ((0.5 - std::log(std::tan(piP * 0.25 + l * 0.5)) / (2.0 * piP)) *
-                                    n14 -
-                                1538048.0) /
-                               16384.0;
-                    };
-                    const double lon1 = bathy.Lon0() + bathy.Nx() * bathy.Dlon();
-                    const double lat0 = bathy.Lat1() - bathy.Ny() * bathy.Dlat();
-                    const float u0 = float(std::max(0.0, mercU(bathy.Lon0())));
-                    const float u1 = float(std::min(1.0, mercU(lon1)));
-                    const float v0 = float(std::max(0.0, mercV(bathy.Lat1())));
-                    const float v1 = float(std::min(1.0, mercV(lat0)));
-                    if (u1 > u0 && v1 > v0) resMgr.Want(hgtTenant, 6u, 0u, u0, v0, u1, v1);
-                    static bool pinLogged = false;
-                    if (!pinLogged) {
-                        pinLogged = true;
-                        Log("[swe] domain pinned on height page slice 6 mip 0: uv %.4f..%.4f x "
-                            "%.4f..%.4f (%s)",
-                            u0, u1, v0, v1, (u1 > u0 && v1 > v0) ? "inside the page" : "OUTSIDE");
-                    }
-                }
                 PROF_END(7);
                 if (!opt.rail.empty() && frame >= 150u) {
                     walkNodesAcc += globe->walkNodes;

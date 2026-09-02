@@ -1800,3 +1800,53 @@ validates 59 graph edges; `out/rail_bed_720.mp4` is the flood rail on this path.
 everywhere -- and the bank's shoaling, current amplification and depth-limited breaking on
 every coast the rings reach. The z14 origin is still repeated in `main.cpp` (item 7's Host
 object); Boston's window is still not mip-pinned (item 6).
+
+## 41. The survey as pages, and the pin that belongs to the windows
+
+**The survey as a page tenant (AUDIT_WATER item 2).** The land/sea classifier -- `ComposedLandness`,
+the sea's `discard`, the hand-edit override -- read three committed rasters `GisStencil` built
+at boot from `landmask_ne.raw` / `landmask_global.raw` / a 4096^2 edit box: the parity fills
+the vector mask (section 30) had refused to open. Meanwhile `gis.landsea` already had its own
+tree on the shared addresses, painted by the meridian sweep, gating the seafloor. It could gate
+but could not be READ: the gate multiplied by the layer's WEIGHT, so land had to be painted as
+absence, and a land texel and an unsurveyed texel were the same byte.
+
+Three changes make the tree the classifier's pages:
+- **The sweep writes two bytes a cell** -- value (255 water, 0 land) and flags (1 surveyed,
+  2 edited). `GisMaskSource` returns weight 1 where surveyed and `(value, value, edited, 255)`,
+  weight 0 (no opinion) elsewhere.
+- **The gate is a VALUE gate** (`GateSource`): coverage says whether the gate has an opinion,
+  the value channel is the factor. Void tiles still block; unsurveyed texels pass; land blocks
+  by its value. Identity `gate2|`, so every composite that consumed the old form rehashes.
+- **A third page tenant**, `gis.landsea (survey mask pages)` -- R8G8B8A8_UNORM, the colour
+  ladder's 8 slices, fed by `TileTree::Find("gis.landsea")->Provider(frame)`, demanded by the
+  same CDLOD walk as the colour and the height (cube by node, z14 and z17 by containment,
+  floor mips 4..7). `FillComposedCb` puts it in `gCsU3` (array SRV + residency, cube SRV +
+  residency). `CsMaskSample` takes the finest page with an opinion (a > 0): z17 where the ~1 m
+  edit raster used to answer, z14, the cube face; none -> the height sign, as before where no
+  survey existed. Addresses the survey has no opinion about have no tile; the loader marks them
+  NULL after its retries and never maps a zero.
+
+`GisStencil` keeps the vectors for the overlay and nothing else; `BuildMasks`, the three
+`GpuTexture`s, the edit box and the `.raw` paths are gone. The GA graph names `compose.stack ->
+mask.pages -> {globe.ps, sea.ps}`.
+
+**The pin belongs to the windows (item 6).** The solver domain's mip-0 pin lived in `main`,
+for the Merrimack alone, inside `mode == 1 && globe`. `WeatherManager::PinDomains` now asks
+for every ACTIVE window's lattice on the page it reads, every frame, from the manager that
+owns the windows -- Boston included when it wakes, and with or without a globe layer.
+
+**Found on the way: the flag that ate the next flag.** `--storm --rail-flood DIR --mp4 F`
+parsed as storm = "--rail-flood" and a stray DIR: no rail, no frame cap, the encoder pipe
+waiting forever on stdin while the sim free-ran at render speed and re-solved the wave field
+every 90 sim-seconds -- three "stuck recordings" in a row before the log line `[args] ignoring
+'out/storm_rail'` was read. Every flag with a default went through the same `next()`; it no
+longer consumes a token that begins with `--`.
+
+**Measured.** Warm after the gate's identity change: `gis.landsea` 7082 tiles painted, 13 void;
+`earth.color` 6439 composed, 5996 references; 52 185 tiles packed across the megatexture
+tree (the z17 mask page alone 4215 tiles, 264 MB). Boot: `[gis] the survey is page tenant 2`,
+`[weather] solver domains pinned ... merrimack (inside the page)`, 60 graph edges validate,
+no orphan. `--selftest` passes (dxtest x5 size + layout, gatest). Stills at 80 km (lit and
+albedo) and the helm frame render as before: the coastline classifier, the edit override on
+the jetties and the sea's discard now come from the pages.
