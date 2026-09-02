@@ -66,14 +66,15 @@ float3 SeaPlanetDir(float2 xz) {
 // 30 m ocean. The sea now feels the real shelf everywhere it renders, and land is land.
 float BedAt(float2 xz, out bool surveyed) {
     surveyed = false;
+    // M9ar: THE BED IS THE HEIGHT MEGATEXTURE, inside the survey window too. "Surveyed" is
+    // the survey's own footprint (the CUDEM grid the solver runs on); the height it returns
+    // there is the z14 page at its resident mip, which IS the survey at 9.55 m/px. The
+    // solver-private bank this used to sample no longer exists.
     if (gBathyU.x != 0xFFFFFFFFu) {
         const float2 uv = (xz - gBathyGeo.xy) * gBathyGeo.zw;
-        if (all(uv > 0.002f) && all(uv < 0.998f)) {
-            surveyed = true;
-            return gTex[gBathyU.x].SampleLevel(sLinearClamp, float2(uv.x, 1.0f - uv.y), 0).x;
-        }
+        if (all(uv > 0.002f) && all(uv < 0.998f)) surveyed = true;
     }
-    if (ComposedHeightOn()) return ComposedHeight(SeaPlanetDir(xz), -2.0f);
+    if (ComposedHeightOn()) return ComposedHeight(SeaPlanetDir(xz), surveyed ? -8.0f : -2.0f);
     return -30.0f;
 }
 float BedAt(float2 xz) {
@@ -413,7 +414,10 @@ float4 PsMain(VsOut i) : SV_Target {
                       saturate((gFadeD.x - 2.5f) / 9.0f) * 0.55f);
         if (ComposedColorOn()) {
             const float3 img = ComposedColor(dirP);
-            albSea = lerp(albSea, img, 0.6f * saturate(1.0f + min(hp, 0.0f) / 80.0f));
+            const float reveal = saturate(1.0f + min(hp, 0.0f) / 80.0f);
+            const float3 albWater = albSea;
+            albSea = lerp(albSea, img, 0.6f * reveal);
+            albSea = SeafloorReliefMod(albSea, albWater, img, hp, 1.0f - reveal);   // M9av
         }
         const float ndlG = saturate(gSunDir.y);   // the globe lights water on upT; flat up = +y
         col = lerp(col, albSea * (0.030f + ndlG * SUN_IRR_C * 1.15f), kFar);

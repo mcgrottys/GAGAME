@@ -11,6 +11,8 @@
 #pragma once
 
 #include "compose/Compositor.h"
+#include "core/GradeField.h"
+#include "core/MemGridLoader.h"
 #include "core/Residency.h"
 #include "core/TileAtlas.h"
 #include "render/Camera.h"
@@ -98,6 +100,10 @@ public:
                      double detOrgPxX = 0.0, double detOrgPxY = 0.0) {
         m_colorT = colorCube;
         m_winT = window;
+        const bool pages = colorCube >= 0 && window == colorCube;
+        m_winFace = pages ? 6u : 0u;
+        m_detFace = pages ? 7u : 0u;
+        m_hgtWinFace = (heightCube >= 0 && heightWindow == heightCube) ? 6u : 0u;
         m_hgtT = heightCube;
         m_hgtWinT = heightWindow;
         m_detOrg[0] = orgPxX;
@@ -291,8 +297,64 @@ private:
     Com<ID3D12PipelineState> m_pso, m_skyPso;
     // M6i: m_relief and m_ne retired -- the composed height cube streams what they carried
     // (and returns ~90 MB of committed equirect memory to the pool).
-    GpuTexture m_hs, m_wind, m_cloudSrc, m_windSrc;
-    GpuTexture m_ocean, m_ice;   // M9: (log10 chl, Kd490, log10 SPM, valid); ICEC
+    GpuTexture m_cloudSrc;
+
+    // ---- M9q: THE GLOBAL PLANES, IN THE TREE.
+    //
+    // gfswave Hs and wind, GFS sea ice, and the packed ocean-colour retrieval were four
+    // committed Texture2Ds -- uploaded once, no georeference anything could check, no coverage,
+    // no mip chain that understands absence, and no way into the sparse structure. They are
+    // global field data, which is precisely what the tree is for.
+    //
+    // Each is now MemGridLoader -> RasterSource -> DomainCompositor -> a paged GradeBank, with a
+    // TEXTURE2D view over slice 0 so Globe.hlsl binds them exactly as before. Same drop-in trick
+    // as the bed, and for the same reason: if the picture changes, the bank's CONTENT is the
+    // only thing that can have done it.
+    struct PlaneBank {
+        std::unique_ptr<GradeBank> bank;
+        uint32_t srv = UINT32_MAX;
+        bool Valid() const { return srv != UINT32_MAX; }
+    };
+    PlaneBank m_hsB, m_windB, m_oceanB, m_iceB, m_windSrcB;
+
+    // ---- M9ad: THE PLANET'S IMAGERY, AS ONE PAGED BANK.
+    //
+    // Four slices of ONE reserved array, one per rung of a single ladder, each a Mercator page
+    // of 16384 texels:
+    //
+    //     level 10   1228.8 m/texel   20133 km   the globe
+    //     level  6     76.8 m/texel    1258 km   the region  <- the rung that did not exist
+    //     level  3      9.6 m/texel     157 km   (what the z14 window was)
+    //     level  0      1.2 m/texel      20 km   (what the z17 detail window was)
+    //
+    // Uniform 8x steps where the old cube -> window jump was 64x with nothing in it. Not three
+    // textures with hand-off gates and three residency budgets -- one address space, one budget,
+    // and the shader takes the finest page that contains the sample.
+    static constexpr uint32_t kColorDim = 16384;   // one page, the D3D12 per-texture cap
+    static constexpr uint32_t kColorMips = 8;
+    static constexpr int kColorPages = 4;
+    static constexpr int kColorLevels[kColorPages] = {10, 6, 3, 0};
+    PlaneBank m_colorB;
+    // Per page: Mercator x0, y0 and 1/span, so a direction resolves to page uv with two mads.
+    float m_colorPageGeo[kColorPages][4] = {};
+public:
+    bool BuildColorBank(Gpu& gpu, const Compositor& comp, int colorChannel);
+    uint32_t ColorBankSrv() const { return m_colorB.srv; }
+private:
+
+    // M9w: what the CDLOD walk actually costs, split. The walk is 3.95 ms at helm and the
+    // question is whether that is TRAVERSAL (cullable, parallel over six independent face
+    // roots) or EMIT (m_res->Want, which funnels every leaf into one shared tracking map).
+    // Those two want opposite fixes, so they are counted apart before either is attempted.
+public:
+    mutable uint64_t walkNodes = 0, walkLeaves = 0, walkWantNs = 0;
+    void WalkReset() { walkNodes = walkLeaves = walkWantNs = 0; }
+private:
+
+    // Load -> compose -> sparse, and report the worst disagreement with the source array.
+    bool BuildPlaneBank(Gpu& gpu, PlaneBank& out, const char* name, const char* structure,
+                        const GeoRef& ref, std::vector<MemGridLoader::Plane> planes,
+                        DXGI_FORMAT fmt, float nodataFill);
 
     // M6d: the sparse Mv2 wind bank (div, u, v, curl) -- resident where storms live.
     TileAtlas2D m_windBank;
@@ -317,6 +379,9 @@ private:
     ResidencyManager* m_res = nullptr;
     int m_surfT = -1, m_normT = -1;
     int m_colorT = -1, m_winT = -1, m_hgtT = -1, m_hgtWinT = -1;
+    // M9ap: pages mode -- window == colorT and these are its slices (6, 7). Otherwise 0.
+    uint32_t m_winFace = 0, m_detFace = 0;
+    uint32_t m_hgtWinFace = 0;   // M9aq: heightWindow == hgtT -> slice 6
     uint32_t m_gisEditSrv = 0xFFFFFFFFu;
     float m_gisEditBox[4] = {0, 0, 0, 0};
     bool m_gisEditOn = false;

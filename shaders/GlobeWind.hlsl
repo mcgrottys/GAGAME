@@ -18,7 +18,11 @@ cbuffer WindCb : register(b0) {
 };
 
 StructuredBuffer<uint> gTileList : register(t0);
-Texture2D<float2> gWindSrc : register(t1);    // u east, v north (m/s)
+// M9r: a UAV, not an SRV. The source is a paged GradeBank now, and a bank's resource lives in
+// UNORDERED_ACCESS -- reading it through an SRV would be a state mismatch the debug layer
+// catches and hardware may not. Nothing else changes: this kernel only ever integer-indexed
+// gWindSrc (never sampled it), and that operator is spelled the same on a RWTexture2D.
+RWTexture2D<float2> gWindSrc : register(u1);   // u east, v north (m/s)
 RWTexture2D<float4> gBank : register(u0);
 
 [numthreads(16, 16, 1)]

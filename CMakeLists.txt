@@ -29,6 +29,7 @@ add_executable(gagame
   src/compose/Compositor.cpp
   src/compose/ComposeTest.cpp
   src/compose/Sources.cpp
+  src/compose/GisMask.cpp
   src/compose/GisStencil.cpp
   src/compose/VectorPack.cpp
   src/compose/Exchange.cpp
@@ -64,6 +65,31 @@ target_link_libraries(gagame PRIVATE
   d3d12 dxgi dxguid windowscodecs
   dxcompiler      # DxcCreateInstance; the matching DLL is copied next to the exe below
 )
+
+# ---- DirectStorage: NVMe -> GPU without the CPU staging hop.
+#
+# The composed cache is already the right shape for it -- 64 KB tiles "laid out exactly for
+# CopyTiles" -- so the read path can hand a queue a file, an offset and a destination and never
+# touch the bytes. It ships as a NuGet redistributable rather than in the Windows SDK, so this
+# looks for the package cache and degrades HONESTLY: if it is not there, GA_HAVE_DSTORAGE stays
+# undefined and the loader keeps its ReadFile path, which is what every machine without the
+# redist will do anyway.
+set(DSTORAGE_ROOT "$ENV{USERPROFILE}/.nuget/packages/microsoft.direct3d.directstorage/1.2.2/native")
+if(EXISTS "${DSTORAGE_ROOT}/include/dstorage.h")
+  target_include_directories(gagame PRIVATE "${DSTORAGE_ROOT}/include")
+  target_link_libraries(gagame PRIVATE "${DSTORAGE_ROOT}/lib/x64/dstorage.lib")
+  target_compile_definitions(gagame PRIVATE GA_HAVE_DSTORAGE=1)
+  # Both DLLs must sit beside the exe: dstorage.dll is the API, dstoragecore.dll the
+  # implementation it loads, and missing the second fails at CreateStorageFactory, not at link.
+  foreach(D dstorage.dll dstoragecore.dll)
+    add_custom_command(TARGET gagame POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              "${DSTORAGE_ROOT}/bin/x64/${D}" "$<TARGET_FILE_DIR:gagame>/${D}")
+  endforeach()
+  message(STATUS "DirectStorage 1.2.2 found: NVMe -> GPU path enabled")
+else()
+  message(STATUS "DirectStorage not found; tile reads stay on the ReadFile path")
+endif()
 
 # Shaders compile at RUNTIME through dxcompiler.dll (hot reload on R). The DLL -- and dxil.dll,
 # without which DXC emits unsigned DXIL that the runtime rejects outside developer mode -- must

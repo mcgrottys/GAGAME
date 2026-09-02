@@ -38,6 +38,8 @@
 // ================================================================================================
 #pragma once
 
+#include "compose/TileIndex.h"
+#include "core/TileStream.h"
 #include "core/Gpu.h"
 #include "core/Pga.h"
 
@@ -60,7 +62,22 @@ namespace ga {
 struct TileRequest {
     uint32_t face = 0, mip = 0, x = 0, y = 0;
 };
-using TileProviderFn = std::function<bool(const TileRequest&, std::vector<uint8_t>& out64k)>;
+// M9ai: WHERE A TILE IS, instead of what it contains.
+//
+// A provider that finds its tile in an archive fills this and returns true WITHOUT touching
+// out64k. The bytes then never enter CPU address space at all: DirectStorage takes the path,
+// the offset and the mapped tile, and the read goes NVMe -> GPU. A provider that has to paint,
+// or whose tile is only a loose file, fills out64k as before and leaves this empty -- so the
+// two paths coexist per TILE, not per build.
+struct TileLoc {
+    const wchar_t* path = nullptr;   // archive path; owned by the archive, outlives the request
+    uint64_t offset = 0;
+    uint32_t size = 0;
+    bool Valid() const { return path != nullptr && size != 0; }
+};
+
+using TileProviderFn =
+    std::function<bool(const TileRequest&, std::vector<uint8_t>& out64k, TileLoc* loc)>;
 
 class ResidencyManager {
 public:
@@ -69,6 +86,9 @@ public:
     // thousands, so most of the view rode coarse fallbacks for the whole flight (the vintage
     // patchwork). Loads are disk/CPU paints; feed as many workers as the machine has.
     static constexpr uint32_t kMaxLoadsInFlight = 48;
+    // M9af: slots held open for tiles that are NOT on disk, so preferring cached reads cannot
+    // starve the painting that fills the cache. 12 of 48 = a quarter.
+    static constexpr uint32_t kPaintReserve = 12;
     static constexpr uint32_t kMaxMapsPerFrame = 96;     // tiles mapped+filled per frame
     static constexpr uint32_t kPoolCapTiles = 8192;      // 512 MB ceiling before eviction
     static constexpr uint32_t kEvictAgeFrames = 4;       // > frame overlap: no in-flight reads
@@ -90,6 +110,20 @@ public:
                      TileProviderFn provider) {
         return AddTextureInternal(gpu, name, dim, fmt, std::move(provider), 1);
     }
+    // M9ap: ONE TENANT, N PAGES. The planet's colour as a single reserved Texture2DArray whose
+    // slices are pages of one ladder: 0..5 the cube faces, 6.. the Mercator pages. One SRV, one
+    // residency map, one budget, one provider that dispatches on the slice. The three inset
+    // tenants this replaces were three pages of a ladder nobody had written down as a ladder,
+    // with hand-off fades in the shader that each rung needed to know about its neighbour to
+    // compute. A page's slice IS its `face` in every TileRequest. Slices 0..5 are also viewed
+    // as a TextureCube so the globe keeps hardware-seamless cube filtering.
+    int AddTexturePages(Gpu& gpu, const wchar_t* name, uint32_t dim, DXGI_FORMAT fmt,
+                        TileProviderFn provider, uint32_t pages) {
+        return AddTextureInternal(gpu, name, dim, fmt, std::move(provider), pages);
+    }
+    // The cube views over slices 0..5 of a page tenant (UINT32_MAX for other tenants).
+    uint32_t TextureSrvCube(int tenant) const { return m_tenants[tenant].srvCube; }
+    uint32_t ResidencySrvCube(int tenant) const { return m_tenants[tenant].resMapSrvCube; }
 
     // Tiles known but not yet mapped (seen + loading + in flight). The warm-cache loop drains
     // this to zero before the camera ever moves.
@@ -98,11 +132,12 @@ public:
     }
 
     uint32_t TextureSrv(int tenant) const { return m_tenants[tenant].srv; }
+    uint32_t Mips(int tenant) const { return m_tenants[tenant].mips; }
     // M7l: the hypervisor asks what is ACTUALLY resident at a uv -- the same CPU-side map
     // the GPU residency clamp samples (byte = finest resident mip * 16).
     uint32_t ResidentMipAt(int tenant, uint32_t face, float u, float v) const {
         const Tenant& t = m_tenants[tenant];
-        if (face >= t.faces || t.resCpu[face].empty() || t.resMap.width == 0) return 255u;
+        if (face >= t.resCpu.size() || t.resCpu[face].empty() || t.resMap.width == 0) return 255u;
         const uint32_t rdim = t.resMap.width;
         uint32_t x = static_cast<uint32_t>(u * rdim);
         uint32_t y = static_cast<uint32_t>(v * rdim);
@@ -111,11 +146,42 @@ public:
         return t.resCpu[face][static_cast<size_t>(y) * rdim + x] / 16u;
     }
     ID3D12Resource* TextureRes(int tenant) const { return m_tenants[tenant].res.Get(); }
+    ID3D12Resource* ResidencyRes(int tenant) const { return m_tenants[tenant].resMap.res.Get(); }
     D3D12_RESOURCE_STATES TextureState(int tenant) const { return m_tenants[tenant].state; }
     uint32_t ResidencySrv(int tenant) const { return m_tenants[tenant].resMapSrv; }
 
     // The renderer's per-frame demand: face-uv rect (of THIS tenant's cube) wanted at `mip`.
     // Internally expands to tiles, bumps lastSeen, enqueues unseen ones coarse-to-fine.
+    // M9w: is Want expensive because of the map, or because it TOUCHES THE SAME TILES over and
+    // over? The mip-tail rule re-walks every ancestor for every leaf, so a coarse tile is
+    // visited once per descendant. Counting touches against unique inserts separates
+    // "the hash map is slow" from "we are asking it the same question hundreds of times".
+    mutable uint64_t wantTouches = 0, wantHits = 0;
+    void WantStatsReset() { wantTouches = wantHits = 0; }
+
+    // M9af: hand a tenant the index of its own realization.
+    //
+    // MEASURED, AND NOT USED FOR SCHEDULING. The obvious use -- prefer loads that are a 64 KB
+    // read over loads that are a 16384-sample paint -- was implemented and made the picture
+    // WORSE: the descent seam came straight back, 33% of pixels changed for the worse against
+    // the reference frame. The reason is that only ~1% of the finest level has ever been
+    // painted, so the tiles a readiness preference demotes are exactly the ones that would fill
+    // the far field. Preferring what is cached starves the work that fills the cache. Reserving
+    // a quarter of the slots for paints recovered about a third of the loss and no more.
+    //
+    // It would pay on a WARM cache -- a repeat flight, where reads really are the whole job --
+    // so the hook stays and the policy does not. What the index is actually for here is the
+    // DirectStorage read path: knowing a tile's address, size and hash without touching the
+    // filesystem is what lets a read be issued straight to the GPU.
+    // M9ai: the NVMe -> GPU reader. Null keeps every tile on the upload-ring path.
+    void SetTileStream(TileStream* ts) { m_stream = ts; }
+
+    void SetTileIndex(int tenant, const TileIndex* idx) {
+        if (tenant >= 0 && tenant < static_cast<int>(m_tenants.size())) {
+            m_tenants[tenant].index = idx;
+        }
+    }
+
     void Want(int tenant, uint32_t face, uint32_t mip, float u0, float v0, float u1, float v1,
               bool predicted = false);
 
@@ -146,6 +212,27 @@ public:
     std::string stats;       // "streams: mars 212/512 t 13 MB | earth 96 t | fetches 34" etc.
     uint32_t fetchesThisRun = 0;    // HTTP providers report through their closure
 
+    // M9al: THE INSTRUMENT, before the change. --res-trace prints, every `traceEvery` frames
+    // and per texture tenant: the residency DEFICIT -- tiles wanted THIS frame that are not
+    // mapped, by mip -- the queue depths, and where the load slots went: reads (a 64 KB file)
+    // against paints (a 16384-sample composition), told apart by the provider's wall time.
+    // The picture is made of the deficit; the slots are why it is what it is.
+    bool traceRes = false;
+    uint32_t traceEvery = 30;
+    // M9al: RING LOADS. The user's proposal: do not ask for the finest mip a node needs in one
+    // go -- admit a new request only if its PARENT is already mapped, so every pass advances
+    // the whole view by one mip and neighbouring ground never differs by more than a ring.
+    // What it changes is the QUEUE, not the invariant: coarse-before-fine MAPPING was always
+    // enforced; REQUESTING was not, so on a fast descent the 48 load slots fill with finest-
+    // mip tiles that are not on disk, each a paint, while the next ring of the ground the
+    // camera is actually over queues behind them. Measured (section 32: frame 600 of the rail,
+    // baseline patchy, ring uniformly sharp; timing a wash) and made the DEFAULT by the user.
+    // --no-ring-loads is the A/B.
+    bool ringLoads = true;
+    bool dsSerial = false;   // M9ap diagnostic: one DirectStorage batch in flight at a time
+    uint32_t ringHeld = 0;       // requests deferred by the gate, cumulative
+    uint32_t ringHeldFrame = 0;  // ...and this frame alone
+
 private:
     struct Tenant {
         std::wstring name;
@@ -153,15 +240,41 @@ private:
         DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
         uint32_t faceDim = 0, mips = 0, packedMips = 0, faces = 6;
         uint32_t srv = UINT32_MAX;
+        uint32_t srvCube = UINT32_MAX;   // M9ap: page tenants: slices 0..5 as a cube
         std::vector<D3D12_SUBRESOURCE_TILING> tilings;   // per subresource (face*mips + mip)
+
+        // M9x: THE FLAT STAMP ARRAY. Want() asks "have I already seen this tile this frame"
+        // about twelve thousand times a frame, and 94% of the answers are yes. Asking an
+        // unordered_map<uint64, shared_ptr> costs a hash, a bucket probe and a pointer chase
+        // into scattered heap -- about 81 ns measured -- to retrieve a fact that fits in four
+        // bytes and whose address is pure arithmetic on (face, mip, x, y).
+        //
+        // So the answer moves into a dense array indexed by exactly that arithmetic. The map
+        // stays: it still owns the Tracked objects and everything the loader, mapper and
+        // evictor do with them. What leaves the map is the HOT QUESTION, which never needed it.
+        //
+        // Encoding: frame * 2 + predicted, so one 32-bit read carries both halves of the skip
+        // test. Zero means never seen, which is why frames are counted from 1.
+        std::vector<uint32_t> stamp;
+        std::vector<uint32_t> stampBase;   // offset of each (face, mip) plane into stamp
+        std::vector<uint32_t> stampW;      // that plane's width in tiles, for the row stride
         TileProviderFn provider;
         // Residency map (base-tile granularity, per face): byte = finest resident mip * 16.
         GpuTexture resMap;
         uint32_t resMapSrv = UINT32_MAX;
-        std::vector<uint8_t> resCpu[6];
+        uint32_t resMapSrvCube = UINT32_MAX;   // M9ap
+        std::vector<std::vector<uint8_t>> resCpu;   // per face/page
         bool resDirty = false;
         D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COPY_DEST;
+        // M9af: what this tenant's realization already holds on the NVMe. Borrowed; main owns
+        // the indices. Null means "no information", which schedules exactly as before.
+        const TileIndex* index = nullptr;
+        // M9al: where this tenant's load slots went. A provider that returns in under 4 ms
+        // read a file; one that took longer painted. Updated under m_mx by the workers.
+        uint32_t loadsRead = 0, loadsPaint = 0;
+        uint64_t readUs = 0, paintUs = 0;
     };
+
 
     enum class TileState : uint8_t { Seen, Loading, Loaded, Mapped, Failed };
     struct Tracked {
@@ -172,8 +285,28 @@ private:
         TileState state = TileState::Seen;
         bool predicted = false;
         uint8_t retries = 0;             // M7w: failed loads retry, then go honestly NULL
-        std::vector<uint8_t> data;
+        std::vector<uint8_t> data;       // empty when loc is valid: the bytes stayed on disk
+        TileLoc loc;
+        uint64_t stageOffset = 0;   // where its bytes landed in the device buffer
     };
+    // Index of one tile in a tenant's flat stamp array. Pure arithmetic -- no hashing, no
+    // indirection, and neighbours in a rect land next to each other in memory, which is the
+    // half of the win the instruction count does not show.
+    static inline size_t StampIndex(const Tenant& t, uint32_t face, uint32_t mip, uint32_t x,
+                                    uint32_t y) {
+        const uint32_t plane = face * t.mips + mip;
+        return size_t(t.stampBase[plane]) + size_t(y) * t.stampW[plane] + x;
+    }
+
+    // M9ai: tiles whose bytes are in flight on the DirectStorage queue. They are MAPPED but not
+    // yet claimed in the residency map, so the shader keeps sampling their coarser ancestor
+    // until the fence says the read landed. That is the whole cross-queue synchronisation: no
+    // barrier, no graphics-queue wait, just not lying about what has arrived yet.
+    struct InFlightRead {
+        uint64_t fence = 0;
+        std::vector<std::shared_ptr<Tracked>> tiles;
+    };
+
     using Key = uint64_t;                // tenant:8 | face:3 | mip:5 | y:24 | x:24
     static Key MakeKey(int tenant, const TileRequest& r) {
         return (static_cast<Key>(tenant) << 56) | (static_cast<Key>(r.face) << 53) |
@@ -209,6 +342,28 @@ private:
     std::vector<std::shared_ptr<Tracked>> m_loading;
     std::vector<std::shared_ptr<Tracked>> m_mapped;
     uint32_t m_frame = 0;
+    TileStream* m_stream = nullptr;
+    std::vector<InFlightRead> m_inFlightReads;
+    uint64_t m_directTiles = 0, m_ringTiles = 0, m_directLanded = 0;
+    uint32_t m_stageUsed = 0;   // (unused since M9ap; the free list below owns the slots)
+    // M9ap: landing slots are a FREE LIST, returned only after the CopyTiles that drains them
+    // has been recorded. The previous "reset every frame" reused slot 0 while last frame's
+    // read into slot 0 was still waiting for its fence -- a busy queue wrote one tile's bytes
+    // into another's slot, and the globe came up green and magenta.
+    std::vector<uint32_t> m_stageFree;
+    bool m_stageInit = false;
+    // M9ap: a drained slot is RETIRED, not freed. The CopyTiles that drains it is only
+    // RECORDED when the batch completes; it executes when the frame's command list runs, and
+    // DirectStorage would happily overwrite the slot before then. So a slot returns to the
+    // free list kStageRetireFrames later -- the same overlap discipline the upload ring and
+    // eviction already keep. Freeing on record put a NEW tile's bytes into an OLD coordinate.
+    static constexpr uint32_t kStageRetireFrames = 4;
+    std::deque<std::pair<uint32_t, std::vector<uint32_t>>> m_stageRetire;   // (frame, slots)
+    bool m_directLogged = false;
+public:
+    uint64_t DirectTiles() const { return m_directTiles; }
+    uint64_t RingTiles() const { return m_ringTiles; }
+private:
 
     // Upload ring: kFrameCount slabs of kMaxMapsPerFrame tiles, frame-indexed like the CB arena.
     GpuBuffer m_uploadRing[Gpu::kFrameCount];

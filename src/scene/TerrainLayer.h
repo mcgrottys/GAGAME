@@ -6,6 +6,10 @@
 
 #include "compose/Compositor.h"
 #include "scene/Layer.h"
+#include "compose/DomainSource.h"
+#include "compose/HeightStackSource.h"
+#include "core/GeoGridLoader.h"
+#include "core/GradeField.h"
 #include "sim/BathyModel.h"
 
 #include <string>
@@ -30,8 +34,45 @@ public:
     // (the heightfield texture physics reads, the sea's bed) but stops rendering -- one
     // planet, one description on screen.
     bool renderEnabled = true;
-    uint32_t HeightSrv() const { return m_tex.srv; }
-    GpuTexture& HeightTex() { return m_tex; }   // M5c: the SWE solver reads the bed directly
+    // M9an: THERE IS NO FALLBACK TEXTURE. The bed is the GA sparse bank (BuildBedBank), which
+    // measured equivalent to the committed CUDEM texture at 0.0000 m (section 28) -- so the
+    // committed texture was a second copy of the same bytes, and the user's rule is that the
+    // megatexture is the only texture. HeightSrv() is the bank's SRV, and a caller that asks
+    // before the bank exists gets an invalid index and a logged refusal, not a quiet degrade.
+    uint32_t HeightSrv() const { return m_bedReady ? m_bedSrv : 0xFFFFFFFFu; }
+    // M5c: the SWE solver reads the bed directly -- from the bank, since M9an.
+
+    // ---- M9k: THE BED AS A GA OBJECT -------------------------------------------------------
+    // The same ground, arriving the way every 2D source is supposed to: GA Load (a
+    // FieldLoader over the harvester's grid), GA Compose (a RasterSource through the
+    // DomainCompositor, coverage and all), and a DirectX sparse structure (a paged GradeBank,
+    // reserved array, mip chain, residency map).
+    //
+    // Built ALONGSIDE m_tex on purpose, and proved equal to it before anything switches. The
+    // bed is the most load-bearing texture in the engine -- SweSolver, Sea.hlsl, WaterBank and
+    // Globe.hlsl all read it -- so swapping consumers on an unverified path would risk every
+    // one of them at once for no way to tell which broke.
+    GradeBank& BedBank() { return m_bedBank; }
+    bool BedBankReady() const { return m_bedReady; }
+
+    // ---- M9n: THE BANK AS A DROP-IN BED.
+    //
+    // A paged bank is a Texture2DArray, and every bed consumer -- Sea.hlsl, SeaChurn.hlsl, the
+    // SWE solver -- reads a Texture2D. In D3D12 those are the SAME resource type
+    // (RESOURCE_DIMENSION_TEXTURE2D with DepthOrArraySize), so a TEXTURE2D SRV over the array
+    // views slice 0 and every existing consumer keeps working untouched.
+    //
+    // That is worth more than tidiness: switching the bed is the highest-blast-radius change in
+    // the engine (solver, sea shader, churn, water bank, globe), and doing it WITHOUT editing a
+    // shader means if anything moves on screen, the bank's CONTENT is the only possible cause --
+    // and its content was already proved equal to the committed texture at 0.0000 m.
+    //
+    // Residency: BuildBedBank pins every level of slice 0, so nothing here reads an unmapped
+    // tile. The bed lives in the sparse structure; it just happens to be entirely resident.
+    uint32_t BedSrv() const { return m_bedSrv; }
+    ID3D12Resource* BedRes() { return m_bedBank.Res(); }
+    // Returns the worst |GA path - committed texture| in metres, or -1 if it could not run.
+    double BuildBedBank(Gpu& gpu, const Compositor& comp, int heightChannel);
 
     // M6i: the composed color channel -- filled by FillComposedCb in main, the SAME function
     // and constants the globe uses, so the two layers agree texel for texel.
@@ -52,7 +93,10 @@ private:
     const BathyModel* m_bathy = nullptr;
     ID3D12RootSignature* m_rootSig = nullptr;
     Com<ID3D12PipelineState> m_pso;
-    GpuTexture m_tex;
+
+    GradeBank m_bedBank;
+    bool m_bedReady = false;
+    uint32_t m_bedSrv = UINT32_MAX;   // TEXTURE2D view over slice 0 -- the drop-in
     uint32_t m_quadsX = 0, m_quadsZ = 0;
     ComposedSurfaceCb m_cs{};   // zero until SetComposed: every channel reads "off"
 };

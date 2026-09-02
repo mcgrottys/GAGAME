@@ -915,7 +915,11 @@ bool RunGaSelfTest() {
             // A buoy over the model, exactly the shape the sea state already uses when it
             // assimilates 44013 over GFS-Wave -- but as a SOURCE, so it composes instead of
             // being applied by hand downstream. 44013 sits off Boston.
-            auto pts = std::make_shared<PointSource>("ndbc.44013", kG1, 2, 0.25, 10);
+            // M9l: the buoy declares its unit. It always WAS m/s -- the normalization stage
+            // just made saying so compulsory, and this test caught the omission the moment it
+            // was run: an undeclared source reads as quantity Unknown and the compositor
+            // refuses it, which is the stage working exactly as designed on its own author.
+            auto pts = std::make_shared<PointSource>("ndbc.44013", kG1, 2, 0.25, 10, "m/s");
             pts->Add({-70.651, 42.346, {0.42f, -0.11f, 0, 0}});
 
             DomainCompositor fc;

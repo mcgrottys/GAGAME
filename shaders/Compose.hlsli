@@ -56,20 +56,75 @@ float2 CsWindowUv(float3 dir) {
 // img*img*1.2 curve hack is gone; the user called the conversion, and the user was right).
 // One LINEAR exposure constant remains: display-referred mosaics sit darker than the scene
 // lighting expects, and scaling exposure is honest where bending the curve was not.
+// M9ap: residency of a PAGE (a slice of the page tenant's array), conservative like the rest.
+float CsHavePage(uint mapSrv, float2 uv, uint slice) {
+    const float4 g = gTexArr[mapSrv].GatherRed(sLinearClamp, float3(uv, slice));
+    return max(max(g.x, g.y), max(g.z, g.w)) * 255.0f / 16.0f;
+}
+float CsHaveCubeArr(uint mapSrv, float3 dir) {
+    const float4 g = gTexCubeArr[mapSrv].GatherRed(sLinearClamp, float4(dir, 0.0f));
+    return max(max(g.x, g.y), max(g.z, g.w)) * 255.0f / 16.0f;
+}
+
+// M9ap: THE PAGES PATH. One texture, pages selected by CONTAINMENT and by what is actually
+// resident: every page is the same megatexture at a different ground resolution, so the page
+// whose resident mip gives the finest ground texel at this pixel is the right answer and needs
+// no fade against its neighbour -- where two pages are resident at the same resolution they
+// hold the same pixels. `hand` and `finer` are gone; there is nothing to hand off between.
+float3 ComposedColorPages(float3 dir) {
+    // The cube, through the cube views over slices 0..5 (hardware-seamless across faces).
+    const float haveC = CsHaveCubeArr(gCsU.y, dir);
+    float3 c = gTexCubeArr[gCsU.x].Sample(sAniso, float4(dir, 0.0f), haveC).rgb;
+    float ground = 611.0f * exp2(haveC);
+    if (gCsF.y > 0.5f) {
+        const float2 duv = CsWindowUv(dir);
+        if (all(duv > 0.0f) && all(duv < 1.0f)) {
+            const float haveW = CsHavePage(gCsU5.y, duv, gCsU5.z);
+            const float gW = 9.55f * exp2(haveW);
+            if (gW < ground) {
+                c = gTexArr[gCsU5.x].Sample(sAniso, float3(duv, gCsU5.z), int2(0, 0), haveW).rgb;
+                ground = gW;
+            }
+            if (gCsU5.w != 0xFFFFFFFFu) {
+                const float2 tuv = duv * gCsDet.z + gCsDet.xy;
+                if (all(tuv > 0.0f) && all(tuv < 1.0f)) {
+                    const float haveD = CsHavePage(gCsU5.y, tuv, gCsU5.w);
+                    const float gD = 1.19f * exp2(haveD);
+                    if (gD < ground) {
+                        c = gTexArr[gCsU5.x].Sample(sAniso, float3(tuv, gCsU5.w), int2(0, 0),
+                                                   haveD).rgb;
+                        ground = gD;
+                    }
+                }
+            }
+        }
+    }
+    return c;
+}
+
 float3 ComposedColor(float3 dir) {
+    if (gCsU5.x != 0xFFFFFFFFu && gCsF.x > 0.5f) return ComposedColorPages(dir);
     float3 c = float3(0.5f, 0.5f, 0.5f);
     if (gCsF.x > 0.5f) {
-        const float want = gTexCube[gCsU.x].CalculateLevelOfDetail(sLinearClamp, dir);
+        // M9z: ANISOTROPIC, and the CalculateLevelOfDetail call is GONE. It collapsed the
+        // screen-space Jacobian to ONE number -- the longest derivative -- and then took a
+        // single trilinear tap there, which is why the surface smeared along the compressed
+        // axis wherever the globe curves away. Sample()'s min-LOD clamp form hands the whole
+        // Jacobian to the hardware and still honours the residency floor, so a miss degrades
+        // to the best RESIDENT ancestor exactly as before. Fewer instructions AND the right
+        // footprint: `have` was the only value the old form needed to keep.
         const float have = CsHaveCube(gCsU.y, dir);
-        c = gTexCube[gCsU.x].SampleLevel(sLinearClamp, dir, max(want, have)).rgb;
+        c = gTexCube[gCsU.x].Sample(sAniso, dir, have).rgb;
     }
     if (gCsF.y > 0.5f) {
         const float2 duv = CsWindowUv(dir);
         if (all(duv > 0.0f) && all(duv < 1.0f)) {
             const float2 fe = smoothstep(0.0f, 0.06f, duv) * smoothstep(1.0f, 0.94f, duv);
+            // `want` survives here because it GATES the hand-off below, not just the fetch --
+            // a scalar decision genuinely needs a scalar. The fetch itself goes anisotropic.
             const float want = gTex[gCsU.z].CalculateLevelOfDetail(sLinearClamp, duv);
             const float have = CsHave2D(gCsU.w, duv);
-            const float4 w = gTex[gCsU.z].SampleLevel(sLinearClamp, duv, max(want, have));
+            const float4 w = gTex[gCsU.z].Sample(sAniso, duv, int2(0, 0), have);
             // M7h: the window HANDS OFF to the cube when the view outresolves even its
             // pinned floor (want past ~mip 6): a rung that cannot add detail must vanish,
             // or its different-zoom capture sits as a vintage RECTANGLE on the planet.
@@ -87,7 +142,7 @@ float3 ComposedColor(float3 dir) {
                         gTex[gCsU4.x].CalculateLevelOfDetail(sLinearClamp, tuv);
                     const float haveD = CsHave2D(gCsU4.y, tuv);
                     const float lodD = max(wantD, haveD);
-                    const float4 d = gTex[gCsU4.x].SampleLevel(sLinearClamp, tuv, lodD);
+                    const float4 d = gTex[gCsU4.x].Sample(sAniso, tuv, int2(0, 0), haveD);
                     // Take the detail rung only where it is actually FINER than what the
                     // z14 window just delivered (z17 mip m == z14 mip m-3): a half-warmed
                     // detail tile must never replace sharper coarse truth with mush.
@@ -105,11 +160,65 @@ float3 ComposedColor(float3 dir) {
 }
 bool ComposedColorOn() { return gCsF.x > 0.5f; }
 
+// M9av: THE SEAFLOOR THROUGH OPAQUE WATER. The megatexture's ocean texels are DRY seafloor
+// albedo (synth.seafloor.relief: the bathymetry's hillshade times a sediment ramp keyed on
+// datum depth). Beer-Lambert over the measured K_d makes water past a few tens of metres
+// opaque, and the two-flux endpoint (chlorophyll, SPM) IS its colour -- that stays. The floor's
+// SHADING is carried as a modulation of that endpoint's brightness: divide the ramp's own
+// luminance back out of the texel and what remains is the hillshade, flat bed = 1. A map
+// convention, declared: the hue is the measurement, the relief is the floor's, and
+// kSeafloorRelief = 0 removes it.
+static const float kSeafloorRelief = 1.0f;          // 0 = the physical endpoint alone
+static const float kSeafloorReliefContrast = 1.0f;  // hillshade gain over the painted swing (the
+                                                    // user chose the painted swing as is; a
+                                                    // brightened "map ocean" was tried and rejected)
+float SeafloorRampLuma(float depthM) {
+    // MIRRORS src/compose/Sources.cpp SeafloorRamp: change both.
+    const float d = clamp(depthM, 0.0f, 4000.0f);
+    const float3 c0 = float3(0.66f, 0.60f, 0.46f), c1 = float3(0.56f, 0.52f, 0.42f),
+                 c2 = float3(0.46f, 0.44f, 0.39f), c3 = float3(0.39f, 0.37f, 0.34f),
+                 c4 = float3(0.32f, 0.31f, 0.30f);
+    float3 c;
+    if (d < 40.0f) c = lerp(c0, c1, d / 40.0f);
+    else if (d < 200.0f) c = lerp(c1, c2, (d - 40.0f) / 160.0f);
+    else if (d < 1000.0f) c = lerp(c2, c3, (d - 200.0f) / 800.0f);
+    else c = lerp(c3, c4, (d - 1000.0f) / 3000.0f);
+    return dot(c, float3(0.299f, 0.587f, 0.114f));
+}
+// The endpoint's HUE and brightness are the measurement's (albWater is kept in the signature
+// for the record: a version that redrew the floor through water of that hue at a declared
+// visibility was brighter, greener, and rejected -- the physical water is the look). Only the
+// floor's hillshade rides the endpoint, as a brightness modulation, where the bed term has died.
+float3 SeafloorReliefMod(float3 albSea, float3 albWater, float3 floorAlb, float hp, float opaque) {
+    const float3 L = float3(0.299f, 0.587f, 0.114f);
+    const float ref = SeafloorRampLuma(max(-hp, 0.0f));
+    const float shade0 = dot(floorAlb, L) / max(ref, 1e-3f);          // flat bed = 1
+    const float shade = clamp(1.0f + kSeafloorReliefContrast * (shade0 - 1.0f), 0.30f, 2.2f);
+    return albSea * lerp(1.0f, shade, kSeafloorRelief * saturate(opaque));
+}
+
 // M7g: the effective composed-color texel (metres) RESIDENT at this pixel. Consumers that
 // historically replaced the mosaic outright (the close-up material constants, born when
 // the near field was a 9.5 m blur) ask this and YIELD where the imagery outresolves them.
 float ComposedColorTexelM(float3 dir) {
     float t = 611.0f;   // cube-only worst case
+    if (gCsU5.x != 0xFFFFFFFFu) {
+        // M9ap: the pages path reports the same choice ComposedColorPages makes.
+        t = 611.0f * exp2(CsHaveCubeArr(gCsU.y, dir));
+        if (gCsF.y > 0.5f) {
+            const float2 duv = CsWindowUv(dir);
+            if (all(duv > 0.0f) && all(duv < 1.0f)) {
+                t = min(t, 9.55f * exp2(CsHavePage(gCsU5.y, duv, gCsU5.z)));
+                if (gCsU5.w != 0xFFFFFFFFu) {
+                    const float2 tuv = duv * gCsDet.z + gCsDet.xy;
+                    if (all(tuv > 0.001f) && all(tuv < 0.999f)) {
+                        t = min(t, 1.19f * exp2(CsHavePage(gCsU5.y, tuv, gCsU5.w)));
+                    }
+                }
+            }
+        }
+        return t;
+    }
     if (gCsF.y > 0.5f && gCsU.z != 0xFFFFFFFFu) {
         const float2 duv = CsWindowUv(dir);
         if (all(duv > 0.0f) && all(duv < 1.0f)) {
@@ -130,8 +239,39 @@ float ComposedColorTexelM(float3 dir) {
 // window; CUDEM-fine near the estuary) overlays the cube exactly the way color does, so the
 // land/sea gate and the shading normals stop being 611 m/px approximations where finer truth
 // exists. Off -> 0 (a smooth sphere).
+// M9aq: is there a height window at all, on either path? (Globe.hlsl gates its near-field
+// material on this.)
+bool CsHeightWindowOn() { return gCsU6.x != 0xFFFFFFFFu || gCsU2.z != 0xFFFFFFFFu; }
+// The height window's resident mip at a window uv, on either path.
+float CsHaveHeightWin(float2 duv) {
+    if (gCsU6.x != 0xFFFFFFFFu) return CsHavePage(gCsU6.y, duv, gCsU6.z);
+    return CsHave2D(gCsU2.w, duv);
+}
+
+// M9aq: THE HEIGHT PAGES PATH. Same rule as colour: the cube through its cube views, the z14
+// page through the array view, the page chosen by containment and by what is resident --
+// no feather, because both pages are the same height field at different ground resolutions.
+float ComposedHeightPages(float3 dir, float lod) {
+    const float haveC = CsHaveCubeArr(gCsU2.y, dir);
+    float h = gTexCubeArr[gCsU2.x].SampleLevel(sLinearClamp, float4(dir, 0.0f),
+                                               max(lod, haveC)).x;
+    const float2 duv = CsWindowUv(dir);
+    if (all(duv > 0.0f) && all(duv < 1.0f)) {
+        // The window pyramid runs ~6 mips finer than the cube at the same footprint.
+        const float wantW = clamp(lod + 6.0f, 0.0f, gCsG.z);
+        const float haveW = CsHavePage(gCsU6.y, duv, gCsU6.z);
+        const float lodW = max(wantW, haveW);
+        // Take the page where its resident texel is at least as fine as the cube's.
+        if (9.55f * exp2(haveW) <= 611.0f * exp2(haveC)) {
+            h = gTexArr[gCsU6.x].SampleLevel(sLinearClamp, float3(duv, gCsU6.z), lodW).x;
+        }
+    }
+    return h;
+}
+
 float ComposedHeight(float3 dir, float lod) {
     if (gCsF.z < 0.5f) return 0.0f;
+    if (gCsU6.x != 0xFFFFFFFFu) return ComposedHeightPages(dir, lod);
     const float have = CsHaveCube(gCsU2.y, dir);
     float h = gTexCube[gCsU2.x].SampleLevel(sLinearClamp, dir, max(lod, have)).x;
     if (gCsU2.z != 0xFFFFFFFFu) {

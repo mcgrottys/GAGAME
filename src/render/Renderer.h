@@ -74,6 +74,10 @@ public:
 
     // Reads the tonemapped LDR result back and writes a PNG. Headless-safe.
     bool DumpPng(const std::wstring& path);
+    // Raw RGBA8 + its row pitch (which may exceed width*4 -- D3D readback alignment).
+    bool DumpRaw(std::vector<uint8_t>& out, uint32_t* rowPitch);
+    uint32_t Width() const { return m_width; }
+    uint32_t Height() const { return m_height; }
 
     ShaderCompiler& Shaders() { return m_shaders; }
     ID3D12RootSignature* RootSignature() const { return m_rootSig.Get(); }

@@ -25,16 +25,37 @@ cbuffer ChurnCb : register(b0) {
     float4 gWaveD;   // xy = peak propagation dir, z = deriv texture valid, w = source gain
     float4 gBathyG;  // M5c: world x0, z0, 1/sizeX, 1/sizeZ of the CUDEM (row 0 = north)
     float4 gSweM;    // M5c: x = solved-field on, y = current gain, zw = seaward blend x-range
+    float4 gGeoA;    // M9ar: world -> lat/lon: orgLat, orgLon, 1/mPerLat, 1/mPerLon
+    float4 gWinA;    // M9ar: height page frame: org px x, org px y, 1/16384, world px at z14
 };
 
 StructuredBuffer<uint> gTileList : register(t0);
 Texture2D<float4> gChopDeriv : register(t1);   // cascade-2 derivatives (foam pattern source)
 Texture2D<float4> gSweUv : register(t2);       // M5c: solved currents (u, v, |U|, valid)
-Texture2D<float>  gBathy : register(t3);       // M5c: CUDEM bed, NAVD88 m
+// M9ar: THE BED IS THE HEIGHT MEGATEXTURE -- slice 6 of the height page tenant as a one-slice
+// array view, with its residency map. The CUDEM-private texture this read is gone.
+Texture2DArray<float> gBathy    : register(t3);   // NAVD88 m, the page
+Texture2DArray<float> gBathyRes : register(t4);   // R8: finest resident mip * 16
+
 RWTexture2D<float> gChurnTex : register(u0);
 
 SamplerState sWrap : register(s0);
 SamplerState sClamp : register(s1);
+
+// The bed at a world point, from the page at its resident mip (the water bank's mapping).
+float PageBedAt(float2 world) {
+    const float lat = gGeoA.x + world.y * gGeoA.z;
+    const float lon = gGeoA.y + world.x * gGeoA.w;
+    const float latR = lat * 0.01745329252f;
+    const float mx = (lon + 180.0f) / 360.0f * gWinA.w;
+    const float my = (0.5f - log(tan(0.7853981634f + latR * 0.5f)) * 0.15915494309f) * gWinA.w;
+    const float2 wuv = float2(mx - gWinA.x, my - gWinA.y) * gWinA.z;
+    if (any(wuv <= 0.0f) || any(wuv >= 1.0f)) return -30.0f;
+    const float2 rdim = float2(128.0f, 128.0f);
+    const float haveV = gBathyRes.Load(int4(int2(clamp(wuv * rdim, 0.0f, rdim - 1.0f)), 0, 0)).x;
+    const float mip = clamp(round(haveV * 15.9375f), 0.0f, 6.0f);
+    return gBathy.SampleLevel(sClamp, float3(wuv, 0.0f), mip).x;
+}
 
 uint2 TileTexel(uint3 id) {
     const uint t = gTileList[id.z];
@@ -73,7 +94,7 @@ void CsChurnUpdate(uint3 id : SV_DispatchThreadID) {
             const float2 buv = (world - gBathyG.xy) * gBathyG.zw;
             if (all(buv > 0.001f) && all(buv < 0.999f)) {
                 const float2 suv = float2(buv.x, 1.0f - buv.y);
-                depth = -gBathy.SampleLevel(sClamp, suv, 0).x;   // refined below by the level
+                depth = -PageBedAt(world);   // refined below by the level
                 const float4 s = gSweUv.SampleLevel(sClamp, suv, 0);
                 if (s.w > 0.5f) {
                     U = lerp(s.xy * gSweM.y, U, smoothstep(gSweM.z, gSweM.w, world.x));

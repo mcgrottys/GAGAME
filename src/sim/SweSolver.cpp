@@ -9,11 +9,38 @@
 
 namespace ga {
 
+void SweSolver::SetHeightPage(Gpu& gpu, ID3D12Resource* heightArr, ID3D12Resource* resMapArr,
+                              uint32_t slice, uint32_t mips, double orgPxX, double orgPxY) {
+    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
+    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    sv.Format = DXGI_FORMAT_R16_FLOAT;
+    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    sv.Texture2DArray.MipLevels = mips;
+    sv.Texture2DArray.FirstArraySlice = slice;
+    sv.Texture2DArray.ArraySize = 1;
+    gpu.Device()->CreateShaderResourceView(heightArr, &sv, gpu.SrvHeap().Cpu(m_table + 0));
+    sv.Format = DXGI_FORMAT_R8_UNORM;
+    sv.Texture2DArray.MipLevels = 1;
+    gpu.Device()->CreateShaderResourceView(resMapArr, &sv, gpu.SrvHeap().Cpu(m_table + 1));
+    // Lattice texel -> lat/lon: row 0 is the NORTH edge, so latitude walks south.
+    m_cb.geoLL[0] = static_cast<float>(m_bathy->Lon0());
+    m_cb.geoLL[1] = static_cast<float>(m_bathy->Lat1());
+    m_cb.geoLL[2] = static_cast<float>(m_bathy->Dlon());
+    m_cb.geoLL[3] = static_cast<float>(-m_bathy->Dlat());
+    m_cb.winA[0] = static_cast<float>(orgPxX);
+    m_cb.winA[1] = static_cast<float>(orgPxY);
+    m_cb.winA[2] = 1.0f / 16384.0f;
+    m_cb.winA[3] = 16384.0f * 256.0f;
+    m_bedBound = true;
+    Log("[swe] bed bound to the height megatexture: page slice %u, %u mips, residency-clamped "
+        "per texel -- the solver, the water shading and the globe read ONE bed",
+        slice, mips);
+}
+
 void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
-                     const BathyModel& bathy, ID3D12Resource* bathyRes,
+                     const BathyModel& bathy,
                      const SweConfig& cfg) {
     m_bathy = &bathy;
-    m_bathyRes = bathyRes;
     m_sc = &sc;
     m_shaderDir = shaderDir;
     const uint32_t nx = bathy.Nx(), ny = bathy.Ny();
@@ -50,6 +77,11 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
         // view and composites them on coverage: no second SRV, and no branch deciding which
         // source owns a pixel.
         d.arraySlices = 2;
+        // Channel 2 is coverage (the compose loop writes it there). Declaring it makes the mip
+        // chain weight by it: without this, a coarse texel over a half-covered region averages
+        // real divergence with the zeros of absence and reports the result as fact -- and the
+        // error is WORST at the pinned floor, which is exactly what a distant sample reads.
+        m_velGrad.SetCoverageChannel(2);
         m_velGrad.Init(gpu, d, policy::None());
         // A sliced bank activates nothing by itself -- an inactive slice honestly reports
         // kNothingResident. Slice 0 is ours and must be live before any residency is asked.
@@ -209,10 +241,11 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     m_uvUav = gpu.CreateTextureUav(m_uv.res.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT,
                                    D3D12_UAV_DIMENSION_TEXTURE2D);
 
-    // Root signature: b0 CBV, t0 root SRV (tile list), table [t1 bathy, u0 eta, u1 flux, u2 uv].
+    // Root signature: b0 CBV, t0 root SRV (tile list), table [t1 height page, t2 its residency
+    // map (M9ar), u0 eta, u1 flux, u2 uv, u3 mv].
     D3D12_DESCRIPTOR_RANGE1 ranges[2]{};
     ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = 1;
+    ranges[0].NumDescriptors = 2;
     ranges[0].BaseShaderRegister = 1;
     ranges[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
     ranges[0].OffsetInDescriptorsFromTableStart = 0;
@@ -220,7 +253,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     ranges[1].NumDescriptors = 4;   // M9h: + gMv, the derived grad(flow) bank
     ranges[1].BaseShaderRegister = 0;
     ranges[1].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    ranges[1].OffsetInDescriptorsFromTableStart = 1;
+    ranges[1].OffsetInDescriptorsFromTableStart = 2;
     D3D12_ROOT_PARAMETER1 params[3]{};
     params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
     params[0].Descriptor.ShaderRegister = 0;
@@ -256,24 +289,18 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     makePso(L"CsSweDerive", m_deriveK);
     makePso(L"CsSweVelGrad", m_velGradK);
 
-    m_table = gpu.SrvHeap().Alloc(5);
-    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    sv.Format = DXGI_FORMAT_R32_FLOAT;
-    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    sv.Texture2D.MipLevels = 1;
-    gpu.Device()->CreateShaderResourceView(bathyRes, &sv, gpu.SrvHeap().Cpu(m_table + 0));
+    m_table = gpu.SrvHeap().Alloc(6);   // t1, t2 filled by SetHeightPage; u0..u3 here
     D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
     uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
     uv.Format = DXGI_FORMAT_R32_FLOAT;
     gpu.Device()->CreateUnorderedAccessView(m_eta.Res(), nullptr, &uv,
-                                            gpu.SrvHeap().Cpu(m_table + 1));
+                                            gpu.SrvHeap().Cpu(m_table + 2));
     uv.Format = DXGI_FORMAT_R32G32_FLOAT;
     gpu.Device()->CreateUnorderedAccessView(m_flux.Res(), nullptr, &uv,
-                                            gpu.SrvHeap().Cpu(m_table + 2));
+                                            gpu.SrvHeap().Cpu(m_table + 3));
     uv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
     gpu.Device()->CreateUnorderedAccessView(m_uv.res.Get(), nullptr, &uv,
-                                            gpu.SrvHeap().Cpu(m_table + 3));
+                                            gpu.SrvHeap().Cpu(m_table + 4));
     // The bank is an ARRAY now, so its UAV must be an array view pinned to slice 0. A plain
     // Texture2D view of an array resource is invalid, and the solve would write nowhere.
     uv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -282,7 +309,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     uv.Texture2DArray.FirstArraySlice = 0;
     uv.Texture2DArray.ArraySize = 1;
     gpu.Device()->CreateUnorderedAccessView(m_velGrad.Res(), nullptr, &uv,
-                                            gpu.SrvHeap().Cpu(m_table + 4));
+                                            gpu.SrvHeap().Cpu(m_table + 5));
     uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
 
     Log("[swe] grid %ux%u dx %.2f x dy %.2f m  dt %.3f s  eta %u/%u t  flux %u/%u t  "

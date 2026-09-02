@@ -36,6 +36,11 @@ class SeaLayer;
 
 class WaterBankLayer : public Layer {
 public:
+    // M9p: --flat-bed. Replaces the sampled bed with a constant so the same scene can be
+    // filled twice and diffed. Public because it is a debug lever, not state.
+    bool flatBed = false;
+    float flatBedNavd = -30.0f;
+
     static constexpr int kMips = 6;         // texel = base * 2^m; at base 1.2: 1.2..38 m
                                             // texels, 0.6..20 km spans (scene bankTexelM)
     static constexpr int kRingTiles = 4;    // 4x4 logical tiles per ring
@@ -71,9 +76,13 @@ public:
     // M7q: the composed height WINDOW, per texel, in the kernel -- the corner-lerp bed
     // quantized depth to ~600 m patches and the M7p physics inherited the blockiness (the
     // data lens showed breaking bands cutting at tile edges; the user called it).
-    void SetHeightWindow(uint32_t srv, uint32_t resMapSrv, double orgPxX, double orgPxY) {
+    // M9aq: `slice` != ~0 means srv/resMapSrv are Texture2DArray views of the height PAGE
+    // tenant and the window is that slice; ~0 is the old single-face window.
+    void SetHeightWindow(uint32_t srv, uint32_t resMapSrv, double orgPxX, double orgPxY,
+                         uint32_t slice = 0xFFFFFFFFu) {
         m_hgtWinSrv = srv;
         m_hgtWinResSrv = resMapSrv;
+        m_hgtWinSlice = slice;
         m_hgtWinOrg[0] = orgPxX;
         m_hgtWinOrg[1] = orgPxY;
     }
@@ -107,6 +116,7 @@ public:
 
 private:
     // Mirrors BankCb in WaterBank.hlsl.
+
     struct BankCbData {
         float org[4];
         float patch[4];
@@ -137,6 +147,11 @@ private:
         float bandKFold[4];    // M9c: the FOLD's wavenumber per band (energy-weighted);
                                // bandK above keeps the cut mean for the physics closures.
                                // APPENDED at the end, per the layout law two rows up.
+        float debugA[4];       // M9p: x != 0 = flat-bed override, y = the bed (NAVD m). Sits
+                               // AFTER bandKFold because gDebugA does in the HLSL -- the two
+                               // orders are the contract, and a same-size swap passes the
+                               // byte-parity gate while silently offsetting nothing here but
+                               // reading the wrong row there.
     };
     struct BankTile {
         float orgXZ[2];
@@ -160,6 +175,7 @@ private:
     Compositor* m_comp = nullptr;
     int m_hgtCh = -1;
     uint32_t m_hgtWinSrv = 0xFFFFFFFFu, m_hgtWinResSrv = 0xFFFFFFFFu;
+    uint32_t m_hgtWinSlice = 0xFFFFFFFFu;
     double m_hgtWinOrg[2] = {0.0, 0.0};
     const GlobeModel* m_globe = nullptr;
     const SeaState* m_seaState = nullptr;

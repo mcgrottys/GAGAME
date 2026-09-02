@@ -39,6 +39,7 @@
 #pragma once
 
 #include "core/FieldLoader.h"
+#include "core/GaUnits.h"
 #include "core/GeoRef.h"
 #include "core/GradeField.h"
 #include "compose/Projections.h"
@@ -80,6 +81,13 @@ public:
     virtual SourceDomain Domain() const = 0;
     virtual uint8_t GradeSig() const = 0;
     virtual uint32_t Channels() const = 0;
+    // M9l: what the numbers MEAN. Grade says how a value transforms; this says what it IS.
+    // Defaulted rather than pure so an existing source keeps compiling -- but the default is
+    // Unknown, which the compositor refuses, so silence is not a way past the check.
+    virtual const UnitSpec& Unit() const {
+        static const UnitSpec kUnstated;
+        return kUnstated;
+    }
     // The value and weight here. False is identical to weight 0 and exists only for callers
     // that want to skip the copy.
     virtual bool SampleAt(const DomainQuery& q, DomainValue& out) const = 0;
@@ -91,6 +99,30 @@ public:
     // Higher wins where two sources both claim full weight -- a 1.5 m survey over a 700 m
     // model. Equal priority blends by weight, which is what a feathered edge wants.
     virtual int Priority() const { return 0; }
+
+    // ---- M9m: THE TREE. Composition converges -- many leaves, fewer nodes, one product -- so a
+    // source may itself have inputs. Defaulted to a leaf, which is what a loader-backed source
+    // is, so nothing that exists today has to say anything. PrintTree walks these.
+    virtual size_t InputCount() const { return 0; }
+    virtual const DomainSource* Input(size_t) const { return nullptr; }
+    // What this node DOES, for the printed tree: "load", "compose", "subtract", "normalize".
+    virtual const char* NodeKind() const { return "load"; }
+    // The gantt column. A bed composes once; a tide is a function of t and must be re-evaluated
+    // every instant. Stating it is what lets one tree carry rows on different clocks.
+    virtual const char* Cadence() const { return "static"; }
+    // M9am: WHAT A CACHE MAY KEY THIS NODE'S OUTPUT ON. A leaf's tiles on disk are a function of
+    // the data it reads and nothing else, so the default is name + unit; a loader that knows its
+    // structure (a tile tree, a file version) says so, and a wrapper that changes nothing
+    // identity-bearing forwards its inner's. Compose nodes derive theirs from their inputs.
+    virtual std::string Identity() const { return std::string(Name()) + "|" + Unit().Describe(); }
+    // M9am: the declared footprint in degrees, when there is one. MayCover answers "might this
+    // touch"; this answers "how much", which the soak rule needs -- a source whose footprint
+    // spans less than ~2 texels of a tile drops out of that tile's subset, so a coarse tile is
+    // not repainted for a speck. False = unknown, which the caller treats as "always in".
+    virtual bool Footprint(double& lon0, double& lat0, double& lon1, double& lat1) const {
+        (void)lon0; (void)lat0; (void)lon1; (void)lat1;
+        return false;
+    }
 };
 
 // ================================================================================================
@@ -101,15 +133,21 @@ class RasterSource : public DomainSource {
 public:
     RasterSource(std::unique_ptr<FieldLoader> loader, int priority = 0)
         : m_loader(std::move(loader)), m_priority(priority) {
-        if (m_loader) CacheAll();
+        if (m_loader) {
+            m_unit = UnitSpec::Parse(m_loader->Ref().valueUnit);
+            CacheAll();
+        }
     }
     bool Valid() const { return m_loader != nullptr && !m_cache.empty(); }
-    // The source'''s own georeference -- a consumer placing it as a PAGE needs its extent, and
+    // The source's own georeference -- a consumer placing it as a PAGE needs its extent, and
     // getting that from the source rather than restating it is what keeps the two aligned.
     const GeoRef& Ref() const { return m_loader->Ref(); }
 
     const char* Name() const override { return m_loader ? m_loader->Name() : "raster"; }
     SourceDomain Domain() const override { return SourceDomain::Raster; }
+    // Straight from GeoRef::valueUnit -- the string the loader read out of the file, parsed
+    // once here. The loader still reports; this stage still decides.
+    const UnitSpec& Unit() const override { return m_unit; }
     uint8_t GradeSig() const override { return m_loader ? m_loader->GradeSig() : 0; }
     uint32_t Channels() const override { return m_chan; }
     int Priority() const override { return m_priority; }
@@ -241,6 +279,7 @@ private:
     std::vector<float> m_cache, m_cov;
     uint32_t m_chan = 1;
     int m_priority = 0;
+    UnitSpec m_unit;
 };
 
 // ================================================================================================
@@ -255,15 +294,16 @@ public:
         float c[4];
     };
     PointSource(std::string name, uint8_t grade, uint32_t channels, double radiusDeg,
-                int priority = 10)
+                int priority = 10, const char* valueUnit = "")
         : m_name(std::move(name)), m_grade(grade), m_chan(channels), m_radius(radiusDeg),
-          m_priority(priority) {}
+          m_priority(priority), m_unit(UnitSpec::Parse(valueUnit)) {}
 
     void Add(const Obs& o) { m_obs.push_back(o); }
     size_t Count() const { return m_obs.size(); }
 
     const char* Name() const override { return m_name.c_str(); }
     SourceDomain Domain() const override { return SourceDomain::Point; }
+    const UnitSpec& Unit() const override { return m_unit; }
     uint8_t GradeSig() const override { return m_grade; }
     uint32_t Channels() const override { return m_chan; }
     int Priority() const override { return m_priority; }
@@ -299,7 +339,99 @@ private:
     uint32_t m_chan;
     double m_radius;
     int m_priority;
+    UnitSpec m_unit;
 };
+
+// ================================================================================================
+//  NormalizedSource -- THE NORMALIZATION STAGE, as a decorator.
+//
+//  A DomainSource wrapping a DomainSource, rescaling every channel on the way out. A decorator
+//  rather than a mutation because the raw source stays valid and inspectable, and because it
+//  COMPOSES: a normalized source is itself a source, so nothing downstream needs a second code
+//  path and a normalized source can feed another compositor as easily as a raw one. The wrapper
+//  is skipped entirely when the factor is 1 and the offset 0 -- normalization that costs nothing
+//  when nothing is needed is normalization people leave switched on.
+//
+//  WEIGHT IS NOT TOUCHED. Coverage is a fraction in both frames; scaling it would darken every
+//  partially covered texel, which is exactly the bug MipReduce.hlsl's comment warns about.
+// ================================================================================================
+class NormalizedSource : public DomainSource {
+public:
+    NormalizedSource(std::shared_ptr<DomainSource> inner, const UnitSpec& from, const UnitSpec& to)
+        : m_inner(std::move(inner)),
+          m_scale(to.toCanonical != 0.0 ? from.toCanonical / to.toCanonical : 1.0),
+          m_offset(from.datumShiftM - to.datumShiftM),
+          m_unit(to) {}
+
+    const char* Name() const override { return m_inner->Name(); }
+    SourceDomain Domain() const override { return m_inner->Domain(); }
+    uint8_t GradeSig() const override { return m_inner->GradeSig(); }
+    uint32_t Channels() const override { return m_inner->Channels(); }
+    int Priority() const override { return m_inner->Priority(); }
+    const UnitSpec& Unit() const override { return m_unit; }
+    const char* NodeKind() const override { return "normalize"; }
+    const char* Cadence() const override { return m_inner->Cadence(); }
+    size_t InputCount() const override { return 1; }
+    const DomainSource* Input(size_t i) const override { return i ? nullptr : m_inner.get(); }
+    // The scale and offset are part of the tile FORMAT, not of the data, so the cache keys on
+    // the inner identity plus what was done to it.
+    std::string Identity() const override {
+        char b[64];
+        snprintf(b, sizeof(b), "|norm x%.9g %+.6g", m_scale, m_offset);
+        return m_inner->Identity() + b;
+    }
+    bool MayCover(double a, double b, double c, double d) const override {
+        return m_inner->MayCover(a, b, c, d);
+    }
+    bool Footprint(double& a, double& b, double& c, double& d) const override {
+        return m_inner->Footprint(a, b, c, d);
+    }
+    bool SampleAt(const DomainQuery& q, DomainValue& out) const override {
+        if (!m_inner->SampleAt(q, out)) return false;
+        const uint32_t n = m_inner->Channels();
+        for (uint32_t i = 0; i < n && i < 4; ++i) {
+            out.c[i] = static_cast<float>(out.c[i] * m_scale + m_offset);
+        }
+        return true;
+    }
+
+private:
+    std::shared_ptr<DomainSource> m_inner;
+    double m_scale = 1.0;
+    double m_offset = 0.0;
+    UnitSpec m_unit;
+};
+
+// The one call a caller makes. Returns a source ready to compose, or NULL with a logged reason.
+// Null is the point: an incommensurable source never reaches Compose, so no later stage has to
+// carry a doubt about what its floats mean.
+inline std::shared_ptr<DomainSource> Normalize(std::shared_ptr<DomainSource> src,
+                                               const UnitSpec& target) {
+    if (!src) return nullptr;
+    const UnitSpec from = src->Unit();
+    std::string why;
+    if (!target.AcceptsFrom(from, &why)) {
+        Log("[normalize] %s REFUSED: %s (source %s, target %s)", src->Name(), why.c_str(),
+            from.Describe().c_str(), target.Describe().c_str());
+        return nullptr;
+    }
+    const double scale = target.toCanonical != 0.0 ? from.toCanonical / target.toCanonical : 1.0;
+    const double offset = from.datumShiftM - target.datumShiftM;
+    if (scale == 1.0 && offset == 0.0) return src;   // already there; the stage is free
+    Log("[normalize] %s: %s -> %s (x%.6g %+.4g)", src->Name(), from.Describe().c_str(),
+        target.Describe().c_str(), scale, offset);
+    return std::make_shared<NormalizedSource>(std::move(src), from, target);
+}
+
+// Normalize to the canonical form of whatever the source already is -- a file in feet becoming a
+// field in metres without anyone having to name a target.
+inline std::shared_ptr<DomainSource> NormalizeToSi(std::shared_ptr<DomainSource> src) {
+    if (!src) return nullptr;
+    UnitSpec t = src->Unit();
+    t.toCanonical = 1.0;
+    t.datumShiftM = 0.0;
+    return Normalize(std::move(src), t);
+}
 
 // ================================================================================================
 //  DomainCompositor -- N sources of any domain into ONE page of a GA product.
@@ -313,12 +445,34 @@ private:
 class DomainCompositor {
 public:
     void SetLadder(const LevelLadder& l) { m_ladder = l; }
+
+    // M9n: HOW SOURCES COMBINE, and it is not one rule.
+    //
+    //   PriorityAverage  the native rule: highest priority wins, ties blend by weight. Right
+    //                    when sources are RIVALS describing one quantity -- a 1.5 m survey and
+    //                    a 700 m model of the same current.
+    //   LayeredOver      h += (m - h) * w, bottom to top. Right when sources are a STACK with
+    //                    an authority order, each painting over what is under it. This is
+    //                    Compositor::SampleHeightStack exactly, and reproducing the engine's
+    //                    bed requires it: the two rules agree only where every weight is 0 or
+    //                    1, and disagree precisely across a feather -- which is where a survey
+    //                    edit meets the grid beneath it, and where the bed's 28 m lived.
+    enum class Blend : uint8_t { PriorityAverage, LayeredOver };
+    void SetBlend(Blend b) { m_blend = b; }
+    Blend BlendMode() const { return m_blend; }
     // A page's geography, EXACTLY -- not the anchor-linear approximation. That form
     // (BathyModel::kOrgLat with a frozen mPerLon) is declared valid only NEAR ITS ANCHOR and
     // is what every local water consumer shares; a planet-scale tree cannot use it, because a
     // metres-per-degree frozen at 42.8N is wrong by 40% at the equator and unbounded at the
     // pole. So a page states its own lat/lon extent and the compositor interpolates within it.
     struct PageGeo {
+        // M9ad: when true, lat0/dLat are NORMALIZED MERCATOR y (0 = north pole edge, 1 = south)
+        // rather than degrees, and each row is converted back to latitude before the sources are
+        // asked. A linear lat/lon page is fine over a survey and badly wrong over a continent --
+        // the coarse rungs of a planet ladder span thousands of km, where the two frames
+        // disagree by hundreds. Imagery is Mercator-native anyway, so this is also the frame
+        // that costs the sources no reprojection.
+        bool mercator = false;
         double lon0 = 0.0, lat0 = 0.0;   // texel (0,0) CENTRE
         double dLon = 0.0, dLat = 0.0;   // degrees per texel; dLat < 0 = row 0 north
     };
@@ -332,27 +486,125 @@ public:
         if (m_sources.empty()) {
             m_grade = s->GradeSig();
             m_chan = s->Channels();
+            m_unit = s->Unit();
         } else if (s->GradeSig() != m_grade || s->Channels() != m_chan) {
             Log("[compose] %s REFUSED: grade %u/%u channels %u/%u -- a product carries one "
                 "grade and one unit; mixing them makes a number nothing downstream can catch",
                 s->Name(), s->GradeSig(), m_grade, s->Channels(), m_chan);
             return false;
         }
+        // M9l: and the UNIT half, which this message has promised since it was written while
+        // checking only the grade. A source must arrive already in the product's frame -- the
+        // compositor does not convert, because by here the provenance needed to convert
+        // honestly (which file, which datum) is gone. Normalize() is the door.
+        {
+            std::string why;
+            if (!m_unit.AcceptsFrom(s->Unit(), &why)) {
+                Log("[compose] %s REFUSED: %s -- run it through Normalize() first (product is "
+                    "%s)", s->Name(), why.c_str(), m_unit.Describe().c_str());
+                return false;
+            }
+            if (!s->Unit().IsCanonical()) {
+                Log("[compose] %s REFUSED: %s is convertible but UNNORMALIZED -- the "
+                    "normalization stage is not optional", s->Name(),
+                    s->Unit().Describe().c_str());
+                return false;
+            }
+        }
         m_sources.push_back(std::move(s));
         return true;
     }
     uint8_t Grade() const { return m_grade; }
     uint32_t Channels() const { return m_chan; }
+    const UnitSpec& Unit() const { return m_unit; }
     size_t SourceCount() const { return m_sources.size(); }
+
+    // M9m: ONE texel's worth of composition -- priority first, then weighted average within the
+    // winning priority. Factored out of ComposePage so that CompositeSource (a compositor wearing
+    // the source interface, which is what makes trees possible) answers a point query through the
+    // exact same code that fills a page. Two implementations would drift, and the drift would
+    // show up only where a composite fed another composite.
+    // M9am: ONE STEP OF "OVER", as a function. The tile-wise compose in TileTree.h runs this on
+    // bytes already on disk; the point-wise compose below runs it on fresh samples. Two loops,
+    // one kernel -- the alternative is the drift that shows up only where a composite feeds a
+    // composite.
+    static void OverStep(double acc[4], double& cov, const float* c, float weight,
+                         uint32_t chan) {
+        const double w = (std::min)(1.0, double(weight));
+        for (uint32_t k = 0; k < chan && k < 4; ++k) acc[k] += (double(c[k]) - acc[k]) * w;
+        cov += (1.0 - cov) * w;
+    }
+    static void OverFinish(const double acc[4], double cov, uint32_t chan, DomainValue& out) {
+        for (uint32_t k = 0; k < chan && k < 4; ++k) out.c[k] = float(acc[k] / cov);
+        out.weight = float(cov);
+    }
+
+    bool SampleBlended(const DomainQuery& q, DomainValue& out) const {
+        out = DomainValue{};
+        if (m_blend == Blend::LayeredOver) {
+            // Sequential over, in ADD order -- so a caller must add bottom-to-top or the law
+            // ends up under the grid it is supposed to overrule. Starting the accumulator at
+            // zero (rather than at "absent") is deliberate: it is what SampleHeightStack does,
+            // so a lone partial-weight layer pulls toward zero in both paths identically.
+            double acc[4] = {0, 0, 0, 0}, cov = 0.0;
+            for (const auto& s : m_sources) {
+                DomainValue v;
+                if (!s->SampleAt(q, v) || v.weight <= 0.0f) continue;
+                OverStep(acc, cov, v.c, v.weight, m_chan);
+            }
+            if (cov <= 0.0) return false;   // NODATA: absent, not zero. The caller fills.
+            // UN-PREMULTIPLY. Accumulating from zero is compositing over TRANSPARENT BLACK: a
+            // texel only 30% covered would come out as 0.3 x its value, i.e. dragged toward sea
+            // level by the absence beneath it. Dividing by the accumulated coverage removes that
+            // phantom layer and leaves "the value, known with 30% confidence", which is the only
+            // reading that survives being mipped or being blended again upstream.
+            //
+            // This does NOT move the bed: its bottom layer (ETOPO) covers the globe at w=1, so
+            // cov is 1 everywhere and the division is by one. It matters exactly where the old
+            // form was silently wrong -- a product whose stack does not reach the ground.
+            OverFinish(acc, cov, m_chan, out);
+            return true;
+        }
+        int bestPri = INT32_MIN;
+        double acc[4] = {0, 0, 0, 0}, wsum = 0.0;
+        for (const auto& s : m_sources) {
+            DomainValue v;
+            if (!s->SampleAt(q, v) || v.weight <= 0.0f) continue;
+            const int pri = s->Priority();
+            if (pri < bestPri) continue;
+            if (pri > bestPri) {   // a finer source appeared: discard the coarser mix
+                bestPri = pri;
+                wsum = 0.0;
+                acc[0] = acc[1] = acc[2] = acc[3] = 0.0;
+            }
+            for (uint32_t c = 0; c < m_chan && c < 4; ++c) acc[c] += v.weight * v.c[c];
+            wsum += v.weight;
+        }
+        if (wsum <= 0.0) return false;
+        for (uint32_t c = 0; c < m_chan && c < 4; ++c) out.c[c] = float(acc[c] / wsum);
+        out.weight = float((std::min)(1.0, wsum));
+        return true;
+    }
+
+    // For the printed tree -- a composite reports its children.
+    const DomainSource* SourceAt(size_t i) const {
+        return i < m_sources.size() ? m_sources[i].get() : nullptr;
+    }
 
     // Compose one page. `out` is width*height*channels, `cov` is width*height. Returns the
     // number of texels that got any coverage -- zero means "do not allocate this page", which
     // is the ingest rule arriving at the other end of the pipeline.
+    // nodata: what an UNCOVERED texel gets. It is a parameter, not a constant zero, because
+    // zero is a legal value for nearly every field this composes -- a bed at 0 m is sea level,
+    // a current at 0 m/s is slack water -- so filling holes with it makes absence
+    // indistinguishable from data and there is no way to recover the difference later. `cov`
+    // remains the authority; this is what lands in the texel for consumers that only read the
+    // value plane.
     uint32_t ComposePage(const PageAddr& addr, const PageGeo& geo, uint32_t width,
                          uint32_t height, uint32_t channels, std::vector<float>& out,
-                         std::vector<float>& cov, double unixT = 0.0,
-                         double depthM = 0.0) const {
-        out.assign(size_t(width) * height * channels, 0.0f);
+                         std::vector<float>& cov, double unixT = 0.0, double depthM = 0.0,
+                         float nodata = 0.0f) const {
+        out.assign(size_t(width) * height * channels, nodata);
         cov.assign(size_t(width) * height, 0.0f);
         const double mpt = m_ladder.MetersPerTexel(addr.level);
         uint32_t covered = 0;
@@ -360,32 +612,23 @@ public:
             for (uint32_t x = 0; x < width; ++x) {
                 DomainQuery q;
                 q.lon = geo.lon0 + x * geo.dLon;
-                q.lat = geo.lat0 + y * geo.dLat;
+                if (geo.mercator) {
+                    // Inverse Web Mercator: lat = 2*atan(exp(pi*(1 - 2y))) - pi/2.
+                    const double my = geo.lat0 + y * geo.dLat;
+                    const double t = 3.14159265358979 * (1.0 - 2.0 * my);
+                    q.lat = (2.0 * std::atan(std::exp(t)) - 1.57079632679490) * 57.2957795130823;
+                } else {
+                    q.lat = geo.lat0 + y * geo.dLat;
+                }
                 q.depthM = depthM;
                 q.unixT = unixT;
                 q.groundM = mpt;
 
-                int bestPri = INT32_MIN;
-                double acc[4] = {0, 0, 0, 0}, wsum = 0.0;
-                for (const auto& s : m_sources) {
-                    DomainValue v;
-                    if (!s->SampleAt(q, v) || v.weight <= 0.0f) continue;
-                    const int pri = s->Priority();
-                    if (pri < bestPri) continue;
-                    if (pri > bestPri) {   // a finer source appeared: discard the coarser mix
-                        bestPri = pri;
-                        wsum = 0.0;
-                        acc[0] = acc[1] = acc[2] = acc[3] = 0.0;
-                    }
-                    for (uint32_t c = 0; c < channels && c < 4; ++c) acc[c] += v.weight * v.c[c];
-                    wsum += v.weight;
-                }
-                if (wsum <= 0.0) continue;   // absent: leave zero, and count nothing
+                DomainValue blended;
+                if (!SampleBlended(q, blended)) continue;   // absent: leave zero, count nothing
                 const size_t o = (size_t(y) * width + x) * channels;
-                for (uint32_t c = 0; c < channels && c < 4; ++c) {
-                    out[o + c] = float(acc[c] / wsum);
-                }
-                cov[size_t(y) * width + x] = float((std::min)(1.0, wsum));
+                for (uint32_t c = 0; c < channels && c < 4; ++c) out[o + c] = blended.c[c];
+                cov[size_t(y) * width + x] = blended.weight;
                 ++covered;
             }
         }
@@ -396,6 +639,8 @@ private:
     LevelLadder m_ladder;
     std::vector<std::shared_ptr<DomainSource>> m_sources;
     uint8_t m_grade = 0;
+    UnitSpec m_unit;   // the product frame: set by the first source, enforced on every other
+    Blend m_blend = Blend::PriorityAverage;
     uint32_t m_chan = 0;
 };
 

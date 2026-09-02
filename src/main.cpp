@@ -14,6 +14,14 @@
 // ================================================================================================
 #include <sys/stat.h>
 
+#include "compose/ColorStackSource.h"
+#include "compose/GisMask.h"
+#include "compose/HeightStackSource.h"
+#include "compose/TileTree.h"
+#include "compose/TileArchive.h"
+#include "compose/TileIndex.h"
+#include "core/TileStream.h"
+#include "compose/ComposeTree.h"
 #include "compose/DomainSource.h"
 #include "core/CurrentFieldLoader.h"
 #include "core/GeoGridLoader.h"
@@ -96,6 +104,25 @@ struct Options {
     uint32_t tileBudget = 1000;       // --tile-budget: hard cap on Google fetches per run
     bool warmInlet = false;           // --warm-inlet: pre-cache the Merrimack detail pyramid
     bool railZoom = false;            // --rail-zoom DIR: orbit -> inlet imagery zoom -> estuary
+    bool framesSet = false;           // an explicit --frames beats a rail default
+    uint32_t predictEvery = 3;        // --predict-every N: prefetch-walk cadence (1 = old)
+    bool packTiles = false;           // --pack-tiles: pack the composed cache, then exit
+    bool directStorage = true;        // --no-direct-storage: the upload ring, for the A/B (M9ao)
+    bool dsSerial = false;            // --ds-serial: one DS batch in flight (diagnostic)
+    bool colorTrees = true;           // --no-color-trees: the incumbent providers, for the A/B.
+                                      // The DEFAULT: colour AND height pages fed from the trees.
+    bool gisGate = true;              // --no-gis-gate: drop the vector land/sea gate on the bed
+    bool seafloor = true;             // --no-seafloor: drop the global seafloor relief source
+    std::string gisDump;              // --gis-dump PATH: the gate over the survey box as PGM, exit
+    bool ringLoads = true;            // --no-ring-loads: the old queue, for the A/B (M9al)
+    bool resTrace = false;            // --res-trace: residency deficit + slot accounting, per 30 f
+    uint32_t treeAudit = 0;           // --tree-audit N: compare N tiles/frame, report, exit
+    bool warmTrees = false;           // --warm-trees: build them without comparing, then exit
+    bool packTrees = false;           // --pack-trees: one archive per node per frame, then exit
+    bool bench = false;               // --bench: fly the rail, capture nothing, time honestly
+    std::string mp4;                  // --mp4 PATH: pipe rail frames straight to an encoder
+    bool flatBed = false;             // --flat-bed N: constant bed, to A/B bathymetry
+    float flatBedNavd = -30.0f;
     bool railFlood = false;           // --rail-flood DIR: orbit -> zoom -> the throat at helm
     bool railJetty = false;           // --rail-jetty DIR: jetty tip -> jetty tip -> bird's eye
                                       // height, facing the entrance (shoot at max flood)
@@ -211,7 +238,10 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--debug") o.debugLayer = true;
         else if (a == "--width") o.width = static_cast<uint32_t>(atoi(next("1600").c_str()));
         else if (a == "--height") o.height = static_cast<uint32_t>(atoi(next("900").c_str()));
-        else if (a == "--frames") o.frames = static_cast<uint32_t>(atoi(next("1").c_str()));
+        else if (a == "--frames") {
+            o.frames = static_cast<uint32_t>(atoi(next("1").c_str()));
+            o.framesSet = true;
+        }
         else if (a == "--dump") o.dump = Widen(next("out.png").c_str());
         else if (a == "--shaders") o.shaderDir = Widen(next("shaders").c_str());
         else if (a == "--tides") o.tidesPath = next("data/tides/stations.json");
@@ -273,6 +303,42 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--sea-verify") o.seaVerify = true;
         else if (a == "--viz") o.viz = true;
         else if (a == "--wireframe") o.surfaceDebug = 1;
+        // M9s: encode the rail straight to mp4, no PNG frames at all.
+        else if (a == "--mp4") o.mp4 = next("out.mp4");
+        // M9t: fly the rail and measure it, capturing NOTHING. See the note at the timing site
+        // for why this is not the same as reading renderMs out of a captured run.
+        else if (a == "--bench") o.bench = true;
+        // M9ah: pack every realization's loose tiles into one archive and exit.
+        else if (a == "--pack-tiles") o.packTiles = true;
+        // M9ai: route archived tile reads NVMe -> GPU. Off by default until the streamed
+        // path is proven pixel-equal to the upload-ring path it replaces.
+        else if (a == "--direct-storage") o.directStorage = true;    // the default; kept
+        else if (a == "--no-direct-storage") o.directStorage = false;
+        else if (a == "--ds-serial") o.dsSerial = true;
+        // M9aj: the three trees. --color-trees composes colour FROM the per-source trees
+        // instead of from the sources; --tree-audit measures the two answers against each
+        // other on tiles the shipped path already painted, then exits.
+        else if (a == "--color-trees") o.colorTrees = true;      // the default; kept for scripts
+        else if (a == "--no-color-trees") o.colorTrees = false;
+        // M9ak: the vector land/sea gate is ON. The flag exists to A/B what it changed.
+        else if (a == "--no-gis-gate") o.gisGate = false;
+        else if (a == "--no-seafloor") o.seafloor = false;
+        else if (a == "--gis-dump") o.gisDump = next("gis_gate.pgm");
+        // M9al: the ring gate and its instrument. Instrument first, gate second, both off.
+        else if (a == "--ring-loads") o.ringLoads = true;      // the default; kept for scripts
+        else if (a == "--no-ring-loads") o.ringLoads = false;
+        else if (a == "--res-trace") o.resTrace = true;
+        else if (a == "--tree-audit") o.treeAudit = uint32_t(atoi(next("400").c_str()));
+        // After a source is added there is nothing to compare against -- which is exactly when
+        // the trees most need building. --warm-trees composes every address regardless.
+        else if (a == "--warm-trees") { o.warmTrees = true; o.treeAudit = 1000000u; }
+        // M9ao: pack every node of the megatexture tree so a tile -- or a reference to one --
+        // resolves to a place DirectStorage can read. Needs the graph, so it runs after it.
+        else if (a == "--pack-trees") { o.packTrees = true; o.treeAudit = 1u; }
+        else if (a == "--predict-every") o.predictEvery = uint32_t(atoi(next("1").c_str()));
+        // M9p: replace the bed with a flat floor at this NAVD height. The A/B against a normal
+        // run isolates BATHYMETRY's contribution to the geometry from everything else.
+        else if (a == "--flat-bed") { o.flatBed = true; o.flatBedNavd = float(atof(next("-30").c_str())); }
         else if (a == "--dump-both") o.dumpBoth = true;
         else if (a == "--load-field") o.loadField = next("");
         else if (a == "--meshlets") o.surfaceDebug = 2;
@@ -332,10 +398,12 @@ Options ParseArgs(int argc, char** argv) {
         // the zoom and Mars flyover run 30 s; the flood ride holds the helm for 40 s total.
         o.headless = true;
         o.globeStart = true;
-        o.frames = o.railJetty                             ? 40 * 30
-                   : o.railFlood                           ? 40 * 30
-                   : (o.railZoom || o.planet == "mars")    ? 30 * 30
-                                                           : 25 * 30;
+        // An explicit --frames wins: dumping a rail at a CHOSEN moment is how you inspect
+        // something a viewer noticed at 0:12 rather than guessing camera arguments for it.
+        if (!o.framesSet) o.frames = o.railJetty                             ? 40 * 30
+                                : o.railFlood                        ? 40 * 30
+                                : (o.railZoom || o.planet == "mars") ? 30 * 30
+                                                                     : 25 * 30;
         o.timeScale = 1.0;
     }
     if (o.planet == "mars") o.globeStart = true;   // there is only orbit on Mars (for now)
@@ -445,7 +513,7 @@ static int RunChannelExport(const std::string& spec, const std::wstring& outPath
     std::vector<uint8_t> tile;
     for (uint32_t ty = 0; ty < tilesY; ++ty) {
         for (uint32_t tx = 0; tx < tilesX; ++tx) {
-            if (!fn({face, mip, tx, ty}, tile) || tile.size() != 65536) continue;
+            if (!fn({face, mip, tx, ty}, tile, nullptr) || tile.size() != 65536) continue;
             for (uint32_t py = 0; py < tileH; ++py) {
                 const size_t row = static_cast<size_t>(ty) * tileH + py;
                 if (height) {
@@ -531,6 +599,140 @@ static int RunChannelExport(const std::string& spec, const std::wstring& outPath
     return 0;
 }
 
+// M9n: NAVD88 zero above LOCAL MSL, in metres, from published CO-OPS station datums -- the same
+// staff carries MSL and NAVD88, so their difference is data, not an assumption. Boston: MSL
+// 2.660, NAVD88 2.752 -> +0.092. Returns false when no station in the table publishes both.
+//
+// The bed's ETOPO layers are MSL-referenced and need the NEGATIVE of this to reach NAVD88; the
+// tide's MLLW link is a different offset from the same table. One derivation, two consumers.
+bool NavdAboveMsl(const TideModel& model, double* outM, std::string* from) {
+    double best = 1e9;
+    bool got = false;
+    for (size_t i = 0; i < model.Count(); ++i) {
+        const TideStation& s = model.S(i);
+        if (s.mllwMinusNavdM <= -900.0) continue;
+        const double d = -s.mllwMinusNavdM - s.meanMllwM;   // NAVD88 zero above local MSL
+        if (!got || std::abs(d) < std::abs(best)) {
+            best = d;
+            got = true;
+            if (from) *from = s.name;
+        }
+    }
+    if (got && outM) *outM = best;
+    return got;
+}
+
+// ================================================================================================
+//  M9s: THE RECORDER, ENCODING AS IT GOES.
+//
+//  A rail used to write 1200 PNGs and then run ffmpeg over them. The rail metrics priced that
+//  honestly for the first time: 1.7 ms to RENDER a frame, ~90 ms to PNG it. Fifty-three parts
+//  in fifty-four of a recording's wall clock went into compressing intermediates that were
+//  deleted immediately afterwards -- and it also meant the mp4 could not exist until every
+//  frame had hit the disk twice.
+//
+//  So the frames go straight into an encoder over a pipe: no PNG, no intermediate directory,
+//  no second pass. NVENC where the GPU offers it (it is already rendering; the encoder blocks
+//  are idle), libx264 where it does not. rawvideo in, mp4 out, one process for the whole rail.
+//
+//  Deliberately ffmpeg over a pipe rather than linking an encoder: it keeps the codec choice
+//  a runtime decision, costs nothing when unused, and a recorder that shells out is a recorder
+//  that cannot corrupt the renderer.
+// ================================================================================================
+class FramePipe {
+public:
+    bool Open(const std::string& path, uint32_t w, uint32_t h, uint32_t fps) {
+        m_w = w;
+        m_h = h;
+        const Codec& c = PickCodec();
+        char cmd[1024];
+        snprintf(cmd, sizeof(cmd),
+                 "ffmpeg -hide_banner -loglevel warning -y -f rawvideo -pixel_format rgba "
+                 "-video_size %ux%u -framerate %u -i - %s -pix_fmt yuv420p \"%s\"",
+                 w, h, fps, c.args, path.c_str());
+        m_f = _popen(cmd, "wb");
+        if (!m_f) {
+            Log("[rec] could not start ffmpeg -- falling back to PNG frames");
+            return false;
+        }
+        Log("[rec] encoding %ux%u @%u fps straight from the framebuffer via %s -> %s", w, h, fps,
+            c.label, path.c_str());
+        return true;
+    }
+    bool Open() const { return m_f != nullptr; }
+
+    // The readback row pitch is aligned and usually exceeds width*4, so rows are written one at
+    // a time. Writing the whole buffer would shear the picture by the padding, every frame.
+    void Write(const std::vector<uint8_t>& px, uint32_t rowPitch) {
+        if (!m_f) return;
+        const size_t row = size_t(m_w) * 4;
+        size_t wrote = 0;
+        for (uint32_t y = 0; y < m_h; ++y) {
+            const size_t off = size_t(y) * rowPitch;
+            if (off + row > px.size()) break;
+            wrote += fwrite(px.data() + off, 1, row, m_f);
+        }
+        if (!m_reported) {
+            m_reported = true;
+            Log("[rec] first frame: %zu px bytes, pitch %u, wrote %zu of %zu expected%s",
+                px.size(), rowPitch, wrote, row * m_h,
+                ferror(m_f) ? " -- PIPE ERROR" : "");
+        }
+    }
+    void Close() {
+        if (!m_f) return;
+        _pclose(m_f);
+        m_f = nullptr;
+        Log("[rec] encoder closed");
+    }
+
+private:
+    struct Codec {
+        const char* args;
+        const char* label;
+    };
+
+    // PROBE BY ENCODING, NOT BY LISTING. The first version of this asked `ffmpeg -encoders` for
+    // h264_nvenc, found it, and produced a ZERO-BYTE mp4: the encoder is compiled in and listed,
+    // but this machine's driver exposes NVENC API 13.0 while that ffmpeg build requires 13.1, so
+    // it fails at open. "Is it listed" and "does it work" are different questions and only the
+    // second one matters -- so the probe actually encodes one frame to null and checks the exit
+    // status. It costs a fraction of a second, once, and it means the day the driver is updated
+    // NVENC starts being used with no code change at all.
+    static const Codec& PickCodec() {
+        static const Codec kCandidates[] = {
+            {"-c:v h264_nvenc -preset p5 -rc vbr -cq 21 -b:v 0", "h264_nvenc (NVIDIA GPU)"},
+            {"-c:v h264_qsv -global_quality 21", "h264_qsv (Intel GPU)"},
+            {"-c:v h264_amf -quality balanced -rc cqp -qp_i 21 -qp_p 21", "h264_amf (AMD GPU)"},
+            {"-c:v libx264 -preset veryfast -crf 20", "libx264 (CPU)"},
+        };
+        static const Codec* chosen = nullptr;
+        if (chosen) return *chosen;
+        for (const Codec& c : kCandidates) {
+            char probe[512];
+            snprintf(probe, sizeof(probe),
+                     "ffmpeg -hide_banner -loglevel error -f lavfi "
+                     "-i color=c=black:s=64x64:d=0.1 -frames:v 1 %s -f null - >nul 2>&1",
+                     c.args);
+            if (system(probe) == 0) {
+                chosen = &c;
+                if (&c != &kCandidates[0]) {
+                    Log("[rec] %s unavailable here (encoder present but fails to open -- on this "
+                        "machine the driver exposes an older NVENC API than this ffmpeg needs); "
+                        "using %s",
+                        "h264_nvenc", c.label);
+                }
+                return *chosen;
+            }
+        }
+        chosen = &kCandidates[3];   // libx264 is always the last word
+        return *chosen;
+    }
+    FILE* m_f = nullptr;
+    uint32_t m_w = 0, m_h = 0;
+    bool m_reported = false;
+};
+
 float ResolveDatum(const TideModel& model) {
     const TideStation& fs = model.S(model.Focus());
     if (fs.mllwMinusNavdM > -900.0) {
@@ -538,19 +740,9 @@ float ResolveDatum(const TideModel& model) {
             fs.mllwMinusNavdM);
         return static_cast<float>(fs.mllwMinusNavdM);
     }
-    double delta = 0.0, best = 1e9;
+    double delta = 0.0;
     std::string from = "NAVD=MSL assumption";
-    for (size_t i = 0; i < model.Count(); ++i) {
-        const TideStation& s = model.S(i);
-        if (s.mllwMinusNavdM > -900.0) {
-            const double d = -s.mllwMinusNavdM - s.meanMllwM;   // NAVD height above local MSL
-            if (std::abs(d) < std::abs(best)) {
-                best = d;
-                from = s.name;
-            }
-        }
-    }
-    if (best < 1e8) delta = best;
+    NavdAboveMsl(model, &delta, &from);
     const float off = static_cast<float>(-(fs.meanMllwM + delta));
     Log("[datum] no NAVD link at %s; MLLW - NAVD88 = %+.3f m via NAVD=MSL%+.3f (from %s)",
         fs.name.c_str(), off, delta, from.c_str());
@@ -1350,6 +1542,27 @@ int main(int argc, char** argv) {
     try {
         const Options opt = ParseArgs(argc, argv);
 
+        // M9ah: pack the composed cache into per-realization archives and exit. No device, no
+        // scene -- this is a disk-to-disk job. The loose tiles are kept: the archive is derived,
+        // and the compositor keeps writing loose files as it paints, so anything painted after a
+        // pack must still be findable the old way.
+        if (opt.packTiles) {
+            const char* jobs[][2] = {
+                {"earth.color", "cube16k"},
+                {"earth.color", "window_z14_1263360_1538048"},
+                {"earth.color", "window_z17_10168820_12344774"},
+                {"earth.color", "window_z19_40699567_49405858"},
+                {"earth.height", "cube16k"},
+                {"earth.height", "window_z14_1263360_1538048"},
+                {"mars.height", "cube16k"},
+            };
+            uint32_t total = 0;
+            for (const auto& j : jobs) total += TileArchive::Pack(j[0], j[1]);
+            Log("[tilearch] %u tiles packed across %zu realizations", total,
+                sizeof(jobs) / sizeof(jobs[0]));
+            return 0;
+        }
+
         // ---- M0 + M4: the self-test path needs a device and the shader compiler, nothing else.
         // M9h: --load-field -- the plugin path, end to end and standalone. Register a loader
         // for a file type, open a file, and the sparse bank falls out of the ingest rule:
@@ -1511,9 +1724,27 @@ int main(int argc, char** argv) {
         bathyBoston.Load("data/bathy/boston.json");
 
         Compositor compositor;
+        // M9n: THE HEIGHT STACK'S VERTICAL DATUM, resolved once and applied at the sources.
+        // ETOPO is MSL/geoid referenced and everything above it in the stack is NAVD88; the two
+        // were blended as one height for as long as the stack has existed. The link is published
+        // -- CO-OPS carries MSL and NAVD88 on one station staff -- so it is derived, logged, and
+        // handed to the ETOPO sources, which means the CORRECTION REACHES EVERY CONSUMER of the
+        // stack rather than only the products that happen to know about it.
+        double navdAboveMsl = 0.0;
+        std::string datumFrom = "none";
+        const bool haveMslLink = NavdAboveMsl(model, &navdAboveMsl, &datumFrom);
+        const double mslToNavd = haveMslLink ? -navdAboveMsl : 0.0;
+        if (haveMslLink) {
+            Log("[datum] height stack: MSL -> NAVD88 = %+.3f m, from CO-OPS published datums at "
+                "%s (regional, not GEOID18) -- applied to the ETOPO layers at the source",
+                mslToNavd, datumFrom.c_str());
+        } else {
+            Log("[datum] height stack: NO station publishes both MSL and NAVD88 -- ETOPO stays "
+                "in its own datum and the stack blends two frames (pre-M9n behaviour)");
+        }
         EquirectHeightSource srcEtopo("noaa.etopo2022", "equirect-grid int16 8192x4096",
                                       489200.0, &globeModel.Elev(), globeModel.Nx(),
-                                      globeModel.Ny());
+                                      globeModel.Ny(), mslToNavd);
         EquirectHeightSource srcMola("nasa.mola.megdr16", "equirect-grid int16 5760x2880",
                                      369700.0, &marsModel.Elev(), marsModel.Nx(),
                                      marsModel.Ny());
@@ -1532,7 +1763,7 @@ int main(int argc, char** argv) {
                     "noaa.etopo15s.ne", "window-grid int16 1440x1200", 46100.0,
                     &globeModel.NeElev(), globeModel.NeNx(), globeModel.NeNy(),
                     globeModel.NeLon0(), globeModel.NeLat1(), globeModel.NeDLon(),
-                    globeModel.NeDLat());
+                    globeModel.NeDLat(), 0.04, mslToNavd);
                 hstack.push_back(srcNe15.get());
             }
             if (bathyCapeAnn.Ready()) {
@@ -1593,9 +1824,27 @@ int main(int argc, char** argv) {
             terrain->Configure(opt.shaderDir, &bathy);
             terrain->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             renderer.AddLayer(std::move(terrOwned));
+            // M9k/M9n: THE BED, through GA Load -> normalize -> GA Compose (the six-layer
+            // height stack, LayeredOver) -> a reserved, paged, mipped sparse array. Built HERE,
+            // before anything binds a bed, because the consumers below now take the bank: the
+            // solver, the sea shader, the churn kernel and the water bank all read one bed and
+            // it has to exist before the first of them asks.
+            // M9ar: the bed bank is NOT built. The height megatexture (the height page tenant,
+            // slice 6 = the z14 survey page) is the only bed on the GPU; the solver, the sea
+            // shader, the water bank and the globe all read it. The bank was a second
+            // realization of the same six layers -- proved equal at 0.0000 m in section 28,
+            // which is exactly why it can go.
+
             if (sea) {
-                sea->SetBathy(terrain->HeightSrv(), bathy.WorldX0(), bathy.WorldZ0(),
-                              bathy.WorldSizeX(), bathy.WorldSizeZ());
+                // M9n: THE BED IS NOW THE GA BANK. Proved equal to the committed texture at
+                // 0.0000 m across all 2187162 texels, through GA Load -> normalize -> Compose
+                // (six layers, LayeredOver) -> a reserved, paged, mipped sparse array. M9an:
+                // the committed texture is GONE; the bank is the bed and there is no fallback.
+                // The sea keeps the survey's WORLD frame (the eta atlas is aligned to it);
+                // 0 in the SRV slot means "a survey window exists" and is never sampled.
+                Log("[bed] the sea and the solver read the height megatexture -- the only bed");
+                sea->SetBathy(0u, bathy.WorldX0(), bathy.WorldZ0(), bathy.WorldSizeX(),
+                              bathy.WorldSizeZ());
             }
         } else {
             Log("[main] no bathymetry (run: py -3 harvester\\harvest_bathy.py); open-ocean sea");
@@ -1606,7 +1855,77 @@ int main(int argc, char** argv) {
         SweSolver swe;
         double riverQ = 70.0;
         if (terrain && sea && !opt.sweOff) {
-            swe.Init(gpu, renderer.Shaders(), opt.shaderDir, bathy, terrain->HeightTex().res.Get());
+            // ---- M9m: THE COMPOSE TREE, and the tide step that forced it into existence.
+            //
+            // Depth is not a dataset anyone ships. It is water level minus bed, and those two
+            // arrive in DIFFERENT VERTICAL DATUMS from different domains on different clocks --
+            // which is why it needed a tree rather than another entry in a source list. The
+            // compositor blends sources that disagree about ONE quantity; this combines two
+            // quantities into a third, so it is a different node with a different rule.
+            //
+            // The join used to be a constant in a comment in BathyModel. GaUnits made guessing
+            // it illegal, and the number it demanded turned out to already exist per station as
+            // the CO-OPS link, so the tide now carries its own frame and the graph shows it.
+            {
+                LoaderRegistry breg;
+                breg.Register("json", GeoGridLoader::Open);
+                if (auto bld = breg.Open("data/bathy/merrimack.json")) {
+                    auto bed = Normalize(std::make_shared<RasterSource>(std::move(bld), 0),
+                                         UnitSpec::Of(Quantity::Length, "NAVD88"));
+                    // The tide arrives in the frame its harmonics were fitted in, with every
+                    // station. The MLLW -> NAVD88 link is then DECLARED, using the number main
+                    // already resolved and logged -- an estimate for Newburyport, which has no
+                    // published link, and now an estimate visible in the graph instead of buried.
+                    auto tideMllw = std::make_shared<TideSource>(&model);
+                    auto tideNavd = DeclareDatumLink(tideMllw, datumOff, "NAVD88",
+                                                     "main::ResolveDatum -- see [datum] above");
+                    auto depth = std::make_shared<BinaryFieldSource>(
+                        "water.depth", BinaryFieldSource::Op::Subtract, tideNavd, bed);
+                    PrintTree("water.depth = tide - bed", depth.get());
+
+                    // The guard, demonstrated rather than asserted: the SAME subtraction with
+                    // the tide left in MLLW. Both operands are lengths, both look like metres,
+                    // and the answer would be wrong by the datum link at every texel forever.
+                    BinaryFieldSource bad("water.depth.WRONG-DATUM",
+                                          BinaryFieldSource::Op::Subtract, tideMllw, bed);
+                    Log("[tree] MLLW tide - NAVD88 bed: %s",
+                        bad.Valid() ? "accepted -- THE GUARD IS BROKEN" : "refused, as it must be");
+
+                    // Equivalence against the engine's own water level. main computes
+                    // oceanAt(t) = Height(focus,t) + datumOff with datumOff from ResolveDatum;
+                    // the tree reaches the same number through a declared per-station link.
+                    const int fs = model.Focus();
+                    double worstLvl = 0.0, worstDep = 0.0;
+                    uint32_t probed = 0;
+                    for (int k = 0; k < 24; ++k) {
+                        const double t = model.EpochUnix() + k * 3600.0;
+                        DomainQuery q;
+                        q.lon = model.S(size_t(fs)).lon;
+                        q.lat = model.S(size_t(fs)).lat;
+                        q.unixT = t;
+                        q.groundM = 10.0;
+                        DomainValue lv;
+                        if (!tideNavd->SampleAt(q, lv) || lv.weight <= 0.0f) continue;
+                        const double engine = model.Height(size_t(fs), t) + datumOff;
+                        worstLvl = (std::max)(worstLvl, std::abs(double(lv.c[0]) - engine));
+                        DomainValue dv;
+                        if (depth->SampleAt(q, dv) && dv.weight > 0.0f) {
+                            DomainValue bv;
+                            if (bed->SampleAt(q, bv) && bv.weight > 0.0f) {
+                                worstDep = (std::max)(
+                                    worstDep, std::abs(double(dv.c[0]) - (engine - bv.c[0])));
+                            }
+                        }
+                        ++probed;
+                    }
+                    Log("[tree] %u hourly probes at %s: worst |tree - engine| level %.4f m, "
+                        "depth %.4f m (%s)",
+                        probed, model.S(size_t(fs)).name.c_str(), worstLvl, worstDep,
+                        (worstLvl < 0.01 && worstDep < 0.01) ? "equivalent"
+                                                             : "DIVERGENT -- check the link");
+                }
+            }
+            swe.Init(gpu, renderer.Shaders(), opt.shaderDir, bathy);   // bed bound below
             // M6r: the discharge is LIVE again -- it rides the Flather boundary's u_ext (the
             // station stage still carries it into eta; the prism term dwarfs it either way).
             riverQ = (opt.riverQ > 0) ? opt.riverQ : LoadRiverDischarge("data/river/river.json");
@@ -1642,6 +1961,14 @@ int main(int argc, char** argv) {
             waterBank->Configure(opt.shaderDir, sea, &swe, &bathy, &waterAtlas, &compositor,
                                  hgtCh, &globeModel, &seaState);
             waterBank->SetBaseTexel(waterScene.bankTexelM);   // M8h ring density (scene)
+            waterBank->flatBed = opt.flatBed;
+            waterBank->flatBedNavd = opt.flatBedNavd;
+            if (opt.flatBed) {
+                Log("[bed] --flat-bed %.1f m NAVD: the bank fills against a CONSTANT floor. Diff "
+                    "this run's wireframe against a normal one -- whatever differs is what "
+                    "bathymetry does to the MESH, with shading held out of it.",
+                    opt.flatBedNavd);
+            }
             waterBank->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             renderer.AddLayer(std::move(wbOwned));
             sea->drawEnabled = !opt.oneWater;
@@ -1691,12 +2018,17 @@ int main(int argc, char** argv) {
         // realizations paint composed quadtrees ONCE and cache every 64KB tile.
         GoogleColorSource srcGoogle(&googleTiles);
         BedSynthSource srcBed;          // M7d: the bed classifier -- the first synthesis
+        SeafloorReliefSource srcRelief; // M9av: the seafloor's appearance from the ingested bathymetry
                                         // node; its program is data/bed/bed_rules.json
         AerialOrthoSource srcAerial;    // M6l: MassGIS 15 cm orthos (loads if harvested)
         AerialOrthoSource srcOverlay;   // M6o: user GeoTIFF overlays -- ALPHA IS FIBER: a
                                         // mostly-transparent highlights plane bleeds through
                                         // the composed quadtree pixel by pixel
         GisStencil gisStencil;   // survey vectors + mask realizations (GSHHG/WDBII)
+        // M9ak: the SAME survey, as rings rather than as a parity fill -- the compositor's
+        // land/sea gate. Neither .raw mask is opened by this one.
+        GisVectorMask gisMask;
+        GisMaskSource srcGisMask(&gisMask);
         VectorPack vectors;      // M6p: lossless vector layers, LOD by wedge importance
         GisLayer* gisLayer = nullptr;
 
@@ -1706,8 +2038,22 @@ int main(int argc, char** argv) {
         int detTenant = -1;   // M7f: z17 detail color window
         double det17OrgX = 0.0, det17OrgY = 0.0;
         int colCh = -1;   // color channel id (hgtCh registered above the solver, M6w)
+        // M9am: the megatexture graph and its on-disk tile cache. Declared HERE, beside the
+        // tenants that hold providers into them, so they cannot die first.
+        std::vector<std::shared_ptr<DomainSource>> megaKeep;
+        std::unique_ptr<TileTree> megaTree;
+        // M9as: THE HEIGHT GRAPH AND ITS DISK TREE. BuildHeightStack's six layers, each its own
+        // sparse tree on the NVMe (FloatW: value + coverage), composed LayeredOver into ONE root
+        // whose tiles are the R16F pages the height tenant reads. Inputs are ordered by
+        // fidelity -- coarsest first, so the deepest tree paints over everything it intersects
+        // (the user's rule) -- and the order is printed, not assumed.
+        std::shared_ptr<DomainSource> heightRoot;
+        std::unique_ptr<TileTree> heightTree;
         if (globe) {
             resMgr.Init(gpu);
+            resMgr.ringLoads = opt.ringLoads;
+            resMgr.dsSerial = opt.dsSerial;
+            resMgr.traceRes = opt.resTrace;
             int surf = -1, norm = -1;
             if (marsMode) {
                 // Mars: color/normal stay NATIVE streams (the rescued sample's pyramids are
@@ -1732,15 +2078,66 @@ int main(int argc, char** argv) {
             } else {
                 // earth.height REGISTERED above the solver (M6w) -- here it becomes GPU
                 // tenants: the global cube and the Merrimack z14 window.
-                hgtTenant = resMgr.AddTextureCube(gpu, L"earth.height (composed)",
-                                                  Compositor::kFaceDim, DXGI_FORMAT_R16_FLOAT,
-                                                  compositor.CubeHeight(hgtCh));
-                // The height WINDOW: the same Mercator frame as the color window, so the
-                // globe's near-field land/sea gate and normals ride CUDEM truth.
-                hgtWinTenant = resMgr.AddTexture2D(
-                    gpu, L"earth.height.window (composed, Merrimack z14)",
-                    Compositor::kFaceDim, DXGI_FORMAT_R16_FLOAT,
-                    compositor.WindowHeight(hgtCh, 1263360, 1538048, 16384, 14));
+                // M9aq: ONE height tenant -- pages 0..5 the cube faces, 6 the z14 Mercator
+                // page (the frame the colour window shares, so the near-field land/sea gate
+                // and the normals ride CUDEM truth). One provider dispatching on the slice.
+                // M9as: fed by the height TileTree when --color-trees is on.
+                if (opt.colorTrees || opt.treeAudit) {
+                    auto layers = BuildHeightStack(compositor, hgtCh);
+                    std::vector<std::pair<double, std::shared_ptr<DomainSource>>> byRes;
+                    const Compositor::Channel& hch = compositor.ChannelAt(hgtCh);
+                    for (size_t i = 0; i < layers.size() && i < hch.height.size(); ++i) {
+                        byRes.push_back({hch.height[i]->Info().cmPerPixel, layers[i]});
+                    }
+                    std::stable_sort(byRes.begin(), byRes.end(),
+                                     [](const auto& a, const auto& b) { return a.first > b.first; });
+                    auto dc = std::make_shared<DomainCompositor>();
+                    dc->SetBlend(DomainCompositor::Blend::LayeredOver);
+                    std::string order;
+                    for (auto& p : byRes) {
+                        if (dc->Add(p.second)) order += " " + std::string(p.second->Name()) +
+                                                        "(" + std::to_string(int(p.first)) + "cm)";
+                    }
+                    heightRoot = std::make_shared<CompositeSource>("earth.height", dc);
+                    for (auto& l : layers) megaKeep.push_back(l);
+                    Log("[height-tree] compose order, coarsest first (the deepest tree paints "
+                        "last):%s",
+                        order.c_str());
+                    heightTree = std::make_unique<TileTree>(heightRoot.get(), TileTree::Fmt::Half);
+                    heightTree->Print();
+                }
+                {
+                    const TileProviderFn hCube = (opt.colorTrees && heightTree)
+                        ? heightTree->Provider(ColorFrame::Cube(Compositor::kFaceDim, 256, 128))
+                        : compositor.CubeHeight(hgtCh);
+                    const TileProviderFn hWin = (opt.colorTrees && heightTree)
+                        ? heightTree->Provider(ColorFrame::Window(1263360, 1538048, 14, 256, 128))
+                        : compositor.WindowHeight(hgtCh, 1263360, 1538048, 16384, 14);
+                    TileProviderFn hPages = [hCube, hWin](const TileRequest& r,
+                                                          std::vector<uint8_t>& out,
+                                                          TileLoc* loc) {
+                        if (r.face < 6) return hCube(r, out, loc);
+                        TileRequest w = r;
+                        w.face = 0;
+                        return hWin(w, out, loc);
+                    };
+                    hgtTenant = resMgr.AddTexturePages(gpu, L"earth.height (megatexture pages)",
+                                                       Compositor::kFaceDim,
+                                                       DXGI_FORMAT_R16_FLOAT, std::move(hPages),
+                                                       7);
+                    hgtWinTenant = hgtTenant;   // pages mode: the window is slice 6
+                    // M9ar: the solver's bed, and the churn kernel's, is slice 6 of this tenant.
+                    if (swe.Ready()) {
+                        swe.SetHeightPage(gpu, resMgr.TextureRes(hgtTenant),
+                                          resMgr.ResidencyRes(hgtTenant), 6u,
+                                          resMgr.Mips(hgtTenant), 1263360.0, 1538048.0);
+                    }
+                    if (sea) {
+                        sea->SetHeightPage(resMgr.TextureRes(hgtTenant),
+                                           resMgr.ResidencyRes(hgtTenant), 6u,
+                                           resMgr.Mips(hgtTenant), 1263360.0, 1538048.0);
+                    }
+                }
                 // earth.color: the Google mercator tree, realized twice -- the global cube
                 // and the Merrimack z14 window (same stack, deeper footprint).
                 if (googleTiles.Init("satellite", opt.tileBudget)) {
@@ -1749,6 +2146,7 @@ int main(int argc, char** argv) {
                     // have coverage -- the compositor's first independent high-res layer,
                     // aligned by its own declared projection (EPSG:6348), not by luck.
                     std::vector<ColorSource*> colorStack{&srcGoogle};
+                    size_t bedLayer = SIZE_MAX, maskLayer = SIZE_MAX;
                     // M7x (user catch): the ortho was painting its capture-day WATER over the
                     // drained-bed albedo -- a hard-edged dark rectangle the sea shader then
                     // attenuated AGAIN. Photos are LAND authorities; the bed classifier is
@@ -1756,30 +2154,142 @@ int main(int argc, char** argv) {
                     // aerial (both photos, finer wins), bed above both (its height-band alpha
                     // reclaims everything below the intertidal ramp and hands land back to
                     // the photos above +1.2 m NAVD), hand overlays on top of everything.
+                    bool srcAerialLoaded = false, srcOverlayLoaded = false;
                     if (srcAerial.Load("data/aerial/aerial.json")) {
                         colorStack.push_back(&srcAerial);
+                        srcAerialLoaded = true;
+                    }
+                    // M9av: the GLOBAL seafloor under the bed classifier -- the ingested
+                    // bathymetry's hillshade x sediment ramp, every ocean texel; the classifier
+                    // keeps its authority inside its own box by painting over it.
+                    size_t reliefLayer = SIZE_MAX;
+                    if (opt.seafloor &&
+                        srcRelief.Load("data/bed/seafloor_rules.json", &compositor, hgtCh)) {
+                        colorStack.push_back(&srcRelief);
+                        reliefLayer = colorStack.size() - 1;
                     }
                     if (srcBed.Load("data/bed/bed_rules.json", &compositor, hgtCh)) {
                         colorStack.push_back(&srcBed);
+                        bedLayer = colorStack.size() - 1;
                     }
                     if (srcOverlay.Load("data/overlay/overlay.json")) {
                         colorStack.push_back(&srcOverlay);
+                        srcOverlayLoaded = true;
+                    }
+                    // M9ak: THE GATE. The user's rule: "the GIS mask gates, the height band
+                    // refines". srcBed is the WATER authority and its alpha is a height band,
+                    // which cannot tell an inland hollow below +1.2 m NAVD from the sea; the
+                    // survey can, and cannot place a waterline to the metre. So the survey
+                    // multiplies the bed's weight and the height band decides where inside it.
+                    //
+                    // The mask is a LAYER (so it earns a cache identity and its own tree on the
+                    // same addresses as the imagery) that PAINTS NOTHING. Its footprint is the
+                    // rings' own bounds, so every tile outside New England keeps the identity
+                    // it already has -- the global cube is not repainted for this.
+                    const size_t bedIdx = bedLayer;
+                    if (opt.gisGate && (bedIdx != SIZE_MAX || reliefLayer != SIZE_MAX) &&
+                        gisMask.Load("data/gis/")) {
+                        srcGisMask.Refresh();   // the rings are loaded: declare the real box
+                        if (!opt.gisDump.empty()) {
+                            // M9av: LOOK AT THE GATE. 255 = water (or no opinion), 0 = land.
+                            double b0, a0, b1, a1;
+                            gisMask.Bounds(b0, a0, b1, a1);
+                            const uint32_t dim = 1024;
+                            std::vector<uint8_t> g;
+                            gisMask.RasterizeGate(a0, a1, b0, b1, dim, g);
+                            std::ofstream pf(opt.gisDump, std::ios::binary);
+                            pf << "P5\n" << dim << " " << dim << "\n255\n";
+                            pf.write(reinterpret_cast<const char*>(g.data()), g.size());
+                            Log("[gismask] --gis-dump: %s (%ux%u over %.3f,%.3f..%.3f,%.3f) %s",
+                                opt.gisDump.c_str(), dim, dim, b0, a0, b1, a1,
+                                pf ? "written" : "FAILED TO WRITE");
+                            std::exit(0);
+                        }
+                        colorStack.push_back(&srcGisMask);
+                        maskLayer = colorStack.size() - 1;
                     }
                     colCh = compositor.AddColorChannel("earth.color", std::move(colorStack));
-                    colorCubeT = resMgr.AddTextureCube(gpu, L"earth.color (composed)",
-                                                       Compositor::kFaceDim,
-                                                       DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
-                                                       compositor.CubeColor(colCh));
-                    winTenant = resMgr.AddTexture2D(
-                        gpu, L"earth.color.window (composed, Merrimack z14)",
-                        Compositor::kFaceDim, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
-                        compositor.WindowColor(colCh, 1263360, 1538048, 16384, 14));
-                    // M7f: the z17 DETAIL window -- 1.2 m px, ~14 km centred on the inlet
-                    // mouth: the near field stops being capped at the z14 window's 9.5 m.
-                    // Same channel, same stack (massgis where harvested, google's own z17
-                    // ladder elsewhere), the compose ladder's third rung.
+                    if (maskLayer != SIZE_MAX) {
+                        if (bedIdx != SIZE_MAX) compositor.SetColorGate(colCh, bedIdx, maskLayer);
+                        if (reliefLayer != SIZE_MAX) {
+                            compositor.SetColorGate(colCh, reliefLayer, maskLayer);
+                        }
+                    }
+                    // M9am: THE MEGATEXTURE, AS THE WATER'S GRAPH. The same nodes the bed and
+                    // the tide compose through -- ColorLayerSource, NormalizeToSi,
+                    // DomainCompositor::LayeredOver, CompositeSource -- with TileTree caching
+                    // every node's output on the NVMe on the shared tile addresses:
+                    //
+                    //     google ---+
+                    //               +-> earth.land ----------------+
+                    //     aerial ---+                              |
+                    //                                              +-> earth.color (mega)
+                    //     relief --+                              |
+                    //              +-> earth.seafloor --+          |
+                    //     bed -----+                    +-> gate --+
+                    //     gis.landsea (vector) ---------+
+                    //
+                    // Land is the base; the seafloor paints over it with weight = its own height
+                    // band x the survey's water coverage ("the GIS mask gates, the height band
+                    // refines"), so over surveyed water the land goes transparent per pixel and
+                    // the seafloor shows; inland the seafloor is gated out and the mega tile is a
+                    // stored REFERENCE to the land tree's. The flat incumbent channel above stays
+                    // as the definition the audit compares against.
+                    std::vector<std::shared_ptr<DomainSource>>& keepAlive = megaKeep;
+                    auto leaf = [&](ColorSource* s) -> std::shared_ptr<DomainSource> {
+                        auto l = std::make_shared<ColorLayerSource>(s);
+                        auto n = NormalizeToSi(l);
+                        keepAlive.push_back(l);
+                        return n ? n : l;
+                    };
+                    auto over = [&](const char* name,
+                                    std::vector<std::shared_ptr<DomainSource>> in)
+                        -> std::shared_ptr<DomainSource> {
+                        auto dc = std::make_shared<DomainCompositor>();
+                        dc->SetBlend(DomainCompositor::Blend::LayeredOver);
+                        for (auto& s : in) {
+                            if (!dc->Add(s)) Log("[mega] %s: input %s refused", name, s->Name());
+                        }
+                        return std::make_shared<CompositeSource>(name, dc);
+                    };
+                    std::vector<std::shared_ptr<DomainSource>> landIn{leaf(&srcGoogle)};
+                    if (srcAerialLoaded) landIn.push_back(leaf(&srcAerial));
+                    std::shared_ptr<DomainSource> land = over("earth.land", landIn);
+                    std::shared_ptr<DomainSource> mega;
+                    std::vector<std::shared_ptr<DomainSource>> seaIn;
+                    if (reliefLayer != SIZE_MAX) seaIn.push_back(leaf(&srcRelief));
+                    if (bedLayer != SIZE_MAX) seaIn.push_back(leaf(&srcBed));
+                    if (!seaIn.empty()) {
+                        std::shared_ptr<DomainSource> sea = over("earth.seafloor", seaIn);
+                        std::shared_ptr<DomainSource> seaGated = sea;
+                        if (maskLayer != SIZE_MAX) {
+                            seaGated = std::make_shared<GateSource>("seafloor<gis", sea,
+                                                                    leaf(&srcGisMask));
+                        }
+                        std::vector<std::shared_ptr<DomainSource>> megaIn{land, seaGated};
+                        if (srcOverlayLoaded) megaIn.push_back(leaf(&srcOverlay));
+                        mega = over("earth.color", megaIn);
+                    } else {
+                        mega = land;
+                    }
+                    keepAlive.push_back(land);
+                    keepAlive.push_back(mega);
+                    PrintTree("earth.color (megatexture)", mega.get());
+                    if (opt.colorTrees || opt.treeAudit) {
+                        megaTree = std::make_unique<TileTree>(mega.get());
+                        megaTree->Print();
+                    }
+                    auto mkColor = [&](const ColorFrame& f) -> TileProviderFn {
+                        return (opt.colorTrees && megaTree) ? megaTree->Provider(f)
+                                                            : compositor.ColorRealization(colCh, f);
+                    };
+                    // M9ap: NO INSET TEXTURES. The planet's colour is ONE tenant -- a reserved
+                    // Texture2DArray of pages: slices 0..5 the cube faces, 6 the z14 Mercator
+                    // page, 7 the z17 page -- with one SRV, one residency map, one budget, and
+                    // one provider that dispatches on the slice. The three tenants this
+                    // replaces were three pages of a ladder with hand-off fades between them.
+                    const double n17 = 16384.0 * 256.0 * 8.0;
                     {
-                        const double n17 = 16384.0 * 256.0 * 8.0;
                         const double piD = 3.14159265358979;
                         const double lonC = -70.8125, latC = 42.8160 * piD / 180.0;
                         const double mx = (lonC + 180.0) / 360.0 * n17;
@@ -1789,16 +2299,138 @@ int main(int argc, char** argv) {
                             n17;
                         det17OrgX = std::floor(mx - 8192.0);
                         det17OrgY = std::floor(my - 8192.0);
-                        detTenant = resMgr.AddTexture2D(
-                            gpu, L"earth.color.detail (composed, Merrimack z17)",
-                            Compositor::kFaceDim, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
-                            compositor.WindowColor(
-                                colCh, static_cast<long long>(det17OrgX),
-                                static_cast<long long>(det17OrgY), 16384, 17));
+                    }
+                    const TileProviderFn pCube = mkColor(ColorFrame::Cube(Compositor::kFaceDim));
+                    const TileProviderFn pWin = mkColor(ColorFrame::Window(1263360, 1538048, 14));
+                    const TileProviderFn pDet = mkColor(ColorFrame::Window(
+                        static_cast<long long>(det17OrgX), static_cast<long long>(det17OrgY), 17));
+                    TileProviderFn pages = [pCube, pWin, pDet](const TileRequest& r,
+                                                               std::vector<uint8_t>& out,
+                                                               TileLoc* loc) {
+                        if (r.face < 6) return pCube(r, out, loc);
+                        TileRequest w = r;
+                        w.face = 0;   // a Mercator page is a single-face frame
+                        return r.face == 6 ? pWin(w, out, loc) : pDet(w, out, loc);
+                    };
+                    colorCubeT = resMgr.AddTexturePages(gpu, L"earth.color (megatexture pages)",
+                                                        Compositor::kFaceDim,
+                                                        DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
+                                                        std::move(pages), 8);
+                    winTenant = colorCubeT;   // pages mode: window == cube, slice 6
+                    detTenant = colorCubeT;   // slice 7
+                    (void)n17;
+                    // The gate. Every realization the render path uses, on tiles the shipped
+                    // paint loop already wrote, with the worst per-channel disagreement printed.
+                    if (opt.treeAudit) {
+                        const ColorFrame frames[] = {
+                            ColorFrame::Cube(Compositor::kFaceDim),
+                            ColorFrame::Window(1263360, 1538048, 14),
+                            ColorFrame::Window(static_cast<long long>(det17OrgX),
+                                               static_cast<long long>(det17OrgY), 17),
+                        };
+                        const ColorFrame hframes[] = {
+                            ColorFrame::Cube(Compositor::kFaceDim, 256, 128),
+                            ColorFrame::Window(1263360, 1538048, 14, 256, 128),
+                        };
+                        if (opt.packTrees) {
+                            std::vector<std::string> tags;
+                            for (const ColorFrame& f : frames) tags.push_back(f.Tag());
+                            uint32_t n = megaTree->Pack(tags);
+                            if (heightTree) {
+                                std::vector<std::string> htags;
+                                for (const ColorFrame& f : hframes) htags.push_back(f.Tag());
+                                n += heightTree->Pack(htags);
+                            }
+                            Log("[tiletree] packed %u tiles across the megatexture tree; "
+                                "references resolve into the archives they name",
+                                n);
+                            resMgr.Shutdown();
+                            return 0;
+                        }
+                        TreeAudit all;
+                        if (heightTree) {
+                            for (const ColorFrame& f : hframes) {
+                                TreeAudit ha;
+                                AuditTileTree(compositor, hgtCh, *heightTree, f, opt.treeAudit,
+                                              ha, opt.warmTrees, true, "windowH");
+                                Log("[tree-audit] earth.height/%s: %u tiles, %u exact, worst "
+                                    "|direct - tree| = %.3f m, %llu of %llu texels differ",
+                                    f.Tag().c_str(), ha.tiles, ha.exact, ha.worstDelta / 1000.0,
+                                    static_cast<unsigned long long>(ha.difTexels),
+                                    static_cast<unsigned long long>(ha.texels));
+                            }
+                            Log("[trees]\n%s", heightTree->Stats().c_str());
+                        }
+                        for (const ColorFrame& f : frames) {
+                            TreeAudit a;
+                            AuditTileTree(compositor, colCh, *megaTree, f, opt.treeAudit, a,
+                                          opt.warmTrees);
+                            all.tiles += a.tiles;
+                            all.exact += a.exact;
+                            all.difTexels += a.difTexels;
+                            all.texels += a.texels;
+                            all.alphaDif += a.alphaDif;
+                            all.worstDelta = (std::max)(all.worstDelta, a.worstDelta);
+                        }
+                        Log("[tree-audit] TOTAL: %u tiles, %u byte-identical (%.1f%%), worst "
+                            "|direct - tree| = %u/255, %llu of %llu texels differ (%.4f%%), "
+                            "%u cover mismatches",
+                            all.tiles, all.exact,
+                            all.tiles ? 100.0 * double(all.exact) / double(all.tiles) : 0.0,
+                            all.worstDelta,
+                            static_cast<unsigned long long>(all.difTexels),
+                            static_cast<unsigned long long>(all.texels),
+                            all.texels ? 100.0 * double(all.difTexels) / double(all.texels)
+                                       : 0.0,
+                            all.alphaDif);
+                        Log("[trees]\n%s", megaTree->Stats().c_str());
+                        resMgr.Shutdown();
+                        return 0;
                     }
                 }
                 globe->SetComposed(colorCubeT, winTenant, hgtTenant, hgtWinTenant, winOrgX,
                                    winOrgY, 16384.0, detTenant, det17OrgX, det17OrgY);
+
+                // ---- M9ae: WHAT THE DISK ALREADY HOLDS, in memory, once.
+                //
+                // The composed cache is the tree's backing store -- 64 KB tiles laid out for
+                // CopyTiles -- but nothing in RAM knew what was in it, so "is a finer level
+                // ready here?" could only be answered by building a filename and asking the
+                // filesystem. Residency could request a level; it could not prefer the levels
+                // that would be a cheap READ over the ones that mean a paint or a fetch.
+                //
+                // The index is one entry per TILE, not per texel, so the asymmetry that makes
+                // NVMe paging worth doing shows up directly: terabytes of tree, megabytes of map.
+                {
+                    static TileIndex idxColorCube, idxColorWin, idxColorDet, idxHeightCube;
+                    idxColorCube.Scan("earth.color", "cube16k");
+                    idxColorWin.Scan("earth.color", "window_z14_1263360_1538048");
+                    idxColorDet.Scan("earth.color", "window_z17_10168820_12344774");
+                    idxHeightCube.Scan("earth.height", "cube16k");
+                    idxColorCube.Report();
+                    idxColorWin.Report();
+                    idxColorDet.Report();
+                    idxHeightCube.Report();
+                    // Each tenant gets the index of its OWN realization -- the scheduler then
+                    // prefers loads that are a read over loads that are a paint.
+                    resMgr.SetTileIndex(colorCubeT, &idxColorCube);
+                    resMgr.SetTileIndex(winTenant, &idxColorWin);
+                    resMgr.SetTileIndex(detTenant, &idxColorDet);
+                    resMgr.SetTileIndex(hgtTenant, &idxHeightCube);
+                    // M9ag: the NVMe -> GPU reader. Created once; a machine without the
+                    // redist or with a driver that declines keeps the ReadFile path.
+                    static TileStream tileStream;
+                    // M9ao: ON by default. Through the packed trees the streamed path is
+                    // pixel-identical to the upload ring (section 33); the user made it the
+                    // default. --no-direct-storage is the A/B.
+                    if (opt.directStorage) {
+                        if (tileStream.Init(gpu)) resMgr.SetTileStream(&tileStream);
+                    } else {
+                        Log("[dstorage] OFF by request (--no-direct-storage): every tile takes "
+                            "the upload ring");
+                    }
+                }
+
             }
             globe->stencilOverlay = opt.stencil;
             globe->debugLens = opt.lens;
@@ -2220,9 +2852,17 @@ int main(int argc, char** argv) {
         // reads, so its height channel is off).
         if (!marsMode && globe) {
             ComposedSurfaceCb cs{};
+            // M9ap: pages mode -- the terrain, the sea and the GIS layer sample the SAME page
+            // tenant the globe does, slices 6 and 7 included.
+            const double det17Org[2] = {det17OrgX, det17OrgY};
+            const bool pagesMode = colorCubeT >= 0 && winTenant == colorCubeT;
             FillComposedCb(cs, &resMgr, colorCubeT, winTenant, hgtTenant, hgtWinTenant,
                            winOrgX, winOrgY, 16384.0, 14, planetR, east0, oDir, north0,
-                           opt.stencil, gisStencil.MaskWinSrv(), gisStencil.MaskGlobSrv());
+                           opt.stencil, gisStencil.MaskWinSrv(), gisStencil.MaskGlobSrv(),
+                           pagesMode ? detTenant : -1, pagesMode ? det17Org : nullptr, 17,
+                           UINT32_MAX, nullptr, pagesMode ? 6u : UINT32_MAX,
+                           pagesMode ? 7u : UINT32_MAX,
+                           (hgtTenant >= 0 && hgtWinTenant == hgtTenant) ? 6u : UINT32_MAX);
             if (terrain) terrain->SetComposed(cs);
             if (sea) sea->SetComposed(cs);
             if (gisLayer) gisLayer->SetComposed(cs);
@@ -2530,6 +3170,12 @@ int main(int argc, char** argv) {
                 bcfg.spongeX0 = -2500.0f;   // Mass Bay, east of the outer harbor islands
                 bcfg.westBoundary = false;  // the Charles is dammed; the west edge is a wall
                 weather.AddDormantWindow("boston", &bathyBoston, bcfg, oceanAtBoston, 0.5);
+                // M9ar: Boston lies inside the z14 height page; its solver reads slice 6 too.
+                if (hgtTenant >= 0) {
+                    weather.SetHeightPage(resMgr.TextureRes(hgtTenant),
+                                          resMgr.ResidencyRes(hgtTenant), 6u,
+                                          resMgr.Mips(hgtTenant), 1263360.0, 1538048.0);
+                }
             }
         }
 
@@ -2849,9 +3495,10 @@ int main(int argc, char** argv) {
             if (hgtWinTenant >= 0) {
                 // Height paints are pure local math: warm the WHOLE window at mip 2 (~32 MB)
                 // so land/sea classification is never a coarse-mip smear anywhere in view.
-                resMgr.Want(hgtWinTenant, 0, 2, 0, 0, 1, 1);
+                const uint32_t hwf = (hgtWinTenant == hgtTenant) ? 6u : 0u;   // M9aq slice
+                resMgr.Want(hgtWinTenant, hwf, 2, 0, 0, 1, 1);
                 for (const auto& w : rings) {
-                    resMgr.Want(hgtWinTenant, 0, w.mip, w.a, w.a, w.b, w.b);
+                    resMgr.Want(hgtWinTenant, hwf, w.mip, w.a, w.a, w.b, w.b);
                 }
             }
             if (hgtTenant >= 0) {
@@ -2897,6 +3544,41 @@ int main(int argc, char** argv) {
         bool dumpedSolid = false;   // --dump-both: the solid image is already on disk
         double frameMsSum = 0.0;
         uint32_t frameMsN = 0;
+        // M9o: a recording carries its OWN cost. A rail is the only run long enough and varied
+        // enough -- globe to helm, every residency regime in one take -- for frame time to mean
+        // something, and it is exactly the run nobody measures because they are watching the
+        // pictures. Per-frame, not averaged: a mean hides the stall that a viewer actually sees.
+        std::vector<float> railMs, railLoopMs;
+        // M9u: WHERE THE OTHER HALF OF THE FRAME GOES. --bench showed render is only 7.9 of a
+        // 17.2 ms helm frame; this splits the remaining 9.4 ms by section. Accumulated in two
+        // buckets -- the whole rail, and the HELM leg alone -- because the cost is altitude
+        // dependent and a single total would average the expensive view away, which is the
+        // mistake the phase table already caught once.
+        // M9v: prefetch cadence, --predict-every. 1 = every frame (the shipped behaviour).
+        const uint32_t kPredictEvery = (std::max)(1u, opt.predictEvery);
+        double profMs[10] = {}, profHelmMs[10] = {};
+        std::vector<float> railPreMs;   // M9u: the whole pre-RenderFrame half
+        uint64_t walkNodesAcc = 0, walkLeavesAcc = 0, walkWantNsAcc = 0, walkFrames = 0;
+        uint64_t wantTouchAcc = 0, wantHitAcc = 0;
+        static const char* kProfName[10] = {
+            "weather.Update", "scene hot-reload stat", "waveField.Update",
+            "waterBank.SetFrame", "tide.SetTime", "sea.SetTime",
+            "groundAt (cam clamp)", "globe.SetView", "globe.PredictWants", "swe (solver step)"};
+        std::chrono::steady_clock::time_point profT0;
+        bool profHelm = false;
+#define PROF_BEGIN() profT0 = Clock::now()
+#define PROF_END(slot)                                                                         do {                                                                                           const double _e =                                                                              std::chrono::duration<double>(Clock::now() - profT0).count() * 1000.0;                  profMs[slot] += _e;                                                                        if (profHelm) profHelmMs[slot] += _e;                                                  } while (0)
+        FramePipe recPipe;
+        std::vector<uint8_t> recPixels;
+        if (!opt.mp4.empty()) {
+            recPipe.Open(opt.mp4, renderer.Width(), renderer.Height(), 30);
+        }
+        std::vector<uint64_t> railPool;
+        if (!opt.rail.empty()) {
+            railMs.reserve(opt.frames ? opt.frames : 1200);
+            railLoopMs.reserve(opt.frames ? opt.frames : 1200);
+            railPool.reserve(opt.frames ? opt.frames : 1200);
+        }
 
         for (;;) {
             if (!opt.headless) {
@@ -2908,6 +3590,7 @@ int main(int argc, char** argv) {
             const auto now = Clock::now();
             float dt = std::chrono::duration<float>(now - last).count();
             last = now;
+            const auto preT0 = Clock::now();   // M9u: everything before RenderFrame
             dt = (dt > 0.25f) ? 0.25f : dt;   // a debugger break must not teleport time
 
             if (!opt.headless) {
@@ -3050,6 +3733,8 @@ int main(int argc, char** argv) {
                     recFrame = opt.frames - 1u;
                 }
                 simUnix = startUnix + static_cast<double>(recFrame) * (timeScale / 30.0);
+                // The helm leg of --rail-flood: keys at 32 s (cHelmIn) and 40 s (cHelmGap).
+                profHelm = !opt.rail.empty() && recFrame >= 32u * 30u;
                 if (!opt.rail.empty() && !railKeys.empty()) {
                     // M6g: the rails just set a pose in the ONE frame. Nothing switches.
                     railPose(static_cast<double>(recFrame) / 30.0, cam);
@@ -3083,10 +3768,12 @@ int main(int argc, char** argv) {
                 // is the demand signal; dormant windows spin up as it arrives, mirrors
                 // refresh, owned solvers advance. All in the flat one-world frame.
                 if (!marsMode) {
+                    PROF_BEGIN();
                     weather.Update(gpu, renderer.Shaders(), opt.shaderDir, simUnix,
                                    BathyModel::kOrgLat + cam.pz / BathyModel::kMPerLat,
                                    BathyModel::kOrgLon + cam.px / BathyModel::kMPerLon,
                                    altV);
+                    PROF_END(0);
                 }
                 // M7: the bank's rings follow the camera; the globe binds THIS frame's
                 // origins (residency committed in SetFrame, content recomposed in Render).
@@ -3094,6 +3781,7 @@ int main(int argc, char** argv) {
                     // M8: the scene file hot-reloads -- edit, save, watch the water
                     // change. A geometry edit re-Configures the solver (its bucket key
                     // rolls, the cache answers or a background solve runs).
+                    PROF_BEGIN();
                     if (WaterSceneChanged(kScenePath, &waterSceneMtime) &&
                         LoadWaterScene(kScenePath, waterScene)) {
                         if (waveField) {
@@ -3113,14 +3801,17 @@ int main(int argc, char** argv) {
                         }
                         Log("[scene] %s hot-reloaded", kScenePath);
                     }
+                    PROF_END(1);
                     // M8: bucket-watch + background solve + upload/swap for the solved
                     // wave field, BEFORE the bank recomposes so the kernel binds a whole
                     // field or the previous one -- never a half-written atlas.
                     // (frame >= 2: the first frames run on the boot clock before --start
                     // settles; solving them caches a real answer for the wrong instant.)
                     if (waveField && sea && waterScene.wfEnabled && frame >= 2) {
+                        PROF_BEGIN();
                         waveField->Update(gpu, simUnix, sea->Parts(), sea->activeParts,
                                           opt.headless);
+                        PROF_END(2);
                     }
                     // M8 fleet: advance the traffic (stateless), hand the table to the
                     // bank kernel (wakes) -- and to the vessel layer when it exists.
@@ -3154,7 +3845,9 @@ int main(int argc, char** argv) {
                         }
                         waterBank->SetBoats(bA, bB);
                     }
+                    PROF_BEGIN();
                     waterBank->SetFrame(gpu, simUnix, cam.px, cam.pz);
+                    PROF_END(3);
                     float orgs[12];
                     for (int mR = 0; mR < WaterBankLayer::kMips; ++mR) {
                         waterBank->RingOrigin(mR, orgs[mR * 2], orgs[mR * 2 + 1]);
@@ -3173,9 +3866,11 @@ int main(int argc, char** argv) {
                     }
                     waterBank->injectPattern = opt.inject;
                     if (hgtWinTenant >= 0) {
+                        // M9aq: in pages mode the window is slice 6 of the height array.
                         waterBank->SetHeightWindow(resMgr.TextureSrv(hgtWinTenant),
                                                    resMgr.ResidencySrv(hgtWinTenant),
-                                                   winOrgX, winOrgY);
+                                                   winOrgX, winOrgY,
+                                                   hgtWinTenant == hgtTenant ? 6u : UINT32_MAX);
                     }
                     globe->windGateVal = sea->WindGate();
                     globe->SetWaterBank(waterBank->DispSrv(), waterBank->ParamSrv(),
@@ -3197,22 +3892,83 @@ int main(int argc, char** argv) {
             if (mode == 1 && globe) {
                 globe->reliefExagg =
                     static_cast<float>(std::clamp(altV / 250000.0, 1.0, 20.0));
+                PROF_BEGIN();
                 const double g = groundAt(cam.px, cam.pz);
+                PROF_END(6);
                 if (cam.py < g + 1.2) cam.py = g + 1.2;
                 const float viewH = opt.headless ? static_cast<float>(opt.height)
                                                  : static_cast<float>(
                                                        std::max(1u, window.Height()));
                 const float aspect =
                     (opt.headless ? static_cast<float>(opt.width) : window.Width()) / viewH;
+                globe->WalkReset();
+                resMgr.WantStatsReset();
+                PROF_BEGIN();
                 globe->SetView(cam, aspect, viewH, simUnix - startUnix);
+                // M9ar: THE SOLVER DOMAIN STAYS RESIDENT AT MIP 0. The bed bank used to be
+                // pinned wholesale; the page tenant is demand-driven, so the solver's lattice
+                // is asked for every frame at the page's finest mip. ~110 tiles of 256x128 at
+                // 9.55 m over an 18.8 x 16 km domain -- recency keeps them mapped.
+                if (hgtTenant >= 0 && hgtWinTenant == hgtTenant && bathy.Ready()) {
+                    const double piP = 3.14159265358979, n14 = 16384.0 * 256.0;
+                    auto mercU = [&](double lonDeg) {
+                        return ((lonDeg + 180.0) / 360.0 * n14 - 1263360.0) / 16384.0;
+                    };
+                    auto mercV = [&](double latDeg) {
+                        const double l = latDeg * piP / 180.0;
+                        return ((0.5 - std::log(std::tan(piP * 0.25 + l * 0.5)) / (2.0 * piP)) *
+                                    n14 -
+                                1538048.0) /
+                               16384.0;
+                    };
+                    const double lon1 = bathy.Lon0() + bathy.Nx() * bathy.Dlon();
+                    const double lat0 = bathy.Lat1() - bathy.Ny() * bathy.Dlat();
+                    const float u0 = float(std::max(0.0, mercU(bathy.Lon0())));
+                    const float u1 = float(std::min(1.0, mercU(lon1)));
+                    const float v0 = float(std::max(0.0, mercV(bathy.Lat1())));
+                    const float v1 = float(std::min(1.0, mercV(lat0)));
+                    if (u1 > u0 && v1 > v0) resMgr.Want(hgtTenant, 6u, 0u, u0, v0, u1, v1);
+                    static bool pinLogged = false;
+                    if (!pinLogged) {
+                        pinLogged = true;
+                        Log("[swe] domain pinned on height page slice 6 mip 0: uv %.4f..%.4f x "
+                            "%.4f..%.4f (%s)",
+                            u0, u1, v0, v1, (u1 > u0 && v1 > v0) ? "inside the page" : "OUTSIDE");
+                    }
+                }
+                PROF_END(7);
+                if (!opt.rail.empty() && frame >= 150u) {
+                    walkNodesAcc += globe->walkNodes;
+                    walkLeavesAcc += globe->walkLeaves;
+                    walkWantNsAcc += globe->walkWantNs;
+                    wantTouchAcc += resMgr.wantTouches;
+                    wantHitAcc += resMgr.wantHits;
+                    ++walkFrames;
+                }
                 // M6e screw-prefetch: extrapolate the pose ~0.8 s ahead along its own screw and
                 // let the walk under THAT camera queue tiles early (predicted priority).
-                Camera pred = cam;
-                motorPose(resMgr.PredictNextPose(poseMotor(cam), 24.0), pred);
-                globe->PredictWants(pred, aspect);
+                // M9v: THE PREFETCH WALK, AMORTIZED. Measured at 3.25 ms per frame at helm --
+                // a full six-face quadtree descent with NO frustum cull (the predicted view is
+                // approximate by design, so it walks more nodes than the real pass does). Paying
+                // that at 30 Hz to serve a prediction 0.8 SECONDS ahead is spending a whole
+                // frame budget to refine a guess whose own horizon is 24 frames wide.
+                //
+                // Every 6th frame is 5 Hz -- 0.2 s of granularity against an 0.8 s lookahead, so
+                // the prefetch still lands four times inside its own horizon. The phase is tied
+                // to the frame counter rather than a timer so a headless rail and an interactive
+                // run walk the same nodes on the same frames.
+                if ((frame % kPredictEvery) == 0) {
+                    PROF_BEGIN();
+                    Camera pred = cam;
+                    motorPose(resMgr.PredictNextPose(poseMotor(cam), 24.0), pred);
+                    globe->PredictWants(pred, aspect);
+                    PROF_END(8);
+                }
             }
 
+            PROF_BEGIN();
             tide->SetTime(simUnix, windowSec);
+            PROF_END(4);
             renderer.waterLevel = static_cast<float>(tide->focusHeight);
             // The terrain speaks NAVD88; the tide speaks MLLW. One offset joins them. In
             // estuary mode the open-water level is the ENTRANCE station's (M5c), and the west
@@ -3220,11 +3976,13 @@ int main(int argc, char** argv) {
             const double waterNavd =
                 bathy.Ready() ? oceanAt(simUnix) : tide->focusHeight + datumOff;
             lastWaterNavd = waterNavd;   // next frame's camera-pivot rays test against it
+            PROF_BEGIN();
             if (swe.Ready()) {
                 swe.SetBoundaries(static_cast<float>(westAt(simUnix)),
                                   static_cast<float>(southAt(simUnix)),
                                   static_cast<float>(westQAt(simUnix)));
             }
+            PROF_END(9);
             // M7k: arm the programmatic .wpix capture so it records the run's LAST warm
             // frames -- every pass named by its state-diagram node.
             if (opt.pixFrames > 0 && opt.frames > 0 && opt.frames + (opt.rail.empty() ? 0u : 150u) >= opt.pixFrames + 4 &&
@@ -3232,17 +3990,59 @@ int main(int argc, char** argv) {
                 PixGpuCaptureFrames(L"gagame.wpix", opt.pixFrames);
                 pixArmed = true;
             }
+            PROF_BEGIN();
             if (sea) sea->SetTime(simUnix, bathy.Ready() ? waterNavd : tide->focusHeight,
                                   cam.px, cam.pz);
+            PROF_END(5);
             if (terrain) terrain->waterNavd = static_cast<float>(waterNavd);
             if (globe) globe->waterNavd = static_cast<float>(waterNavd);   // M6j materials
 
+            // M9o/M9t: the ENGINE's cost. dt (the loop interval) also carries the recorder's
+            // bill -- PNG encode, or readback plus the encoder pipe -- so both are kept:
+            // renderMs judges the engine, dt judges the capture.
+            //
+            // AND A CAVEAT THAT COST ME A WRONG NUMBER. RenderFrame only RECORDS and submits;
+            // without a fence, the GPU is still working when the clock stops. In a captured run
+            // that GPU time was real but hidden -- DumpRaw calls WaitIdle, so execution was
+            // being paid for inside the READBACK and renderMs read as pure CPU submit. I
+            // reported 1.67 ms as the frame cost on that basis, which flattered it.
+            //
+            // --bench closes the fence here instead, so the number includes execution and is
+            // the honest answer to "what does a frame cost". It is deliberately NOT on by
+            // default: a per-frame WaitIdle destroys the CPU/GPU overlap a real run depends on,
+            // which would make the captured runs measure something nobody ships.
+            const float preMs =
+                std::chrono::duration<float>(Clock::now() - preT0).count() * 1000.0f;
+            const auto rf0 = Clock::now();
             renderer.RenderFrame(cam, static_cast<float>(simUnix - startUnix), dt);
+            if (opt.bench) gpu.WaitIdle();
+            const float renderMs =
+                std::chrono::duration<float>(Clock::now() - rf0).count() * 1000.0f;
 
-            if (!opt.rail.empty() && frame >= 150u) {
-                wchar_t rp[512];
-                swprintf(rp, 512, L"%s\\rail_%04u.png", opt.rail.c_str(), frame - 150u);
-                renderer.DumpPng(rp);
+            if (!opt.rail.empty() && frame >= 150u && opt.bench) {
+                // Bench records the timing and nothing else -- no readback, no encode, no disk.
+                railMs.push_back(renderMs);
+                railLoopMs.push_back(dt * 1000.0f);
+                railPreMs.push_back(preMs);
+                railPool.push_back(PoolCommittedBytes());
+            } else if (!opt.rail.empty() && frame >= 150u) {
+                if (recPipe.Open()) {
+                    uint32_t rowPitch = 0;
+                    if (renderer.DumpRaw(recPixels, &rowPitch)) {
+                        recPipe.Write(recPixels, rowPitch);
+                    }
+                } else {
+                    wchar_t rp[512];
+                    swprintf(rp, 512, L"%s\\rail_%04u.png", opt.rail.c_str(), frame - 150u);
+                    renderer.DumpPng(rp);
+                }
+                // Two clocks, because they answer different questions. renderMs is the engine
+                // alone; dt is the whole loop and therefore includes the PREVIOUS frame's PNG
+                // encode, which at 1600x900 is tens of milliseconds of the recorder's own cost.
+                // A rail reported on dt would look three times slower than the thing it shows.
+                railMs.push_back(renderMs);
+                railLoopMs.push_back(dt * 1000.0f);
+                railPool.push_back(PoolCommittedBytes());
             }
 
             if (!opt.headless &&
@@ -3276,6 +4076,141 @@ int main(int argc, char** argv) {
             if (opt.frames &&
                 frame >= opt.frames + (opt.rail.empty() ? 0u : 150u) +
                              (opt.dumpBoth ? 1u : 0u)) {
+                // The encoder gets its end-of-stream BEFORE the metrics print, so the mp4 is
+                // complete and closed by the time the numbers describing it appear.
+                recPipe.Close();
+
+                // ---- M9o: THE RECORDING'S OWN COST, reported with the recording.
+                //
+                // Percentiles, not a mean. A rail runs from orbit to helm height, crossing
+                // every residency regime the engine has, so its frame times are deliberately
+                // NOT a single distribution -- averaging them describes no moment that ever
+                // happened. p95 and max are what a viewer perceives as stutter; the worst
+                // frame's INDEX says where in the flight it happened, which is the half that
+                // makes it actionable (a spike at frame 600 is the 80 km -> 7 km descent
+                // paging in, a spike at 1100 is helm-height water detail, and they have different
+                // fixes).
+                if (!railMs.empty()) {
+                    std::vector<float> sorted = railMs;
+                    std::sort(sorted.begin(), sorted.end());
+                    auto pct = [&](double q) {
+                        const size_t i = (std::min)(sorted.size() - 1,
+                                                    size_t(q * double(sorted.size() - 1) + 0.5));
+                        return sorted[i];
+                    };
+                    double sum = 0.0;
+                    size_t worstI = 0;
+                    for (size_t i = 0; i < railMs.size(); ++i) {
+                        sum += railMs[i];
+                        if (railMs[i] > railMs[worstI]) worstI = i;
+                    }
+                    const double mean = sum / double(railMs.size());
+                    Log("[rail] %zu frames RENDER: mean %.2f ms (%.1f fps), p50 %.2f, "
+                        "p95 %.2f, p99 %.2f, max %.2f ms at frame %zu",
+                        railMs.size(), mean, mean > 0.0 ? 1000.0 / mean : 0.0, pct(0.50),
+                        pct(0.95), pct(0.99), double(railMs[worstI]), worstI);
+                    if (!railLoopMs.empty()) {
+                        double lsum = 0.0;
+                        for (float m : railLoopMs) lsum += m;
+                        const double lmean = lsum / double(railLoopMs.size());
+                        // In bench there is no capture at all, so the gap is the REST OF THE
+                        // LOOP -- sim clock, weather residency, solver advance, scene watch.
+                        // Calling that "capture overhead" would have been a second wrong label
+                        // on the same line.
+                        Log("[rail] loop mean %.2f ms, so %.2f ms/frame outside RenderFrame (%s)",
+                            lmean, (lmean > mean) ? (lmean - mean) : 0.0,
+                            opt.bench ? "sim, residency and solver -- nothing is captured"
+                                      : (recPipe.Open() ? "readback + encode: the recorder's bill"
+                                                        : "PNG encode and disk"));
+                    }
+                    // THE BUDGET IS THE WHOLE FRAME, not RenderFrame. Counting renderMs
+                    // against 16.7 ms reported "0/1200 over budget" while the helm phase was
+                    // actually running a 17.2 ms LOOP -- the sim, residency and solver work
+                    // outside RenderFrame is about half the cost at low altitude, and a budget
+                    // that ignores half the frame is a budget that always passes.
+                    const std::vector<float>& budgetSrc =
+                        railLoopMs.empty() ? railMs : railLoopMs;
+                    uint32_t over33 = 0, over16 = 0;
+                    for (float m : budgetSrc) {
+                        if (m > 33.3f) ++over33;
+                        if (m > 16.7f) ++over16;
+                    }
+                    Log("[rail] budget (FULL FRAME): %u/%zu over 16.7 ms (%.1f%%), %u over "
+                        "33.3 ms (%.1f%%)",
+                        over16, budgetSrc.size(), 100.0 * over16 / double(budgetSrc.size()),
+                        over33, 100.0 * over33 / double(budgetSrc.size()));
+                    {
+                        double tot = 0.0, totH = 0.0;
+                        for (int k = 0; k < 10; ++k) { tot += profMs[k]; totH += profHelmMs[k]; }
+                        const double n = double(railMs.size());
+                        const double nH = 240.0;   // the helm leg, 8 s at 30 fps
+                        Log("[rail] outside RenderFrame, per frame -- %-22s %8s %8s",
+                            "section", "whole", "helm");
+                        for (int k = 0; k < 10; ++k) {
+                            Log("[rail]   %-22s %6.3f ms %6.3f ms", kProfName[k],
+                                profMs[k] / n, profHelmMs[k] / nH);
+                        }
+                        if (globe && walkFrames) {
+                            // NOT just Want(): the bracket spans the whole leaf EMIT, which
+                            // also carries the window-rect Mercator math (nine CubeDir corners
+                            // with asin/atan2/log/tan each). Naming it "Want()" would credit
+                            // the map for trig it never touched.
+                            Log("[rail]   walk: %.0f nodes, %.0f leaves per frame; leaf emit "
+                                "(Want + window rects) is %.3f ms of the %.3f ms SetView "
+                                "(%.0f%%)",
+                                double(walkNodesAcc) / double(walkFrames),
+                                double(walkLeavesAcc) / double(walkFrames),
+                                double(walkWantNsAcc) / double(walkFrames) / 1e6,
+                                profMs[7] / n,
+                                100.0 * (double(walkWantNsAcc) / double(walkFrames) / 1e6) /
+                                    (std::max)(1e-6, profMs[7] / n));
+                            const double tch = double(wantTouchAcc) / double(walkFrames);
+                            const double hit = double(wantHitAcc) / double(walkFrames);
+                            Log("[rail]   Want(): %.0f tile touches/frame, %.0f already tracked "
+                                "(%.1f%% repeat) -- %.1f touches per leaf",
+                                tch, hit, 100.0 * hit / (std::max)(1.0, tch),
+                                tch / (std::max)(1.0, double(walkLeavesAcc) /
+                                                          double(walkFrames)));
+                        }
+                        Log("[rail]   %-22s %6.3f ms %6.3f ms  <- measured here", "sum of the ten",
+                            tot / n, totH / nH);
+                        if (!railPreMs.empty()) {
+                            double pre = 0.0, preH = 0.0;
+                            for (size_t k = 0; k < railPreMs.size(); ++k) {
+                                pre += railPreMs[k];
+                                if (k >= 960) preH += railPreMs[k];
+                            }
+                            Log("[rail]   %-22s %6.3f ms %6.3f ms  <- ALL of it, so the "
+                                "remainder is post-render",
+                                "pre-RenderFrame total", pre / n, preH / nH);
+                        }
+                    }
+                    Log("[rail] tile pool at end: %.2f GB committed across every atlas -- the "
+                        "sparse structure's real cost for this flight",
+                        railPool.empty() ? 0.0 : railPool.back() / 1073741824.0);
+
+                    // The per-frame series, next to the frames it describes. A summary answers
+                    // "was it smooth"; only the series answers "where did it stop being smooth",
+                    // and that question is the reason to record at all.
+                    std::string csv;
+                    for (const wchar_t* w = opt.rail.c_str(); *w; ++w) {
+                        csv.push_back(static_cast<char>(*w));   // rail dirs are ASCII
+                    }
+                    csv += "\\metrics.csv";
+                    if (FILE* f = nullptr; fopen_s(&f, csv.c_str(), "w") == 0 && f) {
+                        fprintf(f, "frame,render_ms,render_fps,loop_ms,pool_bytes\n");
+                        for (size_t i = 0; i < railMs.size(); ++i) {
+                            fprintf(f, "%zu,%.4f,%.2f,%.4f,%llu\n", i, double(railMs[i]),
+                                    railMs[i] > 0.0f ? 1000.0 / double(railMs[i]) : 0.0,
+                                    i < railLoopMs.size() ? double(railLoopMs[i]) : 0.0,
+                                    static_cast<unsigned long long>(
+                                        i < railPool.size() ? railPool[i] : 0));
+                        }
+                        fclose(f);
+                        Log("[rail] per-frame series -> %s", csv.c_str());
+                    }
+                }
+
                 // M7j: THE HYPERVISOR -- one sample, every transformation, each hop tagged
                 // with the AST edge it exercises. CPU-derivable steps print values; fields
                 // that live only on the GPU print their frame contract and where to look.
@@ -3444,8 +4379,9 @@ int main(int argc, char** argv) {
                         const double uT = (mxT - winOrgX) / 16384.0;
                         const double vT = (myT - winOrgY) / 16384.0;
                         if (uT > 0.0 && uT < 1.0 && vT > 0.0 && vT < 1.0) {
+                            const uint32_t hwfT = (hgtWinTenant == hgtTenant) ? 6u : 0u;
                             const uint32_t mipT = resMgr.ResidentMipAt(
-                                hgtWinTenant, 0, static_cast<float>(uT),
+                                hgtWinTenant, hwfT, static_cast<float>(uT),
                                 static_cast<float>(vT));
                             if (mipT <= 7) {
                                 const uint32_t dimT = 16384u >> mipT;
@@ -3456,7 +4392,8 @@ int main(int argc, char** argv) {
                                 uint8_t pxT[16] = {};
                                 float gpuH = 0.0f;
                                 if (gpu.ReadbackTexel(resMgr.TextureRes(hgtWinTenant),
-                                                      mipT, txT, tyT,
+                                                      hwfT * resMgr.Mips(hgtWinTenant) + mipT,
+                                                      txT, tyT,
                                                       resMgr.TextureState(hgtWinTenant),
                                                       pxT)) {
                                     const uint16_t h16 =

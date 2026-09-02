@@ -34,9 +34,12 @@
 // ================================================================================================
 #pragma once
 
+#include "compose/TileArchive.h"
 #include "core/Residency.h"
 
 #include <atomic>
+#include <map>
+#include <mutex>
 #include <memory>
 #include <string>
 #include <vector>
@@ -68,6 +71,14 @@ struct SourceInfo {
 // stash tile-scoped corrections -- the grade-normalization gain lives here.
 struct PaintCtx {
     float gain[3] = {1.0f, 1.0f, 1.0f};
+    // M9ak: PER-TILE SCRATCH. A source may do work once per tile in BeginTile and read it back
+    // per texel. The vector GIS mask sweeps its rings by meridian into here -- one sweep per
+    // tile instead of a point-in-polygon against 1.26 million edges per texel -- and the sweep
+    // itself then happens only once per tile ADDRESS ever, because the mask is a layer and so
+    // gets its own tree on the same addresses as the imagery it gates.
+    std::vector<uint8_t> scratch;
+    uint32_t scratchDim = 0;
+    double sLat0 = 0, sLat1 = 0, sLon0 = 0, sLon1 = 0;   // the box `scratch` spans (radians)
 };
 
 class ColorSource {
@@ -101,6 +112,8 @@ public:
 };
 
 // ---- 3. the compositor ---------------------------------------------------------------------
+struct ColorFrame;   // the realization's geometry, defined below the class it belongs to
+
 class Compositor {
 public:
     static constexpr uint32_t kFaceDim = 16384;   // every composed pyramid realization today
@@ -126,6 +139,9 @@ public:
     TileProviderFn CubeColor(int channel);
     TileProviderFn WindowColor(int channel, long long orgPxX, long long orgPxY, uint32_t sizePx,
                                int zBase);
+    // Both of the above ARE this, with a frame filled in. A caller that has a frame -- a page of
+    // a ladder, a per-source tree, a test -- names it directly and gets the same paint.
+    TileProviderFn ColorRealization(int channel, const ColorFrame& frame);
     TileProviderFn CubeHeight(int channel);
     //  * WindowHeight: R16F tiles of the SAME Mercator window frame the color window uses --
     //    one frame, two channels, so near-field land/sea gates and normals ride CUDEM truth.
@@ -143,6 +159,11 @@ public:
     // M6w: the same contract for HEIGHT -- the physics-facing bed query. The SWE lattice, the
     // weather manager's products, and the renderer's tiles all evaluate THIS stack; there is
     // one bed, sampled at rungs.
+    // M9av: the finest declared grain (metres) of any height layer whose footprint holds the
+    // point -- what a derivative of the stack may honestly be taken at. A gradient stepped finer
+    // than the data's cell reads the interpolant's facets (bilinear ETOPO at 4.9 km stepped at
+    // 1 km rendered the continental slope as terraces).
+    double HeightGrainM(int channel, double latRad, double lonRad) const;
     float SampleHeightStack(int channel, double latRad, double lonRad,
                             double groundResM) const;
 
@@ -154,12 +175,48 @@ public:
         std::vector<ColorSource*> color;
         std::vector<HeightSource*> height;
         std::vector<FieldSource*> field;
+        // M9ak: THE GATE. Parallel to `color`. A layer's paint weight is MULTIPLIED by the
+        // coverage of its gate, per texel, which is a different composition from the stack's
+        // own paint-over: the stack resolves who is on top, a gate resolves whether a layer
+        // is ALLOWED HERE AT ALL.
+        //
+        // The user's rule, in their words: "the GIS mask gates, the height band refines". The
+        // survey says where water can be; the bed classifier's height-band alpha says where
+        // exactly the waterline falls INSIDE that. Neither can do the other's job -- GSHHG at
+        // 1:250k cannot place a waterline to the metre, and a height threshold alone cannot
+        // tell an inland hollow below +1.2 m from the sea.
+        //
+        // A gate source is a member of `color` (so it earns a cache identity and its own tree)
+        // but is never painted, and a gate that does not reach a tile has NO OPINION -- factor
+        // 1, not 0. A missing gate must never delete data.
+        std::vector<int> gateOf;         // index into `color`, or -1 for ungated
+        std::vector<uint8_t> gateOnly;   // 1 = this layer only gates; it paints nothing
     };
+    // layer's weight *= gate's coverage. Both are indices into the channel's colour stack.
+    void SetColorGate(int channel, size_t layer, size_t gate);
     // Public for the selftest: the soak rule is a CONTRACT, and contracts get pinned.
     const Channel& ChannelAt(int id) const { return m_channels[id]; }
     int ChannelCount() const { return static_cast<int>(m_channels.size()); }
+    // THE SOAK RULE'S MEMBERSHIP TEST, public so the tile trees apply the identical rule: a
+    // footprint (degrees) belongs to a tile if it is global, or overlaps by >= ~2 texels in
+    // some axis. A tree that used a looser test painted a speck of ortho into a coarse cube
+    // tile the incumbent never painted -- 27/255 on 567 texels, found by the audit.
+    static bool Touches(double lon0, double lat0, double lon1, double lat1, const TileBox& b);
     uint64_t ColorSubset(const Channel& ch, const TileBox& box,
                          std::vector<size_t>& included) const;
+    // The one colour paint loop, exposed so anything that composes must go through THIS walk
+    // rather than writing a second one that can drift from it.
+    void PaintColorTile(const Channel& ch, const ColorFrame& frame, const TileRequest& r,
+                        const TileBox& box, const std::vector<size_t>& inc,
+                        std::vector<uint8_t>& out, bool& complete) const;
+    // ONE source over the same addresses -- what a per-source tree stores (SourceTree.h). RGB
+    // is the source's own bytes, untouched; ALPHA IS THE PAINT WEIGHT, quantized, because the
+    // stack's feather lives in the weight and a tree that dropped it could not be composed
+    // afterwards. `anyCover`/`fullCover` are what let the composite decide, per tile, between a
+    // REFERENCE to this tree and a genuine composition.
+    static void PaintSourceTile(ColorSource* src, const ColorFrame& frame, const TileRequest& r,
+                                const TileBox& box, std::vector<uint8_t>& out, bool& complete,
+                                bool& anyCover, bool& fullCover);
     uint64_t HeightSubset(const Channel& ch, const TileBox& box,
                           std::vector<size_t>& included) const;
     uint64_t FieldSubset(const Channel& ch, const TileBox& box,
@@ -180,6 +237,15 @@ private:
     //    into a cache HIT -- redundant paints never run;
     //  * tiles a source never touched keep their identity forever.
     // (ColorSubset/HeightSubset implement it; declared public above for the selftest.)
+    // M9ai: the archive for one realization, opened once and cached. Returns true and fills
+    // `loc` when the tile is present under the CURRENT subset -- the caller then returns
+    // without reading, and the bytes stay on disk for DirectStorage. A missing archive, or a
+    // tile painted after the last pack, simply misses and the loose-file path runs.
+    bool TryArchive(const Channel& ch, const char* realization, const TileRequest& r,
+                    uint64_t subset, TileLoc* loc);
+    std::map<std::string, TileArchive> m_archives;
+    std::mutex m_archiveMx;
+
     std::string CachePath(const Channel& ch, const char* realization, const TileRequest& r,
                           uint64_t subset) const;
     bool ReadCached(const std::string& path, std::vector<uint8_t>& out);
@@ -215,6 +281,64 @@ struct ComposedSurfaceCb {
     uint32_t u4[4];   // M7f: detail color window (z17) SRV + residency, fine edit mask SRV
     float det[4];     // detail uv from window uv: offset xy, scale z; w = fine edit mask on
     float ed[4];      // fine edit mask box in window uv: offset xy, scale zw
+    uint32_t u5[4];   // M9ap PAGES: colour array SRV, array residency SRV, window slice,
+                      // detail slice. u5[0] == ~0 means the old three-tenant path.
+    uint32_t u6[4];   // M9aq HEIGHT PAGES: height array SRV, array residency SRV, window
+                      // slice. u6[0] == ~0 means the old cube + window tenants.
+};
+
+// ================================================================================================
+//  ColorFrame - M9aj: THE FRAME, SAID ONCE.
+//
+//  CubeColor and WindowColor each carried their own copy of three things: the tile's lat/lon
+//  BOX (for the soak rule), the per-texel lat/lon, and the ground resolution the sources are
+//  asked at. Two copies of one geometry is how the globe and the terrain came to disagree about
+//  where the coast was (the M6h glitch), and the per-source trees below need a THIRD caller --
+//  which is the moment to stop copying it.
+//
+//  A frame is (kind, tile extent, and either a cube face dimension or a Mercator origin+zoom).
+//  It is the whole of what a realization's addressing means, it is cheap to pass by value, and
+//  Tag() is the cache identity the frame demands: a tile's content is a pure function of
+//  (org, zBase, mip, x, y) plus the stack, so org and zBase belong in the folder name (M7x).
+// ================================================================================================
+struct ColorFrame {
+    enum class Kind : uint8_t { Cube, Window };
+    Kind kind = Kind::Cube;
+    uint32_t texW = 128, texH = 128;   // texels per 64 KB tile (RGBA8 128x128; R16F 256x128)
+    uint32_t faceDim = Compositor::kFaceDim;   // Cube
+    long long orgPxX = 0, orgPxY = 0;          // Window: origin in zBase Mercator pixels
+    int zBase = 14;
+
+    static ColorFrame Cube(uint32_t faceDim, uint32_t texW = 128, uint32_t texH = 128) {
+        ColorFrame f;
+        f.kind = Kind::Cube;
+        f.faceDim = faceDim;
+        f.texW = texW;
+        f.texH = texH;
+        return f;
+    }
+    static ColorFrame Window(long long orgPxX, long long orgPxY, int zBase,
+                             uint32_t texW = 128, uint32_t texH = 128) {
+        ColorFrame f;
+        f.kind = Kind::Window;
+        f.orgPxX = orgPxX;
+        f.orgPxY = orgPxY;
+        f.zBase = zBase;
+        f.texW = texW;
+        f.texH = texH;
+        return f;
+    }
+
+    // What a source is ASKED at. The cube's finest is bounded by the face dimension; a window's
+    // is its zoom base, which is how a realization demands detail the cube can never demand.
+    double GroundRes(uint32_t mip) const;
+    // The tile's angular box + per-texel span -- the soak rule's input.
+    void Box(const TileRequest& r, Compositor::TileBox& box) const;
+    // One texel's centre, in the WGS84 exchange frame every source answers in.
+    void Texel(const TileRequest& r, uint32_t px, uint32_t py, double& latRad,
+               double& lonRad) const;
+    // The realization's cache folder name -- "cube16k", "window_z14_1263360_1538048".
+    std::string Tag(const char* kindName = "window") const;
 };
 
 // The compositor's --selftest gate (ComposeTest.cpp): paint order, per-pixel weights, alpha,
@@ -222,6 +346,8 @@ struct ComposedSurfaceCb {
 // isolation. Returns false (and logs FAILs) if any contract is broken.
 bool RunComposeSelfTest();
 
+// M9ap: when `window == colorCube` (and detailWin likewise) the colour is ONE page tenant
+// and winSlice/detSlice name the Mercator pages inside it; the shader takes the pages path.
 void FillComposedCb(ComposedSurfaceCb& cb, const ResidencyManager* rm, int colorCube,
                     int window, int heightCube, int heightWindow, double orgPxX,
                     double orgPxY, double sizePx, int zBase, double planetR,
@@ -229,6 +355,8 @@ void FillComposedCb(ComposedSurfaceCb& cb, const ResidencyManager* rm, int color
                     bool stencilOverlay, uint32_t gisWinSrv = UINT32_MAX,
                     uint32_t gisGlobSrv = UINT32_MAX, int detailWin = -1,
                     const double* detOrgPx = nullptr, int detailZ = 17,
-                    uint32_t editMaskSrv = UINT32_MAX, const float* editBox = nullptr);
+                    uint32_t editMaskSrv = UINT32_MAX, const float* editBox = nullptr,
+                    uint32_t winSlice = UINT32_MAX, uint32_t detSlice = UINT32_MAX,
+                    uint32_t hgtWinSlice = UINT32_MAX);
 
 }  // namespace ga

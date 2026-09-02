@@ -52,6 +52,16 @@ public:
     // M5c: the shallow-water solver (owned by main; recorded into this layer's command list
     // each frame) and the CPU bathy grid the swell-shadow march walks.
     void SetSwe(SweSolver* swe) { m_swe = swe; }
+    // M9ar: the churn kernel's bed -- slice `slice` of the height page tenant, residency-clamped.
+    void SetHeightPage(ID3D12Resource* heightArr, ID3D12Resource* resMapArr, uint32_t slice,
+                       uint32_t mips, double orgPxX, double orgPxY) {
+        m_hgtArr = heightArr;
+        m_hgtRes = resMapArr;
+        m_hgtSlice = slice;
+        m_hgtMips = mips;
+        m_hgtOrg[0] = orgPxX;
+        m_hgtOrg[1] = orgPxY;
+    }
     void SetBathyCpu(const BathyModel* bm) { m_bathyCpu = bm; }
     // M6i: composed channels + survey masks -- the same fill the globe and terrain use.
     void SetComposed(const ComposedSurfaceCb& cs) { m_seaCb.cs = cs; }
@@ -194,6 +204,10 @@ private:
         float misc[4];   // x = chop-band wavenumber (M5c; was deep phase speed)
         float waveD[4];
         float bathyG[4]; // M5c: CUDEM world x0, z0, 1/sizeX, 1/sizeZ
+        // M9ar: THE BED IS THE HEIGHT MEGATEXTURE. world -> lat/lon (orgLat, orgLon, 1/mPerLat,
+        // 1/mPerLon) and the page frame (org px x, y, 1/16384, world px at z14). Appended LAST.
+        float geoA[4];
+        float winA[4];
         float sweM[4];   // M5c: solved-field on, current gain, seaward blend x-range
     };
     struct SpecCbData {
@@ -261,7 +275,12 @@ private:
     GradeBank m_churn;
     Com<ID3D12RootSignature> m_churnRs;
     Com<ID3D12PipelineState> m_churnClear, m_churnUpdate;
-    uint32_t m_churnTable = UINT32_MAX;    // [t1 chop deriv, t2 swe uv, t3 bathy, u0 churn]
+    uint32_t m_churnTable = UINT32_MAX;    // [t1 chop deriv, t2 swe uv, t3 height page,
+                                           //  t4 its residency map (M9ar), u0 churn]
+    ID3D12Resource* m_hgtArr = nullptr;    // M9ar: borrowed from the residency manager
+    ID3D12Resource* m_hgtRes = nullptr;
+    uint32_t m_hgtSlice = 6, m_hgtMips = 7;
+    double m_hgtOrg[2] = {0.0, 0.0};
     bool m_churnSweWired = false;          // t2/t3 start as null views; wired when the solver is
     GpuTexture m_maskTex;                  // tilesX x tilesY R8: residency for the visualizer
     std::vector<uint8_t> m_maskCpu;

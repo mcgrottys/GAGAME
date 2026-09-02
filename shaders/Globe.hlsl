@@ -662,6 +662,7 @@ float4 PsMain(VsOut i) : SV_Target {
         float3 bedAlb = (ComposedColorOn() && gStreamF.z < 0.5f)
                             ? ComposedColor(bedDir)
                             : float3(0.44f, 0.40f, 0.31f);
+        const float3 floorAlb = bedAlb;   // M9av: the floor's dry albedo, before caustics
         // ---- M8 CAUSTICS (ALGEBRA.md caustics; proofs/caustic_jacobian.py). Sunlight
         // refracting at the wave surface converges on the bed; the gain is the inverse
         // ray-map Jacobian in its PHYSICAL form, gain = 1/(1 + h K lap_phys) with the
@@ -717,7 +718,13 @@ float4 PsMain(VsOut i) : SV_Target {
             cg = lerp(1.0f, cg, gBankE.z);   // scene causticStrength
             bedAlb *= lerp(1.0f, cg, saturate(gSunDir.y * 3.0f));
         }
+        const float3 albWater = albSea;   // M9av: the water's hue, before the bed term
         albSea = lerp(albSea, bedAlb, Tw);
+        // M9av: past the depth the ray resolves, the map draws the floor through this water.
+        if (ComposedColorOn() && gStreamF.z < 0.5f) {
+            albSea = SeafloorReliefMod(albSea, albWater, floorAlb, hp,
+                                       1.0f - (Tw.x + Tw.y + Tw.z) / 3.0f);
+        }
         // M9: sea ice sits ON the water -- after every water term, before foam (foam on top of
         // ice is still foam). The concentration is the coverage fraction, so the lerp IS the
         // physics; no threshold, no ice "texture" the data does not contain.
@@ -935,8 +942,8 @@ float4 PsMain(VsOut i) : SV_Target {
             if (all(duvL > 0.0f) && all(duvL < 1.0f)) lc = float3(duvL, 0.0f);
         } else if (lensId == 3) {
             const float2 duvL = CsWindowUv(up);
-            if (gCsU2.w != 0xFFFFFFFFu && all(duvL > 0.0f) && all(duvL < 1.0f)) {
-                const float mL = CsHave2D(gCsU2.w, duvL);
+            if (CsHeightWindowOn() && all(duvL > 0.0f) && all(duvL < 1.0f)) {
+                const float mL = CsHaveHeightWin(duvL);
                 lc = lerp(float3(0.1f, 0.85f, 0.25f), float3(0.9f, 0.12f, 0.1f),
                           saturate(mL / 7.0f));
             }
@@ -1010,7 +1017,7 @@ float4 PsMain(VsOut i) : SV_Target {
     // physics that a mosaic cannot know owns the last few hundred metres, the mosaic owns the
     // aerial, and the crossfade between them is the ONE distance ramp.
     const float distC = length(i.rel);
-    if (gStreamF.z < 0.5f && landness > 0.0f && distC < 2700.0f && gCsU2.z != 0xFFFFFFFFu) {
+    if (gStreamF.z < 0.5f && landness > 0.0f && distC < 2700.0f && CsHeightWindowOn()) {
         const float2 wuv = CsWindowUv(up);
         if (all(wuv > 0.0f) && all(wuv < 1.0f)) {
             const float2 grF = ComposedHeightGrad(up, -8.0f);   // true slope, finest resident

@@ -46,14 +46,20 @@ private:
 // Serves ETOPO 2022 (Earth) and MEGDR MOLA (Mars) -- one structure, two planets.
 class EquirectHeightSource : public HeightSource {
 public:
+    // datumShiftM: metres ADDED to every sample to express the grid in the stack's datum.
+    // ETOPO is MSL/geoid referenced and the rest of the earth stack is NAVD88, so the earth's
+    // ETOPO layers carry the published MSL -> NAVD88 link here rather than leaving every
+    // consumer to blend two datums as if they were one. Mars passes 0: an areoid has no NAVD88.
     EquirectHeightSource(const char* name, const char* structure, double cmPerPixel,
-                         const std::vector<int16_t>* elev, int nx, int ny);
+                         const std::vector<int16_t>* elev, int nx, int ny,
+                         double datumShiftM = 0.0);
     const SourceInfo& Info() const override { return m_info; }
     float Sample(double latRad, double lonRad, double groundResM, float& metres) override;
 
 private:
     const std::vector<int16_t>* m_elev;
     int m_nx, m_ny;
+    double m_datumShift = 0.0;
     SourceInfo m_info;
 };
 
@@ -63,7 +69,8 @@ class WindowHeightSource : public HeightSource {
 public:
     WindowHeightSource(const char* name, const char* structure, double cmPerPixel,
                        const std::vector<int16_t>* elev, int nx, int ny, double lon0,
-                       double lat1, double dLon, double dLat, double featherFrac = 0.04);
+                       double lat1, double dLon, double dLat, double featherFrac = 0.04,
+                       double datumShiftM = 0.0);
     const SourceInfo& Info() const override { return m_info; }
     float Sample(double latRad, double lonRad, double groundResM, float& metres) override;
 
@@ -71,6 +78,7 @@ private:
     const std::vector<int16_t>* m_elev;
     int m_nx, m_ny;
     double m_lon0, m_lat1, m_dLon, m_dLat, m_feather;
+    double m_datumShift = 0.0;
     SourceInfo m_info;
 };
 
@@ -170,6 +178,33 @@ private:
     std::vector<Rule> m_rules;
     std::vector<Zone> m_zones;
     double m_full0 = -9.0, m_full1 = 0.4, m_off0 = -14.0, m_off1 = 1.2;
+    SourceInfo m_info;
+};
+
+// M9av: THE SEAFLOOR'S APPEARANCE, FROM THE BATHYMETRY THE PROJECT ALREADY INGESTS. No seafloor
+// imagery exists in data/ (the ocean floor has no photographs), so its texture is a PRODUCT of
+// the height stack -- ETOPO, the NE 15 s grid and CUDEM, whichever is finest under the texel:
+// relief = the gradient of the bed (the grade-1 part of its derivative) lit by one fixed
+// cartographic sun, times a dry sediment ramp keyed on datum depth (sand on the shelf, silt on
+// the slope, clay on the plain). Global footprint; the alpha is the same waterline band the bed
+// classifier hands land back through, with NO deep cutoff: the tree paints every ocean texel.
+// DRY albedo, like synth.bed: the water's optics (measured K_d, the two-flux endpoint) stay the
+// renderer's, and where they make the water opaque the renderer shades the endpoint by this
+// relief instead of replacing it (Compose.hlsli SeafloorReliefMod).
+class SeafloorReliefSource : public ColorSource {
+public:
+    bool Load(const std::string& rulesPath, const Compositor* comp, int hgtChannel);
+    const SourceInfo& Info() const override { return m_info; }
+    float Sample(double latRad, double lonRad, double groundResM, const PaintCtx& ctx,
+                 uint8_t rgba[4]) override;
+
+private:
+    const Compositor* m_comp = nullptr;
+    int m_hgtCh = -1;
+    double m_full1 = 0.4, m_off1 = 1.2;       // the waterline band (metres, datum)
+    double m_azDeg = 315.0, m_elDeg = 45.0;   // the cartographic sun
+    double m_exagg = 25.0;                    // vertical exaggeration on the gradient
+    double m_ambient = 0.45;
     SourceInfo m_info;
 };
 

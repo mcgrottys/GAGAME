@@ -711,3 +711,1044 @@ yet wired to this bank.
 
 So: the pipeline is proven end to end on one page. Making the fallback unnecessary is a matter
 of pages, not of mechanism.
+
+## 25. The bed through the GA path, and what the disagreement revealed
+
+`TerrainLayer::BuildBedBank` builds the CUDEM bed the way every 2D source is supposed to
+arrive -- GA Load (`GeoGridLoader`), GA Compose (`RasterSource` through `DomainCompositor`),
+DirectX sparse structure (a paged `GradeBank`: reserved array, mip chain, pinned floor,
+residency map) -- **alongside** the committed texture, and reports the worst disagreement:
+
+    [bed] GA path: 1863x1174, 6 levels, 2187162/2187162 texels covered at L0,
+          worst |GA - committed| = 28.3231 m (DIVERGENT -- do not switch consumers)
+
+Nothing switched. The bed feeds the solver, the sea shader, the water bank and the globe, so a
+silent half-texel slide there moves a coastline everywhere at once -- which is exactly why the
+new path was built beside the old one with a number attached rather than swapped in.
+
+### The 28 m is not a bug in the GA path
+
+    [bathy] realized from the height channel: 395205 moved (152351 by >0.5 m,
+            worst 29.1 m: feathers + hand-edit structures)
+
+The GA path reproduces the FILE exactly. The engine's bed is that file **realized against the
+composed height channel** -- survey edits and feathering laid over CUDEM -- and 28.3 sits
+inside that 29.1. The two paths disagree by precisely the step the GA path does not perform.
+
+**And that step is a composition.** Survey edits over a base grid, resolved by authority, is
+what `DomainCompositor` exists to do: the edits are a second source with higher priority, and
+the feather is the weight ramp it already implements. Today it runs as a post-process inside
+`BathyModel`, which is why a compositor that has never heard of it cannot reproduce the result.
+
+So the finish is not to make the GA path imitate the realization -- it is to move the
+realization INTO the compositor as a source, at which point the disagreement should collapse
+and the committed texture becomes redundant rather than authoritative.
+
+That is the shape of every remaining conversion in section 22: not "read the same bytes
+sparsely", but "make the thing that edits the bytes a source".
+
+## 26. The normalization stage, and composition as a reverse tree
+
+The pipeline was always stated as five arrows:
+
+    GA Load -> GA Unit/Scale/Projection normalize -> GA Compose -> GA physics -> sparse GPU
+
+The second arrow did not exist. `GeoRef::valueUnit` was written by every loader, logged once at
+boot, and read by nothing; `DomainCompositor::Add` said *"a product carries one grade and one
+unit"* while checking only grade and channel count. A bed in `m NAVD88` and a survey in `ft MLLW`
+would have composed to full coverage and a number that is neither.
+
+`src/core/GaUnits.h` is that arrow. `Quantity` says what a number IS; `UnitSpec` parses a
+`valueUnit`, carries a factor to SI and a vertical datum, and `AcceptsFrom` converts across a
+scale but refuses across a quantity or a datum.
+
+**Why it is its own stage.** A loader must report its file faithfully, units it cannot convert
+included — converting there erases the provenance that makes a refusal explainable, and "this
+file is feet" is the useful half of the error. A compositor sees floats, by which point the unit
+is already gone. So it sits between them, and `Add()` now enforces both halves it promised —
+including refusing a *convertible but unnormalized* source, because a stage that can be skipped
+is not a stage.
+
+### The reverse tree
+
+A `DomainCompositor` was a leaf-eater: sources in, page out, nothing downstream could consume a
+composed product except the GPU. `CompositeSource` makes a compositor a source. Three things
+follow: composites **nest**; the unit check **composes with them**, so a wrong datum four levels
+down is caught at the edge that introduced it; and every node declares a **cadence**, which is
+the gantt column — the bed composes once, the tide is a function of `t`.
+
+`PrintTree` walks the live graph, so a mis-wired node shows up there before it shows up in pixels.
+
+### The tide step
+
+Depth is not a dataset anyone ships. It is water level minus bed — two quantities, two vertical
+datums, two domains, two clocks. A compositor resolves *disagreement about one quantity*;
+`BinaryFieldSource` combines *two quantities into a third*, and its coverage multiplies rather
+than averages, because a depth is meaningful only where both operands are known.
+
+Subtracting two levelled heights yields a **thickness with no datum**, and the unit algebra
+records that — so the result refuses to compose with anything still carrying one.
+
+### The datum rule caught its own author first
+
+`TideSource` originally emitted NAVD88 directly, applying each station's published CO-OPS link and
+dropping any station without one. That looked more rigorous and measured **1.7346 m worse**:
+
+    [tide-src] 2 stations usable in NAVD88 (18 dropped: no published NAVD link)
+
+Only 2 of 20 stations carry a link, and **Newburyport — the focus, whose harmonics actually
+describe this estuary — is not one of them.** The water level was being interpolated from
+Riverside and Boston. The curve came from the wrong place in order to avoid guessing a constant.
+
+So a source reports what its data says, in the frame its data is in, and a missing link is a
+reason to make somebody **declare** it rather than to discard a good tide curve.
+`DeclareDatumLink` takes the offset and a provenance string and prints both every run. It is
+handed main's own `ResolveDatum` result — an estimate that was always there, hand-carried in a
+`BathyModel` comment. It is now an edge with a type on both ends.
+
+    [datum] no NAVD link at Newburyport; MLLW - NAVD88 = -1.396 m via NAVD=MSL+0.092 (from Boston)
+    [datum-link] tide.mllw: MLLW -> NAVD88, -1.3960 m -- declared, not derived
+    [tree] node                       kind       domain  unit                       cadence
+    [tree] water.depth                subtract   point   m [length]                 per-instant
+    [tree]   +- tide.mllw             normalize  point   length NAVD88              per-instant
+    [tree]     +- tide.mllw           load       point   length MLLW                per-instant
+    [tree]   +- merrimack             load       raster  m NAVD88                   static
+    [tree] MLLW tide - NAVD88 bed: refused, as it must be
+    [tree] 24 hourly probes at Newburyport: worst |tree - engine| level 0.0000 m,
+           depth 0.0000 m (equivalent)
+
+Equal to the engine's own water level to the printed digit — through a graph that states its
+units, its datums, and which of its numbers is an assumption.
+
+## 27. The realization moved into the compositor, and the bed converged
+
+Section 25 left the GA bed **DIVERGENT at 28.3231 m** and named the cause: the engine's bed is
+not a file. `BathyModel::RealizeFromChannel` *overwrites every cell* with
+`Compositor::SampleHeightStack`, so the authoritative bed is a six-layer composite and the GA
+path had exactly one of those layers.
+
+    L0 noaa.etopo2022        4.9 km   global floor
+    L1 noaa.etopo15s.ne      461 m    regional
+    L2 noaa.cudem.capeann    13.7 m
+    L3 noaa.cudem.boston     13.7 m
+    L4 noaa.cudem.merrimack  13.7 m   <- the one layer the GA path had
+    L5 survey.edits          5 m      hand-edit polygons -- "THE LAW"
+
+`HeightStackSource.h` adapts each existing `HeightSource` into a `DomainSource`. Nothing is
+reimplemented — every layer still answers through the same `Sample()` the renderer calls — so
+there is no second copy of the resample, the feather, or the edit polygons to drift out of step.
+The fix was never "read the same bytes sparsely"; it was "make the thing that edits the bytes a
+source".
+
+### The blend rule had to move too
+
+This was the subtler half. `SampleHeightStack` is a sequential **over** in layer order:
+
+    h += (m - h) * w          for each layer, bottom to top
+
+while `DomainCompositor`'s native rule is priority-bucketed weighted **average**. Those agree
+only where every weight is 0 or 1 — and disagree *precisely across a feather*, which is where a
+survey edit meets the grid beneath it, and where the 28 m lived. Averaging would have pulled the
+edit toward the CUDEM under it instead of laying it over. Hence `Blend::LayeredOver`.
+
+### The datum: a real number, not a label
+
+The unit stage refused the stack outright, and it was right to. CUDEM and the edits are NAVD88;
+the two ETOPO layers are MSL/geoid referenced. The engine has always blended them as one height.
+
+Labelling that with a zero shift would have been documentation, not a fix. The real number turned
+out to be **already on disk** — CO-OPS publishes a station's datums on one staff, and Boston's
+cached `datums_metric.json` carries both:
+
+    MSL 2.660    NAVD88 2.752   ->   NAVD88 zero sits 0.092 m ABOVE local MSL
+
+so an MSL height becomes NAVD88 by subtracting 0.092 m. `main::ResolveDatum` already derived this
+same quantity from the same data; `NavdAboveMsl` now factors it out, so there is one derivation
+and two consumers — the tide's MLLW link and the bed's MSL link.
+
+Its limit is stated because it is real: local MSL is not the global geoid, and the separation
+varies across the domain. This is the best published number available short of GEOID18 or VDatum.
+
+### Fidelity and correctness, measured separately
+
+Two questions hide in one number, and answering them together would let each excuse the other.
+So the stack is composed **twice**:
+
+    [bed] realization fidelity: worst |GA(link=0) - committed| = 0.0000 m
+          (EQUIVALENT -- the six-layer stack is reproduced)
+    [bed] GA path: 1863x1174, 6 levels, 6 layers, 2187162/2187162 covered at L0 --
+          SAFE TO SWITCH: stack reproduced exactly, and the shipped bed adds the datum link
+    [bed] shipped GA bed vs committed: 0.0920 m, all of it the published MSL -> NAVD88 link
+          the committed bed omits (it blends MSL-referenced ETOPO as if it were NAVD88)
+    [bed] datum sensitivity: 1.000 m of MSL error moves the bed by at most 1.0000 m
+          (mean 0.0781 m)
+
+**28.3231 m → 0.0000 m.** With the link at zero the GA path reproduces the engine's bed exactly,
+which is the proof that the realization moved. The shipped bed then differs by 0.0920 m, and that
+difference is a **finding about the committed bed**, not an error in this path: the engine's bed
+carries a 9.2 cm datum error wherever ETOPO shows through.
+
+The sensitivity probe is what makes that claim quantitative rather than rhetorical. Displacing
+only the MSL-referenced layers by a whole metre moves the finished bed by at most 1.0 m and by
+0.078 m on average — so ETOPO holds full authority somewhere (outside CUDEM's footprint) and is
+painted over almost everywhere else. The datum question is settled *where it matters* by
+measurement instead of by argument.
+
+Consumers are **not** switched. That is a separate change, with the solver, the sea shader, the
+water bank and the globe all reading the bed at once.
+
+## 28. The datum fixed at the source, the switch, and nodata through the chain
+
+### The correction went where every consumer sees it
+
+Section 27 found the engine's bed carried a 9.2 cm error wherever ETOPO showed through.
+Correcting it only in the GA adapter would have fixed one bank and left the renderer, the cube,
+the window and every other reader of the height stack still wrong — which is *worse* than being
+consistently wrong, because then the two disagree.
+
+So `EquirectHeightSource` and `WindowHeightSource` take a `datumShiftM` and apply it in
+`Sample()`. `main` derives the link once (`NavdAboveMsl`, from CO-OPS station datums already
+cached on disk), logs its provenance, and hands it to the two ETOPO layers:
+
+    [datum] height stack: MSL -> NAVD88 = -0.092 m, from CO-OPS published datums at Boston
+            (regional, not GEOID18) -- applied to the ETOPO layers at the source
+    L0 noaa.etopo2022    EPSG:4326 equirect, vdatum -0.092 m -> NAVD88
+    L1 noaa.etopo15s.ne  EPSG:4326 window (row 0 N), vdatum -0.092 m -> NAVD88
+
+`kComposeVersion` moved 3 → 4: a datum shift is a paint-math change, so every composed height
+tile repaints once. The GA adapter then *stopped* applying its own link — with the sources
+honest it would have corrected twice — and the bed comparison became direct again at 0.0000 m.
+
+### Nodata, at the texel
+
+Two real bugs, both introduced by the compositing work itself:
+
+**Absence was being written as zero.** `ComposePage` filled uncovered texels with `0.0` — and
+zero is a *legal value* for nearly every field it composes. A bed at 0 m is sea level; a current
+at 0 m/s is slack water. Absence became indistinguishable from data, with no way to recover the
+difference downstream. It now takes a `nodata` parameter, and the bed passes `-9999`,
+`BathyModel`'s own sentinel, so both paths agree on what absence looks like.
+
+**Partial coverage was dragging values toward zero.** `LayeredOver` accumulated from zero, which
+is compositing over *transparent black*: a texel 30% covered came out as `0.3 × value`. It now
+un-premultiplies by accumulated coverage. This does not move the bed — ETOPO covers the globe at
+`w=1`, so the divisor is 1 — it matters exactly where the old form was silently wrong.
+
+### And through the chain
+
+`MipReduce.hlsl` gained a coverage-weighted variant. The plain box average is correct only when a
+null texel *means* zero. The moment a bank carries coverage, averaging four texels of which two
+are absent halves the value and reports it as fact — and the error **compounds upward**, so the
+coarsest mips (the pinned floor, which is what a distant sample actually reads) end up the most
+corrupted. That is backwards from every other error in the system.
+
+Value channels are now weighted by coverage; coverage itself averages plain, because it is the
+fraction of the coarse texel that had data. The velgrad bank declares channel 2 and uses it.
+
+### The switch, done without touching a shader
+
+A paged bank is a `Texture2DArray` and every bed consumer reads a `Texture2D` — but in D3D12
+those are the same resource type, so a `TEXTURE2D` SRV over the array views slice 0 and every
+consumer works untouched.
+
+That is worth more than tidiness. Switching the bed is the highest-blast-radius change in the
+engine — solver, sea shader, churn kernel, water bank, globe — and doing it *without editing a
+shader* means that if anything moves on screen, the bank's **content** is the only possible
+cause. And its content was already proved equal at 0.0000 m across all 2,187,162 texels.
+
+    [bed] consumers bound to the GA sparse bank (slice 0)
+
+### Recordings report their cost
+
+A rail is the only run long enough and varied enough — orbit to helm, every residency regime in
+one take — for frame time to mean anything, and it is exactly the run nobody measures because
+they are watching the pictures.
+
+Percentiles, not a mean: a rail crosses regimes deliberately, so an average describes no moment
+that ever happened. The worst frame's **index** is reported because that is the half that makes
+it actionable — a spike at frame 600 is the 80 km → 7 km descent paging in; a spike at 1100 is
+helm-height water detail, and they have different fixes.
+
+The first measurement immediately caught a comment of mine lying. `dt` spans the whole loop and
+therefore carries the *previous* frame's PNG encode, which at 1600×900 is tens of milliseconds of
+the **recorder's** cost — reporting that as frame time would have slandered the engine. Both
+clocks are kept now: `renderMs` brackets `RenderFrame` alone and judges the engine, `dt` judges
+the capture, and their difference is printed. The per-frame series lands in `metrics.csv` beside
+the frames, because a summary answers *was it smooth* and only the series answers *where did it
+stop being smooth*.
+
+## 29. The three trees, and the reference that costs nothing
+
+The pipeline has been stated the same way for months:
+
+    1. INGEST      GeoTIFFs; Google tiles  ->  raw files in a local cache
+    2. NORMALIZE   to the body's scale, units, projection
+                   ->  cached as its OWN sparse GA tree on disk
+    3. COMPOSE     the trees  ->  ONE composite sparse GA tree
+                   (tile REFERENCES into the input trees, and genuinely composited tiles
+                    cached only where they OVERLAP)
+
+**Stage 2 had no output.** `GaUnits`/`NormalizeToSi` converted at *sample* time and nothing kept
+the result; `cache/composed/<channel>/<realization>/` held only the finished blend. Everything
+odd about that cache follows from the missing middle.
+
+### What the missing middle costs, counted
+
+A composed tile's filename carries the source-SUBSET hash it was painted from, and
+`SubsetSeed` folds in `kComposeVersion`. So a change to the **blend** re-identifies every tile in
+the channel. Reconstructing the hashes offline against the cache on this machine:
+
+    cube16k    4340 tiles   271 MB
+               2429 = google-only at compose v4
+               1792 = google-only at compose v3   <- superseded by a version bump alone
+                119 = everything else
+
+97.3% of the global cube has exactly one source in it and cannot be changed by a blend edit, and
+41% of it is a repaint that was owed to nothing.
+
+### A source tree is identified by the source
+
+`SourceTree` (`src/compose/SourceTree.h`) stores one source's tiles on the shared addresses. Its
+identity is `name | structure | kSourceTreeVersion` and **nothing about the stack above it** —
+`kSourceTreeVersion` is deliberately *not* `kComposeVersion`, because coupling them would
+reintroduce exactly the orphaning the split exists to stop.
+
+RGB is the source's own bytes. **Alpha is the paint weight**, because the stack's feather lives
+in the weight and a tree that dropped it could not be composed afterwards.
+
+A source that declares a tile in its footprint and then does not reach it writes a **zero-byte
+`.void` entry** instead of 64 KB of zeros. 1893 of those exist so far: 118 MB of nothing not
+written down. Storing zeros to say "nothing here" is the opposite of a sparse tree.
+
+### The reference is computed, not stored
+
+Where exactly one source covers a tile **and claims every texel outright**, the composite *is*
+that source's tile: the lerp from black by weight 1 is the identity, and the composite's alpha
+(255 wherever anything covers) is the weight the tree already holds. So the composite returns
+those bytes and writes nothing.
+
+A marker file per referenced tile would carry no information `ColorSubset` does not already
+produce, from declared footprints, in microseconds, with no filesystem contact. So there is one
+directory entry saved per reference and, more to the point, nothing on disk that can go stale.
+
+`fullCover` is the test, and it is **computed from the tile**, never assumed from the footprint.
+It has to be: the composite starts from black, so a *lone* source at weight 0.5 composites to
+half its own colour. A reference over a feather would be a quietly brightened coastline.
+
+### The number
+
+`--tree-audit N` walks the composed cache, keeps every tile whose filename still carries the
+subset the compositor would use **today** (a stale one would only measure an old stack), and asks
+the tree path for the same address. It strides across the whole folder rather than taking the
+first N, because directory order is dominated by the coarse mips — which are exactly the case
+that is trivially exact.
+
+    earth.color/cube16k       2454 tiles, 2441 byte-identical, 0.0041% of texels differ,
+                              2441 referenced,   13 composed
+    earth.color/window z14    2290 tiles, 1393 byte-identical, 1.4353% differ,
+                              1304 referenced,  986 composed
+    earth.color/window z17    3740 tiles, 1996 byte-identical, 2.4189% differ,
+                               729 referenced, 3011 composed
+    TOTAL                     8484 tiles, 5830 byte-identical (68.7%), 52.7% referenced,
+                              worst |direct - tree| = 1/255 over 139,001,856 texels,
+                              0 alpha mismatches
+
+**Not one texel moves by more than a single LSB**, and it is the alpha quantization and nothing
+else. The bound is analytic: the composite lerps by `w`, so half an alpha step moves a channel by
+at most `|rgba - acc| / 510` — under one LSB, and only where `0 < w < 1`. Every source that
+answers 0 or 1 round-trips exactly, which is why the cube (google alone, weight 1) is 99.5%
+byte-identical and the windows — feathered ortho, the bed's intertidal alpha ramp — are not.
+
+Through the renderer, with the trees warm:
+
+    globe still (--campos 0,0 --cam 200000,0,0 --frames 30):     0 of 1440000 pixels differ
+    helm still  (--campos 120,-10 --cam 7,92.5,-1.5 --frames 6): 2 of 1440000 differ, by 1/255
+
+### What it costs, honestly
+
+1057 MB of trees for the 8484 addresses the incumbent stores in 530 MB of current tiles. **Two
+times the bytes where sources overlap** — which is what "composited tiles cached only where they
+OVERLAP" *means*, since the overlap regions now hold each input as well as the product. Against
+the incumbent's actual on-disk state (1001 MB, 471 MB of it superseded) it is a wash today, and
+the asymmetry is in what happens next: a blend edit re-composes; it does not repaint.
+
+### The frame had to be said once first
+
+`CubeColor` and `WindowColor` each carried their own copy of the tile's lat/lon box, the
+per-texel lat/lon, and the ground resolution — and the paint loop under them was duplicated
+verbatim. Two copies of one geometry is how the globe and the terrain came to disagree about
+where the coast was (§ the M6h glitch), and a per-source tree is a *third* caller of exactly that
+math. `ColorFrame` is (kind, tile extent, and either a cube face dimension or a Mercator origin
+plus zoom base); `Compositor::ColorRealization` is both old functions with a frame filled in.
+Both standard stills came out bit-identical across that refactor.
+
+### What this buys
+
+The megatexture is the point. A land/sea mask arriving as a GIS tree and a seafloor arriving as
+its own tree compose with these by reading 64 KB and writing 64 KB — no reprojection, no HTTP, no
+resample, and no source sampled twice. Composition stops being a thing that repaints the planet
+and becomes a thing that reads it.
+
+### Not yet
+
+`--color-trees` is **off by default**. Two things are unfinished and neither is a defect in the
+above:
+
+1. **A reference still copies bytes.** `TileLoc` can hand DirectStorage a path, an offset and a
+   size, which is exactly what a reference *is* — but `TileArchive::Pack` is hardwired to
+   `cache/composed/<channel>/<realization>` and to a filename carrying a subset hash, and a
+   source tree has neither. Packing the trees turns every reference into a zero-copy NVMe read.
+2. **`TileIndex` does not know about trees.** It scans one realization folder; the composite
+   tree's readiness is the union of its inputs' readiness, which is a different question and
+   wants a different answer.
+
+## 30. The land/sea gate: the survey gates, the height band refines
+
+`synth.bed` is the colour stack's **water authority** — its height-band alpha reclaims everything
+below the intertidal ramp and hands land back to the photos above +1.2 m NAVD. That is a
+threshold on elevation, and a threshold on elevation cannot tell an inland hollow below +1.2 m
+from the sea. The survey can. The survey, at GSHHG's 1:250k, cannot place a waterline to the
+metre. The bed can.
+
+So neither replaces the other, and the user's rule is a **product**:
+
+    bed weight  =  height-band alpha  x  survey water coverage
+
+which is a different composition from the stack's own paint-over. The stack resolves *who is on
+top*; a gate resolves *whether a layer is allowed here at all*. `Channel::gateOf` / `gateOnly`
+plus `SetColorGate` are that, applied identically in `PaintColorTile` and in
+`ColorTreeStack::Compose`, entirely CPU-side at paint time. No shader moved.
+
+### The GIS stays vector
+
+The first cut of this read `data/gis/landmask_ne.raw` — 16 MB of even-odd parity fill, plus 8 MB
+global. The user stopped it, and they were right: those files are a **realization** of the
+survey, at one resolution, in one frame. `GisStencil.h` has said so since it was written — the
+polylines "stay resident as the authority" — and it left a promissory note that GA earns its
+keep here because *spherical polygons are chains of great arcs; incidence and clipping are meets
+and joins*. `GisMask.cpp` cashes it. Neither `.raw` is opened.
+
+    [gismask] VECTOR land/sea: 1298 coast rings, 26788 NHD open-water rings, 4 hand-edit rings,
+              1261898 points -- no .raw parity fill opened
+
+The composition rule was already written down, in `data/gis/survey.json`, as the recipe the
+harvester used: GSHHG coast rings are **land**, NHD open-water polygons **carve** water back out
+of them, and `edits.geojson` polygons are **law** over both — with marsh and wetland deliberately
+excluded because "the live tide owns that call". The same division of labour, one level down.
+
+### Why columns, and where the algebra is real
+
+A point-in-polygon test on a sphere is a crossing count along an arc from the query point. Fill
+the grid by **rows** and that arc is a *parallel* — not a great circle — so every crossing is an
+approximation in the lon/lat chart, worse the longer the edge and the higher the latitude. Fill
+it by **columns** and the arc is a *meridian*, which is a great circle, and the test becomes
+exact incidence:
+
+    edge A->B spans the great circle   n = A ^ B          (the join of two points)
+    the meridian at longitude L is     m = (-sin L, cos L, 0)
+    it crosses iff                     sign(m . A) != sign(m . B)
+    and the crossing point is          d = n x m          (the MEET of the two circles)
+
+Four dot products, one cross product, one `asin` per crossing. No chart, no dateline special
+case, no `cos(lat)` fudge.
+
+**The index is by longitude and only by longitude.** Parity along a meridian depends on every
+edge that crosses it, however far south of the tile — so latitude cannot prune, and must not:
+
+    [gismask] meridian index: 1799 longitude buckets, 91230 coast edges, 1169694 water edges
+              (14.7 MB) -- a column touches ~737 edges, not 1260924
+
+### The grids line up, which is the whole compute saving
+
+The mask is a **layer**, so it gets its own sparse tree on the *same* `(face, mip, x, y)`
+addresses as the imagery and the bed. The meridian sweep therefore happens **once per address,
+ever**. After that the gate is a 64 KB read, and combining the bed with the land textures is a
+per-texel byte multiply — no reprojection, no resample, no second frame to reconcile.
+
+That is also why the mask oversamples its sweep only 2×: `Sample` reads only the cells under
+texel centres, so anything past the tile's own resolution is discarded work. Nearest, never
+interpolated — a gate that blurs is not a gate.
+
+### The composite is keyed by its inputs
+
+`kComposeVersion` re-identified a whole channel when the **blend** changed, and re-identified
+nothing when a **source** did. Both halves are wrong, and the second was a live bug: a
+re-harvested source tree would have been ignored by an already-cached composite.
+
+A composite tile is a pure function of the input tree tiles it consumed plus the rule that
+combined them, so its key is now exactly that — each contributing tree's identity, what that tree
+holds at the address, the gate wiring, and a `kBlendVersion` for the rule itself. **It updates
+when new tiles appear in a source and at no other time.** `SourceTree::Peek` answers from two
+directory lookups, so a warm composite hit costs no tile I/O at all.
+
+### Three bugs, found by looking
+
+1. **The gate silently never entered a single subset.** `GisMaskSource` was constructed *before*
+   `Load()`, so it declared the empty box `GisVectorMask` starts with (lon 180..−180),
+   `SourceTouches` rejected it against every tile, and the gate was built, wired, logged, and
+   never once asked a question. Two A/B renders came back byte-identical and looked like a
+   result. What caught it was a tree directory with **zero files in it**.
+2. **Absent and empty are opposite answers for a gate.** An all-land mask tile stores as a
+   zero-byte `.void`, and `Compose` read absence as *no opinion* — which would have let the bed
+   paint over dry land, the one thing the gate exists to stop.
+3. **After a source is added there is nothing to compare against**, so `--tree-audit` skipped
+   every gated address as stale and warmed none of them. `--warm-trees` composes regardless.
+
+### Measured
+
+Residency-free, tile for tile, the two gated paint loops on the same addresses:
+
+    TOTAL  2602 tiles, 2415 byte-identical (92.8%), worst |direct - tree| = 1/255 over
+           42,631,168 texels, 0 alpha mismatches, 92.7% referenced
+
+The remaining tiles are *stale skipped* — the incumbent has not repainted the region yet, and
+that asymmetry **is** the result. Adding one source cost the tree path one new tree plus a
+recompose of the tiles it touches; it costs the incumbent path a full repaint of every tile the
+new source's footprint can reach.
+
+A rendered A/B was misleading twice before it was useful, both times for the same reason: a cold
+cache is not a pixel difference. `--color-trees` against the incumbent read as *worst 131/255,
+19% of pixels* on empty trees and *0 pixels* once warm; the gated direct path read as *40% of
+pixels* while it was still repainting a region the tree path had already built. **Warm both
+sides, or use the audit, which compares tiles and cannot be fooled by residency at all.**
+
+## 31. The megatexture as the water's graph
+
+The user, twice in one afternoon: *"we should have done most of this work already for the
+water's Sparse GA tree."* Correct. `ComposeTree.h` had already made a compositor a source
+(`CompositeSource`); `DomainSource` already carried the tree, the unit stage and the blend; and
+`SampleBlended` had already been fixed (§27) to un-premultiply by coverage — the exact property
+that lets one composite feed another. §29 built a second graph beside all of it. §31 deletes that
+graph and puts the imagery where the water is.
+
+### The one new piece
+
+The water composes one page over the estuary into RAM. Imagery cannot: a page is 16384², and
+four of them eight mips deep is a billion queries (§25). So the only thing the water's path lacked
+is the **output of every node, on the NVMe, one tile at a time, on the addresses every tree
+shares**. `TileTree` (`src/compose/TileTree.h`) is that and nothing else — it has no blend rule
+of its own. The kernel is `DomainCompositor::OverStep`/`OverFinish`, factored out so the tile-wise
+compose and the point-wise one cannot drift.
+
+### The pipeline, as stated, and where each arrow lands
+
+    INGEST      raw files in a local cache                    the loaders, unchanged
+    NORMALIZE   -> each source's OWN sparse tree on disk       TileTree over a leaf
+    COMPOSE     -> a third tree of REFERENCES into the inputs  TileTree over a compose node
+                   composited tiles only where inputs OVERLAP
+    ...the same again for the seafloor, and for the GIS mask
+    MEGATEXTURE the three trees -> ONE tree for the atlas       TileTree over the root
+
+    [tree] earth.color                compose    raster  sRGB byte [colour]
+    [tree]   +- earth.land            compose
+    [tree]     +- google.satellite    normalize / load
+    [tree]     +- massgis.coq2023     normalize / load
+    [tree]   +- seafloor<gis          gate
+    [tree]     +- earth.seafloor      compose
+    [tree]       +- synth.bed         normalize / load
+    [tree]     +- gis.landsea         normalize / load
+
+Land is the base; the seafloor paints over it with weight = its own height-band alpha × the
+survey's water coverage. Over surveyed water the land goes transparent per pixel and the
+seafloor shows; inland the seafloor is gated out and the megatexture tile is a **reference** to
+the land tree's. The flat incumbent channel stays as the definition the audit compares against.
+
+### The reference is stored
+
+A compose tile that is one input's tile untouched is a zero-byte entry whose *name* carries the
+input tree's identity: `f0_m3_x12_y7_<key>.ref-<childId>`. The composite tree on disk therefore
+describes itself — an index can be built from its folder alone, and a reference resolves to a
+place in the input tree without running the compositor. That is what lets DirectStorage read it
+later: a reference *is* `(path, offset, size)` in someone else's archive.
+
+**Straight alpha makes the reference exact with no full-coverage condition.** `OverFinish`
+divides by the coverage it just multiplied by, so a single-input compose at partial weight *is*
+its input, byte for byte. The lerp-from-black form §29 inherited from the incumbent could not do
+this (a lone layer at w=0.5 composites to half its colour) — priors §18.
+
+### Identity is the inputs
+
+A node's identity folds its children's, recursively (`DomainSource::Identity`). A tile's key
+folds what each child *holds* at that address — content or void. So a composite updates when a
+source's tiles change and at no other time, and `Peek` answers from directory lookups alone.
+
+`GateSource` is a third kind of edge beside compose and subtract: the value is the layer's, only
+the weight is the product. *Absent* (outside the gate's footprint: no opinion) and *void* (inside
+it, covering nothing: blocks) stay different answers, carried in the key.
+
+### Measured
+
+Tile for tile against the incumbent, before warming:
+
+    cube16k     165 tiles, 165 byte-identical, worst 0/255
+    window z14   92 tiles, worst 1/255, 4.37% of texels by one LSB
+    window z17  106 tiles, worst 1/255, 3.80%
+    TOTAL       363 tiles, worst |direct - tree| = 1/255, 0 cover mismatches
+
+The one-LSB texels are the weight quantized at three nodes (bed, gis, gate) instead of one. The
+audit caught two real disagreements first: **27/255 on 567 texels** of one cube tile, because
+`MayCover` admitted a sub-texel ortho the incumbent's soak rule drops (priors §16, fixed with
+`DomainSource::Footprint` + `Compositor::Touches`); and 6–15% of window texels off by one from
+rounding where the reference truncates.
+
+The full warm, 21,508 addresses, is the structure on disk:
+
+    earth.color      11007 ref   3782 composed      74% references
+      earth.land     14108 ref    453 composed      97%
+      earth.seafloor  3977 ref      0 composed     100% -- a compose over one source is free
+      seafloor<gis    2562 void  3781 composed      the gate, void wherever the survey says land
+
+Through the renderer, warm: **globe 0 of 1,440,000 pixels differ; helm 2, by 1/255.** Bench,
+three passes: 4.65 / 4.69 / 4.82 ms mean against the incumbent's 4.75 — no render-time cost,
+because nothing here touches a shader.
+
+### What went wrong, in order
+
+- The graph and its `TileTree` were block-locals; the audit returned from inside the block, the
+  render path left it, and every worker thread dereferenced a freed tree at once. Hoisted.
+- The Scriptorium's Release binary — the one `.mcp.json` launches — had never been built, so the
+  server could not start in any session. Built, reindexed, verified over stdio. Priors §18 is the
+  entry that should have been read first; the memory now says so.
+
+## 32. Ring loads: the instrument first, then the gate, then the picture
+
+The user's frames at t=12 s showed low-resolution tiles popping in around the inlet on the way
+down, and a proposal: do not ask for the finest mip a node needs in one go; do one more pass so
+that neighbouring tiles never differ by more than a mip, and the view refines as an even spread.
+The rule for this repo is instrument before change, so this section is in that order.
+
+### The instrument
+
+`--res-trace` prints, every 30 frames, per texture tenant: the residency **deficit** — tiles in
+the queues (wanted and not mapped) by mip — the queue depths, how many entries are speculative
+or stale, the ring gate's holds, and **where the load slots went**: a provider that returns in
+under 4 ms read a file, one that took longer painted. The picture is made of the deficit; the
+slots are why it is what it is.
+
+Two things it said before the gate existed:
+
+- With the trees warm, **paints are rare** — 14–30 of ~2,000 loads on the rail — at ~4.5 ms
+  each. The popping is not painting.
+- **Reads cost 1.8 ms per 64 KB tile.** That is the per-file open, the cost `TileArchive`'s
+  header names as the one that survives every other optimisation, and it is the lever the
+  user's rule (painted tiles live on disk; DirectStorage loads them) points at.
+
+The instrument had a bug of its own worth recording: it filtered queue entries by a frame stamp
+whose meaning depended on call order, and printed `deficit 0` beside `seen 834`. The queues *are*
+the wanted-and-unmapped set by construction; it now counts them and reports staleness separately.
+
+### The gate
+
+`ResidencyManager::Want()` walks each node's column coarsest-first. With `--ring-loads` a **new**
+request below the coarsest level is admitted only if its parent is already mapped; otherwise it
+is left unstamped and the column stops there, so next frame's walk asks again one ring finer. It
+changes the *queue*, not the invariant — coarse-before-fine mapping was always enforced;
+requesting was not. On a fast descent the near field wanted mip 0 immediately, the whole column
+went into the queue, and the 48 slots filled with finest-mip tiles while the next ring of the
+ground the camera was actually over waited behind them.
+
+Nothing is lost: the node walk repeats every frame, and no slot is ever spent on a tile more than
+one level from being displayable. A half-written version with a `goto` was reverted rather than
+left unmeasured; this one is a flag and a counter.
+
+### The picture, at the same instants
+
+Both arms: warm megatexture trees, the standard rail, one frame dumped per run, and the only
+difference the flag.
+
+    frame 540  (t=18 s, start of the 80 km -> 7 km descent)    0 pixels differ
+    frame 600  (t=20 s, mid-descent)                       45.6% differ, worst 152/255
+    frame 720  (t=24 s, arriving at 7 km)                   0.24% differ, worst 30/255
+
+Frame 600 is the argument. Baseline: the near field — Newburyport, the lower-left land, the
+marsh — sits on a coarse ring while a few patches carry their finest mips. Ring: the whole view
+resolved one ring at a time and is uniformly sharp at the same instant. By 720 both arms have
+converged, so what the gate changes is exactly the transient, which is what was reported.
+
+Over the rail the gate held **11,852** requests; bench mean 4.61 vs 4.64 ms, p99 10.85 vs 11.00
+— timing is a wash, as it should be for a change that moves work, not adds it.
+
+### No fallback textures
+
+Also this section, because the user's rule arrived while the instrument was running: *there
+should be no fallback textures, only the megatextures.* `TerrainLayer::m_tex` — the committed
+CUDEM copy the bed bank was proved equal to at 0.0000 m (§28) — is deleted. The layer's own draw
+and the SWE solver read the bank; a bank that fails to build throws at boot instead of degrading,
+and `HeightSrv()` returns an invalid index rather than a second copy of the bed. The helm still
+is pixel-identical before and after.
+
+What remains off the atlases, from the live grep rather than the old audit: `GulfLayer::m_uvTex`
+(currents), `SweSolver::m_uv` (solver state, owed as a Volatile bank), `WeatherManager`'s
+per-window bed mirror, `FieldSet`'s PNG fields, and `GisStencil`'s three raster masks — which the
+*compositor* no longer needs (the gate is vector) but the shader classifier still samples. Those
+are conversions, not fallbacks. `WaveField`'s atlas is already a `GradeBank`.
+
+### The trace, both arms, same rail
+
+    baseline   mean 4.76 ms, p99 11.10, max 13.19   queue peaks: f300 547, f510 700, f540 746, f720 590
+    ring       mean 4.72 ms, p99 10.91, max 23.40   queue peaks: f300 495, f510 470, f720  86; held 11918 total
+
+At every sampled instant the queued entries are flagged **predicted**: during the descent the
+backlog is the prefetch walk's, the real view's tiles are already resident, and the gate is
+throttling speculation as much as demand. That is why the per-mip deficit column read empty
+(it excludes speculative entries) -- an instrument finding worth its own follow-up, not chased
+here.
+
+**Ring loads are the default** as of this commit — the user's call on the frame-600 pair and the
+rail video. `--no-ring-loads` restores the whole-column queue for an A/B.
+
+## 33. The trees packed, and a reference becomes a place
+
+§32's instrument said the rail's loads were 64 KB reads at **1.8 ms each** — the per-file open,
+the cost `TileArchive`'s header names as the one that survives every other optimisation. The
+user's rule is that painted tiles live on disk and DirectStorage loads them. This section is that
+rule for the trees.
+
+### Pack any folder
+
+`TileArchive::PackDir` packs a tree node's frame folder — `f_m_x_y.bin` for a leaf,
+`f_m_x_y_<key>.bin` for a compose node; the key lands in the record's `subset`, a leaf's is 0, so
+`Find(key, subset)` is one lookup for both. The zero-byte `.void` and `.ref-*` entries are **not**
+packed: they cost a directory lookup and never a read, and a reference resolves through the
+*child's* archive, which is the point.
+
+    --pack-trees: 28,584 tiles into 21 archives, 1.79 GB, 10.7 s. Loose files kept.
+
+### A tile is a place
+
+`TileTree::Tile` takes an optional `TileLoc`. A tile that lives in an archive is answered as
+(path, offset, size) with `out` empty, and the bytes never enter the process. A **stored
+reference resolves through the child it names**, so a reference in the megatexture's folder
+becomes a `TileLoc` into `earth.land`'s archive, or `google.satellite`'s — the chain ends at
+whichever tree actually holds bytes.
+
+A caller that must have the bytes — a parent gathering children, or the upload ring when
+DirectStorage is off — reads them through the archive's **one open handle** with a positioned
+`ReadFile`, which is thread-safe on a synchronous handle. That alone is the win the instrument
+asked for:
+
+    reads on the rail   1.8 ms/tile (loose)  ->  1.2-1.3 ms/tile (archive handle)
+
+### Measured
+
+    globe still, archives vs incumbent          0 pixels
+    helm, 6 frames, loose vs archive            0 pixels
+    helm, 200 frames, loose vs archive          0 pixels
+    helm, --direct-storage vs upload ring       0 pixels   <- the test --direct-storage never had
+
+The 30-frame helm read 43% different between loose and archive on the same tree, and 52%
+different between frame 30 and frame 200 on the *same* path: a still that is not settled is a
+picture of residency in flight, not of the data (priors §9). Two hundred frames settles it.
+
+`--direct-storage` was left off because the composed-cache path was "not pixel-equal to the
+upload ring (9.14% differs) — and equality is not even the right test". Through the trees it *is*
+equal, on the same still, so the test exists now; whether to make it the default is a rail
+review, as ring loads were.
+
+### One caution recorded
+
+`<windows.h>` in a header that `Compositor.h` includes reached `SeaLayer` and broke `std::min`
+through the `min`/`max` macros — guarded with `NOMINMAX` and `#undef` in both tree headers.
+
+**DirectStorage is the default** as of the next commit — the user's call on the pixel-identical
+helm still. `--no-direct-storage` restores the upload ring for an A/B. A tile not yet packed
+takes the ring until `--pack-trees` runs again; nothing is wrong, it is just slower.
+
+## 34. No insets: one colour page tenant, and the DirectStorage race that hid behind them
+
+*"I swear you are using a separate inset texture in the renderer."* Correct. Three colour
+textures — the 16k cube, the z14 window, the z17 detail inset — with hand-off fades in
+`Compose.hlsli`. The megatexture tree fed all three, but they were three GPU textures, three
+budgets and shader seams: the rung ladder §2 of the handoff had named for deletion.
+
+### One tenant
+
+`AddTexturePages` creates one reserved `Texture2DArray` whose slices are pages of one ladder —
+0..5 the cube faces, 6 the z14 page, 7 the z17 page. One SRV, one residency map, one budget, one
+provider dispatching on the slice. Slices 0..5 are also viewed as a `TextureCubeArray` (bindless
+`space6`) so the globe keeps seamless cube filtering.
+
+`ComposedColorPages` selects by **containment and residency**: every page is the same
+megatexture at a different ground resolution, so the page whose resident mip gives the finest
+texel at the pixel is the answer, and where two pages are resident at the same resolution they
+hold the same pixels. There is nothing to fade between. `hand` and `finer` are gone.
+
+    [residency] earth.color (megatexture pages): 16384x16384 x8 8 mips, 174760 tiles virtual
+
+### The race
+
+The globe then came up green and magenta — only with DirectStorage. Parking one archive at a
+time named the bytes: height tiles in colour, then GIS mask tiles, then seafloor tiles, then
+*oceans next to mountains* — right bytes, wrong coordinates. Four things, found in that order:
+
+1. `ReleaseCompleted` closed **every** open file when **any** fence completed; reads queued
+   behind a later fence read from closed files. Files now travel with their batch's fence.
+2. The landing buffer was reset every frame, reusing slot 0 while last frame's slot 0 was still
+   waiting on its fence. Slots are a free list.
+3. **A drained slot was freed when its `CopyTiles` was recorded, not when it executed.** The
+   same frame's `MapAndFill` gave the slot to a new read, DirectStorage wrote it at once on its
+   own queue, and the later-executing copy put the new tile's bytes into the old coordinate.
+   Slots retire on a 4-frame delay — the overlap discipline the upload ring and eviction already
+   keep. This was the one. Every DirectStorage comparison since M9ai had shown 1.8–9% "not
+   pixel-equal, and equality is not the right test": it was this bug, not streaming timing.
+4. Nothing had ever asked DirectStorage whether a read failed. `RetrieveErrorRecord` is called per
+   completed batch. Zero failures here — which is what let the race be found instead of blamed on
+   the disk.
+
+Archive payloads are 64 KB-aligned as well (kept; DirectStorage prefers it; it was not the bug).
+
+### Measured
+
+    helm,  400 frames, DirectStorage vs upload ring    0 of 1,440,000 pixels
+    globe, 200 frames, DirectStorage vs upload ring    0 of 1,440,000 pixels
+
+### The acceptance image
+
+The user supplied the target: New England from altitude, one uniform resolution across land and
+sea, **the seafloor visible through the water with its own relief and colour**, no haze. That is
+the composite doing its job — land tree over a *real* seafloor tree, gated by the survey — and it
+says plainly that `synth.bed` (a classifier over the height stack) is a placeholder for an
+ingested seafloor texture tree. That is the next tree.
+
+## 35. Height pages: one height tenant
+
+Same shape as §34, for the second of the spec's three lines — *1 Sparse Global Height GA*.
+`earth.height` was a cube tenant plus a z14 window tenant with a feathered lerp between them;
+it is one `AddTexturePages` tenant now, pages 0..5 the cube faces and 6 the z14 page, one
+provider dispatching on the slice, `ComposedHeightPages` selecting by containment and residency.
+
+    [residency] earth.height (megatexture pages): 16384x16384 x7 7 mips, 76454 tiles virtual
+
+### What the two-tenant design was hiding
+
+Three readers of the height *window* had bound the second texture directly, and each had to
+learn that the window is a slice:
+
+- the globe's data lens and its near-field material gate (`Globe.hlsl`);
+- the trace probe's readback, whose subresource is now `slice × mips + mip`;
+- **the water bank**, which reads the bed per texel by integer `Load` from the window. Its own
+  root signature had no `Texture2DArray` space at all. It has one now, the slice travels in
+  `gSlotsD.z` (previously `~0` and unused, so the CB layout is unchanged), and the loads branch
+  on it.
+
+### Measured
+
+    globe 200 frames, height pages vs two tenants     0 of 1,440,000 pixels
+    helm  400 frames                                  2,148 pixels (0.15%), deterministic,
+                                                      all in the horizon band y 428..485
+
+The band is the far shore, where the old path feathered the window into the cube over 6% of its
+span and the pages path takes whichever page is resident at the finer texel. Same class of change
+as the colour fades' removal in §34, and the same argument: the pages are one height field, so
+where both are resident at a resolution they agree, and where they are not, the sharper one is
+the truth.
+
+### What is on the GPU now, against the spec's last three lines
+
+    1 global colour GA    earth.color  (megatexture pages, 8)        yes
+    1 global height GA    earth.height (megatexture pages, 7)        yes
+    N water/weather GAs   the GradeBank arrays                       yes
+    strays                GulfLayer::m_uvTex, SweSolver::m_uv, WeatherManager's bed mirror,
+                          FieldSet PNGs, GisStencil's three raster masks (shader-side)
+
+## 36. The water simulation reads the height megatexture
+
+The user's requirement, verbatim: *make sure the water simulation is using the height mega
+texture for bathymetry for the water shading.* Before this section three different GPU copies of
+the bed existed: the height page tenant (read by the globe and the water bank), the bed
+`GradeBank` (read by the SWE solver, the sea shader's near field and the churn kernel), and a
+per-window bed mirror in `WeatherManager` for owned solvers. All three were the same six-layer
+height stack — §28 proved the bank equal to the composed height at 0.0000 m — which is exactly
+why two of them could go.
+
+### One bed
+
+The bed bank is not built. The per-window mirror is deleted. Every reader binds **slice 6 of the
+height page tenant** — the z14 Mercator page, 9.55 m/px, which is the survey's own resolution
+(the bank was 1863×1174 at ~10 m) — with its residency map, and reads at the resident mip:
+
+| reader | before | now |
+|---|---|---|
+| SWE solver (`Swe.hlsl` `BedAt`) | `gBathy` Texture2D from the bank, lattice-indexed | lattice → lat/lon → page uv (`gGeoLL`, `gWinA`), residency-clamped bilinear from `Texture2DArray` slice 6 |
+| sea shader (`Sea.hlsl` `BedAt`) | bank sample inside the survey, `ComposedHeight` outside | `ComposedHeight` everywhere; *surveyed* is the survey's footprint, sampled at lod −8 |
+| churn kernel (`SeaChurn.hlsl`) | `SweSolver::BathyRes()` | `PageBedAt(world)` — the water bank's mapping, residency-clamped |
+| water bank | already slice 6 | unchanged |
+| owned weather solvers (Boston) | `ownedBathyTex` per window | `WeatherManager::SetHeightPage` → the same slice; Boston lies inside the page |
+
+The residency manager now leaves tenants and maps in `PIXEL | NON_PIXEL` shader-resource state:
+compute has been reading them all along under a pixel-only state the driver forgave.
+
+### What the bank guaranteed and the page must earn
+
+The bank was pinned wholesale; the page is demand-driven. The solver's lattice is therefore
+`Want`ed every frame at mip 0 on slice 6 (~110 tiles of 256×128 over 18.8 × 16 km) so recency
+keeps it mapped. The trace probe is the check, because a pixel diff cannot be — any change in the
+bed, even the R16F quantization against the old R32F bank, moves the solve and the foam
+everywhere:
+
+    frame  60   height.window mip 1  texel (4354,3064): GPU -1.18 m vs CPU stack -1.18 m  MATCH
+    frame 200   height.window mip 0  texel (8708,6128): GPU -1.18 m vs CPU stack -1.18 m  MATCH
+
+Under ring loads the domain reaches mip 0 between those two; the value is the stack's at both.
+Helm 400 frames run-to-run: 0 pixels. Bench 4.90 ms. Selftest clean.
+
+### Compositing order, as the user stated it
+
+Highest-fidelity tree paints last. `BuildHeightStack` already returns the layers bottom-to-top by
+fidelity (ETOPO → NE 15 s → CUDEM → survey edits) and `LayeredOver` paints in that order; when
+the height `TileTree` is built (next), its inputs are ordered by ladder depth — the deeper nest
+paints over everything it intersects — rather than by hand.
+
+### Still owed
+
+The height page's provider is the compositor's `SampleHeightStack` through `cache/composed`: a
+disk cache, but not per-source trees with references. The water/weather planes compose into RAM
+at boot. Both are the "disk trees" half of this step and are next; what this section did is
+make sure there is only one bed for them to become.
+
+## 37. The height disk tree
+
+The second half of "height and water disk trees". §36 made one bed on the GPU; this makes it
+come from per-source trees on the NVMe, the way colour does (§31).
+
+### Fidelity is the sort key
+
+    [height-tree] compose order, coarsest first (the deepest tree paints last):
+                  noaa.etopo2022(489200cm) noaa.etopo15s.ne(46100cm) noaa.cudem.capeann(1370cm)
+                  noaa.cudem.boston(1370cm) noaa.cudem.merrimack(1370cm) survey.edits(500cm)
+
+The user's rule — the highest-precision tree paints last, over everything it intersects — is
+implemented as a sort by declared cm/px, coarsest first, printed every boot. It matches the hand
+order `BuildHeightStack` had, and now it cannot drift from it.
+
+### Two scalar tile formats, and why the leaves are float
+
+`TileTree` gains `FloatW` — 256×128 texels of (float value, float weight), 256 KB — for every
+leaf and intermediate, and `Half` — 256×128 half values, 64 KB, R16F exactly — for the root,
+which always materializes because its tile is what DirectStorage reads.
+
+The first cut stored leaves as half. The audit caught it: 84 of 89 cube tiles exact and a 4 m
+worst, all on the NE 15 s ring. The worst-texel dump put both blends within a millimetre in float
+(ETOPO −3130 m w 1.000, NE 15 s −3160 m w 0.999 → incumbent −3160.00, tree −3158.00): one
+**half-ULP at 3 km depth**, from composing quantized leaves. A leaf tree is the lossless source
+(the user's rule 2 and 4); it stores float. With float leaves:
+
+    earth.height/cube16k      89 tiles, 87 exact, 3 of 2,916,352 texels differ, worst 0.250 m
+    earth.height/window z14   72 tiles, 56 exact, 52 of 2,359,296 texels differ, worst 0.007 m
+
+That is equivalence to the R16F format.
+
+### A latent difference, recorded
+
+The incumbent height paint is `h += (m − h)·w` from **zero** — the over-transparent-black form
+§27 found for the bed. The tree composes straight-alpha. They agree today because ETOPO is global
+at w = 1; over a partial base they would not, and the tree is the correct one.
+
+### Still owed: the water/weather planes as trees
+
+`BuildPlaneBank` (Hs, wind, ocean colour, ice, windSrc) composes into RAM at boot. Same
+machinery applies — a `TileTree(FloatW)` per plane over its `RasterSource` — with one honest
+caveat: these are hourly forecasts, so a disk tree buys boot time, not the repaint economics
+that justify it for imagery and bathymetry.
+
+### Measured, warm and packed
+
+    warm    earth.height root 2531 composed (materialized by design); leaves: etopo 2531 content,
+            NE 15 s 1140 void, CUDEMs 2208-2480 void, edits 2525 void -- the sparse trees ARE sparse
+    pack    earth.height.62f857aa/cube16k.gaa 1320 tiles, window_z14 1372 tiles;
+            "archive open, 1320 tiles answer as places" -- DirectStorage reads the height tree
+    probe   frame 200, height.window mip 0, GPU -1.18 m vs CPU stack -1.18 m, MATCH -- the
+            solver's bed is the tree's, which is the stack's
+    helm    400 frames, tree-fed vs composed-cache-fed height page: 860 px (0.06%) -- the
+            0.25 m / 7 mm texel differences moving the solve slightly
+    globe   200 frames: 12.4% differ, 3.05% by more than 1 LSB -- relief shading under a
+            different resident height mip at frame 200 (load order), not content; the probe
+            is the content check
+
+## 38. The trees are the default, and the storm rail
+
+`--color-trees` is the default (it feeds the height pages too); `--no-color-trees` restores the
+incumbent providers behind the same page tenants for an A/B. Everything on: trees, one page
+tenant per channel, DirectStorage, ring loads, the solver on the height megatexture.
+
+    storm rail (--storm 3.0,10,95), default      5.08 / 5.11 ms mean, p99 11.54 / 11.94
+    storm rail, --no-color-trees                 4.97 ms mean, p99 10.54
+    flood rail, default                          4.91 ms mean, p99 11.84
+
+The storm costs ~0.2 ms over the flood (the sea's own work), and the trees cost ~0.1 ms mean and
+~1 ms at p99 against the incumbent providers -- load-side, from resolving stored references
+hop by hop and the height root materializing; nothing on the shader side changed. Selftest green.
+
+## 39. The seafloor's texture, and the two bugs it exposed
+
+**The ask**: "do the ingested seafloor texture next", with the acceptance image (Google Earth over
+New England: seabed relief visible through the water, uniform resolution). The inventory said
+there is nothing to ingest -- `data/` holds bathymetry (ETOPO 2022, the NE 15 s grid, three
+CUDEM windows), no photograph of the floor, because none exists. The ocean floor's texture in
+every map is a PRODUCT of its bathymetry, and the bathymetry IS ingested: it is the height stack,
+the same one the bed classifier already reads. So the source is derived, and says so.
+
+**`synth.seafloor.relief`** (`src/compose/Sources.cpp`, program in `data/bed/seafloor_rules.json`,
+authored on first run, never clobbered):
+
+- relief = the gradient of the bed lit by one fixed cartographic sun (az 315, el 45, ambient
+  0.45), normalized so a flat bed shades to exactly 1. Central differences, stepped at
+  max(texel, the finest data grain under the point) -- `Compositor::HeightGrainM` -- and
+  exaggerated x60 (the Gulf's slopes are ~1%; at x25 the painted swing was 8%, invisible lit).
+- colour = a dry sediment ramp keyed on DATUM depth: sand 0 m, silt by 200 m, clay by 4 km
+  (`SeafloorRamp`, mirrored in HLSL as `SeafloorRampLuma`), times the shade.
+- weight = the classifier's waterline band above (full at +0.4 m, off at +1.2 m NAVD), folded
+  as coverage at coarse texels (M7s), and NO deep cutoff: every ocean texel is painted.
+- footprint global; identity = the rules text + the ramp/gradient version + the height stack's
+  signature (as `synth.bed`).
+
+It is a leaf of `earth.seafloor` UNDER `synth.bed` (the classifier keeps its authority inside its
+own box by painting over it), and the survey gates it exactly as it gates the classifier:
+
+    google ---+
+              +-> earth.land ------------------+
+    aerial ---+                                |
+    relief --+                                 +-> earth.color (mega)
+             +-> earth.seafloor --+            |
+    bed -----+                    +-> gate ----+
+    gis.landsea (vector) ---------+
+
+Its own tree on disk, its tiles referenced by the composite where nothing else paints -- the
+same three-tree process as the land (S29). `--no-seafloor` is the A/B.
+
+**Through the water.** The megatexture's ocean texels are DRY albedo, like the classifier's, so
+the water's optics stay the renderer's: Beer-Lambert over the measured K_d, the two-flux
+endpoint from chlorophyll and SPM (`optics`) -- hue AND brightness. Where the physical bed term
+has died (weight 1 - mean T_w) the floor's hillshade rides the endpoint as a brightness
+modulation only (`Compose.hlsli` `SeafloorReliefMod`: divide the ramp's own luminance back out
+of the texel, what remains is the shade, flat bed = 1). Two constants, `kSeafloorRelief` (0 =
+the endpoint alone) and a contrast gain left at 1. Tried and REJECTED on the user's frame pair:
+a brighter "map ocean" that redrew the floor through water of the measured hue at a declared
+visibility -- the physical dark water with the relief riding it is the look. What made the
+relief legible was the source, not the shader: exaggeration 25 -> 60 (an authored value, so the
+tree's identity moved with it).
+
+**Bug 1 -- the chord across the Gulf** (priors 20). The first albedo still had a solid wedge
+from the Maine coast to Cape Ann where the relief was gated OUT and Google's blue showed.
+`data/gis/coast_ne.bin` holds the coastline CLIPPED to the survey box: 1283 closed rings and 15
+open pieces, the mainland one 32,727-point piece from New Jersey (south edge) to Maine (east
+edge). The crossing test closed each piece with a chord back to its own start; that chord ran
+across the Gulf of Maine and even-odd parity called everything inside it land. Invisible for a
+week because nothing gated in deep water until the relief did. Fix (`GisVectorMask::ReadRings`,
+`StitchAlongBox`): walk the box boundary counter-clockwise (interior on the left -- the
+coastline convention) from each piece's end to the next piece's start, chaining until the chain
+closes: 14 pieces -> 9 disjoint land polygons. `--gis-dump` writes the gate as a PGM; the picture
+is the proof (water: the Gulf, the Sound, Champlain, the St Lawrence, the NHD lakes; land: the
+rest, Cape Cod and the Nova Scotia sliver included).
+
+**Bug 2 -- terraces down the slope** (priors 21). Beyond the NE grid, ETOPO's 4.9 km cells are
+sampled bilinearly; a 1 km gradient step inside a cell measured the interpolant's facet, and
+the continental slope rendered as a staircase. Derivatives are taken at the data's grain.
+
+**Measured (warm, `--warm-trees` then `--pack-trees`)**: `synth.seafloor.relief` 9308 tiles
+painted, 2855 void (land); `earth.seafloor` 4151 composed (where the classifier overlaps it),
+2302 references; `earth.color` 5912 composed, 7226 references, 12208 cache hits; the stitched
+`gis.landsea` 7079 painted. 34,999 tiles packed across the megatexture tree. Stills: frame 345
+(~250 km) lit and albedo, frame 450 (80 km); `out/rail_seafloor_720.mp4` is the flood rail.
+Bench not re-run this session (the shader change is one multiply per water pixel; the tree cost
+was measured in S38).

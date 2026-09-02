@@ -56,7 +56,7 @@ bool MarsBinProvider::Open(const std::wstring& binPath, DXGI_FORMAT fmt) {
 }
 
 TileProviderFn MarsBinProvider::Fn() {
-    return [this](const TileRequest& r, std::vector<uint8_t>& out) {
+    return [this](const TileRequest& r, std::vector<uint8_t>& out, TileLoc*) {
         if (!m_file || r.mip >= m_mipPrefix.size()) return false;
         const uint64_t tileIndex = r.face * m_tilesPerFace + m_mipPrefix[r.mip] +
                                    static_cast<uint64_t>(r.y) * m_mipTilesW[r.mip] + r.x;

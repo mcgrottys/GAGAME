@@ -64,6 +64,17 @@ public:
                            std::function<double(double)> oceanAt);
     void AddDormantWindow(const char* name, BathyModel* bathy, const SweConfig& cfg,
                           std::function<double(double)> oceanAt, double spinupHours);
+    // M9ar: the bed every OWNED solver binds at activation -- a slice of the height page
+    // tenant. There is no per-window bed texture any more.
+    void SetHeightPage(ID3D12Resource* heightArr, ID3D12Resource* resMapArr, uint32_t slice,
+                       uint32_t mips, double orgPxX, double orgPxY) {
+        m_hgtArr = heightArr;
+        m_hgtRes = resMapArr;
+        m_hgtSlice = slice;
+        m_hgtMips = mips;
+        m_hgtOrg[0] = orgPxX;
+        m_hgtOrg[1] = orgPxY;
+    }
 
     // Per frame (or before a physics batch): lazy activation, owned-solver advancement,
     // mirror refresh (full-field readbacks at most every kMirrorDt sim-seconds).
@@ -80,11 +91,14 @@ public:
     std::string stats;   // "wx 2 windows (merrimack, boston)" for the title bar
 
 private:
+    ID3D12Resource* m_hgtArr = nullptr;   // M9ar: borrowed from the residency manager
+    ID3D12Resource* m_hgtRes = nullptr;
+    uint32_t m_hgtSlice = 6, m_hgtMips = 7;
+    double m_hgtOrg[2] = {0.0, 0.0};
     struct Window {
         std::string name;
         SweSolver* solver = nullptr;              // external, or owned.get()
         std::unique_ptr<SweSolver> owned;
-        std::unique_ptr<GpuTexture> ownedBathyTex;
         const BathyModel* bathy = nullptr;
         BathyModel* bathyMut = nullptr;       // dormant windows: realized from the channel
                                               // on activation (the one bed, lazily)

@@ -106,17 +106,26 @@ float GoogleColorSource::Sample(double latRad, double lonRad, double groundResM,
 
 EquirectHeightSource::EquirectHeightSource(const char* name, const char* structure,
                                            double cmPerPixel, const std::vector<int16_t>* elev,
-                                           int nx, int ny)
-    : m_elev(elev), m_nx(nx), m_ny(ny) {
-    m_info = {name, structure, "EPSG:4326 equirect (plate carree)", cmPerPixel, -180, -90, 180,
-              90};
+                                           int nx, int ny, double datumShiftM)
+    : m_elev(elev), m_nx(nx), m_ny(ny), m_datumShift(datumShiftM) {
+    static char crs[2][96];
+    static int slot = 0;
+    const int k = slot++ & 1;
+    if (datumShiftM != 0.0) {
+        snprintf(crs[k], sizeof(crs[k]), "EPSG:4326 equirect, vdatum %+.3f m -> NAVD88",
+                 datumShiftM);
+    } else {
+        snprintf(crs[k], sizeof(crs[k]), "EPSG:4326 equirect (plate carree)");
+    }
+    m_info = {name, structure, crs[k], cmPerPixel, -180, -90, 180, 90};
 }
 
 float EquirectHeightSource::Sample(double latRad, double lonRad, double, float& metres) {
     if (!m_elev || m_nx <= 0) return 0.0f;
     const double u = lonRad / (2.0 * kPi) + 0.5;
     const double v = std::clamp(0.5 - latRad / kPi, 0.0, 1.0);
-    metres = Bilinear(*m_elev, m_nx, m_ny, u * m_nx, v * m_ny, true);
+    metres = Bilinear(*m_elev, m_nx, m_ny, u * m_nx, v * m_ny, true) +
+             static_cast<float>(m_datumShift);
     return 1.0f;
 }
 
@@ -125,11 +134,18 @@ float EquirectHeightSource::Sample(double latRad, double lonRad, double, float& 
 WindowHeightSource::WindowHeightSource(const char* name, const char* structure,
                                        double cmPerPixel, const std::vector<int16_t>* elev,
                                        int nx, int ny, double lon0, double lat1, double dLon,
-                                       double dLat, double featherFrac)
+                                       double dLat, double featherFrac, double datumShiftM)
     : m_elev(elev), m_nx(nx), m_ny(ny), m_lon0(lon0), m_lat1(lat1), m_dLon(dLon),
-      m_dLat(std::abs(dLat)), m_feather(featherFrac) {
-    m_info = {name, structure, "EPSG:4326 window (row 0 north)", cmPerPixel, lon0,
-              lat1 - ny * std::abs(dLat), lon0 + nx * dLon, lat1};
+      m_dLat(std::abs(dLat)), m_feather(featherFrac), m_datumShift(datumShiftM) {
+    static char crs[96];
+    if (datumShiftM != 0.0) {
+        snprintf(crs, sizeof(crs), "EPSG:4326 window (row 0 N), vdatum %+.3f m -> NAVD88",
+                 datumShiftM);
+    } else {
+        snprintf(crs, sizeof(crs), "EPSG:4326 window (row 0 north)");
+    }
+    m_info = {name, structure, crs, cmPerPixel, lon0, lat1 - ny * std::abs(dLat),
+              lon0 + nx * dLon, lat1};
 }
 
 float WindowHeightSource::Sample(double latRad, double lonRad, double, float& metres) {
@@ -138,7 +154,8 @@ float WindowHeightSource::Sample(double latRad, double lonRad, double, float& me
     const double u = (lonDeg - m_lon0) / (m_nx * m_dLon);
     const double v = (m_lat1 - latDeg) / (m_ny * m_dLat);
     if (u < 0.0 || u > 1.0 || v < 0.0 || v > 1.0) return 0.0f;
-    metres = Bilinear(*m_elev, m_nx, m_ny, u * m_nx, v * m_ny, false);
+    metres = Bilinear(*m_elev, m_nx, m_ny, u * m_nx, v * m_ny, false) +
+             static_cast<float>(m_datumShift);
     const double edge = (std::min)((std::min)(u, 1.0 - u), (std::min)(v, 1.0 - v));
     return Feather(edge, m_feather);   // the old render-time NeWeight feather, at paint time
 }
@@ -643,6 +660,156 @@ float BedSynthSource::Sample(double latRad, double lonRad, double groundResM,
     for (int i = 0; i < 3; ++i) {
         const float c =
             (shallow[i] + (deep[i] - shallow[i]) * t) * (1.0f + rule->noise * grain);
+        rgba[i] = static_cast<uint8_t>(
+            (std::min)((std::max)(c, 0.0f), 1.0f) * 255.0f + 0.5f);
+    }
+    rgba[3] = 255;
+    return a;
+}
+
+// ---- M9av: the seafloor relief source ---------------------------------------------------------
+namespace {
+
+const char* kSeafloorRulesDefault = R"JSON({
+  "_": "synth.seafloor.relief -- THE PROGRAM. Hillshade of the ingested bathymetry times a dry sediment ramp. The ramp itself is code (Sources.cpp SeafloorRamp), mirrored in shaders/Compose.hlsli SeafloorRampLuma, which the renderer divides back out to recover the shading through opaque water.",
+  "alpha": {"full1": 0.4, "off1": 1.2},
+  "sun": {"azimuthDeg": 315.0, "elevationDeg": 45.0},
+  "exaggeration": 25.0,
+  "ambient": 0.45
+}
+)JSON";
+
+// Dry sediment albedo by datum depth: sand on the shelf, silt down the slope, clay on the plain.
+// MIRRORED in shaders/Compose.hlsli SeafloorRampLuma -- change both, or the renderer's shading
+// recovery drifts.
+void SeafloorRamp(float depthM, float rgb[3]) {
+    static const float kD[5] = {0.0f, 40.0f, 200.0f, 1000.0f, 4000.0f};
+    static const float kC[5][3] = {{0.66f, 0.60f, 0.46f}, {0.56f, 0.52f, 0.42f},
+                                   {0.46f, 0.44f, 0.39f}, {0.39f, 0.37f, 0.34f},
+                                   {0.32f, 0.31f, 0.30f}};
+    const float d = (std::min)((std::max)(depthM, 0.0f), 4000.0f);
+    int i = 0;
+    while (i < 3 && d > kD[i + 1]) ++i;
+    const float t = (d - kD[i]) / (kD[i + 1] - kD[i]);
+    for (int c = 0; c < 3; ++c) rgb[c] = kC[i][c] + (kC[i + 1][c] - kC[i][c]) * t;
+}
+
+}  // namespace
+
+bool SeafloorReliefSource::Load(const std::string& rulesPath, const Compositor* comp,
+                                int hgtChannel) {
+    m_comp = comp;
+    m_hgtCh = hgtChannel;
+    if (!comp || hgtChannel < 0) return false;
+    if (!std::ifstream(rulesPath)) {
+        std::filesystem::create_directories(
+            std::filesystem::path(rulesPath).parent_path());
+        std::ofstream(rulesPath, std::ios::binary) << kSeafloorRulesDefault;
+    }
+    std::ifstream f(rulesPath, std::ios::binary);
+    if (!f) return false;
+    const std::string text((std::istreambuf_iterator<char>(f)),
+                           std::istreambuf_iterator<char>());
+    std::string err;
+    const JsonValue root = JsonParser::Parse(text, &err);
+    if (!err.empty()) return false;
+    if (const JsonValue* a = root.Get("alpha")) {
+        m_full1 = a->Num("full1", 0.4);
+        m_off1 = a->Num("off1", 1.2);
+    }
+    if (const JsonValue* s = root.Get("sun")) {
+        m_azDeg = s->Num("azimuthDeg", 315.0);
+        m_elDeg = s->Num("elevationDeg", 45.0);
+    }
+    m_exagg = root.Num("exaggeration", 25.0);
+    m_ambient = root.Num("ambient", 0.45);
+    // THE IDENTITY IS THE PROGRAM + ITS INPUTS (as synth.bed): the rules, the ramp's version,
+    // and the height stack's signature. The product's grain is its finest input's.
+    uint64_t h = 14695981039346656037ull;
+    auto mix = [&h](const std::string& t) {
+        for (const char c : t) h = (h ^ static_cast<uint8_t>(c)) * 1099511628211ull;
+    };
+    mix(text);
+    mix("ramp v1 grad central-at-grain");
+    double finest = 1e9;
+    for (const HeightSource* hs : m_comp->ChannelAt(m_hgtCh).height) {
+        mix(hs->Info().name);
+        mix(hs->Info().structure);
+        if (hs->Info().cmPerPixel > 0.0) finest = (std::min)(finest, hs->Info().cmPerPixel);
+    }
+    char structure[96];
+    snprintf(structure, sizeof(structure),
+             "seafloor-relief (bathy hillshade x sediment ramp) v%08x",
+             static_cast<uint32_t>(h & 0xFFFFFFFFu));
+    m_info.name = "synth.seafloor.relief";
+    m_info.structure = structure;
+    m_info.crs = "wgs84.synthesis (height-stack product; seafloor_rules.json -- THE PROGRAM)";
+    m_info.cmPerPixel = finest < 1e9 ? finest : 1000.0;
+    m_info.lon0 = -180.0;
+    m_info.lat0 = -90.0;
+    m_info.lon1 = 180.0;
+    m_info.lat1 = 90.0;
+    return true;
+}
+
+float SeafloorReliefSource::Sample(double latRad, double lonRad, double groundResM,
+                                   const PaintCtx&, uint8_t rgba[4]) {
+    if (!m_comp) return 0.0f;
+    const float bed = m_comp->SampleHeightStack(m_hgtCh, latRad, lonRad, groundResM);
+    // The waterline band, folded as COVERAGE at coarse texels (M7s, as synth.bed): average the
+    // thresholded field, never threshold the average. No deep cutoff: the ocean is all ours.
+    auto alphaAt = [&](float b) {
+        double av = 1.0;
+        if (b > m_full1) av = (m_off1 - b) / (std::max)(m_off1 - m_full1, 1e-6);
+        return (std::min)((std::max)(av, 0.0), 1.0);
+    };
+    float a;
+    if (groundResM > 90.0) {
+        const int n = (std::min)(4, static_cast<int>(groundResM / 45.0));
+        const double dLat = groundResM / 6371000.0 / n;
+        const double dLon = dLat / (std::max)(std::cos(latRad), 0.2);
+        double acc = 0.0;
+        for (int sy = 0; sy < n; ++sy) {
+            for (int sx = 0; sx < n; ++sx) {
+                const double la = latRad + (sy - (n - 1) * 0.5) * dLat;
+                const double lo = lonRad + (sx - (n - 1) * 0.5) * dLon;
+                acc += alphaAt(m_comp->SampleHeightStack(m_hgtCh, la, lo, 45.0));
+            }
+        }
+        a = static_cast<float>(acc / (n * n));
+    } else {
+        a = static_cast<float>(alphaAt(bed));
+    }
+    if (a <= 0.004f) return 0.0f;
+    // The gradient at the texel's own scale (forward differences east and north), exaggerated
+    // and lit by the fixed sun. A flat bed shades to exactly 1, so the ramp's luminance is the
+    // reference the renderer divides out to get the hillshade back.
+    // Central differences at the LARGER of the texel and the data's grain under this point:
+    // a step inside a bilinear cell measures the interpolant's facet, not the seabed.
+    const double dM = (std::max)((std::max)(groundResM, 8.0),
+                                 m_comp->HeightGrainM(m_hgtCh, latRad, lonRad));
+    const double dLatR = 0.5 * dM / 6371000.0;
+    const double dLonR = 0.5 * dM / (6371000.0 * (std::max)(std::cos(latRad), 0.2));
+    const float bE = m_comp->SampleHeightStack(m_hgtCh, latRad, lonRad + dLonR, groundResM);
+    const float bW = m_comp->SampleHeightStack(m_hgtCh, latRad, lonRad - dLonR, groundResM);
+    const float bN = m_comp->SampleHeightStack(m_hgtCh, latRad + dLatR, lonRad, groundResM);
+    const float bS = m_comp->SampleHeightStack(m_hgtCh, latRad - dLatR, lonRad, groundResM);
+    double nx = -m_exagg * (bE - bW) / dM, ny = -m_exagg * (bN - bS) / dM, nz = 1.0;
+    const double nl = std::sqrt(nx * nx + ny * ny + nz * nz);
+    nx /= nl;
+    ny /= nl;
+    nz /= nl;
+    const double az = m_azDeg * kPi / 180.0, el = m_elDeg * kPi / 180.0;
+    const double lx = std::cos(el) * std::sin(az), ly = std::cos(el) * std::cos(az),
+                 lz = std::sin(el);
+    const double ndl = (std::max)(nx * lx + ny * ly + nz * lz, 0.0);
+    const double flat = m_ambient + (1.0 - m_ambient) * lz;
+    const double shade =
+        (std::min)((std::max)((m_ambient + (1.0 - m_ambient) * ndl) / flat, 0.35), 1.6);
+    float ramp[3];
+    SeafloorRamp((std::max)(-bed, 0.0f), ramp);
+    for (int i = 0; i < 3; ++i) {
+        const float c = static_cast<float>(ramp[i] * shade);
         rgba[i] = static_cast<uint8_t>(
             (std::min)((std::max)(c, 0.0f), 1.0f) * 255.0f + 0.5f);
     }

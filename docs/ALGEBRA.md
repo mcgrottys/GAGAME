@@ -319,9 +319,21 @@ bed_rules.json + zones + the height stack).
 **Coverage folding** (M7s): classification alphas at coarse LODs are computed by
 subsampling the decision at fine scale and averaging the answers (see `fold`).
 
-Code: `src/compose/Compositor.*`, `Sources.*`. Gates: `composetest` (paint order,
-weights, alpha, cache identity, addressing vs closed forms), `atlastest`. AST: all
-`compose.stack` edges.
+**The tree of trees** (M9am): a compositor is itself a source (`CompositeSource`), so
+composition nests; `TileTree` caches EVERY node's output on the NVMe on the shared tile
+addresses. Two laws make a composite a valid input: **straight alpha** — the over is
+un-premultiplied (`OverFinish` divides by coverage), so a single-input compose at partial
+weight IS its input byte for byte and is stored as a zero-byte **reference** naming the
+child tree; and **identity is the inputs** — a node's identity folds its children's, a
+tile's key folds what each child holds at that address, so a composite updates when a
+source's tiles change and at no other time. A **gate** (`GateSource`) is a third kind of
+edge: the value is the layer's, only the weight is the product; *absent* (no opinion)
+and *void* (blocks) are different answers.
+
+Code: `src/compose/Compositor.*`, `Sources.*`, `ComposeTree.h`, `TileTree.h`,
+`GisMask.*`. Gates: `composetest` (paint order, weights, alpha, cache identity,
+addressing vs closed forms), `atlastest`, `--tree-audit` (tree vs incumbent, tile for
+tile, worst |Δ| ≤ 1/255). AST: all `compose.stack` edges.
 
 ## discrete — The small algebras: noise, decay, morph, the float wall
 
@@ -647,6 +659,24 @@ link; the reference's "1.68 m regional offset" is Boston's OWN link misapplied r
 independent contours across the flats; excluded masks (no-data, hand edits, marsh) are
 declared, never silent.
 
+**The seafloor beyond the box (M9av)**: no photograph of the ocean floor exists to ingest, so
+the seafloor's texture is a PRODUCT of the bathymetry the project already ingests -- the height
+stack (ETOPO 4.9 km, the NE 15 s grid, CUDEM). `synth.seafloor.relief` = hillshade x dry
+sediment ramp: the gradient of the bed (the grade-1 part of its derivative, central differences
+at max(texel, data grain) -- a step finer than the grain reads the bilinear interpolant's
+facets, which rendered the continental slope as terraces) exaggerated x25 and lit by one fixed
+cartographic sun (az 315, el 45, ambient 0.45, normalized so a flat bed shades to exactly 1),
+times a ramp keyed on DATUM depth (sand 0 m, silt by 200 m, clay by 4 km -- the same
+energy-sorting argument, extended past the shelf). Global footprint, the bed classifier's
+waterline band above with no deep cutoff, gated by the survey like the classifier, painted
+UNDER the classifier in `earth.seafloor`. DRY albedo, as the classifier: the water's optics stay
+the renderer's. Through opaque water (T_w -> 0 by a few tens of metres at measured K_d) the
+two-flux endpoint IS the colour -- chlorophyll and SPM keep their say -- and the floor's shading
+rides it as a brightness modulation: the renderer divides the ramp's own luminance (mirrored in
+HLSL, `SeafloorRampLuma`) back out of the texel and what remains is the hillshade. A map
+convention, declared as one, weighted by (1 - mean T_w) so the physical bed term owns the
+shallows, removable by one constant (`kSeafloorRelief`).
+
 Code: `proofs/bed_relief.py`, `src/compose/Sources.cpp`.
 Gates: `gatest` block 11 (transfer-function zeros/peaks, skew vector, narrowness discrete
 count, hemisphere partition, waterline flip-metric exactness); the waterline gate harness
@@ -822,6 +852,28 @@ model (or a textbook) would hold → what this project measured → the law now 
     that differs in **0–3 pixels** is not a subtle effect and not a cold cache; it is a
     severed wire. Prove the flag reached the GPU before spending 240 frames judging it —
     priors 9 governs renders that differ *slightly*, not renders that differ *not at all*.
+16. **Membership by overlap is not membership by soak.** Prior: a source belongs to a
+    tile if its footprint overlaps it (`MayCover`). Measured (M9am, `--tree-audit`): at
+    a coarse LOD a footprint under ~2 texels paints a speck the reference never paints —
+    27/255 on 567 texels of one cube tile, byte-identical everywhere else. Law: tile
+    membership is the SOAK rule (§compose), applied by one function
+    (`Compositor::Touches`) from every path; `MayCover` is a rejection test, not an
+    admission test.
+17. **A source's footprint is its admission ticket.** Prior: wiring a source into a
+    stack means it participates. Measured (M9ak): a source constructed before its data
+    loaded declared the empty box its class starts with (lon 180..−180), the soak rule
+    rejected it against every tile, and the gate was built, logged, and never asked a
+    question — two A/B renders agreed exactly (see 15) and a tree folder with **zero
+    files** was what caught it. Law: re-declare bounds after load; before believing any
+    A/B on a new source, check that its tree directory is non-empty.
+18. **The blend you inherit decides whether trees can nest.** Prior: any per-pixel over
+    composes. Measured: lerp-from-black is not associative for partial weights — a lone
+    layer at w=0.5 over nothing composites to half its colour, so a composite of it could
+    not feed another compose without darkening. The water's `SampleBlended` had already
+    fixed this (M9n, un-premultiply by coverage) and the imagery path duplicated the old
+    form beside it. Law: one kernel (`OverStep`/`OverFinish`) for the point path and the
+    tile path; and READ THE WATER'S PATH before building the imagery's — the user's
+    correction, and the Scriptorium's `math('compose')` would have said so first.
 
 ## verification — The gate map: which algebra is pinned where
 
@@ -852,3 +904,30 @@ model (or a textbook) would hold → what this project measured → the law now 
 - The hypervisor (`--trace lat,lon`) — one sample walked through every edge on the CPU
   with AST annotations; `--lens waterdata/authority/...` — fields as color;
   `--dump-fibers` — the bank planes with declared ranges; PIX events per AST node.
+19. **Recording a copy is not executing it.** Prior: once `CopyTiles` from a landing slot is
+    recorded, the slot is drained and may be reused. Measured (M9ap): the copy executes when the
+    frame's list runs; a slot handed to DirectStorage in the same frame is overwritten first,
+    and the copy lands the *new* tile's bytes at the *old* coordinate — "oceans next to
+    mountains". Every DirectStorage-vs-ring difference since M9ai (1.8–9%, written off as
+    "streaming timing") was this. Law: anything a recorded command still reads retires on the
+    frame-overlap delay the upload ring and eviction already keep; and **ask the transport
+    whether it failed** (`RetrieveErrorRecord`) before reasoning about what it delivered.
+
+20. **A clipped ring is not a ring; close it along the clip.** Prior: the survey's coast file
+    is "rings", so even-odd parity over its edges is the land/sea answer. Reality: a coastline
+    clipped to a box arrives as OPEN polylines whose ends lie on the box's edges (the mainland
+    was one 32,727-point piece from New Jersey to Maine), and a crossing test that closes each
+    piece with a chord back to its own start draws that chord across the Gulf of Maine -- the
+    whole wedge inside it was LAND, invisible for a week because nothing gated in deep water
+    until the seafloor relief did. The closure the data means is along the box: walk its
+    boundary counter-clockwise (interior on the left -- land on the left of digitization) from
+    each piece's end to the NEXT piece's start, chain until the chain closes; 14 pieces became
+    9 disjoint land polygons and the gate raster (`--gis-dump`) is the map. Lesson: a gate you
+    have only ever seen through its consequences has not been looked at. Dump the gate.
+
+21. **A derivative is taken at the data's grain, not the texel's.** Prior: the texel's ground
+    resolution is the right step for a gradient of the height stack. Reality: under a 4.9 km
+    ETOPO cell sampled bilinearly, a 1 km step measures the interpolant's facet -- piecewise-
+    constant gradients, terraces down the continental slope. Step at max(texel, finest grain
+    covering the point) (`Compositor::HeightGrainM`), centred; the fold law's cousin: never
+    differentiate finer than the field was measured.

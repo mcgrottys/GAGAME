@@ -52,6 +52,32 @@ void CsMipReduce(uint3 id : SV_DispatchThreadID) {
     // than folding a duplicate in and biasing the border.
     const uint2 s0 = id.xy * 2u;
     const uint2 s1 = uint2(min(s0.x + 1u, gSrcDim.x - 1u), min(s0.y + 1u, gSrcDim.y - 1u));
-    gDst[uint3(id.xy, 0)] = (gSrc[uint3(s0, 0)] + gSrc[uint3(s1.x, s0.y, 0)] +
-                             gSrc[uint3(s0.x, s1.y, 0)] + gSrc[uint3(s1, 0)]) * 0.25f;
+    const MipT a = gSrc[uint3(s0, 0)];
+    const MipT b = gSrc[uint3(s1.x, s0.y, 0)];
+    const MipT c = gSrc[uint3(s0.x, s1.y, 0)];
+    const MipT d = gSrc[uint3(s1, 0)];
+
+#ifdef GA_MIP_COVCH
+    // ---- COVERAGE-WEIGHTED: ABSENCE MUST NOT VOTE. -------------------------------------------
+    // The plain box average above is correct only when a null texel MEANS the quantity is
+    // identically zero. The moment a bank carries coverage -- because its sources do not reach
+    // everywhere, which is the normal case for anything composed -- averaging four texels of
+    // which two are absent halves the value and reports it as fact. The error compounds up the
+    // chain: each level folds more absence in, so the coarsest mips (the PINNED floor, the ones
+    // that can never be missing and are therefore what a distant sample actually reads) are the
+    // most corrupted. That is backwards from every other error in the system.
+    //
+    // So the value channels are averaged weighted by coverage, and coverage itself is averaged
+    // PLAIN -- it is the fraction of the coarse texel that had data, which is a mean of the four
+    // fractions, not a weighted mean of itself.
+    const float wa = a[GA_MIP_COVCH], wb = b[GA_MIP_COVCH];
+    const float wc = c[GA_MIP_COVCH], wd = d[GA_MIP_COVCH];
+    const float wsum = wa + wb + wc + wd;
+    MipT o = (MipT)0;
+    if (wsum > 0.0f) o = (a * wa + b * wb + c * wc + d * wd) / wsum;
+    o[GA_MIP_COVCH] = wsum * 0.25f;   // fully absent -> 0: still absent, and says so
+    gDst[uint3(id.xy, 0)] = o;
+#else
+    gDst[uint3(id.xy, 0)] = (a + b + c + d) * 0.25f;
+#endif
 }
