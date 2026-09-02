@@ -367,14 +367,31 @@ Options ParseArgs(int argc, char** argv) {
             // A camera the user saved with F5: the same five numbers --cam/--campos take,
             // looked up by name so a pose survives the session it was found in.
             o.view = next("view-1");
+            // Views the user asked to KEEP live here, not in the gitignored data/ folder.
+            // east, alt, north, azimuth (compass), pitch -- SetFromCompass's own order.
+            struct BuiltInView { const char* name; float x, alt, z, az, pitch; };
+            static const BuiltInView kBuiltInViews[] = {
+                // On the north jetty a little in from its tip, looking back along it toward
+                // the range tower (saved with F5 2026-09-01: "keep this!").
+                {"jetty-north", 541.20f, 7.00f, 72.52f, 246.0f, -4.0f},
+                // Off the jetty tips looking west into the entrance, three heights.
+                {"entrance-low", 900.0f, 40.0f, -10.0f, 270.0f, -10.0f},
+                {"entrance-mid", 1200.0f, 120.0f, -10.0f, 270.0f, -18.0f},
+                {"entrance-high", 1500.0f, 300.0f, -10.0f, 270.0f, -28.0f},
+            };
+            bool found = false;
+            for (const BuiltInView& b : kBuiltInViews) {
+                if (o.view != b.name) continue;
+                o.camX = b.x; o.camAlt = b.alt; o.camZ = b.z; o.camAz = b.az; o.camPitch = b.pitch;
+                found = true;
+            }
             std::ifstream vf("data/views.json", std::ios::binary);
             const std::string text((std::istreambuf_iterator<char>(vf)),
                                    std::istreambuf_iterator<char>());
             std::string err;
             const JsonValue root = JsonParser::Parse(text, &err);
             const JsonValue* views = err.empty() ? root.Get("views") : nullptr;
-            bool found = false;
-            if (views) {
+            if (views) {   // the file may override a built-in of the same name
                 for (const JsonValue& v : views->arr) {
                     if (v.Str("name") != o.view) continue;
                     o.camX = static_cast<float>(v.Num("x", 0.0));
@@ -386,8 +403,8 @@ Options ParseArgs(int argc, char** argv) {
                 }
             }
             if (!found) {
-                fprintf(stderr, "--view %s: not in data/views.json (press F5 in the viewer to "
-                        "save one)\n", o.view.c_str());
+                fprintf(stderr, "--view %s: not built in and not in data/views.json (press F5 "
+                        "in the viewer to save one)\n", o.view.c_str());
                 exit(2);
             }
         }
