@@ -595,43 +595,42 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
     m_seaCb.churnU[0] = m_churnReady ? m_churn.Srv() : UINT32_MAX;
     m_seaCb.churnU[1] = m_churnReady ? m_maskTex.srv : UINT32_MAX;
     m_seaCb.churnU[2] = atlasVisualize ? 1u : 0u;
-    m_seaCb.churnU[3] = 0;
-    m_seaCb.churnF[0] = -0.5f * kChurnDomainM;
-    m_seaCb.churnF[1] = -0.5f * kChurnDomainM;
-    m_seaCb.churnF[2] = 1.0f / kChurnDomainM;
-    m_seaCb.churnF[3] = 1.05f;   // churn -> foam gain
+    m_seaCb.churnU[3] = m_expRes;   // M9ba: the exposure tenant's residency map
+    // M9az: THE CHURN FOLLOWS THE CAMERA. The 16 km domain used to sit on the station: memory
+    // could not exist +-8 km from Newburyport, Boston's window included. The atlas is now a
+    // toroidal clipmap on a WORLD-anchored tile lattice -- the window's origin snaps to a tile
+    // multiple like the wave bank's rings (ReanchorRing), a world tile lives at slot (tile mod
+    // atlas tiles), so re-anchoring moves no bytes: content stays where the water is, the
+    // slots whose world tile changed hands are cleared, and tiles that leave the window unmap.
     if (m_churnReady) {
-        m_seaCb.churnF2[0] = static_cast<float>(m_churn.TileW()) * kChurnTexelM;
-        m_seaCb.churnF2[1] = static_cast<float>(m_churn.TileH()) * kChurnTexelM;
+        const float spanX = static_cast<float>(m_churn.TileW()) * kChurnTexelM;
+        const float spanZ = static_cast<float>(m_churn.TileH()) * kChurnTexelM;
+        const double half = 0.5 * kChurnDomainM;
+        m_churnOrgX = static_cast<float>(std::floor((camX - half) / spanX) * spanX);
+        m_churnOrgZ = static_cast<float>(std::floor((camZ - half) / spanZ) * spanZ);
+        m_seaCb.churnF2[0] = spanX;
+        m_seaCb.churnF2[1] = spanZ;
         m_seaCb.churnF2[2] = static_cast<float>(m_churn.TilesX());
         m_seaCb.churnF2[3] = static_cast<float>(m_churn.TilesY());
-        UpdateChurnResidency(*m_gpu, simUnix, signedMs);
     }
+    m_seaCb.churnF[0] = m_churnOrgX;
+    m_seaCb.churnF[1] = m_churnOrgZ;
+    m_seaCb.churnF[2] = 1.0f / kChurnDomainM;
+    m_seaCb.churnF[3] = 1.05f;   // churn -> foam gain
+    if (m_churnReady) UpdateChurnResidency(*m_gpu, simUnix, signedMs);
 
     m_seaCb.bathyU[0] = m_bathySrv;
     memcpy(m_seaCb.bathyGeo, m_bathyGeo, sizeof(m_bathyGeo));
 
-    // ---- M5c: swell-shadow mask -- rebuilt when the peak wave direction or the water level
-    // moves enough to change what blocks the sea (a bar that shadows at low water drowns at
-    // high water).
-    // M7j: the hypervisor's first catch -- the mask could build from the DEFAULT peak
-    // direction (toward east) before partitions loaded: marching "toward the source" then
-    // walked WEST into the dunes from every ocean cell, and the whole sea read as deep
-    // shadow. No real direction, no shadow (exposure 1 until the swell is known).
-    if (m_bathyCpu && m_bathyCpu->Ready() && m_peakDirValid) {
-        const float lvl = static_cast<float>(seaLevelM);
-        const float dirDot = m_peakDirX * m_shadowDirX + m_peakDirZ * m_shadowDirZ;
-        if (!m_shadowBuilt || dirDot < 0.98f || std::abs(lvl - m_shadowLevel) > 0.5f) {
-            BuildShadowMask(*m_gpu, lvl);
-        }
-    }
+    // M9ba: the swell exposure is a tree node driven from main (ExposureSource::Set on the
+    // peak direction and the level); nothing is built here any more.
 
     // ---- M5c: solver bindings. NULL-tile eta reads = "the tide plane is right here".
     const bool sweOn = m_swe && m_swe->Ready();
     m_seaCb.sweU[0] = sweOn ? m_swe->EtaSrv() : UINT32_MAX;
     m_seaCb.sweU[1] = sweOn ? m_swe->UvSrv() : UINT32_MAX;
     m_seaCb.sweU[2] = sweOn ? 1u : 0u;
-    m_seaCb.sweU[3] = m_shadowBuilt ? m_shadowTex.srv : UINT32_MAX;
+    m_seaCb.sweU[3] = m_expSrv;    // M9ba: the exposure page tenant's array SRV
     if (sweOn) {
         m_seaCb.sweF[0] = static_cast<float>(m_swe->Nx());
         m_seaCb.sweF[1] = static_cast<float>(m_swe->Ny());
@@ -649,88 +648,6 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
 // geometric shadow. Two box blurs give the penumbra a wavelength-ish softness. This is
 // line-of-sight, not diffraction -- honest about what it is, and it reads right: calm in the
 // lee of the north jetty while the bar outside stays violent.
-void SeaLayer::BuildShadowMask(Gpu& gpu, float waterNavd) {
-    const BathyModel& bm = *m_bathyCpu;
-    const int nx = bm.Nx(), ny = bm.Ny();
-    const float cellX = bm.WorldSizeX() / nx, cellZ = bm.WorldSizeZ() / ny;
-    const auto& elev = bm.Elev();
-
-    // March in grid space (row 0 = north). Step ~2 cells; nearest-sample the bed directly.
-    const float stepM = 13.0f;
-    const float sx = -m_peakDirX * stepM / cellX;          // grid x per step
-    const float sy = +m_peakDirZ * stepM / cellZ;          // grid y grows SOUTH; -(-dirZ)
-    const int maxSteps = static_cast<int>(4000.0f / stepM);
-
-    // Graded blocking: an awash bar (crest barely above water) BREAKS the swell and transmits a
-    // reduced sea; only real walls -- jetty crests, dunes, the island -- throw a deep shadow.
-    std::vector<float> mask(kShadowN * kShadowN, 1.0f);
-    for (uint32_t my = 0; my < kShadowN; ++my) {
-        for (uint32_t mx = 0; mx < kShadowN; ++mx) {
-            const float gx0 = (mx + 0.5f) / kShadowN * nx;
-            const float gy0 = (my + 0.5f) / kShadowN * ny;
-            const float e0 = elev[static_cast<int>(gy0) * nx + static_cast<int>(gx0)];
-            if (e0 > -9000.0f && e0 > waterNavd) continue;   // land cell; value never sampled
-            float gx = gx0, gy = gy0;
-            float excess = 0.0f;   // worst blocker height above the water line en route
-            for (int s = 0; s < maxSteps; ++s) {
-                gx += sx;
-                gy += sy;
-                const int ix = static_cast<int>(gx), iy = static_cast<int>(gy);
-                if (ix < 0 || iy < 0 || ix >= nx || iy >= ny) break;   // open water: exposed
-                const float e = elev[iy * nx + ix];
-                if (e > -9000.0f) excess = std::max(excess, e - waterNavd);
-                if (excess > 1.2f) break;   // already a full wall; no need to keep marching
-            }
-            if (excess > 0.15f) {
-                // 0.15 m awash -> 0.5 transmission, ramping down to the 0.12 deep-shadow floor
-                // by a 1.2 m wall.
-                const float t = std::min((excess - 0.15f) / 1.05f, 1.0f);
-                mask[my * kShadowN + mx] = 0.5f - 0.38f * t;
-            }
-        }
-    }
-    for (int pass = 0; pass < 2; ++pass) {
-        std::vector<float> sm = mask;
-        for (int y = 1; y < static_cast<int>(kShadowN) - 1; ++y) {
-            for (int x = 1; x < static_cast<int>(kShadowN) - 1; ++x) {
-                float a = 0;
-                for (int dy = -1; dy <= 1; ++dy) {
-                    for (int dx2 = -1; dx2 <= 1; ++dx2) {
-                        a += mask[(y + dy) * kShadowN + (x + dx2)];
-                    }
-                }
-                sm[y * kShadowN + x] = a / 9.0f;
-            }
-        }
-        mask.swap(sm);
-    }
-
-    m_shadowCpu.resize(mask.size());
-    for (size_t i = 0; i < mask.size(); ++i) {
-        m_shadowCpu[i] = static_cast<uint8_t>(std::clamp(mask[i], 0.0f, 1.0f) * 255.0f + 0.5f);
-    }
-    if (!m_shadowTex.Valid()) {
-        m_shadowTex = gpu.CreateTexture2D(kShadowN, kShadowN, DXGI_FORMAT_R8_UNORM,
-                                          D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST,
-                                          L"sea.swellShadow");
-    }
-    gpu.UploadTexture(m_shadowTex, m_shadowCpu.data(), kShadowN);
-    // The domain shader reads it too: PIXEL alone is not a legal state for that.
-    ID3D12GraphicsCommandList* cl = gpu.BeginUpload();
-    gpu.Transition(cl, m_shadowTex, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
-                                        D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-    gpu.EndUpload();
-    if (m_shadowTex.srv == UINT32_MAX) {
-        m_shadowTex.srv = gpu.CreateSrv(m_shadowTex.res.Get(), DXGI_FORMAT_R8_UNORM);
-    }
-
-    m_shadowDirX = m_peakDirX;
-    m_shadowDirZ = m_peakDirZ;
-    m_shadowLevel = waterNavd;
-    m_shadowBuilt = true;
-    Log("[sea] swell-shadow mask rebuilt (dir %.2f,%.2f water %.2f NAVD)", m_peakDirX,
-        m_peakDirZ, waterNavd);
-}
 
 void SeaLayer::UpdateChurnResidency(Gpu& gpu, double simUnix, double signedMs) {
     if (!m_churnReady) return;
@@ -750,29 +667,51 @@ void SeaLayer::UpdateChurnResidency(Gpu& gpu, double simUnix, double signedMs) {
     // Deep-water chop speed as the conservative onset (shallow water only blocks EARLIER).
     const float bandC2 = 1.86f;
     const double onset = 0.16 * bandC2;
-    if (std::abs(signedMs) > onset) {
-        const float fx = m_seaCb.jetDir[0], fz = m_seaCb.jetDir[1];
-        const float ex = m_seaCb.jetDir[2], ez = m_seaCb.jetDir[3];
-        for (uint32_t ty = 0; ty < m_churn.TilesY(); ++ty) {
-            for (uint32_t tx = 0; tx < m_churn.TilesX(); ++tx) {
-                const float wx = m_seaCb.churnF[0] +
-                                 (tx + 0.5f) * m_seaCb.churnF2[0];
-                const float wz = m_seaCb.churnF[1] +
-                                 (ty + 0.5f) * m_seaCb.churnF2[1];
-                const float along = wx * ex + wz * ez;
-                const float px = wx - along * ex, pz = wz - along * ez;
-                const float cross2 = px * px + pz * pz;
-                float env = std::exp(-cross2 / (m_seaCb.jet[1] * m_seaCb.jet[1]));
-                env *= (along > 0) ? std::exp(-along / m_seaCb.jet[2]) : 1.0f;
-                (void)fx; (void)fz;
-                // M5c: a WIDE superset -- the deposit is now geographic (solved currents +
-                // depth), so an over-mapped tile just holds zeros, while an under-mapped one
-                // punches a visible NULL rectangle into the middle of real breaking.
-                if (env * std::abs(signedMs) > onset * 0.35) {
-                    const uint32_t i = ty * m_churn.TilesX() + tx;
-                    m_lastActive[i] = simUnix;
-                    if (!m_churn.IsResident(tx, ty)) m_churn.RequestMap(tx, ty);
-                }
+    // M9az: walk the WINDOW's tiles (world lattice), not the atlas' slots. Each world tile maps
+    // to one slot; a slot that held a different world tile last frame has changed hands.
+    const uint32_t NX = m_churn.TilesX(), NY = m_churn.TilesY();
+    const float spanX = m_seaCb.churnF2[0], spanZ = m_seaCb.churnF2[1];
+    const int32_t T0x = static_cast<int32_t>(std::floor(m_churnOrgX / spanX));
+    const int32_t T0y = static_cast<int32_t>(std::floor(m_churnOrgZ / spanZ));
+    if (m_slotWorldX.size() != size_t(NX) * NY) {
+        m_slotWorldX.assign(size_t(NX) * NY, INT32_MIN);
+        m_slotWorldY.assign(size_t(NX) * NY, INT32_MIN);
+    }
+    auto slotOf = [&](int32_t Tx, int32_t Ty, uint32_t& sx, uint32_t& sy) {
+        const int32_t mx = ((Tx % int32_t(NX)) + int32_t(NX)) % int32_t(NX);
+        const int32_t my = ((Ty % int32_t(NY)) + int32_t(NY)) % int32_t(NY);
+        sx = uint32_t(mx);
+        sy = uint32_t(my);
+    };
+    const bool jetOn = std::abs(signedMs) > onset;
+    const float ex = m_seaCb.jetDir[2], ez = m_seaCb.jetDir[3];
+    for (uint32_t j = 0; j < NY; ++j) {
+        for (uint32_t i = 0; i < NX; ++i) {
+            const int32_t Tx = T0x + int32_t(i), Ty = T0y + int32_t(j);
+            uint32_t sx, sy;
+            slotOf(Tx, Ty, sx, sy);
+            const uint32_t slot = sy * NX + sx;
+            if (m_slotWorldX[slot] != Tx || m_slotWorldY[slot] != Ty) {
+                // The slot changed hands: its bytes belong to water 16 km away.
+                m_slotWorldX[slot] = Tx;
+                m_slotWorldY[slot] = Ty;
+                m_lastActive[slot] = -1.0e18;
+                if (m_churn.IsResident(sx, sy)) m_pendingClear.push_back(slot);
+            }
+            if (!jetOn) continue;
+            const float wx = (float(Tx) + 0.5f) * spanX;
+            const float wz = (float(Ty) + 0.5f) * spanZ;
+            const float along = wx * ex + wz * ez;
+            const float px = wx - along * ex, pz = wz - along * ez;
+            const float cross2 = px * px + pz * pz;
+            float env = std::exp(-cross2 / (m_seaCb.jet[1] * m_seaCb.jet[1]));
+            env *= (along > 0) ? std::exp(-along / m_seaCb.jet[2]) : 1.0f;
+            // M5c: a WIDE superset -- the deposit is geographic (solved currents + depth), so
+            // an over-mapped tile just holds zeros, while an under-mapped one punches a
+            // visible NULL rectangle into the middle of real breaking.
+            if (env * std::abs(signedMs) > onset * 0.35) {
+                m_lastActive[slot] = simUnix;
+                if (!m_churn.IsResident(sx, sy)) m_churn.RequestMap(sx, sy);
             }
         }
     }
@@ -825,9 +764,10 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
             av.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             av.Format = DXGI_FORMAT_R16_FLOAT;
             av.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+            // M9ax: the whole tenant (cube faces + the page); the slice rides the CB.
             av.Texture2DArray.MipLevels = m_hgtMips;
-            av.Texture2DArray.FirstArraySlice = m_hgtSlice;
-            av.Texture2DArray.ArraySize = 1;
+            av.Texture2DArray.FirstArraySlice = 0;
+            av.Texture2DArray.ArraySize = UINT32_MAX;
             ctx.gpu->Device()->CreateShaderResourceView(m_hgtArr, &av,
                                                         ctx.gpu->SrvHeap().Cpu(m_churnTable + 2));
             av.Format = DXGI_FORMAT_R8_UNORM;
@@ -855,6 +795,10 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
 
         m_churnCb.originX = m_seaCb.churnF[0];
         m_churnCb.originZ = m_seaCb.churnF[1];
+        m_churnCb.window[0] = std::floor(m_churnOrgX / m_seaCb.churnF2[0]);
+        m_churnCb.window[1] = std::floor(m_churnOrgZ / m_seaCb.churnF2[1]);
+        m_churnCb.window[2] = static_cast<float>(m_churn.TilesY());
+        m_churnCb.window[3] = 0.0f;
         m_churnCb.texelM = kChurnTexelM;
         m_churnCb.domainM = kChurnDomainM;
         m_churnCb.tilesX = m_churn.TilesX();
@@ -866,10 +810,10 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
         memcpy(m_churnCb.jetB, m_seaCb.jetDir, 16);
         // M5c: the chop-band WAVENUMBER -- the kernel derives phase speed from the local depth,
         // exactly like Sea.hlsl (misc[0] was the deep-water speed when churn had no bathy).
-        m_churnCb.misc[0] = m_seaCb.bandK[2];
-        m_churnCb.misc[1] = m_fft.PatchL(2);
-        m_churnCb.misc[2] = m_seaCb.waveC[3];
-        m_churnCb.misc[3] = 0;
+        m_churnCb.miscC[0] = m_seaCb.bandK[2];
+        m_churnCb.miscC[1] = m_fft.PatchL(2);
+        m_churnCb.miscC[2] = m_seaCb.waveC[3];
+        m_churnCb.miscC[3] = 0;
         memcpy(m_churnCb.bathyG, m_bathyGeo, sizeof(m_bathyGeo));
         m_churnCb.geoA[0] = static_cast<float>(BathyModel::kOrgLat);
         m_churnCb.geoA[1] = static_cast<float>(BathyModel::kOrgLon);
@@ -879,6 +823,7 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
         m_churnCb.winA[1] = static_cast<float>(m_hgtOrg[1]);
         m_churnCb.winA[2] = 1.0f / 16384.0f;
         m_churnCb.winA[3] = 16384.0f * 256.0f;
+        m_churnCb.pageB[0] = static_cast<float>(m_hgtSlice);
         m_churnCb.sweM[0] = m_churnSweWired ? 1.0f : 0.0f;
         m_churnCb.sweM[1] = sweCurrentGain;
         m_churnCb.sweM[2] = 500.0f;   // the same seaward handover ramp as Sea.hlsl's JetU

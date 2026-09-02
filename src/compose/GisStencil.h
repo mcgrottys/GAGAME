@@ -28,18 +28,10 @@ public:
     using Polyline = std::vector<std::pair<float, float>>;   // (lon, lat) degrees
 
     bool Load(const std::string& jsonPath);
-    // The raster realizations. The WINDOW mask is R8G8: r = land mask with data/gis/
-    // edits.geojson baked over the survey, g = EDIT FLAG -- flagged texels are law, they
-    // override the survey and the live-tide classifier alike (the jetties came back from
-    // the sea by three hand-typed polygons). Needs the shared Mercator window frame.
-    void BuildMasks(Gpu& gpu, double orgPxX, double orgPxY, double sizePx);
+    // M9ay: the raster realizations (window R8G8, global R8, fine edit R8G8) are gone. They
+    // read the .raw parity fills; the classifier reads gis.landsea's own pages now
+    // (GisMask + the mask page tenant). This class keeps the VECTORS for the overlay.
     bool Ready() const { return m_ready; }
-    uint32_t MaskWinSrv() const { return m_maskWin.srv; }
-    // M7f: the FINE edit mask -- edits.geojson rasterized at ~1 m over the edits' own bbox
-    // (the 4096^2 window mask answers at 38 m texels; a 25 m jetty is one texel there).
-    uint32_t MaskEditSrv() const { return m_maskEdit.Valid() ? m_maskEdit.srv : 0xFFFFFFFFu; }
-    const float* EditBox() const { return m_editBox; }   // window-uv offset xy, scale zw
-    uint32_t MaskGlobSrv() const { return m_maskGlob.srv; }
 
     const std::vector<Polyline>& CoastNe() const { return m_coastNe; }
     const std::vector<Polyline>& RiversNe() const { return m_riversNe; }
@@ -49,10 +41,7 @@ private:
     static bool ReadBin(const std::string& path, std::vector<Polyline>& out);
 
     std::vector<Polyline> m_coastNe, m_riversNe, m_coastGlob;
-    std::string m_dir, m_maskNePath, m_maskGlobPath;
-    uint32_t m_maskNeDim = 0, m_maskGw = 0, m_maskGh = 0;
-    GpuTexture m_maskWin, m_maskGlob, m_maskEdit;
-    float m_editBox[4] = {0, 0, 0, 0};
+    std::string m_dir;
     bool m_ready = false;
 };
 

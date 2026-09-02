@@ -79,6 +79,7 @@ public:
     // 255 = the bed may paint here (water, or outside the survey: no opinion),
     //   0 = the survey says land.
     // Row 0 is latMax. Column-major internally, because a column is a meridian.
+    // M9ay: out is dim*dim*2 bytes: [value (255 water / 0 land), flags (1 surveyed, 2 edited)].
     void RasterizeGate(double latMin, double latMax, double lonMin, double lonMax, uint32_t dim,
                        std::vector<uint8_t>& out) const;
 
@@ -103,6 +104,7 @@ private:
     // parity -- and there are a few dozen of them, not a million.
     struct EdgeIndex {
         std::vector<uint32_t> a, b;      // indices into m_pts
+        std::vector<uint32_t> ring;      // the ring each edge belongs to (per-feature parity)
         std::vector<uint32_t> start;     // bucket -> first entry in `edge` (size buckets+1)
         std::vector<uint32_t> edge;      // entries: indices into a/b
     };
@@ -115,6 +117,10 @@ private:
     int Bucket(double lonDeg) const;
     // Crossing latitudes of one edge set with the meridian at `lonDeg`, appended to `xs`.
     void Crossings(const EdgeIndex& idx, double lonDeg, std::vector<double>& xs) const;
+    // The same crossings tagged by ring, for sets whose members OVERLAP (the NHD water
+    // polygons): parity is taken per feature and the features are OR'ed.
+    void CrossingsTagged(const EdgeIndex& idx, double lonDeg,
+                         std::vector<std::pair<uint32_t, double>>& xs) const;
     void CrossingsRing(const Ring& r, double lonDeg, std::vector<double>& xs) const;
     // Parity-fill a column from the sorted crossing latitudes.
     static void FillParity(std::vector<double>& xs, double latMin, double latMax, uint32_t dim,

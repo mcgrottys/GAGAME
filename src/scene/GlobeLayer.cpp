@@ -927,6 +927,7 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
         if (m_normT >= 0) m_res->Want(m_normT, face, mip, tu0, tv0, tu1, tv1, m_predictPass);
         if (m_colorT >= 0) m_res->Want(m_colorT, face, mip, tu0, tv0, tu1, tv1, m_predictPass);
         if (m_hgtT >= 0) m_res->Want(m_hgtT, face, mip, tu0, tv0, tu1, tv1, m_predictPass);
+        if (m_maskT >= 0) m_res->Want(m_maskT, face, mip, tu0, tv0, tu1, tv1, m_predictPass);
         // M6f: the window's demand -- the node's corners in Mercator z14-pixel space,
         // intersected with the window; its mip matches the same on-screen texel math against
         // the window's OWN pyramid (mip 0 = z14). Color and height windows share the frame,
@@ -995,6 +996,7 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
                     m_res->Want(m_hgtWinT, m_hgtWinFace, dmip, wu0, wv0, wu1, wv1,
                                 m_predictPass);
                 }
+                if (m_maskT >= 0) m_res->Want(m_maskT, 6u, dmip, wu0, wv0, wu1, wv1, m_predictPass);
             }
             // M7f: the z17 DETAIL window rides the same node box, 8x finer frame.
             if (m_detWinT >= 0) {
@@ -1014,6 +1016,12 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
                                 static_cast<float>((std::max)(ev0, 0.0)),
                                 static_cast<float>((std::min)(eu1, 1.0)),
                                 static_cast<float>((std::min)(ev1, 1.0)), m_predictPass);
+                    if (m_maskT >= 0) {
+                        m_res->Want(m_maskT, 7u, emip, static_cast<float>((std::max)(eu0, 0.0)),
+                                    static_cast<float>((std::max)(ev0, 0.0)),
+                                    static_cast<float>((std::min)(eu1, 1.0)),
+                                    static_cast<float>((std::min)(ev1, 1.0)), m_predictPass);
+                    }
                 }
             }
         }
@@ -1327,11 +1335,14 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         if (m_winT >= 0) m_res->Want(m_winT, m_winFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
         if (m_hgtWinT >= 0) m_res->Want(m_hgtWinT, m_hgtWinFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
         if (m_detWinT >= 0) m_res->Want(m_detWinT, m_detFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
+        if (m_maskT >= 0) {
+            m_res->Want(m_maskT, 6u, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
+            m_res->Want(m_maskT, 7u, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
+        }
     }
     FillComposedCb(m_cb.cs, m_res, m_colorT, m_winT, m_hgtT, m_hgtWinT, m_detOrg[0],
                    m_detOrg[1], m_detSize, 14, m_radius, m_frameE, m_frameU, m_frameN,
-                   stencilOverlay, m_gisWinSrv, m_gisGlobSrv, m_detWinT, m_det17Org, 17,
-                   m_gisEditSrv, m_gisEditOn ? m_gisEditBox : nullptr,
+                   stencilOverlay, m_maskT, m_detWinT, m_det17Org, 17,
                    m_winFace ? m_winFace : UINT32_MAX, m_detFace ? m_detFace : UINT32_MAX,
                    m_hgtWinFace ? m_hgtWinFace : UINT32_MAX);
     if (m_streamMars) {

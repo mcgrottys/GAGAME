@@ -53,10 +53,12 @@
 
 #include <algorithm>
 #include <atomic>
+#include <functional>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -76,7 +78,8 @@ namespace ga {
 
 // Bump when the tile FORMAT or the leaf paint changes. Not when a source does -- a source's
 // identity is its own, and coupling the two would orphan every tree on every edit.
-inline constexpr int kTileTreeVersion = 1;
+// 2 (M9bb): parent mips are FOLDED from painted children (the pyramid), not only resampled.
+inline constexpr int kTileTreeVersion = 2;
 
 namespace tree_detail {
 
@@ -184,13 +187,14 @@ public:
 
     // Builds the tree of caches under this node, recursively. Every compose and gate node gets
     // its own folder; every leaf gets one. Nodes are borrowed -- the graph outlives the caches.
-    explicit TileTree(const DomainSource* node, Fmt fmt = Fmt::Rgba8) : m_node(node), m_fmt(fmt) {
+    explicit TileTree(const DomainSource* node, Fmt fmt = Fmt::Rgba8, TileTree* parent = nullptr)
+        : m_node(node), m_fmt(fmt), m_parent(parent) {
         const std::string kind = node->NodeKind();
         if (kind == "compose" || kind == "gate") {
             // Under a scalar root every input is FloatW: coverage rides with the value.
             const Fmt kidFmt = (fmt == Fmt::Rgba8) ? Fmt::Rgba8 : Fmt::FloatW;
             for (size_t i = 0; i < node->InputCount(); ++i) {
-                m_kids.push_back(std::make_unique<TileTree>(node->Input(i), kidFmt));
+                m_kids.push_back(std::make_unique<TileTree>(node->Input(i), kidFmt, this));
             }
         }
         // A leaf is anything not composed here -- a loader, or a loader under a normalize.
@@ -214,12 +218,26 @@ public:
     }
 
     const std::string& Id() const { return m_id; }
+    // M9bb: THE PYRAMID. Fires when a tile of THIS node changed under a consumer that already
+    // holds it -- a child's paint folded into a parent, or a descendant's fold made a cached
+    // composite stale. The residency manager hangs its per-tile refetch here. Called from the
+    // painting threads: the hook must be cheap and must queue, not touch GPU state.
+    std::function<void(const std::string& tag, const TileRequest& r)> onChanged;
     Fmt Format() const { return m_fmt; }
     size_t TileBytes() const { return m_fmt == Fmt::FloatW ? 262144u : 65536u; }
     const char* Name() const { return m_node->Name(); }
     const DomainSource* Node() const { return m_node; }
     size_t KidCount() const { return m_kids.size(); }
     TileTree& Kid(size_t i) { return *m_kids[i]; }
+    // M9ay: a node by name, depth-first, outermost match first (a normalize wrapper shares
+    // its leaf's name; its tiles are references into the leaf, so either answers).
+    TileTree* Find(const char* name) {
+        if (std::strcmp(Name(), name) == 0) return this;
+        for (auto& k : m_kids) {
+            if (TileTree* f = k->Find(name)) return f;
+        }
+        return nullptr;
+    }
 
     void EnsureFrame(const std::string& tag) {
         tree_detail::MakeDir(m_root + "\\" + tag);
@@ -289,6 +307,7 @@ public:
 
     // ---- accounting --------------------------------------------------------------------------
     std::atomic<uint32_t> painted{0}, read{0}, voids{0}, refs{0}, composed{0}, hits{0};
+    std::atomic<uint32_t> folded{0}, dropped{0};   // M9bb: pyramid folds; cached addresses dropped
     std::string Stats(int depth = 0) const {
         std::string pad(size_t(depth) * 2, ' ');
         char b[256];
@@ -505,7 +524,119 @@ private:
             return Status::Void;
         }
         tree_detail::WriteTile(base + ".bin", out);
+        FoldUp(frame, tag, r, out);
         return Status::Content;
+    }
+
+    // ---- M9bb: THE PYRAMID, IN THE COMPOSITOR. A leaf's freshly painted tile is folded into
+    // its parent's quadrant (2x2 box, coverage-weighted -- the fold law: average the answers),
+    // and that parent into its own, up to the frame's coarsest mip. A parent that does not
+    // exist yet is painted from the source first (as every mip always was), then overwritten
+    // where children exist; so a coarse mip is the source's own resample where nothing finer
+    // has been painted, and exactly the fold of the finer level where it has. Composites above
+    // are not folded here: they compose their children's (folded) parents through the same
+    // OverStep, so fold(compose) and compose(fold) meet up to the over's own nonlinearity, and
+    // their cached tiles at the changed address are dropped so they recompose.
+    static uint32_t MaxMip(const ColorFrame& f) {
+        uint32_t m = 0;
+        for (uint32_t d = f.faceDim; d > f.texW; d >>= 1) ++m;
+        return m;
+    }
+    void FoldQuadrant(const ColorFrame& frame, const TileRequest& child,
+                      const std::vector<uint8_t>& src, std::vector<uint8_t>& parent) const {
+        const uint32_t W = frame.texW, H = frame.texH, hw = W / 2, hh = H / 2;
+        const uint32_t ox = (child.x & 1u) * hw, oy = (child.y & 1u) * hh;
+        if (m_fmt == Fmt::FloatW) {
+            const float* s = reinterpret_cast<const float*>(src.data());
+            float* d = reinterpret_cast<float*>(parent.data());
+            for (uint32_t py = 0; py < hh; ++py) {
+                for (uint32_t px = 0; px < hw; ++px) {
+                    double vw = 0.0, wsum = 0.0;
+                    for (uint32_t k = 0; k < 4; ++k) {
+                        const size_t i = (size_t(2 * py + (k >> 1)) * W + (2 * px + (k & 1))) * 2;
+                        vw += double(s[i]) * s[i + 1];
+                        wsum += s[i + 1];
+                    }
+                    const size_t o = (size_t(oy + py) * W + (ox + px)) * 2;
+                    d[o] = wsum > 0.0 ? float(vw / wsum) : 0.0f;
+                    d[o + 1] = float(wsum * 0.25);
+                }
+            }
+            return;
+        }
+        if (m_fmt != Fmt::Rgba8) return;   // Half tiles are roots; they compose, never fold
+        for (uint32_t py = 0; py < hh; ++py) {
+            for (uint32_t px = 0; px < hw; ++px) {
+                double c[3] = {0, 0, 0}, a = 0.0;
+                for (uint32_t k = 0; k < 4; ++k) {
+                    const uint8_t* s = &src[(size_t(2 * py + (k >> 1)) * W + (2 * px + (k & 1))) * 4];
+                    const double w = s[3] / 255.0;
+                    for (int q = 0; q < 3; ++q) c[q] += s[q] * w;
+                    a += w;
+                }
+                uint8_t* d = &parent[(size_t(oy + py) * W + (ox + px)) * 4];
+                if (a > 0.0) {
+                    for (int q = 0; q < 3; ++q) {
+                        d[q] = static_cast<uint8_t>((std::max)(0.0, (std::min)(255.0, c[q] / a)));
+                    }
+                }
+                d[3] = static_cast<uint8_t>((std::min)(1.0, a * 0.25) * 255.0 + 0.5);
+            }
+        }
+    }
+    void FoldUp(const ColorFrame& frame, const std::string& tag, const TileRequest& r,
+                const std::vector<uint8_t>& child) {
+        if (r.mip >= MaxMip(frame)) return;
+        if (m_fmt == Fmt::Half) return;
+        std::lock_guard<std::recursive_mutex> lk(m_foldMx);
+        const TileRequest p{r.face, r.mip + 1, r.x / 2, r.y / 2};
+        const std::string pbase = Base(tag, p);
+        std::vector<uint8_t> parent;
+        Held ph = PeekAt(pbase);
+        if (ph == Held::Content && !tree_detail::ReadTile(pbase + ".bin", parent, TileBytes())) {
+            ph = Held::Absent;
+        }
+        if (ph == Held::Absent) {
+            Compositor::TileBox pbox{};
+            frame.Box(p, pbox);
+            const Status s = LeafTile(frame, tag, p, pbox, parent, nullptr);
+            if (s == Status::Transient) return;
+            if (s != Status::Content) {
+                parent.assign(TileBytes(), 0);
+                ph = Held::Void;
+            }
+        } else if (ph == Held::Void) {
+            parent.assign(TileBytes(), 0);
+        }
+        if (parent.size() != TileBytes()) return;
+        FoldQuadrant(frame, r, child, parent);
+        if (ph == Held::Void) DeleteFileA((pbase + ".void").c_str());
+        tree_detail::WriteTile(pbase + ".bin", parent);
+        ++folded;
+        InvalidateAbove(tag, p);
+        FoldUp(frame, tag, p, parent);
+    }
+    // A tile of this node changed: consumers holding it refetch; ancestors' cached composites
+    // of the same address are dropped (their key folds what children HOLD, not what they say).
+    void InvalidateAbove(const std::string& tag, const TileRequest& r) {
+        if (onChanged) onChanged(tag, r);
+        if (m_parent) m_parent->DropCachedAddress(tag, r);
+    }
+    void DropCachedAddress(const std::string& tag, const TileRequest& r) {
+        const std::string base = Base(tag, r);
+        WIN32_FIND_DATAA fd{};
+        HANDLE h = FindFirstFileA((base + "_*").c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            const std::string dir = base.substr(0, base.find_last_of('\\') + 1);
+            do {
+                DeleteFileA((dir + fd.cFileName).c_str());
+            } while (FindNextFileA(h, &fd));
+            FindClose(h);
+        }
+        DeleteFileA((base + ".bin").c_str());
+        DeleteFileA((base + ".void").c_str());
+        ++dropped;
+        InvalidateAbove(tag, r);
     }
 
     // ---- compose: the children's tiles through OverStep ---------------------------------------
@@ -712,6 +843,8 @@ private:
     std::string m_id, m_root;
     std::map<std::string, TileArchive> m_arcs;
     std::mutex m_arcMx;
+    std::recursive_mutex m_foldMx;   // M9bb: parents are read-modify-written by painting threads
+    TileTree* m_parent = nullptr;
 };
 
 // ================================================================================================

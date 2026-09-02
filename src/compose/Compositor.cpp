@@ -692,9 +692,8 @@ void FillComposedCb(ComposedSurfaceCb& cb, const ResidencyManager* rm, int color
                     int window, int heightCube, int heightWindow, double orgPxX,
                     double orgPxY, double sizePx, int zBase, double planetR,
                     const double east[3], const double up[3], const double north[3],
-                    bool stencilOverlay, uint32_t gisWinSrv, uint32_t gisGlobSrv,
-                    int detailWin, const double* detOrgPx, int detailZ,
-                    uint32_t editMaskSrv, const float* editBox, uint32_t winSlice,
+                    bool stencilOverlay, int maskPages, int detailWin,
+                    const double* detOrgPx, int detailZ, uint32_t winSlice,
                     uint32_t detSlice, uint32_t hgtWinSlice) {
     const bool cubeOn = rm && colorCube >= 0;
     const bool winOn = rm && window >= 0;
@@ -727,9 +726,14 @@ void FillComposedCb(ComposedSurfaceCb& cb, const ResidencyManager* rm, int color
                      : UINT32_MAX;
     cb.u2[2] = (hgtWinOn && !hpages) ? rm->TextureSrv(heightWindow) : UINT32_MAX;
     cb.u2[3] = (hgtWinOn && !hpages) ? rm->ResidencySrv(heightWindow) : UINT32_MAX;
-    cb.u3[0] = gisWinSrv;
-    cb.u3[1] = gisGlobSrv;
-    cb.u3[2] = cb.u3[3] = UINT32_MAX;
+    // M9ay: the survey MASK PAGES (gis.landsea's tree as a page tenant): array SRV + residency
+    // for the Mercator pages (slices 6, 7), cube views for the faces. r = water coverage,
+    // b = edited, a = surveyed. UINT32_MAX = no survey: the classifier uses the height sign.
+    const bool maskOn = rm && maskPages >= 0;
+    cb.u3[0] = maskOn ? rm->TextureSrv(maskPages) : UINT32_MAX;
+    cb.u3[1] = maskOn ? rm->ResidencySrv(maskPages) : UINT32_MAX;
+    cb.u3[2] = maskOn ? rm->TextureSrvCube(maskPages) : UINT32_MAX;
+    cb.u3[3] = maskOn ? rm->ResidencySrvCube(maskPages) : UINT32_MAX;
     cb.f[0] = cubeOn ? 1.0f : 0.0f;
     cb.f[1] = winOn ? 1.0f : 0.0f;
     cb.f[2] = hgtOn ? 1.0f : 0.0f;
@@ -755,7 +759,7 @@ void FillComposedCb(ComposedSurfaceCb& cb, const ResidencyManager* rm, int color
     const bool detOn = rm && detailWin >= 0 && detOrgPx;
     cb.u4[0] = (detOn && !pages) ? rm->TextureSrv(detailWin) : UINT32_MAX;
     cb.u4[1] = (detOn && !pages) ? rm->ResidencySrv(detailWin) : UINT32_MAX;
-    cb.u4[2] = editMaskSrv;
+    cb.u4[2] = UINT32_MAX;   // M9ay: the fine edit raster is gone; edits ride the mask pages
     cb.u4[3] = UINT32_MAX;
     cb.det[0] = cb.det[1] = cb.det[2] = 0.0f;
     if (detOn && zBase > 0 && sizePx > 0.0) {
@@ -764,8 +768,8 @@ void FillComposedCb(ComposedSurfaceCb& cb, const ResidencyManager* rm, int color
         cb.det[1] = static_cast<float>((orgPxY * f - detOrgPx[1]) / 16384.0);
         cb.det[2] = static_cast<float>(sizePx * f / 16384.0);
     }
-    cb.det[3] = (editMaskSrv != UINT32_MAX && editBox) ? 1.0f : 0.0f;
-    for (int i = 0; i < 4; ++i) cb.ed[i] = editBox ? editBox[i] : 0.0f;
+    cb.det[3] = 0.0f;
+    for (int i = 0; i < 4; ++i) cb.ed[i] = 0.0f;
 }
 
 }  // namespace ga

@@ -1752,3 +1752,192 @@ painted, 2855 void (land); `earth.seafloor` 4151 composed (where the classifier 
 (~250 km) lit and albedo, frame 450 (80 km); `out/rail_seafloor_720.mp4` is the flood rail.
 Bench not re-run this session (the shader change is one multiply per water pixel; the tree cost
 was measured in S38).
+
+## 40. The bed everywhere: one resolver for the kernels, and the row the size gate could not see
+
+**The keyhole (AUDIT_WATER item 5).** The pixel stage has resolved the planet's height with
+one rule since section 35 -- `ComposedHeightPages`: the z14 page by containment where its
+resident texel is at least as fine as the cube's, else the cube face by direction, the
+residency map clamping the mip. The three kernels that simulate on the bed each carried HALF
+of it: the page only, with a +100 m wall (SWE), -30 m (churn) or a CPU corner lerp (bank)
+outside it. The cube slices were bound to every one of them and never asked.
+
+**One include, any stage.** `shaders/HeightPages.hlsli` is the whole rule with manual bilinear
+Loads (ALGEBRA priors 1: a bindless SampleLevel outside the pixel stage returns zero), on the
+tenant's full array view (slices 0..5 the cube faces, 6 the page) and its residency-map array:
+`HpHeightAt(arr, res, lat, lon, winA, winSlice, pageMipMin)`. Two residency reads decide, one
+bilinear is paid. The cube-face inverse of `ComposeCubeDir` is a hand port, so gatest
+round-trips 20 000 random directions through it (worst 1-dot ~1e-16). The SWE, churn and bank
+views are the WHOLE tenant now (`ArraySize -1`), the page's slice rides a CB row
+(`gPageB.x`), and the bank's corner lerp survives only for a bank with no height tenant at
+all. Trace probe at the mouth, mip 0: page -9.02 m vs CPU stack -9.02 m, MATCH.
+
+**The SWE currents as a bank (item 4).** `SweSolver::m_uv` was the last dense committed
+texture on the per-frame water path. It is a Volatile `GradeBank` now (grade 1, RGBA16F,
+one mip, the same wet-tile residency as eta), with a TEXTURE2D view over slice 0 for the
+three consumers that read a plain texture, an array UAV pinned to slice 0 for the solve, and
+the readback wrapped like eta's. Land tiles are NULL and read the hardware zero, which the
+sea already treats as "no solve here" through the valid channel.
+
+**The row the size gate could not see (priors 22).** Wiring the churn found `ChurnCbData`
+rotated against `ChurnCb` since M9ar: `geoA, winA` inserted before `sweM` on the C++ side and
+appended after `gSweM` on the HLSL side. Same size; every row from `gSweM` on shifted. The
+churn read its "solved field on" from the anchor latitude, its current gain from the
+longitude (-70.8), and its page frame from the SWE handover ramp, so its bed was -30 m
+everywhere and its churn physics ran on nonsense for a week without a visible tell. Fixed by
+putting the C++ rows in the shader's order, and `dxtest` now reflects every cbuffer variable
+and matches its offset, size and name against the header's rows (nested `ComposedSurfaceCb`
+rows carry their member as a prefix, `cs + u == gCsU`); a deliberate same-size rotation fails
+with `FAIL cb layout: at 128 B ChurnCb has gSweM but ChurnCbData has pageB`. Two bank rows
+and one churn row were renamed on the C++ side to their shader names on the way.
+
+**Measured.** Flood rail, 1200 frames RENDER: 5.05 / 5.11 ms mean (the session's earlier
+default 4.86-4.91): the resolver's trig and two residency reads per bank texel per ring, ~0.15
+ms. `--selftest` passes (dxtest x5 size + layout, gatest incl. the cube-face inverse); the boot
+validates 59 graph edges; `out/rail_bed_720.mp4` is the flood rail on this path.
+
+**What this opens.** A `WeatherManager` window anywhere the tenant has a bed -- which is
+everywhere -- and the bank's shoaling, current amplification and depth-limited breaking on
+every coast the rings reach. The z14 origin is still repeated in `main.cpp` (item 7's Host
+object); Boston's window is still not mip-pinned (item 6).
+
+## 41. The survey as pages, and the pin that belongs to the windows
+
+**The survey as a page tenant (AUDIT_WATER item 2).** The land/sea classifier -- `ComposedLandness`,
+the sea's `discard`, the hand-edit override -- read three committed rasters `GisStencil` built
+at boot from `landmask_ne.raw` / `landmask_global.raw` / a 4096^2 edit box: the parity fills
+the vector mask (section 30) had refused to open. Meanwhile `gis.landsea` already had its own
+tree on the shared addresses, painted by the meridian sweep, gating the seafloor. It could gate
+but could not be READ: the gate multiplied by the layer's WEIGHT, so land had to be painted as
+absence, and a land texel and an unsurveyed texel were the same byte.
+
+Three changes make the tree the classifier's pages:
+- **The sweep writes two bytes a cell** -- value (255 water, 0 land) and flags (1 surveyed,
+  2 edited). `GisMaskSource` returns weight 1 where surveyed and `(value, value, edited, 255)`,
+  weight 0 (no opinion) elsewhere.
+- **The gate is a VALUE gate** (`GateSource`): coverage says whether the gate has an opinion,
+  the value channel is the factor. Void tiles still block; unsurveyed texels pass; land blocks
+  by its value. Identity `gate2|`, so every composite that consumed the old form rehashes.
+- **A third page tenant**, `gis.landsea (survey mask pages)` -- R8G8B8A8_UNORM, the colour
+  ladder's 8 slices, fed by `TileTree::Find("gis.landsea")->Provider(frame)`, demanded by the
+  same CDLOD walk as the colour and the height (cube by node, z14 and z17 by containment,
+  floor mips 4..7). `FillComposedCb` puts it in `gCsU3` (array SRV + residency, cube SRV +
+  residency). `CsMaskSample` takes the finest page with an opinion (a > 0): z17 where the ~1 m
+  edit raster used to answer, z14, the cube face; none -> the height sign, as before where no
+  survey existed. Addresses the survey has no opinion about have no tile; the loader marks them
+  NULL after its retries and never maps a zero.
+
+`GisStencil` keeps the vectors for the overlay and nothing else; `BuildMasks`, the three
+`GpuTexture`s, the edit box and the `.raw` paths are gone. The GA graph names `compose.stack ->
+mask.pages -> {globe.ps, sea.ps}`.
+
+**The pin belongs to the windows (item 6).** The solver domain's mip-0 pin lived in `main`,
+for the Merrimack alone, inside `mode == 1 && globe`. `WeatherManager::PinDomains` now asks
+for every ACTIVE window's lattice on the page it reads, every frame, from the manager that
+owns the windows -- Boston included when it wakes, and with or without a globe layer.
+
+**Found by the storm video: the channel was land.** With the classifier reading the sweep for
+the first time, the helm stood on drained bed: the z17 mask tiles two and three tiles west of
+the mouth were land, surveyed. The harvester's rule for the water carve is "NHD open-water
+even-odd PER FEATURE" and the sweep took parity over the UNION of the water rings; where two
+water polygons overlap (SeaOcean over the estuary/river polygon at the mouth) the parities
+cancel and the channel is land. Since M9ak that same union parity had gated the bed classifier
+out of the river without anyone seeing it -- the raster classifier still said water, so the
+sea drew water over a Google photo of water. The crossings now carry their ring id
+(`CrossingsTagged`), each feature fills its own parity and the features OR (priors 23). The
+coast set keeps union parity: GSHHG's hierarchy is nested and XOR is its semantics.
+
+**Found on the way: the flag that ate the next flag.** `--storm --rail-flood DIR --mp4 F`
+parsed as storm = "--rail-flood" and a stray DIR: no rail, no frame cap, the encoder pipe
+waiting forever on stdin while the sim free-ran at render speed and re-solved the wave field
+every 90 sim-seconds -- three "stuck recordings" in a row before the log line `[args] ignoring
+'out/storm_rail'` was read. Every flag with a default went through the same `next()`; it no
+longer consumes a token that begins with `--`.
+
+**Measured.** Warm after the gate's identity change: `gis.landsea` 7082 tiles painted, 13 void;
+`earth.color` 6439 composed, 5996 references; 52 185 tiles packed across the megatexture
+tree (the z17 mask page alone 4215 tiles, 264 MB). Boot: `[gis] the survey is page tenant 2`,
+`[weather] solver domains pinned ... merrimack (inside the page)`, 60 graph edges validate,
+no orphan. `--selftest` passes (dxtest x5 size + layout, gatest). Stills at 80 km (lit and
+albedo) and the helm frame render as before: the coastline classifier, the edit override on
+the jetties and the sea's discard now come from the pages.
+
+## 42. The churn follows the camera; the swell shadow is a tree node
+
+Two items from the water audit (AUDIT_WATER §4), both about the same thing: a field that
+existed only inside one box near Newburyport now exists wherever the camera is.
+
+**The churn (M9az).** The foam-memory atlas was a fixed 16 km box centred on the station:
+breaking could not be remembered eight kilometres from the ACT0816 buoy, Boston's window
+included. The atlas is unchanged (8192², 2 m texels, sparse, list-driven kernels); its
+ADDRESSING is now toroidal on a world-anchored tile lattice -- a world tile (Tx, Ty) lives at
+slot (Tx mod NX, Ty mod NY), and the domain is the ±8 km window around the camera whose origin
+snaps to a tile multiple exactly as the wave bank's rings do (`ReanchorRing`). Re-anchoring
+moves no bytes: content stays where the water is; a slot whose world tile changed hands is
+cleared (its bytes belonged to water 16 km away); tiles that leave the window unmap. Consumers
+test the window on the origin and sample at `frac(world / domain)` with a WRAP sampler, since
+the wrap line runs through the window. The kernel unwraps a slot to its world tile from the
+window's origin tile (`gWindow`, appended to `ChurnCb` on both sides). Measured: the helm frame
+differs from the fixed-domain build in 296 of 1.44 M pixels by at most 6/255 -- the wrap
+sampler at tile bilinear edges, nothing else.
+
+**The swell exposure (M9ba).** The line-of-sight shadow was a 160² CPU raster marched over one
+copy of the Merrimack CUDEM and uploaded as a committed texture -- inside one 18 km box the
+sea was sheltered, everywhere else the bank's rings whitecapped every harbour. It is a field
+over the bed, so it is now a `DomainSource` (`ExposureSource`): the march runs over the height
+STACK (whatever is finest under the ray), identity = the stack's signature + the peak direction
+bucketed to 5° + the level bucketed to 0.25 m + the program version. A one-input compose root
+over it gives a `TileTree` that materializes R16F; the tree is the provider of a fourth page
+tenant, `swell.exposure (pages)`, demanded every frame at mip 3 (76 m texels) over ±20 km
+around the camera, read by the sea shader and the bank kernel through the same lat/lon →
+page frame as the bed (`SweShadow`, the bank's `expo`), residency-clamped, nothing resident =
+exposed. When the bucket rolls the tree re-keys under an atomic shared pointer (loader threads
+may be inside the old tree's provider) and the tenant DROPS its tiles: residency bytes go to
+"nothing" this frame, pool slots are NULL-mapped after the frame-overlap window (priors 19),
+loads in flight for the old identity are discarded when they land (`ResidencyManager::Drop`).
+The CPU mirror for `--trace` is the node itself.
+
+**What the tree showed that the raster hid.** Marched over the composed stack, the survey
+edits make the jetties real +2.5 m walls, and a single line of sight from mid-channel toward an
+080° swell crosses the north jetty: the whole channel went to the 0.12 floor, where the old
+raster -- marching CUDEM's smeared crests and then box-smoothing a 117 m grid -- leaked. A
+single ray cannot carry what actually puts swell in that channel, so the node marches a
+cosine-weighted FAN of five rays across the sea's declared directional spread (±26°, the
+wave-field spectrum's own) and averages their transmissions. Diffraction is not modelled and
+is not claimed; the fan is the spread the spectrum already states. The graph: `sea.peakdir →
+exposure.node → {water.bank, sea.ps}`, mercator-uv, no flip; the ledger truth re-pinned.
+
+## 43. The pyramid, in the compositor
+
+The user's rule, stated while the exposure page misbehaved: parent mips are filled by folding
+the children DURING composition, not resampled from the source per level, and not as a
+separate pass. Until now every mip of every tree was its own paint (M6i's "each LOD averages
+the source over its own footprint"): correct where the source can answer at that footprint,
+but two independent answers per address, and for a node whose answer is a *march* (the
+exposure) two different marches. Now (`TileTree::FoldUp`, tree version 2):
+
+- A leaf's freshly painted tile is folded into its parent's quadrant -- 2x2 box,
+  coverage-weighted (straight colour x alpha / sum alpha, alpha = mean; value x weight / sum
+  weight, weight = mean), the fold law -- and that parent into its own, up to the frame's
+  coarsest mip. A parent that does not exist yet is painted from the source first (as every
+  mip always was), then overwritten where children exist. So a coarse texel is the source's
+  own resample where nothing finer was ever painted, and exactly the fold of the finer level
+  where it was; the two agree by construction wherever both exist.
+- Composites are not folded: they compose their children's folded parents through the same
+  `OverStep`, so fold(compose) meets compose(fold) up to the over's own nonlinearity. Their
+  CACHED tiles at a changed address are dropped (`DropCachedAddress`): a composite's key folds
+  what its children hold, not what they say, so a fold below would otherwise never be seen.
+- A changed tile is announced upward (`onChanged`); the residency manager queues a per-tile
+  refetch (`ResidencyManager::Invalidate`, applied on the main thread with Drop's retire
+  rules), so a page tenant holding the old parent takes the folded one on its next Want.
+- Parents are read-modify-written by painting threads under a per-tree recursive mutex.
+  Archives serve before loose files, so a pack after a warm is still the rule.
+
+**§42 postscript -- what was actually wrong.** The exposure node was right on disk from its
+second build, and the flat storm at the helm was never the node: every tenant staged its
+residency map at the same tail of the upload ring, and the exposure page (7 slices, like the
+height page) inherited the height tenant's map (priors 25). With one region per tenant the page
+reads its own residency, samples mip 4 where mip 4 is what it has, and the helm frame differs
+from `--no-exposure` by the shadow alone (96 k pixels, the footprint the constant probe
+predicted). Everything the probes said along the way was true; the copy between the CPU's map
+and the GPU's was the lie.

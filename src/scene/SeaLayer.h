@@ -10,6 +10,7 @@
 #pragma once
 
 #include "compose/Compositor.h"
+#include "compose/ExposureSource.h"
 #include "core/OceanFft.h"
 #include "core/TileAtlas.h"
 #include "core/GradeField.h"
@@ -68,11 +69,23 @@ public:
     uint32_t ChurnTiles() const { return m_churnReady ? m_churn.ResidentCount() : 0; }
     // M7e: the bank reads the foam MEMORY -- advected churn joins the one water's fiber.
     uint32_t ChurnAtlasSrv() const { return m_churnReady ? m_churn.Srv() : 0xFFFFFFFFu; }
+    // M9az: the churn window's world origin (a tile multiple, camera-following) and the
+    // domain's inverse span -- consumers test the window with these and sample the toroidal
+    // atlas at frac(world / domain).
+    float ChurnOriginX() const { return m_churnOrgX; }
+    float ChurnOriginZ() const { return m_churnOrgZ; }
+    static float ChurnDomainM() { return kChurnDomainM; }
     uint64_t ChurnBytes() const { return m_churnReady ? m_churn.ResidentBytes() : 0; }
-    // M7j: the bank reads the SWELL SHADOW -- the line-of-sight exposure field (CPU march,
-    // rebuilt when the peak direction or level moves). One-water lost this edge silently;
-    // the GA AST's orphan rule exists because of it.
-    uint32_t ShadowSrv() const { return m_shadowBuilt ? m_shadowTex.srv : 0xFFFFFFFFu; }
+    // M9ba: the swell EXPOSURE is a tree node read as a page tenant (swell.exposure, the z14
+    // slice at mips >= 3); the bank and the sea read the same pages. One-water once lost this
+    // edge silently -- the GA AST's orphan rule exists because of it.
+    void SetExposurePage(uint32_t arrSrv, uint32_t resSrv, const ExposureSource* src) {
+        m_expSrv = arrSrv;
+        m_expRes = resSrv;
+        m_exposure = src;
+    }
+    uint32_t ExposureSrv() const { return m_expSrv; }
+    uint32_t ExposureResSrv() const { return m_expRes; }
     // M7p: the peak propagation direction, for the bank's wave-current amplification.
     bool PeakDirValid() const { return m_peakDirValid; }
     float PeakDirX() const { return m_peakDirX; }
@@ -94,29 +107,12 @@ public:
     // M8: a --storm override makes the GFS grid stale by definition -- consumers that
     // ratio local grid Hs against the reference must treat the storm AS the reference.
     bool StormOn() const { return m_stormHs > 0.01f; }
-    // M7j --trace: the CPU mirror of the kernel's shadow read -- SAME frame, SAME
-    // row0-north flip, so the hypervisor prints exactly what the GPU will see.
+    // M9ba --trace: the CPU mirror of the page read -- the node itself, at the page's
+    // ~76 m grain, so the hypervisor prints what the GPU will see.
     float ShadowAtWorld(float x, float z) const {
-        if (!m_shadowBuilt || m_shadowCpu.empty()) return 1.0f;
-        const float u = (x - m_bathyGeo[0]) * m_bathyGeo[2];
-        const float v = (z - m_bathyGeo[1]) * m_bathyGeo[3];
-        if (u < 0.0f || u > 1.0f || v < 0.0f || v > 1.0f) return 1.0f;
-        const int sx = (std::min)((std::max)(static_cast<int>(u * kShadowN), 0),
-                                  static_cast<int>(kShadowN) - 1);
-        const int sy = (std::min)((std::max)(static_cast<int>((1.0f - v) * kShadowN), 0),
-                                  static_cast<int>(kShadowN) - 1);
-        return m_shadowCpu[static_cast<size_t>(sy) * kShadowN + sx] / 255.0f;
-    }
-    // M7j --trace: dump the shadow mask as PGM (row 0 = north, like the storage) so the
-    // hypervisor's user can LOOK at the field against the coastline.
-    bool DumpShadowPgm(const char* path) const {
-        if (!m_shadowBuilt || m_shadowCpu.empty()) return false;
-        FILE* f = fopen(path, "wb");
-        if (!f) return false;
-        fprintf(f, "P5 %u %u 255 ", kShadowN, kShadowN);
-        fwrite(m_shadowCpu.data(), 1, m_shadowCpu.size(), f);
-        fclose(f);
-        return true;
+        if (!m_exposure) return 1.0f;
+        return m_exposure->At(BathyModel::kOrgLat + z / BathyModel::kMPerLat,
+                              BathyModel::kOrgLon + x / BathyModel::kMPerLon);
     }
 
     const char* Name() const override { return "sea"; }
@@ -201,14 +197,22 @@ private:
         float dt, tau, pad0, pad1;
         float jetA[4];
         float jetB[4];
-        float misc[4];   // x = chop-band wavenumber (M5c; was deep phase speed)
+        float miscC[4];  // x = chop-band wavenumber (M5c; was deep phase speed); gMiscC
         float waveD[4];
         float bathyG[4]; // M5c: CUDEM world x0, z0, 1/sizeX, 1/sizeZ
+        float sweM[4];   // M5c: solved-field on, current gain, seaward blend x-range
         // M9ar: THE BED IS THE HEIGHT MEGATEXTURE. world -> lat/lon (orgLat, orgLon, 1/mPerLat,
-        // 1/mPerLon) and the page frame (org px x, y, 1/16384, world px at z14). Appended LAST.
+        // 1/mPerLon) and the page frame (org px x, y, 1/16384, world px at z14). Appended LAST
+        // -- and M9ax found them inserted BEFORE sweM on this side only: same bytes, every row
+        // from gSweM on rotated (the churn read its current gain from the longitude for a
+        // week; priors 22). The order here IS the shader's.
         float geoA[4];
         float winA[4];
-        float sweM[4];   // M5c: solved-field on, current gain, seaward blend x-range
+        float pageB[4];  // M9ax: x = the z14 page's slice
+        // M9az: THE WINDOW. The atlas is addressed TOROIDALLY on a world-anchored tile lattice
+        // (slot = world tile mod atlas tiles), and the domain is the +-8 km window around the
+        // camera: x, y = the world tile index of the window's origin, z = atlas tiles in y.
+        float window[4];
     };
     struct SpecCbData {
         float rect[4];
@@ -254,17 +258,13 @@ private:
     void UpdateChurnResidency(Gpu& gpu, double simUnix, double signedMs);
     void RecordChurn(const FrameContext& ctx);
 
-    // ---- M5c: solver coupling + the swell-shadow mask (CPU line-of-sight march)
-    static constexpr uint32_t kShadowN = 160;
-    void BuildShadowMask(Gpu& gpu, float waterNavd);
 
     SweSolver* m_swe = nullptr;
     const BathyModel* m_bathyCpu = nullptr;
-    GpuTexture m_shadowTex;
-    std::vector<uint8_t> m_shadowCpu;
-    float m_shadowDirX = 0, m_shadowDirZ = 0, m_shadowLevel = 0;
     bool m_peakDirValid = false;   // M7j: never march the default direction
-    bool m_shadowBuilt = false;
+    // M9ba: the exposure page tenant (array SRV, residency SRV) and the node behind it.
+    uint32_t m_expSrv = UINT32_MAX, m_expRes = UINT32_MAX;
+    const ExposureSource* m_exposure = nullptr;
     double m_simUnix = 0;
 
     // M9h: the first bank ported to GradeBank. Driven MANUALLY -- the churn policy is
@@ -286,6 +286,10 @@ private:
     std::vector<uint8_t> m_maskCpu;
     std::vector<double> m_lastActive;
     std::vector<uint32_t> m_pendingClear;
+    // M9az: which WORLD tile each atlas slot holds (the toroidal window). A slot whose world
+    // tile changes hands is stale: cleared if it stays resident, forgotten either way.
+    std::vector<int32_t> m_slotWorldX, m_slotWorldY;
+    float m_churnOrgX = 0.0f, m_churnOrgZ = 0.0f;
     D3D12_RESOURCE_STATES m_churnState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     ChurnCbData m_churnCb{};
     double m_prevChurnT = 0;

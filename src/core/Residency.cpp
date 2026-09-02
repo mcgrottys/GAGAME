@@ -1,5 +1,7 @@
 #include "core/Residency.h"
 
+#include <atomic>
+
 #include "core/PixEvents.h"
 #include "core/TileAtlas.h"   // Cl2ProductSignature -- the proven closure drives DeriveDemand
 
@@ -12,8 +14,11 @@ namespace ga {
 void ResidencyManager::Init(Gpu& gpu) {
     m_gpu = &gpu;
     for (uint32_t i = 0; i < Gpu::kFrameCount; ++i) {
+        // M9bb: the tile slab, plus a RESERVE for the residency maps -- one region per
+        // tenant, never the slab's tail (see the map refresh below for what sharing it did).
         m_uploadRing[i] = gpu.CreateUploadBuffer(
-            static_cast<uint64_t>(kMaxMapsPerFrame) * 65536, L"residency upload ring");
+            static_cast<uint64_t>(kMaxMapsPerFrame) * 65536 + kMapStageBytes,
+            L"residency upload ring");
     }
     // M7w: 2 workers starved every descent (140 loads in 300 frames measured at the flood-rail
     // pose -- the patchwork was coarse fallback, not bad data). Paints are local disk/CPU work.
@@ -556,9 +561,78 @@ void ResidencyManager::UpdateResidencyByte(Tenant& t, const TileRequest& r, bool
     t.resDirty = true;
 }
 
+void ResidencyManager::DropOne(const std::shared_ptr<Tracked>& tr) {
+    tr->dropped = true;
+    if (tr->state == TileState::Mapped) {
+        UpdateResidencyByte(m_tenants[tr->tenant], tr->req, false);
+        m_retiring.push_back({tr, m_frame});
+        auto mit = std::find(m_mapped.begin(), m_mapped.end(), tr);
+        if (mit != m_mapped.end()) m_mapped.erase(mit);
+    }
+}
+
+void ResidencyManager::Invalidate(int tenant, const TileRequest& r) {
+    std::lock_guard<std::mutex> lk(m_invMx);
+    m_invQ.push_back({tenant, r});
+}
+
+void ResidencyManager::Drop(int tenant) {
+    Tenant& t = m_tenants[tenant];
+    uint32_t mapped = 0, inflight = 0;
+    for (auto it = m_tracked.begin(); it != m_tracked.end();) {
+        auto& tr = it->second;
+        if (tr->tenant != tenant) { ++it; continue; }
+        if (tr->state == TileState::Mapped) ++mapped; else ++inflight;
+        DropOne(tr);
+        it = m_tracked.erase(it);
+    }
+    Log("[residency] %S: dropped %u mapped tiles (retire after %u frames) and %u in flight",
+        t.name.c_str(), mapped, kEvictAgeFrames, inflight);
+}
+
 void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     PixScope scope(cl, "residency (seen->load->map->fill; classic lists, screw prefetch)");
     ++m_frame;
+    // M9bb: apply the invalidations the painting threads queued (one tile each).
+    {
+        std::vector<std::pair<int, TileRequest>> q;
+        {
+            std::lock_guard<std::mutex> lk(m_invMx);
+            q.swap(m_invQ);
+        }
+        for (const auto& [tenant, r] : q) {
+            auto it = m_tracked.find(MakeKey(tenant, r));
+            if (it == m_tracked.end()) continue;
+            DropOne(it->second);
+            m_tracked.erase(it);
+        }
+    }
+    // M9ba: NULL-map the dropped tiles whose overlap window has passed; free their slots.
+    for (auto it = m_retiring.begin(); it != m_retiring.end();) {
+        if (m_frame - it->frame < kEvictAgeFrames) { ++it; continue; }
+        Tenant& t = m_tenants[it->tile->tenant];
+        // If this coordinate was re-requested and re-mapped since the drop (the bucket rolled
+        // and the same tile came straight back under the new identity), the NEW mapping owns
+        // the coordinate: NULL-mapping it here would unmap the fresh tile -- which is exactly
+        // what happened (the exposure page read zeros through a residency byte that said
+        // "mapped"). Only free the old slot in that case.
+        auto cur = m_tracked.find(MakeKey(it->tile->tenant, it->tile->req));
+        const bool remapped = cur != m_tracked.end() && cur->second->state == TileState::Mapped &&
+                              cur->second.get() != it->tile.get();
+        if (!remapped) {
+            const D3D12_TILED_RESOURCE_COORDINATE coord{
+                it->tile->req.x, it->tile->req.y, 0,
+                it->tile->req.face * t.mips + it->tile->req.mip};
+            const D3D12_TILE_REGION_SIZE size{1, FALSE, 0, 0, 0};
+            const D3D12_TILE_RANGE_FLAGS flag = D3D12_TILE_RANGE_FLAG_NULL;
+            const UINT off = 0, cnt = 1;
+            gpu.Queue()->UpdateTileMappings(t.res.Get(), 1, &coord, &size, nullptr, 1, &flag,
+                                            &off, &cnt, D3D12_TILE_MAPPING_FLAG_NONE);
+        }
+        if (it->tile->pool != UINT32_MAX) m_freePool.push_back(it->tile->pool);
+        it->tile->state = TileState::Failed;
+        it = m_retiring.erase(it);
+    }
 
     // ---- M9ai: RETIRE LANDED DIRECT READS. A tile mapped last frame and read by DirectStorage
     // becomes claimable only once its fence signals. Until then it has been mapped but NOT
@@ -693,6 +767,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         while (m_inFlight < static_cast<int>(kMaxLoadsInFlight) && !m_seen.empty()) {
             auto tile = m_seen.front();
             m_seen.pop_front();
+            if (tile->dropped) continue;   // M9ba: identity moved before it loaded
             tile->state = TileState::Loading;
             m_loading.push_back(tile);
             m_loadQueue.push_back(tile);
@@ -715,6 +790,10 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         for (auto it = m_loading.begin();
              it != m_loading.end() && batch.size() < kMaxMapsPerFrame;) {
             auto& tile = *it;
+            if (tile->dropped) {   // M9ba: landed for an identity that no longer exists
+                it = m_loading.erase(it);
+                continue;
+            }
             if (tile->state == TileState::Failed) {
                 // Honestly unmapped forever: it stays in m_tracked (Want() only bumps
                 // lastSeen), consumers keep reading the coarser real mip.
@@ -742,17 +821,30 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     }
     if (!batch.empty()) MapAndFill(gpu, cl, batch);
 
-    // ---- residency-map refresh (tiny R8 cubes; only when dirty)
+    // ---- residency-map refresh (tiny R8 maps; only when dirty)
+    //
+    // M9bb: EACH TENANT STAGES IN ITS OWN REGION. The maps used to borrow "the tail of the
+    // slab", computed per tenant from its own face count -- so every tenant's staging started
+    // at the same (or an overlapping) offset, and when two tenants were dirty in one frame the
+    // second memcpy overwrote the first's bytes before the recorded copies executed. Tenants
+    // inherited each other's residency: the exposure page (7 slices, like the height page)
+    // read the height tenant's map, believed mip 3 was resident under the helm, sampled its own
+    // unmapped mip 3 and got zeros -- a flat sea with the node saying 0.85. Regions now sit
+    // past the tile slab, one per tenant index, and can never touch a tile fill either.
+    uint64_t mapStage = static_cast<uint64_t>(kMaxMapsPerFrame) * 65536;
     for (auto& t : m_tenants) {
         if (!t.resDirty) continue;
         t.resDirty = false;
         const uint32_t rdim = t.resMap.width;
         const uint32_t pitch = (rdim + 255u) & ~255u;
-        // Per-frame staging from the ring? Residency maps are <10 KB: borrow the tail of the
-        // upload ring slab (tiles never fill it completely because batch <= kMaxMapsPerFrame).
+        const uint64_t bytes = static_cast<uint64_t>(pitch) * rdim * t.faces;
         GpuBuffer& ring = m_uploadRing[gpu.FrameIndex()];
-        const uint64_t tail = static_cast<uint64_t>(kMaxMapsPerFrame) * 65536 -
-                              static_cast<uint64_t>(pitch) * rdim * t.faces;
+        if (mapStage + bytes > static_cast<uint64_t>(kMaxMapsPerFrame) * 65536 + kMapStageBytes) {
+            t.resDirty = true;   // no room this frame: keep it dirty, it goes next frame
+            continue;
+        }
+        const uint64_t tail = mapStage;
+        mapStage += bytes;
         uint8_t* dst = ring.cpu + tail;
         gpu.Transition(cl, t.resMap, D3D12_RESOURCE_STATE_COPY_DEST);
         for (uint32_t f = 0; f < t.faces; ++f) {

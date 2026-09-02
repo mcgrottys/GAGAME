@@ -291,20 +291,51 @@ float ComposedHeight(float3 dir, float lod) {
 }
 bool ComposedHeightOn() { return gCsF.z > 0.5f; }
 
-// M6i: the survey land mask -- raster realization of the GSHHG polygons, sampled per pixel.
-// Returns land coverage 0..1, or -1 where no mask exists (a planet without GIS yet).
-float ComposedLandMask(float3 dir) {
+// M9ay: THE SURVEY AS PAGES. gis.landsea's own tree -- the vector rings swept per tile on the
+// same addresses as the imagery and the bed -- is a page tenant: r = water coverage (1 water,
+// 0 land), b = edited (a hand ring decided this texel), a = surveyed (an opinion exists).
+// The finest page with an opinion answers: z17 (1.19 m, where the old ~1 m edit raster was),
+// z14, then the cube face. No page with an opinion here -> false: the classifier falls back
+// to the height sign. The three committed rasters this replaces (window R8G8, global R8,
+// fine edit R8G2) read the .raw parity fills the vector mask refuses; they are gone.
+bool CsMaskSample(float3 dir, out float4 m) {
+    m = float4(0, 0, 0, 0);
+    if (gCsU3.x == 0xFFFFFFFFu) return false;
     const float2 duv = CsWindowUv(dir);
-    if (gCsU3.x != 0xFFFFFFFFu && all(duv > 0.0f) && all(duv < 1.0f)) {
-        return gTex[gCsU3.x].SampleLevel(sLinearClamp, duv, 0).x;
+    if (all(duv > 0.0f) && all(duv < 1.0f)) {
+        if (gCsU5.w != 0xFFFFFFFFu) {   // the z17 page exists in the colour ladder -> ours too
+            const float2 tuv = duv * gCsDet.z + gCsDet.xy;
+            if (all(tuv > 0.001f) && all(tuv < 0.999f)) {
+                const float haveD = CsHavePage(gCsU3.y, tuv, 7u);
+                if (haveD <= 7.5f) {
+                    m = gTexArr[gCsU3.x].SampleLevel(sLinearClamp, float3(tuv, 7.0f), haveD);
+                    if (m.a > 0.001f) return true;
+                }
+            }
+        }
+        const float haveW = CsHavePage(gCsU3.y, duv, 6u);
+        if (haveW <= 7.5f) {
+            m = gTexArr[gCsU3.x].SampleLevel(sLinearClamp, float3(duv, 6.0f), haveW);
+            if (m.a > 0.001f) return true;
+        }
     }
-    if (gCsU3.y != 0xFFFFFFFFu) {
-        const float lat = asin(clamp(dir.y, -1.0f, 1.0f));
-        const float lon = atan2(dir.z, dir.x);
-        const float2 uvG = float2(lon / (2.0f * kCsPi) + 0.5f, 0.5f - lat / kCsPi);
-        return gTex[gCsU3.y].SampleLevel(sLinearClamp, uvG, 0).x;
+    if (gCsU3.z != 0xFFFFFFFFu) {
+        const float haveC = CsHaveCubeArr(gCsU3.w, dir);
+        if (haveC <= 7.5f) {
+            m = gTexCubeArr[gCsU3.z].SampleLevel(sLinearClamp, float4(dir, 0.0f), haveC);
+            if (m.a > 0.001f) return true;
+        }
     }
-    return -1.0f;
+    return false;
+}
+
+// The survey land mask, per pixel: land coverage 0..1, or -1 where the survey has no opinion
+// (outside its rings' box, or a planet without GIS). Coverage is un-premultiplied: a texel
+// half surveyed still reports its water fraction, not half of it.
+float ComposedLandMask(float3 dir) {
+    float4 m;
+    if (!CsMaskSample(dir, m)) return -1.0f;
+    return 1.0f - m.r / max(m.a, 0.001f);
 }
 
 // THE land/sea classifier: survey polygons decide by default; inside the fine z14 window the
@@ -318,17 +349,13 @@ float ComposedLandMask(float3 dir) {
 // shading mixes, geometry blends, and data-level changes modulate a gradient the eye reads
 // as wet sand instead of flipping a bit. Outside the window the mask stays binary (a survey
 // polygon IS a bit); no mask, no window -> height sign vs the waterline (Mars: 0).
-// M7f: the fine edit mask -- surveyed structures rasterized at ~1 m over their own bbox.
-// The 38 m survey mask keeps the coastline; the fine mask keeps the jetties. Falls back to
-// the coarse window mask outside the fine box (or when no fine mask exists).
-float2 CsEditMask(float2 duv) {
-    if (gCsDet.w > 0.5f) {
-        const float2 euv = (duv - gCsEd.xy) * gCsEd.zw;
-        if (all(euv > 0.0f) && all(euv < 1.0f)) {
-            return gTex[gCsU4.z].SampleLevel(sLinearClamp, euv, 0).xy;
-        }
-    }
-    return gTex[gCsU3.x].SampleLevel(sLinearClamp, duv, 0).xy;
+// M7f/M9ay: the hand edits -- (land, edited) at this pixel from the mask pages; the z17 page
+// keeps the jetties at 1.19 m where the ~1 m fine raster used to. (0, 0) with no opinion.
+float2 CsEditMask(float3 dir) {
+    float4 m;
+    if (!CsMaskSample(dir, m)) return float2(0.0f, 0.0f);
+    const float a = max(m.a, 0.001f);
+    return float2(1.0f - m.r / a, m.b / a);
 }
 
 float ComposedLandness(float3 dir, float hp, float waterLevel) {
@@ -347,12 +374,8 @@ float ComposedLandness(float3 dir, float hp, float waterLevel) {
     // classifier smears their thin ridges -- the operator's polygon settles it). Bilinear g
     // blends the override's own edge.
     if (gCsU3.x != 0xFFFFFFFFu) {
-        const float2 duvE = CsWindowUv(dir);
-        if (all(duvE > 0.0f) && all(duvE < 1.0f)) {
-            const float2 me = CsEditMask(duvE);
-            land = lerp(land, (me.x > 0.5f) ? 1.0f : 0.0f,
-                        smoothstep(0.2f, 0.8f, me.y));
-        }
+        const float2 me = CsEditMask(dir);
+        land = lerp(land, (me.x > 0.5f) ? 1.0f : 0.0f, smoothstep(0.2f, 0.8f, me.y));
     }
     return land;
 }
@@ -366,9 +389,7 @@ bool ComposedIsLand(float3 dir, float hp, float waterLevel) {
 // continuous ridge even where the smeared height channel dips under the tide.
 float ComposedEditLand(float3 dir) {
     if (gCsU3.x == 0xFFFFFFFFu) return 0.0f;
-    const float2 duv = CsWindowUv(dir);
-    if (any(duv < 0.0f) || any(duv > 1.0f)) return 0.0f;
-    const float2 me = CsEditMask(duv);
+    const float2 me = CsEditMask(dir);
     return smoothstep(0.2f, 0.8f, me.y) * ((me.x > 0.5f) ? 1.0f : 0.0f);
 }
 

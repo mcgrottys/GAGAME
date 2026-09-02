@@ -104,7 +104,7 @@ public:
     }
 
     uint32_t EtaSrv() const { return m_eta.Srv(); }    // dEta from the tide plane, R32F
-    uint32_t UvSrv() const { return m_uv.srv; }        // dense currents, RGBA16F
+    uint32_t UvSrv() const { return m_uvSrv; }         // currents, RGBA16F (slice-0 view)
     uint32_t VelGradSrv() const { return m_velGrad.Srv(); }   // M9h: (div, curl), RG16F
     uint32_t VelGradResMapSrv() const { return m_velGrad.ResidencyMapSrv(); }
     uint32_t VelGradMips() const { return m_velGrad.MipCount(); }
@@ -116,7 +116,7 @@ public:
     uint32_t VelGradResMapW() const { return m_velGrad.TilesX(); }
     uint32_t VelGradResMapH() const { return m_velGrad.TilesY(); }
     ID3D12Resource* VelGradRes() const { return m_velGrad.Res(); }
-    ID3D12Resource* UvRes() const { return m_uv.res.Get(); }
+    ID3D12Resource* UvRes() const { return m_uvBank.Res(); }
 
     uint32_t Nx() const { return m_cb.nx; }
     float CellM() const { return m_cb.dx; }   // level-0 ground size, for a page ladder
@@ -178,6 +178,7 @@ private:
         // Mercator page frame (org px x, org px y, 1/16384, world px at z14). Appended LAST.
         float geoLL[4];
         float winA[4];
+        float pageB[4];   // M9ax: x = the z14 page's slice. APPENDED LAST (both sides).
         // M9h: the GoMOFS ingest rows. APPENDED AT THE END on both sides -- a same-size
         // insertion in the middle passes the byte-parity gate and silently offsets every later
         // row (the lesson WaterBank.hlsl:44 records, nearly repeated here).
@@ -191,8 +192,12 @@ private:
     GradeBank m_velGrad;
     ShaderCompiler* m_sc = nullptr;   // M9h: BuildChain compiles the reducer on first use
     std::wstring m_shaderDir;
-    GpuTexture m_uv;
-    uint32_t m_uvUav = UINT32_MAX;
+    // M9ax: the derived currents as a Volatile GradeBank over the wet tiles -- the same
+    // residency as eta -- with a TEXTURE2D view over slice 0 for the consumers that read a
+    // plain texture (Sea.hlsl, SeaChurn.hlsl, WaterBank.hlsl). The dense committed RGBA16F
+    // this replaces was the last flat texture on the per-frame water path (AUDIT_WATER item 4).
+    GradeBank m_uvBank;
+    uint32_t m_uvSrv = UINT32_MAX;
     Com<ID3D12RootSignature> m_rs;
     Com<ID3D12PipelineState> m_clearEta, m_clearFlux, m_uvClear, m_fluxK, m_heightK, m_deriveK;
     Com<ID3D12PipelineState> m_velGradK;   // M9h: grad(flow) -> div + curl

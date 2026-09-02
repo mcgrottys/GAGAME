@@ -34,12 +34,12 @@ cbuffer SeaCb : register(b1) {
     float4 gWaveC;      // x HEIGHT EXAGGERATION (look knob), yz = peak dir, w advect wrap t
     float4 gBandK;      // xyz = representative WAVENUMBER per cascade (rad/m); phase speed is
                         // derived per-vertex from the local depth
-    uint4  gChurnU;     // x churn atlas SRV, y residency-mask SRV, z visualizer on, w unused
+    uint4  gChurnU;     // x churn atlas SRV, y residency-mask SRV, z visualizer on, w exposure page residency SRV (M9ba)
     float4 gChurnF;     // xy = atlas world origin, z = 1/domain size, w = churn foam gain
     float4 gChurnF2;    // xy = tile world size (m), zw = tile count
     uint4  gBathyU;     // x = CUDEM heightfield SRV (0xFFFFFFFF = open-ocean mode)
     float4 gBathyGeo;   // world x0, z0, 1/sizeX, 1/sizeZ (row 0 of the texture = NORTH)
-    uint4  gSweU;       // M5c: x eta SRV, y uv SRV, z solver on, w swell-shadow mask SRV
+    uint4  gSweU;       // M5c: x eta SRV, y uv SRV, z solver on, w exposure PAGE array SRV (M9ba)
     float4 gSweF;       // xy = bathy grid dims, zw = 1 / eta-atlas PADDED dims
     float4 gSweG;       // x = prism-truncation current gain (the CUDEM window holds ~1/3 of the
                         // real tidal prism; the solver supplies the SHAPE, this ACT-calibrated
@@ -103,11 +103,31 @@ float SweDEta(float2 xz) {
 // M5c: swell exposure -- 1 in open water, ~0.12 in the geometric shadow of the jetties and
 // Plum Island (CPU line-of-sight march toward the peak-wave source, rebuilt when the wave
 // direction or the water level moves).
+// M9ba: the exposure is a PAGE (swell.exposure tenant, z14 slice, mips >= 3): nothing resident
+// = no opinion = exposed. Same frame as the bed's page, same residency clamp.
+// PRIORS 1: this runs in the DOMAIN shader too, and a bindless SampleLevel outside the pixel
+// stage returns ZERO on this GPU (the first version did exactly that: the node said 0.85 at
+// the helm and the near field lay flat). Loads, manual bilinear, like the bank kernel.
 float SweShadow(float2 xz) {
-    if (gSweU.w == 0xFFFFFFFFu) return 1.0f;
-    const float2 uv = BathyUv(xz);
+    if (gSweU.w == 0xFFFFFFFFu || gChurnU.w == 0xFFFFFFFFu) return 1.0f;
+    const float2 uv = CsWindowUv(SeaPlanetDir(xz));
     if (any(uv < 0.0f) || any(uv > 1.0f)) return 1.0f;
-    return gTex[gSweU.w].SampleLevel(sLinearClamp, float2(uv.x, 1.0f - uv.y), 0).x;
+    const uint slice = gCsU6.z;
+    const int2 rc = int2(clamp(uv * 128.0f, 0.0f, 127.0f));
+    const float haveB = gTexArr[gChurnU.w].Load(int4(rc, int(slice), 0)).x * 15.9375f;
+    if (haveB > 7.5f) return 1.0f;
+    const int mip = int(max(round(haveB), 3.0f));
+    const float dim = 16384.0f / exp2(float(mip));
+    const float2 tf = uv * dim - 0.5f;
+    const float2 t0 = floor(tf);
+    const float2 fr = tf - t0;
+    const int2 i0 = clamp(int2(t0), int2(0, 0), int2(dim - 1.0f, dim - 1.0f));
+    const int2 i1 = clamp(int2(t0) + 1, int2(0, 0), int2(dim - 1.0f, dim - 1.0f));
+    const float a = gTexArr[gSweU.w].Load(int4(i0.x, i0.y, int(slice), mip)).x;
+    const float b = gTexArr[gSweU.w].Load(int4(i1.x, i0.y, int(slice), mip)).x;
+    const float c = gTexArr[gSweU.w].Load(int4(i0.x, i1.y, int(slice), mip)).x;
+    const float d = gTexArr[gSweU.w].Load(int4(i1.x, i1.y, int(slice), mip)).x;
+    return lerp(lerp(a, b, fr.x), lerp(c, d, fr.x), fr.y);
 }
 
 float2 JetU(float2 xz) {
@@ -460,8 +480,12 @@ float4 PsMain(VsOut i) : SV_Target {
 
     float churn = 0.0f;
     if (gChurnU.x != 0xFFFFFFFFu) {
-        const float2 cuv = (i.worldXZ - gChurnF.xy) * gChurnF.z;
-        churn = gTex[gChurnU.x].SampleLevel(sLinearClamp, cuv, 0).x;
+        // M9az: the atlas is toroidal on the world lattice -- inside the window, sample at
+        // frac(world / domain) with a WRAP sampler (the wrap line runs through the window).
+        const float2 rel = (i.worldXZ - gChurnF.xy) * gChurnF.z;
+        if (all(rel > 0.0f) && all(rel < 1.0f)) {
+            churn = gTex[gChurnU.x].SampleLevel(sLinearWrap, i.worldXZ * gChurnF.z, 0).x;
+        }
         // The memory says WHERE water is aerated; the chop's live texture says what it looks
         // like this instant -- without this modulation the throat renders as uniform fog.
         churn *= 0.5f + 0.5f * saturate(chopFoam * 3.0f + slopeMag);
@@ -481,12 +505,12 @@ float4 PsMain(VsOut i) : SV_Target {
 
     // Residency visualizer (V): green = resident churn tiles, red grid = NULL.
     if (gChurnU.z != 0u && gChurnU.x != 0xFFFFFFFFu) {
-        const float2 tuv = (i.worldXZ - gChurnF.xy) / gChurnF2.xy;
+        const float2 tuv = i.worldXZ / gChurnF2.xy;   // M9az: world tile lattice
         const float2 dgrid = abs(frac(tuv) - 0.5f);
         const float2 aa = fwidth(tuv) * 1.5f;
         const float gridLine = max(smoothstep(0.5f - aa.x, 0.5f, dgrid.x),
                                    smoothstep(0.5f - aa.y, 0.5f, dgrid.y));
-        const float2 tc = (floor(tuv) + 0.5f) / gChurnF2.zw;
+        const float2 tc = frac((floor(tuv) + 0.5f) / gChurnF2.zw);   // the slot it aliases to
         const float resident = gTex[gChurnU.y].SampleLevel(sPointClamp, tc, 0).x;
         const float3 gridCol = (resident > 0.5f) ? float3(0.25f, 1.7f, 0.45f)
                                                  : float3(0.55f, 0.14f, 0.14f);

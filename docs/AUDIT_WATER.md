@@ -73,7 +73,7 @@ containment picks the page, residency picks the mip — and it is a pixel-stage 
    no longer exist. Re-register as `height.pages → {sea.ps, churn.kernel, swe.solver,
    water.bank}` and `color.pages → globe.ps`, and re-pin the truth to the page path (the flip
    ledger changes: page reads are Mercator-uv, no flip, like `CsWindowUv`).
-2. **The three GIS rasters are the default classifier**, not a `--stencil` extra:
+2. **The three GIS rasters are the default classifier**, not a `--stencil` extra: The sweep's water carve is per feature now (priors 23): union parity had called the Merrimack's channel land.
    `GisStencil.cpp:184-214` → `Compositor.cpp:730-731, 758` → `ComposedLandness`
    (`Compose.hlsli:298-337`) and the sea's `discard` (`Sea.hlsl:321`). They read the `.raw`
    parity fills `GisMask.h:6-13` says are "a realization, not the survey". `gis.landsea` already
@@ -112,7 +112,7 @@ containment picks the page, residency picks the mip — and it is a pixel-stage 
    drawn only under `--gulf`; `m_mvSrv` still seeds `swe.velgrad` slice 1. The GoMOFS field
    already has a `RasterSource` path (`main.cpp:2503-2509`); the panel should read that plane,
    and Okubo–Weiss is a function of the div/curl slice that already exists.
-10. **Small**: `SeaLayer::m_maskTex` (debug residency visualizer; the bank's own residency map
+10. **Small**: (churn re-anchoring and the exposure node DONE, SPARSE_GA §42) `SeaLayer::m_maskTex` (debug residency visualizer; the bank's own residency map
     is the same information); `GlobeLayer::m_cloudSrc` (720×361×10 R32F staging kept for the
     process lifetime after a one-shot build); the swell shadow marches a CPU copy of CUDEM
     rather than the height tree.
@@ -154,6 +154,20 @@ new architecture:
 - **Volumetrics on the same law**: `TileTree` gained `FloatW`/`Half` for scalar fields; a
   volume format over `TileAtlas3D` addresses is the same code path (cloud, then the water
   column itself — K_d as a field in depth is what `optics` already computes at the surface).
+
+## Progress
+
+- Items 1 and 3: done (PR #9) -- the graph names the page tenants; the dead code is gone.
+- Items 2 and 6: done (M9ay, §41) -- the survey's tree is a third page tenant and the
+  classifier reads it (`GisStencil`'s three rasters and the `.raw` fills are gone; the gate
+  became a value gate so the mask can be read as well as gate); the solver mip pin moved
+  into `WeatherManager::PinDomains`, every active window, every frame.
+- Items 4 and 5: done (M9ax) -- `SweSolver::m_uv` is a Volatile `GradeBank` over the wet
+  tiles; `shaders/HeightPages.hlsli` resolves cube-or-window per texel for the SWE, the churn
+  and the bank, so the three kernels have a bed everywhere the tenant does. Found on the way:
+  `ChurnCbData` had been rotated against `ChurnCb` since M9ar (same size, rows shifted; the
+  churn read its current gain from the longitude) -- fixed, and `dxtest` now holds row
+  layout by name and offset, not only size (ALGEBRA priors 22).
 
 ## 5. Recommended order
 

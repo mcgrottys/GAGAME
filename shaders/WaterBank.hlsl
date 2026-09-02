@@ -94,6 +94,7 @@ StructuredBuffer<BankTile> gTiles : register(t0);
 // bring-up; the mesh stage showed the same).
 Texture2D gT[] : register(t0, space1);
 Texture2DArray gTA[] : register(t0, space5);   // M9aq: the height PAGE tenant's array views
+#include "HeightPages.hlsli"
 RWTexture2D<float4> gU[] : register(u0, space2);
 
 float4 LoadBilinearWrap(uint slot, float2 uv, float dim) {
@@ -258,38 +259,15 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // HEIGHT WINDOW, residency-clamped, corner-lerp as the out-of-window fallback.
     const float level = lerp(lerp(t.lvl00, t.lvl10, f.x), lerp(t.lvl01, t.lvl11, f.x), f.y);
     float bed = lerp(lerp(t.bed00, t.bed10, f.x), lerp(t.bed01, t.bed11, f.x), f.y);
-    if (gSlotsD.x != 0xFFFFFFFFu) {
+    if (gSlotsD.x != 0xFFFFFFFFu && gSlotsD.z != 0xFFFFFFFFu) {
+        // M9ax: the whole tenant -- the z14 page where it is resident and fine, the cube face
+        // everywhere else on the planet -- so shoaling, the current amplification and the
+        // depth-limited breaking act on every coast the rings reach, not only inside one page.
+        // The rings are held to page mips >= 2 (their own texels are 1.2 m and up). The corner
+        // lerp above remains only for a bank with no height tenant at all.
         const float lat = gGeoA.x + xz.y * gGeoA.z;
         const float lon = gGeoA.y + xz.x * gGeoA.w;
-        const float latR = lat * 0.01745329252f;
-        const float mx = (lon + 180.0f) / 360.0f * gWinA.w;
-        const float my =
-            (0.5f - log(tan(0.7853981634f + latR * 0.5f)) * 0.15915494309f) * gWinA.w;
-        const float2 wuv = float2(mx - gWinA.x, my - gWinA.y) * gWinA.z;
-        if (all(wuv > 0.002f) && all(wuv < 0.998f)) {
-            // residency map: byte = finest resident mip * 16 (R8 UNORM)
-            const float2 rdim = float2(128.0f, 128.0f);
-            const int2 rc = int2(clamp(wuv * rdim, 0.0f, rdim - 1.0f));
-            const float haveV = (gSlotsD.z != 0xFFFFFFFFu)
-                                    ? gTA[gSlotsD.y][int3(rc, int(gSlotsD.z))].x
-                                    : gT[gSlotsD.y][rc].x;
-            const float mip = clamp(round(haveV * 15.9375f), 2.0f, 7.0f);
-            const float dim = 16384.0f / exp2(mip);
-            const float2 tf2 = wuv * dim - 0.5f;
-            const float2 t02 = floor(tf2);
-            const float2 fr2 = tf2 - t02;
-            float acc = 0.0f;
-            [unroll] for (int k2 = 0; k2 < 4; ++k2) {
-                const int2 tc2 = clamp(int2(t02) + int2(k2 & 1, k2 >> 1), int2(0, 0),
-                                       int2(dim - 1.0f, dim - 1.0f));
-                const float hv = (gSlotsD.z != 0xFFFFFFFFu)
-                                     ? gTA[gSlotsD.x].Load(int4(tc2, int(gSlotsD.z), int(mip))).x
-                                     : gT[gSlotsD.x].Load(int3(tc2, int(mip))).x;
-                acc += ((k2 & 1) ? fr2.x : 1.0f - fr2.x) *
-                       ((k2 >> 1) ? fr2.y : 1.0f - fr2.y) * hv;
-            }
-            bed = acc;
-        }
+        bed = HpHeightAt(gTA[gSlotsD.x], gTA[gSlotsD.y], lat, lon, gWinA, gSlotsD.z, 2.0f);
     }
 
     // The SWE refinement where the solver is resident: dEta on the level, solved currents.
@@ -320,14 +298,22 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // of this bug. Ocean bands fold by exposure; sigma^2 rides the same amplitude-squared
     // law; local chop keeps a floor. The shadow shares the SWE window's frame (row 0 =
     // north), so the same (1 - v) flip applies.
+    // M9ba: the exposure is a PAGE of the swell.exposure tenant (z14 slice, mips >= 3), read
+    // through the same lat/lon -> page frame as the bed; nothing resident = exposed.
     float expo = 1.0f;
-    if (gSlotsC.y != 0xFFFFFFFFu && gSwe.z > 0.0f) {
-        const float2 suv = (xz - gSwe.xy) * float2(gSwe.z, gSwe.w);
-        if (all(suv > 0.001f) && all(suv < 0.999f)) {
-            expo = max(LoadBilinearClamp(gSlotsC.y,
-                                         float2(suv.x * 160.0f, (1.0f - suv.y) * 160.0f),
-                                         float2(160.0f, 160.0f)).x,
-                       0.18f);
+    if (gSlotsC.y != 0xFFFFFFFFu && gSlotsC.z != 0xFFFFFFFFu && gSlotsD.z != 0xFFFFFFFFu) {
+        const float lat = gGeoA.x + xz.y * gGeoA.z;
+        const float lon = gGeoA.y + xz.x * gGeoA.w;
+        const float mx = (lon + 180.0f) / 360.0f * gWinA.w;
+        const float my = (0.5f - log(tan(0.7853981634f + lat * 0.01745329252f * 0.5f)) *
+                                     0.15915494309f) * gWinA.w;
+        const float2 wuv = float2(mx - gWinA.x, my - gWinA.y) * gWinA.z;
+        if (all(wuv > 0.0f) && all(wuv < 1.0f)) {
+            const float have = round(HpHaveMip(gTA[gSlotsC.z], wuv, gSlotsD.z));
+            if (have <= kHpMaxMip) {
+                expo = max(HpLoadBilinear(gTA[gSlotsC.y], wuv, gSlotsD.z, max(have, 3.0f)),
+                           0.18f);
+            }
         }
     }
 
@@ -514,10 +500,11 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // MAX, never + (adding memory to fresh foam brightened the throat into uniform fog);
     // the live noise modulates the memory so old deposits stay textured, not flat.
     if (gSlotsC.x != 0xFFFFFFFFu) {
+        // M9az: toroidal atlas on the world lattice: window test on the origin, wrap sample.
         const float2 cuv = (xz - gChurn.xy) * gChurn.z;
         if (all(cuv > 0.001f) && all(cuv < 0.999f)) {
             const float churnV =
-                LoadBilinearClamp(gSlotsC.x, cuv * gChurn.w, gChurn.ww).x;
+                LoadBilinearWrap(gSlotsC.x, frac(xz * gChurn.z), gChurn.w).x;
             foam = max(foam, saturate(churnV) * gFoamA.x * 1.3f);
         }
     }

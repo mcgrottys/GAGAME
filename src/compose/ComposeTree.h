@@ -162,7 +162,7 @@ public:
         return m_layer->Footprint(a, b, c, d);
     }
     std::string Identity() const override {
-        return "gate|(" + m_layer->Identity() + ")<(" + m_gate->Identity() + ")";
+        return "gate2|(" + m_layer->Identity() + ")<(" + m_gate->Identity() + ")";   // M9ay value gate
     }
     bool SampleAt(const DomainQuery& q, DomainValue& out) const override {
         if (!m_layer->SampleAt(q, out) || out.weight <= 0.0f) return false;
@@ -170,8 +170,17 @@ public:
         // Outside the gate's footprint it is not consulted: no opinion, the layer passes.
         const bool present = m_gate->MayCover(q.lon, q.lat, q.lon, q.lat);
         if (!present) return true;
-        if (!m_gate->SampleAt(q, g)) g.weight = 0.0f;   // present and silent: blocks
-        out.weight *= g.weight;
+        // M9ay: a VALUE gate. Present and silent (a void tile) still blocks. Where the gate
+        // answers, its COVERAGE says whether it has an opinion (0 = none: the layer passes)
+        // and its value channel IS the factor -- the survey's water coverage, 1 water, 0
+        // land. Before this the weight was the factor, so land had to be painted as ABSENCE,
+        // and a land texel and an unsurveyed texel were the same byte: the mask could gate
+        // but could not be read. Now its tiles are the classifier's pages (AUDIT_WATER item 2).
+        if (!m_gate->SampleAt(q, g)) {
+            out.weight = 0.0f;
+            return false;
+        }
+        if (g.weight > 0.0f) out.weight *= g.c[0];
         return out.weight > 0.0f;
     }
 

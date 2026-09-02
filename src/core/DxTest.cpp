@@ -30,8 +30,18 @@ std::string ReadFile(const std::string& path) {
 // ---- 1. the C++ side of CB parity: byte-count a CB struct from header text. Our CB style
 // is rows: T name[4] / [8] / [16], plain scalars, and the one nested ComposedSurfaceCb.
 // Anything this parser cannot read is a FAIL (the style is part of the contract).
+// M9ax: a row of the C++ struct, by name and byte offset -- so the gate can hold the LAYOUT,
+// not only the size. A same-size insertion in the middle of one side passed the size check
+// and rotated every later row on the other (ChurnCbData vs ChurnCb, M9ar..M9ax: the churn
+// read its current gain from the longitude; priors 22).
+struct CbField {
+    std::string name;
+    int offset, size;
+};
+
 int StructBytes(const std::string& text, const std::string& name, bool& ok,
-                const std::string& composedText) {
+                const std::string& composedText, std::vector<CbField>* fields = nullptr,
+                const std::string& prefix = "", int base = 0) {
     const std::string key = "struct " + name + " {";
     const size_t at = text.find(key);
     if (at == std::string::npos) {
@@ -53,7 +63,15 @@ int StructBytes(const std::string& text, const std::string& name, bool& ok,
         if (line.empty()) continue;
         if (line.rfind("ComposedSurfaceCb", 0) == 0) {
             bool okN = true;
-            bytes += StructBytes(composedText, "ComposedSurfaceCb", okN, composedText);
+            // the member name ("cs") prefixes the nested rows: cs + u -> gCsU on the HLSL side
+            std::string member = line.substr(17);
+            const size_t semi = member.find(';');
+            if (semi != std::string::npos) member = member.substr(0, semi);
+            const size_t b0 = member.find_first_not_of(" \t");
+            const size_t b1 = member.find_last_not_of(" \t");
+            member = (b0 == std::string::npos) ? "" : member.substr(b0, b1 - b0 + 1);
+            bytes += StructBytes(composedText, "ComposedSurfaceCb", okN, composedText, fields,
+                                 prefix + member, base + bytes);
             if (!okN) ok = false;
             continue;
         }
@@ -79,11 +97,18 @@ int StructBytes(const std::string& text, const std::string& name, bool& ok,
             const size_t semi = rest.find(';', pos);
             const size_t end = (comma != std::string::npos && comma < semi) ? comma : semi;
             if (end == std::string::npos) break;
-            if (br != std::string::npos && br < end) {
-                bytes += unit * std::atoi(rest.c_str() + br + 1);
-            } else {
-                bytes += unit;
+            const int sz = (br != std::string::npos && br < end)
+                               ? unit * std::atoi(rest.c_str() + br + 1)
+                               : unit;
+            if (fields) {
+                const size_t nEnd = (br != std::string::npos && br < end) ? br : end;
+                std::string fname = rest.substr(pos, nEnd - pos);
+                const size_t f0 = fname.find_first_not_of(" \t");
+                const size_t f1 = fname.find_last_not_of(" \t");
+                fname = (f0 == std::string::npos) ? "" : fname.substr(f0, f1 - f0 + 1);
+                fields->push_back({prefix + fname, base + bytes, sz});
             }
+            bytes += sz;
             if (end == semi) break;
             pos = end + 1;
         }
@@ -163,6 +188,50 @@ bool RunDxSelfTest() {
                 "(a row added on one side only?)",
                 c.cppFile, c.cppStruct, cpp, c.hlslFile, c.cbuffer, bd.Size);
             ok = false;
+            continue;
+        }
+        // M9ax: THE LAYOUT, ROW BY ROW. Every reflected variable must start where a C++ row
+        // of the same size and the same name starts (names compared without the HLSL 'g'
+        // prefix, case-insensitively; nested ComposedSurfaceCb rows carry their member as a
+        // prefix, cs + u == gCsU). Equal sizes with rotated rows is exactly the failure this
+        // exists for.
+        std::vector<CbField> rows;
+        bool okR = true;
+        StructBytes(ReadFile(c.cppFile), c.cppStruct, okR, composed, &rows);
+        auto normHlsl = [](std::string n) {
+            if (n.size() > 1 && n[0] == 'g' && std::isupper((unsigned char)n[1])) n = n.substr(1);
+            std::string o;
+            for (const char ch : n) if (std::isalnum((unsigned char)ch)) o += (char)std::tolower((unsigned char)ch);
+            return o;
+        };
+        auto normCpp = [](const std::string& n) {
+            std::string o;
+            for (const char ch : n) if (std::isalnum((unsigned char)ch)) o += (char)std::tolower((unsigned char)ch);
+            return o;
+        };
+        for (UINT vi = 0; vi < bd.Variables; ++vi) {
+            ID3D12ShaderReflectionVariable* var = cb->GetVariableByIndex(vi);
+            D3D12_SHADER_VARIABLE_DESC vd{};
+            if (!var || FAILED(var->GetDesc(&vd))) continue;
+            const CbField* row = nullptr;
+            for (const CbField& r : rows) {
+                if (r.offset == static_cast<int>(vd.StartOffset)) { row = &r; break; }
+            }
+            if (!row) {
+                Log("[dxtest] FAIL cb layout: %s %s::%s at %u B starts inside a C++ row of "
+                    "%s::%s -- rows rotated or split on one side",
+                    c.hlslFile, c.cbuffer, vd.Name, vd.StartOffset, c.cppFile, c.cppStruct);
+                ok = false;
+                continue;
+            }
+            if (row->size != static_cast<int>(vd.Size) ||
+                normHlsl(vd.Name) != normCpp(row->name)) {
+                Log("[dxtest] FAIL cb layout: at %u B %s has %s (%u B) but %s has %s (%d B) "
+                    "-- same bytes, different row: the size check cannot see this",
+                    vd.StartOffset, c.cbuffer, vd.Name, vd.Size, c.cppStruct,
+                    row->name.c_str(), row->size);
+                ok = false;
+            }
         }
     }
 
@@ -261,7 +330,7 @@ bool RunDxSelfTest() {
     }
 
     if (ok) {
-        Log("[dxtest] ---- PASS: cb parity x%zu (reflection vs header), sampler law "
+        Log("[dxtest] ---- PASS: cb parity x%zu (reflection vs header: size + row layout), sampler law "
             "(%d compute entries, %d flagged), %d ast anchors resolve ----",
             std::size(kCbs), kernels, flagged, anchors);
     }

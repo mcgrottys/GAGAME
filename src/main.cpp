@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 
 #include "compose/ColorStackSource.h"
+#include "compose/ExposureSource.h"
 #include "compose/GisMask.h"
 #include "compose/HeightStackSource.h"
 #include "compose/TileTree.h"
@@ -115,6 +116,7 @@ struct Options {
                                       // The DEFAULT: colour AND height pages fed from the trees.
     bool gisGate = true;              // --no-gis-gate: drop the vector land/sea gate on the bed
     bool seafloor = true;             // --no-seafloor: drop the global seafloor relief source
+    bool exposure = true;             // --no-exposure: no swell-exposure page (everything exposed)
     std::string gisDump;              // --gis-dump PATH: the gate over the survey box as PGM, exit
     bool ringLoads = true;            // --no-ring-loads: the old queue, for the A/B (M9al)
     bool resTrace = false;            // --res-trace: residency deficit + slot accounting, per 30 f
@@ -227,8 +229,15 @@ Options ParseArgs(int argc, char** argv) {
     Options o;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
+        // M9ay: a flag with a DEFAULT must not eat the next flag. `--storm --rail-flood DIR`
+        // parsed as storm="--rail-flood" and a stray DIR: no rail, no frame cap, an encoder
+        // pipe waiting forever on stdin while the sim free-ran and re-solved the wave field
+        // every 90 s -- "the recording is stuck". A token that starts with "--" is a flag.
         auto next = [&](const char* def) -> std::string {
-            return (i + 1 < argc) ? argv[++i] : def;
+            if (i + 1 < argc && !(argv[i + 1][0] == '-' && argv[i + 1][1] == '-')) {
+                return argv[++i];
+            }
+            return def;
         };
         if (a == "--selftest") o.selftest = true;
         else if (a == "--crash-test") {
@@ -326,6 +335,7 @@ Options ParseArgs(int argc, char** argv) {
         // M9ak: the vector land/sea gate is ON. The flag exists to A/B what it changed.
         else if (a == "--no-gis-gate") o.gisGate = false;
         else if (a == "--no-seafloor") o.seafloor = false;
+        else if (a == "--no-exposure") o.exposure = false;
         else if (a == "--gis-dump") o.gisDump = next("gis_gate.pgm");
         // M9al: the ring gate and its instrument. Instrument first, gate second, both off.
         else if (a == "--ring-loads") o.ringLoads = true;      // the default; kept for scripts
@@ -2083,6 +2093,7 @@ int main(int argc, char** argv) {
         Exchange exchange;       // M6j: the plugin bus -- named GA buffer channels
         const double winOrgX = 4935.0 * 256.0, winOrgY = 6008.0 * 256.0;   // Merrimack z14 px
         int colorCubeT = -1, winTenant = -1, hgtTenant = -1, hgtWinTenant = -1;
+        int maskTenant = -1;   // M9ay: the survey mask pages (gis.landsea's tree)
         int detTenant = -1;   // M7f: z17 detail color window
         double det17OrgX = 0.0, det17OrgY = 0.0;
         int colCh = -1;   // color channel id (hgtCh registered above the solver, M6w)
@@ -2097,6 +2108,15 @@ int main(int argc, char** argv) {
         // (the user's rule) -- and the order is printed, not assumed.
         std::shared_ptr<DomainSource> heightRoot;
         std::unique_ptr<TileTree> heightTree;
+        // M9ba: THE SWELL EXPOSURE AS A TREE NODE. A DomainSource (the LOS march over the height
+        // stack), a one-input compose root so the tree materializes R16F, the tree behind a
+        // holder so a bucket roll swaps it under the tenant's provider, and the tenant itself.
+        std::shared_ptr<ExposureSource> exposureSrc;
+        std::shared_ptr<DomainSource> exposureRoot;
+        // shared_ptr, swapped ATOMICALLY: loader threads are inside the old tree's provider
+        // when a bucket rolls; they hold their own reference until their paint returns.
+        std::shared_ptr<std::shared_ptr<TileTree>> exposureTree;
+        int exposureT = -1;
         if (globe) {
             resMgr.Init(gpu);
             resMgr.ringLoads = opt.ringLoads;
@@ -2152,6 +2172,13 @@ int main(int argc, char** argv) {
                         "last):%s",
                         order.c_str());
                     heightTree = std::make_unique<TileTree>(heightRoot.get(), TileTree::Fmt::Half);
+                    heightTree->onChanged = [&resMgr, &hgtTenant](const std::string& tag,
+                                                                  const TileRequest& r) {
+                        if (hgtTenant < 0) return;
+                        TileRequest q = r;
+                        if (tag.rfind("window_z14", 0) == 0) q.face = 6u;
+                        resMgr.Invalidate(hgtTenant, q);
+                    };
                     heightTree->Print();
                 }
                 {
@@ -2180,6 +2207,52 @@ int main(int argc, char** argv) {
                                           resMgr.ResidencyRes(hgtTenant), 6u,
                                           resMgr.Mips(hgtTenant), 1263360.0, 1538048.0);
                     }
+                        if (sea && hgtCh >= 0 && opt.exposure) {
+                            exposureSrc = std::make_shared<ExposureSource>(&compositor, hgtCh);
+                            auto xdc = std::make_shared<DomainCompositor>();
+                            xdc->SetBlend(DomainCompositor::Blend::LayeredOver);
+                            if (!xdc->Add(exposureSrc)) Log("[exposure] compose REFUSED the node");
+                            exposureRoot = std::make_shared<CompositeSource>("swell.exposure", xdc);
+                            exposureTree = std::make_shared<std::shared_ptr<TileTree>>(
+                                std::make_shared<TileTree>(exposureRoot.get(), TileTree::Fmt::Half));
+                            (*exposureTree)->onChanged = [&resMgr, &exposureT](const std::string&,
+                                                                               const TileRequest& r) {
+                                if (exposureT < 0) return;
+                                TileRequest q = r;
+                                q.face = 6u;
+                                resMgr.Invalidate(exposureT, q);
+                            };
+                            auto holder = exposureTree;
+                            TileProviderFn xp = [holder](const TileRequest& r,
+                                                         std::vector<uint8_t>& out, TileLoc* loc) {
+                                if (r.face != 6) {
+                                    // The cube faces are not this node's frame: answer "fully
+                                    // exposed" (R16F 1.0) so the boot's coarsest loads and any
+                                    // stray want land once instead of retrying forever.
+                                    out.assign(65536, 0);
+                                    uint16_t* h = reinterpret_cast<uint16_t*>(out.data());
+                                    for (size_t i = 0; i < 32768; ++i) h[i] = 0x3C00u;
+                                    if (loc) *loc = TileLoc{};
+                                    return true;
+                                }
+                                std::shared_ptr<TileTree> t = std::atomic_load(holder.get());
+                                if (!t) return false;
+                                TileRequest w = r;
+                                w.face = 0;
+                                return t->Provider(
+                                    ColorFrame::Window(1263360, 1538048, 14, 256, 128))(w, out, loc);
+                            };
+                            exposureT = resMgr.AddTexturePages(gpu, L"swell.exposure (pages)",
+                                                               Compositor::kFaceDim,
+                                                               DXGI_FORMAT_R16_FLOAT, std::move(xp),
+                                                               7);
+                            sea->SetExposurePage(resMgr.TextureSrv(exposureT),
+                                                 resMgr.ResidencySrv(exposureT), exposureSrc.get());
+                            Log("[exposure] swell.exposure is page tenant %d: the LOS march over "
+                                "the height stack, cached per (direction, level) bucket, read at "
+                                "page mips >= 3 (%.0f m)",
+                                exposureT, 9.55 * 8.0);
+                        }
                     if (sea) {
                         sea->SetHeightPage(resMgr.TextureRes(hgtTenant),
                                            resMgr.ResidencyRes(hgtTenant), 6u,
@@ -2245,9 +2318,14 @@ int main(int argc, char** argv) {
                             const uint32_t dim = 1024;
                             std::vector<uint8_t> g;
                             gisMask.RasterizeGate(a0, a1, b0, b1, dim, g);
+                            std::vector<uint8_t> v(static_cast<size_t>(dim) * dim);
+                            for (size_t i = 0; i < v.size(); ++i) {
+                                // value where surveyed; 128 (grey) where the mask has no opinion
+                                v[i] = (g[i * 2 + 1] & 1u) ? g[i * 2] : 128u;
+                            }
                             std::ofstream pf(opt.gisDump, std::ios::binary);
                             pf << "P5\n" << dim << " " << dim << "\n255\n";
-                            pf.write(reinterpret_cast<const char*>(g.data()), g.size());
+                            pf.write(reinterpret_cast<const char*>(v.data()), v.size());
                             Log("[gismask] --gis-dump: %s (%ux%u over %.3f,%.3f..%.3f,%.3f) %s",
                                 opt.gisDump.c_str(), dim, dim, b0, a0, b1, a1,
                                 pf ? "written" : "FAILED TO WRITE");
@@ -2325,6 +2403,16 @@ int main(int argc, char** argv) {
                     PrintTree("earth.color (megatexture)", mega.get());
                     if (opt.colorTrees || opt.treeAudit) {
                         megaTree = std::make_unique<TileTree>(mega.get());
+                        // M9bb: a fold or a drop below changed a root tile: the colour tenant
+                        // refetches that address (the frame's tag names the page slice).
+                        megaTree->onChanged = [&resMgr, &colorCubeT](const std::string& tag,
+                                                                     const TileRequest& r) {
+                            if (colorCubeT < 0) return;
+                            TileRequest q = r;
+                            if (tag.rfind("window_z14", 0) == 0) q.face = 6u;
+                            else if (tag.rfind("window_z17", 0) == 0) q.face = 7u;
+                            resMgr.Invalidate(colorCubeT, q);
+                        };
                         megaTree->Print();
                     }
                     auto mkColor = [&](const ColorFrame& f) -> TileProviderFn {
@@ -2367,6 +2455,50 @@ int main(int argc, char** argv) {
                     winTenant = colorCubeT;   // pages mode: window == cube, slice 6
                     detTenant = colorCubeT;   // slice 7
                     (void)n17;
+                    // M9ay: THE SURVEY AS A PAGE TENANT. gis.landsea's own tree -- the vector
+                    // rings swept per tile on the SAME addresses as the imagery and the bed --
+                    // feeds a third page tenant (r = water coverage, b = edited, a = surveyed).
+                    // The classifier reads it; the three committed rasters GisStencil built
+                    // from the .raw parity fills are gone (AUDIT_WATER item 2). Addresses the
+                    // survey has no opinion about have no tile: the loader marks them NULL after
+                    // its retries and the shader falls back to the height sign there.
+                    if (opt.colorTrees && megaTree && maskLayer != SIZE_MAX) {
+                        if (TileTree* gt = megaTree->Find("gis.landsea")) {
+                            gt->onChanged = [&resMgr, &maskTenant](const std::string& tag,
+                                                                   const TileRequest& r) {
+                                if (maskTenant < 0) return;
+                                TileRequest q = r;
+                                if (tag.rfind("window_z14", 0) == 0) q.face = 6u;
+                                else if (tag.rfind("window_z17", 0) == 0) q.face = 7u;
+                                resMgr.Invalidate(maskTenant, q);
+                            };
+                            const TileProviderFn gCube =
+                                gt->Provider(ColorFrame::Cube(Compositor::kFaceDim));
+                            const TileProviderFn gWin =
+                                gt->Provider(ColorFrame::Window(1263360, 1538048, 14));
+                            const TileProviderFn gDet =
+                                gt->Provider(ColorFrame::Window(static_cast<long long>(det17OrgX),
+                                                                static_cast<long long>(det17OrgY),
+                                                                17));
+                            TileProviderFn gpages = [gCube, gWin, gDet](const TileRequest& r,
+                                                                       std::vector<uint8_t>& out,
+                                                                       TileLoc* loc) {
+                                if (r.face < 6) return gCube(r, out, loc);
+                                TileRequest w = r;
+                                w.face = 0;
+                                return r.face == 6 ? gWin(w, out, loc) : gDet(w, out, loc);
+                            };
+                            maskTenant = resMgr.AddTexturePages(
+                                gpu, L"gis.landsea (survey mask pages)", Compositor::kFaceDim,
+                                DXGI_FORMAT_R8G8B8A8_UNORM, std::move(gpages), 8);
+                            Log("[gis] the survey is page tenant %d: r = water coverage, b = "
+                                "edited, a = surveyed -- no .raw raster is opened",
+                                maskTenant);
+                        } else {
+                            Log("[gis] no gis.landsea node in the megatexture tree: the "
+                                "classifier falls back to the height sign");
+                        }
+                    }
                     // The gate. Every realization the render path uses, on tiles the shipped
                     // paint loop already wrote, with the worst per-channel disagreement printed.
                     if (opt.treeAudit) {
@@ -2437,7 +2569,8 @@ int main(int argc, char** argv) {
                     }
                 }
                 globe->SetComposed(colorCubeT, winTenant, hgtTenant, hgtWinTenant, winOrgX,
-                                   winOrgY, 16384.0, detTenant, det17OrgX, det17OrgY);
+                                   winOrgY, 16384.0, detTenant, det17OrgX, det17OrgY,
+                                   maskTenant);
 
                 // ---- M9ae: WHAT THE DISK ALREADY HOLDS, in memory, once.
                 //
@@ -2683,9 +2816,7 @@ int main(int argc, char** argv) {
             // The survey pack loads whenever it exists: the land MASKS are the default
             // classifier (always on); the VECTOR overlay draws only under --stencil.
             if (!marsMode && gisStencil.Load("data/gis/gis.json")) {
-                gisStencil.BuildMasks(gpu, winOrgX, winOrgY, 16384.0);
-                globe->SetGisStencil(gisStencil.MaskWinSrv(), gisStencil.MaskGlobSrv(),
-                                     gisStencil.MaskEditSrv(), gisStencil.EditBox());
+                // M9ay: no raster is built here any more; the classifier reads the mask pages.
                 vectors.Load("data/vectors/vectors.vpack");
                 auto gisOwned = std::make_unique<GisLayer>();
                 gisLayer = gisOwned.get();
@@ -2906,9 +3037,9 @@ int main(int argc, char** argv) {
             const bool pagesMode = colorCubeT >= 0 && winTenant == colorCubeT;
             FillComposedCb(cs, &resMgr, colorCubeT, winTenant, hgtTenant, hgtWinTenant,
                            winOrgX, winOrgY, 16384.0, 14, planetR, east0, oDir, north0,
-                           opt.stencil, gisStencil.MaskWinSrv(), gisStencil.MaskGlobSrv(),
+                           opt.stencil, maskTenant,
                            pagesMode ? detTenant : -1, pagesMode ? det17Org : nullptr, 17,
-                           UINT32_MAX, nullptr, pagesMode ? 6u : UINT32_MAX,
+                           pagesMode ? 6u : UINT32_MAX,
                            pagesMode ? 7u : UINT32_MAX,
                            (hgtTenant >= 0 && hgtWinTenant == hgtTenant) ? 6u : UINT32_MAX);
             if (terrain) terrain->SetComposed(cs);
@@ -3869,6 +4000,8 @@ int main(int argc, char** argv) {
                                    BathyModel::kOrgLat + cam.pz / BathyModel::kMPerLat,
                                    BathyModel::kOrgLon + cam.px / BathyModel::kMPerLon,
                                    altV);
+                    // M9ay: every ACTIVE window's lattice at mip 0, from the manager that owns them.
+                    weather.PinDomains(resMgr, hgtTenant);
                     PROF_END(0);
                 }
                 // M7: the bank's rings follow the camera; the globe binds THIS frame's
@@ -4001,37 +4134,6 @@ int main(int argc, char** argv) {
                 resMgr.WantStatsReset();
                 PROF_BEGIN();
                 globe->SetView(cam, aspect, viewH, simUnix - startUnix);
-                // M9ar: THE SOLVER DOMAIN STAYS RESIDENT AT MIP 0. The bed bank used to be
-                // pinned wholesale; the page tenant is demand-driven, so the solver's lattice
-                // is asked for every frame at the page's finest mip. ~110 tiles of 256x128 at
-                // 9.55 m over an 18.8 x 16 km domain -- recency keeps them mapped.
-                if (hgtTenant >= 0 && hgtWinTenant == hgtTenant && bathy.Ready()) {
-                    const double piP = 3.14159265358979, n14 = 16384.0 * 256.0;
-                    auto mercU = [&](double lonDeg) {
-                        return ((lonDeg + 180.0) / 360.0 * n14 - 1263360.0) / 16384.0;
-                    };
-                    auto mercV = [&](double latDeg) {
-                        const double l = latDeg * piP / 180.0;
-                        return ((0.5 - std::log(std::tan(piP * 0.25 + l * 0.5)) / (2.0 * piP)) *
-                                    n14 -
-                                1538048.0) /
-                               16384.0;
-                    };
-                    const double lon1 = bathy.Lon0() + bathy.Nx() * bathy.Dlon();
-                    const double lat0 = bathy.Lat1() - bathy.Ny() * bathy.Dlat();
-                    const float u0 = float(std::max(0.0, mercU(bathy.Lon0())));
-                    const float u1 = float(std::min(1.0, mercU(lon1)));
-                    const float v0 = float(std::max(0.0, mercV(bathy.Lat1())));
-                    const float v1 = float(std::min(1.0, mercV(lat0)));
-                    if (u1 > u0 && v1 > v0) resMgr.Want(hgtTenant, 6u, 0u, u0, v0, u1, v1);
-                    static bool pinLogged = false;
-                    if (!pinLogged) {
-                        pinLogged = true;
-                        Log("[swe] domain pinned on height page slice 6 mip 0: uv %.4f..%.4f x "
-                            "%.4f..%.4f (%s)",
-                            u0, u1, v0, v1, (u1 > u0 && v1 > v0) ? "inside the page" : "OUTSIDE");
-                    }
-                }
                 PROF_END(7);
                 if (!opt.rail.empty() && frame >= 150u) {
                     walkNodesAcc += globe->walkNodes;
@@ -4089,6 +4191,60 @@ int main(int argc, char** argv) {
             PROF_BEGIN();
             if (sea) sea->SetTime(simUnix, bathy.Ready() ? waterNavd : tide->focusHeight,
                                   cam.px, cam.pz);
+            // M9ba: the exposure node's inputs; a bucket roll re-keys the tree and drops the
+            // tenant's tiles. Then demand the page at mip 3 over +-20 km around the camera --
+            // the bank's outer ring -- every frame.
+            if (sea && exposureSrc && exposureT >= 0) {
+                if (exposureSrc->Set(sea->PeakDirX(), sea->PeakDirZ(), waterNavd,
+                                     sea->PeakDirValid())) {
+                    auto fresh = std::make_shared<TileTree>(exposureRoot.get(), TileTree::Fmt::Half);
+                    fresh->onChanged = [&resMgr, &exposureT](const std::string&, const TileRequest& r) {
+                        if (exposureT < 0) return;
+                        TileRequest q = r;
+                        q.face = 6u;
+                        resMgr.Invalidate(exposureT, q);
+                    };
+                    std::atomic_store(exposureTree.get(), fresh);
+                    resMgr.Drop(exposureT);
+                    Log("[exposure] bucket rolled -> tree %s", fresh->Id().c_str());
+                }
+                if (exposureSrc->Valid()) {
+                    const double piP = 3.14159265358979, n14 = 16384.0 * 256.0;
+                    const double latC = BathyModel::kOrgLat + cam.pz / BathyModel::kMPerLat;
+                    const double lonC = BathyModel::kOrgLon + cam.px / BathyModel::kMPerLon;
+                    const double dLat = 20000.0 / BathyModel::kMPerLat;
+                    const double dLon = 20000.0 / BathyModel::kMPerLon;
+                    auto mU = [&](double lonDeg) {
+                        return ((lonDeg + 180.0) / 360.0 * n14 - 1263360.0) / 16384.0;
+                    };
+                    auto mV = [&](double latDeg) {
+                        const double l = latDeg * piP / 180.0;
+                        return ((0.5 - std::log(std::tan(piP * 0.25 + l * 0.5)) / (2.0 * piP)) *
+                                    n14 - 1538048.0) / 16384.0;
+                    };
+                    const float u0 = float(std::clamp(mU(lonC - dLon), 0.0, 1.0));
+                    const float u1 = float(std::clamp(mU(lonC + dLon), 0.0, 1.0));
+                    const float v0 = float(std::clamp(mV(latC + dLat), 0.0, 1.0));
+                    const float v1 = float(std::clamp(mV(latC - dLat), 0.0, 1.0));
+                    if (u1 > u0 && v1 > v0) resMgr.Want(exposureT, 6u, 3u, u0, v0, u1, v1);
+                    if (opt.resTrace && (frame % 150u) == 0u) {
+                        // The instrument (--res-trace): what the page holds at the camera vs what
+                        // the node says, and what the manager believes about the tiles under it.
+                        const float uc = float(std::clamp(mU(lonC), 0.0, 1.0));
+                        const float vc = float(std::clamp(mV(latC), 0.0, 1.0));
+                        Log("[exposure] frame %u cam (%.4f, %.4f): page z14 resident mip %u, node "
+                            "%.2f, tree %s",
+                            frame, latC, lonC, resMgr.ResidentMipAt(exposureT, 6u, uc, vc),
+                            exposureSrc->At(latC, lonC), std::atomic_load(exposureTree.get())->Id().c_str());
+                        for (uint32_t mm = 3; mm <= 5; ++mm) {
+                            const uint32_t dim = 16384u >> mm;
+                            const TileRequest tq{6u, mm, uint32_t(uc * dim) / 256u, uint32_t(vc * dim) / 128u};
+                            Log("[exposure]   mip %u tile (%u,%u): %s", mm, tq.x, tq.y,
+                                resMgr.DebugTile(exposureT, tq).c_str());
+                        }
+                    }
+                }
+            }
             PROF_END(5);
             if (terrain) terrain->waterNavd = static_cast<float>(waterNavd);
             if (globe) globe->waterNavd = static_cast<float>(waterNavd);   // M6j materials
@@ -4438,8 +4594,8 @@ int main(int argc, char** argv) {
                         wq.hs, wq.tp, wq.dirDeg, wq.waveSrc, hsScaleT, hsRefT);
                     const float expoT = sea->ShadowAtWorld(static_cast<float>(wx),
                                                            static_cast<float>(wz));
-                    Log("[trace] 7 exposure  swe.solver shadow (row0N, FLIP, floor 0.18): "
-                        "%.2f  (edge swe.solver->water.bank shadow)",
+                    Log("[trace] 7 exposure  swell.exposure node (page z14 mips >= 3, no flip, "
+                        "floor 0.18): %.2f  (edge exposure.node->water.bank exposure)",
                         (std::max)(expoT, 0.18f));
                     for (int m = 0; m < 3; ++m) {
                         const double texel = 4.8 * (1 << m);
@@ -4526,9 +4682,7 @@ int main(int argc, char** argv) {
                             }
                         }
                     }
-                    if (sea->DumpShadowPgm("trace_shadow.pgm")) {
-                        Log("[trace] shadow mask dumped: trace_shadow.pgm (row 0 = north)");
-                    }
+                    // M9ba: the exposure field is the tree folder cache\trees\swell.exposure.*
                 }
                 break;
             }

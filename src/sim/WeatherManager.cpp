@@ -1,6 +1,7 @@
 #include "sim/WeatherManager.h"
 
 #include "core/Common.h"
+#include "core/Residency.h"
 
 #include <algorithm>
 #include <cmath>
@@ -104,6 +105,44 @@ void WeatherManager::RefreshMirror(Gpu& gpu, Window& w, double simUnix) {
     if (!w.solver || !w.solver->Ready()) return;
     w.solver->ReadFields(gpu, w.eta, w.etaW, w.etaH, w.uv4, w.uvW, w.uvH);
     w.mirrorT = simUnix;
+}
+
+void WeatherManager::PinDomains(ResidencyManager& res, int hgtTenant) {
+    if (hgtTenant < 0 || !m_hgtArr) return;
+    const double piP = 3.14159265358979, n14 = 16384.0 * 256.0;
+    auto mercU = [&](double lonDeg) {
+        return ((lonDeg + 180.0) / 360.0 * n14 - m_hgtOrg[0]) / 16384.0;
+    };
+    auto mercV = [&](double latDeg) {
+        const double l = latDeg * piP / 180.0;
+        return ((0.5 - std::log(std::tan(piP * 0.25 + l * 0.5)) / (2.0 * piP)) * n14 -
+                m_hgtOrg[1]) /
+               16384.0;
+    };
+    std::string pinned;
+    for (const Window& w : m_windows) {
+        if (!w.active || !w.bathy || !w.bathy->Ready()) continue;
+        const BathyModel& b = *w.bathy;
+        const double lon1 = b.Lon0() + b.Nx() * b.Dlon();
+        const double lat0 = b.Lat1() - b.Ny() * b.Dlat();
+        const float u0 = float((std::max)(0.0, mercU(b.Lon0())));
+        const float u1 = float((std::min)(1.0, mercU(lon1)));
+        const float v0 = float((std::max)(0.0, mercV(b.Lat1())));
+        const float v1 = float((std::min)(1.0, mercV(lat0)));
+        const bool inside = u1 > u0 && v1 > v0;
+        if (inside) res.Want(hgtTenant, m_hgtSlice, 0u, u0, v0, u1, v1);
+        if (!m_pinLogged) {
+            char line[160];
+            snprintf(line, sizeof(line), " %s uv %.4f..%.4f x %.4f..%.4f (%s)", w.name.c_str(),
+                     u0, u1, v0, v1, inside ? "inside the page" : "OUTSIDE -- unpinned");
+            pinned += line;
+        }
+    }
+    if (!m_pinLogged && !pinned.empty()) {
+        m_pinLogged = true;
+        Log("[weather] solver domains pinned on height page slice %u mip 0:%s", m_hgtSlice,
+            pinned.c_str());
+    }
 }
 
 void WeatherManager::Update(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
