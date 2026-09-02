@@ -116,6 +116,7 @@ struct Options {
                                       // The DEFAULT: colour AND height pages fed from the trees.
     bool gisGate = true;              // --no-gis-gate: drop the vector land/sea gate on the bed
     bool seafloor = true;             // --no-seafloor: drop the global seafloor relief source
+    bool exposure = true;             // --no-exposure: no swell-exposure page (everything exposed)
     std::string gisDump;              // --gis-dump PATH: the gate over the survey box as PGM, exit
     bool ringLoads = true;            // --no-ring-loads: the old queue, for the A/B (M9al)
     bool resTrace = false;            // --res-trace: residency deficit + slot accounting, per 30 f
@@ -334,6 +335,7 @@ Options ParseArgs(int argc, char** argv) {
         // M9ak: the vector land/sea gate is ON. The flag exists to A/B what it changed.
         else if (a == "--no-gis-gate") o.gisGate = false;
         else if (a == "--no-seafloor") o.seafloor = false;
+        else if (a == "--no-exposure") o.exposure = false;
         else if (a == "--gis-dump") o.gisDump = next("gis_gate.pgm");
         // M9al: the ring gate and its instrument. Instrument first, gate second, both off.
         else if (a == "--ring-loads") o.ringLoads = true;      // the default; kept for scripts
@@ -2170,6 +2172,13 @@ int main(int argc, char** argv) {
                         "last):%s",
                         order.c_str());
                     heightTree = std::make_unique<TileTree>(heightRoot.get(), TileTree::Fmt::Half);
+                    heightTree->onChanged = [&resMgr, &hgtTenant](const std::string& tag,
+                                                                  const TileRequest& r) {
+                        if (hgtTenant < 0) return;
+                        TileRequest q = r;
+                        if (tag.rfind("window_z14", 0) == 0) q.face = 6u;
+                        resMgr.Invalidate(hgtTenant, q);
+                    };
                     heightTree->Print();
                 }
                 {
@@ -2198,7 +2207,7 @@ int main(int argc, char** argv) {
                                           resMgr.ResidencyRes(hgtTenant), 6u,
                                           resMgr.Mips(hgtTenant), 1263360.0, 1538048.0);
                     }
-                        if (sea && hgtCh >= 0) {
+                        if (sea && hgtCh >= 0 && opt.exposure) {
                             exposureSrc = std::make_shared<ExposureSource>(&compositor, hgtCh);
                             auto xdc = std::make_shared<DomainCompositor>();
                             xdc->SetBlend(DomainCompositor::Blend::LayeredOver);
@@ -2206,6 +2215,13 @@ int main(int argc, char** argv) {
                             exposureRoot = std::make_shared<CompositeSource>("swell.exposure", xdc);
                             exposureTree = std::make_shared<std::shared_ptr<TileTree>>(
                                 std::make_shared<TileTree>(exposureRoot.get(), TileTree::Fmt::Half));
+                            (*exposureTree)->onChanged = [&resMgr, &exposureT](const std::string&,
+                                                                               const TileRequest& r) {
+                                if (exposureT < 0) return;
+                                TileRequest q = r;
+                                q.face = 6u;
+                                resMgr.Invalidate(exposureT, q);
+                            };
                             auto holder = exposureTree;
                             TileProviderFn xp = [holder](const TileRequest& r,
                                                          std::vector<uint8_t>& out, TileLoc* loc) {
@@ -2387,6 +2403,16 @@ int main(int argc, char** argv) {
                     PrintTree("earth.color (megatexture)", mega.get());
                     if (opt.colorTrees || opt.treeAudit) {
                         megaTree = std::make_unique<TileTree>(mega.get());
+                        // M9bb: a fold or a drop below changed a root tile: the colour tenant
+                        // refetches that address (the frame's tag names the page slice).
+                        megaTree->onChanged = [&resMgr, &colorCubeT](const std::string& tag,
+                                                                     const TileRequest& r) {
+                            if (colorCubeT < 0) return;
+                            TileRequest q = r;
+                            if (tag.rfind("window_z14", 0) == 0) q.face = 6u;
+                            else if (tag.rfind("window_z17", 0) == 0) q.face = 7u;
+                            resMgr.Invalidate(colorCubeT, q);
+                        };
                         megaTree->Print();
                     }
                     auto mkColor = [&](const ColorFrame& f) -> TileProviderFn {
@@ -2438,6 +2464,14 @@ int main(int argc, char** argv) {
                     // its retries and the shader falls back to the height sign there.
                     if (opt.colorTrees && megaTree && maskLayer != SIZE_MAX) {
                         if (TileTree* gt = megaTree->Find("gis.landsea")) {
+                            gt->onChanged = [&resMgr, &maskTenant](const std::string& tag,
+                                                                   const TileRequest& r) {
+                                if (maskTenant < 0) return;
+                                TileRequest q = r;
+                                if (tag.rfind("window_z14", 0) == 0) q.face = 6u;
+                                else if (tag.rfind("window_z17", 0) == 0) q.face = 7u;
+                                resMgr.Invalidate(maskTenant, q);
+                            };
                             const TileProviderFn gCube =
                                 gt->Provider(ColorFrame::Cube(Compositor::kFaceDim));
                             const TileProviderFn gWin =
@@ -4164,6 +4198,12 @@ int main(int argc, char** argv) {
                 if (exposureSrc->Set(sea->PeakDirX(), sea->PeakDirZ(), waterNavd,
                                      sea->PeakDirValid())) {
                     auto fresh = std::make_shared<TileTree>(exposureRoot.get(), TileTree::Fmt::Half);
+                    fresh->onChanged = [&resMgr, &exposureT](const std::string&, const TileRequest& r) {
+                        if (exposureT < 0) return;
+                        TileRequest q = r;
+                        q.face = 6u;
+                        resMgr.Invalidate(exposureT, q);
+                    };
                     std::atomic_store(exposureTree.get(), fresh);
                     resMgr.Drop(exposureT);
                     Log("[exposure] bucket rolled -> tree %s", fresh->Id().c_str());
@@ -4187,6 +4227,22 @@ int main(int argc, char** argv) {
                     const float v0 = float(std::clamp(mV(latC + dLat), 0.0, 1.0));
                     const float v1 = float(std::clamp(mV(latC - dLat), 0.0, 1.0));
                     if (u1 > u0 && v1 > v0) resMgr.Want(exposureT, 6u, 3u, u0, v0, u1, v1);
+                    if (opt.resTrace && (frame % 150u) == 0u) {
+                        // The instrument (--res-trace): what the page holds at the camera vs what
+                        // the node says, and what the manager believes about the tiles under it.
+                        const float uc = float(std::clamp(mU(lonC), 0.0, 1.0));
+                        const float vc = float(std::clamp(mV(latC), 0.0, 1.0));
+                        Log("[exposure] frame %u cam (%.4f, %.4f): page z14 resident mip %u, node "
+                            "%.2f, tree %s",
+                            frame, latC, lonC, resMgr.ResidentMipAt(exposureT, 6u, uc, vc),
+                            exposureSrc->At(latC, lonC), std::atomic_load(exposureTree.get())->Id().c_str());
+                        for (uint32_t mm = 3; mm <= 5; ++mm) {
+                            const uint32_t dim = 16384u >> mm;
+                            const TileRequest tq{6u, mm, uint32_t(uc * dim) / 256u, uint32_t(vc * dim) / 128u};
+                            Log("[exposure]   mip %u tile (%u,%u): %s", mm, tq.x, tq.y,
+                                resMgr.DebugTile(exposureT, tq).c_str());
+                        }
+                    }
                 }
             }
             PROF_END(5);

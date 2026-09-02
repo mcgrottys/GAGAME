@@ -937,6 +937,26 @@ model (or a textbook) would hold → what this project measured → the law now 
     (`wavefield`) becomes a five-ray cosine-weighted fan, and the model says what it is
     (spread, not diffraction).
 
+25. **Two tenants cannot share a staging tail.** Prior: the residency maps are tiny, so
+    borrowing "the tail of the upload slab" is free. Reality: each tenant computed its own
+    tail from its own face count, so every tenant's staging began at the same or an
+    overlapping offset, and two maps dirty in one frame overwrote each other BEFORE the
+    recorded copies ran -- tenants inherited each other's residency. Found only when a fourth
+    tenant with the height page's slice count arrived: the exposure page read the height
+    tenant's map, believed mip 3 resident under the helm, sampled its own unmapped mip 3, got
+    zeros, and the storm lay flat while the node said 0.85 and the disk said 0.85. Two days of
+    probes ended at a memcpy. Law: a staging region is owned by one writer per frame, and the
+    slab must have room for every writer it can have. And the lesson for the probing: when the
+    CPU's view and the GPU's view of the same byte disagree, stop reasoning about the data and
+    look at the copy between them.
+
+26. **The pyramid is the compositor's job.** Prior: each mip painted independently from the
+    source is "correct at its own footprint" and therefore fine. Reality (the user's call): two
+    independent answers per address are two answers, and for a node whose answer is a march
+    they are two marches; the parent must be the fold of the children where children exist.
+    Law: fold up at paint time inside the tree (§43), drop the cached composites above, and
+    refetch the page -- no separate pass, no reconciliation step.
+
 ## verification — The gate map: which algebra is pinned where
 
 - `pga` — motors: rotation, composition, rigidity, screw log/exp, slerp.
@@ -966,3 +986,10 @@ model (or a textbook) would hold → what this project measured → the law now 
 - The hypervisor (`--trace lat,lon`) — one sample walked through every edge on the CPU
   with AST annotations; `--lens waterdata/authority/...` — fields as color;
   `--dump-fibers` — the bank planes with declared ranges; PIX events per AST node.
+
+**The pyramid (M9bb).** A tree's parent tile is the coverage-weighted 2x2 fold of its children
+wherever children have been painted, and the source's own resample where none have; composites
+compose folded parents; a fold below drops the cached composite above and re-fetches the page.
+`fold`'s law ("average the answers") is what makes the fold and the resample agree for linear
+sources and disagree honestly for nonlinear ones -- a classifier's coarse texel is the coverage
+of its fine decisions, which is what the fold delivers and the resample could only approximate.

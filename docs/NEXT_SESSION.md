@@ -237,6 +237,7 @@ the unlit version.
 | `--pack-trees` | one `.gaa` per node per frame under `cache/trees/`; refs resolve into the child's archive. Re-run after a warm; loose files are kept |
 | `--no-gis-gate` | drop the vector land/sea gate (on by default) — the A/B for what the survey changed |
 | `--no-seafloor` | drop the global seafloor relief source (`synth.seafloor.relief`, on by default) — the A/B for the seabed |
+| `--no-exposure` | no swell-exposure page tenant (everything exposed) — the A/B for the shadow node. With `--res-trace`, every 150 frames logs the page's resident mip at the camera, the node's own value, and the manager's view of the tiles under it |
 | `--gis-dump PATH` | write the survey gate as a 1024² PGM over its box and exit (255 water / 0 land). `py out/pgm2png.py` converts it. **Look at the gate**, don't infer it |
 | `--res-trace` | every 30 frames: residency deficit by mip per tenant, queue depths, slots spent on reads vs paints |
 | `--no-ring-loads` | the old queue: request the whole column at once. Ring loads (parent must be mapped; the view refines one ring at a time) are the **default** |

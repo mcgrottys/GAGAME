@@ -105,13 +105,29 @@ float SweDEta(float2 xz) {
 // direction or the water level moves).
 // M9ba: the exposure is a PAGE (swell.exposure tenant, z14 slice, mips >= 3): nothing resident
 // = no opinion = exposed. Same frame as the bed's page, same residency clamp.
+// PRIORS 1: this runs in the DOMAIN shader too, and a bindless SampleLevel outside the pixel
+// stage returns ZERO on this GPU (the first version did exactly that: the node said 0.85 at
+// the helm and the near field lay flat). Loads, manual bilinear, like the bank kernel.
 float SweShadow(float2 xz) {
     if (gSweU.w == 0xFFFFFFFFu || gChurnU.w == 0xFFFFFFFFu) return 1.0f;
     const float2 uv = CsWindowUv(SeaPlanetDir(xz));
     if (any(uv < 0.0f) || any(uv > 1.0f)) return 1.0f;
-    const float have = CsHavePage(gChurnU.w, uv, gCsU6.z);
-    if (have > 7.5f) return 1.0f;
-    return gTexArr[gSweU.w].SampleLevel(sLinearClamp, float3(uv, gCsU6.z), max(have, 3.0f)).x;
+    const uint slice = gCsU6.z;
+    const int2 rc = int2(clamp(uv * 128.0f, 0.0f, 127.0f));
+    const float haveB = gTexArr[gChurnU.w].Load(int4(rc, int(slice), 0)).x * 15.9375f;
+    if (haveB > 7.5f) return 1.0f;
+    const int mip = int(max(round(haveB), 3.0f));
+    const float dim = 16384.0f / exp2(float(mip));
+    const float2 tf = uv * dim - 0.5f;
+    const float2 t0 = floor(tf);
+    const float2 fr = tf - t0;
+    const int2 i0 = clamp(int2(t0), int2(0, 0), int2(dim - 1.0f, dim - 1.0f));
+    const int2 i1 = clamp(int2(t0) + 1, int2(0, 0), int2(dim - 1.0f, dim - 1.0f));
+    const float a = gTexArr[gSweU.w].Load(int4(i0.x, i0.y, int(slice), mip)).x;
+    const float b = gTexArr[gSweU.w].Load(int4(i1.x, i0.y, int(slice), mip)).x;
+    const float c = gTexArr[gSweU.w].Load(int4(i0.x, i1.y, int(slice), mip)).x;
+    const float d = gTexArr[gSweU.w].Load(int4(i1.x, i1.y, int(slice), mip)).x;
+    return lerp(lerp(a, b, fr.x), lerp(c, d, fr.x), fr.y);
 }
 
 float2 JetU(float2 xz) {

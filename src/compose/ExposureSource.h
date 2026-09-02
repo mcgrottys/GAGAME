@@ -68,7 +68,7 @@ public:
     std::string Identity() const override {
         const uint64_t p = m_params.load();
         char b[96];
-        snprintf(b, sizeof(b), "swell.exposure|v2 fan5x26 march %.0fm to %.0fm|dir%03d|lvl%+d|",
+        snprintf(b, sizeof(b), "swell.exposure|v3 fan5x26 best-ray march %.0fm to %.0fm|dir%03d|lvl%+d|",
                  kStepMinM, kMaxRangeM, DirBucket(p), LevelBucket(p));
         std::string id = b;
         if (m_comp && m_hgtCh >= 0) {
@@ -95,16 +95,19 @@ public:
         // The step follows the texel: a 76 m texel does not need 13 m steps, a 9 m one does.
         const double stepM = (std::max)(kStepMinM, q.groundM * 0.35);
         const int maxSteps = static_cast<int>(kMaxRangeM / stepM);
-        // A FAN, not a ray. The sea has directional spread (the wave-field spectrum's +-26
-        // degrees, `wavefield`), and a channel behind a jetty receives the part of it that
-        // clears the tip -- the single line of sight the old raster marched put the whole
-        // Merrimack channel at the deep-shadow floor once the survey edits made the jetties
-        // real walls. Five rays across the spread, cosine-weighted; the answer is the
-        // weighted mean of their transmissions. Diffraction proper is not modelled; this is
-        // the spread the spectrum already declares, and nothing more.
+        // A FAN, not a ray -- and the BEST ray, not the mean. The sea has directional spread
+        // (the wave-field spectrum's +-26 degrees, `wavefield`); a jettied channel takes
+        // whatever part of that spread is aligned with it, because the waves that enter
+        // refract along the channel and fill it (the Merrimack's standing waves stand a
+        // kilometre inside the tips -- the user has ridden them on a clear day). The single
+        // line of sight the old raster marched put the whole channel at the deep-shadow floor
+        // once the survey edits made the jetties real walls; averaging a fan left it at 0.3.
+        // So: five rays across the spread, each transmission weighted by its angular
+        // distance from the peak, and the exposure is the MAXIMUM -- the channel is as open
+        // as its most open direction. Diffraction proper is not modelled and not claimed.
         static const double kFanDeg[5] = {-26.0, -13.0, 0.0, 13.0, 26.0};
-        static const double kFanW[5] = {0.5, 0.8, 1.0, 0.8, 0.5};
-        double acc = 0.0, wsum = 0.0;
+        static const double kFanW[5] = {0.6, 0.85, 1.0, 0.85, 0.6};
+        double best = 0.0;
         for (int r = 0; r < 5; ++r) {
             const double ang = ang0 + kFanDeg[r] * kD2R;
             // Propagation direction (unit, world east/north); the march goes TOWARD the source.
@@ -126,10 +129,9 @@ public:
                 const double t = (std::min)((excess - 0.15) / 1.05, 1.0);
                 tr = 0.5 - 0.38 * t;
             }
-            acc += kFanW[r] * tr;
-            wsum += kFanW[r];
+            best = (std::max)(best, kFanW[r] * tr);
         }
-        out.c[0] = static_cast<float>(acc / wsum);
+        out.c[0] = static_cast<float>((std::min)(best, 1.0));
         return true;
     }
 

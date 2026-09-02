@@ -1906,3 +1906,38 @@ cosine-weighted FAN of five rays across the sea's declared directional spread (�
 wave-field spectrum's own) and averages their transmissions. Diffraction is not modelled and
 is not claimed; the fan is the spread the spectrum already states. The graph: `sea.peakdir →
 exposure.node → {water.bank, sea.ps}`, mercator-uv, no flip; the ledger truth re-pinned.
+
+## 43. The pyramid, in the compositor
+
+The user's rule, stated while the exposure page misbehaved: parent mips are filled by folding
+the children DURING composition, not resampled from the source per level, and not as a
+separate pass. Until now every mip of every tree was its own paint (M6i's "each LOD averages
+the source over its own footprint"): correct where the source can answer at that footprint,
+but two independent answers per address, and for a node whose answer is a *march* (the
+exposure) two different marches. Now (`TileTree::FoldUp`, tree version 2):
+
+- A leaf's freshly painted tile is folded into its parent's quadrant -- 2x2 box,
+  coverage-weighted (straight colour x alpha / sum alpha, alpha = mean; value x weight / sum
+  weight, weight = mean), the fold law -- and that parent into its own, up to the frame's
+  coarsest mip. A parent that does not exist yet is painted from the source first (as every
+  mip always was), then overwritten where children exist. So a coarse texel is the source's
+  own resample where nothing finer was ever painted, and exactly the fold of the finer level
+  where it was; the two agree by construction wherever both exist.
+- Composites are not folded: they compose their children's folded parents through the same
+  `OverStep`, so fold(compose) meets compose(fold) up to the over's own nonlinearity. Their
+  CACHED tiles at a changed address are dropped (`DropCachedAddress`): a composite's key folds
+  what its children hold, not what they say, so a fold below would otherwise never be seen.
+- A changed tile is announced upward (`onChanged`); the residency manager queues a per-tile
+  refetch (`ResidencyManager::Invalidate`, applied on the main thread with Drop's retire
+  rules), so a page tenant holding the old parent takes the folded one on its next Want.
+- Parents are read-modify-written by painting threads under a per-tree recursive mutex.
+  Archives serve before loose files, so a pack after a warm is still the rule.
+
+**§42 postscript -- what was actually wrong.** The exposure node was right on disk from its
+second build, and the flat storm at the helm was never the node: every tenant staged its
+residency map at the same tail of the upload ring, and the exposure page (7 slices, like the
+height page) inherited the height tenant's map (priors 25). With one region per tenant the page
+reads its own residency, samples mip 4 where mip 4 is what it has, and the helm frame differs
+from `--no-exposure` by the shadow alone (96 k pixels, the footprint the constant probe
+predicted). Everything the probes said along the way was true; the copy between the CPU's map
+and the GPU's was the lie.

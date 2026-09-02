@@ -90,6 +90,7 @@ public:
     // starve the painting that fills the cache. 12 of 48 = a quarter.
     static constexpr uint32_t kPaintReserve = 12;
     static constexpr uint32_t kMaxMapsPerFrame = 96;     // tiles mapped+filled per frame
+    static constexpr uint64_t kMapStageBytes = 8ull << 20;   // M9bb: residency-map staging reserve
     static constexpr uint32_t kPoolCapTiles = 8192;      // 512 MB ceiling before eviction
     static constexpr uint32_t kEvictAgeFrames = 4;       // > frame overlap: no in-flight reads
 
@@ -184,6 +185,21 @@ public:
     // NULL-mapped after the frame-overlap window (priors 19: something recorded may still read
     // them); loads in flight for the old identity are discarded when they land.
     void Drop(int tenant);
+    // M9bb: ONE tile changed on disk (a pyramid fold rewrote it, or a composite of it was
+    // dropped): forget what is mapped at that address so the next Want refetches. Safe from
+    // any thread -- it queues; ProcessQueues applies it on the main thread with Drop's rules.
+    void Invalidate(int tenant, const TileRequest& r);
+    // Debug: what the manager believes about one tile (state, pool slot, bytes it carried).
+    std::string DebugTile(int tenant, const TileRequest& r) const {
+        auto it = m_tracked.find(MakeKey(tenant, r));
+        if (it == m_tracked.end()) return "untracked";
+        const auto& t = it->second;
+        char b[160];
+        snprintf(b, sizeof(b), "state %d pool %u data %zu loc %d dropped %d lastSeen %u retries %u",
+                 int(t->state), t->pool, t->data.size(), int(t->loc.Valid()), int(t->dropped),
+                 t->lastSeen, unsigned(t->retries));
+        return b;
+    }
 
     // Screw-prefetch input: this frame's camera pose motor. The manager keeps the previous one
     // and hands back the extrapolated pose for the caller to run its node walk a second time
@@ -295,6 +311,9 @@ private:
         uint32_t frame;
     };
     std::vector<Retiring> m_retiring;   // M9ba: dropped-while-mapped, NULL-mapped after overlap
+    std::mutex m_invMx;
+    std::vector<std::pair<int, TileRequest>> m_invQ;   // M9bb: invalidations from paint threads
+    void DropOne(const std::shared_ptr<Tracked>& tr);
     // Index of one tile in a tenant's flat stamp array. Pure arithmetic -- no hashing, no
     // indirection, and neighbours in a rect land next to each other in memory, which is the
     // half of the win the instruction count does not show.
