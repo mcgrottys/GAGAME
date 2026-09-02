@@ -532,16 +532,22 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     memcpy(cb.boatA, m_boatA, sizeof(cb.boatA));   // M8: the fleet (zeros = no wake)
     memcpy(cb.boatB, m_boatB, sizeof(cb.boatB));
     cb.waveU[0] = 0xFFFFFFFFu;
-    if (m_wave && m_wave->Ready()) {
+    if (m_wave && m_wave->Ready() && m_wavePages != UINT32_MAX) {
         const WaveField::GpuTable& wt = m_wave->Table();
-        cb.waveU[0] = m_wave->Srv();
-        cb.waveU[1] = wt.nx;
-        cb.waveU[2] = wt.ny;
-        cb.waveU[3] = WaveField::kMaxComp;
+        cb.waveU[0] = m_wavePages;
+        cb.waveU[1] = m_wavePagesRes;
+        cb.waveU[2] = wt.nUsed;
+        cb.waveU[3] = wt.envSlice;
         cb.waveA[0] = wt.orgX;
         cb.waveA[1] = wt.orgZ;
         cb.waveA[2] = wt.invCell;
         cb.waveA[3] = wt.feather;
+        cb.waveP[0] = static_cast<float>(m_waveOrgPx[0]);
+        cb.waveP[1] = static_cast<float>(m_waveOrgPx[1]);
+        cb.waveP[2] = 1.0f / 16384.0f;
+        cb.waveP[3] = static_cast<float>(65536.0 * 256.0);
+        cb.waveD[0] = static_cast<float>(m_waveNx);
+        cb.waveD[1] = static_cast<float>(m_waveNy);
         cb.waveB[0] = wt.envMax;
         cb.waveB[1] = wt.sumMax;
         cb.waveB[2] = sc2.wfChop;   // chop (scene cfg; ambient-sea lambda by default)

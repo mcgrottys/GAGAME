@@ -53,6 +53,9 @@
 
 namespace ga {
 
+struct ColorFrame;
+struct TileRequest;
+
 enum class SourceDomain : uint8_t { Point, Profile, Raster, Volume };
 
 // Where a value is wanted. Depth and time are carried for every query even when a 2-D source
@@ -91,6 +94,16 @@ public:
     // The value and weight here. False is identical to weight 0 and exists only for callers
     // that want to skip the copy.
     virtual bool SampleAt(const DomainQuery& q, DomainValue& out) const = 0;
+    // M9bc: TILE-NATIVE nodes. Some answers are regional -- a boundary-value solve with a phase
+    // gauge, a stencil operator with a margin -- and cannot be asked one texel at a time. Such a
+    // node paints a whole tile of values for a frame's address (any mip); the tree treats the
+    // result exactly as a per-texel paint: same formats, identity, fold, refetch. False = the
+    // answer is not ready for this identity (the tree returns Transient and asks again).
+    virtual bool TileNative() const { return false; }
+    virtual bool PaintTile(const ColorFrame&, const TileRequest&, uint32_t, uint32_t,
+                           std::vector<DomainValue>&) const {
+        return false;
+    }
     // Cheap rejection so a compositor can skip a source over a whole page without querying it.
     virtual bool MayCover(double lon0, double lat0, double lon1, double lat1) const {
         (void)lon0; (void)lat0; (void)lon1; (void)lat1;

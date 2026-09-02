@@ -44,7 +44,8 @@ cbuffer BankCb : register(b0) {
     // field OWNS the structure-bearing bands (cascades 0-1 yield); the chop band and
     // the ripple tail stay local. Time is the rotor e^{-i sigma t}, applied to the
     // stored spinor with CPU-computed (cos, sin)(sigma t) -- phase never wraps here.
-    uint4  gWaveU;      // x = atlas SRV (0xFFFFFFFF = absent), y = nx, z = ny, w = nComp
+    uint4  gWaveU;      // M9bc: x = wave PAGE tenant array SRV (0xFFFFFFFF = absent), y = its
+                        // residency SRV, z = nUsed comps, w = the envelope plane
     float4 gWaveA;      // window org xy (world m), z = 1/cellM, w = feather m
     float4 gWaveB;      // x = envMax, y = sumMax, z = chop, w = solved-at level (NAVD)
     float4 gFoamA;      // scene closures: churnGain, shedSteepCap, shedMssCeil, crestLo
@@ -71,6 +72,8 @@ cbuffer BankCb : register(b0) {
     // hmax = 0.55*depth breaking clamp); only a diff proves it MOVES it. Appended at the end
     // on both sides, per the law twelve rows up.
     float4 gDebugA;
+    float4 gWaveP;      // M9bc: the z16 page frame: org px x, y, 1/16384, world px at z16
+    float4 gWaveD;      // M9bc: window nx, ny (solver cells = page texels), 0, 0
 };
 
 struct BankTile {
@@ -113,17 +116,31 @@ float4 LoadBilinearWrap(uint slot, float2 uv, float dim) {
 // M8: bilinear over ONE SLICE of the solved-wave atlas (slice s at ((s&1)*nx, (s/2)*ny));
 // taps clamp INSIDE the slice so components never bleed into each other. The spinor
 // channels blend componentwise in the plane -- the cl2 law; the caller renormalizes.
-float4 WaveSample(uint slot, float2 cellUv, uint s, float2 dims) {
-    const float2 org = float2(float(s & 1) * dims.x, float(s >> 1) * dims.y);
-    const float2 tf = clamp(cellUv, 0.5f, dims - 0.5f) - 0.5f;
+// M9bc: the solved wave field is PAGES of the wave.field tenant (z16, slices 6.. = planes:
+// component p's (a, k, cos, sin), then the envelope). Mip 0 is what the window pins; a plane
+// not resident at mip 0 here reads as absent (0) and the caller's window weight drops it.
+float2 WavePageUv(float2 xz) {
+    const float lat = gGeoA.x + xz.y * gGeoA.z;
+    const float lon = gGeoA.y + xz.x * gGeoA.w;
+    const float mx = (lon + 180.0f) / 360.0f * gWaveP.w;
+    const float my = (0.5f - log(tan(0.7853981634f + lat * 0.01745329252f * 0.5f)) *
+                                 0.15915494309f) * gWaveP.w;
+    return float2(mx - gWaveP.x, my - gWaveP.y) * gWaveP.z;
+}
+bool WavePageResident(float2 uv, uint plane) {
+    const int2 rc = int2(clamp(uv * 128.0f, 0.0f, 127.0f));
+    return gTA[gWaveU.y].Load(int4(rc, int(6u + plane), 0)).x * 15.9375f < 0.5f;
+}
+float4 WavePageSample(float2 uv, uint plane) {
+    if (!WavePageResident(uv, plane)) return 0.0f;
+    const float2 tf = uv * 16384.0f - 0.5f;
     const float2 t0 = floor(tf);
     const float2 fr = tf - t0;
     float4 acc = 0.0f;
     [unroll] for (int k = 0; k < 4; ++k) {
-        const int2 tc = clamp(int2(t0) + int2(k & 1, k >> 1), int2(0, 0),
-                              int2(dims) - int2(1, 1));
+        const int2 tc = clamp(int2(t0) + int2(k & 1, k >> 1), int2(0, 0), int2(16383, 16383));
         acc += ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y) *
-               gT[slot][int2(org) + tc];
+               gTA[gWaveU.x].Load(int4(tc, int(6u + plane), 0));
     }
     return acc;
 }
@@ -322,14 +339,18 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // foam machinery stay local. Feathered so the handover is invisible (every rung
     // earns its place and VANISHES where it cannot -- the M7h symmetric-ladder doctrine).
     float wWin = 0.0f;
-    float2 wcell = 0.0f;
+    float2 wuv = 0.0f;
     if (gWaveU.x != 0xFFFFFFFFu) {
-        wcell = (xz - gWaveA.xy) * gWaveA.z;
-        const float2 dimsW = float2(gWaveU.y, gWaveU.z);
+        const float2 wcell = (xz - gWaveA.xy) * gWaveA.z;
+        const float2 dimsW = gWaveD.xy;
         const float eM =
             min(min(wcell.x, dimsW.x - wcell.x), min(wcell.y, dimsW.y - wcell.y)) /
             gWaveA.z;
         wWin = smoothstep(0.0f, max(gWaveA.w, 1.0f), eM);
+        wuv = WavePageUv(xz);
+        // No solved field resident here (the chain still landing, or off the page): the
+        // cascades carry the sea alone -- the same handover the feather makes at the edge.
+        if (wWin > 0.0f && !WavePageResident(wuv, 0u)) wWin = 0.0f;
     }
 
     // THE FOLD, per ring (M6t): a band is geometry while THIS tile's texels resolve its
@@ -404,15 +425,14 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // sigma t): the reference's surface, wearing our live gains through the window blend.
     float rmsW = 0.0f, excW = 0.0f;
     if (wWin > 0.001f) {
-        const float2 dimsW = float2(gWaveU.y, gWaveU.z);
         float3 dW = 0.0f;
         float sigW = 0.0f;
-        [loop] for (uint s = 0; s < gWaveU.w; ++s) {
+        [loop] for (uint s = 0; s < gWaveU.z; ++s) {
             const float4 sc = gWaveScale[s >> 1];
             const float aMax = (s & 1) ? sc.z : sc.x;
             if (aMax <= 0.0f) continue;
             const float kMax = (s & 1) ? sc.w : sc.y;
-            const float4 t4 = WaveSample(gWaveU.x, wcell, s, dimsW);
+            const float4 t4 = WavePageSample(wuv, s);
             // The swell shadow shelters the SOLVED bands exactly as it does the
             // cascades (the helm-in-the-lee shot exposed the asymmetry: solved comps
             // sailed through the jetty's lee unsheltered).
@@ -441,7 +461,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             dW.y += wF * aW * cT;
             dW.xz -= gWaveB.z * wF * aW * sT * dir2;
         }
-        const float4 env = WaveSample(gWaveU.x, wcell, 16u, dimsW);
+        const float4 env = WavePageSample(wuv, gWaveU.w);
         rmsW = env.x * gWaveB.x * expo;   // the solver's envelope, sheltered like its comps
         excW = env.y * 2.5f * expo;       // its breaking indicator, rms_raw / rms_limit
         d += dW * wWin;

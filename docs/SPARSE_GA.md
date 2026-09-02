@@ -1941,3 +1941,62 @@ reads its own residency, samples mip 4 where mip 4 is what it has, and the helm 
 from `--no-exposure` by the shadow alone (96 k pixels, the footprint the constant probe
 predicted). Everything the probes said along the way was true; the copy between the CPU's map
 and the GPU's was the lie.
+
+## 44. The wave field as a tree node; tile-native nodes; what a tile is not worth storing
+
+**Tile-native nodes (M9bc).** Some answers are regional and cannot be asked one texel at a
+time: the solved wave field is a boundary-value solve over a window with a global phase gauge
+(`wavefield`); a stencil operator (grad, div, curl over a neighbourhood) needs a margin. A
+`DomainSource` may now declare `TileNative()` and paint a whole tile of values for a frame's
+address at any mip (`PaintTile`); the tree treats the result exactly as a per-texel paint --
+same formats, identity, fold, refetch. False means "not ready for this identity": the tree
+answers Transient and asks again, never caching a tile of the wrong field.
+
+**The wave field (`WaveFieldSource`).** The solver's grid IS the z16 page's grid: cell = the
+page texel in world metres at the window's latitude (1.752 m; Mercator is conformal, x and y
+agree to 0.01% across the window), origin on a texel corner, nx/ny tile multiples (1920x1152).
+A tile is then exact bytes of the solve, never a resample. Planes are the frame's FACES: face
+p is component p's (a, k, cos phi, sin phi) -- the Cl(2)+ even part with its scalars, in the
+solver's own truncating quantizer -- and face nUsed is the envelope; a fourth tile format,
+`Raw4`, holds them (four bytes, no coverage byte; absence is the tile's absence). Every mip is
+answered as the 2^m box mean of the solve (componentwise on the spinor -- the cl2 blend law),
+which is what the fold produces, so parents and children agree by construction. Identity =
+solver version + the bucket key the field was solved under + the frame. The solver keeps its
+solve as an immutable CPU snapshot (`WaveField::Live()`) that the painting threads read; the
+GPU atlas and its upload are gone. A page tenant, `wave.field (pages)` (6 cube slices it never
+uses + 17 planes), serves the bank, which reads a plane by Loads at mip 0 through the same
+lat/lon -> page frame as the bed (`WavePageSample`); a plane not resident at mip 0 reads as
+absent and the window weight drops the solved field there -- the cascades carry the sea, the
+same handover the feather makes at the window edge.
+
+**No popping (the user's rule).** When the bucket rolls the tree re-keys, and before the
+tenant is told the window's whole pyramid is PREFILLED to disk (`TileTree::Prefill`, finest
+first): the residency manager's ancestor chain then reads files and never waits on a paint.
+Then the old tiles drop and the wants go out. 4 s per bucket for 17 planes at every mip.
+
+**What is not worth storing (M9bd, the user's rule).** Three things the tree now refuses to
+write:
+- *Nothing.* A Raw4 tile with no non-zero texel (a gated component, land) is a void marker.
+- *Redundant parents.* A parent within 4/255 of the fold of its own children is not stored;
+  a zero-byte `.fold` marker says "derive me", and it is rebuilt from the children each time
+  it is served. A tile-native node's parents are exactly that fold, so its tree holds mip 0 as
+  bytes and markers above it: 145 MB where the first version held 212 MB, and the helm frame is
+  bit-identical. (The first version also READ the children at every level of the fold chain,
+  4^m reads per paint: 75 s of prefill. The chain for a derived parent touches no bytes now.)
+- *The chain past the point where the child stops mattering.* Folding a child into a parent
+  that moves the parent by less than 4/255 anywhere writes nothing and stops: a one-tile
+  GeoTIFF folds into its parent and grandparent and is then invisible, and the composite there
+  keeps its reference to the base tree (the soak rule already left the small source out of
+  that subset). No coarse tile is materialized for it.
+
+**Measured.** Aligned grid 1920x1152 at 1.752 m; solve 3.4 s; prefill 3791 tiles / 17 planes
+/ every mip in 3.96 s; tree 2286 mip-0 tiles, 944 void, 1071 markers, 145 MB; helm frame with
+the pages differs from the GradeBank build only by the re-gridded solve (24% of pixels, the
+same field on a 1.75 m lattice) and is pixel-identical between the materialized and
+marker-only trees. Selftest passes (the bank CB grew two rows on both sides).
+
+**Toward composers as formulas.** The tile-native hook is the door for the operator nodes the
+user described -- the geometric product of Cl(2) fibers (grade-typed by `Cl2ProductSignature`,
+already the atlas's closure), and the stencil family (grad, div, curl: the Maxwell-shaped
+operators over currents and heights). Both are DomainSources over DomainSources; the tree
+caches them like anything else. That is the next section.

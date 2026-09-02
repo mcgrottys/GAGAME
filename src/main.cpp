@@ -60,6 +60,7 @@
 #include "sim/BathyModel.h"
 #include "sim/GlobeModel.h"
 #include "sim/WaveField.h"
+#include "sim/WaveFieldSource.h"
 #include "sim/CurrentModel.h"
 #include "sim/SeaState.h"
 #include "sim/SweSolver.h"
@@ -3439,10 +3440,24 @@ int main(int argc, char** argv) {
         };
         std::unique_ptr<WaveField> waveField;
         int wfCtSta = -1;
+        // M9bc: THE WAVE FIELD AS A TREE NODE. The solver's grid is aligned to the z16 page
+        // (WaveFieldSource::Align), the node paints planes as the frame's faces, the tree caches
+        // them, and a page tenant serves them to the bank. A bucket roll re-keys the tree and the
+        // window's whole pyramid is prefilled before the tenant is told.
+        std::shared_ptr<WaveFieldSource> waveSrc;
+        std::shared_ptr<std::shared_ptr<TileTree>> waveTree;
+        WaveFieldSource::Frame waveFrame;
+        int waveT = -1;
         if (waterBank && hgtCh >= 0) {
             waveField = std::make_unique<WaveField>();
             wfCtSta = haveCurrents ? currents.StationIndex("ACT0816") : -1;
-            waveField->Configure(sceneToWaveCfg(waterScene), &compositor, hgtCh,
+            WaveFieldConfig wcfg = sceneToWaveCfg(waterScene);
+            waveFrame = WaveFieldSource::Align(wcfg);
+            Log("[wave] grid aligned to the z16 page: cell %.3f m, %d x %d cells, window px "
+                "(%lld, %lld), frame org (%lld, %lld)",
+                wcfg.cellM, wcfg.nx, wcfg.ny, waveFrame.winPxX, waveFrame.winPxY,
+                waveFrame.orgPxX, waveFrame.orgPxY);
+            waveField->Configure(wcfg, &compositor, hgtCh,
                                  &waterAtlas, &model, entSta,
                                  haveCurrents ? &currents : nullptr, wfCtSta);
             // M8 flows into waves: the SWE's SOLVED current drives the dispersion when
@@ -3452,6 +3467,35 @@ int main(int argc, char** argv) {
             }
             waterBank->SetWaveField(waterScene.wfEnabled ? waveField.get() : nullptr);
             waterBank->SetScene(&waterScene);
+            if (waterScene.wfEnabled) {
+                waveSrc = std::make_shared<WaveFieldSource>(waveField.get(), waveFrame);
+                waveTree = std::make_shared<std::shared_ptr<TileTree>>(
+                    std::make_shared<TileTree>(waveSrc.get(), TileTree::Fmt::Raw4));
+                auto holder = waveTree;
+                const ColorFrame wframe = waveFrame.color;
+                TileProviderFn wp = [holder, wframe](const TileRequest& r,
+                                                     std::vector<uint8_t>& out, TileLoc* loc) {
+                    if (r.face < 6u) {
+                        out.assign(65536, 0);   // the cube faces are not this node's frame
+                        if (loc) *loc = TileLoc{};
+                        return true;
+                    }
+                    std::shared_ptr<TileTree> t = std::atomic_load(holder.get());
+                    if (!t) return false;
+                    TileRequest w = r;
+                    w.face = r.face - 6u;   // the plane
+                    return t->Provider(wframe)(w, out, loc);
+                };
+                waveT = resMgr.AddTexturePages(gpu, L"wave.field (pages)", Compositor::kFaceDim,
+                                               DXGI_FORMAT_R8G8B8A8_UNORM, std::move(wp),
+                                               6u + uint32_t(WaveField::kMaxComp) + 1u);
+                waterBank->SetWavePages(resMgr.TextureSrv(waveT), resMgr.ResidencySrv(waveT),
+                                        double(waveFrame.orgPxX), double(waveFrame.orgPxY),
+                                        waveFrame.nx, waveFrame.ny);
+                Log("[wave] wave.field is page tenant %d: %u planes over the z16 window, tiles "
+                    "exact bytes of the solve, pyramid prefilled per bucket",
+                    waveT, uint32_t(WaveField::kMaxComp) + 1u);
+            }
         }
         if (globe) {
             globe->foamOpacity = waterScene.foamOpacity;
@@ -4014,7 +4058,9 @@ int main(int argc, char** argv) {
                     if (WaterSceneChanged(kScenePath, &waterSceneMtime) &&
                         LoadWaterScene(kScenePath, waterScene)) {
                         if (waveField) {
-                            waveField->Configure(sceneToWaveCfg(waterScene), &compositor,
+                            WaveFieldConfig wcfg2 = sceneToWaveCfg(waterScene);
+                            waveFrame = WaveFieldSource::Align(wcfg2);   // M9bc: the page grid
+                            waveField->Configure(wcfg2, &compositor,
                                                  hgtCh, &waterAtlas, &model, entSta,
                                                  haveCurrents ? &currents : nullptr,
                                                  wfCtSta);
@@ -4041,6 +4087,33 @@ int main(int argc, char** argv) {
                         waveField->Update(gpu, simUnix, sea->Parts(), sea->activeParts,
                                           opt.headless);
                         PROF_END(2);
+                        // M9bc: the solve moved -> a new tree under the same tenant, its
+                        // pyramid prefilled to disk, the old tiles dropped, then the wants.
+                        if (waveSrc && waveT >= 0 && waveField->Ready() &&
+                            waveField->LiveKey() != waveSrc->Key()) {
+                            waveSrc->SetKey(waveField->LiveKey());
+                            auto fresh = std::make_shared<TileTree>(waveSrc.get(), TileTree::Fmt::Raw4);
+                            float u0, v0, u1, v1;
+                            waveSrc->WindowUv(u0, v0, u1, v1);
+                            const auto tp0 = Clock::now();
+                            const uint32_t nPlanes = waveField->Table().nUsed + 1u;
+                            const uint32_t filled = fresh->Prefill(waveFrame.color, 0u, nPlanes, u0, v0, u1, v1);
+                            std::atomic_store(waveTree.get(), fresh);
+                            resMgr.Drop(waveT);
+                            Log("[wave] bucket %016llx -> tree %s: %u tiles prefilled (%u planes, "
+                                "every mip) in %.2f s",
+                                static_cast<unsigned long long>(waveSrc->Key()), fresh->Id().c_str(),
+                                filled, nPlanes,
+                                std::chrono::duration<double>(Clock::now() - tp0).count());
+                        }
+                        if (waveSrc && waveT >= 0 && waveSrc->Key() != 0) {
+                            float u0, v0, u1, v1;
+                            waveSrc->WindowUv(u0, v0, u1, v1);
+                            const uint32_t nPlanes = waveField->Table().nUsed + 1u;
+                            for (uint32_t p = 0; p < nPlanes; ++p) {
+                                resMgr.Want(waveT, 6u + p, 0u, u0, v0, u1, v1);
+                            }
+                        }
                     }
                     // M8 fleet: advance the traffic (stateless), hand the table to the
                     // bank kernel (wakes) -- and to the vessel layer when it exists.

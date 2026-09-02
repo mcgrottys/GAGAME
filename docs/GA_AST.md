@@ -38,7 +38,7 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | water.atlas | level bucket | wave.solver | world.m +v=N | world.m +v=N | - | m NAVD | 0.25 m buckets | x1 | WaveField.h BucketKey |
 | act.currents | current proxy (fallback) | wave.solver | world.m +v=N | atlas.texel +v=N | - | m/s (conveyance jet, x3.0 closure) | 0..2 | x3 | WaveField.h (ebb toward 105, flood 285) |
 | swe.solver | current (solved) | wave.solver | raster.row0N +v=S | atlas.texel +v=N | FLIP | m/s (live SeaLayer gain), 0.05 buckets | +-2.5 | x1 | WaveField.h RefreshSweCurrent (1-v flip) |
-| wave.solver | a/k/phase-spinor planes | water.bank | atlas.texel +v=N | atlas.texel +v=N | - | m / rad/m / unit spinor (RGBA8, per-comp aMax kMax) | 17 slices, 2-wide grid | x1 | WaterBank.hlsl WaveSample (no flip) |
+| wave.solver | a/k/phase-spinor planes | water.bank | mercator.px +v=S | uv01.vS +v=S | - | m / rad/m / unit spinor (RGBA8 pages, per-comp aMax kMax) | 17 planes of the wave.field page tenant (z16), mip 0 pinned | x1 | WaterBank.hlsl WavePageSample (M9bc; no flip: both vS) |
 | water.bank | disp/param/detail | globe.ps | atlas.texel +v=N | atlas.texel +v=N | - | m / sigma2 / m/s / band gains (g1,dry,g0,g2) | rings 4.8..154 m/texel | x1 | Globe.hlsl BankSample manual bilinear |
 | water.bank | disp+level | globe.mesh | atlas.texel +v=N | atlas.texel +v=N | - | m NAVD | +-4 | x1 | GlobeMesh.hlsl BankSample |
 | noaa.stations | harmonic fit | water.atlas | latlon.deg +v=N | latlon.deg +v=N | - | phasor re/im per constituent | sub-mm RMS (watertest) | x1 | harvest_tides.py -> StationFieldSource IDW p=2 |

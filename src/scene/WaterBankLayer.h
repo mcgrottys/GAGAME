@@ -89,6 +89,16 @@ public:
     // M8: the solved wave field (may be null / not Ready -- the kernel falls back to
     // the cascade closures outside the window, which is also the fallback everywhere).
     void SetWaveField(const class WaveField* wf) { m_wave = wf; }
+    // M9bc: the wave field's PAGES (the tree's tenant) and the z16 frame they sit in.
+    void SetWavePages(uint32_t srv, uint32_t resSrv, double orgPxX, double orgPxY, uint32_t nx,
+                      uint32_t ny) {
+        m_wavePages = srv;
+        m_wavePagesRes = resSrv;
+        m_waveOrgPx[0] = orgPxX;
+        m_waveOrgPx[1] = orgPxY;
+        m_waveNx = nx;
+        m_waveNy = ny;
+    }
     // M8: the water scene config (data/wave_scene.json, hot-reloaded in main) -- the
     // bank reads the LIVE values every frame, so an edit lands on the next recompose.
     void SetScene(const struct WaterSceneConfig* sc) { m_scene = sc; }
@@ -134,7 +144,7 @@ private:
         float winA[4];        // window: org px x, org px y, 1/sizePx, full-world px (z14)
         uint32_t slotsE[4];   // M8 foamlaw: cascade DERIV SRVs x3 (Jacobian foam union)
         float rmsRef[4];      // M8: unit-sea rms envelope per band (crest gate / excess)
-        uint32_t waveU[4];    // M8 wavefield: atlas SRV, nx, ny, nComp
+        uint32_t waveU[4];    // M9bc wavefield: page tenant SRV, its residency SRV, nUsed, env plane
         float waveA[4];       // window org xy (world m), 1/cellM, feather m
         float waveB[4];       // envMax, sumMax, chop, solved-at level
         float foamA[4];       // scene closures: churnGain, shedSteepCap, shedMssCeil, crestLo
@@ -152,6 +162,8 @@ private:
                                // orders are the contract, and a same-size swap passes the
                                // byte-parity gate while silently offsetting nothing here but
                                // reading the wrong row there.
+        float waveP[4];       // M9bc: z16 page frame -- org px x, y, 1/16384, world px
+        float waveD[4];       // M9bc: window nx, ny (cells = texels), 0, 0
     };
     struct BankTile {
         float orgXZ[2];
@@ -180,6 +192,9 @@ private:
     const GlobeModel* m_globe = nullptr;
     const SeaState* m_seaState = nullptr;
     const class WaveField* m_wave = nullptr;   // M8: the solved wave field (optional)
+    uint32_t m_wavePages = UINT32_MAX, m_wavePagesRes = UINT32_MAX;   // M9bc
+    double m_waveOrgPx[2] = {0.0, 0.0};
+    uint32_t m_waveNx = 0, m_waveNy = 0;
     const struct WaterSceneConfig* m_scene = nullptr;   // M8: live scene closures
     float m_boatA[32] = {}, m_boatB[32] = {};           // M8: the fleet (zeros = off)
 
