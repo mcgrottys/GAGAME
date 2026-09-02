@@ -332,11 +332,17 @@ private:
         std::vector<std::shared_ptr<Tracked>> tiles;
     };
 
-    using Key = uint64_t;                // tenant:8 | face:3 | mip:5 | y:24 | x:24
+    // M9bf: THE KEY ALIASED. Three bits of face was the cube's six; a page tenant has up to
+    // 23 slices, and face 14 of the wave tenant packed to the same key as face 6 of the tenant
+    // after it -- the bank's coarsest plane tiles were "already tracked" (as wave tiles) and
+    // never loaded, the mapping order held every finer level, the water went flat. The wave
+    // planes 8..16 had been aliasing each other and their neighbours since the 23-slice tenant.
+    // tenant:8 | face:8 | mip:6 | y:21 | x:21 -- 2M tiles per axis is 2^27 texels at 64/tile.
+    using Key = uint64_t;
     static Key MakeKey(int tenant, const TileRequest& r) {
-        return (static_cast<Key>(tenant) << 56) | (static_cast<Key>(r.face) << 53) |
-               (static_cast<Key>(r.mip) << 48) | (static_cast<Key>(r.y) << 24) |
-               static_cast<Key>(r.x);
+        return (static_cast<Key>(tenant) << 56) | (static_cast<Key>(r.face & 0xFFu) << 48) |
+               (static_cast<Key>(r.mip & 0x3Fu) << 42) |
+               (static_cast<Key>(r.y & 0x1FFFFFu) << 21) | static_cast<Key>(r.x & 0x1FFFFFu);
     }
 
     struct FieldAdapter {
