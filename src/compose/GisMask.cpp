@@ -267,7 +267,7 @@ bool GisVectorMask::Load(const std::string& dir) {
     // re-harvesting the GIS changes this mask's tree identity -- and therefore every composite
     // that consumed it -- and changes nothing else.
     char fp[160];
-    snprintf(fp, sizeof(fp), "stitched rings %zu/%zu/%zu pts %zu box %.4f,%.4f,%.4f,%.4f",
+    snprintf(fp, sizeof(fp), "sweep v3 (per-feature carve) rings %zu/%zu/%zu pts %zu box %.4f,%.4f,%.4f,%.4f",
              m_coast.size(), m_water.size(), m_edits.size(), m_pts.size(), m_lon0, m_lat0,
              m_lon1, m_lat1);
     m_fingerprint = fp;
@@ -297,12 +297,14 @@ int GisVectorMask::Bucket(double lonDeg) const {
 // south of the tile, so latitude cannot prune here and must not be allowed to.
 void GisVectorMask::BuildIndex(const std::vector<Ring>& rings, EdgeIndex& idx) {
     std::vector<uint32_t> lo, hi;
-    for (const Ring& r : rings) {
+    for (size_t ri = 0; ri < rings.size(); ++ri) {
+        const Ring& r = rings[ri];
         for (uint32_t i = 0; i < r.count; ++i) {
             const uint32_t ai = r.first + i;
             const uint32_t bi = r.first + ((i + 1) % r.count);
             idx.a.push_back(ai);
             idx.b.push_back(bi);
+            idx.ring.push_back(static_cast<uint32_t>(ri));
             const double la = std::atan2(m_pts[ai].y, m_pts[ai].x) / kD2R;
             const double lb = std::atan2(m_pts[bi].y, m_pts[bi].x) / kD2R;
             double l0 = (std::min)(la, lb), l1 = (std::max)(la, lb);
@@ -367,6 +369,24 @@ void GisVectorMask::Crossings(const EdgeIndex& idx, double lonDeg, std::vector<d
     }
 }
 
+void GisVectorMask::CrossingsTagged(const EdgeIndex& idx, double lonDeg,
+                                    std::vector<std::pair<uint32_t, double>>& xs) const {
+    const int b = Bucket(lonDeg);
+    if (b < 0 || idx.start.empty()) return;
+    const double L = lonDeg * kD2R;
+    const double mx = -std::sin(L), my = std::cos(L);
+    const double ex = std::cos(L), ey = std::sin(L);
+    double lat = 0;
+    for (uint32_t k = idx.start[b]; k < idx.start[b + 1]; ++k) {
+        const uint32_t e = idx.edge[k];
+        const Vec3& A = m_pts[idx.a[e]];
+        const Vec3& B = m_pts[idx.b[e]];
+        if (MeridianCross(A.x, A.y, A.z, B.x, B.y, B.z, mx, my, ex, ey, lat)) {
+            xs.push_back({idx.ring[e], lat});
+        }
+    }
+}
+
 void GisVectorMask::CrossingsRing(const Ring& r, double lonDeg, std::vector<double>& xs) const {
     if (lonDeg < r.lon0 || lonDeg > r.lon1) return;
     const double L = lonDeg * kD2R;
@@ -412,6 +432,7 @@ void GisVectorMask::RasterizeGate(double latMin, double latMax, double lonMin, d
     if (m_coast.empty()) return;
     std::vector<uint8_t> col(dim), ecol(dim);
     std::vector<double> xs;
+    std::vector<std::pair<uint32_t, double>> tagged;
     const double dLat = (latMax - latMin) / double(dim);
     for (uint32_t cx = 0; cx < dim; ++cx) {
         const double lon = lonMin + (double(cx) + 0.5) * (lonMax - lonMin) / double(dim);
@@ -421,9 +442,25 @@ void GisVectorMask::RasterizeGate(double latMin, double latMax, double lonMin, d
         xs.clear();
         Crossings(m_coastIdx, lon, xs);
         FillParity(xs, latMin, latMax, dim, col, 0u);     // inside the coast: LAND
-        xs.clear();
-        Crossings(m_waterIdx, lon, xs);
-        FillParity(xs, latMin, latMax, dim, col, 255u);   // carved back to WATER
+        // M9az: THE CARVE IS PER FEATURE, THEN OR -- the harvester's rule ("NHD open-water
+        // even-odd per feature"). Parity over the UNION of the water rings cancels wherever
+        // two water polygons overlap, and at the Merrimack mouth SeaOcean overlaps the
+        // estuary/river polygon: the channel between the jetties came out LAND, the helm
+        // stood on drained bed, and the bed classifier had been silently gated out of the
+        // river since M9ak. Group the crossings by ring and fill each ring's parity alone.
+        tagged.clear();
+        CrossingsTagged(m_waterIdx, lon, tagged);
+        std::sort(tagged.begin(), tagged.end());
+        for (size_t s0 = 0; s0 < tagged.size();) {
+            size_t s1 = s0;
+            xs.clear();
+            while (s1 < tagged.size() && tagged[s1].first == tagged[s0].first) {
+                xs.push_back(tagged[s1].second);
+                ++s1;
+            }
+            FillParity(xs, latMin, latMax, dim, col, 255u);   // this feature carves WATER
+            s0 = s1;
+        }
         for (const Ring& e : m_edits) {                   // and the hand edits are law
             xs.clear();
             CrossingsRing(e, lon, xs);

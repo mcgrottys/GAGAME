@@ -1836,6 +1836,17 @@ for the Merrimack alone, inside `mode == 1 && globe`. `WeatherManager::PinDomain
 for every ACTIVE window's lattice on the page it reads, every frame, from the manager that
 owns the windows -- Boston included when it wakes, and with or without a globe layer.
 
+**Found by the storm video: the channel was land.** With the classifier reading the sweep for
+the first time, the helm stood on drained bed: the z17 mask tiles two and three tiles west of
+the mouth were land, surveyed. The harvester's rule for the water carve is "NHD open-water
+even-odd PER FEATURE" and the sweep took parity over the UNION of the water rings; where two
+water polygons overlap (SeaOcean over the estuary/river polygon at the mouth) the parities
+cancel and the channel is land. Since M9ak that same union parity had gated the bed classifier
+out of the river without anyone seeing it -- the raster classifier still said water, so the
+sea drew water over a Google photo of water. The crossings now carry their ring id
+(`CrossingsTagged`), each feature fills its own parity and the features OR (priors 22). The
+coast set keeps union parity: GSHHG's hierarchy is nested and XOR is its semantics.
+
 **Found on the way: the flag that ate the next flag.** `--storm --rail-flood DIR --mp4 F`
 parsed as storm = "--rail-flood" and a stray DIR: no rail, no frame cap, the encoder pipe
 waiting forever on stdin while the sim free-ran at render speed and re-solved the wave field

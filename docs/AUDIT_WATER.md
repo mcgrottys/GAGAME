@@ -73,7 +73,7 @@ containment picks the page, residency picks the mip — and it is a pixel-stage 
    no longer exist. Re-register as `height.pages → {sea.ps, churn.kernel, swe.solver,
    water.bank}` and `color.pages → globe.ps`, and re-pin the truth to the page path (the flip
    ledger changes: page reads are Mercator-uv, no flip, like `CsWindowUv`).
-2. **The three GIS rasters are the default classifier**, not a `--stencil` extra:
+2. **The three GIS rasters are the default classifier**, not a `--stencil` extra: The sweep's water carve is per feature now (priors 22): union parity had called the Merrimack's channel land.
    `GisStencil.cpp:184-214` → `Compositor.cpp:730-731, 758` → `ComposedLandness`
    (`Compose.hlsli:298-337`) and the sea's `discard` (`Sea.hlsl:321`). They read the `.raw`
    parity fills `GisMask.h:6-13` says are "a realization, not the survey". `gis.landsea` already
