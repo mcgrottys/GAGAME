@@ -11,7 +11,7 @@ there and something named is missing; **missing** means nothing on the path exis
 | # | The rule | Status | Where it stands today |
 |---|---|---|---|
 | 1 | Multiple hosts/domains in a scene, each with its own GA schema (projections, units, scales) | **partial** | Earth and Mars exist as *modes* (`marsMode` in `main.cpp`), not as host objects. `LevelLadder` is the per-body scale (`PageTable.h`), `UnitSpec`/`GaUnits.h` the units, `GeoRef` the projection — but they are not gathered into one `Host` that a source is normalized *to*. The earth ladder is declared inline. |
-| 2 | Every ingested file — volumes, rasters, numerics — written to its own Sparse GA model **on disk** for the target host | **partial** | Colour: yes, every leaf of the megatexture graph has its own on-disk tree (`TileTree`, §31). Height: the bed composes into a GPU `GradeBank` at boot from `GeoGridLoader` + `RasterSource` (§25–28) — normalized and composed on the GA path, but **not cached as a tree on disk**. Water/weather planes (`GlobeLayer::BuildPlaneBank` ×5, `TerrainLayer::BuildBedBank`, `GulfLayer`, `WeatherManager`): same — GA path, no disk tree. Volumes (cloud banks): `TileAtlas` 3D reserved, no disk tree. |
+| 2 | Every ingested file — volumes, rasters, numerics — written to its own Sparse GA model **on disk** for the target host | **partial** | Colour: yes (§31). Height: yes as of §37 — six leaf trees (float value + weight, lossless), one R16F root, fidelity-ordered. Water/weather planes (`GlobeLayer::BuildPlaneBank` ×5, `GulfLayer`): GA path, no disk tree yet. Volumes (cloud banks): `TileAtlas` 3D reserved, no disk tree. |
 | 3 | A GA adapter normalizes each model to the domain (projection, units, scale) before use | **aligned for units/scale, partial for projection** | `NormalizedSource` + `Normalize()`/`NormalizeToSi()` refuse an unnormalized or incommensurable source (§26). Projection is handled *per source* inside `Sample()` (each source resolves to the WGS84 exchange frame); there is no adapter that re-projects a raster to the host's frame as a stage. Mercator vs cube vs lat/lon pages are frames of the *realization*, not of the model. |
 | 4 | PNG / GeoTIFF / etc. into a lossless engine bitmap | **missing** | `FieldSet.cpp:26` loads PNGs straight into committed textures. GeoTIFF-derived data arrives as `.rgb`/`.f32`/`.bin` blobs produced by harvester scripts (see `products` in the registry) — those *are* lossless, but ad hoc per script; there is no engine-side lossless tile format other than the 64 KB tree tile itself, and no PNG → tile ingest. |
 | 5 | GeoTIFFs are not tiled: the loader must build the lower-LOD mips for the tree | **partial** | `TileTree` paints each mip **independently from the source** at that mip's ground resolution (the compositor's rule since M6i: "each LOD averages the source over its own footprint"). That yields correct coarse levels, but it re-samples the source per level rather than building a mip chain from the finest — for a 15 cm ortho every coarse tile re-reads the JP2. A fold-down (§ALGEBRA `fold`: average the *answers*) from the finest tree level would be cheaper and is not written. |
@@ -38,10 +38,9 @@ there and something named is missing; **missing** means nothing on the path exis
 ## What is not, in the order it should be fixed
 
 1. ~~Height → one page tenant~~ — done, §35.
-2. **Height and water as disk trees** (row 2). `BuildBedBank`/`BuildPlaneBank` compose pages into
-   RAM at boot; put a `TileTree` under each node so the bed and the planes are cached on the NVMe
-   like colour, and boot becomes a read. This is the point where "chain for CPU physics" (row 14)
-   becomes real: the SWE lattice can then ask the bed tree for its tiles.
+2. ~~Height as a disk tree~~ — done, §37. **Water/weather planes as disk trees** (row 2):
+   `BuildPlaneBank` composes into RAM at boot; a `TileTree(FloatW)` per plane over its
+   `RasterSource` makes boot a read (hourly forecasts, so the win is boot time, not repaints).
 3. **Ingested seafloor texture** (row 8) — the acceptance image.
 4. **A `Host` object** (row 1): ladder + unit frame + projection + radius, one per body, that every
    `Normalize()` targets and every `TileTree` keys on. Today the earth's is implicit.

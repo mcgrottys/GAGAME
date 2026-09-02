@@ -1605,3 +1605,48 @@ The height page's provider is the compositor's `SampleHeightStack` through `cach
 disk cache, but not per-source trees with references. The water/weather planes compose into RAM
 at boot. Both are the "disk trees" half of this step and are next; what this section did is
 make sure there is only one bed for them to become.
+
+## 37. The height disk tree
+
+The second half of "height and water disk trees". §36 made one bed on the GPU; this makes it
+come from per-source trees on the NVMe, the way colour does (§31).
+
+### Fidelity is the sort key
+
+    [height-tree] compose order, coarsest first (the deepest tree paints last):
+                  noaa.etopo2022(489200cm) noaa.etopo15s.ne(46100cm) noaa.cudem.capeann(1370cm)
+                  noaa.cudem.boston(1370cm) noaa.cudem.merrimack(1370cm) survey.edits(500cm)
+
+The user's rule — the highest-precision tree paints last, over everything it intersects — is
+implemented as a sort by declared cm/px, coarsest first, printed every boot. It matches the hand
+order `BuildHeightStack` had, and now it cannot drift from it.
+
+### Two scalar tile formats, and why the leaves are float
+
+`TileTree` gains `FloatW` — 256×128 texels of (float value, float weight), 256 KB — for every
+leaf and intermediate, and `Half` — 256×128 half values, 64 KB, R16F exactly — for the root,
+which always materializes because its tile is what DirectStorage reads.
+
+The first cut stored leaves as half. The audit caught it: 84 of 89 cube tiles exact and a 4 m
+worst, all on the NE 15 s ring. The worst-texel dump put both blends within a millimetre in float
+(ETOPO −3130 m w 1.000, NE 15 s −3160 m w 0.999 → incumbent −3160.00, tree −3158.00): one
+**half-ULP at 3 km depth**, from composing quantized leaves. A leaf tree is the lossless source
+(the user's rule 2 and 4); it stores float. With float leaves:
+
+    earth.height/cube16k      89 tiles, 87 exact, 3 of 2,916,352 texels differ, worst 0.250 m
+    earth.height/window z14   72 tiles, 56 exact, 52 of 2,359,296 texels differ, worst 0.007 m
+
+That is equivalence to the R16F format.
+
+### A latent difference, recorded
+
+The incumbent height paint is `h += (m − h)·w` from **zero** — the over-transparent-black form
+§27 found for the bed. The tree composes straight-alpha. They agree today because ETOPO is global
+at w = 1; over a partial base they would not, and the tree is the correct one.
+
+### Still owed: the water/weather planes as trees
+
+`BuildPlaneBank` (Hs, wind, ocean colour, ice, windSrc) composes into RAM at boot. Same
+machinery applies — a `TileTree(FloatW)` per plane over its `RasterSource` — with one honest
+caveat: these are hourly forecasts, so a disk tree buys boot time, not the repaint economics
+that justify it for imagery and bathymetry.

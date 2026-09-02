@@ -134,9 +134,10 @@ the incumbent (globe 0 px, helm 2 px by 1/255); bench 4.65–4.82 ms vs incumben
 
 The solver domain is pinned at mip 0 every frame; the trace probe (`--trace 42.8125,-70.8175`,
 200 frames) is the check -- page texel vs CPU stack, MATCH. A pixel diff is NOT a check here:
-any bed change moves the solve and the foam everywhere. Next for this line: the height page fed
-by a TileTree over BuildHeightStack (inputs ordered by ladder depth, deepest last), then the
-water/weather planes as trees.
+any bed change moves the solve and the foam everywhere. The height page is fed by a TileTree
+over BuildHeightStack under --color-trees (section 37: fidelity-sorted inputs, float leaves,
+R16F root, worst 0.25 m / 7 mm against the composed cache). Next: the water/weather planes as
+trees, and making --color-trees the default once the height tree is warm and packed.
 
 ## 2b. The rungs are DELETED for colour (section 34) AND height (section 35).
 
