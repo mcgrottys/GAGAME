@@ -16,6 +16,7 @@
 
 #include "compose/ColorStackSource.h"
 #include "compose/GisMask.h"
+#include "compose/HeightStackSource.h"
 #include "compose/TileTree.h"
 #include "compose/TileArchive.h"
 #include "compose/TileIndex.h"
@@ -2034,6 +2035,13 @@ int main(int argc, char** argv) {
         // tenants that hold providers into them, so they cannot die first.
         std::vector<std::shared_ptr<DomainSource>> megaKeep;
         std::unique_ptr<TileTree> megaTree;
+        // M9as: THE HEIGHT GRAPH AND ITS DISK TREE. BuildHeightStack's six layers, each its own
+        // sparse tree on the NVMe (FloatW: value + coverage), composed LayeredOver into ONE root
+        // whose tiles are the R16F pages the height tenant reads. Inputs are ordered by
+        // fidelity -- coarsest first, so the deepest tree paints over everything it intersects
+        // (the user's rule) -- and the order is printed, not assumed.
+        std::shared_ptr<DomainSource> heightRoot;
+        std::unique_ptr<TileTree> heightTree;
         if (globe) {
             resMgr.Init(gpu);
             resMgr.ringLoads = opt.ringLoads;
@@ -2066,10 +2074,38 @@ int main(int argc, char** argv) {
                 // M9aq: ONE height tenant -- pages 0..5 the cube faces, 6 the z14 Mercator
                 // page (the frame the colour window shares, so the near-field land/sea gate
                 // and the normals ride CUDEM truth). One provider dispatching on the slice.
+                // M9as: fed by the height TileTree when --color-trees is on.
+                if (opt.colorTrees || opt.treeAudit) {
+                    auto layers = BuildHeightStack(compositor, hgtCh);
+                    std::vector<std::pair<double, std::shared_ptr<DomainSource>>> byRes;
+                    const Compositor::Channel& hch = compositor.ChannelAt(hgtCh);
+                    for (size_t i = 0; i < layers.size() && i < hch.height.size(); ++i) {
+                        byRes.push_back({hch.height[i]->Info().cmPerPixel, layers[i]});
+                    }
+                    std::stable_sort(byRes.begin(), byRes.end(),
+                                     [](const auto& a, const auto& b) { return a.first > b.first; });
+                    auto dc = std::make_shared<DomainCompositor>();
+                    dc->SetBlend(DomainCompositor::Blend::LayeredOver);
+                    std::string order;
+                    for (auto& p : byRes) {
+                        if (dc->Add(p.second)) order += " " + std::string(p.second->Name()) +
+                                                        "(" + std::to_string(int(p.first)) + "cm)";
+                    }
+                    heightRoot = std::make_shared<CompositeSource>("earth.height", dc);
+                    for (auto& l : layers) megaKeep.push_back(l);
+                    Log("[height-tree] compose order, coarsest first (the deepest tree paints "
+                        "last):%s",
+                        order.c_str());
+                    heightTree = std::make_unique<TileTree>(heightRoot.get(), TileTree::Fmt::Half);
+                    heightTree->Print();
+                }
                 {
-                    const TileProviderFn hCube = compositor.CubeHeight(hgtCh);
-                    const TileProviderFn hWin =
-                        compositor.WindowHeight(hgtCh, 1263360, 1538048, 16384, 14);
+                    const TileProviderFn hCube = (opt.colorTrees && heightTree)
+                        ? heightTree->Provider(ColorFrame::Cube(Compositor::kFaceDim, 256, 128))
+                        : compositor.CubeHeight(hgtCh);
+                    const TileProviderFn hWin = (opt.colorTrees && heightTree)
+                        ? heightTree->Provider(ColorFrame::Window(1263360, 1538048, 14, 256, 128))
+                        : compositor.WindowHeight(hgtCh, 1263360, 1538048, 16384, 14);
                     TileProviderFn hPages = [hCube, hWin](const TileRequest& r,
                                                           std::vector<uint8_t>& out,
                                                           TileLoc* loc) {
@@ -2253,10 +2289,19 @@ int main(int argc, char** argv) {
                             ColorFrame::Window(static_cast<long long>(det17OrgX),
                                                static_cast<long long>(det17OrgY), 17),
                         };
+                        const ColorFrame hframes[] = {
+                            ColorFrame::Cube(Compositor::kFaceDim, 256, 128),
+                            ColorFrame::Window(1263360, 1538048, 14, 256, 128),
+                        };
                         if (opt.packTrees) {
                             std::vector<std::string> tags;
                             for (const ColorFrame& f : frames) tags.push_back(f.Tag());
-                            const uint32_t n = megaTree->Pack(tags);
+                            uint32_t n = megaTree->Pack(tags);
+                            if (heightTree) {
+                                std::vector<std::string> htags;
+                                for (const ColorFrame& f : hframes) htags.push_back(f.Tag());
+                                n += heightTree->Pack(htags);
+                            }
                             Log("[tiletree] packed %u tiles across the megatexture tree; "
                                 "references resolve into the archives they name",
                                 n);
@@ -2264,6 +2309,19 @@ int main(int argc, char** argv) {
                             return 0;
                         }
                         TreeAudit all;
+                        if (heightTree) {
+                            for (const ColorFrame& f : hframes) {
+                                TreeAudit ha;
+                                AuditTileTree(compositor, hgtCh, *heightTree, f, opt.treeAudit,
+                                              ha, opt.warmTrees, true, "windowH");
+                                Log("[tree-audit] earth.height/%s: %u tiles, %u exact, worst "
+                                    "|direct - tree| = %.3f m, %llu of %llu texels differ",
+                                    f.Tag().c_str(), ha.tiles, ha.exact, ha.worstDelta / 1000.0,
+                                    static_cast<unsigned long long>(ha.difTexels),
+                                    static_cast<unsigned long long>(ha.texels));
+                            }
+                            Log("[trees]\n%s", heightTree->Stats().c_str());
+                        }
                         for (const ColorFrame& f : frames) {
                             TreeAudit a;
                             AuditTileTree(compositor, colCh, *megaTree, f, opt.treeAudit, a,
