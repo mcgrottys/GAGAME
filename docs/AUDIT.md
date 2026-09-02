@@ -58,3 +58,10 @@ there and something named is missing; **missing** means nothing on the path exis
 - Priors §9/§15: a cold cache is not a pixel difference, and an A/B that agrees exactly is a
   severed wire. Both cost this session hours before being re-read.
 - Priors §19: recording a copy is not executing it. Every DirectStorage difference since M9ai.
+
+## The water, audited separately
+
+`docs/AUDIT_WATER.md` (2026-09-02): the water shading and geometry against the same design — what
+rides the two page tenants (all of it), the three kernels that read only the z14 slice, the
+stale GA-graph edges, the GIS rasters that are still the default classifier, the dead code, and
+what the substrate now unblocks (solver domains anywhere, the wave field as a tree node).

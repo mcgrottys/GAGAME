@@ -875,6 +875,34 @@ model (or a textbook) would hold → what this project measured → the law now 
     tile path; and READ THE WATER'S PATH before building the imagery's — the user's
     correction, and the Scriptorium's `math('compose')` would have said so first.
 
+19. **Recording a copy is not executing it.** Prior: once `CopyTiles` from a landing slot is
+    recorded, the slot is drained and may be reused. Measured (M9ap): the copy executes when the
+    frame's list runs; a slot handed to DirectStorage in the same frame is overwritten first,
+    and the copy lands the *new* tile's bytes at the *old* coordinate — "oceans next to
+    mountains". Every DirectStorage-vs-ring difference since M9ai (1.8–9%, written off as
+    "streaming timing") was this. Law: anything a recorded command still reads retires on the
+    frame-overlap delay the upload ring and eviction already keep; and **ask the transport
+    whether it failed** (`RetrieveErrorRecord`) before reasoning about what it delivered.
+
+20. **A clipped ring is not a ring; close it along the clip.** Prior: the survey's coast file
+    is "rings", so even-odd parity over its edges is the land/sea answer. Reality: a coastline
+    clipped to a box arrives as OPEN polylines whose ends lie on the box's edges (the mainland
+    was one 32,727-point piece from New Jersey to Maine), and a crossing test that closes each
+    piece with a chord back to its own start draws that chord across the Gulf of Maine -- the
+    whole wedge inside it was LAND, invisible for a week because nothing gated in deep water
+    until the seafloor relief did. The closure the data means is along the box: walk its
+    boundary counter-clockwise (interior on the left -- land on the left of digitization) from
+    each piece's end to the NEXT piece's start, chain until the chain closes; 14 pieces became
+    9 disjoint land polygons and the gate raster (`--gis-dump`) is the map. Lesson: a gate you
+    have only ever seen through its consequences has not been looked at. Dump the gate.
+
+21. **A derivative is taken at the data's grain, not the texel's.** Prior: the texel's ground
+    resolution is the right step for a gradient of the height stack. Reality: under a 4.9 km
+    ETOPO cell sampled bilinearly, a 1 km step measures the interpolant's facet -- piecewise-
+    constant gradients, terraces down the continental slope. Step at max(texel, finest grain
+    covering the point) (`Compositor::HeightGrainM`), centred; the fold law's cousin: never
+    differentiate finer than the field was measured.
+
 ## verification — The gate map: which algebra is pinned where
 
 - `pga` — motors: rotation, composition, rigidity, screw log/exp, slerp.
@@ -904,30 +932,3 @@ model (or a textbook) would hold → what this project measured → the law now 
 - The hypervisor (`--trace lat,lon`) — one sample walked through every edge on the CPU
   with AST annotations; `--lens waterdata/authority/...` — fields as color;
   `--dump-fibers` — the bank planes with declared ranges; PIX events per AST node.
-19. **Recording a copy is not executing it.** Prior: once `CopyTiles` from a landing slot is
-    recorded, the slot is drained and may be reused. Measured (M9ap): the copy executes when the
-    frame's list runs; a slot handed to DirectStorage in the same frame is overwritten first,
-    and the copy lands the *new* tile's bytes at the *old* coordinate — "oceans next to
-    mountains". Every DirectStorage-vs-ring difference since M9ai (1.8–9%, written off as
-    "streaming timing") was this. Law: anything a recorded command still reads retires on the
-    frame-overlap delay the upload ring and eviction already keep; and **ask the transport
-    whether it failed** (`RetrieveErrorRecord`) before reasoning about what it delivered.
-
-20. **A clipped ring is not a ring; close it along the clip.** Prior: the survey's coast file
-    is "rings", so even-odd parity over its edges is the land/sea answer. Reality: a coastline
-    clipped to a box arrives as OPEN polylines whose ends lie on the box's edges (the mainland
-    was one 32,727-point piece from New Jersey to Maine), and a crossing test that closes each
-    piece with a chord back to its own start draws that chord across the Gulf of Maine -- the
-    whole wedge inside it was LAND, invisible for a week because nothing gated in deep water
-    until the seafloor relief did. The closure the data means is along the box: walk its
-    boundary counter-clockwise (interior on the left -- land on the left of digitization) from
-    each piece's end to the NEXT piece's start, chain until the chain closes; 14 pieces became
-    9 disjoint land polygons and the gate raster (`--gis-dump`) is the map. Lesson: a gate you
-    have only ever seen through its consequences has not been looked at. Dump the gate.
-
-21. **A derivative is taken at the data's grain, not the texel's.** Prior: the texel's ground
-    resolution is the right step for a gradient of the height stack. Reality: under a 4.9 km
-    ETOPO cell sampled bilinearly, a 1 km step measures the interpolant's facet -- piecewise-
-    constant gradients, terraces down the continental slope. Step at max(texel, finest grain
-    covering the point) (`Compositor::HeightGrainM`), centred; the fold law's cousin: never
-    differentiate finer than the field was measured.
