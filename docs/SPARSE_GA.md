@@ -1664,3 +1664,17 @@ that justify it for imagery and bathymetry.
     globe   200 frames: 12.4% differ, 3.05% by more than 1 LSB -- relief shading under a
             different resident height mip at frame 200 (load order), not content; the probe
             is the content check
+
+## 38. The trees are the default, and the storm rail
+
+`--color-trees` is the default (it feeds the height pages too); `--no-color-trees` restores the
+incumbent providers behind the same page tenants for an A/B. Everything on: trees, one page
+tenant per channel, DirectStorage, ring loads, the solver on the height megatexture.
+
+    storm rail (--storm 3.0,10,95), default      5.08 / 5.11 ms mean, p99 11.54 / 11.94
+    storm rail, --no-color-trees                 4.97 ms mean, p99 10.54
+    flood rail, default                          4.91 ms mean, p99 11.84
+
+The storm costs ~0.2 ms over the flood (the sea's own work), and the trees cost ~0.1 ms mean and
+~1 ms at p99 against the incumbent providers -- load-side, from resolving stored references
+hop by hop and the height root materializing; nothing on the shader side changed. Selftest green.

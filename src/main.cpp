@@ -109,7 +109,8 @@ struct Options {
     bool packTiles = false;           // --pack-tiles: pack the composed cache, then exit
     bool directStorage = true;        // --no-direct-storage: the upload ring, for the A/B (M9ao)
     bool dsSerial = false;            // --ds-serial: one DS batch in flight (diagnostic)
-    bool colorTrees = false;          // --color-trees: colour through the per-source trees
+    bool colorTrees = true;           // --no-color-trees: the incumbent providers, for the A/B.
+                                      // The DEFAULT: colour AND height pages fed from the trees.
     bool gisGate = true;              // --no-gis-gate: drop the vector land/sea gate on the bed
     bool ringLoads = true;            // --no-ring-loads: the old queue, for the A/B (M9al)
     bool resTrace = false;            // --res-trace: residency deficit + slot accounting, per 30 f
@@ -315,7 +316,8 @@ Options ParseArgs(int argc, char** argv) {
         // M9aj: the three trees. --color-trees composes colour FROM the per-source trees
         // instead of from the sources; --tree-audit measures the two answers against each
         // other on tiles the shipped path already painted, then exits.
-        else if (a == "--color-trees") o.colorTrees = true;
+        else if (a == "--color-trees") o.colorTrees = true;      // the default; kept for scripts
+        else if (a == "--no-color-trees") o.colorTrees = false;
         // M9ak: the vector land/sea gate is ON. The flag exists to A/B what it changed.
         else if (a == "--no-gis-gate") o.gisGate = false;
         // M9al: the ring gate and its instrument. Instrument first, gate second, both off.

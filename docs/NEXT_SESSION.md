@@ -231,7 +231,7 @@ the unlit version.
 | `--pack-tiles` | pack the composed cache into `.gaa` archives, then exit |
 | `--no-direct-storage` | the upload ring for every tile. NVMe→GPU reads are the **default**, and proven: helm 400 / globe 200 frames are 0 px against the ring (§34) |
 | `--ds-serial` | diagnostic: one DirectStorage batch in flight at a time |
-| `--color-trees` | colour through the per-source trees (**off by default**) |
+| `--no-color-trees` | the incumbent providers behind the page tenants, for the A/B. The trees (colour AND height) are the **default** |
 | `--tree-audit N` | the megatexture tree vs the incumbent, N tiles per realization, exit. Skips tiles the incumbent has not repainted from today's stack |
 | `--warm-trees` | compose every address of the tree regardless, no comparison. **This is the warm-up**; ~15 min from cold for 21.5k addresses |
 | `--pack-trees` | one `.gaa` per node per frame under `cache/trees/`; refs resolve into the child's archive. Re-run after a warm; loose files are kept |
