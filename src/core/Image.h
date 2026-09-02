@@ -19,9 +19,6 @@ struct ImageData {
     bool Valid() const { return width && height && !pixels.empty(); }
 };
 
-// Loads a PNG. 16-bit grey becomes R16_UNORM; anything else becomes R8G8B8A8_UNORM.
-ImageData LoadPng(const std::wstring& path);
-
 // Writes 8-bit RGBA to a PNG.
 //
 // byteCount is REQUIRED and must be the actual length of the buffer. Do not let this function infer

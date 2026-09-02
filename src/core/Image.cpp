@@ -34,64 +34,6 @@ private:
 
 }  // namespace
 
-ImageData LoadPng(const std::wstring& path) {
-    ImageData out;
-    IWICImagingFactory* wic = WicFactory::Get();
-    if (!wic) return out;
-
-    Com<IWICBitmapDecoder> dec;
-    HRESULT hr = wic->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
-                                                WICDecodeMetadataCacheOnDemand, &dec);
-    if (FAILED(hr)) {
-        Log("[image] cannot open %S : %s", path.c_str(), HrString(hr).c_str());
-        return out;
-    }
-    Com<IWICBitmapFrameDecode> frame;
-    if (FAILED(dec->GetFrame(0, &frame))) return out;
-
-    UINT w = 0, h = 0;
-    frame->GetSize(&w, &h);
-    WICPixelFormatGUID srcFmt{};
-    frame->GetPixelFormat(&srcFmt);
-
-    // Only 16-bit greyscale is worth preserving at full precision; everything else this project
-    // loads is 8-bit colour and gets normalised to RGBA8.
-    const bool grey16 = (srcFmt == GUID_WICPixelFormat16bppGray);
-    const WICPixelFormatGUID dstFmt = grey16 ? GUID_WICPixelFormat16bppGray
-                                             : GUID_WICPixelFormat32bppRGBA;
-    const uint32_t bpp = grey16 ? 2u : 4u;
-
-    Com<IWICBitmapSource> src;
-    if (srcFmt == dstFmt) {
-        src = frame;
-    } else {
-        Com<IWICFormatConverter> conv;
-        if (FAILED(wic->CreateFormatConverter(&conv))) return out;
-        if (FAILED(conv->Initialize(frame.Get(), dstFmt, WICBitmapDitherTypeNone, nullptr, 0.0,
-                                    WICBitmapPaletteTypeMedianCut))) {
-            Log("[image] cannot convert %S to the target format", path.c_str());
-            return out;
-        }
-        src = conv;
-    }
-
-    out.width = w;
-    out.height = h;
-    out.rowPitch = w * bpp;
-    out.format = grey16 ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8G8B8A8_UNORM;
-    out.pixels.resize(static_cast<size_t>(out.rowPitch) * h);
-
-    WICRect rc{0, 0, static_cast<INT>(w), static_cast<INT>(h)};
-    hr = src->CopyPixels(&rc, out.rowPitch, static_cast<UINT>(out.pixels.size()),
-                         out.pixels.data());
-    if (FAILED(hr)) {
-        Log("[image] CopyPixels failed for %S", path.c_str());
-        out.pixels.clear();
-        return out;
-    }
-    return out;
-}
-
 bool SavePng(const std::wstring& path, const uint8_t* rgba, uint32_t width, uint32_t height,
              uint32_t rowPitch, size_t byteCount) {
     // A readback buffer is RowPitch * (h - 1) + rowBytes, not RowPitch * h. Refuse rather than

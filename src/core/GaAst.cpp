@@ -130,20 +130,40 @@ void RegisterKnownComposeEdges() {
     // resolves each texel to lat/lon -- that inversion IS the flip. The shader-side window
     // uv keeps mercator orientation, so sampling needs NO flip (unlike the water atlases:
     // this asymmetry is exactly what the table exists to keep straight).
-    Register({"compose.stack", "window.z14", "paint", latlon, mercPx, true,
-              "sRGB bytes / m NAVD", "tile 128^2", 1.0,
-              "Compositor::WindowColor/WindowHeight (merc inverse per texel)"});
-    Register({"compose.stack", "window.z17", "paint", latlon, mercPx, true, "sRGB bytes",
-              "tile 128^2", 1.0, "Compositor::WindowColor zBase 17"});
-    Register({"compose.stack", "cube.color", "paint", latlon, cube, false, "sRGB bytes",
-              "16k faces", 1.0, "ComposeCubeDir (D3D cube convention, composetest-pinned)"});
-    Register({"window.z14", "globe.ps", "window-sample", mercPx, uvS, false,
-              "sRGB / m NAVD", "uv 0..1", 1.0, "Compose.hlsli CsWindowUv (no flip: both vS)"});
-    Register({"window.z17", "globe.ps", "detail-sample", mercPx, uvS, false, "sRGB",
-              "finer-only gate", 1.0, "Compose.hlsli detail rung (M7f/M7h handoff)"});
-    Register({"google.tiles", "window.z14", "fetch", mercPx, mercPx, false, "sRGB bytes",
+    // M9aw: THE PAGE TENANTS. Since M9ap/M9aq the imagery and the heights are ONE reserved
+    // Texture2DArray each: slices 0..5 the cube faces (painted in cube.face, no flip), the
+    // rest Mercator pages (painted merc-y-south from lat/lon -- the flip IS the inverse
+    // projection, as the M7l window edge documented). Sampling takes the finest page that
+    // contains the direction and the residency map clamps the mip (ComposedColorPages /
+    // ComposedHeightPages). The window tenants these edges used to name -- window.z14,
+    // window.z17, height.window, bathy.cudem -- were deleted in M9ap..M9ar; this registry
+    // kept describing them for a month (AUDIT_WATER item 1): self-consistent edges about
+    // resources that did not exist, which is the one rot the validator cannot see.
+    Register({"compose.stack", "color.pages", "paint cube faces", latlon, cube, false,
+              "sRGB bytes", "slices 0..5, 16k faces", 1.0,
+              "TileTree::Provider(ColorFrame::Cube) / ComposeCubeDir (composetest-pinned)"});
+    Register({"compose.stack", "color.pages", "paint mercator pages", latlon, mercPx, true,
+              "sRGB bytes", "slice 6 = z14, slice 7 = z17; tile 128^2", 1.0,
+              "TileTree::Provider(ColorFrame::Window) (merc inverse per texel)"});
+    Register({"compose.stack", "height.pages", "paint cube faces", latlon, cube, false,
+              "m NAVD (R16F)", "slices 0..5, 16k faces", 1.0,
+              "TileTree::Provider(ColorFrame::Cube), the height root"});
+    Register({"compose.stack", "height.pages", "paint mercator page", latlon, mercPx, true,
+              "m NAVD (R16F)", "slice 6 = z14 at 1263360,1538048; tile 256x128", 1.0,
+              "TileTree::Provider(ColorFrame::Window), the height root"});
+    Register({"color.pages", "globe.ps", "page-sample", mercPx, uvS, false, "sRGB",
+              "finest containing page, residency-clamped mip", 1.0,
+              "Compose.hlsli ComposedColorPages (no flip: both vS)"});
+    Register({"color.pages", "sea.ps", "bed albedo", mercPx, uvS, false, "sRGB",
+              "through the refracted ray; the seafloor relief past the survey", 1.0,
+              "Sea.hlsl ComposedColor(SeaPlanetDir)"});
+    Register({"color.pages", "globe.ps", "bed albedo", mercPx, uvS, false, "sRGB",
+              "at the refracted ray's bed hit", 1.0, "Globe.hlsl ComposedColor(bedDir)"});
+    Register({"height.pages", "globe.ps", "height", mercPx, uvS, false, "m NAVD",
+              "vertex, pixel, refracted cast", 1.0, "Compose.hlsli ComposedHeightPages"});
+    Register({"google.tiles", "compose.stack", "fetch", mercPx, mercPx, false, "sRGB bytes",
               "zoom = f(groundResM)", 1.0, "GoogleColorSource::ZoomFor"});
-    Register({"massgis.ortho", "window.z14", "fetch", latlon, mercPx, true, "sRGB bytes",
+    Register({"massgis.ortho", "compose.stack", "fetch", latlon, mercPx, true, "sRGB bytes",
               "EPSG:6348 UTM19N declared", 1.0, "AerialOrthoSource (TM forward)"});
     Register({"height.stack", "synth.bed", "classify", latlon, latlon, false,
               "m NAVD -> dry albedo", "3 samples/texel", 1.0,
@@ -178,10 +198,10 @@ void RegisterKnownWaterEdges() {
     // exactly as the M7l window-sample edge documents. First registration of this edge
     // said latlon->uv/no-flip and the validator rightly refused it -- the checker's
     // first catch of its own author.
-    Register({"height.window", "water.bank", "bed per texel", mercPxW, uvSW, false,
-              "m NAVD", "float merc ~0.25 px ulp (gatest-bounded); residency-clamped "
-              "mips 2..7",
-              1.0, "WaterBank.hlsl M7q (same formulation as CsWindowUv)"});
+    Register({"height.pages", "water.bank", "bed per texel", mercPxW, uvSW, false,
+              "m NAVD", "z14 slice only (AUDIT_WATER item 5); float merc ~0.25 px ulp "
+              "(gatest-bounded); residency-clamped mips 2..7",
+              1.0, "WaterBank.hlsl gTA[slice 6] (same formulation as CsWindowUv)"});
     const Frame wrap{"patch.wrap", true, 0, 0, 0};
     const Frame atlasN{"atlas.texel", true, 0, 0, 0};
     const Frame rowS{"raster.row0N", false, 0, 0, 0};
@@ -214,10 +234,17 @@ void RegisterKnownWaterEdges() {
     Register({"churn.kernel", "water.bank", "churn", atlasN, atlasN, false,
               "0..1 aeration (remembered foam, MAX-composited)", "0..1", 1.0,
               "WaterBank.hlsl CsBankFill flat"});
-    Register({"bathy.cudem", "churn.kernel", "bed", rowS, atlasN, true, "m NAVD", "-40..15",
-              1.0, "SeaChurn.hlsl suv flip"});
-    Register({"bathy.cudem", "sea.ps", "bed", rowS, atlasN, true, "m NAVD", "-40..15", 1.0,
-              "Sea.hlsl:71 (uv.x, 1-uv.y)"});
+    // M9ar: ONE BED. The committed CUDEM copy is gone; the churn, the sea and the solver
+    // read the height page tenant through the same lat/lon -> Mercator-uv step the bank
+    // takes (both +v south, no flip). The z14 slice is still the only one these kernels
+    // resolve (AUDIT_WATER item 5).
+    Register({"height.pages", "churn.kernel", "bed", mercPxW, uvSW, false, "m NAVD",
+              "z14 slice; -30 m off the page", 1.0, "SeaChurn.hlsl PageBedAt"});
+    Register({"height.pages", "sea.ps", "bed", mercPxW, uvSW, false, "m NAVD",
+              "cube + z14 page", 1.0, "Sea.hlsl BedAt -> ComposedHeight(SeaPlanetDir)"});
+    Register({"height.pages", "swe.solver", "bed", mercPxW, uvSW, false, "m NAVD",
+              "z14 slice; +100 m wall off the page", 1.0,
+              "Swe.hlsl BedAt (lattice -> lat/lon -> page uv, residency-clamped)"});
     Register({"swe.solver", "sea.ps", "eta", rowS, atlasN, true, "m dEta", "+-1.5", 1.0,
               "Sea.hlsl SweDEta (1-uv.y)"});
     Register({"swe.solver", "sea.ps", "shadow", rowS, atlasN, true, "0..1 exposure",

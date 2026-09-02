@@ -104,12 +104,6 @@ public:
                        TileProviderFn provider) {
         return AddTextureInternal(gpu, name, faceDim, fmt, std::move(provider), 6);
     }
-    // M6f: a single-face detail WINDOW (the Merrimack imagery pyramid) -- same machinery,
-    // arraySize 1, callers pass face 0.
-    int AddTexture2D(Gpu& gpu, const wchar_t* name, uint32_t dim, DXGI_FORMAT fmt,
-                     TileProviderFn provider) {
-        return AddTextureInternal(gpu, name, dim, fmt, std::move(provider), 1);
-    }
     // M9ap: ONE TENANT, N PAGES. The planet's colour as a single reserved Texture2DArray whose
     // slices are pages of one ladder: 0..5 the cube faces, 6.. the Mercator pages. One SRV, one
     // residency map, one budget, one provider that dispatches on the slice. The three inset

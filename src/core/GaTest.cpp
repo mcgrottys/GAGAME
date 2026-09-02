@@ -173,7 +173,7 @@ bool RunGaSelfTest() {
     const Truth truths[] = {
         {"swe.solver", "eta", false, true},
         {"swe.solver", "uv", false, true},
-        {"bathy.cudem", "bed", false, true},
+        {"height.pages", "bed", false, false},   // M9ar: the page, merc-uv, no flip
         {"churn.kernel", "churn", true, false},
         {"ocean.fft", "cascade.disp", true, false},
         {"swe.solver", "shadow", false, true},
