@@ -112,7 +112,7 @@ containment picks the page, residency picks the mip — and it is a pixel-stage 
    drawn only under `--gulf`; `m_mvSrv` still seeds `swe.velgrad` slice 1. The GoMOFS field
    already has a `RasterSource` path (`main.cpp:2503-2509`); the panel should read that plane,
    and Okubo–Weiss is a function of the div/curl slice that already exists.
-10. **Small**: (churn re-anchoring and the exposure node DONE, SPARSE_GA §42) `SeaLayer::m_maskTex` (debug residency visualizer; the bank's own residency map
+10. **Small**: (churn re-anchoring, the exposure node and the wave field as a tree node DONE, SPARSE_GA §42–44) `SeaLayer::m_maskTex` (debug residency visualizer; the bank's own residency map
     is the same information); `GlobeLayer::m_cloudSrc` (720×361×10 R32F staging kept for the
     process lifetime after a one-shot build); the swell shadow marches a CPU copy of CUDEM
     rather than the height tree.

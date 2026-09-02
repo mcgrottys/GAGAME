@@ -993,3 +993,10 @@ compose folded parents; a fold below drops the cached composite above and re-fet
 `fold`'s law ("average the answers") is what makes the fold and the resample agree for linear
 sources and disagree honestly for nonlinear ones -- a classifier's coarse texel is the coverage
 of its fine decisions, which is what the fold delivers and the resample could only approximate.
+
+**Tile-native nodes and derived parents (M9bc/M9bd).** A node whose answer is regional (a
+boundary-value solve, a stencil) paints whole tiles; the tree's contract is unchanged. A parent
+within 4/255 of the fold of its children is not a tile, it is a marker -- the fold is the
+theorem, the marker is the proof that nothing more was said; and a fold that moves a parent
+by less than that writes nothing and stops, so a small source's influence ends where the
+algebra says it does.

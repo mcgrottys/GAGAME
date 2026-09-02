@@ -26,6 +26,7 @@
 #pragma once
 
 #include <atomic>
+#include <memory>
 #include <cstdint>
 #include <string>
 #include <thread>
@@ -90,8 +91,6 @@ public:
     bool Update(Gpu& gpu, double simUnix, const PartParam* parts, int nParts,
                 bool block = false);
 
-    bool Ready() const { return m_srv != 0xFFFFFFFFu; }
-    uint32_t Srv() const { return m_srv; }
 
     // The GPU contract, valid when Ready(): window georef + packing + per-component rows.
     struct GpuTable {
@@ -103,6 +102,17 @@ public:
         float envMax, sumMax, excMax, level;    // env scales + the level it solved at
     };
     const GpuTable& Table() const { return m_table; }
+
+    // M9bc: the field is a TREE NODE now (WaveFieldSource) -- the solver keeps the solve on the
+    // CPU as an immutable snapshot the painting threads read; there is no GPU atlas here.
+    struct Solved {                       // one finished solve (CPU side)
+        std::vector<uint8_t> atlas;       // packed RGBA8, (2*nx) x (rows*ny)
+        GpuTable table{};
+        uint64_t key = 0;
+    };
+    std::shared_ptr<const Solved> Live() const { return std::atomic_load(&m_live); }
+    uint64_t LiveKey() const { return m_liveKey; }
+    bool Ready() const { return Live() != nullptr; }
 
     // The hypervisor's step 9c: evaluate the SOLVED field at a world point on the CPU
     // (bilinear on the packed planes, spinor advanced by the same rotor the kernel
@@ -117,11 +127,6 @@ public:
     std::string stats;   // provenance line for the title bar / report
 
 private:
-    struct Solved {                       // one finished solve (CPU side)
-        std::vector<uint8_t> atlas;       // packed RGBA8, (2*nx) x (rows*ny)
-        GpuTable table{};
-        uint64_t key = 0;
-    };
 
     uint64_t BucketKey(double simUnix, const PartParam* parts, int nParts) const;
     void AdoptTable(const GpuTable& t);   // m_table = t with the display closure applied
@@ -147,7 +152,7 @@ private:
     double m_curReadT = -1e18;                    // last refresh (sim s)
 
     GpuTable m_table{};
-    uint32_t m_srv = 0xFFFFFFFFu;
+    std::shared_ptr<const Solved> m_live;   // M9bc: the adopted solve, swapped atomically
     uint64_t m_liveKey = 0;
 
     // background solve plumbing: one worker at a time, result handed over by flag
@@ -156,11 +161,8 @@ private:
     std::atomic<bool> m_resultReady{false};
     Solved m_result;                     // written by worker, read by main after the flag
     // CPU copies for ProbeAt (the live field's planes)
-    std::vector<uint8_t> m_cpuAtlas;
 
-    void* m_tex = nullptr;               // M9h: GradeBank*, owned -- the solved field is a
-                                         // SPARSE grade bank now. Still void* so this header
-                                         // stays free of Gpu.h, the same trick as before.
+
 };
 
 }  // namespace ga

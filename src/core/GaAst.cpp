@@ -273,9 +273,10 @@ void RegisterKnownWaterEdges() {
     Register({"swe.solver", "wave.solver", "current (solved)", rowS, atlasN, true,
               "m/s (live SeaLayer gain), 0.05 buckets", "+-2.5", 1.0,
               "WaveField.h RefreshSweCurrent (1-v flip)"});
-    Register({"wave.solver", "water.bank", "a/k/phase-spinor planes", atlasN, atlasN,
-              false, "m / rad/m / unit spinor (RGBA8, per-comp aMax kMax)",
-              "17 slices, 2-wide grid", 1.0, "WaterBank.hlsl WaveSample (no flip)"});
+    Register({"wave.solver", "water.bank", "a/k/phase-spinor planes", mercPxW, uvSW,
+              false, "m / rad/m / unit spinor (RGBA8 pages, per-comp aMax kMax)",
+              "17 planes of the wave.field page tenant (z16), mip 0 pinned", 1.0,
+              "WaterBank.hlsl WavePageSample (M9bc; no flip: both vS)"});
     Register({"water.bank", "globe.ps", "disp/param/detail", atlasN, atlasN, false,
               "m / sigma2 / m/s / band gains (g1,dry,g0,g2)", "rings 4.8..154 m/texel", 1.0,
               "Globe.hlsl BankSample manual bilinear"});

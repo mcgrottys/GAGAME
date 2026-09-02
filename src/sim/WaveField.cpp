@@ -217,83 +217,6 @@ void PruneWaveCache(uint64_t liveKey) {
             double(freed) / (1024.0 * 1024.0 * 1024.0));
     }
 }
-
-// M9h: THE SOLVED FIELD BECOMES A SPARSE GRADE BANK.
-//
-// This atlas was a dense committed texture -- 3200 x 9000 RGBA8, 112 MB, fully allocated
-// regardless of what was in it -- which is a plain violation of the gameplan's own thesis
-// (statelessness as the base field, statefulness as SPARSE residency). It is now a reserved
-// resource whose residency is decided by one rule:
-//
-//     A TILE THAT IS ENTIRELY ZERO IS NEVER ALLOCATED.
-//
-// That single test captures BOTH sparsity axes at once, which is why it is the right rule
-// rather than a convenient one:
-//   * dry and land cells carry a = 0 because the limiter zeroed them -- no wave there;
-//   * a component gated out by minSamplesPerLambda has aMax = 0, so its ENTIRE SLICE is zero,
-//     and grade-shedding falls out of the same scan for free.
-// In both cases the Tier-2 read-zero guarantee restores exactly the value the dense texture
-// held, so the bank kernel needs no branch and no fallback: a null tile reads 0 and means it.
-//
-// Upload is per resident tile (CopyTiles from 64 KB staging = one DirectStorage request each),
-// and every resident tile is refilled rather than just the newly-mapped ones, because a solve
-// changes every value it touches, not only the tiles that appeared.
-uint32_t UploadAtlas(Gpu& gpu, void*& slot, const uint8_t* bytes, uint32_t w, uint32_t h) {
-    GradeBank* bank = static_cast<GradeBank*>(slot);
-    if (bank && (bank->Desc().width != w || bank->Desc().height != h)) {
-        gpu.WaitIdle();
-        delete bank;
-        bank = nullptr;
-        slot = nullptr;
-    }
-    if (!bank) {
-        GradeBankDesc d;
-        d.name = "wave.solved";
-        d.width = w;
-        d.height = h;
-        d.fmt = DXGI_FORMAT_R8G8B8A8_UNORM;
-        // Per component the atlas carries (a, k, cos phi, sin phi): an amplitude and a
-        // wavenumber (scalars) with the phase as a unit SPINOR -- the Cl(2)+ even part, which
-        // is grades 0 and 2. Declaring that is what lets a derived field ask the Cayley
-        // closure where a product with the wave field can be non-zero without reading it.
-        d.gradeSig = kG0 | kG2;
-        d.units = "a/aMax, k/kMax, cos, sin";
-        d.range = "0..1 per channel";
-        bank = new GradeBank();
-        bank->Init(gpu, d, policy::None());
-        slot = bank;
-    }
-    // Coverage: scan each tile of the freshly solved atlas for any non-zero byte.
-    const uint32_t tilesX = bank->TilesX(), tilesY = bank->TilesY();
-    const uint32_t tw = bank->TileW(), th = bank->TileH();
-    std::vector<uint8_t> mask(size_t(tilesX) * tilesY, 0);
-    for (uint32_t ty = 0; ty < tilesY; ++ty) {
-        for (uint32_t tx = 0; tx < tilesX; ++tx) {
-            bool any = false;
-            for (uint32_t r = 0; r < th && !any; ++r) {
-                const uint32_t sy = ty * th + r;
-                if (sy >= h) break;
-                const uint32_t sx = tx * tw;
-                if (sx >= w) break;
-                const uint32_t n = (std::min)(tw, w - sx) * 4u;
-                const uint8_t* row = bytes + (size_t(sy) * w + sx) * 4;
-                for (uint32_t i = 0; i < n; ++i) {
-                    if (row[i]) { any = true; break; }
-                }
-            }
-            mask[size_t(ty) * tilesX + tx] = any ? 1u : 0u;
-        }
-    }
-    bank->SetPolicy(policy::Mask(mask, tilesX));
-    bank->Update(gpu);
-    bank->UploadDenseTiles(gpu, bytes, w, 4u, bank->ResidentList());
-    const uint32_t res = bank->ResidentCount(), all = tilesX * tilesY;
-    Log("[wave] atlas sparse: %u/%u tiles resident (%.0f%%), %.1f of %.1f MB", res, all,
-        all ? 100.0 * res / all : 0.0, bank->ResidentBytes() / 1048576.0,
-        bank->VirtualBytes() / 1048576.0);
-    return bank->Srv();
-}
-
 }  // namespace
 
 // ------------------------------------------------------------------------------------------------
@@ -973,12 +896,10 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
         if (m_worker.joinable()) m_worker.join();
         m_resultReady.store(false);
         m_inFlight.store(false);
-        const uint32_t aw = m_result.table.nx * 2;
-        const uint32_t ah = uint32_t((m_result.table.nUsed + 2) / 2) * m_result.table.ny;
-        m_srv = UploadAtlas(gpu, m_tex, m_result.atlas.data(), aw, ah);
         AdoptTable(m_result.table);
         m_liveKey = m_result.key;
-        m_cpuAtlas = std::move(m_result.atlas);
+        std::atomic_store(&m_live, std::shared_ptr<const Solved>(
+                                       std::make_shared<Solved>(std::move(m_result))));
         char buf[160];
         snprintf(buf, sizeof(buf), "wave %ux%u lvl %+.2f key %016llx (solved)", m_table.nx,
                  m_table.ny, double(m_table.level),
@@ -992,17 +913,16 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
         Solved s;
         if (LoadCache(key, s)) {
             // cache hits upload synchronously: they must not flicker through the async path.
-            const uint32_t aw = s.table.nx * 2;
-            const uint32_t ah = uint32_t((s.table.nUsed + 2) / 2) * s.table.ny;
-            m_srv = UploadAtlas(gpu, m_tex, s.atlas.data(), aw, ah);
             AdoptTable(s.table);
             m_liveKey = key;
-            m_cpuAtlas = std::move(s.atlas);
+            s.key = key;
+            std::atomic_store(&m_live,
+                              std::shared_ptr<const Solved>(std::make_shared<Solved>(std::move(s))));
             char buf[160];
             snprintf(buf, sizeof(buf), "wave %ux%u lvl %+.2f key %016llx (cache)", m_table.nx,
                      m_table.ny, double(m_table.level), static_cast<unsigned long long>(key));
             stats = buf;
-            Log("[wave] cache hit %016llx -- uploaded without a solve",
+            Log("[wave] cache hit %016llx -- adopted without a solve",
                 static_cast<unsigned long long>(key));
         } else if (block) {
             // headless determinism: the dump frames must see the field, so eat the
@@ -1010,12 +930,11 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
             std::vector<PartParam> pcopy;
             if (parts && nParts > 0) pcopy.assign(parts, parts + nParts);
             Solved s2 = SolveNow(key, simUnix, pcopy);
-            const uint32_t aw = s2.table.nx * 2;
-            const uint32_t ah = uint32_t((s2.table.nUsed + 2) / 2) * s2.table.ny;
-            m_srv = UploadAtlas(gpu, m_tex, s2.atlas.data(), aw, ah);
             AdoptTable(s2.table);
             m_liveKey = key;
-            m_cpuAtlas = std::move(s2.atlas);
+            s2.key = key;
+            std::atomic_store(&m_live,
+                              std::shared_ptr<const Solved>(std::make_shared<Solved>(std::move(s2))));
             PruneWaveCache(m_liveKey);   // the blocking solve wrote a cache entry too
         } else {
             std::vector<PartParam> pcopy;
@@ -1028,7 +947,9 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
 
 WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix) const {
     Probe p;
-    if (m_srv == 0xFFFFFFFFu || m_cpuAtlas.empty()) return p;
+    const std::shared_ptr<const Solved> live = Live();
+    if (!live || live->atlas.empty()) return p;
+    const std::vector<uint8_t>& m_cpuAtlas = live->atlas;
     const GpuTable& t = m_table;
     const int nx = int(t.nx), ny = int(t.ny);
     if (nx < 2 || ny < 2) return p;

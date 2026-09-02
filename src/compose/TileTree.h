@@ -183,7 +183,9 @@ public:
     // from them cost one half-ULP against the incumbent (2 m at 3 km depth, 0.125 m at 100 m).
     // Half is the GPU form: 256x128 half values, 64 KB, R16F exactly -- the ONE quantization,
     // at the root, which always materializes because its tile is what DirectStorage reads.
-    enum class Fmt : uint8_t { Rgba8, FloatW, Half };
+    // Raw4 (M9bc): four quantized channels, no coverage byte -- a tile-native node's planes
+    // (the wave field's a, k, cos, sin); absence is the tile's absence. 128x128, 64 KB, a GPU tile.
+    enum class Fmt : uint8_t { Rgba8, FloatW, Half, Raw4 };
 
     // Builds the tree of caches under this node, recursively. Every compose and gate node gets
     // its own folder; every leaf gets one. Nodes are borrowed -- the graph outlives the caches.
@@ -209,7 +211,8 @@ public:
         }
         const uint64_t h = tree_detail::Fnv1a(
             tree_detail::Fnv1a(14695981039346656037ull, node->Identity()),
-            "#" + std::to_string(kTileTreeVersion) + (fmt == Fmt::Rgba8 ? "" : fmt == Fmt::FloatW ? "fw" : "h"));
+            "#" + std::to_string(kTileTreeVersion) +
+                (fmt == Fmt::Rgba8 ? "" : fmt == Fmt::FloatW ? "fw" : fmt == Fmt::Half ? "h" : "r4"));
         m_id = tree_detail::Hex8(h);
         m_root = "cache\\trees\\" + tree_detail::Sanitize(node->Name()) + "." + m_id;
         tree_detail::MakeDir("cache");
@@ -381,6 +384,7 @@ private:
     static Held PeekAt(const std::string& base) {
         if (tree_detail::Exists(base + ".void")) return Held::Void;
         if (tree_detail::Exists(base + ".bin")) return Held::Content;
+        if (tree_detail::Exists(base + ".fold")) return Held::Content;   // derived from children
         std::string id;
         if (tree_detail::FindRef(base, id)) return Held::Content;
         return Held::Absent;
@@ -467,8 +471,48 @@ private:
             ++read;
             return Status::Content;
         }
+        if (tree_detail::Exists(base + ".fold")) {
+            // M9bd: a REDUNDANT parent -- within 4/255 of the fold of its children -- was never
+            // stored; rebuild it from them every time it is asked. Nothing is written.
+            return FoldFromChildren(frame, tag, r, out, false);
+        }
         bool complete = true, anyCover = false, full = false;
-        if (m_fmt != Fmt::Rgba8) {
+        if (m_node->TileNative()) {
+            // M9bc: a regional node paints the whole tile; quantize per the tree's format.
+            std::vector<DomainValue> vals;
+            if (!m_node->PaintTile(frame, r, frame.texW, frame.texH, vals) ||
+                vals.size() != size_t(frame.texW) * frame.texH) {
+                return Status::Transient;   // not ready for this identity: ask again
+            }
+            out.assign(TileBytes(), 0);
+            for (size_t i = 0; i < vals.size(); ++i) {
+                const DomainValue& v = vals[i];
+                if (v.weight <= 0.0f) continue;
+                // "Write nothing": a Raw4 texel that is all zero adds no coverage -- a tile of
+                // zeros (a gated component, land) is a void marker, never 64 KB of nothing.
+                if (m_fmt == Fmt::Raw4 &&
+                    v.c[0] <= 0.0f && v.c[1] <= 0.0f && v.c[2] <= 0.0f && v.c[3] <= 0.0f) {
+                    continue;
+                }
+                anyCover = true;
+                if (m_fmt == Fmt::FloatW) {
+                    float* d = reinterpret_cast<float*>(out.data()) + i * 2;
+                    d[0] = v.c[0];
+                    d[1] = (std::min)(1.0f, v.weight);
+                } else if (m_fmt == Fmt::Raw4) {
+                    for (int q = 0; q < 4; ++q) {
+                        out[i * 4 + q] = static_cast<uint8_t>(
+                            (std::max)(0.0f, (std::min)(1.0f, v.c[q])) * 255.0f + 0.5f);
+                    }
+                } else {
+                    for (int q = 0; q < 3; ++q) {
+                        out[i * 4 + q] = static_cast<uint8_t>(
+                            (std::max)(0.0f, (std::min)(1.0f, v.c[q])) * 255.0f + 0.5f);
+                    }
+                    out[i * 4 + 3] = static_cast<uint8_t>((std::min)(1.0f, v.weight) * 255.0f + 0.5f);
+                }
+            }
+        } else if (m_fmt == Fmt::FloatW) {
             // A scalar leaf: sample the node per texel, store (half value, half weight).
             constexpr double kR2D = 180.0 / 3.14159265358979;
             out.assign(TileBytes(), 0);
@@ -564,6 +608,21 @@ private:
             }
             return;
         }
+        if (m_fmt == Fmt::Raw4) {
+            // Four channels, componentwise means -- on (cos, sin) this IS the spinor blend law.
+            for (uint32_t py = 0; py < hh; ++py) {
+                for (uint32_t px = 0; px < hw; ++px) {
+                    uint32_t acc[4] = {0, 0, 0, 0};
+                    for (uint32_t k = 0; k < 4; ++k) {
+                        const uint8_t* s = &src[(size_t(2 * py + (k >> 1)) * W + (2 * px + (k & 1))) * 4];
+                        for (int q = 0; q < 4; ++q) acc[q] += s[q];
+                    }
+                    uint8_t* d = &parent[(size_t(oy + py) * W + (ox + px)) * 4];
+                    for (int q = 0; q < 4; ++q) d[q] = static_cast<uint8_t>((acc[q] + 2u) / 4u);
+                }
+            }
+            return;
+        }
         if (m_fmt != Fmt::Rgba8) return;   // Half tiles are roots; they compose, never fold
         for (uint32_t py = 0; py < hh; ++py) {
             for (uint32_t px = 0; px < hw; ++px) {
@@ -592,6 +651,35 @@ private:
         const TileRequest p{r.face, r.mip + 1, r.x / 2, r.y / 2};
         const std::string pbase = Base(tag, p);
         std::vector<uint8_t> parent;
+        if (m_node->TileNative()) {
+            // A tile-native node's parents ARE the fold of their children (a box mean): never
+            // painted, never stored, never read here -- every ancestor gets a marker if it has
+            // none and a refetch notice, and that is the whole chain. (Reading the children at
+            // each level cost 4^m reads per paint: 44 s of prefill for one bucket.)
+            TileRequest a = p;
+            for (uint32_t m = r.mip + 1; m <= MaxMip(frame); ++m) {
+                const std::string ab = Base(tag, a);
+                if (!tree_detail::Exists(ab + ".bin") && !tree_detail::Exists(ab + ".void") &&
+                    !tree_detail::Exists(ab + ".fold")) {
+                    tree_detail::Touch(ab + ".fold");
+                } else if (tree_detail::Exists(ab + ".void")) {
+                    DeleteFileA((ab + ".void").c_str());   // a child with content arrived
+                    tree_detail::Touch(ab + ".fold");
+                }
+                InvalidateAbove(tag, a);
+                a = TileRequest{a.face, a.mip + 1, a.x / 2, a.y / 2};
+            }
+            return;
+        }
+        if (tree_detail::Exists(pbase + ".fold")) {
+            // The parent is derived from its children: nothing to rewrite, but whoever holds
+            // it must refetch, and the level above sees the change through the rebuilt bytes.
+            // Siblings still unpainted stop the chain here; the last of them carries it up.
+            if (FoldFromChildren(frame, tag, p, parent, false) != Status::Content) return;
+            InvalidateAbove(tag, p);
+            FoldUp(frame, tag, p, parent);
+            return;
+        }
         Held ph = PeekAt(pbase);
         if (ph == Held::Content && !tree_detail::ReadTile(pbase + ".bin", parent, TileBytes())) {
             ph = Held::Absent;
@@ -609,13 +697,124 @@ private:
             parent.assign(TileBytes(), 0);
         }
         if (parent.size() != TileBytes()) return;
+        const std::vector<uint8_t> before = parent;
         FoldQuadrant(frame, r, child, parent);
+        // M9bd: THE CHAIN STOPS WHERE THE CHILD STOPS MATTERING. A one-tile source folds into
+        // its parent and grandparent and is then invisible: if folding it in moves the parent
+        // by less than 4/255 anywhere, nothing is written and nothing above is touched -- the
+        // composite there keeps its reference to the base tree (the soak rule already left
+        // the small source out of that subset), and no coarse tile is materialized for it.
+        if (ph != Held::Void && Redundant(before, parent, kFoldRedundantTol)) return;
         if (ph == Held::Void) DeleteFileA((pbase + ".void").c_str());
         tree_detail::WriteTile(pbase + ".bin", parent);
         ++folded;
         InvalidateAbove(tag, p);
         FoldUp(frame, tag, p, parent);
     }
+public:
+    // M9bc: PREFILL THE PYRAMID. Realize every tile of a box at every mip from the root down,
+    // so the disk holds the whole chain before anyone asks: the residency manager's ancestor
+    // walk then reads files and never waits on a paint (no waves popping in). Returns tiles
+    // realized. The box is in the frame's uv; faces/planes are [f0, f1).
+    uint32_t Prefill(const ColorFrame& frame, uint32_t f0, uint32_t f1, float u0, float v0,
+                     float u1, float v1) {
+        const std::string tag = frame.Tag();
+        EnsureFrame(tag);
+        uint32_t n = 0, markers = 0;
+        const uint32_t maxMip = MaxMip(frame);
+        for (uint32_t f = f0; f < f1; ++f) {
+            // Finest first: the level above is then the fold of what was just written.
+            for (uint32_t m = 0; m <= maxMip; ++m) {
+                const uint32_t dim = frame.faceDim >> m;
+                const uint32_t tw = (std::max)(1u, dim / frame.texW), th = (std::max)(1u, dim / frame.texH);
+                const uint32_t x0 = uint32_t((std::max)(0.0f, u0) * tw), y0 = uint32_t((std::max)(0.0f, v0) * th);
+                const uint32_t x1 = (std::min)(tw - 1, uint32_t((std::min)(0.9999f, u1) * tw));
+                const uint32_t y1 = (std::min)(th - 1, uint32_t((std::min)(0.9999f, v1) * th));
+                for (uint32_t y = y0; y <= y1; ++y) {
+                    for (uint32_t x = x0; x <= x1; ++x) {
+                        const TileRequest r{f, m, x, y};
+                        const std::string base = Base(tag, r);
+                        if (PeekAt(base) != Held::Absent) { ++n; continue; }
+                        std::vector<uint8_t> bytes;
+                        if (m == 0) {
+                            if (Tile(frame, tag, r, bytes, nullptr) != Status::Transient) ++n;
+                            continue;
+                        }
+                        // A parent: the fold of its children. A tile-native node's parent IS
+                        // that fold (a box mean), so it is never stored -- a marker says so.
+                        // Any other node's parent is painted and kept only where it differs
+                        // from the fold by more than 4/255 somewhere.
+                        if (m_node->TileNative()) {
+                            // Derived, so decide by what the children HOLD -- no reads.
+                            bool anyKid = false;
+                            for (uint32_t k = 0; k < 4 && !anyKid; ++k) {
+                                const TileRequest c{f, m - 1, x * 2 + (k & 1), y * 2 + (k >> 1)};
+                                anyKid = PeekAt(Base(tag, c)) == Held::Content;
+                            }
+                            tree_detail::Touch(base + (anyKid ? ".fold" : ".void"));
+                            if (anyKid) ++markers;
+                            ++n;
+                            continue;
+                        }
+                        std::vector<uint8_t> fold;
+                        const Status fs = FoldFromChildren(frame, tag, r, fold, false);
+                        if (fs == Status::Transient) continue;
+                        if (fs == Status::Void) {
+                            tree_detail::Touch(base + ".void");
+                            ++n;
+                            continue;
+                        }
+                        if (Tile(frame, tag, r, bytes, nullptr) == Status::Content &&
+                            Redundant(bytes, fold, kFoldRedundantTol)) {
+                            DeleteFileA((base + ".bin").c_str());
+                            tree_detail::Touch(base + ".fold");
+                            ++markers;
+                        }
+                        ++n;
+                    }
+                }
+            }
+        }
+        folded += markers;
+        return n;
+    }
+private:
+    // M9bd: rebuild a parent from its four children (content, void or markers themselves).
+    // Transient if any child is not ready; Void if none has content. `materialize` writes the
+    // result as bytes and retires the marker -- for deep levels that are actually served, so
+    // a mip-6 read is one file and not 4^6 of them.
+    Status FoldFromChildren(const ColorFrame& frame, const std::string& tag, const TileRequest& r,
+                            std::vector<uint8_t>& out, bool materialize) {
+        if (r.mip == 0) return Status::Transient;
+        out.assign(TileBytes(), 0);
+        bool any = false;
+        for (uint32_t k = 0; k < 4; ++k) {
+            const TileRequest c{r.face, r.mip - 1, r.x * 2 + (k & 1), r.y * 2 + (k >> 1)};
+            std::vector<uint8_t> cb;
+            const Status s = Tile(frame, tag, c, cb, nullptr);
+            if (s == Status::Transient) return Status::Transient;
+            if (s != Status::Content || cb.size() != TileBytes()) continue;
+            FoldQuadrant(frame, c, cb, out);
+            any = true;
+        }
+        if (!any) return Status::Void;
+        if (materialize) {
+            const std::string base = Base(tag, r);
+            tree_detail::WriteTile(base + ".bin", out);
+            DeleteFileA((base + ".fold").c_str());
+        }
+        return Status::Content;
+    }
+    // Within tol/255 on every byte? (Byte formats only; a float tile is never called redundant.)
+    bool Redundant(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b, int tol) const {
+        if (m_fmt == Fmt::FloatW || a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i) {
+            const int d = int(a[i]) - int(b[i]);
+            if (d > tol || d < -tol) return false;
+        }
+        return true;
+    }
+    static constexpr int kFoldRedundantTol = 4;   // the user's "4 pixel": 4/255 per channel
     // A tile of this node changed: consumers holding it refetch; ancestors' cached composites
     // of the same address are dropped (their key folds what children HOLD, not what they say).
     void InvalidateAbove(const std::string& tag, const TileRequest& r) {
