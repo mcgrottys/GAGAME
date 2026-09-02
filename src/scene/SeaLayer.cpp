@@ -825,9 +825,10 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
             av.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             av.Format = DXGI_FORMAT_R16_FLOAT;
             av.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+            // M9ax: the whole tenant (cube faces + the page); the slice rides the CB.
             av.Texture2DArray.MipLevels = m_hgtMips;
-            av.Texture2DArray.FirstArraySlice = m_hgtSlice;
-            av.Texture2DArray.ArraySize = 1;
+            av.Texture2DArray.FirstArraySlice = 0;
+            av.Texture2DArray.ArraySize = UINT32_MAX;
             ctx.gpu->Device()->CreateShaderResourceView(m_hgtArr, &av,
                                                         ctx.gpu->SrvHeap().Cpu(m_churnTable + 2));
             av.Format = DXGI_FORMAT_R8_UNORM;
@@ -866,10 +867,10 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
         memcpy(m_churnCb.jetB, m_seaCb.jetDir, 16);
         // M5c: the chop-band WAVENUMBER -- the kernel derives phase speed from the local depth,
         // exactly like Sea.hlsl (misc[0] was the deep-water speed when churn had no bathy).
-        m_churnCb.misc[0] = m_seaCb.bandK[2];
-        m_churnCb.misc[1] = m_fft.PatchL(2);
-        m_churnCb.misc[2] = m_seaCb.waveC[3];
-        m_churnCb.misc[3] = 0;
+        m_churnCb.miscC[0] = m_seaCb.bandK[2];
+        m_churnCb.miscC[1] = m_fft.PatchL(2);
+        m_churnCb.miscC[2] = m_seaCb.waveC[3];
+        m_churnCb.miscC[3] = 0;
         memcpy(m_churnCb.bathyG, m_bathyGeo, sizeof(m_bathyGeo));
         m_churnCb.geoA[0] = static_cast<float>(BathyModel::kOrgLat);
         m_churnCb.geoA[1] = static_cast<float>(BathyModel::kOrgLon);
@@ -879,6 +880,7 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
         m_churnCb.winA[1] = static_cast<float>(m_hgtOrg[1]);
         m_churnCb.winA[2] = 1.0f / 16384.0f;
         m_churnCb.winA[3] = 16384.0f * 256.0f;
+        m_churnCb.pageB[0] = static_cast<float>(m_hgtSlice);
         m_churnCb.sweM[0] = m_churnSweWired ? 1.0f : 0.0f;
         m_churnCb.sweM[1] = sweCurrentGain;
         m_churnCb.sweM[2] = 500.0f;   // the same seaward handover ramp as Sea.hlsl's JetU

@@ -39,19 +39,25 @@ cbuffer SweCb : register(b0) {
     float gPadA, gPadB, gPadC;
     float4 gGeoLL;               // M9ar: lattice -> lat/lon: lon0, lat1, dlon, -dlat (deg/texel)
     float4 gWinA;                // M9ar: height page frame: org px x, org px y, 1/16384, world px
+    float4 gPageB;               // M9ax: x = the z14 page's slice in the tenant's array
 };
 
+#include "HeightPages.hlsli"
+
 StructuredBuffer<uint> gTileList : register(t0);
-// M9ar: THE BED IS THE HEIGHT MEGATEXTURE. Slice 6 of the height page tenant (the z14 Mercator
-// page, 9.55 m/px -- the survey resolution) viewed as a one-slice array, with its residency
-// map. There is no solver-private copy of the bed any more.
-Texture2DArray<float> gBathy    : register(t1);   // NAVD88 m; the page
-Texture2DArray<float> gBathyRes : register(t2);   // R8: finest resident mip * 16
+// M9ar: THE BED IS THE HEIGHT MEGATEXTURE. M9ax: the tenant's WHOLE array (cube faces 0..5 and
+// the z14 page, gPageB.x) with its residency-map array, resolved per texel by HeightPages.hlsli
+// exactly as the pixel stage resolves it. There is no solver-private copy of the bed, and no
+// wall past the page: a lattice anywhere on the planet has a bed.
+Texture2DArray<float4> gBathy    : register(t1);   // NAVD88 m; R16F loads as .x
+Texture2DArray<float4> gBathyRes : register(t2);   // R8: finest resident mip * 16
 RWTexture2D<float>  gEta  : register(u0);        // DEVIATION from the tide plane, m
 RWTexture2D<float2> gFlux : register(u1);        // SIGNED face fluxes, m^3/s: x = across the
                                                  // EAST face (+east), y = across the SOUTH
                                                  // face (+south). Staggered C-grid.
-RWTexture2D<float4> gUv   : register(u2);        // derived: u east, v north, speed, valid
+// M9ax: the derived currents are a Volatile GradeBank like gMv below (the dense committed
+// texture is gone); the view is pinned to slice 0, so the solve writes uint3(xy, 0).
+RWTexture2DArray<float4> gUv : register(u2);     // derived: u east, v north, speed, valid
 // M9h: grad(flow) -- the FIRST field in this engine whose residency was decided by the Cayley
 // closure rather than by a physics policy. grad is a grade-1 operator, so nabla U is the
 // geometric product of two vectors: Cl2ProductSignature(kG1, kG1) = kG0 | kG2. The scalar part
@@ -69,29 +75,11 @@ RWTexture2DArray<float4> gMv : register(u3);
 
 float BedAt(int2 t) {
     if (any(t < 0) || t.x >= (int)gNx || t.y >= (int)gNy) return 100.0f;   // outside = wall
-    // Lattice texel centre -> lat/lon -> the page Mercator uv (the same three lines the
-    // water bank uses for its per-texel bed), then a bilinear read at the resident mip.
+    // Lattice texel centre -> lat/lon -> the planet's height: the page where it is resident
+    // and at least as fine as the cube, the cube face otherwise (HeightPages.hlsli).
     const float lon = gGeoLL.x + (t.x + 0.5f) * gGeoLL.z;
     const float lat = gGeoLL.y + (t.y + 0.5f) * gGeoLL.w;
-    const float latR = lat * 0.01745329252f;
-    const float mx = (lon + 180.0f) / 360.0f * gWinA.w;
-    const float my = (0.5f - log(tan(0.7853981634f + latR * 0.5f)) * 0.15915494309f) * gWinA.w;
-    const float2 wuv = float2(mx - gWinA.x, my - gWinA.y) * gWinA.z;
-    if (any(wuv <= 0.0f) || any(wuv >= 1.0f)) return 100.0f;   // off the page = wall
-    const float2 rdim = float2(128.0f, 128.0f);
-    const float haveV = gBathyRes.Load(int4(int2(clamp(wuv * rdim, 0.0f, rdim - 1.0f)), 0, 0)).x;
-    const float mip = clamp(round(haveV * 15.9375f), 0.0f, 6.0f);
-    const float dim = 16384.0f / exp2(mip);
-    const float2 tf = wuv * dim - 0.5f;
-    const float2 t0 = floor(tf);
-    const float2 fr = tf - t0;
-    float acc = 0.0f;
-    [unroll] for (int k = 0; k < 4; ++k) {
-        const int2 tc = clamp(int2(t0) + int2(k & 1, k >> 1), int2(0, 0), int2(dim - 1.0f, dim - 1.0f));
-        acc += ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y) *
-               gBathy.Load(int4(tc, 0, int(mip))).x;
-    }
-    return acc;
+    return HpHeightAt(gBathy, gBathyRes, lat, lon, gWinA, uint(gPageB.x), 0.0f);
 }
 
 float EtaAt(int2 t) {
@@ -138,14 +126,14 @@ void CsSweVelGrad(uint3 id : SV_DispatchThreadID) {
     if (id.x >= gEtaTileW || id.y >= gEtaTileH) return;
     const uint2 t = EtaTexel(id);
     if (t.x >= gNx || t.y >= gNy) return;
-    const float4 c = gUv[t];
+    const float4 c = gUv[uint3(t, 0)];
     if (c.w < 0.5f) { gMv[uint3(t, 0)] = float4(0, 0, 0, 0); return; }
 
     const uint2 xm = uint2(max(int(t.x) - 1, 0), t.y);
     const uint2 xp = uint2(min(t.x + 1u, gNx - 1u), t.y);
     const uint2 ym = uint2(t.x, max(int(t.y) - 1, 0));
     const uint2 yp = uint2(t.x, min(t.y + 1u, gNy - 1u));
-    float4 a = gUv[xm], b = gUv[xp], d = gUv[ym], e = gUv[yp];
+    float4 a = gUv[uint3(xm, 0)], b = gUv[uint3(xp, 0)], d = gUv[uint3(ym, 0)], e = gUv[uint3(yp, 0)];
     if (a.w < 0.5f) a = c;
     if (b.w < 0.5f) b = c;
     if (d.w < 0.5f) d = c;
@@ -178,7 +166,7 @@ void CsSweClearFlux(uint3 id : SV_DispatchThreadID) {
 [numthreads(16, 16, 1)]
 void CsSweUvClear(uint3 id : SV_DispatchThreadID) {
     if (id.x >= gNx || id.y >= gNy) return;
-    gUv[id.xy] = float4(0, 0, 0, 0);
+    gUv[uint3(id.xy, 0)] = float4(0, 0, 0, 0);
 }
 
 // ---- one substep ---------------------------------------------------------------------------
@@ -309,7 +297,7 @@ void CsSweDerive(uint3 id : SV_DispatchThreadID) {
     // Dry cells and the sponged open sea hand the render back to the stateless model (the
     // analytic jet is ACT-calibrated; out there it is the better answer).
     if (h < 0.05f || SpongeAt(t) > 0.5f) {
-        gUv[t] = float4(0, 0, 0, 0);
+        gUv[uint3(t, 0)] = float4(0, 0, 0, 0);
         return;
     }
     // Cell-centred velocity: the mean of the two faces in each axis, each over its OWN face
@@ -320,5 +308,5 @@ void CsSweDerive(uint3 id : SV_DispatchThreadID) {
     const float qn = gFlux[int2(t.x, t.y - 1)].y;
     const float u = 0.5f * (qc.x + qw) / (h * gDy);
     const float v = -0.5f * (qc.y + qn) / (h * gDx);   // texture +y is south; world v is north
-    gUv[t] = float4(u, v, length(float2(u, v)), 1.0f);
+    gUv[uint3(t, 0)] = float4(u, v, length(float2(u, v)), 1.0f);
 }

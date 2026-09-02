@@ -15,9 +15,11 @@ void SweSolver::SetHeightPage(Gpu& gpu, ID3D12Resource* heightArr, ID3D12Resourc
     sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     sv.Format = DXGI_FORMAT_R16_FLOAT;
     sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    // M9ax: the WHOLE tenant -- cube faces and the page -- so the kernel resolves the bed
+    // anywhere, not only inside the one page (ArraySize -1 = every slice).
     sv.Texture2DArray.MipLevels = mips;
-    sv.Texture2DArray.FirstArraySlice = slice;
-    sv.Texture2DArray.ArraySize = 1;
+    sv.Texture2DArray.FirstArraySlice = 0;
+    sv.Texture2DArray.ArraySize = UINT32_MAX;
     gpu.Device()->CreateShaderResourceView(heightArr, &sv, gpu.SrvHeap().Cpu(m_table + 0));
     sv.Format = DXGI_FORMAT_R8_UNORM;
     sv.Texture2DArray.MipLevels = 1;
@@ -31,6 +33,7 @@ void SweSolver::SetHeightPage(Gpu& gpu, ID3D12Resource* heightArr, ID3D12Resourc
     m_cb.winA[1] = static_cast<float>(orgPxY);
     m_cb.winA[2] = 1.0f / 16384.0f;
     m_cb.winA[3] = 16384.0f * 256.0f;
+    m_cb.pageB[0] = static_cast<float>(slice);
     m_bedBound = true;
     Log("[swe] bed bound to the height megatexture: page slice %u, %u mips, residency-clamped "
         "per texel -- the solver, the water shading and the globe read ONE bed",
@@ -91,7 +94,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     // Static residency: everything that can ever be wet -- bed below max tide + surge + wave
     // margin. Land and dune tiles stay NULL forever; their reads are the hardware zero.
     const auto& elev = bathy.Elev();
-    auto mapWet = [&](TileAtlas2D& bank) {
+    auto mapWet = [&](auto& bank) {
         for (uint32_t ty = 0; ty < bank.TilesY(); ++ty) {
             for (uint32_t tx = 0; tx < bank.TilesX(); ++tx) {
                 bool wet = false;
@@ -233,13 +236,28 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
         Log("[swe] south boundary strip active (Plum Island Sound rows %u..%u)", ny - 8, ny - 1);
     }
 
-    // Dense derived-current texture (exact bathy dims; no padding).
-    m_uv = gpu.CreateTexture2D(nx, ny, DXGI_FORMAT_R16G16B16A16_FLOAT,
-                               D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
-                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"swe.uv (derived currents)");
-    m_uv.srv = gpu.CreateSrv(m_uv.res.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-    m_uvUav = gpu.CreateTextureUav(m_uv.res.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT,
-                                   D3D12_UAV_DIMENSION_TEXTURE2D);
+    // M9ax: the derived currents as a bank over the wet tiles. Grade 1 (a vector field);
+    // RGBA16F keeps the (u, v, |U|, valid) fiber the consumers already read. Same residency as
+    // eta: land tiles stay NULL and read the hardware zero, which the sea shader already treats
+    // as "no solve here" through the valid channel.
+    {
+        GradeBankDesc d;
+        d.name = "swe.uv (derived currents)";
+        d.width = nx;
+        d.height = ny;
+        d.fmt = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        d.gradeSig = kG1;
+        d.metersPerTexel = dx;
+        d.units = "m/s";
+        d.range = "+-2.5";
+        d.mipLevels = 1;
+        d.arraySlices = 1;
+        m_uvBank.Init(gpu, d, policy::None());
+        m_uvBank.ActivateSlice(gpu, 0);
+        mapWet(m_uvBank);
+        m_uvSrv = gpu.CreateSrv(m_uvBank.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+        m_uvState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    }
 
     // Root signature: b0 CBV, t0 root SRV (tile list), table [t1 height page, t2 its residency
     // map (M9ar), u0 eta, u1 flux, u2 uv, u3 mv].
@@ -298,9 +316,6 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     uv.Format = DXGI_FORMAT_R32G32_FLOAT;
     gpu.Device()->CreateUnorderedAccessView(m_flux.Res(), nullptr, &uv,
                                             gpu.SrvHeap().Cpu(m_table + 3));
-    uv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    gpu.Device()->CreateUnorderedAccessView(m_uv.res.Get(), nullptr, &uv,
-                                            gpu.SrvHeap().Cpu(m_table + 4));
     // The bank is an ARRAY now, so its UAV must be an array view pinned to slice 0. A plain
     // Texture2D view of an array resource is invalid, and the solve would write nowhere.
     uv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -308,6 +323,8 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     uv.Texture2DArray.MipSlice = 0;
     uv.Texture2DArray.FirstArraySlice = 0;
     uv.Texture2DArray.ArraySize = 1;
+    gpu.Device()->CreateUnorderedAccessView(m_uvBank.Res(), nullptr, &uv,
+                                            gpu.SrvHeap().Cpu(m_table + 4));   // M9ax: uv bank
     gpu.Device()->CreateUnorderedAccessView(m_velGrad.Res(), nullptr, &uv,
                                             gpu.SrvHeap().Cpu(m_table + 5));
     uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
@@ -346,7 +363,7 @@ void SweSolver::RecordReset(ID3D12GraphicsCommandList* cl, Gpu& gpu) {
     for (int i = 0; i < 3; ++i) uav[i].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     uav[0].UAV.pResource = m_eta.Res();
     uav[1].UAV.pResource = m_flux.Res();
-    uav[2].UAV.pResource = m_uv.res.Get();
+    uav[2].UAV.pResource = m_uvBank.Res();
     cl->ResourceBarrier(3, uav);
 }
 
@@ -377,7 +394,13 @@ int SweSolver::Record(ID3D12GraphicsCommandList* cl, Gpu& gpu, double simUnix, f
     };
     auto uvTo = [&](D3D12_RESOURCE_STATES to) {
         if (m_uvState == to) return;
-        gpu.Transition(cl, m_uv, to);
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = m_uvBank.Res();
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = m_uvState;
+        b.Transition.StateAfter = to;
+        cl->ResourceBarrier(1, &b);
         m_uvState = to;
     };
     etaTo(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -463,7 +486,7 @@ int SweSolver::Record(ID3D12GraphicsCommandList* cl, Gpu& gpu, double simUnix, f
     {
         D3D12_RESOURCE_BARRIER ub{};
         ub.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-        ub.UAV.pResource = m_uv.res.Get();
+        ub.UAV.pResource = m_uvBank.Res();
         cl->ResourceBarrier(1, &ub);
         const auto& gl = m_velGrad.ResidentList();
         if (!gl.empty()) {
@@ -523,8 +546,14 @@ void SweSolver::ReadFields(Gpu& gpu, std::vector<float>& etaOut, uint32_t& etaW,
     wrap.state = m_etaState;
     const std::vector<uint8_t> etaData = gpu.ReadbackTexture(wrap, &etaPitch);
     m_etaState = wrap.state;
-    const std::vector<uint8_t> uvData = gpu.ReadbackTexture(m_uv, &uvPitch);
-    m_uvState = m_uv.state;
+    GpuTexture uvWrap;
+    uvWrap.res = m_uvBank.Res();
+    uvWrap.format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    uvWrap.width = m_uvBank.TilesX() * m_uvBank.TileW();
+    uvWrap.height = m_uvBank.TilesY() * m_uvBank.TileH();
+    uvWrap.state = m_uvState;
+    const std::vector<uint8_t> uvData = gpu.ReadbackTexture(uvWrap, &uvPitch);
+    m_uvState = uvWrap.state;
 
     // The eta RESOURCE desc is the LOGICAL grid (nx x ny) -- the tile-multiple padding lives
     // in the atlas' addressing, not the texture dims. (ReadProbes' padded wrap dims were
@@ -562,8 +591,14 @@ void SweSolver::ReadProbes(Gpu& gpu, const float* xzPairs, int count, Probe* out
     wrap.state = m_etaState;
     const std::vector<uint8_t> etaData = gpu.ReadbackTexture(wrap, &etaPitch);
     m_etaState = wrap.state;
-    const std::vector<uint8_t> uvData = gpu.ReadbackTexture(m_uv, &uvPitch);
-    m_uvState = m_uv.state;
+    GpuTexture uvWrap;
+    uvWrap.res = m_uvBank.Res();
+    uvWrap.format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    uvWrap.width = m_uvBank.TilesX() * m_uvBank.TileW();
+    uvWrap.height = m_uvBank.TilesY() * m_uvBank.TileH();
+    uvWrap.state = m_uvState;
+    const std::vector<uint8_t> uvData = gpu.ReadbackTexture(uvWrap, &uvPitch);
+    m_uvState = uvWrap.state;
 
     for (int i = 0; i < count; ++i) {
         const float wx = xzPairs[i * 2], wz = xzPairs[i * 2 + 1];

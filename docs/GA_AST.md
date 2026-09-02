@@ -4,18 +4,21 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 
 | from | field | to | src frame | dst frame | flip | units | range | gain | code anchor |
 |---|---|---|---|---|---|---|---|---|---|
-| compose.stack | paint | window.z14 | latlon.deg +v=N | mercator.px +v=S | FLIP | sRGB bytes / m NAVD | tile 128^2 | x1 | Compositor::WindowColor/WindowHeight (merc inverse per texel) |
-| compose.stack | paint | window.z17 | latlon.deg +v=N | mercator.px +v=S | FLIP | sRGB bytes | tile 128^2 | x1 | Compositor::WindowColor zBase 17 |
-| compose.stack | paint | cube.color | latlon.deg +v=N | cube.face +v=N | - | sRGB bytes | 16k faces | x1 | ComposeCubeDir (D3D cube convention, composetest-pinned) |
-| window.z14 | window-sample | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | sRGB / m NAVD | uv 0..1 | x1 | Compose.hlsli CsWindowUv (no flip: both vS) |
-| window.z17 | detail-sample | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | sRGB | finer-only gate | x1 | Compose.hlsli detail rung (M7f/M7h handoff) |
-| google.tiles | fetch | window.z14 | mercator.px +v=S | mercator.px +v=S | - | sRGB bytes | zoom = f(groundResM) | x1 | GoogleColorSource::ZoomFor |
-| massgis.ortho | fetch | window.z14 | latlon.deg +v=N | mercator.px +v=S | FLIP | sRGB bytes | EPSG:6348 UTM19N declared | x1 | AerialOrthoSource (TM forward) |
+| compose.stack | paint cube faces | color.pages | latlon.deg +v=N | cube.face +v=N | - | sRGB bytes | slices 0..5, 16k faces | x1 | TileTree::Provider(ColorFrame::Cube) / ComposeCubeDir (composetest-pinned) |
+| compose.stack | paint mercator pages | color.pages | latlon.deg +v=N | mercator.px +v=S | FLIP | sRGB bytes | slice 6 = z14, slice 7 = z17; tile 128^2 | x1 | TileTree::Provider(ColorFrame::Window) (merc inverse per texel) |
+| compose.stack | paint cube faces | height.pages | latlon.deg +v=N | cube.face +v=N | - | m NAVD (R16F) | slices 0..5, 16k faces | x1 | TileTree::Provider(ColorFrame::Cube), the height root |
+| compose.stack | paint mercator page | height.pages | latlon.deg +v=N | mercator.px +v=S | FLIP | m NAVD (R16F) | slice 6 = z14 at 1263360,1538048; tile 256x128 | x1 | TileTree::Provider(ColorFrame::Window), the height root |
+| color.pages | page-sample | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | sRGB | finest containing page, residency-clamped mip | x1 | Compose.hlsli ComposedColorPages (no flip: both vS) |
+| color.pages | bed albedo | sea.ps (inactive) | mercator.px +v=S | uv01.vS +v=S | - | sRGB | through the refracted ray; the seafloor relief past the survey | x1 | Sea.hlsl ComposedColor(SeaPlanetDir) |
+| color.pages | bed albedo | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | sRGB | at the refracted ray's bed hit | x1 | Globe.hlsl ComposedColor(bedDir) |
+| height.pages | height | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | vertex, pixel, refracted cast | x1 | Compose.hlsli ComposedHeightPages |
+| google.tiles | fetch | compose.stack | mercator.px +v=S | mercator.px +v=S | - | sRGB bytes | zoom = f(groundResM) | x1 | GoogleColorSource::ZoomFor |
+| massgis.ortho | fetch | compose.stack | latlon.deg +v=N | mercator.px +v=S | FLIP | sRGB bytes | EPSG:6348 UTM19N declared | x1 | AerialOrthoSource (TM forward) |
 | height.stack | classify | synth.bed | latlon.deg +v=N | latlon.deg +v=N | - | m NAVD -> dry albedo | 3 samples/texel | x1 | BedSynthSource::Sample (M7d cross-channel edge) |
 | globe.walk | wants | residency.mgr | uv01.vS +v=S | uv01.vS +v=S | - | mip requests | mips 0..7 + floor 4..7 | x1 | GlobeLayer node walk + M7g mip floor |
 | residency.mgr | have-map | globe.ps | resmap.texel +v=S | uv01.vS +v=S | - | finest mip * 16 (R8) | 0..7*16 | x1 | CsHave2D residency clamp |
 | world.flat | anchor-linear map | latlon.deg | world.m +v=N | latlon.deg +v=N | - | deg | mPerLon frozen at anchor; shared by ALL water consumers | x1 | BathyModel::kOrgLat/kMPerLat convention |
-| height.window | bed per texel | water.bank | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | float merc ~0.25 px ulp (gatest-bounded); residency-clamped mips 2..7 | x1 | WaterBank.hlsl M7q (same formulation as CsWindowUv) |
+| height.pages | bed per texel | water.bank | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | z14 slice only (AUDIT_WATER item 5); float merc ~0.25 px ulp (gatest-bounded); residency-clamped mips 2..7 | x1 | WaterBank.hlsl gTA[slice 6] (same formulation as CsWindowUv) |
 | ocean.fft | cascade.disp | water.bank | patch.wrap +v=N | atlas.texel +v=N | - | m displacement | +-Hs/2 | x1 | WaterBank.hlsl CsBankFill wrap |
 | ocean.fft | cascade.deriv (foam union) | water.bank | patch.wrap +v=N | atlas.texel +v=N | - | jacobian foam 0..1 | 0..1 | x1 | WaterBank.hlsl CsBankFill foam discipline |
 | ocean.fft | cascade.deriv | globe.ps | patch.wrap +v=N | atlas.texel +v=N | - | slope | +-0.3 | x1 | Globe.hlsl detail loop |
@@ -24,8 +27,9 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | swe.solver | uv | water.bank | raster.row0N +v=S | atlas.texel +v=N | FLIP | m/s | +-2.5 | x1 | WaterBank.hlsl CsBankFill (1-uv.y) |
 | swe.solver | shadow | water.bank | raster.row0N +v=S | atlas.texel +v=N | FLIP | 0..1 exposure | 0.12..1 | x1 | WaterBank.hlsl CsBankFill (1-uv.y), floor 0.18 |
 | churn.kernel | churn | water.bank | atlas.texel +v=N | atlas.texel +v=N | - | 0..1 aeration (remembered foam, MAX-composited) | 0..1 | x1 | WaterBank.hlsl CsBankFill flat |
-| bathy.cudem | bed | churn.kernel | raster.row0N +v=S | atlas.texel +v=N | FLIP | m NAVD | -40..15 | x1 | SeaChurn.hlsl suv flip |
-| bathy.cudem | bed | sea.ps (inactive) | raster.row0N +v=S | atlas.texel +v=N | FLIP | m NAVD | -40..15 | x1 | Sea.hlsl:71 (uv.x, 1-uv.y) |
+| height.pages | bed | churn.kernel | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | z14 slice; -30 m off the page | x1 | SeaChurn.hlsl PageBedAt |
+| height.pages | bed | sea.ps (inactive) | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | cube + z14 page | x1 | Sea.hlsl BedAt -> ComposedHeight(SeaPlanetDir) |
+| height.pages | bed | swe.solver | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | z14 slice; +100 m wall off the page | x1 | Swe.hlsl BedAt (lattice -> lat/lon -> page uv, residency-clamped) |
 | swe.solver | eta | sea.ps (inactive) | raster.row0N +v=S | atlas.texel +v=N | FLIP | m dEta | +-1.5 | x1 | Sea.hlsl SweDEta (1-uv.y) |
 | swe.solver | shadow | sea.ps (inactive) | raster.row0N +v=S | atlas.texel +v=N | FLIP | 0..1 exposure | 0.12..1 | x1 | Sea.hlsl SweShadow (uv.x, 1-uv.y) |
 | churn.kernel | churn | sea.ps (inactive) | atlas.texel +v=N | atlas.texel +v=N | - | 0..1 aeration | 0..1 | x1.05 | Sea.hlsl cuv flat |

@@ -155,6 +155,16 @@ new architecture:
   volume format over `TileAtlas3D` addresses is the same code path (cloud, then the water
   column itself — K_d as a field in depth is what `optics` already computes at the surface).
 
+## Progress
+
+- Items 1 and 3: done (PR #9) -- the graph names the page tenants; the dead code is gone.
+- Items 4 and 5: done (M9ax) -- `SweSolver::m_uv` is a Volatile `GradeBank` over the wet
+  tiles; `shaders/HeightPages.hlsli` resolves cube-or-window per texel for the SWE, the churn
+  and the bank, so the three kernels have a bed everywhere the tenant does. Found on the way:
+  `ChurnCbData` had been rotated against `ChurnCb` since M9ar (same size, rows shifted; the
+  churn read its current gain from the longitude) -- fixed, and `dxtest` now holds row
+  layout by name and offset, not only size (ALGEBRA priors 22).
+
 ## 5. Recommended order
 
 1. AST re-registration + ledger truths (item 1) — an afternoon, and the validator then guards

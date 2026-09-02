@@ -11,6 +11,7 @@
 #include "Common.h"
 #include "GaAst.h"
 #include "GradeField.h"   // M9h: the type-level grade algebra pins itself here
+#include "compose/Compositor.h"
 #include "compose/DomainSource.h"
 #include "CurrentFieldLoader.h"
 #include "FieldLoader.h"
@@ -970,11 +971,65 @@ bool RunGaSelfTest() {
         }
     }
 
+    // ---- M9ax: THE CUBE-FACE INVERSE. shaders/HeightPages.hlsli resolves the bed on the cube
+    // faces for the compute kernels by inverting Compositor::ComposeCubeDir by hand (no
+    // hardware cube sampler outside the pixel stage). A wrong face or a flipped axis there is
+    // a silently wrong bed everywhere the z14 page is not -- so the port is pinned here:
+    // random directions -> (face, uv) by the shader's arithmetic -> ComposeCubeDir -> the same
+    // direction, to 1e-9, and the uv is inside the face.
+    {
+        auto hpCubeFace = [](const double d[3], double uv[2]) -> uint32_t {
+            const double a[3] = {std::fabs(d[0]), std::fabs(d[1]), std::fabs(d[2])};
+            double sx, t;
+            uint32_t face;
+            if (a[0] >= a[1] && a[0] >= a[2]) {
+                if (d[0] > 0) { face = 0; sx = -d[2] / a[0]; t = -d[1] / a[0]; }
+                else          { face = 1; sx =  d[2] / a[0]; t = -d[1] / a[0]; }
+            } else if (a[1] >= a[2]) {
+                if (d[1] > 0) { face = 2; sx =  d[0] / a[1]; t =  d[2] / a[1]; }
+                else          { face = 3; sx =  d[0] / a[1]; t = -d[2] / a[1]; }
+            } else {
+                if (d[2] > 0) { face = 4; sx =  d[0] / a[2]; t = -d[1] / a[2]; }
+                else          { face = 5; sx = -d[0] / a[2]; t = -d[1] / a[2]; }
+            }
+            uv[0] = sx * 0.5 + 0.5;
+            uv[1] = t * 0.5 + 0.5;
+            return face;
+        };
+        std::mt19937 rng(0x9a5eedu);
+        std::uniform_real_distribution<double> U(-1.0, 1.0);
+        double worst = 0.0;
+        uint32_t bad = 0, faces[6] = {0, 0, 0, 0, 0, 0};
+        for (int i = 0; i < 20000; ++i) {
+            double d[3] = {U(rng), U(rng), U(rng)};
+            const double l = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            if (l < 1e-6) continue;
+            for (double& c : d) c /= l;
+            double uv[2], back[3];
+            const uint32_t f = hpCubeFace(d, uv);
+            ++faces[f];
+            ComposeCubeDir(f, uv[0], uv[1], back);
+            const double err = 1.0 - (d[0] * back[0] + d[1] * back[1] + d[2] * back[2]);
+            worst = (std::max)(worst, err);
+            if (err > 1e-9 || uv[0] < 0.0 || uv[0] > 1.0 || uv[1] < 0.0 || uv[1] > 1.0) ++bad;
+        }
+        if (bad || worst > 1e-9) {
+            Log("[gatest] FAIL cube-face inverse (HeightPages.hlsli HpCubeFace port): %u of "
+                "20000 directions do not round-trip through ComposeCubeDir (worst 1-dot %.3g)",
+                bad, worst);
+            ok = false;
+        } else {
+            Log("[gatest] cube-face inverse: 20000 directions round-trip through ComposeCubeDir "
+                "(worst 1-dot %.1e; faces %u/%u/%u/%u/%u/%u)",
+                worst, faces[0], faces[1], faces[2], faces[3], faces[4], faces[5]);
+        }
+    }
+
     if (ok) {
         Log("[gatest] ---- PASS: sandwich, refraction rotor, fold telescope, spinor blend, "
-            "frame rules + orientation ledger, merc chain bound; water parity: solved "
-            "wave field, caustic bivector, ripple prefilter, foam discipline, signed "
-            "Kelvin phase, bed relief + waterline metric ----");
+            "frame rules + orientation ledger, merc chain bound, cube-face inverse; water "
+            "parity: solved wave field, caustic bivector, ripple prefilter, foam discipline, "
+            "signed Kelvin phase, bed relief + waterline metric ----");
     }
     return ok;
 }

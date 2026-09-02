@@ -903,6 +903,19 @@ model (or a textbook) would hold → what this project measured → the law now 
     covering the point) (`Compositor::HeightGrainM`), centred; the fold law's cousin: never
     differentiate finer than the field was measured.
 
+22. **Byte parity is not layout parity.** Prior (this project's own gate, `dxtest`): if the
+    C++ constant-buffer struct and the HLSL cbuffer are the same size, the rows line up --
+    "append at the END on both sides" was the law and the size check its enforcement.
+    Measured (M9ax, while wiring the churn to the page resolver): `ChurnCbData` had `geoA,
+    winA` inserted BEFORE `sweM` on the C++ side and appended AFTER `gSweM` on the HLSL side
+    at M9ar. Same bytes; every row from `gSweM` on rotated. For a week the churn kernel read
+    its "solved field on" flag from the anchor latitude, its current gain from the LONGITUDE
+    (-70.8), and its page frame from the SWE handover ramp -- so its bed was -30 m
+    everywhere and nothing looked wrong enough to ask. Law: the gate compares each reflected
+    variable's offset, size and name against the header's rows (`FAIL cb layout`); a
+    same-size rotation is exactly what it exists to catch. And the general form: a check that
+    passes on the failure you are worried about has not been asked the question.
+
 ## verification — The gate map: which algebra is pinned where
 
 - `pga` — motors: rotation, composition, rigidity, screw log/exp, slerp.

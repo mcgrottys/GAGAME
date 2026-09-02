@@ -483,10 +483,10 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.churn[1] = -8192.0f;
     cb.churn[2] = 1.0f / 16384.0f;
     cb.churn[3] = 8192.0f;
-    cb.waveDir[0] = m_sea ? m_sea->PeakDirX() : 0.0f;
-    cb.waveDir[1] = m_sea ? m_sea->PeakDirZ() : 0.0f;
-    cb.waveDir[2] = (m_sea && m_sea->PeakDirValid()) ? 1.0f : 0.0f;
-    cb.waveDir[3] = 0.0f;
+    cb.peakDir[0] = m_sea ? m_sea->PeakDirX() : 0.0f;
+    cb.peakDir[1] = m_sea ? m_sea->PeakDirZ() : 0.0f;
+    cb.peakDir[2] = (m_sea && m_sea->PeakDirValid()) ? 1.0f : 0.0f;
+    cb.peakDir[3] = 0.0f;
     cb.slotsD[0] = m_hgtWinSrv;
     cb.slotsD[1] = m_hgtWinResSrv;
     cb.slotsD[2] = m_hgtWinSlice;   // M9aq: the page, or ~0 for the old window
@@ -549,8 +549,8 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
             const int r4 = (c2 >> 1) * 4 + (c2 & 1) * 2;
             cb.waveSig[r4] = static_cast<float>(std::cos(ang));
             cb.waveSig[r4 + 1] = static_cast<float>(std::sin(ang));
-            cb.waveDirTab[r4] = wt.dirX[c2];
-            cb.waveDirTab[r4 + 1] = wt.dirZ[c2];
+            cb.waveDir[r4] = wt.dirX[c2];
+            cb.waveDir[r4 + 1] = wt.dirZ[c2];
             cb.waveScale[r4] = wt.aMax[c2];
             cb.waveScale[r4 + 1] = wt.kMax[c2];
         }

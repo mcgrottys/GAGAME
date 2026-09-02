@@ -1752,3 +1752,51 @@ painted, 2855 void (land); `earth.seafloor` 4151 composed (where the classifier 
 (~250 km) lit and albedo, frame 450 (80 km); `out/rail_seafloor_720.mp4` is the flood rail.
 Bench not re-run this session (the shader change is one multiply per water pixel; the tree cost
 was measured in S38).
+
+## 40. The bed everywhere: one resolver for the kernels, and the row the size gate could not see
+
+**The keyhole (AUDIT_WATER item 5).** The pixel stage has resolved the planet's height with
+one rule since section 35 -- `ComposedHeightPages`: the z14 page by containment where its
+resident texel is at least as fine as the cube's, else the cube face by direction, the
+residency map clamping the mip. The three kernels that simulate on the bed each carried HALF
+of it: the page only, with a +100 m wall (SWE), -30 m (churn) or a CPU corner lerp (bank)
+outside it. The cube slices were bound to every one of them and never asked.
+
+**One include, any stage.** `shaders/HeightPages.hlsli` is the whole rule with manual bilinear
+Loads (ALGEBRA priors 1: a bindless SampleLevel outside the pixel stage returns zero), on the
+tenant's full array view (slices 0..5 the cube faces, 6 the page) and its residency-map array:
+`HpHeightAt(arr, res, lat, lon, winA, winSlice, pageMipMin)`. Two residency reads decide, one
+bilinear is paid. The cube-face inverse of `ComposeCubeDir` is a hand port, so gatest
+round-trips 20 000 random directions through it (worst 1-dot ~1e-16). The SWE, churn and bank
+views are the WHOLE tenant now (`ArraySize -1`), the page's slice rides a CB row
+(`gPageB.x`), and the bank's corner lerp survives only for a bank with no height tenant at
+all. Trace probe at the mouth, mip 0: page -9.02 m vs CPU stack -9.02 m, MATCH.
+
+**The SWE currents as a bank (item 4).** `SweSolver::m_uv` was the last dense committed
+texture on the per-frame water path. It is a Volatile `GradeBank` now (grade 1, RGBA16F,
+one mip, the same wet-tile residency as eta), with a TEXTURE2D view over slice 0 for the
+three consumers that read a plain texture, an array UAV pinned to slice 0 for the solve, and
+the readback wrapped like eta's. Land tiles are NULL and read the hardware zero, which the
+sea already treats as "no solve here" through the valid channel.
+
+**The row the size gate could not see (priors 22).** Wiring the churn found `ChurnCbData`
+rotated against `ChurnCb` since M9ar: `geoA, winA` inserted before `sweM` on the C++ side and
+appended after `gSweM` on the HLSL side. Same size; every row from `gSweM` on shifted. The
+churn read its "solved field on" from the anchor latitude, its current gain from the
+longitude (-70.8), and its page frame from the SWE handover ramp, so its bed was -30 m
+everywhere and its churn physics ran on nonsense for a week without a visible tell. Fixed by
+putting the C++ rows in the shader's order, and `dxtest` now reflects every cbuffer variable
+and matches its offset, size and name against the header's rows (nested `ComposedSurfaceCb`
+rows carry their member as a prefix, `cs + u == gCsU`); a deliberate same-size rotation fails
+with `FAIL cb layout: at 128 B ChurnCb has gSweM but ChurnCbData has pageB`. Two bank rows
+and one churn row were renamed on the C++ side to their shader names on the way.
+
+**Measured.** Flood rail, 1200 frames RENDER: 5.05 / 5.11 ms mean (the session's earlier
+default 4.86-4.91): the resolver's trig and two residency reads per bank texel per ring, ~0.15
+ms. `--selftest` passes (dxtest x5 size + layout, gatest incl. the cube-face inverse); the boot
+validates 59 graph edges; `out/rail_bed_720.mp4` is the flood rail on this path.
+
+**What this opens.** A `WeatherManager` window anywhere the tenant has a bed -- which is
+everywhere -- and the bank's shoaling, current amplification and depth-limited breaking on
+every coast the rings reach. The z14 origin is still repeated in `main.cpp` (item 7's Host
+object); Boston's window is still not mip-pinned (item 6).

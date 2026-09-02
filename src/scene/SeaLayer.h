@@ -201,14 +201,18 @@ private:
         float dt, tau, pad0, pad1;
         float jetA[4];
         float jetB[4];
-        float misc[4];   // x = chop-band wavenumber (M5c; was deep phase speed)
+        float miscC[4];  // x = chop-band wavenumber (M5c; was deep phase speed); gMiscC
         float waveD[4];
         float bathyG[4]; // M5c: CUDEM world x0, z0, 1/sizeX, 1/sizeZ
+        float sweM[4];   // M5c: solved-field on, current gain, seaward blend x-range
         // M9ar: THE BED IS THE HEIGHT MEGATEXTURE. world -> lat/lon (orgLat, orgLon, 1/mPerLat,
-        // 1/mPerLon) and the page frame (org px x, y, 1/16384, world px at z14). Appended LAST.
+        // 1/mPerLon) and the page frame (org px x, y, 1/16384, world px at z14). Appended LAST
+        // -- and M9ax found them inserted BEFORE sweM on this side only: same bytes, every row
+        // from gSweM on rotated (the churn read its current gain from the longitude for a
+        // week; priors 22). The order here IS the shader's.
         float geoA[4];
         float winA[4];
-        float sweM[4];   // M5c: solved-field on, current gain, seaward blend x-range
+        float pageB[4];  // M9ax: x = the z14 page's slice
     };
     struct SpecCbData {
         float rect[4];

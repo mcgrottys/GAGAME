@@ -128,7 +128,7 @@ private:
         uint32_t slotsB[4];
         uint32_t slotsC[4];   // x = churn atlas SRV (M7e foam memory)
         float churn[4];       // xy origin, z 1/domain, w atlas texels
-        float waveDir[4];     // M7p: peak propagation dir xy, z valid
+        float peakDir[4];     // M7p: peak propagation dir xy, z valid (gPeakDir)
         uint32_t slotsD[4];   // M7q: height window SRV, its residency-map SRV
         float geoA[4];        // world->latlon: orgLat, orgLon, 1/mPerLat, 1/mPerLon
         float winA[4];        // window: org px x, org px y, 1/sizePx, full-world px (z14)
@@ -140,7 +140,7 @@ private:
         float foamA[4];       // scene closures: churnGain, shedSteepCap, shedMssCeil, crestLo
         float foamB[4];       // crestHi, depthLo, depthHi, spare
         float waveSig[32];     // (cos, sin)(sigma_c t), packed 2 comps per float4 row
-        float waveDirTab[32];  // unit propagation (east, north), same packing
+        float waveDir[32];     // unit propagation (east, north), same packing (gWaveDir)
         float waveScale[32];   // (aMax, kMax) dequant scales, same packing
         float boatA[32];       // M8 wakes: (x, z, heading rad, speed m/s) x8
         float boatB[32];       // (wake amp m, hull half-length m, enabled, spare) x8
