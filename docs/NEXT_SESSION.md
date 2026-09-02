@@ -136,8 +136,13 @@ The solver domain is pinned at mip 0 every frame; the trace probe (`--trace 42.8
 200 frames) is the check -- page texel vs CPU stack, MATCH. A pixel diff is NOT a check here:
 any bed change moves the solve and the foam everywhere. The height page is fed by a TileTree
 over BuildHeightStack under --color-trees (section 37: fidelity-sorted inputs, float leaves,
-R16F root, worst 0.25 m / 7 mm against the composed cache). Next: the water/weather planes as
-trees, and making --color-trees the default once the height tree is warm and packed.
+R16F root, worst 0.25 m / 7 mm against the composed cache). USER DECISIONS (2026-09-01): the water/weather planes stay in RAM -- fine as is; a disk tree
+for them waits until the loader identity carries the forecast cycle (a tree keyed on name|unit
+would serve a stale GFS forever). Confirmed: seabed HEIGHTS are already in the height
+megatexture (the same layers carry land and seafloor elevation); seabed COLOUR is in the colour
+megatexture via earth.seafloor. What the acceptance image still wants is an INGESTED seafloor
+appearance source (shaded bathymetry / sediment imagery) replacing the classifier's colour --
+a colour-tree source, not a height change. Next: that, then --color-trees as the default.
 
 ## 2b. The rungs are DELETED for colour (section 34) AND height (section 35).
 
