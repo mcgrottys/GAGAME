@@ -4,6 +4,7 @@
 #include "core/Residency.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 
@@ -95,16 +96,30 @@ bool WeatherManager::Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& 
         auto zero = [](double) { return 0.0; };
         w.solver->Spinup(gpu, simUnix, w.spinupHours, w.oceanAt, zero, zero, zero);
         w.active = true;
-        RefreshMirror(gpu, w, simUnix);
+        // No mirror read here: the window's mirror fills on the first RefreshMirrorsTo (the
+        // probe harness calls it right after Update); the camera-rule activation in the
+        // loop has no reader to fill it for.
         return true;
     }
     return false;
 }
 
-void WeatherManager::RefreshMirror(Gpu& gpu, Window& w, double simUnix) {
-    if (!w.solver || !w.solver->Ready()) return;
-    w.solver->ReadFields(gpu, w.eta, w.etaW, w.etaH, w.uv4, w.uvW, w.uvH);
-    w.mirrorT = simUnix;
+void WeatherManager::RefreshMirrorsTo(Gpu& gpu, double simUnix) {
+    for (Window& w : m_windows) {
+        if (!w.active || !w.solver || !w.solver->Ready()) continue;
+        if (simUnix - w.mirrorT <= kMirrorDt) continue;   // inside the contract: no drain
+        const auto t0 = std::chrono::steady_clock::now();
+        w.solver->ReadFields(gpu, w.eta, w.etaW, w.etaH, w.uv4, w.uvW, w.uvH);
+        w.mirrorT = simUnix;
+        const double ms =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() *
+            1000.0;
+        // Loud by design: two full GPU drains. One line per probe/dump/trace run is the
+        // expectation; a line per frame means a reader crept into the loop (step 2).
+        Log("[weather] %s mirror read back to t=%.0f: %ux%u eta + uv in %.1f ms (on demand: "
+            "a frame-loop reader would print this every %.0f sim-s)",
+            w.name.c_str(), simUnix, w.etaW, w.etaH, ms, kMirrorDt);
+    }
 }
 
 void WeatherManager::PinDomains(ResidencyManager& res, int hgtTenant) {
@@ -166,7 +181,9 @@ void WeatherManager::Update(Gpu& gpu, ShaderCompiler& sc, const std::wstring& sh
             auto zero = [](double) { return 0.0; };
             w.solver->AdvanceTo(gpu, simUnix, w.oceanAt, zero, zero, zero);
         }
-        if (w.active && simUnix - w.mirrorT > kMirrorDt) RefreshMirror(gpu, w, simUnix);
+        // The mirror used to refresh here every kMirrorDt (two readbacks, two WaitIdle
+        // drains, 8.7 M half->float: 17.9-27.2 ms on every 61st frame of the storm rail)
+        // for a Query nobody in the loop calls. RefreshMirrorsTo, on demand, replaced it.
         if (w.active) ++active;
     }
     char s[96];

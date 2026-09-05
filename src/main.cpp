@@ -3416,6 +3416,8 @@ int main(int argc, char** argv) {
                 Log("[wx] probe: manager update at the probe point");
                 weather.Update(gpu, renderer.Shaders(), opt.shaderDir, simUnix, plat, plon,
                                1000.0);
+                // The probe reads the windows' CPU mirrors: fill them once, at its instant.
+                weather.RefreshMirrorsTo(gpu, simUnix);
                 auto show = [&](double res) {
                     const WeatherSample ws = weather.Query(plat, plon, simUnix, res);
                     Log("[wx] res %6.0f m: level %+6.2f  cur %+5.2f,%+5.2f  Hs %4.2f Tp %4.1f "
@@ -4120,8 +4122,9 @@ int main(int argc, char** argv) {
                     gisLayer->tolMeters = static_cast<float>(altV * cam.fovY / vh);
                 }
                 // M6x: the weather manager's residency clock -- the camera's ground position
-                // is the demand signal; dormant windows spin up as it arrives, mirrors
-                // refresh, owned solvers advance. All in the flat one-world frame.
+                // is the demand signal; dormant windows spin up as it arrives, owned solvers
+                // advance. All in the flat one-world frame. (The CPU mirrors no longer
+                // refresh here: nothing in the loop reads them -- step 2 of PERF_EXPERIMENT.)
                 if (!marsMode) {
                     PROF_BEGIN();
                     weather.Update(gpu, renderer.Shaders(), opt.shaderDir, simUnix,
@@ -4820,6 +4823,9 @@ int main(int argc, char** argv) {
                 // so proofs/inlet_storm.py -- the user's own vqview wave model -- can run
                 // the independent 2D storm figure on the exact data this engine uses.
                 if (opt.dumpWater && !marsMode && sea) {
+                    // The export reads the solver mirrors through Query: bring them to this
+                    // instant first (the one readback of the run; the loop never did one).
+                    weather.RefreshMirrorsTo(gpu, simUnix);
                     const double bx0 = -1200.0, bz0 = -1600.0, cellW = 10.0;
                     const int nxW = 420, nyW = 300;
                     std::vector<float> bedW(nxW * nyW), lvlW2(nxW * nyW), uW(nxW * nyW),
@@ -4870,6 +4876,7 @@ int main(int argc, char** argv) {
                         nxW, nyW, cellW);
                 }
                 if (opt.trace && !marsMode && sea && waterBank) {
+                    weather.RefreshMirrorsTo(gpu, simUnix);   // a no-op after the export above
                     const double tlat = opt.traceLat, tlon = opt.traceLon;
                     const double wx = (tlon - BathyModel::kOrgLon) * BathyModel::kMPerLon;
                     const double wz = (tlat - BathyModel::kOrgLat) * BathyModel::kMPerLat;
