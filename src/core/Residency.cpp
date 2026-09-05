@@ -529,6 +529,10 @@ void ResidencyManager::Want(int tenant, uint32_t face, uint32_t mip, float u0, f
                         held = true;
                         ++ringHeld;
                         ++ringHeldFrame;
+                        // Step 25: held under a parent that will never map -- the exact
+                        // settle's "unreachable", never its deficit. The request stream is
+                        // the same either way; this is a count.
+                        if (parent && parent->state == TileState::Failed) ++ringHeldDeadFrame;
                         continue;
                     }
                 }
@@ -819,6 +823,126 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     }
     lap(1);
 
+    // ---- Step 25: THE EXACT SETTLE (Residency.h settleExact). Harness only: main raises the
+    // flag for the held frames of a --settle-exact still, and outside a hold this block is
+    // never entered. It runs AFTER the landed reads claimed their tiles (a tile that arrived
+    // this turn is mapped, not deficit) and BEFORE the loads start and the batch is gathered
+    // (a stale pending tile is dropped before it takes a load slot or a map).
+    settleTurn = SettleTurn{};
+    if (settleExact) {
+        std::lock_guard<std::mutex> lk(m_mx);
+        // Mapped but not yet claimed: its bytes are still crossing the bus on a DirectStorage
+        // batch, and the landed loop would claim a dropped tile (state Mapped until it
+        // retires) into a byte the drop had just raised. Such a tile waits for its fence and
+        // is dropped on a later turn.
+        std::vector<const Tracked*> reading;
+        for (const auto& b : m_inFlightReads) {
+            for (const auto& tile : b.tiles) reading.push_back(tile.get());
+        }
+        std::sort(reading.begin(), reading.end());
+        // THE CAP'S CASUALTIES. MEASURED (bird, first --settle-exact run, 2026-09-05): 988
+        // wave.field mip-0 tiles wanted, in state Loaded, tracked, in no queue -- the mapped
+        // sets summed to exactly kPoolCapTiles (8192) against a want set of 9176 tiles
+        // (573 MB), and MapAndFill's cap branch, finding no victim (every mapped tile is
+        // wanted every frame), breaks out of a batch the gather had already erased from
+        // m_loading. Outside a hold that is the shipped behaviour and the reason a quiet
+        // --settle-sync fires over a race-decided resident set; here the hold's pool holds the
+        // want set (MapAndFill), so a Loaded tile in no queue goes back to m_loading and maps.
+        std::vector<const Tracked*> queued;
+        queued.reserve(m_loading.size());
+        for (const auto& tile : m_loading) queued.push_back(tile.get());
+        std::sort(queued.begin(), queued.end());
+        // Can this wanted, unmapped tile ever land? Climb its ancestor column to the first
+        // mapped tile: a Failed tile on the way (or the tile itself) means the ring gate and
+        // the mapping invariant keep it out forever -- unreachable, by state. A missing
+        // ancestor is not dead: the walk re-requests it next frame (the column stamps
+        // coarse-to-fine, so a wanted tile's ancestors are wanted too).
+        auto reachable = [&](const Tenant& t, const Tracked* tr) {
+            for (const Tracked* p = tr;;) {
+                if (p->state == TileState::Failed) return false;
+                if (p->state == TileState::Mapped) return true;
+                if (p->req.mip + 1 >= t.mips) return true;   // the floor: mapped at birth
+                p = t.slot[StampIndex(t, p->req.face, p->req.mip + 1, p->req.x >> 1,
+                                      p->req.y >> 1)];
+                if (!p) return true;
+            }
+        };
+        bool compact = false;
+        for (Tenant& t : m_tenants) {
+            uint32_t wanted = 0, mapped = 0, deficit = 0, unreachable = 0, stale = 0,
+                     dropped = 0, droppedMapped = 0, requeued = 0;
+            for (size_t i = 0; i < t.tracked.size();) {
+                Tracked* tr = t.tracked[i].get();
+                const size_t idx = StampIndex(t, tr->req.face, tr->req.mip, tr->req.x, tr->req.y);
+                // Want() stamps m_frame + 1 and this turn incremented m_frame: this frame's
+                // walks wrote exactly m_frame (predicted or not -- no predicted walk runs
+                // during a hold, main suspends it).
+                if ((t.stamp[idx] >> 1) == m_frame) {
+                    ++wanted;
+                    if (tr->state == TileState::Mapped) {
+                        ++mapped;
+                    } else {
+                        if (tr->state == TileState::Loaded &&
+                            !std::binary_search(queued.begin(), queued.end(), tr)) {
+                            m_loading.push_back(t.tracked[i]);
+                            ++requeued;
+                        }
+                        if (reachable(t, tr)) ++deficit;
+                        else ++unreachable;
+                    }
+                    ++i;
+                    continue;
+                }
+                if (tr->req.mip + 1 == t.mips) {   // the coarsest mip is never dropped
+                    ++i;
+                    continue;
+                }
+                const bool aged = tr->lastSeen + kEvictAgeFrames < m_frame;
+                const bool inFlight = std::binary_search(reading.begin(), reading.end(), tr);
+                if (!aged || inFlight) {
+                    ++stale;
+                    ++i;
+                    continue;
+                }
+                const std::shared_ptr<Tracked> keep = t.tracked[i];   // outlives Untrack
+                Untrack(t, tr);   // the back moved into i: do not advance
+                if (DropOne(keep)) {
+                    compact = true;
+                    ++droppedMapped;
+                }
+                ++dropped;
+            }
+            t.exWanted = wanted;
+            t.exMapped = mapped;
+            t.exDeficit = deficit;
+            t.exUnreachable = unreachable;
+            t.exStale = stale;
+            t.exDropped += dropped;
+            t.exDroppedMapped += droppedMapped;
+            t.exRequeued += requeued;
+            settleTurn.wanted += wanted;
+            settleTurn.mapped += mapped;
+            settleTurn.deficit += deficit;
+            settleTurn.unreachable += unreachable;
+            settleTurn.stale += stale;
+            settleTurn.dropped += dropped;
+            settleTurn.requeued += requeued;
+        }
+        if (compact) {
+            std::erase_if(m_mapped, [](const std::shared_ptr<Tracked>& p) { return p->dropped; });
+        }
+        // A request the ring gate held this frame is a wanted tile one ring away: deficit,
+        // unless its parent's load failed, in which case it is never admitted.
+        settleTurn.deficit += ringHeldFrame - ringHeldDeadFrame;
+        settleTurn.unreachable += ringHeldDeadFrame;
+        settleTurn.pending = static_cast<uint32_t>(m_seen.size() + m_loading.size());
+        settleTurn.reads = static_cast<uint32_t>(m_inFlightReads.size());
+        settleTurn.retiring = static_cast<uint32_t>(m_retiring.size());
+        settleTurn.exact = settleTurn.deficit == 0 && settleTurn.stale == 0 &&
+                           settleTurn.pending == 0 && settleTurn.reads == 0 &&
+                           settleTurn.retiring == 0;
+    }
+
     // ---- M9al: the instrument. Deficit by mip per tenant, queue depths, slots by kind.
     if (traceRes && (m_frame % (std::max)(1u, traceEvery)) == 0) {
         std::lock_guard<std::mutex> lk(m_mx);
@@ -866,6 +990,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         }
     }
     ringHeldFrame = 0;
+    ringHeldDeadFrame = 0;
     lap0 = Clock::now();   // the trace print above is not a phase
 
     // ---- start loads (newest-seen first, coarse first; predicted tiles yield to real ones)
@@ -1008,6 +1133,13 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
                                          D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     }
     lap(9);
+    // Step 25: a map that found no staging room this turn goes next turn -- the frame just
+    // recorded samples the old bytes, so the turn is not exact yet.
+    if (settleExact && settleTurn.exact) {
+        for (const auto& t : m_tenants) {
+            if (t.resDirty) settleTurn.exact = false;
+        }
+    }
 
     // ---- stats
     char s[256];
@@ -1073,7 +1205,12 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
     std::vector<std::shared_ptr<Tracked>> toFill;
     for (const auto& tile : batch) {
         Tenant& t = m_tenants[tile->tenant];
-        if (m_freePool.empty() && m_heaps.size() * kPoolChunkTiles >= kPoolCapTiles) {
+        // Step 25: during an exact hold the pool holds the WANT SET, whatever its size -- the
+        // still is defined as every wanted tile resident, and a cap below the want set makes
+        // the picture a race (see the ledger's pool line). Outside a hold the cap is the
+        // shipped one, and this test is the shipped test.
+        if (!settleExact && m_freePool.empty() &&
+            m_heaps.size() * kPoolChunkTiles >= kPoolCapTiles) {
             // Pool at budget: evict.
             std::sort(m_mapped.begin(), m_mapped.end(), [](const auto& a, const auto& b) {
                 if (a->lastSeen != b->lastSeen) return a->lastSeen < b->lastSeen;
@@ -1215,6 +1352,89 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     }
     phase(6);
+}
+
+void ResidencyManager::LogSettleExact(uint32_t heldFrames) const {
+    // The per-tenant ledger of the last turn, and the mapped set itself as one number: FNV-1a
+    // over the tracked tiles in state Mapped, in key order (face, mip, y, x), so the order the
+    // landings happened in -- which two runs never share -- is not in the hash and the SET is.
+    for (size_t k = 0; k < m_tenants.size(); ++k) {
+        const Tenant& t = m_tenants[k];
+        std::vector<Key> keys;
+        keys.reserve(t.tracked.size());
+        for (const auto& tr : t.tracked) {
+            if (tr->state == TileState::Mapped) keys.push_back(MakeKey(static_cast<int>(k), tr->req));
+        }
+        std::sort(keys.begin(), keys.end());
+        uint64_t h = 14695981039346656037ull;
+        for (const Key key : keys) {
+            for (int b = 0; b < 8; ++b) {
+                h ^= (key >> (8 * b)) & 0xFFu;
+                h *= 1099511628211ull;
+            }
+        }
+        if (!t.exWanted && !t.exDropped && keys.empty()) continue;
+        Log("[settle-exact]   %-44S wanted %u, mapped %u, deficit %u, unreachable %u, stale %u "
+            "| dropped %u over the hold (%u were mapped) | mapped set %zu tiles, FNV-1a %016llx",
+            t.name.c_str(), t.exWanted, t.exMapped, t.exDeficit, t.exUnreachable, t.exStale,
+            t.exDropped, t.exDroppedMapped, keys.size(), static_cast<unsigned long long>(h));
+        // The tiles that keep a hold from being exact, NAMED: the wanted-and-unmapped set by
+        // state and mip, whether each still sits in a queue, and the first few by address.
+        // (The gate's rule: a hold that never becomes exact names its tiles; it is the next
+        // residency bug, not a number to soften.)
+        if (t.exDeficit || t.exUnreachable) {
+            uint32_t byState[5] = {}, byMip[64] = {}, queued = 0, dropped = 0;
+            std::string named;
+            uint32_t shown = 0;
+            for (const auto& tr : t.tracked) {
+                const size_t idx = StampIndex(t, tr->req.face, tr->req.mip, tr->req.x, tr->req.y);
+                if ((t.stamp[idx] >> 1) != m_frame || tr->state == TileState::Mapped) continue;
+                ++byState[static_cast<int>(tr->state)];
+                ++byMip[tr->req.mip < 64 ? tr->req.mip : 63];
+                if (tr->dropped) ++dropped;
+                bool inQ = false;
+                for (const auto& q : m_seen) inQ = inQ || q == tr;
+                for (const auto& q : m_loading) inQ = inQ || q == tr;
+                if (inQ) ++queued;
+                if (shown < 6) {
+                    char b[96];
+                    snprintf(b, sizeof(b), " f%u m%u (%u,%u) state %d%s%s", tr->req.face,
+                             tr->req.mip, tr->req.x, tr->req.y, int(tr->state),
+                             tr->dropped ? " dropped" : "", inQ ? " queued" : " UNQUEUED");
+                    named += b;
+                    ++shown;
+                }
+            }
+            std::string mips;
+            for (uint32_t m = 0; m < 64; ++m) {
+                if (!byMip[m]) continue;
+                char b[24];
+                snprintf(b, sizeof(b), " m%u:%u", m, byMip[m]);
+                mips += b;
+            }
+            Log("[settle-exact]     unmapped wanted: seen %u, loading %u, loaded %u, failed %u; "
+                "%u in a queue, %u dropped; by mip%s; e.g.%s",
+                byState[0], byState[1], byState[2], byState[4], queued, dropped, mips.c_str(),
+                named.c_str());
+        }
+    }
+    // The pool against the shipped cap. Over the cap, the picture outside this hold is decided
+    // by which tiles landed first (the header's note on settleExact).
+    uint32_t requeued = 0;
+    for (const auto& t : m_tenants) requeued += t.exRequeued;
+    const size_t poolTiles = m_mapped.size();
+    Log("[settle-exact] pool: %zu tiles mapped (%.0f MB) against the shipped cap of %u tiles "
+        "(%.0f MB); %u cap casualties re-queued over the hold%s",
+        poolTiles, poolTiles / 16.0, kPoolCapTiles, kPoolCapTiles / 16.0, requeued,
+        poolTiles > kPoolCapTiles
+            ? " -- THE WANT SET EXCEEDS THE SHIPPED CAP: outside this hold the resident set at "
+              "this pose is a race for the last slots"
+            : "");
+    Log("[settle-exact] held %u frames: wanted %u, mapped %u, deficit %u, unreachable %u, stale "
+        "%u, pending %u, in-flight reads %u, retiring %u -- %s",
+        heldFrames, settleTurn.wanted, settleTurn.mapped, settleTurn.deficit,
+        settleTurn.unreachable, settleTurn.stale, settleTurn.pending, settleTurn.reads,
+        settleTurn.retiring, settleTurn.exact ? "EXACT" : "not exact");
 }
 
 void ResidencyManager::RegisterField(const char* name, std::function<uint64_t()> residentBytes,

@@ -137,6 +137,10 @@ struct Options {
                                       // residency queues and DirectStorage reads have drained
     uint32_t settleHold = 0;          // --settle-hold N: hold it for exactly N frames, counted;
                                       // with --settle-sync, drain first and then to at least N
+    bool settleExact = false;         // --settle-exact: hold until the resident set IS the
+                                      // walk's want set (Residency.h settleExact), churn frozen
+    bool settleClearChurn = false;    // --settle-clear-churn: zero the churn atlas at the first
+                                      // held frame (SeaLayer.h ClearChurn), the history A/B
     std::wstring dumpHdr;             // --dump-hdr PATH: the RGBA16F radiance before the tonemap
     std::string mp4;                  // --mp4 PATH: pipe rail frames straight to an encoder
     bool flatBed = false;             // --flat-bed N: constant bed, to A/B bathymetry
@@ -357,6 +361,19 @@ Options ParseArgs(int argc, char** argv) {
         // 3000-frame drain cap, which is a give-up rule for the drain, not a budget.
         else if (a == "--settle-hold")
             o.settleHold = static_cast<uint32_t>(atoi(next("300").c_str()));
+        // --settle-exact: the same clock hold and churn freeze, exited only when the resident
+        // set IS the walk's want set -- every wanted tile mapped at its mip, every mapped tile
+        // the walk does not want dropped, nothing pending, in flight or retiring, for
+        // kEvictAgeFrames + 4 consecutive turns (Residency.h settleExact). --settle-sync's
+        // quiet test fires over two different resident sets (step 21's first attempt: two
+        // quiet bird holds differed in whole tiles' mips); this one names the set. With
+        // --settle-hold N it composes: exact first, then to at least N.
+        else if (a == "--settle-exact") o.settleExact = true;
+        // --settle-clear-churn: the churn atlas is zeroed at the first held frame, so the still
+        // carries no foam deposited during the real frames (which lands when the bed and the
+        // wave pages happen to). The A/B of a held still with and without it tells the
+        // residency's share of a residual from the churn history's (SeaLayer.h ClearChurn).
+        else if (a == "--settle-clear-churn") o.settleClearChurn = true;
         else if (a == "--dump-hdr") o.dumpHdr = Widen(next("out.rgba16f").c_str());
         // M9ah: pack every realization's loose tiles into one archive and exit.
         else if (a == "--pack-tiles") o.packTiles = true;
@@ -3883,6 +3900,11 @@ int main(int argc, char** argv) {
         uint32_t settleFrames = 0, settleQuiet = 0, settlePending0 = 0, settleReads0 = 0;
         constexpr uint32_t kSettleQuietFrames = ResidencyManager::kEvictAgeFrames;
         constexpr uint32_t kSettleCapFrames = 3000;   // then dump anyway, and say so
+        // Step 25: --settle-exact's own count -- consecutive turns the manager reported the
+        // resident set equal to the want set. kEvictAgeFrames past the last drop its NULL map
+        // has landed; the +4 is one more overlap window with nothing moving.
+        uint32_t settleExactQuiet = 0;
+        constexpr uint32_t kSettleExactFrames = ResidencyManager::kEvictAgeFrames + 4u;
         FramePipe recPipe;
         std::vector<uint8_t> recPixels;
         if (!opt.mp4.empty()) {
@@ -4612,8 +4634,8 @@ int main(int argc, char** argv) {
                 // of one binary at the bird), and two stills held for different numbers of
                 // frames are not like for like until the churn is frozen through the hold
                 // (it is, below).
-                if ((opt.settleSync || opt.settleHold) && !opt.dump.empty() && opt.headless &&
-                    !opt.dumpBoth) {
+                if ((opt.settleSync || opt.settleHold || opt.settleExact) && !opt.dump.empty() &&
+                    opt.headless && !opt.dumpBoth) {
                     const uint32_t pend = resMgr.PendingCount();
                     const uint32_t reads = resMgr.InFlightReads();
                     const bool quiet = pend == 0 && reads == 0 && ringHeldBefore == 0;
@@ -4621,24 +4643,52 @@ int main(int argc, char** argv) {
                         settling = true;
                         settlePending0 = pend;
                         settleReads0 = reads;
+                        // Step 25: the manager's exact turn runs on every held frame from the
+                        // next one on (this frame's turn was the shipped one) and never
+                        // outside a hold.
+                        resMgr.settleExact = opt.settleExact;
+                        // --settle-clear-churn: the whole atlas onto the clear list; the next
+                        // held frame's clear dispatch zeroes it and the freeze keeps it so.
+                        if (opt.settleClearChurn && sea) {
+                            Log("[settle-clear-churn] %u resident churn tiles onto the clear "
+                                "list at the first held frame",
+                                sea->ClearChurn());
+                        }
                     }
                     settleQuiet = quiet ? settleQuiet + 1 : 0;
+                    // --settle-exact: the turn just taken found the resident set equal to the
+                    // want set (Residency.h settleExact) -- for kSettleExactFrames turns
+                    // running, one overlap window past the last drop's NULL map.
+                    const ResidencyManager::SettleTurn& ex = resMgr.settleTurn;
+                    settleExactQuiet = (opt.settleExact && ex.exact) ? settleExactQuiet + 1 : 0;
                     // The drain's give-up cap bounds the DRAIN, never the counted hold: a run
                     // asked for N frames gets N whatever the residency is doing.
                     const bool drainHolds =
                         opt.settleSync && settleQuiet < kSettleQuietFrames &&
                         settleFrames < kSettleCapFrames;
+                    const bool exactHolds =
+                        opt.settleExact && settleExactQuiet < kSettleExactFrames &&
+                        settleFrames < kSettleCapFrames;
                     const bool countHolds = settleFrames < opt.settleHold;
-                    if (drainHolds || countHolds) {
+                    if (drainHolds || exactHolds || countHolds) {
                         ++settleFrames;
                         if (settleFrames % 150u == 0u) {
                             Log("[settle-sync] +%u frames at the held instant: pending %u, "
                                 "in-flight reads %u, ring-held %u, pool %.0f MB",
                                 settleFrames, pend, reads, ringHeldBefore,
                                 PoolCommittedBytes() / 1048576.0);
+                            if (opt.settleExact) {
+                                Log("[settle-exact] +%u: wanted %u, mapped %u, deficit %u, "
+                                    "unreachable %u, stale %u, dropped this turn %u, retiring "
+                                    "%u, exact for %u turns",
+                                    settleFrames, ex.wanted, ex.mapped, ex.deficit,
+                                    ex.unreachable, ex.stale, ex.dropped, ex.retiring,
+                                    settleExactQuiet);
+                            }
                         }
                         continue;
                     }
+                    if (opt.settleExact) resMgr.LogSettleExact(settleFrames);
                     // MEASURED (helm still, 14:00, 2026-09-05): with the predicted walk running
                     // through the hold, pending hit 0 within 300 frames yet was never quiet four
                     // frames running in 3000; with it suspended (this code), 149 tiles stay
@@ -4648,20 +4698,41 @@ int main(int argc, char** argv) {
                     // run the hold converged in 217-226 frames. Every held pair agreed to
                     // 2-13 px, the same band as two unheld runs (5-18 px): the horizon-line
                     // floor is not the residency's, and 'none' at the helm is still open (P16).
-                    const char* rule = opt.settleSync
-                                           ? (opt.settleHold ? "drain, then --settle-hold"
-                                                             : "--settle-sync, judged")
-                                           : "--settle-hold, counted";
+                    //
+                    // Step 25, --settle-exact, MEASURED (2026-09-05, out/step25): the 149 were
+                    // stale pending tiles (wanted on the approach, not at the pose) and the
+                    // exact turn drops them; the helm reaches EXACT in 243-252 held frames
+                    // (11367 wanted = 11367 mapped), the bird in 214-216 (9176 -- a want set
+                    // 984 tiles OVER the shipped pool cap, so the drain-judged bird was a race:
+                    // two binaries' --settle-sync birds differed by 21.7 % of the pixels), the
+                    // globe in 619-737, key7km in 228-253. Two exact runs of one binary: bird
+                    // 0 px, globe 0 px (at different hold lengths), --lens bed at the bird
+                    // 0 px, key7km 8 px at |d| 1, helm 65 px all on rows 430-432 (the horizon
+                    // line, max |d| 15) with every tenant's mapped-set hash equal -- P16 is not
+                    // the residency's. helm_ebb (19:30): 17 % of the water, 10 % with the churn
+                    // cleared at the hold (--settle-clear-churn): the churn's pre-hold history
+                    // is part of it and a second field integrated over the real frames is the
+                    // rest; the still is exact in residency and not yet in history.
+                    const char* rule =
+                        opt.settleExact
+                            ? (opt.settleHold ? "exact, then --settle-hold" : "--settle-exact, judged")
+                        : opt.settleSync
+                            ? (opt.settleHold ? "drain, then --settle-hold" : "--settle-sync, judged")
+                            : "--settle-hold, counted";
+                    const bool drained = !opt.settleSync || settleQuiet >= kSettleQuietFrames;
+                    const bool exact = !opt.settleExact || settleExactQuiet >= kSettleExactFrames;
                     Log("[settle-sync] dump frame held %u extra frames at the same instant (%s): "
-                        "pending %u -> %u, in-flight reads %u -> %u, quiet for %u frames, pool "
-                        "%.0f MB%s",
+                        "pending %u -> %u, in-flight reads %u -> %u, quiet for %u frames, exact "
+                        "for %u turns, pool %.0f MB%s%s",
                         settleFrames, rule, settlePending0, pend, settleReads0, reads, settleQuiet,
-                        PoolCommittedBytes() / 1048576.0,
-                        (!opt.settleSync || settleQuiet >= kSettleQuietFrames)
-                            ? ""
-                            : " -- CAP REACHED, the residency never drained (a pending set that "
-                              "stopped shrinking with the pool below its cap is waiting on "
-                              "parents no walk asks for); dumping anyway");
+                        settleExactQuiet, PoolCommittedBytes() / 1048576.0,
+                        drained ? ""
+                                : " -- CAP REACHED, the residency never drained (a pending set "
+                                  "that stopped shrinking with the pool below its cap is waiting "
+                                  "on parents no walk asks for); dumping anyway",
+                        exact ? ""
+                              : " -- CAP REACHED, the resident set never matched the want set "
+                                "(see the [settle-exact] ledger above); dumping anyway");
                 }
                 // The last frame's loop interval: measured here rather than at a next
                 // iteration that never comes.

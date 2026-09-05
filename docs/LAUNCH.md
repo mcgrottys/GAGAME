@@ -71,6 +71,26 @@ ebb — the whitewater river over the shoal); calm evening low `--start 2026-08-
   flag both sides share. The churn atlas is frozen for exactly the held frames — its kernel
   only climbs at a frozen dt, so an unfrozen hold made the foam a function of the hold's
   length (`[gpu] sea.churn 0.000 ms` on held frames is the proof of wire).
+- `--settle-exact` — the same hold, exited only when the RESIDENT SET IS THE WALK'S WANT SET:
+  every held turn the residency manager reads the walk's per-tile frame stamps, counts the
+  deficit (wanted, not mapped at that mip), drops every tracked tile the walk did not want
+  this frame (the invalidation's own retire path; the coarsest mip is the floor and stays; a
+  tile is dropped once unwanted for `kEvictAgeFrames` turns and never while a DirectStorage
+  batch still carries it), and reports the turn EXACT when deficit, stale, pending, in-flight
+  and retiring are all zero; the dump waits for `kEvictAgeFrames + 4` exact turns in a row. A
+  wanted tile that can never land (its load failed, or an ancestor's did) is excluded by its
+  state, never by a timeout. `--settle-sync`'s quiet test fires over two different resident
+  sets (two quiet bird holds differed in whole tiles' mips); this is THE GATE'S definition of
+  settled from perf step 25 on, on both binaries of an A/B: the still is a function of the
+  pose and the data. The exit prints a `[settle-exact]` ledger per tenant -- wanted, mapped,
+  deficit, unreachable, dropped over the hold, and an FNV-1a of the mapped set -- so two runs
+  that differ can be told apart as "different resident set" or "same set, different bytes".
+  Composes with `--settle-hold N` (exact first, then to at least N). `--settle-sync` stays as
+  it is for the pop-in track's landing series, which needs the schedule-dependent behaviour.
+  `--settle-clear-churn` zeroes the churn atlas at the first held frame (the clear kernel over
+  every resident tile, then the freeze keeps it): the A/B of a held still with and without it
+  separates a residual the residency owns from one the churn's pre-hold history owns (the foam
+  deposited during the real frames lands when the bed and the wave pages happened to).
 - `py -3 proofs/water_optics.py` — M9's water-quality forms (the Kd490→RGB transfer and the
   two-flux deep colour) against the measured NOAA fields; renders `proofs/water_optics.png`
   with the rendered water swatches. Toggle the feature itself with `closures.waterOptics`

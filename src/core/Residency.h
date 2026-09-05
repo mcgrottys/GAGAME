@@ -282,6 +282,67 @@ public:
     // with PendingCount() this is "nothing is still landing" -- what --settle-sync waits for.
     uint32_t InFlightReads() const { return static_cast<uint32_t>(m_inFlightReads.size()); }
 
+    // Step 25 (docs/PERF_EXPERIMENT.md): --settle-exact. THE RESIDENT SET IS THE WANT SET.
+    //
+    // --settle-sync's quiet test (pending 0, no in-flight read, nothing ring-held) fires over
+    // two different resident sets: a request the ring gate held and the walk then stopped
+    // asking for is neither pending nor resident, and what stays MAPPED is whatever the 240
+    // real frames happened to land -- tiles the predicted walk asked for, tiles wanted at a
+    // finer mip on the approach than at the pose. MEASURED (step 21's first attempt, bird,
+    // --settle-sync --settle-hold 400, two runs, both quiet at pending 0): --lens bed differed
+    // by 2.1 % of the pixels with max |d| 217, whole tiles resident at different mips; the
+    // ring-held totals were 3.31 M against 3.11 M. The picture the shader samples is the
+    // finest mapped mip under each pixel (the residency byte clamps the LOD there), so a
+    // mapped tile the walk does not want is not inert: it is what a still is made of.
+    //
+    // While main raises settleExact (the held frames of a --settle-exact still), every
+    // ProcessQueues turn reads the walk's own record -- the per-tile frame stamp Want()
+    // writes down the whole ancestor column -- and (a) counts the DEFICIT, the stamped tiles
+    // not mapped at their mip; (b) DROPS every tracked tile whose stamp is stale (not wanted
+    // this frame at that mip) through Untrack + DropOne, the invalidation's own path: the
+    // residency byte rises now, the NULL map and the pool slot follow kEvictAgeFrames later,
+    // a tile still crossing the bus on a DirectStorage batch waits for its fence, and a tile
+    // is only dropped once it has been unwanted for kEvictAgeFrames turns (the evictor's own
+    // age rule); the coarsest mip is the floor and is never dropped; (c) leaves the issuing to
+    // the walks, which run every held frame at the fixed pose; (d) reports the turn as EXACT
+    // when the deficit is zero, no stale tile is tracked, and nothing is pending, in flight
+    // or retiring -- main dumps after kEvictAgeFrames + 4 consecutive exact turns. A wanted
+    // tile that can never land -- its own load failed, or an ancestor's did, so the ring gate
+    // holds its children forever -- is excluded from the deficit BY ITS STATE (the manager
+    // knows), never by a timeout.
+    //
+    // THE POOL DURING THE HOLD IS THE WANT SET. MEASURED (bird, the first exact run): the
+    // walk wants 9176 tiles (573 MB) and kPoolCapTiles is 8192 (512 MB); at the cap the
+    // evictor finds no victim (every mapped tile is wanted every frame), MapAndFill breaks
+    // out of its batch, and the batch's remaining tiles -- already erased from m_loading --
+    // are lost in state Loaded, tracked and unqueued, until something invalidates them.
+    // Which 984 tiles lose is decided by landing order: that is the race a quiet
+    // --settle-sync fired over. So while settleExact is raised MapAndFill's cap test is
+    // skipped (the pool grows to the want set, bounded by the walk) and the exact turn
+    // returns a wanted Loaded tile in no queue to m_loading. The ledger prints the mapped
+    // total against the shipped cap so an over-cap pose is named. Outside a hold settleExact
+    // is false and this is the shipped turn, call for call.
+    bool settleExact = false;
+    // Of ringHeldFrame: requests held under a parent whose load FAILED. They can never be
+    // admitted, so the exact settle counts them as unreachable, not as deficit.
+    uint32_t ringHeldDeadFrame = 0;
+    struct SettleTurn {
+        uint32_t wanted = 0;        // tracked tiles stamped by this frame's walks
+        uint32_t mapped = 0;        // ... of which mapped at their mip
+        uint32_t deficit = 0;       // ... wanted, not mapped, and able to land (+ live ring-held)
+        uint32_t unreachable = 0;   // ... wanted, and never will land (Failed, or under one)
+        uint32_t stale = 0;         // tracked, not wanted this frame, still tracked after the turn
+        uint32_t dropped = 0;       // stale tiles dropped this turn
+        uint32_t requeued = 0;      // wanted, Loaded, in no queue (the cap's casualties) -> m_loading
+        uint32_t pending = 0, reads = 0, retiring = 0;
+        bool exact = false;
+    };
+    SettleTurn settleTurn;   // the last turn's finding; main reads it after RenderFrame
+    // The per-tenant report at the exit of an exact hold: wanted, mapped, deficit, dropped,
+    // and an FNV-1a over the mapped set (face, mip, x, y in key order) -- two runs, or two
+    // binaries that issue the same want stream, print the same hash or the difference is real.
+    void LogSettleExact(uint32_t heldFrames) const;
+
 private:
     struct Tracked;
     struct Tenant {
@@ -340,6 +401,10 @@ private:
         // read a file; one that took longer painted. Updated under m_mx by the workers.
         uint32_t loadsRead = 0, loadsPaint = 0;
         uint64_t readUs = 0, paintUs = 0;
+        // Step 25: the exact settle's per-tenant ledger -- the last turn's counts and the
+        // drops summed over the hold, for LogSettleExact.
+        uint32_t exWanted = 0, exMapped = 0, exDeficit = 0, exUnreachable = 0, exStale = 0;
+        uint32_t exDropped = 0, exDroppedMapped = 0, exRequeued = 0;
     };
 
 
