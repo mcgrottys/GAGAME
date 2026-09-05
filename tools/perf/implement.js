@@ -154,7 +154,14 @@ const PROCEDURE_V8 = PROCEDURE_V7 + `
 // The order of the run: 1..6, 21, 25, 22, 23, 24, 27, 26, 7.. -- so 'after step 25' is a position, not a number.
 const AFTER_25 = new Set([22, 23, 24, 26, 27, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20])
 const AFTER_22 = new Set([23, 24, 26, 27, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20])
-const procFor = (n) => n === 1 ? PROCEDURE : n === 2 ? PROCEDURE_V2 : n <= 4 ? PROCEDURE_V3 : n <= 6 ? PROCEDURE_V4 : AFTER_22.has(n) ? PROCEDURE_V8 : AFTER_25.has(n) ? PROCEDURE_V7 : PROCEDURE_V5
+// v9 (after step 24): the key7km flip patch is the whole near-water patch x 960..1002, y 819..873 at
+// |d| <= 1 (rounding-boundary crossings of the solver's run-to-run state, < 0.25 LSB in radiance),
+// not only the 8-px cluster; a want-set change is an input to the STREAMER and is gated on the rail
+// (frames extracted and read), never on the settled stills alone (priors 29).
+const PROCEDURE_V9 = PROCEDURE_V8 + `
+- MEASURED AFTER STEP 24 (in force from step 27): (5) the key7km run-to-run flip on one binary covers the near-water patch x 960..1002, y 819..873 at |d| <= 1 (every such pixel < 0.25 LSB-equivalent in radiance: --dump-hdr on both sides shows n(>= 0.5) = 0), until step 26 lands; a 'none' claim at key7km means bit-identical to at least one previous-binary render with every other pair differing only inside that patch at |d| <= 1. (6) A change to the WANT SET (a cull, a prefetch change, a budget) is an input to the streamer: it must be gated on the like-for-like rail with frames extracted and Read at the phases where the per-second YAVG moves (step 24: 24-27 s of the descent), not on settled stills alone; a finer mip landing earlier is intended, garbage (tile-shaped noise) is a regression and gets a bug-fix step. (7) --settle-exact at the helm reaches EXACT in ~240 held frames on HEAD (no 3000-frame cap any more).`
+const AFTER_24 = new Set([26, 27, 28, 29, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20])
+const procFor = (n) => n === 1 ? PROCEDURE : n === 2 ? PROCEDURE_V2 : n <= 4 ? PROCEDURE_V3 : n <= 6 ? PROCEDURE_V4 : AFTER_24.has(n) ? PROCEDURE_V9 : AFTER_22.has(n) ? PROCEDURE_V8 : AFTER_25.has(n) ? PROCEDURE_V7 : PROCEDURE_V5
 // A step re-run after a failed first attempt gets an attempt marker so the cache does not replay the fail.
 const attempts = (args && args.attempts) || { 21: 2 }
 const attemptNote = (n) => attempts[n] ? `\nATTEMPT ${attempts[n]} of this step: its specification in the plan file was rewritten after the first attempt; read the CURRENT entry, and the first attempt's report in the workflow journal for what it measured.` : ''
@@ -209,8 +216,8 @@ const opusFrom = (args.opusFrom === undefined) ? 6 : args.opusFrom
 // 22/25 ran on Fable; changing a completed call's opts would re-run it): Fable stays only on the
 // steps whose risk is in the reasoning -- the watertight shell (23), the solver (26), the two
 // pop-in algebra steps (17, 18) -- and their verifiers.
-const fableSteps = args.fableSteps || [25, 23, 26, 17, 18]
-const fableVerify = args.fableVerify || [25, 22, 23, 26, 17, 18]
+const fableSteps = args.fableSteps || [25, 23, 26, 28, 17, 18]
+const fableVerify = args.fableVerify || [25, 22, 23, 26, 28, 17, 18]
 const implOpts = (n) => (opusFrom && n >= opusFrom && !fableSteps.includes(n)) ? { model: 'opus' } : {}
 const verifyOpts = (n) => (opusFrom && n >= opusFrom - 1 && !fableVerify.includes(n)) ? { model: 'opus' } : {}
 const startStep = args.startStep || 1
@@ -255,7 +262,8 @@ ORCHESTRATOR'S RULING FOR STEP 4: the helm rule is met by the SETTLED pair -- ou
 GATE V4 (from step 5): the helm is also gated SETTLED (helm.png vs helm_prev.png, both --settle-sync, 'noise' or better; both logs may show the 3000-frame cap); the unsettled helm vs out/baseline is informational only.${n > 6 ? `
 GATE V5 (after step 6): settled pairs are like for like only at equal hold length or with the churn frozen during the hold (step 21); the rail gate is continuity (no new-only spike) + per-second YAVG within 0.5/255, SSIM informational. A step declared 'visible' (step 23, the cracks; step 27, the holes; step 26, the solver) must show the difference confined to the pixels it lists and proves.${AFTER_25.has(n) ? `
 GATE V7 (step 25 landed): the four settled stills are --settle-exact --settle-clear-churn on both binaries, both logs saying EXACT (a 3000-frame give-up makes the still undecidable, not a pass); bird/globe/key7km 'none'; the helm judged with --ignore-rows 425:437 and the strip within n(|d|>1) <= 128, max|d| <= 32; helm_ebb by the 2x2 protocol until step 26 lands, exact after; fibers compared under --settle-exact --settle-clear-churn with a same-binary floor until step 26. Check the *_exact* logs and the ledgers exist in out/step${n}/ for every settled still.${AFTER_22.has(n) ? `
-GATE V8 (from step 23): key7km 'none' = bit-identical to at least one previous-binary render with every other pair differing only inside the (992..1002, 864..873) |d|=1 cluster (the SWE, until step 26); helm_ebb's 2x2 with four renders per binary; single-pixel differences attributed by --dump-hdr and per-mechanism probe builds, not tallies; separable sub-mechanisms gated separately when the combined gate is not 'none'. A 'visible' step (23, 26, 27) must confine its difference to what it lists and proves.` : ''}` : ''}` : ''}` : ''}`}`}`,
+GATE V8 (from step 23): key7km 'none' = bit-identical to at least one previous-binary render with every other pair differing only inside the (992..1002, 864..873) |d|=1 cluster (the SWE, until step 26); helm_ebb's 2x2 with four renders per binary; single-pixel differences attributed by --dump-hdr and per-mechanism probe builds, not tallies; separable sub-mechanisms gated separately when the combined gate is not 'none'. A 'visible' step (23, 26, 27) must confine its difference to what it lists and proves.${AFTER_24.has(n) ? `
+GATE V9 (from step 27): the key7km flip patch is x 960..1002, y 819..873 at |d| <= 1 until step 26; a want-set change is gated on the rail with frames extracted and read (garbage is a regression, an earlier finer mip is not); step 28 is a 'visible' bug fix confined to the garbage it removes; step 29 (the cull) ships only with the rail clean.` : ''}` : ''}` : ''}` : ''}` : ''}`}`}`,
       { label: `verify:${n}`, phase: 'Verify', schema: VERIFY_SCHEMA, effort: 'high', ...verifyOpts(n) })
     state.verifications.push(v || { step: n, verdict: 'approve-with-followup', reasons: ['verifier returned nothing'], law_violations: [], followups: [] })
     if (v && v.verdict === 'revert') {
