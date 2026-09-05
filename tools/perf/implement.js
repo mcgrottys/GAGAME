@@ -155,6 +155,13 @@ if (!plan || !plan.execution_order) return { error: 'pass the exec plan as args.
 const state = { lastBench: `${WT}/out/instr_bench/bench.log`, results: [], verifications: [] }
 if (args.lastBench) state.lastBench = args.lastBench
 
+// Model routing (the owner's call, 2026-09-05 11:15): implementers and verifiers run on Opus from
+// args.opusFrom onward to spare the Fable quota; earlier steps keep their cached Fable results
+// (a changed opts object would invalidate the cache, so the override is only added from that step).
+// Pass args.opusFrom = 0 to keep everything on the session model.
+const opusFrom = (args.opusFrom === undefined) ? 6 : args.opusFrom
+const implOpts = (n) => (opusFrom && n >= opusFrom) ? { model: 'opus' } : {}
+const verifyOpts = (n) => (opusFrom && n >= opusFrom - 1) ? { model: 'opus' } : {}
 const startStep = args.startStep || 1
 if (args.priorResults) state.results.push(...args.priorResults)
 
@@ -173,7 +180,7 @@ PREVIOUS RESULTS THIS RUN (for context): ${JSON.stringify(state.results.map(r =>
 Output directory for this step: ${WT}/out/step${n}/ (create it).
 
 Do the work: implement exactly this step's mechanism, build, selftest, the five stills + imgdiff, the bench with --gpu-time, decide pass/fail against the step's gate, commit or revert as the procedure says, and return the result through the schema. Read the diff images (Read the PNG) when a verdict is not 'none' and say in notes where the pixels moved.`,
-    { label: `implement:${n}:${step.name.slice(0, 40)}`, phase: 'Implement', schema: RESULT_SCHEMA, effort: 'max' })
+    { label: `implement:${n}:${step.name.slice(0, 40)}`, phase: 'Implement', schema: RESULT_SCHEMA, effort: 'max', ...implOpts(n) })
   if (!res) {
     // A null here is an agent that died on a terminal API error (a usage limit, most likely), not a
     // failed gate. Marking the step failed and marching on would burn every later step the same way,
@@ -195,12 +202,12 @@ Try to REFUTE the commit: is the change really exact where it claims to be (floa
 ${n === 2 ? `GATE V2 (in force from step 2): bird and globe must be 'none' (0 px) vs out/baseline; helm passes at 'noise' or through the same-session 2x2 protocol against out/prev_exe/gagame.exe (best cross pair 'noise' or better); key7km and helm_ebb pass only through the 2x2 protocol with the count rule (best cross pair n(|d|>1) <= 1.5 x max A/A + 64, max|d| <= max A/A + 8) AND a described same-kind diff pattern; shader/bank steps also need --dump-fibers |delta| = 0 against the previous binary; the storm-rail raildiff against the previous accepted rail must be clean. Confirm from the artifacts in out/step${n}/ (imgdiff.json, the diff PNGs, the A/A lines, raildiff/series.csv summary) that the implementer applied these rules mechanically and did not pass a still by narrative. If the artifacts do not exist for a rule that applied, the gate was not asked: 'revert'.` : `GATE V3 (in force from step 3): bird, globe and key7km are rendered with --settle-sync and must be 'none' (0 px) against the previous binary's settled render in the same session (out/prev_exe/gagame.exe; the *_prev.png files in out/step${n}/); helm passes at 'noise' vs out/baseline or through the same-session 2x2 protocol (best cross pair 'noise' or better); helm_ebb passes only through the 2x2 protocol with the count rule (best cross pair n(|d|>1) <= 1.5 x max A/A + 64, max|d| <= max A/A + 8) AND a described same-kind diff pattern; shader/bank steps also need --dump-fibers |delta| = 0 against the previous binary under --settle-sync; the storm-rail raildiff (14:00, --tile-budget 3000, like for like) against the previous accepted rail must be clean; the bench must show the saving on the row the step targets. Confirm from the artifacts in out/step${n}/ (the *_prev renders, imgdiff.json, the diff PNGs, the A/A lines, raildiff/series.csv summary, bench logs) that the implementer applied these rules mechanically and did not pass a still by narrative. If the artifacts do not exist for a rule that applied, the gate was not asked: 'revert'.${n === 4 ? `
 ORCHESTRATOR'S RULING FOR STEP 4: the helm rule is met by the SETTLED pair -- out/step4/helm_settled.png vs helm_settled_prev.png (both --settle-sync, both binaries capping the hold the same way) must be 'noise' or better; the implementer reports 8 px max 4. The unsettled frame-240 2x2 (11.7k px on the far horizon strip) is landing timing from a loop 2 ms/frame faster and is informational; do not revert on it. Verify the settled pair from the artifacts and the rest of the gate as written.` : n >= 5 ? `
 GATE V4 (from step 5): the helm is also gated SETTLED (helm.png vs helm_prev.png, both --settle-sync, 'noise' or better; both logs may show the 3000-frame cap); the unsettled helm vs out/baseline is informational only.` : ''}`}`}`,
-      { label: `verify:${n}`, phase: 'Verify', schema: VERIFY_SCHEMA, effort: 'high' })
+      { label: `verify:${n}`, phase: 'Verify', schema: VERIFY_SCHEMA, effort: 'high', ...verifyOpts(n) })
     state.verifications.push(v || { step: n, verdict: 'approve-with-followup', reasons: ['verifier returned nothing'], law_violations: [], followups: [] })
     if (v && v.verdict === 'revert') {
       log(`step ${n} reverted by the verifier: ${v.reasons.join('; ')}`)
       const r = await agent(`Revert one commit in the GAGAME worktree ${WT}: run 'git -C "${WT}" revert --no-edit ${res.commit}', then rebuild with the PowerShell tool: cmd /c "\\"${WTW}\\build.bat\\" > \\"${WTW}\\build_log.txt\\" 2>&1" and confirm build_log.txt ends with 'built:'. Then run build\\bin\\gagame.exe --selftest (poll 'Get-Process gagame' first so no other instance runs) and confirm all gates PASS. Reason for the revert: ${v.reasons.join('; ')}. Return the new HEAD sha and the selftest line as plain text.`,
-        { label: `revert:${n}`, phase: 'Verify', effort: 'low' })
+        { label: `revert:${n}`, phase: 'Verify', effort: 'low', ...verifyOpts(n) })
       state.results[state.results.length - 1].status = 'fail'
       state.results[state.results.length - 1].notes += ' | REVERTED by verifier: ' + v.reasons.join('; ') + ' | ' + (r || '')
       state.lastBench = state.results.length > 1 ? (state.results.slice(0, -1).reverse().find(x => x.status === 'pass') || {}).bench_after || state.lastBench : state.lastBench
@@ -219,6 +226,6 @@ Do, in order (one gagame process at a time, poll Get-Process gagame first):
 2. ${WT}/docs/PERF_EXPERIMENT.md already holds the baseline table and the plan (committed before the run). APPEND a '## Results' section: one row per step (name, status, commit, what changed, fidelity verdicts, before/after numbers), the final table next to the baseline table, the windowed numbers, the pop-in track outcome (with the landing-series numbers), what was reverted and why (with regression video paths), what remains (the deferred list), and what the Catalog direction buys next. Keep the repo's documentary voice: measured numbers, failed attempts recorded.
 3. If any step falsified a prior (a textbook expectation measured wrong), append a numbered entry to the priors ledger in docs/ALGEBRA.md in the existing format, and add any new flags to docs/LAUNCH.md launch-verify. Then run 'dotnet run --project tools/Scriptorium -- --index' from the worktree root (Bash is fine) so the Scriptorium serves the updates.
 4. Commit the docs (same trailer). Return as plain text: the final [rail] and [gpu] lines, the windowed [perf] lines, the SSIM summary, the list of commits on this branch since ${args.baseSha || 'the start'} (git log --oneline), and the path of PERF_EXPERIMENT.md.`,
-  { label: 'close', phase: 'Close', effort: 'high' })
+  { label: 'close', phase: 'Close', effort: 'high', ...(opusFrom ? { model: 'opus' } : {}) })
 
 return { results: state.results, verifications: state.verifications, closing }
