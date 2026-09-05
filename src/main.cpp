@@ -2054,6 +2054,10 @@ int main(int argc, char** argv) {
         const char* kScenePath = "data/wave_scene.json";
         LoadWaterScene(kScenePath, waterScene);
         WaterSceneChanged(kScenePath, &waterSceneMtime);
+        // Step 3 (docs/PERF_EXPERIMENT.md): the directory watches the file; the frame polls
+        // one atomic instead of paying the 0.14-0.19 ms stat through the data/ junction.
+        WaterSceneWatch sceneWatch;
+        sceneWatch.Start(kScenePath);
 
         WaterBankLayer* waterBank = nullptr;
         if (sea && bathy.Ready() && !marsMode) {
@@ -4141,8 +4145,13 @@ int main(int argc, char** argv) {
                     // M8: the scene file hot-reloads -- edit, save, watch the water
                     // change. A geometry edit re-Configures the solver (its bucket key
                     // rolls, the cache answers or a background solve runs).
+                    // Step 3 (docs/PERF_EXPERIMENT.md): the stat runs only when the
+                    // directory watcher says the file moved (every 30 frames with no
+                    // watch); the mtime compare and the reload are unchanged. The stat
+                    // alone was 0.140 ms whole / 0.185 ms helm per frame (step 2's bench).
                     PROF_BEGIN();
-                    if (WaterSceneChanged(kScenePath, &waterSceneMtime) &&
+                    if (sceneWatch.Poll(frame) &&
+                        WaterSceneChanged(kScenePath, &waterSceneMtime) &&
                         LoadWaterScene(kScenePath, waterScene)) {
                         if (waveField) {
                             WaveFieldConfig wcfg2 = sceneToWaveCfg(waterScene);
@@ -4161,7 +4170,8 @@ int main(int argc, char** argv) {
                         if (waterScene.jettyCrestNavd > -90.0f) {
                             globe->editFloorNavd = waterScene.jettyCrestNavd;
                         }
-                        Log("[scene] %s hot-reloaded", kScenePath);
+                        Log("[scene] %s hot-reloaded at frame %u, %s", kScenePath, frame,
+                            sceneWatch.Trigger().c_str());
                     }
                     PROF_END(1);
                     // M8: bucket-watch + background solve + upload/swap for the solved
@@ -5065,6 +5075,7 @@ int main(int argc, char** argv) {
 
         gpu.WaitIdle();
         resMgr.Shutdown();
+        sceneWatch.Stop();   // cancels the pending directory read and joins (logged)
         renderer.Shutdown();
         gpu.Shutdown();
         window.Destroy();
