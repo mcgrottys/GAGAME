@@ -139,7 +139,7 @@ if (PROCEDURE_V6 === PROCEDURE_V5) throw new Error('PROCEDURE_V6 replacements di
 const AFTER_25 = new Set([22, 23, 24, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20])
 const procFor = (n) => n === 1 ? PROCEDURE : n === 2 ? PROCEDURE_V2 : n <= 4 ? PROCEDURE_V3 : n <= 6 ? PROCEDURE_V4 : AFTER_25.has(n) ? PROCEDURE_V6 : PROCEDURE_V5
 // A step re-run after a failed first attempt gets an attempt marker so the cache does not replay the fail.
-const attempts = args.attempts || { 21: 2 }
+const attempts = (args && args.attempts) || { 21: 2 }
 const attemptNote = (n) => attempts[n] ? `\nATTEMPT ${attempts[n]} of this step: its specification in the plan file was rewritten after the first attempt; read the CURRENT entry, and the first attempt's report in the workflow journal for what it measured.` : ''
 
 const RESULT_SCHEMA = {
