@@ -957,6 +957,28 @@ model (or a textbook) would hold → what this project measured → the law now 
     Law: fold up at paint time inside the tree (§43), drop the cached composites above, and
     refetch the page -- no separate pass, no reconciliation step.
 
+27. **Draw order is not invariant while the shell has seams.** Prior (perf plan steps 6 and
+    22, stated as the reason face-first emission is "exact"): for opaque geometry with a
+    GREATER depth test, no `SV_Depth` and no blending, the winner at a pixel is the maximum
+    depth over the fragments covering it, so the ORDER the meshlets rasterize in cannot change
+    the image; the top-left fill rule keeps a shared edge covered exactly once. Measured (step
+    22, key7km settled with `--settle-exact --settle-clear-churn`, resident set hash-equal per
+    tenant, `--dump-hdr` in radiance): rotating the six cube-face subtrees so the eye's own
+    face emits first -- identical node set (1099/653), identical want set, identical
+    `[predict]` call count, no meshlet-budget drops -- moves ~150-200 pixels of ONE 60x85 patch
+    of the nearest water by up to 1.5e-5 radiance (0.017 LSB-equivalent), and that is enough to
+    flip one 8-bit pixel, (960,831) blue 39 -> 40, in 10 of 16 runs where the unreordered
+    binary gives 39 in 11 of 11. So the shell is not single-covered there: the CDLOD/cube-face
+    seam either double-covers at a depth the reorder re-ranks, or its shared-edge vertices are
+    not bit-coincident. This is the OVER-covered cousin of the seven under-covered crack pixels
+    at the same pose (perf plan step 23), and the same fix closes both. Law: "a reorder is
+    exact" is a claim about the shell's closure, not about the depth function -- do not spend
+    it until the shell is proven watertight, and gate a reorder on the pose that shows the
+    seams (key7km), never on the helm alone. The cost of the claim was measured too: the face
+    reorder alone is -0.53 ms of `globe.mesh` at the helm (3.573 -> 3.048) and -1.01 ms at p95,
+    while the two genuinely exact companions of the same step (the `discard`-free shipped PSO
+    and the MsMain per-vertex `ComposedHeight` dedupe) are 0.00 ms on that row.
+
 ## verification — The gate map: which algebra is pinned where
 
 - `pga` — motors: rotation, composition, rigidity, screw log/exp, slerp.
