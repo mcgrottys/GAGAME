@@ -1057,6 +1057,50 @@ model (or a textbook) would hold → what this project measured → the law now 
     predicted calls, in a rotated order), is clean on the same rail -- YAVG 0.018/255,
     bit-identical at all four settled poses -- and ships by itself: `globe.mesh` 3.082 ->
     2.718 ms whole-rail and 4.981 -> 4.472 over the helm phase, p95 5.297 -> 4.801.
+30. **A quiet queue is not a resident set.** Prior (this repo's own `--settle-sync`, perf
+    plan steps 1-24): once nothing is pending, no read is in flight and nothing is
+    ring-held, the streamer has finished and the picture is a function of the pose and the
+    data. Measured (step 25's exact ledger, then step 27): the resident set is the TILE
+    MAPPING and nothing else, and the queues can go quiet with tiles missing from it. At
+    the bird pose the walk wants 9176 tiles (573 MB) against a pool cap of 8192 (512 MB);
+    at the cap `MapAndFill`'s evictor finds no victim -- every mapped tile is wanted this
+    frame -- and breaks out of a batch the gather had already erased from `m_loading`,
+    leaving those tiles tracked, in state `Loaded`, in no queue: pending 0, reads 0, and a
+    permanent hole at that mip. 988 `wave.field` mip-0 tiles were in exactly that state on
+    one run; which 984 lose is decided by landing order. Step 27 measured the size of the
+    lie directly: the shipped `--settle-sync` bird against the same binary's
+    `--settle-exact` bird is 73.2 % identical, max |d| 152 -- a bare, wave-less sea over
+    the ocean and the inlet where the storm's crests belong -- while both runs reported a
+    drained streamer. The helm is over the same cap (11367 tiles, 711 MB). Law: only the
+    exact hold (`--settle-exact`: every wanted tile mapped, every mapped tile wanted) names
+    a resident set; a queue-drain gate is a timing statement, not a residency one, and a
+    tile lost between the queue and the map is a lie the residency byte tells.
+31. **Raising a residency budget is not free, and the picture it buys is not clean yet.**
+    Prior (perf plan step 27, the owner's budget decision of 2026-09-05 15:00): the tiles
+    over the cap are already being read from the archive, so mapping them instead of
+    dropping them costs one `UpdateTileMappings` each and changes nothing else. Measured
+    (step 27, both binaries in one session, untouched GPU rows stable to 1-2 %: `tonemap`
+    0.024/0.023, `sea` 0.477/0.475): the old cap was not throttling a cost, it was
+    STOPPING THE STREAMER. With the cap at 16384 tiles the residency turn on the descent
+    goes from p50 0.547 ms to p50 5.512 ms -- most descent frames had been mapping nothing
+    at all -- and the shipped pipelined loop mean goes 4.31 -> 5.19 ms (+20 %), the fenced
+    7.92 -> 9.09, `fill: DS OpenFile + Enqueue` 0.437 -> 1.002 ms, with the GPU following
+    the data that now arrives (`globe.mesh` helm 3.839 -> 4.759, `waterbank.fill` helm
+    0.676 -> 1.164). And the state it reaches carries priors 29's garbage: at frames 766
+    and 770 of the storm rail the ground is a full mip finer AND shows straight-edged
+    dark-noise quadrilaterals the size of a z17 detail-window tile (frame 766 over the
+    barrier beach at (0..560, 555..700), frame 770 the yellow-speckled block at
+    (400..700, 400..700)), gone again by frame 780. Priors 29 blamed the horizon cull for
+    finding that state; step 27 reached it with no cull at all, from the pool budget alone.
+    Law: the residency BUDGET is an input to the streamer exactly as the want set is (the
+    rail rule, not the settled stills, judges it), the landing race is a property of the
+    fine state and not of whatever change reaches it, and the race (perf plan step 28) is
+    fixed BEFORE any change that lets the streamer get there. The fix for the lost tail and
+    the cap raise were measured together, passed every settled still (bird bit-identical to
+    its own exact hold, globe/key7km/helm 0 px cross-binary, `helm_ebb` 2x2 with a TIGHTER
+    A/A floor than the previous binary's: 116167 vs 270620 differing pixels), and were
+    reverted on the rail: `out/regress_step27.mp4`, per-second YAVG 0.804/255 at 26 s
+    against the 0.50 bound, continuity itself clean (no new-only tblend spike).
 
 ## verification — The gate map: which algebra is pinned where
 
