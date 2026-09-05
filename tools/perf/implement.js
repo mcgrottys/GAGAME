@@ -127,7 +127,20 @@ const PROCEDURE_V5 = PROCEDURE_V4
   .replace(`The previous accepted rail is out/step2/rail.mp4 (step 1's is out/step1/rail.mp4), then the last passing step's.`,
            `The previous accepted rail is the last PASSING step's out/stepM/rail.mp4 (step 6 failed: its rail is out/regress_step6.mp4, not a reference).`)
 if (PROCEDURE_V5 === PROCEDURE_V4) throw new Error('PROCEDURE_V5 replacements did not apply')
-const procFor = (n) => n === 1 ? PROCEDURE : n === 2 ? PROCEDURE_V2 : n <= 4 ? PROCEDURE_V3 : n <= 6 ? PROCEDURE_V4 : PROCEDURE_V5
+// v6 (after step 25 lands): the settled stills are rendered with --settle-exact on both binaries
+// (resident set == want set, churn frozen), so 'settled' is a function of the pose and the data.
+const PROCEDURE_V6 = PROCEDURE_V5
+  .replace(`--settle-sync (step 1) holds the dump instant until residency is quiet`,
+           `FROM STEP 25 ON, replace --settle-sync with --settle-exact in the four settled stills above (bird, key7km, globe, and helm), on BOTH binaries: it drops every mapped tile the walk does not want and holds until every wanted tile is resident with the churn frozen, so the still is a function of the pose and the data (step 21's first attempt measured plain --settle-sync pairs differing by 13 % of the water because the resident set depended on the landing schedule; step 25 measured --settle-exact A/A at 0 px). A settled cross-binary difference under --settle-exact is a real change. --settle-sync (step 1) holds the dump instant until residency is quiet`)
+  .replace(`helm (settled, from step 5): render with --settle-sync on both binaries (helm.png vs helm_prev.png).`,
+           `helm (settled, from step 5; --settle-exact from step 25): render with --settle-exact on both binaries (helm.png vs helm_prev.png).`)
+if (PROCEDURE_V6 === PROCEDURE_V5) throw new Error('PROCEDURE_V6 replacements did not apply')
+// The order of the run: 1..6, 21, 25, 22, 23, 24, 7.. -- so 'after step 25' is a position, not a number.
+const AFTER_25 = new Set([22, 23, 24, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20])
+const procFor = (n) => n === 1 ? PROCEDURE : n === 2 ? PROCEDURE_V2 : n <= 4 ? PROCEDURE_V3 : n <= 6 ? PROCEDURE_V4 : AFTER_25.has(n) ? PROCEDURE_V6 : PROCEDURE_V5
+// A step re-run after a failed first attempt gets an attempt marker so the cache does not replay the fail.
+const attempts = args.attempts || { 21: 2 }
+const attemptNote = (n) => attempts[n] ? `\nATTEMPT ${attempts[n]} of this step: its specification in the plan file was rewritten after the first attempt; read the CURRENT entry, and the first attempt's report in the workflow journal for what it measured.` : ''
 
 const RESULT_SCHEMA = {
   type: 'object',
@@ -175,8 +188,8 @@ if (args.lastBench) state.lastBench = args.lastBench
 // Fable stays on the steps whose risk is in the reasoning (the owner: 'use it wisely'): the
 // shader-exactness gates, the cull-side audit and the pop-in track's algebra, and their verifiers.
 const opusFrom = (args.opusFrom === undefined) ? 6 : args.opusFrom
-const fableSteps = args.fableSteps || [8, 11, 17, 18, 19, 23, 24]
-const fableVerify = args.fableVerify || [8, 9, 17, 18, 19, 22, 23, 24]
+const fableSteps = args.fableSteps || [8, 11, 17, 18, 19, 23, 24, 25]
+const fableVerify = args.fableVerify || [8, 9, 17, 18, 19, 22, 23, 24, 25]
 const implOpts = (n) => (opusFrom && n >= opusFrom && !fableSteps.includes(n)) ? { model: 'opus' } : {}
 const verifyOpts = (n) => (opusFrom && n >= opusFrom - 1 && !fableVerify.includes(n)) ? { model: 'opus' } : {}
 const startStep = args.startStep || 1
@@ -191,7 +204,7 @@ for (const step of plan.execution_order) {
 ${LAWS}
 ${procFor(n)}
 
-THIS STEP: number ${n}, '${step.name}', declared fidelity class '${step.fidelity_class}', effort ${step.effort}. Its FULL specification (mechanism, files_lines, expected_ms_saved, gate, ga_angle, notes, dependencies) is the entry with "step": ${n} in execution_order inside ${PLAN} -- Read that file and follow that entry exactly; the plan's measure_first probes, popin_track, stop_rules are in the same file.
+THIS STEP: number ${n}, '${step.name}', declared fidelity class '${step.fidelity_class}', effort ${step.effort}. Its FULL specification (mechanism, files_lines, expected_ms_saved, gate, ga_angle, notes, dependencies) is the entry with "step": ${n} in execution_order inside ${PLAN} -- Read that file and follow that entry exactly; the plan's measure_first probes, popin_track, stop_rules are in the same file.${attemptNote(n)}
 PREVIOUS ACCEPTED BENCH LOG: ${state.lastBench}
 PREVIOUS RESULTS THIS RUN (for context): ${JSON.stringify(state.results.map(r => ({ step: r.step, name: r.name, status: r.status, commit: r.commit, bench_after: r.bench_after })))}
 Output directory for this step: ${WT}/out/step${n}/ (create it).
