@@ -198,8 +198,12 @@ if (args.lastBench) state.lastBench = args.lastBench
 // Fable stays on the steps whose risk is in the reasoning (the owner: 'use it wisely'): the
 // shader-exactness gates, the cull-side audit and the pop-in track's algebra, and their verifiers.
 const opusFrom = (args.opusFrom === undefined) ? 6 : args.opusFrom
-const fableSteps = args.fableSteps || [8, 11, 17, 18, 19, 23, 24, 25, 26, 27]
-const fableVerify = args.fableVerify || [8, 9, 17, 18, 19, 22, 23, 24, 25, 26, 27]
+// 15:00: the owner asked to spare Fable. Completed calls keep their model (25 and the verifiers
+// 22/25 ran on Fable; changing a completed call's opts would re-run it): Fable stays only on the
+// steps whose risk is in the reasoning -- the watertight shell (23), the solver (26), the two
+// pop-in algebra steps (17, 18) -- and their verifiers.
+const fableSteps = args.fableSteps || [25, 23, 26, 17, 18]
+const fableVerify = args.fableVerify || [25, 22, 23, 26, 17, 18]
 const implOpts = (n) => (opusFrom && n >= opusFrom && !fableSteps.includes(n)) ? { model: 'opus' } : {}
 const verifyOpts = (n) => (opusFrom && n >= opusFrom - 1 && !fableVerify.includes(n)) ? { model: 'opus' } : {}
 const startStep = args.startStep || 1
