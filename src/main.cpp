@@ -125,6 +125,8 @@ struct Options {
     bool warmTrees = false;           // --warm-trees: build them without comparing, then exit
     bool packTrees = false;           // --pack-trees: one archive per node per frame, then exit
     bool bench = false;               // --bench: fly the rail, capture nothing, time honestly
+    bool gpuTime = false;             // --gpu-time: timestamp queries per pass, [gpu] lines + gpu_ms.csv
+    bool noVsync = false;             // --no-vsync: windowed, ALLOW_TEARING + Present(0, tearing)
     std::string mp4;                  // --mp4 PATH: pipe rail frames straight to an encoder
     bool flatBed = false;             // --flat-bed N: constant bed, to A/B bathymetry
     float flatBedNavd = -30.0f;
@@ -321,6 +323,10 @@ Options ParseArgs(int argc, char** argv) {
         // M9t: fly the rail and measure it, capturing NOTHING. See the note at the timing site
         // for why this is not the same as reading renderMs out of a captured run.
         else if (a == "--bench") o.bench = true;
+        // Instruments: GPU time per pass (timestamp queries, read frames-in-flight deep, no
+        // stall) and a tearing present for the windowed frame-rate question.
+        else if (a == "--gpu-time") o.gpuTime = true;
+        else if (a == "--no-vsync") o.noVsync = true;
         // M9ah: pack every realization's loose tiles into one archive and exit.
         else if (a == "--pack-tiles") o.packTiles = true;
         // M9ai: route archived tile reads NVMe -> GPU. Off by default until the streamed
@@ -1708,12 +1714,19 @@ int main(int argc, char** argv) {
         // M7k: the PIX capturer must be resident BEFORE device creation.
         if (opt.pixFrames > 0) PixLoadGpuCapturer();
         Gpu gpu;
-        gpu.Init(opt.headless ? nullptr : window.Handle(), opt.width, opt.height, opt.debugLayer);
+        gpu.Init(opt.headless ? nullptr : window.Handle(), opt.width, opt.height, opt.debugLayer,
+                 opt.noVsync && !opt.headless);
+        if (!opt.headless) {
+            Log("[window] client area %ux%u (requested %ux%u; the swapchain matches the client "
+                "rect, not the outer window)",
+                window.Width(), window.Height(), opt.width, opt.height);
+        }
 
         RendererDesc rd;
         rd.shaderDir = opt.shaderDir;
         Renderer renderer;
         renderer.Init(gpu, rd);
+        if (opt.gpuTime) renderer.EnableGpuProfiler();
 
         FieldSet fields;
         fields.Init(gpu, L".", 1.0f, 1.0f);
@@ -4339,6 +4352,10 @@ int main(int argc, char** argv) {
             const float preMs =
                 std::chrono::duration<float>(Clock::now() - preT0).count() * 1000.0f;
             const auto rf0 = Clock::now();
+            // --gpu-time rows are labelled like the [rail] series: a rail's 150 settle frames
+            // are negative and excluded from the statistics.
+            renderer.gpuFrameLabel =
+                static_cast<int64_t>(frame) - (opt.rail.empty() ? 0 : 150);
             renderer.RenderFrame(cam, static_cast<float>(simUnix - startUnix), dt);
             if (opt.bench) gpu.WaitIdle();
             const float renderMs =
@@ -4760,9 +4777,25 @@ int main(int argc, char** argv) {
                 break;
             }
         }
+        // --gpu-time: the per-pass GPU table, next to the [rail] lines it explains. The last
+        // frames in flight are still unread; an idle wait drains them before the report.
+        if (GpuProfiler* prof = renderer.Profiler()) {
+            gpu.WaitIdle();
+            prof->Drain();
+            prof->Report(opt.rail.empty() ? -1 : 900);
+            if (!opt.rail.empty()) {
+                std::string csv;
+                for (const wchar_t* w = opt.rail.c_str(); *w; ++w) {
+                    csv.push_back(static_cast<char>(*w));
+                }
+                csv += "\\gpu_ms.csv";
+                if (!prof->WriteCsv(csv)) Log("[gpu] could not write %s", csv.c_str());
+            }
+        }
         if (frameMsN > 30) {
-            Log("[perf] mean frame %.2f ms over %u frames (%.0f fps)", frameMsSum / frameMsN,
-                frameMsN, 1000.0 / (frameMsSum / frameMsN));
+            Log("[perf] mean frame %.2f ms over %u frames (%.0f fps)%s", frameMsSum / frameMsN,
+                frameMsN, 1000.0 / (frameMsSum / frameMsN),
+                opt.headless ? "" : (gpu.TearingEnabled() ? " [no-vsync, tearing]" : " [vsync]"));
         }
         // M7l: THE DEBUG SESSION REPORT -- the free byproducts, printed every run: what the
         // diagram holds, what the compositor did, what streaming did. The gates print their

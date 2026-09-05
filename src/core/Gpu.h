@@ -82,8 +82,13 @@ public:
 
     // hwnd may be null: that is headless mode, which creates no swapchain. Headless exists so the
     // renderer (and the tile self-test) can be verified from a shell with no desktop session.
-    void Init(HWND hwnd, uint32_t width, uint32_t height, bool wantDebugLayer);
+    // allowTearing (--no-vsync, windowed only): ALLOW_TEARING swapchain + Present(0, tearing)
+    // when DXGI_FEATURE_PRESENT_ALLOW_TEARING is supported; otherwise the default Present(1,0).
+    void Init(HWND hwnd, uint32_t width, uint32_t height, bool wantDebugLayer,
+              bool allowTearing = false);
     void Shutdown();
+    // What the swapchain actually does (for the boot report and the perf lines).
+    bool TearingEnabled() const { return m_tearing; }
 
     ID3D12Device* Device() const { return m_device.Get(); }
     // UpdateTileMappings lives on the queue, not the command list; the atlas needs this.
@@ -171,6 +176,8 @@ private:
     Com<ID3D12Device> m_device;
     Com<ID3D12CommandQueue> m_queue;
     Com<IDXGISwapChain3> m_swapchain;
+    bool m_wantTearing = false;   // asked for (--no-vsync)
+    bool m_tearing = false;       // granted (DXGI_FEATURE_PRESENT_ALLOW_TEARING said yes)
 
     Com<ID3D12Resource> m_backBuffers[kFrameCount];
     uint32_t m_backBufferRtv[kFrameCount] = {};

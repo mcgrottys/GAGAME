@@ -1,5 +1,7 @@
 #include "scene/SeaLayer.h"
 
+#include "core/GpuProfiler.h"
+
 #include "core/PixEvents.h"
 #include "scene/FieldSet.h"
 
@@ -867,11 +869,19 @@ void SeaLayer::Render(const FrameContext& ctx) {
     // The compute chain records into the same command list; compute bindings do not disturb the
     // graphics root signature the Renderer already set.
     if (m_swe && m_swe->Ready()) {
+        GpuScope gscope(ctx.prof, ctx.cl, "sea.swe");
         m_swe->Record(ctx.cl, *ctx.gpu, m_simUnix, m_seaCb.sea[0]);
     }
-    m_fft.Record(ctx.cl, *ctx.gpu, m_tSec);
-    RecordChurn(ctx);
+    {
+        GpuScope gscope(ctx.prof, ctx.cl, "sea.fft");
+        m_fft.Record(ctx.cl, *ctx.gpu, m_tSec);
+    }
+    {
+        GpuScope gscope(ctx.prof, ctx.cl, "sea.churn");
+        RecordChurn(ctx);
+    }
 
+    GpuScope gdraw(drawEnabled ? ctx.prof : nullptr, ctx.cl, "sea.draw");
     if (drawEnabled) {
         PixScope scope(ctx.cl, "sea.surface (tessellated: screen-space edge density)");
         ctx.cl->SetPipelineState((wireframe && m_seaPsoWire) ? m_seaPsoWire.Get()

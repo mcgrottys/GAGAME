@@ -1,5 +1,7 @@
 #include "scene/GlobeLayer.h"
 
+#include "core/GpuProfiler.h"
+
 #include "compose/DomainSource.h"
 #include "sim/BathyModel.h"
 
@@ -1383,12 +1385,16 @@ void GlobeLayer::Render(const FrameContext& ctx) {
 
     // M6e: the residency manager's per-frame turn -- loads started, budgeted tiles mapped and
     // filled, residency maps refreshed -- BEFORE the surface samples any of it.
-    if (m_res) m_res->ProcessQueues(*ctx.gpu, ctx.cl);
+    if (m_res) {
+        GpuScope gscope(ctx.prof, ctx.cl, "globe.residency");
+        m_res->ProcessQueues(*ctx.gpu, ctx.cl);
+    }
 
     const D3D12_GPU_VIRTUAL_ADDRESS cbVa = ctx.gpu->PushConstants(&m_cb, sizeof(m_cb));
 
     // 1) The atmosphere backdrop: limb scatter + sun for every ray that misses the planet.
     if (m_skyPso && skyPassEnabled) {
+        GpuScope gscope(ctx.prof, ctx.cl, "globe.sky");
         PixMarker(ctx.cl, "globe.sky (single-scatter shell: the limb past the disc)");
         ctx.cl->SetPipelineState(m_skyPso.Get());
         ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -1406,6 +1412,7 @@ void GlobeLayer::Render(const FrameContext& ctx) {
             m_msPath = false;
             return;
         }
+        GpuScope gscope(ctx.prof, ctx.cl, "globe.mesh");
         GpuBuffer& rec = m_recBuf[ctx.gpu->FrameIndex()];
         const size_t bytes = m_meshlets.size() * sizeof(MeshletRec);
         memcpy(rec.cpu, m_meshlets.data(), bytes);

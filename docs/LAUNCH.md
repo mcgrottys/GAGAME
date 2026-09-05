@@ -76,6 +76,18 @@ ebb — the whitewater river over the shoal); calm evening low `--start 2026-08-
 - `--albedo` — raw composed color lens; `--stencil` — GIS alignment overlay.
 - `--pix N` — programmatic PIX GPU capture of N frames (needs PIX installed; passes are
   marked with AST node names).
+- `--gpu-time` — timestamp queries around every pass (each layer, tonemap, present copy, and
+  the compute-vs-draw sub-passes inside sea/waterbank/globe), read frames-in-flight deep so
+  nothing stalls. Prints `[gpu] <pass> mean p50 p95 max@frame` at exit next to the `[rail]`
+  lines and writes `<raildir>/gpu_ms.csv` (one row per frame, one column per pass). Off = no
+  queries issued.
+- `--no-vsync` — windowed only: ALLOW_TEARING swapchain + `Present(0, ALLOW_TEARING)` when
+  DXGI supports it, so the `[perf]` line measures the engine and not the display's refresh.
+  Default stays `Present(1, 0)`.
+- Boot report (`[gpu] boot:` lines, always printed) — the adapter chosen, whether it is the
+  high-performance pick, which adapter owns each DXGI output, and whether the present is
+  SAME-ADAPTER or CROSS-ADAPTER (hybrid laptop: RTX renders, the iGPU that owns the panel
+  flips). Read it before believing any windowed frame rate.
 - Boot always prints the AST (`[gaast]`) and regenerates `docs/GA_AST.md` +
   `docs/ga_ast.json`; `py -3 tools/astdiagram.py` redraws `docs/diagrams/*.svg`.
 

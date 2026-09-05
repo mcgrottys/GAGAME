@@ -225,6 +225,9 @@ the unlit version.
 | `--one-water` | the unified wave-bank path — **use this** |
 | `--mp4 PATH` | encode straight from the framebuffer, no PNGs |
 | `--bench` | fly the rail, capture nothing, time honestly |
+| `--gpu-time` | timestamp queries per GPU pass (layers, tonemap, present copy, sea/waterbank/globe sub-passes); `[gpu]` mean/p50/p95/max@frame at exit + `<raildir>/gpu_ms.csv`. Off = no queries |
+| `--no-vsync` | windowed: ALLOW_TEARING swapchain + `Present(0, tearing)` when DXGI allows; default is `Present(1,0)` |
+| (boot report) | `[gpu] boot:` lines every run: adapter chosen, high-performance rank, which adapter owns the DXGI outputs, SAME- vs CROSS-ADAPTER present |
 | `--albedo` | unlit — separates texture from shading |
 | `--wireframe` / `--dump-both` | geometry check |
 | `--flat-bed N` | constant bed at N m NAVD — A/B what bathymetry does to the MESH |

@@ -1,5 +1,7 @@
 #include "scene/WaterBankLayer.h"
 
+#include "core/GpuProfiler.h"
+
 #include "core/Image.h"
 #include "core/PixEvents.h"
 #include "scene/SeaLayer.h"
@@ -565,6 +567,7 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
         }
     }
 
+    GpuScope gscope(ctx.prof, ctx.cl, "waterbank.fill");   // barriers + the one dispatch
     auto toUav = [&](TileAtlas2D& bank) {
         if (m_state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) return;
         D3D12_RESOURCE_BARRIER b{};

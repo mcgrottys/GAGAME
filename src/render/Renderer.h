@@ -15,6 +15,7 @@
 #pragma once
 
 #include "core/Gpu.h"
+#include "core/GpuProfiler.h"
 #include "core/Shader.h"
 #include "render/Camera.h"
 #include "scene/Layer.h"
@@ -82,6 +83,12 @@ public:
     ShaderCompiler& Shaders() { return m_shaders; }
     ID3D12RootSignature* RootSignature() const { return m_rootSig.Get(); }
 
+    // --gpu-time: timestamp pairs around every pass. Off (null) by default -- no queries issued.
+    void EnableGpuProfiler();
+    GpuProfiler* Profiler() { return m_prof.get(); }
+    // The caller's frame number for the profiler's rows (a rail's settle frames are negative).
+    int64_t gpuFrameLabel = 0;
+
     // Water level in metres above datum -- in M1 this is the tide at the focus station, published
     // scene-wide because anything that sits in or on the water will need it.
     float waterLevel = 0.0f;
@@ -114,6 +121,7 @@ private:
     std::vector<std::unique_ptr<Layer>> m_layers;
     D3D12_GPU_VIRTUAL_ADDRESS m_fieldTableVa = 0;
     uint32_t m_width = 0, m_height = 0;
+    std::unique_ptr<GpuProfiler> m_prof;
 };
 
 }  // namespace ga
