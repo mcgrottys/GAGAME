@@ -1,5 +1,7 @@
 #include "scene/SeaLayer.h"
 
+#include "core/GpuProfiler.h"
+
 #include "core/PixEvents.h"
 #include "scene/FieldSet.h"
 
@@ -790,7 +792,14 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
         m_churnState = to;
     };
 
-    if (!m_churn.ResidentList().empty() || !m_pendingClear.empty()) {
+    // freezeChurn (harness, held stills only -- see SeaLayer.h): the advection/deposit pass is
+    // suspended while a still is held at one instant, so the atlas is exactly what the last
+    // unheld frame left and the hold's LENGTH stops changing the foam. The clear list is still
+    // dispatched: a tile mapped during the hold would otherwise be read as undefined pool
+    // memory. Outside a hold freezeChurn is false and this is the shipped path, dispatch for
+    // dispatch.
+    const bool doUpdate = !freezeChurn && !m_churn.ResidentList().empty();
+    if (doUpdate || !m_pendingClear.empty()) {
         barrierTo(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
         m_churnCb.originX = m_seaCb.churnF[0];
@@ -856,7 +865,7 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
             uav.UAV.pResource = m_churn.Res();
             ctx.cl->ResourceBarrier(1, &uav);
         }
-        dispatchList(m_churnUpdate.Get(), m_churn.ResidentList());
+        if (doUpdate) dispatchList(m_churnUpdate.Get(), m_churn.ResidentList());
     }
     barrierTo(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 }
@@ -867,11 +876,19 @@ void SeaLayer::Render(const FrameContext& ctx) {
     // The compute chain records into the same command list; compute bindings do not disturb the
     // graphics root signature the Renderer already set.
     if (m_swe && m_swe->Ready()) {
+        GpuScope gscope(ctx.prof, ctx.cl, "sea.swe");
         m_swe->Record(ctx.cl, *ctx.gpu, m_simUnix, m_seaCb.sea[0]);
     }
-    m_fft.Record(ctx.cl, *ctx.gpu, m_tSec);
-    RecordChurn(ctx);
+    {
+        GpuScope gscope(ctx.prof, ctx.cl, "sea.fft");
+        m_fft.Record(ctx.cl, *ctx.gpu, m_tSec);
+    }
+    {
+        GpuScope gscope(ctx.prof, ctx.cl, "sea.churn");
+        RecordChurn(ctx);
+    }
 
+    GpuScope gdraw(drawEnabled ? ctx.prof : nullptr, ctx.cl, "sea.draw");
     if (drawEnabled) {
         PixScope scope(ctx.cl, "sea.surface (tessellated: screen-space edge density)");
         ctx.cl->SetPipelineState((wireframe && m_seaPsoWire) ? m_seaPsoWire.Get()

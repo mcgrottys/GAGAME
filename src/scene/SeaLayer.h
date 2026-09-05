@@ -162,6 +162,33 @@ public:
     // M9b: G key / --wireframe. Shading cannot tell geometry from normals (priors 8); the
     // raster fill can. Same shaders, same displacement, lines instead of faces.
     bool wireframe = false;
+    // Harness only: raised by main for the frames a still is HELD at one instant
+    // (--settle-sync / --settle-hold). The churn is a stateful atlas -- at a held instant
+    // dtSim is 0 and CsChurnUpdate reduces to max(old, src), so the foam can only CLIMB, once
+    // per held frame, against a bed that is still landing. MEASURED (bird, 2026-09-05): two
+    // holds of different length gave different foam, which is what made two settled stills
+    // incomparable across binaries. Frozen, the atlas is whatever the last unheld frame left
+    // and hold length stops being a term. The CLEAR kernel still runs, so a tile mapped during
+    // the hold is never read as undefined pool memory. Proof of wire: [gpu] sea.churn 0.000 ms
+    // on held frames (p50 0.000 over 540 frames of a 240 + 300 render, 0.178 unheld).
+    bool freezeChurn = false;
+    // Harness only (--settle-clear-churn, step 25 of docs/PERF_EXPERIMENT.md): zero the whole
+    // churn atlas on the next Update by putting every resident tile on the clear list the
+    // fresh-tile clear kernel already runs. Raised once, at the first held frame, so a held
+    // still carries NO foam history from the real frames before the hold: --settle-exact
+    // makes the resident set a function of the pose, but the churn's deposits depend on WHEN
+    // the bed and the wave pages landed during those frames -- the A/B that tells "the
+    // residency" from "the churn's history" is this render against one without the flag.
+    // MEASURED (helm_ebb, 19:30, 2026-09-05, out/step25): two --settle-exact runs differed on
+    // 17.1 % of the pixels; with the atlas cleared, 10.0 % -- the churn's history is part of
+    // the residual, and the SWE's own state (level within 1.5 cm, current within 3 cm/s over
+    // 38-65 % of the inlet cells, exported by --dump-water-state) is the rest. Returns the
+    // tiles put on the list, for the proof-of-wire line main prints.
+    uint32_t ClearChurn() {
+        const std::vector<uint32_t>& r = m_churn.ResidentList();
+        m_pendingClear.insert(m_pendingClear.end(), r.begin(), r.end());
+        return static_cast<uint32_t>(r.size());
+    }
 
 private:
     struct SeaCbData {

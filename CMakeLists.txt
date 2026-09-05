@@ -14,12 +14,14 @@ endif()
 
 add_executable(gagame
   src/main.cpp
+  src/core/BuildInfo.cpp
   src/core/GaAst.cpp
   src/core/PixEvents.cpp
   src/core/GaTest.cpp
   src/core/DxTest.cpp
   src/core/CrashTrace.cpp
   src/core/Gpu.cpp
+  src/core/GpuProfiler.cpp
   src/core/Shader.cpp
   src/core/Window.cpp
   src/core/Image.cpp
@@ -61,6 +63,33 @@ target_include_directories(gagame PRIVATE src)
 # Every Win32 call in this project is the ...W variant, so the resource macros (IDC_ARROW and
 # friends) must resolve to their wide forms too.
 target_compile_definitions(gagame PRIVATE UNICODE _UNICODE)
+
+# ---- The build names its revision (core/BuildInfo.h). Resolved at configure time -- build.bat
+# reconfigures on every build -- and pinned to ONE translation unit so a new commit recompiles
+# BuildInfo.cpp alone. "-dirty" means src/, shaders/ or this file differ from HEAD (the data/
+# junction and the regenerated docs/GA_AST.md are deliberately not consulted: they say nothing
+# about the binary). Without git the string is "unknown" and the build proceeds.
+find_package(Git QUIET)
+set(GA_GIT_REV "unknown")
+if(GIT_FOUND)
+  execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short HEAD
+                  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                  OUTPUT_VARIABLE GA_GIT_HEAD OUTPUT_STRIP_TRAILING_WHITESPACE
+                  RESULT_VARIABLE GA_GIT_RC ERROR_QUIET)
+  if(GA_GIT_RC EQUAL 0 AND NOT GA_GIT_HEAD STREQUAL "")
+    set(GA_GIT_REV "${GA_GIT_HEAD}")
+    execute_process(COMMAND ${GIT_EXECUTABLE} status --porcelain --untracked-files=no
+                            -- src shaders CMakeLists.txt
+                    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                    OUTPUT_VARIABLE GA_GIT_STATUS OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(NOT GA_GIT_STATUS STREQUAL "")
+      set(GA_GIT_REV "${GA_GIT_REV}-dirty")
+    endif()
+  endif()
+endif()
+set_source_files_properties(src/core/BuildInfo.cpp PROPERTIES
+  COMPILE_DEFINITIONS "GA_GIT_REV=\"${GA_GIT_REV}\"")
+message(STATUS "build revision: ${GA_GIT_REV}")
 target_link_libraries(gagame PRIVATE
   d3d12 dxgi dxguid windowscodecs
   dxcompiler      # DxcCreateInstance; the matching DLL is copied next to the exe below

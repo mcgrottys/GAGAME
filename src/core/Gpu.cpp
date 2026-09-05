@@ -1,6 +1,8 @@
 #include "core/Gpu.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <string>
 
 namespace ga {
 
@@ -46,10 +48,12 @@ D3D12_GPU_DESCRIPTOR_HANDLE DescriptorHeap::Gpu(uint32_t index) const {
 
 // ================================================================================ Gpu init
 
-void Gpu::Init(HWND hwnd, uint32_t width, uint32_t height, bool wantDebugLayer) {
+void Gpu::Init(HWND hwnd, uint32_t width, uint32_t height, bool wantDebugLayer,
+               bool allowTearing) {
     m_hwnd = hwnd;
     m_width = std::max(width, 1u);
     m_height = std::max(height, 1u);
+    m_wantTearing = allowTearing && hwnd != nullptr;
 
     UINT factoryFlags = 0;
     if (wantDebugLayer) {
@@ -70,6 +74,8 @@ void Gpu::Init(HWND hwnd, uint32_t width, uint32_t height, bool wantDebugLayer) 
     // Highest-performance adapter that can actually make a device. Iterating rather than taking
     // adapter 0 matters on machines with an integrated GPU present (this one: RTX 5060 + 780M).
     Com<IDXGIAdapter1> adapter;
+    DXGI_ADAPTER_DESC1 chosen{};
+    UINT chosenRank = 0;
     for (UINT i = 0; m_factory->EnumAdapterByGpuPreference(
                          i, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
                          IID_PPV_ARGS(&adapter)) != DXGI_ERROR_NOT_FOUND;
@@ -80,6 +86,8 @@ void Gpu::Init(HWND hwnd, uint32_t width, uint32_t height, bool wantDebugLayer) 
         if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0,
                                         IID_PPV_ARGS(&m_device)))) {
             m_dedicatedVram = ad.DedicatedVideoMemory;
+            chosen = ad;
+            chosenRank = i;
             Log("[gpu] adapter: %S  (%llu MB dedicated)", ad.Description,
                 static_cast<uint64_t>(ad.DedicatedVideoMemory / (1024 * 1024)));
             break;
@@ -87,6 +95,78 @@ void Gpu::Init(HWND hwnd, uint32_t width, uint32_t height, bool wantDebugLayer) 
         adapter = nullptr;
     }
     if (!m_device) throw std::runtime_error("no D3D12 feature level 12.0 adapter found");
+
+    // ---- BOOT REPORT: which adapter, whether it is the high-performance pick, and whether it
+    // owns a display output. On a hybrid laptop the panel usually hangs off the integrated GPU;
+    // a swapchain on the discrete GPU is then a CROSS-ADAPTER present (DWM copies every frame
+    // to the adapter that owns the output), which is a different animal from a local flip.
+    {
+        Log("[gpu] boot: chosen adapter '%S' -- rank %u in DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE "
+            "order (%s), vendor 0x%04x device 0x%04x, %llu MB dedicated / %llu MB shared",
+            chosen.Description, chosenRank,
+            chosenRank == 0 ? "IS the high-performance adapter"
+                            : "NOT the top pick: a higher-ranked adapter failed FL 12_0",
+            chosen.VendorId, chosen.DeviceId,
+            static_cast<unsigned long long>(chosen.DedicatedVideoMemory >> 20),
+            static_cast<unsigned long long>(chosen.SharedSystemMemory >> 20));
+        auto countOutputs = [](IDXGIAdapter1* a, std::string* names) {
+            UINT n = 0;
+            Com<IDXGIOutput> out;
+            for (UINT k = 0; a->EnumOutputs(k, &out) != DXGI_ERROR_NOT_FOUND; ++k, out = nullptr) {
+                DXGI_OUTPUT_DESC od{};
+                if (SUCCEEDED(out->GetDesc(&od))) {
+                    char buf[160];
+                    snprintf(buf, sizeof(buf), "%s%S %ldx%ld", n ? ", " : "", od.DeviceName,
+                             static_cast<long>(od.DesktopCoordinates.right -
+                                               od.DesktopCoordinates.left),
+                             static_cast<long>(od.DesktopCoordinates.bottom -
+                                               od.DesktopCoordinates.top));
+                    if (names) *names += buf;
+                }
+                ++n;
+            }
+            return n;
+        };
+        std::string mine;
+        const UINT myOutputs = countOutputs(adapter.Get(), &mine);
+        Log("[gpu] boot: chosen adapter owns %u DXGI output%s%s%s", myOutputs,
+            myOutputs == 1 ? "" : "s", myOutputs ? ": " : "", mine.c_str());
+        // Who owns the outputs, then.
+        std::string ownerName;
+        UINT ownerOutputs = 0;
+        Com<IDXGIAdapter1> other;
+        for (UINT i = 0; m_factory->EnumAdapters1(i, &other) != DXGI_ERROR_NOT_FOUND;
+             ++i, other = nullptr) {
+            DXGI_ADAPTER_DESC1 od{};
+            other->GetDesc1(&od);
+            if (od.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) continue;
+            std::string names;
+            const UINT n = countOutputs(other.Get(), &names);
+            const bool same = od.AdapterLuid.LowPart == chosen.AdapterLuid.LowPart &&
+                              od.AdapterLuid.HighPart == chosen.AdapterLuid.HighPart;
+            Log("[gpu] boot:   adapter %u '%S'%s: %u output%s%s%s", i, od.Description,
+                same ? " (chosen)" : "", n, n == 1 ? "" : "s", n ? " -- " : "", names.c_str());
+            if (!same && n) {
+                char buf[256];
+                snprintf(buf, sizeof(buf), "%S", od.Description);
+                ownerName = buf;
+                ownerOutputs += n;
+            }
+        }
+        if (!m_hwnd) {
+            Log("[gpu] boot: headless -- no swapchain, so no present at all");
+        } else if (myOutputs) {
+            Log("[gpu] boot: present is SAME-ADAPTER -- the swapchain's adapter owns the "
+                "output it presents to");
+        } else {
+            Log("[gpu] boot: present is CROSS-ADAPTER -- the swapchain's adapter ('%S') owns NO "
+                "display output; the panel belongs to '%s' (%u output%s). Every frame is "
+                "rendered on the %S, copied across to the %s by DWM, and flipped there.",
+                chosen.Description, ownerName.empty() ? "(no other adapter found)" : ownerName.c_str(),
+                ownerOutputs, ownerOutputs == 1 ? "" : "s", chosen.Description,
+                ownerName.empty() ? "?" : ownerName.c_str());
+        }
+    }
 
     // Resource binding tier 3 makes the unbounded SRV table legal. The tiled-resources tier is the
     // M0 question: >= TIER_2 is guaranteed on FL 12_0 hardware per the D3D12 docs, and TIER_2 is
@@ -151,6 +231,29 @@ void Gpu::CreateSwapchain() {
     sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
     sd.SampleDesc.Count = 1;
 
+    // --no-vsync: tearing is a swapchain CREATION flag as well as a Present flag, and only
+    // legal when the factory says the OS/driver pair supports it.
+    m_tearing = false;
+    if (m_wantTearing) {
+        BOOL allow = FALSE;
+        if (SUCCEEDED(m_factory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allow,
+                                                     sizeof(allow))) &&
+            allow) {
+            sd.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+            m_tearing = true;
+            Log("[gpu] boot: present mode: --no-vsync -> DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING + "
+                "Present(0, DXGI_PRESENT_ALLOW_TEARING)");
+        } else {
+            Log("[gpu] boot: present mode: --no-vsync requested but "
+                "DXGI_FEATURE_PRESENT_ALLOW_TEARING is unsupported here; falling back to "
+                "Present(1, 0)");
+        }
+    } else {
+        Log("[gpu] boot: present mode: vsync, Present(1, 0), FLIP_DISCARD x%u buffers, no "
+            "waitable object, no latency setting",
+            kFrameCount);
+    }
+
     Com<IDXGISwapChain1> sc1;
     GA_CHECK(m_factory->CreateSwapChainForHwnd(m_queue.Get(), m_hwnd, &sd, nullptr, nullptr, &sc1));
     GA_CHECK(m_factory->MakeWindowAssociation(m_hwnd, DXGI_MWA_NO_ALT_ENTER));
@@ -204,7 +307,18 @@ void Gpu::EndFrame(bool present) {
     ID3D12CommandList* lists[] = {m_cmdList.Get()};
     m_queue->ExecuteCommandLists(1, lists);
 
-    if (present && m_swapchain) GA_CHECK(m_swapchain->Present(1, 0));
+    if (present && m_swapchain) {
+        GA_CHECK(m_tearing ? m_swapchain->Present(0, DXGI_PRESENT_ALLOW_TEARING)
+                           : m_swapchain->Present(1, 0));
+        ++m_presents;
+        if (!m_presentStats0Valid && m_presents >= 8) {
+            DXGI_FRAME_STATISTICS fs{};
+            if (SUCCEEDED(m_swapchain->GetFrameStatistics(&fs))) {
+                m_presentStats0 = fs;
+                m_presentStats0Valid = true;
+            }
+        }
+    }
 
     m_frameFence[m_frameIndex] = ++m_fenceValue;
     GA_CHECK(m_queue->Signal(m_fence.Get(), m_fenceValue));
@@ -223,6 +337,73 @@ void Gpu::WaitIdle() {
     }
 }
 
+void Gpu::ReportPresentStats() {
+    if (!m_swapchain) return;
+    // The panel behind the window: its current mode's refresh rate is the denominator.
+    // MEASURED on this laptop: the swapchain sits on the RTX, which owns no output, so
+    // GetContainingOutput fails (cross-adapter present); the window's monitor names the panel
+    // instead. The same composed present is why DXGI_FRAME_STATISTICS counts nothing (0
+    // presents over 0 refreshes after 400 Present() calls): the flip happens on the 780M
+    // under DWM, out of this swapchain's sight. Both cases are said rather than printed as 0.
+    auto panelHz = [](const wchar_t* deviceName) {
+        DEVMODEW dm{};
+        dm.dmSize = sizeof(dm);
+        return EnumDisplaySettingsW(deviceName, ENUM_CURRENT_SETTINGS, &dm)
+                   ? static_cast<unsigned>(dm.dmDisplayFrequency)
+                   : 0u;
+    };
+    std::string panel = "(unknown output)";
+    unsigned hz = 0;
+    {
+        Com<IDXGIOutput> out;
+        DXGI_OUTPUT_DESC od{};
+        char buf[96];
+        if (SUCCEEDED(m_swapchain->GetContainingOutput(&out)) && SUCCEEDED(out->GetDesc(&od))) {
+            snprintf(buf, sizeof(buf), "%S", od.DeviceName);
+            panel = buf;
+            hz = panelHz(od.DeviceName);
+        } else if (m_hwnd) {
+            MONITORINFOEXW mi{};
+            mi.cbSize = sizeof(mi);
+            if (GetMonitorInfoW(MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
+                snprintf(buf, sizeof(buf), "%S (the window's monitor; the swapchain's adapter "
+                         "owns no output)", mi.szDevice);
+                panel = buf;
+                hz = panelHz(mi.szDevice);
+            }
+        }
+    }
+    DXGI_FRAME_STATISTICS fs{};
+    const HRESULT hr = m_swapchain->GetFrameStatistics(&fs);
+    if (FAILED(hr) || !m_presentStats0Valid) {
+        Log("[present] %s at %u Hz: %u Present() calls; DXGI_FRAME_STATISTICS unavailable (%s) "
+            "-- presents per refresh not measured",
+            panel.c_str(), hz, m_presents,
+            FAILED(hr) ? (hr == DXGI_ERROR_FRAME_STATISTICS_DISJOINT ? "disjoint" : "failed")
+                       : "no first sample");
+        return;
+    }
+    // Deltas since the first sample: PresentCount counts images that reached the monitor,
+    // SyncRefreshCount the v-blanks that passed. Their ratio is what a viewer sees; under
+    // Present(1,0) it cannot exceed 1, under tearing it can.
+    const UINT shown = fs.PresentCount - m_presentStats0.PresentCount;
+    const UINT refreshes = fs.SyncRefreshCount - m_presentStats0.SyncRefreshCount;
+    if (shown == 0 && refreshes == 0) {
+        Log("[present] %s at %u Hz: %u Present() calls (%s), but DXGI_FRAME_STATISTICS counted "
+            "0 presents over 0 refreshes -- a composed (cross-adapter) present reports none, so "
+            "presents per refresh is not measurable from this swapchain; PresentMon is the tool "
+            "(probe P12)",
+            panel.c_str(), hz, m_presents,
+            m_tearing ? "Present(0, ALLOW_TEARING)" : "Present(1, 0)");
+        return;
+    }
+    const double perRefresh = refreshes ? double(shown) / double(refreshes) : 0.0;
+    Log("[present] %s at %u Hz: %u presents shown over %u refreshes = %.3f presents/refresh "
+        "(~%.1f fps perceived); %u Present() calls, %s",
+        panel.c_str(), hz, shown, refreshes, perRefresh, perRefresh * double(hz), m_presents,
+        m_tearing ? "Present(0, ALLOW_TEARING)" : "Present(1, 0)");
+}
+
 void Gpu::Resize(uint32_t width, uint32_t height) {
     width = std::max(width, 1u);
     height = std::max(height, 1u);
@@ -233,7 +414,8 @@ void Gpu::Resize(uint32_t width, uint32_t height) {
     if (!m_swapchain) return;
     for (auto& bb : m_backBuffers) bb.Reset();
     GA_CHECK(m_swapchain->ResizeBuffers(kFrameCount, m_width, m_height,
-                                        DXGI_FORMAT_R8G8B8A8_UNORM, 0));
+                                        DXGI_FORMAT_R8G8B8A8_UNORM,
+                                        m_tearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0));
     for (uint32_t i = 0; i < kFrameCount; ++i) {
         GA_CHECK(m_swapchain->GetBuffer(i, IID_PPV_ARGS(&m_backBuffers[i])));
         m_device->CreateRenderTargetView(m_backBuffers[i].Get(), nullptr,

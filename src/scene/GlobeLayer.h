@@ -19,7 +19,10 @@
 #include "scene/Layer.h"
 #include "sim/GlobeModel.h"
 
+#include <condition_variable>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace ga {
@@ -122,14 +125,74 @@ public:
         return (m_windReady ? m_windBank.ResidentBytes() : 0) +
                (m_cloudReady ? m_cloud.ResidentBytes() : 0);
     }
-    // Screw-prefetch: run the node walk for a PREDICTED camera, emitting Want(predicted) only.
-    void PredictWants(const Camera& cam, float aspect);
+    // Step 5 (docs/PERF_EXPERIMENT.md): THE PREFETCH WALK LEAVES THE MAIN THREAD.
+    //
+    // The screw-predicted walk (M6e: the same six-face descent under the pose 24 frames
+    // ahead, no frustum cull, Want(predicted) only) was 1.9-2.0 ms of main-thread CPU on
+    // every third helm frame -- the measured comb: loop 13.8-14.2 ms on frame%3==1 against
+    // 11.9-12.5 on the others. The walk is pure geometry: the eye, the planet frame, the
+    // window origins and the tenant ids decide every rect it emits, and none of them changes
+    // once the frame's pose is clamped. So StartPredictWalk captures them into a WalkParams
+    // and posts it to a worker the moment the pose is final; the worker walks into a vector
+    // of rects in DFS order while the main thread runs SetView; ReplayPredictWants, at the
+    // point the walk used to run (after SetView, before ProcessQueues advances the stamp
+    // frame), waits for the job -- never skips it: a skipped walk would make a rail's want
+    // stream depend on the machine -- and issues the same Want(predicted) calls in the same
+    // order. The manager sees the identical stream (Residency.h predictedHash: the same
+    // FNV-1a on the worker and inline under --predict-inline), so its stamps, queues and
+    // sort ties are unchanged. PredictNextPose keeps its call cadence and so its 72-frame
+    // effective lookahead (it moves m_prevPose only on the frames it runs); that quirk is
+    // its own A/B, not this step's.
+    //
+    // Everything the node walk reads, captured. The real walk runs over one of these too
+    // (SetView fills it, then adds the five planes), so the two walks are ONE geometry.
+    struct WalkParams {
+        double R = 0.0;
+        double frameE[3] = {}, frameU[3] = {}, frameN[3] = {};   // planet -> tangent rows
+        double camPos[3] = {};      // the eye in the tangent frame (the predicted one here)
+        double camPlanet[3] = {};   // the REAL eye in the planet frame: the horizon test's r
+                                    // (PredictWants never moved it; kept so, to the bit)
+        int camFace = 0;            // step 24: the eye's own cube face, walked first
+        double frustum[6][4] = {};  // camera-relative planes; planeCount 0 = no cull
+        int planeCount = 0;
+        float reliefExagg = 1.0f;
+        int maxDepth = kMaxDepth;
+        float pixAng = 1.0e-3f;     // one pixel's angle: the relief-mip selector
+        bool wants = false;         // a residency manager and at least one cube tenant
+        int surfT = -1, normT = -1, colorT = -1, hgtT = -1, maskT = -1;
+        int winT = -1, hgtWinT = -1, detWinT = -1;
+        uint32_t winFace = 0, hgtWinFace = 0, detFace = 0;
+        double detOrg[2] = {}, detSize = 1.0, det17Org[2] = {};
+        bool probeCullFar = false;   // step 23 probe
+    };
+    // One Want() the walk asked for, as it asked (face and mip as the manager takes them).
+    struct WantRect {
+        int tenant;
+        uint32_t face, mip;
+        float u0, v0, u1, v1;
+    };
+    // Post the prefetch walk for this frame: `cam` is the frame's clamped camera (its planet
+    // position and pixel angle are the walk's, exactly as SetView's are), `pred` the
+    // extrapolated pose the walk runs under. Returns at once; the worker walks while SetView
+    // runs. Nothing is posted without a manager and a cube tenant (PredictWants's own gate).
+    void StartPredictWalk(const Camera& cam, const Camera& pred, float viewportH);
+    // Wait for that walk and issue its rects through Want(predicted = true), in DFS order --
+    // where PredictWants used to run. A no-op when nothing was posted.
+    void ReplayPredictWants();
+    // The worker's figures for the [rail] table: walks replayed, their nodes, leaves and
+    // rects, the walk's own time on the worker, the main thread's wait at the join, the
+    // replay's time. All frames of the run.
+    uint64_t predictWalks = 0, predictNodes = 0, predictLeaves = 0, predictRects = 0;
+    uint64_t predictWalkNs = 0, predictWaitNs = 0, predictReplayNs = 0;
+    ~GlobeLayer() override;   // joins the worker
 
     float reliefExagg = 1.0f;       // set per frame by main (altitude-scaled display choice)
     float waterNavd = 0.0f;         // M6j: live water level, for the close-up material model
     bool msSurface = true;          // M6j: request the mesh-shader unified surface
     bool MeshPathActive() const { return m_msPath; }
     bool stencilOverlay = false;    // M6i: --stencil, the GIS alignment overlay
+    bool probeCullFar = false;      // step 23 probe: horizon cull at every altitude (+0.1 rad)
+    void DumpMeshlets(const std::wstring& path) const;   // step 23 probe: the records drawn
     int debugLens = 0;              // M7m: --lens (1 worldxz, 2 winuv, 3 mip, 4 ring,
                                     // 7 velgrad -- the derived div/curl bank)
     // M9h: the grad(flow) bank and the grid it lives on, for lens 7.
@@ -197,10 +260,20 @@ private:
         uint32_t face, cell0;
         float morphStart, morphEnd;
         float anchorRel[3], arc;
-        float dPdu[3], pad0;
-        float dPdv[3], pad1;
+        float dPdu[3];
+        uint32_t seamX;   // step 23: the seam word across the W (mx 0) / E (mx 3) edge
+        float dPdv[3];
+        uint32_t seamY;   // step 23: the same across the N (my 0) / S (my 3) edge
         float upT[3], pad2;
     };
+    static_assert(sizeof(MeshletRec) == 96, "MeshletRec mirrors GlobeMesh.hlsl: 96 B");
+    // Step 23: one emitted leaf, keyed for the seam table (SeamTable): face, level and the
+    // node's integer grid position, and its first record.
+    struct LeafKey {
+        uint64_t key;
+        uint32_t base;
+    };
+    void SeamTable();
     // Mirrors GlobeCb in Globe.hlsl. (Count float4 rows on BOTH sides after any edit.)
     struct GlobeCbData {
         float glo[4];
@@ -261,7 +334,9 @@ private:
         float altC[4];
     };
 
-    void SelectNode(int face, int level, double u0, double v0, double size);
+    // Step 5: everything the walk reads, from the members and this camera (planeCount 0).
+    WalkParams CaptureWalk(const Camera& cam, float viewportH) const;
+    void PredictWorker();   // the prefetch walk's thread body
     void EmitMeshlets(int face, double u0, double v0, double size, double arc,
                       float morphStart, float morphEnd);
     bool BuildPso(Gpu& gpu, ShaderCompiler& sc);
@@ -318,6 +393,9 @@ private:
 public:
     mutable uint64_t walkNodes = 0, walkLeaves = 0, walkWantNs = 0;
     void WalkReset() { walkNodes = walkLeaves = walkWantNs = 0; }
+    // The meshlet-record memcpy into the frame's upload buffer (Render), last frame, ms: the
+    // one CPU cost of the mesh path inside the RENDER bracket. main reads and zeroes it.
+    double meshletCopyMs = 0.0;
 private:
 
     // Load -> compose -> sparse, and report the worst disagreement with the source array.
@@ -357,11 +435,8 @@ private:
     double m_detOrg[2] = {0, 0};
     double m_detSize = 1;
     bool m_streamMars = false;
-    bool m_predictPass = false;
     double m_radius = GlobeModel::kR;
-    float m_pixAng = 1.0e-3f;
     double m_frameE[3] = {1, 0, 0}, m_frameU[3] = {0, 1, 0}, m_frameN[3] = {0, 0, 1};
-    double m_camPlanet[3] = {0, 0, 2.0e7};   // for the horizon cull (doubles, per SetView)
     double m_estGeo[4] = {0, 0, 0, 0};
     uint32_t m_bankSrv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
     uint32_t m_bankDeriv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
@@ -383,6 +458,7 @@ private:
     // M6j: the mesh-shader path.
     static constexpr uint32_t kMaxMeshlets = 65536;
     uint32_t m_meshletDrops = 0;    // M8h: leaves dropped at the record cap this frame
+    std::vector<LeafKey> m_leafKeys;   // step 23: this frame's emitted leaves (SeamTable)
     bool m_dropsReported = false;   // one report per drop episode, not per frame
     bool m_msPath = false;
     uint32_t m_meshStatWalks = 0;   // M9d: --mesh-stats prints on the 8th walk
@@ -394,9 +470,25 @@ private:
     GlobeCbData m_cb{};
     SkyCbData m_skyCb{};
     float m_viewportH = 900.0f;
-    double m_camPos[3] = {0, 0, 2.0e7};
-    double m_frustum[6][4];          // camera-relative plane equations
-    int m_planeCount = 0;
+    double m_camPos[3] = {0, 0, 2.0e7};   // the flat eye: meshlet anchors and gCamAbs
+    // Step 5: the real walk's inputs (SetView fills them; the walk reads nothing else) and
+    // the prefetch walk's job. The worker starts on the first StartPredictWalk and the
+    // destructor joins it; the two threads hand the job across under one mutex -- posted
+    // (params waiting for the worker), busy (posted or walking: the rects are not back),
+    // outstanding (posted and not yet replayed), quit.
+    WalkParams m_wp{};
+    struct PredictJob {
+        std::thread thread;
+        std::mutex mx;
+        std::condition_variable cv;
+        bool posted = false;
+        bool busy = false;
+        bool outstanding = false;
+        bool quit = false;
+        WalkParams params{};
+        std::vector<WantRect> rects;   // the worker's answer; ReplayPredictWants empties it
+        uint64_t nodes = 0, leaves = 0, walkNs = 0;
+    } m_predict;
 };
 
 }  // namespace ga

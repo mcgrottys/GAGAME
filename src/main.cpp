@@ -52,6 +52,7 @@
 #include "compose/WaterAtlas.h"
 #include "core/Json.h"
 #include "core/GaAst.h"
+#include "core/BuildInfo.h"
 #include "core/CrashTrace.h"
 #include "core/DxTest.h"
 #include "core/Pga.h"
@@ -67,6 +68,7 @@
 #include "sim/TideModel.h"
 #include "sim/WeatherManager.h"
 
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -87,6 +89,8 @@ struct Options {
     uint32_t pixFrames = 0;           // --pix N: programmatic .wpix capture of N frames
     bool dumpFibers = false;          // --dump-fibers: bank planes as PNGs + range gate
     int lens = 0;                     // --lens worldxz|winuv|mip|ring: value-as-color
+    bool probeCullFar = false;        // step 23 probe: cull beyond the horizon at every altitude
+    std::wstring dumpMeshlets;        // step 23 probe: the dump frame's meshlet records
     bool dumpWater = false;           // --dump-water-state: inlet fields for proofs/
     bool sliceOn = false;             // --slice d: the cutaway plane (M7o)
     double sliceD = 0.0;              // plane offset, world z metres
@@ -110,6 +114,8 @@ struct Options {
     bool railZoom = false;            // --rail-zoom DIR: orbit -> inlet imagery zoom -> estuary
     bool framesSet = false;           // an explicit --frames beats a rail default
     uint32_t predictEvery = 3;        // --predict-every N: prefetch-walk cadence (1 = old)
+    bool predictInline = false;       // --predict-inline: the prefetch walk on the main thread
+                                      // where it used to run (step 5's A/B: the same FNV-1a)
     bool packTiles = false;           // --pack-tiles: pack the composed cache, then exit
     bool directStorage = true;        // --no-direct-storage: the upload ring, for the A/B (M9ao)
     bool dsSerial = false;            // --ds-serial: one DS batch in flight (diagnostic)
@@ -125,6 +131,19 @@ struct Options {
     bool warmTrees = false;           // --warm-trees: build them without comparing, then exit
     bool packTrees = false;           // --pack-trees: one archive per node per frame, then exit
     bool bench = false;               // --bench: fly the rail, capture nothing, time honestly
+    bool benchOverlap = false;        // --bench-overlap: --bench WITHOUT the per-frame WaitIdle --
+                                      // the loop mean is then the shipped max(CPU, GPU) pipeline
+    bool gpuTime = false;             // --gpu-time: timestamp queries per pass, [gpu] lines + gpu_ms.csv
+    bool noVsync = false;             // --no-vsync: windowed, ALLOW_TEARING + Present(0, tearing)
+    bool settleSync = false;          // --settle-sync: hold the --dump frame's instant until the
+                                      // residency queues and DirectStorage reads have drained
+    uint32_t settleHold = 0;          // --settle-hold N: hold it for exactly N frames, counted;
+                                      // with --settle-sync, drain first and then to at least N
+    bool settleExact = false;         // --settle-exact: hold until the resident set IS the
+                                      // walk's want set (Residency.h settleExact), churn frozen
+    bool settleClearChurn = false;    // --settle-clear-churn: zero the churn atlas at the first
+                                      // held frame (SeaLayer.h ClearChurn), the history A/B
+    std::wstring dumpHdr;             // --dump-hdr PATH: the RGBA16F radiance before the tonemap
     std::string mp4;                  // --mp4 PATH: pipe rail frames straight to an encoder
     bool flatBed = false;             // --flat-bed N: constant bed, to A/B bathymetry
     float flatBedNavd = -30.0f;
@@ -293,8 +312,10 @@ Options ParseArgs(int argc, char** argv) {
             const std::string n = next("worldxz");
             o.lens = n == "worldxz" ? 1 : n == "winuv" ? 2 : n == "mip" ? 3
                      : n == "ring" ? 4 : n == "cascade" ? 5
-                     : n == "waterdata" ? 6 : n == "velgrad" ? 7 : 1;
+                     : n == "waterdata" ? 6 : n == "velgrad" ? 7 : n == "shell" ? 8 : 1;
         }
+        else if (a == "--probe-cull-far") o.probeCullFar = true;
+        else if (a == "--dump-meshlets") o.dumpMeshlets = Widen(next("meshlets.bin").c_str());
         else if (a == "--dump-water-state") o.dumpWater = true;
         else if (a == "--slice") {
             o.sliceOn = true;
@@ -321,6 +342,43 @@ Options ParseArgs(int argc, char** argv) {
         // M9t: fly the rail and measure it, capturing NOTHING. See the note at the timing site
         // for why this is not the same as reading renderMs out of a captured run.
         else if (a == "--bench") o.bench = true;
+        // --bench-overlap: the same flight with the CPU/GPU overlap the shipped loop keeps. The
+        // fenced --bench prints CPU + GPU in series; this prints what a player's frame costs.
+        else if (a == "--bench-overlap") { o.bench = true; o.benchOverlap = true; }
+        // Instruments: GPU time per pass (timestamp queries, read frames-in-flight deep, no
+        // stall) and a tearing present for the windowed frame-rate question.
+        else if (a == "--gpu-time") o.gpuTime = true;
+        else if (a == "--no-vsync") o.noVsync = true;
+        // --settle-sync: a still's dump frame is held (the sim clock frozen at its instant, the
+        // way --dump-both holds it) until nothing is still landing -- the residency queues empty,
+        // no DirectStorage batch in flight, no ring-held request -- for kEvictAgeFrames frames,
+        // so when the far tiles happened to arrive stops deciding the still. MEASURED (helm,
+        // 2026-09-05): held pairs agree to 2-13 px; unheld pairs to 5-18 px or one far-water
+        // tile (~870 px) -- the horizon-line residue is not the residency's (probe P16 stays open).
+        else if (a == "--settle-sync") o.settleSync = true;
+        // --settle-hold N: the same hold, COUNTED. --settle-sync's length is whatever the
+        // residency needs, and the two binaries of an A/B rarely need the same (211 vs 225
+        // frames on two runs of one binary; 300 vs 900 across a change) -- so two settled
+        // stills were taken after different numbers of frames. Held exactly N frames past the
+        // dump instant whatever residency is doing, N is a flag both sides share. With
+        // --settle-sync it composes: drain first, then hold to at least N. Honoured past the
+        // 3000-frame drain cap, which is a give-up rule for the drain, not a budget.
+        else if (a == "--settle-hold")
+            o.settleHold = static_cast<uint32_t>(atoi(next("300").c_str()));
+        // --settle-exact: the same clock hold and churn freeze, exited only when the resident
+        // set IS the walk's want set -- every wanted tile mapped at its mip, every mapped tile
+        // the walk does not want dropped, nothing pending, in flight or retiring, for
+        // kEvictAgeFrames + 4 consecutive turns (Residency.h settleExact). --settle-sync's
+        // quiet test fires over two different resident sets (step 21's first attempt: two
+        // quiet bird holds differed in whole tiles' mips); this one names the set. With
+        // --settle-hold N it composes: exact first, then to at least N.
+        else if (a == "--settle-exact") o.settleExact = true;
+        // --settle-clear-churn: the churn atlas is zeroed at the first held frame, so the still
+        // carries no foam deposited during the real frames (which lands when the bed and the
+        // wave pages happen to). The A/B of a held still with and without it tells the
+        // residency's share of a residual from the churn history's (SeaLayer.h ClearChurn).
+        else if (a == "--settle-clear-churn") o.settleClearChurn = true;
+        else if (a == "--dump-hdr") o.dumpHdr = Widen(next("out.rgba16f").c_str());
         // M9ah: pack every realization's loose tiles into one archive and exit.
         else if (a == "--pack-tiles") o.packTiles = true;
         // M9ai: route archived tile reads NVMe -> GPU. Off by default until the streamed
@@ -350,6 +408,7 @@ Options ParseArgs(int argc, char** argv) {
         // resolves to a place DirectStorage can read. Needs the graph, so it runs after it.
         else if (a == "--pack-trees") { o.packTrees = true; o.treeAudit = 1u; }
         else if (a == "--predict-every") o.predictEvery = uint32_t(atoi(next("1").c_str()));
+        else if (a == "--predict-inline") o.predictInline = true;
         // M9p: replace the bed with a flat floor at this NAVD height. The A/B against a normal
         // run isolates BATHYMETRY's contribution to the geometry from everything else.
         else if (a == "--flat-bed") { o.flatBed = true; o.flatBedNavd = float(atof(next("-30").c_str())); }
@@ -1600,6 +1659,17 @@ int main(int argc, char** argv) {
     ga::InstallCrashTrace();   // M7v: symbolized stacks on any crash, headless
     try {
         const Options opt = ParseArgs(argc, argv);
+        {
+            // The first line of every log: which binary, which flags. A baseline still or a
+            // bench log is otherwise unmatchable to the recipe that made it (out/baseline/*.log
+            // named neither; the memory note carried the command instead).
+            std::string args;
+            for (int i = 1; i < argc; ++i) {
+                if (i > 1) args += ' ';
+                args += argv[i];
+            }
+            Log("[boot] gagame rev %s | argv: %s", BuildGitRev(), args.c_str());
+        }
 
         // M9ah: pack the composed cache into per-realization archives and exit. No device, no
         // scene -- this is a disk-to-disk job. The loose tiles are kept: the archive is derived,
@@ -1708,12 +1778,19 @@ int main(int argc, char** argv) {
         // M7k: the PIX capturer must be resident BEFORE device creation.
         if (opt.pixFrames > 0) PixLoadGpuCapturer();
         Gpu gpu;
-        gpu.Init(opt.headless ? nullptr : window.Handle(), opt.width, opt.height, opt.debugLayer);
+        gpu.Init(opt.headless ? nullptr : window.Handle(), opt.width, opt.height, opt.debugLayer,
+                 opt.noVsync && !opt.headless);
+        if (!opt.headless) {
+            Log("[window] client area %ux%u (requested %ux%u; the swapchain matches the client "
+                "rect, not the outer window)",
+                window.Width(), window.Height(), opt.width, opt.height);
+        }
 
         RendererDesc rd;
         rd.shaderDir = opt.shaderDir;
         Renderer renderer;
         renderer.Init(gpu, rd);
+        if (opt.gpuTime) renderer.EnableGpuProfiler();
 
         FieldSet fields;
         fields.Init(gpu, L".", 1.0f, 1.0f);
@@ -2012,6 +2089,10 @@ int main(int argc, char** argv) {
         const char* kScenePath = "data/wave_scene.json";
         LoadWaterScene(kScenePath, waterScene);
         WaterSceneChanged(kScenePath, &waterSceneMtime);
+        // Step 3 (docs/PERF_EXPERIMENT.md): the directory watches the file; the frame polls
+        // one atomic instead of paying the 0.14-0.19 ms stat through the data/ junction.
+        WaterSceneWatch sceneWatch;
+        sceneWatch.Start(kScenePath);
 
         WaterBankLayer* waterBank = nullptr;
         if (sea && bathy.Ready() && !marsMode) {
@@ -2616,6 +2697,7 @@ int main(int argc, char** argv) {
             }
             globe->stencilOverlay = opt.stencil;
             globe->debugLens = opt.lens;
+            globe->probeCullFar = opt.probeCullFar;
             // M9h: the grad(flow) bank plus the grid it lives on, for --lens velgrad. The
             // SWE solver owns the bank; the bathy model owns the world mapping.
             if (swe.Ready() && bathy.Ready()) {
@@ -3374,6 +3456,8 @@ int main(int argc, char** argv) {
                 Log("[wx] probe: manager update at the probe point");
                 weather.Update(gpu, renderer.Shaders(), opt.shaderDir, simUnix, plat, plon,
                                1000.0);
+                // The probe reads the windows' CPU mirrors: fill them once, at its instant.
+                weather.RefreshMirrorsTo(gpu, simUnix);
                 auto show = [&](double res) {
                     const WeatherSample ws = weather.Query(plat, plon, simUnix, res);
                     Log("[wx] res %6.0f m: level %+6.2f  cur %+5.2f,%+5.2f  Hs %4.2f Tp %4.1f "
@@ -3779,18 +3863,53 @@ int main(int argc, char** argv) {
         // mistake the phase table already caught once.
         // M9v: prefetch cadence, --predict-every. 1 = every frame (the shipped behaviour).
         const uint32_t kPredictEvery = (std::max)(1u, opt.predictEvery);
-        double profMs[10] = {}, profHelmMs[10] = {};
+        // Step 1 (perf plan): two brackets that were unnamed -- the 17 wave-plane Wants after
+        // waveField.Update (the 0.60 ms helm residual between "sum of the ten" and the
+        // pre-RenderFrame total in out/instr_bench.log) and the exposure roll + Want that
+        // sea.SetTime's bracket used to swallow.
+        constexpr int kProfN = 12;
+        double profMs[kProfN] = {}, profHelmMs[kProfN] = {};
         std::vector<float> railPreMs;   // M9u: the whole pre-RenderFrame half
         uint64_t walkNodesAcc = 0, walkLeavesAcc = 0, walkWantNsAcc = 0, walkFrames = 0;
         uint64_t wantTouchAcc = 0, wantHitAcc = 0;
-        static const char* kProfName[10] = {
+        static const char* kProfName[kProfN] = {
             "weather.Update", "scene hot-reload stat", "waveField.Update",
             "waterBank.SetFrame", "tide.SetTime", "sea.SetTime",
-            "groundAt (cam clamp)", "globe.SetView", "globe.PredictWants", "swe (solver step)"};
+            "groundAt (cam clamp)", "globe.SetView", "globe.PredictWants", "swe (solver step)",
+            "wave-plane Wants (17)", "exposure roll + Want"};
         std::chrono::steady_clock::time_point profT0;
         bool profHelm = false;
+        // The section brackets accumulate only over the frames the [rail] series keeps (a rail's
+        // 150 settle frames are excluded, as the walk stats already were); the divisor is the
+        // series length, so the two now agree. profOn is set at the top of every iteration.
+        bool profOn = true;
 #define PROF_BEGIN() profT0 = Clock::now()
-#define PROF_END(slot)                                                                         do {                                                                                           const double _e =                                                                              std::chrono::duration<double>(Clock::now() - profT0).count() * 1000.0;                  profMs[slot] += _e;                                                                        if (profHelm) profHelmMs[slot] += _e;                                                  } while (0)
+#define PROF_END(slot)                                                                         do {                                                                                           const double _e =                                                                              std::chrono::duration<double>(Clock::now() - profT0).count() * 1000.0;                  if (profOn) {                                                                                  profMs[slot] += _e;                                                                        if (profHelm) profHelmMs[slot] += _e;                                                  }                                                                                          } while (0)
+        // THE CPU INSIDE RenderFrame, named. RENDER = record + fence (+ serialized GPU under
+        // --bench); the record half held three untimed CPU costs: the residency turn
+        // (ProcessQueues, by phase -- probe P5 of the plan), the bank's tile-list build (P6) and
+        // the meshlet memcpy. Each layer times itself; they are read and zeroed here so a frame
+        // that skipped a layer contributes nothing. Accumulated like the section table, and
+        // written per frame into metrics.csv.
+        constexpr int kInPhases = ResidencyManager::kPhases;
+        constexpr int kInResTurn = kInPhases, kInBankList = kInPhases + 1,
+                      kInMeshCopy = kInPhases + 2, kInN = kInPhases + 3;
+        double profInMs[kInN] = {}, profInHelmMs[kInN] = {};
+        std::vector<std::array<float, kInN>> railInMs;
+        // metrics.csv pairs loop_ms with its own frame: the interval measured at the top of an
+        // iteration is the PREVIOUS frame's, so it closes the row that frame opened.
+        bool loopRowOpen = false;
+        // --settle-sync state: the instant is held at the dump frame while the residency
+        // manager drains; the still is then a function of pose and instant alone.
+        bool settling = false;
+        uint32_t settleFrames = 0, settleQuiet = 0, settlePending0 = 0, settleReads0 = 0;
+        constexpr uint32_t kSettleQuietFrames = ResidencyManager::kEvictAgeFrames;
+        constexpr uint32_t kSettleCapFrames = 3000;   // then dump anyway, and say so
+        // Step 25: --settle-exact's own count -- consecutive turns the manager reported the
+        // resident set equal to the want set. kEvictAgeFrames past the last drop its NULL map
+        // has landed; the +4 is one more overlap window with nothing moving.
+        uint32_t settleExactQuiet = 0;
+        constexpr uint32_t kSettleExactFrames = ResidencyManager::kEvictAgeFrames + 4u;
         FramePipe recPipe;
         std::vector<uint8_t> recPixels;
         if (!opt.mp4.empty()) {
@@ -3814,6 +3933,16 @@ int main(int argc, char** argv) {
             float dt = std::chrono::duration<float>(now - last).count();
             last = now;
             const auto preT0 = Clock::now();   // M9u: everything before RenderFrame
+            // The interval just measured is the previous frame's whole loop (its render, its
+            // capture, this iteration's message pump): close that frame's row with it. It used
+            // to be pushed beside the CURRENT frame's render time, so every metrics.csv row
+            // paired frame N's render with frame N-1's loop and the 61-frame comb sat one row
+            // late. Unclamped: a stall is a stall in a series.
+            if (loopRowOpen) {
+                railLoopMs.push_back(dt * 1000.0f);
+                loopRowOpen = false;
+            }
+            profOn = opt.rail.empty() || frame >= 150u;
             dt = (dt > 0.25f) ? 0.25f : dt;   // a debugger break must not teleport time
 
             if (!opt.headless) {
@@ -4000,10 +4129,27 @@ int main(int argc, char** argv) {
                 // the solid frame's instant so the two images are the same water, not the
                 // same water 33 ms later -- otherwise the lines do not sit on the crests
                 // they are supposed to explain.
-                if (opt.dumpBoth && opt.frames && recFrame >= opt.frames) {
+                // --settle-sync / --settle-hold hold the same instant for as many frames as the
+                // residency manager needs to drain, or for a counted N (the exit test below
+                // decides which). The held instant is opt.frames - 1, the LAST frame an unheld
+                // --frames N run renders and dumps: an off-by-one here would put the held still
+                // a whole 1/30 s of sea away from the unheld one, so it was MEASURED rather than
+                // read (helm_ebb, 2026-09-05, out/step21/ob_*): --frames 240 --settle-hold 1
+                // against an unheld --frames 241 is 54.76 % identical, 33.08 % of pixels over
+                // 1 LSB -- indistinguishable from the 1/30 s step itself (240 vs 241: 54.76 %,
+                // 33.07 %) -- while against the unheld --frames 240 it is 94.62 % identical,
+                // the extra frame of residency landing at a pose that is nowhere near settled
+                // (pending 2992 -> 3004). The held frame names the unheld dump's moment; there
+                // is no off-by-one. The same clamp is what puts --dump-both's wireframe on the
+                // solid frame's crests, which is the second reason not to move it.
+                if ((opt.dumpBoth || settling) && opt.frames && recFrame >= opt.frames) {
                     recFrame = opt.frames - 1u;
                 }
                 simUnix = startUnix + static_cast<double>(recFrame) * (timeScale / 30.0);
+                // The churn atlas is stateful and its kernel only climbs at a frozen dt, so a
+                // held frame would advance the foam the hold's length decides. Freeze it for
+                // exactly the held frames (SeaLayer.h freezeChurn).
+                if (sea) sea->freezeChurn = settling;
                 // The helm leg of --rail-flood: keys at 32 s (cHelmIn) and 40 s (cHelmGap).
                 profHelm = !opt.rail.empty() && recFrame >= 32u * 30u;
                 if (!opt.rail.empty() && !railKeys.empty()) {
@@ -4036,8 +4182,9 @@ int main(int argc, char** argv) {
                     gisLayer->tolMeters = static_cast<float>(altV * cam.fovY / vh);
                 }
                 // M6x: the weather manager's residency clock -- the camera's ground position
-                // is the demand signal; dormant windows spin up as it arrives, mirrors
-                // refresh, owned solvers advance. All in the flat one-world frame.
+                // is the demand signal; dormant windows spin up as it arrives, owned solvers
+                // advance. All in the flat one-world frame. (The CPU mirrors no longer
+                // refresh here: nothing in the loop reads them -- step 2 of PERF_EXPERIMENT.)
                 if (!marsMode) {
                     PROF_BEGIN();
                     weather.Update(gpu, renderer.Shaders(), opt.shaderDir, simUnix,
@@ -4054,8 +4201,13 @@ int main(int argc, char** argv) {
                     // M8: the scene file hot-reloads -- edit, save, watch the water
                     // change. A geometry edit re-Configures the solver (its bucket key
                     // rolls, the cache answers or a background solve runs).
+                    // Step 3 (docs/PERF_EXPERIMENT.md): the stat runs only when the
+                    // directory watcher says the file moved (every 30 frames with no
+                    // watch); the mtime compare and the reload are unchanged. The stat
+                    // alone was 0.140 ms whole / 0.185 ms helm per frame (step 2's bench).
                     PROF_BEGIN();
-                    if (WaterSceneChanged(kScenePath, &waterSceneMtime) &&
+                    if (sceneWatch.Poll(frame) &&
+                        WaterSceneChanged(kScenePath, &waterSceneMtime) &&
                         LoadWaterScene(kScenePath, waterScene)) {
                         if (waveField) {
                             WaveFieldConfig wcfg2 = sceneToWaveCfg(waterScene);
@@ -4074,7 +4226,8 @@ int main(int argc, char** argv) {
                         if (waterScene.jettyCrestNavd > -90.0f) {
                             globe->editFloorNavd = waterScene.jettyCrestNavd;
                         }
-                        Log("[scene] %s hot-reloaded", kScenePath);
+                        Log("[scene] %s hot-reloaded at frame %u, %s", kScenePath, frame,
+                            sceneWatch.Trigger().c_str());
                     }
                     PROF_END(1);
                     // M8: bucket-watch + background solve + upload/swap for the solved
@@ -4107,12 +4260,16 @@ int main(int argc, char** argv) {
                                 std::chrono::duration<double>(Clock::now() - tp0).count());
                         }
                         if (waveSrc && waveT >= 0 && waveSrc->Key() != 0) {
+                            // Bracketed apart from waveField.Update: these Wants are the whole
+                            // window at mip 0 on every plane, a map find per un-stamped tile.
+                            PROF_BEGIN();
                             float u0, v0, u1, v1;
                             waveSrc->WindowUv(u0, v0, u1, v1);
                             const uint32_t nPlanes = waveField->Table().nUsed + 1u;
                             for (uint32_t p = 0; p < nPlanes; ++p) {
                                 resMgr.Want(waveT, 6u + p, 0u, u0, v0, u1, v1);
                             }
+                            PROF_END(10);
                         }
                     }
                     // M8 fleet: advance the traffic (stateless), hand the table to the
@@ -4205,17 +4362,6 @@ int main(int argc, char** argv) {
                     (opt.headless ? static_cast<float>(opt.width) : window.Width()) / viewH;
                 globe->WalkReset();
                 resMgr.WantStatsReset();
-                PROF_BEGIN();
-                globe->SetView(cam, aspect, viewH, simUnix - startUnix);
-                PROF_END(7);
-                if (!opt.rail.empty() && frame >= 150u) {
-                    walkNodesAcc += globe->walkNodes;
-                    walkLeavesAcc += globe->walkLeaves;
-                    walkWantNsAcc += globe->walkWantNs;
-                    wantTouchAcc += resMgr.wantTouches;
-                    wantHitAcc += resMgr.wantHits;
-                    ++walkFrames;
-                }
                 // M6e screw-prefetch: extrapolate the pose ~0.8 s ahead along its own screw and
                 // let the walk under THAT camera queue tiles early (predicted priority).
                 // M9v: THE PREFETCH WALK, AMORTIZED. Measured at 3.25 ms per frame at helm --
@@ -4228,11 +4374,50 @@ int main(int argc, char** argv) {
                 // the prefetch still lands four times inside its own horizon. The phase is tied
                 // to the frame counter rather than a timer so a headless rail and an interactive
                 // run walk the same nodes on the same frames.
-                if ((frame % kPredictEvery) == 0) {
+                // --settle-sync: the hold runs WITHOUT the predicted walk. MEASURED (step 1 of the
+                // perf plan, helm still): with it, pending reached 0 within 300 held frames but
+                // was never quiet for four consecutive frames in 3000 -- the walk re-wants tiles
+                // on every third frame at a held pose; with it off for the WHOLE run
+                // (--predict-every 1000000) the hold converged in 217-226 frames and the two
+                // held stills were 5 px apart. The 240 real frames keep it (the still's history
+                // is the shipped one); the hold's residual is logged at the exit test.
+                // Step 5 (docs/PERF_EXPERIMENT.md): THE PREFETCH WALK LEAVES THE MAIN THREAD.
+                // Its inputs are final here -- the pose is clamped, the frame vectors and the
+                // window origins are per-run -- so the worker starts NOW and walks beside
+                // SetView; the replay below, where the walk used to run, waits for it and
+                // issues the same Want(predicted) calls in the same order (never skips: a rail's
+                // want stream must not depend on the machine). PredictNextPose keeps its call
+                // cadence, and so its 72-frame effective lookahead. Slot 8 brackets the pose and
+                // the post here plus the join and the replay below. --predict-inline runs the
+                // same walk synchronously at the old point, for the A/B: both print the
+                // predicted stream's FNV-1a ([predict], [rail], --res-trace).
+                const bool predictFrame = !settling && (frame % kPredictEvery) == 0;
+                if (predictFrame && !opt.predictInline) {
                     PROF_BEGIN();
                     Camera pred = cam;
                     motorPose(resMgr.PredictNextPose(poseMotor(cam), 24.0), pred);
-                    globe->PredictWants(pred, aspect);
+                    globe->StartPredictWalk(cam, pred, viewH);
+                    PROF_END(8);
+                }
+                PROF_BEGIN();
+                globe->SetView(cam, aspect, viewH, simUnix - startUnix);
+                PROF_END(7);
+                if (!opt.rail.empty() && frame >= 150u) {
+                    walkNodesAcc += globe->walkNodes;
+                    walkLeavesAcc += globe->walkLeaves;
+                    walkWantNsAcc += globe->walkWantNs;
+                    wantTouchAcc += resMgr.wantTouches;
+                    wantHitAcc += resMgr.wantHits;
+                    ++walkFrames;
+                }
+                if (predictFrame) {
+                    PROF_BEGIN();
+                    if (opt.predictInline) {
+                        Camera pred = cam;
+                        motorPose(resMgr.PredictNextPose(poseMotor(cam), 24.0), pred);
+                        globe->StartPredictWalk(cam, pred, viewH);
+                    }
+                    globe->ReplayPredictWants();
                     PROF_END(8);
                 }
             }
@@ -4264,9 +4449,12 @@ int main(int argc, char** argv) {
             PROF_BEGIN();
             if (sea) sea->SetTime(simUnix, bathy.Ready() ? waterNavd : tide->focusHeight,
                                   cam.px, cam.pz);
+            PROF_END(5);
             // M9ba: the exposure node's inputs; a bucket roll re-keys the tree and drops the
             // tenant's tiles. Then demand the page at mip 3 over +-20 km around the camera --
-            // the bank's outer ring -- every frame.
+            // the bank's outer ring -- every frame. Its own bracket (slot 11): sea.SetTime
+            // used to carry it.
+            PROF_BEGIN();
             if (sea && exposureSrc && exposureT >= 0) {
                 if (exposureSrc->Set(sea->PeakDirX(), sea->PeakDirZ(), waterNavd,
                                      sea->PeakDirValid())) {
@@ -4318,7 +4506,7 @@ int main(int argc, char** argv) {
                     }
                 }
             }
-            PROF_END(5);
+            PROF_END(11);
             if (terrain) terrain->waterNavd = static_cast<float>(waterNavd);
             if (globe) globe->waterNavd = static_cast<float>(waterNavd);   // M6j materials
 
@@ -4339,17 +4527,49 @@ int main(int argc, char** argv) {
             const float preMs =
                 std::chrono::duration<float>(Clock::now() - preT0).count() * 1000.0f;
             const auto rf0 = Clock::now();
+            // --gpu-time rows are labelled like the [rail] series: a rail's 150 settle frames
+            // are negative and excluded from the statistics.
+            renderer.gpuFrameLabel =
+                static_cast<int64_t>(frame) - (opt.rail.empty() ? 0 : 150);
+            // --settle-sync reads the ring gate's hold count for THIS frame's wants here;
+            // ProcessQueues zeroes it inside RenderFrame.
+            const uint32_t ringHeldBefore = resMgr.ringHeldFrame;
             renderer.RenderFrame(cam, static_cast<float>(simUnix - startUnix), dt);
-            if (opt.bench) gpu.WaitIdle();
+            // --bench-overlap keeps the overlap: RENDER is then record + the BeginFrame fence
+            // wait, and the loop mean is the pipelined max(CPU, GPU) a player's frame costs.
+            if (opt.bench && !opt.benchOverlap) gpu.WaitIdle();
             const float renderMs =
                 std::chrono::duration<float>(Clock::now() - rf0).count() * 1000.0f;
+            // The CPU brackets inside RenderFrame (see profInMs): read, accumulate, zero.
+            std::array<float, kInN> inMs{};
+            for (int k = 0; k < kInPhases; ++k) {
+                inMs[k] = static_cast<float>(resMgr.phaseMs[k]);
+                resMgr.phaseMs[k] = 0.0;
+            }
+            inMs[kInResTurn] = static_cast<float>(resMgr.turnMs);
+            resMgr.turnMs = 0.0;
+            if (waterBank) {
+                inMs[kInBankList] = static_cast<float>(waterBank->tileListMs);
+                waterBank->tileListMs = 0.0;
+            }
+            if (globe) {
+                inMs[kInMeshCopy] = static_cast<float>(globe->meshletCopyMs);
+                globe->meshletCopyMs = 0.0;
+            }
+            if (profOn) {
+                for (int k = 0; k < kInN; ++k) {
+                    profInMs[k] += inMs[k];
+                    if (profHelm) profInHelmMs[k] += inMs[k];
+                }
+            }
 
             if (!opt.rail.empty() && frame >= 150u && opt.bench) {
                 // Bench records the timing and nothing else -- no readback, no encode, no disk.
                 railMs.push_back(renderMs);
-                railLoopMs.push_back(dt * 1000.0f);
+                loopRowOpen = true;   // closed by the next iteration's interval
                 railPreMs.push_back(preMs);
                 railPool.push_back(PoolCommittedBytes());
+                railInMs.push_back(inMs);
             } else if (!opt.rail.empty() && frame >= 150u) {
                 if (recPipe.Open()) {
                     uint32_t rowPitch = 0;
@@ -4362,12 +4582,14 @@ int main(int argc, char** argv) {
                     renderer.DumpPng(rp);
                 }
                 // Two clocks, because they answer different questions. renderMs is the engine
-                // alone; dt is the whole loop and therefore includes the PREVIOUS frame's PNG
-                // encode, which at 1600x900 is tens of milliseconds of the recorder's own cost.
-                // A rail reported on dt would look three times slower than the thing it shows.
+                // alone; the loop interval (closed by the next iteration) includes this frame's
+                // PNG encode, which at 1600x900 is tens of milliseconds of the recorder's own
+                // cost. A rail reported on it would look three times slower than what it shows.
                 railMs.push_back(renderMs);
-                railLoopMs.push_back(dt * 1000.0f);
+                loopRowOpen = true;
+                railPreMs.push_back(preMs);
                 railPool.push_back(PoolCommittedBytes());
+                railInMs.push_back(inMs);
             }
 
             if (!opt.headless &&
@@ -4401,6 +4623,129 @@ int main(int argc, char** argv) {
             if (opt.frames &&
                 frame >= opt.frames + (opt.rail.empty() ? 0u : 150u) +
                              (opt.dumpBoth ? 1u : 0u)) {
+                // --settle-sync: the frame just rendered is the dump frame's instant. Judge it
+                // AFTER its RenderFrame (ProcessQueues has mapped, copied and re-uploaded the
+                // residency maps for everything that landed this frame): nothing queued, no
+                // DirectStorage batch awaiting its fence, and no request the ring gate held
+                // this frame (a held child is admitted only once its parent maps, so a quiet
+                // queue can refill next frame). Quiet for kEvictAgeFrames consecutive frames
+                // -- one full overlap window -- before the image is taken. The still is then
+                // the same bytes whichever frame the far tiles landed on.
+                //
+                // --settle-hold N holds the same instant for exactly N frames instead, and the
+                // two compose: drain first, then to at least N. THE RULE THAT KEPT IT is named
+                // in the exit line, because the two are not interchangeable -- a drain-judged
+                // hold runs as long as the residency makes it (211 and 225 frames on two runs
+                // of one binary at the bird), and two stills held for different numbers of
+                // frames are not like for like until the churn is frozen through the hold
+                // (it is, below).
+                if ((opt.settleSync || opt.settleHold || opt.settleExact) && !opt.dump.empty() &&
+                    opt.headless && !opt.dumpBoth) {
+                    const uint32_t pend = resMgr.PendingCount();
+                    const uint32_t reads = resMgr.InFlightReads();
+                    const bool quiet = pend == 0 && reads == 0 && ringHeldBefore == 0;
+                    if (!settling) {
+                        settling = true;
+                        settlePending0 = pend;
+                        settleReads0 = reads;
+                        // Step 25: the manager's exact turn runs on every held frame from the
+                        // next one on (this frame's turn was the shipped one) and never
+                        // outside a hold.
+                        resMgr.settleExact = opt.settleExact;
+                        // --settle-clear-churn: the whole atlas onto the clear list; the next
+                        // held frame's clear dispatch zeroes it and the freeze keeps it so.
+                        if (opt.settleClearChurn && sea) {
+                            Log("[settle-clear-churn] %u resident churn tiles onto the clear "
+                                "list at the first held frame",
+                                sea->ClearChurn());
+                        }
+                    }
+                    settleQuiet = quiet ? settleQuiet + 1 : 0;
+                    // --settle-exact: the turn just taken found the resident set equal to the
+                    // want set (Residency.h settleExact) -- for kSettleExactFrames turns
+                    // running, one overlap window past the last drop's NULL map.
+                    const ResidencyManager::SettleTurn& ex = resMgr.settleTurn;
+                    settleExactQuiet = (opt.settleExact && ex.exact) ? settleExactQuiet + 1 : 0;
+                    // The drain's give-up cap bounds the DRAIN, never the counted hold: a run
+                    // asked for N frames gets N whatever the residency is doing.
+                    const bool drainHolds =
+                        opt.settleSync && settleQuiet < kSettleQuietFrames &&
+                        settleFrames < kSettleCapFrames;
+                    const bool exactHolds =
+                        opt.settleExact && settleExactQuiet < kSettleExactFrames &&
+                        settleFrames < kSettleCapFrames;
+                    const bool countHolds = settleFrames < opt.settleHold;
+                    if (drainHolds || exactHolds || countHolds) {
+                        ++settleFrames;
+                        if (settleFrames % 150u == 0u) {
+                            Log("[settle-sync] +%u frames at the held instant: pending %u, "
+                                "in-flight reads %u, ring-held %u, pool %.0f MB",
+                                settleFrames, pend, reads, ringHeldBefore,
+                                PoolCommittedBytes() / 1048576.0);
+                            if (opt.settleExact) {
+                                Log("[settle-exact] +%u: wanted %u, mapped %u, deficit %u, "
+                                    "unreachable %u, stale %u, dropped this turn %u, retiring "
+                                    "%u, exact for %u turns",
+                                    settleFrames, ex.wanted, ex.mapped, ex.deficit,
+                                    ex.unreachable, ex.stale, ex.dropped, ex.retiring,
+                                    settleExactQuiet);
+                            }
+                        }
+                        continue;
+                    }
+                    if (opt.settleExact) resMgr.LogSettleExact(settleFrames);
+                    // MEASURED (helm still, 14:00, 2026-09-05): with the predicted walk running
+                    // through the hold, pending hit 0 within 300 frames yet was never quiet four
+                    // frames running in 3000; with it suspended (this code), 149 tiles stay
+                    // pending from +300 frames on with the pool at 236 MB -- below the 512 MB
+                    // cap, so they are not eviction victims; which parent they wait on is the
+                    // next probe (--res-trace through the hold). With the walk off for the WHOLE
+                    // run the hold converged in 217-226 frames. Every held pair agreed to
+                    // 2-13 px, the same band as two unheld runs (5-18 px): the horizon-line
+                    // floor is not the residency's, and 'none' at the helm is still open (P16).
+                    //
+                    // Step 25, --settle-exact, MEASURED (2026-09-05, out/step25): the 149 were
+                    // stale pending tiles (wanted on the approach, not at the pose) and the
+                    // exact turn drops them; the helm reaches EXACT in 243-252 held frames
+                    // (11367 wanted = 11367 mapped), the bird in 214-216 (9176 -- a want set
+                    // 984 tiles OVER the shipped pool cap, so the drain-judged bird was a race:
+                    // two binaries' --settle-sync birds differed by 21.7 % of the pixels), the
+                    // globe in 619-737, key7km in 228-253. Two exact runs of one binary: bird
+                    // 0 px, globe 0 px (at different hold lengths), --lens bed at the bird
+                    // 0 px, key7km 8 px at |d| 1, helm 65 px all on rows 430-432 (the horizon
+                    // line, max |d| 15) with every tenant's mapped-set hash equal -- P16 is not
+                    // the residency's. helm_ebb (19:30): 17 % of the water, 10 % with the churn
+                    // cleared at the hold (--settle-clear-churn): the churn's pre-hold history
+                    // is part of it and a second field integrated over the real frames is the
+                    // rest; the still is exact in residency and not yet in history.
+                    const char* rule =
+                        opt.settleExact
+                            ? (opt.settleHold ? "exact, then --settle-hold" : "--settle-exact, judged")
+                        : opt.settleSync
+                            ? (opt.settleHold ? "drain, then --settle-hold" : "--settle-sync, judged")
+                            : "--settle-hold, counted";
+                    const bool drained = !opt.settleSync || settleQuiet >= kSettleQuietFrames;
+                    const bool exact = !opt.settleExact || settleExactQuiet >= kSettleExactFrames;
+                    Log("[settle-sync] dump frame held %u extra frames at the same instant (%s): "
+                        "pending %u -> %u, in-flight reads %u -> %u, quiet for %u frames, exact "
+                        "for %u turns, pool %.0f MB%s%s",
+                        settleFrames, rule, settlePending0, pend, settleReads0, reads, settleQuiet,
+                        settleExactQuiet, PoolCommittedBytes() / 1048576.0,
+                        drained ? ""
+                                : " -- CAP REACHED, the residency never drained (a pending set "
+                                  "that stopped shrinking with the pool below its cap is waiting "
+                                  "on parents no walk asks for); dumping anyway",
+                        exact ? ""
+                              : " -- CAP REACHED, the resident set never matched the want set "
+                                "(see the [settle-exact] ledger above); dumping anyway");
+                }
+                // The last frame's loop interval: measured here rather than at a next
+                // iteration that never comes.
+                if (loopRowOpen) {
+                    railLoopMs.push_back(
+                        std::chrono::duration<float>(Clock::now() - last).count() * 1000.0f);
+                    loopRowOpen = false;
+                }
                 // The encoder gets its end-of-stream BEFORE the metrics print, so the mp4 is
                 // complete and closed by the time the numbers describing it appear.
                 recPipe.Close();
@@ -4430,10 +4775,14 @@ int main(int argc, char** argv) {
                         if (railMs[i] > railMs[worstI]) worstI = i;
                     }
                     const double mean = sum / double(railMs.size());
-                    Log("[rail] %zu frames RENDER: mean %.2f ms (%.1f fps), p50 %.2f, "
+                    Log("[rail] %zu frames RENDER%s: mean %.2f ms (%.1f fps), p50 %.2f, "
                         "p95 %.2f, p99 %.2f, max %.2f ms at frame %zu",
-                        railMs.size(), mean, mean > 0.0 ? 1000.0 / mean : 0.0, pct(0.50),
-                        pct(0.95), pct(0.99), double(railMs[worstI]), worstI);
+                        railMs.size(),
+                        opt.benchOverlap
+                            ? " (CPU record + BeginFrame fence; the GPU overlaps -- OVERLAP bench)"
+                            : (opt.bench ? " (record + serialized GPU: fenced bench)" : ""),
+                        mean, mean > 0.0 ? 1000.0 / mean : 0.0, pct(0.50), pct(0.95), pct(0.99),
+                        double(railMs[worstI]), worstI);
                     if (!railLoopMs.empty()) {
                         double lsum = 0.0;
                         for (float m : railLoopMs) lsum += m;
@@ -4442,8 +4791,11 @@ int main(int argc, char** argv) {
                         // LOOP -- sim clock, weather residency, solver advance, scene watch.
                         // Calling that "capture overhead" would have been a second wrong label
                         // on the same line.
-                        Log("[rail] loop mean %.2f ms, so %.2f ms/frame outside RenderFrame (%s)",
-                            lmean, (lmean > mean) ? (lmean - mean) : 0.0,
+                        Log("[rail] loop mean %.2f ms%s, so %.2f ms/frame outside RenderFrame (%s)",
+                            lmean,
+                            opt.benchOverlap ? " = the shipped pipelined frame, max(CPU, GPU)"
+                                             : "",
+                            (lmean > mean) ? (lmean - mean) : 0.0,
                             opt.bench ? "sim, residency and solver -- nothing is captured"
                                       : (recPipe.Open() ? "readback + encode: the recorder's bill"
                                                         : "PNG encode and disk"));
@@ -4466,12 +4818,12 @@ int main(int argc, char** argv) {
                         over33, 100.0 * over33 / double(budgetSrc.size()));
                     {
                         double tot = 0.0, totH = 0.0;
-                        for (int k = 0; k < 10; ++k) { tot += profMs[k]; totH += profHelmMs[k]; }
+                        for (int k = 0; k < kProfN; ++k) { tot += profMs[k]; totH += profHelmMs[k]; }
                         const double n = double(railMs.size());
                         const double nH = 240.0;   // the helm leg, 8 s at 30 fps
                         Log("[rail] outside RenderFrame, per frame -- %-22s %8s %8s",
                             "section", "whole", "helm");
-                        for (int k = 0; k < 10; ++k) {
+                        for (int k = 0; k < kProfN; ++k) {
                             Log("[rail]   %-22s %6.3f ms %6.3f ms", kProfName[k],
                                 profMs[k] / n, profHelmMs[k] / nH);
                         }
@@ -4497,8 +4849,28 @@ int main(int argc, char** argv) {
                                 tch / (std::max)(1.0, double(walkLeavesAcc) /
                                                           double(walkFrames)));
                         }
-                        Log("[rail]   %-22s %6.3f ms %6.3f ms  <- measured here", "sum of the ten",
-                            tot / n, totH / nH);
+                        if (globe && globe->predictWalks) {
+                            // Step 5: the prefetch walk's own bill, per walk (every
+                            // kPredictEvery frames, all frames of the run). The join wait is
+                            // what the worker did NOT hide; the replay is the Want() calls
+                            // the walk used to make inline. The hash is the stream itself.
+                            const double w = double(globe->predictWalks);
+                            Log("[rail]   prefetch walk (%s): %.0f walks of %.0f nodes / %.0f "
+                                "leaves / %.0f rects; the walk %.3f ms, the main thread waited "
+                                "%.3f ms at the join and replayed in %.3f ms, per walk (one in "
+                                "%u frames); predicted stream %llu Want calls, FNV-1a %016llx",
+                                opt.predictInline ? "inline, --predict-inline" : "on the worker",
+                                w, double(globe->predictNodes) / w,
+                                double(globe->predictLeaves) / w,
+                                double(globe->predictRects) / w,
+                                double(globe->predictWalkNs) / w / 1e6,
+                                double(globe->predictWaitNs) / w / 1e6,
+                                double(globe->predictReplayNs) / w / 1e6, kPredictEvery,
+                                static_cast<unsigned long long>(resMgr.predictedCalls),
+                                static_cast<unsigned long long>(resMgr.predictedHash));
+                        }
+                        Log("[rail]   %-22s %6.3f ms %6.3f ms  <- measured here",
+                            "sum of the twelve", tot / n, totH / nH);
                         if (!railPreMs.empty()) {
                             double pre = 0.0, preH = 0.0;
                             for (size_t k = 0; k < railPreMs.size(); ++k) {
@@ -4508,6 +4880,40 @@ int main(int argc, char** argv) {
                             Log("[rail]   %-22s %6.3f ms %6.3f ms  <- ALL of it, so the "
                                 "remainder is post-render",
                                 "pre-RenderFrame total", pre / n, preH / nH);
+                        }
+                        // The CPU inside RenderFrame, by owner. The residency turn's phases
+                        // sum to its total less the untimed stats string; the descent's p95
+                        // (frames 450-899, the 80 km -> 7 km paging) is probe P5's number.
+                        Log("[rail] inside RenderFrame (CPU record), per frame -- %-22s %8s %8s",
+                            "section", "whole", "helm");
+                        Log("[rail]   %-34s %6.3f ms %6.3f ms", "residency turn (ProcessQueues)",
+                            profInMs[kInResTurn] / n, profInHelmMs[kInResTurn] / nH);
+                        for (int k = 0; k < kInPhases; ++k) {
+                            Log("[rail]     %-32s %6.3f ms %6.3f ms",
+                                ResidencyManager::PhaseName(k), profInMs[k] / n,
+                                profInHelmMs[k] / nH);
+                        }
+                        Log("[rail]   %-34s %6.3f ms %6.3f ms", "waterbank tile list (CPU)",
+                            profInMs[kInBankList] / n, profInHelmMs[kInBankList] / nH);
+                        Log("[rail]   %-34s %6.3f ms %6.3f ms", "globe meshlet memcpy",
+                            profInMs[kInMeshCopy] / n, profInHelmMs[kInMeshCopy] / nH);
+                        if (railInMs.size() > 899) {
+                            std::vector<float> turn;
+                            float turnMax = 0.0f;
+                            size_t turnAt = 450;
+                            for (size_t k = 450; k < 900; ++k) {
+                                turn.push_back(railInMs[k][kInResTurn]);
+                                if (railInMs[k][kInResTurn] > turnMax) {
+                                    turnMax = railInMs[k][kInResTurn];
+                                    turnAt = k;
+                                }
+                            }
+                            std::sort(turn.begin(), turn.end());
+                            Log("[rail]   residency turn on the descent (frames 450-899): p50 "
+                                "%.3f, p95 %.3f, max %.3f ms at frame %zu",
+                                turn[size_t(0.50 * double(turn.size() - 1) + 0.5)],
+                                turn[size_t(0.95 * double(turn.size() - 1) + 0.5)], turnMax,
+                                turnAt);
                         }
                     }
                     Log("[rail] tile pool at end: %.2f GB committed across every atlas -- the "
@@ -4523,13 +4929,27 @@ int main(int argc, char** argv) {
                     }
                     csv += "\\metrics.csv";
                     if (FILE* f = nullptr; fopen_s(&f, csv.c_str(), "w") == 0 && f) {
-                        fprintf(f, "frame,render_ms,render_fps,loop_ms,pool_bytes\n");
+                        // loop_ms is the frame's OWN loop interval (closed by the next
+                        // iteration); pre_ms the CPU before RenderFrame; resq_* the residency
+                        // turn inside it by phase (header order = ResidencyManager::PhaseName).
+                        fprintf(f, "frame,render_ms,render_fps,loop_ms,pool_bytes,pre_ms,resq_ms,"
+                                   "resq_retire,resq_dsland,resq_sortseen,resq_loads,"
+                                   "resq_sortload,resq_gather,resq_map,resq_dsenq,resq_ring,"
+                                   "resq_resmap,bank_list_ms,meshlet_copy_ms\n");
                         for (size_t i = 0; i < railMs.size(); ++i) {
-                            fprintf(f, "%zu,%.4f,%.2f,%.4f,%llu\n", i, double(railMs[i]),
+                            fprintf(f, "%zu,%.4f,%.2f,%.4f,%llu,%.4f", i, double(railMs[i]),
                                     railMs[i] > 0.0f ? 1000.0 / double(railMs[i]) : 0.0,
                                     i < railLoopMs.size() ? double(railLoopMs[i]) : 0.0,
                                     static_cast<unsigned long long>(
-                                        i < railPool.size() ? railPool[i] : 0));
+                                        i < railPool.size() ? railPool[i] : 0),
+                                    i < railPreMs.size() ? double(railPreMs[i]) : 0.0);
+                            const std::array<float, kInN> zero{};
+                            const std::array<float, kInN>& in =
+                                i < railInMs.size() ? railInMs[i] : zero;
+                            fprintf(f, ",%.4f", double(in[kInResTurn]));
+                            for (int k = 0; k < kInPhases; ++k) fprintf(f, ",%.4f", double(in[k]));
+                            fprintf(f, ",%.4f,%.4f\n", double(in[kInBankList]),
+                                    double(in[kInMeshCopy]));
                         }
                         fclose(f);
                         Log("[rail] per-frame series -> %s", csv.c_str());
@@ -4578,6 +4998,9 @@ int main(int argc, char** argv) {
                 // so proofs/inlet_storm.py -- the user's own vqview wave model -- can run
                 // the independent 2D storm figure on the exact data this engine uses.
                 if (opt.dumpWater && !marsMode && sea) {
+                    // The export reads the solver mirrors through Query: bring them to this
+                    // instant first (the one readback of the run; the loop never did one).
+                    weather.RefreshMirrorsTo(gpu, simUnix);
                     const double bx0 = -1200.0, bz0 = -1600.0, cellW = 10.0;
                     const int nxW = 420, nyW = 300;
                     std::vector<float> bedW(nxW * nyW), lvlW2(nxW * nyW), uW(nxW * nyW),
@@ -4628,6 +5051,7 @@ int main(int argc, char** argv) {
                         nxW, nyW, cellW);
                 }
                 if (opt.trace && !marsMode && sea && waterBank) {
+                    weather.RefreshMirrorsTo(gpu, simUnix);   // a no-op after the export above
                     const double tlat = opt.traceLat, tlon = opt.traceLon;
                     const double wx = (tlon - BathyModel::kOrgLon) * BathyModel::kMPerLon;
                     const double wz = (tlat - BathyModel::kOrgLat) * BathyModel::kMPerLat;
@@ -4760,10 +5184,37 @@ int main(int argc, char** argv) {
                 break;
             }
         }
-        if (frameMsN > 30) {
-            Log("[perf] mean frame %.2f ms over %u frames (%.0f fps)", frameMsSum / frameMsN,
-                frameMsN, 1000.0 / (frameMsSum / frameMsN));
+        // --gpu-time: the per-pass GPU table, next to the [rail] lines it explains. The last
+        // frames in flight are still unread; an idle wait drains them before the report.
+        if (GpuProfiler* prof = renderer.Profiler()) {
+            gpu.WaitIdle();
+            prof->Drain();
+            prof->Report(opt.rail.empty() ? -1 : 900);
+            if (!opt.rail.empty()) {
+                std::string csv;
+                for (const wchar_t* w = opt.rail.c_str(); *w; ++w) {
+                    csv.push_back(static_cast<char>(*w));
+                }
+                csv += "\\gpu_ms.csv";
+                if (!prof->WriteCsv(csv)) Log("[gpu] could not write %s", csv.c_str());
+            }
         }
+        if (frameMsN > 30) {
+            Log("[perf] mean frame %.2f ms over %u frames (%.0f fps)%s", frameMsSum / frameMsN,
+                frameMsN, 1000.0 / (frameMsSum / frameMsN),
+                opt.headless ? "" : (gpu.TearingEnabled() ? " [no-vsync, tearing]" : " [vsync]"));
+        }
+        // Step 5: the predicted request stream's hash, every run (Residency.h): two runs of
+        // the same flight that print different hashes asked the manager for different tiles.
+        if (resMgr.predictedCalls) {
+            Log("[predict] %llu predicted Want calls this run, FNV-1a %016llx (call order "
+                "included)",
+                static_cast<unsigned long long>(resMgr.predictedCalls),
+                static_cast<unsigned long long>(resMgr.predictedHash));
+        }
+        // Windowed: what the panel actually showed -- presents per refresh beside [perf]'s
+        // loop mean, which cannot see a present that was skipped.
+        if (!opt.headless) gpu.ReportPresentStats();
         // M7l: THE DEBUG SESSION REPORT -- the free byproducts, printed every run: what the
         // diagram holds, what the compositor did, what streaming did. The gates print their
         // own PASS lines under --selftest; the trace and fibers print theirs when asked.
@@ -4792,9 +5243,13 @@ int main(int argc, char** argv) {
                 renderer.DumpPng(opt.dump);
             }
         }
+        // The same frame's radiance before the tonemap (tools/imgdiff.py --hdr).
+        if (!opt.dumpHdr.empty()) renderer.DumpHdr(opt.dumpHdr);
+        if (!opt.dumpMeshlets.empty() && globe) globe->DumpMeshlets(opt.dumpMeshlets);
 
         gpu.WaitIdle();
         resMgr.Shutdown();
+        sceneWatch.Stop();   // cancels the pending directory read and joins (logged)
         renderer.Shutdown();
         gpu.Shutdown();
         window.Destroy();

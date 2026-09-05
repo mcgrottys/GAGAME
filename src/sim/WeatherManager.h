@@ -78,8 +78,8 @@ public:
         m_hgtOrg[1] = orgPxY;
     }
 
-    // Per frame (or before a physics batch): lazy activation, owned-solver advancement,
-    // mirror refresh (full-field readbacks at most every kMirrorDt sim-seconds).
+    // Per frame (or before a physics batch): lazy activation and owned-solver advancement.
+    // Nothing here reads the GPU back: the CPU mirrors refresh on demand (RefreshMirrorsTo).
     void Update(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir, double simUnix,
                 double camLatDeg, double camLonDeg, double camAltM);
     // M9ay: THE SOLVER DOMAINS STAY RESIDENT AT MIP 0 -- every ACTIVE window's lattice, on
@@ -90,6 +90,20 @@ public:
     // Force a dormant window up (the probe harness; interactive uses the camera rule).
     bool Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
                   const char* name, double simUnix);
+
+    // THE MIRROR REFRESHES ON DEMAND, NEVER ON A CLOCK (step 2 of docs/PERF_EXPERIMENT.md).
+    // Query reads a CPU mirror of each active window's eta/uv banks, and its only callers
+    // are the --ocean-probe harness (before the loop) and the --dump-water-state / --trace
+    // exports (after it): a reader refreshes the mirrors ONCE to its instant, then queries.
+    // A refresh is two full-field ReadbackTexture calls (a committed READBACK resource and
+    // a WaitIdle drain each) plus 8.7 M half->float conversions. MEASURED on the storm rail
+    // (out/step1/bench, --bench --gpu-time) while Update() still fired it every kMirrorDt =
+    // 2 sim-s: an isolated (loop - render) stall of 17.9-27.2 ms (mean 23.2, n = 19) on
+    // every frame 61k -- the bench's whole p99 (28.7 ms) and 19 of its 21 frames over
+    // 16.7 ms -- feeding nothing the loop renders (no frame consumer of Query exists).
+    // The contract is unchanged: a mirror is at most kMirrorDt behind the asking clock.
+    // Every refresh logs its cost, so a per-frame reader added later announces itself.
+    void RefreshMirrorsTo(Gpu& gpu, double simUnix);
 
     WeatherSample Query(double latDeg, double lonDeg, double unixT,
                         double groundResM = 500.0) const;
@@ -116,16 +130,15 @@ private:
         // CPU mirrors
         std::vector<float> eta, uv4;
         uint32_t etaW = 0, etaH = 0, uvW = 0, uvH = 0;
-        double mirrorT = -1.0e18;
+        double mirrorT = -1.0e18;             // sim instant of the mirror; never = unread
         char levelTag[48] = {0};
         char currentTag[48] = {0};
     };
-    static constexpr double kMirrorDt = 2.0;      // sim-seconds between mirror refreshes
+    static constexpr double kMirrorDt = 2.0;      // a mirror may lag the asking clock this much
     static constexpr double kActivateAltM = 30000.0;
     bool m_pinLogged = false;
 
     const Window* WindowAt(double latDeg, double lonDeg) const;
-    void RefreshMirror(Gpu& gpu, Window& w, double simUnix);
 
     Compositor* m_comp = nullptr;
     int m_hgtCh = -1;

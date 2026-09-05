@@ -23,6 +23,7 @@ namespace ga {
 
 class FieldSet;
 class Camera;
+class GpuProfiler;
 
 struct FrameContext {
     Gpu* gpu = nullptr;
@@ -31,6 +32,9 @@ struct FrameContext {
     D3D12_GPU_VIRTUAL_ADDRESS sceneCb = 0;   // b0, already filled for this frame
     float timeSec = 0;
     uint32_t width = 0, height = 0;
+    // --gpu-time: timestamp pairs around a layer's internal sub-passes. Null (the default) means
+    // no queries are issued anywhere; wrap with GpuScope, which is a no-op on null.
+    GpuProfiler* prof = nullptr;
 };
 
 class Layer {

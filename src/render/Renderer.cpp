@@ -25,6 +25,13 @@ void Renderer::Init(Gpu& gpu, const RendererDesc& desc) {
 
 void Renderer::Shutdown() {
     m_layers.clear();
+    m_prof.reset();
+}
+
+void Renderer::EnableGpuProfiler() {
+    if (m_prof) return;
+    m_prof = std::make_unique<GpuProfiler>();
+    m_prof->Init(*m_gpu);
 }
 
 void Renderer::CreateRootSignature() {
@@ -250,6 +257,10 @@ void Renderer::ReloadShaders() {
 void Renderer::RenderFrame(const Camera& cam, float timeSec, float dt) {
     (void)dt;
     auto* cl = m_gpu->BeginFrame();
+    // --gpu-time: reads the slot this frame index last used (fenced by BeginFrame above), then
+    // opens the whole-frame pair. Null profiler = the default path, no queries at all.
+    GpuProfiler* prof = m_prof.get();
+    if (prof) prof->BeginFrame(cl, gpuFrameLabel);
 
     // ---- scene constants
     SceneConstants sc{};
@@ -334,15 +345,18 @@ void Renderer::RenderFrame(const Camera& cam, float timeSec, float dt) {
     ctx.timeSec = timeSec;
     ctx.width = m_width;
     ctx.height = m_height;
+    ctx.prof = prof;
     for (auto& l : m_layers) {
         if (!l->enabled) continue;
         PixScope scope(cl, l->Name());
+        GpuScope gscope(prof, cl, l->Name());
         l->Render(ctx);
     }
 
     // ---- tonemap HDR -> LDR
     {
         PixScope scope(cl, "tonemap");
+        GpuScope gscope(prof, cl, "tonemap");
         m_gpu->Transition(cl, m_sceneColor, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         m_gpu->Transition(cl, m_ldrTarget, D3D12_RESOURCE_STATE_RENDER_TARGET);
         const auto ldrRtv = m_gpu->RtvHeap().Cpu(m_ldrRtv);
@@ -359,6 +373,7 @@ void Renderer::RenderFrame(const Camera& cam, float timeSec, float dt) {
 
     // ---- to the swapchain, when there is one
     if (!m_gpu->Headless()) {
+        GpuScope gscope(prof, cl, "present-copy");
         ID3D12Resource* bb = m_gpu->BackBuffer();
         D3D12_RESOURCE_BARRIER toCopy[2]{};
         toCopy[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -385,6 +400,7 @@ void Renderer::RenderFrame(const Camera& cam, float timeSec, float dt) {
         cl->ResourceBarrier(1, &toPresent);
     }
 
+    if (prof) prof->EndFrame(cl);   // closes the frame pair and resolves, before Close()
     m_gpu->EndFrame(!m_gpu->Headless());
 }
 
@@ -407,6 +423,41 @@ bool Renderer::DumpPng(const std::wstring& path) {
     if (pixels.empty()) return false;
     const bool ok = SavePng(path, pixels.data(), m_width, m_height, rowPitch, pixels.size());
     Log("[renderer] dump %S : %s", path.c_str(), ok ? "ok" : "FAILED");
+    return ok;
+}
+
+bool Renderer::DumpHdr(const std::wstring& path) {
+    m_gpu->WaitIdle();
+    uint32_t rowPitch = 0;
+    // sceneColor sits in PIXEL_SHADER_RESOURCE after the tonemap read it; ReadbackTexture
+    // transitions to COPY_SOURCE and back, so the next frame's RENDER_TARGET transition holds.
+    std::vector<uint8_t> px = m_gpu->ReadbackTexture(m_sceneColor, &rowPitch);
+    if (px.empty()) return false;
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"wb") != 0 || !f) {
+        Log("[renderer] dump-hdr %S : FAILED (open)", path.c_str());
+        return false;
+    }
+    const size_t rowBytes = size_t(m_width) * 8;   // RGBA16F, de-pitched
+    bool ok = true;
+    for (uint32_t y = 0; y < m_height && ok; ++y) {
+        ok = fwrite(px.data() + size_t(y) * rowPitch, 1, rowBytes, f) == rowBytes;
+    }
+    fclose(f);
+    const std::wstring side = path + L".json";
+    if (_wfopen_s(&f, side.c_str(), L"wb") == 0 && f) {
+        // The curve the 8-bit image went through (Tonemap.hlsl): v = pow(shoulder(E * L), 1 / gamma)
+        // with shoulder(x) = min(x, knee) + (1 - knee) * (1 - exp(-(x - knee)+ / (1 - knee))).
+        fprintf(f,
+                "{ \"width\": %u, \"height\": %u, \"format\": \"RGBA16F\", \"exposure\": %.9g, "
+                "\"knee\": 0.85, \"gamma\": 2.2 }\n",
+                m_width, m_height, double(m_desc.exposure));
+        fclose(f);
+    } else {
+        ok = false;
+    }
+    Log("[renderer] dump-hdr %S : %s (%ux%u RGBA16F, exposure %.4g, sidecar %S)", path.c_str(),
+        ok ? "ok" : "FAILED", m_width, m_height, double(m_desc.exposure), side.c_str());
     return ok;
 }
 

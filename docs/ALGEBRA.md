@@ -343,8 +343,19 @@ tile, worst |Δ| ≤ 1/255). AST: all `compose.stack` edges.
 - **Churn decay/refresh**: memory = max(old · e^{−dt/τ}, deposit) — crisp fresh streaks
   over an exponential wash.
 - **CDLOD morph**: vertex grid position g −= frac(g/2)·2·k with k the distance ramp —
-  identical on both sides of every seam, so cracks are impossible by construction; the
-  height SOURCE morphs with the grid.
+  identical on both sides of every SAME-LEVEL seam; the height SOURCE morphs with the
+  grid. It is NOT complete at a coarser neighbour's edge (the split is on the centre
+  distance, the ramp ends at 2.93 coarse arcs, the coarse leaf's near corner can sit at
+  2.29), so level seams are closed by the seam bands instead (priors 28).
+- **The seam bands** (mesh path): a seam is closed by a thin band behind it, never by
+  moving a vertex — the interpolated `dir`'s ulp is 0.4 m of ground, so any
+  retessellation flips 8-bit pixels far from the crack. The band's inner edge is the
+  record's own seam vertex with only its depth changed (bit-identical screen xy: the
+  shared edge stays single-covered), its outer edge the same vertex 0.002 cells outward
+  (fine-path hairlines) or the coarse record's own vertex at our even positions, ≥ 1 m /
+  0.01 cells inside the coarse leaf (level seams); the whole band is 0.5 % of the distance
+  farther in ndc depth, so it loses to every real fragment and wins only where nothing
+  was drawn. `--lens shell` reports a band fragment as A = 9: the hole map.
 - **The float wall** (mesh path): fine meshlets carry a double-precision camera-relative
   anchor + the position Jacobian d(pos)/d(uv); vertices reconstruct as anchor + J·du with
   small integer offsets — no 6.4e6-magnitude float subtraction anywhere near the helm.
@@ -956,6 +967,140 @@ model (or a textbook) would hold → what this project measured → the law now 
     they are two marches; the parent must be the fold of the children where children exist.
     Law: fold up at paint time inside the tree (§43), drop the cached composites above, and
     refetch the page -- no separate pass, no reconciliation step.
+
+27. **Draw order is not invariant while the shell has seams.** Prior (perf plan steps 6 and
+    22, stated as the reason face-first emission is "exact"): for opaque geometry with a
+    GREATER depth test, no `SV_Depth` and no blending, the winner at a pixel is the maximum
+    depth over the fragments covering it, so the ORDER the meshlets rasterize in cannot change
+    the image; the top-left fill rule keeps a shared edge covered exactly once. Measured (step
+    22, key7km settled with `--settle-exact --settle-clear-churn`, resident set hash-equal per
+    tenant, `--dump-hdr` in radiance): rotating the six cube-face subtrees so the eye's own
+    face emits first -- identical node set (1099/653), identical want set, identical
+    `[predict]` call count, no meshlet-budget drops -- moves ~150-200 pixels of ONE 60x85 patch
+    of the nearest water by up to 1.5e-5 radiance (0.017 LSB-equivalent), and that is enough to
+    flip one 8-bit pixel, (960,831) blue 39 -> 40, in 10 of 16 runs where the unreordered
+    binary gives 39 in 11 of 11. So the shell is not single-covered there: the CDLOD/cube-face
+    seam either double-covers at a depth the reorder re-ranks, or its shared-edge vertices are
+    not bit-coincident. This is the OVER-covered cousin of the seven under-covered crack pixels
+    at the same pose (perf plan step 23), and the same fix closes both. Law: "a reorder is
+    exact" is a claim about the shell's closure, not about the depth function -- do not spend
+    it until the shell is proven watertight, and gate a reorder on the pose that shows the
+    seams (key7km), never on the helm alone. The cost of the claim was measured too: the face
+    reorder alone is -0.53 ms of `globe.mesh` at the helm (3.573 -> 3.048) and -1.01 ms at p95,
+    while the two genuinely exact companions of the same step (the `discard`-free shipped PSO
+    and the MsMain per-vertex `ComposedHeight` dedupe) are 0.00 ms on that row.
+
+28. **"Crack-free by construction" was a claim about one seam class.** Prior (the M6j
+    comment in `GlobeMesh.hlsl` and the discrete section above, until perf plan step 23):
+    the per-level morph evaluates identically on both sides of every seam, so the shell
+    has no cracks. Measured (`--lens shell`, the fragment's central angle from the eye,
+    settled stills): the shell had holes -- seven pixels at the 7 km key pose, thirteen
+    at the bird, each a ray that left the surface through a seam and landed 30-160 deg
+    away on the far side of the planet (that far surface is what those pixels showed, and
+    what step 6's horizon cull took away); at the helm 36 and at the ebb helm 54 more
+    that no far-side test can see, because at a 1-2 deg depression the ray through a seam
+    lands on the NEXT surface behind it, and two at the globe that showed space. Three
+    classes. (a) LEVEL seams: a leaf splits on its centre distance (3 arc) and a finer
+    neighbour morphs out over [4.05, 5.85] x ITS arc = up to 2.93 coarse arcs, while the
+    coarse leaf only promises its centre past 3 arc, so its near corner sits at 2.29 arcs
+    where the fine side is still at k 0.3-0.9: odd seam vertices off the coarse edge and
+    even ones on a height blended toward the finest data the coarse side never samples.
+    All seven key7km cracks, the helm's L18/L17 and L17/L16 rings, the globe's two.
+    (b) FINE-PATH seams: a fine meshlet (arc <= 650 m) reconstructs anchor + J.du from its
+    OWN record, so two records round one shared vertex ~0.3 mm apart -- a 1e-4 px
+    hairline at 2 km, hit by a pixel centre every ~100k px of seam; which seams a run
+    shows depends on the run's SWE state (twelve of the bird's thirteen come and go with
+    it, the level-seam one stays). (c) Same-level classic seams are coincident (one
+    formula on bit-identical uv) and never cracked. Law: a seam is closed by a BAND, not
+    by moving a vertex -- the interpolated `dir`'s ulp is 0.4 m of ground on this GPU, so
+    any retessellation flips 8-bit pixels far from the crack; the owning meshlet draws the
+    strip between the two records' own surfaces (the neighbour's vertex from the
+    neighbour's record) 0.5 % of the distance behind in depth, so it loses to every real
+    fragment and wins only where nothing was drawn -- and THAT is the proof a changed pixel
+    was a hole (the hole map, `--lens shell` A = 9). Two margins were measured wrong
+    first: a band straddling the seam by 0.02 cells and flat, 0.1 % behind, sat ~7 mm off
+    the sloping wave surface, and at a 3.8 deg depression 7 mm of height is 10 cm along
+    the ray = the whole margin at 100 m, so it won on 39 helm pixels; one-sided at 0.002
+    cells and 0.5 % behind it never does. Measured at step 23: the far-hemisphere probe
+    (`--probe-cull-far`) 0 px against the unculled render at the bird, the globe and the
+    helm, sub-LSB in radiance at key7km (the SWE patch), undecidable at the ebb helm (the
+    SWE history: any two runs differ on 6-11 % of the water); every pixel the fix changed
+    at the four settled poses is in its own hole map. Face seams (a neighbour on another
+    cube face) are not in the table and stay open; none lie in the five gate poses. The
+    corollary for priors 27: with the shell closed, the camera-face-first order is 0 px
+    against the plain order at key7km, and the 8-pixel |d| = 1 cluster at (992..1002,
+    864..873) flips between two same-order runs -- the SWE's run-to-run state, not a seam.
+
+29. **A cull that only removes wants still moves the picture, through the streamer.** Prior
+    (perf plan step 24, the reason the low-altitude horizon cull was declared exact): the
+    cull drops nodes the eye cannot reach, so its want set is a strict SUBSET of today's and
+    the shading law is untouched; a settled still can therefore only be identical, and the
+    flight follows. The stills held (step 24, `--settle-exact --settle-clear-churn`, both
+    binaries in one session): bird 0 px, globe 0 px, helm 0 px off its horizon strip,
+    key7km bit-identical to a previous-binary render, while the want sets fell 8-12 %
+    (helm 11367 -> 10193, key7km 8038 -> 7099, bird 9176 -> 8389; globe 5368 -> 5368 and
+    its meshlet records byte-identical, the cull above 10 km being today's threshold
+    tabulated). THE RAIL DID NOT: per-second YAVG 0.587/255 at 26 s against a 0.020/255
+    A/A floor for the same binary across sessions, no new-only tblend spike. The frames say
+    why. Freed of the far hemisphere the streamer reaches, by frame 760 of the storm rail,
+    a residency state the unculled binary never reaches in the same flight -- the ground is
+    a full mip finer -- and that state carries garbage: straight-edged quadrilaterals of
+    dark noise, the size and shape of a z17 detail-window tile in perspective (frame 766:
+    (1180..1300, 540..670), the marina at (700..820, 700..800), (150..450, 780..900)), on
+    an otherwise sharper picture. Nothing is fetched (`fetches 0`: the archive answers) and
+    the pool never nears its cap (0.23 GB), so it is the landing schedule, not a budget.
+    Law: the want set is an input to the STREAMER, not only to the shading, so "fewer wants
+    can only help" is a claim about residency and is gated on the rail, never on the settled
+    stills; a step that changes the want set belongs behind the residency fixes (perf plan
+    step 27), not in front of them. The camera-face-first order, which changes the emission
+    ORDER and leaves the want set alone (identical want counts and the same 2760215
+    predicted calls, in a rotated order), is clean on the same rail -- YAVG 0.018/255,
+    bit-identical at all four settled poses -- and ships by itself: `globe.mesh` 3.082 ->
+    2.718 ms whole-rail and 4.981 -> 4.472 over the helm phase, p95 5.297 -> 4.801.
+30. **A quiet queue is not a resident set.** Prior (this repo's own `--settle-sync`, perf
+    plan steps 1-24): once nothing is pending, no read is in flight and nothing is
+    ring-held, the streamer has finished and the picture is a function of the pose and the
+    data. Measured (step 25's exact ledger, then step 27): the resident set is the TILE
+    MAPPING and nothing else, and the queues can go quiet with tiles missing from it. At
+    the bird pose the walk wants 9176 tiles (573 MB) against a pool cap of 8192 (512 MB);
+    at the cap `MapAndFill`'s evictor finds no victim -- every mapped tile is wanted this
+    frame -- and breaks out of a batch the gather had already erased from `m_loading`,
+    leaving those tiles tracked, in state `Loaded`, in no queue: pending 0, reads 0, and a
+    permanent hole at that mip. 988 `wave.field` mip-0 tiles were in exactly that state on
+    one run; which 984 lose is decided by landing order. Step 27 measured the size of the
+    lie directly: the shipped `--settle-sync` bird against the same binary's
+    `--settle-exact` bird is 73.2 % identical, max |d| 152 -- a bare, wave-less sea over
+    the ocean and the inlet where the storm's crests belong -- while both runs reported a
+    drained streamer. The helm is over the same cap (11367 tiles, 711 MB). Law: only the
+    exact hold (`--settle-exact`: every wanted tile mapped, every mapped tile wanted) names
+    a resident set; a queue-drain gate is a timing statement, not a residency one, and a
+    tile lost between the queue and the map is a lie the residency byte tells.
+31. **Raising a residency budget is not free, and the picture it buys is not clean yet.**
+    Prior (perf plan step 27, the owner's budget decision of 2026-09-05 15:00): the tiles
+    over the cap are already being read from the archive, so mapping them instead of
+    dropping them costs one `UpdateTileMappings` each and changes nothing else. Measured
+    (step 27, both binaries in one session, untouched GPU rows stable to 1-2 %: `tonemap`
+    0.024/0.023, `sea` 0.477/0.475): the old cap was not throttling a cost, it was
+    STOPPING THE STREAMER. With the cap at 16384 tiles the residency turn on the descent
+    goes from p50 0.547 ms to p50 5.512 ms -- most descent frames had been mapping nothing
+    at all -- and the shipped pipelined loop mean goes 4.31 -> 5.19 ms (+20 %), the fenced
+    7.92 -> 9.09, `fill: DS OpenFile + Enqueue` 0.437 -> 1.002 ms, with the GPU following
+    the data that now arrives (`globe.mesh` helm 3.839 -> 4.759, `waterbank.fill` helm
+    0.676 -> 1.164). And the state it reaches carries priors 29's garbage: at frames 766
+    and 770 of the storm rail the ground is a full mip finer AND shows straight-edged
+    dark-noise quadrilaterals the size of a z17 detail-window tile (frame 766 over the
+    barrier beach at (0..560, 555..700), frame 770 the yellow-speckled block at
+    (400..700, 400..700)), gone again by frame 780. Priors 29 blamed the horizon cull for
+    finding that state; step 27 reached it with no cull at all, from the pool budget alone.
+    Law: the residency BUDGET is an input to the streamer exactly as the want set is (the
+    rail rule, not the settled stills, judges it), the landing race is a property of the
+    fine state and not of whatever change reaches it, and the race (perf plan step 28) is
+    fixed BEFORE any change that lets the streamer get there. The fix for the lost tail and
+    the cap raise were measured together, passed every settled still (bird bit-identical to
+    its own exact hold, globe/key7km/helm 0 px cross-binary, `helm_ebb` 2x2 with a TIGHTER
+    A/A floor than the previous binary's: 116167 vs 270620 differing pixels), and were
+    reverted on the rail: `out/regress_step27.mp4`, per-second YAVG 0.804/255 at 26 s
+    against the 0.50 bound, continuity itself clean (no new-only tblend spike).
 
 ## verification — The gate map: which algebra is pinned where
 

@@ -153,6 +153,16 @@ public:
     // "the hash map is slow" from "we are asking it the same question hundreds of times".
     mutable uint64_t wantTouches = 0, wantHits = 0;
     void WantStatsReset() { wantTouches = wantHits = 0; }
+    // Step 5 (docs/PERF_EXPERIMENT.md): THE PREDICTED REQUEST STREAM, HASHED IN CALL ORDER.
+    // FNV-1a over (tenant, face, mip, the rect's four float bit patterns) of every
+    // Want(predicted = true), for the whole run. It is the A/B instrument for any change to
+    // the prefetch walk -- the walk that moved to a worker thread in step 5 had to hand the
+    // manager the identical stream in the identical order, and "identical" is this number:
+    // the walk on the main thread (--predict-inline) and the walk on the worker print the
+    // same hash over the storm rail, or the change is not exact. Printed by [rail],
+    // --res-trace and the end-of-run [predict] line.
+    uint64_t predictedHash = 14695981039346656037ull;
+    uint64_t predictedCalls = 0;
 
     // M9af: hand a tenant the index of its own realization.
     //
@@ -191,9 +201,8 @@ public:
     void Invalidate(int tenant, const TileRequest& r);
     // Debug: what the manager believes about one tile (state, pool slot, bytes it carried).
     std::string DebugTile(int tenant, const TileRequest& r) const {
-        auto it = m_tracked.find(MakeKey(tenant, r));
-        if (it == m_tracked.end()) return "untracked";
-        const auto& t = it->second;
+        const Tracked* t = Find(tenant, r);
+        if (!t) return "untracked";
         char b[160];
         snprintf(b, sizeof(b), "state %d pool %u data %zu loc %d dropped %d lastSeen %u retries %u",
                  int(t->state), t->pool, t->data.size(), int(t->loc.Valid()), int(t->dropped),
@@ -249,7 +258,93 @@ public:
     uint32_t ringHeld = 0;       // requests deferred by the gate, cumulative
     uint32_t ringHeldFrame = 0;  // ...and this frame alone
 
+    // THE TURN'S CPU COST, BY PHASE. ProcessQueues runs inside GlobeLayer::Render, i.e. inside
+    // the [rail] RENDER bracket, and was the only unnamed CPU work in it: the descent's record
+    // tail (render minus GPU: p95 8.5-8.7 ms, max 15.2 ms at frame 561 against a 2.8 ms GPU,
+    // out/instr_bench) has no owner until these say which phase carries it -- the per-tile
+    // IDStorageFactory::OpenFile, the two shared_ptr sorts under m_mx, the 96 x 64 KB ring
+    // memcpy, or the whole-tenant residency-map memcpy. Every phase is a steady_clock bracket;
+    // queue-side UpdateTileMappings is inside its phase (it is CPU-side driver work), GPU
+    // execution is not. Zeroed at the top of ProcessQueues; main reads them after RenderFrame.
+    static constexpr int kPhases = 10;
+    static const char* PhaseName(int k) {
+        static const char* kNames[kPhases] = {
+            "invalidate + retire (NULL maps)", "DS landed: fence poll + CopyTiles",
+            "sort m_seen",                     "start loads",
+            "sort m_loading",                  "gather mappable",
+            "map: evict + UpdateTileMappings", "fill: DS OpenFile + Enqueue",
+            "fill: ring memcpy + CopyTiles",   "residency map memcpy + copies"};
+        return (k >= 0 && k < kPhases) ? kNames[k] : "?";
+    }
+    double phaseMs[kPhases] = {};
+    double turnMs = 0.0;   // the whole ProcessQueues call (phases + the untimed stats string)
+    // DirectStorage batches whose fence has not signalled: mapped, not yet claimed. Together
+    // with PendingCount() this is "nothing is still landing" -- what --settle-sync waits for.
+    uint32_t InFlightReads() const { return static_cast<uint32_t>(m_inFlightReads.size()); }
+
+    // Step 25 (docs/PERF_EXPERIMENT.md): --settle-exact. THE RESIDENT SET IS THE WANT SET.
+    //
+    // --settle-sync's quiet test (pending 0, no in-flight read, nothing ring-held) fires over
+    // two different resident sets: a request the ring gate held and the walk then stopped
+    // asking for is neither pending nor resident, and what stays MAPPED is whatever the 240
+    // real frames happened to land -- tiles the predicted walk asked for, tiles wanted at a
+    // finer mip on the approach than at the pose. MEASURED (step 21's first attempt, bird,
+    // --settle-sync --settle-hold 400, two runs, both quiet at pending 0): --lens bed differed
+    // by 2.1 % of the pixels with max |d| 217, whole tiles resident at different mips; the
+    // ring-held totals were 3.31 M against 3.11 M. The picture the shader samples is the
+    // finest mapped mip under each pixel (the residency byte clamps the LOD there), so a
+    // mapped tile the walk does not want is not inert: it is what a still is made of.
+    //
+    // While main raises settleExact (the held frames of a --settle-exact still), every
+    // ProcessQueues turn reads the walk's own record -- the per-tile frame stamp Want()
+    // writes down the whole ancestor column -- and (a) counts the DEFICIT, the stamped tiles
+    // not mapped at their mip; (b) DROPS every tracked tile whose stamp is stale (not wanted
+    // this frame at that mip) through Untrack + DropOne, the invalidation's own path: the
+    // residency byte rises now, the NULL map and the pool slot follow kEvictAgeFrames later,
+    // a tile still crossing the bus on a DirectStorage batch waits for its fence, and a tile
+    // is only dropped once it has been unwanted for kEvictAgeFrames turns (the evictor's own
+    // age rule); the coarsest mip is the floor and is never dropped; (c) leaves the issuing to
+    // the walks, which run every held frame at the fixed pose; (d) reports the turn as EXACT
+    // when the deficit is zero, no stale tile is tracked, and nothing is pending, in flight
+    // or retiring -- main dumps after kEvictAgeFrames + 4 consecutive exact turns. A wanted
+    // tile that can never land -- its own load failed, or an ancestor's did, so the ring gate
+    // holds its children forever -- is excluded from the deficit BY ITS STATE (the manager
+    // knows), never by a timeout.
+    //
+    // THE POOL DURING THE HOLD IS THE WANT SET. MEASURED (bird, the first exact run): the
+    // walk wants 9176 tiles (573 MB) and kPoolCapTiles is 8192 (512 MB); at the cap the
+    // evictor finds no victim (every mapped tile is wanted every frame), MapAndFill breaks
+    // out of its batch, and the batch's remaining tiles -- already erased from m_loading --
+    // are lost in state Loaded, tracked and unqueued, until something invalidates them.
+    // Which 984 tiles lose is decided by landing order: that is the race a quiet
+    // --settle-sync fired over. So while settleExact is raised MapAndFill's cap test is
+    // skipped (the pool grows to the want set, bounded by the walk) and the exact turn
+    // returns a wanted Loaded tile in no queue to m_loading. The ledger prints the mapped
+    // total against the shipped cap so an over-cap pose is named. Outside a hold settleExact
+    // is false and this is the shipped turn, call for call.
+    bool settleExact = false;
+    // Of ringHeldFrame: requests held under a parent whose load FAILED. They can never be
+    // admitted, so the exact settle counts them as unreachable, not as deficit.
+    uint32_t ringHeldDeadFrame = 0;
+    struct SettleTurn {
+        uint32_t wanted = 0;        // tracked tiles stamped by this frame's walks
+        uint32_t mapped = 0;        // ... of which mapped at their mip
+        uint32_t deficit = 0;       // ... wanted, not mapped, and able to land (+ live ring-held)
+        uint32_t unreachable = 0;   // ... wanted, and never will land (Failed, or under one)
+        uint32_t stale = 0;         // tracked, not wanted this frame, still tracked after the turn
+        uint32_t dropped = 0;       // stale tiles dropped this turn
+        uint32_t requeued = 0;      // wanted, Loaded, in no queue (the cap's casualties) -> m_loading
+        uint32_t pending = 0, reads = 0, retiring = 0;
+        bool exact = false;
+    };
+    SettleTurn settleTurn;   // the last turn's finding; main reads it after RenderFrame
+    // The per-tenant report at the exit of an exact hold: wanted, mapped, deficit, dropped,
+    // and an FNV-1a over the mapped set (face, mip, x, y in key order) -- two runs, or two
+    // binaries that issue the same want stream, print the same hash or the difference is real.
+    void LogSettleExact(uint32_t heldFrames) const;
+
 private:
+    struct Tracked;
     struct Tenant {
         std::wstring name;
         Com<ID3D12Resource> res;
@@ -265,15 +360,32 @@ private:
         // into scattered heap -- about 81 ns measured -- to retrieve a fact that fits in four
         // bytes and whose address is pure arithmetic on (face, mip, x, y).
         //
-        // So the answer moves into a dense array indexed by exactly that arithmetic. The map
-        // stays: it still owns the Tracked objects and everything the loader, mapper and
-        // evictor do with them. What leaves the map is the HOT QUESTION, which never needed it.
+        // So the answer moves into a dense array indexed by exactly that arithmetic. What
+        // leaves the map is the HOT QUESTION, which never needed it.
         //
         // Encoding: frame * 2 + predicted, so one 32-bit read carries both halves of the skip
         // test. Zero means never seen, which is why frames are counted from 1.
         std::vector<uint32_t> stamp;
         std::vector<uint32_t> stampBase;   // offset of each (face, mip) plane into stamp
         std::vector<uint32_t> stampW;      // that plane's width in tiles, for the row stride
+        // Step 4 (docs/PERF_EXPERIMENT.md): THE SLOT ARRAY BESIDE IT. The map the M9x note
+        // left in place was a std::map, not the unordered_map it described, and every touch
+        // the stamp did NOT answer still went through it: the first touch of a tile in a frame
+        // (~26.7k touches/frame of which 19.3k were stamp hits, step 3's storm bench), the
+        // ring gate's parent probe on every new tile, the mapper's parent check and the
+        // evictor's child check -- a red-black tree of every tracked tile of every tenant,
+        // walked at 100-200 ns a find. The same arithmetic that addresses the stamp addresses
+        // the Tracked itself: `slot` is laid out exactly like `stamp`, holds the tile's
+        // Tracked (null = untracked), and every probe becomes one array read. The index is a
+        // pure function of (face, mip, x, y) with no packing at all, which is what makes the
+        // M9bf key-aliasing class of bug impossible here. `tracked` OWNS this tenant's tiles
+        // (unordered; Tracked::pos is the entry's index, so removal is a swap with the back),
+        // so Drop() walks its own tenant instead of every tenant's map. Every erase path --
+        // Drop, an invalidation, an eviction -- goes through Untrack(), which clears the slot;
+        // a stale slot would alias a reused Tracked, so --res-trace audits slot against list
+        // for the first kSlotAuditFrames frames. 8 B per virtual tile (about 7 MB in all).
+        std::vector<Tracked*> slot;
+        std::vector<std::shared_ptr<Tracked>> tracked;
         TileProviderFn provider;
         // Residency map (base-tile granularity, per face): byte = finest resident mip * 16.
         GpuTexture resMap;
@@ -289,6 +401,10 @@ private:
         // read a file; one that took longer painted. Updated under m_mx by the workers.
         uint32_t loadsRead = 0, loadsPaint = 0;
         uint64_t readUs = 0, paintUs = 0;
+        // Step 25: the exact settle's per-tenant ledger -- the last turn's counts and the
+        // drops summed over the hold, for LogSettleExact.
+        uint32_t exWanted = 0, exMapped = 0, exDeficit = 0, exUnreachable = 0, exStale = 0;
+        uint32_t exDropped = 0, exDroppedMapped = 0, exRequeued = 0;
     };
 
 
@@ -305,6 +421,7 @@ private:
         TileLoc loc;
         uint64_t stageOffset = 0;   // where its bytes landed in the device buffer
         bool dropped = false;       // M9ba: identity moved under it; discard when it lands
+        uint32_t pos = UINT32_MAX;  // step 4: its index in the tenant's `tracked` list
     };
     struct Retiring {
         std::shared_ptr<Tracked> tile;
@@ -313,7 +430,10 @@ private:
     std::vector<Retiring> m_retiring;   // M9ba: dropped-while-mapped, NULL-mapped after overlap
     std::mutex m_invMx;
     std::vector<std::pair<int, TileRequest>> m_invQ;   // M9bb: invalidations from paint threads
-    void DropOne(const std::shared_ptr<Tracked>& tr);
+    // Marks the tile dropped and, when it was mapped, retires it. Returns that -- the caller
+    // compacts m_mapped ONCE afterwards (erase_if on `dropped`, order kept) instead of a
+    // std::find per tile: Drop() of a 23-slice tenant was O(dropped x mapped).
+    bool DropOne(const std::shared_ptr<Tracked>& tr);
     // Index of one tile in a tenant's flat stamp array. Pure arithmetic -- no hashing, no
     // indirection, and neighbours in a rect land next to each other in memory, which is the
     // half of the win the instruction count does not show.
@@ -322,6 +442,25 @@ private:
         const uint32_t plane = face * t.mips + mip;
         return size_t(t.stampBase[plane]) + size_t(y) * t.stampW[plane] + x;
     }
+    // Step 4: the slot array's three operations. Find() is bounds-checked because its callers
+    // hand in coordinates the walk did not compute (an invalidation from a paint thread, the
+    // trace's DebugTile, the evictor's child probe on a grid whose width need not halve
+    // evenly); the walk itself indexes `slot` directly with coordinates it derived in range.
+    Tracked* Find(int tenant, const TileRequest& r) const {
+        if (tenant < 0 || size_t(tenant) >= m_tenants.size()) return nullptr;
+        const Tenant& t = m_tenants[tenant];
+        if (r.face >= t.faces || r.mip >= t.mips) return nullptr;
+        const auto& ti = t.tilings[r.face * t.mips + r.mip];
+        if (r.x >= ti.WidthInTiles || r.y >= ti.HeightInTiles) return nullptr;
+        return t.slot[StampIndex(t, r.face, r.mip, r.x, r.y)];
+    }
+    void Track(Tenant& t, const std::shared_ptr<Tracked>& tr);
+    void Untrack(Tenant& t, Tracked* tr);
+    // The bring-up gate for the slot array, under --res-trace: every non-null slot is a list
+    // entry and every list entry's slot points back at it. A mismatch is the M9bf class of
+    // bug (a stale index aliasing a reused Tracked) and aborts the run.
+    static constexpr uint32_t kSlotAuditFrames = 1000;
+    void AuditSlots() const;
 
     // M9ai: tiles whose bytes are in flight on the DirectStorage queue. They are MAPPED but not
     // yet claimed in the residency map, so the shader keeps sampling their coarser ancestor
@@ -338,6 +477,9 @@ private:
     // never loaded, the mapping order held every finer level, the water went flat. The wave
     // planes 8..16 had been aliasing each other and their neighbours since the 23-slice tenant.
     // tenant:8 | face:8 | mip:6 | y:21 | x:21 -- 2M tiles per axis is 2^27 texels at 64/tile.
+    // Step 4: no longer the map's key (the slot array is indexed without packing); it is the
+    // ORDER the map walked a tenant's tiles in, which Drop() keeps so that m_retiring, the
+    // NULL-map calls and the freed pool slots come out in the sequence they always did.
     using Key = uint64_t;
     static Key MakeKey(int tenant, const TileRequest& r) {
         return (static_cast<Key>(tenant) << 56) | (static_cast<Key>(r.face & 0xFFu) << 48) |
@@ -368,7 +510,7 @@ private:
     std::vector<Com<ID3D12Heap>> m_heaps;
     std::vector<uint32_t> m_freePool;
 
-    std::map<Key, std::shared_ptr<Tracked>> m_tracked;
+    // (The tracked set lives per tenant: Tenant::slot + Tenant::tracked, step 4.)
     std::deque<std::shared_ptr<Tracked>> m_seen;
     std::vector<std::shared_ptr<Tracked>> m_loading;
     std::vector<std::shared_ptr<Tracked>> m_mapped;

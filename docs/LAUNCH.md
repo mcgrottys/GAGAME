@@ -60,6 +60,37 @@ ebb — the whitewater river over the shoal); calm evening low `--start 2026-08-
   the water surprises you; validate against NOAA with the printed station numbers.
 - `--dump-fibers` — the bank's planes as PNGs + `fiber_detail.f32` + `fiber_meta.json`
   (range-checked against the AST's declared ranges; violations print).
+- `--settle-sync` / `--settle-hold N` — a still's dump frame is HELD at its instant (the last
+  frame `--frames N` renders) for extra frames, so *when* the far tiles happened to land stops
+  deciding the image. `--settle-sync` holds until the residency is quiet (pending 0, no
+  in-flight read, nothing ring-held, for `kEvictAgeFrames` frames; give-up cap 3000, and it
+  says so). `--settle-hold N` holds exactly N frames whatever residency is doing; together
+  they drain first and then hold to at least N. The exit line names the rule that held it.
+  A/B TWO BINARIES AT THE SAME N: a drain-judged hold runs as long as the residency makes it
+  (211 vs 225 frames on two runs of one binary at the bird), and only the counted form is a
+  flag both sides share. The churn atlas is frozen for exactly the held frames — its kernel
+  only climbs at a frozen dt, so an unfrozen hold made the foam a function of the hold's
+  length (`[gpu] sea.churn 0.000 ms` on held frames is the proof of wire).
+- `--settle-exact` — the same hold, exited only when the RESIDENT SET IS THE WALK'S WANT SET:
+  every held turn the residency manager reads the walk's per-tile frame stamps, counts the
+  deficit (wanted, not mapped at that mip), drops every tracked tile the walk did not want
+  this frame (the invalidation's own retire path; the coarsest mip is the floor and stays; a
+  tile is dropped once unwanted for `kEvictAgeFrames` turns and never while a DirectStorage
+  batch still carries it), and reports the turn EXACT when deficit, stale, pending, in-flight
+  and retiring are all zero; the dump waits for `kEvictAgeFrames + 4` exact turns in a row. A
+  wanted tile that can never land (its load failed, or an ancestor's did) is excluded by its
+  state, never by a timeout. `--settle-sync`'s quiet test fires over two different resident
+  sets (two quiet bird holds differed in whole tiles' mips); this is THE GATE'S definition of
+  settled from perf step 25 on, on both binaries of an A/B: the still is a function of the
+  pose and the data. The exit prints a `[settle-exact]` ledger per tenant -- wanted, mapped,
+  deficit, unreachable, dropped over the hold, and an FNV-1a of the mapped set -- so two runs
+  that differ can be told apart as "different resident set" or "same set, different bytes".
+  Composes with `--settle-hold N` (exact first, then to at least N). `--settle-sync` stays as
+  it is for the pop-in track's landing series, which needs the schedule-dependent behaviour.
+  `--settle-clear-churn` zeroes the churn atlas at the first held frame (the clear kernel over
+  every resident tile, then the freeze keeps it): the A/B of a held still with and without it
+  separates a residual the residency owns from one the churn's pre-hold history owns (the foam
+  deposited during the real frames lands when the bed and the wave pages happened to).
 - `py -3 proofs/water_optics.py` — M9's water-quality forms (the Kd490→RGB transfer and the
   two-flux deep colour) against the measured NOAA fields; renders `proofs/water_optics.png`
   with the rendered water swatches. Toggle the feature itself with `closures.waterOptics`
@@ -76,6 +107,26 @@ ebb — the whitewater river over the shoal); calm evening low `--start 2026-08-
 - `--albedo` — raw composed color lens; `--stencil` — GIS alignment overlay.
 - `--pix N` — programmatic PIX GPU capture of N frames (needs PIX installed; passes are
   marked with AST node names).
+- `--gpu-time` — timestamp queries around every pass (each layer, tonemap, present copy, and
+  the compute-vs-draw sub-passes inside sea/waterbank/globe), read frames-in-flight deep so
+  nothing stalls. Prints `[gpu] <pass> mean p50 p95 max@frame` at exit next to the `[rail]`
+  lines and writes `<raildir>/gpu_ms.csv` (one row per frame, one column per pass). Off = no
+  queries issued.
+- `--no-vsync` — windowed only: ALLOW_TEARING swapchain + `Present(0, ALLOW_TEARING)` when
+  DXGI supports it, so the `[perf]` line measures the engine and not the display's refresh.
+  Default stays `Present(1, 0)`.
+- Boot report (`[gpu] boot:` lines, always printed) — the adapter chosen, whether it is the
+  high-performance pick, which adapter owns each DXGI output, and whether the present is
+  SAME-ADAPTER or CROSS-ADAPTER (hybrid laptop: RTX renders, the iGPU that owns the panel
+  flips). Read it before believing any windowed frame rate.
+- `py -3 tools/raildiff.py BASE.mp4 NEW.mp4 --out-dir DIR --stills 3` — two recordings of the
+  same rail, per frame. THE RULE: the verdict is CONTINUITY + LUMA — exit 1 only on a
+  new-only `tblend` spike (a pop that BASE does not also have) or a per-second mean luma
+  drifting past `--yavg-max` (0.5/255). SSIM is printed and never gates: two rails of one
+  flight from two binaries measured SSIM min 0.93 with YAVG inside 0.15/255 and no spike,
+  because a residency-landing shift decorrelates the helm's crests while the sea's brightness
+  and its frame-to-frame continuity are unchanged. Record both sides like for like
+  (`--rail-flood DIR --mp4 OUT.mp4 --tile-budget 3000`, same `--storm` and `--start`).
 - Boot always prints the AST (`[gaast]`) and regenerates `docs/GA_AST.md` +
   `docs/ga_ast.json`; `py -3 tools/astdiagram.py` redraws `docs/diagrams/*.svg`.
 

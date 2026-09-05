@@ -15,6 +15,7 @@
 #pragma once
 
 #include "core/Gpu.h"
+#include "core/GpuProfiler.h"
 #include "core/Shader.h"
 #include "render/Camera.h"
 #include "scene/Layer.h"
@@ -76,11 +77,22 @@ public:
     bool DumpPng(const std::wstring& path);
     // Raw RGBA8 + its row pitch (which may exceed width*4 -- D3D readback alignment).
     bool DumpRaw(std::vector<uint8_t>& out, uint32_t* rowPitch);
+    // --dump-hdr: the RGBA16F scene radiance BEFORE the tonemap, raw de-pitched rows plus a
+    // .json sidecar (size, exposure, the shoulder knee and gamma Tonemap.hlsl applies), so a
+    // sub-LSB claim is judged in radiance through the curve (tools/imgdiff.py --hdr) rather
+    // than in the 8-bit image that already rounded it.
+    bool DumpHdr(const std::wstring& path);
     uint32_t Width() const { return m_width; }
     uint32_t Height() const { return m_height; }
 
     ShaderCompiler& Shaders() { return m_shaders; }
     ID3D12RootSignature* RootSignature() const { return m_rootSig.Get(); }
+
+    // --gpu-time: timestamp pairs around every pass. Off (null) by default -- no queries issued.
+    void EnableGpuProfiler();
+    GpuProfiler* Profiler() { return m_prof.get(); }
+    // The caller's frame number for the profiler's rows (a rail's settle frames are negative).
+    int64_t gpuFrameLabel = 0;
 
     // Water level in metres above datum -- in M1 this is the tide at the focus station, published
     // scene-wide because anything that sits in or on the water will need it.
@@ -114,6 +126,7 @@ private:
     std::vector<std::unique_ptr<Layer>> m_layers;
     D3D12_GPU_VIRTUAL_ADDRESS m_fieldTableVa = 0;
     uint32_t m_width = 0, m_height = 0;
+    std::unique_ptr<GpuProfiler> m_prof;
 };
 
 }  // namespace ga
