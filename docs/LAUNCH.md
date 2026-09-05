@@ -60,6 +60,17 @@ ebb — the whitewater river over the shoal); calm evening low `--start 2026-08-
   the water surprises you; validate against NOAA with the printed station numbers.
 - `--dump-fibers` — the bank's planes as PNGs + `fiber_detail.f32` + `fiber_meta.json`
   (range-checked against the AST's declared ranges; violations print).
+- `--settle-sync` / `--settle-hold N` — a still's dump frame is HELD at its instant (the last
+  frame `--frames N` renders) for extra frames, so *when* the far tiles happened to land stops
+  deciding the image. `--settle-sync` holds until the residency is quiet (pending 0, no
+  in-flight read, nothing ring-held, for `kEvictAgeFrames` frames; give-up cap 3000, and it
+  says so). `--settle-hold N` holds exactly N frames whatever residency is doing; together
+  they drain first and then hold to at least N. The exit line names the rule that held it.
+  A/B TWO BINARIES AT THE SAME N: a drain-judged hold runs as long as the residency makes it
+  (211 vs 225 frames on two runs of one binary at the bird), and only the counted form is a
+  flag both sides share. The churn atlas is frozen for exactly the held frames — its kernel
+  only climbs at a frozen dt, so an unfrozen hold made the foam a function of the hold's
+  length (`[gpu] sea.churn 0.000 ms` on held frames is the proof of wire).
 - `py -3 proofs/water_optics.py` — M9's water-quality forms (the Kd490→RGB transfer and the
   two-flux deep colour) against the measured NOAA fields; renders `proofs/water_optics.png`
   with the rendered water swatches. Toggle the feature itself with `closures.waterOptics`
@@ -88,6 +99,14 @@ ebb — the whitewater river over the shoal); calm evening low `--start 2026-08-
   high-performance pick, which adapter owns each DXGI output, and whether the present is
   SAME-ADAPTER or CROSS-ADAPTER (hybrid laptop: RTX renders, the iGPU that owns the panel
   flips). Read it before believing any windowed frame rate.
+- `py -3 tools/raildiff.py BASE.mp4 NEW.mp4 --out-dir DIR --stills 3` — two recordings of the
+  same rail, per frame. THE RULE: the verdict is CONTINUITY + LUMA — exit 1 only on a
+  new-only `tblend` spike (a pop that BASE does not also have) or a per-second mean luma
+  drifting past `--yavg-max` (0.5/255). SSIM is printed and never gates: two rails of one
+  flight from two binaries measured SSIM min 0.93 with YAVG inside 0.15/255 and no spike,
+  because a residency-landing shift decorrelates the helm's crests while the sea's brightness
+  and its frame-to-frame continuity are unchanged. Record both sides like for like
+  (`--rail-flood DIR --mp4 OUT.mp4 --tile-budget 3000`, same `--storm` and `--start`).
 - Boot always prints the AST (`[gaast]`) and regenerates `docs/GA_AST.md` +
   `docs/ga_ast.json`; `py -3 tools/astdiagram.py` redraws `docs/diagrams/*.svg`.
 

@@ -792,7 +792,14 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
         m_churnState = to;
     };
 
-    if (!m_churn.ResidentList().empty() || !m_pendingClear.empty()) {
+    // freezeChurn (harness, held stills only -- see SeaLayer.h): the advection/deposit pass is
+    // suspended while a still is held at one instant, so the atlas is exactly what the last
+    // unheld frame left and the hold's LENGTH stops changing the foam. The clear list is still
+    // dispatched: a tile mapped during the hold would otherwise be read as undefined pool
+    // memory. Outside a hold freezeChurn is false and this is the shipped path, dispatch for
+    // dispatch.
+    const bool doUpdate = !freezeChurn && !m_churn.ResidentList().empty();
+    if (doUpdate || !m_pendingClear.empty()) {
         barrierTo(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
         m_churnCb.originX = m_seaCb.churnF[0];
@@ -858,7 +865,7 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
             uav.UAV.pResource = m_churn.Res();
             ctx.cl->ResourceBarrier(1, &uav);
         }
-        dispatchList(m_churnUpdate.Get(), m_churn.ResidentList());
+        if (doUpdate) dispatchList(m_churnUpdate.Get(), m_churn.ResidentList());
     }
     barrierTo(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 }

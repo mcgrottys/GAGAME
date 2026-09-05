@@ -15,15 +15,25 @@ Three series through ffmpeg (the essentials build on this machine; ffprobe besid
 Video is lossy (H.264): this is a smoke test for continuity and for WHEN something moved --
 never the pixel gate (tools/imgdiff.py on --dump stills is).
 
+THE VERDICT IS CONTINUITY + LUMA, NOT SSIM. MEASURED (step 6 of the perf plan, two rails of
+the same 40 s flight from two binaries): SSIM min 0.93 with the per-second YAVG inside
+0.15/255 and no new-only spike -- a residency-landing shift decorrelates the helm's crests
+frame by frame while the sea's brightness and its frame-to-frame continuity are unchanged.
+SSIM is a correlation, and a rail whose water has moved half a crest is uncorrelated and
+correct. So SSIM is REPORTED (min, where, per second) and never gates; exit 1 means a
+new-only tblend spike (a pop) or a per-second mean luma that drifted more than --yavg-max.
+
 Usage:
     py -3 tools/raildiff.py BASE.mp4 NEW.mp4 [--out-dir DIR] [--rows 0.45:1.0] [--stills N]
-                            [--ssim-floor 0.95] [--spike 3.0]
+                            [--ssim-floor 0.90] [--yavg-max 0.5] [--spike 3.0]
 
     --rows y0:y1   the water rows as fractions of the height (default 0.45:1.0, below the
                    horizon at the helm); the tblend series is cropped to them
     --stills N     write amplified |BASE - NEW| stills for the N worst-SSIM frames into DIR
+    --ssim-floor F informational only: frames below F are counted and named
+    --yavg-max D   THE LUMA GATE: max per-second |mean luma(new) - mean luma(base)|, /255
 Writes DIR/series.csv (frame, t, ssim_all, ssim_y, psnr, yavg_base, yavg_new, tb_base, tb_new)
-and prints the summary. Exit 1 when a spike is flagged or the SSIM floor is broken.
+and prints the summary, ending in a VERDICT line. Exit 1 on a new-only spike or a luma drift.
 """
 import argparse
 import csv
@@ -123,7 +133,10 @@ def main(argv):
     ap.add_argument("--out-dir", default=None)
     ap.add_argument("--rows", default="0.45:1.0", help="water rows as height fractions y0:y1")
     ap.add_argument("--stills", type=int, default=0, help="amplified difference stills for the N worst frames")
-    ap.add_argument("--ssim-floor", type=float, default=0.95)
+    ap.add_argument("--ssim-floor", type=float, default=0.90,
+                    help="informational: count and name the frames below it (never the verdict)")
+    ap.add_argument("--yavg-max", type=float, default=0.5,
+                    help="the luma gate: max per-second |mean luma(new) - mean luma(base)|, /255")
     ap.add_argument("--spike", type=float, default=3.0, help="flag NEW frames whose tblend delta exceeds this x rolling median")
     args = ap.parse_args(argv)
 
@@ -165,7 +178,7 @@ def main(argv):
     # ---- SSIM
     worst = sorted(frames, key=lambda i: ssim_all.get(i, 1.0))[:5]
     below = [i for i in frames if ssim_all.get(i, 1.0) < args.ssim_floor]
-    print(f"\nSSIM (All) over {n} frames: mean {sum(ssim_all[i] for i in frames) / n:.4f}, "
+    print(f"\nSSIM (All, INFORMATIONAL) over {n} frames: mean {sum(ssim_all[i] for i in frames) / n:.4f}, "
           f"min {ssim_all[worst[0]]:.4f} at frame {worst[0]} (t={worst[0] / fps:.2f} s); "
           f"{len(below)} frames below {args.ssim_floor}")
     print("  worst five: " + ", ".join(f"f{i} {ssim_all[i]:.4f} (t={i / fps:.1f}s)" for i in worst))
@@ -182,8 +195,10 @@ def main(argv):
         mn = sum(yn.get(i, 0.0) for i in ids) / len(ids)
         dy.append((abs(mn - mb), s, mb, mn))
     dy_max = max(dy) if dy else (0.0, 0, 0.0, 0.0)
+    luma_over = dy_max[0] > args.yavg_max
     print(f"YAVG per second: max |new - base| {dy_max[0]:.3f}/255 at {dy_max[1]} s "
-          f"(base {dy_max[2]:.2f}, new {dy_max[3]:.2f}); mean |diff| {sum(d[0] for d in dy) / max(1, len(dy)):.3f}/255")
+          f"(base {dy_max[2]:.2f}, new {dy_max[3]:.2f}); mean |diff| {sum(d[0] for d in dy) / max(1, len(dy)):.3f}/255"
+          f"  [gate {args.yavg_max:.2f}/255: {'OVER' if luma_over else 'ok'}]")
 
     # ---- the pop instrument: frame-to-frame change over the water rows
     tb_ids = sorted(k for k in tn if k in tb)
@@ -223,7 +238,21 @@ def main(argv):
             print(f"  wrote {out} (|base - new| x16, frame {i})")
 
     print(f"series -> {os.path.join(out_dir, 'series.csv')}")
-    return 1 if (flagged or below) else 0
+
+    # ---- the verdict: continuity (no new-only pop) + luma (the sea's brightness held).
+    reasons = []
+    if flagged:
+        reasons.append(f"{len(flagged)} new-only tblend spike(s), first at f{flagged[0][0]}")
+    if luma_over:
+        reasons.append(f"per-second YAVG max {dy_max[0]:.3f}/255 over {args.yavg_max:.2f} at {dy_max[1]} s")
+    ssim_note = (f"SSIM min {ssim_all[worst[0]]:.4f} at f{worst[0]} (informational"
+                 + (f", {len(below)} frames below {args.ssim_floor}" if below else "") + ")")
+    if reasons:
+        print(f"\nVERDICT: FAIL -- " + "; ".join(reasons) + f"; {ssim_note}")
+        return 1
+    print(f"\nVERDICT: PASS -- no new-only spikes; per-second YAVG max {dy_max[0]:.3f}/255 "
+          f"within {args.yavg_max:.2f}; {ssim_note}")
+    return 0
 
 
 if __name__ == "__main__":

@@ -135,6 +135,8 @@ struct Options {
     bool noVsync = false;             // --no-vsync: windowed, ALLOW_TEARING + Present(0, tearing)
     bool settleSync = false;          // --settle-sync: hold the --dump frame's instant until the
                                       // residency queues and DirectStorage reads have drained
+    uint32_t settleHold = 0;          // --settle-hold N: hold it for exactly N frames, counted;
+                                      // with --settle-sync, drain first and then to at least N
     std::wstring dumpHdr;             // --dump-hdr PATH: the RGBA16F radiance before the tonemap
     std::string mp4;                  // --mp4 PATH: pipe rail frames straight to an encoder
     bool flatBed = false;             // --flat-bed N: constant bed, to A/B bathymetry
@@ -346,6 +348,15 @@ Options ParseArgs(int argc, char** argv) {
         // 2026-09-05): held pairs agree to 2-13 px; unheld pairs to 5-18 px or one far-water
         // tile (~870 px) -- the horizon-line residue is not the residency's (probe P16 stays open).
         else if (a == "--settle-sync") o.settleSync = true;
+        // --settle-hold N: the same hold, COUNTED. --settle-sync's length is whatever the
+        // residency needs, and the two binaries of an A/B rarely need the same (211 vs 225
+        // frames on two runs of one binary; 300 vs 900 across a change) -- so two settled
+        // stills were taken after different numbers of frames. Held exactly N frames past the
+        // dump instant whatever residency is doing, N is a flag both sides share. With
+        // --settle-sync it composes: drain first, then hold to at least N. Honoured past the
+        // 3000-frame drain cap, which is a give-up rule for the drain, not a budget.
+        else if (a == "--settle-hold")
+            o.settleHold = static_cast<uint32_t>(atoi(next("300").c_str()));
         else if (a == "--dump-hdr") o.dumpHdr = Widen(next("out.rgba16f").c_str());
         // M9ah: pack every realization's loose tiles into one archive and exit.
         else if (a == "--pack-tiles") o.packTiles = true;
@@ -4091,12 +4102,27 @@ int main(int argc, char** argv) {
                 // the solid frame's instant so the two images are the same water, not the
                 // same water 33 ms later -- otherwise the lines do not sit on the crests
                 // they are supposed to explain.
-                // --settle-sync holds the same instant for as many frames as the residency
-                // manager needs to drain (the exit test below decides when that is).
+                // --settle-sync / --settle-hold hold the same instant for as many frames as the
+                // residency manager needs to drain, or for a counted N (the exit test below
+                // decides which). The held instant is opt.frames - 1, the LAST frame an unheld
+                // --frames N run renders and dumps: an off-by-one here would put the held still
+                // a whole 1/30 s of sea away from the unheld one, so it was MEASURED rather than
+                // read (helm_ebb, 2026-09-05, out/step21/ob_*): --frames 240 --settle-hold 1
+                // against an unheld --frames 241 is 54.76 % identical, 33.08 % of pixels over
+                // 1 LSB -- indistinguishable from the 1/30 s step itself (240 vs 241: 54.76 %,
+                // 33.07 %) -- while against the unheld --frames 240 it is 94.62 % identical,
+                // the extra frame of residency landing at a pose that is nowhere near settled
+                // (pending 2992 -> 3004). The held frame names the unheld dump's moment; there
+                // is no off-by-one. The same clamp is what puts --dump-both's wireframe on the
+                // solid frame's crests, which is the second reason not to move it.
                 if ((opt.dumpBoth || settling) && opt.frames && recFrame >= opt.frames) {
                     recFrame = opt.frames - 1u;
                 }
                 simUnix = startUnix + static_cast<double>(recFrame) * (timeScale / 30.0);
+                // The churn atlas is stateful and its kernel only climbs at a frozen dt, so a
+                // held frame would advance the foam the hold's length decides. Freeze it for
+                // exactly the held frames (SeaLayer.h freezeChurn).
+                if (sea) sea->freezeChurn = settling;
                 // The helm leg of --rail-flood: keys at 32 s (cHelmIn) and 40 s (cHelmGap).
                 profHelm = !opt.rail.empty() && recFrame >= 32u * 30u;
                 if (!opt.rail.empty() && !railKeys.empty()) {
@@ -4578,7 +4604,16 @@ int main(int argc, char** argv) {
                 // queue can refill next frame). Quiet for kEvictAgeFrames consecutive frames
                 // -- one full overlap window -- before the image is taken. The still is then
                 // the same bytes whichever frame the far tiles landed on.
-                if (opt.settleSync && !opt.dump.empty() && opt.headless && !opt.dumpBoth) {
+                //
+                // --settle-hold N holds the same instant for exactly N frames instead, and the
+                // two compose: drain first, then to at least N. THE RULE THAT KEPT IT is named
+                // in the exit line, because the two are not interchangeable -- a drain-judged
+                // hold runs as long as the residency makes it (211 and 225 frames on two runs
+                // of one binary at the bird), and two stills held for different numbers of
+                // frames are not like for like until the churn is frozen through the hold
+                // (it is, below).
+                if ((opt.settleSync || opt.settleHold) && !opt.dump.empty() && opt.headless &&
+                    !opt.dumpBoth) {
                     const uint32_t pend = resMgr.PendingCount();
                     const uint32_t reads = resMgr.InFlightReads();
                     const bool quiet = pend == 0 && reads == 0 && ringHeldBefore == 0;
@@ -4588,7 +4623,13 @@ int main(int argc, char** argv) {
                         settleReads0 = reads;
                     }
                     settleQuiet = quiet ? settleQuiet + 1 : 0;
-                    if (settleQuiet < kSettleQuietFrames && settleFrames < kSettleCapFrames) {
+                    // The drain's give-up cap bounds the DRAIN, never the counted hold: a run
+                    // asked for N frames gets N whatever the residency is doing.
+                    const bool drainHolds =
+                        opt.settleSync && settleQuiet < kSettleQuietFrames &&
+                        settleFrames < kSettleCapFrames;
+                    const bool countHolds = settleFrames < opt.settleHold;
+                    if (drainHolds || countHolds) {
                         ++settleFrames;
                         if (settleFrames % 150u == 0u) {
                             Log("[settle-sync] +%u frames at the held instant: pending %u, "
@@ -4607,12 +4648,16 @@ int main(int argc, char** argv) {
                     // run the hold converged in 217-226 frames. Every held pair agreed to
                     // 2-13 px, the same band as two unheld runs (5-18 px): the horizon-line
                     // floor is not the residency's, and 'none' at the helm is still open (P16).
-                    Log("[settle-sync] dump frame held %u extra frames at the same instant: "
+                    const char* rule = opt.settleSync
+                                           ? (opt.settleHold ? "drain, then --settle-hold"
+                                                             : "--settle-sync, judged")
+                                           : "--settle-hold, counted";
+                    Log("[settle-sync] dump frame held %u extra frames at the same instant (%s): "
                         "pending %u -> %u, in-flight reads %u -> %u, quiet for %u frames, pool "
                         "%.0f MB%s",
-                        settleFrames, settlePending0, pend, settleReads0, reads, settleQuiet,
+                        settleFrames, rule, settlePending0, pend, settleReads0, reads, settleQuiet,
                         PoolCommittedBytes() / 1048576.0,
-                        settleQuiet >= kSettleQuietFrames
+                        (!opt.settleSync || settleQuiet >= kSettleQuietFrames)
                             ? ""
                             : " -- CAP REACHED, the residency never drained (a pending set that "
                               "stopped shrinking with the pool below its cap is waiting on "

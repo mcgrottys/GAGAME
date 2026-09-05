@@ -162,6 +162,16 @@ public:
     // M9b: G key / --wireframe. Shading cannot tell geometry from normals (priors 8); the
     // raster fill can. Same shaders, same displacement, lines instead of faces.
     bool wireframe = false;
+    // Harness only: raised by main for the frames a still is HELD at one instant
+    // (--settle-sync / --settle-hold). The churn is a stateful atlas -- at a held instant
+    // dtSim is 0 and CsChurnUpdate reduces to max(old, src), so the foam can only CLIMB, once
+    // per held frame, against a bed that is still landing. MEASURED (bird, 2026-09-05): two
+    // holds of different length gave different foam, which is what made two settled stills
+    // incomparable across binaries. Frozen, the atlas is whatever the last unheld frame left
+    // and hold length stops being a term. The CLEAR kernel still runs, so a tile mapped during
+    // the hold is never read as undefined pool memory. Proof of wire: [gpu] sea.churn 0.000 ms
+    // on held frames (p50 0.000 over 540 frames of a 240 + 300 render, 0.178 unheld).
+    bool freezeChurn = false;
 
 private:
     struct SeaCbData {
