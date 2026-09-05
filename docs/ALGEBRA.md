@@ -343,8 +343,19 @@ tile, worst |Δ| ≤ 1/255). AST: all `compose.stack` edges.
 - **Churn decay/refresh**: memory = max(old · e^{−dt/τ}, deposit) — crisp fresh streaks
   over an exponential wash.
 - **CDLOD morph**: vertex grid position g −= frac(g/2)·2·k with k the distance ramp —
-  identical on both sides of every seam, so cracks are impossible by construction; the
-  height SOURCE morphs with the grid.
+  identical on both sides of every SAME-LEVEL seam; the height SOURCE morphs with the
+  grid. It is NOT complete at a coarser neighbour's edge (the split is on the centre
+  distance, the ramp ends at 2.93 coarse arcs, the coarse leaf's near corner can sit at
+  2.29), so level seams are closed by the seam bands instead (priors 28).
+- **The seam bands** (mesh path): a seam is closed by a thin band behind it, never by
+  moving a vertex — the interpolated `dir`'s ulp is 0.4 m of ground, so any
+  retessellation flips 8-bit pixels far from the crack. The band's inner edge is the
+  record's own seam vertex with only its depth changed (bit-identical screen xy: the
+  shared edge stays single-covered), its outer edge the same vertex 0.002 cells outward
+  (fine-path hairlines) or the coarse record's own vertex at our even positions, ≥ 1 m /
+  0.01 cells inside the coarse leaf (level seams); the whole band is 0.5 % of the distance
+  farther in ndc depth, so it loses to every real fragment and wins only where nothing
+  was drawn. `--lens shell` reports a band fragment as A = 9: the hole map.
 - **The float wall** (mesh path): fine meshlets carry a double-precision camera-relative
   anchor + the position Jacobian d(pos)/d(uv); vertices reconstruct as anchor + J·du with
   small integer offsets — no 6.4e6-magnitude float subtraction anywhere near the helm.
@@ -978,6 +989,47 @@ model (or a textbook) would hold → what this project measured → the law now 
     reorder alone is -0.53 ms of `globe.mesh` at the helm (3.573 -> 3.048) and -1.01 ms at p95,
     while the two genuinely exact companions of the same step (the `discard`-free shipped PSO
     and the MsMain per-vertex `ComposedHeight` dedupe) are 0.00 ms on that row.
+
+28. **"Crack-free by construction" was a claim about one seam class.** Prior (the M6j
+    comment in `GlobeMesh.hlsl` and the discrete section above, until perf plan step 23):
+    the per-level morph evaluates identically on both sides of every seam, so the shell
+    has no cracks. Measured (`--lens shell`, the fragment's central angle from the eye,
+    settled stills): the shell had holes -- seven pixels at the 7 km key pose, thirteen
+    at the bird, each a ray that left the surface through a seam and landed 30-160 deg
+    away on the far side of the planet (that far surface is what those pixels showed, and
+    what step 6's horizon cull took away); at the helm 36 and at the ebb helm 54 more
+    that no far-side test can see, because at a 1-2 deg depression the ray through a seam
+    lands on the NEXT surface behind it, and two at the globe that showed space. Three
+    classes. (a) LEVEL seams: a leaf splits on its centre distance (3 arc) and a finer
+    neighbour morphs out over [4.05, 5.85] x ITS arc = up to 2.93 coarse arcs, while the
+    coarse leaf only promises its centre past 3 arc, so its near corner sits at 2.29 arcs
+    where the fine side is still at k 0.3-0.9: odd seam vertices off the coarse edge and
+    even ones on a height blended toward the finest data the coarse side never samples.
+    All seven key7km cracks, the helm's L18/L17 and L17/L16 rings, the globe's two.
+    (b) FINE-PATH seams: a fine meshlet (arc <= 650 m) reconstructs anchor + J.du from its
+    OWN record, so two records round one shared vertex ~0.3 mm apart -- a 1e-4 px
+    hairline at 2 km, hit by a pixel centre every ~100k px of seam; which seams a run
+    shows depends on the run's SWE state (twelve of the bird's thirteen come and go with
+    it, the level-seam one stays). (c) Same-level classic seams are coincident (one
+    formula on bit-identical uv) and never cracked. Law: a seam is closed by a BAND, not
+    by moving a vertex -- the interpolated `dir`'s ulp is 0.4 m of ground on this GPU, so
+    any retessellation flips 8-bit pixels far from the crack; the owning meshlet draws the
+    strip between the two records' own surfaces (the neighbour's vertex from the
+    neighbour's record) 0.5 % of the distance behind in depth, so it loses to every real
+    fragment and wins only where nothing was drawn -- and THAT is the proof a changed pixel
+    was a hole (the hole map, `--lens shell` A = 9). Two margins were measured wrong
+    first: a band straddling the seam by 0.02 cells and flat, 0.1 % behind, sat ~7 mm off
+    the sloping wave surface, and at a 3.8 deg depression 7 mm of height is 10 cm along
+    the ray = the whole margin at 100 m, so it won on 39 helm pixels; one-sided at 0.002
+    cells and 0.5 % behind it never does. Measured at step 23: the far-hemisphere probe
+    (`--probe-cull-far`) 0 px against the unculled render at the bird, the globe and the
+    helm, sub-LSB in radiance at key7km (the SWE patch), undecidable at the ebb helm (the
+    SWE history: any two runs differ on 6-11 % of the water); every pixel the fix changed
+    at the four settled poses is in its own hole map. Face seams (a neighbour on another
+    cube face) are not in the table and stay open; none lie in the five gate poses. The
+    corollary for priors 27: with the shell closed, the camera-face-first order is 0 px
+    against the plain order at key7km, and the 8-pixel |d| = 1 cluster at (992..1002,
+    864..873) flips between two same-order runs -- the SWE's run-to-run state, not a seam.
 
 ## verification — The gate map: which algebra is pinned where
 

@@ -162,6 +162,7 @@ public:
         int winT = -1, hgtWinT = -1, detWinT = -1;
         uint32_t winFace = 0, hgtWinFace = 0, detFace = 0;
         double detOrg[2] = {}, detSize = 1.0, det17Org[2] = {};
+        bool probeCullFar = false;   // step 23 probe
     };
     // One Want() the walk asked for, as it asked (face and mip as the manager takes them).
     struct WantRect {
@@ -189,6 +190,9 @@ public:
     bool msSurface = true;          // M6j: request the mesh-shader unified surface
     bool MeshPathActive() const { return m_msPath; }
     bool stencilOverlay = false;    // M6i: --stencil, the GIS alignment overlay
+    bool probeCullFar = false;      // step 23 probe: horizon cull at every altitude (+0.1 rad)
+    bool probeFaceFirst = false;    // step 23 probe: the eye's cube face walked first
+    void DumpMeshlets(const std::wstring& path) const;   // step 23 probe: the records drawn
     int debugLens = 0;              // M7m: --lens (1 worldxz, 2 winuv, 3 mip, 4 ring,
                                     // 7 velgrad -- the derived div/curl bank)
     // M9h: the grad(flow) bank and the grid it lives on, for lens 7.
@@ -256,10 +260,20 @@ private:
         uint32_t face, cell0;
         float morphStart, morphEnd;
         float anchorRel[3], arc;
-        float dPdu[3], pad0;
-        float dPdv[3], pad1;
+        float dPdu[3];
+        uint32_t seamX;   // step 23: the seam word across the W (mx 0) / E (mx 3) edge
+        float dPdv[3];
+        uint32_t seamY;   // step 23: the same across the N (my 0) / S (my 3) edge
         float upT[3], pad2;
     };
+    static_assert(sizeof(MeshletRec) == 96, "MeshletRec mirrors GlobeMesh.hlsl: 96 B");
+    // Step 23: one emitted leaf, keyed for the seam table (SeamTable): face, level and the
+    // node's integer grid position, and its first record.
+    struct LeafKey {
+        uint64_t key;
+        uint32_t base;
+    };
+    void SeamTable();
     // Mirrors GlobeCb in Globe.hlsl. (Count float4 rows on BOTH sides after any edit.)
     struct GlobeCbData {
         float glo[4];
@@ -444,6 +458,7 @@ private:
     // M6j: the mesh-shader path.
     static constexpr uint32_t kMaxMeshlets = 65536;
     uint32_t m_meshletDrops = 0;    // M8h: leaves dropped at the record cap this frame
+    std::vector<LeafKey> m_leafKeys;   // step 23: this frame's emitted leaves (SeamTable)
     bool m_dropsReported = false;   // one report per drop episode, not per frame
     bool m_msPath = false;
     uint32_t m_meshStatWalks = 0;   // M9d: --mesh-stats prints on the 8th walk

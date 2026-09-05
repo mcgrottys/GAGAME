@@ -937,6 +937,18 @@ float4 PsMain(VsOut i) : SV_Target {
                 const float curlN = clamp(mvL.y, -1.0f, 1.0f);
                 lc = float3(saturate(curlN), divN * 0.9f, saturate(-curlN));
             }
+        } else if (lensId == 8) {
+            // Step 23 -- THE SHELL LENS: R = the fragment's central angle from the eye's
+            // sub-point (radians), G/B = the meshlet record (hi/lo byte), A = 7 marks a
+            // surface fragment against the sky pass and 9 a SEAM BAND fragment
+            // (GlobeMesh.hlsl BandDepth). A closed shell never shows a fragment beyond the
+            // horizon angle acos(R/r) plus the relief's reach -- a pixel that does is a ray
+            // that left the shell through a crack and landed on the far side -- and a band
+            // is visible only where the shell had no coverage of its own: the hole map.
+            const float caL = acos(clamp(dot(upT, normalize(gCamAbs.xyz)), -1.0f, 1.0f));
+            const uint midL = i.mid & 0xFFFFu;
+            return float4(caL, float(midL >> 8u), float(midL & 255u),
+                          (i.mid & 0x80000000u) ? 9.0f : 7.0f);
         } else if (lensId == 2) {
             const float2 duvL = CsWindowUv(up);
             if (all(duvL > 0.0f) && all(duvL < 1.0f)) lc = float3(duvL, 0.0f);

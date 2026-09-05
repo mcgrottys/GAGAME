@@ -881,6 +881,16 @@ void WalkNode(const WalkParams& wp, uint64_t& nodes, int face, int level, double
         const double horizon = std::acos(std::clamp(R / r, 0.0, 1.0));
         const double nodeAng = arc * 0.80 / R;   // generous half-diagonal
         if (ang > horizon + nodeAng + 0.02) return;
+    } else if (wp.probeCullFar) {
+        // Step 23 probe: the same test below 10 km with a 0.1 rad (640 km) margin -- nothing
+        // visible from under 10 km lies beyond it, so a pixel this cull changes is a ray that
+        // left the shell.
+        const double cosA = (dir[0] * wp.camPlanet[0] + dir[1] * wp.camPlanet[1] +
+                             dir[2] * wp.camPlanet[2]) / r;
+        const double ang = std::acos(std::clamp(cosA, -1.0, 1.0));
+        const double horizon = std::acos(std::clamp(R / r, 0.0, 1.0));
+        const double nodeAng = arc * 0.80 / R;
+        if (ang > horizon + nodeAng + 0.10) return;
     }
 
     // Frustum cull: bounding sphere in camera-relative space. Radius covers the node's ground
@@ -1122,6 +1132,90 @@ void GlobeLayer::EmitMeshlets(int face, double u0, double v0, double size, doubl
     }
 }
 
+// Step 23 (docs/PERF_EXPERIMENT.md): THE SEAM TABLE -- which leaf edges meet a coarser
+// leaf, so GlobeMesh.hlsl can close those seams (its level bands; docs/ALGEBRA.md priors
+// 28).
+//
+// MEASURED (--lens shell at key7km, settled): the seven crack pixels through which the
+// far side of the planet showed all lie on level seams -- a leaf against a neighbour one
+// level coarser. The walk is the only thing that knows the leaf set, so it names those
+// neighbours here: per boundary record whose outer edge meets a coarser leaf, that leaf's
+// record across the edge and which half of the coarse edge this record meets. A same-level
+// neighbour needs no word (the fine path's hairline bands are unconditional on the W and N
+// sides, the classic path's same-level seams are coincident by construction), a finer
+// neighbour owns the seam from its side, and a neighbour on another cube face is not in
+// the table -- face seams stay open (none in the five gate poses; a later item). Only a
+// leaf's two OUTER edges (the ones on its parent's boundary) can face a coarser leaf: across
+// an inner edge the neighbour is a sibling, and the coarser candidate there is the parent,
+// which split. Cost: one sort of ~650 keys and two binary searches per leaf.
+namespace {
+uint32_t SeamWord(uint32_t rec, uint32_t rel, uint32_t off) {
+    return (rec & 0xFFFFu) | (rel << 16) | (off << 18);
+}
+}  // namespace
+
+void GlobeLayer::SeamTable() {
+    constexpr uint32_t kCoarser = 1u;
+    std::sort(m_leafKeys.begin(), m_leafKeys.end(),
+              [](const LeafKey& a, const LeafKey& b) { return a.key < b.key; });
+    auto find = [&](int face, int level, int64_t ix, int64_t iy) -> int64_t {
+        if (level < 0 || ix < 0 || iy < 0 || ix >= (int64_t(1) << level) ||
+            iy >= (int64_t(1) << level)) {
+            return -1;
+        }
+        const uint64_t key = (static_cast<uint64_t>(face) << 58) |
+                             (static_cast<uint64_t>(level) << 52) |
+                             (static_cast<uint64_t>(ix) << 26) | static_cast<uint64_t>(iy);
+        const auto it = std::lower_bound(
+            m_leafKeys.begin(), m_leafKeys.end(), key,
+            [](const LeafKey& a, uint64_t k) { return a.key < k; });
+        return (it != m_leafKeys.end() && it->key == key) ? int64_t(it->base) : -1;
+    };
+    for (const LeafKey& lk : m_leafKeys) {
+        const int face = static_cast<int>(lk.key >> 58);
+        const int level = static_cast<int>((lk.key >> 52) & 63u);
+        const int64_t ix = static_cast<int64_t>((lk.key >> 26) & ((uint64_t(1) << 26) - 1));
+        const int64_t iy = static_cast<int64_t>(lk.key & ((uint64_t(1) << 26) - 1));
+        MeshletRec* r = m_meshlets.data() + lk.base;   // r[my * 4 + mx]
+        // The W or E seam, whichever is the outer one (ix even: W): this leaf's column mx
+        // 0 / 3 against the coarse leaf's column 3 / 0. A coarser neighbour's edge is two
+        // leaves long; this leaf is its lower half when iy is even. Our meshlet row my then
+        // meets its row 2*half + my/2 at cell offset 4*(my&1). One leaf per place, so a
+        // hit at level - 1 is the neighbour and a miss means a same-level or finer one.
+        {
+            const int side = static_cast<int>(ix & 1);   // 0: W is outer, 1: E is outer
+            const int64_t nx = side == 0 ? ix - 1 : ix + 1;
+            const int mx = side == 0 ? 0 : 3;
+            const int nmx = side == 0 ? 3 : 0;
+            const int64_t coarser = find(face, level - 1, nx >> 1, iy >> 1);
+            if (coarser >= 0) {
+                const int half = static_cast<int>(iy & 1);
+                for (int my = 0; my < 4; ++my) {
+                    const int cmy = 2 * half + my / 2;
+                    r[my * 4 + mx].seamX = SeamWord(
+                        static_cast<uint32_t>(coarser) + cmy * 4 + nmx, kCoarser, my & 1);
+                }
+            }
+        }
+        // The N or S seam (iy even: N), the same way: row my 0 / 3 against row 3 / 0.
+        {
+            const int side = static_cast<int>(iy & 1);
+            const int64_t ny = side == 0 ? iy - 1 : iy + 1;
+            const int my = side == 0 ? 0 : 3;
+            const int nmy = side == 0 ? 3 : 0;
+            const int64_t coarser = find(face, level - 1, ix >> 1, ny >> 1);
+            if (coarser >= 0) {
+                const int half = static_cast<int>(ix & 1);
+                for (int mx = 0; mx < 4; ++mx) {
+                    const int cmx = 2 * half + mx / 2;
+                    r[my * 4 + mx].seamY = SeamWord(
+                        static_cast<uint32_t>(coarser) + nmy * 4 + cmx, kCoarser, mx & 1);
+                }
+            }
+        }
+    }
+}
+
 // Step 5: everything the node walk reads, captured. SetView fills one for the real walk
 // (then adds the five planes); StartPredictWalk fills one for the prefetch walk and moves
 // only the eye -- the planet-frame position and the pixel angle stay the REAL camera's,
@@ -1163,7 +1257,21 @@ GlobeLayer::WalkParams GlobeLayer::CaptureWalk(const Camera& cam, float viewport
     wp.detSize = m_detSize;
     wp.det17Org[0] = m_det17Org[0];
     wp.det17Org[1] = m_det17Org[1];
+    wp.probeCullFar = probeCullFar;
     return wp;
+}
+
+void GlobeLayer::DumpMeshlets(const std::wstring& path) const {
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"wb") != 0 || !f) {
+        Log("[globe] dump-meshlets %S : FAILED (open)", path.c_str());
+        return;
+    }
+    const size_t n = m_meshlets.size();
+    const bool ok = fwrite(m_meshlets.data(), sizeof(MeshletRec), n, f) == n;
+    fclose(f);
+    Log("[globe] dump-meshlets %S : %s (%zu records x %zu B)", path.c_str(),
+        ok ? "ok" : "FAILED", n, sizeof(MeshletRec));
 }
 
 // M6e screw-prefetch, step 5: the same walk under the PREDICTED pose, posted to the worker.
@@ -1297,6 +1405,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
 
     m_nodes.clear();
     m_meshlets.clear();
+    m_leafKeys.clear();
     m_meshletDrops = 0;
     // The real walk's leaf: the wants straight to the manager (this frame's stamp), then the
     // draw records. The prefetch walk's leaf (PredictWorker) records rects instead; both run
@@ -1315,7 +1424,19 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         const float morphStart = static_cast<float>(arc * kLodFactor * 1.35);
         const float morphEnd = static_cast<float>(arc * kLodFactor * 1.95);
         if (m_msPath) {
+            const size_t base = m_meshlets.size();
             EmitMeshlets(face, u0, v0, size, arc, morphStart, morphEnd);
+            // Step 23: the seam table's key. size is 2^-level and u0, v0 are multiples of
+            // it, so the level and the grid position are exact integers.
+            if (m_meshlets.size() == base + 16) {
+                const int level = static_cast<int>(std::lround(-std::log2(size)));
+                const uint64_t ix = static_cast<uint64_t>(std::llround(u0 / size));
+                const uint64_t iy = static_cast<uint64_t>(std::llround(v0 / size));
+                m_leafKeys.push_back(LeafKey{(static_cast<uint64_t>(face) << 58) |
+                                                 (static_cast<uint64_t>(level) << 52) |
+                                                 (ix << 26) | iy,
+                                             static_cast<uint32_t>(base)});
+            }
             return;
         }
         NodeData nd{};
@@ -1328,7 +1449,19 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         nd.morphEnd = morphEnd;
         m_nodes.push_back(nd);
     };
-    for (int f = 0; f < 6; ++f) WalkNode(m_wp, walkNodes, f, 0, 0.0, 0.0, 1.0, leaf);
+    int camFace = 0;
+    if (probeFaceFirst) {
+        // Step 23 probe: the eye's own cube face first (face order +x -x +y -y +z -z).
+        const double ax = std::abs(m_wp.camPlanet[0]), ay = std::abs(m_wp.camPlanet[1]),
+                     az = std::abs(m_wp.camPlanet[2]);
+        const int axis = (ax >= ay && ax >= az) ? 0 : (ay >= az ? 1 : 2);
+        camFace = axis * 2 + (m_wp.camPlanet[axis] < 0.0 ? 1 : 0);
+    }
+    for (int i = 0; i < 6; ++i) {
+        const int f = probeFaceFirst ? (camFace + i) % 6 : i;
+        WalkNode(m_wp, walkNodes, f, 0, 0.0, 0.0, 1.0, leaf);
+    }
+    if (m_msPath) SeamTable();
     // M8h: a dropped leaf is a hole. Report on the transition (once per episode), with
     // the count -- the fix is a coarser view or a bigger kMaxMeshlets, not silence.
     if (m_meshletDrops > 0 && !m_dropsReported) {
