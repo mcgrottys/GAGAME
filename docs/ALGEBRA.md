@@ -1031,6 +1031,33 @@ model (or a textbook) would hold → what this project measured → the law now 
     against the plain order at key7km, and the 8-pixel |d| = 1 cluster at (992..1002,
     864..873) flips between two same-order runs -- the SWE's run-to-run state, not a seam.
 
+29. **A cull that only removes wants still moves the picture, through the streamer.** Prior
+    (perf plan step 24, the reason the low-altitude horizon cull was declared exact): the
+    cull drops nodes the eye cannot reach, so its want set is a strict SUBSET of today's and
+    the shading law is untouched; a settled still can therefore only be identical, and the
+    flight follows. The stills held (step 24, `--settle-exact --settle-clear-churn`, both
+    binaries in one session): bird 0 px, globe 0 px, helm 0 px off its horizon strip,
+    key7km bit-identical to a previous-binary render, while the want sets fell 8-12 %
+    (helm 11367 -> 10193, key7km 8038 -> 7099, bird 9176 -> 8389; globe 5368 -> 5368 and
+    its meshlet records byte-identical, the cull above 10 km being today's threshold
+    tabulated). THE RAIL DID NOT: per-second YAVG 0.587/255 at 26 s against a 0.020/255
+    A/A floor for the same binary across sessions, no new-only tblend spike. The frames say
+    why. Freed of the far hemisphere the streamer reaches, by frame 760 of the storm rail,
+    a residency state the unculled binary never reaches in the same flight -- the ground is
+    a full mip finer -- and that state carries garbage: straight-edged quadrilaterals of
+    dark noise, the size and shape of a z17 detail-window tile in perspective (frame 766:
+    (1180..1300, 540..670), the marina at (700..820, 700..800), (150..450, 780..900)), on
+    an otherwise sharper picture. Nothing is fetched (`fetches 0`: the archive answers) and
+    the pool never nears its cap (0.23 GB), so it is the landing schedule, not a budget.
+    Law: the want set is an input to the STREAMER, not only to the shading, so "fewer wants
+    can only help" is a claim about residency and is gated on the rail, never on the settled
+    stills; a step that changes the want set belongs behind the residency fixes (perf plan
+    step 27), not in front of them. The camera-face-first order, which changes the emission
+    ORDER and leaves the want set alone (identical want counts and the same 2760215
+    predicted calls, in a rotated order), is clean on the same rail -- YAVG 0.018/255,
+    bit-identical at all four settled poses -- and ships by itself: `globe.mesh` 3.082 ->
+    2.718 ms whole-rail and 4.981 -> 4.472 over the helm phase, p95 5.297 -> 4.801.
+
 ## verification — The gate map: which algebra is pinned where
 
 - `pga` — motors: rotation, composition, rigidity, screw log/exp, slerp.

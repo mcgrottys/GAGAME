@@ -152,6 +152,7 @@ public:
         double camPos[3] = {};      // the eye in the tangent frame (the predicted one here)
         double camPlanet[3] = {};   // the REAL eye in the planet frame: the horizon test's r
                                     // (PredictWants never moved it; kept so, to the bit)
+        int camFace = 0;            // step 24: the eye's own cube face, walked first
         double frustum[6][4] = {};  // camera-relative planes; planeCount 0 = no cull
         int planeCount = 0;
         float reliefExagg = 1.0f;
@@ -191,7 +192,6 @@ public:
     bool MeshPathActive() const { return m_msPath; }
     bool stencilOverlay = false;    // M6i: --stencil, the GIS alignment overlay
     bool probeCullFar = false;      // step 23 probe: horizon cull at every altitude (+0.1 rad)
-    bool probeFaceFirst = false;    // step 23 probe: the eye's cube face walked first
     void DumpMeshlets(const std::wstring& path) const;   // step 23 probe: the records drawn
     int debugLens = 0;              // M7m: --lens (1 worldxz, 2 winuv, 3 mip, 4 ring,
                                     // 7 velgrad -- the derived div/curl bank)

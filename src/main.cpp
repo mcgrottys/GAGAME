@@ -90,7 +90,6 @@ struct Options {
     bool dumpFibers = false;          // --dump-fibers: bank planes as PNGs + range gate
     int lens = 0;                     // --lens worldxz|winuv|mip|ring: value-as-color
     bool probeCullFar = false;        // step 23 probe: cull beyond the horizon at every altitude
-    bool probeFaceFirst = false;      // step 23 probe: the eye's cube face walked first
     std::wstring dumpMeshlets;        // step 23 probe: the dump frame's meshlet records
     bool dumpWater = false;           // --dump-water-state: inlet fields for proofs/
     bool sliceOn = false;             // --slice d: the cutaway plane (M7o)
@@ -316,7 +315,6 @@ Options ParseArgs(int argc, char** argv) {
                      : n == "waterdata" ? 6 : n == "velgrad" ? 7 : n == "shell" ? 8 : 1;
         }
         else if (a == "--probe-cull-far") o.probeCullFar = true;
-        else if (a == "--probe-face-first") o.probeFaceFirst = true;
         else if (a == "--dump-meshlets") o.dumpMeshlets = Widen(next("meshlets.bin").c_str());
         else if (a == "--dump-water-state") o.dumpWater = true;
         else if (a == "--slice") {
@@ -2700,7 +2698,6 @@ int main(int argc, char** argv) {
             globe->stencilOverlay = opt.stencil;
             globe->debugLens = opt.lens;
             globe->probeCullFar = opt.probeCullFar;
-            globe->probeFaceFirst = opt.probeFaceFirst;
             // M9h: the grad(flow) bank plus the grid it lives on, for --lens velgrad. The
             // SWE solver owns the bank; the bathy model owns the world mapping.
             if (swe.Ready() && bathy.Ready()) {

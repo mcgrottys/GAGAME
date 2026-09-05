@@ -1236,6 +1236,14 @@ GlobeLayer::WalkParams GlobeLayer::CaptureWalk(const Camera& cam, float viewport
     for (int i = 0; i < 3; ++i) {
         wp.camPlanet[i] = m_frameU[i] * ry + m_frameE[i] * cam.px + m_frameN[i] * cam.pz;
     }
+    // Step 24: the eye's own cube face (face order +x -x +y -y +z -z), named once per frame
+    // so the real walk and the prefetch walk emit the same subtree first.
+    {
+        const double ax = std::abs(wp.camPlanet[0]), ay = std::abs(wp.camPlanet[1]),
+                     az = std::abs(wp.camPlanet[2]);
+        const int axis = (ax >= ay && ax >= az) ? 0 : (ay >= az ? 1 : 2);
+        wp.camFace = axis * 2 + (wp.camPlanet[axis] < 0.0 ? 1 : 0);
+    }
     wp.planeCount = 0;
     wp.reliefExagg = reliefExagg;
     wp.maxDepth = m_msPath ? 18 : kMaxDepth;   // M6j/M8h, see WalkNode
@@ -1321,7 +1329,10 @@ void GlobeLayer::PredictWorker() {
             };
             LeafWants(wp, face, u0, v0, size, arc, dist, emit);
         };
-        for (int f = 0; f < 6; ++f) WalkNode(wp, nodes, f, 0, 0.0, 0.0, 1.0, leaf);
+        // Step 24: the same face order as the real walk -- one geometry, one order.
+        for (int i = 0; i < 6; ++i) {
+            WalkNode(wp, nodes, (wp.camFace + i) % 6, 0, 0.0, 0.0, 1.0, leaf);
+        }
         const uint64_t ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                          std::chrono::steady_clock::now() - t0).count());
         lk.lock();
@@ -1449,17 +1460,17 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         nd.morphEnd = morphEnd;
         m_nodes.push_back(nd);
     };
-    int camFace = 0;
-    if (probeFaceFirst) {
-        // Step 23 probe: the eye's own cube face first (face order +x -x +y -y +z -z).
-        const double ax = std::abs(m_wp.camPlanet[0]), ay = std::abs(m_wp.camPlanet[1]),
-                     az = std::abs(m_wp.camPlanet[2]);
-        const int axis = (ax >= ay && ax >= az) ? 0 : (ay >= az ? 1 : 2);
-        camFace = axis * 2 + (m_wp.camPlanet[axis] < 0.0 ? 1 : 0);
-    }
+    // Step 24 (docs/PERF_EXPERIMENT.md): THE EYE'S OWN CUBE FACE FIRST. The near surface
+    // records before the far subtrees, so early-Z rejects their fragments instead of shading
+    // them and letting GREATER overwrite. The node set, the want set and the records are the
+    // old ones -- only the order they are emitted in changes -- and that is exact only
+    // because step 23 closed the shell (docs/ALGEBRA.md priors 27/28: with the cracks open
+    // the same rotation moved a pixel). MEASURED: all four settled poses bit-identical
+    // across binaries, and [gpu] globe.mesh 3.082 -> 2.718 ms whole-rail, 4.981 -> 4.472
+    // over the helm phase, p95 5.297 -> 4.801 (fenced; the overlap bench reads the same
+    // -0.53 ms helm and takes the shipped loop 4.73 -> 4.30 ms).
     for (int i = 0; i < 6; ++i) {
-        const int f = probeFaceFirst ? (camFace + i) % 6 : i;
-        WalkNode(m_wp, walkNodes, f, 0, 0.0, 0.0, 1.0, leaf);
+        WalkNode(m_wp, walkNodes, (m_wp.camFace + i) % 6, 0, 0.0, 0.0, 1.0, leaf);
     }
     if (m_msPath) SeamTable();
     // M8h: a dropped leaf is a hole. Report on the transition (once per episode), with
