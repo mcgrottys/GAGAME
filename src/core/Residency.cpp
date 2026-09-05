@@ -159,11 +159,20 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
             t.stampBase[i] = acc;
             t.stampW[i] = t.tilings[i].WidthInTiles;
             acc += t.tilings[i].WidthInTiles * t.tilings[i].HeightInTiles;
+            // Step 4: Want()'s column scan rests on a plane's rect being exactly the parents
+            // of the finer plane's rect, which is true to the bit only when every plane is a
+            // power of two tiles on each axis (then u * tw halves exactly from plane to
+            // plane). Every tenant today is (16384-texel faces, 512x256 / 256x128 / 128x128
+            // tiles); a tenant that were not would silently change the request stream, so
+            // it is refused here instead.
+            const uint32_t w = t.tilings[i].WidthInTiles, h = t.tilings[i].HeightInTiles;
+            GA_CHECK((w & (w - 1)) == 0 && (h & (h - 1)) == 0 && w && h ? S_OK : E_UNEXPECTED);
         }
         t.stamp.assign(acc, 0u);
-        Log("[residency] %S: stamp array %u tiles (%.2f MB) -- Want()'s hot question leaves "
-            "the hash map",
-            name, acc, acc * 4.0 / 1048576.0);
+        t.slot.assign(acc, nullptr);   // step 4: the Tracked at the same index
+        Log("[residency] %S: stamp array %u tiles (%.2f MB) + slot array (%.2f MB) -- Want()'s "
+            "hot question and its tile both leave the map",
+            name, acc, acc * 4.0 / 1048576.0, acc * double(sizeof(Tracked*)) / 1048576.0);
     }
     Log("[residency] %S: %ux%u x%u %u mips, %u tiles virtual (%.0f MB), tile %ux%u",
         name, faceDim, faceDim, faces, mips, totalTiles, totalTiles / 16.0, shape.WidthInTexels,
@@ -354,7 +363,7 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
                 tr->lastSeen = m_frame;
                 tr->pool = b.slot;
                 tr->state = TileState::Mapped;
-                m_tracked[MakeKey(id, b.req)] = tr;
+                Track(tn, tr);
                 m_mapped.push_back(tr);
                 UpdateResidencyByte(tn, b.req, true);
             }
@@ -398,68 +407,97 @@ void ResidencyManager::Want(int tenant, uint32_t face, uint32_t mip, float u0, f
     // m_frame starts at 0 and is incremented in ProcessQueues, i.e. AFTER this walk -- so on the
     // very first frame a raw encoding would have made every untouched tile look already-stamped
     // and skipped the entire frame's wants.
-    const auto kStampFrame = [this] { return m_frame + 1u; };
+    const uint32_t stampFrame = m_frame + 1u;
     // The stamp this touch would write: frame in the high bits, predicted in bit 0.
-    const uint32_t myStamp = (kStampFrame() << 1) | (predicted ? 1u : 0u);
-    {
-        const uint32_t plane = face * t.mips + mip;
-        const auto& fine = t.tilings[plane];
-        const uint32_t tw = fine.WidthInTiles, th = fine.HeightInTiles;
-        const uint32_t x0 = static_cast<uint32_t>((std::max)(0.0f, u0) * tw);
-        const uint32_t y0 = static_cast<uint32_t>((std::max)(0.0f, v0) * th);
-        const uint32_t x1 = (std::min)(tw - 1, static_cast<uint32_t>((std::min)(0.9999f, u1) * tw));
-        const uint32_t y1 = (std::min)(th - 1, static_cast<uint32_t>((std::min)(0.9999f, v1) * th));
+    const uint32_t myStamp = (stampFrame << 1) | (predicted ? 1u : 0u);
+    // Fresh means this frame AND not a real touch arriving on a speculative tile -- that
+    // transition must still run, or a tile the prefetch asked for and the view then confirmed
+    // stays flagged speculative and is evicted on the wrong budget.
+    const auto fresh = [&](uint32_t s) {
+        return (s >> 1) == stampFrame && !(!predicted && (s & 1u));
+    };
+    // The rect in one plane's tiles. ONE arithmetic for every level: the column scan below
+    // rests on rect(m + 1) being exactly the parents of rect(m), which holds because every
+    // plane is a power of two tiles wide (faceDim and the tile shape both are), so u * tw at
+    // the coarser plane is u * tw / 2 to the bit and its floor is the finer floor >> 1.
+    struct Rect {
+        uint32_t x0, y0, x1, y1;
+    };
+    const auto rectAt = [&](uint32_t plane) {
+        const auto& ti = t.tilings[plane];
+        const uint32_t tw = ti.WidthInTiles;
+        const uint32_t th = ti.HeightInTiles;   // UINT16 in the D3D struct; widen once
+        Rect r;
+        r.x0 = static_cast<uint32_t>((std::max)(0.0f, u0) * tw);
+        r.y0 = static_cast<uint32_t>((std::max)(0.0f, v0) * th);
+        r.x1 = (std::min)(tw - 1, static_cast<uint32_t>((std::min)(0.9999f, u1) * tw));
+        r.y1 = (std::min)(th - 1, static_cast<uint32_t>((std::min)(0.9999f, v1) * th));
+        return r;
+    };
+
+    // Step 4 (docs/PERF_EXPERIMENT.md): THE COLUMN SCAN, BOTTOM-UP. The M9w test above only
+    // paid off when the WHOLE finest rect was fresh, which two leaves that share a parent but
+    // not a tile never satisfy; every other call re-read the stamp of every ancestor level for
+    // the whole rect. The column invariant is stronger than that test used it: a tile is
+    // stamped only after its entire ancestor column was stamped in the same call (the walk
+    // is coarse-to-fine and stops at a held level before stamping anything finer), and
+    // rect(m + 1) is exactly the parents of rect(m). So the first level, scanning from the
+    // requested mip UPWARD, whose rect is entirely fresh has nothing but fresh levels above
+    // it, and the walk below can start one level under it. That walk is the same code in
+    // the same order, so the request stream is unchanged; what is gone is the stamp reads of
+    // the levels above `top`. The predicted-to-real downgrade is exact for the same reason
+    // the M9w test was: a real touch never finds a real-stamped child under a speculative
+    // parent, because a call stamps its whole column with one flag and no tenant is touched
+    // predicted-then-real within one frame -- the frame's only predicted caller is
+    // PredictWants, which runs after SetView on the globe's tenants and never touches the
+    // wave or exposure tenants the later Wants ask for. A ring-held ancestor is unstamped by
+    // design and reads as not fresh, so it keeps the scan climbing, never stops it.
+    int top = -1;   // coarsest level with work; -1 = the whole column is fresh
+    for (uint32_t m = mip; m < t.mips; ++m) {
+        const uint32_t plane = face * t.mips + m;
+        const Rect r = rectAt(plane);
         bool allFresh = true;
-        for (uint32_t y = y0; y <= y1 && allFresh; ++y) {
-            const uint32_t* row = t.stamp.data() + t.stampBase[plane] + size_t(y) * t.stampW[plane];
-            for (uint32_t x = x0; x <= x1; ++x) {
+        for (uint32_t y = r.y0; y <= r.y1 && allFresh; ++y) {
+            const uint32_t* row =
+                t.stamp.data() + t.stampBase[plane] + size_t(y) * t.stampW[plane];
+            for (uint32_t x = r.x0; x <= r.x1; ++x) {
                 ++wantTouches;
-                const uint32_t s = row[x];
-                // Fresh means this frame AND not a real touch arriving on a speculative tile
-                // -- that transition must still run, or a tile the prefetch asked for and the
-                // view then confirmed stays flagged speculative and is evicted on the wrong
-                // budget.
-                if ((s >> 1) != kStampFrame() || (!predicted && (s & 1u))) {
+                if (!fresh(row[x])) {
                     allFresh = false;
                     break;
                 }
                 ++wantHits;
             }
         }
-        if (allFresh) return;
+        if (allFresh) break;
+        top = static_cast<int>(m);
     }
+    if (top < 0) return;
 
-    for (int m = static_cast<int>(t.mips) - 1; m >= static_cast<int>(mip); --m) {
+    for (int m = top; m >= static_cast<int>(mip); --m) {
         bool held = false;   // M9al: a request at this level waited for its parent
-        const auto& ti = t.tilings[face * t.mips + m];
-        const uint32_t tw = ti.WidthInTiles;
-        const uint32_t th = ti.HeightInTiles;   // UINT16 in the D3D struct; widen once
-        const uint32_t x0 = static_cast<uint32_t>((std::max)(0.0f, u0) * tw);
-        const uint32_t y0 = static_cast<uint32_t>((std::max)(0.0f, v0) * th);
-        const uint32_t x1 =
-            (std::min)(tw - 1, static_cast<uint32_t>((std::min)(0.9999f, u1) * tw));
-        const uint32_t y1 =
-            (std::min)(th - 1, static_cast<uint32_t>((std::min)(0.9999f, v1) * th));
-        for (uint32_t y = y0; y <= y1; ++y) {
-            const uint32_t plane = face * t.mips + static_cast<uint32_t>(m);
-            for (uint32_t x = x0; x <= x1; ++x) {
-                TileRequest r{face, static_cast<uint32_t>(m), x, y};
+        const uint32_t plane = face * t.mips + static_cast<uint32_t>(m);
+        const Rect r = rectAt(plane);
+        for (uint32_t y = r.y0; y <= r.y1; ++y) {
+            const size_t rowBase = size_t(t.stampBase[plane]) + size_t(y) * t.stampW[plane];
+            uint32_t* stampRow = t.stamp.data() + rowBase;
+            Tracked** slotRow = t.slot.data() + rowBase;
+            for (uint32_t x = r.x0; x <= r.x1; ++x) {
                 ++wantTouches;
-                // The stamp answers "already handled this frame" without touching the map at
+                // The stamp answers "already handled this frame" without touching the tile at
                 // all. It is written on every path below, so it stays exactly as true as
                 // lastSeen/predicted are -- they remain the authority for eviction; this is a
                 // cache of the one question the walk asks.
-                uint32_t& st = t.stamp[StampIndex(t, face, static_cast<uint32_t>(m), x, y)];
-                if ((st >> 1) == kStampFrame() && !(!predicted && (st & 1u))) {
+                uint32_t& st = stampRow[x];
+                if (fresh(st)) {
                     ++wantHits;
                     continue;
                 }
-                const Key k = MakeKey(tenant, r);
-                auto it = m_tracked.find(k);
-                if (it != m_tracked.end()) {
-                    it->second->lastSeen = m_frame;
-                    if (!predicted) it->second->predicted = false;
-                    st = (kStampFrame() << 1) | (it->second->predicted ? 1u : 0u);
+                // Step 4: the tile itself sits at the same index. No key, no tree.
+                if (Tracked* tr = slotRow[x]) {
+                    tr->lastSeen = m_frame;
+                    if (!predicted) tr->predicted = false;
+                    st = (stampFrame << 1) | (tr->predicted ? 1u : 0u);
                     continue;
                 }
                 // M9al: THE RING GATE. A new request below the coarsest level is admitted only
@@ -468,9 +506,9 @@ void ResidencyManager::Want(int tenant, uint32_t face, uint32_t mip, float u0, f
                 // answer is the same question one ring later. Nothing is lost, and no load slot
                 // is ever spent on a tile more than one level from being displayable.
                 if (ringLoads && m < static_cast<int>(t.mips) - 1) {
-                    const TileRequest pr{face, static_cast<uint32_t>(m + 1), x >> 1, y >> 1};
-                    const auto pit = m_tracked.find(MakeKey(tenant, pr));
-                    if (pit == m_tracked.end() || pit->second->state != TileState::Mapped) {
+                    const Tracked* parent =
+                        t.slot[StampIndex(t, face, static_cast<uint32_t>(m + 1), x >> 1, y >> 1)];
+                    if (!parent || parent->state != TileState::Mapped) {
                         held = true;
                         ++ringHeld;
                         ++ringHeldFrame;
@@ -480,16 +518,63 @@ void ResidencyManager::Want(int tenant, uint32_t face, uint32_t mip, float u0, f
                 st = myStamp;
                 auto tr = std::make_shared<Tracked>();
                 tr->tenant = tenant;
-                tr->req = r;
+                tr->req = TileRequest{face, static_cast<uint32_t>(m), x, y};
                 tr->lastSeen = m_frame;
                 tr->predicted = predicted;
-                m_tracked[k] = tr;
+                Track(t, tr);
                 m_seen.push_back(tr);
             }
         }
         // A level with a missing parent cannot have a mapped child: stop the column here and
         // let the next frame's walk resume one ring finer.
         if (held) return;
+    }
+}
+
+void ResidencyManager::Track(Tenant& t, const std::shared_ptr<Tracked>& tr) {
+    Tracked*& s = t.slot[StampIndex(t, tr->req.face, tr->req.mip, tr->req.x, tr->req.y)];
+    if (s) throw std::runtime_error("residency: Track() over a live slot");
+    s = tr.get();
+    tr->pos = static_cast<uint32_t>(t.tracked.size());
+    t.tracked.push_back(tr);
+}
+
+void ResidencyManager::Untrack(Tenant& t, Tracked* tr) {
+    Tracked*& s = t.slot[StampIndex(t, tr->req.face, tr->req.mip, tr->req.x, tr->req.y)];
+    if (s != tr) throw std::runtime_error("residency: Untrack() of a tile its slot does not hold");
+    s = nullptr;
+    const uint32_t i = tr->pos;
+    tr->pos = UINT32_MAX;   // before the list drops what may be the last reference
+    if (i + 1 != t.tracked.size()) {
+        t.tracked[i] = std::move(t.tracked.back());
+        t.tracked[i]->pos = i;
+    }
+    t.tracked.pop_back();
+}
+
+void ResidencyManager::AuditSlots() const {
+    size_t total = 0;
+    for (size_t k = 0; k < m_tenants.size(); ++k) {
+        const Tenant& t = m_tenants[k];
+        size_t live = 0;
+        for (const Tracked* p : t.slot) live += p != nullptr;
+        bool ok = live == t.tracked.size();
+        for (size_t i = 0; ok && i < t.tracked.size(); ++i) {
+            const Tracked* p = t.tracked[i].get();
+            ok = p->pos == i && p->tenant == static_cast<int>(k) &&
+                 t.slot[StampIndex(t, p->req.face, p->req.mip, p->req.x, p->req.y)] == p;
+        }
+        if (!ok) {
+            Log("[residency] SLOT AUDIT FAILED f%u %S: %zu live slots, %zu tracked", m_frame,
+                t.name.c_str(), live, t.tracked.size());
+            throw std::runtime_error("residency slot audit failed (see log)");
+        }
+        total += t.tracked.size();
+    }
+    if (m_frame == kSlotAuditFrames) {
+        Log("[residency] slot audit: %u frames, %zu tracked tiles across %zu tenants -- every "
+            "live slot is a list entry and every entry's slot points back at it",
+            m_frame, total, m_tenants.size());
     }
 }
 
@@ -561,14 +646,12 @@ void ResidencyManager::UpdateResidencyByte(Tenant& t, const TileRequest& r, bool
     t.resDirty = true;
 }
 
-void ResidencyManager::DropOne(const std::shared_ptr<Tracked>& tr) {
+bool ResidencyManager::DropOne(const std::shared_ptr<Tracked>& tr) {
     tr->dropped = true;
-    if (tr->state == TileState::Mapped) {
-        UpdateResidencyByte(m_tenants[tr->tenant], tr->req, false);
-        m_retiring.push_back({tr, m_frame});
-        auto mit = std::find(m_mapped.begin(), m_mapped.end(), tr);
-        if (mit != m_mapped.end()) m_mapped.erase(mit);
-    }
+    if (tr->state != TileState::Mapped) return false;
+    UpdateResidencyByte(m_tenants[tr->tenant], tr->req, false);
+    m_retiring.push_back({tr, m_frame});
+    return true;
 }
 
 void ResidencyManager::Invalidate(int tenant, const TileRequest& r) {
@@ -578,13 +661,24 @@ void ResidencyManager::Invalidate(int tenant, const TileRequest& r) {
 
 void ResidencyManager::Drop(int tenant) {
     Tenant& t = m_tenants[tenant];
+    // Step 4: this tenant's own list, in the order the map walked it (face, mip, y, x) so
+    // m_retiring and everything downstream of it -- the NULL-map calls, the freed pool slots
+    // -- come out in the sequence they always did. Every slot is cleared here; the list is
+    // taken whole, so this is O(dropped log dropped) plus ONE pass over m_mapped instead of a
+    // walk over every tenant's tiles and a std::find over m_mapped per dropped tile.
+    std::vector<std::shared_ptr<Tracked>> all;
+    all.swap(t.tracked);
+    std::sort(all.begin(), all.end(), [tenant](const auto& a, const auto& b) {
+        return MakeKey(tenant, a->req) < MakeKey(tenant, b->req);
+    });
     uint32_t mapped = 0, inflight = 0;
-    for (auto it = m_tracked.begin(); it != m_tracked.end();) {
-        auto& tr = it->second;
-        if (tr->tenant != tenant) { ++it; continue; }
-        if (tr->state == TileState::Mapped) ++mapped; else ++inflight;
-        DropOne(tr);
-        it = m_tracked.erase(it);
+    for (auto& tr : all) {
+        t.slot[StampIndex(t, tr->req.face, tr->req.mip, tr->req.x, tr->req.y)] = nullptr;
+        tr->pos = UINT32_MAX;
+        if (DropOne(tr)) ++mapped; else ++inflight;
+    }
+    if (mapped) {
+        std::erase_if(m_mapped, [](const std::shared_ptr<Tracked>& p) { return p->dropped; });
     }
     Log("[residency] %S: dropped %u mapped tiles (retire after %u frames) and %u in flight",
         t.name.c_str(), mapped, kEvictAgeFrames, inflight);
@@ -604,6 +698,9 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         lap0 = t;
     };
     ++m_frame;
+    // Step 4: the slot array's bring-up gate rides the trace flag for the first thousand
+    // frames (a full scan of every slot array; not a cost the bench ever pays).
+    if (traceRes && m_frame <= kSlotAuditFrames) AuditSlots();
     // M9bb: apply the invalidations the painting threads queued (one tile each).
     {
         std::vector<std::pair<int, TileRequest>> q;
@@ -611,11 +708,17 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             std::lock_guard<std::mutex> lk(m_invMx);
             q.swap(m_invQ);
         }
+        bool compact = false;
         for (const auto& [tenant, r] : q) {
-            auto it = m_tracked.find(MakeKey(tenant, r));
-            if (it == m_tracked.end()) continue;
-            DropOne(it->second);
-            m_tracked.erase(it);
+            Tracked* tr = Find(tenant, r);
+            if (!tr) continue;
+            Tenant& t = m_tenants[tenant];
+            const std::shared_ptr<Tracked> keep = t.tracked[tr->pos];   // outlives Untrack
+            Untrack(t, tr);
+            if (DropOne(keep)) compact = true;
+        }
+        if (compact) {
+            std::erase_if(m_mapped, [](const std::shared_ptr<Tracked>& p) { return p->dropped; });
         }
     }
     // M9ba: NULL-map the dropped tiles whose overlap window has passed; free their slots.
@@ -627,9 +730,8 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         // the coordinate: NULL-mapping it here would unmap the fresh tile -- which is exactly
         // what happened (the exposure page read zeros through a residency byte that said
         // "mapped"). Only free the old slot in that case.
-        auto cur = m_tracked.find(MakeKey(it->tile->tenant, it->tile->req));
-        const bool remapped = cur != m_tracked.end() && cur->second->state == TileState::Mapped &&
-                              cur->second.get() != it->tile.get();
+        const Tracked* cur = Find(it->tile->tenant, it->tile->req);
+        const bool remapped = cur && cur->state == TileState::Mapped && cur != it->tile.get();
         if (!remapped) {
             const D3D12_TILED_RESOURCE_COORDINATE coord{
                 it->tile->req.x, it->tile->req.y, 0,
@@ -825,9 +927,9 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             const Tenant& t = m_tenants[tile->tenant];
             bool parentOk = tile->req.mip + 1 >= t.mips;
             if (!parentOk) {
-                TileRequest p{tile->req.face, tile->req.mip + 1, tile->req.x / 2, tile->req.y / 2};
-                auto pit = m_tracked.find(MakeKey(tile->tenant, p));
-                parentOk = pit != m_tracked.end() && pit->second->state == TileState::Mapped;
+                const Tracked* parent = t.slot[StampIndex(
+                    t, tile->req.face, tile->req.mip + 1, tile->req.x / 2, tile->req.y / 2)];
+                parentOk = parent && parent->state == TileState::Mapped;
             }
             if (!parentOk) {
                 ++it;   // waits for its ancestor; sort order makes this rare
@@ -925,17 +1027,16 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
     // within the frame-overlap window (the GPU may still read them), or tiles with a mapped
     // child (the classic's pyramid invariant).
     auto childMapped = [&](const std::shared_ptr<Tracked>& tr) {
-        const Tenant& t = m_tenants[tr->tenant];
         if (tr->req.mip == 0) return false;
         for (uint32_t dy = 0; dy < 2; ++dy) {
             for (uint32_t dx = 0; dx < 2; ++dx) {
-                TileRequest c{tr->req.face, tr->req.mip - 1, tr->req.x * 2 + dx,
-                              tr->req.y * 2 + dy};
-                auto it = m_tracked.find(MakeKey(tr->tenant, c));
-                if (it != m_tracked.end() && it->second->state == TileState::Mapped) return true;
+                const TileRequest c{tr->req.face, tr->req.mip - 1, tr->req.x * 2 + dx,
+                                    tr->req.y * 2 + dy};
+                const Tracked* child = Find(tr->tenant, c);   // bounds-checked: a child
+                                                              // may lie past an odd grid
+                if (child && child->state == TileState::Mapped) return true;
             }
         }
-        (void)t;
         return false;
     };
 
@@ -974,8 +1075,8 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
                 ev.counts.push_back(1);
                 UpdateResidencyByte(vt, victim->req, false);
                 m_freePool.push_back(victim->pool);
-                m_tracked.erase(MakeKey(victim->tenant, victim->req));
-                m_mapped.erase(it);
+                Untrack(vt, victim.get());   // m_mapped's reference keeps it alive until
+                m_mapped.erase(it);          // this erase, as the map's did
                 freed = true;
                 break;
             }

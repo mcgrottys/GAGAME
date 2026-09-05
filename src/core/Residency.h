@@ -191,9 +191,8 @@ public:
     void Invalidate(int tenant, const TileRequest& r);
     // Debug: what the manager believes about one tile (state, pool slot, bytes it carried).
     std::string DebugTile(int tenant, const TileRequest& r) const {
-        auto it = m_tracked.find(MakeKey(tenant, r));
-        if (it == m_tracked.end()) return "untracked";
-        const auto& t = it->second;
+        const Tracked* t = Find(tenant, r);
+        if (!t) return "untracked";
         char b[160];
         snprintf(b, sizeof(b), "state %d pool %u data %zu loc %d dropped %d lastSeen %u retries %u",
                  int(t->state), t->pool, t->data.size(), int(t->loc.Valid()), int(t->dropped),
@@ -274,6 +273,7 @@ public:
     uint32_t InFlightReads() const { return static_cast<uint32_t>(m_inFlightReads.size()); }
 
 private:
+    struct Tracked;
     struct Tenant {
         std::wstring name;
         Com<ID3D12Resource> res;
@@ -289,15 +289,32 @@ private:
         // into scattered heap -- about 81 ns measured -- to retrieve a fact that fits in four
         // bytes and whose address is pure arithmetic on (face, mip, x, y).
         //
-        // So the answer moves into a dense array indexed by exactly that arithmetic. The map
-        // stays: it still owns the Tracked objects and everything the loader, mapper and
-        // evictor do with them. What leaves the map is the HOT QUESTION, which never needed it.
+        // So the answer moves into a dense array indexed by exactly that arithmetic. What
+        // leaves the map is the HOT QUESTION, which never needed it.
         //
         // Encoding: frame * 2 + predicted, so one 32-bit read carries both halves of the skip
         // test. Zero means never seen, which is why frames are counted from 1.
         std::vector<uint32_t> stamp;
         std::vector<uint32_t> stampBase;   // offset of each (face, mip) plane into stamp
         std::vector<uint32_t> stampW;      // that plane's width in tiles, for the row stride
+        // Step 4 (docs/PERF_EXPERIMENT.md): THE SLOT ARRAY BESIDE IT. The map the M9x note
+        // left in place was a std::map, not the unordered_map it described, and every touch
+        // the stamp did NOT answer still went through it: the first touch of a tile in a frame
+        // (~26.7k touches/frame of which 19.3k were stamp hits, step 3's storm bench), the
+        // ring gate's parent probe on every new tile, the mapper's parent check and the
+        // evictor's child check -- a red-black tree of every tracked tile of every tenant,
+        // walked at 100-200 ns a find. The same arithmetic that addresses the stamp addresses
+        // the Tracked itself: `slot` is laid out exactly like `stamp`, holds the tile's
+        // Tracked (null = untracked), and every probe becomes one array read. The index is a
+        // pure function of (face, mip, x, y) with no packing at all, which is what makes the
+        // M9bf key-aliasing class of bug impossible here. `tracked` OWNS this tenant's tiles
+        // (unordered; Tracked::pos is the entry's index, so removal is a swap with the back),
+        // so Drop() walks its own tenant instead of every tenant's map. Every erase path --
+        // Drop, an invalidation, an eviction -- goes through Untrack(), which clears the slot;
+        // a stale slot would alias a reused Tracked, so --res-trace audits slot against list
+        // for the first kSlotAuditFrames frames. 8 B per virtual tile (about 7 MB in all).
+        std::vector<Tracked*> slot;
+        std::vector<std::shared_ptr<Tracked>> tracked;
         TileProviderFn provider;
         // Residency map (base-tile granularity, per face): byte = finest resident mip * 16.
         GpuTexture resMap;
@@ -329,6 +346,7 @@ private:
         TileLoc loc;
         uint64_t stageOffset = 0;   // where its bytes landed in the device buffer
         bool dropped = false;       // M9ba: identity moved under it; discard when it lands
+        uint32_t pos = UINT32_MAX;  // step 4: its index in the tenant's `tracked` list
     };
     struct Retiring {
         std::shared_ptr<Tracked> tile;
@@ -337,7 +355,10 @@ private:
     std::vector<Retiring> m_retiring;   // M9ba: dropped-while-mapped, NULL-mapped after overlap
     std::mutex m_invMx;
     std::vector<std::pair<int, TileRequest>> m_invQ;   // M9bb: invalidations from paint threads
-    void DropOne(const std::shared_ptr<Tracked>& tr);
+    // Marks the tile dropped and, when it was mapped, retires it. Returns that -- the caller
+    // compacts m_mapped ONCE afterwards (erase_if on `dropped`, order kept) instead of a
+    // std::find per tile: Drop() of a 23-slice tenant was O(dropped x mapped).
+    bool DropOne(const std::shared_ptr<Tracked>& tr);
     // Index of one tile in a tenant's flat stamp array. Pure arithmetic -- no hashing, no
     // indirection, and neighbours in a rect land next to each other in memory, which is the
     // half of the win the instruction count does not show.
@@ -346,6 +367,25 @@ private:
         const uint32_t plane = face * t.mips + mip;
         return size_t(t.stampBase[plane]) + size_t(y) * t.stampW[plane] + x;
     }
+    // Step 4: the slot array's three operations. Find() is bounds-checked because its callers
+    // hand in coordinates the walk did not compute (an invalidation from a paint thread, the
+    // trace's DebugTile, the evictor's child probe on a grid whose width need not halve
+    // evenly); the walk itself indexes `slot` directly with coordinates it derived in range.
+    Tracked* Find(int tenant, const TileRequest& r) const {
+        if (tenant < 0 || size_t(tenant) >= m_tenants.size()) return nullptr;
+        const Tenant& t = m_tenants[tenant];
+        if (r.face >= t.faces || r.mip >= t.mips) return nullptr;
+        const auto& ti = t.tilings[r.face * t.mips + r.mip];
+        if (r.x >= ti.WidthInTiles || r.y >= ti.HeightInTiles) return nullptr;
+        return t.slot[StampIndex(t, r.face, r.mip, r.x, r.y)];
+    }
+    void Track(Tenant& t, const std::shared_ptr<Tracked>& tr);
+    void Untrack(Tenant& t, Tracked* tr);
+    // The bring-up gate for the slot array, under --res-trace: every non-null slot is a list
+    // entry and every list entry's slot points back at it. A mismatch is the M9bf class of
+    // bug (a stale index aliasing a reused Tracked) and aborts the run.
+    static constexpr uint32_t kSlotAuditFrames = 1000;
+    void AuditSlots() const;
 
     // M9ai: tiles whose bytes are in flight on the DirectStorage queue. They are MAPPED but not
     // yet claimed in the residency map, so the shader keeps sampling their coarser ancestor
@@ -362,6 +402,9 @@ private:
     // never loaded, the mapping order held every finer level, the water went flat. The wave
     // planes 8..16 had been aliasing each other and their neighbours since the 23-slice tenant.
     // tenant:8 | face:8 | mip:6 | y:21 | x:21 -- 2M tiles per axis is 2^27 texels at 64/tile.
+    // Step 4: no longer the map's key (the slot array is indexed without packing); it is the
+    // ORDER the map walked a tenant's tiles in, which Drop() keeps so that m_retiring, the
+    // NULL-map calls and the freed pool slots come out in the sequence they always did.
     using Key = uint64_t;
     static Key MakeKey(int tenant, const TileRequest& r) {
         return (static_cast<Key>(tenant) << 56) | (static_cast<Key>(r.face & 0xFFu) << 48) |
@@ -392,7 +435,7 @@ private:
     std::vector<Com<ID3D12Heap>> m_heaps;
     std::vector<uint32_t> m_freePool;
 
-    std::map<Key, std::shared_ptr<Tracked>> m_tracked;
+    // (The tracked set lives per tenant: Tenant::slot + Tenant::tracked, step 4.)
     std::deque<std::shared_ptr<Tracked>> m_seen;
     std::vector<std::shared_ptr<Tracked>> m_loading;
     std::vector<std::shared_ptr<Tracked>> m_mapped;
