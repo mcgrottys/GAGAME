@@ -182,3 +182,193 @@ branch: every step is gated bit-identical at settle against the previous binary.
   window at settled residency (`out/lens/key7km_waterdata.png`, lower left): a tile that never lands
   or a void marker served as absence. Steps 16-17 (materialized parents, any-rung sampling) would
   cover it with the coarse rung; it deserves its own look with `--res-trace` at that pose.
+
+## Results so far (checkpoint 2026-09-05, PR)
+
+Eight steps attempted, seven accepted, one reverted whole and one re-scoped after its premise was
+falsified by its own measurement. Every accepted step is one commit that can be reverted alone; the
+message body carries the numbers it was gated on. The run is still going (order below), so this
+section is a checkpoint, not a conclusion.
+
+### (a) The steps
+
+| step | commit | status | what changed | measured (the row the step targeted, before -> after) |
+|---|---|---|---|---|
+| 1 | `34be398` | pass (0 px) | instruments before optimizations: `[boot]` rev+argv, CPU brackets outside and inside RenderFrame, `--bench-overlap`, `gpu.gap`, `--settle-sync`, `--dump-hdr`, `tools/raildiff.py` | the unbracketed helm residual 0.60 ms -> 0.007 ms (sum of the twelve 4.612 vs pre-RenderFrame 4.619); the pipelined loop measured for the first time: 5.02 ms |
+| 2 | `1a8e74b` | pass | the dead weather-mirror readback deleted (lazy `Query`) -- two full-field readbacks with a `WaitIdle` drain each, every 2 sim-s, feeding no pixel | weather.Update 0.358/0.374 -> 0.044/0.057 ms (whole/helm); the 61-frame comb 22.4 ms x 19/19 isolated peaks -> 2.8 ms x 0/19; loop p99 27.5 -> 16.0, max 40.5 -> 21.2 |
+| 3 | `6adf6fc` | pass | the scene hot-reload `_stat64` off the frame: a thread in `ReadDirectoryChangesW` on the resolved `data/` directory raises one atomic flag | scene hot-reload stat 0.133/0.192 -> 0.000/0.000 ms; pre-RenderFrame total 2.496/4.358 -> 2.369/4.119 |
+| 4 | `f1cbe53` | pass | the residency tracked set leaves `std::map`: a per-tenant slot array on the stamp array's layout, a bottom-up column stamp scan, per-tenant Drop lists, one `erase_if` over `m_mapped` | globe.SetView 1.471/3.388 -> 1.074/2.292; PredictWants 0.395/0.699 -> 0.241/0.373; wave-plane Wants 0.371/0.530 -> 0.074/0.082; pre-RenderFrame 2.518/4.789 -> 1.631/2.856; loop 8.75 -> 7.99 |
+| 5 | `cfc8e50` | pass | the screw-predicted six-face prefetch walk runs as pure geometry on a worker; the main thread replays its rects through `Want()` in DFS order, so the residency manager sees the identical stream | PredictWants 0.350/0.543 -> 0.167/0.247; pre-RenderFrame 2.177/3.663 -> 1.748/3.099; loop 8.96 -> 8.24; the frame%3 comb 0.915 -> 0.270 whole and 1.449 -> 0.882 helm; predicted stream FNV-1a `3e40fd73c3bf3da6` on the worker, under `--predict-inline` and from the in-place walk |
+| 6 | none -- reverted | FAIL (fidelity) | the eye's polar plane as the horizon cull at every altitude, camera face first, discard-free shipped PSO, MsMain per-vertex dedupe | the largest GPU move of the run -- globe.mesh 2.716/4.006 -> 2.071/2.721 (-1.285 ms at the helm) -- but key7km settled is VISIBLE by seven single pixels: the shell is not watertight and those rays were landing on the antipodal surface the cull removes. Reverted whole; `out/regress_step6.mp4` recorded |
+| 21 (attempt 1) | none -- reverted | FAIL (premise) | `--settle-hold N` + the churn atlas frozen during a hold, gated at 0 px between two hold lengths | the gate's premise is false: bird rendered TWICE at the SAME hold (drain + 300, both quiet at 56 frames, byte-identical logs) differs by 12.861 % of pixels. The churn freeze reached the GPU (`[gpu]` sea.churn p50 0.178 -> 0.000 ms on held frames) and is simply not the term |
+| 21 (attempt 2) | `7879a2b` | pass | re-scoped to its landable parts: `--settle-hold N` counted, the churn frozen for exactly the held frames, raildiff's verdict = continuity + luma with SSIM reported and never gating | proof of wire: `[gpu]` sea.churn mean 0.184 / p50 0.178 ms over 240 unheld frames vs mean 0.101 / p50 0.000 over the 540 of a 240 + 300 render. No saving claimed (fenced RENDER 6.24 / loop 7.72; predicted stream hash unchanged) |
+| 25 | `c92ed30` | pass | `--settle-exact`: hold until the resident set IS the walk's want set (stale tiles dropped through the retire path, the pool grown to the want set for the hold), with a per-tenant ledger and an FNV-1a of the mapped set; `--settle-clear-churn` | two `--settle-sync` birds of one binary differ by 0-12 % of the pixels (21.7 % across binaries); under `--settle-exact` the bird is EXACT in 202-216 held frames and two runs are bit-identical (0 px). Globe 0 px in 619-737 frames, key7km 0 px with the churn cleared, the helm EXACT in 243-252 frames where `--settle-sync` capped at 3000 |
+| 22 | in flight | running | step 6's three exact sub-mechanisms alone -- face-first walk, discard-free shipped PSO (`--slice` behind a define), MsMain per-vertex `ComposedHeight` dedupe | -- |
+
+Tooling commits alongside them: `df7c911` (`tools/perf/` -- the two workflow scripts and the resume
+recipe), `c658a22` (the artifact diagnosis above), `2bf7f4a` (imgdiff `--ignore-rows`), `c5f8cf2`,
+`d55d3e9`, `969d754`, `396f7fd`, `b8d0a82`, `a9e474d` (the gate's revisions and the model routing).
+
+### (b) The headline numbers
+
+Baseline = `out/instr_bench.log`, the instrumented but unchanged binary. Latest accepted bench =
+step 25's (`out/step25/attempt1/bench.log` and `bench_overlap.log`, rev `7879a2b`-dirty). Storm rail,
+`--rail-flood --storm 3.0,10,95 --start 2026-08-28T19:30:00`, 1600x900, 1200 frames.
+
+| quantity | baseline | latest accepted |
+|---|---|---|
+| `[rail]` RENDER mean (fenced: CPU record + a serializing WaitIdle) | 6.42 ms (155.7 fps) | 6.80 ms (147.1 fps) |
+| `[rail]` loop mean (fenced) | 9.48 ms | 8.45 ms |
+| outside RenderFrame, whole / helm | 3.067 / 5.025 ms | 1.652 / 2.733 ms |
+| GPU whole-frame, whole / helm | 3.804 / 5.964 ms | 3.629 / 5.692 ms |
+| GPU globe.mesh, whole / helm | 2.837 / 4.226 ms | 2.703 / 4.015 ms |
+| `--bench-overlap` loop mean (the shipped pipelined frame) | not measurable before step 1 | 4.52 ms (5.02 at step 1); `[perf]` 4.10 ms, 244 fps headless |
+
+Every accepted step so far is CPU-side, and the whole saving is in the row that says so: **outside
+RenderFrame fell 3.07 -> 1.65 ms on the whole flight and 5.03 -> 2.73 ms at the helm.** The fenced
+`[rail]` RENDER mean did not move and was never supposed to -- it brackets record + fence + a
+serialized GPU, and none of that is where the work was. The GPU rows moved by 3-5 %; no accepted
+step touched a GPU pass, so that is the machine, not the code.
+
+The owner's own windowed measurement (screen on, the steps 1-4 binary, helm pose, `--gpu-time`):
+
+```
+[perf] mean frame 7.15 ms over 590 frames (140 fps) [vsync]
+[present] \\.\DISPLAY1 ... at 165 Hz: 593 presents shown over 698 refreshes
+          = 0.850 presents/refresh (~140.2 fps perceived)
+GPU whole-frame 3.93 ms at the helm pose, windowed
+```
+
+so the cross-adapter present path is not the cap it was feared to be (the earlier "30 fps" was the
+screen-off power state plus the 22 ms mirror stall this run deleted).
+
+**The caveat that governs every number above.** This machine drifts 8-10 % run to run on rows the
+code never touched: step 1 measured every GPU-only row 8-10 % *faster* than the baseline log on a
+command stream proven identical (globe.mesh helm 4.23 -> 4.00 with the globe still 0 px), and step
+6's bench sat ~8 % *slow* across untouched rows (waterbank tile list helm 1.157 -> 1.545). Only a
+same-session comparison against the previous accepted binary is like for like, and that is how every
+step above was actually gated -- the baseline-to-latest column is orientation, not evidence.
+
+### (c) Found on the way
+
+Defects and facts this run established, none of them introduced by it:
+
+- **The surface shell is not watertight.** Seven single-pixel cracks at the 7 km pose --
+  (1572,50) (506,237) (571,246) (377,322) (1362,352) (1384,355) (1525,374) -- have no triangle
+  covering them, and the ray through such a crack leaves the shell and lands on the ANTIPODAL
+  surface (a -45 deg ray exits at ~90 deg of central angle, which no useful horizon margin retains).
+  This is why step 6 failed: culling the far side removes those accidental backdrops. The six
+  neighbours of each crack are byte-identical in both builds. Step 23 fixes them, declared visible
+  by exactly those pixels; step 24 then re-gates the cull.
+- **The settled still was never reproducible.** `--settle-sync`'s quiet test (pending 0, nothing in
+  flight, nothing ring-held) is necessary and not sufficient: a request the ring gate holds and the
+  walk then stops asking for is neither pending nor resident, so the test fires over a race-decided
+  resident set. Two `--settle-sync` renders of ONE binary at the SAME hold length differ by ~13 % of
+  the water pixels; a data-lens A/A shows whole tiles resident at different mips. `--settle-exact`
+  (step 25) makes the still a function of the pose and the data instead.
+- **The lost batch tail at the pool cap.** The bird pose wants 9176 tiles (573 MB) against
+  `kPoolCapTiles` 8192 (512 MB). At the cap `MapAndFill`'s evictor finds no victim, breaks out of
+  the batch, and the batch's remaining tiles -- already erased from `m_loading` by the gather -- are
+  LOST in state Loaded, tracked and unqueued until something invalidates them: 988 `wave.field`
+  mip-0 tiles in exactly that state on the first exact run's ledger. Permanent holes at that mip,
+  and which ~984 tiles lose is landing order. Step 27 returns the unmappable tail to the loading
+  queue and reports the cap; the owner decided the budget with it: `kPoolCapTiles` -> 16384 (1 GB).
+  (2720 of the 9176 are the 17 RGBA8 wave planes at mip 0; packing them to 5 stays a later item.)
+- **The SWE solver is not reproducible over real frames.** Two `--settle-exact` runs at the ebb helm
+  (`--dump-water-state`): level differs on 65 % of cells within 1.5 cm, u/v on 38-47 % within
+  3 cm/s; bed and shadow identical. Candidates are the substep-budget drift clamp in
+  `SweSolver::Record` dropping steps on a slow frame, or a non-deterministic GPU reduction. Step 26,
+  and a prerequisite for every fiber gate and for the pop-in track.
+- **The windowed exit crash.** Every windowed run exits `0xC0000409` after printing `done` --
+  pre-existing (main's Sep 2 binary does it too), unfixed, and out of this run's scope.
+- **The helm's 149 never-draining prefetch requests** (recorded in steps 4 and 5 as "waiting on
+  parents no walk asks for") are the predicted walk's FAR HEMISPHERE: step 6's cull drained them,
+  and step 25's exact turn drops them as stale pending tiles.
+- **The horizon strip, rows 430-432, is the one residual outside residency.** Under `--settle-exact`
+  the helm's A/A floor is 65 px (max |d| 15) without the churn cleared and 106 px (max 23) with it,
+  ALL on those three rows, with every tenant's mapped-set hash equal -- so no residency tile can be
+  named for it. `tools/imgdiff.py --ignore-rows 425:437` takes the verdict off the strip and prints
+  the strip's own numbers beside it.
+- **`--lens bed` is not a parser token** -- it resolves to lens 1, `worldxz`. A real bed lens is a
+  small follow-up; every "bed lens" result quoted in this run is therefore a `worldxz` lens.
+
+### (d) The harness that now exists
+
+| flag / tool | what it does |
+|---|---|
+| `--gpu-time` | D3D12 timestamp spans per pass and sub-pass, resolved a frame later so nothing stalls; adds the `gpu.gap` row (idle between one frame's closing stamp and the next's opening one) |
+| `--no-vsync` | windowed: ALLOW_TEARING swapchain + `Present(0, ALLOW_TEARING)` |
+| `--bench-overlap` | `--bench` without the per-frame `WaitIdle`: the shipped pipelined frame, loop = max(CPU, GPU). The `[rail]` header says which bench it is |
+| `--settle-sync` | holds the dump instant until residency is quiet (pending 0, no in-flight read, nothing ring-held; cap 3000 held frames, logged loudly). Necessary, not sufficient -- see (c) |
+| `--settle-hold N` | holds exactly N frames past the dump instant whatever residency is doing; composes with the others as "drain first, then at least N"; the exit line names the rule that held it |
+| `--settle-exact` | holds until the resident set IS the walk's want set, then four more exact turns; prints a per-tenant ledger (wanted, mapped, deficit, unreachable, stale, dropped, re-queued) and an FNV-1a over the mapped set in key order |
+| `--settle-clear-churn` | puts the whole churn atlas on the clear kernel's list at the first held frame (count logged) |
+| `--dump-hdr` | dumps the pre-tonemap radiance buffer, so a fidelity claim can be made in radiance rather than in bytes |
+| `--predict-inline` | runs the prefetch walk synchronously at the old call site -- the A/B for step 5, and the way its stream hash was proven identical |
+| `--res-trace` | (existing) the residency trace, plus step 4's slot audit |
+| `tools/imgdiff.py` | identical %, max abs d, n(abs d > 1), SSIM and an amplified difference image, with the measured verdict bands none / sub-lsb / noise / VISIBLE. `--pairs A B` over two directories, `--floor A1 A2` prints an A/A pair beside the A/B, `--hdr` compares two `--dump-hdr` dumps in radiance, `--ignore-rows Y0:Y1` takes the verdict off named rows and reports them separately |
+| `tools/raildiff.py` | per-frame SSIM/PSNR, per-second YAVG, and the `tblend` difference series over the water rows with new-only spike flagging. Exit 1 = a new-only spike or per-second mean luma past `--yavg-max` (0.5/255); `--ssim-floor` is printed and informational |
+| the `[boot]` line | `[boot] gagame rev <sha> \| argv: <flags>` as the first line of every log, so no measurement is orphaned from its build or its recipe |
+| the `[present]` line | at exit, windowed: `DXGI_FRAME_STATISTICS` presents over refreshes with the panel's Hz, and a plain statement when DXGI counts nothing (which it does on this cross-adapter swapchain) |
+
+### (e) What is running, and what is pending
+
+The order is **22, 23, 24, 27, 26, then 7-20** ("after step 25" is a position, not a number):
+
+- **22** -- step 6's three exact sub-mechanisms alone: camera face first in both walks, the
+  discard-free shipped PSO, the MsMain per-vertex `ComposedHeight` dedupe. Some unknown share of
+  step 6's -1.285 ms helm globe.mesh is theirs, and separating them is one A/B. *(running now)*
+- **23** -- make the surface shell watertight; declared visible by exactly the crack pixels.
+- **24** -- the polar-plane horizon cull at every altitude, re-gated once the shell is watertight.
+- **27** -- return the unmappable batch tail to the loading queue at the pool cap, report the cap,
+  and raise `kPoolCapTiles` to 16384 (1 GB); declared visible by exactly the holes it fills.
+- **26** -- SWE determinism: the solver's state after N sim-seconds must not depend on wall time.
+  Prerequisite for every fiber gate and for the pop-in track.
+- **7-20** -- then the plan's main sequence: 7 the camera-independent walk cache; 8 the grade-0
+  gates and dead taps in Globe's PsMain/MsMain; 9 the exact `CsBankFill` skips and the bank's CPU
+  corner build; 10 the residency turn on the main thread (cached DirectStorage handles, compact-key
+  sorts, per-slice map uploads); 11 the relief-true frustum bound; 12 the cloud-march floor skip;
+  13 the CDLOD walk as geometry jobs; 14 the small exact hygiene; and 15-20, the pop-in track
+  (per-tree solve snapshot, materialized wave-pyramid parents, solved pages at any resident rung,
+  the fade byte in a second map, generations instead of Drop, the cache read off-thread).
+
+**To resume:** `tools/perf/README.md`. `git log --oneline f4a380f..HEAD` says which steps landed
+(one commit per step, "Step N of docs/PERF_EXPERIMENT.md" in the message) and `out/step<N>/` holds
+each step's artifacts; the tree must be clean and `build/bin/gagame.exe` must be the last accepted
+build. Then relaunch `tools/perf/implement.js` with `startStep` = the first step not yet accepted
+and the compact step list from `out/perf/exec_compact.json`. A Workflow `resumeFromRunId` is
+same-session only.
+
+### (f) How to test this branch
+
+Build from PowerShell (the worktree needs its `cache/` and `data/` junctions to the main checkout
+first -- see the project's worktree run-setup note):
+
+```
+cmd.exe /c "<worktree>\build.bat"
+build\bin\gagame.exe --selftest                    # 7/7 PASS
+```
+
+The storm rail bench, the run's main instrument:
+
+```
+build\bin\gagame.exe --sea --one-water --headless --rail-flood out/x --bench --gpu-time ^
+    --storm 3.0,10,95 --start 2026-08-28T19:30:00
+```
+
+and the same with `--bench-overlap` for the shipped, pipelined loop (the fenced `--bench` number is
+CPU record + a serializing WaitIdle and is not the frame you see). The windowed check:
+
+```
+build\bin\gagame.exe --sea --one-water --frames 600 --storm 3.0,10,95 ^
+    --start 2026-08-28T19:30:00 --campos 120,-10 --cam 7,92.5,-1.5 --gpu-time
+```
+
+-- a window opens, closes after 600 frames, and prints `[perf]`, `[gpu]` and `[present]`. Drop
+`--frames` for the interactive session at the same pose. (The windowed exit still crashes with
+`0xC0000409` after `done`; pre-existing, see (c).)
+
+Two cautions while the run is unattended: in this worktree `cache/` and `data/` are junctions to the
+main checkout, and running `gagame` from ANY checkout while the workflow is working perturbs its
+gates -- a local run at 10:57-11:00 folded a tree-cache rebuild into every measurement after it and
+cost step 5 its bird A/A floor.
