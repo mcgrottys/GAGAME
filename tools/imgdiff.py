@@ -34,7 +34,7 @@ v2 (perf plan step 1) adds what a sub-LSB claim actually needs:
     --json PATH                every number, machine-readable.
 
 Usage:
-    py -3 tools/imgdiff.py a.png b.png [--out diff.png] [--floor a1.png a2.png] [--json r.json]
+    py -3 tools/imgdiff.py a.png b.png [--out diff.png] [--floor a1.png a2.png] [--json r.json] [--ignore-rows 425:437]
     py -3 tools/imgdiff.py --pairs dirA dirB [--out-dir diffs] [--json r.json]   # same-named PNGs
     py -3 tools/imgdiff.py --hdr a.rgba16f b.rgba16f [--out diff.png] [--json r.json]
 
@@ -87,12 +87,25 @@ def _luma8(a):
     return 0.299 * a[..., 0] + 0.587 * a[..., 1] + 0.114 * a[..., 2]
 
 
-def compare(path_a, path_b, out_path=None, with_ssim=True):
+def compare(path_a, path_b, out_path=None, with_ssim=True, ignore_rows=None):
     a = np.asarray(Image.open(path_a).convert("RGB"), dtype=np.int16)
     b = np.asarray(Image.open(path_b).convert("RGB"), dtype=np.int16)
     if a.shape != b.shape:
         return {"error": f"shape mismatch {a.shape} vs {b.shape}"}
     d = np.abs(a - b)
+    d_full = d
+    strip = None
+    if ignore_rows:
+        # The helm's horizon strip (rows 430-432 at 1600x900) is the one residual outside the
+        # residency: step 25 measured an --settle-exact A/A of 65 px there with hash-equal
+        # resident sets (probe P16 stays open). The verdict is taken on every other row; the
+        # strip's own numbers are reported beside it, never folded into the verdict.
+        y0, y1 = ignore_rows
+        pm_strip = d[y0:y1].max(axis=2) if y1 > y0 else np.zeros((0, d.shape[1]), dtype=d.dtype)
+        strip = {"rows": f"{y0}:{y1}", "n_diff": int((pm_strip > 0).sum()),
+                 "n_over1": int((pm_strip > 1).sum()), "max_abs": int(pm_strip.max()) if pm_strip.size else 0}
+        d = d.copy()
+        d[y0:y1] = 0
     per_pixel_max = d.max(axis=2)
     n_px = per_pixel_max.size
     identical = int((per_pixel_max == 0).sum())
@@ -151,8 +164,10 @@ def compare(path_a, path_b, out_path=None, with_ssim=True):
         res["verdict"] = "noise (within the measured run-to-run floor)"
     else:
         res["verdict"] = "VISIBLE"
+    if strip is not None:
+        res["ignored_strip"] = strip
     if out_path:
-        amp = np.clip(d * 16, 0, 255).astype(np.uint8)
+        amp = np.clip(d_full * 16, 0, 255).astype(np.uint8)
         Image.fromarray(amp, "RGB").save(out_path)
         res["diff_image"] = out_path
     return res
@@ -249,6 +264,9 @@ def fmt(name, r):
          f"n(|d|>1) {r['n_over1']:8d} ({r['n_over1_pct']:.3f}%)  mean|d| {r['mean_abs']:.4f}")
     if "ssim" in r:
         s += f"  SSIM {r['ssim']:.5f}"
+    if "ignored_strip" in r:
+        st = r["ignored_strip"]
+        s += f"  [rows {st['rows']} ignored: {st['n_diff']} px differ, n(|d|>1) {st['n_over1']}, max|d| {st['max_abs']}]"
     s += f"  -> {r['verdict']}"
     if r["max_abs"] > 0:
         h = r["hist"]
@@ -267,11 +285,16 @@ def main(argv):
     ap.add_argument("--pairs", nargs=2, metavar=("DIR_A", "DIR_B"), help="compare same-named PNGs in two directories")
     ap.add_argument("--out-dir", help="where to write difference images in --pairs mode")
     ap.add_argument("--no-ssim", action="store_true", help="skip SSIM (faster)")
+    ap.add_argument("--ignore-rows", metavar="Y0:Y1", help="rows [Y0, Y1) left out of the verdict and reported separately (the helm's horizon strip: 425:437)")
     ap.add_argument("--hdr", nargs=2, metavar=("A_RAW", "B_RAW"), help="compare two --dump-hdr dumps in radiance")
     ap.add_argument("--floor", nargs=2, metavar=("A1", "A2"), help="an A/A pair of one binary, printed beside the A/B")
     ap.add_argument("--json", help="write every number to this JSON file")
     args = ap.parse_args(argv)
 
+    ign = None
+    if args.ignore_rows:
+        y0, y1 = (int(v) for v in args.ignore_rows.split(":"))
+        ign = (y0, y1)
     worst = "none"
     results = {}
     if args.hdr:
@@ -290,7 +313,7 @@ def main(argv):
             os.makedirs(args.out_dir, exist_ok=True)
         for n in names:
             out = os.path.join(args.out_dir, n.replace(".png", "_diff.png")) if args.out_dir else None
-            r = compare(os.path.join(da, n), os.path.join(db, n), out, not args.no_ssim)
+            r = compare(os.path.join(da, n), os.path.join(db, n), out, not args.no_ssim, ign)
             results[n] = r
             print(fmt(n, r))
             v = r.get("verdict", "VISIBLE")
@@ -300,12 +323,12 @@ def main(argv):
         if not (args.a and args.b):
             ap.print_help()
             return 2
-        r = compare(args.a, args.b, args.out, not args.no_ssim)
+        r = compare(args.a, args.b, args.out, not args.no_ssim, ign)
         results[os.path.basename(args.b)] = r
         print(fmt(os.path.basename(args.b), r))
         worst = "VISIBLE" if r.get("verdict", "VISIBLE").startswith("VISIBLE") else r.get("verdict")
     if args.floor:
-        rf = compare(args.floor[0], args.floor[1], None, not args.no_ssim)
+        rf = compare(args.floor[0], args.floor[1], None, not args.no_ssim, ign)
         results["floor(A/A)"] = rf
         print(fmt("floor (A/A)", rf))
     if args.json:
