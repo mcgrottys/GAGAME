@@ -382,6 +382,23 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
 
 void ResidencyManager::Want(int tenant, uint32_t face, uint32_t mip, float u0, float v0,
                             float u1, float v1, bool predicted) {
+    if (predicted) {
+        // Step 5: the predicted stream's hash (see Residency.h). The arguments as the caller
+        // gave them, before the mip clamp -- the stream the WALK emitted is the object.
+        uint32_t w[7] = {static_cast<uint32_t>(tenant), face, mip, 0u, 0u, 0u, 0u};
+        memcpy(&w[3], &u0, 4);
+        memcpy(&w[4], &v0, 4);
+        memcpy(&w[5], &u1, 4);
+        memcpy(&w[6], &v1, 4);
+        const uint8_t* b = reinterpret_cast<const uint8_t*>(w);
+        uint64_t h = predictedHash;
+        for (size_t i = 0; i < sizeof(w); ++i) {
+            h ^= b[i];
+            h *= 1099511628211ull;
+        }
+        predictedHash = h;
+        ++predictedCalls;
+    }
     Tenant& t = m_tenants[tenant];
     if (mip >= t.mips) mip = t.mips - 1;
 
@@ -825,6 +842,9 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             "in flight %d (of %u), ring-held %u this frame / %u total",
             m_frame, seenNow, loadingNow, predictedN, stale, m_inFlight.load(),
             kMaxLoadsInFlight, ringHeldFrame, ringHeld);
+        Log("[res-trace] f%u predicted stream so far: %llu Want calls, FNV-1a %016llx",
+            m_frame, static_cast<unsigned long long>(predictedCalls),
+            static_cast<unsigned long long>(predictedHash));
         for (size_t t = 0; t < m_tenants.size(); ++t) {
             const Tenant& tn = m_tenants[t];
             uint32_t tot = 0;

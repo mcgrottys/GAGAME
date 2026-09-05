@@ -112,6 +112,8 @@ struct Options {
     bool railZoom = false;            // --rail-zoom DIR: orbit -> inlet imagery zoom -> estuary
     bool framesSet = false;           // an explicit --frames beats a rail default
     uint32_t predictEvery = 3;        // --predict-every N: prefetch-walk cadence (1 = old)
+    bool predictInline = false;       // --predict-inline: the prefetch walk on the main thread
+                                      // where it used to run (step 5's A/B: the same FNV-1a)
     bool packTiles = false;           // --pack-tiles: pack the composed cache, then exit
     bool directStorage = true;        // --no-direct-storage: the upload ring, for the A/B (M9ao)
     bool dsSerial = false;            // --ds-serial: one DS batch in flight (diagnostic)
@@ -374,6 +376,7 @@ Options ParseArgs(int argc, char** argv) {
         // resolves to a place DirectStorage can read. Needs the graph, so it runs after it.
         else if (a == "--pack-trees") { o.packTrees = true; o.treeAudit = 1u; }
         else if (a == "--predict-every") o.predictEvery = uint32_t(atoi(next("1").c_str()));
+        else if (a == "--predict-inline") o.predictInline = true;
         // M9p: replace the bed with a flat floor at this NAVD height. The A/B against a normal
         // run isolates BATHYMETRY's contribution to the geometry from everything else.
         else if (a == "--flat-bed") { o.flatBed = true; o.flatBedNavd = float(atof(next("-30").c_str())); }
@@ -4306,17 +4309,6 @@ int main(int argc, char** argv) {
                     (opt.headless ? static_cast<float>(opt.width) : window.Width()) / viewH;
                 globe->WalkReset();
                 resMgr.WantStatsReset();
-                PROF_BEGIN();
-                globe->SetView(cam, aspect, viewH, simUnix - startUnix);
-                PROF_END(7);
-                if (!opt.rail.empty() && frame >= 150u) {
-                    walkNodesAcc += globe->walkNodes;
-                    walkLeavesAcc += globe->walkLeaves;
-                    walkWantNsAcc += globe->walkWantNs;
-                    wantTouchAcc += resMgr.wantTouches;
-                    wantHitAcc += resMgr.wantHits;
-                    ++walkFrames;
-                }
                 // M6e screw-prefetch: extrapolate the pose ~0.8 s ahead along its own screw and
                 // let the walk under THAT camera queue tiles early (predicted priority).
                 // M9v: THE PREFETCH WALK, AMORTIZED. Measured at 3.25 ms per frame at helm --
@@ -4336,11 +4328,43 @@ int main(int argc, char** argv) {
                 // (--predict-every 1000000) the hold converged in 217-226 frames and the two
                 // held stills were 5 px apart. The 240 real frames keep it (the still's history
                 // is the shipped one); the hold's residual is logged at the exit test.
-                if (!settling && (frame % kPredictEvery) == 0) {
+                // Step 5 (docs/PERF_EXPERIMENT.md): THE PREFETCH WALK LEAVES THE MAIN THREAD.
+                // Its inputs are final here -- the pose is clamped, the frame vectors and the
+                // window origins are per-run -- so the worker starts NOW and walks beside
+                // SetView; the replay below, where the walk used to run, waits for it and
+                // issues the same Want(predicted) calls in the same order (never skips: a rail's
+                // want stream must not depend on the machine). PredictNextPose keeps its call
+                // cadence, and so its 72-frame effective lookahead. Slot 8 brackets the pose and
+                // the post here plus the join and the replay below. --predict-inline runs the
+                // same walk synchronously at the old point, for the A/B: both print the
+                // predicted stream's FNV-1a ([predict], [rail], --res-trace).
+                const bool predictFrame = !settling && (frame % kPredictEvery) == 0;
+                if (predictFrame && !opt.predictInline) {
                     PROF_BEGIN();
                     Camera pred = cam;
                     motorPose(resMgr.PredictNextPose(poseMotor(cam), 24.0), pred);
-                    globe->PredictWants(pred, aspect);
+                    globe->StartPredictWalk(cam, pred, viewH);
+                    PROF_END(8);
+                }
+                PROF_BEGIN();
+                globe->SetView(cam, aspect, viewH, simUnix - startUnix);
+                PROF_END(7);
+                if (!opt.rail.empty() && frame >= 150u) {
+                    walkNodesAcc += globe->walkNodes;
+                    walkLeavesAcc += globe->walkLeaves;
+                    walkWantNsAcc += globe->walkWantNs;
+                    wantTouchAcc += resMgr.wantTouches;
+                    wantHitAcc += resMgr.wantHits;
+                    ++walkFrames;
+                }
+                if (predictFrame) {
+                    PROF_BEGIN();
+                    if (opt.predictInline) {
+                        Camera pred = cam;
+                        motorPose(resMgr.PredictNextPose(poseMotor(cam), 24.0), pred);
+                        globe->StartPredictWalk(cam, pred, viewH);
+                    }
+                    globe->ReplayPredictWants();
                     PROF_END(8);
                 }
             }
@@ -4704,6 +4728,26 @@ int main(int argc, char** argv) {
                                 tch / (std::max)(1.0, double(walkLeavesAcc) /
                                                           double(walkFrames)));
                         }
+                        if (globe && globe->predictWalks) {
+                            // Step 5: the prefetch walk's own bill, per walk (every
+                            // kPredictEvery frames, all frames of the run). The join wait is
+                            // what the worker did NOT hide; the replay is the Want() calls
+                            // the walk used to make inline. The hash is the stream itself.
+                            const double w = double(globe->predictWalks);
+                            Log("[rail]   prefetch walk (%s): %.0f walks of %.0f nodes / %.0f "
+                                "leaves / %.0f rects; the walk %.3f ms, the main thread waited "
+                                "%.3f ms at the join and replayed in %.3f ms, per walk (one in "
+                                "%u frames); predicted stream %llu Want calls, FNV-1a %016llx",
+                                opt.predictInline ? "inline, --predict-inline" : "on the worker",
+                                w, double(globe->predictNodes) / w,
+                                double(globe->predictLeaves) / w,
+                                double(globe->predictRects) / w,
+                                double(globe->predictWalkNs) / w / 1e6,
+                                double(globe->predictWaitNs) / w / 1e6,
+                                double(globe->predictReplayNs) / w / 1e6, kPredictEvery,
+                                static_cast<unsigned long long>(resMgr.predictedCalls),
+                                static_cast<unsigned long long>(resMgr.predictedHash));
+                        }
                         Log("[rail]   %-22s %6.3f ms %6.3f ms  <- measured here",
                             "sum of the twelve", tot / n, totH / nH);
                         if (!railPreMs.empty()) {
@@ -5038,6 +5082,14 @@ int main(int argc, char** argv) {
             Log("[perf] mean frame %.2f ms over %u frames (%.0f fps)%s", frameMsSum / frameMsN,
                 frameMsN, 1000.0 / (frameMsSum / frameMsN),
                 opt.headless ? "" : (gpu.TearingEnabled() ? " [no-vsync, tearing]" : " [vsync]"));
+        }
+        // Step 5: the predicted request stream's hash, every run (Residency.h): two runs of
+        // the same flight that print different hashes asked the manager for different tiles.
+        if (resMgr.predictedCalls) {
+            Log("[predict] %llu predicted Want calls this run, FNV-1a %016llx (call order "
+                "included)",
+                static_cast<unsigned long long>(resMgr.predictedCalls),
+                static_cast<unsigned long long>(resMgr.predictedHash));
         }
         // Windowed: what the panel actually showed -- presents per refresh beside [perf]'s
         // loop mean, which cannot see a present that was skipped.

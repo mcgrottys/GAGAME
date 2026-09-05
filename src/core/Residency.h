@@ -153,6 +153,16 @@ public:
     // "the hash map is slow" from "we are asking it the same question hundreds of times".
     mutable uint64_t wantTouches = 0, wantHits = 0;
     void WantStatsReset() { wantTouches = wantHits = 0; }
+    // Step 5 (docs/PERF_EXPERIMENT.md): THE PREDICTED REQUEST STREAM, HASHED IN CALL ORDER.
+    // FNV-1a over (tenant, face, mip, the rect's four float bit patterns) of every
+    // Want(predicted = true), for the whole run. It is the A/B instrument for any change to
+    // the prefetch walk -- the walk that moved to a worker thread in step 5 had to hand the
+    // manager the identical stream in the identical order, and "identical" is this number:
+    // the walk on the main thread (--predict-inline) and the walk on the worker print the
+    // same hash over the storm rail, or the change is not exact. Printed by [rail],
+    // --res-trace and the end-of-run [predict] line.
+    uint64_t predictedHash = 14695981039346656037ull;
+    uint64_t predictedCalls = 0;
 
     // M9af: hand a tenant the index of its own realization.
     //

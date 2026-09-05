@@ -835,29 +835,48 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
 // asin. Monotonic, so clamping either side of it is the same statement.
 static const double kSinLatClamp = std::sin(1.4844);
 
-void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double size) {
-    ++walkNodes;
-    const double R = m_radius;
+namespace {
+
+// Step 5 (docs/PERF_EXPERIMENT.md): THE NODE WALK AS A PURE FUNCTION OF WalkParams.
+//
+// SelectNode read a dozen members, and PredictWants ran it a second time by overriding
+// m_camPos / m_frustum / m_planeCount in place under a flag. Both walks now run THIS code
+// over a WalkParams they cannot reach past: the real walk (SetView -- five planes, a leaf
+// that Wants and emits the draw records) and the prefetch walk (the worker thread -- the
+// predicted eye, no planes, a leaf that records rects for the main thread to replay). One
+// geometry, so the two cannot drift; the same expressions in the same order under
+// /fp:precise, so the request stream is the old one to the bit (MEASURED, step 5: the
+// predicted stream's FNV-1a identical over the storm rail against the in-place walk; the
+// real walk's nodes / leaves / Want() touches per frame unchanged).
+using WalkParams = GlobeLayer::WalkParams;
+
+// One node: its span and distance, the horizon and frustum culls, the split test; a leaf
+// falls through to leaf(face, u0, v0, size, arc, dist).
+template <class Leaf>
+void WalkNode(const WalkParams& wp, uint64_t& nodes, int face, int level, double u0,
+              double v0, double size, Leaf& leaf) {
+    ++nodes;
+    const double R = wp.R;
     double dir[3];
     CubeDirD(face, u0 + size * 0.5, v0 + size * 0.5, dir);
     const double arc = (kPi / 2.0) * R / (1 << level);   // ground span of this node, m
 
     // M6g: node position in the TANGENT frame (doubles; the same frame the camera lives in).
     const double px = dir[0] * R, py = dir[1] * R, pz = dir[2] * R;
-    const double tx = m_frameE[0] * px + m_frameE[1] * py + m_frameE[2] * pz;
-    const double ty = m_frameU[0] * px + m_frameU[1] * py + m_frameU[2] * pz - R;
-    const double tz = m_frameN[0] * px + m_frameN[1] * py + m_frameN[2] * pz;
-    const double rel[3] = {tx - m_camPos[0], ty - m_camPos[1], tz - m_camPos[2]};
+    const double tx = wp.frameE[0] * px + wp.frameE[1] * py + wp.frameE[2] * pz;
+    const double ty = wp.frameU[0] * px + wp.frameU[1] * py + wp.frameU[2] * pz - R;
+    const double tz = wp.frameN[0] * px + wp.frameN[1] * py + wp.frameN[2] * pz;
+    const double rel[3] = {tx - wp.camPos[0], ty - wp.camPos[1], tz - wp.camPos[2]};
     const double dist =
         std::sqrt(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]);
 
     // Horizon cull in the planet frame (angles, not dots: both can exceed 90 degrees).
     const double r =
-        std::sqrt(m_camPlanet[0] * m_camPlanet[0] + m_camPlanet[1] * m_camPlanet[1] +
-                  m_camPlanet[2] * m_camPlanet[2]);
+        std::sqrt(wp.camPlanet[0] * wp.camPlanet[0] + wp.camPlanet[1] * wp.camPlanet[1] +
+                  wp.camPlanet[2] * wp.camPlanet[2]);
     if (r > R + 10000.0) {
-        const double cosA = (dir[0] * m_camPlanet[0] + dir[1] * m_camPlanet[1] +
-                             dir[2] * m_camPlanet[2]) / r;
+        const double cosA = (dir[0] * wp.camPlanet[0] + dir[1] * wp.camPlanet[1] +
+                             dir[2] * wp.camPlanet[2]) / r;
         const double ang = std::acos(std::clamp(cosA, -1.0, 1.0));
         const double horizon = std::acos(std::clamp(R / r, 0.0, 1.0));
         const double nodeAng = arc * 0.80 / R;   // generous half-diagonal
@@ -865,11 +884,12 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
     }
 
     // Frustum cull: bounding sphere in camera-relative space. Radius covers the node's ground
-    // extent, its relief, and the display exaggeration.
-    const double radius = arc * 0.75 + 9000.0 * (std::max)(1.0f, reliefExagg);
-    for (int p = 0; p < m_planeCount; ++p) {
-        const double d = m_frustum[p][0] * rel[0] + m_frustum[p][1] * rel[1] +
-                         m_frustum[p][2] * rel[2] + m_frustum[p][3];
+    // extent, its relief, and the display exaggeration. (planeCount 0 -- the prefetch walk --
+    // culls nothing: the predicted view is approximate by nature, M6e.)
+    const double radius = arc * 0.75 + 9000.0 * (std::max)(1.0f, wp.reliefExagg);
+    for (int p = 0; p < wp.planeCount; ++p) {
+        const double d = wp.frustum[p][0] * rel[0] + wp.frustum[p][1] * rel[1] +
+                         wp.frustum[p][2] * rel[2] + wp.frustum[p][3];
         if (d < -radius) return;
     }
 
@@ -878,24 +898,30 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
     // not articulate what a finer ring stores; the user's call: more wave vertices).
     // The fallback VS path keeps its classic depth (the terrain layer covers the near
     // field). The distance split (dist < 3*arc) reaches level 18 only within ~115 m of
-    // the eye, so the record budget grows by a few hundred, not thousands.
-    const int maxDepth = m_msPath ? 18 : kMaxDepth;
-    if (level < maxDepth && dist < arc * kLodFactor) {
+    // the eye, so the record budget grows by a few hundred, not thousands. (wp.maxDepth is
+    // 18 on the mesh path and kMaxDepth on the fallback -- CaptureWalk.)
+    if (level < wp.maxDepth && dist < arc * GlobeLayer::kLodFactor) {
         const double h = size * 0.5;
-        SelectNode(face, level + 1, u0, v0, h);
-        SelectNode(face, level + 1, u0 + h, v0, h);
-        SelectNode(face, level + 1, u0, v0 + h, h);
-        SelectNode(face, level + 1, u0 + h, v0 + h, h);
+        WalkNode(wp, nodes, face, level + 1, u0, v0, h, leaf);
+        WalkNode(wp, nodes, face, level + 1, u0 + h, v0, h, leaf);
+        WalkNode(wp, nodes, face, level + 1, u0, v0 + h, h, leaf);
+        WalkNode(wp, nodes, face, level + 1, u0 + h, v0 + h, h, leaf);
         return;
     }
+    leaf(face, u0, v0, size, arc, dist);
+}
 
+// A leaf's wants, in emission order: emit(tenant, face, mip, u0, v0, u1, v1) once per
+// Want() the leaf asks for, in the order it asks. The real walk sends each to the manager
+// at once; the prefetch walk records them and the main thread replays them.
+template <class Emit>
+void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size, double arc,
+               double dist, Emit& emit) {
     // M6e: this leaf's on-screen span decides which streamed-texture mip it WANTS; the
     // residency manager turns wants into loads/mappings on its own budgets. The CDLOD walk IS
     // the sampling feedback -- deterministic, no readback pass (the classic had to render one).
     // M6i: the same rects feed every tenant riding this planet -- Mars's native pyramids and
     // the composed color/height cubes alike (Want clamps to each tenant's own mip count).
-    ++walkLeaves;
-    const auto wt0 = std::chrono::steady_clock::now();
     // M9ab: THE MIP FOLLOWS THE NODE'S NEAREST POINT, NOT ITS CENTRE.
     //
     // This is where the descent-boundary seam came from. `dist` is to the node CENTRE, and a
@@ -915,142 +941,116 @@ void GlobeLayer::SelectNode(int face, int level, double u0, double v0, double si
     // over-asked: it bought the same seam fix at double the p99, because every node in the
     // frame requested a level finer than its geometry justifies.)
     const double distNear = (std::max)(dist - arc * 0.5, 1.0);
-    if (m_res && (m_surfT >= 0 || m_colorT >= 0 || m_hgtT >= 0)) {
-        const double px = arc / (distNear * (std::max)(m_pixAng, 1e-6f));
-        const double texAtMip0 = size * 16384.0;
-        const int mip = (std::max)(
-            0, static_cast<int>(std::ceil(std::log2((std::max)(texAtMip0 / (std::max)(px, 16.0),
-                                                               1.0)))));
-        // Node rects live in OUR CubeDir face-uv; texture tiles live in the HARDWARE cube
-        // convention. Deriving the two per face collapses to one universal rule: v -> 1 - v.
-        const float tu0 = static_cast<float>(u0), tu1 = static_cast<float>(u0 + size);
-        const float tv0 = static_cast<float>(1.0 - (v0 + size));
-        const float tv1 = static_cast<float>(1.0 - v0);
-        if (m_surfT >= 0) m_res->Want(m_surfT, face, mip, tu0, tv0, tu1, tv1, m_predictPass);
-        if (m_normT >= 0) m_res->Want(m_normT, face, mip, tu0, tv0, tu1, tv1, m_predictPass);
-        if (m_colorT >= 0) m_res->Want(m_colorT, face, mip, tu0, tv0, tu1, tv1, m_predictPass);
-        if (m_hgtT >= 0) m_res->Want(m_hgtT, face, mip, tu0, tv0, tu1, tv1, m_predictPass);
-        if (m_maskT >= 0) m_res->Want(m_maskT, face, mip, tu0, tv0, tu1, tv1, m_predictPass);
-        // M6f: the window's demand -- the node's corners in Mercator z14-pixel space,
-        // intersected with the window; its mip matches the same on-screen texel math against
-        // the window's OWN pyramid (mip 0 = z14). Color and height windows share the frame,
-        // so one rect feeds both.
-        if (m_winT >= 0 || m_hgtWinT >= 0) {
-            double mmin[2] = {1e18, 1e18}, mmax[2] = {-1e18, -1e18};
-            double s1min = 1e18, s1max = -1e18;
-            for (int cy = 0; cy < 3; ++cy) {
-                for (int cx = 0; cx < 3; ++cx) {
-                    // M9y: THE SAME MERCATOR, WITHOUT asin AND tan.
-                    //
-                    // This ran nine times per leaf -- 653 leaves a frame, so ~29000
-                    // transcendental calls -- to bound a node in z14 pixel space. Four of the
-                    // five per corner were avoidable, because CubeDirD already hands back the
-                    // unit direction and d[1] IS sin(latitude):
-                    //
-                    //   tan(pi/4 + phi/2) == (1 + sin phi) / cos phi == (1 + d1) / sqrt(1 - d1^2)
-                    //
-                    // so asin (to get phi) and tan (to undo it) cancel algebraically. What is
-                    // left is one log and one sqrt. The latitude clamp moves onto the SINE,
-                    // which is exactly equivalent because asin is monotonic on [-1, 1].
-                    double d[3];
-                    CubeDirD(face, u0 + size * cx * 0.5, v0 + size * cy * 0.5, d);
-                    const double lon = std::atan2(d[2], d[0]);
-                    const double n14 = 16384.0 * 256.0;
-                    const double mx = (lon / 3.14159265358979 * 0.5 + 0.5) * n14;
-                    // my is STRICTLY DECREASING in d[1], so its extremes over the corners are
-                    // f() of the extremes of the sine -- track the sine here and evaluate the
-                    // log exactly twice, after the loop, instead of nine times inside it.
-                    // Monotonicity, not approximation: the same two numbers come out.
-                    s1min = (std::min)(s1min, d[1]);
-                    s1max = (std::max)(s1max, d[1]);
-                    mmin[0] = (std::min)(mmin[0], mx);
-                    mmax[0] = (std::max)(mmax[0], mx);
-                }
-            }
-            // The two log evaluations the loop above no longer does nine times each. Decreasing
-            // in the sine, so the largest sine gives the smallest y.
-            {
+    if (!wp.wants) return;
+    // The node's span in pixels at its nearest point: one number, the same for the cube mip
+    // and both window mips below (the walk used to recompute it in each block; the same
+    // operands give the same double).
+    const double px = arc / (distNear * (std::max)(wp.pixAng, 1e-6f));
+    const double texAtMip0 = size * 16384.0;
+    const int mip = (std::max)(
+        0, static_cast<int>(std::ceil(std::log2((std::max)(texAtMip0 / (std::max)(px, 16.0),
+                                                           1.0)))));
+    // Node rects live in OUR CubeDir face-uv; texture tiles live in the HARDWARE cube
+    // convention. Deriving the two per face collapses to one universal rule: v -> 1 - v.
+    const float tu0 = static_cast<float>(u0), tu1 = static_cast<float>(u0 + size);
+    const float tv0 = static_cast<float>(1.0 - (v0 + size));
+    const float tv1 = static_cast<float>(1.0 - v0);
+    const uint32_t f = static_cast<uint32_t>(face);
+    const uint32_t m = static_cast<uint32_t>(mip);
+    if (wp.surfT >= 0) emit(wp.surfT, f, m, tu0, tv0, tu1, tv1);
+    if (wp.normT >= 0) emit(wp.normT, f, m, tu0, tv0, tu1, tv1);
+    if (wp.colorT >= 0) emit(wp.colorT, f, m, tu0, tv0, tu1, tv1);
+    if (wp.hgtT >= 0) emit(wp.hgtT, f, m, tu0, tv0, tu1, tv1);
+    if (wp.maskT >= 0) emit(wp.maskT, f, m, tu0, tv0, tu1, tv1);
+    // M6f: the window's demand -- the node's corners in Mercator z14-pixel space,
+    // intersected with the window; its mip matches the same on-screen texel math against
+    // the window's OWN pyramid (mip 0 = z14). Color and height windows share the frame,
+    // so one rect feeds both.
+    if (wp.winT >= 0 || wp.hgtWinT >= 0) {
+        double mmin[2] = {1e18, 1e18}, mmax[2] = {-1e18, -1e18};
+        double s1min = 1e18, s1max = -1e18;
+        for (int cy = 0; cy < 3; ++cy) {
+            for (int cx = 0; cx < 3; ++cx) {
+                // M9y: THE SAME MERCATOR, WITHOUT asin AND tan.
+                //
+                // This ran nine times per leaf -- 653 leaves a frame, so ~29000
+                // transcendental calls -- to bound a node in z14 pixel space. Four of the
+                // five per corner were avoidable, because CubeDirD already hands back the
+                // unit direction and d[1] IS sin(latitude):
+                //
+                //   tan(pi/4 + phi/2) == (1 + sin phi) / cos phi == (1 + d1) / sqrt(1 - d1^2)
+                //
+                // so asin (to get phi) and tan (to undo it) cancel algebraically. What is
+                // left is one log and one sqrt. The latitude clamp moves onto the SINE,
+                // which is exactly equivalent because asin is monotonic on [-1, 1].
+                double d[3];
+                CubeDirD(face, u0 + size * cx * 0.5, v0 + size * cy * 0.5, d);
+                const double lon = std::atan2(d[2], d[0]);
                 const double n14 = 16384.0 * 256.0;
-                const double lo = std::clamp(s1min, -kSinLatClamp, kSinLatClamp);
-                const double hi = std::clamp(s1max, -kSinLatClamp, kSinLatClamp);
-                const double k = n14 / (2.0 * 3.14159265358979);
-                mmin[1] = 0.5 * n14 - std::log((1.0 + hi) / std::sqrt(1.0 - hi * hi)) * k;
-                mmax[1] = 0.5 * n14 - std::log((1.0 + lo) / std::sqrt(1.0 - lo * lo)) * k;
+                const double mx = (lon / 3.14159265358979 * 0.5 + 0.5) * n14;
+                // my is STRICTLY DECREASING in d[1], so its extremes over the corners are
+                // f() of the extremes of the sine -- track the sine here and evaluate the
+                // log exactly twice, after the loop, instead of nine times inside it.
+                // Monotonicity, not approximation: the same two numbers come out.
+                s1min = (std::min)(s1min, d[1]);
+                s1max = (std::max)(s1max, d[1]);
+                mmin[0] = (std::min)(mmin[0], mx);
+                mmax[0] = (std::max)(mmax[0], mx);
             }
-            const double du0 = (mmin[0] - m_detOrg[0]) / m_detSize;
-            const double dv0 = (mmin[1] - m_detOrg[1]) / m_detSize;
-            const double du1 = (mmax[0] - m_detOrg[0]) / m_detSize;
-            const double dv1 = (mmax[1] - m_detOrg[1]) / m_detSize;
-            if (du1 > 0.0 && dv1 > 0.0 && du0 < 1.0 && dv0 < 1.0) {
-                const double px = arc / (distNear * (std::max)(m_pixAng, 1e-6f));
-                const double span = (std::max)(du1 - du0, dv1 - dv0);
-                const double texAtMip0 = span * 16384.0;
-                const int dmip = (std::max)(
-                    0, static_cast<int>(std::ceil(
-                           std::log2((std::max)(texAtMip0 / (std::max)(px, 16.0), 1.0)))));
-                const float wu0 = static_cast<float>((std::max)(du0, 0.0));
-                const float wv0 = static_cast<float>((std::max)(dv0, 0.0));
-                const float wu1 = static_cast<float>((std::min)(du1, 1.0));
-                const float wv1 = static_cast<float>((std::min)(dv1, 1.0));
-                if (m_winT >= 0) {
-                    m_res->Want(m_winT, m_winFace, dmip, wu0, wv0, wu1, wv1, m_predictPass);
-                }
-                if (m_hgtWinT >= 0) {
-                    m_res->Want(m_hgtWinT, m_hgtWinFace, dmip, wu0, wv0, wu1, wv1,
-                                m_predictPass);
-                }
-                if (m_maskT >= 0) m_res->Want(m_maskT, 6u, dmip, wu0, wv0, wu1, wv1, m_predictPass);
-            }
-            // M7f: the z17 DETAIL window rides the same node box, 8x finer frame.
-            if (m_detWinT >= 0) {
-                const double eu0 = (mmin[0] * 8.0 - m_det17Org[0]) / 16384.0;
-                const double ev0 = (mmin[1] * 8.0 - m_det17Org[1]) / 16384.0;
-                const double eu1 = (mmax[0] * 8.0 - m_det17Org[0]) / 16384.0;
-                const double ev1 = (mmax[1] * 8.0 - m_det17Org[1]) / 16384.0;
-                if (eu1 > 0.0 && ev1 > 0.0 && eu0 < 1.0 && ev0 < 1.0) {
-                    const double px =
-                        arc / (distNear * (std::max)(m_pixAng, 1e-6f));
-                    const double spanD = (std::max)(eu1 - eu0, ev1 - ev0);
-                    const int emip = (std::max)(
-                        0, static_cast<int>(std::ceil(std::log2(
-                               (std::max)(spanD * 16384.0 / (std::max)(px, 16.0), 1.0)))));
-                    m_res->Want(m_detWinT, m_detFace, emip,
-                                static_cast<float>((std::max)(eu0, 0.0)),
-                                static_cast<float>((std::max)(ev0, 0.0)),
-                                static_cast<float>((std::min)(eu1, 1.0)),
-                                static_cast<float>((std::min)(ev1, 1.0)), m_predictPass);
-                    if (m_maskT >= 0) {
-                        m_res->Want(m_maskT, 7u, emip, static_cast<float>((std::max)(eu0, 0.0)),
-                                    static_cast<float>((std::max)(ev0, 0.0)),
-                                    static_cast<float>((std::min)(eu1, 1.0)),
-                                    static_cast<float>((std::min)(ev1, 1.0)), m_predictPass);
-                    }
-                }
+        }
+        // The two log evaluations the loop above no longer does nine times each. Decreasing
+        // in the sine, so the largest sine gives the smallest y.
+        {
+            const double n14 = 16384.0 * 256.0;
+            const double lo = std::clamp(s1min, -kSinLatClamp, kSinLatClamp);
+            const double hi = std::clamp(s1max, -kSinLatClamp, kSinLatClamp);
+            const double k = n14 / (2.0 * 3.14159265358979);
+            mmin[1] = 0.5 * n14 - std::log((1.0 + hi) / std::sqrt(1.0 - hi * hi)) * k;
+            mmax[1] = 0.5 * n14 - std::log((1.0 + lo) / std::sqrt(1.0 - lo * lo)) * k;
+        }
+        const double du0 = (mmin[0] - wp.detOrg[0]) / wp.detSize;
+        const double dv0 = (mmin[1] - wp.detOrg[1]) / wp.detSize;
+        const double du1 = (mmax[0] - wp.detOrg[0]) / wp.detSize;
+        const double dv1 = (mmax[1] - wp.detOrg[1]) / wp.detSize;
+        if (du1 > 0.0 && dv1 > 0.0 && du0 < 1.0 && dv0 < 1.0) {
+            const double span = (std::max)(du1 - du0, dv1 - dv0);
+            const double texAtMip0W = span * 16384.0;
+            const int dmip = (std::max)(
+                0, static_cast<int>(std::ceil(
+                       std::log2((std::max)(texAtMip0W / (std::max)(px, 16.0), 1.0)))));
+            const float wu0 = static_cast<float>((std::max)(du0, 0.0));
+            const float wv0 = static_cast<float>((std::max)(dv0, 0.0));
+            const float wu1 = static_cast<float>((std::min)(du1, 1.0));
+            const float wv1 = static_cast<float>((std::min)(dv1, 1.0));
+            const uint32_t dm = static_cast<uint32_t>(dmip);
+            if (wp.winT >= 0) emit(wp.winT, wp.winFace, dm, wu0, wv0, wu1, wv1);
+            if (wp.hgtWinT >= 0) emit(wp.hgtWinT, wp.hgtWinFace, dm, wu0, wv0, wu1, wv1);
+            if (wp.maskT >= 0) emit(wp.maskT, 6u, dm, wu0, wv0, wu1, wv1);
+        }
+        // M7f: the z17 DETAIL window rides the same node box, 8x finer frame.
+        if (wp.detWinT >= 0) {
+            const double eu0 = (mmin[0] * 8.0 - wp.det17Org[0]) / 16384.0;
+            const double ev0 = (mmin[1] * 8.0 - wp.det17Org[1]) / 16384.0;
+            const double eu1 = (mmax[0] * 8.0 - wp.det17Org[0]) / 16384.0;
+            const double ev1 = (mmax[1] * 8.0 - wp.det17Org[1]) / 16384.0;
+            if (eu1 > 0.0 && ev1 > 0.0 && eu0 < 1.0 && ev0 < 1.0) {
+                const double spanD = (std::max)(eu1 - eu0, ev1 - ev0);
+                const int emip = (std::max)(
+                    0, static_cast<int>(std::ceil(std::log2(
+                           (std::max)(spanD * 16384.0 / (std::max)(px, 16.0), 1.0)))));
+                const uint32_t em = static_cast<uint32_t>(emip);
+                const float du0f = static_cast<float>((std::max)(eu0, 0.0));
+                const float dv0f = static_cast<float>((std::max)(ev0, 0.0));
+                const float du1f = static_cast<float>((std::min)(eu1, 1.0));
+                const float dv1f = static_cast<float>((std::min)(ev1, 1.0));
+                emit(wp.detWinT, wp.detFace, em, du0f, dv0f, du1f, dv1f);
+                if (wp.maskT >= 0) emit(wp.maskT, 7u, em, du0f, dv0f, du1f, dv1f);
             }
         }
     }
-    walkWantNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                              std::chrono::steady_clock::now() - wt0).count());
-    if (m_predictPass) return;   // prefetch walk: wants only, no draw nodes
-
-    // Per-LEVEL morph ramp (identical on both sides of every seam = crack-free): fade this LOD
-    // out across the band where its parent would still be split.
-    const float morphStart = static_cast<float>(arc * kLodFactor * 1.35);
-    const float morphEnd = static_cast<float>(arc * kLodFactor * 1.95);
-    if (m_msPath) {
-        EmitMeshlets(face, u0, v0, size, arc, morphStart, morphEnd);
-        return;
-    }
-    NodeData nd{};
-    nd.uv0[0] = static_cast<float>(u0);
-    nd.uv0[1] = static_cast<float>(v0);
-    nd.uvStep[0] = static_cast<float>(size / 32.0);
-    nd.uvStep[1] = static_cast<float>(size / 32.0);
-    nd.face = static_cast<uint32_t>(face);
-    nd.morphStart = morphStart;
-    nd.morphEnd = morphEnd;
-    m_nodes.push_back(nd);
 }
+
+}  // namespace
 
 // M6j: one leaf -> 16 mesh-shader records (4x4 sub-meshlets of 8x8 cells). Fine meshlets
 // (arc <= 650 m) get a DOUBLE-precision camera-relative anchor + the position Jacobian, so
@@ -1122,42 +1122,159 @@ void GlobeLayer::EmitMeshlets(int face, double u0, double v0, double size, doubl
     }
 }
 
-// M6e screw-prefetch: the same walk under the PREDICTED pose, emitting predicted wants only.
-void GlobeLayer::PredictWants(const Camera& cam, float aspect) {
-    if (!m_res || (m_surfT < 0 && m_colorT < 0 && m_hgtT < 0)) return;
-    double savedPos[3] = {m_camPos[0], m_camPos[1], m_camPos[2]};
-    double savedFrustum[6][4];
-    memcpy(savedFrustum, m_frustum, sizeof(m_frustum));
-    const int savedPlanes = m_planeCount;
+// Step 5: everything the node walk reads, captured. SetView fills one for the real walk
+// (then adds the five planes); StartPredictWalk fills one for the prefetch walk and moves
+// only the eye -- the planet-frame position and the pixel angle stay the REAL camera's,
+// exactly as PredictWants left them (it overrode m_camPos and the planes, nothing else).
+GlobeLayer::WalkParams GlobeLayer::CaptureWalk(const Camera& cam, float viewportH) const {
+    WalkParams wp;
+    wp.R = m_radius;
+    for (int i = 0; i < 3; ++i) {
+        wp.frameE[i] = m_frameE[i];
+        wp.frameU[i] = m_frameU[i];
+        wp.frameN[i] = m_frameN[i];
+    }
+    wp.camPos[0] = cam.px;
+    wp.camPos[1] = cam.py;
+    wp.camPos[2] = cam.pz;
+    // M6g: the planet-frame position (doubles) for the horizon test.
+    const double ry = m_radius + cam.py;
+    for (int i = 0; i < 3; ++i) {
+        wp.camPlanet[i] = m_frameU[i] * ry + m_frameE[i] * cam.px + m_frameN[i] * cam.pz;
+    }
+    wp.planeCount = 0;
+    wp.reliefExagg = reliefExagg;
+    wp.maxDepth = m_msPath ? 18 : kMaxDepth;   // M6j/M8h, see WalkNode
+    wp.pixAng = cam.fovY / (std::max)(viewportH, 1.0f);
+    wp.wants = m_res && (m_surfT >= 0 || m_colorT >= 0 || m_hgtT >= 0);
+    wp.surfT = m_surfT;
+    wp.normT = m_normT;
+    wp.colorT = m_colorT;
+    wp.hgtT = m_hgtT;
+    wp.maskT = m_maskT;
+    wp.winT = m_winT;
+    wp.hgtWinT = m_hgtWinT;
+    wp.detWinT = m_detWinT;
+    wp.winFace = m_winFace;
+    wp.hgtWinFace = m_hgtWinFace;
+    wp.detFace = m_detFace;
+    wp.detOrg[0] = m_detOrg[0];
+    wp.detOrg[1] = m_detOrg[1];
+    wp.detSize = m_detSize;
+    wp.det17Org[0] = m_det17Org[0];
+    wp.det17Org[1] = m_det17Org[1];
+    return wp;
+}
 
-    m_camPos[0] = cam.px;
-    m_camPos[1] = cam.py;
-    m_camPos[2] = cam.pz;
-    m_planeCount = 0;   // no frustum cull: the predicted view is approximate by nature
-    m_predictPass = true;
-    for (int f = 0; f < 6; ++f) SelectNode(f, 0, 0.0, 0.0, 1.0);
-    m_predictPass = false;
+// M6e screw-prefetch, step 5: the same walk under the PREDICTED pose, posted to the worker.
+void GlobeLayer::StartPredictWalk(const Camera& cam, const Camera& pred, float viewportH) {
+    WalkParams wp = CaptureWalk(cam, viewportH);
+    if (!wp.wants) return;   // PredictWants's own gate: no manager, no cube tenant, no walk
+    wp.camPos[0] = pred.px;
+    wp.camPos[1] = pred.py;
+    wp.camPos[2] = pred.pz;
+    // planeCount stays 0: no frustum cull, the predicted view is approximate by nature.
+    std::lock_guard<std::mutex> lk(m_predict.mx);
+    if (m_predict.outstanding) {
+        // A second post before the replay would issue one frame's walk under another
+        // frame's stamp; main never does it, so a caller that does is a bug, said loudly.
+        throw std::runtime_error("globe: prefetch walk posted over an unreplayed one");
+    }
+    if (!m_predict.thread.joinable()) {
+        m_predict.thread = std::thread([this] { PredictWorker(); });
+    }
+    m_predict.params = wp;
+    m_predict.posted = true;
+    m_predict.busy = true;
+    m_predict.outstanding = true;
+    m_predict.cv.notify_all();
+}
 
-    memcpy(m_frustum, savedFrustum, sizeof(m_frustum));
-    m_planeCount = savedPlanes;
-    m_camPos[0] = savedPos[0];
-    m_camPos[1] = savedPos[1];
-    m_camPos[2] = savedPos[2];
+// The worker: waits for a posted WalkParams, walks it into rects, hands them back. It reads
+// nothing of the layer but the job -- its own copy of the params, the vector it swaps in
+// and out under the lock -- because the main thread is inside SetView the whole time.
+void GlobeLayer::PredictWorker() {
+    std::unique_lock<std::mutex> lk(m_predict.mx);
+    for (;;) {
+        m_predict.cv.wait(lk, [&] { return m_predict.posted || m_predict.quit; });
+        if (m_predict.quit) return;
+        m_predict.posted = false;
+        const WalkParams wp = m_predict.params;
+        std::vector<WantRect> out;
+        out.swap(m_predict.rects);   // the buffer the last replay emptied: its capacity
+        lk.unlock();
+        const auto t0 = std::chrono::steady_clock::now();
+        uint64_t nodes = 0, leaves = 0;
+        auto leaf = [&](int face, double u0, double v0, double size, double arc, double dist) {
+            ++leaves;
+            auto emit = [&](int tenant, uint32_t f, uint32_t mip, float u0r, float v0r,
+                            float u1r, float v1r) {
+                out.push_back(WantRect{tenant, f, mip, u0r, v0r, u1r, v1r});
+            };
+            LeafWants(wp, face, u0, v0, size, arc, dist, emit);
+        };
+        for (int f = 0; f < 6; ++f) WalkNode(wp, nodes, f, 0, 0.0, 0.0, 1.0, leaf);
+        const uint64_t ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         std::chrono::steady_clock::now() - t0).count());
+        lk.lock();
+        m_predict.rects.swap(out);
+        m_predict.nodes = nodes;
+        m_predict.leaves = leaves;
+        m_predict.walkNs = ns;
+        m_predict.busy = false;
+        m_predict.cv.notify_all();
+    }
+}
+
+// The replay: the rects through Want(predicted = true) in the order the walk emitted them,
+// on the main thread, where PredictWants used to run -- after SetView's real wants on the
+// same tenants (a predicted touch after a real one changes nothing, Residency.cpp) and
+// before ProcessQueues moves the stamp frame. Wait-never-skip.
+void GlobeLayer::ReplayPredictWants() {
+    std::unique_lock<std::mutex> lk(m_predict.mx);
+    if (!m_predict.outstanding) return;
+    const auto w0 = std::chrono::steady_clock::now();
+    m_predict.cv.wait(lk, [&] { return !m_predict.busy; });
+    const auto w1 = std::chrono::steady_clock::now();
+    // The worker is idle until the next post, so the rects are ours under the lock.
+    for (const WantRect& r : m_predict.rects) {
+        m_res->Want(r.tenant, r.face, r.mip, r.u0, r.v0, r.u1, r.v1, true);
+    }
+    const auto w2 = std::chrono::steady_clock::now();
+    ++predictWalks;
+    predictNodes += m_predict.nodes;
+    predictLeaves += m_predict.leaves;
+    predictRects += m_predict.rects.size();
+    predictWalkNs += m_predict.walkNs;
+    predictWaitNs +=
+        uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(w1 - w0).count());
+    predictReplayNs +=
+        uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(w2 - w1).count());
+    m_predict.rects.clear();
+    m_predict.outstanding = false;
+}
+
+GlobeLayer::~GlobeLayer() {
+    if (m_predict.thread.joinable()) {
+        {
+            std::lock_guard<std::mutex> lk(m_predict.mx);
+            m_predict.quit = true;
+        }
+        m_predict.cv.notify_all();
+        m_predict.thread.join();
+    }
 }
 
 void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, double simTime) {
     if (!m_globe || !m_globe->Ready()) return;
     m_viewportH = viewportH;
-    m_pixAng = cam.fovY / (std::max)(viewportH, 1.0f);   // the walk needs it BEFORE wavesB
-    // M6g: cam is the FLAT (tangent-frame) camera. Keep it for node culling, and derive the
-    // planet-frame position (doubles) for the horizon test.
+    // M6g: cam is the FLAT (tangent-frame) camera. Keep it for the meshlet anchors and the
+    // constants; the walk reads its own capture (the planet-frame eye for the horizon test,
+    // the pixel's angular size for the mip selector -- step 5, CaptureWalk).
     m_camPos[0] = cam.px;
     m_camPos[1] = cam.py;
     m_camPos[2] = cam.pz;
-    const double ry = m_radius + cam.py;
-    for (int i = 0; i < 3; ++i) {
-        m_camPlanet[i] = m_frameU[i] * ry + m_frameE[i] * cam.px + m_frameN[i] * cam.pz;
-    }
+    m_wp = CaptureWalk(cam, viewportH);
 
     // Frustum planes from the camera-relative view-projection (reversed-Z: use the 4 side
     // planes + near; there is no far plane).
@@ -1166,22 +1283,52 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     XMStoreFloat4x4(&m, vp);
     auto plane = [&](int idx, double a, double b, double c, double d) {
         const double len = std::sqrt(a * a + b * b + c * c);
-        m_frustum[idx][0] = a / len;
-        m_frustum[idx][1] = b / len;
-        m_frustum[idx][2] = c / len;
-        m_frustum[idx][3] = d / len;
+        m_wp.frustum[idx][0] = a / len;
+        m_wp.frustum[idx][1] = b / len;
+        m_wp.frustum[idx][2] = c / len;
+        m_wp.frustum[idx][3] = d / len;
     };
     plane(0, m._14 + m._11, m._24 + m._21, m._34 + m._31, m._44 + m._41);   // left
     plane(1, m._14 - m._11, m._24 - m._21, m._34 - m._31, m._44 - m._41);   // right
     plane(2, m._14 + m._12, m._24 + m._22, m._34 + m._32, m._44 + m._42);   // bottom
     plane(3, m._14 - m._12, m._24 - m._22, m._34 - m._32, m._44 - m._42);   // top
     plane(4, m._13, m._23, m._33, m._43);                                    // near (z >= 0)
-    m_planeCount = 5;
+    m_wp.planeCount = 5;
 
     m_nodes.clear();
     m_meshlets.clear();
     m_meshletDrops = 0;
-    for (int f = 0; f < 6; ++f) SelectNode(f, 0, 0.0, 0.0, 1.0);
+    // The real walk's leaf: the wants straight to the manager (this frame's stamp), then the
+    // draw records. The prefetch walk's leaf (PredictWorker) records rects instead; both run
+    // WalkNode / LeafWants above.
+    auto leaf = [&](int face, double u0, double v0, double size, double arc, double dist) {
+        ++walkLeaves;
+        const auto wt0 = std::chrono::steady_clock::now();
+        auto emit = [&](int tenant, uint32_t f, uint32_t mip, float u0r, float v0r, float u1r,
+                        float v1r) { m_res->Want(tenant, f, mip, u0r, v0r, u1r, v1r); };
+        LeafWants(m_wp, face, u0, v0, size, arc, dist, emit);
+        walkWantNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now() - wt0).count());
+
+        // Per-LEVEL morph ramp (identical on both sides of every seam = crack-free): fade this
+        // LOD out across the band where its parent would still be split.
+        const float morphStart = static_cast<float>(arc * kLodFactor * 1.35);
+        const float morphEnd = static_cast<float>(arc * kLodFactor * 1.95);
+        if (m_msPath) {
+            EmitMeshlets(face, u0, v0, size, arc, morphStart, morphEnd);
+            return;
+        }
+        NodeData nd{};
+        nd.uv0[0] = static_cast<float>(u0);
+        nd.uv0[1] = static_cast<float>(v0);
+        nd.uvStep[0] = static_cast<float>(size / 32.0);
+        nd.uvStep[1] = static_cast<float>(size / 32.0);
+        nd.face = static_cast<uint32_t>(face);
+        nd.morphStart = morphStart;
+        nd.morphEnd = morphEnd;
+        m_nodes.push_back(nd);
+    };
+    for (int f = 0; f < 6; ++f) WalkNode(m_wp, walkNodes, f, 0, 0.0, 0.0, 1.0, leaf);
     // M8h: a dropped leaf is a hole. Report on the transition (once per episode), with
     // the count -- the fix is a coarser view or a bigger kMaxMeshlets, not silence.
     if (m_meshletDrops > 0 && !m_dropsReported) {
