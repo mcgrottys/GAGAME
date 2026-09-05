@@ -372,3 +372,22 @@ Two cautions while the run is unattended: in this worktree `cache/` and `data/` 
 main checkout, and running `gagame` from ANY checkout while the workflow is working perturbs its
 gates -- a local run at 10:57-11:00 folded a tree-cache rebuild into every measurement after it and
 cost step 5 its bird A/A floor.
+
+## Checkpoint 2 (2026-09-05 19:40, the run paused by the owner)
+
+Landed since the first checkpoint: step 23 (6dff8d2, the watertight shell), step 24 (a7615d2, the
+camera-face-first draw order), and the priors entries 27-31 from the two measured failures (9ace20a,
+f3891e2). Measured on the step-24 build, same session, previous binary as the reference: globe.mesh at
+the helm 4.98 -> 4.47 ms (p95 -1.06 ms), whole-frame GPU 6.69 -> 6.17 ms at the helm, the pipelined
+loop 4.73 -> 4.30 ms; the four settled stills byte-identical across the two binaries.
+
+Not shipped, with the evidence on disk: the low-altitude horizon cull (twice: first the cracks, then
+the landing race it exposes on the descent; `out/regress_step6.mp4`, `out/step24/`), the pool-cap fix
+with the 1 GB budget (`out/step27/`: correct, reverted only because the bigger pool reaches the same
+race), and step 28 (the landing race itself) was in progress when the run paused -- its partial diff
+is `out/step28/partial_attempt1.patch` (not applied; the tree is the accepted state).
+
+Order to resume (tools/perf/README.md; `startStep` = 28 in the run's position order): 28 (the landing
+race, Fable), 30 (the pool fix again, Opus), 26 (SWE determinism, Fable), 29 (the cull, third attempt,
+Opus), then 7-20 as planned. The plan file is `out/perf/exec.json`; the step list in run order is
+`out/perf/exec_compact.json`.
