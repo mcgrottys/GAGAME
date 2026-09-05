@@ -116,6 +116,19 @@ const PROCEDURE_V4 = PROCEDURE_V3
            `    helm (settled, from step 5): render with --settle-sync on both binaries (helm.png vs helm_prev.png). At the helm the hold usually hits its 3000-frame cap because the predicted walk leaves ~149 requests that never drain (step 4 measured both binaries capping the same way and the settled pair agreeing to 8 px, max 4): that is acceptable when both logs show the cap. Candidate vs previous settled must be 'noise' or better (the helm keeps a 3-11 px horizon residue even settled). If VISIBLE, re-render both once; if still VISIBLE, the step FAILS on fidelity. Step 4 measured why the unsettled frame-240 helm can no longer gate: a loop 2 ms/frame faster lands the far field one ring later at frame 240 (11.7k px on the horizon strip) while the settled picture is unchanged -- so the frame-240 helm vs out/baseline is recorded for the record only, never as the verdict.`)
 if (PROCEDURE_V4 === PROCEDURE_V3) throw new Error('PROCEDURE_V4 replacements did not apply')
 
+// v5 (after step 6): the settled stills are like for like only when the hold is the same length or
+// the churn is frozen during the hold (step 21 builds that); the rail gate is continuity + luma,
+// SSIM informational; the far-hemisphere prefetch is what kept the helm from draining.
+const PROCEDURE_V5 = PROCEDURE_V4
+  .replace(`- Continuity (the fade rule): record the storm rail with the candidate LIKE FOR LIKE with the reference recording:`,
+           `- SETTLED STILLS, LIKE FOR LIKE (step 6 measured this): --settle-sync renders full frames at a frozen instant and the churn atlas keeps advancing per frame, so two holds of different length give different foam. Until step 21 lands, when the two binaries' holds differ by more than ~2x (both logs print the held frames), render both with --settle-hold N (same N, e.g. 600) instead and compare those; once step 21 has landed (the churn is frozen during the hold) --settle-sync pairs are comparable at any hold length. A step that changes how many requests the walk issues (a cull, a prefetch change) changes the hold length: expect it and use the equal-N form. A settled still that still differs across binaries after that is a real change.
+- RAIL GATE (from step 21's raildiff): pass = no new-only tblend spike and per-second YAVG |new - base| <= 0.5/255; SSIM is reported (min, where) but is not the verdict -- residency-timing shifts decorrelate the helm phase crest by crest between binaries with no spike (step 6: SSIM min 0.93, YAVG within 0.15/255). Before step 21 lands, run raildiff with --ssim-floor 0.90 and apply the same rule by hand from its printout.
+- Continuity (the fade rule): record the storm rail with the candidate LIKE FOR LIKE with the reference recording:`)
+  .replace(`The previous accepted rail is out/step2/rail.mp4 (step 1's is out/step1/rail.mp4), then the last passing step's.`,
+           `The previous accepted rail is the last PASSING step's out/stepM/rail.mp4 (step 6 failed: its rail is out/regress_step6.mp4, not a reference).`)
+if (PROCEDURE_V5 === PROCEDURE_V4) throw new Error('PROCEDURE_V5 replacements did not apply')
+const procFor = (n) => n === 1 ? PROCEDURE : n === 2 ? PROCEDURE_V2 : n <= 4 ? PROCEDURE_V3 : n <= 6 ? PROCEDURE_V4 : PROCEDURE_V5
+
 const RESULT_SCHEMA = {
   type: 'object',
   properties: {
@@ -162,8 +175,8 @@ if (args.lastBench) state.lastBench = args.lastBench
 // Fable stays on the steps whose risk is in the reasoning (the owner: 'use it wisely'): the
 // shader-exactness gates, the cull-side audit and the pop-in track's algebra, and their verifiers.
 const opusFrom = (args.opusFrom === undefined) ? 6 : args.opusFrom
-const fableSteps = args.fableSteps || [8, 11, 17, 18, 19]
-const fableVerify = args.fableVerify || [8, 9, 17, 18, 19]
+const fableSteps = args.fableSteps || [8, 11, 17, 18, 19, 23, 24]
+const fableVerify = args.fableVerify || [8, 9, 17, 18, 19, 22, 23, 24]
 const implOpts = (n) => (opusFrom && n >= opusFrom && !fableSteps.includes(n)) ? { model: 'opus' } : {}
 const verifyOpts = (n) => (opusFrom && n >= opusFrom - 1 && !fableVerify.includes(n)) ? { model: 'opus' } : {}
 const startStep = args.startStep || 1
@@ -176,7 +189,7 @@ for (const step of plan.execution_order) {
   log(`step ${n}: ${step.name}`)
   const res = await agent(`You are implementing ONE step of a performance plan in the GAGAME engine (D3D12, C++20, HLSL). Read the plan file ${PLAN} (the whole plan, so you know what comes before and after), the findings file ${FINDINGS} for the evidence behind this step (search it for the file names the step cites), and the relevant docs/ALGEBRA.md sections, then the cited code.
 ${LAWS}
-${n === 1 ? PROCEDURE : n === 2 ? PROCEDURE_V2 : n <= 4 ? PROCEDURE_V3 : PROCEDURE_V4}
+${procFor(n)}
 
 THIS STEP: number ${n}, '${step.name}', declared fidelity class '${step.fidelity_class}', effort ${step.effort}. Its FULL specification (mechanism, files_lines, expected_ms_saved, gate, ga_angle, notes, dependencies) is the entry with "step": ${n} in execution_order inside ${PLAN} -- Read that file and follow that entry exactly; the plan's measure_first probes, popin_track, stop_rules are in the same file.
 PREVIOUS ACCEPTED BENCH LOG: ${state.lastBench}
@@ -205,7 +218,8 @@ IMPLEMENTER'S REPORT: ${JSON.stringify(res)}
 Try to REFUTE the commit: is the change really exact where it claims to be (float reassociation, sample-order changes, dropped terms multiplied by a value that is only NEARLY zero)? Does a gate that passed actually ask the question (were the stills rendered with the baseline's exact flags; is the bench comparison like for like; could the saving be noise: compare against the p95 spread)? Any law violated? Any new pop or discontinuity introduced (read the code paths around residency/LOD transitions)? Does the code comment state the measurement? Return approve / revert / approve-with-followup with reasons; 'revert' only for a real defect or a broken gate, not style.${n === 1 ? '' : `
 ${n === 2 ? `GATE V2 (in force from step 2): bird and globe must be 'none' (0 px) vs out/baseline; helm passes at 'noise' or through the same-session 2x2 protocol against out/prev_exe/gagame.exe (best cross pair 'noise' or better); key7km and helm_ebb pass only through the 2x2 protocol with the count rule (best cross pair n(|d|>1) <= 1.5 x max A/A + 64, max|d| <= max A/A + 8) AND a described same-kind diff pattern; shader/bank steps also need --dump-fibers |delta| = 0 against the previous binary; the storm-rail raildiff against the previous accepted rail must be clean. Confirm from the artifacts in out/step${n}/ (imgdiff.json, the diff PNGs, the A/A lines, raildiff/series.csv summary) that the implementer applied these rules mechanically and did not pass a still by narrative. If the artifacts do not exist for a rule that applied, the gate was not asked: 'revert'.` : `GATE V3 (in force from step 3): bird, globe and key7km are rendered with --settle-sync and must be 'none' (0 px) against the previous binary's settled render in the same session (out/prev_exe/gagame.exe; the *_prev.png files in out/step${n}/); helm passes at 'noise' vs out/baseline or through the same-session 2x2 protocol (best cross pair 'noise' or better); helm_ebb passes only through the 2x2 protocol with the count rule (best cross pair n(|d|>1) <= 1.5 x max A/A + 64, max|d| <= max A/A + 8) AND a described same-kind diff pattern; shader/bank steps also need --dump-fibers |delta| = 0 against the previous binary under --settle-sync; the storm-rail raildiff (14:00, --tile-budget 3000, like for like) against the previous accepted rail must be clean; the bench must show the saving on the row the step targets. Confirm from the artifacts in out/step${n}/ (the *_prev renders, imgdiff.json, the diff PNGs, the A/A lines, raildiff/series.csv summary, bench logs) that the implementer applied these rules mechanically and did not pass a still by narrative. If the artifacts do not exist for a rule that applied, the gate was not asked: 'revert'.${n === 4 ? `
 ORCHESTRATOR'S RULING FOR STEP 4: the helm rule is met by the SETTLED pair -- out/step4/helm_settled.png vs helm_settled_prev.png (both --settle-sync, both binaries capping the hold the same way) must be 'noise' or better; the implementer reports 8 px max 4. The unsettled frame-240 2x2 (11.7k px on the far horizon strip) is landing timing from a loop 2 ms/frame faster and is informational; do not revert on it. Verify the settled pair from the artifacts and the rest of the gate as written.` : n >= 5 ? `
-GATE V4 (from step 5): the helm is also gated SETTLED (helm.png vs helm_prev.png, both --settle-sync, 'noise' or better; both logs may show the 3000-frame cap); the unsettled helm vs out/baseline is informational only.` : ''}`}`}`,
+GATE V4 (from step 5): the helm is also gated SETTLED (helm.png vs helm_prev.png, both --settle-sync, 'noise' or better; both logs may show the 3000-frame cap); the unsettled helm vs out/baseline is informational only.${n > 6 ? `
+GATE V5 (after step 6): settled pairs are like for like only at equal hold length or with the churn frozen during the hold (step 21); the rail gate is continuity (no new-only spike) + per-second YAVG within 0.5/255, SSIM informational. A step declared 'visible' (step 23, the cracks) must show the difference confined to the pixels it lists and proves.` : ''}` : ''}`}`}`,
       { label: `verify:${n}`, phase: 'Verify', schema: VERIFY_SCHEMA, effort: 'high', ...verifyOpts(n) })
     state.verifications.push(v || { step: n, verdict: 'approve-with-followup', reasons: ['verifier returned nothing'], law_violations: [], followups: [] })
     if (v && v.verdict === 'revert') {
