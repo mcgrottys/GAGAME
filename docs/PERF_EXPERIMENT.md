@@ -148,3 +148,37 @@ The null-tile climb (CheckAccessFullyMapped, tiletest-proven on this GPU) replac
 ## 10. Effects when fast
 
 Listed in the structured `effects_when_fast`: the spectral Laplacian channel and the Gram-form caustic fold; the shipped tangent bivector slope plane; the pixel-stage residency fade through the fractional clamp; the analytic ripple tail with the footprint-bivector prefilter; coverage-folded whitecaps; Kelvin wakes and vessel motors; a 7th ring at 0.6 m, level 19, 32 components; physical bucket interpolation and a second solver window as generation B; a Bruneton-class atmosphere and a denser sun-ward cloud march where P7 finds density; terrain/structure shadows and reflections through the existing secant cast; the camera-relative sample position; MSAA only after the split rule stops emitting slivers; determinism (--settle-sync, argv echo, the HDR gate) as the effect that makes every other one measurable.
+
+## Artifact diagnosis (2026-09-05 11:50, the owner's screenshot from an interactive session)
+
+The owner's oblique view up the estuary toward Newburyport (19:30 storm, tide +0.88 m, ebb 0.48 m/s)
+showed three things that read as "clipping". Lens stills at the cached bird (1500 m) and 7 km poses,
+`--settle-sync`, on the step-5 binary (`out/lens/*.png`: lit, `--albedo`, `--stencil`, `--lens
+waterdata`, `--lens ring`, `--lens mip`) pin each one to its producer. None is a regression of this
+branch: every step is gated bit-identical at settle against the previous binary.
+
+- **Pale sheets and soft blobs over the water (offshore, and the flooded flats).** Shading, not data:
+  the `--albedo` lens shows no trace of them (the composed colour is uniform over the water), the
+  ring lens shows they sit in the coarser bank rings (the grey/yellow annuli around the camera's
+  ground point), and the waterdata lens shows the breaking triggers firing as broad diagonal bands
+  there. That is the crest gate applied to a box-averaged crest at a coarse ring (foamlaw + fold:
+  the folding law's own counterexample), so whitecap streaks fuse into sheets at altitude. The fix is
+  on the effects list (coverage-folded whitecaps: foam as the expected coverage of the fine answer);
+  the pop-in track's consumer changes remove the timing half (which sheets appear depends on when
+  the wave pages landed -- the same mechanism as the ebb helm's 6-9 % run-to-run floor).
+- **Blocky pale rectangles on the marsh.** At +0.88 m the flats are flooded and the classifier says
+  water there (the albedo lens shows the khaki water class over the flats); the rectangles are the
+  same foam gate on the coarse ring, quantized by the bed classifier's coarse-mip decision (the
+  documented "speckle over flats" residue). Steps 17-18 (consumers read the fold's answer at any
+  resident rung; thresholded answers lerp as answers) are the structural fix.
+- **Straight seams crossing the water.** Window edges, not mesh clips: the stencil lens draws them
+  as thin green polygons -- the z17 detail window (1.2 m/texel; outside it the imagery is the z14
+  rung at 9.5 m/texel, which is why the river corridor looks sharper than its surroundings) and the
+  solved wave field's z16 window (3.4 x 2.0 km around the entrance, blended over 120 m; beyond it
+  the FFT cascades carry the sea). The picture is one colour tenant and one height tenant sampled at
+  whatever rung is resident; the water parameters are separate tenants and their borders are where
+  a consumer reads absence. Step 19 turns the bucket-roll Drop into a swap with a cross-fade.
+- **Found on the way.** The 7 km waterdata lens shows a rectangular hole (no data) inside the solved
+  window at settled residency (`out/lens/key7km_waterdata.png`, lower left): a tile that never lands
+  or a void marker served as absence. Steps 16-17 (materialized parents, any-rung sampling) would
+  cover it with the coarse rung; it deserves its own look with `--res-trace` at that pose.
