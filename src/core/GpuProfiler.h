@@ -75,6 +75,12 @@ private:
     bool m_open = false;
     std::vector<std::string> m_names;
     std::vector<Row> m_rows;
+    // "gpu.gap": the idle between the previous frame's closing stamp and this frame's opening
+    // one. Slots retire in frame order (BeginFrame reads the slot it reuses, Drain the older
+    // first), so the previous row's end tick is always the frame before. In --bench it is the
+    // CPU recording the next frame while the GPU is fenced idle; windowed it is the fence and
+    // the present pacing; in --bench-overlap it is the bubble the shipped loop actually has.
+    uint64_t m_lastFrameEnd = 0;
 };
 
 // RAII pair; null profiler = nothing recorded (the default path).

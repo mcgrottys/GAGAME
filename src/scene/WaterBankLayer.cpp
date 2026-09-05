@@ -9,6 +9,7 @@
 #include "sim/WaveField.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -380,6 +381,7 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     PixScope scope(ctx.cl, "waterbank (the wave vertex bank: rings recomposed per frame)");
 
     // The tile list: every wet tile in every ring, with its corner params from the stacks.
+    const auto tileList0 = std::chrono::steady_clock::now();   // tileListMs bracket
     std::vector<BankTile> tiles;
     tiles.reserve(kMips * kRingTiles * kRingTiles);
     const double hsRef =
@@ -444,6 +446,9 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
             }
         }
     }
+    tileListMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                           tileList0)
+                     .count();
     if (tiles.empty()) return;
 
     BankCbData cb{};

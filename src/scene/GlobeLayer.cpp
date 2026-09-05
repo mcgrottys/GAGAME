@@ -9,6 +9,7 @@
 #include "core/Shader.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 
@@ -1415,7 +1416,11 @@ void GlobeLayer::Render(const FrameContext& ctx) {
         GpuScope gscope(ctx.prof, ctx.cl, "globe.mesh");
         GpuBuffer& rec = m_recBuf[ctx.gpu->FrameIndex()];
         const size_t bytes = m_meshlets.size() * sizeof(MeshletRec);
+        const auto copy0 = std::chrono::steady_clock::now();   // meshletCopyMs bracket
         memcpy(rec.cpu, m_meshlets.data(), bytes);
+        meshletCopyMs = std::chrono::duration<double, std::milli>(
+                            std::chrono::steady_clock::now() - copy0)
+                            .count();
         ID3D12PipelineState* msSel = m_msPso.Get();
         if (surfaceDebug == 1 && m_msPsoWire) msSel = m_msPsoWire.Get();
         else if (surfaceDebug == 2 && m_msPsoMeshlet) msSel = m_msPsoMeshlet.Get();

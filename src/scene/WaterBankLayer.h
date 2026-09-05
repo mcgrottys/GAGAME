@@ -123,6 +123,10 @@ public:
 
     bool enabled = true;
     std::string stats;
+    // The CPU tile-list build inside Render (up to 384 CornerParams, each Level() = 18
+    // SampleFieldStack + 18 sincos, plus the height-stack sample), last frame, ms. It runs
+    // inside the [rail] RENDER bracket and was unnamed there; main reads and zeroes it.
+    double tileListMs = 0.0;
 
 private:
     // Mirrors BankCb in WaterBank.hlsl.

@@ -249,6 +249,30 @@ public:
     uint32_t ringHeld = 0;       // requests deferred by the gate, cumulative
     uint32_t ringHeldFrame = 0;  // ...and this frame alone
 
+    // THE TURN'S CPU COST, BY PHASE. ProcessQueues runs inside GlobeLayer::Render, i.e. inside
+    // the [rail] RENDER bracket, and was the only unnamed CPU work in it: the descent's record
+    // tail (render minus GPU: p95 8.5-8.7 ms, max 15.2 ms at frame 561 against a 2.8 ms GPU,
+    // out/instr_bench) has no owner until these say which phase carries it -- the per-tile
+    // IDStorageFactory::OpenFile, the two shared_ptr sorts under m_mx, the 96 x 64 KB ring
+    // memcpy, or the whole-tenant residency-map memcpy. Every phase is a steady_clock bracket;
+    // queue-side UpdateTileMappings is inside its phase (it is CPU-side driver work), GPU
+    // execution is not. Zeroed at the top of ProcessQueues; main reads them after RenderFrame.
+    static constexpr int kPhases = 10;
+    static const char* PhaseName(int k) {
+        static const char* kNames[kPhases] = {
+            "invalidate + retire (NULL maps)", "DS landed: fence poll + CopyTiles",
+            "sort m_seen",                     "start loads",
+            "sort m_loading",                  "gather mappable",
+            "map: evict + UpdateTileMappings", "fill: DS OpenFile + Enqueue",
+            "fill: ring memcpy + CopyTiles",   "residency map memcpy + copies"};
+        return (k >= 0 && k < kPhases) ? kNames[k] : "?";
+    }
+    double phaseMs[kPhases] = {};
+    double turnMs = 0.0;   // the whole ProcessQueues call (phases + the untimed stats string)
+    // DirectStorage batches whose fence has not signalled: mapped, not yet claimed. Together
+    // with PendingCount() this is "nothing is still landing" -- what --settle-sync waits for.
+    uint32_t InFlightReads() const { return static_cast<uint32_t>(m_inFlightReads.size()); }
+
 private:
     struct Tenant {
         std::wstring name;

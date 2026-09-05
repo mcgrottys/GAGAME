@@ -77,6 +77,11 @@ public:
     bool DumpPng(const std::wstring& path);
     // Raw RGBA8 + its row pitch (which may exceed width*4 -- D3D readback alignment).
     bool DumpRaw(std::vector<uint8_t>& out, uint32_t* rowPitch);
+    // --dump-hdr: the RGBA16F scene radiance BEFORE the tonemap, raw de-pitched rows plus a
+    // .json sidecar (size, exposure, the shoulder knee and gamma Tonemap.hlsl applies), so a
+    // sub-LSB claim is judged in radiance through the curve (tools/imgdiff.py --hdr) rather
+    // than in the 8-bit image that already rounded it.
+    bool DumpHdr(const std::wstring& path);
     uint32_t Width() const { return m_width; }
     uint32_t Height() const { return m_height; }
 

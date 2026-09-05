@@ -318,6 +318,9 @@ private:
 public:
     mutable uint64_t walkNodes = 0, walkLeaves = 0, walkWantNs = 0;
     void WalkReset() { walkNodes = walkLeaves = walkWantNs = 0; }
+    // The meshlet-record memcpy into the frame's upload buffer (Render), last frame, ms: the
+    // one CPU cost of the mesh path inside the RENDER bracket. main reads and zeroes it.
+    double meshletCopyMs = 0.0;
 private:
 
     // Load -> compose -> sparse, and report the worst disagreement with the source array.

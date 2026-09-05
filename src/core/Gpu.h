@@ -89,6 +89,11 @@ public:
     void Shutdown();
     // What the swapchain actually does (for the boot report and the perf lines).
     bool TearingEnabled() const { return m_tearing; }
+    // Windowed only, at exit: presents actually shown per panel refresh over the run, from
+    // DXGI_FRAME_STATISTICS sampled after the first presents and again here, beside the
+    // panel's refresh rate -- the perceived rate under Present(1,0) that [perf]'s loop mean
+    // cannot see (probe P12: is the owner's ~30 fps a present-path throughput limit?).
+    void ReportPresentStats();
 
     ID3D12Device* Device() const { return m_device.Get(); }
     // UpdateTileMappings lives on the queue, not the command list; the atlas needs this.
@@ -178,6 +183,11 @@ private:
     Com<IDXGISwapChain3> m_swapchain;
     bool m_wantTearing = false;   // asked for (--no-vsync)
     bool m_tearing = false;       // granted (DXGI_FEATURE_PRESENT_ALLOW_TEARING said yes)
+    // ReportPresentStats: the first sample is taken once the swapchain has presented a few
+    // frames (the first call can come back DISJOINT); deltas against it are the run.
+    DXGI_FRAME_STATISTICS m_presentStats0{};
+    bool m_presentStats0Valid = false;
+    uint32_t m_presents = 0;      // Present() calls
 
     Com<ID3D12Resource> m_backBuffers[kFrameCount];
     uint32_t m_backBufferRtv[kFrameCount] = {};

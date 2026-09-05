@@ -592,6 +592,17 @@ void ResidencyManager::Drop(int tenant) {
 
 void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     PixScope scope(cl, "residency (seen->load->map->fill; classic lists, screw prefetch)");
+    // The phase brackets (see phaseMs in the header). `lap` closes the phase that began at the
+    // previous lap; a block that is not a phase (the --res-trace print) resets the lap clock.
+    using Clock = std::chrono::steady_clock;
+    const auto turn0 = Clock::now();
+    auto lap0 = turn0;
+    for (double& p : phaseMs) p = 0.0;
+    auto lap = [&](int k) {
+        const auto t = Clock::now();
+        phaseMs[k] += std::chrono::duration<double, std::milli>(t - lap0).count();
+        lap0 = t;
+    };
     ++m_frame;
     // M9bb: apply the invalidations the painting threads queued (one tile each).
     {
@@ -633,6 +644,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         it->tile->state = TileState::Failed;
         it = m_retiring.erase(it);
     }
+    lap(0);
 
     // ---- M9ai: RETIRE LANDED DIRECT READS. A tile mapped last frame and read by DirectStorage
     // becomes claimable only once its fence signals. Until then it has been mapped but NOT
@@ -686,6 +698,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             it = m_inFlightReads.erase(it);
         }
     }
+    lap(1);
 
     // ---- M9al: the instrument. Deficit by mip per tenant, queue depths, slots by kind.
     if (traceRes && (m_frame % (std::max)(1u, traceEvery)) == 0) {
@@ -731,6 +744,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         }
     }
     ringHeldFrame = 0;
+    lap0 = Clock::now();   // the trace print above is not a phase
 
     // ---- start loads (newest-seen first, coarse first; predicted tiles yield to real ones)
     {
@@ -744,6 +758,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             ++m_inFlight;
             m_cv.notify_one();
         }
+        lap(3);
         // M9af: READY BEFORE UNREADY. A tile already on the NVMe is a 64 KB read; one that is
         // not is a paint of 16384 samples and, for a tile-tree source, a network fetch behind a
         // budget. Those differ by orders of magnitude and the queue could not tell them apart,
@@ -759,6 +774,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             if (a->lastSeen != b->lastSeen) return a->lastSeen > b->lastSeen;
             return a->req.mip > b->req.mip;
         });
+        lap(2);
         // M9af: READINESS ORDERING WAS TRIED HERE AND MEASURED WORSE. See the note on
         // ResidencyManager::SetTileIndex -- preferring tiles already on the NVMe starves the
         // painting that puts them there, and this scene's cache is ~1% warm at the finest level.
@@ -774,6 +790,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             ++m_inFlight;
             m_cv.notify_one();
         }
+        lap(3);
     }
 
     // ---- gather mappable tiles (loaded, parent already mapped or coarsest)
@@ -787,6 +804,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             if (a->req.mip != b->req.mip) return a->req.mip > b->req.mip;
             return a->lastSeen > b->lastSeen;
         });
+        lap(4);
         for (auto it = m_loading.begin();
              it != m_loading.end() && batch.size() < kMaxMapsPerFrame;) {
             auto& tile = *it;
@@ -818,8 +836,10 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             batch.push_back(tile);
             it = m_loading.erase(it);
         }
+        lap(5);
     }
-    if (!batch.empty()) MapAndFill(gpu, cl, batch);
+    if (!batch.empty()) MapAndFill(gpu, cl, batch);   // phases 6..8 bracket themselves
+    lap0 = Clock::now();
 
     // ---- residency-map refresh (tiny R8 maps; only when dirty)
     //
@@ -865,6 +885,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         gpu.Transition(cl, t.resMap, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
                                          D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     }
+    lap(9);
 
     // ---- stats
     char s[256];
@@ -885,11 +906,21 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
                  f.bytes() / 1048576.0);
         stats += fs;
     }
+    turnMs = std::chrono::duration<double, std::milli>(Clock::now() - turn0).count();
 }
 
 void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
                                   const std::vector<std::shared_ptr<Tracked>>& batch) {
     PixMarker(cl, "residency.mapAndFill");
+    // Phase brackets (header, phaseMs): 6 = evict + map + barriers, 7 = the DirectStorage
+    // per-tile OpenFile + Enqueue and the Submit, 8 = the ring memcpy + CopyTiles.
+    using Clock = std::chrono::steady_clock;
+    auto ph0 = Clock::now();
+    auto phase = [&](int k) {
+        const auto t = Clock::now();
+        phaseMs[k] += std::chrono::duration<double, std::milli>(t - ph0).count();
+        ph0 = t;
+    };
     // Evictions to free pool slots when needed. Never evict: the coarsest mip, tiles seen
     // within the frame-overlap window (the GPU may still read them), or tiles with a mapped
     // child (the classic's pyramid invariant).
@@ -996,6 +1027,7 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
             t.state = D3D12_RESOURCE_STATE_COPY_DEST;
         }
     }
+    phase(6);
     std::vector<std::shared_ptr<Tracked>> direct;
     for (const auto& tile : toFill) {
         Tenant& t = m_tenants[tile->tenant];
@@ -1027,6 +1059,7 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
                 tile->stageOffset = slotOff;
                 direct.push_back(tile);
                 ++m_directTiles;
+                phase(7);
                 continue;
             }
         }
@@ -1039,12 +1072,14 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
         ++m_ringTiles;
         tile->data.clear();
         tile->data.shrink_to_fit();
+        phase(8);
     }
     if (!direct.empty()) {
         InFlightRead f;
         f.fence = m_stream->Submit();
         f.tiles = std::move(direct);
         m_inFlightReads.push_back(std::move(f));
+        phase(7);
     }
     for (auto& t : m_tenants) {
         D3D12_RESOURCE_BARRIER b{};
@@ -1058,6 +1093,7 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
         t.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     }
+    phase(6);
 }
 
 void ResidencyManager::RegisterField(const char* name, std::function<uint64_t()> residentBytes,

@@ -426,4 +426,39 @@ bool Renderer::DumpPng(const std::wstring& path) {
     return ok;
 }
 
+bool Renderer::DumpHdr(const std::wstring& path) {
+    m_gpu->WaitIdle();
+    uint32_t rowPitch = 0;
+    // sceneColor sits in PIXEL_SHADER_RESOURCE after the tonemap read it; ReadbackTexture
+    // transitions to COPY_SOURCE and back, so the next frame's RENDER_TARGET transition holds.
+    std::vector<uint8_t> px = m_gpu->ReadbackTexture(m_sceneColor, &rowPitch);
+    if (px.empty()) return false;
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path.c_str(), L"wb") != 0 || !f) {
+        Log("[renderer] dump-hdr %S : FAILED (open)", path.c_str());
+        return false;
+    }
+    const size_t rowBytes = size_t(m_width) * 8;   // RGBA16F, de-pitched
+    bool ok = true;
+    for (uint32_t y = 0; y < m_height && ok; ++y) {
+        ok = fwrite(px.data() + size_t(y) * rowPitch, 1, rowBytes, f) == rowBytes;
+    }
+    fclose(f);
+    const std::wstring side = path + L".json";
+    if (_wfopen_s(&f, side.c_str(), L"wb") == 0 && f) {
+        // The curve the 8-bit image went through (Tonemap.hlsl): v = pow(shoulder(E * L), 1 / gamma)
+        // with shoulder(x) = min(x, knee) + (1 - knee) * (1 - exp(-(x - knee)+ / (1 - knee))).
+        fprintf(f,
+                "{ \"width\": %u, \"height\": %u, \"format\": \"RGBA16F\", \"exposure\": %.9g, "
+                "\"knee\": 0.85, \"gamma\": 2.2 }\n",
+                m_width, m_height, double(m_desc.exposure));
+        fclose(f);
+    } else {
+        ok = false;
+    }
+    Log("[renderer] dump-hdr %S : %s (%ux%u RGBA16F, exposure %.4g, sidecar %S)", path.c_str(),
+        ok ? "ok" : "FAILED", m_width, m_height, double(m_desc.exposure), side.c_str());
+    return ok;
+}
+
 }  // namespace ga

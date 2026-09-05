@@ -310,6 +310,14 @@ void Gpu::EndFrame(bool present) {
     if (present && m_swapchain) {
         GA_CHECK(m_tearing ? m_swapchain->Present(0, DXGI_PRESENT_ALLOW_TEARING)
                            : m_swapchain->Present(1, 0));
+        ++m_presents;
+        if (!m_presentStats0Valid && m_presents >= 8) {
+            DXGI_FRAME_STATISTICS fs{};
+            if (SUCCEEDED(m_swapchain->GetFrameStatistics(&fs))) {
+                m_presentStats0 = fs;
+                m_presentStats0Valid = true;
+            }
+        }
     }
 
     m_frameFence[m_frameIndex] = ++m_fenceValue;
@@ -327,6 +335,73 @@ void Gpu::WaitIdle() {
         GA_CHECK(m_fence->SetEventOnCompletion(v, m_fenceEvent));
         WaitForSingleObject(m_fenceEvent, INFINITE);
     }
+}
+
+void Gpu::ReportPresentStats() {
+    if (!m_swapchain) return;
+    // The panel behind the window: its current mode's refresh rate is the denominator.
+    // MEASURED on this laptop: the swapchain sits on the RTX, which owns no output, so
+    // GetContainingOutput fails (cross-adapter present); the window's monitor names the panel
+    // instead. The same composed present is why DXGI_FRAME_STATISTICS counts nothing (0
+    // presents over 0 refreshes after 400 Present() calls): the flip happens on the 780M
+    // under DWM, out of this swapchain's sight. Both cases are said rather than printed as 0.
+    auto panelHz = [](const wchar_t* deviceName) {
+        DEVMODEW dm{};
+        dm.dmSize = sizeof(dm);
+        return EnumDisplaySettingsW(deviceName, ENUM_CURRENT_SETTINGS, &dm)
+                   ? static_cast<unsigned>(dm.dmDisplayFrequency)
+                   : 0u;
+    };
+    std::string panel = "(unknown output)";
+    unsigned hz = 0;
+    {
+        Com<IDXGIOutput> out;
+        DXGI_OUTPUT_DESC od{};
+        char buf[96];
+        if (SUCCEEDED(m_swapchain->GetContainingOutput(&out)) && SUCCEEDED(out->GetDesc(&od))) {
+            snprintf(buf, sizeof(buf), "%S", od.DeviceName);
+            panel = buf;
+            hz = panelHz(od.DeviceName);
+        } else if (m_hwnd) {
+            MONITORINFOEXW mi{};
+            mi.cbSize = sizeof(mi);
+            if (GetMonitorInfoW(MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
+                snprintf(buf, sizeof(buf), "%S (the window's monitor; the swapchain's adapter "
+                         "owns no output)", mi.szDevice);
+                panel = buf;
+                hz = panelHz(mi.szDevice);
+            }
+        }
+    }
+    DXGI_FRAME_STATISTICS fs{};
+    const HRESULT hr = m_swapchain->GetFrameStatistics(&fs);
+    if (FAILED(hr) || !m_presentStats0Valid) {
+        Log("[present] %s at %u Hz: %u Present() calls; DXGI_FRAME_STATISTICS unavailable (%s) "
+            "-- presents per refresh not measured",
+            panel.c_str(), hz, m_presents,
+            FAILED(hr) ? (hr == DXGI_ERROR_FRAME_STATISTICS_DISJOINT ? "disjoint" : "failed")
+                       : "no first sample");
+        return;
+    }
+    // Deltas since the first sample: PresentCount counts images that reached the monitor,
+    // SyncRefreshCount the v-blanks that passed. Their ratio is what a viewer sees; under
+    // Present(1,0) it cannot exceed 1, under tearing it can.
+    const UINT shown = fs.PresentCount - m_presentStats0.PresentCount;
+    const UINT refreshes = fs.SyncRefreshCount - m_presentStats0.SyncRefreshCount;
+    if (shown == 0 && refreshes == 0) {
+        Log("[present] %s at %u Hz: %u Present() calls (%s), but DXGI_FRAME_STATISTICS counted "
+            "0 presents over 0 refreshes -- a composed (cross-adapter) present reports none, so "
+            "presents per refresh is not measurable from this swapchain; PresentMon is the tool "
+            "(probe P12)",
+            panel.c_str(), hz, m_presents,
+            m_tearing ? "Present(0, ALLOW_TEARING)" : "Present(1, 0)");
+        return;
+    }
+    const double perRefresh = refreshes ? double(shown) / double(refreshes) : 0.0;
+    Log("[present] %s at %u Hz: %u presents shown over %u refreshes = %.3f presents/refresh "
+        "(~%.1f fps perceived); %u Present() calls, %s",
+        panel.c_str(), hz, shown, refreshes, perRefresh, perRefresh * double(hz), m_presents,
+        m_tearing ? "Present(0, ALLOW_TEARING)" : "Present(1, 0)");
 }
 
 void Gpu::Resize(uint32_t width, uint32_t height) {

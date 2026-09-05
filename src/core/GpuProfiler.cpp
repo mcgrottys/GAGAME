@@ -112,6 +112,18 @@ void GpuProfiler::ReadSlot(uint32_t slot) {
         if (row.ms[sp.pass] < 0.0f) row.ms[sp.pass] = ms;
         else row.ms[sp.pass] += ms;
     }
+    // The whole-frame pair is spans[0] (BeginFrame opens it first); its raw ticks give the
+    // inter-frame gap against the previous row's closing stamp (see m_lastFrameEnd).
+    if (!s.spans.empty()) {
+        const uint64_t fb = ticks[s.spans[0].begin], fe = ticks[s.spans[0].end];
+        if (m_lastFrameEnd && fb > m_lastFrameEnd) {
+            const uint32_t gap = PassId("gpu.gap");
+            if (gap != UINT32_MAX) {
+                row.ms[gap] = float(double(fb - m_lastFrameEnd) * m_msPerTick);
+            }
+        }
+        m_lastFrameEnd = fe;
+    }
     D3D12_RANGE none{0, 0};
     m_readback->Unmap(0, &none);
     m_rows.push_back(std::move(row));
@@ -162,6 +174,12 @@ void GpuProfiler::Report(int64_t helmFrom) const {
                 m_names[p].c_str(), sum / double(v.size()), pct(0.50), pct(0.95), mx,
                 static_cast<long long>(mxAt), v.size());
         }
+    }
+    for (const std::string& n : m_names) {
+        if (n != "gpu.gap") continue;
+        Log("[gpu] gpu.gap is the idle between one frame's closing stamp and the next frame's "
+            "opening one (outside whole-frame): the GPU waiting on the CPU record, the "
+            "BeginFrame fence, or the display's present pacing");
     }
 }
 
