@@ -159,9 +159,13 @@ if (args.lastBench) state.lastBench = args.lastBench
 // args.opusFrom onward to spare the Fable quota; earlier steps keep their cached Fable results
 // (a changed opts object would invalidate the cache, so the override is only added from that step).
 // Pass args.opusFrom = 0 to keep everything on the session model.
+// Fable stays on the steps whose risk is in the reasoning (the owner: 'use it wisely'): the
+// shader-exactness gates, the cull-side audit and the pop-in track's algebra, and their verifiers.
 const opusFrom = (args.opusFrom === undefined) ? 6 : args.opusFrom
-const implOpts = (n) => (opusFrom && n >= opusFrom) ? { model: 'opus' } : {}
-const verifyOpts = (n) => (opusFrom && n >= opusFrom - 1) ? { model: 'opus' } : {}
+const fableSteps = args.fableSteps || [8, 11, 17, 18, 19]
+const fableVerify = args.fableVerify || [8, 9, 17, 18, 19]
+const implOpts = (n) => (opusFrom && n >= opusFrom && !fableSteps.includes(n)) ? { model: 'opus' } : {}
+const verifyOpts = (n) => (opusFrom && n >= opusFrom - 1 && !fableVerify.includes(n)) ? { model: 'opus' } : {}
 const startStep = args.startStep || 1
 if (args.priorResults) state.results.push(...args.priorResults)
 
