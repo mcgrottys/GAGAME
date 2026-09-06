@@ -266,7 +266,95 @@ struct VsOut {
     float  att : TEXCOORD2;         // skirt attenuation
     float  brk : TEXCOORD3;         // depth-limited breaking fraction at this vertex
     float2 sh : TEXCOORD4;          // x = water depth (m), y = dry guard
+    // M9bg: the surface's finished colour, shaded in the DOMAIN shader (this mesh's per-vertex
+    // stage) and INTERPOLATED across the triangle. PsMain only writes it out.
+    float3 col : TEXCOORD5;
 };
+
+// ---- M9bg: THE SEA, VERTEX-SHADED --------------------------------------------------------
+// The user's contract: "old school vertex shaded water keeping the nice geometry". This is
+// the SeaLayer's half of it (the globe's half is Globe.hlsl WaterVertexColor); it runs in the
+// DOMAIN shader, which is this surface's per-vertex stage once the hardware has tessellated.
+//
+// The geometry is untouched -- the same screen-space edge factors, the same three cascades,
+// the same depth-limited breaking clamp. What retired is everything that used to PAINT the
+// water per pixel: the composed imagery bed, the churn atlas, the globe-convergence block
+// with its ComposedHeight/ComposedColor lod cascade, the residency visualiser. The only reads
+// left are the cascade DERIVATIVE textures, which is where this vertex's wave NORMAL comes
+// from -- the geometry's own source, sampled exactly where the displacement was.
+float3 SeaVertexColor(float2 xz, float3 rel, float2 U, float2 adv, float depth, float dryGuard,
+                      float shadow, float att, float brk, float distCam) {
+    const float kFoamW[3] = {0.3f, 1.0f, 1.0f};
+    float hx = 0, hz = 0, foam = 0, chopFoam = 0, blockC2 = 0;
+    float sig2 = gBandSig.w;
+    [unroll] for (uint c = 0; c < 3; ++c) {
+        const float2 uvc = (xz - adv) / gPatchL[c];
+        const float w = CascadeFade(c, distCam) * att;
+        const float2 ab = BandScale(c, U, depth, shadow);
+        const float4 dv = gTex[gDerivSrv[c]].SampleLevel(sLinearWrap, uvc, 0);
+        hx += dv.x * w * ab.x;
+        hz += dv.y * w * ab.x;
+        sig2 += gBandSig[c] * (1.0f - w) * ab.x * ab.x * dryGuard * dryGuard;
+        foam += dv.w * w * kFoamW[c] * saturate(ab.x);
+        if (c == 2) {
+            chopFoam = dv.w * w;
+            blockC2 = ab.y;
+        }
+    }
+    hx *= dryGuard * gWaveC.x;
+    hz *= dryGuard * gWaveC.x;
+    const float sm0 = length(float2(hx, hz));
+    if (sm0 > 1.1f) {
+        hx *= 1.1f / sm0;
+        hz *= 1.1f / sm0;
+    }
+    // THE FOLD, AT VERTEX DENSITY: a glint lobe narrower than the triangle it lands on
+    // interpolates into hard white facets. The sub-vertex sharpness sheds into the variance
+    // (the same law the bands already obey), floored at the open-ocean Cox-Munk value.
+    sig2 = max(sig2, 0.0260f);
+    const float3 n = normalize(float3(-hx, 1.0f, -hz));
+    const float3 v = normalize(-rel);
+
+    // The body: the scattering asymptote, one Lambert term. No bed, no imagery.
+    const float3 deep = gBscat.rgb / max(gSigmaW.rgb, 1e-4f);
+    const float ndl = saturate(dot(n, gSunDir.xyz));
+    float3 col = deep * (0.30f + 0.70f * ndl) * SUN_IRR_C;
+
+    // The sky mirror, horizon-clamped (a steep shoaling face must read as horizon sky, not
+    // the near-black a below-horizon ray would give).
+    float3 refl = reflect(-v, n);
+    refl.y = max(refl.y, 0.02f);
+    const float f = 0.02f + 0.98f * pow(1.0f - saturate(dot(n, v)), 5.0f);
+    col = lerp(col, SkyRadianceDirDiscless(refl), f);
+
+    // The one glint: the same Cox-Munk lobe, evaluated once per vertex.
+    {
+        const float3 hv = normalize(v + gSunDir.xyz);
+        const float ch = saturate(dot(hv, n));
+        const float t2 = max(1.0f - ch * ch, 0.0f) / max(ch * ch, 1e-4f);
+        float glint = exp(-t2 / sig2) /
+                      (4.0f * 3.14159265f * sig2 * max(ch * ch * ch * ch, 1e-4f));
+        glint *= (0.02f + 0.98f * pow(1.0f - saturate(dot(v, hv)), 5.0f)) *
+                 saturate(dot(gSunDir.xyz, n));
+        col += glint * SUN_IRR_C * 0.85f;
+    }
+
+    // Whitecaps: the Jacobian foam, current blocking of the chop, and the depth-limited
+    // breaking this vertex's own clamp reported. The churn atlas (a texture) is out.
+    const float slopeMag = saturate(length(float2(hx, hz)) * 1.5f);
+    const float currentFoam = blockC2 * (0.10f * CascadeFade(2, distCam) +
+                                         0.55f * saturate(chopFoam * 3.0f + slopeMag * 0.6f));
+    float shoreFoam = 0.0f;
+    if (gBathyU.x != 0xFFFFFFFFu) {
+        const float surf = saturate(brk * 6.0f);
+        shoreFoam = saturate(brk * 1.5f + smoothstep(0.9f, 0.25f, depth) * 0.4f * surf) *
+                    dryGuard * saturate(0.35f + chopFoam * 2.0f + slopeMag * 0.8f);
+    }
+    const float fm = min(saturate(foam * gSea.z + currentFoam + shoreFoam), 0.88f);
+    col = lerp(col, float3(1.05f, 1.10f, 1.15f) * (0.55f + 0.6f * ndl), fm);
+
+    return AerialPerspective(col, normalize(rel), distCam);
+}
 
 [domain("quad")]
 VsOut DsMain(HsPatch hs, float2 uv : SV_DomainLocation, const OutputPatch<VsCtl, 4> p) {
@@ -318,6 +406,7 @@ VsOut DsMain(HsPatch hs, float2 uv : SV_DomainLocation, const OutputPatch<VsCtl,
     o.worldXZ = xz;
     o.sh = float2(depth, dryGuard);
     o.rel = world - gEyeRel.xyz;
+    o.col = SeaVertexColor(xz, o.rel, U, adv, depth, dryGuard, shadow, o.att, o.brk, distCam);
     o.pos = mul(float4(o.rel, 1.0f), gViewProj);
     return o;
 }
@@ -325,198 +414,23 @@ VsOut DsMain(HsPatch hs, float2 uv : SV_DomainLocation, const OutputPatch<VsCtl,
 // ------------------------------------------------------------------ shading
 
 float4 PsMain(VsOut i) : SV_Target {
-    const float distCam = length(i.rel);
-    const float kFoamW[3] = {0.3f, 1.0f, 1.0f};
-    const float2 Upx = JetU(i.worldXZ);
-    const float2 adv = JetUAdvect(i.worldXZ) * gWaveC.w;   // must match the DS sampling exactly
-    const float depth = i.sh.x;
-    // M6i: OUTSIDE the surveyed window the survey mask classifies per pixel -- the ocean sheet
-    // simply is not drawn over land (inside the window the SWE wet/dry + terrain depth own
-    // this, so the gate stays out of the estuary's way).
+    // ---- M9bg: THE PIXEL STAGE DOES NO SHADING. The colour was computed at this triangle's
+    // vertices (SeaVertexColor, in the domain shader) and interpolated here -- old-school
+    // vertex shading, with the tessellated geometry left exactly as it was.
+    //
+    // The one thing that stays per pixel is not paint, it is the land/water QUESTION: outside
+    // the surveyed window the ocean sheet simply must not be drawn over land, and that cut is
+    // a classification, at the pixel's own resolution (M6i). Inside the window the SWE wet/dry
+    // and the terrain depth own it, so the gate stays out of the estuary's way.
     {
         const float2 buv = (i.worldXZ - gBathyGeo.xy) * gBathyGeo.zw;
         const bool surveyed =
             gBathyU.x != 0xFFFFFFFFu && all(buv > 0.002f) && all(buv < 0.998f);
         if (!surveyed && ComposedHeightOn() &&
-            ComposedIsLand(SeaPlanetDir(i.worldXZ), gSea.x - depth, gSea.x) &&
-            depth < 0.75f) {
+            ComposedIsLand(SeaPlanetDir(i.worldXZ), gSea.x - i.sh.x, gSea.x) &&
+            i.sh.x < 0.75f) {
             discard;
         }
     }
-    const float shadow = SweShadow(i.worldXZ);
-
-    float hx = 0, hz = 0, foam = 0, chopFoam = 0, blockC2 = 0;
-    // M6t: the shed variance. Starts at the sub-resolved floor (capillary tail the FFT never
-    // synthesises) and collects every band the footprint has folded, scaled by the same local
-    // amplitude physics the geometry would have shown (shoaling, shadow, dry guard). At the
-    // helm this is a tight glitter on resolved wave faces; at altitude it telescopes to the
-    // globe's Cox-Munk sigma^2 -- the two water descriptions meet at the same pixel.
-    float sig2 = gBandSig.w;
-    [unroll] for (uint c = 0; c < 3; ++c) {
-        const float2 uvc = (i.worldXZ - adv) / gPatchL[c];
-        const float w = CascadeFade(c, distCam) * i.att;
-        const float2 ab = BandScale(c, Upx, depth, shadow);
-        const float4 dv = gTex[gDerivSrv[c]].SampleLevel(sLinearWrap, uvc, 0);
-        hx += dv.x * w * ab.x;
-        hz += dv.y * w * ab.x;
-        sig2 += gBandSig[c] * (1.0f - w) * ab.x * ab.x * i.sh.y * i.sh.y;
-        // Foam follows the band's LOCAL amplitude: a swell that never reaches the lee cannot
-        // whitecap there.
-        foam += dv.w * w * kFoamW[c] * saturate(ab.x);
-        if (c == 2) {
-            chopFoam = dv.w * w;
-            blockC2 = ab.y;
-        }
-    }
-    hx *= i.sh.y * gWaveC.x;
-    hz *= i.sh.y * gWaveC.x;
-    // M6t: cap the shaded slope at the limiting steepness -- shoaling gain can push sampled
-    // slopes past any real wave face (they would be BREAKING; that physics is M7's), and the
-    // over-steep facets rendered as dark back-faces speckling storm aerials.
-    const float sm0 = length(float2(hx, hz));
-    if (sm0 > 1.1f) {
-        hx *= 1.1f / sm0;
-        hz *= 1.1f / sm0;
-    }
-    const float3 n = normalize(float3(-hx, 1.0f, -hz));
-    const float3 v = normalize(-i.rel);
-
-    // Water colour: the b/sigma asymptote in deep water, blending toward sunlit bed as the
-    // two-way extinction thins.
-    const float3 deep = gBscat.rgb / max(gSigmaW.rgb, 1e-4f);
-    const float ndl = saturate(dot(n, gSunDir.xyz));
-    float3 col = deep * (0.30f + 0.70f * ndl) * SUN_IRR_C;
-    if (gBathyU.x != 0xFFFFFFFFu) {
-        const float dd = max(depth, 0.04f);
-        const float3 T = exp(-2.2f * gSigmaW.rgb * dd);
-        // M6n: the bed the thin water reveals is the IMAGERY's bed, not an analytic sand
-        // tone. Flooded marsh shows brown marsh through centimetres of tide, sandbars show
-        // sand, and the dry-guard's glassy sheet stops reading as grey SPECKLE from altitude
-        // -- it reads as what is under it. (ComposedColor returns linear; lit like the old
-        // constant so deep-water behaviour is untouched.)
-        float3 bedAlb = float3(0.42f, 0.38f, 0.28f);
-        if (ComposedColorOn()) bedAlb = ComposedColor(SeaPlanetDir(i.worldXZ));
-        const float3 bedCol = bedAlb * (0.35f + 0.75f * ndl) * SUN_IRR_C;
-        col = lerp(col, bedCol, T);
-    }
-
-    // Fresnel sky reflection -- the one shared sky, but DISCLESS (M6t): the sun's specular
-    // now belongs entirely to the Cox-Munk lobe below, which owns it at EVERY scale (a
-    // mirror disc here plus the lobe at helm-tight sigma^2 would count the sun twice).
-    // Steep shoaling faces can send the reflection below the horizon; a real sea shows
-    // spilling whitecaps there (steepness-limited breaking -- the M7 wavelets item). Until
-    // then, CLAMP the ray to the horizon: those facets read as horizon sky (what water
-    // actually mirrors at grazing), not the near-black that speckled storm aerials -- and
-    // not the zenith blue an abs() mirror would give (tried; it traded black for teal).
-    float3 refl = reflect(-v, n);
-    refl.y = max(refl.y, 0.02f);
-    const float f = 0.02f + 0.98f * pow(1.0f - saturate(dot(n, v)), 5.0f);
-    col = lerp(col, SkyRadianceDirDiscless(refl), f);
-
-    // M6u: THE OTHER HALF OF ONE WATER. M6t unified the ENERGY (glint sigma^2 telescopes to
-    // Cox-Munk); the mode handoff still swapped the water's COLOR -- the globe paints its
-    // ocean from the shelf-tinted albedo + composed imagery with NO near-field haze, the sea
-    // painted a scattering asymptote under a hazed sky mirror, and at the switch the whole
-    // ocean snapped (the user's frame pair, 0:16 vs 0:17). Convergence: above the estuary's
-    // own altitudes this pixel evaluates THE GLOBE'S EXACT WATER FORMULA -- same composed
-    // channels, same lod the globe would pick, same lighting constants -- and the sky mirror
-    // and haze fade out with it. By the handoff band the two renderers emit the same pixel.
-    const float kFar = smoothstep(700.0f, 2800.0f, gEyeRel.y);
-    if (kFar > 0.0f) {
-        const float3 dirP = SeaPlanetDir(i.worldXZ);
-        const float pixAng = 2.0f * length(gCamUp.xyz) * gViewport.w;
-        const float lodFar = ComposedHeightLod(distCam, pixAng);
-        const float hp = ComposedHeightOn() ? ComposedHeight(dirP, lodFar) : -30.0f;
-        const float shelf = saturate(1.0f + hp / 160.0f);
-        float3 albSea = lerp(float3(0.013f, 0.055f, 0.115f), float3(0.06f, 0.30f, 0.34f),
-                             shelf * shelf);
-        albSea = lerp(albSea, float3(0.55f, 0.62f, 0.68f),
-                      saturate((gFadeD.x - 2.5f) / 9.0f) * 0.55f);
-        if (ComposedColorOn()) {
-            const float3 img = ComposedColor(dirP);
-            const float reveal = saturate(1.0f + min(hp, 0.0f) / 80.0f);
-            const float3 albWater = albSea;
-            albSea = lerp(albSea, img, 0.6f * reveal);
-            albSea = SeafloorReliefMod(albSea, albWater, img, hp, 1.0f - reveal);   // M9av
-        }
-        const float ndlG = saturate(gSunDir.y);   // the globe lights water on upT; flat up = +y
-        col = lerp(col, albSea * (0.030f + ndlG * SUN_IRR_C * 1.15f), kFar);
-    }
-
-    // M6t: THE ONE GLINT -- the globe's exact Cox-Munk lobe, on the RESOLVED normal, with
-    // sigma^2 = floor + shed bands. Near: sharp glitter riding wave faces (the missing sun
-    // glint at the helm). Far: n flattens, sigma^2 telescopes to Cox-Munk(wind), and this
-    // expression becomes literally the globe shader's ocean specular. No pop, by construction.
-    {
-        const float3 hv = normalize(v + gSunDir.xyz);
-        const float ch = saturate(dot(hv, n));
-        const float t2 = max(1.0f - ch * ch, 0.0f) / max(ch * ch, 1e-4f);
-        float glint = exp(-t2 / sig2) /
-                      (4.0f * 3.14159265f * sig2 * max(ch * ch * ch * ch, 1e-4f));
-        glint *= (0.02f + 0.98f * pow(1.0f - saturate(dot(v, hv)), 5.0f)) *
-                 saturate(dot(gSunDir.xyz, n));
-        col += glint * SUN_IRR_C * 0.85f;
-    }
-
-    // Whitecaps: wind-gated Jacobian foam + current blocking of the chop + depth-limited
-    // breaking (the standing-wave faces over the bar) + churn memory.
-    const float slopeMag = saturate(length(float2(hx, hz)) * 1.5f);
-    // Blocked chop is scattered breaking wavelets, not paint: everything here rides the LIVE
-    // chop texture, and the small always-on floor exists only within the chop band's own fade
-    // range. (The M5c solved field correctly blocks a WIDE throat area; a structure-free 0.10
-    // baseline over it rendered as a white slab from any aerial view.)
-    const float currentFoam = blockC2 * (0.10f * CascadeFade(2, distCam) +
-                                         0.55f * saturate(chopFoam * 3.0f + slopeMag * 0.6f));
-    float shoreFoam = 0.0f;
-    if (gBathyU.x != 0xFFFFFFFFu) {
-        // M6n: the shallow-DEPTH foam term is gated by BREAKING ENERGY (i.brk), not depth
-        // alone -- depth alone painted a 40% white wash across every acre of quietly flooded
-        // marsh (the last layer of the "flats speckle"). Foam is surf: it appears where waves
-        // actually break, and the sheltered creeks stay glassy over their imagery bed.
-        const float surf = saturate(i.brk * 6.0f);
-        shoreFoam = saturate(i.brk * 1.5f + smoothstep(0.9f, 0.25f, depth) * 0.4f * surf) *
-                    i.sh.y * saturate(0.35f + chopFoam * 2.0f + slopeMag * 0.8f);
-    }
-
-    float churn = 0.0f;
-    if (gChurnU.x != 0xFFFFFFFFu) {
-        // M9az: the atlas is toroidal on the world lattice -- inside the window, sample at
-        // frac(world / domain) with a WRAP sampler (the wrap line runs through the window).
-        const float2 rel = (i.worldXZ - gChurnF.xy) * gChurnF.z;
-        if (all(rel > 0.0f) && all(rel < 1.0f)) {
-            churn = gTex[gChurnU.x].SampleLevel(sLinearWrap, i.worldXZ * gChurnF.z, 0).x;
-        }
-        // The memory says WHERE water is aerated; the chop's live texture says what it looks
-        // like this instant -- without this modulation the throat renders as uniform fog.
-        churn *= 0.5f + 0.5f * saturate(chopFoam * 3.0f + slopeMag);
-        // Metre-scale froth decorrelates into the mean albedo once the footprint outgrows the
-        // churn's 2 m texels (M6t: footprint-based like the wave bands -- zoom-aware).
-        churn *= 1.0f - smoothstep(1.5f, 7.0f, PixFootM(distCam));
-    }
-
-    // Cap below 1 so even the worst breaking keeps a thread of water colour.
-    const float fm = min(saturate(foam * gSea.z + currentFoam + shoreFoam + churn * gChurnF.w),
-                         0.88f);
-    col = lerp(col, float3(1.05f, 1.10f, 1.15f) * (0.55f + 0.6f * ndl), fm);
-
-    // M6u: the globe applies NO near-field haze to its ocean below the space rim; the haze
-    // fades with the same convergence or the handoff keeps an 18% pale step at 3.5 km.
-    col = lerp(AerialPerspective(col, normalize(i.rel), distCam), col, kFar);
-
-    // Residency visualizer (V): green = resident churn tiles, red grid = NULL.
-    if (gChurnU.z != 0u && gChurnU.x != 0xFFFFFFFFu) {
-        const float2 tuv = i.worldXZ / gChurnF2.xy;   // M9az: world tile lattice
-        const float2 dgrid = abs(frac(tuv) - 0.5f);
-        const float2 aa = fwidth(tuv) * 1.5f;
-        const float gridLine = max(smoothstep(0.5f - aa.x, 0.5f, dgrid.x),
-                                   smoothstep(0.5f - aa.y, 0.5f, dgrid.y));
-        const float2 tc = frac((floor(tuv) + 0.5f) / gChurnF2.zw);   // the slot it aliases to
-        const float resident = gTex[gChurnU.y].SampleLevel(sPointClamp, tc, 0).x;
-        const float3 gridCol = (resident > 0.5f) ? float3(0.25f, 1.7f, 0.45f)
-                                                 : float3(0.55f, 0.14f, 0.14f);
-        col = lerp(col, gridCol, gridLine * (resident > 0.5f ? 0.6f : 0.15f));
-        col += resident * float3(0.015f, 0.09f, 0.025f);
-    }
-
-    return float4(col, 1.0f);
+    return float4(i.col, 1.0f);
 }
