@@ -154,13 +154,11 @@ void RegisterKnownComposeEdges() {
     Register({"color.pages", "globe.ps", "page-sample", mercPx, uvS, false, "sRGB",
               "finest containing page, residency-clamped mip", 1.0,
               "Compose.hlsli ComposedColorPages (no flip: both vS)"});
-    Register({"color.pages", "sea.ps", "bed albedo", mercPx, uvS, false, "sRGB",
-              "through the refracted ray; the seafloor relief past the survey", 1.0,
-              "Sea.hlsl ComposedColor(SeaPlanetDir)"});
-    Register({"color.pages", "globe.ps", "bed albedo", mercPx, uvS, false, "sRGB",
-              "at the refracted ray's bed hit", 1.0, "Globe.hlsl ComposedColor(bedDir)"});
+    // M9bg: `color.pages -> {globe,sea}.ps "bed albedo"` retired with the refracted ray. The
+    // water is vertex-shaded now and takes NO imagery at all; the colour pages feed land only.
     Register({"height.pages", "globe.ps", "height", mercPx, uvS, false, "m NAVD",
-              "vertex, pixel, refracted cast", 1.0, "Compose.hlsli ComposedHeightPages"});
+              "vertex + pixel classification (M9bg: the refracted cast retired)", 1.0,
+              "Compose.hlsli ComposedHeightPages"});
     Register({"google.tiles", "compose.stack", "fetch", mercPx, mercPx, false, "sRGB bytes",
               "zoom = f(groundResM)", 1.0, "GoogleColorSource::ZoomFor"});
     Register({"massgis.ortho", "compose.stack", "fetch", latlon, mercPx, true, "sRGB bytes",
@@ -216,15 +214,9 @@ void RegisterKnownWaterEdges() {
     Register({"ocean.fft", "water.bank", "cascade.deriv (foam union)", wrap, atlasN,
               false, "jacobian foam 0..1", "0..1", 1.0,
               "WaterBank.hlsl CsBankFill foam discipline"});
-    Register({"ocean.fft", "globe.ps", "cascade.deriv", wrap, atlasN, false, "slope",
-              "+-0.3", 1.0, "Globe.hlsl detail loop"});
-    // M8 caustics: the SAME deriv fibers, sampled at the SUN ray's water entry
-    // (bed - sunRun) and assembled into the ray-map Jacobian -- J in dv.z, the
-    // Laplacian finite-differenced from the slope channels at cascade resolution,
-    // amplitude-scaled by the detail plane's per-band gains (ALGEBRA.md caustics;
-    // proofs/caustic_jacobian.py adjudicated the PHYSICAL gain form).
-    Register({"ocean.fft", "globe.ps", "caustic jacobian", wrap, atlasN, false,
-              "J / 1/m lap", "gain 0.35..2.6", 1.0, "Globe.hlsl M8 caustic block"});
+    // M9bg: `ocean.fft -> globe.ps` lost BOTH its edges -- the per-pixel cascade sparkle and
+    // the M8 caustic Jacobian. A vertex-shaded sea reads no cascade fibers in the pixel stage;
+    // the FFT still reaches the water through the bank kernel, which is where it belongs.
     Register({"swe.solver", "water.bank", "eta", rowS, atlasN, true, "m dEta", "+-1.5", 1.0,
               "WaterBank.hlsl CsBankFill (1-uv.y)"});
     Register({"swe.solver", "water.bank", "uv", rowS, atlasN, true, "m/s", "+-2.5", 1.0,
@@ -249,8 +241,7 @@ void RegisterKnownWaterEdges() {
               "Sea.hlsl SweDEta (1-uv.y)"});
     Register({"exposure.node", "sea.ps", "exposure", mercPxW, uvSW, false, "0..1 exposure",
               "0.12..1", 1.0, "Sea.hlsl SweShadow (uv.x, 1-uv.y)"});
-    Register({"churn.kernel", "sea.ps", "churn", atlasN, atlasN, false, "0..1 aeration",
-              "0..1", 1.05, "Sea.hlsl cuv flat"});
+    // M9bg: `churn.kernel -> sea.ps` retired -- the churn atlas was a per-pixel foam texture.
     Register({"compose.stack", "water.bank", "corners", worldM, worldM, false,
               "m NAVD level/bed + hsScale", "hsScale 0.15..3", 1.0,
               "WaterBankLayer CornerParams (CPU)"});
@@ -277,9 +268,15 @@ void RegisterKnownWaterEdges() {
               false, "m / rad/m / unit spinor (RGBA8 pages, per-comp aMax kMax)",
               "17 planes of the wave.field page tenant (z16), mip 0 pinned", 1.0,
               "WaterBank.hlsl WavePageSample (M9bc; no flip: both vS)"});
-    Register({"water.bank", "globe.ps", "disp/param/detail", atlasN, atlasN, false,
-              "m / sigma2 / m/s / band gains (g1,dry,g0,g2)", "rings 4.8..154 m/texel", 1.0,
-              "Globe.hlsl BankSample manual bilinear"});
+    // M9bg: the pixel stage reads the bank ONLY for the --bank-lens sanity overlay now; the
+    // shading edge moved to globe.mesh below, where WaterVertexColor probes it for the wave
+    // normal, sigma^2 and foam.
+    Register({"water.bank", "globe.ps", "disp/param/detail (sanity lens only)", atlasN, atlasN,
+              false, "m / sigma2 / m/s / band gains (g1,dry,g0,g2)", "rings 4.8..154 m/texel",
+              1.0, "Globe.hlsl BankSample manual bilinear"});
+    Register({"water.bank", "globe.mesh", "shading: normal/sigma2/foam", atlasN, atlasN, false,
+              "m / sigma2 / 0..1 foam", "rings 4.8..154 m/texel", 1.0,
+              "Globe.hlsl WaterVertexColor (3 BankSample probes per vertex)"});
     Register({"water.bank", "globe.mesh", "disp+level", atlasN, atlasN, false, "m NAVD",
               "+-4", 1.0, "GlobeMesh.hlsl BankSample"});
 
@@ -308,10 +305,10 @@ void RegisterKnownWaterEdges() {
     Register({"weather.mgr", "compose.stack", "corner params feed", latlonW, worldM,
               false, "level/bed/hs", "query rungs", 1.0,
               "WeatherManager::Query -> CornerParams"});
-    Register({"gfswave.grid", "globe.ps", "hs whitening", rowS, atlasN, true, "m", "0..15",
-              1.0, "Globe.hlsl wuv (lat1-lat formula)"});
-    Register({"gfs.wind", "globe.ps", "wind10 (far sigma2)", rowS, atlasN, true, "m/s",
-              "0..40", 1.0, "Globe.hlsl wuv; sigma2 = 0.003+0.00512 U"});
+    // M9bg: `gfswave.grid -> globe.ps` (far-field whitening) and `gfs.wind -> globe.ps` (the
+    // Cox-Munk sigma^2 from U10) retired. Both still reach the water, but through the BANK:
+    // Hs sets the corner params below, the wind raises the FFT's sea, and the vertex reads
+    // sigma^2 out of the bank's own param plane.
     // M9a: the wind's SECOND consumer. The same U10 that sets the far-field glint lobe also
     // RAISES a sea on hours where GFS-Wave's partitioning reports none -- without it those
     // hours carry swell only (a 4 mHz Gaussian, no tail) and cascades 1-2 synthesise exactly
@@ -319,18 +316,11 @@ void RegisterKnownWaterEdges() {
     Register({"gfs.wind", "ocean.fft", "wind-sea fill (PM, when partitions have none)",
               latlonW, latlonW, false, "m Hs / s Tp", "Hs 0..2 over U10 0..9", 1.0,
               "SeaLayer::SetTime -> SeaState::WindSeaPm (closure windSeaFill)"});
-    // M9 (docs/ALGEBRA.md "optics"): the water's QUALITY. Two edges into the same consumer,
-    // because the two retrievals answer two different questions about the same pixel -- how
-    // fast light dies in it, and what colour comes back out. Both land in Globe.hlsl's ray
-    // path where M7c had constants.
-    Register({"ocean.colour", "globe.ps", "Kd490 -> Kd(RGB) transfer", rowS, atlasN, true,
-              "1/m", "0.019..6 (Kdw floor)", 1.0,
-              "Globe.hlsl SampleWaterOptics (Austin-Petzold; M(490)=1)"});
-    Register({"ocean.colour", "globe.ps", "chl/SPM -> deep albedo", rowS, atlasN, true,
-              "albedo", "0.001..0.5", 1.0,
-              "Globe.hlsl SampleWaterOptics (Gordon two-flux, gain 2.0331)"});
-    Register({"gfs.icec", "globe.ps", "ice albedo + glint damp", rowS, atlasN, true, "0..1",
-              "concentration", 1.0, "Globe.hlsl wuv (wave grid); sigma2 *= 1-0.95c"});
+    // M9bg: the M9 OPTICS EDGES ARE GONE FROM THE RENDERER. `ocean.colour -> globe.ps` (both
+    // the Austin-Petzold K_d transfer and the Gordon deep albedo) and `gfs.icec -> globe.ps`
+    // fed the two-ray water; a vertex-shaded sea has no ray path to put them in. The
+    // retrievals, the closed forms and proofs/water_optics.py all stand -- nothing downstream
+    // consumes them at present, which is exactly what this diagram should say.
     Register({"gfs.cloud", "cloud.volume", "density bake", rowS, atlasN, true, "0..1",
               "3D tiles 320 km col", 1.0, "GlobeLayer cloud bake (ReliefUv family)"});
     Register({"cloud.volume", "globe.ps", "density march", rowS, atlasN, true, "sigma_t",

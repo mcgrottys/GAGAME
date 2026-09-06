@@ -120,6 +120,9 @@ bool BankFetch(uint m, float2 worldXZ, out float4 disp, out float4 param,
 }
 
 // ---- M8 FOAM BREAKUP (ALGEBRA.md foamlaw; the reference's range-faded octaves) ----
+// M9bg: CURRENTLY UNREFERENCED. This textured the bank's physics coverage per pixel; the
+// vertex-shaded water takes the bank's foam number as it comes. Kept because foamlaw and the
+// reference's 30.7% -> 2.1% gouache measurement still describe the shipped bank kernel.
 // Per-pixel value noise in three IRRATIONALLY-ROTATED octaves (axis-aligned octaves at
 // 2x spacing share lattice seams and sum to rectangular blocks); each octave fades once
 // its features stop covering several pixels of RANGE (never a bank texel -- a shading
@@ -240,6 +243,97 @@ float2 ReliefUv(float3 dir) {
 
 // ------------------------------------------------------------------ vertex
 
+// ---- M9bg: THE WATER IS VERTEX-SHADED (the user's contract: "old school vertex shaded water
+// keeping the nice geometry"). The sea's colour is computed ONCE PER VERTEX here, from the
+// vertex's own wave normal and the analytic sky, and the triangle interpolates it. Nothing
+// paints the water in the pixel stage any more: no imagery, no ocean-colour retrieval, no
+// bed cast, no caustics, no foam-breakup octaves, no per-pixel normals -- PsMain's whole
+// water branch retired into these forty lines.
+//
+// THE GEOMETRY IS UNTOUCHED. The wave bank still displaces every vertex (level + folded
+// cascades + the lateral Gerstner term) and the meshlet/CDLOD density is what it was; the
+// only bank reads here are the two finite-difference probes that give this vertex its wave
+// NORMAL, and those are Loads (BankFetch), which is what makes this legal outside the pixel
+// stage at all -- priors 1: a bindless SampleLevel returns ZERO in the mesh stage, so a
+// vertex-shaded sea may not sample. It does not need to: every term below is a closed form.
+//
+// h is the vertex's own composed height, already fetched for displacement -- the shelf tint
+// rides it for free, so shallows still read green without a single extra fetch.
+float3 WaterVertexColor(float3 dir, float3 rel, float h) {
+    const float3 upT = CsToTangent(dir);
+    const float3 v = normalize(-rel);
+    const float3 axisT = float3(gCsR0.y, gCsR1.y, gCsR2.y);
+    float3 east = cross(axisT, upT);
+    east = (dot(east, east) < 1e-8f) ? float3(1.0f, 0.0f, 0.0f) : normalize(east);
+    const float3 north = cross(upT, east);
+
+    // The wave normal at THIS VERTEX: two finite differences of the bank's own displacement,
+    // at the ring's texel. Same arithmetic the pixel shader used to run per pixel, and the
+    // same 1.1 slope cap (shoaling gain can exceed any real wave face; uncapped facets
+    // render as dark back-face speckle).
+    float3 nW = upT;
+    float s2 = 0.0300f;    // plain wind-sea slope variance where no ring covers this vertex
+    float foam = 0.0f;
+    {
+        float4 bD, bP, bDet, bDx, bDz, tA, tB;
+        float bT, tu;
+        const float2 wxz = (upT * gGlo.x).xz;
+        if (BankSample(wxz, bD, bP, bDet, bT)) {
+            // THE FOLD, AT VERTEX DENSITY (ALGEBRA.md "fold"). The bank's sigma^2 floors at
+            // 0.0015 because a PIXEL could resolve a lobe that sharp. A VERTEX cannot: a
+            // highlight narrower than the triangle it lands on interpolates into hard white
+            // facets (seen at the helm -- the sun's path came out as a staircase of blocks).
+            // Same law as everywhere else in this engine: what the sampling cannot resolve is
+            // not deleted, it sheds into the variance. The floor is the open-ocean Cox-Munk
+            // value, so the sun's path stays a broad sheen the mesh can actually carry.
+            s2 = max(bP.y, 0.0260f);
+            foam = saturate(bD.w);
+            BankSample(wxz + float2(bT, 0.0f), bDx, tA, tB, tu);
+            BankSample(wxz + float2(0.0f, bT), bDz, tA, tB, tu);
+            float sx = (bDx.y - bD.y) / bT;
+            float sz = (bDz.y - bD.y) / bT;
+            const float sl = length(float2(sx, sz));
+            if (sl > 1.1f) { sx *= 1.1f / sl; sz *= 1.1f / sl; }
+            nW = normalize(upT - east * sx - north * sz);
+        }
+    }
+
+    // Depth tint from the vertex's own height: navy offshore, green over the shallows.
+    const float shelf = saturate(1.0f + h / 45.0f);
+    float3 alb = lerp(float3(0.008f, 0.030f, 0.080f), float3(0.055f, 0.28f, 0.31f),
+                      shelf * shelf);
+
+    // The sky mirror, on the reflected ray, horizon-clamped: a facet on the back of a steep
+    // wave reflects BELOW the horizon and the sky model darkens there, which used to paint
+    // grey patches over wave backs.
+    const float fres = 0.02f + 0.98f * pow(1.0f - saturate(dot(v, nW)), 5.0f);
+    const float3 dIn = -v;
+    float3 rDir = normalize(dIn - 2.0f * dot(dIn, nW) * nW);
+    const float rUp = dot(rDir, upT);
+    if (rUp < 0.02f) rDir = normalize(rDir + (0.02f - rUp) * upT);
+
+    // The sun's highlight: the Cox-Munk lobe on the vertex normal, sigma^2 from the bank.
+    const float3 hv = normalize(v + gSunDir.xyz);
+    const float ch = saturate(dot(hv, nW));
+    const float tt = max(1.0f - ch * ch, 0.0f) / max(ch * ch, 1e-4f);
+    float spec = exp(-tt / s2) / (4.0f * kPi * s2 * max(ch * ch * ch * ch, 1e-4f));
+    spec *= (0.02f + 0.98f * pow(1.0f - saturate(dot(v, hv)), 5.0f)) *
+            saturate(dot(gSunDir.xyz, nW));
+
+    // Energy splits, not doubles: the body dims by the Fresnel the mirror takes. Foam rides
+    // ON the water, after the split.
+    alb *= 1.0f - fres;
+    alb = lerp(alb, float3(0.945f, 0.965f, 0.975f), foam * gBankD.w);
+
+    const float day = saturate(dot(gSunDir.xyz, upT) * 3.0f + 0.12f);
+    const float ndl = saturate(dot(nW, gSunDir.xyz));
+    float3 col = alb * (0.030f + ndl * SUN_IRR_C * 1.15f);
+    col += spec * SUN_IRR_C * 0.85f;
+    col += SkyRadianceDirDiscless(rDir) * (fres * 0.9f * (1.0f - foam)) * day;
+    col += alb * float3(0.010f, 0.014f, 0.028f) * (1.0f - day);   // moonlit-blue night side
+    return col;
+}
+
 struct VsOut {
     float4 pos : SV_Position;
     float3 rel : TEXCOORD0;    // camera-relative position
@@ -250,6 +344,9 @@ struct VsOut {
     // quantity. Read only by PsMeshlet; PsMain ignores it, so the shipped shading is
     // byte-identical.
     nointerpolation uint mid : TEXCOORD3;
+    // M9bg: the water's finished colour, shaded at this vertex and INTERPOLATED across the
+    // triangle -- old-school Gouraud. PsMain reads it; it never recomputes it.
+    float3 wcol : TEXCOORD4;
 };
 
 #ifndef GA_MESH_PATH
@@ -301,6 +398,7 @@ VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
     // camera -- the same cancellation profile the planet frame had, now in ONE shared frame.
     const float3 dirT = CsToTangent(dir);
     o.rel = dirT * (gGlo.x + max(h, 0.0f) * gGlo.y) - gCamAbs.xyz;
+    o.wcol = WaterVertexColor(dir, o.rel, h);   // M9bg: the sea, shaded here and nowhere else
     o.pos = mul(float4(o.rel, 1.0f), gViewProj);
     return o;
 }
@@ -324,6 +422,9 @@ float3 Hypsometric(float h, float lat) {
 }
 
 // ---- M9: THE WATER'S QUALITY (docs/ALGEBRA.md "optics"; proofs/water_optics.py) --------------
+// M9bg: CURRENTLY UNREFERENCED -- the two-ray water it fed is gone (the sea is vertex-shaded and
+// carries no texture). Kept verbatim: it is the HLSL port of the optics chapter, every constant
+// is printed by the proof, and the retrievals it reads are still harvested and resident.
 // M7c left two constants in the ray path -- the K_d triple and the shelf/deep scatter colour.
 // Both are MADE by chlorophyll, sediment and CDOM, so both are measurements. Two closed forms
 // replace them, and every constant below is printed by the proof's "numbers the HLSL port must
@@ -472,325 +573,25 @@ float4 PsMain(VsOut i) : SV_Target {
         const float3 nLand =
             normalize(upT - east * (gr.x * kSlopeGain) - north * (gr.y * kSlopeGain));
         const float3 albLand = Hypsometric(max(hp, 0.0f), lat);
-
-        // SEA side: depth tints the shelves; GFS-Wave whitens the storms.
-        // M7e: the reference photos say the green band is NARROW -- open water reads navy
-        // just past the bar, and the emerald belongs to the shallows alone.
-        // M9: the scatter endpoint is now a MEASUREMENT (ALGEBRA "optics"). The depth lerp it
-        // replaces was double-counting bed brightness that lerp(albSea, bedAlb, Tw) already
-        // supplies below -- with real optics the bed carries the shallows and the water carries
-        // its own colour. The M7c pair survives verbatim on the flag-off branch.
-        const WaterOptics wq = SampleWaterOptics(degrees(lat), lonDeg);
-        const float shelf = saturate(1.0f + hp / 45.0f);        // 1 at the beach, 0 by -45 m
-        float3 albSea = wq.deep.x >= 0.0f
-                            ? wq.deep
-                            : lerp(float3(0.008f, 0.030f, 0.080f), float3(0.055f, 0.28f, 0.31f),
-                                   shelf * shelf);
-        float hs = 0.0f, wind = 6.0f;
-        if (gTexIdx.y != 0xFFFFFFFFu) {
-            const float2 wuv = float2(
-                frac((lonDeg - gWavesA.y) * gWavesA.w / gWavesB.x),
-                saturate(((gWavesA.x - degrees(lat)) * gWavesA.z + 0.5f) / gWavesB.y));
-            const float hsS = gTex[gTexIdx.y].SampleLevel(sLinearClamp, wuv, 0).x;
-            if (hsS >= 0.0f) hs = hsS;                          // -1 = land in the wave grid
-            if (gTexIdx.z != 0xFFFFFFFFu) {
-                const float w = gTex[gTexIdx.z].SampleLevel(sLinearClamp, wuv, 0).x;
-                if (w >= 0.0f) wind = w;
-            }
-        }
-        // Dupuy-Bruneton in spirit: unresolved whitecap coverage brightens the storm belts.
-        albSea = lerp(albSea, float3(0.55f, 0.62f, 0.68f), saturate((hs - 2.5f) / 9.0f) * 0.55f);
-
-        // Cox-Munk: slope variance from wind speed; the glint lobe IS the far-field BRDF.
-        // M7: inside the wave bank's rings the sigma^2 comes from the BANK (the M6t fold's
-        // shed variance, locally sea-state true), and its foam whitens the water -- the
-        // shading now reads the same tiled resource the geometry displaces from.
-        // M9: ice damps the capillary-gravity waves the Cox-Munk lobe is MADE of, so the glint
-        // dies with the same field that whitens the surface below -- one number, both terms.
-        float s2 = (0.003f + 0.00512f * wind) * (1.0f - 0.95f * wq.ice);
-        float3 nWater = upT;    // band-limited to the PIXEL (ring slopes + cascade detail,
-                                // each band under its per-axis Gaussian prefilter): feeds
-                                // the glint AND the Fresnel split / both rays. Fresnel on
-                                // the ring-texel normal rendered a 4.8 m-blurred sea --
-                                // molten "Vaseline" at helm height (seen, fixed M8g); the
-                                // prefilter law makes this normal safe at every footprint,
-                                // because gAx/gAy fold each band away as the pixel stops
-                                // resolving it (sub-pixel energy stays in sigma^2).
-        float3 nSmooth = upT;   // band-limited to the ring texel: feeds DIFFUSE only --
-                                // per-chop diffuse rendered 2 m wavelets as dark flecks
-                                // from altitude (the leopard, rolled back by the user)
-        float lvlW = 0.0f;    // live water level here (bank: tide + solver); 0 = geoid far afield
-        float foamW = 0.0f;   // whitening accumulator -- painted AFTER the refraction mix so
-                              // foam rides ON the water, not under it
-        const float footPx = length(i.rel) * gWavesB.z;
-        // M8 ripple prefilter (ALGEBRA.md ripple; proofs/ripple_prefilter.py): the pixel
-        // footprint's world-space edges, computed OUTSIDE the bank branch so the screen
-        // derivatives ride uniform control flow. The footprint is a FRAME {fpx, fpz};
-        // its per-axis Gaussian at a band's wavenumber is the exact expected attenuation
-        // -- the anisotropy no scalar footPx can express (a grazing sliver resolves
-        // across-view ripples while along-view ones alias into crawling shimmer).
-        const float2 fpxW = ddx((CsToTangent(up) * gGlo.x).xz);
-        const float2 fpzW = ddy((CsToTangent(up) * gGlo.x).xz);
-        float3 bankGains = 0.0f;   // per-band sea-state gains (x=b0, y=b1, z=b2) for the
-        float bankEta = 0.0f;      // caustic assembly + peak shaping below; hoisted out
-        bool bankOn = false;       // of the bank scope
-        {
-            float4 bD, bP, bDet, bDx, bDz, tmp, tmp2;
-            float bT, t2u;
-            const float2 wxz = (CsToTangent(up) * gGlo.x).xz;
-            if (BankSample(wxz, bD, bP, bDet, bT)) {
-                bankOn = true;
-                bankGains = float3(bDet.z, bDet.x, bDet.w);
-                bankEta = bD.y;
-                s2 = max(bP.y, 0.0015f);
-                lvlW = bP.x;
-                foamW = saturate(bD.w);   // M8: the bank's foam is already disciplined
-                                          // (crest-gated union, noise-broken, memory-max)
-                // Per-pixel wave normals, finite-differenced from the bank at its own ring
-                // texel: geometry alone is nearly invisible from above -- the normal is what
-                // makes the sea READ (the M6t glint then rides real wave faces).
-                BankSample(wxz + float2(bT, 0.0f), bDx, tmp, tmp2, t2u);
-                BankSample(wxz + float2(0.0f, bT), bDz, tmp, tmp2, t2u);
-                float sx = (bDx.y - bD.y) / bT;
-                float sz = (bDz.y - bD.y) / bT;
-                // Shoaled slopes can exceed any real wave face; cap at 1.1 (the Sea.hlsl
-                // guard) or over-steep facets render as dark back-face speckle and pin
-                // Fresnel at its ceiling (grey plateaus -- the two-sided failure mode).
-                const float slS = length(float2(sx, sz));
-                if (slS > 1.1f) { sx *= 1.1f / slS; sz *= 1.1f / slS; }
-                nSmooth = normalize(upT - east * sx - north * sz);
-                // M7a: THE SPARKLE -- bands this PIXEL resolves but the ring texel does not,
-                // read straight from the cascade DERIVATIVE textures at full FFT resolution,
-                // weighted by the fold difference (wPix - wRing) and the tile's local sea
-                // state (detail plane: hsScale, dry). Sigma^2 hands the same energy back, so
-                // the three tiers stay telescoped; at altitude wPix <= wRing and every term
-                // vanishes -- the far field is untouched.
-                float env = 0.0f;
-                [unroll] for (uint c = 0; c < 3; ++c) {
-                    // M9c: fold on where the band's ENERGY sits, not its midpoint. wRing
-                    // and wPix move together, so the telescope stays exact.
-                    const float lam = 6.2831853f / gBankFold[c];
-                    const float wRing = 1.0f - smoothstep(lam * 0.12f, lam * 0.5f, bT);
-                    const float wPix = 1.0f - smoothstep(lam * 0.12f, lam * 0.5f, footPx);
-                    const float wDet = saturate(wPix - wRing) * bDet.y;
-                    if (wPix <= 0.01f) continue;
-                    const float2 duv = wxz / gBankB[c];
-                    const float4 dv =
-                        gTex[gBankU2[c + 1u]].SampleLevel(sLinearWrap, duv, 0);
-                    // M7e: THE GROUPS. From altitude the eye never sees the wave -- it sees
-                    // the ENVELOPE: groups, streaks, glitter grain. The fold's flat sigma^2
-                    // erased that spatial variance (the "lame" aerial water). The local
-                    // slope magnitude, weighted by what the PIXEL resolves, restores it --
-                    // and it telescopes: by ~10 km footprints wPix folds it away again.
-                    // Per-axis Gaussian prefilter at this band's wavenumber: the x-slope
-                    // channel carries content along x-hat, the y-slope along y-hat; each
-                    // attenuates by exp(-|J^T k|^2/8) in ITS direction (sigma = half the
-                    // footprint extent). Under-recovered energy stays in sigma^2 below --
-                    // shed, never aliased. Isotropic-max here erred x3000 at grazing.
-                    const float kC = gBankC[c];
-                    const float gAx = exp(-0.125f * kC * kC *
-                                          (fpxW.x * fpxW.x + fpzW.x * fpzW.x));
-                    const float gAy = exp(-0.125f * kC * kC *
-                                          (fpxW.y * fpxW.y + fpzW.y * fpzW.y));
-                    env += length(dv.xy) * wPix * (0.5f * (gAx + gAy));
-                    if (wDet <= 0.002f) continue;
-                    sx += dv.x * wDet * bDet.x * gBankB.w * gAx;
-                    sz += dv.y * wDet * bDet.x * gBankB.w * gAy;
-                    foamW = max(foamW, saturate(dv.w * wDet) * saturate(bDet.x) *
-                                           max(gAx, gAy) * gBankE.y *
-                                           (c == 2 ? 0.30f : 0.15f));
-                    s2 = max(s2 - wDet * bDet.x * bDet.x *
-                                      (0.5f * (gAx * gAx + gAy * gAy)) *
-                                      (c == 0 ? 0.0004f : (c == 1 ? 0.0018f : 0.0060f)),
-                             0.0015f);
-                }
-                const float envN = saturate(env * bDet.x * 4.0f);
-                s2 = max(s2 * (0.70f + 0.60f * envN), 0.0015f);
-                albSea = lerp(albSea, float3(0.52f, 0.58f, 0.60f), envN * envN * 0.08f);
-                const float slW = length(float2(sx, sz));
-                if (slW > 1.1f) { sx *= 1.1f / slW; sz *= 1.1f / slW; }
-                nWater = normalize(upT - east * sx - north * sz);
-            }
-        }
-        // ---- M7c: THE TWO RAYS. A water pixel is a Fresnel split between two rays, and
-        // both are answered by data this atlas already realizes -- ray tracing against our
-        // own quadtrees, no BLAS, no second scene description. The REFLECTED ray asks the
-        // analytic sky (below, on the true wave normal: the sandwich r = -n d n). The
-        // REFRACTED ray bends by Snell -- a ROTOR in the incidence bivector (d ^ n); the
-        // closed form below IS R d ~R expanded -- then marches into the water and lands on
-        // the BED: the composed height quadtree, found by secant cast, wearing the composed
-        // IMAGERY as its albedo. Beer-Lambert attenuates per channel over the REAL path
-        // (down along the ray + diffuse up), so deep water collapses to the shelf scatter
-        // color the globe always drew and the far field stays converged, while shallow
-        // water shows the bar through the surface -- scaled by the LIVE tide, because
-        // depth = level - bed at this pixel. Space and helm are the same formula; the
-        // tiers telescope by physics, not by altitude branches.
-        const float depthW = max(lvlW - hp, 0.0f);
-        const float3 dIn = -v;                                   // camera -> surface
-        const float ci = saturate(-dot(dIn, nWater));
-        const float etaR = 1.0f / 1.34f;
-        const float st2 = etaR * etaR * max(1.0f - ci * ci, 0.0f);
-        const float3 tDir = normalize(
-            etaR * dIn + (etaR * ci - sqrt(max(1.0f - st2, 0.0f))) * nWater);
-        float sDown = depthW;    // vertical closed form: exact where parallax is subpixel
-        float3 bedDir = up;
-        if (footPx < 30.0f && depthW > 0.01f && depthW < 90.0f) {
-            // The cast: 2 secant steps against ComposedHeight. Under 30 m footprints the
-            // march matters (looking through a wave face shifts the bar); past that the
-            // refracted hit is the pixel's own bed and the closed form takes over -- the
-            // two agree where they meet, so there is no seam to hide.
-            const float3 Pw = gCamAbs.xyz + i.rel;
-            const float muD = max(-dot(tDir, upT), 0.10f);
-            float sP = depthW / muD;
-            [unroll] for (int itr = 0; itr < 2; ++itr) {
-                const float3 Pb = Pw + tDir * sP;
-                const float gap =
-                    (length(Pb) - gGlo.x) - ComposedHeight(CsToPlanet(normalize(Pb)), lod);
-                sP = clamp(sP + gap / muD, 0.3f, 140.0f);
-            }
-            bedDir = CsToPlanet(normalize(Pw + tDir * sP));
-            sDown = sP;
-        }
-        // Per-channel diffuse attenuation. M7c shipped one coastal constant for the whole
-        // planet, with BLUE penetrating deepest -- the open-ocean ordering, which is why the
-        // shoals read turquoise everywhere. M9 reads it from the retrieval instead: open ocean
-        // keeps that ordering, but past K490* = 0.0823 /m the crossover flips and GREEN becomes
-        // the deepest-penetrating channel, which is what makes coastal water green. One field,
-        // one crossover, no second tuning (priors ledger 13).
-        const float3 Kd = wq.kd;
-        const float3 Tw = exp(-Kd * (sDown + depthW));
-        float3 bedAlb = (ComposedColorOn() && gStreamF.z < 0.5f)
-                            ? ComposedColor(bedDir)
-                            : float3(0.44f, 0.40f, 0.31f);
-        const float3 floorAlb = bedAlb;   // M9av: the floor's dry albedo, before caustics
-        // ---- M8 CAUSTICS (ALGEBRA.md caustics; proofs/caustic_jacobian.py). Sunlight
-        // refracting at the wave surface converges on the bed; the gain is the inverse
-        // ray-map Jacobian in its PHYSICAL form, gain = 1/(1 + h K lap_phys) with the
-        // crest identity lap_phys = lap/areaJac^2 and K = 1 - 1/n ~ 0.25 -- adjudicated
-        // by 2^22-ray ground truth (corr 0.999; the reference's shipped sign renders
-        // troughs bright). areaJac and lap assemble from the cascade derivative fibers
-        // (J in dv.z; lap = FD of the slope channels at cascade resolution), scaled by
-        // the detail plane's per-band gains, and sampled where the SUN entered the water
-        // (bed - sunRun): sampling at the view entry pins the pattern to the camera.
-        // The sun's 0.53-degree disc blurs the pattern by ~h*0.0093, so it fades by 20 m
-        // (smoothstep 4..20) and clamps [0.35, 2.6] -- closures, pinned by the proof.
-        if (bankOn && footPx < 30.0f && depthW > 0.05f && depthW < 20.0f &&
-            gSunDir.y > 0.02f) {
-            const float2 wxzC = (CsToTangent(up) * gGlo.x).xz;
-            const float2 bedXZ =
-                wxzC + float2(dot(tDir, east), dot(tDir, north)) * sDown;
-            const float3 sunT = refract(normalize(-gSunDir.xyz), upT, etaR);
-            const float sunDn = max(-dot(sunT, upT), 0.15f);
-            const float3 sunH = sunT + sunDn * upT;
-            const float2 causticXZ =
-                bedXZ - float2(dot(sunH, east), dot(sunH, north)) / sunDn * depthW;
-            float ajF = 1.0f;
-            float lapF = 0.0f;
-            [unroll] for (uint cc = 0; cc < 3; ++cc) {
-                const float lamC = 6.2831853f / gBankC[cc];
-                const float wPixC = 1.0f - smoothstep(lamC * 0.12f, lamC * 0.5f, footPx);
-                if (wPixC <= 0.01f) continue;
-                const float ampC = (cc == 0) ? bankGains.x
-                                             : ((cc == 1) ? bankGains.y : bankGains.z);
-                const float2 duvC = causticXZ / gBankB[cc];
-                const float du1 = 1.0f / 256.0f;                  // one cascade texel
-                const float texM = gBankB[cc] * du1;              // its metres
-                const float4 dc =
-                    gTex[gBankU2[cc + 1u]].SampleLevel(sLinearWrap, duvC, 0);
-                const float hxp = gTex[gBankU2[cc + 1u]]
-                                      .SampleLevel(sLinearWrap, duvC + float2(du1, 0), 0).x;
-                const float hxm = gTex[gBankU2[cc + 1u]]
-                                      .SampleLevel(sLinearWrap, duvC - float2(du1, 0), 0).x;
-                const float hzp = gTex[gBankU2[cc + 1u]]
-                                      .SampleLevel(sLinearWrap, duvC + float2(0, du1), 0).y;
-                const float hzm = gTex[gBankU2[cc + 1u]]
-                                      .SampleLevel(sLinearWrap, duvC - float2(0, du1), 0).y;
-                const float lapC =
-                    (hxp - hxm + hzp - hzm) / (2.0f * texM);
-                ajF += wPixC * ampC * (dc.z - 1.0f);
-                lapF += wPixC * ampC * lapC;
-            }
-            const float ajC = max(ajF, 0.05f);
-            const float lapPhys = lapF * gBankB.w / (ajC * ajC);
-            float cg = 1.0f / max(1.0f + depthW * 0.25f * lapPhys, 0.05f);
-            cg = lerp(1.0f, cg, 1.0f - smoothstep(4.0f, 20.0f, depthW));
-            cg = clamp(cg, 0.60f, 1.8f);
-            cg = lerp(1.0f, cg, gBankE.z);   // scene causticStrength
-            bedAlb *= lerp(1.0f, cg, saturate(gSunDir.y * 3.0f));
-        }
-        const float3 albWater = albSea;   // M9av: the water's hue, before the bed term
-        albSea = lerp(albSea, bedAlb, Tw);
-        // M9av: past the depth the ray resolves, the map draws the floor through this water.
-        if (ComposedColorOn() && gStreamF.z < 0.5f) {
-            albSea = SeafloorReliefMod(albSea, albWater, floorAlb, hp,
-                                       1.0f - (Tw.x + Tw.y + Tw.z) / 3.0f);
-        }
-        // M9: sea ice sits ON the water -- after every water term, before foam (foam on top of
-        // ice is still foam). The concentration is the coverage fraction, so the lerp IS the
-        // physics; no threshold, no ice "texture" the data does not contain.
-        albSea = lerp(albSea, float3(0.78f, 0.82f, 0.85f), saturate(wq.ice));
-
-        const float3 hv = normalize(v + gSunDir.xyz);
-        const float ch = saturate(dot(hv, nWater));
-        const float t2 = max(1.0f - ch * ch, 0.0f) / max(ch * ch, 1e-4f);
-        spec = exp(-t2 / s2) / (4.0f * kPi * s2 * max(ch * ch * ch * ch, 1e-4f));
-        const float fres = 0.02f + 0.98f * pow(1.0f - saturate(dot(v, hv)), 5.0f);
-        spec *= fres * saturate(dot(gSunDir.xyz, nWater));
-
-        // The reflected ray: sky radiance on the sandwich -n d n, Fresnel-weighted on the
-        // TRUE wave normal; the refracted side scales by 1-F so energy splits, not doubles.
-        // From straight above F ~ 0.02 (space view untouched); toward the horizon the sea
-        // mirrors the sky, which is the term every previous tuning pass was missing.
-        const float fresN = 0.02f + 0.98f * pow(1.0f - saturate(dot(v, nWater)), 5.0f);
-        float3 rDir = normalize(dIn - 2.0f * dot(dIn, nWater) * nWater);
-        // A front-facing facet on the back of a steep wave reflects BELOW the horizon;
-        // the sky model correctly darkens there, which painted grey patches over wave
-        // backs. What such a facet actually sees is more sea and the sky above it --
-        // clamp the ray to the horizon (the Sea.hlsl refl.y guard, tangent-frame form).
-        const float rUp = dot(rDir, upT);
-        if (rUp < 0.02f) rDir = normalize(rDir + (0.02f - rUp) * upT);
-        skyReflAdd = SkyRadianceDirDiscless(rDir) * (fresN * 0.9f * (1.0f - landness));
-        albSea *= 1.0f - fresN;
-
-        // M8 foamlaw: foam rides ON the water -- painted AFTER the Fresnel split (it no
-        // longer dims toward the horizon) at the scene's peak opacity over water AND
-        // reflection: whitewater is a thin aerated layer, not paint. The kernel shipped
-        // PURE physics coverage; the per-pixel range-faded breakup textures it here
-        // (strength 0.55 + 0.75 n: a triggered crest always shows SOME foam; noise
-        // modulates amount, never existence -- 30.7% gouache -> 2.1%, the reference's
-        // own measurement).
-        const float fnB =
-            FoamBreakup((CsToTangent(up) * gGlo.x).xz, length(i.rel));
-        const float foamOp =
-            saturate(saturate(foamW) * (0.55f + 0.75f * fnB)) * gBankD.w;
-        albSea = lerp(albSea, float3(0.945f, 0.965f, 0.975f), foamOp);
-        skyReflAdd *= 1.0f - foamOp;
-
-        // M8: peak-normalized shaping -- crests catch more light than troughs simply by
-        // being nearer the sky. tanh never saturates, so no flat-bottomed troughs; the
-        // peak proxy is kappa*envRms (kappa 2.8, the Gaussian expected-max closure).
-        if (bankOn) {
-            const float envR = max(
-                sqrt(dot(bankGains * bankGains, gBankD.xyz * gBankD.xyz)), 1e-4f);
-            const float shape = tanh(1.6f * bankEta / max(2.8f * envR, 1e-3f));
-            albSea *= 1.0f + 0.09f * shape;
-        }
-
-        // The analog mix: glint dies as the flat emerges, the land normal takes over.
-        // M8 the sparkle normal feeds ONLY the glint (the reference law, one step
-        // further than M7c): per-chop diffuse shading on nWater rendered every 2 m
-        // wavelet as a dark fleck from altitude -- the leopard the user rolled back.
-        // The body of the water shades on the band-limited normal; glitter is the
-        // microfacet lobe's job.
-        n = normalize(lerp(nSmooth, nLand, landness));
-        alb = lerp(albSea, albLand, landness);
-        spec *= 1.0f - landness;
+        // ---- M9bg: THE SEA SIDE IS GONE FROM THIS SHADER. Everything that used to paint
+        // water here -- the ocean-colour retrieval and its K_d transfer, the wave-grid Hs and
+        // wind fetch, the bank's per-pixel normals and the cascade sparkle, the two rays with
+        // their secant cast onto the imagery bed, Beer-Lambert, the caustic Jacobian, the
+        // seafloor relief, the ice lerp, the foam-breakup octaves and the peak shaping --
+        // retired to WaterVertexColor, which runs once per VERTEX. What arrives here is
+        // i.wcol, already lit, and it is mixed in AFTER the lighting combine below. A water
+        // pixel now costs this shader nothing at all: no sample, no march, no branch.
+        //
+        // The geometry that carried all of it is untouched: the bank still displaces every
+        // vertex and the meshlets are as dense as they ever were.
+        n = nLand;
+        alb = albLand;
     }
 
-    // ---- M6i/M7c: the composed color channel. Land takes the imagery outright; the water
-    // side already carries it in through the REFRACTED ray (bed albedo, attenuated by the
-    // real underwater path) -- the old fixed 0.6 shallow blend is retired.
-    if (ComposedColorOn() && gStreamF.z < 0.5f) {
+    // ---- M6i/M7c: the composed color channel. Land takes the imagery outright.
+    // M9bg: gated on landness as well -- the imagery is now a LAND albedo only (the water
+    // carries no texture at all), so an open-water pixel must not pay for the fetch.
+    if (ComposedColorOn() && gStreamF.z < 0.5f && landness > 0.0f) {
         const float3 img = ComposedColor(up);
         alb = lerp(alb, img, landness);
         // M7e: a surveyed STRUCTURE wears rock, not the photo under it -- beneath a jetty
@@ -1022,6 +823,15 @@ float4 PsMain(VsOut i) : SV_Target {
     col += spec * SUN_IRR_C * 0.85f * (1.0f - overhead);
     col += skyReflAdd * day * (1.0f - 0.6f * overhead);   // M7c: the reflected ray, skyward
     col += alb * float3(0.010f, 0.014f, 0.028f) * (1.0f - day);   // moonlit-blue night side
+
+    // ---- M9bg: THE MIX. Land was lit above, per pixel; the water was lit at its VERTICES and
+    // interpolated here. A shoreline pixel is landness of the one and (1 - landness) of the
+    // other -- the same analog band that mixes the GEOMETRY in SurfaceVertex, so colour and
+    // mesh cannot disagree about where the shore is. Over open water landness is 0, the land
+    // half above contributed nothing, and the sea's pixel is a pure interpolation.
+    // Everything below is ATMOSPHERE (cloud shadow, the volume march, the space rim) -- that
+    // is the air between the eye and the surface, not paint on the water, so it still applies.
+    if (gStreamF.z < 0.5f) col = lerp(i.wcol, col, landness);
 
     // ---- M6j: the CLOSE-UP material model, now in the planet shader -- wet sand at the LIVE
     // waterline, dunes, riprap on steep rock, lit the way the terrain layer lit them (sun +

@@ -130,6 +130,14 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
         o.rel = CsToTangent(dir) * (gGlo.x + disp) - gCamAbs.xyz;
     }
     o.rel += float3(latW.x, 0.0f, latW.y);
+    // M9bg: the water's colour, shaded AT THIS VERTEX from its own wave normal (the bank's
+    // Loads -- stage-proof) and the analytic sky. The pixel stage does no water work.
+    // EVERY vertex is shaded, including dry ones: a shoreline triangle's land corner is still
+    // READ by the pixels partway across it (landness there is < 1), so skipping it to save the
+    // three bank probes would interpolate a black corner into the surf. Over land the bank's
+    // tiles are NULL and read zero, so a dry vertex costs three cheap Loads and lands on the
+    // shallow tint -- the right colour for exactly the pixels that mix it.
+    o.wcol = WaterVertexColor(dir, o.rel, h);
     o.pos = mul(float4(o.rel, 1.0f), gViewProj);
     return o;
 }
