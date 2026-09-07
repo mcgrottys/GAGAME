@@ -341,7 +341,7 @@ private:
 
     // Step 5: everything the walk reads, from the members and this camera (planeCount 0).
     WalkParams CaptureWalk(const Camera& cam, float viewportH) const;
-    void PredictWorker();   // the prefetch walk's thread body
+    void PredictWalk();   // the prefetch walk, as one pool job
     void EmitMeshlets(int face, double u0, double v0, double size, double arc,
                       float morphStart, float morphEnd);
     bool BuildPso(Gpu& gpu, ShaderCompiler& sc);
@@ -477,19 +477,17 @@ private:
     float m_viewportH = 900.0f;
     double m_camPos[3] = {0, 0, 2.0e7};   // the flat eye: meshlet anchors and gCamAbs
     // Step 5: the real walk's inputs (SetView fills them; the walk reads nothing else) and
-    // the prefetch walk's job. The worker starts on the first StartPredictWalk and the
-    // destructor joins it; the two threads hand the job across under one mutex -- posted
-    // (params waiting for the worker), busy (posted or walking: the rects are not back),
-    // outstanding (posted and not yet replayed), quit.
+    // the prefetch walk's job. The walk is a pool job now (core/ThreadManager.h, Lane::Compute)
+    // rather than a dedicated thread parked on the cv: one post, one job. The state handed
+    // across under this mutex -- busy (the walk is out; the rects are not back), outstanding
+    // (posted and not yet replayed). `posted` and `quit` existed to drive a parked thread and
+    // are gone with it.
     WalkParams m_wp{};
     struct PredictJob {
-        std::thread thread;
         std::mutex mx;
         std::condition_variable cv;
-        bool posted = false;
         bool busy = false;
         bool outstanding = false;
-        bool quit = false;
         WalkParams params{};
         std::vector<WantRect> rects;   // the worker's answer; ReplayPredictWants empties it
         uint64_t nodes = 0, leaves = 0, walkNs = 0;
