@@ -105,16 +105,34 @@ inline std::string Sanitize(const std::string& s) {
     }
     return o.empty() ? std::string("node") : o;
 }
+// FILE_SHARE_DELETE IS THE LOAD-BEARING FLAG HERE, and it is half of the atomic publish below.
+// WriteTile publishes by renaming a temp over this path, and MoveFileEx onto a file another
+// thread holds open fails with ERROR_ACCESS_DENIED unless EVERY reader allowed delete-sharing.
+// std::ifstream does not. MEASURED, before this was written: 366 of 400 concurrent publishes
+// lost that way -- the "atomic" publish would have destroyed 91% of tile writes to buy back a
+// torn read. With the flag the rename supersedes the directory entry, this handle keeps reading
+// the tile it opened, and the reader gets a WHOLE OLD tile instead of a torn new one. It also
+// makes DropCachedAddress's deletes stop failing against a reader, which they could before.
 inline bool ReadTile(const std::string& path, std::vector<uint8_t>& out, size_t bytes = 65536) {
-    threadaudit::ReadScope audit(path);   // declared first: it closes after the ifstream does
-    std::ifstream f(path, std::ios::binary);
-    if (!f) return false;
-    out.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    if (out.size() != bytes) {
+    threadaudit::ReadScope audit(path);
+    const HANDLE h =
+        CreateFileA(path.c_str(), GENERIC_READ,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER sz{};
+    if (!GetFileSizeEx(h, &sz) || static_cast<uint64_t>(sz.QuadPart) != bytes) {
+        CloseHandle(h);
         out.clear();
-        return false;   // torn write (crash mid-save): repaint it
+        return false;   // torn write (a crash mid-save, now the only way to get one): repaint it
     }
-    return true;
+    out.resize(bytes);
+    DWORD got = 0;
+    const bool ok = ReadFile(h, out.data(), static_cast<DWORD>(bytes), &got, nullptr) &&
+                    got == static_cast<DWORD>(bytes);
+    CloseHandle(h);
+    if (!ok) out.clear();
+    return ok;
 }
 // M9as: half floats for the height trees. Value and weight both ride as halves; the weight's
 // 10-bit mantissa is far finer than the 8-bit alpha colour uses, and a bed in metres at half
@@ -136,19 +154,103 @@ inline float H2F(uint16_t h) {
 }
 // A failed write must be loud: a whole audit pass once painted 1742 tiles into folders that did
 // not exist, reported good numbers, and stored nothing.
-inline void WriteTile(const std::string& path, const std::vector<uint8_t>& data) {
-    threadaudit::WriteScope audit(path);   // open truncates; the bytes land at close
-    std::ofstream f(path, std::ios::binary);
-    f.write(reinterpret_cast<const char*>(data.data()), data.size());
-    if (!f) {
+//
+// AND A TILE IS PUBLISHED WHOLE OR NOT AT ALL. Writing straight to the target truncates it at
+// open and flushes the bytes at close, and every reader in this file treats a short read as
+// ABSENT: ReadTile returns false (the size check at the top of this namespace), Serve falls
+// through to a repaint, and FoldUp takes its ph = Held::Absent branch and repaints the parent
+// FROM THE SOURCE -- discarding every sibling's fold already accumulated in it. Silent pyramid
+// data loss, decided by which thread was in the window. m_foldMx did not cover it: it guards
+// FoldUp on one node against another FoldUp, not against any reader, and not against LeafTile's
+// own write of the same address.
+//
+// So: write a per-thread temp beside the target and MoveFileExA over it. The NTFS rename swaps
+// one directory entry, so a reader sees the whole old tile or the whole new one and never
+// neither. The temp is named ~pub<n> with no extension, which matches none of the three
+// patterns anything in this codebase scans a tile folder with (*.bin, <base>.ref-*, <base>_*).
+// Returns whether the tile is now ON DISK under `path`. A caller that ignores it gets the old
+// behaviour; the concurrency gate in ThreadTest.cpp needs to know, because a publish a reader
+// makes fail is the same lost tile as a torn one.
+inline bool WriteTile(const std::string& path, const std::vector<uint8_t>& data) {
+    threadaudit::WriteScope audit(path);
+    static std::atomic<uint32_t> seq{0};
+    char stem[24];
+    snprintf(stem, sizeof(stem), "~pub%08x", seq.fetch_add(1, std::memory_order_relaxed));
+    const size_t slash = path.find_last_of('\\');
+    const std::string tmp =
+        (slash == std::string::npos) ? std::string(stem) : path.substr(0, slash + 1) + stem;
+    // The temp is opened with DELETE access and full sharing, and kept OPEN, because the rename
+    // is issued on this handle rather than by MoveFileEx. MoveFileEx cannot replace a target
+    // another thread holds open -- it fails ERROR_ACCESS_DENIED even when every reader allows
+    // delete-sharing (measured: 352 of 400 publishes lost that way). A rename issued through
+    // the handle with POSIX semantics supersedes the entry exactly as rename(2) does.
+    const HANDLE h = CreateFileA(tmp.c_str(), GENERIC_WRITE | DELETE,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                 CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
         static std::atomic<bool> warned{false};
         if (!warned.exchange(true)) {
-            Log("[tiletree] CANNOT WRITE %s -- painting and storing NOTHING (missing folder? "
-                "disk full?)",
-                path.c_str());
+            Log("[tiletree] CANNOT WRITE %s (err %lu) -- painting and storing NOTHING (missing "
+                "folder? disk full?)",
+                path.c_str(), GetLastError());
         }
+        return false;
     }
+    DWORD wrote = 0;
+    if (!WriteFile(h, data.data(), static_cast<DWORD>(data.size()), &wrote, nullptr) ||
+        wrote != static_cast<DWORD>(data.size())) {
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true)) {
+            Log("[tiletree] SHORT WRITE %s (%lu of %zu bytes) -- storing NOTHING", path.c_str(),
+                wrote, data.size());
+        }
+        CloseHandle(h);
+        DeleteFileA(tmp.c_str());
+        return false;
+    }
+    // FILE_RENAME_INFO wants a fully qualified UTF-16 destination.
+    char full[MAX_PATH * 2];
+    if (!GetFullPathNameA(path.c_str(), sizeof(full), full, nullptr)) {
+        CloseHandle(h);
+        DeleteFileA(tmp.c_str());
+        return false;
+    }
+    const int wn = MultiByteToWideChar(CP_ACP, 0, full, -1, nullptr, 0);   // includes the NUL
+    std::vector<uint8_t> info(sizeof(FILE_RENAME_INFO) + static_cast<size_t>(wn) * sizeof(wchar_t));
+    auto* ri = reinterpret_cast<FILE_RENAME_INFO*>(info.data());
+    ri->RootDirectory = nullptr;
+    ri->FileNameLength = static_cast<DWORD>((wn - 1) * sizeof(wchar_t));
+    MultiByteToWideChar(CP_ACP, 0, full, -1, ri->FileName, wn);
+    // POSIX semantics first (Win10 1607+); fall back to the plain replace where it is refused,
+    // which is still correct whenever no reader happens to hold the target open.
+    ri->Flags = 0x1 /*REPLACE_IF_EXISTS*/ | 0x2 /*POSIX_SEMANTICS*/;
+    bool ok = SetFileInformationByHandle(h, static_cast<FILE_INFO_BY_HANDLE_CLASS>(22),
+                                         info.data(), static_cast<DWORD>(info.size())) != 0;
+    if (!ok) {
+        ri->ReplaceIfExists = TRUE;
+        ok = SetFileInformationByHandle(h, FileRenameInfo, info.data(),
+                                        static_cast<DWORD>(info.size())) != 0;
+    }
+    const DWORD err = ok ? 0 : GetLastError();
+    CloseHandle(h);
+    if (!ok) {
+        static std::atomic<bool> warned{false};
+        if (!warned.exchange(true)) {
+            Log("[tiletree] CANNOT PUBLISH %s (err %lu) -- the tile was written and then LOST",
+                path.c_str(), err);
+        }
+        DeleteFileA(tmp.c_str());
+        return false;
+    }
+    return true;
 }
+// Markers (.void, .fold, .ref-<id>) do NOT need the temp-and-rename above, and it would only
+// cost them a second file operation: the only thing anyone ever reads from a marker is whether
+// it EXISTS (Peek/PeekAt/FindRef call GetFileAttributesA, never open it), and an ofstream that
+// creates-or-truncates a zero-byte file leaves it existing throughout. There is no window in
+// which the marker is half a marker. (The window that DOES exist -- Delete(.void) followed by
+// Touch(.fold) in FoldUp, where a reader between them sees neither -- is an ordering problem
+// and no atomic write fixes it.)
 inline void Touch(const std::string& path) {
     threadaudit::WriteScope audit(path);
     std::ofstream f(path, std::ios::binary);   // zero bytes: the entry IS the record

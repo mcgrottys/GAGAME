@@ -142,6 +142,59 @@ bool RunThreadSelfTest() {
         ok &= Expect("off-main sites from a worker", s.offMain.size(), 1);
     }
 
+    // (6) THE ONE THAT MATTERS: a reader must never see a tile that is neither the old one nor
+    //     the new one. This drives the REAL tree_detail::WriteTile and ReadTile, not the audit,
+    //     because the audit only says two threads met -- it cannot say what the reader got.
+    //
+    //     A truncating publish fails here, and must: ReadTile's size check catches the short
+    //     file and returns false, which every caller in TileTree.h reads as ABSENT -- Serve
+    //     falls through to a repaint and FoldUp repaints the parent from the source, throwing
+    //     away the folds already in it. `absent` below counts exactly those.
+    //
+    //     Worth recording why this test exists at all: the storm rail with a warm tree cache
+    //     does 386 tile writes and 27732 reads and meets ZERO collisions, so no rail gates this.
+    //     The race needs a workload that paints, and this is the smallest honest one.
+    {
+        const std::string rw = dir + "\\publish.bin";
+        std::vector<uint8_t> a(65536, 0xA1), b(65536, 0xB2);
+        tree_detail::WriteTile(rw, a);
+        std::atomic<bool> stop{false};
+        std::atomic<uint32_t> absent{0}, torn{0}, whole{0}, lost{0};
+        std::thread w([&] {
+            for (int i = 0; i < 400; ++i) {
+                if (!tree_detail::WriteTile(rw, (i & 1) ? b : a)) {
+                    lost.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+            stop.store(true, std::memory_order_release);
+        });
+        std::thread r([&] {
+            std::vector<uint8_t> got;
+            while (!stop.load(std::memory_order_acquire)) {
+                if (!tree_detail::ReadTile(rw, got)) {
+                    absent.fetch_add(1, std::memory_order_relaxed);
+                    continue;
+                }
+                const uint8_t v = got[0];
+                bool uniform = (v == 0xA1 || v == 0xB2);
+                for (size_t k = 0; uniform && k < got.size(); ++k) uniform = got[k] == v;
+                (uniform ? whole : torn).fetch_add(1, std::memory_order_relaxed);
+            }
+        });
+        w.join();
+        r.join();
+        Log("[threadtest]   publish/read race over 400 publishes: %u whole reads, %u ABSENT, "
+            "%u TORN, %u publishes LOST",
+            whole.load(), absent.load(), torn.load(), lost.load());
+        ok &= Expect("reads that saw no tile while one was always there", absent.load(), 0);
+        ok &= Expect("reads that saw a mixture of two tiles", torn.load(), 0);
+        // A publish a concurrent reader makes FAIL is the same lost tile by another route --
+        // MoveFileEx over a file someone holds open is the way this fix could pay for itself
+        // with a new defect, so it is gated, not assumed.
+        ok &= Expect("publishes lost to a concurrent reader", lost.load(), 0);
+        tree_detail::Delete(rw);
+    }
+
     tree_detail::Delete(path);
     s.ResetCounts();
     s.Restore(saved);
