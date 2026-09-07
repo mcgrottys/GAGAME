@@ -634,11 +634,14 @@ private:
             return FoldFromChildren(frame, tag, r, out, false);
         }
         bool complete = true, anyCover = false, full = false;
+        // The node's inputs must hold still for the whole tile (DomainSource::BeginTile).
+        m_node->BeginTile();
         if (m_node->TileNative()) {
             // M9bc: a regional node paints the whole tile; quantize per the tree's format.
             std::vector<DomainValue> vals;
             if (!m_node->PaintTile(frame, r, frame.texW, frame.texH, vals) ||
                 vals.size() != size_t(frame.texW) * frame.texH) {
+                m_node->EndTile();
                 return Status::Transient;   // not ready for this identity: ask again
             }
             out.assign(TileBytes(), 0);
@@ -717,6 +720,9 @@ private:
                 }
             }
         }
+        // The snapshot went stale while this tile painted: its texels are two different fields
+        // and the identity it would be stored under names only one of them. Never cached.
+        if (!m_node->EndTile()) return Status::Transient;
         if (!complete) return Status::Transient;   // never cached; the next run repaints
         ++painted;
         if (!anyCover) {

@@ -30,6 +30,13 @@
 
 namespace ga {
 
+// The bucket the calling thread's current tile is being painted from. Namespace scope rather
+// than a class member so it is one variable per THREAD, not one per source instance.
+namespace expo_detail {
+inline constexpr uint64_t kNoTile = ~0ull;
+inline thread_local uint64_t t_tile = kNoTile;
+}  // namespace expo_detail
+
 class ExposureSource : public DomainSource {
 public:
     ExposureSource(const Compositor* comp, int hgtChannel)
@@ -79,9 +86,30 @@ public:
         return id;
     }
 
+    // ---- THE TILE SCOPE (DomainSource::BeginTile). m_params is exchanged by the FRAME thread
+    // every frame while this march runs per texel on a loader job for tens of milliseconds, so
+    // without a snapshot a single tile could be marched from two different swell directions and
+    // two different levels -- and then stored under ONE identity, because the tree's id is
+    // computed when the tree is built. The window is real and named: Set() mutates the params
+    // BEFORE main builds the replacement tree (main.cpp, the exposure roll), so a worker inside
+    // the old tree paints with the new bucket.
+    //
+    // Snapshot per thread, answer every texel of the tile from it, and refuse the tile if the
+    // bucket moved before it finished. Note EndTile compares VALUES, not exchange events: Set()
+    // exchanges every frame but writes the same packed word unless the bucket really rolled, so
+    // a still scene rejects nothing.
+    void BeginTile() const override { expo_detail::t_tile = m_params.load(); }
+    bool EndTile() const override {
+        const uint64_t painted = expo_detail::t_tile;
+        expo_detail::t_tile = expo_detail::kNoTile;
+        return painted == expo_detail::kNoTile || painted == m_params.load();
+    }
+
     bool SampleAt(const DomainQuery& q, DomainValue& out) const override {
         out.weight = 0.0f;
-        const uint64_t p = m_params.load();
+        // Inside a tile: the snapshot. Outside one (the trace, a point query): live.
+        const uint64_t p =
+            (expo_detail::t_tile != expo_detail::kNoTile) ? expo_detail::t_tile : m_params.load();
         const int32_t dirB = DirBucket(p);
         if (!m_comp || m_hgtCh < 0 || dirB < 0) return false;
         const double level = LevelBucket(p) * kLevelBucketM;

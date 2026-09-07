@@ -2012,6 +2012,22 @@ Eight commits, instruments first, each one gated and revertible alone.
 storm rail: the GPU frame is 6.187 ms of which `globe.mesh` is 4.908 (79%), so perfect threading
 takes the shipped loop from ~130 to ~160 fps and then stops, GPU-bound.
 
+**What it costs, measured, and the owner's call on it.** Net **+0.19 ms (~3%)** on the fenced
+RENDER mean, p95/p99 equal or slightly better. It is not CPU: `pre-RenderFrame` is identical and
+the residency turn is **2.7x faster** (p50 0.47-0.60 -> 0.17-0.22 ms; `ReadTile` had been pulling a
+64 KB tile through `istreambuf_iterator` one char at a time). The cost is GPU, +0.30 ms with no
+shader changed, landing exactly in the passes whose cost scales with residency (`waterbank` 0.346
+-> 0.532, `globe.mesh` 2.392 -> 2.489) while `sea`, which does not care, did not move at all (0.469
+-> 0.473). The streamer got faster, so more lands per frame, so the GPU draws more of the world.
+**The owner judged the trade worth it (2026-09-07) and it ships.** Do not re-open it as a
+regression without re-reading this paragraph.
+
+One consequence to know before comparing anything mid-flight: `groundAt` clamps the camera to
+resident height pages, so a binary that streams faster gets a finer ground answer, sits at a
+slightly different altitude, and diverges along the rail. Frame 500 of the 19:30Z rail differs by
+0.75% of pixels between these two binaries, frame 760 by 15% -- and almost all of it is POSE, not
+quality. **Only `--settle-exact` stills compare across binaries.**
+
 ### The instruments, before anything was fixed
 
 `--res-trace-frames A:B` prints the residency turn's **landing ledger** (`Residency.h TurnLedger`,
@@ -2129,11 +2145,29 @@ three and four are BIT-IDENTICAL: the still converges after one warm-up, so `too
 renders every pose twice and discards the first. A gate that compares one render per binary is
 reading a coin toss between "cold vs warm" and "warm vs warm".
 
-### Still owed
+### The tile scope: one tile is one field
 
-`ExposureSource::SampleAt` re-reads its bucket per TEXEL while `Set()` exchanges it from the frame
-thread, so one tile can be painted from two swell buckets and stored under one identity. The fix
-wants a per-tile snapshot with reject-on-mismatch -- `WaveFieldSource::PaintTile`'s shape -- but
-`DomainSource` has no per-tile hook for a non-tile-native node, so it is a change to that interface
-(mirroring `ColorSource::BeginTile` + `PaintCtx`) rather than a guard. The tree re-keys and drops
-those tiles on the roll, which is what has been covering it.
+`ExposureSource::SampleAt` re-read its bucket per TEXEL while `Set()` exchanges it from the frame
+thread every frame, so one tile could be marched from two swell directions and two levels and then
+stored under ONE identity -- the tree's id is computed when the tree is built. The window is named:
+`Set()` mutates the params BEFORE main builds the replacement tree, so a worker inside the old tree
+paints with the new bucket.
+
+`DomainSource` gains the per-texel twin of the contract `PaintTile` already had for tile-native
+nodes: **`BeginTile` / `EndTile`**, shaped like `ColorSource::BeginTile` in `Compositor.h`, which
+the colour path has always had. A node whose inputs can move snapshots them in `BeginTile`, answers
+every texel of that tile from the snapshot, and `EndTile` returns false when the snapshot went
+stale -- the tree answers Transient and asks again rather than storing two fields as one. The
+default pair is free, so no other source changes.
+
+`ExposureSource` keeps its snapshot in a `thread_local` at namespace scope: one per THREAD, not one
+per source instance, because twelve loader jobs paint different tiles of the same source at once.
+`EndTile` compares VALUES rather than exchange events -- `Set()` exchanges every frame but writes
+the same packed word unless the bucket really rolled -- so a still scene refuses nothing.
+
+Gated by `RunThreadSelfTest` case 9 on the real `ExposureSource` (a null compositor is enough; only
+`SampleAt` needs one): a quiet tile is kept, a tile with a roll under it is refused, a re-`Set` to
+the same bucket is kept, and one thread's scope does not decide another's. **It fails on the
+unfixed code** -- verified by disabling the overrides and rebuilding, which turns exactly the roll
+and per-thread assertions red. Over a rail the exposure tenant reaches deficit 0 as before, at 53
+paints against 36: refused tiles are repainted, which is the cost of not storing a lie.

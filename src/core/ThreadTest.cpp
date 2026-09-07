@@ -13,6 +13,7 @@
 #include <thread>
 #include <vector>
 
+#include "compose/ExposureSource.h"
 #include "compose/TileTree.h"
 #include "core/Common.h"
 #include "core/ThreadAudit.h"
@@ -337,6 +338,49 @@ bool RunThreadSelfTest() {
             Log("[threadtest]   jobs hash %016llx, identical threaded and inline",
                 static_cast<unsigned long long>(threaded));
         }
+    }
+
+    // (9) THE TILE SCOPE, on the real ExposureSource. Its march runs per texel on a loader job
+    //     for tens of milliseconds while the FRAME thread exchanges the swell bucket every
+    //     frame, so a tile could be marched from two directions and stored under one identity.
+    //     A null compositor is enough to exercise the scope: only SampleAt needs one.
+    {
+        ExposureSource ex(nullptr, -1);
+
+        ex.Set(1.0f, 0.0f, 1.0, true);          // some bucket
+        ex.BeginTile();
+        ok &= Expect("quiet tile is kept", ex.EndTile(), 1);
+
+        ex.BeginTile();
+        ex.Set(0.0f, 1.0f, 1.0, true);          // the bucket ROLLS mid-tile
+        ok &= Expect("tile refused when the bucket rolls under it", ex.EndTile(), 0);
+
+        // Set() runs every frame and exchanges unconditionally; it must only reject when the
+        // bucket VALUE actually moved, or a still scene would refuse every tile it paints.
+        ex.BeginTile();
+        ex.Set(0.0f, 1.0f, 1.0, true);          // same direction and level: same packed word
+        ok &= Expect("re-Set to the same bucket keeps the tile", ex.EndTile(), 1);
+
+        // The snapshot is PER THREAD. Another thread opening and closing its own tile scope in
+        // the middle of this one must not decide this one's verdict. Staged, not hoped for:
+        // this thread snapshots bucket X, the other rolls to Y and completes its own tile, and
+        // this thread must then report X != Y and refuse. A shared snapshot would report the
+        // other thread's Y against the live Y and wrongly keep the tile.
+        ex.Set(1.0f, 0.0f, 1.0, true);
+        ex.BeginTile();                          // this thread holds bucket X
+        std::atomic<bool> otherDone{false};
+        std::atomic<int> otherVerdict{-1};
+        std::thread other([&] {
+            ex.Set(0.0f, 1.0f, 1.0, true);       // roll to Y
+            ex.BeginTile();
+            otherVerdict.store(ex.EndTile() ? 1 : 0);
+            otherDone.store(true, std::memory_order_release);
+        });
+        ok &= Expect("the other thread's own tile completed",
+                     WaitFor([&] { return otherDone.load(std::memory_order_acquire); }), 1);
+        other.join();
+        ok &= Expect("the other thread kept its own tile", otherVerdict.load(), 1);
+        ok &= Expect("this thread still refuses, on ITS snapshot", ex.EndTile(), 0);
     }
 
     tree_detail::Delete(path);
