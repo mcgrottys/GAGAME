@@ -614,12 +614,39 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // ---- THE SPLIT. Schlick on the TRUE per-pixel normal: from straight above F ~ 0.02 and
     // the space view is the bed's; toward the horizon the sea becomes a mirror.
     const float3 dIn = -v;                                   // camera -> surface
-    const float fres = 0.02f + 0.98f * pow(1.0f - saturate(dot(v, nPix)), 5.0f);
+    const float cosV = saturate(dot(v, nPix));
+    const float fres = 0.02f + 0.98f * pow(1.0f - cosV, 5.0f);
 
-    // ---- RAY 1, REFLECTED: the sandwich, clamped to the horizon.
+    // ---- RAY 1, REFLECTED: the Cl(3) sandwich. What it HITS is the question the old horizon
+    // clamp dodged.
     float3 rDir = normalize(dIn - 2.0f * dot(dIn, nPix) * nPix);
     const float rUp = dot(rDir, upT);
-    if (rUp < 0.02f) rDir = normalize(rDir + (0.02f - rUp) * upT);
+
+    // ---- M9bj: THE MIRROR SEES SEA, NOT ONLY SKY. Clamping every below-horizon ray back up to
+    // the horizon laundered it into the BRIGHTEST band of the sky, and at the helm that turned
+    // a storm into a white sheet: the mid-field normal is band-limited to the bank's ring texel
+    // (5-15 m), so it is nearly flat, its mirror ray leaves at +2 deg, and every pixel returned
+    // the same pale horizon.
+    //
+    // But the pixel is not one facet. sigma^2 is the slope variance the FOLD sheds the moment a
+    // band stops being resolved (ALGEBRA "fold"), and a slope spread of sigma spreads the
+    // REFLECTED direction by 2 sigma. The fraction of that distribution whose ray leaves below
+    // the horizon does not see sky at all -- it sees more sea, whose radiance this function has
+    // already computed. So the mirror is a blend, in units of the spread itself:
+    //
+    //     seaward = saturate(1/2 - rUp / (2 * 2 sigma))
+    //
+    // ONE continuous expression, no branch, no threshold, and its limits are the physics: at
+    // rUp = 0 exactly half the facets point down, so seaward = 1/2; from space rUp ~ 1 and it
+    // saturates to 0, so the orbital view is untouched to the last bit; at the helm sigma ~ 0.17
+    // gives a 20 deg spread and roughly half the sheet turns back into water you can see into.
+    // The fold's shed grades used to reach the GLINT and not the MIRROR -- that asymmetry was
+    // the artefact, and this is the same sigma^2 arriving where it was always due.
+    const float spread = 2.0f * sqrt(max(s2, 1e-6f));
+    const float seaward = saturate(0.5f - 0.5f * rUp / spread);
+    // The sky is still sampled on a horizon-clamped ray -- below it the model has no sky to
+    // give -- but it now only carries the (1 - seaward) share.
+    const float3 rSky = normalize(rDir + max(0.02f - rUp, 0.0f) * upT);
 
     // ---- RAY 2, REFRACTED: the rotor's closed form, then the cast. depth = level - bed at
     // THIS pixel, so the translucency follows the LIVE tide.
@@ -663,13 +690,24 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     spec *= (0.02f + 0.98f * pow(1.0f - saturate(dot(v, hv)), 5.0f)) *
             saturate(dot(gSunDir.xyz, nPix));
 
-    // ---- THE COMBINE. Energy SPLITS: the body dims by exactly the Fresnel the mirror takes.
-    albW *= 1.0f - fres;
+    // ---- THE COMBINE. Energy SPLITS: the body dims by exactly the Fresnel the mirror takes,
+    // and the mirror itself is part sky, part the very water it stands on.
     const float ndl = saturate(dot(nSmooth, gSunDir.xyz));   // the body, on the smooth normal
-    float3 col = albW * (0.030f + ndl * SUN_IRR_C * 1.15f);
+    const float3 bodyLit = albW * (0.030f + ndl * SUN_IRR_C * 1.15f);
+    // What the seaward share HITS is another wave, and that wave is water too: at its own
+    // grazing angle it is mostly a mirror, and only steeply-down rays see into it. So the
+    // seaward endpoint is one more bounce of the SAME Schlick, on the flat sea's normal --
+    // |rUp| is that hit's cosine. At the horizon it returns 1 and the endpoint is sky again
+    // (which is why the horizon band stays pale silver instead of turning green); pointing
+    // straight down it returns 0.02 and the endpoint is the water body. No new constant, no
+    // branch -- the law already in this function, applied once more.
+    const float3 skyLit = SkyRadianceDirDiscless(rSky) * day;
+    const float fresHit = 0.02f + 0.98f * pow(1.0f - saturate(-rUp), 5.0f);
+    const float3 mirror = lerp(skyLit, lerp(bodyLit, skyLit, fresHit), seaward);
+    float3 col = bodyLit * (1.0f - fres);
     col += spec * SUN_IRR_C * 0.85f;
-    col += SkyRadianceDirDiscless(rDir) * (fres * 0.9f) * day;
-    col += albW * float3(0.010f, 0.014f, 0.028f) * (1.0f - day);   // moonlit-blue night side
+    col += mirror * (fres * 0.9f);
+    col += albW * (1.0f - fres) * float3(0.010f, 0.014f, 0.028f) * (1.0f - day);   // night side
     return col;
 }
 

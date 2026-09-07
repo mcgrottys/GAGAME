@@ -442,10 +442,25 @@ float3 SeaPixelColor(float2 xz, float3 rel, float att, float depth, float dryGua
 
     // ---- RAY 1, REFLECTED: horizon-clamped (a steep shoaling face must read as horizon sky,
     // not the near-black a below-horizon ray gives), DISCLESS -- the sun belongs to the lobe.
-    float3 refl = reflect(dIn, n);
-    refl.y = max(refl.y, 0.02f);
+    // M9bj: THE MIRROR SEES SEA, NOT ONLY SKY -- the same law as Globe.hlsl WaterPixelColor.
+    // A below-horizon reflected ray clamped back up to the horizon returns the sky's brightest
+    // band, and at the helm that painted the whole sea white. The pixel is not one facet: sig2
+    // is the fold's shed slope variance, a slope spread of sigma spreads the reflected ray by
+    // 2 sigma, and the share of that spread pointing below the horizon sees WATER -- whose
+    // radiance is `col`, right here, already computed. One expression, no branch; 1/2 exactly
+    // at the horizon, 0 from overhead, so the orbital view is untouched.
+    const float3 refl = reflect(dIn, n);
+    const float spread = 2.0f * sqrt(max(sig2, 1e-6f));
+    const float seaward = saturate(0.5f - 0.5f * refl.y / spread);
     const float f = 0.02f + 0.98f * pow(1.0f - saturate(dot(n, v)), 5.0f);
-    col = lerp(col, SkyRadianceDirDiscless(refl), f);
+    const float3 rSky = normalize(refl + float3(0.0f, max(0.02f - refl.y, 0.0f), 0.0f));
+    // ...and what the seaward share hits is another wave, which at ITS grazing angle is itself
+    // a mirror: one more bounce of the same Schlick, |refl.y| being that hit's cosine. At the
+    // horizon it returns 1 (the band stays pale, not green); straight down it returns 0.02 and
+    // the endpoint is the water.
+    const float3 skyLit = SkyRadianceDirDiscless(rSky);
+    const float fresHit = 0.02f + 0.98f * pow(1.0f - saturate(-refl.y), 5.0f);
+    col = lerp(col, lerp(skyLit, lerp(col, skyLit, fresHit), seaward), f);
 
     // ---- THE ONE GLINT, on the resolved normal at the sub-resolved floor.
     {
