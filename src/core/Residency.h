@@ -95,7 +95,11 @@ public:
     static constexpr uint32_t kEvictAgeFrames = 4;       // > frame overlap: no in-flight reads
 
     void Init(Gpu& gpu);
+    // Idempotent, and the destructor calls it: the pool outlives this object and its jobs
+    // capture `this`, so leaving without draining them is a use-after-free waiting for a
+    // slow load. main still calls it explicitly at every early exit.
     void Shutdown();
+    ~ResidencyManager() { Shutdown(); }
 
     // ---- texture tenants (Mars, Earth) ------------------------------------------------------
     // Creates the reserved cube (ArraySize 6, full mip chain), its SRV, the R8 residency-map

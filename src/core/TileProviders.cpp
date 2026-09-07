@@ -216,6 +216,7 @@ bool GoogleTileProvider::FetchTile(int z, int x, int y, std::vector<uint8_t>& jp
             if (jpg.size() > 200) return true;   // cache hit: zero network
         }
     }
+    long long waitMs = 0;
     {
         std::lock_guard<std::mutex> lk(m_mx);
         if (m_fetched >= m_budget) {
@@ -229,14 +230,20 @@ bool GoogleTileProvider::FetchTile(int z, int x, int y, std::vector<uint8_t>& jp
         }
         // Throttle: >= 80 ms between requests, process-wide. Google's limits are far higher;
         // we stay an order of magnitude under on principle (same doctrine as the NOAA side).
+        //
+        // THE SLEEP USED TO HAPPEN HERE, HOLDING m_mx -- which is also the mutex guarding the
+        // decoded-tile LRU, so one thread waiting out its 80 ms locked every other loader
+        // thread out of the cache for the same 80 ms. The slot is RESERVED on the shared clock
+        // under the lock and waited for outside it. Reserving also spaces concurrent callers 80
+        // ms apart instead of letting them all sleep to the same instant and fire together.
         const long long now = NowMs();
-        if (now - m_lastFetchMs < 80) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(80 - (now - m_lastFetchMs)));
-        }
-        m_lastFetchMs = NowMs();
+        const long long slot = (now > m_lastFetchMs + 80) ? now : m_lastFetchMs + 80;
+        waitMs = slot - now;
+        m_lastFetchMs = slot;
         ++m_fetched;
         if (m_counter) *m_counter = m_fetched;
     }
+    if (waitMs > 0) std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
     wchar_t wpath[256];
     swprintf(wpath, 256, L"/v1/2dtiles/%d/%d/%d?session=%S&key=%S", z, x, y, m_session.c_str(),
              m_key.c_str());

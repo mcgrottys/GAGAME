@@ -554,26 +554,28 @@ namespace {
 // (The genuine cross-bank coupling is not memory at all: if C = A * B, C's tiles are only
 // useful where BOTH operands are resident, so a refusal in A wastes whatever B spent. That is
 // DeriveDemand's job -- residency correlation, not allocation.)
-uint64_t g_poolCommittedBytes = 0;
-bool g_poolWarned = false;
+// Atomic because main reads it for the recording's cost line while banks grow. Plain
+// read-modify-write on a shared counter is a race even when every writer happens to be the
+// frame thread today -- and this file's banks are exactly what a thread manager might move.
+std::atomic<uint64_t> g_poolCommittedBytes{0};
+std::atomic<bool> g_poolWarned{false};
 
 void PoolCommitted(Gpu& gpu, uint64_t bytes) {
-    g_poolCommittedBytes += bytes;
+    const uint64_t held = g_poolCommittedBytes.fetch_add(bytes, std::memory_order_relaxed) + bytes;
     const uint64_t vram = gpu.DedicatedVramBytes();
-    if (!vram || g_poolWarned) return;
-    if (g_poolCommittedBytes * 10 > vram * 7) {
-        g_poolWarned = true;
+    if (!vram) return;
+    if (held * 10 > vram * 7 && !g_poolWarned.exchange(true)) {
         Log("[atlas] POOL PRESSURE: tile pools now hold %.2f GB of %.2f GB dedicated (>70%%). "
             "Budgets are per bank; nothing enforces the SUM, so this is the warning that the "
             "next bank to grow may be the one that fails.",
-            g_poolCommittedBytes / 1073741824.0, vram / 1073741824.0);
+            held / 1073741824.0, vram / 1073741824.0);
     }
 }
 }   // namespace
 
 // Committed tile-pool bytes across every atlas. Outside the anonymous namespace above on
 // purpose: a recording reports the sparse structure's real cost, so main has to see it.
-uint64_t PoolCommittedBytes() { return g_poolCommittedBytes; }
+uint64_t PoolCommittedBytes() { return g_poolCommittedBytes.load(std::memory_order_relaxed); }
 
 // ================================================================================ TileAtlas2D
 

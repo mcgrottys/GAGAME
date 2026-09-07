@@ -158,6 +158,11 @@ private:
     // background solve plumbing: one worker at a time, result handed over by flag
     std::atomic<bool> m_solveRunning{false};   // the pool job is live (replaces joining m_worker)
     void WaitForSolve();   // what m_worker.join() used to do; main thread only
+public:
+    // A solve in flight holds `this`. There was no destructor at all before, and ~std::thread
+    // on a joinable thread calls std::terminate -- so a teardown mid-solve was a crash.
+    ~WaveField() { WaitForSolve(); }
+private:
     std::atomic<bool> m_inFlight{false};
     std::atomic<bool> m_resultReady{false};
     Solved m_result;                     // written by worker, read by main after the flag
