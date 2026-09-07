@@ -2012,21 +2012,29 @@ Eight commits, instruments first, each one gated and revertible alone.
 storm rail: the GPU frame is 6.187 ms of which `globe.mesh` is 4.908 (79%), so perfect threading
 takes the shipped loop from ~130 to ~160 fps and then stops, GPU-bound.
 
-**What it costs, measured, and the owner's call on it.** Net **+0.19 ms (~3%)** on the fenced
-RENDER mean, p95/p99 equal or slightly better. It is not CPU: `pre-RenderFrame` is identical and
-the residency turn is **2.7x faster** (p50 0.47-0.60 -> 0.17-0.22 ms; `ReadTile` had been pulling a
-64 KB tile through `istreambuf_iterator` one char at a time). The cost is GPU, +0.30 ms with no
-shader changed, landing exactly in the passes whose cost scales with residency (`waterbank` 0.346
--> 0.532, `globe.mesh` 2.392 -> 2.489) while `sea`, which does not care, did not move at all (0.469
--> 0.473). The streamer got faster, so more lands per frame, so the GPU draws more of the world.
-**The owner judged the trade worth it (2026-09-07) and it ships.** Do not re-open it as a
-regression without re-reading this paragraph.
+**What it costs: nothing. It is faster.** Measured at a FIXED POSE (helm, 600 frames, five pairs
+interleaved with the baseline binary): CPU frame **7.552 -> 7.436 ms, 0.12 ms FASTER**, and the GPU
+unchanged within noise (5.582 -> 5.621 mean, ranges 5.54-5.65 against 5.56-5.71, fully
+overlapping). The residency turn is **2.7x faster** on the rail as well (p50 0.47-0.60 -> 0.17-0.22
+ms): `ReadTile` had been pulling a 64 KB tile through `istreambuf_iterator` one char at a time.
 
-One consequence to know before comparing anything mid-flight: `groundAt` clamps the camera to
-resident height pages, so a binary that streams faster gets a finer ground answer, sits at a
-slightly different altitude, and diverges along the rail. Frame 500 of the 19:30Z rail differs by
-0.75% of pixels between these two binaries, frame 760 by 15% -- and almost all of it is POSE, not
-quality. **Only `--settle-exact` stills compare across binaries.**
+**THE STORM RAIL CANNOT A/B TWO BINARIES THAT STREAM AT DIFFERENT SPEEDS, and this is the finding
+that matters most in this section.** `groundAt` clamps the camera to RESIDENT height pages, so a
+binary whose streamer is faster gets a finer ground answer, sits at a slightly different altitude,
+and flies a different path from there. Frame 500 of the 19:30Z rail differs by 0.75% of pixels
+between these two binaries, frame 760 by 15% -- and almost all of it is POSE, not quality. The
+downstream consequence is that `globe.mesh` and `waterbank` do more work at the lower altitude,
+which reads on the rail as a GPU cost that does not exist.
+
+That is exactly the trap this pass fell into: the rail first reported "+0.19 ms, and the GPU rose
+in the residency-sensitive passes while `sea` did not", which is a coherent and entirely wrong
+story about the streamer landing more data. The fixed pose says the frame is faster. **A rail
+measures a flight, not a frame.** Use `--settle-exact` stills for pixels and a FIXED POSE for
+timing whenever the change can touch streaming speed at all.
+
+(One real saving was found on the way and kept: the pool had been calling `notify_all()` twice
+after every job -- about 30000 broadcasts a rail waking fifteen threads each -- one of them on a
+condition variable nothing ever waited on.)
 
 ### The instruments, before anything was fixed
 
