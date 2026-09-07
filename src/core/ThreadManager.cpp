@@ -115,13 +115,22 @@ void ThreadManager::Worker() {
             if (lane < 0) continue;
         }
         fn();
+        // A finished job can unblock a lane that was AT ITS CAP -- but only one thread can take
+        // the freed slot, and only if there is anything queued for a lane with room. Waking all
+        // of them on every job is a thundering herd: ~15000 jobs over a rail, 15 threads woken
+        // each time to re-check a predicate that is false for all but one of them.
+        bool wake = false;
         {
             std::lock_guard<std::mutex> lk(m_mx);
             --m_active[lane];
+            for (int L = 0; L < int(Lane::kCount); ++L) {
+                if (!m_q[L].empty() && m_active[L] < m_cap[L]) {
+                    wake = true;
+                    break;
+                }
+            }
         }
-        // A finished job may have unblocked a lane that was at its cap.
-        m_cv.notify_all();
-        m_idleCv.notify_all();
+        if (wake) m_cv.notify_one();
     }
     if (SUCCEEDED(co)) CoUninitialize();
 }

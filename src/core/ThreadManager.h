@@ -98,7 +98,6 @@ private:
     int m_cap[int(Lane::kCount)] = {0, 0};
     std::mutex m_mx;
     std::condition_variable m_cv;      // work available, or quitting
-    std::condition_variable m_idleCv;  // a job finished (Drain waits on this)
     bool m_quit = false;
     bool m_inline = false;
     mutable std::mutex m_hashMx;   // Fold() is a read-modify-write; see ThreadManager.cpp
