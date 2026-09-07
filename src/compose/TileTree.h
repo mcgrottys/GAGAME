@@ -73,6 +73,7 @@
 #include "compose/DomainSource.h"
 #include "compose/TileArchive.h"
 #include "core/Common.h"
+#include "core/ThreadAudit.h"
 
 namespace ga {
 
@@ -105,6 +106,7 @@ inline std::string Sanitize(const std::string& s) {
     return o.empty() ? std::string("node") : o;
 }
 inline bool ReadTile(const std::string& path, std::vector<uint8_t>& out, size_t bytes = 65536) {
+    threadaudit::ReadScope audit(path);   // declared first: it closes after the ifstream does
     std::ifstream f(path, std::ios::binary);
     if (!f) return false;
     out.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -135,6 +137,7 @@ inline float H2F(uint16_t h) {
 // A failed write must be loud: a whole audit pass once painted 1742 tiles into folders that did
 // not exist, reported good numbers, and stored nothing.
 inline void WriteTile(const std::string& path, const std::vector<uint8_t>& data) {
+    threadaudit::WriteScope audit(path);   // open truncates; the bytes land at close
     std::ofstream f(path, std::ios::binary);
     f.write(reinterpret_cast<const char*>(data.data()), data.size());
     if (!f) {
@@ -147,6 +150,7 @@ inline void WriteTile(const std::string& path, const std::vector<uint8_t>& data)
     }
 }
 inline void Touch(const std::string& path) {
+    threadaudit::WriteScope audit(path);
     std::ofstream f(path, std::ios::binary);   // zero bytes: the entry IS the record
     if (!f) {
         static std::atomic<bool> warned{false};
@@ -157,6 +161,12 @@ inline bool Exists(const std::string& path) {
     return GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 inline void MakeDir(const std::string& path) { CreateDirectoryA(path.c_str(), nullptr); }
+// Every unlink goes through here: DropCachedAddress deletes tiles on the PARENT node under no
+// lock, and a delete inside someone else's read is the same collision a torn write is.
+inline void Delete(const std::string& path) {
+    threadaudit::Deleted(path);
+    DeleteFileA(path.c_str());
+}
 // The one wildcard lookup a stored reference costs: "<base>.ref-*" -> the suffix.
 inline bool FindRef(const std::string& base, std::string& childId) {
     WIN32_FIND_DATAA fd{};
@@ -663,7 +673,7 @@ private:
                     !tree_detail::Exists(ab + ".fold")) {
                     tree_detail::Touch(ab + ".fold");
                 } else if (tree_detail::Exists(ab + ".void")) {
-                    DeleteFileA((ab + ".void").c_str());   // a child with content arrived
+                    tree_detail::Delete(ab + ".void");   // a child with content arrived
                     tree_detail::Touch(ab + ".fold");
                 }
                 InvalidateAbove(tag, a);
@@ -705,7 +715,7 @@ private:
         // composite there keeps its reference to the base tree (the soak rule already left
         // the small source out of that subset), and no coarse tile is materialized for it.
         if (ph != Held::Void && Redundant(before, parent, kFoldRedundantTol)) return;
-        if (ph == Held::Void) DeleteFileA((pbase + ".void").c_str());
+        if (ph == Held::Void) tree_detail::Delete(pbase + ".void");
         tree_detail::WriteTile(pbase + ".bin", parent);
         ++folded;
         InvalidateAbove(tag, p);
@@ -766,7 +776,7 @@ public:
                         }
                         if (Tile(frame, tag, r, bytes, nullptr) == Status::Content &&
                             Redundant(bytes, fold, kFoldRedundantTol)) {
-                            DeleteFileA((base + ".bin").c_str());
+                            tree_detail::Delete(base + ".bin");
                             tree_detail::Touch(base + ".fold");
                             ++markers;
                         }
@@ -801,7 +811,7 @@ private:
         if (materialize) {
             const std::string base = Base(tag, r);
             tree_detail::WriteTile(base + ".bin", out);
-            DeleteFileA((base + ".fold").c_str());
+            tree_detail::Delete(base + ".fold");
         }
         return Status::Content;
     }
@@ -828,12 +838,12 @@ private:
         if (h != INVALID_HANDLE_VALUE) {
             const std::string dir = base.substr(0, base.find_last_of('\\') + 1);
             do {
-                DeleteFileA((dir + fd.cFileName).c_str());
+                tree_detail::Delete(dir + fd.cFileName);
             } while (FindNextFileA(h, &fd));
             FindClose(h);
         }
-        DeleteFileA((base + ".bin").c_str());
-        DeleteFileA((base + ".void").c_str());
+        tree_detail::Delete(base + ".bin");
+        tree_detail::Delete(base + ".void");
         ++dropped;
         InvalidateAbove(tag, r);
     }

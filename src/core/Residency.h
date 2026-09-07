@@ -343,6 +343,45 @@ public:
     // binaries that issue the same want stream, print the same hash or the difference is real.
     void LogSettleExact(uint32_t heldFrames) const;
 
+    // Step 28 (docs/PERF_EXPERIMENT.md): THE LANDING LEDGER. What one turn did to the tiles
+    // between the queue and the sampler, by the class of thing that can go wrong there: a
+    // DirectStorage batch landing for a coordinate its tile no longer owns, a ring fill of a
+    // tile that has NO bytes, a turn whose landed copies had no mapped batch behind them.
+    // Zeroed at the top of ProcessQueues; printed every turn of the --res-trace-frames window
+    // (main raises traceTurn per frame) and summed over the run for the [rail] tail.
+    //
+    // MEASURED (2026-09-05, the storm rail with --probe-cull-far, recorded frames 700-820,
+    // the pool at its 8192-tile cap the whole time): the landing buffer never ran short (410-511
+    // of 512 slots free at up to 96 direct tiles a turn), every fence signalled one turn after
+    // its Submit, no fill lacked bytes -- and one turn in three landed a batch with NO mapped
+    // batch behind it (rec746, 755, 758, 761, 764, 767, 770, 776, 779, 791, 800).
+    //
+    // RE-MEASURED (2026-09-06, this ledger, same rail and window): the same eleven recorded
+    // frames came back LANDED-ONLY, plus rec774, every one of them with `barriered` = 0. Over
+    // the whole flood rail 89 such turns and 85 unowned claims; over the 19:30Z rail 68 and 126.
+    // Zero ring fills without bytes on both.
+    //
+    // THE BARRIER IS STILL AT THE TAIL OF MapAndFill, which a turn with an empty batch never
+    // reaches, so those turns still draw the tenant mid-copy. Nothing here fixes that; this
+    // ledger exists so the fix has a number to be gated against, and so the count can be
+    // required to reach zero rather than assumed to (see ProcessQueues).
+    struct TurnLedger {
+        uint32_t landedBatches = 0, landedTiles = 0;   // fences signalled this turn; tiles claimed
+        uint32_t landedRetired = 0;   // ... landed for a tile the retire loop already NULL-mapped
+        uint32_t landedUnowned = 0;   // ... landed for a coordinate the tile no longer owns
+        uint32_t lagMin = 0, lagMax = 0;   // turns from a batch's Submit to its fence, this turn
+        uint32_t batch = 0, direct = 0, ring = 0;   // the mapped batch, by fill path
+        uint32_t ringNoBytes = 0;   // ring fills of a tile with no bytes: a garbage fill
+        uint32_t evicted = 0;
+        uint32_t landedOnly = 0;    // 1: tiles landed and no batch was mapped this turn
+        uint32_t barriered = 0;     // tenants transitioned back to shader reads after the copies
+        uint32_t stageFree = 0, stageRetiring = 0, inFlightTiles = 0;   // after the turn
+    };
+    TurnLedger turn;
+    uint64_t ringNoBytesTotal = 0, landedUnownedTotal = 0, landedOnlyTurns = 0;
+    bool traceTurn = false;        // print this turn's ledger (main: --res-trace-frames)
+    uint32_t traceRecFrame = 0;    // the recorded frame main labels it with
+
 private:
     struct Tracked;
     struct Tenant {
@@ -468,6 +507,7 @@ private:
     // barrier, no graphics-queue wait, just not lying about what has arrived yet.
     struct InFlightRead {
         uint64_t fence = 0;
+        uint32_t frame = 0;   // the turn that submitted it (step 28: the ledger's lag)
         std::vector<std::shared_ptr<Tracked>> tiles;
     };
 
