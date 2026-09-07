@@ -56,6 +56,7 @@
 #include "core/CrashTrace.h"
 #include "core/ThreadAudit.h"
 #include "core/ThreadManager.h"
+#include "sim/SimClock.h"
 #include "core/DxTest.h"
 #include "core/Pga.h"
 #include "core/TileProviders.h"
@@ -1806,6 +1807,7 @@ int main(int argc, char** argv) {
             ok &= RunTileSelfTest(gpu, sc, opt.shaderDir);
             ok &= RunAtlasSelfTest(gpu, sc, opt.shaderDir);
             ok &= RunThreadSelfTest();    // the thread instrument's own gate: it must SEE a race
+            ok &= RunSimClockSelfTest();  // the scene clock: whole quanta, framing-independent
             gpu.Shutdown();
             return ok ? 0 : 1;
         }
@@ -3400,6 +3402,11 @@ int main(int argc, char** argv) {
         }
 
         double simUnix = (opt.startUnix > 0) ? opt.startUnix : NowUnix();
+        // The playable clock (sim/SimClock.h). Headless keeps its own frame-indexed formula
+        // below -- that path was already fixed-step, which is why rails reproduce and sessions
+        // did not.
+        SimClock simClock;
+        simClock.Reset(simUnix);
         bool sunLogged = false;   // M9bi: log the placed sun once, with its numbers
         const double startUnix = simUnix;
 
@@ -3997,6 +4004,7 @@ int main(int argc, char** argv) {
                 if (window.TakeResized()) renderer.OnResize(window.Width(), window.Height());
             }
 
+            int simSteps = 0;   // whole sim quanta this frame (sim/SimClock.h)
             const auto now = Clock::now();
             float dt = std::chrono::duration<float>(now - last).count();
             last = now;
@@ -4146,6 +4154,12 @@ int main(int argc, char** argv) {
                 if (in.keyPressed[VK_LEFT]) simUnix -= nudge;
                 if (in.keyPressed[VK_RIGHT]) simUnix += nudge;
                 if (in.keyPressed[VK_HOME] || in.keyPressed['N']) simUnix = NowUnix();
+                // A deliberate jump re-bases the clock; the partial quantum does not smear
+                // across the discontinuity.
+                if (in.keyPressed[VK_LEFT] || in.keyPressed[VK_RIGHT] ||
+                    in.keyPressed[VK_HOME] || in.keyPressed['N']) {
+                    simClock.SetTo(simUnix);
+                }
                 if (in.keyPressed[VK_OEM_4]) windowSec = std::max(windowSec * 0.5, 0.5 * 86400.0);
                 if (in.keyPressed[VK_OEM_6]) windowSec = std::min(windowSec * 2.0, 30.0 * 86400.0);
                 if (in.keyPressed['C']) {   // cycle the ribbon's contour gauge
@@ -4182,7 +4196,18 @@ int main(int argc, char** argv) {
                     if (mode == 0) cam = camChart;
                     else if (mode == 1) cam = camSea;
                 }
-                if (!paused) simUnix += dt * timeScale;
+                // THE SCENE CLOCK ADVANCES IN WHOLE QUANTA. It used to be `simUnix += dt *
+                // timeScale` with dt straight off the wall clock, so how much world a frame
+                // covered was a function of how fast that frame rendered -- and everything that
+                // integrates inherited it. SweSolver already chases this clock with its own
+                // fixed 0.25 s substeps, capped at kMaxSubsteps a frame, so a lurching clock is
+                // what leaves it behind by a frame-rate-dependent amount (PERF_EXPERIMENT step
+                // 26). `simSteps` is the count an integrating consumer steps: the boat's
+                // `for (int i = 0; i < simSteps; ++i) Step(SimClock::kDt)` hangs here.
+                if (!paused) {
+                    simSteps = simClock.Advance(dt, timeScale);
+                    simUnix = simClock.Now();
+                }
             } else {
                 // Deterministic time in headless mode so a dump sequence is reproducible.
                 // M7h: rail SETTLE -- the first recorded frame used to be the coldest:
