@@ -2018,19 +2018,30 @@ unchanged within noise (5.582 -> 5.621 mean, ranges 5.54-5.65 against 5.56-5.71,
 overlapping). The residency turn is **2.7x faster** on the rail as well (p50 0.47-0.60 -> 0.17-0.22
 ms): `ReadTile` had been pulling a 64 KB tile through `istreambuf_iterator` one char at a time.
 
-**THE STORM RAIL CANNOT A/B TWO BINARIES THAT STREAM AT DIFFERENT SPEEDS, and this is the finding
-that matters most in this section.** `groundAt` clamps the camera to RESIDENT height pages, so a
-binary whose streamer is faster gets a finer ground answer, sits at a slightly different altitude,
-and flies a different path from there. Frame 500 of the 19:30Z rail differs by 0.75% of pixels
-between these two binaries, frame 760 by 15% -- and almost all of it is POSE, not quality. The
-downstream consequence is that `globe.mesh` and `waterbank` do more work at the lower altitude,
-which reads on the rail as a GPU cost that does not exist.
+**WHY THE RAIL DISAGREES, read out of the code rather than inferred.** The rail is frame
+deterministic in both pose and clock: `railPose(recFrame / 30.0, cam)` sets the camera and
+`simUnix = startUnix + recFrame * (timeScale / 30.0)` sets the instant, both pure functions of the
+recorded frame index. `groundAt` reads a CPU `BathyModel`, not resident pages. (The wall-clock
+`simUnix += dt * timeScale` is the INTERACTIVE path; a rail never takes it.)
 
-That is exactly the trap this pass fell into: the rail first reported "+0.19 ms, and the GPU rose
-in the residency-sensitive passes while `sea` did not", which is a coherent and entirely wrong
-story about the streamer landing more data. The fixed pose says the frame is faster. **A rail
-measures a flight, not a frame.** Use `--settle-exact` stills for pixels and a FIXED POSE for
-timing whenever the change can touch streaming speed at all.
+So at a given rail frame the two binaries share a pose and an instant, and the only thing that CAN
+differ is which tiles happen to be resident at that moment -- race-decided per priors 30, and never
+converging on a rail because the camera keeps moving. Different resident height tiles displace the
+surface differently, which is why frame 760 differs by 15% of pixels, and why `globe.mesh` and
+`waterbank` carry the GPU delta while `sea` does not move at all.
+
+At a FIXED pose that transient is gone: residency converges, the `--settle-exact` hashes prove the
+resident sets identical, and the frame is faster. There is no per-frame cost; the rail is measuring
+a streaming transient, not the work per frame.
+
+**The rail keeps its job -- continuity, pop-in, the picture over time. It loses its job as a
+cross-binary stopwatch** whenever a change can touch streaming speed at all: use a fixed pose for
+timing and `--settle-exact` stills for pixels.
+
+(Recorded because this section got the mechanism wrong twice before anyone read the code: first
+"the streamer lands more data", then "the camera clamps to resident pages so the paths diverge".
+The second was simply false -- pose and clock are frame-pinned. The first was right, and had been
+talked out of on the strength of a camera shift that was really displaced geometry.)
 
 (One real saving was found on the way and kept: the pool had been calling `notify_all()` twice
 after every job -- about 30000 broadcasts a rail waking fifteen threads each -- one of them on a
