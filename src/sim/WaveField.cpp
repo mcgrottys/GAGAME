@@ -48,6 +48,7 @@
 #include "sim/CurrentModel.h"
 
 #include "sim/WaveField.h"
+#include "core/ThreadManager.h"
 
 #include "core/Gpu.h"
 #include "sim/BathyModel.h"
@@ -157,18 +158,20 @@ double Wrap360(double deg) {
     return w;   // matches python's floored %: [0, 360)
 }
 
+// The solver's row split. It used to SPAWN AND JOIN max(4, hw-2) threads on every call, at three
+// call sites, nested inside the solve worker -- 14 threads per call on this machine, created and
+// destroyed each time. It is the pool's ParallelFor now.
+//
+// THE CHUNKING IS UNCHANGED ON PURPOSE: the same nThreads expression gives the same chunk size,
+// so every call gets the identical row ranges it always did. The rows write disjoint output and
+// the only shared accumulator is an atomic counter, so the split could not change the answer --
+// but keeping it identical means the solve is not a variable in this commit's gate.
 void ParallelRows(int ny, const std::function<void(int, int)>& fn) {
+    if (ny <= 0) return;
     const unsigned hw = std::thread::hardware_concurrency();
     const int nThreads = (std::max)(4, (hw > 2u) ? int(hw - 2u) : 4);
-    std::vector<std::thread> ts;
     const int chunk = (ny + nThreads - 1) / nThreads;
-    for (int t = 0; t < nThreads; ++t) {
-        const int j0 = t * chunk;
-        const int j1 = (std::min)(ny, j0 + chunk);
-        if (j0 >= j1) break;
-        ts.emplace_back(fn, j0, j1);
-    }
-    for (std::thread& th : ts) th.join();
+    Threads().ParallelFor(Lane::Compute, "wave.rows", ny, chunk, fn);
 }
 
 void CachePathFor(uint64_t key, char* buf, size_t n) {
@@ -624,7 +627,7 @@ bool ReadCache(const char* path, uint64_t key, const WaveFieldConfig& cfg,
 void WaveField::Configure(const WaveFieldConfig& cfg, const Compositor* comp, int hgtChannel,
                           const WaterAtlas* atlas, const TideModel* tides, int entranceStation,
                           const CurrentModel* currents, int actStation) {
-    if (m_worker.joinable()) m_worker.join();   // reconfigure never races a live solve
+    WaitForSolve();   // reconfigure never races a live solve
     m_inFlight.store(false);
     m_resultReady.store(false);
     m_cfg = cfg;
@@ -841,16 +844,29 @@ WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
 }
 
 void WaveField::SolveAsync(uint64_t key, double simUnix, std::vector<PartParam> parts) {
-    if (m_worker.joinable()) m_worker.join();   // a finished, already-consumed worker
+    WaitForSolve();   // a finished, already-consumed solve
     m_inFlight.store(true);
     m_result = Solved{};
+    m_solveRunning.store(true, std::memory_order_release);
     Log("[wave] bucket rolled -> background solve (key %016llx)",
         static_cast<unsigned long long>(key));
-    m_worker = std::thread([this, key, simUnix, p = std::move(parts)]() {
+    // Lane::Compute, not Io: this runs for seconds and would otherwise hold one of the twelve
+    // loader slots for the whole solve. Its own ParallelRows is a nested ParallelFor on the same
+    // lane, which is safe because that caller does its own share of the chunks.
+    Threads().Submit(Lane::Compute, "wave.solve", [this, key, simUnix, p = std::move(parts)]() {
         Solved s = SolveNow(key, simUnix, p);
         m_result = std::move(s);
         m_resultReady.store(true, std::memory_order_release);
+        m_solveRunning.store(false, std::memory_order_release);
     });
+}
+
+// What join() used to do. Main thread only -- Configure and Update -- so it cannot be the
+// thread the solve is waiting for.
+void WaveField::WaitForSolve() {
+    while (m_solveRunning.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
 }
 
 void WaveField::AdoptTable(const GpuTable& t) {
@@ -893,7 +909,7 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
     // hand over a finished background solve first: the old field stays live until the new
     // one is WHOLE (double-buffer by construction -- the renderer never sees a half solve).
     if (m_resultReady.load(std::memory_order_acquire)) {
-        if (m_worker.joinable()) m_worker.join();
+        WaitForSolve();   // the job stores m_resultReady before it clears m_solveRunning
         m_resultReady.store(false);
         m_inFlight.store(false);
         AdoptTable(m_result.table);

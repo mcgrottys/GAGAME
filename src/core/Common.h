@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+#include <mutex>
 #include <string>
 #include <stdexcept>
 
@@ -22,6 +23,11 @@ inline void Log(const char* fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
+    // Formatted first, printed under a lock. Every pool thread logs -- the tile-tree archive
+    // lines come off loader threads -- and fputs of a whole line is not atomic, so lines could
+    // interleave mid-line. Every gate in this project is read out of these logs.
+    static std::mutex mx;
+    std::lock_guard<std::mutex> lk(mx);
     fputs(buf, stdout);
     fputc('\n', stdout);
     fflush(stdout);

@@ -1,4 +1,5 @@
 #include "core/Residency.h"
+#include "core/ThreadManager.h"
 
 #include <atomic>
 
@@ -20,36 +21,30 @@ void ResidencyManager::Init(Gpu& gpu) {
             static_cast<uint64_t>(kMaxMapsPerFrame) * 65536 + kMapStageBytes,
             L"residency upload ring");
     }
-    // M7w: 2 workers starved every descent (140 loads in 300 frames measured at the flood-rail
-    // pose -- the patchwork was coarse fallback, not bad data). Paints are local disk/CPU work.
-    const unsigned hc = std::thread::hardware_concurrency();
-    const int nWorkers = (std::min)(12, (std::max)(4, static_cast<int>(hc) - 2));
-    for (int i = 0; i < nWorkers; ++i) {
-        m_workers.emplace_back([this] { LoaderThread(); });
-    }
+    // M7w's worker count (2 starved every descent: 140 loads in 300 frames at the flood-rail
+    // pose, and the patchwork was coarse fallback, not bad data) is now the Io lane's cap, set
+    // by ThreadManager::Init from the same expression. No threads are created here.
+    m_quit = false;
+    Log("[residency] loads run on the pool's Io lane (%d at once)", Threads().IoCap());
 }
 
 void ResidencyManager::Shutdown() {
-    {
-        std::lock_guard<std::mutex> lk(m_mx);
-        m_quit = true;
-    }
-    m_cv.notify_all();
-    for (auto& w : m_workers) {
-        if (w.joinable()) w.join();
-    }
-    m_workers.clear();
+    // The jobs capture `this`. Refuse new work, then WAIT for the ones already running to
+    // leave -- the pool outlives this object and would otherwise still be inside it. (The old
+    // pool joined its own threads here, which had the same effect for free.)
+    m_quit = true;
+    std::unique_lock<std::mutex> lk(m_mx);
+    m_drainCv.wait(lk, [this] { return m_inFlight.load() == 0; });
 }
 
-void ResidencyManager::LoaderThread() {
-    for (;;) {
-        std::shared_ptr<Tracked> job;
-        {
-            std::unique_lock<std::mutex> lk(m_mx);
-            m_cv.wait(lk, [this] { return m_quit || !m_loadQueue.empty(); });
-            if (m_quit) return;
-            job = m_loadQueue.front();
-            m_loadQueue.pop_front();
+void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
+    {
+        // Shutdown ran between this job being queued and it being picked up.
+        if (m_quit.load()) {
+            std::lock_guard<std::mutex> lk(m_mx);
+            --m_inFlight;
+            m_drainCv.notify_all();
+            return;
         }
         std::vector<uint8_t> data;
         TileLoc loc;
@@ -96,6 +91,7 @@ void ResidencyManager::LoaderThread() {
             }
             --m_inFlight;
         }
+        m_drainCv.notify_all();
     }
 }
 
@@ -713,6 +709,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     const auto turn0 = Clock::now();
     auto lap0 = turn0;
     for (double& p : phaseMs) p = 0.0;
+    turn = TurnLedger{};   // step 28: the landing ledger, this turn's
     auto lap = [&](int k) {
         const auto t = Clock::now();
         phaseMs[k] += std::chrono::duration<double, std::milli>(t - lap0).count();
@@ -777,9 +774,29 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     if (m_stream && !m_inFlightReads.empty()) {
         for (auto it = m_inFlightReads.begin(); it != m_inFlightReads.end();) {
             if (!m_stream->Complete(it->fence)) { ++it; continue; }
+            // Step 28: the ledger's lag -- how many turns this batch held its landing slots.
+            {
+                const uint32_t lag = m_frame - it->frame;
+                if (!turn.landedBatches || lag < turn.lagMin) turn.lagMin = lag;
+                if (lag > turn.lagMax) turn.lagMax = lag;
+                ++turn.landedBatches;
+            }
             for (auto& tile : it->tiles) {
                 // Evicted while in flight: its slot is gone and the claim would be a lie.
-                if (tile->state != TileState::Mapped) continue;
+                if (tile->state != TileState::Mapped) { ++turn.landedRetired; continue; }
+                // AND THE CLAIM MUST BE ITS OWN. A tile that was dropped, evicted at the cap or
+                // re-tracked since its read was issued no longer owns its coordinate: the copy
+                // below would swizzle the OLD identity's bytes into a slot that now belongs to
+                // something else, and UpdateResidencyByte would then swear real data is there.
+                // Measured before this skip existed: 85 such claims over the 14:00 flood rail
+                // and 126 over the 19:30Z one. The slot still retires -- that loop is below and
+                // runs over every tile of the batch -- so skipping here leaks nothing.
+                if (tile->dropped || Find(tile->tenant, tile->req) != tile.get()) {
+                    ++turn.landedUnowned;
+                    ++landedUnownedTotal;
+                    continue;
+                }
+                ++turn.landedTiles;
                 Tenant& t = m_tenants[tile->tenant];
                 if (t.state != D3D12_RESOURCE_STATE_COPY_DEST) {
                     D3D12_RESOURCE_BARRIER b{};
@@ -994,6 +1011,13 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     lap0 = Clock::now();   // the trace print above is not a phase
 
     // ---- start loads (newest-seen first, coarse first; predicted tiles yield to real ones)
+    //
+    // The tiles are CHOSEN under m_mx and SUBMITTED after it is released. Two reasons, and the
+    // second is not optional: under --jobs-inline a Submit runs the job on this very thread, and
+    // RunLoad takes m_mx, which a lock still held here would deadlock on. The submission order is
+    // exactly the order this block produced, so the request stream reaching the Io lane -- which
+    // is FIFO at the old pool's worker count -- is the one the old queue saw.
+    std::vector<std::shared_ptr<Tracked>> toLoad;
     {
         std::lock_guard<std::mutex> lk(m_mx);
         // M7w: failed loads parked in m_loading with state Seen get their retry first.
@@ -1001,9 +1025,8 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             if (tile->state != TileState::Seen) continue;
             if (m_inFlight >= static_cast<int>(kMaxLoadsInFlight)) break;
             tile->state = TileState::Loading;
-            m_loadQueue.push_back(tile);
+            toLoad.push_back(tile);
             ++m_inFlight;
-            m_cv.notify_one();
         }
         lap(3);
         // M9af: READY BEFORE UNREADY. A tile already on the NVMe is a 64 KB read; one that is
@@ -1033,11 +1056,13 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             if (tile->dropped) continue;   // M9ba: identity moved before it loaded
             tile->state = TileState::Loading;
             m_loading.push_back(tile);
-            m_loadQueue.push_back(tile);
+            toLoad.push_back(tile);
             ++m_inFlight;
-            m_cv.notify_one();
         }
         lap(3);
+    }
+    for (const auto& tile : toLoad) {
+        Threads().Submit(Lane::Io, "residency.load", [this, tile] { RunLoad(tile); });
     }
 
     // ---- gather mappable tiles (loaded, parent already mapped or coarsest)
@@ -1086,6 +1111,62 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         lap(5);
     }
     if (!batch.empty()) MapAndFill(gpu, cl, batch);   // phases 6..8 bracket themselves
+    // ---- THE BARRIER THE LANDED COPIES NEVER HAD. The landed loop above moves a tenant to
+    // COPY_DEST and records the CopyTiles that swizzle its arrived tiles in; the transition back
+    // to shader reads used to live at the tail of MapAndFill, which a turn with an EMPTY BATCH
+    // never reaches. Such a turn drew the tenant in COPY_DEST with no barrier between the copies
+    // and the draw -- and the residency byte, raised in the same turn, sent the sampler to the
+    // tile while the copy engine was still writing it: whatever the pool slot held before, block
+    // by block, until the copy caught up. That is priors 29/31's straight-edged dark-noise
+    // quadrilaterals the size of one z17 detail tile.
+    //
+    // MEASURED by the previous commit's ledger, on the shipped code: 89 such turns over the
+    // 14:00 flood rail and 68 over the 19:30Z one, every one of them reporting `barriered` = 0,
+    // clustered exactly where step 28's notes recorded them (rec746, 755, 758, 761, 764, 767,
+    // 770, 774, 776, 779, 791, 800). A fast streamer -- the horizon cull, a raised pool cap --
+    // is what makes such turns common, which is why this is fixed BEFORE either of those.
+    //
+    // Every tenant a turn leaves in COPY_DEST goes back here, batch or no batch. Note this is
+    // NOT the old sequence verbatim: MapAndFill's tail transitioned every tenant unconditionally,
+    // including ones already in PIXEL|NON_PIXEL, which is a StateBefore == StateAfter barrier the
+    // debug layer rejects. Only tenants that are actually in COPY_DEST are transitioned now, so
+    // the command stream is shorter as well as correct.
+    lap0 = Clock::now();   // the barriers stay in phase 6, where MapAndFill's tail had them
+    for (auto& t : m_tenants) {
+        if (t.state != D3D12_RESOURCE_STATE_COPY_DEST) continue;
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = t.res.Get();
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = t.state;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;   // M9ar: compute reads too
+        cl->ResourceBarrier(1, &b);
+        t.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        ++turn.barriered;
+    }
+    lap(6);
+    // The landing ledger, this turn (Residency.h TurnLedger).
+    if (turn.landedTiles && batch.empty()) {
+        turn.landedOnly = 1;
+        ++landedOnlyTurns;
+    }
+    turn.stageFree = static_cast<uint32_t>(m_stageFree.size());
+    for (const auto& r : m_stageRetire) turn.stageRetiring += static_cast<uint32_t>(r.second.size());
+    for (const auto& b : m_inFlightReads) turn.inFlightTiles += static_cast<uint32_t>(b.tiles.size());
+    if (traceTurn) {
+        Log("[res-turn] rec%u f%u | landed %u batches / %u tiles (lag %u..%u turns), %u retired, "
+            "%u UNOWNED%s | batch %u: direct %u, ring %u, NO-BYTES %u, evicted %u | %u tenants "
+            "barriered | landing: free %u, retiring %u, in flight %u tiles / %zu batches | pool "
+            "%zu mapped, %zu free | queue: seen %zu, loading %zu, in flight %d",
+            traceRecFrame, m_frame, turn.landedBatches, turn.landedTiles, turn.lagMin,
+            turn.lagMax, turn.landedRetired, turn.landedUnowned,
+            turn.landedOnly ? ", LANDED-ONLY turn" : "", turn.batch, turn.direct, turn.ring,
+            turn.ringNoBytes, turn.evicted, turn.barriered, turn.stageFree, turn.stageRetiring,
+            turn.inFlightTiles, m_inFlightReads.size(), m_mapped.size(), m_freePool.size(),
+            m_seen.size(), m_loading.size(), m_inFlight.load());
+    }
     lap0 = Clock::now();
 
     // ---- residency-map refresh (tiny R8 maps; only when dirty)
@@ -1148,10 +1229,15 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         (void)tr;
         bytes += 65536;
     }
-    snprintf(s, sizeof(s), "streams %zu res (%zu t, %.0f MB, %u fetches, %llu direct/%llu ring%s)",
+    snprintf(s, sizeof(s),
+             "streams %zu res (%zu t, %.0f MB, %u fetches, %llu direct/%llu ring, landing: %llu "
+             "landed-only turns, %llu no-bytes fills, %llu unowned claims%s)",
              m_tenants.size(), m_mapped.size(), bytes / 1048576.0, fetchesThisRun,
              static_cast<unsigned long long>(m_directTiles),
              static_cast<unsigned long long>(m_ringTiles),
+             static_cast<unsigned long long>(landedOnlyTurns),
+             static_cast<unsigned long long>(ringNoBytesTotal),
+             static_cast<unsigned long long>(landedUnownedTotal),
              m_failedLoads ? " FAILED-TILES" : "");
     stats = s;
     for (const auto& f : m_fields) {
@@ -1202,6 +1288,17 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
     // Keyed by (tenant, heapChunk); evictions keyed by (tenant, UINT32_MAX).
     std::map<std::pair<int, uint32_t>, PerHeap> calls;
 
+    // THE LANDING-SLOT DRAIN STAYS WHERE IT WAS, in the fill loop below. Step 28's patch hoisted
+    // it here so the ledger could report a settled `stageFree`, arguing the slots come back in
+    // the same turn either way. They do NOT, in one case: an empty `toFill` never reaches the
+    // loop, so the old code skipped the drain that turn and the hoist returns those slots a turn
+    // early. MEASURED (2026-09-06, five settled stills, --settle-exact, prev binary vs this one
+    // in one session against a same-session A/A floor): with the hoist, key7km went max |d| 9
+    // against an A/A floor of 5 -- three pixels, but outside the floor, and this commit is
+    // supposed to be an instrument. The ledger does not need it: `stageFree` is read at the end
+    // of the turn, after the fill loop has drained, so it reports the same number.
+    turn.batch = static_cast<uint32_t>(batch.size());
+
     std::vector<std::shared_ptr<Tracked>> toFill;
     for (const auto& tile : batch) {
         Tenant& t = m_tenants[tile->tenant];
@@ -1235,6 +1332,7 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
                 Untrack(vt, victim.get());   // m_mapped's reference keeps it alive until
                 m_mapped.erase(it);          // this erase, as the map's did
                 freed = true;
+                ++turn.evicted;
                 break;
             }
             if (!freed) break;   // nothing evictable yet; try again next frame
@@ -1317,12 +1415,27 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
                 tile->stageOffset = slotOff;
                 direct.push_back(tile);
                 ++m_directTiles;
+                ++turn.direct;
                 phase(7);
                 continue;
             }
         }
         const D3D12_TILE_REGION_SIZE size{1, FALSE, 0, 0, 0};
         const size_t n = tile->data.size() < 65536 ? tile->data.size() : 65536;
+        ++turn.ring;
+        if (n < 65536) {
+            // Step 28, counted: a ring fill of a tile that has no bytes (an archived tile
+            // that found no landing slot, or whose OpenFile failed) copies the slab's stale
+            // bytes into a mapped tile.
+            ++turn.ringNoBytes;
+            ++ringNoBytesTotal;
+            if (traceTurn) {
+                Log("[res-turn]   NO BYTES: %S f%u m%u (%u,%u) -> pool %u, %zu of 65536 bytes "
+                    "(loc %d, landing slots free %zu)",
+                    t.name.c_str(), tile->req.face, tile->req.mip, tile->req.x, tile->req.y,
+                    tile->pool, n, int(tile->loc.Valid()), m_stageFree.size());
+            }
+        }
         memcpy(ring.cpu + off, tile->data.data(), n);
         cl->CopyTiles(t.res.Get(), &coord, &size, ring.res.Get(), off,
                       D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE);
@@ -1335,23 +1448,13 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
     if (!direct.empty()) {
         InFlightRead f;
         f.fence = m_stream->Submit();
+        f.frame = m_frame;
         f.tiles = std::move(direct);
         m_inFlightReads.push_back(std::move(f));
         phase(7);
     }
-    for (auto& t : m_tenants) {
-        D3D12_RESOURCE_BARRIER b{};
-        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Transition.pResource = t.res.Get();
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b.Transition.StateBefore = t.state;
-        b.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
-                                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;   // M9ar: compute reads too
-        cl->ResourceBarrier(1, &b);
-        t.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
-                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-    }
-    phase(6);
+    // The tenants go back to shader reads in ProcessQueues, after this call returns: the landed
+    // loop's copies need that barrier on the turns this call never runs at all.
 }
 
 void ResidencyManager::LogSettleExact(uint32_t heldFrames) const {

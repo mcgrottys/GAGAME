@@ -108,16 +108,16 @@ EquirectHeightSource::EquirectHeightSource(const char* name, const char* structu
                                            double cmPerPixel, const std::vector<int16_t>* elev,
                                            int nx, int ny, double datumShiftM)
     : m_elev(elev), m_nx(nx), m_ny(ny), m_datumShift(datumShiftM) {
-    static char crs[2][96];
-    static int slot = 0;
-    const int k = slot++ & 1;
+    // A plain local. This was a pair of function-local STATIC buffers picked by a
+    // non-atomic `slot++`, so two sources constructed at once raced on both the index and the
+    // buffer -- and it was never needed: SourceInfo::crs is a std::string and copies.
+    char crs[96];
     if (datumShiftM != 0.0) {
-        snprintf(crs[k], sizeof(crs[k]), "EPSG:4326 equirect, vdatum %+.3f m -> NAVD88",
-                 datumShiftM);
+        snprintf(crs, sizeof(crs), "EPSG:4326 equirect, vdatum %+.3f m -> NAVD88", datumShiftM);
     } else {
-        snprintf(crs[k], sizeof(crs[k]), "EPSG:4326 equirect (plate carree)");
+        snprintf(crs, sizeof(crs), "EPSG:4326 equirect (plate carree)");
     }
-    m_info = {name, structure, crs[k], cmPerPixel, -180, -90, 180, 90};
+    m_info = {name, structure, crs, cmPerPixel, -180, -90, 180, 90};
 }
 
 float EquirectHeightSource::Sample(double latRad, double lonRad, double, float& metres) {
@@ -137,7 +137,7 @@ WindowHeightSource::WindowHeightSource(const char* name, const char* structure,
                                        double dLat, double featherFrac, double datumShiftM)
     : m_elev(elev), m_nx(nx), m_ny(ny), m_lon0(lon0), m_lat1(lat1), m_dLon(dLon),
       m_dLat(std::abs(dLat)), m_feather(featherFrac), m_datumShift(datumShiftM) {
-    static char crs[96];
+    char crs[96];   // was a function-local static shared by every instance
     if (datumShiftM != 0.0) {
         snprintf(crs, sizeof(crs), "EPSG:4326 window (row 0 N), vdatum %+.3f m -> NAVD88",
                  datumShiftM);

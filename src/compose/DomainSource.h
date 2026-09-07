@@ -104,6 +104,18 @@ public:
                            std::vector<DomainValue>&) const {
         return false;
     }
+    // ---- THE TILE SCOPE. A per-texel node whose INPUTS can move under it -- a bucket the frame
+    // thread re-keys while a paint is running on a loader job -- snapshots them in BeginTile and
+    // answers every SampleAt of THAT tile from the snapshot, so one tile is one field. EndTile
+    // returns false when the snapshot went stale before the tile finished: the tree answers
+    // Transient and asks again rather than storing two fields as one.
+    //
+    // This is the per-texel twin of the contract PaintTile already has for tile-native nodes
+    // ("false = the answer is not ready for this identity"), and it is shaped like
+    // ColorSource::BeginTile in Compositor.h, which the colour path has always had. Called on
+    // the painting thread, once each, around the texel loop; the default pair is free.
+    virtual void BeginTile() const {}
+    virtual bool EndTile() const { return true; }
     // Cheap rejection so a compositor can skip a source over a whole page without querying it.
     virtual bool MayCover(double lon0, double lat0, double lon1, double lat1) const {
         (void)lon0; (void)lat0; (void)lon1; (void)lat1;

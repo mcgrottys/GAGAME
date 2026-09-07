@@ -1,4 +1,5 @@
 #include "scene/GlobeLayer.h"
+#include "core/ThreadManager.h"
 
 #include "core/GpuProfiler.h"
 
@@ -1290,35 +1291,34 @@ void GlobeLayer::StartPredictWalk(const Camera& cam, const Camera& pred, float v
     wp.camPos[1] = pred.py;
     wp.camPos[2] = pred.pz;
     // planeCount stays 0: no frustum cull, the predicted view is approximate by nature.
-    std::lock_guard<std::mutex> lk(m_predict.mx);
-    if (m_predict.outstanding) {
-        // A second post before the replay would issue one frame's walk under another
-        // frame's stamp; main never does it, so a caller that does is a bug, said loudly.
-        throw std::runtime_error("globe: prefetch walk posted over an unreplayed one");
+    {
+        std::lock_guard<std::mutex> lk(m_predict.mx);
+        if (m_predict.outstanding) {
+            // A second post before the replay would issue one frame's walk under another
+            // frame's stamp; main never does it, so a caller that does is a bug, said loudly.
+            throw std::runtime_error("globe: prefetch walk posted over an unreplayed one");
+        }
+        m_predict.params = wp;
+        m_predict.busy = true;
+        m_predict.outstanding = true;
     }
-    if (!m_predict.thread.joinable()) {
-        m_predict.thread = std::thread([this] { PredictWorker(); });
-    }
-    m_predict.params = wp;
-    m_predict.posted = true;
-    m_predict.busy = true;
-    m_predict.outstanding = true;
-    m_predict.cv.notify_all();
+    // SUBMITTED OUTSIDE THE LOCK. Under --jobs-inline the walk runs on this very thread, and it
+    // takes m_predict.mx at both ends -- a self-deadlock if the post still held it.
+    Threads().Submit(Lane::Compute, "globe.predict", [this] { PredictWalk(); });
 }
 
-// The worker: waits for a posted WalkParams, walks it into rects, hands them back. It reads
-// nothing of the layer but the job -- its own copy of the params, the vector it swaps in
-// and out under the lock -- because the main thread is inside SetView the whole time.
-void GlobeLayer::PredictWorker() {
-    std::unique_lock<std::mutex> lk(m_predict.mx);
-    for (;;) {
-        m_predict.cv.wait(lk, [&] { return m_predict.posted || m_predict.quit; });
-        if (m_predict.quit) return;
-        m_predict.posted = false;
-        const WalkParams wp = m_predict.params;
-        std::vector<WantRect> out;
+// One posted walk, as a pool job (it was a dedicated thread parked on a condition variable).
+// It reads nothing of the layer but the job -- its own copy of the params, the vector it swaps
+// in and out under the lock -- because the main thread is inside SetView the whole time.
+void GlobeLayer::PredictWalk() {
+    WalkParams wp;
+    std::vector<WantRect> out;
+    {
+        std::lock_guard<std::mutex> lk(m_predict.mx);
+        wp = m_predict.params;
         out.swap(m_predict.rects);   // the buffer the last replay emptied: its capacity
-        lk.unlock();
+    }
+    {
         const auto t0 = std::chrono::steady_clock::now();
         uint64_t nodes = 0, leaves = 0;
         auto leaf = [&](int face, double u0, double v0, double size, double arc, double dist) {
@@ -1335,12 +1335,14 @@ void GlobeLayer::PredictWorker() {
         }
         const uint64_t ns = uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                          std::chrono::steady_clock::now() - t0).count());
-        lk.lock();
-        m_predict.rects.swap(out);
-        m_predict.nodes = nodes;
-        m_predict.leaves = leaves;
-        m_predict.walkNs = ns;
-        m_predict.busy = false;
+        {
+            std::lock_guard<std::mutex> lk(m_predict.mx);
+            m_predict.rects.swap(out);
+            m_predict.nodes = nodes;
+            m_predict.leaves = leaves;
+            m_predict.walkNs = ns;
+            m_predict.busy = false;
+        }
         m_predict.cv.notify_all();
     }
 }
@@ -1374,14 +1376,10 @@ void GlobeLayer::ReplayPredictWants() {
 }
 
 GlobeLayer::~GlobeLayer() {
-    if (m_predict.thread.joinable()) {
-        {
-            std::lock_guard<std::mutex> lk(m_predict.mx);
-            m_predict.quit = true;
-        }
-        m_predict.cv.notify_all();
-        m_predict.thread.join();
-    }
+    // There is no thread to join any more; what has to be true is that no pool job is still
+    // inside this object. A walk posted and never replayed is exactly that case.
+    std::unique_lock<std::mutex> lk(m_predict.mx);
+    m_predict.cv.wait(lk, [&] { return !m_predict.busy; });
 }
 
 void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, double simTime) {
