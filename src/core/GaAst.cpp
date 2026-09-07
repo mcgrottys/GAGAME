@@ -383,4 +383,103 @@ void WriteJson(const char* path) {
     fclose(f);
 }
 
+// ---- M9bi: THE SUN'S OWN EDGES ---------------------------------------------------------------
+// Before this, the sun appeared in the diagram nowhere at all -- it was two floats on the
+// Renderer with no producer, which is precisely the shape of graph rot the orphan rule was
+// written to catch, except that a field with no producer is invisible to it. Now the clock
+// produces a PLACE and the place produces a direction, and both edges are in the table.
+//
+// Registered only when the ephemeris is actually driving (main.cpp gates on --sun, which pins
+// the old art direction and takes these edges out with it), for the same reason the
+// --pixel-water edges are gated: an edge for a mode the run is not in is rot wearing the other
+// sign (priors 6).
+void RegisterSolarEdges() {
+    // solar.au: the heliocentric space, unit length 1 AU, equatorial mean-of-date axes with the
+    // celestial pole as +v. planet.re: the engine's planet frame at unit length R_earth. Both
+    // are +v = north, so nothing in this chain flips -- and saying so is the point of the rule.
+    const Frame clock{"scalar.params", true, 0, 0, 0};
+    const Frame solarAu{"solar.au", true, 0, 0, 1.495978707e11};
+    const Frame tangent{"world.m", true, 0, 0, 0};
+
+    Register({"sim.clock", "solar.sun", "unix -> apparent RA/dec/distance", clock, solarAu,
+              false, "deg / deg / AU", "dec +-23.44, 0.98329..1.01671 AU", 1.0,
+              "Ephemeris.h Solar (Astronomical Almanac low-precision series, ~0.01 deg)"});
+    Register({"solar.sun", "globe.ps", "sun direction (versor chain, tangent frame)", solarAu,
+              tangent, false, "unit vector",
+              "T,R,M,D then CsToTangent; topocentric, 8.8 arcsec of parallax", 1.0,
+              "Ephemeris.h Build + SunDirFromPlanetPoint -> Renderer sunDirTangent (gSunDir)"});
+    Register({"solar.sun", "sea.ps", "sun direction (versor chain, tangent frame)", solarAu,
+              tangent, false, "unit vector", "the same gSunDir -- one place, every layer", 1.0,
+              "Renderer SceneConstants sunDir (Sea.hlsl gSunDir)"});
+    Register({"solar.sun", "globe.mesh", "sun direction (per-vertex water shading)", solarAu,
+              tangent, false, "unit vector", "WaterVertexColor's lambert + Cox-Munk lobe", 1.0,
+              "Globe.hlsl WaterVertexColor (gSunDir)"});
+    // The second thing only a PLACED sun can supply: its own angular size, which is what the
+    // disc in the sky is drawn from. A direction has no distance and therefore no disc.
+    Register({"solar.sun", "globe.ps", "angular radius -> the sky's disc", solarAu, tangent,
+              false, "deg", "0.2621..0.2710 over a year (Earth-Sun distance)", 1.0,
+              "Common.hlsli SkyRadianceDir smoothstep(gMisc.y, gMisc.z, cosA)"});
+}
+
+// ---- M9bh: THE EDGES --pixel-water PUTS BACK ------------------------------------------------
+// M9bg retired eleven edges when the water went Gouraud, and that was the truth of it: a
+// vertex-shaded sea reads no imagery, no retrieval, no cascade fiber in the pixel stage. This
+// function declares the ones the PIXEL path restores, and it is called ONLY when the flag is
+// on -- so the printed diagram is exactly true in both modes rather than true in one of them
+// (priors 6: graph rot is edges that describe a path the renderer no longer walks; an edge
+// registered for a mode the run is not in is the same rot, wearing the other sign).
+//
+// EIGHT return; four stay retired, on purpose. The M8 caustic Jacobian, the GFS-Wave Hs
+// whitening, the sea-ice albedo and the churn atlas are NOT here, because the pixel path
+// carries no foam, no ice and no bed dapple. The look contract is visible as graph shape,
+// which is most of the point of keeping this table.
+void RegisterPixelWaterEdges() {
+    const Frame mercPx{"mercator.px", false, 0, 0, 0};   // web-mercator y grows SOUTH
+    const Frame uvS{"uv01.vS", false, 0, 0, 0};
+    const Frame wrap{"patch.wrap", true, 0, 0, 0};
+    const Frame atlasN{"atlas.texel", true, 0, 0, 0};
+    const Frame rowS{"raster.row0N", false, 0, 0, 0};
+
+    // THE REFRACTED RAY'S LANDING POINT wears the composed imagery -- in both water shaders,
+    // and in each one sampled at the RAY's own bed hit, not the pixel's surface position.
+    Register({"color.pages", "globe.ps", "bed albedo (--pixel-water)", mercPx, uvS, false,
+              "sRGB", "at the refracted ray's bed hit, 2 secant steps", 1.0,
+              "Globe.hlsl WaterPixelColor ComposedColor(bedDir)"});
+    Register({"color.pages", "sea.ps", "bed albedo (--pixel-water)", mercPx, uvS, false,
+              "sRGB", "at the refracted ray's bed hit in the flat frame", 1.0,
+              "Sea.hlsl SeaPixelColor ComposedColor(SeaPlanetDir(bedXZ))"});
+    // The height quadtree IS the scene description the refracted ray traces against; the
+    // secant loop reads it at the pixel's own lod. (The vertex+pixel classification edge
+    // already registered in RegisterKnownComposeEdges covers the same producer/field, so
+    // this one names the CAST specifically.)
+    Register({"height.pages", "globe.ps", "refracted cast (--pixel-water)", mercPx, uvS, false,
+              "m NAVD", "2 secant steps, s clamped 0.3..140 m", 1.0,
+              "Globe.hlsl WaterPixelColor ComposedHeight(CsToPlanet(Pb))"});
+    // The cascade sparkle: bands the PIXEL resolves but the ring texel does not, each under
+    // its own per-axis footprint Gaussian. No foam channel is read -- only the slope pair.
+    Register({"ocean.fft", "globe.ps", "cascade.deriv slope (--pixel-water)", wrap, atlasN,
+              false, "slope", "+-0.3, prefiltered per axis", 1.0,
+              "Globe.hlsl WaterPixelColor detail loop"});
+    // The far-field Cox-Munk lobe, where no bank ring covers the pixel.
+    Register({"gfs.wind", "globe.ps", "wind10 (far sigma2, --pixel-water)", rowS, atlasN, true,
+              "m/s", "0..40", 1.0,
+              "Globe.hlsl WaterPixelColor wuv; sigma2 = 0.003+0.00512 U"});
+    // M9 optics (docs/ALGEBRA.md "optics"): two retrievals, two questions about the same
+    // pixel -- how fast light dies in this water, and what colour comes back out of it. Both
+    // land in the ray path, which is the only place they have ever had a consumer.
+    Register({"ocean.colour", "globe.ps", "Kd490 -> Kd(RGB) transfer (--pixel-water)", rowS,
+              atlasN, true, "1/m", "0.019..6 (Kdw floor)", 1.0,
+              "Globe.hlsl SampleWaterOptics (Austin-Petzold; M(490)=1)"});
+    Register({"ocean.colour", "globe.ps", "chl/SPM -> deep albedo (--pixel-water)", rowS,
+              atlasN, true, "albedo", "0.001..0.5", 1.0,
+              "Globe.hlsl SampleWaterOptics (Gordon two-flux, gain 2.0331)"});
+    // The bank stops being a sanity overlay and becomes a SHADING read again: the two ring
+    // finite differences for the wave normal, the fold's shed sigma^2, the live water level
+    // the translucency's depth is measured against. (The M9bg "sanity lens only" edge stays
+    // registered beside this one -- --bank-lens is still its own consumer.)
+    Register({"water.bank", "globe.ps", "shading: normal/sigma2/level (--pixel-water)", atlasN,
+              atlasN, false, "m / sigma2 / m NAVD", "rings 4.8..154 m/texel", 1.0,
+              "Globe.hlsl WaterPixelColor (3 BankSample probes per pixel)"});
+}
+
 }  // namespace ga::ast

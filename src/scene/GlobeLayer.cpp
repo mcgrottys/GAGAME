@@ -1572,7 +1572,9 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.optU[0] = (opticsOn && m_oceanB.Valid()) ? m_oceanB.srv : UINT32_MAX;
     m_cb.optU[1] = m_iceB.Valid() ? m_iceB.srv : UINT32_MAX;
     m_cb.optU[2] = opticsOn ? 1u : 0u;
-    m_cb.optU[3] = 0u;
+    // M9bh: the water's SHADING STAGE. 0 = the vertex-shaded default (PsMain writes the
+    // interpolated colour through), 1 = --pixel-water (PsMain runs WaterPixelColor's two rays).
+    m_cb.optU[3] = pixelWater ? 1u : 0u;
     m_cb.optA[0] = static_cast<float>(m_globe->OcLat1());
     m_cb.optA[1] = static_cast<float>(m_globe->OcLon1());
     m_cb.optA[2] = static_cast<float>(1.0 / m_globe->OcDLat());

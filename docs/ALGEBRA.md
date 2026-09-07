@@ -65,6 +65,65 @@ endpoints reproduce the keys.
 Code: `src/core/Pga.h` (the multivector layout + products), `main.cpp` railPose.
 Gates: `pga` (motor self-test). AST: camera edges are implicit (world frame both sides).
 
+## cga — The conformal model Cl(4,1): the sun as a place, and the space as a versor
+
+`pga` carries rigid motion but cannot carry a **sphere**, and in a degenerate projective
+algebra a point and a direction are the same object. That was tolerable while the sun was
+two floats of art direction (`sunAzimuthDeg = 112`, `sunElevationDeg = 26`, no date, no
+latitude, no distance). It stopped being tolerable when the sun became a thing at a place.
+
+Cl(4,1) is Euclidean 3-space plus a **null pair** built from one extra positive and one
+negative basis vector:
+
+    n₀ = (e₅ − e₄)/2,  n∞ = e₄ + e₅,   n₀² = n∞² = 0,   n₀·n∞ = −1
+
+and a Euclidean point x embeds as the null vector
+
+    P = n₀ + x + ½x² n∞,      P² = 0,   P·n∞ = −1
+
+from which everything follows: **P·Q = −½|p−q|²** (distance with no square root), a sphere
+is P_c − ½r² n∞, a plane is n + d n∞, and translation, rotation and **scaling** are all
+versors acting by one sandwich V X Ṽ. Intersections are the outer product: the day/night
+**terminator** is `Earth ∧ π_polar`, a grade-2 circle blade, and "is this point on it" is one
+left contraction, whatever the object's grade.
+
+**The unit length is part of the model.** The embedding squares the coordinate into the same
+two basis vectors n₀ occupies, so once ½|x|² passes 1/(2ε) the origin's ±½ is annihilated and
+P·n∞ becomes exactly 0 — and a conformal vector with P·n∞ = 0 *is* a point at infinity. In
+metres that happens at |x| = 9.49e7 m: geostationary orbit survives, the Moon does not, and the
+sun is a direction again. Each space therefore declares its own unit length — `solar.au` at 1 AU,
+`planet.re` at R⊕ — and moving between them is a **dilator**, not a reinterpretation. Eleven
+orders of magnitude, one versor. (Priors 32.)
+
+**The sun's frame chain** (`Ephemeris.h`) is four versors and one sandwich:
+
+    T  translator   put the Earth's centre at the origin      (heliocentric → geocentric)
+    R  rotor        −GMST about the celestial pole            (inertial → Earth-fixed)
+    M  reflection   swap the last two axes                    (ECEF → the engine's frame)
+    D  dilator      1 AU → 1 R⊕ of unit length                (the SPACE change)
+
+M is a reflection because the engine's planet frame is **left-handed** (at lat 0 lon 0:
+east = +z, north = +y, up = +x, so east × north = −up) while ECEF is right-handed. A rotor
+cannot express that; an odd versor can. (Priors 34.)
+
+What the placement buys that a direction could not: the sun's **angular radius** (0.2621–0.2710°
+over a year, which the sky's disc is now drawn from — the constants it replaced spanned
+0.44–0.99°, so the sun was 1.7–3.7× too wide), its **irradiance** (1316.6–1407.7 W/m², the
+annual 3.4%), the **finite-source parallax** (≤ 8.79″ = R⊕/d, taken once at the camera), and a
+terminator that is the tangent-cone contact circle rather than a great circle (offset R²/d =
+269 m, radius short of R by 6 mm — geometrically real, visually nothing; the 59 km softness of a
+real terminator comes from the sun's *disc*, and the ~18° twilight ramp the engine already had
+is atmospheric, not geometric).
+
+Code: `src/core/Cga.h` (the full algebra — 5-bit blade masks, 32 doubles, one geometric
+product; everything else written through it), `src/sim/Ephemeris.h` (the sun). Gates: `cga`
+(1113 checks: null pair, up/down + homogeneity, the distance law, each versor's sandwich and
+their composition, sphere/plane/meet incidence, the unit-length collapse), and `gatest`'s sun
+block — the versor chain against the trig closed form (2e-12 over 366 samples), **solar noon at
+the Merrimack mouth on 2026-08-28 against an external ephemeris (−0.2 s of 16:44:25Z)**,
+distance/declination/angular-radius bands, the terminator meet, and the parallax ceiling.
+AST: `sim.clock → solar.sun → {globe.ps, sea.ps, globe.mesh}`.
+
 ## cl3 — Vector algebra of Cl(3): reflection and refraction as versors
 
 The pixel shader's optics are grade-1 sandwiches in ordinary Cl(3):
@@ -274,6 +333,23 @@ already owns (no BLAS — the scene descriptions are our own quadtrees):
   telescopes off by ~10 km footprints.
 - Foam whitens albedo (bank foam channel + churn memory); land takes imagery with the
   hand-edit rock override; sRGB pixels ship as captured (no re-grading — see priors).
+
+**The atmosphere ledger — every pixel gets air exactly once** (audited M9bi, after the
+question was asked directly). Four things in this engine are "atmosphere", and they are
+disjoint by construction, not by luck:
+
+| term | where it applies | what stops it doubling |
+|---|---|---|
+| `AerialPerspective` (haze, 1.3 km scale height) | Sea.hlsl water (both shading paths, once at the end); Globe.hlsl's M6j close-up material; Terrain.hlsl | the Sea PSO is opaque (`ONE`/`ZERO`), so it *replaces* the globe's pixel rather than adding to it; the M6j block is gated `landness > 0` |
+| the cloud-volume march | Globe.hlsl PsMain, once, between the shell entry and the ground | one block, one `col = col*T + scat` |
+| the from-space rim | Globe.hlsl PsMain, faded in above 60 km altitude | complementary to the shell: rim is *on* the disc, the shell is *off* it |
+| the Rayleigh shell (`PsSky`) | fullscreen backdrop at reversed-Z infinity with `GREATER_EQUAL` | touches only pixels nothing has drawn |
+
+The one asymmetry the audit did find is a MISSING atmosphere, not a doubled one: **the globe's
+water takes no `AerialPerspective` at all** (the near-haze block is land-gated), so in
+`--one-water` mode the sea's distance fade is carried entirely by the Fresnel sky mirror going
+to 1 at grazing — which is the physically dominant term there, but it is not the same thing the
+SeaLayer does to the same water. Recorded rather than changed: it is a look decision.
 
 Code: `shaders/Globe.hlsl` (M7c/M7e blocks), `Common.hlsli` sky. Gates: visual parity
 stills; gatest covers the versor pieces. AST: `water.bank → globe.ps`, `height.window →
@@ -1102,12 +1178,66 @@ model (or a textbook) would hold → what this project measured → the law now 
     reverted on the rail: `out/regress_step27.mp4`, per-second YAVG 0.804/255 at 26 s
     against the 0.50 bound, continuity itself clean (no new-only tblend spike).
 
+32. **A conformal point written in metres stops being a point.** Prior (and the first
+    version of this entry, which was wrong and is kept here as the correction it is): the
+    hazard of embedding solar-system distances in CGA is *precision* — the n∞ coefficient
+    at 1 AU is 1.1e22, whose double ulp is ~2e6 m, so the sun "cannot resolve the Earth".
+    Measured (`RunCgaSelfTest`, and it fails its own gate if this ever changes): the hazard
+    is not precision, it is **type**. n₀ carries ±½ on e₄ and e₅ and the embedding's n∞ term
+    adds ½|x|² to those same two coefficients, so once ½|x|² passes 1/(2ε) the ±½ is
+    annihilated outright and **P·n∞ = 0 exactly** — which is the definition of a point at
+    infinity. The threshold in metres is |x| = 9.49e7 m: geostationary orbit (4.2e7) still
+    works, the Moon (3.8e8) does not, the sun reads 0. The model does not degrade, it
+    silently becomes the direction-only model it was brought in to replace. Law: a space
+    declares its unit length before anything is embedded in it, and the length is chosen so
+    the objects of interest sit near |x| ~ 1; changing it is a dilator. Corollary for this
+    ledger: an argument from ulp size is not a measurement, and this one was checked only
+    because it was written as a gate first.
+
+33. **The dilator does not preserve normalisation, and `Down()` hides that it doesn't.**
+    Prior: a versor is a versor, so a point that goes through a versor chain comes out a
+    point. Measured (M9bi, the terminator gate failing by 0.428 against a 1e-9 tolerance):
+    conformal points are HOMOGENEOUS, rotors and translators happen to preserve the P·n∞ =
+    −1 normalisation, and the **dilator does not** — rescaling the space is precisely its
+    job. Every read-back through `Down()` renormalises, so the position checks all passed
+    and hid it; but `DualSphere(centre, r)` reads a radius straight out of the vector, and
+    an un-normalised centre yields a sphere of radius r/√λ — off by 153× at the AU → R⊕
+    dilation. Second half of the same lesson: even normalised, the dilator multiplies the
+    n∞ coefficient's ERROR by scale², so one ulp of cancellation at 1 AU reads back as a
+    1.5 km displacement at the Earth's centre while the Euclidean part is still exact. The
+    fix is to rebuild the coefficient the products degraded (`Reproject`, the null-cone
+    analogue of re-orthonormalising a long rotor product): 1539 m → 0.095 m. Law: after a
+    scale change, renormalise AND re-project; and any constructor that reads a length out
+    of a conformal vector states that it assumes P·n∞ = −1.
+
+34. **The engine's planet frame is left-handed, so ECEF → planet is a reflection.** Prior:
+    the map between two Cartesian planet frames is a rotation, so a rotor covers it. Checked
+    (M9bi, against the frame's own definition in `Compose.hlsli`): at lat 0 lon 0 the engine
+    has east = +z, north = +y, up = +x, so east × north = −up — the frame is left-handed,
+    while ECEF is right-handed, and the map between them is the axis swap (X,Y,Z) → (X,Z,Y),
+    determinant −1. A rotor cannot express it and would have mirrored the sky without
+    failing anything. In CGA an odd versor is still a versor, so the map is a reflection in
+    the plane with unit normal (0, 1, −1)/√2 and the sandwich carries points and spheres
+    through it unchanged. Law: the orientation ledger records HANDEDNESS, not only the
+    +v = north question; a frame pair that disagrees about handedness needs an odd versor
+    and the AST edge says so.
+
+
 ## verification — The gate map: which algebra is pinned where
 
 - `pga` — motors: rotation, composition, rigidity, screw log/exp, slerp.
+- `cga` — the conformal model Cl(4,1): the null pair, the up/down maps and homogeneity,
+  P·Q = −½d², each versor's sandwich and their composition, sphere/plane/meet incidence, and
+  the unit-length collapse (a point in metres becomes a point at infinity past 9.49e7 m).
 - `gatest` — versors (sandwich, refraction rotor incl. TIR), fold telescope identities,
   spinor blend soundness, AST flip/orphan/ledger rules, mercator float bound (1.64 m
   measured < 4.5 m asserted), wave-physics endpoint pins.
+- `gatest`, the sun (M9bi) — the four-versor frame chain against the trig closed form
+  (2e-12 over 366 samples of 2026), **solar noon at the Merrimack mouth on 2026-08-28 against
+  an external ephemeris: −0.2 s of 16:44:25Z**, the distance/declination/angular-radius bands,
+  the terminator as `sphere ∧ plane` (its own 24 points accepted at 1.9e-16), the versor
+  chain's round-trip residue (0.095 m at the Earth's centre) and the finite-sun parallax
+  ceiling (6.55″ measured against R⊕/d = 8.79″).
 - `composetest` — paint order, per-pixel weights, alpha fiber, soak-rule identity,
   cube/window addressing vs closed forms, stack-hash isolation.
 - `watertest` — station fits (sub-mm), datum ladder, phasor field soak, tile-vs-stack

@@ -41,7 +41,8 @@ struct SceneConstants {
     float camUp[4];
     float camFwd[4];
     float viewport[4];      // w, h, 1/w, 1/h
-    float misc[4];          // x water level (m above datum -- the TIDE, in M1), yzw spare
+    float misc[4];          // x water level (m above datum -- the TIDE, in M1), yz = the SUN's
+                            // disc (cos of its outer/inner angular radius, M9bi), w spare
 };
 static_assert(sizeof(SceneConstants) % 16 == 0, "SceneConstants must be 16-byte aligned");
 
@@ -97,6 +98,17 @@ public:
     // Water level in metres above datum -- in M1 this is the tide at the focus station, published
     // scene-wide because anything that sits in or on the water will need it.
     float waterLevel = 0.0f;
+    // M9bi: THE SUN IS A PLACE. When sunPlaced is set, the direction below comes from
+    // Ephemeris.h's conformal chain -- the real sun for the scene's own timestamp and latitude,
+    // already rotated into this frame -- and the azimuth/elevation art direction is ignored.
+    // `--sun az,el` clears the flag and pins the old constants back, which is what every
+    // recorded baseline before M9bi was lit by.
+    bool sunPlaced = false;
+    float sunDirTangent[3] = {0.0f, 1.0f, 0.0f};
+    // The sun's own angular RADIUS at the current Earth-Sun distance (0.2621..0.2710 deg over a
+    // year). A direction cannot have one; only something at a distance can, and the disc in the
+    // sky is drawn from it rather than from the two hand-picked cosines that were there before.
+    float sunAngRadiusDeg = 0.26656f;
     float sunAzimuthDeg = 112.0f;
     float sunElevationDeg = 26.0f;
     // Turbid coastal water (vqview's calibrated Merrimack optics, kept as the default palette).
