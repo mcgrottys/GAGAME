@@ -788,12 +788,17 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             for (auto& tile : it->tiles) {
                 // Evicted while in flight: its slot is gone and the claim would be a lie.
                 if (tile->state != TileState::Mapped) { ++turn.landedRetired; continue; }
-                // Step 28, counted: a tile that was dropped, evicted at the cap or re-tracked
-                // since its read was issued no longer owns its coordinate; the copy below
-                // would land the old bytes there and the claim would be a lie.
+                // AND THE CLAIM MUST BE ITS OWN. A tile that was dropped, evicted at the cap or
+                // re-tracked since its read was issued no longer owns its coordinate: the copy
+                // below would swizzle the OLD identity's bytes into a slot that now belongs to
+                // something else, and UpdateResidencyByte would then swear real data is there.
+                // Measured before this skip existed: 85 such claims over the 14:00 flood rail
+                // and 126 over the 19:30Z one. The slot still retires -- that loop is below and
+                // runs over every tile of the batch -- so skipping here leaks nothing.
                 if (tile->dropped || Find(tile->tenant, tile->req) != tile.get()) {
                     ++turn.landedUnowned;
                     ++landedUnownedTotal;
+                    continue;
                 }
                 ++turn.landedTiles;
                 Tenant& t = m_tenants[tile->tenant];
@@ -1102,13 +1107,42 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         lap(5);
     }
     if (!batch.empty()) MapAndFill(gpu, cl, batch);   // phases 6..8 bracket themselves
-    // THE BARRIER IS NOT HERE YET, AND THAT IS WHAT THIS LEDGER IS FOR. The landed loop above
-    // moved a tenant to COPY_DEST and recorded the CopyTiles that swizzle its arrived tiles in;
-    // the transition back to shader reads lives at the tail of MapAndFill, which a turn with an
-    // EMPTY BATCH never reaches -- so such a turn draws the tenant mid-copy. `turn.landedOnly`
-    // counts exactly those turns, on the shipped code, before anything is changed to fix them:
-    // the instrument comes first, and the count it prints is what the fix will be gated against
-    // (priors 29/31, docs/PERF_EXPERIMENT.md step 28).
+    // ---- THE BARRIER THE LANDED COPIES NEVER HAD. The landed loop above moves a tenant to
+    // COPY_DEST and records the CopyTiles that swizzle its arrived tiles in; the transition back
+    // to shader reads used to live at the tail of MapAndFill, which a turn with an EMPTY BATCH
+    // never reaches. Such a turn drew the tenant in COPY_DEST with no barrier between the copies
+    // and the draw -- and the residency byte, raised in the same turn, sent the sampler to the
+    // tile while the copy engine was still writing it: whatever the pool slot held before, block
+    // by block, until the copy caught up. That is priors 29/31's straight-edged dark-noise
+    // quadrilaterals the size of one z17 detail tile.
+    //
+    // MEASURED by the previous commit's ledger, on the shipped code: 89 such turns over the
+    // 14:00 flood rail and 68 over the 19:30Z one, every one of them reporting `barriered` = 0,
+    // clustered exactly where step 28's notes recorded them (rec746, 755, 758, 761, 764, 767,
+    // 770, 774, 776, 779, 791, 800). A fast streamer -- the horizon cull, a raised pool cap --
+    // is what makes such turns common, which is why this is fixed BEFORE either of those.
+    //
+    // Every tenant a turn leaves in COPY_DEST goes back here, batch or no batch. Note this is
+    // NOT the old sequence verbatim: MapAndFill's tail transitioned every tenant unconditionally,
+    // including ones already in PIXEL|NON_PIXEL, which is a StateBefore == StateAfter barrier the
+    // debug layer rejects. Only tenants that are actually in COPY_DEST are transitioned now, so
+    // the command stream is shorter as well as correct.
+    lap0 = Clock::now();   // the barriers stay in phase 6, where MapAndFill's tail had them
+    for (auto& t : m_tenants) {
+        if (t.state != D3D12_RESOURCE_STATE_COPY_DEST) continue;
+        D3D12_RESOURCE_BARRIER b{};
+        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        b.Transition.pResource = t.res.Get();
+        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        b.Transition.StateBefore = t.state;
+        b.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;   // M9ar: compute reads too
+        cl->ResourceBarrier(1, &b);
+        t.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
+                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        ++turn.barriered;
+    }
+    lap(6);
     // The landing ledger, this turn (Residency.h TurnLedger).
     if (turn.landedTiles && batch.empty()) {
         turn.landedOnly = 1;
@@ -1415,20 +1449,8 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
         m_inFlightReads.push_back(std::move(f));
         phase(7);
     }
-    for (auto& t : m_tenants) {
-        D3D12_RESOURCE_BARRIER b{};
-        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Transition.pResource = t.res.Get();
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b.Transition.StateBefore = t.state;
-        b.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
-                                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;   // M9ar: compute reads too
-        cl->ResourceBarrier(1, &b);
-        t.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
-                  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-        ++turn.barriered;   // step 0: counted where the shipped code actually issues them
-    }
-    phase(6);
+    // The tenants go back to shader reads in ProcessQueues, after this call returns: the landed
+    // loop's copies need that barrier on the turns this call never runs at all.
 }
 
 void ResidencyManager::LogSettleExact(uint32_t heldFrames) const {
