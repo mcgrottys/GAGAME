@@ -19,7 +19,8 @@
 
 cbuffer SeaCb : register(b1) {
     float4 gSea;        // x seaLevel (NAVD88 m), y gridSpanM, z foamIntensity, w skirtStart
-    float4 gSnap;       // xy = grid centre (camera XZ snapped to cascade-0 texels), zw unused
+    float4 gSnap;       // xy = grid centre (camera XZ snapped to cascade-0 texels),
+                        // z = M9bh --pixel-water (shade in PsMain, not DsMain), w unused
     uint4  gDispSrv;    // xyz = displacement SRVs per cascade
     uint4  gDerivSrv;   // xyz = derivative SRVs per cascade
     float4 gPatchL;     // xyz = cascade patch sizes m, w = target tessellated edge, PIXELS
@@ -356,6 +357,111 @@ float3 SeaVertexColor(float2 xz, float3 rel, float2 U, float2 adv, float depth, 
     return AerialPerspective(col, normalize(rel), distCam);
 }
 
+// ---- M9bh: THE ESTUARY SURFACE, PIXEL-SHADED -- glass over the bed --------------------------
+// SeaVertexColor above is the shipped default and stays it. This is the --pixel-water look
+// (gSnap.z), and it is the SeaLayer's half of the same argument the globe's WaterPixelColor
+// makes: a colour interpolates, a RAY does not. What the eye sees through this water is the
+// bed, reached by a refracted ray that leaves every pixel in its own direction -- and over the
+// bar, where the bed is a metre away and the wave face is steep, two neighbouring pixels look
+// at bed a metre apart. Gouraud cannot express that; it smears it, and the smear slides.
+//
+//   * the REFRACTED ray, Snell's rotor in closed form (ALGEBRA "cl3"), marched by 2 secant
+//     steps against the CUDEM bed in the PHYSICS frame -- the rendered surface carries the
+//     one-world curvature drop and the bed does not, so the drop is added back before the
+//     cast or the ray lands metres deep in the wrong place;
+//   * the bed wears the composed imagery AT THE RAY'S OWN LANDING POINT, not at the pixel's
+//     -- that offset IS the refraction, and it is what makes a sandbar wobble under a wave;
+//   * Beer-Lambert per channel over the real path (down along the ray + diffuse up) at the
+//     scene's water extinction, so thin water is transparent and deep water collapses to the
+//     b/sigma scattering asymptote the layer always drew;
+//   * the REFLECTED ray, horizon-clamped, and the one Cox-Munk glint on the pixel normal, at
+//     the SUB-RESOLVED floor -- SeaVertexColor has to floor sigma^2 at the open-ocean value
+//     because a triangle cannot carry a sharper lobe. A pixel can. That is the glassiness.
+//
+// NO FOAM, by contract: the Jacobian whitecaps, the current-blocked chop, the depth-limited
+// breaking foam and the churn atlas are all absent here. `brk` still limits the GEOMETRY in
+// DsMain exactly as before -- the wave still stops standing up past 0.55h -- it simply no
+// longer pays out as white. Calm or storm, this surface is glass.
+float3 SeaPixelColor(float2 xz, float3 rel, float att, float depth, float dryGuard,
+                     float distCam) {
+    const float2 U = JetU(xz);
+    const float2 adv = JetUAdvect(xz) * gWaveC.w;   // must match the DS sampling exactly
+    const float shadow = SweShadow(xz);
+
+    // The surface, at PIXEL rate: the same three cascades the domain shader displaced from,
+    // sampled here instead of interpolated. Every band the footprint has folded away still
+    // sheds into sigma^2 (M6t) -- the energy ledger does not care which stage reads it.
+    float hx = 0.0f, hz = 0.0f;
+    float sig2 = gBandSig.w;
+    [unroll] for (uint c = 0; c < 3; ++c) {
+        const float2 uvc = (xz - adv) / gPatchL[c];
+        const float w = CascadeFade(c, distCam) * att;
+        const float ab = BandScale(c, U, depth, shadow).x;
+        const float4 dv = gTex[gDerivSrv[c]].SampleLevel(sLinearWrap, uvc, 0);
+        hx += dv.x * w * ab;
+        hz += dv.y * w * ab;
+        sig2 += gBandSig[c] * (1.0f - w) * ab * ab * dryGuard * dryGuard;
+    }
+    hx *= dryGuard * gWaveC.x;
+    hz *= dryGuard * gWaveC.x;
+    // Shoaling gain can push sampled slopes past any real wave face; the over-steep facets
+    // render as dark back-face speckle (M6t).
+    const float sm0 = length(float2(hx, hz));
+    if (sm0 > 1.1f) { hx *= 1.1f / sm0; hz *= 1.1f / sm0; }
+    const float3 n = normalize(float3(-hx, 1.0f, -hz));
+    const float3 v = normalize(-rel);
+    const float3 dIn = -v;
+    const float ndl = saturate(dot(n, gSunDir.xyz));
+
+    // ---- RAY 2, REFRACTED: the rotor's closed form, then the cast onto the bed.
+    const float etaR = 1.0f / 1.34f;
+    const float ci = saturate(-dot(dIn, n));
+    const float st2 = etaR * etaR * max(1.0f - ci * ci, 0.0f);
+    const float3 tDir = normalize(etaR * dIn + (etaR * ci - sqrt(max(1.0f - st2, 0.0f))) * n);
+    const float dd = max(depth, 0.04f);
+    const float drop = dot(xz, xz) / (2.0f * 6371000.0f);   // back to the PHYSICS frame
+    const float3 Ps = rel + gEyeRel.xyz + float3(0.0f, drop, 0.0f);
+    const float muD = max(-tDir.y, 0.10f);
+    float sP = dd / muD;
+    [unroll] for (int it = 0; it < 2; ++it) {
+        const float3 Pb = Ps + tDir * sP;
+        sP = clamp(sP + (Pb.y - BedAt(Pb.xz)) / muD, 0.05f, 120.0f);
+    }
+    const float2 bedXZ = (Ps + tDir * sP).xz;
+
+    // The body: the b/sigma asymptote, opened up toward the sunlit bed as the two-way
+    // extinction thins. Where there is no survey there is no bed to see -- the asymptote is
+    // the whole answer, which is exactly what open ocean looks like.
+    float3 col = (gBscat.rgb / max(gSigmaW.rgb, 1e-4f)) * (0.30f + 0.70f * ndl) * SUN_IRR_C;
+    if (gBathyU.x != 0xFFFFFFFFu) {
+        const float3 T = exp(-gSigmaW.rgb * (sP + dd));
+        float3 bedAlb = float3(0.42f, 0.38f, 0.28f);
+        if (ComposedColorOn()) bedAlb = ComposedColor(SeaPlanetDir(bedXZ));
+        col = lerp(col, bedAlb * (0.35f + 0.75f * ndl) * SUN_IRR_C, T);
+    }
+
+    // ---- RAY 1, REFLECTED: horizon-clamped (a steep shoaling face must read as horizon sky,
+    // not the near-black a below-horizon ray gives), DISCLESS -- the sun belongs to the lobe.
+    float3 refl = reflect(dIn, n);
+    refl.y = max(refl.y, 0.02f);
+    const float f = 0.02f + 0.98f * pow(1.0f - saturate(dot(n, v)), 5.0f);
+    col = lerp(col, SkyRadianceDirDiscless(refl), f);
+
+    // ---- THE ONE GLINT, on the resolved normal at the sub-resolved floor.
+    {
+        const float3 hv = normalize(v + gSunDir.xyz);
+        const float ch = saturate(dot(hv, n));
+        const float t2 = max(1.0f - ch * ch, 0.0f) / max(ch * ch, 1e-4f);
+        float glint = exp(-t2 / sig2) /
+                      (4.0f * 3.14159265f * sig2 * max(ch * ch * ch * ch, 1e-4f));
+        glint *= (0.02f + 0.98f * pow(1.0f - saturate(dot(v, hv)), 5.0f)) *
+                 saturate(dot(gSunDir.xyz, n));
+        col += glint * SUN_IRR_C * 0.85f;
+    }
+
+    return AerialPerspective(col, normalize(rel), distCam);
+}
+
 [domain("quad")]
 VsOut DsMain(HsPatch hs, float2 uv : SV_DomainLocation, const OutputPatch<VsCtl, 4> p) {
     VsOut o;
@@ -431,6 +537,13 @@ float4 PsMain(VsOut i) : SV_Target {
             i.sh.x < 0.75f) {
             discard;
         }
+    }
+    // M9bh: --pixel-water (gSnap.z) shades HERE instead, per pixel -- the refracted ray
+    // that makes this water translucent cannot ride an interpolator. Default is the
+    // interpolated domain-shader colour, byte for byte.
+    if (gSnap.z > 0.5f) {
+        return float4(SeaPixelColor(i.worldXZ, i.rel, i.att, i.sh.x, i.sh.y, length(i.rel)),
+                      1.0f);
     }
     return float4(i.col, 1.0f);
 }

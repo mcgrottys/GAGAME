@@ -223,6 +223,11 @@ public:
     float windGateVal = 1.0f;       // M8: Monahan whitecap gate (per frame, from sea)
     float causticStrength = 0.6f;   // M8: bed dapple strength (scene cfg; 0 = off)
     bool waterOptics = true;        // M9: data-driven K_d + deep colour (scene cfg)
+    // M9bh --pixel-water: shade the sea per PIXEL (the two rays -- the Cl(3) sky mirror and
+    // the refracted bed cast that makes it TRANSLUCENT), instead of the M9bg vertex-shaded
+    // default. A look switch, not a quality tier: the geometry is identical either way, and
+    // the pixel path carries no foam at all.
+    bool pixelWater = false;
     // M9b: SURFACE DEBUG. Shading alone cannot tell geometry from normals (priors 8), so
     // the raster answers instead. 0 = shipped, 1 = wireframe (every triangle: is the mesh
     // actually moving?), 2 = meshlet tint (one flat colour per amplification record: what
@@ -303,7 +308,7 @@ private:
         float bankE[4];       // M8: ring cross-fade width (texels), rest spare
         // M9 (ALGEBRA "optics"): the water's quality + the sea ice. THREE rows -- keep the
         // count in step with GlobeCb in Globe.hlsl.
-        uint32_t optU[4];     // ocean-colour SRV, ice SRV, optics on, spare
+        uint32_t optU[4];     // ocean-colour SRV, ice SRV, optics on, M9bh pixel-water on
         float optA[4];        // ocean grid: lat1, lon1, 1/dlat, 1/dlon
         float optB[4];        // nx, ny, deep-albedo gain g, spare
         float bankFold[4];    // M9c: the FOLD's wavenumber per band (energy-weighted)

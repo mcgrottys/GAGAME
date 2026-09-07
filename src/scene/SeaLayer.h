@@ -137,6 +137,10 @@ public:
     std::string currentStatus;   // "ebb 0.72 m/s" for the title bar
     std::string atlasStats;      // "churn 34/2048 t 2.1 MB" for the title bar
     float foamIntensity = 1.0f;
+    // M9bh --pixel-water: shade in PsMain (the refracted bed cast -- translucent, foamless)
+    // instead of the M9bg domain-shader default. The tessellation and the displacement are
+    // untouched; only the stage that paints changes.
+    bool pixelWater = false;
     float targetEdgePx = 12.0f;  // tessellated triangle edge target, screen pixels
     // The CUDEM window holds roughly a third of the real tidal prism, so the solved currents run
     // ~3x under the ACT0816 predictions; this gain (calibrated from the --swe-cycle run, peak

@@ -200,6 +200,9 @@ struct Options {
                                       // verification harness (rungs + provenance + gates)
     bool oneWater = false;            // --one-water: M7 -- water geometry from the wave
                                       // vertex bank alone (SeaLayer's grid retires)
+    bool pixelWater = false;          // --pixel-water: M9bh -- shade the water per PIXEL (the
+                                      // two rays: sky mirror + refracted bed cast, translucent,
+                                      // no foam). Off = the M9bg vertex-shaded default.
     double riverQ = -1;               // --river q overrides data/river/river.json
     std::wstring sweUvDump;           // --swe-uv f.png: dump the solved current field after
                                       // spin-up (debug picture: red east, blue west)
@@ -496,6 +499,7 @@ Options ParseArgs(int argc, char** argv) {
         }
         else if (a == "--ocean-probe") o.oceanProbe = next("42.35,-70.65");
         else if (a == "--one-water") o.oneWater = true;
+        else if (a == "--pixel-water") o.pixelWater = true;
         else if (a == "--river") o.riverQ = atof(next("70").c_str());
         else if (a == "--storm") {
             // hs,tp,fromdeg -- sandbox sea state override
@@ -1816,6 +1820,7 @@ int main(int argc, char** argv) {
             sea = seaOwned.get();
             sea->Configure(opt.shaderDir, &seaState);
             sea->foamIntensity = opt.foam;
+            sea->pixelWater = opt.pixelWater;   // M9bh: shade in PsMain, not DsMain
             sea->targetEdgePx = opt.edgePx;
             sea->sweCurrentGain = opt.sweGain;
             sea->heightScale = opt.heightScale;
@@ -2883,6 +2888,10 @@ int main(int argc, char** argv) {
             // session. (The workflow as an AST: domains, axes, units, scales, ranges.)
             ga::ast::RegisterKnownWaterEdges();
             ga::ast::SetActive("sea.ps", !opt.oneWater);
+            // M9bh: --pixel-water re-opens eight edges into the pixel stage (the two rays
+            // and what they read). Declared only when the flag is on -- an edge for a mode
+            // the run is not in is graph rot wearing the other sign.
+            if (opt.pixelWater) ga::ast::RegisterPixelWaterEdges();
             if (opt.sliceOn) {
                 // M7o: the demo node registers its edge like any other -- the AST is how
                 // features arrive now. One blade, one inner product, one discard.
@@ -3582,6 +3591,7 @@ int main(int argc, char** argv) {
             }
         }
         if (globe) {
+            globe->pixelWater = opt.pixelWater;   // M9bh: the two-ray water, per pixel
             globe->foamOpacity = waterScene.foamOpacity;
             globe->ringBlendTexels = waterScene.ringBlendTexels;
             globe->causticStrength = waterScene.causticStrength;

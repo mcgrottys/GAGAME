@@ -529,6 +529,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
     const double texel = m_fft.PatchL(0) / OceanFft::kN;
     m_seaCb.snap[0] = static_cast<float>(std::floor(camX / texel) * texel);
     m_seaCb.snap[1] = static_cast<float>(std::floor(camZ / texel) * texel);
+    m_seaCb.snap[2] = pixelWater ? 1.0f : 0.0f;   // M9bh: which stage shades this surface
     m_seaCb.sea[0] = static_cast<float>(seaLevelM);
     m_seaCb.sea[1] = 3600.0f;    // grid span, m
     m_seaCb.sea[2] = foamIntensity * m_windGate;

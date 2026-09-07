@@ -422,9 +422,9 @@ float3 Hypsometric(float h, float lat) {
 }
 
 // ---- M9: THE WATER'S QUALITY (docs/ALGEBRA.md "optics"; proofs/water_optics.py) --------------
-// M9bg: CURRENTLY UNREFERENCED -- the two-ray water it fed is gone (the sea is vertex-shaded and
-// carries no texture). Kept verbatim: it is the HLSL port of the optics chapter, every constant
-// is printed by the proof, and the retrievals it reads are still harvested and resident.
+// M9bh: REFERENCED AGAIN, by WaterPixelColor alone (--pixel-water). The vertex-shaded default
+// still does not read it -- a Gouraud sea carries no texture and no ray to attenuate -- so this
+// is the retrieval's only renderer consumer, and it is one a flag can switch off.
 // M7c left two constants in the ray path -- the K_d triple and the shelf/deep scatter colour.
 // Both are MADE by chlorophyll, sediment and CDOM, so both are measurements. Two closed forms
 // replace them, and every constant below is printed by the proof's "numbers the HLSL port must
@@ -488,6 +488,191 @@ WaterOptics SampleWaterOptics(float latDeg, float lonDeg) {
     return o;
 }
 
+// ---- M9bh: THE WATER, PIXEL-SHADED -- the two rays, and nothing else -------------------------
+// The shipped sea is VERTEX-shaded (WaterVertexColor above, M9bg): one colour per vertex,
+// Gouraud across the triangle, and it stays the default. This is the other look, selected by
+// --pixel-water (gOptU.w). It exists per PIXEL because the thing it draws cannot be
+// interpolated: a RAY. A vertex can carry a colour; it cannot carry what the eye sees THROUGH
+// the water, because the refracted ray leaves every pixel in its own direction and lands
+// somewhere else on the bed. Interpolating two vertices' bed hits does not give the bed
+// between them -- it gives a smear that slides when the wave moves.
+//
+// docs/ALGEBRA.md "radiometry": a water pixel is a Fresnel split between two rays, and both
+// are answered by quadtrees this engine already realizes -- no BLAS, no second scene
+// description, no acceleration structure to keep in sync with the water it describes.
+//
+//   L = F L_sky(r) + (1-F)[ T_w (*) rho_bed E_bed + (1 - T_w) (*) C_scatter ] + L_glint
+//
+//   * the REFLECTED ray r = -n d n -- the Cl(3) versor sandwich (ALGEBRA "cl3"), answered by
+//     the analytic sky, horizon-clamped (a facet on the back of a steep wave reflects BELOW
+//     the horizon, where the sky model correctly darkens, and that painted grey patches);
+//   * the REFRACTED ray t = R d ~R -- the Snell rotor in the incidence bivector (d ^ n); the
+//     closed form below IS that sandwich expanded. It marches into the water and lands on the
+//     BED by 2 secant steps against the composed height quadtree, and the bed wears the
+//     composed IMAGERY as its albedo;
+//   * Beer-Lambert over the REAL path (down along the ray + diffuse up) at the MEASURED K_d
+//     (ALGEBRA "optics"; priors 13 -- the channel ordering is a retrieval, not a constant),
+//     so the water is TRANSLUCENT where it is thin and collapses to the scattering endpoint
+//     where it is deep. The far field is untouched by construction: past 30 m footprints the
+//     cast retires to its own vertical closed form, and the two agree where they meet.
+//
+// WHAT IS DELIBERATELY ABSENT -- the contract for this path is "just glassy waves with no
+// foam": no foam of any kind (no bank foam channel, no cascade foam channel, no FoamBreakup
+// octaves, no churn atlas, no whitecap albedo, no storm-belt whitening), no sea ice, no
+// seafloor relief modulation, no caustics, no peak shaping. Glass, over water, over a bed.
+//
+// TWO NORMALS, and the split matters (M8, the "leopard" the user rolled back): nSmooth is
+// band-limited to the ring TEXEL and shades the BODY -- per-chop diffuse rendered every 2 m
+// wavelet as a dark fleck from altitude. nPix carries the cascade bands this pixel resolves
+// and feeds the glint, the Fresnel split and BOTH rays. Glitter is the microfacet lobe's job.
+//
+// Every screen derivative this needs is taken in PsMain under uniform control flow and handed
+// in: the footprint FRAME {fpxW, fpzW}, whose per-axis Gaussian at a band's wavenumber is that
+// band's exact expected attenuation (ALGEBRA "ripple"; an isotropic scalar erred x3000 at
+// grazing). Under-recovered energy sheds into sigma^2 -- never aliased, never deleted.
+float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 rel, float hp,
+                       float latDeg, float lonDeg, float lod, float day, float footPx,
+                       float2 fpxW, float2 fpzW) {
+    const float3 v = normalize(-rel);
+    const float2 wxz = (upT * gGlo.x).xz;
+
+    // ---- THE VOLUME'S OPTICS. K_d and the scattering endpoint are MADE by chlorophyll,
+    // sediment and CDOM, so both are measurements (ALGEBRA "optics"). Where the retrieval is
+    // absent, the M7c constants and the shelf tint stand in, byte for byte.
+    const WaterOptics wq = SampleWaterOptics(latDeg, lonDeg);
+    const float shelf = saturate(1.0f + hp / 45.0f);        // 1 at the beach, 0 by -45 m
+    const float3 cScatter =
+        (wq.deep.x >= 0.0f) ? wq.deep
+                            : lerp(float3(0.008f, 0.030f, 0.080f),
+                                   float3(0.055f, 0.28f, 0.31f), shelf * shelf);
+
+    // ---- THE SURFACE. Far afield the slope variance is Cox-Munk on the live wind; inside the
+    // bank's rings the fold's own shed sigma^2 replaces it, floored at the PIXEL's resolving
+    // limit (0.0015 -- not the vertex path's 0.0260, which exists only because a triangle
+    // cannot carry a lobe that sharp; a pixel can, and that sharpness IS the glassiness).
+    float s2 = 0.0300f;
+    if (gTexIdx.z != 0xFFFFFFFFu) {
+        const float2 wuv = float2(
+            frac((lonDeg - gWavesA.y) * gWavesA.w / gWavesB.x),
+            saturate(((gWavesA.x - latDeg) * gWavesA.z + 0.5f) / gWavesB.y));
+        const float w10 = gTex[gTexIdx.z].SampleLevel(sLinearClamp, wuv, 0).x;
+        if (w10 >= 0.0f) s2 = 0.003f + 0.00512f * w10;
+    }
+    float3 nSmooth = upT;    // ring-texel band limit -> the body's diffuse
+    float3 nPix = upT;       // + the bands this pixel resolves -> glint, Fresnel, both rays
+    float lvlW = 0.0f;       // live water level here (tide + solver); 0 = geoid far afield
+    {
+        float4 bD, bP, bDet, bDx, bDz, tA, tB;
+        float bT, tu;
+        if (BankSample(wxz, bD, bP, bDet, bT)) {
+            s2 = max(bP.y, 0.0015f);
+            lvlW = bP.x;
+            // The wave normal: two finite differences of the bank's own displacement, at the
+            // ring's texel (priors 21 -- a derivative is taken at the DATA's grain).
+            BankSample(wxz + float2(bT, 0.0f), bDx, tA, tB, tu);
+            BankSample(wxz + float2(0.0f, bT), bDz, tA, tB, tu);
+            float sx = (bDx.y - bD.y) / bT;
+            float sz = (bDz.y - bD.y) / bT;
+            // Shoaling gain can exceed any real wave face; uncapped facets render as dark
+            // back-face speckle and pin Fresnel at its ceiling (the two-sided failure).
+            const float slS = length(float2(sx, sz));
+            if (slS > 1.1f) { sx *= 1.1f / slS; sz *= 1.1f / slS; }
+            nSmooth = normalize(upT - east * sx - north * sz);
+
+            // The bands the PIXEL resolves but the ring texel does not, read from the cascade
+            // DERIVATIVE textures at full FFT resolution and weighted by the fold difference
+            // (wPix - wRing). At altitude wPix <= wRing and every term below vanishes: the
+            // far field is untouched, and the tiers stay telescoped because sigma^2 takes
+            // back exactly what the slope does not.
+            [unroll] for (uint c = 0; c < 3; ++c) {
+                const float lam = 6.2831853f / gBankFold[c];    // M9c: the band's ENERGY, not
+                const float wRing =                             // its geometric midpoint
+                    1.0f - smoothstep(lam * 0.12f, lam * 0.5f, bT);
+                const float wPix = 1.0f - smoothstep(lam * 0.12f, lam * 0.5f, footPx);
+                const float wDet = saturate(wPix - wRing) * bDet.y;
+                if (wDet <= 0.002f) continue;
+                const float kC = gBankC[c];
+                const float gAx =
+                    exp(-0.125f * kC * kC * (fpxW.x * fpxW.x + fpzW.x * fpzW.x));
+                const float gAy =
+                    exp(-0.125f * kC * kC * (fpxW.y * fpxW.y + fpzW.y * fpzW.y));
+                const float4 dv =
+                    gTex[gBankU2[c + 1u]].SampleLevel(sLinearWrap, wxz / gBankB[c], 0);
+                sx += dv.x * wDet * bDet.x * gBankB.w * gAx;
+                sz += dv.y * wDet * bDet.x * gBankB.w * gAy;
+                s2 = max(s2 - wDet * bDet.x * bDet.x *
+                                  (0.5f * (gAx * gAx + gAy * gAy)) *
+                                  (c == 0 ? 0.0004f : (c == 1 ? 0.0018f : 0.0060f)),
+                         0.0015f);
+            }
+            const float slW = length(float2(sx, sz));
+            if (slW > 1.1f) { sx *= 1.1f / slW; sz *= 1.1f / slW; }
+            nPix = normalize(upT - east * sx - north * sz);
+        }
+    }
+
+    // ---- THE SPLIT. Schlick on the TRUE per-pixel normal: from straight above F ~ 0.02 and
+    // the space view is the bed's; toward the horizon the sea becomes a mirror.
+    const float3 dIn = -v;                                   // camera -> surface
+    const float fres = 0.02f + 0.98f * pow(1.0f - saturate(dot(v, nPix)), 5.0f);
+
+    // ---- RAY 1, REFLECTED: the sandwich, clamped to the horizon.
+    float3 rDir = normalize(dIn - 2.0f * dot(dIn, nPix) * nPix);
+    const float rUp = dot(rDir, upT);
+    if (rUp < 0.02f) rDir = normalize(rDir + (0.02f - rUp) * upT);
+
+    // ---- RAY 2, REFRACTED: the rotor's closed form, then the cast. depth = level - bed at
+    // THIS pixel, so the translucency follows the LIVE tide.
+    const float depthW = max(lvlW - hp, 0.0f);
+    const float ci = saturate(-dot(dIn, nPix));
+    const float etaR = 1.0f / 1.34f;
+    const float st2 = etaR * etaR * max(1.0f - ci * ci, 0.0f);
+    const float3 tDir =
+        normalize(etaR * dIn + (etaR * ci - sqrt(max(1.0f - st2, 0.0f))) * nPix);
+    float sDown = depthW;      // the vertical closed form: exact where parallax is subpixel
+    float3 bedDir = up;
+    if (footPx < 30.0f && depthW > 0.01f && depthW < 90.0f) {
+        // Under 30 m footprints the march MATTERS -- looking through a wave face shifts the
+        // bar, and that shift is the whole reason this path is per pixel.
+        const float3 Pw = gCamAbs.xyz + rel;
+        const float muD = max(-dot(tDir, upT), 0.10f);
+        float sP = depthW / muD;
+        [unroll] for (int itr = 0; itr < 2; ++itr) {
+            const float3 Pb = Pw + tDir * sP;
+            const float gap =
+                (length(Pb) - gGlo.x) - ComposedHeight(CsToPlanet(normalize(Pb)), lod);
+            sP = clamp(sP + gap / muD, 0.3f, 140.0f);
+        }
+        bedDir = CsToPlanet(normalize(Pw + tDir * sP));
+        sDown = sP;
+    }
+    const float3 Tw = exp(-wq.kd * (sDown + depthW));
+    const float3 bedAlb = (ComposedColorOn() && gStreamF.z < 0.5f)
+                              ? ComposedColor(bedDir)
+                              : float3(0.44f, 0.40f, 0.31f);
+    // THE TRANSLUCENCY. Albedos mix and the surface lights ONCE -- the engine's radiometry
+    // everywhere else -- so this path cannot disagree with the vertex path about EXPOSURE,
+    // only about what is under the water.
+    float3 albW = lerp(cScatter, bedAlb, Tw);
+
+    // ---- THE GLINT: the Cox-Munk lobe on the pixel normal, sigma^2 as folded above.
+    const float3 hv = normalize(v + gSunDir.xyz);
+    const float ch = saturate(dot(hv, nPix));
+    const float tt = max(1.0f - ch * ch, 0.0f) / max(ch * ch, 1e-4f);
+    float spec = exp(-tt / s2) / (4.0f * kPi * s2 * max(ch * ch * ch * ch, 1e-4f));
+    spec *= (0.02f + 0.98f * pow(1.0f - saturate(dot(v, hv)), 5.0f)) *
+            saturate(dot(gSunDir.xyz, nPix));
+
+    // ---- THE COMBINE. Energy SPLITS: the body dims by exactly the Fresnel the mirror takes.
+    albW *= 1.0f - fres;
+    const float ndl = saturate(dot(nSmooth, gSunDir.xyz));   // the body, on the smooth normal
+    float3 col = albW * (0.030f + ndl * SUN_IRR_C * 1.15f);
+    col += spec * SUN_IRR_C * 0.85f;
+    col += SkyRadianceDirDiscless(rDir) * (fres * 0.9f) * day;
+    col += albW * float3(0.010f, 0.014f, 0.028f) * (1.0f - day);   // moonlit-blue night side
+    return col;
+}
+
 // M9b: THE AMPLIFICATION UNIT, made visible. Wireframe answers "is the geometry moving";
 // this answers "what drew it" -- one flat colour per meshlet record (per CDLOD node
 // instance on the VS fallback), so the 8x8-cell blocks and the CDLOD ring handovers read
@@ -527,6 +712,16 @@ float4 PsMain(VsOut i) : SV_Target {
     east = (dot(east, east) < 1e-8f) ? float3(1.0f, 0.0f, 0.0f) : normalize(east);
     const float3 north = cross(upT, east);
     const float day = saturate(dot(gSunDir.xyz, upT) * 3.0f + 0.12f);
+
+    // ---- M9bh: THE PIXEL'S FOOTPRINT, taken HERE and nowhere else. Screen derivatives are
+    // defined only under UNIFORM control flow, so the water's prefilter frame is computed at
+    // the top of the shader and handed to WaterPixelColor -- never inside its branches. The
+    // footprint is a FRAME {fpxW, fpzW}, not a scalar: a grazing sliver resolves across-view
+    // ripples while along-view ones alias into crawling shimmer, and only the frame's per-axis
+    // Gaussian can say so (ALGEBRA "ripple"; an isotropic max erred x3000 at grazing).
+    const float2 fpxW = ddx((upT * gGlo.x).xz);
+    const float2 fpzW = ddy((upT * gGlo.x).xz);
+    const float footPxW = length(i.rel) * gWavesB.z;
 
     const float lod = ComposedHeightLod(length(i.rel), gWavesB.z);
     // M6i: land/sea CLASSIFICATION resamples the height channel PER PIXEL at screen lod. The
@@ -831,7 +1026,16 @@ float4 PsMain(VsOut i) : SV_Target {
     // half above contributed nothing, and the sea's pixel is a pure interpolation.
     // Everything below is ATMOSPHERE (cloud shadow, the volume march, the space rim) -- that
     // is the air between the eye and the surface, not paint on the water, so it still applies.
-    if (gStreamF.z < 0.5f) col = lerp(i.wcol, col, landness);
+    // M9bh: --pixel-water (gOptU.w) replaces the interpolated colour with WaterPixelColor,
+    // evaluated HERE, per pixel -- the two rays cannot ride an interpolator. Both paths return
+    // a FINISHED water colour, so the mix below is the same line either way, and the land half
+    // of a shoreline pixel is untouched by the choice.
+    float3 wcol = i.wcol;
+    if (gOptU.w != 0u && gStreamF.z < 0.5f && landness < 0.999f) {
+        wcol = WaterPixelColor(up, upT, east, north, i.rel, hp, degrees(lat), lonDeg, lod, day,
+                               footPxW, fpxW, fpzW);
+    }
+    if (gStreamF.z < 0.5f) col = lerp(wcol, col, landness);
 
     // ---- M6j: the CLOSE-UP material model, now in the planet shader -- wet sand at the LIVE
     // waterline, dunes, riprap on steep rock, lit the way the terrain layer lit them (sun +
