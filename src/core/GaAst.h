@@ -77,6 +77,10 @@ void RegisterKnownComposeEdges();   // the compositor + residency pillars (M7l)
 // sigma^2 and the ocean-colour retrievals). Registered ONLY when the flag is on, so the
 // printed diagram describes the path this run actually walks.
 void RegisterPixelWaterEdges();
+// M9bi: the SUN's edges -- the clock producing a place, and the place producing the one
+// direction every shading layer reads. Registered when the ephemeris is driving (--sun pins the
+// old art direction and takes them out with it).
+void RegisterSolarEdges();
 // M7m: persist the diagram as markdown (docs/GA_AST.md) so the scriptorium indexes it --
 // a future session QUERIES the edge table instead of rereading shaders out of context.
 void WriteMarkdown(const char* path);

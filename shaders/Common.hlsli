@@ -28,7 +28,8 @@ cbuffer SceneCb : register(b0) {
     float4   gCamUp;         // pre-scaled by tan(fovY/2)
     float4   gCamFwd;
     float4   gViewport;      // w, h, 1/w, 1/h
-    float4   gMisc;          // x water level (m above datum -- the tide), yzw spare
+    float4   gMisc;          // x water level (m above datum -- the tide), yz = the SUN's disc
+                             // (cos of 1.15x and 0.85x its true angular radius, M9bi), w spare
 };
 
 #define gTime        (gParams0.x)
@@ -142,7 +143,10 @@ float3 SkyRadiance(float ey) { return lerp(SKY_LO_C, SKY_HI_C, smoothstep(0.0f, 
 float3 SkyRadianceDir(float3 dir) {
     float3 col = SkyRadiance(dir.y);
     const float cosA = dot(dir, gSunDir.xyz);
-    const float disc = smoothstep(0.99985f, 0.99997f, cosA);
+    // M9bi: the disc is the sun's ACTUAL angular size (gMisc.yz, from the Earth-Sun distance
+    // of this frame), not the two hand-picked cosines that stood here -- those spanned 0.44 to
+    // 0.99 degrees against a true radius of 0.2666, so the sun was drawn 1.7x to 3.7x too wide.
+    const float disc = smoothstep(gMisc.y, gMisc.z, cosA);
     const float halo = pow(saturate(cosA), 350.0f) * 0.35f + pow(saturate(cosA), 12.0f) * 0.05f;
     col += SUN_IRR_C * (disc * 12.0f + halo);
     // Below the horizon there is no sky, so darken rather than mirroring the horizon band.

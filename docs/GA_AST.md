@@ -55,3 +55,8 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | mask.pages | classifier + edit override | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | land 0..1, edited 0..1, or no opinion | finest page with an opinion | x1 | Compose.hlsli CsMaskSample / ComposedLandness |
 | mask.pages | classifier + edit override | sea.ps (inactive) | mercator.px +v=S | uv01.vS +v=S | - | land bit | ComposedIsLand | x1 | Sea.hlsl ComposedIsLand |
 | globe.ps | radiance (accepting state) | frame.out | world.m +v=N | world.m +v=N | - | linear RGB -> tonemap | the render | x1 | Renderer tonemap |
+| sim.clock | unix -> apparent RA/dec/distance | solar.sun | scalar.params +v=N | solar.au +v=N | - | deg / deg / AU | dec +-23.44, 0.98329..1.01671 AU | x1 | Ephemeris.h Solar (Astronomical Almanac low-precision series, ~0.01 deg) |
+| solar.sun | sun direction (versor chain, tangent frame) | globe.ps | solar.au +v=N | world.m +v=N | - | unit vector | T,R,M,D then CsToTangent; topocentric, 8.8 arcsec of parallax | x1 | Ephemeris.h Build + SunDirFromPlanetPoint -> Renderer sunDirTangent (gSunDir) |
+| solar.sun | sun direction (versor chain, tangent frame) | sea.ps | solar.au +v=N | world.m +v=N | - | unit vector | the same gSunDir -- one place, every layer | x1 | Renderer SceneConstants sunDir (Sea.hlsl gSunDir) |
+| solar.sun | sun direction (per-vertex water shading) | globe.mesh | solar.au +v=N | world.m +v=N | - | unit vector | WaterVertexColor's lambert + Cox-Munk lobe | x1 | Globe.hlsl WaterVertexColor (gSunDir) |
+| solar.sun | angular radius -> the sky's disc | globe.ps | solar.au +v=N | world.m +v=N | - | deg | 0.2621..0.2710 over a year (Earth-Sun distance) | x1 | Common.hlsli SkyRadianceDir smoothstep(gMisc.y, gMisc.z, cosA) |

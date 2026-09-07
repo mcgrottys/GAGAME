@@ -383,6 +383,44 @@ void WriteJson(const char* path) {
     fclose(f);
 }
 
+// ---- M9bi: THE SUN'S OWN EDGES ---------------------------------------------------------------
+// Before this, the sun appeared in the diagram nowhere at all -- it was two floats on the
+// Renderer with no producer, which is precisely the shape of graph rot the orphan rule was
+// written to catch, except that a field with no producer is invisible to it. Now the clock
+// produces a PLACE and the place produces a direction, and both edges are in the table.
+//
+// Registered only when the ephemeris is actually driving (main.cpp gates on --sun, which pins
+// the old art direction and takes these edges out with it), for the same reason the
+// --pixel-water edges are gated: an edge for a mode the run is not in is rot wearing the other
+// sign (priors 6).
+void RegisterSolarEdges() {
+    // solar.au: the heliocentric space, unit length 1 AU, equatorial mean-of-date axes with the
+    // celestial pole as +v. planet.re: the engine's planet frame at unit length R_earth. Both
+    // are +v = north, so nothing in this chain flips -- and saying so is the point of the rule.
+    const Frame clock{"scalar.params", true, 0, 0, 0};
+    const Frame solarAu{"solar.au", true, 0, 0, 1.495978707e11};
+    const Frame tangent{"world.m", true, 0, 0, 0};
+
+    Register({"sim.clock", "solar.sun", "unix -> apparent RA/dec/distance", clock, solarAu,
+              false, "deg / deg / AU", "dec +-23.44, 0.98329..1.01671 AU", 1.0,
+              "Ephemeris.h Solar (Astronomical Almanac low-precision series, ~0.01 deg)"});
+    Register({"solar.sun", "globe.ps", "sun direction (versor chain, tangent frame)", solarAu,
+              tangent, false, "unit vector",
+              "T,R,M,D then CsToTangent; topocentric, 8.8 arcsec of parallax", 1.0,
+              "Ephemeris.h Build + SunDirFromPlanetPoint -> Renderer sunDirTangent (gSunDir)"});
+    Register({"solar.sun", "sea.ps", "sun direction (versor chain, tangent frame)", solarAu,
+              tangent, false, "unit vector", "the same gSunDir -- one place, every layer", 1.0,
+              "Renderer SceneConstants sunDir (Sea.hlsl gSunDir)"});
+    Register({"solar.sun", "globe.mesh", "sun direction (per-vertex water shading)", solarAu,
+              tangent, false, "unit vector", "WaterVertexColor's lambert + Cox-Munk lobe", 1.0,
+              "Globe.hlsl WaterVertexColor (gSunDir)"});
+    // The second thing only a PLACED sun can supply: its own angular size, which is what the
+    // disc in the sky is drawn from. A direction has no distance and therefore no disc.
+    Register({"solar.sun", "globe.ps", "angular radius -> the sky's disc", solarAu, tangent,
+              false, "deg", "0.2621..0.2710 over a year (Earth-Sun distance)", 1.0,
+              "Common.hlsli SkyRadianceDir smoothstep(gMisc.y, gMisc.z, cosA)"});
+}
+
 // ---- M9bh: THE EDGES --pixel-water PUTS BACK ------------------------------------------------
 // M9bg retired eleven edges when the water went Gouraud, and that was the truth of it: a
 // vertex-shaded sea reads no imagery, no retrieval, no cascade fiber in the pixel stage. This

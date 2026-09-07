@@ -4,6 +4,7 @@
 //  orientation ledger's ground truths asserted edge by edge. A frame mismatch or a broken
 //  product identity fails --selftest -- not a render review three sessions later.
 // ================================================================================================
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <random>
@@ -18,6 +19,8 @@
 #include "GeoRef.h"
 #include "PageTable.h"
 #include "Pga.h"
+#include "Cga.h"           // M9bi: the conformal algebra the solar system needed
+#include "sim/Ephemeris.h"   // ...and the sun it places
 
 namespace ga {
 
@@ -58,6 +61,11 @@ float Smooth(float e0, float e1, float x) {
 bool RunGaSelfTest() {
     bool ok = true;
     ast::RegisterKnownWaterEdges();   // the canonical table -- selftest needs no scene
+    ast::RegisterSolarEdges();        // M9bi: the sun is in the graph now, not beside it
+    // ---- 0. THE CONFORMAL MODEL (M9bi). Cl(4,1) pins itself before anything built on it runs:
+    // the sun's place, its distance and the frame chain that carries it here all rest on these
+    // identities, so they are checked first and the rest of this gate may assume them.
+    if (!cga::RunCgaSelfTest()) ok = false;
     std::mt19937 rng(20260830);
     std::uniform_real_distribution<double> U(-1.0, 1.0);
     auto rv = [&] { return Norm(V3{U(rng), U(rng), U(rng) + 1.7}); };
@@ -1025,11 +1033,206 @@ bool RunGaSelfTest() {
         }
     }
 
+    // ---- M9bi: THE SUN, PLACED. Ephemeris.h puts a conformal point at the sun and carries it
+    // into the engine's planet frame through four versors. Three things are pinned here:
+    //   (a) the versor chain agrees with the independent trig closed form -- the algebra is
+    //       doing the work, and it lands where the textbook formula lands;
+    //   (b) SOLAR NOON at the Merrimack mouth on 2026-08-28 matches an OUTSIDE ephemeris
+    //       (16:44:25Z), so this is not the engine marking its own homework;
+    //   (c) the sun's distance, angular radius and the terminator's own geometry are inside
+    //       their known physical ranges.
+    {
+        const double lonSite = -70.81, latSite = 42.816;   // the Merrimack mouth
+        // (a) THE CHAIN vs THE CLOSED FORM. Sampled across a year so no single epoch can hide
+        // a sign: the four-versor sandwich must reproduce PlanetDirFromLatLon(dec, ra - GMST).
+        double worst = 0.0;
+        for (int k = 0; k < 366; ++k) {
+            const double t = 1767225600.0 + k * 86400.0 + k * 997.0;   // 2026, drifting in-day
+            const sun::SolarSystem ss = sun::Build(t);
+            double cx, cy, cz;
+            sun::PlanetDirFromLatLon(ss.app.subsolarLatDeg, ss.app.subsolarLonDeg, cx, cy, cz);
+            const double d = std::sqrt((ss.sunDirPlanet[0] - cx) * (ss.sunDirPlanet[0] - cx) +
+                                       (ss.sunDirPlanet[1] - cy) * (ss.sunDirPlanet[1] - cy) +
+                                       (ss.sunDirPlanet[2] - cz) * (ss.sunDirPlanet[2] - cz));
+            if (d > worst) worst = d;
+        }
+        if (worst > 1e-9) {
+            Log("[gatest] FAIL sun frame chain: the CGA versor chain (translator, rotor, "
+                "mirror, dilator) disagrees with the trig closed form by %.3g over 2026", worst);
+            ok = false;
+        } else {
+            Log("[gatest] sun frame chain: 366 samples through T,R,M,D land on the closed form "
+                "(worst %.1e); the left-handed planet frame's MIRROR is a versor too", worst);
+        }
+
+        // (b) SOLAR NOON, against an external ephemeris. Bisect the site's hour angle -- the
+        // longitude difference between the site and the subsolar point -- for its zero.
+        auto hourAngleDeg = [&](double t) {
+            const sun::Apparent a = sun::Solar(t);
+            return sun::Wrap180(lonSite - a.subsolarLonDeg);
+        };
+        double lo = 1787925600.0, hi = 1787943600.0;   // 14:00Z .. 19:00Z on 2026-08-28
+        for (int i = 0; i < 80; ++i) {
+            const double mid = 0.5 * (lo + hi);
+            if (hourAngleDeg(lo) * hourAngleDeg(mid) <= 0.0) hi = mid; else lo = mid;
+        }
+        const double noonUnix = 0.5 * (lo + hi);
+        const double refNoon = 1787935465.0;   // 2026-08-28T16:44:25Z, sunrise-sunset.org
+        if (std::fabs(noonUnix - refNoon) > 60.0) {
+            Log("[gatest] FAIL solar noon at the Merrimack 2026-08-28: %.1f s from the "
+                "external ephemeris (%.0f vs %.0f)", noonUnix - refNoon, noonUnix, refNoon);
+            ok = false;
+        } else {
+            Log("[gatest] solar noon 2026-08-28 at %.3f/%.3f: %+.1f s from the external "
+                "ephemeris (16:44:25Z) -- the sun is where an outside source says it is",
+                latSite, lonSite, noonUnix - refNoon);
+        }
+
+        // (c) THE PHYSICAL RANGES, swept over a year. Perihelion and aphelion are the series'
+        // own extremes and they are the published ones; the angular radius follows from the
+        // distance, and it is the number the sun's DISC in the sky is drawn from.
+        double dMin = 9.9, dMax = -9.9, decMin = 99.0, decMax = -99.0, arMin = 9.9, arMax = 0.0;
+        for (int k = 0; k < 3660; ++k) {
+            const sun::Apparent a = sun::Solar(1767225600.0 + k * 8640.0);
+            dMin = (a.distAu < dMin) ? a.distAu : dMin;
+            dMax = (a.distAu > dMax) ? a.distAu : dMax;
+            decMin = (a.decDeg < decMin) ? a.decDeg : decMin;
+            decMax = (a.decDeg > decMax) ? a.decDeg : decMax;
+            arMin = (a.angRadiusDeg < arMin) ? a.angRadiusDeg : arMin;
+            arMax = (a.angRadiusDeg > arMax) ? a.angRadiusDeg : arMax;
+        }
+        auto band = [&](double v, double want, double tol, const char* what) {
+            if (std::fabs(v - want) <= tol) return;
+            Log("[gatest] FAIL sun %s: %.5f, expected %.5f +- %g", what, v, want, tol);
+            ok = false;
+        };
+        band(dMin, 0.98329, 0.0005, "perihelion distance (AU)");
+        band(dMax, 1.01671, 0.0005, "aphelion distance (AU)");
+        band(decMax, 23.44, 0.05, "max declination (northern solstice)");
+        band(decMin, -23.44, 0.05, "min declination (southern solstice)");
+        band(arMin, 0.26216, 0.0006, "min angular radius (deg, at aphelion)");
+        band(arMax, 0.27107, 0.0006, "max angular radius (deg, at perihelion)");
+        Log("[gatest] sun over 2026: distance %.5f..%.5f AU, declination %+.2f..%+.2f deg, "
+            "angular radius %.4f..%.4f deg, irradiance %.1f..%.1f W/m2",
+            dMin, dMax, decMin, decMax, arMin, arMax,
+            sun::kTsi1AuWm2 / (dMax * dMax), sun::kTsi1AuWm2 / (dMin * dMin));
+
+        // (d) THE TERMINATOR AS A MEET. The day/night boundary of a sphere lit from a FINITE
+        // point is the contact circle of the tangent cone, and in CGA it is sphere ^ plane.
+        // Pin the incidence (every constructed terminator point satisfies P _| C = 0), the
+        // tangency (the sun-to-point segment is perpendicular to the surface normal there),
+        // and the two closed-form numbers -- offset R^2/d and radius R sqrt(1 - R^2/d^2).
+        {
+            const sun::SolarSystem ss = sun::Build(1787925600.0);
+            const sun::Terminator tm =
+                sun::TerminatorOf(ss.earthSpherePlanet, ss.sunPointPlanet, 1.0);
+            const double d = cga::Distance(ss.sunPointPlanet,
+                                           cga::Up(0.0, 0.0, 0.0));   // Earth radii
+            band(tm.offset, 1.0 / d, 1e-12, "terminator offset = R^2/d (Earth radii)");
+            band(tm.radius, std::sqrt(1.0 - 1.0 / (d * d)), 1e-12, "terminator radius");
+            // Build points ON that circle from its own frame and ask the BLADE about them.
+            double nx = ss.sunDirPlanet[0], ny = ss.sunDirPlanet[1], nz = ss.sunDirPlanet[2];
+            double ux = -ny, uy = nx, uz = 0.0;   // any vector across the sun direction
+            const double ul = std::sqrt(ux * ux + uy * uy + uz * uz);
+            ux /= ul; uy /= ul; uz /= ul;
+            const double vx = ny * uz - nz * uy, vy = nz * ux - nx * uz, vz = nx * uy - ny * ux;
+            double worstInc = 0.0;
+            for (int i = 0; i < 24; ++i) {
+                const double ph = double(i) * 0.2617993877991494;
+                const double cx = nx * tm.offset + tm.radius * (ux * std::cos(ph) + vx * std::sin(ph));
+                const double cy = ny * tm.offset + tm.radius * (uy * std::cos(ph) + vy * std::sin(ph));
+                const double cz = nz * tm.offset + tm.radius * (uz * std::cos(ph) + vz * std::sin(ph));
+                const cga::Mv P = cga::Up(cx, cy, cz);
+                const double inc = cga::Lc(P, tm.circle).Max();
+                if (inc > worstInc) worstInc = inc;
+                // TANGENCY: at a terminator point the sun lies exactly on the horizon, so the
+                // line to the sun is perpendicular to the outward normal (which is the point).
+                const double sx = ss.sunDirPlanet[0] * d - cx;
+                const double sy = ss.sunDirPlanet[1] * d - cy;
+                const double sz = ss.sunDirPlanet[2] * d - cz;
+                const double sl = std::sqrt(sx * sx + sy * sy + sz * sz);
+                band((cx * sx + cy * sy + cz * sz) / sl, 0.0, 1e-9,
+                     "terminator point: the sun is exactly on its horizon");
+            }
+            // The chain's own residue, reported rather than absorbed: the dilator multiplies
+            // the ni coefficient by scale^2 = 5.5e8, so one ulp of cancellation at 1 AU shows
+            // up here as a fraction of a metre at the Earth's centre.
+            if (ss.chainOriginResidM > 5.0) {
+                Log("[gatest] FAIL the versor chain misses the Earth's centre by %.3f m",
+                    ss.chainOriginResidM);
+                ok = false;
+            } else {
+                Log("[gatest] versor chain round trip: the Earth's centre lands %.3f m from the "
+                    "origin (the dilator's scale^2 on one ulp at 1 AU) -- reported, not absorbed",
+                    ss.chainOriginResidM);
+            }
+            if (worstInc > 1e-11) {
+                Log("[gatest] FAIL terminator meet: a point built on the circle fails "
+                    "P _| (S ^ pi) = 0 by %.3g", worstInc);
+                ok = false;
+            } else {
+                Log("[gatest] terminator: sphere ^ plane accepts its own 24 points (worst "
+                    "%.1e); offset %.4g Earth radii = %.0f m, radius short of R by %.3f m -- "
+                    "geometrically real, visually nothing; the 59 km softness comes from the "
+                    "sun's 0.266 deg DISC, not from this",
+                    worstInc, tm.offset, tm.offset * sun::kEarthRadiusM,
+                    (1.0 - tm.radius) * sun::kEarthRadiusM);
+            }
+        }
+
+        // (d2) WHAT IT COSTS. The whole solar chain is CPU work done ONCE per frame: a 32x32
+        // blade geometric product a handful of times, plus the trig series. If that were not
+        // negligible the answer would be to cache it, not to give up the model -- so measure it
+        // rather than assume, and print the number where the next reader will find it.
+        {
+            volatile double sink = 0.0;
+            const int reps = 20000;
+            const auto t0 = std::chrono::steady_clock::now();
+            for (int i = 0; i < reps; ++i) {
+                const sun::SolarSystem b = sun::Build(1787925600.0 + i);
+                sink += b.sunDirPlanet[0];
+            }
+            const double ns =
+                std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - t0)
+                    .count() / reps;
+            (void)sink;
+            Log("[gatest] solar chain cost: %.2f us per frame (%d builds timed) -- four versor "
+                "sandwiches in Cl(4,1) at 32 doubles each, once per frame, on one core",
+                ns / 1000.0, reps);
+        }
+
+        // (e) THE PARALLAX the finite sun buys: the direction from a point ON the planet is not
+        // the direction from its centre. It is at most R_earth/d = 8.8 arcsec, which is why the
+        // renderer takes it once at the camera and never per pixel -- but it is nonzero, and a
+        // sun that is a direction cannot produce it at all.
+        {
+            const sun::SolarSystem ss = sun::Build(1787925600.0);
+            double px, py, pz;
+            sun::PlanetDirFromLatLon(latSite, lonSite, px, py, pz);
+            const double site[3] = {px, py, pz};
+            double topo[3];
+            sun::SunDirFromPlanetPoint(ss, site, topo);
+            const double dotc = topo[0] * ss.sunDirPlanet[0] + topo[1] * ss.sunDirPlanet[1] +
+                                topo[2] * ss.sunDirPlanet[2];
+            const double sepArcsec = std::acos(dotc < 1.0 ? dotc : 1.0) * 180.0 / 3.14159265358979 * 3600.0;
+            if (sepArcsec > 9.0) {
+                Log("[gatest] FAIL solar parallax %.2f arcsec exceeds R_earth/d = 8.79", sepArcsec);
+                ok = false;
+            } else {
+                Log("[gatest] finite-sun parallax at the site: %.2f arcsec off the geocentric "
+                    "direction (ceiling R_earth/d = 8.79) -- sub-pixel, and only a PLACE can "
+                    "have it", sepArcsec);
+            }
+        }
+    }
+
     if (ok) {
         Log("[gatest] ---- PASS: sandwich, refraction rotor, fold telescope, spinor blend, "
             "frame rules + orientation ledger, merc chain bound, cube-face inverse; water "
             "parity: solved wave field, caustic bivector, ripple prefilter, foam discipline, "
-            "signed Kelvin phase, bed relief + waterline metric ----");
+            "signed Kelvin phase, bed relief + waterline metric; the SUN: versor frame chain, "
+            "solar noon vs an external ephemeris, distance/declination/angular-radius bands, "
+            "the terminator as a meet, finite-sun parallax ----");
     }
     return ok;
 }

@@ -59,6 +59,7 @@
 #include "core/TileProviders.h"
 #include "core/SceneConfig.h"
 #include "sim/BathyModel.h"
+#include "sim/Ephemeris.h"   // M9bi: the sun as a place, in Cl(4,1)
 #include "sim/GlobeModel.h"
 #include "sim/WaveField.h"
 #include "sim/WaveFieldSource.h"
@@ -203,6 +204,11 @@ struct Options {
     bool pixelWater = false;          // --pixel-water: M9bh -- shade the water per PIXEL (the
                                       // two rays: sky mirror + refracted bed cast, translucent,
                                       // no foam). Off = the M9bg vertex-shaded default.
+    // M9bi: --sun az,el PINS the pre-ephemeris art direction (112, 26) that every baseline
+    // before M9bi was lit by. Without it the sun comes from the EPHEMERIS at the scene's own
+    // timestamp and place -- a deliberate look change, which is why the escape hatch exists.
+    bool sunPinned = false;
+    float sunAz = 112.0f, sunEl = 26.0f;
     double riverQ = -1;               // --river q overrides data/river/river.json
     std::wstring sweUvDump;           // --swe-uv f.png: dump the solved current field after
                                       // spin-up (debug picture: red east, blue west)
@@ -500,6 +506,11 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--ocean-probe") o.oceanProbe = next("42.35,-70.65");
         else if (a == "--one-water") o.oneWater = true;
         else if (a == "--pixel-water") o.pixelWater = true;
+        else if (a == "--sun") {
+            const std::string v = next("112,26");
+            sscanf_s(v.c_str(), "%f,%f", &o.sunAz, &o.sunEl);
+            o.sunPinned = true;
+        }
         else if (a == "--river") o.riverQ = atof(next("70").c_str());
         else if (a == "--storm") {
             // hs,tp,fromdeg -- sandbox sea state override
@@ -2892,6 +2903,8 @@ int main(int argc, char** argv) {
             // and what they read). Declared only when the flag is on -- an edge for a mode
             // the run is not in is graph rot wearing the other sign.
             if (opt.pixelWater) ga::ast::RegisterPixelWaterEdges();
+            // M9bi: the sun's own edges, when the ephemeris is the one driving it.
+            if (!opt.sunPinned) ga::ast::RegisterSolarEdges();
             if (opt.sliceOn) {
                 // M7o: the demo node registers its edge like any other -- the AST is how
                 // features arrive now. One blade, one inner product, one discard.
@@ -3351,6 +3364,7 @@ int main(int argc, char** argv) {
         }
 
         double simUnix = (opt.startUnix > 0) ? opt.startUnix : NowUnix();
+        bool sunLogged = false;   // M9bi: log the placed sun once, with its numbers
         const double startUnix = simUnix;
 
         // M5c boundary clocks. Ocean = the ENTRANCE station (the physically right open-water
@@ -3589,6 +3603,14 @@ int main(int argc, char** argv) {
                     "exact bytes of the solve, pyramid prefilled per bucket",
                     waveT, uint32_t(WaveField::kMaxComp) + 1u);
             }
+        }
+        // M9bi: --sun pins the pre-ephemeris art direction; sunPlaced stays false and the
+        // renderer keeps using these two constants, exactly as every earlier baseline did.
+        if (opt.sunPinned) {
+            renderer.sunAzimuthDeg = opt.sunAz;
+            renderer.sunElevationDeg = opt.sunEl;
+            Log("[sun] PINNED to azimuth %.1f, elevation %.1f -- the ephemeris is off",
+                opt.sunAz, opt.sunEl);
         }
         if (globe) {
             globe->pixelWater = opt.pixelWater;   // M9bh: the two-ray water, per pixel
@@ -4543,6 +4565,44 @@ int main(int argc, char** argv) {
                 static_cast<int64_t>(frame) - (opt.rail.empty() ? 0 : 150);
             // --settle-sync reads the ring gate's hold count for THIS frame's wants here;
             // ProcessQueues zeroes it inside RenderFrame.
+            // ---- M9bi: THE SUN, PLACED. One conformal point at the origin of the
+            // heliocentric frame, carried into THIS frame by the versor chain in Ephemeris.h
+            // and handed to the renderer as the scene's single light. Everything that shades
+            // reads gSunDir, so placing it once here places it for the globe, the sea, the sky,
+            // the terrain and every reflection -- which is what "a global constant for the
+            // solar system" has to mean.
+            //
+            // The direction is taken from the CAMERA'S OWN PLACE on the planet rather than from
+            // the Earth's centre: that is the finite-source parallax, at most 8.8 arcsec, and
+            // it is the difference between a sun that is somewhere and a sun that merely points.
+            if (!opt.sunPinned) {
+                const sun::SolarSystem ss = sun::Build(simUnix);
+                const double here[3] = {oDir[0], oDir[1], oDir[2]};   // unit = 1 Earth radius
+                double sdir[3];
+                sun::SunDirFromPlanetPoint(ss, here, sdir);
+                renderer.sunPlaced = true;
+                renderer.sunDirTangent[0] = static_cast<float>(
+                    sdir[0] * east0[0] + sdir[1] * east0[1] + sdir[2] * east0[2]);
+                renderer.sunDirTangent[1] = static_cast<float>(
+                    sdir[0] * oDir[0] + sdir[1] * oDir[1] + sdir[2] * oDir[2]);
+                renderer.sunDirTangent[2] = static_cast<float>(
+                    sdir[0] * north0[0] + sdir[1] * north0[1] + sdir[2] * north0[2]);
+                renderer.sunAngRadiusDeg = static_cast<float>(ss.app.angRadiusDeg);
+                if (!sunLogged) {
+                    sunLogged = true;
+                    const double el = std::asin(std::max(
+                        -1.0, std::min(1.0, double(renderer.sunDirTangent[1])))) * 180.0 / 3.14159265358979;
+                    double az = std::atan2(double(renderer.sunDirTangent[0]),
+                                           double(renderer.sunDirTangent[2])) *
+                                180.0 / 3.14159265358979;
+                    if (az < 0.0) az += 360.0;
+                    Log("[sun] placed from the ephemeris: subsolar %.3f N %.3f E, %.6f AU "
+                        "(%.1f W/m2), angular radius %.4f deg; from here azimuth %.2f, "
+                        "elevation %+.2f  [--sun 112,26 pins the pre-M9bi art direction]",
+                        ss.app.subsolarLatDeg, ss.app.subsolarLonDeg, ss.app.distAu,
+                        ss.app.irradianceWm2, ss.app.angRadiusDeg, az, el);
+                }
+            }
             const uint32_t ringHeldBefore = resMgr.ringHeldFrame;
             renderer.RenderFrame(cam, static_cast<float>(simUnix - startUnix), dt);
             // --bench-overlap keeps the overlap: RENDER is then record + the BeginFrame fence

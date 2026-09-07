@@ -270,11 +270,20 @@ void Renderer::RenderFrame(const Camera& cam, float timeSec, float dt) {
     // native layout. No transpose. Common.hlsli declares the cbuffer matrix row_major to match.
     XMStoreFloat4x4(reinterpret_cast<XMFLOAT4X4*>(sc.viewProj), XMMatrixMultiply(view, proj));
 
-    const float az = XMConvertToRadians(sunAzimuthDeg);
-    const float el = XMConvertToRadians(sunElevationDeg);
-    sc.sunDir[0] = std::cos(el) * std::sin(az);
-    sc.sunDir[1] = std::sin(el);
-    sc.sunDir[2] = std::cos(el) * std::cos(az);
+    // M9bi: the placed sun wins. Its direction was computed once, on the CPU, from the sun's
+    // conformal POINT in the solar frame and carried here by the versor chain -- so every layer
+    // in the scene shares not just one vector but one PLACE.
+    if (sunPlaced) {
+        sc.sunDir[0] = sunDirTangent[0];
+        sc.sunDir[1] = sunDirTangent[1];
+        sc.sunDir[2] = sunDirTangent[2];
+    } else {
+        const float az = XMConvertToRadians(sunAzimuthDeg);
+        const float el = XMConvertToRadians(sunElevationDeg);
+        sc.sunDir[0] = std::cos(el) * std::sin(az);
+        sc.sunDir[1] = std::sin(el);
+        sc.sunDir[2] = std::cos(el) * std::cos(az);
+    }
 
     for (int c = 0; c < 3; ++c) {
         sc.sigmaW[c] = sigmaW[c];
@@ -311,6 +320,14 @@ void Renderer::RenderFrame(const Camera& cam, float timeSec, float dt) {
     sc.viewport[2] = 1.0f / static_cast<float>(m_width);
     sc.viewport[3] = 1.0f / static_cast<float>(m_height);
     sc.misc[0] = waterLevel;
+    // The sun's DISC, from its real angular radius: bright inside 0.85 R, gone by 1.15 R. The
+    // constants this replaces (cos 0.44 deg .. cos 0.99 deg) drew a sun between 1.7x and 3.7x
+    // too wide, which no amount of exposure tuning could have diagnosed.
+    {
+        const float r = XMConvertToRadians(sunAngRadiusDeg);
+        sc.misc[1] = std::cos(r * 1.15f);
+        sc.misc[2] = std::cos(r * 0.85f);
+    }
 
     const D3D12_GPU_VIRTUAL_ADDRESS sceneCb = m_gpu->PushConstants(&sc, sizeof(sc));
 
