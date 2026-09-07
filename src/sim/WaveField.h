@@ -156,7 +156,8 @@ private:
     uint64_t m_liveKey = 0;
 
     // background solve plumbing: one worker at a time, result handed over by flag
-    std::thread m_worker;
+    std::atomic<bool> m_solveRunning{false};   // the pool job is live (replaces joining m_worker)
+    void WaitForSolve();   // what m_worker.join() used to do; main thread only
     std::atomic<bool> m_inFlight{false};
     std::atomic<bool> m_resultReady{false};
     Solved m_result;                     // written by worker, read by main after the flag
