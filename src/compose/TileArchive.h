@@ -214,6 +214,17 @@ public:
         }
         // The path the reader hands DirectStorage -- opened once for the whole run, not per tile.
         m_wpath.assign(m_path.begin(), m_path.end());
+        // AND THE READ HANDLE IS OPENED HERE, not lazily in ReadPayload. It used to be created
+        // on first use with no lock -- `if (!m_h) { CreateFileA(...); m_h.reset(...); }` -- so
+        // two worker threads reaching a cold archive together both opened a HANDLE and both
+        // assigned a non-atomic shared_ptr over each other: a torn control block, a leaked
+        // handle, or worse. OpenPath runs exactly once per archive, under the caller's lock, so
+        // opening here removes the race rather than guarding it. FILE_SHARE_DELETE so an
+        // archive can still be replaced by a repack while a reader holds it.
+        const HANDLE h = CreateFileA(m_path.c_str(), GENERIC_READ,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                     nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h != INVALID_HANDLE_VALUE) m_h.reset(h, [](void* q) { CloseHandle(q); });
         return true;
     }
 
@@ -257,12 +268,7 @@ public:
     // threads may share it. This is what removes the 1.8 ms-per-tile open the instrument found:
     // the tile still enters CPU memory, but through a handle that already exists.
     bool ReadPayload(const Rec& rec, std::vector<uint8_t>& out) {
-        if (!m_h) {
-            HANDLE h = CreateFileA(m_path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-            if (h == INVALID_HANDLE_VALUE) return false;
-            m_h.reset(h, [](void* p) { CloseHandle(p); });
-        }
+        if (!m_h) return false;   // opened in OpenPath, under the caller's lock; never lazily
         out.resize(rec.size);
         OVERLAPPED ov{};
         ov.Offset = static_cast<DWORD>(rec.offset & 0xFFFFFFFFull);
