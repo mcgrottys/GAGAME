@@ -8,6 +8,7 @@
 // It is the first gate of this work and the one that makes the others mean something: if this
 // suite ever passes while the audit is blind, every later "0 collisions" is a lie.
 #include <atomic>
+#include <chrono>
 #include <string>
 #include <thread>
 #include <vector>
@@ -15,6 +16,7 @@
 #include "compose/TileTree.h"
 #include "core/Common.h"
 #include "core/ThreadAudit.h"
+#include "core/ThreadManager.h"
 
 namespace ga {
 
@@ -30,6 +32,18 @@ struct Gate {
         while (arrived.load(std::memory_order_acquire) < of) std::this_thread::yield();
     }
 };
+
+// Wait on a condition with a WALL-CLOCK bound. A spin-count bound is a machine-speed bound:
+// on a loaded box it expires early and reports a hang that is not one.
+template <class Pred>
+bool WaitFor(Pred p, int ms = 20000) {
+    const auto t0 = std::chrono::steady_clock::now();
+    while (!p()) {
+        if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(ms)) return false;
+        std::this_thread::yield();
+    }
+    return true;
+}
 
 bool Expect(const char* what, uint64_t got, uint64_t want) {
     if (got == want) return true;
@@ -193,6 +207,136 @@ bool RunThreadSelfTest() {
         // with a new defect, so it is gated, not assumed.
         ok &= Expect("publishes lost to a concurrent reader", lost.load(), 0);
         tree_detail::Delete(rw);
+    }
+
+    // (7) THE POOL. Coverage, no double-execution, and the two deadlocks a fork/join over a
+    //     shared pool can actually hit.
+    {
+        ThreadManager tm;
+        tm.Init(6, 3);   // small and lopsided on purpose: 6 threads, Io capped at 3
+
+        // (a) ParallelFor visits every index exactly once, at several shapes including ones
+        //     where the last chunk is short and where there are fewer items than threads.
+        for (const int n : {1, 5, 64, 1000}) {
+            for (const int grain : {1, 7, 64}) {
+                std::vector<std::atomic<int>> hit(static_cast<size_t>(n));
+                for (auto& x : hit) x.store(0);
+                tm.ParallelFor(Lane::Compute, "cover", n, grain,
+                               [&](int j0, int j1) {
+                                   for (int j = j0; j < j1; ++j) {
+                                       hit[static_cast<size_t>(j)].fetch_add(1);
+                                   }
+                               });
+                int bad = 0;
+                for (auto& x : hit) bad += (x.load() != 1);
+                if (bad) {
+                    Log("[threadtest]   FAIL ParallelFor n=%d grain=%d: %d indices not visited "
+                        "exactly once",
+                        n, grain, bad);
+                    ok = false;
+                }
+            }
+        }
+
+        // (b) THE DEADLOCK THAT MATTERS. Saturate every pool thread with jobs that will not
+        //     return until told, then run a ParallelFor from this thread. It must finish: the
+        //     caller drains the chunks itself rather than waiting for a free worker. A pool
+        //     whose ParallelFor waits on workers hangs here forever, which is why this is a
+        //     gate and not a comment.
+        {
+            // The park flags are shared_ptr, not stack locals: these jobs outlive the block if
+            // anything goes wrong, and a job spinning on a dead stack address never unparks --
+            // which is how the FIRST version of this test wedged every later case at zero.
+            auto release = std::make_shared<std::atomic<bool>>(false);
+            auto parked = std::make_shared<std::atomic<int>>(0);
+            auto left = std::make_shared<std::atomic<int>>(0);
+            const int nthreads = static_cast<int>(tm.ThreadCount());
+            for (int i = 0; i < nthreads; ++i) {
+                tm.Submit(Lane::Compute, "park", [release, parked, left] {
+                    parked->fetch_add(1);
+                    while (!release->load(std::memory_order_acquire)) std::this_thread::yield();
+                    left->fetch_add(1);
+                });
+            }
+            ok &= Expect("every worker parked", WaitFor([&] { return parked->load() >= nthreads; }),
+                         1);
+            std::atomic<int> sum{0};
+            tm.ParallelFor(Lane::Compute, "starved", 500, 10,
+                           [&](int j0, int j1) { sum.fetch_add(j1 - j0); });
+            ok &= Expect("ParallelFor completed with every worker parked", sum.load(), 500);
+            release->store(true, std::memory_order_release);
+            ok &= Expect("every parked worker released", WaitFor([&] { return left->load() >= nthreads; }),
+                         1);
+        }
+
+        // (c) A ParallelFor nested inside a pool job, which is exactly what the wave solver
+        //     will be once SolveAsync is a job and ParallelRows is a ParallelFor.
+        {
+            std::atomic<int> inner{0};
+            std::atomic<bool> done{false};
+            tm.Submit(Lane::Io, "outer", [&] {
+                tm.ParallelFor(Lane::Compute, "inner", 300, 16,
+                               [&](int j0, int j1) { inner.fetch_add(j1 - j0); });
+                done.store(true, std::memory_order_release);
+            });
+            ok &= Expect("nested ParallelFor's outer job finished",
+                         WaitFor([&] { return done.load(std::memory_order_acquire); }), 1);
+            ok &= Expect("nested ParallelFor inside a pool job", inner.load(), 300);
+        }
+
+        // (d) The Io lane never runs more than its cap at once -- that cap is the whole reason
+        //     moving the loader pool in here does not re-tune it.
+        {
+            std::atomic<int> live{0}, peak{0};
+            std::atomic<int> ran{0};
+            for (int i = 0; i < 40; ++i) {
+                tm.Submit(Lane::Io, "cap", [&] {
+                    const int now = live.fetch_add(1) + 1;
+                    int was = peak.load();
+                    while (now > was && !peak.compare_exchange_weak(was, now)) {
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    live.fetch_sub(1);
+                    ran.fetch_add(1);
+                });
+            }
+            WaitFor([&] { return ran.load() >= 40; });
+            ok &= Expect("Io jobs all ran", ran.load(), 40);
+            if (peak.load() > tm.IoCap()) {
+                Log("[threadtest]   FAIL Io lane ran %d at once against a cap of %d", peak.load(),
+                    tm.IoCap());
+                ok = false;
+            }
+        }
+        tm.Shutdown();
+    }
+
+    // (8) --jobs-inline must ask for the SAME work in the SAME order as the threaded pool.
+    //     That equality is the whole basis for using the hash as an A/B.
+    {
+        auto stream = [](bool inl) {
+            ThreadManager tm;
+            tm.Init(4, 2);
+            tm.SetInline(inl);
+            std::atomic<int> acc{0};
+            for (int i = 0; i < 50; ++i) {
+                tm.Submit((i & 1) ? Lane::Io : Lane::Compute, "ab", [&acc, i] { acc.fetch_add(i); });
+            }
+            tm.ParallelFor(Lane::Compute, "abpf", 200, 8, [&](int a, int b) { acc.fetch_add(b - a); });
+            const uint64_t h = tm.JobsHash();
+            tm.Shutdown();
+            return h;
+        };
+        const uint64_t threaded = stream(false), inlined = stream(true);
+        if (threaded != inlined) {
+            Log("[threadtest]   FAIL jobs hash: threaded %016llx vs --jobs-inline %016llx",
+                static_cast<unsigned long long>(threaded),
+                static_cast<unsigned long long>(inlined));
+            ok = false;
+        } else {
+            Log("[threadtest]   jobs hash %016llx, identical threaded and inline",
+                static_cast<unsigned long long>(threaded));
+        }
     }
 
     tree_detail::Delete(path);

@@ -539,7 +539,8 @@ private:
 
     int AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t faceDim, DXGI_FORMAT fmt,
                            TileProviderFn provider, uint32_t faces);
-    void LoaderThread();
+    // One load, on a Lane::Io job. Was the body of LoaderThread's loop.
+    void RunLoad(const std::shared_ptr<Tracked>& job);
     uint32_t AcquirePoolTile(Gpu& gpu);
     void UpdateResidencyByte(Tenant& t, const TileRequest& r, bool mapped);
     void MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
@@ -581,11 +582,13 @@ private:
     // Upload ring: kFrameCount slabs of kMaxMapsPerFrame tiles, frame-indexed like the CB arena.
     GpuBuffer m_uploadRing[Gpu::kFrameCount];
 
-    // Loader workers.
-    std::vector<std::thread> m_workers;
-    std::deque<std::shared_ptr<Tracked>> m_loadQueue;
+    // The loader threads live in the process pool now (core/ThreadManager.h, Lane::Io, capped
+    // at this pool's old worker count and served FIFO). What stays here is the STATE they
+    // touched: m_mx still guards Tracked and the per-tenant load counters, m_inFlight is still
+    // the kMaxLoadsInFlight admission, and m_drainCv is how Shutdown waits for jobs that are
+    // already running to leave before the manager they capture goes away.
     std::mutex m_mx;
-    std::condition_variable m_cv;
+    std::condition_variable m_drainCv;
     std::atomic<bool> m_quit{false};
     std::atomic<int> m_inFlight{0};
     uint32_t m_failedLoads = 0;   // M7w: terminal load failures (tiles left honestly NULL)

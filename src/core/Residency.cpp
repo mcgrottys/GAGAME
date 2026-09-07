@@ -1,4 +1,5 @@
 #include "core/Residency.h"
+#include "core/ThreadManager.h"
 
 #include <atomic>
 
@@ -20,36 +21,30 @@ void ResidencyManager::Init(Gpu& gpu) {
             static_cast<uint64_t>(kMaxMapsPerFrame) * 65536 + kMapStageBytes,
             L"residency upload ring");
     }
-    // M7w: 2 workers starved every descent (140 loads in 300 frames measured at the flood-rail
-    // pose -- the patchwork was coarse fallback, not bad data). Paints are local disk/CPU work.
-    const unsigned hc = std::thread::hardware_concurrency();
-    const int nWorkers = (std::min)(12, (std::max)(4, static_cast<int>(hc) - 2));
-    for (int i = 0; i < nWorkers; ++i) {
-        m_workers.emplace_back([this] { LoaderThread(); });
-    }
+    // M7w's worker count (2 starved every descent: 140 loads in 300 frames at the flood-rail
+    // pose, and the patchwork was coarse fallback, not bad data) is now the Io lane's cap, set
+    // by ThreadManager::Init from the same expression. No threads are created here.
+    m_quit = false;
+    Log("[residency] loads run on the pool's Io lane (%d at once)", Threads().IoCap());
 }
 
 void ResidencyManager::Shutdown() {
-    {
-        std::lock_guard<std::mutex> lk(m_mx);
-        m_quit = true;
-    }
-    m_cv.notify_all();
-    for (auto& w : m_workers) {
-        if (w.joinable()) w.join();
-    }
-    m_workers.clear();
+    // The jobs capture `this`. Refuse new work, then WAIT for the ones already running to
+    // leave -- the pool outlives this object and would otherwise still be inside it. (The old
+    // pool joined its own threads here, which had the same effect for free.)
+    m_quit = true;
+    std::unique_lock<std::mutex> lk(m_mx);
+    m_drainCv.wait(lk, [this] { return m_inFlight.load() == 0; });
 }
 
-void ResidencyManager::LoaderThread() {
-    for (;;) {
-        std::shared_ptr<Tracked> job;
-        {
-            std::unique_lock<std::mutex> lk(m_mx);
-            m_cv.wait(lk, [this] { return m_quit || !m_loadQueue.empty(); });
-            if (m_quit) return;
-            job = m_loadQueue.front();
-            m_loadQueue.pop_front();
+void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
+    {
+        // Shutdown ran between this job being queued and it being picked up.
+        if (m_quit.load()) {
+            std::lock_guard<std::mutex> lk(m_mx);
+            --m_inFlight;
+            m_drainCv.notify_all();
+            return;
         }
         std::vector<uint8_t> data;
         TileLoc loc;
@@ -96,6 +91,7 @@ void ResidencyManager::LoaderThread() {
             }
             --m_inFlight;
         }
+        m_drainCv.notify_all();
     }
 }
 
@@ -1015,6 +1011,13 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     lap0 = Clock::now();   // the trace print above is not a phase
 
     // ---- start loads (newest-seen first, coarse first; predicted tiles yield to real ones)
+    //
+    // The tiles are CHOSEN under m_mx and SUBMITTED after it is released. Two reasons, and the
+    // second is not optional: under --jobs-inline a Submit runs the job on this very thread, and
+    // RunLoad takes m_mx, which a lock still held here would deadlock on. The submission order is
+    // exactly the order this block produced, so the request stream reaching the Io lane -- which
+    // is FIFO at the old pool's worker count -- is the one the old queue saw.
+    std::vector<std::shared_ptr<Tracked>> toLoad;
     {
         std::lock_guard<std::mutex> lk(m_mx);
         // M7w: failed loads parked in m_loading with state Seen get their retry first.
@@ -1022,9 +1025,8 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             if (tile->state != TileState::Seen) continue;
             if (m_inFlight >= static_cast<int>(kMaxLoadsInFlight)) break;
             tile->state = TileState::Loading;
-            m_loadQueue.push_back(tile);
+            toLoad.push_back(tile);
             ++m_inFlight;
-            m_cv.notify_one();
         }
         lap(3);
         // M9af: READY BEFORE UNREADY. A tile already on the NVMe is a 64 KB read; one that is
@@ -1054,11 +1056,13 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             if (tile->dropped) continue;   // M9ba: identity moved before it loaded
             tile->state = TileState::Loading;
             m_loading.push_back(tile);
-            m_loadQueue.push_back(tile);
+            toLoad.push_back(tile);
             ++m_inFlight;
-            m_cv.notify_one();
         }
         lap(3);
+    }
+    for (const auto& tile : toLoad) {
+        Threads().Submit(Lane::Io, "residency.load", [this, tile] { RunLoad(tile); });
     }
 
     // ---- gather mappable tiles (loaded, parent already mapped or coarsest)

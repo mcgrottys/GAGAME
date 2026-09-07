@@ -55,6 +55,7 @@
 #include "core/BuildInfo.h"
 #include "core/CrashTrace.h"
 #include "core/ThreadAudit.h"
+#include "core/ThreadManager.h"
 #include "core/DxTest.h"
 #include "core/Pga.h"
 #include "core/TileProviders.h"
@@ -130,6 +131,7 @@ struct Options {
     bool ringLoads = true;            // --no-ring-loads: the old queue, for the A/B (M9al)
     bool resTrace = false;            // --res-trace: residency deficit + slot accounting, per 30 f
     bool threadAudit = false;         // --thread-audit: count tile-file collisions between threads
+    bool jobsInline = false;          // --jobs-inline: every job on the calling thread, in order
     uint32_t traceFrom = UINT32_MAX;  // --res-trace-frames A:B: the landing ledger every turn of
     uint32_t traceTo = 0;             // recorded frames A..B (Residency.h TurnLedger, step 28)
     uint32_t treeAudit = 0;           // --tree-audit N: compare N tiles/frame, report, exit
@@ -417,6 +419,10 @@ Options ParseArgs(int argc, char** argv) {
         // is scoped, and a run reports how often two threads met at one path. Off by default --
         // it takes a mutex per tile file, which is a different landing schedule.
         else if (a == "--thread-audit") o.threadAudit = true;
+        // The pool's A/B, the same shape as --predict-inline: every Submit and ParallelFor runs
+        // on the calling thread in submission order, so a threading difference shows as a
+        // difference against a single-threaded reference rather than as a mystery pixel.
+        else if (a == "--jobs-inline") o.jobsInline = true;
         // Step 28: --res-trace-frames A:B prints the residency turn's landing ledger on every
         // recorded frame of [A, B]: what landed, from where, and what the landing buffer had
         // left. On its own -- not under --res-trace, whose audit moves the loop's timing.
@@ -1697,6 +1703,10 @@ int main(int argc, char** argv) {
     try {
         const Options opt = ParseArgs(argc, argv);
         if (opt.threadAudit) ga::threadaudit::Enable();
+        // The process pool, before anything can submit to it. Everything that used to spawn its
+        // own threads is a client of this (core/ThreadManager.h).
+        ga::Threads().Init();
+        ga::Threads().SetInline(opt.jobsInline);
         {
             // The first line of every log: which binary, which flags. A baseline still or a
             // bench log is otherwise unmatchable to the recipe that made it (out/baseline/*.log
@@ -4997,6 +5007,10 @@ int main(int argc, char** argv) {
                                 ResidencyManager::PhaseName(k), profInMs[k] / n,
                                 profInHelmMs[k] / nH);
                         }
+                        Log("[jobs] %llu jobs submitted, stream FNV-1a %016llx%s",
+                            static_cast<unsigned long long>(ga::Threads().JobsSubmitted()),
+                            static_cast<unsigned long long>(ga::Threads().JobsHash()),
+                            ga::Threads().Inline() ? " (--jobs-inline)" : "");
                         // Step 28: the landing ledger over the run (Residency.h TurnLedger).
                         Log("[rail]     landing: %llu turns landed tiles with no batch behind "
                             "them (drawn without a barrier before step 28), %llu ring fills "
@@ -5366,6 +5380,7 @@ int main(int argc, char** argv) {
         gpu.Shutdown();
         window.Destroy();
         ga::threadaudit::Report();   // --thread-audit: what the threads did to the tile files
+        ga::Threads().Shutdown();
         Log("done (%u frames)", frame);
         return 0;
     } catch (const std::exception& e) {

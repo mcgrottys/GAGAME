@@ -29,6 +29,7 @@ add_executable(gagame
   src/core/Residency.cpp
   src/core/TileProviders.cpp
   src/core/ThreadTest.cpp
+  src/core/ThreadManager.cpp
   src/compose/Compositor.cpp
   src/compose/ComposeTest.cpp
   src/compose/Sources.cpp
