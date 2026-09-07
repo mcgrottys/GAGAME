@@ -2000,3 +2000,140 @@ user described -- the geometric product of Cl(2) fibers (grade-typed by `Cl2Prod
 already the atlas's closure), and the stencil family (grad, div, curl: the Maxwell-shaped
 operators over currents and heights). Both are DomainSources over DomainSources; the tree
 caches them like anything else. That is the next section.
+
+## 45. The tree is thread safe, and there is one pool
+
+The tree was already a multi-threaded structure -- 4-12 residency loaders run `TileTree::Provider`
+concurrently -- and §43 stated the contract: *"Parents are read-modify-written by painting threads
+under a per-tree recursive mutex."* Nothing measured whether the contract held, and it did not.
+Eight commits, instruments first, each one gated and revertible alone.
+
+**What this is not.** It buys no framerate and no commit claims one. Measured 2026-09-06 on the
+storm rail: the GPU frame is 6.187 ms of which `globe.mesh` is 4.908 (79%), so perfect threading
+takes the shipped loop from ~130 to ~160 fps and then stops, GPU-bound.
+
+### The instruments, before anything was fixed
+
+`--res-trace-frames A:B` prints the residency turn's **landing ledger** (`Residency.h TurnLedger`,
+the never-landed half of PERF_EXPERIMENT step 28): batches landed and their fence lag, tiles
+claiming a coordinate they no longer own, ring fills with no bytes, turns that landed tiles with
+no mapped batch behind them. `--thread-audit` (`core/ThreadAudit.h`) scopes every tile-file write,
+read and delete and reports how often two threads met at one path, plus `GA_MAIN_THREAD_ONLY()` --
+a *checked* declaration for the structures that carry no synchronization at all (`PageTable`,
+`TileIndex`, `TileAtlas2D`, every `Gpu` entry). Not an assert: RelWithDebInfo defines NDEBUG and is
+the only build anyone measures here.
+
+`RunThreadSelfTest` (`--selftest`, now 8 gates) is the gate on the instruments. It stages each
+collision deliberately and requires the audit to count exactly it -- and it failed its own first
+version, where a barrier let the first thread leave its scope before the second entered so no
+collision ever happened. **A race test that cannot fail is decoration.**
+
+### A tile is published whole or not at all
+
+`WriteTile` published by writing straight to the target: `std::ofstream` truncates at open and the
+bytes land at close. Every reader treats a short read as ABSENT -- so `FoldUp` took its
+`ph = Held::Absent` branch and **repainted the parent from the source**, discarding every sibling's
+fold already accumulated in it. Silent pyramid data loss, decided by which thread was in the
+window. The publish is a rename now, and **either half of the fix alone is worse than the bug**:
+
+| | absent reads | torn | publishes LOST |
+|---|---|---|---|
+| truncating write (the incumbent) | 40 | 0 | 0 |
+| temp + `MoveFileEx` | 40 | 0 | **366 / 400** |
+| + readers allow `FILE_SHARE_DELETE` | 0 | 0 | 352 / 400 |
+| + rename through the temp's own handle, POSIX semantics | **0** | **0** | **0** |
+
+`MoveFileEx` cannot replace a file another thread holds open even once every reader permits
+delete-sharing. Shipping row two would have destroyed 91% of tile writes under load.
+
+### One lock per ADDRESS, and the rule that makes striping safe
+
+`m_foldMx` was per NODE and wrapped `FoldUp` alone: it serialized every fold on a node against
+every other, and covered neither `LeafTile`'s own publish of the same address nor any reader. It is
+`kStripes = 256` recursive mutexes on the root, keyed by (node, tag, face, mip, x, y). `LeafTile`
+publishes **only if nothing is there** and adopts what it finds -- against a fold the fold is the
+better answer, and against another painter the bytes are the same anyway.
+
+**Hold at most one stripe at a time.** Two addresses can collide onto one stripe; that is what
+striping is. Any scheme holding two can deadlock on a collision however carefully the acquisition
+order is argued, and holding one cannot, at any table size. So `FoldUp` was split -- `FoldInto`
+does the read-modify-publish under the stripe, `FoldUp` announces upward and recurses with nothing
+held -- and `DropCachedAddress` takes no stripe at all, because after the atomic publish a delete
+leaves no torn state.
+
+### The landing race
+
+Two defects between the queue and the sampler, counted before either was touched. The barrier back
+to shader reads lived at the tail of `MapAndFill`, which a turn with an **empty batch** never
+reaches -- so such a turn drew the tenant in `COPY_DEST` while the copy engine was writing it, and
+the residency byte, raised in the same turn, sent the sampler there. And a tile dropped, evicted or
+re-tracked since its read was issued still claimed its coordinate. Measured on the 14:00 rail with
+`--probe-cull-far`: the eleven frames step 28 recorded came back LANDED-ONLY (rec746, 755, 758,
+761, 764, 767, 770, 776, 779, 791, 800) plus rec774, every one with **0 tenants barriered**; after
+the fix, 1 to 3 on all twelve. Unowned claims went 85 -> 324, and **the rise is the fix working**:
+they are discarded now rather than raising a residency byte over stale bytes, so the tile stays
+honestly unresident and gets re-asked.
+
+Priors 31's dark quadrilaterals did not reproduce at the shipped 8192-tile cap, so this fixes a
+mechanism it can prove and removes an artifact it never saw. Its value is that priors 31's law is
+now satisfiable: the race is fixed BEFORE the cap raise and the horizon cull, which are the changes
+that make those turns common.
+
+### One pool
+
+`core/ThreadManager.h`. Before: 12 residency loaders + `WaveField::ParallelRows` **spawning and
+joining 14 threads per call** at three sites nested inside the solve thread + the solve thread +
+the predict thread + the watcher -- about 29 threads on 16 cores, no shared admission control, five
+shutdown disciplines, and no job/task/parallel-for abstraction anywhere in `src/`. After: one pool
+of `hw-1`, two lanes. `Lane::Io` is capped at `min(12, max(4, hw-2))` -- M7w's own expression,
+moved not re-tuned -- and served FIFO, so the residency request stream keeps its order and its
+concurrency. `Lane::Compute` is served first, because a `ParallelFor`'s caller is blocked on its
+chunks while a paint is tens of milliseconds. COM init/uninit moved onto the pool threads,
+replacing the `thread_local CoInitializeEx` that was never unwound.
+
+`ParallelFor`'s caller **participates in the work**, which is what makes it safe from inside a pool
+job and what lets `ParallelRows` stop spawning. The pool's own gate caught two defects in the first
+draft: it waited on *helper jobs running* rather than on work finishing (park every worker and it
+hangs forever while the caller has already done all the work), and its hash folded once per helper,
+making it a function of the machine's core count. Both are gated now.
+
+Loads are **chosen under `m_mx` and submitted after it is released**: under `--jobs-inline` a
+submit runs the job on the calling thread, and `RunLoad` takes that same lock. The same shape
+applies to the predict walk.
+
+### What gates this, when the pictures cannot
+
+The five settled stills **do not paint** -- a warm rail writes 386 tiles against 27732 reads and
+meets zero collisions -- and they **never run the wave solver**, which loads from cache every time.
+So:
+
+- the publish/read race is gated by a self-test that drives the real `WriteTile`/`ReadTile` from
+  two threads and fails on the incumbent;
+- the fold is gated by `--thread-audit` on a forced bucket roll (4736 writes, 25856 reads, 143
+  deletes, **0 collisions of every class**);
+- the solver is gated by `proofs/wave_field_check.py`, which re-solves in Python from the cache
+  file's own stored inputs: AGREES, every component within 0.75 LSB, phase spinor dot 0.999985;
+- `SolveAsync` needed its own **windowed** run, because headless solves block and no headless gate
+  reaches it at all.
+
+And the sharpest instrument for everything else is not pixels: under `--settle-exact` the five
+per-tenant **mapped-set FNV-1a hashes** and the **predicted Want stream** are identical across all
+eight commits and under both `--predict-inline` and `--jobs-inline`. Same tiles, same order, same
+settled resident set, whether the work runs on fifteen threads or none.
+
+**A verdict is not an attribution, and one A/A render is not a floor.** `helm_ebb` reads VISIBLE on
+every arm of this work at 200-800 differing pixels -- and the *same binary* differs from *itself*
+by 267-778 px at that pose, because its churn atlas remembers the landing path. Over four renders
+of one binary at key7km the FIRST differs from the other three by max |d| 13 and renders two,
+three and four are BIT-IDENTICAL: the still converges after one warm-up, so `tools/stills.sh` now
+renders every pose twice and discards the first. A gate that compares one render per binary is
+reading a coin toss between "cold vs warm" and "warm vs warm".
+
+### Still owed
+
+`ExposureSource::SampleAt` re-reads its bucket per TEXEL while `Set()` exchanges it from the frame
+thread, so one tile can be painted from two swell buckets and stored under one identity. The fix
+wants a per-tile snapshot with reject-on-mismatch -- `WaveFieldSource::PaintTile`'s shape -- but
+`DomainSource` has no per-tile hook for a non-tile-native node, so it is a change to that interface
+(mirroring `ColorSource::BeginTile` + `PaintCtx`) rather than a guard. The tree re-keys and drops
+those tiles on the roll, which is what has been covering it.
