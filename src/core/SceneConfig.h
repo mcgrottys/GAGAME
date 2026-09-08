@@ -35,7 +35,10 @@ struct WaterSceneConfig {
     double wfOrgX = -1400.0, wfOrgZ = -800.0;
     int wfNx = 1600, wfNy = 1000;
     double wfCellM = 2.0;
-    int wfComps = 16;
+    // M9bp: 32, not 16 -- sixteen components 1.6 deg apart sum to a fixed interference
+    // lattice, the comb of straight ridges down a storm face (M9bl). Defaulted HERE and
+    // not only in data/wave_scene.json, because that file is untracked.
+    int wfComps = 32;
     double wfSpreadDeg = 26.0;
     double wfBarNormalDeg = 285.0;      // the entrance bar's normal, compass
     double wfGammaHs = 0.60;            // Hs <= gamma * h (the total limiter)

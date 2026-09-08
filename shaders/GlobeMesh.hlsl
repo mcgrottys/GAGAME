@@ -45,6 +45,11 @@ StructuredBuffer<MeshletRec> gMeshlets : register(t0, space0);
 //   bit 18      this meshlet meets the upper half (cells 4..7) of that record's edge
 static const uint kSeamNone = 0u, kSeamCoarser = 1u;
 
+// M9bm: the lateral term is fully applied above this areaJac and rolls off to zero at the
+// overturn. 0.35 sits under foamlaw's saturation knee (J = 0.45), so the guard only ever acts
+// where the foam law has already declared the crest broken.
+static const float kLatFoldFloor = 0.35f;
+
 // ONE vertex of the surface: the record's grid position g (node cells, 0..32), CDLOD-morphed
 // and displaced, as the M6j path always computed it. MsMain's 81 vertices and the seam bands
 // below both come from here, so a band vertex is the neighbour's own arithmetic on the
@@ -114,8 +119,30 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
         float4 bD, bP, bDet;
         const float2 bankXZ = (CsToTangent(dir) * gGlo.x).xz;
         float bT;
-        dispWater = BankSample(bankXZ, bD, bP, bDet, bT) ? (bP.x + bD.y) : 0.0f;
-        latW = float2(bD.x, bD.z) * (1.0f - landness);
+        float3 dDdx, dDdz;
+        dispWater = BankSampleT(bankXZ, bD, bP, bDet, bT, dDdx, dDdz) ? (bP.x + bD.y) : 0.0f;
+        // M9bm: THE FOLD GUARD.
+        //
+        // The lateral term was applied with nothing bounding the Jacobian it induces. Where
+        // d(Dx)/dx approaches -1 neighbouring vertices cross, the surface turns over, and the
+        // mesh renders a near-vertical WALL with the water visible behind it -- the user's
+        // "gap ... it looks like the water behind it has the section of wave it's missing".
+        // Seen only under --wireflat: shaded, the crease reads as a wave face.
+        //
+        // areaJac = det(I + J_h) IS the tangent bivector's own magnitude (ALGEBRA
+        // "caustics"), and it reaches zero exactly at the overturn -- "breaking is the
+        // crest's area 2-blade degenerating". So the object already computed for the normal
+        // is the one that detects the fold; no new quantity, no threshold pulled from the air.
+        //
+        // Scaling the lateral term to zero as the blade degenerates loses NOTHING physical:
+        // foamlaw's Jacobian trigger, saturate((0.80 - J) * 4), has already been paying that
+        // excess out as foam since M8. This is the same law the depth-limited breaking clamp
+        // states -- "converts the excess into foam instead of geometry" -- applied to the
+        // horizontal component, which was the one term still exempt from it.
+        const float areaJac =
+            (1.0f + dDdx.x) * (1.0f + dDdz.z) - dDdz.x * dDdx.z;
+        latW = float2(bD.x, bD.z) * (1.0f - landness) *
+               smoothstep(0.0f, kLatFoldFloor, areaJac);
     }
     const float disp = lerp(dispWater, dispLand, landness);
 

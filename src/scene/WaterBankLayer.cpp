@@ -562,13 +562,20 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
         for (int c2 = 0; c2 < WaveField::kMaxComp; ++c2) {
             const double ang =
                 std::fmod(static_cast<double>(wt.sigma[c2]) * m_simUnix, 2.0 * kPiD);
-            const int r4 = (c2 >> 1) * 4 + (c2 & 1) * 2;
-            cb.waveSig[r4] = static_cast<float>(std::cos(ang));
-            cb.waveSig[r4 + 1] = static_cast<float>(std::sin(ang));
-            cb.waveDir[r4] = wt.dirX[c2];
-            cb.waveDir[r4 + 1] = wt.dirZ[c2];
-            cb.waveScale[r4] = wt.aMax[c2];
-            cb.waveScale[r4 + 1] = wt.kMax[c2];
+            // M9bl: comps 0..15 ride the original rows, 16..31 the appended ones -- the
+            // same split the HLSL's WaveSigRow/WaveDirRow/WaveScaleRow read back.
+            const int half = (c2 < 16) ? 0 : 1;
+            const int cH = c2 - half * 16;
+            const int r4 = (cH >> 1) * 4 + (cH & 1) * 2;
+            float* sig = half ? cb.waveSig2 : cb.waveSig;
+            float* dir = half ? cb.waveDir2 : cb.waveDir;
+            float* scl = half ? cb.waveScale2 : cb.waveScale;
+            sig[r4] = static_cast<float>(std::cos(ang));
+            sig[r4 + 1] = static_cast<float>(std::sin(ang));
+            dir[r4] = wt.dirX[c2];
+            dir[r4 + 1] = wt.dirZ[c2];
+            scl[r4] = wt.aMax[c2];
+            scl[r4 + 1] = wt.kMax[c2];
         }
     }
 

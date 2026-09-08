@@ -48,7 +48,7 @@ struct WaveFieldConfig {
     double orgX = -1400.0, orgZ = -800.0;
     int nx = 1600, ny = 1000;
     double cellM = 2.0;
-    int nComp = 16;                    // the reference construction (JONSWAP gamma=1)
+    int nComp = 32;                    // M9bp: see SceneConfig wfComps (16 was the comb)
     double spreadDeg = 26.0;
     double barNormalDeg = 285.0;       // the entrance bar's normal, compass
     double gammaHs = 0.60;             // Hs <= gammaHs * h (the total limiter)
@@ -64,8 +64,14 @@ struct WaveFieldConfig {
 
 class WaveField {
 public:
-    static constexpr int kMaxComp = 16;
-    static constexpr uint32_t kSolverVersion = 1;
+    // M9bl: 32, was 16. Sixteen components over a 26 deg spread are 1.6 deg apart, and a
+    // sum of sixteen long-crested trains that close together is a FIXED interference
+    // lattice -- the regular comb of straight ridges down a storm face. A real sea is
+    // irregular because its directional spectrum is continuous. Doubling the components
+    // halves the angular step and pushes the superposition's repeat out of frame; the
+    // cbuffer rows for 16..31 append at the END of BankCb (see WaterBank.hlsl gWaveSig2).
+    static constexpr int kMaxComp = 32;
+    static constexpr uint32_t kSolverVersion = 2;   // M9bl: kMaxComp 16 -> 32
 
     void Configure(const WaveFieldConfig& cfg, const Compositor* comp, int hgtChannel,
                    const WaterAtlas* atlas, const TideModel* tides, int entranceStation,

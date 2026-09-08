@@ -74,7 +74,22 @@ cbuffer BankCb : register(b0) {
     float4 gDebugA;
     float4 gWaveP;      // M9bc: the z16 page frame: org px x, y, 1/16384, world px at z16
     float4 gWaveD;      // M9bc: window nx, ny (solver cells = page texels), 0, 0
+    // M9bl: THE SECOND SIXTEEN. kMaxComp went 16 -> 32 because a 16-component directional
+    // sum IS a regular comb -- sixteen long-crested trains 1.6 deg apart superpose into a
+    // fixed interference lattice, which is what the storm face's straight parallel ridges
+    // are. A real sea's crests are irregular because its spectrum is continuous; the cure
+    // is more components, not more mesh (proved: 2x vertex density left the ridges intact).
+    // These APPEND at the end rather than widening the arrays above, per the layout law
+    // sixty rows up -- widening in place slides gBoatA and every row after it.
+    float4 gWaveSig2[8];
+    float4 gWaveDir2[8];
+    float4 gWaveScale2[8];
 };
+
+// M9bl: one component's rows, from whichever half holds it. r = comp >> 1.
+float4 WaveSigRow(uint r) { return (r < 8u) ? gWaveSig[r] : gWaveSig2[r - 8u]; }
+float4 WaveDirRow(uint r) { return (r < 8u) ? gWaveDir[r] : gWaveDir2[r - 8u]; }
+float4 WaveScaleRow(uint r) { return (r < 8u) ? gWaveScale[r] : gWaveScale2[r - 8u]; }
 
 struct BankTile {
     float2 orgXZ;       // this tile's window-frame origin, world m
@@ -99,6 +114,58 @@ Texture2D gT[] : register(t0, space1);
 Texture2DArray gTA[] : register(t0, space5);   // M9aq: the height PAGE tenant's array views
 #include "HeightPages.hlsli"
 RWTexture2D<float4> gU[] : register(u0, space2);
+
+// M9bo: THE CASCADE, PREFILTERED TO THIS RING.
+//
+// The cascades are realized at 2.95 / 0.73 / 0.18 m per texel (L / 256). A bank tile stores at
+// its RING's texel -- 1.2 m on ring 0, doubling outward to 38 m -- so this read is coarser than
+// its source by 1.6x on cascade 1, 6.7x on cascade 2, and up to 200x on the outer rings. It was
+// a bilinear tap at MIP 0, which prefilters nothing: every wavelength between the cascade's
+// texel and the ring's folded straight into the stored displacement as alias, and aliasing a
+// directional spectrum on a regular lattice makes exactly the kind of structured pattern this
+// engine spends its fold law avoiding.
+//
+// The fold does not cover this. It judges a whole band by ONE representative wavenumber
+// (gBandKFold) and admits or sheds it entire; the texture underneath still carries the band's
+// full spread, and the part of that spread below the ring's Nyquist is what aliased. So the
+// fold decides WHETHER a band is geometry, and the mip chain decides WHAT of it survives at
+// this tile's scale. Two different questions -- the second one was simply never asked.
+//
+// mip = log2(ringTexel / cascadeTexel), clamped: 0 where the ring already oversamples the
+// cascade (cascade 0 on ring 0), rising to the top of the chain on the outer rings.
+float CascadeMip(uint c, float ringTexelM) {
+    const float cascadeTexelM = gPatch[c] * (1.0f / 256.0f);
+    return clamp(log2(max(ringTexelM, 1e-4f) / max(cascadeTexelM, 1e-6f)), 0.0f, 8.0f);
+}
+
+float4 LoadWrapAtLevel(uint slot, float2 uv, int lvl) {
+    const float dim = max(256.0f / exp2(float(lvl)), 1.0f);
+    const int idim = int(dim);
+    const float2 tf = uv * dim - 0.5f;
+    const float2 t0 = floor(tf);
+    const float2 fr = tf - t0;
+    float4 acc = 0.0f;
+    [unroll] for (int k = 0; k < 4; ++k) {
+        const int2 tc = (int2(t0) + int2(k & 1, k >> 1) + idim) % idim;
+        acc += ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y) *
+               gT[slot].Load(int3(tc, lvl));
+    }
+    return acc;
+}
+
+// TRILINEAR, not a rounded pick. The ring texel almost never lands on a power of two of the
+// cascade's -- ring 0 against cascade 2 wants log2(1.2 / 0.1836) = 2.71 -- and rounding that to
+// 3 filters to 1.47 m when the ring holds 1.2 m, which throws away resolvable chop and reads as
+// the near water going soft. Blending the two levels lands the filter exactly on the ring's
+// scale: no alias from under-filtering, no lost detail from over-filtering, and no step in the
+// look when a tile's texel crosses a power of two.
+float4 LoadBilinearWrapMip(uint slot, float2 uv, float mip) {
+    const int lo = int(floor(mip));
+    const float f = mip - float(lo);
+    const float4 a = LoadWrapAtLevel(slot, uv, lo);
+    if (f < 0.002f) return a;
+    return lerp(a, LoadWrapAtLevel(slot, uv, min(lo + 1, 8)), f);
+}
 
 float4 LoadBilinearWrap(uint slot, float2 uv, float dim) {
     const float2 tf = uv * dim - 0.5f;
@@ -127,20 +194,37 @@ float2 WavePageUv(float2 xz) {
                                  0.15915494309f) * gWaveP.w;
     return float2(mx - gWaveP.x, my - gWaveP.y) * gWaveP.z;
 }
-bool WavePageResident(float2 uv, uint plane) {
+// M9bl: the finest RESIDENT mip of one plane here (byte = finest mip * 16, conservative
+// per 128th of the page). > 7.5 means nothing is resident at all.
+float WavePageHave(float2 uv, uint plane) {
     const int2 rc = int2(clamp(uv * 128.0f, 0.0f, 127.0f));
-    return gTA[gWaveU.y].Load(int4(rc, int(6u + plane), 0)).x * 15.9375f < 0.5f;
+    return gTA[gWaveU.y].Load(int4(rc, int(6u + plane), 0)).x * 15.9375f;
+}
+// Was "< 0.5f": resident meant MIP 0 RESIDENT, so a window holding coarse levels counted as
+// absent and the solved field contributed nothing at all. That is the opposite of this
+// engine's residency law (priors: a miss degrades to the best resident ANCESTOR -- blur --
+// never to nothing and never to unmapped garbage), and it is why the field could only ever
+// be all-or-nothing instead of arriving as a gradient.
+bool WavePageResident(float2 uv, uint plane) {
+    return WavePageHave(uv, plane) <= 7.5f;
 }
 float4 WavePageSample(float2 uv, uint plane) {
-    if (!WavePageResident(uv, plane)) return 0.0f;
-    const float2 tf = uv * 16384.0f - 0.5f;
+    // M9bl: read the finest mip actually RESIDENT here, not mip 0. Same clamp the height
+    // pages, the exposure and the churn already use -- the window refines as its levels
+    // land instead of appearing whole.
+    const float have = WavePageHave(uv, plane);
+    if (have > 7.5f) return 0.0f;                 // nothing resident: no opinion
+    const float mip = max(round(have), 0.0f);
+    const float dim = 16384.0f / exp2(mip);
+    const float2 tf = uv * dim - 0.5f;
     const float2 t0 = floor(tf);
     const float2 fr = tf - t0;
+    const int hi = int(dim) - 1;
     float4 acc = 0.0f;
     [unroll] for (int k = 0; k < 4; ++k) {
-        const int2 tc = clamp(int2(t0) + int2(k & 1, k >> 1), int2(0, 0), int2(16383, 16383));
+        const int2 tc = clamp(int2(t0) + int2(k & 1, k >> 1), int2(0, 0), int2(hi, hi));
         acc += ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y) *
-               gTA[gWaveU.x].Load(int4(tc, int(6u + plane), 0));
+               gTA[gWaveU.x].Load(int4(tc, int(6u + plane), int(mip)));
     }
     return acc;
 }
@@ -402,11 +486,12 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         // solved field carries shoaling/refraction/limiting per cell, not per band.
         if (c != 2) amp *= 1.0f - wWin;
         const float2 cuv = frac(xz / gPatch[c]);
-        const float4 s = LoadBilinearWrap(gSlotsA[c], cuv, 256.0f);
+        const float cmip = CascadeMip(c, t.texelM);
+        const float4 s = LoadBilinearWrapMip(gSlotsA[c], cuv, cmip);
         d += s.xyz * (w * amp);
         // The Jacobian foam lives in the DERIV fiber (the disp fiber's w is zero --
         // the old additive term here read it and contributed nothing since M7).
-        const float4 dv = LoadBilinearWrap(gSlotsE[c], cuv, 256.0f);
+        const float4 dv = LoadBilinearWrapMip(gSlotsE[c], cuv, cmip);
         // Monahan-gated: the Jacobian says WHERE a whitecap sits, the wind says HOW MANY
         // there are. Depth/blocking/wake foam stay ungated -- that breaking is geometry
         // and current physics, not wind climatology.
@@ -428,7 +513,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         float3 dW = 0.0f;
         float sigW = 0.0f;
         [loop] for (uint s = 0; s < gWaveU.z; ++s) {
-            const float4 sc = gWaveScale[s >> 1];
+            const float4 sc = WaveScaleRow(s >> 1);
             const float aMax = (s & 1) ? sc.z : sc.x;
             if (aMax <= 0.0f) continue;
             const float kMax = (s & 1) ? sc.w : sc.y;
@@ -452,11 +537,11 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             if (wF <= 0.001f) continue;
             float2 sp = t4.zw * 2.0f - 1.0f;
             sp /= max(length(sp), 1e-4f);          // the spinor stays unit (cl2 law)
-            const float4 rr = gWaveSig[s >> 1];
+            const float4 rr = WaveSigRow(s >> 1);
             const float2 rot = (s & 1) ? rr.zw : rr.xy;
             const float cT = sp.x * rot.x + sp.y * rot.y;   // cos(phi - sigma t)
             const float sT = sp.y * rot.x - sp.x * rot.y;   // sin(phi - sigma t)
-            const float4 dd = gWaveDir[s >> 1];
+            const float4 dd = WaveDirRow(s >> 1);
             const float2 dir2 = (s & 1) ? dd.zw : dd.xy;
             dW.y += wF * aW * cT;
             dW.xz -= gWaveB.z * wF * aW * sT * dir2;

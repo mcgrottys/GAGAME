@@ -272,11 +272,11 @@ void RegisterKnownWaterEdges() {
     // shading edge moved to globe.mesh below, where WaterVertexColor probes it for the wave
     // normal, sigma^2 and foam.
     Register({"water.bank", "globe.ps", "disp/param/detail (sanity lens only)", atlasN, atlasN,
-              false, "m / sigma2 / m/s / band gains (g1,dry,g0,g2)", "rings 4.8..154 m/texel",
-              1.0, "Globe.hlsl BankSample manual bilinear"});
+              false, "m / sigma2 / m/s / band gains (g1,dry,g0,g2)", "rings 1.2..38 m/texel",
+              1.0, "Globe.hlsl BankSample cubic (Catmull-Rom) + tangent bivector"});
     Register({"water.bank", "globe.mesh", "shading: normal/sigma2/foam", atlasN, atlasN, false,
-              "m / sigma2 / 0..1 foam", "rings 4.8..154 m/texel", 1.0,
-              "Globe.hlsl WaterVertexColor (3 BankSample probes per vertex)"});
+              "m / sigma2 / 0..1 foam", "rings 1.2..38 m/texel", 1.0,
+              "Globe.hlsl WaterVertexColor (one BankSampleT, analytic normal)"});
     Register({"water.bank", "globe.mesh", "disp+level", atlasN, atlasN, false, "m NAVD",
               "+-4", 1.0, "GlobeMesh.hlsl BankSample"});
 
@@ -478,8 +478,8 @@ void RegisterPixelWaterEdges() {
     // the translucency's depth is measured against. (The M9bg "sanity lens only" edge stays
     // registered beside this one -- --bank-lens is still its own consumer.)
     Register({"water.bank", "globe.ps", "shading: normal/sigma2/level (--pixel-water)", atlasN,
-              atlasN, false, "m / sigma2 / m NAVD", "rings 4.8..154 m/texel", 1.0,
-              "Globe.hlsl WaterPixelColor (3 BankSample probes per pixel)"});
+              atlasN, false, "m / sigma2 / m NAVD", "rings 1.2..38 m/texel", 1.0,
+              "Globe.hlsl WaterPixelColor (one BankSampleT, analytic normal)"});
 }
 
 }  // namespace ga::ast
