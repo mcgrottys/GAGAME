@@ -197,6 +197,11 @@ struct Element {
                                              // roll are computed FROM this -- flipping it is the
                                              // whole counter-rotating change.
     Num propTorqueArm;                       // effective arm of the torque reaction
+    // The speed at which this prop runs out of thrust. It belongs to the GEARCASE AND THE
+    // WHEEL, not to the boat: a high-thrust leg swinging a big low-pitch prop makes far more
+    // static thrust and gives up earlier, and a speed prop does the opposite. Hard-coding it
+    // would have made every engine in every spec the same engine.
+    Num freeRunSpeed;
 
     // ---- Foil (rudder, skeg, keel, sail)
     Num foilArea;

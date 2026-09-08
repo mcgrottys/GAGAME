@@ -515,8 +515,8 @@ Bivector Vessel::NetWrench(const WaterSurface& sea, const VesselControls& c, dou
                 double fwdW[3] = {fwdBody[0], fwdBody[1], fwdBody[2]};
                 m_body.pose.TransformDir(fwdW[0], fwdW[1], fwdW[2]);
                 const double along = vFwd[0] * fwdW[0] + vFwd[1] * fwdW[1] + vFwd[2] * fwdW[2];
-                constexpr double kFreeRunMs = 19.0;   // ~37 kn, where the prop runs out
-                const double fall = std::max(0.0, 1.0 - std::max(along, 0.0) / kFreeRunMs);
+                const double freeRun = (e.freeRunSpeed.v > 0.1) ? e.freeRunSpeed.v : 19.0;
+                const double fall = std::max(0.0, 1.0 - std::max(along, 0.0) / freeRun);
                 const double mag = c.throttle[i] * e.maxThrust.v * wet * fall;
                 double fWorld[3] = {fwdBody[0] * mag, fwdBody[1] * mag, fwdBody[2] * mag};
                 m_body.pose.TransformDir(fWorld[0], fWorld[1], fWorld[2]);

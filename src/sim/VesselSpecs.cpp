@@ -104,7 +104,7 @@ VesselSpec MakeTestBox() {
 VesselSpec MakeRhib18() {
     VesselSpec s;
     s.kind = "rhib.novurania18";
-    s.display = "1998 Novurania 18' RHIB, twin Yamaha F50";
+    s.display = "1998 Novurania 18' RHIB, twin Yamaha T50TLRW (High Thrust, 4-stroke)";
 
     // ---- the two dimensions that are actually known -----------------------------------------
     const double LOA = 5.49;      // 18 ft
@@ -244,11 +244,17 @@ VesselSpec MakeRhib18() {
     // transom and the pressure peak sits just forward of it -- and that is the whole reason a
     // boat trims BOW-UP as it accelerates instead of simply rising.
     //
-    // Placed at -0.10 LOA first, which after the CG solve landed within a centimetre of the CG
-    // itself: the lift then had no moment arm at all, the hull could not trim itself up, the
-    // angle of attack stayed at zero and it sat at 17 kn in displacement mode forever. The bug
-    // was invisible as a force and obvious as a trim.
-    plane.mount.at = Motor::Translation(0.0, KEEL, -0.30 * LOA);
+    // WHICH WAY THE MOMENT GOES, worked out the hard way. Moved to -0.30 LOA first on the
+    // reasoning that a planing hull "rides on its after sections" -- but an upward force AFT of
+    // the CG lifts the STERN and drives the bow DOWN, and it measured exactly that: 3070 N at
+    // 1.1 m aft is 3400 N m of bow-down, and the hull ran at -1.6 deg no matter the throttle.
+    //
+    // The pressure peak on a planing surface is at the SPRAY ROOT -- the forward edge of the
+    // wetted length, where the flow first meets the hull -- not back at the transom, where the
+    // water is leaving and the pressure has already returned to atmospheric. Forward of the CG
+    // is where it belongs, and then the centre-of-pressure march with speed carries it further
+    // forward and gives porpoising something to be.
+    plane.mount.at = Motor::Translation(0.0, KEEL, -0.05 * LOA);
     plane.deadriseDeg = Num::Of(22.0, "deg", "ASSUMED: transom deadrise for a 1998 deep-V RHIB");
     plane.planingBeam = Num::Of(2.0 * BH, "m", "DERIVED: chine beam from the station table");
     plane.planingIncidence = Num::Of(3.0, "deg",
@@ -279,14 +285,27 @@ VesselSpec MakeRhib18() {
         eng.mount.axisD[0] = 0.0; eng.mount.axisD[1] = 1.0; eng.mount.axisD[2] = 0.0;
         eng.mount.lo = -0.60; eng.mount.hi = 0.60;     // ~34 deg either side, hard over
         eng.mount.rate = 1.2;                          // rad/s at the helm pump
-        // Static bollard thrust. The rule of thumb for a well-matched outboard prop is
-        // 8-12 kgf per hp at zero speed, so 50 hp gives ~400 kgf ~ 4 kN each. It falls off with
-        // speed in the thruster law (a prop cannot make static thrust at 30 kn); together with
-        // the wetted-area drag that puts this hull's top speed near 30 kn, which is where a
-        // 100 hp 18-footer actually sits.
-        eng.maxThrust = Num::Of(4000.0, "n",
-                                "DERIVED: 50 hp x ~8 kgf/hp static bollard thrust, 13 in prop");
-        eng.propRadius = Num::Of(0.165, "m", "Yamaha F50: 13 in diameter class");
+        // THESE ARE HIGH THRUST ENGINES, which is a different machine from an F50 and not a
+        // trim level. Yamaha's T prefix is the High Thrust series: a lower gear ratio (~2.3:1
+        // against ~1.85) swinging a larger-diameter, lower-pitch wheel. It converts the same
+        // 50 hp into markedly more STATIC thrust and gives it up at a lower speed -- the leg is
+        // built to move weight, not to chase a top end.
+        //
+        // So the pair of numbers moves together, and moving only one would be the mistake:
+        // ~11 kgf/hp static instead of ~8, and a free-running speed near 15 m/s (29 kn) instead
+        // of 19. On a 900 kg hull that is MORE hump-crossing authority and a lower terminal
+        // speed, which is exactly the trade the owner of a high-thrust leg has made.
+        eng.maxThrust = Num::Of(5400.0, "n",
+                                "USER: T50TLRW is Yamaha HIGH THRUST -- ~11 kgf/hp static on a "
+                                "big low-pitch wheel, vs ~8 for a standard F50 leg");
+        // CORRECTED BY THE BOAT ITSELF. I inferred 15 m/s (~29 kn) from the high-thrust label,
+        // and the owner reports 35-40 mph -- 30-35 kn -- so the real leg pulls well past that.
+        // The static-thrust half of the high-thrust reading stands; the top-end penalty I
+        // deduced from it does not, and a measurement outranks an inference from a model name.
+        eng.freeRunSpeed = Num::Of(20.0, "m/s",
+                                   "USER: boat measures 35-40 mph, so the leg pulls past 18 m/s");
+        eng.propRadius = Num::Of(0.1905, "m",
+                                 "USER: high-thrust leg swings a bigger wheel -- 15 in class");
         eng.rotation = +1;   // USER: this boat's pair are BOTH standard rotation
         // THE TORQUE REACTION IS SHAFT TORQUE, not thrust times a moment arm -- getting that
         // wrong is worth a factor of four and it showed as a hull heeling 42 degrees under
@@ -294,13 +313,20 @@ VesselSpec MakeRhib18() {
         // the effective arm is a QUARTER OF THE PROP RADIUS, and at 4 kN that is ~165 N m per
         // engine. Cross-check: 50 hp at ~5000 rpm through a 2:1 gearcase is ~280 N m of shaft
         // torque per engine at full noise, so this is the right order and slightly under.
-        eng.propTorqueArm = Num::Of(0.165 / 4.0, "m",
-                                    "DERIVED: tau = T*R/4 from a propeller's KQ/KT ratio");
+        // tau ~ T*R/4 from the propeller's KQ/KT ratio -- and BOTH factors just went up: a
+        // high-thrust leg makes more thrust on a bigger wheel, so its torque reaction is larger
+        // too. With both engines turning the same way (this boat's rigging) that is a standing
+        // roll the helmsman lives with, and it is the one thing a counter-rotating pair would
+        // have cancelled for free.
+        eng.propTorqueArm = Num::Of(0.1905 / 4.0, "m",
+                                    "DERIVED: tau = T*R/4, on the high-thrust wheel's radius");
         // 110 kg each, hung at the transom. This is the number that makes the boat squat when
         // you open the throttles: Build solves the CG from it, so the hull is trimmed stern-down
         // before it has moved at all, and the planing surface therefore meets the flow at a
         // positive angle from the first metre.
-        eng.mass = Num::Of(110.0, "kg", "Yamaha F50 four-stroke: ~110 kg dry, published");
+        eng.mass = Num::Of(112.0, "kg",
+                           "USER: T50TLRW, four-stroke -- ~112 kg dry; the high-thrust gearcase "
+                           "is slightly heavier than the standard leg");
         s.elements.push_back(eng);
     }
 
@@ -330,7 +356,18 @@ VesselSpec MakeRhib18() {
     drag.dragArea[2] = Num::Of(2.0 * BH * 0.35, "1", "DERIVED: immersed transom section");
     drag.dragCd[0] = Num::Of(1.1, "1", "ASSUMED: hull broadside");
     drag.dragCd[1] = Num::Of(1.3, "1", "ASSUMED: bluff in heave");
-    drag.dragCd[2] = Num::Of(0.35, "1", "ASSUMED: a hull is FINE fore-and-aft -- that is a hull");
+    // BACK-SOLVED FROM A KNOWN RATIO, not guessed. A planing hull of this size runs at a
+    // resistance/weight ratio near 0.13 at 16 kn, so ~1150 N for this boat. At 8.4 m/s and 57%
+    // wetted that requires Cd*A ~ 0.056 m^2; on the 0.595 m^2 transom section that is Cd 0.10.
+    //
+    // It was 0.35 -- a flat-plate figure -- which put 4300 N of resistance on the hull, 3.7x
+    // reality, and that single number is what pinned the boat at 16 kn: thrust could never
+    // exceed it, so the hull never reached the speed where the running surface makes lift, so
+    // it never trimmed up, so it never planed. A hull is FINE fore-and-aft; that is what a hull
+    // IS, and 0.35 was describing a barn door.
+    drag.dragCd[2] = Num::Of(0.10, "1",
+                             "DERIVED: back-solved from R/W ~ 0.13 at 16 kn for a planing hull "
+                             "of this displacement");
     s.elements.push_back(drag);
 
     // ---- windage: the same Drag kind, in the other fluid --------------------------------------
