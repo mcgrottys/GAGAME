@@ -25,6 +25,12 @@ class OceanFft {
 public:
     static constexpr uint32_t kN = 256;
     static constexpr uint32_t kCascades = 3;
+    // M9bo: disp/deriv carry a FULL MIP CHAIN (256 -> 1, nine levels), because the bank
+    // kernel samples them at the RING's texel and the rings are far coarser than the
+    // cascades. Cascade 2 is 0.18 m/texel read at a 1.2 m ring texel -- 6.7x undersampled,
+    // and it was a bilinear tap at mip 0 with no prefilter, so everything between those two
+    // scales aliased straight into the stored displacement. The chain is the prefilter.
+    static constexpr uint32_t kMips = 9;
 
     void Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir);
     bool ReloadShaders(Gpu& gpu, ShaderCompiler& sc);
@@ -51,8 +57,15 @@ private:
     struct Cascade {
         Com<ID3D12Resource> h0, pingA, pongA, pingB, pongB, disp, deriv;
         uint32_t blockInit = 0, blockMod = 0, blockRows = 0, blockCols = 0, blockAsm = 0;
+        // M9bo: one UAV PAIR PER LEVEL per texture (src, dst), never a reused pair --
+        // descriptor writes land on the CPU immediately while the dispatches execute later,
+        // so a shared pair would give every level whichever write happened last
+        // (TileAtlas2D::BuildMips learned this the hard way; the note is there).
+        uint32_t mipTableDisp = 0, mipTableDeriv = 0;
         bool outputsArePs = false;   // disp/deriv currently in pixel-shader-resource state
     };
+
+    void BuildMips(ID3D12GraphicsCommandList* cl, Gpu& gpu, Cascade& k);
 
     bool BuildPipelines(Gpu& gpu, ShaderCompiler& sc);
     void Dispatch(ID3D12GraphicsCommandList* cl, Gpu& gpu, ID3D12PipelineState* pso,
@@ -62,6 +75,8 @@ private:
     std::wstring m_shaderDir;
     Com<ID3D12RootSignature> m_rootSig;
     Com<ID3D12PipelineState> m_init, m_modulate, m_fft, m_assemble;
+    Com<ID3D12RootSignature> m_mipRs;      // M9bo: the 2x2 box reduce (shaders/MipReduce.hlsl)
+    Com<ID3D12PipelineState> m_mipPso;
 
     Cascade m_cascade[kCascades];
     float m_patchL[kCascades] = {756.0f, 186.0f, 47.0f};
