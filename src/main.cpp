@@ -59,6 +59,8 @@
 #include "sim/RigidBody.h"
 #include "sim/Vessel.h"
 #include "sim/WaterSurfaceTree.h"
+#include "sim/VesselSpec.h"
+#include "scene/VesselLayer.h"
 #include "sim/SimClock.h"
 #include "core/DxTest.h"
 #include "core/Pga.h"
@@ -107,6 +109,7 @@ struct Options {
     std::wstring dumpMeshlets;        // step 23 probe: the dump frame's meshlet records
     bool dumpWater = false;           // --dump-water-state: inlet fields for proofs/
     bool twinSurface = false;         // --twin-surface: CPU WaterSurface vs the GPU bank
+    std::string boat;                 // --boat <kind>: spawn a vessel and helm it
     bool sliceOn = false;             // --slice d: the cutaway plane (M7o)
     double sliceD = 0.0;              // plane offset, world z metres
     int inject = 0;                   // --inject [bank|cascade]: edge test cards
@@ -353,6 +356,7 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--dump-meshlets") o.dumpMeshlets = Widen(next("meshlets.bin").c_str());
         else if (a == "--dump-water-state") o.dumpWater = true;
         else if (a == "--twin-surface") o.twinSurface = true;
+        else if (a == "--boat") o.boat = next("box.test");
         else if (a == "--slice") {
             o.sliceOn = true;
             o.sliceD = _wtof(Widen(next("0").c_str()).c_str());
@@ -2203,6 +2207,7 @@ int main(int argc, char** argv) {
         // (M6w: the models + the compositor's height side were HOISTED above the bathy/solver
         // block -- the solver's bed realizes from the channel.)
         GlobeLayer* globe = nullptr;
+        VesselLayer* vesselLayer = nullptr;   // M9bq: the hulls, drawn from their specs
         if (globeDataOk) {
             auto globeOwned = std::make_unique<GlobeLayer>();
             globe = globeOwned.get();
@@ -2995,6 +3000,13 @@ int main(int argc, char** argv) {
                 gisLayer->enabled = opt.stencil;
                 renderer.AddLayer(std::move(gisOwned));
             }
+            if (!marsMode && !opt.boat.empty()) {
+                auto vlOwned = std::make_unique<VesselLayer>();
+                vlOwned->Configure(opt.shaderDir);
+                vlOwned->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
+                vesselLayer = vlOwned.get();
+                renderer.AddLayer(std::move(vlOwned));
+            }
             if (!marsMode) {
                 auto mkOwned = std::make_unique<MarkerLayer>();
                 mkOwned->Configure(opt.shaderDir, &exchange, "markers.stations");
@@ -3434,6 +3446,44 @@ int main(int argc, char** argv) {
         // did not.
         SimClock simClock;
         simClock.Reset(simUnix);
+
+        // ==================================================================================
+        //  M9bq THE BOAT. A vessel from the registry, stepped on the scene clock's whole
+        //  quanta against the tree's own water. Nothing here is a demo path: this is the
+        //  same Vessel the gates exercise, the same TreeWater the twin measures, and the
+        //  same SimClock everything else in the scene rides.
+        // ==================================================================================
+        VesselRegistry vesselReg;
+        RegisterBuiltinVessels(vesselReg);
+        std::unique_ptr<Vessel> boat;
+        TreeWater boatSea;
+        VesselControls boatCtl;
+        bool helming = false;         // T detaches the camera; the physics never stops
+        double helmYawRef = 0.0;      // the look-steer's heading reference -- see the note in
+        if (!opt.boat.empty()) {
+            const VesselSpec spec = vesselReg.Build(opt.boat);
+            if (spec.kind.empty()) {
+                Log("[vessel] --boat '%s' is not a registered kind; known:", opt.boat.c_str());
+                for (const std::string& k : vesselReg.Kinds()) Log("[vessel]   %s", k.c_str());
+            } else {
+                spec.PrintLedger();
+                boat = std::make_unique<Vessel>();
+                // Spawn in the FLAT world frame, at --campos. NOT at cam.px/cam.pz: on a
+                // rail the camera starts in the PLANET frame, and a hull built there lands at
+                // (5.3e6, -2.4e6) where the bed lookup is meaningless -- it reported AGROUND at
+                // depth -278 m, which is exactly what a frame confusion looks like from inside.
+                const Motor start = Motor::Translation(opt.camX, 0.0, opt.camZ);
+                if (!boat->Build(spec, start)) {
+                    Log("[vessel] build FAILED -- not spawning (a partial hull would sink and "
+                        "look like a physics bug)");
+                    boat.reset();
+                } else {
+                    helming = true;
+                    Log("[vessel] '%s' spawned at (%.1f, %.1f): %s", spec.kind.c_str(), cam.px,
+                        cam.pz, spec.display.c_str());
+                }
+            }
+        }
         bool sunLogged = false;   // M9bi: log the placed sun once, with its numbers
         const double startUnix = simUnix;
 
@@ -4025,6 +4075,68 @@ int main(int argc, char** argv) {
             railPool.reserve(opt.frames ? opt.frames : 1200);
         }
 
+                                      // stepBoat for why it is NOT read off the live camera
+        // ONE step path, called from BOTH clock branches. The windowed clock advances in whole
+        // quanta off SimClock and the headless clock is frame-indexed, but a boat that
+        // integrated differently between them could not be gated by any rail -- and the rails
+        // are the only reproducible instrument this engine has. So the quanta COUNT differs and
+        // nothing else does.
+        auto stepBoat = [&](int quanta) {
+            if (!boat) return;
+            boatSea.Configure(&weather, waveField.get(), sea ? &sea->Ocean() : nullptr,
+                              &seaState, sea ? double(sea->heightScale) : 1.0,
+                              waterScene.wfExag, waterScene.wfChop);
+            PROF_BEGIN();
+            for (int q = 0; q < quanta; ++q) {
+                boat->Step(boatSea, boatCtl, simUnix, SimClock::kDt);
+            }
+            if (!boat->Body().Sane()) boatCtl = VesselControls{};
+            PROF_END(11);
+
+            const Vessel* vs[1] = {boat.get()};
+            if (vesselLayer) vesselLayer->SetVessels(vs, 1);
+
+            // One telemetry line a second. Cheap, and it is the only way to tell a hull that is
+            // floating wrong from one that is not being DRAWN.
+            static int telTick = 0;
+            if ((telTick++ % 60) == 0) {
+                const VesselTelemetry& t = boat->Telemetry();
+                double bp[3] = {0, 0, 0};
+                boat->Body().pose.TransformPoint(bp[0], bp[1], bp[2]);
+                Log("[vessel] pos (%.1f, %+.2f, %.1f) %.1f kn hdg %.0f heel %+.1f trim %+.1f "
+                    "draught %.3f vol %.2f depth %.1f%s%s | parts %u",
+                    bp[0], bp[1], bp[2], t.speedKn, t.headingRad * 57.2957795,
+                    t.heelRad * 57.2957795, t.trimRad * 57.2957795, t.draughtM, t.immersedVol,
+                    t.depthM, t.aground ? " AGROUND" : "",
+                    t.waterValid ? "" : " NO-WATER",
+                    vesselLayer ? vesselLayer->PartCount() : 0u);
+            }
+
+            // ---- THE CHASE CAMERA. Gravity-up and roll-free by choice: a camera that heels
+            // with the hull reads as the WORLD rolling, which is nauseating and is not what a
+            // helmsman's inner ear reports. The motor-native view that DOES heel is the
+            // first-person one, later.
+            if (helming) {
+                const RigidBody& b = boat->Body();
+                double p[3] = {0, 0, 0};
+                b.pose.TransformPoint(p[0], p[1], p[2]);
+                double f[3] = {0, 0, 1};
+                b.pose.TransformDir(f[0], f[1], f[2]);
+                const double fl = std::sqrt(f[0] * f[0] + f[2] * f[2]);
+                if (fl > 1e-6) { f[0] /= fl; f[2] /= fl; }
+                // The look-steer's reference is THIS camera's heading, kept here rather than
+                // read off `cam`, so detaching the view (T, or a spectator flying to orbit in a
+                // future multiplayer) cannot feed the assist a heading from the other side of
+                // the planet.
+                helmYawRef = std::atan2(f[2], f[0]);
+                const double back = 15.0, up = 5.0;
+                cam.px = p[0] - f[0] * back;
+                cam.py = p[1] + up;
+                cam.pz = p[2] - f[2] * back;
+                cam.LookAt(p[0], p[1] + 0.6, p[2]);
+            }
+        };
+
         for (;;) {
             if (!opt.headless) {
                 window.NewFrame();
@@ -4125,7 +4237,10 @@ int main(int argc, char** argv) {
                     }
                 }
 
-                cam.Update(in, dt);
+                // While helming, the free-fly integration does not run at all: Camera::Update
+                // owns W A S D Q E Shift Ctrl, which is a head-on collision with the binnacle.
+                // A control MODE is the only honest fix -- rebinding would just move the clash.
+                if (!helming) cam.Update(in, dt);
                 if (in.keyPressed[VK_F5]) {
                     // SAVE THIS CAMERA. The five numbers SetFromCompass takes, inverted from
                     // the live pose, appended to data/views.json under a generated name (rename
@@ -4235,6 +4350,47 @@ int main(int argc, char** argv) {
                 if (!paused) {
                     simSteps = simClock.Advance(dt, timeScale);
                     simUnix = simClock.Now();
+
+                    // ---- THE HELM. Reading the controls is the only part of the boat that
+                    // is windowed-only; the STEP itself is shared with the headless path below,
+                    // because a boat that integrates differently in a rail than in a window is
+                    // a boat no rail can gate.
+                    if (boat) {
+                        if (in.keyPressed['T']) {
+                            helming = !helming;
+                            Log("[vessel] %s", helming ? "helm" : "camera detached (the boat "
+                                                                 "keeps sailing)");
+                        }
+                        if (helming) {
+                            // Keyboard for now; the analog triggers are the twin-lever binnacle
+                            // and land with XInput. W/S drive BOTH levers, Q/E split them, which
+                            // is what makes a pivot a squeeze rather than a mode.
+                            const double rate = dt * 1.5;
+                            double demand = 0.0;
+                            if (in.keyDown['W']) demand += 1.0;
+                            if (in.keyDown['S']) demand -= 1.0;
+                            double split = 0.0;
+                            if (in.keyDown['E']) split += 1.0;
+                            if (in.keyDown['Q']) split -= 1.0;
+                            for (int t = 0; t < VesselControls::kMaxThrusters; ++t) {
+                                const double want =
+                                    std::clamp(demand + ((t % 2 == 0) ? -split : split),
+                                               -1.0, 1.0);
+                                boatCtl.throttle[t] +=
+                                    std::clamp(want - boatCtl.throttle[t], -rate, rate);
+                            }
+                            double sd = 0.0;
+                            if (in.keyDown['D']) sd += 1.0;
+                            if (in.keyDown['A']) sd -= 1.0;
+                            // A mechanical steering RATE limit, not a snap: the outboards swing
+                            // at a finite speed and that lag is a real part of how a boat feels.
+                            const double sMax = 0.6;
+                            boatCtl.steer += std::clamp(sd * sMax - boatCtl.steer,
+                                                        -dt * 1.2, dt * 1.2);
+                            boatCtl.steer = std::clamp(boatCtl.steer, -sMax, sMax);
+                        }
+                        stepBoat(simSteps);
+                    }
                 }
             } else {
                 // Deterministic time in headless mode so a dump sequence is reproducible.
@@ -4275,6 +4431,11 @@ int main(int argc, char** argv) {
                     recFrame = opt.frames - 1u;
                 }
                 simUnix = startUnix + static_cast<double>(recFrame) * (timeScale / 30.0);
+                // The headless clock is frame-indexed, so a frame is worth exactly
+                // timeScale/30 seconds of world; the boat owes that many whole quanta. Rounding
+                // rather than truncating keeps the owed time from drifting slow over a long
+                // rail, and at the default scale it is an exact 8.
+                stepBoat(static_cast<int>(std::lround((timeScale / 30.0) / SimClock::kDt)));
                 // The churn atlas is stateful and its kernel only climbs at a frozen dt, so a
                 // held frame would advance the foam the hold's length decides. Freeze it for
                 // exactly the held frames (SeaLayer.h freezeChurn).
@@ -4283,7 +4444,11 @@ int main(int argc, char** argv) {
                 profHelm = !opt.rail.empty() && recFrame >= 32u * 30u;
                 if (!opt.rail.empty() && !railKeys.empty()) {
                     // M6g: the rails just set a pose in the ONE frame. Nothing switches.
-                    railPose(static_cast<double>(recFrame) / 30.0, cam);
+                    // Helming outranks the rail: the chase camera has already placed the
+                    // view on the boat this frame and a rail pose would yank it away. This is
+                    // what makes `--rail-flood --boat` a chase-cam recording rather than a
+                    // flypast that happens to contain a hull.
+                    if (!helming) railPose(static_cast<double>(recFrame) / 30.0, cam);
                 }
             }
 

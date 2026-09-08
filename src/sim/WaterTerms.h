@@ -396,8 +396,16 @@ inline void WakeBranch(double t, double K0, double xi, double zeta, double amp, 
 //    * DIVERGENT BRANCH x 0.85.  TUNED.  The source gives no argument; physically the divergent
 //      arm is the weaker-looking one in photographs, but 0.85 is a number, not a derivation.
 //
-//    * 1200 m CULL.  "spread + damp are dead past this" -- at 1200 m, dRel for a 7.5 m hull is
-//      160, so spreading alone is down to 1/12.7 and the term is below the amplitude early-out.
+//    * 1200 m CULL.  The shader records this as "spread + damp are dead past this".  MEASURED,
+//      that is NOT why it is safe, and the difference is worth writing down.  At 1200 m a 7.5 m
+//      hull is at dRel 160, so spreading is down to 0.079 -- still 4.3 cm of wake for the
+//      recreational class, 400x the 1e-4 m early-out -- and the divergent damping is
+//      distance-INDEPENDENT, so it removes nothing here at all.  What removes it is the
+//      MESH-NYQUIST limit above: the transverse wave is 15.1 m, so any tile whose texel exceeds
+//      7.6 m cuts the term entirely, and at that range they all do.  So 1200 m is a COST bound
+//      (8 vessels x every texel) that the band limit happens to cover -- not a radius at which
+//      the physics has vanished.  On an artificially fine tile out there it WOULD step by about
+//      4 cm.  proofs/water_terms.py prints all of these numbers rather than asserting them.
 //
 //  THE STERN TURBULENCE TERM is a different animal and is labelled as such in the shader: the
 //  aerated prop wash, a short narrow decaying envelope, "the reference's tuned closure".  Every
@@ -422,7 +430,7 @@ inline void WakeOne(const WakeVessel& v, double px, double pz, double sampleM, W
     const double rgtZ = fwdX;
     const double rX = px - v.x;
     const double rZ = pz - v.z;
-    if (rX * rX + rZ * rZ > 1200.0 * 1200.0) return;    // spread + damp are dead past this
+    if (rX * rX + rZ * rZ > 1200.0 * 1200.0) return;    // a COST bound -- see the CULL note
     const double xi = -(rX * fwdX + rZ * fwdZ);         // metres ASTERN (positive behind)
     const double across = rX * rgtX + rZ * rgtZ;        // metres abeam, signed
     double side = 1.0;

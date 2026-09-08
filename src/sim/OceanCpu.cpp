@@ -362,7 +362,9 @@ void OceanCpu::Sample(double wx, double wz, double tSec, OceanSample& out) const
 }
 
 // ONE implementation, not two. The sign ledger above is hard enough to hold in one place, and the
-// five channels this caller drops are ~10% of the query: the two sincos per bin are the cost, and
+// five channels this caller drops are ~13% of the query, measured either side of the change on
+// two interleaved sessions (35.6 -> 40.4 and 35.1 -> 39.8 us; OceanCpu.h, COST): the two sincos
+// per bin are the query, and
 // they are paid either way. Callers that only need the surface point keep their old signature.
 void OceanCpu::Displacement(double wx, double wz, double tSec, double out[3]) const {
     OceanSample s;

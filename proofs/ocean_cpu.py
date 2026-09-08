@@ -1086,9 +1086,10 @@ ratio = float(np.mean(hor) / np.mean(OB["vy"] ** 2))
 bs = np.array([float(np.mean(hor[i]) / np.mean(OB["vy"][i] ** 2))
                for i in RNG_O.integers(0, len(XO), size=(200, len(XO)))])
 sd = float(bs.std(ddof=1))
-print("      %d points, Hs 2.5 m sea: rms horizontal %.4f m/s, rms vertical %.4f m/s" % (NORB,
-         float(np.sqrt(np.mean(hor))), float(np.sqrt(np.mean(OB["vy"] ** 2)))))
-check("gate8b horizontal and vertical kinetic energy are equipartitioned", abs(ratio - 1.0) < 3 * sd,
+print("      %d points, Hs 2.5 m sea: rms horizontal %.4f m/s, rms vertical %.4f m/s"
+      % (NORB, float(np.sqrt(np.mean(hor))), float(np.sqrt(np.mean(OB["vy"] ** 2)))))
+check("gate8b horizontal and vertical kinetic energy are equipartitioned",
+      abs(ratio - 1.0) < 3 * sd,
       "<vx^2+vz^2>/<vy^2> = %.5f, 3 x bootstrap sd = %.5f" % (ratio, 3 * sd))
 check("gate8b ...and the vertical is uncorrelated with both horizontals (quadrature)",
       abs(float(np.corrcoef(OB["vx"], OB["vy"])[0, 1])) < 0.10
@@ -1152,8 +1153,8 @@ for sd_ in [0x9E3779B1 + 0x9E3779B9 * i for i in range(32)]:
         mom[label].append(float(np.mean(s["h"] * s["vx"])))
 res = {k: (float(np.mean(v)), float(np.std(v, ddof=1) / math.sqrt(len(v)))) for k, v in mom.items()}
 for k in ("east/Q", "opposed/Q", "opposed/P"):
-    print("      <h * vx> over %d points, 32 seeds -- %-11s %+.5f +- %.5f m^2/s" % (NORB,
-             k, res[k][0], res[k][1]))
+    print("      <h * vx> over %d points, 32 seeds -- %-11s %+.5f +- %.5f m^2/s"
+          % (NORB, k, res[k][0], res[k][1]))
 check("gate8d two opposed swells carry no net momentum (the -k half of a pair runs the other way)",
       abs(res["opposed/Q"][0]) < 3 * res["opposed/Q"][1] + 0.02 * abs(res["east/Q"][0]),
       "opposed %+.5f vs one swell alone %+.5f m^2/s, i.e. %.2f%% of it"

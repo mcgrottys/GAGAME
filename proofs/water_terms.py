@@ -363,8 +363,8 @@ def hlsl_body(path, fname):
     raise TranspileError("HLSL function not found: %s in %s" % (fname, path))
 
 
-def cpp_body(fname):
-    lines = strip_comments(HEADER_TEXT)
+def cpp_body(fname, text=None):
+    lines = strip_comments(HEADER_TEXT if text is None else text)
     for i, line in enumerate(lines):
         m = SIG.match(line)
         if m and m.group(2) == fname:
@@ -436,22 +436,13 @@ for fname in ("BandPhaseSpeed", "ShoalFactor", "WaveCurrentAmp", "WakeBranch", "
           "%d values; HLSL-only %s, C++-only %s (allowed %s / %s)" %
           (len(c), only_h, only_c, exp_h, exp_c))
 
-# and the control: a transposed digit is caught.
+# and the control: a transposed digit in ONE constant is caught, function-locally.
 _bad = HEADER_TEXT.replace("0.30 / wt::Max(k, 1e-3)", "0.03 / wt::Max(k, 1e-3)")
-_c = literals("\n".join(strip_comments(_bad)[0:0]) or "", ())
-_lines = strip_comments(_bad)
-_j = [i for i, l in enumerate(_lines) if SIG.match(l) and SIG.match(l).group(2) == "WakeBranch"][0]
-_body = []
-_d, _k = 1, _j + 1
-while _d > 0:
-    _d += _lines[_k].count("{") - _lines[_k].count("}")
-    if _d > 0:
-        _body.append(_lines[_k])
-    _k += 1
-_only_h, _only_c = multiset_diff(literals(hlsl_body(BANK, "WakeBranch")),
-                                 literals("\n".join(_body)))
-check("control: steepness cap 0.30 -> 0.03 is CAUGHT by gate 0", _only_h == [0.3],
-      "HLSL-only %s, C++-only %s (the real header leaves both empty)" % (_only_h, _only_c))
+_oh, _oc = multiset_diff(literals(hlsl_body(BANK, "WakeBranch")),
+                         literals(cpp_body("WakeBranch", _bad)))
+check("control: steepness cap 0.30 -> 0.03 is CAUGHT by gate 0", _oh == [0.3] and _oc == [0.03],
+      "the mutated port reports HLSL-only %s / C++-only %s; the real header leaves both empty" %
+      (_oh, _oc))
 
 
 # The parity constant is NOT standard gravity, and that is deliberate (see the header's comment
@@ -606,29 +597,35 @@ check("the mutant IS the reference form K0(xi sec + zeta sec |t|) (1e-15 rel)",
 # amplitude envelope's own gradient -- so the residual is the envelope term, and what matters
 # is that it is small for the signed form and NOT small for the folded one.
 def slope_residual(env):
+    """RMS|grad eta (finite difference) - analytic slope| / RMS|grad eta|, along a ray at 45% of
+    the wedge.  RMS and not pointwise on purpose: the analytic slope vanishes at every crest
+    while the envelope's own gradient does not, so a pointwise ratio would be measuring the
+    crest rather than the field."""
     WV, WS = env["WakeVessel"], env["WakeSample"]
     v = WV(0.0, 0.0, 0.0, 4.86, 0.55, 7.5, True)
-    worst = 0.0
-    for xi in (60.0, 140.0, 260.0):
-        for f in (0.15, 0.45, 0.75):
-            x, z = -xi, f * xi * INV2R2
-            h = 1e-4
-            a = WS(); env["WakeOne"](v, x, z, 0.5, a)
-            ex = []
-            for dx, dz in ((h, 0.0), (-h, 0.0), (0.0, h), (0.0, -h)):
-                b = WS(); env["WakeOne"](v, x + dx, z + dz, 0.5, b)
-                ex.append(b.eta)
-            fx, fz = (ex[0] - ex[1]) / (2 * h), (ex[2] - ex[3]) / (2 * h)
-            den = math.hypot(fx, fz)
-            if den > 1e-6:
-                worst = max(worst, math.hypot(fx - a.slopeX, fz - a.slopeZ) / den)
-    return worst
+    h, num, den = 1e-4, 0.0, 0.0
+    for i in range(600):
+        xi = 60.0 + 0.5 * i
+        x, z = -xi, 0.45 * xi * INV2R2
+        a = WS()
+        env["WakeOne"](v, x, z, 0.5, a)
+        ex = []
+        for dx, dz in ((h, 0.0), (-h, 0.0), (0.0, h), (0.0, -h)):
+            b = WS()
+            env["WakeOne"](v, x + dx, z + dz, 0.5, b)
+            ex.append(b.eta)
+        fx, fz = (ex[0] - ex[1]) / (2 * h), (ex[2] - ex[3]) / (2 * h)
+        num += (fx - a.slopeX) ** 2 + (fz - a.slopeZ) ** 2
+        den += fx * fx + fz * fz
+    return math.sqrt(num / den)
 
 
 rs, rf = slope_residual(ENV), slope_residual(ENV_F)
-check("analytic slope == d(eta)/dx to within the envelope term (signed form)", rs <= 0.05,
-      "signed max relative slope residual %.4f; FOLDED control %.4f (%.0fx worse)" %
-      (rs, rf, rf / max(rs, 1e-12)))
+check("the analytic slope IS d(eta)/dx, to within the omitted envelope gradient", rs <= 0.05,
+      "signed form: RMS slope residual %.4f of RMS |grad eta|; FOLDED control %.4f (%.1fx "
+      "worse). The residual is the amplitude envelope's own gradient, which the shader omits "
+      "deliberately; it is O(2%%) because the envelope varies on ~100 m and the phase on %.1f m."
+      % (rs, rf, rf / max(rs, 1e-12), 2.0 * math.pi / (G / 4.86 ** 2)))
 
 
 # ==================================================================================================
@@ -741,14 +738,19 @@ check("branches merge at t = -1/sqrt(2), k = 1.5 K0 (1e-6)",
 print("")
 print("== gate 5: shoaling and phase speed, at both limits ==")
 BPS, SHOAL = ENV["BandPhaseSpeed"], ENV["ShoalFactor"]
-K_TEST = 0.234162       # the wind-sea band's representative k; any k works, this one is real
+# Two real band wavenumbers rather than one, and the reason matters: the 0.15 m depth floor is
+# INSIDE these functions, so a shallow-limit probe must pick a k small enough that kh -> 0 is
+# still reached at depths the floor does not clamp.  kh = 0.01 on the wind-sea band would ask
+# for 4 cm of water and would measure the floor instead of the limit.
+K_DEEP = BAND_K[1]      # wind sea, k = 0.234 /m: kh = 16 is 68 m of water
+K_SHAL = BAND_K[0]      # swell,    k = 0.0295 /m: kh = 0.01 is still 0.34 m, above the floor
 
 
 def deep_err(fn, ref):
     out = []
     for kh in (4.0, 8.0, 16.0):
-        h = kh / K_TEST
-        out.append((kh, fn(K_TEST, h) / ref(K_TEST, h) - 1.0))
+        h = kh / K_DEEP
+        out.append((kh, fn(K_DEEP, h) / ref(K_DEEP, h) - 1.0))
     return out
 
 
@@ -760,20 +762,20 @@ check("BandPhaseSpeed -> sqrt(g/k) as kh -> inf, error <= 1.2 exp(-2kh)", ok,
 
 c_shal = []
 for kh in (0.3, 0.1, 0.03, 0.01):
-    h = kh / K_TEST
-    c_shal.append((kh, BPS(K_TEST, h) / math.sqrt(G * h) - 1.0))
+    h = kh / K_SHAL
+    c_shal.append((kh, BPS(K_SHAL, h) / math.sqrt(G * h) - 1.0))
 ok = all(abs(e / (-(kh * kh) / 6.0) - 1.0) <= 0.05 for kh, e in c_shal)
 check("BandPhaseSpeed -> sqrt(g h) as kh -> 0, error == -(kh)^2/6 within 5%", ok,
       "; ".join("kh=%g rel err %+.4g (predicted %+.4g)" % (kh, e, -(kh * kh) / 6.0)
                 for kh, e in c_shal))
 
-s_deep = [(kh, SHOAL(K_TEST, kh / K_TEST) - 1.0) for kh in (4.0, 8.0, 16.0)]
+s_deep = [(kh, SHOAL(K_DEEP, kh / K_DEEP) - 1.0) for kh in (4.0, 8.0, 16.0)]
 check("ShoalFactor -> 1 as kh -> inf", all(abs(e) <= 0.02 for _, e in s_deep),
       "; ".join("kh=%g S-1 = %+.3g" % (kh, e) for kh, e in s_deep))
 
 s_shal = []
 for kh in (0.3, 0.15, 0.08, 0.04):
-    S = SHOAL(K_TEST, kh / K_TEST)
+    S = SHOAL(K_SHAL, kh / K_SHAL)
     asym = (kh ** -0.25) / math.sqrt(2.0)
     s_shal.append((kh, S, asym, S / asym - 1.0))
 ok = all(abs(e / (kh * kh / 4.0) - 1.0) <= 0.10 for kh, _, _, e in s_shal)
@@ -781,15 +783,24 @@ check("ShoalFactor -> (1/sqrt2)(kh)^(-1/4) as kh -> 0, error == +(kh)^2/4 within
       "; ".join("kh=%g S=%.5f asym=%.5f rel %+.4g (predicted %+.4g)" %
                 (kh, S, a, e, kh * kh / 4.0) for kh, S, a, e in s_shal))
 
-# Green's law EXPONENT, measured as a log-log slope on the header's own function.
-h1, h2 = 0.08 / K_TEST, 0.32 / K_TEST
-slope = math.log(SHOAL(K_TEST, h2) / SHOAL(K_TEST, h1)) / math.log(h2 / h1)
-check("Green's law exponent d log S / d log h == -1/4 (2%)", abs(slope + 0.25) <= 0.005,
-      "measured %.6f over kh 0.08 -> 0.32" % slope)
+# Green's law EXPONENT, as a log-log slope on the header's own function.  The window sits
+# between two walls: above kh ~ 0.03 the 1.7 clamp binds and S stops being the law, and below
+# kh ~ 0.1 the +(kh)^2/4 correction measured just above shows up in the slope.  Printed as a
+# CONVERGING SEQUENCE, so -1/4 is visibly a limit and not one lucky window.
+def shoal_exponent(env, kh_lo, kh_hi):
+    a, b = kh_lo / K_SHAL, kh_hi / K_SHAL
+    return math.log(env["ShoalFactor"](K_SHAL, b) / env["ShoalFactor"](K_SHAL, a)) / math.log(b / a)
+
+
+SEQ = [(0.032, 0.128), (0.032, 0.064), (0.032, 0.045)]
+exps = [shoal_exponent(ENV, lo, hi) for lo, hi in SEQ]
+check("Green's law exponent d log S / d log h -> -1/4 (0.005 on the tightest window)",
+      abs(exps[-1] + 0.25) <= 0.005,
+      "; ".join("kh %g..%g -> %.6f" % (lo, hi, e) for (lo, hi), e in zip(SEQ, exps)) +
+      "  (margin on the tightest %.5f)" % abs(exps[-1] + 0.25))
 
 ENV_T, _, _ = mutate(("const double th = std::tanh(kh);", "const double th = 1.0;"))
-slope_bad = math.log(ENV_T["ShoalFactor"](K_TEST, h2) / ENV_T["ShoalFactor"](K_TEST, h1)) / \
-    math.log(h2 / h1)
+slope_bad = shoal_exponent(ENV_T, 0.032, 0.045)
 check("control: tanh -> 1 in ShoalFactor destroys the Green's law exponent",
       abs(slope_bad + 0.25) > 0.05,
       "mutated exponent %.6f vs -0.25 -- off by %.4f (gate tolerance 0.005)" %
@@ -797,14 +808,14 @@ check("control: tanh -> 1 in ShoalFactor destroys the Green's law exponent",
 
 ENV_D, _, _ = mutate(("const double cgDeep = 0.5 * std::sqrt(kGWave / kBand);",
                       "const double cgDeep = std::sqrt(kGWave / kBand);"))
-off_bad = ENV_D["ShoalFactor"](K_TEST, 0.15 / K_TEST) / ((0.15 ** -0.25) / math.sqrt(2.0))
+off_bad = ENV_D["ShoalFactor"](K_DEEP, 0.15 / K_DEEP) / ((0.15 ** -0.25) / math.sqrt(2.0))
 check("control: dropping the 1/2 from c_g^deep breaks the shallow OFFSET",
       abs(off_bad - 1.0) > 0.1,
       "mutated S / asymptote = %.6f (want 1.0000); the exponent survives, the offset does not"
       % off_bad)
 
 ENV_S, _, _ = mutate(("(1.0 + 2.0 * kh / wt::Max(std::sinh(2.0 * kh), 1e-3))", "(1.0)"))
-off_b2 = ENV_S["ShoalFactor"](K_TEST, 0.15 / K_TEST) / ((0.15 ** -0.25) / math.sqrt(2.0))
+off_b2 = ENV_S["ShoalFactor"](K_DEEP, 0.15 / K_DEEP) / ((0.15 ** -0.25) / math.sqrt(2.0))
 check("control: dropping the (1 + 2kh/sinh 2kh) group-speed term breaks the offset too",
       abs(off_b2 - 1.0) > 0.1, "mutated S / asymptote = %.6f" % off_b2)
 
@@ -812,11 +823,10 @@ check("control: dropping the (1 + 2kh/sinh 2kh) group-speed term breaks the offs
 khs = np.exp(np.linspace(math.log(1e-3), math.log(60.0), 20001))
 unclamped = []
 for kh in khs:
-    h = float(kh) / K_TEST
     th = math.tanh(kh)
-    c = math.sqrt(G / K_TEST * th)
+    c = math.sqrt(G / K_DEEP * th)
     cg = 0.5 * c * (1.0 + 2.0 * kh / max(math.sinh(2.0 * kh), 1e-3))
-    unclamped.append(math.sqrt(0.5 * math.sqrt(G / K_TEST) / max(cg, 0.05)))
+    unclamped.append(math.sqrt(0.5 * math.sqrt(G / K_DEEP) / max(cg, 0.05)))
 smin = min(unclamped)
 kh_at_min = float(khs[int(np.argmin(unclamped))])
 check("the 0.75 floor is a GUARD: the unclamped law never goes below it", smin > 0.75,
@@ -829,9 +839,9 @@ note("the 1.7 cap DOES bind, for kh < %.4f. At the 0.15 m depth floor that is th
      (kh_cap, BAND_K[0], BAND_K[0] * 0.15, math.sqrt(0.5) * (BAND_K[0] * 0.15) ** -0.25,
       BAND_K[1], BAND_K[1] * 0.15, math.sqrt(0.5) * (BAND_K[1] * 0.15) ** -0.25, BAND_K[2]))
 check("the depth floor is the same 0.15 m in both depth laws",
-      BPS(K_TEST, 0.0) == BPS(K_TEST, 0.15) and SHOAL(K_TEST, 0.0) == SHOAL(K_TEST, 0.15),
+      BPS(K_DEEP, 0.0) == BPS(K_DEEP, 0.15) and SHOAL(K_DEEP, 0.0) == SHOAL(K_DEEP, 0.15),
       "c(h=0) = c(h=0.15) = %.6f m/s, S(h=0) = S(h=0.15) = %.6f" %
-      (BPS(K_TEST, 0.0), SHOAL(K_TEST, 0.0)))
+      (BPS(K_DEEP, 0.0), SHOAL(K_DEEP, 0.0)))
 
 
 # ==================================================================================================
@@ -855,13 +865,27 @@ for i in range(400):
 check("WaveCurrentAmp's closed form == exact action transport 1/sqrt(cr(cr+2r)) (1e-12)",
       worst_act <= 1e-12, "max rel deviation %.3g over the unclamped band (%d of 400 clamped)"
       % (worst_act, worst_clamped))
-_cr = 0.5 * (1.0 - math.sqrt(1.0 + 4.0 * 0.3))  # the OTHER root of the same quadratic
-check("control: the other root of c'/c0 does not satisfy action transport",
-      abs(1.0 / math.sqrt(abs(_cr * _cr * (2.0 * _cr - 1.0))) -
-          1.0 / math.sqrt(abs(_cr * (_cr + 2.0 * 0.3)))) > 0.1,
-      "wrong root gives %.4f vs %.4f at r = 0.3" %
-      (1.0 / math.sqrt(abs(_cr * _cr * (2.0 * _cr - 1.0))),
-       1.0 / math.sqrt(abs(_cr * (_cr + 2.0 * 0.3)))))
+# WHAT THAT EQUALITY DOES *NOT* TEST, said out loud because the first draft of this proof got
+# it wrong.  Given r = cr^2 - cr, the polynomials cr^2(2cr-1) and cr(cr+2r) are IDENTICALLY
+# equal for ANY cr -- so the check above pins the algebra and says nothing about which root of
+# c'/c0 the shader took.  A "wrong root" control there is vacuous.  The branch is real content
+# and needs its own two checks, below.
+RS = [(-0.2449 + 0.7449 * i / 399.0) for i in range(400)]
+worst_q = max(abs((0.5 * (1.0 + math.sqrt(1.0 + 4.0 * r))) ** 2 -
+                  0.5 * (1.0 + math.sqrt(1.0 + 4.0 * r)) - r) for r in RS)
+check("c'/c0 is a root of x^2 - x = r (1e-15)", worst_q <= 1e-15,
+      "max |x^2 - x - r| = %.3g over r in [-0.245, 0.5]" % worst_q)
+xp = [0.5 * (1.0 + math.sqrt(1.0 + 4.0 * r)) for r in RS]
+xm = [0.5 * (1.0 - math.sqrt(1.0 + 4.0 * r)) for r in RS]
+check("and it is the branch that keeps 2c'/c0 - 1 positive -- the other one has no real "
+      "amplitude at all", min(xp) > 0.5 and max(xm) <= 0.5,
+      "the taken root spans %.4f..%.4f (all > 1/2); the rejected root spans %.4f..%.4f "
+      "(all <= 1/2, so cr^2(2cr-1) <= 0 and 1/sqrt of it is imaginary)" %
+      (min(xp), max(xp), min(xm), max(xm)))
+_wrong = max(abs((1.0 + r) ** 2 - (1.0 + r) - r) for r in RS)
+check("control: the linear stand-in c'/c0 = 1 + r is NOT a root of x^2 - x = r", _wrong > 1e-3,
+      "max |x^2 - x - r| = %.4f for the wrong relation (residual is exactly r^2), against "
+      "%.3g for the shipped one" % (_wrong, worst_q))
 check("still water is exactly transparent: amp(r=0) == 1, blocked(r=0) == 0",
       abs(WCA(0.0, 0.0, 1.0, 0.0, 1.0).amp - 1.0) < 1e-15 and
       WCA(0.0, 0.0, 1.0, 0.0, 1.0).blocked == 0.0,
@@ -908,36 +932,52 @@ v0 = WakeVessel(0.0, 0.0, 0.0, 4.86, 0.55, 7.5, True)
 K0 = G / 4.86 ** 2
 note("K0 = g/U^2 = %.6f /m, lambda_t = %.4f m, lambda_cusp = (2/3)lambda_t = %.4f m" %
      (K0, 2 * math.pi / K0, 2.0 / 3.0 * 2 * math.pi / K0))
-note("steepness cap ak <= 0.30 binds when amp > 0.30/k; on the transverse branch k = K0 so "
-     "that is amp > %.3f m -- above this hull's cap of 0.22*7.5*0.34 = %.4f m, so on-track it "
-     "never binds; on the divergent branch k grows as sec^2 and it does." %
-     (0.30 / K0, 0.22 * 7.5 * 0.34))
-note("divergent damping exp(-(k/5K0)^2) is 0.5 at k/K0 = %.3f (theta = %.2f deg) and 0.01 at "
-     "k/K0 = %.3f -- the short arm is gone well before the wedge edge's k/K0 = 1.5 on the "
-     "TRANSVERSE branch, but the divergent branch reaches k/K0 = 5 at |t| = %.3f." %
-     (5.0 * math.sqrt(math.log(2.0)), math.degrees(math.atan(
-         math.sqrt(5.0 * math.sqrt(math.log(2.0)) - 1.0))), 5.0 * math.sqrt(math.log(100.0)),
-      math.sqrt(4.0)))
+note("steepness cap ak <= 0.30 caps amplitude at 0.30/k. The transverse branch spans k/K0 in "
+     "[1, 1.5] (track to wedge edge), so its ceiling runs %.4f m down to %.4f m against this "
+     "hull's draught cap of 0.22*7.5*0.34 = %.4f m -- it does NOT bind on the track and DOES "
+     "bind near the cusp. On the divergent branch k/K0 = sec^2 is unbounded and the cap is what "
+     "holds the short waves." % (0.30 / K0, 0.30 / (1.5 * K0), 0.22 * 7.5 * 0.34))
+note("divergent damping exp(-(k/5K0)^2): %.3f at the cusp (k/K0 = 1.5), 0.5 at k/K0 = %.2f "
+     "(theta %.1f deg), 0.01 at k/K0 = %.2f. The TRANSVERSE branch never leaves k/K0 in "
+     "[1, 1.5], so it is essentially undamped; the DIVERGENT branch's k/K0 = sec^2 grows "
+     "without bound as the sample nears the track, and that short arm is what this removes." %
+     (math.exp(-(1.5 / 5.0) ** 2), 5.0 * math.sqrt(math.log(2.0)),
+      math.degrees(math.atan(math.sqrt(5.0 * math.sqrt(math.log(2.0)) - 1.0))),
+      5.0 * math.sqrt(math.log(100.0))))
 lam_cusp = 2.0 / 3.0 * 2 * math.pi / K0
 note("mesh-Nyquist band limit smoothstep(2, 5, lambda/sampleM): the cusp wave (%.2f m) is cut "
      "entirely for texels coarser than %.2f m and fully passed below %.2f m." %
      (lam_cusp, lam_cusp / 2.0, lam_cusp / 5.0))
 for dRel in (0.5, 1.0, 2.5, 3.5, 10.0, 160.0):
-    nf = ENV["wt" if False else "Smoothstep"](0.5, 2.5, dRel)
-    note("dRel %6.1f: nearFade %.4f, cusp fade %.4f, spreading 1/sqrt(0.6+dRel) = %.4f" %
-         (dRel, nf, ENV["Smoothstep"](1.0, 3.5, dRel), 1.0 / math.sqrt(0.6 + dRel)))
-a_end = WakeSample()
-ENV["WakeOne"](v0, -1200.0, 0.0, 0.5, a_end)
-note("at the 1200 m cull radius the surviving amplitude would be %.3g m against the 1e-4 m "
-     "early-out -- 'spread + damp are dead past this', measured." %
-     (0.55 * 1.0 / math.sqrt(0.6 + 1200.0 / 7.5)))
-st = WakeSample()
-ENV["WakeOne"](v0, -7.5, 0.0, 0.5, st)
-note("stern turbulence at one half-length astern on the track: %.4f (peaks at %.4f); it is "
-     "evaluated for any xi > 0, ahead of the bow gate and the wedge test." %
-     (st.stern, max((lambda s: s.stern)(
-         [ENV["WakeOne"](v0, -x / 10.0, 0.0, 0.5, s) or s
-          for s in [WakeSample()]][0]) for x in range(1, 600))))
+    note("dRel %6.1f: nearFade %.4f, cusp fade-in %.4f, spreading 1/sqrt(0.6+dRel) = %.4f" %
+         (dRel, ENV["Smoothstep"](0.5, 2.5, dRel), ENV["Smoothstep"](1.0, 3.5, dRel),
+          1.0 / math.sqrt(0.6 + dRel)))
+# The 1200 m cull, measured -- and it does NOT say what the shader comment says.
+a1200 = 0.55 / math.sqrt(0.6 + 1200.0 / 7.5)
+lam_t = 2.0 * math.pi / (G / 4.86 ** 2)
+note("MEASURED, and it corrects the source's stated reason: at the 1200 m cull spreading has "
+     "the amplitude at %.4f m -- 400x the 1e-4 m early-out, not 'dead'. The divergent damping "
+     "is distance-INDEPENDENT and removes nothing here either. What actually kills the wake at "
+     "that range is the mesh-Nyquist band limit: the transverse wave is %.2f m, so any tile "
+     "whose texel exceeds %.2f m cuts it entirely. 1200 m is a COST bound with a small (~%.0f "
+     "cm) discontinuity at its edge on a fine tile, not a vanishing." %
+     (a1200, lam_t, lam_t / 2.0, 100.0 * a1200))
+sterns = []
+for i in range(1, 4000):
+    sN = WakeSample()
+    ENV["WakeOne"](v0, -i / 10.0, 0.0, 0.5, sN)
+    sterns.append((sN.stern, i / 10.0))
+peak, peak_at = max(sterns)
+note("stern turbulence on the track peaks at %.4f, %.1f m astern (%.2f hull half-lengths), and "
+     "is under 0.01 by %.1f m; it is evaluated for any xi > 0, ahead of both the bow gate and "
+     "the wedge test, because prop wash exists whether or not a stationary phase does." %
+     (peak, peak_at, peak_at / 7.5,
+      min([x for v, x in sterns if x > peak_at and v < 0.01] or [float("nan")])))
+half = WakeSample()
+ENV["WakeOne"](v0, -7.5, 0.0, 0.5, half)
+note("one hull half-length astern the stern term is %.4f and the wake proper is eta = %.4f m "
+     "(nearFade has it at %.3f of full strength there)." %
+     (half.stern, half.eta, ENV["Smoothstep"](0.5, 2.5, 1.0)))
 
 print("")
 if FAILS:

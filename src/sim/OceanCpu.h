@@ -3,9 +3,9 @@
 //
 //  WHY THIS FILE EXISTS.  A hull needs the sea surface where the hull is, this frame, in doubles:
 //  the heave under each station, the horizontal (choppy) offset that decides WHICH water the bow
-//  is actually in, the SLOPE that turns that point into a free-surface normal, and the water's own
-//  VELOCITY, without which every drag force is computed against a sea standing perfectly still.
-//  The cascades that carry that sea live only as GPU textures written by
+//  is actually in, the SLOPE that turns that point into a free-surface normal, and the water's
+//  own VELOCITY, without which every drag force is computed against a sea standing perfectly
+//  still.  The cascades that carry that sea live only as GPU textures written by
 //  shaders/OceanCompute.hlsl.  Inside WaveField's solved window the CPU has ProbeAt; OUTSIDE it --
 //  which is to say everywhere in open ocean, which is almost everywhere -- the CPU knows nothing
 //  about the sea at all.  This file closes that.  The alternative, reading the displacement
@@ -108,11 +108,27 @@
 //  bin lists -- safe to call from every physics thread at once, no locking, once the sea state is
 //  set.
 //
-//  COST, measured (MSVC /O2, one core, 20000 calls): 36 us per Displacement (35.8-37.2 over
-//  repeated runs) over 1319 retained pairs -- a Hs 2.5 m Gulf-of-Maine sea, 164 + 166 + 989
-//  across the three cascades.  A Hs 6.5 m storm is 1374 pairs.  That is ~27 ns per
-//  pair, and it is two sincos: one for the rotor and one for the spatial phasor.  If a hull ever
-//  needs many stations per step, the ROTOR half is the one to hoist -- e^{iwt} does not depend on
+//  COST, measured (MSVC /O2, one core, 20000 calls per timing) on BOTH SIDES of the slope and
+//  velocity being added -- the two binaries run INTERLEAVED, five runs of each, because this
+//  machine is shared and timing one build after the other measures the load as much as the code.
+//  Two independent interleaved sessions, median of 15 timings each:
+//
+//    Hs 2.5 m Gulf-of-Maine sea, 1319 retained pairs (164 + 166 + 989 across the cascades)
+//        before, Displacement:  35.59 / 35.14 us   (spreads 35.21-37.43, 34.88-36.69)
+//        after,  Sample:        40.35 / 39.81 us   =>  +13.4% and +13.3%
+//        after,  Displacement:  40.40 / 39.80 us   -- it calls Sample, so it IS that query
+//    Hs 6.5 m storm, 1374 pairs
+//        before 37.88 / 37.37 us, after 42.47 / 42.44 us  =>  +12.1% and +13.6%
+//
+//  The RATIO is the measurement, ~13%; the absolute microseconds belong to the machine and moved
+//  1.5% between the two sessions.  (An earlier run of the same pre-change code on a quieter
+//  machine gave 36 us with a 35.8-37.2 spread -- the same number to within its own spread.)
+//
+//  That is ~30 ns per pair, and it is STILL two sincos: one for the rotor and one for the spatial
+//  phasor.  The whole 13% is the second phasor Q and four more accumulators -- no transcendental
+//  was added, which is why it is 13% and not 100%, and it is why a second PASS for the slope
+//  would have cost the other 87%.  If a hull ever needs many stations per step, the ROTOR half is
+//  the one to hoist -- e^{iwt} does not depend on
 //  the query point, so a caller sampling P points at one instant can compute it once per bin
 //  instead of P times and halve the transcendental count.  That is deliberately not done here:
 //  it needs mutable state or a second entry point, and neither belongs in a const query until a
@@ -132,9 +148,10 @@ namespace ga {
 //
 //  Why one struct and not three calls: the cost of a query IS the two sincos per retained bin
 //  (COST, above), and all eight numbers are real multiples of the same two phasors those sincos
-//  build.  A second pass for the slope would double a 36 us query to buy arithmetic already in
-//  flight.  Nothing here is boat-shaped -- no station geometry, no fades, no policy; those belong
-//  to the caller, as the last KNOWN DIFFERENCE above says.
+//  build.  A second pass for the slope would have cost another 35 us to buy arithmetic already in
+//  flight; carrying it in the first pass cost 4.7 us, measured either side (COST, above).
+//  Nothing here is boat-shaped -- no station geometry, no fades, no policy; those belong to the
+//  caller, as the last KNOWN DIFFERENCE above says.
 //
 //  SLOPE.  (sx, sz) = (dh/dx, dh/dz) of the height field with respect to the QUERY coordinate.
 //  That is the shader's hx/hz channel exactly -- the one Sea.hlsl:316 turns into
@@ -172,7 +189,7 @@ namespace ga {
 //
 //  THE TRAP: a retained pair is not one wave, it is TWO.  hk = h0(+k) e^{-iwt} +
 //  conj(h0(-k)) e^{+iwt}, and while the first term travels along +k, the second is a wave at
-//  wavevector -k travelling along -k -- 2 Re[conj(B) e^{i(k.x + wt)}] IS 2 Re[B e^{i((-k).x - wt)}].
+//  wavevector -k travelling along -k: 2 Re[conj(B) e^{i(k.x + wt)}] IS 2 Re[B e^{i((-k).x - wt)}].
 //  Their k^ are OPPOSITE, so the pair's horizontal velocity is w*k^*(eta_A - eta_B), NEVER
 //  w*k^*h.  A directional swell hides the difference (where A is large, B is nearly zero); a
 //  cos^2 8 wind sea does not, so getting it wrong would have been a drag bias that appeared only
