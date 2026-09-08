@@ -48,7 +48,7 @@ struct WaveFieldConfig {
     double orgX = -1400.0, orgZ = -800.0;
     int nx = 1600, ny = 1000;
     double cellM = 2.0;
-    int nComp = 16;                    // the reference construction (JONSWAP gamma=1)
+    int nComp = 32;                    // M9bp: see SceneConfig wfComps (16 was the comb)
     double spreadDeg = 26.0;
     double barNormalDeg = 285.0;       // the entrance bar's normal, compass
     double gammaHs = 0.60;             // Hs <= gammaHs * h (the total limiter)

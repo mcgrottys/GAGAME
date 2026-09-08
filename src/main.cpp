@@ -213,11 +213,19 @@ struct Options {
                                       // channel bathymetry (M6w: the chart IS the stack)
     std::string oceanProbe;           // --ocean-probe lat,lon: the weather manager's
                                       // verification harness (rungs + provenance + gates)
-    bool oneWater = false;            // --one-water: M7 -- water geometry from the wave
+    // M9bp: BOTH DEFAULT ON -- this is the water the M9bk..M9bo pass was measured against and
+    // the one the user judged. Every fix in that pass lives on this path: the tangent-bivector
+    // normal, the wave-grain walk and its morph band, the fold guard on the lateral term, the
+    // residency gradient and water mip bias, the cascade prefilter. With the flags off the
+    // SeaLayer grid draws instead and none of it applies, so shipping them off meant shipping
+    // the water nobody was looking at. --no-one-water / --no-pixel-water are the escape
+    // hatches; the positive forms still parse, so existing scripts and the storm-rail recipe
+    // are unchanged.
+    bool oneWater = true;             // --no-one-water: M7 -- water geometry from the wave
                                       // vertex bank alone (SeaLayer's grid retires)
-    bool pixelWater = false;          // --pixel-water: M9bh -- shade the water per PIXEL (the
-                                      // two rays: sky mirror + refracted bed cast, translucent,
-                                      // no foam). Off = the M9bg vertex-shaded default.
+    bool pixelWater = true;           // --no-pixel-water: M9bh -- shade the water per PIXEL
+                                      // (the two rays: sky mirror + refracted bed cast,
+                                      // translucent, no foam). Off = M9bg vertex-shaded.
     // M9bi: --sun az,el PINS the pre-ephemeris art direction (112, 26) that every baseline
     // before M9bi was lit by. Without it the sun comes from the EPHEMERIS at the scene's own
     // timestamp and place -- a deliberate look change, which is why the escape hatch exists.
@@ -539,8 +547,11 @@ Options ParseArgs(int argc, char** argv) {
             o.fidelityMap = Widen(next("fidelity_map.png").c_str());
         }
         else if (a == "--ocean-probe") o.oceanProbe = next("42.35,-70.65");
+        // M9bp: both are the DEFAULT now; the positive forms stay so scripts keep parsing.
         else if (a == "--one-water") o.oneWater = true;
+        else if (a == "--no-one-water") o.oneWater = false;
         else if (a == "--pixel-water") o.pixelWater = true;
+        else if (a == "--no-pixel-water") o.pixelWater = false;
         else if (a == "--sun") {
             const std::string v = next("112,26");
             sscanf_s(v.c_str(), "%f,%f", &o.sunAz, &o.sunEl);
