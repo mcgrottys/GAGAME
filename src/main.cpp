@@ -3946,6 +3946,7 @@ int main(int argc, char** argv) {
         double profMs[kProfN] = {}, profHelmMs[kProfN] = {};
         std::vector<float> railPreMs;   // M9u: the whole pre-RenderFrame half
         uint64_t walkNodesAcc = 0, walkLeavesAcc = 0, walkWantNsAcc = 0, walkFrames = 0;
+        uint64_t morphFullAcc = 0, morphPartAcc = 0;
         uint64_t wantTouchAcc = 0, wantHitAcc = 0;
         static const char* kProfName[kProfN] = {
             "weather.Update", "scene hot-reload stat", "waveField.Update",
@@ -4507,6 +4508,8 @@ int main(int argc, char** argv) {
                     walkNodesAcc += globe->walkNodes;
                     walkLeavesAcc += globe->walkLeaves;
                     walkWantNsAcc += globe->walkWantNs;
+                    morphFullAcc += globe->walkMorphFull;
+                    morphPartAcc += globe->walkMorphPart;
                     wantTouchAcc += resMgr.wantTouches;
                     wantHitAcc += resMgr.wantHits;
                     ++walkFrames;
@@ -4971,6 +4974,10 @@ int main(int argc, char** argv) {
                             // also carries the window-rect Mercator math (nine CubeDir corners
                             // with asin/atan2/log/tan each). Naming it "Want()" would credit
                             // the map for trig it never touched.
+                            Log("[rail]   MORPH PROBE: %.0f%% of leaves are FULLY morphed "
+                                "(k==1, half density), %.0f%% partially",
+                                100.0 * double(morphFullAcc) / (std::max)(1.0, double(walkLeavesAcc)),
+                                100.0 * double(morphPartAcc) / (std::max)(1.0, double(walkLeavesAcc)));
                             Log("[rail]   walk: %.0f nodes, %.0f leaves per frame; leaf emit "
                                 "(Want + window rects) is %.3f ms of the %.3f ms SetView "
                                 "(%.0f%%)",

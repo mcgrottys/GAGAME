@@ -853,6 +853,38 @@ using WalkParams = GlobeLayer::WalkParams;
 
 // One node: its span and distance, the horizon and frustum culls, the split test; a leaf
 // falls through to leaf(face, u0, v0, size, arc, dist).
+// M9bk: THE DISTANCE AT WHICH A NODE OF THIS ARC STOPS BEING SPLIT.
+//
+// The morph band's contract (see the leaf lambda) is "fade this LOD out across the band where
+// its PARENT would still be split", and it was written as arc*kLodFactor*{1.35, 1.95} because
+// under the distance rule alone the parent stops splitting at exactly 2*arc*kLodFactor -- so
+// those constants are 0.675 and 0.975 of the handover, not magic numbers.
+//
+// The wave-grain rule keeps a node splitting FURTHER OUT than the distance rule does, so the
+// handover moved and the band did not follow. MEASURED (storm rail, walk probe): fully-morphed
+// leaves went 10% -> 41% when the rule landed. A fully-morphed leaf snaps its odd vertices onto
+// its even ones, so it renders at HALF the density the walk just paid for -- the amplification
+// was buying geometry the morph then threw away, and the collapsed rows are what read as
+// ramps in the wireframe.
+//
+// This returns the handover for either rule, so the band tracks whichever one is binding.
+double SplitRange(const WalkParams& wp, double arc) {
+    double d = arc * GlobeLayer::kLodFactor;
+    if (wp.waveGrainM > 0.0f) {
+        const double cell = arc / 32.0;
+        if (cell > static_cast<double>(wp.waveGrainM)) {
+            // The wave rule splits while cell > max(grain, dist*c); with cell past the grain
+            // floor that is dist < cell/c, and the range gate caps it at the rings' reach.
+            const double c = (std::max)(1.0 / 256.0,
+                                        static_cast<double>(wp.pixAng) *
+                                            GlobeLayer::kWavePxFloor);
+            const double reach = GlobeLayer::kWaveRings * 256.0 * wp.waveGrainM;
+            d = (std::max)(d, (std::min)(cell / c, reach));
+        }
+    }
+    return d;
+}
+
 template <class Leaf>
 void WalkNode(const WalkParams& wp, uint64_t& nodes, int face, int level, double u0,
               double v0, double size, Leaf& leaf) {
@@ -911,7 +943,51 @@ void WalkNode(const WalkParams& wp, uint64_t& nodes, int face, int level, double
     // field). The distance split (dist < 3*arc) reaches level 18 only within ~115 m of
     // the eye, so the record budget grows by a few hundred, not thousands. (wp.maxDepth is
     // 18 on the mesh path and kMaxDepth on the fallback -- CaptureWalk.)
-    if (level < wp.maxDepth && dist < arc * GlobeLayer::kLodFactor) {
+    bool split = level < wp.maxDepth && dist < arc * GlobeLayer::kLodFactor;
+
+    // M9bk: THE MESH CARRIES THE FIELD AT THE FIELD'S OWN GRAIN.
+    //
+    // MEASURED (storm rail frame 1199, --wireframe A/B): the distance rule above holds a node
+    // CELL at arc/32 with arc ~ dist/3, i.e. cell ~ dist/96 -- a constant ~10 px. The wave
+    // bank stores the surface far finer than that: ring m has texel base*2^m and reach
+    // 256 texels, so the ring covering a point at range d has texel ~ max(base, d/256). The
+    // mesh was therefore coarser than its own data by ~2.7x EVERYWHERE the bank reaches, and
+    // the shortfall is what read as terraces down a storm wave's face -- triangles, not the
+    // field (the cubic kernel in Globe.hlsl smoothed the field and left the terraces, which
+    // is how we know).
+    //
+    // So: keep splitting while the cell is coarser than the grain the wave field is actually
+    // stored at, floored so a triangle never falls below kWavePxFloor pixels (past that the
+    // fold has shed the band into sigma^2 and geometry is buying nothing), and bounded by
+    // waveMaxDepth.
+    //
+    // This is ONE rule, and it is self-gating: beyond the outer ring's reach waveTexel runs
+    // past what the distance rule already gives, and from orbit every node is far enough that
+    // the pixel floor binds first. A globe view emits exactly the meshlets it emitted before
+    // -- the helm is the only place the rule has anything to say, which is the whole point.
+    if (!split && wp.waveGrainM > 0.0f && level < wp.waveMaxDepth) {
+        // THE RANGE GATE, and why it is not optional. A ring holds 512 texels, so ring m
+        // reaches 256*grain*2^m from the eye and the OUTER ring is 9.8 km out. Refining to
+        // the ring texel over that whole disc is what blew the record budget -- and, worse,
+        // a screen-space floor alone is not a helm rule at all: from orbit every node is far,
+        // so a floor finer than the walk's own ~10 px refines the WHOLE PLANET. The user's
+        // constraint is explicit -- globe views need none of this.
+        //
+        // So the rule lives where the bank's fine rings actually are: the first kWaveRings
+        // rings around the eye. That is the helm's own neighbourhood by construction (at
+        // altitude nothing is within 614 m of the camera, so the rule never fires and the
+        // globe walk is untouched, leaf for leaf).
+        const double reach = GlobeLayer::kWaveRings * 256.0 * wp.waveGrainM;
+        if (dist < reach) {
+            const double cell = arc / 32.0;
+            const double waveTexel =
+                (std::max)(static_cast<double>(wp.waveGrainM), dist / 256.0);
+            const double pxFloor = dist * wp.pixAng * GlobeLayer::kWavePxFloor;
+            split = cell > (std::max)(waveTexel, pxFloor);
+        }
+    }
+
+    if (split) {
         const double h = size * 0.5;
         WalkNode(wp, nodes, face, level + 1, u0, v0, h, leaf);
         WalkNode(wp, nodes, face, level + 1, u0 + h, v0, h, leaf);
@@ -1248,6 +1324,10 @@ GlobeLayer::WalkParams GlobeLayer::CaptureWalk(const Camera& cam, float viewport
     wp.planeCount = 0;
     wp.reliefExagg = reliefExagg;
     wp.maxDepth = m_msPath ? 18 : kMaxDepth;   // M6j/M8h, see WalkNode
+    // M9bk: the wave-grain rule rides the mesh path in one-water mode only -- that is where
+    // the bank IS the water's geometry. Off elsewhere, so nothing but the helm changes.
+    wp.waveGrainM = (m_msPath && m_oneWater) ? m_bankBase : 0.0f;
+    wp.waveMaxDepth = kWaveMaxDepth;
     wp.pixAng = cam.fovY / (std::max)(viewportH, 1.0f);
     wp.wants = m_res && (m_surfT >= 0 || m_colorT >= 0 || m_hgtT >= 0);
     wp.surfT = m_surfT;
@@ -1430,8 +1510,16 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
 
         // Per-LEVEL morph ramp (identical on both sides of every seam = crack-free): fade this
         // LOD out across the band where its parent would still be split.
-        const float morphStart = static_cast<float>(arc * kLodFactor * 1.35);
-        const float morphEnd = static_cast<float>(arc * kLodFactor * 1.95);
+        // M9bk: against the PARENT's handover under whichever rule is binding. 0.675/0.975 of
+        // it reproduce the old arc*kLodFactor*{1.35, 1.95} exactly when the wave rule is inert,
+        // so a globe frame's bands are unchanged to the bit.
+        const double dHand = SplitRange(m_wp, arc * 2.0);
+        const float morphStart = static_cast<float>(dHand * 0.675);
+        const float morphEnd = static_cast<float>(dHand * 0.975);
+        // M9bk PROBE: how many leaves sit PAST their own morph band (k == 1, odd vertices
+        // snapped onto even = the level renders at half the resolution the walk paid for)?
+        if (dist > morphEnd) ++walkMorphFull;
+        else if (dist > morphStart) ++walkMorphPart;
         if (m_msPath) {
             const size_t base = m_meshlets.size();
             EmitMeshlets(face, u0, v0, size, arc, morphStart, morphEnd);

@@ -83,16 +83,66 @@ cbuffer GlobeCb : register(b1) {
 
 // Sample the bank at a world-frame XZ: finest ring containing the point wins. Returns false
 // beyond every ring (the far field: sub-pixel waves, level ~ the plane).
-// One ring's manual-bilinear fetch (the static-sampler SampleLevel path reads ZERO from
-// the MESH stage on this driver -- Load is stage-proof). edgeD = distance to the ring's
-// valid border in texels, for the cross-fade below.
+// ---- THE BANK'S RECONSTRUCTION KERNEL (ALGEBRA.md "caustics": the tangent bivector) -------
+//
+// The bank stores the wave surface on a ring lattice. What the mesh and the pixels actually
+// need is the surface BETWEEN those texels, and the kernel that fills the gap decides whether
+// the water reads as water or as a heightfield.
+//
+// WHAT WAS WRONG. This was a tent (manual bilinear): C0. The value is continuous across a
+// texel border and the GRADIENT is not, so the surface carries a slope discontinuity along
+// every texel edge -- and the normal was then taken as a FORWARD DIFFERENCE over one whole
+// texel, which is piecewise constant per cell. Geometry creased on the lattice and shading
+// stepped with it: the comb of parallel ridges down a storm wave's face and the dead-straight
+// slope crease at a ring handover (rail_1199, the storm rail's last frame). Neither is in the
+// data; both are the kernel.
+//
+// THE LAW. One cubic (Catmull-Rom) convolution, applied uniformly -- no case split, no
+// threshold, no special near field. It is INTERPOLATING, so the sampled surface is preserved
+// exactly at texel centres and the rendered Hs gate does not move (a B-spline would smooth the
+// data itself and shed amplitude the fold has already accounted for). Its first derivative is
+// continuous, which is precisely what the facets were the absence of.
+//
+// The derivative is ANALYTIC and comes from the SAME 16 taps -- the kernel differentiated, not
+// the surface re-probed. That retires the two extra ring probes each shading path used to take
+// (priors 21's "a derivative at the DATA's grain" is honoured better here than by a difference:
+// the kernel's support IS the grain, and it is continuous). Net taps per shaded point FALL,
+// 36 -> 24, because one evaluation now answers what three probes used to.
+//
+// Loads, not SampleLevel: priors 1 -- a bindless SampleLevel reads ZERO outside the pixel
+// stage on this driver, and this runs in the mesh stage.
+float4 CatmullW(float t) {
+    const float t2 = t * t, t3 = t2 * t;
+    return float4(-0.5f * t3 + t2 - 0.5f * t,
+                   1.5f * t3 - 2.5f * t2 + 1.0f,
+                  -1.5f * t3 + 2.0f * t2 + 0.5f * t,
+                   0.5f * t3 - 0.5f * t2);
+}
+// d/dt of the above: the tangent, exact, same support.
+float4 CatmullDW(float t) {
+    const float t2 = t * t;
+    return float4(-1.5f * t2 + 2.0f * t - 0.5f,
+                   4.5f * t2 - 5.0f * t,
+                  -4.5f * t2 + 4.0f * t + 0.5f,
+                   1.5f * t2 - 1.0f * t);
+}
+
+// One ring's fetch. disp is reconstructed by the cubic above and carries its own world-space
+// Jacobian columns dDdx = dD/dx, dDdz = dD/dz (metres per metre, all three components -- the
+// lateral Gerstner terms included, which is what makes the wedge below a real tangent
+// bivector and not a heightfield approximation). param/detail stay on the tent: they are
+// shading scalars read at their own grain, and no geometry hangs off their gradient.
+// edgeD = distance to the ring's valid border in texels, for the cross-fade below.
 bool BankFetch(uint m, float2 worldXZ, out float4 disp, out float4 param,
-               out float4 detail, out float texelOut, out float edgeD) {
+               out float4 detail, out float texelOut, out float edgeD,
+               out float3 dDdx, out float3 dDdz) {
     disp = 0.0f;
     param = 0.0f;
     detail = 0.0f;
     texelOut = 0.0f;
     edgeD = 0.0f;
+    dDdx = 0.0f;
+    dDdz = 0.0f;
     const float texel = gBankA.x * (float)(1u << m);
     const float2 org = (m == 0) ? gBankOrg01.xy
                       : (m == 1) ? gBankOrg01.zw
@@ -101,20 +151,42 @@ bool BankFetch(uint m, float2 worldXZ, out float4 disp, out float4 param,
                       : (m == 4) ? gBankOrg45.xy
                                  : gBankOrg45.zw;
     const float2 local = (worldXZ - org) / texel;
-    if (any(local < 1.0f) || any(local > 511.0f)) return false;
-    edgeD = min(min(local.x - 1.0f, 511.0f - local.x),
-                min(local.y - 1.0f, 511.0f - local.y));
+    // The cubic reaches one texel further than the tent on each side, so the valid window
+    // loses one texel at each border. The ring cross-fade already lives 48 texels inside it.
+    if (any(local < 2.0f) || any(local > 510.0f)) return false;
+    edgeD = min(min(local.x - 2.0f, 510.0f - local.x),
+                min(local.y - 2.0f, 510.0f - local.y));
     const float2 tf = local - 0.5f;
     const int2 t0 = int2(floor(tf));
     const float2 fr = tf - float2(t0);
     const int xoff = (int)m * 512;
+
+    // param/detail: the tent, unchanged (4 taps).
     [unroll] for (int k = 0; k < 4; ++k) {
         const int2 tc = t0 + int2(k & 1, k >> 1);
         const float wgt = ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y);
-        disp += wgt * gTex[gBankU.x][int2(xoff + tc.x, tc.y)];
         param += wgt * gTex[gBankU.y][int2(xoff + tc.x, tc.y)];
         detail += wgt * gTex[gBankU2.x][int2(xoff + tc.x, tc.y)];
     }
+
+    // disp: the cubic, value and both tangents from one 4x4 support.
+    const float4 wx = CatmullW(fr.x), wz = CatmullW(fr.y);
+    const float4 dx = CatmullDW(fr.x), dz = CatmullDW(fr.y);
+    [unroll] for (int j = 0; j < 4; ++j) {
+        float4 row = 0.0f, rowDx = 0.0f;
+        [unroll] for (int i = 0; i < 4; ++i) {
+            const int2 tc = t0 + int2(i - 1, j - 1);
+            const float4 s = gTex[gBankU.x][int2(xoff + tc.x, tc.y)];
+            row += wx[i] * s;
+            rowDx += dx[i] * s;
+        }
+        disp += wz[j] * row;
+        dDdx += wz[j] * rowDx.xyz;
+        dDdz += dz[j] * row.xyz;
+    }
+    // d/d(texel) -> d/d(metre).
+    dDdx /= texel;
+    dDdz /= texel;
     texelOut = texel;
     return true;
 }
@@ -156,16 +228,18 @@ float FoamBreakup(float2 posM, float range) {
     return (wsum > 1e-3f) ? (n / wsum) : 0.5f;
 }
 
-bool BankSample(float2 worldXZ, out float4 disp, out float4 param, out float4 detail,
-                out float texelOut) {
+bool BankSampleT(float2 worldXZ, out float4 disp, out float4 param, out float4 detail,
+                 out float texelOut, out float3 dDdx, out float3 dDdz) {
     disp = 0.0f;
     param = 0.0f;
     detail = 0.0f;
     texelOut = 0.0f;
+    dDdx = 0.0f;
+    dDdz = 0.0f;
     if (gBankU.z == 0u) return false;
     [unroll] for (uint m = 0; m < 6; ++m) {
         float eD;
-        if (!BankFetch(m, worldXZ, disp, param, detail, texelOut, eD)) continue;
+        if (!BankFetch(m, worldXZ, disp, param, detail, texelOut, eD, dDdx, dDdz)) continue;
         // M8 THE RING CROSS-FADE (the user's "interpolation param", data/wave_scene.json
         // ringBlendTexels): near this ring's border, blend toward the next coarser ring
         // so the texture handover never pops -- the M6t fold already conserves the
@@ -174,17 +248,60 @@ bool BankSample(float2 worldXZ, out float4 disp, out float4 param, out float4 de
         if (m < 5u && eD < blendW) {
             float4 d2, p2, det2;
             float t2, e2;
-            if (BankFetch(m + 1u, worldXZ, d2, p2, det2, t2, e2)) {
+            float3 dx2, dz2;
+            if (BankFetch(m + 1u, worldXZ, d2, p2, det2, t2, e2, dx2, dz2)) {
                 const float w = saturate(eD / blendW);
                 disp = lerp(d2, disp, w);
                 param = lerp(p2, param, w);
                 detail = lerp(det2, detail, w);
                 texelOut = lerp(t2, texelOut, w);
+                // The tangents are already in metres per metre on BOTH rings, so the same
+                // weight carries them: the handover is C0 in the slope instead of a step,
+                // which is what the dead-straight crease at a ring border actually was.
+                dDdx = lerp(dx2, dDdx, w);
+                dDdz = lerp(dz2, dDdz, w);
             }
         }
         return true;
     }
     return false;
+}
+
+// The old signature, for the call sites that want the value and no frame.
+bool BankSample(float2 worldXZ, out float4 disp, out float4 param, out float4 detail,
+                out float texelOut) {
+    float3 dx, dz;
+    return BankSampleT(worldXZ, disp, param, detail, texelOut, dx, dz);
+}
+
+// ---- THE TANGENT BIVECTOR ------------------------------------------------------------------
+// T = t_x ^ t_z of the displaced surface, where the displacement's Jacobian columns come from
+// the kernel above. In the local {east, up, north} frame the two tangents are
+//     t_x = (1 + dDx/dx,  dDy/dx,      dDz/dx)
+//     t_z = (dDx/dz,      dDy/dz,  1 + dDz/dz)
+// and the lighting normal is the bivector's DUAL. One object, one evaluation -- ALGEBRA.md
+// "caustics": the same grade-2 quantity whose horizontal part is areaJac, so when the caustic
+// path wants the ray map's first factor it is already here rather than re-derived.
+//
+// The 1.1 slope cap stays exactly where it was: shoaling gain can exceed any real wave face,
+// and uncapped facets render as dark back-face speckle (the two-sided failure).
+// The bivector reduced to the slope pair the shading paths carry (the pixel path then ADDS
+// the sub-texel cascade bands onto it before building its own normal, so the slope -- not the
+// finished normal -- is the shared currency).
+float2 BankSlope(float3 dDdx, float3 dDdz) {
+    const float3 tx = float3(1.0f + dDdx.x, dDdx.y, dDdx.z);
+    const float3 tz = float3(dDdz.x, dDdz.y, 1.0f + dDdz.z);
+    // dual(t_x ^ t_z) in the tangent basis; x,z are the horizontal axes and y is up.
+    const float3 nL = cross(tz, tx);
+    const float uy = max(abs(nL.y), 1e-4f);
+    float2 s = float2(-nL.x / uy, -nL.z / uy);
+    const float sl = length(s);
+    if (sl > 1.1f) s *= 1.1f / sl;
+    return s;
+}
+float3 BankNormal(float3 dDdx, float3 dDdz, float3 east, float3 upT, float3 north) {
+    const float2 s = BankSlope(dDdx, dDdz);
+    return normalize(upT - east * s.x - north * s.y);
 }
 
 #include "Compose.hlsli"
@@ -275,10 +392,11 @@ float3 WaterVertexColor(float3 dir, float3 rel, float h) {
     float s2 = 0.0300f;    // plain wind-sea slope variance where no ring covers this vertex
     float foam = 0.0f;
     {
-        float4 bD, bP, bDet, bDx, bDz, tA, tB;
-        float bT, tu;
+        float4 bD, bP, bDet;
+        float bT;
+        float3 bDdx, bDdz;
         const float2 wxz = (upT * gGlo.x).xz;
-        if (BankSample(wxz, bD, bP, bDet, bT)) {
+        if (BankSampleT(wxz, bD, bP, bDet, bT, bDdx, bDdz)) {
             // THE FOLD, AT VERTEX DENSITY (ALGEBRA.md "fold"). The bank's sigma^2 floors at
             // 0.0015 because a PIXEL could resolve a lobe that sharp. A VERTEX cannot: a
             // highlight narrower than the triangle it lands on interpolates into hard white
@@ -288,13 +406,11 @@ float3 WaterVertexColor(float3 dir, float3 rel, float h) {
             // value, so the sun's path stays a broad sheen the mesh can actually carry.
             s2 = max(bP.y, 0.0260f);
             foam = saturate(bD.w);
-            BankSample(wxz + float2(bT, 0.0f), bDx, tA, tB, tu);
-            BankSample(wxz + float2(0.0f, bT), bDz, tA, tB, tu);
-            float sx = (bDx.y - bD.y) / bT;
-            float sz = (bDz.y - bD.y) / bT;
-            const float sl = length(float2(sx, sz));
-            if (sl > 1.1f) { sx *= 1.1f / sl; sz *= 1.1f / sl; }
-            nW = normalize(upT - east * sx - north * sz);
+            // The wave normal at THIS VERTEX: the tangent bivector's dual, analytic from the
+            // reconstruction kernel's own derivative. The two extra ring probes this used to
+            // take are gone -- and with them the piecewise-constant normal that made a storm
+            // face read as a staircase.
+            nW = BankNormal(bDdx, bDdz, east, upT, north);
         }
     }
 
@@ -562,21 +678,20 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     float3 nPix = upT;       // + the bands this pixel resolves -> glint, Fresnel, both rays
     float lvlW = 0.0f;       // live water level here (tide + solver); 0 = geoid far afield
     {
-        float4 bD, bP, bDet, bDx, bDz, tA, tB;
-        float bT, tu;
-        if (BankSample(wxz, bD, bP, bDet, bT)) {
+        float4 bD, bP, bDet;
+        float bT;
+        float3 bDdx, bDdz;
+        if (BankSampleT(wxz, bD, bP, bDet, bT, bDdx, bDdz)) {
             s2 = max(bP.y, 0.0015f);
             lvlW = bP.x;
-            // The wave normal: two finite differences of the bank's own displacement, at the
-            // ring's texel (priors 21 -- a derivative is taken at the DATA's grain).
-            BankSample(wxz + float2(bT, 0.0f), bDx, tA, tB, tu);
-            BankSample(wxz + float2(0.0f, bT), bDz, tA, tB, tu);
-            float sx = (bDx.y - bD.y) / bT;
-            float sz = (bDz.y - bD.y) / bT;
-            // Shoaling gain can exceed any real wave face; uncapped facets render as dark
-            // back-face speckle and pin Fresnel at its ceiling (the two-sided failure).
-            const float slS = length(float2(sx, sz));
-            if (slS > 1.1f) { sx *= 1.1f / slS; sz *= 1.1f / slS; }
+            // The wave normal: the tangent bivector's dual, analytic from the reconstruction
+            // kernel (priors 21 -- the derivative is still taken at the DATA's grain, because
+            // the kernel's 4x4 support IS that grain; what changed is that it is now
+            // continuous across a texel border instead of stepping at it). The two extra ring
+            // probes are gone, and the 1.1 cap rides inside BankSlope.
+            const float2 sRing = BankSlope(bDdx, bDdz);
+            float sx = sRing.x;
+            float sz = sRing.y;
             nSmooth = normalize(upT - east * sx - north * sz);
 
             // The bands the PIXEL resolves but the ring texel does not, read from the cascade

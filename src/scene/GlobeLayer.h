@@ -31,6 +31,23 @@ class GlobeLayer : public Layer {
 public:
     static constexpr int kMaxDepth = 6;      // smallest node ~156 km: vertex spacing == texel
     static constexpr double kLodFactor = 3.0;
+    // M9bk: the wave-grain rule's screen floor -- a surface triangle never goes below this
+    // many pixels. Past it the fold has already shed the band into sigma^2, so more geometry
+    // buys variance the shading is carrying anyway.
+    //
+    // MEASURED: at 3.0, unbounded in range, the rule split all the way to the outer ring at
+    // 9.8 km and blew the record budget ("meshlet budget hit: 39 leaves dropped
+    // (65520/65536)") -- holes in the surface. The range gate in WalkNode is the real bound;
+    // this floor is the safety under it, so a triangle never goes below a few pixels.
+    static constexpr double kWavePxFloor = 3.0;
+    // How many of the bank's rings the rule refines over. Ring m reaches 256*grain*2^m, so
+    // 2 rings is ~614 m at the shipped 1.2 m grain: the helm's neighbourhood, and nothing a
+    // globe view can ever be inside.
+    static constexpr double kWaveRings = 2.0;
+    // ... and its depth ceiling. Level 20 is a 9.6 m node = 0.30 m cells, a quarter of the
+    // bank's ring-0 texel: enough to carry the cubic's curvature between texels without
+    // pretending to data that is not there.
+    static constexpr int kWaveMaxDepth = 20;
 
     void Configure(const std::wstring& shaderDir, const GlobeModel* globe) {
         m_shaderDir = shaderDir;
@@ -157,6 +174,11 @@ public:
         int planeCount = 0;
         float reliefExagg = 1.0f;
         int maxDepth = kMaxDepth;
+        // M9bk: THE WAVE GRAIN. The wave bank's ring-0 texel (m); 0 = no bank, rule inert.
+        // The walk carries the surface at the density the WAVE FIELD is stored at wherever
+        // the bank actually reaches -- see WalkNode.
+        float waveGrainM = 0.0f;
+        int waveMaxDepth = kMaxDepth;
         float pixAng = 1.0e-3f;     // one pixel's angle: the relief-mip selector
         bool wants = false;         // a residency manager and at least one cube tenant
         int surfT = -1, normT = -1, colorT = -1, hgtT = -1, maskT = -1;
@@ -397,7 +419,13 @@ private:
     // Those two want opposite fixes, so they are counted apart before either is attempted.
 public:
     mutable uint64_t walkNodes = 0, walkLeaves = 0, walkWantNs = 0;
-    void WalkReset() { walkNodes = walkLeaves = walkWantNs = 0; }
+    // M9bk probe: leaves sitting past their own morph band (k == 1: the odd vertices are
+    // snapped onto the even ones, so the level renders at HALF the density the walk paid for).
+    mutable uint64_t walkMorphFull = 0, walkMorphPart = 0;
+    void WalkReset() {
+        walkNodes = walkLeaves = walkWantNs = 0;
+        walkMorphFull = walkMorphPart = 0;
+    }
     // The meshlet-record memcpy into the frame's upload buffer (Render), last frame, ms: the
     // one CPU cost of the mesh path inside the RENDER bracket. main reads and zeroes it.
     double meshletCopyMs = 0.0;
