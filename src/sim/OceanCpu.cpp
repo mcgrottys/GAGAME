@@ -277,7 +277,7 @@ void OceanCpu::SetSeaState(const PartParam* parts, int count, uint32_t seed, con
         4.0 * std::sqrt(std::max(Variance(0) + Variance(1) + Variance(2), 0.0)));
 }
 
-// The truncated direct sum. Per retained pair this is one rotor (the same e^{+iwt} CsModulate
+// The truncated direct sum. Per retained pair this is one rotor (the same e^{-iwt} CsModulate
 // applies) times one spatial phasor (the e^{+ik.x} CsFft synthesises), and then the eight linear
 // spectral fields are all real multiples of that product's real and imaginary parts:
 //
@@ -295,9 +295,11 @@ void OceanCpu::Displacement(double wx, double wz, double tSec, double out[3]) co
     if (m_ready) {
         for (int c = 0; c < kCascades; ++c) {
             for (const Bin& b : m_bin[c]) {
-                const double wt = b.w * tSec;
+                // -w, mirroring CsModulate: paired with the e^{+ik.x} synthesis below this
+                // is what makes a bin travel along +k, i.e. toward its partition's dirTo.
+                const double wt = -b.w * tSec;
                 const double cw = std::cos(wt), sw = std::sin(wt);
-                // hk = h0(+k) e^{+iwt} + conj(h0(-k)) e^{-iwt}   (CsModulate, verbatim)
+                // hk = h0(+k) e^{-iwt} + conj(h0(-k)) e^{+iwt}   (CsModulate, verbatim)
                 const double hkr = (b.ar * cw - b.ai * sw) + (b.br * cw - b.bi * sw);
                 const double hki = (b.ar * sw + b.ai * cw) - (b.br * sw + b.bi * cw);
 

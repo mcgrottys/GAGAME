@@ -272,7 +272,7 @@ def reference_fields(A, B, kx, kz, t, *, chop_sign=-1.0, fft_sign=+1.0):
     live = klen > 1e-5
     safe = np.where(live, klen, 1.0)
     w = np.sqrt(G * safe)
-    rot = np.exp(1j * w * t)
+    rot = np.exp(-1j * w * t)   # -w: see CsModulate
     hk = A * rot + np.conj(B) * np.conj(rot)
 
     dxh = np.where(live, chop_sign * 1j * (kx / safe) * hk, 0.0)   # shader: -i (kx/k) h
@@ -324,7 +324,7 @@ def direct_sum(pk_x, pk_z, pA, pB, x, z, t, *, chop_sign=-1.0):
     """OceanCpu::Displacement, one point.  Returns (Dx, h, Dz) BEFORE the lambda scale."""
     klen = np.sqrt(pk_x * pk_x + pk_z * pk_z)
     w = np.sqrt(G * klen)
-    hk = pA * np.exp(1j * w * t) + np.conj(pB) * np.exp(-1j * w * t)
+    hk = pA * np.exp(-1j * w * t) + np.conj(pB) * np.exp(1j * w * t)
     p = hk * np.exp(1j * (pk_x * x + pk_z * z))
     h = 2.0 * float(np.sum(np.real(p)))
     # Dx = 2 Re[(-i kx/k) hk e^{ikx}] = 2 (kx/k) Im[p]   (chop_sign = -1 is the shader's)
@@ -796,10 +796,17 @@ shift = (i - 30) + sub
 speed = -shift * PATCH_L[0] / N
 print("      cross-correlation peak at %+.2f texels => the crest pattern moved %+.2f m/s in +x, "
       "i.e. %s" % (shift, speed, "EAST" if speed > 0 else "WEST"))
-print("      => a bin at wavevector k travels toward -k^: with e^{+i(k.x + wt)} the phase fronts")
-print("         run AGAINST k, so the sea runs OPPOSITE to the partition's dirTo.  (Tessendorf's")
-print("         equations have this too; it is invisible under his |k^.w^|^2 spectrum, which is")
-print("         symmetric in k.  The cos^2s lobe here is not, so it shows.)")
+# THE DIRECTION GATE. dirTo is +x here, so a correct sea has speed > 0. This is an ASSERT,
+# not a paragraph: before 2026-09-08 CsModulate paired e^{+iwt} with the e^{+ik.x} synthesis,
+# so every bin ran along -k and a swell declared toward the east measured -19.62 m/s. It is
+# invisible under Tessendorf's |k^.w^|^2 spectrum (symmetric in k); the cos^2s lobe here is
+# not symmetric, so it showed. The rotor now carries -w. A regression flips `speed` and fails.
+agree = speed > 0.0
+print("      => the sea runs %s the partition's dirTo (measured %+.2f m/s, dirTo = +x)"
+      % ("TOWARD" if agree else "OPPOSITE to", speed))
+check("the cascade sea propagates TOWARD its partition's dirTo", agree)
+check("...and at the deep-water phase speed (within 12%)", abs(abs(speed) - c_deep) < 0.12 * c_deep,
+      "measured %.2f m/s vs c = %.2f m/s" % (abs(speed), c_deep))
 
 # Does the choppy displacement compress crests (real Gerstner) or stretch them?  The Jacobian
 # CsAssemble writes is the whole-field answer: J < 1 means the surface folded IN.
