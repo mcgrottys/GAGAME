@@ -142,20 +142,37 @@ float2 WavePageUv(float2 xz) {
                                  0.15915494309f) * gWaveP.w;
     return float2(mx - gWaveP.x, my - gWaveP.y) * gWaveP.z;
 }
-bool WavePageResident(float2 uv, uint plane) {
+// M9bl: the finest RESIDENT mip of one plane here (byte = finest mip * 16, conservative
+// per 128th of the page). > 7.5 means nothing is resident at all.
+float WavePageHave(float2 uv, uint plane) {
     const int2 rc = int2(clamp(uv * 128.0f, 0.0f, 127.0f));
-    return gTA[gWaveU.y].Load(int4(rc, int(6u + plane), 0)).x * 15.9375f < 0.5f;
+    return gTA[gWaveU.y].Load(int4(rc, int(6u + plane), 0)).x * 15.9375f;
+}
+// Was "< 0.5f": resident meant MIP 0 RESIDENT, so a window holding coarse levels counted as
+// absent and the solved field contributed nothing at all. That is the opposite of this
+// engine's residency law (priors: a miss degrades to the best resident ANCESTOR -- blur --
+// never to nothing and never to unmapped garbage), and it is why the field could only ever
+// be all-or-nothing instead of arriving as a gradient.
+bool WavePageResident(float2 uv, uint plane) {
+    return WavePageHave(uv, plane) <= 7.5f;
 }
 float4 WavePageSample(float2 uv, uint plane) {
-    if (!WavePageResident(uv, plane)) return 0.0f;
-    const float2 tf = uv * 16384.0f - 0.5f;
+    // M9bl: read the finest mip actually RESIDENT here, not mip 0. Same clamp the height
+    // pages, the exposure and the churn already use -- the window refines as its levels
+    // land instead of appearing whole.
+    const float have = WavePageHave(uv, plane);
+    if (have > 7.5f) return 0.0f;                 // nothing resident: no opinion
+    const float mip = max(round(have), 0.0f);
+    const float dim = 16384.0f / exp2(mip);
+    const float2 tf = uv * dim - 0.5f;
     const float2 t0 = floor(tf);
     const float2 fr = tf - t0;
+    const int hi = int(dim) - 1;
     float4 acc = 0.0f;
     [unroll] for (int k = 0; k < 4; ++k) {
-        const int2 tc = clamp(int2(t0) + int2(k & 1, k >> 1), int2(0, 0), int2(16383, 16383));
+        const int2 tc = clamp(int2(t0) + int2(k & 1, k >> 1), int2(0, 0), int2(hi, hi));
         acc += ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y) *
-               gTA[gWaveU.x].Load(int4(tc, int(6u + plane), 0));
+               gTA[gWaveU.x].Load(int4(tc, int(6u + plane), int(mip)));
     }
     return acc;
 }

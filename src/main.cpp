@@ -85,6 +85,10 @@ using namespace ga;
 
 namespace {
 
+// M9bl: the wave tenant's coarsest mip (7 levels, like the other page tenants). The window's
+// want rides the mip its on-screen size justifies, so the field arrives as a gradient.
+constexpr double kWaveMaxMip = 6.0;
+
 struct Options {
     uint32_t width = 1600, height = 900;
     bool headless = false;
@@ -4366,12 +4370,62 @@ int main(int argc, char** argv) {
                         if (waveSrc && waveT >= 0 && waveSrc->Key() != 0) {
                             // Bracketed apart from waveField.Update: these Wants are the whole
                             // window at mip 0 on every plane, a map find per un-stamped tile.
+                            //
+                            // M9bl: ...and THAT is the whole point of the gate below. Mip 0 is
+                            // the finest level of a 16384-texel pyramid, asked for across the
+                            // entire window, on every plane, every frame, from every altitude.
+                            // From orbit the solved window subtends single-digit pixels, so
+                            // this demanded the sharpest data in the tenant for a handful of
+                            // pixels -- and it competes for the SAME 48-slot in-flight loader
+                            // queue the imagery streams through.
+                            //
+                            // MEASURED (--res-trace, storm rail f30): earth.height held 27 read
+                            // slots against 17 wave planes and only 17 slots against 33, so the
+                            // land lost a third of its loader bandwidth and stood at a coarse
+                            // mip through the whole descent -- the blurry coastline. Raising
+                            // --tile-budget from 3000 to 9000 changed nothing, because the
+                            // frame budget was never the bottleneck; the queue was.
+                            //
+                            // The rule: stream the window only once it is worth its finest mip.
+                            // WavePageSample reads mip 0 and gates on residency, so under the
+                            // threshold the solved field contributes nothing -- correct, since
+                            // at that range it cannot be seen, and the ambient cascades own the
+                            // water anyway. At 3.8 km of window this crosses at ~40 km, which
+                            // the flood rail reaches ~17 s in: fourteen seconds of lead before
+                            // the helm, so the field is long resident by the time it matters.
+                            const auto& wtab = waveField->Table();
+                            const double cellW = 1.0 / (std::max)(double(wtab.invCell), 1e-9);
+                            const double spanW = double(wtab.nx) * cellW;
+                            const double cxW = double(wtab.orgX) + spanW * 0.5;
+                            const double czW = double(wtab.orgZ) + double(wtab.ny) * cellW * 0.5;
+                            const double dxW = cam.px - cxW, dzW = cam.pz - czW;
+                            const double distW = (std::max)(
+                                std::sqrt(dxW * dxW + cam.py * cam.py + dzW * dzW), 1.0);
+                            const double vhW = opt.headless
+                                                   ? double(opt.height)
+                                                   : double((std::max)(1u, window.Height()));
+                            const double pixAngW =
+                                double(cam.fovY) / (std::max)(vhW, 1.0);
+                            const double winPx = spanW / (distW * (std::max)(pixAngW, 1e-9));
+                            // The mip the window can actually be SEEN at: nx texels across
+                            // mapped onto winPx pixels. Every other tenant chooses this way
+                            // (LeafWants: px = arc / (distNear * pixAng)); this one asked for
+                            // mip 0 flat, which is why it never formed a gradient and why
+                            // --ring-loads had no parent chain to admit. Now the request walks
+                            // in coarse-first like everything else, and WavePageSample reads
+                            // whatever level has landed.
+                            const double texAcross = (std::max)(double(wtab.nx), 1.0);
+                            const double lvl =
+                                std::ceil(std::log2((std::max)(texAcross /
+                                                               (std::max)(winPx, 1.0), 1.0)));
+                            const uint32_t wantMip = static_cast<uint32_t>(
+                                (std::min)((std::max)(lvl, 0.0), kWaveMaxMip));
                             PROF_BEGIN();
                             float u0, v0, u1, v1;
                             waveSrc->WindowUv(u0, v0, u1, v1);
                             const uint32_t nPlanes = waveField->Table().nUsed + 1u;
                             for (uint32_t p = 0; p < nPlanes; ++p) {
-                                resMgr.Want(waveT, 6u + p, 0u, u0, v0, u1, v1);
+                                resMgr.Want(waveT, 6u + p, wantMip, u0, v0, u1, v1);
                             }
                             PROF_END(10);
                         }
