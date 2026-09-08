@@ -56,6 +56,7 @@
 #include "core/CrashTrace.h"
 #include "core/ThreadAudit.h"
 #include "core/ThreadManager.h"
+#include "sim/RigidBody.h"
 #include "sim/SimClock.h"
 #include "core/DxTest.h"
 #include "core/Pga.h"
@@ -1828,6 +1829,7 @@ int main(int argc, char** argv) {
             ok &= RunAtlasSelfTest(gpu, sc, opt.shaderDir);
             ok &= RunThreadSelfTest();    // the thread instrument's own gate: it must SEE a race
             ok &= RunSimClockSelfTest();  // the scene clock: whole quanta, framing-independent
+            ok &= RunRigidBodySelfTest();  // M9bq: the body with momentum -- L, T, moment arms
             gpu.Shutdown();
             return ok ? 0 : 1;
         }
