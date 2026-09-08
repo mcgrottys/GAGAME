@@ -278,20 +278,36 @@ void OceanCpu::SetSeaState(const PartParam* parts, int count, uint32_t seed, con
 }
 
 // The truncated direct sum. Per retained pair this is one rotor (the same e^{-iwt} CsModulate
-// applies) times one spatial phasor (the e^{+ik.x} CsFft synthesises), and then the eight linear
-// spectral fields are all real multiples of that product's real and imaginary parts:
+// applies) times one spatial phasor (the e^{+ik.x} CsFft synthesises) -- and TWO complex numbers
+// come out of that single pair of sincos, not one:
 //
-//     P = hk * e^{i k.x}
-//     h  = 2 Re[P]                        Dx = 2 (kx/k) Im[P]      Dz = 2 (kz/k) Im[P]
-//     hx = -2 kx Im[P]                    hz = -2 kz Im[P]
-//     Jxx = 2 (kx^2/k) Re[P]              Jzz = 2 (kz^2/k) Re[P]   Jxz = 2 (kx kz/k) Re[P]
+//     f = h0(+k) e^{-iwt}          the half of the pair that travels along +k
+//     g = conj(h0(-k)) e^{+iwt}    the half that travels along -k (see OceanCpu.h, THE TRAP)
+//     P = (f + g) e^{+i k.x}       f + g is CsModulate's hk, verbatim
+//     Q = (f - g) e^{+i k.x}       the same sum with the -k half negated
 //
-// (Only the first row is needed here; the rest is written down because it is the same P, so a
-// normal or a Jacobian costs no extra transcendental if this ever grows one. Derivation: the
-// factor 2 is the conjugate pair; Dx = 2 Re[(-i kx/k) hk e^{ikx}] = 2 (kx/k) Im[P] because
-// Re[-i z] = Im[z], and that -i is the chop sign read off CsModulate's float2(hk.y, -hk.x).)
-void OceanCpu::Displacement(double wx, double wz, double tSec, double out[3]) const {
-    double dx = 0.0, h = 0.0, dz = 0.0;
+// Every linear field at this point is then a real multiple of one of their two parts:
+//
+//     h   = 2 Re[P]               Dx  = 2 (kx/k) Im[P]      Dz  = 2 (kz/k) Im[P]
+//     hx  = -2 kx Im[P]           hz  = -2 kz Im[P]
+//     vx  = 2 w (kx/k) Re[Q]      vz  = 2 w (kz/k) Re[Q]    vy  = 2 w Im[Q]
+//     Jxx = 2 (kx^2/k) Re[P]      Jzz = 2 (kz^2/k) Re[P]    Jxz = 2 (kx kz/k) Re[P]
+//
+// (The Jacobian row is written down and not computed: it is the same P, so it would cost no
+// transcendental, and nothing has asked for it yet.)
+//
+// WHERE EACH SIGN COMES FROM. The factor 2 is the conjugate pair, on every row.
+//   Dx   Re[-i z] = Im[z], and that -i is the chop sign read off CsModulate's float2(hk.y, -hk.x).
+//   hx   d/dx of hk e^{+ik.x} brings down +i kx -- the SPATIAL sign and only that, since the rotor
+//        sits inside hk where no x-derivative reaches it -- and then Re[i z] = -Im[z]. This is
+//        CsModulate's hx = float2(-hk.y, hk.x) * k.x, which is (+i)(a + ib)*kx, ported not
+//        invented. proofs/ocean_cpu.py gate 6 finite-differences h and would catch a flip.
+//   v    linear deep-water theory, derived in OceanCpu.h rather than ported, because the GPU has
+//        no velocity channel. vy = 2 w Im[Q] is IDENTICALLY d/dt of 2 Re[P] (d/dt sends f -> -iwf
+//        and g -> +iwg, so dh/dt = 2 Re[-iw(f - g) e^{ik.x}] = 2 w Im[Q]) -- which is why gate 7
+//        can finite-difference h in TIME and land on vy, and why using P there would not.
+void OceanCpu::Sample(double wx, double wz, double tSec, OceanSample& out) const {
+    double dx = 0.0, h = 0.0, dz = 0.0, sx = 0.0, sz = 0.0, vx = 0.0, vy = 0.0, vz = 0.0;
     if (m_ready) {
         for (int c = 0; c < kCascades; ++c) {
             for (const Bin& b : m_bin[c]) {
@@ -299,27 +315,61 @@ void OceanCpu::Displacement(double wx, double wz, double tSec, double out[3]) co
                 // is what makes a bin travel along +k, i.e. toward its partition's dirTo.
                 const double wt = -b.w * tSec;
                 const double cw = std::cos(wt), sw = std::sin(wt);
-                // hk = h0(+k) e^{-iwt} + conj(h0(-k)) e^{+iwt}   (CsModulate, verbatim)
-                const double hkr = (b.ar * cw - b.ai * sw) + (b.br * cw - b.bi * sw);
-                const double hki = (b.ar * sw + b.ai * cw) - (b.br * sw + b.bi * cw);
+                // The two halves of CsModulate's hk, kept APART rather than added: they travel
+                // opposite ways, so their orbital velocities have opposite k^ and only their
+                // difference is the pair's horizontal velocity. Their sum is hk, exactly.
+                const double fr = b.ar * cw - b.ai * sw;
+                const double fi = b.ar * sw + b.ai * cw;
+                const double gr = b.br * cw - b.bi * sw;
+                const double gi = -(b.br * sw + b.bi * cw);
+                const double hkr = fr + gr, hki = fi + gi;   // == CsModulate's hk
+                const double dfr = fr - gr, dfi = fi - gi;   // the -k half negated
 
-                // P = hk * e^{+i k.x}, the spatial phasor CsFft's synthesis transform supplies.
+                // P and Q = (hk, hk with the -k half negated) * e^{+i k.x}, the spatial phasor
+                // CsFft's synthesis transform supplies. One sincos serves both.
                 const double th = b.kx * wx + b.kz * wz;
                 const double ct = std::cos(th), st = std::sin(th);
                 const double pRe = hkr * ct - hki * st;
                 const double pIm = hkr * st + hki * ct;
+                const double qRe = dfr * ct - dfi * st;
+                const double qIm = dfr * st + dfi * ct;
 
                 h += 2.0 * pRe;
-                const double s = 2.0 * pIm * b.invK;
-                dx += s * b.kx;
-                dz += s * b.kz;
+                const double p2 = 2.0 * pIm;         // the chop and the slope share it
+                const double pk = p2 * b.invK;
+                dx += pk * b.kx;
+                dz += pk * b.kz;
+                sx -= p2 * b.kx;                     // hx = -2 kx Im[P]
+                sz -= p2 * b.kz;
+                const double q2 = 2.0 * b.w * qRe * b.invK;   // w * k^ * (this pair's elevation)
+                vx += q2 * b.kx;
+                vz += q2 * b.kz;
+                vy += 2.0 * b.w * qIm;               // == d/dt of this pair's height
             }
         }
     }
-    // CsAssemble: float4(fLambda * dx, h, fLambda * dz, 0). The height channel is NOT scaled.
-    out[0] = m_lambda * dx;
-    out[1] = h;
-    out[2] = m_lambda * dz;
+    // CsAssemble: float4(fLambda * dx, h, fLambda * dz, 0). The height channel is NOT scaled --
+    // and neither is the slope (CsAssemble writes hx/hz raw into the deriv texture) nor the
+    // velocity, which is a property of the water and not of a displacement style.
+    out.dx = m_lambda * dx;
+    out.h = h;
+    out.dz = m_lambda * dz;
+    out.sx = sx;
+    out.sz = sz;
+    out.vx = vx;
+    out.vy = vy;
+    out.vz = vz;
+}
+
+// ONE implementation, not two. The sign ledger above is hard enough to hold in one place, and the
+// five channels this caller drops are ~10% of the query: the two sincos per bin are the cost, and
+// they are paid either way. Callers that only need the surface point keep their old signature.
+void OceanCpu::Displacement(double wx, double wz, double tSec, double out[3]) const {
+    OceanSample s;
+    Sample(wx, wz, tSec, s);
+    out[0] = s.dx;
+    out[1] = s.h;
+    out[2] = s.dz;
 }
 
 double OceanCpu::ResidualVarianceFraction(int cascade) const {

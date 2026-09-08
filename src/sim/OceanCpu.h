@@ -2,8 +2,10 @@
 //  OceanCpu - the three FFT wave cascades, evaluated on the CPU, anywhere on the planet.
 //
 //  WHY THIS FILE EXISTS.  A hull needs the sea surface where the hull is, this frame, in doubles:
-//  the heave under each station, and the horizontal (choppy) offset that decides WHICH water the
-//  bow is actually in.  The cascades that carry that sea live only as GPU textures written by
+//  the heave under each station, the horizontal (choppy) offset that decides WHICH water the bow
+//  is actually in, the SLOPE that turns that point into a free-surface normal, and the water's own
+//  VELOCITY, without which every drag force is computed against a sea standing perfectly still.
+//  The cascades that carry that sea live only as GPU textures written by
 //  shaders/OceanCompute.hlsl.  Inside WaveField's solved window the CPU has ProbeAt; OUTSIDE it --
 //  which is to say everywhere in open ocean, which is almost everywhere -- the CPU knows nothing
 //  about the sea at all.  This file closes that.  The alternative, reading the displacement
@@ -60,6 +62,14 @@
 //            height channel is never scaled by the choppy constant.
 //    layout  the packed complex C = h_hat + i*Dx_hat lands h in .re and Dx in .im, which is why
 //            the disp texture is (Dx, h, Dz) and why Displacement returns it in that order.
+//    slope   +i k, and it is the SPATIAL sign ALONE.  CsModulate writes hx = float2(-hk.y, hk.x)
+//            * k.x, and (-b, a) is exactly (+i)*(a + ib), so hx_hat = i*kx*hk -- carried to real
+//            space by the same e^{+ik.x} synthesis as the height.  The rotor cannot enter it:
+//            d/dx of hk*e^{+ik.x} brings down +i*kx because x appears in the phasor and nowhere
+//            else, so 2026-09-08's e^{+iwt} -> e^{-iwt} moved the VALUE of every slope and not
+//            its sign.  (Had CsFft synthesised with e^{-ik.x}, the factor would be -i*kx; that
+//            pairing is what the sign is read from, not the rotor.)  Flipping it, and dropping
+//            the k, are proofs/ocean_cpu.py gate 6's two negative controls.
 //
 //  TWO CONSEQUENCES OF THOSE CONVENTIONS, MEASURED RATHER THAN ASSERTED (proofs/ocean_cpu.py's
 //  REPORT block prints both, and they are properties of the GPU shader, faithfully mirrored here,
@@ -117,6 +127,72 @@
 
 namespace ga {
 
+// ------------------------------------------------------------------------------------------------
+//  ONE POINT OF THE SEA -- everything a hull asks of it, from ONE pass over the retained bins.
+//
+//  Why one struct and not three calls: the cost of a query IS the two sincos per retained bin
+//  (COST, above), and all eight numbers are real multiples of the same two phasors those sincos
+//  build.  A second pass for the slope would double a 36 us query to buy arithmetic already in
+//  flight.  Nothing here is boat-shaped -- no station geometry, no fades, no policy; those belong
+//  to the caller, as the last KNOWN DIFFERENCE above says.
+//
+//  SLOPE.  (sx, sz) = (dh/dx, dh/dz) of the height field with respect to the QUERY coordinate.
+//  That is the shader's hx/hz channel exactly -- the one Sea.hlsl:316 turns into
+//  normalize(float3(-hx, 1, -hz)) -- so a caller building a free-surface normal that way builds
+//  the same vector the render lights with, and owns the cascade fades and the |slope| <= 1.1 clamp
+//  Sea.hlsl applies just before it.
+//
+//  WHAT THE SLOPE IS NOT: the gradient with respect to WORLD position.  The choppy map sends
+//  (x, z) to (x + lambda*Dx, z + lambda*Dz), so the exact tangents of the DRAWN surface carry the
+//  chop's own gradient too, and the exact normal needs the Jacobian columns (Jxx, Jzz, Jxz).
+//  Those fall out of the same phasor for no extra transcendental and are deliberately NOT
+//  returned: the render ignores them as well, and a hull whose normal is built differently from
+//  the water it is drawn on is a bug that looks like tuning.  Add them the day something measures
+//  the difference and cares.
+//
+//  PARTICLE VELOCITY.  (vx, vy, vz) is the water's velocity at the surface, m/s, of the particle
+//  whose Lagrangian LABEL is (wx, wz) -- i.e. of the water drawn at (wx + dx, h, wz + dz).  It has
+//  no shader equivalent, because the GPU never needed one, so it is DERIVED from linear
+//  deep-water theory per bin rather than ported:
+//
+//    For one free wave of elevation eta = Re[H e^{i(k.x - wt)}] the potential satisfying Laplace
+//    and the linearised free-surface conditions is phi = Re[-i (g H / w) e^{|k|y} e^{i(k.x - wt)}]
+//    with y = 0 the mean surface.  w^2 = g|k| is EXACTLY the condition that makes d(phi)/dy at
+//    y = 0 equal d(eta)/dt, so no dispersion assumption enters beyond the one Bin::w already
+//    carries.  Then
+//
+//        horizontal   grad_xz phi = (g/w) k eta = w * k^ * eta        (g/w = w/|k| in deep water)
+//        vertical     d(phi)/dy   = d(eta)/dt
+//
+//    Evaluating at y = 0 rather than at y = eta is a second-order difference, which is the order
+//    the entire linear synthesis is written to; there is no depth factor to apply because
+//    e^{|k| * 0} = 1.  The horizontal is IN PHASE with the elevation (fastest forward at the
+//    crest, backward in the trough) and the vertical is in quadrature, which is what makes a deep
+//    water orbit a circle of radius w*a -- gate 8 measures the circle rather than assuming it.
+//
+//  THE TRAP: a retained pair is not one wave, it is TWO.  hk = h0(+k) e^{-iwt} +
+//  conj(h0(-k)) e^{+iwt}, and while the first term travels along +k, the second is a wave at
+//  wavevector -k travelling along -k -- 2 Re[conj(B) e^{i(k.x + wt)}] IS 2 Re[B e^{i((-k).x - wt)}].
+//  Their k^ are OPPOSITE, so the pair's horizontal velocity is w*k^*(eta_A - eta_B), NEVER
+//  w*k^*h.  A directional swell hides the difference (where A is large, B is nearly zero); a
+//  cos^2 8 wind sea does not, so getting it wrong would have been a drag bias that appeared only
+//  in a short sea and looked like a tuning problem.  The loop therefore carries a SECOND phasor Q
+//  -- the same sum with the -k half negated -- for four extra multiplies and no extra
+//  transcendental.  See OceanCpu.cpp.
+//
+//  WHAT THIS IS NOT: d/dt of the choppy position (x + lambda*Dx, h, z + lambda*Dz).  That would
+//  inherit lambda, an artistic constant and not a fluid velocity, and it would inherit the chop's
+//  sign -- which the ledger above records as pointing AWAY from crests, so for a single wave
+//  d(lambda*Dx)/dt comes out as -lambda*w*k^*eta, exactly backward.  proofs/ocean_cpu.py MEASURES
+//  that anti-correlation instead of asserting it, so the day the chop sign is fixed in the shader
+//  the number moves and says so.
+// ------------------------------------------------------------------------------------------------
+struct OceanSample {
+    double dx = 0, h = 0, dz = 0;   // displacement, m -- the disp texture's (Dx, h, Dz), lambda in
+    double sx = 0, sz = 0;          // dh/dx, dh/dz, dimensionless -- the deriv texture's (hx, hz)
+    double vx = 0, vy = 0, vz = 0;  // particle velocity at the surface, m/s -- no shader twin
+};
+
 class OceanCpu {
 public:
     static constexpr int kCascades = 3;      // OceanFft::kCascades
@@ -160,6 +236,12 @@ public:
     // world point" must therefore iterate, because the map is not the identity; one Newton step is
     // usually enough at kLambda 1.1 and that is the caller's business, not this file's.
     void Displacement(double wx, double wz, double tSec, double out[3]) const;
+
+    // Displacement, slope and particle velocity, from ONE pass over the same bins. See the
+    // OceanSample block above for what each channel means and exactly where its sign comes from.
+    // Displacement() is this call with five of the eight numbers dropped, and costs what it costs:
+    // there is no cheaper query, because the transcendentals are shared by all eight.
+    void Sample(double wx, double wz, double tSec, OceanSample& out) const;
 
     bool Ready() const { return m_ready; }
 

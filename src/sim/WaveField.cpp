@@ -873,18 +873,25 @@ void WaveField::WaitForSolve() {
     }
 }
 
-void WaveField::AdoptTable(const GpuTable& t) {
-    // The display closure: exaggeration multiplies the DEQUANT tables, never the solve.
-    // The packed bytes stay raw physics (cache and bucket key untouched); the GPU decodes
-    // a/aMax * (exag*aMaxRaw) and ProbeAt reads this same table, so the twin holds.
-    m_table = t;
+// The display closure: exaggeration multiplies the DEQUANT tables, never the solve. The
+// packed bytes stay raw physics (cache and bucket key untouched); the GPU decodes
+// a/aMax * (exag*aMaxRaw) and ProbeAt applies this SAME function to its own snapshot, so the
+// 9b/9c twin holds. It lives as a function rather than only inside AdoptTable because there
+// are now two readers of a solve and a closure copied twice is a closure that can drift.
+// (m_cfg is written once, by Configure, before any painting thread exists -- so a const call
+// from a worker is safe; if a future Configure ever runs live this read becomes a race.)
+WaveField::GpuTable WaveField::DisplayTable(const GpuTable& raw) const {
+    GpuTable t = raw;
     const float e = m_cfg.displayExag;
     if (e > 0.0f && e != 1.0f) {
-        for (int c = 0; c < kMaxComp; ++c) m_table.aMax[c] *= e;
-        m_table.envMax *= e;    // the envelope shades what the geometry shows
-        m_table.excMax *= e;
+        for (int c = 0; c < kMaxComp; ++c) t.aMax[c] *= e;
+        t.envMax *= e;    // the envelope shades what the geometry shows
+        t.excMax *= e;
     }
+    return t;
 }
+
+void WaveField::AdoptTable(const GpuTable& t) { m_table = DisplayTable(t); }
 
 bool WaveField::LoadCache(uint64_t key, Solved& out) const {
     char path[128];
@@ -970,7 +977,15 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix) const 
     const std::shared_ptr<const Solved> live = Live();
     if (!live || live->atlas.empty()) return p;
     const std::vector<uint8_t>& m_cpuAtlas = live->atlas;
-    const GpuTable& t = m_table;
+    // THREAD SAFETY (this used to be half-done): the atomic_load above takes a snapshot of the
+    // BYTES, and the table must come from the same one. Reading m_table instead was two bugs
+    // in one line -- a plain data race, because AdoptTable rewrites that member field by field
+    // on the main thread while painting threads probe, and a torn PAIRING, because even a
+    // clean read could hand this loop the new solve's dequant scales over the old solve's
+    // bytes, decoding every component whose aMax moved at the wrong amplitude until the next
+    // frame. live->table is immutable the instant it is published, so it is read here and the
+    // display closure applied locally. The snapshot is now atlas-and-table or neither.
+    const GpuTable t = DisplayTable(live->table);
     const int nx = int(t.nx), ny = int(t.ny);
     if (nx < 2 || ny < 2) return p;
     // texel-center bilinear, exactly the GPU kernel's addressing (clamp at the window edge).
@@ -994,6 +1009,13 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix) const 
         return (at(0, 0) * (1.0 - wxf) + at(1, 0) * wxf) * (1.0 - wzf) +
                (at(0, 1) * (1.0 - wxf) + at(1, 1) * wxf) * wzf;
     };
+    // Eight running sums, all in DOUBLE. The engine's law is doubles on the CPU, and there is
+    // a concrete reason here: kMaxComp is 32 now, and accumulating 32 terms in float is 32
+    // roundings of the quantity a whole hull responds to. (eta moved to double with the rest:
+    // the shift is ~1e-7 m, five orders under the 8-bit atlas's own half-LSB floor, so the
+    // 9b/9c twin sees nothing -- it is only ever more accurate.)
+    double eta = 0.0, dxS = 0.0, dzS = 0.0, sxS = 0.0, szS = 0.0;
+    double vxS = 0.0, vyS = 0.0, vzS = 0.0;
     for (uint32_t c = 0; c < t.nUsed && c < uint32_t(kMaxComp); ++c) {
         if (!(t.aMax[c] > 0.0f)) continue;   // gated to the cascades (or flat sea)
         const double a = bil(c, 0) * double(t.aMax[c]);
@@ -1014,8 +1036,34 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix) const 
         p.a[c] = float(a);
         p.k[c] = float(k);
         p.phase[c] = float(std::atan2(sa, ca));
-        p.eta += float(a * ca);
+
+        // ---- the six new sums. Derivation and sign ledger: WaveField.h, above `struct
+        // Probe`. In one line: ca IS cos(theta) with theta = phi - sigma*t, so d(theta)/dt
+        // = -sigma and grad(theta) = k*d^, and everything below is the chain rule on the
+        // eta line that follows. a*ca and a*sa are the wave's in-phase and quadrature parts;
+        // all six quantities are those two times a scalar, which is why this costs no
+        // second sincos and no second bilinear tap.
+        const double dX = double(t.dirX[c]), dZ = double(t.dirZ[c]);
+        const double sig = double(t.sigma[c]);
+        const double aC = a * ca;   // in phase with the crest
+        const double aS = a * sa;   // 90 deg ahead of it
+        eta += aC;                                   // eta = a cos(theta)   <- the reference
+        dxS -= aS * dX;                              // D_h = -a sin(theta) d^   (chop = 1;
+        dzS -= aS * dZ;                              //        WaterBank scales this by wfChop)
+        sxS -= aS * k * dX;                          // grad eta = -a k sin(theta) d^
+        szS -= aS * k * dZ;                          //   (the k is the term: a slope is 1/L)
+        vxS += sig * aC * dX;                        // u = +sigma a cos(theta) d^  (crest
+        vzS += sig * aC * dZ;                        //   water runs WITH the wave)
+        vyS += sig * aS;                             // w = +sigma a sin(theta) == d(eta)/dt
     }
+    p.eta = float(eta);
+    p.dx = float(dxS);
+    p.dz = float(dzS);
+    p.sx = float(sxS);
+    p.sz = float(szS);
+    p.vx = float(vxS);
+    p.vy = float(vyS);
+    p.vz = float(vzS);
     p.rms = float(bil(t.envSlice, 0) * double(t.envMax));
     p.excess = float(bil(t.envSlice, 1) * double(t.excMax));
     p.valid = true;

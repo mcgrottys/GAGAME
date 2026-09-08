@@ -329,6 +329,17 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
             }
         }
         m_fft.SetSeaState(parts, activeParts, seed);
+        // M9bq: THE CPU TWIN IS FED FROM THE SAME CALL SITE, with the same partitions and the
+        // same seed, so the two processors cannot come to disagree about what sea this is. A
+        // hull querying a separately-configured OceanCpu would ride a statistically identical
+        // and physically DIFFERENT ocean -- right Hs, wrong crests -- and nothing would ever
+        // look wrong enough to investigate.
+        {
+            const float pl[3] = {m_fft.PatchL(0), m_fft.PatchL(1), m_fft.PatchL(2)};
+            const float lo[3] = {m_fft.BandLo(0), m_fft.BandLo(1), m_fft.BandLo(2)};
+            const float hi[3] = {m_fft.BandHi(0), m_fft.BandHi(1), m_fft.BandHi(2)};
+            m_oceanCpu.SetSeaState(parts, activeParts, seed, pl, lo, hi, m_fft.Lambda());
+        }
         hsModel = SeaState::SignificantHeight(parts, activeParts);
         for (int i = 0; i < 4; ++i) m_parts[i] = (i < activeParts) ? parts[i] : PartParam{};
         if (activeParts > 0) {

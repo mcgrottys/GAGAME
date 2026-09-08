@@ -69,6 +69,20 @@ public:
     // M7j --trace: read the ACTUAL bank texel at a world point -- the hypervisor's
     // cross-check between the CPU's expectation and what the GPU wrote.
     void TraceProbe(Gpu& gpu, double wx, double wz);
+    // M9bq --twin-surface: what the bank ACTUALLY holds at a set of world points, for the
+    // CPU/GPU twin gate. TraceProbe answers one point and costs three whole-texture readbacks
+    // to do it; a gate wants hundreds of points and can afford exactly one fence, so this reads
+    // each plane ONCE and then addresses every point out of that snapshot. Same texel maths,
+    // same finest-resident-ring rule, one drain instead of 3N.
+    struct BankPoint {
+        bool valid = false;      // false = outside every resident ring
+        int ring = -1;           // which mip answered
+        float texelM = 0.0f;
+        float dispX = 0, dispY = 0, dispZ = 0, foam = 0;
+        float level = 0, sigma2 = 0, curU = 0, curV = 0;
+    };
+    void ReadBankPoints(Gpu& gpu, const double* worldXz, int n, BankPoint* out);
+
     // M7k --dump-fibers: export the three bank planes as PNGs + validate the value
     // ranges against the AST's declarations -- the hypervisor for whole fields.
     void DumpFibers(Gpu& gpu);

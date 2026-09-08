@@ -224,6 +224,59 @@ float HalfF(uint16_t h) {
 }
 }  // namespace
 
+// M9bq: the twin gate's reader. ONE readback per plane, then N points addressed out of the
+// snapshot -- see the header for why TraceProbe cannot serve this.
+//
+// A point is answered by the FINEST resident ring that contains it, which is the same rule the
+// renderer's BankSample walks; a point outside every ring comes back valid = false rather than
+// clamped to the coarsest, because "off the bank" and "on the bank's edge" are different
+// statements and a gate that confused them would report a fictitious disagreement.
+void WaterBankLayer::ReadBankPoints(Gpu& gpu, const double* worldXz, int n, BankPoint* out) {
+    for (int i = 0; i < n; ++i) out[i] = BankPoint{};
+    if (n <= 0) return;
+
+    auto snap = [&](TileAtlas2D& bank, std::vector<uint8_t>& data, uint32_t& pitch) {
+        GpuTexture wrap;
+        wrap.res = bank.Res();
+        wrap.format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        wrap.width = 3072;
+        wrap.height = 512;
+        wrap.state = m_state;
+        data = gpu.ReadbackTexture(wrap, &pitch);
+    };
+    std::vector<uint8_t> dData, pData;
+    uint32_t dPitch = 0, pPitch = 0;
+    snap(m_disp, dData, dPitch);
+    snap(m_param, pData, pPitch);
+    if (dData.empty() || pData.empty()) return;
+
+    for (int i = 0; i < n; ++i) {
+        const double wx = worldXz[i * 2 + 0], wz = worldXz[i * 2 + 1];
+        for (int m = 0; m < kMips; ++m) {
+            if (!m_orgValid[m]) continue;
+            const double texel = m_baseTexelM * (1 << m);
+            const int tx = static_cast<int>((wx - m_orgX[m]) / texel);
+            const int ty = static_cast<int>((wz - m_orgZ[m]) / texel);
+            if (tx < 1 || ty < 1 || tx >= 511 || ty >= 511) continue;
+            auto at = [&](const std::vector<uint8_t>& data, uint32_t pitch, float o[4]) {
+                const uint16_t* px = reinterpret_cast<const uint16_t*>(
+                    data.data() + static_cast<size_t>(pitch) * ty) + (m * 512 + tx) * 4;
+                for (int c = 0; c < 4; ++c) o[c] = HalfF(px[c]);
+            };
+            float d[4], p[4];
+            at(dData, dPitch, d);
+            at(pData, pPitch, p);
+            BankPoint& b = out[i];
+            b.valid = true;
+            b.ring = m;
+            b.texelM = static_cast<float>(texel);
+            b.dispX = d[0]; b.dispY = d[1]; b.dispZ = d[2]; b.foam = d[3];
+            b.level = p[0]; b.sigma2 = p[1]; b.curU = p[2]; b.curV = p[3];
+            break;
+        }
+    }
+}
+
 void WaterBankLayer::TraceProbe(Gpu& gpu, double wx, double wz) {
     for (int m = 0; m < kMips; ++m) {
         if (!m_orgValid[m]) continue;

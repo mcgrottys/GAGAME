@@ -17,6 +17,7 @@
 #include "scene/Layer.h"
 #include "sim/BathyModel.h"
 #include "sim/CurrentModel.h"
+#include "sim/OceanCpu.h"
 #include "sim/SeaState.h"
 #include "sim/SweSolver.h"
 
@@ -147,6 +148,10 @@ public:
     // ACT / peak solved) restores the magnitude while the solver keeps the spatial shape.
     float sweCurrentGain = 3.2f;
     float heightScale = 1.15f;   // vertical exaggeration; vqview shipped 1.15 as its look
+
+    // M9bq: the cascades, evaluated on the CPU for the hull. Owned here because this is where
+    // the sea state is decided, and fed in the same breath as the GPU's copy (SeaLayer.cpp).
+    const OceanCpu& Ocean() const { return m_oceanCpu; }
     // M9a: fill the missing wind sea from the GFS wind (data/wave_scene.json; 0 = off)
     float windSeaFill = 1.0f;
     // M9c: how far the fold's band wavelength follows the SPECTRUM instead of the band's
@@ -261,6 +266,7 @@ private:
     ID3D12RootSignature* m_rootSig = nullptr;
     Com<ID3D12PipelineState> m_seaPso, m_specPso, m_seaPsoWire;
     OceanFft m_fft;
+    OceanCpu m_oceanCpu;   // M9bq: the hull's copy of the same three cascades
 
     SeaCbData m_seaCb{};
     SpecCbData m_specCb{};

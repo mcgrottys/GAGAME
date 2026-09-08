@@ -4,7 +4,7 @@
 #  WHY THIS FILE EXISTS.  OceanCpu claims something strong: that a truncated direct sum on the CPU
 #  reproduces THE SAME REALIZATION the GPU's three FFT cascades draw -- the same individual crests,
 #  not a statistically similar sea.  A merely similar sea would put a hull on water the render
-#  never drew, and nothing would ever look wrong enough to find.  The claim has four independent
+#  never drew, and nothing would ever look wrong enough to find.  The claim has five independent
 #  failure modes and one gate each:
 #
 #    1  SPECTRUM     does the summed per-bin variance equal the analytic m0 of the partition set
@@ -17,6 +17,12 @@
 #    4  REALIZATION  do pcg2d / GaussianPair agree bit-for-bit with the C++; does the truncated
 #                    direct sum agree with a real 2-D inverse FFT of the same packed spectrum
 #                    (the GPU's own algorithm); and does the C++ agree with this file?
+#    5  DERIVATIVES  OceanCpu::Sample also returns the surface SLOPE and the water's PARTICLE
+#                    VELOCITY.  The slope is PORTED (CsModulate's i*k*h), so it is graded against
+#                    the height field it must be the derivative of; the velocity has no shader
+#                    twin at all -- it is derived from linear deep-water theory -- so it is graded
+#                    three ways: against dh/dt, against the height field's own spatial statistics,
+#                    and against the shape of a deep-water orbit (gates 6, 7, 8).
 #
 #  Gate 4b is the one that pins every SIGN and SCALE at once: the numpy pipeline below is
 #  CsInitSpectrum -> CsModulate -> the unnormalised e^{+i} inverse transform -> CsAssemble,
@@ -331,6 +337,92 @@ def direct_sum(pk_x, pk_z, pA, pB, x, z, t, *, chop_sign=-1.0):
     dx = 2.0 * float(np.sum((-chop_sign) * (pk_x / klen) * np.imag(p)))
     dz = 2.0 * float(np.sum((-chop_sign) * (pk_z / klen) * np.imag(p)))
     return dx, h, dz
+
+
+CHANNELS = ("dx", "h", "dz", "sx", "sz", "vx", "vy", "vz")
+
+
+def direct_sample(pk_x, pk_z, pA, pB, x, z, t, *, slope_sign=-1.0, slope_k=True,
+                  vel_pair="Q", horiz_rate="w", horiz_unit=True, chunk=128):
+    """OceanCpu::Sample, vectorised over query points.  All eight channels, in the C++'s OWN
+    conventions -- which means dx/dz come back ALREADY multiplied by LAMBDA, unlike direct_sum
+    above, which returns them raw.  Two conventions in one file is a trap, so: this function
+    grades the C++ and therefore matches the C++, and direct_sum is left exactly as gates 4b and
+    5 have always used it.
+
+    The two phasors, which is the whole content of Sample:
+
+        f = A e^{-iwt}                the half of the pair travelling along +k
+        g = conj(B) e^{+iwt}          the half travelling along -k
+        P = (f + g) e^{ik.x}          h = 2 Re[P]     (f + g is CsModulate's hk, verbatim)
+        Q = (f - g) e^{ik.x}          the same sum with the -k half negated
+
+        h  = 2 Re[P]          Dx = 2 (kx/k) Im[P]         hx = -2 kx Im[P]
+        vy = 2 w Im[Q]        vx = 2 w (kx/k) Re[Q]
+
+    The keyword arguments exist ONLY to build the negative controls of gates 6-8, and each one
+    breaks exactly one thing:
+        slope_sign  +1 flips i*k*h to -i*k*h (the spatial-derivative sign)
+        slope_k     False drops the k factor from i*k*h, keeping only its sign
+        vel_pair    'P' uses hk where the derivation says the -k half must be negated -- the
+                    'a pair is one wave' mistake, invisible in a swell and not in a wind sea
+        horiz_rate  'g/w' uses the potential's own prefactor g/w where d/dx has already turned it
+                    into g*k/w = w; off by exactly |k|
+        horiz_unit  False uses k instead of k^, i.e. the same slip with the other sign of |k|
+    """
+    x = np.atleast_1d(np.asarray(x, dtype=np.float64))
+    z = np.atleast_1d(np.asarray(z, dtype=np.float64))
+    klen = np.sqrt(pk_x * pk_x + pk_z * pk_z)
+    w = np.sqrt(G * klen)
+    f = pA * np.exp(-1j * w * t)
+    g = np.conj(pB) * np.exp(1j * w * t)
+    hk, dk = f + g, f - g
+    rate = w if horiz_rate == "w" else (G / w)          # g/w == w/|k|: the control is a factor |k|
+    khx = (pk_x / klen) if horiz_unit else pk_x
+    khz = (pk_z / klen) if horiz_unit else pk_z
+    slx = pk_x if slope_k else np.ones_like(pk_x)
+    slz = pk_z if slope_k else np.ones_like(pk_z)
+    out = {c: np.zeros(x.shape, dtype=np.float64) for c in CHANNELS}
+    for i0 in range(0, x.size, chunk):        # chunked: 400 points x 1300 bins is 4 MB per array
+        s = slice(i0, min(i0 + chunk, x.size))
+        ph = np.exp(1j * (np.outer(x[s], pk_x) + np.outer(z[s], pk_z)))
+        p = hk * ph
+        q = dk * ph
+        v = q if vel_pair == "Q" else p
+        pim = 2.0 * p.imag
+        out["h"][s] = 2.0 * np.sum(p.real, axis=1)
+        out["dx"][s] = LAMBDA * np.sum(pim * (pk_x / klen), axis=1)
+        out["dz"][s] = LAMBDA * np.sum(pim * (pk_z / klen), axis=1)
+        out["sx"][s] = slope_sign * np.sum(pim * slx, axis=1)
+        out["sz"][s] = slope_sign * np.sum(pim * slz, axis=1)
+        vre = 2.0 * rate * v.real
+        out["vx"][s] = np.sum(vre * khx, axis=1)
+        out["vz"][s] = np.sum(vre * khz, axis=1)
+        out["vy"][s] = np.sum(2.0 * w * v.imag, axis=1)
+    return out
+
+
+def build_sea(parts, seed, cascades=(0, 1, 2)):
+    """The retained, truncated pair list per cascade -- the state OceanCpu::SetSeaState leaves
+    behind, and the only thing Sample ever reads."""
+    sea = []
+    for c in cascades:
+        a, b, kx, kz = build_h0(parts, seed, c)
+        pkx, pkz, pa, pb, wgt = build_pairs(a, b, kx, kz)
+        n, resid = truncate(wgt)
+        sea.append((pkx[:n], pkz[:n], pa[:n], pb[:n], resid))
+    return sea
+
+
+def sample_sea(sea, x, z, t, **kw):
+    """Sample summed over the cascades, which is what OceanCpu::Sample returns."""
+    tot = None
+    for (pkx, pkz, pa, pb, _) in sea:
+        if len(pkx) == 0:
+            continue
+        r = direct_sample(pkx, pkz, pa, pb, x, z, t, **kw)
+        tot = r if tot is None else {c: tot[c] + r[c] for c in CHANNELS}
+    return tot
 
 
 # ==================================================================================================
@@ -707,7 +799,7 @@ if len(sys.argv) > 1:
         t = ln.split()
         if t[0] == "#STATE":
             state = t[1]
-            cxx[state] = {"parts": [], "casc": {}, "disp": []}
+            cxx[state] = {"parts": [], "casc": {}, "disp": [], "sample": [], "fd": []}
         elif t[0] == "#PART":
             cxx[state]["parts"].append({"fp": float(t[3]), "specScale": float(t[5]),
                                         "sigF": float(t[7]), "gamma": float(t[9]),
@@ -717,6 +809,10 @@ if len(sys.argv) > 1:
             cxx[state]["casc"][int(t[1])] = (int(t[3]), float(t[5]), float(t[7]))
         elif t[0] == "#DISP":
             cxx[state]["disp"].append([float(v) for v in t[2:]])
+        elif t[0] == "#SAMPLE":
+            cxx[state]["sample"].append([float(v) for v in t[2:]])
+        elif t[0] == "#FD":
+            cxx[state]["fd"].append(t[1:])
 
     # Three separate tolerances, each set by what limits it -- not one loose number covering all.
     #   count     EXACT.  The retained set is a discrete decision; it may not differ at all.
@@ -761,6 +857,46 @@ if len(sys.argv) > 1:
                           abs(LAMBDA * dz - row[5]))
         check("gate5 %s Displacement over %d points" % (state, len(d["disp"])), worst_d < 1e-7,
               "max |delta| %.3e m across (Dx, h, Dz)" % worst_d)
+
+        # The five channels Sample adds. Same three tolerances in spirit, one per unit: metres for
+        # the displacement, dimensionless for the slope, m/s for the velocity. Nothing here is a
+        # different ALGORITHM from the C++ -- both sum the same retained bins in double -- so the
+        # only thing between them is summation order, and 1e-9 on a slope of order 0.06 is four
+        # orders of margin over that. A wrong SIGN would land at 2x the channel.
+        if d["sample"]:
+            wd = ws = wv = 0.0
+            for row in d["sample"]:
+                x, z, t = row[0], row[1], row[2]
+                got = {c: 0.0 for c in CHANNELS}
+                for c in range(3):
+                    a, b_, cc, dd = pairs[c]
+                    if len(a) == 0:
+                        continue
+                    r = direct_sample(a, b_, cc, dd, x, z, t)
+                    for ch in CHANNELS:
+                        got[ch] += float(r[ch][0])
+                wd = max(wd, abs(got["dx"] - row[3]), abs(got["h"] - row[4]),
+                         abs(got["dz"] - row[5]))
+                ws = max(ws, abs(got["sx"] - row[6]), abs(got["sz"] - row[7]))
+                wv = max(wv, abs(got["vx"] - row[8]), abs(got["vy"] - row[9]),
+                         abs(got["vz"] - row[10]))
+            check("gate5 %s Sample displacement over %d points" % (state, len(d["sample"])),
+                  wd < 1e-7, "max |delta| %.3e m across (Dx, h, Dz)" % wd)
+            check("gate5 %s Sample slope over %d points" % (state, len(d["sample"])), ws < 1e-9,
+                  "max |delta| %.3e (dimensionless) across (sx, sz)" % ws)
+            check("gate5 %s Sample velocity over %d points" % (state, len(d["sample"])), wv < 1e-7,
+                  "max |delta| %.3e m/s across (vx, vy, vz)" % wv)
+
+        # The C++ grading ITSELF: the harness central-differences its own h and compares against
+        # its own sx/sz/vy. This file cannot see those points, so what is checked here is the
+        # RATIO to the channel's own rms -- at the harness's eps = 1e-4 the truncation floor is
+        # ~1e-8 of the channel, and a flipped sign or a dropped k would be ~1 or worse.
+        for row in d["fd"]:
+            nm, mx, rms, scale = row[0], float(row[2]), float(row[4]), float(row[6])
+            check("gate5 %s C++ self finite-difference: %s" % (state, nm),
+                  mx < 1e-6 * scale and scale > 0.0,
+                  "max |FD(h) - %s| %.3e vs channel rms %.3e (ratio %.2e), rms err %.3e"
+                  % (nm, mx, scale, mx / max(scale, 1e-300), rms))
     for ln in rows:
         if ln.startswith("#TIME"):
             print("      " + ln[1:])
@@ -768,6 +904,284 @@ else:
     print("      SKIPPED: pass the C++ harness dump as argv[1] to run this gate.")
     print("      (build a standalone TU around src/sim/OceanCpu.cpp + SeaState.cpp that prints")
     print("       #HASH / #STATE / #PART / #CASCADE / #DISP lines; gates 1-4 do not need it.)")
+print()
+
+
+
+# ==================================================================================================
+#  GATES 6-8 -- what Sample() adds to Displacement: the surface SLOPE and the water's PARTICLE
+#  VELOCITY.
+#
+#  Every check below is against the HEIGHT channel, or against a statistic of it, because the
+#  height is the channel gates 1-4 have already pinned to the shader.  Nothing is compared against
+#  a restatement of its own formula: that is the f(a) - f(a) bug this file's header names, and it
+#  is exactly the trap a "derivative" gate falls into if it differentiates the same expression
+#  twice.  Each negative control perturbs the CHANNEL and leaves the finite difference alone.
+# ==================================================================================================
+print("-" * 98)
+print("GATE 6  slope: (sx, sz) vs a central difference of the height field in x and z")
+print("-" * 98)
+
+SEA = build_sea(BOTH, SEED)
+RNG_S = np.random.default_rng(20260908)
+NPT = 384
+X_S = RNG_S.uniform(-3000.0, 3000.0, NPT)
+Z_S = RNG_S.uniform(-3000.0, 3000.0, NPT)
+T_S = 4321.5
+
+
+def fd_bound(sea, eps, comp):
+    """A STRICT bound on the central-difference truncation error, |eps^2/6 * d3h/du3|, computed
+    from the retained bins instead of fitted: |d3h/du3| <= sum over pairs of 2(|A|+|B|)|r|^3,
+    where r is kx, kz or w depending on which variable is differenced.  This is the number the
+    gate is judged against, so the tolerance is derived from the field, not chosen."""
+    tot = 0.0
+    for (pkx, pkz, pa, pb, _) in sea:
+        if len(pkx) == 0:
+            continue
+        r = {"kx": np.abs(pkx), "kz": np.abs(pkz),
+             "w": np.sqrt(G * np.sqrt(pkx * pkx + pkz * pkz))}[comp]
+        tot += float(np.sum(2.0 * (np.abs(pa) + np.abs(pb)) * r ** 3))
+    return eps * eps / 6.0 * tot
+
+
+BASE_S = sample_sea(SEA, X_S, Z_S, T_S)
+print("      field at these 384 points: rms h %.4f m, rms slope %.4f, rms |v| %.4f m/s"
+      % (float(np.sqrt(np.mean(BASE_S["h"] ** 2))),
+         float(np.sqrt(np.mean(BASE_S["sx"] ** 2 + BASE_S["sz"] ** 2))),
+         float(np.sqrt(np.mean(BASE_S["vx"] ** 2 + BASE_S["vy"] ** 2 + BASE_S["vz"] ** 2)))))
+
+fd_slope = {}
+for eps in (4e-4, 2e-4, 1e-4):
+    dhx = (sample_sea(SEA, X_S + eps, Z_S, T_S)["h"]
+           - sample_sea(SEA, X_S - eps, Z_S, T_S)["h"]) / (2.0 * eps)
+    dhz = (sample_sea(SEA, X_S, Z_S + eps, T_S)["h"]
+           - sample_sea(SEA, X_S, Z_S - eps, T_S)["h"]) / (2.0 * eps)
+    err = np.concatenate([dhx - BASE_S["sx"], dhz - BASE_S["sz"]])
+    bnd = max(fd_bound(SEA, eps, "kx"), fd_bound(SEA, eps, "kz"))
+    fd_slope[eps] = (dhx, dhz, float(np.max(np.abs(err))), float(np.sqrt(np.mean(err ** 2))), bnd)
+    print("      eps %.0e m: max |FD(h) - s| %.3e, rms %.3e, bound eps^2/6 * max|d3h/dx3| = %.3e"
+          % (eps, fd_slope[eps][2], fd_slope[eps][3], bnd))
+
+DHX, DHZ, MAXE, RMSE, BND = fd_slope[1e-4]
+check("gate6 slope is the spatial derivative of the height field", MAXE < BND,
+      "max err %.3e, rms %.3e over 768 differences, against a strict FD truncation bound of %.3e "
+      "(%.1fx margin); rms slope itself is %.4f"
+      % (MAXE, RMSE, BND, BND / MAXE, float(np.sqrt(np.mean(BASE_S["sx"] ** 2)))))
+# The error is the DIFFERENCE SCHEME's, not the slope's: halving eps must quarter it. If the slope
+# were wrong the error would be a constant, and refinement would not move it at all.
+r1 = fd_slope[4e-4][2] / fd_slope[2e-4][2]
+r2 = fd_slope[2e-4][2] / fd_slope[1e-4][2]
+check("gate6 that residual is the central difference's own eps^2, not the slope's", 3.0 < r1 < 5.0
+      and 3.0 < r2 < 5.0, "max err falls %.2fx then %.2fx as eps halves (eps^2 predicts 4.00)"
+      % (r1, r2))
+
+for name, kw in (("the slope sign (+i k -> -i k)", {"slope_sign": +1.0}),
+                 ("the k factor (i k h -> i h)", {"slope_k": False})):
+    bad = sample_sea(SEA, X_S, Z_S, T_S, **kw)
+    e = max(float(np.max(np.abs(DHX - bad["sx"]))), float(np.max(np.abs(DHZ - bad["sz"]))))
+    check_fails("gate6 survives flipping %s" % name, e < BND,
+                "max err becomes %.3e -- %.1e x the FD bound" % (e, e / BND))
+print()
+
+
+print("-" * 98)
+print("GATE 7  vertical velocity: vy vs a central difference of the height field in TIME")
+print("-" * 98)
+
+fd_time = {}
+for dt in (4e-4, 2e-4, 1e-4):
+    dht = (sample_sea(SEA, X_S, Z_S, T_S + dt)["h"]
+           - sample_sea(SEA, X_S, Z_S, T_S - dt)["h"]) / (2.0 * dt)
+    err = dht - BASE_S["vy"]
+    bnd = fd_bound(SEA, dt, "w")
+    fd_time[dt] = (dht, float(np.max(np.abs(err))), float(np.sqrt(np.mean(err ** 2))), bnd)
+    print("      dt %.0e s: max |FD(h) - vy| %.3e m/s, rms %.3e, bound dt^2/6 * max|d3h/dt3| "
+          "= %.3e" % (dt, fd_time[dt][1], fd_time[dt][2], bnd))
+
+DHT, MAXT, RMST, BNDT = fd_time[1e-4]
+check("gate7 vy is the time derivative of the height field", MAXT < BNDT,
+      "max err %.3e m/s, rms %.3e over 384 points, against a strict FD truncation bound of %.3e "
+      "(%.1fx margin); rms vy itself is %.4f m/s"
+      % (MAXT, RMST, BNDT, BNDT / MAXT, float(np.sqrt(np.mean(BASE_S["vy"] ** 2)))))
+rt = fd_time[4e-4][1] / fd_time[2e-4][1]
+check("gate7 that residual is the central difference's own dt^2", 3.0 < rt < 5.0,
+      "max err falls %.2fx as dt halves (dt^2 predicts 4.00)" % rt)
+
+# NEGATIVE CONTROL 1, and the reason the whole Q phasor exists: use hk (both halves of the pair
+# added) where the derivation says the -k half must be SUBTRACTED. It is a real error of real size
+# only because the wind sea's cos^2 8 lobe puts energy on both sides of every k; a pure swell
+# would have hidden it almost perfectly, which is exactly why the gate runs on BOTH.
+bad = sample_sea(SEA, X_S, Z_S, T_S, vel_pair="P")
+e = float(np.max(np.abs(DHT - bad["vy"])))
+diff = float(np.sqrt(np.mean((bad["vy"] - BASE_S["vy"]) ** 2)))
+check_fails("gate7 survives using hk (P) where the -k half must be negated (Q)", e < BNDT,
+            "max err becomes %.3e m/s -- %.1e x the FD bound; the two variants differ by %.3f m/s "
+            "rms, %.1f%% of the channel"
+            % (e, e / BNDT, diff, 100 * diff / float(np.sqrt(np.mean(BASE_S["vy"] ** 2)))))
+e = float(np.max(np.abs(DHT + BASE_S["vy"])))
+check_fails("gate7 survives flipping the sign of vy", e < BNDT,
+            "max err becomes %.3e m/s -- %.1e x the FD bound" % (e, e / BNDT))
+print()
+
+
+print("-" * 98)
+print("GATE 8  orbits: is the motion this velocity describes a deep-water orbit?")
+print("-" * 98)
+
+# 8a -- ONE bin, no truncation, no statistics: an exact circle or nothing.  a = 2|A| = 0.50 m at
+# k = 0.06 rad/m (a 105 m wave), sampled over exactly one period so the averages are exact.
+K1, A1 = 0.06, 0.25
+W1 = math.sqrt(G * K1)
+pk1 = (np.array([K1]), np.array([0.0]), np.array([A1 + 0j]), np.array([0j]), 0.0)
+ts = np.arange(256) * (2.0 * PI / W1) / 256.0
+u1 = np.array([direct_sample(*pk1[:4], 0.0, 0.0, t)["vx"][0] for t in ts])
+w1 = np.array([direct_sample(*pk1[:4], 0.0, 0.0, t)["vy"][0] for t in ts])
+h1 = np.array([direct_sample(*pk1[:4], 0.0, 0.0, t)["h"][0] for t in ts])
+rad = np.hypot(u1, w1)
+want = W1 * (2.0 * A1)
+print("      single bin k %.3f rad/m (L %.1f m), a %.2f m, w %.4f rad/s: orbit radius %.9f m/s "
+      "(w*a = %.9f), h amplitude %.6f m" % (K1, 2 * PI / K1, 2 * A1, W1, float(rad.mean()), want,
+                                            float(np.max(np.abs(h1)))))
+check("gate8a a single deep-water bin traces a CIRCLE of radius w*a",
+      float(np.max(np.abs(rad - want))) < 1e-12,
+      "max |r - w*a| = %.3e m/s over one period, i.e. the horizontal and vertical velocity "
+      "amplitudes agree to machine precision, which is what circular means"
+      % float(np.max(np.abs(rad - want))))
+cov = np.cov(np.vstack([u1, w1]))
+ev = np.linalg.eigvalsh(cov)
+ecc = math.sqrt(max(1.0 - ev[0] / ev[1], 0.0))
+check("gate8a ...with zero eccentricity and zero correlation", ecc < 1e-7 and abs(
+    float(np.corrcoef(u1, w1)[0, 1])) < 1e-7,
+      "eccentricity %.2e, corr(u, w) %.2e" % (ecc, float(np.corrcoef(u1, w1)[0, 1])))
+# WHICH WAY ROUND, and it is not decoration: it is the sign of the horizontal velocity, and a hull
+# computing relative-velocity drag against a sea flowing backwards would be pushed the wrong way
+# by every crest. u = w * k^ * eta means the water runs FORWARD at the crest; the orbit therefore
+# goes round clockwise in (along-k, up), i.e. down the BACK of a passing crest.
+cross = float(np.mean(u1 * np.roll(w1, -1) - w1 * np.roll(u1, -1)))
+check("gate8a ...and turns the way a following crest requires (forward at the crest)",
+      cross < 0.0 and float(np.corrcoef(u1, h1)[0, 1]) > 0.999999,
+      "signed orbit area %+.4f (negative = clockwise in (along-k, up)), corr(u, h) %+.6f"
+      % (cross, float(np.corrcoef(u1, h1)[0, 1])))
+for name, kw in (("w -> g/w in the horizontal (the potential's prefactor, before d/dx)",
+                  {"horiz_rate": "g/w"}), ("k^ -> k in the horizontal", {"horiz_unit": False})):
+    bu = np.array([direct_sample(*pk1[:4], 0.0, 0.0, t, **kw)["vx"][0] for t in ts])
+    br = np.hypot(bu, w1)
+    bcov = np.linalg.eigvalsh(np.cov(np.vstack([bu, w1])))
+    check_fails("gate8a survives %s" % name, float(np.max(np.abs(br - want))) < 1e-12,
+                "radius becomes %.4f..%.4f m/s against w*a = %.4f, eccentricity %.4f"
+                % (float(br.min()), float(br.max()), want, math.sqrt(1.0 - bcov[0] / bcov[1])))
+
+# 8b -- the REAL truncated three-cascade sea.  For any sum of free deep-water waves the horizontal
+# and vertical kinetic energies at the surface are EQUAL: each wave contributes (w a)^2/2 to both.
+# So <vx^2 + vz^2> / <vy^2> is exactly 1 in the space average -- an identity that holds for every
+# spectrum, every direction and every time, and one no bin's own formula can be rearranged into.
+RNG_O = np.random.default_rng(4242)
+NORB = 4096
+XO = RNG_O.uniform(-5000.0, 5000.0, NORB)
+ZO = RNG_O.uniform(-5000.0, 5000.0, NORB)
+OB = sample_sea(SEA, XO, ZO, 987.5)
+hor = OB["vx"] ** 2 + OB["vz"] ** 2
+ratio = float(np.mean(hor) / np.mean(OB["vy"] ** 2))
+bs = np.array([float(np.mean(hor[i]) / np.mean(OB["vy"][i] ** 2))
+               for i in RNG_O.integers(0, len(XO), size=(200, len(XO)))])
+sd = float(bs.std(ddof=1))
+print("      %d points, Hs 2.5 m sea: rms horizontal %.4f m/s, rms vertical %.4f m/s" % (NORB,
+         float(np.sqrt(np.mean(hor))), float(np.sqrt(np.mean(OB["vy"] ** 2)))))
+check("gate8b horizontal and vertical kinetic energy are equipartitioned", abs(ratio - 1.0) < 3 * sd,
+      "<vx^2+vz^2>/<vy^2> = %.5f, 3 x bootstrap sd = %.5f" % (ratio, 3 * sd))
+check("gate8b ...and the vertical is uncorrelated with both horizontals (quadrature)",
+      abs(float(np.corrcoef(OB["vx"], OB["vy"])[0, 1])) < 0.10
+      and abs(float(np.corrcoef(OB["vz"], OB["vy"])[0, 1])) < 0.10,
+      "corr(vx, vy) %+.4f, corr(vz, vy) %+.4f"
+      % (float(np.corrcoef(OB["vx"], OB["vy"])[0, 1]),
+         float(np.corrcoef(OB["vz"], OB["vy"])[0, 1])))
+for name, kw in (("w -> g/w in the horizontal", {"horiz_rate": "g/w"}),
+                 ("k^ -> k in the horizontal", {"horiz_unit": False})):
+    b = sample_sea(SEA, XO, ZO, 987.5, **kw)
+    br = float(np.mean(b["vx"] ** 2 + b["vz"] ** 2) / np.mean(b["vy"] ** 2))
+    check_fails("gate8b survives %s" % name, abs(br - 1.0) < 3 * sd,
+                "the ratio becomes %.4g instead of 1" % br)
+
+# 8c -- the swell case the question is usually asked about: ONE narrow partition, so "the orbit"
+# has an unambiguous plane.  It is NOT a circle in the along-direction, and the amount by which it
+# misses is PREDICTED from the retained bins rather than tolerated: a cos^2 60 lobe tilts each
+# bin's k^ off the mean direction, and only the component along d^ lands in u_along.
+ONE_S = [make_partition(2.0, 12.0, 270.0, False)]            # from the west => dirTo = due EAST
+SEA1 = build_sea(ONE_S, SEED, cascades=(0,))
+dhat = (ONE_S[0]["dirToX"], ONE_S[0]["dirToZ"])
+S1 = sample_sea(SEA1, XO, ZO, 987.5)
+ual = S1["vx"] * dhat[0] + S1["vz"] * dhat[1]
+num = den = 0.0
+for (pkx, pkz, pa, pb, _) in SEA1:
+    kl = np.sqrt(pkx * pkx + pkz * pkz)
+    wgt = G * kl * (np.abs(pa) ** 2 + np.abs(pb) ** 2)       # w^2 |amplitude|^2, the orbit energy
+    num += float(np.sum(wgt * ((pkx * dhat[0] + pkz * dhat[1]) / kl) ** 2))
+    den += float(np.sum(wgt))
+pred = num / den
+meas = float(np.var(ual) / np.var(S1["vy"]))
+cov1 = np.linalg.eigvalsh(np.cov(np.vstack([ual, S1["vy"]])))
+print("      single Tp 12 s swell, dirTo = +x: std(u_along) %.4f m/s, std(vy) %.4f m/s, "
+      "corr(u_along, h) %+.4f" % (float(ual.std()), float(S1["vy"].std()),
+                                  float(np.corrcoef(ual, S1["h"])[0, 1])))
+check("gate8c the swell orbit's along-direction axis is short by exactly its directional spread",
+      abs(meas - pred) < 0.02,
+      "measured var(u_along)/var(vy) = %.4f, predicted from the retained bins' own <(k^.d^)^2> = "
+      "%.4f; ellipse eccentricity %.3f, which is the cos^2 60 lobe and not an error in v"
+      % (meas, pred, math.sqrt(1.0 - cov1[0] / cov1[1])))
+bad1 = sample_sea(SEA1, XO, ZO, 987.5, horiz_rate="g/w")
+bmeas = float(np.var(bad1["vx"] * dhat[0] + bad1["vz"] * dhat[1]) / np.var(bad1["vy"]))
+check_fails("gate8c survives w -> g/w in the horizontal", abs(bmeas - pred) < 0.02,
+            "the same ratio becomes %.4g against a prediction of %.4f" % (bmeas, pred))
+
+# 8d -- the one statistic that can tell Q from P in the HORIZONTAL, and the reason the pair must be
+# split.  <h * vx> over space is the sea's net wave momentum: it is sum over pairs of
+# w k^x (2|A|^2 - 2|B|^2) with Q, because the -k half carries momentum the OTHER way, and
+# sum over pairs of w k^x (2|A|^2 + 2|B|^2) with P.  Two OPPOSED swells of equal Hs therefore
+# cancel to zero under Q and do not under P -- how MUCH they fail to cancel is measured below and
+# not predicted here, because P also flips the sign of every pair whose k^ points the other way,
+# so the wrong answer is not simply twice the right one.  Averaged over seeds because one
+# realization of a narrow swell is a chi-square with few degrees of freedom (gate 2b).
+EAST = [make_partition(2.0, 12.0, 270.0, False)]
+OPP = [make_partition(2.0, 12.0, 270.0, False), make_partition(2.0, 12.0, 90.0, False)]
+mom = {"east/Q": [], "opposed/Q": [], "opposed/P": []}
+for sd_ in [0x9E3779B1 + 0x9E3779B9 * i for i in range(32)]:
+    for label, parts, kw in (("east/Q", EAST, {}), ("opposed/Q", OPP, {}),
+                             ("opposed/P", OPP, {"vel_pair": "P"})):
+        s = sample_sea(build_sea(parts, sd_, cascades=(0,)), XO, ZO, 321.0, **kw)
+        mom[label].append(float(np.mean(s["h"] * s["vx"])))
+res = {k: (float(np.mean(v)), float(np.std(v, ddof=1) / math.sqrt(len(v)))) for k, v in mom.items()}
+for k in ("east/Q", "opposed/Q", "opposed/P"):
+    print("      <h * vx> over %d points, 32 seeds -- %-11s %+.5f +- %.5f m^2/s" % (NORB,
+             k, res[k][0], res[k][1]))
+check("gate8d two opposed swells carry no net momentum (the -k half of a pair runs the other way)",
+      abs(res["opposed/Q"][0]) < 3 * res["opposed/Q"][1] + 0.02 * abs(res["east/Q"][0]),
+      "opposed %+.5f vs one swell alone %+.5f m^2/s, i.e. %.2f%% of it"
+      % (res["opposed/Q"][0], res["east/Q"][0],
+         100 * abs(res["opposed/Q"][0] / res["east/Q"][0])))
+check_fails("gate8d survives using hk (P) for the horizontal velocity",
+            abs(res["opposed/P"][0]) < 3 * res["opposed/P"][1] + 0.02 * abs(res["east/Q"][0]),
+            "the same opposed sea then carries %+.5f m^2/s, %.2fx one swell's own momentum"
+            % (res["opposed/P"][0], res["opposed/P"][0] / res["east/Q"][0]))
+
+# 8e -- NOT a gate on the velocity: a MEASUREMENT of the choppy channel, kept here because it is
+# the reason OceanCpu.h refuses to derive the velocity by differentiating lambda*D.  For a single
+# wave d(Dx)/dt would be -w k^ eta, backward, because the chop points away from crests (see the
+# REPORT below).  If the chop sign is ever fixed in the shader, this correlation flips and says so.
+DTC = 0.05
+ddx = (sample_sea(SEA1, XO, ZO, 987.5 + DTC)["dx"]
+       - sample_sea(SEA1, XO, ZO, 987.5 - DTC)["dx"]) / (2.0 * DTC)
+ratio_l = float(ddx.std() / S1["vx"].std())
+print("      d(lambda*Dx)/dt vs the derived vx on that swell: corr %+.4f, rms %.4f vs %.4f m/s "
+      "(ratio %.4f)" % (float(np.corrcoef(ddx, S1["vx"])[0, 1]), float(ddx.std()),
+                        float(S1["vx"].std()), ratio_l))
+check("gate8e differentiating the choppy displacement would give the water the WRONG direction, "
+      "scaled by lambda",
+      float(np.corrcoef(ddx, S1["vx"])[0, 1]) < -0.99 and abs(ratio_l - LAMBDA) < 0.02,
+      "corr %+.4f and |d(lambda*Dx)/dt| / |vx| = %.4f == lambda %.2f, i.e. d(lambda*D)/dt is "
+      "-lambda*v exactly: it is not interchangeable with the linear-wave derivation, which is why "
+      "OceanCpu.h derives the velocity instead of differentiating the chop"
+      % (float(np.corrcoef(ddx, S1["vx"])[0, 1]), ratio_l, LAMBDA))
 print()
 
 
