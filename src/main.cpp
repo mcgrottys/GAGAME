@@ -57,6 +57,7 @@
 #include "core/ThreadAudit.h"
 #include "core/ThreadManager.h"
 #include "sim/RigidBody.h"
+#include "sim/Vessel.h"
 #include "sim/SimClock.h"
 #include "core/DxTest.h"
 #include "core/Pga.h"
@@ -1830,6 +1831,7 @@ int main(int argc, char** argv) {
             ok &= RunThreadSelfTest();    // the thread instrument's own gate: it must SEE a race
             ok &= RunSimClockSelfTest();  // the scene clock: whole quanta, framing-independent
             ok &= RunRigidBodySelfTest();  // M9bq: the body with momentum -- L, T, moment arms
+            ok &= RunVesselSelfTest();     // M9bq: the factory + the element laws
             gpu.Shutdown();
             return ok ? 0 : 1;
         }

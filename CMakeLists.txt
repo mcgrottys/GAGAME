@@ -56,6 +56,9 @@ add_executable(gagame
   src/sim/SweSolver.cpp
   src/sim/SimClockTest.cpp
   src/sim/RigidBody.cpp
+  src/sim/Vessel.cpp
+  src/sim/VesselSpecs.cpp
+  src/sim/VesselTest.cpp
   src/sim/WaveField.cpp
   src/sim/WeatherManager.cpp
   src/sim/GlobeModel.cpp
