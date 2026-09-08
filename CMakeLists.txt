@@ -55,6 +55,7 @@ add_executable(gagame
   src/sim/BathyModel.cpp
   src/sim/SweSolver.cpp
   src/sim/SimClockTest.cpp
+  src/sim/OceanCpu.cpp
   src/sim/RigidBody.cpp
   src/sim/Vessel.cpp
   src/sim/VesselSpecs.cpp
