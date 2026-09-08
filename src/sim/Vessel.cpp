@@ -126,6 +126,7 @@ Bivector Vessel::Buoyancy(const Element& e, const WaterSurface& sea, double simU
 
         const double vol = area * span;
         m_accVol += vol;
+        m_tel.hullVol += vol;
         // Immersion depth at this station, for the telemetry only -- never for the force.
         const double keelPt[3] = {0.0, st.oy.empty() ? 0.0 : st.oy[0], st.z};
         m_accDraught += -(nb[0] * (keelPt[0] - pb[0]) + nb[1] * (keelPt[1] - pb[1]) +
@@ -255,6 +256,13 @@ bool Vessel::Build(const VesselSpec& spec, const Motor& pose) {
             m_spec.kind.c_str(), cg[0], cg[1], cg[2], located, hullM);
     }
 
+    // The transom: the aftmost station, after the CG solve has moved them. The planing law
+    // measures its wetted length forward from here.
+    m_transomZ = 0.0;
+    for (const Element& el : m_spec.elements) {
+        for (const Section& st : el.stations) m_transomZ = (std::min)(m_transomZ, st.z);
+    }
+
     m_body = RigidBody{};
     m_body.mp.mass = spec.massLoaded.v > 0.0 ? spec.massLoaded.v : spec.massDry.v;
     // AXES. A moment of inertia is named for the motion it resists, and that is the axis it
@@ -336,6 +344,7 @@ Bivector Vessel::Collar(const Element& e, const WaterSurface& sea, double simUni
 
         const double vol = area * dz;
         m_accVol += vol;
+        m_tel.collarVol += vol;
 
         // Buoyancy along the free surface's NORMAL -- the surface is an equipotential of the
         // effective gravity, so that direction IS the first-order law; world up would be the
@@ -439,6 +448,28 @@ Bivector Vessel::PlaningPanel(const Element& e, const WaterSurface& sea, double 
 
     // The centre of pressure marches FORWARD as speed rises -- the mechanism behind porpoising.
     // Referenced to a nominal planing speed so the term is bounded and dimensionless.
+    // WHERE THE PRESSURE ACTS, and this is the term that SETS THE TRIM.
+    //
+    // alpha = sin(trim) + incidence, and the lift acts forward of the CG -- so more trim makes
+    // more alpha, which makes more lift, which makes more trim. Nothing in that loop closes it,
+    // and the hull ran at +17 to +29 degrees bow-up: pointing at the sky, not planing, where a
+    // real deep-V sits at 3-6.
+    //
+    // What closes it on a real hull is that the WETTED LENGTH SHRINKS as trim rises: the bow
+    // lifts clear, the spray root moves aft, and the centre of pressure goes with it -- so the
+    // bow-up moment falls exactly when the trim that caused it grows. Lw ~ immersion/tan(alpha)
+    // is the geometry of a planing wedge, and the pressure peak sits about three quarters of the
+    // way forward of the transom. Both are Savitsky's shape, which is all this model claims.
+    // TRIED AND REVERTED, and the note is worth more than the code was. Placing it at
+    // `transom + 0.75 * wetted length`, with Lw ~ immersion/tan(alpha), is Savitsky's own
+    // geometry and it SHOULD supply the negative feedback this model lacks. Measured, it
+    // swings the centre of pressure between the transom and mid-length as alpha moves, which
+    // is a stiffer loop than the one it replaced: the hull went from a steady +17 deg of trim
+    // to tumbling airborne at full throttle, heel -143.
+    //
+    // What it needs and does not have is the wetted length as a STATE that lags the attitude,
+    // rather than an instantaneous function of it -- the spray root does not teleport. That is
+    // a real model, not a line, and the trim being high is the lesser bug of the two.
     const double cpShift = 0.35 * e.planingBeam.v * std::min(1.0, spd / 12.0);
     const double applyAt[3] = {atBody[0], atBody[1], atBody[2] + cpShift};
 
@@ -527,6 +558,8 @@ Bivector Vessel::Foil(const Element& e, const WaterSurface& sea, const VesselCon
 Bivector Vessel::NetWrench(const WaterSurface& sea, const VesselControls& c, double simUnix) {
     Bivector w = Bivector::Zero();
     m_accVol = 0.0;
+    m_tel.hullVol = 0.0;
+    m_tel.collarVol = 0.0;
     m_accDraught = 0.0;
     m_accStations = 0;
     m_tel.waterValid = true;

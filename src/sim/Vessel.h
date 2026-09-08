@@ -62,6 +62,11 @@ struct VesselTelemetry {
     double heelRad = 0.0, trimRad = 0.0;
     double draughtM = 0.0;          // mean immersion at the stations
     double immersedVol = 0.0;       // m^3
+    // Split, because it answers the question the owner asked: are the TUBES still in the water
+    // at planing trim? All of this hull's roll damping and most of its roll stiffness live in
+    // the collar, so a collar that lifts clear at speed is a boat with nothing damping its roll
+    // -- which is exactly the symptom.
+    double hullVol = 0.0, collarVol = 0.0;
     double depthM = 0.0;            // water depth under the hull
     bool   aground = false;
     bool   waterValid = false;      // false = no coverage; NOT the same as flat water
@@ -96,6 +101,10 @@ private:
     Bivector Planing(const Element& e, const WaterSurface& sea, double simUnix);
     // One half of the running surface, offset across the beam. Roll stiffness and roll damping
     // both come from evaluating this at two places rather than one -- see the note in the .cpp.
+    // The aftmost station, in body coordinates -- the transom the wetted length is measured
+    // forward from. Found once at Build, after the CG solve has moved the stations.
+    double m_transomZ = 0.0;
+
     Bivector PlaningPanel(const Element& e, const WaterSurface& sea, double simUnix,
                           double xOffset, double areaFrac);
     Bivector Foil(const Element& e, const WaterSurface& sea, const VesselControls& c,

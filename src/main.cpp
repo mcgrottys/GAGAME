@@ -3471,6 +3471,18 @@ int main(int argc, char** argv) {
         std::unique_ptr<Vessel> boat;
         TreeWater boatSea;
         VesselControls boatCtl;
+        // M9br: THE WAVE PREFILL, OFF THE FRAME THREAD. When a tide or current bucket rolls,
+        // the solve was already backgrounded but the PREFILL was not -- and writing 7359 tiles
+        // across 33 planes and every mip takes 11-19 s, on the frame thread, which is the
+        // once-a-minute freeze. Nothing reads the new tree until the atomic_store below, so it
+        // can be built and filled on a worker and swapped in when it is whole.
+        std::shared_ptr<TileTree> wavePending;
+        std::atomic<bool> wavePrefillDone{false};
+        std::atomic<bool> wavePrefillBusy{false};
+        uint64_t wavePendingKey = 0;
+        uint32_t wavePendingTiles = 0, wavePendingPlanes = 0;
+        double wavePendingSec = 0.0;
+
         bool boatPlaced = false;      // set down on the surface at the first step, see stepBoat
         bool helming = false;         // T detaches the camera; the physics never stops
         double helmYawRef = 0.0;      // the look-steer's heading reference -- see the note in
@@ -4183,10 +4195,10 @@ int main(int argc, char** argv) {
                     ws.heightNavd, ws.nx, ws.ny, ws.nz, slope,
                     std::atan(slope) * 57.2957795, ws.vx, ws.vy, ws.vz);
                 Log("[vessel] pos (%.1f, %+.2f, %.1f) %.1f kn hdg %.0f heel %+.1f trim %+.1f "
-                    "draught %.3f vol %.2f depth %.1f%s%s | parts %u",
+                    "draught %.3f vol %.2f (hull %.2f collar %.2f) depth %.1f%s%s | parts %u",
                     bp[0], bp[1], bp[2], t.speedKn, t.headingRad * 57.2957795,
                     t.heelRad * 57.2957795, t.trimRad * 57.2957795, t.draughtM, t.immersedVol,
-                    t.depthM,
+                    t.hullVol, t.collarVol, t.depthM,
                     (t.immersedVol < 1e-6) ? " AIRBORNE" : (t.aground ? " AGROUND" : ""),
                     t.waterValid ? "" : " NO-WATER",
                     vesselLayer ? vesselLayer->PartCount() : 0u);
@@ -4654,22 +4666,46 @@ int main(int argc, char** argv) {
                         PROF_END(2);
                         // M9bc: the solve moved -> a new tree under the same tenant, its
                         // pyramid prefilled to disk, the old tiles dropped, then the wants.
-                        if (waveSrc && waveT >= 0 && waveField->Ready() &&
-                            waveField->LiveKey() != waveSrc->Key()) {
-                            waveSrc->SetKey(waveField->LiveKey());
-                            auto fresh = std::make_shared<TileTree>(waveSrc.get(), TileTree::Fmt::Raw4);
-                            float u0, v0, u1, v1;
-                            waveSrc->WindowUv(u0, v0, u1, v1);
-                            const auto tp0 = Clock::now();
-                            const uint32_t nPlanes = waveField->Table().nUsed + 1u;
-                            const uint32_t filled = fresh->Prefill(waveFrame.color, 0u, nPlanes, u0, v0, u1, v1);
-                            std::atomic_store(waveTree.get(), fresh);
+                        // Publish a finished prefill. Only the swap and the Drop touch the
+                        // residency manager, and both stay on this thread.
+                        if (wavePrefillDone.load(std::memory_order_acquire)) {
+                            std::atomic_store(waveTree.get(), wavePending);
                             resMgr.Drop(waveT);
                             Log("[wave] bucket %016llx -> tree %s: %u tiles prefilled (%u planes, "
-                                "every mip) in %.2f s",
-                                static_cast<unsigned long long>(waveSrc->Key()), fresh->Id().c_str(),
-                                filled, nPlanes,
-                                std::chrono::duration<double>(Clock::now() - tp0).count());
+                                "every mip) in %.2f s on a worker -- the frame did not wait",
+                                static_cast<unsigned long long>(wavePendingKey),
+                                wavePending->Id().c_str(), wavePendingTiles, wavePendingPlanes,
+                                wavePendingSec);
+                            wavePending.reset();
+                            wavePrefillDone.store(false, std::memory_order_release);
+                            wavePrefillBusy.store(false, std::memory_order_release);
+                        }
+                        // Kick a new one when the bucket has rolled and none is in flight. The
+                        // busy flag matters: the source's key is mutated here, so a second job
+                        // over the same source would be filling a tree whose identity moved.
+                        if (waveSrc && waveT >= 0 && waveField->Ready() &&
+                            waveField->LiveKey() != waveSrc->Key() &&
+                            !wavePrefillBusy.load(std::memory_order_acquire)) {
+                            waveSrc->SetKey(waveField->LiveKey());
+                            wavePendingKey = waveSrc->Key();
+                            wavePendingPlanes = waveField->Table().nUsed + 1u;
+                            float u0, v0, u1, v1;
+                            waveSrc->WindowUv(u0, v0, u1, v1);
+                            wavePrefillBusy.store(true, std::memory_order_release);
+                            const ColorFrame wf = waveFrame.color;
+                            WaveFieldSource* wsrc = waveSrc.get();
+                            const uint32_t planes = wavePendingPlanes;
+                            Threads().Submit(Lane::Compute, "wave.prefill",
+                                             [&wavePending, &wavePrefillDone, &wavePendingTiles,
+                                              &wavePendingSec, wf, wsrc, planes, u0, v0, u1, v1]() {
+                                const auto tp0 = Clock::now();
+                                auto fresh = std::make_shared<TileTree>(wsrc, TileTree::Fmt::Raw4);
+                                wavePendingTiles = fresh->Prefill(wf, 0u, planes, u0, v0, u1, v1);
+                                wavePendingSec =
+                                    std::chrono::duration<double>(Clock::now() - tp0).count();
+                                wavePending = fresh;
+                                wavePrefillDone.store(true, std::memory_order_release);
+                            });
                         }
                         if (waveSrc && waveT >= 0 && waveSrc->Key() != 0) {
                             // Bracketed apart from waveField.Update: these Wants are the whole
