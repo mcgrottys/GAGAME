@@ -47,7 +47,13 @@ public:
     // ---- the two media, assembled from the above. Non-virtual: every implementation must build
     // them the same way, because an element's whole contract is that it cannot tell them apart.
     Medium WaterAt(double wx, double wz, double simUnix) const {
-        const SurfaceSample s = At(wx, wz, simUnix);
+        return WaterFrom(At(wx, wz, simUnix), wx, wz);
+    }
+    // The same medium from a sample the caller ALREADY HAS. Buoyancy asked for the surface and
+    // then asked for the water at the same point, which evaluated the entire sea twice per
+    // station -- and the sea is not cheap: a hull query sums the retained spectrum. Every
+    // element that needs both now pays once.
+    Medium WaterFrom(const SurfaceSample& s, double wx, double wz) const {
         Medium m = Medium::Seawater();
         FillSurface(m, s, wx, wz);
         m.vx = s.vx; m.vy = s.vy; m.vz = s.vz;

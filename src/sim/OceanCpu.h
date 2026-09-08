@@ -260,6 +260,20 @@ public:
     // there is no cheaper query, because the transcendentals are shared by all eight.
     void Sample(double wx, double wz, double tSec, OceanSample& out) const;
 
+    // THE HULL'S QUERY. Identical to Sample except that waves shorter than `minLambda` are not
+    // summed at all.
+    //
+    // This is a physical statement, not a speed hack, and the two happen to coincide. A hull
+    // integrates PRESSURE OVER AREA: a 5.5 m boat resolving its buoyancy on ~0.6 m panels
+    // cannot feel a 1 m wave, because that wave puts as much up-force on one half of a panel as
+    // down-force on the other and the integral is what the panel returns. Summing those bins
+    // costs a sincos each and contributes a force of zero.
+    //
+    // It is also most of the cost. A typical sea retains 29/237/1451 pairs across the three
+    // cascades -- cascade 2, the short chop, is 85% of the bins and none of the hull forces.
+    void SampleForHull(double wx, double wz, double tSec, double minLambda,
+                       OceanSample& out) const;
+
     bool Ready() const { return m_ready; }
 
     // --- reporting: what the truncation actually cost, per cascade ---------------------------
@@ -288,6 +302,13 @@ private:
         double ar = 0, ai = 0;   // h0(+k) as CsInitSpectrum writes it into .xy
         double br = 0, bi = 0;   // h0(-k) as CsInitSpectrum writes it into .zw
     };
+
+    // The whole-cascade early-out for SampleForHull: the LONGEST wave this cascade actually
+    // retained. If even that is finer than what the caller can resolve, the cascade is skipped
+    // without touching a single bin.
+    double m_lambdaMax[kCascades] = {};
+
+    void SampleBand(double wx, double wz, double tSec, double minLambda, OceanSample& out) const;
 
     std::vector<Bin> m_bin[kCascades];
     double m_varAll[kCascades] = {};    // realized variance over every pair with energy

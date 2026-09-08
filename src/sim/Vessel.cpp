@@ -99,9 +99,12 @@ Bivector Vessel::Buoyancy(const Element& e, const WaterSurface& sea, double simU
         const double bodyC[3] = {0.0, 0.0, st.z};
         double wc[3];
         m_body.ToWorld(bodyC, wc);
-        const Medium med = sea.WaterAt(wc[0], wc[2], simUnix);
         const SurfaceSample ss = sea.At(wc[0], wc[2], simUnix);
         if (!ss.valid) { m_tel.waterValid = false; continue; }
+        // ONE evaluation, not two. Both of these used to call At() -- WaterAt does so
+        // internally -- so every station and every tube slice summed the whole retained
+        // spectrum twice for the same point.
+        const Medium med = sea.WaterFrom(ss, wc[0], wc[2]);
 
         // The water plane, in body coordinates. A plane is a point and a normal; both come
         // across by the pose's inverse, and (point - station) stays hull-sized.
@@ -311,9 +314,12 @@ Bivector Vessel::Collar(const Element& e, const WaterSurface& sea, double simUni
         const double atBody[3] = {e.tubeXOffset.v, e.tubeYOffset.v, z};
         double wc[3];
         m_body.ToWorld(atBody, wc);
-        const Medium med = sea.WaterAt(wc[0], wc[2], simUnix);
         const SurfaceSample ss = sea.At(wc[0], wc[2], simUnix);
         if (!ss.valid) { m_tel.waterValid = false; continue; }
+        // ONE evaluation, not two. Both of these used to call At() -- WaterAt does so
+        // internally -- so every station and every tube slice summed the whole retained
+        // spectrum twice for the same point.
+        const Medium med = sea.WaterFrom(ss, wc[0], wc[2]);
 
         // Depth of the tube's AXIS below the surface; the tube spans axis-r .. axis+r, so the
         // flooded depth measured from its underside is that plus r, clamped to the diameter.

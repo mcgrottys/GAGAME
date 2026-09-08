@@ -4124,9 +4124,26 @@ int main(int argc, char** argv) {
                 }
                 boatCtl.steer = opt.boatSteer;
             }
+            // THE HULL STEPS AT 60 Hz, NOT 240. SimClock's quantum is 240 Hz because that is
+            // what the SCENE needed; nothing in a hull's dynamics asks for 4 ms resolution. Its
+            // fastest modes are heave at ~1 s, roll at ~1.8 s, and the collar's slam at ~10 Hz
+            // -- 60 Hz resolves the quickest of those by six to one.
+            //
+            // It matters because a step is not cheap: ~73 water queries for this hull, and each
+            // one sums the solved field's 32 components and the retained cascade bins. At 240 Hz
+            // that measured 26 ms a frame, which is more than the entire renderer costs.
+            //
+            // Determinism is untouched -- this is still a FIXED step off the same clock, just a
+            // coarser multiple of it, so the boat is as frame-rate independent as before. The
+            // leftover quanta are carried, never dropped, so no owed time is lost.
+            static int quantaOwed = 0;
+            constexpr int kPerStep = 4;                     // 240 / 4 = 60 Hz
+            quantaOwed += quanta;
+            const int steps = quantaOwed / kPerStep;
+            quantaOwed -= steps * kPerStep;
             PROF_BEGIN();
-            for (int q = 0; q < quanta; ++q) {
-                boat->Step(boatSea, boatCtl, simUnix, SimClock::kDt);
+            for (int q = 0; q < steps; ++q) {
+                boat->Step(boatSea, boatCtl, simUnix, SimClock::kDt * kPerStep);
             }
             if (!boat->Body().Sane()) boatCtl = VesselControls{};
             PROF_END(11);

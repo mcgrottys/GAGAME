@@ -266,6 +266,13 @@ void OceanCpu::SetSeaState(const PartParam* parts, int count, uint32_t seed, con
         // |hk(k)|^2 and |hk(-k)|^2 = |hk(k)|^2, and <|hk|^2>_t = |A|^2 + |B|^2.
         m_varAll[c] = 2.0 * total;
         m_varKept[c] = 2.0 * kept;
+        // The longest wave this cascade kept, for SampleForHull's whole-cascade early-out.
+        double lamMax = 0.0;
+        for (const Bin& b : all) {
+            const double lam = 6.283185307179586 * b.invK;
+            if (lam > lamMax) lamMax = lam;
+        }
+        m_lambdaMax[c] = lamMax;
         m_bin[c] = std::move(all);
     }
 
@@ -306,11 +313,26 @@ void OceanCpu::SetSeaState(const PartParam* parts, int count, uint32_t seed, con
 //        no velocity channel. vy = 2 w Im[Q] is IDENTICALLY d/dt of 2 Re[P] (d/dt sends f -> -iwf
 //        and g -> +iwg, so dh/dt = 2 Re[-iw(f - g) e^{ik.x}] = 2 w Im[Q]) -- which is why gate 7
 //        can finite-difference h in TIME and land on vy, and why using P there would not.
+void OceanCpu::SampleForHull(double wx, double wz, double tSec, double minLambda,
+                             OceanSample& out) const {
+    SampleBand(wx, wz, tSec, minLambda, out);
+}
+
 void OceanCpu::Sample(double wx, double wz, double tSec, OceanSample& out) const {
+    SampleBand(wx, wz, tSec, 0.0, out);
+}
+
+void OceanCpu::SampleBand(double wx, double wz, double tSec, double minLambda,
+                          OceanSample& out) const {
     double dx = 0.0, h = 0.0, dz = 0.0, sx = 0.0, sz = 0.0, vx = 0.0, vy = 0.0, vz = 0.0;
     if (m_ready) {
+        // 2*pi/k at the band's LOW end is the longest wave a cascade carries; if even that is
+        // below the caller's resolution the whole cascade is skipped without touching a bin.
         for (int c = 0; c < kCascades; ++c) {
+            if (m_lambdaMax[c] < minLambda) continue;   // whole cascade finer than asked for
             for (const Bin& b : m_bin[c]) {
+                // b.invK is 1/|k|, so 2*pi*invK is this bin's wavelength.
+                if (minLambda > 1e-6 && 6.283185307179586 * b.invK < minLambda) continue;
                 // -w, mirroring CsModulate: paired with the e^{+ik.x} synthesis below this
                 // is what makes a bin travel along +k, i.e. toward its partition's dirTo.
                 const double wt = -b.w * tSec;

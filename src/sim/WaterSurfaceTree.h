@@ -116,6 +116,30 @@ private:
     double m_sampleM = 0.5;
     WakeBoat m_boats[8];
     int m_boatCount = 0;
+
+    // ---- THE SLOW FIELD, MEMOISED. --------------------------------------------------------
+    // A hull asks this evaluator ~120 times per physics step, once per station and per tube
+    // slice, and WeatherManager::Query is not cheap: six height layers, eighteen tide
+    // constituents each a compositor sample, the current, the wave grid and the wind. Measured
+    // at 27 us a call it was 28 ms a frame, and the boat cost more than the entire renderer.
+    //
+    // But that query answers the SLOW field. The tide gradient is ~1e-6 m/m, the surge and the
+    // current vary over hundreds of metres, and the wind over kilometres -- none of them change
+    // meaningfully across a 5.5 m hull. What DOES vary at hull scale is the waves, and those are
+    // evaluated per station regardless. So the mean state is fetched once per cell and reused.
+    //
+    // The cell is 8 m and the memo is one entry, which is all a single hull needs (its stations
+    // are inside one cell). Quantising POSITION means a hull straddling a boundary flips between
+    // two answers that differ by ~1e-5 m of tide -- far under the wave amplitude and under the
+    // atlas's own half-LSB. The BED is the term that genuinely varies over 8 m, and it is used
+    // for depth and grounding, not for a force, so a hull-length smoothing of it is honest.
+    //
+    // Single-threaded by contract: this is read from the physics tick only. If a second vessel
+    // ever steps concurrently this needs a per-vessel memo, not a lock.
+    static constexpr double kSlowCellM = 8.0;
+    mutable double m_memoX = 1e30, m_memoZ = 1e30, m_memoT = -1e30;
+    mutable WeatherSample m_memo;
+    const WeatherSample& SlowAt(double wx, double wz, double simUnix) const;
 };
 
 }  // namespace ga

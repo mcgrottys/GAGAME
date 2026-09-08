@@ -71,13 +71,28 @@ double TreeWater::WindowWeight(double wx, double wz) const {
     return SmoothStep(0.0, (std::max)(double(t.feather), 1.0), eM);
 }
 
+const WeatherSample& TreeWater::SlowAt(double wx, double wz, double simUnix) const {
+    const double cx = std::floor(wx / kSlowCellM);
+    const double cz = std::floor(wz / kSlowCellM);
+    if (cx != m_memoX || cz != m_memoZ || simUnix != m_memoT) {
+        double latDeg = 0.0, lonDeg = 0.0;
+        // Ask at the CELL CENTRE, not at the caller's point: then every station in the cell gets
+        // the same answer regardless of which one asked first, so the hull's forces do not
+        // depend on the order its elements happen to be evaluated in.
+        LatLonOf((cx + 0.5) * kSlowCellM, (cz + 0.5) * kSlowCellM, latDeg, lonDeg);
+        m_memo = m_wx->Query(latDeg, lonDeg, simUnix, 1.0);
+        m_memoX = cx;
+        m_memoZ = cz;
+        m_memoT = simUnix;
+    }
+    return m_memo;
+}
+
 SurfaceSample TreeWater::At(double wx, double wz, double simUnix) const {
     SurfaceSample s;
     if (!m_wx) return s;   // valid stays false: no tree attached is not flat water
 
-    double latDeg = 0.0, lonDeg = 0.0;
-    LatLonOf(wx, wz, latDeg, lonDeg);
-    const WeatherSample q = m_wx->Query(latDeg, lonDeg, simUnix, 1.0);
+    const WeatherSample& q = SlowAt(wx, wz, simUnix);
 
     // ---- THE COVERAGE GATE. Test the PROVENANCE, never the value: a bed of 0.0 is what both a
     // point at datum and a point nothing covers return, and only one of those is a measurement.
@@ -122,7 +137,11 @@ SurfaceSample TreeWater::At(double wx, double wz, double simUnix) const {
         // hull scale the fix is a per-cascade output, not a fudge here.
         const double wCas = 1.0 - wWin;
         OceanSample o;
-        m_ocean->Sample(wx, wz, CascadeTime(simUnix), o);
+        // Band-limited to what the hull can actually feel. A wave shorter than the panel
+        // spacing puts as much up-force on one half of a panel as down on the other, so it
+        // integrates to nothing -- summing it is a sincos per bin for a force of zero, and the
+        // short cascade is ~85% of the retained bins.
+        m_ocean->SampleForHull(wx, wz, CascadeTime(simUnix), 2.0 * m_sampleM, o);
         dispY += wCas * o.h;
         dispX += wCas * o.dx;
         dispZ += wCas * o.dz;
