@@ -168,6 +168,13 @@ private:
                                // reading the wrong row there.
         float waveP[4];       // M9bc: z16 page frame -- org px x, y, 1/16384, world px
         float waveD[4];       // M9bc: window nx, ny (cells = texels), 0, 0
+        // M9bl: components 16..31. The first sixteen keep waveSig/waveDir/waveScale above at
+        // their original offsets and these APPEND at the end -- the layout law: widening
+        // those arrays in place would silently slide boatA and everything after it, which is
+        // the exact failure the law was written for. Same split, same order, in the HLSL.
+        float waveSig2[32];
+        float waveDir2[32];
+        float waveScale2[32];
     };
     struct BankTile {
         float orgXZ[2];

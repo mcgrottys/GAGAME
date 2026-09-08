@@ -74,7 +74,22 @@ cbuffer BankCb : register(b0) {
     float4 gDebugA;
     float4 gWaveP;      // M9bc: the z16 page frame: org px x, y, 1/16384, world px at z16
     float4 gWaveD;      // M9bc: window nx, ny (solver cells = page texels), 0, 0
+    // M9bl: THE SECOND SIXTEEN. kMaxComp went 16 -> 32 because a 16-component directional
+    // sum IS a regular comb -- sixteen long-crested trains 1.6 deg apart superpose into a
+    // fixed interference lattice, which is what the storm face's straight parallel ridges
+    // are. A real sea's crests are irregular because its spectrum is continuous; the cure
+    // is more components, not more mesh (proved: 2x vertex density left the ridges intact).
+    // These APPEND at the end rather than widening the arrays above, per the layout law
+    // sixty rows up -- widening in place slides gBoatA and every row after it.
+    float4 gWaveSig2[8];
+    float4 gWaveDir2[8];
+    float4 gWaveScale2[8];
 };
+
+// M9bl: one component's rows, from whichever half holds it. r = comp >> 1.
+float4 WaveSigRow(uint r) { return (r < 8u) ? gWaveSig[r] : gWaveSig2[r - 8u]; }
+float4 WaveDirRow(uint r) { return (r < 8u) ? gWaveDir[r] : gWaveDir2[r - 8u]; }
+float4 WaveScaleRow(uint r) { return (r < 8u) ? gWaveScale[r] : gWaveScale2[r - 8u]; }
 
 struct BankTile {
     float2 orgXZ;       // this tile's window-frame origin, world m
@@ -428,7 +443,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         float3 dW = 0.0f;
         float sigW = 0.0f;
         [loop] for (uint s = 0; s < gWaveU.z; ++s) {
-            const float4 sc = gWaveScale[s >> 1];
+            const float4 sc = WaveScaleRow(s >> 1);
             const float aMax = (s & 1) ? sc.z : sc.x;
             if (aMax <= 0.0f) continue;
             const float kMax = (s & 1) ? sc.w : sc.y;
@@ -452,11 +467,11 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             if (wF <= 0.001f) continue;
             float2 sp = t4.zw * 2.0f - 1.0f;
             sp /= max(length(sp), 1e-4f);          // the spinor stays unit (cl2 law)
-            const float4 rr = gWaveSig[s >> 1];
+            const float4 rr = WaveSigRow(s >> 1);
             const float2 rot = (s & 1) ? rr.zw : rr.xy;
             const float cT = sp.x * rot.x + sp.y * rot.y;   // cos(phi - sigma t)
             const float sT = sp.y * rot.x - sp.x * rot.y;   // sin(phi - sigma t)
-            const float4 dd = gWaveDir[s >> 1];
+            const float4 dd = WaveDirRow(s >> 1);
             const float2 dir2 = (s & 1) ? dd.zw : dd.xy;
             dW.y += wF * aW * cT;
             dW.xz -= gWaveB.z * wF * aW * sT * dir2;

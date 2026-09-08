@@ -250,7 +250,11 @@ struct CacheHead {
 };
 #pragma pack(pop)
 static_assert(sizeof(CacheHead) == 144, "cache head layout is the python checker's contract");
-static_assert(sizeof(WaveField::GpuTable) == 368, "GpuTable layout is the GPU/cache contract");
+// M9bl: 368 -> 688 with kMaxComp 16 -> 32 (48 fixed bytes + 5 float[kMaxComp] arrays).
+// Deliberately a literal: the number is the contract, so growing the table has to be an
+// edit someone reads. Old cache entries reject themselves on the tableBytes check in
+// LoadCached, and kSolverVersion bumps so the bucket key changes too.
+static_assert(sizeof(WaveField::GpuTable) == 688, "GpuTable layout is the GPU/cache contract");
 
 // The climatological current proxy (engine decision 2 in the file header). Depth-gated
 // conveyance + seaward decay + the x3.0 throat closure; direction by the sign convention
