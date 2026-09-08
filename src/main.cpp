@@ -88,6 +88,9 @@ namespace {
 // M9bl: the wave tenant's coarsest mip (7 levels, like the other page tenants). The window's
 // want rides the mip its on-screen size justifies, so the field arrives as a gradient.
 constexpr double kWaveMaxMip = 6.0;
+// M9bn: how many levels FINER than the screen rule the water asks for. Water is this
+// engine's subject; a coarse mip on it reads as structure (the page grid), not softness.
+constexpr double kWaterMipBias = 2.0;
 
 struct Options {
     uint32_t width = 1600, height = 900;
@@ -4414,10 +4417,21 @@ int main(int argc, char** argv) {
                             // --ring-loads had no parent chain to admit. Now the request walks
                             // in coarse-first like everything else, and WavePageSample reads
                             // whatever level has landed.
+                            // ...biased FINER than that, because the water is the subject of
+                            // this renderer and must never be the coarsest thing on screen.
+                            // The screen rule alone is right for imagery, where a coarse mip
+                            // just looks soft; on the solved field a coarse level is a
+                            // structured artefact -- the shallow water showed the page's own
+                            // texel grid as faint rectangles (the user's catch). Two levels
+                            // of bias put the window at mip 0 well before the helm arrives,
+                            // and it costs nothing at altitude: the clamp to kWaveMaxMip is
+                            // already binding there, so the orbit legs request exactly what
+                            // they requested before and the imagery keeps its loader slots.
                             const double texAcross = (std::max)(double(wtab.nx), 1.0);
                             const double lvl =
                                 std::ceil(std::log2((std::max)(texAcross /
-                                                               (std::max)(winPx, 1.0), 1.0)));
+                                                               (std::max)(winPx, 1.0), 1.0))) -
+                                kWaterMipBias;
                             const uint32_t wantMip = static_cast<uint32_t>(
                                 (std::min)((std::max)(lvl, 0.0), kWaveMaxMip));
                             PROF_BEGIN();
