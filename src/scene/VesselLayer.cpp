@@ -115,6 +115,16 @@ void VesselLayer::SetVessels(const Vessel* const* vessels, int count) {
                          0.5 * h, pal);
                     break;
                 }
+                case ElementKind::Ballast: {
+                    // Drawn small and deliberately visible. Where a boat carries its weight is
+                    // the difference between a hull that planes at 4 degrees and one that runs
+                    // bow-high at 12, and being able to SEE that the tanks are forward is worth
+                    // the six triangles.
+                    const double m = (e.mass.v > 0.0) ? e.mass.v : 1.0;
+                    const double h = 0.5 * std::cbrt(m / 700.0);   // ~size by mass, gently
+                    Emit(m_parts, hull, e.mount.at, 0.0, 0.0, 0.0, h, h, h, pal);
+                    break;
+                }
                 // Planing and Drag are LAWS over surfaces the other elements already draw --
                 // a running surface and a windage area are not solids, and boxing them would
                 // double-draw the hull.

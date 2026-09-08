@@ -156,6 +156,16 @@ Bivector Vessel::Drag(const Element& e, const WaterSurface& sea, double simUnix)
     const double imm = med.ImmersionAt(wc);
     if (imm <= 0.0) return Bivector::Zero();
 
+    // WETTED AREA IS NOT CONSTANT, and a planing hull is the case that proves it. Held fixed,
+    // hull drag rises as v^2 forever and the boat asymptotes at displacement speed no matter how
+    // much thrust it has -- it can never climb its own hump. Scaling the reference area by how
+    // deep this panel actually sits is the cheapest honest statement of "lift reduces wetted
+    // area", and it is what turns the planing law above into an actual transition: lift lowers
+    // immersion, immersion lowers drag, drag lowers resistance, speed rises, lift rises.
+    // kRefImmersion is the panel's own static depth, so the factor is 1 at rest by construction.
+    constexpr double kRefImmersion = 0.35;
+    const double wetted = std::min(1.0, imm / kRefImmersion);
+
     // RELATIVE velocity: the hull through the fluid, not the hull through the ground. This is
     // where a current sets a boat sideways and where being carried by a wave stops being drag.
     double vb[3];
@@ -168,7 +178,8 @@ Bivector Vessel::Drag(const Element& e, const WaterSurface& sea, double simUnix)
     for (int i = 0; i < 3; ++i) {
         // Quadratic in speed, signed: -1/2 rho Cd A |v| v. Written with |v|*v rather than v^2
         // so the sign is carried by the law instead of by a branch on the direction.
-        fb[i] = -0.5 * med.rho * e.dragCd[i].v * e.dragArea[i].v * std::abs(rel[i]) * rel[i];
+        fb[i] = -0.5 * med.rho * e.dragCd[i].v * e.dragArea[i].v * wetted *
+                std::abs(rel[i]) * rel[i];
     }
     double fWorld[3] = {fb[0], fb[1], fb[2]};
     m_body.pose.TransformDir(fWorld[0], fWorld[1], fWorld[2]);
@@ -183,20 +194,64 @@ bool Vessel::Build(const VesselSpec& spec, const Motor& pose) {
         Log("[vessel] refusing to build from an empty spec");
         return false;
     }
-    for (const Element& e : spec.elements) {
-        if (e.kind == ElementKind::Collar || e.kind == ElementKind::Planing ||
-            e.kind == ElementKind::Foil) {
-            // Declared but not yet implemented (they arrive with the RHIB). Refuse rather than
-            // contribute zero: a hull silently missing its tubes would float low and look like a
-            // mass error, and this engine's ingest rule is that absence is never a value.
-            Log("[vessel] spec '%s' uses element kind %d ('%s') which this build does not "
-                "implement yet -- refusing to build a partial hull",
-                spec.kind.c_str(), static_cast<int>(e.kind), e.name.c_str());
-            return false;
-        }
-    }
 
     m_spec = spec;
+
+    // ---- SOLVE THE CENTRE OF MASS, then move the whole hull onto it. -----------------------
+    // RigidBody's body origin is the CG by construction (put it anywhere else and the linear and
+    // angular equations couple through a term everyone forgets). A spec, though, is naturally
+    // written about a GEOMETRY datum -- mid-length, on the keel line -- because that is where a
+    // draughtsman measures from. So the two have to be reconciled exactly once, here.
+    //
+    // The hull's own mass acts at hullMassCentre; every element carrying a mass acts at its
+    // mount. The combined centroid is the CG, and then every station and every mount is
+    // translated by -CG so the body origin lands on it. Nothing downstream needs to know.
+    {
+        double sumM = 0.0, mom[3] = {0.0, 0.0, 0.0};
+        double located = 0.0;
+        for (const Element& e : m_spec.elements) {
+            if (!(e.mass.v > 0.0)) continue;
+            double at[3];
+            e.mount.Origin(0.0, at);
+            for (int i = 0; i < 3; ++i) mom[i] += e.mass.v * at[i];
+            located += e.mass.v;
+        }
+        const double total = (m_spec.massLoaded.v > 0.0) ? m_spec.massLoaded.v
+                                                         : m_spec.massDry.v;
+        const double hullM = total - located;
+        if (hullM < 0.0) {
+            Log("[vessel] spec '%s': located element masses (%.0f kg) exceed the loaded "
+                "displacement (%.0f kg) -- refusing, because the remainder would be a NEGATIVE "
+                "hull and it would float upside down rather than fail",
+                m_spec.kind.c_str(), located, total);
+            return false;
+        }
+        for (int i = 0; i < 3; ++i) mom[i] += hullM * m_spec.hullMassCentre[i];
+        sumM = located + hullM;
+        double cg[3] = {0.0, 0.0, 0.0};
+        if (sumM > 1e-9) for (int i = 0; i < 3; ++i) cg[i] = mom[i] / sumM;
+
+        // Re-reference the geometry. Stations carry (x, y) outlines at a longitudinal z; mounts
+        // carry a motor and, when jointed, a line to swing about.
+        for (Element& e : m_spec.elements) {
+            for (Section& st : e.stations) {
+                st.z -= cg[2];
+                for (double& y : st.oy) y -= cg[1];
+                for (double& x : st.ox) x -= cg[0];
+            }
+            e.mount.at = Motor::Translation(-cg[0], -cg[1], -cg[2]) * e.mount.at;
+            if (e.mount.jointed) for (int i = 0; i < 3; ++i) e.mount.axisP[i] -= cg[i];
+            e.tubeZ0.v -= cg[2];
+            e.tubeZ1.v -= cg[2];
+            e.tubeXOffset.v -= cg[0];
+            e.tubeYOffset.v -= cg[1];
+        }
+        for (int i = 0; i < 3; ++i) m_spec.cgFromTransom[i] = cg[i];
+        Log("[vessel] %s: CG solved at (%+.3f, %+.3f, %+.3f) m from the geometry datum -- "
+            "%.0f kg located in elements, %.0f kg hull",
+            m_spec.kind.c_str(), cg[0], cg[1], cg[2], located, hullM);
+    }
+
     m_body = RigidBody{};
     m_body.mp.mass = spec.massLoaded.v > 0.0 ? spec.massLoaded.v : spec.massDry.v;
     // AXES. A moment of inertia is named for the motion it resists, and that is the axis it
@@ -217,6 +272,193 @@ bool Vessel::Build(const VesselSpec& spec, const Motor& pose) {
     return true;
 }
 
+// ================================================================================================
+//  Collar - ONE TUBE CHAMBER, and the curve that IS a RHIB.
+//
+//  The immersed area of a circle of radius r flooded to depth h is closed form:
+//
+//      A(h) = r^2 acos((r-h)/r) - (r-h) sqrt(2rh - h^2),      0 <= h <= 2r
+//
+//  and its derivative is the whole character of the boat. dA/dh is ZERO at first touch, MAXIMAL
+//  at half immersion, and zero again once the tube is under: a collar meets the water softly,
+//  then very stiffly, then stops caring. That is why a RHIB lands on its tubes instead of
+//  slamming on its chines, and it is why this is a law and not a spring constant.
+//
+//  THE DAMPING TERM IS NOT OPTIONAL. A collar is a ~0.25 bar membrane, not a rigid float: it
+//  absorbs on the way in. Without this the stiffness above is a pure spring and the hull rings
+//  like a bell on every wave. With it, a slam becomes a thump. It is proportional to the rate of
+//  immersion, which is the relative normal velocity -- no state, no history, no filter.
+//
+//  Chambers are independent by construction, so a puncture is asymmetric and survivable rather
+//  than a game over, and so a heeled hull gets its righting moment from the lee tube alone.
+// ================================================================================================
+Bivector Vessel::Collar(const Element& e, const WaterSurface& sea, double simUnix) {
+    Bivector w = Bivector::Zero();
+    const double z0 = e.tubeZ0.v, z1 = e.tubeZ1.v;
+    const double len = std::abs(z1 - z0);
+    if (len < 1e-6) return w;
+
+    // Five slices is enough: the tube is slender and the immersion varies smoothly along it.
+    // More would buy precision the sea state does not have.
+    constexpr int kSlices = 5;
+    const double dz = len / kSlices;
+    for (int i = 0; i < kSlices; ++i) {
+        const double u = (i + 0.5) / kSlices;
+        const double z = z0 + (z1 - z0) * u;
+        const double r = e.tubeR0.v + (e.tubeR1.v - e.tubeR0.v) * u;
+        if (r <= 1e-6) continue;
+
+        const double atBody[3] = {e.tubeXOffset.v, e.tubeYOffset.v, z};
+        double wc[3];
+        m_body.ToWorld(atBody, wc);
+        const Medium med = sea.WaterAt(wc[0], wc[2], simUnix);
+        const SurfaceSample ss = sea.At(wc[0], wc[2], simUnix);
+        if (!ss.valid) { m_tel.waterValid = false; continue; }
+
+        // Depth of the tube's AXIS below the surface; the tube spans axis-r .. axis+r, so the
+        // flooded depth measured from its underside is that plus r, clamped to the diameter.
+        const double axisDepth = med.ImmersionAt(wc);
+        double hh = axisDepth + r;
+        if (hh <= 0.0) continue;                       // clear of the water: contributes nothing
+        if (hh > 2.0 * r) hh = 2.0 * r;
+
+        const double rm = r - hh;
+        const double disc = 2.0 * r * hh - hh * hh;
+        const double area = r * r * std::acos(std::max(-1.0, std::min(1.0, rm / r))) -
+                            rm * std::sqrt(std::max(disc, 0.0));
+        if (area <= 0.0) continue;
+
+        const double vol = area * dz;
+        m_accVol += vol;
+
+        // Buoyancy along the free surface's NORMAL -- the surface is an equipotential of the
+        // effective gravity, so that direction IS the first-order law; world up would be the
+        // approximation.
+        const double mag = med.rho * kG * vol;
+        double f[3] = {med.nx * mag, med.ny * mag, med.nz * mag};
+
+        // The membrane. Relative velocity along the same normal, scaled by how much of the tube
+        // is engaged (dA/dh is the engaged width, and that is what the water has to push).
+        double vb[3];
+        m_body.VelocityAtBody(atBody, vb);
+        const double rel[3] = {vb[0] - med.vx, vb[1] - med.vy, vb[2] - med.vz};
+        const double vn = rel[0] * med.nx + rel[1] * med.ny + rel[2] * med.nz;
+        const double engaged = 2.0 * std::sqrt(std::max(disc, 0.0));   // chord width at h
+        const double damp = -e.tubeDamping.v * vn * (engaged * dz) / std::max(2.0 * r * dz, 1e-6);
+        f[0] += med.nx * damp;
+        f[1] += med.ny * damp;
+        f[2] += med.nz * damp;
+
+        w += m_body.BodyWrench(f, atBody);
+    }
+    return w;
+}
+
+// ================================================================================================
+//  Planing - Savitsky's SHAPE, not Savitsky.
+//
+//  Dynamic lift goes as rho v^2 sin(alpha) x wetted area. That is the whole model, and everything
+//  a planing hull is famous for is supposed to FALL OUT of it rather than be written down:
+//
+//    * the HUMP -- at low speed there is no lift, the hull is deep, drag is high; push through
+//      and lift reduces immersion, which reduces drag, which raises speed, which raises lift;
+//    * TRIM SENSITIVITY -- alpha is the angle the bottom meets the flow, so bow attitude IS the
+//      throttle's partner;
+//    * PORPOISING -- the centre of pressure moves FORWARD with speed, so the lift and the weight
+//      chase each other in pitch. If this model porpoises when badly trimmed, that is evidence
+//      it is right, not a bug to damp away.
+//
+//  Deadrise costs lift: a deep-V pays for its soft ride with a lower lift coefficient than a flat
+//  plate, which is why 22 degrees rides well and needs the horsepower.
+// ================================================================================================
+Bivector Vessel::Planing(const Element& e, const WaterSurface& sea, double simUnix) {
+    double atBody[3];
+    e.mount.Origin(0.0, atBody);
+    double wc[3];
+    m_body.ToWorld(atBody, wc);
+    const Medium med = sea.WaterAt(wc[0], wc[2], simUnix);
+    if (med.ImmersionAt(wc) <= 0.0) return Bivector::Zero();   // airborne: no lift, only gravity
+
+    double vb[3];
+    m_body.VelocityAtBody(atBody, vb);
+    double rel[3] = {vb[0] - med.vx, vb[1] - med.vy, vb[2] - med.vz};
+    m_body.pose.Inverse().TransformDir(rel[0], rel[1], rel[2]);
+
+    const double u = rel[2];                       // forward component, body axes
+    if (u <= 0.1) return Bivector::Zero();         // astern or stopped: a planing surface does
+                                                   // nothing at all, which is why boats back slowly
+    const double spd = std::sqrt(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]);
+    if (spd < 1e-6) return Bivector::Zero();
+
+    // The angle the bottom meets the flow. rel[1] > 0 is the hull RISING relative to the water,
+    // which unloads the running surface; the loading case is the hull descending into the flow.
+    // So the angle of attack is positive exactly when rel[1] is negative.
+    // The hull's trim relative to the flow, PLUS the running surface's built-in incidence. The
+    // second term is what lets the boat get onto plane at all: without it a level hull meets the
+    // flow at zero degrees, makes no lift, never trims up, and never reaches the angle that
+    // would have made lift -- measured as a hull stuck at 17 kn with the throttles buried.
+    const double alpha = -rel[1] / spd + e.planingIncidence.v;
+    if (alpha <= 0.0) return Bivector::Zero();
+
+    const double dead = e.deadriseDeg.v;           // radians (Num parsed "deg")
+    const double deadLoss = std::max(0.25, std::cos(dead));
+    const double lift = 0.5 * med.rho * spd * spd * e.planingArea.v * alpha * deadLoss;
+
+    // The centre of pressure marches FORWARD as speed rises -- the mechanism behind porpoising.
+    // Referenced to a nominal planing speed so the term is bounded and dimensionless.
+    const double cpShift = 0.35 * e.planingBeam.v * std::min(1.0, spd / 12.0);
+    const double applyAt[3] = {atBody[0], atBody[1], atBody[2] + cpShift};
+
+    // Lift acts normal to the RUNNING SURFACE, which is the hull's own up -- not the world's.
+    // That is what makes a heeled planing hull carve instead of skid.
+    double fWorld[3] = {0.0, lift, 0.0};
+    m_body.pose.TransformDir(fWorld[0], fWorld[1], fWorld[2]);
+    return m_body.BodyWrench(fWorld, applyAt);
+}
+
+// ================================================================================================
+//  Foil - a lifting surface in whatever fluid it is mounted in.
+//
+//  One kind covers the skeg, a rudder, a centreboard and (in air) a sail: they differ by area,
+//  slope, stall and WHICH MEDIUM, and nothing else. This is the element that makes a hull track
+//  instead of skate -- a small area a long way aft turns sideslip into a restoring yaw moment,
+//  and a RHIB without it is a dinner plate.
+// ================================================================================================
+Bivector Vessel::Foil(const Element& e, const WaterSurface& sea, double simUnix) {
+    double atBody[3];
+    e.mount.Origin(0.0, atBody);
+    double wc[3];
+    m_body.ToWorld(atBody, wc);
+    const Medium med = (e.medium == MediumKind::Air) ? sea.AirAt(wc[0], wc[2], simUnix)
+                                                     : sea.WaterAt(wc[0], wc[2], simUnix);
+    if (med.ImmersionAt(wc) <= 0.0) return Bivector::Zero();
+
+    double vb[3];
+    m_body.VelocityAtBody(atBody, vb);
+    double rel[3] = {vb[0] - med.vx, vb[1] - med.vy, vb[2] - med.vz};
+    m_body.pose.Inverse().TransformDir(rel[0], rel[1], rel[2]);
+
+    // Sideslip in the horizontal plane: the angle between where the foil points (body +z) and
+    // where the water is actually going.
+    const double u = std::abs(rel[2]);
+    const double spd2 = rel[0] * rel[0] + rel[2] * rel[2];
+    if (spd2 < 1e-6 || u < 1e-3) return Bivector::Zero();
+    const double alpha = std::atan2(rel[0], u);
+
+    const double stall = e.foilStallDeg.v;                       // radians
+    const double aEff = std::max(-stall, std::min(stall, alpha));
+    // Past stall the lift does not vanish, it plateaus -- clamping the ANGLE rather than zeroing
+    // the force is what keeps a hard-over turn from going weightless at the skeg.
+    const double cl = e.foilLiftSlope.v * aEff;
+    const double q = 0.5 * med.rho * spd2 * e.foilArea.v;
+
+    // Lift opposes the sideslip; profile drag opposes the motion.
+    double fb[3] = {-q * cl, 0.0, -q * e.foilCd0.v * ((rel[2] > 0.0) ? 1.0 : -1.0)};
+    double fWorld[3] = {fb[0], fb[1], fb[2]};
+    m_body.pose.TransformDir(fWorld[0], fWorld[1], fWorld[2]);
+    return m_body.BodyWrench(fWorld, atBody);
+}
+
 Bivector Vessel::NetWrench(const WaterSurface& sea, const VesselControls& c, double simUnix) {
     Bivector w = Bivector::Zero();
     m_accVol = 0.0;
@@ -233,6 +475,15 @@ Bivector Vessel::NetWrench(const WaterSurface& sea, const VesselControls& c, dou
                 break;
             case ElementKind::Drag:
                 w += Drag(e, sea, simUnix);
+                break;
+            case ElementKind::Collar:
+                w += Collar(e, sea, simUnix);
+                break;
+            case ElementKind::Planing:
+                w += Planing(e, sea, simUnix);
+                break;
+            case ElementKind::Foil:
+                w += Foil(e, sea, simUnix);
                 break;
             case ElementKind::Thruster: {
                 const int i = thrusterIdx++;
@@ -253,7 +504,20 @@ Bivector Vessel::NetWrench(const WaterSurface& sea, const VesselControls& c, dou
                                        ? 0.0
                                        : std::min(1.0, imm / std::max(e.propRadius.v, 1e-3));
                 if (wet > 0.0) ++m_tel.thrustersWet;
-                const double mag = c.throttle[i] * e.maxThrust.v * wet;
+                // THRUST FALLS OFF WITH SPEED. A propeller's thrust is highest at zero
+                // advance and vanishes as the boat approaches the speed its pitch can sustain;
+                // held constant instead, the hull would accelerate until drag alone stopped it
+                // and would feel like a rocket at 30 kn rather than a boat running out of prop.
+                // Linear is the honest first shape -- the real curve depends on pitch, slip and
+                // cavitation, none of which this spec knows.
+                double vFwd[3];
+                m_body.VelocityAtBody(atBody, vFwd);
+                double fwdW[3] = {fwdBody[0], fwdBody[1], fwdBody[2]};
+                m_body.pose.TransformDir(fwdW[0], fwdW[1], fwdW[2]);
+                const double along = vFwd[0] * fwdW[0] + vFwd[1] * fwdW[1] + vFwd[2] * fwdW[2];
+                constexpr double kFreeRunMs = 19.0;   // ~37 kn, where the prop runs out
+                const double fall = std::max(0.0, 1.0 - std::max(along, 0.0) / kFreeRunMs);
+                const double mag = c.throttle[i] * e.maxThrust.v * wet * fall;
                 double fWorld[3] = {fwdBody[0] * mag, fwdBody[1] * mag, fwdBody[2] * mag};
                 m_body.pose.TransformDir(fWorld[0], fWorld[1], fWorld[2]);
                 w += m_body.BodyWrench(fWorld, atBody);

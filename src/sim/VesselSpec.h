@@ -127,7 +127,12 @@ struct Attach {
     }
 };
 
-enum class ElementKind : uint8_t { Buoyancy, Collar, Planing, Thruster, Foil, Drag };
+// Ballast is the odd one out and earns its place: it exerts NO force of its own, it only sits
+// somewhere and weighs something. Fuel, batteries, crew, a bag of gear. It exists because where a
+// boat carries its weight is a real design fact -- tanks forward instead of aft is worth degrees
+// of running trim -- and because the alternative is a single hand-tuned "the CG is here" number
+// that stops being true the moment anything is added.
+enum class ElementKind : uint8_t { Buoyancy, Collar, Planing, Thruster, Foil, Drag, Ballast };
 enum class MediumKind : uint8_t { Water, Air };
 
 // ================================================================================================
@@ -155,6 +160,16 @@ struct Element {
     MediumKind medium = MediumKind::Water;   // THE wind hook: the same kind in the other fluid
     Attach mount;
 
+    // What this part WEIGHS, and therefore where it drags the centre of mass to. Optional: a
+    // zero here means "not a located mass", not "weightless" -- the hull's own mass is carried
+    // by the spec's massDry/massLoaded and placed at hullMassCentre.
+    //
+    // This is the field that makes the factory's promise real. Two hundred kilos of outboard
+    // hanging off a transom is not a detail of the RHIB, it is WHY a RHIB squats when you open
+    // the throttles and why its pitch inertia is aft-dominated; and adding a third engine has to
+    // move the CG without anyone editing a number that says where the CG is.
+    Num mass;
+
     // ---- Buoyancy
     std::vector<Section> stations;           // ordered by z
 
@@ -169,6 +184,11 @@ struct Element {
     Num deadriseDeg;                         // transom deadrise
     Num planingBeam;                         // chine beam
     Num planingArea;                         // reference wetted area at speed
+    // The running surface's OWN angle to the hull datum. Without it a planing model cannot start:
+    // level hull -> zero angle of attack -> no lift -> no bow-up trim -> level hull, forever, and
+    // the boat sits in displacement mode at any throttle. A real after body is not parallel to
+    // the waterline, and this is that fact as a number.
+    Num planingIncidence;
 
     // ---- Thruster
     Num maxThrust;                           // static thrust at full throttle
@@ -198,7 +218,12 @@ struct VesselSpec {
 
     Num loa, beam, draftStatic;
     Num massDry, massLoaded;
-    double cgFromTransom[3] = {0, 0, 0};     // where the CG sits, for the record
+    // Where the hull's OWN mass (structure, collar, deck, tanks, crew) acts, in the spec's
+    // geometry datum. Located element masses are added to this; Vessel::Build solves for the
+    // combined centroid and re-references every station and mount to it, because RigidBody's
+    // body origin IS the centre of mass and nothing else will do.
+    double hullMassCentre[3] = {0, 0, 0};
+    double cgFromTransom[3] = {0, 0, 0};     // SOLVED at Build, for the record and the ledger
     Num inertiaRoll, inertiaPitch, inertiaYaw;   // about the CG, body axes
     Num addedMassSurge, addedMassSway, addedMassHeave;
     Num addedInertiaRoll, addedInertiaPitch, addedInertiaYaw;
@@ -255,5 +280,10 @@ void RegisterBuiltinVessels(VesselRegistry& reg);
 // factory, and because a box is the only hull whose draught, heave period and metacentric height
 // are all exact closed forms to gate the element code against.
 VesselSpec MakeTestBox();
+
+// A 1998 Novurania 18' RHIB on twin Yamaha F50s -- the first hull meant to be SAILED
+// rather than gated. Deep-V stations, five collar chambers, two steered outboards, a
+// skeg, hull resistance and windage. Most of its numbers are ASSUMED and say so.
+VesselSpec MakeRhib18();
 
 }  // namespace ga

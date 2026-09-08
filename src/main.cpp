@@ -110,6 +110,11 @@ struct Options {
     bool dumpWater = false;           // --dump-water-state: inlet fields for proofs/
     bool twinSurface = false;         // --twin-surface: CPU WaterSurface vs the GPU bank
     std::string boat;                 // --boat <kind>: spawn a vessel and helm it
+    // --boat-drive t,s: hold the throttles and the helm at fixed values. Headless has no
+    // keyboard, so without this a powered run cannot be reproduced or gated at all -- and
+    // "does it plane / does it launch off a crest" are exactly the questions that need one.
+    double boatThrottle = 0.0, boatSteer = 0.0;
+    bool boatDrive = false;
     bool sliceOn = false;             // --slice d: the cutaway plane (M7o)
     double sliceD = 0.0;              // plane offset, world z metres
     int inject = 0;                   // --inject [bank|cascade]: edge test cards
@@ -357,6 +362,14 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--dump-water-state") o.dumpWater = true;
         else if (a == "--twin-surface") o.twinSurface = true;
         else if (a == "--boat") o.boat = next("box.test");
+        else if (a == "--boat-drive") {
+            const std::string v = next("1,0");
+            float t = 1.0f, st = 0.0f;
+            sscanf_s(v.c_str(), "%f,%f", &t, &st);
+            o.boatThrottle = t;
+            o.boatSteer = st;
+            o.boatDrive = true;
+        }
         else if (a == "--slice") {
             o.sliceOn = true;
             o.sliceD = _wtof(Widen(next("0").c_str()).c_str());
@@ -3458,6 +3471,7 @@ int main(int argc, char** argv) {
         std::unique_ptr<Vessel> boat;
         TreeWater boatSea;
         VesselControls boatCtl;
+        bool boatPlaced = false;      // set down on the surface at the first step, see stepBoat
         bool helming = false;         // T detaches the camera; the physics never stops
         double helmYawRef = 0.0;      // the look-steer's heading reference -- see the note in
         if (!opt.boat.empty()) {
@@ -4086,6 +4100,30 @@ int main(int argc, char** argv) {
             boatSea.Configure(&weather, waveField.get(), sea ? &sea->Ocean() : nullptr,
                               &seaState, sea ? double(sea->heightScale) : 1.0,
                               waterScene.wfExag, waterScene.wfChop);
+            // PLACE THE HULL ON THE WATER, ONCE. A vessel is built before the weather
+            // manager exists, so it cannot be spawned at the right height -- and NAVD 0 is half
+            // a metre under the surface here at this tide. Dropped in submerged, the hull takes
+            // a buoyancy impulse of its own displacement in one quantum and the RHIB simply
+            // capsized: heel 179 deg, floating inverted, never recovering. So the first step
+            // sets it down gently instead of the scene throwing it in.
+            if (!boatPlaced) {
+                double bp0[3] = {0, 0, 0};
+                boat->Body().pose.TransformPoint(bp0[0], bp0[1], bp0[2]);
+                const SurfaceSample ss = boatSea.At(bp0[0], bp0[2], simUnix);
+                if (ss.valid) {
+                    boat->Body().SetPose(Motor::Translation(bp0[0], ss.heightNavd, bp0[2]));
+                    boatPlaced = true;
+                    Log("[vessel] set down on the water at y = %+.3f m NAVD", ss.heightNavd);
+                } else {
+                    return;   // no water yet: do not integrate a hull that has nothing to float on
+                }
+            }
+            if (opt.boatDrive) {
+                for (int t = 0; t < VesselControls::kMaxThrusters; ++t) {
+                    boatCtl.throttle[t] = opt.boatThrottle;
+                }
+                boatCtl.steer = opt.boatSteer;
+            }
             PROF_BEGIN();
             for (int q = 0; q < quanta; ++q) {
                 boat->Step(boatSea, boatCtl, simUnix, SimClock::kDt);
@@ -4103,11 +4141,21 @@ int main(int argc, char** argv) {
                 const VesselTelemetry& t = boat->Telemetry();
                 double bp[3] = {0, 0, 0};
                 boat->Body().pose.TransformPoint(bp[0], bp[1], bp[2]);
+                // The water the hull is standing on, at the hull. Buoyancy acts along this
+                // NORMAL, so a wrong slope is not a cosmetic error -- it is a horizontal force.
+                const SurfaceSample ws = boatSea.At(bp[0], bp[2], simUnix);
+                const double slope = std::sqrt(ws.nx * ws.nx + ws.nz * ws.nz) /
+                                     ((std::abs(ws.ny) > 1e-9) ? std::abs(ws.ny) : 1e-9);
+                Log("[vessel]   water: eta %+.2f n (%+.3f, %+.3f, %+.3f) |slope| %.3f = %.1f deg"
+                    "  orbital (%+.2f, %+.2f, %+.2f) m/s",
+                    ws.heightNavd, ws.nx, ws.ny, ws.nz, slope,
+                    std::atan(slope) * 57.2957795, ws.vx, ws.vy, ws.vz);
                 Log("[vessel] pos (%.1f, %+.2f, %.1f) %.1f kn hdg %.0f heel %+.1f trim %+.1f "
                     "draught %.3f vol %.2f depth %.1f%s%s | parts %u",
                     bp[0], bp[1], bp[2], t.speedKn, t.headingRad * 57.2957795,
                     t.heelRad * 57.2957795, t.trimRad * 57.2957795, t.draughtM, t.immersedVol,
-                    t.depthM, t.aground ? " AGROUND" : "",
+                    t.depthM,
+                    (t.immersedVol < 1e-6) ? " AIRBORNE" : (t.aground ? " AGROUND" : ""),
                     t.waterValid ? "" : " NO-WATER",
                     vesselLayer ? vesselLayer->PartCount() : 0u);
             }

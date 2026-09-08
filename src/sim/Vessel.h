@@ -92,6 +92,9 @@ public:
 
 private:
     Bivector Buoyancy(const Element& e, const WaterSurface& sea, double simUnix);
+    Bivector Collar(const Element& e, const WaterSurface& sea, double simUnix);
+    Bivector Planing(const Element& e, const WaterSurface& sea, double simUnix);
+    Bivector Foil(const Element& e, const WaterSurface& sea, double simUnix);
     Bivector Drag(const Element& e, const WaterSurface& sea, double simUnix);
 
     VesselSpec m_spec;
