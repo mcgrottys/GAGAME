@@ -817,6 +817,20 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
     } else {
         Log("[globe] mesh WIREFRAME PSO creation failed (solid path unaffected)");
     }
+    // M9bk: ...and the same wireframe with NO water shading on the lines (--wireflat), so the
+    // mesh can be read as geometry instead of through the look it is carrying.
+    ShaderBlob psW = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"PsWireFlat", L"ps_6_5");
+    if (psW.Valid()) {
+        const auto psKeep = stream.ps.val;
+        stream.ps.val = {psW.Data(), psW.Size()};
+        Com<ID3D12PipelineState> psoWF;
+        if (SUCCEEDED(dev2->CreatePipelineState(&sd, IID_PPV_ARGS(&psoWF)))) {
+            m_msPsoWireFlat = psoWF;
+        } else {
+            Log("[globe] mesh FLAT-WIRE PSO creation failed (solid path unaffected)");
+        }
+        stream.ps.val = psKeep;
+    }
     // ...and solid again, with the meshlet-identity pixel shader.
     ShaderBlob psM = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"PsMeshlet", L"ps_6_5");
     if (psM.Valid()) {
@@ -872,7 +886,9 @@ double SplitRange(const WalkParams& wp, double arc) {
     double d = arc * GlobeLayer::kLodFactor;
     if (wp.waveGrainM > 0.0f) {
         const double cell = arc / 32.0;
-        if (cell > static_cast<double>(wp.waveGrainM)) {
+        const double grain =
+            static_cast<double>(wp.waveGrainM) / GlobeLayer::kWaveOversample;
+        if (cell > grain) {
             // The wave rule splits while cell > max(grain, dist*c); with cell past the grain
             // floor that is dist < cell/c, and the range gate caps it at the rings' reach.
             const double c = (std::max)(1.0 / 256.0,
@@ -981,7 +997,8 @@ void WalkNode(const WalkParams& wp, uint64_t& nodes, int face, int level, double
         if (dist < reach) {
             const double cell = arc / 32.0;
             const double waveTexel =
-                (std::max)(static_cast<double>(wp.waveGrainM), dist / 256.0);
+                (std::max)(static_cast<double>(wp.waveGrainM), dist / 256.0) /
+                GlobeLayer::kWaveOversample;
             const double pxFloor = dist * wp.pixAng * GlobeLayer::kWavePxFloor;
             split = cell > (std::max)(waveTexel, pxFloor);
         }
@@ -1803,6 +1820,7 @@ void GlobeLayer::Render(const FrameContext& ctx) {
         ID3D12PipelineState* msSel = m_msPso.Get();
         if (surfaceDebug == 1 && m_msPsoWire) msSel = m_msPsoWire.Get();
         else if (surfaceDebug == 2 && m_msPsoMeshlet) msSel = m_msPsoMeshlet.Get();
+        else if (surfaceDebug == 3 && m_msPsoWireFlat) msSel = m_msPsoWireFlat.Get();
         ctx.cl->SetPipelineState(msSel);
         ctx.cl->SetGraphicsRootConstantBufferView(1, cbVa);
         ctx.cl->SetGraphicsRootShaderResourceView(2, rec.res->GetGPUVirtualAddress());

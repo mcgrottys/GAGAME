@@ -450,6 +450,8 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--dump-both") o.dumpBoth = true;
         else if (a == "--load-field") o.loadField = next("");
         else if (a == "--meshlets") o.surfaceDebug = 2;
+        // M9bk: the wireframe with the water shading OFF -- geometry, read as geometry.
+        else if (a == "--wireflat") o.surfaceDebug = 3;
         else if (a == "--mesh-stats") o.meshStats = true;
         else if (a == "--stencil") o.stencil = true;
         else if (a == "--no-ms") o.msSurface = false;

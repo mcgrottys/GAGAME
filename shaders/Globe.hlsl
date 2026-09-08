@@ -843,6 +843,18 @@ float4 PsMeshlet(VsOut i) : SV_Target {
     return float4(c * (0.25f + 0.75f * lam), 1.0f);
 }
 
+// M9bk: THE FLAT WIRE (--wireflat). The --wireframe pass draws its lines with PsMain, so
+// every edge is painted with finished water -- specular, foam, sky mirror -- and the mesh you
+// are trying to READ is buried in the shading of the thing it describes. That cost this
+// session two wrong diagnoses off wireframe crops. This is the same geometry with NO shading:
+// one grey, depth-cued only so near and far stay separable. What you see is where the vertices
+// are, and nothing else.
+float4 PsWireFlat(VsOut i) : SV_Target {
+    const float d = length(i.rel);
+    const float f = saturate(260.0f / (260.0f + d));
+    return float4(f * 2.2f, f * 2.2f, f * 2.3f, 1.0f);
+}
+
 float4 PsMain(VsOut i) : SV_Target {
     const float3 up = normalize(i.dir);   // PLANET frame: lat/lon + every texture fetch
     const float3 v = normalize(-i.rel);   // TANGENT frame: geometry + lighting (M6g)

@@ -44,6 +44,14 @@ public:
     // 2 rings is ~614 m at the shipped 1.2 m grain: the helm's neighbourhood, and nothing a
     // globe view can ever be inside.
     static constexpr double kWaveRings = 2.0;
+    // M9bk: NYQUIST ON THE WAVE GRAIN. The scene deliberately sets bankTexelM 1.2 to "match
+    // the mesh vertex spacing (~1.19 m)" -- and matching a sample grid to the grid it samples
+    // is the worst case, not the best: the vertex phase inside a texel drifts at the
+    // difference frequency, beating at 1.2*1.19/0.01 ~ 143 m. That beat is the long straight
+    // ridges fanning down a storm face, aligned to the MESH and not to the wave (seen only
+    // once --wireflat took the water shading off the lines). Two vertices per texel puts the
+    // mesh above the field's Nyquist, so it RESOLVES the bank instead of beating with it.
+    static constexpr double kWaveOversample = 1.0;   // MEASURED: 2.0 did NOT remove the ridges (they are in the FIELD, not the sampling) and cost the record budget.
     // ... and its depth ceiling. Level 20 is a 9.6 m node = 0.30 m cells, a quarter of the
     // bank's ring-0 texel: enough to carry the cubic's curvature between texels without
     // pretending to data that is not there.
@@ -495,7 +503,7 @@ private:
     bool m_dropsReported = false;   // one report per drop episode, not per frame
     bool m_msPath = false;
     uint32_t m_meshStatWalks = 0;   // M9d: --mesh-stats prints on the 8th walk
-    Com<ID3D12PipelineState> m_msPso, m_msPsoWire, m_msPsoMeshlet;
+    Com<ID3D12PipelineState> m_msPso, m_msPsoWire, m_msPsoMeshlet, m_msPsoWireFlat;
     Com<ID3D12PipelineState> m_psoWire, m_psoMeshlet;
     Com<ID3D12GraphicsCommandList6> m_cl6;
     std::vector<MeshletRec> m_meshlets;
