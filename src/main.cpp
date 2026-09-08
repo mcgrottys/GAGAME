@@ -4480,15 +4480,32 @@ int main(int argc, char** argv) {
                                 boatCtl.throttle[t] +=
                                     std::clamp(want - boatCtl.throttle[t], -rate, rate);
                             }
+                            // D IS STARBOARD, and the sign is the outboard's, not the
+                            // wheel's. Motor::Rotation about +y takes +z to +x (RunPgaSelfTest
+                            // pins it), so a POSITIVE steer swings the thrust to starboard --
+                            // and that thrust acts at the transom, ABAFT the CG, so it pushes
+                            // the stern to starboard and the bow to PORT. A helm that turns the
+                            // boat to starboard therefore commands a NEGATIVE angle here, which
+                            // is exactly what the real linkage does: the leg kicks the stern the
+                            // opposite way to the turn.
                             double sd = 0.0;
-                            if (in.keyDown['D']) sd += 1.0;
-                            if (in.keyDown['A']) sd -= 1.0;
+                            if (in.keyDown['D']) sd -= 1.0;
+                            if (in.keyDown['A']) sd += 1.0;
                             // A mechanical steering RATE limit, not a snap: the outboards swing
                             // at a finite speed and that lag is a real part of how a boat feels.
                             const double sMax = 0.6;
                             boatCtl.steer += std::clamp(sd * sMax - boatCtl.steer,
                                                         -dt * 1.2, dt * 1.2);
                             boatCtl.steer = std::clamp(boatCtl.steer, -sMax, sMax);
+
+                            // TRIM. Shift trims OUT (bow up), Ctrl trims IN (bow down). It is
+                            // slow on purpose -- a trim pump takes seconds to sweep its range --
+                            // and it is the helmsman's only direct hold on running attitude.
+                            double td = 0.0;
+                            if (in.keyDown[VK_SHIFT]) td += 1.0;
+                            if (in.keyDown[VK_CONTROL]) td -= 1.0;
+                            boatCtl.tilt = std::clamp(boatCtl.tilt + td * dt * 0.20,
+                                                      -0.0873, 0.2618);
                         }
                         stepBoat(simSteps);
                     }

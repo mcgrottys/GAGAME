@@ -94,7 +94,12 @@ private:
     Bivector Buoyancy(const Element& e, const WaterSurface& sea, double simUnix);
     Bivector Collar(const Element& e, const WaterSurface& sea, double simUnix);
     Bivector Planing(const Element& e, const WaterSurface& sea, double simUnix);
-    Bivector Foil(const Element& e, const WaterSurface& sea, double simUnix);
+    // One half of the running surface, offset across the beam. Roll stiffness and roll damping
+    // both come from evaluating this at two places rather than one -- see the note in the .cpp.
+    Bivector PlaningPanel(const Element& e, const WaterSurface& sea, double simUnix,
+                          double xOffset, double areaFrac);
+    Bivector Foil(const Element& e, const WaterSurface& sea, const VesselControls& c,
+                  double simUnix);
     Bivector Drag(const Element& e, const WaterSurface& sea, double simUnix);
 
     VesselSpec m_spec;

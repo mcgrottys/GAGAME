@@ -231,7 +231,7 @@ VesselSpec MakeRhib18() {
             // so 1400 N s/m per m^2 gives ~5.6 kN s/m of heave damping against a critical
             // 2*sqrt(k m) ~ 18 kN s/m -- about 0.3 of critical, which is a membrane that
             // absorbs a slam without turning the boat into a brick.
-            tube.tubeDamping = Num::Of(1400.0, "1",
+            tube.tubeDamping = Num::Of(2400.0, "1",
                                        "DERIVED: ~0.3 of critical heave damping over the collar's "
                                        "wetted area; N s/m per m^2 of engaged tube");
             s.elements.push_back(tube);
@@ -283,12 +283,24 @@ VesselSpec MakeRhib18() {
         eng.mount.at = Motor::Translation(sx, -0.38, -0.5 * LOA - 0.10);
         // Steering is a rotation about the near-vertical line through the mount. ONE PGA
         // primitive; the offset axis is free, which is the whole reason the joint is a LINE.
+        // The steering line, in the mount's OWN frame: through its origin, near-vertical. It
+        // was written with the mount's body-frame position here, which made Posed() translate
+        // the offset twice and swing the leg ~2.9 m off the transom every time the wheel moved.
         eng.mount.jointed = true;
-        eng.mount.axisP[0] = sx; eng.mount.axisP[1] = -0.38;
-        eng.mount.axisP[2] = -0.5 * LOA - 0.10;
+        eng.mount.axisP[0] = 0.0; eng.mount.axisP[1] = 0.0; eng.mount.axisP[2] = 0.0;
         eng.mount.axisD[0] = 0.0; eng.mount.axisD[1] = 1.0; eng.mount.axisD[2] = 0.0;
         eng.mount.lo = -0.60; eng.mount.hi = 0.60;     // ~34 deg either side, hard over
         eng.mount.rate = 1.2;                          // rad/s at the helm pump
+
+        // The TRIM line: the transverse pin, also through the mount. Positive rotation about
+        // local +x carries the thrust axis (+z) toward -y, i.e. angles it DOWN at the transom,
+        // which pushes the stern down and the bow up -- trimming out. -5 to +15 degrees is the
+        // ordinary working range of an outboard's trim before it starts ventilating.
+        eng.mount.tilted = true;
+        eng.mount.tiltD[0] = 1.0; eng.mount.tiltD[1] = 0.0; eng.mount.tiltD[2] = 0.0;
+        eng.mount.tiltLo = -0.0873;                    // -5 deg, tucked under
+        eng.mount.tiltHi = 0.2618;                     // +15 deg, trimmed out
+        eng.mount.tiltRate = 0.20;                     // rad/s -- a trim pump is not fast
         // THESE ARE HIGH THRUST ENGINES, which is a different machine from an F50 and not a
         // trim level. Yamaha's T prefix is the High Thrust series: a lower gear ratio (~2.3:1
         // against ~1.85) swinging a larger-diameter, lower-pitch wheel. It converts the same
@@ -332,6 +344,25 @@ VesselSpec MakeRhib18() {
                            "USER: T50TLRW, four-stroke -- ~112 kg dry; the high-thrust gearcase "
                            "is slightly heavier than the standard leg");
         s.elements.push_back(eng);
+
+        // THE LOWER UNIT, as its own steered foil. It shares the engine's mount and steering
+        // line, so it swings with the leg and its side force lands at the transom -- abaft the
+        // CG, which is what turns a boat, and only ~0.4 m below it, which is why it turns
+        // without rolling the hull the way a deep keel skeg would.
+        //
+        // This is where an outboard boat's turning force actually comes from. The thrust vector
+        // alone only yaws the hull; the leg is what it pushes against.
+        Element leg;
+        leg.kind = ElementKind::Foil;
+        leg.name = side == 0 ? "gearcase.port" : "gearcase.stbd";
+        leg.medium = MediumKind::Water;
+        leg.mount = eng.mount;                     // same place, same steering and trim lines
+        leg.foilArea = Num::Of(0.055, "1",
+                               "ASSUMED: one gearcase + anti-ventilation plate in profile");
+        leg.foilLiftSlope = Num::Of(2.4, "1", "DERIVED: low-aspect strut, dCl/dalpha ~ 2.4 /rad");
+        leg.foilStallDeg = Num::Of(28.0, "deg", "ASSUMED: struts stall late and softly");
+        leg.foilCd0 = Num::Of(0.03, "1", "ASSUMED: gearcase profile drag");
+        s.elements.push_back(leg);
     }
 
     // ---- the skeg: what makes it track -------------------------------------------------------
@@ -342,7 +373,15 @@ VesselSpec MakeRhib18() {
     skeg.name = "skeg";
     skeg.medium = MediumKind::Water;
     skeg.mount.at = Motor::Translation(0.0, KEEL - 0.05, -0.34 * LOA);
-    skeg.foilArea = Num::Of(0.16, "1", "ASSUMED: keel skeg + the two gearcases as lifting area");
+    // Measured down from 0.16 by its consequence: a skeg is a small plate and two gearcases,
+    // not a keel. At 0.16 it made more side force than the boat weighed and rolled it over in
+    // every turn. 0.06 leaves it doing what a skeg does -- resisting yaw -- without steering
+    // the boat from below its centre of mass.
+    skeg.foilArea = Num::Of(0.05, "1",
+                            "ASSUMED: the HULL's keel skeg alone. The gearcases used to be "
+                            "lumped in here, on the centreline and fixed, which put their area "
+                            "in the wrong place and denied it to the helm -- they are their own "
+                            "steered foils now");
     skeg.foilLiftSlope = Num::Of(2.6, "1",
                                  "DERIVED: low-aspect lifting surface, dCl/dalpha ~ 2.6 /rad");
     skeg.foilStallDeg = Num::Of(22.0, "deg", "ASSUMED: low-aspect stall");

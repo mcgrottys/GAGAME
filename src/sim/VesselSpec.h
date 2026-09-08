@@ -108,22 +108,43 @@ struct Attach {
     double lo = 0.0, hi = 0.0;                 // travel limits, radians
     double rate = 1.0;                         // max slew, rad/s (mechanical, not a filter)
 
+    // The TRIM/TILT joint: a second line, transverse. Trimming an outboard OUT angles its thrust
+    // downward at the transom, which pushes the stern down and lifts the bow -- it is the
+    // helmsman's only direct control over running attitude, and on a planing hull that is most
+    // of the difference between a boat that skips and one that tracks.
+    bool tilted = false;
+    double tiltP[3] = {0, 0, 0};
+    double tiltD[3] = {1, 0, 0};
+    double tiltLo = 0.0, tiltHi = 0.0, tiltRate = 0.35;
+
     // The joint at angle `q`, composed onto the mount. ONE PGA primitive for every articulation
     // on every hull; the offset axis costs nothing extra.
-    Motor Posed(double q) const {
-        if (!jointed) return at;
-        const double c = (q < lo) ? lo : ((q > hi) ? hi : q);
-        return at * Motor::Rotation(axisP, axisD, c);
+    // TWO joints, because an outboard has two: it swings about a near-vertical line to steer
+    // and about a transverse pin to trim. Both are composed in the mount's LOCAL frame, so
+    // `axisP` is measured from the mount itself -- putting the body-frame position there makes
+    // the rotation swing the whole leg off the transom instead of turning it in place, which is
+    // what it did.
+    Motor Posed(double q, double t = 0.0) const {
+        Motor m = at;
+        if (jointed) {
+            const double c = (q < lo) ? lo : ((q > hi) ? hi : q);
+            m = m * Motor::Rotation(axisP, axisD, c);
+        }
+        if (tilted) {
+            const double c = (t < tiltLo) ? tiltLo : ((t > tiltHi) ? tiltHi : t);
+            m = m * Motor::Rotation(tiltP, tiltD, c);
+        }
+        return m;
     }
     // The mount's origin in body coordinates -- where a force from this part is applied.
-    void Origin(double q, double out[3]) const {
+    void Origin(double q, double out[3], double t = 0.0) const {
         out[0] = out[1] = out[2] = 0.0;
-        Posed(q).TransformPoint(out[0], out[1], out[2]);
+        Posed(q, t).TransformPoint(out[0], out[1], out[2]);
     }
     // The mount's forward axis (body +z) in body coordinates -- a thruster's line of action.
-    void Forward(double q, double out[3]) const {
+    void Forward(double q, double out[3], double t = 0.0) const {
         out[0] = 0.0; out[1] = 0.0; out[2] = 1.0;
-        Posed(q).TransformDir(out[0], out[1], out[2]);
+        Posed(q, t).TransformDir(out[0], out[1], out[2]);
     }
 };
 

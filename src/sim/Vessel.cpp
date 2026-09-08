@@ -383,9 +383,30 @@ Bivector Vessel::Collar(const Element& e, const WaterSurface& sea, double simUni
 //  Deadrise costs lift: a deep-V pays for its soft ride with a lower lift coefficient than a flat
 //  plate, which is why 22 degrees rides well and needs the horsepower.
 // ================================================================================================
+// The running surface is evaluated as TWO half-panels, port and starboard, each at a quarter
+// beam. That is not a refinement, it is what makes a planing hull stable in roll at all:
+//
+// A single centreline force cannot produce a righting moment however large it is, so at planing
+// trim the model had NO roll stiffness and NO roll damping -- both live in the buoyancy stations
+// and the collar, and both are out of the water once the hull is flying. Measured: +-50 degrees
+// of heel in a turn and +76 running straight. Split across the beam, a heeled hull puts the low
+// panel deeper into the flow and at a larger angle, so it makes more lift and pushes back; a
+// rolling hull sees a different vertical velocity on each side, which is the damping. Both fall
+// out of asking the same question at two places instead of one.
 Bivector Vessel::Planing(const Element& e, const WaterSurface& sea, double simUnix) {
+    Bivector w = Bivector::Zero();
+    const double halfB = 0.25 * ((e.planingBeam.v > 0.0) ? e.planingBeam.v : 1.0);
+    for (int side = 0; side < 2; ++side) {
+        w += PlaningPanel(e, sea, simUnix, (side == 0) ? -halfB : halfB, 0.5);
+    }
+    return w;
+}
+
+Bivector Vessel::PlaningPanel(const Element& e, const WaterSurface& sea, double simUnix,
+                              double xOffset, double areaFrac) {
     double atBody[3];
     e.mount.Origin(0.0, atBody);
+    atBody[0] += xOffset;
     double wc[3];
     m_body.ToWorld(atBody, wc);
     const Medium med = sea.WaterAt(wc[0], wc[2], simUnix);
@@ -414,13 +435,21 @@ Bivector Vessel::Planing(const Element& e, const WaterSurface& sea, double simUn
 
     const double dead = e.deadriseDeg.v;           // radians (Num parsed "deg")
     const double deadLoss = std::max(0.25, std::cos(dead));
-    const double lift = 0.5 * med.rho * spd * spd * e.planingArea.v * alpha * deadLoss;
+    const double lift = 0.5 * med.rho * spd * spd * e.planingArea.v * areaFrac * alpha * deadLoss;
 
     // The centre of pressure marches FORWARD as speed rises -- the mechanism behind porpoising.
     // Referenced to a nominal planing speed so the term is bounded and dimensionless.
     const double cpShift = 0.35 * e.planingBeam.v * std::min(1.0, spd / 12.0);
     const double applyAt[3] = {atBody[0], atBody[1], atBody[2] + cpShift};
 
+    // A DEADRISE SIDE-FORCE TERM WAS TRIED HERE AND REMOVED. The physics is real -- a planing
+    // V loads one panel harder than the other in a sideslip and the difference is lateral force
+    // -- but written as `-lift * tan(deadrise) * f(sideslip)` at the running surface it is a
+    // POSITIVE FEEDBACK: the force acts below the CG, so it heels the hull, which increases the
+    // sideslip, which increases the force. Measured at +-43 degrees of roll oscillation running
+    // dead straight. Whatever form this term takes it needs a restoring moment that grows faster
+    // than the heel, and that is a hull-form model, not a line here.
+    //
     // Lift acts normal to the RUNNING SURFACE, which is the hull's own up -- not the world's.
     // That is what makes a heeled planing hull carve instead of skid.
     double fWorld[3] = {0.0, lift, 0.0};
@@ -436,9 +465,15 @@ Bivector Vessel::Planing(const Element& e, const WaterSurface& sea, double simUn
 //  instead of skate -- a small area a long way aft turns sideslip into a restoring yaw moment,
 //  and a RHIB without it is a dinner plate.
 // ================================================================================================
-Bivector Vessel::Foil(const Element& e, const WaterSurface& sea, double simUnix) {
+Bivector Vessel::Foil(const Element& e, const WaterSurface& sea, const VesselControls& c,
+                      double simUnix) {
+    // A JOINTED FOIL FOLLOWS THE HELM. On an outboard boat the lower unit IS a rudder -- a big
+    // lateral area at the transom that swings with the leg -- and leaving it out was leaving out
+    // most of where the turn comes from. The thrust vector alone yaws the hull without giving it
+    // anything to push against, which is a boat that pirouettes rather than turns.
+    const double q = e.mount.jointed ? c.steer : 0.0;
     double atBody[3];
-    e.mount.Origin(0.0, atBody);
+    e.mount.Origin(q, atBody, c.tilt);
     double wc[3];
     m_body.ToWorld(atBody, wc);
     const Medium med = (e.medium == MediumKind::Air) ? sea.AirAt(wc[0], wc[2], simUnix)
@@ -449,8 +484,12 @@ Bivector Vessel::Foil(const Element& e, const WaterSurface& sea, double simUnix)
     m_body.VelocityAtBody(atBody, vb);
     double rel[3] = {vb[0] - med.vx, vb[1] - med.vy, vb[2] - med.vz};
     m_body.pose.Inverse().TransformDir(rel[0], rel[1], rel[2]);
+    // ...and then into the FOIL's own frame, so a steered leg measures its angle of attack
+    // against where it is actually pointing rather than against the hull's centreline.
+    const Motor posed = e.mount.Posed(q, c.tilt);
+    posed.Inverse().TransformDir(rel[0], rel[1], rel[2]);
 
-    // Sideslip in the horizontal plane: the angle between where the foil points (body +z) and
+    // Sideslip in the horizontal plane: the angle between where the foil points (local +z) and
     // where the water is actually going.
     const double u = std::abs(rel[2]);
     const double spd2 = rel[0] * rel[0] + rel[2] * rel[2];
@@ -462,10 +501,24 @@ Bivector Vessel::Foil(const Element& e, const WaterSurface& sea, double simUnix)
     // Past stall the lift does not vanish, it plateaus -- clamping the ANGLE rather than zeroing
     // the force is what keeps a hard-over turn from going weightless at the skeg.
     const double cl = e.foilLiftSlope.v * aEff;
-    const double q = 0.5 * med.rho * spd2 * e.foilArea.v;
+
+    // VENTILATION. A lifting surface close under the free surface does not make its full
+    // coefficient: it draws air down the low-pressure face and the lift collapses. Without this
+    // the skeg was making ~14 kN at 25 kn -- one and a half times the boat's weight -- half a
+    // metre below the CG, and since a planing hull has lifted its bottom clear the skeg was the
+    // ONLY lateral force acting. The boat rolled onto its back in every hard turn.
+    //
+    // Scaled by immersion over the foil's own span, which is the ratio that decides whether a
+    // surface is working in solid water or drawing air. A real RHIB turns on its banked hull
+    // bottom, with the skeg damping yaw rather than providing the turn.
+    const double span = std::sqrt((std::max)(e.foilArea.v, 1e-6));
+    const double wet = (std::min)(1.0, med.ImmersionAt(wc) / (std::max)(span, 1e-3));
+    const double qDyn = 0.5 * med.rho * spd2 * e.foilArea.v * wet * wet;
 
     // Lift opposes the sideslip; profile drag opposes the motion.
-    double fb[3] = {-q * cl, 0.0, -q * e.foilCd0.v * ((rel[2] > 0.0) ? 1.0 : -1.0)};
+    double fb[3] = {-qDyn * cl, 0.0, -qDyn * e.foilCd0.v * ((rel[2] > 0.0) ? 1.0 : -1.0)};
+    // Out of the foil's frame, then out of the body's.
+    posed.TransformDir(fb[0], fb[1], fb[2]);
     double fWorld[3] = {fb[0], fb[1], fb[2]};
     m_body.pose.TransformDir(fWorld[0], fWorld[1], fWorld[2]);
     return m_body.BodyWrench(fWorld, atBody);
@@ -495,7 +548,7 @@ Bivector Vessel::NetWrench(const WaterSurface& sea, const VesselControls& c, dou
                 w += Planing(e, sea, simUnix);
                 break;
             case ElementKind::Foil:
-                w += Foil(e, sea, simUnix);
+                w += Foil(e, sea, c, simUnix);
                 break;
             case ElementKind::Thruster: {
                 const int i = thrusterIdx++;
@@ -503,8 +556,8 @@ Bivector Vessel::NetWrench(const WaterSurface& sea, const VesselControls& c, dou
                 // The steering joint rotates the LINE of action -- one PGA primitive, an offset
                 // axis, exactly what Motor::Rotation was written for.
                 double atBody[3], fwdBody[3];
-                e.mount.Origin(c.steer, atBody);
-                e.mount.Forward(c.steer, fwdBody);
+                e.mount.Origin(c.steer, atBody, c.tilt);
+                e.mount.Forward(c.steer, fwdBody, c.tilt);
                 double wc[3];
                 m_body.ToWorld(atBody, wc);
                 const Medium med = sea.WaterAt(wc[0], wc[2], simUnix);
