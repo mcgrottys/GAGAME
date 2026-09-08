@@ -350,7 +350,13 @@ Bivector Vessel::Collar(const Element& e, const WaterSurface& sea, double simUni
         const double rel[3] = {vb[0] - med.vx, vb[1] - med.vy, vb[2] - med.vz};
         const double vn = rel[0] * med.nx + rel[1] * med.ny + rel[2] * med.nz;
         const double engaged = 2.0 * std::sqrt(std::max(disc, 0.0));   // chord width at h
-        const double damp = -e.tubeDamping.v * vn * (engaged * dz) / std::max(2.0 * r * dz, 1e-6);
+        // Damping per unit of ENGAGED AREA, so the total does not depend on how finely the
+        // chamber happens to be sliced. Written as a per-slice force it was multiplied by the
+        // slice count: 50 slices x 9000 N s/m came to ~450 kN s/m against a critical damping
+        // for this hull's heave of 2*sqrt(k m) ~ 18 kN s/m. Twenty-four times critical, taken
+        // explicitly at 60 Hz where c*dt/m ~ 8 against a stability limit of 2 -- so the moment
+        // the tubes engaged the term diverged and threw the boat over. It flipped on spawn.
+        const double damp = -e.tubeDamping.v * vn * (engaged * dz);
         f[0] += med.nx * damp;
         f[1] += med.ny * damp;
         f[2] += med.nz * damp;

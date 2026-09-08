@@ -178,7 +178,9 @@ struct Element {
     Num tubeR0, tubeR1;                      // radius at each end (linear between)
     Num tubeXOffset;                         // centreline offset from the hull centreplane (+stbd)
     Num tubeYOffset;                         // and its height above the CG
-    Num tubeDamping;                         // N per (m/s) of immersion rate -- the membrane
+    Num tubeDamping;                         // N s/m PER SQUARE METRE of engaged tube area --
+                                             // the membrane. Per-area so the total is a property
+                                             // of the collar, not of the slice count.
 
     // ---- Planing
     Num deadriseDeg;                         // transom deadrise

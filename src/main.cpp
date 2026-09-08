@@ -4111,9 +4111,24 @@ int main(int argc, char** argv) {
                 boat->Body().pose.TransformPoint(bp0[0], bp0[1], bp0[2]);
                 const SurfaceSample ss = boatSea.At(bp0[0], bp0[2], simUnix);
                 if (ss.valid) {
-                    boat->Body().SetPose(Motor::Translation(bp0[0], ss.heightNavd, bp0[2]));
+                    // Put the KEEL at its static draught, not the CG on the waterline. The CG
+                    // sits well above the keel, so placing it at the surface immersed the hull
+                    // half a metre deeper than it floats and it came up like a cork. The keel
+                    // depth comes from the spec's own stations, after Build re-referenced them
+                    // onto the CG, so it is whatever this hull actually is.
+                    double keel = 0.0;
+                    for (const Element& el : boat->Spec().elements) {
+                        for (const Section& st : el.stations) {
+                            for (double y : st.oy) keel = (std::min)(keel, y);
+                        }
+                    }
+                    const double draft = (boat->Spec().draftStatic.v > 0.0)
+                                             ? boat->Spec().draftStatic.v : -keel;
+                    const double y0 = ss.heightNavd - keel - draft;
+                    boat->Body().SetPose(Motor::Translation(bp0[0], y0, bp0[2]));
                     boatPlaced = true;
-                    Log("[vessel] set down on the water at y = %+.3f m NAVD", ss.heightNavd);
+                    Log("[vessel] set down: surface %+.3f, keel %.3f below CG, draught %.2f "
+                        "-> CG at %+.3f m NAVD", ss.heightNavd, -keel, draft, y0);
                 } else {
                     return;   // no water yet: do not integrate a hull that has nothing to float on
                 }
@@ -4367,6 +4382,27 @@ int main(int argc, char** argv) {
                 if (in.keyPressed[VK_LEFT] || in.keyPressed[VK_RIGHT] ||
                     in.keyPressed[VK_HOME] || in.keyPressed['N']) {
                     simClock.SetTo(simUnix);
+                    // THE CLOCK POLICY, which a stateful body needs and nothing else in this
+                    // engine does. Everything else here is f(simUnix) and simply re-evaluates;
+                    // a hull carries momentum, so jumping an hour teleports the sea out from
+                    // under it while it keeps the velocity it had. It came back as the boat
+                    // being flung. A deliberate jump resets it to rest at its last pose.
+                    if (boat) {
+                        boat->Body().Rest();
+                        boatCtl = VesselControls{};
+                        boatPlaced = false;   // re-seat it on the new instant's surface
+                        Log("[vessel] time jumped -- hull reset to rest (a boat cannot be "
+                            "integrated across a scrub)");
+                    }
+                }
+                // A boat at 100x time is not a simulation of anything: the tide and current
+                // buckets roll every few frames, and each roll costs an 8-11 s wave solve plus
+                // a 12-19 s page prefill, which is what reads as a freeze. Time scaling stays
+                // available with no hull aboard.
+                if (boat && timeScale > 10.0) {
+                    timeScale = 10.0;
+                    Log("[vessel] time scale held at 10x while a hull is aboard -- faster than "
+                        "that spends every frame re-solving the wave field, not sailing");
                 }
                 if (in.keyPressed[VK_OEM_4]) windowSec = std::max(windowSec * 0.5, 0.5 * 86400.0);
                 if (in.keyPressed[VK_OEM_6]) windowSec = std::min(windowSec * 2.0, 30.0 * 86400.0);

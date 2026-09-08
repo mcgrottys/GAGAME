@@ -227,9 +227,13 @@ VesselSpec MakeRhib18() {
                                   "ASSUMED: constant aft, tapering into the bow cone");
             tube.tubeXOffset = Num::Of(sx, "m", "DERIVED: overall beam less one tube radius");
             tube.tubeYOffset = Num::Of(tubeY, "m", "ASSUMED: collar sits just above the sheer");
-            tube.tubeDamping = Num::Of(9000.0, "1",
-                                       "ASSUMED: membrane damping, N per m/s of immersion rate -- "
-                                       "the term that makes a slam a thump; TUNED, not derived");
+            // SIZED AGAINST CRITICAL, not picked. The collar's wetted area at rest is ~4 m^2,
+            // so 1400 N s/m per m^2 gives ~5.6 kN s/m of heave damping against a critical
+            // 2*sqrt(k m) ~ 18 kN s/m -- about 0.3 of critical, which is a membrane that
+            // absorbs a slam without turning the boat into a brick.
+            tube.tubeDamping = Num::Of(1400.0, "1",
+                                       "DERIVED: ~0.3 of critical heave damping over the collar's "
+                                       "wetted area; N s/m per m^2 of engaged tube");
             s.elements.push_back(tube);
         }
     }
