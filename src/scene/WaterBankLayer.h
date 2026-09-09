@@ -189,6 +189,9 @@ private:
         float waveSig2[32];
         float waveDir2[32];
         float waveScale2[32];
+        // M9bt: the fold's second moment, per band. APPENDED at the end on both sides, per
+        // the layout law above -- widening bandKFold in place would slide every row after it.
+        float bandKSpread[4];
     };
     struct BankTile {
         float orgXZ[2];

@@ -98,6 +98,9 @@ public:
     // M9c: the wavenumber the FOLD should judge this band by -- energy-weighted, not the
     // band's geometric midpoint. Only the fold weight reads it; the physics keeps gBandK.
     float BandKFold(int c) const { return m_bandKFold[c]; }
+    // M9bt: the band's energy-weighted log-WIDTH -- the second moment the fold needs to
+    // answer with a fraction instead of a yes or a no.
+    float BandKSpread(int c) const { return m_bandKSpread[c]; }
     // M8 wavefield: the live partition set, for the solved-field bucket key + spectrum.
     const PartParam* Parts() const { return m_parts; }
     // M8: the Monahan wind gate -- whitecap COVERAGE follows wind speed; the Jacobian
@@ -283,6 +286,9 @@ private:
     float m_cPeak = 10.0f;     // peak-partition phase speed for the amplification factor
     float m_peakDirX = -1.0f, m_peakDirZ = 0.0f;
     float m_bandRms[3] = {};   // M8: unit-sea rms envelope per band (sqrt(2 m0) * exag)
+    // M9bt: defaults are the cut widths under a flat spread, range/sqrt(12) in ln k, so a
+    // spectrum that never loads folds exactly as a uniformly-filled band would.
+    float m_bandKSpread[3] = {0.732f, 0.465f, 0.933f};
     float m_bandKFold[3] = {0.0209f, 0.2339f, 2.8420f};   // M9c: fold wavenumbers; the cut
                                                           // means until the first SetTime
     PartParam m_parts[4] = {};   // M8: the live partition set (wavefield spectrum input)
