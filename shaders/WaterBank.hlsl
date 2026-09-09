@@ -84,9 +84,6 @@ cbuffer BankCb : register(b0) {
     float4 gWaveSig2[8];
     float4 gWaveDir2[8];
     float4 gWaveScale2[8];
-    // M9bt: the fold's SECOND moment per band -- the energy-weighted width of ln k. Appended
-    // at the end on both sides, per the layout law above.
-    float4 gBandKSpread;
 };
 
 // M9bl: one component's rows, from whichever half holds it. r = comp >> 1.
@@ -460,32 +457,9 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     float gain1 = t.hsScale * expo;
     float gain2 = t.hsScale * expo;
     [unroll] for (uint c = 0; c < 3; ++c) {
-        // ---- M9bt: THE FOLD ASKS FOR A FRACTION, NOT A VERDICT. --------------------------
-        //
-        // The question is "how much of this band can a grid of THIS spacing still carry", and
-        // Nyquist answers it exactly: a grid of spacing T resolves k < pi/T and nothing above.
-        // But a cascade band is not one wavenumber -- band 2 spans lambda 0.41..12 m, thirty
-        // to one -- so the answer is not yes or no, it is the FRACTION OF THE BAND'S VARIANCE
-        // BELOW NYQUIST. With the band log-normal about its own energy-weighted mean
-        // (gBandKFold) and its own energy-weighted width (gBandKSpread), that fraction is a
-        // logistic in ln(k_nyquist / k_fold), and sqrt(3)/pi is the scale that matches a
-        // logistic to a normal of that width. Nothing here is placed: both moments come from
-        // the live spectrum, and Nyquist is Nyquist.
-        //
-        // WHAT IT REPLACES, and why the sea was glass: smoothstep(lam*0.12, lam*0.5, texelM)
-        // reached ZERO at texelM = lam/2 -- exactly AT Nyquist, where half the band's energy
-        // still sits at wavelengths the grid resolves perfectly well -- and it began shedding
-        // at lam/8, four times finer than the limit. Band 2 folds at 6.96 m in a 7 s sea, so
-        // its geometry weight was 0.36 on the 2.4 m ring and 0 on every ring beyond: the chop
-        // existed only within ~300 m of the camera and the whole sea past it was a mirror.
-        // Measured, a declared Hs 0.80 arrived as rms 0.13 m where a Gaussian sea wants 0.20.
-        //
-        // Nothing is lost by keeping more: the shed term below is (1 - w), so whatever leaves
-        // geometry still arrives as slope variance. The two are complementary by construction,
-        // which is why this cannot double-count and cannot pop between rings.
-        const float kNy = 3.14159265f / max(t.texelM, 1e-4f);
-        const float sLog = max(gBandKSpread[c], 0.05f) * 0.5513289f;   // sigma -> logistic
-        const float w = saturate(1.0f / (1.0f + exp(-log(kNy / gBandKFold[c]) / sLog)));
+        // M9c: the fold judges the band by the wavelength its ENERGY actually sits at.
+        const float lam = 6.2831853f / gBandKFold[c];
+        const float w = 1.0f - smoothstep(lam * 0.12f, lam * 0.5f, t.texelM);
         // M7p: the two ORPHANED PHYSICS EDGES, restored from the retired SeaLayer path
         // and found by the 2D proof figure: SHOALING (Green's-law growth as the group
         // speed drops entering shallow water) and WAVE-CURRENT amplification (the ebb

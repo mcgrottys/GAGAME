@@ -109,15 +109,34 @@ SurfaceSample TreeWater::At(double wx, double wz, double simUnix) const {
     // ---- THE WAVES, in CsBankFill's order and with its weights. The solved field owns the
     // window and the cascades own everywhere else; wWin is the one blend and it is the same
     // expression on both processors.
-    const double wWin = WindowWeight(wx, wz);
+    // THE BLEND MUST SUM TO ONE, and the only honest way to guarantee that is to let the
+    // window weight be WHAT THE SOLVED FIELD ACTUALLY SUPPLIED rather than what the geometry
+    // says it should have.
+    //
+    // ABSENCE IS NOT ZERO -- the ingest rule, and this is where breaking it capsizes a boat.
+    // The solved field's pages STREAM. Drive into an area whose tiles have not landed and
+    // ProbeAt answers "not valid", so the solved term was skipped -- but the cascades below
+    // were still handed only (1 - wWin), so wWin of the sea VANISHED. Not a smoother sea: a
+    // HOLE, with the straight edge of the tile that had not arrived, sitting next to full
+    // amplitude on the tile that had. The hull reads that step as a wall and goes over it,
+    // which is exactly "weird waves at the edge of tiles that flip the boat, when I move the
+    // boat to a new area".
+    //
+    // A point the solved field does not cover is not a point with less sea. It is a point the
+    // cascades own entire, exactly as they do everywhere outside the window -- so wWin starts
+    // at zero and is raised only by a probe that answered. Streaming then changes WHICH
+    // description carries the sea, never HOW MUCH sea there is.
+    const double wGeom = WindowWeight(wx, wz);
+    double wWin = 0.0;
 
     double dispX = 0.0, dispY = 0.0, dispZ = 0.0;   // wave displacement, physical metres
     double slopeX = 0.0, slopeZ = 0.0;
     double orbX = 0.0, orbY = 0.0, orbZ = 0.0;
 
-    if (wWin > 0.001 && m_wave) {
+    if (wGeom > 0.001 && m_wave) {
         const WaveField::Probe p = m_wave->ProbeAt(wx, wz, simUnix);
         if (p.valid) {
+            wWin = wGeom;
             dispY += wWin * double(p.eta);
             dispX += wWin * m_waveChop * double(p.dx);   // gWaveB.z, see the header
             dispZ += wWin * m_waveChop * double(p.dz);
