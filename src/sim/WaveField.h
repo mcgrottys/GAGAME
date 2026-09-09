@@ -1,4 +1,4 @@
-// ================================================================================================
+﻿// ================================================================================================
 //  WaveField - M8: THE SOLVED WAVE FIELD. The stationary wave boundary-value problem, solved
 //  per cell over the inlet window and CACHED: per spectral component, a per-cell amplitude
 //  (shoaling * refraction * the total-Hs limiter), wavenumber (current-Doppler finite-depth
@@ -75,7 +75,10 @@ public:
     // halves the angular step and pushes the superposition's repeat out of frame; the
     // cbuffer rows for 16..31 append at the END of BankCb (see WaterBank.hlsl gWaveSig2).
     static constexpr int kMaxComp = 32;
-    static constexpr uint32_t kSolverVersion = 2;   // M9bl: kMaxComp 16 -> 32
+    // M9bv: 3, was 2. The fan is 8 frequencies x 4 directions rather than 32 x 1 -- same
+    // component count and the same atlas layout, but a different point of S(f, theta) per
+    // component, so every cached solve on disk is a different field and must be re-solved.
+    static constexpr uint32_t kSolverVersion = 5;   // M9bv: 2D stratified (f, theta) fan
 
     void Configure(const WaveFieldConfig& cfg, const Compositor* comp, int hgtChannel,
                    const WaterAtlas* atlas, const TideModel* tides, int entranceStation,

@@ -1,4 +1,4 @@
-// ================================================================================================
+﻿// ================================================================================================
 //  WaveField.cpp - M8: the solved wave field, ported NUMBER FOR NUMBER from proofs/wave_field.py
 //  (the authoritative prototype, itself twin-tested to half an 8-bit LSB against the
 //  vqview-inlet reference bake). ALGEBRA.md `wavefield` carries the derivation; every closure
@@ -75,6 +75,15 @@ constexpr double kCgFloor = 0.15;    // m/s floor under cg + U_along (shoaling d
 constexpr double kSnellClip = 0.999; // sine clip at grazing
 constexpr double kKrCosFloor = 1e-3; // Kr cosine floors
 constexpr double kGolden = 0.6180339887498949;   // golden-sequence directions
+// M9bv: DIRECTIONS PER FREQUENCY. A directional spectrum is S(f, theta) -- two dimensional --
+// and the fan used to sample it along a diagonal, one theta per f. Four per frequency turns
+// 32 long-crested trains into 8 short-crested groups, which is what a sea actually is.
+constexpr int kDirFan = 4;
+// A SECOND irrational, for the frequency axis. Reusing kGolden for both would place the
+// frequency and the direction of every component at the same fraction of their strata --
+// a diagonal through the (f, theta) grid, which is the very correlation the fan is meant
+// to break. sqrt(2) - 1 is independent of the golden ratio and equidistributes as well.
+constexpr double kGolden2 = 0.41421356237309515;
 constexpr double kFreqLo = 0.62, kFreqHi = 2.30; // geomspace band, x fp
 constexpr double kExcessMax = 2.5;   // env G channel scale (excess/2.5), fixed
 constexpr float kFeatherM = 120.0f;  // edge blend into the cascades, metres
@@ -320,35 +329,89 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
         return;
     }
 
-    // -- the discrete spectrum (proof: geomspace 0.62..2.30 fp, JONSWAP gamma=1, sqrt(S df)
-    //    weights renormalized to sum w^2 = 1, golden-ratio directions) ---------------------
+    // -- THE DIRECTIONAL SPECTRUM IS TWO-DIMENSIONAL, and sampling it along a DIAGONAL is
+    //    what made the corduroy. -----------------------------------------------------------
+    //
+    // The fan paired one direction with one frequency, dirs[i] against fr[i], 1:1. That is a
+    // sum of nc LONG-CRESTED trains: each component is a single infinite straight ridge, and
+    // thirty-two of them read as thirty-two straight ridges plus their beat envelopes -- the
+    // parallel ribbons, visible in the GEOMETRY, worst where the solved field is strongest.
+    // Jittering the directions (the golden sequence below, kept) stops them forming a regular
+    // lattice; it cannot stop each one being long-crested. M9bl's 16 -> 32 halved the angular
+    // step and "pushed the superposition's repeat out of frame", which is a mitigation and
+    // says so.
+    //
+    // A real sea is short-crested because EVERY frequency carries a spread of directions. So
+    // the same 32 components are now 8 frequencies x 4 directions. Same count, same atlas
+    // layout, same cbuffer packing -- only which point of S(f, theta) each component samples.
+    //
+    // The four directions of a frequency are STRATIFIED (one per quarter of the fan) and the
+    // offset inside each quarter comes from the golden sequence on the GLOBAL index, so no
+    // two frequencies share a direction set and nothing lines up across the ladder. The
+    // directional weight is cos^2 in ENERGY over the declared half-width -- zero at the fan's
+    // edge, where the uniform version was still at full strength -- so it is cos in AMPLITUDE,
+    // which is what wts carries. The final renormalisation to sum w^2 = 1 is unchanged, so Hs
+    // is preserved by construction and this moves energy in angle without creating any.
     const double fp = 1.0 / in.tp;
-    double fr[WaveField::kMaxComp], Sf[WaveField::kMaxComp], df[WaveField::kMaxComp];
+    double fr[WaveField::kMaxComp];
     double wts[WaveField::kMaxComp], dirs[WaveField::kMaxComp];
+    const int nd = (nc >= kDirFan * 2) ? kDirFan : 1;   // directions per frequency
+    const int nf = nc / nd;                             // frequencies in the ladder
     {
+        // NO TWO COMPONENTS MAY SHARE A FREQUENCY. This is the whole lesson of the first
+        // attempt: giving a frequency stratum four DIRECTIONS at ONE frequency replaced the
+        // corduroy with something worse -- a brick lattice of dashes on the solver grid.
+        // Trains of equal |k| at different angles interfere into a STANDING pattern; its
+        // nodes and antinodes do not move, because there is no frequency difference for them
+        // to beat at. Different frequencies drift past each other and smear; identical ones
+        // lock. Bisected to it directly: ONE component alone renders perfectly clean, all
+        // thirty-two together render the lattice.
+        //
+        // So the stratification is two-dimensional and every cell of it is distinct. Stratum
+        // i owns a log-f band and stratum-column j owns a quarter of the direction fan; the
+        // component at (i, j) takes its frequency from INSIDE stratum i and its direction
+        // from inside quarter j, both placed by the golden sequence on the GLOBAL index. The
+        // result is 32 distinct frequencies AND 4 directions per frequency band -- the
+        // frequency resolution the old 32x1 ladder had, and the directional spread it never
+        // had, in the same 32 slots.
         const double la = std::log10(kFreqLo * fp), lb = std::log10(kFreqHi * fp);
-        const double step = (lb - la) / double(nc - 1);
-        for (int i = 0; i < nc; ++i) fr[i] = std::pow(10.0, double(i) * step + la);
-        fr[0] = kFreqLo * fp;          // np.geomspace pins BOTH endpoints exactly
-        fr[nc - 1] = kFreqHi * fp;
-        for (int i = 0; i < nc; ++i) {
-            Sf[i] = std::pow(fr[i], -5.0) * std::exp(-1.25 * std::pow(fp / fr[i], 4.0));
+        const double step = (lb - la) / double(nf);
+        const double halfW = (std::max)(cfg.spreadDeg, 1e-6);
+        for (int i = 0; i < nf; ++i) {
+            // The stratum's own linear width in f, shared by its nd components.
+            const double fLo = std::pow(10.0, la + double(i) * step);
+            const double fHi = std::pow(10.0, la + double(i + 1) * step);
+            const double dfc = (fHi - fLo) / double(nd);
+            for (int j = 0; j < nd; ++j) {
+                const int ic = i * nd + j;
+                const double g = std::fmod(double(ic + 1) * kGolden, 1.0);
+                const double h = std::fmod(double(ic + 1) * kGolden2, 1.0);
+                // frequency: inside stratum i, at its own place -- never shared
+                const double f = std::pow(10.0, la + (double(i) + (double(j) + h) /
+                                                                      double(nd)) * step);
+                // direction: inside quarter j of the fan, at its own place
+                const double u = (double(j) + g) / double(nd);
+                const double off = halfW * (2.0 * u - 1.0);
+                const double S = std::pow(f, -5.0) * std::exp(-1.25 * std::pow(fp / f, 4.0));
+                const double cw = std::cos(0.5 * kPiW * off / halfW);
+                fr[ic] = f;
+                dirs[ic] = in.mwdFromDeg + off;
+                wts[ic] = std::sqrt((std::max)(S * dfc, 0.0)) * ((cw > 0.0) ? cw : 0.0);
+            }
         }
-        df[0] = fr[1] - fr[0];         // np.gradient, edge_order=1
-        df[nc - 1] = fr[nc - 1] - fr[nc - 2];
-        for (int i = 1; i < nc - 1; ++i) df[i] = (fr[i + 1] - fr[i - 1]) / 2.0;
+        for (int i = nf * nd; i < nc; ++i) {   // nc not a multiple of nd: the tail is silent
+            fr[i] = kFreqHi * fp;
+            dirs[i] = in.mwdFromDeg;
+            wts[i] = 0.0;
+        }
         double norm = 0.0;
-        for (int i = 0; i < nc; ++i) {
-            wts[i] = std::sqrt((std::max)(Sf[i] * df[i], 0.0));
-            norm += wts[i] * wts[i];
-        }
-        norm = std::sqrt(norm);
+        for (int i = 0; i < nc; ++i) norm += wts[i] * wts[i];
+        norm = std::sqrt((std::max)(norm, 1e-30));
         for (int i = 0; i < nc; ++i) wts[i] /= norm;
-        for (int i = 0; i < nc; ++i) {
-            const double g = std::fmod(double(i) * kGolden, 1.0);
-            dirs[i] = in.mwdFromDeg + cfg.spreadDeg * (2.0 * g - 1.0);
-        }
     }
+    Log("[wave] fan: %d frequencies x %d directions = %d comps over +-%.1f deg "
+        "(cos^2 in energy, stratified + golden jitter per frequency)",
+        nf, nd, nc, cfg.spreadDeg);
     const double aTot = in.hs / 4.0 * std::sqrt(2.0);   // Hs = 4 sigma_eta = 2 sqrt2 rms
 
     // -- depth from the bucketed level (dry when the water never reaches the bed) ----------
