@@ -64,6 +64,12 @@ struct WaveFieldConfig {
                                        // tables at ADOPTION (upload) -- the cache and the
                                        // bucket key stay raw physics; ProbeAt reads the
                                        // same scaled table, so 9b/9c agree with the GPU
+    // --wave-map: dump the solved field as an image, straight off the solver's own grid.
+    // NOT part of the answer, so NOT in BucketKey -- turning the instrument on must not
+    // invalidate a cache. The camera, the mesh, the fold, the streaming and the lighting all
+    // sit between the solve and the screen, and every one of them can hide or fake a
+    // structure in the field; this is the one picture with none of them in it.
+    std::wstring mapPath;
 };
 
 class WaveField {
@@ -78,7 +84,12 @@ public:
     // M9bv: 3, was 2. The fan is 8 frequencies x 4 directions rather than 32 x 1 -- same
     // component count and the same atlas layout, but a different point of S(f, theta) per
     // component, so every cached solve on disk is a different field and must be re-solved.
-    static constexpr uint32_t kSolverVersion = 6;   // M9bv: fan half-width moment-matched
+    // M9bw: 8, was 6 (7 was a discarded single-path test). The stored phase is the
+    // EIKONAL solution of |grad phi| = k rather than a line integral of k*d^ along some
+    // chosen path -- that integral was path-dependent (the
+    // field has curl wherever grad k is not parallel to d^), so it printed the integration
+    // route into the sea as banding. Every cached solve carries the old, walked phase.
+    static constexpr uint32_t kSolverVersion = 9;
 
     void Configure(const WaveFieldConfig& cfg, const Compositor* comp, int hgtChannel,
                    const WaterAtlas* atlas, const TideModel* tides, int entranceStation,
@@ -160,14 +171,16 @@ public:
     //   grad.   grad(theta) = grad(phi) = k*d^.  This is the WKB reading -- a, k and d^ vary
     //           on the bathymetry's scale, not the wavelength's -- and it is the same
     //           statement ALGEBRA.md `wavefield` makes when it says each component WANTS
-    //           grad(phi) = k*d^.  Two honest asymmetries in how the stored phase realises
-    //           it (the phase-gauge block in the .cpp): d(phi)/dx is EXACT per cell, because
-    //           the gauge cumsums k*d0*cellM west->east; d(phi)/dz carries the ROW MEAN of
-    //           k*d^_z, because a single reference column would print its depth profile as
-    //           horizontal bands.  So sz is the LOCAL plane wave's slope -- which is the one
-    //           a normal wants, and the one the caustics derivation uses -- and it is not
-    //           the finite difference of the stored phase wherever local k leaves its row
-    //           mean.  proofs/wavefield_probe.py measures that gap on a real cached solve.
+    //           grad(phi) = k*d^.  M9bw: the stored phase now realises it as far as it CAN
+    //           be realised -- phi is the eikonal solution of |grad phi| = k, so |grad phi|
+    //           is right everywhere and grad phi is curl-free by construction.  What it is
+    //           NOT is k times the deep-water d^: the direction of grad phi refracts, which
+    //           is the whole point (see the phase-gauge block in the .cpp).  So sz below,
+    //           built from the fixed d^, is the LOCAL plane wave's slope in the UNREFRACTED
+    //           direction -- the one a normal wants and the one the caustics derivation
+    //           uses -- and it departs from the finite difference of the stored phase by
+    //           exactly the refraction angle.  proofs/wavefield_probe.py measures that gap
+    //           on a real cached solve.
     //
     //   eta = a cos(theta)                                   (the line above, unchanged)
     //   D_h = -a sin(theta) d^        <- ALGEBRA.md `caustics`: the Gerstner displacement is

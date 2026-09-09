@@ -215,6 +215,8 @@ struct Options {
                                       // (M6r: the prism-debt field needs ~an hour to settle;
                                       // costs ~1 s at startup)
     double sweCycleH = 0;             // --swe-cycle N: headless validation over N hours -> CSV
+    std::wstring waveMap;             // --wave-map out.png: the solved field on the solver's
+                                      // OWN cells, no camera, mesh, fold or light in the way
     std::wstring waterMap;            // --water-map out.png: the REPROJECTION PROOF -- the
                                       // water atlas + survey printed through a custom Lambert
                                       // conformal sheet (paper-chart foundation)
@@ -564,6 +566,7 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--swe-spinup") o.sweSpinupH = atof(next("0.25").c_str());
         else if (a == "--swe-cycle") o.sweCycleH = atof(next("13").c_str());
         else if (a == "--water-map") o.waterMap = Widen(next("water_map.png").c_str());
+        else if (a == "--wave-map") o.waveMap = Widen(next("wave_map.png").c_str());
         else if (a == "--bathy-map") o.bathyMap = Widen(next("bathy_map.png").c_str());
         else if (a == "--fidelity-map") {
             o.fidelityMap = Widen(next("fidelity_map.png").c_str());
@@ -3673,7 +3676,7 @@ int main(int argc, char** argv) {
         // state, the solve carries the structure, the GPU carries the phase.
         // The water scene is DATA (data/wave_scene.json, authored if absent, hot-reloaded
         // per frame): move the solved window, retune closures, save -- no recompile.
-        auto sceneToWaveCfg = [](const WaterSceneConfig& s) {
+        auto sceneToWaveCfg = [&opt](const WaterSceneConfig& s) {
             WaveFieldConfig c;
             c.orgX = s.wfOrgX;
             c.orgZ = s.wfOrgZ;
@@ -3689,6 +3692,7 @@ int main(int argc, char** argv) {
             c.currentBucketMs = s.wfCurrentBucketMs;
             c.featherM = s.wfFeatherM;
             c.displayExag = s.wfExag;
+            c.mapPath = opt.waveMap;   // the instrument, not the answer -- see WaveField.h
             return c;
         };
         std::unique_ptr<WaveField> waveField;

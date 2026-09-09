@@ -45,6 +45,7 @@
 // it (none of its own includes do) -- fine once the engine wiring includes both, but load-
 // bearing here.
 #include "core/GradeField.h"
+#include "core/Image.h"
 #include "sim/CurrentModel.h"
 
 #include "sim/WaveField.h"
@@ -432,10 +433,12 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
     const double kHold = BracketGrid()[kBracketN - 1] * 0.25;
 
     // -- per-component solve ---------------------------------------------------------------
-    std::vector<double> kbuf(cells), phibuf(cells);
+    std::vector<double> kbuf(cells), phibuf(cells), feik(cells);
     std::vector<float> aRaw(size_t(nc) * cells);
     std::vector<double> sumsq(cells, 0.0), sumA(cells, 0.0);
+    std::vector<double> eta(cells, 0.0);   // --wave-map only: sum a cos(phi) at t = 0
     std::atomic<long long> blockedCells{0};
+    const int icDiag = nc / 2;   // one component carries the phase-gauge instrument
     bool uploaded[WaveField::kMaxComp] = {};
     int nUp = 0;
 
@@ -507,19 +510,186 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
         uploaded[ic] = true;
         ++nUp;
 
-        // phase gauge: exact d(phi)/dx per cell; d(phi)/dy carries the ROW MEAN of k*d_n (a
-        // single reference column would print its depth profile as horizontal bands).
-        double rowCum = 0.0;
-        for (int j = 0; j < ny; ++j) {
-            const size_t row = size_t(j) * size_t(nx);
-            double xrun = 0.0, rowSum = 0.0;
-            for (int i = 0; i < nx; ++i) {
-                xrun += (kbuf[row + i] * d0) * cfg.cellM;
-                phibuf[row + i] = xrun;
-                rowSum += (kbuf[row + i] * d1) * cfg.cellM;
+        // ---- M9bw: THE PHASE IS A FIELD, NOT A PATH. -----------------------------------
+        //
+        // phi used to be accumulated by WALKING the grid and adding k*(d^ . dl) as it went,
+        // and every version of that walk printed the walk itself into the sea. The row-mean
+        // gauge laid its inconsistency down along ROWS -- east-west banding whatever the wave
+        // direction, which is why storm 90 and storm 190 rendered the same streaks. Replacing
+        // it with an honest west-edge-then-eastward path integral moved the bias without
+        // removing it, and that is the tell: THERE IS NO PATH THAT WORKS. The field k(x,y) d^,
+        // with d^ held at the deep-water direction, has curl
+        //
+        //     d/dx (k d1) - d/dy (k d0)  =  d1 dk/dx - d0 dk/dy
+        //
+        // which vanishes only where grad k is parallel to d^. Over a bar, up a channel, along
+        // a jetty it is not, so the line integral genuinely depends on the route and phi is
+        // not a function of position at all. The disagreement between two routes is logged
+        // below in radians; it is whole wavelengths.
+        //
+        // The curl is not an error to be averaged away. It is SNELL'S LAW asking to be obeyed.
+        // A wave whose |k| changes with depth must also TURN, and those are the same
+        // statement: phi is single-valued, so grad phi is curl-free BY CONSTRUCTION, and
+        // |grad phi| = k is the eikonal equation. Holding the direction fixed while letting
+        // the magnitude shoal is exactly the inconsistency the walk kept trying to smear out.
+        // The amplitude already knew: Kr above is built from the REFRACTED angle, so the
+        // shoaling gain has been assuming a bend the phase refused to make.
+        //
+        // So phi is SOLVED, not integrated: Godunov upwind fast sweeping for |grad phi| = k,
+        // seeded on the two INFLOW edges (a 1-D path has no path-dependence, so the boundary
+        // datum is exact) and swept in the four diagonal orders twice. The update's own
+        // quadratic is (phi-a)^2 + (phi-b)^2 = (k dx)^2, which for a plane wave reads
+        // (k d0 dx)^2 + (k d1 dx)^2 = (k dx)^2 -- an identity -- so the scheme is EXACT for a
+        // plane wave on a uniform k at ANY angle. Deep water is therefore untouched to the
+        // last bit, no direction of the grid is special, and every departure from the plane
+        // wave is refraction the bathymetry actually asked for: rays bending toward the
+        // shallows and crests swinging parallel to the contours inside the inlet.
+        //
+        // Dry cells carry the k the wet field reaches at its OWN depth floor rather than the
+        // quantisation hold, so the speed field is continuous across the waterline and the
+        // shoreline is not a phase barrier. Their amplitude is zero either way; this is only
+        // so that a footprint straddling the beach interpolates a continuing wave.
+        {
+            bool blShore = false;
+            const double kShore = SolveDispersion(sig, kDepthFloor, 0.0, blShore);
+            const double dxm = cfg.cellM;
+            const double kInf = 1e30;
+            for (size_t idx = 0; idx < cells; ++idx) {
+                feik[idx] = (h[idx] > 0.0) ? kbuf[idx] : kShore;
+                phibuf[idx] = kInf;
             }
-            rowCum += rowSum / double(nx);
-            for (int i = 0; i < nx; ++i) phibuf[row + i] += rowCum;
+            // ---- THE BOUNDARY IS THE INCIDENT SWELL, AND IT ARRIVES FROM DEEP WATER. ----
+            //
+            // The first version of this seeded each inflow edge by INTEGRATING the local k
+            // along it, and that put the path-dependence straight back -- into the boundary
+            // instead of the interior. The two edges accumulate different amounts of shoaling
+            // (the east edge is open ocean, the south edge runs the length of Plum Island's
+            // shallows), the fronts they launch disagree by tens of radians, and first arrival
+            // resolves the disagreement as a SHOCK: a dead straight diagonal seam across the
+            // ebb shoal, wave structure smooth on one side of it and unrelated on the other.
+            // It was plainly visible in the very first --wave-map, and it is the bias that
+            // survived the switch from the row-mean gauge.
+            //
+            // A boundary condition is not something to integrate; it is something to STATE.
+            // The incident wave is a swell, and a swell is defined in DEEP water: a plane wave
+            // of wavenumber k_inf = sigma^2/g travelling along d^. So that is what the two
+            // inflow edges carry, both from the same expression, which makes them consistent
+            // by construction -- one plane, not two integrals that have to be reconciled.
+            //
+            // This is not an approximation traded for tidiness, it is Snell's law stated at
+            // the right place. Prescribing k_inf*d^ on the boundary fixes the TANGENTIAL
+            // wavenumber at k_inf*sin(theta0) -- the invariant -- and the eikonal then takes
+            // the normal component from the LOCAL k, which is precisely refraction from deep
+            // water onto the window's edge. The window's east edge sits in ~18 m, where k is
+            // about a third above deep; the interior k is unaffected (it is solved, not
+            // seeded), and the incident direction it implies differs from the deep bearing by
+            // roughly a degree -- which is the bend the wave really made getting here.
+            //
+            // Re-applied after every sweep so it stays a boundary condition rather than an
+            // initial guess the sweep is free to undercut.
+            const int ib = (d0 >= 0.0) ? 0 : (nx - 1);      // the inflow corner
+            const int jb = (d1 >= 0.0) ? 0 : (ny - 1);
+            const double kInfC = (sig * sig) / kGrav;       // deep-water k of this component
+            auto seed = [&]() {
+                for (int i = 0; i < nx; ++i) {
+                    phibuf[size_t(jb) * size_t(nx) + size_t(i)] =
+                        kInfC * d0 * double(i - ib) * dxm;
+                }
+                for (int j = 0; j < ny; ++j) {
+                    phibuf[size_t(j) * size_t(nx) + size_t(ib)] =
+                        kInfC * d1 * double(j - jb) * dxm;
+                }
+            };
+            seed();
+            for (int pass = 0; pass < 8; ++pass) {          // two rounds of the four orders
+                seed();
+                const bool xr = (pass & 1) != 0, yr = (pass & 2) != 0;
+                for (int jj = 0; jj < ny; ++jj) {
+                    const int j = yr ? (ny - 1 - jj) : jj;
+                    const size_t row = size_t(j) * size_t(nx);
+                    for (int ii = 0; ii < nx; ++ii) {
+                        const int i = xr ? (nx - 1 - ii) : ii;
+                        const size_t idx = row + size_t(i);
+                        const double ax = (std::min)((i > 0) ? phibuf[idx - 1] : kInf,
+                                                     (i + 1 < nx) ? phibuf[idx + 1] : kInf);
+                        const double ay =
+                            (std::min)((j > 0) ? phibuf[idx - size_t(nx)] : kInf,
+                                       (j + 1 < ny) ? phibuf[idx + size_t(nx)] : kInf);
+                        const double lo = (ax < ay) ? ax : ay;
+                        if (lo >= kInf) continue;
+                        const double f = feik[idx] * dxm;
+                        const double dif = ax - ay;
+                        const double cand = (std::abs(dif) >= f)
+                                                ? (lo + f)
+                                                : 0.5 * (ax + ay +
+                                                         std::sqrt(2.0 * f * f - dif * dif));
+                        if (cand < phibuf[idx]) phibuf[idx] = cand;
+                    }
+                }
+            }
+            seed();   // the last sweep must not be allowed to undercut it either
+        }
+        if (ic == icDiag) {
+            // The instrument that says the walk was never salvageable: the SAME k field,
+            // integrated by two legal routes to every cell, and the largest disagreement
+            // between them. A phase is a phase; if these differ by more than a fraction of a
+            // radian the quantity was not one.
+            std::vector<double> pa(cells), pb(cells);
+            for (int j = 0; j < ny; ++j) {   // north up the west edge, then east along rows
+                const size_t row = size_t(j) * size_t(nx);
+                pa[row] = (j > 0) ? (pa[row - size_t(nx)] +
+                                     kbuf[row - size_t(nx)] * d1 * cfg.cellM)
+                                  : 0.0;
+                for (int i = 1; i < nx; ++i)
+                    pa[row + i] = pa[row + i - 1] + kbuf[row + i - 1] * d0 * cfg.cellM;
+            }
+            for (int i = 0; i < nx; ++i) {   // east along the south edge, then north up cols
+                pb[i] = (i > 0) ? (pb[i - 1] + kbuf[i - 1] * d0 * cfg.cellM) : 0.0;
+                for (int j = 1; j < ny; ++j) {
+                    const size_t idx = size_t(j) * size_t(nx) + size_t(i);
+                    pb[idx] = pb[idx - size_t(nx)] + kbuf[idx - size_t(nx)] * d1 * cfg.cellM;
+                }
+            }
+            // The residual is a DISTRIBUTION, and a max is the wrong number to quote: an
+            // eikonal solution is allowed kinks. Where two ray families meet -- behind a
+            // jetty, over a focusing shoal -- the viscosity solution takes first arrival and
+            // creases, and a centred difference across a crease reads a gradient that is not
+            // the local one. Those cells are the physics (that crease is a caustic), so the
+            // percentiles say how much of the field is smooth and the max says how sharp the
+            // sharpest crease is, and they are reported separately rather than blended into
+            // one alarming number. Sampled only where all four neighbours are wet: across the
+            // waterline the speed field steps from the wet k to the shoreline limit on
+            // purpose, so a difference taken over that step measures the beach, not the wave.
+            double gap = 0.0;
+            std::vector<double> rs;
+            rs.reserve(cells / 4);
+            for (int j = 1; j < ny - 1; ++j) {
+                const size_t row = size_t(j) * size_t(nx);
+                for (int i = 1; i < nx - 1; ++i) {
+                    const size_t idx = row + size_t(i);
+                    if (h[idx] <= 0.0) continue;
+                    gap = (std::max)(gap, std::abs(pa[idx] - pb[idx]));
+                    if (h[idx - 1] <= 0.0 || h[idx + 1] <= 0.0 ||
+                        h[idx - size_t(nx)] <= 0.0 || h[idx + size_t(nx)] <= 0.0) continue;
+                    const double gx = (phibuf[idx + 1] - phibuf[idx - 1]) / (2.0 * cfg.cellM);
+                    const double gz = (phibuf[idx + size_t(nx)] - phibuf[idx - size_t(nx)]) /
+                                      (2.0 * cfg.cellM);
+                    rs.push_back(std::abs(std::sqrt(gx * gx + gz * gz) - kbuf[idx]) /
+                                 kbuf[idx]);
+                }
+            }
+            std::sort(rs.begin(), rs.end());
+            auto pct = [&](double q) {
+                return rs.empty() ? 0.0 : rs[(std::min)(rs.size() - 1,
+                                                        size_t(q * double(rs.size())))];
+            };
+            Log("[wave] phase gauge (comp %d, T %.1f s): the old walk disagreed with itself "
+                "by %.0f rad (%.1f wavelengths) between two routes -- the phase it wrote was "
+                "not a function of position. Eikonal |grad phi|/k residual over %zu open-water "
+                "cells: p50 %.2f%%, p90 %.2f%%, p99 %.1f%%, max %.0f%% (the tail is the "
+                "caustic creases, where first arrival is meant to fold)",
+                ic, T, gap, gap / (2.0 * kPiW), rs.size(), pct(0.50) * 100.0,
+                pct(0.90) * 100.0, pct(0.99) * 100.0, (rs.empty() ? 0.0 : rs.back()) * 100.0);
         }
 
         double kFieldMax = 0.0;
@@ -538,6 +708,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
                     const double ph = phibuf[row + i];
                     px[2] = Quant8(std::cos(ph) * 0.5 + 0.5, 1.0);
                     px[3] = Quant8(std::sin(ph) * 0.5 + 0.5, 1.0);
+                    eta[row + i] += double(aPlane[row + i]) * std::cos(ph);
                 }
             }
         });
@@ -546,7 +717,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
     // -- the TOTAL-Hs limiter: Hs = 2 sqrt2 rms <= gammaHs * h, ONE uniform factor per cell
     //    on every a_i (spectral shape and directions survive); excess > 1 is the breaking
     //    indicator -- "does the sea here want to be taller than the water allows".
-    std::vector<double> lim(cells);
+    std::vector<double> lim(cells);   // (and eta below, which carries the same factor)
     double rmsFieldMax = 0.0, sumFieldMax = 0.0;
     for (size_t idx = 0; idx < cells; ++idx) {
         const double rmsRaw = std::sqrt(sumsq[idx]);
@@ -600,6 +771,43 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
                 atlas[arow + size_t(i) * 4] =
                     Quant8(double(aPlane[row + i]) * lim[row + i], aMax);
             }
+        }
+    }
+
+    // ---- --wave-map: the field with nothing between it and the eye. -------------------
+    // Every earlier argument about banding was conducted through a renderer, and a renderer
+    // can invent structure (shading rate, mip choice, mesh spacing) and can hide it (a fold
+    // that sheds a band into slope variance draws a mirror). This writes what the solver
+    // actually produced: eta = sum a cos(phi) at t = 0, on the solve's own cells, one texel
+    // per cell, with land drawn dark so the coastline gives the picture its orientation.
+    // Blue is a trough, red a crest; a wave train from the east must show crests running
+    // north-south offshore, and must swing parallel to the contours as it shoals.
+    if (!cfg.mapPath.empty()) {
+        double eMax = 1e-6;
+        for (size_t idx = 0; idx < cells; ++idx) eMax = (std::max)(eMax, std::abs(eta[idx]));
+        std::vector<uint8_t> img(cells * 4);
+        for (int j = 0; j < ny; ++j) {
+            // row 0 of the solve is SOUTH; a PNG's row 0 is the TOP, so north goes up.
+            const size_t src = size_t(ny - 1 - j) * size_t(nx);
+            const size_t dst = size_t(j) * size_t(nx);
+            for (int i = 0; i < nx; ++i) {
+                uint8_t* px = &img[(dst + size_t(i)) * 4];
+                px[3] = 255;
+                if (h[src + size_t(i)] <= 0.0) { px[0] = px[1] = px[2] = 40; continue; }
+                const double u = eta[src + size_t(i)] / eMax;   // -1 trough .. +1 crest
+                const double p = (u > 0.0) ? u : 0.0, n = (u < 0.0) ? -u : 0.0;
+                px[0] = uint8_t(255.0 * (1.0 - 0.90 * n));
+                px[1] = uint8_t(255.0 * (1.0 - 0.85 * (p + n)));
+                px[2] = uint8_t(255.0 * (1.0 - 0.90 * p));
+            }
+        }
+        if (SavePng(cfg.mapPath, img.data(), uint32_t(nx), uint32_t(ny), uint32_t(nx) * 4,
+                    img.size())) {
+            Log("[wave] wave map: %dx%d cells @ %.2f m, eta range +-%.2f m (display exag not "
+                "applied -- this is the cache's raw physics)",
+                nx, ny, cfg.cellM, eMax);
+        } else {
+            Log("[wave] wave map FAILED to write");
         }
     }
 
