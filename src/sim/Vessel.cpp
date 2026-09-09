@@ -16,9 +16,15 @@ namespace ga {
 //  still give a heeled hull no righting moment at all.
 // ================================================================================================
 double ClipSectionArea(const double* px, const double* py, int n, double a, double b, double c,
-                       double* cxOut, double* cyOut) {
+                       double* cxOut, double* cyOut, double* exOut, double* eyOut) {
     if (cxOut) *cxOut = 0.0;
     if (cyOut) *cyOut = 0.0;
+    // The EXTENTS of what survives the clip, which for a slice ARE its projected areas: the
+    // projection of a section onto the plane normal to body x is exactly its y-extent times the
+    // slice length, and likewise for y. So the resistance law downstream needs no reference area
+    // of its own -- the wetted shape reports its own frontal areas, and they vanish with it.
+    if (exOut) *exOut = 0.0;
+    if (eyOut) *eyOut = 0.0;
     if (n < 3) return 0.0;
 
     // inside = a*x + b*y + c <= 0
@@ -52,6 +58,15 @@ double ClipSectionArea(const double* px, const double* py, int n, double a, doub
     if (std::abs(area2) < 1e-15) return 0.0;
     if (cxOut) *cxOut = cx / (3.0 * area2);
     if (cyOut) *cyOut = cy / (3.0 * area2);
+    if (exOut || eyOut) {
+        double xlo = ox[0], xhi = ox[0], ylo = oy[0], yhi = oy[0];
+        for (int i = 1; i < m; ++i) {
+            xlo = (std::min)(xlo, ox[i]); xhi = (std::max)(xhi, ox[i]);
+            ylo = (std::min)(ylo, oy[i]); yhi = (std::max)(yhi, oy[i]);
+        }
+        if (exOut) *exOut = xhi - xlo;
+        if (eyOut) *eyOut = yhi - ylo;
+    }
     return 0.5 * std::abs(area2);
 }
 
@@ -120,8 +135,8 @@ Bivector Vessel::Buoyancy(const Element& e, const WaterSurface& sea, double simU
 
         double px[64], py[64];
         const int n = FullSection(st, px, py, 64);
-        double cx = 0.0, cy = 0.0;
-        const double area = ClipSectionArea(px, py, n, a, b, c, &cx, &cy);
+        double cx = 0.0, cy = 0.0, ex = 0.0, ey = 0.0;
+        const double area = ClipSectionArea(px, py, n, a, b, c, &cx, &cy, &ex, &ey);
         if (area <= 0.0) continue;
 
         const double vol = area * span;
@@ -139,6 +154,56 @@ Bivector Vessel::Buoyancy(const Element& e, const WaterSurface& sea, double simU
         const double fWorld[3] = {med.nx * mag, med.ny * mag, med.nz * mag};
         const double atBody[3] = {cx, cy, st.z};
         w += m_body.BodyWrench(fWorld, atBody);
+
+        // ---- RESISTANCE, WHERE THE HULL ACTUALLY IS ------------------------------------------
+        // The hull resistance used to be ONE force at ONE point, and that single choice was
+        // three bugs wearing a coat:
+        //
+        //   * a point force has NO rotational damping worth the name. The lever was 0.55 m, so
+        //     the yaw damping went as that squared -- against a distributed hull's L^2/12 = 2.5
+        //     m^2, about eight times short. The heading wandered because nothing opposed yaw.
+        //   * roll damping was worse: a force ON THE CENTRELINE CANNOT DAMP ROLL AT ALL.
+        //   * and it was gated on the immersion of that one point, so the instant the hull
+        //     inverted -- the point now in the air -- every bit of hull resistance switched off
+        //     together. A capsized boat kept its angular momentum and coasted: measured at 53
+        //     degrees of heading per telemetry line, dead constant, for as long as the log ran.
+        //     A CONSTANT RATE IS ZERO DAMPING, and that is the spin.
+        //
+        // Resistance is a property of the WETTED SURFACE, and the wetted surface is exactly what
+        // the clip above just computed. So it is evaluated here, per station, at that station's
+        // own immersed centroid, against that station's own local velocity -- and then rotational
+        // damping is not a term anybody writes down. It falls out of the fact that a rotating
+        // hull moves faster through the water at its ends than at its middle.
+        //
+        // The areas are not declared either: `ey * span` IS the projection of this immersed slice
+        // normal to body x, and `ex * span` its projection normal to body y. A hull that lifts
+        // out sheds them continuously; a hull that swamps gains them. There is no inversion case,
+        // because inversion was never a case -- it was a point that went dry.
+        //
+        // Axial (body z) resistance is deliberately NOT here: on a slender body that is a
+        // whole-hull quantity -- frontal form drag plus friction over the wetted length -- not a
+        // sum of station projections, and it stays on the one element where it was calibrated.
+        if (e.dragCd[0].v > 0.0 || e.dragCd[1].v > 0.0) {
+            // Two-point Gauss across the immersed width. +-w/(2 sqrt 3) with half the area each
+            // integrates x^2 exactly for a uniform strip, so the roll damping this produces is
+            // the strip's true second moment rather than the 25% short a quarter-beam split
+            // would give.
+            const double arm = ex * 0.2886751345948129;
+            const double halfLat = 0.5 * e.dragCd[0].v * ey * span;
+            const double halfVert = 0.5 * e.dragCd[1].v * ex * span;
+            for (int sgn = -1; sgn <= 1; sgn += 2) {
+                const double pt[3] = {cx + sgn * arm, cy, st.z};
+                double vb[3];
+                m_body.VelocityAtBody(pt, vb);
+                double rel[3] = {vb[0] - med.vx, vb[1] - med.vy, vb[2] - med.vz};
+                inv.TransformDir(rel[0], rel[1], rel[2]);
+                // Quadratic and signed, |v| v, so the direction is carried by the law.
+                double fb[3] = {-0.5 * med.rho * halfLat * std::abs(rel[0]) * rel[0],
+                                -0.5 * med.rho * halfVert * std::abs(rel[1]) * rel[1], 0.0};
+                m_body.pose.TransformDir(fb[0], fb[1], fb[2]);
+                w += m_body.BodyWrench(fb, pt);
+            }
+        }
     }
     return w;
 }
@@ -154,21 +219,31 @@ Bivector Vessel::Drag(const Element& e, const WaterSurface& sea, double simUnix)
 
     const Medium med = (e.medium == MediumKind::Air) ? sea.AirAt(wc[0], wc[2], simUnix)
                                                      : sea.WaterAt(wc[0], wc[2], simUnix);
-    // Immersion gates the element in ITS OWN medium: a hull panel contributes when it is under
-    // water, a windage panel when it is above it, and `up` in the Medium is the only difference
-    // between those two sentences.
-    const double imm = med.ImmersionAt(wc);
-    if (imm <= 0.0) return Bivector::Zero();
 
     // WETTED AREA IS NOT CONSTANT, and a planing hull is the case that proves it. Held fixed,
     // hull drag rises as v^2 forever and the boat asymptotes at displacement speed no matter how
-    // much thrust it has -- it can never climb its own hump. Scaling the reference area by how
-    // deep this panel actually sits is the cheapest honest statement of "lift reduces wetted
-    // area", and it is what turns the planing law above into an actual transition: lift lowers
+    // much thrust it has -- it can never climb its own hump. Scaling by how much hull is actually
+    // in the water is what turns the planing law into an actual transition: lift lowers
     // immersion, immersion lowers drag, drag lowers resistance, speed rises, lift rises.
-    // kRefImmersion is the panel's own static depth, so the factor is 1 at rest by construction.
-    constexpr double kRefImmersion = 0.35;
-    const double wetted = std::min(1.0, imm / kRefImmersion);
+    //
+    // THE MEASURE HAS TO BE THE HULL, NOT A POINT ON IT. Asking one mount whether IT is wet
+    // reads correctly upright and reads zero the moment the hull rolls past its beam ends --
+    // which is how a capsized boat came to coast with no resistance whatever. The immersed
+    // volume over the static displaced volume asks the whole hull instead: it is exactly 1 at
+    // rest by construction rather than by a tuned reference depth, it falls as the hull climbs
+    // onto the plane, it is 0 airborne, and inverted-and-swamped it is 1. Nothing about it knows
+    // which way up the boat is, which is the point.
+    double wetted;
+    if (e.medium == MediumKind::Air) {
+        // Windage is the mirror question and a point still answers it: the console and collar
+        // are either in the air or they are not, and there is no "partly" worth modelling.
+        const double imm = med.ImmersionAt(wc);
+        if (imm <= 0.0) return Bivector::Zero();
+        wetted = std::min(1.0, imm / 0.35);
+    } else {
+        wetted = m_wetFrac;
+        if (wetted <= 1e-4) return Bivector::Zero();
+    }
 
     // RELATIVE velocity: the hull through the fluid, not the hull through the ground. This is
     // where a current sets a boat sideways and where being carried by a wave stops being drag.
@@ -610,17 +685,31 @@ Bivector Vessel::NetWrench(const WaterSurface& sea, const VesselControls& c, dou
     m_tel.waterValid = true;
     m_tel.thrustersWet = 0;
 
-    int thrusterIdx = 0;
+    // TWO PASSES. Resistance and added mass are both properties of the WETTED HULL, and the
+    // wetted hull is not known until the buoyancy clip and the collar have run. Letting that
+    // depend on where a spec happens to list its elements is the kind of coupling that works
+    // until somebody reorders a table, so the volume is established first and read second.
     for (const Element& e : m_spec.elements) {
         switch (e.kind) {
             case ElementKind::Buoyancy:
                 w += Buoyancy(e, sea, simUnix);
                 break;
-            case ElementKind::Drag:
-                w += Drag(e, sea, simUnix);
-                break;
             case ElementKind::Collar:
                 w += Collar(e, sea, simUnix);
+                break;
+            default:
+                break;
+        }
+    }
+    // How much hull is in the water, as a fraction of what it displaces at rest: 1 at rest by
+    // construction, 0 airborne, and clamped at 1 when swamped.
+    m_wetFrac = std::clamp(m_accVol / m_dispVol, 0.0, 1.0);
+
+    int thrusterIdx = 0;
+    for (const Element& e : m_spec.elements) {
+        switch (e.kind) {
+            case ElementKind::Drag:
+                w += Drag(e, sea, simUnix);
                 break;
             case ElementKind::Planing:
                 w += Planing(e, sea, simUnix);
@@ -700,12 +789,9 @@ void Vessel::Step(const WaterSurface& sea, const VesselControls& c, double simUn
     //
     // The scale is the immersed volume over the static displaced volume, which is 1 at rest by
     // construction and goes to 0 as the hull flies. NetWrench has just accumulated it.
-    {
-        const double wet = std::clamp(m_accVol / m_dispVol, 0.0, 1.0);
-        for (int i = 0; i < 3; ++i) {
-            m_body.mp.addedM[i] = m_addedM0[i] * wet;
-            m_body.mp.addedI[i] = m_addedI0[i] * wet;
-        }
+    for (int i = 0; i < 3; ++i) {
+        m_body.mp.addedM[i] = m_addedM0[i] * m_wetFrac;
+        m_body.mp.addedI[i] = m_addedI0[i] * m_wetFrac;
     }
     m_body.Step(w, dt);
     if (!m_body.Sane()) return;

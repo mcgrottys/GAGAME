@@ -130,6 +130,10 @@ private:
     VesselTelemetry m_tel;
     // Accumulated across one wrench evaluation, so telemetry does not need a second pass.
     double m_accVol = 0.0;
+    // The immersed fraction, established by the first pass of NetWrench and read by the second.
+    // One number, two customers: the added mass (entrained water there is no longer any of) and
+    // the axial resistance (a hull that is not in the water does not make any).
+    double m_wetFrac = 1.0;
     double m_accDraught = 0.0;
     int    m_accStations = 0;
 };
@@ -138,7 +142,8 @@ private:
 // Clips a closed polygon to the half-plane a*x + b*y + c <= 0 and returns the area and centroid
 // of what remains. Returns 0 area when nothing is inside. `n` points in, arbitrary winding.
 double ClipSectionArea(const double* px, const double* py, int n, double a, double b, double c,
-                       double* cxOut, double* cyOut);
+                       double* cxOut, double* cyOut, double* exOut = nullptr,
+                       double* eyOut = nullptr);
 
 bool RunVesselSelfTest();
 

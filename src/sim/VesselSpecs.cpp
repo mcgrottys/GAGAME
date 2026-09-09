@@ -199,6 +199,16 @@ VesselSpec MakeRhib18() {
         st.oy = {yKeel, (yChine < SHEER) ? yChine : SHEER, SHEER};
         hull.stations.push_back(st);
     }
+    // THE HULL'S OWN RESISTANCE, on the sections above. Only the coefficients are declared --
+    // the areas are whatever the clip finds wet this instant, per station, so they follow the
+    // hull onto the plane, into the air and upside down without anybody writing those cases.
+    // These are the same two numbers the single-point element used to carry; what changed is
+    // that they are now applied where the water actually is, which is where roll and yaw
+    // damping come from.
+    hull.dragCd[0] = Num::Of(1.1, "1", "ASSUMED: hull broadside, on the immersed section's own "
+                                       "projected side area");
+    hull.dragCd[1] = Num::Of(1.3, "1", "ASSUMED: bluff in heave, on the immersed section's own "
+                                       "projected plan area");
     s.elements.push_back(hull);
 
     // ---- the collar: five independent chambers ------------------------------------------------
@@ -406,11 +416,18 @@ VesselSpec MakeRhib18() {
     drag.name = "hull.drag";
     drag.medium = MediumKind::Water;
     drag.mount.at = Motor::Translation(0.0, KEEL + 0.15, 0.0);
-    drag.dragArea[0] = Num::Of(0.55 * LOA * 0.45, "1", "DERIVED: immersed side area");
-    drag.dragArea[1] = Num::Of(0.62 * LOA * 2.0 * BH, "1", "DERIVED: plan area (heave damping)");
+    // AXIAL ONLY. The side and plan areas moved onto the hull's own stations, where they are
+    // measured rather than estimated and where they can damp rotation; leaving them here as
+    // well would count the same water twice. What stays is the one direction a station-by-
+    // station projection would get WRONG: axial resistance on a slender body is a whole-hull
+    // quantity -- the frontal form drag plus the friction of the whole wetted length, felt once
+    // -- not the sum of nine section areas, which would be nine times the hull's own frontal
+    // area and would stop the boat dead.
+    drag.dragArea[0] = Num::Of(0.0, "1", "the immersed side area is now measured per station");
+    drag.dragArea[1] = Num::Of(0.0, "1", "the immersed plan area is now measured per station");
     drag.dragArea[2] = Num::Of(2.0 * BH * 0.35, "1", "DERIVED: immersed transom section");
-    drag.dragCd[0] = Num::Of(1.1, "1", "ASSUMED: hull broadside");
-    drag.dragCd[1] = Num::Of(1.3, "1", "ASSUMED: bluff in heave");
+    drag.dragCd[0] = Num::Of(0.0, "1", "see dragArea[0]");
+    drag.dragCd[1] = Num::Of(0.0, "1", "see dragArea[1]");
     // BACK-SOLVED FROM A KNOWN RATIO, not guessed. A planing hull of this size runs at a
     // resistance/weight ratio near 0.13 at 16 kn, so ~1150 N for this boat. At 8.4 m/s and 57%
     // wetted that requires Cd*A ~ 0.056 m^2; on the 0.595 m^2 transom section that is Cd 0.10.
