@@ -376,7 +376,17 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
         // had, in the same 32 slots.
         const double la = std::log10(kFreqLo * fp), lb = std::log10(kFreqHi * fp);
         const double step = (lb - la) / double(nf);
-        const double halfW = (std::max)(cfg.spreadDeg, 1e-6);
+        // THE FAN'S HALF-WIDTH IS NOT spreadDeg, it is whatever makes cos^2 have the SAME
+        // SECOND MOMENT spreadDeg has always meant. The old fan weighted +-spreadDeg
+        // UNIFORMLY, whose directional standard deviation is spreadDeg/sqrt(3). Dropping a
+        // cos^2 taper on the same half-width silently narrowed that to spreadDeg*0.3615 --
+        // a 38% cut in effective spread, which is a 38% INCREASE in crest length, and the
+        // sea came out visibly smeared into long horizontal streaks. The taper is right (a
+        // real directional spectrum goes to zero at its edge; the uniform one did not), so
+        // widen the fan until the moment matches: sqrt((1/3) / (1/3 - 2/pi^2)) = 1.5971.
+        // spreadDeg then keeps meaning exactly what it meant before this file changed.
+        constexpr double kCos2Widen = 1.5970512;
+        const double halfW = (std::max)(cfg.spreadDeg, 1e-6) * kCos2Widen;
         for (int i = 0; i < nf; ++i) {
             // The stratum's own linear width in f, shared by its nd components.
             const double fLo = std::pow(10.0, la + double(i) * step);

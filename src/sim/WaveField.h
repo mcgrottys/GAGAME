@@ -78,7 +78,7 @@ public:
     // M9bv: 3, was 2. The fan is 8 frequencies x 4 directions rather than 32 x 1 -- same
     // component count and the same atlas layout, but a different point of S(f, theta) per
     // component, so every cached solve on disk is a different field and must be re-solved.
-    static constexpr uint32_t kSolverVersion = 5;   // M9bv: 2D stratified (f, theta) fan
+    static constexpr uint32_t kSolverVersion = 6;   // M9bv: fan half-width moment-matched
 
     void Configure(const WaveFieldConfig& cfg, const Compositor* comp, int hgtChannel,
                    const WaterAtlas* atlas, const TideModel* tides, int entranceStation,
