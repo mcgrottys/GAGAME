@@ -207,7 +207,19 @@ VesselSpec MakeRhib18() {
     // half immersion and saturating once under -- that curve IS the RHIB's character, and the
     // damping term is what turns a slam into a thump (a collar is a ~0.25 bar membrane, not a
     // rigid float).
-    const double tubeY = 0.10, tubeX = 0.5 * BOA - RT;
+    // THE TUBES SIT IN THE WATER, not on it. At +0.10 the tube's underside sat exactly ON the
+    // waterline, so the collar contributed nothing until the hull already heeled -- and the
+    // measured consequence was a boat more stable INVERTED than upright: floating upside down it
+    // had 0.41-0.48 m^3 of collar immersed against 0.04-0.29 upright at plane, because the
+    // tubes are above the CG one way up and below it the other.
+    //
+    // A real RIB carries the lower part of its collar in the water at rest -- the tubes ARE the
+    // beam, which is where "wonderful lateral stability... prevents the vessel from tipping or
+    // capsizing even when deliberately overloaded to one side" comes from. At -0.05 about a
+    // third of the tube is immersed at rest, so the collar is load-bearing form stability from
+    // the first degree of heel instead of a fender that only wakes up once the boat is already
+    // going over.
+    const double tubeY = -0.05, tubeX = 0.5 * BOA - RT;
     const double chamberZ[6] = {-0.5 * LOA, -0.28 * LOA, -0.06 * LOA,
                                 0.16 * LOA, 0.34 * LOA, 0.46 * LOA};
     for (int side = 0; side < 2; ++side) {

@@ -112,6 +112,12 @@ private:
     // evaluated is that the spray root does not teleport. Taken as an instantaneous function of
     // trim it swung the centre of pressure between the transom and mid-length every step and
     // threw the hull; lagged, it is the negative feedback that sets the running trim.
+    // The spec's added mass at FULL immersion. What the body carries is this scaled by how much
+    // of the hull is actually in the water -- see the note in Step.
+    double m_addedM0[3] = {0, 0, 0};
+    double m_addedI0[3] = {0, 0, 0};
+    double m_dispVol = 1.0;        // static displaced volume, the scale for "fully immersed"
+
     double m_lambda = 1.5;
     double m_dt = 1.0 / 60.0;   // set by Step, read by the lambda relaxation
 

@@ -272,6 +272,15 @@ bool Vessel::Build(const VesselSpec& spec, const Motor& pose) {
     m_body.mp.I[0][0] = spec.inertiaPitch.v;    // about body x (starboard) = PITCH
     m_body.mp.I[1][1] = spec.inertiaYaw.v;      // about body y (up)        = YAW
     m_body.mp.I[2][2] = spec.inertiaRoll.v;     // about body z (forward)   = ROLL
+    // Keep the FULL-IMMERSION figures; Step scales them by how wet the hull actually is.
+    m_addedM0[0] = spec.addedMassSway.v;
+    m_addedM0[1] = spec.addedMassHeave.v;
+    m_addedM0[2] = spec.addedMassSurge.v;
+    m_addedI0[0] = spec.addedInertiaPitch.v;
+    m_addedI0[1] = spec.addedInertiaYaw.v;
+    m_addedI0[2] = spec.addedInertiaRoll.v;
+    m_dispVol = std::max(m_body.mp.mass / 1025.0, 1e-6);
+
     m_body.mp.addedM[0] = spec.addedMassSway.v;     // body x = starboard -> sway
     m_body.mp.addedM[1] = spec.addedMassHeave.v;    // body y = up        -> heave
     m_body.mp.addedM[2] = spec.addedMassSurge.v;    // body z = forward   -> surge
@@ -682,6 +691,22 @@ Bivector Vessel::NetWrench(const WaterSurface& sea, const VesselControls& c, dou
 void Vessel::Step(const WaterSurface& sea, const VesselControls& c, double simUnix, double dt) {
     m_dt = dt;
     const Bivector w = NetWrench(sea, c, simUnix);
+
+    // ADDED MASS IS ENTRAINED WATER, so a hull with no water around it has none. It was applied
+    // unconditionally, which meant an AIRBORNE boat still carried 495 kg of heave added mass
+    // against a gravity of only m*g -- it fell at 900*9.81/1395 = 6.3 m/s^2, 65% of gravity, and
+    // hung in the air. Scaled by how much of the hull is actually immersed, a launched hull
+    // falls at g and lands like it means it.
+    //
+    // The scale is the immersed volume over the static displaced volume, which is 1 at rest by
+    // construction and goes to 0 as the hull flies. NetWrench has just accumulated it.
+    {
+        const double wet = std::clamp(m_accVol / m_dispVol, 0.0, 1.0);
+        for (int i = 0; i < 3; ++i) {
+            m_body.mp.addedM[i] = m_addedM0[i] * wet;
+            m_body.mp.addedI[i] = m_addedI0[i] * wet;
+        }
+    }
     m_body.Step(w, dt);
     if (!m_body.Sane()) return;
 
