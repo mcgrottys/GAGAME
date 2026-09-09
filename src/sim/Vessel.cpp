@@ -574,9 +574,28 @@ Bivector Vessel::Planing(const Element& e, const WaterSurface& sea, double simUn
     const double zCop = m_transomZ + cp * lam * b;
     m_tel.copZ = zCop;
 
-    // Athwartships: half each, weighted by each panel's own angle of attack, normalised so the
-    // pair still delivers Savitsky's total. A heeled hull loads the low panel harder; a rolling
-    // one sees different vertical velocity on each side. Stiffness and damping, from one split.
+    // Athwartships: half each, weighted by each panel's own angle of attack AGAINST THE
+    // REFERENCE -- never against the pair's sum. A heeled hull loads the low panel harder; a
+    // rolling one sees different vertical velocity on each side. Stiffness and damping, from
+    // one split.
+    //
+    // NORMALISING TO THE SUM IS WHAT MADE IT WALK. Written as share = a_i / (aP + aS), the two
+    // shares add to 1 BY CONSTRUCTION, so the pair always delivered the whole of Savitsky's
+    // lift no matter how little running surface was left in the water. Lift one panel clear --
+    // ordinary at 29 kn, where the hull carries 0.05 m^3 of the 0.88 it displaces -- and the
+    // survivor took share = 1.0: the ENTIRE lift, moved to a quarter beam off the centreline.
+    // On the corrected 1.30 m beam that is 8800 N at 0.325 m = 2860 N m against a roll inertia
+    // of 859 kg m^2, or 190 deg/s^2, and then the same thing mirrored on the way back. A limit
+    // cycle, and it read as the boat riding a sea that was not there: MEASURED at +-18 deg of
+    // heel on water of Hs 0.05 m, which is a mirror.
+    //
+    // Savitsky's b is the beam of the WETTED surface. Half the surface out of the water is not
+    // the same lift relocated, it is about half the lift -- so each panel carries its own half
+    // scaled by its own alpha over the alpha the lift was computed at. Both panels at the
+    // reference angle sum to exactly 1, so the calibrated level-trim case is untouched; a heeled
+    // hull makes the low panel do more and the high panel less, which is the righting moment;
+    // and a hull with one chine flying makes LESS TOTAL LIFT and settles back onto the other,
+    // which is a restoring loop instead of a divergent one.
     const double halfB = 0.25 * b;
     double aP = 0.0, aS = 0.0;
     for (int side = 0; side < 2; ++side) {
@@ -593,12 +612,14 @@ Bivector Vessel::Planing(const Element& e, const WaterSurface& sea, double simUn
         const double a = (ps > 1e-6) ? std::max(0.0, -pr[1] / ps + e.planingIncidence.v) : 0.0;
         (side == 0 ? aP : aS) = a;
     }
-    const double aSum = aP + aS;
-    if (aSum <= 1e-9) return Bivector::Zero();
+    if (aP + aS <= 1e-9) return Bivector::Zero();
+    const double aRef = std::max(alpha0, 1e-4);   // the angle `lift` above was computed at
 
     Bivector w = Bivector::Zero();
     for (int side = 0; side < 2; ++side) {
-        const double share = ((side == 0) ? aP : aS) / aSum;
+        // Capped at 1.0: one panel can at most deliver the reference lift on its own, because
+        // the wetted beam cannot exceed the beam.
+        const double share = 0.5 * std::min(((side == 0) ? aP : aS) / aRef, 2.0);
         if (share <= 0.0) continue;
         const double applyAt[3] = {(side == 0) ? -halfB : halfB, atBody[1], zCop};
         double fWorld[3] = {0.0, lift * share, 0.0};
