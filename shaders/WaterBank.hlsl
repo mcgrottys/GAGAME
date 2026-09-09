@@ -84,6 +84,9 @@ cbuffer BankCb : register(b0) {
     float4 gWaveSig2[8];
     float4 gWaveDir2[8];
     float4 gWaveScale2[8];
+    // M9bt: the fold's SECOND moment per band -- the energy-weighted width of ln k. Appended
+    // at the end on both sides, per the layout law above.
+    float4 gBandKSpread;
 };
 
 // M9bl: one component's rows, from whichever half holds it. r = comp >> 1.
@@ -457,9 +460,32 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     float gain1 = t.hsScale * expo;
     float gain2 = t.hsScale * expo;
     [unroll] for (uint c = 0; c < 3; ++c) {
-        // M9c: the fold judges the band by the wavelength its ENERGY actually sits at.
-        const float lam = 6.2831853f / gBandKFold[c];
-        const float w = 1.0f - smoothstep(lam * 0.12f, lam * 0.5f, t.texelM);
+        // ---- M9bt: THE FOLD ASKS FOR A FRACTION, NOT A VERDICT. --------------------------
+        //
+        // The question is "how much of this band can a grid of THIS spacing still carry", and
+        // Nyquist answers it exactly: a grid of spacing T resolves k < pi/T and nothing above.
+        // But a cascade band is not one wavenumber -- band 2 spans lambda 0.41..12 m, thirty
+        // to one -- so the answer is not yes or no, it is the FRACTION OF THE BAND'S VARIANCE
+        // BELOW NYQUIST. With the band log-normal about its own energy-weighted mean
+        // (gBandKFold) and its own energy-weighted width (gBandKSpread), that fraction is a
+        // logistic in ln(k_nyquist / k_fold), and sqrt(3)/pi is the scale that matches a
+        // logistic to a normal of that width. Nothing here is placed: both moments come from
+        // the live spectrum, and Nyquist is Nyquist.
+        //
+        // WHAT IT REPLACES, and why the sea was glass: smoothstep(lam*0.12, lam*0.5, texelM)
+        // reached ZERO at texelM = lam/2 -- exactly AT Nyquist, where half the band's energy
+        // still sits at wavelengths the grid resolves perfectly well -- and it began shedding
+        // at lam/8, four times finer than the limit. Band 2 folds at 6.96 m in a 7 s sea, so
+        // its geometry weight was 0.36 on the 2.4 m ring and 0 on every ring beyond: the chop
+        // existed only within ~300 m of the camera and the whole sea past it was a mirror.
+        // Measured, a declared Hs 0.80 arrived as rms 0.13 m where a Gaussian sea wants 0.20.
+        //
+        // Nothing is lost by keeping more: the shed term below is (1 - w), so whatever leaves
+        // geometry still arrives as slope variance. The two are complementary by construction,
+        // which is why this cannot double-count and cannot pop between rings.
+        const float kNy = 3.14159265f / max(t.texelM, 1e-4f);
+        const float sLog = max(gBandKSpread[c], 0.05f) * 0.5513289f;   // sigma -> logistic
+        const float w = saturate(1.0f / (1.0f + exp(-log(kNy / gBandKFold[c]) / sLog)));
         // M7p: the two ORPHANED PHYSICS EDGES, restored from the retired SeaLayer path
         // and found by the 2D proof figure: SHOALING (Green's-law growth as the group
         // speed drops entering shallow water) and WAVE-CURRENT amplification (the ebb
@@ -533,18 +559,46 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             // gate already turns that energy into foam); the glint keeps only what a
             // real sea can carry. Total capped below -- both closures, ALGEBRA.md.
             const float akS = min(aW * kW, gFoamA.y);
-            sigW += (1.0f - wF) * 0.5f * akS * akS;
-            if (wF <= 0.001f) continue;
+            // ---- M9bu: THE SPINOR'S LENGTH IS NOT NOISE, IT IS THE ANSWER. --------------
+            //
+            // WavePageSample reads the finest mip actually RESIDENT (M9bl, so the window
+            // refines as its levels land rather than appearing whole). Reading a coarser mip
+            // BILINEARLY AVERAGES THE PHASE SPINOR over that footprint -- and averaging
+            // phasors shortens them. The length that comes back is exactly the phase
+            // COHERENCE of the component over the footprint that was read: 1 where the phase
+            // is smooth across it, 0 where the wave turns over inside it.
+            //
+            // Normalising that back to unit length threw the answer away and restored FULL
+            // AMPLITUDE to an incoherent average, pointing at the circular MEAN of the phases
+            // in the footprint -- a wave of the right size at a fabricated, shifted phase.
+            // Per plane, because each component's page streams on its own schedule, so a
+            // subset of the 32 comps sat at shifted phases and the subset changed tile by
+            // tile as levels landed. The user saw it exactly: "every few rows gets an offset
+            // ... like a signal got shifted when going into the tiles", only in the inlet
+            // (the solved field's window), and in the GEOMETRY rather than the shading.
+            //
+            // The length is the footprint filter's own transfer function on this component --
+            // the same quantity the band fold computes from Nyquist, here measured directly
+            // instead of derived. So it multiplies the amplitude, exactly as wF does, and
+            // what it takes out of geometry the shed below carries as slope variance. A
+            // component the page cannot resolve now contributes NOTHING rather than a
+            // full-amplitude lie, and the window still refines as its levels land -- it just
+            // grows in honestly, from low amplitude to full, instead of arriving at full
+            // amplitude in the wrong place.
             float2 sp = t4.zw * 2.0f - 1.0f;
+            const float coh = saturate(length(sp));
             sp /= max(length(sp), 1e-4f);          // the spinor stays unit (cl2 law)
+            const float wFc = wF * coh;
+            sigW += (1.0f - wFc) * 0.5f * akS * akS;
+            if (wFc <= 0.001f) continue;
             const float4 rr = WaveSigRow(s >> 1);
             const float2 rot = (s & 1) ? rr.zw : rr.xy;
             const float cT = sp.x * rot.x + sp.y * rot.y;   // cos(phi - sigma t)
             const float sT = sp.y * rot.x - sp.x * rot.y;   // sin(phi - sigma t)
             const float4 dd = WaveDirRow(s >> 1);
             const float2 dir2 = (s & 1) ? dd.zw : dd.xy;
-            dW.y += wF * aW * cT;
-            dW.xz -= gWaveB.z * wF * aW * sT * dir2;
+            dW.y += wFc * aW * cT;
+            dW.xz -= gWaveB.z * wFc * aW * sT * dir2;
         }
         const float4 env = WavePageSample(wuv, gWaveU.w);
         rmsW = env.x * gWaveB.x * expo;   // the solver's envelope, sheltered like its comps
