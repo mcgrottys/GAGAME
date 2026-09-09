@@ -402,90 +402,126 @@ Bivector Vessel::Collar(const Element& e, const WaterSurface& sea, double simUni
 // panel deeper into the flow and at a larger angle, so it makes more lift and pushes back; a
 // rolling hull sees a different vertical velocity on each side, which is the damping. Both fall
 // out of asking the same question at two places instead of one.
+// ================================================================================================
+//  SAVITSKY (1964), and why the empirical form beats the one this file had.
+//
+//  The hand-rolled law here was lift ~ rho v^2 sin(alpha) x area at a centre of pressure that
+//  marched FORWARD with speed. That is unconditionally unstable in trim: alpha = sin(trim) +
+//  incidence, the lift acts forward of the CG, so more trim makes more lift makes more trim, and
+//  the hull settled at +17 to +29 degrees bow-up where a real deep-V runs at 3-6.
+//
+//  Savitsky's method closes that loop through the WETTED LENGTH. Writing lambda for the mean
+//  wetted-length-to-beam ratio, Cv = V/sqrt(g b) for the speed coefficient, tau for trim in
+//  DEGREES and beta for deadrise in degrees:
+//
+//      CL0  = tau^1.1 (0.0120 lambda^0.5 + 0.0055 lambda^2.5 / Cv^2)
+//      CLb  = CL0 - 0.0065 beta CL0^0.60                       (deadrise sheds lift)
+//      lift = CLb * 0.5 rho V^2 b^2
+//      Cp   = 0.75 - 1 / (5.236 Cv^2 / lambda^2 + 2.40)        (fraction of lambda*b fwd of transom)
+//
+//  The last line is the one that matters. Cp is bounded in [0.33, 0.75] -- it cannot run away --
+//  and the centre of pressure sits at Cp * lambda * b forward of the TRANSOM, so it is the
+//  wetted length that carries it. Trim up, the bow lifts clear, lambda shrinks, and the pressure
+//  centre walks aft toward the transom, killing the bow-up moment that raised the trim. That is
+//  the negative feedback, and it is geometry rather than a tuned gain.
+//
+//  LAMBDA IS A STATE. Evaluated instantaneously from immersion/tan(tau) it is stiffer than what
+//  it replaces -- measured, the hull went from a steady +17 deg to tumbling airborne. The spray
+//  root migrates at a finite rate, so lambda relaxes toward its geometric target with a time
+//  constant. That lag IS the model.
+//
+//  Sources: Savitsky, "Hydrodynamic Design of Planing Hulls", Marine Technology 1(4), 1964.
+//  The Cp coefficients (5.236, 2.40) are as quoted in the standard reproductions of the method.
+//
+//  WHAT IS KEPT FROM BEFORE: the split across the beam. Savitsky is a whole-surface method and
+//  says nothing about roll, but a single centreline force cannot make a righting moment at all,
+//  and at planing trim the stations and the collar are out of the water. So Savitsky sets the
+//  MAGNITUDE and the LONGITUDINAL position, and the two panels distribute it athwartships by
+//  their own local angle of attack -- which is where roll stiffness and roll damping come from.
+// ================================================================================================
 Bivector Vessel::Planing(const Element& e, const WaterSurface& sea, double simUnix) {
-    Bivector w = Bivector::Zero();
-    const double halfB = 0.25 * ((e.planingBeam.v > 0.0) ? e.planingBeam.v : 1.0);
-    for (int side = 0; side < 2; ++side) {
-        w += PlaningPanel(e, sea, simUnix, (side == 0) ? -halfB : halfB, 0.5);
-    }
-    return w;
-}
+    const double b = (e.planingBeam.v > 0.0) ? e.planingBeam.v : 1.0;
 
-Bivector Vessel::PlaningPanel(const Element& e, const WaterSurface& sea, double simUnix,
-                              double xOffset, double areaFrac) {
+    // The reference query, at the centreline mount: attitude, speed and immersion.
     double atBody[3];
     e.mount.Origin(0.0, atBody);
-    atBody[0] += xOffset;
     double wc[3];
     m_body.ToWorld(atBody, wc);
     const Medium med = sea.WaterAt(wc[0], wc[2], simUnix);
-    if (med.ImmersionAt(wc) <= 0.0) return Bivector::Zero();   // airborne: no lift, only gravity
+    const double imm = med.ImmersionAt(wc);
 
     double vb[3];
     m_body.VelocityAtBody(atBody, vb);
     double rel[3] = {vb[0] - med.vx, vb[1] - med.vy, vb[2] - med.vz};
     m_body.pose.Inverse().TransformDir(rel[0], rel[1], rel[2]);
+    const double spd = std::sqrt(rel[0]*rel[0] + rel[1]*rel[1] + rel[2]*rel[2]);
 
-    const double u = rel[2];                       // forward component, body axes
-    if (u <= 0.1) return Bivector::Zero();         // astern or stopped: a planing surface does
-                                                   // nothing at all, which is why boats back slowly
-    const double spd = std::sqrt(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]);
-    if (spd < 1e-6) return Bivector::Zero();
+    // LAMBDA RELAXES whether or not the surface is making lift this instant -- a hull coming off
+    // the plane has to let its wetted length grow back, and freezing the state while airborne
+    // would have it land with the wrong one.
+    const double alpha0 = (spd > 1e-6) ? (-rel[1] / spd + e.planingIncidence.v) : 0.0;
+    const double lamMax = (m_spec.loa.v > 0.0) ? m_spec.loa.v / b : 4.0;
+    const double lamGeom =
+        (imm > 0.0 && alpha0 > 1e-3)
+            ? std::min(lamMax, (imm / std::max(std::tan(alpha0), 0.02)) / b)
+            : lamMax;
+    constexpr double kSprayLagS = 0.35;    // how long the spray root takes to migrate
+    m_lambda += (lamGeom - m_lambda) * std::min(1.0, m_dt / kSprayLagS);
+    m_lambda = std::clamp(m_lambda, 0.05, lamMax);
+    m_tel.wettedLambda = m_lambda;
 
-    // The angle the bottom meets the flow. rel[1] > 0 is the hull RISING relative to the water,
-    // which unloads the running surface; the loading case is the hull descending into the flow.
-    // So the angle of attack is positive exactly when rel[1] is negative.
-    // The hull's trim relative to the flow, PLUS the running surface's built-in incidence. The
-    // second term is what lets the boat get onto plane at all: without it a level hull meets the
-    // flow at zero degrees, makes no lift, never trims up, and never reaches the angle that
-    // would have made lift -- measured as a hull stuck at 17 kn with the throttles buried.
-    const double alpha = -rel[1] / spd + e.planingIncidence.v;
-    if (alpha <= 0.0) return Bivector::Zero();
+    if (imm <= 0.0) return Bivector::Zero();        // airborne: gravity only
+    if (rel[2] <= 0.1 || spd < 1e-6) return Bivector::Zero();   // astern or stopped
 
-    const double dead = e.deadriseDeg.v;           // radians (Num parsed "deg")
-    const double deadLoss = std::max(0.25, std::cos(dead));
-    const double lift = 0.5 * med.rho * spd * spd * e.planingArea.v * areaFrac * alpha * deadLoss;
+    const double tauDeg = std::asin(std::clamp(alpha0, -1.0, 1.0)) * 57.2957795;
+    const double cv = spd / std::sqrt(kG * b);
+    if (tauDeg <= 0.05 || cv < 0.3) return Bivector::Zero();
 
-    // The centre of pressure marches FORWARD as speed rises -- the mechanism behind porpoising.
-    // Referenced to a nominal planing speed so the term is bounded and dimensionless.
-    // WHERE THE PRESSURE ACTS, and this is the term that SETS THE TRIM.
-    //
-    // alpha = sin(trim) + incidence, and the lift acts forward of the CG -- so more trim makes
-    // more alpha, which makes more lift, which makes more trim. Nothing in that loop closes it,
-    // and the hull ran at +17 to +29 degrees bow-up: pointing at the sky, not planing, where a
-    // real deep-V sits at 3-6.
-    //
-    // What closes it on a real hull is that the WETTED LENGTH SHRINKS as trim rises: the bow
-    // lifts clear, the spray root moves aft, and the centre of pressure goes with it -- so the
-    // bow-up moment falls exactly when the trim that caused it grows. Lw ~ immersion/tan(alpha)
-    // is the geometry of a planing wedge, and the pressure peak sits about three quarters of the
-    // way forward of the transom. Both are Savitsky's shape, which is all this model claims.
-    // TRIED AND REVERTED, and the note is worth more than the code was. Placing it at
-    // `transom + 0.75 * wetted length`, with Lw ~ immersion/tan(alpha), is Savitsky's own
-    // geometry and it SHOULD supply the negative feedback this model lacks. Measured, it
-    // swings the centre of pressure between the transom and mid-length as alpha moves, which
-    // is a stiffer loop than the one it replaced: the hull went from a steady +17 deg of trim
-    // to tumbling airborne at full throttle, heel -143.
-    //
-    // What it needs and does not have is the wetted length as a STATE that lags the attitude,
-    // rather than an instantaneous function of it -- the spray root does not teleport. That is
-    // a real model, not a line, and the trim being high is the lesser bug of the two.
-    const double cpShift = 0.35 * e.planingBeam.v * std::min(1.0, spd / 12.0);
-    const double applyAt[3] = {atBody[0], atBody[1], atBody[2] + cpShift};
+    const double lam = m_lambda;
+    const double cl0 = std::pow(tauDeg, 1.1) *
+                       (0.0120 * std::sqrt(lam) + 0.0055 * std::pow(lam, 2.5) / (cv * cv));
+    const double betaDeg = e.deadriseDeg.v * 57.2957795;   // Num parsed "deg" into radians
+    const double clb = std::max(0.0, cl0 - 0.0065 * betaDeg * std::pow(cl0, 0.60));
+    const double lift = clb * 0.5 * med.rho * spd * spd * b * b;
+    if (!(lift > 0.0)) return Bivector::Zero();
 
-    // A DEADRISE SIDE-FORCE TERM WAS TRIED HERE AND REMOVED. The physics is real -- a planing
-    // V loads one panel harder than the other in a sideslip and the difference is lateral force
-    // -- but written as `-lift * tan(deadrise) * f(sideslip)` at the running surface it is a
-    // POSITIVE FEEDBACK: the force acts below the CG, so it heels the hull, which increases the
-    // sideslip, which increases the force. Measured at +-43 degrees of roll oscillation running
-    // dead straight. Whatever form this term takes it needs a restoring moment that grows faster
-    // than the heel, and that is a hull-form model, not a line here.
-    //
-    // Lift acts normal to the RUNNING SURFACE, which is the hull's own up -- not the world's.
-    // That is what makes a heeled planing hull carve instead of skid.
-    double fWorld[3] = {0.0, lift, 0.0};
-    m_body.pose.TransformDir(fWorld[0], fWorld[1], fWorld[2]);
-    return m_body.BodyWrench(fWorld, applyAt);
+    // Cp in [0.33, 0.75] of the wetted length, forward of the transom. Bounded by construction.
+    const double cp = 0.75 - 1.0 / (5.236 * cv * cv / (lam * lam) + 2.40);
+    const double zCop = m_transomZ + cp * lam * b;
+    m_tel.copZ = zCop;
+
+    // Athwartships: half each, weighted by each panel's own angle of attack, normalised so the
+    // pair still delivers Savitsky's total. A heeled hull loads the low panel harder; a rolling
+    // one sees different vertical velocity on each side. Stiffness and damping, from one split.
+    const double halfB = 0.25 * b;
+    double aP = 0.0, aS = 0.0;
+    for (int side = 0; side < 2; ++side) {
+        double pb[3] = {(side == 0) ? -halfB : halfB, atBody[1], zCop};
+        double pw[3];
+        m_body.ToWorld(pb, pw);
+        const Medium pm = sea.WaterAt(pw[0], pw[2], simUnix);
+        if (pm.ImmersionAt(pw) <= 0.0) continue;
+        double pv[3];
+        m_body.VelocityAtBody(pb, pv);
+        double pr[3] = {pv[0] - pm.vx, pv[1] - pm.vy, pv[2] - pm.vz};
+        m_body.pose.Inverse().TransformDir(pr[0], pr[1], pr[2]);
+        const double ps = std::sqrt(pr[0]*pr[0] + pr[1]*pr[1] + pr[2]*pr[2]);
+        const double a = (ps > 1e-6) ? std::max(0.0, -pr[1] / ps + e.planingIncidence.v) : 0.0;
+        (side == 0 ? aP : aS) = a;
+    }
+    const double aSum = aP + aS;
+    if (aSum <= 1e-9) return Bivector::Zero();
+
+    Bivector w = Bivector::Zero();
+    for (int side = 0; side < 2; ++side) {
+        const double share = ((side == 0) ? aP : aS) / aSum;
+        if (share <= 0.0) continue;
+        const double applyAt[3] = {(side == 0) ? -halfB : halfB, atBody[1], zCop};
+        double fWorld[3] = {0.0, lift * share, 0.0};
+        m_body.pose.TransformDir(fWorld[0], fWorld[1], fWorld[2]);
+        w += m_body.BodyWrench(fWorld, applyAt);
+    }
+    return w;
 }
 
 // ================================================================================================
@@ -644,6 +680,7 @@ Bivector Vessel::NetWrench(const WaterSurface& sea, const VesselControls& c, dou
 }
 
 void Vessel::Step(const WaterSurface& sea, const VesselControls& c, double simUnix, double dt) {
+    m_dt = dt;
     const Bivector w = NetWrench(sea, c, simUnix);
     m_body.Step(w, dt);
     if (!m_body.Sane()) return;

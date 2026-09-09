@@ -67,6 +67,8 @@ struct VesselTelemetry {
     // the collar, so a collar that lifts clear at speed is a boat with nothing damping its roll
     // -- which is exactly the symptom.
     double hullVol = 0.0, collarVol = 0.0;
+    double wettedLambda = 0.0;      // Savitsky's mean wetted-length / beam -- the planing state
+    double copZ = 0.0;              // where the planing pressure acts, body z
     double depthM = 0.0;            // water depth under the hull
     bool   aground = false;
     bool   waterValid = false;      // false = no coverage; NOT the same as flat water
@@ -105,8 +107,14 @@ private:
     // forward from. Found once at Build, after the CG solve has moved the stations.
     double m_transomZ = 0.0;
 
-    Bivector PlaningPanel(const Element& e, const WaterSurface& sea, double simUnix,
-                          double xOffset, double areaFrac);
+    // THE WETTED LENGTH, AS A STATE. Savitsky's lambda -- mean wetted length over beam -- is the
+    // variable everything else keys on, and the reason it must be integrated rather than
+    // evaluated is that the spray root does not teleport. Taken as an instantaneous function of
+    // trim it swung the centre of pressure between the transom and mid-length every step and
+    // threw the hull; lagged, it is the negative feedback that sets the running trim.
+    double m_lambda = 1.5;
+    double m_dt = 1.0 / 60.0;   // set by Step, read by the lambda relaxation
+
     Bivector Foil(const Element& e, const WaterSurface& sea, const VesselControls& c,
                   double simUnix);
     Bivector Drag(const Element& e, const WaterSurface& sea, double simUnix);

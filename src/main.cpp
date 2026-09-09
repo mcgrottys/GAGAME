@@ -4195,10 +4195,11 @@ int main(int argc, char** argv) {
                     ws.heightNavd, ws.nx, ws.ny, ws.nz, slope,
                     std::atan(slope) * 57.2957795, ws.vx, ws.vy, ws.vz);
                 Log("[vessel] pos (%.1f, %+.2f, %.1f) %.1f kn hdg %.0f heel %+.1f trim %+.1f "
-                    "draught %.3f vol %.2f (hull %.2f collar %.2f) depth %.1f%s%s | parts %u",
+                    "draught %.3f vol %.2f (hull %.2f collar %.2f) lam %.2f cop %+.2f "
+                    "depth %.1f%s%s | parts %u",
                     bp[0], bp[1], bp[2], t.speedKn, t.headingRad * 57.2957795,
                     t.heelRad * 57.2957795, t.trimRad * 57.2957795, t.draughtM, t.immersedVol,
-                    t.hullVol, t.collarVol, t.depthM,
+                    t.hullVol, t.collarVol, t.wettedLambda, t.copZ, t.depthM,
                     (t.immersedVol < 1e-6) ? " AIRBORNE" : (t.aground ? " AGROUND" : ""),
                     t.waterValid ? "" : " NO-WATER",
                     vesselLayer ? vesselLayer->PartCount() : 0u);
