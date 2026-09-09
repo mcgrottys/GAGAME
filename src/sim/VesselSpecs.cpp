@@ -107,14 +107,27 @@ VesselSpec MakeRhib18() {
     s.display = "1998 Novurania 18' RHIB, twin Yamaha T50TLRW (High Thrust, 4-stroke)";
 
     // ---- the two dimensions that are actually known -----------------------------------------
-    const double LOA = 5.49;      // 18 ft
+    const double LOA = 5.49;      // 18 ft, tube tip to tube tip
     const double BOA = 2.30;      // overall, tube to tube
     const double RT = 0.25;       // tube radius
-    // The rigid hull inside the collar: overall beam less a tube diameter, less the small
-    // overhang the collar sits proud by.
-    const double BH = 0.5 * (BOA - 2.0 * RT) - 0.05;   // half-beam at the chine, 0.85 m
+
+    // ---- and the ones the owner's own photographs corrected --------------------------------
+    // THE RIGID HULL IS NEITHER THE BOAT'S LENGTH NOR ITS BEAM, and that was the loft's biggest
+    // error. Astern, the tubes finish in flat caps standing well proud of the transom; forward
+    // they run out past the stem into the bow cone. So the GRP is shorter than LOA at both ends.
+    //
+    // Across is worse. The tubes are bonded ONTO the hull's topsides and OVERLAP them, so the
+    // transom between them is barely half the overall beam -- not "BOA less two tube diameters",
+    // which is what this file assumed and which made the running surface 30% too wide. On a
+    // planing hull that is not a detail: Savitsky's lift goes as beam SQUARED.
+    //
+    // Read off the stern-on and deck photographs; both agree on a chine beam near 1.3 m against
+    // the 2.3 m overall.
+    const double HL = 4.90;       // rigid hull length; the tubes overhang ~0.3 m aft, ~0.3 fwd
+    const double BH = 0.65;       // half-beam at the chine -- MEASURED off the transom photo
     const double KEEL = -0.45;    // deepest point of the V below the CG datum
     const double SHEER = 0.28;    // gunwale height above the same datum
+    const double RAIL = 0.055;    // the spray rail's flat
     const double DEAD = 22.0 * 3.14159265358979323846 / 180.0;   // transom deadrise
 
     s.loa = Num::Of(18.0, "ft", "Novurania 18 -- the model name IS the length");
@@ -182,21 +195,37 @@ VesselSpec MakeRhib18() {
     hull.medium = MediumKind::Water;
     for (int i = 0; i < 9; ++i) {
         const double u = double(i) / 8.0;            // 0 transom .. 1 stem
-        const double z = -0.5 * LOA + u * LOA;
+        const double z = -0.5 * HL + u * HL;
         // Beam: full aft, holding to about two thirds forward, then a fine entry.
         const double taper = (u < 0.62) ? (1.0 - 0.10 * (u / 0.62))
                                         : (0.90 - 0.86 * ((u - 0.62) / 0.38));
         const double b = BH * ((taper > 0.06) ? taper : 0.06);
         // Deadrise warps from 22 deg aft to ~46 deg at the stem.
         const double dead = DEAD * (1.0 + 1.1 * u * u);
-        // Keel rocker: the running surface is straight aft, lifting over the forward third.
-        const double lift = (u < 0.66) ? 0.0 : 0.55 * ((u - 0.66) / 0.34) * ((u - 0.66) / 0.34);
+        // KEEL ROCKER, and the forefoot is DEEP. The rocker used to start at 62% and lift the
+        // stem 0.30 m, which drew a shallow, full bow; the beached photographs show the opposite
+        // -- the V carries deep and sharp right to a raked stem, which is what lets the boat put
+        // its nose into a sea instead of slapping over it. Straight further aft, and less lift.
+        const double lift = (u < 0.74) ? 0.0 : 0.38 * ((u - 0.74) / 0.26) * ((u - 0.74) / 0.26);
         const double yKeel = KEEL + lift * (-KEEL + 0.10);
-        const double yChine = yKeel + b * std::tan(dead);
+        const double yChine = (std::min)(yKeel + b * std::tan(dead), SHEER);
         Section st;
         st.z = z;
-        st.ox = {0.0, b, b};
-        st.oy = {yKeel, (yChine < SHEER) ? yChine : SHEER, SHEER};
+        // THE SPRAY RAIL. It is the bright line running the whole length of the hull in every
+        // photograph, and it is not trim: it is the widest part of the section at very nearly
+        // the depth the boat floats at. It knocks the sheet down, it carries dynamic pressure,
+        // and -- now that resistance is measured off these polygons rather than declared -- it
+        // is a good part of where the roll damping comes from. Angled slightly down and out,
+        // which is what throws the spray clear instead of letting it climb the topside.
+        // It fades out forward, where the stem is too fine to carry one.
+        const double rail = (yChine < SHEER - 0.02) ? RAIL * ((u < 0.88) ? 1.0 : 0.0) : 0.0;
+        if (rail > 0.0) {
+            st.ox = {0.0, b, b + rail, b + rail};
+            st.oy = {yKeel, yChine, yChine - 0.30 * rail, SHEER};
+        } else {
+            st.ox = {0.0, b, b};
+            st.oy = {yKeel, yChine, SHEER};
+        }
         hull.stations.push_back(st);
     }
     // THE HULL'S OWN RESISTANCE, on the sections above. Only the coefficients are declared --
@@ -280,14 +309,18 @@ VesselSpec MakeRhib18() {
     // water is leaving and the pressure has already returned to atmospheric. Forward of the CG
     // is where it belongs, and then the centre-of-pressure march with speed carries it further
     // forward and gives porpoising something to be.
-    plane.mount.at = Motor::Translation(0.0, KEEL, -0.05 * LOA);
+    plane.mount.at = Motor::Translation(0.0, KEEL, -0.05 * HL);
     plane.deadriseDeg = Num::Of(22.0, "deg", "ASSUMED: transom deadrise for a 1998 deep-V RHIB");
-    plane.planingBeam = Num::Of(2.0 * BH, "m", "DERIVED: chine beam from the station table");
+    plane.planingBeam = Num::Of(2.0 * BH, "m",
+                                "MEASURED off the owner's stern-on photo: the tubes overlap the "
+                                "topsides, so the running surface is ~1.3 m, not the 1.7 m that "
+                                "BOA-less-two-tube-diameters implies. Savitsky's lift goes as "
+                                "beam SQUARED, so this was the loft's most expensive error");
     plane.planingIncidence = Num::Of(3.0, "deg",
                                      "ASSUMED: the after buttocks sit ~3 deg to the datum, which "
                                      "is the ordinary range for a moulded deep-V; TUNED to put "
                                      "the running trim in the real 3-6 deg band");
-    plane.planingArea = Num::Of(0.62 * LOA * 2.0 * BH, "1",
+    plane.planingArea = Num::Of(0.62 * HL * 2.0 * BH, "1",
                                 "DERIVED: 62% of the chine rectangle wets at speed");
     s.elements.push_back(plane);
 
@@ -437,9 +470,13 @@ VesselSpec MakeRhib18() {
     // exceed it, so the hull never reached the speed where the running surface makes lift, so
     // it never trimmed up, so it never planed. A hull is FINE fore-and-aft; that is what a hull
     // IS, and 0.35 was describing a barn door.
-    drag.dragCd[2] = Num::Of(0.10, "1",
+    // The back-solve fixes the PRODUCT Cd*A -- R/W ~ 0.13 at 16 kn is a whole-boat figure and
+    // does not care how it is split. The transom section shrank with the corrected chine beam,
+    // so the coefficient rises to hold the same resistance rather than quietly making the boat
+    // 24% slipperier because a photograph got measured.
+    drag.dragCd[2] = Num::Of(0.13, "1",
                              "DERIVED: back-solved from R/W ~ 0.13 at 16 kn for a planing hull "
-                             "of this displacement");
+                             "of this displacement, holding Cd*A across the beam correction");
     s.elements.push_back(drag);
 
     // ---- windage: the same Drag kind, in the other fluid --------------------------------------
