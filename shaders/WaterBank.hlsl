@@ -426,6 +426,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // foam machinery stay local. Feathered so the handover is invisible (every rung
     // earns its place and VANISHES where it cannot -- the M7h symmetric-ladder doctrine).
     float wWin = 0.0f;
+    float wCas = 0.0f;   // what the CASCADES yield by -- see the delivery law below
     float2 wuv = 0.0f;
     if (gWaveU.x != 0xFFFFFFFFu) {
         const float2 wcell = (xz - gWaveA.xy) * gWaveA.z;
@@ -435,9 +436,42 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             gWaveA.z;
         wWin = smoothstep(0.0f, max(gWaveA.w, 1.0f), eM);
         wuv = WavePageUv(xz);
-        // No solved field resident here (the chain still landing, or off the page): the
-        // cascades carry the sea alone -- the same handover the feather makes at the edge.
-        if (wWin > 0.0f && !WavePageResident(wuv, 0u)) wWin = 0.0f;
+        // ---- M9by: THE CASCADES YIELD BY WHAT THE FIELD SUPPLIED, NOT BY THE WINDOW. -----
+        //
+        // This was the SAME bug a74382c fixed on the CPU, in the renderer, and it was left
+        // here because that commit's own report asserted "the GPU was already correct --
+        // WaterBank.hlsl zeroes wWin when the page isn't resident, so its cascades take 1".
+        // It zeroes wWin on the residency of PLANE 0. The solved field has 33 planes, each
+        // streaming on its own schedule, and WavePageSample returns ZERO for any plane that
+        // has not landed. So the instant plane 0 arrived, wWin went to 1, cascades 0 and 1
+        // stood down entirely, and every component still in flight contributed nothing. The
+        // blend stopped summing to one and the difference was simply lost.
+        //
+        // Systematic, not random: main.cpp Wants the planes in order p = 0..nPlanes-1, so
+        // plane 0 is always first to land. And it inverts with RANGE, which is the tell the
+        // user reported -- "big waves in the distance for a moment, then they disappear by
+        // the time I get near". Far off the window wants a coarse mip: few tiles, the whole
+        // field lands, the sea is whole. Closing in, wantMip walks down to 0, all 33 planes
+        // re-request at the finer level, and plane 0 re-arms wWin = 1 while the rest are
+        // still in flight. The water flattens as you approach it.
+        //
+        // The cure is the ingest rule, exactly as on the CPU: a point the solved field has
+        // not supplied is not a point with less sea, it is a point the cascades own. The
+        // solved sum already carries only what answered, so it keeps the geometric weight;
+        // the cascades yield by that weight scaled by the FRACTION that answered. f = 0 and
+        // the cascades take the whole sea; f = 1 and it is the old handover; in between the
+        // sea is whole and streaming decides only WHICH description carries it.
+        //
+        // Counted only inside the window, where wWin > 0 -- open water never pays for it,
+        // and the map is 128x128 for the whole page, so a tile's threads all hit the same
+        // few texels.
+        if (wWin > 0.0f) {
+            float nHave = 0.0f;
+            [loop] for (uint q = 0; q < gWaveU.z; ++q) {
+                if (WavePageResident(wuv, q)) nHave += 1.0f;
+            }
+            wCas = wWin * (nHave / max(float(gWaveU.z), 1.0f));
+        }
     }
 
     // THE FOLD, per ring (M6t): a band is geometry while THIS tile's texels resolve its
@@ -510,7 +544,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         if (c == 2) gain2 = amp;
         // M8: inside the solved window the cascades' structure bands stand down -- the
         // solved field carries shoaling/refraction/limiting per cell, not per band.
-        if (c != 2) amp *= 1.0f - wWin;
+        if (c != 2) amp *= 1.0f - wCas;   // M9by: the DELIVERED weight, not the window
         const float2 cuv = frac(xz / gPatch[c]);
         const float cmip = CascadeMip(c, t.texelM);
         const float4 s = LoadBilinearWrapMip(gSlotsA[c], cuv, cmip);
@@ -550,8 +584,40 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             const float aW = t4.x * aMax * expo;
             if (aW < 1e-4f) continue;
             const float kW = max(t4.y * kMax, 1e-4f);
-            const float lamW = 6.2831853f / kW;
-            const float wF = 1.0f - smoothstep(lamW * 0.12f, lamW * 0.5f, t.texelM);
+            // ---- M9bx: THE SOLVED FIELD GETS THE SAME FOLD THE CASCADES GOT. -------------
+            //
+            // M9bt replaced smoothstep(lam*0.12, lam*0.5, texelM) for the CASCADE bands and
+            // left it here, on the solved components -- the half of the sea the inlet is
+            // ENTIRELY made of, because inside the window every cascade but band 2 stands
+            // down against (1 - wWin). So the fix for "flat and glassy" never reached the
+            // water the boat is actually driving through, and the same complaint came back
+            // in the same place. Same law, same file, the half that was missed.
+            //
+            // What the old curve did: reached ZERO at texelM = lam/2 -- exactly AT Nyquist,
+            // where the grid still resolves the wave perfectly -- and started shedding at
+            // lam/8, four times finer than the limit. In the inlet the solved comps SHOAL, so
+            // their local lambda is short: a 20 m wave was drawn at 0.009 of its amplitude on
+            // the 9.6 m ring, i.e. deleted about 300 m out. Beyond that the sea was a mirror.
+            //
+            // What replaces it needs no spread and no placed constant, because a solved
+            // component is not a band -- it is ONE wavenumber, and the ring texel is a BOX
+            // AVERAGE of width texelM. A sinusoid through a box of width T comes out scaled
+            // by sinc(kT/2), and the mesh's linear reconstruction between texels squares it.
+            // So the fold IS the filter's own transfer function, evaluated at this component's
+            // own k. It is 1 for long waves, 0.44 at Nyquist, and reaches its first null at
+            // lambda = texelM, where a wave exactly one texel long genuinely averages to
+            // nothing. The sidelobes past the null stay (they are <5% and a real box really
+            // does pass them) -- no clamp, no gate, no special case.
+            //
+            // The cascade fold needed the band's log-WIDTH because a band is a distribution
+            // and the answer there is the fraction of its variance below Nyquist. Here the
+            // distribution is a delta, so the transfer function is the whole answer.
+            //
+            // Energy is conserved exactly as before: whatever leaves geometry, (1 - wFc)
+            // below carries as slope variance.
+            const float xF = 0.5f * kW * t.texelM;
+            const float sF = sin(xF) / max(xF, 1e-6f);
+            const float wF = sF * sF;
             // Shed steepness rides the MICHE cap (ak <= 0.44): the limiter bounds HEIGHT
             // by depth, but an opposing current grows k unbounded while a stays -- the
             // raw (a k)^2 shed painted arrested zones as a white sigma^2 wash stepping
@@ -638,13 +704,13 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         max(sqrt(gain0 * gain0 * gRmsRef.x * gRmsRef.x +
                  gain1 * gain1 * gRmsRef.y * gRmsRef.y +
                  gain2 * gain2 * gRmsRef.z * gRmsRef.z), 1e-4f);
-    const float envRms = lerp(envRmsC, max(rmsW * gPatch.w, 1e-4f), wWin);
+    const float envRms = lerp(envRmsC, max(rmsW * gPatch.w, 1e-4f), wCas);
     // The breaking indicator is PHYSICAL: divide the display exaggeration back out
     // (the exaggerated envelope inflated depth foam ~15% everywhere -- part of the
     // "rapids" look the user called; the solved excW is physical by construction).
     const float excessC =
         (envRmsC / max(gPatch.w, 1e-3f)) * 2.8284271f / (0.60f * max(depth, 0.05f));
-    const float excess = lerp(excessC, excW, wWin);
+    const float excess = lerp(excessC, excW, wCas);
     // The kernel writes PURE physics foam (triggers x crest); the visual BREAKUP is the
     // pixel stage's job -- noise at ring resolution folded its fine octaves away and
     // painted the throat as featureless milk (the fold law, learned again: a shading
