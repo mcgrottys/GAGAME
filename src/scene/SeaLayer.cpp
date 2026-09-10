@@ -329,6 +329,17 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
             }
         }
         m_fft.SetSeaState(parts, activeParts, seed);
+        // M9bq: THE CPU TWIN IS FED FROM THE SAME CALL SITE, with the same partitions and the
+        // same seed, so the two processors cannot come to disagree about what sea this is. A
+        // hull querying a separately-configured OceanCpu would ride a statistically identical
+        // and physically DIFFERENT ocean -- right Hs, wrong crests -- and nothing would ever
+        // look wrong enough to investigate.
+        {
+            const float pl[3] = {m_fft.PatchL(0), m_fft.PatchL(1), m_fft.PatchL(2)};
+            const float lo[3] = {m_fft.BandLo(0), m_fft.BandLo(1), m_fft.BandLo(2)};
+            const float hi[3] = {m_fft.BandHi(0), m_fft.BandHi(1), m_fft.BandHi(2)};
+            m_oceanCpu.SetSeaState(parts, activeParts, seed, pl, lo, hi, m_fft.Lambda());
+        }
         hsModel = SeaState::SignificantHeight(parts, activeParts);
         for (int i = 0; i < 4; ++i) m_parts[i] = (i < activeParts) ? parts[i] : PartParam{};
         if (activeParts > 0) {
@@ -408,6 +419,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
             double mss[3] = {0, 0, 0};
             double m0b[3] = {0, 0, 0};   // M8 foamlaw: banded amplitude variance too
             double lnk[3] = {0, 0, 0};   // M9c: energy-weighted sum of ln k, for the FOLD
+            double lnk2[3] = {0, 0, 0};  // M9bt: and its SECOND moment -- the band's WIDTH
             const double df = 0.004;
             for (double f = df; f < 2.0; f += df) {
                 const double k = (2.0 * kPiD * f) * (2.0 * kPiD * f) / 9.81;
@@ -417,6 +429,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
                         mss[c] += k * k * s * df;
                         m0b[c] += s * df;
                         lnk[c] += std::log(k) * s * df;
+                        lnk2[c] += std::log(k) * std::log(k) * s * df;
                     }
                 }
             }
@@ -450,7 +463,32 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
                 const double g = std::clamp(static_cast<double>(bandFoldWeight), 0.0, 1.0);
                 m_bandKFold[c] = static_cast<float>(
                     std::exp(std::log(kGeo) * (1.0 - g) + std::log(kF) * g));
+
+                // ---- M9bt: THE BAND'S WIDTH, which the fold needs and never had. -----------
+                // A cascade band is not a wavenumber, it is a DISTRIBUTION: band 2 spans
+                // lambda 0.41..12 m, thirty to one. The fold has always judged the whole band
+                // by its centre and admitted or shed it entire, which is a yes/no answer to a
+                // question whose true answer is a fraction -- "how much of this band can a grid
+                // of this spacing still carry". That fraction needs the second moment, so here
+                // it is: the energy-weighted standard deviation of ln k, the natural partner to
+                // the energy-weighted mean of ln k computed just above.
+                //
+                // An empty band falls back to the width its own cuts would have if the energy
+                // were spread flat across them -- range over sqrt(12), the uniform
+                // distribution's own standard deviation -- so this stays a no-op exactly where
+                // the mean does.
+                double var = 0.0;
+                if (m0b[c] > 1e-14) {
+                    const double mu = lnk[c] / m0b[c];
+                    var = std::max(0.0, lnk2[c] / m0b[c] - mu * mu);
+                }
+                const double cutW = std::log(kCut[c + 1] / kCut[c]) / std::sqrt(12.0);
+                m_bandKSpread[c] = static_cast<float>(
+                    std::clamp((var > 1e-12) ? std::sqrt(var) : cutW, 0.05, 2.0));
             }
+            Log("[sea] fold log-width per band: %.2f / %.2f / %.2f (energy-weighted sigma "
+                "of ln k -- the fraction of each band Nyquist still admits)",
+                m_bandKSpread[0], m_bandKSpread[1], m_bandKSpread[2]);
             Log("[sea] fold wavelength per band: %.1f / %.1f / %.2f m (cut means "
                 "%.1f / %.1f / %.2f, weight %.2f)",
                 6.283185307 / m_bandKFold[0], 6.283185307 / m_bandKFold[1],

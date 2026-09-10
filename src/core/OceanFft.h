@@ -43,6 +43,13 @@ public:
     void Record(ID3D12GraphicsCommandList* cl, Gpu& gpu, float tSec);
 
     float PatchL(uint32_t c) const { return m_patchL[c]; }
+    // M9bq: the rest of a cascade's geometry, so the CPU twin (sim/OceanCpu.h) is configured
+    // from THESE numbers rather than from a second copy of them. The bands are derived in
+    // Init from the patch sizes and the grid; duplicating that derivation is how the two
+    // processors would come to disagree about which cascade owns which wavenumber.
+    float BandLo(uint32_t c) const { return m_bandLo[c]; }
+    float BandHi(uint32_t c) const { return m_bandHi[c]; }
+    float Lambda() const { return m_lambda; }   // the choppy (Gerstner) displacement scale
     uint32_t DispSrv(uint32_t c) const { return m_dispSrv[c]; }
     uint32_t DerivSrv(uint32_t c) const { return m_derivSrv[c]; }
     ID3D12Resource* DerivRes(uint32_t c) const { return m_cascade[c].deriv.Get(); }

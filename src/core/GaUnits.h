@@ -57,6 +57,13 @@ enum class Quantity : uint8_t {
     Pressure,
     Temperature,
     Colour,         // imagery
+    // M9bq: the vessel quantities. A hull spec is a table of numbers whose UNITS are exactly
+    // the thing a reader cannot check by eye -- a displacement in pounds read as kilograms is
+    // a boat that floats 2.2x too high and looks plausible doing it. These three close the set
+    // a rigid body needs; Length and Velocity already carry the rest.
+    Mass,           // displacement, engine and crew masses
+    Force,          // thrust, and every wrench the elements return
+    Density,        // seawater vs air -- the one number that distinguishes the two media
 };
 
 inline const char* QuantityName(Quantity q) {
@@ -68,6 +75,9 @@ inline const char* QuantityName(Quantity q) {
         case Quantity::Pressure:      return "pressure";
         case Quantity::Temperature:   return "temperature";
         case Quantity::Colour:        return "colour";
+        case Quantity::Mass:          return "mass";
+        case Quantity::Force:         return "force";
+        case Quantity::Density:       return "density";
         default:                      return "unknown";
     }
 }
@@ -135,6 +145,15 @@ struct UnitSpec {
             {"rgb", Quantity::Colour, 1.0 / 255.0},
             {"byte", Quantity::Colour, 1.0 / 255.0},
             {"unorm", Quantity::Colour, 1.0},
+            {"kg", Quantity::Mass, 1.0},           {"g", Quantity::Mass, 0.001},
+            {"t", Quantity::Mass, 1000.0},         {"tonne", Quantity::Mass, 1000.0},
+            {"tonnes", Quantity::Mass, 1000.0},
+            {"lb", Quantity::Mass, 0.45359237},    {"lbs", Quantity::Mass, 0.45359237},
+            {"n", Quantity::Force, 1.0},           {"newton", Quantity::Force, 1.0},
+            {"newtons", Quantity::Force, 1.0},     {"kilonewton", Quantity::Force, 1000.0},
+            {"kgf", Quantity::Force, 9.80665},     {"lbf", Quantity::Force, 4.4482216152605},
+            {"kg/m3", Quantity::Density, 1.0},     {"kg/m^3", Quantity::Density, 1.0},
+            {"g/cm3", Quantity::Density, 1000.0},
             {"1", Quantity::Dimensionless, 1.0},   {"none", Quantity::Dimensionless, 1.0},
             {"fraction", Quantity::Dimensionless, 1.0},
             {"mask", Quantity::Dimensionless, 1.0},

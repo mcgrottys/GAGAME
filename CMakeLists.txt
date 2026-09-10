@@ -49,12 +49,19 @@ add_executable(gagame
   src/scene/TerrainLayer.cpp
   src/scene/GisLayer.cpp
   src/scene/MarkerLayer.cpp
+  src/scene/VesselLayer.cpp
   src/sim/TideModel.cpp
   src/sim/SeaState.cpp
   src/sim/CurrentModel.cpp
   src/sim/BathyModel.cpp
   src/sim/SweSolver.cpp
   src/sim/SimClockTest.cpp
+  src/sim/OceanCpu.cpp
+  src/sim/WaterSurfaceTree.cpp
+  src/sim/RigidBody.cpp
+  src/sim/Vessel.cpp
+  src/sim/VesselSpecs.cpp
+  src/sim/VesselTest.cpp
   src/sim/WaveField.cpp
   src/sim/WeatherManager.cpp
   src/sim/GlobeModel.cpp

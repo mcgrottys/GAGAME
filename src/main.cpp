@@ -56,6 +56,11 @@
 #include "core/CrashTrace.h"
 #include "core/ThreadAudit.h"
 #include "core/ThreadManager.h"
+#include "sim/RigidBody.h"
+#include "sim/Vessel.h"
+#include "sim/WaterSurfaceTree.h"
+#include "sim/VesselSpec.h"
+#include "scene/VesselLayer.h"
 #include "sim/SimClock.h"
 #include "core/DxTest.h"
 #include "core/Pga.h"
@@ -103,6 +108,13 @@ struct Options {
     bool probeCullFar = false;        // step 23 probe: cull beyond the horizon at every altitude
     std::wstring dumpMeshlets;        // step 23 probe: the dump frame's meshlet records
     bool dumpWater = false;           // --dump-water-state: inlet fields for proofs/
+    bool twinSurface = false;         // --twin-surface: CPU WaterSurface vs the GPU bank
+    std::string boat;                 // --boat <kind>: spawn a vessel and helm it
+    // --boat-drive t,s: hold the throttles and the helm at fixed values. Headless has no
+    // keyboard, so without this a powered run cannot be reproduced or gated at all -- and
+    // "does it plane / does it launch off a crest" are exactly the questions that need one.
+    double boatThrottle = 0.0, boatSteer = 0.0;
+    bool boatDrive = false;
     bool sliceOn = false;             // --slice d: the cutaway plane (M7o)
     double sliceD = 0.0;              // plane offset, world z metres
     int inject = 0;                   // --inject [bank|cascade]: edge test cards
@@ -203,6 +215,8 @@ struct Options {
                                       // (M6r: the prism-debt field needs ~an hour to settle;
                                       // costs ~1 s at startup)
     double sweCycleH = 0;             // --swe-cycle N: headless validation over N hours -> CSV
+    std::wstring waveMap;             // --wave-map out.png: the solved field on the solver's
+                                      // OWN cells, no camera, mesh, fold or light in the way
     std::wstring waterMap;            // --water-map out.png: the REPROJECTION PROOF -- the
                                       // water atlas + survey printed through a custom Lambert
                                       // conformal sheet (paper-chart foundation)
@@ -348,6 +362,16 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--probe-cull-far") o.probeCullFar = true;
         else if (a == "--dump-meshlets") o.dumpMeshlets = Widen(next("meshlets.bin").c_str());
         else if (a == "--dump-water-state") o.dumpWater = true;
+        else if (a == "--twin-surface") o.twinSurface = true;
+        else if (a == "--boat") o.boat = next("box.test");
+        else if (a == "--boat-drive") {
+            const std::string v = next("1,0");
+            float t = 1.0f, st = 0.0f;
+            sscanf_s(v.c_str(), "%f,%f", &t, &st);
+            o.boatThrottle = t;
+            o.boatSteer = st;
+            o.boatDrive = true;
+        }
         else if (a == "--slice") {
             o.sliceOn = true;
             o.sliceD = _wtof(Widen(next("0").c_str()).c_str());
@@ -542,6 +566,7 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--swe-spinup") o.sweSpinupH = atof(next("0.25").c_str());
         else if (a == "--swe-cycle") o.sweCycleH = atof(next("13").c_str());
         else if (a == "--water-map") o.waterMap = Widen(next("water_map.png").c_str());
+        else if (a == "--wave-map") o.waveMap = Widen(next("wave_map.png").c_str());
         else if (a == "--bathy-map") o.bathyMap = Widen(next("bathy_map.png").c_str());
         else if (a == "--fidelity-map") {
             o.fidelityMap = Widen(next("fidelity_map.png").c_str());
@@ -1828,6 +1853,8 @@ int main(int argc, char** argv) {
             ok &= RunAtlasSelfTest(gpu, sc, opt.shaderDir);
             ok &= RunThreadSelfTest();    // the thread instrument's own gate: it must SEE a race
             ok &= RunSimClockSelfTest();  // the scene clock: whole quanta, framing-independent
+            ok &= RunRigidBodySelfTest();  // M9bq: the body with momentum -- L, T, moment arms
+            ok &= RunVesselSelfTest();     // M9bq: the factory + the element laws
             gpu.Shutdown();
             return ok ? 0 : 1;
         }
@@ -2196,6 +2223,7 @@ int main(int argc, char** argv) {
         // (M6w: the models + the compositor's height side were HOISTED above the bathy/solver
         // block -- the solver's bed realizes from the channel.)
         GlobeLayer* globe = nullptr;
+        VesselLayer* vesselLayer = nullptr;   // M9bq: the hulls, drawn from their specs
         if (globeDataOk) {
             auto globeOwned = std::make_unique<GlobeLayer>();
             globe = globeOwned.get();
@@ -2988,6 +3016,13 @@ int main(int argc, char** argv) {
                 gisLayer->enabled = opt.stencil;
                 renderer.AddLayer(std::move(gisOwned));
             }
+            if (!marsMode && !opt.boat.empty()) {
+                auto vlOwned = std::make_unique<VesselLayer>();
+                vlOwned->Configure(opt.shaderDir);
+                vlOwned->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
+                vesselLayer = vlOwned.get();
+                renderer.AddLayer(std::move(vlOwned));
+            }
             if (!marsMode) {
                 auto mkOwned = std::make_unique<MarkerLayer>();
                 mkOwned->Configure(opt.shaderDir, &exchange, "markers.stations");
@@ -3427,6 +3462,57 @@ int main(int argc, char** argv) {
         // did not.
         SimClock simClock;
         simClock.Reset(simUnix);
+
+        // ==================================================================================
+        //  M9bq THE BOAT. A vessel from the registry, stepped on the scene clock's whole
+        //  quanta against the tree's own water. Nothing here is a demo path: this is the
+        //  same Vessel the gates exercise, the same TreeWater the twin measures, and the
+        //  same SimClock everything else in the scene rides.
+        // ==================================================================================
+        VesselRegistry vesselReg;
+        RegisterBuiltinVessels(vesselReg);
+        std::unique_ptr<Vessel> boat;
+        TreeWater boatSea;
+        VesselControls boatCtl;
+        // M9br: THE WAVE PREFILL, OFF THE FRAME THREAD. When a tide or current bucket rolls,
+        // the solve was already backgrounded but the PREFILL was not -- and writing 7359 tiles
+        // across 33 planes and every mip takes 11-19 s, on the frame thread, which is the
+        // once-a-minute freeze. Nothing reads the new tree until the atomic_store below, so it
+        // can be built and filled on a worker and swapped in when it is whole.
+        std::shared_ptr<TileTree> wavePending;
+        std::atomic<bool> wavePrefillDone{false};
+        std::atomic<bool> wavePrefillBusy{false};
+        uint64_t wavePendingKey = 0;
+        uint32_t wavePendingTiles = 0, wavePendingPlanes = 0;
+        double wavePendingSec = 0.0;
+
+        bool boatPlaced = false;      // set down on the surface at the first step, see stepBoat
+        bool helming = false;         // T detaches the camera; the physics never stops
+        double helmYawRef = 0.0;      // the look-steer's heading reference -- see the note in
+        if (!opt.boat.empty()) {
+            const VesselSpec spec = vesselReg.Build(opt.boat);
+            if (spec.kind.empty()) {
+                Log("[vessel] --boat '%s' is not a registered kind; known:", opt.boat.c_str());
+                for (const std::string& k : vesselReg.Kinds()) Log("[vessel]   %s", k.c_str());
+            } else {
+                spec.PrintLedger();
+                boat = std::make_unique<Vessel>();
+                // Spawn in the FLAT world frame, at --campos. NOT at cam.px/cam.pz: on a
+                // rail the camera starts in the PLANET frame, and a hull built there lands at
+                // (5.3e6, -2.4e6) where the bed lookup is meaningless -- it reported AGROUND at
+                // depth -278 m, which is exactly what a frame confusion looks like from inside.
+                const Motor start = Motor::Translation(opt.camX, 0.0, opt.camZ);
+                if (!boat->Build(spec, start)) {
+                    Log("[vessel] build FAILED -- not spawning (a partial hull would sink and "
+                        "look like a physics bug)");
+                    boat.reset();
+                } else {
+                    helming = true;
+                    Log("[vessel] '%s' spawned at (%.1f, %.1f): %s", spec.kind.c_str(), cam.px,
+                        cam.pz, spec.display.c_str());
+                }
+            }
+        }
         bool sunLogged = false;   // M9bi: log the placed sun once, with its numbers
         const double startUnix = simUnix;
 
@@ -3590,7 +3676,7 @@ int main(int argc, char** argv) {
         // state, the solve carries the structure, the GPU carries the phase.
         // The water scene is DATA (data/wave_scene.json, authored if absent, hot-reloaded
         // per frame): move the solved window, retune closures, save -- no recompile.
-        auto sceneToWaveCfg = [](const WaterSceneConfig& s) {
+        auto sceneToWaveCfg = [&opt](const WaterSceneConfig& s) {
             WaveFieldConfig c;
             c.orgX = s.wfOrgX;
             c.orgZ = s.wfOrgZ;
@@ -3606,6 +3692,7 @@ int main(int argc, char** argv) {
             c.currentBucketMs = s.wfCurrentBucketMs;
             c.featherM = s.wfFeatherM;
             c.displayExag = s.wfExag;
+            c.mapPath = opt.waveMap;   // the instrument, not the answer -- see WaveField.h
             return c;
         };
         std::unique_ptr<WaveField> waveField;
@@ -4018,6 +4105,135 @@ int main(int argc, char** argv) {
             railPool.reserve(opt.frames ? opt.frames : 1200);
         }
 
+                                      // stepBoat for why it is NOT read off the live camera
+        // ONE step path, called from BOTH clock branches. The windowed clock advances in whole
+        // quanta off SimClock and the headless clock is frame-indexed, but a boat that
+        // integrated differently between them could not be gated by any rail -- and the rails
+        // are the only reproducible instrument this engine has. So the quanta COUNT differs and
+        // nothing else does.
+        auto stepBoat = [&](int quanta) {
+            if (!boat) return;
+            boatSea.Configure(&weather, waveField.get(), sea ? &sea->Ocean() : nullptr,
+                              &seaState, sea ? double(sea->heightScale) : 1.0,
+                              waterScene.wfExag, waterScene.wfChop);
+            // PLACE THE HULL ON THE WATER, ONCE. A vessel is built before the weather
+            // manager exists, so it cannot be spawned at the right height -- and NAVD 0 is half
+            // a metre under the surface here at this tide. Dropped in submerged, the hull takes
+            // a buoyancy impulse of its own displacement in one quantum and the RHIB simply
+            // capsized: heel 179 deg, floating inverted, never recovering. So the first step
+            // sets it down gently instead of the scene throwing it in.
+            if (!boatPlaced) {
+                double bp0[3] = {0, 0, 0};
+                boat->Body().pose.TransformPoint(bp0[0], bp0[1], bp0[2]);
+                const SurfaceSample ss = boatSea.At(bp0[0], bp0[2], simUnix);
+                if (ss.valid) {
+                    // Put the KEEL at its static draught, not the CG on the waterline. The CG
+                    // sits well above the keel, so placing it at the surface immersed the hull
+                    // half a metre deeper than it floats and it came up like a cork. The keel
+                    // depth comes from the spec's own stations, after Build re-referenced them
+                    // onto the CG, so it is whatever this hull actually is.
+                    double keel = 0.0;
+                    for (const Element& el : boat->Spec().elements) {
+                        for (const Section& st : el.stations) {
+                            for (double y : st.oy) keel = (std::min)(keel, y);
+                        }
+                    }
+                    const double draft = (boat->Spec().draftStatic.v > 0.0)
+                                             ? boat->Spec().draftStatic.v : -keel;
+                    const double y0 = ss.heightNavd - keel - draft;
+                    boat->Body().SetPose(Motor::Translation(bp0[0], y0, bp0[2]));
+                    boatPlaced = true;
+                    Log("[vessel] set down: surface %+.3f, keel %.3f below CG, draught %.2f "
+                        "-> CG at %+.3f m NAVD", ss.heightNavd, -keel, draft, y0);
+                } else {
+                    return;   // no water yet: do not integrate a hull that has nothing to float on
+                }
+            }
+            if (opt.boatDrive) {
+                for (int t = 0; t < VesselControls::kMaxThrusters; ++t) {
+                    boatCtl.throttle[t] = opt.boatThrottle;
+                }
+                boatCtl.steer = opt.boatSteer;
+            }
+            // THE HULL STEPS AT 60 Hz, NOT 240. SimClock's quantum is 240 Hz because that is
+            // what the SCENE needed; nothing in a hull's dynamics asks for 4 ms resolution. Its
+            // fastest modes are heave at ~1 s, roll at ~1.8 s, and the collar's slam at ~10 Hz
+            // -- 60 Hz resolves the quickest of those by six to one.
+            //
+            // It matters because a step is not cheap: ~73 water queries for this hull, and each
+            // one sums the solved field's 32 components and the retained cascade bins. At 240 Hz
+            // that measured 26 ms a frame, which is more than the entire renderer costs.
+            //
+            // Determinism is untouched -- this is still a FIXED step off the same clock, just a
+            // coarser multiple of it, so the boat is as frame-rate independent as before. The
+            // leftover quanta are carried, never dropped, so no owed time is lost.
+            static int quantaOwed = 0;
+            constexpr int kPerStep = 4;                     // 240 / 4 = 60 Hz
+            quantaOwed += quanta;
+            const int steps = quantaOwed / kPerStep;
+            quantaOwed -= steps * kPerStep;
+            PROF_BEGIN();
+            for (int q = 0; q < steps; ++q) {
+                boat->Step(boatSea, boatCtl, simUnix, SimClock::kDt * kPerStep);
+            }
+            if (!boat->Body().Sane()) boatCtl = VesselControls{};
+            PROF_END(11);
+
+            const Vessel* vs[1] = {boat.get()};
+            if (vesselLayer) vesselLayer->SetVessels(vs, 1);
+
+            // One telemetry line a second. Cheap, and it is the only way to tell a hull that is
+            // floating wrong from one that is not being DRAWN.
+            static int telTick = 0;
+            if ((telTick++ % 60) == 0) {
+                const VesselTelemetry& t = boat->Telemetry();
+                double bp[3] = {0, 0, 0};
+                boat->Body().pose.TransformPoint(bp[0], bp[1], bp[2]);
+                // The water the hull is standing on, at the hull. Buoyancy acts along this
+                // NORMAL, so a wrong slope is not a cosmetic error -- it is a horizontal force.
+                const SurfaceSample ws = boatSea.At(bp[0], bp[2], simUnix);
+                const double slope = std::sqrt(ws.nx * ws.nx + ws.nz * ws.nz) /
+                                     ((std::abs(ws.ny) > 1e-9) ? std::abs(ws.ny) : 1e-9);
+                Log("[vessel]   water: eta %+.2f n (%+.3f, %+.3f, %+.3f) |slope| %.3f = %.1f deg"
+                    "  orbital (%+.2f, %+.2f, %+.2f) m/s",
+                    ws.heightNavd, ws.nx, ws.ny, ws.nz, slope,
+                    std::atan(slope) * 57.2957795, ws.vx, ws.vy, ws.vz);
+                Log("[vessel] pos (%.1f, %+.2f, %.1f) %.1f kn hdg %.0f heel %+.1f trim %+.1f "
+                    "draught %.3f vol %.2f (hull %.2f collar %.2f) lam %.2f cop %+.2f "
+                    "depth %.1f%s%s | parts %u",
+                    bp[0], bp[1], bp[2], t.speedKn, t.headingRad * 57.2957795,
+                    t.heelRad * 57.2957795, t.trimRad * 57.2957795, t.draughtM, t.immersedVol,
+                    t.hullVol, t.collarVol, t.wettedLambda, t.copZ, t.depthM,
+                    (t.immersedVol < 1e-6) ? " AIRBORNE" : (t.aground ? " AGROUND" : ""),
+                    t.waterValid ? "" : " NO-WATER",
+                    vesselLayer ? vesselLayer->PartCount() : 0u);
+            }
+
+            // ---- THE CHASE CAMERA. Gravity-up and roll-free by choice: a camera that heels
+            // with the hull reads as the WORLD rolling, which is nauseating and is not what a
+            // helmsman's inner ear reports. The motor-native view that DOES heel is the
+            // first-person one, later.
+            if (helming) {
+                const RigidBody& b = boat->Body();
+                double p[3] = {0, 0, 0};
+                b.pose.TransformPoint(p[0], p[1], p[2]);
+                double f[3] = {0, 0, 1};
+                b.pose.TransformDir(f[0], f[1], f[2]);
+                const double fl = std::sqrt(f[0] * f[0] + f[2] * f[2]);
+                if (fl > 1e-6) { f[0] /= fl; f[2] /= fl; }
+                // The look-steer's reference is THIS camera's heading, kept here rather than
+                // read off `cam`, so detaching the view (T, or a spectator flying to orbit in a
+                // future multiplayer) cannot feed the assist a heading from the other side of
+                // the planet.
+                helmYawRef = std::atan2(f[2], f[0]);
+                const double back = 15.0, up = 5.0;
+                cam.px = p[0] - f[0] * back;
+                cam.py = p[1] + up;
+                cam.pz = p[2] - f[2] * back;
+                cam.LookAt(p[0], p[1] + 0.6, p[2]);
+            }
+        };
+
         for (;;) {
             if (!opt.headless) {
                 window.NewFrame();
@@ -4118,7 +4334,10 @@ int main(int argc, char** argv) {
                     }
                 }
 
-                cam.Update(in, dt);
+                // While helming, the free-fly integration does not run at all: Camera::Update
+                // owns W A S D Q E Shift Ctrl, which is a head-on collision with the binnacle.
+                // A control MODE is the only honest fix -- rebinding would just move the clash.
+                if (!helming) cam.Update(in, dt);
                 if (in.keyPressed[VK_F5]) {
                     // SAVE THIS CAMERA. The five numbers SetFromCompass takes, inverted from
                     // the live pose, appended to data/views.json under a generated name (rename
@@ -4180,6 +4399,27 @@ int main(int argc, char** argv) {
                 if (in.keyPressed[VK_LEFT] || in.keyPressed[VK_RIGHT] ||
                     in.keyPressed[VK_HOME] || in.keyPressed['N']) {
                     simClock.SetTo(simUnix);
+                    // THE CLOCK POLICY, which a stateful body needs and nothing else in this
+                    // engine does. Everything else here is f(simUnix) and simply re-evaluates;
+                    // a hull carries momentum, so jumping an hour teleports the sea out from
+                    // under it while it keeps the velocity it had. It came back as the boat
+                    // being flung. A deliberate jump resets it to rest at its last pose.
+                    if (boat) {
+                        boat->Body().Rest();
+                        boatCtl = VesselControls{};
+                        boatPlaced = false;   // re-seat it on the new instant's surface
+                        Log("[vessel] time jumped -- hull reset to rest (a boat cannot be "
+                            "integrated across a scrub)");
+                    }
+                }
+                // A boat at 100x time is not a simulation of anything: the tide and current
+                // buckets roll every few frames, and each roll costs an 8-11 s wave solve plus
+                // a 12-19 s page prefill, which is what reads as a freeze. Time scaling stays
+                // available with no hull aboard.
+                if (boat && timeScale > 10.0) {
+                    timeScale = 10.0;
+                    Log("[vessel] time scale held at 10x while a hull is aboard -- faster than "
+                        "that spends every frame re-solving the wave field, not sailing");
                 }
                 if (in.keyPressed[VK_OEM_4]) windowSec = std::max(windowSec * 0.5, 0.5 * 86400.0);
                 if (in.keyPressed[VK_OEM_6]) windowSec = std::min(windowSec * 2.0, 30.0 * 86400.0);
@@ -4228,6 +4468,64 @@ int main(int argc, char** argv) {
                 if (!paused) {
                     simSteps = simClock.Advance(dt, timeScale);
                     simUnix = simClock.Now();
+
+                    // ---- THE HELM. Reading the controls is the only part of the boat that
+                    // is windowed-only; the STEP itself is shared with the headless path below,
+                    // because a boat that integrates differently in a rail than in a window is
+                    // a boat no rail can gate.
+                    if (boat) {
+                        if (in.keyPressed['T']) {
+                            helming = !helming;
+                            Log("[vessel] %s", helming ? "helm" : "camera detached (the boat "
+                                                                 "keeps sailing)");
+                        }
+                        if (helming) {
+                            // Keyboard for now; the analog triggers are the twin-lever binnacle
+                            // and land with XInput. W/S drive BOTH levers, Q/E split them, which
+                            // is what makes a pivot a squeeze rather than a mode.
+                            const double rate = dt * 1.5;
+                            double demand = 0.0;
+                            if (in.keyDown['W']) demand += 1.0;
+                            if (in.keyDown['S']) demand -= 1.0;
+                            double split = 0.0;
+                            if (in.keyDown['E']) split += 1.0;
+                            if (in.keyDown['Q']) split -= 1.0;
+                            for (int t = 0; t < VesselControls::kMaxThrusters; ++t) {
+                                const double want =
+                                    std::clamp(demand + ((t % 2 == 0) ? -split : split),
+                                               -1.0, 1.0);
+                                boatCtl.throttle[t] +=
+                                    std::clamp(want - boatCtl.throttle[t], -rate, rate);
+                            }
+                            // D IS STARBOARD, and the sign is the outboard's, not the
+                            // wheel's. Motor::Rotation about +y takes +z to +x (RunPgaSelfTest
+                            // pins it), so a POSITIVE steer swings the thrust to starboard --
+                            // and that thrust acts at the transom, ABAFT the CG, so it pushes
+                            // the stern to starboard and the bow to PORT. A helm that turns the
+                            // boat to starboard therefore commands a NEGATIVE angle here, which
+                            // is exactly what the real linkage does: the leg kicks the stern the
+                            // opposite way to the turn.
+                            double sd = 0.0;
+                            if (in.keyDown['D']) sd -= 1.0;
+                            if (in.keyDown['A']) sd += 1.0;
+                            // A mechanical steering RATE limit, not a snap: the outboards swing
+                            // at a finite speed and that lag is a real part of how a boat feels.
+                            const double sMax = 0.6;
+                            boatCtl.steer += std::clamp(sd * sMax - boatCtl.steer,
+                                                        -dt * 1.2, dt * 1.2);
+                            boatCtl.steer = std::clamp(boatCtl.steer, -sMax, sMax);
+
+                            // TRIM. Shift trims OUT (bow up), Ctrl trims IN (bow down). It is
+                            // slow on purpose -- a trim pump takes seconds to sweep its range --
+                            // and it is the helmsman's only direct hold on running attitude.
+                            double td = 0.0;
+                            if (in.keyDown[VK_SHIFT]) td += 1.0;
+                            if (in.keyDown[VK_CONTROL]) td -= 1.0;
+                            boatCtl.tilt = std::clamp(boatCtl.tilt + td * dt * 0.20,
+                                                      -0.0873, 0.2618);
+                        }
+                        stepBoat(simSteps);
+                    }
                 }
             } else {
                 // Deterministic time in headless mode so a dump sequence is reproducible.
@@ -4268,6 +4566,11 @@ int main(int argc, char** argv) {
                     recFrame = opt.frames - 1u;
                 }
                 simUnix = startUnix + static_cast<double>(recFrame) * (timeScale / 30.0);
+                // The headless clock is frame-indexed, so a frame is worth exactly
+                // timeScale/30 seconds of world; the boat owes that many whole quanta. Rounding
+                // rather than truncating keeps the owed time from drifting slow over a long
+                // rail, and at the default scale it is an exact 8.
+                stepBoat(static_cast<int>(std::lround((timeScale / 30.0) / SimClock::kDt)));
                 // The churn atlas is stateful and its kernel only climbs at a frozen dt, so a
                 // held frame would advance the foam the hold's length decides. Freeze it for
                 // exactly the held frames (SeaLayer.h freezeChurn).
@@ -4276,7 +4579,11 @@ int main(int argc, char** argv) {
                 profHelm = !opt.rail.empty() && recFrame >= 32u * 30u;
                 if (!opt.rail.empty() && !railKeys.empty()) {
                     // M6g: the rails just set a pose in the ONE frame. Nothing switches.
-                    railPose(static_cast<double>(recFrame) / 30.0, cam);
+                    // Helming outranks the rail: the chase camera has already placed the
+                    // view on the boat this frame and a rail pose would yank it away. This is
+                    // what makes `--rail-flood --boat` a chase-cam recording rather than a
+                    // flypast that happens to contain a hull.
+                    if (!helming) railPose(static_cast<double>(recFrame) / 30.0, cam);
                 }
             }
 
@@ -4364,22 +4671,46 @@ int main(int argc, char** argv) {
                         PROF_END(2);
                         // M9bc: the solve moved -> a new tree under the same tenant, its
                         // pyramid prefilled to disk, the old tiles dropped, then the wants.
-                        if (waveSrc && waveT >= 0 && waveField->Ready() &&
-                            waveField->LiveKey() != waveSrc->Key()) {
-                            waveSrc->SetKey(waveField->LiveKey());
-                            auto fresh = std::make_shared<TileTree>(waveSrc.get(), TileTree::Fmt::Raw4);
-                            float u0, v0, u1, v1;
-                            waveSrc->WindowUv(u0, v0, u1, v1);
-                            const auto tp0 = Clock::now();
-                            const uint32_t nPlanes = waveField->Table().nUsed + 1u;
-                            const uint32_t filled = fresh->Prefill(waveFrame.color, 0u, nPlanes, u0, v0, u1, v1);
-                            std::atomic_store(waveTree.get(), fresh);
+                        // Publish a finished prefill. Only the swap and the Drop touch the
+                        // residency manager, and both stay on this thread.
+                        if (wavePrefillDone.load(std::memory_order_acquire)) {
+                            std::atomic_store(waveTree.get(), wavePending);
                             resMgr.Drop(waveT);
                             Log("[wave] bucket %016llx -> tree %s: %u tiles prefilled (%u planes, "
-                                "every mip) in %.2f s",
-                                static_cast<unsigned long long>(waveSrc->Key()), fresh->Id().c_str(),
-                                filled, nPlanes,
-                                std::chrono::duration<double>(Clock::now() - tp0).count());
+                                "every mip) in %.2f s on a worker -- the frame did not wait",
+                                static_cast<unsigned long long>(wavePendingKey),
+                                wavePending->Id().c_str(), wavePendingTiles, wavePendingPlanes,
+                                wavePendingSec);
+                            wavePending.reset();
+                            wavePrefillDone.store(false, std::memory_order_release);
+                            wavePrefillBusy.store(false, std::memory_order_release);
+                        }
+                        // Kick a new one when the bucket has rolled and none is in flight. The
+                        // busy flag matters: the source's key is mutated here, so a second job
+                        // over the same source would be filling a tree whose identity moved.
+                        if (waveSrc && waveT >= 0 && waveField->Ready() &&
+                            waveField->LiveKey() != waveSrc->Key() &&
+                            !wavePrefillBusy.load(std::memory_order_acquire)) {
+                            waveSrc->SetKey(waveField->LiveKey());
+                            wavePendingKey = waveSrc->Key();
+                            wavePendingPlanes = waveField->Table().nUsed + 1u;
+                            float u0, v0, u1, v1;
+                            waveSrc->WindowUv(u0, v0, u1, v1);
+                            wavePrefillBusy.store(true, std::memory_order_release);
+                            const ColorFrame wf = waveFrame.color;
+                            WaveFieldSource* wsrc = waveSrc.get();
+                            const uint32_t planes = wavePendingPlanes;
+                            Threads().Submit(Lane::Compute, "wave.prefill",
+                                             [&wavePending, &wavePrefillDone, &wavePendingTiles,
+                                              &wavePendingSec, wf, wsrc, planes, u0, v0, u1, v1]() {
+                                const auto tp0 = Clock::now();
+                                auto fresh = std::make_shared<TileTree>(wsrc, TileTree::Fmt::Raw4);
+                                wavePendingTiles = fresh->Prefill(wf, 0u, planes, u0, v0, u1, v1);
+                                wavePendingSec =
+                                    std::chrono::duration<double>(Clock::now() - tp0).count();
+                                wavePending = fresh;
+                                wavePrefillDone.store(true, std::memory_order_release);
+                            });
                         }
                         if (waveSrc && waveT >= 0 && waveSrc->Key() != 0) {
                             // Bracketed apart from waveField.Update: these Wants are the whole
@@ -5288,6 +5619,147 @@ int main(int argc, char** argv) {
                     }
                     Log("[waterstate] ws_*.f32 + ws_meta.json exported (%dx%d at %.0f m)",
                         nxW, nyW, cellW);
+                }
+                // ==================================================================
+                //  M9bq --twin-surface: THE KEYSTONE GATE. Does the CPU water a hull
+                //  reads agree with the GPU water the player sees?
+                //
+                //  Everything in the vessel work rests on TreeWater being the same sea as
+                //  CsBankFill. Nothing else can check that: the rails are headless stills,
+                //  the selftest has no GPU bank, and a boat that floats wrong looks exactly
+                //  like a boat whose water is wrong. So this reads the bank ONCE and asks
+                //  the CPU the same question at the same points.
+                //
+                //  THE SITES ARE RANGES FROM THE CAMERA, NOT PLACES. The bank is a ladder of
+                //  camera-anchored rings ~20 km across at the coarsest, so a point in the
+                //  open Atlantic is not "offshore", it is OUTSIDE EVERY RING and the gate
+                //  would be comparing against nothing. Range is also the axis that actually
+                //  matters here: it sweeps ring texel size and it sweeps wWin, which is the
+                //  handover between the solved field and the cascades and therefore the
+                //  single most likely explanation for a disagreement.
+                //
+                //  Blue water is checked separately below, WITHOUT a GPU comparison, because
+                //  out there the question is not "do the two agree" but "does the CPU know
+                //  where the bottom is at all".
+                // ==================================================================
+                if (opt.twinSurface && !marsMode && sea && waterBank) {
+                    weather.RefreshMirrorsTo(gpu, simUnix);
+                    TreeWater tw;
+                    tw.Configure(&weather, waveField.get(), &sea->Ocean(), &seaState,
+                                 sea->heightScale, waterScene.wfExag, waterScene.wfChop);
+                    Log("[twin] %s", tw.Describe(cam.px, cam.pz, simUnix).c_str());
+
+                    constexpr int kRings = 4, kPer = 64;
+                    const double kRangeM[kRings] = {0.0, 500.0, 2000.0, 8000.0};
+                    std::vector<double> pts;
+                    pts.reserve(kRings * kPer * 2);
+                    for (int r = 0; r < kRings; ++r) {
+                        for (int i = 0; i < kPer; ++i) {
+                            // A deterministic spiral, so two runs sample the same water and a
+                            // regression is a change in the ANSWER, not in the question.
+                            const double th = i * 2.39996322972865332;   // golden angle
+                            const double rr = kRangeM[r] + (r == 0 ? 0.0 : 0.0);
+                            const double jit = (r == 0) ? (i % 8) * 1.5 : 0.0;
+                            pts.push_back(cam.px + (rr + jit) * std::cos(th));
+                            pts.push_back(cam.pz + (rr + jit) * std::sin(th));
+                        }
+                    }
+                    std::vector<WaterBankLayer::BankPoint> bp(pts.size() / 2);
+                    waterBank->ReadBankPoints(gpu, pts.data(), int(bp.size()), bp.data());
+
+                    Log("[twin] ---- CPU TreeWater vs GPU bank, %d points, exag %.3f ----",
+                        int(bp.size()), double(sea->heightScale));
+                    int totalCmp = 0;
+                    double worstAll = 0.0;
+                    for (int r = 0; r < kRings; ++r) {
+                        int nCmp = 0, nNoBank = 0, nNoCpu = 0;
+                        double maxD = 0.0, sumSq = 0.0, wSum = 0.0;
+                        // THE ERROR MUST BE DECOMPOSED OR IT CANNOT BE DIAGNOSED. The surface
+                        // is mean level + wave displacement, and those come from completely
+                        // different machinery: the level from the tide atlas and the solver
+                        // mirror, the displacement from the solved field and the cascades. A
+                        // single total error number cannot tell a tide offset from a wave phase
+                        // error, and they have opposite fixes.
+                        double maxL = 0.0, sumSqL = 0.0, maxW = 0.0, sumSqW = 0.0;
+                        // The two fields' own rms, and their correlation. Together these say
+                        // WHICH kind of wrong: equal rms with zero correlation is a phase
+                        // error, unequal rms is an amplitude or gain error, and they have
+                        // nothing to do with each other.
+                        double sqC = 0.0, sqG = 0.0, cross = 0.0;
+                        int ringUsed = -1;
+                        for (int i = 0; i < kPer; ++i) {
+                            const int idx = r * kPer + i;
+                            const double wx = pts[idx * 2], wz = pts[idx * 2 + 1];
+                            if (!bp[idx].valid) { ++nNoBank; continue; }
+                            const SurfaceSample cs = tw.At(wx, wz, simUnix);
+                            if (!cs.valid) { ++nNoCpu; continue; }
+                            // The bank writes the mean level and the wave displacement into
+                            // different planes; the surface the renderer draws is their sum.
+                            const double gpuH = double(bp[idx].level) + double(bp[idx].dispY);
+                            const double d = cs.heightNavd - gpuH;
+                            maxD = (std::max)(maxD, std::abs(d));
+                            sumSq += d * d;
+                            // The same split on the CPU side: the mean surface straight from the
+                            // one point evaluator, and the waves as the remainder.
+                            double qlat = 0.0, qlon = 0.0;
+                            qlon = BathyModel::kOrgLon + wx / BathyModel::kMPerLon;
+                            qlat = BathyModel::kOrgLat + wz / BathyModel::kMPerLat;
+                            const double cpuLevel =
+                                weather.Query(qlat, qlon, simUnix, 1.0).levelNavd;
+                            const double dL = cpuLevel - double(bp[idx].level);
+                            const double dW = (cs.heightNavd - cpuLevel) - double(bp[idx].dispY);
+                            maxL = (std::max)(maxL, std::abs(dL));
+                            sumSqL += dL * dL;
+                            maxW = (std::max)(maxW, std::abs(dW));
+                            sumSqW += dW * dW;
+                            const double cw = cs.heightNavd - cpuLevel, gw = double(bp[idx].dispY);
+                            sqC += cw * cw;
+                            sqG += gw * gw;
+                            cross += cw * gw;
+                            wSum += tw.WindowWeight(wx, wz);
+                            ringUsed = bp[idx].ring;
+                            ++nCmp;
+                        }
+                        totalCmp += nCmp;
+                        worstAll = (std::max)(worstAll, maxD);
+                        if (nCmp > 0) {
+                            Log("[twin]   %5.0f m: n=%2d  TOTAL max %+.4f rms %.4f | "
+                                "LEVEL max %+.4f rms %.4f | WAVES max %+.4f rms %.4f | "
+                                "wWin %.3f ring %d (no bank %d)",
+                                kRangeM[r], nCmp, maxD, std::sqrt(sumSq / nCmp),
+                                maxL, std::sqrt(sumSqL / nCmp),
+                                maxW, std::sqrt(sumSqW / nCmp),
+                                wSum / nCmp, ringUsed, nNoBank);
+                            const double rc = std::sqrt(sqC / nCmp), rg = std::sqrt(sqG / nCmp);
+                            Log("[twin]            wave rms: CPU %.4f  GPU %.4f  ratio %.3f  "
+                                "correlation %+.3f",
+                                rc, rg, (rg > 1e-9) ? rc / rg : 0.0,
+                                (rc > 1e-9 && rg > 1e-9) ? (cross / nCmp) / (rc * rg) : 0.0);
+                        } else {
+                            Log("[twin]   %5.0f m: NO COMPARISON (no bank %d, no cpu %d)",
+                                kRangeM[r], nNoBank, nNoCpu);
+                        }
+                    }
+                    Log("[twin] compared %d points, worst |dh| %.4f m", totalCmp, worstAll);
+
+                    // ---- BLUE WATER. No GPU comparison is possible out here (no resident
+                    // ring), and that is the point: the question offshore is whether the CPU
+                    // knows the bottom at all. A bed of exactly 0.0 with no provenance is the
+                    // failure this checks for -- it would read as aground in mid-ocean.
+                    const double kOff[3][2] = {{40000.0, 0.0}, {120000.0, 40000.0},
+                                               {400000.0, 100000.0}};
+                    for (int i = 0; i < 3; ++i) {
+                        const double wx = kOff[i][0], wz = kOff[i][1];
+                        const SurfaceSample bs = tw.At(wx, wz, simUnix);
+                        Log("[twin] blue %6.0f km E: %s  level %+.3f bed %+.1f depth %+.1f m",
+                            wx / 1000.0, bs.valid ? "COVERED" : "NO COVERAGE",
+                            bs.heightNavd, bs.bedNavd, bs.depthM);
+                        if (bs.valid && std::abs(bs.bedNavd) < 1e-6) {
+                            Log("[twin]   WARNING bed is exactly 0.0 with coverage claimed -- "
+                                "that is the signature of an absent height source reading as "
+                                "datum, not of a real seabed at NAVD zero");
+                        }
+                    }
                 }
                 if (opt.trace && !marsMode && sea && waterBank) {
                     weather.RefreshMirrorsTo(gpu, simUnix);   // a no-op after the export above

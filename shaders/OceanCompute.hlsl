@@ -3,7 +3,7 @@
 //
 //    CsInitSpectrum  once per forecast tick: h0(k) from the partition spectra (JONSWAP wind sea +
 //                    Gaussian swells, cos^2s spreading) with deterministic per-texel Gaussians.
-//    CsModulate      per frame: THE ROTOR. h(k,t) = h0(k) e^{+iwt} + conj(h0(-k)) e^{-iwt} --
+//    CsModulate      per frame: THE ROTOR. h(k,t) = h0(k) e^{-iwt} + conj(h0(-k)) e^{+iwt} --
 //                    each complex multiply is a Cl(2)+ rotor advancing the bin's phase
 //                    (GAMEPLAN.md section 5, application 3). Then the eight linear spectral
 //                    fields (h, Dx, Dz, hx, hz, Jxx, Jzz, Jxz) packed two-real-per-complex into
@@ -165,9 +165,22 @@ void CsModulate(uint3 id : SV_DispatchThreadID) {
     const float kLen = length(k);
     const float4 h0 = gU0[id.xy];
 
-    // The rotor: e^{iwt} advances every bin's phase analytically. Stateless in time.
+    // The rotor advances every bin's phase analytically. Stateless in time.
+    //
+    // THE SIGN IS -w, AND IT IS LOAD-BEARING. CsFft synthesises with e^{+ik.x} (its twiddle is
+    // +2pi(i%hl)/len), so pairing that with e^{+iwt} would make each bin's phase fronts satisfy
+    // k.x + wt = const -- fronts that run along -k. Since BinVariance puts a partition's energy
+    // at k parallel to dirTo, the whole sea then ran OPPOSITE to the direction it was declared
+    // with: a swell built "toward the east" measured 19.6 m/s westward. Tessendorf's equations
+    // carry the same pairing, but his |k^.w^|^2 spectrum is symmetric in k, so both directions
+    // get equal energy and the error cannot show; the cos^2s lobe here is NOT symmetric (s = 8
+    // wind sea, s = 60 swell), so it showed as soon as anything asked which way the sea ran.
+    // With -w the bins go as e^{i(k.x - wt)} and travel along +k, which is dirTo.
+    //
+    // The conjugate half needs no separate change: it reads (rot.x, -rot.y), so it flips with
+    // this line and the field stays exactly real (hk(-k) = conj(hk(k)) either way).
     const float w = sqrt(G * kLen);
-    const float wt = w * fTime;
+    const float wt = -w * fTime;
     const float2 rot = float2(cos(wt), sin(wt));
     const float2 hk = cmul(h0.xy, rot) + cmul(float2(h0.z, -h0.w), float2(rot.x, -rot.y));
 
