@@ -19,6 +19,18 @@
 //  render in ONE shared tangent frame (M6g).
 // ================================================================================================
 #define GA_NO_FIELD_BUFFER
+// M10 THE DROSTE GAUGE (src/core/Droste.h). A record of level k is the ROOT seen from the eye
+// S^-k(C): the mesh and pixel stages run the unchanged root shading in the level's OWN frame,
+// with that level's eye and sun, and only the clip position is mapped back to the true frame
+// (s^k Q^k). These statics carry the level being drawn; LoadLevel below fills them from the
+// level table at the top of every entry point. Declared before Common.hlsli so its sky and haze
+// helpers read the level's sun and eye height, not the scene's.
+static float3 sLvlSun = float3(0.0f, 1.0f, 0.0f);
+static float sLvlEyeY = 0.0f;
+static float3 sLvlSkyUp = float3(0.0f, 1.0f, 0.0f);
+#define GA_SUN_DIR (sLvlSun)
+#define GA_EYE_Y (sLvlEyeY)
+#define GA_SKY_UP (sLvlSkyUp)
 #include "Common.hlsli"
 
 cbuffer GlobeCb : register(b1) {
@@ -79,7 +91,73 @@ cbuffer GlobeCb : register(b1) {
     float4 gLensA;      // org x, org z, 1/sizeX, 1/sizeZ
     float4 gLensB;      // M9h: x = bank texel metres, yz = residency-map dims, w spare
     float4 gLensR;      // M9j: region page -- lon0, lat0, 1/spanLon, 1/spanLat
+    // M10 THE DROSTE LEVELS -- appended at the END, per the layout law (priors 22).
+    float4 gDrosteA;      // x = levels in the table, y = the camera's absolute level,
+                          // z = lighting (0 realistic, 1 appealing), w = portal shadow on
+    float4 gDrostePortal; // the inner globe in ANY level's own frame: centre xyz, radius (m)
+    uint4  gBankBU;       // set B (the outer level's rings): disp, param, detail SRVs, on
+    float4 gBankBOrg01;   // set B ring origins, as gBankOrg01..45
+    float4 gBankBOrg23;
+    float4 gBankBOrg45;
+    float4 gDroste[48];   // 8 levels x 6 rows -- see LoadLevel
 };
+
+// ---- M10: the level being drawn (LoadLevel) --------------------------------------------------
+// Six rows per level, filled by GlobeLayer::SetView:
+//   0  the eye in the level's own frame, sphere-centred (replaces gCamAbs)   | s^k
+//   1  Q^k row 0 (own -> true rotation)                                      | relief exaggeration
+//   2  Q^k row 1                                                             | the eye's flat y
+//   3  Q^k row 2                                                             | bank set (0, 1, -1)
+//   4  the sun in the level's own frame                                      | spare
+//   5  the zenith of the sky this level SEES, own frame                      | that sky's daylight
+//      (< 0: the level's own day -- every level but a realistic inner one)
+static float3 sLvlCamAbs = float3(0.0f, 0.0f, 0.0f);
+static float sLvlSigma = 1.0f;
+static float3x3 sLvlQ = float3x3(1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+static float sLvlExag = 1.0f;
+static int sLvlBank = 0;
+static float sLvlSkyDay = -1.0f;
+
+void LoadLevel(uint slot) {
+    const uint b = min(slot, 7u) * 6u;
+    const float4 r0 = gDroste[b], r1 = gDroste[b + 1u], r2 = gDroste[b + 2u];
+    const float4 r3 = gDroste[b + 3u], r4 = gDroste[b + 4u], r5 = gDroste[b + 5u];
+    sLvlCamAbs = r0.xyz;
+    sLvlSigma = r0.w;
+    sLvlQ = float3x3(r1.xyz, r2.xyz, r3.xyz);
+    sLvlExag = r1.w;
+    sLvlEyeY = r2.w;
+    sLvlBank = (int)round(r3.w);
+    sLvlSun = r4.xyz;
+    sLvlSkyUp = r5.xyz;
+    sLvlSkyDay = r5.w;
+}
+
+// THE SKY'S DAYLIGHT, as the mirror and the skylight see it. A planet's sky is lit by that
+// planet's sun, so its brightness goes with the local `day` -- except inside a realistic Droste
+// tower, where the sky above an inner level is the ROOT's, lit by the root's day, whatever the
+// inner planet's own terminator says. A mirror reflects the sky it sees: the inner night-side sea
+// under the root's noon is a mirror of a bright sky, not a black one.
+float SkyDay(float localDay) { return (sLvlSkyDay < 0.0f) ? localDay : sLvlSkyDay; }
+
+// The gauge's one outward step: a camera-relative vector in the level's own frame, as the true
+// camera sees it. s^k Q^k -- the similarity with its translation already cancelled by the eye.
+float3 TrueRel(float3 relOwn) { return sLvlSigma * mul(sLvlQ, relOwn); }
+
+// THE INNER GLOBE'S SHADOW. The next level down sits in every level at the same place in that
+// level's own frame (gDrostePortal), so one analytic sphere test shades the whole tower: the sun
+// seen from P is eclipsed by the globe's disc, softened over the sun's own angular radius. One
+// expression -- at the contact (d -> r) the globe's disc fills the half-sky and the ground is in
+// shade; far away the disc shrinks to nothing and so does the shadow.
+float PortalShadow(float3 pOwnFlat) {
+    const float rad = gDrostePortal.w;
+    const float3 toC = gDrostePortal.xyz - pOwnFlat;
+    const float d = max(length(toC), 1e-6f);
+    const float alpha = asin(saturate(rad / d));                  // the globe's angular radius
+    const float theta = acos(clamp(dot(toC / d, GA_SUN_DIR), -1.0f, 1.0f));
+    const float kSunR = 0.0047f;                                  // ~0.27 deg, the disc itself
+    return (rad > 0.0f) ? saturate((theta - alpha) / (2.0f * kSunR) + 0.5f) : 1.0f;
+}
 
 // Sample the bank at a world-frame XZ: finest ring containing the point wins. Returns false
 // beyond every ring (the far field: sub-pixel waves, level ~ the plane).
@@ -111,6 +189,28 @@ cbuffer GlobeCb : register(b1) {
 //
 // Loads, not SampleLevel: priors 1 -- a bindless SampleLevel reads ZERO outside the pixel
 // stage on this driver, and this runs in the mesh stage.
+//
+// M10: TWO RING SETS. The bank is a camera-anchored ladder, and under the Droste gauge each
+// level has its own eye. Set A is anchored at the camera level's eye (as it always was); set B
+// at the OUTER level's eye (S(C)), so the sea the camera's planet floats in carries its own
+// waves. A level with no set (-1: every globe smaller than the camera's own) is seen from far
+// enough that the fold has already shed its waves into sigma^2 -- its rings would sit beyond
+// the last one anyway, which is the same answer.
+float2 BankRingOrg(uint m) {
+    const bool b = sLvlBank == 1;
+    const float4 o01 = b ? gBankBOrg01 : gBankOrg01;
+    const float4 o23 = b ? gBankBOrg23 : gBankOrg23;
+    const float4 o45 = b ? gBankBOrg45 : gBankOrg45;
+    return (m == 0) ? o01.xy : (m == 1) ? o01.zw : (m == 2) ? o23.xy
+         : (m == 3) ? o23.zw : (m == 4) ? o45.xy : o45.zw;
+}
+uint BankDispSrv() { return (sLvlBank == 1) ? gBankBU.x : gBankU.x; }
+uint BankParamSrv() { return (sLvlBank == 1) ? gBankBU.y : gBankU.y; }
+uint BankDetailSrv() { return (sLvlBank == 1) ? gBankBU.z : gBankU2.x; }
+bool BankSetLive() {
+    return gBankU.z != 0u && sLvlBank >= 0 && (sLvlBank == 0 || gBankBU.w != 0u);
+}
+
 float4 CatmullW(float t) {
     const float t2 = t * t, t3 = t2 * t;
     return float4(-0.5f * t3 + t2 - 0.5f * t,
@@ -144,12 +244,7 @@ bool BankFetch(uint m, float2 worldXZ, out float4 disp, out float4 param,
     dDdx = 0.0f;
     dDdz = 0.0f;
     const float texel = gBankA.x * (float)(1u << m);
-    const float2 org = (m == 0) ? gBankOrg01.xy
-                      : (m == 1) ? gBankOrg01.zw
-                      : (m == 2) ? gBankOrg23.xy
-                      : (m == 3) ? gBankOrg23.zw
-                      : (m == 4) ? gBankOrg45.xy
-                                 : gBankOrg45.zw;
+    const float2 org = BankRingOrg(m);
     const float2 local = (worldXZ - org) / texel;
     // The cubic reaches one texel further than the tent on each side, so the valid window
     // loses one texel at each border. The ring cross-fade already lives 48 texels inside it.
@@ -162,11 +257,12 @@ bool BankFetch(uint m, float2 worldXZ, out float4 disp, out float4 param,
     const int xoff = (int)m * 512;
 
     // param/detail: the tent, unchanged (4 taps).
+    const uint srvD = BankDispSrv(), srvP = BankParamSrv(), srvT = BankDetailSrv();
     [unroll] for (int k = 0; k < 4; ++k) {
         const int2 tc = t0 + int2(k & 1, k >> 1);
         const float wgt = ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y);
-        param += wgt * gTex[gBankU.y][int2(xoff + tc.x, tc.y)];
-        detail += wgt * gTex[gBankU2.x][int2(xoff + tc.x, tc.y)];
+        param += wgt * gTex[srvP][int2(xoff + tc.x, tc.y)];
+        detail += wgt * gTex[srvT][int2(xoff + tc.x, tc.y)];
     }
 
     // disp: the cubic, value and both tangents from one 4x4 support.
@@ -176,7 +272,7 @@ bool BankFetch(uint m, float2 worldXZ, out float4 disp, out float4 param,
         float4 row = 0.0f, rowDx = 0.0f;
         [unroll] for (int i = 0; i < 4; ++i) {
             const int2 tc = t0 + int2(i - 1, j - 1);
-            const float4 s = gTex[gBankU.x][int2(xoff + tc.x, tc.y)];
+            const float4 s = gTex[srvD][int2(xoff + tc.x, tc.y)];
             row += wx[i] * s;
             rowDx += dx[i] * s;
         }
@@ -236,7 +332,7 @@ bool BankSampleT(float2 worldXZ, out float4 disp, out float4 param, out float4 d
     texelOut = 0.0f;
     dDdx = 0.0f;
     dDdz = 0.0f;
-    if (gBankU.z == 0u) return false;
+    if (!BankSetLive()) return false;
     [unroll] for (uint m = 0; m < 6; ++m) {
         float eD;
         if (!BankFetch(m, worldXZ, disp, param, detail, texelOut, eD, dDdx, dDdz)) continue;
@@ -429,23 +525,25 @@ float3 WaterVertexColor(float3 dir, float3 rel, float h) {
     if (rUp < 0.02f) rDir = normalize(rDir + (0.02f - rUp) * upT);
 
     // The sun's highlight: the Cox-Munk lobe on the vertex normal, sigma^2 from the bank.
-    const float3 hv = normalize(v + gSunDir.xyz);
+    // M10: the level's own sun, eclipsed by the inner globe where its disc covers the sun.
+    const float sunVis = PortalShadow(sLvlCamAbs + rel - float3(0.0f, gGlo.x, 0.0f));
+    const float3 hv = normalize(v + GA_SUN_DIR);
     const float ch = saturate(dot(hv, nW));
     const float tt = max(1.0f - ch * ch, 0.0f) / max(ch * ch, 1e-4f);
     float spec = exp(-tt / s2) / (4.0f * kPi * s2 * max(ch * ch * ch * ch, 1e-4f));
     spec *= (0.02f + 0.98f * pow(1.0f - saturate(dot(v, hv)), 5.0f)) *
-            saturate(dot(gSunDir.xyz, nW));
+            saturate(dot(GA_SUN_DIR, nW)) * sunVis;
 
     // Energy splits, not doubles: the body dims by the Fresnel the mirror takes. Foam rides
     // ON the water, after the split.
     alb *= 1.0f - fres;
     alb = lerp(alb, float3(0.945f, 0.965f, 0.975f), foam * gBankD.w);
 
-    const float day = saturate(dot(gSunDir.xyz, upT) * 3.0f + 0.12f);
-    const float ndl = saturate(dot(nW, gSunDir.xyz));
+    const float day = saturate(dot(GA_SUN_DIR, upT) * 3.0f + 0.12f);
+    const float ndl = saturate(dot(nW, GA_SUN_DIR)) * sunVis;
     float3 col = alb * (0.030f + ndl * SUN_IRR_C * 1.15f);
     col += spec * SUN_IRR_C * 0.85f;
-    col += SkyRadianceDirDiscless(rDir) * (fres * 0.9f * (1.0f - foam)) * day;
+    col += SkyRadianceDirDiscless(rDir) * (fres * 0.9f * (1.0f - foam)) * SkyDay(day);
     col += alb * float3(0.010f, 0.014f, 0.028f) * (1.0f - day);   // moonlit-blue night side
     return col;
 }
@@ -463,10 +561,14 @@ struct VsOut {
     // M9bg: the water's finished colour, shaded at this vertex and INTERPOLATED across the
     // triangle -- old-school Gouraud. PsMain reads it; it never recomputes it.
     float3 wcol : TEXCOORD4;
+    // M10: which Droste level drew this fragment -- a slot in the level table. rel above is in
+    // THAT level's own frame (the gauge), so PsMain must load the level before it reads rel.
+    nointerpolation uint lvl : TEXCOORD5;
 };
 
 #ifndef GA_MESH_PATH
 VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
+    LoadLevel(0u);   // M10: the fallback path draws the camera's own level only
     const GlobeNode nd = gNodes[inst];
     const uint quad = vid / 6u;
     const uint corner = vid % 6u;
@@ -507,6 +609,7 @@ VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
 
     VsOut o;
     o.mid = inst;
+    o.lvl = 0u;
     o.dir = dir;   // PLANET frame: texturing (cube samples, lat/lon) stays untouched
     o.h = h;
     // The ocean surface renders AT the geoid; land rides the (altitude-scaled) exaggeration.
@@ -776,7 +879,7 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     if (footPx < 30.0f && depthW > 0.01f && depthW < 90.0f) {
         // Under 30 m footprints the march MATTERS -- looking through a wave face shifts the
         // bar, and that shift is the whole reason this path is per pixel.
-        const float3 Pw = gCamAbs.xyz + rel;
+        const float3 Pw = sLvlCamAbs + rel;   // M10: the level's own eye (the gauge)
         const float muD = max(-dot(tDir, upT), 0.10f);
         float sP = depthW / muD;
         [unroll] for (int itr = 0; itr < 2; ++itr) {
@@ -798,16 +901,18 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     float3 albW = lerp(cScatter, bedAlb, Tw);
 
     // ---- THE GLINT: the Cox-Munk lobe on the pixel normal, sigma^2 as folded above.
-    const float3 hv = normalize(v + gSunDir.xyz);
+    // M10: the level's own sun, eclipsed by the inner globe (PortalShadow).
+    const float sunVis = PortalShadow(sLvlCamAbs + rel - float3(0.0f, gGlo.x, 0.0f));
+    const float3 hv = normalize(v + GA_SUN_DIR);
     const float ch = saturate(dot(hv, nPix));
     const float tt = max(1.0f - ch * ch, 0.0f) / max(ch * ch, 1e-4f);
     float spec = exp(-tt / s2) / (4.0f * kPi * s2 * max(ch * ch * ch * ch, 1e-4f));
     spec *= (0.02f + 0.98f * pow(1.0f - saturate(dot(v, hv)), 5.0f)) *
-            saturate(dot(gSunDir.xyz, nPix));
+            saturate(dot(GA_SUN_DIR, nPix)) * sunVis;
 
     // ---- THE COMBINE. Energy SPLITS: the body dims by exactly the Fresnel the mirror takes,
     // and the mirror itself is part sky, part the very water it stands on.
-    const float ndl = saturate(dot(nSmooth, gSunDir.xyz));   // the body, on the smooth normal
+    const float ndl = saturate(dot(nSmooth, GA_SUN_DIR)) * sunVis;   // the body, smooth normal
     const float3 bodyLit = albW * (0.030f + ndl * SUN_IRR_C * 1.15f);
     // What the seaward share HITS is another wave, and that wave is water too: at its own
     // grazing angle it is mostly a mirror, and only steeply-down rays see into it. So the
@@ -816,7 +921,7 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // (which is why the horizon band stays pale silver instead of turning green); pointing
     // straight down it returns 0.02 and the endpoint is the water body. No new constant, no
     // branch -- the law already in this function, applied once more.
-    const float3 skyLit = SkyRadianceDirDiscless(rSky) * day;
+    const float3 skyLit = SkyRadianceDirDiscless(rSky) * SkyDay(day);   // M10: the sky it sees
     const float fresHit = 0.02f + 0.98f * pow(1.0f - saturate(-rUp), 5.0f);
     const float3 mirror = lerp(skyLit, lerp(bodyLit, skyLit, fresHit), seaward);
     float3 col = bodyLit * (1.0f - fres);
@@ -856,6 +961,10 @@ float4 PsWireFlat(VsOut i) : SV_Target {
 }
 
 float4 PsMain(VsOut i) : SV_Target {
+    // M10: THE GAUGE FIRST. i.rel, the eye, the sun and the bank set are all the drawing
+    // level's own; everything below is the root's shading, unchanged, run in that frame.
+    LoadLevel(i.lvl);
+    const float sunVis = PortalShadow(sLvlCamAbs + i.rel - float3(0.0f, gGlo.x, 0.0f));
     const float3 up = normalize(i.dir);   // PLANET frame: lat/lon + every texture fetch
     const float3 v = normalize(-i.rel);   // TANGENT frame: geometry + lighting (M6g)
     const float lat = asin(clamp(up.y, -1.0f, 1.0f));
@@ -876,7 +985,7 @@ float4 PsMain(VsOut i) : SV_Target {
     float3 east = cross(axisT, upT);
     east = (dot(east, east) < 1e-8f) ? float3(1.0f, 0.0f, 0.0f) : normalize(east);
     const float3 north = cross(upT, east);
-    const float day = saturate(dot(gSunDir.xyz, upT) * 3.0f + 0.12f);
+    const float day = saturate(dot(GA_SUN_DIR, upT) * 3.0f + 0.12f);
 
     // ---- M9bh: THE PIXEL'S FOOTPRINT, taken HERE and nowhere else. Screen derivatives are
     // defined only under UNIFORM control flow, so the water's prefilter frame is computed at
@@ -1106,8 +1215,8 @@ float4 PsMain(VsOut i) : SV_Target {
             // horizon angle acos(R/r) plus the relief's reach -- a pixel that does is a ray
             // that left the shell through a crack and landed on the far side -- and a band
             // is visible only where the shell had no coverage of its own: the hole map.
-            const float caL = acos(clamp(dot(upT, normalize(gCamAbs.xyz)), -1.0f, 1.0f));
-            const uint midL = i.mid & 0xFFFFu;
+            const float caL = acos(clamp(dot(upT, normalize(sLvlCamAbs)), -1.0f, 1.0f));
+            const uint midL = i.mid & 0x1FFFFu;   // M10: 17-bit records
             return float4(caL, float(midL >> 8u), float(midL & 255u),
                           (i.mid & 0x80000000u) ? 9.0f : 7.0f);
         } else if (lensId == 2) {
@@ -1178,7 +1287,7 @@ float4 PsMain(VsOut i) : SV_Target {
         overhead = saturate(overhead * gCloudA.w);
     }
 
-    const float ndl = saturate(dot(n, gSunDir.xyz)) * (1.0f - 0.75f * overhead);
+    const float ndl = saturate(dot(n, GA_SUN_DIR)) * (1.0f - 0.75f * overhead) * sunVis;
     float3 col = alb * (0.030f + ndl * SUN_IRR_C * 1.15f);
     col += spec * SUN_IRR_C * 0.85f * (1.0f - overhead);
     col += skyReflAdd * day * (1.0f - 0.6f * overhead);   // M7c: the reflected ray, skyward
@@ -1245,9 +1354,16 @@ float4 PsMain(VsOut i) : SV_Target {
             const float generic =
                 (hp - water < 0.35f || elm > 0.01f) ? 0.0f : 1.0f;
             matAlb = lerp(matAlb, alb, imgFine * generic * 0.85f);
-            const float ndlM = saturate(dot(nM, gSunDir.xyz));
-            float3 colNear = matAlb * (SUN_IRR_C * ndlM + SkyRadiance(nM.y) * 0.55f);
-            colNear = AerialPerspective(colNear, normalize(i.rel), distC);
+            const float ndlM = saturate(dot(nM, GA_SUN_DIR)) * sunVis;
+            // M10 (a pre-existing bug the Droste night found): the sky's ambient here ignored
+            // the hour. Every other term in this shader dims its skylight by `day`; this one did
+            // not, so a night-side beach glowed daylight-grey within 2.7 km of the eye -- never
+            // seen, because the root helm is always in daylight. Now it takes the same `day` and
+            // the same moonlit floor the far-field mix below uses: one law, day or night.
+            const float skyD = SkyDay(day);
+            float3 colNear = matAlb * (SUN_IRR_C * ndlM + SkyRadiance(dot(nM, GA_SKY_UP)) * (0.55f * skyD) +
+                                       float3(0.010f, 0.014f, 0.028f) * (1.0f - skyD));
+            colNear = AerialPerspectiveDay(colNear, normalize(i.rel), distC, skyD);
             // M6n: the material weight rides landness too -- a half-emerged flat takes half
             // the wet-sand treatment, and the shore band grades instead of popping.
             col = lerp(col, colNear,
@@ -1258,7 +1374,7 @@ float4 PsMain(VsOut i) : SV_Target {
     // ...and a short march through the volume bank renders the clouds themselves. NULL tiles
     // read zero: over clear air every sample is the hardware's answer, not a branch's.
     if (gTexIdx.w != 0xFFFFFFFFu) {
-        const float3 ro = gCamAbs.xyz;
+        const float3 ro = sLvlCamAbs;   // M10: the level's own eye marches its own sky
         const float3 rd = normalize(i.rel);
         const float top = gGlo.x + gCloudA.y;
         const float b = dot(ro, rd);
@@ -1276,7 +1392,7 @@ float4 PsMain(VsOut i) : SV_Target {
                 const float jit = frac(sin(dot(i.pos.xy, float2(12.9898f, 78.233f))) * 43758.5f);
                 float T = 1.0f;
                 float3 scat = 0.0f;
-                const float mu = dot(rd, gSunDir.xyz);
+                const float mu = dot(rd, GA_SUN_DIR);
                 const float phase = 0.55f + 0.45f * mu;            // cheap forward lobe
                 [loop] for (uint s = 0; s < kSteps && T > 0.02f; ++s) {
                     const float3 p = ro + rd * (t0 + (s + jit) * dt);
@@ -1292,12 +1408,12 @@ float4 PsMain(VsOut i) : SV_Target {
                     // One sun-ward sample above approximates self-shadowing. Geometry stays
                     // tangent (shared sun); only the texture lookup rotates to planet.
                     const float3 pdT = p / pr;
-                    const float3 lpT = pdT * (pr + 900.0f) + gSunDir.xyz * 900.0f;
+                    const float3 lpT = pdT * (pr + 900.0f) + GA_SUN_DIR * 900.0f;
                     const float3 luvw = float3(ReliefUv(CsToPlanet(normalize(lpT))),
                                                (length(lpT) - gGlo.x) / gCloudA.y);
                     const float lDens = gTex3D[gTexIdx.w].SampleLevel(sLinearClamp, luvw, 0).x;
                     const float sunT = exp(-lDens * gCloudA.x * 1500.0f) *
-                                       saturate(dot(pdT, gSunDir.xyz) * 3.0f + 0.1f);
+                                       saturate(dot(pdT, GA_SUN_DIR) * 3.0f + 0.1f);
                     const float3 cloudCol =
                         SUN_IRR_C * (sunT * phase * gCloudA.z + 0.06f) + 0.02f;
                     scat += T * (1.0f - stepT) * cloudCol;
@@ -1313,7 +1429,7 @@ float4 PsMain(VsOut i) : SV_Target {
     // grey-blue over every oblique view of the imagery (the "washed out when zooming in"
     // report; the near-field haze budget belongs to AerialPerspective alone).
     const float rim = pow(1.0f - saturate(dot(upT, v)), 3.0f) *
-                      smoothstep(60000.0f, 250000.0f, length(gCamAbs.xyz) - gGlo.x);
+                      smoothstep(60000.0f, 250000.0f, length(sLvlCamAbs) - gGlo.x);
     // Mars wears a THIN dusty shell, not Earth's blue one.
     const float3 rimCol = (gStreamF.z > 0.5f) ? float3(0.72f, 0.42f, 0.24f)
                                               : float3(0.42f, 0.58f, 0.92f);
@@ -1373,7 +1489,42 @@ cbuffer GlobeSkyCb : register(b2) {
     float4 gSkyFwd;     // camera forward, w = tan(fovY/2)
     float4 gSkyRight;   // camera right,  w = aspect
     float4 gSkyUp;      // camera up
+    // M10: x = the level slot PsLimb draws; y = the share of the space backdrop that is the
+    // camera level's OWN air (1 = the old backdrop; 0 when the eye is outside that air, whose
+    // limb is then PsLimb's); z = 1 under Droste: the sun shows wherever the planet does not;
+    // w = one pixel's angle (rad), the footprint PsLimb filters over.
+    float4 gSkyLvl;
+    float4 gSkySpaceSun;   // M10: the space backdrop's sun (Droste only; camera frame)
 };
+
+// The shell's single scatter along [t0, t0 + span] of a ray from ro (sphere-centred, in the
+// planet's own units) lit by `sun`: the light it adds, and in odView the optical depth it puts
+// in front of whatever lies behind it. 6 steps, Chapman-lite sun transmittance.
+float3 ShellScatter(float3 ro, float3 rd, float t0, float span, float3 sun, out float odView) {
+    const uint kSteps = 6;
+    const float dt = span / kSteps;
+    float3 sum = 0.0f;
+    odView = 0.0f;
+    [unroll] for (uint s = 0; s < kSteps; ++s) {
+        const float3 p = ro + rd * (t0 + (s + 0.5f) * dt);
+        const float h = max(length(p) - gGlo.x, 0.0f);
+        const float dens = exp(-h / kRayleighH);
+        odView += dens * dt;
+        // Sun transmittance out of the shell from p: one closed-form-ish estimate via the
+        // grazing airmass (Chapman-lite).
+        const float cosSun = dot(normalize(p), sun);
+        const float am = dens * kRayleighH * 2.2f / max(cosSun + 0.18f, 0.02f);
+        const float3 sunT = exp(-kBetaR * max(am, 0.0f));
+        sum += dens * dt * sunT * exp(-kBetaR * odView);
+    }
+    const float mu = dot(rd, sun);
+    const float phaseR = 0.0596831f * (1.0f + mu * mu);   // 3/(16 pi)
+    float3 col = sum * kBetaR * phaseR * 22.0f * SUN_IRR_C;
+    if (gStreamF.z > 0.5f) {   // Mars: 1% of Earth's air, dust-toned
+        col = dot(col, float3(0.33f, 0.34f, 0.33f)) * float3(1.15f, 0.55f, 0.30f) * 0.30f;
+    }
+    return col;
+}
 
 float4 PsSky(SkyVsOut i) : SV_Target {
     const float2 ndc = i.dir.xy;
@@ -1388,40 +1539,105 @@ float4 PsSky(SkyVsOut i) : SV_Target {
         return float4(0, 0, 0, 1);
     }
 
+    // The sun itself. Without Droste it shows only where the ray leaves the shell toward it (the
+    // shipped backdrop); under Droste the backdrop is space, and space has the sun in it
+    // wherever the planet is not -- a limb in front of it (PsLimb) dims it by its own air. Whose
+    // sun: under appealing lighting every level has one, and space shows the one of the level
+    // whose orbit called for it (gSkySpaceSun) -- not the camera's, which is the gauge.
+    const float3 sunSky = (gSkyLvl.z > 0.5f) ? gSkySpaceSun.xyz : gSunDir.xyz;
+    const float mu = dot(rd, sunSky);
+    const float3 sunDisc = SUN_IRR_C * smoothstep(0.9998f, 0.99995f, mu) * 4.0f;
+    const float3 bare = (gSkyLvl.z > 0.5f) ? sunDisc : float3(0.0f, 0.0f, 0.0f);
+
     // Atmosphere shell chord.
     const float top = gGlo.x + kAtmTop;
     const float cTop = dot(ro, ro) - top * top;
     const float disc = b * b - cTop;
-    if (disc <= 0.0f) return float4(0, 0, 0, 1);
+    if (disc <= 0.0f) return float4(bare, 1);
     const float t0 = max(-b - sqrt(disc), 0.0f);
     const float t1 = -b + sqrt(disc);
     const float span = t1 - t0;
-    if (span <= 0.0f) return float4(0, 0, 0, 1);
+    if (span <= 0.0f) return float4(bare, 1);
 
-    const uint kSteps = 6;
-    const float dt = span / kSteps;
-    float3 sum = 0.0f;
-    float odView = 0.0f;
-    [unroll] for (uint s = 0; s < kSteps; ++s) {
-        const float3 p = ro + rd * (t0 + (s + 0.5f) * dt);
-        const float h = max(length(p) - gGlo.x, 0.0f);
-        const float dens = exp(-h / kRayleighH);
-        odView += dens * dt;
-        // Sun transmittance out of the shell from p: one closed-form-ish estimate via the
-        // grazing airmass (Chapman-lite).
-        const float cosSun = dot(normalize(p), gSunDir.xyz);
-        const float am = dens * kRayleighH * 2.2f / max(cosSun + 0.18f, 0.02f);
-        const float3 sunT = exp(-kBetaR * max(am, 0.0f));
-        sum += dens * dt * sunT * exp(-kBetaR * odView);
-    }
-    const float mu = dot(rd, gSunDir.xyz);
-    const float phaseR = 0.0596831f * (1.0f + mu * mu);   // 3/(16 pi)
-    float3 col = sum * kBetaR * phaseR * 22.0f * SUN_IRR_C;
-    if (gStreamF.z > 0.5f) {   // Mars: 1% of Earth's air, dust-toned
-        col = dot(col, float3(0.33f, 0.34f, 0.33f)) * float3(1.15f, 0.55f, 0.30f) * 0.30f;
-    }
+    // M10: the camera level's own air, at its share of the space backdrop (gSkyLvl.y: exactly 1
+    // without Droste).
+    float odView;
+    float3 col = ShellScatter(ro, rd, t0, span, gSunDir.xyz, odView) * gSkyLvl.y;
 
     // The sun itself, when the ray leaves the shell toward it.
-    col += SUN_IRR_C * smoothstep(0.9998f, 0.99995f, mu) * 4.0f;
+    col += sunDisc;
     return float4(col, 1.0f);
+}
+
+// ------------------------------------------------------------------ M10: the limbs
+//
+// Every planet in the Droste tower whose air the eye is OUTSIDE of wears its limb: the same
+// shell, scattered by the same function, in that level's own frame (its eye, its sun), drawn
+// after the surface over whatever lies behind it. The backdrop above could not do this -- it
+// touches only empty pixels, and an inner globe's limb lies over the outer world's sea. Blended
+// as light added plus the light behind carried through (dual source: dst = scatter + dst * T),
+// and depth-tested at the shell's own entry (SV_Depth), so a jetty in front hides it and the sea
+// behind shows through it. Which levels: CPU side, one rule for every level including the
+// camera's own -- the eye outside the shell -- so the re-root (a gauge change) moves no limb.
+struct LimbOut {
+    float4 scatter : SV_Target0;   // the in-scatter the chord adds
+    float4 trans : SV_Target1;     // what survives of the scene behind it
+    float depth : SV_Depth;        // the shell's entry: nearer surfaces hide the limb
+};
+
+LimbOut PsLimb(SkyVsOut i) {
+    LoadLevel((uint)gSkyLvl.x);
+    const float2 ndc = i.dir.xy;
+    const float3 rdT = normalize(gSkyFwd.xyz + gSkyRight.xyz * (ndc.x * gSkyFwd.w * gSkyRight.w)
+                                 + gSkyUp.xyz * (ndc.y * gSkyFwd.w));
+    const float3 rd = mul(rdT, sLvlQ);   // Q^T: the same ray in the level's own frame
+    const float3 ro = sLvlCamAbs;
+    const float R = gGlo.x;
+    const float top = R + kAtmTop;
+    // The closest approach as a vector (ro - rd b), not b^2 - c: an inner globe's eye sits
+    // ~1.7e7 own-metres out, where b^2 - c cancels away kilometres of the limb.
+    const float b = dot(ro, rd);
+    const float3 perp = ro - rd * b;
+    const float rc = length(perp);                 // the ray's closest approach to the centre
+    if (b >= 0.0f || rc >= top) discard;           // the shell is behind, or the ray misses it
+
+    // THE PIXEL, NOT ITS CENTRE. A limb seen from afar is thinner than a pixel -- from the
+    // jetties one pixel spans ~60 km of an inner planet's own air, the whole shell -- and a
+    // centre sample of it is a bright dotted outline that crawls as the eye moves. The value
+    // the pixel owes is the limb AVERAGED over its footprint, and the limb varies across a
+    // pixel only with the tangent height h, so average 8 rays whose tangent heights span the
+    // footprint (pixel angle x distance to the tangent point). Resolved up close, the 8 rays
+    // coincide and this is the centre sample; far away it is the thin faint glow a real limb
+    // is. Rays that strike the planet are the disc's (nothing added, nothing dimmed) -- which
+    // also feathers the limb onto the disc's edge instead of clipping it there.
+    const float foot = gSkyLvl.w * (-b);
+    const float hc = rc - R;
+    if (hc < -0.5f * foot) discard;                // wholly the disc: the surface's, rim and all
+    const float3 nrm = perp / max(rc, 1e-3f);      // the direction h grows at the tangent
+    const float3 tanPt = ro + rd * (-b);
+    float3 scatter = 0.0f;
+    float3 trans = 0.0f;
+    const float t0c = -b - sqrt(max(top * top - rc * rc, 0.0f));
+    const uint kSub = 8u;
+    [unroll] for (uint s = 0; s < kSub; ++s) {
+        const float h = hc + foot * ((float(s) + 0.5f) / float(kSub) - 0.5f);
+        const float3 pSub = tanPt + nrm * (h - hc);     // the tangent point, moved to height h
+        const float3 rdS = normalize(pSub - ro);
+        const float bS = dot(ro, rdS);
+        const float rS = length(ro - rdS * bS);
+        if (rS < R) { trans += 1.0f; continue; }         // the disc's part of the pixel
+        if (rS >= top) { trans += 1.0f; continue; }      // clear of the air
+        const float hwS = sqrt(top * top - rS * rS);
+        const float t0S = max(-bS - hwS, 0.0f);
+        float od;
+        scatter += ShellScatter(ro, rdS, t0S, (hwS - bS) - t0S, GA_SUN_DIR, od);
+        trans += exp(-kBetaR * od);
+    }
+    LimbOut o;
+    o.scatter = float4(scatter / float(kSub), 0.0f);
+    o.trans = float4(trans / float(kSub), 1.0f);
+    // Depth: the shell's entry along the pixel's own ray (a jetty in front hides the limb).
+    const float4 clip = mul(float4(rdT * max(sLvlSigma * max(t0c, 0.0f), 1e-3f), 1.0f), gViewProj);
+    o.depth = saturate(clip.z / clip.w);
+    return o;
 }

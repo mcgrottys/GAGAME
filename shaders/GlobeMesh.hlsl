@@ -34,15 +34,17 @@ struct MeshletRec {
     float3 dPdv;
     uint seamY;          // step 23: the same across the N (my 0) / S (my 3) edge
     float3 upT;          // tangent-frame up at the centre
-    float pad2;
+    uint level;          // M10: the Droste level slot -- anchorRel, dPdu/dPdv and upT are all in
+                         // THAT level's own frame, relative to ITS eye (Droste.h, the gauge)
 };
 StructuredBuffer<MeshletRec> gMeshlets : register(t0, space0);
 
 // Step 23 (docs/PERF_EXPERIMENT.md): THE SEAM WORD, packed by GlobeLayer::SeamTable.
-//   bits 0..15  the coarse neighbour's meshlet record across the seam
-//   bits 16..17 relation: 0 none (a same-level or finer neighbour, another face, or no
+//   bits 0..16  the coarse neighbour's meshlet record across the seam (M10: 17 bits -- the
+//               record budget is 2^17 since the Droste levels)
+//   bits 17..18 relation: 0 none (a same-level or finer neighbour, another face, or no
 //               neighbour), 1 one level coarser
-//   bit 18      this meshlet meets the upper half (cells 4..7) of that record's edge
+//   bit 19      this meshlet meets the upper half (cells 4..7) of that record's edge
 static const uint kSeamNone = 0u, kSeamCoarser = 1u;
 
 // M9bm: the lateral term is fully applied above this areaJac and rolls off to zero at the
@@ -66,7 +68,7 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
         d0 = length(rec.anchorRel + rec.dPdu * duC.x + rec.dPdv * duC.y);
     } else {
         const float3 dir0 = CubeDir(rec.face, rec.uv0 + g * rec.uvStepCell);
-        d0 = length(CsToTangent(dir0) * gGlo.x - gCamAbs.xyz);
+        d0 = length(CsToTangent(dir0) * gGlo.x - sLvlCamAbs);   // M10: the level's own eye
     }
     const float k = saturate((d0 - rec.morphStart) / max(rec.morphEnd - rec.morphStart, 1.0f));
     g -= frac(g * 0.5f) * 2.0f * k;
@@ -101,7 +103,8 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     // north jetty goes awash at high water (the user's catch). Surveyed data taller
     // than the floor still wins through the max below.
     const float editFloor = ComposedEditLand(dir) * gBankE.w;
-    const float dispLand = max(max(h, 0.0f) * gGlo.y, editFloor * gGlo.y);
+    // M10: the relief exaggeration is a display choice made at the level's OWN altitude.
+    const float dispLand = max(max(h, 0.0f) * sLvlExag, editFloor * sLvlExag);
     // M7: ONE WATER. In one-water mode the vertex samples THE WAVE VERTEX BANK -- level
     // (tide + solver) plus the folded cascade displacement, one tiled resource, ring LOD.
     // Beyond every ring (or bank off) the M6t sunk plane remains: it exists only so the
@@ -148,13 +151,14 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
 
     VsOut o;
     o.mid = gid;   // M9b: this record's index, for PsMeshlet's tint
+    o.lvl = rec.level;
     o.dir = dir;
     o.h = h;
     if (fine) {
         const float2 du = (g - float2(cx0 + 4.0f, cy0 + 4.0f)) * rec.uvStepCell;
         o.rel = rec.anchorRel + rec.dPdu * du.x + rec.dPdv * du.y + rec.upT * disp;
     } else {
-        o.rel = CsToTangent(dir) * (gGlo.x + disp) - gCamAbs.xyz;
+        o.rel = CsToTangent(dir) * (gGlo.x + disp) - sLvlCamAbs;
     }
     o.rel += float3(latW.x, 0.0f, latW.y);
     // M9bg: the water's colour, shaded AT THIS VERTEX from its own wave normal (the bank's
@@ -165,7 +169,10 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     // tiles are NULL and read zero, so a dry vertex costs three cheap Loads and lands on the
     // shallow tint -- the right colour for exactly the pixels that mix it.
     o.wcol = WaterVertexColor(dir, o.rel, h);
-    o.pos = mul(float4(o.rel, 1.0f), gViewProj);
+    // M10: the one outward step of the gauge -- rel stays in the level's own frame for the
+    // pixel stage; the rasterizer gets the true camera-relative position (s^k Q^k rel). Level 0
+    // is the identity, so the camera's own planet rasterizes exactly as it always did.
+    o.pos = mul(float4(TrueRel(o.rel), 1.0f), gViewProj);
     return o;
 }
 
@@ -240,18 +247,18 @@ void SeamBands(const MeshletRec rec, out Band b[4], out uint nv, out uint nt) {
     uint off[4] = {0u, 0u, 0u, 0u};
     // Level seams first: the seam words name a coarser neighbour across the node's W/E edge
     // (records with mx 0/3) and N/S edge (my 0/3).
-    const uint relX = (rec.seamX >> 16) & 3u, relY = (rec.seamY >> 16) & 3u;
+    const uint relX = (rec.seamX >> 17) & 3u, relY = (rec.seamY >> 17) & 3u;
     if (mx == 0u && relX == kSeamCoarser) {
-        kind[0] = kBandLevel; nb[0] = rec.seamX & 0xFFFFu; off[0] = ((rec.seamX >> 18) & 1u) * 4u;
+        kind[0] = kBandLevel; nb[0] = rec.seamX & 0x1FFFFu; off[0] = ((rec.seamX >> 19) & 1u) * 4u;
     }
     if (mx == 3u && relX == kSeamCoarser) {
-        kind[1] = kBandLevel; nb[1] = rec.seamX & 0xFFFFu; off[1] = ((rec.seamX >> 18) & 1u) * 4u;
+        kind[1] = kBandLevel; nb[1] = rec.seamX & 0x1FFFFu; off[1] = ((rec.seamX >> 19) & 1u) * 4u;
     }
     if (my == 0u && relY == kSeamCoarser) {
-        kind[2] = kBandLevel; nb[2] = rec.seamY & 0xFFFFu; off[2] = ((rec.seamY >> 18) & 1u) * 4u;
+        kind[2] = kBandLevel; nb[2] = rec.seamY & 0x1FFFFu; off[2] = ((rec.seamY >> 19) & 1u) * 4u;
     }
     if (my == 3u && relY == kSeamCoarser) {
-        kind[3] = kBandLevel; nb[3] = rec.seamY & 0xFFFFu; off[3] = ((rec.seamY >> 18) & 1u) * 4u;
+        kind[3] = kBandLevel; nb[3] = rec.seamY & 0x1FFFFu; off[3] = ((rec.seamY >> 19) & 1u) * 4u;
     }
     // Hairline bands on the fine path's W and N seams where no level band already sits.
     if (fine) {
@@ -292,7 +299,7 @@ VsOut BandDepth(VsOut o) {
 // The same vertex moved in the tangent plane, then pushed behind.
 VsOut BandMoved(VsOut o, float3 nudge) {
     o.rel += nudge;
-    o.pos = mul(float4(o.rel, 1.0f), gViewProj);
+    o.pos = mul(float4(TrueRel(o.rel), 1.0f), gViewProj);   // M10: the gauge, as SurfaceVertex
     return BandDepth(o);
 }
 
@@ -333,13 +340,26 @@ uint3 BandTri(const Band bd, uint t) {
 // seam bands (step 23: at most 64 vertices and 56 triangles more).
 [outputtopology("triangle")]
 [numthreads(128, 1, 1)]
-void MsMain(uint gtid : SV_GroupThreadID, uint gid : SV_GroupID,
+void MsMain(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
             out vertices VsOut verts[145], out indices uint3 tris[184]) {
-    const MeshletRec rec = gMeshlets[gid];
+    // M10: the dispatch is 2-D (one dimension caps at 65535 groups); fold it back to the record.
+    // The tail groups of the last row emit nothing (gGlo.z = the record count) -- through the ONE
+    // SetMeshOutputCounts the validator allows (two call sites fail validation even on exclusive
+    // paths, and a failed MsMain silently drops the whole mesh pipeline), with the record read
+    // clamped in bounds (a root SRV has no bounds check).
+    const uint count = (uint)gGlo.z;
+    const uint gid = gid3.y * 65535u + gid3.x;
+    const bool live = gid < count;
+    const MeshletRec rec = gMeshlets[min(gid, max(count, 1u) - 1u)];
+    // M10: this record's Droste level -- its eye, sun, exaggeration, bank set and the gauge's
+    // outward map. A seam band's coarse neighbour is always a record of the SAME level (the
+    // seam table keys on it), so one load serves every vertex this group writes.
+    LoadLevel(rec.level);
     Band bands[4];
     uint nv, nt;
     SeamBands(rec, bands, nv, nt);
-    SetMeshOutputCounts(81u + nv, 128u + nt);
+    SetMeshOutputCounts(live ? 81u + nv : 0u, live ? 128u + nt : 0u);
+    if (!live) return;
     const float cx0 = float(rec.cell0 & 0xFFu);
     const float cy0 = float(rec.cell0 >> 8);
 

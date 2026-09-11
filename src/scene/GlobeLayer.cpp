@@ -162,6 +162,36 @@ void CubeDirD(int face, double u, double v, double out[3]) {
 
 }  // namespace
 
+// M10: THE ADDRESS AND THE PLACE. A leaf (face, level, ix, iy) of the walk's own quadtree --
+// the node the Droste link hangs from -- and its inverse, in CubeDirD's face convention (NOT the
+// hardware cube's: LeafWants flips v for the tenants, the walk never does).
+void GlobeLayer::LeafDir(int face, int level, uint32_t ix, uint32_t iy, double out[3]) {
+    const double n = double(1u << level);
+    CubeDirD(face, (double(ix) + 0.5) / n, (double(iy) + 0.5) / n, out);
+}
+
+void GlobeLayer::LeafOf(const double d[3], int level, int& face, uint32_t& ix, uint32_t& iy) {
+    const double ax = std::abs(d[0]), ay = std::abs(d[1]), az = std::abs(d[2]);
+    double cx = 0.0, cy = 0.0;
+    if (ax >= ay && ax >= az) {
+        face = d[0] > 0.0 ? 0 : 1;
+        cy = d[1] / ax;
+        cx = (d[0] > 0.0 ? -d[2] : d[2]) / ax;
+    } else if (ay >= az) {
+        face = d[1] > 0.0 ? 2 : 3;
+        cx = d[0] / ay;
+        cy = (d[1] > 0.0 ? -d[2] : d[2]) / ay;
+    } else {
+        face = d[2] > 0.0 ? 4 : 5;
+        cx = (d[2] > 0.0 ? d[0] : -d[0]) / az;
+        cy = d[1] / az;
+    }
+    const double n = double(1u << level);
+    const double u = (cx + 1.0) * 0.5, v = (cy + 1.0) * 0.5;
+    ix = static_cast<uint32_t>(std::clamp(std::floor(u * n), 0.0, n - 1.0));
+    iy = static_cast<uint32_t>(std::clamp(std::floor(v * n), 0.0, n - 1.0));
+}
+
 void GlobeLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSignature* rootSig) {
     m_rootSig = rootSig;
     if (!m_globe || !m_globe->Ready()) throw std::runtime_error("GlobeLayer needs globe data");
@@ -666,7 +696,45 @@ bool GlobeLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
     ShaderBlob ps = sc.Compile(path, L"PsMain", L"ps_6_0");
     ShaderBlob vsk = sc.Compile(path, L"VsSky", L"vs_6_0");
     ShaderBlob psk = sc.Compile(path, L"PsSky", L"ps_6_0");
-    if (!vs.Valid() || !ps.Valid() || !vsk.Valid() || !psk.Valid()) return false;
+    ShaderBlob psl = sc.Compile(path, L"PsLimb", L"ps_6_0");
+    if (!vs.Valid() || !ps.Valid() || !vsk.Valid() || !psk.Valid() || !psl.Valid()) return false;
+
+    // M10: THE LIMBS (PsLimb). Light added, the scene behind carried through its own air:
+    // dual-source, dst = scatter + dst * T, per channel (Rayleigh dims blue first, so a scalar
+    // alpha would grey the sea behind a limb). Depth-tested at the shell's entry -- the shader
+    // writes it -- and never written: a limb is air, nothing stands on it.
+    {
+        D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
+        d.pRootSignature = m_rootSig;
+        d.VS = {vsk.Data(), vsk.Size()};
+        d.PS = {psl.Data(), psl.Size()};
+        d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        d.BlendState.RenderTarget[0].BlendEnable = TRUE;
+        d.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
+        d.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_SRC1_COLOR;
+        d.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+        d.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ZERO;
+        d.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ONE;
+        d.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
+        d.SampleMask = UINT_MAX;
+        d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+        d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        d.RasterizerState.DepthClipEnable = FALSE;   // the depth is the shader's, not VsSky's
+        d.DepthStencilState.DepthEnable = TRUE;
+        d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
+        d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;   // reversed-Z
+        d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+        d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        d.NumRenderTargets = 1;
+        d.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        d.SampleDesc.Count = 1;
+        Com<ID3D12PipelineState> pso;
+        if (FAILED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) {
+            Log("[globe] limb PSO failed");
+            return false;
+        }
+        m_limbPso = pso;
+    }
 
     // The atmosphere backdrop: fullscreen, no depth involvement; the surface overdraws it.
     {
@@ -675,6 +743,17 @@ bool GlobeLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
         d.VS = {vsk.Data(), vsk.Size()};
         d.PS = {psk.Data(), psk.Size()};
         d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        // M10: the backdrop blends over the sky dome by a factor (skyPassWeight): src W + dst
+        // (1 - W). At the shipped W = 1 that is src exactly (dst x 0 = 0), the old overwrite;
+        // under appealing Droste lighting the two backdrops cross-fade by the gravity weights,
+        // so the frame's re-root -- a gauge change -- cannot pop the sky.
+        d.BlendState.RenderTarget[0].BlendEnable = TRUE;
+        d.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_BLEND_FACTOR;
+        d.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_BLEND_FACTOR;
+        d.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
+        d.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
+        d.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
+        d.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
         d.SampleMask = UINT_MAX;
         d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
         d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
@@ -945,11 +1024,37 @@ void WalkNode(const WalkParams& wp, uint64_t& nodes, int face, int level, double
     // Frustum cull: bounding sphere in camera-relative space. Radius covers the node's ground
     // extent, its relief, and the display exaggeration. (planeCount 0 -- the prefetch walk --
     // culls nothing: the predicted view is approximate by nature, M6e.)
-    const double radius = arc * 0.75 + 9000.0 * (std::max)(1.0f, wp.reliefExagg);
+    double radius = arc * 0.75 + 9000.0 * (std::max)(1.0f, wp.reliefExagg);
+    if (wp.relief && arc < 50000.0) {
+        // M10 (WalkParams::relief): the node's own height, and what one ETOPO cell can hide --
+        // 150 m of structure, slope over the node's half-span, a tenth of the relief itself.
+        const double h = wp.relief->ElevAt(std::asin(std::clamp(dir[1], -1.0, 1.0)) * 57.29577951308232,
+                                           std::atan2(dir[2], dir[0]) * 57.29577951308232);
+        const double margin = 150.0 + 0.6 * arc + 0.1 * std::abs(h);
+        radius = arc * 0.75 + (std::abs(h) + margin) * (std::max)(1.0f, wp.reliefExagg);
+    }
     for (int p = 0; p < wp.planeCount; ++p) {
         const double d = wp.frustum[p][0] * rel[0] + wp.frustum[p][1] * rel[1] +
                          wp.frustum[p][2] * rel[2] + wp.frustum[p][3];
         if (d < -radius) return;
+    }
+    // M10: THE PLANET YOU STAND ON hides the world it floats in (wp.occ; zero radius = none).
+    // Exact and conservative: every ray inside the occluder's silhouette cone meets the sphere
+    // no later than the tangent distance sqrt(d^2 - r^2), so a node wholly inside the cone and
+    // wholly beyond that distance is behind the sphere or inside it -- unseen either way. The
+    // node's bound is the frustum's own (relief headroom included), so nothing that could peek
+    // over the limb is ever dropped.
+    if (wp.occ[3] > 0.0) {
+        const double oc[3] = {wp.occ[0] - wp.camPos[0], wp.occ[1] - wp.camPos[1],
+                              wp.occ[2] - wp.camPos[2]};
+        const double dO = std::sqrt(oc[0] * oc[0] + oc[1] * oc[1] + oc[2] * oc[2]);
+        const double rO = wp.occ[3];
+        if (dO > rO && dist > radius && dist - radius >= std::sqrt(dO * dO - rO * rO)) {
+            const double alphaO = std::asin(rO / dO);
+            const double alphaN = std::asin(radius / dist);
+            const double cosB = (oc[0] * rel[0] + oc[1] * rel[1] + oc[2] * rel[2]) / (dO * dist);
+            if (std::acos(std::clamp(cosB, -1.0, 1.0)) + alphaN <= alphaO) return;
+        }
     }
 
     // M6j/M8h: the mesh path walks two rungs past CUDEM scale (level 18 = 1.19 m vertex
@@ -1161,11 +1266,11 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
 // vertices reconstruct from small numbers only -- the float wall the estuary layers dodged by
 // staying flat falls here, and the one surface reaches walking height.
 void GlobeLayer::EmitMeshlets(int face, double u0, double v0, double size, double arc,
-                              float morphStart, float morphEnd) {
-    // M8h: >= keeps the worst-case record count at 65520 -- DispatchMesh's X dimension
-    // caps at 65535, and the old > guard let the buffer land on exactly 65536 (out of
-    // spec). A dropped leaf is a HOLE in the surface, so it is counted and reported,
-    // never silent.
+                              float morphStart, float morphEnd, const double camPos[3],
+                              uint32_t slot) {
+    // M8h: >= keeps the record count strictly under the cap (the old > guard let the buffer
+    // land exactly on it). A dropped leaf is a HOLE in the surface, so it is counted and
+    // reported, never silent. (M10: the cap is 2^17 over a 2-D dispatch -- see kMaxMeshlets.)
     if (m_meshlets.size() + 16 >= kMaxMeshlets) {
         ++m_meshletDrops;
         return;
@@ -1190,14 +1295,18 @@ void GlobeLayer::EmitMeshlets(int face, double u0, double v0, double size, doubl
             rec.morphStart = morphStart;
             rec.morphEnd = morphEnd;
             rec.arc = static_cast<float>(arc);
+            rec.level = slot;   // M10
             const double cu = u0 + (mx * 8 + 4) * step;
             const double cv = v0 + (my * 8 + 4) * step;
             double dc[3], tc[3];
             CubeDirD(face, cu, cv, dc);
             tangent(dc, tc);
-            rec.anchorRel[0] = static_cast<float>(tc[0] - m_camPos[0]);
-            rec.anchorRel[1] = static_cast<float>(tc[1] - m_camPos[1]);
-            rec.anchorRel[2] = static_cast<float>(tc[2] - m_camPos[2]);
+            // M10: relative to THIS level's eye, in its own frame -- the doubles cancel here,
+            // so an inner globe a few metres across keeps the same millimetre-stable anchors the
+            // helm always had (the gauge moves the precision problem nowhere).
+            rec.anchorRel[0] = static_cast<float>(tc[0] - camPos[0]);
+            rec.anchorRel[1] = static_cast<float>(tc[1] - camPos[1]);
+            rec.anchorRel[2] = static_cast<float>(tc[2] - camPos[2]);
             // Jacobian by central difference in doubles; per face-uv UNIT.
             const double e = (std::max)(step * 0.25, 1e-7);
             double dA[3], dB[3], tA[3], tB[3];
@@ -1244,7 +1353,8 @@ void GlobeLayer::EmitMeshlets(int face, double u0, double v0, double size, doubl
 // which split. Cost: one sort of ~650 keys and two binary searches per leaf.
 namespace {
 uint32_t SeamWord(uint32_t rec, uint32_t rel, uint32_t off) {
-    return (rec & 0xFFFFu) | (rel << 16) | (off << 18);
+    // M10: 17 bits of record (the budget is 2^17), then the relation and the half.
+    return (rec & 0x1FFFFu) | (rel << 17) | (off << 19);
 }
 }  // namespace
 
@@ -1252,12 +1362,14 @@ void GlobeLayer::SeamTable() {
     constexpr uint32_t kCoarser = 1u;
     std::sort(m_leafKeys.begin(), m_leafKeys.end(),
               [](const LeafKey& a, const LeafKey& b) { return a.key < b.key; });
-    auto find = [&](int face, int level, int64_t ix, int64_t iy) -> int64_t {
+    // M10: the Droste level slot rides the top three bits, so a seam only ever finds a
+    // neighbour in its OWN level -- two levels share every address, never a seam.
+    auto find = [&](uint64_t slot, int face, int level, int64_t ix, int64_t iy) -> int64_t {
         if (level < 0 || ix < 0 || iy < 0 || ix >= (int64_t(1) << level) ||
             iy >= (int64_t(1) << level)) {
             return -1;
         }
-        const uint64_t key = (static_cast<uint64_t>(face) << 58) |
+        const uint64_t key = (slot << 61) | (static_cast<uint64_t>(face) << 58) |
                              (static_cast<uint64_t>(level) << 52) |
                              (static_cast<uint64_t>(ix) << 26) | static_cast<uint64_t>(iy);
         const auto it = std::lower_bound(
@@ -1266,7 +1378,8 @@ void GlobeLayer::SeamTable() {
         return (it != m_leafKeys.end() && it->key == key) ? int64_t(it->base) : -1;
     };
     for (const LeafKey& lk : m_leafKeys) {
-        const int face = static_cast<int>(lk.key >> 58);
+        const uint64_t slot = lk.key >> 61;
+        const int face = static_cast<int>((lk.key >> 58) & 7u);
         const int level = static_cast<int>((lk.key >> 52) & 63u);
         const int64_t ix = static_cast<int64_t>((lk.key >> 26) & ((uint64_t(1) << 26) - 1));
         const int64_t iy = static_cast<int64_t>(lk.key & ((uint64_t(1) << 26) - 1));
@@ -1281,7 +1394,7 @@ void GlobeLayer::SeamTable() {
             const int64_t nx = side == 0 ? ix - 1 : ix + 1;
             const int mx = side == 0 ? 0 : 3;
             const int nmx = side == 0 ? 3 : 0;
-            const int64_t coarser = find(face, level - 1, nx >> 1, iy >> 1);
+            const int64_t coarser = find(slot, face, level - 1, nx >> 1, iy >> 1);
             if (coarser >= 0) {
                 const int half = static_cast<int>(iy & 1);
                 for (int my = 0; my < 4; ++my) {
@@ -1297,7 +1410,7 @@ void GlobeLayer::SeamTable() {
             const int64_t ny = side == 0 ? iy - 1 : iy + 1;
             const int my = side == 0 ? 0 : 3;
             const int nmy = side == 0 ? 3 : 0;
-            const int64_t coarser = find(face, level - 1, ix >> 1, ny >> 1);
+            const int64_t coarser = find(slot, face, level - 1, ix >> 1, ny >> 1);
             if (coarser >= 0) {
                 const int half = static_cast<int>(ix & 1);
                 for (int mx = 0; mx < 4; ++mx) {
@@ -1479,6 +1592,76 @@ GlobeLayer::~GlobeLayer() {
     m_predict.cv.wait(lk, [&] { return !m_predict.busy; });
 }
 
+// One walk of the root's six faces under `wp` -- the camera's own level (slot 0, the walk this
+// always was) or an M10 Droste level (its eye, planes and exaggeration already in that level's
+// own frame). The real walk's leaf: the wants straight to the manager (this frame's stamp), then
+// the draw records. The prefetch walk's leaf (PredictWorker) records rects instead; both run
+// WalkNode / LeafWants above.
+void GlobeLayer::WalkLevel(const WalkParams& wp, uint32_t slot) {
+    auto leaf = [&](int face, double u0, double v0, double size, double arc, double dist) {
+        ++walkLeaves;
+        const auto wt0 = std::chrono::steady_clock::now();
+        auto emit = [&](int tenant, uint32_t f, uint32_t mip, float u0r, float v0r, float u1r,
+                        float v1r) { m_res->Want(tenant, f, mip, u0r, v0r, u1r, v1r); };
+        LeafWants(wp, face, u0, v0, size, arc, dist, emit);
+        walkWantNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                   std::chrono::steady_clock::now() - wt0).count());
+
+        // Per-LEVEL morph ramp (identical on both sides of every seam = crack-free): fade this
+        // LOD out across the band where its parent would still be split.
+        // M9bk: against the PARENT's handover under whichever rule is binding. 0.675/0.975 of
+        // it reproduce the old arc*kLodFactor*{1.35, 1.95} exactly when the wave rule is inert,
+        // so a globe frame's bands are unchanged to the bit.
+        const double dHand = SplitRange(wp, arc * 2.0);
+        const float morphStart = static_cast<float>(dHand * 0.675);
+        const float morphEnd = static_cast<float>(dHand * 0.975);
+        // M9bk PROBE: how many leaves sit PAST their own morph band (k == 1, odd vertices
+        // snapped onto even = the level renders at half the resolution the walk paid for)?
+        if (dist > morphEnd) ++walkMorphFull;
+        else if (dist > morphStart) ++walkMorphPart;
+        if (m_msPath) {
+            const size_t base = m_meshlets.size();
+            EmitMeshlets(face, u0, v0, size, arc, morphStart, morphEnd, wp.camPos, slot);
+            // Step 23: the seam table's key. size is 2^-level and u0, v0 are multiples of
+            // it, so the level and the grid position are exact integers. M10: the Droste slot
+            // rides the top bits, so seams never cross levels.
+            if (m_meshlets.size() == base + 16) {
+                const int level = static_cast<int>(std::lround(-std::log2(size)));
+                const uint64_t ix = static_cast<uint64_t>(std::llround(u0 / size));
+                const uint64_t iy = static_cast<uint64_t>(std::llround(v0 / size));
+                m_leafKeys.push_back(LeafKey{(static_cast<uint64_t>(slot) << 61) |
+                                                 (static_cast<uint64_t>(face) << 58) |
+                                                 (static_cast<uint64_t>(level) << 52) |
+                                                 (ix << 26) | iy,
+                                             static_cast<uint32_t>(base)});
+            }
+            return;
+        }
+        if (slot != 0u) return;   // the VS fallback draws the camera's own level only
+        NodeData nd{};
+        nd.uv0[0] = static_cast<float>(u0);
+        nd.uv0[1] = static_cast<float>(v0);
+        nd.uvStep[0] = static_cast<float>(size / 32.0);
+        nd.uvStep[1] = static_cast<float>(size / 32.0);
+        nd.face = static_cast<uint32_t>(face);
+        nd.morphStart = morphStart;
+        nd.morphEnd = morphEnd;
+        m_nodes.push_back(nd);
+    };
+    // Step 24 (docs/PERF_EXPERIMENT.md): THE EYE'S OWN CUBE FACE FIRST. The near surface
+    // records before the far subtrees, so early-Z rejects their fragments instead of shading
+    // them and letting GREATER overwrite. The node set, the want set and the records are the
+    // old ones -- only the order they are emitted in changes -- and that is exact only
+    // because step 23 closed the shell (docs/ALGEBRA.md priors 27/28: with the cracks open
+    // the same rotation moved a pixel). MEASURED: all four settled poses bit-identical
+    // across binaries, and [gpu] globe.mesh 3.082 -> 2.718 ms whole-rail, 4.981 -> 4.472
+    // over the helm phase, p95 5.297 -> 4.801 (fenced; the overlap bench reads the same
+    // -0.53 ms helm and takes the shipped loop 4.73 -> 4.30 ms).
+    for (int i = 0; i < 6; ++i) {
+        WalkNode(wp, walkNodes, (wp.camFace + i) % 6, 0, 0.0, 0.0, 1.0, leaf);
+    }
+}
+
 void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, double simTime) {
     if (!m_globe || !m_globe->Ready()) return;
     m_viewportH = viewportH;
@@ -1513,67 +1696,62 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_meshlets.clear();
     m_leafKeys.clear();
     m_meshletDrops = 0;
-    // The real walk's leaf: the wants straight to the manager (this frame's stamp), then the
-    // draw records. The prefetch walk's leaf (PredictWorker) records rects instead; both run
-    // WalkNode / LeafWants above.
-    auto leaf = [&](int face, double u0, double v0, double size, double arc, double dist) {
-        ++walkLeaves;
-        const auto wt0 = std::chrono::steady_clock::now();
-        auto emit = [&](int tenant, uint32_t f, uint32_t mip, float u0r, float v0r, float u1r,
-                        float v1r) { m_res->Want(tenant, f, mip, u0r, v0r, u1r, v1r); };
-        LeafWants(m_wp, face, u0, v0, size, arc, dist, emit);
-        walkWantNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                   std::chrono::steady_clock::now() - wt0).count());
-
-        // Per-LEVEL morph ramp (identical on both sides of every seam = crack-free): fade this
-        // LOD out across the band where its parent would still be split.
-        // M9bk: against the PARENT's handover under whichever rule is binding. 0.675/0.975 of
-        // it reproduce the old arc*kLodFactor*{1.35, 1.95} exactly when the wave rule is inert,
-        // so a globe frame's bands are unchanged to the bit.
-        const double dHand = SplitRange(m_wp, arc * 2.0);
-        const float morphStart = static_cast<float>(dHand * 0.675);
-        const float morphEnd = static_cast<float>(dHand * 0.975);
-        // M9bk PROBE: how many leaves sit PAST their own morph band (k == 1, odd vertices
-        // snapped onto even = the level renders at half the resolution the walk paid for)?
-        if (dist > morphEnd) ++walkMorphFull;
-        else if (dist > morphStart) ++walkMorphPart;
-        if (m_msPath) {
-            const size_t base = m_meshlets.size();
-            EmitMeshlets(face, u0, v0, size, arc, morphStart, morphEnd);
-            // Step 23: the seam table's key. size is 2^-level and u0, v0 are multiples of
-            // it, so the level and the grid position are exact integers.
-            if (m_meshlets.size() == base + 16) {
-                const int level = static_cast<int>(std::lround(-std::log2(size)));
-                const uint64_t ix = static_cast<uint64_t>(std::llround(u0 / size));
-                const uint64_t iy = static_cast<uint64_t>(std::llround(v0 / size));
-                m_leafKeys.push_back(LeafKey{(static_cast<uint64_t>(face) << 58) |
-                                                 (static_cast<uint64_t>(level) << 52) |
-                                                 (ix << 26) | iy,
-                                             static_cast<uint32_t>(base)});
-            }
-            return;
+    for (uint32_t& n : levelRecords) n = 0;
+    // The camera's own level: slot 0, the identity gauge -- exactly the walk this always was.
+    WalkLevel(m_wp, 0u);
+    levelRecords[0] = static_cast<uint32_t>(m_meshlets.size());
+    // ---- M10: THE CYCLE, TAKEN. Each further level is the ROOT walked again under the eye
+    // S^-k(C) (Droste.h). Everything the walk reads is scale-free or already in the level's own
+    // units: the split rule compares distance to arc, the horizon test is angular, and the
+    // frustum's planes carry across as n -> Q^T n, d -> d / s^k (a similarity keeps planes
+    // planes). Its wants go to the SAME tenants at the SAME addresses -- the sparse structure
+    // answers every level from one resident set, and a small globe asks only for coarse mips
+    // the root already holds. Its records carry their slot, so the mesh stage knows which
+    // gauge to rasterize them through.
+    for (size_t li = 0; li < m_levels.size() && m_msPath; ++li) {
+        const DrosteLevel& L = m_levels[li];
+        const uint32_t slot = static_cast<uint32_t>(li + 1);
+        // WHERE THE RECURSION STOPS: a globe under half a pixel has nothing to walk. The
+        // screen, not a depth limit, ends the tower (the eye's distance to the level's planet
+        // centre, in that level's own units, against the pixel's angle).
+        const double ry = m_radius + L.cam[1];
+        const double dC = std::sqrt(L.cam[0] * L.cam[0] + ry * ry + L.cam[2] * L.cam[2]);
+        const double angR = std::asin((std::min)(m_radius / (std::max)(dC, 1.0), 1.0));
+        if (angR < double(m_wp.pixAng) * 0.5) continue;
+        WalkParams wp = m_wp;
+        for (int i = 0; i < 3; ++i) {
+            wp.camPos[i] = L.cam[i];
+            wp.camPlanet[i] = m_frameU[i] * ry + m_frameE[i] * L.cam[0] + m_frameN[i] * L.cam[2];
         }
-        NodeData nd{};
-        nd.uv0[0] = static_cast<float>(u0);
-        nd.uv0[1] = static_cast<float>(v0);
-        nd.uvStep[0] = static_cast<float>(size / 32.0);
-        nd.uvStep[1] = static_cast<float>(size / 32.0);
-        nd.face = static_cast<uint32_t>(face);
-        nd.morphStart = morphStart;
-        nd.morphEnd = morphEnd;
-        m_nodes.push_back(nd);
-    };
-    // Step 24 (docs/PERF_EXPERIMENT.md): THE EYE'S OWN CUBE FACE FIRST. The near surface
-    // records before the far subtrees, so early-Z rejects their fragments instead of shading
-    // them and letting GREATER overwrite. The node set, the want set and the records are the
-    // old ones -- only the order they are emitted in changes -- and that is exact only
-    // because step 23 closed the shell (docs/ALGEBRA.md priors 27/28: with the cracks open
-    // the same rotation moved a pixel). MEASURED: all four settled poses bit-identical
-    // across binaries, and [gpu] globe.mesh 3.082 -> 2.718 ms whole-rail, 4.981 -> 4.472
-    // over the helm phase, p95 5.297 -> 4.801 (fenced; the overlap bench reads the same
-    // -0.53 ms helm and takes the shipped loop 4.73 -> 4.30 ms).
-    for (int i = 0; i < 6; ++i) {
-        WalkNode(m_wp, walkNodes, (m_wp.camFace + i) % 6, 0, 0.0, 0.0, 1.0, leaf);
+        {
+            const double ax = std::abs(wp.camPlanet[0]), ay = std::abs(wp.camPlanet[1]),
+                         az = std::abs(wp.camPlanet[2]);
+            const int axis = (ax >= ay && ax >= az) ? 0 : (ay >= az ? 1 : 2);
+            wp.camFace = axis * 2 + (wp.camPlanet[axis] < 0.0 ? 1 : 0);
+        }
+        wp.reliefExagg = L.reliefExagg;
+        // The wave-grain rule refines toward the bank's fine rings; a level with no ring set
+        // is seen from beyond them, so the rule has nothing to reach for there.
+        if (L.bankSet < 0) wp.waveGrainM = 0.0f;
+        // A level ABOVE the camera's is the world its planet floats in -- and that planet (the
+        // portal sphere, in this level's own frame) hides most of it.
+        if (L.rel < 0) {
+            for (int i = 0; i < 4; ++i) wp.occ[i] = m_portal[i];
+        }
+        // Every extra level culls with its LOCAL relief, and past its own horizon at any
+        // altitude (the step-23 far test: nothing seen from under 10 km lies 0.1 rad beyond it).
+        wp.relief = m_globe;
+        wp.probeCullFar = true;
+        for (int p = 0; p < m_wp.planeCount; ++p) {
+            const double* n = m_wp.frustum[p];
+            for (int j = 0; j < 3; ++j) {
+                wp.frustum[p][j] = L.Q[0][j] * n[0] + L.Q[1][j] * n[1] + L.Q[2][j] * n[2];
+            }
+            wp.frustum[p][3] = n[3] / L.sigma;
+        }
+        const size_t before = m_meshlets.size();
+        WalkLevel(wp, slot);
+        levelRecords[slot] = static_cast<uint32_t>(m_meshlets.size() - before);
     }
     if (m_msPath) SeamTable();
     // M8h: a dropped leaf is a hole. Report on the transition (once per episode), with
@@ -1582,6 +1760,14 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         Log("[globe] meshlet budget hit: %u leaves dropped (%zu/%u records) -- holes "
             "until the view coarsens",
             m_meshletDrops, m_meshlets.size(), kMaxMeshlets);
+        if (!m_levels.empty()) {
+            Log("[globe]   records by Droste slot: own %u | %u %u %u %u %u (rel %d %d %d %d %d)",
+                levelRecords[0], levelRecords[1], levelRecords[2], levelRecords[3],
+                levelRecords[4], levelRecords[5],
+                m_levels.size() > 0 ? m_levels[0].rel : 0, m_levels.size() > 1 ? m_levels[1].rel : 0,
+                m_levels.size() > 2 ? m_levels[2].rel : 0, m_levels.size() > 3 ? m_levels[3].rel : 0,
+                m_levels.size() > 4 ? m_levels[4].rel : 0);
+        }
         m_dropsReported = true;
     } else if (m_meshletDrops == 0) {
         m_dropsReported = false;
@@ -1624,7 +1810,9 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
                                m_camPos[2] * m_camPos[2]);
     m_cb.glo[0] = static_cast<float>(m_radius);
     m_cb.glo[1] = reliefExagg;
-    m_cb.glo[2] = static_cast<float>(m_nodes.size());
+    // z = the draw's unit count: CDLOD nodes on the fallback, meshlet records on the mesh path
+    // (M10: GlobeMesh.hlsl bounds its folded 2-D group id by it). Exact in a float to 2^24.
+    m_cb.glo[2] = static_cast<float>(m_msPath ? m_meshlets.size() : m_nodes.size());
     m_cb.glo[3] = static_cast<float>(std::fmod(simTime, 3600.0));
     // M6g: gCamAbs = sphere-CENTRED tangent camera (flat + (0,R,0); the sum in doubles).
     m_cb.camAbs[0] = static_cast<float>(m_camPos[0]);
@@ -1752,6 +1940,55 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         m_cb.optU[2] = 0;
     }
 
+    // ---- M10: THE LEVEL TABLE. Slot 0 is the camera's own level -- the identity gauge, the
+    // scene's sun, set A -- so with no Droste link the table says exactly what the old
+    // constants said. Slots 1..n are the extra levels SetDroste handed over.
+    memset(m_cb.droste, 0, sizeof(m_cb.droste));
+    auto fillLevel = [&](uint32_t slot, const double c[3], double sigma, const double Q[3][3],
+                         float exag, const float sun[3], int bank, const float skyUp[3],
+                         float skyDay) {
+        float* r = m_cb.droste + slot * 24u;
+        r[0] = static_cast<float>(c[0]);
+        r[1] = static_cast<float>(c[1] + m_radius);   // sphere-centred, summed in doubles
+        r[2] = static_cast<float>(c[2]);
+        r[3] = static_cast<float>(sigma);
+        for (int row = 0; row < 3; ++row) {
+            for (int col = 0; col < 3; ++col) r[4 + row * 4 + col] = static_cast<float>(Q[row][col]);
+        }
+        r[7] = exag;
+        r[11] = static_cast<float>(c[1]);
+        r[15] = static_cast<float>(bank);
+        r[16] = sun[0];
+        r[17] = sun[1];
+        r[18] = sun[2];
+        r[20] = skyUp[0];
+        r[21] = skyUp[1];
+        r[22] = skyUp[2];
+        r[23] = skyDay;
+    };
+    {
+        const double I3[3][3] = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}};
+        fillLevel(0u, m_camPos, 1.0, I3, reliefExagg, m_camSun, 0, m_camSkyUp, m_camSkyDay);
+        for (size_t li = 0; li < m_levels.size(); ++li) {
+            const DrosteLevel& L = m_levels[li];
+            fillLevel(static_cast<uint32_t>(li + 1), L.cam, L.sigma, L.Q, L.reliefExagg, L.sun,
+                      L.bankSet, L.skyUp, L.skyDay);
+        }
+    }
+    m_cb.drosteA[0] = static_cast<float>(1 + m_levels.size());
+    m_cb.drosteA[1] = static_cast<float>(m_camLevelAbs);
+    m_cb.drosteA[2] = static_cast<float>(m_lighting);
+    m_cb.drosteA[3] = (m_drosteOn && m_portal[3] > 0.0) ? 1.0f : 0.0f;
+    for (int i = 0; i < 3; ++i) m_cb.drostePortal[i] = static_cast<float>(m_portal[i]);
+    m_cb.drostePortal[3] = m_drosteOn ? static_cast<float>(m_portal[3]) : 0.0f;
+    m_cb.bankBU[0] = m_bankB[0];
+    m_cb.bankBU[1] = m_bankB[1];
+    m_cb.bankBU[2] = m_bankB[2];
+    m_cb.bankBU[3] = (m_bankBOn && m_bankB[0] != 0xFFFFFFFFu) ? 1u : 0u;
+    memcpy(m_cb.bankBOrg01, &m_bankBOrg[0], 16);
+    memcpy(m_cb.bankBOrg23, &m_bankBOrg[4], 16);
+    memcpy(m_cb.bankBOrg45, &m_bankBOrg[8], 16);
+
     // The sky pass rebuilds pixel rays from this basis (b2). M6j: the ONE render basis --
     // the shell can no longer roll apart from the surface it wraps.
     XMFLOAT3 cf, cr, cu;
@@ -1762,6 +1999,45 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_skyCb.right[3] = aspect;
     m_skyCb.up[0] = cu.x; m_skyCb.up[1] = cu.y; m_skyCb.up[2] = cu.z;
     m_skyCb.up[3] = 0.0f;
+    // M10: THE LIMBS. Every level whose air the eye is OUTSIDE of wears its limb (PsLimb, after
+    // the surface) -- one rule for every slot, the camera's own included, because the re-root is
+    // a gauge change and a rule keyed on "which slot is the camera's" would move a limb on it
+    // (priors 36). The backdrop keeps the camera level's air only while the eye is inside it,
+    // and then only at its share of the space backdrop (skyOwnAir); without Droste lvl = (0,1,0)
+    // is the shipped backdrop exactly.
+    m_limbCount = 0;
+    m_skyCb.lvl[0] = 0.0f;
+    m_skyCb.lvl[1] = 1.0f;
+    m_skyCb.lvl[2] = 0.0f;
+    m_skyCb.lvl[3] = 0.0f;
+    for (int i = 0; i < 3; ++i) m_skyCb.spaceSun[i] = m_spaceSun[i];
+    m_skyCb.spaceSun[3] = 0.0f;
+    if (m_drosteOn && m_msPath && !albedoLens) {
+        const double top = m_radius + 60000.0;   // Globe.hlsl kAtmTop
+        struct Cand { uint32_t slot; double dist; };
+        Cand cand[kMaxLevels];
+        int nc = 0;
+        // True if the eye is outside the level's air. Its limb joins the list when the shell
+        // spans a pixel; the list is sorted by the TRUE distance to the shell.
+        auto consider = [&](uint32_t slot, const double c[3], double sigma) {
+            const double ry = m_radius + c[1];
+            const double dC = std::sqrt(c[0] * c[0] + ry * ry + c[2] * c[2]);
+            if (dC <= top) return false;
+            if (std::asin(top / dC) >= double(m_wp.pixAng) && nc < kMaxLevels) {
+                cand[nc++] = {slot, sigma * (dC - top)};
+            }
+            return true;
+        };
+        const bool outside0 = consider(0u, m_camPos, 1.0);
+        for (size_t li = 0; li < m_levels.size(); ++li) {
+            consider(static_cast<uint32_t>(li + 1), m_levels[li].cam, m_levels[li].sigma);
+        }
+        std::sort(cand, cand + nc, [](const Cand& a, const Cand& b) { return a.dist > b.dist; });
+        for (int i = 0; i < nc; ++i) m_limbSlots[m_limbCount++] = cand[i].slot;
+        m_skyCb.lvl[1] = outside0 ? 0.0f : std::clamp(skyOwnAir, 0.0f, 1.0f);
+        m_skyCb.lvl[2] = 1.0f;
+        m_skyCb.lvl[3] = m_wp.pixAng;   // the limb is filtered over this footprint
+    }
     // (M6h: the M6b destination beacon is fully retired -- row and shader block deleted.)
 
     char s[96];
@@ -1773,6 +2049,11 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
                  (r - m_radius) / 1000.0);
     }
     stats = s;
+    if (m_drosteOn) {
+        char d[96];
+        snprintf(d, sizeof(d), "  droste L%d x%zu", m_camLevelAbs, 1 + m_levels.size());
+        stats += d;
+    }
     if (m_res) stats += "  " + m_res->stats;
 }
 
@@ -1794,6 +2075,9 @@ void GlobeLayer::Render(const FrameContext& ctx) {
         GpuScope gscope(ctx.prof, ctx.cl, "globe.sky");
         PixMarker(ctx.cl, "globe.sky (single-scatter shell: the limb past the disc)");
         ctx.cl->SetPipelineState(m_skyPso.Get());
+        const float w = std::clamp(skyPassWeight, 0.0f, 1.0f);
+        const float bf[4] = {w, w, w, w};
+        ctx.cl->OMSetBlendFactor(bf);
         ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         ctx.cl->SetGraphicsRootConstantBufferView(1, cbVa);
         ctx.cl->SetGraphicsRootConstantBufferView(
@@ -1824,7 +2108,26 @@ void GlobeLayer::Render(const FrameContext& ctx) {
         ctx.cl->SetPipelineState(msSel);
         ctx.cl->SetGraphicsRootConstantBufferView(1, cbVa);
         ctx.cl->SetGraphicsRootShaderResourceView(2, rec.res->GetGPUVirtualAddress());
-        m_cl6->DispatchMesh(static_cast<UINT>(m_meshlets.size()), 1, 1);
+        // M10: 2-D, because one dimension caps at 65535 groups (GlobeMesh.hlsl folds y*65535+x).
+        const UINT n = static_cast<UINT>(m_meshlets.size());
+        m_cl6->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
+
+        // 3) M10: the limbs of every planet whose air the eye is outside of, over the surface
+        // just drawn (SetView chose the slots, farthest first).
+        if (m_limbPso && m_limbCount > 0) {
+            GpuScope lscope(ctx.prof, ctx.cl, "globe.limbs");
+            PixMarker(ctx.cl, "globe.limbs (each level's shell over what lies behind it)");
+            ctx.cl->SetPipelineState(m_limbPso.Get());
+            ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            ctx.cl->SetGraphicsRootConstantBufferView(1, cbVa);
+            for (int li = 0; li < m_limbCount; ++li) {
+                SkyCbData lc = m_skyCb;
+                lc.lvl[0] = static_cast<float>(m_limbSlots[li]);
+                ctx.cl->SetGraphicsRootConstantBufferView(
+                    4, ctx.gpu->PushConstants(&lc, sizeof(lc)));
+                ctx.cl->DrawInstanced(3, 1, 0, 0);
+            }
+        }
         return;
     }
     ID3D12PipelineState* sel = m_pso.Get();

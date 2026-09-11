@@ -51,6 +51,25 @@ ffmpeg -y -framerate 30 -i DIR/rail_%04d.png -c:v libx264 -pix_fmt yuv420p -crf 
 Showcase conditions: storm ascent `--storm 3.0,10,95 --start 2026-08-28T19:30:00` (max
 ebb — the whitewater river over the shoal); calm evening low `--start 2026-08-28T22:15:00`.
 
+**M10 — the Droste rails (the globe within the globe; `math('droste')`).** `--droste` hangs
+the root under a leaf of its own quadtree (default: the level-16 leaf at the entrance mouth, a
+153 m inner Earth resting on the bed, a quarter twist per level about north). On the storm
+preset:
+
+```bat
+build\bin\gagame.exe --sea --one-water --pixel-water --storm 3.0,10,95 --start 2026-08-28T14:00:00 --tile-budget 3000 --rail-droste out\droste\dive --mp4 out\droste\dive.mp4 --droste-light appealing --droste-levels 2 --droste-level-sec 20
+```
+
+`--rail-droste DIR` flies the storm rail to the helm (its last key re-aimed at the fixed point),
+then the similarity's own logarithmic spiral pose(u) = S^u(helm), one level per
+`--droste-level-sec`, `--droste-levels` deep. `--rail-droste-out DIR` is the out-and-back: in
+two levels, turn at the bottom, back out along the same spiral facing outward, then the climb to
+orbit. `--droste-light realistic|appealing` is the lighting A/B (realistic: one real sun, so the
+twisted inner Merrimacks face away from it and are at night; appealing: every level lit as the
+root). `--droste-at lat,lon,level`, `--droste-fill f` and `--droste-twist deg` move and reshape
+the link (under ~75° of twist the dive runs from 45° above the mouth instead of through the
+helm). The log names every re-root (`[droste] frame N: the nearest ground is now level k`).
+
 ## launch-verify — The verification loop (run before believing anything)
 
 - `--selftest` — the seven gates: pga, gatest (GA products + fold + frames + AST

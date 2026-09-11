@@ -39,6 +39,25 @@ cbuffer SceneCb : register(b0) {
 #define gExposure    (gParams1.w)
 #define WATER_Y_M    (gMisc.x)
 
+// M10 THE DROSTE GAUGE. The sky and haze helpers below read the sun and the eye's height
+// through these two names, so a shader that draws a level OTHER than the camera's own (Globe.hlsl:
+// the inner and outer globes are the root seen from S^-k(C), shaded in their own frame) can hand
+// them that level's values before including this file. Every other shader gets the scene's own,
+// byte for byte.
+#ifndef GA_SUN_DIR
+#define GA_SUN_DIR (gSunDir.xyz)
+#endif
+#ifndef GA_EYE_Y
+#define GA_EYE_Y (gEyeRel.y)
+#endif
+// ...and WHOSE sky it is: the zenith the sky gradient is measured from. Inside a twisted Droste
+// level under realistic lighting the sky above is the ROOT's (the inner planet's own air is thin
+// and, on its night side, dark), so the gradient runs from the root's zenith, not the level's.
+// Every other shader: +y, and dot(d, (0,1,0)) is d.y exactly.
+#ifndef GA_SKY_UP
+#define GA_SKY_UP (float3(0.0f, 1.0f, 0.0f))
+#endif
+
 // Mirrors ga::FieldDesc in src/scene/FieldSet.h (64 bytes).
 struct FieldDesc {
     float4 worldToUv;    // uv = worldXZ * xy + zw
@@ -141,8 +160,9 @@ float3 SkyRadiance(float ey) { return lerp(SKY_LO_C, SKY_HI_C, smoothstep(0.0f, 
 // ** THE SUN MUST BE IN HERE ** -- vqview measured an entire HDR frame under 1.0 luminance when
 // the reflection used the gradient-only form; no tonemapper can invent a missing highlight.
 float3 SkyRadianceDir(float3 dir) {
-    float3 col = SkyRadiance(dir.y);
-    const float cosA = dot(dir, gSunDir.xyz);
+    const float ey = dot(dir, GA_SKY_UP);
+    float3 col = SkyRadiance(ey);
+    const float cosA = dot(dir, GA_SUN_DIR);
     // M9bi: the disc is the sun's ACTUAL angular size (gMisc.yz, from the Earth-Sun distance
     // of this frame), not the two hand-picked cosines that stood here -- those spanned 0.44 to
     // 0.99 degrees against a true radius of 0.2666, so the sun was drawn 1.7x to 3.7x too wide.
@@ -150,7 +170,7 @@ float3 SkyRadianceDir(float3 dir) {
     const float halo = pow(saturate(cosA), 350.0f) * 0.35f + pow(saturate(cosA), 12.0f) * 0.05f;
     col += SUN_IRR_C * (disc * 12.0f + halo);
     // Below the horizon there is no sky, so darken rather than mirroring the horizon band.
-    return lerp(col, SKY_LO_C * 0.45f, smoothstep(0.0f, -0.06f, dir.y));
+    return lerp(col, SKY_LO_C * 0.45f, smoothstep(0.0f, -0.06f, ey));
 }
 
 // M6t: the sky WITHOUT the specular sun disc (halo kept -- that is scattered skylight, not
@@ -158,23 +178,28 @@ float3 SkyRadianceDir(float3 dir) {
 // BRDF owns the sun through Cox-Munk at every scale, and the mirror disc here on top of a
 // helm-tight lobe would count the sun twice.
 float3 SkyRadianceDirDiscless(float3 dir) {
-    float3 col = SkyRadiance(dir.y);
-    const float cosA = dot(dir, gSunDir.xyz);
+    const float ey = dot(dir, GA_SKY_UP);
+    float3 col = SkyRadiance(ey);
+    const float cosA = dot(dir, GA_SUN_DIR);
     col += SUN_IRR_C * (pow(saturate(cosA), 350.0f) * 0.35f + pow(saturate(cosA), 12.0f) * 0.05f);
-    return lerp(col, SKY_LO_C * 0.45f, smoothstep(0.0f, -0.06f, dir.y));
+    return lerp(col, SKY_LO_C * 0.45f, smoothstep(0.0f, -0.06f, ey));
 }
 
 // Aerial perspective: exponential extinction toward the sky colour along the view ray. The 6 km
 // scale keeps mid-field wave contrast alive on the open sea; vqview's 2.5 km suited a 470 m
 // scene.
-float3 AerialPerspective(float3 col, float3 viewDir, float range) {
+// M10: AerialPerspectiveDay is the same haze with the hour in it. The light the haze scatters
+// toward the eye is the SKY's, so it dims with the sky: at day = 1 it is AerialPerspective
+// exactly (every existing caller keeps its bytes), at night the air still attenuates but adds
+// no daylight.
+float3 AerialPerspectiveDay(float3 col, float3 viewDir, float range, float day) {
     // Height-integrated airmass (M6b): haze density falls off exp(-y/H), so the effective path
     // is the integral of density along the ray, not its raw length -- a helm-height horizontal
     // view keeps the sea-level look, while a view DOWN from 2.6 km no longer drowns the estuary
     // in fog (the pre-M6b constant-density version did exactly that the moment the camera could
     // fly). Closed form: L_eff = H/dy * (exp(-y0/H) - exp(-(y0+L*dy)/H)), dy != 0.
     const float H = 1300.0f;                       // haze scale height, m
-    const float y0 = max(gEyeRel.y, 0.0f);
+    const float y0 = max(GA_EYE_Y, 0.0f);
     const float dy = viewDir.y;
     float leff;
     if (abs(dy) < 1e-3f) {
@@ -183,7 +208,10 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
         leff = (H / dy) * (exp(-y0 / H) - exp(-(y0 + range * dy) / H));
     }
     const float t = 1.0f - exp(-max(leff, 0.0f) / 6000.0f);
-    return lerp(col, SkyRadiance(viewDir.y), saturate(t));
+    return lerp(col, SkyRadiance(viewDir.y) * day, saturate(t));
+}
+float3 AerialPerspective(float3 col, float3 viewDir, float range) {
+    return AerialPerspectiveDay(col, viewDir, range, 1.0f);
 }
 
 // M6i: the composed-surface constants -- 9 float4 rows a layer embeds in its OWN cbuffer to

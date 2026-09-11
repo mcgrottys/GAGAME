@@ -61,7 +61,16 @@ void SkyLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
 
 void SkyLayer::Render(const FrameContext& ctx) {
     if (!m_pso) return;
+    // M10: the sky's frame (Sky.hlsl SkyFrameCb, b1): three rotation rows and the sun.
+    struct { float r0[4], r1[4], r2[4], sun[4]; } cb{};
+    for (int i = 0; i < 3; ++i) {
+        cb.r0[i] = m_rot[i];
+        cb.r1[i] = m_rot[3 + i];
+        cb.r2[i] = m_rot[6 + i];
+        cb.sun[i] = m_sun[i];
+    }
     ctx.cl->SetPipelineState(m_pso.Get());
+    ctx.cl->SetGraphicsRootConstantBufferView(1, ctx.gpu->PushConstants(&cb, sizeof(cb)));
     ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx.cl->DrawInstanced(3, 1, 0, 0);
 }
