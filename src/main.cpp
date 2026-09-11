@@ -63,6 +63,7 @@
 #include "scene/VesselLayer.h"
 #include "sim/SimClock.h"
 #include "core/DxTest.h"
+#include "core/Droste.h"   // M10: the globe within the globe, as one Cl(4,1) versor
 #include "core/Pga.h"
 #include "core/TileProviders.h"
 #include "core/SceneConfig.h"
@@ -255,6 +256,18 @@ struct Options {
                                       // With the prism source term + Flather + per-axis
                                       // metric + walled jetties the solver's throat core
                                       // reads 0.93 vs ACT 1.06 -- honest at gain 1
+    // ---- M10 THE DROSTE LINK (src/core/Droste.h): the root's address, hung as a leaf.
+    bool droste = false;              // --droste: link the root under a leaf of itself
+    double drosteLat = 42.81826;      // --droste-at lat,lon[,level]: the leaf is the one at this
+    double drosteLon = -70.80045;     // place (default: the entrance mouth, east of the jetty
+    int drosteLevel = 16;             // tips) and this quadtree level (16 = a 153 m leaf)
+    double drosteFill = 1.0;          // --droste-fill f: the inner globe's diameter / leaf span
+    double drosteTwistDeg = 90.0;     // --droste-twist deg: the twist per level about north
+    int drosteLight = 0;              // --droste-light realistic|appealing (the lighting A/B)
+    bool railDroste = false;          // --rail-droste DIR: the storm rail, then the dive
+    bool railDrosteOut = false;       // --rail-droste-out DIR: in two levels, turn, fly out
+    double drosteLevelSec = 16.0;     // --droste-level-sec s: rail seconds per level
+    int drosteLevels = 3;             // --droste-levels n: how deep the dive rail goes
 };
 
 std::wstring Widen(const char* s) {
@@ -338,6 +351,38 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--rail-zoom") { o.rail = Widen(next("rail_frames").c_str()); o.railZoom = true; }
         else if (a == "--rail-flood") { o.rail = Widen(next("rail_frames").c_str()); o.railFlood = true; }
         else if (a == "--rail-jetty") { o.rail = Widen(next("rail_frames").c_str()); o.railJetty = true; }
+        // M10: the Droste rails. Both ride the storm rail's keys to the helm (--rail-droste
+        // implies the flood keys), then leave them for the similarity's own spiral.
+        else if (a == "--rail-droste") {
+            o.rail = Widen(next("rail_frames").c_str());
+            o.railFlood = true;
+            o.railDroste = true;
+            o.droste = true;
+        }
+        else if (a == "--rail-droste-out") {
+            o.rail = Widen(next("rail_frames").c_str());
+            o.railFlood = true;
+            o.railDrosteOut = true;
+            o.droste = true;
+        }
+        else if (a == "--droste") o.droste = true;
+        else if (a == "--droste-at") {
+            const std::string v = next("42.81826,-70.80045,16");
+            double la = o.drosteLat, lo = o.drosteLon;
+            int lv = o.drosteLevel;
+            const int n = sscanf_s(v.c_str(), "%lf,%lf,%d", &la, &lo, &lv);
+            if (n >= 2) { o.drosteLat = la; o.drosteLon = lo; }
+            if (n >= 3) o.drosteLevel = std::clamp(lv, 4, 20);
+            o.droste = true;
+        }
+        else if (a == "--droste-fill") o.drosteFill = std::clamp(atof(next("1").c_str()), 0.05, 2.0);
+        else if (a == "--droste-twist") o.drosteTwistDeg = atof(next("90").c_str());
+        else if (a == "--droste-light") {
+            const std::string n = next("realistic");
+            o.drosteLight = (n == "appealing" || n == "1") ? 1 : 0;
+        }
+        else if (a == "--droste-level-sec") o.drosteLevelSec = std::clamp(atof(next("16").c_str()), 2.0, 120.0);
+        else if (a == "--droste-levels") o.drosteLevels = std::clamp(atoi(next("3").c_str()), 1, 6);
         else if (a == "--trace") {
             // M7j: THE HYPERVISOR. One sample walked through the whole one-water chain on
             // the CPU, every transformation printed with its AST edge -- validate against
@@ -605,6 +650,15 @@ Options ParseArgs(int argc, char** argv) {
         // An explicit --frames wins: dumping a rail at a CHOSEN moment is how you inspect
         // something a viewer noticed at 0:12 rather than guessing camera arguments for it.
         if (!o.framesSet) o.frames = o.railJetty                             ? 40 * 30
+                                : o.railDroste
+                                    // storm rail + the 2 s helm hold + the dive (whose ease-in
+                                    // costs half its 3 s ramp) + a 2 s hold on the last helm
+                                    ? static_cast<uint32_t>((40.0 + 2.0 + 1.5 +
+                                                             o.drosteLevels * o.drosteLevelSec + 2.0) * 30.0)
+                                : o.railDrosteOut
+                                    // 14 s of storm rail + 2 s hold + in (2T) + 3 s turn +
+                                    // out (2T) + the 28 s climb to orbit
+                                    ? static_cast<uint32_t>((47.0 + 4.0 * o.drosteLevelSec) * 30.0)
                                 : o.railFlood                        ? 40 * 30
                                 : (o.railZoom || o.planet == "mars") ? 30 * 30
                                                                      : 25 * 30;
@@ -2194,6 +2248,7 @@ int main(int argc, char** argv) {
         sceneWatch.Start(kScenePath);
 
         WaterBankLayer* waterBank = nullptr;
+        WaterBankLayer* waterBankB = nullptr;   // M10: the outer level's rings (set B)
         if (sea && bathy.Ready() && !marsMode) {
             auto wbOwned = std::make_unique<WaterBankLayer>();
             waterBank = wbOwned.get();
@@ -2210,6 +2265,23 @@ int main(int argc, char** argv) {
             }
             waterBank->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             renderer.AddLayer(std::move(wbOwned));
+            // M10: SET B -- the rings of the level the camera's planet FLOATS IN (Droste.h). The
+            // bank is a camera-anchored ladder and under the gauge every level has its own eye;
+            // the outer sea is seen from S(C), so its waves need rings anchored there. Stateless
+            // like the first bank (every tile recomputed each frame), so it costs one more fill
+            // and a second small atlas, and it runs only while an outer level exists.
+            if (opt.droste && opt.oneWater) {
+                auto wbB = std::make_unique<WaterBankLayer>();
+                waterBankB = wbB.get();
+                waterBankB->Configure(opt.shaderDir, sea, &swe, &bathy, &waterAtlas, &compositor,
+                                      hgtCh, &globeModel, &seaState);
+                waterBankB->SetBaseTexel(waterScene.bankTexelM);
+                waterBankB->flatBed = opt.flatBed;
+                waterBankB->flatBedNavd = opt.flatBedNavd;
+                waterBankB->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
+                waterBankB->enabled = false;   // until the camera has a level above it
+                renderer.AddLayer(std::move(wbB));
+            }
             sea->drawEnabled = !opt.oneWater;
             if (opt.oneWater) {
                 Log("[waterbank] ONE-WATER: the SeaLayer grid retires; the globe's meshlets "
@@ -3224,6 +3296,41 @@ int main(int argc, char** argv) {
                                         bathy.WorldSizeZ() / BathyModel::kMPerLat);
             }
         }
+        // ---- M10: THE DROSTE LINK (src/core/Droste.h). The root's ADDRESS, hung as a leaf:
+        // the quadtree leaf at (drosteLat, drosteLon, drosteLevel) gets the root as its child.
+        // What that means in space follows from the address alone -- the globe's diameter is
+        // the leaf's span (x fill), it rests on the composed ground at the leaf's centre, and
+        // the fixed point where the tower converges is then FORCED by the similarity. The link
+        // is one Cl(4,1) versor; everything per frame is its closed form.
+        droste::Portal portal;
+        int camLevel = 0;   // the camera's ABSOLUTE level: 0 = the root, 1 = inside the first link
+        if (opt.droste && globe && !marsMode) {
+            double pd[3];
+            GlobeModel::LatLonDir(opt.drosteLat, opt.drosteLon, pd);
+            int lf = 0;
+            uint32_t lix = 0, liy = 0;
+            GlobeLayer::LeafOf(pd, opt.drosteLevel, lf, lix, liy);
+            double ld[3];
+            GlobeLayer::LeafDir(lf, opt.drosteLevel, lix, liy, ld);
+            const double latC = std::asin(std::clamp(ld[1], -1.0, 1.0));
+            const double lonC = std::atan2(ld[2], ld[0]);
+            const double spanM =
+                (3.14159265358979 / 2.0) * planetR / double(1u << opt.drosteLevel);
+            const double ground =
+                (hgtCh >= 0) ? double(compositor.SampleHeightStack(hgtCh, latC, lonC, spanM * 0.25))
+                             : 0.0;
+            const double twist = opt.drosteTwistDeg * 3.14159265358979 / 180.0;
+            const double axisN[3] = {0.0, 0.0, 1.0};   // the anchor's north, in the one frame
+            portal = droste::BuildPortal(lf, opt.drosteLevel, lix, liy, ld, east0, oDir, north0,
+                                         planetR, ground, opt.drosteFill, axisN, twist);
+            Log("[droste] the root hangs at leaf (face %d, level %d, %u, %u) = %.5f N %.5f E: "
+                "globe radius %.2f m (s %.4e, %.2f decades a level) resting on %.2f m, centre "
+                "(%.2f, %.2f, %.2f), twist %.1f deg about north, fixed point (%.4f, %.4f, %.4f)",
+                lf, opt.drosteLevel, lix, liy, latC * 57.29577951308232,
+                lonC * 57.29577951308232, portal.radius, portal.s, -std::log10(portal.s), ground,
+                portal.centre[0], portal.centre[1], portal.centre[2], opt.drosteTwistDeg,
+                portal.p[0], portal.p[1], portal.p[2]);
+        }
         // M6i: the terrain samples the SAME composed color the globe does -- one fill
         // function, one frame, one answer (its geometry stays the CUDEM grid the physics
         // reads, so its height channel is off).
@@ -3449,6 +3556,191 @@ int main(int argc, char** argv) {
             double u = (t - t0) / std::max(t1 - t0, 1e-6);
             u = u * u * (3.0 - 2.0 * u);   // ease both ends of every leg
             motorPose(Motor::Slerp(railKeys[i].second, railKeys[i + 1].second, u), out);
+        };
+
+        // ---- M10: THE DIVE (--rail-droste). The storm rail flies its keys to the helm -- its
+        // last key re-aimed at the fixed point -- and then the camera leaves the keys for the
+        // similarity's own one-parameter subgroup:
+        //
+        //     pose(u) = S^u(helm):   C(u) = p + s^u Q^u (C_helm - p),   view Q^u (fwd, up)
+        //
+        // the logarithmic spiral through the helm that converges on the fixed point. PGA could
+        // not write this path -- a motor has no scale -- and nothing about it is keyed: it is
+        // exp(u log S), with the level n = floor(u) handed to the frame and f = u - n the only
+        // number ever pushed through the versor, so the doubles never see s^n. Every level of
+        // the dive is the SAME flight one level down (S^(u+1) = S S^u); only the world around
+        // the tower says which level it is. The spiral runs at a constant rate in log-scale,
+        // d(ln |C - p|)/dt = ln(s) / T -- the logarithm the user asked for, with gravity's
+        // signature: the approach never arrives, it only gets smaller.
+        Camera drosteHelm;
+        drosteHelm.SetFromCompass(120.0, 7.0, -10.0, 92.5f, -1.5f);   // the storm rail's helm
+        drosteHelm.fovY = cam.fovY;
+        double drosteHelmUp[3] = {0.0, 1.0, 0.0};
+        // WHICH POSE THE SPIRAL RUNS THROUGH. The helm's spiral clears the inner globe only if
+        // the twist lifts it up and over: MEASURED (clearance over dist-to-p along S^u(helm),
+        // u in [0, 1.2]) -0.21 at 0 deg, -0.10 at 30, -0.02 at 60, +0.012 at 90. With less twist
+        // the line from the fixed point through the helm, extended outward, runs underground in
+        // the inner frame. So an untwisted tower dives from ABOVE: 45 deg over the mouth, looking
+        // down at the fixed point -- the classic straight Droste zoom, outside the globe for
+        // every u because the approach lies above the globe's tangent plane at the top.
+        const bool diveFromAbove = portal.Valid() && std::abs(opt.drosteTwistDeg) < 75.0;
+        if (diveFromAbove) {
+            drosteHelm.px = portal.p[0] - 300.0;
+            drosteHelm.py = portal.p[1] + 300.0;
+            drosteHelm.pz = portal.p[2];
+        }
+        if (portal.Valid()) {
+            drosteHelm.LookAt(portal.p[0], portal.p[1], portal.p[2]);
+            const double gy = drosteHelm.py + planetR;
+            const double gl = std::sqrt(drosteHelm.px * drosteHelm.px + gy * gy +
+                                        drosteHelm.pz * drosteHelm.pz);
+            drosteHelm.upHint[0] = static_cast<float>(drosteHelm.px / gl);
+            drosteHelm.upHint[1] = static_cast<float>(gy / gl);
+            drosteHelm.upHint[2] = static_cast<float>(drosteHelm.pz / gl);
+            DirectX::XMFLOAT3 hf, hr, hu;
+            drosteHelm.ViewBasis(hf, hr, hu);   // the helm's TRUE up: the roll the spiral carries
+            drosteHelmUp[0] = hu.x;
+            drosteHelmUp[1] = hu.y;
+            drosteHelmUp[2] = hu.z;
+            if ((opt.railDroste || opt.railDrosteOut) && !railKeys.empty()) {
+                railKeys.back().second = poseMotor(drosteHelm);
+            }
+        }
+        const double kDiveT0 = 40.0 + 2.0;   // the storm rail, then two seconds at the helm
+        // S^u(base), written in level floor(u): the pose, its level, and its up. The base is the
+        // helm (the dive) or the helm turned around (the out-and-back's return leg).
+        auto diveFrom = [&](const Camera& base, double u, Camera& out, int& level, double up[3]) {
+            const double n = std::floor(u);
+            const double f = u - n;
+            const double c0[3] = {base.px, base.py, base.pz};
+            const DirectX::XMFLOAT3 hf = base.Forward();
+            const double f0[3] = {hf.x, hf.y, hf.z};
+            double c[3], fw[3];
+            portal.Apply(f, c0, c);
+            portal.ApplyDir(f, f0, fw);
+            portal.ApplyDir(f, drosteHelmUp, up);
+            out = base;
+            out.px = c[0];
+            out.py = c[1];
+            out.pz = c[2];
+            out.yaw = static_cast<float>(std::atan2(fw[2], fw[0]));
+            const float lim = 3.14159265f / 2.0f - 0.0017f;
+            out.pitch = std::clamp(
+                static_cast<float>(std::atan2(fw[1], std::sqrt(fw[0] * fw[0] + fw[2] * fw[2]))),
+                -lim, lim);
+            level = static_cast<int>(n);
+        };
+        auto diveAt = [&](double u, Camera& out, int& level, double up[3]) {
+            diveFrom(drosteHelm, u, out, level, up);
+        };
+        // The out-and-back's other face of the helm: turned about the local vertical to look
+        // back up the channel, a little down at the water.
+        Camera drosteHelmBack = drosteHelm;
+        drosteHelmBack.yaw = drosteHelm.yaw + 3.14159265f;
+        drosteHelmBack.pitch = -0.07f;
+        // A leg that moves u by dU in D seconds with 3 s velocity ramps at both ends: rest,
+        // the subgroup's constant log-rate, rest.
+        auto legU = [](double tau, double D, double dU) {
+            const double r = (std::min)(3.0, 0.5 * D);
+            const double v = dU / (D - r);
+            if (tau <= 0.0) return 0.0;
+            if (tau >= D) return dU;
+            if (tau < r) return v * tau * tau / (2.0 * r);
+            if (tau <= D - r) return v * (tau - 0.5 * r);
+            const double e = D - tau;
+            return dU - v * e * e / (2.0 * r);
+        };
+        // The dive's clock: u(t) eased in over the first seconds (C1 -- the camera leaves the
+        // helm from rest, then runs at the subgroup's constant log-rate), one level per
+        // drosteLevelSec.
+        auto diveU = [&](double tau) {
+            const double T = opt.drosteLevelSec, ramp = 3.0;
+            if (tau <= 0.0) return 0.0;
+            const double u = (tau < ramp) ? tau * tau / (2.0 * ramp * T) : (tau - 0.5 * ramp) / T;
+            // The dive rail ends ON a helm (a whole level): it holds there for the last frames.
+            return opt.railDroste ? (std::min)(u, double(opt.drosteLevels)) : u;
+        };
+        // THE OUT-AND-BACK (--rail-droste-out, the user's side quest): in two levels, turn
+        // around at the bottom, fly back out along the SAME logarithmic spiral facing outward --
+        // S^u of the turned helm, u running 2 -> 0, the frame re-rooting outward on its own --
+        // then turn back and climb away along the storm rail's keys reversed, the tower
+        // shrinking into its entrance until the planet is whole again.
+        std::vector<std::pair<double, Motor>> climbKeys;
+        if (portal.Valid() && opt.railDrosteOut) {
+            Camera cRise;   // rising over the harbor, looking back east at the entrance
+            cRise.SetFromCompass(-900.0, 450.0, -60.0, 84.0f, -17.0f);
+            climbKeys.push_back({0.0, poseMotor(drosteHelmBack)});
+            climbKeys.push_back({7.0, poseMotor(cRise)});
+            climbKeys.push_back({13.0, orbKey(42.74, -70.87, 7e3, 42.8183, -70.81)});
+            climbKeys.push_back({18.5, orbKey(42.55, -70.98, 80e3, 42.8183, -70.81)});
+            climbKeys.push_back({23.5, orbKey(41.9, -71.6, 800e3, 42.8183, -70.81)});
+            climbKeys.push_back({28.0, poseMotor(camGlobe)});
+        }
+        auto keyedPose = [&](const std::vector<std::pair<double, Motor>>& keys, double t,
+                             Camera& out) {
+            size_t i = 0;
+            while (i + 1 < keys.size() && keys[i + 1].first <= t) ++i;
+            if (i + 1 >= keys.size()) {
+                motorPose(keys.back().second, out);
+                return;
+            }
+            double u = (t - keys[i].first) / std::max(keys[i + 1].first - keys[i].first, 1e-6);
+            u = u * u * (3.0 - 2.0 * u);
+            motorPose(Motor::Slerp(keys[i].second, keys[i + 1].second, u), out);
+        };
+        auto gravityUp = [&](const Camera& c, double up[3]) {
+            const double gy = c.py + planetR;
+            const double gl = std::sqrt(c.px * c.px + gy * gy + c.pz * c.pz);
+            up[0] = c.px / gl;
+            up[1] = gy / gl;
+            up[2] = c.pz / gl;
+        };
+        auto drosteRailPose = [&](double t, Camera& out, int& level, double up[3]) {
+            level = 0;
+            if (opt.railDroste) {
+                if (t < 40.0) {
+                    railPose(t, out);   // the storm rail (its last key aimed at the fixed point)
+                    gravityUp(out, up);
+                    return;
+                }
+                diveAt(diveU(t - kDiveT0), out, level, up);
+                return;
+            }
+            // --rail-droste-out
+            const double T = opt.drosteLevelSec, Din = 2.0 * T, Dout = 2.0 * T, Tturn = 3.0;
+            double tau = t;
+            if (tau < 14.0) {   // the storm rail's last leg: 1.5 km over the harbor -> the helm
+                railPose(26.0 + tau, out);
+                gravityUp(out, up);
+                return;
+            }
+            tau -= 14.0;
+            if (tau < 2.0) {    // a breath at the helm, the tower dead ahead
+                diveAt(0.0, out, level, up);
+                return;
+            }
+            tau -= 2.0;
+            if (tau < Din) {    // IN: u 0 -> 2
+                diveAt(legU(tau, Din, 2.0), out, level, up);
+                return;
+            }
+            tau -= Din;
+            if (tau < Tturn) {  // THE TURN, at the second level's helm
+                double w = tau / Tturn;
+                w = w * w * (3.0 - 2.0 * w);
+                motorPose(Motor::Slerp(poseMotor(drosteHelm), poseMotor(drosteHelmBack), w), out);
+                level = 2;
+                for (int i = 0; i < 3; ++i) up[i] = drosteHelmUp[i];
+                return;
+            }
+            tau -= Tturn;
+            if (tau < Dout) {   // OUT: u 2 -> 0, facing outward
+                diveFrom(drosteHelmBack, 2.0 - legU(tau, Dout, 2.0), out, level, up);
+                return;
+            }
+            tau -= Dout;
+            keyedPose(climbKeys, tau, out);   // the climb to orbit, looking back at the tower
+            gravityUp(out, up);
         };
         if (opt.camAlt > 0) {
             const double cx = (opt.camX < 1e8f) ? opt.camX : 0.0;
@@ -3724,6 +4016,10 @@ int main(int argc, char** argv) {
             }
             waterBank->SetWaveField(waterScene.wfEnabled ? waveField.get() : nullptr);
             waterBank->SetScene(&waterScene);
+            if (waterBankB) {
+                waterBankB->SetWaveField(waterScene.wfEnabled ? waveField.get() : nullptr);
+                waterBankB->SetScene(&waterScene);
+            }
             if (waterScene.wfEnabled) {
                 waveSrc = std::make_shared<WaveFieldSource>(waveField.get(), waveFrame);
                 waveTree = std::make_shared<std::shared_ptr<TileTree>>(
@@ -3749,6 +4045,11 @@ int main(int argc, char** argv) {
                 waterBank->SetWavePages(resMgr.TextureSrv(waveT), resMgr.ResidencySrv(waveT),
                                         double(waveFrame.orgPxX), double(waveFrame.orgPxY),
                                         waveFrame.nx, waveFrame.ny);
+                if (waterBankB) {   // the same pages: one solve, every level's sea
+                    waterBankB->SetWavePages(resMgr.TextureSrv(waveT), resMgr.ResidencySrv(waveT),
+                                             double(waveFrame.orgPxX), double(waveFrame.orgPxY),
+                                             waveFrame.nx, waveFrame.ny);
+                }
                 Log("[wave] wave.field is page tenant %d: %u planes over the z16 window, tiles "
                     "exact bytes of the solve, pyramid prefilled per bucket",
                     waveT, uint32_t(WaveField::kMaxComp) + 1u);
@@ -4242,6 +4543,10 @@ int main(int argc, char** argv) {
             }
 
             int simSteps = 0;   // whole sim quanta this frame (sim/SimClock.h)
+            // M10: the roll reference the Droste rail writes (its pose is a similarity, roll
+            // and all); without a rail the gravity blend below supplies it.
+            double drosteUp[3] = {0.0, 1.0, 0.0};
+            bool drosteRailUp = false;
             const auto now = Clock::now();
             float dt = std::chrono::duration<float>(now - last).count();
             last = now;
@@ -4583,8 +4888,224 @@ int main(int argc, char** argv) {
                     // view on the boat this frame and a rail pose would yank it away. This is
                     // what makes `--rail-flood --boat` a chase-cam recording rather than a
                     // flypast that happens to contain a hull.
-                    if (!helming) railPose(static_cast<double>(recFrame) / 30.0, cam);
+                    // M10: the Droste rails leave the keys at the helm for the similarity's
+                    // own spiral, and say which level the pose is written in.
+                    if (!helming) {
+                        if (portal.Valid() && (opt.railDroste || opt.railDrosteOut)) {
+                            drosteRailPose(static_cast<double>(recFrame) / 30.0, cam, camLevel,
+                                           drosteUp);
+                            drosteRailUp = true;
+                        } else {
+                            railPose(static_cast<double>(recFrame) / 30.0, cam);
+                        }
+                    }
                 }
+            }
+
+            // ---- M9bi: THE SUN, PLACED. One conformal point at the origin of the
+            // heliocentric frame, carried into THIS frame by the versor chain in Ephemeris.h
+            // and handed to the renderer as the scene's single light. Everything that shades
+            // reads gSunDir, so placing it once here places it for the globe, the sea, the sky,
+            // the terrain and every reflection -- which is what "a global constant for the
+            // solar system" has to mean.
+            //
+            // The direction is taken from the CAMERA'S OWN PLACE on the planet rather than from
+            // the Earth's centre: that is the finite-source parallax, at most 8.8 arcsec, and
+            // it is the difference between a sun that is somewhere and a sun that merely points.
+            // (M10 moved this block up from just before RenderFrame: the globe's level table
+            // carries the sun, and the walk that fills the table runs before RenderFrame.)
+            if (!opt.sunPinned) {
+                const sun::SolarSystem ss = sun::Build(simUnix);
+                const double here[3] = {oDir[0], oDir[1], oDir[2]};   // unit = 1 Earth radius
+                double sdir[3];
+                sun::SunDirFromPlanetPoint(ss, here, sdir);
+                renderer.sunPlaced = true;
+                renderer.sunDirTangent[0] = static_cast<float>(
+                    sdir[0] * east0[0] + sdir[1] * east0[1] + sdir[2] * east0[2]);
+                renderer.sunDirTangent[1] = static_cast<float>(
+                    sdir[0] * oDir[0] + sdir[1] * oDir[1] + sdir[2] * oDir[2]);
+                renderer.sunDirTangent[2] = static_cast<float>(
+                    sdir[0] * north0[0] + sdir[1] * north0[1] + sdir[2] * north0[2]);
+                renderer.sunAngRadiusDeg = static_cast<float>(ss.app.angRadiusDeg);
+                if (!sunLogged) {
+                    sunLogged = true;
+                    const double el = std::asin(std::max(
+                        -1.0, std::min(1.0, double(renderer.sunDirTangent[1])))) * 180.0 / 3.14159265358979;
+                    double az = std::atan2(double(renderer.sunDirTangent[0]),
+                                           double(renderer.sunDirTangent[2])) *
+                                180.0 / 3.14159265358979;
+                    if (az < 0.0) az += 360.0;
+                    Log("[sun] placed from the ephemeris: subsolar %.3f N %.3f E, %.6f AU "
+                        "(%.1f W/m2), angular radius %.4f deg; from here azimuth %.2f, "
+                        "elevation %+.2f  [--sun 112,26 pins the pre-M9bi art direction]",
+                        ss.app.subsolarLatDeg, ss.app.subsolarLonDeg, ss.app.distAu,
+                        ss.app.irradianceWm2, ss.app.angRadiusDeg, az, el);
+                }
+            }
+
+            // ---- M10: THE FLOATING SCALE, and the levels this frame draws (Droste.h). ------
+            // (1) THE GAUGE STEP. The camera belongs to the ground it would fall onto -- the
+            // gravity analog. When the nearest ground is the next level in (or out), the frame
+            // re-roots there: C <- S^-1(C), the view rotated with it, the level index moved.
+            // Nothing on screen changes (the gauge identity, gated in RunDrosteSelfTest); what
+            // changes is that every double is again near the scale of the world it describes,
+            // which is the floating origin's own reason to exist, extended to scale.
+            std::vector<GlobeLayer::DrosteLevel> drosteLv;
+            bool drosteOuter = false;
+            double drosteOuterCam[3] = {0.0, 0.0, 0.0};
+            float sunRootF[3];
+            renderer.SunDir(sunRootF);
+            float sunCamF[3] = {sunRootF[0], sunRootF[1], sunRootF[2]};
+            if (portal.Valid() && mode == 1) {
+                for (int guard = 0; guard < 4; ++guard) {
+                    const double C[3] = {cam.px, cam.py, cam.pz};
+                    const int step = droste::NearestLevel(portal, camLevel, C);
+                    if (step == 0) break;
+                    double Cn[3], fw[3], fn[3], un[3];
+                    portal.Apply(-double(step), C, Cn);
+                    const DirectX::XMFLOAT3 f = cam.Forward();
+                    fw[0] = f.x;
+                    fw[1] = f.y;
+                    fw[2] = f.z;
+                    portal.ApplyDir(-double(step), fw, fn);
+                    portal.ApplyDir(-double(step), drosteUp, un);
+                    cam.px = Cn[0];
+                    cam.py = Cn[1];
+                    cam.pz = Cn[2];
+                    cam.yaw = static_cast<float>(std::atan2(fn[2], fn[0]));
+                    const float lim = 3.14159265f / 2.0f - 0.0017f;
+                    cam.pitch = std::clamp(
+                        static_cast<float>(std::atan2(fn[1], std::sqrt(fn[0] * fn[0] + fn[2] * fn[2]))),
+                        -lim, lim);
+                    for (int i = 0; i < 3; ++i) drosteUp[i] = un[i];
+                    // Speed is a length per second: the new frame's metres are s^-step old ones.
+                    cam.speed = static_cast<float>(
+                        std::clamp(double(cam.speed) / portal.Scale(double(step)), 0.05, 2.5e6));
+                    camLevel += step;
+                }
+                // Logged on the frame the camera's level CHANGES (the dive rail re-derives the
+                // pose from level floor(u) every frame, so the step itself repeats; the change
+                // is the event).
+                static int loggedLevel = 0;
+                if (camLevel != loggedLevel) {
+                    Log("[droste] frame %u: the nearest ground is now level %d -- the frame "
+                        "re-roots there (a gauge change, C -> S^%+d(C)); local scale %.3g m",
+                        frame, camLevel, loggedLevel - camLevel,
+                        droste::LocalScale(portal, camLevel, std::array<double, 3>{cam.px, cam.py, cam.pz}.data()));
+                    loggedLevel = camLevel;
+                }
+                // (2) THE SUN, PER LEVEL -- the one trick the user allowed (lighting and
+                // atmosphere may cheat). REALISTIC: one sun, the real one; a level twisted k
+                // times sees it rotated by Q^-k in its own frame, so an inner Merrimack that
+                // faces away from the sun is at night. APPEALING: every level is lit exactly as
+                // the root is, in its own frame -- the tower self-similar to the last photon.
+                const double sr[3] = {sunRootF[0], sunRootF[1], sunRootF[2]};
+                double sc[3] = {sr[0], sr[1], sr[2]};
+                if (opt.drosteLight == 0) portal.ApplyDir(-double(camLevel), sr, sc);
+                for (int i = 0; i < 3; ++i) sunCamF[i] = static_cast<float>(sc[i]);
+                renderer.sunPlaced = true;
+                for (int i = 0; i < 3; ++i) renderer.sunDirTangent[i] = sunCamF[i];
+                // (3) THE LEVELS: two out (never above the root), three in. The globe walks
+                // each under its own eye S^-k(C) and drops any whose planet is under half a
+                // pixel -- the screen, not this range, is what ends the tower.
+                const double C[3] = {cam.px, cam.py, cam.pz};
+                // INNER FIRST (+1, +2, +3, then -1, -2): the globes the camera is diving into are
+                // small and cheap, and they are the subject; the worlds outside are big and
+                // mostly hidden behind the planet the camera stands on. Walked in this order a
+                // tight record budget costs an outer horizon, never the next globe (MEASURED on
+                // the first dive: rel -1 took 34 k records and the next globe got none).
+                const int nOut = (std::min)(camLevel, 2);
+                for (int k = 0; k < 3 + nOut; ++k) {
+                    const int rel = (k < 3) ? k + 1 : -(k - 2);
+                    GlobeLayer::DrosteLevel L;
+                    L.rel = rel;
+                    portal.Apply(-double(rel), C, L.cam);
+                    L.sigma = portal.Scale(double(rel));
+                    portal.Rot(double(rel), L.Q);
+                    const double gy = L.cam[1] + planetR;
+                    const double altK =
+                        std::sqrt(L.cam[0] * L.cam[0] + gy * gy + L.cam[2] * L.cam[2]) - planetR;
+                    L.reliefExagg = static_cast<float>(std::clamp(altK / 250000.0, 1.0, 20.0));
+                    double sk[3] = {sr[0], sr[1], sr[2]};
+                    if (opt.drosteLight == 0) portal.ApplyDir(-double(camLevel + rel), sr, sk);
+                    for (int i = 0; i < 3; ++i) L.sun[i] = static_cast<float>(sk[i]);
+                    // THE SKY IT SEES. Realistic: every level inside the root sits a few
+                    // hundred metres up in the root's air, so the sky over it is the ROOT's --
+                    // its zenith turned into this level's frame, lit by the root's day -- and a
+                    // night-side inner sea mirrors that bright sky. Appealing: its own sky.
+                    if (opt.drosteLight == 0 && camLevel + rel > 0) {
+                        const double upR[3] = {0.0, 1.0, 0.0};
+                        double su[3];
+                        portal.ApplyDir(-double(camLevel + rel), upR, su);
+                        for (int i = 0; i < 3; ++i) L.skyUp[i] = static_cast<float>(su[i]);
+                        L.skyDay = static_cast<float>(std::clamp(sr[1] * 3.0 + 0.12, 0.0, 1.0));
+                    }
+                    L.bankSet = (rel == -1 && waterBankB) ? 1 : -1;
+                    if (rel == -1) {
+                        drosteOuter = true;
+                        for (int i = 0; i < 3; ++i) drosteOuterCam[i] = L.cam[i];
+                    }
+                    drosteLv.push_back(L);
+                }
+            }
+            if (globe) {
+                globe->SetSun(sunCamF);
+                // The camera level's own sky (slot 0): the root's, turned, under realistic
+                // lighting inside the tower; its own everywhere else.
+                {
+                    float upC[3] = {0.0f, 1.0f, 0.0f};
+                    float dayC = -1.0f;
+                    if (portal.Valid() && mode == 1 && opt.drosteLight == 0 && camLevel > 0) {
+                        const double upR[3] = {0.0, 1.0, 0.0};
+                        double su[3];
+                        portal.ApplyDir(-double(camLevel), upR, su);
+                        for (int i = 0; i < 3; ++i) upC[i] = static_cast<float>(su[i]);
+                        dayC = static_cast<float>(std::clamp(double(sunRootF[1]) * 3.0 + 0.12, 0.0, 1.0));
+                    }
+                    globe->SetCamSky(upC, dayC);
+                }
+                if (portal.Valid() && mode == 1) {
+                    globe->SetDroste(drosteLv.data(), static_cast<int>(drosteLv.size()),
+                                     opt.drosteLight, portal.centre, portal.radius, camLevel);
+                }
+            }
+            // M10: WHOSE SKY. Identity and the camera's sun reproduce the old dome exactly; under
+            // REALISTIC lighting inside the tower the backdrop is the ROOT's sky -- every inner
+            // level sits a few hundred metres up in the root's air -- turned into the camera's
+            // frame by Q^L, with the root's own sun. Under APPEALING lighting every level has a
+            // sky of its own, and the dome is the one whose ground calls for a dome the loudest
+            // (Droste.h Grounds, domeRel) -- NOT the camera's level, which is the gauge: drawn in
+            // the camera's frame it swung 60 deg at the re-root. The space backdrop's sun is
+            // likewise the sun of the level whose orbit calls for space (spaceRel).
+            {
+                float rows[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+                const float* skySun = sunCamF;
+                float spaceSun[3] = {sunCamF[0], sunCamF[1], sunCamF[2]};
+                int domeRel = 0;
+                if (portal.Valid() && mode == 1) {
+                    if (opt.drosteLight == 0) {
+                        domeRel = -camLevel;   // the root's
+                    } else {
+                        const double C[3] = {cam.px, cam.py, cam.pz};
+                        const droste::GroundField gf = droste::Grounds(portal, camLevel, C);
+                        domeRel = gf.domeRel;
+                        double m[3][3], sv[3];
+                        const double sr[3] = {sunRootF[0], sunRootF[1], sunRootF[2]};
+                        portal.Rot(double(gf.spaceRel), m);   // that level -> the camera's frame
+                        droste::MatVec(m, sr, sv);
+                        for (int i = 0; i < 3; ++i) spaceSun[i] = static_cast<float>(sv[i]);
+                    }
+                    if (domeRel != 0) {
+                        double m[3][3];
+                        portal.Rot(double(-domeRel), m);   // the camera's frame -> the dome's
+                        for (int r = 0; r < 3; ++r) {
+                            for (int c = 0; c < 3; ++c) rows[r * 3 + c] = static_cast<float>(m[r][c]);
+                        }
+                        skySun = sunRootF;   // every level's own sun has the root's numbers
+                    }
+                }
+                sky->SetSkyFrame(rows, skySun);
+                if (globe) globe->SetSpaceSun(spaceSun);
             }
 
             // M6g world housekeeping, all continuous in altitude: gravity-up for the view
@@ -4601,7 +5122,44 @@ int main(int argc, char** argv) {
                 if (altV > 6000.0) {
                     cam.speed = static_cast<float>(std::clamp(altV * 0.45, 60.0, 2.5e6));
                 }
-                if (sea) sea->enabled = altV < 60000.0 && !marsMode && !opt.albedo;
+                // M10: THE SECOND BODY'S TERM (M6g's upHint comment promised one). Anti-gravity
+                // of the Droste world: each level's planet radial, weighted 1/d^2 by the distance
+                // to its ground, so the roll follows the ground you would fall onto and turns
+                // continuously as another ground takes over -- an inner planet's up is its
+                // parent's WEST under the quarter twist. The dive rail writes its own up (the
+                // spiral carries roll exactly); free flight takes the field. And the speed rides
+                // the local scale (Droste.h LocalScale): every approach is exponential, which is
+                // the logarithm the camera needs to cross decades without a gear change.
+                double altWater = altV;   // the lowest eye over a sea this frame draws waves on
+                if (portal.Valid()) {
+                    const double C[3] = {cam.px, cam.py, cam.pz};
+                    // The ground field (Droste.h Grounds): the roll's up and the speed's scale
+                    // from ONE gauge-invariant weight.
+                    const droste::GroundField gf = droste::Grounds(portal, camLevel, C);
+                    const double* gU = drosteRailUp ? drosteUp : gf.up;
+                    const double gn = std::sqrt(gU[0] * gU[0] + gU[1] * gU[1] + gU[2] * gU[2]);
+                    if (gn > 1e-30) {
+                        for (int i = 0; i < 3; ++i) cam.upHint[i] = static_cast<float>(gU[i] / gn);
+                    }
+                    const double lam = gf.lambda;
+                    if (!drosteRailUp) {
+                        cam.speed = (lam > 6000.0)
+                                        ? static_cast<float>(std::clamp(lam * 0.45, 60.0, 2.5e6))
+                                        : static_cast<float>((std::min)(double(cam.speed),
+                                                                        (std::max)(lam * 1.5, 0.05)));
+                    }
+                    if (drosteOuter) {
+                        const double oy = drosteOuterCam[1] + planetR;
+                        const double altO = std::sqrt(drosteOuterCam[0] * drosteOuterCam[0] +
+                                                      oy * oy +
+                                                      drosteOuterCam[2] * drosteOuterCam[2]) -
+                                            planetR;
+                        altWater = (std::min)(altWater, altO);
+                    }
+                }
+                // The FFT cascades serve every level's sea (their tiles are world-XZ periodic),
+                // so they run while ANY drawn sea is close -- the outer level's included.
+                if (sea) sea->enabled = altWater < 60000.0 && !marsMode && !opt.albedo;
                 // M6p: the survey vectors decimate to the view -- tolerance = one ground
                 // pixel; the layer republishes only when the x8 bucket changes.
                 if (gisLayer) {
@@ -4647,6 +5205,10 @@ int main(int argc, char** argv) {
                                                  wfCtSta);
                             waterBank->SetWaveField(
                                 waterScene.wfEnabled ? waveField.get() : nullptr);
+                            if (waterBankB) {
+                                waterBankB->SetWaveField(
+                                    waterScene.wfEnabled ? waveField.get() : nullptr);
+                            }
                         }
                         globe->foamOpacity = waterScene.foamOpacity;
                         globe->ringBlendTexels = waterScene.ringBlendTexels;
@@ -4744,8 +5306,16 @@ int main(int argc, char** argv) {
                             const double cxW = double(wtab.orgX) + spanW * 0.5;
                             const double czW = double(wtab.orgZ) + double(wtab.ny) * cellW * 0.5;
                             const double dxW = cam.px - cxW, dzW = cam.pz - czW;
-                            const double distW = (std::max)(
+                            double distW = (std::max)(
                                 std::sqrt(dxW * dxW + cam.py * cam.py + dzW * dzW), 1.0);
+                            // M10: the outer level's sea is the SAME solve seen from S(C); the
+                            // nearer of the two eyes decides the mip (one tenant, one want).
+                            if (drosteOuter) {
+                                const double ox = drosteOuterCam[0] - cxW;
+                                const double oz = drosteOuterCam[2] - czW;
+                                distW = (std::min)(distW, (std::max)(std::sqrt(
+                                    ox * ox + drosteOuterCam[1] * drosteOuterCam[1] + oz * oz), 1.0));
+                            }
                             const double vhW = opt.headless
                                                    ? double(opt.height)
                                                    : double((std::max)(1u, window.Height()));
@@ -4817,6 +5387,7 @@ int main(int argc, char** argv) {
                             }
                         }
                         waterBank->SetBoats(bA, bB);
+                        if (waterBankB) waterBankB->SetBoats(bA, bB);
                     }
                     PROF_BEGIN();
                     waterBank->SetFrame(gpu, simUnix, cam.px, cam.pz);
@@ -4844,19 +5415,72 @@ int main(int argc, char** argv) {
                                                    resMgr.ResidencySrv(hgtWinTenant),
                                                    winOrgX, winOrgY,
                                                    hgtWinTenant == hgtTenant ? 6u : UINT32_MAX);
+                        if (waterBankB) {
+                            waterBankB->SetHeightWindow(resMgr.TextureSrv(hgtWinTenant),
+                                                        resMgr.ResidencySrv(hgtWinTenant),
+                                                        winOrgX, winOrgY,
+                                                        hgtWinTenant == hgtTenant ? 6u
+                                                                                  : UINT32_MAX);
+                        }
                     }
                     globe->windGateVal = sea->WindGate();
                     globe->SetWaterBank(waterBank->DispSrv(), waterBank->ParamSrv(),
                                         waterBank->DetailSrv(), derivS, patchS, bandKS,
                                         bandRmsS, bandFoldS, sea->heightScale,
                                         waterBank->BaseTexelM(), orgs, opt.oneWater);
+                    // M10: set B follows the OUTER level's eye, S(C) -- the sea the camera's
+                    // planet floats in, seen from where the camera really is in that level's
+                    // own frame. Off (and not filled) while the camera is at the root.
+                    if (waterBankB) {
+                        waterBankB->enabled = drosteOuter;
+                        float orgB[12] = {};
+                        if (drosteOuter) {
+                            waterBankB->injectPattern = opt.inject;
+                            waterBankB->SetFrame(gpu, simUnix, drosteOuterCam[0],
+                                                 drosteOuterCam[2]);
+                            for (int mR = 0; mR < WaterBankLayer::kMips; ++mR) {
+                                waterBankB->RingOrigin(mR, orgB[mR * 2], orgB[mR * 2 + 1]);
+                            }
+                        }
+                        globe->SetWaterBankB(waterBankB->DispSrv(), waterBankB->ParamSrv(),
+                                             waterBankB->DetailSrv(), orgB, drosteOuter);
+                    }
                 }
                 // (--albedo: the water stands down too -- textures judged as layered images,
                 // nothing else in the frame; the lit look retunes separately.)
-                sky->enabled = altV < 9000.0 && !marsMode && !opt.albedo;   // low haze dome...
+                // M10: under REALISTIC Droste lighting the sky belongs to the OUTERMOST world:
+                // every inner level sits a few hundred metres up in the root's air, so from
+                // anywhere inside the tower the backdrop is the root's low sky, never space.
+                // APPEALING gives each level its own -- its orbit reads as an orbit.
+                const bool rootSky = portal.Valid() && opt.drosteLight == 0 && camLevel > 0;
+                sky->enabled = (altV < 9000.0 || rootSky) && !marsMode && !opt.albedo;   // low haze dome...
                 if (globe) globe->skyPassEnabled = !sky->enabled && !opt.albedo;   // ...or the
                                                             // limb shell, never both at once
                                                             // (--albedo: neither -- textures)
+                if (globe) {
+                    globe->skyPassWeight = 1.0f;
+                    globe->skyOwnAir = 1.0f;
+                }
+                // M10 APPEALING: every level wears the backdrop its OWN altitude calls for (the
+                // dome low, the limb shell and space above ~9 km of its own units), and the
+                // grounds within reach blend by the same 1/d^2 weights the roll follows. The
+                // weights read true distances and each level's own altitude -- both blind to
+                // which frame the camera happens to be rooted in -- so the re-root cannot pop the
+                // sky, and a camera leaving an inner planet's orbit for its surface fades from
+                // its space into its day. Two backdrops drawn, one cross-fade, no switch.
+                if (globe && portal.Valid() && opt.drosteLight == 1 && !marsMode && !opt.albedo) {
+                    const double C[3] = {cam.px, cam.py, cam.pz};
+                    const droste::GroundField gf = droste::Grounds(portal, camLevel, C);
+                    const float W = static_cast<float>(gf.W);
+                    sky->enabled = W < 0.999f;
+                    globe->skyPassEnabled = W > 0.001f;
+                    globe->skyPassWeight = W;
+                    // Whose space is it? The part of W an INNER planet's orbit called for is
+                    // space with that planet's limb in it (PsLimb) -- none of the camera level's
+                    // air. Only the camera level's own share carries its shell (the grey haze of
+                    // the root's low sky was standing in for the inner globe's black).
+                    globe->skyOwnAir = static_cast<float>(gf.ownShare);
+                }
             } else {
                 cam.upHint[0] = 0.0f;
                 cam.upHint[1] = 1.0f;
@@ -5004,6 +5628,16 @@ int main(int argc, char** argv) {
                     const float v0 = float(std::clamp(mV(latC + dLat), 0.0, 1.0));
                     const float v1 = float(std::clamp(mV(latC - dLat), 0.0, 1.0));
                     if (u1 > u0 && v1 > v0) resMgr.Want(exposureT, 6u, 3u, u0, v0, u1, v1);
+                    // M10: and around the outer level's eye, whose sea set B draws.
+                    if (drosteOuter) {
+                        const double latO = BathyModel::kOrgLat + drosteOuterCam[2] / BathyModel::kMPerLat;
+                        const double lonO = BathyModel::kOrgLon + drosteOuterCam[0] / BathyModel::kMPerLon;
+                        const float ou0 = float(std::clamp(mU(lonO - dLon), 0.0, 1.0));
+                        const float ou1 = float(std::clamp(mU(lonO + dLon), 0.0, 1.0));
+                        const float ov0 = float(std::clamp(mV(latO + dLat), 0.0, 1.0));
+                        const float ov1 = float(std::clamp(mV(latO - dLat), 0.0, 1.0));
+                        if (ou1 > ou0 && ov1 > ov0) resMgr.Want(exposureT, 6u, 3u, ou0, ov0, ou1, ov1);
+                    }
                     if (opt.resTrace && (frame % 150u) == 0u) {
                         // The instrument (--res-trace): what the page holds at the camera vs what
                         // the node says, and what the manager believes about the tiles under it.
@@ -5049,44 +5683,8 @@ int main(int argc, char** argv) {
                 static_cast<int64_t>(frame) - (opt.rail.empty() ? 0 : 150);
             // --settle-sync reads the ring gate's hold count for THIS frame's wants here;
             // ProcessQueues zeroes it inside RenderFrame.
-            // ---- M9bi: THE SUN, PLACED. One conformal point at the origin of the
-            // heliocentric frame, carried into THIS frame by the versor chain in Ephemeris.h
-            // and handed to the renderer as the scene's single light. Everything that shades
-            // reads gSunDir, so placing it once here places it for the globe, the sea, the sky,
-            // the terrain and every reflection -- which is what "a global constant for the
-            // solar system" has to mean.
-            //
-            // The direction is taken from the CAMERA'S OWN PLACE on the planet rather than from
-            // the Earth's centre: that is the finite-source parallax, at most 8.8 arcsec, and
-            // it is the difference between a sun that is somewhere and a sun that merely points.
-            if (!opt.sunPinned) {
-                const sun::SolarSystem ss = sun::Build(simUnix);
-                const double here[3] = {oDir[0], oDir[1], oDir[2]};   // unit = 1 Earth radius
-                double sdir[3];
-                sun::SunDirFromPlanetPoint(ss, here, sdir);
-                renderer.sunPlaced = true;
-                renderer.sunDirTangent[0] = static_cast<float>(
-                    sdir[0] * east0[0] + sdir[1] * east0[1] + sdir[2] * east0[2]);
-                renderer.sunDirTangent[1] = static_cast<float>(
-                    sdir[0] * oDir[0] + sdir[1] * oDir[1] + sdir[2] * oDir[2]);
-                renderer.sunDirTangent[2] = static_cast<float>(
-                    sdir[0] * north0[0] + sdir[1] * north0[1] + sdir[2] * north0[2]);
-                renderer.sunAngRadiusDeg = static_cast<float>(ss.app.angRadiusDeg);
-                if (!sunLogged) {
-                    sunLogged = true;
-                    const double el = std::asin(std::max(
-                        -1.0, std::min(1.0, double(renderer.sunDirTangent[1])))) * 180.0 / 3.14159265358979;
-                    double az = std::atan2(double(renderer.sunDirTangent[0]),
-                                           double(renderer.sunDirTangent[2])) *
-                                180.0 / 3.14159265358979;
-                    if (az < 0.0) az += 360.0;
-                    Log("[sun] placed from the ephemeris: subsolar %.3f N %.3f E, %.6f AU "
-                        "(%.1f W/m2), angular radius %.4f deg; from here azimuth %.2f, "
-                        "elevation %+.2f  [--sun 112,26 pins the pre-M9bi art direction]",
-                        ss.app.subsolarLatDeg, ss.app.subsolarLonDeg, ss.app.distAu,
-                        ss.app.irradianceWm2, ss.app.angRadiusDeg, az, el);
-                }
-            }
+            // (M9bi's sun placement moved to the top of the frame's housekeeping in M10: the
+            // globe's level table carries the sun, and the walk that fills it runs before here.)
             const uint32_t ringHeldBefore = resMgr.ringHeldFrame;
             renderer.RenderFrame(cam, static_cast<float>(simUnix - startUnix), dt);
             // --bench-overlap keeps the overlap: RENDER is then record + the BeginFrame fence

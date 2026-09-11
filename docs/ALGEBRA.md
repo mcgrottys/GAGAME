@@ -124,6 +124,128 @@ the Merrimack mouth on 2026-08-28 against an external ephemeris (−0.2 s of 16:
 distance/declination/angular-radius bands, the terminator meet, and the parallax ceiling.
 AST: `sim.clock → solar.sun → {globe.ps, sea.ps, globe.mesh}`.
 
+## droste — The globe within the globe: the root's address as a leaf, one versor, and the floating scale
+
+The planet is a sparse quadtree over six cube faces; every node is an **address** (face,
+level, x, y), and the residency manager streams whatever the walk asks for at an address. The
+Droste effect is one edit to that structure: a single leaf gets the **root** as its child. The
+tree becomes a graph with one cycle, and descending through the cycle arrives back at the whole
+planet — smaller, resting in the leaf, carrying its own leaf. Nothing is copied: the inner
+planet's tiles *are* the root's tiles (the same addresses in the same tenants), so every level's
+wants land in one resident set and a small globe simply asks for coarser mips. The recursion is
+bounded by the **screen**, not by memory: a level whose planet is under half a pixel emits
+nothing and the cycle is not taken again.
+
+**The link is one conformal versor.** Mapping the root onto the leaf's globe is a similarity —
+a dilation by s about a fixed point p with a twist Q about an axis through it:
+
+    S = T(p) R(axis, θ) D(s) T(−p),        x ↦ p + s Q (x − p)
+
+PGA cannot write this (a motor has no scale); Cl(4,1) can, and it carries the root's
+**DualSphere** onto the leaf's globe in one sandwich, radius included (read back as σ² after
+the priors-33 normalization σ·n∞ = −1). The address fixes everything else: the globe's diameter
+is the leaf's span × fill, it **rests** on the composed ground at the leaf's centre, s = r/R,
+and the fixed point is then *forced* — (I − sQ) p = c₁ − sQ c₀ — because S must take the
+root's centre c₀ onto the globe's centre c₁. At the default leaf (face 5, level 16, the
+entrance mouth) s = 1.1984e−5: 4.92 decades a level, a 153 m globe.
+
+**The gauge.** A similarity preserves angles, so drawing level k from the eye C is *exactly*
+drawing the root from S⁻ᵏ(C):
+
+    Sᵏ(y) − C  =  sᵏ Qᵏ (y − S⁻ᵏ(C))
+
+The walk runs the same tree again under the transformed eye (the split rule compares distance
+to arc and the horizon test is angular, so nothing in it has a scale; frustum planes carry
+across as n ↦ Qᵀn, d ↦ d/sᵏ); the mesh and pixel stages run the unchanged root shading in the
+level's **own** frame with that level's eye, sun and ring set; only the clip position is mapped
+back (`TrueRel`: sᵏQᵏ·rel). Reversed-Z float depth is scale-free, so all levels share one depth
+buffer. Level 0 is the identity gauge. MEASURED against a pre-Droste build (4dde625, without
+`--droste`, at poses whose own A/A is exact): bit-identical at 80 km; 1 pixel at 1/255 at 800 km;
+12 cloud-top pixels at 1/255 from 13 000 km. That is float contraction: the identity's exact
+×1.0 factors move where the compiler fuses a multiply-add. The helm and harbour poses are not
+deterministic run to run (A/A SSIM 0.92–0.99), so there the check says only that nothing moved
+beyond that floor.
+
+**The floating scale.** The floating origin keeps every double near the world it describes by
+translating; the Droste world also needs a *scale*. The camera belongs to the **ground it would
+fall onto** — the one that weighs most among its level and the two neighbours — and when
+that ground belongs to another level the frame re-roots: C ↦ S⁻¹(C), the view rotated by Q⁻¹,
+the level index moved. Nothing on screen changes (the gauge identity, gated); the eye's numbers
+are again metres of the world it is in.
+
+**The ground field — one weight for everything the camera reads.** A ground at height h whose
+planet has radius r weighs
+
+    w(h, r) = r² / (h² (r² + h²))
+
+— 1/h² near the surface (the ground under you dominates) and a further (r/h)² once the planet is
+small in the sky. The same weights give the re-root (the heaviest ground owns the eye), the roll
+(anti-gravity: each planet's radial by its weight — M6g's "second body's term"), the speed
+(λ = (Σw)^−½, `LocalScale`: every approach is exponential), and the appealing backdrop (the space
+weight W = Σ w·sp / Σ w, sp = how far above its own ~6–12 km each level's altitude is; the dome
+belongs to the ground with the largest w(1 − sp), space and its sun to the largest w·sp). The size
+term is not decoration. Every inner globe nests at the same spot, so from farther away than they
+are wide they all stand at the same h, and bare 1/h² counts each one, as many as a camera-relative
+window happens to include. The window then *is* the gauge (priors 39). w is homogeneous of degree
+−2, so a re-root scales every weight alike and each rule normalizes it away. The gate reads the
+field from the root and from forced gauges one and two levels in, and demands the same up, the
+same λ (in true metres), the same W and the same backdrop owners. Anything that reads an altitude
+in *the current frame* instead is not gauge-invariant and pops at the re-root (priors 36).
+
+**The logarithm.** Fractional powers Sᵘ = exp(u log S) are a one-parameter subgroup; the rotor
+and the dilator are generated at the same point in orthogonal planes, so they commute and
+Sᵘ = T(p) R(uθ) D(sᵘ) T(−p). Its orbits are **logarithmic spirals** converging on p, and the
+dive rail is one of them, through the helm: pose(u) = Sᵘ(helm), run at a constant log-rate
+d(ln|C − p|)/dt = ln(s)/T. Every level of the dive is the same flight one level down
+(Sᵘ⁺¹ = S·Sᵘ); only floor(u) is handed to the frame and only f = u − floor(u) is pushed through
+the versor, so the doubles never see sⁿ. The helm's spiral clears the inner globe only if the
+twist lifts it over (measured clearance/distance: −0.21 at 0°, −0.10 at 30°, −0.02 at 60°,
++0.012 at 90°); an untwisted tower dives from 45° above the mouth instead — the classic
+straight zoom.
+
+**The water, twice.** The wave bank is a camera-anchored ring ladder, and under the gauge each
+level has its own eye. Set A is anchored at the camera level's eye as always; set B (a second,
+equally stateless bank) at the OUTER level's eye S(C), so the sea the camera's planet floats in
+carries its own waves. Inner levels need no rings: the camera re-roots into a level before its
+waves can be resolved, so an inner sea is only ever seen from beyond its last ring, where the
+fold has already shed the waves into σ².
+
+**Lighting and atmosphere — the declared cheat, and the A/B.** REALISTIC: one sun, the real
+one; a level twisted k times sees it rotated by Q⁻ᵏ in its own frame (with the quarter twist
+every inner Merrimack faces the helm and so faces *away* from the 14:00Z sun — night), and
+from inside the tower the backdrop is the root's sky, turned by Q^L. APPEALING: every level is
+lit exactly as the root is, in its own frame, and wears the backdrop its own altitude calls
+for — the tower self-similar to the last photon. Both keep the inner globe's analytic shadow
+(`PortalShadow`: the sun's disc eclipsed by the globe's, one expression) and each level's own
+clouds, marched in its own frame.
+
+**The limbs.** Each planet whose air the eye is *outside* of gets its limb drawn: the same
+single-scatter shell as the root's backdrop (`ShellScatter`, 6 steps, one function for both), in
+that level's own frame with its own eye and sun, drawn after the surface over whatever lies
+behind it. It composites as dst = scatter + dst·T with per-channel transmittance (dual-source
+blend: Rayleigh dims blue first, so a scalar alpha would grey the sea behind a limb), and it is
+depth-tested at the shell's entry, which the shader writes (SV_Depth). A jetty in front hides
+the limb and the sea behind shows through it. The backdrop could not do this: it touches only
+empty pixels, and an inner globe's limb lies over the outer world's sea. The rule is one law for
+every slot, the camera's own included (the eye outside the shell), so the re-root moves no limb.
+The backdrop keeps the camera level's air only while the eye is inside it. The limb is
+**filtered**, not sampled: from the jetties one pixel spans ~60 km of an inner planet's own air
+(the whole shell), and a centre sample drew a bright dotted outline that crawled. The pixel's
+value is the limb averaged over its footprint, and the limb varies across a pixel only with the
+tangent height, so 8 rays span the footprint in h. Up close they coincide and this is the centre
+sample.
+
+Code: `src/core/Droste.h` (the portal, the versor, the closed forms, the ground field and the
+owning-ground rule), `GlobeLayer::WalkLevel`/`SetView` (the cycle taken, the limb slots),
+`shaders/Globe.hlsl` `LoadLevel`/`TrueRel`/`PortalShadow`/`ShellScatter`/`PsLimb`, `main.cpp`
+(`--droste`, `--rail-droste`, `--rail-droste-out`). Gates: `droste` in gatest (1939 checks: the
+root's centre onto the leaf's globe by closed form and by sandwich, the DualSphere's own radius,
+the fixed point, the rest contact, S⁻¹S = 1, the fractional subgroup, the gauge identity for
+k ∈ {−1..2}, re-rooting as a gauge change, the ground field blind to the gauge from forced
+re-roots of one and two levels, and the eye over the inner Merrimack owned by the globe under it
+and no deeper). The field gate was seen to fail on the bare 1/h² law (496 failures), not only
+to pass on the new one.
+
 ## cl3 — Vector algebra of Cl(3): reflection and refraction as versors
 
 The pixel shader's optics are grade-1 sandwiches in ordinary Cl(3):
@@ -1222,6 +1344,73 @@ model (or a textbook) would hold → what this project measured → the law now 
     +v = north question; a frame pair that disagrees about handedness needs an odd versor
     and the AST edge says so.
 
+35. **A cull bound sized for orbit starves an eye that stands on the ground.** Prior: the
+    walk's frustum test pads every node with 9 km of relief (× the display exaggeration)
+    because Everest exists; the padding only ever costs a few extra nodes. Measured (M10, the
+    first Droste dive): an outer level's eye sits ~70 m above its sea, and every node within
+    9 km of it passes the frustum test in every direction, behind the camera included — that
+    level alone emitted 34 368 meshlet records, the camera's own level 31 152, the record
+    budget (65 536) ran out, and the next globe down, walked last, got **zero**: the inner
+    planet vanished from its own helm. Law: a cull bound is a statement about the terrain
+    *near the node*, and where the eye is close the local relief (ETOPO at the node + what one
+    cell can hide) is the honest one; and walk the small, central levels first, so a tight
+    budget costs an outer horizon, never the subject. (Extra levels only — the camera's own
+    walk keeps its bytes, priors 29.)
+
+36. **A gauge change is invisible only to gauge-invariant rules.** Prior: re-rooting the
+    camera into the next level (C ↦ S⁻¹(C)) changes nothing on screen, because the gauge
+    identity holds for every drawn level (it is gated). Measured (M10, the appealing dive): the
+    backdrop switch — sky dome below 9 km of altitude, limb shell and space above — read the
+    altitude *in the current frame*, which jumps at the re-root from 50 m (the root's sea) to
+    ~3000 km (the inner planet's orbit), so the sky popped from blue to black on one frame
+    while every surface stayed put. Law: anything read from the camera must be a function of
+    TRUE distances and each level's OWN altitudes, never of the frame the camera happens to be
+    rooted in — the appealing backdrop now cross-fades by the same 1/h² ground weights the roll
+    follows, and there is no switch left to pop.
+
+37. **A term that was only ever seen at noon is a term nobody has checked at night.** Prior:
+    the near-field material block's skylight is right — it has shipped since M6j and every
+    helm render looks correct. Measured (M10, realistic lighting): the quarter-twisted inner
+    Merrimack faces away from the 14:00Z sun, so its helm is at night, and within 2.7 km of
+    the eye its beaches and flats glowed a flat daylight grey — the block's `SkyRadiance × 0.55`
+    ambient and its aerial-perspective haze never took `day`, while every other term in the
+    shader did. The root's helm had simply never been dark. Law: a lighting term is not
+    verified until it has been seen on both sides of the terminator; it now takes the same
+    `day` and the same moonlit floor as the far-field mix (`AerialPerspectiveDay`, identical at
+    day = 1).
+
+38. **A gate that compiles one stage has not compiled the pipeline.** Prior: `--selftest`
+    passes, so the shaders build -- `dxtest` compiles Globe.hlsl for its CB parity check.
+    Measured (M10, the 2-D mesh dispatch): an early-out that called `SetMeshOutputCounts(0, 0)`
+    on the tail groups and the real counts on the live ones is legal-looking HLSL on exclusive
+    paths, and the validator rejects it ("cannot be called multiple times"). `dxtest` compiled
+    `PsMain` only, so it said PASS; at run time `MsMain` failed, the globe's mesh pipeline fell
+    back with nothing but a `[shader] COMPILE FAILED` line at boot, and the root planet was
+    missing from an entire dive -- found by eye, in the video; the log filter watched for the
+    renderer's own words and not the compiler's. Law: the mesh stage is its own gate now
+    (`dxtest` 2b: every entry the sampler
+    scan skips as `[outputtopology]` + `[numthreads]` must compile AND validate as ms_6_5), and
+    it was seen to FAIL on the planted defect before it was trusted (priors 22's corollary).
+
+39. **A window relative to the camera is itself a gauge.** Prior (after priors 36): a rule
+    that reads true distances is gauge-invariant, so the roll, the speed and the backdrop,
+    all summing 1/h² over the camera's level and its neighbours, were safe. Measured (M10,
+    a still 40 m west of the quarter-twisted inner globe, which is directly over *its*
+    Merrimack): the nearest-surface re-root stepped in TWO levels, because the next globe's top
+    stands a hair nearer than the ground it rests on. The −1..+1 window then no longer held the
+    root the eye stood 71 m above, W went to 1, and the appealing sky was black. The same geometry
+    without the twist lies on the tower's axis and sank four levels a frame (the guard's limit)
+    with no end. Two things were wrong. Which levels a camera-relative window holds depends on
+    the camera's level, and that is the gauge. And bare 1/h² is not size-blind in a *nested*
+    world: every inner globe sits at one spot, so from far away all of them stand at the same h
+    and each adds 1/h² (the gate read λ = 28.0 m from the root, 22.9 m one gauge in, 19.9 m two
+    in). Law: a ground weighs r²/(h²(r²+h²)). Near the surface that is 1/h², and a globe small
+    in the sky falls away, so the tower sums to its largest member whatever the window, and the
+    heaviest ground (not the nearest) owns the eye. The gate forces the gauge instead of trusting
+    the rule to pick it. The same pass found the appealing dome drawn in the camera level's frame,
+    a third gauge read, which swung the dome's zenith ~60° at the re-root. The dome now belongs
+    to the ground that calls for it.
+
 
 ## verification — The gate map: which algebra is pinned where
 
@@ -1229,6 +1418,13 @@ model (or a textbook) would hold → what this project measured → the law now 
 - `cga` — the conformal model Cl(4,1): the null pair, the up/down maps and homogeneity,
   P·Q = −½d², each versor's sandwich and their composition, sphere/plane/meet incidence, and
   the unit-length collapse (a point in metres becomes a point at infinity past 9.49e7 m).
+- `droste` (M10) — the link S at a real leaf, both with and without the quarter twist: S(c₀) =
+  c₁ by closed form and by sandwich, the transformed DualSphere's own radius, S(p) = p, the rest
+  contact on the leaf's ground, S⁻¹S = 1, S^½S^½ = S and S² = S·S, the gauge identity
+  Sᵏ(y) − C = sᵏQᵏ(y − S⁻ᵏ(C)) for k ∈ {−1, 0, 1, 2}, and re-rooting as a gauge change; the
+  ground field (roll, speed, backdrop weight and owners) identical from forced gauges one and two
+  levels in — seen to FAIL under bare 1/h² — and the eye over the inner Merrimack owned by the
+  globe beneath it, not by the specks nested on it (priors 39).
 - `gatest` — versors (sandwich, refraction rotor incl. TIR), fold telescope identities,
   spinor blend soundness, AST flip/orphan/ledger rules, mercator float bound (1.64 m
   measured < 4.5 m asserted), wave-physics endpoint pins.
@@ -1243,6 +1439,9 @@ model (or a textbook) would hold → what this project measured → the law now 
 - `watertest` — station fits (sub-mm), datum ladder, phasor field soak, tile-vs-stack
   identity, seam continuity (2.1 mm).
 - `tiletest` — the tiled atlas contract on this GPU (residency, null-tile zeros).
+- `dxtest` — CB parity by reflection (size + row layout), the sampler law over every compute
+  entry, the mesh stage (M10: every mesh entry compiles and validates as ms_6_5 — seen to FAIL
+  on a planted double `SetMeshOutputCounts`, priors 38), and the AST anchors.
 - `atlastest` — end-to-end atlas behaviors.
 - The M7p match report (`proofs/inlet_storm.py`) — the wave-physics chain against an
   independent implementation on the same fields: corr ≥ 0.9/ring, mean |log ratio| ≤ 4%.

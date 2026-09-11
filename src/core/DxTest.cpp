@@ -237,18 +237,19 @@ bool RunDxSelfTest() {
 
     // ---- 2. THE SAMPLER LAW: discover every compute entry, compile, reflect, and refuse
     // the proven trap (static sampler + unbounded bindless array in a compute stage).
-    int kernels = 0, flagged = 0;
+    int kernels = 0, flagged = 0, meshEntries = 0;
     for (const auto& de : std::filesystem::directory_iterator("shaders")) {
         const std::string path = de.path().string();
         if (path.size() < 5 || path.substr(path.size() - 5) != ".hlsl") continue;
         const std::string text = ReadFile(path);
         // mesh shaders carry [numthreads] too -- their stage has its own rules (and
         // ComposedHeight sampling in the MESH stage empirically works; the proven trap
-        // is compute), so the scan skips entries marked [outputtopology].
+        // is compute), so the sampler scan skips entries marked [outputtopology]. (A hull
+        // shader's [outputtopology] has no [numthreads], so it is neither kind.)
         size_t at = 0;
         while ((at = text.find("[numthreads(", at)) != std::string::npos) {
             const size_t back = text.rfind("[outputtopology", at);
-            if (back != std::string::npos && at - back < 200) { at += 12; continue; }
+            const bool mesh = back != std::string::npos && at - back < 200;
             const size_t v = text.find("void ", at);
             if (v == std::string::npos) break;
             size_t e = v + 5;
@@ -260,6 +261,22 @@ bool RunDxSelfTest() {
             at = e;
             std::wstring wentry(entry.begin(), entry.end());
             std::wstring wpath(path.begin(), path.end());
+            if (mesh) {
+                // ---- 2b. M10: THE MESH STAGE COMPILES. The entries the sampler scan
+                // skips must compile and VALIDATE as ms_6_5. The CB-parity step above
+                // compiles PsMain only, so a mesh shader that failed validation passed
+                // this gate -- and at run time the globe's mesh pipeline silently fell back
+                // (MEASURED, M10: a second SetMeshOutputCounts call site on an early-out
+                // path; the root planet vanished from a rail while --selftest said PASS).
+                ++meshEntries;
+                if (!sc.Compile(wpath, wentry.c_str(), L"ms_6_5").Valid()) {
+                    Log("[dxtest] FAIL mesh stage: %s::%s does not compile/validate as "
+                        "ms_6_5 -- the globe's mesh pipeline would silently fall back",
+                        path.c_str(), entry.c_str());
+                    ok = false;
+                }
+                continue;
+            }
             const ShaderBlob blob = sc.Compile(wpath, wentry.c_str(), L"cs_6_0");
             if (!blob.Valid()) {
                 // entries needing defines or newer SM are outside this gate's scope
@@ -331,8 +348,9 @@ bool RunDxSelfTest() {
 
     if (ok) {
         Log("[dxtest] ---- PASS: cb parity x%zu (reflection vs header: size + row layout), sampler law "
-            "(%d compute entries, %d flagged), %d ast anchors resolve ----",
-            std::size(kCbs), kernels, flagged, anchors);
+            "(%d compute entries, %d flagged), %d mesh entries validate as ms_6_5, %d ast "
+            "anchors resolve ----",
+            std::size(kCbs), kernels, flagged, meshEntries, anchors);
     }
     return ok;
 }

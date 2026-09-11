@@ -18,12 +18,24 @@ public:
     void ReloadShaders(Gpu& gpu, ShaderCompiler& sc) override;
     void Render(const FrameContext& ctx) override;
 
+    // M10: WHOSE sky. The dome is evaluated in its own world's frame: rows take a view ray from
+    // the camera's frame into the sky's, and `sun` is the sun in the sky's frame. Identity and
+    // the scene's sun (the default, and every run without a Droste link) reproduce the old pass
+    // exactly; under realistic Droste lighting the camera sits inside a twisted level and the
+    // backdrop is the ROOT's sky, turned by Q^L.
+    void SetSkyFrame(const float rows[9], const float sun[3]) {
+        for (int i = 0; i < 9; ++i) m_rot[i] = rows[i];
+        for (int i = 0; i < 3; ++i) m_sun[i] = sun[i];
+    }
+
 private:
     bool BuildPso(Gpu& gpu, ShaderCompiler& sc);
 
     std::wstring m_shaderDir;
     ID3D12RootSignature* m_rootSig = nullptr;
     Com<ID3D12PipelineState> m_pso;
+    float m_rot[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    float m_sun[3] = {0.0f, 1.0f, 0.0f};
 };
 
 }  // namespace ga

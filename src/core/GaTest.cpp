@@ -20,6 +20,7 @@
 #include "PageTable.h"
 #include "Pga.h"
 #include "Cga.h"           // M9bi: the conformal algebra the solar system needed
+#include "Droste.h"        // M10: ...and the globe within the globe, one versor of it
 #include "sim/Ephemeris.h"   // ...and the sun it places
 
 namespace ga {
@@ -66,6 +67,11 @@ bool RunGaSelfTest() {
     // the sun's place, its distance and the frame chain that carries it here all rest on these
     // identities, so they are checked first and the rest of this gate may assume them.
     if (!cga::RunCgaSelfTest()) ok = false;
+    // ---- 0b. THE DROSTE LINK (M10). The globe within the globe is one versor of that model;
+    // its gate holds the closed form every frame uses to the sandwich, and holds the gauge
+    // identity -- level k seen from C is the root seen from S^-k(C) -- that every inner and
+    // outer planet is drawn by.
+    if (!droste::RunDrosteSelfTest()) ok = false;
     std::mt19937 rng(20260830);
     std::uniform_real_distribution<double> U(-1.0, 1.0);
     auto rv = [&] { return Norm(V3{U(rng), U(rng), U(rng) + 1.7}); };

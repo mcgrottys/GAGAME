@@ -20,6 +20,7 @@
 #include "render/Camera.h"
 #include "scene/Layer.h"
 
+#include <cmath>
 #include <memory>
 #include <vector>
 
@@ -111,6 +112,22 @@ public:
     float sunAngRadiusDeg = 0.26656f;
     float sunAzimuthDeg = 112.0f;
     float sunElevationDeg = 26.0f;
+    // The unit sun direction this frame's scene constants will carry -- the placed sun, or the
+    // pinned art direction. M10: the globe's level table takes it from here, so the two cannot
+    // disagree about which sun the camera's own level is lit by.
+    void SunDir(float out[3]) const {
+        if (sunPlaced) {
+            out[0] = sunDirTangent[0];
+            out[1] = sunDirTangent[1];
+            out[2] = sunDirTangent[2];
+            return;
+        }
+        const float az = sunAzimuthDeg * 0.017453292519943295f;
+        const float el = sunElevationDeg * 0.017453292519943295f;
+        out[0] = std::cos(el) * std::sin(az);
+        out[1] = std::sin(el);
+        out[2] = std::cos(el) * std::cos(az);
+    }
     // Turbid coastal water (vqview's calibrated Merrimack optics, kept as the default palette).
     float sigmaW[3] = {0.330f, 0.1238f, 0.1463f};
     float bscat[3] = {0.0173f, 0.0233f, 0.0248f};

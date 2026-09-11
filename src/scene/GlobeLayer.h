@@ -19,6 +19,7 @@
 #include "scene/Layer.h"
 #include "sim/GlobeModel.h"
 
+#include <algorithm>
 #include <condition_variable>
 #include <mutex>
 #include <string>
@@ -194,6 +195,20 @@ public:
         uint32_t winFace = 0, hgtWinFace = 0, detFace = 0;
         double detOrg[2] = {}, detSize = 1.0, det17Org[2] = {};
         bool probeCullFar = false;   // step 23 probe
+        // M10: an OCCLUDING SPHERE in this walk's own frame (centre, radius; radius 0 = none).
+        // For a level the camera's planet floats in, that planet hides most of it: a node whose
+        // bounding sphere lies wholly inside the planet's silhouette cone and beyond its tangent
+        // distance cannot be seen, and is not walked.
+        double occ[4] = {0.0, 0.0, 0.0, 0.0};
+        // M10: a LOCAL relief bound for the culls. The shipped bound pads every node with 9 km
+        // of relief (the planet's worst case, x the exaggeration) -- right from orbit, and ruinous
+        // for a Droste level whose eye sits 70 m above its sea: nothing within 9 km of that eye
+        // can ever be culled, so the whole entrance walks to the wave grain in every direction
+        // (MEASURED: 34 k records for the outer level alone, the inner globe then starved to 0).
+        // With the planet's own CPU relief (ETOPO) a small node's bound is its local height plus
+        // a margin for what a 1.8 km cell can hide. Extra levels only: the camera's own walk keeps
+        // its bytes (priors 29 -- a changed want set is a changed picture, through the streamer).
+        const GlobeModel* relief = nullptr;
     };
     // One Want() the walk asked for, as it asked (face and mip as the manager takes them).
     struct WantRect {
@@ -248,6 +263,68 @@ public:
         m_lensRegion[2] = (spanLon != 0.0) ? static_cast<float>(1.0 / spanLon) : 0.0f;
         m_lensRegion[3] = (spanLat != 0.0) ? static_cast<float>(1.0 / spanLat) : 0.0f;
     }
+    // ---- M10 THE DROSTE LEVELS (src/core/Droste.h) -----------------------------------------
+    // The camera's own level is always walked (slot 0). Each extra level is the ROOT walked
+    // again under the eye S^-k(C) -- the same tree, the same addresses, the same wants into the
+    // same tenants (the sparse structure serves every level from one resident set) -- and its
+    // records are drawn through the gauge: shaded in the level's own frame, rasterized at
+    // s^k Q^k of it. A level whose globe is under a pixel emits nothing; that is where the
+    // recursion stops, and it is the screen that stops it.
+    static constexpr int kMaxLevels = 8;
+    struct DrosteLevel {
+        int rel = 0;                  // the level, relative to the camera's
+        double cam[3] = {0.0, 0.0, 0.0};   // the eye in this level's OWN tangent frame: S^-k(C)
+        double sigma = 1.0;           // true size over own size: s^k
+        double Q[3][3] = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}};   // own -> true
+        float reliefExagg = 1.0f;     // the display exaggeration at this level's own altitude
+        float sun[3] = {0.0f, 1.0f, 0.0f};   // the sun in this level's own frame
+        int bankSet = -1;             // 0 = the camera's rings, 1 = set B, -1 = none (far)
+        float skyUp[3] = {0.0f, 1.0f, 0.0f};   // the zenith of the sky this level SEES, own frame
+        float skyDay = -1.0f;         // that sky's daylight; < 0 = the level's own local day
+    };
+    // Per frame, BEFORE SetView: the scene's sun as the renderer will write it (the level
+    // table's slot 0 carries it -- the globe's shading reads the table, not gSunDir).
+    void SetSun(const float sun[3]) {
+        for (int i = 0; i < 3; ++i) m_camSun[i] = sun[i];
+    }
+    // M10: the sky the camera's own level SEES (slot 0's row 5): its zenith in this frame and its
+    // daylight (< 0 = the level's own local day, the default and every non-Droste run).
+    void SetCamSky(const float up[3], float day) {
+        for (int i = 0; i < 3; ++i) m_camSkyUp[i] = up[i];
+        m_camSkyDay = day;
+    }
+    // M10: the sun the SPACE backdrop shows (camera frame) -- the sun of the level whose orbit
+    // calls for space (Droste.h Grounds, spaceRel). Read only under Droste.
+    void SetSpaceSun(const float sun[3]) {
+        for (int i = 0; i < 3; ++i) m_spaceSun[i] = sun[i];
+    }
+    // Per frame, BEFORE SetView, when the link is live. `extra` are the levels other than the
+    // camera's; the portal (centre, radius) is the next level down in any level's own frame, for
+    // the shadow; camLevelAbs is for the title bar.
+    void SetDroste(const DrosteLevel* extra, int n, int lighting, const double portalCentre[3],
+                   double portalRadius, int camLevelAbs) {
+        m_levels.assign(extra, extra + (std::min)(n, kMaxLevels - 1));
+        for (int i = 0; i < 3; ++i) m_portal[i] = portalCentre[i];
+        m_portal[3] = portalRadius;
+        m_lighting = lighting;
+        m_camLevelAbs = camLevelAbs;
+        m_drosteOn = true;
+    }
+    // Set B: the rings anchored at the OUTER level's eye (a second WaterBankLayer).
+    void SetWaterBankB(uint32_t disp, uint32_t param, uint32_t detail, const float* org12,
+                       bool on) {
+        m_bankB[0] = disp;
+        m_bankB[1] = param;
+        m_bankB[2] = detail;
+        for (int i = 0; i < 12; ++i) m_bankBOrg[i] = org12 ? org12[i] : 0.0f;
+        m_bankBOn = on;
+    }
+    // THE ADDRESS <-> PLACE maps of the walk's own quadtree (CubeDir's face convention): the
+    // unit direction at a leaf's centre, and the leaf at `level` that holds a direction.
+    static void LeafDir(int face, int level, uint32_t ix, uint32_t iy, double out[3]);
+    static void LeafOf(const double dir[3], int level, int& face, uint32_t& ix, uint32_t& iy);
+    uint32_t levelRecords[kMaxLevels] = {};   // records emitted per slot, last frame
+
     float foamOpacity = 0.72f;      // M8: peak foam opacity (data/wave_scene.json)
     float ringBlendTexels = 48.0f;  // M8: bank ring cross-fade width (scene cfg)
     float windGateVal = 1.0f;       // M8: Monahan whitecap gate (per frame, from sea)
@@ -277,6 +354,11 @@ public:
     bool albedoLens = false;        // M6j: --albedo, raw composed color -- no lighting, no
                                     // atmosphere, no materials; THE view for texture work
     bool skyPassEnabled = true;     // M6g: off while SkyLayer owns the low-altitude backdrop
+    float skyPassWeight = 1.0f;     // M10: the limb backdrop's blend over the dome (1 = replace)
+    // M10: the share of that space backdrop which is the camera level's OWN air (the rest is the
+    // space some other level's altitude called for, and holds no air of the camera's). 1 = the
+    // shipped backdrop; ignored without Droste.
+    float skyOwnAir = 1.0f;
     bool windOverlay = false;       // V key: tint the Mv2 wind bank's curl (violet cyclonic)
     bool marsReliefValid = false;   // M6f: the configured model's relief IS Mars (MOLA)
     std::string stats;              // "globe 214 nodes  alt 3520 km" for the title bar
@@ -299,7 +381,8 @@ private:
         uint32_t seamX;   // step 23: the seam word across the W (mx 0) / E (mx 3) edge
         float dPdv[3];
         uint32_t seamY;   // step 23: the same across the N (my 0) / S (my 3) edge
-        float upT[3], pad2;
+        float upT[3];
+        uint32_t level;   // M10: the Droste level slot (the record's frame is that level's own)
     };
     static_assert(sizeof(MeshletRec) == 96, "MeshletRec mirrors GlobeMesh.hlsl: 96 B");
     // Step 23: one emitted leaf, keyed for the seam table (SeamTable): face, level and the
@@ -346,6 +429,14 @@ private:
         float lensA[4];       // bathy grid: org x, org z, 1/sizeX, 1/sizeZ
         float lensB[4];       // M9h: bank texel m, residency-map dims, spare
         float lensR[4];       // M9j: region page lon0, lat0, 1/spanLon, 1/spanLat
+        // M10 THE DROSTE LEVELS -- appended at the END on both sides (priors 22).
+        float drosteA[4];     // levels in the table, camera's absolute level, lighting, shadow on
+        float drostePortal[4];   // the inner globe in any level's own frame: centre, radius
+        uint32_t bankBU[4];   // set B: disp, param, detail SRVs, on
+        float bankBOrg01[4];
+        float bankBOrg23[4];
+        float bankBOrg45[4];
+        float droste[192];    // 8 levels x 6 rows (Globe.hlsl LoadLevel)
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -358,6 +449,8 @@ private:
         float fwd[4];         // xyz forward, w = tan(fovY/2)
         float right[4];       // xyz right, w = aspect
         float up[4];
+        float lvl[4];         // M10: limb slot, own-air share, Droste sun rule, pixel angle
+        float spaceSun[4];    // M10: the space backdrop's sun (GlobeSkyCb gSkySpaceSun)
     };
     // Mirrors CloudCb in CloudVol.hlsl.
     struct CloudCbData {
@@ -372,8 +465,12 @@ private:
     // Step 5: everything the walk reads, from the members and this camera (planeCount 0).
     WalkParams CaptureWalk(const Camera& cam, float viewportH) const;
     void PredictWalk();   // the prefetch walk, as one pool job
+    // camPos is the eye of the level being emitted, in that level's own frame (M10); slot is
+    // its row in the level table.
     void EmitMeshlets(int face, double u0, double v0, double size, double arc,
-                      float morphStart, float morphEnd);
+                      float morphStart, float morphEnd, const double camPos[3], uint32_t slot);
+    // M10: one walk of the root under a level's eye, emitting records into `slot`.
+    void WalkLevel(const WalkParams& wp, uint32_t slot);
     bool BuildPso(Gpu& gpu, ShaderCompiler& sc);
     bool BuildMeshPso(Gpu& gpu, ShaderCompiler& sc);
 
@@ -397,6 +494,7 @@ private:
     const GlobeModel* m_globe = nullptr;
     ID3D12RootSignature* m_rootSig = nullptr;
     Com<ID3D12PipelineState> m_pso, m_skyPso;
+    Com<ID3D12PipelineState> m_limbPso;   // M10: PsLimb, dual-source blend, SV_Depth-tested
     // M6i: m_relief and m_ne retired -- the composed height cube streams what they carried
     // (and returns ~90 MB of committed equirect memory to the pool).
     GpuTexture m_cloudSrc;
@@ -496,8 +594,29 @@ private:
     bool m_oneWater = false;
 
     std::vector<NodeData> m_nodes;
+    // M10: the Droste levels of this frame (slots 1..n; slot 0 is the camera's own).
+    std::vector<DrosteLevel> m_levels;
+    float m_camSun[3] = {0.0f, 1.0f, 0.0f};
+    float m_camSkyUp[3] = {0.0f, 1.0f, 0.0f};
+    float m_camSkyDay = -1.0f;
+    float m_spaceSun[3] = {0.0f, 1.0f, 0.0f};
+    double m_portal[4] = {0.0, 0.0, 0.0, 0.0};
+    int m_lighting = 0;
+    int m_camLevelAbs = 0;
+    bool m_drosteOn = false;
+    // M10: the level slots whose limb PsLimb draws this frame, farthest first (each dims what is
+    // behind it, so the nearer limb must composite last).
+    uint32_t m_limbSlots[kMaxLevels] = {};
+    int m_limbCount = 0;
+    uint32_t m_bankB[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    float m_bankBOrg[12] = {};
+    bool m_bankBOn = false;
     // M6j: the mesh-shader path.
-    static constexpr uint32_t kMaxMeshlets = 65536;
+    // M10: 2^17. DispatchMesh caps ONE dimension at 65535 groups, and that was the budget; the
+    // Droste levels outgrew it (a turned-around helm at level 2 walked 41 k records of its own
+    // beside 24 k for the two worlds outside it, and dropped leaves = holes). The dispatch is now
+    // 2-D (GlobeMesh.hlsl folds the group id) and the seam word's record index is 17 bits wide.
+    static constexpr uint32_t kMaxMeshlets = 131072;
     uint32_t m_meshletDrops = 0;    // M8h: leaves dropped at the record cap this frame
     std::vector<LeafKey> m_leafKeys;   // step 23: this frame's emitted leaves (SeamTable)
     bool m_dropsReported = false;   // one report per drop episode, not per frame
