@@ -43,8 +43,16 @@ static const float3 kCorners[8] = {
     float3(-1, -1, -1), float3(1, -1, -1), float3(1, -1, 1), float3(-1, -1, 1),
     float3(-1,  1, -1), float3(1,  1, -1), float3(1,  1, 1), float3(-1,  1, 1)
 };
-static const uint kIdx[36] = {0,1,5, 0,5,4, 1,2,6, 1,6,5, 2,3,7, 2,7,6,
-                              3,0,4, 3,4,7, 4,5,6, 4,6,7, 0,2,1, 0,3,2};
+// CLOCKWISE SEEN FROM OUTSIDE, which is D3D's front face -- and the table used to be the other
+// way round. Culling BACK then removed every face turned toward the camera and kept only the far
+// walls, so a box drew as its own inside and anything sitting within one showed straight through
+// (the RHIB's ballast, visible through its hull). The rule, checkable by hand: with the
+// LookToLH view and this projection there is no mirror anywhere in the chain, so a triangle winds
+// clockwise on screen exactly when (v1 - v0) x (v2 - v0) points TOWARD the eye -- i.e. every
+// triangle here must have that cross product along its OUTWARD normal, kFaceN[tri]. Swapping the
+// last two indices of each triangle is the whole fix; kFaceN is per-triangle and does not move.
+static const uint kIdx[36] = {0,5,1, 0,4,5, 1,6,2, 1,5,6, 2,7,3, 2,6,7,
+                              3,4,0, 3,7,4, 4,6,5, 4,7,6, 0,1,2, 0,2,3};
 static const float3 kFaceN[12] = {
     float3(0,0,-1), float3(0,0,-1), float3(1,0,0), float3(1,0,0),
     float3(0,0,1),  float3(0,0,1),  float3(-1,0,0), float3(-1,0,0),
