@@ -2,6 +2,9 @@
 
 #include "hal/PixEvents.h"
 #include "hal/Pipeline.h"
+#include "hal/Resources.h"
+#include "hal/Root.h"
+#include "hal/Views.h"
 #include "scene/FieldSet.h"
 
 #include <cmath>
@@ -40,23 +43,12 @@ void GulfLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
     m_uvSrv = gpu.CreateSrv(m_uvTex.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
 
     auto makeOut = [&](const wchar_t* name) {
-        D3D12_RESOURCE_DESC d{};
-        d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        d.Width = static_cast<UINT64>(f.nx);
-        d.Height = static_cast<UINT>(f.ny);
-        d.DepthOrArraySize = 1;
-        d.MipLevels = 1;
-        d.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        d.SampleDesc.Count = 1;
-        d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-        D3D12_HEAP_PROPERTIES hp{};
-        hp.Type = D3D12_HEAP_TYPE_DEFAULT;
-        Com<ID3D12Resource> res;
-        GA_CHECK(gpu.Device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d,
-                                                      D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                                      nullptr, IID_PPV_ARGS(&res)));
-        res->SetName(name);
-        return res;
+        return hal::Committed(gpu, name, static_cast<uint32_t>(f.nx), static_cast<uint32_t>(f.ny),
+                              DXGI_FORMAT_R16G16B16A16_FLOAT,
+                              D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                              "a derived field over the gulf's current grid, written once by the "
+                              "gradient kernel and read as a texture: dense and small, not a bank");
     };
     m_mvTex = makeOut(L"gulf.mv2 (div, u, v, curl)");
     m_owTex = makeOut(L"gulf.okuboWeiss");
@@ -117,42 +109,16 @@ bool GulfLayer::BuildDrawPso(Gpu& gpu, ShaderCompiler& sc) {
 void GulfLayer::RunVelGrad(Gpu& gpu, ShaderCompiler& sc) {
     // Tiny dedicated compute root signature: constants + one 3-UAV table.
     if (!m_csRootSig) {
-        D3D12_DESCRIPTOR_RANGE1 range{};
-        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        range.NumDescriptors = 3;
-        range.BaseShaderRegister = 0;
-        range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-
-        D3D12_ROOT_PARAMETER1 params[2]{};
-        params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        params[0].Constants.ShaderRegister = 0;
-        params[0].Constants.Num32BitValues = 4;
-        params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        params[1].DescriptorTable.NumDescriptorRanges = 1;
-        params[1].DescriptorTable.pDescriptorRanges = &range;
-
-        D3D12_VERSIONED_ROOT_SIGNATURE_DESC vd{};
-        vd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-        vd.Desc_1_1.NumParameters = _countof(params);
-        vd.Desc_1_1.pParameters = params;
-        Com<ID3DBlob> blob, err;
-        GA_CHECK(D3D12SerializeVersionedRootSignature(&vd, &blob, &err));
-        GA_CHECK(gpu.Device()->CreateRootSignature(0, blob->GetBufferPointer(),
-                                                  blob->GetBufferSize(),
-                                                  IID_PPV_ARGS(&m_csRootSig)));
+        m_csRootSig = hal::RootLayout{}
+                          .Constants(0, 4)
+                          .Table({hal::UavRange(0, 3)})
+                          .Build(gpu, "gulf.velgrad");
         m_csRootSig->SetName(L"gulf velgrad root signature");
 
-        m_csTable = gpu.SrvHeap().Alloc(3);
-        D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
-        uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        uv.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-        gpu.Device()->CreateUnorderedAccessView(m_uvTex.res.Get(), nullptr, &uv,
-                                                gpu.SrvHeap().Cpu(m_csTable + 0));
-        uv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        gpu.Device()->CreateUnorderedAccessView(m_mvTex.Get(), nullptr, &uv,
-                                                gpu.SrvHeap().Cpu(m_csTable + 1));
-        gpu.Device()->CreateUnorderedAccessView(m_owTex.Get(), nullptr, &uv,
-                                                gpu.SrvHeap().Cpu(m_csTable + 2));
+        m_csTable = hal::Table::Alloc(gpu, 3, "gulf.velgrad");
+        m_csTable.Uav2D(0, m_uvTex.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+        m_csTable.Uav2D(1, m_mvTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+        m_csTable.Uav2D(2, m_owTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
     }
 
     m_csPso = hal::Require(
@@ -171,14 +137,13 @@ void GulfLayer::RunVelGrad(Gpu& gpu, ShaderCompiler& sc) {
     c.cy = static_cast<float>(f.dlat * 110574.0);
 
     hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
-    ID3D12DescriptorHeap* heaps[] = {gpu.SrvHeap().Heap()};
-    up.Native()->SetDescriptorHeaps(1, heaps);
+    up.BindHeaps();
     {
         PixScope scope(up.Native(), "gulf.velgrad (grad(U): div->grade0, vorticity->grade2, OW)");
         up.Barrier(m_uvTex.res.Get(), m_uvTex.state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         up.ComputeRoot(m_csRootSig.Get());
         up.Native()->SetComputeRoot32BitConstants(0, 4, &c, 0);
-        up.ComputeTable(1, m_csTable);
+        up.ComputeTable(1, m_csTable.Base());
         up.Pipeline(m_csPso.Get());
         up.Dispatch((c.nx + 7) / 8, (c.ny + 7) / 8, 1);
         up.Barrier(m_uvTex.res.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,

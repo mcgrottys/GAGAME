@@ -13,6 +13,7 @@
 #include "compose/ExposureSource.h"
 #include "core/OceanFft.h"
 #include "hal/TileAtlas.h"
+#include "hal/Views.h"
 #include "core/GradeField.h"
 #include "scene/Layer.h"
 #include "sim/BathyModel.h"
@@ -318,7 +319,7 @@ private:
     GradeBank m_churn;
     Com<ID3D12RootSignature> m_churnRs;
     Com<ID3D12PipelineState> m_churnClear, m_churnUpdate;
-    uint32_t m_churnTable = UINT32_MAX;    // [t1 chop deriv, t2 swe uv, t3 height page,
+    hal::Table m_churnTable;               // [t1 chop deriv, t2 swe uv, t3 height page,
                                            //  t4 its residency map (M9ar), u0 churn]
     ID3D12Resource* m_hgtArr = nullptr;    // M9ar: borrowed from the residency manager
     ID3D12Resource* m_hgtRes = nullptr;

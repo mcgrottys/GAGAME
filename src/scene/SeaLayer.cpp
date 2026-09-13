@@ -4,6 +4,8 @@
 
 #include "hal/PixEvents.h"
 #include "hal/Pipeline.h"
+#include "hal/Root.h"
+#include "hal/Views.h"
 #include "scene/FieldSet.h"
 
 #include <algorithm>
@@ -49,45 +51,17 @@ void SeaLayer::InitChurn(Gpu& gpu, ShaderCompiler& sc) {
     m_lastActive.assign(static_cast<size_t>(m_churn.TilesX()) * m_churn.TilesY(), -1.0e18);
 
     // Root signature: b0 CBV, t0 root SRV (tile list from the frame arena), table
-    // [t1 chop-deriv, t2 swe uv, t3 bathy, u0 churn], s0 wrap + s1 clamp samplers.
-    D3D12_DESCRIPTOR_RANGE1 ranges[2]{};
-    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = 4;   // M9ar: + t4, the height page residency map
-    ranges[0].BaseShaderRegister = 1;
-    ranges[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    ranges[0].OffsetInDescriptorsFromTableStart = 0;
-    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    ranges[1].NumDescriptors = 1;
-    ranges[1].BaseShaderRegister = 0;
-    ranges[1].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    ranges[1].OffsetInDescriptorsFromTableStart = 4;
-    D3D12_ROOT_PARAMETER1 params[3]{};
-    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    params[0].Descriptor.ShaderRegister = 0;
-    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    params[1].Descriptor.ShaderRegister = 0;
-    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[2].DescriptorTable.NumDescriptorRanges = 2;
-    params[2].DescriptorTable.pDescriptorRanges = ranges;
-    D3D12_STATIC_SAMPLER_DESC samps[2]{};
-    samps[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-    samps[0].AddressU = samps[0].AddressV = samps[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    samps[0].MaxLOD = D3D12_FLOAT32_MAX;
-    samps[0].ShaderRegister = 0;
-    samps[0].ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-    samps[1] = samps[0];
-    samps[1].AddressU = samps[1].AddressV = samps[1].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    samps[1].ShaderRegister = 1;
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC vd{};
-    vd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    vd.Desc_1_1.NumParameters = _countof(params);
-    vd.Desc_1_1.pParameters = params;
-    vd.Desc_1_1.NumStaticSamplers = 2;
-    vd.Desc_1_1.pStaticSamplers = samps;
-    Com<ID3DBlob> blob, err;
-    GA_CHECK(D3D12SerializeVersionedRootSignature(&vd, &blob, &err));
-    GA_CHECK(gpu.Device()->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
-                                              IID_PPV_ARGS(&m_churnRs)));
+    // [t1 chop-deriv, t2 swe uv, t3 bathy, t4 its residency map (M9ar), u0 churn], s0 wrap +
+    // s1 clamp samplers.
+    m_churnRs = hal::RootLayout{}
+                    .Cbv(0)
+                    .Srv(0)
+                    .Table({hal::SrvRange(1, 4), hal::UavRange(0, 1)})
+                    .Sampler(hal::StaticSampler(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                                                D3D12_TEXTURE_ADDRESS_MODE_WRAP))
+                    .Sampler(hal::StaticSampler(1, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                                                D3D12_TEXTURE_ADDRESS_MODE_CLAMP))
+                    .Build(gpu, "sea.churn");
     m_churnRs->SetName(L"sea.churn root signature");
 
     auto makePso = [&](const wchar_t* entry, Com<ID3D12PipelineState>& out) {
@@ -101,36 +75,18 @@ void SeaLayer::InitChurn(Gpu& gpu, ShaderCompiler& sc) {
     makePso(L"CsChurnClear", m_churnClear);
     makePso(L"CsChurnUpdate", m_churnUpdate);
 
-    m_churnTable = gpu.SrvHeap().Alloc(5);   // M9ar: + the residency map slot
-    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    sv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    sv.Texture2D.MipLevels = 1;
-    gpu.Device()->CreateShaderResourceView(m_fft.DerivRes(2), &sv,
-                                           gpu.SrvHeap().Cpu(m_churnTable + 0));
+    m_churnTable = hal::Table::Alloc(gpu, 5, "sea.churn");   // M9ar: + the residency map slot
+    m_churnTable.Srv2D(0, m_fft.DerivRes(2), DXGI_FORMAT_R16G16B16A16_FLOAT);
     // t2 (solved currents) and t3 (bathy) start as NULL views -- they read zeros, which the
     // kernel's gSweM.x gate never touches -- and are wired in RecordChurn once the solver
     // exists (main attaches it after this layer's Init).
-    gpu.Device()->CreateShaderResourceView(nullptr, &sv, gpu.SrvHeap().Cpu(m_churnTable + 1));
-    sv.Format = DXGI_FORMAT_R32_FLOAT;
-    gpu.Device()->CreateShaderResourceView(nullptr, &sv, gpu.SrvHeap().Cpu(m_churnTable + 2));
-    {   // M9ar: t3/t4 are Texture2DArray in the kernel; null views must say so
-        D3D12_SHADER_RESOURCE_VIEW_DESC nv{};
-        nv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        nv.Format = DXGI_FORMAT_R16_FLOAT;
-        nv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-        nv.Texture2DArray.MipLevels = 1;
-        nv.Texture2DArray.ArraySize = 1;
-        gpu.Device()->CreateShaderResourceView(nullptr, &nv, gpu.SrvHeap().Cpu(m_churnTable + 2));
-        nv.Format = DXGI_FORMAT_R8_UNORM;
-        gpu.Device()->CreateShaderResourceView(nullptr, &nv, gpu.SrvHeap().Cpu(m_churnTable + 3));
-    }
-    D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
-    uv.Format = DXGI_FORMAT_R16_FLOAT;
-    uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    gpu.Device()->CreateUnorderedAccessView(m_churn.Res(), nullptr, &uv,
-                                            gpu.SrvHeap().Cpu(m_churnTable + 4));
+    m_churnTable.Srv2D(1, nullptr, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    // M9ar: t3/t4 are Texture2DArray in the kernel; null views must say so. (Until step 3d
+    // t3 was first written as a Texture2D R32F null view and then, before any use, as this
+    // one; the dead write is gone.)
+    m_churnTable.SrvArray(2, nullptr, DXGI_FORMAT_R16_FLOAT, 0, 1);
+    m_churnTable.SrvArray(3, nullptr, DXGI_FORMAT_R8_UNORM, 0, 1);
+    m_churnTable.Uav2D(4, m_churn.Res(), DXGI_FORMAT_R16_FLOAT);
 
     m_maskCpu.assign(static_cast<size_t>(m_churn.TilesX()) * m_churn.TilesY(), 0);
     m_maskTex = gpu.CreateTexture2D(m_churn.TilesX(), m_churn.TilesY(), DXGI_FORMAT_R8_UNORM,
@@ -736,29 +692,12 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
     // M5c late wiring: the solver is attached after Init, so its textures land in the table on
     // first use (overwriting the null views).
     if (!m_churnSweWired && m_swe && m_swe->Ready()) {
-        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        sv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        sv.Texture2D.MipLevels = 1;
-        ctx.gpu->Device()->CreateShaderResourceView(m_swe->UvRes(), &sv,
-                                                    ctx.gpu->SrvHeap().Cpu(m_churnTable + 1));
+        m_churnTable.Srv2D(1, m_swe->UvRes(), DXGI_FORMAT_R16G16B16A16_FLOAT);
         // M9ar: the bed is slice m_hgtSlice of the height PAGE tenant, plus its residency map.
         if (m_hgtArr && m_hgtRes) {
-            D3D12_SHADER_RESOURCE_VIEW_DESC av{};
-            av.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            av.Format = DXGI_FORMAT_R16_FLOAT;
-            av.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
             // M9ax: the whole tenant (cube faces + the page); the slice rides the CB.
-            av.Texture2DArray.MipLevels = m_hgtMips;
-            av.Texture2DArray.FirstArraySlice = 0;
-            av.Texture2DArray.ArraySize = UINT32_MAX;
-            ctx.gpu->Device()->CreateShaderResourceView(m_hgtArr, &av,
-                                                        ctx.gpu->SrvHeap().Cpu(m_churnTable + 2));
-            av.Format = DXGI_FORMAT_R8_UNORM;
-            av.Texture2DArray.MipLevels = 1;
-            ctx.gpu->Device()->CreateShaderResourceView(m_hgtRes, &av,
-                                                        ctx.gpu->SrvHeap().Cpu(m_churnTable + 3));
+            m_churnTable.SrvArray(2, m_hgtArr, DXGI_FORMAT_R16_FLOAT, 0, UINT32_MAX, m_hgtMips);
+            m_churnTable.SrvArray(3, m_hgtRes, DXGI_FORMAT_R8_UNORM, 0, UINT32_MAX, 1);
         }
         m_churnSweWired = true;
     }
@@ -826,7 +765,7 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
             m_churnCb.listCount = static_cast<uint32_t>(list.size());
             ctx.cmd->ComputeConstants(0, m_churnCb);
             ctx.cmd->ComputeSrvAt(1, ctx.gpu->PushConstants(list.data(), list.size() * 4));
-            ctx.cmd->ComputeTable(2, m_churnTable);
+            ctx.cmd->ComputeTable(2, m_churnTable.Base());
             ctx.cmd->Pipeline(pso);
             ctx.cmd->Dispatch(m_churn.TileW() / 16, m_churn.TileH() / 16, m_churnCb.listCount);
         };

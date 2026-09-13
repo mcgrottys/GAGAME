@@ -16,6 +16,7 @@
 
 #include "hal/Gpu.h"
 #include "hal/GpuProfiler.h"
+#include "hal/Root.h"
 #include "hal/Shader.h"
 #include "render/Camera.h"
 #include "scene/Layer.h"
@@ -133,6 +134,9 @@ public:
     float bscat[3] = {0.0173f, 0.0233f, 0.0248f};
 
 private:
+    // The table above as a hal::RootLayout -- the one graphics layout, built once by
+    // CreateRootSignature and handed to every layer's Init.
+    static hal::RootLayout SharedGraphicsLayout();
     void CreateRootSignature();
     void CreateTargets(uint32_t width, uint32_t height);
     void CreateTonemapPso();

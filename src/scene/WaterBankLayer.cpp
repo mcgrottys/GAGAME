@@ -5,6 +5,7 @@
 #include "core/Image.h"
 #include "hal/PixEvents.h"
 #include "hal/Pipeline.h"
+#include "hal/Root.h"
 #include "scene/SeaLayer.h"
 #include "core/SceneConfig.h"
 #include "sim/WaveField.h"
@@ -50,34 +51,11 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSig
     // Root signature: b0 CB, t0 tile list, then the BINDLESS pair -- one unbounded SRV range
     // and one unbounded UAV range over the shared heap, so this kernel reaches every texture
     // by slot exactly the way the render path does.
-    D3D12_DESCRIPTOR_RANGE1 rs[2]{}, ru[1]{};
-    rs[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    rs[0].NumDescriptors = UINT_MAX;
-    rs[0].BaseShaderRegister = 0;
-    rs[0].RegisterSpace = 1;
-    rs[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    rs[0].OffsetInDescriptorsFromTableStart = 0;
-    ru[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    ru[0].NumDescriptors = UINT_MAX;
-    ru[0].BaseShaderRegister = 0;
-    ru[0].RegisterSpace = 2;
     // M9aq: t0, space5 -- the heap as Texture2DArray, so the bed can be read from slice 6 of
     // the height PAGE tenant (one height texture; the window is a page of it).
-    rs[1] = rs[0];
-    rs[1].RegisterSpace = 5;
-    ru[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    ru[0].OffsetInDescriptorsFromTableStart = 0;
-    D3D12_ROOT_PARAMETER1 params[4]{};
-    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    params[0].Descriptor.ShaderRegister = 0;
-    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    params[1].Descriptor.ShaderRegister = 0;
-    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[2].DescriptorTable.NumDescriptorRanges = 2;
-    params[2].DescriptorTable.pDescriptorRanges = rs;
-    params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[3].DescriptorTable.NumDescriptorRanges = 1;
-    params[3].DescriptorTable.pDescriptorRanges = ru;
+    // The two samplers are this kernel's own and go in as written (no LOD range, no
+    // comparison -- unlike the house sampler); WaterBank.hlsl declares no SamplerState, its
+    // reads are manual bilinear loads, so nothing samples through them.
     D3D12_STATIC_SAMPLER_DESC samp[2]{};
     samp[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
     samp[0].AddressU = samp[0].AddressV = samp[0].AddressW =
@@ -88,16 +66,14 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSig
     samp[1].AddressU = samp[1].AddressV = samp[1].AddressW =
         D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
     samp[1].ShaderRegister = 1;
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC vd{};
-    vd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    vd.Desc_1_1.NumParameters = _countof(params);
-    vd.Desc_1_1.pParameters = params;
-    vd.Desc_1_1.NumStaticSamplers = 2;
-    vd.Desc_1_1.pStaticSamplers = samp;
-    Com<ID3DBlob> blob, err;
-    GA_CHECK(D3D12SerializeVersionedRootSignature(&vd, &blob, &err));
-    GA_CHECK(gpu.Device()->CreateRootSignature(0, blob->GetBufferPointer(),
-                                              blob->GetBufferSize(), IID_PPV_ARGS(&m_rs)));
+    m_rs = hal::RootLayout{}
+               .Cbv(0)
+               .Srv(0)
+               .Table({hal::SrvRange(0, hal::kUnbounded, 1), hal::SrvRange(0, hal::kUnbounded, 5)})
+               .Table({hal::UavRange(0, hal::kUnbounded, 2)})
+               .Sampler(samp[0])
+               .Sampler(samp[1])
+               .Build(gpu, "waterbank");
     m_rs->SetName(L"water bank root signature");
 
     m_fill = hal::Require(

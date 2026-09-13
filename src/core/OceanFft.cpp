@@ -2,6 +2,9 @@
 
 #include "hal/PixEvents.h"
 #include "hal/Pipeline.h"
+#include "hal/Resources.h"
+#include "hal/Root.h"
+#include "hal/Views.h"
 
 #include <algorithm>
 #include <cmath>
@@ -24,22 +27,10 @@ struct FftConsts {
 
 Com<ID3D12Resource> MakeTex(Gpu& gpu, uint32_t n, DXGI_FORMAT fmt, const wchar_t* name,
                             D3D12_RESOURCE_STATES state, uint32_t mips = 1) {
-    D3D12_RESOURCE_DESC d{};
-    d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    d.Width = n;
-    d.Height = n;
-    d.DepthOrArraySize = 1;
-    d.MipLevels = static_cast<UINT16>(mips);
-    d.Format = fmt;
-    d.SampleDesc.Count = 1;
-    d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    D3D12_HEAP_PROPERTIES hp{};
-    hp.Type = D3D12_HEAP_TYPE_DEFAULT;
-    Com<ID3D12Resource> res;
-    GA_CHECK(gpu.Device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, state, nullptr,
-                                                  IID_PPV_ARGS(&res)));
-    res->SetName(name);
-    return res;
+    return hal::Committed(gpu, name, n, n, fmt, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, state,
+                          "the FFT's working set: a dense n^2 UAV texture the kernels ping-pong "
+                          "through whole, never partly resident, so not a bank",
+                          static_cast<uint16_t>(mips));
 }
 
 }  // namespace
@@ -142,36 +133,11 @@ void OceanFft::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir)
     m_bandHi[2] = 0.9f * kPi * kN / m_patchL[2];   // guard band below Nyquist
 
     // Root signature: b1 root constants, b0 CBV (partitions), one table of 4 UAVs.
-    D3D12_DESCRIPTOR_RANGE1 range{};
-    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    range.NumDescriptors = 4;
-    range.BaseShaderRegister = 0;
-    range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    range.OffsetInDescriptorsFromTableStart = 0;
-
-    D3D12_ROOT_PARAMETER1 params[3]{};
-    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    params[0].Constants.ShaderRegister = 1;   // b1
-    params[0].Constants.Num32BitValues = sizeof(FftConsts) / 4;
-    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    params[1].Descriptor.ShaderRegister = 0;  // b0
-    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[2].DescriptorTable.NumDescriptorRanges = 1;
-    params[2].DescriptorTable.pDescriptorRanges = &range;
-
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC vd{};
-    vd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    vd.Desc_1_1.NumParameters = _countof(params);
-    vd.Desc_1_1.pParameters = params;
-
-    Com<ID3DBlob> blob, err;
-    HRESULT hr = D3D12SerializeVersionedRootSignature(&vd, &blob, &err);
-    if (FAILED(hr)) {
-        if (err) Log("[ocean] root sig: %s", static_cast<const char*>(err->GetBufferPointer()));
-        GA_CHECK(hr);
-    }
-    GA_CHECK(gpu.Device()->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
-                                              IID_PPV_ARGS(&m_rootSig)));
+    m_rootSig = hal::RootLayout{}
+                    .Constants(1, sizeof(FftConsts) / 4)
+                    .Cbv(0)
+                    .Table({hal::UavRange(0, 4)})
+                    .Build(gpu, "ocean");
     m_rootSig->SetName(L"ocean compute root signature");
 
     if (!BuildPipelines(gpu, sc)) throw std::runtime_error("ocean compute shaders failed");
@@ -182,24 +148,12 @@ void OceanFft::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir)
     // average of the field. (The coverage-weighted path exists for texture tenants, where null
     // means ABSENT; using it here would be wrong in the other direction.)
     {
-        D3D12_DESCRIPTOR_RANGE range{};
-        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        range.NumDescriptors = 2;
-        range.BaseShaderRegister = 0;
-        D3D12_ROOT_PARAMETER rp[2]{};
-        rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        rp[0].Constants.Num32BitValues = 4;
-        rp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        rp[1].DescriptorTable.NumDescriptorRanges = 1;
-        rp[1].DescriptorTable.pDescriptorRanges = &range;
-        D3D12_ROOT_SIGNATURE_DESC rsd{};
-        rsd.NumParameters = 2;
-        rsd.pParameters = rp;
-        Com<ID3DBlob> blob, err;
-        GA_CHECK(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &err));
-        GA_CHECK(gpu.Device()->CreateRootSignature(0, blob->GetBufferPointer(),
-                                                   blob->GetBufferSize(),
-                                                   IID_PPV_ARGS(&m_mipRs)));
+        // (Until step 3d the one version-1.0 root signature in the tree; 1.1 with the volatile
+        // flag 1.0 implied is the same signature to the driver.)
+        m_mipRs = hal::RootLayout{}
+                      .Constants(0, 4)
+                      .Table({hal::UavRange(0, 2)})
+                      .Build(gpu, "ocean.mip");
         m_mipRs->SetName(L"ocean mip reduce root signature");
         std::vector<std::wstring> defs{L"GA_MIP_CH=4"};
         m_mipPso = hal::Require(
@@ -240,18 +194,15 @@ void OceanFft::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir)
         // Descriptor blocks (4 consecutive UAVs each), one per kernel binding pattern.
         auto block = [&](ID3D12Resource* u0, ID3D12Resource* u1, ID3D12Resource* u2,
                          ID3D12Resource* u3) {
-            const uint32_t base = gpu.SrvHeap().Alloc(4);
+            hal::Table t = hal::Table::Alloc(gpu, 4, "ocean.block");
             ID3D12Resource* res[4] = {u0, u1, u2, u3};
             for (uint32_t s = 0; s < 4; ++s) {
-                D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
-                uv.Format = (res[s] == k.disp.Get() || res[s] == k.deriv.Get())
-                                ? DXGI_FORMAT_R16G16B16A16_FLOAT
-                                : DXGI_FORMAT_R32G32B32A32_FLOAT;
-                uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-                gpu.Device()->CreateUnorderedAccessView(res[s], nullptr, &uv,
-                                                        gpu.SrvHeap().Cpu(base + s));
+                const DXGI_FORMAT fmt = (res[s] == k.disp.Get() || res[s] == k.deriv.Get())
+                                            ? DXGI_FORMAT_R16G16B16A16_FLOAT
+                                            : DXGI_FORMAT_R32G32B32A32_FLOAT;
+                t.Uav2D(s, res[s], fmt);
             }
-            return base;
+            return t.Base();
         };
         k.blockInit = block(k.h0.Get(), k.pingA.Get(), k.pingB.Get(), k.pongA.Get());
         k.blockMod = block(k.h0.Get(), k.pingA.Get(), k.pingB.Get(), k.pongA.Get());
@@ -264,21 +215,12 @@ void OceanFft::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir)
         // banks alike, and a plain Texture2D view against that declaration is a binding
         // mismatch (TileAtlas2D::BuildMips carries the same note).
         auto mipTable = [&](ID3D12Resource* res) {
-            const uint32_t base = gpu.SrvHeap().Alloc(2 * (kMips - 1));
+            hal::Table t = hal::Table::Alloc(gpu, 2 * (kMips - 1), "ocean.mip");
             for (uint32_t m = 0; m + 1 < kMips; ++m) {
-                D3D12_UNORDERED_ACCESS_VIEW_DESC u{};
-                u.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-                u.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
-                u.Texture2DArray.FirstArraySlice = 0;
-                u.Texture2DArray.ArraySize = 1;
-                u.Texture2DArray.MipSlice = m;
-                gpu.Device()->CreateUnorderedAccessView(res, nullptr, &u,
-                                                        gpu.SrvHeap().Cpu(base + 2 * m));
-                u.Texture2DArray.MipSlice = m + 1;
-                gpu.Device()->CreateUnorderedAccessView(res, nullptr, &u,
-                                                        gpu.SrvHeap().Cpu(base + 2 * m + 1));
+                t.UavArray(2 * m, res, DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1, m);
+                t.UavArray(2 * m + 1, res, DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1, m + 1);
             }
-            return base;
+            return t.Base();
         };
         k.mipTableDisp = mipTable(k.disp.Get());
         k.mipTableDeriv = mipTable(k.deriv.Get());

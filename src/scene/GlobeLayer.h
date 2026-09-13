@@ -15,6 +15,7 @@
 #include "core/MemGridLoader.h"
 #include "hal/Residency.h"
 #include "hal/TileAtlas.h"
+#include "hal/Views.h"
 #include "render/Camera.h"
 #include "scene/Layer.h"
 #include "sim/GlobeModel.h"
@@ -547,7 +548,7 @@ private:
     std::vector<uint8_t> m_windPhys;   // M9h: the physics verdict, kept for the AND below
     Com<ID3D12RootSignature> m_windRs;
     Com<ID3D12PipelineState> m_windBuild;
-    uint32_t m_windTable = UINT32_MAX;   // [t1 wind source SRV, u0 bank UAV]
+    hal::Table m_windTable;   // [u1 wind source (a bank, slice 0), u0 bank]
     bool m_windReady = false;
 
     // M6c: the sky as a sparse VOLUME bank (R16F, 200 m vertical texels; NULL tile = clear
@@ -558,7 +559,7 @@ private:
     TileAtlas3D m_cloud;
     Com<ID3D12RootSignature> m_cloudRs;
     Com<ID3D12PipelineState> m_cloudBuild;
-    uint32_t m_cloudTable = UINT32_MAX;   // [t1 source SRV, u0 volume UAV]
+    hal::Table m_cloudTable;   // [t1 source SRV, u0 volume UAV]
     bool m_cloudReady = false;
 
     // M6e/M6i: streaming -- Mars's native pyramids (surf/norm) + the composed channels.

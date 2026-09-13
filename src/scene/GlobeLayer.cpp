@@ -8,6 +8,9 @@
 
 #include "hal/PixEvents.h"
 #include "hal/Pipeline.h"
+#include "hal/Resources.h"
+#include "hal/Root.h"
+#include "hal/Views.h"
 #include "hal/Shader.h"
 
 #include <algorithm>
@@ -309,22 +312,17 @@ void GlobeLayer::InitClouds(Gpu& gpu, ShaderCompiler& sc) {
 
     // ---- dense source volume (720x361x10 R32F, ~10 MB)
     {
-        D3D12_RESOURCE_DESC rd{};
-        rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
-        rd.Width = snx;
-        rd.Height = sny;
-        rd.DepthOrArraySize = static_cast<UINT16>(snz);
-        rd.MipLevels = 1;
-        rd.Format = DXGI_FORMAT_R32_FLOAT;
-        rd.SampleDesc.Count = 1;
-        D3D12_HEAP_PROPERTIES hp{};
-        hp.Type = D3D12_HEAP_TYPE_DEFAULT;
-        GA_CHECK(gpu.Device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
-                                                      D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                      IID_PPV_ARGS(&m_cloudSrc.res)));
-        m_cloudSrc.res->SetName(L"globe.cloudSrc (GFS isobaric TCDC)");
+        m_cloudSrc.res = hal::Committed3D(
+            gpu, L"globe.cloudSrc (GFS isobaric TCDC)", snx, sny, snz, DXGI_FORMAT_R32_FLOAT,
+            D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST,
+            "the clouds' GFS source volume (720x361x10): uploaded once, sampled once by the "
+            "build kernel into the sparse bank the frame reads -- dense because it is the "
+            "input, not the field");
         m_cloudSrc.state = D3D12_RESOURCE_STATE_COPY_DEST;
 
+        // The footprint query stays raw (the one such site): a copy layout, not a creation,
+        // over the resource's own desc as Gpu::UploadTexture does.
+        const auto rd = m_cloudSrc.res->GetDesc();
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
         UINT numRows = 0;
         UINT64 rowBytes = 0, total = 0;
@@ -387,61 +385,22 @@ void GlobeLayer::InitClouds(Gpu& gpu, ShaderCompiler& sc) {
         m_cloud.ResidentBytes() / 1048576.0, m_cloud.VirtualBytes() / 1048576.0);
 
     // ---- build kernel (b0 CBV, t0 list root SRV, table [t1 src, u0 vol], s0 clamp)
-    D3D12_DESCRIPTOR_RANGE1 ranges[2]{};
-    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = 1;
-    ranges[0].BaseShaderRegister = 1;
-    ranges[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    ranges[0].OffsetInDescriptorsFromTableStart = 0;
-    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    ranges[1].NumDescriptors = 1;
-    ranges[1].BaseShaderRegister = 0;
-    ranges[1].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    ranges[1].OffsetInDescriptorsFromTableStart = 1;
-    D3D12_ROOT_PARAMETER1 params[3]{};
-    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    params[0].Descriptor.ShaderRegister = 0;
-    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    params[1].Descriptor.ShaderRegister = 0;
-    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[2].DescriptorTable.NumDescriptorRanges = 2;
-    params[2].DescriptorTable.pDescriptorRanges = ranges;
-    D3D12_STATIC_SAMPLER_DESC samp{};
-    samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-    samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    samp.MaxLOD = D3D12_FLOAT32_MAX;
-    samp.ShaderRegister = 0;
-    samp.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC vd{};
-    vd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    vd.Desc_1_1.NumParameters = _countof(params);
-    vd.Desc_1_1.pParameters = params;
-    vd.Desc_1_1.NumStaticSamplers = 1;
-    vd.Desc_1_1.pStaticSamplers = &samp;
-    Com<ID3DBlob> blob, err;
-    GA_CHECK(D3D12SerializeVersionedRootSignature(&vd, &blob, &err));
-    GA_CHECK(gpu.Device()->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
-                                              IID_PPV_ARGS(&m_cloudRs)));
+    m_cloudRs = hal::RootLayout{}
+                    .Cbv(0)
+                    .Srv(0)
+                    .Table({hal::SrvRange(1, 1), hal::UavRange(0, 1)})
+                    .Sampler(hal::StaticSampler(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                                                D3D12_TEXTURE_ADDRESS_MODE_CLAMP))
+                    .Build(gpu, "globe.cloud");
     m_cloudBuild = hal::Require(
         hal::BuildCompute(gpu, m_cloudRs.Get(),
                           sc.Compile(m_shaderDir + L"/CloudVol.hlsl", L"CsCloudBuild", L"cs_6_0"),
                           "globe.cloud"),
         "CloudVol kernel");
 
-    m_cloudTable = gpu.SrvHeap().Alloc(2);
-    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    sv.Format = DXGI_FORMAT_R32_FLOAT;
-    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
-    sv.Texture3D.MipLevels = 1;
-    gpu.Device()->CreateShaderResourceView(m_cloudSrc.res.Get(), &sv,
-                                           gpu.SrvHeap().Cpu(m_cloudTable + 0));
-    D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
-    uv.Format = DXGI_FORMAT_R16_FLOAT;
-    uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
-    uv.Texture3D.WSize = UINT(-1);
-    gpu.Device()->CreateUnorderedAccessView(m_cloud.Res(), nullptr, &uv,
-                                            gpu.SrvHeap().Cpu(m_cloudTable + 1));
+    m_cloudTable = hal::Table::Alloc(gpu, 2, "globe.cloud");
+    m_cloudTable.Srv3D(0, m_cloudSrc.res.Get(), DXGI_FORMAT_R32_FLOAT);
+    m_cloudTable.Uav3D(1, m_cloud.Res(), DXGI_FORMAT_R16_FLOAT);
 
     // ---- one build pass (clouds are static per forecast cycle)
     {
@@ -466,13 +425,12 @@ void GlobeLayer::InitClouds(Gpu& gpu, ShaderCompiler& sc) {
         cb.altC[3] = 1.0f;    // density gamma (linear: GFS fraction is already conservative)
 
         hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
-        ID3D12DescriptorHeap* heaps[] = {gpu.SrvHeap().Heap()};   // raw upload list: bind it
-        up.Native()->SetDescriptorHeaps(1, heaps);
+        up.BindHeaps();   // the upload list has no heap bound until a layer says so
         up.ComputeRoot(m_cloudRs.Get());
         up.ComputeConstants(0, cb);
         const auto& list = m_cloud.ResidentList();
         up.ComputeSrvAt(1, gpu.PushConstants(list.data(), list.size() * 4));
-        up.ComputeTable(2, m_cloudTable);
+        up.ComputeTable(2, m_cloudTable.Base());
         up.Pipeline(m_cloudBuild.Get());
         up.Dispatch(m_cloud.TileW() / 8, m_cloud.TileH() / 8, cb.listCount);
         up.Barrier(m_cloud.Res(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -593,53 +551,24 @@ void GlobeLayer::InitNeAndWind(Gpu& gpu, ShaderCompiler& sc) {
     Log("[globe] wind Mv2 residency: %u/%u tiles -- calm air stays NULL", resident,
         m_windBank.TilesX() * m_windBank.TilesY());
 
-    // Build root signature + kernel (b0 CBV, t0 list, table [t1 src, u0 bank]).
-    D3D12_DESCRIPTOR_RANGE1 ranges[2]{};
-    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;   // M9r: the source is a bank now
-    ranges[0].NumDescriptors = 1;
-    ranges[0].BaseShaderRegister = 1;
-    ranges[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    ranges[0].OffsetInDescriptorsFromTableStart = 0;
-    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    ranges[1].NumDescriptors = 1;
-    ranges[1].BaseShaderRegister = 0;
-    ranges[1].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    ranges[1].OffsetInDescriptorsFromTableStart = 1;
-    D3D12_ROOT_PARAMETER1 params[3]{};
-    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    params[0].Descriptor.ShaderRegister = 0;
-    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    params[1].Descriptor.ShaderRegister = 0;
-    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[2].DescriptorTable.NumDescriptorRanges = 2;
-    params[2].DescriptorTable.pDescriptorRanges = ranges;
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC vd{};
-    vd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    vd.Desc_1_1.NumParameters = _countof(params);
-    vd.Desc_1_1.pParameters = params;
-    Com<ID3DBlob> blob, err;
-    GA_CHECK(D3D12SerializeVersionedRootSignature(&vd, &blob, &err));
-    GA_CHECK(gpu.Device()->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
-                                              IID_PPV_ARGS(&m_windRs)));
+    // Build root signature + kernel (b0 CBV, t0 list, table [u1 src, u0 bank]; M9r: the source
+    // is a bank now, so both are UAVs).
+    m_windRs = hal::RootLayout{}
+                   .Cbv(0)
+                   .Srv(0)
+                   .Table({hal::UavRange(1, 1), hal::UavRange(0, 1)})
+                   .Build(gpu, "globe.wind");
     m_windBuild = hal::Require(
         hal::BuildCompute(gpu, m_windRs.Get(),
                           sc.Compile(m_shaderDir + L"/GlobeWind.hlsl", L"CsWindGrad", L"cs_6_0"),
                           "globe.wind"),
         "GlobeWind kernel");
 
-    m_windTable = gpu.SrvHeap().Alloc(2);
+    m_windTable = hal::Table::Alloc(gpu, 2, "globe.wind");
     // A TEXTURE2D UAV over the bank's slice 0 -- the same drop-in trick as the SRV, in the
     // state the bank already holds.
-    D3D12_UNORDERED_ACCESS_VIEW_DESC srcUav{};
-    srcUav.Format = DXGI_FORMAT_R32G32_FLOAT;
-    srcUav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    gpu.Device()->CreateUnorderedAccessView(m_windSrcB.bank->Res(), nullptr, &srcUav,
-                                            gpu.SrvHeap().Cpu(m_windTable + 0));
-    D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
-    uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    gpu.Device()->CreateUnorderedAccessView(m_windBank.Res(), nullptr, &uav,
-                                            gpu.SrvHeap().Cpu(m_windTable + 1));
+    m_windTable.Uav2D(0, m_windSrcB.bank->Res(), DXGI_FORMAT_R32G32_FLOAT);
+    m_windTable.Uav2D(1, m_windBank.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT);
 
     // One-shot build (static per forecast cycle).
     {
@@ -656,13 +585,12 @@ void GlobeLayer::InitNeAndWind(Gpu& gpu, ShaderCompiler& sc) {
         cb.scale = 1.0e4f;
 
         hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
-        ID3D12DescriptorHeap* heaps[] = {gpu.SrvHeap().Heap()};
-        up.Native()->SetDescriptorHeaps(1, heaps);
+        up.BindHeaps();
         up.ComputeRoot(m_windRs.Get());
         up.ComputeConstants(0, cb);
         const auto& list = m_windBank.ResidentList();
         up.ComputeSrvAt(1, gpu.PushConstants(list.data(), list.size() * 4));
-        up.ComputeTable(2, m_windTable);
+        up.ComputeTable(2, m_windTable.Base());
         up.Pipeline(m_windBuild.Get());
         up.Dispatch(m_windBank.TileW() / 16, m_windBank.TileH() / 16, cb.listCount);
         up.Barrier(m_windBank.Res(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,

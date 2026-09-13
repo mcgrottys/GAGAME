@@ -113,6 +113,15 @@ public:
     void ComputeTable(uint32_t rootParam, uint32_t heapSlot) {
         m_cl->SetComputeRootDescriptorTable(rootParam, m_gpu->SrvHeap().Gpu(heapSlot));
     }
+    // The shader-visible heap, bound to this list (M12 step 3d). The frame list gets it at
+    // BeginFrame; the upload list has none until a layer says so (the cloud and wind builds,
+    // the gulf's gradient), and the solver's spin-up records on whichever list it is handed --
+    // re-setting the same heap on the frame list is a no-op the runtime allows. The one heap
+    // every table above indexes.
+    void BindHeaps() {
+        ID3D12DescriptorHeap* heaps[] = {m_gpu->SrvHeap().Heap()};
+        m_cl->SetDescriptorHeaps(1, heaps);
+    }
 
     // ---- work -------------------------------------------------------------------------------
     void Topology(D3D12_PRIMITIVE_TOPOLOGY t) { m_cl->IASetPrimitiveTopology(t); }

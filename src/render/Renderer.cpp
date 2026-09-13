@@ -4,6 +4,7 @@
 #include "hal/Context.h"
 #include "hal/PixEvents.h"
 #include "hal/Pipeline.h"
+#include "hal/Views.h"
 #include "scene/FieldSet.h"
 
 #include <cmath>
@@ -36,7 +37,7 @@ void Renderer::EnableGpuProfiler() {
     m_prof->Init(*m_gpu);
 }
 
-void Renderer::CreateRootSignature() {
+hal::RootLayout Renderer::SharedGraphicsLayout() {
     // t0, space1: one unbounded range covering the whole shader-visible heap. This is the piece
     // that makes textures addressable by uint index, so stacking products never edits this table.
     // t0, space2 (M6c): the SAME heap again, viewed as Texture3D -- both ranges start at table
@@ -51,94 +52,45 @@ void Renderer::CreateRootSignature() {
     // t0, space5 (M9j): the heap as Texture2DArray -- paged GA banks, whose slices are pages.
     // t0, space6 (M9ap): the heap as TextureCubeArray -- slices 0..5 of the colour PAGE
     // tenant viewed as a cube, so the globe keeps seamless cube filtering from an array.
-    D3D12_DESCRIPTOR_RANGE1 ranges[6]{};
-    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = UINT_MAX;   // unbounded; requires resource binding tier 3
-    ranges[0].BaseShaderRegister = 0;
-    ranges[0].RegisterSpace = 1;
-    ranges[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    ranges[0].OffsetInDescriptorsFromTableStart = 0;
-    ranges[1] = ranges[0];
-    ranges[1].RegisterSpace = 2;
-    ranges[2] = ranges[0];
-    ranges[2].RegisterSpace = 3;
-    ranges[3] = ranges[0];
-    ranges[3].RegisterSpace = 4;
-    ranges[4] = ranges[0];
-    ranges[4].RegisterSpace = 5;
-    ranges[5] = ranges[0];
-    ranges[5].RegisterSpace = 6;
+    // (An unbounded range adds nothing to the table offset: Root.h's law, stated for this.)
+    hal::RootLayout rl;
+    rl.Cbv(0)   // b0: scene constants
+        .Cbv(1)   // b1: per-draw constants
+        .Srv(0)   // t0, space0: the FieldDesc table
+        .Table({hal::SrvRange(0, hal::kUnbounded, 1), hal::SrvRange(0, hal::kUnbounded, 2),
+                hal::SrvRange(0, hal::kUnbounded, 3), hal::SrvRange(0, hal::kUnbounded, 4),
+                hal::SrvRange(0, hal::kUnbounded, 5), hal::SrvRange(0, hal::kUnbounded, 6)})
+        // b2: the shared SURFACE constants slot (vqview's mechanism for letting later layers
+        // evaluate the water surface). Bound by whichever layer owns the surface; buoyant
+        // things read it. Read-only sharing of one buffer; no second upload.
+        .Cbv(2);
+    rl.Sampler(hal::StaticSampler(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                                  D3D12_TEXTURE_ADDRESS_MODE_CLAMP))
+        .Sampler(hal::StaticSampler(1, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                                    D3D12_TEXTURE_ADDRESS_MODE_WRAP))
+        // s2 is point-clamp, and it exists specifically for fields that MUST NOT be
+        // hardware-filtered -- rotor fields, where a componentwise lerp silently stops being a
+        // rotation.
+        .Sampler(hal::StaticSampler(2, D3D12_FILTER_MIN_MAG_MIP_POINT,
+                                    D3D12_TEXTURE_ADDRESS_MODE_CLAMP))
+        // M9z: s3 is ANISOTROPIC, and it exists for one specific failure. The streamed surface
+        // was sampled as CalculateLevelOfDetail + SampleLevel -- an ISOTROPIC level chosen by
+        // the LONGEST derivative, then one trilinear tap at it. That is correct looking straight
+        // down and wrong at a grazing angle, where the texel footprint is a long thin sliver:
+        // the mip gets picked for the stretched axis and everything blurs along the compressed
+        // one. It shows up on the descent as diagonal smearing exactly where the globe curves
+        // away, which is the artefact this sampler is here to remove.
+        //
+        // 8x rather than 16x: the footprint anisotropy at these angles is a few to one, 8
+        // covers it, and the taps are paid on every surface pixel.
+        .Sampler(hal::StaticSampler(3, D3D12_FILTER_ANISOTROPIC, D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                    8))
+        .Flags(D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+    return rl;
+}
 
-    D3D12_ROOT_PARAMETER1 params[5]{};
-    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    params[0].Descriptor.ShaderRegister = 0;   // b0
-    params[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    params[1].Descriptor.ShaderRegister = 1;   // b1
-    params[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    params[2].Descriptor.ShaderRegister = 0;   // t0, space0 -> FieldDesc table
-    params[2].Descriptor.RegisterSpace = 0;
-    params[2].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-    params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[3].DescriptorTable.NumDescriptorRanges = 6;
-    params[3].DescriptorTable.pDescriptorRanges = ranges;
-    params[3].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-    // b2: the shared SURFACE constants slot (vqview's mechanism for letting later layers evaluate
-    // the water surface). Unused in M1 but kept: the FFT ocean will bind it in M2 and buoyant
-    // things read it in M7. Read-only sharing of one buffer; no second upload.
-    params[4].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    params[4].Descriptor.ShaderRegister = 2;   // b2
-    params[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-
-    D3D12_STATIC_SAMPLER_DESC samplers[4]{};
-    auto initSampler = [](D3D12_STATIC_SAMPLER_DESC& s, UINT reg, D3D12_FILTER filter,
-                          D3D12_TEXTURE_ADDRESS_MODE addr) {
-        s.Filter = filter;
-        s.AddressU = s.AddressV = s.AddressW = addr;
-        s.MaxLOD = D3D12_FLOAT32_MAX;
-        s.ShaderRegister = reg;
-        s.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-        s.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-    };
-    initSampler(samplers[0], 0, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
-    initSampler(samplers[1], 1, D3D12_FILTER_MIN_MAG_MIP_LINEAR, D3D12_TEXTURE_ADDRESS_MODE_WRAP);
-    // s2 is point-clamp, and it exists specifically for fields that MUST NOT be hardware-filtered
-    // -- rotor fields, where a componentwise lerp silently stops being a rotation.
-    initSampler(samplers[2], 2, D3D12_FILTER_MIN_MAG_MIP_POINT, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
-    // M9z: s3 is ANISOTROPIC, and it exists for one specific failure. The streamed surface was
-    // sampled as CalculateLevelOfDetail + SampleLevel -- an ISOTROPIC level chosen by the
-    // LONGEST derivative, then one trilinear tap at it. That is correct looking straight down
-    // and wrong at a grazing angle, where the texel footprint is a long thin sliver: the mip
-    // gets picked for the stretched axis and everything blurs along the compressed one. It
-    // shows up on the descent as diagonal smearing exactly where the globe curves away, which
-    // is the artefact this sampler is here to remove.
-    //
-    // 8x rather than 16x: the footprint anisotropy at these angles is a few to one, 8 covers it,
-    // and the taps are paid on every surface pixel.
-    initSampler(samplers[3], 3, D3D12_FILTER_ANISOTROPIC, D3D12_TEXTURE_ADDRESS_MODE_CLAMP);
-    samplers[3].MaxAnisotropy = 8;
-
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC vd{};
-    vd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    vd.Desc_1_1.NumParameters = _countof(params);
-    vd.Desc_1_1.pParameters = params;
-    vd.Desc_1_1.NumStaticSamplers = _countof(samplers);
-    vd.Desc_1_1.pStaticSamplers = samplers;
-    vd.Desc_1_1.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-
-    Com<ID3DBlob> blob, err;
-    HRESULT hr = D3D12SerializeVersionedRootSignature(&vd, &blob, &err);
-    if (FAILED(hr)) {
-        if (err) Log("[renderer] root signature: %s", static_cast<const char*>(err->GetBufferPointer()));
-        GA_CHECK(hr);
-    }
-    GA_CHECK(m_gpu->Device()->CreateRootSignature(0, blob->GetBufferPointer(),
-                                                 blob->GetBufferSize(), IID_PPV_ARGS(&m_rootSig)));
+void Renderer::CreateRootSignature() {
+    m_rootSig = SharedGraphicsLayout().Build(*m_gpu, "renderer.shared");
     m_rootSig->SetName(L"shared root signature");
 }
 
@@ -166,21 +118,10 @@ void Renderer::CreateTargets(uint32_t width, uint32_t height) {
                                          D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
                                          D3D12_RESOURCE_STATE_RENDER_TARGET, L"ldrTarget", &lcv);
 
-    if (m_sceneColorRtv == UINT32_MAX) {
-        m_sceneColorRtv = m_gpu->RtvHeap().Alloc();
-        m_ldrRtv = m_gpu->RtvHeap().Alloc();
-        m_sceneDepthDsv = m_gpu->DsvHeap().Alloc();
-    }
-    m_gpu->Device()->CreateRenderTargetView(m_sceneColor.res.Get(), nullptr,
-                                            m_gpu->RtvHeap().Cpu(m_sceneColorRtv));
-    m_gpu->Device()->CreateRenderTargetView(m_ldrTarget.res.Get(), nullptr,
-                                            m_gpu->RtvHeap().Cpu(m_ldrRtv));
-
-    D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};
-    dsv.Format = kSceneDepthFormat;
-    dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-    m_gpu->Device()->CreateDepthStencilView(m_sceneDepth.res.Get(), &dsv,
-                                            m_gpu->DsvHeap().Cpu(m_sceneDepthDsv));
+    // The target views: allocated once (UINT32_MAX), re-created into the same slots on resize.
+    m_sceneColorRtv = hal::Rtv(*m_gpu, m_sceneColor.res.Get(), m_sceneColorRtv);
+    m_ldrRtv = hal::Rtv(*m_gpu, m_ldrTarget.res.Get(), m_ldrRtv);
+    m_sceneDepthDsv = hal::Dsv(*m_gpu, m_sceneDepth.res.Get(), kSceneDepthFormat, m_sceneDepthDsv);
 
     // SRVs are allocated fresh on resize. The heap is a bump allocator, so this leaks slots across
     // resizes; with a 4096-slot heap that is thousands of resizes before it matters.

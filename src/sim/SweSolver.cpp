@@ -2,6 +2,8 @@
 
 #include "hal/PixEvents.h"
 #include "hal/Pipeline.h"
+#include "hal/Root.h"
+#include "hal/Views.h"
 
 #include <algorithm>
 #include <cmath>
@@ -12,19 +14,11 @@ namespace ga {
 
 void SweSolver::SetHeightPage(Gpu& gpu, ID3D12Resource* heightArr, ID3D12Resource* resMapArr,
                               uint32_t slice, uint32_t mips, double orgPxX, double orgPxY) {
-    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    sv.Format = DXGI_FORMAT_R16_FLOAT;
-    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+    (void)gpu;   // the table carries the device
     // M9ax: the WHOLE tenant -- cube faces and the page -- so the kernel resolves the bed
     // anywhere, not only inside the one page (ArraySize -1 = every slice).
-    sv.Texture2DArray.MipLevels = mips;
-    sv.Texture2DArray.FirstArraySlice = 0;
-    sv.Texture2DArray.ArraySize = UINT32_MAX;
-    gpu.Device()->CreateShaderResourceView(heightArr, &sv, gpu.SrvHeap().Cpu(m_table + 0));
-    sv.Format = DXGI_FORMAT_R8_UNORM;
-    sv.Texture2DArray.MipLevels = 1;
-    gpu.Device()->CreateShaderResourceView(resMapArr, &sv, gpu.SrvHeap().Cpu(m_table + 1));
+    m_table.SrvArray(0, heightArr, DXGI_FORMAT_R16_FLOAT, 0, UINT32_MAX, mips);
+    m_table.SrvArray(1, resMapArr, DXGI_FORMAT_R8_UNORM, 0, UINT32_MAX, 1);
     // Lattice texel -> lat/lon: row 0 is the NORTH edge, so latitude walks south.
     m_cb.geoLL[0] = static_cast<float>(m_bathy->Lon0());
     m_cb.geoLL[1] = static_cast<float>(m_bathy->Lat1());
@@ -261,34 +255,12 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     }
 
     // Root signature: b0 CBV, t0 root SRV (tile list), table [t1 height page, t2 its residency
-    // map (M9ar), u0 eta, u1 flux, u2 uv, u3 mv].
-    D3D12_DESCRIPTOR_RANGE1 ranges[2]{};
-    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = 2;
-    ranges[0].BaseShaderRegister = 1;
-    ranges[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    ranges[0].OffsetInDescriptorsFromTableStart = 0;
-    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    ranges[1].NumDescriptors = 4;   // M9h: + gMv, the derived grad(flow) bank
-    ranges[1].BaseShaderRegister = 0;
-    ranges[1].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    ranges[1].OffsetInDescriptorsFromTableStart = 2;
-    D3D12_ROOT_PARAMETER1 params[3]{};
-    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    params[0].Descriptor.ShaderRegister = 0;
-    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    params[1].Descriptor.ShaderRegister = 0;
-    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[2].DescriptorTable.NumDescriptorRanges = 2;
-    params[2].DescriptorTable.pDescriptorRanges = ranges;
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC vd{};
-    vd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    vd.Desc_1_1.NumParameters = _countof(params);
-    vd.Desc_1_1.pParameters = params;
-    Com<ID3DBlob> blob, err;
-    GA_CHECK(D3D12SerializeVersionedRootSignature(&vd, &blob, &err));
-    GA_CHECK(gpu.Device()->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
-                                              IID_PPV_ARGS(&m_rs)));
+    // map (M9ar), u0 eta, u1 flux, u2 uv, u3 mv (M9h: the derived grad(flow) bank)].
+    m_rs = hal::RootLayout{}
+               .Cbv(0)
+               .Srv(0)
+               .Table({hal::SrvRange(1, 2), hal::UavRange(0, 4)})
+               .Build(gpu, "swe");
     m_rs->SetName(L"swe root signature");
 
     auto makePso = [&](const wchar_t* entry, Com<ID3D12PipelineState>& out) {
@@ -306,27 +278,13 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     makePso(L"CsSweDerive", m_deriveK);
     makePso(L"CsSweVelGrad", m_velGradK);
 
-    m_table = gpu.SrvHeap().Alloc(6);   // t1, t2 filled by SetHeightPage; u0..u3 here
-    D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
-    uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    uv.Format = DXGI_FORMAT_R32_FLOAT;
-    gpu.Device()->CreateUnorderedAccessView(m_eta.Res(), nullptr, &uv,
-                                            gpu.SrvHeap().Cpu(m_table + 2));
-    uv.Format = DXGI_FORMAT_R32G32_FLOAT;
-    gpu.Device()->CreateUnorderedAccessView(m_flux.Res(), nullptr, &uv,
-                                            gpu.SrvHeap().Cpu(m_table + 3));
+    m_table = hal::Table::Alloc(gpu, 6, "swe");   // t1, t2 filled by SetHeightPage; u0..u3 here
+    m_table.Uav2D(2, m_eta.Res(), DXGI_FORMAT_R32_FLOAT);
+    m_table.Uav2D(3, m_flux.Res(), DXGI_FORMAT_R32G32_FLOAT);
     // The bank is an ARRAY now, so its UAV must be an array view pinned to slice 0. A plain
     // Texture2D view of an array resource is invalid, and the solve would write nowhere.
-    uv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
-    uv.Texture2DArray.MipSlice = 0;
-    uv.Texture2DArray.FirstArraySlice = 0;
-    uv.Texture2DArray.ArraySize = 1;
-    gpu.Device()->CreateUnorderedAccessView(m_uvBank.Res(), nullptr, &uv,
-                                            gpu.SrvHeap().Cpu(m_table + 4));   // M9ax: uv bank
-    gpu.Device()->CreateUnorderedAccessView(m_velGrad.Res(), nullptr, &uv,
-                                            gpu.SrvHeap().Cpu(m_table + 5));
-    uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+    m_table.UavArray(4, m_uvBank.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);   // M9ax: uv bank
+    m_table.UavArray(5, m_velGrad.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
 
     Log("[swe] grid %ux%u dx %.2f x dy %.2f m  dt %.3f s  eta %u/%u t  flux %u/%u t  "
         "resident %.1f MB",
@@ -341,7 +299,7 @@ void SweSolver::RecordReset(hal::CommandContext& cmd, Gpu& gpu) {
     PixScope scope(cmd.Native(), "swe.reset (state -> the analytic tide plane)");
     cmd.ComputeRoot(m_rs.Get());
     cmd.ComputeConstants(0, m_cb);
-    cmd.ComputeTable(2, m_table);
+    cmd.ComputeTable(2, m_table.Base());
 
     const auto& el = m_eta.ResidentList();
     cmd.ComputeSrvAt(1, gpu.PushConstants(el.data(), el.size() * 4));
@@ -378,8 +336,7 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
 
     // Spin-up runs on the raw upload list, which has no descriptor heap bound; the frame list
     // already has this exact heap, so re-setting it is harmless there.
-    ID3D12DescriptorHeap* heaps[] = {gpu.SrvHeap().Heap()};
-    cmd.Native()->SetDescriptorHeaps(1, heaps);
+    cmd.BindHeaps();
 
     auto etaTo = [&](D3D12_RESOURCE_STATES to) {
         if (m_etaState == to) return;
@@ -440,7 +397,7 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
 
     cmd.ComputeRoot(m_rs.Get());
     cmd.ComputeConstants(0, m_cb);
-    cmd.ComputeTable(2, m_table);
+    cmd.ComputeTable(2, m_table.Base());
     const auto& el = m_eta.ResidentList();
     const auto& fl = m_flux.ResidentList();
     const D3D12_GPU_VIRTUAL_ADDRESS elVa = gpu.PushConstants(el.data(), el.size() * 4);

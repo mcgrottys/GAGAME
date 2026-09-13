@@ -11,6 +11,7 @@
 // ================================================================================================
 #pragma once
 
+#include "hal/Views.h"
 #include "scene/Layer.h"
 #include "sim/CurrentModel.h"
 
@@ -64,7 +65,7 @@ private:
     GpuTexture m_uvTex;                    // u, v, mask, 0 (RGBA32F)
     Com<ID3D12Resource> m_mvTex, m_owTex;  // outputs of the GA pass (RGBA16F)
     uint32_t m_uvSrv = UINT32_MAX, m_mvSrv = UINT32_MAX, m_owSrv = UINT32_MAX;
-    uint32_t m_csTable = UINT32_MAX;
+    hal::Table m_csTable;   // [u0 uv field, u1 mv2, u2 okubo-weiss]
 
     GulfCbData m_cb{};
     float m_aspectWoverH = 1.0f;

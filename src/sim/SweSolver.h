@@ -26,6 +26,7 @@
 #include "hal/Gpu.h"
 #include "hal/Shader.h"
 #include "hal/TileAtlas.h"
+#include "hal/Views.h"
 #include "sim/BathyModel.h"
 
 #include <algorithm>
@@ -202,7 +203,7 @@ private:
     Com<ID3D12RootSignature> m_rs;
     Com<ID3D12PipelineState> m_clearEta, m_clearFlux, m_uvClear, m_fluxK, m_heightK, m_deriveK;
     Com<ID3D12PipelineState> m_velGradK;   // M9h: grad(flow) -> div + curl
-    uint32_t m_table = UINT32_MAX;   // [t1 bathy SRV, u0 eta, u1 flux, u2 uv]
+    hal::Table m_table;   // [t1 height page, t2 its residency map, u0 eta, u1 flux, u2 uv, u3 mv]
     D3D12_RESOURCE_STATES m_etaState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     D3D12_RESOURCE_STATES m_uvState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
