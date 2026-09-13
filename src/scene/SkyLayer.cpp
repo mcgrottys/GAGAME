@@ -69,10 +69,9 @@ void SkyLayer::Render(const FrameContext& ctx) {
         cb.r2[i] = m_rot[6 + i];
         cb.sun[i] = m_sun[i];
     }
-    ctx.cl->SetPipelineState(m_pso.Get());
-    ctx.cl->SetGraphicsRootConstantBufferView(1, ctx.gpu->PushConstants(&cb, sizeof(cb)));
-    ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx.cl->DrawInstanced(3, 1, 0, 0);
+    ctx.cmd->Pipeline(m_pso.Get());
+    ctx.cmd->GraphicsConstants(1, cb);
+    ctx.cmd->DrawFullscreen();
 }
 
 }  // namespace ga

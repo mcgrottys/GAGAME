@@ -1,6 +1,7 @@
 #include "render/Renderer.h"
 
 #include "core/Image.h"
+#include "hal/Context.h"
 #include "hal/PixEvents.h"
 #include "scene/FieldSet.h"
 
@@ -257,6 +258,7 @@ void Renderer::ReloadShaders() {
 void Renderer::RenderFrame(const Camera& cam, float timeSec, float dt) {
     (void)dt;
     auto* cl = m_gpu->BeginFrame();
+    hal::CommandContext cmd(*m_gpu, cl, hal::Owner::Frame);
     // --gpu-time: reads the slot this frame index last used (fenced by BeginFrame above), then
     // opens the whole-frame pair. Null profiler = the default path, no queries at all.
     GpuProfiler* prof = m_prof.get();
@@ -332,31 +334,28 @@ void Renderer::RenderFrame(const Camera& cam, float timeSec, float dt) {
     const D3D12_GPU_VIRTUAL_ADDRESS sceneCb = m_gpu->PushConstants(&sc, sizeof(sc));
 
     // ---- opaque layers into the HDR target
-    m_gpu->Transition(cl, m_sceneColor, D3D12_RESOURCE_STATE_RENDER_TARGET);
-    m_gpu->Transition(cl, m_sceneDepth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    cmd.Barrier(m_sceneColor, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    cmd.Barrier(m_sceneDepth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
 
     const auto colorRtv = m_gpu->RtvHeap().Cpu(m_sceneColorRtv);
     const auto depthDsv = m_gpu->DsvHeap().Cpu(m_sceneDepthDsv);
-    cl->OMSetRenderTargets(1, &colorRtv, FALSE, &depthDsv);
+    cmd.Targets(colorRtv, &depthDsv);
 
     const float clearColor[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-    cl->ClearRenderTargetView(colorRtv, clearColor, 0, nullptr);
+    cmd.ClearColor(colorRtv, clearColor);
     // Reversed-Z: clear depth to 0 (far), compare GREATER.
-    cl->ClearDepthStencilView(depthDsv, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
+    cmd.ClearDepth(depthDsv, 0.0f);
 
-    D3D12_VIEWPORT vp{0, 0, static_cast<float>(m_width), static_cast<float>(m_height), 0.0f, 1.0f};
-    D3D12_RECT scissor{0, 0, static_cast<LONG>(m_width), static_cast<LONG>(m_height)};
-    cl->RSSetViewports(1, &vp);
-    cl->RSSetScissorRects(1, &scissor);
+    cmd.Viewport(m_width, m_height);
 
-    cl->SetGraphicsRootSignature(m_rootSig.Get());
-    cl->SetGraphicsRootConstantBufferView(0, sceneCb);
-    if (m_fieldTableVa) cl->SetGraphicsRootShaderResourceView(2, m_fieldTableVa);
-    cl->SetGraphicsRootDescriptorTable(3, m_gpu->SrvHeap().Gpu(0));
+    cmd.GraphicsRoot(m_rootSig.Get());
+    cmd.GraphicsConstantsAt(0, sceneCb);
+    if (m_fieldTableVa) cmd.GraphicsSrvAt(2, m_fieldTableVa);
+    cmd.GraphicsBindless(3);
 
     FrameContext ctx;
     ctx.gpu = m_gpu;
-    ctx.cl = cl;
+    ctx.cmd = &cmd;
     ctx.camera = &cam;
     ctx.sceneCb = sceneCb;
     ctx.timeSec = timeSec;
@@ -374,47 +373,33 @@ void Renderer::RenderFrame(const Camera& cam, float timeSec, float dt) {
     {
         PixScope scope(cl, "tonemap");
         GpuScope gscope(prof, cl, "tonemap");
-        m_gpu->Transition(cl, m_sceneColor, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        m_gpu->Transition(cl, m_ldrTarget, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        cmd.Barrier(m_sceneColor, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        cmd.Barrier(m_ldrTarget, D3D12_RESOURCE_STATE_RENDER_TARGET);
         const auto ldrRtv = m_gpu->RtvHeap().Cpu(m_ldrRtv);
-        cl->OMSetRenderTargets(1, &ldrRtv, FALSE, nullptr);
-        cl->SetPipelineState(m_tonemapPso.Get());
-        cl->SetGraphicsRootConstantBufferView(0, sceneCb);
-        if (m_fieldTableVa) cl->SetGraphicsRootShaderResourceView(2, m_fieldTableVa);
-        cl->SetGraphicsRootDescriptorTable(3, m_gpu->SrvHeap().Gpu(0));
+        cmd.Targets(ldrRtv, nullptr);
+        cmd.Pipeline(m_tonemapPso.Get());
+        cmd.GraphicsConstantsAt(0, sceneCb);
+        if (m_fieldTableVa) cmd.GraphicsSrvAt(2, m_fieldTableVa);
+        cmd.GraphicsBindless(3);
         struct { uint32_t srv; uint32_t pad[3]; } tm{m_sceneColor.srv, {0, 0, 0}};
-        cl->SetGraphicsRootConstantBufferView(1, m_gpu->PushConstants(&tm, sizeof(tm)));
-        cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        cl->DrawInstanced(3, 1, 0, 0);   // fullscreen triangle from SV_VertexID, no vertex buffer
+        cmd.GraphicsConstants(1, tm);
+        cmd.DrawFullscreen();   // fullscreen triangle from SV_VertexID, no vertex buffer
     }
 
     // ---- to the swapchain, when there is one
     if (!m_gpu->Headless()) {
         GpuScope gscope(prof, cl, "present-copy");
         ID3D12Resource* bb = m_gpu->BackBuffer();
-        D3D12_RESOURCE_BARRIER toCopy[2]{};
-        toCopy[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        toCopy[0].Transition.pResource = bb;
-        toCopy[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        toCopy[0].Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
-        toCopy[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-        toCopy[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        toCopy[1].Transition.pResource = m_ldrTarget.res.Get();
-        toCopy[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        toCopy[1].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        toCopy[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
-        cl->ResourceBarrier(2, toCopy);
+        // Two independent transitions, one call each (was one ResourceBarrier(2, ...); the
+        // same two barriers reach the queue in the same order).
+        cmd.Barrier(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
+        cmd.Barrier(m_ldrTarget.res.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+                    D3D12_RESOURCE_STATE_COPY_SOURCE);
         m_ldrTarget.state = D3D12_RESOURCE_STATE_COPY_SOURCE;
 
-        cl->CopyResource(bb, m_ldrTarget.res.Get());
+        cmd.Copy(bb, m_ldrTarget.res.Get());
 
-        D3D12_RESOURCE_BARRIER toPresent{};
-        toPresent.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        toPresent.Transition.pResource = bb;
-        toPresent.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        toPresent.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        toPresent.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-        cl->ResourceBarrier(1, &toPresent);
+        cmd.Barrier(bb, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PRESENT);
     }
 
     if (prof) prof->EndFrame(cl);   // closes the frame pair and resolves, before Close()

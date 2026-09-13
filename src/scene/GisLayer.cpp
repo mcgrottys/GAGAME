@@ -124,7 +124,7 @@ void GisLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
 
 void GisLayer::Render(const FrameContext& ctx) {
     if (!enabled || !m_pso) return;
-    PixScope scope(ctx.cl, "gis (survey vectors: the authority, drawn as vectors)");
+    PixScope scope(ctx.cmd->Native(), "gis (survey vectors: the authority, drawn as vectors)");
     if (m_pack && m_coastCh >= 0) {
         // Quantize the view's ground-pixel size to x8 buckets; republish only on change.
         float bucket = 0.0f;
@@ -133,17 +133,17 @@ void GisLayer::Render(const FrameContext& ctx) {
         }
         if (bucket != m_bucket) PublishAtTolerance(*ctx.gpu, bucket);
     }
-    ctx.cl->SetPipelineState(m_pso.Get());
-    ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
+    ctx.cmd->Pipeline(m_pso.Get());
+    ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
     auto draw = [&](const Batch& b) {
         const Exchange::View v = m_exchange->Query(b.channel);
         if (!v.valid || v.elements == 0) return;
         GisCbData cb{};
         cb.cs = m_cs;
         memcpy(cb.color, b.color, sizeof(cb.color));
-        ctx.cl->SetGraphicsRootConstantBufferView(1, ctx.gpu->PushConstants(&cb, sizeof(cb)));
-        ctx.cl->SetGraphicsRootShaderResourceView(2, v.va);
-        ctx.cl->DrawInstanced(v.elements, 1, 0, 0);
+        ctx.cmd->GraphicsConstants(1, cb);
+        ctx.cmd->GraphicsSrvAt(2, v.va);
+        ctx.cmd->Draw(v.elements, 1, 0, 0);
     };
     draw(m_global);
     draw(m_coast);

@@ -10,17 +10,6 @@ namespace ga {
 
 namespace {
 constexpr double kPi = 3.14159265358979323846;
-
-void Barrier(ID3D12GraphicsCommandList* cl, ID3D12Resource* res, D3D12_RESOURCE_STATES from,
-             D3D12_RESOURCE_STATES to) {
-    D3D12_RESOURCE_BARRIER b{};
-    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    b.Transition.pResource = res;
-    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    b.Transition.StateBefore = from;
-    b.Transition.StateAfter = to;
-    cl->ResourceBarrier(1, &b);
-}
 }  // namespace
 
 void GulfLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
@@ -206,23 +195,23 @@ void GulfLayer::RunVelGrad(Gpu& gpu, ShaderCompiler& sc) {
     c.cx = static_cast<float>(f.dlon * 111320.0 * std::cos(midLat * kPi / 180.0));
     c.cy = static_cast<float>(f.dlat * 110574.0);
 
-    auto* cl = gpu.BeginUpload();
+    hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
     ID3D12DescriptorHeap* heaps[] = {gpu.SrvHeap().Heap()};
-    cl->SetDescriptorHeaps(1, heaps);
+    up.Native()->SetDescriptorHeaps(1, heaps);
     {
-        PixScope scope(cl, "gulf.velgrad (grad(U): div->grade0, vorticity->grade2, OW)");
-        Barrier(cl, m_uvTex.res.Get(), m_uvTex.state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        cl->SetComputeRootSignature(m_csRootSig.Get());
-        cl->SetComputeRoot32BitConstants(0, 4, &c, 0);
-        cl->SetComputeRootDescriptorTable(1, gpu.SrvHeap().Gpu(m_csTable));
-        cl->SetPipelineState(m_csPso.Get());
-        cl->Dispatch((c.nx + 7) / 8, (c.ny + 7) / 8, 1);
-        Barrier(cl, m_uvTex.res.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        Barrier(cl, m_mvTex.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        Barrier(cl, m_owTex.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        PixScope scope(up.Native(), "gulf.velgrad (grad(U): div->grade0, vorticity->grade2, OW)");
+        up.Barrier(m_uvTex.res.Get(), m_uvTex.state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        up.ComputeRoot(m_csRootSig.Get());
+        up.Native()->SetComputeRoot32BitConstants(0, 4, &c, 0);
+        up.ComputeTable(1, m_csTable);
+        up.Pipeline(m_csPso.Get());
+        up.Dispatch((c.nx + 7) / 8, (c.ny + 7) / 8, 1);
+        up.Barrier(m_uvTex.res.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        up.Barrier(m_mvTex.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        up.Barrier(m_owTex.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
     gpu.EndUpload();
     m_uvTex.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
@@ -238,7 +227,7 @@ void GulfLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
 
 void GulfLayer::Render(const FrameContext& ctx) {
     if (!m_haveField || !m_drawPso) return;
-    PixScope scope(ctx.cl, "gulf.map (speed ramp + OW eddies by bivector sign)");
+    PixScope scope(ctx.cmd->Native(), "gulf.map (speed ramp + OW eddies by bivector sign)");
 
     // Letterbox the geographic aspect into the viewport.
     const float vpAspect = static_cast<float>(ctx.width) / static_cast<float>(ctx.height);
@@ -251,10 +240,10 @@ void GulfLayer::Render(const FrameContext& ctx) {
     m_cb.panel[2] = halfW;
     m_cb.panel[3] = halfH;
 
-    ctx.cl->SetPipelineState(m_drawPso.Get());
-    ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx.cl->SetGraphicsRootConstantBufferView(1, ctx.gpu->PushConstants(&m_cb, sizeof(m_cb)));
-    ctx.cl->DrawInstanced(6, 1, 0, 0);
+    ctx.cmd->Pipeline(m_drawPso.Get());
+    ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx.cmd->GraphicsConstants(1, m_cb);
+    ctx.cmd->Draw(6, 1, 0, 0);
 }
 
 }  // namespace ga

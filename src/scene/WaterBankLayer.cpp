@@ -431,7 +431,8 @@ void WaterBankLayer::DumpFibers(Gpu& gpu) {
 
 void WaterBankLayer::Render(const FrameContext& ctx) {
     if (!m_ready || !enabled || !m_sea) return;
-    PixScope scope(ctx.cl, "waterbank (the wave vertex bank: rings recomposed per frame)");
+    PixScope scope(ctx.cmd->Native(),
+                   "waterbank (the wave vertex bank: rings recomposed per frame)");
 
     // The tile list: every wet tile in every ring, with its corner params from the stacks.
     const auto tileList0 = std::chrono::steady_clock::now();   // tileListMs bracket
@@ -634,41 +635,30 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
         }
     }
 
-    GpuScope gscope(ctx.prof, ctx.cl, "waterbank.fill");   // barriers + the one dispatch
+    GpuScope gscope(ctx.prof, ctx.cmd->Native(), "waterbank.fill");   // barriers + the one dispatch
     auto toUav = [&](TileAtlas2D& bank) {
         if (m_state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) return;
-        D3D12_RESOURCE_BARRIER b{};
-        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Transition.pResource = bank.Res();
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b.Transition.StateBefore = m_state;
-        b.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        ctx.cl->ResourceBarrier(1, &b);
+        ctx.cmd->Barrier(bank.Res(), m_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     };
     toUav(m_disp);
     toUav(m_param);
     toUav(m_detail);
     m_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
-    ctx.cl->SetComputeRootSignature(m_rs.Get());
-    ctx.cl->SetComputeRootConstantBufferView(0, ctx.gpu->PushConstants(&cb, sizeof(cb)));
-    ctx.cl->SetComputeRootShaderResourceView(
+    ctx.cmd->ComputeRoot(m_rs.Get());
+    ctx.cmd->ComputeConstants(0, cb);
+    ctx.cmd->ComputeSrvAt(
         1, ctx.gpu->PushConstants(tiles.data(), tiles.size() * sizeof(BankTile)));
-    ctx.cl->SetComputeRootDescriptorTable(2, ctx.gpu->SrvHeap().Gpu(0));
-    ctx.cl->SetComputeRootDescriptorTable(3, ctx.gpu->SrvHeap().Gpu(0));
-    ctx.cl->SetPipelineState(m_fill.Get());
-    ctx.cl->Dispatch(kTileTexels / 16, kTileTexels / 16,
-                     static_cast<UINT>(tiles.size()));
+    ctx.cmd->ComputeBindless(2);
+    ctx.cmd->ComputeBindless(3);
+    ctx.cmd->Pipeline(m_fill.Get());
+    ctx.cmd->Dispatch(kTileTexels / 16, kTileTexels / 16,
+                      static_cast<UINT>(tiles.size()));
 
     auto toSrv = [&](TileAtlas2D& bank) {
-        D3D12_RESOURCE_BARRIER b{};
-        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Transition.pResource = bank.Res();
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        b.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
-                                  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        ctx.cl->ResourceBarrier(1, &b);
+        ctx.cmd->Barrier(bank.Res(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     };
     toSrv(m_disp);
     toSrv(m_param);

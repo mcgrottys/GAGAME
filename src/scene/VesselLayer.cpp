@@ -158,14 +158,14 @@ void Emit(std::vector<VesselLayer::PartGpu>& out, const Motor& hull, const Motor
 
 void VesselLayer::Render(const FrameContext& ctx) {
     if (!m_pso || m_parts.empty()) return;
-    PixScope scope(ctx.cl, "vessels (spec -> boxes, motor sandwich on the GPU)");
+    PixScope scope(ctx.cmd->Native(), "vessels (spec -> boxes, motor sandwich on the GPU)");
     const float cb[4] = {static_cast<float>(m_parts.size()), 1.0f, 0.0f, 0.0f};
-    ctx.cl->SetPipelineState(m_pso.Get());
-    ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx.cl->SetGraphicsRootConstantBufferView(1, ctx.gpu->PushConstants(cb, sizeof(cb)));
-    ctx.cl->SetGraphicsRootShaderResourceView(
+    ctx.cmd->Pipeline(m_pso.Get());
+    ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx.cmd->GraphicsConstants(1, cb);
+    ctx.cmd->GraphicsSrvAt(
         2, ctx.gpu->PushConstants(m_parts.data(), m_parts.size() * sizeof(PartGpu)));
-    ctx.cl->DrawInstanced(static_cast<uint32_t>(m_parts.size()) * 36u, 1, 0, 0);
+    ctx.cmd->Draw(static_cast<uint32_t>(m_parts.size()) * 36u, 1, 0, 0);
 }
 
 }  // namespace ga

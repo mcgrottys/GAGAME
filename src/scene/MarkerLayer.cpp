@@ -49,13 +49,13 @@ void MarkerLayer::Render(const FrameContext& ctx) {
     if (!m_pso || !m_exchange) return;
     const Exchange::View v = m_exchange->Query(m_channel);
     if (!v.valid || v.elements == 0) return;
-    PixScope scope(ctx.cl, "markers (GA product buffer -> motor sandwich on the GPU)");
+    PixScope scope(ctx.cmd->Native(), "markers (GA product buffer -> motor sandwich on the GPU)");
     float cb[4] = {static_cast<float>(v.elements), 1.0f, 0.0f, 0.0f};
-    ctx.cl->SetPipelineState(m_pso.Get());
-    ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx.cl->SetGraphicsRootConstantBufferView(1, ctx.gpu->PushConstants(cb, sizeof(cb)));
-    ctx.cl->SetGraphicsRootShaderResourceView(2, v.va);
-    ctx.cl->DrawInstanced(v.elements * 36, 1, 0, 0);
+    ctx.cmd->Pipeline(m_pso.Get());
+    ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx.cmd->GraphicsConstants(1, cb);
+    ctx.cmd->GraphicsSrvAt(2, v.va);
+    ctx.cmd->Draw(v.elements * 36, 1, 0, 0);
 }
 
 }  // namespace ga

@@ -44,6 +44,7 @@
 #pragma once
 
 #include "core/Common.h"
+#include "hal/Context.h"
 #include "hal/Gpu.h"
 #include "hal/TileAtlas.h"
 
@@ -166,7 +167,7 @@ inline TilePolicy Derived(std::vector<uint8_t> sigA, std::vector<uint8_t> sigB,
 class GradeBank {
 public:
     // Newly mapped tiles carry UNDEFINED contents; the fill runs over them before use.
-    using FillFn = std::function<void(Gpu&, ID3D12GraphicsCommandList*,
+    using FillFn = std::function<void(Gpu&, hal::CommandContext&,
                                       const std::vector<uint32_t>& tiles)>;
 
     void Init(Gpu& gpu, GradeBankDesc desc, TilePolicy policy) {
@@ -215,9 +216,9 @@ public:
     void SetCoverageChannel(int ch) { m_atlas.SetCoverageChannel(ch); }
 
     void BuildChain(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
-                    ID3D12GraphicsCommandList* cl) {
+                    hal::CommandContext& cmd) {
         if (m_desc.mipLevels < 2 || !m_coarseMapped) return;
-        m_atlas.BuildMips(gpu, sc, shaderDir, cl);
+        m_atlas.BuildMips(gpu, sc, shaderDir, cmd.Native());
     }
     uint32_t ResidencyMapSrv() const { return m_atlas.ResidencyMapSrv(); }
 
@@ -355,24 +356,20 @@ public:
                                           size_t(tw - have) * texelBytes);
                 }
             }
-            ID3D12GraphicsCommandList* cl = gpu.BeginUpload();
-            D3D12_RESOURCE_BARRIER b{};
-            b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-            b.Transition.pResource = m_atlas.Res();
-            b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-            b.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-            b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-            cl->ResourceBarrier(1, &b);
+            hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
+            up.Barrier(m_atlas.Res(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                       D3D12_RESOURCE_STATE_COPY_DEST);
             for (size_t k = 0; k < n; ++k) {
                 const uint32_t packed = tiles[base + k];
                 const D3D12_TILED_RESOURCE_COORDINATE coord{
                     packed % m_atlas.TilesX(), packed / m_atlas.TilesX(), 0, 0};
                 const D3D12_TILE_REGION_SIZE size{1, FALSE, 0, 0, 0};
-                cl->CopyTiles(m_atlas.Res(), &coord, &size, m_stage.res.Get(), k * tileBytes,
-                              D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE);
+                up.Native()->CopyTiles(
+                    m_atlas.Res(), &coord, &size, m_stage.res.Get(), k * tileBytes,
+                    D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE);
             }
-            std::swap(b.Transition.StateBefore, b.Transition.StateAfter);
-            cl->ResourceBarrier(1, &b);
+            up.Barrier(m_atlas.Res(), D3D12_RESOURCE_STATE_COPY_DEST,
+                       D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             gpu.EndUpload();
         }
     }

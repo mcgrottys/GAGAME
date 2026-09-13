@@ -16,6 +16,7 @@
 // ================================================================================================
 #pragma once
 
+#include "hal/Context.h"
 #include "hal/Gpu.h"
 #include "hal/Shader.h"
 
@@ -27,7 +28,9 @@ class GpuProfiler;
 
 struct FrameContext {
     Gpu* gpu = nullptr;
-    ID3D12GraphicsCommandList* cl = nullptr;
+    // M12 3b: the frame's recording, through the facade. Native() is the raw list, and every
+    // use of it in a layer is a call site the next sub-steps look at.
+    hal::CommandContext* cmd = nullptr;
     const Camera* camera = nullptr;
     D3D12_GPU_VIRTUAL_ADDRESS sceneCb = 0;   // b0, already filled for this frame
     float timeSec = 0;

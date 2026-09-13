@@ -335,21 +335,16 @@ void GlobeLayer::InitClouds(Gpu& gpu, ShaderCompiler& sc) {
                        static_cast<uint64_t>(r) * rowBytes,
                    static_cast<size_t>(rowBytes));
         }
-        ID3D12GraphicsCommandList* cl = gpu.BeginUpload();
+        hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
         D3D12_TEXTURE_COPY_LOCATION dst{}, sl{};
         dst.pResource = m_cloudSrc.res.Get();
         dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         sl.pResource = staging.res.Get();
         sl.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         sl.PlacedFootprint = fp;
-        cl->CopyTextureRegion(&dst, 0, 0, 0, &sl, nullptr);
-        D3D12_RESOURCE_BARRIER br{};
-        br.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        br.Transition.pResource = m_cloudSrc.res.Get();
-        br.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        br.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        br.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-        cl->ResourceBarrier(1, &br);
+        up.Native()->CopyTextureRegion(&dst, 0, 0, 0, &sl, nullptr);
+        up.Barrier(m_cloudSrc.res.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         gpu.EndUpload();
         m_cloudSrc.state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     }
@@ -470,24 +465,19 @@ void GlobeLayer::InitClouds(Gpu& gpu, ShaderCompiler& sc) {
         cb.altC[2] = kShellTopM;
         cb.altC[3] = 1.0f;    // density gamma (linear: GFS fraction is already conservative)
 
-        ID3D12GraphicsCommandList* cl = gpu.BeginUpload();
+        hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
         ID3D12DescriptorHeap* heaps[] = {gpu.SrvHeap().Heap()};   // raw upload list: bind it
-        cl->SetDescriptorHeaps(1, heaps);
-        cl->SetComputeRootSignature(m_cloudRs.Get());
-        cl->SetComputeRootConstantBufferView(0, gpu.PushConstants(&cb, sizeof(cb)));
+        up.Native()->SetDescriptorHeaps(1, heaps);
+        up.ComputeRoot(m_cloudRs.Get());
+        up.ComputeConstants(0, cb);
         const auto& list = m_cloud.ResidentList();
-        cl->SetComputeRootShaderResourceView(1, gpu.PushConstants(list.data(), list.size() * 4));
-        cl->SetComputeRootDescriptorTable(2, gpu.SrvHeap().Gpu(m_cloudTable));
-        cl->SetPipelineState(m_cloudBuild.Get());
-        cl->Dispatch(m_cloud.TileW() / 8, m_cloud.TileH() / 8, cb.listCount);
-        D3D12_RESOURCE_BARRIER br{};
-        br.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        br.Transition.pResource = m_cloud.Res();
-        br.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        br.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        br.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
-                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        cl->ResourceBarrier(1, &br);
+        up.ComputeSrvAt(1, gpu.PushConstants(list.data(), list.size() * 4));
+        up.ComputeTable(2, m_cloudTable);
+        up.Pipeline(m_cloudBuild.Get());
+        up.Dispatch(m_cloud.TileW() / 8, m_cloud.TileH() / 8, cb.listCount);
+        up.Barrier(m_cloud.Res(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         gpu.EndUpload();
         gpu.ResetConstantArenaAfterIdle();
     }
@@ -666,24 +656,19 @@ void GlobeLayer::InitNeAndWind(Gpu& gpu, ShaderCompiler& sc) {
         cb.radius = static_cast<float>(GlobeModel::kR);
         cb.scale = 1.0e4f;
 
-        ID3D12GraphicsCommandList* cl = gpu.BeginUpload();
+        hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
         ID3D12DescriptorHeap* heaps[] = {gpu.SrvHeap().Heap()};
-        cl->SetDescriptorHeaps(1, heaps);
-        cl->SetComputeRootSignature(m_windRs.Get());
-        cl->SetComputeRootConstantBufferView(0, gpu.PushConstants(&cb, sizeof(cb)));
+        up.Native()->SetDescriptorHeaps(1, heaps);
+        up.ComputeRoot(m_windRs.Get());
+        up.ComputeConstants(0, cb);
         const auto& list = m_windBank.ResidentList();
-        cl->SetComputeRootShaderResourceView(1, gpu.PushConstants(list.data(), list.size() * 4));
-        cl->SetComputeRootDescriptorTable(2, gpu.SrvHeap().Gpu(m_windTable));
-        cl->SetPipelineState(m_windBuild.Get());
-        cl->Dispatch(m_windBank.TileW() / 16, m_windBank.TileH() / 16, cb.listCount);
-        D3D12_RESOURCE_BARRIER br{};
-        br.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        br.Transition.pResource = m_windBank.Res();
-        br.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        br.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        br.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
-                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        cl->ResourceBarrier(1, &br);
+        up.ComputeSrvAt(1, gpu.PushConstants(list.data(), list.size() * 4));
+        up.ComputeTable(2, m_windTable);
+        up.Pipeline(m_windBuild.Get());
+        up.Dispatch(m_windBank.TileW() / 16, m_windBank.TileH() / 16, cb.listCount);
+        up.Barrier(m_windBank.Res(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         gpu.EndUpload();
         gpu.ResetConstantArenaAfterIdle();
     }
@@ -2067,41 +2052,41 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
 
 void GlobeLayer::Render(const FrameContext& ctx) {
     if (!m_pso || (m_nodes.empty() && m_meshlets.empty())) return;
-    PixScope scope(ctx.cl, "globe (atmosphere shell + quad-sphere CDLOD + sparse cloud volume)");
+    PixScope scope(ctx.cmd->Native(),
+                   "globe (atmosphere shell + quad-sphere CDLOD + sparse cloud volume)");
 
     // M6e: the residency manager's per-frame turn -- loads started, budgeted tiles mapped and
     // filled, residency maps refreshed -- BEFORE the surface samples any of it.
     if (m_res) {
-        GpuScope gscope(ctx.prof, ctx.cl, "globe.residency");
-        m_res->ProcessQueues(*ctx.gpu, ctx.cl);
+        GpuScope gscope(ctx.prof, ctx.cmd->Native(), "globe.residency");
+        m_res->ProcessQueues(*ctx.gpu, ctx.cmd->Native());
     }
 
     const D3D12_GPU_VIRTUAL_ADDRESS cbVa = ctx.gpu->PushConstants(&m_cb, sizeof(m_cb));
 
     // 1) The atmosphere backdrop: limb scatter + sun for every ray that misses the planet.
     if (m_skyPso && skyPassEnabled) {
-        GpuScope gscope(ctx.prof, ctx.cl, "globe.sky");
-        PixMarker(ctx.cl, "globe.sky (single-scatter shell: the limb past the disc)");
-        ctx.cl->SetPipelineState(m_skyPso.Get());
+        GpuScope gscope(ctx.prof, ctx.cmd->Native(), "globe.sky");
+        PixMarker(ctx.cmd->Native(), "globe.sky (single-scatter shell: the limb past the disc)");
+        ctx.cmd->Pipeline(m_skyPso.Get());
         const float w = std::clamp(skyPassWeight, 0.0f, 1.0f);
         const float bf[4] = {w, w, w, w};
-        ctx.cl->OMSetBlendFactor(bf);
-        ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        ctx.cl->SetGraphicsRootConstantBufferView(1, cbVa);
-        ctx.cl->SetGraphicsRootConstantBufferView(
-            4, ctx.gpu->PushConstants(&m_skyCb, sizeof(m_skyCb)));
-        ctx.cl->DrawInstanced(3, 1, 0, 0);
+        ctx.cmd->Native()->OMSetBlendFactor(bf);
+        ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx.cmd->GraphicsConstantsAt(1, cbVa);
+        ctx.cmd->GraphicsConstants(4, m_skyCb);
+        ctx.cmd->Draw(3, 1, 0, 0);
     }
 
     // 2) The surface (which marches the sparse cloud bank on its way down).
     if (m_msPath && m_msPso && !m_meshlets.empty()) {
         // M6j: the unified surface -- meshlet records ride a frame-indexed upload buffer,
         // one DispatchMesh amplifies them from the composed channels.
-        if (!m_cl6 && FAILED(ctx.cl->QueryInterface(IID_PPV_ARGS(&m_cl6)))) {
+        if (!m_cl6 && FAILED(ctx.cmd->Native()->QueryInterface(IID_PPV_ARGS(&m_cl6)))) {
             m_msPath = false;
             return;
         }
-        GpuScope gscope(ctx.prof, ctx.cl, "globe.mesh");
+        GpuScope gscope(ctx.prof, ctx.cmd->Native(), "globe.mesh");
         GpuBuffer& rec = m_recBuf[ctx.gpu->FrameIndex()];
         const size_t bytes = m_meshlets.size() * sizeof(MeshletRec);
         const auto copy0 = std::chrono::steady_clock::now();   // meshletCopyMs bracket
@@ -2113,9 +2098,9 @@ void GlobeLayer::Render(const FrameContext& ctx) {
         if (surfaceDebug == 1 && m_msPsoWire) msSel = m_msPsoWire.Get();
         else if (surfaceDebug == 2 && m_msPsoMeshlet) msSel = m_msPsoMeshlet.Get();
         else if (surfaceDebug == 3 && m_msPsoWireFlat) msSel = m_msPsoWireFlat.Get();
-        ctx.cl->SetPipelineState(msSel);
-        ctx.cl->SetGraphicsRootConstantBufferView(1, cbVa);
-        ctx.cl->SetGraphicsRootShaderResourceView(2, rec.res->GetGPUVirtualAddress());
+        ctx.cmd->Pipeline(msSel);
+        ctx.cmd->GraphicsConstantsAt(1, cbVa);
+        ctx.cmd->GraphicsSrvAt(2, rec.res->GetGPUVirtualAddress());
         // M10: 2-D, because one dimension caps at 65535 groups (GlobeMesh.hlsl folds y*65535+x).
         const UINT n = static_cast<UINT>(m_meshlets.size());
         m_cl6->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
@@ -2123,17 +2108,17 @@ void GlobeLayer::Render(const FrameContext& ctx) {
         // 3) M10: the limbs of every planet whose air the eye is outside of, over the surface
         // just drawn (SetView chose the slots, farthest first).
         if (m_limbPso && m_limbCount > 0) {
-            GpuScope lscope(ctx.prof, ctx.cl, "globe.limbs");
-            PixMarker(ctx.cl, "globe.limbs (each level's shell over what lies behind it)");
-            ctx.cl->SetPipelineState(m_limbPso.Get());
-            ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            ctx.cl->SetGraphicsRootConstantBufferView(1, cbVa);
+            GpuScope lscope(ctx.prof, ctx.cmd->Native(), "globe.limbs");
+            PixMarker(ctx.cmd->Native(),
+                      "globe.limbs (each level's shell over what lies behind it)");
+            ctx.cmd->Pipeline(m_limbPso.Get());
+            ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            ctx.cmd->GraphicsConstantsAt(1, cbVa);
             for (int li = 0; li < m_limbCount; ++li) {
                 SkyCbData lc = m_skyCb;
                 lc.lvl[0] = static_cast<float>(m_limbSlots[li]);
-                ctx.cl->SetGraphicsRootConstantBufferView(
-                    4, ctx.gpu->PushConstants(&lc, sizeof(lc)));
-                ctx.cl->DrawInstanced(3, 1, 0, 0);
+                ctx.cmd->GraphicsConstants(4, lc);
+                ctx.cmd->Draw(3, 1, 0, 0);
             }
         }
         return;
@@ -2141,14 +2126,14 @@ void GlobeLayer::Render(const FrameContext& ctx) {
     ID3D12PipelineState* sel = m_pso.Get();
     if (surfaceDebug == 1 && m_psoWire) sel = m_psoWire.Get();
     else if (surfaceDebug == 2 && m_psoMeshlet) sel = m_psoMeshlet.Get();
-    ctx.cl->SetPipelineState(sel);
-    ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx.cl->SetGraphicsRootConstantBufferView(1, cbVa);
+    ctx.cmd->Pipeline(sel);
+    ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx.cmd->GraphicsConstantsAt(1, cbVa);
     // Root param 2 normally carries the FieldSet; the renderer re-binds it every frame and the
     // globe draws last, so the CDLOD node list borrows the slot for this draw.
-    ctx.cl->SetGraphicsRootShaderResourceView(
+    ctx.cmd->GraphicsSrvAt(
         2, ctx.gpu->PushConstants(m_nodes.data(), m_nodes.size() * sizeof(NodeData)));
-    ctx.cl->DrawInstanced(32 * 32 * 6, static_cast<UINT>(m_nodes.size()), 0, 0);
+    ctx.cmd->Draw(32 * 32 * 6, static_cast<UINT>(m_nodes.size()), 0, 0);
 }
 
 }  // namespace ga

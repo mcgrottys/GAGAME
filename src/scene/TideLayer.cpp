@@ -190,27 +190,24 @@ void TideLayer::Render(const FrameContext& ctx) {
 
     // Ribbon surface, then pylons: same PSO, mode flag in b1.
     {
-        PixScope scope(ctx.cl, "tide.ribbon");
-        ctx.cl->SetPipelineState(m_ribbonPso.Get());
-        ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        PixScope scope(ctx.cmd->Native(), "tide.ribbon");
+        ctx.cmd->Pipeline(m_ribbonPso.Get());
+        ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         m_ribbon.misc[0] = 0.0f;
-        ctx.cl->SetGraphicsRootConstantBufferView(
-            1, ctx.gpu->PushConstants(&m_ribbon, sizeof(m_ribbon)));
-        ctx.cl->DrawInstanced(6 * kQuadsX * kQuadsZ, 1, 0, 0);
+        ctx.cmd->GraphicsConstants(1, m_ribbon);
+        ctx.cmd->Draw(6 * kQuadsX * kQuadsZ, 1, 0, 0);
 
-        PixMarker(ctx.cl, "tide.pylons");
+        PixMarker(ctx.cmd->Native(), "tide.pylons");
         m_ribbon.misc[0] = 1.0f;
-        ctx.cl->SetGraphicsRootConstantBufferView(
-            1, ctx.gpu->PushConstants(&m_ribbon, sizeof(m_ribbon)));
-        ctx.cl->DrawInstanced(36, m_nRibbon, 0, 0);
+        ctx.cmd->GraphicsConstants(1, m_ribbon);
+        ctx.cmd->Draw(36, m_nRibbon, 0, 0);
     }
     {
-        PixScope scope(ctx.cl, "tide.curves (solid=analytic, dashed=NOAA official)");
-        ctx.cl->SetPipelineState(m_curvesPso.Get());
-        ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINESTRIP);
-        ctx.cl->SetGraphicsRootConstantBufferView(
-            1, ctx.gpu->PushConstants(&m_curves, sizeof(m_curves)));
-        ctx.cl->DrawInstanced(kCurveVerts, 18, 0, 0);
+        PixScope scope(ctx.cmd->Native(), "tide.curves (solid=analytic, dashed=NOAA official)");
+        ctx.cmd->Pipeline(m_curvesPso.Get());
+        ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_LINESTRIP);
+        ctx.cmd->GraphicsConstants(1, m_curves);
+        ctx.cmd->Draw(kCurveVerts, 18, 0, 0);
     }
 }
 

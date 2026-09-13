@@ -13,6 +13,7 @@
 // ================================================================================================
 #pragma once
 
+#include "hal/Context.h"
 #include "hal/Gpu.h"
 #include "hal/Shader.h"
 #include "sim/SeaState.h"
@@ -39,8 +40,9 @@ public:
     // derived from the forecast cycle so the ocean is reproducible.
     void SetSeaState(const PartParam* parts, int count, uint32_t seed);
 
-    // Records the whole compute chain for this frame into cl. tSec = seconds since the cycle.
-    void Record(ID3D12GraphicsCommandList* cl, Gpu& gpu, float tSec);
+    // Records the whole compute chain for this frame through cmd. tSec = seconds since the
+    // cycle.
+    void Record(hal::CommandContext& cmd, Gpu& gpu, float tSec);
 
     float PatchL(uint32_t c) const { return m_patchL[c]; }
     // M9bq: the rest of a cascade's geometry, so the CPU twin (sim/OceanCpu.h) is configured
@@ -72,10 +74,10 @@ private:
         bool outputsArePs = false;   // disp/deriv currently in pixel-shader-resource state
     };
 
-    void BuildMips(ID3D12GraphicsCommandList* cl, Gpu& gpu, Cascade& k);
+    void BuildMips(hal::CommandContext& cmd, Gpu& gpu, Cascade& k);
 
     bool BuildPipelines(Gpu& gpu, ShaderCompiler& sc);
-    void Dispatch(ID3D12GraphicsCommandList* cl, Gpu& gpu, ID3D12PipelineState* pso,
+    void Dispatch(hal::CommandContext& cmd, Gpu& gpu, ID3D12PipelineState* pso,
                   uint32_t block, uint32_t cascade, uint32_t dir, float tSec, uint32_t gx,
                   uint32_t gy);
 

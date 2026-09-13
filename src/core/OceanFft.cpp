@@ -21,24 +21,6 @@ struct FftConsts {
     float pad[4];
 };
 
-void Barrier(ID3D12GraphicsCommandList* cl, ID3D12Resource* res, D3D12_RESOURCE_STATES from,
-             D3D12_RESOURCE_STATES to) {
-    D3D12_RESOURCE_BARRIER b{};
-    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    b.Transition.pResource = res;
-    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    b.Transition.StateBefore = from;
-    b.Transition.StateAfter = to;
-    cl->ResourceBarrier(1, &b);
-}
-
-void UavBarrier(ID3D12GraphicsCommandList* cl, ID3D12Resource* res) {
-    D3D12_RESOURCE_BARRIER b{};
-    b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-    b.UAV.pResource = res;
-    cl->ResourceBarrier(1, &b);
-}
-
 Com<ID3D12Resource> MakeTex(Gpu& gpu, uint32_t n, DXGI_FORMAT fmt, const wchar_t* name,
                             D3D12_RESOURCE_STATES state, uint32_t mips = 1) {
     D3D12_RESOURCE_DESC d{};
@@ -64,10 +46,11 @@ Com<ID3D12Resource> MakeTex(Gpu& gpu, uint32_t n, DXGI_FORMAT fmt, const wchar_t
 // M9bo: fill one cascade texture's chain, coarse level by coarse level, while the resource is
 // still in UNORDERED_ACCESS from assembly. A UAV barrier between levels because level m+1 reads
 // what level m just wrote.
-void OceanFft::BuildMips(ID3D12GraphicsCommandList* cl, Gpu& gpu, Cascade& k) {
+void OceanFft::BuildMips(hal::CommandContext& cmd, Gpu& gpu, Cascade& k) {
+    (void)gpu;   // the context carries the device
     if (!m_mipPso) return;
-    cl->SetComputeRootSignature(m_mipRs.Get());
-    cl->SetPipelineState(m_mipPso.Get());
+    cmd.ComputeRoot(m_mipRs.Get());
+    cmd.Pipeline(m_mipPso.Get());
     ID3D12Resource* res[2] = {k.disp.Get(), k.deriv.Get()};
     const uint32_t table[2] = {k.mipTableDisp, k.mipTableDeriv};
     for (uint32_t t = 0; t < 2; ++t) {
@@ -75,17 +58,17 @@ void OceanFft::BuildMips(ID3D12GraphicsCommandList* cl, Gpu& gpu, Cascade& k) {
             const uint32_t sw = (kN >> m) ? (kN >> m) : 1u;
             const uint32_t dw = (kN >> (m + 1)) ? (kN >> (m + 1)) : 1u;
             const uint32_t consts[4] = {dw, dw, sw, sw};
-            cl->SetComputeRoot32BitConstants(0, 4, consts, 0);
-            cl->SetComputeRootDescriptorTable(1, gpu.SrvHeap().Gpu(table[t] + 2 * m));
-            cl->Dispatch((dw + 7) / 8, (dw + 7) / 8, 1);
-            UavBarrier(cl, res[t]);
+            cmd.Native()->SetComputeRoot32BitConstants(0, 4, consts, 0);
+            cmd.ComputeTable(1, table[t] + 2 * m);
+            cmd.Dispatch((dw + 7) / 8, (dw + 7) / 8, 1);
+            cmd.UavBarrier(res[t]);
         }
     }
     // Record binds the ocean root signature ONCE, before the cascade loop, and Dispatch never
     // re-binds it -- so leaving m_mipRs bound here runs the NEXT cascade's FFT kernels against
     // the wrong root signature. That is an access violation inside the driver, reported at
     // OceanFft::Dispatch with nothing in this function on the stack. Put it back.
-    cl->SetComputeRootSignature(m_rootSig.Get());
+    cmd.ComputeRoot(m_rootSig.Get());
 }
 
 double OceanFft::MeasureHs(Gpu& gpu) {
@@ -347,9 +330,10 @@ void OceanFft::SetSeaState(const PartParam* parts, int count, uint32_t seed) {
     m_spectrumDirty = true;
 }
 
-void OceanFft::Dispatch(ID3D12GraphicsCommandList* cl, Gpu& gpu, ID3D12PipelineState* pso,
+void OceanFft::Dispatch(hal::CommandContext& cmd, Gpu& gpu, ID3D12PipelineState* pso,
                         uint32_t block, uint32_t cascade, uint32_t dir, float tSec, uint32_t gx,
                         uint32_t gy) {
+    (void)gpu;   // the context carries the device
     FftConsts c{};
     c.n = kN;
     c.dir = dir;
@@ -365,73 +349,73 @@ void OceanFft::Dispatch(ID3D12GraphicsCommandList* cl, Gpu& gpu, ID3D12PipelineS
     // moderate threshold gives foam on storm crests and a clean surface at Hs 0.4 m.
     c.foamScale = 4.0f;
     c.foamBias = 0.80f;
-    cl->SetComputeRoot32BitConstants(0, sizeof(c) / 4, &c, 0);
-    cl->SetComputeRootConstantBufferView(1, gpu.PushConstants(&m_parts, sizeof(m_parts)));
-    cl->SetComputeRootDescriptorTable(2, gpu.SrvHeap().Gpu(block));
-    cl->SetPipelineState(pso);
-    cl->Dispatch(gx, gy, 1);
+    cmd.Native()->SetComputeRoot32BitConstants(0, sizeof(c) / 4, &c, 0);
+    cmd.ComputeConstants(1, m_parts);
+    cmd.ComputeTable(2, block);
+    cmd.Pipeline(pso);
+    cmd.Dispatch(gx, gy, 1);
 }
 
-void OceanFft::Record(ID3D12GraphicsCommandList* cl, Gpu& gpu, float tSec) {
+void OceanFft::Record(hal::CommandContext& cmd, Gpu& gpu, float tSec) {
     if (!m_ready) return;
-    PixScope frame(cl, "ocean.fft (3 cascades: modulate -> rows -> cols -> assemble)");
-    cl->SetComputeRootSignature(m_rootSig.Get());
+    PixScope frame(cmd.Native(), "ocean.fft (3 cascades: modulate -> rows -> cols -> assemble)");
+    cmd.ComputeRoot(m_rootSig.Get());
 
     for (uint32_t ci = 0; ci < kCascades; ++ci) {
         Cascade& k = m_cascade[ci];
 
         if (k.outputsArePs) {
-            Barrier(cl, k.disp.Get(), D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            Barrier(cl, k.deriv.Get(), D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cmd.Barrier(k.disp.Get(), D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cmd.Barrier(k.deriv.Get(), D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             k.outputsArePs = false;
         }
 
         if (m_spectrumDirty) {
-            PixScope scope(cl, "ocean.initSpectrum");
-            Dispatch(cl, gpu, m_init.Get(), k.blockInit, ci, 0, tSec, kN / 8, kN / 8);
-            UavBarrier(cl, k.h0.Get());
+            PixScope scope(cmd.Native(), "ocean.initSpectrum");
+            Dispatch(cmd, gpu, m_init.Get(), k.blockInit, ci, 0, tSec, kN / 8, kN / 8);
+            cmd.UavBarrier(k.h0.Get());
         }
         {
-            PixScope scope(cl, "ocean.modulate (the rotor)");
-            Dispatch(cl, gpu, m_modulate.Get(), k.blockMod, ci, 0, tSec, kN / 8, kN / 8);
-            UavBarrier(cl, k.pingA.Get());
-            UavBarrier(cl, k.pingB.Get());
+            PixScope scope(cmd.Native(), "ocean.modulate (the rotor)");
+            Dispatch(cmd, gpu, m_modulate.Get(), k.blockMod, ci, 0, tSec, kN / 8, kN / 8);
+            cmd.UavBarrier(k.pingA.Get());
+            cmd.UavBarrier(k.pingB.Get());
         }
         {
-            PixScope scope(cl, "ocean.fft.rows");
-            Dispatch(cl, gpu, m_fft.Get(), k.blockRows, ci, 0, tSec, kN, 1);
-            UavBarrier(cl, k.pongA.Get());
-            UavBarrier(cl, k.pongB.Get());
+            PixScope scope(cmd.Native(), "ocean.fft.rows");
+            Dispatch(cmd, gpu, m_fft.Get(), k.blockRows, ci, 0, tSec, kN, 1);
+            cmd.UavBarrier(k.pongA.Get());
+            cmd.UavBarrier(k.pongB.Get());
         }
         {
-            PixScope scope(cl, "ocean.fft.cols");
-            Dispatch(cl, gpu, m_fft.Get(), k.blockCols, ci, 1, tSec, kN, 1);
-            UavBarrier(cl, k.pingA.Get());
-            UavBarrier(cl, k.pingB.Get());
+            PixScope scope(cmd.Native(), "ocean.fft.cols");
+            Dispatch(cmd, gpu, m_fft.Get(), k.blockCols, ci, 1, tSec, kN, 1);
+            cmd.UavBarrier(k.pingA.Get());
+            cmd.UavBarrier(k.pingB.Get());
         }
         {
-            PixScope scope(cl, "ocean.assemble");
-            Dispatch(cl, gpu, m_assemble.Get(), k.blockAsm, ci, 0, tSec, kN / 8, kN / 8);
-            UavBarrier(cl, k.disp.Get());
-            UavBarrier(cl, k.deriv.Get());
+            PixScope scope(cmd.Native(), "ocean.assemble");
+            Dispatch(cmd, gpu, m_assemble.Get(), k.blockAsm, ci, 0, tSec, kN / 8, kN / 8);
+            cmd.UavBarrier(k.disp.Get());
+            cmd.UavBarrier(k.deriv.Get());
         }
         {
             // M9bo: the chain, while both are still UAVs. The bank kernel reads these at the
             // RING's texel, which is coarser than the cascade's by up to 6.7x on ring 0 and far
             // more outward; without the chain that read was a mip-0 bilinear tap and everything
             // between the two scales aliased into the geometry.
-            PixScope scope(cl, "ocean.mips");
-            BuildMips(cl, gpu, k);
+            PixScope scope(cmd.Native(), "ocean.mips");
+            BuildMips(cmd, gpu, k);
         }
 
         // ALL_SHADER_RESOURCE (pixel + non-pixel) so the churn COMPUTE pass can read the chop
         // derivatives in the same frame the sea PS samples them.
-        Barrier(cl, k.disp.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
-        Barrier(cl, k.deriv.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        cmd.Barrier(k.disp.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        cmd.Barrier(k.deriv.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
         k.outputsArePs = true;
     }
     m_spectrumDirty = false;

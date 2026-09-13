@@ -338,69 +338,58 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     m_pendingReset = true;
 }
 
-void SweSolver::RecordReset(ID3D12GraphicsCommandList* cl, Gpu& gpu) {
-    PixScope scope(cl, "swe.reset (state -> the analytic tide plane)");
-    cl->SetComputeRootSignature(m_rs.Get());
-    cl->SetComputeRootConstantBufferView(0, gpu.PushConstants(&m_cb, sizeof(m_cb)));
-    cl->SetComputeRootDescriptorTable(2, gpu.SrvHeap().Gpu(m_table));
+void SweSolver::RecordReset(hal::CommandContext& cmd, Gpu& gpu) {
+    PixScope scope(cmd.Native(), "swe.reset (state -> the analytic tide plane)");
+    cmd.ComputeRoot(m_rs.Get());
+    cmd.ComputeConstants(0, m_cb);
+    cmd.ComputeTable(2, m_table);
 
     const auto& el = m_eta.ResidentList();
-    cl->SetComputeRootShaderResourceView(1, gpu.PushConstants(el.data(), el.size() * 4));
-    cl->SetPipelineState(m_clearEta.Get());
-    cl->Dispatch(m_eta.TileW() / 16, m_eta.TileH() / 16, static_cast<UINT>(el.size()));
+    cmd.ComputeSrvAt(1, gpu.PushConstants(el.data(), el.size() * 4));
+    cmd.Pipeline(m_clearEta.Get());
+    cmd.Dispatch(m_eta.TileW() / 16, m_eta.TileH() / 16, static_cast<UINT>(el.size()));
 
     const auto& fl = m_flux.ResidentList();
-    cl->SetComputeRootShaderResourceView(1, gpu.PushConstants(fl.data(), fl.size() * 4));
-    cl->SetPipelineState(m_clearFlux.Get());
-    cl->Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, static_cast<UINT>(fl.size()));
+    cmd.ComputeSrvAt(1, gpu.PushConstants(fl.data(), fl.size() * 4));
+    cmd.Pipeline(m_clearFlux.Get());
+    cmd.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, static_cast<UINT>(fl.size()));
 
     // Full-surface uv clear (fresh texture memory is undefined; NULL-region texels must read
     // invalid so the sea falls back to the analytic jet there).
-    cl->SetPipelineState(m_uvClear.Get());
-    cl->Dispatch((m_cb.nx + 15) / 16, (m_cb.ny + 15) / 16, 1);
+    cmd.Pipeline(m_uvClear.Get());
+    cmd.Dispatch((m_cb.nx + 15) / 16, (m_cb.ny + 15) / 16, 1);
 
+    // Three UAV barriers in ONE call: the facade has no multi-barrier form, so this stays raw.
     D3D12_RESOURCE_BARRIER uav[3]{};
     for (int i = 0; i < 3; ++i) uav[i].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
     uav[0].UAV.pResource = m_eta.Res();
     uav[1].UAV.pResource = m_flux.Res();
     uav[2].UAV.pResource = m_uvBank.Res();
-    cl->ResourceBarrier(3, uav);
+    cmd.Native()->ResourceBarrier(3, uav);
 }
 
-int SweSolver::Record(ID3D12GraphicsCommandList* cl, Gpu& gpu, double simUnix, float tideNavd) {
-    return Record(cl, gpu, simUnix, tideNavd, kMaxSubsteps);
+int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float tideNavd) {
+    return Record(cmd, gpu, simUnix, tideNavd, kMaxSubsteps);
 }
 
-int SweSolver::Record(ID3D12GraphicsCommandList* cl, Gpu& gpu, double simUnix, float tideNavd,
+int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float tideNavd,
                       int maxSub) {
     if (!m_ready) return 0;
-    PixScope scope(cl, "swe (sparse shallow-water: flux/height substeps + derive)");
+    PixScope scope(cmd.Native(), "swe (sparse shallow-water: flux/height substeps + derive)");
 
     // Spin-up runs on the raw upload list, which has no descriptor heap bound; the frame list
     // already has this exact heap, so re-setting it is harmless there.
     ID3D12DescriptorHeap* heaps[] = {gpu.SrvHeap().Heap()};
-    cl->SetDescriptorHeaps(1, heaps);
+    cmd.Native()->SetDescriptorHeaps(1, heaps);
 
     auto etaTo = [&](D3D12_RESOURCE_STATES to) {
         if (m_etaState == to) return;
-        D3D12_RESOURCE_BARRIER b{};
-        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Transition.pResource = m_eta.Res();
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b.Transition.StateBefore = m_etaState;
-        b.Transition.StateAfter = to;
-        cl->ResourceBarrier(1, &b);
+        cmd.Barrier(m_eta.Res(), m_etaState, to);
         m_etaState = to;
     };
     auto uvTo = [&](D3D12_RESOURCE_STATES to) {
         if (m_uvState == to) return;
-        D3D12_RESOURCE_BARRIER b{};
-        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Transition.pResource = m_uvBank.Res();
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b.Transition.StateBefore = m_uvState;
-        b.Transition.StateAfter = to;
-        cl->ResourceBarrier(1, &b);
+        cmd.Barrier(m_uvBank.Res(), m_uvState, to);
         m_uvState = to;
     };
     etaTo(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -413,7 +402,7 @@ int SweSolver::Record(ID3D12GraphicsCommandList* cl, Gpu& gpu, double simUnix, f
     // time-dilated hydrodynamics instead of a visible reset flicker.
     const double drift = std::abs(simUnix - m_simTime);
     if (m_pendingReset || drift > 3600.0) {
-        RecordReset(cl, gpu);
+        RecordReset(cmd, gpu);
         m_simTime = simUnix;
         m_pendingReset = false;
         m_lastTideTime = 0;   // no rate across a reset
@@ -450,58 +439,46 @@ int SweSolver::Record(ID3D12GraphicsCommandList* cl, Gpu& gpu, double simUnix, f
     m_cb.westUext =
         (area > 1.0f) ? std::clamp(m_westQ / area, -1.5f, 1.5f) : 0.0f;
 
-    cl->SetComputeRootSignature(m_rs.Get());
-    cl->SetComputeRootConstantBufferView(0, gpu.PushConstants(&m_cb, sizeof(m_cb)));
-    cl->SetComputeRootDescriptorTable(2, gpu.SrvHeap().Gpu(m_table));
+    cmd.ComputeRoot(m_rs.Get());
+    cmd.ComputeConstants(0, m_cb);
+    cmd.ComputeTable(2, m_table);
     const auto& el = m_eta.ResidentList();
     const auto& fl = m_flux.ResidentList();
     const D3D12_GPU_VIRTUAL_ADDRESS elVa = gpu.PushConstants(el.data(), el.size() * 4);
     const D3D12_GPU_VIRTUAL_ADDRESS flVa = gpu.PushConstants(fl.data(), fl.size() * 4);
 
-    D3D12_RESOURCE_BARRIER uavEta{}, uavFlux{};
-    uavEta.Type = uavFlux.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-    uavEta.UAV.pResource = m_eta.Res();
-    uavFlux.UAV.pResource = m_flux.Res();
-
     for (int i = 0; i < n; ++i) {
-        cl->SetComputeRootShaderResourceView(1, flVa);
-        cl->SetPipelineState(m_fluxK.Get());
-        cl->Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, static_cast<UINT>(fl.size()));
-        cl->ResourceBarrier(1, &uavFlux);
+        cmd.ComputeSrvAt(1, flVa);
+        cmd.Pipeline(m_fluxK.Get());
+        cmd.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, static_cast<UINT>(fl.size()));
+        cmd.UavBarrier(m_flux.Res());
 
-        cl->SetComputeRootShaderResourceView(1, elVa);
-        cl->SetPipelineState(m_heightK.Get());
-        cl->Dispatch(m_eta.TileW() / 16, m_eta.TileH() / 16, static_cast<UINT>(el.size()));
-        cl->ResourceBarrier(1, &uavEta);
+        cmd.ComputeSrvAt(1, elVa);
+        cmd.Pipeline(m_heightK.Get());
+        cmd.Dispatch(m_eta.TileW() / 16, m_eta.TileH() / 16, static_cast<UINT>(el.size()));
+        cmd.UavBarrier(m_eta.Res());
     }
     m_simTime += n * m_dt;
 
-    cl->SetComputeRootShaderResourceView(1, elVa);
-    cl->SetPipelineState(m_deriveK.Get());
-    cl->Dispatch(m_eta.TileW() / 16, m_eta.TileH() / 16, static_cast<UINT>(el.size()));
+    cmd.ComputeSrvAt(1, elVa);
+    cmd.Pipeline(m_deriveK.Get());
+    cmd.Dispatch(m_eta.TileW() / 16, m_eta.TileH() / 16, static_cast<UINT>(el.size()));
 
     // M9h: grad(flow), dispatched over the DERIVED bank's own resident list -- the eta list
     // dilated by the stencil apron. uv must be readable by this kernel first, and the write
     // target is a different bank, so the UAV barrier on uv is the whole synchronisation.
     {
-        D3D12_RESOURCE_BARRIER ub{};
-        ub.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-        ub.UAV.pResource = m_uvBank.Res();
-        cl->ResourceBarrier(1, &ub);
+        cmd.UavBarrier(m_uvBank.Res());
         const auto& gl = m_velGrad.ResidentList();
         if (!gl.empty()) {
-            cl->SetComputeRootShaderResourceView(1,
-                                                 gpu.PushConstants(gl.data(), gl.size() * 4));
-            cl->SetPipelineState(m_velGradK.Get());
-            cl->Dispatch(m_eta.TileW() / 16, m_eta.TileH() / 16, static_cast<UINT>(gl.size()));
+            cmd.ComputeSrvAt(1, gpu.PushConstants(gl.data(), gl.size() * 4));
+            cmd.Pipeline(m_velGradK.Get());
+            cmd.Dispatch(m_eta.TileW() / 16, m_eta.TileH() / 16, static_cast<UINT>(gl.size()));
             // mip 0 just changed, so the coarse levels are stale. Refill them: an unfilled
             // coarse level is real memory reading zero, which looks exactly like "the flow is
             // irrotational here" -- a lie the lens would render in perfectly good faith.
-            D3D12_RESOURCE_BARRIER gb{};
-            gb.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-            gb.UAV.pResource = m_velGrad.Res();
-            cl->ResourceBarrier(1, &gb);
-            if (m_sc) m_velGrad.BuildChain(gpu, *m_sc, m_shaderDir, cl);
+            cmd.UavBarrier(m_velGrad.Res());
+            if (m_sc) m_velGrad.BuildChain(gpu, *m_sc, m_shaderDir, cmd);
         }
     }
 

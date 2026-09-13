@@ -22,6 +22,7 @@
 #pragma once
 
 #include "core/GradeField.h"
+#include "hal/Context.h"
 #include "hal/Gpu.h"
 #include "hal/Shader.h"
 #include "hal/TileAtlas.h"
@@ -72,9 +73,9 @@ public:
         m_westQ = westQm3s;
     }
 
-    // Advance toward simUnix (records compute onto cl) and leave eta + uv sampleable.
+    // Advance toward simUnix (records compute through cmd) and leave eta + uv sampleable.
     // tideNavd = the analytic water level, NAVD88 m. Returns substeps executed this frame.
-    int Record(ID3D12GraphicsCommandList* cl, Gpu& gpu, double simUnix, float tideNavd);
+    int Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float tideNavd);
 
     // Solver-only advancement (own submits; no rendering): integrate up to targetUnix in
     // batches of 64 substeps per command list. tideAt(unix) supplies the ocean boundary level,
@@ -86,8 +87,8 @@ public:
             m_westDEta = static_cast<float>(westAt(m_simTime));
             m_southDEta = static_cast<float>(southAt(m_simTime));
             m_westQ = static_cast<float>(westQAt(m_simTime));
-            ID3D12GraphicsCommandList* cl = gpu.BeginUpload();
-            Record(cl, gpu, target, static_cast<float>(tideAt(m_simTime)), 9999);
+            hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
+            Record(up, gpu, target, static_cast<float>(tideAt(m_simTime)), 9999);
             gpu.EndUpload();
             gpu.ResetConstantArenaAfterIdle();   // thousands of batches; EndUpload waited
         }
@@ -151,9 +152,9 @@ public:
     float Dt() const { return m_dt; }
 
 private:
-    int Record(ID3D12GraphicsCommandList* cl, Gpu& gpu, double simUnix, float tideNavd,
+    int Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float tideNavd,
                int maxSub);
-    void RecordReset(ID3D12GraphicsCommandList* cl, Gpu& gpu);
+    void RecordReset(hal::CommandContext& cmd, Gpu& gpu);
 
     // Mirrors SweCb in shaders/Swe.hlsl exactly.
     struct SweCbData {

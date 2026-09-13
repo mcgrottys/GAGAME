@@ -787,7 +787,8 @@ void SeaLayer::UpdateChurnResidency(Gpu& gpu, double simUnix, double signedMs) {
 
 void SeaLayer::RecordChurn(const FrameContext& ctx) {
     if (!m_churnReady) return;
-    PixScope scope(ctx.cl, "sea.churn (sparse stateful atlas: clear fresh, decay+deposit)");
+    PixScope scope(ctx.cmd->Native(),
+                   "sea.churn (sparse stateful atlas: clear fresh, decay+deposit)");
 
     // M5c late wiring: the solver is attached after Init, so its textures land in the table on
     // first use (overwriting the null views).
@@ -821,13 +822,7 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
 
     auto barrierTo = [&](D3D12_RESOURCE_STATES to) {
         if (m_churnState == to) return;
-        D3D12_RESOURCE_BARRIER b{};
-        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Transition.pResource = m_churn.Res();
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b.Transition.StateBefore = m_churnState;
-        b.Transition.StateAfter = to;
-        ctx.cl->ResourceBarrier(1, &b);
+        ctx.cmd->Barrier(m_churn.Res(), m_churnState, to);
         m_churnState = to;
     };
 
@@ -881,28 +876,23 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
         m_churnCb.waveD[2] = 1.0f;
         m_churnCb.waveD[3] = 1.0f;
 
-        ctx.cl->SetComputeRootSignature(m_churnRs.Get());
+        ctx.cmd->ComputeRoot(m_churnRs.Get());
 
         auto dispatchList = [&](ID3D12PipelineState* pso, const std::vector<uint32_t>& list) {
             if (list.empty()) return;
             m_churnCb.listCount = static_cast<uint32_t>(list.size());
-            ctx.cl->SetComputeRootConstantBufferView(
-                0, ctx.gpu->PushConstants(&m_churnCb, sizeof(m_churnCb)));
-            ctx.cl->SetComputeRootShaderResourceView(
-                1, ctx.gpu->PushConstants(list.data(), list.size() * 4));
-            ctx.cl->SetComputeRootDescriptorTable(2, ctx.gpu->SrvHeap().Gpu(m_churnTable));
-            ctx.cl->SetPipelineState(pso);
-            ctx.cl->Dispatch(m_churn.TileW() / 16, m_churn.TileH() / 16, m_churnCb.listCount);
+            ctx.cmd->ComputeConstants(0, m_churnCb);
+            ctx.cmd->ComputeSrvAt(1, ctx.gpu->PushConstants(list.data(), list.size() * 4));
+            ctx.cmd->ComputeTable(2, m_churnTable);
+            ctx.cmd->Pipeline(pso);
+            ctx.cmd->Dispatch(m_churn.TileW() / 16, m_churn.TileH() / 16, m_churnCb.listCount);
         };
 
         if (!m_pendingClear.empty()) {
-            PixMarker(ctx.cl, "churn.clearFresh (undefined pool memory -> zero)");
+            PixMarker(ctx.cmd->Native(), "churn.clearFresh (undefined pool memory -> zero)");
             dispatchList(m_churnClear.Get(), m_pendingClear);
             m_pendingClear.clear();
-            D3D12_RESOURCE_BARRIER uav{};
-            uav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-            uav.UAV.pResource = m_churn.Res();
-            ctx.cl->ResourceBarrier(1, &uav);
+            ctx.cmd->UavBarrier(m_churn.Res());
         }
         if (doUpdate) dispatchList(m_churnUpdate.Get(), m_churn.ResidentList());
     }
@@ -915,35 +905,32 @@ void SeaLayer::Render(const FrameContext& ctx) {
     // The compute chain records into the same command list; compute bindings do not disturb the
     // graphics root signature the Renderer already set.
     if (m_swe && m_swe->Ready()) {
-        GpuScope gscope(ctx.prof, ctx.cl, "sea.swe");
-        m_swe->Record(ctx.cl, *ctx.gpu, m_simUnix, m_seaCb.sea[0]);
+        GpuScope gscope(ctx.prof, ctx.cmd->Native(), "sea.swe");
+        m_swe->Record(*ctx.cmd, *ctx.gpu, m_simUnix, m_seaCb.sea[0]);
     }
     {
-        GpuScope gscope(ctx.prof, ctx.cl, "sea.fft");
-        m_fft.Record(ctx.cl, *ctx.gpu, m_tSec);
+        GpuScope gscope(ctx.prof, ctx.cmd->Native(), "sea.fft");
+        m_fft.Record(*ctx.cmd, *ctx.gpu, m_tSec);
     }
     {
-        GpuScope gscope(ctx.prof, ctx.cl, "sea.churn");
+        GpuScope gscope(ctx.prof, ctx.cmd->Native(), "sea.churn");
         RecordChurn(ctx);
     }
 
-    GpuScope gdraw(drawEnabled ? ctx.prof : nullptr, ctx.cl, "sea.draw");
+    GpuScope gdraw(drawEnabled ? ctx.prof : nullptr, ctx.cmd->Native(), "sea.draw");
     if (drawEnabled) {
-        PixScope scope(ctx.cl, "sea.surface (tessellated: screen-space edge density)");
-        ctx.cl->SetPipelineState((wireframe && m_seaPsoWire) ? m_seaPsoWire.Get()
-                                                             : m_seaPso.Get());
-        ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_4_CONTROL_POINT_PATCHLIST);
-        ctx.cl->SetGraphicsRootConstantBufferView(
-            1, ctx.gpu->PushConstants(&m_seaCb, sizeof(m_seaCb)));
-        ctx.cl->DrawInstanced(4 * kPatches * kPatches, 1, 0, 0);
+        PixScope scope(ctx.cmd->Native(), "sea.surface (tessellated: screen-space edge density)");
+        ctx.cmd->Pipeline((wireframe && m_seaPsoWire) ? m_seaPsoWire.Get() : m_seaPso.Get());
+        ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_4_CONTROL_POINT_PATCHLIST);
+        ctx.cmd->GraphicsConstants(1, m_seaCb);
+        ctx.cmd->Draw(4 * kPatches * kPatches, 1, 0, 0);
     }
     if (drawEnabled) {
-        PixScope scope(ctx.cl, "sea.spectrum (solid=model, dashed=buoy 44013)");
-        ctx.cl->SetPipelineState(m_specPso.Get());
-        ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINESTRIP);
-        ctx.cl->SetGraphicsRootConstantBufferView(
-            1, ctx.gpu->PushConstants(&m_specCb, sizeof(m_specCb)));
-        ctx.cl->DrawInstanced(kSpecSamples, 3, 0, 0);
+        PixScope scope(ctx.cmd->Native(), "sea.spectrum (solid=model, dashed=buoy 44013)");
+        ctx.cmd->Pipeline(m_specPso.Get());
+        ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_LINESTRIP);
+        ctx.cmd->GraphicsConstants(1, m_specCb);
+        ctx.cmd->Draw(kSpecSamples, 3, 0, 0);
     }
 }
 
