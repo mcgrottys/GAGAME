@@ -261,7 +261,8 @@ public:
         double Q[3][3] = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}};   // own -> true
         // M12 step 4d: the same map as a Placement -- the linear part of Level(rel), rotor and
         // scale with t = 0 (the eye-to-eye translation the gauge identity cancels) -- which the
-        // frustum planes are pulled through (PullPlane) beside the hand transport above.
+        // frustum planes ARE pulled through (PullPlane; step 4d-2: the transport the walk culls
+        // by, the hand form from Q and sigma above being the instrument's record).
         Placement gauge;
         float reliefExagg = 1.0f;     // the display exaggeration at this level's own altitude
         float sun[3] = {0.0f, 1.0f, 0.0f};   // the sun in this level's own frame

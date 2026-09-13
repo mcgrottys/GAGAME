@@ -138,7 +138,9 @@ private:
     // portal (the level table's cam / sigma / Q / sun / sky zenith, the camera level's sun,
     // the dive rail's S^f(helm)) is evaluated from Level(k) beside it and compared bit for bit
     // (core/Common.h UlpTally); the table's dump prints when its geometry changes, Finish()
-    // prints the totals. The switch of a site to Level(k) waits on EQUAL there.
+    // prints the totals. Step 4d-2: the renderer's reads ARE the cycle's -- LevelApply /
+    // LevelApplyDir (the power about its fixed point) and PullPlane for the planes -- and the
+    // instrument records the residual against the portal's closed forms, computed beside them.
     struct DrosteProbeRow {
         int rel = 0;
         bool hasSky = false;

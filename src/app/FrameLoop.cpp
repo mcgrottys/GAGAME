@@ -170,10 +170,13 @@ int FrameLoop::Run() {
 
 // M12 step 4d instrument: THE LEVEL TABLE FROM THE CYCLE, beside the portal's closed forms.
 // Per level of a build: cam, the eye in the level's own frame -- portal.Apply(-rel, C) against
-// Level(rel).Inverse().Apply(C); sigma -- portal.Scale(rel) against Level(rel).s; Q --
-// portal.Rot(rel) against the rotor's columns (Rows(): GlobeLayer's own -> true layout,
-// Q[i][j] = axis_j[i]); the level's sun and sky zenith -- portal.ApplyDir(-(camLevel + rel))
-// against Level(camLevel + rel).Inverse().ApplyDir; and the camera level's sun. Every build is
+// LevelApply(-rel, C) (step 4d-2: the power about its fixed point, THE READ; 4d's
+// Level(rel).Inverse().Apply(C) was the same map about the origin, 5546 ulps and 1.42e6 m off
+// at rel +3); sigma -- portal.Scale(rel) against Level(rel).s; Q -- portal.Rot(rel) against the
+// rotor's columns (Rows(): GlobeLayer's own -> true layout, Q[i][j] = axis_j[i]); the level's
+// sun and sky zenith -- portal.ApplyDir(-(camLevel + rel)) against LevelApplyDir, the read; and
+// the camera level's sun. The cam, sun and sky-zenith reads are the cycle's; sigma and Q stay
+// the portal's (the constant buffer's rows). Every build is
 // compared bit for bit (core/Common.h UlpTally; the totals print in Finish()); the dump of both
 // paths' doubles prints when the table's GEOMETRY changes (its FNV-1a over cam, sigma, Q and
 // the level set -- the [kernel] rule: a held still builds one table 450 times, and the sun walks
@@ -228,24 +231,23 @@ void FrameLoop::ProbeDrosteTable(const DrosteProbeRow* rows, int n, const double
 }
 
 // M12 step 4d instrument: THE DIVE THROUGH THE CYCLE. The rail's pose is S^f of the helm, f =
-// u - floor(u) in [0, 1): portal.Apply(f) and ApplyDir(f) -- Rodrigues by twist f about the
-// stored fixed point, scale s^f -- beside Level(f) = S^f (Space.h Pow: the rotor's principal
-// power, the fixed point re-solved by Cramer, the point through Motor::QRotate). The portal's
-// results are what the rail flies until the forms are EQUAL; the live rail (every dive frame,
-// one line each) and the Session sweep of the rail's own u schedule tally separately.
+// u - floor(u) in [0, 1): LevelApply(f) / LevelApplyDir(f) -- step 4d-2, THE READ: the power
+// about its fixed point (Space.h PowApply: p re-solved by Cramer, the rotor's principal power,
+// the point through Motor::QRotate) -- beside portal.Apply(f) and ApplyDir(f), Rodrigues by
+// twist f about the stored fixed point, computed for the residual. The live rail (every dive
+// frame, one line each) and the Session sweep of the rail's own u schedule tally separately.
 void FrameLoop::ProbeDive(double f, const double c0[3], const double f0[3], double c[3],
                           double fw[3], double up[3], bool live, double u) {
-    m_portal.Apply(f, c0, c);
-    m_portal.ApplyDir(f, f0, fw);
-    m_portal.ApplyDir(f, m_drosteHelmUp, up);
-    const Placement Sf = m_drosteLeaf.Level(f);
-    double c2[3], fw2[3], up2[3];
-    Sf.Apply(c0, c2);
-    Sf.ApplyDir(f0, fw2);
-    Sf.ApplyDir(m_drosteHelmUp, up2);
-    const std::string wc = UlpWord(c, c2, 3, live ? m_probeDiveC : m_probeSweepC);
-    const std::string wf = UlpWord(fw, fw2, 3, live ? m_probeDiveFw : m_probeSweepFw);
-    const std::string wu = UlpWord(up, up2, 3, live ? m_probeDiveUp : m_probeSweepUp);
+    m_drosteLeaf.LevelApply(f, c0, c);
+    m_drosteLeaf.LevelApplyDir(f, f0, fw);
+    m_drosteLeaf.LevelApplyDir(f, m_drosteHelmUp, up);
+    double c2[3], fw2[3], up2[3];   // the portal's closed forms, for the record
+    m_portal.Apply(f, c0, c2);
+    m_portal.ApplyDir(f, f0, fw2);
+    m_portal.ApplyDir(f, m_drosteHelmUp, up2);
+    const std::string wc = UlpWord(c2, c, 3, live ? m_probeDiveC : m_probeSweepC);
+    const std::string wf = UlpWord(fw2, fw, 3, live ? m_probeDiveFw : m_probeSweepFw);
+    const std::string wu = UlpWord(up2, up, 3, live ? m_probeDiveUp : m_probeSweepUp);
     const bool allEq = wc == "EQUAL" && wf == "EQUAL" && wu == "EQUAL";
     if (live) ++m_probeDiveCalls;
     if (live || (!allEq && !m_probeSweepShown)) {
@@ -254,8 +256,8 @@ void FrameLoop::ProbeDive(double f, const double c0[3], const double f0[3], doub
             "%.17g fw %.17g %.17g %.17g up %.17g %.17g %.17g | Level c %.17g %.17g %.17g fw %.17g "
             "%.17g %.17g up %.17g %.17g %.17g",
             live ? "frame" : "sweep (the first not EQUAL)", u, f, wc.c_str(), wf.c_str(),
-            wu.c_str(), c[0], c[1], c[2], fw[0], fw[1], fw[2], up[0], up[1], up[2], c2[0], c2[1],
-            c2[2], fw2[0], fw2[1], fw2[2], up2[0], up2[1], up2[2]);
+            wu.c_str(), c2[0], c2[1], c2[2], fw2[0], fw2[1], fw2[2], up2[0], up2[1], up2[2], c[0],
+            c[1], c[2], fw[0], fw[1], fw[2], up[0], up[1], up[2]);
     }
 }
 
@@ -870,9 +872,9 @@ std::optional<int> FrameLoop::Session() {
         const DirectX::XMFLOAT3 hf = base.Forward();
         const double f0[3] = {hf.x, hf.y, hf.z};
         double c[3], fw[3];
-        // M12 step 4d instrument: the portal's three closed forms (Apply(f), ApplyDir(f) on the
-        // forward and the up), with Level(f) evaluated beside them and compared (ProbeDive);
-        // the portal's results are what flies until the forms are EQUAL.
+        // M12 step 4d-2: S^f(helm) through the cycle -- LevelApply(f) on the eye, LevelApplyDir(f)
+        // on the forward and the up (Space.h: the power about its fixed point) -- with the
+        // portal's closed forms evaluated beside them for the record (ProbeDive).
         ProbeDive(f, c0, f0, c, fw, up, true, u);
         out = base;
         out.px = c[0];
@@ -2204,12 +2206,13 @@ bool FrameLoop::Frame() {
         // the root is, in its own frame -- the tower self-similar to the last photon.
         const double sr[3] = {sunRootF[0], sunRootF[1], sunRootF[2]};
         double sc[3] = {sr[0], sr[1], sr[2]};
-        if (opt.drosteLight == 0) portal.ApplyDir(-double(camLevel), sr, sc);
+        // M12 step 4d-2: the camera level's sun through the cycle (LevelApplyDir, the power
+        // about its fixed point); the portal's form beside it for the residual (ProbeDrosteTable,
+        // with the table below).
+        if (opt.drosteLight == 0) drosteLeaf.LevelApplyDir(-double(camLevel), sr, sc);
         for (int i = 0; i < 3; ++i) sunCamF[i] = static_cast<float>(sc[i]);
-        // M12 step 4d instrument: the same sun through the cycle, Level(camLevel).Inverse()
-        // .ApplyDir; compared with the table below (ProbeDrosteTable).
-        double sc2[3] = {sr[0], sr[1], sr[2]};
-        if (opt.drosteLight == 0) drosteLeaf.Level(double(camLevel)).Inverse().ApplyDir(sr, sc2);
+        double sc2[3] = {sr[0], sr[1], sr[2]};   // the portal's, for the record
+        if (opt.drosteLight == 0) portal.ApplyDir(-double(camLevel), sr, sc2);
         renderer.sunPlaced = true;
         for (int i = 0; i < 3; ++i) renderer.sunDirTangent[i] = sunCamF[i];
         // (3) THE LEVELS: two out (never above the root), three in. The globe walks
@@ -2230,19 +2233,23 @@ bool FrameLoop::Frame() {
             const int rel = (k < 3) ? k + 1 : -(k - 2);
             GlobeLayer::DrosteLevel L;
             L.rel = rel;
-            portal.Apply(-double(rel), C, L.cam);
+            // M12 step 4d-2: THE EYE FROM THE CYCLE -- S^-rel(C) about the fixed point
+            // (Space.h PowApply: p + s^-rel Q^-rel (C - p), the form the gauge identity is drawn
+            // by); the portal's own closed form is computed beside it for the record only.
+            // sigma and Q (the constant buffer's rows) stay the portal's.
+            drosteLeaf.LevelApply(-double(rel), C, L.cam);
             L.sigma = portal.Scale(double(rel));
             portal.Rot(double(rel), L.Q);
             DrosteProbeRow& pr = probeRows[probeN++];
             {
                 const Placement Lk = drosteLeaf.Level(double(rel));
                 pr.rel = rel;
-                for (int i = 0; i < 3; ++i) pr.cam[i] = L.cam[i];
+                portal.Apply(-double(rel), C, pr.cam);                // the portal's, for the record
+                for (int i = 0; i < 3; ++i) pr.cam2[i] = L.cam[i];   // the read
                 pr.sigma = L.sigma;
                 for (int qr = 0; qr < 3; ++qr) {
                     for (int qc = 0; qc < 3; ++qc) pr.Q[qr][qc] = L.Q[qr][qc];
                 }
-                Lk.Inverse().Apply(C, pr.cam2);
                 pr.sigma2 = Lk.s;
                 double ax[3], ay[3], az[3];
                 Lk.Rows(ax, ay, az);   // the columns of Q: Q[i][j] = axis_j[i], own -> true
@@ -2261,15 +2268,13 @@ bool FrameLoop::Frame() {
                 std::sqrt(L.cam[0] * L.cam[0] + gy * gy + L.cam[2] * L.cam[2]) - planetR;
             L.reliefExagg = static_cast<float>(std::clamp(altK / 250000.0, 1.0, 20.0));
             double sk[3] = {sr[0], sr[1], sr[2]};
-            if (opt.drosteLight == 0) portal.ApplyDir(-double(camLevel + rel), sr, sk);
+            if (opt.drosteLight == 0) drosteLeaf.LevelApplyDir(-double(camLevel + rel), sr, sk);
             for (int i = 0; i < 3; ++i) L.sun[i] = static_cast<float>(sk[i]);
             for (int i = 0; i < 3; ++i) {
-                pr.sun[i] = sk[i];
-                pr.sun2[i] = sr[i];
+                pr.sun[i] = sr[i];    // the portal's, for the record (below)
+                pr.sun2[i] = sk[i];   // the read
             }
-            if (opt.drosteLight == 0) {
-                drosteLeaf.Level(double(camLevel + rel)).Inverse().ApplyDir(sr, pr.sun2);
-            }
+            if (opt.drosteLight == 0) portal.ApplyDir(-double(camLevel + rel), sr, pr.sun);
             // THE SKY IT SEES. Realistic: every level inside the root sits a few
             // hundred metres up in the root's air, so the sky over it is the ROOT's --
             // its zenith turned into this level's frame, lit by the root's day -- and a
@@ -2277,11 +2282,11 @@ bool FrameLoop::Frame() {
             if (opt.drosteLight == 0 && camLevel + rel > 0) {
                 const double upR[3] = {0.0, 1.0, 0.0};
                 double su[3];
-                portal.ApplyDir(-double(camLevel + rel), upR, su);
+                drosteLeaf.LevelApplyDir(-double(camLevel + rel), upR, su);
                 for (int i = 0; i < 3; ++i) L.skyUp[i] = static_cast<float>(su[i]);
                 L.skyDay = static_cast<float>(std::clamp(sr[1] * 3.0 + 0.12, 0.0, 1.0));
-                for (int i = 0; i < 3; ++i) pr.skyUp[i] = su[i];
-                drosteLeaf.Level(double(camLevel + rel)).Inverse().ApplyDir(upR, pr.skyUp2);
+                for (int i = 0; i < 3; ++i) pr.skyUp2[i] = su[i];             // the read
+                portal.ApplyDir(-double(camLevel + rel), upR, pr.skyUp);   // the portal's
                 pr.hasSky = true;
             }
             L.bankSet = (rel == -1 && waterBankB) ? 1 : -1;
@@ -2291,7 +2296,7 @@ bool FrameLoop::Frame() {
             }
             drosteLv.push_back(L);
         }
-        ProbeDrosteTable(probeRows, probeN, sc, sc2, frame);
+        ProbeDrosteTable(probeRows, probeN, sc2, sc, frame);   // (the portal's, the read)
     }
     if (globe) {
         globe->SetSun(sunCamF);

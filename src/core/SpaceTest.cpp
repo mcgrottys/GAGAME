@@ -14,6 +14,11 @@
 //   5. The unit-length rule (priors 32): Declare() refuses an extent past the conformal collapse
 //      and accepts inside it; Embed keeps P.ni = -1.
 //   6. Frame() rows round-trip; the screw power of a rigid placement equals Motor::Slerp.
+//   7. (step 4d-2) PowApply / PowApplyDir -- the power applied about its fixed point -- against
+//      the portal's closed forms at block 2's tolerance and against Pow(k).Apply (the same map
+//      about the origin), the fixed point fixed at every power, the rigid fallback Pow(u).Apply
+//      bit for bit; the largest ulp distance seen against the portal is printed in the PASS
+//      line, a record and not a gate.
 // A defect planted in Then (a dropped scale factor) was seen to fail blocks 1, 2 and 4 before
 // this gate was trusted (priors 22: a check that cannot fail has not been asked the question).
 #include "core/Space.h"
@@ -63,6 +68,7 @@ void Scatter(int i, double R, double out[3]) {
 bool RunSpaceSelfTest() {
     Gate g;
     const double R = 6371000.0;
+    uint64_t maxUlpPt = 0, maxUlpDir = 0;   // 4d-2: PowApply against the portal, the record
 
     // ---- the portal, built as RunDrosteSelfTest builds it (Droste.h) -----------------------
     const double lat = 42.8183 * 3.14159265358979 / 180.0, lon = -70.81 * 3.14159265358979 / 180.0;
@@ -143,6 +149,20 @@ bool RunSpaceSelfTest() {
                 Sk.ApplyDir(x, da);
                 pt.ApplyDir(k, x, db);
                 g.Near3(da, db, 1e-9 * R, "Level(k) on directions = the portal's Q^k");
+                // 4d-2: the power applied about its fixed point -- the form the tower is drawn
+                // by -- against the portal's closed form at this block's tolerance, against
+                // Pow(k).Apply (the same map about the origin), and its ulp distance recorded.
+                double c[3], dc[3];
+                S.PowApply(k, x, c);
+                g.Near3(c, b, 1e-9 * mag, "PowApply(k) = the portal's closed form about p");
+                g.Near3(c, a, 1e-9 * mag, "PowApply(k) = Pow(k).Apply, the same map about the origin");
+                S.PowApplyDir(k, x, dc);
+                g.Near3(dc, db, 1e-9 * R, "PowApplyDir(k) = the portal's Q^k");
+                for (int j = 0; j < 3; ++j) {
+                    const uint64_t up = UlpDistance(c[j], b[j]), ud = UlpDistance(dc[j], db[j]);
+                    if (up > maxUlpPt) maxUlpPt = up;
+                    if (ud > maxUlpDir) maxUlpDir = ud;
+                }
             }
         }
         // Pow composes: S^0.5 . S^0.5 = S, S^2 = S . S, S^-1 = Inverse.
@@ -165,6 +185,11 @@ bool RunSpaceSelfTest() {
         g.Near3(fp, pt.p, 1e-6 * R, "FixedPoint = the portal's p");
         S.Apply(fp, fpS);
         g.Near3(fpS, fp, 1e-6 * R, "S(p) = p");
+        for (double k : ks) {
+            double fk[3];
+            S.PowApply(k, fp, fk);
+            g.Near3(fk, fp, 1e-6 * R, "PowApply(k) leaves p fixed at every power");
+        }
     }
 
     // ---- 3. the versor -----------------------------------------------------------------------
@@ -297,6 +322,14 @@ bool RunSpaceSelfTest() {
                 Pu.Apply(x, a);
                 Su.Apply(x, b);
                 g.Near3(a, b, 1e-6, "a rigid placement's Pow is the screw (Motor::Slerp)");
+                // 4d-2: no fixed point at s = 1 -- PowApply is Pow(u).Apply there, bit for bit,
+                // and PowApplyDir the rotor's own power.
+                double c[3], dc[3], dd[3];
+                Placement::Rigid(m).PowApply(u, x, c);
+                g.Near3(c, a, 0.0, "a rigid PowApply is Pow(u).Apply, bit for bit");
+                Placement::Rigid(m).PowApplyDir(u, x, dc);
+                Pu.ApplyDir(x, dd);
+                g.Near3(dc, dd, 1e-9, "a rigid PowApplyDir is the screw's rotation");
             }
         }
         // To() through the nearest common ancestor: equal to the root form where the root form is
@@ -385,11 +418,13 @@ bool RunSpaceSelfTest() {
 
     if (g.ok) {
         Log("[space] ---- PASS (%d checks): the group and the fold, Rigid = the motor, Similar = "
-            "the portal at every power, Versor = SimilarityVersor, the gauge identity, the plane "
-            "transport (GlobeLayer's form and the general preimage), the unit-length refusal, "
-            "Frame() rows, the screw power, To() through the nearest common ancestor, "
+            "the portal at every power, PowApply = the portal's closed form about p (within %llu "
+            "ulps on points, %llu on directions), Versor = SimilarityVersor, the gauge identity, "
+            "the plane transport (GlobeLayer's form and the general preimage), the unit-length "
+            "refusal, Frame() rows, the screw power, To() through the nearest common ancestor, "
             "Normalize, parity (the left-handed planet frame as an improper placement) ----",
-            g.checks);
+            g.checks, static_cast<unsigned long long>(maxUlpPt),
+            static_cast<unsigned long long>(maxUlpDir));
     } else {
         Log("[space] ---- FAIL (%d checks) ----", g.checks);
     }

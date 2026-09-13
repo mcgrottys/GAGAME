@@ -1529,13 +1529,17 @@ void GlobeLayer::WalkLevel(const WalkParams& wp, uint32_t slot) {
 }
 
 // M12 step 4d instrument: THE FRUSTUM TRANSPORT THROUGH THE CYCLE. Each camera-relative plane
-// (n . v = d) carried into an extra level's own frame by hand -- n -> Q^T n, d -> d / sigma --
-// beside the same plane PULLED through the level's gauge placement (core/Space.h PullPlane:
+// (n . v = d) PULLED through the level's gauge placement -- step 4d-2, THE READ the walk culls
+// by -- beside the hand transport it replaced, n -> Q^T n, d -> d / sigma from the portal's Q
+// and sigma, computed for the record (core/Space.h PullPlane:
 // n' = R^T n, d' = (d - n . t) / s with t = 0, the linear part of Level(rel): the eye-to-eye
 // translation the gauge identity S^k(C_k) = C cancels exactly). Compared bit for bit per plane
 // per level (core/Common.h UlpTally; the totals in LogDrosteProbe); the dump of both prints when
 // the transport changes (its FNV-1a -- a held still transports one frustum every frame). A level
-// under half a pixel is never transported, so a walk from orbit measures nothing.
+// under half a pixel is never transported, so a walk from orbit measures nothing. The near plane
+// is degenerate on both paths (Camera::Projection's clip.z is the constant nearZ, so plane 4 is
+// (0, 0, 0, nearZ) over a zero length: NaN, and it never culls): its d reads inf by hand and NaN
+// pulled, the one comparison that is neither EQUAL nor a rounding.
 void GlobeLayer::ProbeTransport(const TransportProbeRow* rows, int n) {
     if (n == 0) return;
     ++m_probeWalks;
@@ -1660,24 +1664,21 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         wp.probeCullFar = true;
         for (int p = 0; p < m_wp.planeCount; ++p) {
             const double* n = m_wp.frustum[p];
-            for (int j = 0; j < 3; ++j) {
-                wp.frustum[p][j] = L.Q[0][j] * n[0] + L.Q[1][j] * n[1] + L.Q[2][j] * n[2];
-            }
-            wp.frustum[p][3] = n[3] / L.sigma;
-            // M12 step 4d instrument: the same plane PULLED through the level's gauge placement
-            // (core/Space.h PullPlane), compared bit for bit after the loop (ProbeTransport).
-            // The hand transport above is what this walk culls by until the two are EQUAL.
-            double n2[3], d2;
-            L.gauge.PullPlane(n, n[3], n2, d2);
+            // M12 step 4d-2: THE PLANE, PULLED through the level's gauge placement (core/Space.h
+            // PullPlane: n' = R^T n, d' = (d - n . t) / s with t = 0 -- the linear part of
+            // Level(rel), the eye-to-eye translation the gauge identity cancels exactly). The
+            // hand transport it replaces -- n -> Q^T n, d -> d / sigma from the portal's Q and
+            // sigma -- is computed beside it for the record only (ProbeTransport).
+            L.gauge.PullPlane(n, n[3], wp.frustum[p], wp.frustum[p][3]);
             TransportProbeRow& pr = probeRows[probeN++];
             pr.slot = slot;
             pr.rel = L.rel;
             pr.plane = p;
-            for (int j = 0; j < 4; ++j) pr.hand[j] = wp.frustum[p][j];
-            pr.pulled[0] = n2[0];
-            pr.pulled[1] = n2[1];
-            pr.pulled[2] = n2[2];
-            pr.pulled[3] = d2;
+            for (int j = 0; j < 3; ++j) {
+                pr.hand[j] = L.Q[0][j] * n[0] + L.Q[1][j] * n[1] + L.Q[2][j] * n[2];
+            }
+            pr.hand[3] = n[3] / L.sigma;
+            for (int j = 0; j < 4; ++j) pr.pulled[j] = wp.frustum[p][j];
         }
         const size_t before = m_meshlets.size();
         WalkLevel(wp, slot);
