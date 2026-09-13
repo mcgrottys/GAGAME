@@ -136,6 +136,12 @@ public:
     // The gantt column. A bed composes once; a tide is a function of t and must be re-evaluated
     // every instant. Stating it is what lets one tree carry rows on different clocks.
     virtual const char* Cadence() const { return "static"; }
+    // M12 step 2d: THE LATTICE A NODE DECLARES, or nullptr to INHERIT its parent's -- the
+    // identity element of the fold TileTree::Resolve applies at every node, the way Footprint,
+    // Unit and Cadence already flow through the graph. No shipped node overrides it yet; the
+    // first that does (a window realization under a cube root) composes across lattices only
+    // through a resample node, which the tree refuses to invent (TileTree::RefuseLattice).
+    virtual const Lattice* OwnLattice() const { return nullptr; }
     // M9am: WHAT A CACHE MAY KEY THIS NODE'S OUTPUT ON. A leaf's tiles on disk are a function of
     // the data it reads and nothing else, so the default is name + unit; a loader that knows its
     // structure (a tile tree, a file version) says so, and a wrapper that changes nothing
