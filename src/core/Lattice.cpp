@@ -105,4 +105,12 @@ std::string Lattice::Tag(const char* kindName) const {
     return buf;
 }
 
+ast::Frame Lattice::AstFrame() const {
+    // The table's two frames (GaAst.cpp's `cube` and `mercPx`, {space, vNorth, orgX, orgY,
+    // metersPerUnit, centers}), produced from the declaration: the space from the kind, +v
+    // from VNorth(), origin and pitch 0, centres.
+    return ast::Frame{kind == Kind::Cube ? "cube.face" : "mercator.px", VNorth(), 0.0, 0.0,
+                      0.0, true};
+}
+
 }  // namespace ga

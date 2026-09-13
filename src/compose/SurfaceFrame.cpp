@@ -1,11 +1,15 @@
 #include "compose/SurfaceFrame.h"
 
 #include "compose/Compositor.h"
+#include "core/GaAst.h"
 #include "hal/Residency.h"
 #include "hal/Tenant.h"
 #include "sim/BathyModel.h"
 
 #include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <string>
 
 namespace ga {
 
@@ -56,6 +60,70 @@ void SurfaceFrame::Declare(const hal::Tenant& color, const hal::Tenant& height,
     hgtT = height.Id();
     hgtWinSlice = height.Valid() ? height.SliceOf(winH.Tag()) : UINT32_MAX;
     maskT = mask.Id();
+    // M12 step 4c: the tenants' own words for the diagram, read off the same declarations.
+    // An empty Tenant's Desc() is the empty declaration: no node, no bindings, no row.
+    auto words = [](const hal::Tenant& t) {
+        AstTenant a;
+        a.node = t.Desc().astNode;
+        for (const hal::SliceBinding& b : t.Desc().bindings) {
+            a.bindings.push_back({b.astField, b.first, b.count, b.lattice});
+        }
+        return a;
+    };
+    colorAst = words(color);
+    hgtAst = words(height);
+}
+
+void SurfaceFrame::RegisterEdges() const {
+    // THE COMPOSITOR PILLAR, FROM THE DECLARATIONS. A paint provider iterates a lattice's
+    // texels and resolves each to lat/lon (Lattice::Texel: ComposeCubeDir for a face, the
+    // Mercator inverse for a page), so every paint row runs from the exchange frame the
+    // sources answer in to the lattice's own frame (Lattice::AstFrame), and whether the code
+    // flips is the flip rule on those two frames (ast::NeedsFlip -- GeoRef.h's NeedsFlipInto
+    // said for frames), derived here and checked again by the validator, never typed. The
+    // row's triple is the tenant's node and the binding's edge; bindings that realize one edge
+    // (the colour's z14 and z17 pages) fold into one row whose range lists each slice with the
+    // lattice tag SliceOf resolves it by, then the tile shape; the anchor names the provider on
+    // each lattice. The quantity is the table's word for the fiber, as it was.
+    const ast::Frame latlon{"latlon.deg", true, 0, 0, 0};
+    auto rows = [&](const AstTenant& t, const char* units) {
+        for (size_t i = 0; i < t.bindings.size(); ++i) {
+            const AstBinding& b = t.bindings[i];
+            bool folded = false;   // an earlier binding of the same edge wrote this row
+            for (size_t j = 0; j < i && !folded; ++j) {
+                folded = !std::strcmp(t.bindings[j].field, b.field);
+            }
+            if (folded) continue;
+            const ast::Frame dst = b.lattice.AstFrame();
+            std::string range, tags;
+            for (size_t j = i; j < t.bindings.size(); ++j) {
+                const AstBinding& x = t.bindings[j];
+                if (std::strcmp(x.field, b.field)) continue;
+                const std::string tag = x.lattice.Tag();
+                char buf[160];
+                if (x.count > 1) {
+                    snprintf(buf, sizeof(buf), "slices %u..%u = %s", x.first,
+                             x.first + x.count - 1, tag.c_str());
+                } else {
+                    snprintf(buf, sizeof(buf), "slice %u = %s", x.first, tag.c_str());
+                }
+                range += (range.empty() ? "" : ", ") + std::string(buf);
+                tags += (tags.empty() ? "" : ", ") + tag;
+            }
+            char tile[48];
+            snprintf(tile, sizeof(tile), "; tile %ux%u", b.lattice.texW, b.lattice.texH);
+            range += tile;
+            const bool cube = b.lattice.kind == Lattice::Kind::Cube;
+            const std::string code =
+                "TileTree::Provider(" + tags + ") / " +
+                (cube ? "ComposeCubeDir (composetest-pinned)"
+                      : "Lattice::Texel (merc inverse per texel)");
+            ast::Register({"compose.stack", t.node, b.field, latlon, dst,
+                           ast::NeedsFlip(latlon, dst), units, range, 1.0, code});
+        }
+    };
+    rows(colorAst, "sRGB bytes");
+    rows(hgtAst, "m NAVD (R16F)");
 }
 
 void SurfaceFrame::Fill(ComposedSurfaceCb& cb, const ResidencyManager& rm) const {

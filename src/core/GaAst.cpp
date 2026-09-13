@@ -50,8 +50,8 @@ void Print() {
                      e.src.metersPerUnit);
         }
         Log("[gaast]   -> %-12s %-14s %-22s->%-22s%s%s  %s in %s  x%.3g%s  [%s]", e.to,
-            e.field, sf, df, e.flip ? "  FLIP" : "      ", geo, e.range, e.units, e.gain,
-            e.active ? "" : "  (INACTIVE)", e.code);
+            e.field, sf, df, e.flip ? "  FLIP" : "      ", geo, e.range.c_str(), e.units,
+            e.gain, e.active ? "" : "  (INACTIVE)", e.code.c_str());
     }
 }
 
@@ -59,7 +59,7 @@ bool Validate() {
     bool ok = true;
     for (const Edge& e : Reg()) {
         // THE FLIP RULE: frames that disagree about +v need exactly one flip in the code.
-        const bool need = e.src.vNorth != e.dst.vNorth;
+        const bool need = NeedsFlip(e.src, e.dst);
         if (need != e.flip) {
             Log("[gaast] FAIL flip rule: %s -> %s '%s': src %s dst %s but code %s  [%s]",
                 e.from, e.to, e.field, e.src.vNorth ? "+v=N" : "+v=S",
@@ -115,7 +115,7 @@ void WriteMarkdown(const char* path) {
         fprintf(f, "| %s | %s | %s%s | %s %s | %s %s | %s | %s | %s | x%.3g | %s |%c",
                 e.from, e.field, e.to, e.active ? "" : " (inactive)", e.src.space,
                 e.src.vNorth ? "+v=N" : "+v=S", e.dst.space, e.dst.vNorth ? "+v=N" : "+v=S",
-                e.flip ? "FLIP" : "-", e.units, e.range, e.gain, e.code, nl);
+                e.flip ? "FLIP" : "-", e.units, e.range.c_str(), e.gain, e.code.c_str(), nl);
     }
     fclose(f);
 }
@@ -124,7 +124,6 @@ void RegisterKnownComposeEdges() {
     const Frame latlon{"latlon.deg", true, 0, 0, 0};
     const Frame mercPx{"mercator.px", false, 0, 0, 0};   // web-mercator y grows SOUTH
     const Frame uvS{"uv01.vS", false, 0, 0, 0};
-    const Frame cube{"cube.face", true, 0, 0, 0};        // per-face D3D spec dirs
     const Frame resMap{"resmap.texel", false, 0, 0, 0};
     // THE COMPOSITOR PILLAR. The paint loop iterates raster rows (merc y south) and
     // resolves each texel to lat/lon -- that inversion IS the flip. The shader-side window
@@ -139,18 +138,14 @@ void RegisterKnownComposeEdges() {
     // window.z17, height.window, bathy.cudem -- were deleted in M9ap..M9ar; this registry
     // kept describing them for a month (AUDIT_WATER item 1): self-consistent edges about
     // resources that did not exist, which is the one rot the validator cannot see.
-    Register({"compose.stack", "color.pages", "paint cube faces", latlon, cube, false,
-              "sRGB bytes", "slices 0..5, 16k faces", 1.0,
-              "TileTree::Provider(ColorFrame::Cube) / ComposeCubeDir (composetest-pinned)"});
-    Register({"compose.stack", "color.pages", "paint mercator pages", latlon, mercPx, true,
-              "sRGB bytes", "slice 6 = z14, slice 7 = z17; tile 128^2", 1.0,
-              "TileTree::Provider(ColorFrame::Window) (merc inverse per texel)"});
-    Register({"compose.stack", "height.pages", "paint cube faces", latlon, cube, false,
-              "m NAVD (R16F)", "slices 0..5, 16k faces", 1.0,
-              "TileTree::Provider(ColorFrame::Cube), the height root"});
-    Register({"compose.stack", "height.pages", "paint mercator page", latlon, mercPx, true,
-              "m NAVD (R16F)", "slice 6 = z14 at 1263360,1538048; tile 256x128", 1.0,
-              "TileTree::Provider(ColorFrame::Window), the height root"});
+    // M12 step 4c: THE PAINT ROWS ARE NOT WRITTEN HERE. `compose.stack -> color.pages` and
+    // `-> height.pages` are registered from the declarations themselves -- the tenants' nodes
+    // and edges, their slices, the lattices' own frames (Lattice::AstFrame), the flip derived
+    // from the two frames' +v (NeedsFlip) -- by SurfaceFrame::RegisterEdges, which the
+    // Assembly calls just before this table at boot. A hand row here could name a slice or an
+    // origin the tenant no longer has (the rot above, again); a row read off the declaration
+    // cannot. Under --selftest there is no tenant, so there is no paint row: the four are
+    // validated at every boot instead, on the declaration that boot actually made.
     Register({"color.pages", "globe.ps", "page-sample", mercPx, uvS, false, "sRGB",
               "finest containing page, residency-clamped mip", 1.0,
               "Compose.hlsli ComposedColorPages (no flip: both vS)"});
@@ -375,8 +370,8 @@ void WriteJson(const char* path) {
                 esc(e.from).c_str(), esc(e.to).c_str(), esc(e.field).c_str(),
                 esc(e.src.space).c_str(), e.src.vNorth ? "true" : "false",
                 esc(e.dst.space).c_str(), e.dst.vNorth ? "true" : "false",
-                e.flip ? "true" : "false", esc(e.units).c_str(), esc(e.range).c_str(),
-                e.gain, esc(e.code).c_str(), e.active ? "true" : "false",
+                e.flip ? "true" : "false", esc(e.units).c_str(), esc(e.range.c_str()).c_str(),
+                e.gain, esc(e.code.c_str()).c_str(), e.active ? "true" : "false",
                 i + 1 < es.size() ? "," : "");
     }
     fprintf(f, "  ]\n}\n");

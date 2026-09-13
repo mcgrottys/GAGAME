@@ -928,8 +928,13 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                 cd.absence = hal::Absence::Unloaded;
                 cd.slices = 8;
                 cd.bindings.push_back({0, 6, cCubeL, mkColor(cCubeL), "paint cube faces"});
-                cd.bindings.push_back({6, 1, cWinL, mkColor(cWinL), "paint mercator pages (z14)"});
-                cd.bindings.push_back({7, 1, cDetL, mkColor(cDetL), "paint mercator pages (z17)"});
+                // M12 step 4c: the two pages realize ONE edge of the diagram ("paint mercator
+                // pages": both slices, one row -- the lattice tag beside each tells them
+                // apart), and the row is registered from these words (SurfaceFrame::
+                // RegisterEdges), so a binding names the edge it realizes, not the edge plus
+                // a zoom.
+                cd.bindings.push_back({6, 1, cWinL, mkColor(cWinL), "paint mercator pages"});
+                cd.bindings.push_back({7, 1, cDetL, mkColor(cDetL), "paint mercator pages"});
                 colorTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(cd));
                 colorCubeT = colorTenant.Id();
                 // M9bb: a fold or a drop below changed a root tile: the colour tenant
@@ -1204,6 +1209,13 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
         // M7j: the GA AST -- the state diagram printed and validated EVERY run, so a
         // frame mismatch or an orphaned field is a boot-time report, not a debugging
         // session. (The workflow as an AST: domains, axes, units, scales, ranges.)
+        // M12 step 4c: the compose pillar's paint rows are the shipped surface's declaration
+        // -- the tenants' nodes and edges, their slices, the lattices' frames, the flip
+        // derived -- registered here: after Declare() (the tenants exist), before the hand
+        // table (the rows keep the head of the diagram, where they have always printed) and
+        // before the validator below (the flip rule is checked on rows that exist). Mars
+        // declares no page tenant and gets no paint row, which is the truth of it.
+        surface.RegisterEdges();
         ga::ast::RegisterKnownWaterEdges();
         ga::ast::SetActive("sea.ps", !opt.oneWater);
         // M9bh: --pixel-water re-opens eight edges into the pixel stage (the two rays

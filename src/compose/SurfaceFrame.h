@@ -54,6 +54,18 @@
 //  division, then one cast). The gate: a [kernel] FNV-1a of each kernel's constant buffer,
 //  printed at its upload when it changes, equal before and after the move.
 //
+//  THE DIAGRAM'S PAINT ROWS (step 4c). GaAst.cpp's compose table hand-wrote the four rows
+//  `compose.stack -> color.pages / height.pages` -- the z14 origin as a literal in a range
+//  string, the frames, the flip flags, the slice numbers -- beside the tenants that declare
+//  the same things. RegisterEdges() registers those rows from this declaration: the node and
+//  the edge names Declare() reads off the tenants (TenantDesc::astNode, SliceBinding::astField,
+//  kept here as `colorAst` / `hgtAst` with each binding's slices and lattice), the frames from
+//  the lattices themselves (Lattice::AstFrame), the flip from the two frames' +v
+//  (ast::NeedsFlip -- the rule GeoRef.h derives it by, never a literal), the range and the
+//  anchor from the slices, the tags and the tile shape. The gate: the generated
+//  docs/GA_AST.md differs from the checked-in one in those rows' range and code columns only,
+//  and the probe frame's md5 does not move.
+//
 //  WHO WRITES IT. The Assembly builds it once (Merrimack), declares the tenants into it
 //  (Declare) where it used to hand them to the globe, and hands the globe a pointer where it
 //  used to hand it the radius; the session writes the frame rows through its aliases where it
@@ -66,6 +78,7 @@
 #include "core/Space.h"
 
 #include <cstdint>
+#include <vector>
 
 namespace ga {
 
@@ -94,6 +107,23 @@ struct SurfaceFrame {
     // (detT is the colour tenant: M9ap), the height tenant its z14 page at hgtWinSlice.
     int colorT = -1, hgtT = -1, maskT = -1, detT = -1;
     uint32_t winSlice = UINT32_MAX, detSlice = UINT32_MAX, hgtWinSlice = UINT32_MAX;
+    // M12 step 4c: THE TENANTS' OWN WORDS FOR THE DIAGRAM, read off their declarations by
+    // Declare() beside the ids and the slices: the node a tenant is (TenantDesc::astNode) and,
+    // per binding, the edge it realizes (SliceBinding::astField), its slice range and its
+    // lattice. RegisterEdges() registers the compose pillar's paint rows from these. An
+    // undeclared tenant (Mars's height cube is an AddTextureCube; the packer and the selftest
+    // declare none) has no node and no bindings, and gets no row. The survey's row is still
+    // the hand table's: its tenant names three edges the table names as one (a later step).
+    struct AstBinding {
+        const char* field = "";
+        uint32_t first = 0, count = 0;
+        Lattice lattice;
+    };
+    struct AstTenant {
+        const char* node = "";
+        std::vector<AstBinding> bindings;
+    };
+    AstTenant colorAst, hgtAst;
     bool stencil = false;   // --stencil: the GIS alignment overlay
     // M12 step 4b: THE WORLD.FLAT CHART (core/Space.h's Anchor) -- the anchor-linear lat/lon
     // <-> metres map of BathyModel.h (lat = orgLat + z / mPerLat, lon = orgLon + x / mPerLon,
@@ -108,6 +138,10 @@ struct SurfaceFrame {
     // The tenants, once they exist: ids and page slices read off the declarations. An empty
     // Tenant (never declared) leaves -1 / UINT32_MAX, as the ints did.
     void Declare(const hal::Tenant& color, const hal::Tenant& height, const hal::Tenant& mask);
+    // M12 step 4c: the compose pillar's paint rows, registered from the declaration (the
+    // banner). Called by the Assembly after Declare() and before the AST's hand table and its
+    // validator; idempotent, as every registration is.
+    void RegisterEdges() const;
     // THE ONE FILL of the composed-surface rows (was FillComposedCb, Compositor.cpp).
     void Fill(ComposedSurfaceCb& cb, const ResidencyManager& rm) const;
     // M12 step 4b: the kernels' geoA row -- {orgLat, orgLon, 1/mPerLat, 1/mPerLon} as floats,

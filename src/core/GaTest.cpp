@@ -14,6 +14,7 @@
 #include "GradeField.h"   // M9h: the type-level grade algebra pins itself here
 #include "compose/Compositor.h"
 #include "compose/DomainSource.h"
+#include "compose/SurfaceFrame.h"   // M12 step 4c: the shipped lattices, against the table's frames
 #include "CurrentFieldLoader.h"
 #include "FieldLoader.h"
 #include "GeoRef.h"
@@ -209,6 +210,58 @@ bool RunGaSelfTest() {
         if (!found) {
             Log("[gatest] FAIL ledger truth: edge %s '%s' is not registered", t.from,
                 t.field);
+            ok = false;
+        }
+    }
+
+    // ---- 5b. THE LATTICE'S OWN FRAME (M12 step 4c). The compose pillar's paint rows are
+    // registered from the lattices now (SurfaceFrame::RegisterEdges), so the frame a lattice
+    // reports must be the frame the table has always used, field by field: `cube.face +v=N`
+    // for the two cube tilings, `mercator.px +v=S` for the three windows -- and that window
+    // frame must be the very frame the table's page-sample row carries as its source, so a
+    // lattice-registered row and a hand one cannot disagree about a page.
+    {
+        auto same = [](const ast::Frame& a, const ast::Frame& b) {
+            return !std::strcmp(a.space, b.space) && a.vNorth == b.vNorth && a.orgX == b.orgX &&
+                   a.orgY == b.orgY && a.metersPerUnit == b.metersPerUnit &&
+                   a.centers == b.centers;
+        };
+        const ast::Frame cube{"cube.face", true, 0, 0, 0};       // GaAst.cpp's, as it was
+        const ast::Frame mercPx{"mercator.px", false, 0, 0, 0};
+        // The radius is no lattice's business; the five lattices are the shipped ones.
+        const SurfaceFrame s = SurfaceFrame::Merrimack(6371000.0, false);
+        const struct {
+            const char* name;
+            const Lattice* l;
+            const ast::Frame* want;
+        } lat[] = {{"cube", &s.cube, &cube},    {"cubeH", &s.cubeH, &cube},
+                   {"win", &s.win, &mercPx},    {"det", &s.det, &mercPx},
+                   {"winH", &s.winH, &mercPx}};
+        for (const auto& x : lat) {
+            const ast::Frame f = x.l->AstFrame();
+            if (!same(f, *x.want)) {
+                Log("[gatest] FAIL lattice frame: %s reports %s +v=%s org(%g,%g) %gm/u %s, the "
+                    "table's is %s +v=%s",
+                    x.name, f.space, f.vNorth ? "N" : "S", f.orgX, f.orgY, f.metersPerUnit,
+                    f.centers ? "centres" : "corners", x.want->space,
+                    x.want->vNorth ? "N" : "S");
+                ok = false;
+            }
+        }
+        bool pageRow = false;
+        for (const auto& e : ast::Edges()) {
+            if (std::strcmp(e.from, "color.pages") || std::strcmp(e.field, "page-sample")) {
+                continue;
+            }
+            pageRow = true;
+            if (!same(e.src, s.win.AstFrame())) {
+                Log("[gatest] FAIL lattice frame: the z14 window's frame is not the page-sample "
+                    "row's source frame");
+                ok = false;
+            }
+        }
+        if (!pageRow) {
+            Log("[gatest] FAIL lattice frame: no page-sample row to compare the window against");
             ok = false;
         }
     }
@@ -1234,8 +1287,9 @@ bool RunGaSelfTest() {
 
     if (ok) {
         Log("[gatest] ---- PASS: sandwich, refraction rotor, fold telescope, spinor blend, "
-            "frame rules + orientation ledger, merc chain bound, cube-face inverse; water "
-            "parity: solved wave field, caustic bivector, ripple prefilter, foam discipline, "
+            "frame rules + orientation ledger, lattice frames, merc chain bound, cube-face "
+            "inverse; water parity: solved wave field, caustic bivector, ripple prefilter, foam "
+            "discipline, "
             "signed Kelvin phase, bed relief + waterline metric; the SUN: versor frame chain, "
             "solar noon vs an external ephemeris, distance/declination/angular-radius bands, "
             "the terminator as a meet, finite-sun parallax ----");
