@@ -366,10 +366,38 @@ public:
         for (auto& k : m_kids) k->EnsureFrame(tag);
     }
 
+    // ---- M12 step 2d: the lattice is INHERITED ---------------------------------------------
+    // THE FOLD, one step: a node's lattice is its own declaration (DomainSource::OwnLattice),
+    // else the one it inherits; the root's is what the tenant bound. nullptr is the identity,
+    // so with no declaration anywhere every node sits on the tenant's lattice -- exactly what
+    // passing the same value down every call did, now a rule instead of a habit. Every public
+    // entry point resolves once and hands the RESOLVED lattice to its children, so a grandchild
+    // inherits the resolved value: "first declaration walking up" falls out of composition.
+    const ColorFrame& Resolve(const ColorFrame& inherited) const {
+        const Lattice* own = m_node->OwnLattice();
+        return own ? *own : inherited;
+    }
+    // The tenant binds the root's lattice once (step 3e); Provider() with no argument is the
+    // tree on that lattice.
+    void SetLattice(const Lattice* l) { m_lattice = l; }
+    const Lattice* BoundLattice() const { return m_lattice; }
+    TileProviderFn Provider() {
+        if (!m_lattice) {
+            Log("[tree] %s: Provider() before SetLattice -- no lattice bound", m_node->Name());
+            return [](const TileRequest&, std::vector<uint8_t>& out, TileLoc* loc) {
+                out.assign(65536, 0);
+                if (loc) *loc = TileLoc{};
+                return true;
+            };
+        }
+        return Provider(*m_lattice);
+    }
+
     // ---- what is held here, from the directory alone ----------------------------------------
     // For a leaf: two lookups. For a compose node: its children's answers decide the key, so if
     // any child is Absent this node cannot yet know its own key and answers Absent.
-    Held Peek(const ColorFrame& frame, const std::string& tag, const TileRequest& r) {
+    Held Peek(const ColorFrame& inherited, const std::string& tag, const TileRequest& r) {
+        const ColorFrame& frame = Resolve(inherited);
         if (m_kids.empty()) return PeekAt(Base(tag, r));
         Compositor::TileBox box{};
         frame.Box(r, box);
@@ -385,8 +413,9 @@ public:
     // `loc` valid. A stored reference resolves through the child it names, so a reference in
     // the megatexture's folder becomes a TileLoc into earth.land's archive, or google's. That
     // is the user's rule made literal: painted tiles live on disk and DirectStorage loads them.
-    Status Tile(const ColorFrame& frame, const std::string& tag, const TileRequest& r,
+    Status Tile(const ColorFrame& inherited, const std::string& tag, const TileRequest& r,
                 std::vector<uint8_t>& out, TileLoc* loc = nullptr) {
+        const ColorFrame& frame = Resolve(inherited);
         Compositor::TileBox box{};
         frame.Box(r, box);
         if (m_kids.empty()) return LeafTile(frame, tag, r, box, out, loc);
@@ -396,7 +425,8 @@ public:
 
     // The residency manager's view of this tree: a place if it can take one, else bytes, else
     // zeros where nothing covers.
-    TileProviderFn Provider(const ColorFrame& frame) {
+    TileProviderFn Provider(const ColorFrame& inherited) {
+        const ColorFrame frame = Resolve(inherited);   // by value: the closure carries it
         const std::string tag = frame.Tag();
         EnsureFrame(tag);
         return [this, frame, tag](const TileRequest& r, std::vector<uint8_t>& out, TileLoc* loc) {
@@ -906,8 +936,9 @@ public:
     // so the disk holds the whole chain before anyone asks: the residency manager's ancestor
     // walk then reads files and never waits on a paint (no waves popping in). Returns tiles
     // realized. The box is in the frame's uv; faces/planes are [f0, f1).
-    uint32_t Prefill(const ColorFrame& frame, uint32_t f0, uint32_t f1, float u0, float v0,
+    uint32_t Prefill(const ColorFrame& inherited, uint32_t f0, uint32_t f1, float u0, float v0,
                      float u1, float v1) {
+        const ColorFrame& frame = Resolve(inherited);
         const std::string tag = frame.Tag();
         EnsureFrame(tag);
         uint32_t n = 0, markers = 0;
@@ -1049,6 +1080,10 @@ private:
         std::vector<size_t> live;
         bool complete = true;
         for (size_t k = 0; k < inc.size(); ++k) {
+            if (!RefuseLattice(*m_kids[inc[k]], frame)) {   // M12 step 2d: not this tile's texels
+                complete = false;
+                continue;
+            }
             const Status s = m_kids[inc[k]]->Tile(frame, tag, r, tiles[k]);
             if (s == Status::Transient) {
                 complete = false;
@@ -1173,6 +1208,7 @@ private:
         TileTree& layer = *m_kids[0];
         TileTree& gate = *m_kids[1];
         std::vector<uint8_t> lt, gt;
+        if (!RefuseLattice(layer, frame)) return Status::Transient;   // M12 step 2d
         const Status ls = layer.Tile(frame, tag, r, lt);
         if (ls == Status::Transient) return Status::Transient;
         std::vector<Held> got;
@@ -1180,6 +1216,7 @@ private:
         for (size_t k = 0; k < inc.size(); ++k) gateIn |= (inc[k] == 1);
         Status gs = Status::Void;
         if (gateIn) {
+            if (!RefuseLattice(gate, frame)) return Status::Transient;   // M12 step 2d
             gs = gate.Tile(frame, tag, r, gt);
             if (gs == Status::Transient) return Status::Transient;
         }
@@ -1236,6 +1273,24 @@ private:
     // one graph shares them; see Stripe() for the rule that keeps them deadlock-free.
     std::unique_ptr<std::array<std::recursive_mutex, kStripes>> m_stripes;
     TileTree* m_parent = nullptr;
+    // M12 step 2d: the tenant-bound lattice (SetLattice); nullptr until bound.
+    const Lattice* m_lattice = nullptr;
+    bool m_latticeRefused = false;   // the refusal is said once per node
+
+    // A child on a lattice of its own cannot be composed BY BYTES: its texels are not this
+    // tile's texels (ATLAS: resampling is integration against the dual cell, and there is no
+    // resample node yet). True = same ground, go ahead; false = refused, said once.
+    bool RefuseLattice(const TileTree& kid, const ColorFrame& frame) {
+        if (kid.Resolve(frame).SameGround(frame)) return true;
+        if (!m_latticeRefused) {
+            m_latticeRefused = true;
+            Log("[tree] %s: child %s declares its own lattice (%s under %s) -- composing "
+                "across lattices needs a resample node; refused, the tile stays Transient",
+                m_node->Name(), kid.m_node->Name(), kid.Resolve(frame).Tag().c_str(),
+                frame.Tag().c_str());
+        }
+        return false;
+    }
 };
 
 // ================================================================================================

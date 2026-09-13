@@ -9,6 +9,7 @@
 #include "core/Gpu.h"
 #include "core/Pga.h"
 #include "core/Shader.h"
+#include "core/Space.h"
 #include "core/ThreadAudit.h"
 #include "core/TileAtlas.h"
 #include "sim/RigidBody.h"
@@ -27,6 +28,8 @@ int RunSelfTest(const Options& opt) {
                                   // reflection, the sampler law, AST anchors)
     ok &= RunGaSelfTest();        // pure CPU: GA products + the frame/orientation
                                   // ledger as executable contract (M7j)
+    ok &= RunSpaceSelfTest();     // M12: the frame calculus -- placements, the fold, the
+                                  // Droste link through Space, the lattice against ColorFrame
     ok &= RunComposeSelfTest();   // pure CPU: the layer compositor's contracts
     ok &= RunWaterSelfTest();     // pure CPU: the water atlas' datum/epoch/field gates
     ok &= RunTileSelfTest(gpu, sc, opt.shaderDir);

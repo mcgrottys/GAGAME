@@ -39,6 +39,7 @@
 #pragma once
 
 #include "compose/TileIndex.h"
+#include "core/TileAddress.h"
 #include "core/TileStream.h"
 #include "core/Gpu.h"
 #include "core/Pga.h"
@@ -55,29 +56,6 @@
 #include <vector>
 
 namespace ga {
-
-// A provider fills one 64KB tile's worth of LINEAR data for a texture tenant. Runs on a worker
-// thread; must be self-contained and cache-first (HTTP providers throttle themselves and honor
-// a hard per-run fetch budget). Returns false if the tile cannot be produced (kept NULL).
-struct TileRequest {
-    uint32_t face = 0, mip = 0, x = 0, y = 0;
-};
-// M9ai: WHERE A TILE IS, instead of what it contains.
-//
-// A provider that finds its tile in an archive fills this and returns true WITHOUT touching
-// out64k. The bytes then never enter CPU address space at all: DirectStorage takes the path,
-// the offset and the mapped tile, and the read goes NVMe -> GPU. A provider that has to paint,
-// or whose tile is only a loose file, fills out64k as before and leaves this empty -- so the
-// two paths coexist per TILE, not per build.
-struct TileLoc {
-    const wchar_t* path = nullptr;   // archive path; owned by the archive, outlives the request
-    uint64_t offset = 0;
-    uint32_t size = 0;
-    bool Valid() const { return path != nullptr && size != 0; }
-};
-
-using TileProviderFn =
-    std::function<bool(const TileRequest&, std::vector<uint8_t>& out64k, TileLoc* loc)>;
 
 class ResidencyManager {
 public:
