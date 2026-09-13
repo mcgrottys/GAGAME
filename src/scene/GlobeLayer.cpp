@@ -1114,9 +1114,9 @@ void GlobeLayer::EmitMeshlets(int face, double u0, double v0, double size, doubl
     const double step = size / 32.0;
     auto tangent = [&](const double d[3], double out[3]) {
         const double px = d[0] * R, py = d[1] * R, pz = d[2] * R;
-        out[0] = m_frameE[0] * px + m_frameE[1] * py + m_frameE[2] * pz;
-        out[1] = m_frameU[0] * px + m_frameU[1] * py + m_frameU[2] * pz - R;
-        out[2] = m_frameN[0] * px + m_frameN[1] * py + m_frameN[2] * pz;
+        out[0] = m_surface->east[0] * px + m_surface->east[1] * py + m_surface->east[2] * pz;
+        out[1] = m_surface->up[0] * px + m_surface->up[1] * py + m_surface->up[2] * pz - R;
+        out[2] = m_surface->north[0] * px + m_surface->north[1] * py + m_surface->north[2] * pz;
     };
     for (int my = 0; my < 4; ++my) {
         for (int mx = 0; mx < 4; ++mx) {
@@ -1159,12 +1159,15 @@ void GlobeLayer::EmitMeshlets(int face, double u0, double v0, double size, doubl
             for (int i = 0; i < 3; ++i) {
                 rec.dPdv[i] = static_cast<float>((tA[i] - tB[i]) / (2.0 * e));
             }
-            rec.upT[0] = static_cast<float>(m_frameE[0] * dc[0] + m_frameE[1] * dc[1] +
-                                            m_frameE[2] * dc[2]);
-            rec.upT[1] = static_cast<float>(m_frameU[0] * dc[0] + m_frameU[1] * dc[1] +
-                                            m_frameU[2] * dc[2]);
-            rec.upT[2] = static_cast<float>(m_frameN[0] * dc[0] + m_frameN[1] * dc[1] +
-                                            m_frameN[2] * dc[2]);
+            rec.upT[0] = static_cast<float>(m_surface->east[0] * dc[0] +
+                                            m_surface->east[1] * dc[1] +
+                                            m_surface->east[2] * dc[2]);
+            rec.upT[1] = static_cast<float>(m_surface->up[0] * dc[0] +
+                                            m_surface->up[1] * dc[1] +
+                                            m_surface->up[2] * dc[2]);
+            rec.upT[2] = static_cast<float>(m_surface->north[0] * dc[0] +
+                                            m_surface->north[1] * dc[1] +
+                                            m_surface->north[2] * dc[2]);
             m_meshlets.push_back(rec);
         }
     }
@@ -1258,6 +1261,33 @@ void GlobeLayer::SeamTable() {
     }
 }
 
+// M12 step 4a: the surface, handed over once at assembly (compose/SurfaceFrame.h). The walk
+// and the mip-floor wants read the copies below (CaptureWalk captures them into every
+// WalkParams); the tangent frame's rows and the fill are read from the surface itself, because
+// the session writes the rows after this call. The values are the ones SetComposed and
+// SetPlanetRadius used to receive: the window is the colour tenant's page at winSlice, the
+// height window the height tenant's at hgtWinSlice, the detail page the colour tenant's at
+// detSlice; where a slice is undeclared (no tenant, or Mars's height cube without a page) the
+// window is -1 and its face the 0 the old `pages` test produced.
+void GlobeLayer::SetSurface(const SurfaceFrame* s) {
+    m_surface = s;
+    m_radius = s->planetR;
+    m_maskT = s->maskT;   // M9ay: the survey mask pages (same slices as the colour)
+    m_colorT = s->colorT;
+    m_winT = s->winSlice != UINT32_MAX ? s->colorT : -1;   // M9ap: the z14 page, slice winSlice
+    m_winFace = s->winSlice != UINT32_MAX ? s->winSlice : 0u;
+    m_detFace = s->detSlice != UINT32_MAX ? s->detSlice : 0u;
+    m_hgtWinFace = s->hgtWinSlice != UINT32_MAX ? s->hgtWinSlice : 0u;
+    m_hgtT = s->hgtT;
+    m_hgtWinT = s->hgtWinSlice != UINT32_MAX ? s->hgtT : -1;   // M9aq: the z14 height page
+    m_detOrg[0] = static_cast<double>(s->win.orgPxX);
+    m_detOrg[1] = static_cast<double>(s->win.orgPxY);
+    m_detSize = static_cast<double>(s->win.faceDim);
+    m_detWinT = s->detT;   // M7f: the z17 detail page
+    m_det17Org[0] = static_cast<double>(s->det.orgPxX);
+    m_det17Org[1] = static_cast<double>(s->det.orgPxY);
+}
+
 // Step 5: everything the node walk reads, captured. SetView fills one for the real walk
 // (then adds the five planes); StartPredictWalk fills one for the prefetch walk and moves
 // only the eye -- the planet-frame position and the pixel angle stay the REAL camera's,
@@ -1266,9 +1296,9 @@ GlobeLayer::WalkParams GlobeLayer::CaptureWalk(const Camera& cam, float viewport
     WalkParams wp;
     wp.R = m_radius;
     for (int i = 0; i < 3; ++i) {
-        wp.frameE[i] = m_frameE[i];
-        wp.frameU[i] = m_frameU[i];
-        wp.frameN[i] = m_frameN[i];
+        wp.frameE[i] = m_surface->east[i];
+        wp.frameU[i] = m_surface->up[i];
+        wp.frameN[i] = m_surface->north[i];
     }
     wp.camPos[0] = cam.px;
     wp.camPos[1] = cam.py;
@@ -1276,7 +1306,8 @@ GlobeLayer::WalkParams GlobeLayer::CaptureWalk(const Camera& cam, float viewport
     // M6g: the planet-frame position (doubles) for the horizon test.
     const double ry = m_radius + cam.py;
     for (int i = 0; i < 3; ++i) {
-        wp.camPlanet[i] = m_frameU[i] * ry + m_frameE[i] * cam.px + m_frameN[i] * cam.pz;
+        wp.camPlanet[i] = m_surface->up[i] * ry + m_surface->east[i] * cam.px +
+                          m_surface->north[i] * cam.pz;
     }
     // Step 24: the eye's own cube face (face order +x -x +y -y +z -z), named once per frame
     // so the real walk and the prefetch walk emit the same subtree first.
@@ -1556,7 +1587,8 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         WalkParams wp = m_wp;
         for (int i = 0; i < 3; ++i) {
             wp.camPos[i] = L.cam[i];
-            wp.camPlanet[i] = m_frameU[i] * ry + m_frameE[i] * L.cam[0] + m_frameN[i] * L.cam[2];
+            wp.camPlanet[i] = m_surface->up[i] * ry + m_surface->east[i] * L.cam[0] +
+                              m_surface->north[i] * L.cam[2];
         }
         {
             const double ax = std::abs(wp.camPlanet[0]), ay = std::abs(wp.camPlanet[1]),
@@ -1748,7 +1780,8 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.streamF[2] = m_streamMars ? 1.0f : 0.0f;
     m_cb.streamF[3] = 0.0f;
     // ---- M6i: the composed channels + the one-world frame, through the ONE fill function
-    // the terrain also uses -- the two layers cannot disagree about this math.
+    // the terrain also uses -- the two layers cannot disagree about this math (M12 step 4a:
+    // SurfaceFrame::Fill, the surface's own; the fingerprint below is the gate).
     // M7g: THE MIP FLOOR. The top of every window pyramid (mips 4..7, ~85 tiles, a few
     // MB) is wanted EVERY frame: high-altitude views sample one consistent capture instead
     // of a residency-shaped patchwork of vintages, and a fast ascent can never outrun the
@@ -1762,11 +1795,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
             m_res->Want(m_maskT, 7u, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
         }
     }
-    FillComposedCb(m_cb.cs, m_res, m_colorT, m_winT, m_hgtT, m_hgtWinT, m_detOrg[0],
-                   m_detOrg[1], m_detSize, 14, m_radius, m_frameE, m_frameU, m_frameN,
-                   stencilOverlay, m_maskT, m_detWinT, m_det17Org, 17,
-                   m_winFace ? m_winFace : UINT32_MAX, m_detFace ? m_detFace : UINT32_MAX,
-                   m_hgtWinFace ? m_hgtWinFace : UINT32_MAX);
+    m_surface->Fill(m_cb.cs, *m_res);
     {   // M12 step 0 instrument: does this fill agree with main.cpp's ([surface] main fill)?
         static uint64_t sLastFill = 0;
         const uint64_t h = Fnv1aBytes(&m_cb.cs, sizeof(m_cb.cs));

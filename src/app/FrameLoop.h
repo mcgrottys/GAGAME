@@ -120,7 +120,8 @@ private:
     Camera m_camSea;
     Camera m_camGlobe;
     Camera m_camChart;
-    double m_oDir[3], m_east0[3], m_north0[3];
+    // (M12 step 4a: the tangent frame's rows -- m_oDir, m_east0, m_north0 -- are the
+    // Assembly's SurfaceFrame's; Session() writes them there through the same aliases.)
     droste::Portal m_portal;
     int m_camLevel = 0;   // the camera's ABSOLUTE level: 0 = the root, 1 = inside the first link
     std::function<double(const Camera&)> m_altOf;

@@ -69,6 +69,7 @@
 #include "scene/TideLayer.h"
 #include "compose/Compositor.h"
 #include "compose/Exchange.h"
+#include "compose/SurfaceFrame.h"
 #include "compose/GisStencil.h"
 #include "compose/Sources.h"
 #include "compose/VectorPack.h"
@@ -96,6 +97,14 @@ struct Assembly {
     TideModel model;
     Window window;   // Create()d only when not headless
     Gpu gpu;
+    // M12 step 4a: THE SHIPPED SURFACE (compose/SurfaceFrame.h) -- the planet radius, the
+    // tangent frame's rows, the five lattices, the tenants' ids and page slices, the stencil
+    // flag -- built once in Assemble() (SurfaceFrame::Merrimack) and read by both fills.
+    // Declared BEFORE the renderer because a layer the renderer owns (the globe) holds a
+    // pointer into it until renderer.Shutdown() joins its worker -- the lifetime law above --
+    // and nothing else keeps a reference: a Tenant copies its lattices, the frame loop dies
+    // first, the tools take it by reference for the length of a call.
+    SurfaceFrame surface;
     RendererDesc rd;
     Renderer renderer;
     FieldSet fields;
@@ -166,11 +175,11 @@ struct Assembly {
     GisLayer* gisLayer = nullptr;
 
     Exchange exchange;       // M6j: the plugin bus -- named GA buffer channels
-    const double winOrgX = 4935.0 * 256.0, winOrgY = 6008.0 * 256.0;   // Merrimack z14 px
+    // M12 step 4a: the z14 window origin and the z17 detail origin are `surface`'s
+    // (SurfaceFrame::Merrimack writes them down, once); the ids below are the tenants'.
     int colorCubeT = -1, winTenant = -1, hgtTenant = -1, hgtWinTenant = -1;
     int maskTenant = -1;   // M9ay: the survey mask pages (gis.landsea's tree)
     int detTenant = -1;   // M7f: z17 detail color window
-    double det17OrgX = 0.0, det17OrgY = 0.0;
     int colCh = -1;   // color channel id (hgtCh registered above the solver, M6w)
     // M9am: the megatexture graph and its on-disk tile cache. Declared HERE, beside the
     // tenants that hold providers into them, so they cannot die first.

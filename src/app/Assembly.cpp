@@ -165,6 +165,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
     auto& model = A->model;
     auto& window = A->window;
     auto& gpu = A->gpu;
+    auto& surface = A->surface;
     auto& rd = A->rd;
     auto& renderer = A->renderer;
     auto& fields = A->fields;
@@ -226,16 +227,12 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
     auto& vectors = A->vectors;
     auto& gisLayer = A->gisLayer;
     auto& exchange = A->exchange;
-    auto& winOrgX = A->winOrgX;
-    auto& winOrgY = A->winOrgY;
     auto& colorCubeT = A->colorCubeT;
     auto& winTenant = A->winTenant;
     auto& hgtTenant = A->hgtTenant;
     auto& hgtWinTenant = A->hgtWinTenant;
     auto& maskTenant = A->maskTenant;
     auto& detTenant = A->detTenant;
-    auto& det17OrgX = A->det17OrgX;
-    auto& det17OrgY = A->det17OrgY;
     auto& colCh = A->colCh;
     auto& megaKeep = A->megaKeep;
     auto& megaTree = A->megaTree;
@@ -623,6 +620,11 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
     // same cube faces. Residency is driven by the CDLOD walk, clamped by residency-map
     // cubes, prefetched along the camera's screw.
     planetR = marsMode ? 3389500.0 : GlobeModel::kR;
+    // M12 step 4a: THE SHIPPED SURFACE, declared once (compose/SurfaceFrame.h): the planet's
+    // radius, the cube and the Merrimack windows the tenants below are declared on, the
+    // tenants themselves once they exist (Declare, at the old SetComposed site), and the
+    // tangent frame's rows the session writes into it. Both fills read it.
+    surface = SurfaceFrame::Merrimack(planetR, opt.stencil);
 
     if (globe) {
         resMgr.Init(gpu);
@@ -649,7 +651,10 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                                                   DXGI_FORMAT_R16_FLOAT,
                                                   compositor.CubeHeight(hgtCh));
             }
-            globe->SetComposed(-1, -1, hgtTenant, -1, 0.0, 0.0, 1.0);
+            // M12 step 4a: Mars's height cube into the surface's declaration -- an int, not
+            // a hal::Tenant (AddTextureCube), with no window page: hgtWinSlice stays
+            // undeclared (was SetComposed(-1, -1, hgtTenant, -1, 0.0, 0.0, 1.0)).
+            surface.hgtT = hgtTenant;
         } else {
             // earth.height REGISTERED above the solver (M6w) -- here it becomes GPU
             // tenants: the global cube and the Merrimack z14 window.
@@ -695,8 +700,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                 hd.residence = hal::Residence::Streamable;
                 hd.absence = hal::Absence::Unloaded;
                 hd.slices = 7;
-                const Lattice hCubeL = Lattice::Cube(Compositor::kFaceDim, 256, 128);
-                const Lattice hWinL = Lattice::Window(1263360, 1538048, 14, 256, 128);
+                const Lattice& hCubeL = surface.cubeH;   // M12 step 4a: the surface's lattices
+                const Lattice& hWinL = surface.winH;
                 hd.bindings.push_back({0, 6, hCubeL,
                                        (opt.colorTrees && heightTree)
                                            ? heightTree->Provider(hCubeL)
@@ -705,8 +710,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                 hd.bindings.push_back({6, 1, hWinL,
                                        (opt.colorTrees && heightTree)
                                            ? heightTree->Provider(hWinL)
-                                           : compositor.WindowHeight(hgtCh, 1263360, 1538048,
-                                                                     16384, 14),
+                                           : compositor.WindowHeight(hgtCh, hWinL.orgPxX,
+                                                                     hWinL.orgPxY, hWinL.faceDim,
+                                                                     hWinL.zBase),
                                        "paint mercator page"});
                 heightTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(hd));
                 hgtTenant = heightTenant.Id();
@@ -718,7 +724,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                 if (swe.Ready()) {
                     swe.SetHeightPage(gpu, resMgr.TextureRes(hgtTenant),
                                       resMgr.ResidencyRes(hgtTenant), 6u,
-                                      resMgr.Mips(hgtTenant), 1263360.0, 1538048.0);
+                                      resMgr.Mips(hgtTenant),
+                                      static_cast<double>(surface.winH.orgPxX),
+                                      static_cast<double>(surface.winH.orgPxY));
                 }
                     if (sea && hgtCh >= 0 && opt.exposure) {
                         exposureSrc = std::make_shared<ExposureSource>(&compositor, hgtCh);
@@ -748,8 +756,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                             for (size_t i = 0; i < 32768; ++i) h[i] = 0x3C00u;
                         }
                         xd.slices = 7;
-                        xd.bindings.push_back({6, 1, Lattice::Window(1263360, 1538048, 14, 256, 128),
-                                               nullptr, "exposure"});
+                        xd.bindings.push_back({6, 1, surface.winH, nullptr, "exposure"});
                         xd.holder = exposureTree;
                         exposureTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(xd));
                         exposureT = exposureTenant.Id();
@@ -764,7 +771,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                 if (sea) {
                     sea->SetHeightPage(resMgr.TextureRes(hgtTenant),
                                        resMgr.ResidencyRes(hgtTenant), 6u,
-                                       resMgr.Mips(hgtTenant), 1263360.0, 1538048.0);
+                                       resMgr.Mips(hgtTenant),
+                                       static_cast<double>(surface.winH.orgPxX),
+                                       static_cast<double>(surface.winH.orgPxY));
                 }
             }
             // earth.color: the Google mercator tree, realized twice -- the global cube
@@ -903,25 +912,13 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                 // page, 7 the z17 page -- with one SRV, one residency map, one budget, and
                 // one provider that dispatches on the slice. The three tenants this
                 // replaces were three pages of a ladder with hand-off fades between them.
-                const double n17 = 16384.0 * 256.0 * 8.0;
-                {
-                    const double piD = 3.14159265358979;
-                    const double lonC = -70.8125, latC = 42.8160 * piD / 180.0;
-                    const double mx = (lonC + 180.0) / 360.0 * n17;
-                    const double my =
-                        (0.5 - std::log(std::tan(piD * 0.25 + latC * 0.5)) /
-                                   (2.0 * piD)) *
-                        n17;
-                    det17OrgX = std::floor(mx - 8192.0);
-                    det17OrgY = std::floor(my - 8192.0);
-                }
                 // M12 step 3e: THE DECLARATION -- the three pages above as slice bindings on
-                // their lattices; sRGB colour with the coverage in the alpha, 128x128 tiles; a
-                // missing tile is not loaded yet (the residency map clamps).
-                const Lattice cCubeL = Lattice::Cube(Compositor::kFaceDim);
-                const Lattice cWinL = Lattice::Window(1263360, 1538048, 14);
-                const Lattice cDetL = Lattice::Window(static_cast<long long>(det17OrgX),
-                                                      static_cast<long long>(det17OrgY), 17);
+                // their lattices (the surface's, step 4a: the z17 origin is computed in
+                // SurfaceFrame::Merrimack); sRGB colour with the coverage in the alpha,
+                // 128x128 tiles; a missing tile is not loaded yet (the residency map clamps).
+                const Lattice& cCubeL = surface.cube;
+                const Lattice& cWinL = surface.win;
+                const Lattice& cDetL = surface.det;
                 hal::TenantDesc cd;
                 cd.name = L"earth.color (megatexture pages)";
                 cd.astNode = "color.pages";
@@ -941,7 +938,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                 if (megaTree) colorTenant.Bind(*megaTree);
                 winTenant = colorCubeT;   // pages mode: window == cube, slice 6
                 detTenant = colorCubeT;   // slice 7
-                (void)n17;
                 // M9ay: THE SURVEY AS A PAGE TENANT. gis.landsea's own tree -- the vector
                 // rings swept per tile on the SAME addresses as the imagery and the bed --
                 // feeds a third page tenant (r = water coverage, b = edited, a = surveyed).
@@ -983,14 +979,15 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                     }
                 }
                 if (opt.treeAudit) {
-                    exitCode = tools::RunTreeAudit(opt, compositor, hgtCh, resMgr, det17OrgX,
-                                                   det17OrgY, colCh, megaTree, heightTree);
+                    exitCode = tools::RunTreeAudit(opt, compositor, hgtCh, resMgr, colCh,
+                                                   megaTree, heightTree, surface);
                     return nullptr;
                 }
             }
-            globe->SetComposed(colorCubeT, winTenant, hgtTenant, hgtWinTenant, winOrgX,
-                               winOrgY, 16384.0, detTenant, det17OrgX, det17OrgY,
-                               maskTenant);
+            // M12 step 4a: the tenants, now that they exist, into the surface's declaration
+            // (ids and page slices read off hal::Tenant); the globe takes the surface itself
+            // beside SetResidency below, where the old SetPlanetRadius was.
+            surface.Declare(colorTenant, heightTenant, landseaTenant);
 
             // ---- M9ae: WHAT THE DISK ALREADY HOLDS, in memory, once.
             //
@@ -1004,8 +1001,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
             // NVMe paging worth doing shows up directly: terabytes of tree, megabytes of map.
             {
                 idxColorCube.Scan("earth.color", "cube16k");
-                idxColorWin.Scan("earth.color", "window_z14_1263360_1538048");
-                idxColorDet.Scan("earth.color", "window_z17_10168820_12344774");
+                idxColorWin.Scan("earth.color", surface.win.Tag());
+                idxColorDet.Scan("earth.color", surface.det.Tag());
                 idxHeightCube.Scan("earth.height", "cube16k");
                 idxColorCube.Report();
                 idxColorWin.Report();
@@ -1031,7 +1028,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
             }
 
         }
-        globe->stencilOverlay = opt.stencil;
         globe->debugLens = opt.lens;
         globe->probeCullFar = opt.probeCullFar;
         // M9h: the grad(flow) bank plus the grid it lives on, for --lens velgrad. The
@@ -1257,7 +1253,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
             renderer.AddLayer(std::move(mkOwned));
         }
         globe->SetResidency(&resMgr, surf, norm, marsMode);
-        globe->SetPlanetRadius(planetR);
+        globe->SetSurface(&surface);   // M12 step 4a: its radius, frame, lattices and tenants
 
         // Field adapters: the whole tiled economy reports on one stats line.
         if (swe.Ready()) {

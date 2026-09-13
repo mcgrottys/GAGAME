@@ -21,6 +21,8 @@
 #include "app/FrameLoop.h"
 #include "app/Options.h"
 #include "app/Tools.h"
+#include "compose/SurfaceFrame.h"
+#include "sim/GlobeModel.h"
 
 #include <exception>
 #include <memory>
@@ -53,7 +55,11 @@ int main(int argc, char** argv) {
             Log("[boot] gagame rev %s | argv: %s", BuildGitRev(), args.c_str());
         }
 
-        if (opt.packTiles) return tools::RunPackTiles(opt);
+        // M12 step 4a: a disk job with no scene; the shipped surface's declaration (its
+        // realization tags) is all the packer reads.
+        if (opt.packTiles) {
+            return tools::RunPackTiles(opt, SurfaceFrame::Merrimack(GlobeModel::kR, false));
+        }
 
         // ---- M0 + M4: the self-test path needs a device and the shader compiler, nothing else.
         if (!opt.loadField.empty()) return tools::RunLoadField(opt);

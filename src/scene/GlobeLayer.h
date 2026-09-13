@@ -11,6 +11,7 @@
 #pragma once
 
 #include "compose/Compositor.h"
+#include "compose/SurfaceFrame.h"
 #include "core/GradeField.h"
 #include "core/MemGridLoader.h"
 #include "hal/Residency.h"
@@ -82,17 +83,10 @@ public:
         m_normT = norm;
         m_streamMars = isMars;
     }
-    void SetPlanetRadius(double r) { m_radius = r; }
-    // M6g: ONE WORLD. The globe renders in the estuary tangent frame; rows are the
-    // planet->tangent rotation (east, up-at-origin, north). SetView now receives the FLAT
-    // (tangent-frame) camera; the sphere centre sits at flat (0, -R, 0).
-    void SetFrame(const double east[3], const double up[3], const double north[3]) {
-        for (int i = 0; i < 3; ++i) {
-            m_frameE[i] = east[i];
-            m_frameU[i] = up[i];
-            m_frameN[i] = north[i];
-        }
-    }
+    // M6g: ONE WORLD. The globe renders in the estuary tangent frame; the rows are the
+    // planet->tangent rotation (east, up-at-origin, north). SetView receives the FLAT
+    // (tangent-frame) camera; the sphere centre sits at flat (0, -R, 0). M12 step 4a: the
+    // rows, the radius, the lattices and the tenants are the SurfaceFrame's -- SetSurface.
     // The CUDEM window in degrees, for the foundation sink (0 span = absent).
     void SetEstuaryWindow(double lon0, double lat1, double lonSpan, double latSpan) {
         m_estGeo[0] = lon0;
@@ -125,25 +119,12 @@ public:
         for (int i = 0; i < 12; ++i) m_bankOrg[i] = org12[i];
         m_oneWater = oneWater;
     }
-    void SetComposed(int colorCube, int window, int heightCube, int heightWindow,
-                     double orgPxX, double orgPxY, double sizePx, int detailWin = -1,
-                     double detOrgPxX = 0.0, double detOrgPxY = 0.0, int maskPages = -1) {
-        m_maskT = maskPages;   // M9ay: the survey mask pages (same slices as the colour)
-        m_colorT = colorCube;
-        m_winT = window;
-        const bool pages = colorCube >= 0 && window == colorCube;
-        m_winFace = pages ? 6u : 0u;
-        m_detFace = pages ? 7u : 0u;
-        m_hgtWinFace = (heightCube >= 0 && heightWindow == heightCube) ? 6u : 0u;
-        m_hgtT = heightCube;
-        m_hgtWinT = heightWindow;
-        m_detOrg[0] = orgPxX;
-        m_detOrg[1] = orgPxY;
-        m_detSize = sizePx;
-        m_detWinT = detailWin;               // M7f: the z17 detail color window
-        m_det17Org[0] = detOrgPxX;
-        m_det17Org[1] = detOrgPxY;
-    }
+    // M12 step 4a: THE SURFACE, declared once (compose/SurfaceFrame.h). The globe keeps
+    // copies of what its walk and its mip-floor wants read (the tenant ids, the page slices,
+    // the z14 and z17 origins, the radius: CaptureWalk captures them into every WalkParams)
+    // and reads the tangent frame's rows and the fill from the surface itself. Must precede
+    // the first SetView, as SetResidency must.
+    void SetSurface(const SurfaceFrame* s);
     uint32_t AirTiles() const {
         return (m_windReady ? m_windBank.ResidentCount() : 0) +
                (m_cloudReady ? m_cloud.ResidentCount() : 0);
@@ -236,7 +217,6 @@ public:
     float waterNavd = 0.0f;         // M6j: live water level, for the close-up material model
     bool msSurface = true;          // M6j: request the mesh-shader unified surface
     bool MeshPathActive() const { return m_msPath; }
-    bool stencilOverlay = false;    // M6i: --stencil, the GIS alignment overlay
     bool probeCullFar = false;      // step 23 probe: horizon cull at every altitude (+0.1 rad)
     void DumpMeshlets(const std::wstring& path) const;   // step 23 probe: the records drawn
     int debugLens = 0;              // M7m: --lens (1 worldxz, 2 winuv, 3 mip, 4 ring,
@@ -576,7 +556,10 @@ private:
     double m_detSize = 1;
     bool m_streamMars = false;
     double m_radius = GlobeModel::kR;
-    double m_frameE[3] = {1, 0, 0}, m_frameU[3] = {0, 1, 0}, m_frameN[3] = {0, 0, 1};
+    // M12 step 4a: THE SURFACE (SetSurface). The tenant, slice, origin and radius members
+    // above are its copies for the walk; the tangent frame's rows (east / up / north) and
+    // the fill are read from it.
+    const SurfaceFrame* m_surface = nullptr;
     double m_estGeo[4] = {0, 0, 0, 0};
     uint32_t m_bankSrv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
     uint32_t m_bankDeriv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};

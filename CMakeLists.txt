@@ -52,6 +52,7 @@ add_executable(gagame
   src/core/ThreadTest.cpp
   src/core/ThreadManager.cpp
   src/compose/Compositor.cpp
+  src/compose/SurfaceFrame.cpp
   src/compose/ComposeTest.cpp
   src/compose/Sources.cpp
   src/compose/GisMask.cpp

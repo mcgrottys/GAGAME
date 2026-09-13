@@ -206,16 +206,10 @@ std::optional<int> FrameLoop::Session() {
     auto& resMgr = m_A.resMgr;
     auto& gisLayer = m_A.gisLayer;
     auto& exchange = m_A.exchange;
-    auto& winOrgX = m_A.winOrgX;
-    auto& winOrgY = m_A.winOrgY;
-    auto& colorCubeT = m_A.colorCubeT;
+    auto& surface = m_A.surface;   // M12 step 4a: the shipped surface, declared once
     auto& winTenant = m_A.winTenant;
     auto& hgtTenant = m_A.hgtTenant;
     auto& hgtWinTenant = m_A.hgtWinTenant;
-    auto& maskTenant = m_A.maskTenant;
-    auto& detTenant = m_A.detTenant;
-    auto& det17OrgX = m_A.det17OrgX;
-    auto& det17OrgY = m_A.det17OrgY;
     auto& colCh = m_A.colCh;
     auto& mode = m_mode;
     auto& applyMode = m_applyMode;
@@ -224,9 +218,10 @@ std::optional<int> FrameLoop::Session() {
     auto& camSea = m_camSea;
     auto& camGlobe = m_camGlobe;
     auto& camChart = m_camChart;
-    auto& oDir = m_oDir;
-    auto& east0 = m_east0;
-    auto& north0 = m_north0;
+    // M12 step 4a: the tangent frame's rows are the surface's (compose/SurfaceFrame.h).
+    auto& oDir = m_A.surface.up;
+    auto& east0 = m_A.surface.east;
+    auto& north0 = m_A.surface.north;
     auto& portal = m_portal;
     auto& altOf = m_altOf;
     auto& poseMotor = m_poseMotor;
@@ -427,7 +422,7 @@ std::optional<int> FrameLoop::Session() {
     camGlobe = planetToFlatPose(camGlobe);
     if (mode == 1 && opt.globeStart) cam = camGlobe;
     if (globe) {
-        globe->SetFrame(east0, oDir, north0);
+        // (M12 step 4a: the rows above went into the surface the globe reads -- SetSurface.)
         if (bathy.Ready()) {
             const double lon0 = BathyModel::kOrgLon + bathy.WorldX0() / BathyModel::kMPerLon;
             const double lat1 = BathyModel::kOrgLat +
@@ -475,16 +470,9 @@ std::optional<int> FrameLoop::Session() {
     if (!marsMode && globe) {
         ComposedSurfaceCb cs{};
         // M9ap: pages mode -- the terrain, the sea and the GIS layer sample the SAME page
-        // tenant the globe does, slices 6 and 7 included.
-        const double det17Org[2] = {det17OrgX, det17OrgY};
-        const bool pagesMode = colorCubeT >= 0 && winTenant == colorCubeT;
-        FillComposedCb(cs, &resMgr, colorCubeT, winTenant, hgtTenant, hgtWinTenant,
-                       winOrgX, winOrgY, 16384.0, 14, planetR, east0, oDir, north0,
-                       opt.stencil, maskTenant,
-                       pagesMode ? detTenant : -1, pagesMode ? det17Org : nullptr, 17,
-                       pagesMode ? 6u : UINT32_MAX,
-                       pagesMode ? 7u : UINT32_MAX,
-                       (hgtTenant >= 0 && hgtWinTenant == hgtTenant) ? 6u : UINT32_MAX);
+        // tenant the globe does, slices 6 and 7 included. M12 step 4a: the surface fills its
+        // own rows (SurfaceFrame::Fill), and the globe calls the same fill every frame.
+        surface.Fill(cs, resMgr);
         if (terrain) terrain->SetComposed(cs);
         if (sea) sea->SetComposed(cs);
         if (gisLayer) gisLayer->SetComposed(cs);
@@ -1013,7 +1001,9 @@ std::optional<int> FrameLoop::Session() {
             if (hgtTenant >= 0) {
                 weather.SetHeightPage(resMgr.TextureRes(hgtTenant),
                                       resMgr.ResidencyRes(hgtTenant), 6u,
-                                      resMgr.Mips(hgtTenant), 1263360.0, 1538048.0);
+                                      resMgr.Mips(hgtTenant),
+                                      static_cast<double>(surface.winH.orgPxX),
+                                      static_cast<double>(surface.winH.orgPxY));
             }
         }
     }
@@ -1318,7 +1308,7 @@ std::optional<int> FrameLoop::Session() {
 
     // ---- M6j: channel export mode -- pull data OUT through the manager and exit.
     if (!opt.exportSpec.empty()) {
-        return tools::RunExport(opt, gpu, compositor, hgtCh, resMgr, colCh);
+        return tools::RunExport(opt, gpu, compositor, hgtCh, resMgr, colCh, surface);
     }
 
     // ---- The instrumentation block's runtime part; its members and their notes are
@@ -1494,8 +1484,10 @@ bool FrameLoop::Frame() {
     auto& planetR = m_A.planetR;
     auto& resMgr = m_A.resMgr;
     auto& gisLayer = m_A.gisLayer;
-    auto& winOrgX = m_A.winOrgX;
-    auto& winOrgY = m_A.winOrgY;
+    // M12 step 4a: the z14 page origin, read off the surface's height window -- the doubles
+    // the bank, the trace and the exposure's uv closure below take.
+    const double winOrgX = static_cast<double>(m_A.surface.winH.orgPxX);
+    const double winOrgY = static_cast<double>(m_A.surface.winH.orgPxY);
     auto& hgtTenant = m_A.hgtTenant;
     auto& hgtWinTenant = m_A.hgtWinTenant;
     auto& exposureSrc = m_A.exposureSrc;
@@ -1508,9 +1500,10 @@ bool FrameLoop::Frame() {
     auto& cam = m_cam;
     auto& camSea = m_camSea;
     auto& camChart = m_camChart;
-    auto& oDir = m_oDir;
-    auto& east0 = m_east0;
-    auto& north0 = m_north0;
+    // M12 step 4a: the tangent frame's rows are the surface's (compose/SurfaceFrame.h).
+    auto& oDir = m_A.surface.up;
+    auto& east0 = m_A.surface.east;
+    auto& north0 = m_A.surface.north;
     auto& portal = m_portal;
     auto& camLevel = m_camLevel;
     auto& altOf = m_altOf;
@@ -2673,12 +2666,12 @@ bool FrameLoop::Frame() {
             const double dLat = 20000.0 / BathyModel::kMPerLat;
             const double dLon = 20000.0 / BathyModel::kMPerLon;
             auto mU = [&](double lonDeg) {
-                return ((lonDeg + 180.0) / 360.0 * n14 - 1263360.0) / 16384.0;
+                return ((lonDeg + 180.0) / 360.0 * n14 - winOrgX) / 16384.0;
             };
             auto mV = [&](double latDeg) {
                 const double l = latDeg * piP / 180.0;
                 return ((0.5 - std::log(std::tan(piP * 0.25 + l * 0.5)) / (2.0 * piP)) *
-                            n14 - 1538048.0) / 16384.0;
+                            n14 - winOrgY) / 16384.0;
             };
             const float u0 = float(std::clamp(mU(lonC - dLon), 0.0, 1.0));
             const float u1 = float(std::clamp(mU(lonC + dLon), 0.0, 1.0));

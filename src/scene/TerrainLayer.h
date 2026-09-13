@@ -30,8 +30,8 @@ public:
     // (the heightfield texture physics reads, the sea's bed) but stops rendering -- one
     // planet, one description on screen.
     bool renderEnabled = true;
-    // M6i: the composed color channel -- filled by FillComposedCb in main, the SAME function
-    // and constants the globe uses, so the two layers agree texel for texel.
+    // M6i: the composed color channel -- filled by SurfaceFrame::Fill in the frame loop, the
+    // SAME function and constants the globe uses, so the two layers agree texel for texel.
     void SetComposed(const ComposedSurfaceCb& cs) { m_cs = cs; }
 
 private:

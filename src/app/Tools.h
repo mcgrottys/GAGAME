@@ -39,6 +39,7 @@ class WaterAtlas;
 class WaterBankLayer;
 class WaveField;
 class WeatherManager;
+struct SurfaceFrame;
 struct WaterSceneConfig;
 }  // namespace ga
 
@@ -46,8 +47,9 @@ namespace ga::app::tools {
 
 // ---- Before the scene exists (no device, or a 64x64 device of the tool's own).
 
-// --pack-tiles: pack the composed cache into per-realization archives; exit 0.
-int RunPackTiles(const Options& opt);
+// --pack-tiles: pack the composed cache into per-realization archives; exit 0. (M12 step
+// 4a: the realizations are the surface's lattices; no scene exists, so main() declares it.)
+int RunPackTiles(const Options& opt, const SurfaceFrame& surface);
 // --load-field PATH: a file through the loader plugin into a sparse bank; report; exit.
 int RunLoadField(const Options& opt);
 // --selftest: the twelve gates; exit 0 (pass) / 1 (fail).
@@ -62,9 +64,8 @@ int RunWaterMap(const Options& opt, Gpu& gpu, const GlobeModel& globeModel, Comp
 void RunGisDump(const Options& opt, const GisVectorMask& gisMask);
 // --tree-audit N (--pack-trees, --warm-trees): compare / pack / warm the tile trees; exit 0.
 int RunTreeAudit(const Options& opt, Compositor& compositor, int hgtCh, ResidencyManager& resMgr,
-                 double det17OrgX, double det17OrgY, int colCh,
-                 const std::unique_ptr<TileTree>& megaTree,
-                 const std::unique_ptr<TileTree>& heightTree);
+                 int colCh, const std::unique_ptr<TileTree>& megaTree,
+                 const std::unique_ptr<TileTree>& heightTree, const SurfaceFrame& surface);
 // --fidelity-map PATH: the heterogeneity sheet. Falls through (no early return, as before).
 void RunFidelityMap(const Options& opt, Compositor& compositor);
 // --ocean-probe lat,lon: the weather manager's verification harness. The exit code when
@@ -81,7 +82,7 @@ std::optional<int> RunOceanProbe(const Options& opt, const TideModel& model, Gpu
 void RunSweUv(const Options& opt, Gpu& gpu, const BathyModel& bathy, SweSolver& swe);
 // --export SPEC: a composed channel out through the manager; exit with the export's code.
 int RunExport(const Options& opt, Gpu& gpu, Compositor& compositor, int hgtCh,
-              ResidencyManager& resMgr, int colCh);
+              ResidencyManager& resMgr, int colCh, const SurfaceFrame& surface);
 // --warm-inlet: pre-cache the composed pyramids. Falls through into the frame loop.
 void RunWarmInlet(const Options& opt, Gpu& gpu, const Compositor& compositor,
                   ResidencyManager& resMgr, int winTenant, int hgtTenant, int hgtWinTenant);
