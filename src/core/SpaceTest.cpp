@@ -299,6 +299,46 @@ bool RunSpaceSelfTest() {
                 g.Near3(a, b, 1e-6, "a rigid placement's Pow is the screw (Motor::Slerp)");
             }
         }
+        // To() through the nearest common ancestor: equal to the root form where the root form is
+        // exact, and better where it is not -- two siblings 40 m apart under a tangent frame that
+        // sits a planet radius from the root must see 40 m, not 40 m +- the radius' ulp.
+        Space boatA, boatB;
+        boatA.name = "boat.a";
+        boatA.parent = &tangent;
+        boatA.link = Placement::Rigid(Motor::Translation(100.0, 0.0, -20.0));
+        boatB.name = "boat.b";
+        boatB.parent = &tangent;
+        boatB.link = Placement::Rigid(Motor::Translation(140.0, 0.0, -20.0));
+        const Placement ab = boatA.To(boatB);   // a in b's frame
+        g.Near(ab.t[0], -40.0, 1e-12, "To() through the LCA: 40 m apart is exactly 40 m");
+        g.Near(ab.t[1], 0.0, 1e-12, "To() through the LCA: no vertical leak");
+        g.Near(ab.t[2], 0.0, 1e-12, "To() through the LCA: no lateral leak");
+        const Placement abRoot = boatB.ToRoot().Inverse().Then(boatA.ToRoot());
+        g.True(std::fabs(abRoot.t[0] + 40.0) <= 1e-6 * R, "the root form agrees to the radius' ulp");
+        g.True(std::fabs(ab.t[0] + 40.0) <= std::fabs(abRoot.t[0] + 40.0) + 1e-12,
+               "the LCA form is never worse than the root form");
+        for (int i = 0; i < 4; ++i) {
+            double x[3], a[3], b[3];
+            Scatter(i, 1000.0, x);
+            tower.To(tangent).Apply(x, a);
+            S.Apply(x, b);
+            g.Near3(a, b, 1e-6 * R, "To(parent) through the LCA is the link");
+        }
+        Space lone;
+        lone.name = "another.world";
+        g.True(lone.To(tangent).IsRigid() && lone.To(tangent).t[0] == 0.0,
+               "two worlds with no common ancestor are refused (identity)");
+        // Normalize: a long product drifts off the unit rotor; Normalize puts it back.
+        Placement drift = Placement::Rigid(m);
+        for (int i = 0; i < 2000; ++i) drift = drift.Then(Placement::Rigid(m).Pow(0.001));
+        const double n0 = std::sqrt(drift.r[0] * drift.r[0] + drift.r[1] * drift.r[1] +
+                                    drift.r[2] * drift.r[2] + drift.r[3] * drift.r[3]);
+        drift.Normalize();
+        const double n1 = std::sqrt(drift.r[0] * drift.r[0] + drift.r[1] * drift.r[1] +
+                                    drift.r[2] * drift.r[2] + drift.r[3] * drift.r[3]);
+        g.True(std::fabs(n1 - 1.0) <= 1e-15, "Normalize re-unitizes the rotor");
+        g.True(std::fabs(n1 - 1.0) <= std::fabs(n0 - 1.0), "Normalize never makes it worse");
+
         // The anchor chart round-trips.
         Space::Anchor an;
         an.latDeg = 42.81833; an.lonDeg = -70.81; an.mPerLat = 110574.0; an.mPerLon = 81660.0;
@@ -314,7 +354,8 @@ bool RunSpaceSelfTest() {
         Log("[space] ---- PASS (%d checks): the group and the fold, Rigid = the motor, Similar = "
             "the portal at every power, Versor = SimilarityVersor, the gauge identity, the plane "
             "transport (GlobeLayer's form and the general preimage), the unit-length refusal, "
-            "Frame() rows, the screw power ----",
+            "Frame() rows, the screw power, To() through the nearest common ancestor, "
+            "Normalize ----",
             g.checks);
     } else {
         Log("[space] ---- FAIL (%d checks) ----", g.checks);

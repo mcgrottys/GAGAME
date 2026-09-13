@@ -2,6 +2,15 @@
 //  Space.h - M12: THE FRAME CALCULUS AS CODE. A space is where a node lives; a placement is how
 //  a space sits in its parent; resolution is ONE fold along the parent chain.
 //
+//  THE CONTRACT, EXACTLY (sharpened after an outside review, 2026-09-13): a Placement supports
+//  RIGID MOTION AND POSITIVE UNIFORM SCALE -- a similarity -- and nothing else. Nonuniform
+//  scale, shear and the projection morphs are other contracts with other types. Its one
+//  authoritative representation is the rotor + scale + translation below; the conformal versor
+//  and the 4x4 are DERIVED execution forms. The invariants: the rotor is unit (Normalize()
+//  re-unitizes a long product, as Motor::Normalize does) and "inverse is reverse" holds only
+//  under it; s > 0; Pow(k) takes the PRINCIPAL branch (the rotor's angle in (-pi, pi]), so a
+//  quarter twist per level means a quarter twist per level and never its complement.
+//
 //  WHICH ALGEBRA. A placement is a SIMILARITY -- the group the engine already needs and no more.
 //  The tangent frame under the planet is a rigid motion (Pga.h's motor, exactly); the Droste
 //  link is a dilation with a twist about a fixed point (Droste.h's Cl(4,1) versor, exactly); a
@@ -170,9 +179,21 @@ struct Placement {
         return o;
     }
     bool IsRigid(double eps = 1e-15) const { return std::fabs(s - 1.0) <= eps; }
+    // RE-UNITIZE. Composing placements is exact in principle and drifts in practice (a rail or a
+    // body composes one per tick), and "inverse is reverse" assumes |r| = 1. Same law as
+    // Motor::Normalize, on the rotor alone: the scale and the translation carry no invariant.
+    void Normalize() {
+        const double n = std::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + r[3] * r[3]);
+        if (n > 0.0) {
+            for (double& c : r) c /= n;
+        }
+    }
 
     // exp(k log S). See the banner: the fixed-point form when it is well posed, the screw
-    // (Motor::Log / Exp) when the map is rigid.
+    // (Motor::Log / Exp) when the map is rigid. THE BRANCH: AxisAngle reads the rotor's angle
+    // as 2 atan2(|v|, w), in (-pi, pi] when w >= 0 -- the principal log. A rotor with w < 0 is
+    // the same rotation's other representative; Similar() and Frame() never produce one, and a
+    // product that does is one sign flip away (the double cover Motor::Slerp already handles).
     Placement Pow(double k) const {
         if (IsRigid()) {
             const Motor m = ToMotor();
@@ -373,8 +394,33 @@ struct Space {
     Placement ToRoot() const {
         return parent ? parent->ToRoot().Then(link) : Placement::Identity();
     }
-    // This space's placement in `other`'s frame.
-    Placement To(const Space& other) const { return other.ToRoot().Inverse().Then(ToRoot()); }
+    // This space's placement in `other`'s frame, evaluated through the NEAREST COMMON ANCESTOR:
+    // the fold from the ancestor down each branch, `other`'s inverted -- never root-relative-
+    // then-cancel. Two boats 40 m apart in one tangent space must never see the planet's
+    // radius in their arithmetic; extentM / unitM guards the embedding, this guards the
+    // doubles. Two spaces with no common ancestor are two worlds: refused (identity, logged).
+    Placement To(const Space& other) const {
+        const Space* lca = nullptr;
+        for (const Space* p = this; p && !lca; p = p->parent) {
+            for (const Space* q = &other; q; q = q->parent) {
+                if (q == p) {
+                    lca = p;
+                    break;
+                }
+            }
+        }
+        if (!lca) {
+            Log("[space] %s -> %s: no common ancestor -- two worlds; refusing (identity)",
+                name.c_str(), other.name.c_str());
+            return Placement::Identity();
+        }
+        auto up = [lca](const Space* from) {   // the fold from `from` up to (not including) lca
+            Placement acc = Placement::Identity();
+            for (const Space* p = from; p != lca; p = p->parent) acc = p->link.Then(acc);
+            return acc;
+        };
+        return up(&other).Inverse().Then(up(this));
+    }
     // A point of this space (metres) as a conformal point at this space's unit length.
     cga::Mv Embed(const double xM[3]) const {
         return cga::Up(xM[0] / unitM, xM[1] / unitM, xM[2] / unitM);
