@@ -34,6 +34,8 @@ add_executable(gagame
   src/app/Tools/SeaVerify.cpp
   src/core/BuildInfo.cpp
   src/core/GaAst.cpp
+  src/core/Lattice.cpp
+  src/core/SpaceTest.cpp
   src/core/PixEvents.cpp
   src/core/GaTest.cpp
   src/core/DxTest.cpp

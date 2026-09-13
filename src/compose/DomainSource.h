@@ -53,7 +53,8 @@
 
 namespace ga {
 
-struct ColorFrame;
+struct Lattice;
+using ColorFrame = Lattice;   // M12 step 2b: the frame is the lattice (core/Lattice.h)
 struct TileRequest;
 
 enum class SourceDomain : uint8_t { Point, Profile, Raster, Volume };
