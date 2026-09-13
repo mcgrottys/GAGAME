@@ -740,14 +740,11 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
         m_churnCb.miscC[2] = m_seaCb.waveC[3];
         m_churnCb.miscC[3] = 0;
         memcpy(m_churnCb.bathyG, m_bathyGeo, sizeof(m_bathyGeo));
-        m_churnCb.geoA[0] = static_cast<float>(BathyModel::kOrgLat);
-        m_churnCb.geoA[1] = static_cast<float>(BathyModel::kOrgLon);
-        m_churnCb.geoA[2] = static_cast<float>(1.0 / BathyModel::kMPerLat);
-        m_churnCb.geoA[3] = static_cast<float>(1.0 / BathyModel::kMPerLon);
-        m_churnCb.winA[0] = static_cast<float>(m_hgtOrg[0]);
-        m_churnCb.winA[1] = static_cast<float>(m_hgtOrg[1]);
-        m_churnCb.winA[2] = 1.0f / 16384.0f;
-        m_churnCb.winA[3] = 16384.0f * 256.0f;
+        // M12 step 4b: the world.flat chart's row and the height window's row come from the
+        // surface and the window's lattice (the old eight casts bit for bit; the [kernel]
+        // hash below is the gate).
+        m_surface->FlatRows(m_churnCb.geoA);
+        m_hgtWin.Rows(m_churnCb.winA);
         m_churnCb.pageB[0] = static_cast<float>(m_hgtSlice);
         m_churnCb.sweM[0] = m_churnSweWired ? 1.0f : 0.0f;
         m_churnCb.sweM[1] = sweCurrentGain;
@@ -757,6 +754,19 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
         m_churnCb.waveD[1] = m_seaCb.waveC[2];
         m_churnCb.waveD[2] = 1.0f;
         m_churnCb.waveD[3] = 1.0f;
+        {   // M12 step 4b instrument: the churn kernel's constant buffer, fingerprinted after
+            // its fill -- the gate for the lattice-row moves (winA, geoA from the surface) and
+            // for the fills of 4e/4f. Logs when the hash changes, as the [surface] fills do.
+            // listCount is dispatchList's, written per list below, not this fill's: the copy
+            // hashed here carries it as zero so the fingerprint is the fill and nothing else.
+            ChurnCbData fp = m_churnCb;
+            fp.listCount = 0;
+            const uint64_t h = Fnv1aBytes(&fp, sizeof(fp));
+            if (h != m_churnCbFp) {
+                m_churnCbFp = h;
+                Log("[kernel] churn cb FNV-1a %016llx", static_cast<unsigned long long>(h));
+            }
+        }
 
         ctx.cmd->ComputeRoot(m_churnRs.Get());
 

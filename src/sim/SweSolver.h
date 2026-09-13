@@ -22,6 +22,7 @@
 #pragma once
 
 #include "core/GradeField.h"
+#include "core/Lattice.h"
 #include "hal/Context.h"
 #include "hal/Gpu.h"
 #include "hal/Shader.h"
@@ -52,8 +53,10 @@ public:
     // M9ar: bind the bed -- slice `slice` of the height PAGE tenant's array, with its residency
     // map, so the solver reads the same megatexture the water shading and the globe read, at
     // whatever mip is resident. Must be called before the first Step; there is no bed otherwise.
+    // M12 step 4b: `window` is the z14 lattice the page sits on (the surface's winH); its
+    // Rows() are the kernel's winA row.
     void SetHeightPage(Gpu& gpu, hal::Resource heightArr, hal::Resource resMapArr,
-                       uint32_t slice, uint32_t mips, double orgPxX, double orgPxY);
+                       uint32_t slice, uint32_t mips, const Lattice& window);
     bool BedBound() const { return m_bedBound; }
 
     void Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
@@ -156,6 +159,9 @@ private:
     int Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float tideNavd,
                int maxSub);
     void RecordReset(hal::CommandContext& cmd, Gpu& gpu);
+    // M12 step 4b instrument: the [kernel] swe cb fingerprint, logged at every upload when it
+    // changes (the gate for the lattice-row moves and the fills of 4e/4f).
+    void LogCbFingerprint();
 
     // Mirrors SweCb in shaders/Swe.hlsl exactly.
     struct SweCbData {
@@ -214,6 +220,7 @@ private:
     float m_westQ = 0;                 // west transport target, m^3/s (+east)
     std::vector<float> m_westBed;      // exterior-column bed depths: the live section area
     bool m_bedBound = false;           // M9ar: SetHeightPage has run
+    uint64_t m_cbFp = 0;               // M12 step 4b: the [kernel] swe cb fingerprint's last value
     float m_lastTideNavd = 0;          // for the tide-plane rate (prism source term)
     double m_lastTideTime = 0;
     float m_dt = 0.25f;

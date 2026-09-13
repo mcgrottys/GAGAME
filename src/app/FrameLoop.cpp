@@ -1001,9 +1001,7 @@ std::optional<int> FrameLoop::Session() {
             if (hgtTenant >= 0) {
                 weather.SetHeightPage(resMgr.TextureRes(hgtTenant),
                                       resMgr.ResidencyRes(hgtTenant), 6u,
-                                      resMgr.Mips(hgtTenant),
-                                      static_cast<double>(surface.winH.orgPxX),
-                                      static_cast<double>(surface.winH.orgPxY));
+                                      resMgr.Mips(hgtTenant), surface.winH);
             }
         }
     }
@@ -2468,12 +2466,12 @@ bool FrameLoop::Frame() {
                 // M9aq: in pages mode the window is slice 6 of the height array.
                 waterBank->SetHeightWindow(resMgr.TextureSrv(hgtWinTenant),
                                            resMgr.ResidencySrv(hgtWinTenant),
-                                           winOrgX, winOrgY,
+                                           m_A.surface.winH,
                                            hgtWinTenant == hgtTenant ? 6u : UINT32_MAX);
                 if (waterBankB) {
                     waterBankB->SetHeightWindow(resMgr.TextureSrv(hgtWinTenant),
                                                 resMgr.ResidencySrv(hgtWinTenant),
-                                                winOrgX, winOrgY,
+                                                m_A.surface.winH,
                                                 hgtWinTenant == hgtTenant ? 6u
                                                                           : UINT32_MAX);
                 }

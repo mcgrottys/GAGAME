@@ -44,6 +44,16 @@
 //  origins are below 2^24 and exact in float whether cast from the double or the integer,
 //  1/16384 is 2^-14, and the world-pixel expression is the same text.
 //
+//  THE KERNEL ROWS (step 4b). The water bank, the churn and the solver each hand-filled a
+//  winA row {org px x, org px y, 1/16384, 16384*256} from two origin doubles their
+//  SetHeightPage / SetHeightWindow had been passed plus two literals, and the bank and the
+//  churn a geoA row from BathyModel's four constants -- the world.flat chart in floats. The
+//  three now take the height window's Lattice and fill winA from its Rows(); the chart lives
+//  here as `flat` (core/Space.h's Anchor, written by Merrimack from the same constants) and
+//  the bank and the churn read geoA through FlatRows(), the sites' own casts (a double
+//  division, then one cast). The gate: a [kernel] FNV-1a of each kernel's constant buffer,
+//  printed at its upload when it changes, equal before and after the move.
+//
 //  WHO WRITES IT. The Assembly builds it once (Merrimack), declares the tenants into it
 //  (Declare) where it used to hand them to the globe, and hands the globe a pointer where it
 //  used to hand it the radius; the session writes the frame rows through its aliases where it
@@ -53,6 +63,7 @@
 #pragma once
 
 #include "core/Lattice.h"
+#include "core/Space.h"
 
 #include <cstdint>
 
@@ -84,6 +95,11 @@ struct SurfaceFrame {
     int colorT = -1, hgtT = -1, maskT = -1, detT = -1;
     uint32_t winSlice = UINT32_MAX, detSlice = UINT32_MAX, hgtWinSlice = UINT32_MAX;
     bool stencil = false;   // --stencil: the GIS alignment overlay
+    // M12 step 4b: THE WORLD.FLAT CHART (core/Space.h's Anchor) -- the anchor-linear lat/lon
+    // <-> metres map of BathyModel.h (lat = orgLat + z / mPerLat, lon = orgLon + x / mPerLon,
+    // mPerLon frozen at the anchor) that the kernels' geoA row is made of. Merrimack writes it
+    // from BathyModel's constants.
+    Space::Anchor flat;
 
     // The Merrimack estuary's shipped surface on a planet of radius planetR: the lattices,
     // with the two window origins written here and nowhere else. The tenants come later
@@ -94,6 +110,14 @@ struct SurfaceFrame {
     void Declare(const hal::Tenant& color, const hal::Tenant& height, const hal::Tenant& mask);
     // THE ONE FILL of the composed-surface rows (was FillComposedCb, Compositor.cpp).
     void Fill(ComposedSurfaceCb& cb, const ResidencyManager& rm) const;
+    // M12 step 4b: the kernels' geoA row -- {orgLat, orgLon, 1/mPerLat, 1/mPerLon} as floats,
+    // the old four casts bit for bit (a double division, then one cast, as the sites wrote).
+    void FlatRows(float geoA[4]) const {
+        geoA[0] = static_cast<float>(flat.latDeg);
+        geoA[1] = static_cast<float>(flat.lonDeg);
+        geoA[2] = static_cast<float>(1.0 / flat.mPerLat);
+        geoA[3] = static_cast<float>(1.0 / flat.mPerLon);
+    }
 };
 
 }  // namespace ga

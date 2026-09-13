@@ -302,6 +302,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
         auto seaOwned = std::make_unique<SeaLayer>();
         sea = seaOwned.get();
         sea->Configure(opt.shaderDir, &seaState);
+        sea->SetSurface(&surface);   // M12 step 4b: the world.flat chart, for the churn's geoA row
         sea->foamIntensity = opt.foam;
         sea->pixelWater = opt.pixelWater;   // M9bh: shade in PsMain, not DsMain
         sea->targetEdgePx = opt.edgePx;
@@ -556,6 +557,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
         waterBank->Configure(opt.shaderDir, sea, &swe, &bathy, &waterAtlas, &compositor,
                              hgtCh, &globeModel, &seaState);
         waterBank->SetBaseTexel(waterScene.bankTexelM);   // M8h ring density (scene)
+        waterBank->SetSurface(&surface);   // M12 step 4b: the world.flat chart, for the geoA row
         waterBank->flatBed = opt.flatBed;
         waterBank->flatBedNavd = opt.flatBedNavd;
         if (opt.flatBed) {
@@ -577,6 +579,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
             waterBankB->Configure(opt.shaderDir, sea, &swe, &bathy, &waterAtlas, &compositor,
                                   hgtCh, &globeModel, &seaState);
             waterBankB->SetBaseTexel(waterScene.bankTexelM);
+            waterBankB->SetSurface(&surface);
             waterBankB->flatBed = opt.flatBed;
             waterBankB->flatBedNavd = opt.flatBedNavd;
             waterBankB->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
@@ -724,9 +727,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                 if (swe.Ready()) {
                     swe.SetHeightPage(gpu, resMgr.TextureRes(hgtTenant),
                                       resMgr.ResidencyRes(hgtTenant), 6u,
-                                      resMgr.Mips(hgtTenant),
-                                      static_cast<double>(surface.winH.orgPxX),
-                                      static_cast<double>(surface.winH.orgPxY));
+                                      resMgr.Mips(hgtTenant), surface.winH);
                 }
                     if (sea && hgtCh >= 0 && opt.exposure) {
                         exposureSrc = std::make_shared<ExposureSource>(&compositor, hgtCh);
@@ -771,9 +772,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                 if (sea) {
                     sea->SetHeightPage(resMgr.TextureRes(hgtTenant),
                                        resMgr.ResidencyRes(hgtTenant), 6u,
-                                       resMgr.Mips(hgtTenant),
-                                       static_cast<double>(surface.winH.orgPxX),
-                                       static_cast<double>(surface.winH.orgPxY));
+                                       resMgr.Mips(hgtTenant), surface.winH);
                 }
             }
             // earth.color: the Google mercator tree, realized twice -- the global cube

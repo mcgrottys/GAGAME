@@ -3,6 +3,7 @@
 #include "compose/Compositor.h"
 #include "hal/Residency.h"
 #include "hal/Tenant.h"
+#include "sim/BathyModel.h"
 
 #include <cmath>
 
@@ -12,6 +13,14 @@ SurfaceFrame SurfaceFrame::Merrimack(double planetR, bool stencil) {
     SurfaceFrame s;
     s.planetR = planetR;
     s.stencil = stencil;
+    // M12 step 4b: the world.flat chart -- BathyModel.h's anchor (the ACT0816 entrance
+    // station) and its two frozen metres-per-degree, the constants the kernels' geoA row was
+    // cast from at three sites.
+    s.flat.latDeg = BathyModel::kOrgLat;
+    s.flat.lonDeg = BathyModel::kOrgLon;
+    s.flat.mPerLat = BathyModel::kMPerLat;
+    s.flat.mPerLon = BathyModel::kMPerLon;
+    s.flat.linear = true;
     // The 16k quad-sphere, and the Merrimack z14 window: tile (4935, 6008) of the z14 tile
     // grid, 16384 texels a side (was Assembly.h's `4935.0 * 256.0, 6008.0 * 256.0`, M6i).
     s.cube = Lattice::Cube(Lattice::kFaceDim);

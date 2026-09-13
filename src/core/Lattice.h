@@ -121,7 +121,7 @@ struct Lattice {
         out[2] = static_cast<float>(faceDim > 0 ? 1.0 / double(faceDim) : 0.0);
         out[3] = static_cast<float>((1ll << zBase) * 256ll);
     }
-    // World pixels at zBase (the Mercator closed form, WaveFieldSource.h's MercX/MercY).
+    // World pixels at zBase (the Mercator closed form, the closed forms WaveFieldSource::Align used to carry).
     double WorldPx() const { return double((1ll << zBase) * 256ll); }
     void PxOf(double latDeg, double lonDeg, double& px, double& py) const {
         const double kPi = 3.14159265358979;
