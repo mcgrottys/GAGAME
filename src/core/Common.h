@@ -27,6 +27,84 @@ inline uint64_t Fnv1aBytes(const void* p, size_t n, uint64_t h = 146959810393466
     return h;
 }
 
+// M12 step 4d: THE DISTANCE BETWEEN TWO DOUBLES IN ULPS -- what an instrument reports when a
+// closed form and the form replacing it are compared and are not bitwise equal: the number of
+// representable doubles between them (0 for two identical values, and for the two zeros;
+// UINT64_MAX when either is a NaN). The gate's word EQUAL means the bit patterns agree; the
+// ulp count is the size of the disagreement when they do not -- and an ulp count is unbounded
+// where a value is a rounding of zero, so the callers say the absolute gap beside it.
+inline uint64_t UlpDistance(double a, double b) {
+    if (a != a || b != b) return UINT64_MAX;
+    int64_t ia = 0, ib = 0;
+    memcpy(&ia, &a, sizeof ia);
+    memcpy(&ib, &b, sizeof ib);
+    // Sign-magnitude onto one monotone integer line: a negative pattern is its magnitude, negated.
+    const int64_t oa = ia < 0 ? INT64_MIN - ia : ia;
+    const int64_t ob = ib < 0 ? INT64_MIN - ib : ib;
+    return oa >= ob ? static_cast<uint64_t>(oa) - static_cast<uint64_t>(ob)
+                    : static_cast<uint64_t>(ob) - static_cast<uint64_t>(oa);
+}
+
+// A tally over one instrumented site: how many values were compared, how many were EQUAL (bit
+// for bit), how many differed only in the sign of a zero, and the farthest pair in ulps and in
+// absolute terms. Verdict() is the line the gate reads.
+struct UlpTally {
+    uint64_t n = 0, equal = 0, zeroSign = 0, maxUlps = 0;
+    double maxAbs = 0.0;
+    // One pair; returns its ulp distance (0 = EQUAL, or the two zeros).
+    uint64_t Add(double a, double b) {
+        ++n;
+        if (memcmp(&a, &b, sizeof a) == 0) {
+            ++equal;
+            return 0;
+        }
+        const uint64_t u = UlpDistance(a, b);
+        if (u == 0) ++zeroSign;
+        if (u > maxUlps) maxUlps = u;
+        const double d = a > b ? a - b : b - a;
+        if (d > maxAbs) maxAbs = d;
+        return u;
+    }
+    bool AllEqual() const { return equal == n; }
+    std::string Verdict() const {
+        char b[192];
+        if (n == 0) {
+            snprintf(b, sizeof b, "unmeasured (0)");
+        } else if (AllEqual()) {
+            snprintf(b, sizeof b, "EQUAL (%llu of %llu)", static_cast<unsigned long long>(equal),
+                     static_cast<unsigned long long>(n));
+        } else {
+            snprintf(b, sizeof b, "NOT EQUAL: max %llu ulps, |d| %.3g (%llu of %llu equal, %llu sign-of-zero)",
+                     static_cast<unsigned long long>(maxUlps), maxAbs,
+                     static_cast<unsigned long long>(equal), static_cast<unsigned long long>(n),
+                     static_cast<unsigned long long>(zeroSign));
+        }
+        return b;
+    }
+};
+
+// The word for one compared field of `count` doubles, tallied: "EQUAL" (bit for bit), "sign-of-
+// zero", or the farthest component in ulps with the absolute gap beside it.
+inline std::string UlpWord(const double* a, const double* b, int count, UlpTally& tally) {
+    const uint64_t e0 = tally.equal;
+    uint64_t worst = 0;
+    double maxAbs = 0.0;
+    for (int i = 0; i < count; ++i) {
+        const uint64_t u = tally.Add(a[i], b[i]);
+        if (u > worst) worst = u;
+        const double d = a[i] > b[i] ? a[i] - b[i] : b[i] - a[i];
+        if (d > maxAbs) maxAbs = d;
+    }
+    if (tally.equal - e0 == static_cast<uint64_t>(count)) return "EQUAL";
+    char s[96];
+    if (worst == 0) {
+        snprintf(s, sizeof s, "sign-of-zero");
+    } else {
+        snprintf(s, sizeof s, "%llu ulps (|d| %.3g)", static_cast<unsigned long long>(worst), maxAbs);
+    }
+    return s;
+}
+
 inline void Log(const char* fmt, ...) {
     char buf[2048];
     va_list ap;

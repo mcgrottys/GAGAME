@@ -13,7 +13,9 @@
 #include "compose/Compositor.h"
 #include "compose/SurfaceFrame.h"
 #include "core/GradeField.h"
+#include "core/Common.h"
 #include "core/MemGridLoader.h"
+#include "core/Space.h"   // M12 step 4d: the level's gauge placement, for the plane transport
 #include "hal/Residency.h"
 #include "hal/TileAtlas.h"
 #include "hal/Views.h"
@@ -257,6 +259,10 @@ public:
         double cam[3] = {0.0, 0.0, 0.0};   // the eye in this level's OWN tangent frame: S^-k(C)
         double sigma = 1.0;           // true size over own size: s^k
         double Q[3][3] = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}};   // own -> true
+        // M12 step 4d: the same map as a Placement -- the linear part of Level(rel), rotor and
+        // scale with t = 0 (the eye-to-eye translation the gauge identity cancels) -- which the
+        // frustum planes are pulled through (PullPlane) beside the hand transport above.
+        Placement gauge;
         float reliefExagg = 1.0f;     // the display exaggeration at this level's own altitude
         float sun[3] = {0.0f, 1.0f, 0.0f};   // the sun in this level's own frame
         int bankSet = -1;             // 0 = the camera's rings, 1 = set B, -1 = none (far)
@@ -305,6 +311,7 @@ public:
     static void LeafDir(int face, int level, uint32_t ix, uint32_t iy, double out[3]);
     static void LeafOf(const double dir[3], int level, int& face, uint32_t& ix, uint32_t& iy);
     uint32_t levelRecords[kMaxLevels] = {};   // records emitted per slot, last frame
+    void LogDrosteProbe() const;   // M12 step 4d instrument: the transport comparison's totals
 
     float foamOpacity = 0.72f;      // M8: peak foam opacity (data/wave_scene.json)
     float ringBlendTexels = 48.0f;  // M8: bank ring cross-fade width (scene cfg)
@@ -588,6 +595,16 @@ private:
     int m_lighting = 0;
     int m_camLevelAbs = 0;
     bool m_drosteOn = false;
+    // M12 step 4d instrument: the frustum transport compared, per plane per level, hand (Q^T n,
+    // d / sigma) against PullPlane through the level's gauge placement (ProbeTransport).
+    struct TransportProbeRow {
+        uint32_t slot = 0;
+        int rel = 0, plane = 0;
+        double hand[4] = {}, pulled[4] = {};
+    };
+    void ProbeTransport(const TransportProbeRow* rows, int n);
+    UlpTally m_probeN, m_probeD;
+    uint64_t m_probeFp = 0, m_probeWalks = 0, m_probeDumps = 0;
     // M10: the level slots whose limb PsLimb draws this frame, farthest first (each dims what is
     // behind it, so the nearer limb must composite last).
     uint32_t m_limbSlots[kMaxLevels] = {};

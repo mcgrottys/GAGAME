@@ -1528,6 +1528,53 @@ void GlobeLayer::WalkLevel(const WalkParams& wp, uint32_t slot) {
     }
 }
 
+// M12 step 4d instrument: THE FRUSTUM TRANSPORT THROUGH THE CYCLE. Each camera-relative plane
+// (n . v = d) carried into an extra level's own frame by hand -- n -> Q^T n, d -> d / sigma --
+// beside the same plane PULLED through the level's gauge placement (core/Space.h PullPlane:
+// n' = R^T n, d' = (d - n . t) / s with t = 0, the linear part of Level(rel): the eye-to-eye
+// translation the gauge identity S^k(C_k) = C cancels exactly). Compared bit for bit per plane
+// per level (core/Common.h UlpTally; the totals in LogDrosteProbe); the dump of both prints when
+// the transport changes (its FNV-1a -- a held still transports one frustum every frame). A level
+// under half a pixel is never transported, so a walk from orbit measures nothing.
+void GlobeLayer::ProbeTransport(const TransportProbeRow* rows, int n) {
+    if (n == 0) return;
+    ++m_probeWalks;
+    uint64_t fp = Fnv1aBytes(&n, sizeof n);
+    for (int i = 0; i < n; ++i) {
+        const TransportProbeRow& r = rows[i];
+        fp = Fnv1aBytes(&r.slot, sizeof r.slot, fp);
+        fp = Fnv1aBytes(&r.rel, sizeof r.rel, fp);
+        fp = Fnv1aBytes(&r.plane, sizeof r.plane, fp);
+        fp = Fnv1aBytes(r.hand, sizeof r.hand, fp);
+        fp = Fnv1aBytes(r.pulled, sizeof r.pulled, fp);
+    }
+    const bool dump = fp != m_probeFp;
+    m_probeFp = fp;
+    if (dump) {
+        ++m_probeDumps;
+        Log("[droste] transport walk %llu: %d planes over the extra levels -- hand (Q^T n, d / "
+            "sigma) | pulled (PullPlane through the level's gauge)",
+            static_cast<unsigned long long>(m_probeWalks), n);
+    }
+    for (int i = 0; i < n; ++i) {
+        const TransportProbeRow& r = rows[i];
+        const std::string wN = UlpWord(r.hand, r.pulled, 3, m_probeN);
+        const std::string wD = UlpWord(&r.hand[3], &r.pulled[3], 1, m_probeD);
+        if (!dump) continue;
+        Log("[droste] transport slot %u (rel %+d) plane %d hand: n %.17g %.17g %.17g d %.17g | "
+            "pulled: n %.17g %.17g %.17g d %.17g | n %s d %s",
+            r.slot, r.rel, r.plane, r.hand[0], r.hand[1], r.hand[2], r.hand[3], r.pulled[0],
+            r.pulled[1], r.pulled[2], r.pulled[3], wN.c_str(), wD.c_str());
+    }
+}
+
+void GlobeLayer::LogDrosteProbe() const {
+    Log("[droste] probe totals: frustum transport %llu walks (%llu distinct): n %s | d %s",
+        static_cast<unsigned long long>(m_probeWalks),
+        static_cast<unsigned long long>(m_probeDumps), m_probeN.Verdict().c_str(),
+        m_probeD.Verdict().c_str());
+}
+
 void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, double simTime) {
     if (!m_globe || !m_globe->Ready()) return;
     m_viewportH = viewportH;
@@ -1574,6 +1621,8 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     // answers every level from one resident set, and a small globe asks only for coarse mips
     // the root already holds. Its records carry their slot, so the mesh stage knows which
     // gauge to rasterize them through.
+    TransportProbeRow probeRows[kMaxLevels * 6];   // M12 step 4d instrument (ProbeTransport)
+    int probeN = 0;
     for (size_t li = 0; li < m_levels.size() && m_msPath; ++li) {
         const DrosteLevel& L = m_levels[li];
         const uint32_t slot = static_cast<uint32_t>(li + 1);
@@ -1615,11 +1664,26 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
                 wp.frustum[p][j] = L.Q[0][j] * n[0] + L.Q[1][j] * n[1] + L.Q[2][j] * n[2];
             }
             wp.frustum[p][3] = n[3] / L.sigma;
+            // M12 step 4d instrument: the same plane PULLED through the level's gauge placement
+            // (core/Space.h PullPlane), compared bit for bit after the loop (ProbeTransport).
+            // The hand transport above is what this walk culls by until the two are EQUAL.
+            double n2[3], d2;
+            L.gauge.PullPlane(n, n[3], n2, d2);
+            TransportProbeRow& pr = probeRows[probeN++];
+            pr.slot = slot;
+            pr.rel = L.rel;
+            pr.plane = p;
+            for (int j = 0; j < 4; ++j) pr.hand[j] = wp.frustum[p][j];
+            pr.pulled[0] = n2[0];
+            pr.pulled[1] = n2[1];
+            pr.pulled[2] = n2[2];
+            pr.pulled[3] = d2;
         }
         const size_t before = m_meshlets.size();
         WalkLevel(wp, slot);
         levelRecords[slot] = static_cast<uint32_t>(m_meshlets.size() - before);
     }
+    ProbeTransport(probeRows, probeN);
     if (m_msPath) SeamTable();
     // M8h: a dropped leaf is a hole. Report on the transition (once per episode), with
     // the count -- the fix is a coarser view or a bigger kMaxMeshlets, not silence.

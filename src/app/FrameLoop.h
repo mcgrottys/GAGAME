@@ -59,6 +59,7 @@
 #include "compose/TileTree.h"
 #include "core/Droste.h"   // M10: the globe within the globe, as one Cl(4,1) versor
 #include "core/Pga.h"
+#include "core/Space.h"   // M12 step 4d: the planet, the tangent frame and the Droste cycle, declared
 #include "hal/Residency.h"
 #include "hal/Tenant.h"
 #include "core/SceneConfig.h"
@@ -124,6 +125,36 @@ private:
     // Assembly's SurfaceFrame's; Session() writes them there through the same aliases.)
     droste::Portal m_portal;
     int m_camLevel = 0;   // the camera's ABSOLUTE level: 0 = the root, 1 = inside the first link
+    // M12 step 4d: THE FRAME CALCULUS' DECLARATIONS (core/Space.h). The planet at unit length
+    // R; the tangent frame under it, linked from the surface's rows; and the Droste tower as a
+    // CYCLE -- the root's tangent frame hung under a leaf of itself by the portal's similarity,
+    // Level(k) = S^k. The portal stays the builder (BuildPortal resolves the address); the Space
+    // is the declaration the scene will carry. Space keeps parent POINTERS: they point at these
+    // members, and FrameLoop is neither copied nor moved (above), so they never dangle.
+    Space m_planetSpace;
+    Space m_tangentSpace;
+    Space m_drosteLeaf;
+    // M12 step 4d instrument: the [droste] closed-form comparison. Every Droste read of the
+    // portal (the level table's cam / sigma / Q / sun / sky zenith, the camera level's sun,
+    // the dive rail's S^f(helm)) is evaluated from Level(k) beside it and compared bit for bit
+    // (core/Common.h UlpTally); the table's dump prints when its geometry changes, Finish()
+    // prints the totals. The switch of a site to Level(k) waits on EQUAL there.
+    struct DrosteProbeRow {
+        int rel = 0;
+        bool hasSky = false;
+        double cam[3] = {}, sigma = 1.0, Q[3][3] = {}, sun[3] = {}, skyUp[3] = {};        // the portal's
+        double cam2[3] = {}, sigma2 = 1.0, Q2[3][3] = {}, sun2[3] = {}, skyUp2[3] = {};   // Level(rel)'s
+    };
+    void ProbeDrosteTable(const DrosteProbeRow* rows, int n, const double sun[3],
+                          const double sun2[3], uint32_t frame);
+    void ProbeDive(double f, const double c0[3], const double f0[3], double c[3], double fw[3],
+                   double up[3], bool live, double u);
+    UlpTally m_probeCam, m_probeSigma, m_probeQ, m_probeLevelSun, m_probeSkyUp, m_probeSun;
+    UlpTally m_probeDiveC, m_probeDiveFw, m_probeDiveUp;
+    UlpTally m_probeSweepC, m_probeSweepFw, m_probeSweepUp;
+    uint64_t m_probeTableFp = 0, m_probeTableBuilds = 0, m_probeTableDumps = 0;
+    uint64_t m_probeDiveCalls = 0;
+    bool m_probeSweepShown = false;
     std::function<double(const Camera&)> m_altOf;
     std::function<Motor(const Camera&)> m_poseMotor;
     std::function<void(const Motor&, Camera&)> m_motorPose;
