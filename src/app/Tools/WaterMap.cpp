@@ -7,7 +7,7 @@
 #include "compose/VectorPack.h"
 #include "compose/WaterAtlas.h"
 #include "core/Common.h"
-#include "core/Gpu.h"
+#include "hal/Gpu.h"
 #include "core/Image.h"
 #include "core/Json.h"
 #include "sim/GlobeModel.h"

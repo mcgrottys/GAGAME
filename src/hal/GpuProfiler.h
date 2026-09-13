@@ -12,7 +12,7 @@
 // ================================================================================================
 #pragma once
 
-#include "core/Gpu.h"
+#include "hal/Gpu.h"
 
 #include <cstdint>
 #include <string>

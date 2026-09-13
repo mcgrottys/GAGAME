@@ -31,7 +31,7 @@ public:
 
     const char* Name() const override { return "vessels"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
-              ID3D12RootSignature* rootSig) override;
+              hal::RootSignature rootSig) override;
     void ReloadShaders(Gpu& gpu, ShaderCompiler& sc) override;
     void Render(const FrameContext& ctx) override;
 
@@ -54,8 +54,8 @@ private:
     bool BuildPso(Gpu& gpu, ShaderCompiler& sc);
 
     std::wstring m_shaderDir;
-    ID3D12RootSignature* m_rootSig = nullptr;
-    Com<ID3D12PipelineState> m_pso;
+    hal::RootSignature m_rootSig = nullptr;
+    hal::Pso m_pso;
     std::vector<PartGpu> m_parts;
 };
 

@@ -14,9 +14,10 @@
 // ================================================================================================
 #pragma once
 
-#include "core/Gpu.h"
-#include "core/GpuProfiler.h"
-#include "core/Shader.h"
+#include "hal/Gpu.h"
+#include "hal/GpuProfiler.h"
+#include "hal/Root.h"
+#include "hal/Shader.h"
 #include "render/Camera.h"
 #include "scene/Layer.h"
 
@@ -88,7 +89,7 @@ public:
     uint32_t Height() const { return m_height; }
 
     ShaderCompiler& Shaders() { return m_shaders; }
-    ID3D12RootSignature* RootSignature() const { return m_rootSig.Get(); }
+    hal::RootSignature RootSignature() const { return m_rootSig.Get(); }
 
     // --gpu-time: timestamp pairs around every pass. Off (null) by default -- no queries issued.
     void EnableGpuProfiler();
@@ -133,6 +134,9 @@ public:
     float bscat[3] = {0.0173f, 0.0233f, 0.0248f};
 
 private:
+    // The table above as a hal::RootLayout -- the one graphics layout, built once by
+    // CreateRootSignature and handed to every layer's Init.
+    static hal::RootLayout SharedGraphicsLayout();
     void CreateRootSignature();
     void CreateTargets(uint32_t width, uint32_t height);
     void CreateTonemapPso();
@@ -141,8 +145,8 @@ private:
     RendererDesc m_desc;
     ShaderCompiler m_shaders;
 
-    Com<ID3D12RootSignature> m_rootSig;
-    Com<ID3D12PipelineState> m_tonemapPso;
+    hal::RootSignatureRef m_rootSig;
+    hal::Pso m_tonemapPso;
 
     GpuTexture m_sceneColor;
     GpuTexture m_sceneDepth;

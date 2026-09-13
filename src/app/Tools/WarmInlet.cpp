@@ -5,8 +5,9 @@
 
 #include "compose/Compositor.h"
 #include "core/Common.h"
-#include "core/Gpu.h"
-#include "core/Residency.h"
+#include "hal/Context.h"
+#include "hal/Gpu.h"
+#include "hal/Residency.h"
 
 #include <chrono>
 #include <cstdint>
@@ -50,8 +51,10 @@ void RunWarmInlet(const Options& opt, Gpu& gpu, const Compositor& compositor,
         "in cache/composed forever)",
         opt.tileBudget);
     for (int it = 0; it < 12000 && resMgr.PendingCount() > 0; ++it) {
-        ID3D12GraphicsCommandList* cl = gpu.BeginUpload();
-        resMgr.ProcessQueues(gpu, cl);
+        // M12 step 3f: the residency turn records through an Upload context (the 3b pattern);
+        // the manager still takes the raw list, named as the escape hatch it is.
+        hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
+        resMgr.ProcessQueues(gpu, up.Native());
         gpu.EndUpload();
         std::this_thread::sleep_for(std::chrono::milliseconds(20));   // loads need time
         if (it % 150 == 0) {

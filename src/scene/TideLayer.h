@@ -36,7 +36,7 @@ public:
 
     const char* Name() const override { return "tide"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
-              ID3D12RootSignature* rootSig) override;
+              hal::RootSignature rootSig) override;
     void ReloadShaders(Gpu& gpu, ShaderCompiler& sc) override;
     void Render(const FrameContext& ctx) override;
 
@@ -73,8 +73,8 @@ private:
     const TideModel* m_model = nullptr;
     std::wstring m_shaderDir;
     float m_exagg = 60.0f;
-    ID3D12RootSignature* m_rootSig = nullptr;
-    Com<ID3D12PipelineState> m_ribbonPso, m_curvesPso;
+    hal::RootSignature m_rootSig = nullptr;
+    hal::Pso m_ribbonPso, m_curvesPso;
 
     RibbonCb m_ribbon{};
     CurvesCb m_curves{};

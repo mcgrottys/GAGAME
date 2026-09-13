@@ -1,7 +1,8 @@
 #include "scene/GisLayer.h"
 
-#include "core/PixEvents.h"
-#include "core/Shader.h"
+#include "hal/PixEvents.h"
+#include "hal/Pipeline.h"
+#include "hal/Shader.h"
 
 #include <cstring>
 
@@ -38,7 +39,7 @@ GisLayer::Batch GisLayer::MakeBatch(Gpu& gpu, const std::vector<GisStencil::Poly
     return batch;
 }
 
-void GisLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSignature* rootSig) {
+void GisLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSignature rootSig) {
     m_rootSig = rootSig;
     if (!m_exchange) return;
     if (!BuildPso(gpu, sc)) throw std::runtime_error("gis PSO failed");
@@ -90,41 +91,23 @@ void GisLayer::PublishAtTolerance(Gpu& gpu, float tol) {
 
 bool GisLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
     const std::wstring path = m_shaderDir + L"/GisVec.hlsl";
-    ShaderBlob vs = sc.Compile(path, L"VsMain", L"vs_6_0");
-    ShaderBlob ps = sc.Compile(path, L"PsMain", L"ps_6_0");
-    if (!vs.Valid() || !ps.Valid()) return false;
-
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
-    d.pRootSignature = m_rootSig;
-    d.VS = {vs.Data(), vs.Size()};
-    d.PS = {ps.Data(), ps.Size()};
-    d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    d.SampleMask = UINT_MAX;
-    d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-    // The overlay is X-RAY on purpose (alignment truth over every layer's claim); the far
-    // side of the planet is culled in the vertex shader instead of by depth.
-    d.DepthStencilState.DepthEnable = FALSE;
-    d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-    d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
-    d.NumRenderTargets = 1;
-    d.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    d.SampleDesc.Count = 1;
-
-    Com<ID3D12PipelineState> pso;
-    if (FAILED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) return false;
-    m_pso = pso;
-    return true;
+    hal::GraphicsPipelineDesc d;
+    d.rootSig = m_rootSig;
+    d.vs = sc.Compile(path, L"VsMain", L"vs_6_0");
+    d.ps = sc.Compile(path, L"PsMain", L"ps_6_0");
+    // The overlay is X-RAY on purpose (alignment truth over every layer's claim): depth stays
+    // OFF, and the far side of the planet is culled in the vertex shader instead.
+    d.topology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+    return hal::Reload(m_pso, [&] { return hal::BuildGraphics(gpu, d, "gis"); }, "gis");
 }
 
 void GisLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
-    Com<ID3D12PipelineState> keep = m_pso;
-    if (!BuildPso(gpu, sc)) m_pso = keep;
+    BuildPso(gpu, sc);   // the reload law lives in BuildPso: swap only on success
 }
 
 void GisLayer::Render(const FrameContext& ctx) {
     if (!enabled || !m_pso) return;
-    PixScope scope(ctx.cl, "gis (survey vectors: the authority, drawn as vectors)");
+    PixScope scope(ctx.cmd->Native(), "gis (survey vectors: the authority, drawn as vectors)");
     if (m_pack && m_coastCh >= 0) {
         // Quantize the view's ground-pixel size to x8 buckets; republish only on change.
         float bucket = 0.0f;
@@ -133,17 +116,17 @@ void GisLayer::Render(const FrameContext& ctx) {
         }
         if (bucket != m_bucket) PublishAtTolerance(*ctx.gpu, bucket);
     }
-    ctx.cl->SetPipelineState(m_pso.Get());
-    ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
+    ctx.cmd->Pipeline(m_pso.Get());
+    ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_LINELIST);
     auto draw = [&](const Batch& b) {
         const Exchange::View v = m_exchange->Query(b.channel);
         if (!v.valid || v.elements == 0) return;
         GisCbData cb{};
         cb.cs = m_cs;
         memcpy(cb.color, b.color, sizeof(cb.color));
-        ctx.cl->SetGraphicsRootConstantBufferView(1, ctx.gpu->PushConstants(&cb, sizeof(cb)));
-        ctx.cl->SetGraphicsRootShaderResourceView(2, v.va);
-        ctx.cl->DrawInstanced(v.elements, 1, 0, 0);
+        ctx.cmd->GraphicsConstants(1, cb);
+        ctx.cmd->GraphicsSrvAt(2, v.va);
+        ctx.cmd->Draw(v.elements, 1, 0, 0);
     };
     draw(m_global);
     draw(m_coast);

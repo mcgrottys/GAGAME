@@ -68,7 +68,7 @@ public:
                           std::function<double(double)> oceanAt, double spinupHours);
     // M9ar: the bed every OWNED solver binds at activation -- a slice of the height page
     // tenant. There is no per-window bed texture any more.
-    void SetHeightPage(ID3D12Resource* heightArr, ID3D12Resource* resMapArr, uint32_t slice,
+    void SetHeightPage(hal::Resource heightArr, hal::Resource resMapArr, uint32_t slice,
                        uint32_t mips, double orgPxX, double orgPxY) {
         m_hgtArr = heightArr;
         m_hgtRes = resMapArr;
@@ -112,8 +112,8 @@ public:
     std::string stats;   // "wx 2 windows (merrimack, boston)" for the title bar
 
 private:
-    ID3D12Resource* m_hgtArr = nullptr;   // M9ar: borrowed from the residency manager
-    ID3D12Resource* m_hgtRes = nullptr;
+    hal::Resource m_hgtArr = nullptr;   // M9ar: borrowed from the residency manager
+    hal::Resource m_hgtRes = nullptr;
     uint32_t m_hgtSlice = 6, m_hgtMips = 7;
     double m_hgtOrg[2] = {0.0, 0.0};
     struct Window {

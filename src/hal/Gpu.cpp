@@ -1,4 +1,5 @@
-#include "core/Gpu.h"
+#include "hal/Gpu.h"
+#include "hal/Retire.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -277,6 +278,9 @@ void Gpu::CreateFrameResources() {
     GA_CHECK(m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_alloc[0].Get(),
                                          nullptr, IID_PPV_ARGS(&m_cmdList)));
     m_cmdList->Close();
+    // M12 step 3f: the same list as ID3D12GraphicsCommandList6, for DispatchMesh (MeshList).
+    // A runtime without it leaves this null, and the globe keeps its classic path.
+    if (FAILED(m_cmdList->QueryInterface(IID_PPV_ARGS(&m_cmdList6)))) m_cmdList6 = nullptr;
 }
 
 void Gpu::Shutdown() {
@@ -293,6 +297,8 @@ ID3D12GraphicsCommandList* Gpu::BeginFrame() {
         GA_CHECK(m_fence->SetEventOnCompletion(m_frameFence[m_frameIndex], m_fenceEvent));
         WaitForSingleObject(m_fenceEvent, INFINITE);
     }
+    // M12 step 3e: the deferred releases whose fence has passed (Retire.h) -- the one call.
+    hal::DrainRetired(m_fence->GetCompletedValue());
     m_cbOffset[m_frameIndex] = 0;
     GA_CHECK(m_alloc[m_frameIndex]->Reset());
     GA_CHECK(m_cmdList->Reset(m_alloc[m_frameIndex].Get(), nullptr));

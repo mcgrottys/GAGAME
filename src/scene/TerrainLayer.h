@@ -21,7 +21,7 @@ public:
 
     const char* Name() const override { return "terrain"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
-              ID3D12RootSignature* rootSig) override;
+              hal::RootSignature rootSig) override;
     void ReloadShaders(Gpu& gpu, ShaderCompiler& sc) override;
     void Render(const FrameContext& ctx) override;
 
@@ -47,8 +47,8 @@ private:
 
     std::wstring m_shaderDir;
     const BathyModel* m_bathy = nullptr;
-    ID3D12RootSignature* m_rootSig = nullptr;
-    Com<ID3D12PipelineState> m_pso;
+    hal::RootSignature m_rootSig = nullptr;
+    hal::Pso m_pso;
 
     uint32_t m_quadsX = 0, m_quadsZ = 0;
     ComposedSurfaceCb m_cs{};   // zero until SetComposed: every channel reads "off"

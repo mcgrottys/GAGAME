@@ -3,7 +3,7 @@
 #include "app/Tools.h"
 
 #include "core/Common.h"
-#include "core/Gpu.h"
+#include "hal/Gpu.h"
 #include "scene/SeaLayer.h"
 
 namespace ga::app::tools {

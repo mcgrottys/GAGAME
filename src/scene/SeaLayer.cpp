@@ -1,8 +1,11 @@
 #include "scene/SeaLayer.h"
 
-#include "core/GpuProfiler.h"
+#include "hal/GpuProfiler.h"
 
-#include "core/PixEvents.h"
+#include "hal/PixEvents.h"
+#include "hal/Pipeline.h"
+#include "hal/Root.h"
+#include "hal/Views.h"
 #include "scene/FieldSet.h"
 
 #include <algorithm>
@@ -11,7 +14,7 @@
 namespace ga {
 
 void SeaLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
-                    ID3D12RootSignature* rootSig) {
+                    hal::RootSignature rootSig) {
     (void)fields;
     m_rootSig = rootSig;
     if (!m_sea || !m_sea->Ready()) throw std::runtime_error("SeaLayer needs a SeaState");
@@ -48,89 +51,42 @@ void SeaLayer::InitChurn(Gpu& gpu, ShaderCompiler& sc) {
     m_lastActive.assign(static_cast<size_t>(m_churn.TilesX()) * m_churn.TilesY(), -1.0e18);
 
     // Root signature: b0 CBV, t0 root SRV (tile list from the frame arena), table
-    // [t1 chop-deriv, t2 swe uv, t3 bathy, u0 churn], s0 wrap + s1 clamp samplers.
-    D3D12_DESCRIPTOR_RANGE1 ranges[2]{};
-    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = 4;   // M9ar: + t4, the height page residency map
-    ranges[0].BaseShaderRegister = 1;
-    ranges[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    ranges[0].OffsetInDescriptorsFromTableStart = 0;
-    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    ranges[1].NumDescriptors = 1;
-    ranges[1].BaseShaderRegister = 0;
-    ranges[1].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    ranges[1].OffsetInDescriptorsFromTableStart = 4;
-    D3D12_ROOT_PARAMETER1 params[3]{};
-    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    params[0].Descriptor.ShaderRegister = 0;
-    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    params[1].Descriptor.ShaderRegister = 0;
-    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[2].DescriptorTable.NumDescriptorRanges = 2;
-    params[2].DescriptorTable.pDescriptorRanges = ranges;
-    D3D12_STATIC_SAMPLER_DESC samps[2]{};
-    samps[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-    samps[0].AddressU = samps[0].AddressV = samps[0].AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    samps[0].MaxLOD = D3D12_FLOAT32_MAX;
-    samps[0].ShaderRegister = 0;
-    samps[0].ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-    samps[1] = samps[0];
-    samps[1].AddressU = samps[1].AddressV = samps[1].AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    samps[1].ShaderRegister = 1;
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC vd{};
-    vd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    vd.Desc_1_1.NumParameters = _countof(params);
-    vd.Desc_1_1.pParameters = params;
-    vd.Desc_1_1.NumStaticSamplers = 2;
-    vd.Desc_1_1.pStaticSamplers = samps;
-    Com<ID3DBlob> blob, err;
-    GA_CHECK(D3D12SerializeVersionedRootSignature(&vd, &blob, &err));
-    GA_CHECK(gpu.Device()->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
-                                              IID_PPV_ARGS(&m_churnRs)));
+    // [t1 chop-deriv, t2 swe uv, t3 bathy, t4 its residency map (M9ar), u0 churn], s0 wrap +
+    // s1 clamp samplers.
+    m_churnRs = hal::RootLayout{}
+                    .Cbv(0)
+                    .Srv(0)
+                    .Table({hal::SrvRange(1, 4), hal::UavRange(0, 1)})
+                    .Sampler(hal::StaticSampler(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                                                D3D12_TEXTURE_ADDRESS_MODE_WRAP))
+                    .Sampler(hal::StaticSampler(1, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                                                D3D12_TEXTURE_ADDRESS_MODE_CLAMP))
+                    .Build(gpu, "sea.churn");
     m_churnRs->SetName(L"sea.churn root signature");
 
-    auto makePso = [&](const wchar_t* entry, Com<ID3D12PipelineState>& out) {
-        ShaderBlob cs = sc.Compile(m_shaderDir + L"/SeaChurn.hlsl", entry, L"cs_6_0");
-        if (!cs.Valid()) throw std::runtime_error("SeaChurn kernel failed");
-        D3D12_COMPUTE_PIPELINE_STATE_DESC d{};
-        d.pRootSignature = m_churnRs.Get();
-        d.CS = {cs.Data(), cs.Size()};
-        GA_CHECK(gpu.Device()->CreateComputePipelineState(&d, IID_PPV_ARGS(&out)));
+    auto makePso = [&](const wchar_t* entry, hal::Pso& out) {
+        out = hal::Require(
+            hal::BuildCompute(gpu, m_churnRs.Get(),
+                              sc.Compile(m_shaderDir + L"/SeaChurn.hlsl", entry, L"cs_6_0"),
+                              "sea.churn"),
+            "SeaChurn kernel");
         out->SetName(entry);
     };
     makePso(L"CsChurnClear", m_churnClear);
     makePso(L"CsChurnUpdate", m_churnUpdate);
 
-    m_churnTable = gpu.SrvHeap().Alloc(5);   // M9ar: + the residency map slot
-    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    sv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    sv.Texture2D.MipLevels = 1;
-    gpu.Device()->CreateShaderResourceView(m_fft.DerivRes(2), &sv,
-                                           gpu.SrvHeap().Cpu(m_churnTable + 0));
+    m_churnTable = hal::Table::Alloc(gpu, 5, "sea.churn");   // M9ar: + the residency map slot
+    m_churnTable.Srv2D(0, m_fft.DerivRes(2), DXGI_FORMAT_R16G16B16A16_FLOAT);
     // t2 (solved currents) and t3 (bathy) start as NULL views -- they read zeros, which the
     // kernel's gSweM.x gate never touches -- and are wired in RecordChurn once the solver
     // exists (main attaches it after this layer's Init).
-    gpu.Device()->CreateShaderResourceView(nullptr, &sv, gpu.SrvHeap().Cpu(m_churnTable + 1));
-    sv.Format = DXGI_FORMAT_R32_FLOAT;
-    gpu.Device()->CreateShaderResourceView(nullptr, &sv, gpu.SrvHeap().Cpu(m_churnTable + 2));
-    {   // M9ar: t3/t4 are Texture2DArray in the kernel; null views must say so
-        D3D12_SHADER_RESOURCE_VIEW_DESC nv{};
-        nv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        nv.Format = DXGI_FORMAT_R16_FLOAT;
-        nv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-        nv.Texture2DArray.MipLevels = 1;
-        nv.Texture2DArray.ArraySize = 1;
-        gpu.Device()->CreateShaderResourceView(nullptr, &nv, gpu.SrvHeap().Cpu(m_churnTable + 2));
-        nv.Format = DXGI_FORMAT_R8_UNORM;
-        gpu.Device()->CreateShaderResourceView(nullptr, &nv, gpu.SrvHeap().Cpu(m_churnTable + 3));
-    }
-    D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
-    uv.Format = DXGI_FORMAT_R16_FLOAT;
-    uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    gpu.Device()->CreateUnorderedAccessView(m_churn.Res(), nullptr, &uv,
-                                            gpu.SrvHeap().Cpu(m_churnTable + 4));
+    m_churnTable.Srv2D(1, nullptr, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    // M9ar: t3/t4 are Texture2DArray in the kernel; null views must say so. (Until step 3d
+    // t3 was first written as a Texture2D R32F null view and then, before any use, as this
+    // one; the dead write is gone.)
+    m_churnTable.SrvArray(2, nullptr, DXGI_FORMAT_R16_FLOAT, 0, 1);
+    m_churnTable.SrvArray(3, nullptr, DXGI_FORMAT_R8_UNORM, 0, 1);
+    m_churnTable.Uav2D(4, m_churn.Res(), DXGI_FORMAT_R16_FLOAT);
 
     m_maskCpu.assign(static_cast<size_t>(m_churn.TilesX()) * m_churn.TilesY(), 0);
     m_maskTex = gpu.CreateTexture2D(m_churn.TilesX(), m_churn.TilesY(), DXGI_FORMAT_R8_UNORM,
@@ -142,111 +98,54 @@ void SeaLayer::InitChurn(Gpu& gpu, ShaderCompiler& sc) {
 }
 
 bool SeaLayer::BuildPsos(Gpu& gpu, ShaderCompiler& sc) {
-    auto makePso = [&](const wchar_t* file, bool lines, bool depth,
-                       Com<ID3D12PipelineState>& out) -> bool {
+    // The spectrum plot: lines, no depth.
+    auto makePso = [&](const wchar_t* file, bool lines, bool depth, const char* tag) {
         const std::wstring path = m_shaderDir + L"/" + file;
-        ShaderBlob vs = sc.Compile(path, L"VsMain", L"vs_6_0");
-        ShaderBlob ps = sc.Compile(path, L"PsMain", L"ps_6_0");
-        if (!vs.Valid() || !ps.Valid()) return false;
-
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
-        d.pRootSignature = m_rootSig;
-        d.VS = {vs.Data(), vs.Size()};
-        d.PS = {ps.Data(), ps.Size()};
-        d.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
-        d.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
-        d.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-        d.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
-        d.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
-        d.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-        d.SampleMask = UINT_MAX;
-        d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-        d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        d.RasterizerState.DepthClipEnable = TRUE;
-        d.DepthStencilState.DepthEnable = depth ? TRUE : FALSE;
-        d.DepthStencilState.DepthWriteMask = depth ? D3D12_DEPTH_WRITE_MASK_ALL
-                                                   : D3D12_DEPTH_WRITE_MASK_ZERO;
-        d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;   // reversed-Z
-        d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-        d.PrimitiveTopologyType = lines ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE
-                                        : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        d.NumRenderTargets = 1;
-        d.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        d.SampleDesc.Count = 1;
-
-        Com<ID3D12PipelineState> pso;
-        if (FAILED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) {
-            Log("[sea] PSO %S failed", file);
-            return false;
-        }
-        out = pso;
-        return true;
+        hal::GraphicsPipelineDesc d;
+        d.rootSig = m_rootSig;
+        d.vs = sc.Compile(path, L"VsMain", L"vs_6_0");
+        d.ps = sc.Compile(path, L"PsMain", L"ps_6_0");
+        d.depthClip = TRUE;
+        d.depthTest = depth;
+        d.depthWrite = depth;   // reversed-Z GREATER, the default comparison
+        d.topology = lines ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE
+                           : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        return hal::BuildGraphics(gpu, d, tag);
     };
     // The sea itself tessellates (M5b): VS emits control points, HS sets screen-space edge
     // factors, DS displaces -- vqview's chain, ported.
-    auto makeSeaPso = [&](D3D12_FILL_MODE fill, Com<ID3D12PipelineState>& out) -> bool {
+    auto makeSeaPso = [&](D3D12_FILL_MODE fill, const char* tag) {
         const std::wstring path = m_shaderDir + L"/Sea.hlsl";
-        ShaderBlob vs = sc.Compile(path, L"VsMain", L"vs_6_0");
-        ShaderBlob hs = sc.Compile(path, L"HsMain", L"hs_6_0");
-        ShaderBlob ds = sc.Compile(path, L"DsMain", L"ds_6_0");
-        ShaderBlob ps = sc.Compile(path, L"PsMain", L"ps_6_0");
-        if (!vs.Valid() || !hs.Valid() || !ds.Valid() || !ps.Valid()) return false;
-
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
-        d.pRootSignature = m_rootSig;
-        d.VS = {vs.Data(), vs.Size()};
-        d.HS = {hs.Data(), hs.Size()};
-        d.DS = {ds.Data(), ds.Size()};
-        d.PS = {ps.Data(), ps.Size()};
-        d.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
-        d.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
-        d.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-        d.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
-        d.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
-        d.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-        d.SampleMask = UINT_MAX;
-        d.RasterizerState.FillMode = fill;
-        d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        d.RasterizerState.DepthClipEnable = TRUE;
-        d.DepthStencilState.DepthEnable = TRUE;
-        d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-        d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;   // reversed-Z
-        d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-        d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
-        d.NumRenderTargets = 1;
-        d.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        d.SampleDesc.Count = 1;
-
-        Com<ID3D12PipelineState> pso;
-        if (FAILED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) {
-            Log("[sea] tessellated sea PSO failed");
-            return false;
-        }
-        out = pso;
-        return true;
+        hal::GraphicsPipelineDesc d;
+        d.rootSig = m_rootSig;
+        d.vs = sc.Compile(path, L"VsMain", L"vs_6_0");
+        d.hs = sc.Compile(path, L"HsMain", L"hs_6_0");
+        d.ds = sc.Compile(path, L"DsMain", L"ds_6_0");
+        d.ps = sc.Compile(path, L"PsMain", L"ps_6_0");
+        // The builder refuses an invalid VS or PS; the tessellation stages are this site's.
+        if (!d.hs.Valid() || !d.ds.Valid()) return hal::Pso();
+        d.fill = fill;
+        d.depthClip = TRUE;
+        d.depthTest = true;
+        d.depthWrite = true;
+        d.topology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
+        return hal::BuildGraphics(gpu, d, tag);
     };
 
-    Com<ID3D12PipelineState> sea, seaWire, spec;
-    if (!makeSeaPso(D3D12_FILL_MODE_SOLID, sea)) return false;
-    if (!makePso(L"SpecPlot.hlsl", true, false, spec)) return false;
-    m_seaPso = sea;
-    m_specPso = spec;
-    // M9b: the tessellated sea in wireframe -- the DS-displaced patch grid, so the
-    // screen-space edge density and the actual vertex heave are both visible. Optional:
-    // a failure leaves the solid PSO alone.
-    if (makeSeaPso(D3D12_FILL_MODE_WIREFRAME, seaWire)) m_seaPsoWire = seaWire;
+    // The sea and its spectrum plot swap together or not at all. M9b: the tessellated sea in
+    // wireframe -- the DS-displaced patch grid, so the screen-space edge density and the actual
+    // vertex heave are both visible -- is optional: a failure there leaves the solid PSO alone.
+    hal::ReloadSet set;
+    if (!set.Add(m_seaPso, makeSeaPso(D3D12_FILL_MODE_SOLID, "sea"))) return false;
+    if (!set.Add(m_specPso, makePso(L"SpecPlot.hlsl", true, false, "sea.spec"))) return false;
+    set.Commit();
+    hal::Reload(m_seaPsoWire, [&] { return makeSeaPso(D3D12_FILL_MODE_WIREFRAME, "sea.wire"); },
+                "sea.wire");
     return true;
 }
 
 void SeaLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
-    Com<ID3D12PipelineState> keepSea = m_seaPso, keepSpec = m_specPso;
-    if (!BuildPsos(gpu, sc)) {
-        m_seaPso = keepSea;
-        m_specPso = keepSpec;
-        Log("[sea] reload failed; keeping the previous PSOs");
-    }
+    if (!BuildPsos(gpu, sc)) Log("[sea] reload failed; keeping the previous PSOs");
     if (!m_fft.ReloadShaders(gpu, sc)) Log("[sea] ocean compute reload failed; keeping previous");
 }
 
@@ -787,47 +686,25 @@ void SeaLayer::UpdateChurnResidency(Gpu& gpu, double simUnix, double signedMs) {
 
 void SeaLayer::RecordChurn(const FrameContext& ctx) {
     if (!m_churnReady) return;
-    PixScope scope(ctx.cl, "sea.churn (sparse stateful atlas: clear fresh, decay+deposit)");
+    PixScope scope(ctx.cmd->Native(),
+                   "sea.churn (sparse stateful atlas: clear fresh, decay+deposit)");
 
     // M5c late wiring: the solver is attached after Init, so its textures land in the table on
     // first use (overwriting the null views).
     if (!m_churnSweWired && m_swe && m_swe->Ready()) {
-        D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-        sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        sv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        sv.Texture2D.MipLevels = 1;
-        ctx.gpu->Device()->CreateShaderResourceView(m_swe->UvRes(), &sv,
-                                                    ctx.gpu->SrvHeap().Cpu(m_churnTable + 1));
+        m_churnTable.Srv2D(1, m_swe->UvRes(), DXGI_FORMAT_R16G16B16A16_FLOAT);
         // M9ar: the bed is slice m_hgtSlice of the height PAGE tenant, plus its residency map.
         if (m_hgtArr && m_hgtRes) {
-            D3D12_SHADER_RESOURCE_VIEW_DESC av{};
-            av.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            av.Format = DXGI_FORMAT_R16_FLOAT;
-            av.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
             // M9ax: the whole tenant (cube faces + the page); the slice rides the CB.
-            av.Texture2DArray.MipLevels = m_hgtMips;
-            av.Texture2DArray.FirstArraySlice = 0;
-            av.Texture2DArray.ArraySize = UINT32_MAX;
-            ctx.gpu->Device()->CreateShaderResourceView(m_hgtArr, &av,
-                                                        ctx.gpu->SrvHeap().Cpu(m_churnTable + 2));
-            av.Format = DXGI_FORMAT_R8_UNORM;
-            av.Texture2DArray.MipLevels = 1;
-            ctx.gpu->Device()->CreateShaderResourceView(m_hgtRes, &av,
-                                                        ctx.gpu->SrvHeap().Cpu(m_churnTable + 3));
+            m_churnTable.SrvArray(2, m_hgtArr, DXGI_FORMAT_R16_FLOAT, 0, UINT32_MAX, m_hgtMips);
+            m_churnTable.SrvArray(3, m_hgtRes, DXGI_FORMAT_R8_UNORM, 0, UINT32_MAX, 1);
         }
         m_churnSweWired = true;
     }
 
     auto barrierTo = [&](D3D12_RESOURCE_STATES to) {
         if (m_churnState == to) return;
-        D3D12_RESOURCE_BARRIER b{};
-        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Transition.pResource = m_churn.Res();
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b.Transition.StateBefore = m_churnState;
-        b.Transition.StateAfter = to;
-        ctx.cl->ResourceBarrier(1, &b);
+        ctx.cmd->Barrier(m_churn.Res(), m_churnState, to);
         m_churnState = to;
     };
 
@@ -881,28 +758,23 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
         m_churnCb.waveD[2] = 1.0f;
         m_churnCb.waveD[3] = 1.0f;
 
-        ctx.cl->SetComputeRootSignature(m_churnRs.Get());
+        ctx.cmd->ComputeRoot(m_churnRs.Get());
 
-        auto dispatchList = [&](ID3D12PipelineState* pso, const std::vector<uint32_t>& list) {
+        auto dispatchList = [&](hal::PsoPtr pso, const std::vector<uint32_t>& list) {
             if (list.empty()) return;
             m_churnCb.listCount = static_cast<uint32_t>(list.size());
-            ctx.cl->SetComputeRootConstantBufferView(
-                0, ctx.gpu->PushConstants(&m_churnCb, sizeof(m_churnCb)));
-            ctx.cl->SetComputeRootShaderResourceView(
-                1, ctx.gpu->PushConstants(list.data(), list.size() * 4));
-            ctx.cl->SetComputeRootDescriptorTable(2, ctx.gpu->SrvHeap().Gpu(m_churnTable));
-            ctx.cl->SetPipelineState(pso);
-            ctx.cl->Dispatch(m_churn.TileW() / 16, m_churn.TileH() / 16, m_churnCb.listCount);
+            ctx.cmd->ComputeConstants(0, m_churnCb);
+            ctx.cmd->ComputeSrvAt(1, ctx.gpu->PushConstants(list.data(), list.size() * 4));
+            ctx.cmd->ComputeTable(2, m_churnTable.Base());
+            ctx.cmd->Pipeline(pso);
+            ctx.cmd->Dispatch(m_churn.TileW() / 16, m_churn.TileH() / 16, m_churnCb.listCount);
         };
 
         if (!m_pendingClear.empty()) {
-            PixMarker(ctx.cl, "churn.clearFresh (undefined pool memory -> zero)");
+            PixMarker(ctx.cmd->Native(), "churn.clearFresh (undefined pool memory -> zero)");
             dispatchList(m_churnClear.Get(), m_pendingClear);
             m_pendingClear.clear();
-            D3D12_RESOURCE_BARRIER uav{};
-            uav.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-            uav.UAV.pResource = m_churn.Res();
-            ctx.cl->ResourceBarrier(1, &uav);
+            ctx.cmd->UavBarrier(m_churn.Res());
         }
         if (doUpdate) dispatchList(m_churnUpdate.Get(), m_churn.ResidentList());
     }
@@ -915,35 +787,32 @@ void SeaLayer::Render(const FrameContext& ctx) {
     // The compute chain records into the same command list; compute bindings do not disturb the
     // graphics root signature the Renderer already set.
     if (m_swe && m_swe->Ready()) {
-        GpuScope gscope(ctx.prof, ctx.cl, "sea.swe");
-        m_swe->Record(ctx.cl, *ctx.gpu, m_simUnix, m_seaCb.sea[0]);
+        GpuScope gscope(ctx.prof, ctx.cmd->Native(), "sea.swe");
+        m_swe->Record(*ctx.cmd, *ctx.gpu, m_simUnix, m_seaCb.sea[0]);
     }
     {
-        GpuScope gscope(ctx.prof, ctx.cl, "sea.fft");
-        m_fft.Record(ctx.cl, *ctx.gpu, m_tSec);
+        GpuScope gscope(ctx.prof, ctx.cmd->Native(), "sea.fft");
+        m_fft.Record(*ctx.cmd, *ctx.gpu, m_tSec);
     }
     {
-        GpuScope gscope(ctx.prof, ctx.cl, "sea.churn");
+        GpuScope gscope(ctx.prof, ctx.cmd->Native(), "sea.churn");
         RecordChurn(ctx);
     }
 
-    GpuScope gdraw(drawEnabled ? ctx.prof : nullptr, ctx.cl, "sea.draw");
+    GpuScope gdraw(drawEnabled ? ctx.prof : nullptr, ctx.cmd->Native(), "sea.draw");
     if (drawEnabled) {
-        PixScope scope(ctx.cl, "sea.surface (tessellated: screen-space edge density)");
-        ctx.cl->SetPipelineState((wireframe && m_seaPsoWire) ? m_seaPsoWire.Get()
-                                                             : m_seaPso.Get());
-        ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_4_CONTROL_POINT_PATCHLIST);
-        ctx.cl->SetGraphicsRootConstantBufferView(
-            1, ctx.gpu->PushConstants(&m_seaCb, sizeof(m_seaCb)));
-        ctx.cl->DrawInstanced(4 * kPatches * kPatches, 1, 0, 0);
+        PixScope scope(ctx.cmd->Native(), "sea.surface (tessellated: screen-space edge density)");
+        ctx.cmd->Pipeline((wireframe && m_seaPsoWire) ? m_seaPsoWire.Get() : m_seaPso.Get());
+        ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_4_CONTROL_POINT_PATCHLIST);
+        ctx.cmd->GraphicsConstants(1, m_seaCb);
+        ctx.cmd->Draw(4 * kPatches * kPatches, 1, 0, 0);
     }
     if (drawEnabled) {
-        PixScope scope(ctx.cl, "sea.spectrum (solid=model, dashed=buoy 44013)");
-        ctx.cl->SetPipelineState(m_specPso.Get());
-        ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_LINESTRIP);
-        ctx.cl->SetGraphicsRootConstantBufferView(
-            1, ctx.gpu->PushConstants(&m_specCb, sizeof(m_specCb)));
-        ctx.cl->DrawInstanced(kSpecSamples, 3, 0, 0);
+        PixScope scope(ctx.cmd->Native(), "sea.spectrum (solid=model, dashed=buoy 44013)");
+        ctx.cmd->Pipeline(m_specPso.Get());
+        ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_LINESTRIP);
+        ctx.cmd->GraphicsConstants(1, m_specCb);
+        ctx.cmd->Draw(kSpecSamples, 3, 0, 0);
     }
 }
 

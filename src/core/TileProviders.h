@@ -18,7 +18,7 @@
 // ================================================================================================
 #pragma once
 
-#include "core/Residency.h"
+#include "hal/Residency.h"
 
 #include <map>
 #include <mutex>

@@ -1,4 +1,4 @@
-#include "core/Shader.h"
+#include "hal/Shader.h"
 
 namespace ga {
 

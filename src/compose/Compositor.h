@@ -35,7 +35,8 @@
 #pragma once
 
 #include "compose/TileArchive.h"
-#include "core/Residency.h"
+#include "hal/Residency.h"
+#include "core/Lattice.h"
 
 #include <atomic>
 #include <map>
@@ -112,17 +113,15 @@ public:
 };
 
 // ---- 3. the compositor ---------------------------------------------------------------------
-struct ColorFrame;   // the realization's geometry, defined below the class it belongs to
+struct Lattice;
+using ColorFrame = Lattice;   // M12 step 2b: the frame is the lattice (core/Lattice.h)   // the realization's geometry, defined below the class it belongs to
 
 class Compositor {
 public:
-    static constexpr uint32_t kFaceDim = 16384;   // every composed pyramid realization today
+    static constexpr uint32_t kFaceDim = Lattice::kFaceDim;   // core/Lattice.h
 
-    // One paint tile's angular footprint (radians) + per-texel span, for the soak rule below.
-    struct TileBox {
-        double latMin, latMax, lonMin, lonMax;
-        double texLat, texLon;
-    };
+    // The tile footprint type lives with the lattice now (core/Lattice.h).
+    using TileBox = ga::TileBox;
 
     // Channels: an ordered stack, bottom -> top. Pointers are borrowed (main owns sources).
     int AddColorChannel(const std::string& name, std::vector<ColorSource*> stack);
@@ -261,7 +260,6 @@ private:
 //   +X: dir = ( 1, -t, -s)   -X: dir = (-1, -t,  s)
 //   +Y: dir = ( s,  1,  t)   -Y: dir = ( s, -1, -t)
 //   +Z: dir = ( s, -t,  1)   -Z: dir = (-s, -t, -1)     with s = 2u-1, t = 2v-1.
-void ComposeCubeDir(uint32_t face, double u, double v, double out[3]);
 
 // ---- 4. the one render path's constants ----------------------------------------------------
 // Mirrors GA_COMPOSED_CB_ROWS in Common.hlsli (8 float4 rows -- count on BOTH sides after any
@@ -287,59 +285,10 @@ struct ComposedSurfaceCb {
                       // slice. u6[0] == ~0 means the old cube + window tenants.
 };
 
-// ================================================================================================
-//  ColorFrame - M9aj: THE FRAME, SAID ONCE.
-//
-//  CubeColor and WindowColor each carried their own copy of three things: the tile's lat/lon
-//  BOX (for the soak rule), the per-texel lat/lon, and the ground resolution the sources are
-//  asked at. Two copies of one geometry is how the globe and the terrain came to disagree about
-//  where the coast was (the M6h glitch), and the per-source trees below need a THIRD caller --
-//  which is the moment to stop copying it.
-//
-//  A frame is (kind, tile extent, and either a cube face dimension or a Mercator origin+zoom).
-//  It is the whole of what a realization's addressing means, it is cheap to pass by value, and
-//  Tag() is the cache identity the frame demands: a tile's content is a pure function of
-//  (org, zBase, mip, x, y) plus the stack, so org and zBase belong in the folder name (M7x).
-// ================================================================================================
-struct ColorFrame {
-    enum class Kind : uint8_t { Cube, Window };
-    Kind kind = Kind::Cube;
-    uint32_t texW = 128, texH = 128;   // texels per 64 KB tile (RGBA8 128x128; R16F 256x128)
-    uint32_t faceDim = Compositor::kFaceDim;   // Cube
-    long long orgPxX = 0, orgPxY = 0;          // Window: origin in zBase Mercator pixels
-    int zBase = 14;
-
-    static ColorFrame Cube(uint32_t faceDim, uint32_t texW = 128, uint32_t texH = 128) {
-        ColorFrame f;
-        f.kind = Kind::Cube;
-        f.faceDim = faceDim;
-        f.texW = texW;
-        f.texH = texH;
-        return f;
-    }
-    static ColorFrame Window(long long orgPxX, long long orgPxY, int zBase,
-                             uint32_t texW = 128, uint32_t texH = 128) {
-        ColorFrame f;
-        f.kind = Kind::Window;
-        f.orgPxX = orgPxX;
-        f.orgPxY = orgPxY;
-        f.zBase = zBase;
-        f.texW = texW;
-        f.texH = texH;
-        return f;
-    }
-
-    // What a source is ASKED at. The cube's finest is bounded by the face dimension; a window's
-    // is its zoom base, which is how a realization demands detail the cube can never demand.
-    double GroundRes(uint32_t mip) const;
-    // The tile's angular box + per-texel span -- the soak rule's input.
-    void Box(const TileRequest& r, Compositor::TileBox& box) const;
-    // One texel's centre, in the WGS84 exchange frame every source answers in.
-    void Texel(const TileRequest& r, uint32_t px, uint32_t py, double& latRad,
-               double& lonRad) const;
-    // The realization's cache folder name -- "cube16k", "window_z14_1263360_1538048".
-    std::string Tag(const char* kindName = "window") const;
-};
+// M12 step 2b: THE FRAME moved to core/Lattice.h and became the LATTICE every tree and
+// tenant inherits (its M9aj banner went with it). The old name stays usable here so no
+// call site changed in the move; new code says Lattice.
+using ColorFrame = Lattice;
 
 // The compositor's --selftest gate (ComposeTest.cpp): paint order, per-pixel weights, alpha,
 // cache identity, transient-never-cached, cube/window addressing vs closed forms, stack-hash

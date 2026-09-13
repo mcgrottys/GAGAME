@@ -11,6 +11,7 @@
 // ================================================================================================
 #pragma once
 
+#include "hal/Views.h"
 #include "scene/Layer.h"
 #include "sim/CurrentModel.h"
 
@@ -30,7 +31,7 @@ public:
 
     const char* Name() const override { return "gulf"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
-              ID3D12RootSignature* rootSig) override;
+              hal::RootSignature rootSig) override;
     // M9h: the GoMOFS grad(flow) Mv2, for ingest into the inlet bank's COARSE levels. Same
     // kernel, same quantity, same units as the SWE grad -- which is exactly why this is the
     // right coarse source and the wind was not: the wind's curl is three orders away and only
@@ -56,15 +57,15 @@ private:
 
     std::wstring m_shaderDir;
     const CurrentModel* m_currents = nullptr;
-    ID3D12RootSignature* m_rootSig = nullptr;
-    Com<ID3D12PipelineState> m_drawPso;
+    hal::RootSignature m_rootSig = nullptr;
+    hal::Pso m_drawPso;
 
-    Com<ID3D12RootSignature> m_csRootSig;
-    Com<ID3D12PipelineState> m_csPso;
+    hal::RootSignatureRef m_csRootSig;
+    hal::Pso m_csPso;
     GpuTexture m_uvTex;                    // u, v, mask, 0 (RGBA32F)
-    Com<ID3D12Resource> m_mvTex, m_owTex;  // outputs of the GA pass (RGBA16F)
+    hal::ResourceRef m_mvTex, m_owTex;  // outputs of the GA pass (RGBA16F)
     uint32_t m_uvSrv = UINT32_MAX, m_mvSrv = UINT32_MAX, m_owSrv = UINT32_MAX;
-    uint32_t m_csTable = UINT32_MAX;
+    hal::Table m_csTable;   // [u0 uv field, u1 mv2, u2 okubo-weiss]
 
     GulfCbData m_cb{};
     float m_aspectWoverH = 1.0f;
