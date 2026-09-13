@@ -18,9 +18,12 @@
 //
 //  RELOAD IS ONE LAW: build the new pipeline, and only on success swap it in. Every layer wrote
 //  that rule by hand (`Com<ID3D12PipelineState> keep = m_pso; if (!Build()) m_pso = keep;`);
-//  Reload() is that rule, and the old pipeline stays alive until the last frame that recorded it
-//  has retired (the frame ring holds the reference; step 3e's Retire says so once for every
-//  such object).
+//  Reload() is that rule. What keeps the OLD pipeline alive while a list in flight may still
+//  name it is not this file and not the frame ring (which holds an allocator and a list, no
+//  pipeline references): Renderer::ReloadShaders swaps under a WaitIdle, so no recorded list
+//  outlives the swap. The day a reload stops draining the GPU, the replaced pipeline goes
+//  through hal::Retire (Retire.h) keyed to the fence the current recording will signal --
+//  step 3e stated that contract and found no site that needs it yet.
 //
 //  DX12-first: the fields ARE the D3D enums. No enum of our own stands between a layer and the
 //  hardware; the builder only fills in what nobody wants to type nine times.

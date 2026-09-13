@@ -1,4 +1,5 @@
 #include "hal/Gpu.h"
+#include "hal/Retire.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -293,6 +294,8 @@ ID3D12GraphicsCommandList* Gpu::BeginFrame() {
         GA_CHECK(m_fence->SetEventOnCompletion(m_frameFence[m_frameIndex], m_fenceEvent));
         WaitForSingleObject(m_fenceEvent, INFINITE);
     }
+    // M12 step 3e: the deferred releases whose fence has passed (Retire.h) -- the one call.
+    hal::DrainRetired(m_fence->GetCompletedValue());
     m_cbOffset[m_frameIndex] = 0;
     GA_CHECK(m_alloc[m_frameIndex]->Reset());
     GA_CHECK(m_cmdList->Reset(m_alloc[m_frameIndex].Get(), nullptr));

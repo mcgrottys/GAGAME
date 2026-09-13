@@ -39,6 +39,7 @@
 #pragma once
 
 #include "compose/TileIndex.h"
+#include "core/Lattice.h"
 #include "core/TileAddress.h"
 #include "hal/TileStream.h"
 #include "hal/Gpu.h"
@@ -210,8 +211,11 @@ public:
     // A field publishes its per-tile signatures on a grid it chooses; DeriveDemand applies the
     // proven Cayley closure so a derived field learns WHERE it can be non-zero without reading
     // any data. Grids must match dimensions.
+    // M12 step 3e: and the grid's GROUND, when the publisher has one to declare (a page
+    // tenant's lattice; a bank on its own dense frame has none and passes null). Two grids
+    // combine only on the same ground: DeriveDemand refuses otherwise, once aloud.
     void PublishSignatures(const std::string& field, uint32_t tilesX, uint32_t tilesY,
-                           std::vector<uint8_t> sig);
+                           std::vector<uint8_t> sig, const Lattice* lattice = nullptr);
     // out[i] = union over products: Cl2ProductSignature(a[i], b[i]). Returns false if unknown.
     bool DeriveDemand(const std::string& srcA, const std::string& srcB,
                       std::vector<uint8_t>& out, uint32_t& tilesX, uint32_t& tilesY) const;
@@ -517,6 +521,7 @@ private:
     struct SigGrid {
         uint32_t tilesX = 0, tilesY = 0;
         std::vector<uint8_t> sig;
+        const Lattice* lattice = nullptr;   // M12 step 3e: the ground; null = undeclared
     };
 
     int AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t faceDim, DXGI_FORMAT fmt,
@@ -577,6 +582,7 @@ private:
 
     std::vector<FieldAdapter> m_fields;
     std::map<std::string, SigGrid> m_signatures;
+    mutable bool m_groundRefusalSaid = false;   // M12 step 3e: DeriveDemand's refusal, once
     Motor m_prevPose;
     bool m_havePrevPose = false;
 };

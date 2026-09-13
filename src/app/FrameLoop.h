@@ -60,6 +60,7 @@
 #include "core/Droste.h"   // M10: the globe within the globe, as one Cl(4,1) versor
 #include "core/Pga.h"
 #include "hal/Residency.h"
+#include "hal/Tenant.h"
 #include "core/SceneConfig.h"
 #include "render/Camera.h"
 #include "scene/Route.h"
@@ -180,6 +181,7 @@ private:
     std::shared_ptr<std::shared_ptr<TileTree>> m_waveTree;
     WaveFieldSource::Frame m_waveFrame;
     int m_waveT = -1;
+    hal::Tenant m_waveTenant;   // M12 step 3e: the wave planes' declaration (hal/Tenant.h)
     Route m_route;
     double m_timeScale = 1.0;
     double m_windowSec = 0.0;

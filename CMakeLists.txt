@@ -47,6 +47,7 @@ add_executable(gagame
   src/core/Image.cpp
   src/hal/TileAtlas.cpp
   src/hal/Residency.cpp
+  src/hal/Tenant.cpp
   src/core/TileProviders.cpp
   src/core/ThreadTest.cpp
   src/core/ThreadManager.cpp
