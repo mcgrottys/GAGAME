@@ -4,6 +4,7 @@
 
 #include "core/Image.h"
 #include "hal/PixEvents.h"
+#include "hal/Pipeline.h"
 #include "scene/SeaLayer.h"
 #include "core/SceneConfig.h"
 #include "sim/WaveField.h"
@@ -99,12 +100,11 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSig
                                               blob->GetBufferSize(), IID_PPV_ARGS(&m_rs)));
     m_rs->SetName(L"water bank root signature");
 
-    ShaderBlob cs = sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsBankFill", L"cs_6_0");
-    if (!cs.Valid()) throw std::runtime_error("WaterBank kernel failed");
-    D3D12_COMPUTE_PIPELINE_STATE_DESC d{};
-    d.pRootSignature = m_rs.Get();
-    d.CS = {cs.Data(), cs.Size()};
-    GA_CHECK(gpu.Device()->CreateComputePipelineState(&d, IID_PPV_ARGS(&m_fill)));
+    m_fill = hal::Require(
+        hal::BuildCompute(gpu, m_rs.Get(),
+                          sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsBankFill", L"cs_6_0"),
+                          "waterbank"),
+        "WaterBank kernel");
     m_fill->SetName(L"CsBankFill");
     m_ready = true;
     Log("[waterbank] %d mip rings x %dx%d tiles (%.1f m .. %.0f m texels, %.1f .. %.0f km "
@@ -116,15 +116,10 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSig
 }
 
 void WaterBankLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
-    ShaderBlob cs = sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsBankFill", L"cs_6_0");
-    if (!cs.Valid()) return;
-    D3D12_COMPUTE_PIPELINE_STATE_DESC d{};
-    d.pRootSignature = m_rs.Get();
-    d.CS = {cs.Data(), cs.Size()};
-    Com<ID3D12PipelineState> pso;
-    if (SUCCEEDED(gpu.Device()->CreateComputePipelineState(&d, IID_PPV_ARGS(&pso)))) {
-        m_fill = pso;
-    }
+    const ShaderBlob cs =
+        sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsBankFill", L"cs_6_0");
+    hal::Reload(m_fill, [&] { return hal::BuildCompute(gpu, m_rs.Get(), cs, "waterbank"); },
+                "waterbank");
 }
 
 void WaterBankLayer::SetFrame(Gpu& gpu, double simUnix, double camX, double camZ) {

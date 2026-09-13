@@ -3,6 +3,7 @@
 #include "hal/GpuProfiler.h"
 
 #include "hal/PixEvents.h"
+#include "hal/Pipeline.h"
 #include "scene/FieldSet.h"
 
 #include <algorithm>
@@ -90,12 +91,11 @@ void SeaLayer::InitChurn(Gpu& gpu, ShaderCompiler& sc) {
     m_churnRs->SetName(L"sea.churn root signature");
 
     auto makePso = [&](const wchar_t* entry, Com<ID3D12PipelineState>& out) {
-        ShaderBlob cs = sc.Compile(m_shaderDir + L"/SeaChurn.hlsl", entry, L"cs_6_0");
-        if (!cs.Valid()) throw std::runtime_error("SeaChurn kernel failed");
-        D3D12_COMPUTE_PIPELINE_STATE_DESC d{};
-        d.pRootSignature = m_churnRs.Get();
-        d.CS = {cs.Data(), cs.Size()};
-        GA_CHECK(gpu.Device()->CreateComputePipelineState(&d, IID_PPV_ARGS(&out)));
+        out = hal::Require(
+            hal::BuildCompute(gpu, m_churnRs.Get(),
+                              sc.Compile(m_shaderDir + L"/SeaChurn.hlsl", entry, L"cs_6_0"),
+                              "sea.churn"),
+            "SeaChurn kernel");
         out->SetName(entry);
     };
     makePso(L"CsChurnClear", m_churnClear);
@@ -142,111 +142,54 @@ void SeaLayer::InitChurn(Gpu& gpu, ShaderCompiler& sc) {
 }
 
 bool SeaLayer::BuildPsos(Gpu& gpu, ShaderCompiler& sc) {
-    auto makePso = [&](const wchar_t* file, bool lines, bool depth,
-                       Com<ID3D12PipelineState>& out) -> bool {
+    // The spectrum plot: lines, no depth.
+    auto makePso = [&](const wchar_t* file, bool lines, bool depth, const char* tag) {
         const std::wstring path = m_shaderDir + L"/" + file;
-        ShaderBlob vs = sc.Compile(path, L"VsMain", L"vs_6_0");
-        ShaderBlob ps = sc.Compile(path, L"PsMain", L"ps_6_0");
-        if (!vs.Valid() || !ps.Valid()) return false;
-
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
-        d.pRootSignature = m_rootSig;
-        d.VS = {vs.Data(), vs.Size()};
-        d.PS = {ps.Data(), ps.Size()};
-        d.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
-        d.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
-        d.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-        d.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
-        d.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
-        d.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-        d.SampleMask = UINT_MAX;
-        d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-        d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        d.RasterizerState.DepthClipEnable = TRUE;
-        d.DepthStencilState.DepthEnable = depth ? TRUE : FALSE;
-        d.DepthStencilState.DepthWriteMask = depth ? D3D12_DEPTH_WRITE_MASK_ALL
-                                                   : D3D12_DEPTH_WRITE_MASK_ZERO;
-        d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;   // reversed-Z
-        d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-        d.PrimitiveTopologyType = lines ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE
-                                        : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        d.NumRenderTargets = 1;
-        d.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        d.SampleDesc.Count = 1;
-
-        Com<ID3D12PipelineState> pso;
-        if (FAILED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) {
-            Log("[sea] PSO %S failed", file);
-            return false;
-        }
-        out = pso;
-        return true;
+        hal::GraphicsPipelineDesc d;
+        d.rootSig = m_rootSig;
+        d.vs = sc.Compile(path, L"VsMain", L"vs_6_0");
+        d.ps = sc.Compile(path, L"PsMain", L"ps_6_0");
+        d.depthClip = TRUE;
+        d.depthTest = depth;
+        d.depthWrite = depth;   // reversed-Z GREATER, the default comparison
+        d.topology = lines ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE
+                           : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        return hal::BuildGraphics(gpu, d, tag);
     };
     // The sea itself tessellates (M5b): VS emits control points, HS sets screen-space edge
     // factors, DS displaces -- vqview's chain, ported.
-    auto makeSeaPso = [&](D3D12_FILL_MODE fill, Com<ID3D12PipelineState>& out) -> bool {
+    auto makeSeaPso = [&](D3D12_FILL_MODE fill, const char* tag) {
         const std::wstring path = m_shaderDir + L"/Sea.hlsl";
-        ShaderBlob vs = sc.Compile(path, L"VsMain", L"vs_6_0");
-        ShaderBlob hs = sc.Compile(path, L"HsMain", L"hs_6_0");
-        ShaderBlob ds = sc.Compile(path, L"DsMain", L"ds_6_0");
-        ShaderBlob ps = sc.Compile(path, L"PsMain", L"ps_6_0");
-        if (!vs.Valid() || !hs.Valid() || !ds.Valid() || !ps.Valid()) return false;
-
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
-        d.pRootSignature = m_rootSig;
-        d.VS = {vs.Data(), vs.Size()};
-        d.HS = {hs.Data(), hs.Size()};
-        d.DS = {ds.Data(), ds.Size()};
-        d.PS = {ps.Data(), ps.Size()};
-        d.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
-        d.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
-        d.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-        d.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
-        d.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
-        d.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-        d.SampleMask = UINT_MAX;
-        d.RasterizerState.FillMode = fill;
-        d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        d.RasterizerState.DepthClipEnable = TRUE;
-        d.DepthStencilState.DepthEnable = TRUE;
-        d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-        d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;   // reversed-Z
-        d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-        d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
-        d.NumRenderTargets = 1;
-        d.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        d.SampleDesc.Count = 1;
-
-        Com<ID3D12PipelineState> pso;
-        if (FAILED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) {
-            Log("[sea] tessellated sea PSO failed");
-            return false;
-        }
-        out = pso;
-        return true;
+        hal::GraphicsPipelineDesc d;
+        d.rootSig = m_rootSig;
+        d.vs = sc.Compile(path, L"VsMain", L"vs_6_0");
+        d.hs = sc.Compile(path, L"HsMain", L"hs_6_0");
+        d.ds = sc.Compile(path, L"DsMain", L"ds_6_0");
+        d.ps = sc.Compile(path, L"PsMain", L"ps_6_0");
+        // The builder refuses an invalid VS or PS; the tessellation stages are this site's.
+        if (!d.hs.Valid() || !d.ds.Valid()) return Com<ID3D12PipelineState>();
+        d.fill = fill;
+        d.depthClip = TRUE;
+        d.depthTest = true;
+        d.depthWrite = true;
+        d.topology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
+        return hal::BuildGraphics(gpu, d, tag);
     };
 
-    Com<ID3D12PipelineState> sea, seaWire, spec;
-    if (!makeSeaPso(D3D12_FILL_MODE_SOLID, sea)) return false;
-    if (!makePso(L"SpecPlot.hlsl", true, false, spec)) return false;
-    m_seaPso = sea;
-    m_specPso = spec;
-    // M9b: the tessellated sea in wireframe -- the DS-displaced patch grid, so the
-    // screen-space edge density and the actual vertex heave are both visible. Optional:
-    // a failure leaves the solid PSO alone.
-    if (makeSeaPso(D3D12_FILL_MODE_WIREFRAME, seaWire)) m_seaPsoWire = seaWire;
+    // The sea and its spectrum plot swap together or not at all. M9b: the tessellated sea in
+    // wireframe -- the DS-displaced patch grid, so the screen-space edge density and the actual
+    // vertex heave are both visible -- is optional: a failure there leaves the solid PSO alone.
+    hal::ReloadSet set;
+    if (!set.Add(m_seaPso, makeSeaPso(D3D12_FILL_MODE_SOLID, "sea"))) return false;
+    if (!set.Add(m_specPso, makePso(L"SpecPlot.hlsl", true, false, "sea.spec"))) return false;
+    set.Commit();
+    hal::Reload(m_seaPsoWire, [&] { return makeSeaPso(D3D12_FILL_MODE_WIREFRAME, "sea.wire"); },
+                "sea.wire");
     return true;
 }
 
 void SeaLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
-    Com<ID3D12PipelineState> keepSea = m_seaPso, keepSpec = m_specPso;
-    if (!BuildPsos(gpu, sc)) {
-        m_seaPso = keepSea;
-        m_specPso = keepSpec;
-        Log("[sea] reload failed; keeping the previous PSOs");
-    }
+    if (!BuildPsos(gpu, sc)) Log("[sea] reload failed; keeping the previous PSOs");
     if (!m_fft.ReloadShaders(gpu, sc)) Log("[sea] ocean compute reload failed; keeping previous");
 }
 

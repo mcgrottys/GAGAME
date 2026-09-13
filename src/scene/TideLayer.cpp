@@ -1,6 +1,7 @@
 #include "scene/TideLayer.h"
 
 #include "hal/PixEvents.h"
+#include "hal/Pipeline.h"
 #include "scene/FieldSet.h"
 
 #include <cmath>
@@ -59,65 +60,35 @@ void TideLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
 }
 
 bool TideLayer::BuildPsos(Gpu& gpu, ShaderCompiler& sc) {
-    auto makePso = [&](const wchar_t* file, bool lines, bool depth,
-                       Com<ID3D12PipelineState>& out) -> bool {
+    auto makePso = [&](const wchar_t* file, bool lines, bool depth, const char* tag) {
         const std::wstring path = m_shaderDir + L"/" + file;
-        ShaderBlob vs = sc.Compile(path, L"VsMain", L"vs_6_0");
-        ShaderBlob ps = sc.Compile(path, L"PsMain", L"ps_6_0");
-        if (!vs.Valid() || !ps.Valid()) return false;
-
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
-        d.pRootSignature = m_rootSig;
-        d.VS = {vs.Data(), vs.Size()};
-        d.PS = {ps.Data(), ps.Size()};
-        d.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
-        d.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
-        d.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-        d.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
-        d.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
-        d.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-        d.SampleMask = UINT_MAX;
-        d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-        // A displaced ribbon shows its back faces at grazing angles, same as vqview's water.
-        d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        d.RasterizerState.DepthClipEnable = TRUE;
-        d.DepthStencilState.DepthEnable = depth ? TRUE : FALSE;
-        d.DepthStencilState.DepthWriteMask = depth ? D3D12_DEPTH_WRITE_MASK_ALL
-                                                   : D3D12_DEPTH_WRITE_MASK_ZERO;
-        // Reversed-Z everywhere: GREATER, cleared to 0.
-        d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;
-        d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-        d.PrimitiveTopologyType = lines ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE
-                                        : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        d.NumRenderTargets = 1;
-        d.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        d.SampleDesc.Count = 1;
-
-        Com<ID3D12PipelineState> pso;
-        const HRESULT hr = gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso));
-        if (FAILED(hr)) {
-            Log("[tide] PSO %S: %s", file, HrString(hr).c_str());
-            return false;
-        }
-        out = pso;
-        return true;
+        hal::GraphicsPipelineDesc d;
+        d.rootSig = m_rootSig;
+        d.vs = sc.Compile(path, L"VsMain", L"vs_6_0");
+        d.ps = sc.Compile(path, L"PsMain", L"ps_6_0");
+        // cull stays NONE: a displaced ribbon shows its back faces at grazing angles, same as
+        // vqview's water. Reversed-Z everywhere: GREATER (the default), cleared to 0.
+        d.depthClip = TRUE;
+        d.depthTest = depth;
+        d.depthWrite = depth;
+        d.topology = lines ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE
+                           : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+        return hal::BuildGraphics(gpu, d, tag);
     };
-    Com<ID3D12PipelineState> rib, cur;
-    if (!makePso(L"TideRibbon.hlsl", false, true, rib)) return false;
-    if (!makePso(L"TideCurves.hlsl", true, false, cur)) return false;
-    m_ribbonPso = rib;
-    m_curvesPso = cur;
+    // The ribbon and the curves swap together or not at all.
+    hal::ReloadSet set;
+    if (!set.Add(m_ribbonPso, makePso(L"TideRibbon.hlsl", false, true, "tide.ribbon"))) {
+        return false;
+    }
+    if (!set.Add(m_curvesPso, makePso(L"TideCurves.hlsl", true, false, "tide.curves"))) {
+        return false;
+    }
+    set.Commit();
     return true;
 }
 
 void TideLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
-    Com<ID3D12PipelineState> keepR = m_ribbonPso, keepC = m_curvesPso;
-    if (!BuildPsos(gpu, sc)) {
-        m_ribbonPso = keepR;
-        m_curvesPso = keepC;
-        Log("[tide] reload failed; keeping the previous PSOs");
-    }
+    if (!BuildPsos(gpu, sc)) Log("[tide] reload failed; keeping the previous PSOs");
 }
 
 void TideLayer::SetTime(double simUnix, double windowSec) {

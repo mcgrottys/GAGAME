@@ -1,6 +1,7 @@
 #include "core/OceanFft.h"
 
 #include "hal/PixEvents.h"
+#include "hal/Pipeline.h"
 
 #include <algorithm>
 #include <cmath>
@@ -201,13 +202,12 @@ void OceanFft::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir)
                                                    IID_PPV_ARGS(&m_mipRs)));
         m_mipRs->SetName(L"ocean mip reduce root signature");
         std::vector<std::wstring> defs{L"GA_MIP_CH=4"};
-        ShaderBlob cs = sc.Compile(shaderDir + L"/MipReduce.hlsl", L"CsMipReduce", L"cs_6_0",
-                                   defs);
-        if (!cs.Valid()) throw std::runtime_error("ocean MipReduce failed to compile");
-        D3D12_COMPUTE_PIPELINE_STATE_DESC pd{};
-        pd.pRootSignature = m_mipRs.Get();
-        pd.CS = {cs.Data(), cs.Size()};
-        GA_CHECK(gpu.Device()->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m_mipPso)));
+        m_mipPso = hal::Require(
+            hal::BuildCompute(gpu, m_mipRs.Get(),
+                              sc.Compile(shaderDir + L"/MipReduce.hlsl", L"CsMipReduce",
+                                         L"cs_6_0", defs),
+                              "ocean.mip"),
+            "ocean MipReduce kernel");
         m_mipPso->SetName(L"ocean CsMipReduce");
     }
 
@@ -295,29 +295,22 @@ bool OceanFft::BuildPipelines(Gpu& gpu, ShaderCompiler& sc) {
         {L"CsInitSpectrum", &m_init}, {L"CsModulate", &m_modulate},
         {L"CsFft", &m_fft}, {L"CsAssemble", &m_assemble},
     };
+    // The four kernels swap together or not at all: a spectrum from one and an assembly from
+    // another would not agree.
+    hal::ReloadSet set;
     for (Entry& e : entries) {
-        ShaderBlob cs = sc.Compile(path, e.name, L"cs_6_0");
-        if (!cs.Valid()) return false;
-        D3D12_COMPUTE_PIPELINE_STATE_DESC d{};
-        d.pRootSignature = m_rootSig.Get();
-        d.CS = {cs.Data(), cs.Size()};
-        Com<ID3D12PipelineState> pso;
-        if (FAILED(gpu.Device()->CreateComputePipelineState(&d, IID_PPV_ARGS(&pso)))) return false;
+        auto pso = hal::BuildCompute(gpu, m_rootSig.Get(), sc.Compile(path, e.name, L"cs_6_0"),
+                                     "ocean");
+        if (!pso) return false;
         pso->SetName(e.name);
-        *e.pso = pso;
+        set.Add(*e.pso, std::move(pso));
     }
+    set.Commit();
     return true;
 }
 
 bool OceanFft::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
-    Com<ID3D12PipelineState> keep[4] = {m_init, m_modulate, m_fft, m_assemble};
-    if (!BuildPipelines(gpu, sc)) {
-        m_init = keep[0];
-        m_modulate = keep[1];
-        m_fft = keep[2];
-        m_assemble = keep[3];
-        return false;
-    }
+    if (!BuildPipelines(gpu, sc)) return false;
     m_spectrumDirty = true;   // new spectrum kernel may pack differently; rebuild h0
     return true;
 }

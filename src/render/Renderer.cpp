@@ -3,6 +3,7 @@
 #include "core/Image.h"
 #include "hal/Context.h"
 #include "hal/PixEvents.h"
+#include "hal/Pipeline.h"
 #include "scene/FieldSet.h"
 
 #include <cmath>
@@ -191,43 +192,23 @@ void Renderer::CreateTargets(uint32_t width, uint32_t height) {
 
 void Renderer::CreateTonemapPso() {
     const std::wstring path = m_desc.shaderDir + L"/Tonemap.hlsl";
-    ShaderBlob vs = m_shaders.Compile(path, L"VsMain", L"vs_6_0");
-    ShaderBlob ps = m_shaders.Compile(path, L"PsMain", L"ps_6_0");
-    if (!vs.Valid() || !ps.Valid()) {
+    hal::GraphicsPipelineDesc d;
+    d.rootSig = m_rootSig.Get();
+    d.vs = m_shaders.Compile(path, L"VsMain", L"vs_6_0");
+    d.ps = m_shaders.Compile(path, L"PsMain", L"ps_6_0");
+    if (!d.vs.Valid() || !d.ps.Valid()) {
         Log("[renderer] tonemap shader failed to compile");
         if (!m_tonemapPso) throw std::runtime_error("cannot build the tonemap PSO");
         return;   // keep the old PSO on a failed reload
     }
-
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
-    d.pRootSignature = m_rootSig.Get();
-    d.VS = {vs.Data(), vs.Size()};
-    d.PS = {ps.Data(), ps.Size()};
-    d.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
-    d.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
-    d.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-    d.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
-    d.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
-    d.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-    d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    d.SampleMask = UINT_MAX;
-    d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-    d.RasterizerState.DepthClipEnable = TRUE;
-    d.DepthStencilState.DepthEnable = FALSE;
-    d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    d.NumRenderTargets = 1;
-    d.RTVFormats[0] = kLdrFormat;
-    d.SampleDesc.Count = 1;
-
-    Com<ID3D12PipelineState> pso;
-    HRESULT hr = m_gpu->Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso));
-    if (FAILED(hr)) {
-        Log("[renderer] tonemap PSO: %s", HrString(hr).c_str());
-        if (!m_tonemapPso) GA_CHECK(hr);
-        return;
-    }
-    m_tonemapPso = pso;
+    d.depthClip = TRUE;
+    d.dsvFormat = DXGI_FORMAT_UNKNOWN;   // no depth target is bound at the tonemap pass
+    d.rtvFormat = kLdrFormat;
+    // The reload law: swap only on success. At boot a missing tonemap is fatal.
+    const bool built = hal::Reload(
+        m_tonemapPso, [&] { return hal::BuildGraphics(*m_gpu, d, "renderer.tonemap"); },
+        "renderer.tonemap");
+    if (!built && !m_tonemapPso) throw std::runtime_error("cannot build the tonemap PSO");
 }
 
 void Renderer::AddLayer(std::unique_ptr<Layer> layer) {

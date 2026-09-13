@@ -7,6 +7,7 @@
 #include "sim/BathyModel.h"
 
 #include "hal/PixEvents.h"
+#include "hal/Pipeline.h"
 #include "hal/Shader.h"
 
 #include <algorithm>
@@ -421,12 +422,11 @@ void GlobeLayer::InitClouds(Gpu& gpu, ShaderCompiler& sc) {
     GA_CHECK(D3D12SerializeVersionedRootSignature(&vd, &blob, &err));
     GA_CHECK(gpu.Device()->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
                                               IID_PPV_ARGS(&m_cloudRs)));
-    ShaderBlob cs = sc.Compile(m_shaderDir + L"/CloudVol.hlsl", L"CsCloudBuild", L"cs_6_0");
-    if (!cs.Valid()) throw std::runtime_error("CloudVol kernel failed");
-    D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};
-    cd.pRootSignature = m_cloudRs.Get();
-    cd.CS = {cs.Data(), cs.Size()};
-    GA_CHECK(gpu.Device()->CreateComputePipelineState(&cd, IID_PPV_ARGS(&m_cloudBuild)));
+    m_cloudBuild = hal::Require(
+        hal::BuildCompute(gpu, m_cloudRs.Get(),
+                          sc.Compile(m_shaderDir + L"/CloudVol.hlsl", L"CsCloudBuild", L"cs_6_0"),
+                          "globe.cloud"),
+        "CloudVol kernel");
 
     m_cloudTable = gpu.SrvHeap().Alloc(2);
     D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
@@ -621,12 +621,11 @@ void GlobeLayer::InitNeAndWind(Gpu& gpu, ShaderCompiler& sc) {
     GA_CHECK(D3D12SerializeVersionedRootSignature(&vd, &blob, &err));
     GA_CHECK(gpu.Device()->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
                                               IID_PPV_ARGS(&m_windRs)));
-    ShaderBlob cs = sc.Compile(m_shaderDir + L"/GlobeWind.hlsl", L"CsWindGrad", L"cs_6_0");
-    if (!cs.Valid()) throw std::runtime_error("GlobeWind kernel failed");
-    D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};
-    cd.pRootSignature = m_windRs.Get();
-    cd.CS = {cs.Data(), cs.Size()};
-    GA_CHECK(gpu.Device()->CreateComputePipelineState(&cd, IID_PPV_ARGS(&m_windBuild)));
+    m_windBuild = hal::Require(
+        hal::BuildCompute(gpu, m_windRs.Get(),
+                          sc.Compile(m_shaderDir + L"/GlobeWind.hlsl", L"CsWindGrad", L"cs_6_0"),
+                          "globe.wind"),
+        "GlobeWind kernel");
 
     m_windTable = gpu.SrvHeap().Alloc(2);
     // A TEXTURE2D UAV over the bank's slice 0 -- the same drop-in trick as the SRV, in the
@@ -684,122 +683,79 @@ bool GlobeLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
     ShaderBlob psl = sc.Compile(path, L"PsLimb", L"ps_6_0");
     if (!vs.Valid() || !ps.Valid() || !vsk.Valid() || !psk.Valid() || !psl.Valid()) return false;
 
+    // Each pipeline swaps in as it builds and a failure stops the walk: at boot Init makes that
+    // fatal, on a reload the pipelines already swapped stand and the rest keep their old ones.
+
     // M10: THE LIMBS (PsLimb). Light added, the scene behind carried through its own air:
     // dual-source, dst = scatter + dst * T, per channel (Rayleigh dims blue first, so a scalar
     // alpha would grey the sea behind a limb). Depth-tested at the shell's entry -- the shader
     // writes it -- and never written: a limb is air, nothing stands on it.
     {
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
-        d.pRootSignature = m_rootSig;
-        d.VS = {vsk.Data(), vsk.Size()};
-        d.PS = {psl.Data(), psl.Size()};
-        d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-        d.BlendState.RenderTarget[0].BlendEnable = TRUE;
-        d.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
-        d.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_SRC1_COLOR;
-        d.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-        d.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ZERO;
-        d.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ONE;
-        d.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        d.SampleMask = UINT_MAX;
-        d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-        d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        d.RasterizerState.DepthClipEnable = FALSE;   // the depth is the shader's, not VsSky's
-        d.DepthStencilState.DepthEnable = TRUE;
-        d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-        d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;   // reversed-Z
-        d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-        d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        d.NumRenderTargets = 1;
-        d.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        d.SampleDesc.Count = 1;
-        Com<ID3D12PipelineState> pso;
-        if (FAILED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) {
-            Log("[globe] limb PSO failed");
+        hal::GraphicsPipelineDesc limb;
+        limb.rootSig = m_rootSig;
+        limb.vs = vsk;
+        limb.ps = psl;
+        limb.blend = true;
+        limb.srcBlend = D3D12_BLEND_ONE;
+        limb.dstBlend = D3D12_BLEND_SRC1_COLOR;
+        limb.srcBlendAlpha = D3D12_BLEND_ZERO;
+        limb.dstBlendAlpha = D3D12_BLEND_ONE;
+        // depthClip stays FALSE: the depth is the shader's, not VsSky's
+        limb.depthTest = true;
+        limb.depthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;   // reversed-Z
+        if (!hal::Reload(m_limbPso, [&] { return hal::BuildGraphics(gpu, limb, "globe.limb"); },
+                         "globe.limb")) {
             return false;
         }
-        m_limbPso = pso;
     }
 
     // The atmosphere backdrop: fullscreen, no depth involvement; the surface overdraws it.
     {
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
-        d.pRootSignature = m_rootSig;
-        d.VS = {vsk.Data(), vsk.Size()};
-        d.PS = {psk.Data(), psk.Size()};
-        d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        hal::GraphicsPipelineDesc sky;
+        sky.rootSig = m_rootSig;
+        sky.vs = vsk;
+        sky.ps = psk;
         // M10: the backdrop blends over the sky dome by a factor (skyPassWeight): src W + dst
         // (1 - W). At the shipped W = 1 that is src exactly (dst x 0 = 0), the old overwrite;
         // under appealing Droste lighting the two backdrops cross-fade by the gravity weights,
         // so the frame's re-root -- a gauge change -- cannot pop the sky.
-        d.BlendState.RenderTarget[0].BlendEnable = TRUE;
-        d.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_BLEND_FACTOR;
-        d.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_BLEND_FACTOR;
-        d.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-        d.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
-        d.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
-        d.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        d.SampleMask = UINT_MAX;
-        d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-        d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        sky.blend = true;
+        sky.srcBlend = D3D12_BLEND_BLEND_FACTOR;
+        sky.dstBlend = D3D12_BLEND_INV_BLEND_FACTOR;
         // M6g: the backdrop touches ONLY untouched pixels (VsSky emits z=0 = reversed-Z
         // infinity; cleared depth is 0, drawn geometry is > 0, so GREATER_EQUAL passes only
         // where the frame is still empty). No write: it stays a backdrop.
-        d.DepthStencilState.DepthEnable = TRUE;
-        d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-        d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
-        d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-        d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        d.NumRenderTargets = 1;
-        d.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        d.SampleDesc.Count = 1;
-        Com<ID3D12PipelineState> pso;
-        if (FAILED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) {
-            Log("[globe] sky PSO failed");
+        sky.depthTest = true;
+        sky.depthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+        if (!hal::Reload(m_skyPso, [&] { return hal::BuildGraphics(gpu, sky, "globe.sky"); },
+                         "globe.sky")) {
             return false;
         }
-        m_skyPso = pso;
     }
 
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
-    d.pRootSignature = m_rootSig;
-    d.VS = {vs.Data(), vs.Size()};
-    d.PS = {ps.Data(), ps.Size()};
-    d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    d.SampleMask = UINT_MAX;
-    d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;   // cube faces mix winding
-    d.RasterizerState.DepthClipEnable = TRUE;
-    d.DepthStencilState.DepthEnable = TRUE;
-    d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-    d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;   // reversed-Z
-    d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-    d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    d.NumRenderTargets = 1;
-    d.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    d.SampleDesc.Count = 1;
-
-    Com<ID3D12PipelineState> pso;
-    if (FAILED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) {
-        Log("[globe] PSO failed");
+    hal::GraphicsPipelineDesc surf;
+    surf.rootSig = m_rootSig;
+    surf.vs = vs;
+    surf.ps = ps;
+    // cull stays NONE: cube faces mix winding
+    surf.depthClip = TRUE;
+    surf.depthTest = true;
+    surf.depthWrite = true;   // reversed-Z GREATER, the default comparison
+    if (!hal::Reload(m_pso, [&] { return hal::BuildGraphics(gpu, surf, "globe"); }, "globe")) {
         return false;
     }
-    m_pso = pso;
     // M9b: wireframe twin of the CDLOD fallback, so --wireframe means the same thing on a
-    // machine without mesh shaders.
+    // machine without mesh shaders -- the same struct with one field changed. Optional.
+    auto d = surf.ToDesc();
     d.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
-    Com<ID3D12PipelineState> psoWire;
-    if (SUCCEEDED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&psoWire)))) {
-        m_psoWire = psoWire;
-    }
+    hal::Reload(m_psoWire, [&] { return hal::BuildGraphicsRaw(gpu, d, "globe.wire"); },
+                "globe.wire");
     ShaderBlob psM = sc.Compile(path, L"PsMeshlet", L"ps_6_0");
     if (psM.Valid()) {
         d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
         d.PS = {psM.Data(), psM.Size()};
-        Com<ID3D12PipelineState> psoM;
-        if (SUCCEEDED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&psoM)))) {
-            m_psoMeshlet = psoM;
-        }
+        hal::Reload(m_psoMeshlet, [&] { return hal::BuildGraphicsRaw(gpu, d, "globe.meshlet"); },
+                    "globe.meshlet");
     }
     return true;
 }

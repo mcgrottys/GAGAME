@@ -1,6 +1,7 @@
 #include "scene/GulfLayer.h"
 
 #include "hal/PixEvents.h"
+#include "hal/Pipeline.h"
 #include "scene/FieldSet.h"
 
 #include <cmath>
@@ -106,36 +107,11 @@ void GulfLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
 
 bool GulfLayer::BuildDrawPso(Gpu& gpu, ShaderCompiler& sc) {
     const std::wstring path = m_shaderDir + L"/Gulf.hlsl";
-    ShaderBlob vs = sc.Compile(path, L"VsMain", L"vs_6_0");
-    ShaderBlob ps = sc.Compile(path, L"PsMain", L"ps_6_0");
-    if (!vs.Valid() || !ps.Valid()) return false;
-
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
-    d.pRootSignature = m_rootSig;
-    d.VS = {vs.Data(), vs.Size()};
-    d.PS = {ps.Data(), ps.Size()};
-    d.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
-    d.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
-    d.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-    d.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
-    d.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
-    d.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-    d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    d.SampleMask = UINT_MAX;
-    d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-    d.DepthStencilState.DepthEnable = FALSE;
-    d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-    d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-    d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    d.NumRenderTargets = 1;
-    d.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    d.SampleDesc.Count = 1;
-
-    Com<ID3D12PipelineState> pso;
-    if (FAILED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) return false;
-    m_drawPso = pso;
-    return true;
+    hal::GraphicsPipelineDesc d;   // the sky's defaults, exactly: a depth-off HDR quad
+    d.rootSig = m_rootSig;
+    d.vs = sc.Compile(path, L"VsMain", L"vs_6_0");
+    d.ps = sc.Compile(path, L"PsMain", L"ps_6_0");
+    return hal::Reload(m_drawPso, [&] { return hal::BuildGraphics(gpu, d, "gulf"); }, "gulf");
 }
 
 void GulfLayer::RunVelGrad(Gpu& gpu, ShaderCompiler& sc) {
@@ -179,12 +155,11 @@ void GulfLayer::RunVelGrad(Gpu& gpu, ShaderCompiler& sc) {
                                                 gpu.SrvHeap().Cpu(m_csTable + 2));
     }
 
-    ShaderBlob cs = sc.Compile(m_shaderDir + L"/VelGrad.hlsl", L"CsVelGrad", L"cs_6_0");
-    if (!cs.Valid()) throw std::runtime_error("VelGrad.hlsl failed to compile");
-    D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};
-    cd.pRootSignature = m_csRootSig.Get();
-    cd.CS = {cs.Data(), cs.Size()};
-    GA_CHECK(gpu.Device()->CreateComputePipelineState(&cd, IID_PPV_ARGS(&m_csPso)));
+    m_csPso = hal::Require(
+        hal::BuildCompute(gpu, m_csRootSig.Get(),
+                          sc.Compile(m_shaderDir + L"/VelGrad.hlsl", L"CsVelGrad", L"cs_6_0"),
+                          "gulf.velgrad"),
+        "VelGrad kernel");
     m_csPso->SetName(L"CsVelGrad");
 
     const CurrentField& f = m_currents->Field();
@@ -218,11 +193,7 @@ void GulfLayer::RunVelGrad(Gpu& gpu, ShaderCompiler& sc) {
 }
 
 void GulfLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
-    Com<ID3D12PipelineState> keep = m_drawPso;
-    if (!BuildDrawPso(gpu, sc)) {
-        m_drawPso = keep;
-        Log("[gulf] reload failed; keeping the previous PSO");
-    }
+    BuildDrawPso(gpu, sc);   // the reload law lives in BuildDrawPso: swap only on success
 }
 
 void GulfLayer::Render(const FrameContext& ctx) {

@@ -1,6 +1,7 @@
 #include "sim/SweSolver.h"
 
 #include "hal/PixEvents.h"
+#include "hal/Pipeline.h"
 
 #include <algorithm>
 #include <cmath>
@@ -291,12 +292,10 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     m_rs->SetName(L"swe root signature");
 
     auto makePso = [&](const wchar_t* entry, Com<ID3D12PipelineState>& out) {
-        ShaderBlob cs = sc.Compile(shaderDir + L"/Swe.hlsl", entry, L"cs_6_0");
-        if (!cs.Valid()) throw std::runtime_error("Swe kernel failed");
-        D3D12_COMPUTE_PIPELINE_STATE_DESC d{};
-        d.pRootSignature = m_rs.Get();
-        d.CS = {cs.Data(), cs.Size()};
-        GA_CHECK(gpu.Device()->CreateComputePipelineState(&d, IID_PPV_ARGS(&out)));
+        out = hal::Require(
+            hal::BuildCompute(gpu, m_rs.Get(),
+                              sc.Compile(shaderDir + L"/Swe.hlsl", entry, L"cs_6_0"), "swe"),
+            "Swe kernel");
         out->SetName(entry);
     };
     makePso(L"CsSweClearEta", m_clearEta);
