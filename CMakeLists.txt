@@ -15,6 +15,7 @@ endif()
 add_executable(gagame
   src/main.cpp
   src/app/Options.cpp
+  src/app/Assembly.cpp
   src/app/Tools/PackTiles.cpp
   src/app/Tools/LoadField.cpp
   src/app/Tools/SelfTest.cpp
