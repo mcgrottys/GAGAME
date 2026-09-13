@@ -5,8 +5,8 @@
 #include "app/Tools.h"
 
 #include "core/Common.h"
-#include "core/Gpu.h"
-#include "core/Residency.h"
+#include "hal/Gpu.h"
+#include "hal/Residency.h"
 #include "render/Renderer.h"
 #include "sim/SweSolver.h"
 #include "sim/TideModel.h"

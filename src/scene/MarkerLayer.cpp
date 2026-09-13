@@ -1,7 +1,7 @@
 #include "scene/MarkerLayer.h"
 
-#include "core/PixEvents.h"
-#include "core/Shader.h"
+#include "hal/PixEvents.h"
+#include "hal/Shader.h"
 
 namespace ga {
 

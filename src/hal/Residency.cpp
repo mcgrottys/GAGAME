@@ -1,10 +1,10 @@
-#include "core/Residency.h"
+#include "hal/Residency.h"
 #include "core/ThreadManager.h"
 
 #include <atomic>
 
-#include "core/PixEvents.h"
-#include "core/TileAtlas.h"   // Cl2ProductSignature -- the proven closure drives DeriveDemand
+#include "hal/PixEvents.h"
+#include "hal/TileAtlas.h"   // Cl2ProductSignature -- the proven closure drives DeriveDemand
 
 #include <algorithm>
 #include <chrono>

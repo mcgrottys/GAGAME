@@ -1,6 +1,6 @@
 #include "sim/SweSolver.h"
 
-#include "core/PixEvents.h"
+#include "hal/PixEvents.h"
 
 #include <algorithm>
 #include <cmath>

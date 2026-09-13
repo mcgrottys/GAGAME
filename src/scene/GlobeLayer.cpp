@@ -1,13 +1,13 @@
 #include "scene/GlobeLayer.h"
 #include "core/ThreadManager.h"
 
-#include "core/GpuProfiler.h"
+#include "hal/GpuProfiler.h"
 
 #include "compose/DomainSource.h"
 #include "sim/BathyModel.h"
 
-#include "core/PixEvents.h"
-#include "core/Shader.h"
+#include "hal/PixEvents.h"
+#include "hal/Shader.h"
 
 #include <algorithm>
 #include <chrono>

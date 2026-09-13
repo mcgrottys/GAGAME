@@ -22,9 +22,9 @@
 #pragma once
 
 #include "core/GradeField.h"
-#include "core/Gpu.h"
-#include "core/Shader.h"
-#include "core/TileAtlas.h"
+#include "hal/Gpu.h"
+#include "hal/Shader.h"
+#include "hal/TileAtlas.h"
 #include "sim/BathyModel.h"
 
 #include <algorithm>

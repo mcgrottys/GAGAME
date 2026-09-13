@@ -51,7 +51,7 @@
 #include "sim/WaveField.h"
 #include "core/ThreadManager.h"
 
-#include "core/Gpu.h"
+#include "hal/Gpu.h"
 #include "sim/BathyModel.h"
 #include "sim/SweSolver.h"
 

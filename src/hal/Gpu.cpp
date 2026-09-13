@@ -1,4 +1,4 @@
-#include "core/Gpu.h"
+#include "hal/Gpu.h"
 
 #include <algorithm>
 #include <cstdio>

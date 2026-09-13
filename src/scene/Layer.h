@@ -16,8 +16,8 @@
 // ================================================================================================
 #pragma once
 
-#include "core/Gpu.h"
-#include "core/Shader.h"
+#include "hal/Gpu.h"
+#include "hal/Shader.h"
 
 namespace ga {
 

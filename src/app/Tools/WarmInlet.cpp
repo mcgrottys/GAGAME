@@ -5,8 +5,8 @@
 
 #include "compose/Compositor.h"
 #include "core/Common.h"
-#include "core/Gpu.h"
-#include "core/Residency.h"
+#include "hal/Gpu.h"
+#include "hal/Residency.h"
 
 #include <chrono>
 #include <cstdint>

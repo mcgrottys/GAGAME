@@ -44,8 +44,8 @@
 #pragma once
 
 #include "core/Common.h"
-#include "core/Gpu.h"
-#include "core/TileAtlas.h"
+#include "hal/Gpu.h"
+#include "hal/TileAtlas.h"
 
 #include <algorithm>
 #include <cstdint>

@@ -1,7 +1,7 @@
 #include "render/Renderer.h"
 
 #include "core/Image.h"
-#include "core/PixEvents.h"
+#include "hal/PixEvents.h"
 #include "scene/FieldSet.h"
 
 #include <cmath>

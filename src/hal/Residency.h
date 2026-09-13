@@ -40,8 +40,8 @@
 
 #include "compose/TileIndex.h"
 #include "core/TileAddress.h"
-#include "core/TileStream.h"
-#include "core/Gpu.h"
+#include "hal/TileStream.h"
+#include "hal/Gpu.h"
 #include "core/Pga.h"
 
 #include <atomic>

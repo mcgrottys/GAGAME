@@ -1,8 +1,8 @@
 #include "scene/SeaLayer.h"
 
-#include "core/GpuProfiler.h"
+#include "hal/GpuProfiler.h"
 
-#include "core/PixEvents.h"
+#include "hal/PixEvents.h"
 #include "scene/FieldSet.h"
 
 #include <algorithm>

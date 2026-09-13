@@ -21,7 +21,7 @@
 
 #include "compose/Compositor.h"
 #include "compose/WaterAtlas.h"
-#include "core/TileAtlas.h"
+#include "hal/TileAtlas.h"
 #include "scene/Layer.h"
 #include "sim/GlobeModel.h"
 #include "sim/SeaState.h"

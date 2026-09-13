@@ -14,9 +14,9 @@
 // ================================================================================================
 #pragma once
 
-#include "core/Gpu.h"
-#include "core/GpuProfiler.h"
-#include "core/Shader.h"
+#include "hal/Gpu.h"
+#include "hal/GpuProfiler.h"
+#include "hal/Shader.h"
 #include "render/Camera.h"
 #include "scene/Layer.h"
 

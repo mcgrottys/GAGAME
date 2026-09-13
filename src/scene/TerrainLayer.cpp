@@ -1,6 +1,6 @@
 #include "scene/TerrainLayer.h"
 
-#include "core/PixEvents.h"
+#include "hal/PixEvents.h"
 #include "scene/FieldSet.h"
 
 #include <vector>

@@ -12,8 +12,8 @@
 
 #include "app/Options.h"
 #include "core/Common.h"
-#include "core/Gpu.h"
-#include "core/Residency.h"
+#include "hal/Gpu.h"
+#include "hal/Residency.h"
 #include "sim/BathyModel.h"
 #include "sim/CurrentModel.h"
 #include "sim/SweSolver.h"

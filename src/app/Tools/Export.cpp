@@ -4,9 +4,9 @@
 
 #include "compose/Compositor.h"
 #include "core/Common.h"
-#include "core/Gpu.h"
+#include "hal/Gpu.h"
 #include "core/Image.h"
-#include "core/Residency.h"
+#include "hal/Residency.h"
 
 #include <algorithm>
 #include <cmath>

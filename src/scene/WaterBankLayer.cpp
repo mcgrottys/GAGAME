@@ -1,9 +1,9 @@
 #include "scene/WaterBankLayer.h"
 
-#include "core/GpuProfiler.h"
+#include "hal/GpuProfiler.h"
 
 #include "core/Image.h"
-#include "core/PixEvents.h"
+#include "hal/PixEvents.h"
 #include "scene/SeaLayer.h"
 #include "core/SceneConfig.h"
 #include "sim/WaveField.h"

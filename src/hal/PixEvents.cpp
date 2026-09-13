@@ -6,14 +6,14 @@
 // by hand so the project stays dependency-free). Every pass is already named by its
 // state-diagram node via PixScope, so a capture opens in PIX reading like the GA AST:
 // sea/swe/churn/water.bank/globe, in order, with the banks inspectable per texel.
-#include "PixEvents.h"
+#include "hal/PixEvents.h"
 
 #include <windows.h>
 
 #include <filesystem>
 #include <string>
 
-#include "Common.h"
+#include "core/Common.h"
 
 namespace ga {
 

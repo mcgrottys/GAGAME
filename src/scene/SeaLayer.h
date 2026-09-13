@@ -12,7 +12,7 @@
 #include "compose/Compositor.h"
 #include "compose/ExposureSource.h"
 #include "core/OceanFft.h"
-#include "core/TileAtlas.h"
+#include "hal/TileAtlas.h"
 #include "core/GradeField.h"
 #include "scene/Layer.h"
 #include "sim/BathyModel.h"

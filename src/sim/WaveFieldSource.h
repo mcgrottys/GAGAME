@@ -25,7 +25,7 @@
 #include "compose/Compositor.h"
 #include "compose/DomainSource.h"
 #include "core/GaUnits.h"
-#include "core/Residency.h"
+#include "hal/Residency.h"
 #include "sim/BathyModel.h"
 #include "sim/WaveField.h"
 

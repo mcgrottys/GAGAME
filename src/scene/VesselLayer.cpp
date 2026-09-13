@@ -1,7 +1,7 @@
 #include "scene/VesselLayer.h"
 
-#include "core/PixEvents.h"
-#include "core/Shader.h"
+#include "hal/PixEvents.h"
+#include "hal/Shader.h"
 #include "sim/Vessel.h"
 
 #include <algorithm>

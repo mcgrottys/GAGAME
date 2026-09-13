@@ -59,7 +59,7 @@
 #include "compose/TileTree.h"
 #include "core/Droste.h"   // M10: the globe within the globe, as one Cl(4,1) versor
 #include "core/Pga.h"
-#include "core/Residency.h"
+#include "hal/Residency.h"
 #include "core/SceneConfig.h"
 #include "render/Camera.h"
 #include "scene/Route.h"
