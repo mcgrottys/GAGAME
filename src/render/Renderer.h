@@ -8,12 +8,16 @@
 //      b1            per-draw constants     (root CBV)
 //      t0, space0    FieldDesc table        (root SRV, structured buffer)
 //      t0, space1    unbounded Texture2D[]  (descriptor table over the whole SRV heap)
-//      b2            shared surface constants (bound by whichever layer owns the surface)
-//      s0..s2        static samplers        (linear clamp, linear wrap, point clamp)
+//      b2            surface constants      (root CBV: ComposedSurfaceCb, filled once a frame by
+//                                             the frame loop, pushed and bound once by RenderFrame
+//                                             for every layer -- M12 step 4g)
+//      b3            globe sky constants    (root CBV: GlobeSkyCb, the globe's sky and limb passes)
+//      s0..s3        static samplers        (linear clamp, linear wrap, point clamp, anisotropic)
 //  A new product adds textures to the heap and rows to the FieldDesc table. It does not touch this.
 // ================================================================================================
 #pragma once
 
+#include "compose/Compositor.h"   // ComposedSurfaceCb: the surface constants on b2 (M12 step 4g)
 #include "hal/Gpu.h"
 #include "hal/GpuProfiler.h"
 #include "hal/Root.h"
@@ -97,6 +101,12 @@ public:
     // The caller's frame number for the profiler's rows (a rail's settle frames are negative).
     int64_t gpuFrameLabel = 0;
 
+    // M12 step 4g: THE SURFACE CONSTANT BUFFER (b2). The frame loop fills these rows once a
+    // frame through SurfaceFrame::Fill; RenderFrame pushes them once and binds root parameter 4
+    // (b2) before any layer records, so the globe, the sea, the terrain and the GIS vectors
+    // read one buffer where each carried a copy of these rows inside its own cbuffer. Zero
+    // until filled: every composed channel reads "off".
+    ComposedSurfaceCb surfaceCb{};
     // Water level in metres above datum -- in M1 this is the tide at the focus station, published
     // scene-wide because anything that sits in or on the water will need it.
     float waterLevel = 0.0f;

@@ -71,8 +71,8 @@ public:
     // (SurfaceFrame::FlatRows). Must precede the first churn update.
     void SetSurface(const SurfaceFrame* s) { m_surface = s; }
     void SetBathyCpu(const BathyModel* bm) { m_bathyCpu = bm; }
-    // M6i: composed channels + survey masks -- the same fill the globe and terrain use.
-    void SetComposed(const ComposedSurfaceCb& cs) { m_seaCb.cs = cs; }
+    // M6i's composed channels + survey masks are the renderer's one surface buffer (b2)
+    // since M12 step 4g: the same rows the globe reads, from the same upload.
     uint32_t ChurnTiles() const { return m_churnReady ? m_churn.ResidentCount() : 0; }
     // M7e: the bank reads the foam MEMORY -- advected churn joins the one water's fiber.
     uint32_t ChurnAtlasSrv() const { return m_churnReady ? m_churn.Srv() : 0xFFFFFFFFu; }
@@ -232,7 +232,6 @@ private:
         float bandSig[4];   // M6t: xyz = per-cascade mean-square SLOPE (exaggeration baked),
                             // w = the sub-resolved floor, calibrated so xyz+w sums to the
                             // globe's Cox-Munk sigma^2(wind) -- grade shedding conserves it
-        ComposedSurfaceCb cs;   // M6i: composed channels + survey masks (9 rows)
     };
     // Mirrored in shaders/SeaChurn.hlsl. (Count float4 rows on BOTH sides after any edit -- a
     // shader field without its mirror here reads garbage past the push; see the gSweG incident.)

@@ -7,10 +7,11 @@
 //  per channel (plus the one window overlay, which is the same composed color at a depth the
 //  16k cube cannot carry -- a resolution ramp of identical data, not a second source).
 //
-//  Every layer that includes this file embeds GA_COMPOSED_CB_ROWS (Common.hlsli) in its own
-//  cbuffer FIRST, and fills those rows through SurfaceFrame::Fill alone (M12 step 4a). The globe
-//  and the terrain therefore run literally the same code on literally the same constants -- the
-//  class of bug where two layers disagree about the planet's surface is structurally gone.
+//  The rows this file reads are Common.hlsli's SurfaceCb (b2): ONE constant buffer, filled
+//  through SurfaceFrame::Fill alone (M12 step 4a) and bound once a frame for every layer (M12
+//  step 4g, where each layer embedded a copy in its own cbuffer). The globe and the terrain
+//  therefore run literally the same code on literally the same constants -- the class of bug
+//  where two layers disagree about the planet's surface is structurally gone.
 //  M12 step 4e: the reads themselves -- the window uv, the residency floor, the residency-
 //  clamped sample, the cube-versus-page choice -- are PageSample.hlsli's contract, shared with
 //  the kernels; the functions here bind this cbuffer's rows and views to it and nothing else.

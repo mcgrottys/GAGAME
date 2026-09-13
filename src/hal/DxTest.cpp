@@ -28,7 +28,8 @@ std::string ReadFile(const std::string& path) {
 }
 
 // ---- 1. the C++ side of CB parity: byte-count a CB struct from header text. Our CB style
-// is rows: T name[4] / [8] / [16], plain scalars, and the one nested ComposedSurfaceCb.
+// is rows: T name[4] / [8] / [16], plain scalars, and a nested ComposedSurfaceCb (none since
+// M12 step 4g made the surface its own buffer; the case stays, with the prefix rule below).
 // Anything this parser cannot read is a FAIL (the style is part of the contract).
 // M9ax: a row of the C++ struct, by name and byte offset -- so the gate can hold the LAYOUT,
 // not only the size. A same-size insertion in the middle of one side passed the size check
@@ -125,6 +126,10 @@ struct CbContract {
     const char* cbuffer;
     const wchar_t* entry;
     const wchar_t* target;
+    // M12 step 4g: what the HLSL rows carry between the 'g' and the C++ name -- the surface's
+    // gCsU is ComposedSurfaceCb::u, so its contract says "cs"; every other cbuffer's rows are
+    // the struct's own names.
+    const char* rowPrefix = "";
 };
 
 // The registered contracts. ADD A ROW HERE when a new layer grows a CB -- and the gate
@@ -140,6 +145,11 @@ const CbContract kCbs[] = {
      L"CsChurnUpdate", L"cs_6_0"},
     {"src/sim/SweSolver.h", "SweCbData", "shaders/Swe.hlsl", "SweCb", L"CsSweHeight",
      L"cs_6_0"},
+    // M12 step 4g: THE SURFACE'S OWN BUFFER (b2), declared once in Common.hlsli and read by
+    // every shader on the shared layout; reflected through the globe's pixel stage, which
+    // samples it. Where the four layers' cbuffers embedded these rows, this row holds them.
+    {"src/compose/Compositor.h", "ComposedSurfaceCb", "shaders/Globe.hlsl", "SurfaceCb",
+     L"PsMain", L"ps_6_0", "cs"},
 };
 
 bool ReflectBlob(IDxcUtils* utils, const ShaderBlob& blob,
@@ -192,12 +202,12 @@ bool RunDxSelfTest() {
         }
         // M9ax: THE LAYOUT, ROW BY ROW. Every reflected variable must start where a C++ row
         // of the same size and the same name starts (names compared without the HLSL 'g'
-        // prefix, case-insensitively; nested ComposedSurfaceCb rows carry their member as a
-        // prefix, cs + u == gCsU). Equal sizes with rotated rows is exactly the failure this
-        // exists for.
+        // prefix, case-insensitively, under the contract's rowPrefix: the surface's cs + u ==
+        // gCsU, as a nested ComposedSurfaceCb's member once did). Equal sizes with rotated
+        // rows is exactly the failure this exists for.
         std::vector<CbField> rows;
         bool okR = true;
-        StructBytes(ReadFile(c.cppFile), c.cppStruct, okR, composed, &rows);
+        StructBytes(ReadFile(c.cppFile), c.cppStruct, okR, composed, &rows, c.rowPrefix);
         auto normHlsl = [](std::string n) {
             if (n.size() > 1 && n[0] == 'g' && std::isupper((unsigned char)n[1])) n = n.substr(1);
             std::string o;

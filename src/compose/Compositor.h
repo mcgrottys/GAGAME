@@ -262,10 +262,10 @@ private:
 //   +Z: dir = ( s, -t,  1)   -Z: dir = (-s, -t, -1)     with s = 2u-1, t = 2v-1.
 
 // ---- 4. the one render path's constants ----------------------------------------------------
-// Mirrors GA_COMPOSED_CB_ROWS in Common.hlsli (count rows on BOTH sides after any edit). Every
-// layer that samples a planet's composed channels embeds these rows and fills them through
-// SurfaceFrame::Fill ALONE (compose/SurfaceFrame.h, M12 step 4a), so no two layers can
-// disagree on the math.
+// Mirrors GA_COMPOSED_CB_ROWS in Common.hlsli (count rows on BOTH sides after any edit): the
+// rows of SurfaceCb (b2), ONE buffer the frame loop fills through SurfaceFrame::Fill ALONE
+// (compose/SurfaceFrame.h, M12 step 4a) and the renderer binds once a frame for every layer
+// that samples a planet's composed channels (M12 step 4g), so no two can disagree on the math.
 struct ComposedSurfaceCb {
     uint32_t u[4];    // color cube SRV, color cube residency map, window SRV, window res map
     uint32_t u2[4];   // height cube SRV + residency map, height WINDOW SRV + residency map

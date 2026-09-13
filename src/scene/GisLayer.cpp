@@ -122,7 +122,6 @@ void GisLayer::Render(const FrameContext& ctx) {
         const Exchange::View v = m_exchange->Query(b.channel);
         if (!v.valid || v.elements == 0) return;
         GisCbData cb{};
-        cb.cs = m_cs;
         memcpy(cb.color, b.color, sizeof(cb.color));
         ctx.cmd->GraphicsConstants(1, cb);
         ctx.cmd->GraphicsSrvAt(2, v.va);

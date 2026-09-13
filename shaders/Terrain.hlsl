@@ -9,8 +9,8 @@ cbuffer TerrainCb : register(b1) {
     uint4  gTSrv;      // x = heightfield SRV, y = grid quads X, z = grid quads Z
     float4 gTParams;   // x = water level (NAVD88 m), y = texel world size
     // M6i: the composed channels -- the SAME rows, functions and constants the globe samples,
-    // so the terrain and the globe agree about the Earth's color by construction.
-    GA_COMPOSED_CB_ROWS
+    // so the terrain and the globe agree about the Earth's color by construction -- are
+    // Common.hlsli's SurfaceCb (b2) since M12 step 4g.
 };
 
 #include "Compose.hlsli"

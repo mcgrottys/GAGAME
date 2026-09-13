@@ -1860,15 +1860,9 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
             m_res->Want(m_maskT, 7u, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
         }
     }
-    m_surface->Fill(m_cb.cs, *m_res);
-    {   // M12 step 0 instrument: does this fill agree with main.cpp's ([surface] main fill)?
-        static uint64_t sLastFill = 0;
-        const uint64_t h = Fnv1aBytes(&m_cb.cs, sizeof(m_cb.cs));
-        if (h != sLastFill) {
-            sLastFill = h;
-            Log("[surface] globe fill FNV-1a %016llx", static_cast<unsigned long long>(h));
-        }
-    }
+    // M12 step 4g: the composed-surface rows are the renderer's one buffer (b2), filled by
+    // the frame loop from this same SurfaceFrame; the globe's own fill and its step 0
+    // fingerprint (equal to the frame loop's at every pose it was ever read) are gone.
     if (m_streamMars) {
         m_cb.texIdx[1] = m_cb.texIdx[2] = m_cb.texIdx[3] = UINT32_MAX;   // waves/wind/clouds
         m_cb.texIdx2[1] = UINT32_MAX;                                    // wind bank
@@ -2018,7 +2012,7 @@ void GlobeLayer::Render(const FrameContext& ctx) {
         ctx.cmd->Native()->OMSetBlendFactor(bf);
         ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         ctx.cmd->GraphicsConstantsAt(1, cbVa);
-        ctx.cmd->GraphicsConstants(4, m_skyCb);
+        ctx.cmd->GraphicsConstants(5, m_skyCb);   // b3 (M12 step 4g: b2 is the surface's)
         ctx.cmd->Draw(3, 1, 0, 0);
     }
 
@@ -2061,7 +2055,7 @@ void GlobeLayer::Render(const FrameContext& ctx) {
             for (int li = 0; li < m_limbCount; ++li) {
                 SkyCbData lc = m_skyCb;
                 lc.lvl[0] = static_cast<float>(m_limbSlots[li]);
-                ctx.cmd->GraphicsConstants(4, lc);
+                ctx.cmd->GraphicsConstants(5, lc);   // b3
                 ctx.cmd->Draw(3, 1, 0, 0);
             }
         }

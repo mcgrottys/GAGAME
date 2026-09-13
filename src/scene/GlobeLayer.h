@@ -394,7 +394,8 @@ private:
         float windB[4];       // nx, ny, unused, unused
         uint32_t streamU[4];  // M6e: Mars native surface/normal cubes + their residency maps
         float streamF[4];     // surface on, normal on, planet-is-Mars, unused
-        ComposedSurfaceCb cs; // M6i: the composed channels + the one-world frame (8 rows)
+        // (M6i's composed channels + the one-world frame rows: the renderer's one surface
+        // buffer, b2, since M12 step 4g -- Common.hlsli's SurfaceCb, not a row of this one.)
         float estGeo[4];      // CUDEM window deg: lon0, lat1, 1/lonSpan, 1/latSpan (0 = none)
         // M7: the wave vertex bank (one-water mode): water geometry + params from ONE tiled
         // resource, sampled by ring (camera-anchored mip ladder).
@@ -433,7 +434,8 @@ private:
         uint32_t tileW, tileH, pad0, pad1;
         float lat1, dLatDeg, radius, scale;
     };
-    // Mirrors GlobeSkyCb (b2) in Globe.hlsl.
+    // Mirrors GlobeSkyCb (b3 -- root parameter 5 of the shared layout; M12 step 4g moved it
+    // off b2, the surface's) in Globe.hlsl.
     struct SkyCbData {
         float fwd[4];         // xyz forward, w = tan(fovY/2)
         float right[4];       // xyz right, w = aspect

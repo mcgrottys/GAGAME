@@ -41,13 +41,12 @@ public:
     void ReloadShaders(Gpu& gpu, ShaderCompiler& sc) override;
     void Render(const FrameContext& ctx) override;
 
-    void SetComposed(const ComposedSurfaceCb& cs) { m_cs = cs; }
     bool enabled = false;   // --stencil
 
 private:
-    // Mirrors GisCb in GisVec.hlsl (composed rows + one color row).
+    // Mirrors GisCb in GisVec.hlsl (one color row; the composed rows the vectors project
+    // through are the renderer's one surface buffer, b2, since M12 step 4g).
     struct GisCbData {
-        ComposedSurfaceCb cs;
         float color[4];
     };
     // Each batch is an EXCHANGE CHANNEL: the polylines publish once as lon/lat segment
@@ -72,7 +71,6 @@ private:
     int m_coastCh = -1, m_riversCh = -1, m_globalCh = -1,   // Exchange ids for republish
         m_structsCh = -1;
     float m_bucket = -1.0f;
-    ComposedSurfaceCb m_cs{};
 };
 
 }  // namespace ga

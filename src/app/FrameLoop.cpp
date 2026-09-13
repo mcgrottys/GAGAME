@@ -594,23 +594,11 @@ std::optional<int> FrameLoop::Session() {
             m_tangentSpace.name.c_str(), portal.s, portal.axis[0], portal.axis[1], portal.axis[2],
             portal.twist, drosteLeaf.unitM);
     }
-    // M6i: the terrain samples the SAME composed color the globe does -- one fill
-    // function, one frame, one answer (its geometry stays the CUDEM grid the physics
-    // reads, so its height channel is off).
-    if (!marsMode && globe) {
-        ComposedSurfaceCb cs{};
-        // M9ap: pages mode -- the terrain, the sea and the GIS layer sample the SAME page
-        // tenant the globe does, slices 6 and 7 included. M12 step 4a: the surface fills its
-        // own rows (SurfaceFrame::Fill), and the globe calls the same fill every frame.
-        surface.Fill(cs, resMgr);
-        if (terrain) terrain->SetComposed(cs);
-        if (sea) sea->SetComposed(cs);
-        if (gisLayer) gisLayer->SetComposed(cs);
-        // M12 step 0 instrument: GlobeLayer fills the same rows itself, every frame; the
-        // two [surface] lines must agree, or step 4a's single fill is a measured change.
-        Log("[surface] main fill FNV-1a %016llx",
-            static_cast<unsigned long long>(Fnv1aBytes(&cs, sizeof(cs))));
-    }
+    // M12 step 4g: the composed-surface rows are filled once a FRAME, into the renderer's one
+    // surface buffer (b2), in Frame() beside the renderer's other per-frame members -- where
+    // this block filled the terrain's, the sea's and the GIS layer's copies once, at boot
+    // (M9ap: all of them sample the SAME page tenant the globe does, slices 6 and 7
+    // included), and the globe refilled its own every frame.
     // ---- M6j: the first GA-product-buffer plugin, end to end. The CPU ORGANIZES: one
     // PGA motor per tide station, placing and orienting a pylon on the sphere (Pga.h --
     // conventions pinned by selftest). The Exchange CARRIES: a typed, versioned channel.
@@ -2815,6 +2803,24 @@ bool FrameLoop::Frame() {
     PROF_BEGIN();
     tide->SetTime(simUnix, windowSec);
     PROF_END(4);
+    // M12 step 4g: THE ONE SURFACE CONSTANT BUFFER. The surface fills its rows once a frame
+    // into the renderer's b2 buffer (Renderer::surfaceCb), which RenderFrame pushes once and
+    // binds for every layer: the globe, the sea, the terrain and the GIS vectors read the
+    // same bytes from one buffer where each carried a copy inside its own cbuffer -- the
+    // globe's refilled every frame from this same SurfaceFrame, the other three once at boot
+    // (Session), and the fingerprints of all of them agreed with the bytes pushed for b2 at
+    // every pose (scratchpad/step4g_probe.py). Mars fills too, as the globe's own fill did:
+    // its rows say "height cube, no page" (SurfaceFrame.h's banner). The step 0 fingerprint
+    // stays, printed when the bytes change, and is the only one.
+    if (globe) {
+        m_A.surface.Fill(renderer.surfaceCb, resMgr);
+        static uint64_t sLastSurface = 0;
+        const uint64_t h = Fnv1aBytes(&renderer.surfaceCb, sizeof(renderer.surfaceCb));
+        if (h != sLastSurface) {
+            sLastSurface = h;
+            Log("[surface] main fill FNV-1a %016llx", static_cast<unsigned long long>(h));
+        }
+    }
     renderer.waterLevel = static_cast<float>(tide->focusHeight);
     // The terrain speaks NAVD88; the tide speaks MLLW. One offset joins them. In
     // estuary mode the open-water level is the ENTRANCE station's (M5c), and the west
