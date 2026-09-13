@@ -1932,6 +1932,14 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
                    stencilOverlay, m_maskT, m_detWinT, m_det17Org, 17,
                    m_winFace ? m_winFace : UINT32_MAX, m_detFace ? m_detFace : UINT32_MAX,
                    m_hgtWinFace ? m_hgtWinFace : UINT32_MAX);
+    {   // M12 step 0 instrument: does this fill agree with main.cpp's ([surface] main fill)?
+        static uint64_t sLastFill = 0;
+        const uint64_t h = Fnv1aBytes(&m_cb.cs, sizeof(m_cb.cs));
+        if (h != sLastFill) {
+            sLastFill = h;
+            Log("[surface] globe fill FNV-1a %016llx", static_cast<unsigned long long>(h));
+        }
+    }
     if (m_streamMars) {
         m_cb.texIdx[1] = m_cb.texIdx[2] = m_cb.texIdx[3] = UINT32_MAX;   // waves/wind/clouds
         m_cb.texIdx2[1] = UINT32_MAX;                                    // wind bank

@@ -14,6 +14,7 @@ endif()
 
 add_executable(gagame
   src/main.cpp
+  src/app/Options.cpp
   src/core/BuildInfo.cpp
   src/core/GaAst.cpp
   src/core/PixEvents.cpp
