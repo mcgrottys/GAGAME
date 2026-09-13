@@ -5,7 +5,7 @@
 #include "compose/Compositor.h"
 #include "compose/TileTree.h"
 #include "core/Common.h"
-#include "core/Residency.h"
+#include "hal/Residency.h"
 #include "core/ThreadAudit.h"
 
 #include <algorithm>

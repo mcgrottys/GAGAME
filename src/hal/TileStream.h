@@ -34,7 +34,7 @@
 #include <vector>
 
 #include "core/Common.h"
-#include "core/Gpu.h"
+#include "hal/Gpu.h"
 
 #if defined(GA_HAVE_DSTORAGE)
 #include <dstorage.h>

@@ -1,51 +1,34 @@
 #include "scene/VesselLayer.h"
 
-#include "core/PixEvents.h"
-#include "core/Shader.h"
+#include "hal/PixEvents.h"
+#include "hal/Pipeline.h"
+#include "hal/Shader.h"
 #include "sim/Vessel.h"
 
 #include <algorithm>
 
 namespace ga {
 
-void VesselLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSignature* rootSig) {
+void VesselLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSignature rootSig) {
     m_rootSig = rootSig;
     if (!BuildPso(gpu, sc)) throw std::runtime_error("vessel PSO failed");
 }
 
 bool VesselLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
     const std::wstring path = m_shaderDir + L"/Vessel.hlsl";
-    ShaderBlob vs = sc.Compile(path, L"VsMain", L"vs_6_0");
-    ShaderBlob ps = sc.Compile(path, L"PsMain", L"ps_6_0");
-    if (!vs.Valid() || !ps.Valid()) return false;
-
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
-    d.pRootSignature = m_rootSig;
-    d.VS = {vs.Data(), vs.Size()};
-    d.PS = {ps.Data(), ps.Size()};
-    d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    d.SampleMask = UINT_MAX;
-    d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    d.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
-    d.RasterizerState.DepthClipEnable = TRUE;
-    d.DepthStencilState.DepthEnable = TRUE;
-    d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-    d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;   // reversed-Z
-    d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-    d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    d.NumRenderTargets = 1;
-    d.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    d.SampleDesc.Count = 1;
-
-    Com<ID3D12PipelineState> pso;
-    if (FAILED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) return false;
-    m_pso = pso;
-    return true;
+    hal::GraphicsPipelineDesc d;
+    d.rootSig = m_rootSig;
+    d.vs = sc.Compile(path, L"VsMain", L"vs_6_0");
+    d.ps = sc.Compile(path, L"PsMain", L"ps_6_0");
+    d.cull = D3D12_CULL_MODE_BACK;
+    d.depthClip = TRUE;
+    d.depthTest = true;
+    d.depthWrite = true;   // reversed-Z GREATER, the default comparison
+    return hal::Reload(m_pso, [&] { return hal::BuildGraphics(gpu, d, "vessel"); }, "vessel");
 }
 
 void VesselLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
-    Com<ID3D12PipelineState> keep = m_pso;
-    if (!BuildPso(gpu, sc)) m_pso = keep;
+    BuildPso(gpu, sc);   // the reload law lives in BuildPso: swap only on success
 }
 
 namespace {
@@ -158,14 +141,14 @@ void Emit(std::vector<VesselLayer::PartGpu>& out, const Motor& hull, const Motor
 
 void VesselLayer::Render(const FrameContext& ctx) {
     if (!m_pso || m_parts.empty()) return;
-    PixScope scope(ctx.cl, "vessels (spec -> boxes, motor sandwich on the GPU)");
+    PixScope scope(ctx.cmd->Native(), "vessels (spec -> boxes, motor sandwich on the GPU)");
     const float cb[4] = {static_cast<float>(m_parts.size()), 1.0f, 0.0f, 0.0f};
-    ctx.cl->SetPipelineState(m_pso.Get());
-    ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx.cl->SetGraphicsRootConstantBufferView(1, ctx.gpu->PushConstants(cb, sizeof(cb)));
-    ctx.cl->SetGraphicsRootShaderResourceView(
+    ctx.cmd->Pipeline(m_pso.Get());
+    ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx.cmd->GraphicsConstants(1, cb);
+    ctx.cmd->GraphicsSrvAt(
         2, ctx.gpu->PushConstants(m_parts.data(), m_parts.size() * sizeof(PartGpu)));
-    ctx.cl->DrawInstanced(static_cast<uint32_t>(m_parts.size()) * 36u, 1, 0, 0);
+    ctx.cmd->Draw(static_cast<uint32_t>(m_parts.size()) * 36u, 1, 0, 0);
 }
 
 }  // namespace ga

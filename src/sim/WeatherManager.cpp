@@ -1,7 +1,7 @@
 #include "sim/WeatherManager.h"
 
 #include "core/Common.h"
-#include "core/Residency.h"
+#include "hal/Residency.h"
 
 #include <algorithm>
 #include <chrono>

@@ -47,6 +47,21 @@ struct GpuTexture {
     bool Valid() const { return res != nullptr; }
 };
 
+// ------------------------------------------------------------------ the handles a layer holds
+// M12 step 3f: THE HAL SPELLINGS. What a layer HOLDS from Direct3D -- the root signature it
+// binds, the pipelines it built, the resources it owns or borrows -- keeps the D3D type (this
+// engine is DX12-first: the type IS the object) under a hal name, so that the rule "Direct3D
+// lives in src/hal/" (tools/hal_lint.py) can be read off a layer's header. Each is a typedef of
+// the same type, not a wrapper: nothing about the compiled code changes.
+namespace hal {
+using RootSignature = ID3D12RootSignature*;          // the layout a layer binds: shared, or its own
+using RootSignatureRef = Com<ID3D12RootSignature>;   // ...and the one it built and owns
+using Pso = Com<ID3D12PipelineState>;                // a pipeline a layer built and owns
+using PsoPtr = ID3D12PipelineState*;                 // a pipeline handed to a helper that binds it
+using Resource = ID3D12Resource*;                    // a resource borrowed for a view or a barrier
+using ResourceRef = Com<ID3D12Resource>;             // ...and one a layer created and owns
+}  // namespace hal
+
 // ------------------------------------------------------------------ descriptor heap
 
 class DescriptorHeap {
@@ -115,6 +130,14 @@ public:
 
     // ---- frame lifecycle
     ID3D12GraphicsCommandList* BeginFrame();
+    // M12 step 3f: the frame list as ID3D12GraphicsCommandList6 (DispatchMesh). The list is ONE
+    // object for the life of the device (CreateFrameResources makes it once; BeginFrame resets
+    // it), so the interface is queried once, there, and kept: null on a runtime without it, and
+    // null for any other list (the upload list -- nothing dispatches mesh work outside the
+    // frame). CommandContext::DispatchMesh is the one caller.
+    ID3D12GraphicsCommandList6* MeshList(ID3D12GraphicsCommandList* cl) const {
+        return (cl != nullptr && cl == m_cmdList.Get()) ? m_cmdList6.Get() : nullptr;
+    }
     void EndFrame(bool present);
     void WaitIdle();
     void Resize(uint32_t width, uint32_t height);
@@ -194,6 +217,7 @@ private:
 
     Com<ID3D12CommandAllocator> m_alloc[kFrameCount];
     Com<ID3D12GraphicsCommandList> m_cmdList;
+    Com<ID3D12GraphicsCommandList6> m_cmdList6;   // the same list, as List6 (M12 step 3f)
     GpuBuffer m_cbArena[kFrameCount];
     uint64_t m_cbOffset[kFrameCount] = {};
 

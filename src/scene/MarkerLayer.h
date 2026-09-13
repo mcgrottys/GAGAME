@@ -24,7 +24,7 @@ public:
 
     const char* Name() const override { return "markers"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
-              ID3D12RootSignature* rootSig) override;
+              hal::RootSignature rootSig) override;
     void ReloadShaders(Gpu& gpu, ShaderCompiler& sc) override;
     void Render(const FrameContext& ctx) override;
 
@@ -34,8 +34,8 @@ private:
     std::wstring m_shaderDir;
     const Exchange* m_exchange = nullptr;
     std::string m_channel;
-    ID3D12RootSignature* m_rootSig = nullptr;
-    Com<ID3D12PipelineState> m_pso;
+    hal::RootSignature m_rootSig = nullptr;
+    hal::Pso m_pso;
 };
 
 }  // namespace ga

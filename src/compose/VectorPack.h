@@ -8,7 +8,7 @@
 // ================================================================================================
 #pragma once
 
-#include "core/Gpu.h"
+#include "hal/Gpu.h"
 
 #include <string>
 #include <vector>

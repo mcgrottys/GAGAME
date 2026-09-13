@@ -1,13 +1,17 @@
 #include "scene/GlobeLayer.h"
 #include "core/ThreadManager.h"
 
-#include "core/GpuProfiler.h"
+#include "hal/GpuProfiler.h"
 
 #include "compose/DomainSource.h"
 #include "sim/BathyModel.h"
 
-#include "core/PixEvents.h"
-#include "core/Shader.h"
+#include "hal/PixEvents.h"
+#include "hal/Pipeline.h"
+#include "hal/Resources.h"
+#include "hal/Root.h"
+#include "hal/Views.h"
+#include "hal/Shader.h"
 
 #include <algorithm>
 #include <chrono>
@@ -192,7 +196,7 @@ void GlobeLayer::LeafOf(const double d[3], int level, int& face, uint32_t& ix, u
     iy = static_cast<uint32_t>(std::clamp(std::floor(v * n), 0.0, n - 1.0));
 }
 
-void GlobeLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSignature* rootSig) {
+void GlobeLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSignature rootSig) {
     m_rootSig = rootSig;
     if (!m_globe || !m_globe->Ready()) throw std::runtime_error("GlobeLayer needs globe data");
     if (!BuildPso(gpu, sc)) throw std::runtime_error("globe PSO failed");
@@ -308,22 +312,17 @@ void GlobeLayer::InitClouds(Gpu& gpu, ShaderCompiler& sc) {
 
     // ---- dense source volume (720x361x10 R32F, ~10 MB)
     {
-        D3D12_RESOURCE_DESC rd{};
-        rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE3D;
-        rd.Width = snx;
-        rd.Height = sny;
-        rd.DepthOrArraySize = static_cast<UINT16>(snz);
-        rd.MipLevels = 1;
-        rd.Format = DXGI_FORMAT_R32_FLOAT;
-        rd.SampleDesc.Count = 1;
-        D3D12_HEAP_PROPERTIES hp{};
-        hp.Type = D3D12_HEAP_TYPE_DEFAULT;
-        GA_CHECK(gpu.Device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
-                                                      D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                      IID_PPV_ARGS(&m_cloudSrc.res)));
-        m_cloudSrc.res->SetName(L"globe.cloudSrc (GFS isobaric TCDC)");
+        m_cloudSrc.res = hal::Committed3D(
+            gpu, L"globe.cloudSrc (GFS isobaric TCDC)", snx, sny, snz, DXGI_FORMAT_R32_FLOAT,
+            D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST,
+            "the clouds' GFS source volume (720x361x10): uploaded once, sampled once by the "
+            "build kernel into the sparse bank the frame reads -- dense because it is the "
+            "input, not the field");
         m_cloudSrc.state = D3D12_RESOURCE_STATE_COPY_DEST;
 
+        // The footprint query stays raw (the one such site): a copy layout, not a creation,
+        // over the resource's own desc as Gpu::UploadTexture does.
+        const auto rd = m_cloudSrc.res->GetDesc();
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
         UINT numRows = 0;
         UINT64 rowBytes = 0, total = 0;
@@ -335,21 +334,16 @@ void GlobeLayer::InitClouds(Gpu& gpu, ShaderCompiler& sc) {
                        static_cast<uint64_t>(r) * rowBytes,
                    static_cast<size_t>(rowBytes));
         }
-        ID3D12GraphicsCommandList* cl = gpu.BeginUpload();
+        hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
         D3D12_TEXTURE_COPY_LOCATION dst{}, sl{};
         dst.pResource = m_cloudSrc.res.Get();
         dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         sl.pResource = staging.res.Get();
         sl.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
         sl.PlacedFootprint = fp;
-        cl->CopyTextureRegion(&dst, 0, 0, 0, &sl, nullptr);
-        D3D12_RESOURCE_BARRIER br{};
-        br.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        br.Transition.pResource = m_cloudSrc.res.Get();
-        br.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        br.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-        br.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-        cl->ResourceBarrier(1, &br);
+        up.Native()->CopyTextureRegion(&dst, 0, 0, 0, &sl, nullptr);
+        up.Barrier(m_cloudSrc.res.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         gpu.EndUpload();
         m_cloudSrc.state = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     }
@@ -391,62 +385,22 @@ void GlobeLayer::InitClouds(Gpu& gpu, ShaderCompiler& sc) {
         m_cloud.ResidentBytes() / 1048576.0, m_cloud.VirtualBytes() / 1048576.0);
 
     // ---- build kernel (b0 CBV, t0 list root SRV, table [t1 src, u0 vol], s0 clamp)
-    D3D12_DESCRIPTOR_RANGE1 ranges[2]{};
-    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    ranges[0].NumDescriptors = 1;
-    ranges[0].BaseShaderRegister = 1;
-    ranges[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    ranges[0].OffsetInDescriptorsFromTableStart = 0;
-    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    ranges[1].NumDescriptors = 1;
-    ranges[1].BaseShaderRegister = 0;
-    ranges[1].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    ranges[1].OffsetInDescriptorsFromTableStart = 1;
-    D3D12_ROOT_PARAMETER1 params[3]{};
-    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    params[0].Descriptor.ShaderRegister = 0;
-    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    params[1].Descriptor.ShaderRegister = 0;
-    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[2].DescriptorTable.NumDescriptorRanges = 2;
-    params[2].DescriptorTable.pDescriptorRanges = ranges;
-    D3D12_STATIC_SAMPLER_DESC samp{};
-    samp.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-    samp.AddressU = samp.AddressV = samp.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    samp.MaxLOD = D3D12_FLOAT32_MAX;
-    samp.ShaderRegister = 0;
-    samp.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC vd{};
-    vd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    vd.Desc_1_1.NumParameters = _countof(params);
-    vd.Desc_1_1.pParameters = params;
-    vd.Desc_1_1.NumStaticSamplers = 1;
-    vd.Desc_1_1.pStaticSamplers = &samp;
-    Com<ID3DBlob> blob, err;
-    GA_CHECK(D3D12SerializeVersionedRootSignature(&vd, &blob, &err));
-    GA_CHECK(gpu.Device()->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
-                                              IID_PPV_ARGS(&m_cloudRs)));
-    ShaderBlob cs = sc.Compile(m_shaderDir + L"/CloudVol.hlsl", L"CsCloudBuild", L"cs_6_0");
-    if (!cs.Valid()) throw std::runtime_error("CloudVol kernel failed");
-    D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};
-    cd.pRootSignature = m_cloudRs.Get();
-    cd.CS = {cs.Data(), cs.Size()};
-    GA_CHECK(gpu.Device()->CreateComputePipelineState(&cd, IID_PPV_ARGS(&m_cloudBuild)));
+    m_cloudRs = hal::RootLayout{}
+                    .Cbv(0)
+                    .Srv(0)
+                    .Table({hal::SrvRange(1, 1), hal::UavRange(0, 1)})
+                    .Sampler(hal::StaticSampler(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                                                D3D12_TEXTURE_ADDRESS_MODE_CLAMP))
+                    .Build(gpu, "globe.cloud");
+    m_cloudBuild = hal::Require(
+        hal::BuildCompute(gpu, m_cloudRs.Get(),
+                          sc.Compile(m_shaderDir + L"/CloudVol.hlsl", L"CsCloudBuild", L"cs_6_0"),
+                          "globe.cloud"),
+        "CloudVol kernel");
 
-    m_cloudTable = gpu.SrvHeap().Alloc(2);
-    D3D12_SHADER_RESOURCE_VIEW_DESC sv{};
-    sv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    sv.Format = DXGI_FORMAT_R32_FLOAT;
-    sv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
-    sv.Texture3D.MipLevels = 1;
-    gpu.Device()->CreateShaderResourceView(m_cloudSrc.res.Get(), &sv,
-                                           gpu.SrvHeap().Cpu(m_cloudTable + 0));
-    D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
-    uv.Format = DXGI_FORMAT_R16_FLOAT;
-    uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
-    uv.Texture3D.WSize = UINT(-1);
-    gpu.Device()->CreateUnorderedAccessView(m_cloud.Res(), nullptr, &uv,
-                                            gpu.SrvHeap().Cpu(m_cloudTable + 1));
+    m_cloudTable = hal::Table::Alloc(gpu, 2, "globe.cloud");
+    m_cloudTable.Srv3D(0, m_cloudSrc.res.Get(), DXGI_FORMAT_R32_FLOAT);
+    m_cloudTable.Uav3D(1, m_cloud.Res(), DXGI_FORMAT_R16_FLOAT);
 
     // ---- one build pass (clouds are static per forecast cycle)
     {
@@ -470,24 +424,18 @@ void GlobeLayer::InitClouds(Gpu& gpu, ShaderCompiler& sc) {
         cb.altC[2] = kShellTopM;
         cb.altC[3] = 1.0f;    // density gamma (linear: GFS fraction is already conservative)
 
-        ID3D12GraphicsCommandList* cl = gpu.BeginUpload();
-        ID3D12DescriptorHeap* heaps[] = {gpu.SrvHeap().Heap()};   // raw upload list: bind it
-        cl->SetDescriptorHeaps(1, heaps);
-        cl->SetComputeRootSignature(m_cloudRs.Get());
-        cl->SetComputeRootConstantBufferView(0, gpu.PushConstants(&cb, sizeof(cb)));
+        hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
+        up.BindHeaps();   // the upload list has no heap bound until a layer says so
+        up.ComputeRoot(m_cloudRs.Get());
+        up.ComputeConstants(0, cb);
         const auto& list = m_cloud.ResidentList();
-        cl->SetComputeRootShaderResourceView(1, gpu.PushConstants(list.data(), list.size() * 4));
-        cl->SetComputeRootDescriptorTable(2, gpu.SrvHeap().Gpu(m_cloudTable));
-        cl->SetPipelineState(m_cloudBuild.Get());
-        cl->Dispatch(m_cloud.TileW() / 8, m_cloud.TileH() / 8, cb.listCount);
-        D3D12_RESOURCE_BARRIER br{};
-        br.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        br.Transition.pResource = m_cloud.Res();
-        br.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        br.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        br.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
-                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        cl->ResourceBarrier(1, &br);
+        up.ComputeSrvAt(1, gpu.PushConstants(list.data(), list.size() * 4));
+        up.ComputeTable(2, m_cloudTable.Base());
+        up.Pipeline(m_cloudBuild.Get());
+        up.Dispatch(m_cloud.TileW() / 8, m_cloud.TileH() / 8, cb.listCount);
+        up.Barrier(m_cloud.Res(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         gpu.EndUpload();
         gpu.ResetConstantArenaAfterIdle();
     }
@@ -603,54 +551,24 @@ void GlobeLayer::InitNeAndWind(Gpu& gpu, ShaderCompiler& sc) {
     Log("[globe] wind Mv2 residency: %u/%u tiles -- calm air stays NULL", resident,
         m_windBank.TilesX() * m_windBank.TilesY());
 
-    // Build root signature + kernel (b0 CBV, t0 list, table [t1 src, u0 bank]).
-    D3D12_DESCRIPTOR_RANGE1 ranges[2]{};
-    ranges[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;   // M9r: the source is a bank now
-    ranges[0].NumDescriptors = 1;
-    ranges[0].BaseShaderRegister = 1;
-    ranges[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    ranges[0].OffsetInDescriptorsFromTableStart = 0;
-    ranges[1].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    ranges[1].NumDescriptors = 1;
-    ranges[1].BaseShaderRegister = 0;
-    ranges[1].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    ranges[1].OffsetInDescriptorsFromTableStart = 1;
-    D3D12_ROOT_PARAMETER1 params[3]{};
-    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    params[0].Descriptor.ShaderRegister = 0;
-    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    params[1].Descriptor.ShaderRegister = 0;
-    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[2].DescriptorTable.NumDescriptorRanges = 2;
-    params[2].DescriptorTable.pDescriptorRanges = ranges;
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC vd{};
-    vd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    vd.Desc_1_1.NumParameters = _countof(params);
-    vd.Desc_1_1.pParameters = params;
-    Com<ID3DBlob> blob, err;
-    GA_CHECK(D3D12SerializeVersionedRootSignature(&vd, &blob, &err));
-    GA_CHECK(gpu.Device()->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
-                                              IID_PPV_ARGS(&m_windRs)));
-    ShaderBlob cs = sc.Compile(m_shaderDir + L"/GlobeWind.hlsl", L"CsWindGrad", L"cs_6_0");
-    if (!cs.Valid()) throw std::runtime_error("GlobeWind kernel failed");
-    D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};
-    cd.pRootSignature = m_windRs.Get();
-    cd.CS = {cs.Data(), cs.Size()};
-    GA_CHECK(gpu.Device()->CreateComputePipelineState(&cd, IID_PPV_ARGS(&m_windBuild)));
+    // Build root signature + kernel (b0 CBV, t0 list, table [u1 src, u0 bank]; M9r: the source
+    // is a bank now, so both are UAVs).
+    m_windRs = hal::RootLayout{}
+                   .Cbv(0)
+                   .Srv(0)
+                   .Table({hal::UavRange(1, 1), hal::UavRange(0, 1)})
+                   .Build(gpu, "globe.wind");
+    m_windBuild = hal::Require(
+        hal::BuildCompute(gpu, m_windRs.Get(),
+                          sc.Compile(m_shaderDir + L"/GlobeWind.hlsl", L"CsWindGrad", L"cs_6_0"),
+                          "globe.wind"),
+        "GlobeWind kernel");
 
-    m_windTable = gpu.SrvHeap().Alloc(2);
+    m_windTable = hal::Table::Alloc(gpu, 2, "globe.wind");
     // A TEXTURE2D UAV over the bank's slice 0 -- the same drop-in trick as the SRV, in the
     // state the bank already holds.
-    D3D12_UNORDERED_ACCESS_VIEW_DESC srcUav{};
-    srcUav.Format = DXGI_FORMAT_R32G32_FLOAT;
-    srcUav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    gpu.Device()->CreateUnorderedAccessView(m_windSrcB.bank->Res(), nullptr, &srcUav,
-                                            gpu.SrvHeap().Cpu(m_windTable + 0));
-    D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
-    uav.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    gpu.Device()->CreateUnorderedAccessView(m_windBank.Res(), nullptr, &uav,
-                                            gpu.SrvHeap().Cpu(m_windTable + 1));
+    m_windTable.Uav2D(0, m_windSrcB.bank->Res(), DXGI_FORMAT_R32G32_FLOAT);
+    m_windTable.Uav2D(1, m_windBank.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT);
 
     // One-shot build (static per forecast cycle).
     {
@@ -666,24 +584,18 @@ void GlobeLayer::InitNeAndWind(Gpu& gpu, ShaderCompiler& sc) {
         cb.radius = static_cast<float>(GlobeModel::kR);
         cb.scale = 1.0e4f;
 
-        ID3D12GraphicsCommandList* cl = gpu.BeginUpload();
-        ID3D12DescriptorHeap* heaps[] = {gpu.SrvHeap().Heap()};
-        cl->SetDescriptorHeaps(1, heaps);
-        cl->SetComputeRootSignature(m_windRs.Get());
-        cl->SetComputeRootConstantBufferView(0, gpu.PushConstants(&cb, sizeof(cb)));
+        hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
+        up.BindHeaps();
+        up.ComputeRoot(m_windRs.Get());
+        up.ComputeConstants(0, cb);
         const auto& list = m_windBank.ResidentList();
-        cl->SetComputeRootShaderResourceView(1, gpu.PushConstants(list.data(), list.size() * 4));
-        cl->SetComputeRootDescriptorTable(2, gpu.SrvHeap().Gpu(m_windTable));
-        cl->SetPipelineState(m_windBuild.Get());
-        cl->Dispatch(m_windBank.TileW() / 16, m_windBank.TileH() / 16, cb.listCount);
-        D3D12_RESOURCE_BARRIER br{};
-        br.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        br.Transition.pResource = m_windBank.Res();
-        br.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        br.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        br.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
-                                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        cl->ResourceBarrier(1, &br);
+        up.ComputeSrvAt(1, gpu.PushConstants(list.data(), list.size() * 4));
+        up.ComputeTable(2, m_windTable.Base());
+        up.Pipeline(m_windBuild.Get());
+        up.Dispatch(m_windBank.TileW() / 16, m_windBank.TileH() / 16, cb.listCount);
+        up.Barrier(m_windBank.Res(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                   D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                       D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
         gpu.EndUpload();
         gpu.ResetConstantArenaAfterIdle();
     }
@@ -699,122 +611,79 @@ bool GlobeLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
     ShaderBlob psl = sc.Compile(path, L"PsLimb", L"ps_6_0");
     if (!vs.Valid() || !ps.Valid() || !vsk.Valid() || !psk.Valid() || !psl.Valid()) return false;
 
+    // Each pipeline swaps in as it builds and a failure stops the walk: at boot Init makes that
+    // fatal, on a reload the pipelines already swapped stand and the rest keep their old ones.
+
     // M10: THE LIMBS (PsLimb). Light added, the scene behind carried through its own air:
     // dual-source, dst = scatter + dst * T, per channel (Rayleigh dims blue first, so a scalar
     // alpha would grey the sea behind a limb). Depth-tested at the shell's entry -- the shader
     // writes it -- and never written: a limb is air, nothing stands on it.
     {
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
-        d.pRootSignature = m_rootSig;
-        d.VS = {vsk.Data(), vsk.Size()};
-        d.PS = {psl.Data(), psl.Size()};
-        d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-        d.BlendState.RenderTarget[0].BlendEnable = TRUE;
-        d.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
-        d.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_SRC1_COLOR;
-        d.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-        d.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ZERO;
-        d.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ONE;
-        d.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        d.SampleMask = UINT_MAX;
-        d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-        d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-        d.RasterizerState.DepthClipEnable = FALSE;   // the depth is the shader's, not VsSky's
-        d.DepthStencilState.DepthEnable = TRUE;
-        d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-        d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;   // reversed-Z
-        d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-        d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        d.NumRenderTargets = 1;
-        d.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        d.SampleDesc.Count = 1;
-        Com<ID3D12PipelineState> pso;
-        if (FAILED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) {
-            Log("[globe] limb PSO failed");
+        hal::GraphicsPipelineDesc limb;
+        limb.rootSig = m_rootSig;
+        limb.vs = vsk;
+        limb.ps = psl;
+        limb.blend = true;
+        limb.srcBlend = D3D12_BLEND_ONE;
+        limb.dstBlend = D3D12_BLEND_SRC1_COLOR;
+        limb.srcBlendAlpha = D3D12_BLEND_ZERO;
+        limb.dstBlendAlpha = D3D12_BLEND_ONE;
+        // depthClip stays FALSE: the depth is the shader's, not VsSky's
+        limb.depthTest = true;
+        limb.depthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;   // reversed-Z
+        if (!hal::Reload(m_limbPso, [&] { return hal::BuildGraphics(gpu, limb, "globe.limb"); },
+                         "globe.limb")) {
             return false;
         }
-        m_limbPso = pso;
     }
 
     // The atmosphere backdrop: fullscreen, no depth involvement; the surface overdraws it.
     {
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
-        d.pRootSignature = m_rootSig;
-        d.VS = {vsk.Data(), vsk.Size()};
-        d.PS = {psk.Data(), psk.Size()};
-        d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+        hal::GraphicsPipelineDesc sky;
+        sky.rootSig = m_rootSig;
+        sky.vs = vsk;
+        sky.ps = psk;
         // M10: the backdrop blends over the sky dome by a factor (skyPassWeight): src W + dst
         // (1 - W). At the shipped W = 1 that is src exactly (dst x 0 = 0), the old overwrite;
         // under appealing Droste lighting the two backdrops cross-fade by the gravity weights,
         // so the frame's re-root -- a gauge change -- cannot pop the sky.
-        d.BlendState.RenderTarget[0].BlendEnable = TRUE;
-        d.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_BLEND_FACTOR;
-        d.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_INV_BLEND_FACTOR;
-        d.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-        d.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
-        d.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
-        d.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        d.SampleMask = UINT_MAX;
-        d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-        d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+        sky.blend = true;
+        sky.srcBlend = D3D12_BLEND_BLEND_FACTOR;
+        sky.dstBlend = D3D12_BLEND_INV_BLEND_FACTOR;
         // M6g: the backdrop touches ONLY untouched pixels (VsSky emits z=0 = reversed-Z
         // infinity; cleared depth is 0, drawn geometry is > 0, so GREATER_EQUAL passes only
         // where the frame is still empty). No write: it stays a backdrop.
-        d.DepthStencilState.DepthEnable = TRUE;
-        d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-        d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
-        d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-        d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        d.NumRenderTargets = 1;
-        d.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        d.SampleDesc.Count = 1;
-        Com<ID3D12PipelineState> pso;
-        if (FAILED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) {
-            Log("[globe] sky PSO failed");
+        sky.depthTest = true;
+        sky.depthFunc = D3D12_COMPARISON_FUNC_GREATER_EQUAL;
+        if (!hal::Reload(m_skyPso, [&] { return hal::BuildGraphics(gpu, sky, "globe.sky"); },
+                         "globe.sky")) {
             return false;
         }
-        m_skyPso = pso;
     }
 
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
-    d.pRootSignature = m_rootSig;
-    d.VS = {vs.Data(), vs.Size()};
-    d.PS = {ps.Data(), ps.Size()};
-    d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    d.SampleMask = UINT_MAX;
-    d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;   // cube faces mix winding
-    d.RasterizerState.DepthClipEnable = TRUE;
-    d.DepthStencilState.DepthEnable = TRUE;
-    d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-    d.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;   // reversed-Z
-    d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-    d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    d.NumRenderTargets = 1;
-    d.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    d.SampleDesc.Count = 1;
-
-    Com<ID3D12PipelineState> pso;
-    if (FAILED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) {
-        Log("[globe] PSO failed");
+    hal::GraphicsPipelineDesc surf;
+    surf.rootSig = m_rootSig;
+    surf.vs = vs;
+    surf.ps = ps;
+    // cull stays NONE: cube faces mix winding
+    surf.depthClip = TRUE;
+    surf.depthTest = true;
+    surf.depthWrite = true;   // reversed-Z GREATER, the default comparison
+    if (!hal::Reload(m_pso, [&] { return hal::BuildGraphics(gpu, surf, "globe"); }, "globe")) {
         return false;
     }
-    m_pso = pso;
     // M9b: wireframe twin of the CDLOD fallback, so --wireframe means the same thing on a
-    // machine without mesh shaders.
+    // machine without mesh shaders -- the same struct with one field changed. Optional.
+    auto d = surf.ToDesc();
     d.RasterizerState.FillMode = D3D12_FILL_MODE_WIREFRAME;
-    Com<ID3D12PipelineState> psoWire;
-    if (SUCCEEDED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&psoWire)))) {
-        m_psoWire = psoWire;
-    }
+    hal::Reload(m_psoWire, [&] { return hal::BuildGraphicsRaw(gpu, d, "globe.wire"); },
+                "globe.wire");
     ShaderBlob psM = sc.Compile(path, L"PsMeshlet", L"ps_6_0");
     if (psM.Valid()) {
         d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
         d.PS = {psM.Data(), psM.Size()};
-        Com<ID3D12PipelineState> psoM;
-        if (SUCCEEDED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&psoM)))) {
-            m_psoMeshlet = psoM;
-        }
+        hal::Reload(m_psoMeshlet, [&] { return hal::BuildGraphicsRaw(gpu, d, "globe.meshlet"); },
+                    "globe.meshlet");
     }
     return true;
 }
@@ -824,63 +693,29 @@ void GlobeLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
     if (m_msPath) BuildMeshPso(gpu, sc);
 }
 
-// The mesh PSO rides the subobject STREAM (no d3dx12 in this repo): every subobject is
-// { type, payload }, each aligned to a pointer boundary -- exactly what the runtime parses.
-namespace {
-template <typename T, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE Tag>
-struct alignas(void*) StreamSub {
-    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type = Tag;
-    T val{};
-};
-}  // namespace
-
 bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
-    Com<ID3D12Device2> dev2;
-    if (FAILED(gpu.Device()->QueryInterface(IID_PPV_ARGS(&dev2)))) return false;
     D3D12_FEATURE_DATA_D3D12_OPTIONS7 o7{};
     if (FAILED(gpu.Device()->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &o7,
                                                  sizeof(o7))) ||
         o7.MeshShaderTier == D3D12_MESH_SHADER_TIER_NOT_SUPPORTED) {
         return false;
     }
+    // M12 step 3f: the mesh pipeline as one description (hal/Pipeline.h MeshPipelineDesc: the
+    // subobject stream is its ToStream, ID3D12Device2 is BuildMesh's to fetch). The stream it
+    // lays out was compared byte for byte with the block this replaces, at all four variants,
+    // before the block went.
     const std::wstring path = m_shaderDir + L"/GlobeMesh.hlsl";
-    ShaderBlob ms = sc.Compile(path, L"MsMain", L"ms_6_5");
-    ShaderBlob ps = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"PsMain", L"ps_6_5");
-    if (!ms.Valid() || !ps.Valid()) return false;
-
-    struct {
-        StreamSub<ID3D12RootSignature*, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE> rs;
-        StreamSub<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS> ms;
-        StreamSub<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS> ps;
-        StreamSub<D3D12_BLEND_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND> blend;
-        StreamSub<UINT, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK> mask;
-        StreamSub<D3D12_RASTERIZER_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER> rast;
-        StreamSub<D3D12_DEPTH_STENCIL_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL>
-            ds;
-        StreamSub<DXGI_FORMAT, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT> dsv;
-        StreamSub<D3D12_RT_FORMAT_ARRAY, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS>
-            rtv;
-        StreamSub<DXGI_SAMPLE_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC> sample;
-    } stream;
-    stream.rs.val = m_rootSig;
-    stream.ms.val = {ms.Data(), ms.Size()};
-    stream.ps.val = {ps.Data(), ps.Size()};
-    stream.blend.val.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    stream.mask.val = UINT_MAX;
-    stream.rast.val.FillMode = D3D12_FILL_MODE_SOLID;
-    stream.rast.val.CullMode = D3D12_CULL_MODE_NONE;   // cube faces mix winding
-    stream.rast.val.DepthClipEnable = TRUE;
-    stream.ds.val.DepthEnable = TRUE;
-    stream.ds.val.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-    stream.ds.val.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;   // reversed-Z
-    stream.dsv.val = DXGI_FORMAT_D32_FLOAT;
-    stream.rtv.val.NumRenderTargets = 1;
-    stream.rtv.val.RTFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    stream.sample.val = {1, 0};
-
-    D3D12_PIPELINE_STATE_STREAM_DESC sd{sizeof(stream), &stream};
-    Com<ID3D12PipelineState> pso;
-    if (FAILED(dev2->CreatePipelineState(&sd, IID_PPV_ARGS(&pso)))) {
+    hal::MeshPipelineDesc d;
+    d.rootSig = m_rootSig;
+    d.ms = sc.Compile(path, L"MsMain", L"ms_6_5");
+    d.ps = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"PsMain", L"ps_6_5");
+    if (!d.ms.Valid() || !d.ps.Valid()) return false;
+    // cull stays NONE: cube faces mix winding
+    d.depthClip = TRUE;
+    d.depthTest = true;
+    d.depthWrite = true;   // reversed-Z GREATER, the default comparison
+    hal::Pso pso = hal::BuildMesh(gpu, d, "globe.mesh");
+    if (!pso) {
         Log("[globe] mesh PSO creation failed");
         return false;
     }
@@ -889,9 +724,9 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
     // only the raster fill differs -- so what the lines show is exactly the geometry the
     // solid pass rasterizes, meshlet seams and all. A failure here is not fatal: the solid
     // path stands and the toggle simply has nothing to switch to.
-    stream.rast.val.FillMode = D3D12_FILL_MODE_WIREFRAME;
-    Com<ID3D12PipelineState> psoWire;
-    if (SUCCEEDED(dev2->CreatePipelineState(&sd, IID_PPV_ARGS(&psoWire)))) {
+    d.fill = D3D12_FILL_MODE_WIREFRAME;
+    hal::Pso psoWire = hal::BuildMesh(gpu, d, "globe.mesh.wire");
+    if (psoWire) {
         m_msPsoWire = psoWire;
     } else {
         Log("[globe] mesh WIREFRAME PSO creation failed (solid path unaffected)");
@@ -900,23 +735,23 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
     // mesh can be read as geometry instead of through the look it is carrying.
     ShaderBlob psW = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"PsWireFlat", L"ps_6_5");
     if (psW.Valid()) {
-        const auto psKeep = stream.ps.val;
-        stream.ps.val = {psW.Data(), psW.Size()};
-        Com<ID3D12PipelineState> psoWF;
-        if (SUCCEEDED(dev2->CreatePipelineState(&sd, IID_PPV_ARGS(&psoWF)))) {
+        const ShaderBlob psKeep = d.ps;
+        d.ps = psW;
+        hal::Pso psoWF = hal::BuildMesh(gpu, d, "globe.mesh.wireflat");
+        if (psoWF) {
             m_msPsoWireFlat = psoWF;
         } else {
             Log("[globe] mesh FLAT-WIRE PSO creation failed (solid path unaffected)");
         }
-        stream.ps.val = psKeep;
+        d.ps = psKeep;
     }
     // ...and solid again, with the meshlet-identity pixel shader.
     ShaderBlob psM = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"PsMeshlet", L"ps_6_5");
     if (psM.Valid()) {
-        stream.rast.val.FillMode = D3D12_FILL_MODE_SOLID;
-        stream.ps.val = {psM.Data(), psM.Size()};
-        Com<ID3D12PipelineState> psoM;
-        if (SUCCEEDED(dev2->CreatePipelineState(&sd, IID_PPV_ARGS(&psoM)))) {
+        d.fill = D3D12_FILL_MODE_SOLID;
+        d.ps = psM;
+        hal::Pso psoM = hal::BuildMesh(gpu, d, "globe.mesh.meshlet");
+        if (psoM) {
             m_msPsoMeshlet = psoM;
         } else {
             Log("[globe] mesh MESHLET-TINT PSO creation failed (solid path unaffected)");
@@ -2067,41 +1902,41 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
 
 void GlobeLayer::Render(const FrameContext& ctx) {
     if (!m_pso || (m_nodes.empty() && m_meshlets.empty())) return;
-    PixScope scope(ctx.cl, "globe (atmosphere shell + quad-sphere CDLOD + sparse cloud volume)");
+    PixScope scope(ctx.cmd->Native(),
+                   "globe (atmosphere shell + quad-sphere CDLOD + sparse cloud volume)");
 
     // M6e: the residency manager's per-frame turn -- loads started, budgeted tiles mapped and
     // filled, residency maps refreshed -- BEFORE the surface samples any of it.
     if (m_res) {
-        GpuScope gscope(ctx.prof, ctx.cl, "globe.residency");
-        m_res->ProcessQueues(*ctx.gpu, ctx.cl);
+        GpuScope gscope(ctx.prof, ctx.cmd->Native(), "globe.residency");
+        m_res->ProcessQueues(*ctx.gpu, ctx.cmd->Native());
     }
 
     const D3D12_GPU_VIRTUAL_ADDRESS cbVa = ctx.gpu->PushConstants(&m_cb, sizeof(m_cb));
 
     // 1) The atmosphere backdrop: limb scatter + sun for every ray that misses the planet.
     if (m_skyPso && skyPassEnabled) {
-        GpuScope gscope(ctx.prof, ctx.cl, "globe.sky");
-        PixMarker(ctx.cl, "globe.sky (single-scatter shell: the limb past the disc)");
-        ctx.cl->SetPipelineState(m_skyPso.Get());
+        GpuScope gscope(ctx.prof, ctx.cmd->Native(), "globe.sky");
+        PixMarker(ctx.cmd->Native(), "globe.sky (single-scatter shell: the limb past the disc)");
+        ctx.cmd->Pipeline(m_skyPso.Get());
         const float w = std::clamp(skyPassWeight, 0.0f, 1.0f);
         const float bf[4] = {w, w, w, w};
-        ctx.cl->OMSetBlendFactor(bf);
-        ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        ctx.cl->SetGraphicsRootConstantBufferView(1, cbVa);
-        ctx.cl->SetGraphicsRootConstantBufferView(
-            4, ctx.gpu->PushConstants(&m_skyCb, sizeof(m_skyCb)));
-        ctx.cl->DrawInstanced(3, 1, 0, 0);
+        ctx.cmd->Native()->OMSetBlendFactor(bf);
+        ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx.cmd->GraphicsConstantsAt(1, cbVa);
+        ctx.cmd->GraphicsConstants(4, m_skyCb);
+        ctx.cmd->Draw(3, 1, 0, 0);
     }
 
     // 2) The surface (which marches the sparse cloud bank on its way down).
     if (m_msPath && m_msPso && !m_meshlets.empty()) {
         // M6j: the unified surface -- meshlet records ride a frame-indexed upload buffer,
         // one DispatchMesh amplifies them from the composed channels.
-        if (!m_cl6 && FAILED(ctx.cl->QueryInterface(IID_PPV_ARGS(&m_cl6)))) {
+        if (!ctx.cmd->MeshCapable()) {   // no List6 on this runtime: the classic path (3f)
             m_msPath = false;
             return;
         }
-        GpuScope gscope(ctx.prof, ctx.cl, "globe.mesh");
+        GpuScope gscope(ctx.prof, ctx.cmd->Native(), "globe.mesh");
         GpuBuffer& rec = m_recBuf[ctx.gpu->FrameIndex()];
         const size_t bytes = m_meshlets.size() * sizeof(MeshletRec);
         const auto copy0 = std::chrono::steady_clock::now();   // meshletCopyMs bracket
@@ -2109,46 +1944,46 @@ void GlobeLayer::Render(const FrameContext& ctx) {
         meshletCopyMs = std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - copy0)
                             .count();
-        ID3D12PipelineState* msSel = m_msPso.Get();
+        hal::PsoPtr msSel = m_msPso.Get();
         if (surfaceDebug == 1 && m_msPsoWire) msSel = m_msPsoWire.Get();
         else if (surfaceDebug == 2 && m_msPsoMeshlet) msSel = m_msPsoMeshlet.Get();
         else if (surfaceDebug == 3 && m_msPsoWireFlat) msSel = m_msPsoWireFlat.Get();
-        ctx.cl->SetPipelineState(msSel);
-        ctx.cl->SetGraphicsRootConstantBufferView(1, cbVa);
-        ctx.cl->SetGraphicsRootShaderResourceView(2, rec.res->GetGPUVirtualAddress());
+        ctx.cmd->Pipeline(msSel);
+        ctx.cmd->GraphicsConstantsAt(1, cbVa);
+        ctx.cmd->GraphicsSrvAt(2, rec.res->GetGPUVirtualAddress());
         // M10: 2-D, because one dimension caps at 65535 groups (GlobeMesh.hlsl folds y*65535+x).
         const UINT n = static_cast<UINT>(m_meshlets.size());
-        m_cl6->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
+        ctx.cmd->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
 
         // 3) M10: the limbs of every planet whose air the eye is outside of, over the surface
         // just drawn (SetView chose the slots, farthest first).
         if (m_limbPso && m_limbCount > 0) {
-            GpuScope lscope(ctx.prof, ctx.cl, "globe.limbs");
-            PixMarker(ctx.cl, "globe.limbs (each level's shell over what lies behind it)");
-            ctx.cl->SetPipelineState(m_limbPso.Get());
-            ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-            ctx.cl->SetGraphicsRootConstantBufferView(1, cbVa);
+            GpuScope lscope(ctx.prof, ctx.cmd->Native(), "globe.limbs");
+            PixMarker(ctx.cmd->Native(),
+                      "globe.limbs (each level's shell over what lies behind it)");
+            ctx.cmd->Pipeline(m_limbPso.Get());
+            ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            ctx.cmd->GraphicsConstantsAt(1, cbVa);
             for (int li = 0; li < m_limbCount; ++li) {
                 SkyCbData lc = m_skyCb;
                 lc.lvl[0] = static_cast<float>(m_limbSlots[li]);
-                ctx.cl->SetGraphicsRootConstantBufferView(
-                    4, ctx.gpu->PushConstants(&lc, sizeof(lc)));
-                ctx.cl->DrawInstanced(3, 1, 0, 0);
+                ctx.cmd->GraphicsConstants(4, lc);
+                ctx.cmd->Draw(3, 1, 0, 0);
             }
         }
         return;
     }
-    ID3D12PipelineState* sel = m_pso.Get();
+    hal::PsoPtr sel = m_pso.Get();
     if (surfaceDebug == 1 && m_psoWire) sel = m_psoWire.Get();
     else if (surfaceDebug == 2 && m_psoMeshlet) sel = m_psoMeshlet.Get();
-    ctx.cl->SetPipelineState(sel);
-    ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx.cl->SetGraphicsRootConstantBufferView(1, cbVa);
+    ctx.cmd->Pipeline(sel);
+    ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx.cmd->GraphicsConstantsAt(1, cbVa);
     // Root param 2 normally carries the FieldSet; the renderer re-binds it every frame and the
     // globe draws last, so the CDLOD node list borrows the slot for this draw.
-    ctx.cl->SetGraphicsRootShaderResourceView(
+    ctx.cmd->GraphicsSrvAt(
         2, ctx.gpu->PushConstants(m_nodes.data(), m_nodes.size() * sizeof(NodeData)));
-    ctx.cl->DrawInstanced(32 * 32 * 6, static_cast<UINT>(m_nodes.size()), 0, 0);
+    ctx.cmd->Draw(32 * 32 * 6, static_cast<UINT>(m_nodes.size()), 0, 0);
 }
 
 }  // namespace ga

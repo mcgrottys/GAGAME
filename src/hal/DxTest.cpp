@@ -1,4 +1,4 @@
-#include "DxTest.h"
+#include "hal/DxTest.h"
 
 #include <d3d12shader.h>
 #include <dxcapi.h>
@@ -13,9 +13,9 @@
 #include <string>
 #include <vector>
 
-#include "Common.h"
-#include "GaAst.h"
-#include "Shader.h"
+#include "core/Common.h"
+#include "core/GaAst.h"
+#include "hal/Shader.h"
 
 namespace ga {
 namespace {

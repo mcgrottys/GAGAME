@@ -51,10 +51,11 @@
 #include "compose/GisMask.h"
 #include "compose/TileTree.h"
 #include "compose/TileIndex.h"
-#include "core/TileStream.h"
+#include "hal/TileStream.h"
 #include "compose/DomainSource.h"
-#include "core/Gpu.h"
-#include "core/Residency.h"
+#include "hal/Gpu.h"
+#include "hal/Residency.h"
+#include "hal/Tenant.h"
 #include "core/Window.h"
 #include "render/Renderer.h"
 #include "scene/FieldSet.h"
@@ -191,6 +192,14 @@ struct Assembly {
     // when a bucket rolls; they hold their own reference until their paint returns.
     std::shared_ptr<std::shared_ptr<TileTree>> exposureTree;
     int exposureT = -1;
+    // M12 step 3e: THE FOUR DECLARATIONS (hal/Tenant.h) -- the height, exposure, colour and
+    // survey tenants as TenantDescs, each Sparse()'d into resMgr and Bind()'d to the tree that
+    // feeds it. Declared after the trees they bind (their providers and the exposure holder
+    // point into them) and before the indices; a Tenant is a handle on state the manager's own
+    // dispatcher shares, so destroying one here releases nothing the manager still reads. The
+    // int ids above keep the values Tenant::Id() gave them, so no consumer changed. (The wave's
+    // lives in the frame loop beside its tree.)
+    hal::Tenant heightTenant, exposureTenant, colorTenant, landseaTenant;
     // M9ae: the composed cache's index (one entry per TILE), and M9ag: the NVMe -> GPU reader.
     // Both were function-local statics inside main()'s residency block; as the last members
     // they now destruct first, before gpu (the statics used to outlive the device).

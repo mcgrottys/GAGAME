@@ -1,10 +1,10 @@
-#include "core/Residency.h"
+#include "hal/Residency.h"
 #include "core/ThreadManager.h"
 
 #include <atomic>
 
-#include "core/PixEvents.h"
-#include "core/TileAtlas.h"   // Cl2ProductSignature -- the proven closure drives DeriveDemand
+#include "hal/PixEvents.h"
+#include "hal/TileAtlas.h"   // Cl2ProductSignature -- the proven closure drives DeriveDemand
 
 #include <algorithm>
 #include <chrono>
@@ -1546,8 +1546,9 @@ void ResidencyManager::RegisterField(const char* name, std::function<uint64_t()>
 }
 
 void ResidencyManager::PublishSignatures(const std::string& field, uint32_t tilesX,
-                                         uint32_t tilesY, std::vector<uint8_t> sig) {
-    m_signatures[field] = {tilesX, tilesY, std::move(sig)};
+                                         uint32_t tilesY, std::vector<uint8_t> sig,
+                                         const Lattice* lattice) {
+    m_signatures[field] = {tilesX, tilesY, std::move(sig), lattice};
 }
 
 bool ResidencyManager::DeriveDemand(const std::string& srcA, const std::string& srcB,
@@ -1556,6 +1557,24 @@ bool ResidencyManager::DeriveDemand(const std::string& srcA, const std::string& 
     const auto a = m_signatures.find(srcA);
     const auto b = m_signatures.find(srcB);
     if (a == m_signatures.end() || b == m_signatures.end()) return false;
+    // M12 step 3e: THE GROUND IS PART OF THE OPERAND. An index-by-index product of two grids
+    // is a statement about the ground only when both grids tile the same one, so a publisher
+    // that declared its lattice is held to it: two declared lattices that are not SameGround
+    // are refused, once aloud, as an empty demand -- a resample node is the missing piece, not
+    // a silent mis-registration. The shipped operands (wind10m with itself) share the grid, so
+    // this never fires today; it is the contract the next operand pair meets.
+    if (a->second.lattice && b->second.lattice &&
+        !a->second.lattice->SameGround(*b->second.lattice)) {
+        if (!m_groundRefusalSaid) {
+            m_groundRefusalSaid = true;
+            Log("[residency] DeriveDemand %s x %s: lattices %s and %s are not the same ground "
+                "-- refused (empty demand)",
+                srcA.c_str(), srcB.c_str(), a->second.lattice->Tag().c_str(),
+                b->second.lattice->Tag().c_str());
+        }
+        out.clear();
+        return false;
+    }
     if (a->second.tilesX != b->second.tilesX || a->second.tilesY != b->second.tilesY) {
         return false;
     }

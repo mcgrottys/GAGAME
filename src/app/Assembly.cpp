@@ -17,15 +17,16 @@
 #include "compose/TileTree.h"
 #include "compose/TileArchive.h"
 #include "compose/TileIndex.h"
-#include "core/TileStream.h"
+#include "hal/TileStream.h"
 #include "compose/ComposeTree.h"
 #include "compose/DomainSource.h"
 #include "core/CurrentFieldLoader.h"
 #include "core/GeoGridLoader.h"
-#include "core/Gpu.h"
+#include "hal/Gpu.h"
 #include "core/Image.h"
-#include "core/PixEvents.h"
-#include "core/TileAtlas.h"
+#include "hal/PixEvents.h"
+#include "hal/Tenant.h"
+#include "hal/TileAtlas.h"
 #include "core/Window.h"
 #include "render/Renderer.h"
 #include "scene/FieldSet.h"
@@ -244,6 +245,10 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
     auto& exposureRoot = A->exposureRoot;
     auto& exposureTree = A->exposureTree;
     auto& exposureT = A->exposureT;
+    auto& heightTenant = A->heightTenant;
+    auto& exposureTenant = A->exposureTenant;
+    auto& colorTenant = A->colorTenant;
+    auto& landseaTenant = A->landseaTenant;
     auto& idxColorCube = A->idxColorCube;
     auto& idxColorWin = A->idxColorWin;
     auto& idxColorDet = A->idxColorDet;
@@ -674,34 +679,40 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                     "last):%s",
                     order.c_str());
                 heightTree = std::make_unique<TileTree>(heightRoot.get(), TileTree::Fmt::Half);
-                heightTree->onChanged = [&resMgr, &hgtTenant](const std::string& tag,
-                                                              const TileRequest& r) {
-                    if (hgtTenant < 0) return;
-                    TileRequest q = r;
-                    if (tag.rfind("window_z14", 0) == 0) q.face = 6u;
-                    resMgr.Invalidate(hgtTenant, q);
-                };
                 heightTree->Print();
             }
             {
-                const TileProviderFn hCube = (opt.colorTrees && heightTree)
-                    ? heightTree->Provider(ColorFrame::Cube(Compositor::kFaceDim, 256, 128))
-                    : compositor.CubeHeight(hgtCh);
-                const TileProviderFn hWin = (opt.colorTrees && heightTree)
-                    ? heightTree->Provider(ColorFrame::Window(1263360, 1538048, 14, 256, 128))
-                    : compositor.WindowHeight(hgtCh, 1263360, 1538048, 16384, 14);
-                TileProviderFn hPages = [hCube, hWin](const TileRequest& r,
-                                                      std::vector<uint8_t>& out,
-                                                      TileLoc* loc) {
-                    if (r.face < 6) return hCube(r, out, loc);
-                    TileRequest w = r;
-                    w.face = 0;
-                    return hWin(w, out, loc);
-                };
-                hgtTenant = resMgr.AddTexturePages(gpu, L"earth.height (megatexture pages)",
-                                                   Compositor::kFaceDim,
-                                                   DXGI_FORMAT_R16_FLOAT, std::move(hPages),
-                                                   7);
+                // M12 step 3e: THE DECLARATION (hal/Tenant.h). Slices 0..5 the cube faces on
+                // the 16k quad-sphere, 6 the Merrimack z14 page; R16F metres NAVD88 in 256x128
+                // tiles; a missing tile is not loaded yet, and the residency clamp reads the
+                // coarser level. The providers are the height tree on each binding's lattice,
+                // or the incumbent compositor's when the trees are off.
+                hal::TenantDesc hd;
+                hd.name = L"earth.height (megatexture pages)";
+                hd.astNode = "height.pages";
+                hd.fiber = {DXGI_FORMAT_R16_FLOAT, 256, 128, "m NAVD88 (half float)"};
+                hd.semantics = hal::Semantics::Texture;
+                hd.residence = hal::Residence::Streamable;
+                hd.absence = hal::Absence::Unloaded;
+                hd.slices = 7;
+                const Lattice hCubeL = Lattice::Cube(Compositor::kFaceDim, 256, 128);
+                const Lattice hWinL = Lattice::Window(1263360, 1538048, 14, 256, 128);
+                hd.bindings.push_back({0, 6, hCubeL,
+                                       (opt.colorTrees && heightTree)
+                                           ? heightTree->Provider(hCubeL)
+                                           : compositor.CubeHeight(hgtCh),
+                                       "paint cube faces"});
+                hd.bindings.push_back({6, 1, hWinL,
+                                       (opt.colorTrees && heightTree)
+                                           ? heightTree->Provider(hWinL)
+                                           : compositor.WindowHeight(hgtCh, 1263360, 1538048,
+                                                                     16384, 14),
+                                       "paint mercator page"});
+                heightTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(hd));
+                hgtTenant = heightTenant.Id();
+                // M9bb: a fold or a drop below changed a root tile: the tenant refetches that
+                // address (the tree's tag names the slice) -- the one law, Tenant::Bind.
+                if (heightTree) heightTenant.Bind(*heightTree);
                 hgtWinTenant = hgtTenant;   // pages mode: the window is slice 6
                 // M9ar: the solver's bed, and the churn kernel's, is slice 6 of this tenant.
                 if (swe.Ready()) {
@@ -717,37 +728,32 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                         exposureRoot = std::make_shared<CompositeSource>("swell.exposure", xdc);
                         exposureTree = std::make_shared<std::shared_ptr<TileTree>>(
                             std::make_shared<TileTree>(exposureRoot.get(), TileTree::Fmt::Half));
-                        (*exposureTree)->onChanged = [&resMgr, &exposureT](const std::string&,
-                                                                           const TileRequest& r) {
-                            if (exposureT < 0) return;
-                            TileRequest q = r;
-                            q.face = 6u;
-                            resMgr.Invalidate(exposureT, q);
-                        };
-                        auto holder = exposureTree;
-                        TileProviderFn xp = [holder](const TileRequest& r,
-                                                     std::vector<uint8_t>& out, TileLoc* loc) {
-                            if (r.face != 6) {
-                                // The cube faces are not this node's frame: answer "fully
-                                // exposed" (R16F 1.0) so the boot's coarsest loads and any
-                                // stray want land once instead of retrying forever.
-                                out.assign(65536, 0);
-                                uint16_t* h = reinterpret_cast<uint16_t*>(out.data());
-                                for (size_t i = 0; i < 32768; ++i) h[i] = 0x3C00u;
-                                if (loc) *loc = TileLoc{};
-                                return true;
-                            }
-                            std::shared_ptr<TileTree> t = std::atomic_load(holder.get());
-                            if (!t) return false;
-                            TileRequest w = r;
-                            w.face = 0;
-                            return t->Provider(
-                                ColorFrame::Window(1263360, 1538048, 14, 256, 128))(w, out, loc);
-                        };
-                        exposureT = resMgr.AddTexturePages(gpu, L"swell.exposure (pages)",
-                                                           Compositor::kFaceDim,
-                                                           DXGI_FORMAT_R16_FLOAT, std::move(xp),
-                                                           7);
+                        // M12 step 3e: THE DECLARATION. One page, slice 6, on the Merrimack
+                        // z14 lattice, painted by the tree in the holder (a bucket roll swaps
+                        // it; the dispatcher reads it per request). The cube faces are not
+                        // this node's frame: an unbound slice answers "fully exposed" (R16F
+                        // 1.0 = 0x3C00) so the boot's coarsest loads and any stray want land
+                        // once instead of retrying forever.
+                        hal::TenantDesc xd;
+                        xd.name = L"swell.exposure (pages)";
+                        xd.astNode = "exposure.node";
+                        xd.fiber = {DXGI_FORMAT_R16_FLOAT, 256, 128,
+                                    "swell exposure 0..1 (half float)"};
+                        xd.semantics = hal::Semantics::Texture;
+                        xd.residence = hal::Residence::Recomputable;
+                        xd.absence = hal::Absence::OutOfDomain;
+                        xd.absentTile.assign(65536, 0);
+                        {
+                            uint16_t* h = reinterpret_cast<uint16_t*>(xd.absentTile.data());
+                            for (size_t i = 0; i < 32768; ++i) h[i] = 0x3C00u;
+                        }
+                        xd.slices = 7;
+                        xd.bindings.push_back({6, 1, Lattice::Window(1263360, 1538048, 14, 256, 128),
+                                               nullptr, "exposure"});
+                        xd.holder = exposureTree;
+                        exposureTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(xd));
+                        exposureT = exposureTenant.Id();
+                        exposureTenant.Bind(**exposureTree);   // its folds invalidate slice 6
                         sea->SetExposurePage(resMgr.TextureSrv(exposureT),
                                              resMgr.ResidencySrv(exposureT), exposureSrc.get());
                         Log("[exposure] swell.exposure is page tenant %d: the LOS march over "
@@ -886,16 +892,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                 PrintTree("earth.color (megatexture)", mega.get());
                 if (opt.colorTrees || opt.treeAudit) {
                     megaTree = std::make_unique<TileTree>(mega.get());
-                    // M9bb: a fold or a drop below changed a root tile: the colour tenant
-                    // refetches that address (the frame's tag names the page slice).
-                    megaTree->onChanged = [&resMgr, &colorCubeT](const std::string& tag,
-                                                                 const TileRequest& r) {
-                        if (colorCubeT < 0) return;
-                        TileRequest q = r;
-                        if (tag.rfind("window_z14", 0) == 0) q.face = 6u;
-                        else if (tag.rfind("window_z17", 0) == 0) q.face = 7u;
-                        resMgr.Invalidate(colorCubeT, q);
-                    };
                     megaTree->Print();
                 }
                 auto mkColor = [&](const ColorFrame& f) -> TileProviderFn {
@@ -919,22 +915,30 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                     det17OrgX = std::floor(mx - 8192.0);
                     det17OrgY = std::floor(my - 8192.0);
                 }
-                const TileProviderFn pCube = mkColor(ColorFrame::Cube(Compositor::kFaceDim));
-                const TileProviderFn pWin = mkColor(ColorFrame::Window(1263360, 1538048, 14));
-                const TileProviderFn pDet = mkColor(ColorFrame::Window(
-                    static_cast<long long>(det17OrgX), static_cast<long long>(det17OrgY), 17));
-                TileProviderFn pages = [pCube, pWin, pDet](const TileRequest& r,
-                                                           std::vector<uint8_t>& out,
-                                                           TileLoc* loc) {
-                    if (r.face < 6) return pCube(r, out, loc);
-                    TileRequest w = r;
-                    w.face = 0;   // a Mercator page is a single-face frame
-                    return r.face == 6 ? pWin(w, out, loc) : pDet(w, out, loc);
-                };
-                colorCubeT = resMgr.AddTexturePages(gpu, L"earth.color (megatexture pages)",
-                                                    Compositor::kFaceDim,
-                                                    DXGI_FORMAT_R8G8B8A8_UNORM_SRGB,
-                                                    std::move(pages), 8);
+                // M12 step 3e: THE DECLARATION -- the three pages above as slice bindings on
+                // their lattices; sRGB colour with the coverage in the alpha, 128x128 tiles; a
+                // missing tile is not loaded yet (the residency map clamps).
+                const Lattice cCubeL = Lattice::Cube(Compositor::kFaceDim);
+                const Lattice cWinL = Lattice::Window(1263360, 1538048, 14);
+                const Lattice cDetL = Lattice::Window(static_cast<long long>(det17OrgX),
+                                                      static_cast<long long>(det17OrgY), 17);
+                hal::TenantDesc cd;
+                cd.name = L"earth.color (megatexture pages)";
+                cd.astNode = "color.pages";
+                cd.fiber = {DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, 128, 128,
+                            "sRGB colour, alpha = coverage"};
+                cd.semantics = hal::Semantics::Texture;
+                cd.residence = hal::Residence::Streamable;
+                cd.absence = hal::Absence::Unloaded;
+                cd.slices = 8;
+                cd.bindings.push_back({0, 6, cCubeL, mkColor(cCubeL), "paint cube faces"});
+                cd.bindings.push_back({6, 1, cWinL, mkColor(cWinL), "paint mercator pages (z14)"});
+                cd.bindings.push_back({7, 1, cDetL, mkColor(cDetL), "paint mercator pages (z17)"});
+                colorTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(cd));
+                colorCubeT = colorTenant.Id();
+                // M9bb: a fold or a drop below changed a root tile: the colour tenant
+                // refetches that address (the frame's tag names the page slice) -- Tenant::Bind.
+                if (megaTree) colorTenant.Bind(*megaTree);
                 winTenant = colorCubeT;   // pages mode: window == cube, slice 6
                 detTenant = colorCubeT;   // slice 7
                 (void)n17;
@@ -947,33 +951,29 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                 // its retries and the shader falls back to the height sign there.
                 if (opt.colorTrees && megaTree && maskLayer != SIZE_MAX) {
                     if (TileTree* gt = megaTree->Find("gis.landsea")) {
-                        gt->onChanged = [&resMgr, &maskTenant](const std::string& tag,
-                                                               const TileRequest& r) {
-                            if (maskTenant < 0) return;
-                            TileRequest q = r;
-                            if (tag.rfind("window_z14", 0) == 0) q.face = 6u;
-                            else if (tag.rfind("window_z17", 0) == 0) q.face = 7u;
-                            resMgr.Invalidate(maskTenant, q);
-                        };
-                        const TileProviderFn gCube =
-                            gt->Provider(ColorFrame::Cube(Compositor::kFaceDim));
-                        const TileProviderFn gWin =
-                            gt->Provider(ColorFrame::Window(1263360, 1538048, 14));
-                        const TileProviderFn gDet =
-                            gt->Provider(ColorFrame::Window(static_cast<long long>(det17OrgX),
-                                                            static_cast<long long>(det17OrgY),
-                                                            17));
-                        TileProviderFn gpages = [gCube, gWin, gDet](const TileRequest& r,
-                                                                   std::vector<uint8_t>& out,
-                                                                   TileLoc* loc) {
-                            if (r.face < 6) return gCube(r, out, loc);
-                            TileRequest w = r;
-                            w.face = 0;
-                            return r.face == 6 ? gWin(w, out, loc) : gDet(w, out, loc);
-                        };
-                        maskTenant = resMgr.AddTexturePages(
-                            gpu, L"gis.landsea (survey mask pages)", Compositor::kFaceDim,
-                            DXGI_FORMAT_R8G8B8A8_UNORM, std::move(gpages), 8);
+                        // M12 step 3e: THE DECLARATION -- the survey on the colour's three
+                        // lattices, painted by its own node of the megatexture tree. Where the
+                        // survey has no opinion there is no tile, and the shader falls back to
+                        // the height sign.
+                        hal::TenantDesc md;
+                        md.name = L"gis.landsea (survey mask pages)";
+                        md.astNode = "mask.pages";
+                        md.fiber = {DXGI_FORMAT_R8G8B8A8_UNORM, 128, 128,
+                                    "r = water coverage, b = edited, a = surveyed; no tile = "
+                                    "no opinion, the shader falls back to the height sign"};
+                        md.semantics = hal::Semantics::Texture;
+                        md.residence = hal::Residence::Streamable;
+                        md.absence = hal::Absence::Unloaded;
+                        md.slices = 8;
+                        md.bindings.push_back({0, 6, cCubeL, gt->Provider(cCubeL),
+                                               "paint survey mask (cube faces)"});
+                        md.bindings.push_back({6, 1, cWinL, gt->Provider(cWinL),
+                                               "paint survey mask (z14 page)"});
+                        md.bindings.push_back({7, 1, cDetL, gt->Provider(cDetL),
+                                               "paint survey mask (z17 page)"});
+                        landseaTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(md));
+                        maskTenant = landseaTenant.Id();
+                        landseaTenant.Bind(*gt);   // its folds invalidate the slice its tag names
                         Log("[gis] the survey is page tenant %d: r = water coverage, b = "
                             "edited, a = surveyed -- no .raw raster is opened",
                             maskTenant);

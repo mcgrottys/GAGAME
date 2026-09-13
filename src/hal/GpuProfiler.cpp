@@ -1,4 +1,4 @@
-#include "core/GpuProfiler.h"
+#include "hal/GpuProfiler.h"
 
 #include <algorithm>
 #include <cstdio>

@@ -1,6 +1,6 @@
-#include "core/TileAtlas.h"
+#include "hal/TileAtlas.h"
 
-#include "core/PixEvents.h"
+#include "hal/PixEvents.h"
 
 #include <vector>
 #include <string>

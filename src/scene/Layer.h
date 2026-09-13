@@ -16,8 +16,9 @@
 // ================================================================================================
 #pragma once
 
-#include "core/Gpu.h"
-#include "core/Shader.h"
+#include "hal/Context.h"
+#include "hal/Gpu.h"
+#include "hal/Shader.h"
 
 namespace ga {
 
@@ -27,7 +28,9 @@ class GpuProfiler;
 
 struct FrameContext {
     Gpu* gpu = nullptr;
-    ID3D12GraphicsCommandList* cl = nullptr;
+    // M12 3b: the frame's recording, through the facade. Native() is the raw list, and every
+    // use of it in a layer is a call site the next sub-steps look at.
+    hal::CommandContext* cmd = nullptr;
     const Camera* camera = nullptr;
     D3D12_GPU_VIRTUAL_ADDRESS sceneCb = 0;   // b0, already filled for this frame
     float timeSec = 0;
@@ -43,7 +46,7 @@ public:
 
     virtual const char* Name() const = 0;
     virtual void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
-                      ID3D12RootSignature* rootSig) = 0;
+                      hal::RootSignature rootSig) = 0;
     virtual void ReloadShaders(Gpu& gpu, ShaderCompiler& sc) { (void)gpu; (void)sc; }
     virtual void Render(const FrameContext& ctx) = 0;
 

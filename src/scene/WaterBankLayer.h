@@ -21,7 +21,7 @@
 
 #include "compose/Compositor.h"
 #include "compose/WaterAtlas.h"
-#include "core/TileAtlas.h"
+#include "hal/TileAtlas.h"
 #include "scene/Layer.h"
 #include "sim/GlobeModel.h"
 #include "sim/SeaState.h"
@@ -53,7 +53,7 @@ public:
 
     const char* Name() const override { return "waterbank"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
-              ID3D12RootSignature* rootSig) override;
+              hal::RootSignature rootSig) override;
     void ReloadShaders(Gpu& gpu, ShaderCompiler& sc) override;
     void Render(const FrameContext& ctx) override;   // ring update + fill dispatch
 
@@ -229,8 +229,8 @@ private:
     TileAtlas2D m_disp, m_param, m_detail;   // detail: per-tile sea-state context the PS
                                              // needs to recover sub-ring sparkle (hsScale;
                                              // churn joins it next)
-    Com<ID3D12RootSignature> m_rs;
-    Com<ID3D12PipelineState> m_fill;
+    hal::RootSignatureRef m_rs;
+    hal::Pso m_fill;
     float m_baseTexelM = 4.8f;
     float m_orgX[kMips] = {}, m_orgZ[kMips] = {};
     bool m_orgValid[kMips] = {};

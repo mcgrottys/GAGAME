@@ -37,7 +37,7 @@ public:
 
     const char* Name() const override { return "gis"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
-              ID3D12RootSignature* rootSig) override;
+              hal::RootSignature rootSig) override;
     void ReloadShaders(Gpu& gpu, ShaderCompiler& sc) override;
     void Render(const FrameContext& ctx) override;
 
@@ -66,8 +66,8 @@ private:
     const GisStencil* m_gis = nullptr;
     Exchange* m_exchange = nullptr;
     const VectorPack* m_pack = nullptr;
-    ID3D12RootSignature* m_rootSig = nullptr;
-    Com<ID3D12PipelineState> m_pso;
+    hal::RootSignature m_rootSig = nullptr;
+    hal::Pso m_pso;
     Batch m_coast, m_rivers, m_global, m_structs;
     int m_coastCh = -1, m_riversCh = -1, m_globalCh = -1,   // Exchange ids for republish
         m_structsCh = -1;

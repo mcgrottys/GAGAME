@@ -1,6 +1,10 @@
 #include "scene/GulfLayer.h"
 
-#include "core/PixEvents.h"
+#include "hal/PixEvents.h"
+#include "hal/Pipeline.h"
+#include "hal/Resources.h"
+#include "hal/Root.h"
+#include "hal/Views.h"
 #include "scene/FieldSet.h"
 
 #include <cmath>
@@ -10,21 +14,10 @@ namespace ga {
 
 namespace {
 constexpr double kPi = 3.14159265358979323846;
-
-void Barrier(ID3D12GraphicsCommandList* cl, ID3D12Resource* res, D3D12_RESOURCE_STATES from,
-             D3D12_RESOURCE_STATES to) {
-    D3D12_RESOURCE_BARRIER b{};
-    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    b.Transition.pResource = res;
-    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    b.Transition.StateBefore = from;
-    b.Transition.StateAfter = to;
-    cl->ResourceBarrier(1, &b);
-}
 }  // namespace
 
 void GulfLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
-                     ID3D12RootSignature* rootSig) {
+                     hal::RootSignature rootSig) {
     (void)fields;
     m_rootSig = rootSig;
     if (!m_currents || !m_currents->Field().Valid()) {
@@ -50,23 +43,12 @@ void GulfLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
     m_uvSrv = gpu.CreateSrv(m_uvTex.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
 
     auto makeOut = [&](const wchar_t* name) {
-        D3D12_RESOURCE_DESC d{};
-        d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        d.Width = static_cast<UINT64>(f.nx);
-        d.Height = static_cast<UINT>(f.ny);
-        d.DepthOrArraySize = 1;
-        d.MipLevels = 1;
-        d.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        d.SampleDesc.Count = 1;
-        d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-        D3D12_HEAP_PROPERTIES hp{};
-        hp.Type = D3D12_HEAP_TYPE_DEFAULT;
-        Com<ID3D12Resource> res;
-        GA_CHECK(gpu.Device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d,
-                                                      D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                                                      nullptr, IID_PPV_ARGS(&res)));
-        res->SetName(name);
-        return res;
+        return hal::Committed(gpu, name, static_cast<uint32_t>(f.nx), static_cast<uint32_t>(f.ny),
+                              DXGI_FORMAT_R16G16B16A16_FLOAT,
+                              D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                              "a derived field over the gulf's current grid, written once by the "
+                              "gradient kernel and read as a texture: dense and small, not a bank");
     };
     m_mvTex = makeOut(L"gulf.mv2 (div, u, v, curl)");
     m_owTex = makeOut(L"gulf.okuboWeiss");
@@ -117,85 +99,33 @@ void GulfLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
 
 bool GulfLayer::BuildDrawPso(Gpu& gpu, ShaderCompiler& sc) {
     const std::wstring path = m_shaderDir + L"/Gulf.hlsl";
-    ShaderBlob vs = sc.Compile(path, L"VsMain", L"vs_6_0");
-    ShaderBlob ps = sc.Compile(path, L"PsMain", L"ps_6_0");
-    if (!vs.Valid() || !ps.Valid()) return false;
-
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC d{};
-    d.pRootSignature = m_rootSig;
-    d.VS = {vs.Data(), vs.Size()};
-    d.PS = {ps.Data(), ps.Size()};
-    d.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
-    d.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ZERO;
-    d.BlendState.RenderTarget[0].BlendOp = D3D12_BLEND_OP_ADD;
-    d.BlendState.RenderTarget[0].SrcBlendAlpha = D3D12_BLEND_ONE;
-    d.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_ZERO;
-    d.BlendState.RenderTarget[0].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-    d.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    d.SampleMask = UINT_MAX;
-    d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    d.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-    d.DepthStencilState.DepthEnable = FALSE;
-    d.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-    d.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-    d.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-    d.NumRenderTargets = 1;
-    d.RTVFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    d.SampleDesc.Count = 1;
-
-    Com<ID3D12PipelineState> pso;
-    if (FAILED(gpu.Device()->CreateGraphicsPipelineState(&d, IID_PPV_ARGS(&pso)))) return false;
-    m_drawPso = pso;
-    return true;
+    hal::GraphicsPipelineDesc d;   // the sky's defaults, exactly: a depth-off HDR quad
+    d.rootSig = m_rootSig;
+    d.vs = sc.Compile(path, L"VsMain", L"vs_6_0");
+    d.ps = sc.Compile(path, L"PsMain", L"ps_6_0");
+    return hal::Reload(m_drawPso, [&] { return hal::BuildGraphics(gpu, d, "gulf"); }, "gulf");
 }
 
 void GulfLayer::RunVelGrad(Gpu& gpu, ShaderCompiler& sc) {
     // Tiny dedicated compute root signature: constants + one 3-UAV table.
     if (!m_csRootSig) {
-        D3D12_DESCRIPTOR_RANGE1 range{};
-        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        range.NumDescriptors = 3;
-        range.BaseShaderRegister = 0;
-        range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-
-        D3D12_ROOT_PARAMETER1 params[2]{};
-        params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        params[0].Constants.ShaderRegister = 0;
-        params[0].Constants.Num32BitValues = 4;
-        params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        params[1].DescriptorTable.NumDescriptorRanges = 1;
-        params[1].DescriptorTable.pDescriptorRanges = &range;
-
-        D3D12_VERSIONED_ROOT_SIGNATURE_DESC vd{};
-        vd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-        vd.Desc_1_1.NumParameters = _countof(params);
-        vd.Desc_1_1.pParameters = params;
-        Com<ID3DBlob> blob, err;
-        GA_CHECK(D3D12SerializeVersionedRootSignature(&vd, &blob, &err));
-        GA_CHECK(gpu.Device()->CreateRootSignature(0, blob->GetBufferPointer(),
-                                                  blob->GetBufferSize(),
-                                                  IID_PPV_ARGS(&m_csRootSig)));
+        m_csRootSig = hal::RootLayout{}
+                          .Constants(0, 4)
+                          .Table({hal::UavRange(0, 3)})
+                          .Build(gpu, "gulf.velgrad");
         m_csRootSig->SetName(L"gulf velgrad root signature");
 
-        m_csTable = gpu.SrvHeap().Alloc(3);
-        D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
-        uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        uv.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
-        gpu.Device()->CreateUnorderedAccessView(m_uvTex.res.Get(), nullptr, &uv,
-                                                gpu.SrvHeap().Cpu(m_csTable + 0));
-        uv.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        gpu.Device()->CreateUnorderedAccessView(m_mvTex.Get(), nullptr, &uv,
-                                                gpu.SrvHeap().Cpu(m_csTable + 1));
-        gpu.Device()->CreateUnorderedAccessView(m_owTex.Get(), nullptr, &uv,
-                                                gpu.SrvHeap().Cpu(m_csTable + 2));
+        m_csTable = hal::Table::Alloc(gpu, 3, "gulf.velgrad");
+        m_csTable.Uav2D(0, m_uvTex.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+        m_csTable.Uav2D(1, m_mvTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
+        m_csTable.Uav2D(2, m_owTex.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
     }
 
-    ShaderBlob cs = sc.Compile(m_shaderDir + L"/VelGrad.hlsl", L"CsVelGrad", L"cs_6_0");
-    if (!cs.Valid()) throw std::runtime_error("VelGrad.hlsl failed to compile");
-    D3D12_COMPUTE_PIPELINE_STATE_DESC cd{};
-    cd.pRootSignature = m_csRootSig.Get();
-    cd.CS = {cs.Data(), cs.Size()};
-    GA_CHECK(gpu.Device()->CreateComputePipelineState(&cd, IID_PPV_ARGS(&m_csPso)));
+    m_csPso = hal::Require(
+        hal::BuildCompute(gpu, m_csRootSig.Get(),
+                          sc.Compile(m_shaderDir + L"/VelGrad.hlsl", L"CsVelGrad", L"cs_6_0"),
+                          "gulf.velgrad"),
+        "VelGrad kernel");
     m_csPso->SetName(L"CsVelGrad");
 
     const CurrentField& f = m_currents->Field();
@@ -206,39 +136,34 @@ void GulfLayer::RunVelGrad(Gpu& gpu, ShaderCompiler& sc) {
     c.cx = static_cast<float>(f.dlon * 111320.0 * std::cos(midLat * kPi / 180.0));
     c.cy = static_cast<float>(f.dlat * 110574.0);
 
-    auto* cl = gpu.BeginUpload();
-    ID3D12DescriptorHeap* heaps[] = {gpu.SrvHeap().Heap()};
-    cl->SetDescriptorHeaps(1, heaps);
+    hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
+    up.BindHeaps();
     {
-        PixScope scope(cl, "gulf.velgrad (grad(U): div->grade0, vorticity->grade2, OW)");
-        Barrier(cl, m_uvTex.res.Get(), m_uvTex.state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        cl->SetComputeRootSignature(m_csRootSig.Get());
-        cl->SetComputeRoot32BitConstants(0, 4, &c, 0);
-        cl->SetComputeRootDescriptorTable(1, gpu.SrvHeap().Gpu(m_csTable));
-        cl->SetPipelineState(m_csPso.Get());
-        cl->Dispatch((c.nx + 7) / 8, (c.ny + 7) / 8, 1);
-        Barrier(cl, m_uvTex.res.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        Barrier(cl, m_mvTex.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        Barrier(cl, m_owTex.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        PixScope scope(up.Native(), "gulf.velgrad (grad(U): div->grade0, vorticity->grade2, OW)");
+        up.Barrier(m_uvTex.res.Get(), m_uvTex.state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        up.ComputeRoot(m_csRootSig.Get());
+        up.Native()->SetComputeRoot32BitConstants(0, 4, &c, 0);
+        up.ComputeTable(1, m_csTable.Base());
+        up.Pipeline(m_csPso.Get());
+        up.Dispatch((c.nx + 7) / 8, (c.ny + 7) / 8, 1);
+        up.Barrier(m_uvTex.res.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        up.Barrier(m_mvTex.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        up.Barrier(m_owTex.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
     gpu.EndUpload();
     m_uvTex.state = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 }
 
 void GulfLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
-    Com<ID3D12PipelineState> keep = m_drawPso;
-    if (!BuildDrawPso(gpu, sc)) {
-        m_drawPso = keep;
-        Log("[gulf] reload failed; keeping the previous PSO");
-    }
+    BuildDrawPso(gpu, sc);   // the reload law lives in BuildDrawPso: swap only on success
 }
 
 void GulfLayer::Render(const FrameContext& ctx) {
     if (!m_haveField || !m_drawPso) return;
-    PixScope scope(ctx.cl, "gulf.map (speed ramp + OW eddies by bivector sign)");
+    PixScope scope(ctx.cmd->Native(), "gulf.map (speed ramp + OW eddies by bivector sign)");
 
     // Letterbox the geographic aspect into the viewport.
     const float vpAspect = static_cast<float>(ctx.width) / static_cast<float>(ctx.height);
@@ -251,10 +176,10 @@ void GulfLayer::Render(const FrameContext& ctx) {
     m_cb.panel[2] = halfW;
     m_cb.panel[3] = halfH;
 
-    ctx.cl->SetPipelineState(m_drawPso.Get());
-    ctx.cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ctx.cl->SetGraphicsRootConstantBufferView(1, ctx.gpu->PushConstants(&m_cb, sizeof(m_cb)));
-    ctx.cl->DrawInstanced(6, 1, 0, 0);
+    ctx.cmd->Pipeline(m_drawPso.Get());
+    ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx.cmd->GraphicsConstants(1, m_cb);
+    ctx.cmd->Draw(6, 1, 0, 0);
 }
 
 }  // namespace ga

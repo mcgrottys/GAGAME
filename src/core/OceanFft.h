@@ -13,8 +13,9 @@
 // ================================================================================================
 #pragma once
 
-#include "core/Gpu.h"
-#include "core/Shader.h"
+#include "hal/Context.h"
+#include "hal/Gpu.h"
+#include "hal/Shader.h"
 #include "sim/SeaState.h"
 
 #include <string>
@@ -39,8 +40,9 @@ public:
     // derived from the forecast cycle so the ocean is reproducible.
     void SetSeaState(const PartParam* parts, int count, uint32_t seed);
 
-    // Records the whole compute chain for this frame into cl. tSec = seconds since the cycle.
-    void Record(ID3D12GraphicsCommandList* cl, Gpu& gpu, float tSec);
+    // Records the whole compute chain for this frame through cmd. tSec = seconds since the
+    // cycle.
+    void Record(hal::CommandContext& cmd, Gpu& gpu, float tSec);
 
     float PatchL(uint32_t c) const { return m_patchL[c]; }
     // M9bq: the rest of a cascade's geometry, so the CPU twin (sim/OceanCpu.h) is configured
@@ -52,7 +54,7 @@ public:
     float Lambda() const { return m_lambda; }   // the choppy (Gerstner) displacement scale
     uint32_t DispSrv(uint32_t c) const { return m_dispSrv[c]; }
     uint32_t DerivSrv(uint32_t c) const { return m_derivSrv[c]; }
-    ID3D12Resource* DerivRes(uint32_t c) const { return m_cascade[c].deriv.Get(); }
+    hal::Resource DerivRes(uint32_t c) const { return m_cascade[c].deriv.Get(); }
     bool Ready() const { return m_ready; }
 
     // Numeric gate: read the displacement textures back and measure the RENDERED significant
@@ -62,7 +64,7 @@ public:
 
 private:
     struct Cascade {
-        Com<ID3D12Resource> h0, pingA, pongA, pingB, pongB, disp, deriv;
+        hal::ResourceRef h0, pingA, pongA, pingB, pongB, disp, deriv;
         uint32_t blockInit = 0, blockMod = 0, blockRows = 0, blockCols = 0, blockAsm = 0;
         // M9bo: one UAV PAIR PER LEVEL per texture (src, dst), never a reused pair --
         // descriptor writes land on the CPU immediately while the dispatches execute later,
@@ -72,18 +74,18 @@ private:
         bool outputsArePs = false;   // disp/deriv currently in pixel-shader-resource state
     };
 
-    void BuildMips(ID3D12GraphicsCommandList* cl, Gpu& gpu, Cascade& k);
+    void BuildMips(hal::CommandContext& cmd, Gpu& gpu, Cascade& k);
 
     bool BuildPipelines(Gpu& gpu, ShaderCompiler& sc);
-    void Dispatch(ID3D12GraphicsCommandList* cl, Gpu& gpu, ID3D12PipelineState* pso,
+    void Dispatch(hal::CommandContext& cmd, Gpu& gpu, hal::PsoPtr pso,
                   uint32_t block, uint32_t cascade, uint32_t dir, float tSec, uint32_t gx,
                   uint32_t gy);
 
     std::wstring m_shaderDir;
-    Com<ID3D12RootSignature> m_rootSig;
-    Com<ID3D12PipelineState> m_init, m_modulate, m_fft, m_assemble;
-    Com<ID3D12RootSignature> m_mipRs;      // M9bo: the 2x2 box reduce (shaders/MipReduce.hlsl)
-    Com<ID3D12PipelineState> m_mipPso;
+    hal::RootSignatureRef m_rootSig;
+    hal::Pso m_init, m_modulate, m_fft, m_assemble;
+    hal::RootSignatureRef m_mipRs;      // M9bo: the 2x2 box reduce (shaders/MipReduce.hlsl)
+    hal::Pso m_mipPso;
 
     Cascade m_cascade[kCascades];
     float m_patchL[kCascades] = {756.0f, 186.0f, 47.0f};

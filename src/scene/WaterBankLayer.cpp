@@ -1,9 +1,11 @@
 #include "scene/WaterBankLayer.h"
 
-#include "core/GpuProfiler.h"
+#include "hal/GpuProfiler.h"
 
 #include "core/Image.h"
-#include "core/PixEvents.h"
+#include "hal/PixEvents.h"
+#include "hal/Pipeline.h"
+#include "hal/Root.h"
 #include "scene/SeaLayer.h"
 #include "core/SceneConfig.h"
 #include "sim/WaveField.h"
@@ -36,7 +38,7 @@ void WaterBankLayer::Configure(const std::wstring& shaderDir, SeaLayer* sea, Swe
     m_seaState = seaState;
 }
 
-void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSignature*) {
+void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSignature) {
     if (!m_sea) return;
     // The mip ladder side by side: ring m occupies texels [m*512, (m+1)*512) x [0, 512).
     m_disp.Init(gpu, kMips * kRingTexels, kRingTexels, DXGI_FORMAT_R16G16B16A16_FLOAT,
@@ -49,62 +51,46 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSig
     // Root signature: b0 CB, t0 tile list, then the BINDLESS pair -- one unbounded SRV range
     // and one unbounded UAV range over the shared heap, so this kernel reaches every texture
     // by slot exactly the way the render path does.
-    D3D12_DESCRIPTOR_RANGE1 rs[2]{}, ru[1]{};
-    rs[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    rs[0].NumDescriptors = UINT_MAX;
-    rs[0].BaseShaderRegister = 0;
-    rs[0].RegisterSpace = 1;
-    rs[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    rs[0].OffsetInDescriptorsFromTableStart = 0;
-    ru[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    ru[0].NumDescriptors = UINT_MAX;
-    ru[0].BaseShaderRegister = 0;
-    ru[0].RegisterSpace = 2;
     // M9aq: t0, space5 -- the heap as Texture2DArray, so the bed can be read from slice 6 of
     // the height PAGE tenant (one height texture; the window is a page of it).
-    rs[1] = rs[0];
-    rs[1].RegisterSpace = 5;
-    ru[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    ru[0].OffsetInDescriptorsFromTableStart = 0;
-    D3D12_ROOT_PARAMETER1 params[4]{};
-    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    params[0].Descriptor.ShaderRegister = 0;
-    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    params[1].Descriptor.ShaderRegister = 0;
-    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[2].DescriptorTable.NumDescriptorRanges = 2;
-    params[2].DescriptorTable.pDescriptorRanges = rs;
-    params[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[3].DescriptorTable.NumDescriptorRanges = 1;
-    params[3].DescriptorTable.pDescriptorRanges = ru;
-    D3D12_STATIC_SAMPLER_DESC samp[2]{};
-    samp[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-    samp[0].AddressU = samp[0].AddressV = samp[0].AddressW =
-        D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    samp[0].ShaderRegister = 0;
-    samp[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    samp[1] = samp[0];
-    samp[1].AddressU = samp[1].AddressV = samp[1].AddressW =
-        D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    samp[1].ShaderRegister = 1;
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC vd{};
-    vd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    vd.Desc_1_1.NumParameters = _countof(params);
-    vd.Desc_1_1.pParameters = params;
-    vd.Desc_1_1.NumStaticSamplers = 2;
-    vd.Desc_1_1.pStaticSamplers = samp;
-    Com<ID3DBlob> blob, err;
-    GA_CHECK(D3D12SerializeVersionedRootSignature(&vd, &blob, &err));
-    GA_CHECK(gpu.Device()->CreateRootSignature(0, blob->GetBufferPointer(),
-                                              blob->GetBufferSize(), IID_PPV_ARGS(&m_rs)));
+    // The two samplers are this kernel's own -- MaxLOD 0 and no comparison function at all
+    // (the desc's zero, not NEVER), unlike the house sampler -- and dead: WaterBank.hlsl
+    // declares no SamplerState, its reads are manual bilinear loads, so nothing samples through
+    // them (step 3d's finding, kept as found; step 3f's gate serialized them EQUAL to the descs
+    // they replace).
+    const hal::SamplerFields wrap{0,
+                                  D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                                  D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+                                  D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+                                  D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+                                  0.0f,
+                                  static_cast<D3D12_COMPARISON_FUNC>(0),
+                                  D3D12_SHADER_VISIBILITY_ALL,
+                                  0};
+    const hal::SamplerFields clamp{1,
+                                   D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                                   D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                   D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                   D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                   0.0f,
+                                   static_cast<D3D12_COMPARISON_FUNC>(0),
+                                   D3D12_SHADER_VISIBILITY_ALL,
+                                   0};
+    m_rs = hal::RootLayout{}
+               .Cbv(0)
+               .Srv(0)
+               .Table({hal::SrvRange(0, hal::kUnbounded, 1), hal::SrvRange(0, hal::kUnbounded, 5)})
+               .Table({hal::UavRange(0, hal::kUnbounded, 2)})
+               .Sampler(wrap)
+               .Sampler(clamp)
+               .Build(gpu, "waterbank");
     m_rs->SetName(L"water bank root signature");
 
-    ShaderBlob cs = sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsBankFill", L"cs_6_0");
-    if (!cs.Valid()) throw std::runtime_error("WaterBank kernel failed");
-    D3D12_COMPUTE_PIPELINE_STATE_DESC d{};
-    d.pRootSignature = m_rs.Get();
-    d.CS = {cs.Data(), cs.Size()};
-    GA_CHECK(gpu.Device()->CreateComputePipelineState(&d, IID_PPV_ARGS(&m_fill)));
+    m_fill = hal::Require(
+        hal::BuildCompute(gpu, m_rs.Get(),
+                          sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsBankFill", L"cs_6_0"),
+                          "waterbank"),
+        "WaterBank kernel");
     m_fill->SetName(L"CsBankFill");
     m_ready = true;
     Log("[waterbank] %d mip rings x %dx%d tiles (%.1f m .. %.0f m texels, %.1f .. %.0f km "
@@ -116,15 +102,10 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSig
 }
 
 void WaterBankLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
-    ShaderBlob cs = sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsBankFill", L"cs_6_0");
-    if (!cs.Valid()) return;
-    D3D12_COMPUTE_PIPELINE_STATE_DESC d{};
-    d.pRootSignature = m_rs.Get();
-    d.CS = {cs.Data(), cs.Size()};
-    Com<ID3D12PipelineState> pso;
-    if (SUCCEEDED(gpu.Device()->CreateComputePipelineState(&d, IID_PPV_ARGS(&pso)))) {
-        m_fill = pso;
-    }
+    const ShaderBlob cs =
+        sc.Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsBankFill", L"cs_6_0");
+    hal::Reload(m_fill, [&] { return hal::BuildCompute(gpu, m_rs.Get(), cs, "waterbank"); },
+                "waterbank");
 }
 
 void WaterBankLayer::SetFrame(Gpu& gpu, double simUnix, double camX, double camZ) {
@@ -431,7 +412,8 @@ void WaterBankLayer::DumpFibers(Gpu& gpu) {
 
 void WaterBankLayer::Render(const FrameContext& ctx) {
     if (!m_ready || !enabled || !m_sea) return;
-    PixScope scope(ctx.cl, "waterbank (the wave vertex bank: rings recomposed per frame)");
+    PixScope scope(ctx.cmd->Native(),
+                   "waterbank (the wave vertex bank: rings recomposed per frame)");
 
     // The tile list: every wet tile in every ring, with its corner params from the stacks.
     const auto tileList0 = std::chrono::steady_clock::now();   // tileListMs bracket
@@ -634,41 +616,30 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
         }
     }
 
-    GpuScope gscope(ctx.prof, ctx.cl, "waterbank.fill");   // barriers + the one dispatch
+    GpuScope gscope(ctx.prof, ctx.cmd->Native(), "waterbank.fill");   // barriers + the one dispatch
     auto toUav = [&](TileAtlas2D& bank) {
         if (m_state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS) return;
-        D3D12_RESOURCE_BARRIER b{};
-        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Transition.pResource = bank.Res();
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b.Transition.StateBefore = m_state;
-        b.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        ctx.cl->ResourceBarrier(1, &b);
+        ctx.cmd->Barrier(bank.Res(), m_state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     };
     toUav(m_disp);
     toUav(m_param);
     toUav(m_detail);
     m_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
-    ctx.cl->SetComputeRootSignature(m_rs.Get());
-    ctx.cl->SetComputeRootConstantBufferView(0, ctx.gpu->PushConstants(&cb, sizeof(cb)));
-    ctx.cl->SetComputeRootShaderResourceView(
+    ctx.cmd->ComputeRoot(m_rs.Get());
+    ctx.cmd->ComputeConstants(0, cb);
+    ctx.cmd->ComputeSrvAt(
         1, ctx.gpu->PushConstants(tiles.data(), tiles.size() * sizeof(BankTile)));
-    ctx.cl->SetComputeRootDescriptorTable(2, ctx.gpu->SrvHeap().Gpu(0));
-    ctx.cl->SetComputeRootDescriptorTable(3, ctx.gpu->SrvHeap().Gpu(0));
-    ctx.cl->SetPipelineState(m_fill.Get());
-    ctx.cl->Dispatch(kTileTexels / 16, kTileTexels / 16,
-                     static_cast<UINT>(tiles.size()));
+    ctx.cmd->ComputeBindless(2);
+    ctx.cmd->ComputeBindless(3);
+    ctx.cmd->Pipeline(m_fill.Get());
+    ctx.cmd->Dispatch(kTileTexels / 16, kTileTexels / 16,
+                      static_cast<UINT>(tiles.size()));
 
     auto toSrv = [&](TileAtlas2D& bank) {
-        D3D12_RESOURCE_BARRIER b{};
-        b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-        b.Transition.pResource = bank.Res();
-        b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-        b.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-        b.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
-                                  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
-        ctx.cl->ResourceBarrier(1, &b);
+        ctx.cmd->Barrier(bank.Res(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                         D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |
+                             D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     };
     toSrv(m_disp);
     toSrv(m_param);

@@ -36,17 +36,18 @@ add_executable(gagame
   src/core/GaAst.cpp
   src/core/Lattice.cpp
   src/core/SpaceTest.cpp
-  src/core/PixEvents.cpp
+  src/hal/PixEvents.cpp
   src/core/GaTest.cpp
-  src/core/DxTest.cpp
+  src/hal/DxTest.cpp
   src/core/CrashTrace.cpp
-  src/core/Gpu.cpp
-  src/core/GpuProfiler.cpp
-  src/core/Shader.cpp
+  src/hal/Gpu.cpp
+  src/hal/GpuProfiler.cpp
+  src/hal/Shader.cpp
   src/core/Window.cpp
   src/core/Image.cpp
-  src/core/TileAtlas.cpp
-  src/core/Residency.cpp
+  src/hal/TileAtlas.cpp
+  src/hal/Residency.cpp
+  src/hal/Tenant.cpp
   src/core/TileProviders.cpp
   src/core/ThreadTest.cpp
   src/core/ThreadManager.cpp

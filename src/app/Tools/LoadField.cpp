@@ -7,7 +7,7 @@
 #include "core/GeoGridLoader.h"
 #include "core/GeoRef.h"
 #include "core/GradeField.h"
-#include "core/Gpu.h"
+#include "hal/Gpu.h"
 
 #include <cstdint>
 #include <cstdio>

@@ -22,9 +22,11 @@
 #pragma once
 
 #include "core/GradeField.h"
-#include "core/Gpu.h"
-#include "core/Shader.h"
-#include "core/TileAtlas.h"
+#include "hal/Context.h"
+#include "hal/Gpu.h"
+#include "hal/Shader.h"
+#include "hal/TileAtlas.h"
+#include "hal/Views.h"
 #include "sim/BathyModel.h"
 
 #include <algorithm>
@@ -50,7 +52,7 @@ public:
     // M9ar: bind the bed -- slice `slice` of the height PAGE tenant's array, with its residency
     // map, so the solver reads the same megatexture the water shading and the globe read, at
     // whatever mip is resident. Must be called before the first Step; there is no bed otherwise.
-    void SetHeightPage(Gpu& gpu, ID3D12Resource* heightArr, ID3D12Resource* resMapArr,
+    void SetHeightPage(Gpu& gpu, hal::Resource heightArr, hal::Resource resMapArr,
                        uint32_t slice, uint32_t mips, double orgPxX, double orgPxY);
     bool BedBound() const { return m_bedBound; }
 
@@ -72,9 +74,9 @@ public:
         m_westQ = westQm3s;
     }
 
-    // Advance toward simUnix (records compute onto cl) and leave eta + uv sampleable.
+    // Advance toward simUnix (records compute through cmd) and leave eta + uv sampleable.
     // tideNavd = the analytic water level, NAVD88 m. Returns substeps executed this frame.
-    int Record(ID3D12GraphicsCommandList* cl, Gpu& gpu, double simUnix, float tideNavd);
+    int Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float tideNavd);
 
     // Solver-only advancement (own submits; no rendering): integrate up to targetUnix in
     // batches of 64 substeps per command list. tideAt(unix) supplies the ocean boundary level,
@@ -86,8 +88,8 @@ public:
             m_westDEta = static_cast<float>(westAt(m_simTime));
             m_southDEta = static_cast<float>(southAt(m_simTime));
             m_westQ = static_cast<float>(westQAt(m_simTime));
-            ID3D12GraphicsCommandList* cl = gpu.BeginUpload();
-            Record(cl, gpu, target, static_cast<float>(tideAt(m_simTime)), 9999);
+            hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
+            Record(up, gpu, target, static_cast<float>(tideAt(m_simTime)), 9999);
             gpu.EndUpload();
             gpu.ResetConstantArenaAfterIdle();   // thousands of batches; EndUpload waited
         }
@@ -115,8 +117,8 @@ public:
     // The residency map is one texel per mip-0 TILE, so the lens indexes it in tile space.
     uint32_t VelGradResMapW() const { return m_velGrad.TilesX(); }
     uint32_t VelGradResMapH() const { return m_velGrad.TilesY(); }
-    ID3D12Resource* VelGradRes() const { return m_velGrad.Res(); }
-    ID3D12Resource* UvRes() const { return m_uvBank.Res(); }
+    hal::Resource VelGradRes() const { return m_velGrad.Res(); }
+    hal::Resource UvRes() const { return m_uvBank.Res(); }
 
     uint32_t Nx() const { return m_cb.nx; }
     float CellM() const { return m_cb.dx; }   // level-0 ground size, for a page ladder
@@ -151,9 +153,9 @@ public:
     float Dt() const { return m_dt; }
 
 private:
-    int Record(ID3D12GraphicsCommandList* cl, Gpu& gpu, double simUnix, float tideNavd,
+    int Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float tideNavd,
                int maxSub);
-    void RecordReset(ID3D12GraphicsCommandList* cl, Gpu& gpu);
+    void RecordReset(hal::CommandContext& cmd, Gpu& gpu);
 
     // Mirrors SweCb in shaders/Swe.hlsl exactly.
     struct SweCbData {
@@ -198,10 +200,10 @@ private:
     // this replaces was the last flat texture on the per-frame water path (AUDIT_WATER item 4).
     GradeBank m_uvBank;
     uint32_t m_uvSrv = UINT32_MAX;
-    Com<ID3D12RootSignature> m_rs;
-    Com<ID3D12PipelineState> m_clearEta, m_clearFlux, m_uvClear, m_fluxK, m_heightK, m_deriveK;
-    Com<ID3D12PipelineState> m_velGradK;   // M9h: grad(flow) -> div + curl
-    uint32_t m_table = UINT32_MAX;   // [t1 bathy SRV, u0 eta, u1 flux, u2 uv]
+    hal::RootSignatureRef m_rs;
+    hal::Pso m_clearEta, m_clearFlux, m_uvClear, m_fluxK, m_heightK, m_deriveK;
+    hal::Pso m_velGradK;   // M9h: grad(flow) -> div + curl
+    hal::Table m_table;   // [t1 height page, t2 its residency map, u0 eta, u1 flux, u2 uv, u3 mv]
     D3D12_RESOURCE_STATES m_etaState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     D3D12_RESOURCE_STATES m_uvState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 

@@ -1,6 +1,10 @@
 #include "core/OceanFft.h"
 
-#include "core/PixEvents.h"
+#include "hal/PixEvents.h"
+#include "hal/Pipeline.h"
+#include "hal/Resources.h"
+#include "hal/Root.h"
+#include "hal/Views.h"
 
 #include <algorithm>
 #include <cmath>
@@ -21,42 +25,12 @@ struct FftConsts {
     float pad[4];
 };
 
-void Barrier(ID3D12GraphicsCommandList* cl, ID3D12Resource* res, D3D12_RESOURCE_STATES from,
-             D3D12_RESOURCE_STATES to) {
-    D3D12_RESOURCE_BARRIER b{};
-    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    b.Transition.pResource = res;
-    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    b.Transition.StateBefore = from;
-    b.Transition.StateAfter = to;
-    cl->ResourceBarrier(1, &b);
-}
-
-void UavBarrier(ID3D12GraphicsCommandList* cl, ID3D12Resource* res) {
-    D3D12_RESOURCE_BARRIER b{};
-    b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-    b.UAV.pResource = res;
-    cl->ResourceBarrier(1, &b);
-}
-
-Com<ID3D12Resource> MakeTex(Gpu& gpu, uint32_t n, DXGI_FORMAT fmt, const wchar_t* name,
+hal::ResourceRef MakeTex(Gpu& gpu, uint32_t n, DXGI_FORMAT fmt, const wchar_t* name,
                             D3D12_RESOURCE_STATES state, uint32_t mips = 1) {
-    D3D12_RESOURCE_DESC d{};
-    d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    d.Width = n;
-    d.Height = n;
-    d.DepthOrArraySize = 1;
-    d.MipLevels = static_cast<UINT16>(mips);
-    d.Format = fmt;
-    d.SampleDesc.Count = 1;
-    d.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    D3D12_HEAP_PROPERTIES hp{};
-    hp.Type = D3D12_HEAP_TYPE_DEFAULT;
-    Com<ID3D12Resource> res;
-    GA_CHECK(gpu.Device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d, state, nullptr,
-                                                  IID_PPV_ARGS(&res)));
-    res->SetName(name);
-    return res;
+    return hal::Committed(gpu, name, n, n, fmt, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, state,
+                          "the FFT's working set: a dense n^2 UAV texture the kernels ping-pong "
+                          "through whole, never partly resident, so not a bank",
+                          static_cast<uint16_t>(mips));
 }
 
 }  // namespace
@@ -64,28 +38,29 @@ Com<ID3D12Resource> MakeTex(Gpu& gpu, uint32_t n, DXGI_FORMAT fmt, const wchar_t
 // M9bo: fill one cascade texture's chain, coarse level by coarse level, while the resource is
 // still in UNORDERED_ACCESS from assembly. A UAV barrier between levels because level m+1 reads
 // what level m just wrote.
-void OceanFft::BuildMips(ID3D12GraphicsCommandList* cl, Gpu& gpu, Cascade& k) {
+void OceanFft::BuildMips(hal::CommandContext& cmd, Gpu& gpu, Cascade& k) {
+    (void)gpu;   // the context carries the device
     if (!m_mipPso) return;
-    cl->SetComputeRootSignature(m_mipRs.Get());
-    cl->SetPipelineState(m_mipPso.Get());
-    ID3D12Resource* res[2] = {k.disp.Get(), k.deriv.Get()};
+    cmd.ComputeRoot(m_mipRs.Get());
+    cmd.Pipeline(m_mipPso.Get());
+    hal::Resource res[2] = {k.disp.Get(), k.deriv.Get()};
     const uint32_t table[2] = {k.mipTableDisp, k.mipTableDeriv};
     for (uint32_t t = 0; t < 2; ++t) {
         for (uint32_t m = 0; m + 1 < kMips; ++m) {
             const uint32_t sw = (kN >> m) ? (kN >> m) : 1u;
             const uint32_t dw = (kN >> (m + 1)) ? (kN >> (m + 1)) : 1u;
             const uint32_t consts[4] = {dw, dw, sw, sw};
-            cl->SetComputeRoot32BitConstants(0, 4, consts, 0);
-            cl->SetComputeRootDescriptorTable(1, gpu.SrvHeap().Gpu(table[t] + 2 * m));
-            cl->Dispatch((dw + 7) / 8, (dw + 7) / 8, 1);
-            UavBarrier(cl, res[t]);
+            cmd.Native()->SetComputeRoot32BitConstants(0, 4, consts, 0);
+            cmd.ComputeTable(1, table[t] + 2 * m);
+            cmd.Dispatch((dw + 7) / 8, (dw + 7) / 8, 1);
+            cmd.UavBarrier(res[t]);
         }
     }
     // Record binds the ocean root signature ONCE, before the cascade loop, and Dispatch never
     // re-binds it -- so leaving m_mipRs bound here runs the NEXT cascade's FFT kernels against
     // the wrong root signature. That is an access violation inside the driver, reported at
     // OceanFft::Dispatch with nothing in this function on the stack. Put it back.
-    cl->SetComputeRootSignature(m_rootSig.Get());
+    cmd.ComputeRoot(m_rootSig.Get());
 }
 
 double OceanFft::MeasureHs(Gpu& gpu) {
@@ -158,36 +133,11 @@ void OceanFft::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir)
     m_bandHi[2] = 0.9f * kPi * kN / m_patchL[2];   // guard band below Nyquist
 
     // Root signature: b1 root constants, b0 CBV (partitions), one table of 4 UAVs.
-    D3D12_DESCRIPTOR_RANGE1 range{};
-    range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    range.NumDescriptors = 4;
-    range.BaseShaderRegister = 0;
-    range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE;
-    range.OffsetInDescriptorsFromTableStart = 0;
-
-    D3D12_ROOT_PARAMETER1 params[3]{};
-    params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    params[0].Constants.ShaderRegister = 1;   // b1
-    params[0].Constants.Num32BitValues = sizeof(FftConsts) / 4;
-    params[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    params[1].Descriptor.ShaderRegister = 0;  // b0
-    params[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    params[2].DescriptorTable.NumDescriptorRanges = 1;
-    params[2].DescriptorTable.pDescriptorRanges = &range;
-
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC vd{};
-    vd.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    vd.Desc_1_1.NumParameters = _countof(params);
-    vd.Desc_1_1.pParameters = params;
-
-    Com<ID3DBlob> blob, err;
-    HRESULT hr = D3D12SerializeVersionedRootSignature(&vd, &blob, &err);
-    if (FAILED(hr)) {
-        if (err) Log("[ocean] root sig: %s", static_cast<const char*>(err->GetBufferPointer()));
-        GA_CHECK(hr);
-    }
-    GA_CHECK(gpu.Device()->CreateRootSignature(0, blob->GetBufferPointer(), blob->GetBufferSize(),
-                                              IID_PPV_ARGS(&m_rootSig)));
+    m_rootSig = hal::RootLayout{}
+                    .Constants(1, sizeof(FftConsts) / 4)
+                    .Cbv(0)
+                    .Table({hal::UavRange(0, 4)})
+                    .Build(gpu, "ocean");
     m_rootSig->SetName(L"ocean compute root signature");
 
     if (!BuildPipelines(gpu, sc)) throw std::runtime_error("ocean compute shaders failed");
@@ -198,33 +148,20 @@ void OceanFft::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir)
     // average of the field. (The coverage-weighted path exists for texture tenants, where null
     // means ABSENT; using it here would be wrong in the other direction.)
     {
-        D3D12_DESCRIPTOR_RANGE range{};
-        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        range.NumDescriptors = 2;
-        range.BaseShaderRegister = 0;
-        D3D12_ROOT_PARAMETER rp[2]{};
-        rp[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        rp[0].Constants.Num32BitValues = 4;
-        rp[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        rp[1].DescriptorTable.NumDescriptorRanges = 1;
-        rp[1].DescriptorTable.pDescriptorRanges = &range;
-        D3D12_ROOT_SIGNATURE_DESC rsd{};
-        rsd.NumParameters = 2;
-        rsd.pParameters = rp;
-        Com<ID3DBlob> blob, err;
-        GA_CHECK(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &blob, &err));
-        GA_CHECK(gpu.Device()->CreateRootSignature(0, blob->GetBufferPointer(),
-                                                   blob->GetBufferSize(),
-                                                   IID_PPV_ARGS(&m_mipRs)));
+        // (Until step 3d the one version-1.0 root signature in the tree; 1.1 with the volatile
+        // flag 1.0 implied is the same signature to the driver.)
+        m_mipRs = hal::RootLayout{}
+                      .Constants(0, 4)
+                      .Table({hal::UavRange(0, 2)})
+                      .Build(gpu, "ocean.mip");
         m_mipRs->SetName(L"ocean mip reduce root signature");
         std::vector<std::wstring> defs{L"GA_MIP_CH=4"};
-        ShaderBlob cs = sc.Compile(shaderDir + L"/MipReduce.hlsl", L"CsMipReduce", L"cs_6_0",
-                                   defs);
-        if (!cs.Valid()) throw std::runtime_error("ocean MipReduce failed to compile");
-        D3D12_COMPUTE_PIPELINE_STATE_DESC pd{};
-        pd.pRootSignature = m_mipRs.Get();
-        pd.CS = {cs.Data(), cs.Size()};
-        GA_CHECK(gpu.Device()->CreateComputePipelineState(&pd, IID_PPV_ARGS(&m_mipPso)));
+        m_mipPso = hal::Require(
+            hal::BuildCompute(gpu, m_mipRs.Get(),
+                              sc.Compile(shaderDir + L"/MipReduce.hlsl", L"CsMipReduce",
+                                         L"cs_6_0", defs),
+                              "ocean.mip"),
+            "ocean MipReduce kernel");
         m_mipPso->SetName(L"ocean CsMipReduce");
     }
 
@@ -255,20 +192,17 @@ void OceanFft::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir)
         m_derivSrv[c] = gpu.CreateSrv(k.deriv.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
 
         // Descriptor blocks (4 consecutive UAVs each), one per kernel binding pattern.
-        auto block = [&](ID3D12Resource* u0, ID3D12Resource* u1, ID3D12Resource* u2,
-                         ID3D12Resource* u3) {
-            const uint32_t base = gpu.SrvHeap().Alloc(4);
-            ID3D12Resource* res[4] = {u0, u1, u2, u3};
+        auto block = [&](hal::Resource u0, hal::Resource u1, hal::Resource u2,
+                         hal::Resource u3) {
+            hal::Table t = hal::Table::Alloc(gpu, 4, "ocean.block");
+            hal::Resource res[4] = {u0, u1, u2, u3};
             for (uint32_t s = 0; s < 4; ++s) {
-                D3D12_UNORDERED_ACCESS_VIEW_DESC uv{};
-                uv.Format = (res[s] == k.disp.Get() || res[s] == k.deriv.Get())
-                                ? DXGI_FORMAT_R16G16B16A16_FLOAT
-                                : DXGI_FORMAT_R32G32B32A32_FLOAT;
-                uv.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-                gpu.Device()->CreateUnorderedAccessView(res[s], nullptr, &uv,
-                                                        gpu.SrvHeap().Cpu(base + s));
+                const DXGI_FORMAT fmt = (res[s] == k.disp.Get() || res[s] == k.deriv.Get())
+                                            ? DXGI_FORMAT_R16G16B16A16_FLOAT
+                                            : DXGI_FORMAT_R32G32B32A32_FLOAT;
+                t.Uav2D(s, res[s], fmt);
             }
-            return base;
+            return t.Base();
         };
         k.blockInit = block(k.h0.Get(), k.pingA.Get(), k.pingB.Get(), k.pongA.Get());
         k.blockMod = block(k.h0.Get(), k.pingA.Get(), k.pingB.Get(), k.pongA.Get());
@@ -280,22 +214,13 @@ void OceanFft::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir)
         // MipReduce.hlsl declares RWTexture2DArray so ONE kernel serves paged and unpaged
         // banks alike, and a plain Texture2D view against that declaration is a binding
         // mismatch (TileAtlas2D::BuildMips carries the same note).
-        auto mipTable = [&](ID3D12Resource* res) {
-            const uint32_t base = gpu.SrvHeap().Alloc(2 * (kMips - 1));
+        auto mipTable = [&](hal::Resource res) {
+            hal::Table t = hal::Table::Alloc(gpu, 2 * (kMips - 1), "ocean.mip");
             for (uint32_t m = 0; m + 1 < kMips; ++m) {
-                D3D12_UNORDERED_ACCESS_VIEW_DESC u{};
-                u.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-                u.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
-                u.Texture2DArray.FirstArraySlice = 0;
-                u.Texture2DArray.ArraySize = 1;
-                u.Texture2DArray.MipSlice = m;
-                gpu.Device()->CreateUnorderedAccessView(res, nullptr, &u,
-                                                        gpu.SrvHeap().Cpu(base + 2 * m));
-                u.Texture2DArray.MipSlice = m + 1;
-                gpu.Device()->CreateUnorderedAccessView(res, nullptr, &u,
-                                                        gpu.SrvHeap().Cpu(base + 2 * m + 1));
+                t.UavArray(2 * m, res, DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1, m);
+                t.UavArray(2 * m + 1, res, DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1, m + 1);
             }
-            return base;
+            return t.Base();
         };
         k.mipTableDisp = mipTable(k.disp.Get());
         k.mipTableDeriv = mipTable(k.deriv.Get());
@@ -307,34 +232,27 @@ void OceanFft::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir)
 
 bool OceanFft::BuildPipelines(Gpu& gpu, ShaderCompiler& sc) {
     const std::wstring path = m_shaderDir + L"/OceanCompute.hlsl";
-    struct Entry { const wchar_t* name; Com<ID3D12PipelineState>* pso; };
+    struct Entry { const wchar_t* name; hal::Pso* pso; };
     Entry entries[] = {
         {L"CsInitSpectrum", &m_init}, {L"CsModulate", &m_modulate},
         {L"CsFft", &m_fft}, {L"CsAssemble", &m_assemble},
     };
+    // The four kernels swap together or not at all: a spectrum from one and an assembly from
+    // another would not agree.
+    hal::ReloadSet set;
     for (Entry& e : entries) {
-        ShaderBlob cs = sc.Compile(path, e.name, L"cs_6_0");
-        if (!cs.Valid()) return false;
-        D3D12_COMPUTE_PIPELINE_STATE_DESC d{};
-        d.pRootSignature = m_rootSig.Get();
-        d.CS = {cs.Data(), cs.Size()};
-        Com<ID3D12PipelineState> pso;
-        if (FAILED(gpu.Device()->CreateComputePipelineState(&d, IID_PPV_ARGS(&pso)))) return false;
+        auto pso = hal::BuildCompute(gpu, m_rootSig.Get(), sc.Compile(path, e.name, L"cs_6_0"),
+                                     "ocean");
+        if (!pso) return false;
         pso->SetName(e.name);
-        *e.pso = pso;
+        set.Add(*e.pso, std::move(pso));
     }
+    set.Commit();
     return true;
 }
 
 bool OceanFft::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
-    Com<ID3D12PipelineState> keep[4] = {m_init, m_modulate, m_fft, m_assemble};
-    if (!BuildPipelines(gpu, sc)) {
-        m_init = keep[0];
-        m_modulate = keep[1];
-        m_fft = keep[2];
-        m_assemble = keep[3];
-        return false;
-    }
+    if (!BuildPipelines(gpu, sc)) return false;
     m_spectrumDirty = true;   // new spectrum kernel may pack differently; rebuild h0
     return true;
 }
@@ -347,9 +265,10 @@ void OceanFft::SetSeaState(const PartParam* parts, int count, uint32_t seed) {
     m_spectrumDirty = true;
 }
 
-void OceanFft::Dispatch(ID3D12GraphicsCommandList* cl, Gpu& gpu, ID3D12PipelineState* pso,
+void OceanFft::Dispatch(hal::CommandContext& cmd, Gpu& gpu, hal::PsoPtr pso,
                         uint32_t block, uint32_t cascade, uint32_t dir, float tSec, uint32_t gx,
                         uint32_t gy) {
+    (void)gpu;   // the context carries the device
     FftConsts c{};
     c.n = kN;
     c.dir = dir;
@@ -365,73 +284,73 @@ void OceanFft::Dispatch(ID3D12GraphicsCommandList* cl, Gpu& gpu, ID3D12PipelineS
     // moderate threshold gives foam on storm crests and a clean surface at Hs 0.4 m.
     c.foamScale = 4.0f;
     c.foamBias = 0.80f;
-    cl->SetComputeRoot32BitConstants(0, sizeof(c) / 4, &c, 0);
-    cl->SetComputeRootConstantBufferView(1, gpu.PushConstants(&m_parts, sizeof(m_parts)));
-    cl->SetComputeRootDescriptorTable(2, gpu.SrvHeap().Gpu(block));
-    cl->SetPipelineState(pso);
-    cl->Dispatch(gx, gy, 1);
+    cmd.Native()->SetComputeRoot32BitConstants(0, sizeof(c) / 4, &c, 0);
+    cmd.ComputeConstants(1, m_parts);
+    cmd.ComputeTable(2, block);
+    cmd.Pipeline(pso);
+    cmd.Dispatch(gx, gy, 1);
 }
 
-void OceanFft::Record(ID3D12GraphicsCommandList* cl, Gpu& gpu, float tSec) {
+void OceanFft::Record(hal::CommandContext& cmd, Gpu& gpu, float tSec) {
     if (!m_ready) return;
-    PixScope frame(cl, "ocean.fft (3 cascades: modulate -> rows -> cols -> assemble)");
-    cl->SetComputeRootSignature(m_rootSig.Get());
+    PixScope frame(cmd.Native(), "ocean.fft (3 cascades: modulate -> rows -> cols -> assemble)");
+    cmd.ComputeRoot(m_rootSig.Get());
 
     for (uint32_t ci = 0; ci < kCascades; ++ci) {
         Cascade& k = m_cascade[ci];
 
         if (k.outputsArePs) {
-            Barrier(cl, k.disp.Get(), D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            Barrier(cl, k.deriv.Get(), D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cmd.Barrier(k.disp.Get(), D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            cmd.Barrier(k.deriv.Get(), D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE,
+                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             k.outputsArePs = false;
         }
 
         if (m_spectrumDirty) {
-            PixScope scope(cl, "ocean.initSpectrum");
-            Dispatch(cl, gpu, m_init.Get(), k.blockInit, ci, 0, tSec, kN / 8, kN / 8);
-            UavBarrier(cl, k.h0.Get());
+            PixScope scope(cmd.Native(), "ocean.initSpectrum");
+            Dispatch(cmd, gpu, m_init.Get(), k.blockInit, ci, 0, tSec, kN / 8, kN / 8);
+            cmd.UavBarrier(k.h0.Get());
         }
         {
-            PixScope scope(cl, "ocean.modulate (the rotor)");
-            Dispatch(cl, gpu, m_modulate.Get(), k.blockMod, ci, 0, tSec, kN / 8, kN / 8);
-            UavBarrier(cl, k.pingA.Get());
-            UavBarrier(cl, k.pingB.Get());
+            PixScope scope(cmd.Native(), "ocean.modulate (the rotor)");
+            Dispatch(cmd, gpu, m_modulate.Get(), k.blockMod, ci, 0, tSec, kN / 8, kN / 8);
+            cmd.UavBarrier(k.pingA.Get());
+            cmd.UavBarrier(k.pingB.Get());
         }
         {
-            PixScope scope(cl, "ocean.fft.rows");
-            Dispatch(cl, gpu, m_fft.Get(), k.blockRows, ci, 0, tSec, kN, 1);
-            UavBarrier(cl, k.pongA.Get());
-            UavBarrier(cl, k.pongB.Get());
+            PixScope scope(cmd.Native(), "ocean.fft.rows");
+            Dispatch(cmd, gpu, m_fft.Get(), k.blockRows, ci, 0, tSec, kN, 1);
+            cmd.UavBarrier(k.pongA.Get());
+            cmd.UavBarrier(k.pongB.Get());
         }
         {
-            PixScope scope(cl, "ocean.fft.cols");
-            Dispatch(cl, gpu, m_fft.Get(), k.blockCols, ci, 1, tSec, kN, 1);
-            UavBarrier(cl, k.pingA.Get());
-            UavBarrier(cl, k.pingB.Get());
+            PixScope scope(cmd.Native(), "ocean.fft.cols");
+            Dispatch(cmd, gpu, m_fft.Get(), k.blockCols, ci, 1, tSec, kN, 1);
+            cmd.UavBarrier(k.pingA.Get());
+            cmd.UavBarrier(k.pingB.Get());
         }
         {
-            PixScope scope(cl, "ocean.assemble");
-            Dispatch(cl, gpu, m_assemble.Get(), k.blockAsm, ci, 0, tSec, kN / 8, kN / 8);
-            UavBarrier(cl, k.disp.Get());
-            UavBarrier(cl, k.deriv.Get());
+            PixScope scope(cmd.Native(), "ocean.assemble");
+            Dispatch(cmd, gpu, m_assemble.Get(), k.blockAsm, ci, 0, tSec, kN / 8, kN / 8);
+            cmd.UavBarrier(k.disp.Get());
+            cmd.UavBarrier(k.deriv.Get());
         }
         {
             // M9bo: the chain, while both are still UAVs. The bank kernel reads these at the
             // RING's texel, which is coarser than the cascade's by up to 6.7x on ring 0 and far
             // more outward; without the chain that read was a mip-0 bilinear tap and everything
             // between the two scales aliased into the geometry.
-            PixScope scope(cl, "ocean.mips");
-            BuildMips(cl, gpu, k);
+            PixScope scope(cmd.Native(), "ocean.mips");
+            BuildMips(cmd, gpu, k);
         }
 
         // ALL_SHADER_RESOURCE (pixel + non-pixel) so the churn COMPUTE pass can read the chop
         // derivatives in the same frame the sea PS samples them.
-        Barrier(cl, k.disp.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
-        Barrier(cl, k.deriv.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        cmd.Barrier(k.disp.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
+        cmd.Barrier(k.deriv.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    D3D12_RESOURCE_STATE_ALL_SHADER_RESOURCE);
         k.outputsArePs = true;
     }
     m_spectrumDirty = false;

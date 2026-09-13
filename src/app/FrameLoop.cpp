@@ -22,15 +22,15 @@
 #include "compose/TileTree.h"
 #include "compose/TileArchive.h"
 #include "compose/TileIndex.h"
-#include "core/TileStream.h"
+#include "hal/TileStream.h"
 #include "compose/ComposeTree.h"
 #include "compose/DomainSource.h"
 #include "core/CurrentFieldLoader.h"
 #include "core/GeoGridLoader.h"
-#include "core/Gpu.h"
+#include "hal/Gpu.h"
 #include "core/Image.h"
-#include "core/PixEvents.h"
-#include "core/TileAtlas.h"
+#include "hal/PixEvents.h"
+#include "hal/TileAtlas.h"
 #include "core/Window.h"
 #include "render/Renderer.h"
 #include "scene/FieldSet.h"
@@ -62,7 +62,7 @@
 #include "sim/VesselSpec.h"
 #include "scene/VesselLayer.h"
 #include "sim/SimClock.h"
-#include "core/DxTest.h"
+#include "hal/DxTest.h"
 #include "core/Droste.h"   // M10: the globe within the globe, as one Cl(4,1) versor
 #include "core/Pga.h"
 #include "core/TileProviders.h"
@@ -275,6 +275,7 @@ std::optional<int> FrameLoop::Session() {
     auto& waveTree = m_waveTree;
     auto& waveFrame = m_waveFrame;
     auto& waveT = m_waveT;
+    auto& waveTenant = m_waveTenant;
     auto& route = m_route;
     auto& timeScale = m_timeScale;
     auto& windowSec = m_windowSec;
@@ -1083,24 +1084,26 @@ std::optional<int> FrameLoop::Session() {
             waveSrc = std::make_shared<WaveFieldSource>(waveField.get(), waveFrame);
             waveTree = std::make_shared<std::shared_ptr<TileTree>>(
                 std::make_shared<TileTree>(waveSrc.get(), TileTree::Fmt::Raw4));
-            auto holder = waveTree;
-            const ColorFrame wframe = waveFrame.color;
-            TileProviderFn wp = [holder, wframe](const TileRequest& r,
-                                                 std::vector<uint8_t>& out, TileLoc* loc) {
-                if (r.face < 6u) {
-                    out.assign(65536, 0);   // the cube faces are not this node's frame
-                    if (loc) *loc = TileLoc{};
-                    return true;
-                }
-                std::shared_ptr<TileTree> t = std::atomic_load(holder.get());
-                if (!t) return false;
-                TileRequest w = r;
-                w.face = r.face - 6u;   // the plane
-                return t->Provider(wframe)(w, out, loc);
-            };
-            waveT = resMgr.AddTexturePages(gpu, L"wave.field (pages)", Compositor::kFaceDim,
-                                           DXGI_FORMAT_R8G8B8A8_UNORM, std::move(wp),
-                                           6u + uint32_t(WaveField::kMaxComp) + 1u);
+            // M12 step 3e: THE DECLARATION. Slices 6.. are the component planes on the wave
+            // frame's z16 lattice (slice 6 + plane), painted by the tree in the holder -- a
+            // bucket roll prefills a fresh tree on a worker and swaps it in; the cube faces
+            // are not this node's frame and answer zeros. Nothing here streams: a tile is the
+            // solve's own bytes, repainted per bucket and dropped whole at the roll.
+            hal::TenantDesc wd;
+            wd.name = L"wave.field (pages)";
+            wd.astNode = "wave.solver";
+            wd.fiber = {DXGI_FORMAT_R8G8B8A8_UNORM, 128, 128,
+                        "one component's a, k, cos, sin (quantized; per-comp aMax, kMax)"};
+            wd.semantics = hal::Semantics::Field;
+            wd.residence = hal::Residence::Volatile;
+            wd.absence = hal::Absence::Zero;
+            wd.absentTile.assign(65536, 0);
+            wd.slices = 6u + uint32_t(WaveField::kMaxComp) + 1u;
+            wd.bindings.push_back({6u, uint32_t(WaveField::kMaxComp) + 1u, waveFrame.color,
+                                   nullptr, "a/k/phase-spinor planes"});
+            wd.holder = waveTree;
+            waveTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(wd));
+            waveT = waveTenant.Id();
             waterBank->SetWavePages(resMgr.TextureSrv(waveT), resMgr.ResidencySrv(waveT),
                                     double(waveFrame.orgPxX), double(waveFrame.orgPxY),
                                     waveFrame.nx, waveFrame.ny);
@@ -1499,6 +1502,7 @@ bool FrameLoop::Frame() {
     auto& exposureRoot = m_A.exposureRoot;
     auto& exposureTree = m_A.exposureTree;
     auto& exposureT = m_A.exposureT;
+    auto& exposureTenant = m_A.exposureTenant;
     auto& mode = m_mode;
     auto& applyMode = m_applyMode;
     auto& cam = m_cam;
@@ -2657,12 +2661,7 @@ bool FrameLoop::Frame() {
         if (exposureSrc->Set(sea->PeakDirX(), sea->PeakDirZ(), waterNavd,
                              sea->PeakDirValid())) {
             auto fresh = std::make_shared<TileTree>(exposureRoot.get(), TileTree::Fmt::Half);
-            fresh->onChanged = [&resMgr, &exposureT](const std::string&, const TileRequest& r) {
-                if (exposureT < 0) return;
-                TileRequest q = r;
-                q.face = 6u;
-                resMgr.Invalidate(exposureT, q);
-            };
+            exposureTenant.Bind(*fresh);   // M12 step 3e: the one law -- its folds invalidate slice 6
             std::atomic_store(exposureTree.get(), fresh);
             resMgr.Drop(exposureT);
             Log("[exposure] bucket rolled -> tree %s", fresh->Id().c_str());

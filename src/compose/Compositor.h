@@ -35,7 +35,7 @@
 #pragma once
 
 #include "compose/TileArchive.h"
-#include "core/Residency.h"
+#include "hal/Residency.h"
 #include "core/Lattice.h"
 
 #include <atomic>
