@@ -14,6 +14,24 @@ endif()
 
 add_executable(gagame
   src/main.cpp
+  src/app/Options.cpp
+  src/app/Assembly.cpp
+  src/app/FrameLoop.cpp
+  src/app/Tools/PackTiles.cpp
+  src/app/Tools/LoadField.cpp
+  src/app/Tools/SelfTest.cpp
+  src/app/Tools/WaterMap.cpp
+  src/app/Tools/GisDump.cpp
+  src/app/Tools/TreeAudit.cpp
+  src/app/Tools/FidelityMap.cpp
+  src/app/Tools/OceanProbe.cpp
+  src/app/Tools/SweUv.cpp
+  src/app/Tools/Export.cpp
+  src/app/Tools/WarmInlet.cpp
+  src/app/Tools/DumpWaterState.cpp
+  src/app/Tools/TwinSurface.cpp
+  src/app/Tools/Trace.cpp
+  src/app/Tools/SeaVerify.cpp
   src/core/BuildInfo.cpp
   src/core/GaAst.cpp
   src/core/PixEvents.cpp
