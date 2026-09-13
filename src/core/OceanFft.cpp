@@ -25,7 +25,7 @@ struct FftConsts {
     float pad[4];
 };
 
-Com<ID3D12Resource> MakeTex(Gpu& gpu, uint32_t n, DXGI_FORMAT fmt, const wchar_t* name,
+hal::ResourceRef MakeTex(Gpu& gpu, uint32_t n, DXGI_FORMAT fmt, const wchar_t* name,
                             D3D12_RESOURCE_STATES state, uint32_t mips = 1) {
     return hal::Committed(gpu, name, n, n, fmt, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, state,
                           "the FFT's working set: a dense n^2 UAV texture the kernels ping-pong "
@@ -43,7 +43,7 @@ void OceanFft::BuildMips(hal::CommandContext& cmd, Gpu& gpu, Cascade& k) {
     if (!m_mipPso) return;
     cmd.ComputeRoot(m_mipRs.Get());
     cmd.Pipeline(m_mipPso.Get());
-    ID3D12Resource* res[2] = {k.disp.Get(), k.deriv.Get()};
+    hal::Resource res[2] = {k.disp.Get(), k.deriv.Get()};
     const uint32_t table[2] = {k.mipTableDisp, k.mipTableDeriv};
     for (uint32_t t = 0; t < 2; ++t) {
         for (uint32_t m = 0; m + 1 < kMips; ++m) {
@@ -192,10 +192,10 @@ void OceanFft::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir)
         m_derivSrv[c] = gpu.CreateSrv(k.deriv.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
 
         // Descriptor blocks (4 consecutive UAVs each), one per kernel binding pattern.
-        auto block = [&](ID3D12Resource* u0, ID3D12Resource* u1, ID3D12Resource* u2,
-                         ID3D12Resource* u3) {
+        auto block = [&](hal::Resource u0, hal::Resource u1, hal::Resource u2,
+                         hal::Resource u3) {
             hal::Table t = hal::Table::Alloc(gpu, 4, "ocean.block");
-            ID3D12Resource* res[4] = {u0, u1, u2, u3};
+            hal::Resource res[4] = {u0, u1, u2, u3};
             for (uint32_t s = 0; s < 4; ++s) {
                 const DXGI_FORMAT fmt = (res[s] == k.disp.Get() || res[s] == k.deriv.Get())
                                             ? DXGI_FORMAT_R16G16B16A16_FLOAT
@@ -214,7 +214,7 @@ void OceanFft::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir)
         // MipReduce.hlsl declares RWTexture2DArray so ONE kernel serves paged and unpaged
         // banks alike, and a plain Texture2D view against that declaration is a binding
         // mismatch (TileAtlas2D::BuildMips carries the same note).
-        auto mipTable = [&](ID3D12Resource* res) {
+        auto mipTable = [&](hal::Resource res) {
             hal::Table t = hal::Table::Alloc(gpu, 2 * (kMips - 1), "ocean.mip");
             for (uint32_t m = 0; m + 1 < kMips; ++m) {
                 t.UavArray(2 * m, res, DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1, m);
@@ -232,7 +232,7 @@ void OceanFft::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir)
 
 bool OceanFft::BuildPipelines(Gpu& gpu, ShaderCompiler& sc) {
     const std::wstring path = m_shaderDir + L"/OceanCompute.hlsl";
-    struct Entry { const wchar_t* name; Com<ID3D12PipelineState>* pso; };
+    struct Entry { const wchar_t* name; hal::Pso* pso; };
     Entry entries[] = {
         {L"CsInitSpectrum", &m_init}, {L"CsModulate", &m_modulate},
         {L"CsFft", &m_fft}, {L"CsAssemble", &m_assemble},
@@ -265,7 +265,7 @@ void OceanFft::SetSeaState(const PartParam* parts, int count, uint32_t seed) {
     m_spectrumDirty = true;
 }
 
-void OceanFft::Dispatch(hal::CommandContext& cmd, Gpu& gpu, ID3D12PipelineState* pso,
+void OceanFft::Dispatch(hal::CommandContext& cmd, Gpu& gpu, hal::PsoPtr pso,
                         uint32_t block, uint32_t cascade, uint32_t dir, float tSec, uint32_t gx,
                         uint32_t gy) {
     (void)gpu;   // the context carries the device

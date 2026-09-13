@@ -14,7 +14,7 @@
 namespace ga {
 
 void SeaLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
-                    ID3D12RootSignature* rootSig) {
+                    hal::RootSignature rootSig) {
     (void)fields;
     m_rootSig = rootSig;
     if (!m_sea || !m_sea->Ready()) throw std::runtime_error("SeaLayer needs a SeaState");
@@ -64,7 +64,7 @@ void SeaLayer::InitChurn(Gpu& gpu, ShaderCompiler& sc) {
                     .Build(gpu, "sea.churn");
     m_churnRs->SetName(L"sea.churn root signature");
 
-    auto makePso = [&](const wchar_t* entry, Com<ID3D12PipelineState>& out) {
+    auto makePso = [&](const wchar_t* entry, hal::Pso& out) {
         out = hal::Require(
             hal::BuildCompute(gpu, m_churnRs.Get(),
                               sc.Compile(m_shaderDir + L"/SeaChurn.hlsl", entry, L"cs_6_0"),
@@ -123,7 +123,7 @@ bool SeaLayer::BuildPsos(Gpu& gpu, ShaderCompiler& sc) {
         d.ds = sc.Compile(path, L"DsMain", L"ds_6_0");
         d.ps = sc.Compile(path, L"PsMain", L"ps_6_0");
         // The builder refuses an invalid VS or PS; the tessellation stages are this site's.
-        if (!d.hs.Valid() || !d.ds.Valid()) return Com<ID3D12PipelineState>();
+        if (!d.hs.Valid() || !d.ds.Valid()) return hal::Pso();
         d.fill = fill;
         d.depthClip = TRUE;
         d.depthTest = true;
@@ -760,7 +760,7 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
 
         ctx.cmd->ComputeRoot(m_churnRs.Get());
 
-        auto dispatchList = [&](ID3D12PipelineState* pso, const std::vector<uint32_t>& list) {
+        auto dispatchList = [&](hal::PsoPtr pso, const std::vector<uint32_t>& list) {
             if (list.empty()) return;
             m_churnCb.listCount = static_cast<uint32_t>(list.size());
             ctx.cmd->ComputeConstants(0, m_churnCb);

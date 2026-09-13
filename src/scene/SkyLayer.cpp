@@ -6,7 +6,7 @@
 namespace ga {
 
 void SkyLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
-                    ID3D12RootSignature* rootSig) {
+                    hal::RootSignature rootSig) {
     (void)fields;   // the sky reads no field data
     m_rootSig = rootSig;
     if (!BuildPso(gpu, sc)) throw std::runtime_error("sky PSO could not be created");

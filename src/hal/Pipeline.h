@@ -25,6 +25,17 @@
 //  through hal::Retire (Retire.h) keyed to the fence the current recording will signal --
 //  step 3e stated that contract and found no site that needs it yet.
 //
+//  THE MESH PIPELINE (step 3f). The globe's unified surface has no vertex stage -- a mesh
+//  shader stands in its place -- and D3D12 describes that only through the subobject STREAM
+//  (ID3D12Device2::CreatePipelineState), not the graphics desc. MeshPipelineDesc carries the
+//  fields GraphicsPipelineDesc does where the globe's stream set them (blend, rasterizer,
+//  depth, the formats), with the same defaults, and ToStream() lays them out as the runtime
+//  parses them: { type, payload } pairs, each aligned to a pointer boundary (no d3dx12 in this
+//  repo). One law differs from ToDesc(), and says so: the blend factors are written only under
+//  BlendEnable, as the globe's stream did (D3D12 reads them only then). That the stream's bytes
+//  are the old block's was step 3f's gate -- the four globe variants built side by side in one
+//  probe run, memcmp over sizeof(stream), EQUAL -- before the block was deleted.
+//
 //  DX12-first: the fields ARE the D3D enums. No enum of our own stands between a layer and the
 //  hardware; the builder only fills in what nobody wants to type nine times.
 // ================================================================================================
@@ -33,6 +44,8 @@
 #include "hal/Gpu.h"
 #include "hal/Shader.h"
 
+#include <cstring>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -143,6 +156,119 @@ inline Com<ID3D12PipelineState> BuildCompute(Gpu& gpu, ID3D12RootSignature* root
         return nullptr;
     }
     return pso;
+}
+
+// ---- the mesh-shader pipeline (M12 step 3f) ---------------------------------------------------
+// A subobject of the stream: its type tag, then the payload, the pair aligned to a pointer
+// boundary -- the layout ID3D12Device2::CreatePipelineState parses.
+template <typename T, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE Tag>
+struct alignas(void*) StreamSub {
+    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type = Tag;
+    T val{};
+};
+// The stream itself: the ten subobjects the globe's mesh pipeline sets, in its order.
+struct MeshStream {
+    StreamSub<ID3D12RootSignature*, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE> rs;
+    StreamSub<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS> ms;
+    StreamSub<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS> ps;
+    StreamSub<D3D12_BLEND_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND> blend;
+    StreamSub<UINT, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK> mask;
+    StreamSub<D3D12_RASTERIZER_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER> rast;
+    StreamSub<D3D12_DEPTH_STENCIL_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL> ds;
+    StreamSub<DXGI_FORMAT, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT> dsv;
+    StreamSub<D3D12_RT_FORMAT_ARRAY, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS> rtv;
+    StreamSub<DXGI_SAMPLE_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC> sample;
+};
+
+struct MeshPipelineDesc {
+    ID3D12RootSignature* rootSig = nullptr;
+    ShaderBlob ms, ps;
+    // blend (render target 0): the fields and defaults of GraphicsPipelineDesc
+    bool blend = false;
+    D3D12_BLEND srcBlend = D3D12_BLEND_ONE, dstBlend = D3D12_BLEND_ZERO;
+    D3D12_BLEND_OP blendOp = D3D12_BLEND_OP_ADD;
+    D3D12_BLEND srcBlendAlpha = D3D12_BLEND_ONE, dstBlendAlpha = D3D12_BLEND_ZERO;
+    D3D12_BLEND_OP blendOpAlpha = D3D12_BLEND_OP_ADD;
+    UINT8 writeMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    // rasterizer
+    D3D12_FILL_MODE fill = D3D12_FILL_MODE_SOLID;
+    D3D12_CULL_MODE cull = D3D12_CULL_MODE_NONE;
+    BOOL frontCcw = FALSE;
+    BOOL depthClip = FALSE;   // the globe's surface says TRUE, as its graphics desc does
+    // depth: OFF by default; the surface says GREATER + write (reversed-Z)
+    bool depthTest = false;
+    bool depthWrite = false;
+    D3D12_COMPARISON_FUNC depthFunc = D3D12_COMPARISON_FUNC_GREATER;
+    DXGI_FORMAT dsvFormat = DXGI_FORMAT_D32_FLOAT;
+    // targets
+    uint32_t numRenderTargets = 1;
+    DXGI_FORMAT rtvFormat = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    uint32_t sampleCount = 1;
+
+    // The stream, filled from the fields above, in ZEROED storage: CreatePipelineState receives
+    // sizeof(MeshStream) bytes, the padding between a tag and its payload included, and value-
+    // initialisation alone leaves that padding as the stack had it (step 3f's first probe
+    // differed at byte 4, a padding byte). Built this way every byte the fields do not write --
+    // the stencil state, the padding -- is zero, and the stream is one a gate can compare.
+    MeshStream ToStream() const {
+        alignas(MeshStream) unsigned char zero[sizeof(MeshStream)] = {};
+        MeshStream& s = *new (zero) MeshStream{};
+        s.rs.val = rootSig;
+        s.ms.val = {ms.Data(), ms.Size()};
+        s.ps.val = {ps.Data(), ps.Size()};
+        auto& rt = s.blend.val.RenderTarget[0];
+        rt.BlendEnable = blend ? TRUE : FALSE;
+        // The factors exist only where blending does: the globe's stream never wrote them, and
+        // D3D12 reads them only under BlendEnable.
+        if (blend) {
+            rt.SrcBlend = srcBlend;
+            rt.DestBlend = dstBlend;
+            rt.BlendOp = blendOp;
+            rt.SrcBlendAlpha = srcBlendAlpha;
+            rt.DestBlendAlpha = dstBlendAlpha;
+            rt.BlendOpAlpha = blendOpAlpha;
+        }
+        rt.RenderTargetWriteMask = writeMask;
+        s.mask.val = UINT_MAX;
+        s.rast.val.FillMode = fill;
+        s.rast.val.CullMode = cull;
+        s.rast.val.FrontCounterClockwise = frontCcw;
+        s.rast.val.DepthClipEnable = depthClip;
+        s.ds.val.DepthEnable = depthTest ? TRUE : FALSE;
+        s.ds.val.DepthWriteMask =
+            depthWrite ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
+        if (depthTest) s.ds.val.DepthFunc = depthFunc;
+        s.dsv.val = dsvFormat;
+        s.rtv.val.NumRenderTargets = numRenderTargets;
+        s.rtv.val.RTFormats[0] = rtvFormat;
+        s.sample.val = {sampleCount, 0};
+        return s;
+    }
+};
+
+// Builds through ID3D12Device2 (the stream's creator; the interface is fetched per call -- a
+// refcounted query on the one device), or logs under `tag` and returns null. The policy is
+// the site's, as with BuildGraphics: the globe's solid mesh pipeline failing means the classic
+// path; its wire and meshlet variants are optional.
+inline Com<ID3D12PipelineState> BuildMeshRaw(Gpu& gpu, MeshStream stream, const char* tag) {
+    Com<ID3D12Device2> dev2;
+    if (FAILED(gpu.Device()->QueryInterface(IID_PPV_ARGS(&dev2)))) {
+        Log("[%s] mesh PSO: no ID3D12Device2", tag);
+        return nullptr;
+    }
+    D3D12_PIPELINE_STATE_STREAM_DESC sd{sizeof(stream), &stream};
+    Com<ID3D12PipelineState> pso;
+    const HRESULT hr = dev2->CreatePipelineState(&sd, IID_PPV_ARGS(&pso));
+    if (FAILED(hr)) {
+        Log("[%s] mesh PSO: %s", tag, HrString(hr).c_str());
+        return nullptr;
+    }
+    return pso;
+}
+inline Com<ID3D12PipelineState> BuildMesh(Gpu& gpu, const MeshPipelineDesc& desc,
+                                          const char* tag) {
+    if (!desc.ms.Valid() || !desc.ps.Valid()) return nullptr;   // the compiler already logged
+    return BuildMeshRaw(gpu, desc.ToStream(), tag);
 }
 
 // THE RELOAD LAW: build the new one; only on success does it replace the old. `build` returns

@@ -66,7 +66,7 @@ public:
 
     const char* Name() const override { return "globe"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
-              ID3D12RootSignature* rootSig) override;
+              hal::RootSignature rootSig) override;
     void ReloadShaders(Gpu& gpu, ShaderCompiler& sc) override;
     void Render(const FrameContext& ctx) override;
 
@@ -493,9 +493,9 @@ private:
 
     std::wstring m_shaderDir;
     const GlobeModel* m_globe = nullptr;
-    ID3D12RootSignature* m_rootSig = nullptr;
-    Com<ID3D12PipelineState> m_pso, m_skyPso;
-    Com<ID3D12PipelineState> m_limbPso;   // M10: PsLimb, dual-source blend, SV_Depth-tested
+    hal::RootSignature m_rootSig = nullptr;
+    hal::Pso m_pso, m_skyPso;
+    hal::Pso m_limbPso;   // M10: PsLimb, dual-source blend, SV_Depth-tested
     // M6i: m_relief and m_ne retired -- the composed height cube streams what they carried
     // (and returns ~90 MB of committed equirect memory to the pool).
     GpuTexture m_cloudSrc;
@@ -546,8 +546,8 @@ private:
     // M6d: the sparse Mv2 wind bank (div, u, v, curl) -- resident where storms live.
     TileAtlas2D m_windBank;
     std::vector<uint8_t> m_windPhys;   // M9h: the physics verdict, kept for the AND below
-    Com<ID3D12RootSignature> m_windRs;
-    Com<ID3D12PipelineState> m_windBuild;
+    hal::RootSignatureRef m_windRs;
+    hal::Pso m_windBuild;
     hal::Table m_windTable;   // [u1 wind source (a bank, slice 0), u0 bank]
     bool m_windReady = false;
 
@@ -557,8 +557,8 @@ private:
     static constexpr uint32_t kVolNx = 1024, kVolNy = 512, kVolNz = 64;
     static constexpr float kShellTopM = 12800.0f;
     TileAtlas3D m_cloud;
-    Com<ID3D12RootSignature> m_cloudRs;
-    Com<ID3D12PipelineState> m_cloudBuild;
+    hal::RootSignatureRef m_cloudRs;
+    hal::Pso m_cloudBuild;
     hal::Table m_cloudTable;   // [t1 source SRV, u0 volume UAV]
     bool m_cloudReady = false;
 
@@ -623,9 +623,8 @@ private:
     bool m_dropsReported = false;   // one report per drop episode, not per frame
     bool m_msPath = false;
     uint32_t m_meshStatWalks = 0;   // M9d: --mesh-stats prints on the 8th walk
-    Com<ID3D12PipelineState> m_msPso, m_msPsoWire, m_msPsoMeshlet, m_msPsoWireFlat;
-    Com<ID3D12PipelineState> m_psoWire, m_psoMeshlet;
-    Com<ID3D12GraphicsCommandList6> m_cl6;
+    hal::Pso m_msPso, m_msPsoWire, m_msPsoMeshlet, m_msPsoWireFlat;
+    hal::Pso m_psoWire, m_psoMeshlet;
     std::vector<MeshletRec> m_meshlets;
     GpuBuffer m_recBuf[Gpu::kFrameCount];
     GlobeCbData m_cb{};

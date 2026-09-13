@@ -89,7 +89,7 @@ public:
     uint32_t Height() const { return m_height; }
 
     ShaderCompiler& Shaders() { return m_shaders; }
-    ID3D12RootSignature* RootSignature() const { return m_rootSig.Get(); }
+    hal::RootSignature RootSignature() const { return m_rootSig.Get(); }
 
     // --gpu-time: timestamp pairs around every pass. Off (null) by default -- no queries issued.
     void EnableGpuProfiler();
@@ -145,8 +145,8 @@ private:
     RendererDesc m_desc;
     ShaderCompiler m_shaders;
 
-    Com<ID3D12RootSignature> m_rootSig;
-    Com<ID3D12PipelineState> m_tonemapPso;
+    hal::RootSignatureRef m_rootSig;
+    hal::Pso m_tonemapPso;
 
     GpuTexture m_sceneColor;
     GpuTexture m_sceneDepth;

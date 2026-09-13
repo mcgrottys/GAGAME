@@ -6,7 +6,7 @@
 
 namespace ga {
 
-void MarkerLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSignature* rootSig) {
+void MarkerLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSignature rootSig) {
     m_rootSig = rootSig;
     if (!BuildPso(gpu, sc)) throw std::runtime_error("marker PSO failed");
 }

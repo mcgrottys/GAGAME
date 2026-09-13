@@ -39,7 +39,7 @@ GisLayer::Batch GisLayer::MakeBatch(Gpu& gpu, const std::vector<GisStencil::Poly
     return batch;
 }
 
-void GisLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSignature* rootSig) {
+void GisLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSignature rootSig) {
     m_rootSig = rootSig;
     if (!m_exchange) return;
     if (!BuildPso(gpu, sc)) throw std::runtime_error("gis PSO failed");

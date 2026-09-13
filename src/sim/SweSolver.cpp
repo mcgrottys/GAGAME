@@ -12,7 +12,7 @@
 
 namespace ga {
 
-void SweSolver::SetHeightPage(Gpu& gpu, ID3D12Resource* heightArr, ID3D12Resource* resMapArr,
+void SweSolver::SetHeightPage(Gpu& gpu, hal::Resource heightArr, hal::Resource resMapArr,
                               uint32_t slice, uint32_t mips, double orgPxX, double orgPxY) {
     (void)gpu;   // the table carries the device
     // M9ax: the WHOLE tenant -- cube faces and the page -- so the kernel resolves the bed
@@ -263,7 +263,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
                .Build(gpu, "swe");
     m_rs->SetName(L"swe root signature");
 
-    auto makePso = [&](const wchar_t* entry, Com<ID3D12PipelineState>& out) {
+    auto makePso = [&](const wchar_t* entry, hal::Pso& out) {
         out = hal::Require(
             hal::BuildCompute(gpu, m_rs.Get(),
                               sc.Compile(shaderDir + L"/Swe.hlsl", entry, L"cs_6_0"), "swe"),
@@ -316,13 +316,9 @@ void SweSolver::RecordReset(hal::CommandContext& cmd, Gpu& gpu) {
     cmd.Pipeline(m_uvClear.Get());
     cmd.Dispatch((m_cb.nx + 15) / 16, (m_cb.ny + 15) / 16, 1);
 
-    // Three UAV barriers in ONE call: the facade has no multi-barrier form, so this stays raw.
-    D3D12_RESOURCE_BARRIER uav[3]{};
-    for (int i = 0; i < 3; ++i) uav[i].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
-    uav[0].UAV.pResource = m_eta.Res();
-    uav[1].UAV.pResource = m_flux.Res();
-    uav[2].UAV.pResource = m_uvBank.Res();
-    cmd.Native()->ResourceBarrier(3, uav);
+    // Three UAV barriers in ONE call, in this order (M12 step 3f: the context's multi-barrier
+    // form issues the same three in one ResourceBarrier, as this site wrote them).
+    cmd.UavBarriers({m_eta.Res(), m_flux.Res(), m_uvBank.Res()});
 }
 
 int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float tideNavd) {

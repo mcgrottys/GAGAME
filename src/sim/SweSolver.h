@@ -52,7 +52,7 @@ public:
     // M9ar: bind the bed -- slice `slice` of the height PAGE tenant's array, with its residency
     // map, so the solver reads the same megatexture the water shading and the globe read, at
     // whatever mip is resident. Must be called before the first Step; there is no bed otherwise.
-    void SetHeightPage(Gpu& gpu, ID3D12Resource* heightArr, ID3D12Resource* resMapArr,
+    void SetHeightPage(Gpu& gpu, hal::Resource heightArr, hal::Resource resMapArr,
                        uint32_t slice, uint32_t mips, double orgPxX, double orgPxY);
     bool BedBound() const { return m_bedBound; }
 
@@ -117,8 +117,8 @@ public:
     // The residency map is one texel per mip-0 TILE, so the lens indexes it in tile space.
     uint32_t VelGradResMapW() const { return m_velGrad.TilesX(); }
     uint32_t VelGradResMapH() const { return m_velGrad.TilesY(); }
-    ID3D12Resource* VelGradRes() const { return m_velGrad.Res(); }
-    ID3D12Resource* UvRes() const { return m_uvBank.Res(); }
+    hal::Resource VelGradRes() const { return m_velGrad.Res(); }
+    hal::Resource UvRes() const { return m_uvBank.Res(); }
 
     uint32_t Nx() const { return m_cb.nx; }
     float CellM() const { return m_cb.dx; }   // level-0 ground size, for a page ladder
@@ -200,9 +200,9 @@ private:
     // this replaces was the last flat texture on the per-frame water path (AUDIT_WATER item 4).
     GradeBank m_uvBank;
     uint32_t m_uvSrv = UINT32_MAX;
-    Com<ID3D12RootSignature> m_rs;
-    Com<ID3D12PipelineState> m_clearEta, m_clearFlux, m_uvClear, m_fluxK, m_heightK, m_deriveK;
-    Com<ID3D12PipelineState> m_velGradK;   // M9h: grad(flow) -> div + curl
+    hal::RootSignatureRef m_rs;
+    hal::Pso m_clearEta, m_clearFlux, m_uvClear, m_fluxK, m_heightK, m_deriveK;
+    hal::Pso m_velGradK;   // M9h: grad(flow) -> div + curl
     hal::Table m_table;   // [t1 height page, t2 its residency map, u0 eta, u1 flux, u2 uv, u3 mv]
     D3D12_RESOURCE_STATES m_etaState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     D3D12_RESOURCE_STATES m_uvState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;

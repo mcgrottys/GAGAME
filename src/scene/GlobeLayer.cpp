@@ -196,7 +196,7 @@ void GlobeLayer::LeafOf(const double d[3], int level, int& face, uint32_t& ix, u
     iy = static_cast<uint32_t>(std::clamp(std::floor(v * n), 0.0, n - 1.0));
 }
 
-void GlobeLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSignature* rootSig) {
+void GlobeLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSignature rootSig) {
     m_rootSig = rootSig;
     if (!m_globe || !m_globe->Ready()) throw std::runtime_error("GlobeLayer needs globe data");
     if (!BuildPso(gpu, sc)) throw std::runtime_error("globe PSO failed");
@@ -693,63 +693,29 @@ void GlobeLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
     if (m_msPath) BuildMeshPso(gpu, sc);
 }
 
-// The mesh PSO rides the subobject STREAM (no d3dx12 in this repo): every subobject is
-// { type, payload }, each aligned to a pointer boundary -- exactly what the runtime parses.
-namespace {
-template <typename T, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE Tag>
-struct alignas(void*) StreamSub {
-    D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type = Tag;
-    T val{};
-};
-}  // namespace
-
 bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
-    Com<ID3D12Device2> dev2;
-    if (FAILED(gpu.Device()->QueryInterface(IID_PPV_ARGS(&dev2)))) return false;
     D3D12_FEATURE_DATA_D3D12_OPTIONS7 o7{};
     if (FAILED(gpu.Device()->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &o7,
                                                  sizeof(o7))) ||
         o7.MeshShaderTier == D3D12_MESH_SHADER_TIER_NOT_SUPPORTED) {
         return false;
     }
+    // M12 step 3f: the mesh pipeline as one description (hal/Pipeline.h MeshPipelineDesc: the
+    // subobject stream is its ToStream, ID3D12Device2 is BuildMesh's to fetch). The stream it
+    // lays out was compared byte for byte with the block this replaces, at all four variants,
+    // before the block went.
     const std::wstring path = m_shaderDir + L"/GlobeMesh.hlsl";
-    ShaderBlob ms = sc.Compile(path, L"MsMain", L"ms_6_5");
-    ShaderBlob ps = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"PsMain", L"ps_6_5");
-    if (!ms.Valid() || !ps.Valid()) return false;
-
-    struct {
-        StreamSub<ID3D12RootSignature*, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_ROOT_SIGNATURE> rs;
-        StreamSub<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_MS> ms;
-        StreamSub<D3D12_SHADER_BYTECODE, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_PS> ps;
-        StreamSub<D3D12_BLEND_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_BLEND> blend;
-        StreamSub<UINT, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_MASK> mask;
-        StreamSub<D3D12_RASTERIZER_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RASTERIZER> rast;
-        StreamSub<D3D12_DEPTH_STENCIL_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL>
-            ds;
-        StreamSub<DXGI_FORMAT, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_DEPTH_STENCIL_FORMAT> dsv;
-        StreamSub<D3D12_RT_FORMAT_ARRAY, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_RENDER_TARGET_FORMATS>
-            rtv;
-        StreamSub<DXGI_SAMPLE_DESC, D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_SAMPLE_DESC> sample;
-    } stream;
-    stream.rs.val = m_rootSig;
-    stream.ms.val = {ms.Data(), ms.Size()};
-    stream.ps.val = {ps.Data(), ps.Size()};
-    stream.blend.val.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    stream.mask.val = UINT_MAX;
-    stream.rast.val.FillMode = D3D12_FILL_MODE_SOLID;
-    stream.rast.val.CullMode = D3D12_CULL_MODE_NONE;   // cube faces mix winding
-    stream.rast.val.DepthClipEnable = TRUE;
-    stream.ds.val.DepthEnable = TRUE;
-    stream.ds.val.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-    stream.ds.val.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;   // reversed-Z
-    stream.dsv.val = DXGI_FORMAT_D32_FLOAT;
-    stream.rtv.val.NumRenderTargets = 1;
-    stream.rtv.val.RTFormats[0] = DXGI_FORMAT_R16G16B16A16_FLOAT;
-    stream.sample.val = {1, 0};
-
-    D3D12_PIPELINE_STATE_STREAM_DESC sd{sizeof(stream), &stream};
-    Com<ID3D12PipelineState> pso;
-    if (FAILED(dev2->CreatePipelineState(&sd, IID_PPV_ARGS(&pso)))) {
+    hal::MeshPipelineDesc d;
+    d.rootSig = m_rootSig;
+    d.ms = sc.Compile(path, L"MsMain", L"ms_6_5");
+    d.ps = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"PsMain", L"ps_6_5");
+    if (!d.ms.Valid() || !d.ps.Valid()) return false;
+    // cull stays NONE: cube faces mix winding
+    d.depthClip = TRUE;
+    d.depthTest = true;
+    d.depthWrite = true;   // reversed-Z GREATER, the default comparison
+    hal::Pso pso = hal::BuildMesh(gpu, d, "globe.mesh");
+    if (!pso) {
         Log("[globe] mesh PSO creation failed");
         return false;
     }
@@ -758,9 +724,9 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
     // only the raster fill differs -- so what the lines show is exactly the geometry the
     // solid pass rasterizes, meshlet seams and all. A failure here is not fatal: the solid
     // path stands and the toggle simply has nothing to switch to.
-    stream.rast.val.FillMode = D3D12_FILL_MODE_WIREFRAME;
-    Com<ID3D12PipelineState> psoWire;
-    if (SUCCEEDED(dev2->CreatePipelineState(&sd, IID_PPV_ARGS(&psoWire)))) {
+    d.fill = D3D12_FILL_MODE_WIREFRAME;
+    hal::Pso psoWire = hal::BuildMesh(gpu, d, "globe.mesh.wire");
+    if (psoWire) {
         m_msPsoWire = psoWire;
     } else {
         Log("[globe] mesh WIREFRAME PSO creation failed (solid path unaffected)");
@@ -769,23 +735,23 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
     // mesh can be read as geometry instead of through the look it is carrying.
     ShaderBlob psW = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"PsWireFlat", L"ps_6_5");
     if (psW.Valid()) {
-        const auto psKeep = stream.ps.val;
-        stream.ps.val = {psW.Data(), psW.Size()};
-        Com<ID3D12PipelineState> psoWF;
-        if (SUCCEEDED(dev2->CreatePipelineState(&sd, IID_PPV_ARGS(&psoWF)))) {
+        const ShaderBlob psKeep = d.ps;
+        d.ps = psW;
+        hal::Pso psoWF = hal::BuildMesh(gpu, d, "globe.mesh.wireflat");
+        if (psoWF) {
             m_msPsoWireFlat = psoWF;
         } else {
             Log("[globe] mesh FLAT-WIRE PSO creation failed (solid path unaffected)");
         }
-        stream.ps.val = psKeep;
+        d.ps = psKeep;
     }
     // ...and solid again, with the meshlet-identity pixel shader.
     ShaderBlob psM = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"PsMeshlet", L"ps_6_5");
     if (psM.Valid()) {
-        stream.rast.val.FillMode = D3D12_FILL_MODE_SOLID;
-        stream.ps.val = {psM.Data(), psM.Size()};
-        Com<ID3D12PipelineState> psoM;
-        if (SUCCEEDED(dev2->CreatePipelineState(&sd, IID_PPV_ARGS(&psoM)))) {
+        d.fill = D3D12_FILL_MODE_SOLID;
+        d.ps = psM;
+        hal::Pso psoM = hal::BuildMesh(gpu, d, "globe.mesh.meshlet");
+        if (psoM) {
             m_msPsoMeshlet = psoM;
         } else {
             Log("[globe] mesh MESHLET-TINT PSO creation failed (solid path unaffected)");
@@ -1966,7 +1932,7 @@ void GlobeLayer::Render(const FrameContext& ctx) {
     if (m_msPath && m_msPso && !m_meshlets.empty()) {
         // M6j: the unified surface -- meshlet records ride a frame-indexed upload buffer,
         // one DispatchMesh amplifies them from the composed channels.
-        if (!m_cl6 && FAILED(ctx.cmd->Native()->QueryInterface(IID_PPV_ARGS(&m_cl6)))) {
+        if (!ctx.cmd->MeshCapable()) {   // no List6 on this runtime: the classic path (3f)
             m_msPath = false;
             return;
         }
@@ -1978,7 +1944,7 @@ void GlobeLayer::Render(const FrameContext& ctx) {
         meshletCopyMs = std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - copy0)
                             .count();
-        ID3D12PipelineState* msSel = m_msPso.Get();
+        hal::PsoPtr msSel = m_msPso.Get();
         if (surfaceDebug == 1 && m_msPsoWire) msSel = m_msPsoWire.Get();
         else if (surfaceDebug == 2 && m_msPsoMeshlet) msSel = m_msPsoMeshlet.Get();
         else if (surfaceDebug == 3 && m_msPsoWireFlat) msSel = m_msPsoWireFlat.Get();
@@ -1987,7 +1953,7 @@ void GlobeLayer::Render(const FrameContext& ctx) {
         ctx.cmd->GraphicsSrvAt(2, rec.res->GetGPUVirtualAddress());
         // M10: 2-D, because one dimension caps at 65535 groups (GlobeMesh.hlsl folds y*65535+x).
         const UINT n = static_cast<UINT>(m_meshlets.size());
-        m_cl6->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
+        ctx.cmd->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
 
         // 3) M10: the limbs of every planet whose air the eye is outside of, over the surface
         // just drawn (SetView chose the slots, farthest first).
@@ -2007,7 +1973,7 @@ void GlobeLayer::Render(const FrameContext& ctx) {
         }
         return;
     }
-    ID3D12PipelineState* sel = m_pso.Get();
+    hal::PsoPtr sel = m_pso.Get();
     if (surfaceDebug == 1 && m_psoWire) sel = m_psoWire.Get();
     else if (surfaceDebug == 2 && m_psoMeshlet) sel = m_psoMeshlet.Get();
     ctx.cmd->Pipeline(sel);

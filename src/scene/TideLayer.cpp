@@ -31,7 +31,7 @@ void TideLayer::Configure(const std::wstring& shaderDir, const TideModel* model,
 }
 
 void TideLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
-                     ID3D12RootSignature* rootSig) {
+                     hal::RootSignature rootSig) {
     (void)fields;
     m_rootSig = rootSig;
     if (!m_model || m_model->Count() == 0) throw std::runtime_error("TideLayer needs a TideModel");

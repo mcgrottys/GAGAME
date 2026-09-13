@@ -17,7 +17,7 @@ constexpr double kPi = 3.14159265358979323846;
 }  // namespace
 
 void GulfLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
-                     ID3D12RootSignature* rootSig) {
+                     hal::RootSignature rootSig) {
     (void)fields;
     m_rootSig = rootSig;
     if (!m_currents || !m_currents->Field().Valid()) {

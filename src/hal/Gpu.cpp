@@ -278,6 +278,9 @@ void Gpu::CreateFrameResources() {
     GA_CHECK(m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_alloc[0].Get(),
                                          nullptr, IID_PPV_ARGS(&m_cmdList)));
     m_cmdList->Close();
+    // M12 step 3f: the same list as ID3D12GraphicsCommandList6, for DispatchMesh (MeshList).
+    // A runtime without it leaves this null, and the globe keeps its classic path.
+    if (FAILED(m_cmdList->QueryInterface(IID_PPV_ARGS(&m_cmdList6)))) m_cmdList6 = nullptr;
 }
 
 void Gpu::Shutdown() {

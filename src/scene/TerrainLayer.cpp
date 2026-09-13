@@ -9,7 +9,7 @@
 namespace ga {
 
 void TerrainLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
-                        ID3D12RootSignature* rootSig) {
+                        hal::RootSignature rootSig) {
     (void)fields;
     m_rootSig = rootSig;
     if (!m_bathy || !m_bathy->Ready()) throw std::runtime_error("TerrainLayer needs bathymetry");

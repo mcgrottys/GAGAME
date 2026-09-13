@@ -46,7 +46,7 @@ public:
 
     virtual const char* Name() const = 0;
     virtual void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
-                      ID3D12RootSignature* rootSig) = 0;
+                      hal::RootSignature rootSig) = 0;
     virtual void ReloadShaders(Gpu& gpu, ShaderCompiler& sc) { (void)gpu; (void)sc; }
     virtual void Render(const FrameContext& ctx) = 0;
 

@@ -311,7 +311,7 @@ void Renderer::RenderFrame(const Camera& cam, float timeSec, float dt) {
     // ---- to the swapchain, when there is one
     if (!m_gpu->Headless()) {
         GpuScope gscope(prof, cl, "present-copy");
-        ID3D12Resource* bb = m_gpu->BackBuffer();
+        hal::Resource bb = m_gpu->BackBuffer();
         // Two independent transitions, one call each (was one ResourceBarrier(2, ...); the
         // same two barriers reach the queue in the same order).
         cmd.Barrier(bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);

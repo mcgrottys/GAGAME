@@ -30,6 +30,8 @@
 #include "hal/Gpu.h"
 
 #include <cstdint>
+#include <initializer_list>
+#include <stdexcept>
 
 namespace ga::hal {
 
@@ -42,9 +44,9 @@ public:
 
     Gpu& Device() const { return *m_gpu; }
     Owner Who() const { return m_owner; }
-    // THE ESCAPE HATCH, named. The exotic sites (the mesh pipeline stream, the query heap, the
-    // two capability probes, DirectStorage) reach the list here; so does every site a later
-    // sub-step has not yet given a method to. Count them: tools/hal_lint.py does.
+    // THE ESCAPE HATCH, named. The exotic sites (the query heap, the two capability probes,
+    // DirectStorage) reach the list here; so does every site a later sub-step has not yet
+    // given a method to. Count them: tools/hal_lint.py does.
     ID3D12GraphicsCommandList* Native() const { return m_cl; }
 
     // ---- state ------------------------------------------------------------------------------
@@ -67,6 +69,20 @@ public:
         b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
         b.UAV.pResource = res;
         m_cl->ResourceBarrier(1, &b);
+    }
+    // Several UAV barriers in ONE ResourceBarrier call (M12 step 3f; the solver's three after
+    // its clears): the same n barriers in the same order, one call, as the site spelled them.
+    static constexpr uint32_t kMaxBarriers = 8;
+    void UavBarriers(std::initializer_list<ID3D12Resource*> resources) {
+        if (resources.size() > kMaxBarriers) throw std::runtime_error("UavBarriers: too many");
+        D3D12_RESOURCE_BARRIER b[kMaxBarriers]{};
+        UINT n = 0;
+        for (ID3D12Resource* r : resources) {
+            b[n].Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            b[n].UAV.pResource = r;
+            ++n;
+        }
+        m_cl->ResourceBarrier(n, b);
     }
 
     // ---- binding ----------------------------------------------------------------------------
@@ -135,6 +151,17 @@ public:
         m_cl->DrawInstanced(3, 1, 0, 0);
     }
     void Dispatch(uint32_t x, uint32_t y = 1, uint32_t z = 1) { m_cl->Dispatch(x, y, z); }
+    // Mesh shaders (M12 step 3f). DispatchMesh is ID3D12GraphicsCommandList6's; the Gpu keeps
+    // the frame list's interface, queried once when the list was created (Gpu::MeshList), and
+    // hands it back for this context's list -- null for the upload list or a runtime without
+    // it. MeshCapable() is the globe's test before its first dispatch (no interface: the
+    // classic path), as its own QueryInterface was.
+    bool MeshCapable() const { return m_gpu->MeshList(m_cl) != nullptr; }
+    void DispatchMesh(uint32_t x, uint32_t y = 1, uint32_t z = 1) {
+        ID3D12GraphicsCommandList6* cl6 = m_gpu->MeshList(m_cl);
+        if (!cl6) throw std::runtime_error("DispatchMesh: no List6 for this list (MeshCapable)");
+        cl6->DispatchMesh(x, y, z);
+    }
 
     // ---- targets and the viewport -------------------------------------------------------------
     void Targets(D3D12_CPU_DESCRIPTOR_HANDLE rtv, const D3D12_CPU_DESCRIPTOR_HANDLE* dsv) {

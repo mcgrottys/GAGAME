@@ -38,7 +38,7 @@ void WaterBankLayer::Configure(const std::wstring& shaderDir, SeaLayer* sea, Swe
     m_seaState = seaState;
 }
 
-void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSignature*) {
+void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSignature) {
     if (!m_sea) return;
     // The mip ladder side by side: ring m occupies texels [m*512, (m+1)*512) x [0, 512).
     m_disp.Init(gpu, kMips * kRingTexels, kRingTexels, DXGI_FORMAT_R16G16B16A16_FLOAT,
@@ -53,26 +53,36 @@ void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, ID3D12RootSig
     // by slot exactly the way the render path does.
     // M9aq: t0, space5 -- the heap as Texture2DArray, so the bed can be read from slice 6 of
     // the height PAGE tenant (one height texture; the window is a page of it).
-    // The two samplers are this kernel's own and go in as written (no LOD range, no
-    // comparison -- unlike the house sampler); WaterBank.hlsl declares no SamplerState, its
-    // reads are manual bilinear loads, so nothing samples through them.
-    D3D12_STATIC_SAMPLER_DESC samp[2]{};
-    samp[0].Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-    samp[0].AddressU = samp[0].AddressV = samp[0].AddressW =
-        D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-    samp[0].ShaderRegister = 0;
-    samp[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    samp[1] = samp[0];
-    samp[1].AddressU = samp[1].AddressV = samp[1].AddressW =
-        D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-    samp[1].ShaderRegister = 1;
+    // The two samplers are this kernel's own -- MaxLOD 0 and no comparison function at all
+    // (the desc's zero, not NEVER), unlike the house sampler -- and dead: WaterBank.hlsl
+    // declares no SamplerState, its reads are manual bilinear loads, so nothing samples through
+    // them (step 3d's finding, kept as found; step 3f's gate serialized them EQUAL to the descs
+    // they replace).
+    const hal::SamplerFields wrap{0,
+                                  D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                                  D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+                                  D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+                                  D3D12_TEXTURE_ADDRESS_MODE_WRAP,
+                                  0.0f,
+                                  static_cast<D3D12_COMPARISON_FUNC>(0),
+                                  D3D12_SHADER_VISIBILITY_ALL,
+                                  0};
+    const hal::SamplerFields clamp{1,
+                                   D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                                   D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                   D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                   D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
+                                   0.0f,
+                                   static_cast<D3D12_COMPARISON_FUNC>(0),
+                                   D3D12_SHADER_VISIBILITY_ALL,
+                                   0};
     m_rs = hal::RootLayout{}
                .Cbv(0)
                .Srv(0)
                .Table({hal::SrvRange(0, hal::kUnbounded, 1), hal::SrvRange(0, hal::kUnbounded, 5)})
                .Table({hal::UavRange(0, hal::kUnbounded, 2)})
-               .Sampler(samp[0])
-               .Sampler(samp[1])
+               .Sampler(wrap)
+               .Sampler(clamp)
                .Build(gpu, "waterbank");
     m_rs->SetName(L"water bank root signature");
 

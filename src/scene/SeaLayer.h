@@ -56,7 +56,7 @@ public:
     // each frame) and the CPU bathy grid the swell-shadow march walks.
     void SetSwe(SweSolver* swe) { m_swe = swe; }
     // M9ar: the churn kernel's bed -- slice `slice` of the height page tenant, residency-clamped.
-    void SetHeightPage(ID3D12Resource* heightArr, ID3D12Resource* resMapArr, uint32_t slice,
+    void SetHeightPage(hal::Resource heightArr, hal::Resource resMapArr, uint32_t slice,
                        uint32_t mips, double orgPxX, double orgPxY) {
         m_hgtArr = heightArr;
         m_hgtRes = resMapArr;
@@ -122,7 +122,7 @@ public:
 
     const char* Name() const override { return "sea"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
-              ID3D12RootSignature* rootSig) override;
+              hal::RootSignature rootSig) override;
     void ReloadShaders(Gpu& gpu, ShaderCompiler& sc) override;
     void Render(const FrameContext& ctx) override;
 
@@ -267,8 +267,8 @@ private:
 
     std::wstring m_shaderDir;
     const SeaState* m_sea = nullptr;
-    ID3D12RootSignature* m_rootSig = nullptr;
-    Com<ID3D12PipelineState> m_seaPso, m_specPso, m_seaPsoWire;
+    hal::RootSignature m_rootSig = nullptr;
+    hal::Pso m_seaPso, m_specPso, m_seaPsoWire;
     OceanFft m_fft;
     OceanCpu m_oceanCpu;   // M9bq: the hull's copy of the same three cascades
 
@@ -317,12 +317,12 @@ private:
     // wholesale on a time scrub. GradeBank carries the descriptor, the grade signature and the
     // resident-list discipline; the loop below stays honest about its own state.
     GradeBank m_churn;
-    Com<ID3D12RootSignature> m_churnRs;
-    Com<ID3D12PipelineState> m_churnClear, m_churnUpdate;
+    hal::RootSignatureRef m_churnRs;
+    hal::Pso m_churnClear, m_churnUpdate;
     hal::Table m_churnTable;               // [t1 chop deriv, t2 swe uv, t3 height page,
                                            //  t4 its residency map (M9ar), u0 churn]
-    ID3D12Resource* m_hgtArr = nullptr;    // M9ar: borrowed from the residency manager
-    ID3D12Resource* m_hgtRes = nullptr;
+    hal::Resource m_hgtArr = nullptr;    // M9ar: borrowed from the residency manager
+    hal::Resource m_hgtRes = nullptr;
     uint32_t m_hgtSlice = 6, m_hgtMips = 7;
     double m_hgtOrg[2] = {0.0, 0.0};
     bool m_churnSweWired = false;          // t2/t3 start as null views; wired when the solver is

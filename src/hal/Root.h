@@ -17,9 +17,11 @@
 //  dimensionality.
 //
 //  Root descriptors carry no flags and shader visibility ALL unless said (no site set either).
-//  Static samplers are the D3D desc: StaticSampler() is the house one (the whole mip range,
-//  ComparisonFunc NEVER, every stage) that nine of the eleven in the tree are; the water
-//  bank's two are its own and go in verbatim. Version 1.1 always.
+//  A static sampler is SamplerFields -- the nine fields the sites set, the D3D desc made only
+//  here (step 3f); StaticSampler() is the house preset (the whole mip range, ComparisonFunc
+//  NEVER, every stage) that nine of the eleven in the tree are, and the water bank's two spell
+//  their own (MaxLOD 0, no comparison function at all: dead, since its shaders declare no
+//  sampler -- step 3d's finding, kept as found). Version 1.1 always.
 //
 //  THE GATE: every site serialized its hand-written desc and the builder's, and the two blobs
 //  were compared byte for byte in step 3d's probe before the hand-written block was deleted.
@@ -56,21 +58,42 @@ inline Range UavRange(uint32_t reg, uint32_t count, uint32_t space = 0) {
     return {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, reg, count, space};
 }
 
+// A static sampler, field by field: the fields the sites set and nothing else -- the desc's
+// other fields (MipLODBias, BorderColor, MinLOD, RegisterSpace) stay its zeros, as every site
+// left them. The defaults are the house sampler's; a site that differs says so in the field.
+struct SamplerFields {
+    uint32_t reg = 0;
+    D3D12_FILTER filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    D3D12_TEXTURE_ADDRESS_MODE addrU = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    D3D12_TEXTURE_ADDRESS_MODE addrV = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    D3D12_TEXTURE_ADDRESS_MODE addrW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+    float maxLod = D3D12_FLOAT32_MAX;
+    D3D12_COMPARISON_FUNC comparison = D3D12_COMPARISON_FUNC_NEVER;
+    D3D12_SHADER_VISIBILITY visibility = D3D12_SHADER_VISIBILITY_ALL;
+    uint32_t maxAnisotropy = 0;
+
+    // The desc law: the nine writes the house sampler made into a zeroed desc, in its order.
+    D3D12_STATIC_SAMPLER_DESC ToDesc() const {
+        D3D12_STATIC_SAMPLER_DESC s{};
+        s.Filter = filter;
+        s.AddressU = addrU;
+        s.AddressV = addrV;
+        s.AddressW = addrW;
+        s.MaxAnisotropy = maxAnisotropy;
+        s.MaxLOD = maxLod;
+        s.ShaderRegister = reg;
+        s.ShaderVisibility = visibility;
+        s.ComparisonFunc = comparison;
+        return s;
+    }
+};
 // The house sampler: `filter` with one address mode on all three axes, the whole mip chain
 // (MaxLOD FLOAT32_MAX), no comparison (NEVER), visible to every stage; `maxAnisotropy` only
 // matters under an anisotropic filter (the shared layout's s3 says 8).
-inline D3D12_STATIC_SAMPLER_DESC StaticSampler(uint32_t reg, D3D12_FILTER filter,
-                                               D3D12_TEXTURE_ADDRESS_MODE addr,
-                                               uint32_t maxAnisotropy = 0) {
-    D3D12_STATIC_SAMPLER_DESC s{};
-    s.Filter = filter;
-    s.AddressU = s.AddressV = s.AddressW = addr;
-    s.MaxAnisotropy = maxAnisotropy;
-    s.MaxLOD = D3D12_FLOAT32_MAX;
-    s.ShaderRegister = reg;
-    s.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    s.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-    return s;
+inline SamplerFields StaticSampler(uint32_t reg, D3D12_FILTER filter,
+                                   D3D12_TEXTURE_ADDRESS_MODE addr, uint32_t maxAnisotropy = 0) {
+    return SamplerFields{reg, filter, addr, addr, addr, D3D12_FLOAT32_MAX,
+                         D3D12_COMPARISON_FUNC_NEVER, D3D12_SHADER_VISIBILITY_ALL, maxAnisotropy};
 }
 
 class RootLayout {
@@ -114,8 +137,8 @@ public:
         m_params.push_back(std::move(p));
         return *this;
     }
-    RootLayout& Sampler(const D3D12_STATIC_SAMPLER_DESC& s) {
-        m_samplers.push_back(s);
+    RootLayout& Sampler(const SamplerFields& s) {
+        m_samplers.push_back(s.ToDesc());
         return *this;
     }
     RootLayout& Flags(D3D12_ROOT_SIGNATURE_FLAGS f) {
