@@ -339,6 +339,39 @@ bool RunSpaceSelfTest() {
         g.True(std::fabs(n1 - 1.0) <= 1e-15, "Normalize re-unitizes the rotor");
         g.True(std::fabs(n1 - 1.0) <= std::fabs(n0 - 1.0), "Normalize never makes it worse");
 
+        // PARITY. The engine's planet frame is left-handed (priors 34): ECEF (X, Y, Z) -> planet
+        // (X, Z, Y) is the axis swap, det -1. Frame() must carry it, not silently rotate.
+        {
+            const double ex[3] = {1, 0, 0}, ey[3] = {0, 0, 1}, ez[3] = {0, 1, 0}, o0[3] = {0, 0, 0};
+            const Placement F = Placement::Frame(ex, ey, ez, o0);   // columns: e_x, e_z, e_y
+            g.True(F.s < 0.0, "a left-handed frame is an improper placement (s < 0)");
+            double pe[3], pu[3], pn[3];
+            F.Rows(pe, pu, pn);
+            g.Near3(pe, ex, 1e-14, "improper Frame() east row round-trips");
+            g.Near3(pu, ey, 1e-14, "improper Frame() up row round-trips");
+            g.Near3(pn, ez, 1e-14, "improper Frame() north row round-trips");
+            for (int i = 0; i < 6; ++i) {
+                double x[3], a[3], b[3];
+                Scatter(i, 1000.0, x);
+                F.Apply(x, a);
+                const double want[3] = {x[0], x[2], x[1]};   // the swap
+                g.Near3(a, want, 1e-9, "the reflection swaps Y and Z");
+                droste::SandwichPoint(F.Versor(1000.0), x, 1000.0, b);
+                g.Near3(a, b, 1e-6, "the odd versor's sandwich is the reflection");
+                double d[3];
+                F.ApplyDir(x, d);
+                g.Near3(d, want, 1e-9, "a direction flips with the parity");
+                F.Then(F).Apply(x, b);
+                g.Near3(b, x, 1e-9, "two reflections are the identity");
+            }
+            g.True(F.Then(F).s > 0.0, "two reflections compose to a proper placement");
+            g.True(F.Inverse().s < 0.0, "the inverse of a reflection is a reflection");
+            g.True(F.Pow(0.5).IsRigid() && F.Pow(0.5).t[0] == 0.0, "a half reflection is refused");
+            double p2[3], q2[3];
+            F.Pow(2.0).Apply(p2, q2);   // whole powers compose
+            g.Near(F.Pow(3.0).s, -1.0, 0.0, "an odd whole power keeps the parity");
+        }
+
         // The anchor chart round-trips.
         Space::Anchor an;
         an.latDeg = 42.81833; an.lonDeg = -70.81; an.mPerLat = 110574.0; an.mPerLon = 81660.0;
@@ -355,7 +388,7 @@ bool RunSpaceSelfTest() {
             "the portal at every power, Versor = SimilarityVersor, the gauge identity, the plane "
             "transport (GlobeLayer's form and the general preimage), the unit-length refusal, "
             "Frame() rows, the screw power, To() through the nearest common ancestor, "
-            "Normalize ----",
+            "Normalize, parity (the left-handed planet frame as an improper placement) ----",
             g.checks);
     } else {
         Log("[space] ---- FAIL (%d checks) ----", g.checks);

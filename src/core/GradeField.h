@@ -140,7 +140,9 @@ inline TilePolicy Mask(std::vector<uint8_t> m, uint32_t tilesX) {
     };
 }
 // THE ALGEBRAIC ONE: a derived field's tiles, from its inputs' per-tile grade signatures.
-// out is non-zero exactly where Cl2ProductSignature(a, b) is -- no data read. This is
+// out MAY be non-zero only where Cl2ProductSignature(a, b) is -- no data read. A signature is
+// a BOUND on the output's grades, not a promise of a non-zero: cancellation can still give
+// zero inside it (an outside review, 2026-09-13, on a comment that promised more). This is
 // DeriveDemand's rule expressed as a policy so it composes with the rest.
 inline TilePolicy Derived(std::vector<uint8_t> sigA, std::vector<uint8_t> sigB,
                           uint32_t tilesX) {
@@ -474,7 +476,12 @@ constexpr SumExpr<A, B> operator+(const Field<A>& a, const Field<B>& b) {
 // FieldSet.h anticipated. The TYPE says so.
 template <uint8_t A>
 struct GradExpr {
-    static constexpr uint8_t kSig = static_cast<uint8_t>((A & kG1) ? (kG0 | kG2) : A);
+    // M12 (after an outside review, 2026-09-13): the vector derivative is the geometric product
+    // of a VECTOR with the field, so its grades are Cl2ProductSignature(kG1, A) -- a scalar's
+    // gradient is a vector, a vector's is scalar + bivector, a bivector's is a vector. The old
+    // form `(A & kG1) ? (kG0 | kG2) : A` was right for the vector case its one assertion tested
+    // and wrong for the other six signatures (a scalar stayed a scalar).
+    static constexpr uint8_t kSig = Cl2ProductSignature(kG1, A);
     Field<A> src;
 };
 
@@ -489,5 +496,9 @@ static_assert(GeometricProductExpr<kG1, kG1>::kSig == (kG0 | kG2),
 static_assert(GeometricProductExpr<kG0, kG1>::kSig == kG1, "scalar * vector stays a vector");
 static_assert(GeometricProductExpr<kG2, kG2>::kSig == kG0, "bivector squares to a scalar");
 static_assert(GradExpr<kG1>::kSig == (kG0 | kG2), "grad v = div (g0) + curl (g2)");
+static_assert(GradExpr<kG0>::kSig == kG1, "grad s is a vector");
+static_assert(GradExpr<kG2>::kSig == kG1, "grad B is a vector (Cl(2): e_i d_i B)");
+static_assert(GradExpr<kG0 | kG2>::kSig == kG1, "grad (s + B) is a vector");
+static_assert(GradExpr<kG0 | kG1>::kSig == (kG0 | kG1 | kG2), "grad (s + v) fills every grade");
 
 }   // namespace ga

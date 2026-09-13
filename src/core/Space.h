@@ -3,8 +3,13 @@
 //  a space sits in its parent; resolution is ONE fold along the parent chain.
 //
 //  THE CONTRACT, EXACTLY (sharpened after an outside review, 2026-09-13): a Placement supports
-//  RIGID MOTION AND POSITIVE UNIFORM SCALE -- a similarity -- and nothing else. Nonuniform
-//  scale, shear and the projection morphs are other contracts with other types. Its one
+//  RIGID MOTION, UNIFORM SCALE AND PARITY -- a similarity, proper or improper -- and nothing
+//  else. Nonuniform scale, shear and the projection morphs are other contracts with other
+//  types. Parity is the sign of s: the engine's planet frame is LEFT-handed (priors 34), so
+//  ECEF -> planet is a reflection, and any improper orthogonal map is (-I) times a rotation --
+//  the sign on s and the rotor of that rotation say it exactly (Frame() factors it so), the
+//  conformal versor carries an odd factor (the Euclidean pseudoscalar), and directions flip
+//  with it. A fractional power of a reflection has no principal branch and is refused. Its one
 //  authoritative representation is the rotor + scale + translation below; the conformal versor
 //  and the 4x4 are DERIVED execution forms. The invariants: the rotor is unit (Normalize()
 //  re-unitizes a long product, as Motor::Normalize does) and "inverse is reverse" holds only
@@ -77,10 +82,17 @@ struct Placement {
     static Placement Frame(const double east[3], const double up[3], const double north[3],
                            const double origin[3]) {
         Placement p;
-        // R's columns are the own axes in parent coordinates: R[i][j] = axis_j[i].
-        const double R00 = east[0], R01 = up[0], R02 = north[0];
-        const double R10 = east[1], R11 = up[1], R12 = north[1];
-        const double R20 = east[2], R21 = up[2], R22 = north[2];
+        // R's columns are the own axes in parent coordinates: R[i][j] = axis_j[i]. A left-handed
+        // triple (east . (up x north) < 0) is (-I) times a rotation: keep the sign in s and
+        // derive the rotor from the negated columns, which ARE a rotation.
+        const double det = east[0] * (up[1] * north[2] - up[2] * north[1]) -
+                           east[1] * (up[0] * north[2] - up[2] * north[0]) +
+                           east[2] * (up[0] * north[1] - up[1] * north[0]);
+        const double sg = det < 0.0 ? -1.0 : 1.0;
+        p.s = sg;
+        const double R00 = sg * east[0], R01 = sg * up[0], R02 = sg * north[0];
+        const double R10 = sg * east[1], R11 = sg * up[1], R12 = sg * north[1];
+        const double R20 = sg * east[2], R21 = sg * up[2], R22 = sg * north[2];
         const double tr = R00 + R11 + R22;
         double w, x, y, z;
         if (tr > 0.0) {
@@ -195,6 +207,19 @@ struct Placement {
     // the same rotation's other representative; Similar() and Frame() never produce one, and a
     // product that does is one sign flip away (the double cover Motor::Slerp already handles).
     Placement Pow(double k) const {
+        if (s < 0.0) {
+            // A reflection has no principal logarithm: only whole powers mean anything.
+            const double ki = std::round(k);
+            if (std::fabs(k - ki) > 1e-12) {
+                Log("[space] Pow(%g) of an improper placement (s = %g) has no branch; refusing "
+                    "(identity)", k, s);
+                return Placement::Identity();
+            }
+            Placement acc = Placement::Identity();
+            const Placement step = ki < 0 ? Inverse() : *this;
+            for (int i = 0; i < static_cast<int>(std::fabs(ki)); ++i) acc = step.Then(acc);
+            return acc;
+        }
         if (IsRigid()) {
             const Motor m = ToMotor();
             double a[3], b[3];
@@ -226,12 +251,14 @@ struct Placement {
         out[1] = t[1] + s * py;
         out[2] = t[2] + s * pz;
     }
+    // A direction feels the rotation and the PARITY (a reflection flips it), not the scale.
     void ApplyDir(const double d[3], double out[3]) const {
         double x = d[0], y = d[1], z = d[2];
         Motor::QRotate(r, x, y, z);
-        out[0] = x;
-        out[1] = y;
-        out[2] = z;
+        const double sg = s < 0.0 ? -1.0 : 1.0;
+        out[0] = sg * x;
+        out[1] = sg * y;
+        out[2] = sg * z;
     }
     // A parent-frame plane (n . x = d, n unit) pulled into the own frame: n' = R^T n,
     // d' = (d - n . t) / s. This IS GlobeLayer's hand-written frustum transport
@@ -295,8 +322,14 @@ struct Placement {
         AxisAngle(r, axis, angle);
         const cga::Mv T = cga::Translator(t[0] / L, t[1] / L, t[2] / L);
         const cga::Mv R = cga::Rotor(axis[0], axis[1], axis[2], angle);
-        const cga::Mv D = cga::Dilator(s);
-        return cga::Gp(cga::Gp(T, R), D);
+        const cga::Mv D = cga::Dilator(std::fabs(s));
+        cga::Mv V = cga::Gp(cga::Gp(T, R), D);
+        if (s < 0.0) {
+            // The point reflection x -> -x is the sandwich with the Euclidean pseudoscalar
+            // e1 e2 e3 -- an ODD versor, applied first (rightmost). spacetest pins it.
+            V = cga::Gp(V, cga::Mv::Basis(0b111u));
+        }
+        return V;
     }
 
     // THE RASTERIZER BOUNDARY: the affine map as the row-major, row-vector 4x4 that
