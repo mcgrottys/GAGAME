@@ -23,8 +23,17 @@
 
 #include "PageSample.hlsli"
 
-static const float kHpCubeTexelM = 611.0f;     // cube mip 0 at the equator
-static const float kHpPageTexelM = 9.55f;      // z14 mip 0
+// M12 step 4f: the two ground resolutions are the lattices' own (Lattice::GroundRes(0):
+// kMercCirc / (4 faceDim) for the cube, kMercCirc / world px at z14 for the page), folded at
+// compile time from the constants this file declares -- the kernels' rows carry no ground and
+// nothing else changes -- and bit-identical to the floats the surface's gCsGround row carries
+// (a division by a power of two commutes with rounding: 0x4418dfc2 and 0x4118dfc2 both ways).
+// Exact, the page's mip 6 equals the cube's mip 0 and PageWins takes the page there, where
+// 611.0f and 9.55f (9.55 * 64 = 611.2 > 611) took the cube.
+static const float kHpMercCirc = 40075016.686f;   // Web-Mercator equator, m (Lattice::kMercCirc)
+static const float kHpWorldPxZ14 = 4194304.0f;    // (1 << 14) * 256 px (Lattice::WorldPx at z14)
+static const float kHpCubeTexelM = kHpMercCirc / (4.0f * kPageDim);   // 611.496.. (was 611.0f)
+static const float kHpPageTexelM = kHpMercCirc / kHpWorldPxZ14;        // 9.5546.. (was 9.55f)
 static const float kHpMaxMip = 6.0f;           // 7 mips
 
 // Direction (x = cos lat cos lon, y = sin lat, z = cos lat sin lon -- Compose.hlsli's

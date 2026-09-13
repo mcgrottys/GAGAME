@@ -233,7 +233,8 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
     float4 gCsR2; \
     uint4  gCsU4;   /* M7f: DETAIL color window (z17) SRV + residency, fine edit mask SRV */ \
     float4 gCsDet;  /* detail uv from window uv: offset xy, scale z; w = fine edit mask on */ \
-    float4 gCsEd;   /* fine edit mask box in window uv: offset xy, scale zw */ \
+    float4 gCsGround; /* M12 step 4f: ground texel (m) at mip 0 -- cube, z14 window, z17 \
+                         detail (Lattice::GroundRes(0)); w spare. Was gCsEd, dead since M9ay */ \
     uint4  gCsU5;   /* M9ap PAGES: colour array SRV, array residency SRV, window slice, \
                        detail slice. x == ~0 means the old three-tenant path. */ \
     uint4  gCsU6;   /* M9aq HEIGHT PAGES: height array SRV, array residency SRV, window \

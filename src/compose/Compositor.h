@@ -279,7 +279,9 @@ struct ComposedSurfaceCb {
     float r2[4];
     uint32_t u4[4];   // M7f: detail color window (z17) SRV + residency, fine edit mask SRV
     float det[4];     // detail uv from window uv: offset xy, scale z; w = fine edit mask on
-    float ed[4];      // fine edit mask box in window uv: offset xy, scale zw
+    float ground[4];  // M12 step 4f: ground texel (m) at mip 0 -- the cube, the z14 window,
+                      // the z17 detail (Lattice::GroundRes(0)); w spare. Was ed[4], the fine
+                      // edit mask box, dead since M9ay.
     uint32_t u5[4];   // M9ap PAGES: colour array SRV, array residency SRV, window slice,
                       // detail slice. u5[0] == ~0 means the old three-tenant path.
     uint32_t u6[4];   // M9aq HEIGHT PAGES: height array SRV, array residency SRV, window

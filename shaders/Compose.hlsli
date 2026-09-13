@@ -66,10 +66,11 @@ float CsHaveCubeArr(uint mapSrv, float3 dir) {
     return PageHaveCube(gTexCubeArr[mapSrv], sLinearClamp, dir);
 }
 // The ground texel (metres) at mip 0 of the three rungs -- the cube, the z14 window, the z17
-// detail -- as every rung used to spell them in place (M12 step 4e: one spelling). What they
-// stand for is the lattice's own Lattice::GroundRes(0); the exact values belong to a
-// constant-buffer row, the next, measured step.
-float3 CsGroundM() { return float3(611.0f, 9.55f, 1.19f); }
+// detail: the surface's own row (gCsGround, SurfaceFrame::Fill from Lattice::GroundRes(0):
+// 611.496.., 9.5546.., 1.1943..), M12 step 4f, where the literals 611 / 9.55 / 1.19 stood.
+// Exact, the page's mip 6 IS the cube's mip 0 and the z17's mip 3 the z14's mip 0, and
+// PageWins takes the page there.
+float3 CsGroundM() { return gCsGround.xyz; }
 
 // M9ap: THE PAGES PATH. One texture, pages selected by CONTAINMENT and by what is actually
 // resident: every page is the same megatexture at a different ground resolution, so the page

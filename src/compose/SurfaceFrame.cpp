@@ -214,7 +214,16 @@ void SurfaceFrame::Fill(ComposedSurfaceCb& cb, const ResidencyManager& rm) const
         cb.det[2] = static_cast<float>(sizePx * f / 16384.0);
     }
     cb.det[3] = 0.0f;
-    for (int i = 0; i < 4; ++i) cb.ed[i] = 0.0f;
+    // M12 step 4f: THE GROUND ROW. The mip-0 ground texel of the three rungs, from the lattices
+    // themselves (Lattice::GroundRes(0): kMercCirc / (4 faceDim) for the cube, kMercCirc / world
+    // px for a window) -- 611.496.., 9.5546.., 1.1943.. -- where the shaders spelled 611, 9.55
+    // and 1.19. Exact, the z14 page's mip 6 IS the cube's mip 0 (and the z17's mip 3 the z14's
+    // mip 0), and PageWins takes the page there; the literals (9.55 * 64 = 611.2 > 611) took the
+    // cube. The pixels that move are the ones at that boundary, measured.
+    cb.ground[0] = static_cast<float>(cube.GroundRes(0));
+    cb.ground[1] = static_cast<float>(win.GroundRes(0));
+    cb.ground[2] = static_cast<float>(det.GroundRes(0));
+    cb.ground[3] = 0.0f;
 }
 
 }  // namespace ga
