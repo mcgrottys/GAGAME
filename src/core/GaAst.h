@@ -47,11 +47,19 @@ struct Edge {
     Frame src, dst;
     bool flip;           // does the SAMPLING CODE apply a v-flip on this edge?
     const char* units;   // "m NAVD", "m/s", "0..1 mask", "slope", ...
-    const char* range;   // expected value range, human-readable ("+-3", "0..1")
+    // M12 step 4c: the two DESCRIPTIONS are owned text. An edge registered from a declaration
+    // spells them at run time (a lattice's Tag, a tenant's slice), and Register copies the
+    // Edge, so the edge holds its words rather than pointing into a caller's buffer.
+    std::string range;   // expected value range, human-readable ("+-3", "0..1")
     double gain = 1.0;   // scalar folded in on the way (churn foam gain, sweG.x, hsScale law)
-    const char* code;    // anchor of the sampling site ("WaterBank.hlsl CsBankFill")
+    std::string code;    // anchor of the sampling site ("WaterBank.hlsl CsBankFill")
     bool active = true;  // is the consumer in the CURRENT mode's render path?
 };
+
+// THE FLIP RULE as the one function both its callers use: the validator (Validate) and a
+// registration that DERIVES its flag from two frames (SurfaceFrame::RegisterEdges). It is
+// GeoRef.h's NeedsFlipInto said for frames: a flip exactly when the two +v's disagree.
+inline bool NeedsFlip(const Frame& src, const Frame& dst) { return src.vNorth != dst.vNorth; }
 
 // Registration (idempotent per field+from+to: re-registering updates in place, so per-frame
 // wiring sites are safe). Values should be the LIVE ones -- the print is truth, not doc.
@@ -71,7 +79,8 @@ const std::vector<Edge>& Edges();
 // Called by gatest so --selftest validates the contract even before any scene exists, and
 // by main at boot so the printed diagram always carries every known edge.
 void RegisterKnownWaterEdges();
-void RegisterKnownComposeEdges();   // the compositor + residency pillars (M7l)
+void RegisterKnownComposeEdges();   // the compositor + residency pillars (M7l); the paint
+                                    // rows come from the declarations (SurfaceFrame::RegisterEdges)
 // M9bh: the edges --pixel-water restores (the two rays' consumers: the imagery bed, the
 // height quadtree the refracted cast traces, the cascade slope fibers, the wind's far-field
 // sigma^2 and the ocean-colour retrievals). Registered ONLY when the flag is on, so the

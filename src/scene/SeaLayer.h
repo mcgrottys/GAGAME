@@ -11,6 +11,7 @@
 
 #include "compose/Compositor.h"
 #include "compose/ExposureSource.h"
+#include "compose/SurfaceFrame.h"
 #include "core/OceanFft.h"
 #include "hal/TileAtlas.h"
 #include "hal/Views.h"
@@ -56,18 +57,22 @@ public:
     // each frame) and the CPU bathy grid the swell-shadow march walks.
     void SetSwe(SweSolver* swe) { m_swe = swe; }
     // M9ar: the churn kernel's bed -- slice `slice` of the height page tenant, residency-clamped.
+    // M12 step 4b: `window` is the z14 lattice the page sits on (the surface's winH); its
+    // Rows() are the kernel's winA row.
     void SetHeightPage(hal::Resource heightArr, hal::Resource resMapArr, uint32_t slice,
-                       uint32_t mips, double orgPxX, double orgPxY) {
+                       uint32_t mips, const Lattice& window) {
         m_hgtArr = heightArr;
         m_hgtRes = resMapArr;
         m_hgtSlice = slice;
         m_hgtMips = mips;
-        m_hgtOrg[0] = orgPxX;
-        m_hgtOrg[1] = orgPxY;
+        m_hgtWin = window;
     }
+    // M12 step 4b: the surface, for the world.flat chart the churn's geoA row is cast from
+    // (SurfaceFrame::FlatRows). Must precede the first churn update.
+    void SetSurface(const SurfaceFrame* s) { m_surface = s; }
     void SetBathyCpu(const BathyModel* bm) { m_bathyCpu = bm; }
-    // M6i: composed channels + survey masks -- the same fill the globe and terrain use.
-    void SetComposed(const ComposedSurfaceCb& cs) { m_seaCb.cs = cs; }
+    // M6i's composed channels + survey masks are the renderer's one surface buffer (b2)
+    // since M12 step 4g: the same rows the globe reads, from the same upload.
     uint32_t ChurnTiles() const { return m_churnReady ? m_churn.ResidentCount() : 0; }
     // M7e: the bank reads the foam MEMORY -- advected churn joins the one water's fiber.
     uint32_t ChurnAtlasSrv() const { return m_churnReady ? m_churn.Srv() : 0xFFFFFFFFu; }
@@ -227,7 +232,6 @@ private:
         float bandSig[4];   // M6t: xyz = per-cascade mean-square SLOPE (exaggeration baked),
                             // w = the sub-resolved floor, calibrated so xyz+w sums to the
                             // globe's Cox-Munk sigma^2(wind) -- grade shedding conserves it
-        ComposedSurfaceCb cs;   // M6i: composed channels + survey masks (9 rows)
     };
     // Mirrored in shaders/SeaChurn.hlsl. (Count float4 rows on BOTH sides after any edit -- a
     // shader field without its mirror here reads garbage past the push; see the gSweG incident.)
@@ -324,7 +328,8 @@ private:
     hal::Resource m_hgtArr = nullptr;    // M9ar: borrowed from the residency manager
     hal::Resource m_hgtRes = nullptr;
     uint32_t m_hgtSlice = 6, m_hgtMips = 7;
-    double m_hgtOrg[2] = {0.0, 0.0};
+    Lattice m_hgtWin;   // M12 step 4b: the z14 height window the page sits on (winA = Rows)
+    const SurfaceFrame* m_surface = nullptr;   // M12 step 4b: the world.flat chart (geoA)
     bool m_churnSweWired = false;          // t2/t3 start as null views; wired when the solver is
     GpuTexture m_maskTex;                  // tilesX x tilesY R8: residency for the visualizer
     std::vector<uint8_t> m_maskCpu;
@@ -336,6 +341,7 @@ private:
     float m_churnOrgX = 0.0f, m_churnOrgZ = 0.0f;
     D3D12_RESOURCE_STATES m_churnState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     ChurnCbData m_churnCb{};
+    uint64_t m_churnCbFp = 0;   // M12 step 4b: the [kernel] churn cb fingerprint's last value
     double m_prevChurnT = 0;
     float m_churnDt = 0;
     bool m_churnReady = false;

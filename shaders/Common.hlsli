@@ -214,10 +214,11 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
     return AerialPerspectiveDay(col, viewDir, range, 1.0f);
 }
 
-// M6i: the composed-surface constants -- 9 float4 rows a layer embeds in its OWN cbuffer to
-// sample a planet's composed channels through Compose.hlsli. Mirrors ga::ComposedSurfaceCb
-// (count rows on BOTH sides after any edit); filled by FillComposedCb ALONE so the globe and
-// the terrain cannot disagree about the math. Include Compose.hlsli AFTER the cbuffer.
+// M6i: the composed-surface constants -- the rows every shader samples a planet's composed
+// channels through (Compose.hlsli). Mirrors ga::ComposedSurfaceCb (count rows on BOTH sides
+// after any edit); filled by SurfaceFrame::Fill ALONE so no two layers can disagree about the
+// math. M12 step 4g: declared ONCE, in SurfaceCb (b2) below, where the globe, the terrain,
+// the sea and the GIS vectors each embedded them in their own cbuffer.
 #define GA_COMPOSED_CB_ROWS \
     uint4  gCsU;    /* color cube SRV, color cube residency, window SRV, window residency */ \
     uint4  gCsU2;   /* height cube SRV + residency, height WINDOW SRV + residency */ \
@@ -232,11 +233,21 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
     float4 gCsR2; \
     uint4  gCsU4;   /* M7f: DETAIL color window (z17) SRV + residency, fine edit mask SRV */ \
     float4 gCsDet;  /* detail uv from window uv: offset xy, scale z; w = fine edit mask on */ \
-    float4 gCsEd;   /* fine edit mask box in window uv: offset xy, scale zw */ \
+    float4 gCsGround; /* M12 step 4f: ground texel (m) at mip 0 -- cube, z14 window, z17 \
+                         detail (Lattice::GroundRes(0)); w spare. Was gCsEd, dead since M9ay */ \
     uint4  gCsU5;   /* M9ap PAGES: colour array SRV, array residency SRV, window slice, \
                        detail slice. x == ~0 means the old three-tenant path. */ \
     uint4  gCsU6;   /* M9aq HEIGHT PAGES: height array SRV, array residency SRV, window \
                        slice. x == ~0 means the old cube + window tenants. */
+
+// M12 step 4g: THE ONE SURFACE CONSTANT BUFFER, on the shared layout's b2 (Renderer.h): the
+// frame loop fills ga::ComposedSurfaceCb once a frame through SurfaceFrame::Fill, RenderFrame
+// pushes it once and binds it before any layer records, and every shader on the shared layout
+// reads these rows from that one buffer. Include Compose.hlsli after Common.hlsli, as before;
+// DxTest's parity gate holds this cbuffer against the C++ struct, row by row.
+cbuffer SurfaceCb : register(b2) {
+    GA_COMPOSED_CB_ROWS
+};
 
 // The geometric-algebra toolkit lives in GA.hlsli (M3 moved it out so compute shaders with
 // their own root signatures can share it). Note for surface fields: the grade-2 part of

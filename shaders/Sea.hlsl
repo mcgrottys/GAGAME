@@ -47,9 +47,9 @@ cbuffer SeaCb : register(b1) {
                         // gain restores the MAGNITUDE until the M6 domain widens), yzw unused
     float4 gBandSig;    // M6t: xyz = per-cascade mean-square slope (exaggeration baked),
                         // w = sub-resolved floor; xyz+w = the globe's Cox-Munk sigma^2(wind)
-    // M6i: the composed channels + the survey land masks -- the sea consults the SAME planet
-    // description every other layer does (bed outside the survey, land classification).
-    GA_COMPOSED_CB_ROWS
+    // M6i: the composed channels + the survey land masks the sea consults (the bed outside
+    // the survey, land classification) -- the SAME planet description every other layer
+    // reads -- are Common.hlsli's SurfaceCb (b2) since M12 step 4g.
 };
 
 #include "Compose.hlsli"

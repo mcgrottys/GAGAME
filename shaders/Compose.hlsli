@@ -7,15 +7,19 @@
 //  per channel (plus the one window overlay, which is the same composed color at a depth the
 //  16k cube cannot carry -- a resolution ramp of identical data, not a second source).
 //
-//  Every layer that includes this file embeds GA_COMPOSED_CB_ROWS (Common.hlsli) in its own
-//  cbuffer FIRST, and fills those rows through ga::FillComposedCb alone. The globe and the
-//  terrain therefore run literally the same code on literally the same constants -- the class
-//  of bug where two layers disagree about the planet's surface is structurally gone.
+//  The rows this file reads are Common.hlsli's SurfaceCb (b2): ONE constant buffer, filled
+//  through SurfaceFrame::Fill alone (M12 step 4a) and bound once a frame for every layer (M12
+//  step 4g, where each layer embedded a copy in its own cbuffer). The globe and the terrain
+//  therefore run literally the same code on literally the same constants -- the class of bug
+//  where two layers disagree about the planet's surface is structurally gone.
+//  M12 step 4e: the reads themselves -- the window uv, the residency floor, the residency-
+//  clamped sample, the cube-versus-page choice -- are PageSample.hlsli's contract, shared with
+//  the kernels; the functions here bind this cbuffer's rows and views to it and nothing else.
 // ================================================================================================
 #ifndef GA_COMPOSE_HLSLI
 #define GA_COMPOSE_HLSLI
 
-static const float kCsPi = 3.14159265358979f;
+#include "PageSample.hlsli"
 
 float3 CsToTangent(float3 p) {
     return float3(dot(gCsR0.xyz, p), dot(gCsR1.xyz, p), dot(gCsR2.xyz, p));
@@ -29,6 +33,9 @@ float3 CsToPlanet(float3 t) {   // transpose of the orthonormal rotation
 // -- Tier-2 null zeros -- which diluted the window's alpha toward 0 and let the coarse cube
 // bleed through in bilinear-isoline blobs (the "mottled marsh"). Never sample finer than any
 // texel under the filter footprint; smoothness comes from trilinear WITHIN resident data.
+// A page tenant's floor is PageHave / PageHaveCube (PageSample.hlsli); these two serve the old
+// three-tenant path's TextureCube / Texture2D realizations (and Mars's native pyramids) with
+// the same law.
 float CsHaveCube(uint mapSrv, float3 dir) {
     const float4 g = gTexCube[mapSrv].GatherRed(sLinearClamp, dir);
     return max(max(g.x, g.y), max(g.z, g.w)) * 255.0f / 16.0f;
@@ -40,13 +47,7 @@ float CsHave2D(uint mapSrv, float2 uv) {
 
 // The Mercator-window uv for a planet direction: every window realization (color AND height)
 // shares ONE frame (gCsMerc), so their texels describe the same ground by construction.
-float2 CsWindowUv(float3 dir) {
-    const float lat = asin(clamp(dir.y, -1.0f, 1.0f));
-    const float lonDeg = degrees(atan2(dir.z, dir.x));
-    const float mx = (lonDeg + 180.0f) / 360.0f * gCsMerc.w;
-    const float my = (0.5f - log(tan(0.785398163f + lat * 0.5f)) / (2.0f * kCsPi)) * gCsMerc.w;
-    return (float2(mx, my) - gCsMerc.xy) * gCsMerc.z;
-}
+float2 CsWindowUv(float3 dir) { return PageUv(dir, gCsMerc); }
 
 // The planet's composed color along a PLANET-frame unit radial. Residency maps sample
 // BILINEAR so mip seams ramp instead of snapping (M6h); the window overlay feathers over the
@@ -56,43 +57,52 @@ float2 CsWindowUv(float3 dir) {
 // img*img*1.2 curve hack is gone; the user called the conversion, and the user was right).
 // One LINEAR exposure constant remains: display-referred mosaics sit darker than the scene
 // lighting expects, and scaling exposure is honest where bending the curve was not.
-// M9ap: residency of a PAGE (a slice of the page tenant's array), conservative like the rest.
+// M9ap: residency of a PAGE (a slice of the page tenant's array) and of a face through the
+// tenant's cube view, conservative like the rest (PageSample.hlsli).
 float CsHavePage(uint mapSrv, float2 uv, uint slice) {
-    const float4 g = gTexArr[mapSrv].GatherRed(sLinearClamp, float3(uv, slice));
-    return max(max(g.x, g.y), max(g.z, g.w)) * 255.0f / 16.0f;
+    return PageHave(gTexArr[mapSrv], sLinearClamp, uv, slice);
 }
 float CsHaveCubeArr(uint mapSrv, float3 dir) {
-    const float4 g = gTexCubeArr[mapSrv].GatherRed(sLinearClamp, float4(dir, 0.0f));
-    return max(max(g.x, g.y), max(g.z, g.w)) * 255.0f / 16.0f;
+    return PageHaveCube(gTexCubeArr[mapSrv], sLinearClamp, dir);
 }
+// The ground texel (metres) at mip 0 of the three rungs -- the cube, the z14 window, the z17
+// detail: the surface's own row (gCsGround, SurfaceFrame::Fill from Lattice::GroundRes(0):
+// 611.496.., 9.5546.., 1.1943..), M12 step 4f, where the literals 611 / 9.55 / 1.19 stood.
+// Exact, the page's mip 6 IS the cube's mip 0 and the z17's mip 3 the z14's mip 0, and
+// PageWins takes the page there.
+float3 CsGroundM() { return gCsGround.xyz; }
 
 // M9ap: THE PAGES PATH. One texture, pages selected by CONTAINMENT and by what is actually
 // resident: every page is the same megatexture at a different ground resolution, so the page
 // whose resident mip gives the finest ground texel at this pixel is the right answer and needs
 // no fade against its neighbour -- where two pages are resident at the same resolution they
 // hold the same pixels. `hand` and `finer` are gone; there is nothing to hand off between.
+// M12 step 4e: the ladder is PageWins on PageGroundM, the rung's resident ground against the
+// ground held -- "at least as fine" (the height path's spelling), which with these literals is
+// the strict `<` this path used to write: no two rungs' literal grounds are ever equal in float
+// (9.55 * 64 = 611.2, not 611; 1.19 * 8 = 9.52, not 9.55). Measured, not assumed.
 float3 ComposedColorPages(float3 dir) {
     // The cube, through the cube views over slices 0..5 (hardware-seamless across faces).
     const float haveC = CsHaveCubeArr(gCsU.y, dir);
-    float3 c = gTexCubeArr[gCsU.x].Sample(sAniso, float4(dir, 0.0f), haveC).rgb;
-    float ground = 611.0f * exp2(haveC);
+    float3 c = PageSampleCube(gTexCubeArr[gCsU.x], sAniso, dir, haveC).rgb;
+    const float3 g0 = CsGroundM();
+    float ground = PageGroundM(g0.x, haveC);
     if (gCsF.y > 0.5f) {
         const float2 duv = CsWindowUv(dir);
         if (all(duv > 0.0f) && all(duv < 1.0f)) {
             const float haveW = CsHavePage(gCsU5.y, duv, gCsU5.z);
-            const float gW = 9.55f * exp2(haveW);
-            if (gW < ground) {
-                c = gTexArr[gCsU5.x].Sample(sAniso, float3(duv, gCsU5.z), int2(0, 0), haveW).rgb;
+            const float gW = PageGroundM(g0.y, haveW);
+            if (PageWins(gW, ground)) {
+                c = PageSample(gTexArr[gCsU5.x], sAniso, duv, gCsU5.z, haveW).rgb;
                 ground = gW;
             }
             if (gCsU5.w != 0xFFFFFFFFu) {
                 const float2 tuv = duv * gCsDet.z + gCsDet.xy;
                 if (all(tuv > 0.0f) && all(tuv < 1.0f)) {
                     const float haveD = CsHavePage(gCsU5.y, tuv, gCsU5.w);
-                    const float gD = 1.19f * exp2(haveD);
-                    if (gD < ground) {
-                        c = gTexArr[gCsU5.x].Sample(sAniso, float3(tuv, gCsU5.w), int2(0, 0),
-                                                   haveD).rgb;
+                    const float gD = PageGroundM(g0.z, haveD);
+                    if (PageWins(gD, ground)) {
+                        c = PageSample(gTexArr[gCsU5.x], sAniso, tuv, gCsU5.w, haveD).rgb;
                         ground = gD;
                     }
                 }
@@ -201,18 +211,20 @@ float3 SeafloorReliefMod(float3 albSea, float3 albWater, float3 floorAlb, float 
 // historically replaced the mosaic outright (the close-up material constants, born when
 // the near field was a 9.5 m blur) ask this and YIELD where the imagery outresolves them.
 float ComposedColorTexelM(float3 dir) {
-    float t = 611.0f;   // cube-only worst case
+    const float3 g0 = CsGroundM();
+    float t = g0.x;   // cube-only worst case
     if (gCsU5.x != 0xFFFFFFFFu) {
-        // M9ap: the pages path reports the same choice ComposedColorPages makes.
-        t = 611.0f * exp2(CsHaveCubeArr(gCsU.y, dir));
+        // M9ap: the pages path reports the same choice ComposedColorPages makes -- the finest
+        // resident ground of the ladder (PageWins, as a value).
+        t = PageGroundM(g0.x, CsHaveCubeArr(gCsU.y, dir));
         if (gCsF.y > 0.5f) {
             const float2 duv = CsWindowUv(dir);
             if (all(duv > 0.0f) && all(duv < 1.0f)) {
-                t = min(t, 9.55f * exp2(CsHavePage(gCsU5.y, duv, gCsU5.z)));
+                t = min(t, PageGroundM(g0.y, CsHavePage(gCsU5.y, duv, gCsU5.z)));
                 if (gCsU5.w != 0xFFFFFFFFu) {
                     const float2 tuv = duv * gCsDet.z + gCsDet.xy;
                     if (all(tuv > 0.001f) && all(tuv < 0.999f)) {
-                        t = min(t, 1.19f * exp2(CsHavePage(gCsU5.y, tuv, gCsU5.w)));
+                        t = min(t, PageGroundM(g0.z, CsHavePage(gCsU5.y, tuv, gCsU5.w)));
                     }
                 }
             }
@@ -222,11 +234,11 @@ float ComposedColorTexelM(float3 dir) {
     if (gCsF.y > 0.5f && gCsU.z != 0xFFFFFFFFu) {
         const float2 duv = CsWindowUv(dir);
         if (all(duv > 0.0f) && all(duv < 1.0f)) {
-            t = 9.55f * exp2(CsHave2D(gCsU.w, duv));
+            t = PageGroundM(g0.y, CsHave2D(gCsU.w, duv));
             if (gCsU4.x != 0xFFFFFFFFu) {
                 const float2 tuv = duv * gCsDet.z + gCsDet.xy;
                 if (all(tuv > 0.001f) && all(tuv < 0.999f)) {
-                    t = min(t, 1.19f * exp2(CsHave2D(gCsU4.y, tuv)));
+                    t = min(t, PageGroundM(g0.z, CsHave2D(gCsU4.y, tuv)));
                 }
             }
         }
@@ -253,17 +265,15 @@ float CsHaveHeightWin(float2 duv) {
 // no feather, because both pages are the same height field at different ground resolutions.
 float ComposedHeightPages(float3 dir, float lod) {
     const float haveC = CsHaveCubeArr(gCsU2.y, dir);
-    float h = gTexCubeArr[gCsU2.x].SampleLevel(sLinearClamp, float4(dir, 0.0f),
-                                               max(lod, haveC)).x;
+    float h = PageSampleLevelCube(gTexCubeArr[gCsU2.x], sLinearClamp, dir, lod, haveC).x;
     const float2 duv = CsWindowUv(dir);
     if (all(duv > 0.0f) && all(duv < 1.0f)) {
         // The window pyramid runs ~6 mips finer than the cube at the same footprint.
         const float wantW = clamp(lod + 6.0f, 0.0f, gCsG.z);
         const float haveW = CsHavePage(gCsU6.y, duv, gCsU6.z);
-        const float lodW = max(wantW, haveW);
         // Take the page where its resident texel is at least as fine as the cube's.
-        if (9.55f * exp2(haveW) <= 611.0f * exp2(haveC)) {
-            h = gTexArr[gCsU6.x].SampleLevel(sLinearClamp, float3(duv, gCsU6.z), lodW).x;
+        if (PageWins(haveC, haveW, CsGroundM().xy)) {
+            h = PageSampleLevel(gTexArr[gCsU6.x], sLinearClamp, duv, gCsU6.z, wantW, haveW).x;
         }
     }
     return h;
@@ -307,22 +317,22 @@ bool CsMaskSample(float3 dir, out float4 m) {
             const float2 tuv = duv * gCsDet.z + gCsDet.xy;
             if (all(tuv > 0.001f) && all(tuv < 0.999f)) {
                 const float haveD = CsHavePage(gCsU3.y, tuv, 7u);
-                if (haveD <= 7.5f) {
-                    m = gTexArr[gCsU3.x].SampleLevel(sLinearClamp, float3(tuv, 7.0f), haveD);
+                if (haveD <= 7.5f) {   // the finest resident level: want 0, floored to have
+                    m = PageSampleLevel(gTexArr[gCsU3.x], sLinearClamp, tuv, 7u, 0.0f, haveD);
                     if (m.a > 0.001f) return true;
                 }
             }
         }
         const float haveW = CsHavePage(gCsU3.y, duv, 6u);
         if (haveW <= 7.5f) {
-            m = gTexArr[gCsU3.x].SampleLevel(sLinearClamp, float3(duv, 6.0f), haveW);
+            m = PageSampleLevel(gTexArr[gCsU3.x], sLinearClamp, duv, 6u, 0.0f, haveW);
             if (m.a > 0.001f) return true;
         }
     }
     if (gCsU3.z != 0xFFFFFFFFu) {
         const float haveC = CsHaveCubeArr(gCsU3.w, dir);
         if (haveC <= 7.5f) {
-            m = gTexCubeArr[gCsU3.z].SampleLevel(sLinearClamp, float4(dir, 0.0f), haveC);
+            m = PageSampleLevelCube(gTexCubeArr[gCsU3.z], sLinearClamp, dir, 0.0f, haveC);
             if (m.a > 0.001f) return true;
         }
     }

@@ -7,7 +7,7 @@
 #include "Common.hlsli"
 
 cbuffer GisCb : register(b1) {
-    GA_COMPOSED_CB_ROWS
+    // (the composed rows the vectors project through are Common.hlsli's SurfaceCb, b2: 4g)
     float4 gGisColor;   // rgb = line color, w = lift above the geoid (m)
 };
 

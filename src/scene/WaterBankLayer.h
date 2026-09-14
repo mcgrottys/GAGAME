@@ -20,6 +20,7 @@
 #pragma once
 
 #include "compose/Compositor.h"
+#include "compose/SurfaceFrame.h"
 #include "compose/WaterAtlas.h"
 #include "hal/TileAtlas.h"
 #include "scene/Layer.h"
@@ -92,14 +93,18 @@ public:
     // data lens showed breaking bands cutting at tile edges; the user called it).
     // M9aq: `slice` != ~0 means srv/resMapSrv are Texture2DArray views of the height PAGE
     // tenant and the window is that slice; ~0 is the old single-face window.
-    void SetHeightWindow(uint32_t srv, uint32_t resMapSrv, double orgPxX, double orgPxY,
+    // M12 step 4b: `window` is the z14 lattice the page sits on (the surface's winH); its
+    // Rows() are the kernel's winA row.
+    void SetHeightWindow(uint32_t srv, uint32_t resMapSrv, const Lattice& window,
                          uint32_t slice = 0xFFFFFFFFu) {
         m_hgtWinSrv = srv;
         m_hgtWinResSrv = resMapSrv;
         m_hgtWinSlice = slice;
-        m_hgtWinOrg[0] = orgPxX;
-        m_hgtWinOrg[1] = orgPxY;
+        m_hgtWin = window;
     }
+    // M12 step 4b: the surface, for the world.flat chart the geoA row is cast from
+    // (SurfaceFrame::FlatRows). Must precede the first Render.
+    void SetSurface(const SurfaceFrame* s) { m_surface = s; }
     // M8: the solved wave field (may be null / not Ready -- the kernel falls back to
     // the cascade closures outside the window, which is also the fallback everywhere).
     void SetWaveField(const class WaveField* wf) { m_wave = wf; }
@@ -216,7 +221,9 @@ private:
     int m_hgtCh = -1;
     uint32_t m_hgtWinSrv = 0xFFFFFFFFu, m_hgtWinResSrv = 0xFFFFFFFFu;
     uint32_t m_hgtWinSlice = 0xFFFFFFFFu;
-    double m_hgtWinOrg[2] = {0.0, 0.0};
+    Lattice m_hgtWin;   // M12 step 4b: the z14 height window the page sits on (winA = Rows)
+    const SurfaceFrame* m_surface = nullptr;   // M12 step 4b: the world.flat chart (geoA)
+    uint64_t m_cbFp = 0;   // M12 step 4b: the [kernel] waterbank cb fingerprint's last value
     const GlobeModel* m_globe = nullptr;
     const SeaState* m_seaState = nullptr;
     const class WaveField* m_wave = nullptr;   // M8: the solved wave field (optional)

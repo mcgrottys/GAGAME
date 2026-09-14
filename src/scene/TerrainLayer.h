@@ -30,9 +30,8 @@ public:
     // (the heightfield texture physics reads, the sea's bed) but stops rendering -- one
     // planet, one description on screen.
     bool renderEnabled = true;
-    // M6i: the composed color channel -- filled by FillComposedCb in main, the SAME function
-    // and constants the globe uses, so the two layers agree texel for texel.
-    void SetComposed(const ComposedSurfaceCb& cs) { m_cs = cs; }
+    // M6i's composed colour channel -- the SAME rows, functions and constants the globe
+    // samples -- is the renderer's one surface buffer (b2) since M12 step 4g: nothing to set.
 
 private:
     bool BuildPso(Gpu& gpu, ShaderCompiler& sc);
@@ -42,7 +41,6 @@ private:
         float geo[4];
         uint32_t srv[4];      // heightfield, quadsX, quadsZ
         float params[4];
-        ComposedSurfaceCb cs; // M6i: the composed channels (8 rows)
     };
 
     std::wstring m_shaderDir;
@@ -51,7 +49,6 @@ private:
     hal::Pso m_pso;
 
     uint32_t m_quadsX = 0, m_quadsZ = 0;
-    ComposedSurfaceCb m_cs{};   // zero until SetComposed: every channel reads "off"
 };
 
 }  // namespace ga

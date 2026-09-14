@@ -1114,9 +1114,9 @@ void GlobeLayer::EmitMeshlets(int face, double u0, double v0, double size, doubl
     const double step = size / 32.0;
     auto tangent = [&](const double d[3], double out[3]) {
         const double px = d[0] * R, py = d[1] * R, pz = d[2] * R;
-        out[0] = m_frameE[0] * px + m_frameE[1] * py + m_frameE[2] * pz;
-        out[1] = m_frameU[0] * px + m_frameU[1] * py + m_frameU[2] * pz - R;
-        out[2] = m_frameN[0] * px + m_frameN[1] * py + m_frameN[2] * pz;
+        out[0] = m_surface->east[0] * px + m_surface->east[1] * py + m_surface->east[2] * pz;
+        out[1] = m_surface->up[0] * px + m_surface->up[1] * py + m_surface->up[2] * pz - R;
+        out[2] = m_surface->north[0] * px + m_surface->north[1] * py + m_surface->north[2] * pz;
     };
     for (int my = 0; my < 4; ++my) {
         for (int mx = 0; mx < 4; ++mx) {
@@ -1159,12 +1159,15 @@ void GlobeLayer::EmitMeshlets(int face, double u0, double v0, double size, doubl
             for (int i = 0; i < 3; ++i) {
                 rec.dPdv[i] = static_cast<float>((tA[i] - tB[i]) / (2.0 * e));
             }
-            rec.upT[0] = static_cast<float>(m_frameE[0] * dc[0] + m_frameE[1] * dc[1] +
-                                            m_frameE[2] * dc[2]);
-            rec.upT[1] = static_cast<float>(m_frameU[0] * dc[0] + m_frameU[1] * dc[1] +
-                                            m_frameU[2] * dc[2]);
-            rec.upT[2] = static_cast<float>(m_frameN[0] * dc[0] + m_frameN[1] * dc[1] +
-                                            m_frameN[2] * dc[2]);
+            rec.upT[0] = static_cast<float>(m_surface->east[0] * dc[0] +
+                                            m_surface->east[1] * dc[1] +
+                                            m_surface->east[2] * dc[2]);
+            rec.upT[1] = static_cast<float>(m_surface->up[0] * dc[0] +
+                                            m_surface->up[1] * dc[1] +
+                                            m_surface->up[2] * dc[2]);
+            rec.upT[2] = static_cast<float>(m_surface->north[0] * dc[0] +
+                                            m_surface->north[1] * dc[1] +
+                                            m_surface->north[2] * dc[2]);
             m_meshlets.push_back(rec);
         }
     }
@@ -1258,6 +1261,33 @@ void GlobeLayer::SeamTable() {
     }
 }
 
+// M12 step 4a: the surface, handed over once at assembly (compose/SurfaceFrame.h). The walk
+// and the mip-floor wants read the copies below (CaptureWalk captures them into every
+// WalkParams); the tangent frame's rows and the fill are read from the surface itself, because
+// the session writes the rows after this call. The values are the ones SetComposed and
+// SetPlanetRadius used to receive: the window is the colour tenant's page at winSlice, the
+// height window the height tenant's at hgtWinSlice, the detail page the colour tenant's at
+// detSlice; where a slice is undeclared (no tenant, or Mars's height cube without a page) the
+// window is -1 and its face the 0 the old `pages` test produced.
+void GlobeLayer::SetSurface(const SurfaceFrame* s) {
+    m_surface = s;
+    m_radius = s->planetR;
+    m_maskT = s->maskT;   // M9ay: the survey mask pages (same slices as the colour)
+    m_colorT = s->colorT;
+    m_winT = s->winSlice != UINT32_MAX ? s->colorT : -1;   // M9ap: the z14 page, slice winSlice
+    m_winFace = s->winSlice != UINT32_MAX ? s->winSlice : 0u;
+    m_detFace = s->detSlice != UINT32_MAX ? s->detSlice : 0u;
+    m_hgtWinFace = s->hgtWinSlice != UINT32_MAX ? s->hgtWinSlice : 0u;
+    m_hgtT = s->hgtT;
+    m_hgtWinT = s->hgtWinSlice != UINT32_MAX ? s->hgtT : -1;   // M9aq: the z14 height page
+    m_detOrg[0] = static_cast<double>(s->win.orgPxX);
+    m_detOrg[1] = static_cast<double>(s->win.orgPxY);
+    m_detSize = static_cast<double>(s->win.faceDim);
+    m_detWinT = s->detT;   // M7f: the z17 detail page
+    m_det17Org[0] = static_cast<double>(s->det.orgPxX);
+    m_det17Org[1] = static_cast<double>(s->det.orgPxY);
+}
+
 // Step 5: everything the node walk reads, captured. SetView fills one for the real walk
 // (then adds the five planes); StartPredictWalk fills one for the prefetch walk and moves
 // only the eye -- the planet-frame position and the pixel angle stay the REAL camera's,
@@ -1266,9 +1296,9 @@ GlobeLayer::WalkParams GlobeLayer::CaptureWalk(const Camera& cam, float viewport
     WalkParams wp;
     wp.R = m_radius;
     for (int i = 0; i < 3; ++i) {
-        wp.frameE[i] = m_frameE[i];
-        wp.frameU[i] = m_frameU[i];
-        wp.frameN[i] = m_frameN[i];
+        wp.frameE[i] = m_surface->east[i];
+        wp.frameU[i] = m_surface->up[i];
+        wp.frameN[i] = m_surface->north[i];
     }
     wp.camPos[0] = cam.px;
     wp.camPos[1] = cam.py;
@@ -1276,7 +1306,8 @@ GlobeLayer::WalkParams GlobeLayer::CaptureWalk(const Camera& cam, float viewport
     // M6g: the planet-frame position (doubles) for the horizon test.
     const double ry = m_radius + cam.py;
     for (int i = 0; i < 3; ++i) {
-        wp.camPlanet[i] = m_frameU[i] * ry + m_frameE[i] * cam.px + m_frameN[i] * cam.pz;
+        wp.camPlanet[i] = m_surface->up[i] * ry + m_surface->east[i] * cam.px +
+                          m_surface->north[i] * cam.pz;
     }
     // Step 24: the eye's own cube face (face order +x -x +y -y +z -z), named once per frame
     // so the real walk and the prefetch walk emit the same subtree first.
@@ -1497,6 +1528,57 @@ void GlobeLayer::WalkLevel(const WalkParams& wp, uint32_t slot) {
     }
 }
 
+// M12 step 4d instrument: THE FRUSTUM TRANSPORT THROUGH THE CYCLE. Each camera-relative plane
+// (n . v = d) PULLED through the level's gauge placement -- step 4d-2, THE READ the walk culls
+// by -- beside the hand transport it replaced, n -> Q^T n, d -> d / sigma from the portal's Q
+// and sigma, computed for the record (core/Space.h PullPlane:
+// n' = R^T n, d' = (d - n . t) / s with t = 0, the linear part of Level(rel): the eye-to-eye
+// translation the gauge identity S^k(C_k) = C cancels exactly). Compared bit for bit per plane
+// per level (core/Common.h UlpTally; the totals in LogDrosteProbe); the dump of both prints when
+// the transport changes (its FNV-1a -- a held still transports one frustum every frame). A level
+// under half a pixel is never transported, so a walk from orbit measures nothing. The near plane
+// is degenerate on both paths (Camera::Projection's clip.z is the constant nearZ, so plane 4 is
+// (0, 0, 0, nearZ) over a zero length: NaN, and it never culls): its d reads inf by hand and NaN
+// pulled, the one comparison that is neither EQUAL nor a rounding.
+void GlobeLayer::ProbeTransport(const TransportProbeRow* rows, int n) {
+    if (n == 0) return;
+    ++m_probeWalks;
+    uint64_t fp = Fnv1aBytes(&n, sizeof n);
+    for (int i = 0; i < n; ++i) {
+        const TransportProbeRow& r = rows[i];
+        fp = Fnv1aBytes(&r.slot, sizeof r.slot, fp);
+        fp = Fnv1aBytes(&r.rel, sizeof r.rel, fp);
+        fp = Fnv1aBytes(&r.plane, sizeof r.plane, fp);
+        fp = Fnv1aBytes(r.hand, sizeof r.hand, fp);
+        fp = Fnv1aBytes(r.pulled, sizeof r.pulled, fp);
+    }
+    const bool dump = fp != m_probeFp;
+    m_probeFp = fp;
+    if (dump) {
+        ++m_probeDumps;
+        Log("[droste] transport walk %llu: %d planes over the extra levels -- hand (Q^T n, d / "
+            "sigma) | pulled (PullPlane through the level's gauge)",
+            static_cast<unsigned long long>(m_probeWalks), n);
+    }
+    for (int i = 0; i < n; ++i) {
+        const TransportProbeRow& r = rows[i];
+        const std::string wN = UlpWord(r.hand, r.pulled, 3, m_probeN);
+        const std::string wD = UlpWord(&r.hand[3], &r.pulled[3], 1, m_probeD);
+        if (!dump) continue;
+        Log("[droste] transport slot %u (rel %+d) plane %d hand: n %.17g %.17g %.17g d %.17g | "
+            "pulled: n %.17g %.17g %.17g d %.17g | n %s d %s",
+            r.slot, r.rel, r.plane, r.hand[0], r.hand[1], r.hand[2], r.hand[3], r.pulled[0],
+            r.pulled[1], r.pulled[2], r.pulled[3], wN.c_str(), wD.c_str());
+    }
+}
+
+void GlobeLayer::LogDrosteProbe() const {
+    Log("[droste] probe totals: frustum transport %llu walks (%llu distinct): n %s | d %s",
+        static_cast<unsigned long long>(m_probeWalks),
+        static_cast<unsigned long long>(m_probeDumps), m_probeN.Verdict().c_str(),
+        m_probeD.Verdict().c_str());
+}
+
 void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, double simTime) {
     if (!m_globe || !m_globe->Ready()) return;
     m_viewportH = viewportH;
@@ -1543,6 +1625,8 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     // answers every level from one resident set, and a small globe asks only for coarse mips
     // the root already holds. Its records carry their slot, so the mesh stage knows which
     // gauge to rasterize them through.
+    TransportProbeRow probeRows[kMaxLevels * 6];   // M12 step 4d instrument (ProbeTransport)
+    int probeN = 0;
     for (size_t li = 0; li < m_levels.size() && m_msPath; ++li) {
         const DrosteLevel& L = m_levels[li];
         const uint32_t slot = static_cast<uint32_t>(li + 1);
@@ -1556,7 +1640,8 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         WalkParams wp = m_wp;
         for (int i = 0; i < 3; ++i) {
             wp.camPos[i] = L.cam[i];
-            wp.camPlanet[i] = m_frameU[i] * ry + m_frameE[i] * L.cam[0] + m_frameN[i] * L.cam[2];
+            wp.camPlanet[i] = m_surface->up[i] * ry + m_surface->east[i] * L.cam[0] +
+                              m_surface->north[i] * L.cam[2];
         }
         {
             const double ax = std::abs(wp.camPlanet[0]), ay = std::abs(wp.camPlanet[1]),
@@ -1579,15 +1664,27 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         wp.probeCullFar = true;
         for (int p = 0; p < m_wp.planeCount; ++p) {
             const double* n = m_wp.frustum[p];
+            // M12 step 4d-2: THE PLANE, PULLED through the level's gauge placement (core/Space.h
+            // PullPlane: n' = R^T n, d' = (d - n . t) / s with t = 0 -- the linear part of
+            // Level(rel), the eye-to-eye translation the gauge identity cancels exactly). The
+            // hand transport it replaces -- n -> Q^T n, d -> d / sigma from the portal's Q and
+            // sigma -- is computed beside it for the record only (ProbeTransport).
+            L.gauge.PullPlane(n, n[3], wp.frustum[p], wp.frustum[p][3]);
+            TransportProbeRow& pr = probeRows[probeN++];
+            pr.slot = slot;
+            pr.rel = L.rel;
+            pr.plane = p;
             for (int j = 0; j < 3; ++j) {
-                wp.frustum[p][j] = L.Q[0][j] * n[0] + L.Q[1][j] * n[1] + L.Q[2][j] * n[2];
+                pr.hand[j] = L.Q[0][j] * n[0] + L.Q[1][j] * n[1] + L.Q[2][j] * n[2];
             }
-            wp.frustum[p][3] = n[3] / L.sigma;
+            pr.hand[3] = n[3] / L.sigma;
+            for (int j = 0; j < 4; ++j) pr.pulled[j] = wp.frustum[p][j];
         }
         const size_t before = m_meshlets.size();
         WalkLevel(wp, slot);
         levelRecords[slot] = static_cast<uint32_t>(m_meshlets.size() - before);
     }
+    ProbeTransport(probeRows, probeN);
     if (m_msPath) SeamTable();
     // M8h: a dropped leaf is a hole. Report on the transition (once per episode), with
     // the count -- the fix is a coarser view or a bigger kMaxMeshlets, not silence.
@@ -1748,7 +1845,8 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.streamF[2] = m_streamMars ? 1.0f : 0.0f;
     m_cb.streamF[3] = 0.0f;
     // ---- M6i: the composed channels + the one-world frame, through the ONE fill function
-    // the terrain also uses -- the two layers cannot disagree about this math.
+    // the terrain also uses -- the two layers cannot disagree about this math (M12 step 4a:
+    // SurfaceFrame::Fill, the surface's own; the fingerprint below is the gate).
     // M7g: THE MIP FLOOR. The top of every window pyramid (mips 4..7, ~85 tiles, a few
     // MB) is wanted EVERY frame: high-altitude views sample one consistent capture instead
     // of a residency-shaped patchwork of vintages, and a fast ascent can never outrun the
@@ -1762,19 +1860,9 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
             m_res->Want(m_maskT, 7u, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
         }
     }
-    FillComposedCb(m_cb.cs, m_res, m_colorT, m_winT, m_hgtT, m_hgtWinT, m_detOrg[0],
-                   m_detOrg[1], m_detSize, 14, m_radius, m_frameE, m_frameU, m_frameN,
-                   stencilOverlay, m_maskT, m_detWinT, m_det17Org, 17,
-                   m_winFace ? m_winFace : UINT32_MAX, m_detFace ? m_detFace : UINT32_MAX,
-                   m_hgtWinFace ? m_hgtWinFace : UINT32_MAX);
-    {   // M12 step 0 instrument: does this fill agree with main.cpp's ([surface] main fill)?
-        static uint64_t sLastFill = 0;
-        const uint64_t h = Fnv1aBytes(&m_cb.cs, sizeof(m_cb.cs));
-        if (h != sLastFill) {
-            sLastFill = h;
-            Log("[surface] globe fill FNV-1a %016llx", static_cast<unsigned long long>(h));
-        }
-    }
+    // M12 step 4g: the composed-surface rows are the renderer's one buffer (b2), filled by
+    // the frame loop from this same SurfaceFrame; the globe's own fill and its step 0
+    // fingerprint (equal to the frame loop's at every pose it was ever read) are gone.
     if (m_streamMars) {
         m_cb.texIdx[1] = m_cb.texIdx[2] = m_cb.texIdx[3] = UINT32_MAX;   // waves/wind/clouds
         m_cb.texIdx2[1] = UINT32_MAX;                                    // wind bank
@@ -1924,7 +2012,7 @@ void GlobeLayer::Render(const FrameContext& ctx) {
         ctx.cmd->Native()->OMSetBlendFactor(bf);
         ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         ctx.cmd->GraphicsConstantsAt(1, cbVa);
-        ctx.cmd->GraphicsConstants(4, m_skyCb);
+        ctx.cmd->GraphicsConstants(5, m_skyCb);   // b3 (M12 step 4g: b2 is the surface's)
         ctx.cmd->Draw(3, 1, 0, 0);
     }
 
@@ -1967,7 +2055,7 @@ void GlobeLayer::Render(const FrameContext& ctx) {
             for (int li = 0; li < m_limbCount; ++li) {
                 SkyCbData lc = m_skyCb;
                 lc.lvl[0] = static_cast<float>(m_limbSlots[li]);
-                ctx.cmd->GraphicsConstants(4, lc);
+                ctx.cmd->GraphicsConstants(5, lc);   // b3
                 ctx.cmd->Draw(3, 1, 0, 0);
             }
         }

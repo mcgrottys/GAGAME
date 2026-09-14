@@ -3,6 +3,7 @@
 #include "app/Tools.h"
 
 #include "compose/Compositor.h"
+#include "compose/SurfaceFrame.h"
 #include "compose/TileTree.h"
 #include "core/Common.h"
 #include "hal/Residency.h"
@@ -19,19 +20,12 @@ namespace ga::app::tools {
 // The gate. Every realization the render path uses, on tiles the shipped
 // paint loop already wrote, with the worst per-channel disagreement printed.
 int RunTreeAudit(const Options& opt, Compositor& compositor, int hgtCh,
-                 ResidencyManager& resMgr, double det17OrgX, double det17OrgY, int colCh,
+                 ResidencyManager& resMgr, int colCh,
                  const std::unique_ptr<TileTree>& megaTree,
-                 const std::unique_ptr<TileTree>& heightTree) {
-    const ColorFrame frames[] = {
-        ColorFrame::Cube(Compositor::kFaceDim),
-        ColorFrame::Window(1263360, 1538048, 14),
-        ColorFrame::Window(static_cast<long long>(det17OrgX),
-                           static_cast<long long>(det17OrgY), 17),
-    };
-    const ColorFrame hframes[] = {
-        ColorFrame::Cube(Compositor::kFaceDim, 256, 128),
-        ColorFrame::Window(1263360, 1538048, 14, 256, 128),
-    };
+                 const std::unique_ptr<TileTree>& heightTree, const SurfaceFrame& surface) {
+    // M12 step 4a: the realizations the render path uses ARE the surface's lattices.
+    const ColorFrame frames[] = {surface.cube, surface.win, surface.det};
+    const ColorFrame hframes[] = {surface.cubeH, surface.winH};
     if (opt.packTrees) {
         std::vector<std::string> tags;
         for (const ColorFrame& f : frames) tags.push_back(f.Tag());

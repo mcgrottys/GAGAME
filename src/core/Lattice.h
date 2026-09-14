@@ -25,6 +25,7 @@
 // ================================================================================================
 #pragma once
 
+#include "core/GaAst.h"
 #include "core/GeoRef.h"
 #include "core/PageTable.h"
 #include "core/TileAddress.h"
@@ -92,6 +93,14 @@ struct Lattice {
     CrsKind Crs() const { return kind == Kind::Cube ? CrsKind::Geographic : CrsKind::WebMercator; }
     // Does the second axis grow northward? Mercator rows grow SOUTH (GaAst.cpp's mercator.px).
     bool VNorth() const { return kind == Kind::Cube; }
+    // M12 step 4c: THE LATTICE AS THE DIAGRAM'S FRAME (core/GaAst.h). The cube IS the table's
+    // `cube.face` (+v north: D3D's per-face spec directions) and a window IS its `mercator.px`
+    // (+v south: Mercator rows grow south) -- the space named from the kind, +v from VNorth(),
+    // origin and pitch 0 as the table's frames have always carried them (the print shows those
+    // for metre frames only), centres because Texel samples centres (the +0.5). An edge
+    // registered from a lattice is then the hand frame's equal field by field; gatest asserts
+    // it for the shipped surface's five lattices against the table's own page-sample row.
+    ast::Frame AstFrame() const;
     // The coarsest mip a tree on this lattice carries: faceDim halved down to one tile
     // (TileTree::MaxMip, moved).
     uint32_t MaxMip() const {
@@ -121,7 +130,7 @@ struct Lattice {
         out[2] = static_cast<float>(faceDim > 0 ? 1.0 / double(faceDim) : 0.0);
         out[3] = static_cast<float>((1ll << zBase) * 256ll);
     }
-    // World pixels at zBase (the Mercator closed form, WaveFieldSource.h's MercX/MercY).
+    // World pixels at zBase (the Mercator closed form, the closed forms WaveFieldSource::Align used to carry).
     double WorldPx() const { return double((1ll << zBase) * 256ll); }
     void PxOf(double latDeg, double lonDeg, double& px, double& py) const {
         const double kPi = 3.14159265358979;

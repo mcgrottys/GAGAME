@@ -20,6 +20,7 @@
 
 #include "compose/Compositor.h"
 #include "compose/WaterAtlas.h"
+#include "core/Lattice.h"
 #include "sim/BathyModel.h"
 #include "sim/CurrentModel.h"
 #include "sim/GlobeModel.h"
@@ -68,14 +69,15 @@ public:
                           std::function<double(double)> oceanAt, double spinupHours);
     // M9ar: the bed every OWNED solver binds at activation -- a slice of the height page
     // tenant. There is no per-window bed texture any more.
+    // M12 step 4b: `window` is the z14 lattice the page sits on (the surface's winH), handed
+    // on to every owned solver at activation.
     void SetHeightPage(hal::Resource heightArr, hal::Resource resMapArr, uint32_t slice,
-                       uint32_t mips, double orgPxX, double orgPxY) {
+                       uint32_t mips, const Lattice& window) {
         m_hgtArr = heightArr;
         m_hgtRes = resMapArr;
         m_hgtSlice = slice;
         m_hgtMips = mips;
-        m_hgtOrg[0] = orgPxX;
-        m_hgtOrg[1] = orgPxY;
+        m_hgtWin = window;
     }
 
     // Per frame (or before a physics batch): lazy activation and owned-solver advancement.
@@ -115,7 +117,7 @@ private:
     hal::Resource m_hgtArr = nullptr;   // M9ar: borrowed from the residency manager
     hal::Resource m_hgtRes = nullptr;
     uint32_t m_hgtSlice = 6, m_hgtMips = 7;
-    double m_hgtOrg[2] = {0.0, 0.0};
+    Lattice m_hgtWin;   // M12 step 4b: the z14 height window the page sits on
     struct Window {
         std::string name;
         SweSolver* solver = nullptr;              // external, or owned.get()

@@ -189,19 +189,17 @@ float4 LoadBilinearWrap(uint slot, float2 uv, float dim) {
 // M9bc: the solved wave field is PAGES of the wave.field tenant (z16, slices 6.. = planes:
 // component p's (a, k, cos, sin), then the envelope). Mip 0 is what the window pins; a plane
 // not resident at mip 0 here reads as absent (0) and the caller's window weight drops it.
+// M12 step 4e: the frame, the floor and the read are PageSample.hlsli's (the same lat/lon
+// spelling HeightPages.hlsli takes for the bed).
 float2 WavePageUv(float2 xz) {
     const float lat = gGeoA.x + xz.y * gGeoA.z;
     const float lon = gGeoA.y + xz.x * gGeoA.w;
-    const float mx = (lon + 180.0f) / 360.0f * gWaveP.w;
-    const float my = (0.5f - log(tan(0.7853981634f + lat * 0.01745329252f * 0.5f)) *
-                                 0.15915494309f) * gWaveP.w;
-    return float2(mx - gWaveP.x, my - gWaveP.y) * gWaveP.z;
+    return PageUvLatLon(lat, lon, gWaveP);
 }
 // M9bl: the finest RESIDENT mip of one plane here (byte = finest mip * 16, conservative
 // per 128th of the page). > 7.5 means nothing is resident at all.
 float WavePageHave(float2 uv, uint plane) {
-    const int2 rc = int2(clamp(uv * 128.0f, 0.0f, 127.0f));
-    return gTA[gWaveU.y].Load(int4(rc, int(6u + plane), 0)).x * 15.9375f;
+    return PageHaveLoad(gTA[gWaveU.y], uv, 6u + plane);
 }
 // Was "< 0.5f": resident meant MIP 0 RESIDENT, so a window holding coarse levels counted as
 // absent and the solved field contributed nothing at all. That is the opposite of this
@@ -218,18 +216,7 @@ float4 WavePageSample(float2 uv, uint plane) {
     const float have = WavePageHave(uv, plane);
     if (have > 7.5f) return 0.0f;                 // nothing resident: no opinion
     const float mip = max(round(have), 0.0f);
-    const float dim = 16384.0f / exp2(mip);
-    const float2 tf = uv * dim - 0.5f;
-    const float2 t0 = floor(tf);
-    const float2 fr = tf - t0;
-    const int hi = int(dim) - 1;
-    float4 acc = 0.0f;
-    [unroll] for (int k = 0; k < 4; ++k) {
-        const int2 tc = clamp(int2(t0) + int2(k & 1, k >> 1), int2(0, 0), int2(hi, hi));
-        acc += ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y) *
-               gTA[gWaveU.x].Load(int4(tc, int(6u + plane), int(mip)));
-    }
-    return acc;
+    return PageLoad4(gTA[gWaveU.x], uv, 6u + plane, mip);
 }
 
 float4 LoadBilinearClamp(uint slot, float2 texel, float2 dims) {
@@ -408,15 +395,11 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     if (gSlotsC.y != 0xFFFFFFFFu && gSlotsC.z != 0xFFFFFFFFu && gSlotsD.z != 0xFFFFFFFFu) {
         const float lat = gGeoA.x + xz.y * gGeoA.z;
         const float lon = gGeoA.y + xz.x * gGeoA.w;
-        const float mx = (lon + 180.0f) / 360.0f * gWinA.w;
-        const float my = (0.5f - log(tan(0.7853981634f + lat * 0.01745329252f * 0.5f)) *
-                                     0.15915494309f) * gWinA.w;
-        const float2 wuv = float2(mx - gWinA.x, my - gWinA.y) * gWinA.z;
+        const float2 wuv = PageUvLatLon(lat, lon, gWinA);
         if (all(wuv > 0.0f) && all(wuv < 1.0f)) {
-            const float have = round(HpHaveMip(gTA[gSlotsC.z], wuv, gSlotsD.z));
+            const float have = round(PageHaveLoad(gTA[gSlotsC.z], wuv, gSlotsD.z));
             if (have <= kHpMaxMip) {
-                expo = max(HpLoadBilinear(gTA[gSlotsC.y], wuv, gSlotsD.z, max(have, 3.0f)),
-                           0.18f);
+                expo = max(PageLoad(gTA[gSlotsC.y], wuv, gSlotsD.z, max(have, 3.0f)), 0.18f);
             }
         }
     }

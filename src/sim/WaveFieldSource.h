@@ -25,6 +25,7 @@
 #include "compose/Compositor.h"
 #include "compose/DomainSource.h"
 #include "core/GaUnits.h"
+#include "core/Lattice.h"
 #include "hal/Residency.h"
 #include "sim/BathyModel.h"
 #include "sim/WaveField.h"
@@ -63,8 +64,14 @@ public:
         const double cell = kMercCircM / kWorldPx * std::cos(latC * kD2R);
         const double lonW = BathyModel::kOrgLon + cfg.orgX / BathyModel::kMPerLon;
         const double latN = BathyModel::kOrgLat + (cfg.orgZ + sizeZ) / BathyModel::kMPerLat;
-        const long long X0 = static_cast<long long>(std::floor(MercX(lonW)));
-        const long long Y0 = static_cast<long long>(std::floor(MercY(latN)));
+        // M12 step 4b: the page lattice's own closed form (Lattice::PxOf on a z16 window).
+        // MercX / MercY were its text: a 44.6 M-input sweep (the window's span, a global
+        // grid, a random global set, the shipped window's lonW / latN) found the doubles
+        // bit-identical, so the origin is the lattice's and the two statics are gone.
+        double mx = 0.0, my = 0.0;
+        Lattice::Window(0, 0, kZoom, kTile, kTile).PxOf(latN, lonW, mx, my);
+        const long long X0 = static_cast<long long>(std::floor(mx));
+        const long long Y0 = static_cast<long long>(std::floor(my));
         cfg.nx = static_cast<int>(std::ceil(sizeX / cell / kTile) * kTile);
         cfg.ny = static_cast<int>(std::ceil(sizeZ / cell / kTile) * kTile);
         cfg.cellM = cell;
@@ -83,12 +90,7 @@ public:
         f.color = ColorFrame::Window(f.orgPxX, f.orgPxY, kZoom, kTile, kTile);
         return f;
     }
-    static double MercX(double lonDeg) { return (lonDeg + 180.0) / 360.0 * kWorldPx; }
-    static double MercY(double latDeg) {
-        const double l = latDeg * 3.14159265358979 / 180.0;
-        return (0.5 - std::log(std::tan(3.14159265358979 * 0.25 + l * 0.5)) /
-                          (2.0 * 3.14159265358979)) * kWorldPx;
-    }
+    // The inverse (page row -> latitude); Lattice has no counterpart, so it stays.
     static double LatOfMercY(double y) {
         const double n = 3.14159265358979 * (1.0 - 2.0 * y / kWorldPx);
         return (2.0 * std::atan(std::exp(n)) - 3.14159265358979 * 0.5) * 180.0 / 3.14159265358979;

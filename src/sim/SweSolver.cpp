@@ -12,8 +12,22 @@
 
 namespace ga {
 
+void SweSolver::LogCbFingerprint() {
+    // M12 step 4b instrument: the solver's constant buffer, fingerprinted at every upload --
+    // the gate for the lattice-row moves (winA from the surface's lattice) and for the fills
+    // of 4e/4f. Logs when the hash changes, as the [surface] fills do; the rows every Record
+    // varies (the tide plane, its rate, u_ext) change it per batch, so the log is the solver's
+    // whole CPU-side trajectory. A member, not a static: an owned Boston window is a second
+    // instance.
+    const uint64_t h = Fnv1aBytes(&m_cb, sizeof(m_cb));
+    if (h != m_cbFp) {
+        m_cbFp = h;
+        Log("[kernel] swe cb FNV-1a %016llx", static_cast<unsigned long long>(h));
+    }
+}
+
 void SweSolver::SetHeightPage(Gpu& gpu, hal::Resource heightArr, hal::Resource resMapArr,
-                              uint32_t slice, uint32_t mips, double orgPxX, double orgPxY) {
+                              uint32_t slice, uint32_t mips, const Lattice& window) {
     (void)gpu;   // the table carries the device
     // M9ax: the WHOLE tenant -- cube faces and the page -- so the kernel resolves the bed
     // anywhere, not only inside the one page (ArraySize -1 = every slice).
@@ -24,10 +38,9 @@ void SweSolver::SetHeightPage(Gpu& gpu, hal::Resource heightArr, hal::Resource r
     m_cb.geoLL[1] = static_cast<float>(m_bathy->Lat1());
     m_cb.geoLL[2] = static_cast<float>(m_bathy->Dlon());
     m_cb.geoLL[3] = static_cast<float>(-m_bathy->Dlat());
-    m_cb.winA[0] = static_cast<float>(orgPxX);
-    m_cb.winA[1] = static_cast<float>(orgPxY);
-    m_cb.winA[2] = 1.0f / 16384.0f;
-    m_cb.winA[3] = 16384.0f * 256.0f;
+    // M12 step 4b: the page frame row from the window's lattice (the old four casts bit for
+    // bit; the [kernel] swe hash is the gate).
+    window.Rows(m_cb.winA);
     m_cb.pageB[0] = static_cast<float>(slice);
     m_bedBound = true;
     Log("[swe] bed bound to the height megatexture: page slice %u, %u mips, residency-clamped "
@@ -298,6 +311,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
 void SweSolver::RecordReset(hal::CommandContext& cmd, Gpu& gpu) {
     PixScope scope(cmd.Native(), "swe.reset (state -> the analytic tide plane)");
     cmd.ComputeRoot(m_rs.Get());
+    LogCbFingerprint();
     cmd.ComputeConstants(0, m_cb);
     cmd.ComputeTable(2, m_table.Base());
 
@@ -392,6 +406,7 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
         (area > 1.0f) ? std::clamp(m_westQ / area, -1.5f, 1.5f) : 0.0f;
 
     cmd.ComputeRoot(m_rs.Get());
+    LogCbFingerprint();
     cmd.ComputeConstants(0, m_cb);
     cmd.ComputeTable(2, m_table.Base());
     const auto& el = m_eta.ResidentList();

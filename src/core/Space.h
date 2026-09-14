@@ -46,8 +46,20 @@
 //  well posed (does (I - sR) invert?) and takes it. That is the algebra's own case split, not a
 //  special case bolted on.
 //
+//  THE POWER, APPLIED (step 4d-2). Pow(k) is a Placement, t_k + s^k Q^k x with t_k = p - s^k
+//  Q^k p: the map written about the ORIGIN. Applied to the tower's eye that is two numbers of
+//  the size s^k |x| cancelling -- three levels in, s^-3 C is ~1e21 m and t_k its negative to
+//  within the few thousand kilometres the eye stands from p -- and the eye keeps ~1e6 m of
+//  rounding (MEASURED by the 4d instrument: 5546 ulps, |d| 1.42e6 m at rel +3). PowApply(k)
+//  writes the same map about p, x -> p + s^k Q^k (x - p): the difference is taken first, on
+//  numbers of the world's size, and nothing cancels. That is the gauge identity S^k(y) - C =
+//  s^k Q^k (y - S^-k(C)) in the form every level is drawn by (Droste.h Portal::Apply), and it is
+//  what Space::LevelApply hands the tower; what remains against the portal's Rodrigues form is
+//  the rotor's rounding, the number spacetest prints.
+//
 //  Gates: RunSpaceSelfTest (spacetest, --selftest): composition and inverse against the CGA
-//  sandwich; the fold; Pow against Droste.h's Portal closed forms; PullPlane against the
+//  sandwich; the fold; Pow and PowApply against Droste.h's Portal closed forms (the ulp distance
+//  between PowApply and the portal printed, a record not a gate); PullPlane against the
 //  hand-written transport in GlobeLayer AND the DualPlane sandwich; the unit-length refusal;
 //  Frame() rows round-tripping; Versor(R) coefficient-equal to droste::SimilarityVersor.
 // ================================================================================================
@@ -259,6 +271,46 @@ struct Placement {
         out[0] = sg * x;
         out[1] = sg * y;
         out[2] = sg * z;
+    }
+    // THE POWER, APPLIED ABOUT ITS FIXED POINT (step 4d-2): x -> p + s^k Q^k (x - p). The same
+    // map as Pow(k).Apply, written the way Droste.h's Portal::Apply and the gauge identity write
+    // it -- the difference from p first, then the rotor's k-th power and the scale on a number
+    // of the world's size -- so nothing cancels (the banner: about the origin the two terms of
+    // size s^k |x| lose the eye's position three levels in). p is solved here (FixedPoint) and
+    // never stored: the rotor, the scale and the translation stay the one representation; s^k
+    // is the std::pow(s, k) the portal's Scale(k) makes. A rigid map has no fixed point (p
+    // recedes to infinity): there this IS Pow(k).Apply, the screw; a reflection takes its whole
+    // powers the same way.
+    void PowApply(double k, const double x[3], double out[3]) const {
+        if (s < 0.0 || IsRigid()) {
+            Pow(k).Apply(x, out);
+            return;
+        }
+        double p[3];
+        FixedPoint(p);
+        double q[4];
+        RotorPow(r, k, q);
+        const double sk = std::pow(s, k);
+        double dx = x[0] - p[0], dy = x[1] - p[1], dz = x[2] - p[2];
+        Motor::QRotate(q, dx, dy, dz);
+        out[0] = p[0] + sk * dx;
+        out[1] = p[1] + sk * dy;
+        out[2] = p[2] + sk * dz;
+    }
+    // The k-th power on a direction: the rotor's k-th power alone -- no fixed point, no scale
+    // (a reflection's whole powers carry their parity through Pow).
+    void PowApplyDir(double k, const double d[3], double out[3]) const {
+        if (s < 0.0) {
+            Pow(k).ApplyDir(d, out);
+            return;
+        }
+        double q[4];
+        RotorPow(r, k, q);
+        double x = d[0], y = d[1], z = d[2];
+        Motor::QRotate(q, x, y, z);
+        out[0] = x;
+        out[1] = y;
+        out[2] = z;
     }
     // A parent-frame plane (n . x = d, n unit) pulled into the own frame: n' = R^T n,
     // d' = (d - n . t) / s. This IS GlobeLayer's hand-written frustum transport
@@ -472,6 +524,12 @@ struct Space {
         return c;
     }
     Placement Level(double k) const { return link.Pow(k); }
+    // Level k's map applied about the cycle's fixed point (Placement::PowApply): the tower's eye
+    // S^-k(C) and its directions are computed here, in the form the gauge identity is drawn by.
+    void LevelApply(double k, const double x[3], double out[3]) const { link.PowApply(k, x, out); }
+    void LevelApplyDir(double k, const double d[3], double out[3]) const {
+        link.PowApplyDir(k, d, out);
+    }
 };
 
 // The gate (src/core/SpaceTest.cpp), run from --selftest after gatest.

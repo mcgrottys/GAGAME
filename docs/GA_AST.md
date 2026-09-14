@@ -4,10 +4,10 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 
 | from | field | to | src frame | dst frame | flip | units | range | gain | code anchor |
 |---|---|---|---|---|---|---|---|---|---|
-| compose.stack | paint cube faces | color.pages | latlon.deg +v=N | cube.face +v=N | - | sRGB bytes | slices 0..5, 16k faces | x1 | TileTree::Provider(ColorFrame::Cube) / ComposeCubeDir (composetest-pinned) |
-| compose.stack | paint mercator pages | color.pages | latlon.deg +v=N | mercator.px +v=S | FLIP | sRGB bytes | slice 6 = z14, slice 7 = z17; tile 128^2 | x1 | TileTree::Provider(ColorFrame::Window) (merc inverse per texel) |
-| compose.stack | paint cube faces | height.pages | latlon.deg +v=N | cube.face +v=N | - | m NAVD (R16F) | slices 0..5, 16k faces | x1 | TileTree::Provider(ColorFrame::Cube), the height root |
-| compose.stack | paint mercator page | height.pages | latlon.deg +v=N | mercator.px +v=S | FLIP | m NAVD (R16F) | slice 6 = z14 at 1263360,1538048; tile 256x128 | x1 | TileTree::Provider(ColorFrame::Window), the height root |
+| compose.stack | paint cube faces | color.pages | latlon.deg +v=N | cube.face +v=N | - | sRGB bytes | slices 0..5 = cube16k; tile 128x128 | x1 | TileTree::Provider(cube16k) / ComposeCubeDir (composetest-pinned) |
+| compose.stack | paint mercator pages | color.pages | latlon.deg +v=N | mercator.px +v=S | FLIP | sRGB bytes | slice 6 = window_z14_1263360_1538048, slice 7 = window_z17_10168820_12344774; tile 128x128 | x1 | TileTree::Provider(window_z14_1263360_1538048, window_z17_10168820_12344774) / Lattice::Texel (merc inverse per texel) |
+| compose.stack | paint cube faces | height.pages | latlon.deg +v=N | cube.face +v=N | - | m NAVD (R16F) | slices 0..5 = cube16k; tile 256x128 | x1 | TileTree::Provider(cube16k) / ComposeCubeDir (composetest-pinned) |
+| compose.stack | paint mercator page | height.pages | latlon.deg +v=N | mercator.px +v=S | FLIP | m NAVD (R16F) | slice 6 = window_z14_1263360_1538048; tile 256x128 | x1 | TileTree::Provider(window_z14_1263360_1538048) / Lattice::Texel (merc inverse per texel) |
 | color.pages | page-sample | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | sRGB | finest containing page, residency-clamped mip | x1 | Compose.hlsli ComposedColorPages (no flip: both vS) |
 | height.pages | height | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | vertex + pixel classification (M9bg: the refracted cast retired) | x1 | Compose.hlsli ComposedHeightPages |
 | google.tiles | fetch | compose.stack | mercator.px +v=S | mercator.px +v=S | - | sRGB bytes | zoom = f(groundResM) | x1 | GoogleColorSource::ZoomFor |

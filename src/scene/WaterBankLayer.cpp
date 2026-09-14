@@ -536,14 +536,11 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.slotsD[1] = m_hgtWinResSrv;
     cb.slotsD[2] = m_hgtWinSlice;   // M9aq: the page, or ~0 for the old window
     cb.slotsD[3] = 0xFFFFFFFFu;
-    cb.geoA[0] = static_cast<float>(BathyModel::kOrgLat);
-    cb.geoA[1] = static_cast<float>(BathyModel::kOrgLon);
-    cb.geoA[2] = static_cast<float>(1.0 / BathyModel::kMPerLat);
-    cb.geoA[3] = static_cast<float>(1.0 / BathyModel::kMPerLon);
-    cb.winA[0] = static_cast<float>(m_hgtWinOrg[0]);
-    cb.winA[1] = static_cast<float>(m_hgtWinOrg[1]);
-    cb.winA[2] = 1.0f / 16384.0f;
-    cb.winA[3] = 16384.0f * 256.0f;
+    // M12 step 4b: the world.flat chart's row and the height window's row come from the
+    // surface and the window's lattice (the old eight casts bit for bit; the [kernel] hash
+    // below is the gate).
+    m_surface->FlatRows(cb.geoA);
+    m_hgtWin.Rows(cb.winA);
     // M8 foamlaw: the deriv fibers carry the Jacobian foam (the crest's area 2-blade
     // degenerating -- provably the same event the Miche steepness names), and the band
     // rms envelopes let the kernel normalize eta for the crest gate and depth excess.
@@ -626,6 +623,16 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     toUav(m_detail);
     m_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
 
+    {   // M12 step 4b instrument: the bank's constant buffer, fingerprinted at its upload --
+        // the gate for the lattice-row moves (winA, geoA from the surface) and for the fills
+        // of 4e/4f. Logs when the hash changes, as the [surface] fills do; a member, not a
+        // static, because the Droste set-B bank is a second instance.
+        const uint64_t h = Fnv1aBytes(&cb, sizeof(cb));
+        if (h != m_cbFp) {
+            m_cbFp = h;
+            Log("[kernel] waterbank cb FNV-1a %016llx", static_cast<unsigned long long>(h));
+        }
+    }
     ctx.cmd->ComputeRoot(m_rs.Get());
     ctx.cmd->ComputeConstants(0, cb);
     ctx.cmd->ComputeSrvAt(

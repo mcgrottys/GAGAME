@@ -9,19 +9,31 @@
 //  (AUDIT_WATER item 5, "the keyhole"). This is the whole rule, once, for any stage: manual
 //  bilinear Loads, because a bindless SampleLevel outside the pixel stage returns zero
 //  (ALGEBRA priors 1), on the tenant's full array view (slices 0..5 the cube faces, 6 the z14
-//  page) and its residency-map array.
+//  page) and its residency-map array. M12 step 4e: the reads are PageSample.hlsli's contract
+//  (PageHaveLoad, PageLoad, PageWins) -- the same law the pixel stage binds its views to.
 //
 //  Frames (GaAst: height.pages -> {swe.solver, churn.kernel, water.bank}, merc-uv, no flip):
-//  lat/lon -> Mercator px -> page uv is CsWindowUv's closed form; lat/lon -> direction ->
-//  cube face uv is ComposeCubeDir's inverse (the D3D cube convention the tiles were painted in).
+//  lat/lon -> Mercator px -> page uv is PageUvLatLon, the lat/lon spelling of the window frame
+//  (measured NOT bit-identical to PageUv of the same direction: PageSample.hlsli's banner);
+//  lat/lon -> direction -> cube face uv is ComposeCubeDir's inverse (the D3D cube convention
+//  the tiles were painted in).
 // ================================================================================================
 #ifndef HEIGHT_PAGES_HLSLI
 #define HEIGHT_PAGES_HLSLI
 
-static const float kHpDim = 16384.0f;          // the tenant's page dim (cube faces and pages)
-static const float kHpResDim = 128.0f;         // its residency map (R8, byte = finest mip * 16)
-static const float kHpCubeTexelM = 611.0f;     // cube mip 0 at the equator
-static const float kHpPageTexelM = 9.55f;      // z14 mip 0
+#include "PageSample.hlsli"
+
+// M12 step 4f: the two ground resolutions are the lattices' own (Lattice::GroundRes(0):
+// kMercCirc / (4 faceDim) for the cube, kMercCirc / world px at z14 for the page), folded at
+// compile time from the constants this file declares -- the kernels' rows carry no ground and
+// nothing else changes -- and bit-identical to the floats the surface's gCsGround row carries
+// (a division by a power of two commutes with rounding: 0x4418dfc2 and 0x4118dfc2 both ways).
+// Exact, the page's mip 6 equals the cube's mip 0 and PageWins takes the page there, where
+// 611.0f and 9.55f (9.55 * 64 = 611.2 > 611) took the cube.
+static const float kHpMercCirc = 40075016.686f;   // Web-Mercator equator, m (Lattice::kMercCirc)
+static const float kHpWorldPxZ14 = 4194304.0f;    // (1 << 14) * 256 px (Lattice::WorldPx at z14)
+static const float kHpCubeTexelM = kHpMercCirc / (4.0f * kPageDim);   // 611.496.. (was 611.0f)
+static const float kHpPageTexelM = kHpMercCirc / kHpWorldPxZ14;        // 9.5546.. (was 9.55f)
 static const float kHpMaxMip = 6.0f;           // 7 mips
 
 // Direction (x = cos lat cos lon, y = sin lat, z = cos lat sin lon -- Compose.hlsli's
@@ -44,32 +56,10 @@ uint HpCubeFace(float3 d, out float2 uv) {
     return face;
 }
 
-// The finest resident mip at a uv of one slice (the map is conservative by construction: a
-// byte per 128th of the page, the coarsest answer of the tiles it covers).
-float HpHaveMip(Texture2DArray<float4> res, float2 uv, uint slice) {
-    const int2 rc = int2(clamp(uv * kHpResDim, 0.0f, kHpResDim - 1.0f));
-    return res.Load(int4(rc, int(slice), 0)).x * 15.9375f;
-}
-
-// Bilinear at one mip of one slice, by Loads.
-float HpLoadBilinear(Texture2DArray<float4> arr, float2 uv, uint slice, float mip) {
-    const float dim = kHpDim / exp2(mip);
-    const float2 tf = uv * dim - 0.5f;
-    const float2 t0 = floor(tf);
-    const float2 fr = tf - t0;
-    float acc = 0.0f;
-    [unroll] for (int k = 0; k < 4; ++k) {
-        const int2 tc = clamp(int2(t0) + int2(k & 1, k >> 1), int2(0, 0),
-                              int2(dim - 1.0f, dim - 1.0f));
-        acc += ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y) *
-               arr.Load(int4(tc, int(slice), int(mip))).x;
-    }
-    return acc;
-}
-
-// The planet's height (m NAVD) at lat/lon (degrees). winA = (page org px x, org px y,
-// 1/kHpDim, world px at z14); winSlice the page's slice; pageMipMin the coarsest-allowed
-// page mip a consumer wants to be held to (the bank rings ask 2, the solver 0).
+// The planet's height (m NAVD) at lat/lon (degrees). winA = the page's lattice row (org px x,
+// org px y, 1/kPageDim, world px at z14: Lattice::Rows); winSlice the page's slice; pageMipMin
+// the coarsest-allowed page mip a consumer wants to be held to (the bank rings ask 2, the
+// solver 0).
 float HpHeightAt(Texture2DArray<float4> arr, Texture2DArray<float4> res, float latDeg,
                  float lonDeg, float4 winA, uint winSlice, float pageMipMin) {
     const float latR = latDeg * 0.01745329252f;
@@ -78,19 +68,17 @@ float HpHeightAt(Texture2DArray<float4> arr, Texture2DArray<float4> res, float l
     const float3 dir = float3(cl * cos(lonR), sin(latR), cl * sin(lonR));
     float2 cuv;
     const uint face = HpCubeFace(dir, cuv);
-    const float haveC = clamp(round(HpHaveMip(res, cuv, face)), 0.0f, kHpMaxMip);
+    const float haveC = clamp(round(PageHaveLoad(res, cuv, face)), 0.0f, kHpMaxMip);
     // The page, by containment, where it is at least as fine as the cube. Two residency
     // reads decide; only ONE bilinear is paid (the bank kernel runs this per texel per ring).
-    const float mx = (lonDeg + 180.0f) / 360.0f * winA.w;
-    const float my = (0.5f - log(tan(0.7853981634f + latR * 0.5f)) * 0.15915494309f) * winA.w;
-    const float2 wuv = float2(mx - winA.x, my - winA.y) * winA.z;
+    const float2 wuv = PageUvLatLon(latDeg, lonDeg, winA);
     if (all(wuv > 0.0f) && all(wuv < 1.0f)) {
-        const float haveW = clamp(round(HpHaveMip(res, wuv, winSlice)), pageMipMin, kHpMaxMip);
-        if (kHpPageTexelM * exp2(haveW) <= kHpCubeTexelM * exp2(haveC)) {
-            return HpLoadBilinear(arr, wuv, winSlice, haveW);
+        const float haveW = clamp(round(PageHaveLoad(res, wuv, winSlice)), pageMipMin, kHpMaxMip);
+        if (PageWins(haveC, haveW, float2(kHpCubeTexelM, kHpPageTexelM))) {
+            return PageLoad(arr, wuv, winSlice, haveW);
         }
     }
-    return HpLoadBilinear(arr, cuv, face, haveC);
+    return PageLoad(arr, cuv, face, haveC);
 }
 
 #endif

@@ -90,8 +90,7 @@ bool WeatherManager::Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& 
         SweConfig cfg = w.cfg;
         cfg.name = w.name.c_str();
         w.owned->Init(gpu, sc, shaderDir, *w.bathy, cfg);
-        w.owned->SetHeightPage(gpu, m_hgtArr, m_hgtRes, m_hgtSlice, m_hgtMips, m_hgtOrg[0],
-                               m_hgtOrg[1]);
+        w.owned->SetHeightPage(gpu, m_hgtArr, m_hgtRes, m_hgtSlice, m_hgtMips, m_hgtWin);
         w.solver = w.owned.get();
         auto zero = [](double) { return 0.0; };
         w.solver->Spinup(gpu, simUnix, w.spinupHours, w.oceanAt, zero, zero, zero);
@@ -125,13 +124,16 @@ void WeatherManager::RefreshMirrorsTo(Gpu& gpu, double simUnix) {
 void WeatherManager::PinDomains(ResidencyManager& res, int hgtTenant) {
     if (hgtTenant < 0 || !m_hgtArr) return;
     const double piP = 3.14159265358979, n14 = 16384.0 * 256.0;
+    // M12 step 4b: the origin is the window lattice's (an integer below 2^24: the double the
+    // two members held, exactly).
     auto mercU = [&](double lonDeg) {
-        return ((lonDeg + 180.0) / 360.0 * n14 - m_hgtOrg[0]) / 16384.0;
+        return ((lonDeg + 180.0) / 360.0 * n14 - static_cast<double>(m_hgtWin.orgPxX)) /
+               16384.0;
     };
     auto mercV = [&](double latDeg) {
         const double l = latDeg * piP / 180.0;
         return ((0.5 - std::log(std::tan(piP * 0.25 + l * 0.5)) / (2.0 * piP)) * n14 -
-                m_hgtOrg[1]) /
+                static_cast<double>(m_hgtWin.orgPxY)) /
                16384.0;
     };
     std::string pinned;

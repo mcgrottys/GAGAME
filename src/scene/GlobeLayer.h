@@ -11,8 +11,11 @@
 #pragma once
 
 #include "compose/Compositor.h"
+#include "compose/SurfaceFrame.h"
 #include "core/GradeField.h"
+#include "core/Common.h"
 #include "core/MemGridLoader.h"
+#include "core/Space.h"   // M12 step 4d: the level's gauge placement, for the plane transport
 #include "hal/Residency.h"
 #include "hal/TileAtlas.h"
 #include "hal/Views.h"
@@ -82,17 +85,10 @@ public:
         m_normT = norm;
         m_streamMars = isMars;
     }
-    void SetPlanetRadius(double r) { m_radius = r; }
-    // M6g: ONE WORLD. The globe renders in the estuary tangent frame; rows are the
-    // planet->tangent rotation (east, up-at-origin, north). SetView now receives the FLAT
-    // (tangent-frame) camera; the sphere centre sits at flat (0, -R, 0).
-    void SetFrame(const double east[3], const double up[3], const double north[3]) {
-        for (int i = 0; i < 3; ++i) {
-            m_frameE[i] = east[i];
-            m_frameU[i] = up[i];
-            m_frameN[i] = north[i];
-        }
-    }
+    // M6g: ONE WORLD. The globe renders in the estuary tangent frame; the rows are the
+    // planet->tangent rotation (east, up-at-origin, north). SetView receives the FLAT
+    // (tangent-frame) camera; the sphere centre sits at flat (0, -R, 0). M12 step 4a: the
+    // rows, the radius, the lattices and the tenants are the SurfaceFrame's -- SetSurface.
     // The CUDEM window in degrees, for the foundation sink (0 span = absent).
     void SetEstuaryWindow(double lon0, double lat1, double lonSpan, double latSpan) {
         m_estGeo[0] = lon0;
@@ -125,25 +121,12 @@ public:
         for (int i = 0; i < 12; ++i) m_bankOrg[i] = org12[i];
         m_oneWater = oneWater;
     }
-    void SetComposed(int colorCube, int window, int heightCube, int heightWindow,
-                     double orgPxX, double orgPxY, double sizePx, int detailWin = -1,
-                     double detOrgPxX = 0.0, double detOrgPxY = 0.0, int maskPages = -1) {
-        m_maskT = maskPages;   // M9ay: the survey mask pages (same slices as the colour)
-        m_colorT = colorCube;
-        m_winT = window;
-        const bool pages = colorCube >= 0 && window == colorCube;
-        m_winFace = pages ? 6u : 0u;
-        m_detFace = pages ? 7u : 0u;
-        m_hgtWinFace = (heightCube >= 0 && heightWindow == heightCube) ? 6u : 0u;
-        m_hgtT = heightCube;
-        m_hgtWinT = heightWindow;
-        m_detOrg[0] = orgPxX;
-        m_detOrg[1] = orgPxY;
-        m_detSize = sizePx;
-        m_detWinT = detailWin;               // M7f: the z17 detail color window
-        m_det17Org[0] = detOrgPxX;
-        m_det17Org[1] = detOrgPxY;
-    }
+    // M12 step 4a: THE SURFACE, declared once (compose/SurfaceFrame.h). The globe keeps
+    // copies of what its walk and its mip-floor wants read (the tenant ids, the page slices,
+    // the z14 and z17 origins, the radius: CaptureWalk captures them into every WalkParams)
+    // and reads the tangent frame's rows and the fill from the surface itself. Must precede
+    // the first SetView, as SetResidency must.
+    void SetSurface(const SurfaceFrame* s);
     uint32_t AirTiles() const {
         return (m_windReady ? m_windBank.ResidentCount() : 0) +
                (m_cloudReady ? m_cloud.ResidentCount() : 0);
@@ -236,7 +219,6 @@ public:
     float waterNavd = 0.0f;         // M6j: live water level, for the close-up material model
     bool msSurface = true;          // M6j: request the mesh-shader unified surface
     bool MeshPathActive() const { return m_msPath; }
-    bool stencilOverlay = false;    // M6i: --stencil, the GIS alignment overlay
     bool probeCullFar = false;      // step 23 probe: horizon cull at every altitude (+0.1 rad)
     void DumpMeshlets(const std::wstring& path) const;   // step 23 probe: the records drawn
     int debugLens = 0;              // M7m: --lens (1 worldxz, 2 winuv, 3 mip, 4 ring,
@@ -277,6 +259,11 @@ public:
         double cam[3] = {0.0, 0.0, 0.0};   // the eye in this level's OWN tangent frame: S^-k(C)
         double sigma = 1.0;           // true size over own size: s^k
         double Q[3][3] = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}};   // own -> true
+        // M12 step 4d: the same map as a Placement -- the linear part of Level(rel), rotor and
+        // scale with t = 0 (the eye-to-eye translation the gauge identity cancels) -- which the
+        // frustum planes ARE pulled through (PullPlane; step 4d-2: the transport the walk culls
+        // by, the hand form from Q and sigma above being the instrument's record).
+        Placement gauge;
         float reliefExagg = 1.0f;     // the display exaggeration at this level's own altitude
         float sun[3] = {0.0f, 1.0f, 0.0f};   // the sun in this level's own frame
         int bankSet = -1;             // 0 = the camera's rings, 1 = set B, -1 = none (far)
@@ -325,6 +312,7 @@ public:
     static void LeafDir(int face, int level, uint32_t ix, uint32_t iy, double out[3]);
     static void LeafOf(const double dir[3], int level, int& face, uint32_t& ix, uint32_t& iy);
     uint32_t levelRecords[kMaxLevels] = {};   // records emitted per slot, last frame
+    void LogDrosteProbe() const;   // M12 step 4d instrument: the transport comparison's totals
 
     float foamOpacity = 0.72f;      // M8: peak foam opacity (data/wave_scene.json)
     float ringBlendTexels = 48.0f;  // M8: bank ring cross-fade width (scene cfg)
@@ -406,7 +394,8 @@ private:
         float windB[4];       // nx, ny, unused, unused
         uint32_t streamU[4];  // M6e: Mars native surface/normal cubes + their residency maps
         float streamF[4];     // surface on, normal on, planet-is-Mars, unused
-        ComposedSurfaceCb cs; // M6i: the composed channels + the one-world frame (8 rows)
+        // (M6i's composed channels + the one-world frame rows: the renderer's one surface
+        // buffer, b2, since M12 step 4g -- Common.hlsli's SurfaceCb, not a row of this one.)
         float estGeo[4];      // CUDEM window deg: lon0, lat1, 1/lonSpan, 1/latSpan (0 = none)
         // M7: the wave vertex bank (one-water mode): water geometry + params from ONE tiled
         // resource, sampled by ring (camera-anchored mip ladder).
@@ -445,7 +434,8 @@ private:
         uint32_t tileW, tileH, pad0, pad1;
         float lat1, dLatDeg, radius, scale;
     };
-    // Mirrors GlobeSkyCb (b2) in Globe.hlsl.
+    // Mirrors GlobeSkyCb (b3 -- root parameter 5 of the shared layout; M12 step 4g moved it
+    // off b2, the surface's) in Globe.hlsl.
     struct SkyCbData {
         float fwd[4];         // xyz forward, w = tan(fovY/2)
         float right[4];       // xyz right, w = aspect
@@ -576,7 +566,10 @@ private:
     double m_detSize = 1;
     bool m_streamMars = false;
     double m_radius = GlobeModel::kR;
-    double m_frameE[3] = {1, 0, 0}, m_frameU[3] = {0, 1, 0}, m_frameN[3] = {0, 0, 1};
+    // M12 step 4a: THE SURFACE (SetSurface). The tenant, slice, origin and radius members
+    // above are its copies for the walk; the tangent frame's rows (east / up / north) and
+    // the fill are read from it.
+    const SurfaceFrame* m_surface = nullptr;
     double m_estGeo[4] = {0, 0, 0, 0};
     uint32_t m_bankSrv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
     uint32_t m_bankDeriv[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
@@ -605,6 +598,16 @@ private:
     int m_lighting = 0;
     int m_camLevelAbs = 0;
     bool m_drosteOn = false;
+    // M12 step 4d instrument: the frustum transport compared, per plane per level, hand (Q^T n,
+    // d / sigma) against PullPlane through the level's gauge placement (ProbeTransport).
+    struct TransportProbeRow {
+        uint32_t slot = 0;
+        int rel = 0, plane = 0;
+        double hand[4] = {}, pulled[4] = {};
+    };
+    void ProbeTransport(const TransportProbeRow* rows, int n);
+    UlpTally m_probeN, m_probeD;
+    uint64_t m_probeFp = 0, m_probeWalks = 0, m_probeDumps = 0;
     // M10: the level slots whose limb PsLimb draws this frame, farthest first (each dims what is
     // behind it, so the nearer limb must composite last).
     uint32_t m_limbSlots[kMaxLevels] = {};

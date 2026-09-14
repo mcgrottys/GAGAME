@@ -60,10 +60,17 @@ hal::RootLayout Renderer::SharedGraphicsLayout() {
         .Table({hal::SrvRange(0, hal::kUnbounded, 1), hal::SrvRange(0, hal::kUnbounded, 2),
                 hal::SrvRange(0, hal::kUnbounded, 3), hal::SrvRange(0, hal::kUnbounded, 4),
                 hal::SrvRange(0, hal::kUnbounded, 5), hal::SrvRange(0, hal::kUnbounded, 6)})
-        // b2: the shared SURFACE constants slot (vqview's mechanism for letting later layers
-        // evaluate the water surface). Bound by whichever layer owns the surface; buoyant
-        // things read it. Read-only sharing of one buffer; no second upload.
-        .Cbv(2);
+        // b2: THE SURFACE constants (Common.hlsli's SurfaceCb, ga::ComposedSurfaceCb) --
+        // vqview's mechanism for letting later layers evaluate one surface, finally bound
+        // (M12 step 4g): the frame loop fills the rows once through SurfaceFrame::Fill,
+        // RenderFrame pushes them once and binds them here before any layer records, and every
+        // layer that samples the planet reads that one buffer. One upload a frame, no copies.
+        .Cbv(2)
+        // b3: the globe's sky constants (Globe.hlsl's GlobeSkyCb: the camera basis its sky and
+        // limb passes rebuild their rays from), moved off b2 so the surface could take it.
+        // Appended, so the parameter indices 0..4 every bind site names are unchanged: this
+        // one is 5.
+        .Cbv(3);
     rl.Sampler(hal::StaticSampler(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
                                   D3D12_TEXTURE_ADDRESS_MODE_CLAMP))
         .Sampler(hal::StaticSampler(1, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
@@ -254,6 +261,9 @@ void Renderer::RenderFrame(const Camera& cam, float timeSec, float dt) {
     }
 
     const D3D12_GPU_VIRTUAL_ADDRESS sceneCb = m_gpu->PushConstants(&sc, sizeof(sc));
+    // M12 step 4g: the surface's rows (b2), pushed once beside the scene's and bound below for
+    // every layer; SurfaceFrame::Fill wrote them into surfaceCb this frame (FrameLoop.cpp).
+    const D3D12_GPU_VIRTUAL_ADDRESS surfaceVa = cmd.Push(surfaceCb);
 
     // ---- opaque layers into the HDR target
     cmd.Barrier(m_sceneColor, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -272,6 +282,7 @@ void Renderer::RenderFrame(const Camera& cam, float timeSec, float dt) {
 
     cmd.GraphicsRoot(m_rootSig.Get());
     cmd.GraphicsConstantsAt(0, sceneCb);
+    cmd.GraphicsConstantsAt(4, surfaceVa);   // b2: the surface, once, for every layer (4g)
     if (m_fieldTableVa) cmd.GraphicsSrvAt(2, m_fieldTableVa);
     cmd.GraphicsBindless(3);
 

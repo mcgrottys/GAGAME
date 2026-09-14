@@ -52,8 +52,8 @@ cbuffer GlobeCb : register(b1) {
                         // (BC5), z = surface residency map, w = normal residency map
     float4 gStreamF;    // x = surface on, y = normal on, z = planet is Mars, w = unused
     // M6i: the composed channels (color cube + window, height cube) + the M6g one-world frame
-    // rows, shared VERBATIM with every other layer that samples this planet's surface.
-    GA_COMPOSED_CB_ROWS
+    // rows, shared VERBATIM with every other layer that samples this planet's surface, are
+    // Common.hlsli's SurfaceCb (b2) since M12 step 4g -- one buffer, not a copy in this one.
     float4 gEstGeo;     // estuary CUDEM window (deg): lon0, lat1, 1/lonSpan, 1/latSpan
                         // (w also gates: 0 = absent). The globe FOUNDATION-SINKS a few metres
                         // inside it so the sharp CUDEM surface owns the depth buffer there.
@@ -1473,8 +1473,8 @@ struct SkyVsOut {
 
 SkyVsOut VsSky(uint vid : SV_VertexID) {
     // Fullscreen triangle. The pixel ray is rebuilt in PsSky from the camera basis handed in
-    // through b2 (the shared-surface CBV slot, which the globe never uses otherwise); only the
-    // NDC coordinate rides through here.
+    // through b3 (the globe's own root CBV; M12 step 4g moved it off b2, which is the surface's
+    // now); only the NDC coordinate rides through here.
     const float2 xy = float2((vid == 1) ? 3.0f : -1.0f, (vid == 2) ? 3.0f : -1.0f);
     SkyVsOut o;
     // M6g: z = 0 (reversed-Z infinity) + a GREATER_EQUAL depth test in the PSO means this
@@ -1485,7 +1485,7 @@ SkyVsOut VsSky(uint vid : SV_VertexID) {
     return o;
 }
 
-cbuffer GlobeSkyCb : register(b2) {
+cbuffer GlobeSkyCb : register(b3) {
     float4 gSkyFwd;     // camera forward, w = tan(fovY/2)
     float4 gSkyRight;   // camera right,  w = aspect
     float4 gSkyUp;      // camera up

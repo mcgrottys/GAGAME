@@ -26,7 +26,7 @@
 //    4. ONE RENDER PATH -- shaders/Compose.hlsli. The renderer knows CHANNELS, not sources:
 //       earth color is earth color, earth height is earth height. The globe and the terrain
 //       call the SAME ComposedColor/ComposedHeight functions on the SAME constants
-//       (ComposedSurfaceCb, filled by FillComposedCb alone), so they CANNOT disagree.
+//       (ComposedSurfaceCb, filled by SurfaceFrame::Fill alone), so they CANNOT disagree.
 //
 //  GA hook: a layer is any object with a Sample(); the stack walk is an ordered composition of
 //  operators. Raster operators over multivector-valued layers (contrast amplification, fades,
@@ -262,9 +262,10 @@ private:
 //   +Z: dir = ( s, -t,  1)   -Z: dir = (-s, -t, -1)     with s = 2u-1, t = 2v-1.
 
 // ---- 4. the one render path's constants ----------------------------------------------------
-// Mirrors GA_COMPOSED_CB_ROWS in Common.hlsli (8 float4 rows -- count on BOTH sides after any
-// edit). Every layer that samples a planet's composed channels embeds these rows and fills
-// them through FillComposedCb ALONE, so no two layers can disagree on the math.
+// Mirrors GA_COMPOSED_CB_ROWS in Common.hlsli (count rows on BOTH sides after any edit): the
+// rows of SurfaceCb (b2), ONE buffer the frame loop fills through SurfaceFrame::Fill ALONE
+// (compose/SurfaceFrame.h, M12 step 4a) and the renderer binds once a frame for every layer
+// that samples a planet's composed channels (M12 step 4g), so no two can disagree on the math.
 struct ComposedSurfaceCb {
     uint32_t u[4];    // color cube SRV, color cube residency map, window SRV, window res map
     uint32_t u2[4];   // height cube SRV + residency map, height WINDOW SRV + residency map
@@ -278,7 +279,9 @@ struct ComposedSurfaceCb {
     float r2[4];
     uint32_t u4[4];   // M7f: detail color window (z17) SRV + residency, fine edit mask SRV
     float det[4];     // detail uv from window uv: offset xy, scale z; w = fine edit mask on
-    float ed[4];      // fine edit mask box in window uv: offset xy, scale zw
+    float ground[4];  // M12 step 4f: ground texel (m) at mip 0 -- the cube, the z14 window,
+                      // the z17 detail (Lattice::GroundRes(0)); w spare. Was ed[4], the fine
+                      // edit mask box, dead since M9ay.
     uint32_t u5[4];   // M9ap PAGES: colour array SRV, array residency SRV, window slice,
                       // detail slice. u5[0] == ~0 means the old three-tenant path.
     uint32_t u6[4];   // M9aq HEIGHT PAGES: height array SRV, array residency SRV, window
@@ -295,15 +298,7 @@ using ColorFrame = Lattice;
 // isolation. Returns false (and logs FAILs) if any contract is broken.
 bool RunComposeSelfTest();
 
-// M9ap: when `window == colorCube` (and detailWin likewise) the colour is ONE page tenant
-// and winSlice/detSlice name the Mercator pages inside it; the shader takes the pages path.
-void FillComposedCb(ComposedSurfaceCb& cb, const ResidencyManager* rm, int colorCube,
-                    int window, int heightCube, int heightWindow, double orgPxX,
-                    double orgPxY, double sizePx, int zBase, double planetR,
-                    const double east[3], const double up[3], const double north[3],
-                    bool stencilOverlay, int maskPages = -1, int detailWin = -1,
-                    const double* detOrgPx = nullptr, int detailZ = 17,
-                    uint32_t winSlice = UINT32_MAX, uint32_t detSlice = UINT32_MAX,
-                    uint32_t hgtWinSlice = UINT32_MAX);
+// M12 step 4a: the fill is SurfaceFrame::Fill (compose/SurfaceFrame.h) -- the surface
+// declared once fills its own rows; the M9ap pages rule is stated in its banner.
 
 }  // namespace ga
