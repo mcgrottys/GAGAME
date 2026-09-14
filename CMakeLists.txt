@@ -71,6 +71,8 @@ add_executable(gagame
   src/scene/View.cpp
   src/scene/SceneSchema.cpp
   src/scene/SceneBuilder.cpp
+  src/scene/SceneReload.cpp
+  src/scene/SchemaDoc.cpp
   src/scene/WaterComponent.cpp
   src/scene/Rail.cpp
   src/scene/Entity.cpp

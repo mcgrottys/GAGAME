@@ -76,6 +76,10 @@ public:
     const JsonValue& Resolved() const { return m_doc; }
     JsonValue& Document() { return m_doc; }
     const std::string& Base() const { return m_base; }
+    // M12 step 5f: every file this fold actually READ, in the order it read them (the base
+    // chain, then each include depth first) -- the chain the hot reload watches. An optional
+    // include that was absent is not in it: there is nothing to watch.
+    const std::vector<std::string>& Files() const { return m_files; }
 
     // The canonical text of a document.
     static std::string WriteJson(const JsonValue& v);
@@ -89,6 +93,7 @@ private:
     JsonValue m_doc;
     std::string m_base;
     std::vector<std::string> m_loading;   // the include chain, for the cycle guard
+    std::vector<std::string> m_files;     // every file read, in read order (Files())
 };
 
 // ---- the pure laws, exported for the tests --------------------------------------------------

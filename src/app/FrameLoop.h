@@ -76,6 +76,7 @@
 #include "render/Camera.h"
 #include "scene/Route.h"
 #include "scene/WaterComponent.h"
+#include "scene/SceneReload.h"
 #include "sim/SimClock.h"
 #include "scene/Entity.h"   // M12 step 5e: the hull as a node (its step state, its water)
 #include "scene/Portal.h"   // M12 step 5e: the Droste link and its cycle as a node
@@ -132,6 +133,9 @@ private:
     // which is why it is here and not in the component: that is construction, not a property
     // fan-out. The component names the need through this adapter and this does the work.
     void ReconfigureWaveField(const WaterSceneConfig& cfg);
+    // M12 step 5f: the `water` section's fan-out at reload -- the sea layer's four numbers, and
+    // the wavefield/closures/fleet subtree through 5c's own WaterComponent::Apply.
+    void ApplyWater();
     class WaveRebuild final : public scene::WaterComponent::Rebuild {
     public:
         explicit WaveRebuild(FrameLoop* fl) : m_fl(fl) {}
@@ -147,6 +151,18 @@ private:
     const Scene& m_S;
     Assembly& m_A;
     WaveRebuild m_waveRebuild{this};
+
+    // M12 step 5f: THE WHOLE SCENE HOT-RELOADS (scene/SceneReload.h). `m_live` is the session's
+    // own copy of the document's sections -- the LIVE state a reload writes, where `m_S` is the
+    // record the run was BUILT from and stays const -- and each target's fanOut carries the
+    // written fields to the objects that are not that struct (the camera's optics, the sea
+    // layer's four water numbers, the clock, the predict cadence, and 5c's water Apply).
+    scene::SceneDocument m_live;
+    scene::SceneReload m_reload;
+    // THE FRAME A PLACEMENT RESOLVES IN (scene/Props.h PoseFrame): the surface's own tangent
+    // rows and the planet's radius. A view's set carries `at`, and a placement without a frame
+    // refuses rather than guessing a planet -- which would take the whole view set down with it.
+    scene::PoseFrame m_poseFrame;
 
     // M12 step 5d: the scene's LIST elements this session reads, looked up ONCE in Session() and
     // held as values -- a named lookup is a string compare, and the frame reads some of these

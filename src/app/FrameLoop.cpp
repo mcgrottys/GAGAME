@@ -1234,7 +1234,177 @@ std::optional<int> FrameLoop::Session() {
         eo.gpu = &gpu;
         e->Configure(eo);
     }
+
+    // ---- M12 step 5f: ARM THE WHOLE-SCENE HOT RELOAD (scene/SceneReload.h).
+    //
+    // THE CHAIN, NOT THE FILE. 5c watched data/wave_scene.json, which is ONE overlay of a fold
+    // whose chain is the base scene, the scene THAT inherits, every `include` in order and the
+    // rail this run flies. So the fold is run again here -- deterministically, from the same
+    // flags, by the same function the boot and --print-scene use -- to learn which files it
+    // actually read, and every one of them gets a watcher. The water's watcher is ADOPTED
+    // (Assembly::sceneWatch, already running on that file with its own mtime cell): one watcher
+    // per file, and its poll now belongs to the reload rather than to WaterComponent::Reload.
+    //
+    // THE TARGETS. One per section, taken from the ROOT TABLE'S OWN declaration -- the schema
+    // and the offset both -- so this list cannot drift from the file's sections; then one per
+    // live node the scene declares. A section with no fanOut is not inert: its Restart keys are
+    // REPORTED at reload, which is the whole difference between "not applied" and "ignored".
+    {
+        scene::SceneBuilder rb;
+        SceneArgs ra;
+        std::string rwhy2;
+        if (!BuildScene(opt, rb, ra, &rwhy2)) {
+            Log("[scene] hot reload NOT armed: the boot's own fold does not resolve again (%s)",
+                rwhy2.c_str());
+        } else {
+            m_live = static_cast<const scene::SceneDocument&>(S);
+            m_reload.Configure(
+                [this](scene::SceneBuilder& b, std::string* why) {
+                    SceneArgs a;
+                    return BuildScene(m_opt, b, a, why);
+                },
+                rb.Resolved());
+            for (const std::string& f : rb.Files()) {
+                const bool isWater = (f == std::string(m_A.kScenePath));
+                m_reload.Watch(f, isWater ? &m_A.sceneWatch : nullptr,
+                               isWater ? &m_A.waterSceneMtime : nullptr);
+            }
+            if (m_rail.Loaded() && !m_rail.Path().empty()) m_reload.Watch(m_rail.Path());
+            using RT = scene::SceneReload::Target;
+            auto section = [this](const char* key, std::function<void()> fan = nullptr,
+                                  std::vector<std::string> lists = {}) {
+                const scene::PropDecl* d = scene::SceneFileSchema().Find(key);
+                if (!d || !d->sub) return;
+                RT t;
+                t.path = key;
+                t.schema = d->sub;
+                t.instance = reinterpret_cast<char*>(&m_live) + d->offset;
+                t.fanOut = std::move(fan);
+                t.lists = std::move(lists);
+                m_reload.Add(std::move(t));
+            };
+            section("scene");   // all Restart: a label, the layer law, the planet, the start view
+            section("data");    // every path is read where a file is opened: all Restart
+            section("time", [this] {
+                m_timeScale = m_live.time.timeScale;
+                m_windowSec = m_live.time.windowDays * 86400.0;
+                m_paused = m_live.time.paused;
+            });
+            section("sun", [this] {
+                // `source` is Restart (the AST's solar edges are registered from it at boot, so
+                // switching it live would make docs/GA_AST.md describe a path the run does not
+                // walk); the pinned pair is the renderer's own two floats, read every frame --
+                // and inert under the ephemeris, by the declaration's own meaning.
+                if (m_live.sun.source == Scene::kPinned) {
+                    m_A.renderer.sunAzimuthDeg = m_live.sun.az;
+                    m_A.renderer.sunElevationDeg = m_live.sun.el;
+                }
+            });
+            section("sea");     // the storm and the datum are read where the sea state is built
+            section("water", [this] { ApplyWater(); }, {"fleet.boats"});
+            section("streaming", [this] {
+                m_kPredictEvery = (std::max)(1u, m_live.streaming.predictEvery);
+            });
+            section("capture");   // the dump, the size and the hold are the run's identity
+            section("rails");     // the rail is resolved once, against the tower it was built in
+            m_poseFrame.planetR = m_A.planetR;
+            for (int i = 0; i < 3; ++i) {
+                m_poseFrame.east[i] = m_A.surface.east[i];
+                m_poseFrame.up[i] = m_A.surface.up[i];
+                m_poseFrame.north[i] = m_A.surface.north[i];
+            }
+            m_poseFrame.valid = true;
+            if (!m_startView.p.name.empty()) {
+                RT t;
+                t.path = "views." + m_startView.p.name;
+                t.schema = &scene::ViewSchema();
+                t.instance = &m_startView.p;
+                t.frame = &m_poseFrame;
+                t.fanOut = [this] {
+                    // THE OPTICS, through 5b's own conversion (View.h: the declaration is
+                    // degrees, the Camera holds radians). The eye itself is Restart: this run's
+                    // camera is the session's state, moved by WASD, the rails and the chase cam.
+                    m_cam.fovY = scene::View::FovRadOf(m_startView.p.fovY);
+                    m_cam.nearZ = m_startView.p.nearZ;
+                };
+                m_reload.Add(std::move(t));
+            }
+            if (!m_portalDecl.p.name.empty()) {
+                RT t;
+                t.path = "portals." + m_portalDecl.p.name;
+                t.schema = &scene::PortalSchema();
+                t.instance = &m_portalDecl.p;   // `lighting` is read every frame from here
+                m_reload.Add(std::move(t));
+            }
+            for (auto& e : m_entities) {
+                RT t;
+                t.path = std::string("entities.") + e->Name();
+                t.schema = &scene::EntitySchema();
+                scene::Entity* ep = e.get();
+                t.apply = [ep](const scene::PropSet& p) { ep->Apply(p); };
+                m_reload.Add(std::move(t));
+            }
+            if (const SceneEffect* fx = S.EffectOfType("slice.plane")) {
+                // A typed element answers to TWO schemas (SceneBuilder::ElementChain): its own
+                // (name, type, enabled) and its type's (d). Two targets, so every key under the
+                // element is seen by one of them -- a key covered by neither would be a hole in
+                // the report, which is the one thing this must not have. The element's own half
+                // is all Restart (`enabled` decides the AST edge at boot), so it REPORTS and never
+                // applies: no instance, no apply.
+                const std::string fxPath = std::string("effects.") + fx->p.name;
+                RT a;
+                a.path = fxPath;
+                a.schema = scene::SceneFileSchema().Find("effects")->sub;
+                m_reload.Add(std::move(a));
+                RT b;
+                b.path = fxPath;
+                b.schema = &scene::SlicePlaneSchema();
+                b.apply = [this](const scene::PropSet& p) { m_A.slice.Apply(p); };
+                m_reload.Add(std::move(b));
+            }
+            if (!m_reload.Ready(&rwhy2)) {
+                Log("[scene] hot reload NOT armed: %s", rwhy2.c_str());
+            }
+        }
+    }
     return std::nullopt;
+}
+
+// M12 step 5f: THE WATER SECTION'S FAN-OUT, both halves. The scene's own three numbers are the
+// sea layer's, read every frame from the layer; the wavefield/closures/fleet subtree is 5c's,
+// and it goes through WaterComponent::Apply -- the SAME call the boot made -- rather than being
+// applied a second way here. `WaterSceneDoc` is the reduction app/Scene.h already declares, so
+// the live section and data/wave_scene.json reach that component through one door.
+void FrameLoop::ApplyWater() {
+    if (SeaLayer* sea = m_A.sea) {
+        sea->foamIntensity = m_live.water.foam;
+        sea->targetEdgePx = m_live.water.edgePx;
+        sea->heightScale = m_live.water.heightScale;
+        sea->sweCurrentGain = m_live.water.swe.gain;
+    }
+    const scene::PropDecl* d = scene::SceneFileSchema().Find("water");
+    if (!d || !d->sub) return;
+    JsonValue section = scene::PropSet::Defaults(*d->sub, &m_live.water).ToJson();
+    // THE BOATS ARE A LIST, which a PropSet does not carry (5a's law) -- ToJson writes it as []
+    // -- so they come from the document being applied. Without this line the first reload of
+    // ANY file in the chain handed the component an empty fleet.
+    if (const JsonValue* boats = scene::SceneReload::At(m_reload.Document(), "water.fleet.boats")) {
+        if (JsonValue* fl = scene::JsonGet(section, "fleet")) scene::JsonSet(*fl, "boats", *boats);
+    }
+    scene::PropSet set(scene::WaterSchema());
+    scene::WaterComponent::Fleet fleet;
+    std::string why;
+    if (!m_A.water.ReadJson(WaterSceneDoc(section), set, fleet, &why)) {
+        Log("[scene] water: %s -- the previous water set stands", why.c_str());
+        return;
+    }
+    const int boatsWere = m_A.waterScene.fleetCount;
+    m_A.water.StageFleet(fleet);
+    m_A.water.Apply(set);
+    // The instrument the [water] apply fingerprint cannot be: that hash is a PropSet's, and a
+    // PropSet carries no list, so an emptied fleet would read as an unchanged set.
+    Log("[scene] water fleet: %d boats (was %d)%s", m_A.waterScene.fleetCount, boatsWere,
+        m_A.waterScene.fleetCount == boatsWere ? "" : " -- the fleet MOVED");
 }
 
 // M12 step 5e: THE ENTITIES' STEP, from both clock branches (stepBoat's contract: the quanta
@@ -2075,8 +2245,13 @@ bool FrameLoop::Frame() {
             // key's path, and the accepted diff applied through THE SAME Apply the boot used.
             // The two deliberate changes are here: the sea's four closures and the auto edit
             // floor now reload, because there is only one set left to apply.
+            // M12 step 5f: THE WHOLE SCENE, not one file (scene/SceneReload.h). The poll is
+            // one atomic exchange per watched file; the stat and the re-resolution run only
+            // when a directory said the file moved, exactly as 5c's did. The water reaches
+            // WaterComponent::Apply through the `water` target's fan-out, so the reload law
+            // 5c wrote is called from here and not duplicated.
             PROF_BEGIN();
-            m_A.water.Reload(frame);
+            m_reload.Poll(frame);
             PROF_END(1);
             // M8: bucket-watch + background solve + upload/swap for the solved
             // wave field, BEFORE the bank recomposes so the kernel binds a whole

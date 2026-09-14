@@ -158,6 +158,12 @@ public:
     // The prototype's value of one key, as JSON -- the default an absent key is completed with.
     JsonValue DefaultOf(const PropDecl& d) const;
 
+    // M12 step 5f: THE UI'S SCENE CONTRACT (docs/scene_schema.json, src/scene/SchemaDoc.cpp).
+    // Every reachable type's table -- key, type, field width, quantity, unit, default, doc and
+    // Hot|Restart -- plus the section -> node map and the placement sugar's four spellings,
+    // written at boot the way docs/ga_ast.json is. A fourth reader of one table.
+    static void WriteSchema(const char* path);
+
     static bool IsComment(const std::string& key) { return !key.empty() && key[0] == '_'; }
     // Replaced whole by an overlay (a versor or a colour is a value, not a namespace).
     static bool Atomic(PropType t) {
@@ -205,6 +211,12 @@ public:
 
     const PropValue* Get(const char* key) const;
     const PropSet* Object(const char* key) const;
+    // M12 step 5f: THE RESTART HOLD-BACK, and the log's "key=value". Take copies ONE (possibly
+    // dotted, as Diff spells it) value from a set of the same schema -- what a reload does with
+    // a Restart key it reports and does not apply, so the set the run carries stays the set the
+    // run is in. ValueAt is that key's value as the JSON a file would carry.
+    bool Take(const PropSet& from, const std::string& key);
+    JsonValue ValueAt(const std::string& key) const;
     const Schema& Type() const { return *m_schema; }
 
 private:

@@ -92,6 +92,7 @@
 #include "scene/SceneSchema.h"
 #include "scene/View.h"
 #include "scene/WaterComponent.h"
+#include "scene/SceneReload.h"
 #include "sim/BathyModel.h"
 #include "sim/GlobeModel.h"
 #include "sim/VesselSpec.h"
@@ -1910,6 +1911,149 @@ bool RunSceneSelfTest() {
         }
     }
 
+    // ---- 13. [reload] THE WHOLE SCENE, DIFFED AND APPLIED (M12 step 5f) ---------------------
+    // 5c pinned the reload law for ONE file; this pins it for the document. The four cases the
+    // law has to get right are one document apart: a Hot key that MOVED, a Restart key that
+    // moved (reported, NOT applied, and not reverted either -- the run keeps what it was built
+    // with), a key the candidate no longer CARRIES (which must come back as its DECLARED
+    // default, never as the value the run happens to hold), and a named-array entry the overlay
+    // REMOVED (5a's `"remove": true`, which no property write can stand in for and which the
+    // residue walk therefore has to name). Beside them: the address of a named element, the
+    // pick that lets a typed element answer to two schemas without either seeing the other's
+    // keys, and idempotence -- the same candidate twice is zero fields changed.
+    {
+        std::string why;
+        const JsonValue base = ParseOrDie(g,
+            "{\"scene\": {\"name\": \"r\"},"
+            " \"views\": [{\"name\": \"sea\", \"fovY\": 50}, {\"name\": \"spare\"}],"
+            " \"effects\": [{\"name\": \"cut\", \"type\": \"slice.plane\", \"d\": 3}],"
+            " \"water\": {\"closures\": {\"foamOpacity\": 0.5},"
+            "            \"wavefield\": {\"cellM\": 3, \"bankTexelM\": 1.2}}}");
+        SceneBuilder was;
+        g.True(was.Overlay(base, "base", "", &why) && was.Resolve(&why),
+               (std::string("[reload] the document the run is in resolves: ") + why).c_str());
+        // The candidate: the same base, then ONE overlay that moves a Hot key, moves a Restart
+        // key, drops a key entirely and removes a named entry. The fold is the real one.
+        const JsonValue edit = ParseOrDie(g,
+            "{\"views\": [{\"name\": \"spare\", \"remove\": true}],"
+            " \"water\": {\"wavefield\": {\"cellM\": 4, \"bankTexelM\": 2}}}");
+        const JsonValue baseNoFoam = ParseOrDie(g,
+            "{\"scene\": {\"name\": \"r\"},"
+            " \"views\": [{\"name\": \"sea\", \"fovY\": 50}, {\"name\": \"spare\"}],"
+            " \"effects\": [{\"name\": \"cut\", \"type\": \"slice.plane\", \"d\": 3}],"
+            " \"water\": {\"wavefield\": {\"cellM\": 3, \"bankTexelM\": 1.2}}}");
+        SceneBuilder now;
+        g.True(now.Overlay(baseNoFoam, "base", "", &why) && now.Overlay(edit, "edit", "", &why) &&
+                   now.Resolve(&why),
+               (std::string("[reload] the candidate resolves: ") + why).c_str());
+
+        // (A) THE ADDRESS: a section, a nested key, and a NAMED array element by its name.
+        g.True(SceneReload::At(was.Resolved(), "water.wavefield.cellM") != nullptr &&
+                   SceneReload::At(was.Resolved(), "water.wavefield.cellM")->number == 3.0,
+               "[reload] At walks a dotted section path");
+        g.True(SceneReload::At(was.Resolved(), "views.sea") != nullptr,
+               "[reload] At addresses a named array element by its name");
+        g.True(SceneReload::At(was.Resolved(), "views.nope") == nullptr,
+               "[reload] At answers null for an element that is not there");
+        g.True(SceneReload::At(now.Resolved(), "views.spare") == nullptr,
+               "[reload] the named-array remove took the element out of the fold");
+
+        // (B) THE PICK: a typed element answers to TWO schemas and neither sees the other's keys.
+        const Schema* effectS = SceneFileSchema().Find("effects")->sub;
+        const JsonValue* fx = SceneReload::At(now.Resolved(), "effects.cut");
+        g.True(fx != nullptr, "[reload] the typed element is in the document");
+        if (fx) {
+            const JsonValue own = SceneReload::Pick(*fx, *effectS);
+            const JsonValue typed = SceneReload::Pick(*fx, SlicePlaneSchema());
+            g.True(own.Get("enabled") && !own.Get("d"),
+                   "[reload] the element's own half keeps enabled and drops the type's d");
+            g.True(typed.Get("d") && !typed.Get("name"),
+                   "[reload] the type's half keeps d and drops the element's name");
+        }
+
+        // (C) THE DIFF AND THE APPLY, on the water section.
+        const Schema* waterS = SceneFileSchema().Find("water")->sub;
+        PropSet before = PropSet::Defaults(*waterS, waterS->Prototype());
+        g.True(before.Merge(SceneReload::Pick(*SceneReload::At(was.Resolved(), "water"), *waterS),
+                            "water", &why),
+               "[reload] the run's water set reads back from its document");
+        PropSet acc(*waterS);
+        SceneReload::Verdict v;
+        g.True(SceneReload::Accept(*waterS, *SceneReload::At(now.Resolved(), "water"), before,
+                                   "water", acc, v, &why),
+               (std::string("[reload] the candidate's water section accepts: ") + why).c_str());
+        g.True(v.hot == 2, "[reload] two hot keys: the moved cellM and the dropped foamOpacity");
+        g.True(v.restart == 1 && !v.restartKeys.empty() &&
+                   v.restartKeys[0] == "wavefield.bankTexelM",
+               "[reload] one Restart key, named");
+        g.Same(acc.ValueAt("wavefield.cellM").number, 4.0, "[reload] a Hot key is applied");
+        g.Same(acc.ValueAt("wavefield.bankTexelM").number, FloatAsDouble(1.2f),
+               "[reload] a Restart key is NOT applied: the run keeps what it was built with");
+        g.Same(acc.ValueAt("closures.foamOpacity").number, FloatAsDouble(0.72f),
+               "[reload] a key the candidate no longer carries reverts to its DECLARED default");
+
+        // (D) IDEMPOTENCE: the same candidate over the accepted set is zero fields changed.
+        PropSet again(*waterS);
+        SceneReload::Verdict v2;
+        g.True(SceneReload::Accept(*waterS, *SceneReload::At(now.Resolved(), "water"), acc,
+                                   "water", again, v2, &why),
+               "[reload] the same candidate accepts a second time");
+        g.True(v2.hot == 0, "[reload] idempotent: nothing hot moves the second time");
+        g.True(v2.restart == 1,
+               "[reload] the Restart key is reported every time, because it is still not applied");
+        g.True(SceneBuilder::WriteJson(again.ToJson()) == SceneBuilder::WriteJson(acc.ToJson()),
+               "[reload] and the accepted set is the same set");
+
+        // (E) THE RESIDUE: what no target carries is NAMED, and what a target carries is not.
+        std::vector<std::string> covered{"water", "views.sea"};
+        std::vector<std::string> res;
+        SceneReload::Residue(was.Resolved(), now.Resolved(), "", covered, res);
+        bool sawGone = false, sawWater = false, sawSeaFov = false;
+        for (const std::string& p : res) {
+            if (p == "views.spare (gone)") sawGone = true;
+            if (p.rfind("water", 0) == 0) sawWater = true;
+            if (p.rfind("views.sea", 0) == 0) sawSeaFov = true;
+        }
+        g.True(sawGone, "[reload] a named-array entry the overlay removed is reported by name");
+        g.True(!sawWater, "[reload] a covered section is the target's business, not the residue's");
+        g.True(!sawSeaFov, "[reload] a covered element likewise");
+        std::vector<std::string> none;
+        SceneReload::Residue(was.Resolved(), was.Resolved(), "", none, none);
+        g.True(none.empty(), "[reload] a document against itself has no residue");
+
+        // (E2) THE LIST LAW. A PropSet carries no list, so a list under a target is a VALUE
+        // compared whole: Hot where the target's fan-out consumes it, reported as needing a
+        // restart where nothing does, and silent where it did not change. (The defect this pins:
+        // the water fan-out once rebuilt its section from a PropSet and handed the component
+        // an EMPTY fleet on every reload.)
+        {
+            const JsonValue a = ParseOrDie(g,
+                "{\"fleet\": {\"enabled\": false, \"boats\": [{\"speed\": 4}]}}");
+            const JsonValue b = ParseOrDie(g,
+                "{\"fleet\": {\"enabled\": false, \"boats\": [{\"speed\": 4}, {\"speed\": 5}]}}");
+            SceneReload::Verdict eat, skip, same;
+            SceneReload::Lists(*waterS, &a, b, {"fleet.boats"}, eat);
+            SceneReload::Lists(*waterS, &a, b, {}, skip);
+            SceneReload::Lists(*waterS, &a, a, {"fleet.boats"}, same);
+            g.True(eat.hot == 1 && eat.restart == 0 && !eat.hotKeys.empty() &&
+                       eat.hotKeys[0] == "fleet.boats=[2 elements]",
+                   "[reload] a changed list the fan-out consumes is hot, named with its size");
+            g.True(skip.hot == 0 && skip.restart == 1,
+                   "[reload] a changed list nothing consumes is reported as needing a restart");
+            g.True(same.hot == 0 && same.restart == 0, "[reload] an unchanged list is silent");
+        }
+
+        // (F) AN UNKNOWN KEY REFUSES THE WHOLE RELOAD -- at the fold, before any target is
+        // reached, which is why a refused candidate cannot half-apply.
+        SceneBuilder bad;
+        std::string badWhy;
+        g.True(bad.Overlay(base, "base", "", &badWhy) &&
+                   bad.Overlay(ParseOrDie(g, "{\"water\": {\"nope\": 1}}"), "edit", "", &badWhy),
+               "[reload] the bad overlay applies to the document");
+        g.True(!bad.Resolve(&badWhy), "[reload] an unknown key refuses the candidate");
+        g.Has(badWhy, "water.nope", "[reload] and the refusal names the path");
+    }
+
     if (g.ok) {
         Log("[scene] ---- PASS (%d checks): Registry<T> == VesselRegistry / LoaderRegistry on the "
             "built-in kinds, the property table (defaults, units through GaUnits, the Velocity-"
@@ -1926,7 +2070,12 @@ bool RunSceneSelfTest() {
             "Resolved -> WriteJson -> Load -> Resolve the identity), and the nodes of 5e -- "
             "[rail] the shipped rails printed equal to their files and Rail::At bitwise against "
             "the hand tables, [portal] the cycle as the session declared it, [effect] the slice "
-            "plane's edge in a valid AST, [entity] the freshness defaults ----",
+            "plane's edge in a valid AST, [entity] the freshness defaults -- and [reload] the "
+            "whole scene of 5f (the address and the pick, a Hot key applied, a Restart key "
+            "reported and not applied, a removed key back to its declared default, a named-array "
+            "remove named by the residue, a list under a target as a value -- hot where consumed, "
+            "reported where not --, idempotence, and an unknown key refusing the candidate whole) "
+            "----",
             g.checks);
     } else {
         Log("[scene] ---- FAIL (%d checks) ----", g.checks);

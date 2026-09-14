@@ -50,6 +50,7 @@
 #include "scene/VesselLayer.h"
 #include "core/TileProviders.h"
 #include "core/SceneConfig.h"
+#include "scene/SceneReload.h"
 #include "sim/BathyModel.h"
 #include "sim/GlobeModel.h"
 #include "sim/CurrentModel.h"
@@ -1273,6 +1274,29 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         ga::ast::Validate();
         ga::ast::WriteMarkdown("docs/GA_AST.md");   // the scriptorium indexes this
         ga::ast::WriteJson("docs/ga_ast.json");     // the Blueprint contract (M7u)
+        // M12 step 5f: THE OTHER TWO CONTRACTS THE UI CONSUMES (the plan's section F), written
+        // here because this is where a generated document is written -- same boot, same
+        // determinism, same LF, checked in, a zero-line diff when nothing moved. The scene
+        // contract is read off the Schema tables; the name contract adds the registries that
+        // live outside scene/ and whose owner is the only honest source of "what this build
+        // registered".
+        {
+            scene::Schema::WriteSchema("docs/scene_schema.json");
+            std::vector<scene::RegistryDoc> extra;   // (the hulls: WriteRegistries builds them)
+            // The loader registries are built where a file is opened (the bathy grid and the
+            // current field, Assembly.cpp; --load-field's own), each registering the types it
+            // can answer for -- so this is the union of what those sites register, named here
+            // because there is no one live registry to read.
+            extra.push_back({"loader", "a field file type (core/FieldLoader.h LoaderRegistry)",
+                             {"f32", "json"}});
+            extra.push_back({"tool", "a one-shot mode in `tools[]` (--tool name[:args])",
+                             {"bathy-map", "dump-water-state", "export", "fidelity-map",
+                              "gis-dump", "load-field", "ocean-probe", "pack-tiles", "pack-trees",
+                              "sea-verify", "selftest", "swe-cycle", "swe-uv", "trace",
+                              "tree-audit", "twin-surface", "warm-inlet", "warm-trees",
+                              "water-map", "wave-map"}});
+            scene::WriteRegistries("docs/registries.json", extra);
+        }
         // The survey pack loads whenever it exists: the land MASKS are the default
         // classifier (always on); the VECTOR overlay draws only under --stencil.
         if (!marsMode && gisStencil.Load("data/gis/gis.json")) {

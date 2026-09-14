@@ -320,6 +320,7 @@ bool SceneBuilder::Load(const std::string& path, std::string* why) {
     if (!err.empty()) return Refuse(why, path + ": " + err);
     if (!IsObject(doc)) return Refuse(why, path + ": a scene file is an object");
     if (m_base.empty()) m_base = path;
+    m_files.push_back(path);
     m_loading.push_back(path);
     // The scene this one inherits: loaded first, so this file's keys win over it. M12 step 5d:
     // a COMPLETE document carries every declared key, so a resolved recipe says `"base": ""` --
@@ -386,6 +387,7 @@ bool SceneBuilder::ApplyIncludes(const JsonValue& doc, std::string* why) {
             if (p == file) return Refuse(why, file + ": included by itself (a cycle)");
         }
         m_loading.push_back(file);
+        m_files.push_back(file);
         const bool ok = Overlay(sub, file, at, why) && ApplyIncludes(sub, why);
         m_loading.pop_back();
         if (!ok) return false;

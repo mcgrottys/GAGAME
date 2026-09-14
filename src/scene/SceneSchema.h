@@ -66,6 +66,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace ga::scene {
 
@@ -286,6 +287,17 @@ Registry<const Schema*>& LayerSchemas();
 void RegisterBuiltinSceneTypes();
 // The struct defaults as a document: the bottom of the fold.
 JsonValue DefaultDocument();
+
+// M12 step 5f: THE UI'S NAME CONTRACT (docs/registries.json, src/scene/SchemaDoc.cpp). The three
+// schema registries above and the hulls (with each kind's ledger) are read here; the loaders and
+// the one-shot tools are passed in by their owner, because there is no one live registry of
+// either to read -- the owner is the only place that knows what this build registers.
+struct RegistryDoc {
+    std::string name;                   // "loader" | "tool"
+    std::string what;                   // one line: what a name in it selects
+    std::vector<std::string> names;
+};
+void WriteRegistries(const char* path, const std::vector<RegistryDoc>& extra);
 // The element schemas, for a caller that validates one element (the tests).
 const Schema& ViewSchema();
 const Schema& PortalSchema();

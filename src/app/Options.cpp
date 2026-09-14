@@ -523,8 +523,16 @@ SceneArgs Options::ToSets(const Options& o) {
     const bool world = o.seaStart || o.globeStart;
     const char* mode = world ? "world" : (o.gulfStart ? "gulf" : "chart");
     const char* view = o.globeStart ? "orbit" : (o.seaStart ? "sea" : "chart");
+    // M12 step 5f: MARS IS A SCENE FILE (5d's owed finding). --planet mars implies --globe
+    // (there is only orbit there), so it used to land on scenes/merrimack.json with two --sets
+    // over it -- the planet, and the orbit eye at 2.1 radii OF MARS, a number the shim has to
+    // evaluate because a scene file's single value cannot be a function of the planet. Naming
+    // scenes/mars.json instead makes the base file carry both; the sets still write the same
+    // two values over it, so the resolved document is what it was.
     out.scene = !o.scenePath.empty() ? o.scenePath
-                : (world || o.gulfStart) ? "scenes/merrimack.json" : "scenes/chart.json";
+                : (o.planet == "mars")     ? "scenes/mars.json"
+                : (world || o.gulfStart)   ? "scenes/merrimack.json"
+                                           : "scenes/chart.json";
     // M12 step 5d: A NAMED SCENE FILE KEEPS ITS OWN MODE. The law above is what the FLAGS mean --
     // no mode flag is the chart -- so it is written into the document only when the flags are the
     // whole story: no scene file named, or a mode flag given over one. Otherwise `gagame

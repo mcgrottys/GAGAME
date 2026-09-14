@@ -877,4 +877,36 @@ const PropSet* PropSet::Object(const char* key) const {
     return m_objects[static_cast<size_t>(d - m_schema->Decls().data())].get();
 }
 
+bool PropSet::Take(const PropSet& from, const std::string& key) {
+    if (m_schema != from.m_schema) return false;
+    const size_t dot = key.find('.');
+    if (dot != std::string::npos) {
+        const PropDecl* d = m_schema->Find(key.substr(0, dot));
+        if (!d || d->type != PropType::Object) return false;
+        const size_t i = static_cast<size_t>(d - m_schema->Decls().data());
+        if (!m_objects[i] || !from.m_objects[i]) return false;
+        return m_objects[i]->Take(*from.m_objects[i], key.substr(dot + 1));
+    }
+    const PropDecl* d = m_schema->Find(key);
+    if (!d) return false;
+    const size_t i = static_cast<size_t>(d - m_schema->Decls().data());
+    m_values[i] = from.m_values[i];
+    return true;
+}
+
+JsonValue PropSet::ValueAt(const std::string& key) const {
+    const size_t dot = key.find('.');
+    if (dot != std::string::npos) {
+        const PropDecl* d = m_schema->Find(key.substr(0, dot));
+        if (!d || d->type != PropType::Object) return JsonValue{};
+        const size_t i = static_cast<size_t>(d - m_schema->Decls().data());
+        return m_objects[i] ? m_objects[i]->ValueAt(key.substr(dot + 1)) : JsonValue{};
+    }
+    const PropDecl* d = m_schema->Find(key);
+    if (!d) return JsonValue{};
+    const size_t i = static_cast<size_t>(d - m_schema->Decls().data());
+    if (!m_values[i].set) return m_schema->DefaultOf(*d);
+    return PropToJson(*d, m_values[i]);
+}
+
 }  // namespace ga::scene

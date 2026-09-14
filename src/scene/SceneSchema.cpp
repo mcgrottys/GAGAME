@@ -26,15 +26,27 @@ using Q = Quantity;
 constexpr Reload H = Reload::Hot;
 constexpr Reload R = Reload::Restart;
 
+// M12 step 5f: WHAT Hot MEANS HERE. A reload applies a Hot key through a LIVE TARGET
+// (scene/SceneReload.h) -- a struct the run reads after the write. Seven keys were flagged Hot
+// with nowhere honest to land and are Restart now, for two reasons. THE SESSION OWNS THE VALUE
+// at run time: `scene.view` and `views[].at` name the start camera and its eye, which WASD, the
+// rails and the chase camera then move; `views[].gauge` is the Droste level the session re-roots
+// as the eye crosses a link; `views[].viewport` is not read at all (the renderer records the
+// whole target, Renderer::OneView); `scene.name` is a label nothing reads after the boot's
+// [scene] line. THE BOOT DERIVED A DECLARATION FROM IT: `sun.source` decides whether the AST
+// registers the solar edges, and `effects[].enabled` whether it registers the effect's edge, so
+// a live switch would leave docs/GA_AST.md describing a path the run does not walk. A key with
+// no live target is REPORTED at reload ("needs a restart"), never silently written.
+
 const Schema& SceneSchema_() {
     static const Schema* s = [] {
         auto& p = kDoc.scene;
         Schema* sc = new Schema("scene", &p);
-        sc->Bind("name", p.name, "the scene's name (a label)", H)
+        sc->Bind("name", p.name, "the scene's name (a label, read into the boot's [scene] line)", R)
             .BindEnum("mode", p.mode, {"chart", "world", "gulf"},
                       "the layer-enable law: the M1 chart, the one world (estuary + planet), the gulf map", R)
             .Bind("planet", p.planet, "earth | mars", R)
-            .Bind("view", p.view, "the start camera: a name in views[]", H);
+            .Bind("view", p.view, "the start camera: a name in views[]", R);
         return sc;
     }();
     return *s;
@@ -83,7 +95,7 @@ const Schema& SunSchema() {
         auto& p = kDoc.sun;
         Schema* sc = new Schema("sun", &p);
         sc->BindEnum("source", p.source, {"ephemeris", "pinned"},
-                     "the ephemeris at the scene's time and place, or pinned at az/el (--sun)", H)
+                     "the ephemeris at the scene's time and place, or pinned at az/el (--sun)", R)
             .Bind("az", p.az, Q::Angle, "deg", "pinned azimuth, compass", H)
             .Bind("el", p.el, Q::Angle, "deg", "pinned elevation", H);
         return sc;
@@ -287,10 +299,10 @@ const Schema& ViewportSchema() {
     static const Schema* s = [] {
         auto& p = kView.viewport;
         Schema* sc = new Schema("view.viewport", &p);
-        sc->Bind("x", p.x, Q::Dimensionless, "px", "left edge in the target", H)
-            .Bind("y", p.y, Q::Dimensionless, "px", "top edge in the target", H)
-            .Bind("w", p.w, Q::Dimensionless, "px", "width; 0 = the whole target", H)
-            .Bind("h", p.h, Q::Dimensionless, "px", "height; 0 = the whole target", H);
+        sc->Bind("x", p.x, Q::Dimensionless, "px", "left edge in the target", R)
+            .Bind("y", p.y, Q::Dimensionless, "px", "top edge in the target", R)
+            .Bind("w", p.w, Q::Dimensionless, "px", "width; 0 = the whole target", R)
+            .Bind("h", p.h, Q::Dimensionless, "px", "height; 0 = the whole target", R);
         return sc;
     }();
     return *s;
@@ -313,10 +325,10 @@ const Schema& ViewSchema_() {
     static const Schema* s = [] {
         Schema* sc = new Schema("view", &kView);
         sc->Bind("name", kView.name, "the view's name", R)
-            .Bind("at", kView.at, "the eye: {x, alt, z, az, pitch} | {lat, lon, alt[, lookAt]} | {motor}; absent = the mode's default", H)
+            .Bind("at", kView.at, "the eye: {x, alt, z, az, pitch} | {lat, lon, alt[, lookAt]} | {motor}; absent = the mode's default", R)
             .Optional()
             .Bind("fovY", kView.fovY, Q::Angle, "deg", "vertical field of view (--fov)", H)
-            .Bind("gauge", kView.gauge, "the space the eye is expressed in", H)
+            .Bind("gauge", kView.gauge, "the space the eye is expressed in", R)
             .Bind("nearZ", kView.nearZ, Q::Length, "m", "the near plane", H)
             // M12 step 5b: what scene/View.h declares beside the eye -- the third optic, where
             // the recording lands, and the chase camera.
@@ -403,7 +415,7 @@ const Schema& EffectSchema() {
         Schema* sc = new Schema("effect", &kEffect);
         sc->Bind("name", kEffect.name, "the effect's name", R)
             .Bind("type", kEffect.type, "the effect kind (EffectSchemas)", R)
-            .Bind("enabled", kEffect.enabled, "apply it", H);
+            .Bind("enabled", kEffect.enabled, "apply it", R);
         return sc;
     }();
     return *s;
