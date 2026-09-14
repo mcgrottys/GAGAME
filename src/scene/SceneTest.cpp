@@ -28,6 +28,16 @@
 //      entry within one file merges in place (the named-array law, not a refusal).
 //   7. Node: ResolveAlong is Space::ToRoot's fold, Walk is file order with pruning, Find and
 //      Path, a component wired through Configure/Apply.
+//   9. [view] (M12 step 5b) View::Level, the re-levelling of a motor against an up FIELD, is
+//      introduced BESIDE the Euler extraction and must be proven equal to it before anything
+//      reads it: (A) at the six recipe poses and a thousand random ones it reproduces the frame
+//      the rasterizer builds today -- scene::ToCamera then Camera::ViewBasis -- to the float
+//      basis' own resolution; (B) with the world's up as the field it reproduces `poseMotor`
+//      itself, strictly, wherever the pose is outside ViewBasis's degeneracy blend; (C) it is
+//      invariant to a roll of +-30 degrees about the aim, which is what "the roll is removed by
+//      construction" means; (D) it is idempotent; (E) MotorOf inverts Placement::Rigid, which is
+//      how the scene's placement sugar reaches a pose; (F) View::FromCamera then ToCamera is the
+//      identity on a Camera, optics included.
 //   8. The Options shim: --boat without --campos is REFUSED (the plan's one deliberate
 //      non-identity); the implication laws of ParseArgs reach the sets (--rail-flood: headless,
 //      1200 frames, the orbit view, the flood rail); a still's flags reach the active view.
@@ -47,11 +57,14 @@
 #include "scene/Props.h"
 #include "scene/SceneBuilder.h"
 #include "scene/SceneSchema.h"
+#include "scene/View.h"
 #include "sim/BathyModel.h"
 #include "sim/GlobeModel.h"
 #include "sim/VesselSpec.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <string>
 
@@ -667,6 +680,264 @@ bool RunSceneSelfTest() {
         }
     }
 
+    // ---- 9. [view] the re-levelling (M12 step 5b) -------------------------------------------
+    {
+        // The same six rows as src/hal/DxTest.cpp's kViewPoses (tools/stills.sh + the droste
+        // pose). key7km is the sea default: --globe-cam without --globe never moved the eye.
+        struct VP { const char* name; double e, alt, n; float az, pitch; };
+        const VP poses[] = {
+            {"helm", 120.0, 7.0, -10.0, 92.5f, -1.5f},
+            {"helm_ebb", 120.0, 7.0, -10.0, 92.5f, -1.5f},
+            {"bird", 380.0, 1500.0, 10.0, 272.0f, -88.0f},
+            {"key7km", 522.0, 7.0, 72.0, 246.0f, -4.0f},
+            {"globe", 0.0, 200000.0, 0.0, 0.0f, 0.0f},
+            {"droste", 632.0, 71.0, 30.0, 55.0f, 8.0f},
+        };
+        constexpr double kPi = 3.14159265358979323846;
+        auto axesOf = [](const Motor& m, double x[3], double y[3], double z[3]) {
+            x[0] = 1; x[1] = 0; x[2] = 0; m.TransformDir(x[0], x[1], x[2]);
+            y[0] = 0; y[1] = 1; y[2] = 0; m.TransformDir(y[0], y[1], y[2]);
+            z[0] = 0; z[1] = 0; z[2] = 1; m.TransformDir(z[0], z[1], z[2]);
+        };
+        auto eyeOf = [](const Motor& m, double p[3]) {
+            p[0] = p[1] = p[2] = 0.0;
+            m.TransformPoint(p[0], p[1], p[2]);
+        };
+        auto maxAbs3 = [](const double a[3], const double b[3]) {
+            double e = 0.0;
+            for (int i = 0; i < 3; ++i) e = (std::max)(e, std::fabs(a[i] - b[i]));
+            return e;
+        };
+        auto mag3 = [](const double a[3]) {
+            return (std::max)(1.0, std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]));
+        };
+        // A rotor and its negative are ONE rotation, so the sign is aligned before the compare.
+        auto rotorErr = [](const Motor& a, const Motor& b) {
+            double ra[4], rb[4];
+            a.Real(ra);
+            b.Real(rb);
+            double dot = 0.0;
+            for (int i = 0; i < 4; ++i) dot += ra[i] * rb[i];
+            const double sg = dot < 0.0 ? -1.0 : 1.0;
+            double e = 0.0;
+            for (int i = 0; i < 4; ++i) e = (std::max)(e, std::fabs(ra[i] - sg * rb[i]));
+            return e;
+        };
+        auto wrapPi = [kPi](double a) {
+            while (a > kPi) a -= 2.0 * kPi;
+            while (a < -kPi) a += 2.0 * kPi;
+            return a;
+        };
+        // THE FINDING THIS GATE TURNED UP, and the reference the strict half needs.
+        // scene::FromCamera -- the session's poseMotor, moved verbatim in 5a -- writes
+        //     const double rAxis[3] = {std::sin(c.yaw), 0.0, -std::cos(c.yaw)};
+        // and c.yaw is a FLOAT, so std::sin resolves to the float overload: the roll axis is
+        // float-rounded, |rAxis| is 1 +- 1.2e-7, and the motor that comes back is not a unit
+        // rotor. Two consequences, both measured below and both pre-existing: the pose carries
+        // ~1e-7 rad of spurious ROLL (the axis is not quite perpendicular to the aim), and
+        // TransformPoint scales the eye by |r|^2, which moves the position by up to 1e-5 m at
+        // the bird pose's 1500 m altitude on one poseMotor/motorPose round trip. Nothing on the
+        // render path reads that motor today (the rasterizer takes yaw and pitch), so this step
+        // does NOT touch it -- the camera path is moved, not rewritten. The lambda below is the
+        // same construction with the axis in double: the pose the session means, and what the
+        // strict half of the gate holds View::Level against.
+        auto poseMotorExact = [kPi](const Camera& c) {
+            (void)kPi;
+            const double org[3] = {0.0, 0.0, 0.0};
+            const double yAxis[3] = {0.0, 1.0, 0.0};
+            const double y = static_cast<double>(c.yaw);
+            const double rAxis[3] = {std::sin(y), 0.0, -std::cos(y)};
+            return Motor::Translation(c.px, c.py, c.pz) *
+                   Motor::Rotation(org, rAxis, -static_cast<double>(c.pitch)) *
+                   Motor::Rotation(org, yAxis, -y);
+        };
+        double maxAout = 0.0, maxAband = 0.0, maxAeye = 0.0, maxArel = 0.0;
+        double maxB = 0.0, maxBeye = 0.0, maxBrel = 0.0, maxBfloat = 0.0;
+        double maxC = 0.0, maxCeye = 0.0, maxCrel = 0.0, maxD = 0.0;
+        int nA = 0, nB = 0, nBand = 0;
+        auto probe = [&](const Camera& cam, double rollDeg) {
+            const double up[3] = {cam.upHint[0], cam.upHint[1], cam.upHint[2]};
+            const Motor base = scene::FromCamera(cam);
+            const double org[3] = {0.0, 0.0, 0.0}, ex[3] = {1.0, 0.0, 0.0};
+            // A BODY-FRAME roll about the aim: the thing the levelling must not be able to see.
+            const Motor rolled = base * Motor::Rotation(org, ex, rollDeg * kPi / 180.0);
+            const Motor lv = View::Level(rolled, up);
+
+            // (A) the frame the RASTERIZER builds today, for the same pose: the Euler round trip
+            // and then Camera::ViewBasis. That reference is float throughout (Forward() and the
+            // basis are XMFLOAT3), so the residue is the boundary's, not the algebra's -- and
+            // INSIDE the degeneracy blend the float error is amplified by the blend's own
+            // divisor (1 / 0.0145 = 69x), which is why the two bands are reported apart.
+            Camera c2 = cam;
+            scene::ToCamera(rolled, c2);
+            DirectX::XMFLOAT3 ff, rr, uu;
+            c2.ViewBasis(ff, rr, uu);
+            const double rf[3] = {ff.x, ff.y, ff.z};
+            const double ru[3] = {uu.x, uu.y, uu.z};
+            const double rz[3] = {-rr.x, -rr.y, -rr.z};   // the motor's +Z is -right
+            double x[3], y[3], z[3], p[3];
+            axesOf(lv, x, y, z);
+            eyeOf(lv, p);
+            const double ax =
+                (std::max)(maxAbs3(x, rf), (std::max)(maxAbs3(y, ru), maxAbs3(z, rz)));
+            double d[3] = {1.0, 0.0, 0.0};
+            rolled.TransformDir(d[0], d[1], d[2]);
+            const double dn = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            double align = 0.0;
+            for (int i = 0; i < 3; ++i) align += (d[i] / dn) * up[i];
+            const bool inBand = std::fabs(align) >= 0.985;
+            if (inBand) maxAband = (std::max)(maxAband, ax);
+            else maxAout = (std::max)(maxAout, ax);
+            const double re[3] = {c2.px, c2.py, c2.pz};
+            const double de = maxAbs3(p, re);
+            maxAeye = (std::max)(maxAeye, de);
+            maxArel = (std::max)(maxArel, de / mag3(re));
+            ++nA;
+
+            // (B) with the world's up as the field and OUTSIDE the blend, Level reproduces the
+            // pose motor itself -- the strict half, against the double-axis construction; the
+            // same comparison against the session's own float-axis motor is reported beside it,
+            // and the gap IS the spurious roll named above.
+            const Motor exact = poseMotorExact(cam);
+            double de3[3] = {1.0, 0.0, 0.0};
+            exact.TransformDir(de3[0], de3[1], de3[2]);
+            if (std::fabs(de3[1]) < 0.985) {
+                const double w[3] = {0.0, 1.0, 0.0};
+                const Motor lw = View::Level(exact, w);
+                maxB = (std::max)(maxB, rotorErr(lw, exact));
+                maxBfloat = (std::max)(maxBfloat, rotorErr(View::Level(base, w), base));
+                double pb[3], rb[3];
+                eyeOf(lw, pb);
+                eyeOf(exact, rb);
+                const double db = maxAbs3(pb, rb);
+                maxBeye = (std::max)(maxBeye, db);
+                maxBrel = (std::max)(maxBrel, db / mag3(rb));
+                ++nB;
+            } else {
+                ++nBand;
+            }
+
+            // (C) the roll is removed by construction: levelling a rolled pose and an unrolled
+            // one give the same motor.
+            const Motor l0 = View::Level(base, up);
+            maxC = (std::max)(maxC, rotorErr(lv, l0));
+            double pc[3], p0[3];
+            eyeOf(lv, pc);
+            eyeOf(l0, p0);
+            const double dc = maxAbs3(pc, p0);
+            maxCeye = (std::max)(maxCeye, dc);
+            maxCrel = (std::max)(maxCrel, dc / mag3(p0));
+
+            // (D) idempotent.
+            maxD = (std::max)(maxD, rotorErr(View::Level(lv, up), lv));
+        };
+        auto gravityCam = [](double e, double alt, double n, float az, float pitch) {
+            Camera c;
+            c.SetFromCompass(e, alt, n, az, pitch);
+            c.fovY = 55.0f * 3.14159265f / 180.0f;
+            c.nearZ = 0.25f;
+            const double R = 6371000.0, gy = c.py + R;
+            const double gl = std::sqrt(c.px * c.px + gy * gy + c.pz * c.pz);
+            c.upHint[0] = static_cast<float>(c.px / gl);
+            c.upHint[1] = static_cast<float>(gy / gl);
+            c.upHint[2] = static_cast<float>(c.pz / gl);
+            return c;
+        };
+        for (const VP& vp : poses) {
+            const Camera c = gravityCam(vp.e, vp.alt, vp.n, vp.az, vp.pitch);
+            probe(c, 0.0);
+            probe(c, 30.0);
+            probe(c, -30.0);
+        }
+        // A thousand random poses, from tens of metres to planet radii, with a random up FIELD:
+        // the generator is a fixed LCG, so the sweep is the same sweep on every machine.
+        uint64_t rng = 0x9e3779b97f4a7c15ull;
+        auto next01 = [&rng] {
+            rng = rng * 6364136223846793005ull + 1442695040888963407ull;
+            return static_cast<double>((rng >> 11) & ((1ull << 53) - 1)) / 9007199254740992.0;
+        };
+        for (int i = 0; i < 1000; ++i) {
+            Camera c;
+            const double scale = std::pow(10.0, 1.0 + 6.1 * next01());   // 10 m .. 1.3e7 m
+            c.px = (next01() * 2.0 - 1.0) * scale;
+            c.py = (next01() * 2.0 - 1.0) * scale;
+            c.pz = (next01() * 2.0 - 1.0) * scale;
+            c.yaw = static_cast<float>((next01() * 2.0 - 1.0) * kPi);
+            c.pitch = static_cast<float>((next01() * 2.0 - 1.0) * 89.0 * kPi / 180.0);
+            c.fovY = 55.0f * 3.14159265f / 180.0f;
+            double u[3] = {next01() * 2.0 - 1.0, next01() * 2.0 - 1.0, next01() * 2.0 - 1.0};
+            const double un = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+            if (un < 1e-6) continue;
+            for (int k = 0; k < 3; ++k) c.upHint[k] = static_cast<float>(u[k] / un);
+            probe(c, (next01() * 2.0 - 1.0) * 30.0);
+        }
+        // (E) MotorOf inverts Placement::Rigid -- the sugar's road from a file to a pose. The
+        // identity holds for a UNIT rotor, which is what Placement declares (Space.h), so the
+        // motor is re-unitized first: with the float-axis rotor it is off by |r|^2, which is
+        // the same 1e-5 m at the bird pose that the round trip below reports.
+        double maxE = 0.0;
+        for (const VP& vp : poses) {
+            const Camera c = gravityCam(vp.e, vp.alt, vp.n, vp.az, vp.pitch);
+            Motor m = scene::FromCamera(c);
+            m.Normalize();
+            const Placement p = Placement::Rigid(m);
+            const Placement q = Placement::Rigid(MotorOf(p));
+            for (int k = 0; k < 4; ++k) maxE = (std::max)(maxE, std::fabs(p.r[k] - q.r[k]));
+            for (int k = 0; k < 3; ++k) maxE = (std::max)(maxE, std::fabs(p.t[k] - q.t[k]));
+        }
+        // (F) the rasterizer boundary round-trips a Camera. The OPTICS cross it verbatim and are
+        // compared bitwise; the eye and the aim cross it through the motor, so they carry
+        // poseMotor's own float-axis residue and are measured.
+        bool opticsExact = true;
+        double maxFang = 0.0, maxFeye = 0.0, maxFrel = 0.0;
+        for (const VP& vp : poses) {
+            const Camera c = gravityCam(vp.e, vp.alt, vp.n, vp.az, vp.pitch);
+            View v("probe");
+            v.FromCamera(c);
+            Camera back = c;
+            v.ToCamera(back);
+            opticsExact = opticsExact && back.fovY == c.fovY && back.nearZ == c.nearZ;
+            maxFang = (std::max)(maxFang,
+                                 std::fabs(wrapPi(static_cast<double>(back.yaw) - c.yaw)));
+            maxFang = (std::max)(maxFang,
+                                 std::fabs(wrapPi(static_cast<double>(back.pitch) - c.pitch)));
+            const double a[3] = {back.px, back.py, back.pz};
+            const double b[3] = {c.px, c.py, c.pz};
+            const double df = maxAbs3(a, b);
+            maxFeye = (std::max)(maxFeye, df);
+            maxFrel = (std::max)(maxFrel, df / mag3(b));
+        }
+        const View probeView("probe");
+        Log("[view] Level over %d poses (%d random, %d strict, %d inside ViewBasis's blend):",
+            nA, nA - 18, nB, nBand);
+        Log("[view]   vs the rasterizer's own frame (ToCamera + Camera::ViewBasis, float): max "
+            "axis %.3g outside the blend, %.3g inside it (the blend divides by 0.0145, so it "
+            "multiplies the float basis' error by 69); max eye %.3g m (%.3g relative)",
+            maxAout, maxAband, maxAeye, maxArel);
+        Log("[view]   vs poseMotor at the world-up field: max rotor %.3g, max eye %.3g m (%.3g "
+            "relative) -- against the SESSION's float-axis motor it is %.3g, which is the "
+            "~1e-7 rad of spurious roll std::sin(float) puts in scene::FromCamera's axis",
+            maxB, maxBeye, maxBrel, maxBfloat);
+        Log("[view]   roll +-30 deg invariance: max rotor %.3g, max eye %.3g m (%.3g relative); "
+            "idempotent max rotor %.3g; Rigid(MotorOf(p)) max %.3g; Camera round trip max angle "
+            "%.3g rad, max eye %.3g m (%.3g relative, poseMotor's |r|^2)",
+            maxC, maxCeye, maxCrel, maxD, maxE, maxFang, maxFeye, maxFrel);
+        g.True(maxAout <= 1e-6, "[view] Level reproduces Camera::ViewBasis to the float basis");
+        g.True(maxAband <= 4e-5, "[view] Level reproduces Camera::ViewBasis inside the blend");
+        g.True(maxArel <= 1e-14, "[view] Level's eye IS the pose's eye");
+        g.True(maxB <= 1e-12, "[view] Level at the world-up field == poseMotor (rotor)");
+        g.True(maxBrel <= 1e-14, "[view] Level at the world-up field == poseMotor (eye)");
+        g.True(maxC <= 1e-12, "[view] Level is invariant to roll (rotor)");
+        g.True(maxCrel <= 1e-14, "[view] Level is invariant to roll (eye)");
+        g.True(maxD <= 1e-12, "[view] Level is idempotent");
+        g.True(maxE <= 1e-9, "[view] Placement::Rigid(MotorOf(p)) == p for a unit rotor");
+        g.True(opticsExact, "[view] FromCamera then ToCamera keeps the optics bit for bit");
+        g.True(maxFang <= 1e-6, "[view] FromCamera then ToCamera keeps the aim to a float ulp");
+        g.True(maxFrel <= 1e-6, "[view] FromCamera then ToCamera keeps the eye to poseMotor's own residue");
+        g.True(&probeView.Props() == &ViewSchema(),
+               "[view] a View's Schema IS the views section's table");
+    }
+
     if (g.ok) {
         Log("[scene] ---- PASS (%d checks): Registry<T> == VesselRegistry / LoaderRegistry on the "
             "built-in kinds, the property table (defaults, units through GaUnits, the Velocity-"
@@ -675,7 +946,9 @@ bool RunSceneSelfTest() {
             "placements; named arrays in place / remove / append; completion), the placement "
             "sugar's four spellings == the session's pose maps bit for bit, WriteJson round-trips, "
             "refusals carry the node path, Node (the fold, the walk, a component), the Options "
-            "shim (the --boat refusal, the rail's implication laws) ----",
+            "shim (the --boat refusal, the rail's implication laws), and [view] View::Level "
+            "against the rasterizer's own frame, against poseMotor, under a roll and under "
+            "itself ----",
             g.checks);
     } else {
         Log("[scene] ---- FAIL (%d checks) ----", g.checks);

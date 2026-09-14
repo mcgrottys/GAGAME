@@ -6,6 +6,7 @@
 #include "hal/Pipeline.h"
 #include "hal/Views.h"
 #include "scene/FieldSet.h"
+#include "scene/ViewContext.h"
 
 #include <cmath>
 
@@ -184,19 +185,17 @@ void Renderer::ReloadShaders() {
     for (auto& l : m_layers) l->ReloadShaders(*m_gpu, m_shaders);
 }
 
-void Renderer::RenderFrame(const Camera& cam, float timeSec, float dt) {
-    (void)dt;
-    auto* cl = m_gpu->BeginFrame();
-    hal::CommandContext cmd(*m_gpu, cl, hal::Owner::Frame);
-    // --gpu-time: reads the slot this frame index last used (fenced by BeginFrame above), then
-    // opens the whole-frame pair. Null profiler = the default path, no queries at all.
-    GpuProfiler* prof = m_prof.get();
-    if (prof) prof->BeginFrame(cl, gpuFrameLabel);
-
-    // ---- scene constants
-    SceneConstants sc{};
+// ================================================================================================
+//  M12 step 5b: THE FILL, as a function of its inputs. This is the span RenderFrame used to open
+//  with, moved without a change of expression -- so the rows can be built for a view that is not
+//  the one being recorded, and so the gate (hal/DxTest.cpp) can hold the frozen old body against
+//  this one at the six recipe poses and memcmp the result.
+// ================================================================================================
+void Renderer::FillSceneConstants(const SceneFill& f, SceneConstants& sc) {
+    sc = SceneConstants{};
+    const Camera& cam = *f.cam;
     const XMMATRIX view = cam.ViewRelative();
-    const XMMATRIX proj = cam.Projection(static_cast<float>(m_width) / static_cast<float>(m_height));
+    const XMMATRIX proj = cam.Projection(static_cast<float>(f.width) / static_cast<float>(f.height));
     // HLSL here uses mul(float4, matrix), i.e. row-vector convention, which is DirectXMath's
     // native layout. No transpose. Common.hlsli declares the cbuffer matrix row_major to match.
     XMStoreFloat4x4(reinterpret_cast<XMFLOAT4X4*>(sc.viewProj), XMMatrixMultiply(view, proj));
@@ -204,68 +203,146 @@ void Renderer::RenderFrame(const Camera& cam, float timeSec, float dt) {
     // M9bi: the placed sun wins. Its direction was computed once, on the CPU, from the sun's
     // conformal POINT in the solar frame and carried here by the versor chain -- so every layer
     // in the scene shares not just one vector but one PLACE.
-    if (sunPlaced) {
-        sc.sunDir[0] = sunDirTangent[0];
-        sc.sunDir[1] = sunDirTangent[1];
-        sc.sunDir[2] = sunDirTangent[2];
+    if (f.sunPlaced) {
+        sc.sunDir[0] = f.sunDirTangent[0];
+        sc.sunDir[1] = f.sunDirTangent[1];
+        sc.sunDir[2] = f.sunDirTangent[2];
     } else {
-        const float az = XMConvertToRadians(sunAzimuthDeg);
-        const float el = XMConvertToRadians(sunElevationDeg);
+        const float az = XMConvertToRadians(f.sunAzimuthDeg);
+        const float el = XMConvertToRadians(f.sunElevationDeg);
         sc.sunDir[0] = std::cos(el) * std::sin(az);
         sc.sunDir[1] = std::sin(el);
         sc.sunDir[2] = std::cos(el) * std::cos(az);
     }
 
     for (int c = 0; c < 3; ++c) {
-        sc.sigmaW[c] = sigmaW[c];
-        sc.bscat[c] = bscat[c];
+        sc.sigmaW[c] = f.sigmaW[c];
+        sc.bscat[c] = f.bscat[c];
     }
 
-    sc.params0[0] = timeSec;
-    sc.params0[1] = m_desc.heightScale;
-    sc.params0[2] = m_desc.patchWidthM;
-    sc.params0[3] = m_desc.patchHeightM;
+    sc.params0[0] = f.timeSec;
+    sc.params0[1] = f.heightScale;
+    sc.params0[2] = f.patchWidthM;
+    sc.params0[3] = f.patchHeightM;
     sc.params1[0] = 1.0f;
-    sc.params1[1] = static_cast<float>(m_width) / static_cast<float>(m_height);
+    sc.params1[1] = static_cast<float>(f.width) / static_cast<float>(f.height);
     sc.params1[2] = cam.nearZ;
-    sc.params1[3] = m_desc.exposure;
+    sc.params1[3] = f.exposure;
     sc.eyeRelWorld[0] = static_cast<float>(cam.px);
     sc.eyeRelWorld[1] = static_cast<float>(cam.py);
     sc.eyeRelWorld[2] = static_cast<float>(cam.pz);
 
     // M6j: the ONE render basis (gravity-up aware) -- rays rebuilt from these constants now
-    // agree with gViewProj by construction.
+    // agree with gViewProj by construction. (M12 step 5b: View::Level is the same frame built
+    // from a motor instead of two Euler angles, gated against this one and read by nothing yet.)
     XMFLOAT3 fwd, rgt, upv;
     cam.ViewBasis(fwd, rgt, upv);
     const XMVECTOR vf = XMLoadFloat3(&fwd);
     const XMVECTOR vr = XMLoadFloat3(&rgt);
     const XMVECTOR vu = XMLoadFloat3(&upv);
     const float tanH = std::tan(cam.fovY * 0.5f);
-    const float aspect = static_cast<float>(m_width) / static_cast<float>(m_height);
+    const float aspect = static_cast<float>(f.width) / static_cast<float>(f.height);
     XMStoreFloat3(reinterpret_cast<XMFLOAT3*>(sc.camFwd), vf);
     XMStoreFloat3(reinterpret_cast<XMFLOAT3*>(sc.camRight), XMVectorScale(vr, tanH * aspect));
     XMStoreFloat3(reinterpret_cast<XMFLOAT3*>(sc.camUp), XMVectorScale(vu, tanH));
 
-    sc.viewport[0] = static_cast<float>(m_width);
-    sc.viewport[1] = static_cast<float>(m_height);
-    sc.viewport[2] = 1.0f / static_cast<float>(m_width);
-    sc.viewport[3] = 1.0f / static_cast<float>(m_height);
-    sc.misc[0] = waterLevel;
+    sc.viewport[0] = static_cast<float>(f.width);
+    sc.viewport[1] = static_cast<float>(f.height);
+    sc.viewport[2] = 1.0f / static_cast<float>(f.width);
+    sc.viewport[3] = 1.0f / static_cast<float>(f.height);
+    sc.misc[0] = f.waterLevel;
     // The sun's DISC, from its real angular radius: bright inside 0.85 R, gone by 1.15 R. The
     // constants this replaces (cos 0.44 deg .. cos 0.99 deg) drew a sun between 1.7x and 3.7x
     // too wide, which no amount of exposure tuning could have diagnosed.
     {
-        const float r = XMConvertToRadians(sunAngRadiusDeg);
+        const float r = XMConvertToRadians(f.sunAngRadiusDeg);
         sc.misc[1] = std::cos(r * 1.15f);
         sc.misc[2] = std::cos(r * 0.85f);
     }
+}
 
-    const D3D12_GPU_VIRTUAL_ADDRESS sceneCb = m_gpu->PushConstants(&sc, sizeof(sc));
+SceneFill Renderer::FillInputs(const Camera& cam, float timeSec) const {
+    SceneFill f;
+    f.cam = &cam;
+    f.timeSec = timeSec;
+    f.width = m_width;
+    f.height = m_height;
+    f.heightScale = m_desc.heightScale;
+    f.patchWidthM = m_desc.patchWidthM;
+    f.patchHeightM = m_desc.patchHeightM;
+    f.exposure = m_desc.exposure;
+    f.sunPlaced = sunPlaced;
+    f.sunAzimuthDeg = sunAzimuthDeg;
+    f.sunElevationDeg = sunElevationDeg;
+    f.sunAngRadiusDeg = sunAngRadiusDeg;
+    f.waterLevel = waterLevel;
+    for (int c = 0; c < 3; ++c) {
+        f.sunDirTangent[c] = sunDirTangent[c];
+        f.sigmaW[c] = sigmaW[c];
+        f.bscat[c] = bscat[c];
+    }
+    return f;
+}
+
+scene::ViewSet Renderer::OneView(const Camera& cam, float timeSec) const {
+    scene::ViewSet set;
+    set.views.resize(1);
+    scene::ViewContext& v = set.views[0];
+    v.index = 0;
+    // No View yet: the session's Camera is still the state and the View is the render's INPUT.
+    // 5d hands the scene's View over; nothing about this seam changes when it does.
+    v.view = nullptr;
+    FillSceneConstants(FillInputs(cam, timeSec), v.constants);
+    v.target = "main";
+    v.viewport = {0, 0, m_width, m_height};
+    v.legacy.camera = &cam;
+    v.legacy.timeSec = timeSec;
+    return set;
+}
+
+void Renderer::RenderFrame(const Camera& cam, float timeSec, float dt) {
+    (void)dt;   // unused before the seam, unused after it
+    RenderFrame(OneView(cam, timeSec));
+}
+
+void Renderer::RenderFrame(const scene::ViewSet& set) {
+    // An empty set is a caller's mistake, and it is refused BEFORE the frame ring opens, so
+    // Begin/End stay paired and nothing half-records.
+    if (set.views.empty()) {
+        Log("[renderer] RenderFrame: empty ViewSet -- no frame recorded");
+        return;
+    }
+    // The ring of per-view constant addresses is a fixed array on purpose: a frame must not
+    // allocate, and a set larger than this is REPORTED rather than silently truncated. Eight is
+    // four-way split screen with a stereo pair each; nothing today asks for two.
+    constexpr size_t kMaxViews = 8;
+    const size_t n = set.views.size() < kMaxViews ? set.views.size() : kMaxViews;
+    if (set.views.size() > kMaxViews) {
+        Log("[renderer] %zu views in one frame: only the first %zu are recorded",
+            set.views.size(), kMaxViews);
+    }
+
+    auto* cl = m_gpu->BeginFrame();
+    hal::CommandContext cmd(*m_gpu, cl, hal::Owner::Frame);
+    // --gpu-time: reads the slot this frame index last used (fenced by BeginFrame above), then
+    // opens the whole-frame pair. Null profiler = the default path, no queries at all.
+    GpuProfiler* prof = m_prof.get();
+    if (prof) prof->BeginFrame(cl, gpuFrameLabel);
+
+    // ---- the constants: one b0 per view, pushed in VIEW ORDER, then the surface's b2 once.
+    // With one view that is the ring's old two pushes in their old order, which is why the
+    // addresses the recording names do not move.
+    D3D12_GPU_VIRTUAL_ADDRESS sceneCbs[kMaxViews] = {};
+    for (size_t i = 0; i < n; ++i) {
+        sceneCbs[i] = m_gpu->PushConstants(&set.views[i].constants, sizeof(SceneConstants));
+    }
     // M12 step 4g: the surface's rows (b2), pushed once beside the scene's and bound below for
-    // every layer; SurfaceFrame::Fill wrote them into surfaceCb this frame (FrameLoop.cpp).
+    // every layer of every view; SurfaceFrame::Fill wrote them into surfaceCb this frame
+    // (FrameLoop.cpp). One surface, however many eyes are looking at it.
     const D3D12_GPU_VIRTUAL_ADDRESS surfaceVa = cmd.Push(surfaceCb);
 
-    // ---- opaque layers into the HDR target
+    // ---- opaque layers into the HDR target. The target, the barriers and the CLEAR belong to
+    // the frame, not to a view: they happen once, before the first view records into them.
     cmd.Barrier(m_sceneColor, D3D12_RESOURCE_STATE_RENDER_TARGET);
     cmd.Barrier(m_sceneDepth, D3D12_RESOURCE_STATE_DEPTH_WRITE);
 
@@ -278,28 +355,44 @@ void Renderer::RenderFrame(const Camera& cam, float timeSec, float dt) {
     // Reversed-Z: clear depth to 0 (far), compare GREATER.
     cmd.ClearDepth(depthDsv, 0.0f);
 
-    cmd.Viewport(m_width, m_height);
+    for (size_t i = 0; i < n; ++i) {
+        // The renderer's own copy of the view: it owns the recording context and the fields of
+        // the legacy FrameContext that are the FRAME's (the device, the profiler, this view's
+        // b0 address and its index), and the caller owns the ones that are the VIEW's.
+        scene::ViewContext v = set.views[i];
+        const uint32_t vw = v.viewport.w ? v.viewport.w : m_width;
+        const uint32_t vh = v.viewport.h ? v.viewport.h : m_height;
+        if (v.viewport.x || v.viewport.y) {
+            // Reported, not guessed: an offset viewport needs one more overload on
+            // hal::CommandContext, which the seam step does not add.
+            Log("[renderer] view %u asks for a viewport at (%u, %u): an offset needs "
+                "hal::CommandContext::Viewport(x, y, w, h), which does not exist yet -- "
+                "recording the whole target instead",
+                v.index, v.viewport.x, v.viewport.y);
+        }
+        v.cmd = &cmd;
+        v.legacy.gpu = m_gpu;
+        v.legacy.cmd = &cmd;
+        v.legacy.sceneCb = sceneCbs[i];
+        v.legacy.width = vw;
+        v.legacy.height = vh;
+        v.legacy.prof = prof;
+        v.legacy.viewIndex = v.index;
 
-    cmd.GraphicsRoot(m_rootSig.Get());
-    cmd.GraphicsConstantsAt(0, sceneCb);
-    cmd.GraphicsConstantsAt(4, surfaceVa);   // b2: the surface, once, for every layer (4g)
-    if (m_fieldTableVa) cmd.GraphicsSrvAt(2, m_fieldTableVa);
-    cmd.GraphicsBindless(3);
+        cmd.Viewport(vw, vh);
 
-    FrameContext ctx;
-    ctx.gpu = m_gpu;
-    ctx.cmd = &cmd;
-    ctx.camera = &cam;
-    ctx.sceneCb = sceneCb;
-    ctx.timeSec = timeSec;
-    ctx.width = m_width;
-    ctx.height = m_height;
-    ctx.prof = prof;
-    for (auto& l : m_layers) {
-        if (!l->enabled) continue;
-        PixScope scope(cl, l->Name());
-        GpuScope gscope(prof, cl, l->Name());
-        l->Render(ctx);
+        cmd.GraphicsRoot(m_rootSig.Get());
+        cmd.GraphicsConstantsAt(0, sceneCbs[i]);
+        cmd.GraphicsConstantsAt(4, surfaceVa);   // b2: the surface, once, for every layer (4g)
+        if (m_fieldTableVa) cmd.GraphicsSrvAt(2, m_fieldTableVa);
+        cmd.GraphicsBindless(3);
+
+        for (auto& l : m_layers) {
+            if (!l->enabled) continue;
+            PixScope scope(cl, l->Name());
+            GpuScope gscope(prof, cl, l->Name());
+            l->Render(v.legacy);
+        }
     }
 
     // ---- tonemap HDR -> LDR
@@ -311,7 +404,7 @@ void Renderer::RenderFrame(const Camera& cam, float timeSec, float dt) {
         const auto ldrRtv = m_gpu->RtvHeap().Cpu(m_ldrRtv);
         cmd.Targets(ldrRtv, nullptr);
         cmd.Pipeline(m_tonemapPso.Get());
-        cmd.GraphicsConstantsAt(0, sceneCb);
+        cmd.GraphicsConstantsAt(0, sceneCbs[0]);   // the frame's exposure: view 0's rows
         if (m_fieldTableVa) cmd.GraphicsSrvAt(2, m_fieldTableVa);
         cmd.GraphicsBindless(3);
         struct { uint32_t srv; uint32_t pad[3]; } tm{m_sceneColor.srv, {0, 0, 0}};

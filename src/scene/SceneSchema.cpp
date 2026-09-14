@@ -11,7 +11,7 @@ namespace {
 SceneDocument kDoc;
 IncludeEntry kInclude;
 FleetBoat kBoat;
-ViewProps kView;
+ViewProps kView;   // its viewport and follow prototypes live INSIDE it (Nest takes the address)
 RailKey kRailKey;
 PortalProps kPortal;
 EntityProps kEntity;
@@ -283,6 +283,32 @@ const Schema& CaptureSchema() {
     return *s;
 }
 
+const Schema& ViewportSchema() {
+    static const Schema* s = [] {
+        auto& p = kView.viewport;
+        Schema* sc = new Schema("view.viewport", &p);
+        sc->Bind("x", p.x, Q::Dimensionless, "px", "left edge in the target", H)
+            .Bind("y", p.y, Q::Dimensionless, "px", "top edge in the target", H)
+            .Bind("w", p.w, Q::Dimensionless, "px", "width; 0 = the whole target", H)
+            .Bind("h", p.h, Q::Dimensionless, "px", "height; 0 = the whole target", H);
+        return sc;
+    }();
+    return *s;
+}
+
+const Schema& FollowSchema() {
+    static const Schema* s = [] {
+        auto& p = kView.follow;
+        Schema* sc = new Schema("view.follow", &p);
+        sc->Bind("target", p.target, "the entity this view chases; \"\" = none", H)
+            .Bind("back", p.back, Q::Length, "m", "the eye, behind the target's heading", H)
+            .Bind("up", p.up, Q::Length, "m", "the eye, above the target", H)
+            .Bind("aimLift", p.aimLift, Q::Length, "m", "the aim, above the target's origin", H);
+        return sc;
+    }();
+    return *s;
+}
+
 const Schema& ViewSchema_() {
     static const Schema* s = [] {
         Schema* sc = new Schema("view", &kView);
@@ -291,7 +317,13 @@ const Schema& ViewSchema_() {
             .Optional()
             .Bind("fovY", kView.fovY, Q::Angle, "deg", "vertical field of view (--fov)", H)
             .Bind("gauge", kView.gauge, "the space the eye is expressed in", H)
-            .Bind("nearZ", kView.nearZ, Q::Length, "m", "the near plane", H);
+            .Bind("nearZ", kView.nearZ, Q::Length, "m", "the near plane", H)
+            // M12 step 5b: what scene/View.h declares beside the eye -- the third optic, where
+            // the recording lands, and the chase camera.
+            .Bind("reversedZ", kView.reversedZ, "depth 1 at the near plane falling to 0 at infinity (Camera.h)", R)
+            .Bind("target", kView.target, "the target chain this view records into (\"main\" = the renderer's own)", R)
+            .Nest("viewport", ViewportSchema(), &kView.viewport, "the rectangle of the target")
+            .Nest("follow", FollowSchema(), &kView.follow, "the chase camera");
         return sc;
     }();
     return *s;

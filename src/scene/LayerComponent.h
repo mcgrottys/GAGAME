@@ -13,6 +13,7 @@
 #include "hal/Gpu.h"
 #include "scene/Component.h"
 #include "scene/Layer.h"
+#include "scene/ViewContext.h"
 
 namespace ga::scene {
 
@@ -55,16 +56,10 @@ public:
     void Update(const FrameInfo&) override {}
     void Record(const ViewContext& v) override {
         if (!m_layer->enabled) return;
-        FrameContext ctx;
-        ctx.gpu = m_w.gpu;
-        ctx.cmd = v.cmd;
-        ctx.camera = v.camera;
-        ctx.sceneCb = v.sceneCb;
-        ctx.timeSec = v.timeSec;
-        ctx.width = v.width;
-        ctx.height = v.height;
-        ctx.prof = v.prof;
-        m_layer->Render(ctx);
+        // M12 step 5b: the legacy FrameContext IS what a Layer draws from, and the renderer
+        // already filled it for this view (scene/ViewContext.h) -- so the adapter copies
+        // nothing and the two cannot drift.
+        m_layer->Render(v.legacy);
     }
     void ReloadShaders() override {
         if (m_w.gpu && m_w.shaders) m_layer->ReloadShaders(*m_w.gpu, *m_w.shaders);

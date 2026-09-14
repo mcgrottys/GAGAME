@@ -40,6 +40,7 @@
 #include "scene/GulfLayer.h"
 #include "scene/Pose.h"   // M12 step 5a: the session's pose maps as pure functions
 #include "scene/Route.h"
+#include "scene/ViewContext.h"
 #include "scene/SeaLayer.h"
 #include "scene/SkyLayer.h"
 #include "scene/TerrainLayer.h"
@@ -2882,7 +2883,16 @@ bool FrameLoop::Frame() {
     // (M9bi's sun placement moved to the top of the frame's housekeeping in M10: the
     // globe's level table carries the sun, and the walk that fills it runs before here.)
     const uint32_t ringHeldBefore = resMgr.ringHeldFrame;
-    renderer.RenderFrame(cam, static_cast<float>(simUnix - startUnix), dt);
+    // M12 step 5b: THE VIEWS SEAM. The renderer records a LIST of views in file order and the
+    // session hands it one, built here rather than inside RenderFrame so that the day a scene
+    // carries two the loop appends the second and the renderer does not change. The View is
+    // the RENDER's input; the session's Camera is still the state, and every other reader in
+    // this loop -- the predicted pose and the globe's walk, the pickers, the chase camera, the
+    // gravity-up and speed clamps, the Droste gauge, the bank's centre, the exposure and GIS
+    // probes -- still reads `cam` directly (5d moves them, with the scene wired).
+    const scene::ViewSet viewSet =
+        renderer.OneView(cam, static_cast<float>(simUnix - startUnix));
+    renderer.RenderFrame(viewSet);
     // --bench-overlap keeps the overlap: RENDER is then record + the BeginFrame fence
     // wait, and the loop mean is the pipelined max(CPU, GPU) a player's frame costs.
     if (opt.bench && !opt.benchOverlap) gpu.WaitIdle();

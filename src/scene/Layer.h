@@ -38,6 +38,14 @@ struct FrameContext {
     // --gpu-time: timestamp pairs around a layer's internal sub-passes. Null (the default) means
     // no queries are issued anywhere; wrap with GpuScope, which is a no-op on null.
     GpuProfiler* prof = nullptr;
+    // M12 step 5b: WHICH VIEW of the frame's set is recording (scene/ViewContext.h). The
+    // renderer walks the views in file order and writes the index here; 0 is the session's own
+    // and today the only one. A layer that keys per-view state keys it by THIS index --
+    // m_perView[ctx.viewIndex] -- instead of growing a second hard-coded copy. The M10 outer
+    // Droste level's water bank (Assembly::waterBankB, "set B") is the precedent that priced
+    // it, and it is deliberately NOT re-keyed here: set B stays set B until a scene declares a
+    // second view, so this step cannot move a pixel through it.
+    uint32_t viewIndex = 0;
 };
 
 class Layer {

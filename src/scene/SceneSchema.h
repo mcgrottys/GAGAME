@@ -22,8 +22,12 @@
 //                                                residency
 //      capture    {headless, width, height, frames, dump, hdr, mp4, railDir,
 //                  settle{sync, hold, exact, clearChurn}}
-//      views      [{name, at, fovY, gauge, nearZ}]   -- `at` in the placement sugar; absent
-//                                                       means the engine's default for the mode
+//      views      [{name, at, fovY, gauge, nearZ, reversedZ, target, viewport{}, follow{}}]
+//                                                    -- `at` in the placement sugar; absent
+//                                                       means the engine's default for the mode.
+//                                                       M12 step 5b: the optics, the target and
+//                                                       its rectangle, and the chase camera as
+//                                                       data (scene/View.h)
 //      rails      {active, keys[{t, at}], droste{levelSec, levels}}
 //      portals    [{name, enabled, lat, lon, level, fill, twistDeg, lighting}]
 //      entities   [{name, vessel, at, controller, throttle, steer}]
@@ -164,12 +168,29 @@ struct CaptureSection {
     std::string dump, hdr, mp4, railDir;
     SettleProps settle;
 };
+// M12 step 5b: the rectangle of the target a view records into. Zero width or height = the
+// whole target, which is what every recorded frame means; an OFFSET is declarable and the
+// renderer reports that it cannot honour one yet (it needs a hal::CommandContext overload).
+struct ViewportProps {
+    uint32_t x = 0, y = 0, w = 0, h = 0;
+};
+// THE CHASE CAMERA, as data: the four numbers FrameLoop's `if (helming)` block holds as
+// literals (15 m back, 5 m up, aimed 0.6 m above the hull's origin). An empty target is "this
+// view follows nothing", which is every recorded recipe but the boat's.
+struct FollowProps {
+    std::string target;
+    double back = 15.0, up = 5.0, aimLift = 0.6;
+};
 struct ViewProps {
     std::string name;
     Placement at;                     // optional: absent = the engine's default for the mode
     float fovY = 55.0f;
     std::string gauge = "root";
     float nearZ = 0.25f;
+    bool reversedZ = true;            // Camera.h's law: 1 at the near plane falling to 0
+    std::string target = "main";      // the named target chain; "main" is the renderer's own
+    ViewportProps viewport;
+    FollowProps follow;
 };
 struct RailKey {
     double t = 0.0;

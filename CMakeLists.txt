@@ -67,6 +67,7 @@ add_executable(gagame
   src/scene/Props.cpp
   src/scene/Node.cpp
   src/scene/Pose.cpp
+  src/scene/View.cpp
   src/scene/SceneSchema.cpp
   src/scene/SceneBuilder.cpp
   src/scene/SceneTest.cpp

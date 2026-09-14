@@ -644,6 +644,10 @@ SceneArgs Options::ToSets(const Options& o) {
         JsonSet(at, "z", wide(o.camZ));
         set("entities.boat.at", at);
         set("entities.boat.controller", str(o.boatDrive ? "fixed" : "helm"));
+        // A spawned boat takes the helm (FrameLoop::Session, `helming = true`), and the helm IS
+        // the chase camera -- so the active view follows it. The four numbers are the View's
+        // declared defaults, which are the literals that block holds.
+        set(std::string("views.") + view + ".follow.target", str("boat"));
         if (o.boatDrive) {
             set("entities.boat.throttle", num(o.boatThrottle));
             set("entities.boat.steer", num(o.boatSteer));

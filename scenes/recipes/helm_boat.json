@@ -116,7 +116,11 @@
       "name": "chart",
       "fovY": 55,
       "gauge": "root",
-      "nearZ": 0.25
+      "nearZ": 0.25,
+      "reversedZ": true,
+      "target": "main",
+      "viewport": {"x": 0, "y": 0, "w": 0, "h": 0},
+      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6}
     },
     {
       "_at": "the vqview signature shot: the north jetty tip, az 246 back into the inlet",
@@ -124,7 +128,11 @@
       "at": {"x": 522, "alt": 7, "z": 72, "az": 246, "pitch": -4},
       "fovY": 55,
       "gauge": "root",
-      "nearZ": 0.25
+      "nearZ": 0.25,
+      "reversedZ": true,
+      "target": "main",
+      "viewport": {"x": 0, "y": 0, "w": 0, "h": 0},
+      "follow": {"target": "boat", "back": 15, "up": 5, "aimLift": 0.6}
     },
     {
       "_at": "the globe start: over the North Atlantic at 2.1 planet radii, aimed at the centre",
@@ -132,7 +140,11 @@
       "at": {"lat": 34, "lon": -52, "alt": 13379100},
       "fovY": 55,
       "gauge": "root",
-      "nearZ": 0.25
+      "nearZ": 0.25,
+      "reversedZ": true,
+      "target": "main",
+      "viewport": {"x": 0, "y": 0, "w": 0, "h": 0},
+      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6}
     },
     {
       "_at": "on the north jetty a little in from its tip, looking back along it toward the range tower (F5 2026-09-01: keep this!)",
@@ -140,7 +152,11 @@
       "at": {"x": 541.2, "alt": 7, "z": 72.52, "az": 246, "pitch": -4},
       "fovY": 55,
       "gauge": "root",
-      "nearZ": 0.25
+      "nearZ": 0.25,
+      "reversedZ": true,
+      "target": "main",
+      "viewport": {"x": 0, "y": 0, "w": 0, "h": 0},
+      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6}
     },
     {
       "_at": "off the jetty tips looking west into the entrance, low",
@@ -148,21 +164,33 @@
       "at": {"x": 900, "alt": 40, "z": -10, "az": 270, "pitch": -10},
       "fovY": 55,
       "gauge": "root",
-      "nearZ": 0.25
+      "nearZ": 0.25,
+      "reversedZ": true,
+      "target": "main",
+      "viewport": {"x": 0, "y": 0, "w": 0, "h": 0},
+      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6}
     },
     {
       "name": "entrance-mid",
       "at": {"x": 1200, "alt": 120, "z": -10, "az": 270, "pitch": -18},
       "fovY": 55,
       "gauge": "root",
-      "nearZ": 0.25
+      "nearZ": 0.25,
+      "reversedZ": true,
+      "target": "main",
+      "viewport": {"x": 0, "y": 0, "w": 0, "h": 0},
+      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6}
     },
     {
       "name": "entrance-high",
       "at": {"x": 1500, "alt": 300, "z": -10, "az": 270, "pitch": -28},
       "fovY": 55,
       "gauge": "root",
-      "nearZ": 0.25
+      "nearZ": 0.25,
+      "reversedZ": true,
+      "target": "main",
+      "viewport": {"x": 0, "y": 0, "w": 0, "h": 0},
+      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6}
     }
   ],
   "rails": {

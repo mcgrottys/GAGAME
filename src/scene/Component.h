@@ -75,15 +75,11 @@ struct FrameInfo {
     double asOf = 0.0;      // the physics snapshot's declared simulation time (the freshness contract)
 };
 
-struct ViewContext {
-    hal::CommandContext* cmd = nullptr;   // the frame's recording
-    const Camera* camera = nullptr;       // the view's rasterizer camera
-    uint64_t sceneCb = 0;                 // b0's GPU address for this view, already filled
-    float timeSec = 0.0f;
-    uint32_t width = 0, height = 0;
-    int viewIndex = 0;                    // step 5b: which view of the ViewSet
-    GpuProfiler* prof = nullptr;          // --gpu-time scopes, or null
-};
+// One view's recording. DECLARED here and defined in scene/ViewContext.h, where step 5b gave
+// it the renderer's own rows (the SceneConstants this view records, its target and viewport,
+// and the legacy FrameContext a Layer draws from): this header stays the plugin surface, so
+// only a component that actually DRAWS pays for the definition.
+struct ViewContext;
 
 class Component {
 public:
