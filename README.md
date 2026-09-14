@@ -386,11 +386,32 @@ build\bin\gagame.exe --globe
 
 ## Layout
 
-- `src/core` — device layer (carried from vqview-inlet), DXC hot reload, tiled-resource self-test,
-  PGA motors (Pga.h), PIX markers (no WinPixEventRuntime dependency yet)
-- `src/render` — HDR renderer + camera-relative reversed-Z camera with motor-driven orbit
-- `src/scene` — the Layer products: sky, tide (ribbon + curves); FieldSet indirection
-- `src/sim` — the analytic tide model, sea state, currents, bathy, the sparse SWE solver, and
-  the globe data (GlobeModel)
-- `harvester/` — the polite NOAA fetch + fit tooling (stdlib Python)
-- `data/tides/` — generated engine data; `cache/` — raw NOAA responses (both regenerable)
+The engine after M12 — `docs/ARCHITECTURE.md` is the map, this is the index.
+
+- `src/main.cpp` — the shell: resolve the scene once, run a tool or assemble and loop.
+- `src/app` — `Options` (the flags, and the shim that writes them into a scene), `Scene` (the
+  resolved scene, typed), `Assembly` (the engine built in its lifetime order), `FrameLoop` (the
+  session and the frame's fixed phase order), `Tools/` (the one-shot modes, by name), `FramePipe`.
+- `src/core` — the algebra and the contracts with no GPU in them: PGA motors (`Pga.h`), the conformal
+  model (`Cga.h`), the frame calculus (`Space.h` placements and the fold, `Lattice.h`), the Droste
+  closed forms, units, the GA AST, `Registry.h`, the scene-config readers, the self-tests.
+- `src/hal` — Direct3D 12 and nothing else touches it: the device, the command context, pipeline
+  builders, typed views and root layouts, tiled residency and `Tenant` (the sparse default),
+  DirectStorage, shaders, the profiler, PIX, the retire queue. `tools/hal_lint.py` holds the line.
+- `src/compose` — the tile trees and the compositor; `SurfaceFrame`, the one declared surface.
+- `src/render` — the renderer (a list of views) and the camera.
+- `src/scene` — the layers (sky, tide, sea, terrain, gulf, water bank, globe, GIS, vessels, markers)
+  and the scene graph: `Props`/`Schema`, `SceneBuilder` (the fold), `Node`, `Component`, `View`,
+  `WaterComponent`, `Entity`, `Portal`, `Rail`, `Effect` (`effects/`), `SceneReload`, `SchemaDoc`.
+- `src/sim` — the analytic tide, sea state, currents, bathymetry, the shallow-water solver, the wave
+  field, the weather manager, the globe data, vessels and their factory.
+- `scenes/` — `merrimack.json` (the default scene), `chart.json`, `mars.json`, `views/`, `rails/`,
+  `recipes/` (every recorded run as a file).
+- `shaders/` — HLSL, compiled at run time (editing needs no rebuild).
+- `docs/` — `ARCHITECTURE.md`, `ALGEBRA.md` (the math and the priors ledger), `LAUNCH.md`, the GA AST
+  (`GA_AST.md`, `ga_ast.json`) and the UI contracts (`scene_schema.json`, `registries.json`); the
+  Scriptorium serves `ALGEBRA.md` as `math` topics and `LAUNCH.md` as `note` sections.
+- `tools/` — the gate harness (`gate_stills.sh`, `gate_compare.sh`, `stills.sh`, `imgdiff.py`,
+  `raildiff.py`), `hal_lint.py`, `algebra_lint.py`, the Scriptorium MCP server.
+- `harvester/` — the polite NOAA fetch + fit tooling (stdlib Python).
+- `data/` — generated engine data; `cache/` — raw provider responses (both regenerable).

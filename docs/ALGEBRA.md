@@ -500,6 +500,49 @@ regenerated every run, validated at boot and in gatest):
 
 Gates: `gatest` (flip rule, orphan rule, ledger truths, merc bound), boot validation.
 
+**The fold (M12).** The five declared frames above are now instances of one calculus
+(`core/Space.h`, `core/Lattice.h`; `docs/ARCHITECTURE.md` §2):
+
+- **A placement is a similarity, and nothing else.** x_parent = t + s R(x_own): a rotor in the
+  motor's own layout (composed with `QMul`, applied with `QRotate`, so no second convention), a
+  scale whose sign carries PARITY (the planet frame is left-handed, priors 34, so ECEF → planet is
+  an improper placement), and a translation. Nonuniform scale, shear and the projection morph are
+  other contracts with other types. The conformal versor T(t/L)·R·D(s) is built on demand and the
+  4×4 exists only at `ToMatrix`, the rasterizer boundary; neither is stored or composed. Planes and
+  directions move by the same sandwich as points — no inverse-transpose.
+- **Resolution is one right fold.** `Space::ToRoot()` = parent.ToRoot() · link, with the identity
+  at the root and no branch for rigid versus similar (PGA is the s = 1 representation). Two spaces
+  relate through their NEAREST COMMON ANCESTOR, the fold from it down each branch with one inverted,
+  so two boats 40 m apart under a tangent frame a planet radius from the root see 40 m and never the
+  radius.
+- **A unit length is not a placement.** A space declares the length its conformal embedding is
+  taken at (priors 32); metres are metres in every space, and no size, velocity or mass changes
+  when a space declares a different unit. `Declare()` refuses an extent past |x|/L = 9.49e7.
+- **The power is the one-parameter subgroup, applied about its fixed point.** Pow(k) = exp(k log S):
+  the logarithmic spiral when (I − sR) inverts, the screw through `Motor::Log/Exp` in the rigid
+  limit. Applying it is `PowApply`: p + sᵏQᵏ(x − p), the gauge identity's own form — never tₖ +
+  sᵏQᵏx, which cancels two terms of 1e21 m three levels in (priors 40). The principal branch
+  (angle in (−π, π]) is taken; a fractional power of a reflection has no principal branch and is
+  refused. The Droste tower is `Space::Cycle`: a link whose content is the root again, and
+  Level(k) is the k-th power of that ONE link.
+- **A lattice inherits by the same fold.** A tile-tree node's lattice is the first declaration
+  walking up (`nullptr` is the identity, "inherit"), and bytes are combined only where two
+  lattices are the SAME GROUND: equal dimensions can name different ground, so the compose gather,
+  the gate node and the residency demand refuse a mismatch rather than resample. Resampling is
+  integration against the dual cell, and the tree does not invent it.
+- **The scene's properties fold the same way.** Defaults < base < each include < every `--set`,
+  objects merged by key, named arrays by name, unnamed arrays and placements replaced whole — so the
+  fold is idempotent and a resolved document reloads as itself (priors 42).
+- **A rail is a pure function of time over the same algebra.** Keys interpolate as MOTORS (the screw
+  slerp, `Motor::Slerp`, each leg eased); a spiral segment is Sᵘ(base) through `LevelApply`; no Euler
+  lerp and no matrix.
+
+Gates: `spacetest` (1598 checks: the group and the fold, `Rigid` = the motor, `Similar` = the portal
+at every power, `PowApply` within 33 ulps of the portal's Rodrigues form, `Versor` =
+`SimilarityVersor`, the gauge identity, the plane transport in both forms, the unit-length refusal,
+`Frame()` rows, the screw power, the common-ancestor rule, `Normalize`, parity); `scenetest` (the
+fold's laws and fixed point, `Rail::At` bitwise against the hand tables over 36,000 instants).
+
 ## compose — The compositor's algebra: ordered lerps, hashed identity, folded coverage
 
 The composed planet is an ordered per-pixel lerp stack (bottom→top), each source
@@ -1410,6 +1453,38 @@ model (or a textbook) would hold → what this project measured → the law now 
     the rule to pick it. The same pass found the appealing dome drawn in the camera level's frame,
     a third gauge read, which swung the dome's zenith ~60° at the re-root. The dome now belongs
     to the ground that calls for it.
+40. **A map written about its origin is not the same arithmetic as the map written about its
+    fixed point.** Prior: the power of a similarity is a placement like any other, so the k-th level
+    of the Droste tower is applied as tₖ + sᵏQᵏx. Measured (M12 4d, the `Level(k)`-versus-portal
+    instrument): three levels in, sᵏQᵏx and tₖ are each about 1e21 m and cancel to the few thousand
+    kilometres the eye stands from the fixed point, and the eye kept 1.42e6 m of rounding (5546
+    ulps); only the scale agreed bitwise with the portal's closed form. Law: a power is APPLIED
+    about its fixed point, p + sᵏQᵏ(x − p) (`Placement::PowApply`, `Space::LevelApply`), which is the
+    gauge identity's own form; what remains against the portal's Rodrigues form is the rotor's
+    rounding, within 33 ulps, printed by spacetest as a record.
+41. **A rounded constant decides a tie.** Prior: writing a ground resolution to three figures
+    (`611.0f` for 611.496 m, `9.55f`, `1.19f`) is harmless in a comparison. Measured (M12 4f): at
+    equal resolution the literals made the cube win where the exact values make the page win, and
+    replacing them moved the key7km far-shore line and the bird's near-field land by one count. Law:
+    ground resolutions come from the lattice (`Lattice::GroundRes`, through the surface buffer), never
+    from literals, and the tie rule is declared: the page wins at equal resolution.
+42. **An appended list makes a fold with override non-idempotent.** Prior: an overlay's unnamed
+    array should append to the base's, the natural default when there is no name to merge by.
+    Measured (M12 5d): loading an already-resolved recipe re-applied its own `include` and doubled
+    the fleet and the include chain; the flag path never saw it because those lists are empty in the
+    defaults it starts from. Law: an unnamed list is a VALUE and an overlay replaces it whole; named
+    arrays merge by name; the fold's fixed point (Resolved → WriteJson → Load → Resolve is the
+    identity) is pinned in scenetest. The same law broke once more at reload (5f): a property set
+    carries no lists, so a reload would have written an empty fleet — a list under a reload target
+    is compared and applied as one value.
+43. **A still that does not move is not a camera that did not move.** Prior: a correction to the
+    camera map that leaves six settled stills at their floors, every fingerprint equal, is invisible.
+    Measured (M12 5e): the camera-to-motor map took the float overload of `sin` on the yaw, so its
+    motor was non-unit by 7e-8; with the yaw in double it is unit to 4e-16 and the stills do not move
+    — but the storm rail's keys are motors built by that map, and 88 of its 217 non-window frames
+    re-quantize (the worst 4.3 % of pixels by one count plus edge flips to |d| 140). Law: a change to
+    any map that builds a rail key, a view or a spawn is gated on the rail as well as the stills; the
+    correction is held for the owner with the measurement beside it.
 
 
 ## verification — The gate map: which algebra is pinned where
@@ -1425,6 +1500,17 @@ model (or a textbook) would hold → what this project measured → the law now 
   ground field (roll, speed, backdrop weight and owners) identical from forced gauges one and two
   levels in — seen to FAIL under bare 1/h² — and the eye over the inner Merrimack owned by the
   globe beneath it, not by the specks nested on it (priors 39).
+- `space` (M12) — the frame calculus: the similarity group and the fold, `Rigid` = the motor,
+  `Similar` = the portal's closed forms at every power, `PowApply` about the fixed point within 33
+  ulps of the portal, `Versor` = `SimilarityVersor` coefficient by coefficient, the gauge identity,
+  the plane transport in both forms, the unit-length refusal, `Frame()` rows, the screw power, the
+  common-ancestor rule, `Normalize`, parity (1598 checks; seen to FAIL on a dropped scale).
+- `scene` (M12) — the scene: the registry template against the house registries, the property
+  table's unit and datum refusals, the fold with override and its fixed point, the placement sugar
+  bit-equal to the session's pose maps, `View::Level` against the rasterizer's basis, the water's
+  one `Apply` and its reload law, `Rail::At` bitwise against the hand tables over 36,000 instants,
+  the portal node's cycle, the effect's edge, the entity's freshness defaults, and the whole-scene
+  reload (791 checks).
 - `gatest` — versors (sandwich, refraction rotor incl. TIR), fold telescope identities,
   spinor blend soundness, AST flip/orphan/ledger rules, mercator float bound (1.64 m
   measured < 4.5 m asserted), wave-physics endpoint pins.
@@ -1439,7 +1525,8 @@ model (or a textbook) would hold → what this project measured → the law now 
 - `watertest` — station fits (sub-mm), datum ladder, phasor field soak, tile-vs-stack
   identity, seam continuity (2.1 mm).
 - `tiletest` — the tiled atlas contract on this GPU (residency, null-tile zeros).
-- `dxtest` — CB parity by reflection (size + row layout), the sampler law over every compute
+- `dxtest` — CB parity by reflection (size + row layout), the `SceneConstants` the view list builds
+  against the ones the old fill built (EQUAL at the six recipe poses, M12), the sampler law over every compute
   entry, the mesh stage (M10: every mesh entry compiles and validates as ms_6_5 — seen to FAIL
   on a planted double `SetMeshOutputCounts`, priors 38), and the AST anchors.
 - `atlastest` — end-to-end atlas behaviors.
