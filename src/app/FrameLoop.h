@@ -65,6 +65,7 @@
 #include "core/SceneConfig.h"
 #include "render/Camera.h"
 #include "scene/Route.h"
+#include "scene/WaterComponent.h"
 #include "sim/SimClock.h"
 #include "sim/Vessel.h"
 #include "sim/VesselSpec.h"
@@ -107,8 +108,26 @@ private:
     // 3162..3230: the post-loop tools, the reports, the dumps, the explicit shutdown; `return 0`.
     int Finish();
 
+    // M12 step 5c: the solved wave field re-Configured at the water scene's live window --
+    // today's hot-reload lines, moved verbatim. It reads what the SESSION owns (the compositor,
+    // the water atlas, the tide and current models, the height channel, the aligned page frame),
+    // which is why it is here and not in the component: that is construction, not a property
+    // fan-out. The component names the need through this adapter and this does the work.
+    void ReconfigureWaveField(const WaterSceneConfig& cfg);
+    class WaveRebuild final : public scene::WaterComponent::Rebuild {
+    public:
+        explicit WaveRebuild(FrameLoop* fl) : m_fl(fl) {}
+        void ReconfigureWaveField(const WaterSceneConfig& cfg) override {
+            m_fl->ReconfigureWaveField(cfg);
+        }
+
+    private:
+        FrameLoop* m_fl;
+    };
+
     const Options& m_opt;
     Assembly& m_A;
+    WaveRebuild m_waveRebuild{this};
 
     // ---- main()'s block-level locals over the span, in main()'s order (ff2f732 lines
     // 246..1518), then the three function-local statics. Each is reached in the methods

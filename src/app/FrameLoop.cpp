@@ -263,6 +263,19 @@ void FrameLoop::ProbeDive(double f, const double c0[3], const double f0[3], doub
     }
 }
 
+// M12 step 5c: the solved wave field at a new window -- the hot-reload's own three calls, moved
+// here so the water component can ASK for them without naming the compositor, the atlas, the
+// models or the page frame. A changed window rolls the solver's bucket key, so the next Update
+// re-solves or hits the cache (core/SceneConfig.h's banner); what does NOT move is the page
+// tenant's lattice, bound at construction -- the component logs that when it happens.
+void FrameLoop::ReconfigureWaveField(const WaterSceneConfig& cfg) {
+    if (!m_waveField || !m_sceneToWaveCfg) return;
+    WaveFieldConfig wcfg2 = m_sceneToWaveCfg(cfg);
+    m_waveFrame = WaveFieldSource::Align(wcfg2);   // M9bc: the page grid
+    m_waveField->Configure(wcfg2, &m_A.compositor, m_A.hgtCh, &m_A.waterAtlas, &m_A.model,
+                           m_entSta, m_A.haveCurrents ? &m_A.currents : nullptr, m_wfCtSta);
+}
+
 std::optional<int> FrameLoop::Session() {
     // ---- The aliases: one reference per member this body touches, under main()'s names, so
     // what follows is main()'s code unchanged. A closure that captures one of these by
@@ -1147,12 +1160,9 @@ std::optional<int> FrameLoop::Session() {
         if (swe.Ready() && sea) {
             waveField->SetSweCurrent(&swe, &bathy, sea->sweCurrentGain);
         }
-        waterBank->SetWaveField(waterScene.wfEnabled ? waveField.get() : nullptr);
-        waterBank->SetScene(&waterScene);
-        if (waterBankB) {
-            waterBankB->SetWaveField(waterScene.wfEnabled ? waveField.get() : nullptr);
-            waterBankB->SetScene(&waterScene);
-        }
+        // M12 step 5c: the bank's wave field and its live config pointer (and set B's) are
+        // applied BELOW, by the water component's one Apply -- the same call the hot-reload
+        // makes. Nothing between here and there reads either.
         if (waterScene.wfEnabled) {
             waveSrc = std::make_shared<WaveFieldSource>(waveField.get(), waveFrame);
             waveTree = std::make_shared<std::shared_ptr<TileTree>>(
@@ -1198,39 +1208,28 @@ std::optional<int> FrameLoop::Session() {
         Log("[sun] PINNED to azimuth %.1f, elevation %.1f -- the ephemeris is off",
             opt.sunAz, opt.sunEl);
     }
-    if (globe) {
-        globe->pixelWater = opt.pixelWater;   // M9bh: the two-ray water, per pixel
-        globe->foamOpacity = waterScene.foamOpacity;
-        globe->ringBlendTexels = waterScene.ringBlendTexels;
-        globe->causticStrength = waterScene.causticStrength;
-        globe->waterOptics = waterScene.waterOptics;
-        // M8g THE ORIGIN PLANES: the edit-land geometry floor comes from the datum
-        // envelope (MLLW + margin at the structure), not a tide-relative constant --
-        // the old floor tracked the live waterline, which made the jetty unsinkable.
-        float floorNavd = waterScene.jettyCrestNavd;
-        if (floorNavd <= -90.0f) {
-            floorNavd = 1.8f;
-            if (waterAtlas.Ready()) {
-                float elo = 0.0f, ehi = 0.0f;
-                waterAtlas.EnvelopeNavd(42.8190, -70.8031, 0.0, &elo, &ehi);
-                // Anchored to the TOP plane: a decayed structure is awash at spring
-                // high but a continuous ridge below mid-tide. (lo + margin was the
-                // first draft -- that floors at MLLW, which rescues the smear only
-                // at dead low.) Surveyed crests taller than the floor still win.
-                floorNavd = ehi - 0.45f;
-                Log("[datum] envelope at north jetty: lo %+.2f hi %+.2f m NAVD "
-                    "(synodic-month min/max) -> edit floor %+.2f",
-                    elo, ehi, floorNavd);
-            }
-        }
-        globe->editFloorNavd = floorNavd;
-    }
-    if (sea) {
-        sea->windSeaFill = waterScene.windSeaFill;
-        sea->bandFoldWeight = waterScene.bandFoldWeight;
-        sea->buoyAssimAgeH = waterScene.buoyAssimAgeH;
-        sea->buoyAssimGainMax = waterScene.buoyAssimGainMax;
-    }
+    if (globe) globe->pixelWater = opt.pixelWater;   // M9bh: the two-ray water, per pixel
+    // M12 step 5c: THE WATER SCENE HAS ONE APPLY (scene/WaterComponent.h). Everything this
+    // block used to fan out by hand -- the bank's wave field and its live config pointer, set
+    // B's, the globe's four water fields, the AUTO edit floor from the datum envelope, and the
+    // sea's four closures -- is the component's Apply, and the hot-reload in Frame() calls the
+    // SAME one over a complete resolved candidate. That is the step's deliberate change: before,
+    // a reload applied neither the sea's closures nor the auto floor, and it took the jetty
+    // floor only above the -90 sentinel.
+    scene::WaterComponent::Observers wo;
+    wo.config = &waterScene;
+    wo.bank = waterBank;
+    wo.bankB = waterBankB;
+    wo.sea = sea;
+    wo.globe = globe;
+    wo.waveField = waveField.get();
+    wo.atlas = &waterAtlas;
+    wo.rebuild = &m_waveRebuild;
+    wo.path = m_A.kScenePath;
+    wo.watch = &m_A.sceneWatch;
+    wo.mtime = &m_A.waterSceneMtime;
+    m_A.water.Configure(wo);
+    m_A.water.Apply(m_A.water.BootSet());
 
     // M8 THE FLEET: the AIS traffic lane (harvest_route.py) -- boats are pure
     // f(simUnix) on it (ping-pong at the ends), so scrubbing time scrubs the
@@ -1558,9 +1557,6 @@ bool FrameLoop::Frame() {
     auto& swe = m_A.swe;
     auto& gulf = m_A.gulf;
     auto& waterScene = m_A.waterScene;
-    auto& waterSceneMtime = m_A.waterSceneMtime;
-    auto& kScenePath = m_A.kScenePath;
-    auto& sceneWatch = m_A.sceneWatch;
     auto& waterBank = m_A.waterBank;
     auto& waterBankB = m_A.waterBankB;
     auto& globe = m_A.globe;
@@ -2376,34 +2372,15 @@ bool FrameLoop::Frame() {
             // directory watcher says the file moved (every 30 frames with no
             // watch); the mtime compare and the reload are unchanged. The stat
             // alone was 0.140 ms whole / 0.185 ms helm per frame (step 2's bench).
+            // M12 step 5c: THE RELOAD LAW, whole, in the component (scene/WaterComponent.h):
+            // the watcher's poll, the mtime compare, the file resolved into a COMPLETE
+            // candidate over the DECLARED DEFAULTS (a key the file no longer carries reverts to
+            // its default, not to the value this run was carrying), validated with the refusing
+            // key's path, and the accepted diff applied through THE SAME Apply the boot used.
+            // The two deliberate changes are here: the sea's four closures and the auto edit
+            // floor now reload, because there is only one set left to apply.
             PROF_BEGIN();
-            if (sceneWatch.Poll(frame) &&
-                WaterSceneChanged(kScenePath, &waterSceneMtime) &&
-                LoadWaterScene(kScenePath, waterScene)) {
-                if (waveField) {
-                    WaveFieldConfig wcfg2 = sceneToWaveCfg(waterScene);
-                    waveFrame = WaveFieldSource::Align(wcfg2);   // M9bc: the page grid
-                    waveField->Configure(wcfg2, &compositor,
-                                         hgtCh, &waterAtlas, &model, entSta,
-                                         haveCurrents ? &currents : nullptr,
-                                         wfCtSta);
-                    waterBank->SetWaveField(
-                        waterScene.wfEnabled ? waveField.get() : nullptr);
-                    if (waterBankB) {
-                        waterBankB->SetWaveField(
-                            waterScene.wfEnabled ? waveField.get() : nullptr);
-                    }
-                }
-                globe->foamOpacity = waterScene.foamOpacity;
-                globe->ringBlendTexels = waterScene.ringBlendTexels;
-                globe->causticStrength = waterScene.causticStrength;
-                globe->waterOptics = waterScene.waterOptics;
-                if (waterScene.jettyCrestNavd > -90.0f) {
-                    globe->editFloorNavd = waterScene.jettyCrestNavd;
-                }
-                Log("[scene] %s hot-reloaded at frame %u, %s", kScenePath, frame,
-                    sceneWatch.Trigger().c_str());
-            }
+            m_A.water.Reload(frame);
             PROF_END(1);
             // M8: bucket-watch + background solve + upload/swap for the solved
             // wave field, BEFORE the bank recomposes so the kernel binds a whole

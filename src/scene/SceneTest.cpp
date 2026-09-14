@@ -41,6 +41,15 @@
 //   8. The Options shim: --boat without --campos is REFUSED (the plan's one deliberate
 //      non-identity); the implication laws of ParseArgs reach the sets (--rail-flood: headless,
 //      1200 frames, the orbit view, the flood rail); a still's flags reach the active view.
+//  10. [water] (M12 step 5c) THE ONE APPLY and the reload law, on an in-memory document: the
+//      component's table agrees with the `water` section's own key for key, type for type, unit
+//      for unit and Hot/Restart for Hot/Restart (two tables over two structs, one vocabulary);
+//      a key the document no longer carries reverts to its DECLARED DEFAULT and not to the value
+//      the run was carrying (the step's second deliberate change); an unknown key refuses with
+//      its path and the previous set stands; a Restart-flagged key that changed is reported and
+//      NOT applied, and does not revert either -- the run keeps what it was BUILT with; a unit
+//      refusal carries GaUnits' own why; and Apply is IDEMPOTENT, the same set twice leaving
+//      the same fields and the same fingerprint.
 // A defect planted in MergeInto (the atomic law dropped, so an overlay's {lat, lon, alt}
 // merged into {x, alt, z, az, pitch} by key) was seen to fail block 3 before this gate was
 // trusted (priors 22).
@@ -58,6 +67,7 @@
 #include "scene/SceneBuilder.h"
 #include "scene/SceneSchema.h"
 #include "scene/View.h"
+#include "scene/WaterComponent.h"
 #include "sim/BathyModel.h"
 #include "sim/GlobeModel.h"
 #include "sim/VesselSpec.h"
@@ -938,6 +948,138 @@ bool RunSceneSelfTest() {
                "[view] a View's Schema IS the views section's table");
     }
 
+    // ---- 10. [water] the one Apply and the reload law (M12 step 5c) --------------------------
+    {
+        // (A) TWO TABLES, ONE VOCABULARY. The component binds the live WaterSceneConfig; the
+        // scene file's `water` section binds its own structs. Different layouts, so they cannot
+        // be one Schema -- and they must not drift, because a file written against one is read
+        // by the other. Key, type, field width, quantity, canonical unit, datum and the
+        // Hot/Restart flag are held equal; the doc strings are not (the section's are the
+        // one-liners --print-scene prints, the component's the declaration's own comments).
+        const PropDecl* waterDecl = SceneFileSchema().Find("water");
+        g.True(waterDecl && waterDecl->sub, "[water] the scene file has a water section");
+        int compared = 0;
+        if (waterDecl && waterDecl->sub) {
+            for (const char* section : {"wavefield", "closures", "fleet"}) {
+                const PropDecl* a = WaterSchema().Find(section);
+                const PropDecl* b = waterDecl->sub->Find(section);
+                g.True(a && a->sub && b && b->sub, "[water] both tables carry the section");
+                if (!a || !a->sub || !b || !b->sub) continue;
+                g.True(a->sub->Decls().size() == b->sub->Decls().size(),
+                       "[water] the section's key count agrees");
+                for (const PropDecl& da : a->sub->Decls()) {
+                    const PropDecl* db = b->sub->Find(da.key);
+                    if (!db) {
+                        g.True(false, "[water] the section's key is in both tables");
+                        continue;
+                    }
+                    ++compared;
+                    g.True(da.type == db->type && da.field == db->field,
+                           "[water] the key's type and field width agree");
+                    g.True(da.quantity == db->quantity, "[water] the key's quantity agrees");
+                    g.Same(da.unit.toCanonical, db->unit.toCanonical, "[water] the key's unit agrees");
+                    g.Same(da.unit.datumShiftM, db->unit.datumShiftM, "[water] the key's datum agrees");
+                    g.True(da.reload == db->reload, "[water] the key's Hot/Restart flag agrees");
+                }
+            }
+        }
+
+        // The component wired to a live config and NOTHING else: every fan-out subject is
+        // nullable and every absence is reported, so the whole law runs without a device.
+        WaterSceneConfig live;
+        WaterComponent water;
+        WaterComponent::Observers o;
+        o.config = &live;
+        const std::vector<std::string> missing = water.Configure(o);
+        g.True(missing.size() == 8, "[water] Configure reports every observer it was not given");
+        g.True(std::find(missing.begin(), missing.end(), std::string("config")) == missing.end(),
+               "[water] the one observer it WAS given is not reported missing");
+        auto setText = [](const WaterSceneConfig& c) {
+            return WaterComponent::SetText(PropSet::Defaults(WaterSchema(), &c));
+        };
+
+        // A run that is NOT at the declared defaults: two closures retuned and a bank built at
+        // a different ring density (the Restart key).
+        live.foamOpacity = 0.90f;
+        live.windSeaFill = 0.25f;
+        live.bankTexelM = 2.4f;
+        water.Apply(water.BootSet());
+        g.Same(live.foamOpacity, 0.90f, "[water] the boot set is the live config's own values");
+        g.Same(live.windSeaFill, 0.25f, "[water] the boot set is the live config's own values");
+        g.Same(live.bankTexelM, 2.4f, "[water] the boot set applies its Restart key (it is boot)");
+        const uint64_t bootHash = water.AppliedHash();
+
+        // (B) THE RELOAD LAW. A document naming ONE closure is a COMPLETE candidate: that key
+        // takes the document's value and every other HOT key reverts to its DECLARED DEFAULT --
+        // 0.72 for foamOpacity, 1.0 for windSeaFill, NOT the 0.90 / 0.25 this run carried. That
+        // is the step's second deliberate change; the old reader kept the run's value.
+        PropSet cand(WaterSchema());
+        WaterComponent::Fleet fleet;
+        std::string why;
+        const JsonValue one = ParseOrDie(g, "{\"closures\": {\"churnGain\": 0.5}}");
+        g.True(water.ReadJson(one, cand, fleet, &why), "[water] a one-key document resolves");
+        water.StageFleet(fleet);
+        water.Apply(cand);
+        g.Same(live.churnGain, 0.5f, "[water] the document's key is applied");
+        g.Same(live.foamOpacity, 0.72f, "[water] a key the document drops reverts to its DEFAULT");
+        g.Same(live.windSeaFill, 1.0f, "[water] a key the document drops reverts to its DEFAULT");
+        g.Same(live.wfExag, WaterSceneConfig{}.wfExag,
+               "[water] a whole dropped section reverts to its defaults");
+        g.Same(live.bankTexelM, 2.4f,
+               "[water] a Restart key does NOT revert: the run keeps what it was built with");
+
+        // (C) IDEMPOTENCE: the same set again leaves the same fields and the same fingerprint.
+        const uint64_t h1 = water.AppliedHash();
+        const std::string state1 = setText(live);
+        water.Apply(cand);
+        g.True(water.AppliedHash() == h1, "[water] Apply is idempotent (the set's fingerprint)");
+        g.True(setText(live) == state1, "[water] Apply is idempotent (every declared field)");
+
+        // (D) AN UNKNOWN KEY REFUSES WITH ITS PATH, and the previous set stands.
+        PropSet bad(WaterSchema());
+        why.clear();
+        const JsonValue unknown = ParseOrDie(g, "{\"closures\": {\"foamOpacty\": 0.1}}");
+        g.True(!water.ReadJson(unknown, bad, fleet, &why), "[water] an unknown key refuses");
+        g.Has(why, "water.closures.foamOpacty", "[water] the refusal names the key's path");
+        g.True(setText(live) == state1, "[water] a refused candidate changes nothing");
+
+        // A unit refusal is GaUnits' own, through the same table: a velocity into a length.
+        why.clear();
+        const JsonValue wrongUnit = ParseOrDie(g, "{\"wavefield\": {\"cellM\": \"2 kn\"}}");
+        g.True(!water.ReadJson(wrongUnit, bad, fleet, &why), "[water] a wrong unit refuses");
+        g.Has(why, "wavefield.cellM", "[water] the unit refusal names the key's path");
+
+        // (E) THE RESTART LAW. bankTexelM is read where the bank's rings are BUILT, so a changed
+        // value is reported and NOT applied; the Hot keys beside it are.
+        PropSet restart(WaterSchema());
+        const JsonValue texel = ParseOrDie(
+            g, "{\"wavefield\": {\"bankTexelM\": 4.8}, \"closures\": {\"churnGain\": 0.25}}");
+        g.True(water.ReadJson(texel, restart, fleet, &why), "[water] the Restart document resolves");
+        water.StageFleet(fleet);
+        water.Apply(restart);
+        g.Same(live.bankTexelM, 2.4f, "[water] a changed Restart key is NOT applied");
+        g.Same(live.churnGain, 0.25f, "[water] the Hot keys beside it ARE applied");
+
+        // And the whole law at its limit: the EMPTY document is the declared defaults, every
+        // Hot key, with the Restart key the run was built with left standing.
+        PropSet empty(WaterSchema());
+        g.True(water.ReadJson(ParseOrDie(g, "{}"), empty, fleet, &why),
+               "[water] the empty document resolves");
+        water.StageFleet(fleet);
+        water.Apply(empty);
+        WaterSceneConfig declared;
+        declared.bankTexelM = 2.4f;   // the Restart key this run keeps
+        g.True(setText(live) == setText(declared),
+               "[water] the empty document IS the declared defaults, field for field");
+        g.True(live.fleetCount == WaterSceneConfig{}.fleetCount &&
+                   live.fleet[2].offsetS == WaterSceneConfig{}.fleet[2].offsetS,
+               "[water] the boats -- a LIST, beside the set -- follow the same law");
+        Log("[water] two tables held equal on %d keys; the reload law, the Restart refusal, the "
+            "unknown-key and unit refusals and idempotence on in-memory documents; boot set "
+            "FNV-1a %016llx",
+            compared, static_cast<unsigned long long>(bootHash));
+    }
+
     if (g.ok) {
         Log("[scene] ---- PASS (%d checks): Registry<T> == VesselRegistry / LoaderRegistry on the "
             "built-in kinds, the property table (defaults, units through GaUnits, the Velocity-"
@@ -946,9 +1088,10 @@ bool RunSceneSelfTest() {
             "placements; named arrays in place / remove / append; completion), the placement "
             "sugar's four spellings == the session's pose maps bit for bit, WriteJson round-trips, "
             "refusals carry the node path, Node (the fold, the walk, a component), the Options "
-            "shim (the --boat refusal, the rail's implication laws), and [view] View::Level "
+            "shim (the --boat refusal, the rail's implication laws), [view] View::Level "
             "against the rasterizer's own frame, against poseMotor, under a roll and under "
-            "itself ----",
+            "itself, and [water] the one Apply (the two tables held equal, the reload law's "
+            "revert-to-default, the refusals, the Restart key, idempotence) ----",
             g.checks);
     } else {
         Log("[scene] ---- FAIL (%d checks) ----", g.checks);

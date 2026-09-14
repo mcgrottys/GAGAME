@@ -77,6 +77,7 @@
 #include "scene/VesselLayer.h"
 #include "core/TileProviders.h"
 #include "core/SceneConfig.h"
+#include "scene/WaterComponent.h"
 #include "sim/BathyModel.h"
 #include "sim/GlobeModel.h"
 #include "sim/CurrentModel.h"
@@ -147,6 +148,13 @@ struct Assembly {
     long long waterSceneMtime = 0;
     const char* kScenePath = "data/wave_scene.json";
     WaterSceneWatch sceneWatch;
+    // M12 step 5c: THE WATER SCENE'S ONE APPLY (scene/WaterComponent.h). Declared beside the
+    // config it writes and the watch it polls, and BEFORE the layers it fans out to, because it
+    // holds nothing but observers: it owns no GPU object, joins no thread and frees nothing, so
+    // its position in the lifetime order is about reading well, not about destruction. The
+    // session Configures it once the layers exist and calls Apply at load; the frame loop calls
+    // Reload, which calls the SAME Apply.
+    scene::WaterComponent water;
     WaterBankLayer* waterBank = nullptr;
     WaterBankLayer* waterBankB = nullptr;   // M10: the outer level's rings (set B)
     GlobeLayer* globe = nullptr;
