@@ -1,0 +1,190 @@
+{
+  "_recipe": "--sea --one-water --pixel-water --headless --rail-flood out/rail --frames 300 --storm 3.0,10,95 --start 2026-08-28T14:00:00 --tile-budget 3000",
+  "_readme": [
+    "The default shipped scene (M12 step 5a): the Merrimack estuary in the one world frame, from",
+    "the north jetty tip -- what `gagame --sea` has always meant. Every value is the legacy flag's",
+    "default, so a scene that says nothing means what the flags meant; scenes/recipes/*.json are",
+    "this file with a few keys overridden, each carrying the flag line that made it in _recipe.",
+    "Sections, keys and units: src/scene/SceneSchema.h. Overlays (stronger than this file):",
+    "scenes/views/builtin.json (the kept views) and data/wave_scene.json (the M8 water scene, at",
+    "`water`; authored if absent, never clobbered). Resolution: defaults < this file < includes",
+    "< --set, objects by key, named arrays by name, placements replaced whole (SceneBuilder.h)."
+  ],
+  "base": "",
+  "scene": {"name": "merrimack", "mode": "world", "planet": "earth", "view": "orbit"},
+  "include": [
+    {"file": "scenes/views/builtin.json", "at": "", "optional": false},
+    {"file": "data/wave_scene.json", "at": "water", "optional": true}
+  ],
+  "data": {
+    "shaders": "shaders",
+    "tides": "data/tides/stations.json",
+    "seastate": "data/sea/seastate.json",
+    "currents": "data/currents/currents.json",
+    "bathy": "data/bathy/merrimack.json"
+  },
+  "time": {"start": "2026-08-28T14:00:00Z", "timeScale": 1, "paused": false, "windowDays": 7},
+  "sun": {"source": "ephemeris", "az": 112, "el": 26},
+  "sea": {
+    "storm": {"hs": 3, "tp": 10, "dir": 95},
+    "datum": {"fromStation": true, "mllwToNavd": -1.3}
+  },
+  "water": {
+    "oneWater": true,
+    "pixelWater": true,
+    "foam": 1,
+    "edgePx": 12,
+    "heightScale": 1.15,
+    "swe": {"enabled": true, "westBoundary": true, "spinupH": 1, "gain": 1, "riverQ": -1},
+    "bank": {"flatBed": false, "flatBedNavd": -30},
+    "wavefield": {
+      "_exag": "display exaggeration on the solved comps (vqview shipped 1.15; raise for readable geometry on calm days -- physics in the cache stays raw)",
+      "_bankTexelM": "wave bank ring-0 texel (m): caps which wavelengths become GEOMETRY (fold law) -- a band contributes NOTHING until texel < lambda/2. 2.4 left the chop band at exactly zero even with the energy-weighted fold wavelength (3.55 m needs < 1.77 m). 1.2 matches the mesh vertex spacing (~1.19 m) and puts 39%% of the chop into geometry; outer ring reach halves to 9.8 km. Restart to apply (ring construction).",
+      "enabled": true,
+      "orgX": -1400,
+      "orgZ": -800,
+      "nx": 1600,
+      "ny": 1000,
+      "cellM": 2,
+      "comps": 32,
+      "spreadDeg": 26,
+      "barNormalDeg": 285,
+      "gammaHs": 0.6,
+      "minSamplesPerLambda": 8,
+      "tideBucketM": 0.25,
+      "currentBucketMs": 0.1,
+      "featherM": 120,
+      "chop": 1.1,
+      "exag": 1.6,
+      "bankTexelM": 1.2
+    },
+    "closures": {
+      "_bandFoldWeight": "how far the FOLD's per-band wavelength follows the live spectrum instead of the band's geometric midpoint (cascade 2 spans lambda 0.41-12 m; a 4.6 m wind sea judged as 2.2 m is thrown out of geometry). 0 = the shipped constant, byte for byte.",
+      "_windSeaFill": "gain on the Pierson-Moskowitz wind sea synthesised from the GFS wind on hours whose partitions are all swell (a 4 mHz Gaussian with no tail -- cascades 1-2 realize exactly zero and the water renders as glass). 0 = off, byte for byte.",
+      "shedSteepCap": 0.44,
+      "shedMssCeil": 0.09,
+      "churnGain": 0.12,
+      "crestLo": 0.28,
+      "crestHi": 0.8,
+      "depthLo": 1.05,
+      "depthHi": 1.95,
+      "foamOpacity": 0.72,
+      "ringBlendTexels": 48,
+      "bandFoldWeight": 1,
+      "windSeaFill": 1,
+      "buoyAssimAgeH": 6,
+      "buoyAssimGainMax": 1.8,
+      "causticStrength": 0.6,
+      "waterOptics": true,
+      "jettyCrestNavd": -99
+    },
+    "fleet": {
+      "enabled": false,
+      "boats": [
+        {"speed": 4.86, "halfLen": 7.5, "wakeAmp": 0.55, "offsetS": 400, "dir": 1},
+        {"speed": 4.62, "halfLen": 9, "wakeAmp": 0.47, "offsetS": 1300, "dir": 1},
+        {"speed": 3.83, "halfLen": 13, "wakeAmp": 0.63, "offsetS": 2100, "dir": -1},
+        {"speed": 3.34, "halfLen": 6, "wakeAmp": 0.38, "offsetS": 900, "dir": 1},
+        {"speed": 4.86, "halfLen": 6.5, "wakeAmp": 0.44, "offsetS": 1800, "dir": -1}
+      ]
+    }
+  },
+  "streaming": {
+    "tileBudget": 3000,
+    "predictEvery": 3,
+    "directStorage": true,
+    "colorTrees": true,
+    "gisGate": true,
+    "seafloor": true,
+    "exposure": true,
+    "ringLoads": true
+  },
+  "capture": {
+    "headless": true,
+    "width": 1600,
+    "height": 900,
+    "frames": 300,
+    "dump": "",
+    "hdr": "",
+    "mp4": "",
+    "railDir": "out/rail",
+    "settle": {"sync": false, "hold": 0, "exact": false, "clearChurn": false}
+  },
+  "views": [
+    {
+      "_at": "the M1 chart's oblique, computed from the river's length (FrameLoop::Session); no placement here",
+      "name": "chart",
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 0.25
+    },
+    {
+      "_at": "the vqview signature shot: the north jetty tip, az 246 back into the inlet",
+      "name": "sea",
+      "at": {"x": 522, "alt": 7, "z": 72, "az": 246, "pitch": -4},
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 0.25
+    },
+    {
+      "_at": "the globe start: over the North Atlantic at 2.1 planet radii, aimed at the centre",
+      "name": "orbit",
+      "at": {"lat": 34, "lon": -52, "alt": 13379100},
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 0.25
+    },
+    {
+      "_at": "on the north jetty a little in from its tip, looking back along it toward the range tower (F5 2026-09-01: keep this!)",
+      "name": "jetty-north",
+      "at": {"x": 541.2, "alt": 7, "z": 72.52, "az": 246, "pitch": -4},
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 0.25
+    },
+    {
+      "_at": "off the jetty tips looking west into the entrance, low",
+      "name": "entrance-low",
+      "at": {"x": 900, "alt": 40, "z": -10, "az": 270, "pitch": -10},
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 0.25
+    },
+    {
+      "name": "entrance-mid",
+      "at": {"x": 1200, "alt": 120, "z": -10, "az": 270, "pitch": -18},
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 0.25
+    },
+    {
+      "name": "entrance-high",
+      "at": {"x": 1500, "alt": 300, "z": -10, "az": 270, "pitch": -28},
+      "fovY": 55,
+      "gauge": "root",
+      "nearZ": 0.25
+    }
+  ],
+  "rails": {
+    "active": "flood",
+    "keys": [],
+    "droste": {"levelSec": 16, "levels": 3}
+  },
+  "portals": [],
+  "entities": [],
+  "effects": [],
+  "layers": [
+    {"name": "sky", "enabled": true},
+    {"name": "tide", "enabled": true, "exaggeration": 60},
+    {"name": "sea", "enabled": true},
+    {"name": "terrain", "enabled": true},
+    {"name": "gulf", "enabled": true},
+    {"name": "waterbank", "enabled": true},
+    {"name": "globe", "enabled": true},
+    {"name": "gis", "enabled": true},
+    {"name": "vessels", "enabled": true},
+    {"name": "markers", "enabled": true}
+  ],
+  "nodes": [],
+  "tools": []
+}

@@ -64,6 +64,12 @@ add_executable(gagame
   src/render/Renderer.cpp
   src/render/Camera.cpp
   src/scene/FieldSet.cpp
+  src/scene/Props.cpp
+  src/scene/Node.cpp
+  src/scene/Pose.cpp
+  src/scene/SceneSchema.cpp
+  src/scene/SceneBuilder.cpp
+  src/scene/SceneTest.cpp
   src/scene/SkyLayer.cpp
   src/scene/TideLayer.cpp
   src/scene/SeaLayer.cpp

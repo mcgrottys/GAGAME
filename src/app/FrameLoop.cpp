@@ -38,6 +38,7 @@
 #include "scene/GlobeLayer.h"
 #include "scene/MarkerLayer.h"
 #include "scene/GulfLayer.h"
+#include "scene/Pose.h"   // M12 step 5a: the session's pose maps as pure functions
 #include "scene/Route.h"
 #include "scene/SeaLayer.h"
 #include "scene/SkyLayer.h"
@@ -430,17 +431,13 @@ std::optional<int> FrameLoop::Session() {
     // Globe mode: the planet frame (centre at the origin). Start over the North Atlantic
     // with home in view.
     {
+        // M12 step 5a: the four lines that placed the eye are scene::GlobeCamera (the
+        // scene's {lat, lon, alt} spelling resolves through the same function); gR is
+        // planetR + gAlt inside it, the same sum.
         const double gLat = (opt.gcamLat < 1e8f) ? opt.gcamLat : 34.0;
         const double gLon = (opt.gcamLat < 1e8f) ? opt.gcamLon : -52.0;
-        const double gR = planetR +
-                          ((opt.gcamLat < 1e8f) ? opt.gcamAltKm * 1000.0
-                                                : planetR * 2.1);
-        double d[3];
-        GlobeModel::LatLonDir(gLat, gLon, d);
-        camGlobe.px = d[0] * gR;
-        camGlobe.py = d[1] * gR;
-        camGlobe.pz = d[2] * gR;
-        camGlobe.LookAt(0.0, 0.0, 0.0);
+        const double gAlt = (opt.gcamLat < 1e8f) ? opt.gcamAltKm * 1000.0 : planetR * 2.1;
+        camGlobe = scene::GlobeCamera(gLat, gLon, gAlt, planetR);
         camGlobe.fovY = cam.fovY;
         camGlobe.speed = 800000.0f;
     }
@@ -503,39 +500,14 @@ std::optional<int> FrameLoop::Session() {
             return 1;
         }
     }
+    // M12 step 5a: the pose maps' bodies moved VERBATIM to scene/Pose.h, so the scene's
+    // placement sugar is pinned against the functions the session itself calls; the lambdas
+    // keep their names and their captures (the surface's rows, planetR).
     auto planetToFlatPose = [&](const Camera& g) -> Camera {
-        Camera f = g;
-        const double p[3] = {g.px, g.py, g.pz};
-        f.px = p[0] * east0[0] + p[1] * east0[1] + p[2] * east0[2];
-        f.py = p[0] * oDir[0] + p[1] * oDir[1] + p[2] * oDir[2] - planetR;
-        f.pz = p[0] * north0[0] + p[1] * north0[1] + p[2] * north0[2];
-        const DirectX::XMFLOAT3 ff = g.Forward();
-        const double d[3] = {ff.x, ff.y, ff.z};
-        const double fx = d[0] * east0[0] + d[1] * east0[1] + d[2] * east0[2];
-        const double fy = d[0] * oDir[0] + d[1] * oDir[1] + d[2] * oDir[2];
-        const double fz = d[0] * north0[0] + d[1] * north0[1] + d[2] * north0[2];
-        f.yaw = static_cast<float>(std::atan2(fz, fx));
-        const float lim = 3.14159265f / 2.0f - 0.0017f;
-        f.pitch = std::clamp(
-            static_cast<float>(std::atan2(fy, std::sqrt(fx * fx + fz * fz))), -lim, lim);
-        return f;
+        return scene::PlanetToFlatPose(g, east0, oDir, north0, planetR);
     };
     auto flatToPlanetPose = [&](const Camera& f) -> Camera {
-        Camera g = f;
-        const double r = planetR + f.py;
-        g.px = oDir[0] * r + east0[0] * f.px + north0[0] * f.pz;
-        g.py = oDir[1] * r + east0[1] * f.px + north0[1] * f.pz;
-        g.pz = oDir[2] * r + east0[2] * f.px + north0[2] * f.pz;
-        const DirectX::XMFLOAT3 ff = f.Forward();
-        const double d[3] = {ff.x, ff.y, ff.z};
-        const double gx = east0[0] * d[0] + oDir[0] * d[1] + north0[0] * d[2];
-        const double gy = east0[1] * d[0] + oDir[1] * d[1] + north0[1] * d[2];
-        const double gz = east0[2] * d[0] + oDir[2] * d[1] + north0[2] * d[2];
-        g.yaw = static_cast<float>(std::atan2(gz, gx));
-        const float lim = 3.14159265f / 2.0f - 0.0017f;
-        g.pitch = std::clamp(
-            static_cast<float>(std::atan2(gy, std::sqrt(gx * gx + gz * gz))), -lim, lim);
-        return g;
+        return scene::FlatToPlanetPose(f, east0, oDir, north0, planetR);
     };
     // The camera bookmarks live in the ONE frame now: convert the orbit start pose, and
     // hand the globe its frame + the CUDEM window (for the foundation sink).
@@ -666,26 +638,9 @@ std::optional<int> FrameLoop::Session() {
     // (M0 Exp(u Log(~M0 M1))), so the descent from orbit is one smooth helical motion per
     // leg, eased at the ends. Extraction back to yaw/pitch drops any interpolated roll --
     // the horizon stays level, Google-Earth style.
-    poseMotor = [&](const Camera& c) -> Motor {
-        const double org[3] = {0, 0, 0};
-        const double yAxis[3] = {0, 1, 0};
-        const double rAxis[3] = {std::sin(c.yaw), 0.0, -std::cos(c.yaw)};
-        return Motor::Translation(c.px, c.py, c.pz) *
-               Motor::Rotation(org, rAxis, -c.pitch) * Motor::Rotation(org, yAxis, -c.yaw);
-    };
-    motorPose = [&](const Motor& m, Camera& c) {
-        double px = 0, py = 0, pz = 0;
-        m.TransformPoint(px, py, pz);
-        double fx = 1, fy = 0, fz = 0;
-        m.TransformDir(fx, fy, fz);
-        c.px = px;
-        c.py = py;
-        c.pz = pz;
-        c.yaw = static_cast<float>(std::atan2(fz, fx));
-        const float lim = 3.14159265f / 2.0f - 0.0017f;
-        c.pitch = std::clamp(
-            static_cast<float>(std::atan2(fy, std::sqrt(fx * fx + fz * fz))), -lim, lim);
-    };
+    // (M12 step 5a: bodies in scene/Pose.h -- FromCamera / ToCamera, verbatim.)
+    poseMotor = [&](const Camera& c) -> Motor { return scene::FromCamera(c); };
+    motorPose = [&](const Motor& m, Camera& c) { scene::ToCamera(m, c); };
     // Keys (all in the PLANET frame; flat poses go through flatToPlanetPose):
     //   0-5 s   orbit -> 2.6 km over the estuary (via a 500 km mid key: no screw dives)
     //   5-10 s  hold over the river (the handoff has already switched to the estuary)
@@ -693,17 +648,7 @@ std::optional<int> FrameLoop::Session() {
     //  15-25 s  hold the helm while the real-time sea runs
     // A pose on any planet: stand at (lat, lon, alt), aim at a surface target.
     auto orbPose = [&](double lat, double lon, double altM, double tLat, double tLon) {
-        Camera c;
-        double d[3];
-        GlobeModel::LatLonDir(lat, lon, d);
-        const double rr = planetR + altM;
-        c.px = d[0] * rr;
-        c.py = d[1] * rr;
-        c.pz = d[2] * rr;
-        double t[3];
-        GlobeModel::LatLonDir(tLat, tLon, t);
-        c.LookAt(t[0] * planetR, t[1] * planetR, t[2] * planetR);
-        return c;
+        return scene::OrbitPose(lat, lon, altM, tLat, tLon, planetR);   // 5a: scene/Pose.h
     };
     // M6g: every key is a FLAT-frame pose now -- the rails never change frames, because
     // there is only one. orbPose builds in planet terms for readability and converts.

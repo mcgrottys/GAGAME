@@ -3,9 +3,12 @@
 
 #include "core/Common.h"
 #include "core/Json.h"
+#include "scene/Props.h"
+#include "scene/SceneBuilder.h"
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -60,6 +63,15 @@ Options ParseArgs(int argc, char** argv) {
             }
             return def;
         };
+        // ---- M12 step 5a: the scene front door (see Options.h) -- its own block ahead of the
+        // legacy chain, which sits at the compiler's block-nesting limit (MSVC C1061).
+        if (a == "--print-scene") { o.printScene = true; continue; }
+        if (a == "--set") { o.sets.push_back(next("")); continue; }
+        if (a == "--tool") { o.tools.push_back(next("")); continue; }
+        if (a.size() > 5 && a[0] != '-' && a.compare(a.size() - 5, 5, ".json") == 0) {
+            o.scenePath = a;
+            continue;
+        }
         if (a == "--selftest") o.selftest = true;
         else if (a == "--crash-test") {
             // M7v: prove the crash tracer end to end -- the only honest test of a crash
@@ -301,23 +313,31 @@ Options ParseArgs(int argc, char** argv) {
             // A camera the user saved with F5: the same five numbers --cam/--campos take,
             // looked up by name so a pose survives the session it was found in.
             o.view = next("view-1");
-            // Views the user asked to KEEP live here, not in the gitignored data/ folder.
-            // east, alt, north, azimuth (compass), pitch -- SetFromCompass's own order.
-            struct BuiltInView { const char* name; float x, alt, z, az, pitch; };
-            static const BuiltInView kBuiltInViews[] = {
-                // On the north jetty a little in from its tip, looking back along it toward
-                // the range tower (saved with F5 2026-09-01: "keep this!").
-                {"jetty-north", 541.20f, 7.00f, 72.52f, 246.0f, -4.0f},
-                // Off the jetty tips looking west into the entrance, three heights.
-                {"entrance-low", 900.0f, 40.0f, -10.0f, 270.0f, -10.0f},
-                {"entrance-mid", 1200.0f, 120.0f, -10.0f, 270.0f, -18.0f},
-                {"entrance-high", 1500.0f, 300.0f, -10.0f, 270.0f, -28.0f},
-            };
+            // Views the user asked to KEEP live in scenes/views/builtin.json (M12 step 5a: the
+            // table that was code here, as DATA in the scene file's own spelling -- {name, at:
+            // {x east, alt, z north, az compass, pitch}}, SetFromCompass's order), not in the
+            // gitignored data/ folder; the same five floats come back out of it.
             bool found = false;
-            for (const BuiltInView& b : kBuiltInViews) {
-                if (o.view != b.name) continue;
-                o.camX = b.x; o.camAlt = b.alt; o.camZ = b.z; o.camAz = b.az; o.camPitch = b.pitch;
-                found = true;
+            {
+                std::ifstream bf("scenes/views/builtin.json", std::ios::binary);
+                const std::string btext((std::istreambuf_iterator<char>(bf)),
+                                        std::istreambuf_iterator<char>());
+                std::string berr;
+                const JsonValue broot = JsonParser::Parse(btext, &berr);
+                const JsonValue* bviews = berr.empty() ? broot.Get("views") : nullptr;
+                if (bviews) {
+                    for (const JsonValue& v : bviews->arr) {
+                        if (v.Str("name") != o.view) continue;
+                        const JsonValue* at = v.Get("at");
+                        if (!at) continue;
+                        o.camX = static_cast<float>(at->Num("x", 0.0));
+                        o.camAlt = static_cast<float>(at->Num("alt", 2.0));
+                        o.camZ = static_cast<float>(at->Num("z", 0.0));
+                        o.camAz = static_cast<float>(at->Num("az", 90.0));
+                        o.camPitch = static_cast<float>(at->Num("pitch", 0.0));
+                        found = true;
+                    }
+                }
             }
             std::ifstream vf("data/views.json", std::ios::binary);
             const std::string text((std::istreambuf_iterator<char>(vf)),
@@ -337,8 +357,8 @@ Options ParseArgs(int argc, char** argv) {
                 }
             }
             if (!found) {
-                fprintf(stderr, "--view %s: not built in and not in data/views.json (press F5 "
-                        "in the viewer to save one)\n", o.view.c_str());
+                fprintf(stderr, "--view %s: not in scenes/views/builtin.json and not in "
+                        "data/views.json (press F5 in the viewer to save one)\n", o.view.c_str());
                 exit(2);
             }
         }
@@ -409,6 +429,352 @@ Options ParseArgs(int argc, char** argv) {
     }
     if (o.planet == "mars") o.globeStart = true;   // there is only orbit on Mars (for now)
     return o;
+}
+
+// ================================================================================================
+//  M12 step 5a: THE SHIM. Options::ToSets is a PURE function from the parsed flags to the
+//  scene's spelling of them -- a base scene file, the property overrides in command-line order,
+//  the tools to run, and the pure instruments that stay flags -- reproducing the implication
+//  laws ParseArgs applied (a rail is headless, in orbit, 1200 frames at real time; a dump is
+//  one headless frame; Mars is orbit). A field is emitted when it differs from the struct's
+//  default, so what the flag line SAID is what the sets carry and the base file carries the
+//  rest; --print-scene folds both (scene/SceneBuilder.h) and prints the resolved document,
+//  which is the memento a recipe is judged by (scenes/recipes/*.json).
+//
+//  THE NUMBER LAW here: a legacy float field consumed as a float (sun.az, water.foam, the
+//  compass az/pitch) prints as the shortest decimal that narrows back to it, and the reader
+//  narrows; a legacy float consumed as a DOUBLE by the code (--campos / --cam / --globe-cam's
+//  positions and lat/lon, which SetFromCompass and LatLonDir take as doubles) prints as the
+//  double the code held -- the float widened, shortest round-trip -- so a double scene
+//  reproduces the legacy value bit for bit either way. Every recorded recipe value is exactly
+//  representable, so the recipes read as they were typed.
+//
+//  THE ONE DELIBERATE NON-IDENTITY (the plan's): --boat without --campos spawns the hull at
+//  the 1e9 sentinel today -- off the world, "AGROUND at depth -278 m"; the scene form refuses
+//  it with the reason rather than write a spawn that means nothing.
+// ================================================================================================
+namespace {
+
+std::string Narrow(const std::wstring& w) {
+    std::string s;
+    for (wchar_t c : w) s.push_back(static_cast<char>(c));
+    return s;
+}
+
+// The inverse of DaysFromCivil (Howard Hinnant's civil_from_days).
+void CivilFromDays(int64_t z, int& y, unsigned& m, unsigned& d) {
+    z += 719468;
+    const int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+    const unsigned doe = static_cast<unsigned>(z - era * 146097);
+    const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const int64_t yy = static_cast<int64_t>(yoe) + era * 400;
+    const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const unsigned mp = (5 * doy + 2) / 153;
+    d = doy - (153 * mp + 2) / 5 + 1;
+    m = mp < 10 ? mp + 3 : mp - 9;
+    y = static_cast<int>(yy + (m <= 2));
+}
+
+// time.start: "now" for the sentinel, civil UTC text for a whole second, else the number.
+JsonValue StartValue(double startUnix) {
+    if (startUnix < 0) return scene::JsonStr("now");
+    const double whole = std::floor(startUnix);
+    if (whole != startUnix) return scene::JsonNum(startUnix);
+    const int64_t secs = static_cast<int64_t>(whole);
+    int64_t days = secs / 86400;
+    int64_t rem = secs - days * 86400;
+    if (rem < 0) {
+        rem += 86400;
+        --days;
+    }
+    int y;
+    unsigned m, d;
+    CivilFromDays(days, y, m, d);
+    char buf[40];
+    snprintf(buf, sizeof(buf), "%04d-%02u-%02uT%02lld:%02lld:%02lldZ", y, m, d,
+             static_cast<long long>(rem / 3600), static_cast<long long>((rem / 60) % 60),
+             static_cast<long long>(rem % 60));
+    return scene::JsonStr(buf);
+}
+
+const char* kLensNames[] = {"worldxz", "worldxz", "winuv", "mip", "ring",
+                            "cascade", "waterdata", "velgrad", "shell"};
+
+}  // namespace
+
+SceneArgs Options::ToSets(const Options& o) {
+    using scene::JsonBool;
+    using scene::JsonNum;
+    using scene::JsonObj;
+    using scene::JsonSet;
+    using scene::JsonStr;
+    const Options D;   // the struct's defaults: a field that differs was said, or implied
+    SceneArgs out;
+    auto set = [&](const std::string& path, JsonValue v) { out.sets.push_back({path, std::move(v)}); };
+    auto num = [](double v) { return JsonNum(v); };
+    auto f32 = [](float v) { return JsonNum(scene::FloatAsDouble(v)); };   // consumed as a float
+    auto wide = [](float v) { return JsonNum(static_cast<double>(v)); };     // consumed as a double
+    auto str = [](const std::string& s) { return JsonStr(s); };
+    auto wstr = [](const std::wstring& w) { return JsonStr(Narrow(w)); };
+
+    // ---- the mode law (FrameLoop::Session: --sea or --globe open the world, --gulf the gulf
+    // map, else the chart; the start camera is the globe's in orbit, the sea's at the jetty).
+    const bool world = o.seaStart || o.globeStart;
+    const char* mode = world ? "world" : (o.gulfStart ? "gulf" : "chart");
+    const char* view = o.globeStart ? "orbit" : (o.seaStart ? "sea" : "chart");
+    out.scene = !o.scenePath.empty() ? o.scenePath
+                : (world || o.gulfStart) ? "scenes/merrimack.json" : "scenes/chart.json";
+    set("scene.mode", str(mode));
+    set("scene.view", str(view));
+    if (o.planet != D.planet) set("scene.planet", str(o.planet));
+    // ---- data
+    if (o.shaderDir != D.shaderDir) set("data.shaders", wstr(o.shaderDir));
+    if (o.tidesPath != D.tidesPath) set("data.tides", str(o.tidesPath));
+    if (o.seaPath != D.seaPath) set("data.seastate", str(o.seaPath));
+    if (o.currentsPath != D.currentsPath) set("data.currents", str(o.currentsPath));
+    if (o.bathyPath != D.bathyPath) set("data.bathy", str(o.bathyPath));
+    // ---- time
+    if (o.startUnix != D.startUnix) set("time.start", StartValue(o.startUnix));
+    if (o.timeScale != D.timeScale) set("time.timeScale", num(o.timeScale));
+    if (o.windowDays != D.windowDays) set("time.windowDays", num(o.windowDays));
+    // ---- sun
+    if (o.sunPinned) {
+        set("sun.source", str("pinned"));
+        set("sun.az", f32(o.sunAz));
+        set("sun.el", f32(o.sunEl));
+    }
+    // ---- sea
+    if (o.stormHs != D.stormHs || o.stormTp != D.stormTp || o.stormDir != D.stormDir) {
+        set("sea.storm.hs", f32(o.stormHs));
+        set("sea.storm.tp", f32(o.stormTp));
+        set("sea.storm.dir", f32(o.stormDir));
+    }
+    if (o.datumSet) {
+        set("sea.datum.fromStation", JsonBool(false));
+        set("sea.datum.mllwToNavd", f32(o.datumOff));
+    }
+    // ---- water
+    if (o.oneWater != D.oneWater) set("water.oneWater", JsonBool(o.oneWater));
+    if (o.pixelWater != D.pixelWater) set("water.pixelWater", JsonBool(o.pixelWater));
+    if (o.foam != D.foam) set("water.foam", f32(o.foam));
+    if (o.edgePx != D.edgePx) set("water.edgePx", f32(o.edgePx));
+    if (o.heightScale != D.heightScale) set("water.heightScale", f32(o.heightScale));
+    if (o.sweOff) set("water.swe.enabled", JsonBool(false));
+    if (o.sweWestOff) set("water.swe.westBoundary", JsonBool(false));
+    if (o.sweSpinupH != D.sweSpinupH) set("water.swe.spinupH", num(o.sweSpinupH));
+    if (o.sweGain != D.sweGain) set("water.swe.gain", f32(o.sweGain));
+    if (o.riverQ != D.riverQ) set("water.swe.riverQ", num(o.riverQ));
+    if (o.flatBed) {
+        set("water.bank.flatBed", JsonBool(true));
+        set("water.bank.flatBedNavd", f32(o.flatBedNavd));
+    }
+    // ---- streaming
+    if (o.tileBudget != D.tileBudget) set("streaming.tileBudget", num(o.tileBudget));
+    if (o.predictEvery != D.predictEvery) set("streaming.predictEvery", num(o.predictEvery));
+    if (o.directStorage != D.directStorage) set("streaming.directStorage", JsonBool(o.directStorage));
+    if (o.colorTrees != D.colorTrees) set("streaming.colorTrees", JsonBool(o.colorTrees));
+    if (o.gisGate != D.gisGate) set("streaming.gisGate", JsonBool(o.gisGate));
+    if (o.seafloor != D.seafloor) set("streaming.seafloor", JsonBool(o.seafloor));
+    if (o.exposure != D.exposure) set("streaming.exposure", JsonBool(o.exposure));
+    if (o.ringLoads != D.ringLoads) set("streaming.ringLoads", JsonBool(o.ringLoads));
+    // ---- capture
+    if (o.headless) set("capture.headless", JsonBool(true));
+    if (o.width != D.width) set("capture.width", num(o.width));
+    if (o.height != D.height) set("capture.height", num(o.height));
+    if (o.frames != 0) set("capture.frames", num(o.frames));
+    if (!o.dump.empty()) set("capture.dump", wstr(o.dump));
+    if (!o.dumpHdr.empty()) set("capture.hdr", wstr(o.dumpHdr));
+    if (!o.mp4.empty()) set("capture.mp4", str(o.mp4));
+    if (!o.rail.empty()) set("capture.railDir", wstr(o.rail));
+    if (o.settleSync) set("capture.settle.sync", JsonBool(true));
+    if (o.settleHold) set("capture.settle.hold", num(o.settleHold));
+    if (o.settleExact) set("capture.settle.exact", JsonBool(true));
+    if (o.settleClearChurn) set("capture.settle.clearChurn", JsonBool(true));
+    // ---- views: --globe-cam is the orbit view's eye whether or not it starts there (the
+    // code's camGlobe); --cam/--campos override the ACTIVE camera after the mode chose it.
+    if (o.gcamLat < 1e8f) {
+        JsonValue at = JsonObj();
+        JsonSet(at, "lat", wide(o.gcamLat));
+        JsonSet(at, "lon", wide(o.gcamLon));
+        JsonSet(at, "alt", num(static_cast<double>(o.gcamAltKm) * 1000.0));
+        set("views.orbit.at", at);
+    }
+    if (o.camAlt > 0) {
+        const double cx = (o.camX < 1e8f) ? o.camX : 0.0;
+        const double cz = (o.camZ < 1e8f) ? o.camZ : 0.0;
+        JsonValue at = JsonObj();
+        JsonSet(at, "x", num(cx));
+        JsonSet(at, "alt", wide(o.camAlt));
+        JsonSet(at, "z", num(cz));
+        JsonSet(at, "az", f32(o.camAz));
+        JsonSet(at, "pitch", f32(o.camPitch));
+        set(std::string("views.") + view + ".at", at);
+    }
+    if (o.fovDeg != D.fovDeg) set(std::string("views.") + view + ".fovY", f32(o.fovDeg));
+    // ---- rails
+    const char* rail = o.railJetty ? "jetty" : o.railDroste ? "droste" : o.railDrosteOut ? "droste-out"
+                       : o.railFlood ? "flood" : o.railZoom ? "zoom" : !o.rail.empty() ? "classic"
+                                                                                       : nullptr;
+    if (rail) set("rails.active", str(rail));
+    if (o.drosteLevelSec != D.drosteLevelSec) set("rails.droste.levelSec", num(o.drosteLevelSec));
+    if (o.drosteLevels != D.drosteLevels) set("rails.droste.levels", num(o.drosteLevels));
+    // ---- portals
+    if (o.droste) {
+        set("portals.droste.enabled", JsonBool(true));
+        set("portals.droste.lat", num(o.drosteLat));
+        set("portals.droste.lon", num(o.drosteLon));
+        set("portals.droste.level", num(o.drosteLevel));
+        set("portals.droste.fill", num(o.drosteFill));
+        set("portals.droste.twistDeg", num(o.drosteTwistDeg));
+        set("portals.droste.lighting", str(o.drosteLight == 1 ? "appealing" : "realistic"));
+    }
+    // ---- entities
+    if (!o.boat.empty()) {
+        if (o.camX >= 1e8f || o.camZ >= 1e8f) {
+            out.ok = false;
+            out.why = "--boat " + o.boat + " without --campos x,z: the legacy run spawns the hull "
+                      "at the 1e9 sentinel (off the world, aground at a meaningless depth); the "
+                      "scene form refuses to write that spawn -- give --campos";
+            return out;
+        }
+        set("entities.boat.vessel", str(o.boat));
+        JsonValue at = JsonObj();
+        JsonSet(at, "x", wide(o.camX));
+        JsonSet(at, "alt", num(0.0));
+        JsonSet(at, "z", wide(o.camZ));
+        set("entities.boat.at", at);
+        set("entities.boat.controller", str(o.boatDrive ? "fixed" : "helm"));
+        if (o.boatDrive) {
+            set("entities.boat.throttle", num(o.boatThrottle));
+            set("entities.boat.steer", num(o.boatSteer));
+        }
+    }
+    // ---- effects
+    if (o.sliceOn) {
+        set("effects.slice.type", str("slice.plane"));
+        set("effects.slice.d", num(o.sliceD));
+    }
+    // ---- layers
+    if (o.exaggeration != D.exaggeration) set("layers.tide.exaggeration", f32(o.exaggeration));
+    // ---- tools, in the boot's order (before the scene, during assembly, after the loop)
+    auto tool = [&](const std::string& name, const std::string& args = std::string()) {
+        out.tools.push_back(args.empty() ? name : name + ":" + args);
+    };
+    if (o.packTiles) tool("pack-tiles");
+    if (!o.loadField.empty()) tool("load-field", o.loadField);
+    if (o.selftest) tool("selftest");
+    if (!o.waterMap.empty()) tool("water-map", Narrow(o.waterMap));
+    if (!o.bathyMap.empty()) tool("bathy-map", Narrow(o.bathyMap));
+    if (!o.gisDump.empty()) tool("gis-dump", o.gisDump);
+    if (o.warmTrees) tool("warm-trees");
+    else if (o.packTrees) tool("pack-trees");
+    else if (o.treeAudit) tool("tree-audit", std::to_string(o.treeAudit));
+    if (!o.fidelityMap.empty()) tool("fidelity-map", Narrow(o.fidelityMap));
+    if (!o.oceanProbe.empty()) tool("ocean-probe", o.oceanProbe);
+    if (o.sweCycleH > 0) tool("swe-cycle", scene::NumberText(o.sweCycleH));
+    if (!o.sweUvDump.empty()) tool("swe-uv", Narrow(o.sweUvDump));
+    if (!o.exportSpec.empty()) tool("export", o.exportSpec + "," + Narrow(o.exportOut));
+    if (o.warmInlet) tool("warm-inlet");
+    if (o.dumpWater) tool("dump-water-state");
+    if (o.twinSurface) tool("twin-surface");
+    if (o.trace) tool("trace", scene::NumberText(o.traceLat) + "," + scene::NumberText(o.traceLon));
+    if (o.seaVerify) tool("sea-verify");
+    if (!o.waveMap.empty()) tool("wave-map", Narrow(o.waveMap));
+    for (const std::string& t : o.tools) out.tools.push_back(t);
+    // ---- the pure instruments: they stay flags, and are listed as such
+    auto rawf = [&](const std::string& s) { out.raw.push_back(s); };
+    if (o.pixFrames) rawf("--pix " + std::to_string(o.pixFrames));
+    if (o.dumpFibers) rawf("--dump-fibers");
+    if (o.lens) rawf(std::string("--lens ") + kLensNames[o.lens > 0 && o.lens < 9 ? o.lens : 0]);
+    if (o.probeCullFar) rawf("--probe-cull-far");
+    if (!o.dumpMeshlets.empty()) rawf("--dump-meshlets " + Narrow(o.dumpMeshlets));
+    if (o.inject) rawf(o.inject == 2 ? "--inject cascade" : "--inject bank");
+    if (o.debugLayer) rawf("--debug");
+    if (o.predictInline) rawf("--predict-inline");
+    if (o.dsSerial) rawf("--ds-serial");
+    if (o.resTrace) rawf("--res-trace");
+    if (o.threadAudit) rawf("--thread-audit");
+    if (o.jobsInline) rawf("--jobs-inline");
+    if (o.traceFrom != UINT32_MAX) {
+        rawf("--res-trace-frames " + std::to_string(o.traceFrom) + ":" + std::to_string(o.traceTo));
+    }
+    if (o.benchOverlap) rawf("--bench-overlap");
+    else if (o.bench) rawf("--bench");
+    if (o.gpuTime) rawf("--gpu-time");
+    if (o.noVsync) rawf("--no-vsync");
+    if (o.viz) rawf("--viz");
+    if (o.surfaceDebug == 1) rawf("--wireframe");
+    else if (o.surfaceDebug == 2) rawf("--meshlets");
+    else if (o.surfaceDebug == 3) rawf("--wireflat");
+    if (o.meshStats) rawf("--mesh-stats");
+    if (o.dumpBoth) rawf("--dump-both");
+    if (o.stencil) rawf("--stencil");
+    if (!o.msSurface) rawf("--no-ms");
+    if (o.albedo) rawf("--albedo");
+    // ---- the explicit --set lines, last: the strongest spelling, in command-line order
+    for (const std::string& s : o.sets) {
+        const size_t eq = s.find('=');
+        if (eq == std::string::npos) {
+            out.ok = false;
+            out.why = "--set " + s + ": expected path=value";
+            return out;
+        }
+        out.sets.push_back({s.substr(0, eq), scene::SceneBuilder::SetValue(s.substr(eq + 1))});
+    }
+    return out;
+}
+
+std::string SetText(const SceneSet& s) {
+    std::string v = scene::SceneBuilder::WriteJson(s.value);
+    while (!v.empty() && (v.back() == '\n' || v.back() == '\r')) v.pop_back();
+    return s.path + "=" + v;
+}
+
+// The scene the flags mean, folded (SceneBuilder) and validated; the refusal, when there is
+// one, names the path. Shared by --print-scene and the boot's [scene] line.
+bool BuildScene(const Options& o, scene::SceneBuilder& b, SceneArgs& a, std::string* why) {
+    a = Options::ToSets(o);
+    if (!a.ok) {
+        if (why) *why = a.why;
+        return false;
+    }
+    if (!b.Load(a.scene, why)) return false;
+    for (const SceneSet& s : a.sets) {
+        if (!b.Set(s.path, s.value, why)) return false;
+    }
+    for (const std::string& t : a.tools) {
+        const size_t colon = t.find(':');
+        JsonValue e = scene::JsonObj();
+        scene::JsonSet(e, "args", scene::JsonStr(colon == std::string::npos ? "" : t.substr(colon + 1)));
+        if (!b.Set("tools." + t.substr(0, colon), e, why)) return false;
+    }
+    return b.Resolve(why);
+}
+
+int PrintScene(const Options& o, int argc, char** argv) {
+    scene::SceneBuilder b;
+    SceneArgs a;
+    std::string why;
+    if (!BuildScene(o, b, a, &why)) {
+        fprintf(stderr, "[scene] refused: %s\n", why.c_str());
+        return 2;
+    }
+    for (const std::string& r : a.raw) {
+        fprintf(stderr, "[scene] raw instrument, not scene data: %s\n", r.c_str());
+    }
+    // The flag line that made this document, as its first comment: the memento names its recipe.
+    std::string line;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--print-scene") continue;
+        if (!line.empty()) line += ' ';
+        line += argv[i];
+    }
+    JsonValue& doc = b.Document();
+    doc.obj.insert(doc.obj.begin(), {"_recipe", scene::JsonStr(line)});
+    const std::string text = scene::SceneBuilder::WriteJson(doc);
+    fwrite(text.data(), 1, text.size(), stdout);
+    fflush(stdout);
+    return 0;
 }
 
 }  // namespace ga::app

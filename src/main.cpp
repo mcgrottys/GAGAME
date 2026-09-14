@@ -38,6 +38,11 @@ int main(int argc, char** argv) {
     ga::threadaudit::SetMainThread();
     try {
         const Options opt = ParseArgs(argc, argv);
+        // M12 step 5a: the scene's front door. --print-scene resolves the flags' scene form
+        // (Options::ToSets over scenes/*.json, app/Options.cpp) and prints it -- before the
+        // pool, the boot line and any device work; a refusal is exit 2 with the reason.
+        // Nothing else reads the scene until step 5d: the run below is the flags', as before.
+        if (opt.printScene) return PrintScene(opt, argc, argv);
         if (opt.threadAudit) ga::threadaudit::Enable();
         // The process pool, before anything can submit to it. Everything that used to spawn its
         // own threads is a client of this (core/ThreadManager.h).

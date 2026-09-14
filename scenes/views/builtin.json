@@ -1,0 +1,29 @@
+{
+  "_readme": [
+    "The kept views (M12 step 5a): the table that was code in Options.cpp's --view handler,",
+    "moved here as DATA in the scene file's own spelling -- each `at` is the compass placement",
+    "{x east, alt, z north, az compass, pitch} SetFromCompass takes. --view NAME still reads this",
+    "file (data/views.json, F5's own file, may override a name), and scenes/merrimack.json",
+    "includes it, so any scene may start from one of these by `scene.view`."
+  ],
+  "views": [
+    {
+      "name": "jetty-north",
+      "_at": "on the north jetty a little in from its tip, looking back along it toward the range tower (F5 2026-09-01: keep this!)",
+      "at": {"x": 541.2, "alt": 7, "z": 72.52, "az": 246, "pitch": -4}
+    },
+    {
+      "name": "entrance-low",
+      "_at": "off the jetty tips looking west into the entrance, low",
+      "at": {"x": 900, "alt": 40, "z": -10, "az": 270, "pitch": -10}
+    },
+    {
+      "name": "entrance-mid",
+      "at": {"x": 1200, "alt": 120, "z": -10, "az": 270, "pitch": -18}
+    },
+    {
+      "name": "entrance-high",
+      "at": {"x": 1500, "alt": 300, "z": -10, "az": 270, "pitch": -28}
+    }
+  ]
+}

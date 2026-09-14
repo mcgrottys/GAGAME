@@ -64,6 +64,10 @@ enum class Quantity : uint8_t {
     Mass,           // displacement, engine and crew masses
     Force,          // thrust, and every wrench the elements return
     Density,        // seawater vs air -- the one number that distinguishes the two media
+    // M12 step 5a: the scene's own units. A scene file says "30 min" for a spin-up or "7 km"
+    // for an altitude through THIS parser (no second one), so time joins the set; a count of
+    // frames or pixels is dimensionless and says which.
+    Time,           // seconds, minutes, hours, days
 };
 
 inline const char* QuantityName(Quantity q) {
@@ -78,6 +82,7 @@ inline const char* QuantityName(Quantity q) {
         case Quantity::Mass:          return "mass";
         case Quantity::Force:         return "force";
         case Quantity::Density:       return "density";
+        case Quantity::Time:          return "time";
         default:                      return "unknown";
     }
 }
@@ -157,6 +162,19 @@ struct UnitSpec {
             {"1", Quantity::Dimensionless, 1.0},   {"none", Quantity::Dimensionless, 1.0},
             {"fraction", Quantity::Dimensionless, 1.0},
             {"mask", Quantity::Dimensionless, 1.0},
+            // M12 step 5a: counts (a scene's frames and pixels) and time.
+            {"px", Quantity::Dimensionless, 1.0},  {"pixel", Quantity::Dimensionless, 1.0},
+            {"pixels", Quantity::Dimensionless, 1.0},
+            {"frame", Quantity::Dimensionless, 1.0},
+            {"frames", Quantity::Dimensionless, 1.0},
+            {"count", Quantity::Dimensionless, 1.0},
+            {"s", Quantity::Time, 1.0},            {"sec", Quantity::Time, 1.0},
+            {"second", Quantity::Time, 1.0},       {"seconds", Quantity::Time, 1.0},
+            {"min", Quantity::Time, 60.0},         {"minute", Quantity::Time, 60.0},
+            {"minutes", Quantity::Time, 60.0},     {"h", Quantity::Time, 3600.0},
+            {"hr", Quantity::Time, 3600.0},        {"hour", Quantity::Time, 3600.0},
+            {"hours", Quantity::Time, 3600.0},     {"day", Quantity::Time, 86400.0},
+            {"days", Quantity::Time, 86400.0},
         };
         for (const Row& r : kTable) {
             if (head == r.tok) { u.quantity = r.q; u.toCanonical = r.f; break; }
