@@ -5,6 +5,7 @@
 #include "core/Json.h"
 #include "scene/Props.h"
 #include "scene/SceneBuilder.h"
+#include "sim/GlobeModel.h"   // kR: the orbit eye's default altitude is 2.1 radii
 
 #include <algorithm>
 #include <chrono>
@@ -524,8 +525,16 @@ SceneArgs Options::ToSets(const Options& o) {
     const char* view = o.globeStart ? "orbit" : (o.seaStart ? "sea" : "chart");
     out.scene = !o.scenePath.empty() ? o.scenePath
                 : (world || o.gulfStart) ? "scenes/merrimack.json" : "scenes/chart.json";
-    set("scene.mode", str(mode));
-    set("scene.view", str(view));
+    // M12 step 5d: A NAMED SCENE FILE KEEPS ITS OWN MODE. The law above is what the FLAGS mean --
+    // no mode flag is the chart -- so it is written into the document only when the flags are the
+    // whole story: no scene file named, or a mode flag given over one. Otherwise `gagame
+    // scenes/recipes/helm.json` would be forced to the chart by a law about flags nobody typed.
+    // Every recorded recipe's --print-scene line names no scene file, so its text is unchanged.
+    const bool modeSaid = o.seaStart || o.globeStart || o.gulfStart;
+    if (o.scenePath.empty() || modeSaid) {
+        set("scene.mode", str(mode));
+        set("scene.view", str(view));
+    }
     if (o.planet != D.planet) set("scene.planet", str(o.planet));
     // ---- data
     if (o.shaderDir != D.shaderDir) set("data.shaders", wstr(o.shaderDir));
@@ -592,11 +601,26 @@ SceneArgs Options::ToSets(const Options& o) {
     if (o.settleClearChurn) set("capture.settle.clearChurn", JsonBool(true));
     // ---- views: --globe-cam is the orbit view's eye whether or not it starts there (the
     // code's camGlobe); --cam/--campos override the ACTIVE camera after the mode chose it.
-    if (o.gcamLat < 1e8f) {
+    // M12 step 5d: THE ORBIT EYE IS ALWAYS WRITTEN, BECAUSE ITS DEFAULT IS A FUNCTION OF THE
+    // PLANET. Without --globe-cam the engine stood at 2.1 radii OF THE PLANET THE FLAGS NAME
+    // (main's `planetR * 2.1`, planetR = marsMode ? 3389500 : kR -- app/Assembly.cpp's own
+    // expression), and a scene file's single number cannot be that function. So the shim
+    // evaluates it: Earth prints 13379100, which is exactly what scenes/merrimack.json already
+    // declares, so every recorded recipe's text is byte for byte what it was; Mars prints
+    // 7117950, which is what the flag path has always meant and what the pre-scene binary did.
+    // A Mars SCENE FILE (scenes/mars.json, with its own orbit view) is the follow-on; this line
+    // is what keeps the FLAG path identical now that the boot reads the document.
+    // ...and, as with the mode above, the DEFAULT is what the FLAGS mean, so it is written only
+    // when the flags are the whole story: no scene file named, or --globe-cam naming the eye
+    // outright over one. A named file keeps its own orbit view.
+    const bool gcamSaid = o.gcamLat < 1e8f;   // --globe-cam names all three
+    if (gcamSaid || o.scenePath.empty()) {
+        const double planetR = (o.planet == "mars") ? 3389500.0 : GlobeModel::kR;
         JsonValue at = JsonObj();
-        JsonSet(at, "lat", wide(o.gcamLat));
-        JsonSet(at, "lon", wide(o.gcamLon));
-        JsonSet(at, "alt", num(static_cast<double>(o.gcamAltKm) * 1000.0));
+        JsonSet(at, "lat", gcamSaid ? wide(o.gcamLat) : num(34.0));
+        JsonSet(at, "lon", gcamSaid ? wide(o.gcamLon) : num(-52.0));
+        JsonSet(at, "alt",
+                num(gcamSaid ? static_cast<double>(o.gcamAltKm) * 1000.0 : planetR * 2.1));
         set("views.orbit.at", at);
     }
     if (o.camAlt > 0) {

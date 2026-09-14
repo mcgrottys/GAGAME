@@ -50,9 +50,16 @@
 //      NOT applied, and does not revert either -- the run keeps what it was BUILT with; a unit
 //      refusal carries GaUnits' own why; and Apply is IDEMPOTENT, the same set twice leaving
 //      the same fields and the same fingerprint.
+//  11. (M12 step 5d) THE FOLD'S FIXED POINT, on real files, because both laws live in
+//      SceneBuilder::Load: an UNNAMED list (include, water.fleet.boats, rails.keys) is a VALUE
+//      and an overlay REPLACES it whole; `"base": ""` is NO base (a complete document always
+//      carries the key); and therefore resolution is IDEMPOTENT -- the text --print-scene
+//      writes IS a scene file, and loading it back gives the same document, which is what the
+//      scene spelling of every recipe stands on.
 // A defect planted in MergeInto (the atomic law dropped, so an overlay's {lat, lon, alt}
 // merged into {x, alt, z, az, pitch} by key) was seen to fail block 3 before this gate was
-// trusted (priors 22).
+// trusted (priors 22). The three checks of block 11 were seen to fail with BOTH step 5d fixes
+// reverted (the unnamed list appended, `"base": ""` refused) before they were trusted.
 #include "app/Options.h"
 #include "core/Common.h"
 #include "core/CurrentFieldLoader.h"
@@ -75,6 +82,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string>
 
@@ -1080,6 +1088,58 @@ bool RunSceneSelfTest() {
             compared, static_cast<unsigned long long>(bootHash));
     }
 
+    // ---- 11. THE FOLD'S FIXED POINT (M12 step 5d) -----------------------------------------
+    // The two laws that make resolution idempotent, on real files -- both live in Load(), so an
+    // in-memory Overlay cannot see them. The include names TWO boats and the file that includes
+    // it names THREE: appending gives five (what it did), replacing gives the overlay's two.
+    {
+        const char* kInc = "gagame_scenetest_include.json";
+        const char* kDoc = "gagame_scenetest_scene.json";
+        const char* kFp = "gagame_scenetest_printed.json";
+        auto writeFile = [](const char* path, const std::string& text) {
+            FILE* f = fopen(path, "wb");
+            if (!f) return false;
+            fwrite(text.data(), 1, text.size(), f);
+            fclose(f);
+            return true;
+        };
+        const bool wrote =
+            writeFile(kInc, "{\"fleet\": {\"enabled\": true, \"boats\": ["
+                            "{\"speed\": 3, \"halfLen\": 6}, {\"speed\": 4}]}}") &&
+            writeFile(kDoc, std::string("{\"base\": \"\", \"scene\": {\"name\": \"fixedpoint\"},"
+                                        " \"include\": [{\"file\": \"") + kInc +
+                                "\", \"at\": \"water\"}], \"water\": {\"fleet\": {\"boats\": "
+                                "[{\"speed\": 9}, {\"speed\": 9}, {\"speed\": 9}]}}}");
+        g.True(wrote, "[fold] the temporary scene files are written");
+        SceneBuilder fa;
+        std::string fwhy;
+        g.True(fa.Load(kDoc, &fwhy),
+               (std::string("[fold] `\"base\": \"\"` loads as NO base: ") + fwhy).c_str());
+        g.True(fa.Resolve(&fwhy), (std::string("[fold] it resolves: ") + fwhy).c_str());
+        const JsonValue* fw = fa.Resolved().Get("water");
+        const JsonValue* ffl = fw ? fw->Get("fleet") : nullptr;
+        const JsonValue* fbs = ffl ? ffl->Get("boats") : nullptr;
+        g.True(fbs && fbs->arr.size() == 2,
+               "[fold] an overlay's UNNAMED list REPLACES the base's whole (water.fleet.boats: "
+               "the include's two over the file's three is two, not five)");
+        g.True(fbs && fbs->arr.size() == 2 && fbs->arr[0].Num("speed", 0.0) == 3.0,
+               "[fold] ...and what stands is the OVERLAY's list, in the overlay's order");
+        // THE FIXED POINT: the text --print-scene writes, loaded back, is the same document.
+        const std::string printed = SceneBuilder::WriteJson(fa.Resolved());
+        g.True(writeFile(kFp, printed), "[fold] the printed document is written back as a file");
+        SceneBuilder fb;
+        g.True(fb.Load(kFp, &fwhy),
+               (std::string("[fold] the printed document loads: ") + fwhy).c_str());
+        g.True(fb.Resolve(&fwhy),
+               (std::string("[fold] the printed document resolves: ") + fwhy).c_str());
+        g.True(SceneBuilder::WriteJson(fb.Resolved()) == printed,
+               "[fold] THE FIXED POINT: Resolved -> WriteJson -> Load -> Resolve is the identity "
+               "(the scene spelling of every recipe stands on it)");
+        remove(kInc);
+        remove(kDoc);
+        remove(kFp);
+    }
+
     if (g.ok) {
         Log("[scene] ---- PASS (%d checks): Registry<T> == VesselRegistry / LoaderRegistry on the "
             "built-in kinds, the property table (defaults, units through GaUnits, the Velocity-"
@@ -1091,7 +1151,9 @@ bool RunSceneSelfTest() {
             "shim (the --boat refusal, the rail's implication laws), [view] View::Level "
             "against the rasterizer's own frame, against poseMotor, under a roll and under "
             "itself, and [water] the one Apply (the two tables held equal, the reload law's "
-            "revert-to-default, the refusals, the Restart key, idempotence) ----",
+            "revert-to-default, the refusals, the Restart key, idempotence), and [fold] the "
+            "fixed point (an unnamed list replaced whole, `\"base\": \"\"` as no base, "
+            "Resolved -> WriteJson -> Load -> Resolve the identity) ----",
             g.checks);
     } else {
         Log("[scene] ---- FAIL (%d checks) ----", g.checks);

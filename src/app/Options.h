@@ -16,6 +16,10 @@
 #include <string>
 #include <vector>
 
+namespace ga::scene {
+class SceneBuilder;
+}
+
 namespace ga::app {
 
 struct SceneArgs;
@@ -218,6 +222,10 @@ struct SceneArgs {
     std::vector<std::string> raw;     // the pure instruments, as the flags they stay
 };
 std::string SetText(const SceneSet& s);   // "path=value", for a log line
+// The scene the flags mean, folded (SceneBuilder) and validated; false with `why` naming the
+// path. M12 step 5d: the BOOT resolves through this too, so --print-scene and the run that
+// follows it cannot resolve differently.
+bool BuildScene(const Options& o, scene::SceneBuilder& b, SceneArgs& a, std::string* why);
 // --print-scene: the flags' scene form, folded, validated and printed; 0, or 2 with the reason.
 int PrintScene(const Options& o, int argc, char** argv);
 

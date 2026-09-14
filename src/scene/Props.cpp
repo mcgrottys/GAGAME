@@ -426,6 +426,26 @@ bool ResolvePlacement(const JsonValue& sugar, const PoseFrame& frame, Placement&
     return true;
 }
 
+// M12 step 5d: the same read, stopping before the frame. PoseSugar::Kind mirrors Sugar's first
+// four spellings (Bad never reaches here: ReadSugar refuses it).
+bool ReadPoseSugar(const JsonValue& sugar, const std::string& path, PoseSugar& out,
+                   std::string* why) {
+    SugarValues o;
+    if (!ReadSugar(sugar, path, o, why)) return false;
+    out.kind = static_cast<PoseSugar::Kind>(static_cast<int>(o.kind));
+    out.x = o.x;
+    out.alt = o.alt;
+    out.z = o.z;
+    out.az = o.az;
+    out.pitch = o.pitch;
+    out.lat = o.lat;
+    out.lon = o.lon;
+    out.tLat = o.tLat;
+    out.tLon = o.tLon;
+    out.lookAt = o.lookAt;
+    return true;
+}
+
 // The default sugar for a value the code holds: the motor spelling for a rigid placement,
 // the similarity spelling otherwise (its fixed point and twist read back off the placement).
 static JsonValue MotorSugar(const Motor& m) {

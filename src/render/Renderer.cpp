@@ -388,7 +388,7 @@ void Renderer::RenderFrame(const scene::ViewSet& set) {
         cmd.GraphicsBindless(3);
 
         for (auto& l : m_layers) {
-            if (!l->enabled) continue;
+            if (!l->declared || !l->enabled) continue;
             PixScope scope(cl, l->Name());
             GpuScope gscope(prof, cl, l->Name());
             l->Render(v.legacy);

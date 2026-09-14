@@ -56,6 +56,7 @@
 #include "app/Assembly.h"
 #include "app/FramePipe.h"
 #include "app/Options.h"
+#include "app/Scene.h"
 #include "compose/TileTree.h"
 #include "core/Droste.h"   // M10: the globe within the globe, as one Cl(4,1) versor
 #include "core/Pga.h"
@@ -88,7 +89,11 @@ namespace ga::app {
 
 class FrameLoop {
 public:
-    FrameLoop(const Options& opt, Assembly& A);   // stores the two references; nothing else runs
+    // M12 step 5d: the scene comes with them. Every value the session reads that is scene state
+    // -- the mode and the start view, the eyes, the clocks, the sun, the sea, the capture, the
+    // streaming, the portal and the entity -- is read from `S`; `opt` keeps the pure instruments
+    // and the one-shot tools' own arguments.
+    FrameLoop(const Options& opt, const Scene& S, Assembly& A);   // the references; nothing runs
     FrameLoop(const FrameLoop&) = delete;
     FrameLoop& operator=(const FrameLoop&) = delete;
     FrameLoop(FrameLoop&&) = delete;
@@ -126,8 +131,21 @@ private:
     };
 
     const Options& m_opt;
+    const Scene& m_S;
     Assembly& m_A;
     WaveRebuild m_waveRebuild{this};
+
+    // M12 step 5d: the scene's LIST elements this session reads, looked up ONCE in Session() and
+    // held as values -- a named lookup is a string compare, and the frame reads some of these
+    // (the portal's lighting, the chase camera's three numbers) every frame. Default-constructed
+    // they ARE the declared defaults, which are the flags' defaults, so a scene that declares
+    // neither reads exactly what the flag-shaped code read.
+    ScenePortal m_portalDecl;   // `portals[droste]`
+    bool m_portalOn = false;    // ...and whether it is enabled (--droste)
+    SceneEntity m_entityDecl;   // `entities[0]` (--boat)
+    bool m_entityOn = false;
+    double m_entitySpawn[3] = {0.0, 0.0, 0.0};   // its `at`, in the flat world frame (--campos)
+    SceneView m_startView;      // the view `scene.view` names (its optics and its chase camera)
 
     // ---- main()'s block-level locals over the span, in main()'s order (ff2f732 lines
     // 246..1518), then the three function-local statics. Each is reached in the methods

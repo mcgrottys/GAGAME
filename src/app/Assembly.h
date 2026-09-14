@@ -85,6 +85,7 @@
 #include "sim/SweSolver.h"
 #include "sim/TideModel.h"
 #include "app/Options.h"
+#include "app/Scene.h"
 
 #include <memory>
 #include <optional>
@@ -230,8 +231,12 @@ struct Assembly {
     Assembly& operator=(Assembly&&) = delete;
 };
 
-// main()'s assembly span, verbatim (Assembly.cpp). Returns the built scene, or nullptr when the
-// span exited the process early: `exitCode` then carries the code main() returns.
-std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode);
+// main()'s assembly span (Assembly.cpp). M12 step 5d: every value that is scene state comes from
+// `S`, the resolved document (app/Scene.h) -- the data files, the mode and planet, the water, the
+// sea state, the streaming switches, the capture size, and the `layers` list, which is the
+// registration order and the standing draw declaration. `opt` is read for the pure instruments
+// and the one-shot tools' own arguments, and for nothing else. Returns the built scene, or
+// nullptr when the span exited the process early: `exitCode` then carries the code main returns.
+std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exitCode);
 
 }  // namespace ga::app

@@ -233,6 +233,22 @@ bool CheckPlacementSugar(const JsonValue& sugar, bool rigid, const std::string& 
 bool ResolvePlacement(const JsonValue& sugar, const PoseFrame& frame, Placement& out,
                       std::string* why);
 
+// M12 step 5d: THE SUGAR'S NUMBERS, WITHOUT A FRAME. A scene's eye is a placement, and resolving
+// one needs the tangent rows the boot only has after the surface is built -- but the session's
+// own calls do not want a Placement, they want the numbers the flags used to carry
+// (Camera::SetFromCompass's five, scene::GlobeCamera's three). This is the SAME read
+// ResolvePlacement does, stopping one step earlier: one parser, the declared units, the same
+// refusals naming `path`. The kinds are the four spellings, in the order the sugar declares them.
+struct PoseSugar {
+    enum class Kind { Compass, Orbit, MotorForm, SimilarityForm };
+    Kind kind = Kind::Compass;
+    double x = 0.0, alt = 0.0, z = 0.0, az = 90.0, pitch = 0.0;   // {x, alt, z, az, pitch}
+    double lat = 0.0, lon = 0.0, tLat = 0.0, tLon = 0.0;          // {lat, lon, alt[, lookAt]}
+    bool lookAt = false;
+};
+bool ReadPoseSugar(const JsonValue& sugar, const std::string& path, PoseSugar& out,
+                   std::string* why);
+
 // The number law's formatting.
 std::string NumberText(double v);   // the shortest text that round-trips the double
 std::string FloatText(float v);     // the shortest text that narrows back to the float (<= %.9g)

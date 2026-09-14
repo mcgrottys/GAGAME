@@ -10,7 +10,9 @@
 //  nothing); scalars replace; a named array (views, portals, entities, effects, layers,
 //  nodes, tools) merges element by element -- an overlay entry with the same `name` merges in
 //  place, `"remove": true` deletes it, an entry without a name (or with a new one) is appended;
-//  an unnamed array (include, fleet.boats, rails.keys) appends; order is file order throughout.
+//  an UNNAMED array (include, fleet.boats, rails.keys) is a VALUE and is replaced whole, so the
+//  fold is idempotent and a resolved document reloads as itself (M12 step 5d: appending doubled
+//  the fleet when a recipe file re-applied its own `include`); order is file order throughout.
 //  A --set is `assoc`: `a.b.c=value` walks the path (an array segment names an element, or
 //  indexes an unnamed one), creating what is missing, and merges the value by the same law,
 //  so `views.sea.at={...}` replaces the eye whole and `portals.droste.twistDeg=45` edits one

@@ -47,6 +47,19 @@ std::string Join(const std::vector<std::string>& v) {
 // Named-array merge: in place by name, remove, append (the banner's law).
 void MergeList(JsonValue& base, const JsonValue& overlay, const PropDecl& decl,
                const std::string& path) {
+    // M12 step 5d: AN UNNAMED LIST IS A VALUE, AND AN OVERLAY REPLACES IT WHOLE. `include`,
+    // `water.fleet.boats` and `rails.keys` carry no names to merge by, so appending was the only
+    // thing the law could say about them -- and appending makes the fold NON-IDEMPOTENT: loading
+    // an already-resolved document (`gagame scenes/recipes/helm.json`, whose own `include`
+    // re-applies data/wave_scene.json at `water`) doubled the fleet, and a `base` chain doubled
+    // the include list. A list of boats is the FLEET the way a versor is a pose -- a value, not a
+    // namespace and not an accumulation -- which is the rule Schema::Atomic already states for
+    // the other value shapes. Nothing the FLAG path resolves changes: those three lists are empty
+    // in the defaults the fold starts from, so every recipe's --print-scene text is what it was.
+    if (!decl.named) {
+        base.arr = overlay.arr;
+        return;
+    }
     for (const JsonValue& e : overlay.arr) {
         const JsonValue* name = (decl.named && IsObject(e)) ? NameOf(e, "name") : nullptr;
         JsonValue* target = nullptr;
@@ -308,12 +321,15 @@ bool SceneBuilder::Load(const std::string& path, std::string* why) {
     if (!IsObject(doc)) return Refuse(why, path + ": a scene file is an object");
     if (m_base.empty()) m_base = path;
     m_loading.push_back(path);
-    // The scene this one inherits: loaded first, so this file's keys win over it.
-    if (const JsonValue* base = doc.Get("base")) {
-        if (base->type != JsonValue::Type::String || base->str.empty()) {
-            m_loading.pop_back();
-            return Refuse(why, path + ": base must name a scene file");
-        }
+    // The scene this one inherits: loaded first, so this file's keys win over it. M12 step 5d:
+    // a COMPLETE document carries every declared key, so a resolved recipe says `"base": ""` --
+    // which means NONE, not a broken path. Only a non-string is a refusal.
+    const JsonValue* base = doc.Get("base");
+    if (base && base->type != JsonValue::Type::String) {
+        m_loading.pop_back();
+        return Refuse(why, path + ": base must name a scene file");
+    }
+    if (base && !base->str.empty()) {
         if (!Load(base->str, why)) {
             m_loading.pop_back();
             return false;

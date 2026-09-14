@@ -59,6 +59,12 @@ public:
     virtual void Render(const FrameContext& ctx) = 0;
 
     bool enabled = true;
+    // M12 step 5d: WHAT THE SCENE'S `layers` LIST SAYS. `enabled` is the per-frame gate the mode
+    // and the altitude bands write every frame (FrameLoop's applyMode); this is the STANDING
+    // declaration -- a layer the scene file does not carry, or carries `"enabled": false`, is
+    // registered (the assembly's construction order is the lifetime law and does not move) and
+    // never drawn. Set once, at the end of Assemble(), from the list; nothing else writes it.
+    bool declared = true;
 };
 
 }  // namespace ga

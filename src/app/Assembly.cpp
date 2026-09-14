@@ -156,7 +156,7 @@ float ResolveDatum(const TideModel& model) {
 
 namespace ga::app {
 
-std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
+std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exitCode) {
     auto A = std::make_unique<Assembly>();
     // ---- The aliases: one reference per member, in order, under main()'s names, so the body
     // below is main()'s code unchanged. A closure that captures one of these by reference
@@ -252,17 +252,27 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
     auto& idxHeightCube = A->idxHeightCube;
     auto& tileStream = A->tileStream;
 
+    // ---- M12 step 5d: the scene's spellings this span reads more than once. `shaderDir` was
+    // opt.shaderDir (the wide form the shader compiler takes, widened once at the read); the
+    // portal and the slice effect are named list elements, absent in every scene that does not
+    // declare them.
+    const std::wstring& shaderDir = S.shadersW;
+    const ScenePortal* drostePortal = S.Portal("droste");
+    const bool droste = drostePortal && drostePortal->p.enabled;
+    const SceneEffect* sliceFx = S.EffectOfType("slice.plane");
+    const bool sliceOn = sliceFx != nullptr;
+
     // ---- M1: the tide viewer.
-    if (!model.Load(opt.tidesPath)) {
-        Log("FATAL: no tide data at '%s'.", opt.tidesPath.c_str());
+    if (!model.Load(S.data.tides)) {
+        Log("FATAL: no tide data at '%s'.", S.data.tides.c_str());
         Log("Run the harvester once (network, cached forever after):");
         Log("    py -3 harvester\\harvest_tides.py");
         exitCode = 1;
         return nullptr;
     }
 
-    if (!opt.headless) {
-        if (!window.Create(opt.width, opt.height, L"GAGAME")) {
+    if (!S.capture.headless) {
+        if (!window.Create(S.capture.width, S.capture.height, L"GAGAME")) {
             exitCode = 1;
             return nullptr;
         }
@@ -270,15 +280,15 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
 
     // M7k: the PIX capturer must be resident BEFORE device creation.
     if (opt.pixFrames > 0) PixLoadGpuCapturer();
-    gpu.Init(opt.headless ? nullptr : window.Handle(), opt.width, opt.height, opt.debugLayer,
-             opt.noVsync && !opt.headless);
-    if (!opt.headless) {
+    gpu.Init(S.capture.headless ? nullptr : window.Handle(), S.capture.width, S.capture.height,
+             opt.debugLayer, opt.noVsync && !S.capture.headless);
+    if (!S.capture.headless) {
         Log("[window] client area %ux%u (requested %ux%u; the swapchain matches the client "
             "rect, not the outer window)",
-            window.Width(), window.Height(), opt.width, opt.height);
+            window.Width(), window.Height(), S.capture.width, S.capture.height);
     }
 
-    rd.shaderDir = opt.shaderDir;
+    rd.shaderDir = shaderDir;
     renderer.Init(gpu, rd);
     if (opt.gpuTime) renderer.EnableGpuProfiler();
 
@@ -287,51 +297,52 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
     // Registration order IS draw order: sky (backdrop, depth off), then the tide product.
     skyOwned = std::make_unique<SkyLayer>();
     sky = skyOwned.get();
-    sky->Configure(opt.shaderDir);
+    sky->Configure(shaderDir);
     sky->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
     renderer.AddLayer(std::move(skyOwned));
 
     tideOwned = std::make_unique<TideLayer>();
     tide = tideOwned.get();
-    tide->Configure(opt.shaderDir, &model, opt.exaggeration);
+    tide->Configure(shaderDir, &model,
+                    S.Layer("tide") ? S.Layer("tide")->exaggeration : 60.0f);
     tide->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
     renderer.AddLayer(std::move(tideOwned));
 
     // The open sea (M2) is optional until harvest_waves.py has run once.
-    if (seaState.Load(opt.seaPath)) {
+    if (seaState.Load(S.data.seastate)) {
         auto seaOwned = std::make_unique<SeaLayer>();
         sea = seaOwned.get();
-        sea->Configure(opt.shaderDir, &seaState);
+        sea->Configure(shaderDir, &seaState);
         sea->SetSurface(&surface);   // M12 step 4b: the world.flat chart, for the churn's geoA row
-        sea->foamIntensity = opt.foam;
-        sea->pixelWater = opt.pixelWater;   // M9bh: shade in PsMain, not DsMain
-        sea->targetEdgePx = opt.edgePx;
-        sea->sweCurrentGain = opt.sweGain;
-        sea->heightScale = opt.heightScale;
+        sea->foamIntensity = S.water.foam;
+        sea->pixelWater = S.water.pixelWater;   // M9bh: shade in PsMain, not DsMain
+        sea->targetEdgePx = S.water.edgePx;
+        sea->sweCurrentGain = S.water.swe.gain;
+        sea->heightScale = S.water.heightScale;
         sea->atlasVisualize = opt.viz;
         sea->wireframe = opt.surfaceDebug == 1;
         sea->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
-        if (opt.stormHs > 0.01f) sea->SetStorm(opt.stormHs, opt.stormTp, opt.stormDir);
+        if (S.sea.storm.hs > 0.01f) sea->SetStorm(S.sea.storm.hs, S.sea.storm.tp, S.sea.storm.dir);
         renderer.AddLayer(std::move(seaOwned));
     } else {
         Log("[main] no sea state (run: py -3 harvester\\harvest_waves.py)");
     }
 
     // M3: currents -- the ACT tidal clock for the sea's jet, the GoMOFS field for the gulf.
-    haveCurrents = currents.Load(opt.currentsPath);
+    haveCurrents = currents.Load(S.data.currents);
     if (haveCurrents && sea) sea->SetCurrents(&currents);
     if (!haveCurrents) {
         Log("[main] no currents (run: py -3 harvester\\harvest_currents.py)");
     }
 
     // M5c: the MLLW -> NAVD88 join, now resolved from CO-OPS datums unless --datum forces it.
-    datumOff = opt.datumSet ? opt.datumOff : ResolveDatum(model);
+    datumOff = !S.sea.datum.fromStation ? S.sea.datum.mllwToNavd : ResolveDatum(model);
 
     // ---- M6w: THE ONE BED. The planets' CPU models, the raw CUDEM planes, and the
     // composed HEIGHT channel all come up BEFORE the solver -- because the solver's bed
     // is no longer a private file: it is REALIZED from the same painted stack the
     // renderer's tiles come from (ETOPO <- NE-15s <- the CUDEM windows <- hand edits).
-    marsMode = (opt.planet == "mars");
+    marsMode = (S.scene.planet == "mars");
     if (marsMode) marsModel.LoadMars("data/globe/globe.json");
     globeDataOk = globeModel.Load("data/globe/globe.json");
     GlobeModel& activeGlobe =
@@ -341,7 +352,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
     // The raw CUDEM planes are SOURCES (immutable after load -- their bytes are part of
     // the tile-cache identity). capeann/boston are the M6w HQ insets: channel-only, no
     // solver of their own yet.
-    haveBathyRaw = bathyRaw.Load(opt.bathyPath);
+    haveBathyRaw = bathyRaw.Load(S.data.bathy);
     bathyCapeAnn.Load("data/bathy/capeann.json");
     bathyBoston.Load("data/bathy/boston.json");
 
@@ -404,7 +415,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
     // station field (20 CO-OPS fits, Merrimack to Scituate), epoch-laddered, cached as
     // RG16F window tiles on demand. The sim manager consumes these next.
     waterAtlas.Init(compositor, model, "data/water");
-    if (!opt.waterMap.empty() || !opt.bathyMap.empty()) {
+    if (S.Tool("water-map") || S.Tool("bathy-map")) {
         exitCode = tools::RunWaterMap(opt, gpu, globeModel, compositor, hgtCh, waterAtlas);
         return nullptr;
     }
@@ -413,7 +424,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
     // land draws first and the water covers only what it actually stands above.
     // M6w: the SOLVER'S grid realizes from the channel -- one bed for the solver, the
     // renderer, and every future physics product. Fallback (no channel): raw + walls.
-    if (haveBathyRaw && bathy.Load(opt.bathyPath)) {
+    if (haveBathyRaw && bathy.Load(S.data.bathy)) {
         if (hgtCh >= 0 && !marsMode) {
             bathy.RealizeFromChannel(compositor, hgtCh);
         } else {
@@ -421,7 +432,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
         }
         auto terrOwned = std::make_unique<TerrainLayer>();
         terrain = terrOwned.get();
-        terrain->Configure(opt.shaderDir, &bathy);
+        terrain->Configure(shaderDir, &bathy);
         terrain->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
         renderer.AddLayer(std::move(terrOwned));
         // M9k/M9n: THE BED, through GA Load -> normalize -> GA Compose (the six-layer
@@ -452,7 +463,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
 
     // M5c: the sparse shallow-water solver -- the estuary's own hydrodynamics, tide-forced
     // offshore and river-forced upstream, feeding the sea's mean surface and currents.
-    if (terrain && sea && !opt.sweOff) {
+    if (terrain && sea && S.water.swe.enabled) {
         // ---- M9m: THE COMPOSE TREE, and the tide step that forced it into existence.
         //
         // Depth is not a dataset anyone ships. It is water level minus bed, and those two
@@ -523,17 +534,18 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                                                          : "DIVERGENT -- check the link");
             }
         }
-        swe.Init(gpu, renderer.Shaders(), opt.shaderDir, bathy);   // bed bound below
+        swe.Init(gpu, renderer.Shaders(), shaderDir, bathy);   // bed bound below
         // M6r: the discharge is LIVE again -- it rides the Flather boundary's u_ext (the
         // station stage still carries it into eta; the prism term dwarfs it either way).
-        riverQ = (opt.riverQ > 0) ? opt.riverQ : LoadRiverDischarge("data/river/river.json");
+        riverQ = (S.water.swe.riverQ > 0) ? S.water.swe.riverQ
+                                         : LoadRiverDischarge("data/river/river.json");
         sea->SetSwe(&swe);
         sea->SetBathyCpu(&bathy);
     }
     if (haveCurrents && currents.Field().Valid()) {
         auto gulfOwned = std::make_unique<GulfLayer>();
         gulf = gulfOwned.get();
-        gulf->Configure(opt.shaderDir, &currents);
+        gulf->Configure(shaderDir, &currents);
         gulf->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
         renderer.AddLayer(std::move(gulfOwned));
     }
@@ -547,6 +559,24 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
     // in the frame loop; geometry-of-the-bank changes need a restart (logged).
     LoadWaterScene(kScenePath, waterScene);
     WaterSceneChanged(kScenePath, &waterSceneMtime);
+    // M12 step 5d: ...and the RESOLVED SCENE's `water` section over it. The file above reaches
+    // the document as merrimack.json's own `include` overlay, so for a shipped run these are the
+    // same values by the same fold (LoadWaterScene still AUTHORS the file when it is absent --
+    // the M6p law) -- but a scene file, an overlay or a --set now says them too, through the ONE
+    // table (scene/WaterComponent.h) whose Apply the reload uses.
+    {
+        scene::PropSet wset(scene::WaterSchema());
+        scene::WaterComponent::Fleet wfleet;
+        std::string why;
+        if (!A->water.ReadJson(WaterSceneDoc(S.waterDoc), wset, wfleet, &why) ||
+            !wset.ApplyTo(&waterScene, nullptr, &why)) {
+            Log("FATAL: [scene] %s", why.c_str());
+            exitCode = 2;
+            return nullptr;
+        }
+        waterScene.fleetCount = wfleet.count;
+        for (int i = 0; i < 8; ++i) waterScene.fleet[i] = wfleet.boats[i];
+    }
     // Step 3 (docs/PERF_EXPERIMENT.md): the directory watches the file; the frame polls
     // one atomic instead of paying the 0.14-0.19 ms stat through the data/ junction.
     sceneWatch.Start(kScenePath);
@@ -554,17 +584,17 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
     if (sea && bathy.Ready() && !marsMode) {
         auto wbOwned = std::make_unique<WaterBankLayer>();
         waterBank = wbOwned.get();
-        waterBank->Configure(opt.shaderDir, sea, &swe, &bathy, &waterAtlas, &compositor,
+        waterBank->Configure(shaderDir, sea, &swe, &bathy, &waterAtlas, &compositor,
                              hgtCh, &globeModel, &seaState);
         waterBank->SetBaseTexel(waterScene.bankTexelM);   // M8h ring density (scene)
         waterBank->SetSurface(&surface);   // M12 step 4b: the world.flat chart, for the geoA row
-        waterBank->flatBed = opt.flatBed;
-        waterBank->flatBedNavd = opt.flatBedNavd;
-        if (opt.flatBed) {
+        waterBank->flatBed = S.water.bank.flatBed;
+        waterBank->flatBedNavd = S.water.bank.flatBedNavd;
+        if (S.water.bank.flatBed) {
             Log("[bed] --flat-bed %.1f m NAVD: the bank fills against a CONSTANT floor. Diff "
                 "this run's wireframe against a normal one -- whatever differs is what "
                 "bathymetry does to the MESH, with shading held out of it.",
-                opt.flatBedNavd);
+                S.water.bank.flatBedNavd);
         }
         waterBank->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
         renderer.AddLayer(std::move(wbOwned));
@@ -573,21 +603,21 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
         // the outer sea is seen from S(C), so its waves need rings anchored there. Stateless
         // like the first bank (every tile recomputed each frame), so it costs one more fill
         // and a second small atlas, and it runs only while an outer level exists.
-        if (opt.droste && opt.oneWater) {
+        if (droste && S.water.oneWater) {
             auto wbB = std::make_unique<WaterBankLayer>();
             waterBankB = wbB.get();
-            waterBankB->Configure(opt.shaderDir, sea, &swe, &bathy, &waterAtlas, &compositor,
+            waterBankB->Configure(shaderDir, sea, &swe, &bathy, &waterAtlas, &compositor,
                                   hgtCh, &globeModel, &seaState);
             waterBankB->SetBaseTexel(waterScene.bankTexelM);
             waterBankB->SetSurface(&surface);
-            waterBankB->flatBed = opt.flatBed;
-            waterBankB->flatBedNavd = opt.flatBedNavd;
+            waterBankB->flatBed = S.water.bank.flatBed;
+            waterBankB->flatBedNavd = S.water.bank.flatBedNavd;
             waterBankB->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             waterBankB->enabled = false;   // until the camera has a level above it
             renderer.AddLayer(std::move(wbB));
         }
-        sea->drawEnabled = !opt.oneWater;
-        if (opt.oneWater) {
+        sea->drawEnabled = !S.water.oneWater;
+        if (S.water.oneWater) {
             Log("[waterbank] ONE-WATER: the SeaLayer grid retires; the globe's meshlets "
                 "displace from the bank");
         }
@@ -601,7 +631,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
     if (globeDataOk) {
         auto globeOwned = std::make_unique<GlobeLayer>();
         globe = globeOwned.get();
-        globe->Configure(opt.shaderDir, &activeGlobe);
+        globe->Configure(shaderDir, &activeGlobe);
         globe->marsReliefValid = marsMode && marsModel.Ready();
         globe->windOverlay = opt.viz;
         globe->surfaceDebug = opt.surfaceDebug;
@@ -631,7 +661,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
 
     if (globe) {
         resMgr.Init(gpu);
-        resMgr.ringLoads = opt.ringLoads;
+        resMgr.ringLoads = S.streaming.ringLoads;
         resMgr.dsSerial = opt.dsSerial;
         resMgr.traceRes = opt.resTrace;
         int surf = -1, norm = -1;
@@ -665,7 +695,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
             // page (the frame the colour window shares, so the near-field land/sea gate
             // and the normals ride CUDEM truth). One provider dispatching on the slice.
             // M9as: fed by the height TileTree when --color-trees is on.
-            if (opt.colorTrees || opt.treeAudit) {
+            if (S.streaming.colorTrees || S.Tool("tree-audit")) {
                 auto layers = BuildHeightStack(compositor, hgtCh);
                 std::vector<std::pair<double, std::shared_ptr<DomainSource>>> byRes;
                 const Compositor::Channel& hch = compositor.ChannelAt(hgtCh);
@@ -706,12 +736,12 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                 const Lattice& hCubeL = surface.cubeH;   // M12 step 4a: the surface's lattices
                 const Lattice& hWinL = surface.winH;
                 hd.bindings.push_back({0, 6, hCubeL,
-                                       (opt.colorTrees && heightTree)
+                                       (S.streaming.colorTrees && heightTree)
                                            ? heightTree->Provider(hCubeL)
                                            : compositor.CubeHeight(hgtCh),
                                        "paint cube faces"});
                 hd.bindings.push_back({6, 1, hWinL,
-                                       (opt.colorTrees && heightTree)
+                                       (S.streaming.colorTrees && heightTree)
                                            ? heightTree->Provider(hWinL)
                                            : compositor.WindowHeight(hgtCh, hWinL.orgPxX,
                                                                      hWinL.orgPxY, hWinL.faceDim,
@@ -729,7 +759,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                                       resMgr.ResidencyRes(hgtTenant), 6u,
                                       resMgr.Mips(hgtTenant), surface.winH);
                 }
-                    if (sea && hgtCh >= 0 && opt.exposure) {
+                    if (sea && hgtCh >= 0 && S.streaming.exposure) {
                         exposureSrc = std::make_shared<ExposureSource>(&compositor, hgtCh);
                         auto xdc = std::make_shared<DomainCompositor>();
                         xdc->SetBlend(DomainCompositor::Blend::LayeredOver);
@@ -777,7 +807,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
             }
             // earth.color: the Google mercator tree, realized twice -- the global cube
             // and the Merrimack z14 window (same stack, deeper footprint).
-            if (googleTiles.Init("satellite", opt.tileBudget)) {
+            if (googleTiles.Init("satellite", S.streaming.tileBudget)) {
                 googleTiles.SetFetchCounter(&resMgr.fetchesThisRun);
                 // M6l: the MassGIS 15 cm plane orthos paint ABOVE Google wherever they
                 // have coverage -- the compositor's first independent high-res layer,
@@ -800,7 +830,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                 // bathymetry's hillshade x sediment ramp, every ocean texel; the classifier
                 // keeps its authority inside its own box by painting over it.
                 size_t reliefLayer = SIZE_MAX;
-                if (opt.seafloor &&
+                if (S.streaming.seafloor &&
                     srcRelief.Load("data/bed/seafloor_rules.json", &compositor, hgtCh)) {
                     colorStack.push_back(&srcRelief);
                     reliefLayer = colorStack.size() - 1;
@@ -824,10 +854,10 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                 // rings' own bounds, so every tile outside New England keeps the identity
                 // it already has -- the global cube is not repainted for this.
                 const size_t bedIdx = bedLayer;
-                if (opt.gisGate && (bedIdx != SIZE_MAX || reliefLayer != SIZE_MAX) &&
+                if (S.streaming.gisGate && (bedIdx != SIZE_MAX || reliefLayer != SIZE_MAX) &&
                     gisMask.Load("data/gis/")) {
                     srcGisMask.Refresh();   // the rings are loaded: declare the real box
-                    if (!opt.gisDump.empty()) tools::RunGisDump(opt, gisMask);
+                    if (S.Tool("gis-dump")) tools::RunGisDump(opt, gisMask);
                     colorStack.push_back(&srcGisMask);
                     maskLayer = colorStack.size() - 1;
                 }
@@ -898,12 +928,12 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                 keepAlive.push_back(land);
                 keepAlive.push_back(mega);
                 PrintTree("earth.color (megatexture)", mega.get());
-                if (opt.colorTrees || opt.treeAudit) {
+                if (S.streaming.colorTrees || S.Tool("tree-audit")) {
                     megaTree = std::make_unique<TileTree>(mega.get());
                     megaTree->Print();
                 }
                 auto mkColor = [&](const ColorFrame& f) -> TileProviderFn {
-                    return (opt.colorTrees && megaTree) ? megaTree->Provider(f)
+                    return (S.streaming.colorTrees && megaTree) ? megaTree->Provider(f)
                                                         : compositor.ColorRealization(colCh, f);
                 };
                 // M9ap: NO INSET TEXTURES. The planet's colour is ONE tenant -- a reserved
@@ -949,7 +979,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                 // from the .raw parity fills are gone (AUDIT_WATER item 2). Addresses the
                 // survey has no opinion about have no tile: the loader marks them NULL after
                 // its retries and the shader falls back to the height sign there.
-                if (opt.colorTrees && megaTree && maskLayer != SIZE_MAX) {
+                if (S.streaming.colorTrees && megaTree && maskLayer != SIZE_MAX) {
                     if (TileTree* gt = megaTree->Find("gis.landsea")) {
                         // M12 step 3e: THE DECLARATION -- the survey on the colour's three
                         // lattices, painted by its own node of the megatexture tree. Where the
@@ -982,7 +1012,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                             "classifier falls back to the height sign");
                     }
                 }
-                if (opt.treeAudit) {
+                if (S.Tool("tree-audit")) {
                     exitCode = tools::RunTreeAudit(opt, compositor, hgtCh, resMgr, colCh,
                                                    megaTree, heightTree, surface);
                     return nullptr;
@@ -1023,7 +1053,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                 // M9ao: ON by default. Through the packed trees the streamed path is
                 // pixel-identical to the upload ring (section 33); the user made it the
                 // default. --no-direct-storage is the A/B.
-                if (opt.directStorage) {
+                if (S.streaming.directStorage) {
                     if (tileStream.Init(gpu)) resMgr.SetTileStream(&tileStream);
                 } else {
                     Log("[dstorage] OFF by request (--no-direct-storage): every tile takes "
@@ -1198,14 +1228,14 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                 static_cast<float>(swe.VelGradResMapW()),
                 static_cast<float>(swe.VelGradResMapH()), swe.VelGradMips());
         }
-        globe->sliceOn = opt.sliceOn;
-        globe->sliceD = static_cast<float>(opt.sliceD);
+        globe->sliceOn = sliceOn;
+        globe->sliceD = static_cast<float>(sliceOn ? sliceFx->d : 0.0);
         compositor.LogRegistry();
         // M8j: --fidelity-map draws that same registry. It runs HERE, not at the
         // --water-map exit, because earth.color is registered 200 lines later than
         // earth.height -- the first cut rendered a sheet with the skin channel simply
         // missing, which is the exact class of error this picture exists to catch.
-        if (!opt.fidelityMap.empty()) tools::RunFidelityMap(opt, compositor);
+        if (S.Tool("fidelity-map")) tools::RunFidelityMap(opt, compositor);
         // M7j: the GA AST -- the state diagram printed and validated EVERY run, so a
         // frame mismatch or an orphaned field is a boot-time report, not a debugging
         // session. (The workflow as an AST: domains, axes, units, scales, ranges.)
@@ -1217,14 +1247,14 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
         // declares no page tenant and gets no paint row, which is the truth of it.
         surface.RegisterEdges();
         ga::ast::RegisterKnownWaterEdges();
-        ga::ast::SetActive("sea.ps", !opt.oneWater);
+        ga::ast::SetActive("sea.ps", !S.water.oneWater);
         // M9bh: --pixel-water re-opens eight edges into the pixel stage (the two rays
         // and what they read). Declared only when the flag is on -- an edge for a mode
         // the run is not in is graph rot wearing the other sign.
-        if (opt.pixelWater) ga::ast::RegisterPixelWaterEdges();
+        if (S.water.pixelWater) ga::ast::RegisterPixelWaterEdges();
         // M9bi: the sun's own edges, when the ephemeris is the one driving it.
-        if (!opt.sunPinned) ga::ast::RegisterSolarEdges();
-        if (opt.sliceOn) {
+        if (S.sun.source != Scene::kPinned) ga::ast::RegisterSolarEdges();
+        if (sliceOn) {
             // M7o: the demo node registers its edge like any other -- the AST is how
             // features arrive now. One blade, one inner product, one discard.
             ga::ast::Register({"user.plane", "globe.ps", "slice",
@@ -1244,21 +1274,21 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
             vectors.Load("data/vectors/vectors.vpack");
             auto gisOwned = std::make_unique<GisLayer>();
             gisLayer = gisOwned.get();
-            gisLayer->Configure(opt.shaderDir, &gisStencil, &exchange, &vectors);
+            gisLayer->Configure(shaderDir, &gisStencil, &exchange, &vectors);
             gisLayer->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             gisLayer->enabled = opt.stencil;
             renderer.AddLayer(std::move(gisOwned));
         }
-        if (!marsMode && !opt.boat.empty()) {
+        if (!marsMode && !S.entities.empty()) {
             auto vlOwned = std::make_unique<VesselLayer>();
-            vlOwned->Configure(opt.shaderDir);
+            vlOwned->Configure(shaderDir);
             vlOwned->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             vesselLayer = vlOwned.get();
             renderer.AddLayer(std::move(vlOwned));
         }
         if (!marsMode) {
             auto mkOwned = std::make_unique<MarkerLayer>();
-            mkOwned->Configure(opt.shaderDir, &exchange, "markers.stations");
+            mkOwned->Configure(shaderDir, &exchange, "markers.stations");
             mkOwned->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             mkOwned->enabled = !opt.albedo;   // the lens shows textures, nothing else
             renderer.AddLayer(std::move(mkOwned));
@@ -1316,6 +1346,32 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode) {
                 if (globe) globe->ApplyWindDemand(gpu, derived, dx, dy);
             }
         }
+    }
+
+    // ---- M12 step 5d: THE `layers` LIST, APPLIED AND CHECKED. The list is the registration
+    // order and the standing draw declaration (Layer::declared): a layer the scene does not carry
+    // -- or carries `"enabled": false` -- is built exactly as it was (the construction order IS
+    // the lifetime law and does not move) and never drawn. What the list cannot do silently is
+    // disagree with the code: the order the span above registered in must be the declared order
+    // with the layers this run could not build left out, or the boot refuses naming the layer.
+    // An unknown layer NAME never reaches here -- SceneSchema's registry refuses it at Resolve.
+    {
+        std::vector<std::string> registered;
+        std::string order;
+        for (const std::unique_ptr<Layer>& l : renderer.Layers()) {
+            l->declared = S.LayerOn(l->Name());
+            registered.push_back(l->Name());
+            order += (order.empty() ? "" : " ") + std::string(l->Name()) +
+                     (l->declared ? "" : "(off)");
+        }
+        std::string why;
+        if (!CheckLayerOrder(S, registered, &why)) {
+            Log("FATAL: [scene] %s", why.c_str());
+            exitCode = 2;
+            return nullptr;
+        }
+        Log("[scene] draw order (%zu registered, the scene's list): %s", registered.size(),
+            order.c_str());
     }
     return A;
 }
