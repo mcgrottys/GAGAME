@@ -1,0 +1,282 @@
+{
+  "version": 1,
+  "_doc": "the scene file's vocabulary, generated at boot from the Schema tables (src/scene/SceneSchema.cpp); reload hot|restart says what a running engine can take; --print-scene is the round trip",
+  "sections": [
+    { "key": "base", "kind": "path", "node": "scene-file", "doc": "the scene this one inherits (loaded first; this file overrides it)" },
+    { "key": "scene", "kind": "object", "node": "scene", "doc": "the scene's identity: name, mode, planet, start view" },
+    { "key": "include", "kind": "list", "node": "include", "doc": "overlays applied over this file, in order (stronger than it)" },
+    { "key": "data", "kind": "object", "node": "data", "doc": "the data files the assembly opens" },
+    { "key": "time", "kind": "object", "node": "sim.clock", "doc": "the scene clock (sim/SimClock.h)" },
+    { "key": "sun", "kind": "object", "node": "solar.sun", "doc": "the sun: the ephemeris, or pinned at az/el" },
+    { "key": "sea", "kind": "object", "node": "sea", "doc": "the sea state and the MLLW -> NAVD88 datum link" },
+    { "key": "water", "kind": "object", "node": "water", "doc": "the water component (scene/WaterComponent.h) and the layers it fans out to" },
+    { "key": "streaming", "kind": "object", "node": "residency", "doc": "residency: scene state, because it changes the picture" },
+    { "key": "capture", "kind": "object", "node": "capture", "doc": "the headless capture and the still's hold" },
+    { "key": "views", "kind": "list", "node": "view", "doc": "the cameras (scene/View.h), by name; scene.view names the one that starts" },
+    { "key": "rails", "kind": "object", "node": "rail", "doc": "the rail flown (scene/Rail.h; scenes/rails/<active>.json)" },
+    { "key": "portals", "kind": "list", "node": "portal", "doc": "the Droste links (scene/Portal.h), by name" },
+    { "key": "entities", "kind": "list", "node": "entity", "doc": "the vessels (scene/Entity.h), by name" },
+    { "key": "effects", "kind": "list", "node": "effect", "doc": "the paper visuals (scene/Effect.h), by name, typed by EffectSchemas" },
+    { "key": "layers", "kind": "list", "node": "layer", "doc": "the layers in registration (draw) order, typed by name" },
+    { "key": "nodes", "kind": "list", "node": "component", "doc": "typed nodes (scene/Component.h), by name, typed by ComponentSchemas" },
+    { "key": "tools", "kind": "list", "node": "tool", "doc": "the one-shot modes this scene runs (--tool)" }
+  ],
+  "placement": [
+    { "spelling": "compass", "keys": ["x", "alt", "z", "az", "pitch"], "doc": "the flat world frame in metres and compass degrees: Camera::SetFromCompass, then FromCamera" },
+    { "spelling": "orbit", "keys": ["lat", "lon", "alt", "lookAt"], "doc": "the orbit key: degrees and metres above the planet; lookAt aims at a second lat/lon" },
+    { "spelling": "motor", "keys": ["motor.re", "motor.du"], "doc": "the PGA motor outright (core/Pga.h), for a pose no sugar spells" },
+    { "spelling": "similarity", "keys": ["similarity.p", "similarity.s", "similarity.axis", "similarity.twistDeg"], "doc": "the Cl(4,1) similarity (core/Space.h Placement), the Droste link's own spelling" }
+  ],
+  "types": [
+    { "type": "scene-file", "keys": [
+      { "key": "base", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the scene this one inherits (loaded first; this file overrides it)" },
+      { "key": "scene", "type": "object", "field": "none", "schema": "scene", "reload": "hot", "doc": "the scene: name, mode, planet, start view" },
+      { "key": "include", "type": "list", "field": "none", "element": "include", "named": false, "reload": "hot", "doc": "overlays applied over this file, in order" },
+      { "key": "data", "type": "object", "field": "none", "schema": "data", "reload": "hot", "doc": "the data files" },
+      { "key": "time", "type": "object", "field": "none", "schema": "time", "reload": "hot", "doc": "the scene clock" },
+      { "key": "sun", "type": "object", "field": "none", "schema": "sun", "reload": "hot", "doc": "the sun" },
+      { "key": "sea", "type": "object", "field": "none", "schema": "sea", "reload": "hot", "doc": "the sea state and the datum" },
+      { "key": "water", "type": "object", "field": "none", "schema": "water", "reload": "hot", "doc": "the water" },
+      { "key": "streaming", "type": "object", "field": "none", "schema": "streaming", "reload": "hot", "doc": "residency: scene state" },
+      { "key": "capture", "type": "object", "field": "none", "schema": "capture", "reload": "hot", "doc": "headless capture" },
+      { "key": "views", "type": "list", "field": "none", "element": "view", "named": true, "reload": "hot", "doc": "the cameras, by name" },
+      { "key": "rails", "type": "object", "field": "none", "schema": "rails", "reload": "hot", "doc": "the camera rails" },
+      { "key": "portals", "type": "list", "field": "none", "element": "portal", "named": true, "reload": "hot", "doc": "the Droste links, by name" },
+      { "key": "entities", "type": "list", "field": "none", "element": "entity", "named": true, "reload": "hot", "doc": "the vessels, by name" },
+      { "key": "effects", "type": "list", "field": "none", "element": "effect", "named": true, "registry": "effect", "typeKey": "type", "reload": "hot", "doc": "the paper visuals, by name, typed" },
+      { "key": "layers", "type": "list", "field": "none", "element": "layer", "named": true, "registry": "layer", "typeKey": "name", "reload": "hot", "doc": "the layers in registration order, typed by name" },
+      { "key": "nodes", "type": "list", "field": "none", "element": "node", "named": true, "registry": "component", "typeKey": "type", "reload": "hot", "doc": "typed nodes (plugins)" },
+      { "key": "tools", "type": "list", "field": "none", "element": "tool", "named": true, "reload": "hot", "doc": "the one-shot modes this scene runs" }
+    ] },
+    { "type": "scene", "keys": [
+      { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "merrimack", "reload": "restart", "doc": "the scene's name (a label, read into the boot's [scene] line)" },
+      { "key": "mode", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "world", "names": ["chart", "world", "gulf"], "reload": "restart", "doc": "the layer-enable law: the M1 chart, the one world (estuary + planet), the gulf map" },
+      { "key": "planet", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "earth", "reload": "restart", "doc": "earth | mars" },
+      { "key": "view", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "sea", "reload": "restart", "doc": "the start camera: a name in views[]" }
+    ] },
+    { "type": "include", "keys": [
+      { "key": "file", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a scene file overlaid on the base, in order" },
+      { "key": "at", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the section it overlays (\"\" = the root)" },
+      { "key": "optional", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "a missing file is skipped" }
+    ] },
+    { "type": "data", "keys": [
+      { "key": "shaders", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "shaders", "reload": "restart", "doc": "the shader directory (--shaders)" },
+      { "key": "tides", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "data/tides/stations.json", "reload": "restart", "doc": "the tide stations (--tides)" },
+      { "key": "seastate", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "data/sea/seastate.json", "reload": "restart", "doc": "the sea state (--seastate)" },
+      { "key": "currents", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "data/currents/currents.json", "reload": "restart", "doc": "the currents (--currents)" },
+      { "key": "bathy", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "data/bathy/merrimack.json", "reload": "restart", "doc": "the bathymetry (--bathy)" }
+    ] },
+    { "type": "time", "keys": [
+      { "key": "start", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "now", "reload": "restart", "doc": "\"now\", \"YYYY-MM-DDTHH:MM:SSZ\" or unix seconds (--start)" },
+      { "key": "timeScale", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1, "reload": "hot", "doc": "sim seconds per wall second (--scale)" },
+      { "key": "paused", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "hot", "doc": "start paused" },
+      { "key": "windowDays", "type": "number", "field": "f64", "quantity": "time", "unit": "day", "default": 7, "reload": "hot", "doc": "the tide plot's window (--window-days)" }
+    ] },
+    { "type": "sun", "keys": [
+      { "key": "source", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "ephemeris", "names": ["ephemeris", "pinned"], "reload": "restart", "doc": "the ephemeris at the scene's time and place, or pinned at az/el (--sun)" },
+      { "key": "az", "type": "number", "field": "f32", "quantity": "angle", "unit": "deg", "default": 112, "reload": "hot", "doc": "pinned azimuth, compass" },
+      { "key": "el", "type": "number", "field": "f32", "quantity": "angle", "unit": "deg", "default": 26, "reload": "hot", "doc": "pinned elevation" }
+    ] },
+    { "type": "sea", "keys": [
+      { "key": "storm", "type": "object", "field": "none", "schema": "sea.storm", "reload": "hot", "doc": "the sandbox sea-state override" },
+      { "key": "datum", "type": "object", "field": "none", "schema": "sea.datum", "reload": "hot", "doc": "the MLLW -> NAVD88 link" }
+    ] },
+    { "type": "sea.storm", "keys": [
+      { "key": "hs", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": 0, "reload": "restart", "doc": "significant height; 0 = the forecast sea (--storm)" },
+      { "key": "tp", "type": "number", "field": "f32", "quantity": "time", "unit": "s", "default": 10, "reload": "restart", "doc": "peak period" },
+      { "key": "dir", "type": "number", "field": "f32", "quantity": "angle", "unit": "deg", "default": 90, "reload": "restart", "doc": "from-direction, compass" }
+    ] },
+    { "type": "sea.datum", "keys": [
+      { "key": "fromStation", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "CO-OPS resolves MLLW -> NAVD88 per station; false = mllwToNavd" },
+      { "key": "mllwToNavd", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": -1.3, "reload": "restart", "doc": "tide (m MLLW) + this = NAVD88 (--datum)" }
+    ] },
+    { "type": "water", "keys": [
+      { "key": "oneWater", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "water geometry from the wave bank alone (--no-one-water)" },
+      { "key": "pixelWater", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "shade the water per pixel (--no-pixel-water)" },
+      { "key": "foam", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 1, "reload": "hot", "doc": "sea-mode whitecap intensity (--foam)" },
+      { "key": "edgePx", "type": "number", "field": "f32", "quantity": "1", "unit": "px", "default": 12, "reload": "hot", "doc": "tessellated edge target (--edge-px)" },
+      { "key": "heightScale", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 1.15, "reload": "hot", "doc": "wave vertical exaggeration (--height-scale)" },
+      { "key": "swe", "type": "object", "field": "none", "schema": "water.swe", "reload": "hot", "doc": "the shallow-water solver" },
+      { "key": "bank", "type": "object", "field": "none", "schema": "water.bank", "reload": "hot", "doc": "the water bank" },
+      { "key": "wavefield", "type": "object", "field": "none", "schema": "water.wavefield", "reload": "hot", "doc": "the solved wave field's window (data/wave_scene.json)" },
+      { "key": "closures", "type": "object", "field": "none", "schema": "water.closures", "reload": "hot", "doc": "the kernel closures (data/wave_scene.json)" },
+      { "key": "fleet", "type": "object", "field": "none", "schema": "water.fleet", "reload": "hot", "doc": "the AIS fleet (data/wave_scene.json)" }
+    ] },
+    { "type": "water.swe", "keys": [
+      { "key": "enabled", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the shallow-water solver; false = the analytic tide plane (--swe-off)" },
+      { "key": "westBoundary", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the west-boundary deviation; false = zeroed (--swe-west-off)" },
+      { "key": "spinupH", "type": "number", "field": "f64", "quantity": "time", "unit": "h", "default": 1, "reload": "restart", "doc": "history integrated before the first frame (--swe-spinup)" },
+      { "key": "gain", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 1, "reload": "hot", "doc": "solved-current gain (--swe-gain)" },
+      { "key": "riverQ", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": -1, "reload": "restart", "doc": "river discharge, m^3/s; < 0 = data/river/river.json (--river)" }
+    ] },
+    { "type": "water.bank", "keys": [
+      { "key": "flatBed", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "replace the bed with a flat floor (--flat-bed)" },
+      { "key": "flatBedNavd", "type": "number", "field": "f32", "quantity": "length", "unit": "m NAVD88", "default": -30, "reload": "restart", "doc": "the floor's height" }
+    ] },
+    { "type": "water.wavefield", "keys": [
+      { "key": "enabled", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "hot", "doc": "the solved wave field" },
+      { "key": "orgX", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": -1400, "reload": "hot", "doc": "window origin, world x" },
+      { "key": "orgZ", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": -800, "reload": "hot", "doc": "window origin, world z" },
+      { "key": "nx", "type": "number", "field": "i32", "quantity": "1", "unit": "1", "default": 1600, "reload": "hot", "doc": "cells east" },
+      { "key": "ny", "type": "number", "field": "i32", "quantity": "1", "unit": "1", "default": 1000, "reload": "hot", "doc": "cells north" },
+      { "key": "cellM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 2, "reload": "hot", "doc": "cell size" },
+      { "key": "comps", "type": "number", "field": "i32", "quantity": "1", "unit": "1", "default": 32, "reload": "hot", "doc": "spectral components" },
+      { "key": "spreadDeg", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 26, "reload": "hot", "doc": "directional spread" },
+      { "key": "barNormalDeg", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 285, "reload": "hot", "doc": "the entrance bar's normal, compass" },
+      { "key": "gammaHs", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0.6, "reload": "hot", "doc": "Hs <= gamma * h" },
+      { "key": "minSamplesPerLambda", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 8, "reload": "hot", "doc": "upload gate" },
+      { "key": "tideBucketM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0.25, "reload": "hot", "doc": "re-solve quantization" },
+      { "key": "currentBucketMs", "type": "number", "field": "f64", "quantity": "velocity", "unit": "m/s", "default": 0.1, "reload": "hot", "doc": "re-solve quantization" },
+      { "key": "featherM", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": 120, "reload": "hot", "doc": "window edge blend" },
+      { "key": "chop", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 1.1, "reload": "hot", "doc": "Gerstner horizontal displacement" },
+      { "key": "exag", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 1.15, "reload": "hot", "doc": "display exaggeration on the solved comps" },
+      { "key": "bankTexelM", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": 1.2, "reload": "restart", "doc": "ring-0 texel (ring construction)" }
+    ] },
+    { "type": "water.closures", "keys": [
+      { "key": "shedSteepCap", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 0.44, "reload": "hot", "doc": "Miche cap on the shed slope variance" },
+      { "key": "shedMssCeil", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 0.09, "reload": "hot", "doc": "storm-sea mss ceiling" },
+      { "key": "churnGain", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 0.12, "reload": "hot", "doc": "churn read gain (0 = off)" },
+      { "key": "crestLo", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 0.28, "reload": "hot", "doc": "crest gate, eta/rms" },
+      { "key": "crestHi", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 0.8, "reload": "hot", "doc": "crest gate, eta/rms" },
+      { "key": "depthLo", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 1.05, "reload": "hot", "doc": "depth-excess trigger band" },
+      { "key": "depthHi", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 1.95, "reload": "hot", "doc": "depth-excess trigger band" },
+      { "key": "foamOpacity", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 0.72, "reload": "hot", "doc": "peak foam opacity" },
+      { "key": "ringBlendTexels", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 48, "reload": "hot", "doc": "bank ring cross-fade width" },
+      { "key": "bandFoldWeight", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 1, "reload": "hot", "doc": "the fold's per-band wavelength follows the spectrum" },
+      { "key": "windSeaFill", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 1, "reload": "hot", "doc": "gain on the synthesised wind sea" },
+      { "key": "buoyAssimAgeH", "type": "number", "field": "f32", "quantity": "time", "unit": "h", "default": 6, "reload": "hot", "doc": "buoy assimilation: max observation age" },
+      { "key": "buoyAssimGainMax", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 1.8, "reload": "hot", "doc": "and its gain clamp" },
+      { "key": "causticStrength", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 0.6, "reload": "hot", "doc": "bed dapple (0 = off)" },
+      { "key": "waterOptics", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "hot", "doc": "K_d and the deep colour from the ocean-colour fields" },
+      { "key": "jettyCrestNavd", "type": "number", "field": "f32", "quantity": "length", "unit": "m NAVD88", "default": -99, "reload": "hot", "doc": "edit-land floor; <= -90 = auto" }
+    ] },
+    { "type": "water.fleet", "keys": [
+      { "key": "enabled", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "hot", "doc": "the AIS-lane floats" },
+      { "key": "boats", "type": "list", "field": "none", "element": "water.fleet.boat", "named": false, "reload": "hot", "doc": "the boats, in lane order" }
+    ] },
+    { "type": "water.fleet.boat", "keys": [
+      { "key": "speed", "type": "number", "field": "f64", "quantity": "velocity", "unit": "m/s", "default": 4.86, "reload": "hot", "doc": "AIS per-class mean SOG" },
+      { "key": "halfLen", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 7.5, "reload": "hot", "doc": "half length" },
+      { "key": "wakeAmp", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0.55, "reload": "hot", "doc": "wake amplitude" },
+      { "key": "offsetS", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0, "reload": "hot", "doc": "starting arc-length offset along the lane" },
+      { "key": "dir", "type": "number", "field": "i32", "quantity": "1", "unit": "1", "default": 1, "reload": "hot", "doc": "+1 outbound, -1 inbound" }
+    ] },
+    { "type": "streaming", "keys": [
+      { "key": "tileBudget", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 1000, "reload": "restart", "doc": "hard cap on Google fetches per run (--tile-budget)" },
+      { "key": "predictEvery", "type": "number", "field": "u32", "quantity": "1", "unit": "frames", "default": 3, "reload": "hot", "doc": "prefetch-walk cadence (--predict-every)" },
+      { "key": "directStorage", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "NVMe -> GPU tile reads (--no-direct-storage)" },
+      { "key": "colorTrees", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "colour and height pages from the trees (--no-color-trees)" },
+      { "key": "gisGate", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the vector land/sea gate on the bed (--no-gis-gate)" },
+      { "key": "seafloor", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the global seafloor relief source (--no-seafloor)" },
+      { "key": "exposure", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the swell-exposure page (--no-exposure)" },
+      { "key": "ringLoads", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the ring gate (--no-ring-loads)" }
+    ] },
+    { "type": "capture", "keys": [
+      { "key": "headless", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "no window (--headless)" },
+      { "key": "width", "type": "number", "field": "u32", "quantity": "1", "unit": "px", "default": 1600, "reload": "restart", "doc": "the frame's width (--width)" },
+      { "key": "height", "type": "number", "field": "u32", "quantity": "1", "unit": "px", "default": 900, "reload": "restart", "doc": "the frame's height (--height)" },
+      { "key": "frames", "type": "number", "field": "u32", "quantity": "1", "unit": "frames", "default": 0, "reload": "restart", "doc": "frames to run; 0 = until the window closes (--frames)" },
+      { "key": "dump", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the still's PNG (--dump)" },
+      { "key": "hdr", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the RGBA16F radiance before the tonemap (--dump-hdr)" },
+      { "key": "mp4", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "pipe rail frames to an encoder (--mp4)" },
+      { "key": "railDir", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the rail's PNG directory (--rail*)" },
+      { "key": "settle", "type": "object", "field": "none", "schema": "capture.settle", "reload": "hot", "doc": "the still's hold" }
+    ] },
+    { "type": "capture.settle", "keys": [
+      { "key": "sync", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "hold the dump instant until the residency queues drain (--settle-sync)" },
+      { "key": "hold", "type": "number", "field": "u32", "quantity": "1", "unit": "frames", "default": 0, "reload": "restart", "doc": "hold it for exactly N frames (--settle-hold)" },
+      { "key": "exact", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "hold until the resident set IS the want set (--settle-exact)" },
+      { "key": "clearChurn", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "zero the churn atlas at the first held frame (--settle-clear-churn)" }
+    ] },
+    { "type": "view", "keys": [
+      { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the view's name" },
+      { "key": "at", "type": "similarity", "field": "placement", "quantity": "unknown", "unit": "", "default": null, "optional": true, "reload": "restart", "doc": "the eye: {x, alt, z, az, pitch} | {lat, lon, alt[, lookAt]} | {motor}; absent = the mode's default" },
+      { "key": "fovY", "type": "number", "field": "f32", "quantity": "angle", "unit": "deg", "default": 55, "reload": "hot", "doc": "vertical field of view (--fov)" },
+      { "key": "gauge", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "root", "reload": "restart", "doc": "the space the eye is expressed in" },
+      { "key": "nearZ", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": 0.25, "reload": "hot", "doc": "the near plane" },
+      { "key": "reversedZ", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "depth 1 at the near plane falling to 0 at infinity (Camera.h)" },
+      { "key": "target", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "main", "reload": "restart", "doc": "the target chain this view records into (\"main\" = the renderer's own)" },
+      { "key": "viewport", "type": "object", "field": "none", "schema": "view.viewport", "reload": "hot", "doc": "the rectangle of the target" },
+      { "key": "follow", "type": "object", "field": "none", "schema": "view.follow", "reload": "hot", "doc": "the chase camera" }
+    ] },
+    { "type": "view.viewport", "keys": [
+      { "key": "x", "type": "number", "field": "u32", "quantity": "1", "unit": "px", "default": 0, "reload": "restart", "doc": "left edge in the target" },
+      { "key": "y", "type": "number", "field": "u32", "quantity": "1", "unit": "px", "default": 0, "reload": "restart", "doc": "top edge in the target" },
+      { "key": "w", "type": "number", "field": "u32", "quantity": "1", "unit": "px", "default": 0, "reload": "restart", "doc": "width; 0 = the whole target" },
+      { "key": "h", "type": "number", "field": "u32", "quantity": "1", "unit": "px", "default": 0, "reload": "restart", "doc": "height; 0 = the whole target" }
+    ] },
+    { "type": "view.follow", "keys": [
+      { "key": "target", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "hot", "doc": "the entity this view chases; \"\" = none" },
+      { "key": "back", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 15, "reload": "hot", "doc": "the eye, behind the target's heading" },
+      { "key": "up", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 5, "reload": "hot", "doc": "the eye, above the target" },
+      { "key": "aimLift", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0.6, "reload": "hot", "doc": "the aim, above the target's origin" }
+    ] },
+    { "type": "rails", "keys": [
+      { "key": "active", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "none", "names": ["none", "classic", "zoom", "flood", "jetty", "droste", "droste-out"], "reload": "restart", "doc": "the rail flown (--rail, --rail-zoom, --rail-flood, --rail-jetty, --rail-droste[-out])" },
+      { "key": "keys", "type": "list", "field": "none", "element": "rails.key", "named": false, "reload": "hot", "doc": "an authored keyed flight, inline (the shipped rails are scenes/rails/<active>.json)" },
+      { "key": "droste", "type": "object", "field": "none", "schema": "rails.droste", "reload": "hot", "doc": "the dive" }
+    ] },
+    { "type": "rails.key", "keys": [
+      { "key": "t", "type": "number", "field": "f64", "quantity": "time", "unit": "s", "default": 0, "reload": "restart", "doc": "the key's time" },
+      { "key": "at", "type": "motor", "field": "motor", "quantity": "unknown", "unit": "", "default": null, "optional": true, "reload": "restart", "doc": "the key's pose, in the placement sugar (rigid)" },
+      { "key": "view", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the eye a named view declares (the orbit start)" },
+      { "key": "pose", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a named pose of the tower (scenes/rails/*.json poses)" }
+    ] },
+    { "type": "rails.droste", "keys": [
+      { "key": "levelSec", "type": "number", "field": "f64", "quantity": "time", "unit": "s", "default": 16, "reload": "restart", "doc": "rail seconds per level (--droste-level-sec)" },
+      { "key": "levels", "type": "number", "field": "i32", "quantity": "1", "unit": "1", "default": 3, "reload": "restart", "doc": "how deep the dive goes (--droste-levels)" }
+    ] },
+    { "type": "portal", "keys": [
+      { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the portal's name" },
+      { "key": "enabled", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "link the root under a leaf of itself (--droste)" },
+      { "key": "lat", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 42.81826, "reload": "restart", "doc": "the leaf's place (--droste-at)" },
+      { "key": "lon", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": -70.80045, "reload": "restart", "doc": "the leaf's place" },
+      { "key": "level", "type": "number", "field": "i32", "quantity": "1", "unit": "1", "default": 16, "reload": "restart", "doc": "the quadtree level (16 = a 153 m leaf)" },
+      { "key": "fill", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1, "reload": "restart", "doc": "the inner globe's diameter / leaf span (--droste-fill)" },
+      { "key": "twistDeg", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 90, "reload": "restart", "doc": "the twist per level about north (--droste-twist)" },
+      { "key": "lighting", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "realistic", "names": ["realistic", "appealing"], "reload": "hot", "doc": "the lighting A/B (--droste-light)" }
+    ] },
+    { "type": "entity", "keys": [
+      { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the entity's name" },
+      { "key": "vessel", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the hull kind (VesselRegistry; --boat)" },
+      { "key": "at", "type": "similarity", "field": "placement", "quantity": "unknown", "unit": "", "default": {
+  "motor": {
+    "re": [1, 0, 0, 0],
+    "du": [0, 0, 0, 0]
+  }
+}, "reload": "restart", "doc": "the spawn, in the flat world frame (--campos)" },
+      { "key": "controller", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "helm", "names": ["helm", "fixed"], "reload": "hot", "doc": "the keyboard helm, or fixed throttles and helm (--boat-drive)" },
+      { "key": "throttle", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "hot", "doc": "fixed: every thruster's throttle" },
+      { "key": "steer", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "hot", "doc": "fixed: the commanded steering" },
+      { "key": "mirrorCadence", "type": "number", "field": "f64", "quantity": "time", "unit": "s", "default": 0, "reload": "hot", "doc": "seconds between readbacks of the solver mirror the hull reads; 0 = never (the hull reads the analytic tide and the waves)" }
+    ] },
+    { "type": "effect", "keys": [
+      { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the effect's name" },
+      { "key": "type", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the effect kind (EffectSchemas)" },
+      { "key": "enabled", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "apply it" }
+    ] },
+    { "type": "layer", "keys": [
+      { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the layer (Layer::Name)" },
+      { "key": "enabled", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "hot", "doc": "draw it" }
+    ] },
+    { "type": "node", "keys": [
+      { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the node's name" },
+      { "key": "type", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the component type (ComponentSchemas)" },
+      { "key": "enabled", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "hot", "doc": "walked and drawn" },
+      { "key": "at", "type": "similarity", "field": "placement", "quantity": "unknown", "unit": "", "default": null, "optional": true, "reload": "hot", "doc": "its placement in the parent (any spelling); absent = identity" },
+      { "key": "children", "type": "list", "field": "none", "element": "node", "named": true, "registry": "component", "typeKey": "type", "reload": "hot", "doc": "child nodes, in file order" }
+    ] },
+    { "type": "tool", "keys": [
+      { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the one-shot mode (--tool name[:args])" },
+      { "key": "args", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "its arguments, as one string" }
+    ] },
+    { "type": "slice.plane", "keys": [
+      { "key": "d", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0, "reload": "hot", "doc": "the cutaway plane's offset, world z (--slice)" }
+    ] },
+    { "type": "layer.plain", "keys": [
+    ] },
+    { "type": "layer.tide", "keys": [
+      { "key": "exaggeration", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 60, "reload": "restart", "doc": "ribbon vertical exaggeration (--exagg)" }
+    ] }
+  ]
+}

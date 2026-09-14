@@ -1,0 +1,61 @@
+{
+  "_readme": "The classic flight (--rail): orbit to a hover over the mouth, then the north jetty tip. M6b.",
+  "name": "classic",
+  "tower": false,
+  "poses": [],
+  "segments": [
+    {
+      "kind": "keys",
+      "duration": 0,
+      "levels": 0,
+      "from": 0,
+      "up": "none",
+      "keys": [
+        {"t": 0, "view": "orbit", "pose": ""},
+        {
+          "t": 3,
+          "at": {
+            "lat": 41.2,
+            "lon": -66.5,
+            "alt": 500000,
+            "lookAt": {"lat": 42.81833, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 5,
+          "at": {"x": -200, "alt": 1800, "z": -2500, "az": 22, "pitch": -46},
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 10,
+          "at": {"x": -200, "alt": 1800, "z": -2500, "az": 22, "pitch": -46},
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 15,
+          "at": {"x": 522, "alt": 7, "z": 72, "az": 246, "pitch": -4},
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 25,
+          "at": {"x": 522, "alt": 7, "z": 72, "az": 246, "pitch": -4},
+          "view": "",
+          "pose": ""
+        }
+      ],
+      "base": "",
+      "upOf": "",
+      "to": "",
+      "law": "dive",
+      "u0": 0,
+      "u1": 0,
+      "delay": 0,
+      "level": 0
+    }
+  ]
+}

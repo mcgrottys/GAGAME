@@ -1,0 +1,91 @@
+{
+  "_readme": "The Mars flyover (--planet mars): Valles Marineris west along its 4000 km, then up toward Tharsis.",
+  "name": "mars",
+  "tower": false,
+  "poses": [],
+  "segments": [
+    {
+      "kind": "keys",
+      "duration": 0,
+      "levels": 0,
+      "from": 0,
+      "up": "none",
+      "keys": [
+        {
+          "t": 0,
+          "at": {
+            "lat": 10,
+            "lon": -25,
+            "alt": 3728450.0000000005,
+            "lookAt": {"lat": -12, "lon": -58}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 7,
+          "at": {
+            "lat": -7,
+            "lon": -40,
+            "alt": 800000,
+            "lookAt": {"lat": -13, "lon": -62}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 13,
+          "at": {
+            "lat": -11,
+            "lon": -52,
+            "alt": 220000,
+            "lookAt": {"lat": -13, "lon": -72}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 19,
+          "at": {
+            "lat": -13,
+            "lon": -68,
+            "alt": 150000,
+            "lookAt": {"lat": -11, "lon": -90}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 26,
+          "at": {
+            "lat": -6,
+            "lon": -98,
+            "alt": 600000,
+            "lookAt": {"lat": 18.6, "lon": -133.8}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 30,
+          "at": {
+            "lat": -4,
+            "lon": -104,
+            "alt": 900000,
+            "lookAt": {"lat": 18.6, "lon": -133.8}
+          },
+          "view": "",
+          "pose": ""
+        }
+      ],
+      "base": "",
+      "upOf": "",
+      "to": "",
+      "law": "dive",
+      "u0": 0,
+      "u1": 0,
+      "delay": 0,
+      "level": 0
+    }
+  ]
+}

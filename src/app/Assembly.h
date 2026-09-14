@@ -77,6 +77,8 @@
 #include "scene/VesselLayer.h"
 #include "core/TileProviders.h"
 #include "core/SceneConfig.h"
+#include "scene/WaterComponent.h"
+#include "scene/effects/SlicePlane.h"   // M12 step 5e: the cutaway plane as an effect node
 #include "sim/BathyModel.h"
 #include "sim/GlobeModel.h"
 #include "sim/CurrentModel.h"
@@ -84,6 +86,7 @@
 #include "sim/SweSolver.h"
 #include "sim/TideModel.h"
 #include "app/Options.h"
+#include "app/Scene.h"
 
 #include <memory>
 #include <optional>
@@ -147,6 +150,17 @@ struct Assembly {
     long long waterSceneMtime = 0;
     const char* kScenePath = "data/wave_scene.json";
     WaterSceneWatch sceneWatch;
+    // M12 step 5c: THE WATER SCENE'S ONE APPLY (scene/WaterComponent.h). Declared beside the
+    // config it writes and the watch it polls, and BEFORE the layers it fans out to, because it
+    // holds nothing but observers: it owns no GPU object, joins no thread and frees nothing, so
+    // its position in the lifetime order is about reading well, not about destruction. The
+    // session Configures it once the layers exist and calls Apply at load; the frame loop calls
+    // Reload, which calls the SAME Apply.
+    scene::WaterComponent water;
+    // M12 step 5e: THE EFFECT NODE (scene/effects/SlicePlane.h) -- the cutaway plane owns the
+    // globe's sliceOn/sliceD and registers its AST edge; declared beside the water component
+    // for the same reason (observers only, no GPU object).
+    scene::SlicePlane slice;
     WaterBankLayer* waterBank = nullptr;
     WaterBankLayer* waterBankB = nullptr;   // M10: the outer level's rings (set B)
     GlobeLayer* globe = nullptr;
@@ -222,8 +236,12 @@ struct Assembly {
     Assembly& operator=(Assembly&&) = delete;
 };
 
-// main()'s assembly span, verbatim (Assembly.cpp). Returns the built scene, or nullptr when the
-// span exited the process early: `exitCode` then carries the code main() returns.
-std::unique_ptr<Assembly> Assemble(const Options& opt, int& exitCode);
+// main()'s assembly span (Assembly.cpp). M12 step 5d: every value that is scene state comes from
+// `S`, the resolved document (app/Scene.h) -- the data files, the mode and planet, the water, the
+// sea state, the streaming switches, the capture size, and the `layers` list, which is the
+// registration order and the standing draw declaration. `opt` is read for the pure instruments
+// and the one-shot tools' own arguments, and for nothing else. Returns the built scene, or
+// nullptr when the span exited the process early: `exitCode` then carries the code main returns.
+std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exitCode);
 
 }  // namespace ga::app

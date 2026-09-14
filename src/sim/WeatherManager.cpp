@@ -104,9 +104,36 @@ bool WeatherManager::Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& 
 }
 
 void WeatherManager::RefreshMirrorsTo(Gpu& gpu, double simUnix) {
+    ReadMirrors(gpu, simUnix, kMirrorDt, false);
+}
+
+void WeatherManager::SetMirrorCadence(double seconds) {
+    // 0 (or less) = never: the mirrors are not read by the loop -- what shipped.
+    m_cadence = (seconds > 0.0) ? seconds : INFINITY;
+}
+
+void WeatherManager::RefreshOnCadence(Gpu& gpu, double simUnix) {
+    if (std::isinf(m_cadence)) return;   // never: no reader in the loop, as before
+    ReadMirrors(gpu, simUnix, m_cadence, true);
+}
+
+double WeatherManager::MirrorAsOf() const {
+    // The instant the SNAPSHOT is coherent at: the oldest read among the active windows that
+    // hold one; kNeverRead when no mirror was ever read (the analytic tide answers).
+    double asOf = kNeverRead;
+    bool any = false;
+    for (const Window& w : m_windows) {
+        if (!w.active || w.etaW == 0) continue;
+        asOf = any ? (std::min)(asOf, w.mirrorT) : w.mirrorT;
+        any = true;
+    }
+    return asOf;
+}
+
+void WeatherManager::ReadMirrors(Gpu& gpu, double simUnix, double maxAge, bool onCadence) {
     for (Window& w : m_windows) {
         if (!w.active || !w.solver || !w.solver->Ready()) continue;
-        if (simUnix - w.mirrorT <= kMirrorDt) continue;   // inside the contract: no drain
+        if (simUnix - w.mirrorT <= maxAge) continue;   // inside the contract: no drain
         const auto t0 = std::chrono::steady_clock::now();
         w.solver->ReadFields(gpu, w.eta, w.etaW, w.etaH, w.uv4, w.uvW, w.uvH);
         w.mirrorT = simUnix;
@@ -114,10 +141,18 @@ void WeatherManager::RefreshMirrorsTo(Gpu& gpu, double simUnix) {
             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() *
             1000.0;
         // Loud by design: two full GPU drains. One line per probe/dump/trace run is the
-        // expectation; a line per frame means a reader crept into the loop (step 2).
-        Log("[weather] %s mirror read back to t=%.0f: %ux%u eta + uv in %.1f ms (on demand: "
-            "a frame-loop reader would print this every %.0f sim-s)",
-            w.name.c_str(), simUnix, w.etaW, w.etaH, ms, kMirrorDt);
+        // expectation; a line per frame means a reader crept into the loop (step 2). A
+        // reader on a DECLARED cadence (M12 step 5e, the entity) says so and prints once
+        // per cadence.
+        if (onCadence) {
+            Log("[weather] %s mirror read back to t=%.0f: %ux%u eta + uv in %.1f ms (the "
+                "entity's declared cadence: every %.0f sim-s)",
+                w.name.c_str(), simUnix, w.etaW, w.etaH, ms, maxAge);
+        } else {
+            Log("[weather] %s mirror read back to t=%.0f: %ux%u eta + uv in %.1f ms (on demand: "
+                "a frame-loop reader would print this every %.0f sim-s)",
+                w.name.c_str(), simUnix, w.etaW, w.etaH, ms, kMirrorDt);
+        }
     }
 }
 

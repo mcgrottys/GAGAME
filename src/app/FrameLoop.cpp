@@ -38,7 +38,13 @@
 #include "scene/GlobeLayer.h"
 #include "scene/MarkerLayer.h"
 #include "scene/GulfLayer.h"
+#include "scene/Pose.h"   // M12 step 5a: the session's pose maps as pure functions
 #include "scene/Route.h"
+#include "scene/View.h"   // M12 step 5d: the optics' one conversion (View::FovRadOf)
+#include "scene/Entity.h"   // M12 step 5e: the hull as a node
+#include "scene/Portal.h"   // M12 step 5e: the link as a node
+#include "scene/Rail.h"     // M12 step 5e: the rails as data
+#include "scene/ViewContext.h"
 #include "scene/SeaLayer.h"
 #include "scene/SkyLayer.h"
 #include "scene/TerrainLayer.h"
@@ -158,7 +164,43 @@ namespace ga::app {
 #define PROF_BEGIN() profT0 = Clock::now()
 #define PROF_END(slot)                                                                         do {                                                                                           const double _e =                                                                              std::chrono::duration<double>(Clock::now() - profT0).count() * 1000.0;                  if (profOn) {                                                                                  profMs[slot] += _e;                                                                        if (profHelm) profHelmMs[slot] += _e;                                                  }                                                                                          } while (0)
 
-FrameLoop::FrameLoop(const Options& opt, Assembly& A) : m_opt(opt), m_A(A) {}
+namespace {
+
+// ================================================================================================
+//  M12 step 5d: A VIEW'S DECLARED EYE, IN THE SESSION'S OWN CALLS. The sugar's NUMBERS -- read by
+//  the one parser, in the declared units (scene::ReadPoseSugar) -- go to Camera::SetFromCompass
+//  and scene::GlobeCamera exactly as the flags' numbers did, so a scene camera and a flag camera
+//  are the same arithmetic and not a second conversion. A view with no `at`, or one written in a
+//  spelling this camera cannot take, leaves the engine's default for the mode standing: that is
+//  what "absent = the engine decides" means (SceneSchema.h's views section).
+// ================================================================================================
+bool ReadEye(const SceneView* v, scene::PoseSugar& out) {
+    if (!v || !v->hasAt) return false;
+    std::string why;
+    if (!scene::ReadPoseSugar(v->at, "views." + v->p.name + ".at", out, &why)) {
+        Log("[scene] %s -- the view keeps the engine's default", why.c_str());
+        return false;
+    }
+    return true;
+}
+bool ViewEyeCompass(const SceneView* v, Camera& cam) {
+    scene::PoseSugar s;
+    if (!ReadEye(v, s) || s.kind != scene::PoseSugar::Kind::Compass) return false;
+    cam.SetFromCompass(s.x, s.alt, s.z, static_cast<float>(s.az), static_cast<float>(s.pitch));
+    return true;
+}
+bool ViewEyeOrbit(const SceneView* v, double planetR, Camera& cam) {
+    scene::PoseSugar s;
+    if (!ReadEye(v, s) || s.kind != scene::PoseSugar::Kind::Orbit) return false;
+    cam = s.lookAt ? scene::OrbitPose(s.lat, s.lon, s.alt, s.tLat, s.tLon, planetR)
+                   : scene::GlobeCamera(s.lat, s.lon, s.alt, planetR);
+    return true;
+}
+
+}  // namespace
+
+FrameLoop::FrameLoop(const Options& opt, const Scene& S, Assembly& A)
+    : m_opt(opt), m_S(S), m_A(A) {}
 
 int FrameLoop::Run() {
     if (const std::optional<int> rc = Session()) return *rc;
@@ -236,15 +278,17 @@ void FrameLoop::ProbeDrosteTable(const DrosteProbeRow* rows, int n, const double
 // the point through Motor::QRotate) -- beside portal.Apply(f) and ApplyDir(f), Rodrigues by
 // twist f about the stored fixed point, computed for the residual. The live rail (every dive
 // frame, one line each) and the Session sweep of the rail's own u schedule tally separately.
-void FrameLoop::ProbeDive(double f, const double c0[3], const double f0[3], double c[3],
-                          double fw[3], double up[3], bool live, double u) {
-    m_drosteLeaf.LevelApply(f, c0, c);
-    m_drosteLeaf.LevelApplyDir(f, f0, fw);
-    m_drosteLeaf.LevelApplyDir(f, m_drosteHelmUp, up);
+void FrameLoop::ProbeDive(double f, const double c0[3], const double f0[3], const double up0[3],
+                          double c[3], double fw[3], double up[3], bool live, double u) {
+    const Space& drosteLeaf = m_portalNode.Cycle();   // M12 step 5e: the node's
+    const droste::Portal& portal = m_portalNode.Link();
+    drosteLeaf.LevelApply(f, c0, c);
+    drosteLeaf.LevelApplyDir(f, f0, fw);
+    drosteLeaf.LevelApplyDir(f, up0, up);
     double c2[3], fw2[3], up2[3];   // the portal's closed forms, for the record
-    m_portal.Apply(f, c0, c2);
-    m_portal.ApplyDir(f, f0, fw2);
-    m_portal.ApplyDir(f, m_drosteHelmUp, up2);
+    portal.Apply(f, c0, c2);
+    portal.ApplyDir(f, f0, fw2);
+    portal.ApplyDir(f, up0, up2);
     const std::string wc = UlpWord(c2, c, 3, live ? m_probeDiveC : m_probeSweepC);
     const std::string wf = UlpWord(fw2, fw, 3, live ? m_probeDiveFw : m_probeSweepFw);
     const std::string wu = UlpWord(up2, up, 3, live ? m_probeDiveUp : m_probeSweepUp);
@@ -261,11 +305,59 @@ void FrameLoop::ProbeDive(double f, const double c0[3], const double f0[3], doub
     }
 }
 
+// M12 step 5c: the solved wave field at a new window -- the hot-reload's own three calls, moved
+// here so the water component can ASK for them without naming the compositor, the atlas, the
+// models or the page frame. A changed window rolls the solver's bucket key, so the next Update
+// re-solves or hits the cache (core/SceneConfig.h's banner); what does NOT move is the page
+// tenant's lattice, bound at construction -- the component logs that when it happens.
+void FrameLoop::ReconfigureWaveField(const WaterSceneConfig& cfg) {
+    if (!m_waveField || !m_sceneToWaveCfg) return;
+    WaveFieldConfig wcfg2 = m_sceneToWaveCfg(cfg);
+    m_waveFrame = WaveFieldSource::Align(wcfg2);   // M9bc: the page grid
+    m_waveField->Configure(wcfg2, &m_A.compositor, m_A.hgtCh, &m_A.waterAtlas, &m_A.model,
+                           m_entSta, m_A.haveCurrents ? &m_A.currents : nullptr, m_wfCtSta);
+}
+
 std::optional<int> FrameLoop::Session() {
     // ---- The aliases: one reference per member this body touches, under main()'s names, so
     // what follows is main()'s code unchanged. A closure that captures one of these by
     // reference captures the member it is bound to (CWG 2011) and outlives this call.
     const Options& opt = m_opt;
+    const Scene& S = m_S;
+    // M12 step 5d: the scene's list elements, looked up ONCE (see FrameLoop.h). The aliases are
+    // the MEMBERS, so the lambdas that outlive this call read them safely.
+    if (const ScenePortal* p = S.Portal("droste")) {
+        m_portalDecl = *p;
+        m_portalOn = p->p.enabled;
+    }
+    // M12 step 5e: THE NODES. The portal node from `portals[droste]` (scene/Portal.h) and
+    // one Entity node per `entities` element (scene/Entity.h: its own step state, its own
+    // TreeWater), declared here and wired below where the session's objects exist.
+    m_portalNode.Declared() = m_portalDecl.p;
+    m_portalNode.enabled = m_portalOn;
+    for (const SceneEntity& decl : S.entities) {
+        if (decl.p.vessel.empty()) continue;
+        scene::PoseSugar es;
+        std::string ewhy = "no `at` declared";
+        if (decl.hasAt &&
+            scene::ReadPoseSugar(decl.at, "entities." + decl.p.name + ".at", es, &ewhy) &&
+            es.kind == scene::PoseSugar::Kind::Compass) {
+            auto node = std::make_unique<scene::Entity>();
+            node->Declared() = decl.p;
+            node->SetSpawn(es.x, es.alt, es.z);
+            m_entities.push_back(std::move(node));
+        } else {
+            // The shim already refuses `--boat` without `--campos` (the 1e9 sentinel spawn); a
+            // scene file that declares a vessel without a place gets the same answer, said here.
+            Log("[vessel] '%s' declares no spawn in the compass sugar {x, alt, z} (%s) -- not "
+                "spawning: a hull with no place is aground at a meaningless depth",
+                decl.p.vessel.c_str(), ewhy.c_str());
+        }
+    }
+    if (const SceneView* v = S.Start()) m_startView = *v;
+    auto& portalDecl = m_portalDecl.p;
+    const bool portalOn = m_portalOn;
+    auto& startView = m_startView;
     auto& model = m_A.model;
     auto& window = m_A.window;
     auto& gpu = m_A.gpu;
@@ -315,35 +407,14 @@ std::optional<int> FrameLoop::Session() {
     auto& oDir = m_A.surface.up;
     auto& east0 = m_A.surface.east;
     auto& north0 = m_A.surface.north;
-    auto& portal = m_portal;
-    auto& drosteLeaf = m_drosteLeaf;   // M12 step 4d: the Droste tower as a Space::Cycle
+    const droste::Portal& portal = m_portalNode.Link();   // M12 step 5e: the node's (scene/Portal.h)
+    const Space& drosteLeaf = m_portalNode.Cycle();       // M12 step 4d: the Droste tower as a Space::Cycle
     auto& altOf = m_altOf;
     auto& poseMotor = m_poseMotor;
     auto& motorPose = m_motorPose;
-    auto& railKeys = m_railKeys;
-    auto& railPose = m_railPose;
-    auto& drosteHelm = m_drosteHelm;
-    auto& drosteHelmUp = m_drosteHelmUp;
-    auto& diveFromAbove = m_diveFromAbove;
-    auto& kDiveT0 = m_kDiveT0;
-    auto& diveFrom = m_diveFrom;
-    auto& diveAt = m_diveAt;
-    auto& drosteHelmBack = m_drosteHelmBack;
-    auto& legU = m_legU;
-    auto& diveU = m_diveU;
-    auto& climbKeys = m_climbKeys;
-    auto& keyedPose = m_keyedPose;
-    auto& gravityUp = m_gravityUp;
-    auto& drosteRailPose = m_drosteRailPose;
     auto& simUnix = m_simUnix;
     auto& simClock = m_simClock;
     auto& vesselReg = m_vesselReg;
-    auto& boat = m_boat;
-    auto& boatSea = m_boatSea;
-    auto& boatCtl = m_boatCtl;
-    auto& boatPlaced = m_boatPlaced;
-    auto& helming = m_helming;
-    auto& helmYawRef = m_helmYawRef;
     auto& startUnix = m_startUnix;
     auto& entSta = m_entSta;
     auto& westA = m_westA;
@@ -386,16 +457,13 @@ std::optional<int> FrameLoop::Session() {
     auto& profOn = m_profOn;
     auto& recPipe = m_recPipe;
     auto& railPool = m_railPool;
-    auto& stepBoat = m_stepBoat;
-    auto& quantaOwed = m_quantaOwed;
-    auto& telTick = m_telTick;
 
     // M6g: THREE views, not four -- 0 chart, 1 THE WORLD (estuary and planet, one
     // continuous scene), 2 gulf map. --sea and --globe both open the world; they differ
     // only in the starting camera. Per-frame altitude gates refine world-mode layer
     // enables continuously (sky hands to the limb shell, the FFT sea sheds at height).
-    mode = ((opt.globeStart || opt.seaStart) && (sea || globe)) ? 1
-             : (opt.gulfStart && gulf)                              ? 2 : 0;
+    mode = (S.scene.mode == Scene::kWorld && (sea || globe)) ? 1
+             : (S.scene.mode == Scene::kGulf && gulf)             ? 2 : 0;
     applyMode = [&](int m) {
         sky->enabled = (m != 1);   // world mode gates the sky per frame by altitude
         tide->enabled = (m == 0);
@@ -416,8 +484,12 @@ std::optional<int> FrameLoop::Session() {
     cam.py = 240.0;
     cam.pz = -660.0;
     cam.LookAt(lenM * 0.46, 35.0, 0.0);
-    cam.fovY = opt.fovDeg * 3.14159265f / 180.0f;
+    // M12 step 5d: the optics are the START view's, through 5b's own conversion (View.h: the
+    // declaration is degrees because that is what a file and --fov say; the Camera holds radians)
+    // -- and then the chart view's declared eye, when it declares one (--cam with no mode flag).
+    cam.fovY = scene::View::FovRadOf(startView.p.fovY);
     cam.speed = 150.0f;
+    ViewEyeCompass(S.View("chart"), cam);
 
     // Chart and sea each keep their own camera; TAB cycles views and each resumes where you
     // left it. With bathymetry loaded, the sea default is the LITERAL vqview signature shot:
@@ -425,22 +497,23 @@ std::optional<int> FrameLoop::Session() {
     // back into the inlet.
     if (bathy.Ready()) camSea.SetFromCompass(522.0, 7.0, 72.0, 246.0f, -4.0f);
     else camSea.SetFromCompass(0.0, 12.0, 0.0, 246.0f, -5.0f);
+    // M12 step 5d: THE DECLARED EYE OVER THE ENGINE'S DEFAULT. --cam/--campos write into the
+    // START view (`scene.view`), so that is read first; a scene whose start view is the orbit (or
+    // is not written in the compass sugar at all) leaves the `sea` view's own declaration to say
+    // where the world camera stands, which is what merrimack.json's jetty tip is.
+    if (!ViewEyeCompass(&startView, camSea)) ViewEyeCompass(S.View("sea"), camSea);
     camSea.fovY = cam.fovY;
     camSea.speed = 30.0f;
     // Globe mode: the planet frame (centre at the origin). Start over the North Atlantic
     // with home in view.
     {
-        const double gLat = (opt.gcamLat < 1e8f) ? opt.gcamLat : 34.0;
-        const double gLon = (opt.gcamLat < 1e8f) ? opt.gcamLon : -52.0;
-        const double gR = planetR +
-                          ((opt.gcamLat < 1e8f) ? opt.gcamAltKm * 1000.0
-                                                : planetR * 2.1);
-        double d[3];
-        GlobeModel::LatLonDir(gLat, gLon, d);
-        camGlobe.px = d[0] * gR;
-        camGlobe.py = d[1] * gR;
-        camGlobe.pz = d[2] * gR;
-        camGlobe.LookAt(0.0, 0.0, 0.0);
+        // M12 step 5a: the four lines that placed the eye are scene::GlobeCamera (the
+        // scene's {lat, lon, alt} spelling resolves through the same function); gR is
+        // planetR + gAlt inside it, the same sum. M12 step 5d: the engine's default -- over the
+        // North Atlantic at 2.1 planet radii -- then the `orbit` view's declared eye, which is
+        // where --globe-cam writes and what merrimack.json writes down (34 N, 52 W, 2.1 R).
+        camGlobe = scene::GlobeCamera(34.0, -52.0, planetR * 2.1, planetR);
+        ViewEyeOrbit(S.View("orbit"), planetR, camGlobe);
         camGlobe.fovY = cam.fovY;
         camGlobe.speed = 800000.0f;
     }
@@ -503,44 +576,19 @@ std::optional<int> FrameLoop::Session() {
             return 1;
         }
     }
+    // M12 step 5a: the pose maps' bodies moved VERBATIM to scene/Pose.h, so the scene's
+    // placement sugar is pinned against the functions the session itself calls; the lambdas
+    // keep their names and their captures (the surface's rows, planetR).
     auto planetToFlatPose = [&](const Camera& g) -> Camera {
-        Camera f = g;
-        const double p[3] = {g.px, g.py, g.pz};
-        f.px = p[0] * east0[0] + p[1] * east0[1] + p[2] * east0[2];
-        f.py = p[0] * oDir[0] + p[1] * oDir[1] + p[2] * oDir[2] - planetR;
-        f.pz = p[0] * north0[0] + p[1] * north0[1] + p[2] * north0[2];
-        const DirectX::XMFLOAT3 ff = g.Forward();
-        const double d[3] = {ff.x, ff.y, ff.z};
-        const double fx = d[0] * east0[0] + d[1] * east0[1] + d[2] * east0[2];
-        const double fy = d[0] * oDir[0] + d[1] * oDir[1] + d[2] * oDir[2];
-        const double fz = d[0] * north0[0] + d[1] * north0[1] + d[2] * north0[2];
-        f.yaw = static_cast<float>(std::atan2(fz, fx));
-        const float lim = 3.14159265f / 2.0f - 0.0017f;
-        f.pitch = std::clamp(
-            static_cast<float>(std::atan2(fy, std::sqrt(fx * fx + fz * fz))), -lim, lim);
-        return f;
+        return scene::PlanetToFlatPose(g, east0, oDir, north0, planetR);
     };
     auto flatToPlanetPose = [&](const Camera& f) -> Camera {
-        Camera g = f;
-        const double r = planetR + f.py;
-        g.px = oDir[0] * r + east0[0] * f.px + north0[0] * f.pz;
-        g.py = oDir[1] * r + east0[1] * f.px + north0[1] * f.pz;
-        g.pz = oDir[2] * r + east0[2] * f.px + north0[2] * f.pz;
-        const DirectX::XMFLOAT3 ff = f.Forward();
-        const double d[3] = {ff.x, ff.y, ff.z};
-        const double gx = east0[0] * d[0] + oDir[0] * d[1] + north0[0] * d[2];
-        const double gy = east0[1] * d[0] + oDir[1] * d[1] + north0[1] * d[2];
-        const double gz = east0[2] * d[0] + oDir[2] * d[1] + north0[2] * d[2];
-        g.yaw = static_cast<float>(std::atan2(gz, gx));
-        const float lim = 3.14159265f / 2.0f - 0.0017f;
-        g.pitch = std::clamp(
-            static_cast<float>(std::atan2(gy, std::sqrt(gx * gx + gz * gz))), -lim, lim);
-        return g;
+        return scene::FlatToPlanetPose(f, east0, oDir, north0, planetR);
     };
     // The camera bookmarks live in the ONE frame now: convert the orbit start pose, and
     // hand the globe its frame + the CUDEM window (for the foundation sink).
     camGlobe = planetToFlatPose(camGlobe);
-    if (mode == 1 && opt.globeStart) cam = camGlobe;
+    if (mode == 1 && S.scene.view == "orbit") cam = camGlobe;
     if (globe) {
         // (M12 step 4a: the rows above went into the surface the globe reads -- SetSurface.)
         if (bathy.Ready()) {
@@ -557,42 +605,22 @@ std::optional<int> FrameLoop::Session() {
     // the leaf's span (x fill), it rests on the composed ground at the leaf's centre, and
     // the fixed point where the tower converges is then FORCED by the similarity. The link
     // is one Cl(4,1) versor; everything per frame is its closed form.
-    if (opt.droste && globe && !marsMode) {
-        double pd[3];
-        GlobeModel::LatLonDir(opt.drosteLat, opt.drosteLon, pd);
-        int lf = 0;
-        uint32_t lix = 0, liy = 0;
-        GlobeLayer::LeafOf(pd, opt.drosteLevel, lf, lix, liy);
-        double ld[3];
-        GlobeLayer::LeafDir(lf, opt.drosteLevel, lix, liy, ld);
-        const double latC = std::asin(std::clamp(ld[1], -1.0, 1.0));
-        const double lonC = std::atan2(ld[2], ld[0]);
-        const double spanM =
-            (3.14159265358979 / 2.0) * planetR / double(1u << opt.drosteLevel);
-        const double ground =
-            (hgtCh >= 0) ? double(compositor.SampleHeightStack(hgtCh, latC, lonC, spanM * 0.25))
-                         : 0.0;
-        const double twist = opt.drosteTwistDeg * 3.14159265358979 / 180.0;
-        const double axisN[3] = {0.0, 0.0, 1.0};   // the anchor's north, in the one frame
-        portal = droste::BuildPortal(lf, opt.drosteLevel, lix, liy, ld, east0, oDir, north0,
-                                     planetR, ground, opt.drosteFill, axisN, twist);
-        Log("[droste] the root hangs at leaf (face %d, level %d, %u, %u) = %.5f N %.5f E: "
-            "globe radius %.2f m (s %.4e, %.2f decades a level) resting on %.2f m, centre "
-            "(%.2f, %.2f, %.2f), twist %.1f deg about north, fixed point (%.4f, %.4f, %.4f)",
-            lf, opt.drosteLevel, lix, liy, latC * 57.29577951308232,
-            lonC * 57.29577951308232, portal.radius, portal.s, -std::log10(portal.s), ground,
-            portal.centre[0], portal.centre[1], portal.centre[2], opt.drosteTwistDeg,
-            portal.p[0], portal.p[1], portal.p[2]);
-        // M12 step 4d: THE CYCLE, DECLARED. The root's tangent frame hung under its own leaf by
-        // the portal's similarity, as a Space: Level(k) = S^k. Similar(p, s, axis, twist) takes
-        // the twist in RADIANS, as Portal::twist holds it (radians per level); p, s and axis are
-        // the portal's own (BuildPortal resolved the address into them, and stays the builder).
-        drosteLeaf = Space::Cycle("droste.leaf", m_tangentSpace,
-                                  Placement::Similar(portal.p, portal.s, portal.axis, portal.twist));
-        Log("[space] droste.leaf: %s hung under its own leaf, S = Similar(p, s %.4e, axis (%.0f, "
-            "%.0f, %.0f), twist %.17g rad); Level(k) = S^k, unit length %.4g m",
-            m_tangentSpace.name.c_str(), portal.s, portal.axis[0], portal.axis[1], portal.axis[2],
-            portal.twist, drosteLeaf.unitM);
+    // M12 step 5e: THE PORTAL NODE (scene/Portal.h) runs BuildPortal from its declaration and
+    // declares the cycle -- the session's own block, moved verbatim, its two boot lines with
+    // it; the frame reads Link() and Cycle() through the aliases above.
+    {
+        scene::Portal::Observers po;
+        po.east = east0;
+        po.up = oDir;
+        po.north = north0;
+        po.planetR = planetR;
+        po.compositor = &compositor;
+        po.hgtCh = hgtCh;
+        po.tangent = &m_tangentSpace;
+        po.globe = globe != nullptr;
+        po.marsMode = marsMode;
+        m_portalNode.Configure(po);
+        m_portalNode.Init(gpu);
     }
     // M12 step 4g: the composed-surface rows are filled once a FRAME, into the renderer's one
     // surface buffer (b2), in Frame() beside the renderer's other per-frame members -- where
@@ -666,387 +694,127 @@ std::optional<int> FrameLoop::Session() {
     // (M0 Exp(u Log(~M0 M1))), so the descent from orbit is one smooth helical motion per
     // leg, eased at the ends. Extraction back to yaw/pitch drops any interpolated roll --
     // the horizon stays level, Google-Earth style.
-    poseMotor = [&](const Camera& c) -> Motor {
-        const double org[3] = {0, 0, 0};
-        const double yAxis[3] = {0, 1, 0};
-        const double rAxis[3] = {std::sin(c.yaw), 0.0, -std::cos(c.yaw)};
-        return Motor::Translation(c.px, c.py, c.pz) *
-               Motor::Rotation(org, rAxis, -c.pitch) * Motor::Rotation(org, yAxis, -c.yaw);
-    };
-    motorPose = [&](const Motor& m, Camera& c) {
-        double px = 0, py = 0, pz = 0;
-        m.TransformPoint(px, py, pz);
-        double fx = 1, fy = 0, fz = 0;
-        m.TransformDir(fx, fy, fz);
-        c.px = px;
-        c.py = py;
-        c.pz = pz;
-        c.yaw = static_cast<float>(std::atan2(fz, fx));
-        const float lim = 3.14159265f / 2.0f - 0.0017f;
-        c.pitch = std::clamp(
-            static_cast<float>(std::atan2(fy, std::sqrt(fx * fx + fz * fz))), -lim, lim);
-    };
-    // Keys (all in the PLANET frame; flat poses go through flatToPlanetPose):
-    //   0-5 s   orbit -> 2.6 km over the estuary (via a 500 km mid key: no screw dives)
-    //   5-10 s  hold over the river (the handoff has already switched to the estuary)
-    //  10-15 s  descend to the north-jetty helm
-    //  15-25 s  hold the helm while the real-time sea runs
-    // A pose on any planet: stand at (lat, lon, alt), aim at a surface target.
-    auto orbPose = [&](double lat, double lon, double altM, double tLat, double tLon) {
-        Camera c;
-        double d[3];
-        GlobeModel::LatLonDir(lat, lon, d);
-        const double rr = planetR + altM;
-        c.px = d[0] * rr;
-        c.py = d[1] * rr;
-        c.pz = d[2] * rr;
-        double t[3];
-        GlobeModel::LatLonDir(tLat, tLon, t);
-        c.LookAt(t[0] * planetR, t[1] * planetR, t[2] * planetR);
-        return c;
-    };
-    // M6g: every key is a FLAT-frame pose now -- the rails never change frames, because
-    // there is only one. orbPose builds in planet terms for readability and converts.
-    auto orbKey = [&](double lat, double lon, double altM, double tLat, double tLon) {
-        return poseMotor(planetToFlatPose(orbPose(lat, lon, altM, tLat, tLon)));
-    };
-    if (globe && marsMode) {
-        // The Mars flyover: fall in over Valles Marineris, run the canyon west along its
-        // 4000 km, then climb toward Tharsis with Olympus Mons on the horizon.
-        railKeys.push_back({0.0, orbKey(10, -25, planetR * 1.1, -12, -58)});
-        railKeys.push_back({7.0, orbKey(-7, -40, 800e3, -13, -62)});
-        railKeys.push_back({13.0, orbKey(-11, -52, 220e3, -13, -72)});
-        railKeys.push_back({19.0, orbKey(-13, -68, 150e3, -11, -90)});
-        railKeys.push_back({26.0, orbKey(-6, -98, 600e3, 18.6, -133.8)});
-        railKeys.push_back({30.0, orbKey(-4, -104, 900e3, 18.6, -133.8)});
-    } else if (globe && opt.railFlood && bathy.Ready()) {
-        // M6s: THE FLOOD RIDE -- orbit to the throat, ending at a boat's-helm pose
-        // mid-channel WEST of the gap, facing the entrance: the surveyed jetties (world
-        // z +60..+155 north, -225..-76 south, tips near x 640) frame the incoming tide.
-        // Shoot with --start at a max-flood hour so the jet pours toward the camera.
-        Camera cOver;    // 1.5 km over the harbor, aimed down-channel at the gap
-        cOver.SetFromCompass(-1400.0, 1500.0, 0.0, 93.0f, -40.0f);
-        Camera cHelmIn;  // helm height in the channel, the entrance dead ahead
-        cHelmIn.SetFromCompass(-250.0, 9.0, -15.0, 92.0f, -2.0f);
-        Camera cHelmGap; // ...then a ~3 kn push to between the jetty roots, gap 500 m out
-        cHelmGap.SetFromCompass(120.0, 7.0, -10.0, 92.5f, -1.5f);
-        railKeys.push_back({0.0, poseMotor(camGlobe)});
-        railKeys.push_back({8.0, orbKey(41.9, -71.6, 800e3, 42.8183, -70.81)});
-        railKeys.push_back({15.0, orbKey(42.55, -70.98, 80e3, 42.8183, -70.81)});
-        railKeys.push_back({21.0, orbKey(42.74, -70.87, 7e3, 42.8183, -70.81)});
-        railKeys.push_back({26.0, poseMotor(cOver)});
-        railKeys.push_back({32.0, poseMotor(cHelmIn)});
-        railKeys.push_back({40.0, poseMotor(cHelmGap)});
-    } else if (globe && opt.railJetty && bathy.Ready()) {
-        // M7c: THE JETTY PASS -- the shot the refracted ray was built for. Tip to tip
-        // across the entrance at helm height (the surveyed jetties: world z +60..+155
-        // north, -225..-76 south, tips near x 640), the bar and the channel reading
-        // through the surface the whole way, then a climb to a bird's eye where the
-        // same formula turns into the chart: the ebb shoal, the throat, the flats,
-        // depth as color. Shoot at a LOW-TIDE hour (--start) so the bars stand proud.
-        // M7e: GROUND TO SPACE -- helm water at the gap, tip-to-tip pass, then one
-        // continuous climb to orbit: the same water, the same formula, every altitude.
-        Camera cHelm;    // on the water mid-channel, the entrance dead ahead
-        cHelm.SetFromCompass(250.0, 5.0, 40.0, 94.0f, -1.0f);
-        Camera cNTip;    // over the north tip, the gap ahead
-        cNTip.SetFromCompass(680.0, 14.0, 200.0, 192.0f, -10.0f);
-        Camera cMid;     // mid-gap, swung to look west up the channel
-        cMid.SetFromCompass(650.0, 12.0, -30.0, 262.0f, -8.0f);
-        Camera cSTip;    // over the south tip, looking back northwest across the gap
-        cSTip.SetFromCompass(680.0, 16.0, -290.0, 300.0f, -13.0f);
-        Camera cRise;    // climbing, the whole entrance opening below
-        cRise.SetFromCompass(520.0, 420.0, -140.0, 284.0f, -56.0f);
-        Camera cBird;    // bird's eye over the entrance: depth as color
-        cBird.SetFromCompass(380.0, 1500.0, 10.0, 272.0f, -88.0f);
-        railKeys.push_back({0.0, poseMotor(cHelm)});
-        railKeys.push_back({4.0, poseMotor(cHelm)});
-        railKeys.push_back({9.0, poseMotor(cNTip)});
-        railKeys.push_back({14.0, poseMotor(cMid)});
-        railKeys.push_back({18.0, poseMotor(cSTip)});
-        railKeys.push_back({21.5, poseMotor(cRise)});
-        railKeys.push_back({25.0, poseMotor(cBird)});
-        railKeys.push_back({28.0, poseMotor(cBird)});
-        railKeys.push_back({31.0, orbKey(42.79, -70.84, 7e3, 42.8183, -70.81)});
-        railKeys.push_back({34.5, orbKey(42.62, -70.95, 80e3, 42.8183, -70.81)});
-        railKeys.push_back({38.0, orbKey(41.9, -71.6, 800e3, 42.8183, -70.81)});
-        railKeys.push_back({40.0, orbKey(41.9, -71.6, 800e3, 42.8183, -70.81)});
-    } else if (globe && opt.railZoom && bathy.Ready()) {
-        // The inlet zoom: orbit -> the warmed Google pyramid -> the CUDEM estuary, with NO
-        // handoff to hide behind any more: the same scene refines the whole way down.
-        railKeys.push_back({0.0, poseMotor(camGlobe)});
-        railKeys.push_back({8.0, orbKey(41.9, -71.6, 800e3, 42.8183, -70.81)});
-        railKeys.push_back({16.0, orbKey(42.55, -70.98, 80e3, 42.8183, -70.81)});
-        railKeys.push_back({23.0, orbKey(42.74, -70.87, 7e3, 42.8183, -70.81)});
-        railKeys.push_back({27.0, orbKey(42.79, -70.84, 2400.0, 42.8183, -70.81)});
-        railKeys.push_back({30.0, orbKey(42.80, -70.835, 2200.0, 42.8183, -70.81)});
-    } else if (globe && sea && bathy.Ready() && !marsMode) {
-        Camera cHover;
-        cHover.SetFromCompass(-200.0, 1800.0, -2500.0, 22.0f, -46.0f);
-        Camera cHelm;
-        cHelm.SetFromCompass(522.0, 7.0, 72.0, 246.0f, -4.0f);
-        railKeys.push_back({0.0, poseMotor(camGlobe)});
-        railKeys.push_back({3.0, orbKey(41.2, -66.5, 500000.0,
-                                        BathyModel::kOrgLat, BathyModel::kOrgLon)});
-        railKeys.push_back({5.0, poseMotor(cHover)});
-        railKeys.push_back({10.0, poseMotor(cHover)});
-        railKeys.push_back({15.0, poseMotor(cHelm)});
-        railKeys.push_back({25.0, poseMotor(cHelm)});
-    }
-    railPose = [&](double t, Camera& out) {
-        size_t i = 0;
-        while (i + 1 < railKeys.size() && railKeys[i + 1].first <= t) ++i;
-        if (i + 1 >= railKeys.size()) {
-            motorPose(railKeys.back().second, out);
-            return;
+    // (M12 step 5a: bodies in scene/Pose.h -- FromCamera / ToCamera, verbatim.)
+    poseMotor = [&](const Camera& c) -> Motor { return scene::FromCamera(c); };
+    motorPose = [&](const Motor& m, Camera& c) { scene::ToCamera(m, c); };
+    // M12 step 5e: THE RAILS ARE DATA (scene/Rail.h; scenes/rails/<name>.json). The five hand
+    // tables and the lambdas that flew them -- railKeys, railPose, diveFrom/diveAt, legU,
+    // diveU, keyedPose, gravityUp, drosteRailPose -- are the files' segments and Rail::At.
+    // WHICH FILE is the tables' own selection law: the Mars flyover on Mars; the flood, jetty
+    // and zoom rails by name over the bathymetry; the two Droste rails ride the FLOOD keys to
+    // the helm (--rail-droste's flag implied the flood table until 5d compared the enum and
+    // the fallthrough chose the classic keys -- the data says flood, as M10 wrote it); else
+    // the classic flight. A rail is read only when one is recorded; the dive rail is read
+    // beside it whenever the portal stands, for the [droste] probe's sweep.
+    {
+        const bool towerRail = (S.rails.active == Scene::kRailDroste) ||
+                               (S.rails.active == Scene::kRailDrosteOut);
+        const char* railName =
+            (globe && marsMode)                                                    ? "mars"
+            : (globe && (S.rails.active == Scene::kRailFlood) && bathy.Ready())    ? "flood"
+            : (globe && (S.rails.active == Scene::kRailJetty) && bathy.Ready())    ? "jetty"
+            : (globe && (S.rails.active == Scene::kRailZoom) && bathy.Ready())     ? "zoom"
+            : (globe && towerRail && bathy.Ready())
+                ? ((S.rails.active == Scene::kRailDroste) ? "droste" : "droste-out")
+            : (globe && sea && bathy.Ready() && !marsMode)                         ? "classic"
+                                                                                   : nullptr;
+        // THE FRAME a rail resolves in: the tangent rows and the planet, the portal and its
+        // cycle, the dive's declared pace, the session camera's optics, the views a key names.
+        m_railFrame = scene::RailFrame{};
+        m_railFrame.frame.planetR = planetR;
+        for (int i = 0; i < 3; ++i) {
+            m_railFrame.frame.east[i] = east0[i];
+            m_railFrame.frame.up[i] = oDir[i];
+            m_railFrame.frame.north[i] = north0[i];
         }
-        const double t0 = railKeys[i].first, t1 = railKeys[i + 1].first;
-        double u = (t - t0) / std::max(t1 - t0, 1e-6);
-        u = u * u * (3.0 - 2.0 * u);   // ease both ends of every leg
-        motorPose(Motor::Slerp(railKeys[i].second, railKeys[i + 1].second, u), out);
-    };
-
-    // ---- M10: THE DIVE (--rail-droste). The storm rail flies its keys to the helm -- its
-    // last key re-aimed at the fixed point -- and then the camera leaves the keys for the
-    // similarity's own one-parameter subgroup:
-    //
-    //     pose(u) = S^u(helm):   C(u) = p + s^u Q^u (C_helm - p),   view Q^u (fwd, up)
-    //
-    // the logarithmic spiral through the helm that converges on the fixed point. PGA could
-    // not write this path -- a motor has no scale -- and nothing about it is keyed: it is
-    // exp(u log S), with the level n = floor(u) handed to the frame and f = u - n the only
-    // number ever pushed through the versor, so the doubles never see s^n. Every level of
-    // the dive is the SAME flight one level down (S^(u+1) = S S^u); only the world around
-    // the tower says which level it is. The spiral runs at a constant rate in log-scale,
-    // d(ln |C - p|)/dt = ln(s) / T -- the logarithm the user asked for, with gravity's
-    // signature: the approach never arrives, it only gets smaller.
-    drosteHelm.SetFromCompass(120.0, 7.0, -10.0, 92.5f, -1.5f);   // the storm rail's helm
-    drosteHelm.fovY = cam.fovY;
-    // WHICH POSE THE SPIRAL RUNS THROUGH. The helm's spiral clears the inner globe only if
-    // the twist lifts it up and over: MEASURED (clearance over dist-to-p along S^u(helm),
-    // u in [0, 1.2]) -0.21 at 0 deg, -0.10 at 30, -0.02 at 60, +0.012 at 90. With less twist
-    // the line from the fixed point through the helm, extended outward, runs underground in
-    // the inner frame. So an untwisted tower dives from ABOVE: 45 deg over the mouth, looking
-    // down at the fixed point -- the classic straight Droste zoom, outside the globe for
-    // every u because the approach lies above the globe's tangent plane at the top.
-    diveFromAbove = portal.Valid() && std::abs(opt.drosteTwistDeg) < 75.0;
-    if (diveFromAbove) {
-        drosteHelm.px = portal.p[0] - 300.0;
-        drosteHelm.py = portal.p[1] + 300.0;
-        drosteHelm.pz = portal.p[2];
-    }
-    if (portal.Valid()) {
-        drosteHelm.LookAt(portal.p[0], portal.p[1], portal.p[2]);
-        const double gy = drosteHelm.py + planetR;
-        const double gl = std::sqrt(drosteHelm.px * drosteHelm.px + gy * gy +
-                                    drosteHelm.pz * drosteHelm.pz);
-        drosteHelm.upHint[0] = static_cast<float>(drosteHelm.px / gl);
-        drosteHelm.upHint[1] = static_cast<float>(gy / gl);
-        drosteHelm.upHint[2] = static_cast<float>(drosteHelm.pz / gl);
-        DirectX::XMFLOAT3 hf, hr, hu;
-        drosteHelm.ViewBasis(hf, hr, hu);   // the helm's TRUE up: the roll the spiral carries
-        drosteHelmUp[0] = hu.x;
-        drosteHelmUp[1] = hu.y;
-        drosteHelmUp[2] = hu.z;
-        if ((opt.railDroste || opt.railDrosteOut) && !railKeys.empty()) {
-            railKeys.back().second = poseMotor(drosteHelm);
-        }
-    }
-    // S^u(base), written in level floor(u): the pose, its level, and its up. The base is the
-    // helm (the dive) or the helm turned around (the out-and-back's return leg).
-    diveFrom = [&](const Camera& base, double u, Camera& out, int& level, double up[3]) {
-        const double n = std::floor(u);
-        const double f = u - n;
-        const double c0[3] = {base.px, base.py, base.pz};
-        const DirectX::XMFLOAT3 hf = base.Forward();
-        const double f0[3] = {hf.x, hf.y, hf.z};
-        double c[3], fw[3];
-        // M12 step 4d-2: S^f(helm) through the cycle -- LevelApply(f) on the eye, LevelApplyDir(f)
-        // on the forward and the up (Space.h: the power about its fixed point) -- with the
-        // portal's closed forms evaluated beside them for the record (ProbeDive).
-        ProbeDive(f, c0, f0, c, fw, up, true, u);
-        out = base;
-        out.px = c[0];
-        out.py = c[1];
-        out.pz = c[2];
-        out.yaw = static_cast<float>(std::atan2(fw[2], fw[0]));
-        const float lim = 3.14159265f / 2.0f - 0.0017f;
-        out.pitch = std::clamp(
-            static_cast<float>(std::atan2(fw[1], std::sqrt(fw[0] * fw[0] + fw[2] * fw[2]))),
-            -lim, lim);
-        level = static_cast<int>(n);
-    };
-    diveAt = [&](double u, Camera& out, int& level, double up[3]) {
-        diveFrom(drosteHelm, u, out, level, up);
-    };
-    // The out-and-back's other face of the helm: turned about the local vertical to look
-    // back up the channel, a little down at the water.
-    drosteHelmBack = drosteHelm;
-    drosteHelmBack.yaw = drosteHelm.yaw + 3.14159265f;
-    drosteHelmBack.pitch = -0.07f;
-    // A leg that moves u by dU in D seconds with 3 s velocity ramps at both ends: rest,
-    // the subgroup's constant log-rate, rest.
-    legU = [](double tau, double D, double dU) {
-        const double r = (std::min)(3.0, 0.5 * D);
-        const double v = dU / (D - r);
-        if (tau <= 0.0) return 0.0;
-        if (tau >= D) return dU;
-        if (tau < r) return v * tau * tau / (2.0 * r);
-        if (tau <= D - r) return v * (tau - 0.5 * r);
-        const double e = D - tau;
-        return dU - v * e * e / (2.0 * r);
-    };
-    // The dive's clock: u(t) eased in over the first seconds (C1 -- the camera leaves the
-    // helm from rest, then runs at the subgroup's constant log-rate), one level per
-    // drosteLevelSec.
-    diveU = [&](double tau) {
-        const double T = opt.drosteLevelSec, ramp = 3.0;
-        if (tau <= 0.0) return 0.0;
-        const double u = (tau < ramp) ? tau * tau / (2.0 * ramp * T) : (tau - 0.5 * ramp) / T;
-        // The dive rail ends ON a helm (a whole level): it holds there for the last frames.
-        return opt.railDroste ? (std::min)(u, double(opt.drosteLevels)) : u;
-    };
-    // M12 step 4d instrument: the dive's closed forms compared over the rail's own schedule --
-    // every recorded frame of the dive at 30 fps, u = diveU(tau), tau to the last helm hold --
-    // here, where the helm and its up are final, so every Droste run's log carries the dive's
-    // verdict (the rail reaches its spiral 1260 recorded frames in); the live rail compares the
-    // same way, one line per dive frame.
-    if (portal.Valid()) {
-        const int nF = static_cast<int>((opt.drosteLevels * opt.drosteLevelSec + 2.0) * 30.0);
-        const double c0[3] = {drosteHelm.px, drosteHelm.py, drosteHelm.pz};
-        const DirectX::XMFLOAT3 hf = drosteHelm.Forward();
-        const double f0[3] = {hf.x, hf.y, hf.z};
-        for (int i = 0; i <= nF; ++i) {
-            const double u = diveU(double(i) / 30.0);
-            double c[3], fw[3], up[3];
-            ProbeDive(u - std::floor(u), c0, f0, c, fw, up, false, u);
-        }
-        Log("[droste] probe dive rail (sweep of %d frames' u, %d levels x %.0f s): c %s | fw %s "
-            "| up %s",
-            nF + 1, opt.drosteLevels, opt.drosteLevelSec, m_probeSweepC.Verdict().c_str(),
-            m_probeSweepFw.Verdict().c_str(), m_probeSweepUp.Verdict().c_str());
-    }
-    // THE OUT-AND-BACK (--rail-droste-out, the user's side quest): in two levels, turn
-    // around at the bottom, fly back out along the SAME logarithmic spiral facing outward --
-    // S^u of the turned helm, u running 2 -> 0, the frame re-rooting outward on its own --
-    // then turn back and climb away along the storm rail's keys reversed, the tower
-    // shrinking into its entrance until the planet is whole again.
-    if (portal.Valid() && opt.railDrosteOut) {
-        Camera cRise;   // rising over the harbor, looking back east at the entrance
-        cRise.SetFromCompass(-900.0, 450.0, -60.0, 84.0f, -17.0f);
-        climbKeys.push_back({0.0, poseMotor(drosteHelmBack)});
-        climbKeys.push_back({7.0, poseMotor(cRise)});
-        climbKeys.push_back({13.0, orbKey(42.74, -70.87, 7e3, 42.8183, -70.81)});
-        climbKeys.push_back({18.5, orbKey(42.55, -70.98, 80e3, 42.8183, -70.81)});
-        climbKeys.push_back({23.5, orbKey(41.9, -71.6, 800e3, 42.8183, -70.81)});
-        climbKeys.push_back({28.0, poseMotor(camGlobe)});
-    }
-    keyedPose = [&](const std::vector<std::pair<double, Motor>>& keys, double t,
-                         Camera& out) {
-        size_t i = 0;
-        while (i + 1 < keys.size() && keys[i + 1].first <= t) ++i;
-        if (i + 1 >= keys.size()) {
-            motorPose(keys.back().second, out);
-            return;
-        }
-        double u = (t - keys[i].first) / std::max(keys[i + 1].first - keys[i].first, 1e-6);
-        u = u * u * (3.0 - 2.0 * u);
-        motorPose(Motor::Slerp(keys[i].second, keys[i + 1].second, u), out);
-    };
-    gravityUp = [&](const Camera& c, double up[3]) {
-        const double gy = c.py + planetR;
-        const double gl = std::sqrt(c.px * c.px + gy * gy + c.pz * c.pz);
-        up[0] = c.px / gl;
-        up[1] = gy / gl;
-        up[2] = c.pz / gl;
-    };
-    drosteRailPose = [&](double t, Camera& out, int& level, double up[3]) {
-        level = 0;
-        if (opt.railDroste) {
-            if (t < 40.0) {
-                railPose(t, out);   // the storm rail (its last key aimed at the fixed point)
-                gravityUp(out, up);
-                return;
+        m_railFrame.frame.valid = true;
+        m_railFrame.fovY = cam.fovY;
+        m_railFrame.portal = &portal;
+        m_railFrame.cycle = portal.Valid() ? &drosteLeaf : nullptr;
+        m_railFrame.twistDeg = portalDecl.twistDeg;
+        m_railFrame.levelSec = S.rails.droste.levelSec;
+        m_railFrame.levels = S.rails.droste.levels;
+        m_railFrame.clampLevels = (S.rails.active == Scene::kRailDroste);
+        const Scene* scenePtr = &S;
+        m_railFrame.viewAt = [scenePtr](const std::string& name) -> const JsonValue* {
+            const SceneView* v = scenePtr->View(name);
+            return (v && v->hasAt) ? &v->at : nullptr;
+        };
+        std::string rwhy;
+        if (railName && !S.railDirW.empty()) {
+            const std::string path = std::string("scenes/rails/") + railName + ".json";
+            if (!m_rail.Load(path, &rwhy) || !m_rail.Resolve(m_railFrame, &rwhy)) {
+                Log("FATAL: [rail] %s", rwhy.c_str());
+                return 1;
             }
-            diveAt(diveU(t - kDiveT0), out, level, up);
-            return;
+            Log("[rail] %s: %zu segments from %s%s", m_rail.Name().c_str(),
+                m_rail.SegmentCount(), path.c_str(),
+                m_rail.Tower() ? " (a tower rail: it writes the camera's level and its up)" : "");
         }
-        // --rail-droste-out
-        const double T = opt.drosteLevelSec, Din = 2.0 * T, Dout = 2.0 * T, Tturn = 3.0;
-        double tau = t;
-        if (tau < 14.0) {   // the storm rail's last leg: 1.5 km over the harbor -> the helm
-            railPose(26.0 + tau, out);
-            gravityUp(out, up);
-            return;
+        // M12 step 4d instrument: the dive's closed forms compared over the rail's own schedule
+        // -- every recorded frame of the dive at 30 fps, u = the dive's clock, tau to the last
+        // helm hold -- here, where the helm and its up are final, so every Droste run's log
+        // carries the dive's verdict (the rail reaches its spiral 1260 recorded frames in); the
+        // live rail compares the same way, one line per dive frame. The schedule is the DIVE
+        // RAIL's: its helm pose (aimed at the fixed point, stood off under a small twist) and
+        // its law, read from its file when the run flies another rail or none.
+        m_diveRail = nullptr;
+        if (portal.Valid()) {
+            if (m_rail.Loaded() && m_rail.Tower()) {
+                m_diveRail = &m_rail;
+            } else if (m_diveProbeRail.Load("scenes/rails/droste.json", &rwhy) &&
+                       m_diveProbeRail.Resolve(m_railFrame, &rwhy)) {
+                m_diveRail = &m_diveProbeRail;
+            } else {
+                Log("[droste] probe dive rail: scenes/rails/droste.json not read (%s) -- the "
+                    "sweep is skipped", rwhy.c_str());
+            }
         }
-        tau -= 14.0;
-        if (tau < 2.0) {    // a breath at the helm, the tower dead ahead
-            diveAt(0.0, out, level, up);
-            return;
+        if (const scene::RailPose* helm = m_diveRail ? m_diveRail->Pose("helm") : nullptr) {
+            const int nF =
+                static_cast<int>((S.rails.droste.levels * S.rails.droste.levelSec + 2.0) * 30.0);
+            for (int i = 0; i <= nF; ++i) {
+                const double u = scene::Rail::DiveU(double(i) / 30.0, S.rails.droste.levelSec,
+                                                    S.rails.droste.levels,
+                                                    S.rails.active == Scene::kRailDroste);
+                double c[3], fw[3], up[3];
+                ProbeDive(u - std::floor(u), helm->c0, helm->f0, helm->up0, c, fw, up, false, u);
+            }
+            Log("[droste] probe dive rail (sweep of %d frames' u, %d levels x %.0f s): c %s | fw %s "
+                "| up %s",
+                nF + 1, S.rails.droste.levels, S.rails.droste.levelSec, m_probeSweepC.Verdict().c_str(),
+                m_probeSweepFw.Verdict().c_str(), m_probeSweepUp.Verdict().c_str());
         }
-        tau -= 2.0;
-        if (tau < Din) {    // IN: u 0 -> 2
-            diveAt(legU(tau, Din, 2.0), out, level, up);
-            return;
-        }
-        tau -= Din;
-        if (tau < Tturn) {  // THE TURN, at the second level's helm
-            double w = tau / Tturn;
-            w = w * w * (3.0 - 2.0 * w);
-            motorPose(Motor::Slerp(poseMotor(drosteHelm), poseMotor(drosteHelmBack), w), out);
-            level = 2;
-            for (int i = 0; i < 3; ++i) up[i] = drosteHelmUp[i];
-            return;
-        }
-        tau -= Tturn;
-        if (tau < Dout) {   // OUT: u 2 -> 0, facing outward
-            diveFrom(drosteHelmBack, 2.0 - legU(tau, Dout, 2.0), out, level, up);
-            return;
-        }
-        tau -= Dout;
-        keyedPose(climbKeys, tau, out);   // the climb to orbit, looking back at the tower
-        gravityUp(out, up);
-    };
-    if (opt.camAlt > 0) {
-        const double cx = (opt.camX < 1e8f) ? opt.camX : 0.0;
-        const double cz = (opt.camZ < 1e8f) ? opt.camZ : 0.0;
-        cam.SetFromCompass(cx, opt.camAlt, cz, opt.camAz, opt.camPitch);
     }
+    // (M12 step 5d: --cam / --campos are the START view's `at` now -- applied to the camera the
+    // mode picked, above, where the view that declares the eye is the view that starts.)
 
-    simUnix = (opt.startUnix > 0) ? opt.startUnix : NowUnix();
+    // M12 step 5d: `time.start` -- "now" (the sentinel), a civil UTC stamp, or unix seconds;
+    // ParseStartTime is the flag's own reader, so the two spellings land on the same instant.
+    const double sceneStart = (S.time.start == "now") ? -1.0 : ParseStartTime(S.time.start);
+    simUnix = (sceneStart > 0) ? sceneStart : NowUnix();
     // The playable clock (sim/SimClock.h). Headless keeps its own frame-indexed formula
     // below -- that path was already fixed-step, which is why rails reproduce and sessions
     // did not.
     simClock.Reset(simUnix);
 
     // ==================================================================================
-    //  M9bq THE BOAT. A vessel from the registry, stepped on the scene clock's whole
-    //  quanta against the tree's own water. Nothing here is a demo path: this is the
-    //  same Vessel the gates exercise, the same TreeWater the twin measures, and the
-    //  same SimClock everything else in the scene rides.
+    //  M9bq THE BOAT -- M12 step 5e: an ENTITY node per hull (scene/Entity.h). A vessel
+    //  from the registry, stepped on the scene clock's whole quanta against the tree's
+    //  own water. Nothing here is a demo path: this is the same Vessel the gates
+    //  exercise, the same TreeWater the twin measures, and the same SimClock everything
+    //  else in the scene rides.
     // ==================================================================================
     RegisterBuiltinVessels(vesselReg);
-    if (!opt.boat.empty()) {
-        const VesselSpec spec = vesselReg.Build(opt.boat);
-        if (spec.kind.empty()) {
-            Log("[vessel] --boat '%s' is not a registered kind; known:", opt.boat.c_str());
-            for (const std::string& k : vesselReg.Kinds()) Log("[vessel]   %s", k.c_str());
-        } else {
-            spec.PrintLedger();
-            boat = std::make_unique<Vessel>();
-            // Spawn in the FLAT world frame, at --campos. NOT at cam.px/cam.pz: on a
-            // rail the camera starts in the PLANET frame, and a hull built there lands at
-            // (5.3e6, -2.4e6) where the bed lookup is meaningless -- it reported AGROUND at
-            // depth -278 m, which is exactly what a frame confusion looks like from inside.
-            const Motor start = Motor::Translation(opt.camX, 0.0, opt.camZ);
-            if (!boat->Build(spec, start)) {
-                Log("[vessel] build FAILED -- not spawning (a partial hull would sink and "
-                    "look like a physics bug)");
-                boat.reset();
-            } else {
-                helming = true;
-                Log("[vessel] '%s' spawned at (%.1f, %.1f): %s", spec.kind.c_str(), cam.px,
-                    cam.pz, spec.display.c_str());
-            }
+    for (auto& e : m_entities) e->Spawn(vesselReg);
+    // The chase camera's subject: the entity the start view's `follow` names, or -- when it
+    // names none -- the first hull at the helm, which is what a spawned boat has always meant.
+    m_followed = nullptr;
+    for (auto& e : m_entities) {
+        if (!e->Active()) continue;
+        if (startView.p.follow.target == e->Name() ||
+            (startView.p.follow.target.empty() && !m_followed)) {
+            m_followed = e.get();
         }
     }
     startUnix = simUnix;
@@ -1076,6 +844,9 @@ std::optional<int> FrameLoop::Session() {
                           ? (kWestKm - model.S(westA).riverKm) /
                                 (model.S(westB).riverKm - model.S(westA).riverKm)
                           : 0.0;
+    // M12 step 5d: `water.swe.westBoundary` (--swe-west-off). Captured BY VALUE below, because
+    // the two closures are std::function members that outlive this call.
+    const bool westBoundary = S.water.swe.westBoundary;
     oceanAt = [&](double t) { return model.Height(entSta, t) + datumOff; };
     // The sound's tide: the entrance clock ~10 min later (its Ipswich mouth is a few km
     // down an open coast). Active only when the window holds the sound.
@@ -1086,8 +857,8 @@ std::optional<int> FrameLoop::Session() {
     // smuggle a constant datum offset into the boundary (with the Merrimacport bracket that
     // was a permanent 19 cm seaward slope -- an artificial ever-ebb). The true NAVD river
     // slope at this reach is cm-scale; call it zero and let the tide be the signal.
-    westAt = [&](double t) {
-        if (opt.sweWestOff) return 0.0;
+    westAt = [&, westBoundary](double t) {
+        if (!westBoundary) return 0.0;
         const double tw = (model.Height(westA, t) - model.S(westA).meanMllwM) * (1.0 - wT) +
                           (model.Height(westB, t) - model.S(westB).meanMllwM) * wT;
         return tw - (model.Height(entSta, t) - model.S(entSta).meanMllwM);
@@ -1097,8 +868,8 @@ std::optional<int> FrameLoop::Session() {
     // of tide at Haverhill, ~km 35) fills and drains THROUGH this boundary; its surface
     // area is the prism knob (~19.5 km of ~200 m river; an NHD-integrated area is the
     // named refinement). d(eta_west)/dt by central difference of the station-fit clocks.
-    westQAt = [&, riverQ](double t) {
-        if (opt.sweWestOff) return 0.0;
+    westQAt = [&, riverQ, westBoundary](double t) {
+        if (!westBoundary) return 0.0;
         const double dh = (oceanAt(t + 300.0) + westAt(t + 300.0) - oceanAt(t - 300.0) -
                            westAt(t - 300.0)) / 600.0;
         return riverQ - kUpriverAreaM2 * dh;
@@ -1145,7 +916,7 @@ std::optional<int> FrameLoop::Session() {
         }
     }
 
-    if (!opt.oceanProbe.empty()) {
+    if (S.Tool("ocean-probe")) {
         // nullopt = "lat,lon" did not parse: the block never returned, so the run goes on.
         if (const auto rc = tools::RunOceanProbe(opt, model, gpu, renderer, swe, resMgr,
                                                  simUnix, oceanAt, southAt, westAt, westQAt,
@@ -1177,7 +948,7 @@ std::optional<int> FrameLoop::Session() {
         c.currentBucketMs = s.wfCurrentBucketMs;
         c.featherM = s.wfFeatherM;
         c.displayExag = s.wfExag;
-        c.mapPath = opt.waveMap;   // the instrument, not the answer -- see WaveField.h
+        c.mapPath = opt.waveMap;   // the tool's own argument (--wave-map / --tool wave-map)
         return c;
     };
     // M9bc: THE WAVE FIELD AS A TREE NODE. The solver's grid is aligned to the z16 page
@@ -1201,12 +972,9 @@ std::optional<int> FrameLoop::Session() {
         if (swe.Ready() && sea) {
             waveField->SetSweCurrent(&swe, &bathy, sea->sweCurrentGain);
         }
-        waterBank->SetWaveField(waterScene.wfEnabled ? waveField.get() : nullptr);
-        waterBank->SetScene(&waterScene);
-        if (waterBankB) {
-            waterBankB->SetWaveField(waterScene.wfEnabled ? waveField.get() : nullptr);
-            waterBankB->SetScene(&waterScene);
-        }
+        // M12 step 5c: the bank's wave field and its live config pointer (and set B's) are
+        // applied BELOW, by the water component's one Apply -- the same call the hot-reload
+        // makes. Nothing between here and there reads either.
         if (waterScene.wfEnabled) {
             waveSrc = std::make_shared<WaveFieldSource>(waveField.get(), waveFrame);
             waveTree = std::make_shared<std::shared_ptr<TileTree>>(
@@ -1246,45 +1014,34 @@ std::optional<int> FrameLoop::Session() {
     }
     // M9bi: --sun pins the pre-ephemeris art direction; sunPlaced stays false and the
     // renderer keeps using these two constants, exactly as every earlier baseline did.
-    if (opt.sunPinned) {
-        renderer.sunAzimuthDeg = opt.sunAz;
-        renderer.sunElevationDeg = opt.sunEl;
+    if (S.sun.source == Scene::kPinned) {
+        renderer.sunAzimuthDeg = S.sun.az;
+        renderer.sunElevationDeg = S.sun.el;
         Log("[sun] PINNED to azimuth %.1f, elevation %.1f -- the ephemeris is off",
-            opt.sunAz, opt.sunEl);
+            S.sun.az, S.sun.el);
     }
-    if (globe) {
-        globe->pixelWater = opt.pixelWater;   // M9bh: the two-ray water, per pixel
-        globe->foamOpacity = waterScene.foamOpacity;
-        globe->ringBlendTexels = waterScene.ringBlendTexels;
-        globe->causticStrength = waterScene.causticStrength;
-        globe->waterOptics = waterScene.waterOptics;
-        // M8g THE ORIGIN PLANES: the edit-land geometry floor comes from the datum
-        // envelope (MLLW + margin at the structure), not a tide-relative constant --
-        // the old floor tracked the live waterline, which made the jetty unsinkable.
-        float floorNavd = waterScene.jettyCrestNavd;
-        if (floorNavd <= -90.0f) {
-            floorNavd = 1.8f;
-            if (waterAtlas.Ready()) {
-                float elo = 0.0f, ehi = 0.0f;
-                waterAtlas.EnvelopeNavd(42.8190, -70.8031, 0.0, &elo, &ehi);
-                // Anchored to the TOP plane: a decayed structure is awash at spring
-                // high but a continuous ridge below mid-tide. (lo + margin was the
-                // first draft -- that floors at MLLW, which rescues the smear only
-                // at dead low.) Surveyed crests taller than the floor still win.
-                floorNavd = ehi - 0.45f;
-                Log("[datum] envelope at north jetty: lo %+.2f hi %+.2f m NAVD "
-                    "(synodic-month min/max) -> edit floor %+.2f",
-                    elo, ehi, floorNavd);
-            }
-        }
-        globe->editFloorNavd = floorNavd;
-    }
-    if (sea) {
-        sea->windSeaFill = waterScene.windSeaFill;
-        sea->bandFoldWeight = waterScene.bandFoldWeight;
-        sea->buoyAssimAgeH = waterScene.buoyAssimAgeH;
-        sea->buoyAssimGainMax = waterScene.buoyAssimGainMax;
-    }
+    if (globe) globe->pixelWater = S.water.pixelWater;   // M9bh: the two-ray water, per pixel
+    // M12 step 5c: THE WATER SCENE HAS ONE APPLY (scene/WaterComponent.h). Everything this
+    // block used to fan out by hand -- the bank's wave field and its live config pointer, set
+    // B's, the globe's four water fields, the AUTO edit floor from the datum envelope, and the
+    // sea's four closures -- is the component's Apply, and the hot-reload in Frame() calls the
+    // SAME one over a complete resolved candidate. That is the step's deliberate change: before,
+    // a reload applied neither the sea's closures nor the auto floor, and it took the jetty
+    // floor only above the -90 sentinel.
+    scene::WaterComponent::Observers wo;
+    wo.config = &waterScene;
+    wo.bank = waterBank;
+    wo.bankB = waterBankB;
+    wo.sea = sea;
+    wo.globe = globe;
+    wo.waveField = waveField.get();
+    wo.atlas = &waterAtlas;
+    wo.rebuild = &m_waveRebuild;
+    wo.path = m_A.kScenePath;
+    wo.watch = &m_A.sceneWatch;
+    wo.mtime = &m_A.waterSceneMtime;
+    m_A.water.Configure(wo);
+    m_A.water.Apply(m_A.water.BootSet());
 
     // M8 THE FLEET: the AIS traffic lane (harvest_route.py) -- boats are pure
     // f(simUnix) on it (ping-pong at the ends), so scrubbing time scrubs the
@@ -1294,17 +1051,17 @@ std::optional<int> FrameLoop::Session() {
     // M5c: give the solver history before the first frame, and run the validation cycle if
     // asked (headless CSV; the ebb/flood-asymmetry and basin-lag gates read from it).
     if (swe.Ready()) {
-        if (opt.sweCycleH > 0) {
+        if (S.Tool("swe-cycle")) {
             return tools::RunSweCycleMode(opt, gpu, currents, haveCurrents, bathy, swe, resMgr,
                                           simUnix, oceanAt, southAt, westAt, westQAt);
         }
-        if (opt.sweSpinupH > 0) {
+        if (S.water.swe.spinupH > 0) {
             const auto t0 = std::chrono::steady_clock::now();
-            swe.Spinup(gpu, simUnix, opt.sweSpinupH, oceanAt, westAt, southAt, westQAt);
-            Log("[swe] spun up %.2f h of history in %.1f s", opt.sweSpinupH,
+            swe.Spinup(gpu, simUnix, S.water.swe.spinupH, oceanAt, westAt, southAt, westQAt);
+            Log("[swe] spun up %.2f h of history in %.1f s", S.water.swe.spinupH,
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
         }
-        if (!opt.sweUvDump.empty()) tools::RunSweUv(opt, gpu, bathy, swe);
+        if (S.Tool("swe-uv")) tools::RunSweUv(opt, gpu, bathy, swe);
         {
             // Spot probes for the log: bar, throat, ocean. dEta pathologies show instantly.
             const float pts[6] = {900.0f, 100.0f, 250.0f, 60.0f, 2600.0f, 0.0f};
@@ -1316,8 +1073,9 @@ std::optional<int> FrameLoop::Session() {
                 pr[1].v, pr[1].valid ? 1 : 0, pr[2].dEta);
         }
     }
-    timeScale = opt.timeScale;
-    windowSec = opt.windowDays * 86400.0;
+    timeScale = S.time.timeScale;
+    windowSec = S.time.windowDays * 86400.0;
+    m_paused = S.time.paused;
 
     // ---- Google-Earth camera gestures (PGA motors, core/Pga.h). LMB grabs the ground:
     // plain drag pans (the grabbed point stays under the cursor), SHIFT tilts and ALT
@@ -1431,20 +1189,20 @@ std::optional<int> FrameLoop::Session() {
                                                   : pickGround(sx, sy, out);
     };
 
-    if (!opt.rail.empty()) {
-        CreateDirectoryW(opt.rail.c_str(), nullptr);
-        if (railKeys.empty()) {
+    if (!S.railDirW.empty()) {
+        CreateDirectoryW(S.railDirW.c_str(), nullptr);
+        if (!m_rail.Loaded()) {
             Log("FATAL: --rail needs globe + sea + bathy data all present");
             return 1;
         }
     }
 
-    if (opt.warmInlet && (winTenant >= 0 || hgtTenant >= 0)) {
+    if (S.Tool("warm-inlet") && (winTenant >= 0 || hgtTenant >= 0)) {
         tools::RunWarmInlet(opt, gpu, compositor, resMgr, winTenant, hgtTenant, hgtWinTenant);
     }
 
     // ---- M6j: channel export mode -- pull data OUT through the manager and exit.
-    if (!opt.exportSpec.empty()) {
+    if (S.Tool("export")) {
         return tools::RunExport(opt, gpu, compositor, hgtCh, resMgr, colCh, surface);
     }
 
@@ -1452,146 +1210,240 @@ std::optional<int> FrameLoop::Session() {
     // declared in FrameLoop.h (main.cpp ff2f732 lines 1307..1389).
     last = Clock::now();
     lastTitle = last;
-    kPredictEvery = (std::max)(1u, opt.predictEvery);
-    if (!opt.mp4.empty()) {
-        recPipe.Open(opt.mp4, renderer.Width(), renderer.Height(), 30);
+    kPredictEvery = (std::max)(1u, S.streaming.predictEvery);
+    if (!S.capture.mp4.empty()) {
+        recPipe.Open(S.capture.mp4, renderer.Width(), renderer.Height(), 30);
     }
-    if (!opt.rail.empty()) {
-        railMs.reserve(opt.frames ? opt.frames : 1200);
-        railLoopMs.reserve(opt.frames ? opt.frames : 1200);
-        railPool.reserve(opt.frames ? opt.frames : 1200);
+    if (!S.railDirW.empty()) {
+        railMs.reserve(S.capture.frames ? S.capture.frames : 1200);
+        railLoopMs.reserve(S.capture.frames ? S.capture.frames : 1200);
+        railPool.reserve(S.capture.frames ? S.capture.frames : 1200);
     }
 
-    // ONE step path, called from BOTH clock branches. The windowed clock advances in whole
-    // quanta off SimClock and the headless clock is frame-indexed, but a boat that
-    // integrated differently between them could not be gated by any rail -- and the rails
-    // are the only reproducible instrument this engine has. So the quanta COUNT differs and
-    // nothing else does.
-    stepBoat = [&](int quanta) {
-        if (!boat) return;
-        boatSea.Configure(&weather, waveField.get(), sea ? &sea->Ocean() : nullptr,
-                          &seaState, sea ? double(sea->heightScale) : 1.0,
-                          waterScene.wfExag, waterScene.wfChop);
-        // PLACE THE HULL ON THE WATER, ONCE. A vessel is built before the weather
-        // manager exists, so it cannot be spawned at the right height -- and NAVD 0 is half
-        // a metre under the surface here at this tide. Dropped in submerged, the hull takes
-        // a buoyancy impulse of its own displacement in one quantum and the RHIB simply
-        // capsized: heel 179 deg, floating inverted, never recovering. So the first step
-        // sets it down gently instead of the scene throwing it in.
-        if (!boatPlaced) {
-            double bp0[3] = {0, 0, 0};
-            boat->Body().pose.TransformPoint(bp0[0], bp0[1], bp0[2]);
-            const SurfaceSample ss = boatSea.At(bp0[0], bp0[2], simUnix);
-            if (ss.valid) {
-                // Put the KEEL at its static draught, not the CG on the waterline. The CG
-                // sits well above the keel, so placing it at the surface immersed the hull
-                // half a metre deeper than it floats and it came up like a cork. The keel
-                // depth comes from the spec's own stations, after Build re-referenced them
-                // onto the CG, so it is whatever this hull actually is.
-                double keel = 0.0;
-                for (const Element& el : boat->Spec().elements) {
-                    for (const Section& st : el.stations) {
-                        for (double y : st.oy) keel = (std::min)(keel, y);
-                    }
+    // M12 step 5e: THE ENTITIES' WATER AND LAYER (scene/Entity.h Observers), wired here where
+    // stepBoat used to be assigned -- after the wave field exists, which the lambda captured by
+    // reference. The step itself is Entity::Update, from both clock branches (StepEntities).
+    for (auto& e : m_entities) {
+        scene::Entity::Observers eo;
+        eo.weather = &weather;
+        eo.waveField = waveField.get();
+        eo.sea = sea;
+        eo.seaState = &seaState;
+        eo.waterScene = &waterScene;
+        eo.vesselLayer = vesselLayer;
+        eo.gpu = &gpu;
+        e->Configure(eo);
+    }
+
+    // ---- M12 step 5f: ARM THE WHOLE-SCENE HOT RELOAD (scene/SceneReload.h).
+    //
+    // THE CHAIN, NOT THE FILE. 5c watched data/wave_scene.json, which is ONE overlay of a fold
+    // whose chain is the base scene, the scene THAT inherits, every `include` in order and the
+    // rail this run flies. So the fold is run again here -- deterministically, from the same
+    // flags, by the same function the boot and --print-scene use -- to learn which files it
+    // actually read, and every one of them gets a watcher. The water's watcher is ADOPTED
+    // (Assembly::sceneWatch, already running on that file with its own mtime cell): one watcher
+    // per file, and its poll now belongs to the reload rather than to WaterComponent::Reload.
+    //
+    // THE TARGETS. One per section, taken from the ROOT TABLE'S OWN declaration -- the schema
+    // and the offset both -- so this list cannot drift from the file's sections; then one per
+    // live node the scene declares. A section with no fanOut is not inert: its Restart keys are
+    // REPORTED at reload, which is the whole difference between "not applied" and "ignored".
+    {
+        scene::SceneBuilder rb;
+        SceneArgs ra;
+        std::string rwhy2;
+        if (!BuildScene(opt, rb, ra, &rwhy2)) {
+            Log("[scene] hot reload NOT armed: the boot's own fold does not resolve again (%s)",
+                rwhy2.c_str());
+        } else {
+            m_live = static_cast<const scene::SceneDocument&>(S);
+            m_reload.Configure(
+                [this](scene::SceneBuilder& b, std::string* why) {
+                    SceneArgs a;
+                    return BuildScene(m_opt, b, a, why);
+                },
+                rb.Resolved());
+            for (const std::string& f : rb.Files()) {
+                const bool isWater = (f == std::string(m_A.kScenePath));
+                m_reload.Watch(f, isWater ? &m_A.sceneWatch : nullptr,
+                               isWater ? &m_A.waterSceneMtime : nullptr);
+            }
+            if (m_rail.Loaded() && !m_rail.Path().empty()) m_reload.Watch(m_rail.Path());
+            using RT = scene::SceneReload::Target;
+            auto section = [this](const char* key, std::function<void()> fan = nullptr,
+                                  std::vector<std::string> lists = {}) {
+                const scene::PropDecl* d = scene::SceneFileSchema().Find(key);
+                if (!d || !d->sub) return;
+                RT t;
+                t.path = key;
+                t.schema = d->sub;
+                t.instance = reinterpret_cast<char*>(&m_live) + d->offset;
+                t.fanOut = std::move(fan);
+                t.lists = std::move(lists);
+                m_reload.Add(std::move(t));
+            };
+            section("scene");   // all Restart: a label, the layer law, the planet, the start view
+            section("data");    // every path is read where a file is opened: all Restart
+            section("time", [this] {
+                m_timeScale = m_live.time.timeScale;
+                m_windowSec = m_live.time.windowDays * 86400.0;
+                m_paused = m_live.time.paused;
+            });
+            section("sun", [this] {
+                // `source` is Restart (the AST's solar edges are registered from it at boot, so
+                // switching it live would make docs/GA_AST.md describe a path the run does not
+                // walk); the pinned pair is the renderer's own two floats, read every frame --
+                // and inert under the ephemeris, by the declaration's own meaning.
+                if (m_live.sun.source == Scene::kPinned) {
+                    m_A.renderer.sunAzimuthDeg = m_live.sun.az;
+                    m_A.renderer.sunElevationDeg = m_live.sun.el;
                 }
-                const double draft = (boat->Spec().draftStatic.v > 0.0)
-                                         ? boat->Spec().draftStatic.v : -keel;
-                const double y0 = ss.heightNavd - keel - draft;
-                boat->Body().SetPose(Motor::Translation(bp0[0], y0, bp0[2]));
-                boatPlaced = true;
-                Log("[vessel] set down: surface %+.3f, keel %.3f below CG, draught %.2f "
-                    "-> CG at %+.3f m NAVD", ss.heightNavd, -keel, draft, y0);
-            } else {
-                return;   // no water yet: do not integrate a hull that has nothing to float on
+            });
+            section("sea");     // the storm and the datum are read where the sea state is built
+            section("water", [this] { ApplyWater(); }, {"fleet.boats"});
+            section("streaming", [this] {
+                m_kPredictEvery = (std::max)(1u, m_live.streaming.predictEvery);
+            });
+            section("capture");   // the dump, the size and the hold are the run's identity
+            section("rails");     // the rail is resolved once, against the tower it was built in
+            m_poseFrame.planetR = m_A.planetR;
+            for (int i = 0; i < 3; ++i) {
+                m_poseFrame.east[i] = m_A.surface.east[i];
+                m_poseFrame.up[i] = m_A.surface.up[i];
+                m_poseFrame.north[i] = m_A.surface.north[i];
+            }
+            m_poseFrame.valid = true;
+            if (!m_startView.p.name.empty()) {
+                RT t;
+                t.path = "views." + m_startView.p.name;
+                t.schema = &scene::ViewSchema();
+                t.instance = &m_startView.p;
+                t.frame = &m_poseFrame;
+                t.fanOut = [this] {
+                    // THE OPTICS, through 5b's own conversion (View.h: the declaration is
+                    // degrees, the Camera holds radians). The eye itself is Restart: this run's
+                    // camera is the session's state, moved by WASD, the rails and the chase cam.
+                    m_cam.fovY = scene::View::FovRadOf(m_startView.p.fovY);
+                    m_cam.nearZ = m_startView.p.nearZ;
+                };
+                m_reload.Add(std::move(t));
+            }
+            if (!m_portalDecl.p.name.empty()) {
+                RT t;
+                t.path = "portals." + m_portalDecl.p.name;
+                t.schema = &scene::PortalSchema();
+                t.instance = &m_portalDecl.p;   // `lighting` is read every frame from here
+                m_reload.Add(std::move(t));
+            }
+            for (auto& e : m_entities) {
+                RT t;
+                t.path = std::string("entities.") + e->Name();
+                t.schema = &scene::EntitySchema();
+                scene::Entity* ep = e.get();
+                t.apply = [ep](const scene::PropSet& p) { ep->Apply(p); };
+                m_reload.Add(std::move(t));
+            }
+            if (const SceneEffect* fx = S.EffectOfType("slice.plane")) {
+                // A typed element answers to TWO schemas (SceneBuilder::ElementChain): its own
+                // (name, type, enabled) and its type's (d). Two targets, so every key under the
+                // element is seen by one of them -- a key covered by neither would be a hole in
+                // the report, which is the one thing this must not have. The element's own half
+                // is all Restart (`enabled` decides the AST edge at boot), so it REPORTS and never
+                // applies: no instance, no apply.
+                const std::string fxPath = std::string("effects.") + fx->p.name;
+                RT a;
+                a.path = fxPath;
+                a.schema = scene::SceneFileSchema().Find("effects")->sub;
+                m_reload.Add(std::move(a));
+                RT b;
+                b.path = fxPath;
+                b.schema = &scene::SlicePlaneSchema();
+                b.apply = [this](const scene::PropSet& p) { m_A.slice.Apply(p); };
+                m_reload.Add(std::move(b));
+            }
+            if (!m_reload.Ready(&rwhy2)) {
+                Log("[scene] hot reload NOT armed: %s", rwhy2.c_str());
             }
         }
-        if (opt.boatDrive) {
-            for (int t = 0; t < VesselControls::kMaxThrusters; ++t) {
-                boatCtl.throttle[t] = opt.boatThrottle;
-            }
-            boatCtl.steer = opt.boatSteer;
-        }
-        // THE HULL STEPS AT 60 Hz, NOT 240. SimClock's quantum is 240 Hz because that is
-        // what the SCENE needed; nothing in a hull's dynamics asks for 4 ms resolution. Its
-        // fastest modes are heave at ~1 s, roll at ~1.8 s, and the collar's slam at ~10 Hz
-        // -- 60 Hz resolves the quickest of those by six to one.
-        //
-        // It matters because a step is not cheap: ~73 water queries for this hull, and each
-        // one sums the solved field's 32 components and the retained cascade bins. At 240 Hz
-        // that measured 26 ms a frame, which is more than the entire renderer costs.
-        //
-        // Determinism is untouched -- this is still a FIXED step off the same clock, just a
-        // coarser multiple of it, so the boat is as frame-rate independent as before. The
-        // leftover quanta are carried, never dropped, so no owed time is lost.
-        constexpr int kPerStep = 4;                     // 240 / 4 = 60 Hz
-        quantaOwed += quanta;
-        const int steps = quantaOwed / kPerStep;
-        quantaOwed -= steps * kPerStep;
-        PROF_BEGIN();
-        for (int q = 0; q < steps; ++q) {
-            boat->Step(boatSea, boatCtl, simUnix, SimClock::kDt * kPerStep);
-        }
-        if (!boat->Body().Sane()) boatCtl = VesselControls{};
-        PROF_END(11);
-
-        const Vessel* vs[1] = {boat.get()};
-        if (vesselLayer) vesselLayer->SetVessels(vs, 1);
-
-        // One telemetry line a second. Cheap, and it is the only way to tell a hull that is
-        // floating wrong from one that is not being DRAWN.
-        if ((telTick++ % 60) == 0) {
-            const VesselTelemetry& t = boat->Telemetry();
-            double bp[3] = {0, 0, 0};
-            boat->Body().pose.TransformPoint(bp[0], bp[1], bp[2]);
-            // The water the hull is standing on, at the hull. Buoyancy acts along this
-            // NORMAL, so a wrong slope is not a cosmetic error -- it is a horizontal force.
-            const SurfaceSample ws = boatSea.At(bp[0], bp[2], simUnix);
-            const double slope = std::sqrt(ws.nx * ws.nx + ws.nz * ws.nz) /
-                                 ((std::abs(ws.ny) > 1e-9) ? std::abs(ws.ny) : 1e-9);
-            Log("[vessel]   water: eta %+.2f n (%+.3f, %+.3f, %+.3f) |slope| %.3f = %.1f deg"
-                "  orbital (%+.2f, %+.2f, %+.2f) m/s",
-                ws.heightNavd, ws.nx, ws.ny, ws.nz, slope,
-                std::atan(slope) * 57.2957795, ws.vx, ws.vy, ws.vz);
-            Log("[vessel] pos (%.1f, %+.2f, %.1f) %.1f kn hdg %.0f heel %+.1f trim %+.1f "
-                "draught %.3f vol %.2f (hull %.2f collar %.2f) lam %.2f cop %+.2f "
-                "depth %.1f%s%s | parts %u",
-                bp[0], bp[1], bp[2], t.speedKn, t.headingRad * 57.2957795,
-                t.heelRad * 57.2957795, t.trimRad * 57.2957795, t.draughtM, t.immersedVol,
-                t.hullVol, t.collarVol, t.wettedLambda, t.copZ, t.depthM,
-                (t.immersedVol < 1e-6) ? " AIRBORNE" : (t.aground ? " AGROUND" : ""),
-                t.waterValid ? "" : " NO-WATER",
-                vesselLayer ? vesselLayer->PartCount() : 0u);
-        }
-
-        // ---- THE CHASE CAMERA. Gravity-up and roll-free by choice: a camera that heels
-        // with the hull reads as the WORLD rolling, which is nauseating and is not what a
-        // helmsman's inner ear reports. The motor-native view that DOES heel is the
-        // first-person one, later.
-        if (helming) {
-            const RigidBody& b = boat->Body();
-            double p[3] = {0, 0, 0};
-            b.pose.TransformPoint(p[0], p[1], p[2]);
-            double f[3] = {0, 0, 1};
-            b.pose.TransformDir(f[0], f[1], f[2]);
-            const double fl = std::sqrt(f[0] * f[0] + f[2] * f[2]);
-            if (fl > 1e-6) { f[0] /= fl; f[2] /= fl; }
-            // The look-steer's reference is THIS camera's heading, kept here rather than
-            // read off `cam`, so detaching the view (T, or a spectator flying to orbit in a
-            // future multiplayer) cannot feed the assist a heading from the other side of
-            // the planet.
-            helmYawRef = std::atan2(f[2], f[0]);
-            const double back = 15.0, up = 5.0;
-            cam.px = p[0] - f[0] * back;
-            cam.py = p[1] + up;
-            cam.pz = p[2] - f[2] * back;
-            cam.LookAt(p[0], p[1] + 0.6, p[2]);
-        }
-    };
+    }
     return std::nullopt;
+}
+
+// M12 step 5f: THE WATER SECTION'S FAN-OUT, both halves. The scene's own three numbers are the
+// sea layer's, read every frame from the layer; the wavefield/closures/fleet subtree is 5c's,
+// and it goes through WaterComponent::Apply -- the SAME call the boot made -- rather than being
+// applied a second way here. `WaterSceneDoc` is the reduction app/Scene.h already declares, so
+// the live section and data/wave_scene.json reach that component through one door.
+void FrameLoop::ApplyWater() {
+    if (SeaLayer* sea = m_A.sea) {
+        sea->foamIntensity = m_live.water.foam;
+        sea->targetEdgePx = m_live.water.edgePx;
+        sea->heightScale = m_live.water.heightScale;
+        sea->sweCurrentGain = m_live.water.swe.gain;
+    }
+    const scene::PropDecl* d = scene::SceneFileSchema().Find("water");
+    if (!d || !d->sub) return;
+    JsonValue section = scene::PropSet::Defaults(*d->sub, &m_live.water).ToJson();
+    // THE BOATS ARE A LIST, which a PropSet does not carry (5a's law) -- ToJson writes it as []
+    // -- so they come from the document being applied. Without this line the first reload of
+    // ANY file in the chain handed the component an empty fleet.
+    if (const JsonValue* boats = scene::SceneReload::At(m_reload.Document(), "water.fleet.boats")) {
+        if (JsonValue* fl = scene::JsonGet(section, "fleet")) scene::JsonSet(*fl, "boats", *boats);
+    }
+    scene::PropSet set(scene::WaterSchema());
+    scene::WaterComponent::Fleet fleet;
+    std::string why;
+    if (!m_A.water.ReadJson(WaterSceneDoc(section), set, fleet, &why)) {
+        Log("[scene] water: %s -- the previous water set stands", why.c_str());
+        return;
+    }
+    const int boatsWere = m_A.waterScene.fleetCount;
+    m_A.water.StageFleet(fleet);
+    m_A.water.Apply(set);
+    // The instrument the [water] apply fingerprint cannot be: that hash is a PropSet's, and a
+    // PropSet carries no list, so an emptied fleet would read as an unchanged set.
+    Log("[scene] water fleet: %d boats (was %d)%s", m_A.waterScene.fleetCount, boatsWere,
+        m_A.waterScene.fleetCount == boatsWere ? "" : " -- the fleet MOVED");
+}
+
+// M12 step 5e: THE ENTITIES' STEP, from both clock branches (stepBoat's contract: the quanta
+// COUNT differs between the windowed and the headless clock and nothing else does). The
+// snapshot the hulls read is declared to them (FrameInfo: the clock, its quanta, and asOf --
+// the instant the weather manager's mirrors are coherent at); each entity's step is its own;
+// the hull steps' wall time lands in the profiler's slot 11 as stepBoat's bracket did; and the
+// chase camera is the start view's Follow of the followed hull, placed after the steps as the
+// hand code placed it after the telemetry (and, as there, only once the hull is set down).
+void FrameLoop::StepEntities(int quanta, float dt) {
+    scene::FrameInfo fi;
+    fi.simUnix = m_simUnix;
+    fi.dt = dt;
+    fi.frame = m_frame;
+    fi.quanta = quanta;
+    fi.asOf = m_weather.MirrorAsOf();
+    for (auto& e : m_entities) {
+        if (!e->Active()) continue;
+        e->Update(fi);
+        if (m_profOn) {
+            m_profMs[11] += e->LastStepMs();
+            if (m_profHelm) m_profHelmMs[11] += e->LastStepMs();
+        }
+    }
+    // ---- THE CHASE CAMERA. Gravity-up and roll-free by choice: a camera that heels
+    // with the hull reads as the WORLD rolling, which is nauseating and is not what a
+    // helmsman's inner ear reports. The motor-native view that DOES heel is the
+    // first-person one, later. (scene/View.h Follow: the start view's four numbers.)
+    if (m_followed && m_followed->Helming() && m_followed->Placed()) {
+        double p[3], f[3];
+        m_followed->ChaseFrame(p, f);
+        scene::View::Follow(m_startView.p.follow, p, f, m_cam);
+    }
 }
 
 bool FrameLoop::Frame() {
     const Options& opt = m_opt;
+    const Scene& S = m_S;
+    auto& portalDecl = m_portalDecl.p;
     auto& model = m_A.model;
     auto& window = m_A.window;
     auto& gpu = m_A.gpu;
@@ -1612,9 +1464,6 @@ bool FrameLoop::Frame() {
     auto& swe = m_A.swe;
     auto& gulf = m_A.gulf;
     auto& waterScene = m_A.waterScene;
-    auto& waterSceneMtime = m_A.waterSceneMtime;
-    auto& kScenePath = m_A.kScenePath;
-    auto& sceneWatch = m_A.sceneWatch;
     auto& waterBank = m_A.waterBank;
     auto& waterBankB = m_A.waterBankB;
     auto& globe = m_A.globe;
@@ -1641,19 +1490,15 @@ bool FrameLoop::Frame() {
     auto& oDir = m_A.surface.up;
     auto& east0 = m_A.surface.east;
     auto& north0 = m_A.surface.north;
-    auto& portal = m_portal;
-    auto& drosteLeaf = m_drosteLeaf;   // M12 step 4d: the Droste tower as a Space::Cycle
+    const droste::Portal& portal = m_portalNode.Link();   // M12 step 5e: the node's (scene/Portal.h)
+    const Space& drosteLeaf = m_portalNode.Cycle();       // M12 step 4d: the Droste tower as a Space::Cycle
     auto& camLevel = m_camLevel;
     auto& altOf = m_altOf;
     auto& poseMotor = m_poseMotor;
     auto& motorPose = m_motorPose;
-    auto& railKeys = m_railKeys;
-    auto& railPose = m_railPose;
-    auto& drosteRailPose = m_drosteRailPose;
+    auto& rail = m_rail;   // M12 step 5e: the rail as data (scene/Rail.h)
     auto& simUnix = m_simUnix;
     auto& simClock = m_simClock;
-    auto& boat = m_boat;
-    auto& boatCtl = m_boatCtl;
     auto& wavePending = m_wavePending;
     auto& wavePrefillDone = m_wavePrefillDone;
     auto& wavePrefillBusy = m_wavePrefillBusy;
@@ -1661,8 +1506,11 @@ bool FrameLoop::Frame() {
     auto& wavePendingTiles = m_wavePendingTiles;
     auto& wavePendingPlanes = m_wavePendingPlanes;
     auto& wavePendingSec = m_wavePendingSec;
-    auto& boatPlaced = m_boatPlaced;
-    auto& helming = m_helming;
+    // M12 step 5e: the hulls are entity nodes; the helm -- the chase camera's subject -- is
+    // the followed entity's state, and a hull aboard is any entity that spawned.
+    const auto helming = [this] { return m_followed && m_followed->Helming(); };
+    bool anyHull = false;
+    for (auto& e : m_entities) anyHull = anyHull || e->Active();
     auto& sunLogged = m_sunLogged;
     auto& startUnix = m_startUnix;
     auto& entSta = m_entSta;
@@ -1727,10 +1575,9 @@ bool FrameLoop::Frame() {
     auto& recPipe = m_recPipe;
     auto& recPixels = m_recPixels;
     auto& railPool = m_railPool;
-    auto& stepBoat = m_stepBoat;
     auto& loggedLevel = m_loggedLevel;
 
-    if (!opt.headless) {
+    if (!S.capture.headless) {
         window.NewFrame();
         if (!window.PumpMessages()) return false;
         if (window.TakeResized()) renderer.OnResize(window.Width(), window.Height());
@@ -1754,10 +1601,10 @@ bool FrameLoop::Frame() {
         railLoopMs.push_back(dt * 1000.0f);
         loopRowOpen = false;
     }
-    profOn = opt.rail.empty() || frame >= 150u;
+    profOn = S.railDirW.empty() || frame >= 150u;
     dt = (dt > 0.25f) ? 0.25f : dt;   // a debugger break must not teleport time
 
-    if (!opt.headless) {
+    if (!S.capture.headless) {
         InputState in = window.Input();   // by value: gestures may consume wheel
 
         if (mode != 2) {   // the gulf map keeps its plain controls
@@ -1836,7 +1683,7 @@ bool FrameLoop::Frame() {
         // While helming, the free-fly integration does not run at all: Camera::Update
         // owns W A S D Q E Shift Ctrl, which is a head-on collision with the binnacle.
         // A control MODE is the only honest fix -- rebinding would just move the clash.
-        if (!helming) cam.Update(in, dt);
+        if (!helming()) cam.Update(in, dt);
         if (in.keyPressed[VK_F5]) {
             // SAVE THIS CAMERA. The five numbers SetFromCompass takes, inverted from
             // the live pose, appended to data/views.json under a generated name (rename
@@ -1903,19 +1750,13 @@ bool FrameLoop::Frame() {
             // a hull carries momentum, so jumping an hour teleports the sea out from
             // under it while it keeps the velocity it had. It came back as the boat
             // being flung. A deliberate jump resets it to rest at its last pose.
-            if (boat) {
-                boat->Body().Rest();
-                boatCtl = VesselControls{};
-                boatPlaced = false;   // re-seat it on the new instant's surface
-                Log("[vessel] time jumped -- hull reset to rest (a boat cannot be "
-                    "integrated across a scrub)");
-            }
+            for (auto& e : m_entities) e->ResetAtRest();
         }
         // A boat at 100x time is not a simulation of anything: the tide and current
         // buckets roll every few frames, and each roll costs an 8-11 s wave solve plus
         // a 12-19 s page prefill, which is what reads as a freeze. Time scaling stays
         // available with no hull aboard.
-        if (boat && timeScale > 10.0) {
+        if (anyHull && timeScale > 10.0) {
             timeScale = 10.0;
             Log("[vessel] time scale held at 10x while a hull is aboard -- faster than "
                 "that spends every frame re-solving the wave field, not sailing");
@@ -1972,59 +1813,13 @@ bool FrameLoop::Frame() {
             // is windowed-only; the STEP itself is shared with the headless path below,
             // because a boat that integrates differently in a rail than in a window is
             // a boat no rail can gate.
-            if (boat) {
-                if (in.keyPressed['T']) {
-                    helming = !helming;
-                    Log("[vessel] %s", helming ? "helm" : "camera detached (the boat "
-                                                         "keeps sailing)");
-                }
-                if (helming) {
-                    // Keyboard for now; the analog triggers are the twin-lever binnacle
-                    // and land with XInput. W/S drive BOTH levers, Q/E split them, which
-                    // is what makes a pivot a squeeze rather than a mode.
-                    const double rate = dt * 1.5;
-                    double demand = 0.0;
-                    if (in.keyDown['W']) demand += 1.0;
-                    if (in.keyDown['S']) demand -= 1.0;
-                    double split = 0.0;
-                    if (in.keyDown['E']) split += 1.0;
-                    if (in.keyDown['Q']) split -= 1.0;
-                    for (int t = 0; t < VesselControls::kMaxThrusters; ++t) {
-                        const double want =
-                            std::clamp(demand + ((t % 2 == 0) ? -split : split),
-                                       -1.0, 1.0);
-                        boatCtl.throttle[t] +=
-                            std::clamp(want - boatCtl.throttle[t], -rate, rate);
-                    }
-                    // D IS STARBOARD, and the sign is the outboard's, not the
-                    // wheel's. Motor::Rotation about +y takes +z to +x (RunPgaSelfTest
-                    // pins it), so a POSITIVE steer swings the thrust to starboard --
-                    // and that thrust acts at the transom, ABAFT the CG, so it pushes
-                    // the stern to starboard and the bow to PORT. A helm that turns the
-                    // boat to starboard therefore commands a NEGATIVE angle here, which
-                    // is exactly what the real linkage does: the leg kicks the stern the
-                    // opposite way to the turn.
-                    double sd = 0.0;
-                    if (in.keyDown['D']) sd -= 1.0;
-                    if (in.keyDown['A']) sd += 1.0;
-                    // A mechanical steering RATE limit, not a snap: the outboards swing
-                    // at a finite speed and that lag is a real part of how a boat feels.
-                    const double sMax = 0.6;
-                    boatCtl.steer += std::clamp(sd * sMax - boatCtl.steer,
-                                                -dt * 1.2, dt * 1.2);
-                    boatCtl.steer = std::clamp(boatCtl.steer, -sMax, sMax);
-
-                    // TRIM. Shift trims OUT (bow up), Ctrl trims IN (bow down). It is
-                    // slow on purpose -- a trim pump takes seconds to sweep its range --
-                    // and it is the helmsman's only direct hold on running attitude.
-                    double td = 0.0;
-                    if (in.keyDown[VK_SHIFT]) td += 1.0;
-                    if (in.keyDown[VK_CONTROL]) td -= 1.0;
-                    boatCtl.tilt = std::clamp(boatCtl.tilt + td * dt * 0.20,
-                                              -0.0873, 0.2618);
-                }
-                stepBoat(simSteps);
+            // M12 step 5e: THE ENTITIES -- the helm controller reads the keys (Entity::Helm,
+            // the keyboard block verbatim), the step is Entity::Update (stepBoat), and the
+            // chase camera is the start view's Follow of the followed hull (StepEntities).
+            for (auto& e : m_entities) {
+                if (e->Active()) e->Helm(in, dt);
             }
+            StepEntities(simSteps, dt);
         }
     } else {
         // Deterministic time in headless mode so a dump sequence is reproducible.
@@ -2034,7 +1829,7 @@ bool FrameLoop::Frame() {
         // t=0). The rail now holds its opening pose for kRailSettle unrecorded
         // frames so residency, the solver mirror, and the composed caches are
         // warm before the camera rolls.
-        const uint32_t settle = opt.rail.empty() ? 0u : 150u;
+        const uint32_t settle = S.railDirW.empty() ? 0u : 150u;
         uint32_t recFrame = (frame > settle) ? frame - settle : 0u;
         // Step 28: the landing ledger prints on every turn of the --res-trace-frames
         // window, labelled with the recorded frame (the mp4's index). It does not
@@ -2050,7 +1845,7 @@ bool FrameLoop::Frame() {
         // they are supposed to explain.
         // --settle-sync / --settle-hold hold the same instant for as many frames as the
         // residency manager needs to drain, or for a counted N (the exit test below
-        // decides which). The held instant is opt.frames - 1, the LAST frame an unheld
+        // decides which). The held instant is S.capture.frames - 1, the LAST frame an unheld
         // --frames N run renders and dumps: an off-by-one here would put the held still
         // a whole 1/30 s of sea away from the unheld one, so it was MEASURED rather than
         // read (helm_ebb, 2026-09-05, out/step21/ob_*): --frames 240 --settle-hold 1
@@ -2061,22 +1856,22 @@ bool FrameLoop::Frame() {
         // (pending 2992 -> 3004). The held frame names the unheld dump's moment; there
         // is no off-by-one. The same clamp is what puts --dump-both's wireframe on the
         // solid frame's crests, which is the second reason not to move it.
-        if ((opt.dumpBoth || settling) && opt.frames && recFrame >= opt.frames) {
-            recFrame = opt.frames - 1u;
+        if ((opt.dumpBoth || settling) && S.capture.frames && recFrame >= S.capture.frames) {
+            recFrame = S.capture.frames - 1u;
         }
         simUnix = startUnix + static_cast<double>(recFrame) * (timeScale / 30.0);
         // The headless clock is frame-indexed, so a frame is worth exactly
         // timeScale/30 seconds of world; the boat owes that many whole quanta. Rounding
         // rather than truncating keeps the owed time from drifting slow over a long
         // rail, and at the default scale it is an exact 8.
-        stepBoat(static_cast<int>(std::lround((timeScale / 30.0) / SimClock::kDt)));
+        StepEntities(static_cast<int>(std::lround((timeScale / 30.0) / SimClock::kDt)), dt);
         // The churn atlas is stateful and its kernel only climbs at a frozen dt, so a
         // held frame would advance the foam the hold's length decides. Freeze it for
         // exactly the held frames (SeaLayer.h freezeChurn).
         if (sea) sea->freezeChurn = settling;
         // The helm leg of --rail-flood: keys at 32 s (cHelmIn) and 40 s (cHelmGap).
-        profHelm = !opt.rail.empty() && recFrame >= 32u * 30u;
-        if (!opt.rail.empty() && !railKeys.empty()) {
+        profHelm = !S.railDirW.empty() && recFrame >= 32u * 30u;
+        if (!S.railDirW.empty() && rail.Loaded()) {
             // M6g: the rails just set a pose in the ONE frame. Nothing switches.
             // Helming outranks the rail: the chase camera has already placed the
             // view on the boat this frame and a rail pose would yank it away. This is
@@ -2084,13 +1879,26 @@ bool FrameLoop::Frame() {
             // flypast that happens to contain a hull.
             // M10: the Droste rails leave the keys at the helm for the similarity's
             // own spiral, and say which level the pose is written in.
-            if (!helming) {
-                if (portal.Valid() && (opt.railDroste || opt.railDrosteOut)) {
-                    drosteRailPose(static_cast<double>(recFrame) / 30.0, cam, camLevel,
-                                   drosteUp);
-                    drosteRailUp = true;
-                } else {
-                    railPose(static_cast<double>(recFrame) / 30.0, cam);
+            // M12 step 5e: the rail is data (scene/Rail.h). A TOWER rail flown through a
+            // valid portal writes the camera's level and its up (drosteRailPose's contract);
+            // any other flies its keys (railPose's). AimCamera is the one rasterizer
+            // boundary, and the [droste] probe reads the sample's own spiral beside it.
+            if (!helming()) {
+                const double t = static_cast<double>(recFrame) / 30.0;
+                const bool tower = rail.Tower() && portal.Valid();
+                const scene::RailSample rs = tower ? rail.At(t) : rail.KeysAt(t);
+                scene::Rail::AimCamera(rs, cam);
+                if (tower) {
+                    camLevel = rs.level;
+                    if (rs.upWritten) {
+                        for (int i = 0; i < 3; ++i) drosteUp[i] = rs.up[i];
+                        drosteRailUp = true;
+                    }
+                    if (rs.spiral && rs.base && rs.upOf) {
+                        double c[3], fw[3], up[3];
+                        ProbeDive(rs.f, rs.base->c0, rs.base->f0, rs.upOf->up0, c, fw, up, true,
+                                  rs.u);
+                    }
                 }
             }
         }
@@ -2108,7 +1916,7 @@ bool FrameLoop::Frame() {
     // it is the difference between a sun that is somewhere and a sun that merely points.
     // (M10 moved this block up from just before RenderFrame: the globe's level table
     // carries the sun, and the walk that fills the table runs before RenderFrame.)
-    if (!opt.sunPinned) {
+    if (S.sun.source != Scene::kPinned) {
         const sun::SolarSystem ss = sun::Build(simUnix);
         const double here[3] = {oDir[0], oDir[1], oDir[2]};   // unit = 1 Earth radius
         double sdir[3];
@@ -2197,10 +2005,10 @@ bool FrameLoop::Frame() {
         // M12 step 4d-2: the camera level's sun through the cycle (LevelApplyDir, the power
         // about its fixed point); the portal's form beside it for the residual (ProbeDrosteTable,
         // with the table below).
-        if (opt.drosteLight == 0) drosteLeaf.LevelApplyDir(-double(camLevel), sr, sc);
+        if (portalDecl.lighting == 0) drosteLeaf.LevelApplyDir(-double(camLevel), sr, sc);
         for (int i = 0; i < 3; ++i) sunCamF[i] = static_cast<float>(sc[i]);
         double sc2[3] = {sr[0], sr[1], sr[2]};   // the portal's, for the record
-        if (opt.drosteLight == 0) portal.ApplyDir(-double(camLevel), sr, sc2);
+        if (portalDecl.lighting == 0) portal.ApplyDir(-double(camLevel), sr, sc2);
         renderer.sunPlaced = true;
         for (int i = 0; i < 3; ++i) renderer.sunDirTangent[i] = sunCamF[i];
         // (3) THE LEVELS: two out (never above the root), three in. The globe walks
@@ -2256,18 +2064,18 @@ bool FrameLoop::Frame() {
                 std::sqrt(L.cam[0] * L.cam[0] + gy * gy + L.cam[2] * L.cam[2]) - planetR;
             L.reliefExagg = static_cast<float>(std::clamp(altK / 250000.0, 1.0, 20.0));
             double sk[3] = {sr[0], sr[1], sr[2]};
-            if (opt.drosteLight == 0) drosteLeaf.LevelApplyDir(-double(camLevel + rel), sr, sk);
+            if (portalDecl.lighting == 0) drosteLeaf.LevelApplyDir(-double(camLevel + rel), sr, sk);
             for (int i = 0; i < 3; ++i) L.sun[i] = static_cast<float>(sk[i]);
             for (int i = 0; i < 3; ++i) {
                 pr.sun[i] = sr[i];    // the portal's, for the record (below)
                 pr.sun2[i] = sk[i];   // the read
             }
-            if (opt.drosteLight == 0) portal.ApplyDir(-double(camLevel + rel), sr, pr.sun);
+            if (portalDecl.lighting == 0) portal.ApplyDir(-double(camLevel + rel), sr, pr.sun);
             // THE SKY IT SEES. Realistic: every level inside the root sits a few
             // hundred metres up in the root's air, so the sky over it is the ROOT's --
             // its zenith turned into this level's frame, lit by the root's day -- and a
             // night-side inner sea mirrors that bright sky. Appealing: its own sky.
-            if (opt.drosteLight == 0 && camLevel + rel > 0) {
+            if (portalDecl.lighting == 0 && camLevel + rel > 0) {
                 const double upR[3] = {0.0, 1.0, 0.0};
                 double su[3];
                 drosteLeaf.LevelApplyDir(-double(camLevel + rel), upR, su);
@@ -2293,7 +2101,7 @@ bool FrameLoop::Frame() {
         {
             float upC[3] = {0.0f, 1.0f, 0.0f};
             float dayC = -1.0f;
-            if (portal.Valid() && mode == 1 && opt.drosteLight == 0 && camLevel > 0) {
+            if (portal.Valid() && mode == 1 && portalDecl.lighting == 0 && camLevel > 0) {
                 const double upR[3] = {0.0, 1.0, 0.0};
                 double su[3];
                 portal.ApplyDir(-double(camLevel), upR, su);
@@ -2304,7 +2112,7 @@ bool FrameLoop::Frame() {
         }
         if (portal.Valid() && mode == 1) {
             globe->SetDroste(drosteLv.data(), static_cast<int>(drosteLv.size()),
-                             opt.drosteLight, portal.centre, portal.radius, camLevel);
+                             portalDecl.lighting, portal.centre, portal.radius, camLevel);
         }
     }
     // M10: WHOSE SKY. Identity and the camera's sun reproduce the old dome exactly; under
@@ -2321,7 +2129,7 @@ bool FrameLoop::Frame() {
         float spaceSun[3] = {sunCamF[0], sunCamF[1], sunCamF[2]};
         int domeRel = 0;
         if (portal.Valid() && mode == 1) {
-            if (opt.drosteLight == 0) {
+            if (portalDecl.lighting == 0) {
                 domeRel = -camLevel;   // the root's
             } else {
                 const double C[3] = {cam.px, cam.py, cam.pz};
@@ -2401,8 +2209,8 @@ bool FrameLoop::Frame() {
         // M6p: the survey vectors decimate to the view -- tolerance = one ground
         // pixel; the layer republishes only when the x8 bucket changes.
         if (gisLayer) {
-            const float vh = opt.headless
-                                 ? static_cast<float>(opt.height)
+            const float vh = S.capture.headless
+                                 ? static_cast<float>(S.capture.height)
                                  : static_cast<float>(std::max(1u, window.Height()));
             gisLayer->tolMeters = static_cast<float>(altV * cam.fovY / vh);
         }
@@ -2412,7 +2220,7 @@ bool FrameLoop::Frame() {
         // refresh here: nothing in the loop reads them -- step 2 of PERF_EXPERIMENT.)
         if (!marsMode) {
             PROF_BEGIN();
-            weather.Update(gpu, renderer.Shaders(), opt.shaderDir, simUnix,
+            weather.Update(gpu, renderer.Shaders(), S.shadersW, simUnix,
                            BathyModel::kOrgLat + cam.pz / BathyModel::kMPerLat,
                            BathyModel::kOrgLon + cam.px / BathyModel::kMPerLon,
                            altV);
@@ -2430,34 +2238,20 @@ bool FrameLoop::Frame() {
             // directory watcher says the file moved (every 30 frames with no
             // watch); the mtime compare and the reload are unchanged. The stat
             // alone was 0.140 ms whole / 0.185 ms helm per frame (step 2's bench).
+            // M12 step 5c: THE RELOAD LAW, whole, in the component (scene/WaterComponent.h):
+            // the watcher's poll, the mtime compare, the file resolved into a COMPLETE
+            // candidate over the DECLARED DEFAULTS (a key the file no longer carries reverts to
+            // its default, not to the value this run was carrying), validated with the refusing
+            // key's path, and the accepted diff applied through THE SAME Apply the boot used.
+            // The two deliberate changes are here: the sea's four closures and the auto edit
+            // floor now reload, because there is only one set left to apply.
+            // M12 step 5f: THE WHOLE SCENE, not one file (scene/SceneReload.h). The poll is
+            // one atomic exchange per watched file; the stat and the re-resolution run only
+            // when a directory said the file moved, exactly as 5c's did. The water reaches
+            // WaterComponent::Apply through the `water` target's fan-out, so the reload law
+            // 5c wrote is called from here and not duplicated.
             PROF_BEGIN();
-            if (sceneWatch.Poll(frame) &&
-                WaterSceneChanged(kScenePath, &waterSceneMtime) &&
-                LoadWaterScene(kScenePath, waterScene)) {
-                if (waveField) {
-                    WaveFieldConfig wcfg2 = sceneToWaveCfg(waterScene);
-                    waveFrame = WaveFieldSource::Align(wcfg2);   // M9bc: the page grid
-                    waveField->Configure(wcfg2, &compositor,
-                                         hgtCh, &waterAtlas, &model, entSta,
-                                         haveCurrents ? &currents : nullptr,
-                                         wfCtSta);
-                    waterBank->SetWaveField(
-                        waterScene.wfEnabled ? waveField.get() : nullptr);
-                    if (waterBankB) {
-                        waterBankB->SetWaveField(
-                            waterScene.wfEnabled ? waveField.get() : nullptr);
-                    }
-                }
-                globe->foamOpacity = waterScene.foamOpacity;
-                globe->ringBlendTexels = waterScene.ringBlendTexels;
-                globe->causticStrength = waterScene.causticStrength;
-                globe->waterOptics = waterScene.waterOptics;
-                if (waterScene.jettyCrestNavd > -90.0f) {
-                    globe->editFloorNavd = waterScene.jettyCrestNavd;
-                }
-                Log("[scene] %s hot-reloaded at frame %u, %s", kScenePath, frame,
-                    sceneWatch.Trigger().c_str());
-            }
+            m_reload.Poll(frame);
             PROF_END(1);
             // M8: bucket-watch + background solve + upload/swap for the solved
             // wave field, BEFORE the bank recomposes so the kernel binds a whole
@@ -2467,7 +2261,7 @@ bool FrameLoop::Frame() {
             if (waveField && sea && waterScene.wfEnabled && frame >= 2) {
                 PROF_BEGIN();
                 waveField->Update(gpu, simUnix, sea->Parts(), sea->activeParts,
-                                  opt.headless);
+                                  S.capture.headless);
                 PROF_END(2);
                 // M9bc: the solve moved -> a new tree under the same tenant, its
                 // pyramid prefilled to disk, the old tiles dropped, then the wants.
@@ -2554,8 +2348,8 @@ bool FrameLoop::Frame() {
                         distW = (std::min)(distW, (std::max)(std::sqrt(
                             ox * ox + drosteOuterCam[1] * drosteOuterCam[1] + oz * oz), 1.0));
                     }
-                    const double vhW = opt.headless
-                                           ? double(opt.height)
+                    const double vhW = S.capture.headless
+                                           ? double(S.capture.height)
                                            : double((std::max)(1u, window.Height()));
                     const double pixAngW =
                         double(cam.fovY) / (std::max)(vhW, 1.0);
@@ -2665,7 +2459,7 @@ bool FrameLoop::Frame() {
             globe->SetWaterBank(waterBank->DispSrv(), waterBank->ParamSrv(),
                                 waterBank->DetailSrv(), derivS, patchS, bandKS,
                                 bandRmsS, bandFoldS, sea->heightScale,
-                                waterBank->BaseTexelM(), orgs, opt.oneWater);
+                                waterBank->BaseTexelM(), orgs, S.water.oneWater);
             // M10: set B follows the OUTER level's eye, S(C) -- the sea the camera's
             // planet floats in, seen from where the camera really is in that level's
             // own frame. Off (and not filled) while the camera is at the root.
@@ -2690,7 +2484,7 @@ bool FrameLoop::Frame() {
         // every inner level sits a few hundred metres up in the root's air, so from
         // anywhere inside the tower the backdrop is the root's low sky, never space.
         // APPEALING gives each level its own -- its orbit reads as an orbit.
-        const bool rootSky = portal.Valid() && opt.drosteLight == 0 && camLevel > 0;
+        const bool rootSky = portal.Valid() && portalDecl.lighting == 0 && camLevel > 0;
         sky->enabled = (altV < 9000.0 || rootSky) && !marsMode && !opt.albedo;   // low haze dome...
         if (globe) globe->skyPassEnabled = !sky->enabled && !opt.albedo;   // ...or the
                                                     // limb shell, never both at once
@@ -2706,7 +2500,7 @@ bool FrameLoop::Frame() {
         // which frame the camera happens to be rooted in -- so the re-root cannot pop the
         // sky, and a camera leaving an inner planet's orbit for its surface fades from
         // its space into its day. Two backdrops drawn, one cross-fade, no switch.
-        if (globe && portal.Valid() && opt.drosteLight == 1 && !marsMode && !opt.albedo) {
+        if (globe && portal.Valid() && portalDecl.lighting == 1 && !marsMode && !opt.albedo) {
             const double C[3] = {cam.px, cam.py, cam.pz};
             const droste::GroundField gf = droste::Grounds(portal, camLevel, C);
             const float W = static_cast<float>(gf.W);
@@ -2731,11 +2525,11 @@ bool FrameLoop::Frame() {
         const double g = groundAt(cam.px, cam.pz);
         PROF_END(6);
         if (cam.py < g + 1.2) cam.py = g + 1.2;
-        const float viewH = opt.headless ? static_cast<float>(opt.height)
+        const float viewH = S.capture.headless ? static_cast<float>(S.capture.height)
                                          : static_cast<float>(
                                                std::max(1u, window.Height()));
         const float aspect =
-            (opt.headless ? static_cast<float>(opt.width) : window.Width()) / viewH;
+            (S.capture.headless ? static_cast<float>(S.capture.width) : window.Width()) / viewH;
         globe->WalkReset();
         resMgr.WantStatsReset();
         // M6e screw-prefetch: extrapolate the pose ~0.8 s ahead along its own screw and
@@ -2778,7 +2572,7 @@ bool FrameLoop::Frame() {
         PROF_BEGIN();
         globe->SetView(cam, aspect, viewH, simUnix - startUnix);
         PROF_END(7);
-        if (!opt.rail.empty() && frame >= 150u) {
+        if (!S.railDirW.empty() && frame >= 150u) {
             walkNodesAcc += globe->walkNodes;
             walkLeavesAcc += globe->walkLeaves;
             walkWantNsAcc += globe->walkWantNs;
@@ -2837,8 +2631,9 @@ bool FrameLoop::Frame() {
     PROF_END(9);
     // M7k: arm the programmatic .wpix capture so it records the run's LAST warm
     // frames -- every pass named by its state-diagram node.
-    if (opt.pixFrames > 0 && opt.frames > 0 && opt.frames + (opt.rail.empty() ? 0u : 150u) >= opt.pixFrames + 4 &&
-        frame + opt.pixFrames + 4 == opt.frames + (opt.rail.empty() ? 0u : 150u)) {
+    const uint32_t capEnd = S.capture.frames + (S.railDirW.empty() ? 0u : 150u);
+    if (opt.pixFrames > 0 && S.capture.frames > 0 && capEnd >= opt.pixFrames + 4 &&
+        frame + opt.pixFrames + 4 == capEnd) {
         PixGpuCaptureFrames(L"gagame.wpix", opt.pixFrames);
         pixArmed = true;
     }
@@ -2931,13 +2726,22 @@ bool FrameLoop::Frame() {
     // --gpu-time rows are labelled like the [rail] series: a rail's 150 settle frames
     // are negative and excluded from the statistics.
     renderer.gpuFrameLabel =
-        static_cast<int64_t>(frame) - (opt.rail.empty() ? 0 : 150);
+        static_cast<int64_t>(frame) - (S.railDirW.empty() ? 0 : 150);
     // --settle-sync reads the ring gate's hold count for THIS frame's wants here;
     // ProcessQueues zeroes it inside RenderFrame.
     // (M9bi's sun placement moved to the top of the frame's housekeeping in M10: the
     // globe's level table carries the sun, and the walk that fills it runs before here.)
     const uint32_t ringHeldBefore = resMgr.ringHeldFrame;
-    renderer.RenderFrame(cam, static_cast<float>(simUnix - startUnix), dt);
+    // M12 step 5b: THE VIEWS SEAM. The renderer records a LIST of views in file order and the
+    // session hands it one, built here rather than inside RenderFrame so that the day a scene
+    // carries two the loop appends the second and the renderer does not change. The View is
+    // the RENDER's input; the session's Camera is still the state, and every other reader in
+    // this loop -- the predicted pose and the globe's walk, the pickers, the chase camera, the
+    // gravity-up and speed clamps, the Droste gauge, the bank's centre, the exposure and GIS
+    // probes -- still reads `cam` directly (5d moves them, with the scene wired).
+    const scene::ViewSet viewSet =
+        renderer.OneView(cam, static_cast<float>(simUnix - startUnix));
+    renderer.RenderFrame(viewSet);
     // --bench-overlap keeps the overlap: RENDER is then record + the BeginFrame fence
     // wait, and the loop mean is the pipelined max(CPU, GPU) a player's frame costs.
     if (opt.bench && !opt.benchOverlap) gpu.WaitIdle();
@@ -2966,14 +2770,14 @@ bool FrameLoop::Frame() {
         }
     }
 
-    if (!opt.rail.empty() && frame >= 150u && opt.bench) {
+    if (!S.railDirW.empty() && frame >= 150u && opt.bench) {
         // Bench records the timing and nothing else -- no readback, no encode, no disk.
         railMs.push_back(renderMs);
         loopRowOpen = true;   // closed by the next iteration's interval
         railPreMs.push_back(preMs);
         railPool.push_back(PoolCommittedBytes());
         railInMs.push_back(inMs);
-    } else if (!opt.rail.empty() && frame >= 150u) {
+    } else if (!S.railDirW.empty() && frame >= 150u) {
         if (recPipe.Open()) {
             uint32_t rowPitch = 0;
             if (renderer.DumpRaw(recPixels, &rowPitch)) {
@@ -2981,7 +2785,7 @@ bool FrameLoop::Frame() {
             }
         } else {
             wchar_t rp[512];
-            swprintf(rp, 512, L"%s\\rail_%04u.png", opt.rail.c_str(), frame - 150u);
+            swprintf(rp, 512, L"%s\\rail_%04u.png", S.railDirW.c_str(), frame - 150u);
             renderer.DumpPng(rp);
         }
         // Two clocks, because they answer different questions. renderMs is the engine
@@ -2995,7 +2799,7 @@ bool FrameLoop::Frame() {
         railInMs.push_back(inMs);
     }
 
-    if (!opt.headless &&
+    if (!S.capture.headless &&
         std::chrono::duration<float>(now - lastTitle).count() > 0.25f) {
         lastTitle = now;
         wchar_t title[512];
@@ -3015,16 +2819,16 @@ bool FrameLoop::Frame() {
     // --dump-both: the solid frame has just been rendered. Dump it, flip BOTH
     // surfaces to wireframe, and take one more lap -- the clock is held above, so
     // the second image is the same instant seen as lines.
-    if (opt.dumpBoth && !opt.dump.empty() && !dumpedSolid && opt.frames &&
-        frame == opt.frames + (opt.rail.empty() ? 0u : 150u)) {
-        renderer.DumpPng(opt.dump);
+    if (opt.dumpBoth && !S.dumpW.empty() && !dumpedSolid && S.capture.frames &&
+        frame == S.capture.frames + (S.railDirW.empty() ? 0u : 150u)) {
+        renderer.DumpPng(S.dumpW);
         dumpedSolid = true;
         if (globe) globe->surfaceDebug = 1;
         if (sea) sea->wireframe = true;
         return true;
     }
-    if (opt.frames &&
-        frame >= opt.frames + (opt.rail.empty() ? 0u : 150u) +
+    if (S.capture.frames &&
+        frame >= S.capture.frames + (S.railDirW.empty() ? 0u : 150u) +
                      (opt.dumpBoth ? 1u : 0u)) {
         // --settle-sync: the frame just rendered is the dump frame's instant. Judge it
         // AFTER its RenderFrame (ProcessQueues has mapped, copied and re-uploaded the
@@ -3042,8 +2846,8 @@ bool FrameLoop::Frame() {
         // of one binary at the bird), and two stills held for different numbers of
         // frames are not like for like until the churn is frozen through the hold
         // (it is, below).
-        if ((opt.settleSync || opt.settleHold || opt.settleExact) && !opt.dump.empty() &&
-            opt.headless && !opt.dumpBoth) {
+        if ((S.capture.settle.sync || S.capture.settle.hold || S.capture.settle.exact) &&
+            !S.dumpW.empty() && S.capture.headless && !opt.dumpBoth) {
             const uint32_t pend = resMgr.PendingCount();
             const uint32_t reads = resMgr.InFlightReads();
             const bool quiet = pend == 0 && reads == 0 && ringHeldBefore == 0;
@@ -3054,10 +2858,10 @@ bool FrameLoop::Frame() {
                 // Step 25: the manager's exact turn runs on every held frame from the
                 // next one on (this frame's turn was the shipped one) and never
                 // outside a hold.
-                resMgr.settleExact = opt.settleExact;
+                resMgr.settleExact = S.capture.settle.exact;
                 // --settle-clear-churn: the whole atlas onto the clear list; the next
                 // held frame's clear dispatch zeroes it and the freeze keeps it so.
-                if (opt.settleClearChurn && sea) {
+                if (S.capture.settle.clearChurn && sea) {
                     Log("[settle-clear-churn] %u resident churn tiles onto the clear "
                         "list at the first held frame",
                         sea->ClearChurn());
@@ -3075,16 +2879,16 @@ bool FrameLoop::Frame() {
             // requires that no prefill is in flight.
             const bool prefillIdle = !wavePrefillBusy.load(std::memory_order_acquire);
             settleExactQuiet =
-                (opt.settleExact && ex.exact && prefillIdle) ? settleExactQuiet + 1 : 0;
+                (S.capture.settle.exact && ex.exact && prefillIdle) ? settleExactQuiet + 1 : 0;
             // The drain's give-up cap bounds the DRAIN, never the counted hold: a run
             // asked for N frames gets N whatever the residency is doing.
             const bool drainHolds =
-                opt.settleSync && settleQuiet < kSettleQuietFrames &&
+                S.capture.settle.sync && settleQuiet < kSettleQuietFrames &&
                 settleFrames < kSettleCapFrames;
             const bool exactHolds =
-                opt.settleExact && settleExactQuiet < kSettleExactFrames &&
+                S.capture.settle.exact && settleExactQuiet < kSettleExactFrames &&
                 settleFrames < kSettleCapFrames;
-            const bool countHolds = settleFrames < opt.settleHold;
+            const bool countHolds = settleFrames < S.capture.settle.hold;
             if (drainHolds || exactHolds || countHolds) {
                 ++settleFrames;
                 if (settleFrames % 150u == 0u) {
@@ -3092,7 +2896,7 @@ bool FrameLoop::Frame() {
                         "in-flight reads %u, ring-held %u, pool %.0f MB",
                         settleFrames, pend, reads, ringHeldBefore,
                         PoolCommittedBytes() / 1048576.0);
-                    if (opt.settleExact) {
+                    if (S.capture.settle.exact) {
                         Log("[settle-exact] +%u: wanted %u, mapped %u, deficit %u, "
                             "unreachable %u, stale %u, dropped this turn %u, retiring "
                             "%u, exact for %u turns",
@@ -3103,7 +2907,7 @@ bool FrameLoop::Frame() {
                 }
                 return true;
             }
-            if (opt.settleExact) resMgr.LogSettleExact(settleFrames);
+            if (S.capture.settle.exact) resMgr.LogSettleExact(settleFrames);
             // MEASURED (helm still, 14:00, 2026-09-05): with the predicted walk running
             // through the hold, pending hit 0 within 300 frames yet was never quiet four
             // frames running in 3000; with it suspended (this code), 149 tiles stay
@@ -3129,13 +2933,15 @@ bool FrameLoop::Frame() {
             // is part of it and a second field integrated over the real frames is the
             // rest; the still is exact in residency and not yet in history.
             const char* rule =
-                opt.settleExact
-                    ? (opt.settleHold ? "exact, then --settle-hold" : "--settle-exact, judged")
-                : opt.settleSync
-                    ? (opt.settleHold ? "drain, then --settle-hold" : "--settle-sync, judged")
+                S.capture.settle.exact
+                    ? (S.capture.settle.hold ? "exact, then --settle-hold"
+                                             : "--settle-exact, judged")
+                : S.capture.settle.sync
+                    ? (S.capture.settle.hold ? "drain, then --settle-hold"
+                                             : "--settle-sync, judged")
                     : "--settle-hold, counted";
-            const bool drained = !opt.settleSync || settleQuiet >= kSettleQuietFrames;
-            const bool exact = !opt.settleExact || settleExactQuiet >= kSettleExactFrames;
+            const bool drained = !S.capture.settle.sync || settleQuiet >= kSettleQuietFrames;
+            const bool exact = !S.capture.settle.exact || settleExactQuiet >= kSettleExactFrames;
             Log("[settle-sync] dump frame held %u extra frames at the same instant (%s): "
                 "pending %u -> %u, in-flight reads %u -> %u, quiet for %u frames, exact "
                 "for %u turns, pool %.0f MB%s%s",
@@ -3350,7 +3156,7 @@ bool FrameLoop::Frame() {
             // "was it smooth"; only the series answers "where did it stop being smooth",
             // and that question is the reason to record at all.
             std::string csv;
-            for (const wchar_t* w = opt.rail.c_str(); *w; ++w) {
+            for (const wchar_t* w = S.railDirW.c_str(); *w; ++w) {
                 csv.push_back(static_cast<char>(*w));   // rail dirs are ASCII
             }
             csv += "\\metrics.csv";
@@ -3420,14 +3226,14 @@ bool FrameLoop::Frame() {
             }
         }
         if (opt.dumpFibers && waterBank) waterBank->DumpFibers(gpu);
-        if (opt.dumpWater && !marsMode && sea) {
+        if (S.Tool("dump-water-state") && !marsMode && sea) {
             tools::RunDumpWaterState(opt, gpu, sea, simUnix, weather);
         }
-        if (opt.twinSurface && !marsMode && sea && waterBank) {
+        if (S.Tool("twin-surface") && !marsMode && sea && waterBank) {
             tools::RunTwinSurface(opt, gpu, seaState, sea, waterScene, waterBank, cam,
                                   simUnix, weather, waveField);
         }
-        if (opt.trace && !marsMode && sea && waterBank) {
+        if (S.Tool("trace") && !marsMode && sea && waterBank) {
             tools::RunTrace(opt, gpu, sea, compositor, hgtCh, waterAtlas, waterBank, globe,
                             resMgr, winOrgX, winOrgY, hgtTenant, hgtWinTenant, simUnix,
                             weather);
@@ -3439,6 +3245,7 @@ bool FrameLoop::Frame() {
 
 int FrameLoop::Finish() {
     const Options& opt = m_opt;
+    const Scene& S = m_S;
     auto& window = m_A.window;
     auto& gpu = m_A.gpu;
     auto& renderer = m_A.renderer;
@@ -3454,7 +3261,7 @@ int FrameLoop::Finish() {
 
     // M12 step 4d instrument: the [droste] probe's totals over the run -- one line per site
     // (the per-build dumps are above: ProbeDrosteTable, ProbeDive, GlobeLayer::ProbeTransport).
-    if (m_portal.Valid()) {
+    if (m_portalNode.Valid()) {
         Log("[droste] probe totals: level table %llu builds (%llu distinct): cam %s | sigma %s | "
             "Q %s | level sun %s | sky up %s | camera sun %s",
             static_cast<unsigned long long>(m_probeTableBuilds),
@@ -3476,10 +3283,10 @@ int FrameLoop::Finish() {
     if (GpuProfiler* prof = renderer.Profiler()) {
         gpu.WaitIdle();
         prof->Drain();
-        prof->Report(opt.rail.empty() ? -1 : 900);
-        if (!opt.rail.empty()) {
+        prof->Report(S.railDirW.empty() ? -1 : 900);
+        if (!S.railDirW.empty()) {
             std::string csv;
-            for (const wchar_t* w = opt.rail.c_str(); *w; ++w) {
+            for (const wchar_t* w = S.railDirW.c_str(); *w; ++w) {
                 csv.push_back(static_cast<char>(*w));
             }
             csv += "\\gpu_ms.csv";
@@ -3489,7 +3296,7 @@ int FrameLoop::Finish() {
     if (frameMsN > 30) {
         Log("[perf] mean frame %.2f ms over %u frames (%.0f fps)%s", frameMsSum / frameMsN,
             frameMsN, 1000.0 / (frameMsSum / frameMsN),
-            opt.headless ? "" : (gpu.TearingEnabled() ? " [no-vsync, tearing]" : " [vsync]"));
+            S.capture.headless ? "" : (gpu.TearingEnabled() ? " [no-vsync, tearing]" : " [vsync]"));
     }
     // Step 5: the predicted request stream's hash, every run (Residency.h): two runs of
     // the same flight that print different hashes asked the manager for different tiles.
@@ -3501,7 +3308,7 @@ int FrameLoop::Finish() {
     }
     // Windowed: what the panel actually showed -- presents per refresh beside [perf]'s
     // loop mean, which cannot see a present that was skipped.
-    if (!opt.headless) gpu.ReportPresentStats();
+    if (!S.capture.headless) gpu.ReportPresentStats();
     // M7l: THE DEBUG SESSION REPORT -- the free byproducts, printed every run: what the
     // diagram holds, what the compositor did, what streaming did. The gates print their
     // own PASS lines under --selftest; the trace and fibers print theirs when asked.
@@ -3511,23 +3318,23 @@ int FrameLoop::Finish() {
         compositor.painted.load(), compositor.cacheHits.load(),
         resMgr.fetchesThisRun, resMgr.PendingCount());
 
-    if (opt.seaVerify && sea) tools::RunSeaVerify(opt, gpu, sea);
-    if (!opt.dump.empty()) {
+    if (S.Tool("sea-verify") && sea) tools::RunSeaVerify(opt, gpu, sea);
+    if (!S.dumpW.empty()) {
         if (dumpedSolid) {
             // out.png already holds the solid frame; this pass is the wireframe twin.
-            std::wstring wp = opt.dump;
+            std::wstring wp = S.dumpW;
             const size_t dot = wp.find_last_of(L'.');
             wp = (dot == std::wstring::npos) ? wp + L"_wire"
                                              : wp.substr(0, dot) + L"_wire" + wp.substr(dot);
             renderer.DumpPng(wp);
             Log("[dump] wrote %S (solid) + %S (wireframe, same instant)",
-                opt.dump.c_str(), wp.c_str());
+                S.dumpW.c_str(), wp.c_str());
         } else {
-            renderer.DumpPng(opt.dump);
+            renderer.DumpPng(S.dumpW);
         }
     }
     // The same frame's radiance before the tonemap (tools/imgdiff.py --hdr).
-    if (!opt.dumpHdr.empty()) renderer.DumpHdr(opt.dumpHdr);
+    if (!S.hdrW.empty()) renderer.DumpHdr(S.hdrW);
     if (!opt.dumpMeshlets.empty() && globe) globe->DumpMeshlets(opt.dumpMeshlets);
 
     gpu.WaitIdle();

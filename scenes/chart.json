@@ -1,0 +1,9 @@
+{
+  "_readme": [
+    "The M1 chart (M12 step 5a): what a bare `gagame` has always opened. Three keys over the",
+    "shipped scene -- `base` names scenes/merrimack.json as the scene this one INHERITS (loaded",
+    "first, so these keys win); everything else is that file's."
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {"name": "chart", "mode": "chart", "view": "chart"}
+}

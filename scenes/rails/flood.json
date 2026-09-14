@@ -1,0 +1,77 @@
+{
+  "_readme": "The flood ride (--rail-flood, the storm rail): orbit to the throat, ending at a helm mid-channel west of the gap. M6s.",
+  "name": "flood",
+  "tower": false,
+  "poses": [],
+  "segments": [
+    {
+      "kind": "keys",
+      "duration": 0,
+      "levels": 0,
+      "from": 0,
+      "up": "none",
+      "keys": [
+        {"t": 0, "view": "orbit", "pose": ""},
+        {
+          "t": 8,
+          "at": {
+            "lat": 41.9,
+            "lon": -71.6,
+            "alt": 800000,
+            "lookAt": {"lat": 42.8183, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 15,
+          "at": {
+            "lat": 42.55,
+            "lon": -70.98,
+            "alt": 80000,
+            "lookAt": {"lat": 42.8183, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 21,
+          "at": {
+            "lat": 42.74,
+            "lon": -70.87,
+            "alt": 7000,
+            "lookAt": {"lat": 42.8183, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 26,
+          "at": {"x": -1400, "alt": 1500, "z": 0, "az": 93, "pitch": -40},
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 32,
+          "at": {"x": -250, "alt": 9, "z": -15, "az": 92, "pitch": -2},
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 40,
+          "at": {"x": 120, "alt": 7, "z": -10, "az": 92.5, "pitch": -1.5},
+          "view": "",
+          "pose": ""
+        }
+      ],
+      "base": "",
+      "upOf": "",
+      "to": "",
+      "law": "dive",
+      "u0": 0,
+      "u1": 0,
+      "delay": 0,
+      "level": 0
+    }
+  ]
+}

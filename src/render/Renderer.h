@@ -52,6 +52,30 @@ struct SceneConstants {
 };
 static_assert(sizeof(SceneConstants) % 16 == 0, "SceneConstants must be 16-byte aligned");
 
+// M12 step 5b: THE INPUTS THE SCENE CONSTANTS ARE A PURE FUNCTION OF -- one view (a camera and
+// the target it draws into) and the scene-wide lighting and water the renderer carries. Named
+// so that the fill can be a FUNCTION instead of the first sixty lines of RenderFrame: a gate
+// can build one of these without a device (dxtest holds the frozen old fill against the live
+// one at the six recipe poses, byte for byte), and a second eye fills its own rows from its own
+// camera without reaching into the renderer. Renderer::FillInputs writes every field from the
+// renderer's own members; the initialisers below are inert.
+struct SceneFill {
+    const Camera* cam = nullptr;
+    float timeSec = 0.0f;
+    uint32_t width = 1, height = 1;
+    float heightScale = 0.0f, patchWidthM = 0.0f, patchHeightM = 0.0f, exposure = 0.0f;
+    bool sunPlaced = false;
+    float sunDirTangent[3] = {0.0f, 0.0f, 0.0f};
+    float sunAzimuthDeg = 0.0f, sunElevationDeg = 0.0f, sunAngRadiusDeg = 0.0f;
+    float sigmaW[3] = {0.0f, 0.0f, 0.0f};
+    float bscat[3] = {0.0f, 0.0f, 0.0f};
+    float waterLevel = 0.0f;
+};
+
+namespace scene {
+struct ViewSet;
+}
+
 struct RendererDesc {
     std::wstring shaderDir;
     float patchWidthM = 1000.0f;
@@ -78,7 +102,21 @@ public:
     void ReloadShaders();
 
     // Records and submits one frame. Presents when not headless.
+    //
+    // M12 step 5b, THE SEAM: the frame is a LIST of views, recorded in FILE ORDER into one
+    // command list. The residency wants are additive within a frame, so N walks in view order
+    // are the union of what the N views want, and the predicted-want hash folds call order --
+    // a second view always walks AFTER the main one. With one view this records what it
+    // recorded before the list existed.
+    void RenderFrame(const scene::ViewSet& views);
+    // The one-line forwarder for a caller that has a camera and one view.
     void RenderFrame(const Camera& cam, float timeSec, float dt);
+    // That one view, built from a camera exactly as RenderFrame built its constants.
+    scene::ViewSet OneView(const Camera& cam, float timeSec) const;
+    // THE FILL, static so it can read nothing but its inputs -- the gate's other half.
+    static void FillSceneConstants(const SceneFill& f, SceneConstants& out);
+    // This renderer's own inputs for one view (its target size, optics, sun, water).
+    SceneFill FillInputs(const Camera& cam, float timeSec) const;
 
     // Reads the tonemapped LDR result back and writes a PNG. Headless-safe.
     bool DumpPng(const std::wstring& path);

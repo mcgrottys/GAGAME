@@ -243,14 +243,25 @@ std::string TreeWater::Describe(double wx, double wz, double simUnix) const {
     double latDeg = 0.0, lonDeg = 0.0;
     LatLonOf(wx, wz, latDeg, lonDeg);
     const WeatherSample q = m_wx->Query(latDeg, lonDeg, simUnix, 1.0);
-    char buf[512];
+    // M12 step 5e: THE AGE IT READS (the freshness contract, scene/Entity.h). The level and
+    // the current above come from the solver's CPU mirror when a window holds one; this says
+    // what instant that mirror was read to, or that it never was -- in which case the level
+    // is the tide atlas alone and the current the GoMOFS field, whatever the solver knows.
+    const double asOf = m_wx->MirrorAsOf();
+    char age[96];
+    if (asOf <= WeatherManager::kNeverRead) {
+        snprintf(age, sizeof(age), "mirror never read (the analytic tide; no solved level or current)");
+    } else {
+        snprintf(age, sizeof(age), "mirror as of t=%.0f, %.1f s old", asOf, simUnix - asOf);
+    }
+    char buf[640];
     snprintf(buf, sizeof(buf),
              "water.tree @ (%.1f, %.1f) = %.5f/%.5f deg | bed %s | level %s | current %s | "
-             "wind %s | wWin %.3f | cascades %s | solved %s | exag %.3f",
+             "wind %s | wWin %.3f | cascades %s | solved %s | exag %.3f | %s",
              wx, wz, latDeg, lonDeg, q.bedSrc, q.levelSrc, q.currentSrc, q.windSrc,
              WindowWeight(wx, wz),
              (m_ocean && m_ocean->Ready()) ? "ready" : "ABSENT",
-             (m_wave && m_wave->Ready()) ? "ready" : "ABSENT", m_heightScale);
+             (m_wave && m_wave->Ready()) ? "ready" : "ABSENT", m_heightScale, age);
     return std::string(buf);
 }
 

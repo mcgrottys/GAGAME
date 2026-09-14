@@ -15,6 +15,7 @@ endif()
 add_executable(gagame
   src/main.cpp
   src/app/Options.cpp
+  src/app/Scene.cpp
   src/app/Assembly.cpp
   src/app/FrameLoop.cpp
   src/app/Tools/PackTiles.cpp
@@ -64,6 +65,20 @@ add_executable(gagame
   src/render/Renderer.cpp
   src/render/Camera.cpp
   src/scene/FieldSet.cpp
+  src/scene/Props.cpp
+  src/scene/Node.cpp
+  src/scene/Pose.cpp
+  src/scene/View.cpp
+  src/scene/SceneSchema.cpp
+  src/scene/SceneBuilder.cpp
+  src/scene/SceneReload.cpp
+  src/scene/SchemaDoc.cpp
+  src/scene/WaterComponent.cpp
+  src/scene/Rail.cpp
+  src/scene/Entity.cpp
+  src/scene/Portal.cpp
+  src/scene/effects/SlicePlane.cpp
+  src/scene/SceneTest.cpp
   src/scene/SkyLayer.cpp
   src/scene/TideLayer.cpp
   src/scene/SeaLayer.cpp

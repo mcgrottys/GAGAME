@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "_doc": "every registry's names, with the property schema of each type that has one; generated at boot beside docs/scene_schema.json (src/scene/SchemaDoc.cpp)",
+  "registries": [
+    { "registry": "component", "selects": "a typed node in `nodes[]` (scene/Component.h)", "names": [], "types": [
+    ] },
+    { "registry": "effect", "selects": "a paper visual in `effects[]` (scene/Effect.h)", "names": ["slice.plane"], "types": [
+      { "name": "slice.plane", "type": "slice.plane", "keys": [
+        { "key": "d", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0, "reload": "hot", "doc": "the cutaway plane's offset, world z (--slice)" }
+      ] }
+    ] },
+    { "registry": "layer", "selects": "a draw layer in `layers[]`, in registration order (scene/Layer.h)", "names": ["gis", "globe", "gulf", "markers", "sea", "sky", "terrain", "tide", "vessels", "waterbank"], "types": [
+      { "name": "gis", "type": "layer.plain", "keys": [
+      ] },
+      { "name": "globe", "type": "layer.plain", "keys": [
+      ] },
+      { "name": "gulf", "type": "layer.plain", "keys": [
+      ] },
+      { "name": "markers", "type": "layer.plain", "keys": [
+      ] },
+      { "name": "sea", "type": "layer.plain", "keys": [
+      ] },
+      { "name": "sky", "type": "layer.plain", "keys": [
+      ] },
+      { "name": "terrain", "type": "layer.plain", "keys": [
+      ] },
+      { "name": "tide", "type": "layer.tide", "keys": [
+        { "key": "exaggeration", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 60, "reload": "restart", "doc": "ribbon vertical exaggeration (--exagg)" }
+      ] },
+      { "name": "vessels", "type": "layer.plain", "keys": [
+      ] },
+      { "name": "waterbank", "type": "layer.plain", "keys": [
+      ] }
+    ] },
+    { "registry": "vessel", "selects": "a hull kind in `entities[].vessel` (sim/VesselSpec.h)", "names": ["box.test", "rhib.novurania18"], "types": [
+      { "name": "box.test", "display": "2 x 2 x 5 m test barge (analytic gate hull)", "ledger": [
+        { "key": "loa", "quantity": "length", "value": 5, "raw": 5, "unit": "m", "src": "DECLARED: this hull is a definition, not a measurement" },
+        { "key": "beam", "quantity": "length", "value": 2, "raw": 2, "unit": "m", "src": "DECLARED: this hull is a definition, not a measurement" },
+        { "key": "mass.dry", "quantity": "mass", "value": 2000, "raw": 2000, "unit": "kg", "src": "DECLARED: this hull is a definition, not a measurement" },
+        { "key": "mass.loaded", "quantity": "mass", "value": 2000, "raw": 2000, "unit": "kg", "src": "DECLARED: this hull is a definition, not a measurement" },
+        { "key": "inertia.roll", "quantity": "mass", "value": 1333.3333333333333, "raw": 1333.3333333333333, "unit": "kg", "src": "DERIVED: solid box, m/12 (B^2+H^2)" },
+        { "key": "inertia.pitch", "quantity": "mass", "value": 4833.333333333333, "raw": 4833.333333333333, "unit": "kg", "src": "DERIVED: solid box, m/12 (H^2+L^2)" },
+        { "key": "inertia.yaw", "quantity": "mass", "value": 4833.333333333333, "raw": 4833.333333333333, "unit": "kg", "src": "DERIVED: solid box, m/12 (B^2+L^2)" }
+      ] },
+      { "name": "rhib.novurania18", "display": "1998 Novurania 18' RHIB, twin Yamaha T50TLRW (High Thrust, 4-stroke)", "ledger": [
+        { "key": "loa", "quantity": "length", "value": 5.486400000000001, "raw": 18, "unit": "ft", "src": "Novurania 18 -- the model name IS the length" },
+        { "key": "beam", "quantity": "length", "value": 2.3, "raw": 2.3, "unit": "m", "src": "ASSUMED: typical overall beam for a trailerable 18 ft RHIB (2.2-2.4 m); no 1998 spec sheet found" },
+        { "key": "draft.static", "quantity": "length", "value": 0.3, "raw": 0.3, "unit": "m", "src": "ASSUMED: hull only, drives nothing -- the clip computes the real draught" },
+        { "key": "mass.dry", "quantity": "mass", "value": 650, "raw": 650, "unit": "kg", "src": "ASSUMED: ~430 kg GRP hull + Hypalon collar (1998 CSM is heavier than modern PVC) + 220 kg engines" },
+        { "key": "mass.loaded", "quantity": "mass", "value": 900, "raw": 900, "unit": "kg", "src": "ASSUMED: + 250 kg of fuel, gear and two crew" },
+        { "key": "inertia.roll", "quantity": "mass", "value": 687.4883999999998, "raw": 687.4883999999998, "unit": "kg", "src": "DERIVED: radius of gyration 0.38 x beam (small-craft practice)" },
+        { "key": "inertia.pitch", "quantity": "mass", "value": 2441.3481, "raw": 2441.3481, "unit": "kg", "src": "DERIVED: radius of gyration 0.30 x LOA, aft-loaded by the engines" },
+        { "key": "inertia.yaw", "quantity": "mass", "value": 2441.3481, "raw": 2441.3481, "unit": "kg", "src": "DERIVED: radius of gyration 0.30 x LOA" },
+        { "key": "added.surge", "quantity": "mass", "value": 45, "raw": 45, "unit": "kg", "src": "ASSUMED: 5% of displacement (fine entry)" },
+        { "key": "added.sway", "quantity": "mass", "value": 720, "raw": 720, "unit": "kg", "src": "ASSUMED: 80% -- broadside, the classic figure" },
+        { "key": "added.heave", "quantity": "mass", "value": 495.00000000000006, "raw": 495.00000000000006, "unit": "kg", "src": "ASSUMED: 55% for a deep-V at rest" },
+        { "key": "added.roll", "quantity": "mass", "value": 171.87209999999996, "raw": 171.87209999999996, "unit": "kg", "src": "ASSUMED: 25% of dry roll" },
+        { "key": "added.pitch", "quantity": "mass", "value": 732.40443, "raw": 732.40443, "unit": "kg", "src": "ASSUMED: 30% of dry pitch" },
+        { "key": "added.yaw", "quantity": "mass", "value": 732.40443, "raw": 732.40443, "unit": "kg", "src": "ASSUMED: 30% of dry yaw" },
+        { "key": "tube.port.0.tube.z0", "quantity": "length", "value": -2.745, "raw": -2.745, "unit": "m", "src": "DERIVED: five equal-ish chambers over LOA" },
+        { "key": "tube.port.0.tube.r0", "quantity": "length", "value": 0.25, "raw": 0.25, "unit": "m", "src": "ASSUMED: 0.50 m tube diameter, typical for an 18 ft RHIB of this era" },
+        { "key": "tube.port.1.tube.z0", "quantity": "length", "value": -1.5372000000000001, "raw": -1.5372000000000001, "unit": "m", "src": "DERIVED: five equal-ish chambers over LOA" },
+        { "key": "tube.port.1.tube.r0", "quantity": "length", "value": 0.25, "raw": 0.25, "unit": "m", "src": "ASSUMED: 0.50 m tube diameter, typical for an 18 ft RHIB of this era" },
+        { "key": "tube.port.2.tube.z0", "quantity": "length", "value": -0.3294, "raw": -0.3294, "unit": "m", "src": "DERIVED: five equal-ish chambers over LOA" },
+        { "key": "tube.port.2.tube.r0", "quantity": "length", "value": 0.25, "raw": 0.25, "unit": "m", "src": "ASSUMED: 0.50 m tube diameter, typical for an 18 ft RHIB of this era" },
+        { "key": "tube.port.3.tube.z0", "quantity": "length", "value": 0.8784000000000001, "raw": 0.8784000000000001, "unit": "m", "src": "DERIVED: five equal-ish chambers over LOA" },
+        { "key": "tube.port.3.tube.r0", "quantity": "length", "value": 0.25, "raw": 0.25, "unit": "m", "src": "ASSUMED: 0.50 m tube diameter, typical for an 18 ft RHIB of this era" },
+        { "key": "tube.port.4.tube.z0", "quantity": "length", "value": 1.8666000000000003, "raw": 1.8666000000000003, "unit": "m", "src": "DERIVED: five equal-ish chambers over LOA" },
+        { "key": "tube.port.4.tube.r0", "quantity": "length", "value": 0.25, "raw": 0.25, "unit": "m", "src": "ASSUMED: 0.50 m tube diameter, typical for an 18 ft RHIB of this era" },
+        { "key": "tube.stbd.0.tube.z0", "quantity": "length", "value": -2.745, "raw": -2.745, "unit": "m", "src": "DERIVED: five equal-ish chambers over LOA" },
+        { "key": "tube.stbd.0.tube.r0", "quantity": "length", "value": 0.25, "raw": 0.25, "unit": "m", "src": "ASSUMED: 0.50 m tube diameter, typical for an 18 ft RHIB of this era" },
+        { "key": "tube.stbd.1.tube.z0", "quantity": "length", "value": -1.5372000000000001, "raw": -1.5372000000000001, "unit": "m", "src": "DERIVED: five equal-ish chambers over LOA" },
+        { "key": "tube.stbd.1.tube.r0", "quantity": "length", "value": 0.25, "raw": 0.25, "unit": "m", "src": "ASSUMED: 0.50 m tube diameter, typical for an 18 ft RHIB of this era" },
+        { "key": "tube.stbd.2.tube.z0", "quantity": "length", "value": -0.3294, "raw": -0.3294, "unit": "m", "src": "DERIVED: five equal-ish chambers over LOA" },
+        { "key": "tube.stbd.2.tube.r0", "quantity": "length", "value": 0.25, "raw": 0.25, "unit": "m", "src": "ASSUMED: 0.50 m tube diameter, typical for an 18 ft RHIB of this era" },
+        { "key": "tube.stbd.3.tube.z0", "quantity": "length", "value": 0.8784000000000001, "raw": 0.8784000000000001, "unit": "m", "src": "DERIVED: five equal-ish chambers over LOA" },
+        { "key": "tube.stbd.3.tube.r0", "quantity": "length", "value": 0.25, "raw": 0.25, "unit": "m", "src": "ASSUMED: 0.50 m tube diameter, typical for an 18 ft RHIB of this era" },
+        { "key": "tube.stbd.4.tube.z0", "quantity": "length", "value": 1.8666000000000003, "raw": 1.8666000000000003, "unit": "m", "src": "DERIVED: five equal-ish chambers over LOA" },
+        { "key": "tube.stbd.4.tube.r0", "quantity": "length", "value": 0.25, "raw": 0.25, "unit": "m", "src": "ASSUMED: 0.50 m tube diameter, typical for an 18 ft RHIB of this era" },
+        { "key": "running.surface.deadrise", "quantity": "angle", "value": 0.3839724354387525, "raw": 22, "unit": "deg", "src": "ASSUMED: transom deadrise for a 1998 deep-V RHIB" },
+        { "key": "outboard.port.thrust.max", "quantity": "force", "value": 5400, "raw": 5400, "unit": "n", "src": "USER: T50TLRW is Yamaha HIGH THRUST -- ~11 kgf/hp static on a big low-pitch wheel, vs ~8 for a standard F50 leg" },
+        { "key": "outboard.port.prop.radius", "quantity": "length", "value": 0.1905, "raw": 0.1905, "unit": "m", "src": "USER: high-thrust leg swings a bigger wheel -- 15 in class" },
+        { "key": "gearcase.port.foil.area", "quantity": "1", "value": 0.055, "raw": 0.055, "unit": "1", "src": "ASSUMED: one gearcase + anti-ventilation plate in profile" },
+        { "key": "outboard.stbd.thrust.max", "quantity": "force", "value": 5400, "raw": 5400, "unit": "n", "src": "USER: T50TLRW is Yamaha HIGH THRUST -- ~11 kgf/hp static on a big low-pitch wheel, vs ~8 for a standard F50 leg" },
+        { "key": "outboard.stbd.prop.radius", "quantity": "length", "value": 0.1905, "raw": 0.1905, "unit": "m", "src": "USER: high-thrust leg swings a bigger wheel -- 15 in class" },
+        { "key": "gearcase.stbd.foil.area", "quantity": "1", "value": 0.055, "raw": 0.055, "unit": "1", "src": "ASSUMED: one gearcase + anti-ventilation plate in profile" },
+        { "key": "skeg.foil.area", "quantity": "1", "value": 0.05, "raw": 0.05, "unit": "1", "src": "ASSUMED: the HULL's keel skeg alone. The gearcases used to be lumped in here, on the centreline and fixed, which put their area in the wrong place and denied it to the helm -- they are their own steered foils now" }
+      ] }
+    ] },
+    { "registry": "loader", "selects": "a field file type (core/FieldLoader.h LoaderRegistry)", "names": ["f32", "json"] },
+    { "registry": "tool", "selects": "a one-shot mode in `tools[]` (--tool name[:args])", "names": ["bathy-map", "dump-water-state", "export", "fidelity-map", "gis-dump", "load-field", "ocean-probe", "pack-tiles", "pack-trees", "sea-verify", "selftest", "swe-cycle", "swe-uv", "trace", "tree-audit", "twin-surface", "warm-inlet", "warm-trees", "water-map", "wave-map"] }
+  ]
+}

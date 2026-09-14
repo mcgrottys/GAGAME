@@ -20,8 +20,10 @@
 #include "app/Assembly.h"
 #include "app/FrameLoop.h"
 #include "app/Options.h"
+#include "app/Scene.h"
 #include "app/Tools.h"
 #include "compose/SurfaceFrame.h"
+#include "scene/SceneBuilder.h"
 #include "sim/GlobeModel.h"
 
 #include <exception>
@@ -38,6 +40,10 @@ int main(int argc, char** argv) {
     ga::threadaudit::SetMainThread();
     try {
         const Options opt = ParseArgs(argc, argv);
+        // M12 step 5a: the scene's front door. --print-scene resolves the flags' scene form
+        // (Options::ToSets over scenes/*.json, app/Options.cpp) and prints it -- before the
+        // pool, the boot line and any device work; a refusal is exit 2 with the reason.
+        if (opt.printScene) return PrintScene(opt, argc, argv);
         if (opt.threadAudit) ga::threadaudit::Enable();
         // The process pool, before anything can submit to it. Everything that used to spawn its
         // own threads is a client of this (core/ThreadManager.h).
@@ -55,27 +61,62 @@ int main(int argc, char** argv) {
             Log("[boot] gagame rev %s | argv: %s", BuildGitRev(), args.c_str());
         }
 
+        // ---- M12 step 5d: THE SCENE, RESOLVED ONCE (app/Scene.h). The flags reach it through
+        // the same shim --print-scene prints (Options::ToSets -> SceneBuilder: defaults < the
+        // base file < each include overlay < every --set, in order), so `gagame <flags>` and
+        // `gagame <the scene file those flags print>` resolve to ONE document -- and from here
+        // down the boot reads THAT, not the flags. A refusal is exit 2, naming the path.
+        scene::SceneBuilder builder;
+        SceneArgs sargs;
+        std::string why;
+        if (!BuildScene(opt, builder, sargs, &why)) {
+            Log("FATAL: [scene] refused: %s", why.c_str());
+            return 2;
+        }
+        Scene S;
+        if (!ReadScene(builder.Resolved(), S, &why)) {
+            Log("FATAL: [scene] refused: %s", why.c_str());
+            return 2;
+        }
+        S.path = sargs.scene;
+        {
+            std::string order;
+            for (const std::string& n : S.LayerOrder()) order += (order.empty() ? "" : " ") + n;
+            Log("[scene] %s -> '%s': mode %s, planet %s, start view '%s'; layers: %s",
+                S.path.c_str(), S.scene.name.c_str(),
+                S.scene.mode == Scene::kWorld ? "world"
+                : S.scene.mode == Scene::kGulf ? "gulf" : "chart",
+                S.scene.planet.c_str(), S.scene.view.c_str(), order.c_str());
+            for (const std::string& r : sargs.raw) {
+                Log("[scene] raw instrument, not scene data: %s", r.c_str());
+            }
+        }
+        // A one-shot mode is a TOOL, named in the document, whether the flag or --tool said it
+        // (Options::ToSets writes both into `tools`). Its arguments stay the flag's.
+        Options topt = opt;
+        ToolArgs(S, topt);
+
         // M12 step 4a: a disk job with no scene; the shipped surface's declaration (its
         // realization tags) is all the packer reads.
-        if (opt.packTiles) {
-            return tools::RunPackTiles(opt, SurfaceFrame::Merrimack(GlobeModel::kR, false));
+        if (S.Tool("pack-tiles")) {
+            return tools::RunPackTiles(topt, SurfaceFrame::Merrimack(GlobeModel::kR, false));
         }
 
         // ---- M0 + M4: the self-test path needs a device and the shader compiler, nothing else.
-        if (!opt.loadField.empty()) return tools::RunLoadField(opt);
+        if (!topt.loadField.empty()) return tools::RunLoadField(topt);
 
-        if (opt.selftest) return tools::RunSelfTest(opt);
+        if (S.Tool("selftest")) return tools::RunSelfTest(topt);
 
         // ---- M12 step 1c: the scene, built as one object (app/Assembly.h). Its members
         // are the locals that used to stand here, under the same names, so what follows is
         // unchanged; the Assembly is declared before every session local and outlives them.
         int exitCode = 0;
-        auto A = Assemble(opt, exitCode);
+        auto A = Assemble(topt, S, exitCode);
         if (!A) return exitCode;
         // ---- M12 step 1d: the session and the frame loop as one object (app/FrameLoop.h),
         // declared AFTER the Assembly so it destructs first, as the session locals did before
         // the assembly locals. Run() is main()'s remaining span: Session(), the loop, Finish().
-        auto loop = std::make_unique<FrameLoop>(opt, *A);
+        auto loop = std::make_unique<FrameLoop>(topt, S, *A);
         return loop->Run();
     } catch (const std::exception& e) {
         Log("FATAL: %s", e.what());

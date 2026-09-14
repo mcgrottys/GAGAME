@@ -2,16 +2,27 @@
 //  Options - the command line, as a struct.
 //
 //  M12 step 1a: moved VERBATIM out of main.cpp so the parser is a unit of its own. Nothing here
-//  changed meaning; the flag -> field table is exactly main.cpp's at c27ea44. Step 5 turns every
-//  field into a scene-file property path (Options::ToSets) and the flags into a compatibility
-//  shim; until then this is the whole front door.
+//  changed meaning; the flag -> field table is exactly main.cpp's at c27ea44. Step 5a adds the
+//  scene front door beside it -- a positional scene file, --set, --tool, --print-scene -- and
+//  Options::ToSets, the PURE shim from these fields to the scene's property paths (the
+//  implication laws reproduced, the pure instruments listed as the raw flags they stay). ParseArgs
+//  survives verbatim as the parser; nothing in the engine reads the scene until step 5d.
 // ================================================================================================
 #pragma once
 
+#include "core/Json.h"
+
 #include <cstdint>
 #include <string>
+#include <vector>
+
+namespace ga::scene {
+class SceneBuilder;
+}
 
 namespace ga::app {
+
+struct SceneArgs;
 
 struct Options {
     uint32_t width = 1600, height = 900;
@@ -183,7 +194,40 @@ struct Options {
     bool railDrosteOut = false;       // --rail-droste-out DIR: in two levels, turn, fly out
     double drosteLevelSec = 16.0;     // --droste-level-sec s: rail seconds per level
     int drosteLevels = 3;             // --droste-levels n: how deep the dive rail goes
+    // ---- M12 step 5a: THE SCENE FRONT DOOR (scene/SceneBuilder.h). A positional scene file,
+    // --set a.b.c=value overrides in command-line order, --tool name[:args], and --print-scene
+    // (the resolved document to stdout, exit 0, before the pool, the boot line and any device
+    // work). Nothing in the engine reads the scene yet (step 5d wires Assemble and FrameLoop).
+    std::string scenePath;            // gagame scenes/x.json
+    std::vector<std::string> sets;    // --set a.b.c=value, in order
+    std::vector<std::string> tools;   // --tool name[:args]
+    bool printScene = false;          // --print-scene
+
+    // THE SHIM: the scene's spelling of these fields (Options.cpp, the banner there).
+    static SceneArgs ToSets(const Options& o);
 };
+
+// One property override: a path into the scene document and the JSON value assigned.
+struct SceneSet {
+    std::string path;    // "views.sea.at"
+    JsonValue value;
+};
+// What ToSets answers: a base scene, the overrides in order, the tools, the raw instruments.
+struct SceneArgs {
+    bool ok = true;
+    std::string why;                  // the refusal, when !ok (the --boat sentinel)
+    std::string scene;                // the base scene file
+    std::vector<SceneSet> sets;       // the property overrides, in order
+    std::vector<std::string> tools;   // the one-shot modes, "name[:args]"
+    std::vector<std::string> raw;     // the pure instruments, as the flags they stay
+};
+std::string SetText(const SceneSet& s);   // "path=value", for a log line
+// The scene the flags mean, folded (SceneBuilder) and validated; false with `why` naming the
+// path. M12 step 5d: the BOOT resolves through this too, so --print-scene and the run that
+// follows it cannot resolve differently.
+bool BuildScene(const Options& o, scene::SceneBuilder& b, SceneArgs& a, std::string* why);
+// --print-scene: the flags' scene form, folded, validated and printed; 0, or 2 with the reason.
+int PrintScene(const Options& o, int argc, char** argv);
 
 std::wstring Widen(const char* s);
 double NowUnix();

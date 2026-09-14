@@ -11,6 +11,7 @@
 #include "hal/Shader.h"
 #include "core/Space.h"
 #include "core/ThreadAudit.h"
+#include "scene/SceneBuilder.h"
 #include "hal/TileAtlas.h"
 #include "sim/RigidBody.h"
 #include "sim/SimClock.h"
@@ -38,6 +39,9 @@ int RunSelfTest(const Options& opt) {
     ok &= RunSimClockSelfTest();  // the scene clock: whole quanta, framing-independent
     ok &= RunRigidBodySelfTest();  // M9bq: the body with momentum -- L, T, moment arms
     ok &= RunVesselSelfTest();     // M9bq: the factory + the element laws
+    ok &= scene::RunSceneSelfTest();   // M12 step 5a: the scene's data structures -- the
+                                       // registry template, the property table, the fold with
+                                       // override, the placement sugar, the shim
     gpu.Shutdown();
     return ok ? 0 : 1;
 }
