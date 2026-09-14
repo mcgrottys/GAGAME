@@ -23,7 +23,7 @@ rerun. The Scriptorium MCP server rebuilds with
 ## launch-run — Running the sim
 
 Windowed (interactive): `gagame.exe --sea --one-water` — the one-water globe with the live
-Merrimack window. `--globe-cam lat,lon,altkm` starts at an orbit pose. Mars: `--mars`.
+Merrimack window. Every scene-shaped flag below is also a scene property (`launch-scenes`). `--globe-cam lat,lon,altkm` starts at an orbit pose. Mars: `--mars`.
 
 Headless render: `--headless --frames N --dump out.png` (dump implies headless; ~200+
 frames before judging visuals — residency and composed caches need warm-up; 80-frame
@@ -70,10 +70,58 @@ root). `--droste-at lat,lon,level`, `--droste-fill f` and `--droste-twist deg` m
 the link (under ~75° of twist the dive runs from 45° above the mouth instead of through the
 helm). The log names every re-root (`[droste] frame N: the nearest ground is now level k`).
 
+## launch-scenes — Scenes, recipes and tools (M12)
+
+A run is a SCENE. The flags above still work — they are one way to write a scene — but the
+engine resolves every launch into one document and boots from that (`docs/ARCHITECTURE.md` §4):
+
+```bat
+build\bin\gagame.exe [scene.json] [--set a.b.c=value ...] [--tool name[:args]] [instrument flags]
+```
+
+- **No file, no mode flag** → `scenes/chart.json` (the M1 chart). **A mode flag and no file**
+  (`--sea`, `--globe`, `--gulf`) → `scenes/merrimack.json`. **`--planet mars`** → `scenes/mars.json`.
+- **The fold:** struct defaults < the `base` file < each `include` overlay in order < every `--set`
+  in command-line order. `--set views.sea.fovY=40` edits one key; `--set views.sea.at={...}` replaces
+  the eye whole; `--set portals.droste.twistDeg=45` edits one portal by name.
+- **`--print-scene`** prints the resolved document and exits before the device. It is the round
+  trip: `gagame <flags> --print-scene > my.json`, then `gagame my.json` runs the same scene.
+- **Recipes** (`scenes/recipes/*.json`) are the recorded flag lines as complete documents, each line
+  kept in `_recipe`: `storm_rail`, `helm`, `helm_ebb`, `bird`, `key7km`, `globe`, `droste`,
+  `helm_boat`, `selftest`. The storm rail from its file, full length, with the in-process encode:
+
+```bat
+build\bin\gagame.exe scenes\recipes\storm_rail.json --set capture.frames=1200 --set capture.mp4=out\rail.mp4
+```
+
+  (The recipe keeps the gate's 300 frames; the legacy rail line resolves to 1200 recorded frames, so
+  set it back for a video.)
+- **Rails are files:** `scenes/rails/{classic,zoom,flood,jetty,mars,droste,droste-out}.json`,
+  selected by `rails.active` (the `--rail-*` flags set it). A rail is segments — `keys` (screw slerp
+  between poses), `spiral` (Sᵘ through the portal), `hold`, `turn` — and editing a copy is how a new
+  flight is authored.
+- **Entities, portals, effects** are named lists: `entities[]` (`vessel`, `at`, `controller`
+  helm|fixed, `throttle`, `steer`, `mirrorCadence` in seconds — 0 = never read the solver's mirror,
+  the shipped physics), `portals[droste]`, `effects[slice.plane]`.
+- **Hot reload:** every file the fold read, plus the active rail, is watched. Save one and the log
+  prints `[scene] reload: <files> <n> fields changed (<k> hot, <r> restart) FNV-1a <state>`; a key
+  marked `restart` in `docs/scene_schema.json` is reported and not applied, a removed key returns to
+  its default, and an unknown key refuses the whole reload with its path.
+- **Tools** are one-shot modes by name: `--tool selftest`, `--tool pack-tiles`, `--tool ocean-probe`,
+  ... (`docs/registries.json` lists all twenty); the legacy flags still reach the same tool.
+- **Instruments stay flags** and are never scene data: `--pix`, `--gpu-time`, `--bench`,
+  `--no-vsync`, `--res-trace`, `--lens`, `--stencil`, `--albedo`, `--viz`, the `--dump-*` probes.
+- **For tools that write scenes:** `docs/scene_schema.json` (every key's type, quantity, unit,
+  default, doc and hot|restart) and `docs/registries.json` (every nameable thing and its properties)
+  are rewritten at each boot from the engine's own tables.
+
 ## launch-verify — The verification loop (run before believing anything)
 
-- `--selftest` — the seven gates: pga, gatest (GA products + fold + frames + AST
-  validation), composetest, watertest, tiletest, atlastest, contracttest. All must PASS.
+- `--selftest` (or `--tool selftest`) — the fifteen gates, in run order: pga, dxtest (CB parity,
+  the sampler law, the mesh stage, the view list's scene constants), cga, droste, gatest (GA
+  products + fold + frames + AST validation), space (the frame calculus), composetest,
+  watertest, tiletest, atlastest, threadtest, simclock, rigid, vessel, scene (properties, the
+  fold, views, water, rails, entities, portals, effects, reload). All must PASS.
 - `--trace lat,lon` — THE HYPERVISOR: one sample walked through the whole one-water chain
   on the CPU, every transformation printed with its AST edge and frame. First tool when
   the water surprises you; validate against NOAA with the printed station numbers.

@@ -1664,3 +1664,49 @@ not a finer mask: the march is honest line-of-sight, and LOS is the wrong model 
 scale, because a 15 m obstacle cannot shadow a 100 m swell while Plum Island at 2 km can.
 Scale-aware blocking — an obstacle shadows only once it is wide against λ — deletes the
 halo, keeps the sheltered basin, and costs less.
+
+---
+
+## 24. M12 (2026-09-13 → 14): THE ENGINE UNFOLDED — one lattice, spaces as versors, scenes as files, a paved road under the layers
+
+**Why.** After M10 the engine did what it was for, and the next work was improvements, fixes and
+features. Each of those was harder than it should be: `main.cpp` was 6573 lines with a 4775-line
+`main()` owning ~120 locals, Direct3D leaked into every layer, the z14 window origin was a literal in
+nine places, the Droste portal had its own math, and every demo was a flag line. The owner's asks:
+split `main`, let the sparse tree's layers share their parent's projection unless they override it,
+a HAL that makes the sparse algebraic structures the easy default, a scene data structure (entities,
+views, portals, layers, properties in GA/CGA terms, not 4×4s), contracts for plugins and a future
+WPF/WinUI tool, and demos as scene files. The standing warning shaped every step: ask which algebra,
+not which matrix.
+
+**What landed**, one PR per step, every commit gated bit-identical or at a measured floor on six
+settled stills and the 300-frame storm rail, the per-tenant resident sets and predicted want streams
+strict, and a perf pair on every PR (all inside their spread):
+
+| step | PR | what |
+|---|---|---|
+| 0 | — | the gate harness: `tools/gate_stills.sh`, `tools/gate_compare.sh`, the measured A/A floors |
+| 1 | #21 | `main.cpp` → an app shell by pure motion: `Options`, the tools, `Assembly` (the lifetime law), `FrameLoop` (26 phases); `main.cpp` 6573 → 78 lines |
+| 2 | #22 (#24) | the frame calculus: `Lattice` (was `ColorFrame`), inheritance on the tree, `Space`/`Placement` (a similarity as rotor + scale with parity + translation, one fold, the common-ancestor rule); `spacetest` |
+| 3 | #23 (#24) | the HAL: every Direct3D name under `src/hal/`, `CommandContext`, pipeline builders, typed views, `Tenant` (the sparse default), `Retire`; `hal_lint` with an empty allowlist |
+| 4 | #25 | the one surface: `SurfaceFrame` declared once, kernel rows from the lattice, AST edges from declarations, the Droste tower as `Space::Cycle` with the power applied about its fixed point, `PageSample.hlsli`, one surface CB on `b2`, exact ground resolutions |
+| 5 | #26 | the scene: typed properties and the fold with override, views as a list, the water's one `Apply`, the boot reading the scene, entities/portals/rails/effects as nodes, whole-scene hot reload, the UI's two JSON contracts |
+| 6 | this change | this section, `docs/ARCHITECTURE.md`, the ALGEBRA `frames` addendum and priors 40–43, `launch-scenes`, the README layout |
+
+**What it makes easy.** A new demo is a scene file or a `--set` line. A new GPU field is a tenant
+declaration and inherits residency, the page table and the lattice. A new camera flight is a rail
+file. A new visualization is an effect with typed ports the AST validates. A second boat is a second
+node. A tool can edit a running scene's files and watch the log say what was applied.
+
+**Stated changes, each measured:** the hot-reload applies the same set as boot and a removed key
+reverts to its default (5c); `--boat` without a position is refused (5a); the ground-resolution
+literals became the lattice's exact values, page winning at equal resolution (4f, the owner's
+call); the settle hold waits for the wave prefill (1d).
+
+**Found on the way, reported rather than absorbed:** the hull never read the solved water in ordinary
+play (now a declared cadence, default off); `--globe-cam` without `--globe` never moved the camera (the
+"key7km" still is the jetty view); the Droste walk's near clip plane is NaN; a float overload inside
+the camera map (the correction held, because it re-quantizes the rail); a 5d rail-selection
+regression caught by the dive-rail gate in 5e; two reload defects caught by 5f's probe. The follow-ons
+are listed in `docs/ARCHITECTURE.md` §8: a second simultaneous view, instantiation at reload, the DLL
+loader, the settle-first hold.
