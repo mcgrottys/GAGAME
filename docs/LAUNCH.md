@@ -100,9 +100,18 @@ build\bin\gagame.exe scenes\recipes\storm_rail.json --set capture.frames=1200 --
   selected by `rails.active` (the `--rail-*` flags set it). A rail is segments — `keys` (screw slerp
   between poses), `spiral` (Sᵘ through the portal), `hold`, `turn` — and editing a copy is how a new
   flight is authored.
-- **Entities, portals, effects** are named lists: `entities[]` (`vessel`, `at`, `controller`
-  helm|fixed, `throttle`, `steer`, `mirrorCadence` in seconds — 0 = never read the solver's mirror,
-  the shipped physics), `portals[droste]`, `effects[slice.plane]`.
+- **Entities, portals, effects** are named lists: `entities[]` (`vessel`, `at` — its `az` is the
+  bow's heading, absent = north — `controller` helm|fixed, `throttle`, `steer`, `mirrorCadence` in
+  seconds — 0 = never read the solver's mirror, the shipped physics), `portals[droste]` (`lat`,
+  `lon`, `level`, `fill`, `twistDeg`, `lighting`, and the optional destination `toLat`/`toLon`: the
+  place the inner globe presents where the root shows the leaf), `effects[slice.plane]`.
+- **Play: the Haulover portal.** `build\bin\gagame.exe scenes\demos\haulover_portal.json` opens a
+  window at the helm of the RHIB in the Merrimack entrance, the Droste portal dead ahead with Baker's
+  Haulover Inlet on the face toward you. Helm: W/S throttles, A/D steer, Q/E split the levers,
+  Shift/Ctrl trim. T leaves the helm for the free camera (W A S D, Q/E down/up, right mouse to look,
+  wheel for speed) and returns to it; fly into the globe's west face and the frame re-roots over
+  Haulover at full scale. The boat cannot follow: the portal shrinks what enters it by 4.9 decades,
+  and only the camera's scale floats. The file's `_readme` carries the rest.
 - **Hot reload:** every file the fold read, plus the active rail, is watched. Save one and the log
   prints `[scene] reload: <files> <n> fields changed (<k> hot, <r> restart) FNV-1a <state>`; a key
   marked `restart` in `docs/scene_schema.json` is reported and not applied, a removed key returns to

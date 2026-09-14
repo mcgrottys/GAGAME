@@ -44,6 +44,18 @@ void Entity::Apply(const PropSet& props) {
 
 void Entity::SetSpawn(double x, double y, double z) {
     m_spawn = Motor::Translation(x, y, z);
+    m_spawnTurned = false;
+    m_spawnHeadingRad = 0.0;
+}
+
+void Entity::SetSpawn(double x, double y, double z, double headingDeg) {
+    // A hull is built bow along +z (north). The compass heading is a turn about +y, which takes
+    // +z toward +x (east) in Motor::Rotation's right-handed sense (RunPgaSelfTest pins it), then
+    // the translation to the spawn: one motor, the turn applied first.
+    const double o[3] = {0.0, 0.0, 0.0}, upY[3] = {0.0, 1.0, 0.0};
+    m_spawnTurned = true;
+    m_spawnHeadingRad = headingDeg * 3.14159265358979323846 / 180.0;
+    m_spawn = Motor::Translation(x, y, z) * Motor::Rotation(o, upY, m_spawnHeadingRad);
 }
 
 bool Entity::Spawn(const VesselRegistry& vesselReg) {
@@ -174,6 +186,7 @@ void Entity::ResetAtRest() {
         boat->Body().Rest();
         boatCtl = VesselControls{};
         boatPlaced = false;   // re-seat it on the new instant's surface
+        m_reseatKeepsYaw = true;   // ...facing the way it was
         Log("[vessel] time jumped -- hull reset to rest (a boat cannot be "
             "integrated across a scrub)");
     }
@@ -253,7 +266,26 @@ void Entity::Update(const FrameInfo& fi) {
             const double draft = (boat->Spec().draftStatic.v > 0.0)
                                      ? boat->Spec().draftStatic.v : -keel;
             const double y0 = ss.heightNavd - keel - draft;
-            boat->Body().SetPose(Motor::Translation(bp0[0], y0, bp0[2]));
+            // THE SEAT KEEPS THE HEADING (the Haulover portal demo, 2026-09-14). The set-down
+            // levels the hull at its draught; it never meant to turn it -- but a bare translation
+            // turned every hull to north, which nothing noticed while no spawn declared a heading
+            // and a time jump (which re-seats, "at its last pose") snapped a helmed boat north.
+            // First placement: the spawn's declared heading. A re-seat: the heading it had. A spawn
+            // that declared none, first placement: the translation alone, byte for byte as before
+            // (a composed identity turn could flip a zero's sign, and the telemetry prints it).
+            Motor seat = Motor::Translation(bp0[0], y0, bp0[2]);
+            if (m_reseatKeepsYaw || m_spawnTurned) {
+                double yaw = m_spawnHeadingRad;
+                if (m_reseatKeepsYaw) {
+                    double fx = 0.0, fy = 0.0, fz = 1.0;
+                    boat->Body().pose.TransformDir(fx, fy, fz);
+                    yaw = std::atan2(fx, fz);
+                }
+                const double o[3] = {0.0, 0.0, 0.0}, upY[3] = {0.0, 1.0, 0.0};
+                seat = seat * Motor::Rotation(o, upY, yaw);
+            }
+            m_reseatKeepsYaw = false;
+            boat->Body().SetPose(seat);
             boatPlaced = true;
             Log("[vessel] set down: surface %+.3f, keel %.3f below CG, draught %.2f "
                 "-> CG at %+.3f m NAVD", ss.heightNavd, -keel, draft, y0);

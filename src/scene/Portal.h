@@ -68,6 +68,23 @@ public:
     PortalProps& Declared() { return m_props; }
     const PortalProps& Declared() const { return m_props; }
     std::vector<std::string> Configure(const Observers& o);
+    // THE DESTINATION (the Haulover portal demo, 2026-09-14): the place the inner globe presents
+    // where the root shows this leaf. BuildPortal's rotation is ONE rotor, and it was the twist
+    // about north alone; with a destination it is the twist AFTER the shortest arc that carries
+    // the destination onto the leaf's own place. That is the whole change: the inner planet is
+    // the root, so an eye that dives into the inner globe at that spot and re-roots arrives at
+    // the destination at full scale. Without one, BuildPortal receives exactly the numbers it
+    // always did (absence is the identity, not a zero-length arc).
+    void SetDestination(double latDeg, double lonDeg);
+    bool HasDestination() const { return m_hasTo; }
+    // The rotor, as the axis and angle BuildPortal and Placement::Similar take: the shortest arc
+    // carrying `destPlanet` onto `leafPlanet` (both planet-frame radials, rotated into the tangent
+    // rows first), then `twistRad` about north. False, with the reason, when the destination is
+    // the leaf's antipode (every great circle is a shortest arc there).
+    static bool Carry(const double destPlanet[3], const double leafPlanet[3], const double east[3],
+                      const double up[3], const double north[3], double twistRad,
+                      double axisOut[3], double& angleOut, std::string* why);
+
     // BuildPortal from the declaration, and the cycle. False (and Valid() false) when the
     // scene has no tower: disabled, no globe, or Mars.
     bool Build();
@@ -79,6 +96,8 @@ public:
 
 private:
     PortalProps m_props;
+    bool m_hasTo = false;
+    double m_toLat = 0.0, m_toLon = 0.0;
     Observers m_o;
     droste::Portal m_link;
     Space m_cycle;

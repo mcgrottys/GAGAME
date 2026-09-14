@@ -101,6 +101,8 @@ public:
     const EntityProps& Declared() const { return m_props; }
     // The spawn in the FLAT world frame (the sugar's {x, alt, z}: a translation).
     void SetSpawn(double x, double y, double z);
+    // ...and the bow's compass heading when the sugar says one (`az`: 0 north, 90 east).
+    void SetSpawn(double x, double y, double z, double headingDeg);
     const Motor& Spawn() const { return m_spawn; }
     // The hull from the registry at the spawn: the session's boot block. False = not spawned.
     bool Spawn(const VesselRegistry& reg);
@@ -131,6 +133,12 @@ public:
 private:
     EntityProps m_props;
     Motor m_spawn;
+    // The heading the set-down seats the hull at: the spawn's declared `az` on its first
+    // placement, the heading it had on a re-seat after a time jump. A spawn that declared none
+    // is seated by the translation alone on its first placement, byte for byte as before.
+    bool m_spawnTurned = false;
+    double m_spawnHeadingRad = 0.0;
+    bool m_reseatKeepsYaw = false;
     Observers m_o;
     bool m_wired = false;
 

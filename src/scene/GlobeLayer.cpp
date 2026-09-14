@@ -1552,10 +1552,15 @@ void GlobeLayer::ProbeTransport(const TransportProbeRow* rows, int n) {
         fp = Fnv1aBytes(r.hand, sizeof r.hand, fp);
         fp = Fnv1aBytes(r.pulled, sizeof r.pulled, fp);
     }
+    // Distinct walks are counted and compared every time; their planes are PRINTED for the first
+    // kProbePrintCap (FrameLoop::ProbeDrosteTable's rule and reason: a moving camera walks a new
+    // set every frame). The totals line is over every walk.
+    static constexpr uint64_t kProbePrintCap = 16;
     const bool dump = fp != m_probeFp;
     m_probeFp = fp;
-    if (dump) {
-        ++m_probeDumps;
+    if (dump) ++m_probeDumps;
+    const bool print = dump && m_probeDumps <= kProbePrintCap;
+    if (print) {
         Log("[droste] transport walk %llu: %d planes over the extra levels -- hand (Q^T n, d / "
             "sigma) | pulled (PullPlane through the level's gauge)",
             static_cast<unsigned long long>(m_probeWalks), n);
@@ -1564,7 +1569,7 @@ void GlobeLayer::ProbeTransport(const TransportProbeRow* rows, int n) {
         const TransportProbeRow& r = rows[i];
         const std::string wN = UlpWord(r.hand, r.pulled, 3, m_probeN);
         const std::string wD = UlpWord(&r.hand[3], &r.pulled[3], 1, m_probeD);
-        if (!dump) continue;
+        if (!print) continue;
         Log("[droste] transport slot %u (rel %+d) plane %d hand: n %.17g %.17g %.17g d %.17g | "
             "pulled: n %.17g %.17g %.17g d %.17g | n %s d %s",
             r.slot, r.rel, r.plane, r.hand[0], r.hand[1], r.hand[2], r.hand[3], r.pulled[0],

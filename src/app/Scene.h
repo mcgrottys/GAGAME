@@ -50,6 +50,7 @@ struct SceneView {
 };
 struct ScenePortal {
     scene::PortalProps p;
+    bool hasTo = false;   // toLat AND toLon declared: the portal has a destination
 };
 struct SceneEntity {
     scene::EntityProps p;

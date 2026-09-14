@@ -384,6 +384,13 @@ const Schema& PortalSchema_() {
             .Bind("enabled", kPortal.enabled, "link the root under a leaf of itself (--droste)", R)
             .Bind("lat", kPortal.lat, Q::Angle, "deg", "the leaf's place (--droste-at)", R)
             .Bind("lon", kPortal.lon, Q::Angle, "deg", "the leaf's place", R)
+            .Bind("toLat", kPortal.toLat, Q::Angle, "deg",
+                  "the DESTINATION: the place the inner globe presents where the root shows this leaf "
+                  "(the root turned by the shortest arc carrying it onto the leaf's place, then twisted); "
+                  "with toLon; absent = the leaf's own place", R)
+            .Optional()
+            .Bind("toLon", kPortal.toLon, Q::Angle, "deg", "the destination's longitude (with toLat)", R)
+            .Optional()
             .Bind("level", kPortal.level, Q::Dimensionless, "1", "the quadtree level (16 = a 153 m leaf)", R)
             .Bind("fill", kPortal.fill, Q::Dimensionless, "1", "the inner globe's diameter / leaf span (--droste-fill)", R)
             .Bind("twistDeg", kPortal.twistDeg, Q::Angle, "deg", "the twist per level about north (--droste-twist)", R)
@@ -398,7 +405,7 @@ const Schema& EntitySchema_() {
         Schema* sc = new Schema("entity", &kEntity);
         sc->Bind("name", kEntity.name, "the entity's name", R)
             .Bind("vessel", kEntity.vessel, "the hull kind (VesselRegistry; --boat)", R)
-            .Bind("at", kEntity.at, "the spawn, in the flat world frame (--campos)", R)
+            .Bind("at", kEntity.at, "the spawn, in the flat world frame (--campos); `az` is the bow's compass heading (absent: north, as every hull always spawned)", R)
             .BindEnum("controller", kEntity.controller, {"helm", "fixed"},
                       "the keyboard helm, or fixed throttles and helm (--boat-drive)", H)
             .Bind("throttle", kEntity.throttle, Q::Dimensionless, "1", "fixed: every thruster's throttle", H)

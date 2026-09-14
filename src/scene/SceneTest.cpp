@@ -1863,6 +1863,74 @@ bool RunSceneSelfTest() {
             pm.marsMode = true;
             mars.Configure(pm);
             g.True(!mars.Build() && !mars.Valid(), "[portal] Mars has no tower");
+
+            // THE DESTINATION (the Haulover portal demo): the root turned by the shortest arc
+            // that carries the destination onto the leaf's place, then twisted. Its defining
+            // property: the destination lands on the inner globe exactly where the leaf's own
+            // place lands in the portal without one.
+            g.True(!node.HasDestination(), "[portal] a declared portal has no destination until one is set");
+            const double hLat = 25.8997, hLon = -80.1239;   // Baker's Haulover Inlet
+            Portal to;
+            to.Declared().name = "droste";
+            to.SetDestination(hLat, hLon);
+            to.Configure(po);
+            g.True(to.Build() && to.Valid() && to.HasDestination(), "[portal] a portal with a destination builds");
+            const droste::Portal& tl = to.Link();
+            g.Same(tl.s, ref.s, "[portal] a destination does not change the scale");
+            for (int k = 0; k < 3; ++k) {
+                g.Same(tl.centre[k], ref.centre[k], "[portal] ...nor where the inner globe rests (its centre)");
+            }
+            double hd[3], pd0[3];
+            GlobeModel::LatLonDir(hLat, hLon, hd);
+            GlobeModel::LatLonDir(42.81826, -70.80045, pd0);
+            int lf0 = 0;
+            uint32_t lix0 = 0, liy0 = 0;
+            GlobeLayer::LeafOf(pd0, 16, lf0, lix0, liy0);
+            double ld0[3];
+            GlobeLayer::LeafDir(lf0, 16, lix0, liy0, ld0);
+            auto rows = [&](const double v[3], double o[3]) {
+                o[0] = fr.east[0] * v[0] + fr.east[1] * v[1] + fr.east[2] * v[2];
+                o[1] = fr.up[0] * v[0] + fr.up[1] * v[1] + fr.up[2] * v[2];
+                o[2] = fr.north[0] * v[0] + fr.north[1] * v[1] + fr.north[2] * v[2];
+                const double n = std::sqrt(o[0] * o[0] + o[1] * o[1] + o[2] * o[2]);
+                for (int i = 0; i < 3; ++i) o[i] /= n;
+            };
+            double hT[3], lT[3];
+            rows(hd, hT);
+            rows(ld0, lT);
+            // The root's surface points, tangent frame (the planet's centre is (0, -R, 0)).
+            const double xH[3] = {R * hT[0], R * hT[1] - R, R * hT[2]};
+            const double xL[3] = {R * lT[0], R * lT[1] - R, R * lT[2]};
+            double imgH[3], imgL[3];
+            tl.Apply(1.0, xH, imgH);
+            ref.Apply(1.0, xL, imgL);
+            double gap = 0.0, onGlobe = 0.0;
+            for (int k = 0; k < 3; ++k) {
+                gap = (std::max)(gap, std::fabs(imgH[k] - imgL[k]));
+                onGlobe += (imgH[k] - tl.centre[k]) * (imgH[k] - tl.centre[k]);
+            }
+            g.Near(gap, 0.0, 1e-9, "[portal] the destination lands where the leaf's place lands without one (1e-9 m)");
+            g.Near(std::sqrt(onGlobe), tl.radius, 1e-9, "[portal] ...on the inner globe's surface");
+            // The arc alone turns the destination onto the leaf's place (QRotate, the motor's own).
+            double ax[3], ang = 0.0;
+            g.True(Portal::Carry(hd, ld0, fr.east, fr.up, fr.north, 0.0, ax, ang, nullptr),
+                   "[portal] Carry builds the arc");
+            {
+                const double sh = std::sin(0.5 * ang);
+                const double qArc[4] = {std::cos(0.5 * ang), sh * ax[0], sh * ax[1], sh * ax[2]};
+                double x = hT[0], y = hT[1], z = hT[2];
+                Motor::QRotate(qArc, x, y, z);
+                g.Near(std::fabs(x - lT[0]) + std::fabs(y - lT[1]) + std::fabs(z - lT[2]), 0.0, 1e-14,
+                       "[portal] the arc's rotor turns the destination's radial onto the leaf's");
+                const double arcDeg = std::acos(hT[0] * lT[0] + hT[1] * lT[1] + hT[2] * lT[2]) * 180.0 / kPiL;
+                g.Near(ang * 180.0 / kPiL, arcDeg, 1e-9, "[portal] ...by the great-circle angle between them");
+            }
+            g.True(ang > 0.0 && ang <= kPiL, "[portal] the rotation is the principal branch (0, pi]");
+            const double antiPlanet[3] = {-ld0[0], -ld0[1], -ld0[2]};
+            std::string awhy;
+            g.True(!Portal::Carry(antiPlanet, ld0, fr.east, fr.up, fr.north, 0.0, ax, ang, &awhy) &&
+                       awhy.find("antipode") != std::string::npos,
+                   "[portal] the leaf's antipode is refused, with the reason");
         }
 
         // (C) THE EFFECT: the slice plane's edge registered and validated with the rest of the AST.
@@ -1892,6 +1960,29 @@ bool RunSceneSelfTest() {
         {
             Entity e;
             g.Same(e.Declared().mirrorCadence, 0.0, "[entity] mirrorCadence defaults to 0 = never (today's cost)");
+            // THE SPAWN HEADING: a spawn without `az` is the translation it always was (the bow
+            // north); with `az` the bow turns to that compass heading about the spawn point.
+            e.SetSpawn(120.0, 0.0, -10.0);
+            {
+                const Motor ref = Motor::Translation(120.0, 0.0, -10.0);
+                double a[8], b[8];
+                double r1[4], d1[4], r2[4], d2[4];
+                e.Spawn().Real(r1); e.Spawn().Dual(d1); ref.Real(r2); ref.Dual(d2);
+                for (int k = 0; k < 4; ++k) { a[k] = r1[k]; a[4 + k] = d1[k]; b[k] = r2[k]; b[4 + k] = d2[k]; }
+                bool same = true;
+                for (int k = 0; k < 8; ++k) same = same && (a[k] == b[k]);
+                g.True(same, "[entity] a spawn without az is bitwise the translation it always was");
+            }
+            e.SetSpawn(120.0, 0.0, -10.0, 90.0);
+            {
+                double bx = 0.0, by = 0.0, bz = 1.0;   // the bow at build: +z
+                e.Spawn().TransformDir(bx, by, bz);
+                g.Near(std::atan2(bx, bz) * 180.0 / kPiL, 90.0, 1e-9, "[entity] az 90 turns the bow east (the telemetry's heading)");
+                double px = 0.0, py = 0.0, pz = 0.0;
+                e.Spawn().TransformPoint(px, py, pz);
+                g.Near(std::fabs(px - 120.0) + std::fabs(py) + std::fabs(pz + 10.0), 0.0, 1e-12,
+                       "[entity] ...about the spawn point, which stays where the sugar put it");
+            }
             g.True(!e.Active() && !e.Helming(), "[entity] a node without a hull is inert");
             const PropDecl* mc = EntitySchema().Find("mirrorCadence");
             g.True(mc && mc->quantity == Quantity::Time && mc->unit.toCanonical == 1.0,

@@ -221,6 +221,10 @@ struct PortalProps {
     std::string name;
     bool enabled = true;
     double lat = 42.81826, lon = -70.80045;
+    // THE DESTINATION: the place the inner globe presents where the root shows this leaf. Both
+    // keys are optional and read only when BOTH are declared (ScenePortal::hasTo) -- 0 N 0 E is a
+    // real place, so presence is carried beside the numbers, never inferred from them.
+    double toLat = 0.0, toLon = 0.0;
     int level = 16;
     double fill = 1.0, twistDeg = 90.0;
     int lighting = 0;                 // realistic | appealing

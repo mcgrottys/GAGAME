@@ -237,11 +237,26 @@ void FrameLoop::ProbeDrosteTable(const DrosteProbeRow* rows, int n, const double
         fp = Fnv1aBytes(&r.sigma2, sizeof r.sigma2, fp);
         fp = Fnv1aBytes(r.Q2, sizeof r.Q2, fp);
     }
+    // A DISTINCT table is counted and compared every time; its rows are PRINTED for the first
+    // kProbePrintCap only. A still builds one table, a flight builds one a frame -- and a camera
+    // flown by hand or chasing a hull, 20 lines of %.17g a frame through a flushed log, which a
+    // playable scene cannot carry (the Haulover portal demo, 2026-09-14). The totals line at the
+    // end of the run is the record, over every table.
+    static constexpr uint64_t kProbePrintCap = 16;
     const bool dump = fp != m_probeTableFp;
     m_probeTableFp = fp;
     const std::string wSun = UlpWord(sun, sun2, 3, m_probeSun);
     if (dump) {
         ++m_probeTableDumps;
+        if (m_probeTableDumps == kProbePrintCap + 1) {
+            Log("[droste] table %llu: the level tables are compared on every build from here; their "
+                "rows were printed for the first %llu (the totals at the end are over all of them)",
+                static_cast<unsigned long long>(m_probeTableDumps),
+                static_cast<unsigned long long>(kProbePrintCap));
+        }
+    }
+    const bool print = dump && m_probeTableDumps <= kProbePrintCap;
+    if (print) {
         Log("[droste] table build %llu (frame %u, camera level %d): %d levels -- the portal's "
             "closed forms | Level(rel) from the cycle; camera sun: portal %.17g %.17g %.17g | "
             "Level %.17g %.17g %.17g | %s",
@@ -256,7 +271,7 @@ void FrameLoop::ProbeDrosteTable(const DrosteProbeRow* rows, int n, const double
         const std::string wLs = UlpWord(r.sun, r.sun2, 3, m_probeLevelSun);
         const std::string wUp =
             r.hasSky ? UlpWord(r.skyUp, r.skyUp2, 3, m_probeSkyUp) : std::string("(none)");
-        if (!dump) continue;
+        if (!print) continue;
         Log("[droste] level %+d portal: cam %.17g %.17g %.17g sigma %.17g Q %.17g %.17g %.17g "
             "%.17g %.17g %.17g %.17g %.17g %.17g sun %.17g %.17g %.17g skyUp %.17g %.17g %.17g",
             r.rel, r.cam[0], r.cam[1], r.cam[2], r.sigma, r.Q[0][0], r.Q[0][1], r.Q[0][2],
@@ -335,6 +350,7 @@ std::optional<int> FrameLoop::Session() {
     // TreeWater), declared here and wired below where the session's objects exist.
     m_portalNode.Declared() = m_portalDecl.p;
     m_portalNode.enabled = m_portalOn;
+    if (m_portalDecl.hasTo) m_portalNode.SetDestination(m_portalDecl.p.toLat, m_portalDecl.p.toLon);
     for (const SceneEntity& decl : S.entities) {
         if (decl.p.vessel.empty()) continue;
         scene::PoseSugar es;
@@ -344,7 +360,13 @@ std::optional<int> FrameLoop::Session() {
             es.kind == scene::PoseSugar::Kind::Compass) {
             auto node = std::make_unique<scene::Entity>();
             node->Declared() = decl.p;
-            node->SetSpawn(es.x, es.alt, es.z);
+            // The bow's heading when the sugar declares `az`; a spawn that does not say one
+            // faces north (+z), the heading every hull has always been built at.
+            if (decl.at.Get("az")) {
+                node->SetSpawn(es.x, es.alt, es.z, es.az);
+            } else {
+                node->SetSpawn(es.x, es.alt, es.z);
+            }
             m_entities.push_back(std::move(node));
         } else {
             // The shim already refuses `--boat` without `--campos` (the 1e9 sentinel spawn); a
@@ -1437,6 +1459,16 @@ void FrameLoop::StepEntities(int quanta, float dt) {
         double p[3], f[3];
         m_followed->ChaseFrame(p, f);
         scene::View::Follow(m_startView.p.follow, p, f, m_cam);
+        // THE CHASE EYE'S LEVEL IS THE HULL'S. A camera belongs to the ground its SUBJECT would
+        // fall onto: the free eye is its own subject and re-roots with the Droste gauge; a chase
+        // eye's subject is the hull, which lives in the root's flat frame -- as do the vessel
+        // layer, the markers and the rings drawn around it. So the eye it places is a root eye
+        // (level 0), exactly as a tower rail writes the level of the pose it samples; the gauge
+        // step below does not move it. Found building the Haulover portal demo (2026-09-14):
+        // with a portal in the scene, a chase eye within a few metres of the inner globe
+        // re-rooted, the hull vanished from its own frame, and the next frame placed a root
+        // eye under an inner level's index.
+        m_camLevel = 0;
     }
 }
 
@@ -1959,7 +1991,8 @@ bool FrameLoop::Frame() {
     renderer.SunDir(sunRootF);
     float sunCamF[3] = {sunRootF[0], sunRootF[1], sunRootF[2]};
     if (portal.Valid() && mode == 1) {
-        for (int guard = 0; guard < 4; ++guard) {
+        // (The chase eye is the hull's and stays at its level: StepEntities.)
+        for (int guard = 0; guard < 4 && !helming(); ++guard) {
             const double C[3] = {cam.px, cam.py, cam.pz};
             const int step = droste::NearestLevel(portal, camLevel, C);
             if (step == 0) break;
@@ -2184,7 +2217,11 @@ bool FrameLoop::Frame() {
             const droste::GroundField gf = droste::Grounds(portal, camLevel, C);
             const double* gU = drosteRailUp ? drosteUp : gf.up;
             const double gn = std::sqrt(gU[0] * gU[0] + gU[1] * gU[1] + gU[2] * gU[2]);
-            if (gn > 1e-30) {
+            // ...and the up is the SUBJECT's too (StepEntities' law): a chase eye keeps the root
+            // planet's radial set above -- the hull's gravity -- rather than the field of the
+            // grounds around the EYE, which beside the inner globe tipped the horizon ~30 degrees
+            // while the hull ran level on its own sea (the Haulover portal demo's chase A/B).
+            if (gn > 1e-30 && !helming()) {
                 for (int i = 0; i < 3; ++i) cam.upHint[i] = static_cast<float>(gU[i] / gn);
             }
             const double lam = gf.lambda;

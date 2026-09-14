@@ -225,6 +225,16 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             r.Bool("enabled", p.p.enabled);
             r.F64("lat", p.p.lat);
             r.F64("lon", p.p.lon);
+            r.F64("toLat", p.p.toLat);
+            r.F64("toLon", p.p.toLon);
+            {
+                const bool hasLat = e.Get("toLat") != nullptr, hasLon = e.Get("toLon") != nullptr;
+                if (hasLat != hasLon) {
+                    return Refuse(why, "portals." + p.p.name +
+                                           ": a destination is a place -- declare toLat and toLon together");
+                }
+                p.hasTo = hasLat;
+            }
             r.I32("level", p.p.level);
             r.F64("fill", p.p.fill);
             r.F64("twistDeg", p.p.twistDeg);

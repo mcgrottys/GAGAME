@@ -1,0 +1,39 @@
+{
+  "_readme": [
+    "THE HAULOVER PORTAL -- a playable scene. You are at the helm of the Novurania 18 RHIB in the",
+    "Merrimack entrance on the afternoon ebb of 2026-08-28. Dead ahead, resting on the bed between",
+    "the jetty tips, is the Droste portal: the whole Earth as a 153 m globe, turned so the face",
+    "toward you is Baker's Haulover Inlet, Miami (toLat/toLon). The inner planet IS the root planet,",
+    "so an eye that dives in there re-roots at Haulover at full scale.",
+    "",
+    "Launch from the repo root:  build/bin/gagame.exe scenes/demos/haulover_portal.json",
+    "",
+    "HELM   W / S  both throttles ahead / astern      A / D  steer to port / starboard",
+    "       Q / E  split the levers (pivot)           Shift / Ctrl  trim out / in",
+    "T      leave the helm: the camera flies free (the boat keeps its throttles); T again returns",
+    "FLY    W A S D move, Q / E down / up, hold the right mouse button to look, wheel = speed.",
+    "       Fly into the globe's west face: the speed follows the distance to the nearest ground,",
+    "       and when that ground is the inner globe the frame re-roots -- you are over Haulover.",
+    "TIME   Space pause, Up / Down time x10 / /10, Left / Right nudge.   R reload shaders.",
+    "",
+    "Live edits: save this file while it runs. The portal's `lighting` (realistic | appealing) and the",
+    "water's closures apply at once; the sea state, the destination and the portal's place need a",
+    "restart, and the log says which. The boat itself cannot pass through: the portal shrinks what enters it by",
+    "4.9 decades, and only the camera's scale floats (docs/ARCHITECTURE.md section 8)."
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {"name": "haulover-portal", "mode": "world", "view": "sea"},
+  "time": {"start": "2026-08-28T19:30:00Z"},
+  "sea": {"storm": {"hs": 1.5, "tp": 8, "dir": 95}},
+  "views": [
+    {"name": "sea", "follow": {"target": "boat"}}
+  ],
+  "entities": [
+    {"name": "boat", "vessel": "rhib.novurania18", "at": {"x": 120, "alt": 0, "z": -10, "az": 86},
+     "controller": "helm"}
+  ],
+  "portals": [
+    {"name": "droste", "enabled": true, "toLat": 25.8997, "toLon": -80.1239, "twistDeg": 90,
+     "lighting": "appealing"}
+  ]
+}
