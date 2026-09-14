@@ -329,11 +329,14 @@ const Schema& ViewSchema_() {
     return *s;
 }
 
-const Schema& RailKeySchema() {
+const Schema& RailKeySchema_() {
     static const Schema* s = [] {
         Schema* sc = new Schema("rails.key", &kRailKey);
         sc->Bind("t", kRailKey.t, Q::Time, "s", "the key's time", R)
-            .Bind("at", kRailKey.at, "the key's pose", R);
+            .Bind("at", kRailKey.at, "the key's pose, in the placement sugar (rigid)", R)
+            .Optional()
+            .Bind("view", kRailKey.view, "the eye a named view declares (the orbit start)", R)
+            .Bind("pose", kRailKey.pose, "a named pose of the tower (scenes/rails/*.json poses)", R);
         return sc;
     }();
     return *s;
@@ -355,7 +358,7 @@ const Schema& RailsSchema() {
         sc->BindEnum("active", p.active,
                      {"none", "classic", "zoom", "flood", "jetty", "droste", "droste-out"},
                      "the rail flown (--rail, --rail-zoom, --rail-flood, --rail-jetty, --rail-droste[-out])", R)
-            .List("keys", &RailKeySchema(), "the keys, as data (step 5e moves the tables here)", false)
+            .List("keys", &RailKeySchema_(), "an authored keyed flight, inline (the shipped rails are scenes/rails/<active>.json)", false)
             .Nest("droste", DrosteRailSchema(), &p.droste, "the dive");
         return sc;
     }();
@@ -387,7 +390,9 @@ const Schema& EntitySchema_() {
             .BindEnum("controller", kEntity.controller, {"helm", "fixed"},
                       "the keyboard helm, or fixed throttles and helm (--boat-drive)", H)
             .Bind("throttle", kEntity.throttle, Q::Dimensionless, "1", "fixed: every thruster's throttle", H)
-            .Bind("steer", kEntity.steer, Q::Dimensionless, "1", "fixed: the commanded steering", H);
+            .Bind("steer", kEntity.steer, Q::Dimensionless, "1", "fixed: the commanded steering", H)
+            .Bind("mirrorCadence", kEntity.mirrorCadence, Q::Time, "s",
+                  "seconds between readbacks of the solver mirror the hull reads; 0 = never (the hull reads the analytic tide and the waves)", H);
         return sc;
     }();
     return *s;
@@ -403,7 +408,7 @@ const Schema& EffectSchema() {
     }();
     return *s;
 }
-const Schema& SlicePlaneSchema() {
+const Schema& SlicePlaneSchema_() {
     static const Schema* s = [] {
         Schema* sc = new Schema("slice.plane", &kSlice);
         sc->Bind("d", kSlice.d, Q::Length, "m", "the cutaway plane's offset, world z (--slice)", H);
@@ -464,6 +469,8 @@ const Schema& ViewSchema() { return ViewSchema_(); }
 const Schema& PortalSchema() { return PortalSchema_(); }
 const Schema& EntitySchema() { return EntitySchema_(); }
 const Schema& NodeSchema() { return NodeSchema_(); }
+const Schema& RailKeySchema() { return RailKeySchema_(); }
+const Schema& SlicePlaneSchema() { return SlicePlaneSchema_(); }
 
 const Schema& SceneFileSchema() {
     static const Schema* s = [] {
@@ -508,7 +515,7 @@ void RegisterBuiltinSceneTypes() {
     static bool done = false;
     if (done) return;
     done = true;
-    EffectSchemas().Register("slice.plane", [] { return &SlicePlaneSchema(); });
+    EffectSchemas().Register("slice.plane", [] { return &SlicePlaneSchema_(); });
     for (const char* name : {"sky", "sea", "terrain", "gulf", "waterbank", "globe", "gis",
                              "vessels", "markers"}) {
         LayerSchemas().Register(name, [] { return &EmptySchema(); });

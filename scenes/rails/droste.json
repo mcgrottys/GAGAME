@@ -1,0 +1,99 @@
+{
+  "_readme": "The dive (--rail-droste): the flood keys to the helm re-aimed at the fixed point, then the tower's spiral S^u(helm). M10.",
+  "name": "droste",
+  "tower": true,
+  "poses": [
+    {
+      "name": "helm",
+      "at": {"x": 120, "alt": 7, "z": -10, "az": 92.5, "pitch": -1.5},
+      "aim": "fixedPoint",
+      "standOffBelowTwistDeg": 75,
+      "standOff": [-300, 300, 0],
+      "turnOf": "",
+      "turnYaw": 0,
+      "turnPitch": 0
+    }
+  ],
+  "segments": [
+    {
+      "kind": "keys",
+      "duration": 40,
+      "levels": 0,
+      "from": 0,
+      "up": "gravity",
+      "keys": [
+        {"t": 0, "view": "orbit", "pose": ""},
+        {
+          "t": 8,
+          "at": {
+            "lat": 41.9,
+            "lon": -71.6,
+            "alt": 800000,
+            "lookAt": {"lat": 42.8183, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 15,
+          "at": {
+            "lat": 42.55,
+            "lon": -70.98,
+            "alt": 80000,
+            "lookAt": {"lat": 42.8183, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 21,
+          "at": {
+            "lat": 42.74,
+            "lon": -70.87,
+            "alt": 7000,
+            "lookAt": {"lat": 42.8183, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 26,
+          "at": {"x": -1400, "alt": 1500, "z": 0, "az": 93, "pitch": -40},
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 32,
+          "at": {"x": -250, "alt": 9, "z": -15, "az": 92, "pitch": -2},
+          "view": "",
+          "pose": ""
+        },
+        {"t": 40, "view": "", "pose": "helm"}
+      ],
+      "base": "",
+      "upOf": "",
+      "to": "",
+      "law": "dive",
+      "u0": 0,
+      "u1": 0,
+      "delay": 0,
+      "level": 0
+    },
+    {
+      "kind": "spiral",
+      "duration": 0,
+      "levels": 0,
+      "from": 0,
+      "up": "none",
+      "keys": [],
+      "base": "helm",
+      "upOf": "helm",
+      "to": "",
+      "law": "dive",
+      "u0": 0,
+      "u1": 0,
+      "delay": 2,
+      "level": 0
+    }
+  ]
+}

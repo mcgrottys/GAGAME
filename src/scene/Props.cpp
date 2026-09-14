@@ -446,6 +446,13 @@ bool ReadPoseSugar(const JsonValue& sugar, const std::string& path, PoseSugar& o
     return true;
 }
 
+bool ResolveMotorSugar(const JsonValue& sugar, const PoseFrame& frame, const std::string& path,
+                       Motor& out, std::string* why) {
+    SugarValues o;
+    if (!ReadSugar(sugar, path, o, why)) return false;
+    return ResolveMotor(o, frame, path, out, why);
+}
+
 // The default sugar for a value the code holds: the motor spelling for a rigid placement,
 // the similarity spelling otherwise (its fixed point and twist read back off the placement).
 static JsonValue MotorSugar(const Motor& m) {

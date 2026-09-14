@@ -21,7 +21,8 @@
 //
 //  FrameInfo carries the physics snapshot's `asOf` beside the clock -- the freshness contract
 //  ARCHITECTURE.md records (a consumer receives a coherent snapshot with a declared simulation
-//  time and a fallback policy); Entity::Update (step 5e) is its first consumer.
+//  time and a fallback policy) -- and the clock's whole quanta; Entity::Update (step 5e) is
+//  their first consumer (scene/Entity.h states the contract and its default).
 //
 //  LayerComponent (scene/LayerComponent.h) adapts an existing Layer UNCHANGED, so the nine
 //  layers are not edited in the seam steps; their bespoke setters are called from the owning
@@ -73,6 +74,10 @@ struct FrameInfo {
     double dt = 0.0;        // this frame's advance, seconds (0 when paused or held)
     uint32_t frame = 0;     // the frame index
     double asOf = 0.0;      // the physics snapshot's declared simulation time (the freshness contract)
+    // M12 step 5e: the scene clock's WHOLE quanta this frame (sim/SimClock.h, 240 Hz): what an
+    // integrating consumer steps, so a hull steps the same quanta from the windowed clock and
+    // the frame-indexed headless one (Entity::Update).
+    int quanta = 0;
 };
 
 // One view's recording. DECLARED here and defined in scene/ViewContext.h, where step 5b gave

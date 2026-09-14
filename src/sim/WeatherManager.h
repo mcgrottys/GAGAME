@@ -28,6 +28,7 @@
 #include "sim/SweSolver.h"
 #include "sim/TideModel.h"
 
+#include <cmath>
 #include <functional>
 #include <memory>
 #include <string>
@@ -107,6 +108,22 @@ public:
     // Every refresh logs its cost, so a per-frame reader added later announces itself.
     void RefreshMirrorsTo(Gpu& gpu, double simUnix);
 
+    // M12 step 5e: THE FRESHNESS CONTRACT (scene/Entity.h). The hull's evaluator (Query, through
+    // TreeWater) reads the mirror above, and in ordinary play nothing filled it -- the four
+    // tools were its only readers, so a hull read the analytic tide and the waves and never the
+    // solved level or current, with nothing saying so. Now a physics consumer DECLARES the
+    // cadence its snapshot may age by (the entity's mirrorCadence, seconds) and drives the
+    // refresh on it: RefreshOnCadence reads back a window whose mirror is older than the
+    // cadence, once per cadence and never per hull step; MirrorAsOf says the instant the
+    // mirrors are coherent at (FrameInfo::asOf; kNeverRead when none was read), which is what
+    // TreeWater::Describe reports as the age. 0 = NEVER is the default and what shipped: the
+    // effective cadence was infinite. RefreshMirrorsTo keeps the tools' own contract.
+    void SetMirrorCadence(double seconds);
+    double MirrorCadence() const { return m_cadence; }   // seconds; +inf = never
+    void RefreshOnCadence(Gpu& gpu, double simUnix);
+    double MirrorAsOf() const;
+    static constexpr double kNeverRead = -1.0e18;
+
     WeatherSample Query(double latDeg, double lonDeg, double unixT,
                         double groundResM = 500.0) const;
 
@@ -137,6 +154,8 @@ private:
         char currentTag[48] = {0};
     };
     static constexpr double kMirrorDt = 2.0;      // a mirror may lag the asking clock this much
+    double m_cadence = INFINITY;                  // M12 step 5e: the declared cadence; inf = never
+    void ReadMirrors(Gpu& gpu, double simUnix, double maxAge, bool onCadence);
     static constexpr double kActivateAltM = 30000.0;
     bool m_pinLogged = false;
 

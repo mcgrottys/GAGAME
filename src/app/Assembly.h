@@ -78,6 +78,7 @@
 #include "core/TileProviders.h"
 #include "core/SceneConfig.h"
 #include "scene/WaterComponent.h"
+#include "scene/effects/SlicePlane.h"   // M12 step 5e: the cutaway plane as an effect node
 #include "sim/BathyModel.h"
 #include "sim/GlobeModel.h"
 #include "sim/CurrentModel.h"
@@ -156,6 +157,10 @@ struct Assembly {
     // session Configures it once the layers exist and calls Apply at load; the frame loop calls
     // Reload, which calls the SAME Apply.
     scene::WaterComponent water;
+    // M12 step 5e: THE EFFECT NODE (scene/effects/SlicePlane.h) -- the cutaway plane owns the
+    // globe's sliceOn/sliceD and registers its AST edge; declared beside the water component
+    // for the same reason (observers only, no GPU object).
+    scene::SlicePlane slice;
     WaterBankLayer* waterBank = nullptr;
     WaterBankLayer* waterBankB = nullptr;   // M10: the outer level's rings (set B)
     GlobeLayer* globe = nullptr;

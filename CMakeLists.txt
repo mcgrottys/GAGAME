@@ -72,6 +72,10 @@ add_executable(gagame
   src/scene/SceneSchema.cpp
   src/scene/SceneBuilder.cpp
   src/scene/WaterComponent.cpp
+  src/scene/Rail.cpp
+  src/scene/Entity.cpp
+  src/scene/Portal.cpp
+  src/scene/effects/SlicePlane.cpp
   src/scene/SceneTest.cpp
   src/scene/SkyLayer.cpp
   src/scene/TideLayer.cpp

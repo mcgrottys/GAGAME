@@ -50,6 +50,15 @@
 //  THE ONE DELIBERATE CHANGE (an instrument, not a picture): the --settle-exact hold now also
 //  waits for the wave prefill to be idle -- Frame(), the `prefillIdle` line, MEASURED
 //  2026-09-13 (the exact hold and the prefill raced).
+//
+//  M12 step 5e: the boat, the portal and the rails LEFT the session for scene nodes. The
+//  hull's step state and stepBoat are scene::Entity (one node per `entities` element, stepped
+//  by StepEntities from both clock branches); the portal's build and its cycle are
+//  scene::Portal (Link() and Cycle() where m_portal and m_drosteLeaf were read); the five rail
+//  tables and the six rail lambdas (railPose, diveFrom, diveAt, legU, diveU, keyedPose,
+//  gravityUp, drosteRailPose) are scenes/rails/<name>.json read by scene::Rail, At(t) pure.
+//  Two of the three function-local statics named above are the entity's now (quantaOwed,
+//  telTick); the [droste] probes stay here, reading the node.
 // ================================================================================================
 #pragma once
 
@@ -68,9 +77,10 @@
 #include "scene/Route.h"
 #include "scene/WaterComponent.h"
 #include "sim/SimClock.h"
-#include "sim/Vessel.h"
+#include "scene/Entity.h"   // M12 step 5e: the hull as a node (its step state, its water)
+#include "scene/Portal.h"   // M12 step 5e: the Droste link and its cycle as a node
+#include "scene/Rail.h"     // M12 step 5e: the rails as data
 #include "sim/VesselSpec.h"
-#include "sim/WaterSurfaceTree.h"
 #include "sim/WaveField.h"
 #include "sim/WaveFieldSource.h"
 #include "sim/WeatherManager.h"
@@ -112,6 +122,9 @@ private:
     bool Frame();
     // 3162..3230: the post-loop tools, the reports, the dumps, the explicit shutdown; `return 0`.
     int Finish();
+    // M12 step 5e: the entities' step (stepBoat's one path from both clock branches), the
+    // profiler slot the hull steps kept, and the chase camera after them.
+    void StepEntities(int quanta, float dt);
 
     // M12 step 5c: the solved wave field re-Configured at the water scene's live window --
     // today's hot-reload lines, moved verbatim. It reads what the SESSION owns (the compositor,
@@ -142,9 +155,7 @@ private:
     // neither reads exactly what the flag-shaped code read.
     ScenePortal m_portalDecl;   // `portals[droste]`
     bool m_portalOn = false;    // ...and whether it is enabled (--droste)
-    SceneEntity m_entityDecl;   // `entities[0]` (--boat)
-    bool m_entityOn = false;
-    double m_entitySpawn[3] = {0.0, 0.0, 0.0};   // its `at`, in the flat world frame (--campos)
+    // (M12 step 5e: the `entities` elements are the Entity nodes below, one per element.)
     SceneView m_startView;      // the view `scene.view` names (its optics and its chase camera)
 
     // ---- main()'s block-level locals over the span, in main()'s order (ff2f732 lines
@@ -160,7 +171,9 @@ private:
     Camera m_camChart;
     // (M12 step 4a: the tangent frame's rows -- m_oDir, m_east0, m_north0 -- are the
     // Assembly's SurfaceFrame's; Session() writes them there through the same aliases.)
-    droste::Portal m_portal;
+    // M12 step 5e: THE PORTAL NODE (scene/Portal.h): the link BuildPortal resolves and the
+    // cycle it declares, read through Link() and Cycle() where m_portal and m_drosteLeaf were.
+    scene::Portal m_portalNode;
     int m_camLevel = 0;   // the camera's ABSOLUTE level: 0 = the root, 1 = inside the first link
     // M12 step 4d: THE FRAME CALCULUS' DECLARATIONS (core/Space.h). The planet at unit length
     // R; the tangent frame under it, linked from the surface's rows; and the Droste tower as a
@@ -170,7 +183,7 @@ private:
     // members, and FrameLoop is neither copied nor moved (above), so they never dangle.
     Space m_planetSpace;
     Space m_tangentSpace;
-    Space m_drosteLeaf;
+    // (the Droste cycle, Space::Cycle over m_tangentSpace, is the portal node's: Cycle())
     // M12 step 4d instrument: the [droste] closed-form comparison. Every Droste read of the
     // portal (the level table's cam / sigma / Q / sun / sky zenith, the camera level's sun,
     // the dive rail's S^f(helm)) is evaluated from Level(k) beside it and compared bit for bit
@@ -186,8 +199,8 @@ private:
     };
     void ProbeDrosteTable(const DrosteProbeRow* rows, int n, const double sun[3],
                           const double sun2[3], uint32_t frame);
-    void ProbeDive(double f, const double c0[3], const double f0[3], double c[3], double fw[3],
-                   double up[3], bool live, double u);
+    void ProbeDive(double f, const double c0[3], const double f0[3], const double up0[3],
+                   double c[3], double fw[3], double up[3], bool live, double u);
     UlpTally m_probeCam, m_probeSigma, m_probeQ, m_probeLevelSun, m_probeSkyUp, m_probeSun;
     UlpTally m_probeDiveC, m_probeDiveFw, m_probeDiveUp;
     UlpTally m_probeSweepC, m_probeSweepFw, m_probeSweepUp;
@@ -197,27 +210,22 @@ private:
     std::function<double(const Camera&)> m_altOf;
     std::function<Motor(const Camera&)> m_poseMotor;
     std::function<void(const Motor&, Camera&)> m_motorPose;
-    std::vector<std::pair<double, Motor>> m_railKeys;
-    std::function<void(double, Camera&)> m_railPose;
-    Camera m_drosteHelm;
-    double m_drosteHelmUp[3] = {0.0, 1.0, 0.0};
-    bool m_diveFromAbove = false;
-    const double m_kDiveT0 = 40.0 + 2.0;   // the storm rail, then two seconds at the helm
-    std::function<void(const Camera&, double, Camera&, int&, double[3])> m_diveFrom;
-    std::function<void(double, Camera&, int&, double[3])> m_diveAt;
-    Camera m_drosteHelmBack;
-    std::function<double(double, double, double)> m_legU;
-    std::function<double(double)> m_diveU;
-    std::vector<std::pair<double, Motor>> m_climbKeys;
-    std::function<void(const std::vector<std::pair<double, Motor>>&, double, Camera&)> m_keyedPose;
-    std::function<void(const Camera&, double[3])> m_gravityUp;
-    std::function<void(double, Camera&, int&, double[3])> m_drosteRailPose;
+    // M12 step 5e: THE RAIL AS DATA (scene/Rail.h): the active rail, read from
+    // scenes/rails/<active>.json and resolved in this session's frame; the dive rail beside
+    // it when another rail (or none) is flown, because the [droste] probe's sweep is the
+    // dive rail's own schedule -- its helm pose and its law are that file's.
+    scene::RailFrame m_railFrame;
+    scene::Rail m_rail;
+    scene::Rail m_diveProbeRail;
+    const scene::Rail* m_diveRail = nullptr;
     double m_simUnix = 0.0;
     SimClock m_simClock;
     VesselRegistry m_vesselReg;
-    std::unique_ptr<Vessel> m_boat;
-    TreeWater m_boatSea;
-    VesselControls m_boatCtl;
+    // M12 step 5e: THE HULLS ARE ENTITY NODES (scene/Entity.h), one per `entities` element,
+    // each with its own step state and its own TreeWater; m_followed is the one the start
+    // view's chase camera follows. Heap-held: an Entity is never moved once wired.
+    std::vector<std::unique_ptr<scene::Entity>> m_entities;
+    scene::Entity* m_followed = nullptr;
     // M9br: THE WAVE PREFILL, OFF THE FRAME THREAD. When a tide or current bucket rolls,
     // the solve was already backgrounded but the PREFILL was not -- and writing 7359 tiles
     // across 33 planes and every mip takes 11-19 s, on the frame thread, which is the
@@ -229,10 +237,6 @@ private:
     uint64_t m_wavePendingKey = 0;
     uint32_t m_wavePendingTiles = 0, m_wavePendingPlanes = 0;
     double m_wavePendingSec = 0.0;
-    bool m_boatPlaced = false;      // set down on the surface at the first step, see stepBoat
-    bool m_helming = false;         // T detaches the camera; the physics never stops
-    double m_helmYawRef = 0.0;      // the look-steer's heading reference -- see the note in
-                                    // stepBoat for why it is NOT read off the live camera
     bool m_sunLogged = false;   // M9bi: log the placed sun once, with its numbers
     double m_startUnix = 0.0;
     int m_entSta = 0, m_westA = 0, m_westB = 0;
@@ -339,9 +343,6 @@ private:
     FramePipe m_recPipe;
     std::vector<uint8_t> m_recPixels;
     std::vector<uint64_t> m_railPool;
-    std::function<void(int)> m_stepBoat;
-    int m_quantaOwed = 0;    // stepBoat: the 240 Hz quanta owed to the 60 Hz hull step
-    int m_telTick = 0;       // stepBoat: one telemetry line a second
     int m_loggedLevel = 0;   // Frame(): the Droste level last logged (the gauge step)
 };
 

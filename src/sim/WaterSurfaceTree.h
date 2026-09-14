@@ -85,7 +85,9 @@ public:
     SurfaceSample At(double wx, double wz, double simUnix) const override;
     void WindAt(double wx, double wz, double simUnix, double out[3]) const override;
 
-    // What answered, and what did not -- for the boot log and the twin report.
+    // What answered, and what did not -- for the boot log and the twin report. M12 step 5e:
+    // and the AGE of the solver mirror the level and current are read from, or that it was
+    // never read (the freshness contract, scene/Entity.h).
     std::string Describe(double wx, double wz, double simUnix) const;
 
     // The solved-window blend weight at a point, 0 outside. Public because the twin gate reports

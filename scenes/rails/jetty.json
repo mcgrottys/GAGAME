@@ -1,0 +1,117 @@
+{
+  "_readme": "The jetty pass (--rail-jetty): tip to tip at helm height, a climb to a bird's eye, then orbit. M7c/M7e.",
+  "name": "jetty",
+  "tower": false,
+  "poses": [],
+  "segments": [
+    {
+      "kind": "keys",
+      "duration": 0,
+      "levels": 0,
+      "from": 0,
+      "up": "none",
+      "keys": [
+        {
+          "t": 0,
+          "at": {"x": 250, "alt": 5, "z": 40, "az": 94, "pitch": -1},
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 4,
+          "at": {"x": 250, "alt": 5, "z": 40, "az": 94, "pitch": -1},
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 9,
+          "at": {"x": 680, "alt": 14, "z": 200, "az": 192, "pitch": -10},
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 14,
+          "at": {"x": 650, "alt": 12, "z": -30, "az": 262, "pitch": -8},
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 18,
+          "at": {"x": 680, "alt": 16, "z": -290, "az": 300, "pitch": -13},
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 21.5,
+          "at": {"x": 520, "alt": 420, "z": -140, "az": 284, "pitch": -56},
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 25,
+          "at": {"x": 380, "alt": 1500, "z": 10, "az": 272, "pitch": -88},
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 28,
+          "at": {"x": 380, "alt": 1500, "z": 10, "az": 272, "pitch": -88},
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 31,
+          "at": {
+            "lat": 42.79,
+            "lon": -70.84,
+            "alt": 7000,
+            "lookAt": {"lat": 42.8183, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 34.5,
+          "at": {
+            "lat": 42.62,
+            "lon": -70.95,
+            "alt": 80000,
+            "lookAt": {"lat": 42.8183, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 38,
+          "at": {
+            "lat": 41.9,
+            "lon": -71.6,
+            "alt": 800000,
+            "lookAt": {"lat": 42.8183, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 40,
+          "at": {
+            "lat": 41.9,
+            "lon": -71.6,
+            "alt": 800000,
+            "lookAt": {"lat": 42.8183, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        }
+      ],
+      "base": "",
+      "upOf": "",
+      "to": "",
+      "law": "dive",
+      "u0": 0,
+      "u1": 0,
+      "delay": 0,
+      "level": 0
+    }
+  ]
+}

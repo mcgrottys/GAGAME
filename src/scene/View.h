@@ -134,6 +134,14 @@ public:
     static float FovRadOf(float deg) { return deg * 3.14159265f / 180.0f; }
     static float FovDegOf(float rad) { return rad * 180.0f / 3.14159265f; }
 
+    // ---- THE CHASE CAMERA (M12 step 5e). Pure: the eye `back` behind the target's heading
+    // and `up` above it, aimed `aimLift` above the target's origin -- the follow's four
+    // numbers, fed by the entity's pose (scene/Entity.h ChaseFrame). Gravity-up and roll-free
+    // by choice: a camera that heels with the hull reads as the WORLD rolling, which is
+    // nauseating and is not what a helmsman's inner ear reports.
+    static void Follow(const FollowProps& follow, const double target[3], const double heading[3],
+                       Camera& cam);
+
     // ---- THE RE-LEVELLING. Pure: no member is read or written.
     static Motor Level(const Motor& pose, const double up[3]);
     static void Basis(const Motor& pose, const double up[3], double fwd[3], double right[3],

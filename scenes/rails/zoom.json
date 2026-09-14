@@ -1,0 +1,81 @@
+{
+  "_readme": "The inlet zoom (--rail-zoom): orbit -> the Google pyramid -> the CUDEM estuary, no handoff. M6g.",
+  "name": "zoom",
+  "tower": false,
+  "poses": [],
+  "segments": [
+    {
+      "kind": "keys",
+      "duration": 0,
+      "levels": 0,
+      "from": 0,
+      "up": "none",
+      "keys": [
+        {"t": 0, "view": "orbit", "pose": ""},
+        {
+          "t": 8,
+          "at": {
+            "lat": 41.9,
+            "lon": -71.6,
+            "alt": 800000,
+            "lookAt": {"lat": 42.8183, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 16,
+          "at": {
+            "lat": 42.55,
+            "lon": -70.98,
+            "alt": 80000,
+            "lookAt": {"lat": 42.8183, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 23,
+          "at": {
+            "lat": 42.74,
+            "lon": -70.87,
+            "alt": 7000,
+            "lookAt": {"lat": 42.8183, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 27,
+          "at": {
+            "lat": 42.79,
+            "lon": -70.84,
+            "alt": 2400,
+            "lookAt": {"lat": 42.8183, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 30,
+          "at": {
+            "lat": 42.8,
+            "lon": -70.835,
+            "alt": 2200,
+            "lookAt": {"lat": 42.8183, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        }
+      ],
+      "base": "",
+      "upOf": "",
+      "to": "",
+      "law": "dive",
+      "u0": 0,
+      "u1": 0,
+      "delay": 0,
+      "level": 0
+    }
+  ]
+}

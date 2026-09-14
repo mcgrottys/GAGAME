@@ -1228,8 +1228,17 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 static_cast<float>(swe.VelGradResMapW()),
                 static_cast<float>(swe.VelGradResMapH()), swe.VelGradMips());
         }
-        globe->sliceOn = sliceOn;
-        globe->sliceD = static_cast<float>(sliceOn ? sliceFx->d : 0.0);
+        // M12 step 5e: the cutaway plane is an EFFECT NODE (scene/effects/SlicePlane.h): the
+        // declaration from the `effects` section, the globe as its observer, the fan-out its
+        // own -- the two lines that wrote the globe's fields by hand.
+        A->slice.Declare(sliceFx ? sliceFx->p.name : std::string("slice"), sliceOn,
+                         sliceOn ? sliceFx->d : 0.0);
+        {
+            scene::SlicePlane::Observers so;
+            so.globe = globe;
+            A->slice.Configure(so);
+        }
+        A->slice.FanOut();
         compositor.LogRegistry();
         // M8j: --fidelity-map draws that same registry. It runs HERE, not at the
         // --water-map exit, because earth.color is registered 200 lines later than
@@ -1256,12 +1265,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         if (S.sun.source != Scene::kPinned) ga::ast::RegisterSolarEdges();
         if (sliceOn) {
             // M7o: the demo node registers its edge like any other -- the AST is how
-            // features arrive now. One blade, one inner product, one discard.
-            ga::ast::Register({"user.plane", "globe.ps", "slice",
-                               {"world.m", true, 0, 0, 0}, {"world.m", true, 0, 0, 0},
-                               false, "signed distance m", "keep s<=0", 1.0,
-                               "Globe.hlsl slice discard (gatest: sandwich negates s; "
-                               "proofs/slice_plane.py)"});
+            // features arrive now. One blade, one inner product, one discard. M12 step 5e:
+            // the effect node registers it (Effect::RegisterEdges -- the same row).
+            A->slice.RegisterEdges();
         }
         ga::ast::Print();
         ga::ast::Validate();

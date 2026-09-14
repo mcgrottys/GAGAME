@@ -249,6 +249,14 @@ struct PoseSugar {
 bool ReadPoseSugar(const JsonValue& sugar, const std::string& path, PoseSugar& out,
                    std::string* why);
 
+// M12 step 5e: THE SUGAR AS THE MOTOR the session's pose maps make -- scene::FromCamera of
+// the camera the rigid spelling builds (ResolveMotor, the step before Placement::Rigid). A
+// rail key carries THIS motor: the session's tables were poseMotor(camera), and the round
+// trip through Rigid and MotorOf is not the identity on a motor that is not unit (5b's
+// finding), so a key resolved through a Placement would not be the key the table held.
+bool ResolveMotorSugar(const JsonValue& sugar, const PoseFrame& frame, const std::string& path,
+                       Motor& out, std::string* why);
+
 // The number law's formatting.
 std::string NumberText(double v);   // the shortest text that round-trips the double
 std::string FloatText(float v);     // the shortest text that narrows back to the float (<= %.9g)

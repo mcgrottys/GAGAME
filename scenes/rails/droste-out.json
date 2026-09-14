@@ -1,0 +1,214 @@
+{
+  "_readme": "The out-and-back (--rail-droste-out): the flood's last leg, a breath, two levels in, the turn, two levels out, the climb to orbit. M10.",
+  "name": "droste-out",
+  "tower": true,
+  "poses": [
+    {
+      "name": "helm",
+      "at": {"x": 120, "alt": 7, "z": -10, "az": 92.5, "pitch": -1.5},
+      "aim": "fixedPoint",
+      "standOffBelowTwistDeg": 75,
+      "standOff": [-300, 300, 0],
+      "turnOf": "",
+      "turnYaw": 0,
+      "turnPitch": 0
+    },
+    {
+      "name": "helmBack",
+      "aim": "none",
+      "standOffBelowTwistDeg": 0,
+      "standOff": [0, 0, 0],
+      "turnOf": "helm",
+      "turnYaw": 3.14159265,
+      "turnPitch": -0.07
+    }
+  ],
+  "segments": [
+    {
+      "kind": "keys",
+      "duration": 14,
+      "levels": 0,
+      "from": 26,
+      "up": "gravity",
+      "keys": [
+        {"t": 0, "view": "orbit", "pose": ""},
+        {
+          "t": 8,
+          "at": {
+            "lat": 41.9,
+            "lon": -71.6,
+            "alt": 800000,
+            "lookAt": {"lat": 42.8183, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 15,
+          "at": {
+            "lat": 42.55,
+            "lon": -70.98,
+            "alt": 80000,
+            "lookAt": {"lat": 42.8183, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 21,
+          "at": {
+            "lat": 42.74,
+            "lon": -70.87,
+            "alt": 7000,
+            "lookAt": {"lat": 42.8183, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 26,
+          "at": {"x": -1400, "alt": 1500, "z": 0, "az": 93, "pitch": -40},
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 32,
+          "at": {"x": -250, "alt": 9, "z": -15, "az": 92, "pitch": -2},
+          "view": "",
+          "pose": ""
+        },
+        {"t": 40, "view": "", "pose": "helm"}
+      ],
+      "base": "",
+      "upOf": "",
+      "to": "",
+      "law": "dive",
+      "u0": 0,
+      "u1": 0,
+      "delay": 0,
+      "level": 0
+    },
+    {
+      "kind": "hold",
+      "duration": 2,
+      "levels": 0,
+      "from": 0,
+      "up": "none",
+      "keys": [],
+      "base": "helm",
+      "upOf": "",
+      "to": "",
+      "law": "dive",
+      "u0": 0,
+      "u1": 0,
+      "delay": 0,
+      "level": 0
+    },
+    {
+      "kind": "spiral",
+      "duration": 0,
+      "levels": 2,
+      "from": 0,
+      "up": "none",
+      "keys": [],
+      "base": "helm",
+      "upOf": "helm",
+      "to": "",
+      "law": "leg",
+      "u0": 0,
+      "u1": 2,
+      "delay": 0,
+      "level": 0
+    },
+    {
+      "kind": "turn",
+      "duration": 3,
+      "levels": 0,
+      "from": 0,
+      "up": "none",
+      "keys": [],
+      "base": "helm",
+      "upOf": "helm",
+      "to": "helmBack",
+      "law": "dive",
+      "u0": 0,
+      "u1": 0,
+      "delay": 0,
+      "level": 2
+    },
+    {
+      "kind": "spiral",
+      "duration": 0,
+      "levels": 2,
+      "from": 0,
+      "up": "none",
+      "keys": [],
+      "base": "helmBack",
+      "upOf": "helm",
+      "to": "",
+      "law": "leg",
+      "u0": 2,
+      "u1": 0,
+      "delay": 0,
+      "level": 0
+    },
+    {
+      "kind": "keys",
+      "duration": 0,
+      "levels": 0,
+      "from": 0,
+      "up": "gravity",
+      "keys": [
+        {"t": 0, "view": "", "pose": "helmBack"},
+        {
+          "t": 7,
+          "at": {"x": -900, "alt": 450, "z": -60, "az": 84, "pitch": -17},
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 13,
+          "at": {
+            "lat": 42.74,
+            "lon": -70.87,
+            "alt": 7000,
+            "lookAt": {"lat": 42.8183, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 18.5,
+          "at": {
+            "lat": 42.55,
+            "lon": -70.98,
+            "alt": 80000,
+            "lookAt": {"lat": 42.8183, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {
+          "t": 23.5,
+          "at": {
+            "lat": 41.9,
+            "lon": -71.6,
+            "alt": 800000,
+            "lookAt": {"lat": 42.8183, "lon": -70.81}
+          },
+          "view": "",
+          "pose": ""
+        },
+        {"t": 28, "view": "orbit", "pose": ""}
+      ],
+      "base": "",
+      "upOf": "",
+      "to": "",
+      "law": "dive",
+      "u0": 0,
+      "u1": 0,
+      "delay": 0,
+      "level": 0
+    }
+  ]
+}

@@ -66,7 +66,15 @@ void View::Apply(const PropSet& props) {
 }
 
 void View::Update(const FrameInfo& f) {
-    (void)f;   // step 5e gives Follow its target; the pose is the session's until 5d wires it
+    (void)f;   // the follow is applied by the frame loop from the followed entity (Follow)
+}
+
+void View::Follow(const FollowProps& follow, const double p[3], const double f[3], Camera& cam) {
+    const double back = follow.back, up = follow.up;
+    cam.px = p[0] - f[0] * back;
+    cam.py = p[1] + up;
+    cam.pz = p[2] - f[2] * back;
+    cam.LookAt(p[0], p[1] + follow.aimLift, p[2]);
 }
 
 void View::Record(const ViewContext& v) {

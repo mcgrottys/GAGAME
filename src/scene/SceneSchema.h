@@ -28,9 +28,17 @@
 //                                                       M12 step 5b: the optics, the target and
 //                                                       its rectangle, and the chase camera as
 //                                                       data (scene/View.h)
-//      rails      {active, keys[{t, at}], droste{levelSec, levels}}
+//      rails      {active, keys[{t, at | view | pose}], droste{levelSec, levels}}
+//                                                    -- M12 step 5e: `active` names the rail
+//                                                       flown from scenes/rails/<active>.json
+//                                                       (scene/Rail.h: segments as data); an
+//                                                       inline `keys` list is an authored
+//                                                       keyed flight in the same key spelling
 //      portals    [{name, enabled, lat, lon, level, fill, twistDeg, lighting}]
-//      entities   [{name, vessel, at, controller, throttle, steer}]
+//      entities   [{name, vessel, at, controller, throttle, steer, mirrorCadence}]
+//                                                    -- M12 step 5e: mirrorCadence is the
+//                                                       freshness contract (scene/Entity.h):
+//                                                       0 = never (today's cost)
 //      effects    [{name, type, enabled, ...}]  -- typed through EffectSchemas (slice.plane)
 //      layers     [{name, enabled, ...}]        -- the registration order; typed by name
 //      nodes      [{name, type, enabled, at, children, ...}]   -- typed through ComponentSchemas
@@ -192,9 +200,13 @@ struct ViewProps {
     ViewportProps viewport;
     FollowProps follow;
 };
+// M12 step 5e: a key is a pose at a time -- a rigid placement in the sugar, or the eye a
+// named view declares (`view`), or a named pose of the tower (`pose`, scene/Rail.h).
 struct RailKey {
     double t = 0.0;
-    Placement at;
+    Motor at;                         // optional
+    std::string view;                 // "" = none
+    std::string pose;                 // "" = none
 };
 struct DrosteRail {
     double levelSec = 16.0;
@@ -218,6 +230,11 @@ struct EntityProps {
     Placement at;                     // the spawn (required)
     int controller = 0;               // helm | fixed
     double throttle = 0.0, steer = 0.0;
+    // M12 step 5e: THE FRESHNESS CONTRACT (scene/Entity.h). Seconds between readbacks of the
+    // solver's CPU mirror the hull reads; 0 = NEVER -- what shipped: the effective cadence
+    // was infinite, and the hull read the analytic tide and the waves, never the solved
+    // level or current.
+    double mirrorCadence = 0.0;
 };
 struct EffectProps {
     std::string name;
@@ -274,5 +291,9 @@ const Schema& ViewSchema();
 const Schema& PortalSchema();
 const Schema& EntitySchema();
 const Schema& NodeSchema();
+// M12 step 5e: the rail key (scene/Rail.h reads a rail file's keys through it) and the slice
+// plane's typed table (scene/effects/SlicePlane.h's Props()).
+const Schema& RailKeySchema();
+const Schema& SlicePlaneSchema();
 
 }  // namespace ga::scene

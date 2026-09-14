@@ -56,6 +56,16 @@
 //      carries the key); and therefore resolution is IDEMPOTENT -- the text --print-scene
 //      writes IS a scene file, and loading it back gives the same document, which is what the
 //      scene spelling of every recipe stands on.
+//  12. (M12 step 5e) THE NODES. [rail] the five hand tables and the six rail lambdas of the
+//      session (c2813b8) are transcribed verbatim as the reference: printed through the rail
+//      file's writer they equal scenes/rails/<name>.json byte for byte (the printed text is
+//      written to out/rails_printed/, which is how the files were made), and Rail::At over the
+//      file equals the lambdas' camera, level and up BITWISE at a thousand instants plus every
+//      recorded frame of a 100 s flight, under both twists; [portal] the node's cycle is
+//      Space::Cycle over the tangent space with Similar(p, s, axis, twist) of the link
+//      BuildPortal resolved from the declaration; [effect] the slice plane's edge is registered
+//      and the AST validates with it; [entity] the freshness fields default to today's
+//      behaviour -- no cadence, no mirror read, the age reported as never.
 // A defect planted in MergeInto (the atomic law dropped, so an overlay's {lat, lon, alt}
 // merged into {x, alt, z, az, pitch} by key) was seen to fail block 3 before this gate was
 // trusted (priors 22). The three checks of block 11 were seen to fail with BOTH step 5d fixes
@@ -63,12 +73,19 @@
 #include "app/Options.h"
 #include "core/Common.h"
 #include "core/CurrentFieldLoader.h"
+#include "core/Droste.h"
+#include "core/GaAst.h"
 #include "core/FieldLoader.h"
 #include "core/GeoGridLoader.h"
 #include "core/Registry.h"
 #include "render/Camera.h"
 #include "scene/Component.h"
+#include "scene/Entity.h"
+#include "scene/GlobeLayer.h"
 #include "scene/Node.h"
+#include "scene/Portal.h"
+#include "scene/Rail.h"
+#include "scene/effects/SlicePlane.h"
 #include "scene/Pose.h"
 #include "scene/Props.h"
 #include "scene/SceneBuilder.h"
@@ -78,12 +95,15 @@
 #include "sim/BathyModel.h"
 #include "sim/GlobeModel.h"
 #include "sim/VesselSpec.h"
+#include "sim/WaterSurfaceTree.h"
+#include "sim/WeatherManager.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
 
 namespace ga::scene {
@@ -1140,6 +1160,756 @@ bool RunSceneSelfTest() {
         remove(kFp);
     }
 
+    // ---- 12. [rail] [portal] [effect] [entity] -- the nodes of step 5e ---------------------
+    // (A) THE RAILS. The hand tables and the six lambdas that flew them (FrameLoop::Session at
+    // c2813b8: railKeys, railPose, diveFrom/diveAt, legU, diveU, keyedPose, gravityUp,
+    // drosteRailPose) are transcribed VERBATIM below -- literals and float arithmetic included
+    // -- as the reference, and held two ways against the data form: the tables PRINTED through
+    // the rail file's own writer equal scenes/rails/<name>.json byte for byte (the printed
+    // text is also written to out/rails_printed/, which is how the files were made), and
+    // Rail::At (the file read back and resolved in the same frame) equals the lambdas' camera,
+    // level and up BITWISE at a thousand instants plus every recorded frame of a 100 s flight,
+    // under both twists (the quarter twist the recipes fly and the untwisted tower, which
+    // dives from above). The two Droste rails ride the FLOOD keys to the helm, as the flag
+    // implied the flood table before 5d compared the enum (the 5d parent flew the classic keys
+    // there); the reference says what the design and the pre-5d binary said.
+    {
+        constexpr double kPiL = 3.14159265358979;
+        struct Legacy {
+            double planetR = 0.0;
+            double east0[3], oDir[3], north0[3];
+            float fovY = 0.9f;
+            const droste::Portal* portal = nullptr;
+            const Space* drosteLeaf = nullptr;
+            double twistDeg = 90.0;
+            double levelSec = 16.0;
+            int levels = 3;
+            bool railDroste = false, railDrosteOut = false;
+            Camera camGlobe;
+            std::vector<std::pair<double, Motor>> railKeys, climbKeys;
+            Camera drosteHelm, drosteHelmBack;
+            double drosteHelmUp[3] = {0.0, 1.0, 0.0};
+            bool diveFromAbove = false;
+            const double kDiveT0 = 40.0 + 2.0;
+
+            Motor poseMotor(const Camera& c) const { return scene::FromCamera(c); }
+            void motorPose(const Motor& m, Camera& c) const { scene::ToCamera(m, c); }
+            Camera planetToFlatPose(const Camera& g) const {
+                return scene::PlanetToFlatPose(g, east0, oDir, north0, planetR);
+            }
+            Camera orbPose(double lat, double lon, double altM, double tLat, double tLon) const {
+                return scene::OrbitPose(lat, lon, altM, tLat, tLon, planetR);
+            }
+            Motor orbKey(double lat, double lon, double altM, double tLat, double tLon) const {
+                return poseMotor(planetToFlatPose(orbPose(lat, lon, altM, tLat, tLon)));
+            }
+            void railPose(double t, Camera& out) const {
+                size_t i = 0;
+                while (i + 1 < railKeys.size() && railKeys[i + 1].first <= t) ++i;
+                if (i + 1 >= railKeys.size()) {
+                    motorPose(railKeys.back().second, out);
+                    return;
+                }
+                const double t0 = railKeys[i].first, t1 = railKeys[i + 1].first;
+                double u = (t - t0) / std::max(t1 - t0, 1e-6);
+                u = u * u * (3.0 - 2.0 * u);   // ease both ends of every leg
+                motorPose(Motor::Slerp(railKeys[i].second, railKeys[i + 1].second, u), out);
+            }
+            void diveFrom(const Camera& base, double u, Camera& out, int& level, double up[3]) const {
+                const double n = std::floor(u);
+                const double f = u - n;
+                const double c0[3] = {base.px, base.py, base.pz};
+                const DirectX::XMFLOAT3 hf = base.Forward();
+                const double f0[3] = {hf.x, hf.y, hf.z};
+                double c[3], fw[3];
+                drosteLeaf->LevelApply(f, c0, c);
+                drosteLeaf->LevelApplyDir(f, f0, fw);
+                drosteLeaf->LevelApplyDir(f, drosteHelmUp, up);
+                out = base;
+                out.px = c[0];
+                out.py = c[1];
+                out.pz = c[2];
+                out.yaw = static_cast<float>(std::atan2(fw[2], fw[0]));
+                const float lim = 3.14159265f / 2.0f - 0.0017f;
+                out.pitch = std::clamp(
+                    static_cast<float>(std::atan2(fw[1], std::sqrt(fw[0] * fw[0] + fw[2] * fw[2]))),
+                    -lim, lim);
+                level = static_cast<int>(n);
+            }
+            void diveAt(double u, Camera& out, int& level, double up[3]) const {
+                diveFrom(drosteHelm, u, out, level, up);
+            }
+            static double legU(double tau, double D, double dU) {
+                const double r = (std::min)(3.0, 0.5 * D);
+                const double v = dU / (D - r);
+                if (tau <= 0.0) return 0.0;
+                if (tau >= D) return dU;
+                if (tau < r) return v * tau * tau / (2.0 * r);
+                if (tau <= D - r) return v * (tau - 0.5 * r);
+                const double e = D - tau;
+                return dU - v * e * e / (2.0 * r);
+            }
+            double diveU(double tau) const {
+                const double T = levelSec, ramp = 3.0;
+                if (tau <= 0.0) return 0.0;
+                const double u = (tau < ramp) ? tau * tau / (2.0 * ramp * T) : (tau - 0.5 * ramp) / T;
+                return railDroste ? (std::min)(u, double(levels)) : u;
+            }
+            void keyedPose(const std::vector<std::pair<double, Motor>>& keys, double t,
+                           Camera& out) const {
+                size_t i = 0;
+                while (i + 1 < keys.size() && keys[i + 1].first <= t) ++i;
+                if (i + 1 >= keys.size()) {
+                    motorPose(keys.back().second, out);
+                    return;
+                }
+                double u = (t - keys[i].first) / std::max(keys[i + 1].first - keys[i].first, 1e-6);
+                u = u * u * (3.0 - 2.0 * u);
+                motorPose(Motor::Slerp(keys[i].second, keys[i + 1].second, u), out);
+            }
+            void gravityUp(const Camera& c, double up[3]) const {
+                const double gy = c.py + planetR;
+                const double gl = std::sqrt(c.px * c.px + gy * gy + c.pz * c.pz);
+                up[0] = c.px / gl;
+                up[1] = gy / gl;
+                up[2] = c.pz / gl;
+            }
+            void drosteRailPose(double t, Camera& out, int& level, double up[3]) const {
+                level = 0;
+                if (railDroste) {
+                    if (t < 40.0) {
+                        railPose(t, out);   // the storm rail (its last key aimed at the fixed point)
+                        gravityUp(out, up);
+                        return;
+                    }
+                    diveAt(diveU(t - kDiveT0), out, level, up);
+                    return;
+                }
+                // --rail-droste-out
+                const double T = levelSec, Din = 2.0 * T, Dout = 2.0 * T, Tturn = 3.0;
+                double tau = t;
+                if (tau < 14.0) {   // the storm rail's last leg: 1.5 km over the harbor -> the helm
+                    railPose(26.0 + tau, out);
+                    gravityUp(out, up);
+                    return;
+                }
+                tau -= 14.0;
+                if (tau < 2.0) {    // a breath at the helm, the tower dead ahead
+                    diveAt(0.0, out, level, up);
+                    return;
+                }
+                tau -= 2.0;
+                if (tau < Din) {    // IN: u 0 -> 2
+                    diveAt(legU(tau, Din, 2.0), out, level, up);
+                    return;
+                }
+                tau -= Din;
+                if (tau < Tturn) {  // THE TURN, at the second level's helm
+                    double w = tau / Tturn;
+                    w = w * w * (3.0 - 2.0 * w);
+                    motorPose(Motor::Slerp(poseMotor(drosteHelm), poseMotor(drosteHelmBack), w), out);
+                    level = 2;
+                    for (int i = 0; i < 3; ++i) up[i] = drosteHelmUp[i];
+                    return;
+                }
+                tau -= Tturn;
+                if (tau < Dout) {   // OUT: u 2 -> 0, facing outward
+                    diveFrom(drosteHelmBack, 2.0 - legU(tau, Dout, 2.0), out, level, up);
+                    return;
+                }
+                tau -= Dout;
+                keyedPose(climbKeys, tau, out);   // the climb to orbit, looking back at the tower
+                gravityUp(out, up);
+            }
+            // THE TABLES, verbatim, selected by the rail's name (the flag's own selection law).
+            void Build(const char* name, bool marsMode, bool bathy, bool sea, bool globe) {
+                railKeys.clear();
+                climbKeys.clear();
+                Camera cam;   // the session camera the helm copies its optics from
+                cam.fovY = fovY;
+                camGlobe = scene::GlobeCamera(34.0, -52.0, planetR * 2.1, planetR);
+                camGlobe.fovY = cam.fovY;
+                camGlobe.speed = 800000.0f;
+                camGlobe = planetToFlatPose(camGlobe);
+                const bool flood = strcmp(name, "flood") == 0 || strcmp(name, "droste") == 0 ||
+                                   strcmp(name, "droste-out") == 0;
+                railDroste = strcmp(name, "droste") == 0;
+                railDrosteOut = strcmp(name, "droste-out") == 0;
+                if (globe && marsMode) {
+                    railKeys.push_back({0.0, orbKey(10, -25, planetR * 1.1, -12, -58)});
+                    railKeys.push_back({7.0, orbKey(-7, -40, 800e3, -13, -62)});
+                    railKeys.push_back({13.0, orbKey(-11, -52, 220e3, -13, -72)});
+                    railKeys.push_back({19.0, orbKey(-13, -68, 150e3, -11, -90)});
+                    railKeys.push_back({26.0, orbKey(-6, -98, 600e3, 18.6, -133.8)});
+                    railKeys.push_back({30.0, orbKey(-4, -104, 900e3, 18.6, -133.8)});
+                } else if (globe && flood && bathy) {
+                    Camera cOver;    // 1.5 km over the harbor, aimed down-channel at the gap
+                    cOver.SetFromCompass(-1400.0, 1500.0, 0.0, 93.0f, -40.0f);
+                    Camera cHelmIn;  // helm height in the channel, the entrance dead ahead
+                    cHelmIn.SetFromCompass(-250.0, 9.0, -15.0, 92.0f, -2.0f);
+                    Camera cHelmGap; // ...then a ~3 kn push to between the jetty roots, gap 500 m out
+                    cHelmGap.SetFromCompass(120.0, 7.0, -10.0, 92.5f, -1.5f);
+                    railKeys.push_back({0.0, poseMotor(camGlobe)});
+                    railKeys.push_back({8.0, orbKey(41.9, -71.6, 800e3, 42.8183, -70.81)});
+                    railKeys.push_back({15.0, orbKey(42.55, -70.98, 80e3, 42.8183, -70.81)});
+                    railKeys.push_back({21.0, orbKey(42.74, -70.87, 7e3, 42.8183, -70.81)});
+                    railKeys.push_back({26.0, poseMotor(cOver)});
+                    railKeys.push_back({32.0, poseMotor(cHelmIn)});
+                    railKeys.push_back({40.0, poseMotor(cHelmGap)});
+                } else if (globe && strcmp(name, "jetty") == 0 && bathy) {
+                    Camera cHelm;    // on the water mid-channel, the entrance dead ahead
+                    cHelm.SetFromCompass(250.0, 5.0, 40.0, 94.0f, -1.0f);
+                    Camera cNTip;    // over the north tip, the gap ahead
+                    cNTip.SetFromCompass(680.0, 14.0, 200.0, 192.0f, -10.0f);
+                    Camera cMid;     // mid-gap, swung to look west up the channel
+                    cMid.SetFromCompass(650.0, 12.0, -30.0, 262.0f, -8.0f);
+                    Camera cSTip;    // over the south tip, looking back northwest across the gap
+                    cSTip.SetFromCompass(680.0, 16.0, -290.0, 300.0f, -13.0f);
+                    Camera cRise;    // climbing, the whole entrance opening below
+                    cRise.SetFromCompass(520.0, 420.0, -140.0, 284.0f, -56.0f);
+                    Camera cBird;    // bird's eye over the entrance: depth as color
+                    cBird.SetFromCompass(380.0, 1500.0, 10.0, 272.0f, -88.0f);
+                    railKeys.push_back({0.0, poseMotor(cHelm)});
+                    railKeys.push_back({4.0, poseMotor(cHelm)});
+                    railKeys.push_back({9.0, poseMotor(cNTip)});
+                    railKeys.push_back({14.0, poseMotor(cMid)});
+                    railKeys.push_back({18.0, poseMotor(cSTip)});
+                    railKeys.push_back({21.5, poseMotor(cRise)});
+                    railKeys.push_back({25.0, poseMotor(cBird)});
+                    railKeys.push_back({28.0, poseMotor(cBird)});
+                    railKeys.push_back({31.0, orbKey(42.79, -70.84, 7e3, 42.8183, -70.81)});
+                    railKeys.push_back({34.5, orbKey(42.62, -70.95, 80e3, 42.8183, -70.81)});
+                    railKeys.push_back({38.0, orbKey(41.9, -71.6, 800e3, 42.8183, -70.81)});
+                    railKeys.push_back({40.0, orbKey(41.9, -71.6, 800e3, 42.8183, -70.81)});
+                } else if (globe && strcmp(name, "zoom") == 0 && bathy) {
+                    railKeys.push_back({0.0, poseMotor(camGlobe)});
+                    railKeys.push_back({8.0, orbKey(41.9, -71.6, 800e3, 42.8183, -70.81)});
+                    railKeys.push_back({16.0, orbKey(42.55, -70.98, 80e3, 42.8183, -70.81)});
+                    railKeys.push_back({23.0, orbKey(42.74, -70.87, 7e3, 42.8183, -70.81)});
+                    railKeys.push_back({27.0, orbKey(42.79, -70.84, 2400.0, 42.8183, -70.81)});
+                    railKeys.push_back({30.0, orbKey(42.80, -70.835, 2200.0, 42.8183, -70.81)});
+                } else if (globe && sea && bathy && !marsMode) {
+                    Camera cHover;
+                    cHover.SetFromCompass(-200.0, 1800.0, -2500.0, 22.0f, -46.0f);
+                    Camera cHelm;
+                    cHelm.SetFromCompass(522.0, 7.0, 72.0, 246.0f, -4.0f);
+                    railKeys.push_back({0.0, poseMotor(camGlobe)});
+                    railKeys.push_back({3.0, orbKey(41.2, -66.5, 500000.0,
+                                                    BathyModel::kOrgLat, BathyModel::kOrgLon)});
+                    railKeys.push_back({5.0, poseMotor(cHover)});
+                    railKeys.push_back({10.0, poseMotor(cHover)});
+                    railKeys.push_back({15.0, poseMotor(cHelm)});
+                    railKeys.push_back({25.0, poseMotor(cHelm)});
+                }
+                drosteHelm = Camera();
+                drosteHelm.SetFromCompass(120.0, 7.0, -10.0, 92.5f, -1.5f);   // the storm rail's helm
+                drosteHelm.fovY = cam.fovY;
+                diveFromAbove = portal->Valid() && std::abs(twistDeg) < 75.0;
+                if (diveFromAbove) {
+                    drosteHelm.px = portal->p[0] - 300.0;
+                    drosteHelm.py = portal->p[1] + 300.0;
+                    drosteHelm.pz = portal->p[2];
+                }
+                drosteHelmUp[0] = 0.0;
+                drosteHelmUp[1] = 1.0;
+                drosteHelmUp[2] = 0.0;
+                if (portal->Valid()) {
+                    drosteHelm.LookAt(portal->p[0], portal->p[1], portal->p[2]);
+                    const double gy = drosteHelm.py + planetR;
+                    const double gl = std::sqrt(drosteHelm.px * drosteHelm.px + gy * gy +
+                                                drosteHelm.pz * drosteHelm.pz);
+                    drosteHelm.upHint[0] = static_cast<float>(drosteHelm.px / gl);
+                    drosteHelm.upHint[1] = static_cast<float>(gy / gl);
+                    drosteHelm.upHint[2] = static_cast<float>(drosteHelm.pz / gl);
+                    DirectX::XMFLOAT3 hf, hr, hu;
+                    drosteHelm.ViewBasis(hf, hr, hu);   // the helm's TRUE up: the roll the spiral carries
+                    drosteHelmUp[0] = hu.x;
+                    drosteHelmUp[1] = hu.y;
+                    drosteHelmUp[2] = hu.z;
+                    if ((railDroste || railDrosteOut) && !railKeys.empty()) {
+                        railKeys.back().second = poseMotor(drosteHelm);
+                    }
+                }
+                drosteHelmBack = drosteHelm;
+                drosteHelmBack.yaw = drosteHelm.yaw + 3.14159265f;
+                drosteHelmBack.pitch = -0.07f;
+                if (portal->Valid() && railDrosteOut) {
+                    Camera cRise;   // rising over the harbor, looking back east at the entrance
+                    cRise.SetFromCompass(-900.0, 450.0, -60.0, 84.0f, -17.0f);
+                    climbKeys.push_back({0.0, poseMotor(drosteHelmBack)});
+                    climbKeys.push_back({7.0, poseMotor(cRise)});
+                    climbKeys.push_back({13.0, orbKey(42.74, -70.87, 7e3, 42.8183, -70.81)});
+                    climbKeys.push_back({18.5, orbKey(42.55, -70.98, 80e3, 42.8183, -70.81)});
+                    climbKeys.push_back({23.5, orbKey(41.9, -71.6, 800e3, 42.8183, -70.81)});
+                    climbKeys.push_back({28.0, poseMotor(camGlobe)});
+                }
+            }
+        };
+
+        // ---- THE DATA FORM of the same tables, as the rail file's writer prints it. Each
+        // key's numbers are the literals above, said once more; the gate is that both say the
+        // same thing bit for bit.
+        auto compass = [](double x, double alt, double z, double az, double pitch) {
+            JsonValue o = JsonObj();
+            JsonSet(o, "x", JsonNum(x));
+            JsonSet(o, "alt", JsonNum(alt));
+            JsonSet(o, "z", JsonNum(z));
+            JsonSet(o, "az", JsonNum(az));
+            JsonSet(o, "pitch", JsonNum(pitch));
+            return o;
+        };
+        auto orbit = [](double lat, double lon, double alt, double tLat, double tLon) {
+            JsonValue o = JsonObj();
+            JsonSet(o, "lat", JsonNum(lat));
+            JsonSet(o, "lon", JsonNum(lon));
+            JsonSet(o, "alt", JsonNum(alt));
+            JsonValue look = JsonObj();
+            JsonSet(look, "lat", JsonNum(tLat));
+            JsonSet(look, "lon", JsonNum(tLon));
+            JsonSet(o, "lookAt", look);
+            return o;
+        };
+        auto keyAt = [](double t, JsonValue at) {
+            JsonValue k = JsonObj();
+            JsonSet(k, "t", JsonNum(t));
+            JsonSet(k, "at", std::move(at));
+            return k;
+        };
+        auto keyView = [](double t, const char* view) {
+            JsonValue k = JsonObj();
+            JsonSet(k, "t", JsonNum(t));
+            JsonSet(k, "view", JsonStr(view));
+            return k;
+        };
+        auto keyPose = [](double t, const char* pose) {
+            JsonValue k = JsonObj();
+            JsonSet(k, "t", JsonNum(t));
+            JsonSet(k, "pose", JsonStr(pose));
+            return k;
+        };
+        auto keysSeg = [](std::vector<JsonValue> keys, double duration, double from, bool gravity) {
+            JsonValue s = JsonObj();
+            JsonSet(s, "kind", JsonStr("keys"));
+            if (duration > 0.0) JsonSet(s, "duration", JsonNum(duration));
+            if (from > 0.0) JsonSet(s, "from", JsonNum(from));
+            if (gravity) JsonSet(s, "up", JsonStr("gravity"));
+            JsonValue a = JsonArr();
+            for (JsonValue& k : keys) a.arr.push_back(std::move(k));
+            JsonSet(s, "keys", a);
+            return s;
+        };
+        auto floodKeys = [&](bool helmLast) {
+            std::vector<JsonValue> k;
+            k.push_back(keyView(0.0, "orbit"));
+            k.push_back(keyAt(8.0, orbit(41.9, -71.6, 800e3, 42.8183, -70.81)));
+            k.push_back(keyAt(15.0, orbit(42.55, -70.98, 80e3, 42.8183, -70.81)));
+            k.push_back(keyAt(21.0, orbit(42.74, -70.87, 7e3, 42.8183, -70.81)));
+            k.push_back(keyAt(26.0, compass(-1400.0, 1500.0, 0.0, 93.0, -40.0)));
+            k.push_back(keyAt(32.0, compass(-250.0, 9.0, -15.0, 92.0, -2.0)));
+            if (helmLast) k.push_back(keyPose(40.0, "helm"));
+            else k.push_back(keyAt(40.0, compass(120.0, 7.0, -10.0, 92.5, -1.5)));
+            return k;
+        };
+        auto helmPoses = [&](bool back) {
+            JsonValue a = JsonArr();
+            JsonValue helm = JsonObj();
+            JsonSet(helm, "name", JsonStr("helm"));
+            JsonSet(helm, "at", compass(120.0, 7.0, -10.0, 92.5, -1.5));
+            JsonSet(helm, "aim", JsonStr("fixedPoint"));
+            JsonSet(helm, "standOffBelowTwistDeg", JsonNum(75.0));
+            JsonValue off = JsonArr();
+            off.arr.push_back(JsonNum(-300.0));
+            off.arr.push_back(JsonNum(300.0));
+            off.arr.push_back(JsonNum(0.0));
+            JsonSet(helm, "standOff", off);
+            a.arr.push_back(helm);
+            if (back) {
+                JsonValue hb = JsonObj();
+                JsonSet(hb, "name", JsonStr("helmBack"));
+                JsonSet(hb, "turnOf", JsonStr("helm"));
+                JsonSet(hb, "turnYaw", JsonNum(3.14159265));
+                JsonSet(hb, "turnPitch", JsonNum(-0.07));
+                a.arr.push_back(hb);
+            }
+            return a;
+        };
+        auto railDoc = [&](const char* name, const char* readme, double marsR) {
+            JsonValue d = JsonObj();
+            JsonSet(d, "_readme", JsonStr(readme));
+            JsonSet(d, "name", JsonStr(name));
+            JsonValue segs = JsonArr();
+            if (strcmp(name, "mars") == 0) {
+                std::vector<JsonValue> k;
+                k.push_back(keyAt(0.0, orbit(10, -25, marsR * 1.1, -12, -58)));
+                k.push_back(keyAt(7.0, orbit(-7, -40, 800e3, -13, -62)));
+                k.push_back(keyAt(13.0, orbit(-11, -52, 220e3, -13, -72)));
+                k.push_back(keyAt(19.0, orbit(-13, -68, 150e3, -11, -90)));
+                k.push_back(keyAt(26.0, orbit(-6, -98, 600e3, 18.6, -133.8)));
+                k.push_back(keyAt(30.0, orbit(-4, -104, 900e3, 18.6, -133.8)));
+                segs.arr.push_back(keysSeg(std::move(k), 0.0, 0.0, false));
+            } else if (strcmp(name, "flood") == 0) {
+                segs.arr.push_back(keysSeg(floodKeys(false), 0.0, 0.0, false));
+            } else if (strcmp(name, "jetty") == 0) {
+                std::vector<JsonValue> k;
+                k.push_back(keyAt(0.0, compass(250.0, 5.0, 40.0, 94.0, -1.0)));
+                k.push_back(keyAt(4.0, compass(250.0, 5.0, 40.0, 94.0, -1.0)));
+                k.push_back(keyAt(9.0, compass(680.0, 14.0, 200.0, 192.0, -10.0)));
+                k.push_back(keyAt(14.0, compass(650.0, 12.0, -30.0, 262.0, -8.0)));
+                k.push_back(keyAt(18.0, compass(680.0, 16.0, -290.0, 300.0, -13.0)));
+                k.push_back(keyAt(21.5, compass(520.0, 420.0, -140.0, 284.0, -56.0)));
+                k.push_back(keyAt(25.0, compass(380.0, 1500.0, 10.0, 272.0, -88.0)));
+                k.push_back(keyAt(28.0, compass(380.0, 1500.0, 10.0, 272.0, -88.0)));
+                k.push_back(keyAt(31.0, orbit(42.79, -70.84, 7e3, 42.8183, -70.81)));
+                k.push_back(keyAt(34.5, orbit(42.62, -70.95, 80e3, 42.8183, -70.81)));
+                k.push_back(keyAt(38.0, orbit(41.9, -71.6, 800e3, 42.8183, -70.81)));
+                k.push_back(keyAt(40.0, orbit(41.9, -71.6, 800e3, 42.8183, -70.81)));
+                segs.arr.push_back(keysSeg(std::move(k), 0.0, 0.0, false));
+            } else if (strcmp(name, "zoom") == 0) {
+                std::vector<JsonValue> k;
+                k.push_back(keyView(0.0, "orbit"));
+                k.push_back(keyAt(8.0, orbit(41.9, -71.6, 800e3, 42.8183, -70.81)));
+                k.push_back(keyAt(16.0, orbit(42.55, -70.98, 80e3, 42.8183, -70.81)));
+                k.push_back(keyAt(23.0, orbit(42.74, -70.87, 7e3, 42.8183, -70.81)));
+                k.push_back(keyAt(27.0, orbit(42.79, -70.84, 2400.0, 42.8183, -70.81)));
+                k.push_back(keyAt(30.0, orbit(42.80, -70.835, 2200.0, 42.8183, -70.81)));
+                segs.arr.push_back(keysSeg(std::move(k), 0.0, 0.0, false));
+            } else if (strcmp(name, "classic") == 0) {
+                std::vector<JsonValue> k;
+                k.push_back(keyView(0.0, "orbit"));
+                k.push_back(keyAt(3.0, orbit(41.2, -66.5, 500000.0, BathyModel::kOrgLat, BathyModel::kOrgLon)));
+                k.push_back(keyAt(5.0, compass(-200.0, 1800.0, -2500.0, 22.0, -46.0)));
+                k.push_back(keyAt(10.0, compass(-200.0, 1800.0, -2500.0, 22.0, -46.0)));
+                k.push_back(keyAt(15.0, compass(522.0, 7.0, 72.0, 246.0, -4.0)));
+                k.push_back(keyAt(25.0, compass(522.0, 7.0, 72.0, 246.0, -4.0)));
+                segs.arr.push_back(keysSeg(std::move(k), 0.0, 0.0, false));
+            } else if (strcmp(name, "droste") == 0) {
+                JsonSet(d, "tower", JsonBool(true));
+                JsonSet(d, "poses", helmPoses(false));
+                segs.arr.push_back(keysSeg(floodKeys(true), 40.0, 0.0, true));
+                JsonValue sp = JsonObj();
+                JsonSet(sp, "kind", JsonStr("spiral"));
+                JsonSet(sp, "base", JsonStr("helm"));
+                JsonSet(sp, "upOf", JsonStr("helm"));
+                JsonSet(sp, "law", JsonStr("dive"));
+                JsonSet(sp, "delay", JsonNum(2.0));
+                segs.arr.push_back(sp);
+            } else if (strcmp(name, "droste-out") == 0) {
+                JsonSet(d, "tower", JsonBool(true));
+                JsonSet(d, "poses", helmPoses(true));
+                segs.arr.push_back(keysSeg(floodKeys(true), 14.0, 26.0, true));
+                JsonValue hold = JsonObj();
+                JsonSet(hold, "kind", JsonStr("hold"));
+                JsonSet(hold, "duration", JsonNum(2.0));
+                JsonSet(hold, "base", JsonStr("helm"));
+                segs.arr.push_back(hold);
+                JsonValue in = JsonObj();
+                JsonSet(in, "kind", JsonStr("spiral"));
+                JsonSet(in, "levels", JsonNum(2));
+                JsonSet(in, "base", JsonStr("helm"));
+                JsonSet(in, "upOf", JsonStr("helm"));
+                JsonSet(in, "law", JsonStr("leg"));
+                JsonSet(in, "u0", JsonNum(0.0));
+                JsonSet(in, "u1", JsonNum(2.0));
+                segs.arr.push_back(in);
+                JsonValue turn = JsonObj();
+                JsonSet(turn, "kind", JsonStr("turn"));
+                JsonSet(turn, "duration", JsonNum(3.0));
+                JsonSet(turn, "base", JsonStr("helm"));
+                JsonSet(turn, "upOf", JsonStr("helm"));
+                JsonSet(turn, "to", JsonStr("helmBack"));
+                JsonSet(turn, "level", JsonNum(2));
+                segs.arr.push_back(turn);
+                JsonValue out = JsonObj();
+                JsonSet(out, "kind", JsonStr("spiral"));
+                JsonSet(out, "levels", JsonNum(2));
+                JsonSet(out, "base", JsonStr("helmBack"));
+                JsonSet(out, "upOf", JsonStr("helm"));
+                JsonSet(out, "law", JsonStr("leg"));
+                JsonSet(out, "u0", JsonNum(2.0));
+                JsonSet(out, "u1", JsonNum(0.0));
+                segs.arr.push_back(out);
+                std::vector<JsonValue> k;
+                k.push_back(keyPose(0.0, "helmBack"));
+                k.push_back(keyAt(7.0, compass(-900.0, 450.0, -60.0, 84.0, -17.0)));
+                k.push_back(keyAt(13.0, orbit(42.74, -70.87, 7e3, 42.8183, -70.81)));
+                k.push_back(keyAt(18.5, orbit(42.55, -70.98, 80e3, 42.8183, -70.81)));
+                k.push_back(keyAt(23.5, orbit(41.9, -71.6, 800e3, 42.8183, -70.81)));
+                k.push_back(keyView(28.0, "orbit"));
+                segs.arr.push_back(keysSeg(std::move(k), 0.0, 0.0, true));
+            }
+            JsonSet(d, "segments", segs);
+            SchemaChain chain;
+            chain.a = &Rail::FileSchema();
+            Complete(d, chain);
+            return d;
+        };
+        struct RailCase { const char* name; const char* readme; double length; bool tower; bool mars; };
+        const RailCase cases[] = {
+            {"classic", "The classic flight (--rail): orbit to a hover over the mouth, then the north jetty tip. M6b.", 25.0, false, false},
+            {"zoom", "The inlet zoom (--rail-zoom): orbit -> the Google pyramid -> the CUDEM estuary, no handoff. M6g.", 30.0, false, false},
+            {"flood", "The flood ride (--rail-flood, the storm rail): orbit to the throat, ending at a helm mid-channel west of the gap. M6s.", 40.0, false, false},
+            {"jetty", "The jetty pass (--rail-jetty): tip to tip at helm height, a climb to a bird's eye, then orbit. M7c/M7e.", 40.0, false, false},
+            {"mars", "The Mars flyover (--planet mars): Valles Marineris west along its 4000 km, then up toward Tharsis.", 30.0, false, true},
+            {"droste", "The dive (--rail-droste): the flood keys to the helm re-aimed at the fixed point, then the tower's spiral S^u(helm). M10.", 40.0 + 2.0 + 1.5 + 48.0 + 2.0, true, false},
+            {"droste-out", "The out-and-back (--rail-droste-out): the flood's last leg, a breath, two levels in, the turn, two levels out, the climb to orbit. M10.", 111.0, true, false},
+        };
+        // The frame and the tower, as the session builds them at the recipes' leaf.
+        const double kMarsR = 3389500.0;
+        auto buildPortal = [&](const PoseFrame& fr, double twistDeg) {
+            double pd[3];
+            GlobeModel::LatLonDir(42.81826, -70.80045, pd);
+            int lf = 0;
+            uint32_t lix = 0, liy = 0;
+            GlobeLayer::LeafOf(pd, 16, lf, lix, liy);
+            double ld[3];
+            GlobeLayer::LeafDir(lf, 16, lix, liy, ld);
+            const double axisN[3] = {0.0, 0.0, 1.0};
+            return droste::BuildPortal(lf, 16, lix, liy, ld, fr.east, fr.up, fr.north, fr.planetR,
+                                       -5.0, 1.0, axisN, twistDeg * kPiL / 180.0);
+        };
+        int railCases = 0, railInstants = 0;
+        uint64_t railBits = 0;
+        for (const RailCase& rc : cases) {
+            const double planetR = rc.mars ? kMarsR : R;
+            const PoseFrame fr = rc.mars ? FrameFromAnchor(0.0, 0.0, kMarsR)
+                                         : FrameFromAnchor(BathyModel::kOrgLat, BathyModel::kOrgLon, R);
+            // (1) THE PRINTED TABLE vs THE CHECKED-IN FILE.
+            const JsonValue doc = railDoc(rc.name, rc.readme, kMarsR);
+            const std::string printed = SceneBuilder::WriteJson(doc);
+            {
+                std::string outDir = "out/rails_printed";
+                std::filesystem::create_directories(outDir);
+                FILE* f = fopen((outDir + "/" + rc.name + ".json").c_str(), "wb");
+                if (f) {
+                    fwrite(printed.data(), 1, printed.size(), f);
+                    fclose(f);
+                }
+                std::string text;
+                const std::string path = std::string("scenes/rails/") + rc.name + ".json";
+                const bool have = SceneBuilder::ReadFile(path, text, nullptr);
+                g.True(have, (std::string("[rail] ") + path + " is checked in").c_str());
+                if (have) {
+                    std::string norm;
+                    for (char c : text) if (c != '\r') norm.push_back(c);
+                    g.True(norm == printed, (std::string("[rail] ") + path +
+                                             " equals the table printed through the writer (out/rails_printed/)").c_str());
+                }
+            }
+            // (2) Rail::At vs the lambdas, bitwise, under both twists.
+            for (double twist : {90.0, 0.0}) {
+                if (!rc.tower && twist != 90.0) continue;
+                const droste::Portal portal = rc.mars ? droste::Portal{} : buildPortal(fr, twist);
+                Space planet, tangent;
+                planet.name = "planet.re";
+                planet.unitM = planetR;
+                tangent.name = "tangent.test";
+                tangent.unitM = planetR;
+                tangent.parent = &planet;
+                const double anchor[3] = {fr.up[0] * planetR, fr.up[1] * planetR, fr.up[2] * planetR};
+                tangent.link = Placement::Frame(fr.east, fr.up, fr.north, anchor);
+                Space cycle;
+                if (portal.Valid()) {
+                    cycle = Space::Cycle("droste.leaf", tangent,
+                                         Placement::Similar(portal.p, portal.s, portal.axis, portal.twist));
+                }
+                Legacy L;
+                L.planetR = planetR;
+                for (int k = 0; k < 3; ++k) {
+                    L.east0[k] = fr.east[k];
+                    L.oDir[k] = fr.up[k];
+                    L.north0[k] = fr.north[k];
+                }
+                L.fovY = 55.0f * 3.14159265f / 180.0f;
+                L.portal = &portal;
+                L.drosteLeaf = &cycle;
+                L.twistDeg = twist;
+                L.Build(rc.name, rc.mars, !rc.mars, !rc.mars, true);
+                Rail rail;
+                std::string why;
+                const bool read = rail.FromJson(doc, std::string("rails/") + rc.name, &why);
+                g.True(read, (std::string("[rail] ") + rc.name + " reads: " + why).c_str());
+                RailFrame rf;
+                rf.frame = fr;
+                rf.fovY = L.fovY;
+                rf.portal = &portal;
+                rf.cycle = portal.Valid() ? &cycle : nullptr;
+                rf.twistDeg = twist;
+                rf.levelSec = 16.0;
+                rf.levels = 3;
+                rf.clampLevels = L.railDroste;
+                rf.viewAt = [](const std::string&) -> const JsonValue* { return nullptr; };
+                const bool resolved = read && rail.Resolve(rf, &why);
+                g.True(resolved, (std::string("[rail] ") + rc.name + " resolves: " + why).c_str());
+                if (!resolved) continue;
+                g.True(rail.Tower() == rc.tower, "[rail] the file says whether it is a tower rail");
+                const bool tower = rail.Tower() && portal.Valid();
+                auto sameCam = [&](const Camera& a, const Camera& b) {
+                    return a.px == b.px && a.py == b.py && a.pz == b.pz && a.yaw == b.yaw &&
+                           a.pitch == b.pitch && a.fovY == b.fovY && a.nearZ == b.nearZ &&
+                           a.speed == b.speed && a.upHint[0] == b.upHint[0] &&
+                           a.upHint[1] == b.upHint[1] && a.upHint[2] == b.upHint[2];
+                };
+                uint64_t bad = 0, n = 0;
+                auto probeAt = [&](double t) {
+                    Camera cam0 = L.camGlobe;   // the live camera: what the rail writes into
+                    Camera a = cam0, b = cam0;
+                    int levelA = 0, levelB = 0;
+                    double upA[3] = {0.0, 1.0, 0.0}, upB[3] = {0.0, 1.0, 0.0};
+                    bool upWA = false;
+                    if (tower) {
+                        L.drosteRailPose(t, a, levelA, upA);
+                        upWA = true;
+                    } else {
+                        L.railPose(t, a);
+                    }
+                    const RailSample s = tower ? rail.At(t) : rail.KeysAt(t);
+                    Rail::AimCamera(s, b);
+                    if (tower) {
+                        levelB = s.level;
+                        for (int k = 0; k < 3; ++k) upB[k] = s.up[k];
+                    }
+                    ++n;
+                    const bool same = sameCam(a, b) && levelA == levelB && upWA == s.upWritten &&
+                                      (!tower || (upA[0] == upB[0] && upA[1] == upB[1] && upA[2] == upB[2]));
+                    if (!same) ++bad;
+                    if (!tower) {
+                        // For a plain rail At and KeysAt are one law (one open keys segment).
+                        Camera c = cam0;
+                        Rail::AimCamera(rail.At(t), c);
+                        if (!sameCam(b, c)) ++bad;
+                    }
+                };
+                for (int i = 0; i < 1000; ++i) probeAt(double(i) * (rc.length + 5.0) / 999.0);
+                for (int k = 0; k < 3000; ++k) probeAt(double(k) / 30.0);   // the recorded instants
+                railInstants += static_cast<int>(n);
+                railBits += bad;
+                char what[160];
+                snprintf(what, sizeof what, "[rail] %s (twist %.0f): Rail::At == the hand tables' pose, level and up at %llu instants, bitwise",
+                         rc.name, twist, static_cast<unsigned long long>(n));
+                g.True(bad == 0, what);
+                ++railCases;
+            }
+        }
+        // The laws' own identities: a leg run down is the same leg with the ends swapped, and
+        // the dive's clock clamps only when told to.
+        for (int i = 0; i <= 64; ++i) {
+            const double tau = 32.0 * double(i) / 64.0;
+            g.Same(0.0 - Rail::LegU(tau, 32.0, 0.0 - 2.0), Rail::LegU(tau, 32.0, 2.0), "[rail] a leg 0 -> 2 is legU");
+            g.Same(2.0 - Rail::LegU(tau, 32.0, 2.0 - 0.0), 2.0 - Rail::LegU(tau, 32.0, 2.0), "[rail] a leg 2 -> 0 is 2 - legU");
+        }
+        g.Same(Rail::DiveU(100.0, 16.0, 3, true), 3.0, "[rail] the dive clamps at its levels when the rail ends on a helm");
+        g.True(Rail::DiveU(100.0, 16.0, 3, false) > 3.0, "[rail] ...and runs on when it does not");
+        Log("[rail] %d rail cases held against the hand tables at %d instants (%llu differed); the printed "
+            "tables written to out/rails_printed/", railCases, railInstants,
+            static_cast<unsigned long long>(railBits));
+
+        // (B) THE PORTAL NODE: its cycle IS the session's declaration -- Space::Cycle over the
+        // tangent space with Placement::Similar of the link BuildPortal resolved.
+        {
+            const PoseFrame fr = FrameFromAnchor(BathyModel::kOrgLat, BathyModel::kOrgLon, R);
+            Space planet, tangent;
+            planet.name = "planet.re";
+            planet.unitM = R;
+            tangent.name = "tangent.merrimack";
+            tangent.unitM = R;
+            tangent.parent = &planet;
+            const double anchor[3] = {fr.up[0] * R, fr.up[1] * R, fr.up[2] * R};
+            tangent.link = Placement::Frame(fr.east, fr.up, fr.north, anchor);
+            Portal node;
+            node.Declared().name = "droste";
+            Portal::Observers po;
+            po.east = fr.east;
+            po.up = fr.up;
+            po.north = fr.north;
+            po.planetR = R;
+            po.compositor = nullptr;   // no ground: the leaf's ground reads 0 here
+            po.hgtCh = -1;
+            po.tangent = &tangent;
+            po.globe = true;
+            po.marsMode = false;
+            g.True(node.Configure(po).size() == 1, "[portal] Configure reports the one observer it was not given (the ground)");
+            g.True(node.Build() && node.Valid(), "[portal] the node builds the link from its declaration");
+            const droste::Portal& link = node.Link();
+            const droste::Portal ref = [&] {
+                double pd[3];
+                GlobeModel::LatLonDir(42.81826, -70.80045, pd);
+                int lf = 0;
+                uint32_t lix = 0, liy = 0;
+                GlobeLayer::LeafOf(pd, 16, lf, lix, liy);
+                double ld[3];
+                GlobeLayer::LeafDir(lf, 16, lix, liy, ld);
+                const double axisN[3] = {0.0, 0.0, 1.0};
+                return droste::BuildPortal(lf, 16, lix, liy, ld, fr.east, fr.up, fr.north, R, 0.0, 1.0,
+                                           axisN, 90.0 * kPiL / 180.0);
+            }();
+            g.Same(link.s, ref.s, "[portal] the link IS BuildPortal's (s)");
+            for (int k = 0; k < 3; ++k) {
+                g.Same(link.p[k], ref.p[k], "[portal] the link IS BuildPortal's (fixed point)");
+                g.Same(link.centre[k], ref.centre[k], "[portal] the link IS BuildPortal's (centre)");
+            }
+            g.True(node.Cycle().parent == &tangent, "[portal] the cycle hangs under the tangent space");
+            g.Same(node.Cycle().unitM, tangent.unitM, "[portal] the cycle inherits the tangent's unit length");
+            SamePlacement(g, node.Cycle().link,
+                          Placement::Similar(link.p, link.s, link.axis, link.twist),
+                          "[portal] the cycle's link is Similar(p, s, axis, twist) of the portal");
+            g.True(&node.Props() == &PortalSchema(), "[portal] a Portal's Schema IS the portals section's table");
+            Portal off;
+            off.Declared().enabled = false;
+            off.Configure(po);
+            g.True(!off.Build() && !off.Valid(), "[portal] a disabled portal builds no link");
+            Portal mars;
+            Portal::Observers pm = po;
+            pm.marsMode = true;
+            mars.Configure(pm);
+            g.True(!mars.Build() && !mars.Valid(), "[portal] Mars has no tower");
+        }
+
+        // (C) THE EFFECT: the slice plane's edge registered and validated with the rest of the AST.
+        {
+            SlicePlane fx;
+            fx.Declare("slice", true, 2.0);
+            g.True(fx.Inputs().size() == 1 && fx.Inputs()[0].name == "user.plane" &&
+                       fx.Outputs().size() == 1 && fx.Outputs()[0].name == "slice",
+                   "[effect] slice.plane declares its ports");
+            fx.RegisterEdges();
+            bool found = false;
+            for (const ga::ast::Edge& e : ga::ast::Edges()) {
+                if (strcmp(e.from, "user.plane") == 0 && strcmp(e.to, "globe.ps") == 0 &&
+                    strcmp(e.field, "slice") == 0) {
+                    found = true;
+                    g.True(!e.flip && strcmp(e.src.space, "world.m") == 0 && e.src.vNorth && e.dst.vNorth,
+                           "[effect] the edge is the hand table's row (frames, no flip)");
+                }
+            }
+            g.True(found, "[effect] RegisterEdges registered user.plane -> globe.ps 'slice'");
+            g.True(ga::ast::Validate(), "[effect] the AST validates with the effect's edge in it");
+            g.True(&fx.Props() == &SlicePlaneSchema(), "[effect] a SlicePlane's Schema IS the effects section's typed table");
+            g.Same(fx.Declared().d, 2.0, "[effect] Declare carries the offset");
+        }
+
+        // (D) THE ENTITY's freshness fields default to today's behaviour: no cadence, no mirror.
+        {
+            Entity e;
+            g.Same(e.Declared().mirrorCadence, 0.0, "[entity] mirrorCadence defaults to 0 = never (today's cost)");
+            g.True(!e.Active() && !e.Helming(), "[entity] a node without a hull is inert");
+            const PropDecl* mc = EntitySchema().Find("mirrorCadence");
+            g.True(mc && mc->quantity == Quantity::Time && mc->unit.toCanonical == 1.0,
+                   "[entity] the entities section declares mirrorCadence in seconds");
+            WeatherManager wm;
+            g.True(std::isinf(wm.MirrorCadence()), "[entity] the manager's cadence is infinite by default (never)");
+            wm.SetMirrorCadence(0.0);
+            g.True(std::isinf(wm.MirrorCadence()), "[entity] SetMirrorCadence(0) is never");
+            wm.SetMirrorCadence(1.0);
+            g.Same(wm.MirrorCadence(), 1.0, "[entity] SetMirrorCadence(1) is one second");
+            g.Same(wm.MirrorAsOf(), WeatherManager::kNeverRead, "[entity] no mirror was read: asOf is never");
+            FrameInfo fi;
+            g.True(fi.asOf == 0.0 && fi.quanta == 0, "[entity] FrameInfo carries asOf and the clock's quanta");
+            TreeWater tw;
+            tw.Configure(&wm, nullptr, nullptr, nullptr, 1.0, 1.0, 1.0);
+            g.Has(tw.Describe(120.0, -10.0, 0.0), "mirror never read", "[entity] TreeWater::Describe reports the mirror's age (never)");
+        }
+    }
+
     if (g.ok) {
         Log("[scene] ---- PASS (%d checks): Registry<T> == VesselRegistry / LoaderRegistry on the "
             "built-in kinds, the property table (defaults, units through GaUnits, the Velocity-"
@@ -1153,7 +1923,10 @@ bool RunSceneSelfTest() {
             "itself, and [water] the one Apply (the two tables held equal, the reload law's "
             "revert-to-default, the refusals, the Restart key, idempotence), and [fold] the "
             "fixed point (an unnamed list replaced whole, `\"base\": \"\"` as no base, "
-            "Resolved -> WriteJson -> Load -> Resolve the identity) ----",
+            "Resolved -> WriteJson -> Load -> Resolve the identity), and the nodes of 5e -- "
+            "[rail] the shipped rails printed equal to their files and Rail::At bitwise against "
+            "the hand tables, [portal] the cycle as the session declared it, [effect] the slice "
+            "plane's edge in a valid AST, [entity] the freshness defaults ----",
             g.checks);
     } else {
         Log("[scene] ---- FAIL (%d checks) ----", g.checks);
