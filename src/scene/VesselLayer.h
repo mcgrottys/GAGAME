@@ -38,6 +38,9 @@ public:
     // Per frame, before RenderFrame: rebuild the part list from the vessels the sim is stepping.
     // Copied rather than referenced -- the physics tick and the frame do not share a clock.
     void SetVessels(const Vessel* const* vessels, int count);
+    // ...each in its own space: frames[i] is that space's placement in the root's frame (a hull
+    // carried through a gate). A null array is the root for every hull, byte for byte.
+    void SetVessels(const Vessel* const* vessels, const Motor* frames, int count);
 
     uint32_t PartCount() const { return static_cast<uint32_t>(m_parts.size()); }
 

@@ -105,13 +105,16 @@ build\bin\gagame.exe scenes\recipes\storm_rail.json --set capture.frames=1200 --
   seconds — 0 = never read the solver's mirror, the shipped physics), `portals[droste]` (`lat`,
   `lon`, `level`, `fill`, `twistDeg`, `lighting`, and the optional destination `toLat`/`toLon`: the
   place the inner globe presents where the root shows the leaf), `effects[slice.plane]`.
-- **Play: the Haulover portal.** `build\bin\gagame.exe scenes\demos\haulover_portal.json` opens a
-  window at the helm of the RHIB in the Merrimack entrance, the Droste portal dead ahead with Baker's
-  Haulover Inlet on the face toward you. Helm: W/S throttles, A/D steer, Q/E split the levers,
-  Shift/Ctrl trim. T leaves the helm for the free camera (W A S D, Q/E down/up, right mouse to look,
-  wheel for speed) and returns to it; fly into the globe's west face and the frame re-roots over
-  Haulover at full scale. The boat cannot follow: the portal shrinks what enters it by 4.9 decades,
-  and only the camera's scale floats. The file's `_readme` carries the rest.
+- **Gates** (`gates[]`): a cuboid in the root's flat frame (`at` {x, alt, z, az}, `size` [across, up,
+  along]) whose far side is a place on the same planet (`toLat`, `toLon`, and the heading `toAz`). A
+  hull whose centre of gravity enters the box is carried by one motor into the destination's own
+  tangent space, still moving, its height above its own water kept; nothing else moves, and the
+  destination has no box, so anyone there sees the boat appear.
+- **Play: the Haulover gate.** `build\bin\gagame.exe scenes\demos\haulover_portal.json` opens a window at the helm of the
+  RHIB in the Merrimack entrance with a gate across the channel ahead. Helm: W/S throttles, A/D steer,
+  Q/E split the levers, Shift/Ctrl trim; T leaves the helm for the free camera and returns. Drive
+  into the box and you come out of Baker's Haulover Inlet heading out to sea. Haulover renders only
+  as well as the engine's data there (its global relief floods the barrier island).
 - **Hot reload:** every file the fold read, plus the active rail, is watched. Save one and the log
   prints `[scene] reload: <files> <n> fields changed (<k> hot, <r> restart) FNV-1a <state>`; a key
   marked `restart` in `docs/scene_schema.json` is reported and not applied, a removed key returns to

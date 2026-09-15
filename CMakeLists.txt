@@ -77,6 +77,7 @@ add_executable(gagame
   src/scene/Rail.cpp
   src/scene/Entity.cpp
   src/scene/Portal.cpp
+  src/scene/Gateway.cpp
   src/scene/effects/SlicePlane.cpp
   src/scene/SceneTest.cpp
   src/scene/SkyLayer.cpp

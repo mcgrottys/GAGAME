@@ -65,6 +65,12 @@ public:
         PropValue v;
         if (Read(key, v)) f = static_cast<uint32_t>(v.n);
     }
+    void D3(const char* key, double f[3]) {
+        PropValue v;
+        if (Read(key, v)) {
+            for (int k = 0; k < 3; ++k) f[k] = v.v[k];
+        }
+    }
     void Enum(const char* key, int& f) {
         PropValue v;
         if (Read(key, v)) f = v.e;
@@ -241,6 +247,25 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             r.Enum("lighting", p.p.lighting);
             if (!ok) return false;
             out.portals.push_back(std::move(p));
+        }
+    }
+    if (const JsonValue* a = ListOf(doc, "gates")) {
+        const PropDecl* decl = root.Find("gates");
+        for (const JsonValue& e : a->arr) {
+            SceneGate g;
+            ElementReader r(scene::ElementChain(*decl, e), e, "gates", why, &ok);
+            r.Str("name", g.p.name);
+            r.Bool("enabled", g.p.enabled);
+            r.D3("size", g.p.size);
+            r.F64("toLat", g.p.toLat);
+            r.F64("toLon", g.p.toLon);
+            r.F64("toAz", g.p.toAz);
+            if (const JsonValue* at = e.Get("at")) {
+                g.hasAt = true;
+                g.at = *at;
+            }
+            if (!ok) return false;
+            out.gates.push_back(std::move(g));
         }
     }
     if (const JsonValue* a = ListOf(doc, "entities")) {

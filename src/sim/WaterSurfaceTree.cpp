@@ -43,6 +43,34 @@ void TreeWater::Configure(const WeatherManager* wx, const WaveField* wave, const
     m_waveChop = (waveChop > 0.0) ? waveChop : 1.0;
 }
 
+void TreeWater::SetChart(const Space::Anchor* chart) {
+    m_hasChart = chart != nullptr;
+    if (chart) m_chart = *chart;
+    m_memoX = 1e30;   // the memo belongs to the chart it was asked in
+    m_memoZ = 1e30;
+    m_memoT = -1e30;
+}
+
+void TreeWater::PlaceOf(double wx, double wz, double& latDeg, double& lonDeg) const {
+    if (m_hasChart) {
+        m_chart.LatLonOf(wx, wz, latDeg, lonDeg);
+    } else {
+        LatLonOf(wx, wz, latDeg, lonDeg);
+    }
+}
+
+void TreeWater::RootOf(double wx, double wz, double& rx, double& rz) const {
+    if (!m_hasChart) {
+        rx = wx;
+        rz = wz;
+        return;
+    }
+    double la = 0.0, lo = 0.0;
+    m_chart.LatLonOf(wx, wz, la, lo);
+    rx = (lo - BathyModel::kOrgLon) * BathyModel::kMPerLon;
+    rz = (la - BathyModel::kOrgLat) * BathyModel::kMPerLat;
+}
+
 void TreeWater::SetBoats(const WakeBoat* boats, int count) {
     m_boatCount = (std::min)((std::max)(count, 0), 8);
     for (int i = 0; i < m_boatCount; ++i) m_boats[i] = boats[i];
@@ -79,7 +107,7 @@ const WeatherSample& TreeWater::SlowAt(double wx, double wz, double simUnix) con
         // Ask at the CELL CENTRE, not at the caller's point: then every station in the cell gets
         // the same answer regardless of which one asked first, so the hull's forces do not
         // depend on the order its elements happen to be evaluated in.
-        LatLonOf((cx + 0.5) * kSlowCellM, (cz + 0.5) * kSlowCellM, latDeg, lonDeg);
+        PlaceOf((cx + 0.5) * kSlowCellM, (cz + 0.5) * kSlowCellM, latDeg, lonDeg);
         m_memo = m_wx->Query(latDeg, lonDeg, simUnix, 1.0);
         m_memoX = cx;
         m_memoZ = cz;
@@ -126,7 +154,9 @@ SurfaceSample TreeWater::At(double wx, double wz, double simUnix) const {
     // cascades own entire, exactly as they do everywhere outside the window -- so wWin starts
     // at zero and is raised only by a probe that answered. Streaming then changes WHICH
     // description carries the sea, never HOW MUCH sea there is.
-    const double wGeom = WindowWeight(wx, wz);
+    double rwx = 0.0, rwz = 0.0;   // this point in the root's flat frame (the window, the wakes)
+    RootOf(wx, wz, rwx, rwz);
+    const double wGeom = WindowWeight(rwx, rwz);
     double wWin = 0.0;
 
     double dispX = 0.0, dispY = 0.0, dispZ = 0.0;   // wave displacement, physical metres
@@ -134,7 +164,7 @@ SurfaceSample TreeWater::At(double wx, double wz, double simUnix) const {
     double orbX = 0.0, orbY = 0.0, orbZ = 0.0;
 
     if (wGeom > 0.001 && m_wave) {
-        const WaveField::Probe p = m_wave->ProbeAt(wx, wz, simUnix);
+        const WaveField::Probe p = m_wave->ProbeAt(rwx, rwz, simUnix);
         if (p.valid) {
             wWin = wGeom;
             dispY += wWin * double(p.eta);
@@ -189,7 +219,7 @@ SurfaceSample TreeWater::At(double wx, double wz, double simUnix) const {
             WakeVessel v;
             v.x = b.x; v.z = b.z; v.heading = b.headingRad; v.speed = b.speedMs;
             v.wakeAmp = b.ampM; v.hullHalfLen = b.halfLenM; v.enabled = true;
-            WakeOne(v, wx, wz, m_sampleM, w);
+            WakeOne(v, rwx, rwz, m_sampleM, w);
         }
         // The bank adds the wake to d.y BEFORE the exaggeration multiplies the total, so the
         // wake is exaggerated with everything else. Matching that is what keeps a hull riding

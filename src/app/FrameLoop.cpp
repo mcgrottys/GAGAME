@@ -644,6 +644,26 @@ std::optional<int> FrameLoop::Session() {
         m_portalNode.Configure(po);
         m_portalNode.Init(gpu);
     }
+    // ---- THE GATES (scene/Gateway.h): each box in the root's flat frame, its far side a tangent
+    // space of the same planet, one motor between them.
+    for (const SceneGate& gd : S.gates) {
+        if (!gd.p.enabled || marsMode) continue;
+        scene::PoseSugar gs;
+        std::string gwhy = "no `at` declared";
+        if (!gd.hasAt ||
+            !scene::ReadPoseSugar(gd.at, "gates." + gd.p.name + ".at", gs, &gwhy) ||
+            gs.kind != scene::PoseSugar::Kind::Compass) {
+            Log("[gate] '%s' needs its box in the compass sugar {x, alt, z, az} (%s) -- not built",
+                gd.p.name.c_str(), gwhy.c_str());
+            continue;
+        }
+        auto gate = std::make_unique<scene::Gateway>();
+        gate->Declared() = gd.p;
+        if (gate->Build(m_planetSpace, m_tangentSpace, planetR, gs.x, gs.alt, gs.z,
+                        gd.at.Get("az") ? gs.az : 0.0)) {
+            m_gates.push_back(std::move(gate));
+        }
+    }
     // M12 step 4g: the composed-surface rows are filled once a FRAME, into the renderer's one
     // surface buffer (b2), in Frame() beside the renderer's other per-frame members -- where
     // this block filled the terrain's, the sea's and the GIS layer's copies once, at boot
@@ -1254,6 +1274,7 @@ std::optional<int> FrameLoop::Session() {
         eo.waterScene = &waterScene;
         eo.vesselLayer = vesselLayer;
         eo.gpu = &gpu;
+        eo.gates = &m_gates;
         e->Configure(eo);
     }
 
@@ -1458,7 +1479,22 @@ void FrameLoop::StepEntities(int quanta, float dt) {
     if (m_followed && m_followed->Helming() && m_followed->Placed()) {
         double p[3], f[3];
         m_followed->ChaseFrame(p, f);
-        scene::View::Follow(m_startView.p.follow, p, f, m_cam);
+        if (m_followed->InSpace() == nullptr) {
+            scene::View::Follow(m_startView.p.follow, p, f, m_cam);
+        } else {
+            // A hull in another space: the same chase, said in ITS frame (y is its up), and the
+            // eye and the aim carried into the root's frame by that space's placement.
+            const scene::FollowProps& fw = m_startView.p.follow;
+            double eye[3] = {p[0] - f[0] * fw.back, p[1] + fw.up, p[2] - f[2] * fw.back};
+            double aim[3] = {p[0], p[1] + fw.aimLift, p[2]};
+            const Motor& W = m_followed->SpaceInRoot();
+            W.TransformPoint(eye[0], eye[1], eye[2]);
+            W.TransformPoint(aim[0], aim[1], aim[2]);
+            m_cam.px = eye[0];
+            m_cam.py = eye[1];
+            m_cam.pz = eye[2];
+            m_cam.LookAt(aim[0], aim[1], aim[2]);
+        }
         // THE CHASE EYE'S LEVEL IS THE HULL'S. A camera belongs to the ground its SUBJECT would
         // fall onto: the free eye is its own subject and re-roots with the Droste gauge; a chase
         // eye's subject is the hull, which lives in the root's flat frame -- as do the vessel

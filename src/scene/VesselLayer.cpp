@@ -40,12 +40,16 @@ void Emit(std::vector<VesselLayer::PartGpu>& out, const Motor& hull, const Motor
 }  // namespace
 
 void VesselLayer::SetVessels(const Vessel* const* vessels, int count) {
+    SetVessels(vessels, nullptr, count);
+}
+
+void VesselLayer::SetVessels(const Vessel* const* vessels, const Motor* frames, int count) {
     m_parts.clear();
     if (!vessels) return;
     for (int i = 0; i < count; ++i) {
         const Vessel* v = vessels[i];
         if (!v) continue;
-        const Motor hull = v->Body().pose;
+        const Motor hull = frames ? frames[i] * v->Body().pose : v->Body().pose;
         const VesselSpec& spec = v->Spec();
 
         for (const Element& e : spec.elements) {

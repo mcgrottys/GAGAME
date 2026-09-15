@@ -69,6 +69,8 @@ struct WaterSceneConfig;
 
 namespace ga::scene {
 
+class Gateway;
+
 class Entity final : public Component {
 public:
     // The water the hull reads and the layer that draws it. Every one nullable: absence is
@@ -82,6 +84,10 @@ public:
         const WaterSceneConfig* waterScene = nullptr;   // wfExag / wfChop, live (hot-reloaded)
         VesselLayer* vesselLayer = nullptr;
         Gpu* gpu = nullptr;                       // the mirror refresh's readback
+        // The gates a hull in the ROOT space can be carried through (scene/Gateway.h). Tested
+        // inside the step, before the hull is published to the vessel layer, so the frame that
+        // carries it draws it where it now is.
+        const std::vector<std::unique_ptr<Gateway>>* gates = nullptr;
     };
 
     // ---- Component -------------------------------------------------------------------------
@@ -124,7 +130,18 @@ public:
     // THE CLOCK POLICY: a deliberate time jump resets the hull to rest at its last pose.
     void ResetAtRest();
     // The hull's origin and horizontal heading, for the chase camera; keeps helmYawRef.
+    // In the hull's OWN space (the root's, until a gate carries it).
     void ChaseFrame(double p[3], double f[3]);
+
+    // ---- THE GATE (scene/Gateway.h) --------------------------------------------------------------
+    // The space the hull lives in: null is the root tangent space. After a gate, the destination.
+    const Space* InSpace() const { return m_space; }
+    // That space's placement in the root's frame (identity when it is the root).
+    const Motor& SpaceInRoot() const { return m_spaceInRoot; }
+    // Carry the hull through `gate`: pose and momenta by the gate's motor, the free surface onto
+    // the free surface (the hull keeps its height above its own water), the water read through
+    // the destination's chart. Returns false when there is no hull to carry.
+    bool Teleport(const Gateway& gate, double simUnix);
     // The hull steps' wall time this Update (the frame loop's profiler slot).
     double LastStepMs() const { return m_stepMs; }
     // The declared cadence, seconds; 0 = never (today's behaviour).
@@ -153,6 +170,8 @@ private:
     int m_quantaOwed = 0;        // the 240 Hz quanta owed to the 60 Hz hull step
     int m_telTick = 0;           // one telemetry line a second
     double m_stepMs = 0.0;
+    const Space* m_space = nullptr;   // null = the root tangent space
+    Motor m_spaceInRoot;               // identity until a gate carries the hull
 };
 
 }  // namespace ga::scene

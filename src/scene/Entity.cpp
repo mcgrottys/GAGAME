@@ -1,5 +1,6 @@
 // Entity - the vessel node: the session's boat block and stepBoat, verbatim (M12 step 5e).
 #include "scene/Entity.h"
+#include "scene/Gateway.h"
 
 #include "core/Common.h"
 #include "core/SceneConfig.h"
@@ -192,6 +193,42 @@ void Entity::ResetAtRest() {
     }
 }
 
+bool Entity::Teleport(const Gateway& gate, double simUnix) {
+    if (!m_boat) return false;
+    RigidBody& b = m_boat->Body();
+    double c0[3] = {0.0, 0.0, 0.0};
+    b.pose.TransformPoint(c0[0], c0[1], c0[2]);
+    double la0 = 0.0, lo0 = 0.0;
+    m_sea.PlaceOf(c0[0], c0[2], la0, lo0);
+    const SurfaceSample s0 = m_sea.At(c0[0], c0[2], simUnix);
+    // ONE PRODUCT: the pose and the momenta, by the gate's motor.
+    b.Carry(gate.Carry());
+    m_space = &gate.Destination();
+    m_spaceInRoot = gate.DestinationInSource();
+    m_sea.SetChart(&gate.Chart());   // the same sparse water, read at the destination's places
+    double c1[3] = {0.0, 0.0, 0.0};
+    b.pose.TransformPoint(c1[0], c1[1], c1[2]);
+    const SurfaceSample s1 = m_sea.At(c1[0], c1[2], simUnix);
+    // THE FREE SURFACE ONTO THE FREE SURFACE. Both boxes sit at their own spaces' datum, and the
+    // two seas stand at their own heights this instant (two tides, two sea states): the hull keeps
+    // its height above ITS water, or it arrives as a drop or a plunge and the buoyancy impulse
+    // capsizes it (the set-down's own finding). A translation of the pose; the momenta stand.
+    double lift = 0.0;
+    if (s0.valid && s1.valid) {
+        lift = s1.heightNavd - s0.heightNavd;
+        b.pose = Motor::Translation(0.0, lift, 0.0) * b.pose;
+    }
+    double la1 = 0.0, lo1 = 0.0;
+    m_sea.PlaceOf(c1[0], c1[2], la1, lo1);
+    Log("[gate] '%s' carried '%s' from %.5f N %.5f E to %.5f N %.5f E (%s): surface %+.3f -> %+.3f m, "
+        "lifted %+.3f m%s",
+        gate.Declared().name.c_str(), m_props.name.c_str(), la0, lo0, la1, lo1,
+        gate.Destination().name.c_str(), s0.valid ? s0.heightNavd : 0.0,
+        s1.valid ? s1.heightNavd : 0.0, lift,
+        (s0.valid && s1.valid) ? "" : " (a surface did not answer: no lift applied)");
+    return true;
+}
+
 void Entity::ChaseFrame(double p[3], double f[3]) {
     auto& boat = m_boat;
     auto& helmYawRef = m_helmYawRef;
@@ -331,8 +368,27 @@ void Entity::Update(const FrameInfo& fi) {
     if (!boat->Body().Sane()) boatCtl = VesselControls{};
     m_stepMs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1000.0;
 
+    // THE GATES: a hull whose centre of gravity is inside a box of ITS space is carried. A gate
+    // stands in the root's frame, so a carried hull (in a destination space) meets none: one-way
+    // by construction.
+    if (!m_space && m_o.gates) {
+        double cg[3] = {0.0, 0.0, 0.0};
+        boat->Body().pose.TransformPoint(cg[0], cg[1], cg[2]);
+        for (const auto& g : *m_o.gates) {
+            if (g && g->Inside(cg[0], cg[1], cg[2])) {
+                Teleport(*g, simUnix);
+                break;
+            }
+        }
+    }
     const Vessel* vs[1] = {boat.get()};
-    if (vesselLayer) vesselLayer->SetVessels(vs, 1);
+    if (vesselLayer) {
+        if (m_space) {
+            vesselLayer->SetVessels(vs, &m_spaceInRoot, 1);   // drawn in the root, from its space
+        } else {
+            vesselLayer->SetVessels(vs, 1);
+        }
+    }
 
     // One telemetry line a second. Cheap, and it is the only way to tell a hull that is
     // floating wrong from one that is not being DRAWN.

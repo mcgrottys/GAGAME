@@ -199,6 +199,7 @@
     "droste": {"levelSec": 16, "levels": 3}
   },
   "portals": [],
+  "gates": [],
   "entities": [
     {
       "name": "boat",

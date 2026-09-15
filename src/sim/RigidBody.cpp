@@ -83,6 +83,13 @@ void RigidBody::DeriveTwist() {
     TwistAt(pose, m_twist);
 }
 
+void RigidBody::Carry(const Motor& K) {
+    pose = K * pose;
+    K.TransformDir(m_Lw[0], m_Lw[1], m_Lw[2]);
+    K.TransformDir(m_Pw[0], m_Pw[1], m_Pw[2]);
+    DeriveTwist();
+}
+
 void RigidBody::SetTwist(const Bivector& t) {
     double Ie[3][3];
     EffectiveInertia(Ie);

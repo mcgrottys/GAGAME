@@ -71,6 +71,8 @@
 // trusted (priors 22). The three checks of block 11 were seen to fail with BOTH step 5d fixes
 // reverted (the unnamed list appended, `"base": ""` refused) before they were trusted.
 #include "app/Options.h"
+#include "scene/Gateway.h"
+#include "sim/RigidBody.h"
 #include "core/Common.h"
 #include "core/CurrentFieldLoader.h"
 #include "core/Droste.h"
@@ -1999,6 +2001,98 @@ bool RunSceneSelfTest() {
             TreeWater tw;
             tw.Configure(&wm, nullptr, nullptr, nullptr, 1.0, 1.0, 1.0);
             g.Has(tw.Describe(120.0, -10.0, 0.0), "mirror never read", "[entity] TreeWater::Describe reports the mirror's age (never)");
+        }
+
+        // (E) THE GATE: one motor carries a body from a box to a place on the same planet.
+        {
+            const PoseFrame frM = FrameFromAnchor(BathyModel::kOrgLat, BathyModel::kOrgLon, R);
+            Space planetG, rootG;
+            planetG.name = "planet.re";
+            planetG.unitM = R;
+            planetG.extentM = 2.0 * R;
+            rootG.name = "tangent.merrimack";
+            rootG.unitM = R;
+            rootG.extentM = 2.0 * R;
+            rootG.parent = &planetG;
+            const double anchorM[3] = {frM.up[0] * R, frM.up[1] * R, frM.up[2] * R};
+            rootG.link = Placement::Frame(frM.east, frM.up, frM.north, anchorM);
+            Gateway gate;
+            gate.Declared().name = "haulover";
+            gate.Declared().toLat = 25.8997;
+            gate.Declared().toLon = -80.1239;
+            gate.Declared().toAz = 90.0;
+            g.True(gate.Build(planetG, rootG, R, 600.0, 0.0, -10.0, 90.0) && gate.Valid(),
+                   "[gate] a box at the inlet builds its carry to Haulover");
+            // The box: its centre and its forward face.
+            g.True(gate.Inside(600.0, 0.0, -10.0), "[gate] the box's centre is inside");
+            g.True(gate.Inside(603.9, 14.9, 19.9) && !gate.Inside(604.1, 0.0, -10.0) &&
+                       !gate.Inside(600.0, 15.1, -10.0) && !gate.Inside(600.0, 0.0, 20.1),
+                   "[gate] ...and the default 60 x 30 x 8 m box ends where its half-sizes do (heading east: depth along x, width along z)");
+            // THE CARRY: the entry box's centre lands on the destination's origin, and the box's
+            // forward (east, at az 90) leaves along the exit heading (east, toAz 90).
+            double cx = 600.0, cy = 0.0, cz = -10.0;
+            gate.Carry().TransformPoint(cx, cy, cz);
+            g.Near(std::fabs(cx) + std::fabs(cy) + std::fabs(cz), 0.0, 1e-9, "[gate] the box's centre lands on the destination's origin");
+            double fx = 1.0, fy = 0.0, fz = 0.0;
+            gate.Carry().TransformDir(fx, fy, fz);
+            g.Near(std::atan2(fx, fz) * 180.0 / kPiL, 90.0, 1e-9, "[gate] the box's forward leaves along the exit heading");
+            g.Near(fy, 0.0, 1e-12, "[gate] ...and stays level: both boxes are y-up in their own spaces");
+            // A body keeps its motion: momentum turned with the pose, the body twist unchanged.
+            RigidBody body;
+            body.pose = Motor::Translation(600.0, 0.2, -10.0);
+            Bivector tw0 = Bivector::Zero();
+            tw0.b[2] = 7.5;    // 7.5 m/s along its own bow (+z body)
+            tw0.a[1] = 0.1;    // yawing
+            body.SetTwist(tw0);
+            double p0[3];
+            body.LinearMomentumWorld(p0);
+            body.Carry(gate.Carry());
+            double p1[3];
+            body.LinearMomentumWorld(p1);
+            const Motor& K = gate.Carry();
+            double pk[3] = {p0[0], p0[1], p0[2]};
+            K.TransformDir(pk[0], pk[1], pk[2]);
+            g.Near(std::fabs(p1[0] - pk[0]) + std::fabs(p1[1] - pk[1]) + std::fabs(p1[2] - pk[2]), 0.0, 1e-9,
+                   "[gate] the carried body's world momentum is the old one turned by the carry");
+            const Bivector& tw1 = body.Twist();
+            g.Near(std::fabs(tw1.b[2] - 7.5) + std::fabs(tw1.a[1] - 0.1), 0.0, 1e-9,
+                   "[gate] ...and its body twist is unchanged: it moves in its own frame as it did");
+            // THE DESTINATION SPACE: its up at its origin is the planet's radial at the place.
+            const Placement W = gate.Destination().To(rootG);
+            double upD[3];
+            const double ey[3] = {0.0, 1.0, 0.0};
+            W.ApplyDir(ey, upD);
+            const PoseFrame frH = FrameFromAnchor(25.8997, -80.1239, R);
+            double upH[3];
+            rootG.link.Inverse().ApplyDir(frH.up, upH);
+            g.Near(std::fabs(upD[0] - upH[0]) + std::fabs(upD[1] - upH[1]) + std::fabs(upD[2] - upH[2]), 0.0, 1e-12,
+                   "[gate] the destination space's up is the planet's radial at Haulover");
+            const double tilt = std::acos((std::min)(1.0, upD[1])) * 180.0 / kPiL;
+            g.True(tilt > 17.0 && tilt < 20.0, "[gate] ...18-19 degrees from the Merrimack's (the arc between the inlets)");
+            double ox = 0.0, oy = 0.0, oz = 0.0;
+            gate.DestinationInSource().TransformPoint(ox, oy, oz);
+            double orig[3];
+            const double z0[3] = {0.0, 0.0, 0.0};
+            W.Apply(z0, orig);
+            g.Near(std::fabs(ox - orig[0]) + std::fabs(oy - orig[1]) + std::fabs(oz - orig[2]), 0.0, 1e-6,
+                   "[gate] the destination's motor places its origin where its placement does");
+            // THE CHART: the destination's places, round trip.
+            const Space::Anchor& ch = gate.Chart();
+            double la = 0.0, lo = 0.0, rx = 0.0, rz = 0.0;
+            ch.LatLonOf(1000.0, -500.0, la, lo);
+            ch.FlatOf(la, lo, rx, rz);
+            g.Near(std::fabs(rx - 1000.0) + std::fabs(rz + 500.0), 0.0, 1e-9, "[gate] the destination's chart round-trips");
+            g.Near(la, 25.8997 - 500.0 / 110574.0, 1e-12, "[gate] ...by the engine's law at the place");
+            // THE WATER: with no chart a TreeWater places a point by the root's constants, bitwise.
+            TreeWater twG;
+            double la0 = 0.0, lo0 = 0.0;
+            twG.PlaceOf(120.0, -10.0, la0, lo0);
+            g.True(la0 == BathyModel::kOrgLat + (-10.0) / BathyModel::kMPerLat &&
+                       lo0 == BathyModel::kOrgLon + 120.0 / BathyModel::kMPerLon,
+                   "[gate] a TreeWater with no chart places a point by the root's constants, bitwise");
+            twG.SetChart(&ch);
+            twG.PlaceOf(0.0, 0.0, la0, lo0);
+            g.True(la0 == 25.8997 && lo0 == -80.1239, "[gate] ...and through a gate's chart, at the destination's places");
         }
     }
 

@@ -115,6 +115,11 @@ public:
     const Bivector& Twist() const { return m_twist; }
     void SetTwist(const Bivector& t);            // sets the momenta to match, then re-derives
     void SetPose(const Motor& m) { pose = m; Rest(); }
+    // CARRIED BY A MOTOR (scene/Gateway.h): pose' = K pose, and the world momenta -- linear, and
+    // angular about the CG, neither of which a translation touches -- turned by K's rotation.
+    // The body twist is re-derived and comes out unchanged: a rigid change of where the body is
+    // does not change how it moves in its own frame.
+    void Carry(const Motor& K);
     // Rest, at the current pose. The clock policy calls this when the scene time jumps: a boat
     // cannot be integrated across a scrub, and pretending otherwise would launch it.
     void Rest();
