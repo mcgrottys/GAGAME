@@ -103,6 +103,10 @@ public:
     // opinion (no swell direction, outside the page) is exposed, the kernel's own absence law. Null:
     // no shadow reader, and the sea stands exposed.
     void SetSwellShadow(const PlaceField* shadow) { m_shadow = shadow; }
+    // THE BED THE WATER KERNELS READ (the water match, step 3): the height page's finest texels at a
+    // place (compose/HeightPage), for every depth law this water applies and the bed it reports. No
+    // opinion, or null: the slow field's bed (the stack at 1 m, per 8 m memo cell).
+    void SetBed(const PlaceField* bed) { m_bed = bed; }
 
     // THE CHART (the cuboid gate, 2026-09-14): the flat frame this water is read in. None (the
     // default) is the root's -- the ACT0816 constants, byte for byte. A hull carried through a
@@ -176,6 +180,9 @@ private:
     bool m_peakValid = false;
     bool m_storm = false;
     const PlaceField* m_shadow = nullptr;
+    const PlaceField* m_bed = nullptr;
+    // The bed at a place: the kernels' page (SetBed) or the slow field's.
+    double BedAt(const WeatherSample& q, double latDeg, double lonDeg) const;
     // The swell shadow at a place, by the kernel's law (SetSwellShadow).
     double ExposureAt(double latDeg, double lonDeg) const;
     WakeBoat m_boats[8];

@@ -370,11 +370,19 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         // M9ax: the whole tenant -- the z14 page where it is resident and fine, the cube face
         // everywhere else on the planet -- so shoaling, the current amplification and the
         // depth-limited breaking act on every coast the rings reach, not only inside one page.
-        // The rings are held to page mips >= 2 (their own texels are 1.2 m and up). The corner
-        // lerp above remains only for a bank with no height tenant at all.
+        // The corner lerp above remains only for a bank with no height tenant at all.
         const float lat = gGeoA.x + xz.y * gGeoA.z;
         const float lon = gGeoA.y + xz.x * gGeoA.w;
-        bed = HpHeightAt(gTA[gSlotsD.x], gTA[gSlotsD.y], lat, lon, gWinA, gSlotsD.z, 2.0f);
+        // THE BED AT THE RING'S OWN GRAIN (the water match, step 3): the page level whose texel is
+        // no finer than this ring's, floored to a whole level -- mip 0 (9.55 m of Mercator, ~7 m
+        // here) for the rings a hull and an eye stand in, rising with the coarse rings. The constant
+        // 2 it replaces ("their own texels are 1.2 m and up") held every ring to a z14 page's level
+        // 2 -- 28 m texels here -- and beside the jetty the depth laws saw the wall's 28 m average:
+        // the drawn sea stood at a dry weight of 0.14 where the hull, on a 1 m bed, stood at 1.0.
+        // compose/HeightPage gives a hull this bed at the finest level.
+        const float pageTexelM = kHpPageTexelM * cos(lat * 0.01745329252f);
+        const float bedMip = max(floor(log2(max(t.texelM / pageTexelM, 1.0f))), 0.0f);
+        bed = HpHeightAt(gTA[gSlotsD.x], gTA[gSlotsD.y], lat, lon, gWinA, gSlotsD.z, bedMip);
     }
 
     // THE LEVEL (the water match, step 1 -- the solver is truth). The atlas everywhere; inside the

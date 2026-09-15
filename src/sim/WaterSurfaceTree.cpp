@@ -158,13 +158,19 @@ bool TreeWater::BandGains(double wx, double wz, double simUnix, double gains[Oce
     if (!m_wx) return false;
     const WeatherSample q = MeanStateAt(wx, wz, simUnix);
     if (!(q.bedSrc && q.bedSrc[0] != '-') || !(q.levelSrc && q.levelSrc[0] != '-')) return false;
-    const double depth = q.levelNavd - double(q.bedNavd);
-    dry = wt::Smoothstep(0.05, 0.65, depth);
     double latDeg = 0.0, lonDeg = 0.0;
     PlaceOf(wx, wz, latDeg, lonDeg);
+    const double depth = q.levelNavd - BedAt(q, latDeg, lonDeg);
+    dry = wt::Smoothstep(0.05, 0.65, depth);
     const double hsScale = WaveScale::For(m_wx->Globe(), m_sea, m_storm, simUnix).At(latDeg, lonDeg);
     BandLaw(q, depth, hsScale, ExposureAt(latDeg, lonDeg), gains);
     return true;
+}
+
+double TreeWater::BedAt(const WeatherSample& q, double latDeg, double lonDeg) const {
+    double b = 0.0;
+    if (m_bed && m_bed->Read(latDeg, lonDeg, b)) return b;
+    return double(q.bedNavd);
 }
 
 double TreeWater::ExposureAt(double latDeg, double lonDeg) const {
@@ -193,7 +199,9 @@ SurfaceSample TreeWater::Evaluate(double wx, double wz, double simUnix, bool dis
     const bool haveLevel = q.levelSrc && q.levelSrc[0] != '-';
     if (!haveBed || !haveLevel) return s;
 
-    s.bedNavd = double(q.bedNavd);
+    double latDeg = 0.0, lonDeg = 0.0;
+    PlaceOf(wx, wz, latDeg, lonDeg);
+    s.bedNavd = BedAt(q, latDeg, lonDeg);   // the bed the kernels read (SetBed)
     s.heightNavd = q.levelNavd;             // mean surface: tide atlas + any solver refinement
     s.vx = double(q.u);                     // surface current, east
     s.vz = double(q.v);                     // surface current, north
@@ -203,10 +211,8 @@ SurfaceSample TreeWater::Evaluate(double wx, double wz, double simUnix, bool dis
     // The depth under the mean surface; the dry weight every displacement rides (the kernel's `dry`);
     // the local sea-state scale (WaveScale, the one law the bank's tile corners carry); the swell
     // shadow, the page texels the kernel read (ExposureAt).
-    const double depth = q.levelNavd - double(q.bedNavd);
+    const double depth = q.levelNavd - s.bedNavd;
     const double dry = wt::Smoothstep(0.05, 0.65, depth);
-    double latDeg = 0.0, lonDeg = 0.0;
-    PlaceOf(wx, wz, latDeg, lonDeg);
     const double expo = ExposureAt(latDeg, lonDeg);
     const double hsScale =
         WaveScale::For(m_wx->Globe(), m_sea, m_storm, simUnix).At(latDeg, lonDeg);
@@ -424,14 +430,17 @@ std::string TreeWater::Describe(double wx, double wz, double simUnix) const {
              scale.At(latDeg, lonDeg), m_storm ? "a declared storm is the reference" : "grid",
              scale.hsRef, m_peakValid ? "valid" : "none (wave-current gain 1)",
              m_shadow ? "the page's texels" : "NOT READ (exposed)", ExposureAt(latDeg, lonDeg));
+    char bedLaw[96];
+    snprintf(bedLaw, sizeof(bedLaw), "bed %s %+.2f m", m_bed ? "the page's texels" : "the slow field",
+             BedAt(q, latDeg, lonDeg));
     char buf[900];
     snprintf(buf, sizeof(buf),
              "water.tree @ (%.1f, %.1f) = %.5f/%.5f deg | bed %s | level %s | current %s | "
-             "wind %s | wWin %.3f | cascades %s | solved %s | exag %.3f | %s | %s",
+             "wind %s | wWin %.3f | cascades %s | solved %s | exag %.3f | %s | %s | %s",
              wx, wz, latDeg, lonDeg, q.bedSrc, q.levelSrc, q.currentSrc, q.windSrc,
              WindowWeight(wx, wz),
              (m_ocean && m_ocean->Ready()) ? "ready" : "ABSENT",
-             (m_wave && m_wave->Ready()) ? "ready" : "ABSENT", m_heightScale, laws, age);
+             (m_wave && m_wave->Ready()) ? "ready" : "ABSENT", m_heightScale, laws, bedLaw, age);
     return std::string(buf);
 }
 

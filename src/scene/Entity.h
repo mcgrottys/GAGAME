@@ -86,6 +86,9 @@ public:
         const std::vector<std::unique_ptr<Gateway>>* gates = nullptr;
         // The swell shadow the bank reads, for the hull's water (compose/ExposurePage). Null: exposed.
         const PlaceField* swellShadow = nullptr;
+        // The bed the water kernels read, for the hull's depth laws (compose/HeightPage). Null: the
+        // slow field's bed.
+        const PlaceField* bed = nullptr;
     };
 
     // ---- Component -------------------------------------------------------------------------

@@ -1289,6 +1289,7 @@ std::optional<int> FrameLoop::Session() {
         eo.gpu = &gpu;
         eo.gates = &m_gates;
         eo.swellShadow = m_A.exposureShadow.get();
+        eo.bed = m_A.heightBed.get();
         e->Configure(eo);
     }
 

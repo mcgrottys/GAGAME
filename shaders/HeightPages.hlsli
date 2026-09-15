@@ -58,8 +58,8 @@ uint HpCubeFace(float3 d, out float2 uv) {
 
 // The planet's height (m NAVD) at lat/lon (degrees). winA = the page's lattice row (org px x,
 // org px y, 1/kPageDim, world px at z14: Lattice::Rows); winSlice the page's slice; pageMipMin
-// the coarsest-allowed page mip a consumer wants to be held to (the bank rings ask 2, the
-// solver 0).
+// the coarsest-allowed page mip a consumer wants to be held to (the bank rings ask their own
+// grain -- mip 0 for the fine rings; the solver 0).
 float HpHeightAt(Texture2DArray<float4> arr, Texture2DArray<float4> res, float latDeg,
                  float lonDeg, float4 winA, uint winSlice, float pageMipMin) {
     const float latR = latDeg * 0.01745329252f;

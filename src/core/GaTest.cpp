@@ -1045,24 +1045,8 @@ bool RunGaSelfTest() {
     // random directions -> (face, uv) by the shader's arithmetic -> ComposeCubeDir -> the same
     // direction, to 1e-9, and the uv is inside the face.
     {
-        auto hpCubeFace = [](const double d[3], double uv[2]) -> uint32_t {
-            const double a[3] = {std::fabs(d[0]), std::fabs(d[1]), std::fabs(d[2])};
-            double sx, t;
-            uint32_t face;
-            if (a[0] >= a[1] && a[0] >= a[2]) {
-                if (d[0] > 0) { face = 0; sx = -d[2] / a[0]; t = -d[1] / a[0]; }
-                else          { face = 1; sx =  d[2] / a[0]; t = -d[1] / a[0]; }
-            } else if (a[1] >= a[2]) {
-                if (d[1] > 0) { face = 2; sx =  d[0] / a[1]; t =  d[2] / a[1]; }
-                else          { face = 3; sx =  d[0] / a[1]; t = -d[2] / a[1]; }
-            } else {
-                if (d[2] > 0) { face = 4; sx =  d[0] / a[2]; t = -d[1] / a[2]; }
-                else          { face = 5; sx = -d[0] / a[2]; t = -d[1] / a[2]; }
-            }
-            uv[0] = sx * 0.5 + 0.5;
-            uv[1] = t * 0.5 + 0.5;
-            return face;
-        };
+        // Lattice.h's CubeFaceOfDir: the one CPU port of the shader's inverse.
+        const auto hpCubeFace = [](const double d[3], double uv[2]) { return CubeFaceOfDir(d, uv); };
         std::mt19937 rng(0x9a5eedu);
         std::uniform_real_distribution<double> U(-1.0, 1.0);
         double worst = 0.0;

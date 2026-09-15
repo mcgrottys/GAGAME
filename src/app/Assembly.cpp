@@ -247,6 +247,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     auto& heightTenant = A->heightTenant;
     auto& exposureTenant = A->exposureTenant;
     auto& exposureShadow = A->exposureShadow;
+    auto& heightBed = A->heightBed;
     auto& colorTenant = A->colorTenant;
     auto& landseaTenant = A->landseaTenant;
     auto& idxColorCube = A->idxColorCube;
@@ -754,6 +755,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                                        "paint mercator page"});
                 heightTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(hd));
                 hgtTenant = heightTenant.Id();
+                // The same page's finest texels for a hull's depth laws (compose/HeightPage).
+                heightBed = std::make_unique<HeightPage>(&compositor, hgtCh, hWinL, hCubeL);
                 // M9bb: a fold or a drop below changed a root tile: the tenant refetches that
                 // address (the tree's tag names the slice) -- the one law, Tenant::Bind.
                 if (heightTree) heightTenant.Bind(*heightTree);
