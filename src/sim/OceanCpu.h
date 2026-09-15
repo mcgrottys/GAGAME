@@ -163,10 +163,11 @@ namespace ga {
 //  WHAT THE SLOPE IS NOT: the gradient with respect to WORLD position.  The choppy map sends
 //  (x, z) to (x + lambda*Dx, z + lambda*Dz), so the exact tangents of the DRAWN surface carry the
 //  chop's own gradient too, and the exact normal needs the Jacobian columns (Jxx, Jzz, Jxz).
-//  Those fall out of the same phasor for no extra transcendental and are deliberately NOT
-//  returned: the render ignores them as well, and a hull whose normal is built differently from
-//  the water it is drawn on is a bug that looks like tuning.  Add them the day something measures
-//  the difference and cares.
+//  Those fall out of the same phasor for no extra transcendental, and they are returned now (the
+//  water match, step 3): the mesh draws the displaced surface through its tangent bivector
+//  (GlobeMesh.hlsl, the fold guard), and --water-probe measured the hull reading the undisplaced
+//  one 0.14 m low under half-metre waves. (jxx, jxz, jzz) = (dDx/dx, dDx/dz = dDz/dx, dDz/dz),
+//  lambda in, like dx and dz.
 //
 //  PARTICLE VELOCITY.  (vx, vy, vz) is the water's velocity at the surface, m/s, of the particle
 //  whose Lagrangian LABEL is (wx, wz) -- i.e. of the water drawn at (wx + dx, h, wz + dz).  It has
@@ -209,6 +210,7 @@ struct OceanSample {
     double dx = 0, h = 0, dz = 0;   // displacement, m -- the disp texture's (Dx, h, Dz), lambda in
     double sx = 0, sz = 0;          // dh/dx, dh/dz, dimensionless -- the deriv texture's (hx, hz)
     double vx = 0, vy = 0, vz = 0;  // particle velocity at the surface, m/s -- no shader twin
+    double jxx = 0, jxz = 0, jzz = 0;   // the lateral displacement's Jacobian, lambda in (above)
 };
 
 class OceanCpu {

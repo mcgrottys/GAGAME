@@ -134,6 +134,14 @@ double TreeWater::MeanLevelAt(double wx, double wz, double simUnix) const {
 }
 
 SurfaceSample TreeWater::At(double wx, double wz, double simUnix) const {
+    return Evaluate(wx, wz, simUnix, true);
+}
+
+SurfaceSample TreeWater::AtLabel(double wx, double wz, double simUnix) const {
+    return Evaluate(wx, wz, simUnix, false);
+}
+
+SurfaceSample TreeWater::Evaluate(double wx, double wz, double simUnix, bool displaced) const {
     SurfaceSample s;
     if (!m_wx) return s;   // valid stays false: no tree attached is not flat water
 
@@ -192,6 +200,7 @@ SurfaceSample TreeWater::At(double wx, double wz, double simUnix) const {
     double dispX = 0.0, dispY = 0.0, dispZ = 0.0;   // wave displacement, physical metres
     double slopeX = 0.0, slopeZ = 0.0;
     double orbX = 0.0, orbY = 0.0, orbZ = 0.0;
+    double jacXX = 0.0, jacXZ = 0.0, jacZZ = 0.0;   // d(dispX, dispZ)/d(x, z)
 
     if (wGeom > 0.001 && m_wave) {
         const WaveField::Probe p = m_wave->ProbeAt(rwx, rwz, simUnix);
@@ -208,6 +217,9 @@ SurfaceSample TreeWater::At(double wx, double wz, double simUnix) const {
             orbX += wS * double(p.vx);
             orbY += wS * double(p.vy);
             orbZ += wS * double(p.vz);
+            jacXX += wS * m_waveChop * double(p.jxx);  // the offset's gradient carries its chop
+            jacXZ += wS * m_waveChop * double(p.jxz);
+            jacZZ += wS * m_waveChop * double(p.jzz);
         }
     }
     if (m_ocean && m_ocean->Ready()) {
@@ -248,6 +260,9 @@ SurfaceSample TreeWater::At(double wx, double wz, double simUnix) const {
         orbX += o.vx;
         orbY += o.vy;
         orbZ += o.vz;
+        jacXX += o.jxx;
+        jacXZ += o.jxz;
+        jacZZ += o.jzz;
     }
 
     // ---- THE WAKES. Closed form and stateless, so the CPU runs the same law the bank does
@@ -292,18 +307,49 @@ SurfaceSample TreeWater::At(double wx, double wz, double simUnix) const {
     const double hmax = 0.55 * wt::Max(depth, 0.05);
     const double hY = std::abs(k * dispY);
     if (hY > hmax) k *= hmax / hY;
-    s.heightNavd += k * dispY;
+    double eta = k * dispY;
+    double sx = k * slopeX, sz = k * slopeZ;
     s.dx = k * dispX;
     s.dz = k * dispZ;
     s.vx += k * orbX;
     s.vy += k * orbY;
     s.vz += k * orbZ;
 
-    // ---- THE NORMAL, from the slope of the surface the hull is standing on. n proportional to
-    // (-dh/dx, 1, -dh/dz), normalised. This is the Eulerian normal and it ignores the horizontal
-    // Gerstner offset's contribution to the surface tangent -- the same approximation the bank
-    // makes, kept deliberately so the two agree.
-    const double sx = k * slopeX, sz = k * slopeZ;
+    // ---- THE SURFACE THE MESH DRAWS IS THE DISPLACED ONE (the water match, step 3). The mesh puts
+    // the particle of label L at L + g D(L) (GlobeMesh.hlsl: the lateral offset under the fold guard
+    // g = smoothstep(0, kLatFoldFloor, det(I + J))), so the water standing over this point P is the
+    // particle whose label solves L + g D(L) = P. Answering at P itself put the hull on the wrong
+    // particle: --water-probe measured it 0.14 m below the drawn surface under half-metre waves (a
+    // Gerstner sea shows more trough than crest to a fixed point). ONE NEWTON STEP from L = P, on the
+    // offset's own Jacobian: (I + g J) e = g D, L1 = P - e. The height, the slope and the offset then
+    // move to L1 at first order from what this assembly already holds -- eta(L1) = eta - S.e, and the
+    // drawn surface's slope in WORLD coordinates is (I + g J)^-T S, the tangent bivector's own
+    // statement (symmetric here). What remains is second order in the steepness beyond the step
+    // (0.19 eps^2 a for one train: ~1 cm at eps 0.3, a 0.7 m), for no second evaluation of the sea.
+    // The mesh also fades its offset by (1 - landness) at the shore; in water that is 1.
+    if (displaced) {
+        const double jXX = k * jacXX, jXZ = k * jacXZ, jZZ = k * jacZZ;
+        const double g = wt::Smoothstep(0.0, kLatFoldFloor, (1.0 + jXX) * (1.0 + jZZ) - jXZ * jXZ);
+        const double a11 = 1.0 + g * jXX, a12 = g * jXZ, a22 = 1.0 + g * jZZ;
+        const double det = a11 * a22 - a12 * a12;
+        if (det > 1e-6) {   // the guard's own quadratic can only fail on a doubly folded field
+            const double gx = g * s.dx, gz = g * s.dz;
+            const double ex = (a22 * gx - a12 * gz) / det;
+            const double ez = (a11 * gz - a12 * gx) / det;
+            eta -= sx * ex + sz * ez;
+            const double wsx = (a22 * sx - a12 * sz) / det;
+            const double wsz = (a11 * sz - a12 * sx) / det;
+            sx = wsx;
+            sz = wsz;
+            s.dx = ex;   // the particle standing here came from P - e
+            s.dz = ez;
+        }
+    }
+    s.heightNavd += eta;
+
+    // ---- THE NORMAL, from the slope of the surface the hull is standing on: n proportional to
+    // (-dh/dx, 1, -dh/dz), normalised, with the slope taken in world coordinates on the displaced
+    // surface (above) -- the tangent bivector the mesh lights with. AtLabel's is the label slope.
     const double inv = 1.0 / std::sqrt(sx * sx + 1.0 + sz * sz);
     s.nx = -sx * inv;
     s.ny = inv;

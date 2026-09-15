@@ -108,7 +108,16 @@ public:
     void PlaceOf(double wx, double wz, double& latDeg, double& lonDeg) const;
 
     const char* Name() const override { return "water.tree"; }
+    // THE SURFACE THE MESH DRAWS, at a point of the world (the water match, step 3). The mesh places
+    // each particle at its label plus its lateral offset, so the water standing over a point came
+    // from a label behind it: the height, normal and offset here are that particle's, found by one
+    // Newton step on label + offset = point with the offset's own Jacobian (first order in the
+    // steepness beyond the step, second order in what is left).
     SurfaceSample At(double wx, double wz, double simUnix) const override;
+    // The same water at a LABEL: the particle whose rest position is the point, before its lateral
+    // offset -- what the bank's texel at that point holds. For instruments that compare the two
+    // processors texel for texel (--twin-surface, --water-probe's kernel column); a hull wants At.
+    SurfaceSample AtLabel(double wx, double wz, double simUnix) const;
     void WindAt(double wx, double wz, double simUnix, double out[3]) const override;
 
     // What answered, and what did not -- for the boot log and the twin report. M12 step 5e:
@@ -131,6 +140,8 @@ private:
     // matching it costs nothing while NOT matching it would show up in the twin as a drift that
     // grows with the forecast hour and look like a bug in this file.
     double CascadeTime(double simUnix) const;
+    // At and AtLabel: one assembly; `displaced` stands the answer on the drawn surface.
+    SurfaceSample Evaluate(double wx, double wz, double simUnix, bool displaced) const;
 
     const WeatherManager* m_wx = nullptr;
     const WaveField* m_wave = nullptr;

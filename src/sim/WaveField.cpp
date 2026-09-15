@@ -1297,6 +1297,7 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix) const 
     // 9b/9c twin sees nothing -- it is only ever more accurate.)
     double eta = 0.0, dxS = 0.0, dzS = 0.0, sxS = 0.0, szS = 0.0;
     double vxS = 0.0, vyS = 0.0, vzS = 0.0;
+    double jxxS = 0.0, jxzS = 0.0, jzzS = 0.0;
     for (uint32_t c = 0; c < t.nUsed && c < uint32_t(kMaxComp); ++c) {
         if (!(t.aMax[c] > 0.0f)) continue;   // gated to the cascades (or flat sea)
         const double a = bil(c, 0) * double(t.aMax[c]);
@@ -1341,6 +1342,10 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix) const 
         vxS += sig * aC * dX;                        // u = +sigma a cos(theta) d^  (crest
         vzS += sig * aC * dZ;                        //   water runs WITH the wave)
         vyS += sig * aS;                             // w = +sigma a sin(theta) == d(eta)/dt
+        const double aKC = aC * k;                   // grad D_h = -a k cos(theta) d^ (x) d^
+        jxxS -= aKC * dX * dX;
+        jxzS -= aKC * dX * dZ;
+        jzzS -= aKC * dZ * dZ;
     }
     p.eta = float(eta);
     p.dx = float(dxS);
@@ -1350,6 +1355,9 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix) const 
     p.vx = float(vxS);
     p.vy = float(vyS);
     p.vz = float(vzS);
+    p.jxx = float(jxxS);
+    p.jxz = float(jxzS);
+    p.jzz = float(jzzS);
     p.rms = float(bil(t.envSlice, 0) * double(t.envMax));
     p.excess = float(bil(t.envSlice, 1) * double(t.excMax));
     p.valid = true;

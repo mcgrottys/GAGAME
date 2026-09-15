@@ -791,15 +791,27 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
     barrierTo(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 }
 
+void SeaLayer::Simulate(const FrameContext& ctx) {
+    if (!m_haveData || !m_seaPso) return;
+    if (!m_swe || !m_swe->Ready()) return;
+    // THE SOLVER STEPS FOR ITS CONSUMERS, NOT FOR THE CAMERA (the water match, step 3). It stepped
+    // inside Render, and Render runs only while the sea is `enabled` -- which the frame loop clears
+    // whenever the camera is above 60 km. A hull floating in the solver's domain then read a frozen
+    // surface (its region went unserved, its asOf aged), and a fly-in arrived to a solver that had
+    // to catch up, re-anchor or reset by its clock policy. Now it steps when the sea is drawn, or
+    // when anyone asked it for a region this frame (SweSolver::Demanded) -- interest-driven, sparse,
+    // and blind to where the eye is. Once a frame, however many views draw the sea.
+    if (!enabled && !m_swe->Demanded()) return;
+    GpuScope gscope(ctx.prof, ctx.cmd->Native(), "sea.swe");
+    m_swe->Record(*ctx.cmd, *ctx.gpu, m_simUnix, m_seaCb.sea[0]);
+}
+
 void SeaLayer::Render(const FrameContext& ctx) {
     if (!m_haveData || !m_seaPso) return;
 
     // The compute chain records into the same command list; compute bindings do not disturb the
-    // graphics root signature the Renderer already set.
-    if (m_swe && m_swe->Ready()) {
-        GpuScope gscope(ctx.prof, ctx.cmd->Native(), "sea.swe");
-        m_swe->Record(*ctx.cmd, *ctx.gpu, m_simUnix, m_seaCb.sea[0]);
-    }
+    // graphics root signature the Renderer already set. (The solver stepped in Simulate, before any
+    // view: the churn below advects on this frame's current as it always did.)
     {
         GpuScope gscope(ctx.prof, ctx.cmd->Native(), "sea.fft");
         m_fft.Record(*ctx.cmd, *ctx.gpu, m_tSec);

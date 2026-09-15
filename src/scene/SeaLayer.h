@@ -131,6 +131,7 @@ public:
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
               hal::RootSignature rootSig) override;
     void ReloadShaders(Gpu& gpu, ShaderCompiler& sc) override;
+    void Simulate(const FrameContext& ctx) override;   // the solver's step, for whoever asked
     void Render(const FrameContext& ctx) override;
 
     // Once per frame, before RenderFrame. seaLevelM = the tide; cam XZ centres the grid.

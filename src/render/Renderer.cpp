@@ -341,6 +341,23 @@ void Renderer::RenderFrame(const scene::ViewSet& set) {
     // (FrameLoop.cpp). One surface, however many eyes are looking at it.
     const D3D12_GPU_VIRTUAL_ADDRESS surfaceVa = cmd.Push(surfaceCb);
 
+    // ---- the simulation: once a frame, every declared layer, before any view draws -- whatever
+    // the per-frame `enabled` gate says, because that gate is a view's (Layer::Simulate). Recorded
+    // first, so every layer of every view reads the state this frame advanced.
+    {
+        FrameContext sim = set.views[0].legacy;
+        sim.gpu = m_gpu;
+        sim.cmd = &cmd;
+        sim.sceneCb = sceneCbs[0];
+        sim.width = m_width;
+        sim.height = m_height;
+        sim.prof = prof;
+        sim.viewIndex = set.views[0].index;
+        for (auto& l : m_layers) {
+            if (l->declared) l->Simulate(sim);
+        }
+    }
+
     // ---- opaque layers into the HDR target. The target, the barriers and the CLEAR belong to
     // the frame, not to a view: they happen once, before the first view records into them.
     cmd.Barrier(m_sceneColor, D3D12_RESOURCE_STATE_RENDER_TARGET);

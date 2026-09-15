@@ -69,6 +69,14 @@ inline constexpr double kGWave = 9.81;
 // phase speed, SeaChurn.hlsl 0.4 m), because at 15 cm nothing in a wave band is linear anyway.
 inline constexpr double kDepthFloorM = 0.15;
 
+// The mesh's FOLD GUARD floor, shaders/GlobeMesh.hlsl kLatFoldFloor (M9bm). The mesh draws the
+// lateral Gerstner offset scaled by smoothstep(0, 0.35, areaJac), areaJac = det(I + J) of the
+// displacement: fully applied above 0.35, rolled off to zero at the overturn, where neighbouring
+// vertices would cross. 0.35 sits under foamlaw's saturation knee (J = 0.45), so the guard only acts
+// where the foam law has already declared the crest broken -- carried with that argument, not
+// re-derived. A hull that stands on the surface the mesh draws must displace by the same guard.
+inline constexpr double kLatFoldFloor = 0.35;
+
 // ------------------------------------------------------------------------------------------------
 //  wt - the scalar shims HLSL hands a shader for free.  Written out rather than pulled from
 //  <algorithm> so that Smoothstep is DEMONSTRABLY the HLSL curve: the same 3t^2 - 2t^3 Hermite

@@ -56,6 +56,12 @@ public:
     virtual void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
                       hal::RootSignature rootSig) = 0;
     virtual void ReloadShaders(Gpu& gpu, ShaderCompiler& sc) { (void)gpu; (void)sc; }
+    // ONCE A FRAME, before any view records, for every DECLARED layer whatever its per-frame
+    // `enabled` says (the water match, step 3). `enabled` is a VIEW's decision -- the mode, the
+    // altitude bands -- and it may only decide what is DRAWN. State other consumers read (a solver's
+    // step, the regions it serves a hull) advances here, for whoever asked, so a camera in orbit
+    // cannot freeze the water a boat is floating on. The context is the frame's first view's.
+    virtual void Simulate(const FrameContext& ctx) { (void)ctx; }
     virtual void Render(const FrameContext& ctx) = 0;
 
     bool enabled = true;

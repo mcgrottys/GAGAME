@@ -247,6 +247,10 @@ public:
         float dx = 0.0f, dz = 0.0f;              // horizontal (Gerstner) displacement, m
         float sx = 0.0f, sz = 0.0f;              // surface slope d(eta)/dx, d(eta)/dz (-)
         float vx = 0.0f, vy = 0.0f, vz = 0.0f;   // water particle velocity at the surface, m/s
+        // d(dx, dz)/d(x, z): -a k cos(theta) (d^ (x) d^) per component, chop 1 like dx/dz -- the
+        // Jacobian the displaced surface's tangents carry (the water match, step 3: TreeWater::At
+        // stands the hull on the surface the mesh draws, which is displaced).
+        float jxx = 0.0f, jxz = 0.0f, jzz = 0.0f;
         float a[kMaxComp] = {}, k[kMaxComp] = {}, phase[kMaxComp] = {};
     };
     Probe ProbeAt(double wx, double wz, double simUnix) const;

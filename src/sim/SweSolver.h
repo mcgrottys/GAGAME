@@ -167,6 +167,9 @@ public:
     // consumer that wants its answer kept fresh asks every frame (the answers stay until newer
     // ones replace them). The upload-list paths (Spinup, AdvanceTo) serve nothing.
     void RequestRegion(double worldX, double worldZ, double radiusM);
+    // Someone asked for a region this frame: the solver is wanted whether or not any view draws it
+    // (SeaLayer::Simulate steps it on this as well as on the drawn sea).
+    bool Demanded() const { return !m_requests.empty(); }
     struct Deviation {
         float dEta = 0.0f;           // m, from the tide plane the solver was forced by
         float u = 0.0f, v = 0.0f;    // the solved surface current, m/s east / north

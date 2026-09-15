@@ -39,6 +39,8 @@ namespace ga::app::tools {
 //    PHYS    the hull's OWN water, in its play state: Entity::Sea(), at the point's place in the
 //            hull's frame (its space's placement undone), at this frame's instant. No mirror refresh
 //            -- a hull in play reads none (the blind spot of --twin-surface, which refreshes first).
+//            TreeWater::At -- the displaced surface, what a hull stands on; the kernel column below
+//            compares the twin at the LABEL (TreeWater::AtLabel), where the bank's texel stands.
 //    BANK    the kernel's answer at the point (WaterBankLayer::ReadBankPoints: level + dispY through
 //            the mesh's own reconstruction of the finest ring holding it -- the cubic for disp, the
 //            tent for level), so a difference can be split into what the kernel fed the mesh
@@ -330,9 +332,10 @@ void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double plane
                 }
                 if (bp.valid) {
                     const double level = sea.MeanLevelAt(lx, lz, simUnix);
+                    const SurfaceSample sl = sea.AtLabel(lx, lz, simUnix);   // the texel's particle
                     const double bankH = double(bp.level) + double(bp.dispY);
                     const double mesh = hDrawn - bankH;
-                    const double wPhys = s.heightNavd - level, wBank = double(bp.dispY);
+                    const double wPhys = sl.heightNavd - level, wBank = double(bp.dispY);
                     ++b.nBank;
                     b.sumMesh += mesh;
                     b.sumMesh2 += mesh * mesh;
