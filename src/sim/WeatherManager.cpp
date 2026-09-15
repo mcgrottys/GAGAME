@@ -159,6 +159,7 @@ void WeatherManager::SolverRefine(double latDeg, double lonDeg, double unixT,
         s.u = d.u;
         s.v = d.v;
         s.currentSrc = w->currentTag;
+        s.currentSolved = true;
     }
     s.depthM = static_cast<float>(s.levelNavd - s.bedNavd);
 }

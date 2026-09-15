@@ -73,7 +73,8 @@ cbuffer BankCb : register(b0) {
     // on both sides, per the law twelve rows up.
     float4 gDebugA;
     float4 gWaveP;      // M9bc: the z16 page frame: org px x, y, 1/16384, world px at z16
-    float4 gWaveD;      // M9bc: window nx, ny (solver cells = page texels), 0, 0
+    float4 gWaveD;      // M9bc: window nx, ny (solver cells = page texels); zw = the window's NW
+                        // texel in the page frame (step 2: the page texel IS the cell)
     // M9bl: THE SECOND SIXTEEN. kMaxComp went 16 -> 32 because a 16-component directional
     // sum IS a regular comb -- sixteen long-crested trains 1.6 deg apart superpose into a
     // fixed interference lattice, which is what the storm face's straight parallel ridges
@@ -104,8 +105,7 @@ struct BankTile {
     uint dstY;
     float lvl00, lvl10, lvl01, lvl11;   // tide level at corners (atlas stack, CPU rotors)
     float bed00, bed10, bed01, bed11;   // bed at corners (the one height stack)
-    float hsScale;      // local Hs / reference Hs (the global wave grid modulates the sea)
-    float pad0, pad1, pad2;
+    float hs00, hs10, hs01, hs11;       // local Hs / reference Hs at corners (sim/WaveScale.h)
 };
 StructuredBuffer<BankTile> gTiles : register(t0);
 
@@ -194,10 +194,17 @@ float4 LoadBilinearWrap(uint slot, float2 uv, float dim) {
 // not resident at mip 0 here reads as absent (0) and the caller's window weight drops it.
 // M12 step 4e: the frame, the floor and the read are PageSample.hlsli's (the same lat/lon
 // spelling HeightPages.hlsli takes for the bed).
+// THE SOLVED FIELD'S PAGE TEXEL IS ITS CELL (the water match, step 2). The page provider paints solver
+// cell (i, j) -- row 0 south -- into page texel (winPx + i, winPy + ny - 1 - j) (WaveFieldSource::
+// PaintTile), so a point of the flat frame finds its texel through the solver's own grid: cells from the
+// window's SW corner, flipped to rows from its north edge, offset by the window's texel in the page frame
+// (gWaveD.zw). Through Mercator latitude instead -- the old PageUvLatLon -- the rows came out 0.67 %
+// shorter than the solver's cells (a Mercator texel's metre of latitude is 111319.49 m/deg, the chart's
+// 110574), so the drawn solved waves stood up to 13.6 m north of the bathymetry they were solved over and
+// WaveField::ProbeAt, on the grid, disagreed with them.
 float2 WavePageUv(float2 xz) {
-    const float lat = gGeoA.x + xz.y * gGeoA.z;
-    const float lon = gGeoA.y + xz.x * gGeoA.w;
-    return PageUvLatLon(lat, lon, gWaveP);
+    const float2 cells = (xz - gWaveA.xy) * gWaveA.z;
+    return float2(gWaveD.z + cells.x, gWaveD.w + gWaveD.y - cells.y) * gWaveP.z;
 }
 // M9bl: the finest RESIDENT mip of one plane here (byte = finest mip * 16, conservative
 // per 128th of the page). > 7.5 means nothing is resident at all.
@@ -219,7 +226,10 @@ float4 WavePageSample(float2 uv, uint plane) {
     const float have = WavePageHave(uv, plane);
     if (have > 7.5f) return 0.0f;                 // nothing resident: no opinion
     const float mip = max(round(have), 0.0f);
-    return PageLoad4(gTA[gWaveU.x], uv, 6u + plane, mip);
+    // The byte's decode CENTRE (the water match, step 2): the solve truncates to bytes, so a byte b stands
+    // for [b, b + 1) / 255 and its unbiased value is (b + 0.5) / 255 -- the decode WaveField::ProbeAt has
+    // always used. The UNORM read gives b / 255; the half-LSB is added after the filter, which is linear.
+    return PageLoad4(gTA[gWaveU.x], uv, 6u + plane, mip) + (0.5f / 255.0f);
 }
 
 float4 LoadBilinearClamp(uint slot, float2 texel, float2 dims) {
@@ -353,6 +363,9 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // HEIGHT WINDOW, residency-clamped, corner-lerp as the out-of-window fallback.
     const float level = lerp(lerp(t.lvl00, t.lvl10, f.x), lerp(t.lvl01, t.lvl11, f.x), f.y);
     float bed = lerp(lerp(t.bed00, t.bed10, f.x), lerp(t.bed01, t.bed11, f.x), f.y);
+    // The local sea-state scale: one law with the hull's twin (sim/WaveScale.h), continuous across
+    // the tile and across the wave grid's nodes (it was one value per tile, read off one node).
+    const float hsScale = lerp(lerp(t.hs00, t.hs10, f.x), lerp(t.hs01, t.hs11, f.x), f.y);
     if (gSlotsD.x != 0xFFFFFFFFu && gSlotsD.z != 0xFFFFFFFFu) {
         // M9ax: the whole tenant -- the z14 page where it is resident and fine, the cube face
         // everywhere else on the planet -- so shoaling, the current amplification and the
@@ -483,9 +496,9 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // adds bands 0 and 2 in the free fibers so the PS can amplitude-scale the caustic
     // Jacobian and Laplacian it assembles from the cascade derivative textures
     // (ALGEBRA.md caustics: areaJac_fold = 1 + sum w*amp*(J_c - 1); lap folds linearly).
-    float gain0 = t.hsScale * expo;
-    float gain1 = t.hsScale * expo;
-    float gain2 = t.hsScale * expo;
+    float gain0 = hsScale * expo;
+    float gain1 = hsScale * expo;
+    float gain2 = hsScale * expo;
     [unroll] for (uint c = 0; c < 3; ++c) {
         // ---- M9bt: THE FOLD ASKS FOR A FRACTION, NOT A VERDICT. --------------------------
         //
@@ -519,7 +532,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         // standing the entrance up toward blocking -- the 7-foot-standing-wave term).
         // proofs/inlet_storm.py runs the SAME pure functions on the SAME fields; the
         // match report holds this kernel to it.
-        float amp = t.hsScale * expo;
+        float amp = hsScale * expo;
         float blocked = 0.0f;
         if (depth > 0.05f) {
             const float cB = BandPhaseSpeed(gBandK[c], max(depth, 0.3f));
@@ -733,11 +746,12 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // Depth-limited breaking (the Sea.hlsl clamp, bank-side): the GEOMETRY constraint
     // stays; its foam side-effect retired in M8 -- the envelope-based depthFoam above is
     // the disciplined statement of the same physics (test the envelope, never |eta|).
+    // An AMPLITUDE cap (the water match, step 2): the horizontal excursion is linear in the same
+    // amplitude, so the whole displacement scales by the one ratio -- continuous at the cap, where
+    // the old horizontal step to 0.85 (a number from the first sea, with no argument) was not.
+    // TreeWater::At applies the same cap to the hull's water.
     const float hmax = 0.55f * max(depth, 0.05f);
-    if (abs(d.y) > hmax) {
-        d.y *= hmax / abs(d.y);
-        d.xz *= 0.85f;
-    }
+    if (abs(d.y) > hmax) d *= hmax / abs(d.y);
 
     // M7m: EDGE PATTERN INJECTION. Flip the switch and this kernel writes a WORLD-ALIGNED
     // test card into the foam fiber instead of physics: a 50 m checker and a wedge that

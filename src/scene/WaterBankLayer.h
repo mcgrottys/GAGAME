@@ -112,13 +112,17 @@ public:
     // M8: the solved wave field (may be null / not Ready -- the kernel falls back to
     // the cascade closures outside the window, which is also the fallback everywhere).
     void SetWaveField(const class WaveField* wf) { m_wave = wf; }
-    // M9bc: the wave field's PAGES (the tree's tenant) and the z16 frame they sit in.
+    // M9bc: the wave field's PAGES (the tree's tenant) and the z16 frame they sit in. winPxX/Y: the
+    // window's NW texel in that frame's own pixels (the water match, step 2: the kernel finds a
+    // point's page texel through the solver's grid, from this corner).
     void SetWavePages(uint32_t srv, uint32_t resSrv, double orgPxX, double orgPxY, uint32_t nx,
-                      uint32_t ny) {
+                      uint32_t ny, double winPxX, double winPxY) {
         m_wavePages = srv;
         m_wavePagesRes = resSrv;
         m_waveOrgPx[0] = orgPxX;
         m_waveOrgPx[1] = orgPxY;
+        m_waveWinPx[0] = winPxX;
+        m_waveWinPx[1] = winPxY;
         m_waveNx = nx;
         m_waveNy = ny;
     }
@@ -212,8 +216,7 @@ private:
         uint32_t dstX, dstY;
         float lvl[4];
         float bed[4];
-        float hsScale;
-        float pad[3];
+        float hs[4];   // the local sea-state scale at the corners (sim/WaveScale.h)
     };
 
     void ReanchorRing(Gpu& gpu, int m, double camX, double camZ);
@@ -237,6 +240,7 @@ private:
     const class WaveField* m_wave = nullptr;   // M8: the solved wave field (optional)
     uint32_t m_wavePages = UINT32_MAX, m_wavePagesRes = UINT32_MAX;   // M9bc
     double m_waveOrgPx[2] = {0.0, 0.0};
+    double m_waveWinPx[2] = {0.0, 0.0};
     uint32_t m_waveNx = 0, m_waveNy = 0;
     const struct WaterSceneConfig* m_scene = nullptr;   // M8: live scene closures
     float m_boatA[32] = {}, m_boatB[32] = {};           // M8: the fleet (zeros = off)

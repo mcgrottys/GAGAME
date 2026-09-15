@@ -1054,11 +1054,13 @@ std::optional<int> FrameLoop::Session() {
             waveT = waveTenant.Id();
             waterBank->SetWavePages(resMgr.TextureSrv(waveT), resMgr.ResidencySrv(waveT),
                                     double(waveFrame.orgPxX), double(waveFrame.orgPxY),
-                                    waveFrame.nx, waveFrame.ny);
+                                    waveFrame.nx, waveFrame.ny, double(waveFrame.winPxX),
+                                    double(waveFrame.winPxY));
             if (waterBankB) {   // the same pages: one solve, every level's sea
                 waterBankB->SetWavePages(resMgr.TextureSrv(waveT), resMgr.ResidencySrv(waveT),
                                          double(waveFrame.orgPxX), double(waveFrame.orgPxY),
-                                         waveFrame.nx, waveFrame.ny);
+                                         waveFrame.nx, waveFrame.ny, double(waveFrame.winPxX),
+                                         double(waveFrame.winPxY));
             }
             Log("[wave] wave.field is page tenant %d: %u planes over the z16 window, tiles "
                 "exact bytes of the solve, pyramid prefilled per bucket",
@@ -2973,6 +2975,7 @@ bool FrameLoop::Frame() {
         if (frame >= probeSettle && ((frame - probeSettle) % opt.waterProbeEvery) == 0u) {
             tools::RunWaterProbe(gpu, renderer, cam, planetR, m_entities, waterBank,
                                  m_A.vesselLayer, &waterAtlas, exposureSrc.get(),
+                                 m_waveField.get(), sea, &seaState,
                                  m_oceanAt ? m_oceanAt(simUnix) : 0.0, simUnix,
                                  frame - probeSettle);
         }

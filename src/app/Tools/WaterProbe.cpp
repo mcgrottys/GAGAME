@@ -9,10 +9,14 @@
 #include "render/Camera.h"
 #include "render/Renderer.h"
 #include "scene/Entity.h"
+#include "scene/SeaLayer.h"
 #include "scene/VesselLayer.h"
 #include "scene/WaterBankLayer.h"
+#include "sim/OceanCpu.h"
+#include "sim/SeaState.h"
 #include "sim/Vessel.h"
 #include "sim/WaterSurfaceTree.h"
+#include "sim/WaveField.h"
 
 #include <DirectXMath.h>
 
@@ -35,9 +39,10 @@ namespace ga::app::tools {
 //    PHYS    the hull's OWN water, in its play state: Entity::Sea(), at the point's place in the
 //            hull's frame (its space's placement undone), at this frame's instant. No mirror refresh
 //            -- a hull in play reads none (the blind spot of --twin-surface, which refreshes first).
-//    BANK    the kernel's answer at the point (WaterBankLayer::ReadBankPoints: level + dispY, the
-//            finest ring's nearest texel), so a difference can be split into what the kernel fed the
-//            mesh (BANK - PHYS) and what the raster did with it (DRAWN - BANK).
+//    BANK    the kernel's answer at the point (WaterBankLayer::ReadBankPoints: level + dispY through
+//            the mesh's own reconstruction of the finest ring holding it -- the cubic for disp, the
+//            tent for level), so a difference can be split into what the kernel fed the mesh
+//            (BANK - PHYS) and what the raster did with it (DRAWN - BANK).
 //
 //  Pixels that land on a hull (VesselLayer::Occupies) and points the hull's water calls dry or does
 //  not cover are skipped. Statistics are binned by horizontal distance from the hull, because the
@@ -63,11 +68,149 @@ struct Bin {
 
 }  // namespace
 
+namespace {
+
+double Bearing(double east, double north) {
+    double b = std::atan2(east, north) * 180.0 / 3.14159265358979;
+    return (b < 0.0) ? b + 360.0 : b;
+}
+double WrapPi(double a) {
+    while (a > 3.14159265358979) a -= 6.28318530717959;
+    while (a < -3.14159265358979) a += 6.28318530717959;
+    return a;
+}
+
+// The dominant axis of a field's gradients over a grid (the structure tensor's major eigenvector):
+// for a wave train it is the propagation axis, as a bearing modulo 180, with its coherence
+// (1 = every gradient on one axis, 0 = isotropic).
+template <class F>
+void GradientAxis(double cx, double cz, int n, double step, F height, double& axisDeg,
+                  double& coherence) {
+    double jxx = 0.0, jzz = 0.0, jxz = 0.0;
+    std::vector<double> h(size_t(n) * n);
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < n; ++i) {
+            h[size_t(j) * n + i] = height(cx + (i - n / 2) * step, cz + (j - n / 2) * step);
+        }
+    }
+    for (int j = 1; j + 1 < n; ++j) {
+        for (int i = 1; i + 1 < n; ++i) {
+            const double gx = (h[size_t(j) * n + i + 1] - h[size_t(j) * n + i - 1]) / (2.0 * step);
+            const double gz = (h[size_t(j + 1) * n + i] - h[size_t(j - 1) * n + i]) / (2.0 * step);
+            jxx += gx * gx;
+            jzz += gz * gz;
+            jxz += gx * gz;
+        }
+    }
+    // The major axis angle from +x (east) toward +z (north), then as a compass bearing mod 180.
+    const double ang = 0.5 * std::atan2(2.0 * jxz, jxx - jzz);
+    axisDeg = std::fmod(Bearing(std::cos(ang), std::sin(ang)), 180.0);
+    const double tr = jxx + jzz;
+    const double dif = std::sqrt((jxx - jzz) * (jxx - jzz) + 4.0 * jxz * jxz);
+    coherence = (tr > 1e-12) ? dif / tr : 0.0;
+}
+
+}  // namespace
+
+// THE ORIENTATION AT THE HULL (Mark, 2026-09-15: "something seems sus about the vertical bands"). The
+// probe's own comparison cannot see a rotated dataset: the drawn field and the hull's agree with each
+// other (both read the same trees), so a rotation they SHARE is invisible to it. The truth to hold them
+// to is what the data DECLARES: each solved component carries its propagation direction and wavenumber,
+// so the gradient of its stored phase must point along that direction with magnitude k; and the ambient
+// sea's gradients must lie along its declared peak direction.
+void ReportOrientation(const scene::Entity& e, const WaveField* waveField, const SeaLayer* sea,
+                       const SeaState* seaState, double simUnix, uint32_t recFrame) {
+    if (!e.Hull()) return;
+    double cg[3] = {0.0, 0.0, 0.0};
+    e.Hull()->Body().pose.TransformPoint(cg[0], cg[1], cg[2]);
+    // The declared peak (the sea layer's propagation direction, east/north).
+    const bool peakValid = sea && sea->PeakDirValid();
+    const double peakBearing = peakValid ? Bearing(sea->PeakDirX(), sea->PeakDirZ()) : -1.0;
+    Log("[wprobe]   orientation at the hull, rec%u: the declared peak TRAVELS toward bearing %.1f%s",
+        recFrame, peakBearing, peakValid ? "" : " (no valid peak)");
+    // ---- the solved field: phase gradient against each component's declared direction.
+    if (waveField && waveField->Ready() && !e.InSpace()) {
+        const WaveField::GpuTable& tab = waveField->Table();
+        const double h = 0.25;
+        const WaveField::Probe p0 = waveField->ProbeAt(cg[0], cg[2], simUnix);
+        const WaveField::Probe px1 = waveField->ProbeAt(cg[0] + h, cg[2], simUnix);
+        const WaveField::Probe px0 = waveField->ProbeAt(cg[0] - h, cg[2], simUnix);
+        const WaveField::Probe pz1 = waveField->ProbeAt(cg[0], cg[2] + h, simUnix);
+        const WaveField::Probe pz0 = waveField->ProbeAt(cg[0], cg[2] - h, simUnix);
+        if (p0.valid && px1.valid && px0.valid && pz1.valid && pz0.valid) {
+            double wSum = 0.0, errSum = 0.0, ratioSum = 0.0;
+            int logged = 0;
+            for (uint32_t c = 0; c < tab.nUsed && c < uint32_t(WaveField::kMaxComp); ++c) {
+                if (!(p0.a[c] > 0.01f)) continue;
+                const double gx = WrapPi(double(px1.phase[c]) - double(px0.phase[c])) / (2.0 * h);
+                const double gz = WrapPi(double(pz1.phase[c]) - double(pz0.phase[c])) / (2.0 * h);
+                const double gl = std::sqrt(gx * gx + gz * gz);
+                if (!(gl > 1e-9)) continue;
+                const double dirB = Bearing(tab.dirX[c], tab.dirZ[c]);
+                const double gradB = Bearing(gx, gz);
+                double err = std::fabs(gradB - dirB);
+                if (err > 180.0) err = 360.0 - err;
+                const double ratio = gl / (std::max)(double(p0.k[c]), 1e-9);
+                wSum += p0.a[c];
+                errSum += p0.a[c] * err;
+                ratioSum += p0.a[c] * ratio;
+                if (logged < 6) {
+                    Log("[wprobe]     solved comp %2u: a %.3f m, lambda %.1f m, declared travel %.1f | "
+                        "grad(phase) %.1f, |grad|/k %.2f -> %.1f deg apart",
+                        c, double(p0.a[c]), 6.28318530717959 / (std::max)(double(p0.k[c]), 1e-9),
+                        dirB, gradB, ratio, err);
+                    ++logged;
+                }
+            }
+            if (wSum > 0.0) {
+                Log("[wprobe]     solved field: amplitude-weighted |grad(phase) - declared| %.1f deg, "
+                    "|grad|/k %.2f (a correct field: ~0 deg, ~1.00)",
+                    errSum / wSum, ratioSum / wSum);
+            }
+            // The envelope: which way the solved field's amplitude varies around the hull.
+            double envAxis = 0.0, envCoh = 0.0;
+            GradientAxis(cg[0], cg[2], 40, 4.0,
+                         [&](double x, double z) {
+                             const WaveField::Probe p = waveField->ProbeAt(x, z, simUnix);
+                             return p.valid ? double(p.rms) : 0.0;
+                         },
+                         envAxis, envCoh);
+            double etaAxis = 0.0, etaCoh = 0.0;
+            GradientAxis(cg[0], cg[2], 64, 1.5,
+                         [&](double x, double z) {
+                             const WaveField::Probe p = waveField->ProbeAt(x, z, simUnix);
+                             return p.valid ? double(p.eta) : 0.0;
+                         },
+                         etaAxis, etaCoh);
+            Log("[wprobe]     solved eta gradients lie along bearing %.1f (mod 180, coherence %.2f); its "
+                "rms ENVELOPE varies along %.1f (coherence %.2f)",
+                etaAxis, etaCoh, envAxis, envCoh);
+        }
+    }
+    // ---- the ambient cascades (the CPU twin the kernel's textures mirror), outside any window.
+    if (sea && seaState && sea->Ocean().Ready()) {
+        const double tSec =
+            static_cast<double>(static_cast<float>(simUnix - seaState->CycleUnix()));
+        double casAxis = 0.0, casCoh = 0.0;
+        GradientAxis(cg[0], cg[2], 64, 2.0,
+                     [&](double x, double z) {
+                         OceanSample o;
+                         sea->Ocean().Sample(x, z, tSec, o);
+                         return o.h;
+                     },
+                     casAxis, casCoh);
+        Log("[wprobe]     cascade eta gradients lie along bearing %.1f (mod 180, coherence %.2f); the "
+            "declared peak's axis is %.1f",
+            casAxis, casCoh, peakValid ? std::fmod(peakBearing, 180.0) : -1.0);
+    }
+}
+
 void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double planetR,
                    const std::vector<std::unique_ptr<scene::Entity>>& entities,
                    WaterBankLayer* waterBank, const VesselLayer* vessels,
-                   const WaterAtlas* atlas, const ExposureSource* exposure, double oceanNow,
-                   double simUnix, uint32_t recFrame) {
+                   const WaterAtlas* atlas, const ExposureSource* exposure,
+                   const WaveField* waveField, const SeaLayer* seaLayer, const SeaState* seaState,
+                   double oceanNow, double simUnix, uint32_t recFrame) {
     std::vector<float> depth;
     if (!renderer.ReadDepth(depth)) {
         Log("[wprobe] rec%u: the depth readback failed", recFrame);
@@ -220,6 +363,7 @@ void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double plane
             "weight %.3f",
             exposure ? double(exposure->At(cgLat, cgLon)) : 1.0,
             e->InSpace() ? 0.0 : sea.WindowWeight(cg[0], cg[2]));
+        ReportOrientation(*e, waveField, seaLayer, seaState, simUnix, recFrame);
         for (const Bin& b : bins) {
             if (b.n == 0) continue;
             const double mean = b.sumD / b.n, rms = std::sqrt(b.sumD2 / b.n);

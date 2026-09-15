@@ -389,10 +389,16 @@ band are engineering closures — real waves break rather than blow up).
 **Local amplitude gain** per band: A = hsScale · exposure · S · A_wc, where hsScale is
 the GFS-Wave Hs over the cascade reference, and **exposure** is the swell shadow: a CPU
 line-of-sight march toward the peak-wave source over the live bed (≈0.12 in geometric
-shadow, floor 0.18 in the bank for local chop).
+shadow, floor 0.18 in the bank for local chop). hsScale is ONE continuous law
+(`sim/WaveScale.h`): the node-centred grid read bilinearly, each node's ratio clamped
+[0.15, 3], a node without Hs reading the reference (1), a declared storm the reference
+everywhere; the bank carries it at its tiles' corners, the hull's twin at its point. The
+twin (`TreeWater::At`) applies the whole gain per cascade, on the solver's current only.
 
 **Depth-limited breaking** (bank kernel, after displacement): |η| ≤ 0.55·h, excess
-converted to foam; matches the classical H ≤ 0.78 h with H = 2η.
+converted to foam; matches the classical H ≤ 0.78 h with H = 2η. An AMPLITUDE cap: the
+horizontal excursion is linear in the same amplitude, so the whole displacement scales by
+0.55·h/|η| (continuous at the cap; the first sea stepped the horizontal to 0.85).
 
 **The 7-foot-standing-wave term** (why the entrance stands up): an 11 s swell in 4 m of
 water has c ≈ 6 m/s, so a 1 m/s ebb reaches r ≈ −0.17 — a third of the way to blocking —

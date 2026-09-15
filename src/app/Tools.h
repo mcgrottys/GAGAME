@@ -118,8 +118,9 @@ void RunSeaVerify(const Options& opt, Gpu& gpu, SeaLayer* sea);
 void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double planetR,
                    const std::vector<std::unique_ptr<scene::Entity>>& entities,
                    WaterBankLayer* waterBank, const VesselLayer* vessels,
-                   const WaterAtlas* atlas, const ExposureSource* exposure, double oceanNow,
-                   double simUnix, uint32_t recFrame);
+                   const WaterAtlas* atlas, const ExposureSource* exposure,
+                   const WaveField* waveField, const SeaLayer* sea, const SeaState* seaState,
+                   double oceanNow, double simUnix, uint32_t recFrame);
 
 }  // namespace ga::app::tools
 

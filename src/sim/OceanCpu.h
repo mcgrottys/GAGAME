@@ -136,6 +136,7 @@
 // ================================================================================================
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -273,8 +274,20 @@ public:
     // cascades -- cascade 2, the short chop, is 85% of the bins and none of the hull forces.
     void SampleForHull(double wx, double wz, double tSec, double minLambda,
                        OceanSample& out) const;
+    // ...with a gain PER CASCADE (the water match, step 2): the bank kernel multiplies each cascade by
+    // its own amplitude law -- the local sea-state scale, the swell shadow, shoaling and the
+    // wave-current gain at that band's wavenumber, and the solved window's stand-down on the structure
+    // bands -- so the hull's twin must too. Every channel is linear in a cascade's bins, so a gain on
+    // the cascade is a gain on all eight; a cascade of gain 0 is skipped without touching a bin.
+    void SampleForHull(double wx, double wz, double tSec, double minLambda,
+                       const double gain[kCascades], OceanSample& out) const;
 
     bool Ready() const { return m_ready; }
+
+    // A cascade band's REPRESENTATIVE wavenumber, rad/m: the geometric mean of its two cuts, the
+    // number the bank kernel's per-band laws (phase speed, shoaling, the wave-current gain) are
+    // evaluated at (gBandK). From the cuts this twin was configured with, never a second table.
+    double BandK(int cascade) const { return std::sqrt(m_kLo[cascade] * m_kHi[cascade]); }
 
     // --- reporting: what the truncation actually cost, per cascade ---------------------------
     // The fraction of this cascade's realized variance thrown away by keeping only the retained
@@ -308,11 +321,13 @@ private:
     // without touching a single bin.
     double m_lambdaMax[kCascades] = {};
 
-    void SampleBand(double wx, double wz, double tSec, double minLambda, OceanSample& out) const;
+    void SampleBand(double wx, double wz, double tSec, double minLambda, const double* gain,
+                    OceanSample& out) const;
 
     std::vector<Bin> m_bin[kCascades];
     double m_varAll[kCascades] = {};    // realized variance over every pair with energy
     double m_varKept[kCascades] = {};   // realized variance of the retained pairs
+    double m_kLo[kCascades] = {}, m_kHi[kCascades] = {};   // the band cuts, rad/m (OceanFft's)
     double m_lambda = 1.1;
     bool m_ready = false;
 };

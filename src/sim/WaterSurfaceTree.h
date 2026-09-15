@@ -10,9 +10,12 @@
 //
 //      mean state   WeatherManager::Query   tide atlas + SWE window refinement, the one bed,
 //                                           the surface current, the 10 m wind
-//      solved sea   WaveField::ProbeAt      inside the solve window, weighted by wWin
-//      cascade sea  OceanCpu::Sample        everywhere, weighted by (1 - wWin)
+//      solved sea   WaveField::ProbeAt      inside the solve window, weighted by wWin (x the shadow)
+//      cascade sea  OceanCpu::SampleForHull everywhere, one gain per cascade -- the kernel's band
+//                                           law (sea-state scale, shadow, shoaling, wave-current);
+//                                           the structure bands yield by (1 - wWin), the chop stays
 //      wake         WaterTerms WakeOne      the fleet's Kelvin wakes, closed form
+//      over all     the dry weight, the display exaggeration, the depth-limited amplitude cap
 //
 //  WHY THE MEAN STATE IS NOT RE-DERIVED HERE. WeatherManager::Query is already the tree's point
 //  evaluator: it composes the height stack, refines the level inside a resident solver window,
@@ -82,6 +85,18 @@ public:
     // panel spacing. Below this the wake is a force the hull cannot feel anyway.
     void SetSampleScale(double m) { m_sampleM = (m > 0.01) ? m : 0.01; }
 
+    // THE CASCADE SEA'S CONTEXT (the water match, step 2), as the bank kernel is handed it: the
+    // direction its most energetic partition travels (gPeakDir -- the wave-current gain projects the
+    // current on it), and whether its partitions are a declared storm (whose height IS the reference,
+    // WaveScale). The sea layer owns both; whoever steps a hull hands them in, every step. Until then
+    // there is no peak (the gain is 1, as the kernel's is without one) and no storm.
+    void SetCascadeSea(double peakDirX, double peakDirZ, bool peakValid, bool storm) {
+        m_peakDirX = peakDirX;
+        m_peakDirZ = peakDirZ;
+        m_peakValid = peakValid;
+        m_storm = storm;
+    }
+
     // THE CHART (the cuboid gate, 2026-09-14): the flat frame this water is read in. None (the
     // default) is the root's -- the ACT0816 constants, byte for byte. A hull carried through a
     // gate reads the SAME trees through its destination space's chart: a point's place comes from
@@ -130,6 +145,9 @@ private:
     // as a small phase-looking offset rather than announcing itself as a missing factor.
     double m_waveChop = 1.0;
     double m_sampleM = 0.5;
+    double m_peakDirX = 0.0, m_peakDirZ = 0.0;
+    bool m_peakValid = false;
+    bool m_storm = false;
     WakeBoat m_boats[8];
     int m_boatCount = 0;
 

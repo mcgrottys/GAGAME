@@ -9,6 +9,7 @@
 #include "scene/SeaLayer.h"
 #include "core/SceneConfig.h"
 #include "sim/WaveField.h"
+#include "sim/WaveScale.h"
 
 #include <algorithm>
 #include <chrono>
@@ -231,28 +232,59 @@ void WaterBankLayer::ReadBankPoints(Gpu& gpu, const double* worldXz, int n, Bank
     snap(m_param, pData, pPitch);
     if (dData.empty() || pData.empty()) return;
 
+    // THE MESH'S RECONSTRUCTION, not the texel under the point (the water match, step 2): a texel
+    // holds its field at its CENTRE, and the mesh reads the bank through Globe.hlsl's BankFetch --
+    // the Catmull-Rom cubic over the 4x4 support for disp, the tent for param. The nearest texel
+    // stood up to half a 1.2 m texel off the point, which on a 0.2 slope is 6 cm of "disagreement"
+    // the instrument manufactured itself. (The ring cross-fade is not applied: the finest ring that
+    // holds the whole support answers, as it does 48 texels inside every border.)
+    const auto catmull = [](double t, double w[4]) {
+        const double t2 = t * t, t3 = t2 * t;
+        w[0] = -0.5 * t3 + t2 - 0.5 * t;
+        w[1] = 1.5 * t3 - 2.5 * t2 + 1.0;
+        w[2] = -1.5 * t3 + 2.0 * t2 + 0.5 * t;
+        w[3] = 0.5 * t3 - 0.5 * t2;
+    };
     for (int i = 0; i < n; ++i) {
         const double wx = worldXz[i * 2 + 0], wz = worldXz[i * 2 + 1];
         for (int m = 0; m < kMips; ++m) {
             if (!m_orgValid[m]) continue;
             const double texel = m_baseTexelM * (1 << m);
-            const int tx = static_cast<int>((wx - m_orgX[m]) / texel);
-            const int ty = static_cast<int>((wz - m_orgZ[m]) / texel);
-            if (tx < 1 || ty < 1 || tx >= 511 || ty >= 511) continue;
-            auto at = [&](const std::vector<uint8_t>& data, uint32_t pitch, float o[4]) {
+            const double lx = (wx - m_orgX[m]) / texel, lz = (wz - m_orgZ[m]) / texel;
+            if (lx < 2.0 || lz < 2.0 || lx > 510.0 || lz > 510.0) continue;   // BankFetch's window
+            const int tx0 = static_cast<int>(std::floor(lx - 0.5));
+            const int tz0 = static_cast<int>(std::floor(lz - 0.5));
+            const double fx = (lx - 0.5) - tx0, fz = (lz - 0.5) - tz0;
+            const auto at = [&](const std::vector<uint8_t>& data, uint32_t pitch, int tx, int tz,
+                                int c) {
                 const uint16_t* px = reinterpret_cast<const uint16_t*>(
-                    data.data() + static_cast<size_t>(pitch) * ty) + (m * 512 + tx) * 4;
-                for (int c = 0; c < 4; ++c) o[c] = HalfF(px[c]);
+                    data.data() + static_cast<size_t>(pitch) * static_cast<size_t>(tz)) +
+                    (m * 512 + tx) * 4;
+                return double(HalfF(px[c]));
             };
-            float d[4], p[4];
-            at(dData, dPitch, d);
-            at(pData, pPitch, p);
+            double d[4] = {0, 0, 0, 0}, p[4] = {0, 0, 0, 0};
+            for (int c = 0; c < 4; ++c) {
+                for (int k = 0; k < 4; ++k) {   // the tent
+                    const double wgt = ((k & 1) ? fx : 1.0 - fx) * ((k >> 1) ? fz : 1.0 - fz);
+                    p[c] += wgt * at(pData, pPitch, tx0 + (k & 1), tz0 + (k >> 1), c);
+                }
+            }
+            double wxc[4], wzc[4];
+            catmull(fx, wxc);
+            catmull(fz, wzc);
+            for (int c = 0; c < 4; ++c) {
+                for (int j = 0; j < 4; ++j) {   // the cubic
+                    for (int k = 0; k < 4; ++k) {
+                        d[c] += wzc[j] * wxc[k] * at(dData, dPitch, tx0 + k - 1, tz0 + j - 1, c);
+                    }
+                }
+            }
             BankPoint& b = out[i];
             b.valid = true;
             b.ring = m;
             b.texelM = static_cast<float>(texel);
-            b.dispX = d[0]; b.dispY = d[1]; b.dispZ = d[2]; b.foam = d[3];
-            b.level = p[0]; b.sigma2 = p[1]; b.curU = p[2]; b.curV = p[3];
+            b.dispX = float(d[0]); b.dispY = float(d[1]); b.dispZ = float(d[2]); b.foam = float(d[3]);
+            b.level = float(p[0]); b.sigma2 = float(p[1]); b.curU = float(p[2]); b.curV = float(p[3]);
             break;
         }
     }
@@ -419,10 +451,12 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     const auto tileList0 = std::chrono::steady_clock::now();   // tileListMs bracket
     std::vector<BankTile> tiles;
     tiles.reserve(kMips * kRingTiles * kRingTiles);
-    const double hsRef =
-        (m_seaState && m_seaState->Ready())
-            ? (std::max)(m_seaState->Hour(m_seaState->HourIndex(m_simUnix)).combinedHs, 0.3)
-            : 1.0;
+    // The local sea state: the global Hs grid over the reference the cascades were synthesised
+    // for (the Gulf point) -- mid-ocean waves track their OWN storm, not ours. One law with the
+    // hull's twin (sim/WaveScale.h), carried at the tile's corners and lerped per texel like the
+    // level and the bed, so the scale is continuous across tiles and across the grid's nodes.
+    const WaveScale waveScale =
+        WaveScale::For(m_globe, m_seaState, m_sea && m_sea->StormOn(), m_simUnix);
     for (int m = 0; m < kMips; ++m) {
         const double texel = m_baseTexelM * (1 << m);
         const double tileSpan = kTileTexels * texel;
@@ -436,47 +470,20 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
                 t.dstX = static_cast<uint32_t>(m * kRingTexels + tx * kTileTexels);
                 t.dstY = static_cast<uint32_t>(ty * kTileTexels);
                 for (int k = 0; k < 4; ++k) {
-                    CornerParams(t.orgXZ[0] + (k & 1) * tileSpan,
-                                 t.orgXZ[1] + ((k >> 1) & 1) * tileSpan, t.lvl[k], t.bed[k]);
-                }
-                // The local sea state: the global Hs grid over the reference the cascades
-                // were synthesised for (the Gulf point) -- mid-ocean waves track their OWN
-                // storm, not ours.
-                float hsScale = 1.0f;
-                // M8: under a --storm override the grid is STALE by definition (the
-                // override rewrote the partitions, not the product) -- ratioing grid Hs
-                // against the storm reference painted a 17x tile-quantized staircase
-                // along the grid's land/sea edge (the pale rectangles; the top-down
-                // lens convicted it). The storm IS the reference: hsScale = 1.
-                if (!(m_sea && m_sea->StormOn()) && m_globe && m_globe->WavesNx() > 0) {
-                    const double lat =
-                        BathyModel::kOrgLat + (t.orgXZ[1] + tileSpan * 0.5) /
-                                                  BathyModel::kMPerLat;
-                    double lon = BathyModel::kOrgLon + (t.orgXZ[0] + tileSpan * 0.5) /
-                                                           BathyModel::kMPerLon;
-                    if (m_globe->WavesLon1() > 180.0 && lon < 0.0) lon += 360.0;
-                    const int nx = m_globe->WavesNx(), ny = m_globe->WavesNy();
-                    const int ix = static_cast<int>(
-                        (lon - (m_globe->WavesLon1() - nx * m_globe->WavesDLon())) /
-                        m_globe->WavesDLon());
-                    const int iy = static_cast<int>((m_globe->WavesLat1() - lat) /
-                                                    m_globe->WavesDLat());
-                    if (ix >= 0 && iy >= 0 && ix < nx && iy < ny) {
-                        const float hs = m_globe->Hs()[static_cast<size_t>(iy) * nx + ix];
-                        if (hs >= 0.0f) {
-                            hsScale = static_cast<float>(
-                                std::clamp(hs / hsRef, 0.15, 3.0));
-                        }
-                    }
+                    const double cx = t.orgXZ[0] + (k & 1) * tileSpan;
+                    const double cz = t.orgXZ[1] + ((k >> 1) & 1) * tileSpan;
+                    CornerParams(cx, cz, t.lvl[k], t.bed[k]);
+                    // M8: under a --storm override the grid is STALE by definition -- the
+                    // law answers 1 (the storm IS the reference). M7j/THE LOST LINE: every
+                    // corner is written unconditionally; a tile that shipped 0 once flattened
+                    // the whole sea, and only a CPU-vs-GPU cross-check found it.
+                    t.hs[k] = static_cast<float>(waveScale.At(
+                        BathyModel::kOrgLat + cz / BathyModel::kMPerLat,
+                        BathyModel::kOrgLon + cx / BathyModel::kMPerLon));
                 }
                 // M7j: exposure moved to the KERNEL, from the solver's own swell-shadow
                 // field (the M7i x-ramp killed the channel and the open beaches -- a
                 // hand-drawn boundary where a marched line-of-sight field already existed).
-                // THE LOST LINE: M7i's ramp edit swallowed this unconditional assignment
-                // and every tile shipped hsScale 0 -- the "water seems worse" report was
-                // a dead-flat sea, found by the hypervisor's CPU-vs-GPU cross-check
-                // (expected 0.42, bank said 0.00) in one probe.
-                t.hsScale = hsScale;
                 tiles.push_back(t);
             }
         }
@@ -591,6 +598,8 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
         cb.waveP[3] = static_cast<float>(65536.0 * 256.0);
         cb.waveD[0] = static_cast<float>(m_waveNx);
         cb.waveD[1] = static_cast<float>(m_waveNy);
+        cb.waveD[2] = static_cast<float>(m_waveWinPx[0] - m_waveOrgPx[0]);   // the window's NW texel
+        cb.waveD[3] = static_cast<float>(m_waveWinPx[1] - m_waveOrgPx[1]);   // in the page frame
         cb.waveB[0] = wt.envMax;
         cb.waveB[1] = wt.sumMax;
         cb.waveB[2] = sc2.wfChop;   // chop (scene cfg; ambient-sea lambda by default)

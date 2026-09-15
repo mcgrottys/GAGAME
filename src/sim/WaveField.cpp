@@ -1303,8 +1303,12 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix) const 
         const double k = bil(c, 1) * double(t.kMax[c]);
         const double cs = bil(c, 2) * 2.0 - 1.0;
         const double sn = bil(c, 3) * 2.0 - 1.0;
-        // the rotor: (c,s) -> cos/sin(phi - sigma t); renormalize after the lerp (bilinear
-        // of unit spinors shrinks inside the circle, never rotates -- the cl2 law).
+        // the rotor: (c,s) -> cos/sin(phi - sigma t). The spinor stays unit (bilinear of unit
+        // spinors shrinks inside the circle, never rotates -- the cl2 law), and the LENGTH the lerp
+        // left is the component's phase coherence over the footprint read: it multiplies the
+        // amplitude, as the kernel's M9bu law does (WaterBank.hlsl `coh`), rather than being thrown
+        // away -- a full-amplitude wave at the circular mean of a phase that turns over inside the
+        // cell is not the field (the water match, step 2: the hull's sum and the bank's agree).
         const double wt = double(t.sigma[c]) * simUnix;
         const double ct = std::cos(wt), st = std::sin(wt);
         double ca = cs * ct + sn * st;
@@ -1314,6 +1318,7 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix) const 
             ca /= nrm;
             sa /= nrm;
         }
+        const double aC0 = a * (std::min)(nrm, 1.0);   // the amplitude the footprint carries
         p.a[c] = float(a);
         p.k[c] = float(k);
         p.phase[c] = float(std::atan2(sa, ca));
@@ -1326,8 +1331,8 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix) const 
         // second sincos and no second bilinear tap.
         const double dX = double(t.dirX[c]), dZ = double(t.dirZ[c]);
         const double sig = double(t.sigma[c]);
-        const double aC = a * ca;   // in phase with the crest
-        const double aS = a * sa;   // 90 deg ahead of it
+        const double aC = aC0 * ca;   // in phase with the crest
+        const double aS = aC0 * sa;   // 90 deg ahead of it
         eta += aC;                                   // eta = a cos(theta)   <- the reference
         dxS -= aS * dX;                              // D_h = -a sin(theta) d^   (chop = 1;
         dzS -= aS * dZ;                              //        WaterBank scales this by wfChop)

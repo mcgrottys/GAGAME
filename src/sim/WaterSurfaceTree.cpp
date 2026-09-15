@@ -6,6 +6,7 @@
 #include "core/Common.h"
 #include "sim/BathyModel.h"
 #include "sim/WaterTerms.h"
+#include "sim/WaveScale.h"
 
 #include <algorithm>
 #include <cmath>
@@ -150,6 +151,19 @@ SurfaceSample TreeWater::At(double wx, double wz, double simUnix) const {
     s.vz = double(q.v);                     // surface current, north
     s.vy = 0.0;
 
+    // ---- THE WATER'S OWN CONTEXT, in CsBankFill's order (the water match, step 2: one wave rule).
+    // The depth under the mean surface; the dry weight every displacement rides (the kernel's `dry`);
+    // the local sea-state scale (WaveScale, the one law the bank's tile corners carry). The swell
+    // shadow is the kernel's page read and has no CPU reader yet: the hull's sea stands exposed (1),
+    // which Describe() states and --water-probe measures against the page at the hull.
+    const double depth = q.levelNavd - double(q.bedNavd);
+    const double dry = wt::Smoothstep(0.05, 0.65, depth);
+    const double expo = 1.0;
+    double latDeg = 0.0, lonDeg = 0.0;
+    PlaceOf(wx, wz, latDeg, lonDeg);
+    const double hsScale =
+        WaveScale::For(m_wx->Globe(), m_sea, m_storm, simUnix).At(latDeg, lonDeg);
+
     // ---- THE WAVES, in CsBankFill's order and with its weights. The solved field owns the
     // window and the cascades own everywhere else; wWin is the one blend and it is the same
     // expression on both processors.
@@ -183,38 +197,57 @@ SurfaceSample TreeWater::At(double wx, double wz, double simUnix) const {
         const WaveField::Probe p = m_wave->ProbeAt(rwx, rwz, simUnix);
         if (p.valid) {
             wWin = wGeom;
-            dispY += wWin * double(p.eta);
-            dispX += wWin * m_waveChop * double(p.dx);   // gWaveB.z, see the header
-            dispZ += wWin * m_waveChop * double(p.dz);
-            slopeX += wWin * double(p.sx);
-            slopeZ += wWin * double(p.sz);
-            orbX += wWin * double(p.vx);
-            orbY += wWin * double(p.vy);
-            orbZ += wWin * double(p.vz);
+            // The swell shadow shelters the solved components as it does the cascades (the kernel's
+            // aW = a * aMax * expo).
+            const double wS = wWin * expo;
+            dispY += wS * double(p.eta);
+            dispX += wS * m_waveChop * double(p.dx);   // gWaveB.z, see the header
+            dispZ += wS * m_waveChop * double(p.dz);
+            slopeX += wS * double(p.sx);
+            slopeZ += wS * double(p.sz);
+            orbX += wS * double(p.vx);
+            orbY += wS * double(p.vy);
+            orbZ += wS * double(p.vz);
         }
     }
     if (m_ocean && m_ocean->Ready()) {
-        // (1 - wWin) matches the kernel's `if (c != 2) amp *= 1 - wWin`. KNOWN DEVIATION, and it
-        // is stated rather than hidden: the kernel exempts cascade 2 -- the chop band -- from the
-        // stand-down, and OceanCpu sums the three cascades in one pass so this gates all three.
-        // Inside the window the twin therefore reads slightly SMOOTHER than the bank by exactly
-        // the chop band's amplitude. The --twin-surface gate reports the number; if it matters at
-        // hull scale the fix is a per-cascade output, not a fudge here.
-        const double wCas = 1.0 - wWin;
+        // THE PER-BAND LAW, the kernel's (CsBankFill's cascade loop), one gain per cascade: the
+        // local sea-state scale and the swell shadow; in water, the band's shoaling (Green's law at
+        // its representative wavenumber) and its wave-current gain (the solver's current projected
+        // on the peak's travel, against the band's phase speed at this depth -- the kernel has no
+        // other current, so neither does its twin); and inside the solved window the STRUCTURE
+        // bands (0 and 1) yield to the solved field by its weight while the chop band stays on.
+        // (The twin used to stand all three down by (1 - wWin) and apply none of the rest.)
+        const double curX = q.currentSolved ? double(q.u) : 0.0;
+        const double curZ = q.currentSolved ? double(q.v) : 0.0;
+        double gain[OceanCpu::kCascades];
+        for (int c = 0; c < OceanCpu::kCascades; ++c) {
+            double amp = hsScale * expo;
+            if (depth > 0.05) {
+                const double kB = m_ocean->BandK(c);
+                const double cB = BandPhaseSpeed(kB, wt::Max(depth, 0.3));
+                const WaveCurrentGain ab = m_peakValid
+                                               ? WaveCurrentAmp(curX, curZ, m_peakDirX, m_peakDirZ, cB)
+                                               : WaveCurrentGain{1.0, 0.0};
+                amp *= ab.amp * ShoalFactor(kB, depth);
+            }
+            if (c != 2) amp *= 1.0 - wWin;
+            gain[c] = amp;
+        }
         OceanSample o;
         // Band-limited to what the hull can actually feel. A wave shorter than the panel
         // spacing puts as much up-force on one half of a panel as down on the other, so it
         // integrates to nothing -- summing it is a sincos per bin for a force of zero, and the
         // short cascade is ~85% of the retained bins.
-        m_ocean->SampleForHull(wx, wz, CascadeTime(simUnix), 2.0 * m_sampleM, o);
-        dispY += wCas * o.h;
-        dispX += wCas * o.dx;
-        dispZ += wCas * o.dz;
-        slopeX += wCas * o.sx;
-        slopeZ += wCas * o.sz;
-        orbX += wCas * o.vx;
-        orbY += wCas * o.vy;
-        orbZ += wCas * o.vz;
+        m_ocean->SampleForHull(wx, wz, CascadeTime(simUnix), 2.0 * m_sampleM, gain, o);
+        dispY += o.h;
+        dispX += o.dx;
+        dispZ += o.dz;
+        slopeX += o.sx;
+        slopeZ += o.sz;
+        orbX += o.vx;
+        orbY += o.vy;
+        orbZ += o.vz;
     }
 
     // ---- THE WAKES. Closed form and stateless, so the CPU runs the same law the bank does
@@ -245,23 +278,32 @@ SurfaceSample TreeWater::At(double wx, double wz, double simUnix) const {
         slopeZ += w.slopeZ;
     }
 
-    // ---- THE EXAGGERATION. gPatch.w multiplies the bank's whole displacement, so it multiplies
-    // the slope with it (the slope IS a derivative of the thing being scaled) and the orbital
-    // velocity too (the same surface moving through the same period). The hull rides the sea the
-    // renderer draws; the header says why, and --height-scale 1.0 is the physics-truth run.
-    const double e = m_heightScale;
-    s.heightNavd += e * dispY;
-    s.dx = e * dispX;
-    s.dz = e * dispZ;
-    s.vx += e * orbX;
-    s.vy += e * orbY;
-    s.vz += e * orbZ;
+    // ---- THE EXAGGERATION AND THE DRY WEIGHT. The kernel's `d *= dry * gPatch.w`: gPatch.w
+    // multiplies the bank's whole displacement, so it multiplies the slope with it (the slope IS a
+    // derivative of the thing being scaled) and the orbital velocity too (the same surface moving
+    // through the same period); the dry weight takes every wave off water too thin to carry one. The
+    // hull rides the sea the renderer draws; the header says why, and --height-scale 1.0 is the
+    // physics-truth run.
+    double k = dry * m_heightScale;
+    // ---- DEPTH-LIMITED BREAKING, the kernel's cap: no displacement taller than 0.55 of the depth.
+    // An AMPLITUDE cap, so the whole displacement -- and the slope and the orbital velocity that are
+    // linear in the same amplitude -- scales by the one ratio: continuous at the cap, where the
+    // kernel's horizontal step to 0.85 was not.
+    const double hmax = 0.55 * wt::Max(depth, 0.05);
+    const double hY = std::abs(k * dispY);
+    if (hY > hmax) k *= hmax / hY;
+    s.heightNavd += k * dispY;
+    s.dx = k * dispX;
+    s.dz = k * dispZ;
+    s.vx += k * orbX;
+    s.vy += k * orbY;
+    s.vz += k * orbZ;
 
     // ---- THE NORMAL, from the slope of the surface the hull is standing on. n proportional to
     // (-dh/dx, 1, -dh/dz), normalised. This is the Eulerian normal and it ignores the horizontal
     // Gerstner offset's contribution to the surface tangent -- the same approximation the bank
     // makes, kept deliberately so the two agree.
-    const double sx = e * slopeX, sz = e * slopeZ;
+    const double sx = k * slopeX, sz = k * slopeZ;
     const double inv = 1.0 / std::sqrt(sx * sx + 1.0 + sz * sz);
     s.nx = -sx * inv;
     s.ny = inv;
@@ -299,14 +341,22 @@ std::string TreeWater::Describe(double wx, double wz, double simUnix) const {
     } else {
         snprintf(age, sizeof(age), "solver answers as of t=%.0f, %.1f s old", asOf, simUnix - asOf);
     }
-    char buf[640];
+    // THE BAND LAWS' INPUTS (one wave rule): the sea-state scale, the peak the wave-current gain
+    // projects on, and the one term the hull does not read yet -- the swell shadow (exposed).
+    const WaveScale scale = WaveScale::For(m_wx->Globe(), m_sea, m_storm, simUnix);
+    char laws[200];
+    snprintf(laws, sizeof(laws),
+             "sea state x%.2f (%s, ref Hs %.2f m) | peak %s | swell shadow NOT READ (exposed)",
+             scale.At(latDeg, lonDeg), m_storm ? "a declared storm is the reference" : "grid",
+             scale.hsRef, m_peakValid ? "valid" : "none (wave-current gain 1)");
+    char buf[900];
     snprintf(buf, sizeof(buf),
              "water.tree @ (%.1f, %.1f) = %.5f/%.5f deg | bed %s | level %s | current %s | "
-             "wind %s | wWin %.3f | cascades %s | solved %s | exag %.3f | %s",
+             "wind %s | wWin %.3f | cascades %s | solved %s | exag %.3f | %s | %s",
              wx, wz, latDeg, lonDeg, q.bedSrc, q.levelSrc, q.currentSrc, q.windSrc,
              WindowWeight(wx, wz),
              (m_ocean && m_ocean->Ready()) ? "ready" : "ABSENT",
-             (m_wave && m_wave->Ready()) ? "ready" : "ABSENT", m_heightScale, age);
+             (m_wave && m_wave->Ready()) ? "ready" : "ABSENT", m_heightScale, laws, age);
     return std::string(buf);
 }
 

@@ -53,6 +53,9 @@ struct WeatherSample {
     const char* waveSrc = "-";
     const char* windSrc = "-";
     const char* bedSrc = "-";
+    // The current is a solver's (SolverRefine), not the Gulf field's: the one current the bank
+    // kernel has, so the one its wave-current gain may be fed on both processors.
+    bool currentSolved = false;
 };
 
 class WeatherManager {
@@ -134,6 +137,8 @@ public:
                         bool refineBySolver = true) const;
 
     int ActiveWindows() const;
+    // The planet's grids (the global wave grid WaveScale reads), or null.
+    const GlobeModel* Globe() const { return m_globe; }
     std::string stats;   // "wx 2 windows (merrimack, boston)" for the title bar
 
 private:

@@ -509,14 +509,14 @@ VsOut DsMain(HsPatch hs, float2 uv : SV_DomainLocation, const OutputPatch<VsCtl,
     d *= dryGuard * gWaveC.x;   // look-side exaggeration applies before the breaking clamp
 
     // Depth-limited breaking: the surface cannot heave beyond ~0.55 h. What the clamp removes
-    // comes back as foam through `brk`.
+    // comes back as foam through `brk`. An AMPLITUDE cap, so the whole displacement scales by the
+    // one ratio (WaterBank.hlsl's law: continuous at the cap).
     const float hmax = 0.55f * max(depth, 0.05f);
     const float yAbs = abs(d.y);
     o.brk = 0.0f;
     if (yAbs > hmax) {
         o.brk = saturate((yAbs - hmax) / max(hmax, 0.2f));
-        d.y *= hmax / yAbs;
-        d.xz *= 0.85f;
+        d *= hmax / yAbs;
     }
 
     // M6g one-world: the flat frame is the tangent at the estuary origin; the sea rides the

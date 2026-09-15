@@ -11,6 +11,8 @@
 #include "scene/SeaLayer.h"
 #include "scene/WaterBankLayer.h"
 #include "sim/BathyModel.h"
+#include "sim/WaterTerms.h"
+#include "sim/WaveScale.h"
 #include "sim/WeatherManager.h"
 
 #include <algorithm>
@@ -54,14 +56,15 @@ void RunTrace(const Options& opt, Gpu& gpu, SeaLayer* sea, const Compositor& com
         wq.u, wq.v, wq.currentSrc);
     Log("[trace] 5 depth     level - bed = %.2f m  dry %.2f  breaking clamp "
         "0.55*depth = %.2f m", wq.depthM,
-        std::clamp((wq.depthM - 0.05) / 0.6, 0.0, 1.0),
+        wt::Smoothstep(0.05, 0.65, double(wq.depthM)),
         0.55 * (std::max)(static_cast<double>(wq.depthM), 0.05));
-    const double hsRefT = 0.8;
-    const double hsScaleT =
-        wq.hs > 0.0f ? std::clamp(wq.hs / hsRefT, 0.15, 3.0) : 1.0;
+    // The one law the bank's tile corners and the hull's twin read (sim/WaveScale.h).
+    const WaveScale scaleT = WaveScale::For(weather.Globe(), sea ? sea->State() : nullptr,
+                                            sea && sea->StormOn(), simUnix);
     Log("[trace] 6 sea state Hs %.2f m Tp %.1f s dir %.0f [%s] -> hsScale "
-        "%.2f  (Hs/gulfRef %.2f, clamp 0.15..3)",
-        wq.hs, wq.tp, wq.dirDeg, wq.waveSrc, hsScaleT, hsRefT);
+        "%.2f  (the grid's nodes bilinear over the reference %.2f m%s, clamp 0.15..3)",
+        wq.hs, wq.tp, wq.dirDeg, wq.waveSrc, scaleT.At(tlat, tlon), scaleT.hsRef,
+        scaleT.storm ? "; a declared storm IS the reference" : "");
     const float expoT = sea->ShadowAtWorld(static_cast<float>(wx),
                                            static_cast<float>(wz));
     Log("[trace] 7 exposure  swell.exposure node (page z14 mips >= 3, no flip, "

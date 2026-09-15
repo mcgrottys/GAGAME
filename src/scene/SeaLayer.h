@@ -117,6 +117,8 @@ public:
     // M8: a --storm override makes the GFS grid stale by definition -- consumers that
     // ratio local grid Hs against the reference must treat the storm AS the reference.
     bool StormOn() const { return m_stormHs > 0.01f; }
+    // The forecast the cascades were synthesised from (the reference WaveScale divides by).
+    const SeaState* State() const { return m_sea; }
     // M9ba --trace: the CPU mirror of the page read -- the node itself, at the page's
     // ~76 m grain, so the hypervisor prints what the GPU will see.
     float ShadowAtWorld(float x, float z) const {
