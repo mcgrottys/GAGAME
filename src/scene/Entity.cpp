@@ -278,6 +278,11 @@ void Entity::Update(const FrameInfo& fi) {
     }
     boatSea.SetSwellShadow(m_o.swellShadow);
     boatSea.SetBed(m_o.bed);
+    // M13 step 2: the root space's exact chart, for a hull that has not been carried (a carried
+    // hull holds its gate's, set at the carry and not overwritten here), and the root's chart
+    // itself for the steps that cross spaces (the solved window, the wake table).
+    if (!m_space) boatSea.SetChart(m_o.rootChart);
+    boatSea.SetRootChart(m_o.rootChart);
     // THE SOLVER IS TRUTH, AND THE HULL ASKS FOR IT (the water match, step 1). Every frame, the
     // solver's region around the hull: its reach from the CG (the spec's length overall, which
     // bounds every station wherever the CG sits) plus the distance it covers before the answer

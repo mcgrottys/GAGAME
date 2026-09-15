@@ -220,11 +220,28 @@ private:
         float lvl[4];
         float bed[4];
         float hs[4];   // the local sea-state scale at the corners (sim/WaveScale.h)
+        // M13 step 2: THE TILE'S PLACE, ADDRESSED ONCE. The kernel used to turn every texel's
+        // (x, z) into lat/lon through the anchor-linear chart (gGeoA), which stands up to 28 m
+        // from the ground the mesh draws it on at 5 km and 215 km away at Haulover. These rows
+        // are the exact map (Space::Anchor::PlaceOfProjected: the place a ring texel's radial
+        // projection comes from) evaluated in doubles at this tile's ORIGIN, with its tangent
+        // map taken at the tile's CENTRE, so the kernel forms lat/lon per texel as
+        //   lat = placeA.x + ex * placeA.z + ez * placeB.x
+        //   lon = placeA.y + ex * placeA.w + ez * placeB.y
+        // with (ex, ez) the texel's own metres inside the tile -- small, exact, and no
+        // transcendental per texel. placeB.z != 0 marks the rows valid (a tile past this
+        // frame's horizon has no place and keeps the old chart, which is all it ever had).
+        float placeA[4];   // lat0, lon0, dLat/dx, dLon/dx
+        float placeB[4];   // dLat/dz, dLon/dz, valid, spare
     };
 
     void ReanchorRing(Gpu& gpu, int m, double camX, double camZ);
     bool TileWet(double wx0, double wz0, double spanM) const;
     void CornerParams(double wx, double wz, float& lvl, float& bed) const;
+    // M13 step 2: the place of a ring point, and the tile rows above. Both go through the
+    // surface's chart where it carries the renderer's rows; without them (a bank built before a
+    // surface, or Mars) they are the anchor-linear law, as everything here was.
+    void PlaceOfRing(double wx, double wz, double& latDeg, double& lonDeg) const;
 
     std::wstring m_shaderDir;
     SeaLayer* m_sea = nullptr;

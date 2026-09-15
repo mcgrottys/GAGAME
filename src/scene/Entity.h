@@ -89,6 +89,11 @@ public:
         // The bed the water kernels read, for the hull's depth laws (compose/HeightPage). Null: the
         // slow field's bed.
         const PlaceField* bed = nullptr;
+        // M13 step 2: the ROOT space's chart, with the renderer's own frame rows and the planet's
+        // radius on it (Space::Anchor::PlaceOf). A hull in the root space reads its places through
+        // this; a carried hull through its gate's, set at the carry. Null: the anchor-linear law,
+        // which is what a hull got before the places were exact.
+        const Space::Anchor* rootChart = nullptr;
     };
 
     // ---- Component -------------------------------------------------------------------------

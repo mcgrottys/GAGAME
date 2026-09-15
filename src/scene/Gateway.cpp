@@ -55,6 +55,15 @@ bool Gateway::Build(const Space& planet, const Space& source, double planetR, do
     m_chart.mPerLat = 110574.0;
     m_chart.mPerLon = 111320.0 * std::cos(m_props.toLat * kDeg);
     m_chart.linear = true;
+    // M13 step 2: and the EXACT map beside it -- the destination frame's own rows (the same ones
+    // the space's placement was built from) and the planet's radius, so a carried hull's water is
+    // read at the place, not at the linear chart's drift from this anchor.
+    for (int i = 0; i < 3; ++i) {
+        m_chart.east[i] = fr.east[i];
+        m_chart.up[i] = fr.up[i];
+        m_chart.north[i] = fr.north[i];
+    }
+    m_chart.planetR = planetR;
 
     double ex = 0.0, ey = 0.0, ez = 0.0;
     m_destInSource.TransformPoint(ex, ey, ez);

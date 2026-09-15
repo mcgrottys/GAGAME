@@ -2085,7 +2085,19 @@ bool RunSceneSelfTest() {
                    "[gate] a TreeWater with no chart places a point by the root's constants, bitwise");
             twG.SetChart(&ch);
             twG.PlaceOf(0.0, 0.0, la0, lo0);
-            g.True(la0 == 25.8997 && lo0 == -80.1239, "[gate] ...and through a gate's chart, at the destination's places");
+            // M13 step 2: the chart's own origin IS the destination -- but the answer now comes
+            // through the frame's rows and two transcendentals (Space::Anchor::PlaceOf, the place
+            // on the sphere the mesh is drawn on) rather than off the declaration, so it is exact
+            // to a nanodegree (a tenth of a millimetre of ground) and not bitwise.
+            g.Near(la0, 25.8997, 1e-9, "[gate] ...and through a gate's chart, at the destination's place");
+            g.Near(lo0, -80.1239, 1e-9, "[gate] ...in longitude too");
+            // And away from the anchor the exact map is what it is FOR: the linear chart drifts
+            // 5.6 m per km north of the sphere, which is what the water used to read.
+            double laE = 0.0, loE = 0.0, laL = 0.0, loL = 0.0;
+            twG.PlaceOf(0.0, 5000.0, laE, loE);
+            ch.LatLonOf(0.0, 5000.0, laL, loL);
+            const double driftM = (laL - laE) * 111195.0;
+            g.Near(driftM, 28.1, 1.5, "[gate] ...and stands 28 m off the linear chart at 5 km north");
             // THE WINDOW'S TEST (Gateway::SeenThrough, the shader's GateThrough line for line). The
             // box at (600, 0, -10) heading east: 8 m deep along x, 60 m across along z, 30 m tall.
             const double eyeW[3] = {500.0, 2.0, -10.0};

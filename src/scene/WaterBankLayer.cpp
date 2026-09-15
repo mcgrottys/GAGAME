@@ -117,6 +117,20 @@ void WaterBankLayer::SetFrame(Gpu& gpu, double simUnix, double camX, double camZ
     for (int m = 0; m < kMips; ++m) ReanchorRing(gpu, m, camX, camZ);
 }
 
+// M13 step 2: the place a ring point holds, on the sphere the mesh is drawn on. The rings are a
+// RADIAL PROJECTION onto the root's tangent plane -- the mesh reads them at (R d.x, R d.z) of a
+// vertex's direction -- so the place of (wx, wz) is the direction that projects there
+// (Space::Anchor::PlaceOfProjected). Where the surface never wrote its rows this is the
+// anchor-linear chart, exactly as every line here used to be.
+void WaterBankLayer::PlaceOfRing(double wx, double wz, double& latDeg, double& lonDeg) const {
+    if (m_surface && m_surface->flat.Exact() &&
+        m_surface->flat.PlaceOfProjected(wx, wz, latDeg, lonDeg)) {
+        return;
+    }
+    latDeg = BathyModel::kOrgLat + wz / BathyModel::kMPerLat;
+    lonDeg = BathyModel::kOrgLon + wx / BathyModel::kMPerLon;
+}
+
 bool WaterBankLayer::TileWet(double wx0, double wz0, double spanM) const {
     if (!m_comp || m_hgtCh < 0) return true;
     // Five-point test against the one height stack: any point at or below the high-water
@@ -124,8 +138,8 @@ bool WaterBankLayer::TileWet(double wx0, double wz0, double spanM) const {
     for (int k = 0; k < 5; ++k) {
         const double fx = (k == 4) ? 0.5 : (k & 1) ? 0.96 : 0.04;
         const double fz = (k == 4) ? 0.5 : (k & 2) ? 0.96 : 0.04;
-        const double lat = BathyModel::kOrgLat + (wz0 + fz * spanM) / BathyModel::kMPerLat;
-        const double lon = BathyModel::kOrgLon + (wx0 + fx * spanM) / BathyModel::kMPerLon;
+        double lat = 0.0, lon = 0.0;
+        PlaceOfRing(wx0 + fx * spanM, wz0 + fz * spanM, lat, lon);
         if (m_comp->SampleHeightStack(m_hgtCh, lat * kD2R, lon * kD2R, spanM * 0.25) < 2.5f) {
             return true;
         }
@@ -134,8 +148,8 @@ bool WaterBankLayer::TileWet(double wx0, double wz0, double spanM) const {
 }
 
 void WaterBankLayer::CornerParams(double wx, double wz, float& lvl, float& bed) const {
-    const double lat = BathyModel::kOrgLat + wz / BathyModel::kMPerLat;
-    const double lon = BathyModel::kOrgLon + wx / BathyModel::kMPerLon;
+    double lat = 0.0, lon = 0.0;
+    PlaceOfRing(wx, wz, lat, lon);
     lvl = 0.0f;
     if (m_atlas && m_atlas->Ready()) {
         lvl = static_cast<float>(m_atlas->MslNavd(lat, lon) +
@@ -481,9 +495,31 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
                     // law answers 1 (the storm IS the reference). M7j/THE LOST LINE: every
                     // corner is written unconditionally; a tile that shipped 0 once flattened
                     // the whole sea, and only a CPU-vs-GPU cross-check found it.
-                    t.hs[k] = static_cast<float>(waveScale.At(
-                        BathyModel::kOrgLat + cz / BathyModel::kMPerLat,
-                        BathyModel::kOrgLon + cx / BathyModel::kMPerLon));
+                    double cLat = 0.0, cLon = 0.0;
+                    PlaceOfRing(cx, cz, cLat, cLon);
+                    t.hs[k] = static_cast<float>(waveScale.At(cLat, cLon));
+                }
+                // M13 step 2: the tile's place rows -- the exact map at its origin, its tangent
+                // map at its centre (the midpoint rule; see BankTile). The kernel forms every
+                // texel's lat/lon from these instead of from the anchor-linear chart.
+                {
+                    const double ox = t.orgXZ[0], oz = t.orgXZ[1];   // the FLOAT origin the mesh
+                    const double cx = ox + 0.5 * tileSpan;           // reads with, in doubles
+                    const double cz = oz + 0.5 * tileSpan;
+                    double la0 = 0.0, lo0 = 0.0, dLatDx = 0.0, dLonDx = 0.0, dLatDz = 0.0,
+                           dLonDz = 0.0;
+                    const Space::Anchor& chart = m_surface->flat;
+                    const bool ok = chart.Exact() && chart.PlaceOfProjected(ox, oz, la0, lo0) &&
+                                    chart.PlaceJacobianProjected(cx, cz, 0.5 * texel, dLatDx,
+                                                                 dLonDx, dLatDz, dLonDz);
+                    t.placeA[0] = static_cast<float>(la0);
+                    t.placeA[1] = static_cast<float>(lo0);
+                    t.placeA[2] = static_cast<float>(dLatDx);
+                    t.placeA[3] = static_cast<float>(dLonDx);
+                    t.placeB[0] = static_cast<float>(dLatDz);
+                    t.placeB[1] = static_cast<float>(dLonDz);
+                    t.placeB[2] = ok ? 1.0f : 0.0f;
+                    t.placeB[3] = 0.0f;
                 }
                 // M7j: exposure moved to the KERNEL, from the solver's own swell-shadow
                 // field (the M7i x-ramp killed the channel and the open beaches -- a

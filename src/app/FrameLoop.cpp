@@ -609,6 +609,17 @@ std::optional<int> FrameLoop::Session() {
             Log("FATAL: [space] %s", why.c_str());
             return 1;
         }
+        // M13 step 2: THE ROOT CHART BECOMES EXACT. The surface's flat chart carries the rows just
+        // derived and the planet's radius, so every water reader that asks it for a place gets the
+        // point on the sphere the mesh is drawn on instead of the anchor-linear guess (28 m out at
+        // 5 km). The linear numbers stay for the consumers that are still charts (the solvers'
+        // own domains); nothing here re-derives a convention -- these are the renderer's own rows.
+        for (int i = 0; i < 3; ++i) {
+            m_A.surface.flat.east[i] = east0[i];
+            m_A.surface.flat.up[i] = oDir[i];
+            m_A.surface.flat.north[i] = north0[i];
+        }
+        m_A.surface.flat.planetR = planetR;
     }
     // M12 step 5a: the pose maps' bodies moved VERBATIM to scene/Pose.h, so the scene's
     // placement sugar is pinned against the functions the session itself calls; the lambdas
@@ -1291,6 +1302,7 @@ std::optional<int> FrameLoop::Session() {
         eo.gates = &m_gates;
         eo.swellShadow = m_A.exposureShadow.get();
         eo.bed = m_A.heightBed.get();
+        eo.rootChart = &m_A.surface.flat;   // M13 step 2: places, not the linear chart
         e->Configure(eo);
     }
 

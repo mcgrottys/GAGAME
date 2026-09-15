@@ -115,6 +115,9 @@ public:
     // root's chart (away from the Merrimack they answer nothing); and the cascades, a stationary
     // sea, are evaluated in the chart's own metres.
     void SetChart(const Space::Anchor* chart);
+    // M13 step 2: the ROOT space's chart beside this hull's own -- RootOf (the solved window's
+    // frame, the wake table's) is a geometric step between two spaces and needs both ends.
+    void SetRootChart(const Space::Anchor* chart);
     // The place (lat, lon) of a point of this water's flat frame.
     void PlaceOf(double wx, double wz, double& latDeg, double& lonDeg) const;
 
@@ -214,6 +217,8 @@ private:
     static constexpr double kSlowCellM = 8.0;
     bool m_hasChart = false;
     Space::Anchor m_chart;
+    bool m_hasRoot = false;
+    Space::Anchor m_root;
     // A point of this water's frame in the ROOT's flat frame (the solved window's and the wakes').
     // (public below for the probe: the solved window's own frame is the ROOT chart's, so an
     // instrument asking "does the solved field cover this hull" must ask there.)

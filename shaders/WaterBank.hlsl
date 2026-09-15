@@ -106,8 +106,28 @@ struct BankTile {
     float lvl00, lvl10, lvl01, lvl11;   // tide level at corners (atlas stack, CPU rotors)
     float bed00, bed10, bed01, bed11;   // bed at corners (the one height stack)
     float hs00, hs10, hs01, hs11;       // local Hs / reference Hs at corners (sim/WaveScale.h)
+    // M13 step 2: THE TILE'S PLACE, ADDRESSED ONCE (WaterBankLayer.h's BankTile says how they
+    // are built). lat0/lon0 at the tile's origin, the tangent map at its centre, in degrees and
+    // degrees per metre; placeB.z = 0 means this tile has no place (past the frame's horizon)
+    // and the chart row is all it has.
+    float4 placeA;      // lat0, lon0, dLat/dx, dLon/dx
+    float4 placeB;      // dLat/dz, dLon/dz, valid, spare
 };
 StructuredBuffer<BankTile> gTiles : register(t0);
+
+// THE PLACE OF A TEXEL, from its own metres inside the tile. This is what gGeoA used to answer
+// through the anchor-linear chart (lat = orgLat + z / 110574, lon = orgLon + x / 81660), which
+// stands 5.6 m per km north and 1.1 m per km east of the sphere the mesh draws -- 28 m at the
+// rings' own reach, and a different place entirely (215 km) once a gate carries the eye. The
+// rows are exact at the tile's origin and second-order over the tile.
+float2 TilePlace(const BankTile t, float2 exz) {
+    if (t.placeB.z == 0.0f) {   // no rows: the chart, as before
+        return float2(gGeoA.x + (t.orgXZ.y + exz.y) * gGeoA.z,
+                      gGeoA.y + (t.orgXZ.x + exz.x) * gGeoA.w);
+    }
+    return float2(t.placeA.x + exz.x * t.placeA.z + exz.y * t.placeB.x,
+                  t.placeA.y + exz.x * t.placeA.w + exz.y * t.placeB.y);
+}
 
 #include "Jet.hlsli"
 
@@ -353,7 +373,12 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // caught this line writing CORNERS while BankSample reconstructs centers (local -
     // 0.5): every bank field sat half a texel off, 2.4 m at ring 0 and 77 m at ring 5.
     // The corner-lerp f above already used centers; now the whole kernel agrees.
-    const float2 xz = t.orgXZ + (float2(id.xy) + 0.5f) * t.texelM;
+    const float2 exz = (float2(id.xy) + 0.5f) * t.texelM;   // this texel's own metres in the tile
+    const float2 xz = t.orgXZ + exz;
+    // M13 step 2: the texel's PLACE, from the tile's rows (TilePlace above). Every lat/lon read
+    // below -- the bed, the swell shadow -- is asked for here, once, instead of being re-derived
+    // from the chart at each site.
+    const float2 place = TilePlace(t, exz);
 
     // Corner-lerped spatial context (the CPU sampled the atlas stacks at the corners; a tile
     // spans well under the tide's or the wave grid's own resolution, so bilinear is honest
@@ -371,8 +396,8 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         // everywhere else on the planet -- so shoaling, the current amplification and the
         // depth-limited breaking act on every coast the rings reach, not only inside one page.
         // The corner lerp above remains only for a bank with no height tenant at all.
-        const float lat = gGeoA.x + xz.y * gGeoA.z;
-        const float lon = gGeoA.y + xz.x * gGeoA.w;
+        const float lat = place.x;
+        const float lon = place.y;
         // THE BED AT THE RING'S OWN GRAIN (the water match, step 3): the page level whose texel is
         // no finer than this ring's, floored to a whole level -- mip 0 (9.55 m of Mercator, ~7 m
         // here) for the rings a hull and an eye stand in, rising with the coarse rings. The constant
@@ -424,9 +449,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // through the same lat/lon -> page frame as the bed; nothing resident = exposed.
     float expo = 1.0f;
     if (gSlotsC.y != 0xFFFFFFFFu && gSlotsC.z != 0xFFFFFFFFu && gSlotsD.z != 0xFFFFFFFFu) {
-        const float lat = gGeoA.x + xz.y * gGeoA.z;
-        const float lon = gGeoA.y + xz.x * gGeoA.w;
-        const float2 wuv = PageUvLatLon(lat, lon, gWinA);
+        const float2 wuv = PageUvLatLon(place.x, place.y, gWinA);
         if (all(wuv > 0.0f) && all(wuv < 1.0f)) {
             const float have = round(PageHaveLoad(gTA[gSlotsC.z], wuv, gSlotsD.z));
             if (have <= kHpMaxMip) {

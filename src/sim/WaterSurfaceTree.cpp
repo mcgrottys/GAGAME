@@ -52,18 +52,41 @@ void TreeWater::SetChart(const Space::Anchor* chart) {
     m_memoT = -1e30;
 }
 
+// The ROOT space's chart, always, whatever space this hull sits in: RootOf needs both ends.
+void TreeWater::SetRootChart(const Space::Anchor* chart) {
+    m_hasRoot = chart != nullptr;
+    if (chart) m_root = *chart;
+}
+
+// M13 step 2: THE PLACE, not the chart's guess. Space::Anchor::PlaceOf carries the point through
+// the space's own frame rows onto the sphere the mesh is drawn on and reads its direction; where a
+// space handed us no rows (planetR 0) it is the anchor-linear law, exactly as before. The hull's
+// own y is not passed: a place is a direction, and a metre of altitude turns it by 1.6e-7 degrees
+// (1 cm of ground at 6371 km) -- below the float the kernels carry it in.
 void TreeWater::PlaceOf(double wx, double wz, double& latDeg, double& lonDeg) const {
     if (m_hasChart) {
-        m_chart.LatLonOf(wx, wz, latDeg, lonDeg);
+        m_chart.PlaceOf(wx, 0.0, wz, latDeg, lonDeg);
     } else {
         LatLonOf(wx, wz, latDeg, lonDeg);
     }
 }
 
+// The same point said in the ROOT space's flat frame -- the frame the solved wave field's window
+// and the wake table are expressed in. M13 step 2: where both charts carry their rows this is the
+// geometry itself (the point into the planet frame by its own space's rows, then onto the root's),
+// which is the IDENTITY for a hull in the root space; the lat/lon round trip it replaces was not,
+// once the places became exact, and it would have put the 28 m chart drift under every root hull.
 void TreeWater::RootOf(double wx, double wz, double& rx, double& rz) const {
     if (!m_hasChart) {
         rx = wx;
         rz = wz;
+        return;
+    }
+    if (m_chart.Exact() && m_hasRoot && m_root.Exact()) {
+        double p[3];
+        m_chart.PlanetOf(wx, 0.0, wz, p);
+        rx = p[0] * m_root.east[0] + p[1] * m_root.east[1] + p[2] * m_root.east[2];
+        rz = p[0] * m_root.north[0] + p[1] * m_root.north[1] + p[2] * m_root.north[2];
         return;
     }
     double la = 0.0, lo = 0.0;
