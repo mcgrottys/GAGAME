@@ -120,7 +120,8 @@ void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double plane
                    WaterBankLayer* waterBank, const VesselLayer* vessels,
                    const WaterAtlas* atlas, const ExposureSource* exposure,
                    const WaveField* waveField, const SeaLayer* sea, const SeaState* seaState,
-                   double oceanNow, double simUnix, uint32_t recFrame);
+                   const SurfaceFrame& surface, double oceanNow, double simUnix,
+                   uint32_t recFrame);
 
 }  // namespace ga::app::tools
 

@@ -77,6 +77,7 @@ struct Options {
     std::string gisDump;              // --gis-dump PATH: the gate over the survey box as PGM, exit
     bool ringLoads = true;            // --no-ring-loads: the old queue, for the A/B (M9al)
     bool resTrace = false;            // --res-trace: residency deficit + slot accounting, per 30 f
+    bool waterTiles = false;          // --water-tiles: what the water would cost on the lattice
     bool threadAudit = false;         // --thread-audit: count tile-file collisions between threads
     bool jobsInline = false;          // --jobs-inline: every job on the calling thread, in order
     uint32_t traceFrom = UINT32_MAX;  // --res-trace-frames A:B: the landing ledger every turn of

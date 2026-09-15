@@ -1078,6 +1078,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         }
         globe->debugLens = opt.lens;
         globe->probeCullFar = opt.probeCullFar;
+        globe->waterTileCount = opt.waterTiles;   // M13 step 0
         // M9h: the grad(flow) bank plus the grid it lives on, for --lens velgrad. The
         // SWE solver owns the bank; the bathy model owns the world mapping.
         if (swe.Ready() && bathy.Ready()) {

@@ -2794,6 +2794,11 @@ bool FrameLoop::Frame() {
         PROF_BEGIN();
         globe->SetView(cam, aspect, viewH, simUnix - startUnix);
         PROF_END(7);
+        // M13 step 0 (--water-tiles): what this view's leaves would ask of a water tenant on the
+        // cube quadtree -- the count that sizes a sampler's reserve, printed every 30 frames.
+        if (opt.waterTiles && (frame % 30u) == 0u) {
+            Log("[water-tiles] frame %u: %s", frame, globe->WaterTileReport().c_str());
+        }
         if (!S.railDirW.empty() && frame >= 150u) {
             walkNodesAcc += globe->walkNodes;
             walkLeavesAcc += globe->walkLeaves;
@@ -3082,7 +3087,7 @@ bool FrameLoop::Frame() {
         if (frame >= probeSettle && ((frame - probeSettle) % opt.waterProbeEvery) == 0u) {
             tools::RunWaterProbe(gpu, renderer, cam, planetR, m_entities, waterBank,
                                  m_A.vesselLayer, &waterAtlas, exposureSrc.get(),
-                                 m_waveField.get(), sea, &seaState,
+                                 m_waveField.get(), sea, &seaState, m_A.surface,
                                  m_oceanAt ? m_oceanAt(simUnix) : 0.0, simUnix,
                                  frame - probeSettle);
         }

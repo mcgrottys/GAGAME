@@ -1495,6 +1495,20 @@ void GlobeLayer::WalkLevel(const WalkParams& wp, uint32_t slot) {
                 const int level = static_cast<int>(std::lround(-std::log2(size)));
                 const uint64_t ix = static_cast<uint64_t>(std::llround(u0 / size));
                 const uint64_t iy = static_cast<uint64_t>(std::llround(v0 / size));
+                // M13 step 0: the two water tiles this leaf would read on the cube quadtree --
+                // its grain (level - 2, one texel per cell) and the morph's target (level - 3).
+                // Addresses only; nothing is mapped or filled.
+                if (waterTileCount) {
+                    for (int d = 2; d <= 3; ++d) {
+                        const int T = level - d;
+                        if (T < 0) continue;
+                        const uint64_t tx = ix >> d, ty = iy >> d;
+                        const uint64_t key = (static_cast<uint64_t>(slot) << 61) |
+                                             (static_cast<uint64_t>(face) << 58) |
+                                             (static_cast<uint64_t>(T) << 52) | (tx << 26) | ty;
+                        if (waterTiles.insert(key).second) ++waterTilesByLevel[T & 31];
+                    }
+                }
                 m_leafKeys.push_back(LeafKey{(static_cast<uint64_t>(slot) << 61) |
                                                  (static_cast<uint64_t>(face) << 58) |
                                                  (static_cast<uint64_t>(level) << 52) |

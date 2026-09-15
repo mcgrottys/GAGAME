@@ -256,6 +256,8 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--ring-loads") o.ringLoads = true;      // the default; kept for scripts
         else if (a == "--no-ring-loads") o.ringLoads = false;
         else if (a == "--res-trace") o.resTrace = true;
+        // M13 step 0: count the water tiles the walk would want on the planet's own lattice.
+        else if (a == "--water-tiles") o.waterTiles = true;
         // The tree's thread instrument (core/ThreadAudit.h): every tile write, read and delete
         // is scoped, and a run reports how often two threads met at one path. Off by default --
         // it takes a mutex per tile file, which is a different landing schedule.
@@ -732,6 +734,7 @@ SceneArgs Options::ToSets(const Options& o) {
     if (o.predictInline) rawf("--predict-inline");
     if (o.dsSerial) rawf("--ds-serial");
     if (o.resTrace) rawf("--res-trace");
+    if (o.waterTiles) rawf("--water-tiles");
     if (o.threadAudit) rawf("--thread-audit");
     if (o.jobsInline) rawf("--jobs-inline");
     if (o.traceFrom != UINT32_MAX) {

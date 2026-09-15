@@ -2,6 +2,7 @@
 #include "app/Tools.h"
 
 #include "compose/ExposureSource.h"
+#include "compose/SurfaceFrame.h"
 #include "compose/WaterAtlas.h"
 #include "core/Common.h"
 #include "core/Pga.h"
@@ -77,6 +78,23 @@ double Bearing(double east, double north) {
     double b = std::atan2(east, north) * 180.0 / 3.14159265358979;
     return (b < 0.0) ? b + 360.0 : b;
 }
+
+// THE PLACE OF A ROOT-FRAME POINT, exactly: the tangent frame's rows carry it into the planet frame
+// (planet = east*x + up*(R + y) + north*z, the walk's own expression), and lat/lon is the inverse of
+// GlobeModel::LatLonDir on that direction (this planet frame has x at 0N 0E, y at the pole, z at
+// 90E). No metres-per-degree anywhere: this is the truth the water's linear chart is measured
+// against (M13 step 0).
+void PlaceOfRoot(const SurfaceFrame& s, double planetR, const double p[3], double& latDeg,
+                 double& lonDeg) {
+    const double ry = planetR + p[1];
+    const double d[3] = {s.east[0] * p[0] + s.up[0] * ry + s.north[0] * p[2],
+                         s.east[1] * p[0] + s.up[1] * ry + s.north[1] * p[2],
+                         s.east[2] * p[0] + s.up[2] * ry + s.north[2] * p[2]};
+    const double len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    const double r2d = 180.0 / 3.14159265358979;
+    latDeg = std::asin((std::min)((std::max)(d[1] / (std::max)(len, 1e-12), -1.0), 1.0)) * r2d;
+    lonDeg = std::atan2(d[2], d[0]) * r2d;
+}
 double WrapPi(double a) {
     while (a > 3.14159265358979) a -= 6.28318530717959;
     while (a < -3.14159265358979) a += 6.28318530717959;
@@ -122,7 +140,8 @@ void GradientAxis(double cx, double cz, int n, double step, F height, double& ax
 // so the gradient of its stored phase must point along that direction with magnitude k; and the ambient
 // sea's gradients must lie along its declared peak direction.
 void ReportOrientation(const scene::Entity& e, const WaveField* waveField, const SeaLayer* sea,
-                       const SeaState* seaState, double simUnix, uint32_t recFrame) {
+                       const SeaState* seaState, double rootX, double rootZ, double simUnix,
+                       uint32_t recFrame) {
     if (!e.Hull()) return;
     double cg[3] = {0.0, 0.0, 0.0};
     e.Hull()->Body().pose.TransformPoint(cg[0], cg[1], cg[2]);
@@ -132,14 +151,17 @@ void ReportOrientation(const scene::Entity& e, const WaveField* waveField, const
     Log("[wprobe]   orientation at the hull, rec%u: the declared peak TRAVELS toward bearing %.1f%s",
         recFrame, peakBearing, peakValid ? "" : " (no valid peak)");
     // ---- the solved field: phase gradient against each component's declared direction.
-    if (waveField && waveField->Ready() && !e.InSpace()) {
+    // The solved field is addressed in the ROOT chart's metres (the caller hands them in, the
+    // identity for a root-space hull): a carried hull simply finds no valid probe there, which is
+    // an answer, where before it was not asked at all.
+    if (waveField && waveField->Ready()) {
         const WaveField::GpuTable& tab = waveField->Table();
         const double h = 0.25;
-        const WaveField::Probe p0 = waveField->ProbeAt(cg[0], cg[2], simUnix);
-        const WaveField::Probe px1 = waveField->ProbeAt(cg[0] + h, cg[2], simUnix);
-        const WaveField::Probe px0 = waveField->ProbeAt(cg[0] - h, cg[2], simUnix);
-        const WaveField::Probe pz1 = waveField->ProbeAt(cg[0], cg[2] + h, simUnix);
-        const WaveField::Probe pz0 = waveField->ProbeAt(cg[0], cg[2] - h, simUnix);
+        const WaveField::Probe p0 = waveField->ProbeAt(rootX, rootZ, simUnix);
+        const WaveField::Probe px1 = waveField->ProbeAt(rootX + h, rootZ, simUnix);
+        const WaveField::Probe px0 = waveField->ProbeAt(rootX - h, rootZ, simUnix);
+        const WaveField::Probe pz1 = waveField->ProbeAt(rootX, rootZ + h, simUnix);
+        const WaveField::Probe pz0 = waveField->ProbeAt(rootX, rootZ - h, simUnix);
         if (p0.valid && px1.valid && px0.valid && pz1.valid && pz0.valid) {
             double wSum = 0.0, errSum = 0.0, ratioSum = 0.0;
             int logged = 0;
@@ -172,14 +194,14 @@ void ReportOrientation(const scene::Entity& e, const WaveField* waveField, const
             }
             // The envelope: which way the solved field's amplitude varies around the hull.
             double envAxis = 0.0, envCoh = 0.0;
-            GradientAxis(cg[0], cg[2], 40, 4.0,
+            GradientAxis(rootX, rootZ, 40, 4.0,
                          [&](double x, double z) {
                              const WaveField::Probe p = waveField->ProbeAt(x, z, simUnix);
                              return p.valid ? double(p.rms) : 0.0;
                          },
                          envAxis, envCoh);
             double etaAxis = 0.0, etaCoh = 0.0;
-            GradientAxis(cg[0], cg[2], 64, 1.5,
+            GradientAxis(rootX, rootZ, 64, 1.5,
                          [&](double x, double z) {
                              const WaveField::Probe p = waveField->ProbeAt(x, z, simUnix);
                              return p.valid ? double(p.eta) : 0.0;
@@ -213,7 +235,8 @@ void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double plane
                    WaterBankLayer* waterBank, const VesselLayer* vessels,
                    const WaterAtlas* atlas, const ExposureSource* exposure,
                    const WaveField* waveField, const SeaLayer* seaLayer, const SeaState* seaState,
-                   double oceanNow, double simUnix, uint32_t recFrame) {
+                   const SurfaceFrame& surface, double oceanNow, double simUnix,
+                   uint32_t recFrame) {
     std::vector<float> depth;
     if (!renderer.ReadDepth(depth)) {
         Log("[wprobe] rec%u: the depth readback failed", recFrame);
@@ -369,16 +392,49 @@ void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double plane
         const double expoNode = exposure ? double(exposure->At(cgLat, cgLon)) : 1.0;
         const double marchMs =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - marchT0).count();
+        // The solved window lives in the ROOT chart's metres, so a carried hull asks there too
+        // (RootOf; the identity for a root-space hull) instead of being skipped.
+        double cgRootX = cg[0], cgRootZ = cg[2];
+        sea.RootOf(cg[0], cg[2], cgRootX, cgRootZ);
         Log("[wprobe]   wave gains at the hull: exposure %.3f (the node's march, %.2f ms; the kernel's "
             "floor 0.18) | solved window weight %.3f",
-            expoNode, marchMs, e->InSpace() ? 0.0 : sea.WindowWeight(cg[0], cg[2]));
+            expoNode, marchMs, sea.WindowWeight(cgRootX, cgRootZ));
+        // THE REGISTRATION (M13 step 0): the water's linear chart against the sphere the mesh is
+        // drawn on. Both answer for the same point; the offset is how far the water's data stand
+        // from the ground that carries them, and it GROWS WITH RANGE from the space's anchor -- the
+        // chart is exact at its own origin -- so it is reported at the hull and at the reach of the
+        // rings that draw the water around it. 0 everywhere would mean the chart IS the sphere.
+        {
+            const double d2r = 3.14159265358979 / 180.0;
+            const double legs[4][2] = {{0.0, 0.0}, {0.0, 5000.0}, {5000.0, 0.0}, {0.0, -5000.0}};
+            const char* names[4] = {"at the hull", "5 km north", "5 km east", "5 km south"};
+            char line[512];
+            int n = snprintf(line, sizeof(line), "[wprobe]   registration (chart - sphere):");
+            for (int L = 0; L < 4; ++L) {
+                double q[3] = {cg[0] + legs[L][0], cg[1], cg[2] + legs[L][1]};
+                double qLat = 0.0, qLon = 0.0;
+                sea.PlaceOf(q[0], q[2], qLat, qLon);   // the water's chart, in the hull's space
+                if (e->InSpace()) e->SpaceInRoot().TransformPoint(q[0], q[1], q[2]);
+                double sLat = 0.0, sLon = 0.0;
+                PlaceOfRoot(surface, planetR, q, sLat, sLon);   // the sphere the mesh is drawn on
+                n += snprintf(line + n, sizeof(line) - size_t(n), "  %s %+.1f N %+.1f E m;", names[L],
+                              (qLat - sLat) * d2r * planetR,
+                              (qLon - sLon) * d2r * planetR * std::cos(sLat * d2r));
+            }
+            Log("%s", line);
+        }
         // THE BAND LAW AT THE HULL, AS EACH PROCESSOR APPLIED IT (step 3). The bank kernel writes its
         // full-closure per-band gains and its dry weight to the detail plane; the hull's twin states
         // the same law (TreeWater::BandGains). A drawn sea whose waves stand at a fraction of the
         // hull's with the phases agreeing is a GAIN, and this names which band carries it -- the node's
         // exposure above is the source's own march, not the page texels the kernel read.
-        if (waterBank && !e->InSpace()) {
-            const double cgXz[2] = {cg[0], cg[2]};
+        if (waterBank) {
+            // The bank is addressed by the point's place on the TANGENT PLANE (the mesh's own
+            // bankXZ), so a carried hull's CG is asked for there -- in the ROOT frame, where its
+            // rings are anchored -- and not skipped as it was through the interests commit.
+            const double cgy2 = cgRoot[1] + planetR;
+            const double cgl = std::sqrt(cgRoot[0] * cgRoot[0] + cgy2 * cgy2 + cgRoot[2] * cgRoot[2]);
+            const double cgXz[2] = {planetR * cgRoot[0] / cgl, planetR * cgRoot[2] / cgl};
             WaterBankLayer::BankPoint bc;
             waterBank->ReadBankPoints(gpu, cgXz, 1, &bc);
             double g[OceanCpu::kCascades] = {0.0, 0.0, 0.0}, dryC = 0.0;
@@ -389,7 +445,7 @@ void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double plane
                 double(bc.dry), haveC ? "" : "(no water) ", g[0], g[1], g[2], dryC);
 
         }
-        ReportOrientation(*e, waveField, seaLayer, seaState, simUnix, recFrame);
+        ReportOrientation(*e, waveField, seaLayer, seaState, cgRootX, cgRootZ, simUnix, recFrame);
         for (const Bin& b : bins) {
             if (b.n == 0) continue;
             const double mean = b.sumD / b.n, rms = std::sqrt(b.sumD2 / b.n);

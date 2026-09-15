@@ -27,6 +27,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <string>
+#include <unordered_set>
 #include <thread>
 #include <vector>
 
@@ -543,9 +544,37 @@ public:
     // M9bk probe: leaves sitting past their own morph band (k == 1: the odd vertices are
     // snapped onto the even ones, so the level renders at HALF the density the walk paid for).
     mutable uint64_t walkMorphFull = 0, walkMorphPart = 0;
+    // M13 step 0 (--water-tiles): WHAT WOULD THE WATER COST ON THE PLANET'S OWN LATTICE? The
+    // counter answers it before a line of the kernel moves: under the plan's rule each water leaf
+    // reads the cube-quadtree tile at its level - 2 (one texel per cell) and the one at level - 3
+    // (the morph's target), so the walk records those two addresses per leaf and this reports the
+    // distinct set -- the number a sampler's reserve has to hold, and the pool bytes it costs at
+    // 128^2 texels x 3 planes x RGBA16F. It counts EVERY leaf: a land test can only take tiles
+    // away, and the plan's gate-free test (the min/max height pyramid) does not exist yet.
+    // Off by default; a std::set touch per leaf is not free.
+    bool waterTileCount = false;
+    mutable std::unordered_set<uint64_t> waterTiles;
+    mutable uint32_t waterTilesByLevel[32] = {};
+    static constexpr uint64_t kWaterTileBytes = 128ull * 128ull * 8ull * 3ull;   // 384 KB a slot
     void WalkReset() {
         walkNodes = walkLeaves = walkWantNs = 0;
         walkMorphFull = walkMorphPart = 0;
+        if (waterTileCount) {
+            waterTiles.clear();
+            for (uint32_t& c : waterTilesByLevel) c = 0;
+        }
+    }
+    // The line the still poses and the Haulover carry are read from.
+    std::string WaterTileReport() const {
+        char b[512];
+        int n = snprintf(b, sizeof(b), "%zu tiles (%.1f MB) from %llu leaves:", waterTiles.size(),
+                         double(waterTiles.size() * kWaterTileBytes) / (1024.0 * 1024.0),
+                         static_cast<unsigned long long>(walkLeaves));
+        for (int L = 0; L < 32; ++L) {
+            if (!waterTilesByLevel[L]) continue;
+            n += snprintf(b + n, sizeof(b) - size_t(n), " L%d %u;", L, waterTilesByLevel[L]);
+        }
+        return std::string(b);
     }
     // The meshlet-record memcpy into the frame's upload buffer (Render), last frame, ms: the
     // one CPU cost of the mesh path inside the RENDER bracket. main reads and zeroes it.

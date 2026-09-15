@@ -215,7 +215,12 @@ private:
     bool m_hasChart = false;
     Space::Anchor m_chart;
     // A point of this water's frame in the ROOT's flat frame (the solved window's and the wakes').
+    // (public below for the probe: the solved window's own frame is the ROOT chart's, so an
+    // instrument asking "does the solved field cover this hull" must ask there.)
+public:
     void RootOf(double wx, double wz, double& rx, double& rz) const;
+
+private:
     mutable double m_memoX = 1e30, m_memoZ = 1e30, m_memoT = -1e30;
     mutable WeatherSample m_memo;
     const WeatherSample& SlowAt(double wx, double wz, double simUnix) const;
