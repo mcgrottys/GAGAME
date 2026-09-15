@@ -47,6 +47,7 @@
 // ================================================================================================
 #pragma once
 
+#include "compose/ExposurePage.h"
 #include "compose/ExposureSource.h"
 #include "compose/GisMask.h"
 #include "compose/TileTree.h"
@@ -223,6 +224,10 @@ struct Assembly {
     // int ids above keep the values Tenant::Id() gave them, so no consumer changed. (The wave's
     // lives in the frame loop beside its tree.)
     hal::Tenant heightTenant, exposureTenant, colorTenant, landseaTenant;
+    // THE SWELL SHADOW A HULL READS (the water match, step 3): the exposure page's texels at the
+    // kernel's floor, evaluated from the node on the CPU (compose/ExposurePage) -- the numbers the
+    // page holds, without the page's residency timing.
+    std::unique_ptr<ExposurePage> exposureShadow;
     // M9ae: the composed cache's index (one entry per TILE), and M9ag: the NVMe -> GPU reader.
     // Both were function-local statics inside main()'s residency block; as the last members
     // they now destruct first, before gpu (the statics used to outlive the device).

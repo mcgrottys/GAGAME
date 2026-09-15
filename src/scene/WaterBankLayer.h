@@ -85,6 +85,9 @@ public:
         float texelM = 0.0f;
         float dispX = 0, dispY = 0, dispZ = 0, foam = 0;
         float level = 0, sigma2 = 0, curU = 0, curV = 0;
+        // The detail plane, as the kernel wrote it: the per-band gains of the FULL closure (sea-state
+        // scale x shadow x shoaling x wave-current, before any window stand-down) and the dry weight.
+        float gain0 = 0, gain1 = 0, gain2 = 0, dry = 0;
     };
     void ReadBankPoints(Gpu& gpu, const double* worldXz, int n, BankPoint* out);
 

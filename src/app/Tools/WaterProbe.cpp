@@ -21,6 +21,7 @@
 #include <DirectXMath.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <vector>
 
@@ -362,10 +363,32 @@ void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double plane
             levelCorner - levelHull);
         // THE WAVE GAINS AT THE HULL that only the kernel applies today: the swell shadow (the node's
         // own march, once -- an instrument can afford it) and the solved window's weight.
-        Log("[wprobe]   wave gains at the hull: exposure %.3f (the kernel's floor 0.18) | solved window "
-            "weight %.3f",
-            exposure ? double(exposure->At(cgLat, cgLon)) : 1.0,
-            e->InSpace() ? 0.0 : sea.WindowWeight(cg[0], cg[2]));
+        // (Timed: what one texel of the page costs the node to paint at 76 m -- the price of any CPU
+        // evaluation of the field itself rather than a copy of the texels.)
+        const auto marchT0 = std::chrono::steady_clock::now();
+        const double expoNode = exposure ? double(exposure->At(cgLat, cgLon)) : 1.0;
+        const double marchMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - marchT0).count();
+        Log("[wprobe]   wave gains at the hull: exposure %.3f (the node's march, %.2f ms; the kernel's "
+            "floor 0.18) | solved window weight %.3f",
+            expoNode, marchMs, e->InSpace() ? 0.0 : sea.WindowWeight(cg[0], cg[2]));
+        // THE BAND LAW AT THE HULL, AS EACH PROCESSOR APPLIED IT (step 3). The bank kernel writes its
+        // full-closure per-band gains and its dry weight to the detail plane; the hull's twin states
+        // the same law (TreeWater::BandGains). A drawn sea whose waves stand at a fraction of the
+        // hull's with the phases agreeing is a GAIN, and this names which band carries it -- the node's
+        // exposure above is the source's own march, not the page texels the kernel read.
+        if (waterBank && !e->InSpace()) {
+            const double cgXz[2] = {cg[0], cg[2]};
+            WaterBankLayer::BankPoint bc;
+            waterBank->ReadBankPoints(gpu, cgXz, 1, &bc);
+            double g[OceanCpu::kCascades] = {0.0, 0.0, 0.0}, dryC = 0.0;
+            const bool haveC = sea.BandGains(cg[0], cg[2], simUnix, g, dryC);
+            Log("[wprobe]   band gains at the hull (swell, wind sea, chop; dry): kernel %s%.3f %.3f %.3f; "
+                "%.3f | hull %s%.3f %.3f %.3f; %.3f",
+                bc.valid ? "" : "(no ring) ", double(bc.gain0), double(bc.gain1), double(bc.gain2),
+                double(bc.dry), haveC ? "" : "(no water) ", g[0], g[1], g[2], dryC);
+
+        }
         ReportOrientation(*e, waveField, seaLayer, seaState, simUnix, recFrame);
         for (const Bin& b : bins) {
             if (b.n == 0) continue;

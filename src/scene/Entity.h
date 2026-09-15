@@ -84,6 +84,8 @@ public:
         // inside the step, before the hull is published to the vessel layer, so the frame that
         // carries it draws it where it now is.
         const std::vector<std::unique_ptr<Gateway>>* gates = nullptr;
+        // The swell shadow the bank reads, for the hull's water (compose/ExposurePage). Null: exposed.
+        const PlaceField* swellShadow = nullptr;
     };
 
     // ---- Component -------------------------------------------------------------------------

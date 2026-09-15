@@ -77,6 +77,14 @@ inline constexpr double kDepthFloorM = 0.15;
 // re-derived. A hull that stands on the surface the mesh draws must displace by the same guard.
 inline constexpr double kLatFoldFloor = 0.35;
 
+// The swell shadow's two kernel constants, shaders/WaterBank.hlsl (M7j/M9ba): the exposure page is
+// read at max(have, 3) -- mips >= 3 of the z14 page, ~76 m texels, the grain the line-of-sight march
+// is honest at -- and floored at 0.18, the local chop a wind raises even in the deepest lee (the
+// march's own deep-shadow floor is 0.12; the bank keeps a little more for the sea it makes itself).
+// Carried with the kernel's arguments, not re-derived.
+inline constexpr unsigned kSwellShadowMipFloor = 3;
+inline constexpr double kSwellShadowFloor = 0.18;
+
 // ------------------------------------------------------------------------------------------------
 //  wt - the scalar shims HLSL hands a shader for free.  Written out rather than pulled from
 //  <algorithm> so that Smoothstep is DEMONSTRABLY the HLSL curve: the same 3t^2 - 2t^3 Hermite

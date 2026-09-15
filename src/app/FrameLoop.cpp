@@ -1288,6 +1288,7 @@ std::optional<int> FrameLoop::Session() {
         eo.vesselLayer = vesselLayer;
         eo.gpu = &gpu;
         eo.gates = &m_gates;
+        eo.swellShadow = m_A.exposureShadow.get();
         e->Configure(eo);
     }
 

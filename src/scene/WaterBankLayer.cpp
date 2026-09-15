@@ -226,11 +226,12 @@ void WaterBankLayer::ReadBankPoints(Gpu& gpu, const double* worldXz, int n, Bank
         wrap.state = m_state;
         data = gpu.ReadbackTexture(wrap, &pitch);
     };
-    std::vector<uint8_t> dData, pData;
-    uint32_t dPitch = 0, pPitch = 0;
+    std::vector<uint8_t> dData, pData, tData;
+    uint32_t dPitch = 0, pPitch = 0, tPitch = 0;
     snap(m_disp, dData, dPitch);
     snap(m_param, pData, pPitch);
-    if (dData.empty() || pData.empty()) return;
+    snap(m_detail, tData, tPitch);
+    if (dData.empty() || pData.empty() || tData.empty()) return;
 
     // THE MESH'S RECONSTRUCTION, not the texel under the point (the water match, step 2): a texel
     // holds its field at its CENTRE, and the mesh reads the bank through Globe.hlsl's BankFetch --
@@ -262,11 +263,12 @@ void WaterBankLayer::ReadBankPoints(Gpu& gpu, const double* worldXz, int n, Bank
                     (m * 512 + tx) * 4;
                 return double(HalfF(px[c]));
             };
-            double d[4] = {0, 0, 0, 0}, p[4] = {0, 0, 0, 0};
+            double d[4] = {0, 0, 0, 0}, p[4] = {0, 0, 0, 0}, g[4] = {0, 0, 0, 0};
             for (int c = 0; c < 4; ++c) {
                 for (int k = 0; k < 4; ++k) {   // the tent
                     const double wgt = ((k & 1) ? fx : 1.0 - fx) * ((k >> 1) ? fz : 1.0 - fz);
                     p[c] += wgt * at(pData, pPitch, tx0 + (k & 1), tz0 + (k >> 1), c);
+                    g[c] += wgt * at(tData, tPitch, tx0 + (k & 1), tz0 + (k >> 1), c);
                 }
             }
             double wxc[4], wzc[4];
@@ -285,6 +287,8 @@ void WaterBankLayer::ReadBankPoints(Gpu& gpu, const double* worldXz, int n, Bank
             b.texelM = static_cast<float>(texel);
             b.dispX = float(d[0]); b.dispY = float(d[1]); b.dispZ = float(d[2]); b.foam = float(d[3]);
             b.level = float(p[0]); b.sigma2 = float(p[1]); b.curU = float(p[2]); b.curV = float(p[3]);
+            // The detail layout: (gain1, dry, gain0, gain2).
+            b.gain1 = float(g[0]); b.dry = float(g[1]); b.gain0 = float(g[2]); b.gain2 = float(g[3]);
             break;
         }
     }

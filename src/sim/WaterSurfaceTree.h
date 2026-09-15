@@ -49,6 +49,7 @@
 #pragma once
 
 #include "sim/OceanCpu.h"
+#include "sim/PlaceField.h"
 #include "sim/SeaState.h"
 #include "sim/WaterSurface.h"
 #include "sim/WaveField.h"
@@ -96,6 +97,12 @@ public:
         m_peakValid = peakValid;
         m_storm = storm;
     }
+    // THE SWELL SHADOW, as the kernel reads it (the water match, step 3): the exposure page's texels
+    // at a place (compose/ExposurePage -- the node asked at the texel centres the painter asks it at,
+    // at the kernel's floor mip, quantized as the page stores them), floored at kSwellShadowFloor; no
+    // opinion (no swell direction, outside the page) is exposed, the kernel's own absence law. Null:
+    // no shadow reader, and the sea stands exposed.
+    void SetSwellShadow(const PlaceField* shadow) { m_shadow = shadow; }
 
     // THE CHART (the cuboid gate, 2026-09-14): the flat frame this water is read in. None (the
     // default) is the root's -- the ACT0816 constants, byte for byte. A hull carried through a
@@ -131,6 +138,12 @@ public:
     // The MEAN surface alone at a point of this water's frame (the slow field At() adds its waves
     // to), NAVD metres; NaN where no level rung answered. For the water probe's level/wave split.
     double MeanLevelAt(double wx, double wz, double simUnix) const;
+    // The per-band amplitude law at a point -- the FULL closure (sea-state scale x shadow x shoaling
+    // x wave-current, before the solved window's stand-down) and the dry weight: what the bank
+    // kernel writes to its detail plane, for --water-probe to hold the two against. False where no
+    // level or bed answered.
+    bool BandGains(double wx, double wz, double simUnix, double gains[OceanCpu::kCascades],
+                   double& dry) const;
 
 private:
     // The cascade clock. SeaLayer feeds the FFT `simUnix - CycleUnix()` cast to FLOAT
@@ -142,6 +155,9 @@ private:
     double CascadeTime(double simUnix) const;
     // At and AtLabel: one assembly; `displaced` stands the answer on the drawn surface.
     SurfaceSample Evaluate(double wx, double wz, double simUnix, bool displaced) const;
+    // The kernel's cascade loop's gains, once for At and BandGains.
+    void BandLaw(const WeatherSample& q, double depth, double hsScale, double expo,
+                 double gain[OceanCpu::kCascades]) const;
 
     const WeatherManager* m_wx = nullptr;
     const WaveField* m_wave = nullptr;
@@ -159,6 +175,9 @@ private:
     double m_peakDirX = 0.0, m_peakDirZ = 0.0;
     bool m_peakValid = false;
     bool m_storm = false;
+    const PlaceField* m_shadow = nullptr;
+    // The swell shadow at a place, by the kernel's law (SetSwellShadow).
+    double ExposureAt(double latDeg, double lonDeg) const;
     WakeBoat m_boats[8];
     int m_boatCount = 0;
 

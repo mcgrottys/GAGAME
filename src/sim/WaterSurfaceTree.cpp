@@ -133,6 +133,46 @@ double TreeWater::MeanLevelAt(double wx, double wz, double simUnix) const {
     return (q.levelSrc && q.levelSrc[0] != '-') ? q.levelNavd : std::nan("");
 }
 
+void TreeWater::BandLaw(const WeatherSample& q, double depth, double hsScale, double expo,
+                        double gain[OceanCpu::kCascades]) const {
+    const double curX = q.currentSolved ? double(q.u) : 0.0;
+    const double curZ = q.currentSolved ? double(q.v) : 0.0;
+    for (int c = 0; c < OceanCpu::kCascades; ++c) {
+        double amp = hsScale * expo;
+        if (depth > 0.05 && m_ocean && m_ocean->Ready()) {
+            const double kB = m_ocean->BandK(c);
+            const double cB = BandPhaseSpeed(kB, wt::Max(depth, 0.3));
+            const WaveCurrentGain ab = m_peakValid
+                                           ? WaveCurrentAmp(curX, curZ, m_peakDirX, m_peakDirZ, cB)
+                                           : WaveCurrentGain{1.0, 0.0};
+            amp *= ab.amp * ShoalFactor(kB, depth);
+        }
+        gain[c] = amp;
+    }
+}
+
+bool TreeWater::BandGains(double wx, double wz, double simUnix, double gains[OceanCpu::kCascades],
+                          double& dry) const {
+    for (int c = 0; c < OceanCpu::kCascades; ++c) gains[c] = 0.0;
+    dry = 0.0;
+    if (!m_wx) return false;
+    const WeatherSample q = MeanStateAt(wx, wz, simUnix);
+    if (!(q.bedSrc && q.bedSrc[0] != '-') || !(q.levelSrc && q.levelSrc[0] != '-')) return false;
+    const double depth = q.levelNavd - double(q.bedNavd);
+    dry = wt::Smoothstep(0.05, 0.65, depth);
+    double latDeg = 0.0, lonDeg = 0.0;
+    PlaceOf(wx, wz, latDeg, lonDeg);
+    const double hsScale = WaveScale::For(m_wx->Globe(), m_sea, m_storm, simUnix).At(latDeg, lonDeg);
+    BandLaw(q, depth, hsScale, ExposureAt(latDeg, lonDeg), gains);
+    return true;
+}
+
+double TreeWater::ExposureAt(double latDeg, double lonDeg) const {
+    double e = 1.0;
+    if (m_shadow && m_shadow->Read(latDeg, lonDeg, e)) return wt::Max(e, kSwellShadowFloor);
+    return 1.0;   // no opinion: exposed, as the kernel reads an absent page
+}
+
 SurfaceSample TreeWater::At(double wx, double wz, double simUnix) const {
     return Evaluate(wx, wz, simUnix, true);
 }
@@ -161,14 +201,13 @@ SurfaceSample TreeWater::Evaluate(double wx, double wz, double simUnix, bool dis
 
     // ---- THE WATER'S OWN CONTEXT, in CsBankFill's order (the water match, step 2: one wave rule).
     // The depth under the mean surface; the dry weight every displacement rides (the kernel's `dry`);
-    // the local sea-state scale (WaveScale, the one law the bank's tile corners carry). The swell
-    // shadow is the kernel's page read and has no CPU reader yet: the hull's sea stands exposed (1),
-    // which Describe() states and --water-probe measures against the page at the hull.
+    // the local sea-state scale (WaveScale, the one law the bank's tile corners carry); the swell
+    // shadow, the page texels the kernel read (ExposureAt).
     const double depth = q.levelNavd - double(q.bedNavd);
     const double dry = wt::Smoothstep(0.05, 0.65, depth);
-    const double expo = 1.0;
     double latDeg = 0.0, lonDeg = 0.0;
     PlaceOf(wx, wz, latDeg, lonDeg);
+    const double expo = ExposureAt(latDeg, lonDeg);
     const double hsScale =
         WaveScale::For(m_wx->Globe(), m_sea, m_storm, simUnix).At(latDeg, lonDeg);
 
@@ -230,21 +269,10 @@ SurfaceSample TreeWater::Evaluate(double wx, double wz, double simUnix, bool dis
         // other current, so neither does its twin); and inside the solved window the STRUCTURE
         // bands (0 and 1) yield to the solved field by its weight while the chop band stays on.
         // (The twin used to stand all three down by (1 - wWin) and apply none of the rest.)
-        const double curX = q.currentSolved ? double(q.u) : 0.0;
-        const double curZ = q.currentSolved ? double(q.v) : 0.0;
         double gain[OceanCpu::kCascades];
+        BandLaw(q, depth, hsScale, expo, gain);
         for (int c = 0; c < OceanCpu::kCascades; ++c) {
-            double amp = hsScale * expo;
-            if (depth > 0.05) {
-                const double kB = m_ocean->BandK(c);
-                const double cB = BandPhaseSpeed(kB, wt::Max(depth, 0.3));
-                const WaveCurrentGain ab = m_peakValid
-                                               ? WaveCurrentAmp(curX, curZ, m_peakDirX, m_peakDirZ, cB)
-                                               : WaveCurrentGain{1.0, 0.0};
-                amp *= ab.amp * ShoalFactor(kB, depth);
-            }
-            if (c != 2) amp *= 1.0 - wWin;
-            gain[c] = amp;
+            if (c != 2) gain[c] *= 1.0 - wWin;
         }
         OceanSample o;
         // Band-limited to what the hull can actually feel. A wave shorter than the panel
@@ -390,11 +418,12 @@ std::string TreeWater::Describe(double wx, double wz, double simUnix) const {
     // THE BAND LAWS' INPUTS (one wave rule): the sea-state scale, the peak the wave-current gain
     // projects on, and the one term the hull does not read yet -- the swell shadow (exposed).
     const WaveScale scale = WaveScale::For(m_wx->Globe(), m_sea, m_storm, simUnix);
-    char laws[200];
+    char laws[240];
     snprintf(laws, sizeof(laws),
-             "sea state x%.2f (%s, ref Hs %.2f m) | peak %s | swell shadow NOT READ (exposed)",
+             "sea state x%.2f (%s, ref Hs %.2f m) | peak %s | swell shadow %s x%.3f",
              scale.At(latDeg, lonDeg), m_storm ? "a declared storm is the reference" : "grid",
-             scale.hsRef, m_peakValid ? "valid" : "none (wave-current gain 1)");
+             scale.hsRef, m_peakValid ? "valid" : "none (wave-current gain 1)",
+             m_shadow ? "the page's texels" : "NOT READ (exposed)", ExposureAt(latDeg, lonDeg));
     char buf[900];
     snprintf(buf, sizeof(buf),
              "water.tree @ (%.1f, %.1f) = %.5f/%.5f deg | bed %s | level %s | current %s | "

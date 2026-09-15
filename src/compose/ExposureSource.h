@@ -59,6 +59,9 @@ public:
         return prev != packed;
     }
     bool Valid() const { return DirBucket(m_params.load()) >= 0; }
+    // The live bucket word, (dirBucket << 32) | levelBucket: a field evaluated from this node is the
+    // same field exactly while this is unchanged (ExposurePage keys its memo on it).
+    uint64_t Params() const { return m_params.load(); }
 
     // ---- DomainSource
     const char* Name() const override { return "swell.exposure"; }

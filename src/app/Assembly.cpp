@@ -57,6 +57,7 @@
 #include "sim/SeaState.h"
 #include "sim/SweSolver.h"
 #include "sim/TideModel.h"
+#include "sim/WaterTerms.h"
 #include "app/Options.h"
 #include "app/Tools.h"
 
@@ -245,6 +246,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     auto& exposureT = A->exposureT;
     auto& heightTenant = A->heightTenant;
     auto& exposureTenant = A->exposureTenant;
+    auto& exposureShadow = A->exposureShadow;
     auto& colorTenant = A->colorTenant;
     auto& landseaTenant = A->landseaTenant;
     auto& idxColorCube = A->idxColorCube;
@@ -790,13 +792,19 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                             for (size_t i = 0; i < 32768; ++i) h[i] = 0x3C00u;
                         }
                         xd.slices = 7;
-                        xd.bindings.push_back({6, 1, surface.winH, nullptr, "exposure"});
+                        const uint32_t exposureSlice = 6u;   // the z14 page (slices 0..5: the cube)
+                        xd.bindings.push_back({exposureSlice, 1, surface.winH, nullptr, "exposure"});
                         xd.holder = exposureTree;
                         exposureTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(xd));
                         exposureT = exposureTenant.Id();
                         exposureTenant.Bind(**exposureTree);   // its folds invalidate slice 6
                         sea->SetExposurePage(resMgr.TextureSrv(exposureT),
                                              resMgr.ResidencySrv(exposureT), exposureSrc.get());
+                        // The same texels for whoever floats in them, at the floor the bank reads
+                        // them at (WaterTerms.h kSwellShadowMipFloor): the node asked where the
+                        // painter asks it, quantized as the page stores it.
+                        exposureShadow = std::make_unique<ExposurePage>(
+                            exposureSrc.get(), surface.winH, exposureSlice, kSwellShadowMipFloor);
                         Log("[exposure] swell.exposure is page tenant %d: the LOS march over "
                             "the height stack, cached per (direction, level) bucket, read at "
                             "page mips >= 3 (%.0f m)",

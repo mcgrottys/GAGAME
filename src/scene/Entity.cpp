@@ -276,6 +276,7 @@ void Entity::Update(const FrameInfo& fi) {
     if (sea) {
         boatSea.SetCascadeSea(sea->PeakDirX(), sea->PeakDirZ(), sea->PeakDirValid(), sea->StormOn());
     }
+    boatSea.SetSwellShadow(m_o.swellShadow);
     // THE SOLVER IS TRUTH, AND THE HULL ASKS FOR IT (the water match, step 1). Every frame, the
     // solver's region around the hull: its reach from the CG (the spec's length overall, which
     // bounds every station wherever the CG sits) plus the distance it covers before the answer
