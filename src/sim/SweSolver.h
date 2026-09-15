@@ -25,6 +25,7 @@
 #include "core/Lattice.h"
 #include "hal/Context.h"
 #include "hal/Gpu.h"
+#include "hal/Readback.h"
 #include "hal/Shader.h"
 #include "hal/TileAtlas.h"
 #include "hal/Views.h"
@@ -32,6 +33,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -155,6 +157,40 @@ public:
     double SimTime() const { return m_simTime; }
     float Dt() const { return m_dt; }
 
+    // ---- THE SOLVER, READ WITHOUT A STALL (the water match, step 1 -- Mark, 2026-09-15: the
+    // solver is truth). A hull reads the surface the solver holds, not the tide plane it was forced
+    // by, and it may not stop the renderer to do it (Gpu::WaitIdle is 18-27 ms: WeatherManager.h).
+    // So a consumer ASKS for a region -- the eta and current texels within radiusM of a point of
+    // the flat frame, plus the one-texel apron the bilinear reconstruction reads -- and Record, on
+    // the frame ring only, copies it through hal::RegionReadback; the answer arrives
+    // Gpu::kFrameCount frames later, always, and never by a flush. A request lives one frame: a
+    // consumer that wants its answer kept fresh asks every frame (the answers stay until newer
+    // ones replace them). The upload-list paths (Spinup, AdvanceTo) serve nothing.
+    void RequestRegion(double worldX, double worldZ, double radiusM);
+    struct Deviation {
+        float dEta = 0.0f;           // m, from the tide plane the solver was forced by
+        float u = 0.0f, v = 0.0f;    // the solved surface current, m/s east / north
+        bool currentValid = false;   // the solver has a current there (its valid channel > 0.5)
+        double asOf = 0.0;           // the solver's clock when the texels were copied
+    };
+    // THE KERNEL'S RECONSTRUCTION, at a point of the flat frame (shaders/WaterBank.hlsl: texel =
+    // (u Nx, (1 - v) Ny), centres at -0.5, bilinear, clamped to the grid), from the newest
+    // delivered region holding all four texels. False where no delivered region holds them.
+    bool DeviationAt(double worldX, double worldZ, Deviation& out) const;
+    // The same reconstruction over whole-field arrays (the tools' mirror: eta at rows of etaRowW,
+    // the current's four channels at rows of uvRowW), so the two transports cannot disagree about
+    // the law. False when the arrays are empty.
+    bool DeviationFromFields(double worldX, double worldZ, const std::vector<float>& eta,
+                             uint32_t etaRowW, const std::vector<float>& uv4, uint32_t uvRowW,
+                             double asOf, Deviation& out) const;
+    // THE DOMAIN'S WEIGHT: the solver's surface owns a point in proportion to how far inside the
+    // grid it stands, rising from 0 at the grid's edge to 1 one cell in -- the field is defined at
+    // cell centres and has no support of its own nearer the edge than that. The kernel's
+    // expression, in the kernel's texel units.
+    double DomainWeight(double worldX, double worldZ) const;
+    // The newest delivered region's clock; a large negative number when none has been delivered.
+    double DeliveredAsOf() const { return m_regions.empty() ? -1.0e18 : m_regions.front().asOf; }
+
 private:
     int Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float tideNavd,
                int maxSub);
@@ -225,6 +261,35 @@ private:
     double m_lastTideTime = 0;
     float m_dt = 0.25f;
     bool m_pendingReset = true;
+
+    // ---- the region readback (RequestRegion / DeviationAt) --------------------------------------
+    // A point of the flat frame in the kernel's continuous texel coordinates (u Nx, (1 - v) Ny).
+    bool TexelOf(double worldX, double worldZ, double& tx, double& ty) const;
+    // Read what the ring delivered for this frame's slot, then copy this frame's requests into it.
+    void CollectRegions(Gpu& gpu);
+    void ServeRegions(hal::CommandContext& cmd, Gpu& gpu,
+                      const std::function<void(D3D12_RESOURCE_STATES)>& etaTo,
+                      const std::function<void(D3D12_RESOURCE_STATES)>& uvTo);
+    struct RegionRect {
+        uint32_t x0 = 0, y0 = 0, w = 0, h = 0;
+    };
+    struct DeliveredRegion {
+        RegionRect rect;
+        std::vector<float> eta;   // w * h
+        std::vector<float> uv;    // w * h * 4: u, v, speed, valid
+        double asOf = 0.0;
+    };
+    // Bounds, and why these: a hull asks for its footprint plus its motion over the ring's latency
+    // (a few metres to tens), so a region of kMaxRegionTexels a side holds any hull at any speed a
+    // hull reaches in two frames; kMaxRegions requests a frame holds eight subjects. The readback
+    // slot is sized from the two, and a request past either is refused and logged, never clipped.
+    static constexpr uint32_t kMaxRegions = 8;
+    static constexpr uint32_t kMaxRegionTexels = 64;
+    std::vector<RegionRect> m_requests;           // this frame's
+    std::vector<DeliveredRegion> m_regions;       // newest first
+    double m_slotAsOf[Gpu::kFrameCount] = {};      // the clock each slot's copies were taken at
+    hal::RegionReadback m_readback;
+    bool m_refusedLogged = false;
 };
 
 }  // namespace ga

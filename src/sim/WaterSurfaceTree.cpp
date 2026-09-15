@@ -108,7 +108,9 @@ const WeatherSample& TreeWater::SlowAt(double wx, double wz, double simUnix) con
         // the same answer regardless of which one asked first, so the hull's forces do not
         // depend on the order its elements happen to be evaluated in.
         PlaceOf((cx + 0.5) * kSlowCellM, (cz + 0.5) * kSlowCellM, latDeg, lonDeg);
-        m_memo = m_wx->Query(latDeg, lonDeg, simUnix, 1.0);
+        // The SLOW field only: the solver's surface varies across a cell (the throat's jet, the
+        // basin's gradient) and is cheap to read, so every point refines it (At, MeanLevelAt).
+        m_memo = m_wx->Query(latDeg, lonDeg, simUnix, 1.0, false);
         m_memoX = cx;
         m_memoZ = cz;
         m_memoT = simUnix;
@@ -116,11 +118,25 @@ const WeatherSample& TreeWater::SlowAt(double wx, double wz, double simUnix) con
     return m_memo;
 }
 
+WeatherSample TreeWater::MeanStateAt(double wx, double wz, double simUnix) const {
+    WeatherSample q = SlowAt(wx, wz, simUnix);
+    double latDeg = 0.0, lonDeg = 0.0;
+    PlaceOf(wx, wz, latDeg, lonDeg);
+    m_wx->SolverRefine(latDeg, lonDeg, simUnix, q);   // THE SOLVER IS TRUTH, at this point
+    return q;
+}
+
+double TreeWater::MeanLevelAt(double wx, double wz, double simUnix) const {
+    if (!m_wx) return std::nan("");
+    const WeatherSample q = MeanStateAt(wx, wz, simUnix);
+    return (q.levelSrc && q.levelSrc[0] != '-') ? q.levelNavd : std::nan("");
+}
+
 SurfaceSample TreeWater::At(double wx, double wz, double simUnix) const {
     SurfaceSample s;
     if (!m_wx) return s;   // valid stays false: no tree attached is not flat water
 
-    const WeatherSample& q = SlowAt(wx, wz, simUnix);
+    const WeatherSample q = MeanStateAt(wx, wz, simUnix);
 
     // ---- THE COVERAGE GATE. Test the PROVENANCE, never the value: a bed of 0.0 is what both a
     // point at datum and a point nothing covers return, and only one of those is a measurement.
@@ -273,16 +289,15 @@ std::string TreeWater::Describe(double wx, double wz, double simUnix) const {
     double latDeg = 0.0, lonDeg = 0.0;
     LatLonOf(wx, wz, latDeg, lonDeg);
     const WeatherSample q = m_wx->Query(latDeg, lonDeg, simUnix, 1.0);
-    // M12 step 5e: THE AGE IT READS (the freshness contract, scene/Entity.h). The level and
-    // the current above come from the solver's CPU mirror when a window holds one; this says
-    // what instant that mirror was read to, or that it never was -- in which case the level
-    // is the tide atlas alone and the current the GoMOFS field, whatever the solver knows.
-    const double asOf = m_wx->MirrorAsOf();
+    // THE AGE IT READS. Inside a solver's domain the level and the current are the solver's, as of
+    // the region it last delivered (WeatherManager::RequestRegion); this says that instant, or that
+    // no solver has answered yet -- in which case a point the solver owns reports no level at all.
+    const double asOf = m_wx->SolverAsOf();
     char age[96];
     if (asOf <= WeatherManager::kNeverRead) {
-        snprintf(age, sizeof(age), "mirror never read (the analytic tide; no solved level or current)");
+        snprintf(age, sizeof(age), "no solver has answered (its domain reports no level yet)");
     } else {
-        snprintf(age, sizeof(age), "mirror as of t=%.0f, %.1f s old", asOf, simUnix - asOf);
+        snprintf(age, sizeof(age), "solver answers as of t=%.0f, %.1f s old", asOf, simUnix - asOf);
     }
     char buf[640];
     snprintf(buf, sizeof(buf),

@@ -14,21 +14,17 @@
 //  kind, VesselRegistry), `at` (the spawn, a motor in the placement sugar -- {x, alt, z} is a
 //  pure translation, which is how --campos spawned it), `controller` (helm: the keyboard drives
 //  the levers and the outboard angle, Helm(); fixed: the declared throttle and steer every
-//  step, --boat-drive), and `mirrorCadence` -- the freshness contract below.
+//  step, --boat-drive).
 //
-//  THE FRESHNESS CONTRACT (the review's finding, confirmed in the source). A hull queries the
-//  weather manager every step (TreeWater::SlowAt -> WeatherManager::Query), and Query refines
-//  the tide's level and adds the solved current from a CPU MIRROR of the solver's fields --
-//  but the mirror is filled only by RefreshMirrorsTo, whose callers were four tools. In ordinary
-//  play the mirror was never read: the hull rode the analytic tide and the waves and never the
-//  solved level or the current, with nothing declaring so. The contract now: FrameInfo carries
-//  `asOf`, the instant the physics snapshot is coherent at; the entity DECLARES a cadence
-//  (`mirrorCadence`, seconds) and drives the refresh -- when it exists, and only when the mirror
-//  is older than the cadence (WeatherManager::RefreshOnCadence: one readback per cadence, never
-//  one per hull step); and TreeWater::Describe reports the age it reads. The default is 0 =
-//  NEVER, which is today's cost and today's physics exactly: the effective cadence the engine
-//  shipped with was infinite. A cadence of 1 s makes the hull read the solved water, and that is
-//  a PHYSICS change by design, measured on the helm boat's telemetry and reported, not slipped in.
+//  THE SOLVER IS TRUTH (the water match, step 1 -- Mark, 2026-09-15). A hull queries the weather
+//  manager every step (TreeWater -> WeatherManager::Query), and inside a solver's domain the
+//  water's surface and current are the SOLVER'S. The solver lives on the GPU, so the hull ASKS for
+//  the region around itself every frame (WeatherManager::RequestRegion: the texels copied through
+//  the frame ring and delivered two frames later, never by a stall) and reads the delivered texels
+//  through the kernel's own reconstruction. FrameInfo carries `asOf`, the instant those answers are
+//  coherent at, and TreeWater::Describe reports it. This replaced the step 5e cadence
+//  (`mirrorCadence`, a whole-field mirror read on a clock, default never): measured by
+//  --water-probe, a hull that never read the solver rode 0.39 m below the sea the renderer drew.
 //
 //  The chase camera stays a Follow on the View (scene/View.h): the entity hands the view its
 //  hull's origin and heading (ChaseFrame, which also keeps the look-steer's heading reference
@@ -77,13 +73,13 @@ public:
     // reported by Configure and TreeWater reports a missing term as valid = false, never as
     // flat water (WaterSurfaceTree.h's banner).
     struct Observers {
-        WeatherManager* weather = nullptr;        // THE tree's point evaluator (and the mirror)
+        WeatherManager* weather = nullptr;        // THE tree's point evaluator (and the solver's regions)
         const WaveField* waveField = nullptr;     // the solved field, when the session built one
         SeaLayer* sea = nullptr;                  // its cascades (Ocean()) and heightScale
         const SeaState* seaState = nullptr;
         const WaterSceneConfig* waterScene = nullptr;   // wfExag / wfChop, live (hot-reloaded)
         VesselLayer* vesselLayer = nullptr;
-        Gpu* gpu = nullptr;                       // the mirror refresh's readback
+        Gpu* gpu = nullptr;                       // the device the hull's water lives beside
         // The gates a hull in the ROOT space can be carried through (scene/Gateway.h). Tested
         // inside the step, before the hull is published to the vessel layer, so the frame that
         // carries it draws it where it now is.
@@ -144,8 +140,6 @@ public:
     bool Teleport(const Gateway& gate, double simUnix);
     // The hull steps' wall time this Update (the frame loop's profiler slot).
     double LastStepMs() const { return m_stepMs; }
-    // The declared cadence, seconds; 0 = never (today's behaviour).
-    double MirrorCadence() const { return m_props.mirrorCadence; }
 
 private:
     EntityProps m_props;

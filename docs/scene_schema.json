@@ -259,8 +259,7 @@
 }, "reload": "restart", "doc": "the spawn, in the flat world frame (--campos); `az` is the bow's compass heading (absent: north, as every hull always spawned)" },
       { "key": "controller", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "helm", "names": ["helm", "fixed"], "reload": "hot", "doc": "the keyboard helm, or fixed throttles and helm (--boat-drive)" },
       { "key": "throttle", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "hot", "doc": "fixed: every thruster's throttle" },
-      { "key": "steer", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "hot", "doc": "fixed: the commanded steering" },
-      { "key": "mirrorCadence", "type": "number", "field": "f64", "quantity": "time", "unit": "s", "default": 0, "reload": "hot", "doc": "seconds between readbacks of the solver mirror the hull reads; 0 = never (the hull reads the analytic tide and the waves)" }
+      { "key": "steer", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "hot", "doc": "fixed: the commanded steering" }
     ] },
     { "type": "effect", "keys": [
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the effect's name" },

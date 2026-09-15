@@ -552,6 +552,8 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.bandKFold[3] = 0.0f;
     for (int c = 0; c < 3; ++c) cb.bandKSpread[c] = m_sea->BandKSpread(c);
     cb.bandKSpread[3] = 0.0f;
+    cb.sweB[0] = m_tidePlane;   // the solver is truth: its level is this plane plus its deviation
+    cb.sweB[1] = cb.sweB[2] = cb.sweB[3] = 0.0f;
     cb.debugA[0] = flatBed ? 1.0f : 0.0f;   // M9p: the A/B that proves the bed moves geometry
     cb.debugA[1] = flatBedNavd;
     cb.debugA[2] = cb.debugA[3] = 0.0f;

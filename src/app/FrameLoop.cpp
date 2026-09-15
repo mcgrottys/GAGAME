@@ -1464,7 +1464,7 @@ void FrameLoop::ApplyWater() {
 // M12 step 5e: THE ENTITIES' STEP, from both clock branches (stepBoat's contract: the quanta
 // COUNT differs between the windowed and the headless clock and nothing else does). The
 // snapshot the hulls read is declared to them (FrameInfo: the clock, its quanta, and asOf --
-// the instant the weather manager's mirrors are coherent at); each entity's step is its own;
+// the instant the solver's delivered answers are coherent at); each entity's step is its own;
 // the hull steps' wall time lands in the profiler's slot 11 as stepBoat's bracket did; and the
 // chase camera is the start view's Follow of the followed hull, placed after the steps as the
 // hand code placed it after the telemetry (and, as there, only once the hull is set down).
@@ -1474,7 +1474,7 @@ void FrameLoop::StepEntities(int quanta, float dt) {
     fi.dt = dt;
     fi.frame = m_frame;
     fi.quanta = quanta;
-    fi.asOf = m_weather.MirrorAsOf();
+    fi.asOf = m_weather.SolverAsOf();
     for (auto& e : m_entities) {
         if (!e->Active()) continue;
         e->Update(fi);
@@ -2839,6 +2839,13 @@ bool FrameLoop::Frame() {
     const double waterNavd =
         bathy.Ready() ? oceanAt(simUnix) : tide->focusHeight + datumOff;
     lastWaterNavd = waterNavd;   // next frame's camera-pivot rays test against it
+    // THE PLANE THE SOLVER IS FORCED BY, to the banks: inside its domain the level is that plane
+    // plus its deviation (the solver is truth) -- the same value sea->SetTime hands the solver.
+    {
+        const double tidePlane = bathy.Ready() ? waterNavd : tide->focusHeight;
+        if (waterBank) waterBank->SetTidePlane(tidePlane);
+        if (waterBankB) waterBankB->SetTidePlane(tidePlane);
+    }
     PROF_BEGIN();
     if (swe.Ready()) {
         swe.SetBoundaries(static_cast<float>(westAt(simUnix)),
@@ -2959,6 +2966,17 @@ bool FrameLoop::Frame() {
     const scene::ViewSet viewSet =
         renderer.OneView(cam, static_cast<float>(simUnix - startUnix));
     renderer.RenderFrame(viewSet);
+    // --water-probe N: the drawn sea against each hull's own water, every N recorded frames
+    // (app/Tools/WaterProbe.cpp). An instrument: it reads back and waits, so never in play.
+    if (opt.waterProbeEvery > 0 && !m_entities.empty()) {
+        const uint32_t probeSettle = S.railDirW.empty() ? 0u : 150u;
+        if (frame >= probeSettle && ((frame - probeSettle) % opt.waterProbeEvery) == 0u) {
+            tools::RunWaterProbe(gpu, renderer, cam, planetR, m_entities, waterBank,
+                                 m_A.vesselLayer, &waterAtlas, exposureSrc.get(),
+                                 m_oceanAt ? m_oceanAt(simUnix) : 0.0, simUnix,
+                                 frame - probeSettle);
+        }
+    }
     // --bench-overlap keeps the overlap: RENDER is then record + the BeginFrame fence
     // wait, and the loop mean is the pipelined max(CPU, GPU) a player's frame costs.
     if (opt.bench && !opt.benchOverlap) gpu.WaitIdle();

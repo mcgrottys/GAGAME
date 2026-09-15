@@ -101,8 +101,8 @@ build\bin\gagame.exe scenes\recipes\storm_rail.json --set capture.frames=1200 --
   between poses), `spiral` (Sᵘ through the portal), `hold`, `turn` — and editing a copy is how a new
   flight is authored.
 - **Entities, portals, effects** are named lists: `entities[]` (`vessel`, `at` — its `az` is the
-  bow's heading, absent = north — `controller` helm|fixed, `throttle`, `steer`, `mirrorCadence` in
-  seconds — 0 = never read the solver's mirror, the shipped physics), `portals[droste]` (`lat`,
+  bow's heading, absent = north — `controller` helm|fixed, `throttle`, `steer`; a hull reads the
+  solver's surface around itself every frame, no setting), `portals[droste]` (`lat`,
   `lon`, `level`, `fill`, `twistDeg`, `lighting`, and the optional destination `toLat`/`toLon`: the
   place the inner globe presents where the root shows the leaf), `effects[slice.plane]`.
 - **Gates** (`gates[]`): a cuboid in the root's flat frame (`at` {x, alt, z, az}, `size` [across, up,

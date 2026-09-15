@@ -440,16 +440,17 @@ a file is `scenes/merrimack.json`; legacy flags route through the shim into the 
   single-threaded memo, never shared between hulls): two boats are two nodes. The chase camera is
   `View::Follow`, fed by the entity's `ChaseFrame`. A residue is stated: the vessel layer takes one
   list, so with two entities it draws the last to step.
-- **The freshness contract.** A hull queries the weather manager every step, but the solver's CPU
-  mirror was filled only by four tools, so in ordinary play the hull rode the analytic tide and the
-  waves and never the solved level or current, with nothing saying so. Now `FrameInfo.asOf` names
-  the simulation time the snapshot is coherent at; `entities[].mirrorCadence` (seconds; default 0 =
-  never, which is the physics and the cost that shipped) drives `WeatherManager::RefreshOnCadence`,
-  one readback per cadence and never one per hull step; `MirrorAsOf` and `TreeWater::Describe` say
-  the age that was read. Measured on the helm boat at a 1 s cadence: the set-down surface moves from
-  +0.174 to −0.362 m NAVD (the level becomes the solver's, whose basin still carries the recorded
-  spin-up transient), and every hull line after it shifts by about half a metre. Turning it on is a
-  physics decision, not a refactor.
+- **The solver is truth (was: the freshness contract).** A hull queries the weather manager every
+  step, and inside a solver's domain the water's surface and current are the solver's. The 5e
+  contract read them through a whole-field mirror on a declared cadence that defaulted to never, and
+  `--water-probe` measured what that cost: the drawn sea stood 0.39 m above the water the hull read
+  at the Merrimack helm. Now the hull asks for the solver's region around itself every frame
+  (`WeatherManager::RequestRegion` → `SweSolver::RequestRegion`: the texels copied through the frame
+  ring by `hal::RegionReadback` and delivered two frames later, never by a stall), and both the bank
+  kernel and `Query` read one expression — the atlas, blended over the solver's domain weight to the
+  tide plane the solver was forced by plus its deviation — from the same texels through the same
+  reconstruction. A point the solver owns and has not answered reports no level, not the atlas.
+  `FrameInfo.asOf` is the instant the delivered answers are coherent at (`SolverAsOf`).
 - **`Portal`** — `Build` is the session's `droste::BuildPortal` block and its `Space::Cycle`,
   verbatim; the frame loop reads `Link()` and `Cycle()` from the node.
 - **`Effect`** and `effects/SlicePlane` — the "paper visual" slot: `FieldPort{name, gradeSig, unit,
@@ -620,8 +621,6 @@ Each was found or scoped during the steps and left out on purpose; the step that
   new window onto pages bound at boot; logged when it happens.
 - **The float-yaw correction** (5b, measured in 5e): held as a patch, because correcting the camera
   map re-quantizes the storm rail's imagery beyond the few-pixel precedent; the owner's call.
-- **The freshness contract's default** (5e): `mirrorCadence` ships at 0 = never, today's physics. A
-  cadence makes the hull read the solved water; that is a physics decision, measured and not taken.
 - **The near clip plane in the Droste walk** (4d): NaN on every level, so the near-plane cull has
   never fired.
 - **The two window-uv spellings in the kernels** (4e): measured 10–13 % of texels apart by up to

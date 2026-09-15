@@ -43,6 +43,9 @@ public:
     void SetVessels(const Vessel* const* vessels, const Motor* frames, int count);
 
     uint32_t PartCount() const { return static_cast<uint32_t>(m_cpu.size()); }
+    // Whether a world point lies inside any drawn box, grown by `margin` metres -- the water
+    // probe's test for a depth sample that landed on a hull rather than on the sea.
+    bool Occupies(double x, double y, double z, double margin) const;
 
     // Mirrors `struct VesselPart` in shaders/Vessel.hlsl. Float, because it is display data that
     // has already been made camera-relative in the shader; the DOUBLE pose lives in RigidBody and

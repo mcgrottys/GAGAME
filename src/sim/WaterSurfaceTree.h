@@ -104,6 +104,9 @@ public:
     // The solved-window blend weight at a point, 0 outside. Public because the twin gate reports
     // it per site: the term split is the thing most likely to explain a disagreement.
     double WindowWeight(double wx, double wz) const;
+    // The MEAN surface alone at a point of this water's frame (the slow field At() adds its waves
+    // to), NAVD metres; NaN where no level rung answered. For the water probe's level/wave split.
+    double MeanLevelAt(double wx, double wz, double simUnix) const;
 
 private:
     // The cascade clock. SeaLayer feeds the FFT `simUnix - CycleUnix()` cast to FLOAT
@@ -139,7 +142,11 @@ private:
     // But that query answers the SLOW field. The tide gradient is ~1e-6 m/m, the surge and the
     // current vary over hundreds of metres, and the wind over kilometres -- none of them change
     // meaningfully across a 5.5 m hull. What DOES vary at hull scale is the waves, and those are
-    // evaluated per station regardless. So the mean state is fetched once per cell and reused.
+    // evaluated per station regardless. So the mean state is fetched once per cell and reused --
+    // all but the SOLVER's surface (the water match, step 1): the throat's jet and the basin's
+    // gradient vary within a cell, and reading a delivered region is cheap, so each point is
+    // refined by the solver on its own (WeatherManager::SolverRefine) and the hull's level is as
+    // continuous as the kernel's.
     //
     // The cell is 8 m and the memo is one entry, which is all a single hull needs (its stations
     // are inside one cell). Quantising POSITION means a hull straddling a boundary flips between
@@ -157,6 +164,8 @@ private:
     mutable double m_memoX = 1e30, m_memoZ = 1e30, m_memoT = -1e30;
     mutable WeatherSample m_memo;
     const WeatherSample& SlowAt(double wx, double wz, double simUnix) const;
+    // The mean state at a point: the memoised slow field, refined by the solver at the point.
+    WeatherSample MeanStateAt(double wx, double wz, double simUnix) const;
 };
 
 }  // namespace ga

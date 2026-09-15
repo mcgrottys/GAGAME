@@ -304,8 +304,208 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
         nx, ny, dx, dyM, m_dt, m_eta.ResidentCount(), m_eta.TilesX() * m_eta.TilesY(),
         m_flux.ResidentCount(), m_flux.TilesX() * m_flux.TilesY(),
         (m_eta.ResidentBytes() + m_flux.ResidentBytes()) / 1048576.0);
+    // The region readback's slot: every request a frame may carry at its largest, eta and current
+    // (12 bytes a texel), with room for the copy footprints' row alignment.
+    m_readback.Init(gpu, uint64_t(kMaxRegions) * kMaxRegionTexels * kMaxRegionTexels * 16u,
+                    L"swe region readback");
     m_ready = true;
     m_pendingReset = true;
+}
+
+// ---- THE REGION READBACK (the water match, step 1: the solver is truth) ---------------------------
+
+bool SweSolver::TexelOf(double worldX, double worldZ, double& tx, double& ty) const {
+    if (!m_ready || !m_bathy) return false;
+    // The kernel's own map (WaterBank.hlsl): uv over the bathy's world box, row 0 the NORTH edge.
+    const double u = (worldX - double(m_bathy->WorldX0())) / double(m_bathy->WorldSizeX());
+    const double v = (worldZ - double(m_bathy->WorldZ0())) / double(m_bathy->WorldSizeZ());
+    tx = u * double(m_cb.nx);
+    ty = (1.0 - v) * double(m_cb.ny);
+    return true;
+}
+
+double SweSolver::DomainWeight(double worldX, double worldZ) const {
+    double tx = 0.0, ty = 0.0;
+    if (!TexelOf(worldX, worldZ, tx, ty)) return 0.0;
+    const double e = (std::min)((std::min)(tx, double(m_cb.nx) - tx),
+                                (std::min)(ty, double(m_cb.ny) - ty));
+    const double t = std::clamp(e, 0.0, 1.0);
+    return t * t * (3.0 - 2.0 * t);   // HLSL smoothstep(0, 1, e)
+}
+
+void SweSolver::RequestRegion(double worldX, double worldZ, double radiusM) {
+    double tx = 0.0, ty = 0.0;
+    if (!TexelOf(worldX, worldZ, tx, ty) || !(radiusM >= 0.0)) return;
+    // The texels a bilinear read of any point within the radius touches: floor(t - 0.5) and the
+    // one past it, at both ends.
+    const double rx = radiusM / double(m_cb.dx), ry = radiusM / double(m_cb.dy);
+    const double lx0 = std::floor(tx - 0.5 - rx), lx1 = std::floor(tx - 0.5 + rx) + 1.0;
+    const double ly0 = std::floor(ty - 0.5 - ry), ly1 = std::floor(ty - 0.5 + ry) + 1.0;
+    const double nx = double(m_cb.nx), ny = double(m_cb.ny);
+    if (lx1 < 0.0 || ly1 < 0.0 || lx0 > nx - 1.0 || ly0 > ny - 1.0) return;   // nowhere on the grid
+    RegionRect r;
+    r.x0 = uint32_t(std::clamp(lx0, 0.0, nx - 1.0));
+    r.y0 = uint32_t(std::clamp(ly0, 0.0, ny - 1.0));
+    r.w = uint32_t(std::clamp(lx1, 0.0, nx - 1.0)) - r.x0 + 1u;
+    r.h = uint32_t(std::clamp(ly1, 0.0, ny - 1.0)) - r.y0 + 1u;
+    if (r.w > kMaxRegionTexels || r.h > kMaxRegionTexels) {
+        if (!m_refusedLogged) {
+            Log("[swe] region of %ux%u texels REFUSED (at most %u a side: radius %.1f m) -- the "
+                "consumer's answer stays the last one delivered", r.w, r.h, kMaxRegionTexels, radiusM);
+            m_refusedLogged = true;
+        }
+        return;
+    }
+    auto holds = [](const RegionRect& a, const RegionRect& b) {
+        return b.x0 >= a.x0 && b.y0 >= a.y0 && b.x0 + b.w <= a.x0 + a.w && b.y0 + b.h <= a.y0 + a.h;
+    };
+    for (const RegionRect& q : m_requests) {
+        if (holds(q, r)) return;   // already asked for this frame
+    }
+    m_requests.erase(std::remove_if(m_requests.begin(), m_requests.end(),
+                                    [&](const RegionRect& q) { return holds(r, q); }),
+                     m_requests.end());
+    if (m_requests.size() >= kMaxRegions) {
+        if (!m_refusedLogged) {
+            Log("[swe] region request REFUSED: %u regions already asked this frame -- the "
+                "consumer's answer stays the last one delivered", kMaxRegions);
+            m_refusedLogged = true;
+        }
+        return;
+    }
+    m_requests.push_back(r);
+}
+
+namespace {
+
+// THE ONE RECONSTRUCTION (WaterBank.hlsl LoadBilinearClamp at texel (u Nx, (1 - v) Ny)), over any
+// store: `at(ix, iy, eta, uv4)` answers one grid texel or says it does not hold it.
+template <class At>
+bool Reconstruct(double tx, double ty, uint32_t nx, uint32_t ny, At at, SweSolver::Deviation& out) {
+    const double fx = tx - 0.5, fy = ty - 0.5;
+    const double bx = std::floor(fx), by = std::floor(fy);
+    const double frx = fx - bx, fry = fy - by;
+    double eta = 0.0, uv[4] = {0.0, 0.0, 0.0, 0.0};
+    for (int k = 0; k < 4; ++k) {
+        const int ix = std::clamp(int(bx) + (k & 1), 0, int(nx) - 1);
+        const int iy = std::clamp(int(by) + (k >> 1), 0, int(ny) - 1);
+        float e = 0.0f, c[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        if (!at(ix, iy, e, c)) return false;
+        const double w = ((k & 1) ? frx : 1.0 - frx) * ((k >> 1) ? fry : 1.0 - fry);
+        eta += w * double(e);
+        for (int j = 0; j < 4; ++j) uv[j] += w * double(c[j]);
+    }
+    out.dEta = float(eta);
+    out.u = float(uv[0]);
+    out.v = float(uv[1]);
+    out.currentValid = uv[3] > 0.5;   // the kernel's `s.w > 0.5`
+    return true;
+}
+
+}  // namespace
+
+bool SweSolver::DeviationAt(double worldX, double worldZ, Deviation& out) const {
+    double tx = 0.0, ty = 0.0;
+    if (m_regions.empty() || !TexelOf(worldX, worldZ, tx, ty)) return false;
+    for (const DeliveredRegion& r : m_regions) {
+        const auto at = [&r](int ix, int iy, float& e, float c[4]) {
+            if (ix < int(r.rect.x0) || iy < int(r.rect.y0) || ix >= int(r.rect.x0 + r.rect.w) ||
+                iy >= int(r.rect.y0 + r.rect.h)) {
+                return false;
+            }
+            const size_t i = size_t(iy - int(r.rect.y0)) * r.rect.w + size_t(ix - int(r.rect.x0));
+            e = r.eta[i];
+            for (int j = 0; j < 4; ++j) c[j] = r.uv[i * 4 + j];
+            return true;
+        };
+        if (Reconstruct(tx, ty, m_cb.nx, m_cb.ny, at, out)) {
+            out.asOf = r.asOf;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool SweSolver::DeviationFromFields(double worldX, double worldZ, const std::vector<float>& eta,
+                                    uint32_t etaRowW, const std::vector<float>& uv4,
+                                    uint32_t uvRowW, double asOf, Deviation& out) const {
+    double tx = 0.0, ty = 0.0;
+    if (eta.empty() || uv4.empty() || !TexelOf(worldX, worldZ, tx, ty)) return false;
+    const auto at = [&](int ix, int iy, float& e, float c[4]) {
+        const size_t ie = size_t(iy) * etaRowW + size_t(ix);
+        const size_t iu = (size_t(iy) * uvRowW + size_t(ix)) * 4;
+        if (ie >= eta.size() || iu + 3 >= uv4.size()) return false;
+        e = eta[ie];
+        for (int j = 0; j < 4; ++j) c[j] = uv4[iu + j];
+        return true;
+    };
+    if (!Reconstruct(tx, ty, m_cb.nx, m_cb.ny, at, out)) return false;
+    out.asOf = asOf;
+    return true;
+}
+
+void SweSolver::CollectRegions(Gpu& gpu) {
+    if (!m_readback.Ready()) return;
+    const uint32_t slot = gpu.FrameIndex();
+    if (m_readback.BeginSlot(slot) == 0) return;
+    // The copies arrive in pairs: tag 2k is request k's eta, 2k + 1 its current.
+    std::vector<DeliveredRegion> fresh;
+    for (const hal::RegionReadback::Region& g : m_readback.Delivered()) {
+        const size_t k = g.tag / 2u;
+        if (fresh.size() <= k) fresh.resize(k + 1);
+        DeliveredRegion& d = fresh[k];
+        d.rect = {g.x0, g.y0, g.w, g.h};
+        d.asOf = m_slotAsOf[slot];
+        const size_t n = size_t(g.w) * g.h;
+        if ((g.tag & 1u) == 0u && g.bytes.size() == n * 4) {
+            d.eta.resize(n);
+            memcpy(d.eta.data(), g.bytes.data(), n * 4);
+        } else if ((g.tag & 1u) == 1u && g.bytes.size() == n * 8) {
+            d.uv.resize(n * 4);
+            const uint8_t* b = g.bytes.data();
+            for (size_t i = 0; i < n * 4; ++i) {
+                uint16_t h = 0;
+                memcpy(&h, b + i * 2, 2);
+                d.uv[i] = HalfToFloat(h);
+            }
+        }
+    }
+    // Newest first: this slot's answers ahead of every older one; a pair that did not come back
+    // whole is not an answer.
+    for (auto it = fresh.rbegin(); it != fresh.rend(); ++it) {
+        if (it->eta.empty() || it->uv.size() != it->eta.size() * 4) continue;
+        m_regions.insert(m_regions.begin(), std::move(*it));
+    }
+    if (m_regions.size() > size_t(kMaxRegions) * Gpu::kFrameCount) {
+        m_regions.resize(size_t(kMaxRegions) * Gpu::kFrameCount);
+    }
+}
+
+void SweSolver::ServeRegions(hal::CommandContext& cmd, Gpu& gpu,
+                             const std::function<void(D3D12_RESOURCE_STATES)>& etaTo,
+                             const std::function<void(D3D12_RESOURCE_STATES)>& uvTo) {
+    if (!m_readback.Ready() || m_requests.empty()) return;
+    etaTo(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    uvTo(D3D12_RESOURCE_STATE_COPY_SOURCE);
+    uint32_t k = 0;
+    for (const RegionRect& r : m_requests) {
+        const bool e = m_readback.CopyRegion(cmd, m_eta.Res(), 0, DXGI_FORMAT_R32_FLOAT, r.x0, r.y0,
+                                             r.w, r.h, 2u * k);
+        const bool u = e && m_readback.CopyRegion(cmd, m_uvBank.Res(), 0,
+                                                  DXGI_FORMAT_R16G16B16A16_FLOAT, r.x0, r.y0, r.w,
+                                                  r.h, 2u * k + 1u);
+        if (!u) {
+            if (!m_refusedLogged) {
+                Log("[swe] region readback slot FULL at request %u -- the rest keep their last answers",
+                    k);
+                m_refusedLogged = true;
+            }
+            break;
+        }
+        ++k;
+    }
+    m_slotAsOf[gpu.FrameIndex()] = m_simTime;
+    m_requests.clear();
 }
 
 void SweSolver::RecordReset(hal::CommandContext& cmd, Gpu& gpu) {
@@ -358,6 +558,9 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
         cmd.Barrier(m_uvBank.Res(), m_uvState, to);
         m_uvState = to;
     };
+    // The region readback: what this slot's previous frame copied is an answer now (the frame
+    // ring waited on that frame's fence before this one began). Frame ring only.
+    if (cmd.Who() == hal::Owner::Frame) CollectRegions(gpu);
     etaTo(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     uvTo(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
@@ -448,6 +651,9 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
             if (m_sc) m_velGrad.BuildChain(gpu, *m_sc, m_shaderDir, cmd);
         }
     }
+
+    // This frame's region requests, copied from the state just stepped (frame ring only).
+    if (cmd.Who() == hal::Owner::Frame) ServeRegions(cmd, gpu, etaTo, uvTo);
 
     // Leave eta + uv sampleable by the domain and pixel shaders.
     etaTo(D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE |

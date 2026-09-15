@@ -1958,10 +1958,9 @@ bool RunSceneSelfTest() {
             g.Same(fx.Declared().d, 2.0, "[effect] Declare carries the offset");
         }
 
-        // (D) THE ENTITY's freshness fields default to today's behaviour: no cadence, no mirror.
+        // (D) THE ENTITY: the spawn heading, and the solver it reads (by region, never on a clock).
         {
             Entity e;
-            g.Same(e.Declared().mirrorCadence, 0.0, "[entity] mirrorCadence defaults to 0 = never (today's cost)");
             // THE SPAWN HEADING: a spawn without `az` is the translation it always was (the bow
             // north); with `az` the bow turns to that compass heading about the spawn point.
             e.SetSpawn(120.0, 0.0, -10.0);
@@ -1986,21 +1985,15 @@ bool RunSceneSelfTest() {
                        "[entity] ...about the spawn point, which stays where the sugar put it");
             }
             g.True(!e.Active() && !e.Helming(), "[entity] a node without a hull is inert");
-            const PropDecl* mc = EntitySchema().Find("mirrorCadence");
-            g.True(mc && mc->quantity == Quantity::Time && mc->unit.toCanonical == 1.0,
-                   "[entity] the entities section declares mirrorCadence in seconds");
+            g.True(EntitySchema().Find("mirrorCadence") == nullptr,
+                   "[entity] the entities section has no mirror cadence: the hull reads the solver by region every frame");
             WeatherManager wm;
-            g.True(std::isinf(wm.MirrorCadence()), "[entity] the manager's cadence is infinite by default (never)");
-            wm.SetMirrorCadence(0.0);
-            g.True(std::isinf(wm.MirrorCadence()), "[entity] SetMirrorCadence(0) is never");
-            wm.SetMirrorCadence(1.0);
-            g.Same(wm.MirrorCadence(), 1.0, "[entity] SetMirrorCadence(1) is one second");
-            g.Same(wm.MirrorAsOf(), WeatherManager::kNeverRead, "[entity] no mirror was read: asOf is never");
+            g.Same(wm.SolverAsOf(), WeatherManager::kNeverRead, "[entity] no solver has answered: asOf is never");
             FrameInfo fi;
             g.True(fi.asOf == 0.0 && fi.quanta == 0, "[entity] FrameInfo carries asOf and the clock's quanta");
             TreeWater tw;
             tw.Configure(&wm, nullptr, nullptr, nullptr, 1.0, 1.0, 1.0);
-            g.Has(tw.Describe(120.0, -10.0, 0.0), "mirror never read", "[entity] TreeWater::Describe reports the mirror's age (never)");
+            g.Has(tw.Describe(120.0, -10.0, 0.0), "no solver has answered", "[entity] TreeWater::Describe reports that no solver has answered");
         }
 
         // (E) THE GATE: one motor carries a body from a box to a place on the same planet.

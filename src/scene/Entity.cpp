@@ -5,6 +5,7 @@
 #include "core/Common.h"
 #include "core/SceneConfig.h"
 #include "core/Window.h"
+#include "hal/Gpu.h"
 #include "scene/SeaLayer.h"
 #include "scene/VesselLayer.h"
 #include "sim/SeaState.h"
@@ -40,7 +41,6 @@ void Entity::Apply(const PropSet& props) {
     }
     p.at = m_props.at;
     m_props = p;
-    if (m_wired && m_o.weather) m_o.weather->SetMirrorCadence(m_props.mirrorCadence);
 }
 
 void Entity::SetSpawn(double x, double y, double z) {
@@ -108,8 +108,6 @@ std::vector<std::string> Entity::Configure(const Observers& o) {
         Log("[entity] '%s' NOT wired: %s (each absent term is reported by the water, never zero)",
             m_props.name.c_str(), list.c_str());
     }
-    // THE FRESHNESS CONTRACT's declaration reaches the manager here; 0 = never, today's cost.
-    if (o.weather) o.weather->SetMirrorCadence(m_props.mirrorCadence);
     return missing;
 }
 
@@ -270,14 +268,29 @@ void Entity::Update(const FrameInfo& fi) {
     VesselLayer* vesselLayer = m_o.vesselLayer;
     m_stepMs = 0.0;
     if (!boat) return;
-    // THE FRESHNESS CONTRACT: the entity drives the mirror, on its declared cadence -- a
-    // readback only when the mirror is older than the cadence, and never one per hull step.
-    // At the default (0 = never) this is exactly the hand code: no reader in the loop.
-    if (weather && m_o.gpu) weather->RefreshOnCadence(*m_o.gpu, simUnix);
     boatSea.Configure(weather, waveField, sea ? &sea->Ocean() : nullptr,
                       seaState, sea ? double(sea->heightScale) : 1.0,
                       waterScene ? waterScene->wfExag : 1.0f,
                       waterScene ? waterScene->wfChop : 1.0f);
+    // THE SOLVER IS TRUTH, AND THE HULL ASKS FOR IT (the water match, step 1). Every frame, the
+    // solver's region around the hull: its reach from the CG (the spec's length overall, which
+    // bounds every station wherever the CG sits) plus the distance it covers before the answer
+    // arrives -- the frame ring's latency and this frame, at its speed. Answered two frames on,
+    // without a stall; until the first answer the solver's water reports no level and the set-down
+    // below waits for it, as it waits for any water that has not answered.
+    if (weather) {
+        const double bodyCg[3] = {0.0, 0.0, 0.0};   // the body origin IS the CG (RigidBody.h)
+        double cg[3] = {0.0, 0.0, 0.0}, v[3] = {0.0, 0.0, 0.0};
+        boat->Body().pose.TransformPoint(cg[0], cg[1], cg[2]);
+        boat->Body().VelocityAtBody(bodyCg, v);
+        const double frameS = double((std::max)(quanta, 1)) * SimClock::kDt;
+        const double leadS = double(Gpu::kFrameCount + 1u) * frameS;
+        const double reach = (std::max)(boat->Spec().loa.v, boat->Spec().beam.v);
+        const double speed = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        double latDeg = 0.0, lonDeg = 0.0;
+        boatSea.PlaceOf(cg[0], cg[2], latDeg, lonDeg);
+        weather->RequestRegion(latDeg, lonDeg, reach + speed * leadS);
+    }
     // PLACE THE HULL ON THE WATER, ONCE. A vessel is built before the weather
     // manager exists, so it cannot be spawned at the right height -- and NAVD 0 is half
     // a metre under the surface here at this tide. Dropped in submerged, the hull takes
@@ -326,10 +339,8 @@ void Entity::Update(const FrameInfo& fi) {
             boatPlaced = true;
             Log("[vessel] set down: surface %+.3f, keel %.3f below CG, draught %.2f "
                 "-> CG at %+.3f m NAVD", ss.heightNavd, -keel, draft, y0);
-            // The snapshot the hull reads, and its age: what answered, and whether the
-            // solver's mirror was ever read (the freshness contract's own line). The frame's
-            // asOf is the instant declared BEFORE this step's refresh -- on the first step,
-            // never.
+            // The snapshot the hull reads, and its age: what answered, and the instant the
+            // solver's answers are coherent at (the frame's asOf, declared before this step).
             char asOf[48];
             if (fi.asOf <= WeatherManager::kNeverRead) snprintf(asOf, sizeof(asOf), "never");
             else snprintf(asOf, sizeof(asOf), "t=%.0f", fi.asOf);

@@ -444,6 +444,19 @@ bool Renderer::DumpRaw(std::vector<uint8_t>& out, uint32_t* rowPitch) {
     return !out.empty();
 }
 
+bool Renderer::ReadDepth(std::vector<float>& out) {
+    m_gpu->WaitIdle();
+    uint32_t rowPitch = 0;
+    const std::vector<uint8_t> px = m_gpu->ReadbackTexture(m_sceneDepth, &rowPitch);
+    if (px.empty() || rowPitch < m_width * 4u) return false;
+    out.resize(size_t(m_width) * m_height);
+    for (uint32_t y = 0; y < m_height; ++y) {
+        memcpy(out.data() + size_t(y) * m_width, px.data() + size_t(y) * rowPitch,
+               size_t(m_width) * 4);
+    }
+    return true;
+}
+
 bool Renderer::DumpPng(const std::wstring& path) {
     m_gpu->WaitIdle();
     uint32_t rowPitch = 0;

@@ -427,9 +427,7 @@ const Schema& EntitySchema_() {
             .BindEnum("controller", kEntity.controller, {"helm", "fixed"},
                       "the keyboard helm, or fixed throttles and helm (--boat-drive)", H)
             .Bind("throttle", kEntity.throttle, Q::Dimensionless, "1", "fixed: every thruster's throttle", H)
-            .Bind("steer", kEntity.steer, Q::Dimensionless, "1", "fixed: the commanded steering", H)
-            .Bind("mirrorCadence", kEntity.mirrorCadence, Q::Time, "s",
-                  "seconds between readbacks of the solver mirror the hull reads; 0 = never (the hull reads the analytic tide and the waves)", H);
+            .Bind("steer", kEntity.steer, Q::Dimensionless, "1", "fixed: the commanded steering", H);
         return sc;
     }();
     return *s;

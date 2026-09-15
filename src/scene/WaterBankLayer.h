@@ -61,6 +61,10 @@ public:
     // Per frame, BEFORE RenderFrame (the SeaLayer::SetTime pattern): ring anchors follow
     // the camera and tile residency commits here, so consumers bind THIS frame's origins.
     void SetFrame(Gpu& gpu, double simUnix, double camX, double camZ);
+    // Per frame, BEFORE RenderFrame: the tide plane the solver is forced by this frame (the value
+    // SeaLayer::SetTime hands it) -- inside the solver's domain the level IS that plane plus the
+    // solver's deviation (the solver is truth), and the kernel needs the plane to say so.
+    void SetTidePlane(double navdM) { m_tidePlane = static_cast<float>(navdM); }
 
     uint32_t DispSrv() const { return m_disp.Srv(); }
     uint32_t ParamSrv() const { return m_param.Srv(); }
@@ -197,6 +201,10 @@ private:
         // M9bt: the fold's second moment, per band. APPENDED at the end on both sides, per
         // the layout law above -- widening bandKFold in place would slide every row after it.
         float bandKSpread[4];
+        // THE SOLVER IS TRUTH (the water match, step 1): x = the tide plane the solver was forced
+        // by this frame (NAVD m), which its deviation is measured from. APPENDED at the end on
+        // both sides, per the layout law.
+        float sweB[4];
     };
     struct BankTile {
         float orgXZ[2];
@@ -243,6 +251,7 @@ private:
     bool m_orgValid[kMips] = {};
     uint8_t m_wet[kMips][kRingTiles * kRingTiles] = {};   // per logical tile
     double m_simUnix = 0, m_camX = 0, m_camZ = 0;
+    float m_tidePlane = 0.0f;   // SetTidePlane: the plane the solver's deviation is measured from
     D3D12_RESOURCE_STATES m_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     bool m_ready = false;
 };

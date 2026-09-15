@@ -87,6 +87,9 @@ cbuffer BankCb : register(b0) {
     // M9bt: the fold's SECOND moment per band -- the energy-weighted width of ln k. Appended
     // at the end on both sides, per the layout law above.
     float4 gBandKSpread;
+    // THE SOLVER IS TRUTH (the water match, step 1): x = the tide plane the solver was forced by
+    // this frame (NAVD m) -- its deviation is measured from it. Appended at the end on both sides.
+    float4 gSweB;
 };
 
 // M9bl: one component's rows, from whichever half holds it. r = comp >> 1.
@@ -361,17 +364,25 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         bed = HpHeightAt(gTA[gSlotsD.x], gTA[gSlotsD.y], lat, lon, gWinA, gSlotsD.z, 2.0f);
     }
 
-    // The SWE refinement where the solver is resident: dEta on the level, solved currents.
-    float dEta = 0.0f;
+    // THE LEVEL (the water match, step 1 -- the solver is truth). The atlas everywhere; inside the
+    // solver's domain the surface IS the solver's: the tide plane it was forced by (gSweB.x) plus
+    // the deviation it holds, over the domain's weight -- rising from 0 at the grid's edge to 1 one
+    // cell in (the field is defined at cell centres). The old `level + dEta` added the deviation
+    // from a UNIFORM plane to the spatially varying atlas, and a hard 0.1 % edge cut the domain.
+    // TreeWater reads this expression (WeatherManager::SolverRefine) from the same texels,
+    // delivered through a region readback; --water-probe is the gate that the two stand together.
+    float lvl = level;
     float2 cur = 0.0f;
     if (gSwe.z > 0.0f) {
         const float2 uv = (xz - gSwe.xy) * gSwe.zw;
-        if (all(uv > 0.001f) && all(uv < 0.999f)) {
-            const float2 texel = float2(uv.x * gSweDims.x, (1.0f - uv.y) * gSweDims.y);
-            dEta = LoadBilinearClamp(gSlotsA.w, texel, gSweDims.xy).x;
-            const float4 s = LoadBilinearClamp(
-                gSlotsB.x, float2(uv.x * gSweDims.x, (1.0f - uv.y) * gSweDims.y),
-                gSweDims.xy);
+        const float2 texel = float2(uv.x * gSweDims.x, (1.0f - uv.y) * gSweDims.y);
+        const float eCells =
+            min(min(texel.x, gSweDims.x - texel.x), min(texel.y, gSweDims.y - texel.y));
+        const float wDom = smoothstep(0.0f, 1.0f, eCells);
+        if (wDom > 0.0f) {
+            const float dEta = LoadBilinearClamp(gSlotsA.w, texel, gSweDims.xy).x;
+            lvl = lerp(level, gSweB.x + dEta, wDom);
+            const float4 s = LoadBilinearClamp(gSlotsB.x, texel, gSweDims.xy);
             if (s.w > 0.5f) cur = s.xy;
         }
     }
@@ -379,7 +390,6 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // changes between the two runs is the bed itself -- same window, same residency, same
     // solver, same instant.
     if (gDebugA.x != 0.0f) bed = gDebugA.y;
-    const float lvl = level + dEta;
     const float depth = lvl - bed;
     const float dry = smoothstep(0.05f, 0.65f, depth);
 

@@ -35,10 +35,9 @@
 //                                                       inline `keys` list is an authored
 //                                                       keyed flight in the same key spelling
 //      portals    [{name, enabled, lat, lon, level, fill, twistDeg, lighting}]
-//      entities   [{name, vessel, at, controller, throttle, steer, mirrorCadence}]
-//                                                    -- M12 step 5e: mirrorCadence is the
-//                                                       freshness contract (scene/Entity.h):
-//                                                       0 = never (today's cost)
+//      entities   [{name, vessel, at, controller, throttle, steer}]
+//                                                    -- the hull reads the solver's surface by
+//                                                       region, every frame (scene/Entity.h)
 //      effects    [{name, type, enabled, ...}]  -- typed through EffectSchemas (slice.plane)
 //      layers     [{name, enabled, ...}]        -- the registration order; typed by name
 //      nodes      [{name, type, enabled, at, children, ...}]   -- typed through ComponentSchemas
@@ -245,11 +244,6 @@ struct EntityProps {
     Placement at;                     // the spawn (required)
     int controller = 0;               // helm | fixed
     double throttle = 0.0, steer = 0.0;
-    // M12 step 5e: THE FRESHNESS CONTRACT (scene/Entity.h). Seconds between readbacks of the
-    // solver's CPU mirror the hull reads; 0 = NEVER -- what shipped: the effective cadence
-    // was infinite, and the hull read the analytic tide and the waves, never the solved
-    // level or current.
-    double mirrorCadence = 0.0;
 };
 struct EffectProps {
     std::string name;

@@ -81,6 +81,8 @@ struct Options {
     bool jobsInline = false;          // --jobs-inline: every job on the calling thread, in order
     uint32_t traceFrom = UINT32_MAX;  // --res-trace-frames A:B: the landing ledger every turn of
     uint32_t traceTo = 0;             // recorded frames A..B (Residency.h TurnLedger, step 28)
+    uint32_t waterProbeEvery = 0;     // --water-probe N: every N recorded frames, the DRAWN sea
+                                      // (depth read back) against each hull's own water (WaterProbe)
     uint32_t treeAudit = 0;           // --tree-audit N: compare N tiles/frame, report, exit
     bool warmTrees = false;           // --warm-trees: build them without comparing, then exit
     bool packTrees = false;           // --pack-trees: one archive per node per frame, then exit

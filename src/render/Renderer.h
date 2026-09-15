@@ -127,6 +127,9 @@ public:
     // sub-LSB claim is judged in radiance through the curve (tools/imgdiff.py --hdr) rather
     // than in the 8-bit image that already rounded it.
     bool DumpHdr(const std::wstring& path);
+    // --water-probe: the scene depth (D32, reversed Z: nearZ / viewZ, 0 where nothing was drawn),
+    // de-pitched into width*height floats. An instrument: it waits for the GPU.
+    bool ReadDepth(std::vector<float>& out);
     uint32_t Width() const { return m_width; }
     uint32_t Height() const { return m_height; }
 

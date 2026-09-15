@@ -108,24 +108,30 @@ public:
     // Every refresh logs its cost, so a per-frame reader added later announces itself.
     void RefreshMirrorsTo(Gpu& gpu, double simUnix);
 
-    // M12 step 5e: THE FRESHNESS CONTRACT (scene/Entity.h). The hull's evaluator (Query, through
-    // TreeWater) reads the mirror above, and in ordinary play nothing filled it -- the four
-    // tools were its only readers, so a hull read the analytic tide and the waves and never the
-    // solved level or current, with nothing saying so. Now a physics consumer DECLARES the
-    // cadence its snapshot may age by (the entity's mirrorCadence, seconds) and drives the
-    // refresh on it: RefreshOnCadence reads back a window whose mirror is older than the
-    // cadence, once per cadence and never per hull step; MirrorAsOf says the instant the
-    // mirrors are coherent at (FrameInfo::asOf; kNeverRead when none was read), which is what
-    // TreeWater::Describe reports as the age. 0 = NEVER is the default and what shipped: the
-    // effective cadence was infinite. RefreshMirrorsTo keeps the tools' own contract.
-    void SetMirrorCadence(double seconds);
-    double MirrorCadence() const { return m_cadence; }   // seconds; +inf = never
-    void RefreshOnCadence(Gpu& gpu, double simUnix);
-    double MirrorAsOf() const;
+    // ---- THE SOLVER IS TRUTH (the water match, step 1 -- Mark, 2026-09-15). Inside a solver's
+    // domain the water's surface IS the solver's: the tide plane it was forced by plus its
+    // deviation, over the solver's domain weight (SweSolver::DomainWeight) -- the same expression
+    // the bank kernel draws (WaterBank.hlsl), from the same texels. The hull used to read the
+    // atlas alone there, because the only CPU copy of the solver was a whole-field mirror that
+    // costs 18-27 ms to read and nothing in play read it (measured by --water-probe: the drawn sea
+    // stood +0.39 m above the hull's at the Merrimack helm). Now a consumer of the water at a place
+    // ASKS for the solver's region there, every frame it wants the answer fresh (RequestRegion:
+    // copied through the frame ring, delivered two frames later, never by a flush), and Query reads
+    // the delivered texels. A place the solver owns and has not answered reports its level ABSENT
+    // (levelSrc "-"), not the atlas: absence is not a substitute. The tools' whole-field mirror
+    // (RefreshMirrorsTo) answers through the same reconstruction.
+    void RequestRegion(double latDeg, double lonDeg, double radiusM);
+    // The solver's refinement of one point, applied to a sample built without it: TreeWater
+    // memoises the slow atlas sample per cell and refines each point it asks at, so the solver's
+    // surface is continuous under a hull rather than quantised to the memo's cells.
+    void SolverRefine(double latDeg, double lonDeg, double unixT, WeatherSample& s) const;
+    // The instant the solver's answers are coherent at: the oldest of the active windows' newest
+    // delivered answers (region or mirror); kNeverRead when no window has answered anything.
+    double SolverAsOf() const;
     static constexpr double kNeverRead = -1.0e18;
 
-    WeatherSample Query(double latDeg, double lonDeg, double unixT,
-                        double groundResM = 500.0) const;
+    WeatherSample Query(double latDeg, double lonDeg, double unixT, double groundResM = 500.0,
+                        bool refineBySolver = true) const;
 
     int ActiveWindows() const;
     std::string stats;   // "wx 2 windows (merrimack, boston)" for the title bar
@@ -154,8 +160,7 @@ private:
         char currentTag[48] = {0};
     };
     static constexpr double kMirrorDt = 2.0;      // a mirror may lag the asking clock this much
-    double m_cadence = INFINITY;                  // M12 step 5e: the declared cadence; inf = never
-    void ReadMirrors(Gpu& gpu, double simUnix, double maxAge, bool onCadence);
+    void ReadMirrors(Gpu& gpu, double simUnix, double maxAge);
     static constexpr double kActivateAltM = 30000.0;
     bool m_pinLogged = false;
 

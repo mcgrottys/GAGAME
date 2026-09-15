@@ -137,6 +137,18 @@ void Emit(std::vector<VesselLayer::PartCpu>& out, const Motor& hull, const Motor
 
 }  // namespace
 
+bool VesselLayer::Occupies(double x, double y, double z, double margin) const {
+    for (const PartCpu& p : m_cpu) {
+        double lx = x, ly = y, lz = z;
+        p.world.Inverse().TransformPoint(lx, ly, lz);   // the point in the box's own frame
+        if (std::abs(lx) <= p.half[0] + margin && std::abs(ly) <= p.half[1] + margin &&
+            std::abs(lz) <= p.half[2] + margin) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void VesselLayer::Render(const FrameContext& ctx) {
     if (!m_pso || m_cpu.empty()) return;
     // THE BOUNDARY: each box's motor relative to THIS view's eye, composed in doubles, then float.

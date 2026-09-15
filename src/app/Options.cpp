@@ -275,6 +275,9 @@ Options ParseArgs(int argc, char** argv) {
                 o.traceTo = f1;
             }
         }
+        // The drawn sea against the water each hull reads (app/Tools/WaterProbe.cpp): the scene
+        // depth read back every N recorded frames. An instrument -- its readbacks stop the GPU.
+        else if (a == "--water-probe") o.waterProbeEvery = uint32_t(atoi(next("30").c_str()));
         else if (a == "--tree-audit") o.treeAudit = uint32_t(atoi(next("400").c_str()));
         // After a source is added there is nothing to compare against -- which is exactly when
         // the trees most need building. --warm-trees composes every address regardless.
@@ -734,6 +737,7 @@ SceneArgs Options::ToSets(const Options& o) {
     if (o.traceFrom != UINT32_MAX) {
         rawf("--res-trace-frames " + std::to_string(o.traceFrom) + ":" + std::to_string(o.traceTo));
     }
+    if (o.waterProbeEvery) rawf("--water-probe " + std::to_string(o.waterProbeEvery));
     if (o.benchOverlap) rawf("--bench-overlap");
     else if (o.bench) rawf("--bench");
     if (o.gpuTime) rawf("--gpu-time");
