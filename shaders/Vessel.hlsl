@@ -79,7 +79,10 @@ VsOut VsMain(uint vid : SV_VertexID) {
     VsOut o;
     o.n = MotorDir(p.re, kFaceN[tri]);
     o.col = kPalette[uint(p.half.w) % 7u] * gVsParams.y;
-    o.pos = mul(float4(world - gEyeRel.xyz, 1.0f), gViewProj);
+    // `world` is already RELATIVE TO THE EYE: VesselLayer::Render composes the eye's reverse
+    // translation onto each box's motor in doubles before the float cast, so a hull 2000 km from
+    // the origin is as exact here as one at the Merrimack.
+    o.pos = mul(float4(world, 1.0f), gViewProj);
     return o;
 }
 

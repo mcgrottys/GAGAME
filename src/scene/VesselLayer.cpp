@@ -6,6 +6,7 @@
 #include "sim/Vessel.h"
 
 #include <algorithm>
+#include "render/Camera.h"
 
 namespace ga {
 
@@ -34,7 +35,7 @@ void VesselLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
 namespace {
 
 // One box, in the parent's frame: centre and half-extents, composed onto the hull's pose.
-void Emit(std::vector<VesselLayer::PartGpu>& out, const Motor& hull, const Motor& mount,
+void Emit(std::vector<VesselLayer::PartCpu>& out, const Motor& hull, const Motor& mount,
           double cx, double cy, double cz, double hx, double hy, double hz, int palette);
 
 }  // namespace
@@ -44,7 +45,7 @@ void VesselLayer::SetVessels(const Vessel* const* vessels, int count) {
 }
 
 void VesselLayer::SetVessels(const Vessel* const* vessels, const Motor* frames, int count) {
-    m_parts.clear();
+    m_cpu.clear();
     if (!vessels) return;
     for (int i = 0; i < count; ++i) {
         const Vessel* v = vessels[i];
@@ -72,7 +73,7 @@ void VesselLayer::SetVessels(const Vessel* const* vessels, const Motor* frames, 
                             }
                         }
                         if (!(bx > 0.0) || y1 <= y0) continue;
-                        Emit(m_parts, hull, e.mount.at, 0.0, 0.5 * (y0 + y1),
+                        Emit(m_cpu, hull, e.mount.at, 0.0, 0.5 * (y0 + y1),
                              0.5 * (a.z + b.z), bx, 0.5 * (y1 - y0),
                              0.5 * std::abs(b.z - a.z), pal);
                     }
@@ -82,7 +83,7 @@ void VesselLayer::SetVessels(const Vessel* const* vessels, const Motor* frames, 
                     const double z0 = e.tubeZ0.v, z1 = e.tubeZ1.v;
                     const double r = 0.5 * (e.tubeR0.v + e.tubeR1.v);
                     if (!(r > 0.0)) break;
-                    Emit(m_parts, hull, e.mount.at, e.tubeXOffset.v, e.tubeYOffset.v,
+                    Emit(m_cpu, hull, e.mount.at, e.tubeXOffset.v, e.tubeYOffset.v,
                          0.5 * (z0 + z1), r, r, 0.5 * std::abs(z1 - z0), pal);
                     break;
                 }
@@ -92,13 +93,13 @@ void VesselLayer::SetVessels(const Vessel* const* vessels, const Motor* frames, 
                     // yet, so a steered outboard will draw straight until it is. Called out
                     // because a wrong-looking engine should read as a missing wire, not physics.
                     const double r = (e.propRadius.v > 0.0) ? e.propRadius.v : 0.15;
-                    Emit(m_parts, hull, e.mount.at, 0.0, 0.0, 0.0, r, 2.0 * r, 0.9 * r, pal);
+                    Emit(m_cpu, hull, e.mount.at, 0.0, 0.0, 0.0, r, 2.0 * r, 0.9 * r, pal);
                     break;
                 }
                 case ElementKind::Foil: {
                     const double area = (e.foilArea.v > 0.0) ? e.foilArea.v : 0.1;
                     const double h = std::sqrt(area);
-                    Emit(m_parts, hull, e.mount.at, 0.0, -0.5 * h, 0.0, 0.02, 0.5 * h,
+                    Emit(m_cpu, hull, e.mount.at, 0.0, -0.5 * h, 0.0, 0.02, 0.5 * h,
                          0.5 * h, pal);
                     break;
                 }
@@ -109,7 +110,7 @@ void VesselLayer::SetVessels(const Vessel* const* vessels, const Motor* frames, 
                     // the six triangles.
                     const double m = (e.mass.v > 0.0) ? e.mass.v : 1.0;
                     const double h = 0.5 * std::cbrt(m / 700.0);   // ~size by mass, gently
-                    Emit(m_parts, hull, e.mount.at, 0.0, 0.0, 0.0, h, h, h, pal);
+                    Emit(m_cpu, hull, e.mount.at, 0.0, 0.0, 0.0, h, h, h, pal);
                     break;
                 }
                 // Planing and Drag are LAWS over surfaces the other elements already draw --
@@ -123,17 +124,10 @@ void VesselLayer::SetVessels(const Vessel* const* vessels, const Motor* frames, 
 
 namespace {
 
-void Emit(std::vector<VesselLayer::PartGpu>& out, const Motor& hull, const Motor& mount,
+void Emit(std::vector<VesselLayer::PartCpu>& out, const Motor& hull, const Motor& mount,
           double cx, double cy, double cz, double hx, double hy, double hz, int palette) {
-    const Motor world = hull * mount * Motor::Translation(cx, cy, cz);
-    VesselLayer::PartGpu p{};
-    double re[4], du[4];
-    world.Real(re);
-    world.Dual(du);
-    for (int i = 0; i < 4; ++i) {
-        p.re[i] = static_cast<float>(re[i]);
-        p.du[i] = static_cast<float>(du[i]);
-    }
+    VesselLayer::PartCpu p{};
+    p.world = hull * mount * Motor::Translation(cx, cy, cz);
     p.half[0] = static_cast<float>((std::max)(hx, 0.01));
     p.half[1] = static_cast<float>((std::max)(hy, 0.01));
     p.half[2] = static_cast<float>((std::max)(hz, 0.01));
@@ -144,7 +138,23 @@ void Emit(std::vector<VesselLayer::PartGpu>& out, const Motor& hull, const Motor
 }  // namespace
 
 void VesselLayer::Render(const FrameContext& ctx) {
-    if (!m_pso || m_parts.empty()) return;
+    if (!m_pso || m_cpu.empty()) return;
+    // THE BOUNDARY: each box's motor relative to THIS view's eye, composed in doubles, then float.
+    // (The shader no longer subtracts the eye -- it receives the eye-relative position directly.)
+    const Motor toEye = ctx.camera ? Motor::Translation(-ctx.camera->px, -ctx.camera->py, -ctx.camera->pz)
+                                   : Motor::Identity();
+    m_parts.resize(m_cpu.size());
+    for (size_t k = 0; k < m_cpu.size(); ++k) {
+        const Motor rel = toEye * m_cpu[k].world;
+        double re[4], du[4];
+        rel.Real(re);
+        rel.Dual(du);
+        for (int i = 0; i < 4; ++i) {
+            m_parts[k].re[i] = static_cast<float>(re[i]);
+            m_parts[k].du[i] = static_cast<float>(du[i]);
+            m_parts[k].half[i] = m_cpu[k].half[i];
+        }
+    }
     PixScope scope(ctx.cmd->Native(), "vessels (spec -> boxes, motor sandwich on the GPU)");
     const float cb[4] = {static_cast<float>(m_parts.size()), 1.0f, 0.0f, 0.0f};
     ctx.cmd->Pipeline(m_pso.Get());

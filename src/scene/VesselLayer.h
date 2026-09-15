@@ -42,7 +42,7 @@ public:
     // carried through a gate). A null array is the root for every hull, byte for byte.
     void SetVessels(const Vessel* const* vessels, const Motor* frames, int count);
 
-    uint32_t PartCount() const { return static_cast<uint32_t>(m_parts.size()); }
+    uint32_t PartCount() const { return static_cast<uint32_t>(m_cpu.size()); }
 
     // Mirrors `struct VesselPart` in shaders/Vessel.hlsl. Float, because it is display data that
     // has already been made camera-relative in the shader; the DOUBLE pose lives in RigidBody and
@@ -52,6 +52,15 @@ public:
         float du[4];
         float half[4];   // xyz half extents, w = palette index (the element kind)
     };
+    // A box as the CPU keeps it: its WORLD motor in doubles. It becomes a PartGpu only at Render,
+    // RELATIVE TO THE EYE -- the eye's reverse translation composed in doubles, the float cast
+    // after it. A world motor cast to float is exact near the Merrimack and wrong far from it:
+    // 2054 km out (a hull carried through a gate) float's step is 0.25 m, every box and corner
+    // rounds on its own, and the RHIB drew twisted.
+    struct PartCpu {
+        Motor world;
+        float half[4];
+    };
 
 private:
     bool BuildPso(Gpu& gpu, ShaderCompiler& sc);
@@ -59,7 +68,8 @@ private:
     std::wstring m_shaderDir;
     hal::RootSignature m_rootSig = nullptr;
     hal::Pso m_pso;
-    std::vector<PartGpu> m_parts;
+    std::vector<PartCpu> m_cpu;
+    std::vector<PartGpu> m_parts;   // built from m_cpu at Render, relative to that view's eye
 };
 
 }  // namespace ga
