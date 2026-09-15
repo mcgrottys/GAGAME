@@ -604,7 +604,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         // the outer sea is seen from S(C), so its waves need rings anchored there. Stateless
         // like the first bank (every tile recomputed each frame), so it costs one more fill
         // and a second small atlas, and it runs only while an outer level exists.
-        if (droste && S.water.oneWater) {
+        // (And for a scene with GATES: the sea seen through a gate's window is seen from the
+        // carried eye, so it needs rings anchored there -- the same second bank, the same law.)
+        if ((droste || !S.gates.empty()) && S.water.oneWater) {
             auto wbB = std::make_unique<WaterBankLayer>();
             waterBankB = wbB.get();
             waterBankB->Configure(shaderDir, sea, &swe, &bathy, &waterAtlas, &compositor,

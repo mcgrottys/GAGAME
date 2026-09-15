@@ -57,6 +57,13 @@ public:
     // A point of the SOURCE space inside the box: |local| <= half the size on every axis.
     bool Inside(double px, double py, double pz) const;
 
+    // THE WINDOW'S ONE TEST (Globe.hlsl GateThrough is its line-for-line translation). The segment
+    // from an eye to a point, both in the source frame, reaches the box's entry at or before the
+    // point: the point is seen THROUGH the window. The destination's level keeps exactly those
+    // points; every other level keeps exactly the rest -- two complementary discards, no stencil,
+    // no second target, and nothing about which camera is asking.
+    bool SeenThrough(const double eye[3], const double p[3]) const;
+
 private:
     GateProps m_props;
     bool m_valid = false;

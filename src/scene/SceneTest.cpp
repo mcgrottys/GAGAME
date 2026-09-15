@@ -2093,6 +2093,23 @@ bool RunSceneSelfTest() {
             twG.SetChart(&ch);
             twG.PlaceOf(0.0, 0.0, la0, lo0);
             g.True(la0 == 25.8997 && lo0 == -80.1239, "[gate] ...and through a gate's chart, at the destination's places");
+            // THE WINDOW'S TEST (Gateway::SeenThrough, the shader's GateThrough line for line). The
+            // box at (600, 0, -10) heading east: 8 m deep along x, 60 m across along z, 30 m tall.
+            const double eyeW[3] = {500.0, 2.0, -10.0};
+            const double farBehind[3] = {900.0, 0.0, -10.0};
+            const double besideP[3] = {900.0, 0.0, 200.0};
+            const double beforeBox[3] = {560.0, 1.0, -10.0};
+            const double inBox[3] = {601.0, 0.0, -5.0};
+            g.True(gate.SeenThrough(eyeW, farBehind), "[gate] a point beyond the box, straight through it, is seen through the window");
+            g.True(gate.SeenThrough(eyeW, inBox), "[gate] ...and so is a point inside the box");
+            g.True(!gate.SeenThrough(eyeW, beforeBox), "[gate] a point between the eye and the box is not");
+            g.True(!gate.SeenThrough(eyeW, besideP), "[gate] a point whose ray passes beside the box is not");
+            const double eyeIn[3] = {600.0, 0.0, -10.0};
+            g.True(gate.SeenThrough(eyeIn, besideP) && gate.SeenThrough(eyeIn, beforeBox),
+                   "[gate] from inside the box every ray starts in the window");
+            const double eyeAbove[3] = {600.0, 100.0, -10.0};
+            const double belowBox[3] = {600.0, -40.0, -10.0};
+            g.True(gate.SeenThrough(eyeAbove, belowBox), "[gate] the box is a box: looking down through its top works too");
         }
     }
 

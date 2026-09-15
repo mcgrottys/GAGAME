@@ -2,9 +2,10 @@
   "_readme": [
     "THE HAULOVER GATE -- a playable scene. You are at the helm of the Novurania 18 RHIB in the",
     "Merrimack entrance on the afternoon ebb of 2026-08-28. Ahead, across the channel, stands a",
-    "gate: a 120 m x 30 m x 10 m box. Drive your boat into it and you come out of Baker's Haulover",
-    "Inlet, Miami, heading out to sea, still moving. The box is one motor between two places on the",
-    "same planet: nothing else moves, and nobody at Haulover sees a gate -- the boat just appears.",
+    "gate: a 120 m x 30 m x 10 m box, and a window -- through it, faintly outlined, is Haulover's sea.",
+    "Drive your boat into it and you come out of Baker's Haulover Inlet, Miami, heading out to sea,",
+    "still moving. The box is one motor between two places on the same planet: nothing else moves,",
+    "and nobody at Haulover sees a gate -- the boat just appears.",
     "",
     "Launch from the repo root:  build/bin/gagame.exe scenes/demos/haulover_portal.json",
     "",

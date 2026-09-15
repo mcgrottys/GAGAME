@@ -1911,6 +1911,21 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
                       L.bankSet, L.skyUp, L.skyDay);
         }
     }
+    // THE GATE'S WINDOW: only where its level is walked (the mesh path); on the fallback a window
+    // with no destination level behind it would be a hole, so there is no window.
+    const bool gateOn = m_gateSlot > 0 && m_msPath;
+    m_cb.gateA[0] = gateOn ? static_cast<float>(m_gateSlot) : -1.0f;
+    m_cb.gateA[1] = m_cb.gateA[2] = m_cb.gateA[3] = 0.0f;
+    for (int i = 0; i < 3; ++i) m_cb.gateC[i] = m_gateC[i];
+    m_cb.gateC[3] = 0.0f;
+    for (int i = 0; i < 3; ++i) {
+        m_cb.gateR0[i] = m_gateRows[i];
+        m_cb.gateR1[i] = m_gateRows[3 + i];
+        m_cb.gateR2[i] = m_gateRows[6 + i];
+    }
+    m_cb.gateR0[3] = m_gateHalf[0];
+    m_cb.gateR1[3] = m_gateHalf[1];
+    m_cb.gateR2[3] = m_gateHalf[2];
     m_cb.drosteA[0] = static_cast<float>(1 + m_levels.size());
     m_cb.drosteA[1] = static_cast<float>(m_camLevelAbs);
     m_cb.drosteA[2] = static_cast<float>(m_lighting);

@@ -4,6 +4,7 @@
 #include "core/Common.h"
 #include "scene/Pose.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace ga::scene {
@@ -64,6 +65,26 @@ bool Gateway::Build(const Space& planet, const Space& source, double planetR, do
         std::sqrt(ex * ex + ey * ey + ez * ez) / 1000.0);
     m_valid = true;
     return true;
+}
+
+bool Gateway::SeenThrough(const double eye[3], const double p[3]) const {
+    if (!m_valid) return false;
+    // Both ends in the box's own frame, the segment e + t (f - e), t in [0, 1].
+    double ex = eye[0], ey = eye[1], ez = eye[2];
+    double fx = p[0], fy = p[1], fz = p[2];
+    m_entryInv.TransformPoint(ex, ey, ez);
+    m_entryInv.TransformPoint(fx, fy, fz);
+    const double e[3] = {ex, ey, ez};
+    const double d[3] = {fx - ex, fy - ey, fz - ez};
+    double tEnter = -1e300, tExit = 1e300;
+    for (int a = 0; a < 3; ++a) {
+        const double h = 0.5 * m_props.size[a];
+        const double da = (std::fabs(d[a]) < 1e-12) ? 1e-12 : d[a];
+        const double t1 = (-h - e[a]) / da, t2 = (h - e[a]) / da;
+        tEnter = (std::max)(tEnter, (std::min)(t1, t2));
+        tExit = (std::min)(tExit, (std::max)(t1, t2));
+    }
+    return tEnter <= tExit && tExit >= 0.0 && tEnter <= 1.0;
 }
 
 bool Gateway::Inside(double px, double py, double pz) const {

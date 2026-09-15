@@ -109,11 +109,14 @@ build\bin\gagame.exe scenes\recipes\storm_rail.json --set capture.frames=1200 --
   along]) whose far side is a place on the same planet (`toLat`, `toLon`, and the heading `toAz`). A
   hull whose centre of gravity enters the box is carried by one motor into the destination's own
   tangent space, still moving, its height above its own water kept; nothing else moves, and the
-  destination has no box, so anyone there sees the boat appear.
+  destination has no box, so anyone there sees the boat appear. From the source side the box is a
+  window: whatever is seen through it is the destination, the same planet walked once more from the
+  carried eye (its tiles load while the box is in view), outlined by a faint rim.
 - **Play: the Haulover gate.** `build\bin\gagame.exe scenes\demos\haulover_portal.json` opens a window at the helm of the
   RHIB in the Merrimack entrance with a gate across the channel ahead. Helm: W/S throttles, A/D steer,
-  Q/E split the levers, Shift/Ctrl trim; T leaves the helm for the free camera and returns. Drive
-  into the box and you come out of Baker's Haulover Inlet heading out to sea. Haulover renders only
+  Q/E split the levers, Shift/Ctrl trim; T leaves the helm for the free camera and returns. Through
+  the box you see Haulover's sea; drive into it and you come out of Baker's Haulover Inlet heading
+  out to sea. Haulover renders only
   as well as the engine's data there (its global relief floods the barrier island).
 - **Hot reload:** every file the fold read, plus the active rail, is watched. Save one and the log
   prints `[scene] reload: <files> <n> fields changed (<k> hot, <r> restart) FNV-1a <state>`; a key

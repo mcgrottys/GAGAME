@@ -298,6 +298,24 @@ public:
         m_camLevelAbs = camLevelAbs;
         m_drosteOn = true;
     }
+    // THE GATE'S WINDOW (scene/Gateway.h), per frame before SetView; null clears it. `level` is
+    // the destination drawn as one more level of the walk -- its eye the carried eye, sigma 1, Q
+    // the gate motor's rotation back -- and the box is given in the TRUE camera frame: its centre
+    // relative to the eye, the rows camera -> box, its half extents. Appended after any Droste
+    // levels; the Droste switches (the portal's shadow, the limbs) are not touched.
+    void SetGate(const DrosteLevel* level, const float centreRel[3], const float rows[9],
+                 const float half[3]) {
+        if (!m_drosteOn) m_levels.clear();
+        m_gateSlot = -1;
+        if (!level || m_levels.size() + 1 >= size_t(kMaxLevels)) return;
+        m_levels.push_back(*level);
+        m_gateSlot = static_cast<int>(m_levels.size());
+        for (int i = 0; i < 3; ++i) {
+            m_gateC[i] = centreRel[i];
+            m_gateHalf[i] = half[i];
+        }
+        for (int i = 0; i < 9; ++i) m_gateRows[i] = rows[i];
+    }
     // Set B: the rings anchored at the OUTER level's eye (a second WaterBankLayer).
     void SetWaterBankB(uint32_t disp, uint32_t param, uint32_t detail, const float* org12,
                        bool on) {
@@ -427,6 +445,12 @@ private:
         float bankBOrg23[4];
         float bankBOrg45[4];
         float droste[192];    // 8 levels x 6 rows (Globe.hlsl LoadLevel)
+        // THE GATE'S WINDOW (scene/Gateway.h) -- appended at the END on both sides (priors 22).
+        float gateA[4];       // x = the window's slot in the level table (-1 = no window)
+        float gateC[4];       // the box's centre relative to the eye, TRUE camera frame (m)
+        float gateR0[4];      // rows: TRUE camera frame -> the box's own frame; w = half extent
+        float gateR1[4];
+        float gateR2[4];
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -590,6 +614,10 @@ private:
     std::vector<NodeData> m_nodes;
     // M10: the Droste levels of this frame (slots 1..n; slot 0 is the camera's own).
     std::vector<DrosteLevel> m_levels;
+    int m_gateSlot = -1;                       // the window's slot in the level table
+    float m_gateC[3] = {0.0f, 0.0f, 0.0f};
+    float m_gateRows[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    float m_gateHalf[3] = {0.0f, 0.0f, 0.0f};
     float m_camSun[3] = {0.0f, 1.0f, 0.0f};
     float m_camSkyUp[3] = {0.0f, 1.0f, 0.0f};
     float m_camSkyDay = -1.0f;

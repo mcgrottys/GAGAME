@@ -197,6 +197,17 @@ bool ViewEyeOrbit(const SceneView* v, double planetR, Camera& cam) {
     return true;
 }
 
+// THE ZENITH AT AN EYE: the planet's radial through it, in the tangent frame the loop speaks (the
+// planet's centre sits at (0, -R, 0) there). The gravity-up the M6g block writes into upHint is the
+// same vector at the camera; the skies read it in doubles.
+void ZenithAt(const double p[3], double planetR, double out[3]) {
+    const double gy = p[1] + planetR;
+    const double gl = std::sqrt(p[0] * p[0] + gy * gy + p[2] * p[2]);
+    out[0] = p[0] / gl;
+    out[1] = gy / gl;
+    out[2] = p[2] / gl;
+}
+
 }  // namespace
 
 FrameLoop::FrameLoop(const Options& opt, const Scene& S, Assembly& A)
@@ -2166,7 +2177,8 @@ bool FrameLoop::Frame() {
     if (globe) {
         globe->SetSun(sunCamF);
         // The camera level's own sky (slot 0): the root's, turned, under realistic
-        // lighting inside the tower; its own everywhere else.
+        // lighting inside the tower; its own everywhere else -- and its own zenith is the
+        // planet's radial AT THE EYE (ZenithAt), which +y is only at the tangent origin.
         {
             float upC[3] = {0.0f, 1.0f, 0.0f};
             float dayC = -1.0f;
@@ -2176,12 +2188,38 @@ bool FrameLoop::Frame() {
                 portal.ApplyDir(-double(camLevel), upR, su);
                 for (int i = 0; i < 3; ++i) upC[i] = static_cast<float>(su[i]);
                 dayC = static_cast<float>(std::clamp(double(sunRootF[1]) * 3.0 + 0.12, 0.0, 1.0));
+            } else if (mode == 1) {
+                const double C[3] = {cam.px, cam.py, cam.pz};
+                double z[3];
+                ZenithAt(C, planetR, z);
+                for (int i = 0; i < 3; ++i) upC[i] = static_cast<float>(z[i]);
             }
             globe->SetCamSky(upC, dayC);
         }
         if (portal.Valid() && mode == 1) {
             globe->SetDroste(drosteLv.data(), static_cast<int>(drosteLv.size()),
                              portalDecl.lighting, portal.centre, portal.radius, camLevel);
+        }
+    }
+    // ---- THE GATE'S WINDOW, ITS SEA (scene/Gateway.h). The destination seen through the box is
+    // seen from the CARRIED eye, so its waves need rings anchored there: set B, the second bank the
+    // Droste outer level uses, following the carried eye of the nearest gate within 20 km -- when
+    // no Droste outer level already holds it. (The level itself is added beside SetView, below.)
+    if (!drosteOuter && camLevel == 0 && mode == 1) {
+        double best = 2.0e4;
+        for (const auto& gp : m_gates) {
+            if (!gp->Valid()) continue;
+            double bx = 0.0, by = 0.0, bz = 0.0;
+            gp->Entry().TransformPoint(bx, by, bz);
+            const double dx = bx - cam.px, dy = by - cam.py, dz = bz - cam.pz;
+            const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (dist >= best) continue;
+            best = dist;
+            const Motor Kw = gp->DestinationInSource() * gp->Carry();
+            double E[3] = {cam.px, cam.py, cam.pz};
+            Kw.TransformPoint(E[0], E[1], E[2]);
+            for (int i = 0; i < 3; ++i) drosteOuterCam[i] = E[i];
+            drosteOuter = true;
         }
     }
     // M10: WHOSE SKY. Identity and the camera's sun reproduce the old dome exactly; under
@@ -2217,6 +2255,36 @@ bool FrameLoop::Frame() {
                     for (int c = 0; c < 3; ++c) rows[r * 3 + c] = static_cast<float>(m[r][c]);
                 }
                 skySun = sunRootF;   // every level's own sun has the root's numbers
+            }
+        }
+        // THE CAMERA'S OWN DOME stands on the zenith at the eye. The dome reads dot(d, +y) for its
+        // gradient and dot(d, sun) for its disc, so the rows need only carry the zenith onto +y and
+        // the sun rides the same rows: the shortest arc, one rotor, (1 + u.y, u x y) normalised
+        // (Portal::Carry's construction; QRotate turns u onto +y). The identity at the tangent
+        // origin; 18.5 degrees for a camera the gate carried to Haulover, whose dome stood on the
+        // Merrimack's zenith -- a slab of below-horizon grey over the sea.
+        float zenSun[3];
+        if (domeRel == 0 && mode == 1) {
+            const double C[3] = {cam.px, cam.py, cam.pz};
+            double u[3];
+            ZenithAt(C, planetR, u);
+            double q[4] = {1.0 + u[1], -u[2], 0.0, u[0]};
+            const double qn = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+            if (qn > 1e-9) {   // (the antipode of +y: no eye stands 12,742 km below the origin)
+                for (double& c : q) c /= qn;
+                for (int c = 0; c < 3; ++c) {
+                    double x = c == 0 ? 1.0 : 0.0, y = c == 1 ? 1.0 : 0.0, zc = c == 2 ? 1.0 : 0.0;
+                    Motor::QRotate(q, x, y, zc);
+                    rows[0 * 3 + c] = static_cast<float>(x);
+                    rows[1 * 3 + c] = static_cast<float>(y);
+                    rows[2 * 3 + c] = static_cast<float>(zc);
+                }
+                double sx = skySun[0], sy = skySun[1], sz = skySun[2];
+                Motor::QRotate(q, sx, sy, sz);
+                zenSun[0] = static_cast<float>(sx);
+                zenSun[1] = static_cast<float>(sy);
+                zenSun[2] = static_cast<float>(sz);
+                skySun = zenSun;
             }
         }
         sky->SetSkyFrame(rows, skySun);
@@ -2641,6 +2709,82 @@ bool FrameLoop::Frame() {
             motorPose(resMgr.PredictNextPose(poseMotor(cam), 24.0), pred);
             globe->StartPredictWalk(cam, pred, viewH);
             PROF_END(8);
+        }
+        // ---- THE GATE'S WINDOW (scene/Gateway.h). The destination, seen through the box: the
+        // SAME planet walked once more from the CARRIED eye K(C), its geometry mapped back by the
+        // motor's rotation (the Droste level at scale 1: eye, sigma 1, Q), and a slab test per
+        // pixel. Nothing moves and nothing is copied; the walk's wants go to the same resident
+        // set, so the destination's tiles are loaded while the box is in view. One gate (the
+        // nearest in view, within 20 km); none when the eye is in another level or the box is
+        // out of the view.
+        {
+            const scene::Gateway* win = nullptr;
+            if (camLevel == 0) {
+                const DirectX::XMFLOAT3 fw = cam.Forward();
+                const double tanH = std::tan(0.5 * double(cam.fovY));
+                const double halfDiag = std::atan(tanH * std::sqrt(1.0 + double(aspect) * double(aspect)));
+                double best = 2.0e4;
+                for (const auto& gp : m_gates) {
+                    if (!gp->Valid()) continue;
+                    double bx = 0.0, by = 0.0, bz = 0.0;
+                    gp->Entry().TransformPoint(bx, by, bz);
+                    const double dx = bx - cam.px, dy = by - cam.py, dz = bz - cam.pz;
+                    const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    const double* sz = gp->Declared().size;
+                    const double rb = 0.5 * std::sqrt(sz[0] * sz[0] + sz[1] * sz[1] + sz[2] * sz[2]);
+                    if (dist >= best) continue;
+                    if (dist > rb) {
+                        const double c = (dx * fw.x + dy * fw.y + dz * fw.z) / dist;
+                        const double ang = std::acos(std::clamp(c, -1.0, 1.0));
+                        if (ang > halfDiag + std::asin((std::min)(1.0, rb / dist))) continue;
+                    }
+                    best = dist;
+                    win = gp.get();
+                }
+            }
+            if (win) {
+                const Motor Kw = win->DestinationInSource() * win->Carry();   // source -> destination
+                const Motor Gm = Kw.Inverse();                                  // destination -> source
+                GlobeLayer::DrosteLevel L;
+                L.rel = 1;
+                double E[3] = {cam.px, cam.py, cam.pz};
+                Kw.TransformPoint(E[0], E[1], E[2]);
+                for (int i = 0; i < 3; ++i) L.cam[i] = E[i];
+                L.sigma = 1.0;
+                for (int c = 0; c < 3; ++c) {
+                    double v[3] = {c == 0 ? 1.0 : 0.0, c == 1 ? 1.0 : 0.0, c == 2 ? 1.0 : 0.0};
+                    Gm.TransformDir(v[0], v[1], v[2]);
+                    for (int r = 0; r < 3; ++r) L.Q[r][c] = v[r];
+                }
+                L.gauge = Placement::Rigid(Gm);
+                L.gauge.t[0] = L.gauge.t[1] = L.gauge.t[2] = 0.0;
+                L.reliefExagg = globe->reliefExagg;
+                for (int i = 0; i < 3; ++i) L.sun[i] = sunRootF[i];
+                // Set B follows this carried eye (above) when the scene built it and no Droste
+                // outer level holds it; otherwise the destination's sea is the fold's, ringless.
+                L.bankSet = (waterBankB && !portal.Valid()) ? 1 : -1;
+                double zE[3];
+                ZenithAt(E, planetR, zE);   // the destination's own zenith, at the carried eye
+                for (int i = 0; i < 3; ++i) L.skyUp[i] = static_cast<float>(zE[i]);
+                L.skyDay = -1.0f;
+                double bc[3] = {0.0, 0.0, 0.0};
+                win->Entry().TransformPoint(bc[0], bc[1], bc[2]);
+                const float centreRel[3] = {static_cast<float>(bc[0] - cam.px),
+                                            static_cast<float>(bc[1] - cam.py),
+                                            static_cast<float>(bc[2] - cam.pz)};
+                float rows[9];
+                for (int r = 0; r < 3; ++r) {
+                    double a[3] = {r == 0 ? 1.0 : 0.0, r == 1 ? 1.0 : 0.0, r == 2 ? 1.0 : 0.0};
+                    win->Entry().TransformDir(a[0], a[1], a[2]);   // the box's axis r, source frame
+                    for (int c = 0; c < 3; ++c) rows[r * 3 + c] = static_cast<float>(a[c]);
+                }
+                const float half[3] = {static_cast<float>(0.5 * win->Declared().size[0]),
+                                       static_cast<float>(0.5 * win->Declared().size[1]),
+                                       static_cast<float>(0.5 * win->Declared().size[2])};
+                globe->SetGate(&L, centreRel, rows, half);
+            } else if (!m_gates.empty()) {
+                globe->SetGate(nullptr, nullptr, nullptr, nullptr);
+            }
         }
         PROF_BEGIN();
         globe->SetView(cam, aspect, viewH, simUnix - startUnix);
