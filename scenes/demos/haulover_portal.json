@@ -23,11 +23,14 @@
   "time": {"start": "2026-08-28T19:30:00Z"},
   "sea": {"storm": {"hs": 1.5, "tp": 8, "dir": 95}},
   "views": [
-    {"name": "sea", "follow": {"target": "boat"}}
+    {"name": "sea", "follow": {"target": "boat"}, "interests": [{"name": "boat"}]}
   ],
   "entities": [
     {"name": "boat", "vessel": "rhib.novurania18", "at": {"x": 120, "alt": 0, "z": -10, "az": 86},
      "controller": "helm"}
+  ],
+  "interests": [
+    {"name": "boat", "target": "boat", "radius": 200}
   ],
   "gates": [
     {"name": "haulover", "at": {"x": 450, "alt": 0, "z": 0, "az": 90}, "size": [120, 30, 10],

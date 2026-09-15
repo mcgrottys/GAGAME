@@ -115,7 +115,8 @@
       "reversedZ": true,
       "target": "main",
       "viewport": {"x": 0, "y": 0, "w": 0, "h": 0},
-      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6}
+      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6},
+      "interests": []
     },
     {
       "_at": "the vqview signature shot: the north jetty tip, az 246 back into the inlet",
@@ -127,7 +128,8 @@
       "reversedZ": true,
       "target": "main",
       "viewport": {"x": 0, "y": 0, "w": 0, "h": 0},
-      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6}
+      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6},
+      "interests": []
     },
     {
       "_at": "the globe start: over the North Atlantic at 2.1 planet radii, aimed at the centre",
@@ -139,7 +141,8 @@
       "reversedZ": true,
       "target": "main",
       "viewport": {"x": 0, "y": 0, "w": 0, "h": 0},
-      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6}
+      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6},
+      "interests": []
     },
     {
       "_at": "on the north jetty a little in from its tip, looking back along it toward the range tower (F5 2026-09-01: keep this!)",
@@ -151,7 +154,8 @@
       "reversedZ": true,
       "target": "main",
       "viewport": {"x": 0, "y": 0, "w": 0, "h": 0},
-      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6}
+      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6},
+      "interests": []
     },
     {
       "_at": "off the jetty tips looking west into the entrance, low",
@@ -163,7 +167,8 @@
       "reversedZ": true,
       "target": "main",
       "viewport": {"x": 0, "y": 0, "w": 0, "h": 0},
-      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6}
+      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6},
+      "interests": []
     },
     {
       "name": "entrance-mid",
@@ -174,7 +179,8 @@
       "reversedZ": true,
       "target": "main",
       "viewport": {"x": 0, "y": 0, "w": 0, "h": 0},
-      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6}
+      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6},
+      "interests": []
     },
     {
       "name": "entrance-high",
@@ -185,7 +191,8 @@
       "reversedZ": true,
       "target": "main",
       "viewport": {"x": 0, "y": 0, "w": 0, "h": 0},
-      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6}
+      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6},
+      "interests": []
     }
   ],
   "rails": {
@@ -196,6 +203,7 @@
   "portals": [],
   "gates": [],
   "entities": [],
+  "interests": [],
   "effects": [],
   "layers": [
     {"name": "sky", "enabled": true},

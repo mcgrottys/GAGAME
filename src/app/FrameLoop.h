@@ -95,6 +95,7 @@
 #include <memory>
 #include <optional>
 #include <utility>
+#include <set>
 #include <vector>
 
 namespace ga::app {
@@ -174,6 +175,8 @@ private:
     bool m_portalOn = false;    // ...and whether it is enabled (--droste)
     // (M12 step 5e: the `entities` elements are the Entity nodes below, one per element.)
     SceneView m_startView;      // the view `scene.view` names (its optics and its chase camera)
+    // The interests the view named that were logged once (held, or naming nothing).
+    std::set<std::string> m_interestsLogged, m_interestsMissing;
 
     // ---- main()'s block-level locals over the span, in main()'s order (ff2f732 lines
     // 246..1518), then the three function-local statics. Each is reached in the methods

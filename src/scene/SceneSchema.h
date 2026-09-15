@@ -238,6 +238,22 @@ struct GateProps {
     double toLat = 0.0, toLon = 0.0;       // the destination
     double toAz = 0.0;                     // the heading the box's forward face leaves along
 };
+// THE INTERESTS (the water match): a subject or a place whose surroundings stay resident at the
+// grain its water's kernels read, for the views that name one -- so an eye arriving there, or a
+// hull floating there, finds its data landed rather than landing. `target` names an entity (the
+// interest follows it); otherwise `at` is a fixed place in the placement sugar. A view keeps
+// resident only the interests it lists (views[].interests): one camera can hold a boat's water
+// while another holds none.
+struct InterestProps {
+    std::string name;
+    std::string target;               // an entity's name; "" = the fixed place `at`
+    Placement at;                     // optional
+    double radius = 200.0;            // m: how far around the subject
+};
+// A view's reference to one of the scene's interests, by name.
+struct InterestRef {
+    std::string name;
+};
 struct EntityProps {
     std::string name;
     std::string vessel;
@@ -311,6 +327,7 @@ const Schema& ViewSchema();
 const Schema& PortalSchema();
 const Schema& GateSchema();
 const Schema& EntitySchema();
+const Schema& InterestSchema();
 const Schema& NodeSchema();
 // M12 step 5e: the rail key (scene/Rail.h reads a rail file's keys through it) and the slice
 // plane's typed table (scene/effects/SlicePlane.h's Props()).

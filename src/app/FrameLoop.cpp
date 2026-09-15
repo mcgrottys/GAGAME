@@ -17,6 +17,7 @@
 
 #include "compose/ColorStackSource.h"
 #include "compose/ExposureSource.h"
+#include "sim/WaterTerms.h"
 #include "compose/GisMask.h"
 #include "compose/HeightStackSource.h"
 #include "compose/TileTree.h"
@@ -2931,6 +2932,110 @@ bool FrameLoop::Frame() {
         }
     }
     PROF_END(11);
+    // ---- THE INTERESTS (the water match): the subjects and places the recorded view names keep
+    // their water resident at the grain its kernels read -- the solved field's pages at the solver's
+    // own cells (mip 0), the swell shadow at the bank's floor (kSwellShadowMipFloor), the bed at the
+    // fine rings' grain (mip 0) -- so an eye arriving there finds the data landed rather than
+    // landing. By name, per view: a view that names no interest holds none (a spectator need not
+    // load every boat's water). --water-probe measured the need on a fly-in down the flood rail: for
+    // ~2 s after arriving at the helm the drawn solved sea stood at 0.77-0.92 of the hull's.
+    if (!marsMode && !m_startView.interests.empty()) {
+        const Lattice& page = m_A.surface.winH;
+        const uint32_t pageSlice = m_A.surface.hgtWinSlice;   // the z14 page's slice (0..5: the cube)
+        for (const std::string& iname : m_startView.interests) {
+            const SceneInterest* si = nullptr;
+            for (const SceneInterest& x : S.interests) {
+                if (x.p.name == iname) si = &x;
+            }
+            if (!si) {
+                if (m_interestsMissing.insert(iname).second) {
+                    Log("[interest] view '%s' names '%s', which no interest declares -- nothing held",
+                        m_startView.p.name.c_str(), iname.c_str());
+                }
+                continue;
+            }
+            // Where it stands: the entity's centre of gravity in the root's flat frame (a hull
+            // carried into another space is placed back through its space's motor), or the place.
+            double cx = 0.0, cz = 0.0;
+            bool placed = false;
+            if (!si->p.target.empty()) {
+                for (const auto& e : m_entities) {
+                    if (e->Name() != si->p.target || !e->Hull()) continue;
+                    double c[3] = {0.0, 0.0, 0.0};
+                    e->Hull()->Body().pose.TransformPoint(c[0], c[1], c[2]);
+                    if (e->InSpace()) e->SpaceInRoot().TransformPoint(c[0], c[1], c[2]);
+                    cx = c[0];
+                    cz = c[2];
+                    placed = true;
+                    break;
+                }
+            } else if (si->hasAt) {
+                scene::PoseSugar ps;
+                std::string pwhy;
+                if (scene::ReadPoseSugar(si->at, "interests." + si->p.name + ".at", ps, &pwhy) &&
+                    ps.kind == scene::PoseSugar::Kind::Compass) {
+                    cx = ps.x;
+                    cz = ps.z;
+                    placed = true;
+                }
+            }
+            if (!placed) continue;
+            const double r = (std::max)(si->p.radius, 0.0);
+            uint32_t held = 0;
+            // The z14 page tenants: the swell shadow and the bed.
+            if (pageSlice != UINT32_MAX && page.kind == Lattice::Kind::Window) {
+                double pxW = 0.0, pyN = 0.0, pxE = 0.0, pyS = 0.0;
+                page.PxOf(BathyModel::kOrgLat + (cz + r) / BathyModel::kMPerLat,
+                          BathyModel::kOrgLon + (cx - r) / BathyModel::kMPerLon, pxW, pyN);
+                page.PxOf(BathyModel::kOrgLat + (cz - r) / BathyModel::kMPerLat,
+                          BathyModel::kOrgLon + (cx + r) / BathyModel::kMPerLon, pxE, pyS);
+                const auto uvOf = [&](double px, long long org) {
+                    return float(std::clamp((px - double(org)) / double(page.faceDim), 0.0, 1.0));
+                };
+                const float u0 = uvOf(pxW, page.orgPxX), u1 = uvOf(pxE, page.orgPxX);
+                const float v0 = uvOf(pyN, page.orgPxY), v1 = uvOf(pyS, page.orgPxY);
+                if (u1 > u0 && v1 > v0) {
+                    if (exposureT >= 0 && exposureSrc && exposureSrc->Valid()) {
+                        resMgr.Want(exposureT, pageSlice, kSwellShadowMipFloor, u0, v0, u1, v1);
+                        ++held;
+                    }
+                    if (hgtWinTenant >= 0) {
+                        resMgr.Want(hgtWinTenant, pageSlice, 0u, u0, v0, u1, v1);
+                        ++held;
+                    }
+                }
+            }
+            // The solved field's pages (z16), through the solver's grid (the page texel IS the cell).
+            if (waveSrc && waveT >= 0 && waveSrc->Key() != 0 && waveField && waveField->Ready()) {
+                const WaveField::GpuTable& tab = waveField->Table();
+                const double nx = double(waveFrame.nx), ny = double(waveFrame.ny);
+                const auto cellsOf = [&](double w, double org, double n) {
+                    return std::clamp((w - org) * double(tab.invCell), 0.0, n);
+                };
+                const double cx0 = cellsOf(cx - r, double(tab.orgX), nx);
+                const double cx1 = cellsOf(cx + r, double(tab.orgX), nx);
+                const double cz0 = cellsOf(cz - r, double(tab.orgZ), ny);
+                const double cz1 = cellsOf(cz + r, double(tab.orgZ), ny);
+                if (cx1 > cx0 && cz1 > cz0) {
+                    const double ox = double(waveFrame.winPxX - waveFrame.orgPxX);
+                    const double oy = double(waveFrame.winPxY - waveFrame.orgPxY);
+                    const float u0 = float((ox + cx0) / 16384.0), u1 = float((ox + cx1) / 16384.0);
+                    const float v0 = float((oy + ny - cz1) / 16384.0);
+                    const float v1 = float((oy + ny - cz0) / 16384.0);
+                    const uint32_t planes = tab.nUsed + 1u;
+                    for (uint32_t p = 0; p < planes; ++p) resMgr.Want(waveT, 6u + p, 0u, u0, v0, u1, v1);
+                    held += planes;
+                }
+            }
+            if (m_interestsLogged.insert(iname).second) {
+                Log("[interest] view '%s' holds '%s' (%s%s, %.0f m): %u page wants a frame -- the "
+                    "solved field at mip 0, the swell shadow at mip %u, the bed at mip 0",
+                    m_startView.p.name.c_str(), iname.c_str(),
+                    si->p.target.empty() ? "a place" : "follows ", si->p.target.c_str(), r, held,
+                    kSwellShadowMipFloor);
+            }
+        }
+    }
     if (terrain) terrain->waterNavd = static_cast<float>(waterNavd);
     if (globe) globe->waterNavd = static_cast<float>(waterNavd);   // M6j materials
 
