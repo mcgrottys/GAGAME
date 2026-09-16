@@ -1497,19 +1497,70 @@ void FrameLoop::StepEntities(int quanta, float dt) {
     // helmsman's inner ear reports. The motor-native view that DOES heel is the
     // first-person one, later. (scene/View.h Follow: the start view's four numbers.)
     if (m_followed && m_followed->Helming() && m_followed->Placed()) {
+        // ---- THE EYE DOES NOT GO THROUGH WITH ITS SUBJECT (M13). A gate carries the hull the
+        // instant its centre of gravity enters the box; the eye trails it by `follow.back` and
+        // is still outside. Teleporting the eye with it was the wrong body obeying the rule --
+        // what a helmsman's camera should do is keep watching the boat THROUGH the window and
+        // follow it in. So the eye owes that gate until the box takes the eye too.
+        if (m_followed->Carries() != m_followCarries) {
+            m_followCarries = m_followed->Carries();
+            if (const scene::Gateway* g = m_followed->LastGate()) {
+                if (m_eyeOwes.size() < kMaxEyeOwes) {
+                    m_eyeOwes.push_back(g);
+                    Log("[gate] '%s' went through '%s'; the eye stays on this side and follows it "
+                        "through the window", m_followed->Name(),
+                        g->Declared().name.c_str());
+                } else {
+                    // A subject that outruns its camera through four windows has left it behind:
+                    // the eye takes the last one whole rather than growing an unbounded chain.
+                    Log("[gate] the eye is %zu windows behind '%s' -- it crosses to catch up",
+                        m_eyeOwes.size(), m_followed->Name());
+                    m_eyeOwes.clear();
+                }
+            }
+        }
+        // The pull-back: every window the eye still owes, outermost first. Gm = (DestinationInSource
+        // * Carry)^-1 is the map the window's own geometry is drawn by, so a hull put through it
+        // lands exactly where the window shows it.
+        Motor pull = Motor::Identity();
+        for (const scene::Gateway* g : m_eyeOwes) {
+            pull = pull * (g->DestinationInSource() * g->Carry()).Inverse();
+        }
         double p[3], f[3];
         m_followed->ChaseFrame(p, f);
-        if (m_followed->InSpace() == nullptr) {
+        if (m_followed->InSpace() == nullptr && m_eyeOwes.empty()) {
             scene::View::Follow(m_startView.p.follow, p, f, m_cam);
         } else {
             // A hull in another space: the same chase, said in ITS frame (y is its up), and the
-            // eye and the aim carried into the root's frame by that space's placement.
+            // eye and the aim carried into the root's frame by that space's placement -- then
+            // pulled back through the windows the eye has not yet walked into.
             const scene::FollowProps& fw = m_startView.p.follow;
             double eye[3] = {p[0] - f[0] * fw.back, p[1] + fw.up, p[2] - f[2] * fw.back};
             double aim[3] = {p[0], p[1] + fw.aimLift, p[2]};
-            const Motor& W = m_followed->SpaceInRoot();
-            W.TransformPoint(eye[0], eye[1], eye[2]);
-            W.TransformPoint(aim[0], aim[1], aim[2]);
+            if (const Space* sp = m_followed->InSpace()) {
+                (void)sp;
+                const Motor& W = m_followed->SpaceInRoot();
+                W.TransformPoint(eye[0], eye[1], eye[2]);
+                W.TransformPoint(aim[0], aim[1], aim[2]);
+            }
+            pull.TransformPoint(eye[0], eye[1], eye[2]);
+            pull.TransformPoint(aim[0], aim[1], aim[2]);
+            // THE EYE CROSSES BY THE HULL'S OWN RULE: its centre inside the box, tested in that
+            // gate's own source space. Every ray from inside the box already starts in the
+            // window (scenetest [gate]), so the picture does not move -- the eye simply stops
+            // looking through the window and stands in the place it was looking at.
+            if (!m_eyeOwes.empty()) {
+                const scene::Gateway* g = m_eyeOwes.front();
+                if (g->Inside(eye[0], eye[1], eye[2])) {
+                    m_eyeOwes.erase(m_eyeOwes.begin());
+                    const Motor Kw = g->DestinationInSource() * g->Carry();
+                    Kw.TransformPoint(eye[0], eye[1], eye[2]);
+                    Kw.TransformPoint(aim[0], aim[1], aim[2]);
+                    Log("[gate] the eye reached '%s' and went through: it is standing in %s now, "
+                        "and stops marching", g->Declared().name.c_str(),
+                        g->Destination().name.c_str());
+                }
+            }
             m_cam.px = eye[0];
             m_cam.py = eye[1];
             m_cam.pz = eye[2];
@@ -1525,6 +1576,20 @@ void FrameLoop::StepEntities(int quanta, float dt) {
         // re-rooted, the hull vanished from its own frame, and the next frame placed a root
         // eye under an inner level's index.
         m_camLevel = 0;
+    }
+    // WHAT EACH HULL IS DRAWN THROUGH, decided once the chase has decided. A hull standing in the
+    // space the eye would be in after walking through every window it owes is drawn at its
+    // apparent pose and clipped to the box; every other hull is drawn where it stands, and cut
+    // away where the window shows the other place.
+    Motor pull = Motor::Identity();
+    for (const scene::Gateway* g : m_eyeOwes) {
+        pull = pull * (g->DestinationInSource() * g->Carry()).Inverse();
+    }
+    const Space* beyond = m_eyeOwes.empty() ? nullptr : &m_eyeOwes.back()->Destination();
+    for (auto& e : m_entities) {
+        const bool through = beyond && e->InSpace() == beyond;
+        e->SetViewCarry(through ? &pull : nullptr, through);
+        e->PublishDraw();
     }
 }
 
@@ -2726,7 +2791,13 @@ bool FrameLoop::Frame() {
         // out of the view.
         {
             const scene::Gateway* win = nullptr;
-            if (camLevel == 0) {
+            // THE WINDOW THE EYE IS WALKING INTO WINS. When the subject has gone through a gate
+            // the eye has not, that gate's window is the one the picture depends on -- the boat
+            // is drawn beyond its box and clipped to it -- so it is not a candidate among
+            // near gates, it IS the window, in view or not (a window you are not looking at
+            // simply shows nothing).
+            if (camLevel == 0 && !m_eyeOwes.empty()) win = m_eyeOwes.front();
+            if (camLevel == 0 && !win) {
                 const DirectX::XMFLOAT3 fw = cam.Forward();
                 const double tanH = std::tan(0.5 * double(cam.fovY));
                 const double halfDiag = std::atan(tanH * std::sqrt(1.0 + double(aspect) * double(aspect)));
@@ -2793,6 +2864,9 @@ bool FrameLoop::Frame() {
                                        static_cast<float>(0.5 * win->Declared().size[1]),
                                        static_cast<float>(0.5 * win->Declared().size[2])};
                 globe->SetGate(&L, centreRel, rows, half);
+                // The hulls get the same box: a boat that has gone through is drawn beyond it and
+                // kept only where the window shows it, and one on this side is cut away there.
+                if (m_A.vesselLayer) m_A.vesselLayer->SetGateWindow(rows, half, centreRel, true);
                 // M13: AND THE WINDOW'S SKY. The backdrop pass runs the same slab test and
                 // answers the pixels inside the box in the destination's frame -- otherwise the
                 // window shows the destination's sea under the observer's own sky, which is a
@@ -2853,6 +2927,11 @@ bool FrameLoop::Frame() {
                 }
             } else if (!m_gates.empty()) {
                 globe->SetGate(nullptr, nullptr, nullptr, nullptr);
+                if (m_A.vesselLayer) {
+                    const float z9[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+                    const float z3[3] = {0, 0, 0};
+                    m_A.vesselLayer->SetGateWindow(z9, z3, z3, false);
+                }
                 if (sky) {
                     const float z9[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
                     const float z3[3] = {0, 0, 0};

@@ -273,6 +273,8 @@ bool Entity::Teleport(const Gateway& gate, double simUnix) {
     // ONE PRODUCT: the pose and the momenta, by the gate's motor.
     b.Carry(gate.Carry());
     m_space = &gate.Destination();
+    m_lastGate = &gate;   // the view follows its subject through THIS window
+    ++m_carries;
     m_spaceInRoot = gate.DestinationInSource();
     m_gateChart = gate.Chart();      // M13: kept, so a later re-centre knows this hull's chart
     m_ownValid = false;              // the gate's space replaces any the hull carried
@@ -489,15 +491,38 @@ void Entity::Update(const FrameInfo& fi) {
             }
         }
     }
-    const Vessel* vs[1] = {boat.get()};
-    if (vesselLayer) {
-        if (m_space) {
-            vesselLayer->SetVessels(vs, &m_spaceInRoot, 1);   // drawn in the root, from its space
-        } else {
-            vesselLayer->SetVessels(vs, 1);
-        }
-    }
+    PublishDraw();
+    StepTelemetry(boatSea, simUnix);
+}
 
+// THE DRAW, published after the step -- and after the VIEW has decided what it is looking
+// through this frame (FrameLoop's chase block sets the carry). It used to happen inside the step,
+// which meant the frame a gate carried the hull it was still drawn in the frame the view had
+// finished with: one frame of a vanished boat, exactly at the moment you are watching it go.
+void Entity::PublishDraw() {
+    VesselLayer* vesselLayer = m_o.vesselLayer;
+    if (!vesselLayer || !m_boat) return;
+    const std::unique_ptr<Vessel>& boat = m_boat;
+    {
+        const Vessel* vs[1] = {boat.get()};
+        // THE FRAME THE HULL IS DRAWN IN. Its own space's placement in the root -- and, while the
+        // view still stands on this side of a gate this hull went through, that placement pulled
+        // back through the window (m_viewPull, the gate's motor inverted: the same map the
+        // window's own geometry is drawn by, so the hull lands on the destination's sea exactly
+        // where the window shows it). `through` carries to the shader which side of the window's
+        // slab test keeps the pixel.
+        const uint8_t through = m_viewThrough ? 1u : 0u;
+        const Motor frame = m_space ? (m_viewPullOn ? m_viewPull * m_spaceInRoot : m_spaceInRoot)
+                                    : (m_viewPullOn ? m_viewPull : Motor::Identity());
+        vesselLayer->SetVessels(vs, &frame, &through, 1);
+    }
+}
+
+void Entity::StepTelemetry(TreeWater& boatSea, double simUnix) {
+    VesselLayer* vesselLayer = m_o.vesselLayer;
+    const std::unique_ptr<Vessel>& boat = m_boat;
+    if (!boat) return;
+    int& telTick = m_telTick;
     // One telemetry line a second. Cheap, and it is the only way to tell a hull that is
     // floating wrong from one that is not being DRAWN.
     if ((telTick++ % 60) == 0) {

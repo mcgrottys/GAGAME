@@ -152,10 +152,34 @@ public:
     // the free surface (the hull keeps its height above its own water), the water read through
     // the destination's chart. Returns false when there is no hull to carry.
     bool Teleport(const Gateway& gate, double simUnix);
+    // WHICH GATE LAST CARRIED IT, and how many times it has been carried. The VIEW reads these:
+    // a chase eye does not teleport with its subject, it follows the subject THROUGH the window
+    // and crosses on its own when the box takes it (FrameLoop's m_eyeOwes), so it has to know
+    // which window the subject went through and when that changed.
+    const Gateway* LastGate() const { return m_lastGate; }
+    uint32_t Carries() const { return m_carries; }
+    // THE VIEW'S CARRY, set by the loop each frame before the step. While an eye still stands on
+    // this side of a gate its subject has crossed, the subject is DRAWN at its apparent pose --
+    // pulled back through the gate's motor, which is the same map the window's geometry uses --
+    // and its pixels are kept only where the window shows them. Null pull = the hull draws in
+    // the frame it actually stands in, which is every hull the eye shares a space with.
+    void SetViewCarry(const Motor* pull, bool through) {
+        m_viewPull = pull ? *pull : Motor::Identity();
+        m_viewPullOn = pull != nullptr;
+        m_viewThrough = through;
+    }
     // M13 step 2: the per-subject floating origin -- the hull's space follows the hull.
     void Recentre(double simUnix);
+    // Hand the hull to the vessel layer in the frame the VIEW is looking through this frame.
+    // Called by the step, and again by the loop once the chase has decided (SetViewCarry).
+    void PublishDraw();
     // The hull steps' wall time this Update (the frame loop's profiler slot).
     double LastStepMs() const { return m_stepMs; }
+
+private:
+    void StepTelemetry(TreeWater& boatSea, double simUnix);
+
+public:
 
 private:
     EntityProps m_props;
@@ -181,6 +205,11 @@ private:
     int m_telTick = 0;           // one telemetry line a second
     double m_stepMs = 0.0;
     const Space* m_space = nullptr;   // null = the root tangent space
+    const Gateway* m_lastGate = nullptr;   // the gate that last carried it (the view reads this)
+    uint32_t m_carries = 0;                // how many times, so a view can notice a new one
+    Motor m_viewPull = Motor::Identity();  // the view's pull-back through the windows it owes
+    bool m_viewPullOn = false;
+    bool m_viewThrough = false;
     // M13 step 2: the space this hull carries with it (Recentre) and its chart. m_space points at
     // m_ownSpace once it has re-centred, or at a gate's destination after a carry.
     Space m_ownSpace;

@@ -41,15 +41,21 @@ void Emit(std::vector<VesselLayer::PartCpu>& out, const Motor& hull, const Motor
 }  // namespace
 
 void VesselLayer::SetVessels(const Vessel* const* vessels, int count) {
-    SetVessels(vessels, nullptr, count);
+    SetVessels(vessels, nullptr, nullptr, count);
 }
 
 void VesselLayer::SetVessels(const Vessel* const* vessels, const Motor* frames, int count) {
+    SetVessels(vessels, frames, nullptr, count);
+}
+
+void VesselLayer::SetVessels(const Vessel* const* vessels, const Motor* frames,
+                             const uint8_t* through, int count) {
     m_cpu.clear();
     if (!vessels) return;
     for (int i = 0; i < count; ++i) {
         const Vessel* v = vessels[i];
         if (!v) continue;
+        const size_t first = m_cpu.size();
         const Motor hull = frames ? frames[i] * v->Body().pose : v->Body().pose;
         const VesselSpec& spec = v->Spec();
 
@@ -119,6 +125,10 @@ void VesselLayer::SetVessels(const Vessel* const* vessels, const Motor* frames, 
                 default: break;
             }
         }
+        // Every box this hull emitted belongs to the same side of the window as the hull does.
+        if (through && through[i]) {
+            for (size_t k = first; k < m_cpu.size(); ++k) m_cpu[k].through = 1.0f;
+        }
     }
 }
 
@@ -165,10 +175,27 @@ void VesselLayer::Render(const FrameContext& ctx) {
             m_parts[k].re[i] = static_cast<float>(re[i]);
             m_parts[k].du[i] = static_cast<float>(du[i]);
             m_parts[k].half[i] = m_cpu[k].half[i];
+            m_parts[k].opt[i] = 0.0f;
         }
+        m_parts[k].opt[0] = m_cpu[k].through;
     }
     PixScope scope(ctx.cmd->Native(), "vessels (spec -> boxes, motor sandwich on the GPU)");
-    const float cb[4] = {static_cast<float>(m_parts.size()), 1.0f, 0.0f, 0.0f};
+    // The constants: the part count and brightness as before, then the gate's window (M13) --
+    // the box's rows with its half extents in w, its eye-relative centre, and the one flag the
+    // shader tests. Appended at the END, mirroring Vessel.hlsl's cbuffer (priors 22).
+    struct {
+        float params[4];
+        float r0[4], r1[4], r2[4], c[4];
+    } cb{};
+    cb.params[0] = static_cast<float>(m_parts.size());
+    cb.params[1] = 1.0f;
+    float* rows[3] = {cb.r0, cb.r1, cb.r2};
+    for (int r = 0; r < 3; ++r) {
+        for (int i = 0; i < 3; ++i) rows[r][i] = m_winRows[r * 3 + i];
+        rows[r][3] = m_winHalf[r];
+    }
+    for (int i = 0; i < 3; ++i) cb.c[i] = m_winC[i];
+    cb.c[3] = m_winOn ? 1.0f : 0.0f;
     ctx.cmd->Pipeline(m_pso.Get());
     ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx.cmd->GraphicsConstants(1, cb);

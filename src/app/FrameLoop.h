@@ -247,6 +247,17 @@ private:
     std::vector<std::unique_ptr<scene::Entity>> m_entities;
     std::vector<std::unique_ptr<scene::Gateway>> m_gates;
     scene::Entity* m_followed = nullptr;
+    // ---- THE EYE'S OWN CROSSING (M13). A chase eye does not teleport with its subject. When the
+    // hull goes through a window, the eye keeps standing on this side and chases the hull's
+    // APPARENT pose -- pulled back through that window's motor, which is the map the window's
+    // geometry is already drawn by -- so the boat is watched THROUGH the portal, growing smaller
+    // in it, until the eye itself reaches the box. Then the eye crosses by the hull's own rule
+    // (its centre inside the box), and at that instant every ray already starts inside the
+    // window, so nothing on screen moves: it stops marching because it is in.
+    // These are the gates the subject has crossed and the eye has not, oldest first.
+    static constexpr size_t kMaxEyeOwes = 4;
+    std::vector<const scene::Gateway*> m_eyeOwes;
+    uint32_t m_followCarries = 0;   // the subject's carry count as of the last frame
     // M9br: THE WAVE PREFILL, OFF THE FRAME THREAD. When a tide or current bucket rolls,
     // the solve was already backgrounded but the PREFILL was not -- and writing 7359 tiles
     // across 33 planes and every mip takes 11-19 s, on the frame thread, which is the
