@@ -72,6 +72,8 @@
 // reverted (the unnamed list appended, `"base": ""` refused) before they were trusted.
 #include "app/Options.h"
 #include "scene/Gateway.h"
+#include "core/Dome.h"
+#include "sim/Ephemeris.h"
 #include "sim/RigidBody.h"
 #include "core/Common.h"
 #include "core/CurrentFieldLoader.h"
@@ -2062,6 +2064,66 @@ bool RunSceneSelfTest() {
                    "[gate] the destination space's up is the planet's radial at Haulover");
             const double tilt = std::acos((std::min)(1.0, upD[1])) * 180.0 / kPiL;
             g.True(tilt > 17.0 && tilt < 20.0, "[gate] ...18-19 degrees from the Merrimack's (the arc between the inlets)");
+            // ---- THE WINDOW'S SKY (M13). The gate draws the far place in THIS frame, turned by
+            // Q = rot(Gm) (GlobeLayer's TrueRel), so the sky inside the box is the dome at the
+            // carried eye TURNED THE SAME WAY -- core/Dome.h asked with Q zE and Q sun. Three
+            // things a merely plausible slab cannot do, each of which the first attempt failed:
+            const Motor KwT = gate.DestinationInSource() * gate.Carry();
+            const Motor GmT = KwT.Inverse();
+            double Ew[3] = {600.0, 2.0, -10.0};   // an eye at the box, carried to the other end
+            KwT.TransformPoint(Ew[0], Ew[1], Ew[2]);
+            double zEw[3];
+            ZenithAt(Ew, R, zEw);
+            // The one sun of one instant (2026-08-28T19:30:00Z), in the root frame, exactly as
+            // the frame loop builds it: the ephemeris at the camera's place, on the root's axes.
+            const double unixW = 1787945400.0;
+            const sun::SolarSystem ssW = sun::Build(unixW);
+            double sdW[3];
+            sun::SunDirFromPlanetPoint(ssW, frM.up, sdW);
+            const float sunRootT[3] = {
+                static_cast<float>(sdW[0] * frM.east[0] + sdW[1] * frM.east[1] + sdW[2] * frM.east[2]),
+                static_cast<float>(sdW[0] * frM.up[0] + sdW[1] * frM.up[1] + sdW[2] * frM.up[2]),
+                static_cast<float>(sdW[0] * frM.north[0] + sdW[1] * frM.north[1] + sdW[2] * frM.north[2])};
+            double uW[3] = {zEw[0], zEw[1], zEw[2]};
+            double sW[3] = {sunRootT[0], sunRootT[1], sunRootT[2]};
+            GmT.TransformDir(uW[0], uW[1], uW[2]);
+            GmT.TransformDir(sW[0], sW[1], sW[2]);
+            const float sunWinT[3] = {static_cast<float>(sW[0]), static_cast<float>(sW[1]),
+                                      static_cast<float>(sW[2])};
+            float rowsW[9], sunDomeW[3];
+            DomeFrame(uW, sunWinT, rowsW, sunDomeW);
+            // (1) The window's own up reads as straight up. (Built from zE instead of Q zE -- the
+            // first attempt -- this is cos 18.56 = 0.948, and every ray reads 18.6 degrees low.)
+            const double upY = double(rowsW[3]) * uW[0] + double(rowsW[4]) * uW[1] +
+                               double(rowsW[5]) * uW[2];
+            g.Near(upY, 1.0, 1e-6, "[gate] the window's sky frame stands the destination's zenith on +y");
+            // (2) A ray along the destination's OWN horizon, drawn through the window, reads
+            // elevation zero -- the sea inside the box meets its own sky, at any angle.
+            double hOwn[3] = {zEw[1] * 1.0 - zEw[2] * 0.0, zEw[2] * 0.0 - zEw[0] * 1.0, 0.0};
+            {   // h = zE x e_z normalised: a horizontal direction at the carried eye
+                const double hl = std::sqrt(hOwn[0] * hOwn[0] + hOwn[1] * hOwn[1] + hOwn[2] * hOwn[2]);
+                for (double& c : hOwn) c /= hl;
+            }
+            double hDrawn[3] = {hOwn[0], hOwn[1], hOwn[2]};
+            GmT.TransformDir(hDrawn[0], hDrawn[1], hDrawn[2]);
+            const double hY = double(rowsW[3]) * hDrawn[0] + double(rowsW[4]) * hDrawn[1] +
+                              double(rowsW[5]) * hDrawn[2];
+            g.Near(hY, 0.0, 1e-6, "[gate] ...so a ray along the destination's horizon reads level in it");
+            // (3) THE ONE SUN, TWO GROUNDS. The sun's elevation through the window is its
+            // elevation AT HAULOVER -- against the ephemeris asked directly there (a different
+            // path: the planet frame, that place's own up), and against NOAA's published solar
+            // position for 25.8997 N 80.1239 W at that instant, +55.460 deg (here: +40.899).
+            double sdH[3];
+            sun::SunDirFromPlanetPoint(ssW, frH.up, sdH);
+            const double elThere = std::asin((std::min)(1.0, (std::max)(-1.0,
+                sdH[0] * frH.up[0] + sdH[1] * frH.up[1] + sdH[2] * frH.up[2]))) * 180.0 / kPiL;
+            const double elWin = std::asin((std::min)(1.0, (std::max)(-1.0, double(sunDomeW[1])))) *
+                                 180.0 / kPiL;
+            g.Near(elWin, elThere, 0.01, "[gate] the sun through the window stands where the ephemeris puts it at the destination");
+            g.Near(elWin, 55.460, 0.05, "[gate] ...which is NOAA's solar position for Haulover at that instant");
+            const double elHere = std::asin((std::min)(1.0, (std::max)(-1.0, double(sunRootT[1])))) *
+                                  180.0 / kPiL;
+            g.Near(elHere, 40.899, 0.05, "[gate] ...while the same sun stands at NOAA's Merrimack elevation here");
             double ox = 0.0, oy = 0.0, oz = 0.0;
             gate.DestinationInSource().TransformPoint(ox, oy, oz);
             double orig[3];

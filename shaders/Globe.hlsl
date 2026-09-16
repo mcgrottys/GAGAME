@@ -166,18 +166,10 @@ float3 TrueRel(float3 relOwn) { return sLvlSigma * mul(sLvlQ, relOwn); }
 // origin of the true camera frame) to p reaches the box's entry at or before p: p is seen THROUGH
 // the window. One slab test, in the box's own frame.
 bool GateThrough(float3 p) {
-    const float3x3 R = float3x3(gGateR0.xyz, gGateR1.xyz, gGateR2.xyz);
-    const float3 h = float3(gGateR0.w, gGateR1.w, gGateR2.w);
-    const float3 e = mul(R, -gGateC.xyz);
-    float3 d = mul(R, p);
-    d = lerp(d, float3(1e-12f, 1e-12f, 1e-12f), float3(abs(d) < 1e-12f));
-    const float3 t1 = (-h - e) / d;
-    const float3 t2 = (h - e) / d;
-    const float3 tn = min(t1, t2);
-    const float3 tf = max(t1, t2);
-    const float tEnter = max(max(tn.x, tn.y), tn.z);
-    const float tExit = min(min(tf.x, tf.y), tf.z);
-    return tEnter <= tExit && tExit >= 0.0f && tEnter <= 1.0f;
+    // The slab itself is Common.hlsli's, so the sky's backdrop pixels and these surface pixels
+    // cannot disagree about where the window's edge is.
+    return GateSlabThrough(p, float3x3(gGateR0.xyz, gGateR1.xyz, gGateR2.xyz),
+                           float3(gGateR0.w, gGateR1.w, gGateR2.w), gGateC.xyz);
 }
 
 // THE RIM: how near the ray's entry into the box lies to an EDGE of the face it enters through,

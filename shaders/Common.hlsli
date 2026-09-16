@@ -153,12 +153,45 @@ float3 ViewRay(float2 ndc) {
     return normalize(gCamFwd.xyz + ndc.x * gCamRight.xyz + ndc.y * gCamUp.xyz);
 }
 
+// ---- THE GATE'S SLAB, ONCE (scene/Gateway.cpp SeenThrough, line for line) --------------------
+// The segment from the eye (the origin of the true camera frame) to p reaches the box's entry at
+// or before p: p is seen THROUGH the window. The rows carry a camera-frame vector into the box's
+// own frame, h is its half extent, c its centre relative to the eye. Declared here because TWO
+// passes ask it now -- the globe, for which level a surface pixel belongs to, and the sky, for
+// whose sky a backdrop pixel belongs to -- and a window whose two passes disagreed about its edge
+// would show a seam along the box.
+bool GateSlabThrough(float3 p, float3x3 R, float3 h, float3 c) {
+    const float3 e = mul(R, -c);
+    float3 d = mul(R, p);
+    d = lerp(d, float3(1e-12f, 1e-12f, 1e-12f), float3(abs(d) < 1e-12f));
+    const float3 t1 = (-h - e) / d;
+    const float3 t2 = (h - e) / d;
+    const float3 tn = min(t1, t2);
+    const float3 tf = max(t1, t2);
+    const float tEnter = max(max(tn.x, tn.y), tn.z);
+    const float tExit = min(min(tf.x, tf.y), tf.z);
+    return tEnter <= tExit && tExit >= 0.0f && tEnter <= 1.0f;
+}
+
 // Sky radiance. Defined ONCE here so the sky layer and every reflection cannot disagree.
 float3 SkyRadiance(float ey) { return lerp(SKY_LO_C, SKY_HI_C, smoothstep(0.0f, 0.30f, ey)); }
 
 // The FULL directional form, sun included. Use this for anything that reflects the sky.
 // ** THE SUN MUST BE IN HERE ** -- vqview measured an entire HDR frame under 1.0 luminance when
 // the reflection used the gradient-only form; no tonemapper can invent a missing highlight.
+// The same radiance, asked with an EXPLICIT sun: the gate's window is the destination's sky, and
+// the destination's sun is the one sun asked at ITS OWN PLACE (the ephemeris is evaluated there,
+// in doubles, and handed here already in that frame) rather than this frame's sun turned around.
+float3 SkyRadianceDirSun(float3 dir, float3 sunDir) {
+    const float ey = dot(dir, GA_SKY_UP);
+    float3 col = SkyRadiance(ey);
+    const float cosA = dot(dir, sunDir);
+    const float disc = smoothstep(gMisc.y, gMisc.z, cosA);
+    const float halo = pow(saturate(cosA), 350.0f) * 0.35f + pow(saturate(cosA), 12.0f) * 0.05f;
+    col += SUN_IRR_C * (disc * 12.0f + halo);
+    return lerp(col, SKY_LO_C * 0.45f, smoothstep(0.0f, -0.06f, ey));
+}
+
 float3 SkyRadianceDir(float3 dir) {
     const float ey = dot(dir, GA_SKY_UP);
     float3 col = SkyRadiance(ey);

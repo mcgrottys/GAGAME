@@ -259,6 +259,7 @@ private:
     uint32_t m_wavePendingTiles = 0, m_wavePendingPlanes = 0;
     double m_wavePendingSec = 0.0;
     bool m_sunLogged = false;   // M9bi: log the placed sun once, with its numbers
+    bool m_winSkyLogged = false;   // M13: the gate window's sky, once -- its up and its sun
     double m_startUnix = 0.0;
     int m_entSta = 0, m_westA = 0, m_westB = 0;
     double m_kWestKm = 0.0;

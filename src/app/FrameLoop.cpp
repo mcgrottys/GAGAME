@@ -27,6 +27,7 @@
 #include "compose/ComposeTree.h"
 #include "compose/DomainSource.h"
 #include "core/CurrentFieldLoader.h"
+#include "core/Dome.h"
 #include "core/GeoGridLoader.h"
 #include "hal/Gpu.h"
 #include "core/Image.h"
@@ -196,17 +197,6 @@ bool ViewEyeOrbit(const SceneView* v, double planetR, Camera& cam) {
     cam = s.lookAt ? scene::OrbitPose(s.lat, s.lon, s.alt, s.tLat, s.tLon, planetR)
                    : scene::GlobeCamera(s.lat, s.lon, s.alt, planetR);
     return true;
-}
-
-// THE ZENITH AT AN EYE: the planet's radial through it, in the tangent frame the loop speaks (the
-// planet's centre sits at (0, -R, 0) there). The gravity-up the M6g block writes into upHint is the
-// same vector at the camera; the skies read it in doubles.
-void ZenithAt(const double p[3], double planetR, double out[3]) {
-    const double gy = p[1] + planetR;
-    const double gl = std::sqrt(p[0] * p[0] + gy * gy + p[2] * p[2]);
-    out[0] = p[0] / gl;
-    out[1] = gy / gl;
-    out[2] = p[2] / gl;
 }
 
 }  // namespace
@@ -2276,35 +2266,17 @@ bool FrameLoop::Frame() {
                 skySun = sunRootF;   // every level's own sun has the root's numbers
             }
         }
-        // THE CAMERA'S OWN DOME stands on the zenith at the eye. The dome reads dot(d, +y) for its
-        // gradient and dot(d, sun) for its disc, so the rows need only carry the zenith onto +y and
-        // the sun rides the same rows: the shortest arc, one rotor, (1 + u.y, u x y) normalised
-        // (Portal::Carry's construction; QRotate turns u onto +y). The identity at the tangent
-        // origin; 18.5 degrees for a camera the gate carried to Haulover, whose dome stood on the
+        // THE CAMERA'S OWN DOME stands on the zenith at the eye (DomeFrame, above): the rows carry
+        // that zenith onto +y and the sun rides the same rotor. The identity at the tangent origin;
+        // 18.5 degrees for a camera the gate carried to Haulover, whose dome stood on the
         // Merrimack's zenith -- a slab of below-horizon grey over the sea.
         float zenSun[3];
         if (domeRel == 0 && mode == 1) {
             const double C[3] = {cam.px, cam.py, cam.pz};
             double u[3];
             ZenithAt(C, planetR, u);
-            double q[4] = {1.0 + u[1], -u[2], 0.0, u[0]};
-            const double qn = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
-            if (qn > 1e-9) {   // (the antipode of +y: no eye stands 12,742 km below the origin)
-                for (double& c : q) c /= qn;
-                for (int c = 0; c < 3; ++c) {
-                    double x = c == 0 ? 1.0 : 0.0, y = c == 1 ? 1.0 : 0.0, zc = c == 2 ? 1.0 : 0.0;
-                    Motor::QRotate(q, x, y, zc);
-                    rows[0 * 3 + c] = static_cast<float>(x);
-                    rows[1 * 3 + c] = static_cast<float>(y);
-                    rows[2 * 3 + c] = static_cast<float>(zc);
-                }
-                double sx = skySun[0], sy = skySun[1], sz = skySun[2];
-                Motor::QRotate(q, sx, sy, sz);
-                zenSun[0] = static_cast<float>(sx);
-                zenSun[1] = static_cast<float>(sy);
-                zenSun[2] = static_cast<float>(sz);
-                skySun = zenSun;
-            }
+            DomeFrame(u, skySun, rows, zenSun);
+            skySun = zenSun;
         }
         sky->SetSkyFrame(rows, skySun);
         if (globe) globe->SetSpaceSun(spaceSun);
@@ -2812,8 +2784,71 @@ bool FrameLoop::Frame() {
                                        static_cast<float>(0.5 * win->Declared().size[1]),
                                        static_cast<float>(0.5 * win->Declared().size[2])};
                 globe->SetGate(&L, centreRel, rows, half);
+                // M13: AND THE WINDOW'S SKY. The backdrop pass runs the same slab test and
+                // answers the pixels inside the box in the destination's frame -- otherwise the
+                // window shows the destination's sea under the observer's own sky, which is a
+                // hole in the illusion exactly where the two meet.
+                if (sky) {
+                    // THE WINDOW'S SKY IS THE DESTINATION'S DOME, AND THE DOME IS THE ZENITH.
+                    // A backdrop ray is in the TRUE camera frame, and the window's surfaces are
+                    // drawn from the destination's own frame through one rotation, Q = rot(Gm)
+                    // (TrueRel, Globe.hlsl) -- so the only honest thing to do with the sky is put
+                    // the destination's two directions through that SAME rotation and ask the
+                    // ray, unturned, about them:
+                    //   the zenith at the carried eye, zE  ->  Q zE   (the window's up)
+                    //   the scene's one sun, sunRootF      ->  Q sun  (the window's sun)
+                    // Their dot product is dot(sun, zE): the sun's true elevation AT THE OTHER
+                    // PLACE, which is the whole of the difference between the two skies. Turning
+                    // the RAY by the motor instead (either way round) tilts it out of the window's
+                    // own horizon by the angle between the two places -- 18.6 degrees to Haulover,
+                    // which read as below the horizon everywhere and drew a flat grey slab over
+                    // the destination's sea (seen: out/diag/win_sky_day.png).
+                    //
+                    // THE SUN IS NOT MOVED AND NOT ASKED AGAIN. At 1 AU its rays are parallel
+                    // across the planet to 8.8 arcsec, so in one frame's coordinates it is ONE
+                    // vector at every place on it. What differs between the two ends of a gate is
+                    // not where the sun is but which way the ground faces -- which is exactly why
+                    // it can be low here and high there.
+                    double uW[3] = {zE[0], zE[1], zE[2]};
+                    double sW[3] = {sunRootF[0], sunRootF[1], sunRootF[2]};
+                    Gm.TransformDir(uW[0], uW[1], uW[2]);
+                    Gm.TransformDir(sW[0], sW[1], sW[2]);
+                    const float sunWin[3] = {static_cast<float>(sW[0]), static_cast<float>(sW[1]),
+                                             static_cast<float>(sW[2])};
+                    float skyRows[9];
+                    float sunDest[3];
+                    DomeFrame(uW, sunWin, skyRows, sunDest);
+                    sky->SetGateWindow(rows, half, centreRel, skyRows, sunDest, true);
+                    // THE INSTRUMENT: a picture cannot tell a right sky from a plausible one.
+                    // The sun's elevation through the window is dot(sun, up) at the DESTINATION,
+                    // in doubles, against an ephemeris anyone can check for that lat/lon and that
+                    // instant -- and the tilt is the great-circle angle between the two places.
+                    if (!m_winSkyLogged) {
+                        m_winSkyLogged = true;
+                        const double kDeg = 180.0 / 3.14159265358979;
+                        double cz[3];
+                        const double C[3] = {cam.px, cam.py, cam.pz};
+                        ZenithAt(C, planetR, cz);
+                        const double elH = std::asin(std::clamp(
+                            double(sunRootF[0]) * cz[0] + double(sunRootF[1]) * cz[1] +
+                                double(sunRootF[2]) * cz[2], -1.0, 1.0)) * kDeg;
+                        const double elT = std::asin(std::clamp(double(sunDest[1]), -1.0, 1.0)) * kDeg;
+                        const double tilt = std::acos(std::clamp(
+                            cz[0] * zE[0] + cz[1] * zE[1] + cz[2] * zE[2], -1.0, 1.0)) * kDeg;
+                        Log("[gate] window sky: the ground turns %.2f deg between the two places, "
+                            "so the ONE sun stands %+.2f deg here and %+.2f deg through the window "
+                            "(%s, %.4f N %.4f W)",
+                            tilt, elH, elT, win->Declared().name.c_str(),
+                            win->Declared().toLat, -win->Declared().toLon);
+                    }
+                }
             } else if (!m_gates.empty()) {
                 globe->SetGate(nullptr, nullptr, nullptr, nullptr);
+                if (sky) {
+                    const float z9[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+                    const float z3[3] = {0, 0, 0};
+                    sky->SetGateWindow(z9, z3, z3, z9, z3, false);
+                }
             }
         }
         PROF_BEGIN();
