@@ -73,6 +73,33 @@ public:
     static constexpr uint32_t kPoolCapTiles = 8192;      // 512 MB ceiling before eviction
     static constexpr uint32_t kEvictAgeFrames = 4;       // > frame overlap: no in-flight reads
 
+    // ---- THE SAMPLERS (M13) -------------------------------------------------------------
+    // ONE CACHE FOR THE EARTH, MANY READERS. A sampler is anything that will read the planet
+    // and can be named: a view's walk, a subject whose surroundings stay resident, a gate's
+    // window, a solver's domain pin, a warm-up tool. They share this pool -- a tile two
+    // samplers want is ONE slot -- and each is answerable for what it asked for, which is what
+    // a reserve is written against. So Want() carries WHO, and the per-tile record beside the
+    // stamp is a MASK, not a flag: the second sampler's touch of an already-stamped tile used
+    // to be skipped by the freshness test and left no trace at all, and a want nobody records
+    // cannot be charged, protected, or reported.
+    static constexpr int kMaxSamplers = 16;
+    // Register (or find) a sampler by name; ids are handed out in registration order and are
+    // stable for the run. Beyond kMaxSamplers the last id is shared and the overflow is logged
+    // once -- a crowded scene loses accounting, never tiles.
+    int Sampler(const char* name);
+    int Samplers() const { return static_cast<int>(m_samplers.size()); }
+    const char* SamplerName(int id) const {
+        return (id >= 0 && id < Samplers()) ? m_samplers[id].c_str() : "?";
+    }
+    // Unique tiles each sampler asked for THIS frame (the currency a reserve is written in),
+    // and the tiles it was alone in asking for. Reset when the frame's stamp changes, so they
+    // read the same whether main asks before or after the turn.
+    const uint32_t* SamplerTiles() const { return m_sampTiles; }
+    const uint32_t* SamplerTilesAlone() const { return m_sampAlone; }
+    // One line per sampler -- printed only when there is more than one, so a single-sampler
+    // run's log is what it was.
+    void LogSamplers() const;
+
     void Init(Gpu& gpu);
     // Idempotent, and the destructor calls it: the pool outlives this object and its jobs
     // capture `this`, so leaving without draining them is a use-after-free waiting for a
@@ -170,8 +197,9 @@ public:
         }
     }
 
-    void Want(int tenant, uint32_t face, uint32_t mip, float u0, float v0, float u1, float v1,
-              bool predicted = false);
+    // `sampler` is an id from Sampler(); every call site names the reader it belongs to.
+    void Want(int sampler, int tenant, uint32_t face, uint32_t mip, float u0, float v0, float u1,
+              float v1, bool predicted = false);
     // M9ba: DROP a tenant's every tile -- its provider's identity moved (the exposure node's
     // bucket rolled), so what is mapped is a different field now. Residency bytes go to
     // "nothing" this frame (consumers read absence, never the stale tile); the pool slots are
@@ -391,6 +419,10 @@ private:
         // Encoding: frame * 2 + predicted, so one 32-bit read carries both halves of the skip
         // test. Zero means never seen, which is why frames are counted from 1.
         std::vector<uint32_t> stamp;
+        // M13: WHICH SAMPLERS asked for this tile this frame -- one bit each, addressed by the
+        // same arithmetic as the stamp and only meaningful while the stamp is this frame's.
+        // 2 B per virtual tile beside the stamp's 4 and the slot's 8.
+        std::vector<uint16_t> want;
         std::vector<uint32_t> stampBase;   // offset of each (face, mip) plane into stamp
         std::vector<uint32_t> stampW;      // that plane's width in tiles, for the row stride
         // Step 4 (docs/PERF_EXPERIMENT.md): THE SLOT ARRAY BESIDE IT. The map the M9x note
@@ -542,6 +574,13 @@ private:
     std::deque<std::shared_ptr<Tracked>> m_seen;
     std::vector<std::shared_ptr<Tracked>> m_loading;
     std::vector<std::shared_ptr<Tracked>> m_mapped;
+    // M13: the sampler registry and this frame's per-sampler tile counts.
+    std::vector<std::string> m_samplers;
+    uint32_t m_sampTiles[kMaxSamplers] = {};
+    uint32_t m_sampAlone[kMaxSamplers] = {};
+    uint32_t m_sampFrame = 0;          // the stamp frame those counts belong to
+    bool m_sampOverflowed = false;
+
     uint32_t m_frame = 0;
     TileStream* m_stream = nullptr;
     std::vector<InFlightRead> m_inFlightReads;

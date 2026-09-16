@@ -1435,7 +1435,7 @@ void GlobeLayer::ReplayPredictWants() {
     const auto w1 = std::chrono::steady_clock::now();
     // The worker is idle until the next post, so the rects are ours under the lock.
     for (const WantRect& r : m_predict.rects) {
-        m_res->Want(r.tenant, r.face, r.mip, r.u0, r.v0, r.u1, r.v1, true);
+        m_res->Want(m_sampler, r.tenant, r.face, r.mip, r.u0, r.v0, r.u1, r.v1, true);
     }
     const auto w2 = std::chrono::steady_clock::now();
     ++predictWalks;
@@ -1463,12 +1463,12 @@ GlobeLayer::~GlobeLayer() {
 // own frame). The real walk's leaf: the wants straight to the manager (this frame's stamp), then
 // the draw records. The prefetch walk's leaf (PredictWorker) records rects instead; both run
 // WalkNode / LeafWants above.
-void GlobeLayer::WalkLevel(const WalkParams& wp, uint32_t slot) {
+void GlobeLayer::WalkLevel(const WalkParams& wp, uint32_t slot, int sampler) {
     auto leaf = [&](int face, double u0, double v0, double size, double arc, double dist) {
         ++walkLeaves;
         const auto wt0 = std::chrono::steady_clock::now();
         auto emit = [&](int tenant, uint32_t f, uint32_t mip, float u0r, float v0r, float u1r,
-                        float v1r) { m_res->Want(tenant, f, mip, u0r, v0r, u1r, v1r); };
+                        float v1r) { m_res->Want(sampler, tenant, f, mip, u0r, v0r, u1r, v1r); };
         LeafWants(wp, face, u0, v0, size, arc, dist, emit);
         walkWantNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                    std::chrono::steady_clock::now() - wt0).count());
@@ -1634,7 +1634,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_meshletDrops = 0;
     for (uint32_t& n : levelRecords) n = 0;
     // The camera's own level: slot 0, the identity gauge -- exactly the walk this always was.
-    WalkLevel(m_wp, 0u);
+    WalkLevel(m_wp, 0u, m_sampler);
     levelRecords[0] = static_cast<uint32_t>(m_meshlets.size());
     // ---- M10: THE CYCLE, TAKEN. Each further level is the ROOT walked again under the eye
     // S^-k(C) (Droste.h). Everything the walk reads is scale-free or already in the level's own
@@ -1700,7 +1700,9 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
             for (int j = 0; j < 4; ++j) pr.pulled[j] = wp.frustum[p][j];
         }
         const size_t before = m_meshlets.size();
-        WalkLevel(wp, slot);
+        // M13: an extra level answers for its own tiles on the shared cache when it names a
+        // sampler (a gate's window does); one that does not is part of this view's reading.
+        WalkLevel(wp, slot, L.sampler >= 0 ? L.sampler : m_sampler);
         levelRecords[slot] = static_cast<uint32_t>(m_meshlets.size() - before);
     }
     ProbeTransport(probeRows, probeN);
@@ -1871,12 +1873,14 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     // of a residency-shaped patchwork of vintages, and a fast ascent can never outrun the
     // loader into grey -- the coarse rung is always there to fall back on.
     for (int fm = 4; fm <= 7; ++fm) {
-        if (m_winT >= 0) m_res->Want(m_winT, m_winFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
-        if (m_hgtWinT >= 0) m_res->Want(m_hgtWinT, m_hgtWinFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
-        if (m_detWinT >= 0) m_res->Want(m_detWinT, m_detFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
+        if (m_winT >= 0) m_res->Want(m_sampler, m_winT, m_winFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
+        if (m_hgtWinT >= 0)
+            m_res->Want(m_sampler, m_hgtWinT, m_hgtWinFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
+        if (m_detWinT >= 0)
+            m_res->Want(m_sampler, m_detWinT, m_detFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
         if (m_maskT >= 0) {
-            m_res->Want(m_maskT, 6u, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
-            m_res->Want(m_maskT, 7u, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
+            m_res->Want(m_sampler, m_maskT, 6u, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
+            m_res->Want(m_sampler, m_maskT, 7u, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
         }
     }
     // M12 step 4g: the composed-surface rows are the renderer's one buffer (b2), filled by

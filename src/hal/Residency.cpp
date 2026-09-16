@@ -165,10 +165,13 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
             GA_CHECK((w & (w - 1)) == 0 && (h & (h - 1)) == 0 && w && h ? S_OK : E_UNEXPECTED);
         }
         t.stamp.assign(acc, 0u);
+        t.want.assign(acc, uint16_t(0));   // M13: which samplers asked, this frame
         t.slot.assign(acc, nullptr);   // step 4: the Tracked at the same index
-        Log("[residency] %S: stamp array %u tiles (%.2f MB) + slot array (%.2f MB) -- Want()'s "
-            "hot question and its tile both leave the map",
-            name, acc, acc * 4.0 / 1048576.0, acc * double(sizeof(Tracked*)) / 1048576.0);
+        Log("[residency] %S: stamp array %u tiles (%.2f MB) + sampler mask (%.2f MB) + slot "
+            "array (%.2f MB) -- Want()'s hot question, WHO asked it, and the tile itself, all "
+            "out of the map",
+            name, acc, acc * 4.0 / 1048576.0, acc * 2.0 / 1048576.0,
+            acc * double(sizeof(Tracked*)) / 1048576.0);
     }
     Log("[residency] %S: %ux%u x%u %u mips, %u tiles virtual (%.0f MB), tile %ux%u",
         name, faceDim, faceDim, faces, mips, totalTiles, totalTiles / 16.0, shape.WidthInTexels,
@@ -370,14 +373,16 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
             const auto& ti = tn.tilings[r.face * mips + coarsest];
             const float uc = (r.x + 0.5f) / (std::max)(1u, static_cast<uint32_t>(ti.WidthInTiles));
             const float vc = (r.y + 0.5f) / (std::max)(1u, static_cast<uint32_t>(ti.HeightInTiles));
-            Want(id, r.face, coarsest, uc, vc, uc, vc);
+            // M13: the manager's own retry at boot -- a reader like any other, named so the
+            // ledger never charges a view for a tile the boot asked for.
+            Want(Sampler("boot"), id, r.face, coarsest, uc, vc, uc, vc);
         }
     }
     return id;
 }
 
-void ResidencyManager::Want(int tenant, uint32_t face, uint32_t mip, float u0, float v0,
-                            float u1, float v1, bool predicted) {
+void ResidencyManager::Want(int sampler, int tenant, uint32_t face, uint32_t mip, float u0,
+                            float v0, float u1, float v1, bool predicted) {
     if (predicted) {
         // Step 5: the predicted stream's hash (see Residency.h). The arguments as the caller
         // gave them, before the mip clamp -- the stream the WALK emitted is the object.
@@ -423,11 +428,43 @@ void ResidencyManager::Want(int tenant, uint32_t face, uint32_t mip, float u0, f
     const uint32_t stampFrame = m_frame + 1u;
     // The stamp this touch would write: frame in the high bits, predicted in bit 0.
     const uint32_t myStamp = (stampFrame << 1) | (predicted ? 1u : 0u);
+    // M13: WHO is asking. The counts belong to a frame, so they reset when the stamp frame
+    // moves -- no ordering assumption about when main reads them against the turn.
+    const int sid = (sampler >= 0 && sampler < kMaxSamplers) ? sampler : 0;
+    const uint16_t bit = static_cast<uint16_t>(1u << sid);
+    if (m_sampFrame != stampFrame) {
+        m_sampFrame = stampFrame;
+        for (int i = 0; i < kMaxSamplers; ++i) m_sampTiles[i] = m_sampAlone[i] = 0;
+    }
     // Fresh means this frame AND not a real touch arriving on a speculative tile -- that
     // transition must still run, or a tile the prefetch asked for and the view then confirmed
-    // stays flagged speculative and is evicted on the wrong budget.
-    const auto fresh = [&](uint32_t s) {
-        return (s >> 1) == stampFrame && !(!predicted && (s & 1u));
+    // stays flagged speculative and is evicted on the wrong budget -- AND already carrying
+    // THIS sampler's bit: another sampler's touch leaves the tile stamped but unrecorded for
+    // this one, and a want nobody recorded cannot be charged against a reserve.
+    const auto fresh = [&](uint32_t s, uint16_t w) {
+        return (s >> 1) == stampFrame && !(!predicted && (s & 1u)) && (w & bit) != 0;
+    };
+    // Mark a tile for this sampler. The mask is only meaningful while the stamp is this
+    // frame's, so a stale stamp starts the mask over rather than adding to last frame's.
+    const auto mark = [&](uint32_t& st, uint16_t& w, uint32_t newStamp) {
+        const bool sameFrame = (st >> 1) == stampFrame;
+        const uint16_t was = sameFrame ? w : uint16_t(0);
+        if (!(was & bit)) {
+            ++m_sampTiles[sid];
+            if (was == 0) {
+                ++m_sampAlone[sid];
+            } else if (was && (was & (was - 1)) == 0) {
+                // the tile had exactly one other owner, which is no longer alone on it
+                for (int i = 0; i < kMaxSamplers; ++i) {
+                    if (was == uint16_t(1u << i)) {
+                        if (m_sampAlone[i]) --m_sampAlone[i];
+                        break;
+                    }
+                }
+            }
+        }
+        w = static_cast<uint16_t>(was | bit);
+        st = newStamp;
     };
     // The rect in one plane's tiles. ONE arithmetic for every level: the column scan below
     // rests on rect(m + 1) being exactly the parents of rect(m), which holds because every
@@ -471,11 +508,12 @@ void ResidencyManager::Want(int tenant, uint32_t face, uint32_t mip, float u0, f
         const Rect r = rectAt(plane);
         bool allFresh = true;
         for (uint32_t y = r.y0; y <= r.y1 && allFresh; ++y) {
-            const uint32_t* row =
-                t.stamp.data() + t.stampBase[plane] + size_t(y) * t.stampW[plane];
+            const size_t rowBase = size_t(t.stampBase[plane]) + size_t(y) * t.stampW[plane];
+            const uint32_t* row = t.stamp.data() + rowBase;
+            const uint16_t* wrow = t.want.data() + rowBase;
             for (uint32_t x = r.x0; x <= r.x1; ++x) {
                 ++wantTouches;
-                if (!fresh(row[x])) {
+                if (!fresh(row[x], wrow[x])) {
                     allFresh = false;
                     break;
                 }
@@ -494,6 +532,7 @@ void ResidencyManager::Want(int tenant, uint32_t face, uint32_t mip, float u0, f
         for (uint32_t y = r.y0; y <= r.y1; ++y) {
             const size_t rowBase = size_t(t.stampBase[plane]) + size_t(y) * t.stampW[plane];
             uint32_t* stampRow = t.stamp.data() + rowBase;
+            uint16_t* wantRow = t.want.data() + rowBase;
             Tracked** slotRow = t.slot.data() + rowBase;
             for (uint32_t x = r.x0; x <= r.x1; ++x) {
                 ++wantTouches;
@@ -502,7 +541,8 @@ void ResidencyManager::Want(int tenant, uint32_t face, uint32_t mip, float u0, f
                 // lastSeen/predicted are -- they remain the authority for eviction; this is a
                 // cache of the one question the walk asks.
                 uint32_t& st = stampRow[x];
-                if (fresh(st)) {
+                uint16_t& wt = wantRow[x];
+                if (fresh(st, wt)) {
                     ++wantHits;
                     continue;
                 }
@@ -510,7 +550,7 @@ void ResidencyManager::Want(int tenant, uint32_t face, uint32_t mip, float u0, f
                 if (Tracked* tr = slotRow[x]) {
                     tr->lastSeen = m_frame;
                     if (!predicted) tr->predicted = false;
-                    st = (stampFrame << 1) | (tr->predicted ? 1u : 0u);
+                    mark(st, wt, (stampFrame << 1) | (tr->predicted ? 1u : 0u));
                     continue;
                 }
                 // M9al: THE RING GATE. A new request below the coarsest level is admitted only
@@ -532,7 +572,7 @@ void ResidencyManager::Want(int tenant, uint32_t face, uint32_t mip, float u0, f
                         continue;
                     }
                 }
-                st = myStamp;
+                mark(st, wt, myStamp);
                 auto tr = std::make_shared<Tracked>();
                 tr->tenant = tenant;
                 tr->req = TileRequest{face, static_cast<uint32_t>(m), x, y};
@@ -546,6 +586,40 @@ void ResidencyManager::Want(int tenant, uint32_t face, uint32_t mip, float u0, f
         // let the next frame's walk resume one ring finer.
         if (held) return;
     }
+}
+
+// M13: the sampler registry. Ids are handed out in registration order and never move, so a
+// mask bit means the same reader for the life of the run; a name asked for twice is one
+// sampler (the view's layer and the loop's own wants are the same reader).
+int ResidencyManager::Sampler(const char* name) {
+    const std::string n = name ? name : "?";
+    for (size_t i = 0; i < m_samplers.size(); ++i) {
+        if (m_samplers[i] == n) return static_cast<int>(i);
+    }
+    if (static_cast<int>(m_samplers.size()) >= kMaxSamplers) {
+        if (!m_sampOverflowed) {
+            m_sampOverflowed = true;
+            Log("[residency] more than %d samplers: '%s' and any after it share the last id. "
+                "The accounting merges; no tile is lost.", kMaxSamplers, n.c_str());
+        }
+        return kMaxSamplers - 1;
+    }
+    m_samplers.push_back(n);
+    return static_cast<int>(m_samplers.size()) - 1;
+}
+
+void ResidencyManager::LogSamplers() const {
+    if (Samplers() <= 1) return;   // one reader: the ledger is the totals already printed
+    uint32_t sum = 0;
+    for (int i = 0; i < Samplers(); ++i) sum += m_sampAlone[i];
+    Log("[samplers] frame %u: %d readers on one cache", m_frame, Samplers());
+    for (int i = 0; i < Samplers(); ++i) {
+        Log("[samplers]   %-16s wanted %6u tiles, %6u of them alone (%5.1f %% shared)",
+            m_samplers[i].c_str(), m_sampTiles[i], m_sampAlone[i],
+            m_sampTiles[i] ? 100.0 * double(m_sampTiles[i] - m_sampAlone[i]) / double(m_sampTiles[i])
+                           : 0.0);
+    }
+    Log("[samplers]   %-16s %6u tiles wanted by exactly one reader", "(alone in all)", sum);
 }
 
 void ResidencyManager::Track(Tenant& t, const std::shared_ptr<Tracked>& tr) {
@@ -1156,6 +1230,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     for (const auto& r : m_stageRetire) turn.stageRetiring += static_cast<uint32_t>(r.second.size());
     for (const auto& b : m_inFlightReads) turn.inFlightTiles += static_cast<uint32_t>(b.tiles.size());
     if (traceTurn) {
+        LogSamplers();   // M13: the readers' shares of this turn, beside the turn itself
         Log("[res-turn] rec%u f%u | landed %u batches / %u tiles (lag %u..%u turns), %u retired, "
             "%u UNOWNED%s | batch %u: direct %u, ring %u, NO-BYTES %u, evicted %u | %u tenants "
             "barriered | landing: free %u, retiring %u, in flight %u tiles / %zu batches | pool "
@@ -1458,6 +1533,8 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
 }
 
 void ResidencyManager::LogSettleExact(uint32_t heldFrames) const {
+    // M13: WHO WANTED WHAT, when more than one reader is on the cache (silent otherwise).
+    LogSamplers();
     // The per-tenant ledger of the last turn, and the mapped set itself as one number: FNV-1a
     // over the tracked tiles in state Mapped, in key order (face, mip, y, x), so the order the
     // landings happened in -- which two runs never share -- is not in the hash and the SET is.

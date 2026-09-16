@@ -83,6 +83,9 @@ public:
     // isMars switches the whole shading path (no relief, no live-Earth fields, BC5 normals).
     void SetResidency(ResidencyManager* rm, int surf, int norm, bool isMars) {
         m_res = rm;
+        // M13: this view is a sampler of the one earth cache. Its walk, its prefetch and its
+        // mip floors are all one reader; the extra levels it walks name their own.
+        m_sampler = rm ? rm->Sampler("view") : 0;
         m_surfT = surf;
         m_normT = norm;
         m_streamMars = isMars;
@@ -271,6 +274,10 @@ public:
         int bankSet = -1;             // 0 = the camera's rings, 1 = set B, -1 = none (far)
         float skyUp[3] = {0.0f, 1.0f, 0.0f};   // the zenith of the sky this level SEES, own frame
         float skyDay = -1.0f;         // that sky's daylight; < 0 = the level's own local day
+        // M13: WHICH SAMPLER this level's wants are charged to (ResidencyManager::Sampler).
+        // A Droste level and a gate's window read the same cache the camera does, and each
+        // answers for what it asked for; -1 means the view's own.
+        int sampler = -1;
     };
     // Per frame, BEFORE SetView: the scene's sun as the renderer will write it (the level
     // table's slot 0 carries it -- the globe's shading reads the table, not gSunDir).
@@ -503,7 +510,7 @@ private:
     void EmitMeshlets(int face, double u0, double v0, double size, double arc,
                       float morphStart, float morphEnd, const double camPos[3], uint32_t slot);
     // M10: one walk of the root under a level's eye, emitting records into `slot`.
-    void WalkLevel(const WalkParams& wp, uint32_t slot);
+    void WalkLevel(const WalkParams& wp, uint32_t slot, int sampler);
     bool BuildPso(Gpu& gpu, ShaderCompiler& sc);
     bool BuildMeshPso(Gpu& gpu, ShaderCompiler& sc);
 
@@ -624,6 +631,7 @@ private:
 
     // M6e/M6i: streaming -- Mars's native pyramids (surf/norm) + the composed channels.
     ResidencyManager* m_res = nullptr;
+    int m_sampler = 0;   // M13: this view's id on the shared cache
     int m_surfT = -1, m_normT = -1;
     int m_colorT = -1, m_winT = -1, m_hgtT = -1, m_hgtWinT = -1;
     // M9ap: pages mode -- window == colorT and these are its slices (6, 7). Otherwise 0.

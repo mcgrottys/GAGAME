@@ -209,7 +209,9 @@ void WeatherManager::PinDomains(ResidencyManager& res, int hgtTenant) {
         const float v0 = float((std::max)(0.0, mercV(b.Lat1())));
         const float v1 = float((std::min)(1.0, mercV(lat0)));
         const bool inside = u1 > u0 && v1 > v0;
-        if (inside) res.Want(hgtTenant, m_hgtSlice, 0u, u0, v0, u1, v1);
+        // M13: the solver's domain is its own reader of the shared cache -- it pins the bed
+        // under its lattice whether or not any view is looking there.
+        if (inside) res.Want(res.Sampler("solver"), hgtTenant, m_hgtSlice, 0u, u0, v0, u1, v1);
         if (!m_pinLogged) {
             char line[160];
             snprintf(line, sizeof(line), " %s uv %.4f..%.4f x %.4f..%.4f (%s)", w.name.c_str(),

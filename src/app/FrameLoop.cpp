@@ -1557,6 +1557,11 @@ bool FrameLoop::Frame() {
     auto& globe = m_A.globe;
     auto& planetR = m_A.planetR;
     auto& resMgr = m_A.resMgr;
+    // M13: THE VIEW'S OWN SAMPLER on the one earth cache. The globe's walk registers the same
+    // name, so a view's walk, its prefetch and the loop's page wants for the same eye are ONE
+    // reader -- the thing a reserve is written against -- while subjects and a gate's window
+    // name their own below.
+    const int sampView = resMgr.Sampler("view");
     auto& gisLayer = m_A.gisLayer;
     // M12 step 4a: the z14 page origin, read off the surface's height window -- the doubles
     // the bank, the trace and the exposure's uv closure below take.
@@ -2515,7 +2520,7 @@ bool FrameLoop::Frame() {
                     waveSrc->WindowUv(u0, v0, u1, v1);
                     const uint32_t nPlanes = waveField->Table().nUsed + 1u;
                     for (uint32_t p = 0; p < nPlanes; ++p) {
-                        resMgr.Want(waveT, 6u + p, wantMip, u0, v0, u1, v1);
+                        resMgr.Want(sampView, waveT, 6u + p, wantMip, u0, v0, u1, v1);
                     }
                     PROF_END(10);
                 }
@@ -2761,6 +2766,10 @@ bool FrameLoop::Frame() {
                 L.gauge = Placement::Rigid(Gm);
                 L.gauge.t[0] = L.gauge.t[1] = L.gauge.t[2] = 0.0;
                 L.reliefExagg = globe->reliefExagg;
+                // M13: THE GATE IS ITS OWN SAMPLER. What the window shows is read from the same
+                // earth cache the camera reads, and the gate answers for it -- so a reserve can
+                // say how much of the planet a window may hold without starving the eye.
+                L.sampler = resMgr.Sampler(("gate." + win->Declared().name).c_str());
                 for (int i = 0; i < 3; ++i) L.sun[i] = sunRootF[i];
                 // Set B follows this carried eye (above) when the scene built it and no Droste
                 // outer level holds it; otherwise the destination's sea is the fold's, ringless.
@@ -2967,7 +2976,7 @@ bool FrameLoop::Frame() {
             const float u1 = float(std::clamp(mU(lonC + dLon), 0.0, 1.0));
             const float v0 = float(std::clamp(mV(latC + dLat), 0.0, 1.0));
             const float v1 = float(std::clamp(mV(latC - dLat), 0.0, 1.0));
-            if (u1 > u0 && v1 > v0) resMgr.Want(exposureT, 6u, 3u, u0, v0, u1, v1);
+            if (u1 > u0 && v1 > v0) resMgr.Want(sampView, exposureT, 6u, 3u, u0, v0, u1, v1);
             // M10: and around the outer level's eye, whose sea set B draws.
             if (drosteOuter) {
                 const double latO = BathyModel::kOrgLat + drosteOuterCam[2] / BathyModel::kMPerLat;
@@ -2976,7 +2985,8 @@ bool FrameLoop::Frame() {
                 const float ou1 = float(std::clamp(mU(lonO + dLon), 0.0, 1.0));
                 const float ov0 = float(std::clamp(mV(latO + dLat), 0.0, 1.0));
                 const float ov1 = float(std::clamp(mV(latO - dLat), 0.0, 1.0));
-                if (ou1 > ou0 && ov1 > ov0) resMgr.Want(exposureT, 6u, 3u, ou0, ov0, ou1, ov1);
+                if (ou1 > ou0 && ov1 > ov0)
+                    resMgr.Want(sampView, exposureT, 6u, 3u, ou0, ov0, ou1, ov1);
             }
             if (opt.resTrace && (frame % 150u) == 0u) {
                 // The instrument (--res-trace): what the page holds at the camera vs what
@@ -3045,6 +3055,9 @@ bool FrameLoop::Frame() {
                 }
             }
             if (!placed) continue;
+            // M13: a subject is a SAMPLER of the one earth cache -- it answers for the tiles it
+            // holds resident around itself, separately from the view that named it.
+            const int sampI = resMgr.Sampler(("subject." + iname).c_str());
             const double r = (std::max)(si->p.radius, 0.0);
             uint32_t held = 0;
             // The z14 page tenants: the swell shadow and the bed.
@@ -3061,11 +3074,11 @@ bool FrameLoop::Frame() {
                 const float v0 = uvOf(pyN, page.orgPxY), v1 = uvOf(pyS, page.orgPxY);
                 if (u1 > u0 && v1 > v0) {
                     if (exposureT >= 0 && exposureSrc && exposureSrc->Valid()) {
-                        resMgr.Want(exposureT, pageSlice, kSwellShadowMipFloor, u0, v0, u1, v1);
+                        resMgr.Want(sampI, exposureT, pageSlice, kSwellShadowMipFloor, u0, v0, u1, v1);
                         ++held;
                     }
                     if (hgtWinTenant >= 0) {
-                        resMgr.Want(hgtWinTenant, pageSlice, 0u, u0, v0, u1, v1);
+                        resMgr.Want(sampI, hgtWinTenant, pageSlice, 0u, u0, v0, u1, v1);
                         ++held;
                     }
                 }
@@ -3088,7 +3101,8 @@ bool FrameLoop::Frame() {
                     const float v0 = float((oy + ny - cz1) / 16384.0);
                     const float v1 = float((oy + ny - cz0) / 16384.0);
                     const uint32_t planes = tab.nUsed + 1u;
-                    for (uint32_t p = 0; p < planes; ++p) resMgr.Want(waveT, 6u + p, 0u, u0, v0, u1, v1);
+                    for (uint32_t p = 0; p < planes; ++p)
+                        resMgr.Want(sampI, waveT, 6u + p, 0u, u0, v0, u1, v1);
                     held += planes;
                 }
             }
