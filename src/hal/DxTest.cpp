@@ -221,6 +221,12 @@ void FillSceneConstantsFrozen(const SceneFill& f, SceneConstants& sc) {
         sc.misc[1] = std::cos(r * 1.15f);
         sc.misc[2] = std::cos(r * 0.85f);
     }
+    // M13: the sky's table (the frozen fill grows with the live one, or the gate compares a
+    // row that exists against one that does not).
+    sc.skyLut[0] = (f.skyLutSrv == 0xFFFFFFFFu) ? -1.0f : static_cast<float>(f.skyLutSrv);
+    sc.skyLut[1] = f.planetRadiusM;
+    sc.skyLut[2] = f.eyeRadiusM;
+    sc.skyLut[3] = (f.skyTransSrv == 0xFFFFFFFFu) ? -1.0f : static_cast<float>(f.skyTransSrv);
 }
 
 // The six poses the M12 gate renders (tools/stills.sh, plus gate_stills.sh's droste), built the

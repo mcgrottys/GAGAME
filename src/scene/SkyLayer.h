@@ -2,6 +2,7 @@
 // file, and a shader. It registers no fields, owns one PSO, and issues one three-vertex draw.
 #pragma once
 
+#include "hal/Gpu.h"
 #include "scene/Layer.h"
 
 #include <string>
@@ -51,8 +52,31 @@ public:
         }
     }
 
+    // ---- THE ATMOSPHERE'S TABLES (M13, Atmosphere.hlsli / SkyLut.hlsl) ---------------------
+    // The sky is no longer two constants: it is the measured air, tabulated. Two of the three
+    // tables depend on the atmosphere alone and are built once; the third is this eye's
+    // hemisphere under this sun, one dispatch a frame. The renderer publishes its heap slot in
+    // the scene constants so that every consumer -- the dome, the sea's mirror, the haze --
+    // reads ONE sky. An invalid slot is the shipped gradient, byte for byte.
+    uint32_t SkyViewSrv() const { return m_viewTex.srv; }
+    // ...and the transmittance table, which is what the SUN's own colour is read from.
+    uint32_t TransmittanceSrv() const { return m_transTex.srv; }
+    // Where the eye stands, for the table that is built for it: the planet's radius and the
+    // eye's own (Rb + altitude), in metres, plus the sun in the dome's frame.
+    void SetAir(double planetR, double eyeAltM, const float sunDome[3]) {
+        m_planetR = planetR;
+        m_eyeAltM = eyeAltM;
+        for (int i = 0; i < 3; ++i) m_airSun[i] = sunDome[i];
+    }
+    // --sky-probe: read the tables back and hold them against published optical depths.
+    void Probe(Gpu& gpu);
+    double EyeRadiusM() const { return m_planetR + m_eyeAltM; }
+    double PlanetRadiusM() const { return m_planetR; }
+
 private:
     bool BuildPso(Gpu& gpu, ShaderCompiler& sc);
+    bool BuildLutPsos(Gpu& gpu, ShaderCompiler& sc);
+    void RunLuts(const FrameContext& ctx);
 
     std::wstring m_shaderDir;
     hal::RootSignature m_rootSig = nullptr;
@@ -65,6 +89,18 @@ private:
     float m_winHalf[3] = {0.0f, 0.0f, 0.0f};
     float m_winC[3] = {0.0f, 0.0f, 0.0f};
     float m_winSun[3] = {0.0f, 1.0f, 0.0f};
+
+    // The tables, their UAVs, and the kernels that fill them.
+    static constexpr uint32_t kTransW = 256, kTransH = 64;
+    static constexpr uint32_t kMsW = 32, kMsH = 32;
+    static constexpr uint32_t kViewW = 192, kViewH = 108;
+    GpuTexture m_transTex, m_msTex, m_viewTex;
+    uint32_t m_transUav = UINT32_MAX, m_msUav = UINT32_MAX, m_viewUav = UINT32_MAX;
+    hal::RootSignatureRef m_lutRs;
+    hal::Pso m_csTrans, m_csMs, m_csView;
+    bool m_lutStatic = false;   // the two constant tables are built on the first frame
+    double m_planetR = 6371000.0, m_eyeAltM = 0.0;
+    float m_airSun[3] = {0.0f, 1.0f, 0.0f};
 };
 
 }  // namespace ga

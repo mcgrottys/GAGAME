@@ -49,6 +49,11 @@ struct SceneConstants {
     float viewport[4];      // w, h, 1/w, 1/h
     float misc[4];          // x water level (m above datum -- the TIDE, in M1), yz = the SUN's
                             // disc (cos of its outer/inner angular radius, M9bi), w spare
+    // M13: THE SKY, AS A TABLE. x = the sky-view LUT's heap slot (UINT32_MAX = none, and every
+    // consumer falls back to the two shipped constants), y = the planet's radius and z = the
+    // eye's own (both metres: the table was built for that altitude and is read at it), w spare.
+    // Appended at the END on both sides, and dxtest compares the rows by name (priors 22).
+    float skyLut[4];
 };
 static_assert(sizeof(SceneConstants) % 16 == 0, "SceneConstants must be 16-byte aligned");
 
@@ -70,6 +75,9 @@ struct SceneFill {
     float sigmaW[3] = {0.0f, 0.0f, 0.0f};
     float bscat[3] = {0.0f, 0.0f, 0.0f};
     float waterLevel = 0.0f;
+    // M13: the sky-view table's heap slot and the geometry it was built for (Atmosphere.hlsli).
+    uint32_t skyLutSrv = 0xFFFFFFFFu, skyTransSrv = 0xFFFFFFFFu;
+    float planetRadiusM = 6371000.0f, eyeRadiusM = 6371000.0f;
 };
 
 namespace scene {
@@ -157,6 +165,10 @@ public:
     // `--sun az,el` clears the flag and pins the old constants back, which is what every
     // recorded baseline before M9bi was lit by.
     bool sunPlaced = false;
+    // M13: what the sky layer built this frame, handed to every shader through the scene
+    // constants (the dome, the sea's mirror and the haze must read ONE sky).
+    uint32_t skyLutSrv = 0xFFFFFFFFu, skyTransSrv = 0xFFFFFFFFu;
+    float planetRadiusM = 6371000.0f, eyeRadiusM = 6371000.0f;
     float sunDirTangent[3] = {0.0f, 1.0f, 0.0f};
     // The sun's own angular RADIUS at the current Earth-Sun distance (0.2621..0.2710 deg over a
     // year). A direction cannot have one; only something at a distance can, and the disc in the

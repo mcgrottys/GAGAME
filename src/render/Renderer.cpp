@@ -259,6 +259,16 @@ void Renderer::FillSceneConstants(const SceneFill& f, SceneConstants& sc) {
         sc.misc[1] = std::cos(r * 1.15f);
         sc.misc[2] = std::cos(r * 0.85f);
     }
+    // M13: the sky's table. An invalid slot is the shipped two-constant gradient, so a pass that
+    // runs without the sky layer (a tool, a test) still draws a sky.
+    // The slots are small integers and travel as NUMBERS, not as reinterpreted bit patterns:
+    // a heap slot of 0xFFFFFFFF read as a float is a NaN, and a NaN in the scene constants is
+    // never equal to itself -- which is exactly what the views gate said when it first ran.
+    // -1 is "no table", and every consumer falls back to the gradient.
+    sc.skyLut[0] = (f.skyLutSrv == 0xFFFFFFFFu) ? -1.0f : static_cast<float>(f.skyLutSrv);
+    sc.skyLut[1] = f.planetRadiusM;
+    sc.skyLut[2] = f.eyeRadiusM;
+    sc.skyLut[3] = (f.skyTransSrv == 0xFFFFFFFFu) ? -1.0f : static_cast<float>(f.skyTransSrv);
 }
 
 SceneFill Renderer::FillInputs(const Camera& cam, float timeSec) const {
@@ -276,6 +286,10 @@ SceneFill Renderer::FillInputs(const Camera& cam, float timeSec) const {
     f.sunElevationDeg = sunElevationDeg;
     f.sunAngRadiusDeg = sunAngRadiusDeg;
     f.waterLevel = waterLevel;
+    f.skyLutSrv = skyLutSrv;
+    f.skyTransSrv = skyTransSrv;
+    f.planetRadiusM = planetRadiusM;
+    f.eyeRadiusM = eyeRadiusM;
     for (int c = 0; c < 3; ++c) {
         f.sunDirTangent[c] = sunDirTangent[c];
         f.sigmaW[c] = sigmaW[c];

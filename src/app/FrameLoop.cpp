@@ -2349,6 +2349,31 @@ bool FrameLoop::Frame() {
             skySun = zenSun;
         }
         sky->SetSkyFrame(rows, skySun);
+        // M13: AND THE AIR ITSELF. The sky-view table is built in the DOME's frame -- +y is the
+        // zenith there and `skySun` is that dome's sun -- for the eye's own altitude, so the
+        // elevations the table is indexed by are the true ones wherever the eye stands.
+        {
+            const double C[3] = {cam.px, cam.py, cam.pz};
+            const double gy = C[1] + planetR;
+            const double alt = std::sqrt(C[0] * C[0] + gy * gy + C[2] * C[2]) - planetR;
+            // THE TABLE BELONGS TO AN EYE INSIDE THE AIR. Above the atmosphere there is no dome
+            // to draw -- the engine already fades to the limb shell and to space up there (the
+            // atmosphere ledger's four disjoint terms) -- and a sky-view table built out there
+            // is honestly EMPTY above the horizon, which is not the answer the surface shading's
+            // ambient wants. So past 60 km, where the from-space rim has faded in, the slot goes
+            // invalid and every consumer falls back to the gradient it always had, byte for
+            // byte. This is also what keeps a re-rooted Droste level (whose eye sits in its own
+            // level's orbit, local scale ~3e6 m) drawing the sky it drew before.
+            const bool inAir = alt < 60000.0;
+            sky->SetAir(planetR, alt, skySun);
+            renderer.skyLutSrv = inAir ? sky->SkyViewSrv() : 0xFFFFFFFFu;
+            renderer.skyTransSrv = inAir ? sky->TransmittanceSrv() : 0xFFFFFFFFu;
+            renderer.planetRadiusM = static_cast<float>(planetR);
+            // ...and the lookup reads at the SAME radius the table was built for (SkyLayer
+            // holds it inside the air), or the parameterisation asks for a row that is not there.
+            renderer.eyeRadiusM = static_cast<float>(
+                (std::min)((std::max)(planetR + alt, planetR + 1.0), planetR + 99000.0));
+        }
         if (globe) globe->SetSpaceSun(spaceSun);
     }
 
@@ -3233,6 +3258,12 @@ bool FrameLoop::Frame() {
     const scene::ViewSet viewSet =
         renderer.OneView(cam, static_cast<float>(simUnix - startUnix));
     renderer.RenderFrame(viewSet);
+    // --sky-probe: the atmosphere's tables, read back once the first one is built and held
+    // against published optical depths (SkyLayer::Probe). Reads back and waits: an instrument.
+    if (opt.skyProbe && sky && frame >= 2u && !m_skyProbed) {
+        m_skyProbed = true;
+        sky->Probe(gpu);
+    }
     // --water-probe N: the drawn sea against each hull's own water, every N recorded frames
     // (app/Tools/WaterProbe.cpp). An instrument: it reads back and waits, so never in play.
     if (opt.waterProbeEvery > 0 && !m_entities.empty()) {
