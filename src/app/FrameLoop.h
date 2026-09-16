@@ -77,6 +77,7 @@
 #include "scene/Route.h"
 #include "scene/WaterComponent.h"
 #include "scene/SceneReload.h"
+#include "sim/Ephemeris.h"   // M13: the one light, kept for every viewpoint
 #include "sim/SimClock.h"
 #include "scene/Entity.h"   // M12 step 5e: the hull as a node (its step state, its water)
 #include "scene/Portal.h"   // M12 step 5e: the Droste link and its cycle as a node
@@ -270,6 +271,10 @@ private:
     uint32_t m_wavePendingTiles = 0, m_wavePendingPlanes = 0;
     double m_wavePendingSec = 0.0;
     bool m_skyProbed = false;   // --sky-probe reads the tables once
+    // The solar system this frame was lit by -- the one light, so every viewpoint (a gate's
+    // window included) asks it for its own direction instead of borrowing the camera's.
+    sun::SolarSystem m_solar;
+    bool m_solarValid = false;
     bool m_sunLogged = false;   // M9bi: log the placed sun once, with its numbers
     bool m_winSkyLogged = false;   // M13: the gate window's sky, once -- its up and its sun
     double m_startUnix = 0.0;

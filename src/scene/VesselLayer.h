@@ -50,13 +50,17 @@ public:
                     int count);
     // The gate's box in the true camera frame -- GlobeLayer::SetGate's own rows, half extents and
     // eye-relative centre. `on` false is the shipped pass: no test, no window, byte for byte.
-    void SetGateWindow(const float rows[9], const float half[3], const float centre[3], bool on) {
+    // ...and `sun` is the one light as seen from the far place, in this frame: a hull that has
+    // gone through is lit from where it is.
+    void SetGateWindow(const float rows[9], const float half[3], const float centre[3],
+                       const float sun[3], bool on) {
         m_winOn = on;
         if (!on) return;
         for (int i = 0; i < 9; ++i) m_winRows[i] = rows[i];
         for (int i = 0; i < 3; ++i) {
             m_winHalf[i] = half[i];
             m_winC[i] = centre[i];
+            m_winSun[i] = sun[i];
         }
     }
 
@@ -100,6 +104,7 @@ private:
     float m_winRows[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
     float m_winHalf[3] = {0.0f, 0.0f, 0.0f};
     float m_winC[3] = {0.0f, 0.0f, 0.0f};
+    float m_winSun[3] = {0.0f, 1.0f, 0.0f};
 };
 
 }  // namespace ga

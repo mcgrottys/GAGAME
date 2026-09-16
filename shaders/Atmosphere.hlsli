@@ -27,12 +27,13 @@
 //  and Atmosphere Rendering Technique", EGSR): an isotropic estimate tabulated over (altitude,
 //  sun elevation), summed as a geometric series so an infinite number of orders costs one lookup.
 //
-//  WHY LUTS AND NOT A MARCH PER PIXEL: every mirror in this engine asks the sky for radiance --
-//  the water's Fresnel reflection is the sky, and it asks at every water pixel. A march there
-//  would cost more than the rest of the frame. So the same three tables Hillaire uses are built
-//  once (transmittance, multiple scattering) or once a frame (the sky view), and every consumer
-//  -- the dome, the sea's mirror, the haze -- reads ONE of them. Two copies of a sky model is the
-//  bug the sky pass's own header warns about.
+//  EVERY RAY IS MARCHED WHERE IT IS. There is no table of the view: a pixel's ray, a mirror's, and
+//  a ray a gate carried to the other side of the planet each integrate the air from their own
+//  origin under the one sun, so a window onto Haulover shows Haulover's sky without being told
+//  to. The only tables are properties of the AIR, the same for every ray on the planet: what it
+//  lets through toward the sun from a height at an angle, and what the scattering orders past the
+//  first add there. (An earlier version of this file also tabulated the sky as seen from the
+//  camera; that bakes the sky for ONE eye, and the portal showed the Merrimack's sunset at noon.)
 // ================================================================================================
 #ifndef GA_ATMOSPHERE_HLSLI
 #define GA_ATMOSPHERE_HLSLI
@@ -118,49 +119,101 @@ void AtmMsParams(float2 uv, float Rb, float Rt, out float r, out float muS) {
     r = Rb + saturate(uv.y) * (Rt - Rb);
 }
 
-// ---- the sky-view table: the hemisphere as the eye sees it (Hillaire 2020) --------------------
-// The horizon gets the resolution, because that is where the air is thickest and the colour
-// changes fastest: the vertical coordinate is square-rooted away from the horizon line, and the
-// two halves of the texture are the sky and the ground-intersecting rays.
-float2 AtmSkyViewUv(float r, float3 dir, float3 up, float3 sunDir, float Rb) {
-    const float cosHorizon = sqrt(max(r * r - Rb * Rb, 0.0f)) / max(r, 1e-6f);
-    const float beta = acos(clamp(cosHorizon, -1.0f, 1.0f));
-    const float zenithHorizon = 3.14159265f - beta;
-    const float vza = acos(clamp(dot(dir, up), -1.0f, 1.0f));
-    float v;
-    if (vza < zenithHorizon) {
-        const float c = vza / max(zenithHorizon, 1e-6f);
-        v = 0.5f * (1.0f - sqrt(max(1.0f - c, 0.0f)));
-    } else {
-        const float c = (vza - zenithHorizon) / max(beta, 1e-6f);
-        v = 0.5f + 0.5f * sqrt(max(c, 0.0f));
+// ---- THE RAY, MARCHED (M13). No table of the view: every ray -- a pixel's, a mirror's, one the
+// gate carried to the other side of the planet -- integrates the air from wherever it actually is,
+// under the one sun. What IS tabulated is a property of the air alone, identical for every ray on
+// the planet: what it lets through toward the sun from a height at an angle (transmittance), and
+// what every scattering order past the first adds there (multiple scattering).
+//
+// MANUAL BILINEAR, NOT SampleLevel -- priors 1: the sea shades in the DOMAIN stage and the tables
+// are built in COMPUTE, and a bindless sample outside the pixel stage returns zero on this adapter.
+float3 AtmFetch(uint slot, float2 uv, float2 dims) {
+    const float2 tf = uv * dims - 0.5f;
+    const float2 t0 = floor(tf);
+    const float2 fr = tf - t0;
+    float3 acc = 0.0f;
+    [unroll] for (int k = 0; k < 4; ++k) {
+        const int2 tc = clamp(int2(t0) + int2(k & 1, k >> 1), int2(0, 0), int2(dims) - int2(1, 1));
+        acc += ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y) *
+               gTex[slot][tc].rgb;
     }
-    // Azimuth measured FROM THE SUN, so the table is what the sky actually is: symmetric about
-    // the sun's meridian, with the whole circle resolved for the halo and the anti-solar side.
-    const float3 e = normalize(dir - up * dot(dir, up));
-    const float3 s = normalize(sunDir - up * dot(sunDir, up));
-    float3 t = cross(up, s);
-    const float az = atan2(dot(e, t), dot(e, s));
-    return float2(saturate(az * 0.15915494f + 0.5f), saturate(v));
+    return acc;
+}
+static const float2 kAtmTransDims = float2(256.0f, 64.0f);
+static const float2 kAtmMsDims = float2(32.0f, 32.0f);
+
+// THE ONE DECLARED GAIN: the march answers in the model's units (per unit solar irradiance); the
+// engine's radiance is a relative unit a tonemapper set. This carries one into the other, chosen
+// against the sky the engine drew at noon. It is the only number here that is not a measurement.
+static const float kAtmGain = 18.0f;
+
+// What reaches a point at radius r from the sun at zenith cosine muS: the air's table, and nothing
+// at all when the planet stands in the way -- which is what makes dusk.
+float3 AtmSunT(uint transSlot, float r, float muS, float Rb, float Rt) {
+    if (AtmRaySphere(r, muS, Rb) > 0.0f) return 0.0f;
+    return AtmFetch(transSlot, AtmTransUv(r, muS, Rb, Rt), kAtmTransDims);
 }
 
-void AtmSkyViewParams(float2 uv, float r, float3 up, float3 sunDir, float Rb, out float3 dir) {
-    const float cosHorizon = sqrt(max(r * r - Rb * Rb, 0.0f)) / max(r, 1e-6f);
-    const float beta = acos(clamp(cosHorizon, -1.0f, 1.0f));
-    const float zenithHorizon = 3.14159265f - beta;
-    float vza;
-    if (uv.y < 0.5f) {
-        const float c = 1.0f - 2.0f * uv.y;
-        vza = zenithHorizon * (1.0f - c * c);
-    } else {
-        const float c = 2.0f * uv.y - 1.0f;
-        vza = zenithHorizon + beta * c * c;
+// The radiance along `dir` from a point at radius r whose zenith is `up`, lit by `sunDir`.
+// msSlot < 0 marches single scattering only (the multiple-scattering table is built with it) and
+// returns in `fms` the isotropic response that table needs.
+float3 AtmRay(float r, float3 dir, float3 up, float3 sunDir, uint steps, uint transSlot,
+              int msSlot, float Rb, float Rt, out float3 fms) {
+    fms = 0.0f;
+    const float mu = dot(dir, up);
+    const float muS = dot(sunDir, up);
+    const float nu = dot(dir, sunDir);
+    const float ground = AtmRaySphere(r, mu, Rb);
+    const float disc = r * r * (mu * mu - 1.0f) + Rt * Rt;
+    const float top = max(0.0f, -r * mu + sqrt(max(disc, 0.0f)));
+    const float dist = (ground > 0.0f) ? ground : top;
+    if (dist <= 0.0f) return 0.0f;
+    const float phaseR = AtmPhaseR(nu);
+    const float phaseM = AtmPhaseM(nu);
+    // The orders past the first are a smooth ambient: read once per ray, at its origin, and
+    // weighted by each step's own scattering coefficient below.
+    const float3 msHere = (msSlot >= 0)
+        ? AtmFetch(uint(msSlot), AtmMsUv(r, muS, Rb, Rt), kAtmMsDims) : float3(0.0f, 0.0f, 0.0f);
+    float3 L = 0.0f;
+    float3 T = 1.0f;
+    // STEPS CROWDED TOWARD THE ORIGIN. A ray from near the ground crosses most of its air in the
+    // first few kilometres (Rayleigh's scale height is 8 km, the aerosols' 1.2), so the steps are
+    // spaced exponentially from where the ray starts: t_i = d (e^{g i/n} - 1)/(e^g - 1). With the
+    // in-step integral done analytically, a handful of such steps holds the column.
+    const float g = 3.0f;
+    const float eg = exp(g) - 1.0f;
+    float tPrev = 0.0f;
+    for (uint i = 0u; i < steps; ++i) {
+        const float tNext = dist * (exp(g * float(i + 1u) / float(steps)) - 1.0f) / eg;
+        const float ds = tNext - tPrev;
+        const float t = 0.5f * (tPrev + tNext);
+        tPrev = tNext;
+        const float rr = sqrt(max(r * r + t * t + 2.0f * r * mu * t, 0.0f));
+        float rayD, mieD, ozoD;
+        AtmDensity(rr - Rb, rayD, mieD, ozoD);
+        const float3 sigS = kAtmRayS * rayD + kAtmMieS.xxx * mieD;
+        const float3 sigE = max(kAtmRayS * rayD + kAtmMieE.xxx * mieD + kAtmOzoA * ozoD, 1e-12f);
+        // The sun's zenith cosine AT THAT POINT: air a hundred kilometres along the ray stands under
+        // a different sun angle, and that is the whole geometry of a sunset.
+        const float muSp = clamp((muS * r + t * nu) / max(rr, 1e-6f), -1.0f, 1.0f);
+        float3 S = AtmSunT(transSlot, rr, muSp, Rb, Rt) *
+                   (kAtmRayS * rayD * phaseR + kAtmMieS.xxx * mieD * phaseM);
+        S += msHere * sigS;
+        const float3 Tstep = exp(-sigE * ds);
+        // The step integrated analytically (Hillaire), so few steps do not band.
+        L += T * (S - S * Tstep) / sigE;
+        fms += T * (sigS - sigS * Tstep) / sigE;
+        T *= Tstep;
     }
-    const float az = (uv.x - 0.5f) * 6.28318531f;
-    const float3 s = normalize(sunDir - up * dot(sunDir, up));
-    const float3 t = cross(up, s);
-    const float sinV = sin(vza), cosV = cos(vza);
-    dir = normalize(up * cosV + (s * cos(az) + t * sin(az)) * sinV);
+    // The ground, when the ray reaches it: a Lambert bounce of the direct sun.
+    if (ground > 0.0f) {
+        const float3 n = normalize(up * r + dir * ground);
+        const float muSg = dot(n, sunDir);
+        if (muSg > 0.0f) {
+            L += T * kAtmAlbedo * muSg * AtmSunT(transSlot, Rb, muSg, Rb, Rt) * 0.3183099f;
+        }
+    }
+    return L;
 }
 
 #endif  // GA_ATMOSPHERE_HLSLI

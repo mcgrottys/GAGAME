@@ -223,7 +223,7 @@ void FillSceneConstantsFrozen(const SceneFill& f, SceneConstants& sc) {
     }
     // M13: the sky's table (the frozen fill grows with the live one, or the gate compares a
     // row that exists against one that does not).
-    sc.skyLut[0] = (f.skyLutSrv == 0xFFFFFFFFu) ? -1.0f : static_cast<float>(f.skyLutSrv);
+    sc.skyLut[0] = (f.skyMsSrv == 0xFFFFFFFFu) ? -1.0f : static_cast<float>(f.skyMsSrv);
     sc.skyLut[1] = f.planetRadiusM;
     sc.skyLut[2] = f.eyeRadiusM;
     sc.skyLut[3] = (f.skyTransSrv == 0xFFFFFFFFu) ? -1.0f : static_cast<float>(f.skyTransSrv);

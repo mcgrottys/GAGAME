@@ -88,7 +88,7 @@ struct SceneTool {
 struct Scene : scene::SceneDocument {
     // The enum spellings, in the order the schema declares their names (SceneSchema.cpp).
     enum Mode { kChart = 0, kWorld = 1, kGulf = 2 };
-    enum SunSource { kEphemeris = 0, kPinned = 1 };
+    enum SunSource { kEphemeris = 0, kPinned = 1, kEarth = 2 };
     enum Rail { kRailNone = 0, kRailClassic, kRailZoom, kRailFlood, kRailJetty, kRailDroste,
                 kRailDrosteOut };
     enum Controller { kHelm = 0, kFixed = 1 };

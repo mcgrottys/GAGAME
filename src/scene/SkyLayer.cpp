@@ -31,14 +31,13 @@ void SkyLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
     };
     make(m_transTex, m_transUav, kTransW, kTransH, L"sky.transmittance");
     make(m_msTex, m_msUav, kMsW, kMsH, L"sky.multiscatter");
-    make(m_viewTex, m_viewUav, kViewW, kViewH, L"sky.view (this eye's hemisphere)");
     if (!BuildLutPsos(gpu, sc)) {
         Log("[sky] the atmosphere's kernels did not build -- the dome falls back to the two "
             "constants it always had, and says so rather than drawing black");
     } else {
-        Log("[sky] the air, tabulated: transmittance %ux%u, multiple scattering %ux%u, sky view "
-            "%ux%u (srv %u) -- Rayleigh + Mie + ozone, built once and once a frame",
-            kTransW, kTransH, kMsW, kMsH, kViewW, kViewH, m_viewTex.srv);
+        Log("[sky] the air, tabulated once: transmittance %ux%u, multiple scattering %ux%u -- "
+            "Rayleigh + Mie + ozone; every ray marches it from where it is",
+            kTransW, kTransH, kMsW, kMsH);
     }
 }
 
@@ -75,20 +74,13 @@ bool SkyLayer::BuildLutPsos(Gpu& gpu, ShaderCompiler& sc) {
                                      sc.Compile(path, L"CsMultiScatter", L"cs_6_0"), "skylut");
         },
         "sky.multiscatter");
-    const bool c = hal::Reload(
-        m_csView,
-        [&] {
-            return hal::BuildCompute(gpu, m_lutRs.Get(),
-                                     sc.Compile(path, L"CsSkyView", L"cs_6_0"), "skylut");
-        },
-        "sky.view");
-    return a && b && c;
+    return a && b;
 }
 
 // THE FILL. One constant-buffer shape for all three kernels: where the eye is, how big the
 // planet is, which slots to read and which to write.
 void SkyLayer::RunLuts(const FrameContext& ctx) {
-    if (!m_csView || !m_viewTex.Valid()) return;
+    if (m_lutStatic || !m_csTrans || !m_csMs) return;
     struct LutCb {
         float a[4];
         float b[4];
@@ -97,25 +89,12 @@ void SkyLayer::RunLuts(const FrameContext& ctx) {
     };
     const double Rb = m_planetR;
     const double Rt = m_planetR + 100000.0;
-    // THE ONE DECLARED GAIN. Everything above this line is metres and per-metre coefficients;
-    // the engine's radiance is a relative unit whose zero and one were set by a tonemapper, so
-    // the model's answer needs a scale to land in it. It is chosen ONCE, against the sky this
-    // engine already drew at noon, and it is the only number in the atmosphere that is not a
-    // measurement -- so it is named here rather than smuggled into a coefficient.
-    const float irr = 18.0f;
     auto fill = [&](LutCb& cb, uint32_t w, uint32_t h, uint32_t uav) {
-        for (int i = 0; i < 3; ++i) cb.a[i] = m_airSun[i];
-        // THE EYE'S RADIUS, HELD INSIDE THE AIR. A table built for an eye ABOVE the atmosphere
-        // is empty -- every ray from there leaves without entering, the march returns nothing,
-        // and everything that reads the sky for its ambient goes black (the Droste still, whose
-        // camera sits in orbit, is what said so). The dome is not drawn up there anyway: what
-        // still asks is the skylight on surfaces, and the honest answer for them is the sky at
-        // the top of the air, not no sky at all.
-        cb.a[3] = static_cast<float>(
-            (std::min)((std::max)(Rb + m_eyeAltM, Rb + 1.0), Rt - 1000.0));
+        for (int i = 0; i < 3; ++i) cb.a[i] = 0.0f;
+        cb.a[3] = static_cast<float>(Rb);
         cb.b[0] = static_cast<float>(Rb);
         cb.b[1] = static_cast<float>(Rt);
-        cb.b[2] = irr;
+        cb.b[2] = 0.0f;
         cb.b[3] = 0.0f;
         cb.c[0] = static_cast<float>(w);
         cb.c[1] = static_cast<float>(h);
@@ -149,17 +128,6 @@ void SkyLayer::RunLuts(const FrameContext& ctx) {
         toSrv(m_msTex);
         m_lutStatic = true;
     }
-    if (m_viewTex.state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
-        ctx.cmd->Barrier(m_viewTex.res.Get(), m_viewTex.state,
-                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        m_viewTex.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-    }
-    LutCb cb{};
-    fill(cb, kViewW, kViewH, m_viewUav);
-    ctx.cmd->ComputeConstants(0, cb);
-    ctx.cmd->Pipeline(m_csView.Get());
-    ctx.cmd->Dispatch((kViewW + 7) / 8, (kViewH + 7) / 8, 1);
-    toSrv(m_viewTex);
 }
 
 bool SkyLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
@@ -186,7 +154,7 @@ void SkyLayer::Render(const FrameContext& ctx) {
     struct {
         float r0[4], r1[4], r2[4], sun[4];
         float boxR0[4], boxR1[4], boxR2[4], boxC[4];   // M13: the gate's window (Sky.hlsl)
-        float skyR0[4], skyR1[4], skyR2[4], winSun[4];
+        float winUp[4], winSun[4];                     // ...and the viewpoint its rays land in
     } cb{};
     for (int i = 0; i < 3; ++i) {
         cb.r0[i] = m_rot[i];
@@ -197,15 +165,14 @@ void SkyLayer::Render(const FrameContext& ctx) {
         cb.boxR1[i] = m_winBox[3 + i];
         cb.boxR2[i] = m_winBox[6 + i];
         cb.boxC[i] = m_winC[i];
-        cb.skyR0[i] = m_winSky[i];
-        cb.skyR1[i] = m_winSky[3 + i];
-        cb.skyR2[i] = m_winSky[6 + i];
+        cb.winUp[i] = m_winUp[i];
         cb.winSun[i] = m_winSun[i];
     }
     cb.boxR0[3] = m_winHalf[0];
     cb.boxR1[3] = m_winHalf[1];
     cb.boxR2[3] = m_winHalf[2];
     cb.boxC[3] = m_winOn ? 1.0f : 0.0f;   // the one flag the shader tests
+    cb.winUp[3] = m_winEyeR;
     ctx.cmd->Pipeline(m_pso.Get());
     ctx.cmd->GraphicsConstants(1, cb);
     ctx.cmd->DrawFullscreen();
@@ -228,7 +195,7 @@ void SkyLayer::Render(const FrameContext& ctx) {
 // The gate is the FIRST of those: the table's own vertical transmittance must be exp(-tau) for
 // the tau its coefficients imply, and that tau must sit near the measurement.
 void SkyLayer::Probe(Gpu& gpu) {
-    if (!m_transTex.Valid() || !m_viewTex.Valid()) {
+    if (!m_transTex.Valid()) {
         Log("[sky-probe] no tables (the kernels did not build) -- nothing to read");
         return;
     }
@@ -243,8 +210,8 @@ void SkyLayer::Probe(Gpu& gpu) {
         }
         return true;
     };
-    std::vector<float> tr, sv;
-    if (!grab(m_transTex, kTransW, kTransH, tr) || !grab(m_viewTex, kViewW, kViewH, sv)) {
+    std::vector<float> tr;
+    if (!grab(m_transTex, kTransW, kTransH, tr)) {
         Log("[sky-probe] the readback came back empty");
         return;
     }
@@ -290,8 +257,7 @@ void SkyLayer::Probe(Gpu& gpu) {
     }
     double tz[3];
     transAt(Rb, 1.0, tz);
-    Log("[sky-probe] the tables, read back off the device (transmittance %ux%u, sky view %ux%u)",
-        kTransW, kTransH, kViewW, kViewH);
+    Log("[sky-probe] the air's transmittance, read back off the device (%ux%u)", kTransW, kTransH);
     Log("[sky-probe]   vertical transmittance at sea level, table vs exp(-tau) of its own "
         "coefficients:");
     for (int c = 0; c < 3; ++c) {
@@ -312,32 +278,10 @@ void SkyLayer::Probe(Gpu& gpu) {
     Log("[sky-probe]   the SUN's own colour, through the air at this altitude:");
     for (double el : {60.0, 30.0, 10.0, 5.0, 2.0, 0.0}) {
         double t[3];
-        transAt(m_planetR + m_eyeAltM, std::sin(el * 3.14159265358979 / 180.0), t);
+        transAt(m_planetR + 1.0, std::sin(el * 3.14159265358979 / 180.0), t);
         Log("[sky-probe]     %5.1f deg  (%.4f, %.4f, %.4f)  R/B = %.2f", el, t[0], t[1], t[2],
             (t[2] > 1e-6) ? t[0] / t[2] : 0.0);
     }
-    // The sky view's own shape: the zenith against the horizon, in the sun's meridian and away
-    // from it. A clear sky is brighter at the horizon and brightest toward the sun.
-    auto svAt = [&](double u, double v, double out[3]) {
-        const int x = std::clamp(int(u * kViewW), 0, int(kViewW) - 1);
-        const int y = std::clamp(int(v * kViewH), 0, int(kViewH) - 1);
-        for (int c = 0; c < 3; ++c) out[c] = sv[(size_t(y) * kViewW + x) * 4 + c];
-    };
-    double zen[3], horSun[3], horAnti[3];
-    svAt(0.5, 0.0, zen);
-    svAt(0.5, 0.49, horSun);
-    svAt(0.0, 0.49, horAnti);
-    Log("[sky-probe]   sky view: zenith (%.3f, %.3f, %.3f), horizon toward the sun "
-        "(%.3f, %.3f, %.3f), horizon away (%.3f, %.3f, %.3f)",
-        zen[0], zen[1], zen[2], horSun[0], horSun[1], horSun[2], horAnti[0], horAnti[1],
-        horAnti[2]);
-    const double zl = 0.2126 * zen[0] + 0.7152 * zen[1] + 0.0722 * zen[2];
-    const double sl = 0.2126 * horSun[0] + 0.7152 * horSun[1] + 0.0722 * horSun[2];
-    const double al = 0.2126 * horAnti[0] + 0.7152 * horAnti[1] + 0.0722 * horAnti[2];
-    Log("[sky-probe]   luminance ratios: horizon-toward-sun / zenith = %.2f, "
-        "horizon-away / zenith = %.2f, sun side / anti-sun side = %.2f "
-        "(a clear sky: both above 1, and the sun's side the brighter)",
-        (zl > 1e-9) ? sl / zl : 0.0, (zl > 1e-9) ? al / zl : 0.0, (al > 1e-9) ? sl / al : 0.0);
 }
 
 }  // namespace ga

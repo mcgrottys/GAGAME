@@ -93,9 +93,18 @@ struct TimeSection {
     bool paused = false;
     double windowDays = 7.0;
 };
+// THE EARTH, PLACED AROUND A SUN THAT IS A LIGHT AT THE ORIGIN. Position in metres (the sun is
+// at 0,0,0), and a turn of `spin` degrees about `axis`. Nothing here reads the clock: a scene can
+// hold a night storm at noon if it wants to, and coupling this to time is a later, separate step.
+struct EarthPlacement {
+    double at[3] = {-1.495978707e11, 0.0, 0.0};
+    double axis[3] = {0.0, 0.0, 1.0};
+    double spin = 0.0;
+};
 struct SunSection {
-    int source = 0;                   // ephemeris | pinned
+    int source = 0;                   // ephemeris | pinned | earth
     float az = 112.0f, el = 26.0f;
+    EarthPlacement earth;
 };
 struct StormProps {
     float hs = 0.0f, tp = 10.0f, dir = 90.0f;

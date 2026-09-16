@@ -93,14 +93,28 @@ const Schema& TimeSchema() {
     return *s;
 }
 
+const Schema& EarthSchema() {
+    static const Schema* s = [] {
+        auto& p = kDoc.sun.earth;
+        Schema* sc = new Schema("sun.earth", &p);
+        sc->Bind("at", p.at, Q::Length, "m", "the Earth's centre; the sun is a light at 0,0,0", R)
+            .Bind("axis", p.axis, Q::Dimensionless, "", "the Earth's spin axis in that frame", R)
+            .Bind("spin", p.spin, Q::Angle, "deg", "the Earth's turn about its axis", R);
+        return sc;
+    }();
+    return *s;
+}
+
 const Schema& SunSchema() {
     static const Schema* s = [] {
         auto& p = kDoc.sun;
         Schema* sc = new Schema("sun", &p);
-        sc->BindEnum("source", p.source, {"ephemeris", "pinned"},
-                     "the ephemeris at the scene's time and place, or pinned at az/el (--sun)", R)
+        sc->BindEnum("source", p.source, {"ephemeris", "pinned", "earth"},
+                     "the ephemeris at the scene's time, pinned at az/el, or the Earth placed "
+                     "around a sun at the origin (sun.earth) with no clock at all", R)
             .Bind("az", p.az, Q::Angle, "deg", "pinned azimuth, compass", H)
-            .Bind("el", p.el, Q::Angle, "deg", "pinned elevation", H);
+            .Bind("el", p.el, Q::Angle, "deg", "pinned elevation", H)
+            .Nest("earth", EarthSchema(), &p.earth, "the Earth's place around the sun");
         return sc;
     }();
     return *s;

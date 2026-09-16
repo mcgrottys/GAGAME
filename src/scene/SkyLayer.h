@@ -29,49 +29,35 @@ public:
         for (int i = 0; i < 3; ++i) m_sun[i] = sun[i];
     }
 
-    // M13: THE GATE'S WINDOW HAS A SKY. The gate carried the destination's geometry and nothing
-    // else, so above the destination's horizon the window showed the observer's own sky. A window
-    // is a transform on the whole view: the same slab test the globe clips surfaces with runs in
-    // the backdrop too, and the pixels inside it are answered in the destination's frame.
-    //   boxRows/boxHalf/boxCentre  the box in the true camera frame (GlobeLayer::SetGate's own)
-    //   skyRows                    this frame -> the DESTINATION's dome (its zenith on +y)
-    //   sun                        the scene's one sun, said in that dome's frame
+    // M13: THE GATE'S WINDOW HAS A SKY -- the sky of the place its rays land in. A window is a
+    // transform on the whole view, so the backdrop runs the same slab test the globe clips with,
+    // and a pixel inside it marches the air from the far place: its zenith, the one sun as seen
+    // from there, and its distance from the planet's centre, all said in this frame.
     // `on` false is the shipped pass, byte for byte.
     void SetGateWindow(const float boxRows[9], const float boxHalf[3], const float boxCentre[3],
-                       const float skyRows[9], const float sun[3], bool on) {
+                       const float up[3], float eyeRadiusM, const float sun[3], bool on) {
         m_winOn = on;
         if (!on) return;
-        for (int i = 0; i < 9; ++i) {
-            m_winBox[i] = boxRows[i];
-            m_winSky[i] = skyRows[i];
-        }
+        for (int i = 0; i < 9; ++i) m_winBox[i] = boxRows[i];
         for (int i = 0; i < 3; ++i) {
             m_winHalf[i] = boxHalf[i];
             m_winC[i] = boxCentre[i];
+            m_winUp[i] = up[i];
             m_winSun[i] = sun[i];
         }
+        m_winEyeR = eyeRadiusM;
     }
 
-    // ---- THE ATMOSPHERE'S TABLES (M13, Atmosphere.hlsli / SkyLut.hlsl) ---------------------
-    // The sky is no longer two constants: it is the measured air, tabulated. Two of the three
-    // tables depend on the atmosphere alone and are built once; the third is this eye's
-    // hemisphere under this sun, one dispatch a frame. The renderer publishes its heap slot in
-    // the scene constants so that every consumer -- the dome, the sea's mirror, the haze --
-    // reads ONE sky. An invalid slot is the shipped gradient, byte for byte.
-    uint32_t SkyViewSrv() const { return m_viewTex.srv; }
-    // ...and the transmittance table, which is what the SUN's own colour is read from.
+    // ---- THE AIR'S TWO TABLES (M13, Atmosphere.hlsli / SkyLut.hlsl) ------------------------
+    // Properties of the atmosphere alone -- what it lets through toward the sun from a height at
+    // an angle, and what the scattering orders past the first add there -- built once and the
+    // same for every ray on the planet. There is no table of the VIEW: every ray marches the air
+    // from where it is. The renderer publishes both slots in the scene constants.
     uint32_t TransmittanceSrv() const { return m_transTex.srv; }
-    // Where the eye stands, for the table that is built for it: the planet's radius and the
-    // eye's own (Rb + altitude), in metres, plus the sun in the dome's frame.
-    void SetAir(double planetR, double eyeAltM, const float sunDome[3]) {
-        m_planetR = planetR;
-        m_eyeAltM = eyeAltM;
-        for (int i = 0; i < 3; ++i) m_airSun[i] = sunDome[i];
-    }
-    // --sky-probe: read the tables back and hold them against published optical depths.
+    uint32_t MultiScatterSrv() const { return m_msTex.srv; }
+    void SetPlanetRadius(double planetR) { m_planetR = planetR; }
+    // --sky-probe: read the transmittance back and hold it against published optical depths.
     void Probe(Gpu& gpu);
-    double EyeRadiusM() const { return m_planetR + m_eyeAltM; }
-    double PlanetRadiusM() const { return m_planetR; }
 
 private:
     bool BuildPso(Gpu& gpu, ShaderCompiler& sc);
@@ -85,22 +71,21 @@ private:
     float m_sun[3] = {0.0f, 1.0f, 0.0f};
     bool m_winOn = false;
     float m_winBox[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
-    float m_winSky[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
     float m_winHalf[3] = {0.0f, 0.0f, 0.0f};
     float m_winC[3] = {0.0f, 0.0f, 0.0f};
+    float m_winUp[3] = {0.0f, 1.0f, 0.0f};
     float m_winSun[3] = {0.0f, 1.0f, 0.0f};
+    float m_winEyeR = 6371000.0f;
 
     // The tables, their UAVs, and the kernels that fill them.
     static constexpr uint32_t kTransW = 256, kTransH = 64;
     static constexpr uint32_t kMsW = 32, kMsH = 32;
-    static constexpr uint32_t kViewW = 192, kViewH = 108;
-    GpuTexture m_transTex, m_msTex, m_viewTex;
-    uint32_t m_transUav = UINT32_MAX, m_msUav = UINT32_MAX, m_viewUav = UINT32_MAX;
+    GpuTexture m_transTex, m_msTex;
+    uint32_t m_transUav = UINT32_MAX, m_msUav = UINT32_MAX;
     hal::RootSignatureRef m_lutRs;
-    hal::Pso m_csTrans, m_csMs, m_csView;
+    hal::Pso m_csTrans, m_csMs;
     bool m_lutStatic = false;   // the two constant tables are built on the first frame
-    double m_planetR = 6371000.0, m_eyeAltM = 0.0;
-    float m_airSun[3] = {0.0f, 1.0f, 0.0f};
+    double m_planetR = 6371000.0;
 };
 
 }  // namespace ga

@@ -24,7 +24,16 @@
     "bathy": "data/bathy/merrimack.json"
   },
   "time": {"start": "2026-08-28T19:30:00Z", "timeScale": 1, "paused": false, "windowDays": 7},
-  "sun": {"source": "ephemeris", "az": 112, "el": 26},
+  "sun": {
+    "source": "ephemeris",
+    "az": 112,
+    "el": 26,
+    "earth": {
+      "at": [-149597870700, 0, 0],
+      "axis": [0, 0, 1],
+      "spin": 0
+    }
+  },
   "sea": {
     "storm": {"hs": 3, "tp": 10, "dir": 95},
     "datum": {"fromStation": true, "mllwToNavd": -1.3}

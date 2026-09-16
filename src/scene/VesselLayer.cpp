@@ -186,6 +186,7 @@ void VesselLayer::Render(const FrameContext& ctx) {
     struct {
         float params[4];
         float r0[4], r1[4], r2[4], c[4];
+        float sun[4];   // the one light as seen from the far place, for hulls that went through
     } cb{};
     cb.params[0] = static_cast<float>(m_parts.size());
     cb.params[1] = 1.0f;
@@ -196,6 +197,7 @@ void VesselLayer::Render(const FrameContext& ctx) {
     }
     for (int i = 0; i < 3; ++i) cb.c[i] = m_winC[i];
     cb.c[3] = m_winOn ? 1.0f : 0.0f;
+    for (int i = 0; i < 3; ++i) cb.sun[i] = m_winSun[i];
     ctx.cmd->Pipeline(m_pso.Get());
     ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx.cmd->GraphicsConstants(1, cb);

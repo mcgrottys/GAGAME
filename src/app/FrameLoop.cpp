@@ -2075,7 +2075,15 @@ bool FrameLoop::Frame() {
     // (M10 moved this block up from just before RenderFrame: the globe's level table
     // carries the sun, and the walk that fills the table runs before RenderFrame.)
     if (S.sun.source != Scene::kPinned) {
-        const sun::SolarSystem ss = sun::Build(simUnix);
+        // THE EARTH AROUND A LIGHT AT THE ORIGIN. A scene that places the Earth (sun.earth)
+        // gets exactly that placement, every frame, whatever the clock says -- the tide and the
+        // sun are not coupled. Only the ephemeris source reads the time.
+        const sun::SolarSystem ss =
+            (S.sun.source == Scene::kEarth)
+                ? sun::BuildEarth(S.sun.earth.at, S.sun.earth.axis, S.sun.earth.spin)
+                : sun::Build(simUnix);
+        m_solar = ss;
+        m_solarValid = true;
         const double here[3] = {oDir[0], oDir[1], oDir[2]};   // unit = 1 Earth radius
         double sdir[3];
         sun::SunDirFromPlanetPoint(ss, here, sdir);
@@ -2095,9 +2103,11 @@ bool FrameLoop::Frame() {
                                    double(renderer.sunDirTangent[2])) *
                         180.0 / 3.14159265358979;
             if (az < 0.0) az += 360.0;
-            Log("[sun] placed from the ephemeris: subsolar %.3f N %.3f E, %.6f AU "
+            Log("[sun] placed %s: subsolar %.3f N %.3f E, %.6f AU "
                 "(%.1f W/m2), angular radius %.4f deg; from here azimuth %.2f, "
                 "elevation %+.2f  [--sun 112,26 pins the pre-M9bi art direction]",
+                (S.sun.source == Scene::kEarth) ? "by the scene (the Earth around a light at 0,0,0)"
+                                                : "from the ephemeris",
                 ss.app.subsolarLatDeg, ss.app.subsolarLonDeg, ss.app.distAu,
                 ss.app.irradianceWm2, ss.app.angRadiusDeg, az, el);
         }
@@ -2349,30 +2359,20 @@ bool FrameLoop::Frame() {
             skySun = zenSun;
         }
         sky->SetSkyFrame(rows, skySun);
-        // M13: AND THE AIR ITSELF. The sky-view table is built in the DOME's frame -- +y is the
-        // zenith there and `skySun` is that dome's sun -- for the eye's own altitude, so the
-        // elevations the table is indexed by are the true ones wherever the eye stands.
+        // M13: AND THE AIR ITSELF. The air's two tables (the same for every ray on the planet) and
+        // this eye's distance from the planet's centre; the sky is marched from there. An eye
+        // above the air marches nothing -- the limb shell owns that backdrop (the atmosphere
+        // ledger) -- and every consumer answers with the gradient it always had; the shader
+        // decides that from the radius, per viewpoint, so a re-rooted Droste level (local scale
+        // ~3e6 m) keeps the sky it drew before.
         {
             const double C[3] = {cam.px, cam.py, cam.pz};
             const double gy = C[1] + planetR;
-            const double alt = std::sqrt(C[0] * C[0] + gy * gy + C[2] * C[2]) - planetR;
-            // THE TABLE BELONGS TO AN EYE INSIDE THE AIR. Above the atmosphere there is no dome
-            // to draw -- the engine already fades to the limb shell and to space up there (the
-            // atmosphere ledger's four disjoint terms) -- and a sky-view table built out there
-            // is honestly EMPTY above the horizon, which is not the answer the surface shading's
-            // ambient wants. So past 60 km, where the from-space rim has faded in, the slot goes
-            // invalid and every consumer falls back to the gradient it always had, byte for
-            // byte. This is also what keeps a re-rooted Droste level (whose eye sits in its own
-            // level's orbit, local scale ~3e6 m) drawing the sky it drew before.
-            const bool inAir = alt < 60000.0;
-            sky->SetAir(planetR, alt, skySun);
-            renderer.skyLutSrv = inAir ? sky->SkyViewSrv() : 0xFFFFFFFFu;
-            renderer.skyTransSrv = inAir ? sky->TransmittanceSrv() : 0xFFFFFFFFu;
+            sky->SetPlanetRadius(planetR);
+            renderer.skyMsSrv = sky->MultiScatterSrv();
+            renderer.skyTransSrv = sky->TransmittanceSrv();
             renderer.planetRadiusM = static_cast<float>(planetR);
-            // ...and the lookup reads at the SAME radius the table was built for (SkyLayer
-            // holds it inside the air), or the parameterisation asks for a row that is not there.
-            renderer.eyeRadiusM = static_cast<float>(
-                (std::min)((std::max)(planetR + alt, planetR + 1.0), planetR + 99000.0));
+            renderer.eyeRadiusM = static_cast<float>(std::sqrt(C[0] * C[0] + gy * gy + C[2] * C[2]));
         }
         if (globe) globe->SetSpaceSun(spaceSun);
     }
@@ -2866,7 +2866,24 @@ bool FrameLoop::Frame() {
                 // earth cache the camera reads, and the gate answers for it -- so a reserve can
                 // say how much of the planet a window may hold without starving the eye.
                 L.sampler = resMgr.Sampler(("gate." + win->Declared().name).c_str());
-                for (int i = 0; i < 3; ++i) L.sun[i] = sunRootF[i];
+                // THE WINDOW'S VIEWPOINT, LIT BY THE ONE LIGHT. The carried eye E stands at the
+                // other place; the sun as seen from THERE is asked of the solar system at that
+                // place's own planet point (the light at 0,0,0 does the rest) and said in the root
+                // frame, which is the frame this level is drawn in. Not a copy of this frame's sun.
+                const double gyE = E[1] + planetR;
+                const double rE = std::sqrt(E[0] * E[0] + gyE * gyE + E[2] * E[2]);
+                double sunE[3] = {sunRootF[0], sunRootF[1], sunRootF[2]};
+                if (m_solarValid) {
+                    double pE[3], sd[3];
+                    for (int i = 0; i < 3; ++i) {
+                        pE[i] = (east0[i] * E[0] + oDir[i] * gyE + north0[i] * E[2]) / planetR;
+                    }
+                    sun::SunDirFromPlanetPoint(m_solar, pE, sd);
+                    sunE[0] = sd[0] * east0[0] + sd[1] * east0[1] + sd[2] * east0[2];
+                    sunE[1] = sd[0] * oDir[0] + sd[1] * oDir[1] + sd[2] * oDir[2];
+                    sunE[2] = sd[0] * north0[0] + sd[1] * north0[1] + sd[2] * north0[2];
+                }
+                for (int i = 0; i < 3; ++i) L.sun[i] = static_cast<float>(sunE[i]);
                 // Set B follows this carried eye (above) when the scene built it and no Droste
                 // outer level holds it; otherwise the destination's sea is the fold's, ringless.
                 L.bankSet = (waterBankB && !portal.Valid()) ? 1 : -1;
@@ -2891,77 +2908,48 @@ bool FrameLoop::Frame() {
                 globe->SetGate(&L, centreRel, rows, half);
                 // The hulls get the same box: a boat that has gone through is drawn beyond it and
                 // kept only where the window shows it, and one on this side is cut away there.
-                if (m_A.vesselLayer) m_A.vesselLayer->SetGateWindow(rows, half, centreRel, true);
-                // M13: AND THE WINDOW'S SKY. The backdrop pass runs the same slab test and
-                // answers the pixels inside the box in the destination's frame -- otherwise the
-                // window shows the destination's sea under the observer's own sky, which is a
-                // hole in the illusion exactly where the two meet.
-                if (sky) {
-                    // THE WINDOW'S SKY IS THE DESTINATION'S DOME, AND THE DOME IS THE ZENITH.
-                    // A backdrop ray is in the TRUE camera frame, and the window's surfaces are
-                    // drawn from the destination's own frame through one rotation, Q = rot(Gm)
-                    // (TrueRel, Globe.hlsl) -- so the only honest thing to do with the sky is put
-                    // the destination's two directions through that SAME rotation and ask the
-                    // ray, unturned, about them:
-                    //   the zenith at the carried eye, zE  ->  Q zE   (the window's up)
-                    //   the scene's one sun, sunRootF      ->  Q sun  (the window's sun)
-                    // Their dot product is dot(sun, zE): the sun's true elevation AT THE OTHER
-                    // PLACE, which is the whole of the difference between the two skies. Turning
-                    // the RAY by the motor instead (either way round) tilts it out of the window's
-                    // own horizon by the angle between the two places -- 18.6 degrees to Haulover,
-                    // which read as below the horizon everywhere and drew a flat grey slab over
-                    // the destination's sea (seen: out/diag/win_sky_day.png).
-                    //
-                    // THE SUN IS NOT MOVED AND NOT ASKED AGAIN. At 1 AU its rays are parallel
-                    // across the planet to 8.8 arcsec, so in one frame's coordinates it is ONE
-                    // vector at every place on it. What differs between the two ends of a gate is
-                    // not where the sun is but which way the ground faces -- which is exactly why
-                    // it can be low here and high there.
-                    double uW[3] = {zE[0], zE[1], zE[2]};
-                    double sW[3] = {sunRootF[0], sunRootF[1], sunRootF[2]};
-                    Gm.TransformDir(uW[0], uW[1], uW[2]);
-                    Gm.TransformDir(sW[0], sW[1], sW[2]);
-                    const float sunWin[3] = {static_cast<float>(sW[0]), static_cast<float>(sW[1]),
-                                             static_cast<float>(sW[2])};
-                    float skyRows[9];
-                    float sunDest[3];
-                    DomeFrame(uW, sunWin, skyRows, sunDest);
-                    sky->SetGateWindow(rows, half, centreRel, skyRows, sunDest, true);
-                    // THE INSTRUMENT: a picture cannot tell a right sky from a plausible one.
-                    // The sun's elevation through the window is dot(sun, up) at the DESTINATION,
-                    // in doubles, against an ephemeris anyone can check for that lat/lon and that
-                    // instant -- and the tilt is the great-circle angle between the two places.
-                    if (!m_winSkyLogged) {
-                        m_winSkyLogged = true;
-                        const double kDeg = 180.0 / 3.14159265358979;
-                        double cz[3];
-                        const double C[3] = {cam.px, cam.py, cam.pz};
-                        ZenithAt(C, planetR, cz);
-                        const double elH = std::asin(std::clamp(
-                            double(sunRootF[0]) * cz[0] + double(sunRootF[1]) * cz[1] +
-                                double(sunRootF[2]) * cz[2], -1.0, 1.0)) * kDeg;
-                        const double elT = std::asin(std::clamp(double(sunDest[1]), -1.0, 1.0)) * kDeg;
-                        const double tilt = std::acos(std::clamp(
-                            cz[0] * zE[0] + cz[1] * zE[1] + cz[2] * zE[2], -1.0, 1.0)) * kDeg;
-                        Log("[gate] window sky: the ground turns %.2f deg between the two places, "
-                            "so the ONE sun stands %+.2f deg here and %+.2f deg through the window "
-                            "(%s, %.4f N %.4f W)",
-                            tilt, elH, elT, win->Declared().name.c_str(),
-                            win->Declared().toLat, -win->Declared().toLon);
-                    }
+                // THE RAY, CARRIED. Everything the window shows is where its rays land: the far
+                // place's zenith and the one sun as seen from there, turned into this frame by the
+                // rotation the window's geometry is drawn with (Q = rot(Gm), TrueRel), and E's
+                // distance from the planet's centre. The sky marches the air from there; the hulls
+                // that went through are lit from there. No table of any view.
+                double uW[3] = {zE[0], zE[1], zE[2]};
+                double sW[3] = {sunE[0], sunE[1], sunE[2]};
+                Gm.TransformDir(uW[0], uW[1], uW[2]);
+                Gm.TransformDir(sW[0], sW[1], sW[2]);
+                const float upWin[3] = {static_cast<float>(uW[0]), static_cast<float>(uW[1]),
+                                        static_cast<float>(uW[2])};
+                const float sunWin[3] = {static_cast<float>(sW[0]), static_cast<float>(sW[1]),
+                                         static_cast<float>(sW[2])};
+                // The hulls get the same box: a boat that has gone through is drawn beyond it and
+                // kept only where the window shows it, and one on this side is cut away there.
+                if (m_A.vesselLayer) m_A.vesselLayer->SetGateWindow(rows, half, centreRel, sunWin, true);
+                if (sky) sky->SetGateWindow(rows, half, centreRel, upWin, static_cast<float>(rE), sunWin, true);
+                if (!m_winSkyLogged) {
+                    m_winSkyLogged = true;
+                    const double kDeg = 180.0 / 3.14159265358979;
+                    double cz[3];
+                    const double C[3] = {cam.px, cam.py, cam.pz};
+                    ZenithAt(C, planetR, cz);
+                    const double elH = std::asin(std::clamp(
+                        double(sunRootF[0]) * cz[0] + double(sunRootF[1]) * cz[1] +
+                            double(sunRootF[2]) * cz[2], -1.0, 1.0)) * kDeg;
+                    const double elT = std::asin(std::clamp(
+                        sunE[0] * zE[0] + sunE[1] * zE[1] + sunE[2] * zE[2], -1.0, 1.0)) * kDeg;
+                    const double tilt = std::acos(std::clamp(
+                        cz[0] * zE[0] + cz[1] * zE[1] + cz[2] * zE[2], -1.0, 1.0)) * kDeg;
+                    Log("[gate] '%s': the ground turns %.2f deg between the two places; the one "
+                        "light stands %+.2f deg here and %+.2f deg at %.4f N %.4f W, and the "
+                        "window's rays march that sky",
+                        win->Declared().name.c_str(), tilt, elH, elT, win->Declared().toLat,
+                        -win->Declared().toLon);
                 }
             } else if (!m_gates.empty()) {
                 globe->SetGate(nullptr, nullptr, nullptr, nullptr);
-                if (m_A.vesselLayer) {
-                    const float z9[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
-                    const float z3[3] = {0, 0, 0};
-                    m_A.vesselLayer->SetGateWindow(z9, z3, z3, false);
-                }
-                if (sky) {
-                    const float z9[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
-                    const float z3[3] = {0, 0, 0};
-                    sky->SetGateWindow(z9, z3, z3, z9, z3, false);
-                }
+                const float z9[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+                const float z3[3] = {0, 0, 0};
+                if (m_A.vesselLayer) m_A.vesselLayer->SetGateWindow(z9, z3, z3, z3, false);
+                if (sky) sky->SetGateWindow(z9, z3, z3, z3, 0.0f, z3, false);
             }
         }
         PROF_BEGIN();

@@ -6,8 +6,8 @@
 //    CsMultiScatter     32 x 32   the isotropic estimate of every scattering order past the
 //                                 first, summed as a geometric series (Hillaire 2020 s5).
 //                                 Depends on the atmosphere alone: built ONCE.
-//    CsSkyView        192 x 108   the radiance of the hemisphere from THIS eye with THIS sun.
-//                                 One dispatch a frame, and every consumer reads it.
+//  (There is no table of the VIEW. Every ray marches the air from where it is -- Atmosphere.hlsli
+//  AtmRay -- so these two, which describe the air alone, are all the sky needs.)
 //
 //  The march is the ordinary radiative transfer integral along a ray: at each step, the light
 //  the sun delivers (its transmittance to that point, times the phase functions) plus the light
@@ -55,80 +55,6 @@ float3 AtmTransmittanceTo(float r, float mu, float Rb, float Rt) {
     return exp(-od);
 }
 
-float3 TransLookup(float r, float mu) {
-    const float2 uv = AtmTransUv(r, mu, ATM_RB, ATM_RT);
-    return SkyLutFetch(gLutD.y, uv, float2(256.0f, 64.0f));
-}
-
-// THE SUN'S LIGHT AT A POINT: what reaches it through the air, and nothing at all when the
-// planet itself is in the way. The shadow test is the reason a low sun leaves the ground dark
-// while the air above it is still lit -- which is what dusk IS.
-float3 SunTransmittance(float r, float muS) {
-    if (AtmRaySphere(r, muS, ATM_RB) > 0.0f) return 0.0f;
-    return TransLookup(r, muS);
-}
-
-// ---- the march, shared by the multiple-scattering estimate and the sky view --------------------
-// Returns the radiance along `dir` from a point at radius r, and (for the MS pass) the fraction
-// of light that would come back if the medium scattered isotropically with unit strength.
-float3 MarchSky(float r, float3 dir, float3 up, float3 sunDir, uint steps, bool withMs,
-                out float3 fms) {
-    fms = 0.0f;
-    const float mu = dot(dir, up);
-    const float muS = dot(sunDir, up);
-    const float nu = dot(dir, sunDir);
-    const float ground = AtmRaySphere(r, mu, ATM_RB);
-    const float disc = r * r * (mu * mu - 1.0f) + ATM_RT * ATM_RT;
-    const float top = max(0.0f, -r * mu + sqrt(max(disc, 0.0f)));
-    const float dist = (ground > 0.0f) ? ground : top;
-    if (dist <= 0.0f) return 0.0f;
-
-    const float phaseR = AtmPhaseR(nu);
-    const float phaseM = AtmPhaseM(nu);
-    float3 L = 0.0f;
-    float3 T = 1.0f;
-    const float ds = dist / steps;
-    for (uint i = 0u; i < steps; ++i) {
-        const float t = (i + 0.5f) * ds;
-        const float rr = sqrt(max(r * r + t * t + 2.0f * r * mu * t, 0.0f));
-        const float h = rr - ATM_RB;
-        float rayD, mieD, ozoD;
-        AtmDensity(h, rayD, mieD, ozoD);
-        const float3 sigS = kAtmRayS * rayD + kAtmMieS.xxx * mieD;
-        const float3 sigE = max(kAtmRayS * rayD + kAtmMieE.xxx * mieD + kAtmOzoA * ozoD, 1e-12f);
-        // The sun's zenith cosine AT THAT POINT, not at the eye: the whole geometry of a sunset
-        // is that the air a hundred kilometres away stands under a different sun angle.
-        const float muSp = (muS * r + t * dot(dir, sunDir)) / max(rr, 1e-6f);
-        const float3 sunT = SunTransmittance(rr, clamp(muSp, -1.0f, 1.0f));
-        float3 S = sunT * (kAtmRayS * rayD * phaseR + kAtmMieS.xxx * mieD * phaseM);
-        if (withMs) {
-            const float2 uv = AtmMsUv(rr, clamp(muSp, -1.0f, 1.0f), ATM_RB, ATM_RT);
-            S += SkyLutFetch(gLutD.z, uv, float2(32.0f, 32.0f)) * sigS;
-        }
-        const float3 Tstep = exp(-sigE * ds);
-        // The analytic integral of the step, so the answer does not depend on where the sample
-        // landed inside it.
-        const float3 Sint = (S - S * Tstep) / sigE;
-        L += T * Sint;
-        // The isotropic response the MS pass needs: the same integral with the scattering
-        // coefficient alone and no phase, no sun.
-        const float3 Fint = (sigS - sigS * Tstep) / sigE;
-        fms += T * Fint;
-        T *= Tstep;
-    }
-    // The ground, when the ray reaches it: a Lambert bounce of the direct sun. It is what lifts
-    // the lower sky over a bright surface, and it is the only place the albedo enters.
-    if (ground > 0.0f) {
-        const float3 p = up * r + dir * ground;   // in the local frame, up is the eye's zenith
-        const float3 n = normalize(p);
-        const float muSg = dot(n, sunDir);
-        if (muSg > 0.0f) {
-            L += T * kAtmAlbedo * muSg * SunTransmittance(ATM_RB, muSg) * 0.3183099f;
-        }
-    }
-    return L;
-}
-
 [numthreads(8, 8, 1)]
 void CsTransmittance(uint3 id : SV_DispatchThreadID) {
     const float2 size = gLutC.xy;
@@ -164,7 +90,7 @@ void CsMultiScatter(uint3 id : SV_DispatchThreadID) {
             const float phi = 6.28318531f * (j + 0.5f) / 8.0f;
             const float3 d = float3(sinT * cos(phi), cosT, sinT * sin(phi));
             float3 fms;
-            const float3 L = MarchSky(r, d, up, sunDir, 20u, false, fms);
+            const float3 L = AtmRay(r, d, up, sunDir, 20u, gLutD.y, -1, ATM_RB, ATM_RT, fms);
             lum += L;
             fmsSum += fms;
         }
@@ -174,19 +100,4 @@ void CsMultiScatter(uint3 id : SV_DispatchThreadID) {
     // 1/(4 pi) is already in the direction average; the series is the isotropic feedback.
     const float3 series = 1.0f / max(1.0f - fmsSum, 1e-4f);
     gU[gLutD.x][id.xy] = float4(lum * series, 1.0f);
-}
-
-[numthreads(8, 8, 1)]
-void CsSkyView(uint3 id : SV_DispatchThreadID) {
-    const float2 size = gLutC.xy;
-    if (id.x >= uint(size.x) || id.y >= uint(size.y)) return;
-    const float2 uv = (float2(id.xy) + 0.5f) / size;
-    const float r = gLutA.w;
-    const float3 up = kUpLocal;
-    const float3 sunDir = normalize(gLutA.xyz);
-    float3 dir;
-    AtmSkyViewParams(uv, r, up, sunDir, ATM_RB, dir);
-    float3 fms;
-    const float3 L = MarchSky(r, dir, up, sunDir, 32u, true, fms);
-    gU[gLutD.x][id.xy] = float4(L * gLutB.z, 1.0f);
 }

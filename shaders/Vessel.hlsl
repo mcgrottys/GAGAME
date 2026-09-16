@@ -30,6 +30,7 @@ cbuffer VesselCb : register(b1) {
     float4 gVsBoxR1;
     float4 gVsBoxR2;
     float4 gVsBoxC;    // the box's centre relative to the eye; w != 0 = a window is in view
+    float4 gVsWinSun;  // the one light as seen from the far place: a hull that went through is lit there
 };
 
 struct VesselPart {
@@ -114,7 +115,8 @@ float4 PsMain(VsOut i) : SV_Target {
         discard;   // no window this frame: what is through it cannot be seen at all
     }
     const float3 n = normalize(i.n);
-    const float ndl = saturate(dot(n, gSunDir.xyz));
+    const float3 sunHere = (i.through > 0.5f) ? normalize(gVsWinSun.xyz) : gSunDir.xyz;
+    const float ndl = saturate(dot(n, sunHere));
     const float sky = 0.5f + 0.5f * n.y;
     // The sky term is generous on purpose. A hull read against bright water with only a sun
     // term goes to black on every face pointing away from it, and a black silhouette on water

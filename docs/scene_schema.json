@@ -75,9 +75,15 @@
       { "key": "windowDays", "type": "number", "field": "f64", "quantity": "time", "unit": "day", "default": 7, "reload": "hot", "doc": "the tide plot's window (--window-days)" }
     ] },
     { "type": "sun", "keys": [
-      { "key": "source", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "ephemeris", "names": ["ephemeris", "pinned"], "reload": "restart", "doc": "the ephemeris at the scene's time and place, or pinned at az/el (--sun)" },
+      { "key": "source", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "ephemeris", "names": ["ephemeris", "pinned", "earth"], "reload": "restart", "doc": "the ephemeris at the scene's time, pinned at az/el, or the Earth placed around a sun at the origin (sun.earth) with no clock at all" },
       { "key": "az", "type": "number", "field": "f32", "quantity": "angle", "unit": "deg", "default": 112, "reload": "hot", "doc": "pinned azimuth, compass" },
-      { "key": "el", "type": "number", "field": "f32", "quantity": "angle", "unit": "deg", "default": 26, "reload": "hot", "doc": "pinned elevation" }
+      { "key": "el", "type": "number", "field": "f32", "quantity": "angle", "unit": "deg", "default": 26, "reload": "hot", "doc": "pinned elevation" },
+      { "key": "earth", "type": "object", "field": "none", "schema": "sun.earth", "reload": "hot", "doc": "the Earth's place around the sun" }
+    ] },
+    { "type": "sun.earth", "keys": [
+      { "key": "at", "type": "vec3", "field": "double3", "quantity": "length", "unit": "m", "default": [-149597870700, 0, 0], "reload": "restart", "doc": "the Earth's centre; the sun is a light at 0,0,0" },
+      { "key": "axis", "type": "vec3", "field": "double3", "quantity": "1", "unit": "1", "default": [0, 0, 1], "reload": "restart", "doc": "the Earth's spin axis in that frame" },
+      { "key": "spin", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "the Earth's turn about its axis" }
     ] },
     { "type": "sea", "keys": [
       { "key": "storm", "type": "object", "field": "none", "schema": "sea.storm", "reload": "hot", "doc": "the sandbox sea-state override" },

@@ -28,6 +28,11 @@
 static float3 sLvlSun = float3(0.0f, 1.0f, 0.0f);
 static float sLvlEyeY = 0.0f;
 static float3 sLvlSkyUp = float3(0.0f, 1.0f, 0.0f);
+// M13: and the distance of the level's own eye from its planet's centre, which is where its sky
+// is marched from (Common.hlsli SkyAirAt). The gate's window is a level: its rays land at the far
+// place, so its surfaces reflect the far place's sky with nothing more said.
+static float sLvlSkyEyeR = 6371000.0f;
+#define GA_SKY_EYE_R (sLvlSkyEyeR)
 #define GA_SUN_DIR (sLvlSun)
 #define GA_EYE_Y (sLvlEyeY)
 #define GA_SKY_UP (sLvlSkyUp)
@@ -148,6 +153,7 @@ void LoadLevel(uint slot) {
     sLvlBank = (int)round(r3.w);
     sLvlSun = r4.xyz;
     sLvlSkyUp = r5.xyz;
+    sLvlSkyEyeR = length(r0.xyz);   // the level's eye, sphere-centred, in its own units
     sLvlSkyDay = r5.w;
 }
 

@@ -30,10 +30,9 @@ cbuffer SceneCb : register(b0) {
     float4   gViewport;      // w, h, 1/w, 1/h
     float4   gMisc;          // x water level (m above datum -- the tide), yz = the SUN's disc
                              // (cos of 1.15x and 0.85x its true angular radius, M9bi), w spare
-    float4   gSkyLut;        // M13: x = the sky-view table's heap slot (asuint; ~0 = none),
-                             // y = the planet's radius, z = the eye's, both metres,
-                             // w = the transmittance table's slot (the sun's own colour).
-                             // Slots travel as NUMBERS; -1 is none (a bit pattern would be NaN)
+    float4   gSkyLut;        // M13: the AIR's two tables and this eye's place in it:
+                             // x = multiple-scattering slot, w = transmittance slot (numbers;
+                             // -1 = none), y = the planet's radius, z = the eye's (metres)
 };
 
 #define gTime        (gParams0.x)
@@ -178,63 +177,62 @@ bool GateSlabThrough(float3 p, float3x3 R, float3 h, float3 c) {
 }
 
 // ---- THE SKY, ONCE (M13) --------------------------------------------------------------------
-// Defined here so the sky layer and every reflection cannot disagree -- and now READ FROM THE
-// AIR rather than interpolated between two colours. gSkyLut names the sky-view table the sky
-// layer built this frame (Atmosphere.hlsli / SkyLut.hlsl); the direction is already in the
-// dome's frame, where GA_SKY_UP is the zenith and GA_SUN_DIR is that dome's sun.
+// Defined here so the sky layer and every reflection cannot disagree -- and MARCHED, not looked
+// up: the ray integrates the air from its own viewpoint under the one sun (Atmosphere.hlsli
+// AtmRay). A shader that draws another viewpoint (the globe's gate window and Droste levels) hands
+// its own zenith, sun and eye radius through the three macros, exactly as it already did for the
+// sun; the march then IS that place's sky, with nothing else to tell it.
 //
-// WITHOUT a table -- a tool, a test, a pass that runs before the sky layer -- the old gradient
-// answers, byte for byte. A missing sky is a wrong sky, not a black one.
+// Without the air's tables -- a tool, a test, a pass that runs before the sky layer, or an eye
+// above the air, where the limb shell owns the backdrop -- the shipped gradient answers, byte for
+// byte. A missing sky is a wrong sky, not a black one.
+#ifndef GA_SKY_EYE_R
+#define GA_SKY_EYE_R (gSkyLut.z)
+#endif
 #include "Atmosphere.hlsli"
 
-bool SkyTableOn() { return gSkyLut.x >= 0.0f; }
+static const uint kSkySteps = 6u;   // exponentially spaced (Atmosphere.hlsli AtmRay)
 
-// MANUAL BILINEAR, NOT SampleLevel -- priors 1. The water's shipped look is shaded in the DOMAIN
-// stage (Sea.hlsl's DsMain calls SeaVertexColor), and on this adapter a bindless SampleLevel
-// outside the pixel stage silently returns ZERO. A sky that read black in the sea's own shading
-// and blue everywhere else would be a very confusing bug to find, so the table is LOADED.
-float3 SkyLutFetch(uint slot, float2 uv, float2 dims) {
-    const float2 tf = uv * dims - 0.5f;
-    const float2 t0 = floor(tf);
-    const float2 fr = tf - t0;
-    float3 acc = 0.0f;
-    [unroll] for (int k = 0; k < 4; ++k) {
-        const int2 tc = clamp(int2(t0) + int2(k & 1, k >> 1), int2(0, 0), int2(dims) - int2(1, 1));
-        acc += ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y) *
-               gTex[slot][tc].rgb;
-    }
-    return acc;
+// The marched sky belongs to an eye INSIDE the air. Past 60 km the from-space rim has faded in and
+// the limb shell owns the backdrop (the atmosphere ledger: four disjoint terms), so the cut is
+// that altitude and not the top of the air -- a viewpoint between the two would otherwise draw
+// both.
+static const float kSkyAirCeilingM = 60000.0f;
+bool SkyAirOn(float eyeR) {
+    return gSkyLut.x >= 0.0f && gSkyLut.w >= 0.0f && eyeR < gSkyLut.y + kSkyAirCeilingM;
 }
-static const float2 kSkyViewDims = float2(192.0f, 108.0f);
-static const float2 kSkyTransDims = float2(256.0f, 64.0f);
 
+// The air along a ray from a viewpoint: its zenith, its sun, its distance from the planet centre.
+float3 SkyAirAt(float3 dir, float3 up, float3 sunDir, float eyeR) {
+    float3 fms;
+    const float Rb = gSkyLut.y;
+    const float r = clamp(eyeR, Rb + 1.0f, Rb + kAtmTopM - 1000.0f);
+    return AtmRay(r, dir, up, sunDir, kSkySteps, uint(gSkyLut.w), int(gSkyLut.x), Rb,
+                  Rb + kAtmTopM, fms) * kAtmGain;
+}
 
-// THE SUN'S OWN COLOUR, which is not a constant either. What reaches the eye from the disc is
-// what the air has not taken on the way -- the transmittance table along the sun ray from this
-// altitude. It is why a setting sun is red while a noon sun is white, and it is the same table
-// the sky itself is built from, so the two cannot disagree about how much air there is.
+// THE SUN'S OWN COLOUR through the air from a viewpoint -- why a setting sun is red.
+float3 SunThroughAirAt(float3 up, float3 sunDir, float eyeR) {
+    const float Rb = gSkyLut.y;
+    const float r = clamp(eyeR, Rb + 1.0f, Rb + kAtmTopM - 1000.0f);
+    return AtmSunT(uint(gSkyLut.w), r, clamp(dot(sunDir, up), -1.0f, 1.0f), Rb, Rb + kAtmTopM);
+}
 float3 SunThroughAir() {
-    if (!SkyTableOn()) return float3(1.0f, 1.0f, 1.0f);
-    const float muS = clamp(dot(GA_SUN_DIR, GA_SKY_UP), -1.0f, 1.0f);
-    const float2 uv = AtmTransUv(gSkyLut.z, muS, gSkyLut.y, gSkyLut.y + kAtmTopM);
-    return SkyLutFetch(uint(gSkyLut.w), uv, kSkyTransDims);
+    return SkyAirOn(GA_SKY_EYE_R) ? SunThroughAirAt(GA_SKY_UP, GA_SUN_DIR, GA_SKY_EYE_R)
+                                  : float3(1.0f, 1.0f, 1.0f);
 }
 
-float3 SkyTable(float3 dir) {
-    const float2 uv = AtmSkyViewUv(gSkyLut.z, dir, GA_SKY_UP, GA_SUN_DIR, gSkyLut.y);
-    return SkyLutFetch(uint(gSkyLut.x), uv, kSkyViewDims);
-}
-
-// The gradient that shipped, kept as the fallback and as the shape a reflection asks for when it
-// has only an elevation to give.
+// The gradient that shipped, kept as the fallback and for callers with only an elevation to give
+// (asked, when the air is on, along the sun's own meridian at that elevation).
 float3 SkyRadiance(float ey) {
-    if (SkyTableOn()) {
-        // An elevation with no azimuth: the sun's own meridian is the honest reading, since that
-        // is where a gradient's caller means "this high above the horizon".
+    if (SkyAirOn(GA_SKY_EYE_R)) {
         const float3 up = GA_SKY_UP;
-        const float3 s = normalize(GA_SUN_DIR - up * dot(GA_SUN_DIR, up));
+        const float3 m = GA_SUN_DIR - up * dot(GA_SUN_DIR, up);
+        const float ml = length(m);
+        const float3 sh = (ml > 1e-6f) ? m / ml : float3(1.0f, 0.0f, 0.0f);
         const float c = clamp(ey, -1.0f, 1.0f);
-        return SkyTable(normalize(up * c + s * sqrt(max(1.0f - c * c, 0.0f))));
+        return SkyAirAt(normalize(up * c + sh * sqrt(max(1.0f - c * c, 0.0f))), up, GA_SUN_DIR,
+                        GA_SKY_EYE_R);
     }
     return lerp(SKY_LO_C, SKY_HI_C, smoothstep(0.0f, 0.30f, ey));
 }
@@ -245,36 +243,25 @@ float3 SkyRadiance(float ey) {
 // The same radiance, asked with an EXPLICIT sun: the gate's window is the destination's sky, and
 // the destination's sun is the one sun asked at ITS OWN PLACE (the ephemeris is evaluated there,
 // in doubles, and handed here already in that frame) rather than this frame's sun turned around.
-float3 SkyRadianceDirSun(float3 dir, float3 sunDir) {
-    const float ey = dot(dir, GA_SKY_UP);
-    if (SkyTableOn()) {
-        // The table is built about THIS frame's sun; a window's sky is the same air seen from
-        // the other place, so it is asked with that place's sun by rotating the ray into the
-        // table's azimuth. (The elevation is what differs; the azimuth about the zenith is the
-        // table's own coordinate.)
-        const float2 uv = AtmSkyViewUv(gSkyLut.z, dir, GA_SKY_UP, sunDir, gSkyLut.y);
-        float3 lut = SkyLutFetch(uint(gSkyLut.x), uv, kSkyViewDims);
-        const float cosA0 = dot(dir, sunDir);
-        const float disc0 = smoothstep(gMisc.y, gMisc.z, cosA0);
-        lut += SUN_IRR_C * SunThroughAir() * disc0 * 12.0f;
-        return lut;
+// A viewpoint that is not this frame's -- a ray the gate carried to the other side of the
+// planet: its own zenith, sun and eye radius, all in the frame the ray is in. The same march.
+float3 SkyRadianceAt(float3 dir, float3 up, float3 sunDir, float eyeR) {
+    if (!SkyAirOn(eyeR)) {
+        const float ey = dot(dir, up);
+        float3 col = SkyRadiance(ey);
+        const float cosA = dot(dir, sunDir);
+        col += SUN_IRR_C * (smoothstep(gMisc.y, gMisc.z, cosA) * 12.0f +
+                            pow(saturate(cosA), 350.0f) * 0.35f + pow(saturate(cosA), 12.0f) * 0.05f);
+        return lerp(col, SKY_LO_C * 0.45f, smoothstep(0.0f, -0.06f, ey));
     }
-    float3 col = SkyRadiance(ey);
-    const float cosA = dot(dir, sunDir);
-    const float disc = smoothstep(gMisc.y, gMisc.z, cosA);
-    const float halo = pow(saturate(cosA), 350.0f) * 0.35f + pow(saturate(cosA), 12.0f) * 0.05f;
-    col += SUN_IRR_C * (disc * 12.0f + halo);
-    return lerp(col, SKY_LO_C * 0.45f, smoothstep(0.0f, -0.06f, ey));
+    return SkyAirAt(dir, up, sunDir, eyeR) +
+           SUN_IRR_C * SunThroughAirAt(up, sunDir, eyeR) *
+               smoothstep(gMisc.y, gMisc.z, dot(dir, sunDir)) * 12.0f;
 }
 
 float3 SkyRadianceDir(float3 dir) {
     const float ey = dot(dir, GA_SKY_UP);
-    if (SkyTableOn()) {
-        float3 lut = SkyTable(dir);
-        const float cosA0 = dot(dir, GA_SUN_DIR);
-        lut += SUN_IRR_C * SunThroughAir() * smoothstep(gMisc.y, gMisc.z, cosA0) * 12.0f;
-        return lut;
-    }
+    if (SkyAirOn(GA_SKY_EYE_R)) return SkyRadianceAt(dir, GA_SKY_UP, GA_SUN_DIR, GA_SKY_EYE_R);
     float3 col = SkyRadiance(ey);
     const float cosA = dot(dir, GA_SUN_DIR);
     // M9bi: the disc is the sun's ACTUAL angular size (gMisc.yz, from the Earth-Sun distance
@@ -293,9 +280,9 @@ float3 SkyRadianceDir(float3 dir) {
 // helm-tight lobe would count the sun twice.
 float3 SkyRadianceDirDiscless(float3 dir) {
     const float ey = dot(dir, GA_SKY_UP);
-    // The table already carries the aureole (the Mie lobe IS the halo), so the discless form is
-    // the table itself: what it must not add is the specular disc, and it does not.
-    if (SkyTableOn()) return SkyTable(dir);
+    // The march carries the aureole (the Mie lobe IS the halo); what this form must not add is the
+    // specular disc, and it does not.
+    if (SkyAirOn(GA_SKY_EYE_R)) return SkyAirAt(dir, GA_SKY_UP, GA_SUN_DIR, GA_SKY_EYE_R);
     float3 col = SkyRadiance(ey);
     const float cosA = dot(dir, GA_SUN_DIR);
     col += SUN_IRR_C * (pow(saturate(cosA), 350.0f) * 0.35f + pow(saturate(cosA), 12.0f) * 0.05f);

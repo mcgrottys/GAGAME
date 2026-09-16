@@ -24,14 +24,12 @@ cbuffer SkyFrameCb : register(b1) {
     float4 gWinBoxR1;
     float4 gWinBoxR2;
     float4 gWinBoxC;    // the box's centre relative to the eye; w != 0 = a window is in view
-    // The gate draws the far place in THIS frame's coordinates, so a backdrop ray inside the box
-    // needs no motor -- only the other place's UP. These rows are gSkyR0..R2's own law (the
-    // shortest arc from the zenith onto +y) asked at the carried eye, and the sun is the scene's
-    // one sun said in that frame: parallel rays, one vector, a different ground under it.
-    float4 gWinSkyR0;   // rows: this frame -> the DESTINATION's dome
-    float4 gWinSkyR1;
-    float4 gWinSkyR2;
-    float4 gWinSun;     // the one sun, in the destination's dome frame
+    // THE RAY, CARRIED. A backdrop pixel inside the box is a ray that has gone through the window,
+    // so its sky is the air marched from where the window lands -- the other place's zenith, the
+    // one sun as seen from there, and that place's distance from the planet's centre -- all said
+    // in this frame, because the gate draws the far place in this frame's coordinates.
+    float4 gWinUp;      // xyz = the far place's zenith, in this frame; w = its eye radius (m)
+    float4 gWinSun;     // xyz = the one sun as seen from the far place, in this frame
 };
 #define GA_SUN_DIR (gSkySun.xyz)
 #include "Common.hlsli"
@@ -57,9 +55,8 @@ float4 PsMain(VsOut i) : SV_Target {
     if (gWinBoxC.w != 0.0f &&
         GateSlabThrough(r * 1e9f, float3x3(gWinBoxR0.xyz, gWinBoxR1.xyz, gWinBoxR2.xyz),
                         float3(gWinBoxR0.w, gWinBoxR1.w, gWinBoxR2.w), gWinBoxC.xyz)) {
-        const float3 dw =
-            float3(dot(gWinSkyR0.xyz, r), dot(gWinSkyR1.xyz, r), dot(gWinSkyR2.xyz, r));
-        return float4(SkyRadianceDirSun(dw, gWinSun.xyz), 1.0f);
+        return float4(SkyRadianceAt(r, normalize(gWinUp.xyz), normalize(gWinSun.xyz), gWinUp.w),
+                      1.0f);
     }
     const float3 d = float3(dot(gSkyR0.xyz, r), dot(gSkyR1.xyz, r), dot(gSkyR2.xyz, r));
     return float4(SkyRadianceDir(d), 1.0f);

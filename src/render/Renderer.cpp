@@ -265,7 +265,7 @@ void Renderer::FillSceneConstants(const SceneFill& f, SceneConstants& sc) {
     // a heap slot of 0xFFFFFFFF read as a float is a NaN, and a NaN in the scene constants is
     // never equal to itself -- which is exactly what the views gate said when it first ran.
     // -1 is "no table", and every consumer falls back to the gradient.
-    sc.skyLut[0] = (f.skyLutSrv == 0xFFFFFFFFu) ? -1.0f : static_cast<float>(f.skyLutSrv);
+    sc.skyLut[0] = (f.skyMsSrv == 0xFFFFFFFFu) ? -1.0f : static_cast<float>(f.skyMsSrv);
     sc.skyLut[1] = f.planetRadiusM;
     sc.skyLut[2] = f.eyeRadiusM;
     sc.skyLut[3] = (f.skyTransSrv == 0xFFFFFFFFu) ? -1.0f : static_cast<float>(f.skyTransSrv);
@@ -286,7 +286,7 @@ SceneFill Renderer::FillInputs(const Camera& cam, float timeSec) const {
     f.sunElevationDeg = sunElevationDeg;
     f.sunAngRadiusDeg = sunAngRadiusDeg;
     f.waterLevel = waterLevel;
-    f.skyLutSrv = skyLutSrv;
+    f.skyMsSrv = skyMsSrv;
     f.skyTransSrv = skyTransSrv;
     f.planetRadiusM = planetRadiusM;
     f.eyeRadiusM = eyeRadiusM;
