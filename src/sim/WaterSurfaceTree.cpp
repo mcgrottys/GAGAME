@@ -58,6 +58,50 @@ void TreeWater::SetRootChart(const Space::Anchor* chart) {
     if (chart) m_root = *chart;
 }
 
+// THE CASCADE SEA'S PLANES AT A POINT (sim/WaveChart.h). The neighbourhood is held between calls
+// -- a hull's stations sit metres apart and a cell is hundreds of kilometres across -- but every
+// point gets its own coordinates, shares and rotation out of it, so this is the same expression
+// per point that the kernel runs per texel, not a cheaper stand-in memoised by cell.
+int TreeWater::ChartsAt(double wx, double wz, WaveChart::Chart out[WaveChart::kMax]) const {
+    double dir[3] = {0.0, 1.0, 0.0};
+    if (m_chart.Exact()) {
+        m_chart.PlanetOf(wx, 0.0, wz, dir);
+        const double len = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+        if (len > 0.0) {
+            for (int i = 0; i < 3; ++i) dir[i] /= len;
+        }
+    } else {
+        // No rows: the anchor-linear chart is all this hull has, so its place is taken there and
+        // the planes are still the lattice's -- one law, whatever the chart under it.
+        double la = 0.0, lo = 0.0;
+        PlaceOf(wx, wz, la, lo);
+        const double r = 3.14159265358979323846 / 180.0;
+        const double cl = std::cos(la * r);
+        dir[0] = cl * std::cos(lo * r);
+        dir[1] = std::sin(la * r);
+        dir[2] = cl * std::sin(lo * r);
+    }
+    if (!m_cellValid || !m_waveChart.Holds(m_cell, dir)) {
+        m_cell = m_waveChart.CellAt(dir);
+        m_cellValid = true;
+    }
+    return m_waveChart.At(m_cell, dir, out);
+}
+
+void TreeWater::ChartEdgeM(double wx, double wz, double& ex, double& ez) const {
+    WaveChart::Chart tmp[WaveChart::kMax];
+    ChartsAt(wx, wz, tmp);   // (fills the held neighbourhood for this point)
+    double dir[3] = {0.0, 1.0, 0.0};
+    if (m_chart.Exact()) {
+        m_chart.PlanetOf(wx, 0.0, wz, dir);
+        const double len = std::sqrt(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+        if (len > 0.0) {
+            for (int i = 0; i < 3; ++i) dir[i] /= len;
+        }
+    }
+    m_waveChart.EdgeM(m_cell, dir, ex, ez);
+}
+
 // M13 step 2: THE PLACE, not the chart's guess. Space::Anchor::PlaceOf carries the point through
 // the space's own frame rows onto the sphere the mesh is drawn on and reads its direction; where a
 // space handed us no rows (planetR 0) it is the anchor-linear law, exactly as before. The hull's
@@ -303,23 +347,42 @@ SurfaceSample TreeWater::Evaluate(double wx, double wz, double simUnix, bool dis
         for (int c = 0; c < OceanCpu::kCascades; ++c) {
             if (c != 2) gain[c] *= 1.0 - wWin;
         }
-        OceanSample o;
-        // Band-limited to what the hull can actually feel. A wave shorter than the panel
-        // spacing puts as much up-force on one half of a panel as down on the other, so it
-        // integrates to nothing -- summing it is a sincos per bin for a force of zero, and the
-        // short cascade is ~85% of the retained bins.
-        m_ocean->SampleForHull(wx, wz, CascadeTime(simUnix), 2.0 * m_sampleM, gain, o);
-        dispY += o.h;
-        dispX += o.dx;
-        dispZ += o.dz;
-        slopeX += o.sx;
-        slopeZ += o.sz;
-        orbX += o.vx;
-        orbY += o.vy;
-        orbZ += o.vz;
-        jacXX += o.jxx;
-        jacXZ += o.jxz;
-        jacZZ += o.jzz;
+        // THE CASCADES ARE READ IN THE LATTICE'S OWN PLANES (sim/WaveChart.h), which is the one
+        // term of this water that needs a plane at all. Up to four charts touch a place; each is
+        // sampled at its own coordinate and they are blended variance-preservingly, the vector
+        // and tensor channels rotated into THIS place's east/north first (a chart's axes are its
+        // cell's, up to two degrees away). The kernel runs this same expression per texel, which
+        // is what makes a carried hull ride the sea that is drawn around it.
+        WaveChart::Chart ch[WaveChart::kMax];
+        const int nCh = ChartsAt(wx, wz, ch);
+        const double norm = WaveChart::Norm(ch, nCh);
+        for (int i = 0; i < nCh; ++i) {
+            if (ch[i].w < WaveChart::kSkip) continue;   // the law's own skip; the norm keeps it
+            OceanSample o;
+            // Band-limited to what the hull can actually feel. A wave shorter than the panel
+            // spacing puts as much up-force on one half of a panel as down on the other, so it
+            // integrates to nothing -- summing it is a sincos per bin for a force of zero, and the
+            // short cascade is ~85% of the retained bins.
+            m_ocean->SampleForHull(ch[i].u[0], ch[i].u[1], CascadeTime(simUnix), 2.0 * m_sampleM,
+                                   gain, o);
+            const double w = ch[i].w / norm;
+            const double* R = ch[i].rot;   // this chart's (east, north) in the place's own
+            dispY += w * o.h;
+            orbY += w * o.vy;
+            // The horizontal channels are vectors in the chart's axes.
+            dispX += w * (R[0] * o.dx + R[1] * o.dz);
+            dispZ += w * (R[2] * o.dx + R[3] * o.dz);
+            slopeX += w * (R[0] * o.sx + R[1] * o.sz);
+            slopeZ += w * (R[2] * o.sx + R[3] * o.sz);
+            orbX += w * (R[0] * o.vx + R[1] * o.vz);
+            orbZ += w * (R[2] * o.vx + R[3] * o.vz);
+            // The Jacobian is a 2-tensor: R J R^T, the same rotation on both indices.
+            const double a = R[0] * o.jxx + R[1] * o.jxz, b = R[0] * o.jxz + R[1] * o.jzz;
+            const double c2 = R[2] * o.jxx + R[3] * o.jxz, d2 = R[2] * o.jxz + R[3] * o.jzz;
+            jacXX += w * (a * R[0] + b * R[1]);
+            jacXZ += w * (a * R[2] + b * R[3]);
+            jacZZ += w * (c2 * R[2] + d2 * R[3]);
+        }
     }
 
     // ---- THE WAKES. Closed form and stateless, so the CPU runs the same law the bank does

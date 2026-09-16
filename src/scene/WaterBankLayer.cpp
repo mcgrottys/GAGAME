@@ -520,6 +520,87 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
                     t.placeB[1] = static_cast<float>(dLonDz);
                     t.placeB[2] = ok ? 1.0f : 0.0f;
                     t.placeB[3] = 0.0f;
+
+                    // ---- THE CASCADE SEA'S PLANES for this tile (sim/WaveChart.h). The
+                    // neighbourhood is found at the tile's centre -- a tile is at most 5 km and a
+                    // cell hundreds of km, so the four planes are the same for every texel in it
+                    // -- and each plane's coordinate is sampled at the tile's origin and
+                    // differenced across the tile, about its centre (the midpoint rule again).
+                    // The shares are NOT baked: their two inputs are, so the kernel computes the
+                    // same weights per texel that TreeWater computes per point.
+                    double dC[3];
+                    const bool haveCharts = ok && chart.DirOfProjected(cx, cz, dC);
+                    t.bandY[3] = haveCharts ? 1.0f : 0.0f;
+                    if (haveCharts) {
+                        const WaveChart::Cell cell = m_waveChart.CellAt(dC);
+                        WaveChart::Chart cc[WaveChart::kMax];
+                        m_waveChart.At(cell, dC, cc);   // for the rotations at the tile's centre
+                        const double hx = 0.5 * tileSpan;
+                        // One plane's coordinate at a point of the ring, through the exact place.
+                        auto uAt = [&](int k, double x, double z, double u[2]) {
+                            double d[3];
+                            if (!chart.DirOfProjected(x, z, d)) {
+                                u[0] = u[1] = 0.0;
+                                return;
+                            }
+                            const double p[3] = {d[0] * chart.planetR, d[1] * chart.planetR,
+                                                 d[2] * chart.planetR};
+                            WaveChart::UOf(cell.f[k], p, u);
+                        };
+                        for (int k = 0; k < WaveChart::kMax; ++k) {
+                            double u0[2], uxp[2], uxm[2], uzp[2], uzm[2];
+                            uAt(k, ox, oz, u0);
+                            uAt(k, cx + hx, cz, uxp);
+                            uAt(k, cx - hx, cz, uxm);
+                            uAt(k, cx, cz + hx, uzp);
+                            uAt(k, cx, cz - hx, uzm);
+                            float* row = t.chart[k];
+                            // The origin's coordinate, wrapped into each cascade's own patch: a
+                            // float then carries metres inside a 756 m period instead of the
+                            // hundreds of kilometres a cell can be across. Rows [0..3] hold
+                            // cascades 0 and 1, [4..5] cascade 2 -- the float4 layout the kernel
+                            // reads (ChartUv).
+                            for (int c = 0; c < 3; ++c) {
+                                const double L = m_sea ? double(m_sea->FftPatchL(c)) : 1.0;
+                                const double Lc = (L > 1.0) ? L : 1.0;
+                                row[c * 2 + 0] =
+                                    static_cast<float>(u0[0] - std::floor(u0[0] / Lc) * Lc);
+                                row[c * 2 + 1] =
+                                    static_cast<float>(u0[1] - std::floor(u0[1] / Lc) * Lc);
+                            }
+                            row[6] = row[7] = 0.0f;
+                            row[8] = static_cast<float>((uxp[0] - uxm[0]) / (2.0 * hx));   // du/dex
+                            row[9] = static_cast<float>((uzp[0] - uzm[0]) / (2.0 * hx));   // du/dez
+                            row[10] = static_cast<float>((uxp[1] - uxm[1]) / (2.0 * hx));  // dv/dex
+                            row[11] = static_cast<float>((uzp[1] - uzm[1]) / (2.0 * hx));  // dv/dez
+                            for (int r = 0; r < 4; ++r) {
+                                row[12 + r] = static_cast<float>(cc[k].rot[r]);
+                            }
+                        }
+                        // The shares' two inputs, as an affine map over the tile.
+                        auto edgeAt = [&](double x, double z, double& ex, double& ey) {
+                            double d[3];
+                            if (!chart.DirOfProjected(x, z, d)) {
+                                ex = ey = 0.0;
+                                return;
+                            }
+                            m_waveChart.EdgeM(cell, d, ex, ey);
+                        };
+                        double e0x = 0.0, e0y = 0.0, exp1 = 0.0, eyp1 = 0.0, exm1 = 0.0, eym1 = 0.0;
+                        double ezp1 = 0.0, ezpy = 0.0, ezm1 = 0.0, ezmy = 0.0;
+                        edgeAt(ox, oz, e0x, e0y);
+                        edgeAt(cx + hx, cz, exp1, eyp1);
+                        edgeAt(cx - hx, cz, exm1, eym1);
+                        edgeAt(cx, cz + hx, ezp1, ezpy);
+                        edgeAt(cx, cz - hx, ezm1, ezmy);
+                        t.bandX[0] = static_cast<float>(e0x);
+                        t.bandX[1] = static_cast<float>((exp1 - exm1) / (2.0 * hx));
+                        t.bandX[2] = static_cast<float>((ezp1 - ezm1) / (2.0 * hx));
+                        t.bandX[3] = static_cast<float>(m_waveChart.bandM);
+                        t.bandY[0] = static_cast<float>(e0y);
+                        t.bandY[1] = static_cast<float>((eyp1 - eym1) / (2.0 * hx));
+                        t.bandY[2] = static_cast<float>((ezpy - ezmy) / (2.0 * hx));
+                    }
                 }
                 // M7j: exposure moved to the KERNEL, from the solver's own swell-shadow
                 // field (the M7i x-ramp killed the channel and the open beaches -- a

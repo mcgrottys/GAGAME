@@ -112,6 +112,15 @@ struct BankTile {
     // and the chart row is all it has.
     float4 placeA;      // lat0, lon0, dLat/dx, dLon/dx
     float4 placeB;      // dLat/dz, dLon/dz, valid, spare
+    // M13 step 2: the cascade sea's four planes for this tile (sim/WaveChart.h), in the law's own
+    // order. Per chart: its coordinate at the tile's ORIGIN wrapped into each cascade's period
+    // (rows 0..5), the tangent map of that coordinate over the tile (6..9), its axes said in the
+    // place's east/north (10..13), two spare. bandX/bandY carry the edge distances the shares are
+    // computed from -- the shares themselves are recomputed per texel, as the hull recomputes
+    // them per point, so both processors run one expression.
+    float4 chart[4][4];
+    float4 bandX;       // edgeX at the origin, d/dex, d/dez, the band (m)
+    float4 bandY;       // edgeY at the origin, d/dex, d/dez, 1 = the charts are valid
 };
 StructuredBuffer<BankTile> gTiles : register(t0);
 
@@ -128,6 +137,32 @@ float2 TilePlace(const BankTile t, float2 exz) {
     return float2(t.placeA.x + exz.x * t.placeA.z + exz.y * t.placeB.x,
                   t.placeA.y + exz.x * t.placeA.w + exz.y * t.placeB.y);
 }
+
+// THE SHARES AT A TEXEL, from the tile's two edge rows -- WaveChart::Shares, said in HLSL. Half
+// exactly on a cell edge, one a half-band inside it, the neighbour taking the rest.
+void TileShares(const BankTile t, float2 exz, out float w[4]) {
+    const float band = max(t.bandX.w, 1.0f);
+    const float wx = smoothstep(0.0f, 1.0f,
+                                0.5f + (t.bandX.x + exz.x * t.bandX.y + exz.y * t.bandX.z) / band);
+    const float wy = smoothstep(0.0f, 1.0f,
+                                0.5f + (t.bandY.x + exz.x * t.bandY.y + exz.y * t.bandY.z) / band);
+    w[0] = wx * wy;
+    w[1] = (1.0f - wx) * wy;
+    w[2] = wx * (1.0f - wy);
+    w[3] = (1.0f - wx) * (1.0f - wy);
+}
+
+// One chart's coordinate for cascade c at a texel: the tile's origin row (wrapped into that
+// cascade's own period on the CPU) plus the tangent map across the tile. Rows: [0] = cascade 0
+// and 1's origins, [1].xy = cascade 2's, [2] = the tangent map, [3] = the axes.
+float2 ChartUv(const BankTile t, uint k, uint c, float2 exz) {
+    const float2 u0 = (c == 0u) ? t.chart[k][0].xy
+                    : (c == 1u) ? t.chart[k][0].zw
+                                : t.chart[k][1].xy;
+    const float4 j = t.chart[k][2];   // du/dex, du/dez, dv/dex, dv/dez
+    return u0 + float2(j.x * exz.x + j.y * exz.y, j.z * exz.x + j.w * exz.y);
+}
+float4 ChartRot(const BankTile t, uint k) { return t.chart[k][3]; }
 
 #include "Jet.hlsli"
 
@@ -530,6 +565,16 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     float gain0 = hsScale * expo;
     float gain1 = hsScale * expo;
     float gain2 = hsScale * expo;
+    // M13 step 2: this texel's shares of the lattice's planes, ONCE -- they are a function of the
+    // texel, not of the band, so the three bands below read them rather than re-deriving them.
+    float chartW[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    float chartNorm = 1.0f;
+    const bool chartsOn = t.bandY.w != 0.0f;
+    if (chartsOn) {
+        TileShares(t, exz, chartW);
+        chartNorm = sqrt(max(chartW[0] * chartW[0] + chartW[1] * chartW[1] +
+                                 chartW[2] * chartW[2] + chartW[3] * chartW[3], 1e-12f));
+    }
     [unroll] for (uint c = 0; c < 3; ++c) {
         // ---- M9bt: THE FOLD ASKS FOR A FRACTION, NOT A VERDICT. --------------------------
         //
@@ -582,13 +627,36 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         // M8: inside the solved window the cascades' structure bands stand down -- the
         // solved field carries shoaling/refraction/limiting per cell, not per band.
         if (c != 2) amp *= 1.0f - wCas;   // M9by: the DELIVERED weight, not the window
-        const float2 cuv = frac(xz / gPatch[c]);
         const float cmip = CascadeMip(c, t.texelM);
-        const float4 s = LoadBilinearWrapMip(gSlotsA[c], cuv, cmip);
+        // ---- M13 step 2: THE BAND IS READ IN THE LATTICE'S OWN PLANES (sim/WaveChart.h). Where
+        // this used to be frac(xz / L) on the root's tangent plane -- one plane for a planet,
+        // which is why a hull carried 2054 km rode a different sea from the one drawn around it
+        // -- the texel's charts are read at their own coordinates and blended variance-
+        // preservingly, the vector channels rotated into this place's east/north first. In a
+        // cell's plateau (nine places in ten) exactly one share is non-zero and this is the
+        // single read it always was.
+        float4 s = 0.0f, dv = 0.0f;
+        if (chartsOn) {
+            [unroll] for (uint k = 0; k < 4u; ++k) {
+                if (chartW[k] < 1e-4f) continue;   // the law's own skip; the norm keeps it
+                const float2 cuvK = frac(ChartUv(t, k, c, exz) / gPatch[c]);
+                const float4 sK = LoadBilinearWrapMip(gSlotsA[c], cuvK, cmip);
+                const float4 dK = LoadBilinearWrapMip(gSlotsE[c], cuvK, cmip);
+                const float4 R = ChartRot(t, k);
+                const float wk = chartW[k] / chartNorm;
+                // The heights and the scalar channels blend as they are; the horizontal pair is
+                // a vector in the chart's axes and turns into the place's.
+                s += wk * float4(R.x * sK.x + R.y * sK.z, sK.y, R.z * sK.x + R.w * sK.z, sK.w);
+                dv += wk * float4(R.x * dK.x + R.y * dK.y, R.z * dK.x + R.w * dK.y, dK.z, dK.w);
+            }
+        } else {
+            const float2 cuv = frac(xz / gPatch[c]);   // no charts (Mars, or no rows): as before
+            s = LoadBilinearWrapMip(gSlotsA[c], cuv, cmip);
+            dv = LoadBilinearWrapMip(gSlotsE[c], cuv, cmip);
+        }
         d += s.xyz * (w * amp);
         // The Jacobian foam lives in the DERIV fiber (the disp fiber's w is zero --
         // the old additive term here read it and contributed nothing since M7).
-        const float4 dv = LoadBilinearWrapMip(gSlotsE[c], cuv, cmip);
         // Monahan-gated: the Jacobian says WHERE a whitecap sits, the wind says HOW MANY
         // there are. Depth/blocking/wake foam stay ungated -- that breaking is geometry
         // and current physics, not wind climatology.

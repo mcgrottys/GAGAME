@@ -523,16 +523,23 @@ struct Space {
         // answers for a TEXEL of the projection. They differ by the tilt between the plane and
         // the sphere -- nothing at the anchor, 18.6 degrees and 55 km of place at Haulover -- and
         // M13 step 4 retires this one with the rings it belongs to.
-        bool PlaceOfProjected(double x, double z, double& outLatDeg, double& outLonDeg) const {
-            if (!Exact()) {
-                LatLonOf(x, z, outLatDeg, outLonDeg);
-                return true;
-            }
+        bool DirOfProjected(double x, double z, double d[3]) const {
+            if (!Exact()) return false;
             const double q = (x * x + z * z) / (planetR * planetR);
             if (!(q < 1.0)) return false;   // past the horizon of this frame: no such place
             const double dy = std::sqrt(1.0 - q), dx = x / planetR, dz = z / planetR;
+            for (int i = 0; i < 3; ++i) d[i] = east[i] * dx + up[i] * dy + north[i] * dz;
+            return true;
+        }
+        bool PlaceOfProjected(double x, double z, double& outLatDeg, double& outLonDeg) const {
             double p[3];
-            for (int i = 0; i < 3; ++i) p[i] = east[i] * dx + up[i] * dy + north[i] * dz;
+            if (!DirOfProjected(x, z, p)) {
+                if (!Exact()) {
+                    LatLonOf(x, z, outLatDeg, outLonDeg);
+                    return true;
+                }
+                return false;
+            }
             const double r2d = 180.0 / 3.14159265358979323846;
             outLatDeg = std::asin((p[1] < -1.0) ? -1.0 : (p[1] > 1.0 ? 1.0 : p[1])) * r2d;
             outLonDeg = std::atan2(p[2], p[0]) * r2d;

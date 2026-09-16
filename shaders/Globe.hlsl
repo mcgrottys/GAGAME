@@ -107,7 +107,18 @@ cbuffer GlobeCb : register(b1) {
     float4 gGateR0;
     float4 gGateR1;
     float4 gGateR2;
+    // M13 step 2: the cascade sea's plane at the eye (sim/WaveChart.h) -- see GlobeLayer.h.
+    float4 gChartOrg;   // the cell's centre on the sphere (m); w = 1 when these rows are live
+    float4 gChartE;     // its east; w = the cell's offset along east
+    float4 gChartN;     // its north; w = the offset along north
 };
+
+// A surface point's coordinate in that plane: the tangent projection about the cell's own origin
+// plus its offset -- WaveChart::UOf, said in HLSL. `p` is the point in the PLANET frame (metres).
+float2 ChartUOf(float3 p) {
+    const float3 r = p - gChartOrg.xyz;
+    return float2(dot(r, gChartE.xyz) + gChartE.w, dot(r, gChartN.xyz) + gChartN.w);
+}
 
 // ---- M10: the level being drawn (LoadLevel) --------------------------------------------------
 // Six rows per level, filled by GlobeLayer::SetView:
@@ -862,10 +873,25 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
                     exp(-0.125f * kC * kC * (fpxW.x * fpxW.x + fpzW.x * fpzW.x));
                 const float gAy =
                     exp(-0.125f * kC * kC * (fpxW.y * fpxW.y + fpzW.y * fpzW.y));
-                const float4 dv =
-                    gTex[gBankU2[c + 1u]].SampleLevel(sLinearWrap, wxz / gBankB[c], 0);
-                sx += dv.x * wDet * bDet.x * gBankB.w * gAx;
-                sz += dv.y * wDet * bDet.x * gBankB.w * gAy;
+                // M13 step 2: read in the SAME PLANE the bank filled its texels from (the
+                // lattice's chart at the eye), not on the root's tangent plane -- otherwise
+                // these sub-ring bands are a second realization laid over the first, and at a
+                // carried place they are a different sea entirely. The slopes come back in the
+                // chart's axes and are turned into this pixel's east/north below.
+                const float2 cuvP = (gChartOrg.w != 0.0f)
+                                        ? ChartUOf(upT * gGlo.x) / gBankB[c]
+                                        : wxz / gBankB[c];
+                const float4 dv = gTex[gBankU2[c + 1u]].SampleLevel(sLinearWrap, cuvP, 0);
+                float2 slope = float2(dv.x, dv.y);
+                if (gChartOrg.w != 0.0f) {
+                    // The chart's axes said in this pixel's own east/north (a rotation under two
+                    // degrees: the two frames are a cell apart at most).
+                    const float2 R0 = float2(dot(gChartE.xyz, east), dot(gChartN.xyz, east));
+                    const float2 R1 = float2(dot(gChartE.xyz, north), dot(gChartN.xyz, north));
+                    slope = float2(dot(R0, float2(dv.x, dv.y)), dot(R1, float2(dv.x, dv.y)));
+                }
+                sx += slope.x * wDet * bDet.x * gBankB.w * gAx;
+                sz += slope.y * wDet * bDet.x * gBankB.w * gAy;
                 s2 = max(s2 - wDet * bDet.x * bDet.x *
                                   (0.5f * (gAx * gAx + gAy * gAy)) *
                                   (c == 0 ? 0.0004f : (c == 1 ? 0.0018f : 0.0060f)),

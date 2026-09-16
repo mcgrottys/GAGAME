@@ -63,6 +63,28 @@ struct WaveChart {
 
     static constexpr int kMax = 4;   // a cell, two edge neighbours, one diagonal
 
+    // ONE CHART'S PLANE, as the lattice makes it: a cell's origin on the sphere, its axes, and
+    // its hashed offset. It is a function of the cell's ADDRESS alone, so it can be found once
+    // for a neighbourhood -- a hull's stations, a bank tile's texels -- and the per-point work is
+    // then two dot products.
+    struct Frame {
+        double org[3] = {0.0, 0.0, 0.0};   // the cell's centre on the sphere (metres)
+        double e[3] = {1.0, 0.0, 0.0};     // east at that centre
+        double n[3] = {0.0, 0.0, 1.0};     // north there
+        double off[2] = {0.0, 0.0};        // the cell's own offset in its plane
+        uint64_t key = 0;
+    };
+
+    // THE NEIGHBOURHOOD of a place: its own cell, the metric that carries the band's metres into
+    // the cell's uv, and the four planes that can touch it (its own, the neighbour across the
+    // nearer x edge, across the nearer y edge, and the diagonal -- in that order, always).
+    struct Cell {
+        uint32_t face = 0;
+        int ix = 0, iy = 0, dx = 0, dy = 0;
+        double mPerU = 0.0, mPerV = 0.0;
+        Frame f[4];
+    };
+
     struct Chart {
         double u[2] = {0.0, 0.0};   // the place in this chart's plane (metres), offset included
         double w = 0.0;             // its share of the blend; the shares sum to 1
@@ -116,65 +138,133 @@ struct WaveChart {
         north[2] = east[0] * d[1] - east[1] * d[0];
     }
 
-    // THE CHARTS THAT TOUCH A PLACE (a unit direction in the planet frame). Returns how many
-    // (1 in a cell's plateau, 2 in a band, 4 at a corner); the shares sum to 1.
-    int At(const double dir[3], Chart out[kMax]) const {
+    // THE CHARTS THAT TOUCH A PLACE (a unit direction in the planet frame). ALWAYS four, in one
+    // order -- the cell, its neighbour across the nearer x edge, across the nearer y edge, and
+    // the diagonal -- with shares that sum to 1 exactly. A share is usually 0 (a place in a
+    // cell's plateau reads one chart and three zeros).
+    //
+    // THE SKIP IS PART OF THE LAW, so that both processors run one expression: a reader may skip
+    // SAMPLING a chart whose share is below kSkip, and every share still counts in the norm. The
+    // hull's twin skips to stay cheap; the kernel skips to stay cheap; the result is the same
+    // number to a part in 10^4 of a millimetre, rather than two laws that nearly agree.
+    static constexpr double kSkip = 1.0e-4;
+
+    // THE NEIGHBOURHOOD of a place: the cells, their planes and the metric. Everything in here is
+    // a function of the ADDRESS, so it is found once for a hull's stations or a tile's texels.
+    Cell CellAt(const double dir[3]) const {
+        Cell cell;
+        const int n = 1 << level;
+        double uv[2];
+        cell.face = CubeFaceOfDir(dir, uv);
+        cell.ix = Clampi(int(std::floor(uv[0] * double(n))), 0, n - 1);
+        cell.iy = Clampi(int(std::floor(uv[1] * double(n))), 0, n - 1);
+        cell.dx = (uv[0] * double(n) - double(cell.ix) < 0.5) ? -1 : 1;
+        cell.dy = (uv[1] * double(n) - double(cell.iy) < 0.5) ? -1 : 1;
+        // The cell's metric: metres of ground per uv unit at its centre. The band is stated in
+        // metres of ground, so it is carried into uv through this.
+        const double cu = (double(cell.ix) + 0.5) / double(n);
+        const double cv = (double(cell.iy) + 0.5) / double(n);
+        const double h = 0.25 / double(n);
+        double a[3], b[3];
+        ComposeCubeDir(cell.face, cu + h, cv, a);
+        ComposeCubeDir(cell.face, cu - h, cv, b);
+        cell.mPerU = planetR * Dist(a, b) / (2.0 * h);
+        ComposeCubeDir(cell.face, cu, cv + h, a);
+        ComposeCubeDir(cell.face, cu, cv - h, b);
+        cell.mPerV = planetR * Dist(a, b) / (2.0 * h);
+        const int nx[4] = {0, cell.dx, 0, cell.dx};
+        const int ny[4] = {0, 0, cell.dy, cell.dy};
+        for (int k = 0; k < kMax; ++k) {
+            Build(cell.face, cell.ix + nx[k], cell.iy + ny[k], n, cell.f[k]);
+        }
+        return cell;
+    }
+
+    // Does a neighbourhood still describe this place? (Its own cell and its choice of neighbours
+    // are what a memo may not outlive; both change hundreds of kilometres apart.)
+    bool Holds(const Cell& cell, const double dir[3]) const {
         const int n = 1 << level;
         double uv[2];
         const uint32_t face = CubeFaceOfDir(dir, uv);
+        const int ix = Clampi(int(std::floor(uv[0] * double(n))), 0, n - 1);
+        const int iy = Clampi(int(std::floor(uv[1] * double(n))), 0, n - 1);
+        if (face != cell.face || ix != cell.ix || iy != cell.iy) return false;
+        const int dx = (uv[0] * double(n) - double(ix) < 0.5) ? -1 : 1;
+        const int dy = (uv[1] * double(n) - double(iy) < 0.5) ? -1 : 1;
+        return dx == cell.dx && dy == cell.dy;
+    }
+
+    // THE CHARTS AT A PLACE inside that neighbourhood: each plane's coordinate for this point,
+    // its share, and its axes said in the place's own east/north. Always four, shares summing to
+    // 1 exactly; a reader may skip SAMPLING one below kSkip and the norm still counts it.
+    // The distance, in metres of ground, from a place to the cell edge its chosen neighbour lies
+    // across -- one per axis. The blend's only input, so it is written once here and read by the
+    // hull's twin, by the kernel's per-tile rows, and by the gate.
+    void EdgeM(const Cell& cell, const double dir[3], double& ex, double& ey) const {
+        const int n = 1 << level;
+        double uv[2];
+        CubeFaceOfDir(dir, uv);
         const double fx = uv[0] * double(n), fy = uv[1] * double(n);
-        int ix = int(std::floor(fx)), iy = int(std::floor(fy));
-        if (ix < 0) ix = 0;
-        if (iy < 0) iy = 0;
-        if (ix > n - 1) ix = n - 1;
-        if (iy > n - 1) iy = n - 1;
-        // The place's own frame and its point on the sphere.
+        const double sx = fx - std::floor(fx), sy = fy - std::floor(fy);
+        ex = ((cell.dx < 0) ? sx : 1.0 - sx) * cell.mPerU / double(n);
+        ey = ((cell.dy < 0) ? sy : 1.0 - sy) * cell.mPerV / double(n);
+    }
+    // The shares from those two distances: 1/2 exactly on an edge, 1 a half-band inside it, the
+    // neighbour taking the rest -- smoothstep, so the law is C1 where charts change hands.
+    void Shares(double edgeX, double edgeY, double w[kMax]) const {
+        const double band = (bandM > 1.0) ? bandM : 1.0;
+        const double wx = Smooth(0.5 + edgeX / band), wy = Smooth(0.5 + edgeY / band);
+        w[0] = wx * wy;
+        w[1] = (1.0 - wx) * wy;
+        w[2] = wx * (1.0 - wy);
+        w[3] = (1.0 - wx) * (1.0 - wy);
+    }
+
+    int At(const Cell& cell, const double dir[3], Chart out[kMax]) const {
+        double edgeX = 0.0, edgeY = 0.0;
+        EdgeM(cell, dir, edgeX, edgeY);
+        double ws[kMax];
+        Shares(edgeX, edgeY, ws);
         double pe[3], pn[3], p[3];
         FrameAt(dir, pe, pn);
         for (int i = 0; i < 3; ++i) p[i] = dir[i] * planetR;
-
-        // The cell's metric: metres of ground per uv unit at its centre, along each axis. The
-        // band is stated in metres, so it has to be carried into uv through this.
-        const double cu = (double(ix) + 0.5) / double(n), cv = (double(iy) + 0.5) / double(n);
-        const double h = 0.25 / double(n);
-        double a[3], b[3];
-        ComposeCubeDir(face, cu + h, cv, a);
-        ComposeCubeDir(face, cu - h, cv, b);
-        const double mPerU = planetR * Dist(a, b) / (2.0 * h);
-        ComposeCubeDir(face, cu, cv + h, a);
-        ComposeCubeDir(face, cu, cv - h, b);
-        const double mPerV = planetR * Dist(a, b) / (2.0 * h);
-
-        // The share along each axis: 1/2 exactly on the edge, 1 a half-band inside it, and the
-        // neighbour takes the rest. smoothstep, so the law is C1 where the charts change hands.
-        const double sx = fx - double(ix), sy = fy - double(iy);
-        const int dx = (sx < 0.5) ? -1 : 1, dy = (sy < 0.5) ? -1 : 1;
-        const double edgeX = ((sx < 0.5) ? sx : 1.0 - sx) * mPerU / double(n);
-        const double edgeY = ((sy < 0.5) ? sy : 1.0 - sy) * mPerV / double(n);
-        const double wx = Smooth(0.5 + edgeX / (bandM > 1.0 ? bandM : 1.0));
-        const double wy = Smooth(0.5 + edgeY / (bandM > 1.0 ? bandM : 1.0));
-
-        const int nx[4] = {0, dx, 0, dx};
-        const int ny[4] = {0, 0, dy, dy};
-        const double ws[4] = {wx * wy, (1.0 - wx) * wy, wx * (1.0 - wy), (1.0 - wx) * (1.0 - wy)};
-        int count = 0;
-        for (int k = 0; k < 4; ++k) {
-            if (ws[k] < 1.0e-4) continue;
-            Chart& c = out[count];
+        for (int k = 0; k < kMax; ++k) {
+            const Frame& f = cell.f[k];
+            Chart& c = out[k];
             c.w = ws[k];
-            Build(face, ix + nx[k], iy + ny[k], n, p, pe, pn, c);
-            ++count;
+            c.cell = f.key;
+            const double r[3] = {p[0] - f.org[0], p[1] - f.org[1], p[2] - f.org[2]};
+            c.u[0] = r[0] * f.e[0] + r[1] * f.e[1] + r[2] * f.e[2] + f.off[0];
+            c.u[1] = r[0] * f.n[0] + r[1] * f.n[1] + r[2] * f.n[2] + f.off[1];
+            c.rot[0] = f.e[0] * pe[0] + f.e[1] * pe[1] + f.e[2] * pe[2];
+            c.rot[1] = f.n[0] * pe[0] + f.n[1] * pe[1] + f.n[2] * pe[2];
+            c.rot[2] = f.e[0] * pn[0] + f.e[1] * pn[1] + f.e[2] * pn[2];
+            c.rot[3] = f.n[0] * pn[0] + f.n[1] * pn[1] + f.n[2] * pn[2];
         }
-        // A share dropped below the floor is given back to the largest, so the shares still sum
-        // to 1 exactly and the norm below is the one both processors compute.
-        double sum = 0.0;
-        int big = 0;
-        for (int k = 0; k < count; ++k) {
-            sum += out[k].w;
-            if (out[k].w > out[big].w) big = k;
+        return kMax;
+    }
+
+    // The one-shot, for a caller with a single place to ask about.
+    int At(const double dir[3], Chart out[kMax]) const { return At(CellAt(dir), dir, out); }
+
+    // A point of the sphere (planet frame, metres) in one chart's plane: the tangent projection
+    // about the cell's own origin -- the sandwich's tangent part -- plus the cell's offset. The
+    // kernel's per-tile rows are this function sampled at a tile's corner and differenced across
+    // it, so there is one expression for "where is this in that plane".
+    static void UOf(const Frame& f, const double p[3], double u[2]) {
+        const double r[3] = {p[0] - f.org[0], p[1] - f.org[1], p[2] - f.org[2]};
+        u[0] = r[0] * f.e[0] + r[1] * f.e[1] + r[2] * f.e[2] + f.off[0];
+        u[1] = r[0] * f.n[0] + r[1] * f.n[1] + r[2] * f.n[2] + f.off[1];
+    }
+
+    // How many charts actually carry this place -- 1 in a plateau, 2 in a band, 4 at a corner.
+    // An instrument and a loop bound, never a change of the law.
+    static int Significant(const Chart c[kMax]) {
+        int n = 0;
+        for (int i = 0; i < kMax; ++i) {
+            if (c[i].w >= kSkip) ++n;
         }
-        if (count > 0) out[big].w += 1.0 - sum;
-        return count;
+        return n;
     }
 
     // The blend's norm, said once so both processors read the same expression.
@@ -185,6 +275,7 @@ struct WaveChart {
     }
 
 private:
+    static int Clampi(int v, int lo, int hi) { return (v < lo) ? lo : (v > hi ? hi : v); }
     static double Dist(const double a[3], const double b[3]) {
         const double dx = a[0] - b[0], dy = a[1] - b[1], dz = a[2] - b[2];
         return std::sqrt(dx * dx + dy * dy + dz * dz);
@@ -194,43 +285,28 @@ private:
         return x * x * (3.0 - 2.0 * x);
     }
 
-    // One chart, CANONICALLY. A neighbour index may run off its face; stepping the uv past the
-    // edge still names a direction (the face's plane extends), so that direction is re-addressed
-    // to find whose cell it really is. Both sides of a face edge then build the same chart from
-    // the same address, which is what keeps the blend continuous there.
-    void Build(uint32_t face, int ix, int iy, int n, const double p[3], const double pe[3],
-               const double pn[3], Chart& c) const {
+    // One cell's plane, CANONICALLY. A neighbour index may run off its face; stepping the uv past
+    // the edge still names a direction (the face's plane extends), so that direction is
+    // re-addressed to find whose cell it really is. Both sides of a face edge then build the same
+    // plane from the same address, which is what keeps the blend continuous there.
+    void Build(uint32_t face, int ix, int iy, int n, Frame& f) const {
         double dc[3];
         ComposeCubeDir(face, (double(ix) + 0.5) / double(n), (double(iy) + 0.5) / double(n), dc);
         if (ix < 0 || iy < 0 || ix >= n || iy >= n) {
             double uv2[2];
             const uint32_t f2 = CubeFaceOfDir(dc, uv2);
-            int jx = int(std::floor(uv2[0] * double(n))), jy = int(std::floor(uv2[1] * double(n)));
-            if (jx < 0) jx = 0;
-            if (jy < 0) jy = 0;
-            if (jx > n - 1) jx = n - 1;
-            if (jy > n - 1) jy = n - 1;
+            const int jx = Clampi(int(std::floor(uv2[0] * double(n))), 0, n - 1);
+            const int jy = Clampi(int(std::floor(uv2[1] * double(n))), 0, n - 1);
             face = f2;
             ix = jx;
             iy = jy;
             ComposeCubeDir(face, (double(ix) + 0.5) / double(n), (double(iy) + 0.5) / double(n),
                            dc);
         }
-        double ce[3], cn[3];
-        FrameAt(dc, ce, cn);
-        c.cell = Key(face, level, ix, iy);
-        double off[2];
-        OffsetOf(c.cell, off);
-        // The place in this chart's plane: the tangent projection of the point about the cell's
-        // own origin (its centre on the sphere), which is the sandwich's tangent part.
-        const double r[3] = {p[0] - dc[0] * planetR, p[1] - dc[1] * planetR, p[2] - dc[2] * planetR};
-        c.u[0] = r[0] * ce[0] + r[1] * ce[1] + r[2] * ce[2] + off[0];
-        c.u[1] = r[0] * cn[0] + r[1] * cn[1] + r[2] * cn[2] + off[1];
-        // This chart's axes said in the place's own, for the vector channels.
-        c.rot[0] = ce[0] * pe[0] + ce[1] * pe[1] + ce[2] * pe[2];
-        c.rot[1] = cn[0] * pe[0] + cn[1] * pe[1] + cn[2] * pe[2];
-        c.rot[2] = ce[0] * pn[0] + ce[1] * pn[1] + ce[2] * pn[2];
-        c.rot[3] = cn[0] * pn[0] + cn[1] * pn[1] + cn[2] * pn[2];
+        FrameAt(dc, f.e, f.n);
+        for (int i = 0; i < 3; ++i) f.org[i] = dc[i] * planetR;
+        f.key = Key(face, level, ix, iy);
+        OffsetOf(f.key, f.off);
     }
 };
 

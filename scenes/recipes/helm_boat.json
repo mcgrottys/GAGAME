@@ -214,7 +214,8 @@
       "at": {"x": 120, "alt": 0, "z": -10},
       "controller": "fixed",
       "throttle": 1,
-      "steer": 0
+      "steer": 0,
+      "recentreM": 1000
     }
   ],
   "interests": [],

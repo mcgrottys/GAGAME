@@ -399,6 +399,26 @@ void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double plane
         Log("[wprobe]   wave gains at the hull: exposure %.3f (the node's march, %.2f ms; the kernel's "
             "floor 0.18) | solved window weight %.3f",
             expoNode, marchMs, sea.WindowWeight(cgRootX, cgRootZ));
+        // THE CASCADE SEA'S PLANES AT THE HULL (M13 step 2): how many carry this place and with
+        // what shares. One is a cell's plateau; two is a band, where two realizations blend and
+        // narrowband swell can beat -- the pose a band gate has to be run at.
+        {
+            WaveChart::Chart ch[WaveChart::kMax];
+            const int nCh = sea.ChartsAt(cg[0], cg[2], ch);
+            char line[320];
+            double edgeX = 0.0, edgeZ = 0.0;
+            sea.ChartEdgeM(cg[0], cg[2], edgeX, edgeZ);
+            int n = snprintf(line, sizeof(line),
+                             "[wprobe]   wave planes at the hull: %d of %d carry it (the band is "
+                             "%.1f km away across x, %.1f km across z)",
+                             WaveChart::Significant(ch), nCh, edgeX / 1000.0, edgeZ / 1000.0);
+            for (int i = 0; i < nCh; ++i) {
+                if (ch[i].w < WaveChart::kSkip) continue;
+                n += snprintf(line + n, sizeof(line) - size_t(n), " | cell %llx share %.3f",
+                              static_cast<unsigned long long>(ch[i].cell), ch[i].w);
+            }
+            Log("%s", line);
+        }
         // THE REGISTRATION (M13 step 0): the water's linear chart against the sphere the mesh is
         // drawn on. Both answer for the same point; the offset is how far the water's data stand
         // from the ground that carries them, and it GROWS WITH RANGE from the space's anchor -- the

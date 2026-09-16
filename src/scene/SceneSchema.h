@@ -260,6 +260,11 @@ struct EntityProps {
     Placement at;                     // the spawn (required)
     int controller = 0;               // helm | fixed
     double throttle = 0.0, steer = 0.0;
+    // M13: THE PER-SUBJECT FLOATING ORIGIN. A space is flat and the planet is not, so a hull d
+    // from its space's origin rides d^2/2R above the sphere its sea is drawn on. Past this reach
+    // the hull rebuilds its space at its own place and carries its pose into it (Entity::Recentre)
+    // -- 1 km of reach holds the error under 8 cm. 0 turns it off, and the hull keeps the drift.
+    double recentreM = 1000.0;
 };
 struct EffectProps {
     std::string name;

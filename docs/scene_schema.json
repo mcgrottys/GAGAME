@@ -264,7 +264,8 @@
 }, "reload": "restart", "doc": "the spawn, in the flat world frame (--campos); `az` is the bow's compass heading (absent: north, as every hull always spawned)" },
       { "key": "controller", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "helm", "names": ["helm", "fixed"], "reload": "hot", "doc": "the keyboard helm, or fixed throttles and helm (--boat-drive)" },
       { "key": "throttle", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "hot", "doc": "fixed: every thruster's throttle" },
-      { "key": "steer", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "hot", "doc": "fixed: the commanded steering" }
+      { "key": "steer", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "hot", "doc": "fixed: the commanded steering" },
+      { "key": "recentreM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 1000, "reload": "hot", "doc": "how far this hull may sail from its space's origin before the space moves to its place (the per-subject floating origin; 0 = never, and it rides d^2/2R above the sphere)" }
     ] },
     { "type": "interest", "keys": [
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the interest's name (views[].interests names it)" },

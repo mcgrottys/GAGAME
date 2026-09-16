@@ -22,6 +22,7 @@
 #include "render/Camera.h"
 #include "scene/Layer.h"
 #include "sim/GlobeModel.h"
+#include "sim/WaveChart.h"
 
 #include <algorithm>
 #include <condition_variable>
@@ -318,6 +319,13 @@ public:
         for (int i = 0; i < 9; ++i) m_gateRows[i] = rows[i];
     }
     // Set B: the rings anchored at the OUTER level's eye (a second WaterBankLayer).
+    // M13 step 2: the cascade sea's plane at the eye (sim/WaveChart.h), for the pixel stage's
+    // sub-ring bands -- the same plane the bank filled its texels from. Off until a frame hands
+    // one over, in which case the pixels read the root's tangent plane, as they always did.
+    void SetWaveChartFrame(const WaveChart::Frame& f, bool on) {
+        m_chartFrame = f;
+        m_chartOn = on;
+    }
     void SetWaterBankB(uint32_t disp, uint32_t param, uint32_t detail, const float* org12,
                        bool on) {
         m_bankB[0] = disp;
@@ -452,6 +460,15 @@ private:
         float gateR0[4];      // rows: TRUE camera frame -> the box's own frame; w = half extent
         float gateR1[4];
         float gateR2[4];
+        // M13 step 2: THE CASCADE SEA'S PLANE AT THE EYE (sim/WaveChart.h) -- appended at the END
+        // on both sides (priors 22). The pixel stage adds the bands a ring texel cannot carry by
+        // reading the cascade DERIVATIVE textures directly, and those reads have to happen in the
+        // same plane the bank filled its texels from, or the fine ripples are a second sea laid
+        // over the first. One plane serves every pixel: a chart cell is hundreds of km across and
+        // a frame's pixels sit inside one.
+        float chartOrg[4];    // the cell's centre on the sphere (m), w = 1 when the rows are live
+        float chartE[4];      // its east, w = the offset along east
+        float chartN[4];      // its north, w = the offset along north
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -669,6 +686,8 @@ private:
     // behind it, so the nearer limb must composite last).
     uint32_t m_limbSlots[kMaxLevels] = {};
     int m_limbCount = 0;
+    WaveChart::Frame m_chartFrame;   // M13 step 2: the plane at the eye
+    bool m_chartOn = false;
     uint32_t m_bankB[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
     float m_bankBOrg[12] = {};
     bool m_bankBOn = false;

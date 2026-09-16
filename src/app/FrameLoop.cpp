@@ -1303,6 +1303,8 @@ std::optional<int> FrameLoop::Session() {
         eo.swellShadow = m_A.exposureShadow.get();
         eo.bed = m_A.heightBed.get();
         eo.rootChart = &m_A.surface.flat;   // M13 step 2: places, not the linear chart
+        eo.planet = &m_planetSpace;         // ... and the two spaces a hull re-centres between
+        eo.rootSpace = &m_tangentSpace;
         e->Configure(eo);
     }
 
@@ -2618,6 +2620,17 @@ bool FrameLoop::Frame() {
                                 waterBank->DetailSrv(), derivS, patchS, bandKS,
                                 bandRmsS, bandFoldS, sea->heightScale,
                                 waterBank->BaseTexelM(), orgs, S.water.oneWater);
+            // M13 step 2: the cascade sea's plane AT THE EYE, for the pixel stage's sub-ring
+            // bands -- the same plane the bank's texels were filled from. A chart cell is
+            // hundreds of kilometres across, so one frame's pixels sit inside one.
+            {
+                WaveChart wcEye;
+                double dEye[3];
+                const bool onEye = m_A.surface.flat.Exact() &&
+                                   m_A.surface.flat.DirOfProjected(cam.px, cam.pz, dEye);
+                globe->SetWaveChartFrame(onEye ? wcEye.CellAt(dEye).f[0] : WaveChart::Frame{},
+                                         onEye);
+            }
             // M10: set B follows the OUTER level's eye, S(C) -- the sea the camera's
             // planet floats in, seen from where the camera really is in that level's
             // own frame. Off (and not filled) while the camera is at the root.

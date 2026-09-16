@@ -75,7 +75,10 @@ void DirOf(double latDeg, double lonDeg, double d[3]) {
 // The blend itself, as both processors run it.
 double Blend(const WaveChart::Chart* c, int n, const SynthSea& sea) {
     double s = 0.0;
-    for (int i = 0; i < n; ++i) s += c[i].w * sea.At(c[i].u);
+    for (int i = 0; i < n; ++i) {
+        if (c[i].w < WaveChart::kSkip) continue;   // the law's own skip; the norm keeps it
+        s += c[i].w * sea.At(c[i].u);
+    }
     return s / WaveChart::Norm(c, n);
 }
 
@@ -105,9 +108,10 @@ bool RunWaveChartSelfTest() {
             double sum = 0.0;
             for (int k = 0; k < n; ++k) sum += c[k].w;
             worstSum = (std::max)(worstSum, std::fabs(sum - 1.0));
-            maxN = (std::max)(maxN, n);
-            if (n == 2) ++bands;
-            if (n >= 3) ++corners;
+            const int sig = WaveChart::Significant(c);
+            maxN = (std::max)(maxN, sig);
+            if (sig == 2) ++bands;
+            if (sig >= 3) ++corners;
             ++checks;
         }
         if (worstSum > 1e-12) fail("the shares sum to 1", worstSum, 0.0);
@@ -157,7 +161,9 @@ bool RunWaveChartSelfTest() {
                 worstStep = (std::max)(worstStep, std::fabs(h - prev));
                 worstOwn = (std::max)(worstOwn, std::fabs(own - prevOwn));
             }
-            if (n > 1) worstGap = (std::max)(worstGap, std::fabs(own - sea.At(c[1].u)));
+            if (WaveChart::Significant(c) > 1) {
+                worstGap = (std::max)(worstGap, std::fabs(own - sea.At(c[1].u)));
+            }
             prev = h;
             prevOwn = own;
             ++checks;
@@ -185,7 +191,7 @@ bool RunWaveChartSelfTest() {
             WaveChart::Chart c[WaveChart::kMax];
             const int n = wc.At(d, c);
             const double h = Blend(c, n, sea);
-            if (n == 1) {
+            if (WaveChart::Significant(c) == 1) {
                 v1 += h * h;
                 ++n1;
             } else {

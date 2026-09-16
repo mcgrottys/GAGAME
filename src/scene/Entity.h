@@ -94,6 +94,10 @@ public:
         // this; a carried hull through its gate's, set at the carry. Null: the anchor-linear law,
         // which is what a hull got before the places were exact.
         const Space::Anchor* rootChart = nullptr;
+        // ... and the two spaces the per-subject floating origin is built between: the planet a
+        // hull's own tangent frame hangs under, and the root frame the scene is drawn in.
+        const Space* planet = nullptr;
+        const Space* rootSpace = nullptr;
     };
 
     // ---- Component -------------------------------------------------------------------------
@@ -148,6 +152,8 @@ public:
     // the free surface (the hull keeps its height above its own water), the water read through
     // the destination's chart. Returns false when there is no hull to carry.
     bool Teleport(const Gateway& gate, double simUnix);
+    // M13 step 2: the per-subject floating origin -- the hull's space follows the hull.
+    void Recentre(double simUnix);
     // The hull steps' wall time this Update (the frame loop's profiler slot).
     double LastStepMs() const { return m_stepMs; }
 
@@ -175,6 +181,11 @@ private:
     int m_telTick = 0;           // one telemetry line a second
     double m_stepMs = 0.0;
     const Space* m_space = nullptr;   // null = the root tangent space
+    // M13 step 2: the space this hull carries with it (Recentre) and its chart. m_space points at
+    // m_ownSpace once it has re-centred, or at a gate's destination after a carry.
+    Space m_ownSpace;
+    Space::Anchor m_ownChart, m_gateChart;
+    bool m_ownValid = false;
     Motor m_spaceInRoot;               // identity until a gate carries the hull
 };
 

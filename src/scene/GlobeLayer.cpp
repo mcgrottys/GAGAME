@@ -1940,6 +1940,15 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.gateR0[3] = m_gateHalf[0];
     m_cb.gateR1[3] = m_gateHalf[1];
     m_cb.gateR2[3] = m_gateHalf[2];
+    // M13 step 2: the cascade sea's plane at the eye, for the pixel stage's sub-ring bands.
+    for (int i = 0; i < 3; ++i) {
+        m_cb.chartOrg[i] = static_cast<float>(m_chartFrame.org[i]);
+        m_cb.chartE[i] = static_cast<float>(m_chartFrame.e[i]);
+        m_cb.chartN[i] = static_cast<float>(m_chartFrame.n[i]);
+    }
+    m_cb.chartOrg[3] = m_chartOn ? 1.0f : 0.0f;
+    m_cb.chartE[3] = static_cast<float>(m_chartFrame.off[0]);
+    m_cb.chartN[3] = static_cast<float>(m_chartFrame.off[1]);
     m_cb.drosteA[0] = static_cast<float>(1 + m_levels.size());
     m_cb.drosteA[1] = static_cast<float>(m_camLevelAbs);
     m_cb.drosteA[2] = static_cast<float>(m_lighting);

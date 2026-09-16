@@ -1,6 +1,7 @@
 // Entity - the vessel node: the session's boat block and stepBoat, verbatim (M12 step 5e).
 #include "scene/Entity.h"
 #include "scene/Gateway.h"
+#include "scene/Pose.h"
 
 #include "core/Common.h"
 #include "core/SceneConfig.h"
@@ -191,6 +192,76 @@ void Entity::ResetAtRest() {
     }
 }
 
+// THE PER-SUBJECT FLOATING ORIGIN (M13 step 2). A space is flat; the planet is not. A hull sitting
+// d from its space's origin stands d^2/2R above the sphere its water is drawn on -- 8 cm at a
+// kilometre, 31 cm at two, 300 m at sixty, which is a hull flying over its own sea. So the hull
+// carries its space with it: past `recentreM` the space is rebuilt as the tangent frame AT THE
+// HULL'S OWN PLACE and the pose is carried into it by the relative placement, momenta and all.
+//
+// What does NOT happen: the world frame does not move, no other body or view is touched, and the
+// hull's state is unchanged in its own terms -- this is the floating origin done per subject,
+// which is the thing a world re-anchor was rejected for.
+void Entity::Recentre(double simUnix) {
+    (void)simUnix;
+    if (!m_boat || m_props.recentreM <= 0.0 || !m_o.rootChart || !m_o.rootChart->Exact()) return;
+    if (!m_o.planet || !m_o.rootSpace) return;
+    RigidBody& b = m_boat->Body();
+    double cg[3] = {0.0, 0.0, 0.0};
+    b.pose.TransformPoint(cg[0], cg[1], cg[2]);
+    const double reach = std::sqrt(cg[0] * cg[0] + cg[2] * cg[2]);
+    if (reach < m_props.recentreM) return;
+
+    // Where the hull is, exactly (its own space's rows, on the sphere).
+    const Space::Anchor& chart = m_ownValid ? m_ownChart : (m_space ? m_gateChart : *m_o.rootChart);
+    double lat = 0.0, lon = 0.0;
+    chart.PlaceOf(cg[0], cg[1], cg[2], lat, lon);
+    // The new space: the tangent frame there, built by the rule every other frame in the engine
+    // is built by, hung under the planet.
+    const double R = chart.planetR;
+    const PoseFrame fr = FrameFromAnchor(lat, lon, R);
+    if (!fr.valid) return;
+    Space next;
+    next.name = m_props.name + ".origin";
+    next.unitM = R;
+    next.extentM = 2.0 * R;
+    next.parent = m_o.planet;
+    const double anchor[3] = {fr.up[0] * R, fr.up[1] * R, fr.up[2] * R};
+    next.link = Placement::Frame(fr.east, fr.up, fr.north, anchor);
+    std::string why;
+    if (!next.Declare(&why)) {
+        Log("[vessel] '%s' could not re-centre: %s", m_props.name.c_str(), why.c_str());
+        m_props.recentreM = 0.0;   // said once, then left alone
+        return;
+    }
+    // The pose, carried: the hull's own space into the new one, through the common ancestor.
+    const Space& from = m_space ? *m_space : *m_o.rootSpace;
+    const Placement toNew = from.To(next);
+    b.Carry(toNew.ToMotor());
+    m_ownSpace = next;
+    m_ownChart = Space::Anchor{};
+    m_ownChart.latDeg = lat;
+    m_ownChart.lonDeg = lon;
+    m_ownChart.mPerLat = 110574.0;
+    m_ownChart.mPerLon = 111320.0 * std::cos(lat * 3.14159265358979323846 / 180.0);
+    m_ownChart.linear = true;
+    for (int i = 0; i < 3; ++i) {
+        m_ownChart.east[i] = fr.east[i];
+        m_ownChart.up[i] = fr.up[i];
+        m_ownChart.north[i] = fr.north[i];
+    }
+    m_ownChart.planetR = R;
+    m_ownValid = true;
+    m_space = &m_ownSpace;
+    m_spaceInRoot = m_ownSpace.To(*m_o.rootSpace).ToMotor();
+    m_sea.SetChart(&m_ownChart);
+    double after[3] = {0.0, 0.0, 0.0};
+    b.pose.TransformPoint(after[0], after[1], after[2]);
+    Log("[vessel] '%s' re-centred its origin at %.5f N %.5f E: it stood %.0f m out, where its flat "
+        "frame rides %.2f m over the sphere; now %.1f m out",
+        m_props.name.c_str(), lat, lon, reach, reach * reach / (2.0 * R),
+        std::sqrt(after[0] * after[0] + after[2] * after[2]));
+}
+
 bool Entity::Teleport(const Gateway& gate, double simUnix) {
     if (!m_boat) return false;
     RigidBody& b = m_boat->Body();
@@ -203,6 +274,8 @@ bool Entity::Teleport(const Gateway& gate, double simUnix) {
     b.Carry(gate.Carry());
     m_space = &gate.Destination();
     m_spaceInRoot = gate.DestinationInSource();
+    m_gateChart = gate.Chart();      // M13: kept, so a later re-centre knows this hull's chart
+    m_ownValid = false;              // the gate's space replaces any the hull carried
     m_sea.SetChart(&gate.Chart());   // the same sparse water, read at the destination's places
     double c1[3] = {0.0, 0.0, 0.0};
     b.pose.TransformPoint(c1[0], c1[1], c1[2]);
@@ -302,6 +375,12 @@ void Entity::Update(const FrameInfo& fi) {
         boatSea.PlaceOf(cg[0], cg[2], latDeg, lonDeg);
         weather->RequestRegion(latDeg, lonDeg, reach + speed * leadS);
     }
+    // M13 step 2: THE HULL'S SPACE FOLLOWS THE HULL -- and it does so BEFORE the set-down and
+    // before the step, so the hull is seated on the water of the space it is actually in. Done
+    // after the step instead, a spawn 60 km from the anchor is set down on its old frame's flat
+    // sea, the re-centring then says honestly that this is 300 m of air, and the hull falls.
+    Recentre(simUnix);
+
     // PLACE THE HULL ON THE WATER, ONCE. A vessel is built before the weather
     // manager exists, so it cannot be spawned at the right height -- and NAVD 0 is half
     // a metre under the surface here at this tide. Dropped in submerged, the hull takes
@@ -390,14 +469,21 @@ void Entity::Update(const FrameInfo& fi) {
     if (!boat->Body().Sane()) boatCtl = VesselControls{};
     m_stepMs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() * 1000.0;
 
-    // THE GATES: a hull whose centre of gravity is inside a box of ITS space is carried. A gate
-    // stands in the root's frame, so a carried hull (in a destination space) meets none: one-way
-    // by construction.
-    if (!m_space && m_o.gates) {
-        double cg[3] = {0.0, 0.0, 0.0};
-        boat->Body().pose.TransformPoint(cg[0], cg[1], cg[2]);
+    // THE GATES: a hull whose centre of gravity is inside a box is carried. The test is made in
+    // the GATE's own source space, so a hull that has re-centred (or been carried before) still
+    // meets the gates standing in that space -- the special case for "in the root space" went
+    // out with the floating origin, which gives every hull a space of its own.
+    if (m_o.gates) {
         for (const auto& g : *m_o.gates) {
-            if (g && g->Inside(cg[0], cg[1], cg[2])) {
+            if (!g || !g->Valid()) continue;
+            double cg[3] = {0.0, 0.0, 0.0};
+            boat->Body().pose.TransformPoint(cg[0], cg[1], cg[2]);
+            if (m_space) {   // into the gate's source space, through the common ancestor
+                const Placement toSrc = m_space->To(g->Source());
+                double q[3] = {cg[0], cg[1], cg[2]};
+                toSrc.Apply(q, cg);
+            }
+            if (g->Inside(cg[0], cg[1], cg[2])) {
                 Teleport(*g, simUnix);
                 break;
             }

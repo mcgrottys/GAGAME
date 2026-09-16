@@ -454,7 +454,11 @@ const Schema& EntitySchema_() {
             .BindEnum("controller", kEntity.controller, {"helm", "fixed"},
                       "the keyboard helm, or fixed throttles and helm (--boat-drive)", H)
             .Bind("throttle", kEntity.throttle, Q::Dimensionless, "1", "fixed: every thruster's throttle", H)
-            .Bind("steer", kEntity.steer, Q::Dimensionless, "1", "fixed: the commanded steering", H);
+            .Bind("steer", kEntity.steer, Q::Dimensionless, "1", "fixed: the commanded steering", H)
+            .Bind("recentreM", kEntity.recentreM, Q::Length, "m",
+                  "how far this hull may sail from its space's origin before the space moves to "
+                  "its place (the per-subject floating origin; 0 = never, and it rides d^2/2R "
+                  "above the sphere)", H);
         return sc;
     }();
     return *s;

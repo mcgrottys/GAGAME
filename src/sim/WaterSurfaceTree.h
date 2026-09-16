@@ -52,6 +52,7 @@
 #include "sim/PlaceField.h"
 #include "sim/SeaState.h"
 #include "sim/WaterSurface.h"
+#include "sim/WaveChart.h"
 #include "sim/WaveField.h"
 #include "sim/WeatherManager.h"
 #include "core/Space.h"
@@ -219,6 +220,24 @@ private:
     Space::Anchor m_chart;
     bool m_hasRoot = false;
     Space::Anchor m_root;
+    // M13 step 2: the cascade sea's local planes (sim/WaveChart.h). The neighbourhood is a
+    // function of the address and changes hundreds of kilometres apart, so it is found once and
+    // held; every point inside it still gets its own coordinates, shares and rotation, which is
+    // what keeps this law the same expression the kernel runs per texel.
+    WaveChart m_waveChart;
+    mutable WaveChart::Cell m_cell;
+    mutable bool m_cellValid = false;
+
+public:
+    // The planes carrying a point and their shares -- public because the probe reports them: a
+    // place in a cell's plateau reads one, a place in a band reads two, and which it is decides
+    // what the gate at that pose is measuring.
+    int ChartsAt(double wx, double wz, WaveChart::Chart out[WaveChart::kMax]) const;
+    // ... and how far this point sits from the band it would blend in, in metres of ground along
+    // each axis: what a gate needs to know to stand a hull IN a band deliberately.
+    void ChartEdgeM(double wx, double wz, double& ex, double& ez) const;
+
+private:
     // A point of this water's frame in the ROOT's flat frame (the solved window's and the wakes').
     // (public below for the probe: the solved window's own frame is the ROOT chart's, so an
     // instrument asking "does the solved field cover this hull" must ask there.)

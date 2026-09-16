@@ -25,6 +25,7 @@
 #include "hal/TileAtlas.h"
 #include "scene/Layer.h"
 #include "sim/GlobeModel.h"
+#include "sim/WaveChart.h"
 #include "sim/SeaState.h"
 #include "sim/SweSolver.h"
 
@@ -233,6 +234,16 @@ private:
         // frame's horizon has no place and keeps the old chart, which is all it ever had).
         float placeA[4];   // lat0, lon0, dLat/dx, dLon/dx
         float placeB[4];   // dLat/dz, dLon/dz, valid, spare
+        // M13 step 2: THE CASCADE SEA'S PLANES for this tile (sim/WaveChart.h), addressed once.
+        // Four charts, in the law's own order (the cell, its x neighbour, its y neighbour, the
+        // diagonal), each as: its coordinate at the tile's ORIGIN reduced mod each cascade's
+        // period (so the kernel's floats carry metres, not hundreds of kilometres), the tangent
+        // map of that coordinate over the tile, and its axes said in the place's east/north.
+        // bandX/bandY carry the edge distances the shares are computed from, so the kernel
+        // recomputes the same weights per texel that the hull's twin computes per point.
+        float chart[4][16];   // per chart: u0(c0).xy, u0(c1).xy, u0(c2).xy, J(4), rot(4), 2 spare
+        float bandX[4];       // edgeX at the origin, d/dex, d/dez, the band in metres
+        float bandY[4];       // edgeY at the origin, d/dex, d/dez, charts valid (0 = none)
     };
 
     void ReanchorRing(Gpu& gpu, int m, double camX, double camZ);
@@ -242,6 +253,7 @@ private:
     // surface's chart where it carries the renderer's rows; without them (a bank built before a
     // surface, or Mars) they are the anchor-linear law, as everything here was.
     void PlaceOfRing(double wx, double wz, double& latDeg, double& lonDeg) const;
+    WaveChart m_waveChart;   // M13 step 2: the cascade sea's planes, as the hull's twin has them
 
     std::wstring m_shaderDir;
     SeaLayer* m_sea = nullptr;
