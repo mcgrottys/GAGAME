@@ -17,6 +17,7 @@
 
 #include "core/Pga.h"
 #include "scene/Layer.h"
+#include "scene/WindowBox.h"
 
 #include <string>
 #include <vector>
@@ -41,26 +42,21 @@ public:
     // ...each in its own space: frames[i] is that space's placement in the root's frame (a hull
     // carried through a gate). A null array is the root for every hull, byte for byte.
     void SetVessels(const Vessel* const* vessels, const Motor* frames, int count);
-    // ...and with `through[i]` non-zero, hull i is drawn THROUGH a gate's window: its frame is
-    // already the apparent one (pulled back by the gate's motor) and its pixels survive only
-    // where the window's slab test says the eye reaches them through the box. The complementary
-    // half matters just as much: a hull on THIS side is discarded where the window shows the
-    // other place, or a boat standing behind the portal would be visible through it.
-    void SetVessels(const Vessel* const* vessels, const Motor* frames, const uint8_t* through,
+    // ...and `depth[i]` is the world of the view's chain of windows hull i is drawn in: 0 is the
+    // eye's own, k the world seen through k windows, with frames[i] already pulled back through
+    // them (the same map that world's geometry is drawn by). A hull's pixels survive only where the
+    // ordered slab test (WindowBox.h) says the eye reaches that world -- so a boat is seen through
+    // every window that shows its place, and never through one that shows another.
+    void SetVessels(const Vessel* const* vessels, const Motor* frames, const uint8_t* depth,
                     int count);
-    // The gate's box in the true camera frame -- GlobeLayer::SetGate's own rows, half extents and
-    // eye-relative centre. `on` false is the shipped pass: no test, no window, byte for byte.
-    // ...and `sun` is the one light as seen from the far place, in this frame: a hull that has
-    // gone through is lit from where it is.
-    void SetGateWindow(const float rows[9], const float half[3], const float centre[3],
-                       const float sun[3], bool on) {
-        m_winOn = on;
-        if (!on) return;
-        for (int i = 0; i < 9; ++i) m_winRows[i] = rows[i];
-        for (int i = 0; i < 3; ++i) {
-            m_winHalf[i] = half[i];
-            m_winC[i] = centre[i];
-            m_winSun[i] = sun[i];
+    // The view's chain of windows in the true camera frame (GlobeLayer::SetGates' own boxes), and
+    // the one light as seen from each world it reaches, in this frame: a hull is lit where it is.
+    // n = 0 is the shipped pass: no test, no window, byte for byte.
+    void SetGateWindows(const WindowBox* boxes, const float* suns3, int n) {
+        m_winN = (boxes && suns3) ? (n < kMaxWindowChain ? (n > 0 ? n : 0) : kMaxWindowChain) : 0;
+        for (int k = 0; k < m_winN; ++k) {
+            m_winBoxes[k] = boxes[k];
+            for (int i = 0; i < 3; ++i) m_winSun[k * 3 + i] = suns3[k * 3 + i];
         }
     }
 
@@ -76,9 +72,9 @@ public:
         float re[4];
         float du[4];
         float half[4];   // xyz half extents, w = palette index (the element kind)
-        // M13: x = 1 when this part is seen THROUGH a gate's window (it belongs to the other
-        // place), 0 when it stands in the eye's own. Appended at the END on both sides -- the
-        // shader's struct is the mirror, and priors 22 is about exactly this.
+        // M13: x = the depth of the world this part is drawn in (0 = the eye's own; k = seen
+        // through k windows). Appended at the END on both sides -- the shader's struct is the
+        // mirror, and priors 22 is about exactly this.
         float opt[4];
     };
     // A box as the CPU keeps it: its WORLD motor in doubles. It becomes a PartGpu only at Render,
@@ -89,7 +85,7 @@ public:
     struct PartCpu {
         Motor world;
         float half[4];
-        float through = 0.0f;   // M13: drawn through a gate's window
+        float depth = 0.0f;   // M13: the world of the view's window chain it is drawn in
     };
 
 private:
@@ -100,11 +96,9 @@ private:
     hal::Pso m_pso;
     std::vector<PartCpu> m_cpu;
     std::vector<PartGpu> m_parts;   // built from m_cpu at Render, relative to that view's eye
-    bool m_winOn = false;
-    float m_winRows[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
-    float m_winHalf[3] = {0.0f, 0.0f, 0.0f};
-    float m_winC[3] = {0.0f, 0.0f, 0.0f};
-    float m_winSun[3] = {0.0f, 1.0f, 0.0f};
+    int m_winN = 0;
+    WindowBox m_winBoxes[kMaxWindowChain];
+    float m_winSun[kMaxWindowChain * 3] = {};
 };
 
 }  // namespace ga

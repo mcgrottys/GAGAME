@@ -156,24 +156,49 @@ float3 ViewRay(float2 ndc) {
     return normalize(gCamFwd.xyz + ndc.x * gCamRight.xyz + ndc.y * gCamUp.xyz);
 }
 
-// ---- THE GATE'S SLAB, ONCE (scene/Gateway.cpp SeenThrough, line for line) --------------------
-// The segment from the eye (the origin of the true camera frame) to p reaches the box's entry at
-// or before p: p is seen THROUGH the window. The rows carry a camera-frame vector into the box's
-// own frame, h is its half extent, c its centre relative to the eye. Declared here because TWO
-// passes ask it now -- the globe, for which level a surface pixel belongs to, and the sky, for
-// whose sky a backdrop pixel belongs to -- and a window whose two passes disagreed about its edge
-// would show a seam along the box.
-bool GateSlabThrough(float3 p, float3x3 R, float3 h, float3 c) {
-    const float3 e = mul(R, -c);
+// ---- THE GATES' SLAB, ONCE (scene/Gateway.cpp SeenThroughFrom, line for line) -----------------
+// The segment from the eye (the origin of the true camera frame) to p, walked from tStart on,
+// enters the box at or before p: p is seen THROUGH the window. One window of a chain, packed as
+// scene/WindowBox.h packs it: rows 0..2 carry a camera-frame vector into the box's own frame with
+// the half extent in w, row 3 is the box's centre relative to the eye. Declared here because THREE
+// passes ask it -- the globe (which world a surface pixel belongs to), the sky (whose sky a backdrop
+// pixel belongs to) and the hulls -- and passes that disagreed about an edge would show a seam.
+// With tStart 0 this is the single window's test exactly: tEnter clamped at 0 is <= tExit iff
+// tEnter <= tExit and tExit >= 0.
+bool GateSlabFrom(float3 p, float4 r0, float4 r1, float4 r2, float4 c, float tStart,
+                  out float tIn) {
+    const float3x3 R = float3x3(r0.xyz, r1.xyz, r2.xyz);
+    const float3 h = float3(r0.w, r1.w, r2.w);
+    const float3 e = mul(R, -c.xyz);
     float3 d = mul(R, p);
     d = lerp(d, float3(1e-12f, 1e-12f, 1e-12f), float3(abs(d) < 1e-12f));
     const float3 t1 = (-h - e) / d;
     const float3 t2 = (h - e) / d;
     const float3 tn = min(t1, t2);
     const float3 tf = max(t1, t2);
-    const float tEnter = max(max(tn.x, tn.y), tn.z);
+    // The ray is in this window's world only from where it entered the last one.
+    const float tEnter = max(max(max(tn.x, tn.y), tn.z), tStart);
     const float tExit = min(min(tf.x, tf.y), tf.z);
-    return tEnter <= tExit && tExit >= 0.0f && tEnter <= 1.0f;
+    tIn = tEnter;
+    return tEnter <= tExit && tEnter <= 1.0f;
+}
+
+// THE DEPTH OF A POINT: how many windows of the view's chain the segment from the eye to p passes,
+// in order (scene/Gateway.cpp ChainDepth) -- the world p belongs to, 0 being the eye's own. A world
+// keeps exactly the pixels of its own depth, so the windows within windows are one rule, and the
+// view through each is the world behind glass: rasterized from the true eye, never a picture.
+static const uint kWindowChain = 7u;
+uint WindowChainDepth(float3 p, float4 boxes[28], uint n) {
+    float t = 0.0f;
+    uint k = 0u;
+    const uint m = min(n, kWindowChain);
+    [loop] for (; k < m; ++k) {
+        const uint b = k * 4u;
+        float tIn;
+        if (!GateSlabFrom(p, boxes[b], boxes[b + 1u], boxes[b + 2u], boxes[b + 3u], t, tIn)) break;
+        t = tIn;
+    }
+    return k;
 }
 
 // ---- THE SKY, ONCE (M13) --------------------------------------------------------------------

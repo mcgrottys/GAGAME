@@ -657,24 +657,81 @@ std::optional<int> FrameLoop::Session() {
         m_portalNode.Configure(po);
         m_portalNode.Init(gpu);
     }
-    // ---- THE GATES (scene/Gateway.h): each box in the root's flat frame, its far side a tangent
-    // space of the same planet, one motor between them.
-    for (const SceneGate& gd : S.gates) {
-        if (!gd.p.enabled || marsMode) continue;
-        scene::PoseSugar gs;
-        std::string gwhy = "no `at` declared";
-        if (!gd.hasAt ||
-            !scene::ReadPoseSugar(gd.at, "gates." + gd.p.name + ".at", gs, &gwhy) ||
-            gs.kind != scene::PoseSugar::Kind::Compass) {
-            Log("[gate] '%s' needs its box in the compass sugar {x, alt, z, az} (%s) -- not built",
-                gd.p.name.c_str(), gwhy.c_str());
-            continue;
-        }
-        auto gate = std::make_unique<scene::Gateway>();
-        gate->Declared() = gd.p;
-        if (gate->Build(m_planetSpace, m_tangentSpace, planetR, gs.x, gs.alt, gs.z,
-                        gd.at.Get("az") ? gs.az : 0.0)) {
-            m_gates.push_back(std::move(gate));
+    // ---- THE GATES (scene/Gateway.h) AND THE PLACES THEY STAND AT AND LEAD TO. The root's own
+    // flat frame is a place; every other place a gate names gets ONE tangent space, shared by every
+    // gate that names it -- so a body carried to a place stands in the very frame a gate standing
+    // there was built in, and a way back is simply another gate.
+    {
+        const Space::Anchor& rootChart = m_A.surface.flat;
+        struct PlaceRef {
+            double lat = 0.0, lon = 0.0;
+            const Space* space = nullptr;
+            const Space::Anchor* chart = nullptr;
+        };
+        std::vector<PlaceRef> known;
+        known.push_back({rootChart.latDeg, rootChart.lonDeg, &m_tangentSpace, &rootChart});
+        auto placeAt = [&](bool named, double lat, double lon, const std::string& gate,
+                           PlaceRef& out) {
+            if (!named) {
+                out = known.front();
+                return true;
+            }
+            for (const PlaceRef& k : known) {
+                if (k.lat == lat && k.lon == lon) {
+                    out = k;
+                    return true;
+                }
+            }
+            auto pl = std::make_unique<scene::Place>();
+            char nm[96];
+            snprintf(nm, sizeof(nm), "place.%.5f,%.5f", lat, lon);
+            std::string why;
+            if (!pl->Build(m_planetSpace, planetR, lat, lon, nm, &why)) {
+                Log("[gate] '%s': %.5f N %.5f E is not a place (%s) -- not built", gate.c_str(),
+                    lat, lon, why.c_str());
+                return false;
+            }
+            out = PlaceRef{lat, lon, &pl->space, &pl->chart};
+            known.push_back(out);
+            m_places.push_back(std::move(pl));
+            return true;
+        };
+        for (const SceneGate& gd : S.gates) {
+            if (!gd.p.enabled || marsMode) continue;
+            scene::PoseSugar gs;
+            std::string gwhy = "no `at` declared";
+            if (!gd.hasAt ||
+                !scene::ReadPoseSugar(gd.at, "gates." + gd.p.name + ".at", gs, &gwhy) ||
+                gs.kind != scene::PoseSugar::Kind::Compass) {
+                Log("[gate] '%s' needs its box in the compass sugar {x, alt, z, az} (%s) -- not built",
+                    gd.p.name.c_str(), gwhy.c_str());
+                continue;
+            }
+            double exit[3] = {0.0, 0.0, 0.0};
+            if (gd.hasToAt) {
+                scene::PoseSugar ts;
+                std::string twhy;
+                if (!scene::ReadPoseSugar(gd.toAt, "gates." + gd.p.name + ".toAt", ts, &twhy) ||
+                    ts.kind != scene::PoseSugar::Kind::Compass) {
+                    Log("[gate] '%s' needs its exit in the compass sugar {x, alt, z} (%s) -- not built",
+                        gd.p.name.c_str(), twhy.c_str());
+                    continue;
+                }
+                exit[0] = ts.x;
+                exit[1] = ts.alt;
+                exit[2] = ts.z;
+            }
+            PlaceRef from, to;
+            if (!placeAt(gd.hasFrom, gd.p.fromLat, gd.p.fromLon, gd.p.name, from) ||
+                !placeAt(gd.hasTo, gd.p.toLat, gd.p.toLon, gd.p.name, to)) {
+                continue;
+            }
+            auto gate = std::make_unique<scene::Gateway>();
+            gate->Declared() = gd.p;
+            if (gate->Build(*from.space, *to.space, *to.chart, m_tangentSpace, gs.x, gs.alt, gs.z,
+                            gd.at.Get("az") ? gs.az : 0.0, exit)) {
+                m_gates.push_back(std::move(gate));
+            }
         }
     }
     // M12 step 4g: the composed-surface rows are filled once a FRAME, into the renderer's one
@@ -1519,13 +1576,11 @@ void FrameLoop::StepEntities(int quanta, float dt) {
                 }
             }
         }
-        // The pull-back: every window the eye still owes, outermost first. Gm = (DestinationInSource
-        // * Carry)^-1 is the map the window's own geometry is drawn by, so a hull put through it
-        // lands exactly where the window shows it.
+        // The pull-back: every window the eye still owes, outermost first. A window's motor
+        // inverted (Gateway::Window, said in the root frame wherever the gate stands) is the map its
+        // far side's geometry is drawn by, so a chase put through it lands where the window shows it.
         Motor pull = Motor::Identity();
-        for (const scene::Gateway* g : m_eyeOwes) {
-            pull = pull * (g->DestinationInSource() * g->Carry()).Inverse();
-        }
+        for (const scene::Gateway* g : m_eyeOwes) pull = pull * g->Window().Inverse();
         double p[3], f[3];
         m_followed->ChaseFrame(p, f);
         if (m_followed->InSpace() == nullptr && m_eyeOwes.empty()) {
@@ -1545,15 +1600,15 @@ void FrameLoop::StepEntities(int quanta, float dt) {
             }
             pull.TransformPoint(eye[0], eye[1], eye[2]);
             pull.TransformPoint(aim[0], aim[1], aim[2]);
-            // THE EYE CROSSES BY THE HULL'S OWN RULE: its centre inside the box, tested in that
-            // gate's own source space. Every ray from inside the box already starts in the
-            // window (scenetest [gate]), so the picture does not move -- the eye simply stops
-            // looking through the window and stands in the place it was looking at.
+            // THE EYE CROSSES BY THE HULL'S OWN RULE: its centre inside the box -- the box where
+            // the root frame has it, wherever the gate stands. Every ray from inside the box
+            // already starts in the window (scenetest [gate]), so the picture does not move -- the
+            // eye simply stops looking through the window and stands in the place it was looking at.
             if (!m_eyeOwes.empty()) {
                 const scene::Gateway* g = m_eyeOwes.front();
-                if (g->Inside(eye[0], eye[1], eye[2])) {
+                if (g->InsideRoot(eye[0], eye[1], eye[2])) {
                     m_eyeOwes.erase(m_eyeOwes.begin());
-                    const Motor Kw = g->DestinationInSource() * g->Carry();
+                    const Motor& Kw = g->Window();
                     Kw.TransformPoint(eye[0], eye[1], eye[2]);
                     Kw.TransformPoint(aim[0], aim[1], aim[2]);
                     Log("[gate] the eye reached '%s' and went through: it is standing in %s now, "
@@ -1577,20 +1632,57 @@ void FrameLoop::StepEntities(int quanta, float dt) {
         // eye under an inner level's index.
         m_camLevel = 0;
     }
-    // WHAT EACH HULL IS DRAWN THROUGH, decided once the chase has decided. A hull standing in the
-    // space the eye would be in after walking through every window it owes is drawn at its
-    // apparent pose and clipped to the box; every other hull is drawn where it stands, and cut
-    // away where the window shows the other place.
-    Motor pull = Motor::Identity();
-    for (const scene::Gateway* g : m_eyeOwes) {
-        pull = pull * (g->DestinationInSource() * g->Carry()).Inverse();
+    // (What each hull is drawn through is decided with the view's windows: PublishHulls.)
+}
+
+scene::ViewCone FrameLoop::ViewConeOf(const Camera& cam, float aspect, float viewH) const {
+    scene::ViewCone v;
+    v.eye[0] = cam.px;
+    v.eye[1] = cam.py;
+    v.eye[2] = cam.pz;
+    DirectX::XMFLOAT3 f, r, u;
+    cam.ViewBasis(f, r, u);   // THE render basis: the frame the rays are rasterized in
+    const DirectX::XMFLOAT3* src[3] = {&f, &r, &u};
+    double* dst[3] = {v.fwd, v.right, v.up};
+    for (int k = 0; k < 3; ++k) {
+        dst[k][0] = src[k]->x;
+        dst[k][1] = src[k]->y;
+        dst[k][2] = src[k]->z;
     }
-    const Space* beyond = m_eyeOwes.empty() ? nullptr : &m_eyeOwes.back()->Destination();
-    for (auto& e : m_entities) {
-        const bool through = beyond && e->InSpace() == beyond;
-        e->SetViewCarry(through ? &pull : nullptr, through);
-        e->PublishDraw();
+    v.tanY = std::tan(0.5 * double(cam.fovY));
+    v.tanX = v.tanY * double(aspect);
+    v.pixTan = 2.0 * v.tanY / (std::max)(double(viewH), 1.0);
+    return v;
+}
+
+std::vector<const scene::Gateway*> FrameLoop::GateList() const {
+    std::vector<const scene::Gateway*> out;
+    for (const auto& g : m_gates) {
+        if (g && g->Valid()) out.push_back(g.get());
     }
+    return out;
+}
+
+void FrameLoop::PublishHulls() {
+    VesselLayer* layer = m_A.vesselLayer;
+    if (!layer) return;
+    std::vector<const Vessel*> hulls;
+    std::vector<Motor> frames;
+    std::vector<uint8_t> depths;
+    for (const auto& e : m_entities) {
+        const Vessel* hull = e->Hull();
+        if (!hull) continue;
+        const Motor base = e->DrawFrame();
+        hulls.push_back(hull);
+        frames.push_back(base);
+        depths.push_back(0u);
+        for (size_t k = 0; k < m_windows.size(); ++k) {
+            hulls.push_back(hull);
+            frames.push_back(m_windows[k].pull * base);
+            depths.push_back(static_cast<uint8_t>(k + 1));
+        }
+    }
+    layer->SetVessels(hulls.data(), frames.data(), depths.data(), static_cast<int>(hulls.size()));
 }
 
 bool FrameLoop::Frame() {
@@ -2290,25 +2382,44 @@ bool FrameLoop::Frame() {
                              portalDecl.lighting, portal.centre, portal.radius, camLevel);
         }
     }
-    // ---- THE GATE'S WINDOW, ITS SEA (scene/Gateway.h). The destination seen through the box is
-    // seen from the CARRIED eye, so its waves need rings anchored there: set B, the second bank the
-    // Droste outer level uses, following the carried eye of the nearest gate within 20 km -- when
-    // no Droste outer level already holds it. (The level itself is added beside SetView, below.)
-    if (!drosteOuter && camLevel == 0 && mode == 1) {
-        double best = 2.0e4;
-        for (const auto& gp : m_gates) {
-            if (!gp->Valid()) continue;
-            double bx = 0.0, by = 0.0, bz = 0.0;
-            gp->Entry().TransformPoint(bx, by, bz);
-            const double dx = bx - cam.px, dy = by - cam.py, dz = bz - cam.pz;
-            const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-            if (dist >= best) continue;
-            best = dist;
-            const Motor Kw = gp->DestinationInSource() * gp->Carry();
-            double E[3] = {cam.px, cam.py, cam.pz};
-            Kw.TransformPoint(E[0], E[1], E[2]);
-            for (int i = 0; i < 3; ++i) drosteOuterCam[i] = E[i];
+    // ---- THE VIEW'S WINDOWS, AND THE SEA BEYOND THE FIRST (scene/Gateway.h WindowChain). The
+    // chain is found here, where the eye has its pose, so the second ring set can follow the eye
+    // the first window carries -- set B, the bank the Droste outer level uses, when no Droste outer
+    // level already holds it. With no window in view it follows the nearest gate within reach
+    // anyway, so a window the eye turns toward finds its sea already filled. The worlds themselves
+    // are added beside SetView, below, re-measured after the camera's last clamp.
+    m_windows.clear();
+    if (!drosteOuter && camLevel == 0 && mode == 1 && globe && !m_gates.empty()) {
+        const float viewHw = S.capture.headless ? static_cast<float>(S.capture.height)
+                                                : static_cast<float>(std::max(1u, window.Height()));
+        const float aspectW =
+            (S.capture.headless ? static_cast<float>(S.capture.width) : window.Width()) / viewHw;
+        m_windows = scene::WindowChain(GateList(), m_eyeOwes, ViewConeOf(cam, aspectW, viewHw),
+                                       kMaxWindowChain, kWindowReachM);
+        double E[3] = {cam.px, cam.py, cam.pz};
+        if (!m_windows.empty()) {
+            m_windows.front().carry.TransformPoint(E[0], E[1], E[2]);
             drosteOuter = true;
+        } else {
+            double best = kWindowReachM;
+            const scene::Gateway* nearest = nullptr;
+            for (const auto& gp : m_gates) {
+                if (!gp->Valid()) continue;
+                double bx = 0.0, by = 0.0, bz = 0.0;
+                gp->EntryInRoot().TransformPoint(bx, by, bz);
+                const double dx = bx - cam.px, dy = by - cam.py, dz = bz - cam.pz;
+                const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+                if (dist >= best) continue;
+                best = dist;
+                nearest = gp.get();
+            }
+            if (nearest) {
+                nearest->Window().TransformPoint(E[0], E[1], E[2]);
+                drosteOuter = true;
+            }
+        }
+        if (drosteOuter) {
+            for (int i = 0; i < 3; ++i) drosteOuterCam[i] = E[i];
         }
     }
     // M10: WHOSE SKY. Identity and the camera's sun reproduce the old dome exactly; under
@@ -2806,154 +2917,196 @@ bool FrameLoop::Frame() {
             globe->StartPredictWalk(cam, pred, viewH);
             PROF_END(8);
         }
-        // ---- THE GATE'S WINDOW (scene/Gateway.h). The destination, seen through the box: the
-        // SAME planet walked once more from the CARRIED eye K(C), its geometry mapped back by the
-        // motor's rotation (the Droste level at scale 1: eye, sigma 1, Q), and a slab test per
-        // pixel. Nothing moves and nothing is copied; the walk's wants go to the same resident
-        // set, so the destination's tiles are loaded while the box is in view. One gate (the
-        // nearest in view, within 20 km); none when the eye is in another level or the box is
-        // out of the view.
+        // ---- THE VIEW'S WINDOWS (scene/Gateway.h WindowChain). Each link of the chain is a world
+        // the view reaches through the gates: the SAME planet walked once more from the eye carried
+        // that far, its geometry drawn back by the chain's rotation (the Droste level at scale 1:
+        // eye, sigma 1, Q), walked only along the rays through its windows, and kept per pixel by
+        // the ordered slab test. So each is the world behind a pane of glass -- from any angle, with
+        // the eye's own parallax -- and a corridor of windows within windows is the same rule asked
+        // again. Nothing moves and nothing is copied; every walk's wants go to the one resident set,
+        // charged to its gate. The chain found above is re-measured here, after the camera's last
+        // clamp; none while the eye stands in a Droste level.
         {
-            const scene::Gateway* win = nullptr;
-            // THE WINDOW THE EYE IS WALKING INTO WINS. When the subject has gone through a gate
-            // the eye has not, that gate's window is the one the picture depends on -- the boat
-            // is drawn beyond its box and clipped to it -- so it is not a candidate among
-            // near gates, it IS the window, in view or not (a window you are not looking at
-            // simply shows nothing).
-            if (camLevel == 0 && !m_eyeOwes.empty()) win = m_eyeOwes.front();
-            if (camLevel == 0 && !win) {
-                const DirectX::XMFLOAT3 fw = cam.Forward();
-                const double tanH = std::tan(0.5 * double(cam.fovY));
-                const double halfDiag = std::atan(tanH * std::sqrt(1.0 + double(aspect) * double(aspect)));
-                double best = 2.0e4;
-                for (const auto& gp : m_gates) {
-                    if (!gp->Valid()) continue;
-                    double bx = 0.0, by = 0.0, bz = 0.0;
-                    gp->Entry().TransformPoint(bx, by, bz);
-                    const double dx = bx - cam.px, dy = by - cam.py, dz = bz - cam.pz;
-                    const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
-                    const double* sz = gp->Declared().size;
-                    const double rb = 0.5 * std::sqrt(sz[0] * sz[0] + sz[1] * sz[1] + sz[2] * sz[2]);
-                    if (dist >= best) continue;
-                    if (dist > rb) {
-                        const double c = (dx * fw.x + dy * fw.y + dz * fw.z) / dist;
-                        const double ang = std::acos(std::clamp(c, -1.0, 1.0));
-                        if (ang > halfDiag + std::asin((std::min)(1.0, rb / dist))) continue;
-                    }
-                    best = dist;
-                    win = gp.get();
-                }
+            const scene::ViewCone view = ViewConeOf(cam, aspect, viewH);
+            if (camLevel == 0 && !m_windows.empty()) {
+                std::vector<const scene::Gateway*> seq;
+                for (const scene::WindowLink& l : m_windows) seq.push_back(l.gate);
+                m_windows = scene::WindowChain(GateList(), seq, view, static_cast<int>(seq.size()),
+                                               kWindowReachM);
+            } else {
+                m_windows.clear();
             }
-            if (win) {
-                const Motor Kw = win->DestinationInSource() * win->Carry();   // source -> destination
-                const Motor Gm = Kw.Inverse();                                  // destination -> source
-                GlobeLayer::DrosteLevel L;
-                L.rel = 1;
-                double E[3] = {cam.px, cam.py, cam.pz};
-                Kw.TransformPoint(E[0], E[1], E[2]);
-                for (int i = 0; i < 3; ++i) L.cam[i] = E[i];
-                L.sigma = 1.0;
-                for (int c = 0; c < 3; ++c) {
-                    double v[3] = {c == 0 ? 1.0 : 0.0, c == 1 ? 1.0 : 0.0, c == 2 ? 1.0 : 0.0};
-                    Gm.TransformDir(v[0], v[1], v[2]);
-                    for (int r = 0; r < 3; ++r) L.Q[r][c] = v[r];
-                }
-                L.gauge = Placement::Rigid(Gm);
-                L.gauge.t[0] = L.gauge.t[1] = L.gauge.t[2] = 0.0;
-                L.reliefExagg = globe->reliefExagg;
-                // M13: THE GATE IS ITS OWN SAMPLER. What the window shows is read from the same
-                // earth cache the camera reads, and the gate answers for it -- so a reserve can
-                // say how much of the planet a window may hold without starving the eye.
-                L.sampler = resMgr.Sampler(("gate." + win->Declared().name).c_str());
-                // THE WINDOW'S VIEWPOINT, LIT BY THE ONE LIGHT. The carried eye E stands at the
-                // other place; the sun as seen from THERE is asked of the solar system at that
-                // place's own planet point (the light at 0,0,0 does the rest) and said in the root
-                // frame, which is the frame this level is drawn in. Not a copy of this frame's sun.
-                const double gyE = E[1] + planetR;
-                const double rE = std::sqrt(E[0] * E[0] + gyE * gyE + E[2] * E[2]);
-                double sunE[3] = {sunRootF[0], sunRootF[1], sunRootF[2]};
-                if (m_solarValid) {
-                    double pE[3], sd[3];
-                    for (int i = 0; i < 3; ++i) {
-                        pE[i] = (east0[i] * E[0] + oDir[i] * gyE + north0[i] * E[2]) / planetR;
+            const int n = static_cast<int>(m_windows.size());
+            if (n > 0) {
+                GlobeLayer::DrosteLevel levels[kMaxWindowChain];
+                WindowBox boxes[kMaxWindowChain];
+                float upWin[kMaxWindowChain * 4] = {};
+                float sunWin[kMaxWindowChain * 3] = {};
+                const double C[3] = {cam.px, cam.py, cam.pz};
+                double E1[3] = {C[0], C[1], C[2]};
+                m_windows.front().carry.TransformPoint(E1[0], E1[1], E1[2]);
+                auto within = [](const double a[3], const double b[3]) {
+                    const double d[3] = {a[0] - b[0], a[1] - b[1], a[2] - b[2]};
+                    return d[0] * d[0] + d[1] * d[1] + d[2] * d[2] < kWindowReachM * kWindowReachM;
+                };
+                double zE1[3] = {0.0, 1.0, 0.0}, sunE1[3] = {0.0, 1.0, 0.0};
+                for (int k = 0; k < n; ++k) {
+                    const scene::WindowLink& W = m_windows[size_t(k)];
+                    const Motor& Gm = W.pull;   // this world -> the true frame
+                    GlobeLayer::DrosteLevel& L = levels[k];
+                    L.rel = k + 1;
+                    double E[3] = {C[0], C[1], C[2]};
+                    W.carry.TransformPoint(E[0], E[1], E[2]);   // the eye, carried this far
+                    for (int i = 0; i < 3; ++i) L.cam[i] = E[i];
+                    L.sigma = 1.0;
+                    for (int c = 0; c < 3; ++c) {
+                        double v[3] = {c == 0 ? 1.0 : 0.0, c == 1 ? 1.0 : 0.0, c == 2 ? 1.0 : 0.0};
+                        Gm.TransformDir(v[0], v[1], v[2]);
+                        for (int r = 0; r < 3; ++r) L.Q[r][c] = v[r];
                     }
-                    sun::SunDirFromPlanetPoint(m_solar, pE, sd);
-                    sunE[0] = sd[0] * east0[0] + sd[1] * east0[1] + sd[2] * east0[2];
-                    sunE[1] = sd[0] * oDir[0] + sd[1] * oDir[1] + sd[2] * oDir[2];
-                    sunE[2] = sd[0] * north0[0] + sd[1] * north0[1] + sd[2] * north0[2];
+                    L.gauge = Placement::Rigid(Gm);
+                    L.gauge.t[0] = L.gauge.t[1] = L.gauge.t[2] = 0.0;
+                    L.reliefExagg = globe->reliefExagg;
+                    // M13: THE GATE IS ITS OWN SAMPLER. What a window shows is read from the same
+                    // earth cache the camera reads, and the gate it is seen through answers for it.
+                    L.sampler = resMgr.Sampler(("gate." + W.gate->Declared().name).c_str());
+                    // WALKED ONLY ALONG THE RAYS THROUGH ITS WINDOWS -- the cull, not the picture --
+                    // and not where the next window shows a deeper world. Its tiles are the tiles
+                    // of its place, chosen once for every world standing there (GlobeLayer).
+                    double pl[5][4];
+                    scene::LinkPlanes(W, view, pl);
+                    for (int p = 0; p < 5; ++p) {
+                        for (int j = 0; j < 4; ++j) L.planes[p][j] = pl[p][j];
+                    }
+                    L.planeCount = 5;
+                    if (k + 1 < n && scene::LinkHole(m_windows[size_t(k + 1)], view, pl)) {
+                        for (int p = 0; p < 5; ++p) {
+                            for (int j = 0; j < 4; ++j) L.hole[p][j] = pl[p][j];
+                        }
+                        L.holeCount = 5;
+                    }
+                    L.share = true;
+                    // THE PLACE'S VIEWPOINT, LIT BY THE ONE LIGHT. The carried eye stands at the
+                    // place; the sun as seen from THERE is asked of the solar system at that place's
+                    // own planet point (the light at 0,0,0 does the rest) and said in the root frame,
+                    // which is the frame this level is drawn in. Not a copy of this frame's sun.
+                    const double gyE = E[1] + planetR;
+                    const double rE = std::sqrt(E[0] * E[0] + gyE * gyE + E[2] * E[2]);
+                    double sunE[3] = {sunRootF[0], sunRootF[1], sunRootF[2]};
+                    if (m_solarValid) {
+                        double pE[3], sd[3];
+                        for (int i = 0; i < 3; ++i) {
+                            pE[i] = (east0[i] * E[0] + oDir[i] * gyE + north0[i] * E[2]) / planetR;
+                        }
+                        sun::SunDirFromPlanetPoint(m_solar, pE, sd);
+                        sunE[0] = sd[0] * east0[0] + sd[1] * east0[1] + sd[2] * east0[2];
+                        sunE[1] = sd[0] * oDir[0] + sd[1] * oDir[1] + sd[2] * oDir[2];
+                        sunE[2] = sd[0] * north0[0] + sd[1] * north0[1] + sd[2] * north0[2];
+                    }
+                    for (int i = 0; i < 3; ++i) L.sun[i] = static_cast<float>(sunE[i]);
+                    // ITS SEA'S RINGS: the camera's where this world's eye stands at the camera's own
+                    // place (a corridor comes back home every other window), set B where it stands
+                    // at the first window's, none elsewhere (the fold, ringless). A level's rings are
+                    // read at its OWN points, so a world back home reads the home rings as they are.
+                    L.bankSet = within(E, C) ? 0
+                              : ((waterBankB && !portal.Valid() && within(E, E1)) ? 1 : -1);
+                    double zE[3];
+                    ZenithAt(E, planetR, zE);   // the place's own zenith, at the carried eye
+                    for (int i = 0; i < 3; ++i) L.skyUp[i] = static_cast<float>(zE[i]);
+                    L.skyDay = -1.0f;
+                    if (k == 0) {
+                        for (int i = 0; i < 3; ++i) {
+                            zE1[i] = zE[i];
+                            sunE1[i] = sunE[i];
+                        }
+                    }
+                    // THE WINDOW WHERE THE TRUE EYE SEES IT: the chain's pull on its box.
+                    WindowBox& B = boxes[k];
+                    double bc[3] = {0.0, 0.0, 0.0};
+                    W.boxInRoot.TransformPoint(bc[0], bc[1], bc[2]);
+                    for (int i = 0; i < 3; ++i) B.centre[i] = static_cast<float>(bc[i] - C[i]);
+                    for (int r = 0; r < 3; ++r) {
+                        double a[3] = {r == 0 ? 1.0 : 0.0, r == 1 ? 1.0 : 0.0, r == 2 ? 1.0 : 0.0};
+                        W.boxInRoot.TransformDir(a[0], a[1], a[2]);   // the box's axis r
+                        for (int c = 0; c < 3; ++c) B.rows[r * 3 + c] = static_cast<float>(a[c]);
+                        B.half[r] = static_cast<float>(0.5 * W.gate->Declared().size[r]);
+                    }
+                    // THE RAY, CARRIED. Everything a window shows is where its rays land: the place's
+                    // zenith and the one sun as seen from there, turned into this frame by the
+                    // rotation this world's geometry is drawn with (Q = rot(Gm), TrueRel), and the
+                    // carried eye's distance from the planet's centre. The sky marches the air from
+                    // there; the hulls seen there are lit from there. No table of any view.
+                    double uW[3] = {zE[0], zE[1], zE[2]};
+                    double sW[3] = {sunE[0], sunE[1], sunE[2]};
+                    Gm.TransformDir(uW[0], uW[1], uW[2]);
+                    Gm.TransformDir(sW[0], sW[1], sW[2]);
+                    for (int i = 0; i < 3; ++i) {
+                        upWin[k * 4 + i] = static_cast<float>(uW[i]);
+                        sunWin[k * 3 + i] = static_cast<float>(sW[i]);
+                    }
+                    upWin[k * 4 + 3] = static_cast<float>(rE);
                 }
-                for (int i = 0; i < 3; ++i) L.sun[i] = static_cast<float>(sunE[i]);
-                // Set B follows this carried eye (above) when the scene built it and no Droste
-                // outer level holds it; otherwise the destination's sea is the fold's, ringless.
-                L.bankSet = (waterBankB && !portal.Valid()) ? 1 : -1;
-                double zE[3];
-                ZenithAt(E, planetR, zE);   // the destination's own zenith, at the carried eye
-                for (int i = 0; i < 3; ++i) L.skyUp[i] = static_cast<float>(zE[i]);
-                L.skyDay = -1.0f;
-                double bc[3] = {0.0, 0.0, 0.0};
-                win->Entry().TransformPoint(bc[0], bc[1], bc[2]);
-                const float centreRel[3] = {static_cast<float>(bc[0] - cam.px),
-                                            static_cast<float>(bc[1] - cam.py),
-                                            static_cast<float>(bc[2] - cam.pz)};
-                float rows[9];
-                for (int r = 0; r < 3; ++r) {
-                    double a[3] = {r == 0 ? 1.0 : 0.0, r == 1 ? 1.0 : 0.0, r == 2 ? 1.0 : 0.0};
-                    win->Entry().TransformDir(a[0], a[1], a[2]);   // the box's axis r, source frame
-                    for (int c = 0; c < 3; ++c) rows[r * 3 + c] = static_cast<float>(a[c]);
-                }
-                const float half[3] = {static_cast<float>(0.5 * win->Declared().size[0]),
-                                       static_cast<float>(0.5 * win->Declared().size[1]),
-                                       static_cast<float>(0.5 * win->Declared().size[2])};
-                globe->SetGate(&L, centreRel, rows, half);
-                // The hulls get the same box: a boat that has gone through is drawn beyond it and
-                // kept only where the window shows it, and one on this side is cut away there.
-                // THE RAY, CARRIED. Everything the window shows is where its rays land: the far
-                // place's zenith and the one sun as seen from there, turned into this frame by the
-                // rotation the window's geometry is drawn with (Q = rot(Gm), TrueRel), and E's
-                // distance from the planet's centre. The sky marches the air from there; the hulls
-                // that went through are lit from there. No table of any view.
-                double uW[3] = {zE[0], zE[1], zE[2]};
-                double sW[3] = {sunE[0], sunE[1], sunE[2]};
-                Gm.TransformDir(uW[0], uW[1], uW[2]);
-                Gm.TransformDir(sW[0], sW[1], sW[2]);
-                const float upWin[3] = {static_cast<float>(uW[0]), static_cast<float>(uW[1]),
-                                        static_cast<float>(uW[2])};
-                const float sunWin[3] = {static_cast<float>(sW[0]), static_cast<float>(sW[1]),
-                                         static_cast<float>(sW[2])};
-                // The hulls get the same box: a boat that has gone through is drawn beyond it and
-                // kept only where the window shows it, and one on this side is cut away there.
-                if (m_A.vesselLayer) m_A.vesselLayer->SetGateWindow(rows, half, centreRel, sunWin, true);
-                if (sky) sky->SetGateWindow(rows, half, centreRel, upWin, static_cast<float>(rE), sunWin, true);
+                // The eye's own world need not walk what the first window shows.
+                double viewHole[5][4];
+                const int viewHoleN = scene::LinkHole(m_windows.front(), view, viewHole) ? 5 : 0;
+                globe->SetGates(levels, boxes, n, viewHole, viewHoleN);
+                if (m_A.vesselLayer) m_A.vesselLayer->SetGateWindows(boxes, sunWin, n);
+                if (sky) sky->SetGateWindows(boxes, upWin, sunWin, n);
                 if (!m_winSkyLogged) {
                     m_winSkyLogged = true;
                     const double kDeg = 180.0 / 3.14159265358979;
                     double cz[3];
-                    const double C[3] = {cam.px, cam.py, cam.pz};
                     ZenithAt(C, planetR, cz);
                     const double elH = std::asin(std::clamp(
                         double(sunRootF[0]) * cz[0] + double(sunRootF[1]) * cz[1] +
                             double(sunRootF[2]) * cz[2], -1.0, 1.0)) * kDeg;
                     const double elT = std::asin(std::clamp(
-                        sunE[0] * zE[0] + sunE[1] * zE[1] + sunE[2] * zE[2], -1.0, 1.0)) * kDeg;
+                        sunE1[0] * zE1[0] + sunE1[1] * zE1[1] + sunE1[2] * zE1[2], -1.0, 1.0)) * kDeg;
                     const double tilt = std::acos(std::clamp(
-                        cz[0] * zE[0] + cz[1] * zE[1] + cz[2] * zE[2], -1.0, 1.0)) * kDeg;
+                        cz[0] * zE1[0] + cz[1] * zE1[1] + cz[2] * zE1[2], -1.0, 1.0)) * kDeg;
+                    const scene::Gateway* g1 = m_windows.front().gate;
                     Log("[gate] '%s': the ground turns %.2f deg between the two places; the one "
-                        "light stands %+.2f deg here and %+.2f deg at %.4f N %.4f W, and the "
+                        "light stands %+.2f deg here and %+.2f deg at %.4f N %.4f E, and the "
                         "window's rays march that sky",
-                        win->Declared().name.c_str(), tilt, elH, elT, win->Declared().toLat,
-                        -win->Declared().toLon);
+                        g1->Declared().name.c_str(), tilt, elH, elT, g1->Chart().latDeg,
+                        g1->Chart().lonDeg);
+                }
+                if (n != m_windowDepthLogged) {
+                    std::string names;
+                    for (const scene::WindowLink& l : m_windows) {
+                        if (!names.empty()) names += " -> ";
+                        names += "'" + l.gate->Declared().name + "'";
+                    }
+                    Log("[gate] the view reaches %d window%s deep: %s", n, n == 1 ? "" : "s",
+                        names.c_str());
+                    m_windowDepthLogged = n;
+                    m_windowRecordsDue = true;
                 }
             } else if (!m_gates.empty()) {
-                globe->SetGate(nullptr, nullptr, nullptr, nullptr);
-                const float z9[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
-                const float z3[3] = {0, 0, 0};
-                if (m_A.vesselLayer) m_A.vesselLayer->SetGateWindow(z9, z3, z3, z3, false);
-                if (sky) sky->SetGateWindow(z9, z3, z3, z3, 0.0f, z3, false);
+                globe->SetGates(nullptr, nullptr, 0, nullptr, 0);
+                if (m_A.vesselLayer) m_A.vesselLayer->SetGateWindows(nullptr, nullptr, 0);
+                if (sky) sky->SetGateWindows(nullptr, nullptr, nullptr, 0);
+                if (m_windowDepthLogged > 0) {
+                    Log("[gate] the view reaches no window");
+                    m_windowDepthLogged = 0;
+                }
             }
         }
         PROF_BEGIN();
         globe->SetView(cam, aspect, viewH, simUnix - startUnix);
         PROF_END(7);
+        // WHAT EACH WORLD COSTS: this walk's records per slot, when the corridor's depth changes and
+        // every ten seconds of frames -- a window is walked only along its own rays, and a place's
+        // tiles are chosen once for every world standing there.
+        if (!m_windows.empty() && (m_windowRecordsDue || (frame % 600u) == 0u)) {
+            std::string per;
+            const size_t n = (std::min)(m_windows.size() + 1u, size_t(GlobeLayer::kMaxLevels));
+            for (size_t k = 0; k < n; ++k) {
+                per += (k ? " " : "") + std::to_string(globe->levelRecords[k]);
+            }
+            Log("[gate] walk records by world (own first): %s", per.c_str());
+            m_windowRecordsDue = false;
+        }
         // M13 step 0 (--water-tiles): what this view's leaves would ask of a water tenant on the
         // cube quadtree -- the count that sizes a sampler's reserve, printed every 30 frames.
         if (opt.waterTiles && (frame % 30u) == 0u) {
@@ -3242,6 +3395,7 @@ bool FrameLoop::Frame() {
     // this loop -- the predicted pose and the globe's walk, the pickers, the chase camera, the
     // gravity-up and speed clamps, the Droste gauge, the bank's centre, the exposure and GIS
     // probes -- still reads `cam` directly (5d moves them, with the scene wired).
+    PublishHulls();   // after the view has decided what it looks through this frame
     const scene::ViewSet viewSet =
         renderer.OneView(cam, static_cast<float>(simUnix - startUnix));
     renderer.RenderFrame(viewSet);

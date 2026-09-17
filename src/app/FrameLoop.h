@@ -247,6 +247,23 @@ private:
     // view's chase camera follows. Heap-held: an Entity is never moved once wired.
     std::vector<std::unique_ptr<scene::Entity>> m_entities;
     std::vector<std::unique_ptr<scene::Gateway>> m_gates;
+    // THE PLACES the gates stand at and lead to, other than the root's own frame: one space per
+    // place (scene/Gateway.h Place), so a body carried to a place stands in the very frame a gate
+    // there was built in. Heap-held: the gates and the carried hulls point into them.
+    std::vector<std::unique_ptr<scene::Place>> m_places;
+    // WHAT THE VIEW SEES THROUGH THE GATES this frame (scene/Gateway.h WindowChain): link 0 is the
+    // first window the view enters, link k the window its view meets k windows in. Rebuilt every
+    // frame from whatever gates exist, so a gate that moves, grows or appears is simply seen.
+    std::vector<scene::WindowLink> m_windows;
+    static constexpr double kWindowReachM = 2.0e4;   // a window further than this is not looked for
+    int m_windowDepthLogged = -1;   // the corridor's depth as last logged (on a change only)
+    bool m_windowRecordsDue = false;   // the depth changed: log the next walk's records per world
+    scene::ViewCone ViewConeOf(const Camera& cam, float aspect, float viewH) const;
+    std::vector<const scene::Gateway*> GateList() const;
+    // Every hull, once per world the view reaches: the eye's own, and each place the chain of
+    // windows shows -- pulled back through the windows, so a boat is seen wherever a window shows
+    // its place, its own reflection down the corridor included.
+    void PublishHulls();
     scene::Entity* m_followed = nullptr;
     // ---- THE EYE'S OWN CROSSING (M13). A chase eye does not teleport with its subject. When the
     // hull goes through a window, the eye keeps standing on this side and chases the hull's

@@ -56,7 +56,11 @@ struct ScenePortal {
 struct SceneGate {
     scene::GateProps p;
     bool hasAt = false;
-    JsonValue at;   // the box's sugar as written (read where the flat frame exists)
+    JsonValue at;     // the box's sugar as written (read where the flat frame exists)
+    bool hasFrom = false;   // fromLat AND fromLon declared: the box stands at that place
+    bool hasTo = false;     // toLat AND toLon declared: it leads there
+    bool hasToAt = false;
+    JsonValue toAt;   // where it comes out, as written (read where the destination's frame exists)
 };
 struct SceneEntity {
     scene::EntityProps p;

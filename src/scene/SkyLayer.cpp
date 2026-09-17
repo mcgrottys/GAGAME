@@ -158,26 +158,23 @@ void SkyLayer::Render(const FrameContext& ctx) {
     // M10: the sky's frame (Sky.hlsl SkyFrameCb, b1): three rotation rows and the sun.
     struct {
         float r0[4], r1[4], r2[4], sun[4];
-        float boxR0[4], boxR1[4], boxR2[4], boxC[4];   // M13: the gate's window (Sky.hlsl)
-        float winUp[4], winSun[4];                     // ...and the viewpoint its rays land in
+        float winA[4];                              // M13: the view's windows (Sky.hlsl)
+        float box[kMaxWindowChain * 16];
+        float winUp[kMaxWindowChain * 4];           // ...and the viewpoint each depth lands in
+        float winSun[kMaxWindowChain * 4];
     } cb{};
     for (int i = 0; i < 3; ++i) {
         cb.r0[i] = m_rot[i];
         cb.r1[i] = m_rot[3 + i];
         cb.r2[i] = m_rot[6 + i];
         cb.sun[i] = m_sun[i];
-        cb.boxR0[i] = m_winBox[i];
-        cb.boxR1[i] = m_winBox[3 + i];
-        cb.boxR2[i] = m_winBox[6 + i];
-        cb.boxC[i] = m_winC[i];
-        cb.winUp[i] = m_winUp[i];
-        cb.winSun[i] = m_winSun[i];
     }
-    cb.boxR0[3] = m_winHalf[0];
-    cb.boxR1[3] = m_winHalf[1];
-    cb.boxR2[3] = m_winHalf[2];
-    cb.boxC[3] = m_winOn ? 1.0f : 0.0f;   // the one flag the shader tests
-    cb.winUp[3] = m_winEyeR;
+    cb.winA[0] = static_cast<float>(m_winN);   // the one number the shader's walk reads
+    for (int k = 0; k < m_winN; ++k) {
+        m_winBoxes[k].Pack(cb.box + k * 16);
+        for (int i = 0; i < 4; ++i) cb.winUp[k * 4 + i] = m_winUp[k * 4 + i];
+        for (int i = 0; i < 3; ++i) cb.winSun[k * 4 + i] = m_winSun[k * 3 + i];
+    }
     ctx.cmd->Pipeline(m_pso.Get());
     ctx.cmd->GraphicsConstants(1, cb);
     ctx.cmd->DrawFullscreen();

@@ -49,7 +49,7 @@ void VesselLayer::SetVessels(const Vessel* const* vessels, const Motor* frames, 
 }
 
 void VesselLayer::SetVessels(const Vessel* const* vessels, const Motor* frames,
-                             const uint8_t* through, int count) {
+                             const uint8_t* depth, int count) {
     m_cpu.clear();
     if (!vessels) return;
     for (int i = 0; i < count; ++i) {
@@ -125,9 +125,9 @@ void VesselLayer::SetVessels(const Vessel* const* vessels, const Motor* frames,
                 default: break;
             }
         }
-        // Every box this hull emitted belongs to the same side of the window as the hull does.
-        if (through && through[i]) {
-            for (size_t k = first; k < m_cpu.size(); ++k) m_cpu[k].through = 1.0f;
+        // Every box this hull emitted belongs to the same world of the window chain as the hull.
+        if (depth && depth[i]) {
+            for (size_t k = first; k < m_cpu.size(); ++k) m_cpu[k].depth = float(depth[i]);
         }
     }
 }
@@ -149,6 +149,7 @@ void Emit(std::vector<VesselLayer::PartCpu>& out, const Motor& hull, const Motor
 
 bool VesselLayer::Occupies(double x, double y, double z, double margin) const {
     for (const PartCpu& p : m_cpu) {
+        if (p.depth != 0.0f) continue;   // a hull seen through a window does not stand here
         double lx = x, ly = y, lz = z;
         p.world.Inverse().TransformPoint(lx, ly, lz);   // the point in the box's own frame
         if (std::abs(lx) <= p.half[0] + margin && std::abs(ly) <= p.half[1] + margin &&
@@ -177,27 +178,25 @@ void VesselLayer::Render(const FrameContext& ctx) {
             m_parts[k].half[i] = m_cpu[k].half[i];
             m_parts[k].opt[i] = 0.0f;
         }
-        m_parts[k].opt[0] = m_cpu[k].through;
+        m_parts[k].opt[0] = m_cpu[k].depth;
     }
     PixScope scope(ctx.cmd->Native(), "vessels (spec -> boxes, motor sandwich on the GPU)");
-    // The constants: the part count and brightness as before, then the gate's window (M13) --
-    // the box's rows with its half extents in w, its eye-relative centre, and the one flag the
-    // shader tests. Appended at the END, mirroring Vessel.hlsl's cbuffer (priors 22).
+    // The constants: the part count and brightness as before, then the view's chain of windows
+    // (M13) -- how deep it goes, each box packed as WindowBox.h says, and the one light as seen
+    // from each world it reaches. Mirrors Vessel.hlsl's cbuffer (priors 22).
     struct {
         float params[4];
-        float r0[4], r1[4], r2[4], c[4];
-        float sun[4];   // the one light as seen from the far place, for hulls that went through
+        float winA[4];                          // x = how many windows deep
+        float box[kMaxWindowChain * 16];
+        float sun[kMaxWindowChain * 4];         // per depth: the light there, in this frame
     } cb{};
     cb.params[0] = static_cast<float>(m_parts.size());
     cb.params[1] = 1.0f;
-    float* rows[3] = {cb.r0, cb.r1, cb.r2};
-    for (int r = 0; r < 3; ++r) {
-        for (int i = 0; i < 3; ++i) rows[r][i] = m_winRows[r * 3 + i];
-        rows[r][3] = m_winHalf[r];
+    cb.winA[0] = static_cast<float>(m_winN);
+    for (int k = 0; k < m_winN; ++k) {
+        m_winBoxes[k].Pack(cb.box + k * 16);
+        for (int i = 0; i < 3; ++i) cb.sun[k * 4 + i] = m_winSun[k * 3 + i];
     }
-    for (int i = 0; i < 3; ++i) cb.c[i] = m_winC[i];
-    cb.c[3] = m_winOn ? 1.0f : 0.0f;
-    for (int i = 0; i < 3; ++i) cb.sun[i] = m_winSun[i];
     ctx.cmd->Pipeline(m_pso.Get());
     ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx.cmd->GraphicsConstants(1, cb);

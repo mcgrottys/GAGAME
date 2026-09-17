@@ -2177,6 +2177,210 @@ bool RunSceneSelfTest() {
             const double eyeAbove[3] = {600.0, 100.0, -10.0};
             const double belowBox[3] = {600.0, -40.0, -10.0};
             g.True(gate.SeenThrough(eyeAbove, belowBox), "[gate] the box is a box: looking down through its top works too");
+            // The walked slab from t = 0 IS the single window's test (the shaders ask only the walk).
+            {
+                bool same = true;
+                for (const double* e : {eyeW, eyeIn, eyeAbove}) {
+                    for (const double* q : {farBehind, besideP, beforeBox, inBox, belowBox}) {
+                        same = same && gate.SeenThroughFrom(gate.EntryInRoot(), e, q, 0.0, nullptr) ==
+                                           gate.SeenThrough(e, q);
+                    }
+                }
+                g.True(same, "[gate] the chain's slab walked from its start is the window's own test, point for point");
+            }
+            // ...and the root-frame window of a gate standing in the root frame is the motor the
+            // window was always drawn by.
+            {
+                double a[3] = {640.0, 3.0, 25.0}, b[3] = {640.0, 3.0, 25.0};
+                gate.Window().TransformPoint(a[0], a[1], a[2]);
+                (gate.DestinationInSource() * gate.Carry()).TransformPoint(b[0], b[1], b[2]);
+                g.Near(std::fabs(a[0] - b[0]) + std::fabs(a[1] - b[1]) + std::fabs(a[2] - b[2]), 0.0, 1e-6,
+                       "[gate] Window() is DestinationInSource * Carry when the box stands in the root frame");
+            }
+
+            // ---- A WAY BACK, AND THE CORRIDOR (2026-09-16). A second gate stands at Haulover -- in
+            // the very space the first carries bodies into -- and leads back to the root frame,
+            // coming out 200 m short of the first box. Nothing about it is special: the window
+            // chain follows a view into the first box and, from its far side, into the second.
+            {
+                Place hv;
+                std::string pwhy;
+                g.True(hv.Build(planetG, R, 25.8997, -80.1239, "place.haulover", &pwhy),
+                       "[gate] Haulover is a place: a tangent frame and its chart");
+                Space::Anchor rootChartG;
+                rootChartG.latDeg = BathyModel::kOrgLat;
+                rootChartG.lonDeg = BathyModel::kOrgLon;
+                Gateway gA, gB;
+                gA.Declared().name = "there";
+                gB.Declared().name = "back";
+                for (Gateway* gg : {&gA, &gB}) {
+                    gg->Declared().size[0] = 120.0;
+                    gg->Declared().size[1] = 30.0;
+                    gg->Declared().size[2] = 10.0;
+                    gg->Declared().toAz = 90.0;
+                }
+                const double atOrigin[3] = {0.0, 0.0, 0.0};
+                const double homeExit[3] = {250.0, 0.0, 0.0};
+                g.True(gA.Build(rootG, hv.space, hv.chart, rootG, 450.0, 0.0, 0.0, 90.0, atOrigin) &&
+                           gB.Build(hv.space, rootG, rootChartG, rootG, 200.0, 0.0, 0.0, 90.0, homeExit),
+                       "[gate] a gate standing at Haulover, back to the root frame, builds beside the one that leads there");
+                // Where they stand and where they lead, in the root frame.
+                double hO[3] = {0.0, 0.0, 0.0};
+                hv.space.To(rootG).ToMotor().TransformPoint(hO[0], hO[1], hO[2]);
+                double a0[3] = {450.0, 0.0, 0.0};
+                gA.Window().TransformPoint(a0[0], a0[1], a0[2]);
+                g.Near(std::fabs(a0[0] - hO[0]) + std::fabs(a0[1] - hO[1]) + std::fabs(a0[2] - hO[2]), 0.0, 1e-6,
+                       "[gate] the first window takes its box's centre to Haulover's origin, root to root");
+                double bIn[3] = {0.0, 0.0, 0.0};
+                gB.EntryInRoot().TransformPoint(bIn[0], bIn[1], bIn[2]);
+                double bW[3] = {bIn[0], bIn[1], bIn[2]};
+                gB.Window().TransformPoint(bW[0], bW[1], bW[2]);
+                g.Near(std::fabs(bW[0] - 250.0) + std::fabs(bW[1]) + std::fabs(bW[2]), 0.0, 1e-6,
+                       "[gate] the way back takes its box's centre, 2054 km off in the root frame, to (250, 0, 0)");
+                g.True(gB.InsideRoot(bIn[0], bIn[1], bIn[2]) && !gB.InsideRoot(bIn[0], bIn[1] + 16.0, bIn[2]),
+                       "[gate] ...and knows its own box in the root frame");
+                // THE LOOP: through both, a point moves 400 m west and nothing turns.
+                const Motor loop = gB.Window() * gA.Window();
+                double lp[3] = {450.0, 0.0, 0.0};
+                loop.TransformPoint(lp[0], lp[1], lp[2]);
+                g.Near(std::fabs(lp[0] - 50.0) + std::fabs(lp[1]) + std::fabs(lp[2]), 0.0, 1e-6,
+                       "[gate] there and back is a translation: the first box's centre lands 400 m short of it");
+                double le[3] = {1.0, 0.0, 0.0}, lu[3] = {0.0, 1.0, 0.0};
+                loop.TransformDir(le[0], le[1], le[2]);
+                loop.TransformDir(lu[0], lu[1], lu[2]);
+                g.Near(std::fabs(le[0] - 1.0) + std::fabs(le[1]) + std::fabs(le[2]) + std::fabs(lu[0]) +
+                           std::fabs(lu[1] - 1.0) + std::fabs(lu[2]), 0.0, 1e-9,
+                       "[gate] ...and turns nothing: east stays east, up stays up");
+                // A BODY GOES ROUND: carried to Haulover, driven 200 m east there, carried home.
+                RigidBody rb;
+                const double o0[3] = {0.0, 0.0, 0.0}, yUp[3] = {0.0, 1.0, 0.0};
+                rb.pose = Motor::Translation(450.0, 0.2, 0.0) * Motor::Rotation(o0, yUp, 90.0 * kPiL / 180.0);
+                rb.Carry(gA.Carry());
+                double c1[3] = {0.0, 0.0, 0.0};
+                rb.pose.TransformPoint(c1[0], c1[1], c1[2]);
+                g.Near(std::fabs(c1[0]) + std::fabs(c1[1] - 0.2) + std::fabs(c1[2]), 0.0, 1e-9,
+                       "[gate] the body stands at Haulover's origin, in Haulover's own frame");
+                rb.pose = Motor::Translation(200.0, 0.0, 0.0) * rb.pose;   // 200 m east, there
+                double c2[3] = {0.0, 0.0, 0.0};
+                rb.pose.TransformPoint(c2[0], c2[1], c2[2]);
+                g.True(gB.Inside(c2[0], c2[1], c2[2]), "[gate] ...and 200 m on it is inside the way back, in the same frame");
+                rb.Carry(gB.Carry());
+                double c3[3] = {0.0, 0.0, 0.0}, f3[3] = {0.0, 0.0, 1.0};
+                rb.pose.TransformPoint(c3[0], c3[1], c3[2]);
+                rb.pose.TransformDir(f3[0], f3[1], f3[2]);
+                g.Near(std::fabs(c3[0] - 250.0) + std::fabs(c3[1] - 0.2) + std::fabs(c3[2]), 0.0, 1e-9,
+                       "[gate] ...and comes home at (250, 0.2, 0), still heading east, 200 m short of the first box");
+                g.Near(std::fabs(f3[0] - 1.0) + std::fabs(f3[1]) + std::fabs(f3[2]), 0.0, 1e-9,
+                       "[gate] ...its bow along +x as it left");
+                // THE CORRIDOR. An eye 350 m short of the first box, looking east at 1080p: the view
+                // enters the first box, meets the second 200 m past it on the far side, the first again
+                // 200 m past that -- windows within windows, as deep as the chain may go.
+                ViewCone vc;
+                vc.eye[0] = 100.0;
+                vc.eye[1] = 2.0;
+                vc.eye[2] = 0.0;
+                const double fx0[3] = {1.0, 0.0, 0.0}, rx0[3] = {0.0, 0.0, -1.0}, ux0[3] = {0.0, 1.0, 0.0};
+                for (int i = 0; i < 3; ++i) {
+                    vc.fwd[i] = fx0[i];
+                    vc.right[i] = rx0[i];
+                    vc.up[i] = ux0[i];
+                }
+                vc.tanY = std::tan(0.45);
+                vc.tanX = vc.tanY * 16.0 / 9.0;
+                vc.pixTan = 2.0 * vc.tanY / 1080.0;
+                const std::vector<const Gateway*> both = {&gA, &gB};
+                const std::vector<WindowLink> chain = WindowChain(both, {}, vc, 7, 2.0e4);
+                bool alternates = chain.size() == 7;
+                double worstNear = 0.0;
+                for (size_t k = 0; k < chain.size(); ++k) {
+                    alternates = alternates && chain[k].visible && chain[k].gate == ((k % 2) ? &gB : &gA);
+                    worstNear = (std::max)(worstNear, std::fabs(chain[k].zNear - (345.0 + 200.0 * double(k))));
+                }
+                g.True(alternates, "[gate] the view goes seven windows deep, there and back in turn");
+                g.Near(worstNear, 0.0, 1e-6, "[gate] ...each window 200 m past the last, where the loop puts it");
+                double e2[3] = {vc.eye[0], vc.eye[1], vc.eye[2]};
+                if (chain.size() > 1) chain[1].carry.TransformPoint(e2[0], e2[1], e2[2]);
+                g.Near(std::fabs(e2[0] + 300.0) + std::fabs(e2[1] - 2.0) + std::fabs(e2[2]), 0.0, 1e-6,
+                       "[gate] ...and two windows in, the eye stands 400 m behind itself, at home");
+                // THE DEPTH OF A POINT: the ordered slab walk the shaders ask.
+                const double pNear[3] = {400.0, 0.0, 0.0}, p1[3] = {500.0, 0.0, 0.0},
+                             p2[3] = {700.0, 0.0, 0.0}, p3[3] = {900.0, 0.0, 0.0},
+                             pBeside[3] = {700.0, 0.0, 300.0}, pOver[3] = {700.0, 50.0, 0.0};
+                g.True(ChainDepth(chain, vc.eye, pNear) == 0 && ChainDepth(chain, vc.eye, p1) == 1 &&
+                           ChainDepth(chain, vc.eye, p2) == 2 && ChainDepth(chain, vc.eye, p3) == 3,
+                       "[gate] a point is as deep as the windows its ray passes: 0 short of the box, then 1, 2, 3");
+                g.True(ChainDepth(chain, vc.eye, pBeside) == 0 && ChainDepth(chain, vc.eye, pOver) == 0,
+                       "[gate] ...and a ray that misses the first window is in the eye's own world, however far");
+                // THE WALK'S CULL is conservative: every point the chain keeps at a depth is inside that
+                // link's planes.
+                {
+                    bool inside = true;
+                    const std::pair<const double*, int> kept[] = {{p1, 1}, {p2, 2}, {p3, 3}};
+                    for (const auto& kp : kept) {
+                        double pl[5][4];
+                        LinkPlanes(chain[size_t(kp.second - 1)], vc, pl);
+                        const double rel[3] = {kp.first[0] - vc.eye[0], kp.first[1] - vc.eye[1], kp.first[2] - vc.eye[2]};
+                        for (int p = 0; p < 5; ++p) {
+                            inside = inside && pl[p][0] * rel[0] + pl[p][1] * rel[1] + pl[p][2] * rel[2] + pl[p][3] >= 0.0;
+                        }
+                    }
+                    g.True(inside, "[gate] ...and every point a window keeps lies inside the cull its world is walked with");
+                }
+                // WHAT A WINDOW HIDES (LinkHole): the world in front of window j is the world at
+                // depth j, and no point inside the window's hole is at that depth -- so that world's
+                // walk may skip the hole and lose nothing. Swept over the corridor's own volume.
+                {
+                    int holed = 0, wrong = 0;
+                    for (int j = 0; j < 3; ++j) {
+                        double hp[5][4];
+                        if (!LinkHole(chain[size_t(j)], vc, hp)) {
+                            ++wrong;
+                            continue;
+                        }
+                        for (double x = 300.0; x <= 1300.0; x += 20.0) {
+                            for (double y = -20.0; y <= 30.0; y += 5.0) {
+                                for (double z = -150.0; z <= 150.0; z += 15.0) {
+                                    const double pt[3] = {x, y, z};
+                                    const double rel[3] = {x - vc.eye[0], y - vc.eye[1], z - vc.eye[2]};
+                                    bool in = true;
+                                    for (int p = 0; p < 5 && in; ++p) {
+                                        in = hp[p][0] * rel[0] + hp[p][1] * rel[1] +
+                                                 hp[p][2] * rel[2] + hp[p][3] >= 0.0;
+                                    }
+                                    if (!in) continue;
+                                    ++holed;
+                                    if (ChainDepth(chain, vc.eye, pt) == j) ++wrong;
+                                }
+                            }
+                        }
+                    }
+                    g.True(holed > 100 && wrong == 0,
+                           "[gate] no point a window hides is at the depth of the world in front of it");
+                    double hp0[5][4];
+                    const double rel1[3] = {p1[0] - vc.eye[0], p1[1] - vc.eye[1], p1[2] - vc.eye[2]};
+                    bool p1Hidden = LinkHole(chain[0], vc, hp0);
+                    for (int p = 0; p < 5 && p1Hidden; ++p) {
+                        p1Hidden = hp0[p][0] * rel1[0] + hp0[p][1] * rel1[1] + hp0[p][2] * rel1[2] +
+                                       hp0[p][3] >= 0.0;
+                    }
+                    g.True(p1Hidden, "[gate] ...and the eye's own world skips the sea just behind the first window");
+                }
+                // THE SCREEN ENDS THE CORRIDOR: from 16 km back the third window is under two pixels tall.
+                ViewCone distant = vc;
+                distant.eye[0] = -16000.0;
+                g.True(WindowChain(both, {}, distant, 7, 2.0e4).size() == 2,
+                       "[gate] from 16 km the corridor ends where a window drops under two pixels");
+                // A WINDOW OWED BUT NOT SEEN: the way back, from the Merrimack, is 2054 km away -- taken,
+                // since the view owes it, but no ray reaches it, nothing past it is looked for, and its
+                // world's walk culls everything.
+                const std::vector<WindowLink> owed = WindowChain(both, {&gB}, vc, 7, 2.0e4);
+                g.True(owed.size() == 1 && owed[0].gate == &gB && !owed[0].visible,
+                       "[gate] an owed window no ray reaches is kept, and ends the chain");
+                double ownPl[5][4];
+                LinkPlanes(owed[0], vc, ownPl);
+                g.True(ownPl[4][0] * 10.0 + ownPl[4][3] < 0.0,
+                       "[gate] ...and its world's walk culls everything");
+            }
         }
     }
 

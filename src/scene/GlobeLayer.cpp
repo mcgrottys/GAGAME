@@ -780,7 +780,9 @@ namespace {
 using WalkParams = GlobeLayer::WalkParams;
 
 // One node: its span and distance, the horizon and frustum culls, the split test; a leaf
-// falls through to leaf(face, u0, v0, size, arc, dist).
+// falls through to leaf(face, u0, v0, size, arc, dist, worlds) -- `worlds` the worlds (bit m for
+// wp.worlds[m]) that take it as their leaf, 1 for a walk of one; `active` the worlds still
+// walking this subtree.
 // M9bk: THE DISTANCE AT WHICH A NODE OF THIS ARC STOPS BEING SPLIT.
 //
 // The morph band's contract (see the leaf lambda) is "fade this LOD out across the band where
@@ -815,83 +817,9 @@ double SplitRange(const WalkParams& wp, double arc) {
     return d;
 }
 
-template <class Leaf>
-void WalkNode(const WalkParams& wp, uint64_t& nodes, int face, int level, double u0,
-              double v0, double size, Leaf& leaf) {
-    ++nodes;
-    const double R = wp.R;
-    double dir[3];
-    CubeDirD(face, u0 + size * 0.5, v0 + size * 0.5, dir);
-    const double arc = (kPi / 2.0) * R / (1 << level);   // ground span of this node, m
-
-    // M6g: node position in the TANGENT frame (doubles; the same frame the camera lives in).
-    const double px = dir[0] * R, py = dir[1] * R, pz = dir[2] * R;
-    const double tx = wp.frameE[0] * px + wp.frameE[1] * py + wp.frameE[2] * pz;
-    const double ty = wp.frameU[0] * px + wp.frameU[1] * py + wp.frameU[2] * pz - R;
-    const double tz = wp.frameN[0] * px + wp.frameN[1] * py + wp.frameN[2] * pz;
-    const double rel[3] = {tx - wp.camPos[0], ty - wp.camPos[1], tz - wp.camPos[2]};
-    const double dist =
-        std::sqrt(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]);
-
-    // Horizon cull in the planet frame (angles, not dots: both can exceed 90 degrees).
-    const double r =
-        std::sqrt(wp.camPlanet[0] * wp.camPlanet[0] + wp.camPlanet[1] * wp.camPlanet[1] +
-                  wp.camPlanet[2] * wp.camPlanet[2]);
-    if (r > R + 10000.0) {
-        const double cosA = (dir[0] * wp.camPlanet[0] + dir[1] * wp.camPlanet[1] +
-                             dir[2] * wp.camPlanet[2]) / r;
-        const double ang = std::acos(std::clamp(cosA, -1.0, 1.0));
-        const double horizon = std::acos(std::clamp(R / r, 0.0, 1.0));
-        const double nodeAng = arc * 0.80 / R;   // generous half-diagonal
-        if (ang > horizon + nodeAng + 0.02) return;
-    } else if (wp.probeCullFar) {
-        // Step 23 probe: the same test below 10 km with a 0.1 rad (640 km) margin -- nothing
-        // visible from under 10 km lies beyond it, so a pixel this cull changes is a ray that
-        // left the shell.
-        const double cosA = (dir[0] * wp.camPlanet[0] + dir[1] * wp.camPlanet[1] +
-                             dir[2] * wp.camPlanet[2]) / r;
-        const double ang = std::acos(std::clamp(cosA, -1.0, 1.0));
-        const double horizon = std::acos(std::clamp(R / r, 0.0, 1.0));
-        const double nodeAng = arc * 0.80 / R;
-        if (ang > horizon + nodeAng + 0.10) return;
-    }
-
-    // Frustum cull: bounding sphere in camera-relative space. Radius covers the node's ground
-    // extent, its relief, and the display exaggeration. (planeCount 0 -- the prefetch walk --
-    // culls nothing: the predicted view is approximate by nature, M6e.)
-    double radius = arc * 0.75 + 9000.0 * (std::max)(1.0f, wp.reliefExagg);
-    if (wp.relief && arc < 50000.0) {
-        // M10 (WalkParams::relief): the node's own height, and what one ETOPO cell can hide --
-        // 150 m of structure, slope over the node's half-span, a tenth of the relief itself.
-        const double h = wp.relief->ElevAt(std::asin(std::clamp(dir[1], -1.0, 1.0)) * 57.29577951308232,
-                                           std::atan2(dir[2], dir[0]) * 57.29577951308232);
-        const double margin = 150.0 + 0.6 * arc + 0.1 * std::abs(h);
-        radius = arc * 0.75 + (std::abs(h) + margin) * (std::max)(1.0f, wp.reliefExagg);
-    }
-    for (int p = 0; p < wp.planeCount; ++p) {
-        const double d = wp.frustum[p][0] * rel[0] + wp.frustum[p][1] * rel[1] +
-                         wp.frustum[p][2] * rel[2] + wp.frustum[p][3];
-        if (d < -radius) return;
-    }
-    // M10: THE PLANET YOU STAND ON hides the world it floats in (wp.occ; zero radius = none).
-    // Exact and conservative: every ray inside the occluder's silhouette cone meets the sphere
-    // no later than the tangent distance sqrt(d^2 - r^2), so a node wholly inside the cone and
-    // wholly beyond that distance is behind the sphere or inside it -- unseen either way. The
-    // node's bound is the frustum's own (relief headroom included), so nothing that could peek
-    // over the limb is ever dropped.
-    if (wp.occ[3] > 0.0) {
-        const double oc[3] = {wp.occ[0] - wp.camPos[0], wp.occ[1] - wp.camPos[1],
-                              wp.occ[2] - wp.camPos[2]};
-        const double dO = std::sqrt(oc[0] * oc[0] + oc[1] * oc[1] + oc[2] * oc[2]);
-        const double rO = wp.occ[3];
-        if (dO > rO && dist > radius && dist - radius >= std::sqrt(dO * dO - rO * rO)) {
-            const double alphaO = std::asin(rO / dO);
-            const double alphaN = std::asin(radius / dist);
-            const double cosB = (oc[0] * rel[0] + oc[1] * rel[1] + oc[2] * rel[2]) / (dO * dist);
-            if (std::acos(std::clamp(cosB, -1.0, 1.0)) + alphaN <= alphaO) return;
-        }
-    }
-
+// Whether a node of this level and arc, `dist` from an eye, is split (WalkNode's rule, said once so
+// every world of a shared walk asks it from its own eye).
+bool SplitAt(const WalkParams& wp, int level, double arc, double dist) {
     // M6j/M8h: the mesh path walks two rungs past CUDEM scale (level 18 = 1.19 m vertex
     // spacing -- level 16's 4.77 m exactly saturated the old 4.8 m bank ring and could
     // not articulate what a finer ring stores; the user's call: more wave vertices).
@@ -943,16 +871,196 @@ void WalkNode(const WalkParams& wp, uint64_t& nodes, int face, int level, double
             split = cell > (std::max)(waveTexel, pxFloor);
         }
     }
+    return split;
+}
 
-    if (split) {
-        const double h = size * 0.5;
-        WalkNode(wp, nodes, face, level + 1, u0, v0, h, leaf);
-        WalkNode(wp, nodes, face, level + 1, u0 + h, v0, h, leaf);
-        WalkNode(wp, nodes, face, level + 1, u0, v0 + h, h, leaf);
-        WalkNode(wp, nodes, face, level + 1, u0 + h, v0 + h, h, leaf);
+// A world's horizon as its own walk asks it (WalkNode): its eye in the planet frame, the horizon's
+// angle from there, and the margin past it -- 0.02 rad above 10 km; below, 0.10 where `farCull`
+// (nothing seen from under 10 km lies 0.1 rad beyond it) and no test otherwise.
+void HorizonOf(const double planet[3], double R, bool farCull, WalkParams::World& w) {
+    for (int i = 0; i < 3; ++i) w.planet[i] = planet[i];
+    w.planetR = std::sqrt(planet[0] * planet[0] + planet[1] * planet[1] + planet[2] * planet[2]);
+    w.horizon = std::acos(std::clamp(R / w.planetR, 0.0, 1.0));
+    w.margin = w.planetR > R + 10000.0 ? 0.02 : (farCull ? 0.10 : -1.0);
+    const double limit = w.horizon + w.margin;
+    w.cosLimit = (w.margin >= 0.0 && limit < kPi) ? std::cos(limit) : -1.0;
+}
+
+template <class Leaf>
+void WalkNode(const WalkParams& wp, uint64_t& nodes, int face, int level, double u0,
+              double v0, double size, Leaf& leaf, uint32_t active = 1u) {
+    ++nodes;
+    const double R = wp.R;
+    double dir[3];
+    CubeDirD(face, u0 + size * 0.5, v0 + size * 0.5, dir);
+    const double arc = (kPi / 2.0) * R / (1 << level);   // ground span of this node, m
+
+    // M6g: node position in the TANGENT frame (doubles; the same frame the camera lives in).
+    const double px = dir[0] * R, py = dir[1] * R, pz = dir[2] * R;
+    const double tx = wp.frameE[0] * px + wp.frameE[1] * py + wp.frameE[2] * pz;
+    const double ty = wp.frameU[0] * px + wp.frameU[1] * py + wp.frameU[2] * pz - R;
+    const double tz = wp.frameN[0] * px + wp.frameN[1] * py + wp.frameN[2] * pz;
+    const double rel[3] = {tx - wp.camPos[0], ty - wp.camPos[1], tz - wp.camPos[2]};
+    const double dist = std::sqrt(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]);
+
+    // Horizon cull in the planet frame (angles, not dots: both can exceed 90 degrees).
+    const double nodeAng = arc * 0.80 / R;   // generous half-diagonal
+    uint32_t live = active;
+    if (wp.worldCount == 0) {
+        const double r =
+            std::sqrt(wp.camPlanet[0] * wp.camPlanet[0] + wp.camPlanet[1] * wp.camPlanet[1] +
+                      wp.camPlanet[2] * wp.camPlanet[2]);
+        if (r > R + 10000.0) {
+            const double cosA = (dir[0] * wp.camPlanet[0] + dir[1] * wp.camPlanet[1] +
+                                 dir[2] * wp.camPlanet[2]) / r;
+            const double ang = std::acos(std::clamp(cosA, -1.0, 1.0));
+            const double horizon = std::acos(std::clamp(R / r, 0.0, 1.0));
+            if (ang > horizon + nodeAng + 0.02) return;
+        } else if (wp.probeCullFar) {
+            // Step 23 probe: the same test below 10 km with a 0.1 rad (640 km) margin -- nothing
+            // visible from under 10 km lies beyond it, so a pixel this cull changes is a ray that
+            // left the shell.
+            const double cosA = (dir[0] * wp.camPlanet[0] + dir[1] * wp.camPlanet[1] +
+                                 dir[2] * wp.camPlanet[2]) / r;
+            const double ang = std::acos(std::clamp(cosA, -1.0, 1.0));
+            const double horizon = std::acos(std::clamp(R / r, 0.0, 1.0));
+            if (ang > horizon + nodeAng + 0.10) return;
+        }
+    } else {
+        // M13: EACH WORLD'S OWN HORIZON, from its own eye by its own walk's rule (HorizonOf).
+        // MEASURED why it cannot be the walk's: asked once from the camera, the corridor's
+        // home worlds kept tiles 700-4000 km out that their own walks never drew, and a ray
+        // under the near sea (discarded there: that water is the window's) met them -- a
+        // 348-pixel strip of far land at the waterline of the second window.
+        for (int m = 0; m < wp.worldCount; ++m) {
+            const GlobeLayer::WalkParams::World& w = wp.worlds[m];
+            if (!(live & (1u << m)) || w.margin < 0.0) continue;
+            const double cosA =
+                (dir[0] * w.planet[0] + dir[1] * w.planet[1] + dir[2] * w.planet[2]) / w.planetR;
+            if (cosA >= w.cosLimit) continue;   // inside the limit, whatever the node's size
+            const double ang = std::acos(std::clamp(cosA, -1.0, 1.0));
+            if (ang > w.horizon + nodeAng + w.margin) live &= ~(1u << m);
+        }
+        if (!live) return;
+    }
+
+    // Frustum cull: bounding sphere in camera-relative space. Radius covers the node's ground
+    // extent, its relief, and the display exaggeration. (planeCount 0 -- the prefetch walk --
+    // culls nothing: the predicted view is approximate by nature, M6e.)
+    double radius = arc * 0.75 + 9000.0 * (std::max)(1.0f, wp.reliefExagg);
+    if (wp.relief && arc < 50000.0) {
+        // M10 (WalkParams::relief): the node's own height, and what one ETOPO cell can hide --
+        // 150 m of structure, slope over the node's half-span, a tenth of the relief itself.
+        const double h = wp.relief->ElevAt(std::asin(std::clamp(dir[1], -1.0, 1.0)) * 57.29577951308232,
+                                           std::atan2(dir[2], dir[0]) * 57.29577951308232);
+        const double margin = 150.0 + 0.6 * arc + 0.1 * std::abs(h);
+        radius = arc * 0.75 + (std::abs(h) + margin) * (std::max)(1.0f, wp.reliefExagg);
+    }
+    uint32_t seen = 1u;
+    if (wp.worldCount > 0) {
+        // The windows' own bound: the node's local relief (as `relief` gives the extra levels),
+        // when this walk's bound is the planet's worst case.
+        double tight = radius;
+        if (!wp.relief && wp.worldRelief && arc < 50000.0) {
+            const double h = wp.worldRelief->ElevAt(
+                std::asin(std::clamp(dir[1], -1.0, 1.0)) * 57.29577951308232,
+                std::atan2(dir[2], dir[0]) * 57.29577951308232);
+            const double margin = 150.0 + 0.6 * arc + 0.1 * std::abs(h);
+            tight = arc * 0.75 + (std::abs(h) + margin) * (std::max)(1.0f, wp.reliefExagg);
+        }
+        // M13: THE WORLDS' OWN CULLS. A node is walked if any world sees it -- inside its planes,
+        // and not wholly inside the cone of the next window it shows (that is a deeper world's).
+        seen = 0u;
+        for (int m = 0; m < wp.worldCount; ++m) {
+            if (!(live & (1u << m))) continue;   // stopped above, or past its horizon
+            const GlobeLayer::WalkParams::World& w = wp.worlds[m];
+            const double q[3] = {rel[0] - w.off[0], rel[1] - w.off[1], rel[2] - w.off[2]};
+            // World 0 of the camera's walk keeps the walk's own bound; a window's world takes
+            // the local one. A plane that is not a plane (the reversed-Z camera's near row is
+            // NaN) culls nothing, exactly as the single walk's `d < -radius` never did.
+            const double r = (m == 0) ? radius : tight;
+            bool in = true;
+            for (int p = 0; p < w.planeCount && in; ++p) {
+                in = !(w.planes[p][0] * q[0] + w.planes[p][1] * q[1] + w.planes[p][2] * q[2] +
+                           w.planes[p][3] < -r);
+            }
+            if (in && w.holeCount > 0) {
+                // Wholly behind the next window: every point of the node's bound inside its cone.
+                bool hidden = true;
+                for (int p = 0; p < w.holeCount && hidden; ++p) {
+                    hidden = w.hole[p][0] * q[0] + w.hole[p][1] * q[1] + w.hole[p][2] * q[2] +
+                                 w.hole[p][3] >= tight;
+                }
+                in = !hidden;
+            }
+            if (in) seen |= 1u << m;
+        }
+        if (!seen) return;
+    } else {
+        for (int p = 0; p < wp.planeCount; ++p) {
+            const double d = wp.frustum[p][0] * rel[0] + wp.frustum[p][1] * rel[1] +
+                             wp.frustum[p][2] * rel[2] + wp.frustum[p][3];
+            if (d < -radius) return;
+        }
+    }
+    // M10: THE PLANET YOU STAND ON hides the world it floats in (wp.occ; zero radius = none).
+    // Exact and conservative: every ray inside the occluder's silhouette cone meets the sphere
+    // no later than the tangent distance sqrt(d^2 - r^2), so a node wholly inside the cone and
+    // wholly beyond that distance is behind the sphere or inside it -- unseen either way. The
+    // node's bound is the frustum's own (relief headroom included), so nothing that could peek
+    // over the limb is ever dropped.
+    if (wp.occ[3] > 0.0) {
+        const double oc[3] = {wp.occ[0] - wp.camPos[0], wp.occ[1] - wp.camPos[1],
+                              wp.occ[2] - wp.camPos[2]};
+        const double dO = std::sqrt(oc[0] * oc[0] + oc[1] * oc[1] + oc[2] * oc[2]);
+        const double rO = wp.occ[3];
+        if (dO > rO && dist > radius && dist - radius >= std::sqrt(dO * dO - rO * rO)) {
+            const double alphaO = std::asin(rO / dO);
+            const double alphaN = std::asin(radius / dist);
+            const double cosB = (oc[0] * rel[0] + oc[1] * rel[1] + oc[2] * rel[2]) / (dO * dist);
+            if (std::acos(std::clamp(cosB, -1.0, 1.0)) + alphaN <= alphaO) return;
+        }
+    }
+
+    // WHERE EACH WORLD STOPS (M13). A walk of one splits as it always did. A walk that draws
+    // several worlds asks the same rule of each world from its own eye: a world that needs this
+    // node no finer takes it as a leaf here -- its own cut, exactly what its own walk would have
+    // drawn -- and the walk goes on down only for the worlds that need more. One traversal, one
+    // set of tile requests, and every world at its own grain.
+    if (wp.worldCount == 0) {
+        if (SplitAt(wp, level, arc, dist)) {
+            const double h = size * 0.5;
+            WalkNode(wp, nodes, face, level + 1, u0, v0, h, leaf, active);
+            WalkNode(wp, nodes, face, level + 1, u0 + h, v0, h, leaf, active);
+            WalkNode(wp, nodes, face, level + 1, u0, v0 + h, h, leaf, active);
+            WalkNode(wp, nodes, face, level + 1, u0 + h, v0 + h, h, leaf, active);
+            return;
+        }
+        leaf(face, u0, v0, size, arc, dist, seen);
         return;
     }
-    leaf(face, u0, v0, size, arc, dist);
+    uint32_t down = 0u, here = 0u;
+    double dHere = 1.0e300;   // the nearest world that stops here: the tile requests' distance
+    for (int m = 0; m < wp.worldCount; ++m) {
+        if (!(seen & (1u << m))) continue;
+        const double* o = wp.worlds[m].off;
+        const double q[3] = {rel[0] - o[0], rel[1] - o[1], rel[2] - o[2]};
+        const double dm = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
+        if (SplitAt(wp, level, arc, dm)) {
+            down |= 1u << m;
+        } else {
+            here |= 1u << m;
+            dHere = (std::min)(dHere, dm);
+        }
+    }
+    if (here) leaf(face, u0, v0, size, arc, dHere, here);
+    if (down) {
+        const double h = size * 0.5;
+        WalkNode(wp, nodes, face, level + 1, u0, v0, h, leaf, down);
+        WalkNode(wp, nodes, face, level + 1, u0 + h, v0, h, leaf, down);
+        WalkNode(wp, nodes, face, level + 1, u0, v0 + h, h, leaf, down);
+        WalkNode(wp, nodes, face, level + 1, u0 + h, v0 + h, h, leaf, down);
+    }
 }
 
 // A leaf's wants, in emission order: emit(tenant, face, mip, u0, v0, u1, v1) once per
@@ -1397,7 +1505,8 @@ void GlobeLayer::PredictWalk() {
     {
         const auto t0 = std::chrono::steady_clock::now();
         uint64_t nodes = 0, leaves = 0;
-        auto leaf = [&](int face, double u0, double v0, double size, double arc, double dist) {
+        auto leaf = [&](int face, double u0, double v0, double size, double arc, double dist,
+                        uint32_t /*seen*/) {
             ++leaves;
             auto emit = [&](int tenant, uint32_t f, uint32_t mip, float u0r, float v0r,
                             float u1r, float v1r) {
@@ -1464,7 +1573,8 @@ GlobeLayer::~GlobeLayer() {
 // the draw records. The prefetch walk's leaf (PredictWorker) records rects instead; both run
 // WalkNode / LeafWants above.
 void GlobeLayer::WalkLevel(const WalkParams& wp, uint32_t slot, int sampler) {
-    auto leaf = [&](int face, double u0, double v0, double size, double arc, double dist) {
+    auto leaf = [&](int face, double u0, double v0, double size, double arc, double dist,
+                    uint32_t seen) {
         ++walkLeaves;
         const auto wt0 = std::chrono::steady_clock::now();
         auto emit = [&](int tenant, uint32_t f, uint32_t mip, float u0r, float v0r, float u1r,
@@ -1486,30 +1596,45 @@ void GlobeLayer::WalkLevel(const WalkParams& wp, uint32_t slot, int sampler) {
         if (dist > morphEnd) ++walkMorphFull;
         else if (dist > morphStart) ++walkMorphPart;
         if (m_msPath) {
-            const size_t base = m_meshlets.size();
-            EmitMeshlets(face, u0, v0, size, arc, morphStart, morphEnd, wp.camPos, slot);
-            // Step 23: the seam table's key. size is 2^-level and u0, v0 are multiples of
-            // it, so the level and the grid position are exact integers. M10: the Droste slot
-            // rides the top bits, so seams never cross levels.
-            if (m_meshlets.size() == base + 16) {
+            // EVERY WORLD THAT STOPS HERE draws this tile (M13), anchored at its own eye and
+            // morphed from it -- the records its own walk would have made. The tile was asked of
+            // the residency once, above, for the nearest of them.
+            const int worlds = wp.worldCount > 0 ? wp.worldCount : 1;
+            size_t first = SIZE_MAX;
+            for (int m = 0; m < worlds; ++m) {
+                if (!(seen & (1u << m))) continue;
+                const uint32_t ws = wp.worldCount > 0 ? wp.worlds[m].slot : slot;
+                double eye[3] = {wp.camPos[0], wp.camPos[1], wp.camPos[2]};
+                if (wp.worldCount > 0) {
+                    for (int k = 0; k < 3; ++k) eye[k] += wp.worlds[m].off[k];
+                }
+                const size_t base = m_meshlets.size();
+                EmitMeshlets(face, u0, v0, size, arc, morphStart, morphEnd, eye, ws);
+                if (m_meshlets.size() != base + 16) break;
+                if (first == SIZE_MAX) first = base;
+                levelRecords[ws] += 16u;
+                // Step 23: the seam table's key. size is 2^-level and u0, v0 are multiples of
+                // it, so the level and the grid position are exact integers. M10: the Droste
+                // slot rides the top bits, so seams never cross levels.
                 const int level = static_cast<int>(std::lround(-std::log2(size)));
                 const uint64_t ix = static_cast<uint64_t>(std::llround(u0 / size));
                 const uint64_t iy = static_cast<uint64_t>(std::llround(v0 / size));
                 // M13 step 0: the two water tiles this leaf would read on the cube quadtree --
                 // its grain (level - 2, one texel per cell) and the morph's target (level - 3).
-                // Addresses only; nothing is mapped or filled.
-                if (waterTileCount) {
+                // Addresses only; nothing is mapped or filled -- and a tile is one tile however
+                // many worlds draw it, so it is counted for the first.
+                if (waterTileCount && base == first) {
                     for (int d = 2; d <= 3; ++d) {
                         const int T = level - d;
                         if (T < 0) continue;
                         const uint64_t tx = ix >> d, ty = iy >> d;
-                        const uint64_t key = (static_cast<uint64_t>(slot) << 61) |
+                        const uint64_t key = (static_cast<uint64_t>(ws) << 61) |
                                              (static_cast<uint64_t>(face) << 58) |
                                              (static_cast<uint64_t>(T) << 52) | (tx << 26) | ty;
                         if (waterTiles.insert(key).second) ++waterTilesByLevel[T & 31];
                     }
                 }
-                m_leafKeys.push_back(LeafKey{(static_cast<uint64_t>(slot) << 61) |
+                m_leafKeys.push_back(LeafKey{(static_cast<uint64_t>(ws) << 61) |
                                                  (static_cast<uint64_t>(face) << 58) |
                                                  (static_cast<uint64_t>(level) << 52) |
                                                  (ix << 26) | iy,
@@ -1537,8 +1662,9 @@ void GlobeLayer::WalkLevel(const WalkParams& wp, uint32_t slot, int sampler) {
     // across binaries, and [gpu] globe.mesh 3.082 -> 2.718 ms whole-rail, 4.981 -> 4.472
     // over the helm phase, p95 5.297 -> 4.801 (fenced; the overlap bench reads the same
     // -0.53 ms helm and takes the shipped loop 4.73 -> 4.30 ms).
+    const uint32_t all = wp.worldCount > 0 ? ((1u << wp.worldCount) - 1u) : 1u;
     for (int i = 0; i < 6; ++i) {
-        WalkNode(wp, walkNodes, (wp.camFace + i) % 6, 0, 0.0, 0.0, 1.0, leaf);
+        WalkNode(wp, walkNodes, (wp.camFace + i) % 6, 0, 0.0, 0.0, 1.0, leaf, all);
     }
 }
 
@@ -1633,9 +1759,104 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_leafKeys.clear();
     m_meshletDrops = 0;
     for (uint32_t& n : levelRecords) n = 0;
-    // The camera's own level: slot 0, the identity gauge -- exactly the walk this always was.
+
+    // ---- M13: A PLACE'S TILES ARE CHOSEN ONCE. A gate's world is the camera's own frame at sigma
+    // 1, so it is the same planet at the same address as any other world whose eye stands at its
+    // place -- the eye's own world, or a depth of a corridor of windows that came back. Those
+    // share ONE walk (WalkParams::worlds): its eye is the first of them, a node is walked if any
+    // of them sees it, asked of the residency once, and drawn once per world that sees it. A
+    // world is said to the walk by its slot, its eye, and its cull -- its own horizon, and its
+    // planes pulled through its gauge.
+    TransportProbeRow probeRows[kMaxLevels * 6];   // M12 step 4d instrument (ProbeTransport)
+    int probeN = 0;
+    const bool windowsOn = m_gateFirst > 0 && m_gateCount > 0 && m_msPath;
+    const size_t nLv = m_msPath ? m_levels.size() : 0u;
+    std::vector<int> drawnBy(nLv, -1);   // the slot of the walk that draws each extra level
+    auto within = [](const double a[3], const double b[3]) {
+        const double d[3] = {a[0] - b[0], a[1] - b[1], a[2] - b[2]};
+        return d[0] * d[0] + d[1] * d[1] + d[2] * d[2] < kShareReachM * kShareReachM;
+    };
+    // ...and only a world whose own walk would split and bound a node as this walk does: the wave
+    // grain and the relief exaggeration are the walk's, not the world's.
+    auto sameRules = [&](const DrosteLevel& M, const WalkParams& walk) {
+        const float grain = M.bankSet < 0 ? 0.0f : m_wp.waveGrainM;
+        return grain == walk.waveGrainM && M.reliefExagg == walk.reliefExagg;
+    };
+    // A level's eye in the planet frame (the walk's camPlanet for an extra level).
+    auto planetOf = [&](const double cam[3], double out[3]) {
+        const double ry = m_radius + cam[1];
+        for (int i = 0; i < 3; ++i) {
+            out[i] = m_surface->up[i] * ry + m_surface->east[i] * cam[0] +
+                     m_surface->north[i] * cam[2];
+        }
+    };
+    auto pullWorld = [&](const DrosteLevel& L, uint32_t slot, const double eye[3],
+                         WalkParams::World& w) {
+        w = WalkParams::World{};
+        w.slot = slot;
+        for (int i = 0; i < 3; ++i) w.off[i] = L.cam[i] - eye[i];
+        // Its horizon, from its own eye: past it at any altitude, as every extra level culls.
+        double planet[3];
+        planetOf(L.cam, planet);
+        HorizonOf(planet, m_wp.R, true, w);
+        // A world seen through windows is walked only along the rays through them (its own
+        // cull); every other level along the camera's.
+        const bool ownCull = L.planeCount > 0;
+        w.planeCount = ownCull ? (std::min)(L.planeCount, 6) : m_wp.planeCount;
+        for (int p = 0; p < w.planeCount; ++p) {
+            const double* n = ownCull ? L.planes[p] : m_wp.frustum[p];
+            // M12 step 4d-2: THE PLANE, PULLED through the level's gauge placement (core/Space.h
+            // PullPlane: n' = R^T n, d' = (d - n . t) / s with t = 0 -- the linear part of
+            // Level(rel), the eye-to-eye translation the gauge identity cancels exactly). The
+            // hand transport it replaces -- n -> Q^T n, d -> d / sigma from the portal's Q and
+            // sigma -- is computed beside it for the record only (ProbeTransport).
+            L.gauge.PullPlane(n, n[3], w.planes[p], w.planes[p][3]);
+            if (probeN < kMaxLevels * 6) {
+                TransportProbeRow& pr = probeRows[probeN++];
+                pr.slot = slot;
+                pr.rel = L.rel;
+                pr.plane = p;
+                for (int j = 0; j < 3; ++j) {
+                    pr.hand[j] = L.Q[0][j] * n[0] + L.Q[1][j] * n[1] + L.Q[2][j] * n[2];
+                }
+                pr.hand[3] = n[3] / L.sigma;
+                for (int j = 0; j < 4; ++j) pr.pulled[j] = w.planes[p][j];
+            }
+        }
+        // ...and what it need not walk: the next window's cone, pulled the same way.
+        w.holeCount = (std::min)(L.holeCount, 5);
+        for (int p = 0; p < w.holeCount; ++p) {
+            L.gauge.PullPlane(L.hole[p], L.hole[p][3], w.hole[p], w.hole[p][3]);
+        }
+    };
+
+    // The camera's own level: slot 0, the identity gauge -- exactly the walk this always was, and
+    // when the view has windows, the walk of every world that stands where the camera does. The
+    // eye's own world need not walk what the first window hides.
+    m_wp.worldCount = 0;
+    if (windowsOn && !m_drosteOn) {
+        WalkParams::World& w0 = m_wp.worlds[0];
+        w0 = WalkParams::World{};
+        HorizonOf(m_wp.camPlanet, m_wp.R, m_wp.probeCullFar, w0);
+        w0.planeCount = m_wp.planeCount;
+        for (int p = 0; p < m_wp.planeCount; ++p) {
+            for (int j = 0; j < 4; ++j) w0.planes[p][j] = m_wp.frustum[p][j];
+        }
+        w0.holeCount = m_viewHoleCount;
+        for (int p = 0; p < m_viewHoleCount; ++p) {
+            for (int j = 0; j < 4; ++j) w0.hole[p][j] = m_viewHole[p][j];
+        }
+        m_wp.worldCount = 1;
+        for (size_t li = 0; li < nLv && m_wp.worldCount < WalkParams::kMaxWorlds; ++li) {
+            const DrosteLevel& L = m_levels[li];
+            if (!L.share || !within(L.cam, m_camPos) || !sameRules(L, m_wp)) continue;
+            WalkParams::World& w = m_wp.worlds[m_wp.worldCount++];
+            pullWorld(L, static_cast<uint32_t>(li + 1), m_camPos, w);
+            drawnBy[li] = 0;
+        }
+        m_wp.worldRelief = m_globe;
+    }
     WalkLevel(m_wp, 0u, m_sampler);
-    levelRecords[0] = static_cast<uint32_t>(m_meshlets.size());
     // ---- M10: THE CYCLE, TAKEN. Each further level is the ROOT walked again under the eye
     // S^-k(C) (Droste.h). Everything the walk reads is scale-free or already in the level's own
     // units: the split rule compares distance to arc, the horizon test is angular, and the
@@ -1644,9 +1865,8 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     // answers every level from one resident set, and a small globe asks only for coarse mips
     // the root already holds. Its records carry their slot, so the mesh stage knows which
     // gauge to rasterize them through.
-    TransportProbeRow probeRows[kMaxLevels * 6];   // M12 step 4d instrument (ProbeTransport)
-    int probeN = 0;
-    for (size_t li = 0; li < m_levels.size() && m_msPath; ++li) {
+    for (size_t li = 0; li < nLv; ++li) {
+        if (drawnBy[li] >= 0) continue;   // another world's walk draws it
         const DrosteLevel& L = m_levels[li];
         const uint32_t slot = static_cast<uint32_t>(li + 1);
         // WHERE THE RECURSION STOPS: a globe under half a pixel has nothing to walk. The
@@ -1657,11 +1877,9 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         const double angR = std::asin((std::min)(m_radius / (std::max)(dC, 1.0), 1.0));
         if (angR < double(m_wp.pixAng) * 0.5) continue;
         WalkParams wp = m_wp;
-        for (int i = 0; i < 3; ++i) {
-            wp.camPos[i] = L.cam[i];
-            wp.camPlanet[i] = m_surface->up[i] * ry + m_surface->east[i] * L.cam[0] +
-                              m_surface->north[i] * L.cam[2];
-        }
+        wp.worldCount = 0;
+        for (int i = 0; i < 3; ++i) wp.camPos[i] = L.cam[i];
+        planetOf(L.cam, wp.camPlanet);
         {
             const double ax = std::abs(wp.camPlanet[0]), ay = std::abs(wp.camPlanet[1]),
                          az = std::abs(wp.camPlanet[2]);
@@ -1681,29 +1899,31 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         // altitude (the step-23 far test: nothing seen from under 10 km lies 0.1 rad beyond it).
         wp.relief = m_globe;
         wp.probeCullFar = true;
-        for (int p = 0; p < m_wp.planeCount; ++p) {
-            const double* n = m_wp.frustum[p];
-            // M12 step 4d-2: THE PLANE, PULLED through the level's gauge placement (core/Space.h
-            // PullPlane: n' = R^T n, d' = (d - n . t) / s with t = 0 -- the linear part of
-            // Level(rel), the eye-to-eye translation the gauge identity cancels exactly). The
-            // hand transport it replaces -- n -> Q^T n, d -> d / sigma from the portal's Q and
-            // sigma -- is computed beside it for the record only (ProbeTransport).
-            L.gauge.PullPlane(n, n[3], wp.frustum[p], wp.frustum[p][3]);
-            TransportProbeRow& pr = probeRows[probeN++];
-            pr.slot = slot;
-            pr.rel = L.rel;
-            pr.plane = p;
-            for (int j = 0; j < 3; ++j) {
-                pr.hand[j] = L.Q[0][j] * n[0] + L.Q[1][j] * n[1] + L.Q[2][j] * n[2];
+        if (L.share) {
+            // A gate's world, and every later one standing at its place: one walk from here.
+            pullWorld(L, slot, L.cam, wp.worlds[0]);
+            wp.worldCount = 1;
+            for (size_t lj = li + 1; lj < nLv && wp.worldCount < WalkParams::kMaxWorlds; ++lj) {
+                const DrosteLevel& M = m_levels[lj];
+                if (drawnBy[lj] >= 0 || !M.share || !within(M.cam, L.cam) ||
+                    !sameRules(M, wp)) {
+                    continue;
+                }
+                WalkParams::World& w = wp.worlds[wp.worldCount++];
+                pullWorld(M, static_cast<uint32_t>(lj + 1), L.cam, w);
+                drawnBy[lj] = static_cast<int>(slot);
             }
-            pr.hand[3] = n[3] / L.sigma;
-            for (int j = 0; j < 4; ++j) pr.pulled[j] = wp.frustum[p][j];
+        } else {
+            WalkParams::World w;
+            pullWorld(L, slot, L.cam, w);
+            wp.planeCount = w.planeCount;
+            for (int p = 0; p < w.planeCount; ++p) {
+                for (int j = 0; j < 4; ++j) wp.frustum[p][j] = w.planes[p][j];
+            }
         }
-        const size_t before = m_meshlets.size();
         // M13: an extra level answers for its own tiles on the shared cache when it names a
         // sampler (a gate's window does); one that does not is part of this view's reading.
         WalkLevel(wp, slot, L.sampler >= 0 ? L.sampler : m_sampler);
-        levelRecords[slot] = static_cast<uint32_t>(m_meshlets.size() - before);
     }
     ProbeTransport(probeRows, probeN);
     if (m_msPath) SeamTable();
@@ -1929,21 +2149,19 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
                       L.bankSet, L.skyUp, L.skyDay);
         }
     }
-    // THE GATE'S WINDOW: only where its level is walked (the mesh path); on the fallback a window
-    // with no destination level behind it would be a hole, so there is no window.
-    const bool gateOn = m_gateSlot > 0 && m_msPath;
-    m_cb.gateA[0] = gateOn ? static_cast<float>(m_gateSlot) : -1.0f;
-    m_cb.gateA[1] = m_cb.gateA[2] = m_cb.gateA[3] = 0.0f;
-    for (int i = 0; i < 3; ++i) m_cb.gateC[i] = m_gateC[i];
-    m_cb.gateC[3] = 0.0f;
-    for (int i = 0; i < 3; ++i) {
-        m_cb.gateR0[i] = m_gateRows[i];
-        m_cb.gateR1[i] = m_gateRows[3 + i];
-        m_cb.gateR2[i] = m_gateRows[6 + i];
+    // THE VIEW'S WINDOWS: only where their levels are walked (the mesh path); on the fallback a
+    // window with no world behind it would be a hole, so there are none.
+    const bool gateOn = m_gateFirst > 0 && m_gateCount > 0 && m_msPath;
+    m_cb.gateA[0] = gateOn ? static_cast<float>(m_gateFirst) : -1.0f;
+    m_cb.gateA[1] = gateOn ? static_cast<float>(m_gateCount) : 0.0f;
+    m_cb.gateA[2] = m_cb.gateA[3] = 0.0f;
+    for (int k = 0; k < kMaxWindowChain; ++k) {
+        if (gateOn && k < m_gateCount) {
+            m_gateBoxes[k].Pack(m_cb.gateBox + k * 16);
+        } else {
+            for (int i = 0; i < 16; ++i) m_cb.gateBox[k * 16 + i] = 0.0f;
+        }
     }
-    m_cb.gateR0[3] = m_gateHalf[0];
-    m_cb.gateR1[3] = m_gateHalf[1];
-    m_cb.gateR2[3] = m_gateHalf[2];
     // M13 step 2: the cascade sea's plane at the eye, for the pixel stage's sub-ring bands.
     for (int i = 0; i < 3; ++i) {
         m_cb.chartOrg[i] = static_cast<float>(m_chartFrame.org[i]);

@@ -22,22 +22,21 @@
 
 cbuffer VesselCb : register(b1) {
     float4 gVsParams;   // x = part count (informational), y = brightness, zw = spare
-    // ---- THE GATE'S WINDOW (M13). A hull that has gone through keeps being DRAWN for an eye
-    // that has not: at its apparent pose (the gate's motor, inverted -- the same map the
-    // window's geometry is drawn by), and clipped here to the box. The eye does not teleport
-    // with its subject; it follows it in and crosses when the box takes it.
-    float4 gVsBoxR0;   // rows: the true camera frame -> the box's own; w = half extent
-    float4 gVsBoxR1;
-    float4 gVsBoxR2;
-    float4 gVsBoxC;    // the box's centre relative to the eye; w != 0 = a window is in view
-    float4 gVsWinSun;  // the one light as seen from the far place: a hull that went through is lit there
+    // ---- THE VIEW'S WINDOWS (M13). A hull is drawn once for every world the view reaches
+    // through the gates -- at the pose that world's geometry is drawn by (its windows' motors,
+    // inverted) -- and each copy keeps only the pixels of its own depth. So a boat that has gone
+    // through a gate the eye has not is seen through that window, and a boat whose place a window
+    // shows again, further down the corridor, is seen there too.
+    float4 gVsWinA;       // x = how many windows deep the view's chain goes (0 = none)
+    float4 gVsBox[28];    // the chain, packed as scene/WindowBox.h packs it
+    float4 gVsWinSun[7];  // per depth: the one light as seen from that world, in this frame
 };
 
 struct VesselPart {
     float4 re;      // motor real part: s, r23, r31, r12   (world = hull * attach)
     float4 du;      // motor dual part: q, t01, t02, t03
     float4 half;    // xyz = half extents (m), w = palette index
-    float4 opt;     // x = 1 when this part is seen THROUGH the window, 0 when it is on this side
+    float4 opt;     // x = the depth of the world this part is drawn in (0 = the eye's own)
 };
 StructuredBuffer<VesselPart> gParts : register(t0, space0);
 
@@ -46,7 +45,7 @@ struct VsOut {
     float3 col : COLOR0;
     float3 n : NORMAL0;
     float3 rel : TEXCOORD0;             // the point, relative to the eye: the slab test's input
-    nointerpolation float through : TEXCOORD1;   // which side of the window this part is on
+    nointerpolation float depth : TEXCOORD1;   // which world of the view's chain this part is in
 };
 
 // A box CENTRED on its motor -- unlike Markers.hlsl's pylon, which stands on its origin. A part's
@@ -96,26 +95,21 @@ VsOut VsMain(uint vid : SV_VertexID) {
     // the origin is as exact here as one at the Merrimack.
     o.pos = mul(float4(world, 1.0f), gViewProj);
     o.rel = world;
-    o.through = p.opt.x;
+    o.depth = p.opt.x;
     return o;
 }
 
 float4 PsMain(VsOut i) : SV_Target {
-    // TWO COMPLEMENTARY DISCARDS, the globe's own rule for its levels (Globe.hlsl GateThrough)
-    // applied to hulls: the window's pixels belong to the other place, every other pixel to this
-    // one. So a hull that has gone through shows only where the eye reaches it THROUGH the box,
-    // and a hull on this side is cut away exactly there -- without the second half, a boat
-    // standing behind the portal would be visible through it, which is the one thing a window
-    // must never do.
-    if (gVsBoxC.w != 0.0f) {
-        const bool seen = GateSlabThrough(i.rel, float3x3(gVsBoxR0.xyz, gVsBoxR1.xyz, gVsBoxR2.xyz),
-                                          float3(gVsBoxR0.w, gVsBoxR1.w, gVsBoxR2.w), gVsBoxC.xyz);
-        if (seen != (i.through > 0.5f)) discard;
-    } else if (i.through > 0.5f) {
-        discard;   // no window this frame: what is through it cannot be seen at all
-    }
+    // THE GLOBE'S OWN RULE FOR ITS WORLDS (Globe.hlsl), applied to hulls: a pixel belongs to the
+    // world whose depth its ray reaches, and to no other. So a hull seen through a window shows
+    // only where the eye reaches it through every box before it, and a hull on this side is cut
+    // away where a window shows another place -- without that half, a boat standing behind the
+    // portal would be visible through it, which is the one thing a window must never do. With no
+    // chain every ray is at depth 0: what is through a window cannot be seen at all.
+    const uint depth = (uint)round(i.depth);
+    if (WindowChainDepth(i.rel, gVsBox, (uint)gVsWinA.x) != depth) discard;
     const float3 n = normalize(i.n);
-    const float3 sunHere = (i.through > 0.5f) ? normalize(gVsWinSun.xyz) : gSunDir.xyz;
+    const float3 sunHere = (depth > 0u) ? normalize(gVsWinSun[depth - 1u].xyz) : gSunDir.xyz;
     const float ndl = saturate(dot(n, sunHere));
     const float sky = 0.5f + 0.5f * n.y;
     // The sky term is generous on purpose. A hull read against bright water with only a sun

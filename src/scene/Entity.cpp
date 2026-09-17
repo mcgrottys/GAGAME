@@ -270,15 +270,23 @@ bool Entity::Teleport(const Gateway& gate, double simUnix) {
     double la0 = 0.0, lo0 = 0.0;
     m_sea.PlaceOf(c0[0], c0[2], la0, lo0);
     const SurfaceSample s0 = m_sea.At(c0[0], c0[2], simUnix);
+    // The pose is said in the gate's own source frame first, when the hull stands in another one
+    // (its own re-centred space, or a place a gate at the far side of another built there).
+    const Space* from = m_space ? m_space : m_o.rootSpace;
+    if (from && from != &gate.Source()) b.Carry(from->To(gate.Source()).ToMotor());
     // ONE PRODUCT: the pose and the momenta, by the gate's motor.
     b.Carry(gate.Carry());
-    m_space = &gate.Destination();
+    // A gate that leads back to the scene's own frame puts the hull back in the root space, where
+    // it started: the root is not a place like the others, it is the frame everything is drawn in.
+    const bool home = m_o.rootSpace && &gate.Destination() == m_o.rootSpace;
+    m_space = home ? nullptr : &gate.Destination();
     m_lastGate = &gate;   // the view follows its subject through THIS window
     ++m_carries;
-    m_spaceInRoot = gate.DestinationInSource();
+    m_spaceInRoot = home ? Motor::Identity() : gate.DestinationInRoot();
     m_gateChart = gate.Chart();      // M13: kept, so a later re-centre knows this hull's chart
     m_ownValid = false;              // the gate's space replaces any the hull carried
-    m_sea.SetChart(&gate.Chart());   // the same sparse water, read at the destination's places
+    // The same sparse water, read at the destination's places.
+    m_sea.SetChart((home && m_o.rootChart) ? m_o.rootChart : &gate.Chart());
     double c1[3] = {0.0, 0.0, 0.0};
     b.pose.TransformPoint(c1[0], c1[1], c1[2]);
     const SurfaceSample s1 = m_sea.At(c1[0], c1[2], simUnix);
@@ -376,6 +384,31 @@ void Entity::Update(const FrameInfo& fi) {
         double latDeg = 0.0, lonDeg = 0.0;
         boatSea.PlaceOf(cg[0], cg[2], latDeg, lonDeg);
         weather->RequestRegion(latDeg, lonDeg, reach + speed * leadS);
+        // ...AND FOR WHERE A GATE IS ABOUT TO PUT IT. A hull closing on a box stands at the box's
+        // far side the frame its centre enters, and the carry seats it on the water there -- so
+        // that water is asked for while the hull is still a second of travel away, at the point
+        // the carry would take the hull to now. A sea the solver owns answers nothing it was not
+        // asked for, and an unanswered one would drop the hull onto it.
+        if (m_o.gates) {
+            const Space* here = m_space ? m_space : m_o.rootSpace;
+            for (const auto& g : *m_o.gates) {
+                if (!g || !g->Valid()) continue;
+                double c[3] = {cg[0], cg[1], cg[2]};
+                if (here && &g->Source() != here) {
+                    const double q[3] = {cg[0], cg[1], cg[2]};
+                    here->To(g->Source()).Apply(q, c);
+                }
+                double l[3] = {c[0], c[1], c[2]};
+                g->Entry().Inverse().TransformPoint(l[0], l[1], l[2]);
+                const double* sz = g->Declared().size;
+                const double half = 0.5 * std::sqrt(sz[0] * sz[0] + sz[1] * sz[1] + sz[2] * sz[2]);
+                if (std::sqrt(l[0] * l[0] + l[1] * l[1] + l[2] * l[2]) > half + reach + speed) continue;
+                g->Carry().TransformPoint(c[0], c[1], c[2]);   // where it would stand, there
+                double laX = 0.0, loX = 0.0;
+                g->Chart().PlaceOf(c[0], c[1], c[2], laX, loX);
+                weather->RequestRegion(laX, loX, reach + speed * leadS);
+            }
+        }
     }
     // M13 step 2: THE HULL'S SPACE FOLLOWS THE HULL -- and it does so BEFORE the set-down and
     // before the step, so the hull is seated on the water of the space it is actually in. Done
@@ -476,12 +509,13 @@ void Entity::Update(const FrameInfo& fi) {
     // meets the gates standing in that space -- the special case for "in the root space" went
     // out with the floating origin, which gives every hull a space of its own.
     if (m_o.gates) {
+        const Space* here = m_space ? m_space : m_o.rootSpace;
         for (const auto& g : *m_o.gates) {
             if (!g || !g->Valid()) continue;
             double cg[3] = {0.0, 0.0, 0.0};
             boat->Body().pose.TransformPoint(cg[0], cg[1], cg[2]);
-            if (m_space) {   // into the gate's source space, through the common ancestor
-                const Placement toSrc = m_space->To(g->Source());
+            if (here && &g->Source() != here) {   // into the gate's source space, through the common ancestor
+                const Placement toSrc = here->To(g->Source());
                 double q[3] = {cg[0], cg[1], cg[2]};
                 toSrc.Apply(q, cg);
             }
@@ -491,32 +525,9 @@ void Entity::Update(const FrameInfo& fi) {
             }
         }
     }
-    PublishDraw();
     StepTelemetry(boatSea, simUnix);
 }
 
-// THE DRAW, published after the step -- and after the VIEW has decided what it is looking
-// through this frame (FrameLoop's chase block sets the carry). It used to happen inside the step,
-// which meant the frame a gate carried the hull it was still drawn in the frame the view had
-// finished with: one frame of a vanished boat, exactly at the moment you are watching it go.
-void Entity::PublishDraw() {
-    VesselLayer* vesselLayer = m_o.vesselLayer;
-    if (!vesselLayer || !m_boat) return;
-    const std::unique_ptr<Vessel>& boat = m_boat;
-    {
-        const Vessel* vs[1] = {boat.get()};
-        // THE FRAME THE HULL IS DRAWN IN. Its own space's placement in the root -- and, while the
-        // view still stands on this side of a gate this hull went through, that placement pulled
-        // back through the window (m_viewPull, the gate's motor inverted: the same map the
-        // window's own geometry is drawn by, so the hull lands on the destination's sea exactly
-        // where the window shows it). `through` carries to the shader which side of the window's
-        // slab test keeps the pixel.
-        const uint8_t through = m_viewThrough ? 1u : 0u;
-        const Motor frame = m_space ? (m_viewPullOn ? m_viewPull * m_spaceInRoot : m_spaceInRoot)
-                                    : (m_viewPullOn ? m_viewPull : Motor::Identity());
-        vesselLayer->SetVessels(vs, &frame, &through, 1);
-    }
-}
 
 void Entity::StepTelemetry(TreeWater& boatSea, double simUnix) {
     VesselLayer* vesselLayer = m_o.vesselLayer;

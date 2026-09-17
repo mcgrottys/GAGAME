@@ -253,10 +253,13 @@
     { "type": "gate", "keys": [
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the gate's name" },
       { "key": "enabled", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "carry bodies through it" },
-      { "key": "at", "type": "similarity", "field": "placement", "quantity": "unknown", "unit": "", "default": null, "optional": true, "reload": "restart", "doc": "the box's centre and heading in the flat world frame: {x, alt, z, az}" },
+      { "key": "fromLat", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": null, "optional": true, "reload": "restart", "doc": "the latitude of the place the box stands at (with fromLon; absent: the scene's own frame)" },
+      { "key": "fromLon", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": null, "optional": true, "reload": "restart", "doc": "the longitude of that place" },
+      { "key": "at", "type": "similarity", "field": "placement", "quantity": "unknown", "unit": "", "default": null, "optional": true, "reload": "restart", "doc": "the box's centre and heading in its place's flat frame: {x, alt, z, az}" },
       { "key": "size", "type": "vec3", "field": "double3", "quantity": "length", "unit": "m", "default": [60, 30, 8], "reload": "restart", "doc": "the box: across, up, and along its heading" },
-      { "key": "toLat", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "the destination's latitude" },
-      { "key": "toLon", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "the destination's longitude" },
+      { "key": "toLat", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": null, "optional": true, "reload": "restart", "doc": "the destination's latitude (with toLon; absent: the scene's own frame)" },
+      { "key": "toLon", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": null, "optional": true, "reload": "restart", "doc": "the destination's longitude" },
+      { "key": "toAt", "type": "similarity", "field": "placement", "quantity": "unknown", "unit": "", "default": null, "optional": true, "reload": "restart", "doc": "where the box's centre comes out, in the destination's flat frame: {x, alt, z}" },
       { "key": "toAz", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "the compass heading the box's forward face leaves along at the destination" }
     ] },
     { "type": "entity", "keys": [

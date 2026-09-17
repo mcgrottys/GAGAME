@@ -4,6 +4,7 @@
 
 #include "hal/Gpu.h"
 #include "scene/Layer.h"
+#include "scene/WindowBox.h"
 
 #include <string>
 
@@ -33,23 +34,19 @@ public:
         for (int i = 0; i < 3; ++i) m_sun[i] = sun[i];
     }
 
-    // M13: THE GATE'S WINDOW HAS A SKY -- the sky of the place its rays land in. A window is a
-    // transform on the whole view, so the backdrop runs the same slab test the globe clips with,
-    // and a pixel inside it marches the air from the far place: its zenith, the one sun as seen
-    // from there, and its distance from the planet's centre, all said in this frame.
-    // `on` false is the shipped pass, byte for byte.
-    void SetGateWindow(const float boxRows[9], const float boxHalf[3], const float boxCentre[3],
-                       const float up[3], float eyeRadiusM, const float sun[3], bool on) {
-        m_winOn = on;
-        if (!on) return;
-        for (int i = 0; i < 9; ++i) m_winBox[i] = boxRows[i];
-        for (int i = 0; i < 3; ++i) {
-            m_winHalf[i] = boxHalf[i];
-            m_winC[i] = boxCentre[i];
-            m_winUp[i] = up[i];
-            m_winSun[i] = sun[i];
+    // M13: A WINDOW HAS A SKY -- the sky of the place its rays land in. A window is a transform on
+    // the whole view, so the backdrop walks the same chain of slab tests the globe clips with, and
+    // a pixel k windows deep marches the air from the k-th place: its zenith, the one sun as seen
+    // from there, and its distance from the planet's centre (up4[k*4+3]), all said in this frame.
+    // n = 0 is the shipped pass, byte for byte.
+    void SetGateWindows(const WindowBox* boxes, const float* up4, const float* suns3, int n) {
+        const bool any = boxes && up4 && suns3 && n > 0;
+        m_winN = any ? (n < kMaxWindowChain ? n : kMaxWindowChain) : 0;
+        for (int k = 0; k < m_winN; ++k) {
+            m_winBoxes[k] = boxes[k];
+            for (int i = 0; i < 4; ++i) m_winUp[k * 4 + i] = up4[k * 4 + i];
+            for (int i = 0; i < 3; ++i) m_winSun[k * 3 + i] = suns3[k * 3 + i];
         }
-        m_winEyeR = eyeRadiusM;
     }
 
     // ---- THE AIR'S TABLE (M13, Atmosphere.hlsli / SkyLut.hlsl) -----------------------------
@@ -73,13 +70,10 @@ private:
     hal::Pso m_pso;
     float m_rot[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
     float m_sun[3] = {0.0f, 1.0f, 0.0f};
-    bool m_winOn = false;
-    float m_winBox[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
-    float m_winHalf[3] = {0.0f, 0.0f, 0.0f};
-    float m_winC[3] = {0.0f, 0.0f, 0.0f};
-    float m_winUp[3] = {0.0f, 1.0f, 0.0f};
-    float m_winSun[3] = {0.0f, 1.0f, 0.0f};
-    float m_winEyeR = 6371000.0f;
+    int m_winN = 0;
+    WindowBox m_winBoxes[kMaxWindowChain];
+    float m_winUp[kMaxWindowChain * 4] = {};
+    float m_winSun[kMaxWindowChain * 3] = {};
 
     // The table, its UAV, and the kernel that fills it -- and, under --sky-probe only, the two
     // transmittance tables (float32, so the comparison is not the storage's).
