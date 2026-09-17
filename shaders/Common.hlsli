@@ -30,9 +30,9 @@ cbuffer SceneCb : register(b0) {
     float4   gViewport;      // w, h, 1/w, 1/h
     float4   gMisc;          // x water level (m above datum -- the tide), yz = the SUN's disc
                              // (cos of 1.15x and 0.85x its true angular radius, M9bi), w spare
-    float4   gSkyLut;        // M13: the AIR's two tables and this eye's place in it:
-                             // x = multiple-scattering slot, w = transmittance slot (numbers;
-                             // -1 = none), y = the planet's radius, z = the eye's (metres)
+    float4   gSkyLut;        // M13: the AIR's table and this eye's place in it:
+                             // x = multiple-scattering slot (a number; -1 = none),
+                             // y = the planet's radius, z = the eye's (metres), w spare
 };
 
 #define gTime        (gParams0.x)
@@ -156,24 +156,49 @@ float3 ViewRay(float2 ndc) {
     return normalize(gCamFwd.xyz + ndc.x * gCamRight.xyz + ndc.y * gCamUp.xyz);
 }
 
-// ---- THE GATE'S SLAB, ONCE (scene/Gateway.cpp SeenThrough, line for line) --------------------
-// The segment from the eye (the origin of the true camera frame) to p reaches the box's entry at
-// or before p: p is seen THROUGH the window. The rows carry a camera-frame vector into the box's
-// own frame, h is its half extent, c its centre relative to the eye. Declared here because TWO
-// passes ask it now -- the globe, for which level a surface pixel belongs to, and the sky, for
-// whose sky a backdrop pixel belongs to -- and a window whose two passes disagreed about its edge
-// would show a seam along the box.
-bool GateSlabThrough(float3 p, float3x3 R, float3 h, float3 c) {
-    const float3 e = mul(R, -c);
+// ---- THE GATES' SLAB, ONCE (scene/Gateway.cpp SeenThroughFrom, line for line) -----------------
+// The segment from the eye (the origin of the true camera frame) to p, walked from tStart on,
+// enters the box at or before p: p is seen THROUGH the window. One window of a chain, packed as
+// scene/WindowBox.h packs it: rows 0..2 carry a camera-frame vector into the box's own frame with
+// the half extent in w, row 3 is the box's centre relative to the eye. Declared here because THREE
+// passes ask it -- the globe (which world a surface pixel belongs to), the sky (whose sky a backdrop
+// pixel belongs to) and the hulls -- and passes that disagreed about an edge would show a seam.
+// With tStart 0 this is the single window's test exactly: tEnter clamped at 0 is <= tExit iff
+// tEnter <= tExit and tExit >= 0.
+bool GateSlabFrom(float3 p, float4 r0, float4 r1, float4 r2, float4 c, float tStart,
+                  out float tIn) {
+    const float3x3 R = float3x3(r0.xyz, r1.xyz, r2.xyz);
+    const float3 h = float3(r0.w, r1.w, r2.w);
+    const float3 e = mul(R, -c.xyz);
     float3 d = mul(R, p);
     d = lerp(d, float3(1e-12f, 1e-12f, 1e-12f), float3(abs(d) < 1e-12f));
     const float3 t1 = (-h - e) / d;
     const float3 t2 = (h - e) / d;
     const float3 tn = min(t1, t2);
     const float3 tf = max(t1, t2);
-    const float tEnter = max(max(tn.x, tn.y), tn.z);
+    // The ray is in this window's world only from where it entered the last one.
+    const float tEnter = max(max(max(tn.x, tn.y), tn.z), tStart);
     const float tExit = min(min(tf.x, tf.y), tf.z);
-    return tEnter <= tExit && tExit >= 0.0f && tEnter <= 1.0f;
+    tIn = tEnter;
+    return tEnter <= tExit && tEnter <= 1.0f;
+}
+
+// THE DEPTH OF A POINT: how many windows of the view's chain the segment from the eye to p passes,
+// in order (scene/Gateway.cpp ChainDepth) -- the world p belongs to, 0 being the eye's own. A world
+// keeps exactly the pixels of its own depth, so the windows within windows are one rule, and the
+// view through each is the world behind glass: rasterized from the true eye, never a picture.
+static const uint kWindowChain = 7u;
+uint WindowChainDepth(float3 p, float4 boxes[28], uint n) {
+    float t = 0.0f;
+    uint k = 0u;
+    const uint m = min(n, kWindowChain);
+    [loop] for (; k < m; ++k) {
+        const uint b = k * 4u;
+        float tIn;
+        if (!GateSlabFrom(p, boxes[b], boxes[b + 1u], boxes[b + 2u], boxes[b + 3u], t, tIn)) break;
+        t = tIn;
+    }
+    return k;
 }
 
 // ---- THE SKY, ONCE (M13) --------------------------------------------------------------------
@@ -183,7 +208,7 @@ bool GateSlabThrough(float3 p, float3x3 R, float3 h, float3 c) {
 // its own zenith, sun and eye radius through the three macros, exactly as it already did for the
 // sun; the march then IS that place's sky, with nothing else to tell it.
 //
-// Without the air's tables -- a tool, a test, a pass that runs before the sky layer, or an eye
+// Without the air's table -- a tool, a test, a pass that runs before the sky layer, or an eye
 // above the air, where the limb shell owns the backdrop -- the shipped gradient answers, byte for
 // byte. A missing sky is a wrong sky, not a black one.
 #ifndef GA_SKY_EYE_R
@@ -199,7 +224,7 @@ static const uint kSkySteps = 6u;   // exponentially spaced (Atmosphere.hlsli At
 // both.
 static const float kSkyAirCeilingM = 60000.0f;
 bool SkyAirOn(float eyeR) {
-    return gSkyLut.x >= 0.0f && gSkyLut.w >= 0.0f && eyeR < gSkyLut.y + kSkyAirCeilingM;
+    return gSkyLut.x >= 0.0f && eyeR < gSkyLut.y + kSkyAirCeilingM;
 }
 
 // The air along a ray from a viewpoint: its zenith, its sun, its distance from the planet centre.
@@ -207,15 +232,15 @@ float3 SkyAirAt(float3 dir, float3 up, float3 sunDir, float eyeR) {
     float3 fms;
     const float Rb = gSkyLut.y;
     const float r = clamp(eyeR, Rb + 1.0f, Rb + kAtmTopM - 1000.0f);
-    return AtmRay(r, dir, up, sunDir, kSkySteps, uint(gSkyLut.w), int(gSkyLut.x), Rb,
-                  Rb + kAtmTopM, fms) * kAtmGain;
+    return AtmRay(r, dir, up, sunDir, kSkySteps, int(gSkyLut.x), Rb, Rb + kAtmTopM, fms) *
+           kAtmGain;
 }
 
 // THE SUN'S OWN COLOUR through the air from a viewpoint -- why a setting sun is red.
 float3 SunThroughAirAt(float3 up, float3 sunDir, float eyeR) {
     const float Rb = gSkyLut.y;
     const float r = clamp(eyeR, Rb + 1.0f, Rb + kAtmTopM - 1000.0f);
-    return AtmSunT(uint(gSkyLut.w), r, clamp(dot(sunDir, up), -1.0f, 1.0f), Rb, Rb + kAtmTopM);
+    return AtmSunT(r, clamp(dot(sunDir, up), -1.0f, 1.0f), Rb);
 }
 float3 SunThroughAir() {
     return SkyAirOn(GA_SKY_EYE_R) ? SunThroughAirAt(GA_SKY_UP, GA_SUN_DIR, GA_SKY_EYE_R)

@@ -30,10 +30,12 @@
 //  EVERY RAY IS MARCHED WHERE IT IS. There is no table of the view: a pixel's ray, a mirror's, and
 //  a ray a gate carried to the other side of the planet each integrate the air from their own
 //  origin under the one sun, so a window onto Haulover shows Haulover's sky without being told
-//  to. The only tables are properties of the AIR, the same for every ray on the planet: what it
-//  lets through toward the sun from a height at an angle, and what the scattering orders past the
-//  first add there. (An earlier version of this file also tabulated the sky as seen from the
-//  camera; that bakes the sky for ONE eye, and the portal showed the Merrimack's sunset at noon.)
+//  to. What the sun delivers to each step is a CLOSED FORM -- Chapman's function for the two
+//  exponential components, an exact shell integral for ozone's tent -- so the march reads no
+//  texture for it. The one table left is a property of the AIR, the same for every ray on the
+//  planet: what the scattering orders past the first add at a height under a sun angle. (An
+//  earlier version of this file also tabulated the sky as seen from the camera; that bakes the
+//  sky for ONE eye, and the portal showed the Merrimack's sunset at noon.)
 // ================================================================================================
 #ifndef GA_ATMOSPHERE_HLSLI
 #define GA_ATMOSPHERE_HLSLI
@@ -85,21 +87,12 @@ float AtmRaySphere(float r, float mu, float R) {
     return (t0 < 0.0f) ? t1 : t0;
 }
 
-// ---- the transmittance table's parameterisation (Bruneton & Neyret 2008) ---------------------
+// ---- the transmittance grid (Bruneton & Neyret 2008): --sky-probe's two tables ---------------
 // r is the distance from the planet's centre, mu the cosine of the ray's zenith angle. The
 // mapping spends its resolution where the air does: rho is the ground-parallel distance to the
 // horizon, H the atmosphere's own, and the ray's length to the top is measured between its
-// shortest and longest possible values at that altitude.
-float2 AtmTransUv(float r, float mu, float Rb, float Rt) {
-    const float H = sqrt(max(Rt * Rt - Rb * Rb, 1e-6f));
-    const float rho = sqrt(max(r * r - Rb * Rb, 0.0f));
-    const float disc = r * r * (mu * mu - 1.0f) + Rt * Rt;
-    const float d = max(0.0f, -r * mu + sqrt(max(disc, 0.0f)));
-    const float dMin = Rt - r;
-    const float dMax = rho + H;
-    return float2(saturate((d - dMin) / max(dMax - dMin, 1e-6f)), saturate(rho / H));
-}
-
+// shortest and longest possible values at that altitude. Every texel is a ray that clears the
+// ground. The runtime reads no such table: the sun's transmittance is a closed form (below).
 void AtmTransParams(float2 uv, float Rb, float Rt, out float r, out float mu) {
     const float H = sqrt(max(Rt * Rt - Rb * Rb, 1e-6f));
     const float rho = H * saturate(uv.y);
@@ -121,12 +114,12 @@ void AtmMsParams(float2 uv, float Rb, float Rt, out float r, out float muS) {
 
 // ---- THE RAY, MARCHED (M13). No table of the view: every ray -- a pixel's, a mirror's, one the
 // gate carried to the other side of the planet -- integrates the air from wherever it actually is,
-// under the one sun. What IS tabulated is a property of the air alone, identical for every ray on
-// the planet: what it lets through toward the sun from a height at an angle (transmittance), and
-// what every scattering order past the first adds there (multiple scattering).
+// under the one sun. What the sun delivers to each step is the closed form above; what IS
+// tabulated is a property of the air alone, identical for every ray on the planet: what every
+// scattering order past the first adds at a height under a sun angle (multiple scattering).
 //
-// MANUAL BILINEAR, NOT SampleLevel -- priors 1: the sea shades in the DOMAIN stage and the tables
-// are built in COMPUTE, and a bindless sample outside the pixel stage returns zero on this adapter.
+// MANUAL BILINEAR, NOT SampleLevel -- priors 1: the sea shades in the DOMAIN stage and the table
+// is built in COMPUTE, and a bindless sample outside the pixel stage returns zero on this adapter.
 float3 AtmFetch(uint slot, float2 uv, float2 dims) {
     const float2 tf = uv * dims - 0.5f;
     const float2 t0 = floor(tf);
@@ -139,7 +132,6 @@ float3 AtmFetch(uint slot, float2 uv, float2 dims) {
     }
     return acc;
 }
-static const float2 kAtmTransDims = float2(256.0f, 64.0f);
 static const float2 kAtmMsDims = float2(32.0f, 32.0f);
 
 // THE ONE DECLARED GAIN: the march answers in the model's units (per unit solar irradiance); the
@@ -147,18 +139,97 @@ static const float2 kAtmMsDims = float2(32.0f, 32.0f);
 // against the sky the engine drew at noon. It is the only number here that is not a measurement.
 static const float kAtmGain = 18.0f;
 
-// What reaches a point at radius r from the sun at zenith cosine muS: the air's table, and nothing
-// at all when the planet stands in the way -- which is what makes dusk.
-float3 AtmSunT(uint transSlot, float r, float muS, float Rb, float Rt) {
-    if (AtmRaySphere(r, muS, Rb) > 0.0f) return 0.0f;
-    return AtmFetch(transSlot, AtmTransUv(r, muS, Rb, Rt), kAtmTransDims);
+// ---- WHAT THE SUN DELIVERS, IN CLOSED FORM -----------------------------------------------------
+// What reaches a point from the sun is exp(-tau), tau the air's column along the sun ray, and the
+// column has a closed form for each of the three components -- so no step of any ray reads a
+// texture for it, and --sky-probe holds the form against the brute-force integral on the device.
+//
+// EXPONENTIAL AIR (Rayleigh, aerosols). The column above radius r along a ray at zenith angle z is
+// H rho(r) ch(x, z), x = r / H: CHAPMAN's grazing-incidence function (Chapman 1931). Its standard
+// closed form, the parabolic expansion about the ray's tangent point,
+//     ch(x, z) = sqrt(pi x / 2) exp(x cos^2 z / 2) erfc(sqrt(x / 2) cos z),        z <= 90 deg,
+// errs by -1/x at the zenith and -3/(8x) at the horizon: 0.13 % and 0.05 % for this air's
+// Rayleigh x ~ 800, less for the aerosols' ~5300. The exponential and the erfc are never formed
+// apart (each alone overflows or underflows a float); their product is the scaled complementary
+// error function erfcx(y) = t exp(E(t)), t = 1/(1 + y/2), with E the Chebyshev polynomial of
+// Numerical Recipes' erfcc (Press et al., 2nd ed., s6.2: fractional error under 1.2e-7
+// everywhere), right in both limits -- and E is added to the density's own exponent, so the
+// column costs one exponential. Past the horizontal the ray sinks to its tangent radius b and
+// climbs again; its column is the published reflection -- twice the tangent point's whole
+// grazing column, H rho(b) 2 sqrt(pi b / 2H), less what the reversed ray would see -- which meets
+// the upper form exactly at z = 90 deg, so the column is one continuous function of the angle.
+//
+// OZONE is not exponential -- a tent, 15 km either side of 25 km -- and its column is closed too.
+// Through spherical shells, a ray whose tangent radius is b crosses the shell at radius K with
+// airmass K / sqrt(K^2 - b^2) = [K / sqrt(K + b)] (K - b)^(-1/2). The bracket moves by under
+// 0.2 % across the layer for any ray, so it is taken at the layer's centre; what remains -- the
+// tent against (K - b)^(-1/2) -- integrates exactly, because the tent is three ramps (weights
+// 1, -2, 1 at its three knots) and each ramp's integral from b out to b + x is
+//     psi = (2/3) e (d + e sqrt(p+) + 2 (-p)+),   p = K - b, d = x - p, e = sqrt(x) - sqrt(p+)
+// clamped at zero. That holds for the steepest ray and the most grazing alike, where the usual
+// single-shell airmass diverges. A rising ray meets the layer beyond its own radius (all of it
+// past b, less the part between b and r); a sinking one crosses the part between b and r twice.
+//
+// THE PLANET blocks a sinking ray whose tangent radius is inside it. That is the whole shadow
+// test -- which is what makes dusk -- and it needs no intersection.
+static const float kAtmSqrtPi = 1.77245385f;
+static const float2 kAtmHs = float2(kAtmRayH, kAtmMieH);   // (the compiler folds these three)
+static const float2 kAtmInvHs = 1.0f / kAtmHs;
+static const float2 kAtmRootHalfInvH = sqrt(0.5f * kAtmInvHs);   // sqrt(x / 2) = sqrt(r) times this
+
+// E(t) in erfcx(y) = t exp(E(t)).
+float2 AtmErfcxExponent(float2 t) {
+    return -1.26551223f +
+           t * (1.00002368f +
+           t * (0.37409196f +
+           t * (0.09678418f +
+           t * (-0.18628806f +
+           t * (0.27886807f +
+           t * (-1.13520398f +
+           t * (1.48851587f +
+           t * (-0.82215223f +
+           t * 0.17087277f))))))));
+}
+
+// What reaches a point at radius r from the sun at zenith cosine muS.
+float3 AtmSunT(float r, float muS, float Rb) {
+    const float h = max(r - Rb, 0.0f);
+    const float sink = (muS < 0.0f) ? 1.0f : 0.0f;
+    const float s = sqrt(max(1.0f - muS * muS, 0.0f));
+    const float b = r * s;                          // the ray's tangent radius
+    const float drop = r * muS * muS / (1.0f + s);  // r - b, without cancellation
+
+    // Rayleigh and aerosols together: H rho(r) ch(x, |z|), and the tangent point's full column
+    // (whose exponent is never positive for a ray the planet lets through).
+    const float2 sx = sqrt(r) * kAtmRootHalfInvH;   // sqrt(x / 2)
+    const float2 t = 1.0f / (1.0f + 0.5f * abs(muS) * sx);
+    const float2 up = kAtmHs * kAtmSqrtPi * sx * t * exp(AtmErfcxExponent(t) - h * kAtmInvHs);
+    const float2 tangent = 2.0f * kAtmHs * kAtmSqrtPi * sqrt(b) * kAtmRootHalfInvH *
+                           exp(min((drop - h) * kAtmInvHs, 0.0f));
+    const float2 col = up + sink * (tangent - 2.0f * up);
+
+    // Ozone: the three ramps from b out to the layer's top, and from b out to r.
+    const float R2 = Rb + kAtmOzoC;
+    const float3 knots = float3(R2 - kAtmOzoW, R2, R2 + kAtmOzoW);
+    const float3 p = knots - b;
+    const float3 lam = sqrt(max(p, 0.0f));
+    const float3 neg = 2.0f * max(-p, 0.0f);
+    const float3 eOut = max(lam.z - lam, 0.0f);
+    const float3 eIn = max(sqrt(drop) - lam, 0.0f);
+    const float3 psiOut = eOut * ((knots.z - knots) + lam * eOut + neg);
+    const float3 psiIn = eIn * ((r - knots) + lam * eIn + neg);
+    const float ozo = (0.6666667f / kAtmOzoW) * R2 * rsqrt(R2 + b) *
+                      dot(float3(1.0f, -2.0f, 1.0f), psiOut + (2.0f * sink - 1.0f) * psiIn);
+
+    const float3 tau = kAtmRayS * col.x + kAtmMieE.xxx * col.y + kAtmOzoA * ozo;
+    return (1.0f - sink * step(b, Rb)) * exp(-tau);
 }
 
 // The radiance along `dir` from a point at radius r whose zenith is `up`, lit by `sunDir`.
 // msSlot < 0 marches single scattering only (the multiple-scattering table is built with it) and
 // returns in `fms` the isotropic response that table needs.
-float3 AtmRay(float r, float3 dir, float3 up, float3 sunDir, uint steps, uint transSlot,
-              int msSlot, float Rb, float Rt, out float3 fms) {
+float3 AtmRay(float r, float3 dir, float3 up, float3 sunDir, uint steps, int msSlot, float Rb,
+              float Rt, out float3 fms) {
     fms = 0.0f;
     const float mu = dot(dir, up);
     const float muS = dot(sunDir, up);
@@ -196,7 +267,7 @@ float3 AtmRay(float r, float3 dir, float3 up, float3 sunDir, uint steps, uint tr
         // The sun's zenith cosine AT THAT POINT: air a hundred kilometres along the ray stands under
         // a different sun angle, and that is the whole geometry of a sunset.
         const float muSp = clamp((muS * r + t * nu) / max(rr, 1e-6f), -1.0f, 1.0f);
-        float3 S = AtmSunT(transSlot, rr, muSp, Rb, Rt) *
+        float3 S = AtmSunT(rr, muSp, Rb) *
                    (kAtmRayS * rayD * phaseR + kAtmMieS.xxx * mieD * phaseM);
         S += msHere * sigS;
         const float3 Tstep = exp(-sigE * ds);
@@ -210,7 +281,7 @@ float3 AtmRay(float r, float3 dir, float3 up, float3 sunDir, uint steps, uint tr
         const float3 n = normalize(up * r + dir * ground);
         const float muSg = dot(n, sunDir);
         if (muSg > 0.0f) {
-            L += T * kAtmAlbedo * muSg * AtmSunT(transSlot, Rb, muSg, Rb, Rt) * 0.3183099f;
+            L += T * kAtmAlbedo * muSg * AtmSunT(Rb, muSg, Rb) * 0.3183099f;
         }
     }
     return L;

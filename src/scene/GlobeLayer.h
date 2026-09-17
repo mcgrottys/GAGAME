@@ -21,6 +21,7 @@
 #include "hal/Views.h"
 #include "render/Camera.h"
 #include "scene/Layer.h"
+#include "scene/WindowBox.h"
 #include "sim/GlobeModel.h"
 #include "sim/WaveChart.h"
 
@@ -198,6 +199,41 @@ public:
         // a margin for what a 1.8 km cell can hide. Extra levels only: the camera's own walk keeps
         // its bytes (priors 29 -- a changed want set is a changed picture, through the streamer).
         const GlobeModel* relief = nullptr;
+        // M13: THE WORLDS THIS WALK DRAWS -- a place's tiles, walked once. Every world that shows
+        // the same place (the eye's own, and each depth of a corridor of windows that comes back
+        // to it) is drawn from ONE traversal: a node is walked while any of them sees it and
+        // still needs it finer, and each world takes as its leaves the nodes its own eye stops
+        // at -- its own cut, the records its own walk would have made -- with the tiles asked of
+        // the residency once. worlds[0] is the walk's own (its eye is camPos); each is its level
+        // slot, its eye from camPos, and its cull -- its own horizon, planes it must be inside and
+        // a hole (the next window's cone, which belongs to a deeper world) it must not be wholly
+        // inside, the planes eye-relative in this frame. Worlds share a walk only where their own
+        // walks would split and bound a node alike (the wave grain, the relief exaggeration).
+        // worldCount 0 is the single walk, frustum and all.
+        struct World {
+            uint32_t slot = 0;
+            double off[3] = {0.0, 0.0, 0.0};   // this world's eye minus camPos
+            double planes[6][4] = {};
+            int planeCount = 0;
+            double hole[5][4] = {};
+            int holeCount = 0;
+            // Its horizon (GlobeLayer.cpp HorizonOf): the eye in the planet frame and its radius,
+            // the horizon's angle from there, the margin past it (< 0: no horizon test), and the
+            // cosine of the two together (a node's centre inside it is never past, whatever its
+            // size).
+            double planet[3] = {0.0, 0.0, 0.0};
+            double planetR = 0.0;
+            double horizon = 0.0;
+            double margin = -1.0;
+            double cosLimit = -1.0;
+        };
+        static constexpr int kMaxWorlds = 4;
+        World worlds[kMaxWorlds];
+        int worldCount = 0;
+        // The local relief bound for the WORLDS' tests when the walk's own bound is the planet's
+        // worst case (the camera's walk keeps that bound for its own frustum -- priors 29 -- but
+        // a window's cone padded by 9 km of relief culls nothing near the eye).
+        const GlobeModel* worldRelief = nullptr;
     };
     // One Want() the walk asked for, as it asked (face and mip as the manager takes them).
     struct WantRect {
@@ -259,6 +295,8 @@ public:
     // s^k Q^k of it. A level whose globe is under a pixel emits nothing; that is where the
     // recursion stops, and it is the screen that stops it.
     static constexpr int kMaxLevels = 8;
+    // M13: worlds whose eyes stand this near each other are one place, and share one walk.
+    static constexpr double kShareReachM = 2.0e4;
     struct DrosteLevel {
         int rel = 0;                  // the level, relative to the camera's
         double cam[3] = {0.0, 0.0, 0.0};   // the eye in this level's OWN tangent frame: S^-k(C)
@@ -278,6 +316,20 @@ public:
         // A Droste level and a gate's window read the same cache the camera does, and each
         // answers for what it asked for; -1 means the view's own.
         int sampler = -1;
+        // M13: THE LEVEL'S OWN CULL. A world seen through windows is seen only along the rays that
+        // pass them, so it is walked only there: planes in the TRUE camera frame, eye-relative, in
+        // the frame's axes (a x + b y + c z + d >= 0 inside), pulled through the gauge exactly as
+        // the camera's are. A cull and nothing else -- what the level shows is decided per pixel.
+        // 0 = the camera's own frustum (every Droste level).
+        double planes[6][4] = {};
+        int planeCount = 0;
+        // ...and what it need not walk: the cone of the next window it shows (a deeper world's),
+        // same frame and convention, inside = hidden (scene/Gateway.h LinkHole).
+        double hole[5][4] = {};
+        int holeCount = 0;
+        // A gate's world: drawn in the camera's own frame at sigma 1, so it may share the walk of
+        // any world whose eye stands near its own -- the same place, its tiles chosen once.
+        bool share = false;
     };
     // Per frame, BEFORE SetView: the scene's sun as the renderer will write it (the level
     // table's slot 0 carries it -- the globe's shading reads the table, not gSunDir).
@@ -307,23 +359,36 @@ public:
         m_camLevelAbs = camLevelAbs;
         m_drosteOn = true;
     }
-    // THE GATE'S WINDOW (scene/Gateway.h), per frame before SetView; null clears it. `level` is
-    // the destination drawn as one more level of the walk -- its eye the carried eye, sigma 1, Q
-    // the gate motor's rotation back -- and the box is given in the TRUE camera frame: its centre
-    // relative to the eye, the rows camera -> box, its half extents. Appended after any Droste
-    // levels; the Droste switches (the portal's shadow, the limbs) are not touched.
-    void SetGate(const DrosteLevel* level, const float centreRel[3], const float rows[9],
-                 const float half[3]) {
+    // THE VIEW'S WINDOWS (scene/Gateway.h WindowChain), per frame before SetView; n = 0 clears
+    // them. levels[k] is the world seen through k + 1 windows, drawn as one more level of the walk --
+    // its eye the eye carried that far, sigma 1, Q the chain's rotation back, its cull the rays
+    // through the windows -- and boxes[k] is the (k + 1)-th window in the TRUE camera frame, where
+    // the true eye sees it. A pixel of level k + 1 is kept where its ray passes exactly k + 1
+    // windows, in order; every other level keeps the pixels that pass none. Appended after any
+    // Droste levels, as many as the table holds; the Droste switches are not touched.
+    // `viewHole` is what the eye's own world need not walk: the first window's cone (LinkHole).
+    void SetGates(const DrosteLevel* levels, const WindowBox* boxes, int n,
+                  const double viewHole[5][4], int viewHoleCount) {
         if (!m_drosteOn) m_levels.clear();
-        m_gateSlot = -1;
-        if (!level || m_levels.size() + 1 >= size_t(kMaxLevels)) return;
-        m_levels.push_back(*level);
-        m_gateSlot = static_cast<int>(m_levels.size());
-        for (int i = 0; i < 3; ++i) {
-            m_gateC[i] = centreRel[i];
-            m_gateHalf[i] = half[i];
+        m_gateFirst = -1;
+        m_gateCount = 0;
+        m_viewHoleCount = (viewHole && viewHoleCount > 0) ? (std::min)(viewHoleCount, 5) : 0;
+        for (int p = 0; p < m_viewHoleCount; ++p) {
+            for (int j = 0; j < 4; ++j) m_viewHole[p][j] = viewHole[p][j];
         }
-        for (int i = 0; i < 9; ++i) m_gateRows[i] = rows[i];
+        if (!levels || !boxes || n <= 0) {
+            m_viewHoleCount = 0;
+            return;
+        }
+        const int room = kMaxLevels - 1 - static_cast<int>(m_levels.size());
+        const int take = (std::min)((std::min)(n, room), kMaxWindowChain);
+        if (take <= 0) return;
+        m_gateFirst = static_cast<int>(m_levels.size()) + 1;
+        for (int k = 0; k < take; ++k) {
+            m_levels.push_back(levels[k]);
+            m_gateBoxes[k] = boxes[k];
+        }
+        m_gateCount = take;
     }
     // Set B: the rings anchored at the OUTER level's eye (a second WaterBankLayer).
     // M13 step 2: the cascade sea's plane at the eye (sim/WaveChart.h), for the pixel stage's
@@ -461,12 +526,9 @@ private:
         float bankBOrg23[4];
         float bankBOrg45[4];
         float droste[192];    // 8 levels x 6 rows (Globe.hlsl LoadLevel)
-        // THE GATE'S WINDOW (scene/Gateway.h) -- appended at the END on both sides (priors 22).
-        float gateA[4];       // x = the window's slot in the level table (-1 = no window)
-        float gateC[4];       // the box's centre relative to the eye, TRUE camera frame (m)
-        float gateR0[4];      // rows: TRUE camera frame -> the box's own frame; w = half extent
-        float gateR1[4];
-        float gateR2[4];
+        // THE VIEW'S WINDOWS (scene/Gateway.h) -- both sides changed together (priors 22).
+        float gateA[4];       // x = the first window level's slot (-1 = none), y = how many
+        float gateBox[112];   // 7 windows x 16: the chain, packed as scene/WindowBox.h packs it
         // M13 step 2: THE CASCADE SEA'S PLANE AT THE EYE (sim/WaveChart.h) -- appended at the END
         // on both sides (priors 22). The pixel stage adds the bands a ring texel cannot carry by
         // reading the cascade DERIVATIVE textures directly, and those reads have to happen in the
@@ -477,6 +539,9 @@ private:
         float chartE[4];      // its east, w = the offset along east
         float chartN[4];      // its north, w = the offset along north
     };
+    // (dxtest reads the rows' sizes as written, so the chain's is a literal; this holds it.)
+    static_assert(sizeof(GlobeCbData::gateBox) == sizeof(float) * 16 * kMaxWindowChain,
+                  "GlobeCbData::gateBox holds kMaxWindowChain windows of 16 floats");
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
         uint32_t nx, ny, listCount, tilesX;
@@ -668,10 +733,12 @@ private:
     std::vector<NodeData> m_nodes;
     // M10: the Droste levels of this frame (slots 1..n; slot 0 is the camera's own).
     std::vector<DrosteLevel> m_levels;
-    int m_gateSlot = -1;                       // the window's slot in the level table
-    float m_gateC[3] = {0.0f, 0.0f, 0.0f};
-    float m_gateRows[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
-    float m_gateHalf[3] = {0.0f, 0.0f, 0.0f};
+    int m_gateFirst = -1;                      // the first window level's slot in the table
+    int m_gateCount = 0;                       // how many windows deep the view's chain goes
+    WindowBox m_gateBoxes[kMaxWindowChain];
+    double m_viewHole[5][4] = {};              // the first window's cone: the eye's world skips it
+    int m_viewHoleCount = 0;
+
     float m_camSun[3] = {0.0f, 1.0f, 0.0f};
     float m_camSkyUp[3] = {0.0f, 1.0f, 0.0f};
     float m_camSkyDay = -1.0f;

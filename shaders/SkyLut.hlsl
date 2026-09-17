@@ -1,13 +1,16 @@
 // ================================================================================================
-//  SkyLut.hlsl - the three tables the sky is made of (Atmosphere.hlsli holds the air itself).
+//  SkyLut.hlsl - the air's one table, and the two --sky-probe holds against each other
+//  (Atmosphere.hlsli holds the air itself).
 //
-//    CsTransmittance   256 x 64   what survives a ray from an altitude to the top of the air.
-//                                 Depends on the atmosphere alone, so it is built ONCE.
 //    CsMultiScatter     32 x 32   the isotropic estimate of every scattering order past the
 //                                 first, summed as a geometric series (Hillaire 2020 s5).
 //                                 Depends on the atmosphere alone: built ONCE.
+//    CsTransmittance   256 x 64   PROBE ONLY: what survives a ray from an altitude to the top of
+//    CsTransAnalytic              the air, marched (the table the sky used to read) and in the
+//                                 closed form the sky reads now (Atmosphere.hlsli AtmSunT).
 //  (There is no table of the VIEW. Every ray marches the air from where it is -- Atmosphere.hlsli
-//  AtmRay -- so these two, which describe the air alone, are all the sky needs.)
+//  AtmRay -- and the sun's light at each step is a closed form, so the one table above, which
+//  describes the air alone, is all the sky needs.)
 //
 //  The march is the ordinary radiative transfer integral along a ray: at each step, the light
 //  the sun delivers (its transmittance to that point, times the phase functions) plus the light
@@ -23,7 +26,7 @@ cbuffer SkyLutCb : register(b0) {
     float4 gLutA;    // xyz = the sun, in the eye's own frame (+y is up there); w = eye radius r
     float4 gLutB;    // x = planet radius Rb, y = Rt, z = the solar irradiance scale, w = spare
     float4 gLutC;    // xy = this table's size in texels, zw = spare
-    uint4  gLutD;    // x = the table being written (UAV slot), y = transmittance, z = MS (SRVs)
+    uint4  gLutD;    // x = the table being written (UAV slot), yzw = spare
 };
 #define ATM_RB (gLutB.x)
 #define ATM_RT (gLutB.y)
@@ -37,8 +40,8 @@ RWTexture2D<float4> gU[] : register(u0, space2);
 
 static const float3 kUpLocal = float3(0.0f, 1.0f, 0.0f);
 
-// THE TRANSMITTANCE ALONG A RAY, marched. 40 steps is well past the point where the answer stops
-// moving for a 100 km atmosphere -- this table is built once, so there is no reason to be mean.
+// THE TRANSMITTANCE ALONG A RAY, marched -- the table the sky read before the closed form. 40 steps;
+// --sky-probe measures what that bought against a brute-force integral in doubles.
 float3 AtmTransmittanceTo(float r, float mu, float Rb, float Rt) {
     const float disc = r * r * (mu * mu - 1.0f) + Rt * Rt;
     const float top = max(0.0f, -r * mu + sqrt(max(disc, 0.0f)));
@@ -63,6 +66,18 @@ void CsTransmittance(uint3 id : SV_DispatchThreadID) {
     float r, mu;
     AtmTransParams(uv, ATM_RB, ATM_RT, r, mu);
     gU[gLutD.x][id.xy] = float4(AtmTransmittanceTo(r, mu, ATM_RB, ATM_RT), 1.0f);
+}
+
+// THE SAME QUANTITY AS THE SKY NOW ASKS FOR IT (Atmosphere.hlsli AtmSunT), on the same grid, so
+// --sky-probe reads what this device actually computes from the closed form.
+[numthreads(8, 8, 1)]
+void CsTransAnalytic(uint3 id : SV_DispatchThreadID) {
+    const float2 size = gLutC.xy;
+    if (id.x >= uint(size.x) || id.y >= uint(size.y)) return;
+    const float2 uv = (float2(id.xy) + 0.5f) / size;
+    float r, mu;
+    AtmTransParams(uv, ATM_RB, ATM_RT, r, mu);
+    gU[gLutD.x][id.xy] = float4(AtmSunT(r, mu, ATM_RB), 1.0f);
 }
 
 // THE ORDERS PAST THE FIRST. For a point at (r, muS), light arriving from every direction is
@@ -90,7 +105,7 @@ void CsMultiScatter(uint3 id : SV_DispatchThreadID) {
             const float phi = 6.28318531f * (j + 0.5f) / 8.0f;
             const float3 d = float3(sinT * cos(phi), cosT, sinT * sin(phi));
             float3 fms;
-            const float3 L = AtmRay(r, d, up, sunDir, 20u, gLutD.y, -1, ATM_RB, ATM_RT, fms);
+            const float3 L = AtmRay(r, d, up, sunDir, 20u, -1, ATM_RB, ATM_RT, fms);
             lum += L;
             fmsSum += fms;
         }

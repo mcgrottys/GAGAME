@@ -75,9 +75,9 @@ struct SceneFill {
     float sigmaW[3] = {0.0f, 0.0f, 0.0f};
     float bscat[3] = {0.0f, 0.0f, 0.0f};
     float waterLevel = 0.0f;
-    // M13: the AIR's two tables (multiple scattering, transmittance -- the same for every ray on
-    // the planet) and the eye's place in the air; the sky is marched from there.
-    uint32_t skyMsSrv = 0xFFFFFFFFu, skyTransSrv = 0xFFFFFFFFu;
+    // M13: the AIR's table (multiple scattering -- the same for every ray on the planet) and the
+    // eye's place in the air; the sky is marched from there.
+    uint32_t skyMsSrv = 0xFFFFFFFFu;
     float planetRadiusM = 6371000.0f, eyeRadiusM = 6371000.0f;
 };
 
@@ -168,7 +168,7 @@ public:
     bool sunPlaced = false;
     // M13: what the sky layer built this frame, handed to every shader through the scene
     // constants (the dome, the sea's mirror and the haze must read ONE sky).
-    uint32_t skyMsSrv = 0xFFFFFFFFu, skyTransSrv = 0xFFFFFFFFu;
+    uint32_t skyMsSrv = 0xFFFFFFFFu;
     float planetRadiusM = 6371000.0f, eyeRadiusM = 6371000.0f;
     float sunDirTangent[3] = {0.0f, 1.0f, 0.0f};
     // The sun's own angular RADIUS at the current Earth-Sun distance (0.2621..0.2710 deg over a

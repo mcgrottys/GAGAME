@@ -237,14 +237,18 @@ struct PortalProps {
     double fill = 1.0, twistDeg = 90.0;
     int lighting = 0;                 // realistic | appealing
 };
-// THE GATE (scene/Gateway.h): a cuboid in the root's flat frame whose far side is a place on the
-// same planet; a body whose centre of gravity enters it leaves from the destination.
+// THE GATE (scene/Gateway.h): a cuboid standing at one place whose far side is another place on
+// the same planet; a body whose centre of gravity enters it leaves from the destination. A place is
+// a latitude and a longitude, carried with its presence (SceneGate) because 0 N 0 E is a real
+// one; a gate that names none stands at, or leads to, the scene's own flat frame.
 struct GateProps {
     std::string name;
     bool enabled = true;
-    Placement at;                          // the box's centre and heading: {x, alt, z, az}
+    double fromLat = 0.0, fromLon = 0.0;   // where the box stands (absent: the scene's frame)
+    Placement at;                          // the box's centre and heading there: {x, alt, z, az}
     double size[3] = {60.0, 30.0, 8.0};    // across, up, along the heading -- metres
-    double toLat = 0.0, toLon = 0.0;       // the destination
+    double toLat = 0.0, toLon = 0.0;       // the destination (absent: the scene's frame)
+    Placement toAt;                        // where the box's centre comes out there: {x, alt, z}
     double toAz = 0.0;                     // the heading the box's forward face leaves along
 };
 // THE INTERESTS (the water match): a subject or a place whose surroundings stay resident at the

@@ -433,11 +433,21 @@ const Schema& GateSchema_() {
         Schema* sc = new Schema("gate", &kGate);
         sc->Bind("name", kGate.name, "the gate's name", R)
             .Bind("enabled", kGate.enabled, "carry bodies through it", R)
-            .Bind("at", kGate.at, "the box's centre and heading in the flat world frame: {x, alt, z, az}", R)
+            .Bind("fromLat", kGate.fromLat, Q::Angle, "deg",
+                  "the latitude of the place the box stands at (with fromLon; absent: the scene's own frame)", R)
+            .Optional()
+            .Bind("fromLon", kGate.fromLon, Q::Angle, "deg", "the longitude of that place", R)
+            .Optional()
+            .Bind("at", kGate.at, "the box's centre and heading in its place's flat frame: {x, alt, z, az}", R)
             .Optional()
             .Bind("size", kGate.size, Q::Length, "m", "the box: across, up, and along its heading", R)
-            .Bind("toLat", kGate.toLat, Q::Angle, "deg", "the destination's latitude", R)
+            .Bind("toLat", kGate.toLat, Q::Angle, "deg",
+                  "the destination's latitude (with toLon; absent: the scene's own frame)", R)
+            .Optional()
             .Bind("toLon", kGate.toLon, Q::Angle, "deg", "the destination's longitude", R)
+            .Optional()
+            .Bind("toAt", kGate.toAt, "where the box's centre comes out, in the destination's flat frame: {x, alt, z}", R)
+            .Optional()
             .Bind("toAz", kGate.toAz, Q::Angle, "deg",
                   "the compass heading the box's forward face leaves along at the destination", R);
         return sc;

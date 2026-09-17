@@ -301,7 +301,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // Registration order IS draw order: sky (backdrop, depth off), then the tide product.
     skyOwned = std::make_unique<SkyLayer>();
     sky = skyOwned.get();
-    sky->Configure(shaderDir);
+    sky->Configure(shaderDir, opt.skyProbe);
     sky->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
     renderer.AddLayer(std::move(skyOwned));
 

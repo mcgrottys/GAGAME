@@ -266,12 +266,35 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             r.Str("name", g.p.name);
             r.Bool("enabled", g.p.enabled);
             r.D3("size", g.p.size);
+            r.F64("fromLat", g.p.fromLat);
+            r.F64("fromLon", g.p.fromLon);
             r.F64("toLat", g.p.toLat);
             r.F64("toLon", g.p.toLon);
             r.F64("toAz", g.p.toAz);
+            // A place is a latitude AND a longitude, or none (the scene's own frame).
+            {
+                const bool hasLat = e.Get("fromLat") != nullptr, hasLon = e.Get("fromLon") != nullptr;
+                if (hasLat != hasLon) {
+                    return Refuse(why, "gates." + g.p.name +
+                                           ": the box's place is a place -- declare fromLat and fromLon together");
+                }
+                g.hasFrom = hasLat;
+            }
+            {
+                const bool hasLat = e.Get("toLat") != nullptr, hasLon = e.Get("toLon") != nullptr;
+                if (hasLat != hasLon) {
+                    return Refuse(why, "gates." + g.p.name +
+                                           ": a destination is a place -- declare toLat and toLon together");
+                }
+                g.hasTo = hasLat;
+            }
             if (const JsonValue* at = e.Get("at")) {
                 g.hasAt = true;
                 g.at = *at;
+            }
+            if (const JsonValue* ta = e.Get("toAt")) {
+                g.hasToAt = true;
+                g.toAt = *ta;
             }
             if (!ok) return false;
             out.gates.push_back(std::move(g));

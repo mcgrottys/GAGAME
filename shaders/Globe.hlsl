@@ -105,13 +105,10 @@ cbuffer GlobeCb : register(b1) {
     float4 gBankBOrg23;
     float4 gBankBOrg45;
     float4 gDroste[48];   // 8 levels x 6 rows -- see LoadLevel
-    // THE GATE'S WINDOW (scene/Gateway.h): x = the window's slot (-1 none); the box's centre
-    // relative to the eye (true camera frame); the rows camera -> box, w = the half extents.
+    // THE VIEW'S WINDOWS (scene/Gateway.h WindowChain): x = the first window level's slot (-1
+    // none), y = how many windows deep; the chain, packed as scene/WindowBox.h packs it.
     float4 gGateA;
-    float4 gGateC;
-    float4 gGateR0;
-    float4 gGateR1;
-    float4 gGateR2;
+    float4 gGateBox[28];
     // M13 step 2: the cascade sea's plane at the eye (sim/WaveChart.h) -- see GlobeLayer.h.
     float4 gChartOrg;   // the cell's centre on the sphere (m); w = 1 when these rows are live
     float4 gChartE;     // its east; w = the cell's offset along east
@@ -168,23 +165,27 @@ float SkyDay(float localDay) { return (sLvlSkyDay < 0.0f) ? localDay : sLvlSkyDa
 // camera sees it. s^k Q^k -- the similarity with its translation already cancelled by the eye.
 float3 TrueRel(float3 relOwn) { return sLvlSigma * mul(sLvlQ, relOwn); }
 
-// THE GATE'S WINDOW -- scene/Gateway.cpp SeenThrough, line for line. The segment from the eye (the
-// origin of the true camera frame) to p reaches the box's entry at or before p: p is seen THROUGH
-// the window. One slab test, in the box's own frame.
-bool GateThrough(float3 p) {
-    // The slab itself is Common.hlsli's, so the sky's backdrop pixels and these surface pixels
-    // cannot disagree about where the window's edge is.
-    return GateSlabThrough(p, float3x3(gGateR0.xyz, gGateR1.xyz, gGateR2.xyz),
-                           float3(gGateR0.w, gGateR1.w, gGateR2.w), gGateC.xyz);
+// THE VIEW'S WINDOWS. A level's depth: 0 for the eye's own world and every Droste level, k for the
+// world seen through k windows. A surface pixel is kept by the level whose depth its ray reaches
+// (Common.hlsli WindowChainDepth) -- the slab walk the sky and the hulls ask too, so no two passes
+// can disagree about where a window's edge is.
+uint LevelGateDepth(uint lvl) {
+    if (gGateA.x < 0.0f) return 0u;
+    const uint first = (uint)gGateA.x;
+    const uint n = (uint)gGateA.y;
+    return (lvl >= first && lvl < first + n) ? lvl - first + 1u : 0u;
 }
+uint GateDepth(float3 p) { return WindowChainDepth(p, gGateBox, (uint)gGateA.y); }
 
-// THE RIM: how near the ray's entry into the box lies to an EDGE of the face it enters through,
+// THE RIM: how near the ray's entry into window k lies to an EDGE of the face it enters through,
 // 1 on the edge falling to 0 a rim-width in. A window between two open seas is otherwise hard to
-// find; the rim is drawn on the window's own pixels only, so the destination never shows it.
-float GateRim(float3 p) {
-    const float3x3 R = float3x3(gGateR0.xyz, gGateR1.xyz, gGateR2.xyz);
-    const float3 h = float3(gGateR0.w, gGateR1.w, gGateR2.w);
-    const float3 e = mul(R, -gGateC.xyz);
+// find; the rim is drawn on the pixels seen through that window only, so its far side never
+// shows it -- and down a corridor of windows every frame has its own.
+float GateRim(float3 p, uint k) {
+    const uint b = min(k, kWindowChain - 1u) * 4u;
+    const float3x3 R = float3x3(gGateBox[b].xyz, gGateBox[b + 1u].xyz, gGateBox[b + 2u].xyz);
+    const float3 h = float3(gGateBox[b].w, gGateBox[b + 1u].w, gGateBox[b + 2u].w);
+    const float3 e = mul(R, -gGateBox[b + 3u].xyz);
     float3 d = mul(R, p);
     d = lerp(d, float3(1e-12f, 1e-12f, 1e-12f), float3(abs(d) < 1e-12f));
     const float3 t1 = (-h - e) / d;
@@ -1036,10 +1037,10 @@ float4 PsMain(VsOut i) : SV_Target {
     // M10: THE GAUGE FIRST. i.rel, the eye, the sun and the bank set are all the drawing
     // level's own; everything below is the root's shading, unchanged, run in that frame.
     LoadLevel(i.lvl);
-    // THE GATE'S WINDOW: seen through the box is the destination's level, and only that; every
+    // THE VIEW'S WINDOWS: seen through k boxes is the level of depth k, and only that; every
     // other level is everything else. The same test from every eye, so every view agrees.
     if (gGateA.x >= 0.0f) {
-        if (GateThrough(TrueRel(i.rel)) != (i.lvl == (uint)gGateA.x)) discard;
+        if (GateDepth(TrueRel(i.rel)) != LevelGateDepth(i.lvl)) discard;
     }
     const float sunVis = PortalShadow(sLvlCamAbs + i.rel - float3(0.0f, gGlo.x, 0.0f));
     const float3 up = normalize(i.dir);   // PLANET frame: lat/lon + every texture fetch
@@ -1528,8 +1529,9 @@ float4 PsMain(VsOut i) : SV_Target {
     }
 
     // THE GATE'S RIM, on the window's own pixels only (the destination never draws one).
-    if (gGateA.x >= 0.0f && i.lvl == (uint)gGateA.x) {
-        col = lerp(col, float3(0.75f, 0.92f, 1.0f), 0.55f * GateRim(TrueRel(i.rel)));
+    if (LevelGateDepth(i.lvl) > 0u) {
+        col = lerp(col, float3(0.75f, 0.92f, 1.0f),
+                   0.55f * GateRim(TrueRel(i.rel), LevelGateDepth(i.lvl) - 1u));
     }
     col = ApplyComposedStencil(col, up);   // M6i: --stencil alignment overlay (off = no-op)
     return float4(col, 1.0f);
