@@ -50,6 +50,12 @@ struct SceneView {
 };
 struct ScenePortal {
     scene::PortalProps p;
+    bool hasTo = false;   // toLat AND toLon declared: the portal has a destination
+};
+struct SceneGate {
+    scene::GateProps p;
+    bool hasAt = false;
+    JsonValue at;   // the box's sugar as written (read where the flat frame exists)
 };
 struct SceneEntity {
     scene::EntityProps p;
@@ -88,6 +94,7 @@ struct Scene : scene::SceneDocument {
     std::wstring shadersW, dumpW, hdrW, railDirW;
     std::vector<SceneView> views;
     std::vector<ScenePortal> portals;
+    std::vector<SceneGate> gates;
     std::vector<SceneEntity> entities;
     std::vector<SceneEffect> effects;
     std::vector<SceneLayer> layers;   // THE REGISTRATION ORDER (= the draw order), as data

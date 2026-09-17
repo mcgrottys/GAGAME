@@ -221,9 +221,23 @@ struct PortalProps {
     std::string name;
     bool enabled = true;
     double lat = 42.81826, lon = -70.80045;
+    // THE DESTINATION: the place the inner globe presents where the root shows this leaf. Both
+    // keys are optional and read only when BOTH are declared (ScenePortal::hasTo) -- 0 N 0 E is a
+    // real place, so presence is carried beside the numbers, never inferred from them.
+    double toLat = 0.0, toLon = 0.0;
     int level = 16;
     double fill = 1.0, twistDeg = 90.0;
     int lighting = 0;                 // realistic | appealing
+};
+// THE GATE (scene/Gateway.h): a cuboid in the root's flat frame whose far side is a place on the
+// same planet; a body whose centre of gravity enters it leaves from the destination.
+struct GateProps {
+    std::string name;
+    bool enabled = true;
+    Placement at;                          // the box's centre and heading: {x, alt, z, az}
+    double size[3] = {60.0, 30.0, 8.0};    // across, up, along the heading -- metres
+    double toLat = 0.0, toLon = 0.0;       // the destination
+    double toAz = 0.0;                     // the heading the box's forward face leaves along
 };
 struct EntityProps {
     std::string name;
@@ -301,6 +315,7 @@ void WriteRegistries(const char* path, const std::vector<RegistryDoc>& extra);
 // The element schemas, for a caller that validates one element (the tests).
 const Schema& ViewSchema();
 const Schema& PortalSchema();
+const Schema& GateSchema();
 const Schema& EntitySchema();
 const Schema& NodeSchema();
 // M12 step 5e: the rail key (scene/Rail.h reads a rail file's keys through it) and the slice

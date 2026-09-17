@@ -50,6 +50,7 @@
 #include "sim/WaterSurface.h"
 #include "sim/WaveField.h"
 #include "sim/WeatherManager.h"
+#include "core/Space.h"
 
 #include <string>
 
@@ -80,6 +81,16 @@ public:
     // kernel is the mesh; a hull has no texel, so it declares the scale it wants resolved -- the
     // panel spacing. Below this the wake is a force the hull cannot feel anyway.
     void SetSampleScale(double m) { m_sampleM = (m > 0.01) ? m : 0.01; }
+
+    // THE CHART (the cuboid gate, 2026-09-14): the flat frame this water is read in. None (the
+    // default) is the root's -- the ACT0816 constants, byte for byte. A hull carried through a
+    // gate reads the SAME trees through its destination space's chart: a point's place comes from
+    // that chart; the solved window and the fleet's wakes are asked at the point's place in the
+    // root's chart (away from the Merrimack they answer nothing); and the cascades, a stationary
+    // sea, are evaluated in the chart's own metres.
+    void SetChart(const Space::Anchor* chart);
+    // The place (lat, lon) of a point of this water's flat frame.
+    void PlaceOf(double wx, double wz, double& latDeg, double& lonDeg) const;
 
     const char* Name() const override { return "water.tree"; }
     SurfaceSample At(double wx, double wz, double simUnix) const override;
@@ -139,6 +150,10 @@ private:
     // Single-threaded by contract: this is read from the physics tick only. If a second vessel
     // ever steps concurrently this needs a per-vessel memo, not a lock.
     static constexpr double kSlowCellM = 8.0;
+    bool m_hasChart = false;
+    Space::Anchor m_chart;
+    // A point of this water's frame in the ROOT's flat frame (the solved window's and the wakes').
+    void RootOf(double wx, double wz, double& rx, double& rz) const;
     mutable double m_memoX = 1e30, m_memoZ = 1e30, m_memoT = -1e30;
     mutable WeatherSample m_memo;
     const WeatherSample& SlowAt(double wx, double wz, double simUnix) const;

@@ -65,6 +65,12 @@ public:
         PropValue v;
         if (Read(key, v)) f = static_cast<uint32_t>(v.n);
     }
+    void D3(const char* key, double f[3]) {
+        PropValue v;
+        if (Read(key, v)) {
+            for (int k = 0; k < 3; ++k) f[k] = v.v[k];
+        }
+    }
     void Enum(const char* key, int& f) {
         PropValue v;
         if (Read(key, v)) f = v.e;
@@ -225,12 +231,41 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             r.Bool("enabled", p.p.enabled);
             r.F64("lat", p.p.lat);
             r.F64("lon", p.p.lon);
+            r.F64("toLat", p.p.toLat);
+            r.F64("toLon", p.p.toLon);
+            {
+                const bool hasLat = e.Get("toLat") != nullptr, hasLon = e.Get("toLon") != nullptr;
+                if (hasLat != hasLon) {
+                    return Refuse(why, "portals." + p.p.name +
+                                           ": a destination is a place -- declare toLat and toLon together");
+                }
+                p.hasTo = hasLat;
+            }
             r.I32("level", p.p.level);
             r.F64("fill", p.p.fill);
             r.F64("twistDeg", p.p.twistDeg);
             r.Enum("lighting", p.p.lighting);
             if (!ok) return false;
             out.portals.push_back(std::move(p));
+        }
+    }
+    if (const JsonValue* a = ListOf(doc, "gates")) {
+        const PropDecl* decl = root.Find("gates");
+        for (const JsonValue& e : a->arr) {
+            SceneGate g;
+            ElementReader r(scene::ElementChain(*decl, e), e, "gates", why, &ok);
+            r.Str("name", g.p.name);
+            r.Bool("enabled", g.p.enabled);
+            r.D3("size", g.p.size);
+            r.F64("toLat", g.p.toLat);
+            r.F64("toLon", g.p.toLon);
+            r.F64("toAz", g.p.toAz);
+            if (const JsonValue* at = e.Get("at")) {
+                g.hasAt = true;
+                g.at = *at;
+            }
+            if (!ok) return false;
+            out.gates.push_back(std::move(g));
         }
     }
     if (const JsonValue* a = ListOf(doc, "entities")) {

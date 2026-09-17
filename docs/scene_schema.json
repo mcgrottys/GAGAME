@@ -42,6 +42,7 @@
       { "key": "views", "type": "list", "field": "none", "element": "view", "named": true, "reload": "hot", "doc": "the cameras, by name" },
       { "key": "rails", "type": "object", "field": "none", "schema": "rails", "reload": "hot", "doc": "the camera rails" },
       { "key": "portals", "type": "list", "field": "none", "element": "portal", "named": true, "reload": "hot", "doc": "the Droste links, by name" },
+      { "key": "gates", "type": "list", "field": "none", "element": "gate", "named": true, "reload": "hot", "doc": "the cuboid gates to other places, by name" },
       { "key": "entities", "type": "list", "field": "none", "element": "entity", "named": true, "reload": "hot", "doc": "the vessels, by name" },
       { "key": "effects", "type": "list", "field": "none", "element": "effect", "named": true, "registry": "effect", "typeKey": "type", "reload": "hot", "doc": "the paper visuals, by name, typed" },
       { "key": "layers", "type": "list", "field": "none", "element": "layer", "named": true, "registry": "layer", "typeKey": "name", "reload": "hot", "doc": "the layers in registration order, typed by name" },
@@ -231,10 +232,21 @@
       { "key": "enabled", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "link the root under a leaf of itself (--droste)" },
       { "key": "lat", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 42.81826, "reload": "restart", "doc": "the leaf's place (--droste-at)" },
       { "key": "lon", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": -70.80045, "reload": "restart", "doc": "the leaf's place" },
+      { "key": "toLat", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": null, "optional": true, "reload": "restart", "doc": "the DESTINATION: the place the inner globe presents where the root shows this leaf (the root turned by the shortest arc carrying it onto the leaf's place, then twisted); with toLon; absent = the leaf's own place" },
+      { "key": "toLon", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": null, "optional": true, "reload": "restart", "doc": "the destination's longitude (with toLat)" },
       { "key": "level", "type": "number", "field": "i32", "quantity": "1", "unit": "1", "default": 16, "reload": "restart", "doc": "the quadtree level (16 = a 153 m leaf)" },
       { "key": "fill", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1, "reload": "restart", "doc": "the inner globe's diameter / leaf span (--droste-fill)" },
       { "key": "twistDeg", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 90, "reload": "restart", "doc": "the twist per level about north (--droste-twist)" },
       { "key": "lighting", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "realistic", "names": ["realistic", "appealing"], "reload": "hot", "doc": "the lighting A/B (--droste-light)" }
+    ] },
+    { "type": "gate", "keys": [
+      { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the gate's name" },
+      { "key": "enabled", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "carry bodies through it" },
+      { "key": "at", "type": "similarity", "field": "placement", "quantity": "unknown", "unit": "", "default": null, "optional": true, "reload": "restart", "doc": "the box's centre and heading in the flat world frame: {x, alt, z, az}" },
+      { "key": "size", "type": "vec3", "field": "double3", "quantity": "length", "unit": "m", "default": [60, 30, 8], "reload": "restart", "doc": "the box: across, up, and along its heading" },
+      { "key": "toLat", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "the destination's latitude" },
+      { "key": "toLon", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "the destination's longitude" },
+      { "key": "toAz", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "the compass heading the box's forward face leaves along at the destination" }
     ] },
     { "type": "entity", "keys": [
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the entity's name" },
@@ -244,7 +256,7 @@
     "re": [1, 0, 0, 0],
     "du": [0, 0, 0, 0]
   }
-}, "reload": "restart", "doc": "the spawn, in the flat world frame (--campos)" },
+}, "reload": "restart", "doc": "the spawn, in the flat world frame (--campos); `az` is the bow's compass heading (absent: north, as every hull always spawned)" },
       { "key": "controller", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "helm", "names": ["helm", "fixed"], "reload": "hot", "doc": "the keyboard helm, or fixed throttles and helm (--boat-drive)" },
       { "key": "throttle", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "hot", "doc": "fixed: every thruster's throttle" },
       { "key": "steer", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "hot", "doc": "fixed: the commanded steering" },

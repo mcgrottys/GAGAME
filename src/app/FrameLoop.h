@@ -80,6 +80,7 @@
 #include "sim/SimClock.h"
 #include "scene/Entity.h"   // M12 step 5e: the hull as a node (its step state, its water)
 #include "scene/Portal.h"   // M12 step 5e: the Droste link and its cycle as a node
+#include "scene/Gateway.h"     // the cuboid gates to other places on the planet
 #include "scene/Rail.h"     // M12 step 5e: the rails as data
 #include "sim/VesselSpec.h"
 #include "sim/WaveField.h"
@@ -241,6 +242,7 @@ private:
     // each with its own step state and its own TreeWater; m_followed is the one the start
     // view's chase camera follows. Heap-held: an Entity is never moved once wired.
     std::vector<std::unique_ptr<scene::Entity>> m_entities;
+    std::vector<std::unique_ptr<scene::Gateway>> m_gates;
     scene::Entity* m_followed = nullptr;
     // M9br: THE WAVE PREFILL, OFF THE FRAME THREAD. When a tide or current bucket rolls,
     // the solve was already backgrounded but the PREFILL was not -- and writing 7359 tiles

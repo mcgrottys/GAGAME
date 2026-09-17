@@ -71,6 +71,8 @@
 // trusted (priors 22). The three checks of block 11 were seen to fail with BOTH step 5d fixes
 // reverted (the unnamed list appended, `"base": ""` refused) before they were trusted.
 #include "app/Options.h"
+#include "scene/Gateway.h"
+#include "sim/RigidBody.h"
 #include "core/Common.h"
 #include "core/CurrentFieldLoader.h"
 #include "core/Droste.h"
@@ -1863,6 +1865,74 @@ bool RunSceneSelfTest() {
             pm.marsMode = true;
             mars.Configure(pm);
             g.True(!mars.Build() && !mars.Valid(), "[portal] Mars has no tower");
+
+            // THE DESTINATION (the Haulover portal demo): the root turned by the shortest arc
+            // that carries the destination onto the leaf's place, then twisted. Its defining
+            // property: the destination lands on the inner globe exactly where the leaf's own
+            // place lands in the portal without one.
+            g.True(!node.HasDestination(), "[portal] a declared portal has no destination until one is set");
+            const double hLat = 25.8997, hLon = -80.1239;   // Baker's Haulover Inlet
+            Portal to;
+            to.Declared().name = "droste";
+            to.SetDestination(hLat, hLon);
+            to.Configure(po);
+            g.True(to.Build() && to.Valid() && to.HasDestination(), "[portal] a portal with a destination builds");
+            const droste::Portal& tl = to.Link();
+            g.Same(tl.s, ref.s, "[portal] a destination does not change the scale");
+            for (int k = 0; k < 3; ++k) {
+                g.Same(tl.centre[k], ref.centre[k], "[portal] ...nor where the inner globe rests (its centre)");
+            }
+            double hd[3], pd0[3];
+            GlobeModel::LatLonDir(hLat, hLon, hd);
+            GlobeModel::LatLonDir(42.81826, -70.80045, pd0);
+            int lf0 = 0;
+            uint32_t lix0 = 0, liy0 = 0;
+            GlobeLayer::LeafOf(pd0, 16, lf0, lix0, liy0);
+            double ld0[3];
+            GlobeLayer::LeafDir(lf0, 16, lix0, liy0, ld0);
+            auto rows = [&](const double v[3], double o[3]) {
+                o[0] = fr.east[0] * v[0] + fr.east[1] * v[1] + fr.east[2] * v[2];
+                o[1] = fr.up[0] * v[0] + fr.up[1] * v[1] + fr.up[2] * v[2];
+                o[2] = fr.north[0] * v[0] + fr.north[1] * v[1] + fr.north[2] * v[2];
+                const double n = std::sqrt(o[0] * o[0] + o[1] * o[1] + o[2] * o[2]);
+                for (int i = 0; i < 3; ++i) o[i] /= n;
+            };
+            double hT[3], lT[3];
+            rows(hd, hT);
+            rows(ld0, lT);
+            // The root's surface points, tangent frame (the planet's centre is (0, -R, 0)).
+            const double xH[3] = {R * hT[0], R * hT[1] - R, R * hT[2]};
+            const double xL[3] = {R * lT[0], R * lT[1] - R, R * lT[2]};
+            double imgH[3], imgL[3];
+            tl.Apply(1.0, xH, imgH);
+            ref.Apply(1.0, xL, imgL);
+            double gap = 0.0, onGlobe = 0.0;
+            for (int k = 0; k < 3; ++k) {
+                gap = (std::max)(gap, std::fabs(imgH[k] - imgL[k]));
+                onGlobe += (imgH[k] - tl.centre[k]) * (imgH[k] - tl.centre[k]);
+            }
+            g.Near(gap, 0.0, 1e-9, "[portal] the destination lands where the leaf's place lands without one (1e-9 m)");
+            g.Near(std::sqrt(onGlobe), tl.radius, 1e-9, "[portal] ...on the inner globe's surface");
+            // The arc alone turns the destination onto the leaf's place (QRotate, the motor's own).
+            double ax[3], ang = 0.0;
+            g.True(Portal::Carry(hd, ld0, fr.east, fr.up, fr.north, 0.0, ax, ang, nullptr),
+                   "[portal] Carry builds the arc");
+            {
+                const double sh = std::sin(0.5 * ang);
+                const double qArc[4] = {std::cos(0.5 * ang), sh * ax[0], sh * ax[1], sh * ax[2]};
+                double x = hT[0], y = hT[1], z = hT[2];
+                Motor::QRotate(qArc, x, y, z);
+                g.Near(std::fabs(x - lT[0]) + std::fabs(y - lT[1]) + std::fabs(z - lT[2]), 0.0, 1e-14,
+                       "[portal] the arc's rotor turns the destination's radial onto the leaf's");
+                const double arcDeg = std::acos(hT[0] * lT[0] + hT[1] * lT[1] + hT[2] * lT[2]) * 180.0 / kPiL;
+                g.Near(ang * 180.0 / kPiL, arcDeg, 1e-9, "[portal] ...by the great-circle angle between them");
+            }
+            g.True(ang > 0.0 && ang <= kPiL, "[portal] the rotation is the principal branch (0, pi]");
+            const double antiPlanet[3] = {-ld0[0], -ld0[1], -ld0[2]};
+            std::string awhy;
+            g.True(!Portal::Carry(antiPlanet, ld0, fr.east, fr.up, fr.north, 0.0, ax, ang, &awhy) &&
+                       awhy.find("antipode") != std::string::npos,
+                   "[portal] the leaf's antipode is refused, with the reason");
         }
 
         // (C) THE EFFECT: the slice plane's edge registered and validated with the rest of the AST.
@@ -1892,6 +1962,29 @@ bool RunSceneSelfTest() {
         {
             Entity e;
             g.Same(e.Declared().mirrorCadence, 0.0, "[entity] mirrorCadence defaults to 0 = never (today's cost)");
+            // THE SPAWN HEADING: a spawn without `az` is the translation it always was (the bow
+            // north); with `az` the bow turns to that compass heading about the spawn point.
+            e.SetSpawn(120.0, 0.0, -10.0);
+            {
+                const Motor ref = Motor::Translation(120.0, 0.0, -10.0);
+                double a[8], b[8];
+                double r1[4], d1[4], r2[4], d2[4];
+                e.Spawn().Real(r1); e.Spawn().Dual(d1); ref.Real(r2); ref.Dual(d2);
+                for (int k = 0; k < 4; ++k) { a[k] = r1[k]; a[4 + k] = d1[k]; b[k] = r2[k]; b[4 + k] = d2[k]; }
+                bool same = true;
+                for (int k = 0; k < 8; ++k) same = same && (a[k] == b[k]);
+                g.True(same, "[entity] a spawn without az is bitwise the translation it always was");
+            }
+            e.SetSpawn(120.0, 0.0, -10.0, 90.0);
+            {
+                double bx = 0.0, by = 0.0, bz = 1.0;   // the bow at build: +z
+                e.Spawn().TransformDir(bx, by, bz);
+                g.Near(std::atan2(bx, bz) * 180.0 / kPiL, 90.0, 1e-9, "[entity] az 90 turns the bow east (the telemetry's heading)");
+                double px = 0.0, py = 0.0, pz = 0.0;
+                e.Spawn().TransformPoint(px, py, pz);
+                g.Near(std::fabs(px - 120.0) + std::fabs(py) + std::fabs(pz + 10.0), 0.0, 1e-12,
+                       "[entity] ...about the spawn point, which stays where the sugar put it");
+            }
             g.True(!e.Active() && !e.Helming(), "[entity] a node without a hull is inert");
             const PropDecl* mc = EntitySchema().Find("mirrorCadence");
             g.True(mc && mc->quantity == Quantity::Time && mc->unit.toCanonical == 1.0,
@@ -1908,6 +2001,115 @@ bool RunSceneSelfTest() {
             TreeWater tw;
             tw.Configure(&wm, nullptr, nullptr, nullptr, 1.0, 1.0, 1.0);
             g.Has(tw.Describe(120.0, -10.0, 0.0), "mirror never read", "[entity] TreeWater::Describe reports the mirror's age (never)");
+        }
+
+        // (E) THE GATE: one motor carries a body from a box to a place on the same planet.
+        {
+            const PoseFrame frM = FrameFromAnchor(BathyModel::kOrgLat, BathyModel::kOrgLon, R);
+            Space planetG, rootG;
+            planetG.name = "planet.re";
+            planetG.unitM = R;
+            planetG.extentM = 2.0 * R;
+            rootG.name = "tangent.merrimack";
+            rootG.unitM = R;
+            rootG.extentM = 2.0 * R;
+            rootG.parent = &planetG;
+            const double anchorM[3] = {frM.up[0] * R, frM.up[1] * R, frM.up[2] * R};
+            rootG.link = Placement::Frame(frM.east, frM.up, frM.north, anchorM);
+            Gateway gate;
+            gate.Declared().name = "haulover";
+            gate.Declared().toLat = 25.8997;
+            gate.Declared().toLon = -80.1239;
+            gate.Declared().toAz = 90.0;
+            g.True(gate.Build(planetG, rootG, R, 600.0, 0.0, -10.0, 90.0) && gate.Valid(),
+                   "[gate] a box at the inlet builds its carry to Haulover");
+            // The box: its centre and its forward face.
+            g.True(gate.Inside(600.0, 0.0, -10.0), "[gate] the box's centre is inside");
+            g.True(gate.Inside(603.9, 14.9, 19.9) && !gate.Inside(604.1, 0.0, -10.0) &&
+                       !gate.Inside(600.0, 15.1, -10.0) && !gate.Inside(600.0, 0.0, 20.1),
+                   "[gate] ...and the default 60 x 30 x 8 m box ends where its half-sizes do (heading east: depth along x, width along z)");
+            // THE CARRY: the entry box's centre lands on the destination's origin, and the box's
+            // forward (east, at az 90) leaves along the exit heading (east, toAz 90).
+            double cx = 600.0, cy = 0.0, cz = -10.0;
+            gate.Carry().TransformPoint(cx, cy, cz);
+            g.Near(std::fabs(cx) + std::fabs(cy) + std::fabs(cz), 0.0, 1e-9, "[gate] the box's centre lands on the destination's origin");
+            double fx = 1.0, fy = 0.0, fz = 0.0;
+            gate.Carry().TransformDir(fx, fy, fz);
+            g.Near(std::atan2(fx, fz) * 180.0 / kPiL, 90.0, 1e-9, "[gate] the box's forward leaves along the exit heading");
+            g.Near(fy, 0.0, 1e-12, "[gate] ...and stays level: both boxes are y-up in their own spaces");
+            // A body keeps its motion: momentum turned with the pose, the body twist unchanged.
+            RigidBody body;
+            body.pose = Motor::Translation(600.0, 0.2, -10.0);
+            Bivector tw0 = Bivector::Zero();
+            tw0.b[2] = 7.5;    // 7.5 m/s along its own bow (+z body)
+            tw0.a[1] = 0.1;    // yawing
+            body.SetTwist(tw0);
+            double p0[3];
+            body.LinearMomentumWorld(p0);
+            body.Carry(gate.Carry());
+            double p1[3];
+            body.LinearMomentumWorld(p1);
+            const Motor& K = gate.Carry();
+            double pk[3] = {p0[0], p0[1], p0[2]};
+            K.TransformDir(pk[0], pk[1], pk[2]);
+            g.Near(std::fabs(p1[0] - pk[0]) + std::fabs(p1[1] - pk[1]) + std::fabs(p1[2] - pk[2]), 0.0, 1e-9,
+                   "[gate] the carried body's world momentum is the old one turned by the carry");
+            const Bivector& tw1 = body.Twist();
+            g.Near(std::fabs(tw1.b[2] - 7.5) + std::fabs(tw1.a[1] - 0.1), 0.0, 1e-9,
+                   "[gate] ...and its body twist is unchanged: it moves in its own frame as it did");
+            // THE DESTINATION SPACE: its up at its origin is the planet's radial at the place.
+            const Placement W = gate.Destination().To(rootG);
+            double upD[3];
+            const double ey[3] = {0.0, 1.0, 0.0};
+            W.ApplyDir(ey, upD);
+            const PoseFrame frH = FrameFromAnchor(25.8997, -80.1239, R);
+            double upH[3];
+            rootG.link.Inverse().ApplyDir(frH.up, upH);
+            g.Near(std::fabs(upD[0] - upH[0]) + std::fabs(upD[1] - upH[1]) + std::fabs(upD[2] - upH[2]), 0.0, 1e-12,
+                   "[gate] the destination space's up is the planet's radial at Haulover");
+            const double tilt = std::acos((std::min)(1.0, upD[1])) * 180.0 / kPiL;
+            g.True(tilt > 17.0 && tilt < 20.0, "[gate] ...18-19 degrees from the Merrimack's (the arc between the inlets)");
+            double ox = 0.0, oy = 0.0, oz = 0.0;
+            gate.DestinationInSource().TransformPoint(ox, oy, oz);
+            double orig[3];
+            const double z0[3] = {0.0, 0.0, 0.0};
+            W.Apply(z0, orig);
+            g.Near(std::fabs(ox - orig[0]) + std::fabs(oy - orig[1]) + std::fabs(oz - orig[2]), 0.0, 1e-6,
+                   "[gate] the destination's motor places its origin where its placement does");
+            // THE CHART: the destination's places, round trip.
+            const Space::Anchor& ch = gate.Chart();
+            double la = 0.0, lo = 0.0, rx = 0.0, rz = 0.0;
+            ch.LatLonOf(1000.0, -500.0, la, lo);
+            ch.FlatOf(la, lo, rx, rz);
+            g.Near(std::fabs(rx - 1000.0) + std::fabs(rz + 500.0), 0.0, 1e-9, "[gate] the destination's chart round-trips");
+            g.Near(la, 25.8997 - 500.0 / 110574.0, 1e-12, "[gate] ...by the engine's law at the place");
+            // THE WATER: with no chart a TreeWater places a point by the root's constants, bitwise.
+            TreeWater twG;
+            double la0 = 0.0, lo0 = 0.0;
+            twG.PlaceOf(120.0, -10.0, la0, lo0);
+            g.True(la0 == BathyModel::kOrgLat + (-10.0) / BathyModel::kMPerLat &&
+                       lo0 == BathyModel::kOrgLon + 120.0 / BathyModel::kMPerLon,
+                   "[gate] a TreeWater with no chart places a point by the root's constants, bitwise");
+            twG.SetChart(&ch);
+            twG.PlaceOf(0.0, 0.0, la0, lo0);
+            g.True(la0 == 25.8997 && lo0 == -80.1239, "[gate] ...and through a gate's chart, at the destination's places");
+            // THE WINDOW'S TEST (Gateway::SeenThrough, the shader's GateThrough line for line). The
+            // box at (600, 0, -10) heading east: 8 m deep along x, 60 m across along z, 30 m tall.
+            const double eyeW[3] = {500.0, 2.0, -10.0};
+            const double farBehind[3] = {900.0, 0.0, -10.0};
+            const double besideP[3] = {900.0, 0.0, 200.0};
+            const double beforeBox[3] = {560.0, 1.0, -10.0};
+            const double inBox[3] = {601.0, 0.0, -5.0};
+            g.True(gate.SeenThrough(eyeW, farBehind), "[gate] a point beyond the box, straight through it, is seen through the window");
+            g.True(gate.SeenThrough(eyeW, inBox), "[gate] ...and so is a point inside the box");
+            g.True(!gate.SeenThrough(eyeW, beforeBox), "[gate] a point between the eye and the box is not");
+            g.True(!gate.SeenThrough(eyeW, besideP), "[gate] a point whose ray passes beside the box is not");
+            const double eyeIn[3] = {600.0, 0.0, -10.0};
+            g.True(gate.SeenThrough(eyeIn, besideP) && gate.SeenThrough(eyeIn, beforeBox),
+                   "[gate] from inside the box every ray starts in the window");
+            const double eyeAbove[3] = {600.0, 100.0, -10.0};
+            const double belowBox[3] = {600.0, -40.0, -10.0};
+            g.True(gate.SeenThrough(eyeAbove, belowBox), "[gate] the box is a box: looking down through its top works too");
         }
     }
 

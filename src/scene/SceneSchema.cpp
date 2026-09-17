@@ -14,6 +14,7 @@ FleetBoat kBoat;
 ViewProps kView;   // its viewport and follow prototypes live INSIDE it (Nest takes the address)
 RailKey kRailKey;
 PortalProps kPortal;
+GateProps kGate;
 EntityProps kEntity;
 EffectProps kEffect;
 SlicePlaneProps kSlice;
@@ -384,10 +385,34 @@ const Schema& PortalSchema_() {
             .Bind("enabled", kPortal.enabled, "link the root under a leaf of itself (--droste)", R)
             .Bind("lat", kPortal.lat, Q::Angle, "deg", "the leaf's place (--droste-at)", R)
             .Bind("lon", kPortal.lon, Q::Angle, "deg", "the leaf's place", R)
+            .Bind("toLat", kPortal.toLat, Q::Angle, "deg",
+                  "the DESTINATION: the place the inner globe presents where the root shows this leaf "
+                  "(the root turned by the shortest arc carrying it onto the leaf's place, then twisted); "
+                  "with toLon; absent = the leaf's own place", R)
+            .Optional()
+            .Bind("toLon", kPortal.toLon, Q::Angle, "deg", "the destination's longitude (with toLat)", R)
+            .Optional()
             .Bind("level", kPortal.level, Q::Dimensionless, "1", "the quadtree level (16 = a 153 m leaf)", R)
             .Bind("fill", kPortal.fill, Q::Dimensionless, "1", "the inner globe's diameter / leaf span (--droste-fill)", R)
             .Bind("twistDeg", kPortal.twistDeg, Q::Angle, "deg", "the twist per level about north (--droste-twist)", R)
             .BindEnum("lighting", kPortal.lighting, {"realistic", "appealing"}, "the lighting A/B (--droste-light)", H);
+        return sc;
+    }();
+    return *s;
+}
+
+const Schema& GateSchema_() {
+    static const Schema* s = [] {
+        Schema* sc = new Schema("gate", &kGate);
+        sc->Bind("name", kGate.name, "the gate's name", R)
+            .Bind("enabled", kGate.enabled, "carry bodies through it", R)
+            .Bind("at", kGate.at, "the box's centre and heading in the flat world frame: {x, alt, z, az}", R)
+            .Optional()
+            .Bind("size", kGate.size, Q::Length, "m", "the box: across, up, and along its heading", R)
+            .Bind("toLat", kGate.toLat, Q::Angle, "deg", "the destination's latitude", R)
+            .Bind("toLon", kGate.toLon, Q::Angle, "deg", "the destination's longitude", R)
+            .Bind("toAz", kGate.toAz, Q::Angle, "deg",
+                  "the compass heading the box's forward face leaves along at the destination", R);
         return sc;
     }();
     return *s;
@@ -398,7 +423,7 @@ const Schema& EntitySchema_() {
         Schema* sc = new Schema("entity", &kEntity);
         sc->Bind("name", kEntity.name, "the entity's name", R)
             .Bind("vessel", kEntity.vessel, "the hull kind (VesselRegistry; --boat)", R)
-            .Bind("at", kEntity.at, "the spawn, in the flat world frame (--campos)", R)
+            .Bind("at", kEntity.at, "the spawn, in the flat world frame (--campos); `az` is the bow's compass heading (absent: north, as every hull always spawned)", R)
             .BindEnum("controller", kEntity.controller, {"helm", "fixed"},
                       "the keyboard helm, or fixed throttles and helm (--boat-drive)", H)
             .Bind("throttle", kEntity.throttle, Q::Dimensionless, "1", "fixed: every thruster's throttle", H)
@@ -479,6 +504,7 @@ const Schema& ToolSchema() {
 
 const Schema& ViewSchema() { return ViewSchema_(); }
 const Schema& PortalSchema() { return PortalSchema_(); }
+const Schema& GateSchema() { return GateSchema_(); }
 const Schema& EntitySchema() { return EntitySchema_(); }
 const Schema& NodeSchema() { return NodeSchema_(); }
 const Schema& RailKeySchema() { return RailKeySchema_(); }
@@ -500,6 +526,7 @@ const Schema& SceneFileSchema() {
             .List("views", &ViewSchema_(), "the cameras, by name")
             .Nest("rails", RailsSchema(), &kDoc.rails, "the camera rails")
             .List("portals", &PortalSchema_(), "the Droste links, by name")
+            .List("gates", &GateSchema_(), "the cuboid gates to other places, by name")
             .List("entities", &EntitySchema_(), "the vessels, by name")
             .List("effects", &EffectSchema(), "the paper visuals, by name, typed", true, "effect", "type")
             .List("layers", &LayerEntrySchema(), "the layers in registration order, typed by name", true, "layer", "name")

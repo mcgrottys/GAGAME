@@ -100,6 +100,13 @@ cbuffer GlobeCb : register(b1) {
     float4 gBankBOrg23;
     float4 gBankBOrg45;
     float4 gDroste[48];   // 8 levels x 6 rows -- see LoadLevel
+    // THE GATE'S WINDOW (scene/Gateway.h): x = the window's slot (-1 none); the box's centre
+    // relative to the eye (true camera frame); the rows camera -> box, w = the half extents.
+    float4 gGateA;
+    float4 gGateC;
+    float4 gGateR0;
+    float4 gGateR1;
+    float4 gGateR2;
 };
 
 // ---- M10: the level being drawn (LoadLevel) --------------------------------------------------
@@ -143,6 +150,47 @@ float SkyDay(float localDay) { return (sLvlSkyDay < 0.0f) ? localDay : sLvlSkyDa
 // The gauge's one outward step: a camera-relative vector in the level's own frame, as the true
 // camera sees it. s^k Q^k -- the similarity with its translation already cancelled by the eye.
 float3 TrueRel(float3 relOwn) { return sLvlSigma * mul(sLvlQ, relOwn); }
+
+// THE GATE'S WINDOW -- scene/Gateway.cpp SeenThrough, line for line. The segment from the eye (the
+// origin of the true camera frame) to p reaches the box's entry at or before p: p is seen THROUGH
+// the window. One slab test, in the box's own frame.
+bool GateThrough(float3 p) {
+    const float3x3 R = float3x3(gGateR0.xyz, gGateR1.xyz, gGateR2.xyz);
+    const float3 h = float3(gGateR0.w, gGateR1.w, gGateR2.w);
+    const float3 e = mul(R, -gGateC.xyz);
+    float3 d = mul(R, p);
+    d = lerp(d, float3(1e-12f, 1e-12f, 1e-12f), float3(abs(d) < 1e-12f));
+    const float3 t1 = (-h - e) / d;
+    const float3 t2 = (h - e) / d;
+    const float3 tn = min(t1, t2);
+    const float3 tf = max(t1, t2);
+    const float tEnter = max(max(tn.x, tn.y), tn.z);
+    const float tExit = min(min(tf.x, tf.y), tf.z);
+    return tEnter <= tExit && tExit >= 0.0f && tEnter <= 1.0f;
+}
+
+// THE RIM: how near the ray's entry into the box lies to an EDGE of the face it enters through,
+// 1 on the edge falling to 0 a rim-width in. A window between two open seas is otherwise hard to
+// find; the rim is drawn on the window's own pixels only, so the destination never shows it.
+float GateRim(float3 p) {
+    const float3x3 R = float3x3(gGateR0.xyz, gGateR1.xyz, gGateR2.xyz);
+    const float3 h = float3(gGateR0.w, gGateR1.w, gGateR2.w);
+    const float3 e = mul(R, -gGateC.xyz);
+    float3 d = mul(R, p);
+    d = lerp(d, float3(1e-12f, 1e-12f, 1e-12f), float3(abs(d) < 1e-12f));
+    const float3 t1 = (-h - e) / d;
+    const float3 t2 = (h - e) / d;
+    const float3 tn = min(t1, t2);
+    const float tEnter = max(max(max(tn.x, tn.y), tn.z), 0.0f);
+    const float3 q = e + tEnter * d;                   // the entry point, box frame
+    const float3 inset = h - abs(q);                   // >= 0 inside; ~0 on the entered face
+    // The entered face's axis is the smallest inset; the rim is the next smallest.
+    const float lo = min(min(inset.x, inset.y), inset.z);
+    const float hi = max(max(inset.x, inset.y), inset.z);
+    const float mid = inset.x + inset.y + inset.z - lo - hi;
+    const float width = max(0.35f, 0.004f * length(tEnter * p));
+    return 1.0f - saturate(mid / width);
+}
 
 // THE INNER GLOBE'S SHADOW. The next level down sits in every level at the same place in that
 // level's own frame (gDrostePortal), so one analytic sphere test shades the whole tower: the sun
@@ -964,6 +1012,11 @@ float4 PsMain(VsOut i) : SV_Target {
     // M10: THE GAUGE FIRST. i.rel, the eye, the sun and the bank set are all the drawing
     // level's own; everything below is the root's shading, unchanged, run in that frame.
     LoadLevel(i.lvl);
+    // THE GATE'S WINDOW: seen through the box is the destination's level, and only that; every
+    // other level is everything else. The same test from every eye, so every view agrees.
+    if (gGateA.x >= 0.0f) {
+        if (GateThrough(TrueRel(i.rel)) != (i.lvl == (uint)gGateA.x)) discard;
+    }
     const float sunVis = PortalShadow(sLvlCamAbs + i.rel - float3(0.0f, gGlo.x, 0.0f));
     const float3 up = normalize(i.dir);   // PLANET frame: lat/lon + every texture fetch
     const float3 v = normalize(-i.rel);   // TANGENT frame: geometry + lighting (M6g)
@@ -1450,6 +1503,10 @@ float4 PsMain(VsOut i) : SV_Target {
         col = lerp(col, tint * (0.25f + day), s * 0.4f);
     }
 
+    // THE GATE'S RIM, on the window's own pixels only (the destination never draws one).
+    if (gGateA.x >= 0.0f && i.lvl == (uint)gGateA.x) {
+        col = lerp(col, float3(0.75f, 0.92f, 1.0f), 0.55f * GateRim(TrueRel(i.rel)));
+    }
     col = ApplyComposedStencil(col, up);   // M6i: --stencil alignment overlay (off = no-op)
     return float4(col, 1.0f);
 }

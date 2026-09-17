@@ -1,0 +1,36 @@
+{
+  "_readme": [
+    "THE HAULOVER GATE -- a playable scene. You are at the helm of the Novurania 18 RHIB in the",
+    "Merrimack entrance on the afternoon ebb of 2026-08-28. Ahead, across the channel, stands a",
+    "gate: a 120 m x 30 m x 10 m box, and a window -- through it, faintly outlined, is Haulover's sea.",
+    "Drive your boat into it and you come out of Baker's Haulover Inlet, Miami, heading out to sea,",
+    "still moving. The box is one motor between two places on the same planet: nothing else moves,",
+    "and nobody at Haulover sees a gate -- the boat just appears.",
+    "",
+    "Launch from the repo root:  build/bin/gagame.exe scenes/demos/haulover_portal.json",
+    "",
+    "HELM   W / S  both throttles ahead / astern      A / D  steer to port / starboard",
+    "       Q / E  split the levers (pivot)           Shift / Ctrl  trim out / in",
+    "T      leave the helm: the camera flies free (the boat keeps its throttles); T again returns",
+    "FLY    W A S D move, Q / E down / up, hold the right mouse button to look, wheel = speed",
+    "TIME   Space pause, Up / Down time x10 / /10, Left / Right nudge.   R reload shaders.",
+    "",
+    "Haulover renders only as well as the engine's data there: the global relief floods its barrier",
+    "island, so the water there is open sea until Haulover's own terrain is brought in."
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {"name": "haulover-gate", "mode": "world", "view": "sea"},
+  "time": {"start": "2026-08-28T19:30:00Z"},
+  "sea": {"storm": {"hs": 1.5, "tp": 8, "dir": 95}},
+  "views": [
+    {"name": "sea", "follow": {"target": "boat"}}
+  ],
+  "entities": [
+    {"name": "boat", "vessel": "rhib.novurania18", "at": {"x": 120, "alt": 0, "z": -10, "az": 86},
+     "controller": "helm"}
+  ],
+  "gates": [
+    {"name": "haulover", "at": {"x": 450, "alt": 0, "z": 0, "az": 90}, "size": [120, 30, 10],
+     "toLat": 25.8997, "toLon": -80.1239, "toAz": 90}
+  ]
+}
