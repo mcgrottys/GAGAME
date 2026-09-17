@@ -11,7 +11,11 @@ namespace ga {
 
 class SkyLayer : public Layer {
 public:
-    void Configure(const std::wstring& shaderDir) { m_shaderDir = shaderDir; }
+    // `probe` (--sky-probe) also builds the two transmittance tables Probe() compares.
+    void Configure(const std::wstring& shaderDir, bool probe = false) {
+        m_shaderDir = shaderDir;
+        m_probe = probe;
+    }
 
     const char* Name() const override { return "sky"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
@@ -48,15 +52,15 @@ public:
         m_winEyeR = eyeRadiusM;
     }
 
-    // ---- THE AIR'S TWO TABLES (M13, Atmosphere.hlsli / SkyLut.hlsl) ------------------------
-    // Properties of the atmosphere alone -- what it lets through toward the sun from a height at
-    // an angle, and what the scattering orders past the first add there -- built once and the
-    // same for every ray on the planet. There is no table of the VIEW: every ray marches the air
-    // from where it is. The renderer publishes both slots in the scene constants.
-    uint32_t TransmittanceSrv() const { return m_transTex.srv; }
+    // ---- THE AIR'S TABLE (M13, Atmosphere.hlsli / SkyLut.hlsl) -----------------------------
+    // A property of the atmosphere alone -- what the scattering orders past the first add at a
+    // height under a sun angle -- built once and the same for every ray on the planet. There is
+    // no table of the VIEW (every ray marches the air from where it is) and none of the sun's
+    // transmittance (a closed form). The renderer publishes the slot in the scene constants.
     uint32_t MultiScatterSrv() const { return m_msTex.srv; }
     void SetPlanetRadius(double planetR) { m_planetR = planetR; }
-    // --sky-probe: read the transmittance back and hold it against published optical depths.
+    // --sky-probe: the closed-form transmittance and the marched table it replaced, read back
+    // and held against a brute-force integral and against published optical depths.
     void Probe(Gpu& gpu);
 
 private:
@@ -77,14 +81,16 @@ private:
     float m_winSun[3] = {0.0f, 1.0f, 0.0f};
     float m_winEyeR = 6371000.0f;
 
-    // The tables, their UAVs, and the kernels that fill them.
+    // The table, its UAV, and the kernel that fills it -- and, under --sky-probe only, the two
+    // transmittance tables (float32, so the comparison is not the storage's).
     static constexpr uint32_t kTransW = 256, kTransH = 64;
     static constexpr uint32_t kMsW = 32, kMsH = 32;
-    GpuTexture m_transTex, m_msTex;
-    uint32_t m_transUav = UINT32_MAX, m_msUav = UINT32_MAX;
+    GpuTexture m_msTex, m_transTex, m_anaTex;
+    uint32_t m_msUav = UINT32_MAX, m_transUav = UINT32_MAX, m_anaUav = UINT32_MAX;
     hal::RootSignatureRef m_lutRs;
-    hal::Pso m_csTrans, m_csMs;
-    bool m_lutStatic = false;   // the two constant tables are built on the first frame
+    hal::Pso m_csMs, m_csTrans, m_csAna;
+    bool m_lutStatic = false;   // the constant tables are built on the first frame
+    bool m_probe = false;
     double m_planetR = 6371000.0;
 };
 

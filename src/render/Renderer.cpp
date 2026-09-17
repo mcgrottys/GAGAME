@@ -268,7 +268,7 @@ void Renderer::FillSceneConstants(const SceneFill& f, SceneConstants& sc) {
     sc.skyLut[0] = (f.skyMsSrv == 0xFFFFFFFFu) ? -1.0f : static_cast<float>(f.skyMsSrv);
     sc.skyLut[1] = f.planetRadiusM;
     sc.skyLut[2] = f.eyeRadiusM;
-    sc.skyLut[3] = (f.skyTransSrv == 0xFFFFFFFFu) ? -1.0f : static_cast<float>(f.skyTransSrv);
+    sc.skyLut[3] = 0.0f;   // spare: the sun's transmittance is a closed form, not a table
 }
 
 SceneFill Renderer::FillInputs(const Camera& cam, float timeSec) const {
@@ -287,7 +287,6 @@ SceneFill Renderer::FillInputs(const Camera& cam, float timeSec) const {
     f.sunAngRadiusDeg = sunAngRadiusDeg;
     f.waterLevel = waterLevel;
     f.skyMsSrv = skyMsSrv;
-    f.skyTransSrv = skyTransSrv;
     f.planetRadiusM = planetRadiusM;
     f.eyeRadiusM = eyeRadiusM;
     for (int c = 0; c < 3; ++c) {

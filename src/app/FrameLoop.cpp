@@ -2359,7 +2359,7 @@ bool FrameLoop::Frame() {
             skySun = zenSun;
         }
         sky->SetSkyFrame(rows, skySun);
-        // M13: AND THE AIR ITSELF. The air's two tables (the same for every ray on the planet) and
+        // M13: AND THE AIR ITSELF. The air's one table (the same for every ray on the planet) and
         // this eye's distance from the planet's centre; the sky is marched from there. An eye
         // above the air marches nothing -- the limb shell owns that backdrop (the atmosphere
         // ledger) -- and every consumer answers with the gradient it always had; the shader
@@ -2370,7 +2370,6 @@ bool FrameLoop::Frame() {
             const double gy = C[1] + planetR;
             sky->SetPlanetRadius(planetR);
             renderer.skyMsSrv = sky->MultiScatterSrv();
-            renderer.skyTransSrv = sky->TransmittanceSrv();
             renderer.planetRadiusM = static_cast<float>(planetR);
             renderer.eyeRadiusM = static_cast<float>(std::sqrt(C[0] * C[0] + gy * gy + C[2] * C[2]));
         }

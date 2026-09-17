@@ -30,9 +30,9 @@ cbuffer SceneCb : register(b0) {
     float4   gViewport;      // w, h, 1/w, 1/h
     float4   gMisc;          // x water level (m above datum -- the tide), yz = the SUN's disc
                              // (cos of 1.15x and 0.85x its true angular radius, M9bi), w spare
-    float4   gSkyLut;        // M13: the AIR's two tables and this eye's place in it:
-                             // x = multiple-scattering slot, w = transmittance slot (numbers;
-                             // -1 = none), y = the planet's radius, z = the eye's (metres)
+    float4   gSkyLut;        // M13: the AIR's table and this eye's place in it:
+                             // x = multiple-scattering slot (a number; -1 = none),
+                             // y = the planet's radius, z = the eye's (metres), w spare
 };
 
 #define gTime        (gParams0.x)
@@ -183,7 +183,7 @@ bool GateSlabThrough(float3 p, float3x3 R, float3 h, float3 c) {
 // its own zenith, sun and eye radius through the three macros, exactly as it already did for the
 // sun; the march then IS that place's sky, with nothing else to tell it.
 //
-// Without the air's tables -- a tool, a test, a pass that runs before the sky layer, or an eye
+// Without the air's table -- a tool, a test, a pass that runs before the sky layer, or an eye
 // above the air, where the limb shell owns the backdrop -- the shipped gradient answers, byte for
 // byte. A missing sky is a wrong sky, not a black one.
 #ifndef GA_SKY_EYE_R
@@ -199,7 +199,7 @@ static const uint kSkySteps = 6u;   // exponentially spaced (Atmosphere.hlsli At
 // both.
 static const float kSkyAirCeilingM = 60000.0f;
 bool SkyAirOn(float eyeR) {
-    return gSkyLut.x >= 0.0f && gSkyLut.w >= 0.0f && eyeR < gSkyLut.y + kSkyAirCeilingM;
+    return gSkyLut.x >= 0.0f && eyeR < gSkyLut.y + kSkyAirCeilingM;
 }
 
 // The air along a ray from a viewpoint: its zenith, its sun, its distance from the planet centre.
@@ -207,15 +207,15 @@ float3 SkyAirAt(float3 dir, float3 up, float3 sunDir, float eyeR) {
     float3 fms;
     const float Rb = gSkyLut.y;
     const float r = clamp(eyeR, Rb + 1.0f, Rb + kAtmTopM - 1000.0f);
-    return AtmRay(r, dir, up, sunDir, kSkySteps, uint(gSkyLut.w), int(gSkyLut.x), Rb,
-                  Rb + kAtmTopM, fms) * kAtmGain;
+    return AtmRay(r, dir, up, sunDir, kSkySteps, int(gSkyLut.x), Rb, Rb + kAtmTopM, fms) *
+           kAtmGain;
 }
 
 // THE SUN'S OWN COLOUR through the air from a viewpoint -- why a setting sun is red.
 float3 SunThroughAirAt(float3 up, float3 sunDir, float eyeR) {
     const float Rb = gSkyLut.y;
     const float r = clamp(eyeR, Rb + 1.0f, Rb + kAtmTopM - 1000.0f);
-    return AtmSunT(uint(gSkyLut.w), r, clamp(dot(sunDir, up), -1.0f, 1.0f), Rb, Rb + kAtmTopM);
+    return AtmSunT(r, clamp(dot(sunDir, up), -1.0f, 1.0f), Rb);
 }
 float3 SunThroughAir() {
     return SkyAirOn(GA_SKY_EYE_R) ? SunThroughAirAt(GA_SKY_UP, GA_SUN_DIR, GA_SKY_EYE_R)

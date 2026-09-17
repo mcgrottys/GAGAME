@@ -226,7 +226,7 @@ void FillSceneConstantsFrozen(const SceneFill& f, SceneConstants& sc) {
     sc.skyLut[0] = (f.skyMsSrv == 0xFFFFFFFFu) ? -1.0f : static_cast<float>(f.skyMsSrv);
     sc.skyLut[1] = f.planetRadiusM;
     sc.skyLut[2] = f.eyeRadiusM;
-    sc.skyLut[3] = (f.skyTransSrv == 0xFFFFFFFFu) ? -1.0f : static_cast<float>(f.skyTransSrv);
+    sc.skyLut[3] = 0.0f;
 }
 
 // The six poses the M12 gate renders (tools/stills.sh, plus gate_stills.sh's droste), built the
