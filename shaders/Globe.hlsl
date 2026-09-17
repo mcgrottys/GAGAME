@@ -605,7 +605,7 @@ float3 WaterVertexColor(float3 dir, float3 rel, float h) {
     const float ndl = saturate(dot(nW, GA_SUN_DIR)) * sunVis;
     float3 col = alb * (0.030f + ndl * SUN_IRR_C * 1.15f);
     col += spec * SUN_IRR_C * 0.85f;
-    col += SkyRadianceDirDiscless(rDir) * (fres * 0.9f * (1.0f - foam)) * SkyDay(day);
+    col += SkyRadianceDirDiscless(rDir, SkyDay(day)) * (fres * 0.9f * (1.0f - foam));
     col += alb * float3(0.010f, 0.014f, 0.028f) * (1.0f - day);   // moonlit-blue night side
     return col;
 }
@@ -1000,7 +1000,8 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // (which is why the horizon band stays pale silver instead of turning green); pointing
     // straight down it returns 0.02 and the endpoint is the water body. No new constant, no
     // branch -- the law already in this function, applied once more.
-    const float3 skyLit = SkyRadianceDirDiscless(rSky) * SkyDay(day);   // M10: the sky it sees
+    // M10: the sky it sees -- the hour rides the gradient only; the march already has it.
+    const float3 skyLit = SkyRadianceDirDiscless(rSky, SkyDay(day));
     const float fresHit = 0.02f + 0.98f * pow(1.0f - saturate(-rUp), 5.0f);
     const float3 mirror = lerp(skyLit, lerp(bodyLit, skyLit, fresHit), seaward);
     float3 col = bodyLit * (1.0f - fres);

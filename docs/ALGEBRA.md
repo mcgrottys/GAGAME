@@ -444,8 +444,10 @@ already owns (no BLAS — the scene descriptions are our own quadtrees):
 
     L = F(θ)·L_sky(r̂) + (1−F)·[ T_w ⊙ ρ_bed·E_bed + (1 − T_w) ⊙ C_scatter ] + L_glint
 
-- r̂ = −n d n (reflected ray, `cl3`), L_sky the analytic sky radiance (discless sun +
-  gradient), F = Schlick 0.02 + 0.98(1−cosθ)⁵ on the true wave normal.
+- r̂ = −n d n (reflected ray, `cl3`), L_sky the sky radiance on that ray, discless (the
+  marched air since M13; the two-constant gradient only as its fallback, and only the
+  fallback is told the hour — priors 45), F = Schlick 0.02 + 0.98(1−cosθ)⁵ on the true
+  wave normal.
 - The refracted ray (`cl3` rotor) marches into the water and lands on the **bed** — the
   composed height quadtree, found by 2 secant steps; ρ_bed is the composed color there
   (imagery or synth.bed's dry albedo).
@@ -1519,6 +1521,17 @@ model (or a textbook) would hold → what this project measured → the law now 
     ebb helm is bimodal (0 or 15–30 k px), the bird 3–7 k px, and the Droste pose 80–320 px — one
     A/A pair of it had come out bit-identical, and a lens plus two null arms (the term folded to 1;
     computed, then zeroed) moved it as much as the law did.
+45. **A ramp written for a sky that could not tell the time outlives the sky that can.** Prior: the
+    water's mirror needs its `day` ramp (3 sin(el) + 0.12), or the night sea reflects daylight —
+    true while the sky was two constants. Measured (the helm, the sun pinned low): since M13 the
+    marched sky dims and reddens with the sun by itself, and the ramp dimmed it again. The sea
+    reflected 1.5 % of the twilight glow at −2°, 17 % of the sunset sky at +1°, 33 % at +4° and 64 %
+    at +10°; with the hour taken once, the +1° sea's red mean went 52 → 110 and the −2° sea from
+    near-black to the glow (approved by eye). Law: a correction belongs to the model that lacks the
+    quantity. When the sky learned the hour, the ramp had to move into the gradient fallback that
+    still lacks it (`SkyRadianceDirDiscless(dir, day)`), not stay on every caller — and not vanish
+    either, or an eye above the air (the globe, a Droste level), which still sees the gradient,
+    would light its night-side sea.
 
 
 ## verification — The gate map: which algebra is pinned where

@@ -328,7 +328,14 @@ float3 SkyRadianceDir(float3 dir) {
 // the mirror image). For surfaces that carry their own explicit sun lobe: the unified water
 // BRDF owns the sun through Cox-Munk at every scale, and the mirror disc here on top of a
 // helm-tight lobe would count the sun twice.
-float3 SkyRadianceDirDiscless(float3 dir) {
+//
+// `day` is the caller's daylight, and only the GRADIENT takes it. The march already carries the
+// hour -- the sky over a set sun is dark, or glowing, because the air is -- and the water that
+// multiplied the march by its ramp of the sun's height (3 sin(el) + 0.12) darkened a twilight
+// sea twice: it reflected 0.015 of the glow at -2 deg and 0.17 of it at +1. The gradient is the
+// same two colours at noon and at midnight, so it is still told the hour: an eye above the air
+// (the globe, a Droste level) keeps its night-side sea dark.
+float3 SkyRadianceDirDiscless(float3 dir, float day) {
     const float ey = dot(dir, GA_SKY_UP);
     // The march carries the aureole (the Mie lobe IS the halo); what this form must not add is the
     // specular disc, and it does not.
@@ -336,7 +343,7 @@ float3 SkyRadianceDirDiscless(float3 dir) {
     float3 col = SkyRadiance(ey);
     const float cosA = dot(dir, GA_SUN_DIR);
     col += SUN_IRR_C * (pow(saturate(cosA), 350.0f) * 0.35f + pow(saturate(cosA), 12.0f) * 0.05f);
-    return lerp(col, SKY_LO_C * 0.45f, smoothstep(0.0f, -0.06f, ey));
+    return lerp(col, SKY_LO_C * 0.45f, smoothstep(0.0f, -0.06f, ey)) * day;
 }
 
 // Aerial perspective: exponential extinction toward the sky colour along the view ray. The 6 km
