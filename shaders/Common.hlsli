@@ -247,6 +247,31 @@ float3 SunThroughAir() {
                                   : float3(1.0f, 1.0f, 1.0f);
 }
 
+// ---- THE PLANET'S OWN SHADOW, ONCE ----------------------------------------------------------
+// The sun is one light, and at this scale the only thing that stands between it and the ground
+// is the planet itself. So whether a surface point is lit is a question about the PLANET at that
+// point, never about the surface's own tilt. The surfaces asked their tilt: a wave face leaning a
+// few degrees toward a sun that set two degrees ago still read "lit", and the sea drew a white
+// glint under a sky that had already put its sun out (--sun 236,-2 at the helm). The sky asks
+// the planet (Atmosphere.hlsli AtmSunT); every sun term on a surface now asks it too.
+//
+// Seen from a point h above the sphere, the planet fills the sky below the dipped horizon, whose
+// sine is sqrt(h (2R + h)) / (R + h) -- zero on the sphere. The sun is a disc, so the answer is
+// not a switch: SunDiscClear is the share of the sun's disc clear of an occluder's rim when the
+// disc's centre stands `sep` radians beyond it -- 1/2 with the centre on the rim, all of it one
+// disc radius above, none of it one below. Globe.hlsl's PortalShadow asks exactly this of the
+// Droste inner globe; PlanetShadow asks it of the sphere the point stands on. The separation is
+// summed in sines, which differs from the angle by under 0.2 % within three degrees of the
+// horizon -- and the ramp is 0 or 1 everywhere further out.
+static const float kSunDiscR = 0.0047f;   // the sun's angular radius, ~0.27 deg
+float SunDiscClear(float sep) { return saturate(sep / (2.0f * kSunDiscR) + 0.5f); }
+// `up` is the point's own zenith and `heightM` its ground above the sphere (the sea stands at
+// 0), both in the frame `sunDir` is in.
+float PlanetShadow(float3 up, float3 sunDir, float heightM, float planetR) {
+    const float h = max(heightM, 0.0f);
+    return SunDiscClear(dot(up, sunDir) + sqrt(h * (2.0f * planetR + h)) / (planetR + h));
+}
+
 // The gradient that shipped, kept as the fallback and for callers with only an elevation to give
 // (asked, when the air is on, along the sun's own meridian at that elevation).
 float3 SkyRadiance(float ey) {

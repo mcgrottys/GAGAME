@@ -459,6 +459,12 @@ already owns (no BLAS — the scene descriptions are our own quadtrees):
   with its own Schlick factor. The **group envelope** modulates it: σ² ← σ²(0.70 +
   0.60·env) with env the pixel-resolved slope magnitude — spatial glitter grain that
   telescopes off by ~10 km footprints.
+- **Whether there is a sun is the planet's answer, not the facet's.** Every direct-sun term on
+  the globe's surfaces (the glint and the water body on both paths, the land far and near) is
+  multiplied by `PlanetShadow` (Common.hlsli): the share of the sun's disc above the point's
+  dipped horizon, sin(dip) = √(h(2R+h))/(R+h), ramped over the disc's own radius by
+  `SunDiscClear` — the ramp `PortalShadow` already used for the Droste inner globe, so two
+  occluding spheres share one law. The normal only shapes the lobe and the cosine (priors 44).
 - Foam whitens albedo (bank foam channel + churn memory); land takes imagery with the
   hand-edit rock override; sRGB pixels ship as captured (no re-grading — see priors).
 
@@ -1491,6 +1497,28 @@ model (or a textbook) would hold → what this project measured → the law now 
     re-quantize (the worst 4.3 % of pixels by one count plus edge flips to |d| 140). Law: a change to
     any map that builds a rail key, a view or a spawn is gated on the rail as well as the stills; the
     correction is held for the owner with the measurement beside it.
+44. **A surface normal cannot tell whether the sun is up.** Prior: every direct-sun term is gated
+    by `saturate(n·L)`, so a sun below the horizon lights nothing. Measured (the helm under the
+    storm sea, the sun pinned 2° down at azimuth 236, looking at it): a white Cox–Munk glint and
+    green-lit wave faces under a sky whose own sun had already set — on both water paths, and on
+    land slopes at the far shore. On a mirror path n·L = n·V, so a facet that sends the sun into
+    the eye passes the cosine whenever the eye can see it, wherever the sun is: the cosine can
+    never catch this leak. What hid the glint at night was only the lobe's tail — a sun s below
+    the horizon needs a face tilted (s + δ)/2 for an eye looking δ down — and two degrees under,
+    that tilt is the middle of a storm sea's slopes. Only the sky asked the planet (`AtmSunT`).
+    Law: whether a point has a sun is the PLANET's answer there — the share of the disc above its
+    dipped horizon (`PlanetShadow`, on the ramp `PortalShadow` already used for the inner globe) —
+    and the normal only shapes what arrives. The ramp is the sun's own diameter, so at the
+    Merrimack in late August the sun takes 3.0 min to set, as it does. Asked of the planet: at −2°
+    the pixel water moved on 23 % of the frame (max |d| 247, on the glint) and the vertex water on
+    16 % (max |d| 130); at +1°, +4° and +10° both are bit-identical to main once warm. The Haulover
+    gate, its window read through a flat-colour mask: 445 px against an A/A of 443 at the scene's
+    sun, and 485 against 446 with the Earth turned 9.5° so the Merrimack stands at −2.04° and
+    Haulover at +16.40° — the far place keeps its sun while the near sea goes dark. Every verdict
+    here needed its own floor: the demo varies on 9.8 % of its pixels between identical runs, the
+    ebb helm is bimodal (0 or 15–30 k px), the bird 3–7 k px, and the Droste pose 80–320 px — one
+    A/A pair of it had come out bit-identical, and a lens plus two null arms (the term folded to 1;
+    computed, then zeroed) moved it as much as the law did.
 
 
 ## verification — The gate map: which algebra is pinned where
