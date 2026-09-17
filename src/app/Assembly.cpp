@@ -606,9 +606,10 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         // bank is a camera-anchored ladder and under the gauge every level has its own eye;
         // the outer sea is seen from S(C), so its waves need rings anchored there. Stateless
         // like the first bank (every tile recomputed each frame), so it costs one more fill
-        // and a second small atlas, and it runs only while an outer level exists.
+        // and a second small atlas, and the fill runs only in a frame a world reads it.
         // (And for a scene with GATES: the sea seen through a gate's window is seen from the
-        // carried eye, so it needs rings anchored there -- the same second bank, the same law.)
+        // carried eye, so it needs rings anchored there -- the same second bank, the same law.
+        // With a gate in reach and no window in view the rings stand anchored and unfilled.)
         if ((droste || !S.gates.empty()) && S.water.oneWater) {
             auto wbB = std::make_unique<WaterBankLayer>();
             waterBankB = wbB.get();

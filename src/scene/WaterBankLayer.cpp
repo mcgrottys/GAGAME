@@ -113,7 +113,10 @@ void WaterBankLayer::SetFrame(Gpu& gpu, double simUnix, double camX, double camZ
     m_simUnix = simUnix;
     m_camX = camX;
     m_camZ = camZ;
-    if (!m_ready || !enabled) return;
+    // Where the rings stand is not a drawing decision: `enabled` says whether this frame FILLS
+    // them (Render), and a bank anchored while nothing reads it is mapped and ready for the
+    // frame that does (set B ahead of a window).
+    if (!m_ready) return;
     for (int m = 0; m < kMips; ++m) ReanchorRing(gpu, m, camX, camZ);
 }
 
