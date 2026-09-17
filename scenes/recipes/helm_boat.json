@@ -24,7 +24,16 @@
     "bathy": "data/bathy/merrimack.json"
   },
   "time": {"start": "2026-08-28T14:00:00Z", "timeScale": 1, "paused": false, "windowDays": 7},
-  "sun": {"source": "ephemeris", "az": 112, "el": 26},
+  "sun": {
+    "source": "ephemeris",
+    "az": 112,
+    "el": 26,
+    "earth": {
+      "at": [-149597870700, 0, 0],
+      "axis": [0, 0, 1],
+      "spin": 0
+    }
+  },
   "sea": {
     "storm": {"hs": 3, "tp": 10, "dir": 95},
     "datum": {"fromStation": true, "mllwToNavd": -1.3}
@@ -120,7 +129,8 @@
       "reversedZ": true,
       "target": "main",
       "viewport": {"x": 0, "y": 0, "w": 0, "h": 0},
-      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6}
+      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6},
+      "interests": []
     },
     {
       "_at": "the vqview signature shot: the north jetty tip, az 246 back into the inlet",
@@ -132,7 +142,8 @@
       "reversedZ": true,
       "target": "main",
       "viewport": {"x": 0, "y": 0, "w": 0, "h": 0},
-      "follow": {"target": "boat", "back": 15, "up": 5, "aimLift": 0.6}
+      "follow": {"target": "boat", "back": 15, "up": 5, "aimLift": 0.6},
+      "interests": []
     },
     {
       "_at": "the globe start: over the North Atlantic at 2.1 planet radii, aimed at the centre",
@@ -144,7 +155,8 @@
       "reversedZ": true,
       "target": "main",
       "viewport": {"x": 0, "y": 0, "w": 0, "h": 0},
-      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6}
+      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6},
+      "interests": []
     },
     {
       "_at": "on the north jetty a little in from its tip, looking back along it toward the range tower (F5 2026-09-01: keep this!)",
@@ -156,7 +168,8 @@
       "reversedZ": true,
       "target": "main",
       "viewport": {"x": 0, "y": 0, "w": 0, "h": 0},
-      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6}
+      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6},
+      "interests": []
     },
     {
       "_at": "off the jetty tips looking west into the entrance, low",
@@ -168,7 +181,8 @@
       "reversedZ": true,
       "target": "main",
       "viewport": {"x": 0, "y": 0, "w": 0, "h": 0},
-      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6}
+      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6},
+      "interests": []
     },
     {
       "name": "entrance-mid",
@@ -179,7 +193,8 @@
       "reversedZ": true,
       "target": "main",
       "viewport": {"x": 0, "y": 0, "w": 0, "h": 0},
-      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6}
+      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6},
+      "interests": []
     },
     {
       "name": "entrance-high",
@@ -190,7 +205,8 @@
       "reversedZ": true,
       "target": "main",
       "viewport": {"x": 0, "y": 0, "w": 0, "h": 0},
-      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6}
+      "follow": {"target": "", "back": 15, "up": 5, "aimLift": 0.6},
+      "interests": []
     }
   ],
   "rails": {
@@ -208,9 +224,10 @@
       "controller": "fixed",
       "throttle": 1,
       "steer": 0,
-      "mirrorCadence": 0
+      "recentreM": 1000
     }
   ],
+  "interests": [],
   "effects": [],
   "layers": [
     {"name": "sky", "enabled": true},

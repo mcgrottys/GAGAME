@@ -259,6 +259,16 @@ void Renderer::FillSceneConstants(const SceneFill& f, SceneConstants& sc) {
         sc.misc[1] = std::cos(r * 1.15f);
         sc.misc[2] = std::cos(r * 0.85f);
     }
+    // M13: the sky's table. An invalid slot is the shipped two-constant gradient, so a pass that
+    // runs without the sky layer (a tool, a test) still draws a sky.
+    // The slots are small integers and travel as NUMBERS, not as reinterpreted bit patterns:
+    // a heap slot of 0xFFFFFFFF read as a float is a NaN, and a NaN in the scene constants is
+    // never equal to itself -- which is exactly what the views gate said when it first ran.
+    // -1 is "no table", and every consumer falls back to the gradient.
+    sc.skyLut[0] = (f.skyMsSrv == 0xFFFFFFFFu) ? -1.0f : static_cast<float>(f.skyMsSrv);
+    sc.skyLut[1] = f.planetRadiusM;
+    sc.skyLut[2] = f.eyeRadiusM;
+    sc.skyLut[3] = (f.skyTransSrv == 0xFFFFFFFFu) ? -1.0f : static_cast<float>(f.skyTransSrv);
 }
 
 SceneFill Renderer::FillInputs(const Camera& cam, float timeSec) const {
@@ -276,6 +286,10 @@ SceneFill Renderer::FillInputs(const Camera& cam, float timeSec) const {
     f.sunElevationDeg = sunElevationDeg;
     f.sunAngRadiusDeg = sunAngRadiusDeg;
     f.waterLevel = waterLevel;
+    f.skyMsSrv = skyMsSrv;
+    f.skyTransSrv = skyTransSrv;
+    f.planetRadiusM = planetRadiusM;
+    f.eyeRadiusM = eyeRadiusM;
     for (int c = 0; c < 3; ++c) {
         f.sunDirTangent[c] = sunDirTangent[c];
         f.sigmaW[c] = sigmaW[c];
@@ -340,6 +354,23 @@ void Renderer::RenderFrame(const scene::ViewSet& set) {
     // every layer of every view; SurfaceFrame::Fill wrote them into surfaceCb this frame
     // (FrameLoop.cpp). One surface, however many eyes are looking at it.
     const D3D12_GPU_VIRTUAL_ADDRESS surfaceVa = cmd.Push(surfaceCb);
+
+    // ---- the simulation: once a frame, every declared layer, before any view draws -- whatever
+    // the per-frame `enabled` gate says, because that gate is a view's (Layer::Simulate). Recorded
+    // first, so every layer of every view reads the state this frame advanced.
+    {
+        FrameContext sim = set.views[0].legacy;
+        sim.gpu = m_gpu;
+        sim.cmd = &cmd;
+        sim.sceneCb = sceneCbs[0];
+        sim.width = m_width;
+        sim.height = m_height;
+        sim.prof = prof;
+        sim.viewIndex = set.views[0].index;
+        for (auto& l : m_layers) {
+            if (l->declared) l->Simulate(sim);
+        }
+    }
 
     // ---- opaque layers into the HDR target. The target, the barriers and the CLEAR belong to
     // the frame, not to a view: they happen once, before the first view records into them.
@@ -442,6 +473,19 @@ bool Renderer::DumpRaw(std::vector<uint8_t>& out, uint32_t* rowPitch) {
     out = m_gpu->ReadbackTexture(m_ldrTarget, &rp);
     if (rowPitch) *rowPitch = rp;
     return !out.empty();
+}
+
+bool Renderer::ReadDepth(std::vector<float>& out) {
+    m_gpu->WaitIdle();
+    uint32_t rowPitch = 0;
+    const std::vector<uint8_t> px = m_gpu->ReadbackTexture(m_sceneDepth, &rowPitch);
+    if (px.empty() || rowPitch < m_width * 4u) return false;
+    out.resize(size_t(m_width) * m_height);
+    for (uint32_t y = 0; y < m_height; ++y) {
+        memcpy(out.data() + size_t(y) * m_width, px.data() + size_t(y) * rowPitch,
+               size_t(m_width) * 4);
+    }
+    return true;
 }
 
 bool Renderer::DumpPng(const std::wstring& path) {

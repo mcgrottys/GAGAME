@@ -104,33 +104,67 @@ bool WeatherManager::Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& 
 }
 
 void WeatherManager::RefreshMirrorsTo(Gpu& gpu, double simUnix) {
-    ReadMirrors(gpu, simUnix, kMirrorDt, false);
+    ReadMirrors(gpu, simUnix, kMirrorDt);
 }
 
-void WeatherManager::SetMirrorCadence(double seconds) {
-    // 0 (or less) = never: the mirrors are not read by the loop -- what shipped.
-    m_cadence = (seconds > 0.0) ? seconds : INFINITY;
+void WeatherManager::RequestRegion(double latDeg, double lonDeg, double radiusM) {
+    double x = 0.0, z = 0.0;
+    WorldOf(latDeg, lonDeg, x, z);
+    for (Window& w : m_windows) {
+        if (!w.active || !w.solver || !w.solver->Ready() || !w.bathy) continue;
+        // A region may reach a window whose box its centre is outside of.
+        if (x + radiusM < w.bathy->WorldX0() || x - radiusM > w.bathy->WorldX0() + w.bathy->WorldSizeX() ||
+            z + radiusM < w.bathy->WorldZ0() || z - radiusM > w.bathy->WorldZ0() + w.bathy->WorldSizeZ()) {
+            continue;
+        }
+        w.solver->RequestRegion(x, z, radiusM);
+    }
 }
 
-void WeatherManager::RefreshOnCadence(Gpu& gpu, double simUnix) {
-    if (std::isinf(m_cadence)) return;   // never: no reader in the loop, as before
-    ReadMirrors(gpu, simUnix, m_cadence, true);
-}
-
-double WeatherManager::MirrorAsOf() const {
-    // The instant the SNAPSHOT is coherent at: the oldest read among the active windows that
-    // hold one; kNeverRead when no mirror was ever read (the analytic tide answers).
+double WeatherManager::SolverAsOf() const {
     double asOf = kNeverRead;
     bool any = false;
     for (const Window& w : m_windows) {
-        if (!w.active || w.etaW == 0) continue;
-        asOf = any ? (std::min)(asOf, w.mirrorT) : w.mirrorT;
+        if (!w.active || !w.solver) continue;
+        const double t = (std::max)(w.solver->DeliveredAsOf(), (w.etaW > 0) ? w.mirrorT : kNeverRead);
+        if (t <= kNeverRead) continue;
+        asOf = any ? (std::min)(asOf, t) : t;
         any = true;
     }
     return asOf;
 }
 
-void WeatherManager::ReadMirrors(Gpu& gpu, double simUnix, double maxAge, bool onCadence) {
+void WeatherManager::SolverRefine(double latDeg, double lonDeg, double unixT,
+                                  WeatherSample& s) const {
+    const Window* w = WindowAt(latDeg, lonDeg);
+    if (!w || !w->solver || !w->solver->Ready()) return;
+    double x = 0.0, z = 0.0;
+    WorldOf(latDeg, lonDeg, x, z);
+    const double wDom = w->solver->DomainWeight(x, z);
+    if (!(wDom > 0.0)) return;
+    SweSolver::Deviation d;
+    const bool have =
+        w->solver->DeviationAt(x, z, d) ||
+        w->solver->DeviationFromFields(x, z, w->eta, w->etaW, w->uv4, w->uvW, w->mirrorT, d);
+    if (!have) {
+        // THE SOLVER OWNS THIS SURFACE AND HAS NOT ANSWERED HERE. The atlas is not its answer.
+        s.levelSrc = "-";
+        s.depthM = static_cast<float>(s.levelNavd - s.bedNavd);
+        return;
+    }
+    const double atlas = s.levelNavd;
+    s.levelNavd = atlas + wDom * (w->oceanAt(unixT) + double(d.dEta) - atlas);
+    s.levelSrc = w->levelTag;
+    if (d.currentValid) {
+        s.u = d.u;
+        s.v = d.v;
+        s.currentSrc = w->currentTag;
+        s.currentSolved = true;
+    }
+    s.depthM = static_cast<float>(s.levelNavd - s.bedNavd);
+}
+
+void WeatherManager::ReadMirrors(Gpu& gpu, double simUnix, double maxAge) {
     for (Window& w : m_windows) {
         if (!w.active || !w.solver || !w.solver->Ready()) continue;
         if (simUnix - w.mirrorT <= maxAge) continue;   // inside the contract: no drain
@@ -141,18 +175,11 @@ void WeatherManager::ReadMirrors(Gpu& gpu, double simUnix, double maxAge, bool o
             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() *
             1000.0;
         // Loud by design: two full GPU drains. One line per probe/dump/trace run is the
-        // expectation; a line per frame means a reader crept into the loop (step 2). A
-        // reader on a DECLARED cadence (M12 step 5e, the entity) says so and prints once
-        // per cadence.
-        if (onCadence) {
-            Log("[weather] %s mirror read back to t=%.0f: %ux%u eta + uv in %.1f ms (the "
-                "entity's declared cadence: every %.0f sim-s)",
-                w.name.c_str(), simUnix, w.etaW, w.etaH, ms, maxAge);
-        } else {
-            Log("[weather] %s mirror read back to t=%.0f: %ux%u eta + uv in %.1f ms (on demand: "
-                "a frame-loop reader would print this every %.0f sim-s)",
-                w.name.c_str(), simUnix, w.etaW, w.etaH, ms, kMirrorDt);
-        }
+        // expectation; a line per frame means a reader crept into the loop (step 2) -- play reads
+        // the solver through RequestRegion, never through this.
+        Log("[weather] %s mirror read back to t=%.0f: %ux%u eta + uv in %.1f ms (on demand: "
+            "a frame-loop reader would print this every %.0f sim-s)",
+            w.name.c_str(), simUnix, w.etaW, w.etaH, ms, maxAge);
     }
 }
 
@@ -182,7 +209,9 @@ void WeatherManager::PinDomains(ResidencyManager& res, int hgtTenant) {
         const float v0 = float((std::max)(0.0, mercV(b.Lat1())));
         const float v1 = float((std::min)(1.0, mercV(lat0)));
         const bool inside = u1 > u0 && v1 > v0;
-        if (inside) res.Want(hgtTenant, m_hgtSlice, 0u, u0, v0, u1, v1);
+        // M13: the solver's domain is its own reader of the shared cache -- it pins the bed
+        // under its lattice whether or not any view is looking there.
+        if (inside) res.Want(res.Sampler("solver"), hgtTenant, m_hgtSlice, 0u, u0, v0, u1, v1);
         if (!m_pinLogged) {
             char line[160];
             snprintf(line, sizeof(line), " %s uv %.4f..%.4f x %.4f..%.4f (%s)", w.name.c_str(),
@@ -248,7 +277,7 @@ const WeatherManager::Window* WeatherManager::WindowAt(double latDeg, double lon
 }
 
 WeatherSample WeatherManager::Query(double latDeg, double lonDeg, double unixT,
-                                    double groundResM) const {
+                                    double groundResM, bool refineBySolver) const {
     WeatherSample s;
     const double latRad = latDeg * kD2R, lonRad = lonDeg * kD2R;
 
@@ -266,37 +295,17 @@ WeatherSample WeatherManager::Query(double latDeg, double lonDeg, double unixT,
         }
     }
 
-    // ---- the level: the tide atlas everywhere; a resident solver window refines.
+    // ---- the level: the tide atlas everywhere; inside a solver's domain the solver's own surface
+    // (SolverRefine, at the end: the solver is truth).
     if (m_atlas && m_atlas->Ready()) {
         s.levelNavd = m_atlas->MslNavd(latDeg, lonDeg) +
                       m_atlas->Level(latDeg, lonDeg, unixT, groundResM);
         s.levelSrc = "water.tide atlas";
     }
-    const Window* w = WindowAt(latDeg, lonDeg);
-    if (w && w->etaW > 0) {
-        // dEta mirror (padded atlas dims: the window's grid starts at texel 0,0).
-        double x, z;
-        WorldOf(latDeg, lonDeg, x, z);
-        const double fx = (x - w->bathy->WorldX0()) / w->bathy->WorldSizeX() * w->uvW;
-        const double fy =
-            (1.0 - (z - w->bathy->WorldZ0()) / w->bathy->WorldSizeZ()) * w->uvH;
-        const int ix = static_cast<int>(fx), iy = static_cast<int>(fy);
-        if (ix >= 0 && iy >= 0 && ix < static_cast<int>(w->uvW) &&
-            iy < static_cast<int>(w->uvH)) {
-            s.levelNavd = w->oceanAt(unixT) +
-                          w->eta[static_cast<size_t>(iy) * w->etaW + ix];
-            s.levelSrc = w->levelTag;
-            const float* uv = &w->uv4[(static_cast<size_t>(iy) * w->uvW + ix) * 4];
-            if (uv[3] > 0.5f) {
-                s.u = uv[0];
-                s.v = uv[1];
-                s.currentSrc = w->currentTag;
-            }
-        }
-    }
 
-    // ---- currents: solver already claimed it, else the GoMOFS Gulf field.
-    if (s.currentSrc[0] == '-' && m_currents && m_currents->Field().Valid()) {
+    // ---- currents: the GoMOFS Gulf field; the solver's solved current replaces it where the
+    // solver has one (SolverRefine).
+    if (m_currents && m_currents->Field().Valid()) {
         float u = 0, v = 0;
         if (m_currents->Field().Sample(lonDeg, latDeg, u, v)) {
             s.u = u;
@@ -353,6 +362,7 @@ WeatherSample WeatherManager::Query(double latDeg, double lonDeg, double unixT,
     }
 
     s.depthM = static_cast<float>(s.levelNavd - s.bedNavd);
+    if (refineBySolver) SolverRefine(latDeg, lonDeg, unixT, s);
     return s;
 }
 

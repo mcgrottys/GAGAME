@@ -449,6 +449,122 @@ struct Space {
             x = (inLonDeg - lonDeg) * mPerLon;
             z = (inLatDeg - latDeg) * mPerLat;
         }
+
+        // ---- M13: THE PLACE, EXACTLY -- the same point on the sphere the mesh is drawn on.
+        //
+        // The linear pair above is a chart: exact at its anchor and drifting from there, because
+        // its two metres-per-degree are the ellipsoid's (110574 / 81660) while the renderer's
+        // planet is a sphere of radius planetR (111195 / 81563 at the Merrimack). MEASURED with
+        // --water-probe's registration line: 0 m at the anchor, 28.1 m north at 5 km north, 5.6 m
+        // east at 5 km east -- so the water's bed, tide, sea-state scale and wet test were read up
+        // to 28 m from the ground that draws them, at home as much as 2000 km away.
+        //
+        // The exact map needs no metres-per-degree at all: the space's own tangent frame carries
+        // the point into the planet frame (planet = east*x + up*(R + y) + north*z -- the walk's
+        // own expression, GlobeLayer::CaptureWalk), and a place is that direction (this planet
+        // frame is x at 0N 0E, y at the pole, z at 90E: GlobeModel::LatLonDir's inverse). The rows
+        // are the space's, written where the space is declared -- no convention is re-derived here.
+        double east[3] = {1.0, 0.0, 0.0};
+        double up[3] = {0.0, 1.0, 0.0};
+        double north[3] = {0.0, 0.0, 1.0};
+        double planetR = 0.0;   // 0 = the rows were never written: PlaceOf falls back to the chart
+
+        bool Exact() const { return planetR > 0.0; }
+
+        // The planet-frame position of a point of this space's flat frame.
+        void PlanetOf(double x, double y, double z, double out[3]) const {
+            const double ry = planetR + y;
+            for (int i = 0; i < 3; ++i) out[i] = east[i] * x + up[i] * ry + north[i] * z;
+        }
+        // Its place. Falls back to the linear chart where the rows were never written, so a caller
+        // that has not been given them keeps its old answer instead of a wrong new one.
+        void PlaceOf(double x, double y, double z, double& outLatDeg, double& outLonDeg) const {
+            if (!Exact()) {
+                LatLonOf(x, z, outLatDeg, outLonDeg);
+                return;
+            }
+            double p[3];
+            PlanetOf(x, y, z, p);
+            const double len = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+            const double r2d = 180.0 / 3.14159265358979323846;
+            const double s = (len > 0.0) ? p[1] / len : 0.0;
+            outLatDeg = std::asin((s < -1.0) ? -1.0 : (s > 1.0 ? 1.0 : s)) * r2d;
+            outLonDeg = std::atan2(p[2], p[0]) * r2d;
+        }
+        // d(lat, lon) / d(x, z) in DEGREES PER METRE at a point of the flat frame: the tangent map
+        // a kernel carries per tile so its texels need no transcendental of their own (the plan's
+        // "address once per tile"). Central differences on the exact map in doubles -- the map is
+        // smooth and this is evaluated once per tile, so the step only has to sit above the
+        // double's own noise and below the tile.
+        void PlaceJacobian(double x, double y, double z, double h, double& dLatDx, double& dLonDx,
+                           double& dLatDz, double& dLonDz) const {
+            double la1 = 0.0, lo1 = 0.0, la0 = 0.0, lo0 = 0.0;
+            PlaceOf(x + h, y, z, la1, lo1);
+            PlaceOf(x - h, y, z, la0, lo0);
+            dLatDx = (la1 - la0) / (2.0 * h);
+            dLonDx = WrapDeg(lo1 - lo0) / (2.0 * h);
+            PlaceOf(x, y, z + h, la1, lo1);
+            PlaceOf(x, y, z - h, la0, lo0);
+            dLatDz = (la1 - la0) / (2.0 * h);
+            dLonDz = WrapDeg(lo1 - lo0) / (2.0 * h);
+        }
+        static double WrapDeg(double d) {   // the seam at +-180 is a wrap, not a jump
+            while (d > 180.0) d -= 360.0;
+            while (d < -180.0) d += 360.0;
+            return d;
+        }
+
+        // ---- and the RINGS' OWN MAP, which is a different question and must not be confused
+        // with the one above. A wave-bank ring is addressed by where a surface point projects
+        // RADIALLY onto this frame's tangent plane -- the mesh reads the bank at (R d.x, R d.z)
+        // of its vertex's direction (GlobeMesh.hlsl) -- so the place a ring texel at (x, z) holds
+        // is the direction that projects there: d = (x/R, sqrt(1 - (x^2 + z^2)/R^2), z/R), the
+        // inverse of that law. PlaceOf answers for a POINT of the flat frame (a hull); this
+        // answers for a TEXEL of the projection. They differ by the tilt between the plane and
+        // the sphere -- nothing at the anchor, 18.6 degrees and 55 km of place at Haulover -- and
+        // M13 step 4 retires this one with the rings it belongs to.
+        bool DirOfProjected(double x, double z, double d[3]) const {
+            if (!Exact()) return false;
+            const double q = (x * x + z * z) / (planetR * planetR);
+            if (!(q < 1.0)) return false;   // past the horizon of this frame: no such place
+            const double dy = std::sqrt(1.0 - q), dx = x / planetR, dz = z / planetR;
+            for (int i = 0; i < 3; ++i) d[i] = east[i] * dx + up[i] * dy + north[i] * dz;
+            return true;
+        }
+        bool PlaceOfProjected(double x, double z, double& outLatDeg, double& outLonDeg) const {
+            double p[3];
+            if (!DirOfProjected(x, z, p)) {
+                if (!Exact()) {
+                    LatLonOf(x, z, outLatDeg, outLonDeg);
+                    return true;
+                }
+                return false;
+            }
+            const double r2d = 180.0 / 3.14159265358979323846;
+            outLatDeg = std::asin((p[1] < -1.0) ? -1.0 : (p[1] > 1.0 ? 1.0 : p[1])) * r2d;
+            outLonDeg = std::atan2(p[2], p[0]) * r2d;
+            return true;
+        }
+        // d(lat, lon)/d(x, z) of that map, in degrees per metre, by central differences in
+        // doubles. Evaluated once per tile at its CENTRE, where an affine fit anchored at the
+        // tile's corner is second-order accurate over the whole tile (the midpoint rule: the
+        // residual is d^2/8R of ground -- 0.5 m across the coarsest ring, half a millimetre
+        // across the finest).
+        bool PlaceJacobianProjected(double x, double z, double h, double& dLatDx, double& dLonDx,
+                                    double& dLatDz, double& dLonDz) const {
+            double la1 = 0.0, lo1 = 0.0, la0 = 0.0, lo0 = 0.0;
+            if (!PlaceOfProjected(x + h, z, la1, lo1) || !PlaceOfProjected(x - h, z, la0, lo0)) {
+                return false;
+            }
+            dLatDx = (la1 - la0) / (2.0 * h);
+            dLonDx = WrapDeg(lo1 - lo0) / (2.0 * h);
+            if (!PlaceOfProjected(x, z + h, la1, lo1) || !PlaceOfProjected(x, z - h, la0, lo0)) {
+                return false;
+            }
+            dLatDz = (la1 - la0) / (2.0 * h);
+            dLonDz = WrapDeg(lo1 - lo0) / (2.0 * h);
+            return true;
+        }
     } anchor;
 
     // Cga.h: past |x| / L = 9.49e7 the embedding's origin term is annihilated and the point is

@@ -52,6 +52,7 @@ void RunTwinSurface(const Options&, Gpu& gpu, const SeaState& seaState, SeaLayer
     TreeWater tw;
     tw.Configure(&weather, waveField.get(), &sea->Ocean(), &seaState,
                  sea->heightScale, waterScene.wfExag, waterScene.wfChop);
+    tw.SetCascadeSea(sea->PeakDirX(), sea->PeakDirZ(), sea->PeakDirValid(), sea->StormOn());
     Log("[twin] %s", tw.Describe(cam.px, cam.pz, simUnix).c_str());
 
     constexpr int kRings = 4, kPer = 64;
@@ -96,7 +97,7 @@ void RunTwinSurface(const Options&, Gpu& gpu, const SeaState& seaState, SeaLayer
             const int idx = r * kPer + i;
             const double wx = pts[idx * 2], wz = pts[idx * 2 + 1];
             if (!bp[idx].valid) { ++nNoBank; continue; }
-            const SurfaceSample cs = tw.At(wx, wz, simUnix);
+            const SurfaceSample cs = tw.AtLabel(wx, wz, simUnix);   // the bank texel is a label
             if (!cs.valid) { ++nNoCpu; continue; }
             // The bank writes the mean level and the wave displacement into
             // different planes; the surface the renderer draws is their sum.

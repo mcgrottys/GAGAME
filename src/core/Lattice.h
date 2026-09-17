@@ -38,6 +38,29 @@ namespace ga {
 // The quad-sphere's face direction (D3D cubemap convention): face, u, v in [0,1] -> unit vector
 // in the planet frame. Defined in Lattice.cpp; pinned by composetest.
 void ComposeCubeDir(uint32_t face, double u, double v, double out[3]);
+// ...and its inverse: a unit direction -> (face, u, v). The CPU twin of HeightPages.hlsli's
+// HpCubeFace, the kernels' hand inverse (no hardware cube sampler outside the pixel stage), in the
+// shader's own arithmetic; gatest round-trips 20000 directions through ComposeCubeDir to 1e-9.
+inline uint32_t CubeFaceOfDir(const double d[3], double uv[2]) {
+    const double a0 = d[0] < 0.0 ? -d[0] : d[0];
+    const double a1 = d[1] < 0.0 ? -d[1] : d[1];
+    const double a2 = d[2] < 0.0 ? -d[2] : d[2];
+    double sx = 0.0, t = 0.0;
+    uint32_t face = 0;
+    if (a0 >= a1 && a0 >= a2) {
+        if (d[0] > 0) { face = 0; sx = -d[2] / a0; t = -d[1] / a0; }
+        else          { face = 1; sx =  d[2] / a0; t = -d[1] / a0; }
+    } else if (a1 >= a2) {
+        if (d[1] > 0) { face = 2; sx =  d[0] / a1; t =  d[2] / a1; }
+        else          { face = 3; sx =  d[0] / a1; t = -d[2] / a1; }
+    } else {
+        if (d[2] > 0) { face = 4; sx =  d[0] / a2; t = -d[1] / a2; }
+        else          { face = 5; sx = -d[0] / a2; t = -d[1] / a2; }
+    }
+    uv[0] = sx * 0.5 + 0.5;
+    uv[1] = t * 0.5 + 0.5;
+    return face;
+}
 
 // One paint tile's angular footprint (radians) + per-texel span, for the soak rule.
 struct TileBox {

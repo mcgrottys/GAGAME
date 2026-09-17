@@ -10,9 +10,12 @@
 //
 //      mean state   WeatherManager::Query   tide atlas + SWE window refinement, the one bed,
 //                                           the surface current, the 10 m wind
-//      solved sea   WaveField::ProbeAt      inside the solve window, weighted by wWin
-//      cascade sea  OceanCpu::Sample        everywhere, weighted by (1 - wWin)
+//      solved sea   WaveField::ProbeAt      inside the solve window, weighted by wWin (x the shadow)
+//      cascade sea  OceanCpu::SampleForHull everywhere, one gain per cascade -- the kernel's band
+//                                           law (sea-state scale, shadow, shoaling, wave-current);
+//                                           the structure bands yield by (1 - wWin), the chop stays
 //      wake         WaterTerms WakeOne      the fleet's Kelvin wakes, closed form
+//      over all     the dry weight, the display exaggeration, the depth-limited amplitude cap
 //
 //  WHY THE MEAN STATE IS NOT RE-DERIVED HERE. WeatherManager::Query is already the tree's point
 //  evaluator: it composes the height stack, refines the level inside a resident solver window,
@@ -46,8 +49,10 @@
 #pragma once
 
 #include "sim/OceanCpu.h"
+#include "sim/PlaceField.h"
 #include "sim/SeaState.h"
 #include "sim/WaterSurface.h"
+#include "sim/WaveChart.h"
 #include "sim/WaveField.h"
 #include "sim/WeatherManager.h"
 #include "core/Space.h"
@@ -82,6 +87,28 @@ public:
     // panel spacing. Below this the wake is a force the hull cannot feel anyway.
     void SetSampleScale(double m) { m_sampleM = (m > 0.01) ? m : 0.01; }
 
+    // THE CASCADE SEA'S CONTEXT (the water match, step 2), as the bank kernel is handed it: the
+    // direction its most energetic partition travels (gPeakDir -- the wave-current gain projects the
+    // current on it), and whether its partitions are a declared storm (whose height IS the reference,
+    // WaveScale). The sea layer owns both; whoever steps a hull hands them in, every step. Until then
+    // there is no peak (the gain is 1, as the kernel's is without one) and no storm.
+    void SetCascadeSea(double peakDirX, double peakDirZ, bool peakValid, bool storm) {
+        m_peakDirX = peakDirX;
+        m_peakDirZ = peakDirZ;
+        m_peakValid = peakValid;
+        m_storm = storm;
+    }
+    // THE SWELL SHADOW, as the kernel reads it (the water match, step 3): the exposure page's texels
+    // at a place (compose/ExposurePage -- the node asked at the texel centres the painter asks it at,
+    // at the kernel's floor mip, quantized as the page stores them), floored at kSwellShadowFloor; no
+    // opinion (no swell direction, outside the page) is exposed, the kernel's own absence law. Null:
+    // no shadow reader, and the sea stands exposed.
+    void SetSwellShadow(const PlaceField* shadow) { m_shadow = shadow; }
+    // THE BED THE WATER KERNELS READ (the water match, step 3): the height page's finest texels at a
+    // place (compose/HeightPage), for every depth law this water applies and the bed it reports. No
+    // opinion, or null: the slow field's bed (the stack at 1 m, per 8 m memo cell).
+    void SetBed(const PlaceField* bed) { m_bed = bed; }
+
     // THE CHART (the cuboid gate, 2026-09-14): the flat frame this water is read in. None (the
     // default) is the root's -- the ACT0816 constants, byte for byte. A hull carried through a
     // gate reads the SAME trees through its destination space's chart: a point's place comes from
@@ -89,11 +116,23 @@ public:
     // root's chart (away from the Merrimack they answer nothing); and the cascades, a stationary
     // sea, are evaluated in the chart's own metres.
     void SetChart(const Space::Anchor* chart);
+    // M13 step 2: the ROOT space's chart beside this hull's own -- RootOf (the solved window's
+    // frame, the wake table's) is a geometric step between two spaces and needs both ends.
+    void SetRootChart(const Space::Anchor* chart);
     // The place (lat, lon) of a point of this water's flat frame.
     void PlaceOf(double wx, double wz, double& latDeg, double& lonDeg) const;
 
     const char* Name() const override { return "water.tree"; }
+    // THE SURFACE THE MESH DRAWS, at a point of the world (the water match, step 3). The mesh places
+    // each particle at its label plus its lateral offset, so the water standing over a point came
+    // from a label behind it: the height, normal and offset here are that particle's, found by one
+    // Newton step on label + offset = point with the offset's own Jacobian (first order in the
+    // steepness beyond the step, second order in what is left).
     SurfaceSample At(double wx, double wz, double simUnix) const override;
+    // The same water at a LABEL: the particle whose rest position is the point, before its lateral
+    // offset -- what the bank's texel at that point holds. For instruments that compare the two
+    // processors texel for texel (--twin-surface, --water-probe's kernel column); a hull wants At.
+    SurfaceSample AtLabel(double wx, double wz, double simUnix) const;
     void WindAt(double wx, double wz, double simUnix, double out[3]) const override;
 
     // What answered, and what did not -- for the boot log and the twin report. M12 step 5e:
@@ -104,6 +143,15 @@ public:
     // The solved-window blend weight at a point, 0 outside. Public because the twin gate reports
     // it per site: the term split is the thing most likely to explain a disagreement.
     double WindowWeight(double wx, double wz) const;
+    // The MEAN surface alone at a point of this water's frame (the slow field At() adds its waves
+    // to), NAVD metres; NaN where no level rung answered. For the water probe's level/wave split.
+    double MeanLevelAt(double wx, double wz, double simUnix) const;
+    // The per-band amplitude law at a point -- the FULL closure (sea-state scale x shadow x shoaling
+    // x wave-current, before the solved window's stand-down) and the dry weight: what the bank
+    // kernel writes to its detail plane, for --water-probe to hold the two against. False where no
+    // level or bed answered.
+    bool BandGains(double wx, double wz, double simUnix, double gains[OceanCpu::kCascades],
+                   double& dry) const;
 
 private:
     // The cascade clock. SeaLayer feeds the FFT `simUnix - CycleUnix()` cast to FLOAT
@@ -113,6 +161,11 @@ private:
     // matching it costs nothing while NOT matching it would show up in the twin as a drift that
     // grows with the forecast hour and look like a bug in this file.
     double CascadeTime(double simUnix) const;
+    // At and AtLabel: one assembly; `displaced` stands the answer on the drawn surface.
+    SurfaceSample Evaluate(double wx, double wz, double simUnix, bool displaced) const;
+    // The kernel's cascade loop's gains, once for At and BandGains.
+    void BandLaw(const WeatherSample& q, double depth, double hsScale, double expo,
+                 double gain[OceanCpu::kCascades]) const;
 
     const WeatherManager* m_wx = nullptr;
     const WaveField* m_wave = nullptr;
@@ -127,6 +180,15 @@ private:
     // as a small phase-looking offset rather than announcing itself as a missing factor.
     double m_waveChop = 1.0;
     double m_sampleM = 0.5;
+    double m_peakDirX = 0.0, m_peakDirZ = 0.0;
+    bool m_peakValid = false;
+    bool m_storm = false;
+    const PlaceField* m_shadow = nullptr;
+    const PlaceField* m_bed = nullptr;
+    // The bed at a place: the kernels' page (SetBed) or the slow field's.
+    double BedAt(const WeatherSample& q, double latDeg, double lonDeg) const;
+    // The swell shadow at a place, by the kernel's law (SetSwellShadow).
+    double ExposureAt(double latDeg, double lonDeg) const;
     WakeBoat m_boats[8];
     int m_boatCount = 0;
 
@@ -139,7 +201,11 @@ private:
     // But that query answers the SLOW field. The tide gradient is ~1e-6 m/m, the surge and the
     // current vary over hundreds of metres, and the wind over kilometres -- none of them change
     // meaningfully across a 5.5 m hull. What DOES vary at hull scale is the waves, and those are
-    // evaluated per station regardless. So the mean state is fetched once per cell and reused.
+    // evaluated per station regardless. So the mean state is fetched once per cell and reused --
+    // all but the SOLVER's surface (the water match, step 1): the throat's jet and the basin's
+    // gradient vary within a cell, and reading a delivered region is cheap, so each point is
+    // refined by the solver on its own (WeatherManager::SolverRefine) and the hull's level is as
+    // continuous as the kernel's.
     //
     // The cell is 8 m and the memo is one entry, which is all a single hull needs (its stations
     // are inside one cell). Quantising POSITION means a hull straddling a boundary flips between
@@ -152,11 +218,38 @@ private:
     static constexpr double kSlowCellM = 8.0;
     bool m_hasChart = false;
     Space::Anchor m_chart;
+    bool m_hasRoot = false;
+    Space::Anchor m_root;
+    // M13 step 2: the cascade sea's local planes (sim/WaveChart.h). The neighbourhood is a
+    // function of the address and changes hundreds of kilometres apart, so it is found once and
+    // held; every point inside it still gets its own coordinates, shares and rotation, which is
+    // what keeps this law the same expression the kernel runs per texel.
+    WaveChart m_waveChart;
+    mutable WaveChart::Cell m_cell;
+    mutable bool m_cellValid = false;
+
+public:
+    // The planes carrying a point and their shares -- public because the probe reports them: a
+    // place in a cell's plateau reads one, a place in a band reads two, and which it is decides
+    // what the gate at that pose is measuring.
+    int ChartsAt(double wx, double wz, WaveChart::Chart out[WaveChart::kMax]) const;
+    // ... and how far this point sits from the band it would blend in, in metres of ground along
+    // each axis: what a gate needs to know to stand a hull IN a band deliberately.
+    void ChartEdgeM(double wx, double wz, double& ex, double& ez) const;
+
+private:
     // A point of this water's frame in the ROOT's flat frame (the solved window's and the wakes').
+    // (public below for the probe: the solved window's own frame is the ROOT chart's, so an
+    // instrument asking "does the solved field cover this hull" must ask there.)
+public:
     void RootOf(double wx, double wz, double& rx, double& rz) const;
+
+private:
     mutable double m_memoX = 1e30, m_memoZ = 1e30, m_memoT = -1e30;
     mutable WeatherSample m_memo;
     const WeatherSample& SlowAt(double wx, double wz, double simUnix) const;
+    // The mean state at a point: the memoised slow field, refined by the solver at the point.
+    WeatherSample MeanStateAt(double wx, double wz, double simUnix) const;
 };
 
 }  // namespace ga

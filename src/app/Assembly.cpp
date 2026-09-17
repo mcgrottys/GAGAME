@@ -57,6 +57,7 @@
 #include "sim/SeaState.h"
 #include "sim/SweSolver.h"
 #include "sim/TideModel.h"
+#include "sim/WaterTerms.h"
 #include "app/Options.h"
 #include "app/Tools.h"
 
@@ -245,6 +246,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     auto& exposureT = A->exposureT;
     auto& heightTenant = A->heightTenant;
     auto& exposureTenant = A->exposureTenant;
+    auto& exposureShadow = A->exposureShadow;
+    auto& heightBed = A->heightBed;
     auto& colorTenant = A->colorTenant;
     auto& landseaTenant = A->landseaTenant;
     auto& idxColorCube = A->idxColorCube;
@@ -752,6 +755,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                                        "paint mercator page"});
                 heightTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(hd));
                 hgtTenant = heightTenant.Id();
+                // The same page's finest texels for a hull's depth laws (compose/HeightPage).
+                heightBed = std::make_unique<HeightPage>(&compositor, hgtCh, hWinL, hCubeL);
                 // M9bb: a fold or a drop below changed a root tile: the tenant refetches that
                 // address (the tree's tag names the slice) -- the one law, Tenant::Bind.
                 if (heightTree) heightTenant.Bind(*heightTree);
@@ -790,13 +795,19 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                             for (size_t i = 0; i < 32768; ++i) h[i] = 0x3C00u;
                         }
                         xd.slices = 7;
-                        xd.bindings.push_back({6, 1, surface.winH, nullptr, "exposure"});
+                        const uint32_t exposureSlice = 6u;   // the z14 page (slices 0..5: the cube)
+                        xd.bindings.push_back({exposureSlice, 1, surface.winH, nullptr, "exposure"});
                         xd.holder = exposureTree;
                         exposureTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(xd));
                         exposureT = exposureTenant.Id();
                         exposureTenant.Bind(**exposureTree);   // its folds invalidate slice 6
                         sea->SetExposurePage(resMgr.TextureSrv(exposureT),
                                              resMgr.ResidencySrv(exposureT), exposureSrc.get());
+                        // The same texels for whoever floats in them, at the floor the bank reads
+                        // them at (WaterTerms.h kSwellShadowMipFloor): the node asked where the
+                        // painter asks it, quantized as the page stores it.
+                        exposureShadow = std::make_unique<ExposurePage>(
+                            exposureSrc.get(), surface.winH, exposureSlice, kSwellShadowMipFloor);
                         Log("[exposure] swell.exposure is page tenant %d: the LOS march over "
                             "the height stack, cached per (direction, level) bucket, read at "
                             "page mips >= 3 (%.0f m)",
@@ -1067,6 +1078,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         }
         globe->debugLens = opt.lens;
         globe->probeCullFar = opt.probeCullFar;
+        globe->waterTileCount = opt.waterTiles;   // M13 step 0
         // M9h: the grad(flow) bank plus the grid it lives on, for --lens velgrad. The
         // SWE solver owns the bank; the bathy model owns the world mapping.
         if (swe.Ready() && bathy.Ready()) {

@@ -47,6 +47,7 @@ struct SceneView {
     scene::ViewProps p;
     bool hasAt = false;
     JsonValue at;
+    std::vector<std::string> interests;   // views[].interests, by name, in file order
 };
 struct ScenePortal {
     scene::PortalProps p;
@@ -61,6 +62,11 @@ struct SceneEntity {
     scene::EntityProps p;
     bool hasAt = false;
     JsonValue at;
+};
+struct SceneInterest {
+    scene::InterestProps p;
+    bool hasAt = false;
+    JsonValue at;   // the fixed place's sugar as written (read where the flat frame exists)
 };
 struct SceneEffect {
     scene::EffectProps p;
@@ -82,7 +88,7 @@ struct SceneTool {
 struct Scene : scene::SceneDocument {
     // The enum spellings, in the order the schema declares their names (SceneSchema.cpp).
     enum Mode { kChart = 0, kWorld = 1, kGulf = 2 };
-    enum SunSource { kEphemeris = 0, kPinned = 1 };
+    enum SunSource { kEphemeris = 0, kPinned = 1, kEarth = 2 };
     enum Rail { kRailNone = 0, kRailClassic, kRailZoom, kRailFlood, kRailJetty, kRailDroste,
                 kRailDrosteOut };
     enum Controller { kHelm = 0, kFixed = 1 };
@@ -96,6 +102,7 @@ struct Scene : scene::SceneDocument {
     std::vector<ScenePortal> portals;
     std::vector<SceneGate> gates;
     std::vector<SceneEntity> entities;
+    std::vector<SceneInterest> interests;
     std::vector<SceneEffect> effects;
     std::vector<SceneLayer> layers;   // THE REGISTRATION ORDER (= the draw order), as data
     std::vector<SceneTool> tools;

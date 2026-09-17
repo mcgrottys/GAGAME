@@ -35,10 +35,9 @@
 //                                                       inline `keys` list is an authored
 //                                                       keyed flight in the same key spelling
 //      portals    [{name, enabled, lat, lon, level, fill, twistDeg, lighting}]
-//      entities   [{name, vessel, at, controller, throttle, steer, mirrorCadence}]
-//                                                    -- M12 step 5e: mirrorCadence is the
-//                                                       freshness contract (scene/Entity.h):
-//                                                       0 = never (today's cost)
+//      entities   [{name, vessel, at, controller, throttle, steer}]
+//                                                    -- the hull reads the solver's surface by
+//                                                       region, every frame (scene/Entity.h)
 //      effects    [{name, type, enabled, ...}]  -- typed through EffectSchemas (slice.plane)
 //      layers     [{name, enabled, ...}]        -- the registration order; typed by name
 //      nodes      [{name, type, enabled, at, children, ...}]   -- typed through ComponentSchemas
@@ -94,9 +93,18 @@ struct TimeSection {
     bool paused = false;
     double windowDays = 7.0;
 };
+// THE EARTH, PLACED AROUND A SUN THAT IS A LIGHT AT THE ORIGIN. Position in metres (the sun is
+// at 0,0,0), and a turn of `spin` degrees about `axis`. Nothing here reads the clock: a scene can
+// hold a night storm at noon if it wants to, and coupling this to time is a later, separate step.
+struct EarthPlacement {
+    double at[3] = {-1.495978707e11, 0.0, 0.0};
+    double axis[3] = {0.0, 0.0, 1.0};
+    double spin = 0.0;
+};
 struct SunSection {
-    int source = 0;                   // ephemeris | pinned
+    int source = 0;                   // ephemeris | pinned | earth
     float az = 112.0f, el = 26.0f;
+    EarthPlacement earth;
 };
 struct StormProps {
     float hs = 0.0f, tp = 10.0f, dir = 90.0f;
@@ -239,17 +247,33 @@ struct GateProps {
     double toLat = 0.0, toLon = 0.0;       // the destination
     double toAz = 0.0;                     // the heading the box's forward face leaves along
 };
+// THE INTERESTS (the water match): a subject or a place whose surroundings stay resident at the
+// grain its water's kernels read, for the views that name one -- so an eye arriving there, or a
+// hull floating there, finds its data landed rather than landing. `target` names an entity (the
+// interest follows it); otherwise `at` is a fixed place in the placement sugar. A view keeps
+// resident only the interests it lists (views[].interests): one camera can hold a boat's water
+// while another holds none.
+struct InterestProps {
+    std::string name;
+    std::string target;               // an entity's name; "" = the fixed place `at`
+    Placement at;                     // optional
+    double radius = 200.0;            // m: how far around the subject
+};
+// A view's reference to one of the scene's interests, by name.
+struct InterestRef {
+    std::string name;
+};
 struct EntityProps {
     std::string name;
     std::string vessel;
     Placement at;                     // the spawn (required)
     int controller = 0;               // helm | fixed
     double throttle = 0.0, steer = 0.0;
-    // M12 step 5e: THE FRESHNESS CONTRACT (scene/Entity.h). Seconds between readbacks of the
-    // solver's CPU mirror the hull reads; 0 = NEVER -- what shipped: the effective cadence
-    // was infinite, and the hull read the analytic tide and the waves, never the solved
-    // level or current.
-    double mirrorCadence = 0.0;
+    // M13: THE PER-SUBJECT FLOATING ORIGIN. A space is flat and the planet is not, so a hull d
+    // from its space's origin rides d^2/2R above the sphere its sea is drawn on. Past this reach
+    // the hull rebuilds its space at its own place and carries its pose into it (Entity::Recentre)
+    // -- 1 km of reach holds the error under 8 cm. 0 turns it off, and the hull keeps the drift.
+    double recentreM = 1000.0;
 };
 struct EffectProps {
     std::string name;
@@ -317,6 +341,7 @@ const Schema& ViewSchema();
 const Schema& PortalSchema();
 const Schema& GateSchema();
 const Schema& EntitySchema();
+const Schema& InterestSchema();
 const Schema& NodeSchema();
 // M12 step 5e: the rail key (scene/Rail.h reads a rail file's keys through it) and the slice
 // plane's typed table (scene/effects/SlicePlane.h's Props()).

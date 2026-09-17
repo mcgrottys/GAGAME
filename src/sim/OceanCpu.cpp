@@ -163,6 +163,10 @@ void OceanCpu::SetSeaState(const PartParam* parts, int count, uint32_t seed, con
                            const float kLo[3], const float kHi[3], double lambda) {
     m_lambda = lambda;
     m_ready = false;
+    for (int c = 0; c < kCascades; ++c) {
+        m_kLo[c] = double(kLo[c]);
+        m_kHi[c] = double(kHi[c]);
+    }
 
     // OceanFft's constant buffer holds four partitions; more than that and the shader reads past
     // gPart. Clamp identically so the two agree about which partitions exist.
@@ -300,8 +304,8 @@ void OceanCpu::SetSeaState(const PartParam* parts, int count, uint32_t seed, con
 //     vx  = 2 w (kx/k) Re[Q]      vz  = 2 w (kz/k) Re[Q]    vy  = 2 w Im[Q]
 //     Jxx = 2 (kx^2/k) Re[P]      Jzz = 2 (kz^2/k) Re[P]    Jxz = 2 (kx kz/k) Re[P]
 //
-// (The Jacobian row is written down and not computed: it is the same P, so it would cost no
-// transcendental, and nothing has asked for it yet.)
+// (The Jacobian row is the same P, so it costs no transcendental: three multiplies per bin. The hull
+// asks for it to stand on the displaced surface the mesh draws -- TreeWater::At.)
 //
 // WHERE EACH SIGN COMES FROM. The factor 2 is the conjugate pair, on every row.
 //   Dx   Re[-i z] = Im[z], and that -i is the chop sign read off CsModulate's float2(hk.y, -hk.x).
@@ -315,72 +319,114 @@ void OceanCpu::SetSeaState(const PartParam* parts, int count, uint32_t seed, con
 //        can finite-difference h in TIME and land on vy, and why using P there would not.
 void OceanCpu::SampleForHull(double wx, double wz, double tSec, double minLambda,
                              OceanSample& out) const {
-    SampleBand(wx, wz, tSec, minLambda, out);
+    SampleBand(wx, wz, tSec, minLambda, nullptr, out);
+}
+
+void OceanCpu::SampleForHull(double wx, double wz, double tSec, double minLambda,
+                             const double gain[kCascades], OceanSample& out) const {
+    SampleBand(wx, wz, tSec, minLambda, gain, out);
 }
 
 void OceanCpu::Sample(double wx, double wz, double tSec, OceanSample& out) const {
-    SampleBand(wx, wz, tSec, 0.0, out);
+    SampleBand(wx, wz, tSec, 0.0, nullptr, out);
 }
 
-void OceanCpu::SampleBand(double wx, double wz, double tSec, double minLambda,
+void OceanCpu::SampleBand(double wx, double wz, double tSec, double minLambda, const double* gain,
                           OceanSample& out) const {
-    double dx = 0.0, h = 0.0, dz = 0.0, sx = 0.0, sz = 0.0, vx = 0.0, vy = 0.0, vz = 0.0;
+    // The eight running sums, in the order OceanSample names them.
+    struct Sums {
+        double dx = 0.0, h = 0.0, dz = 0.0, sx = 0.0, sz = 0.0, vx = 0.0, vy = 0.0, vz = 0.0;
+        double jxx = 0.0, jxz = 0.0, jzz = 0.0;
+    };
+    // One cascade's bins into the sums it is handed. Without a gain array they are the totals
+    // themselves -- the one pass this always was, term for term; with one, each cascade sums on
+    // its own and joins the totals by its gain (every channel is linear in a cascade's bins, so
+    // that is exact).
+    const auto accumulate = [&](int c, Sums& a) {
+        for (const Bin& b : m_bin[c]) {
+            // b.invK is 1/|k|, so 2*pi*invK is this bin's wavelength.
+            if (minLambda > 1e-6 && 6.283185307179586 * b.invK < minLambda) continue;
+            // -w, mirroring CsModulate: paired with the e^{+ik.x} synthesis below this
+            // is what makes a bin travel along +k, i.e. toward its partition's dirTo.
+            const double wt = -b.w * tSec;
+            const double cw = std::cos(wt), sw = std::sin(wt);
+            // The two halves of CsModulate's hk, kept APART rather than added: they travel
+            // opposite ways, so their orbital velocities have opposite k^ and only their
+            // difference is the pair's horizontal velocity. Their sum is hk, exactly.
+            const double fr = b.ar * cw - b.ai * sw;
+            const double fi = b.ar * sw + b.ai * cw;
+            const double gr = b.br * cw - b.bi * sw;
+            const double gi = -(b.br * sw + b.bi * cw);
+            const double hkr = fr + gr, hki = fi + gi;   // == CsModulate's hk
+            const double dfr = fr - gr, dfi = fi - gi;   // the -k half negated
+
+            // P and Q = (hk, hk with the -k half negated) * e^{+i k.x}, the spatial phasor
+            // CsFft's synthesis transform supplies. One sincos serves both.
+            const double th = b.kx * wx + b.kz * wz;
+            const double ct = std::cos(th), st = std::sin(th);
+            const double pRe = hkr * ct - hki * st;
+            const double pIm = hkr * st + hki * ct;
+            const double qRe = dfr * ct - dfi * st;
+            const double qIm = dfr * st + dfi * ct;
+
+            a.h += 2.0 * pRe;
+            const double pJ = 2.0 * pRe * b.invK;   // Jxx = 2 (kx^2/k) Re[P], and its two siblings
+            a.jxx += pJ * b.kx * b.kx;
+            a.jxz += pJ * b.kx * b.kz;
+            a.jzz += pJ * b.kz * b.kz;
+            const double p2 = 2.0 * pIm;         // the chop and the slope share it
+            const double pk = p2 * b.invK;
+            a.dx += pk * b.kx;
+            a.dz += pk * b.kz;
+            a.sx -= p2 * b.kx;                   // hx = -2 kx Im[P]
+            a.sz -= p2 * b.kz;
+            const double q2 = 2.0 * b.w * qRe * b.invK;   // w * k^ * (this pair's elevation)
+            a.vx += q2 * b.kx;
+            a.vz += q2 * b.kz;
+            a.vy += 2.0 * b.w * qIm;             // == d/dt of this pair's height
+        }
+    };
+    Sums t;
     if (m_ready) {
         // 2*pi/k at the band's LOW end is the longest wave a cascade carries; if even that is
         // below the caller's resolution the whole cascade is skipped without touching a bin.
         for (int c = 0; c < kCascades; ++c) {
             if (m_lambdaMax[c] < minLambda) continue;   // whole cascade finer than asked for
-            for (const Bin& b : m_bin[c]) {
-                // b.invK is 1/|k|, so 2*pi*invK is this bin's wavelength.
-                if (minLambda > 1e-6 && 6.283185307179586 * b.invK < minLambda) continue;
-                // -w, mirroring CsModulate: paired with the e^{+ik.x} synthesis below this
-                // is what makes a bin travel along +k, i.e. toward its partition's dirTo.
-                const double wt = -b.w * tSec;
-                const double cw = std::cos(wt), sw = std::sin(wt);
-                // The two halves of CsModulate's hk, kept APART rather than added: they travel
-                // opposite ways, so their orbital velocities have opposite k^ and only their
-                // difference is the pair's horizontal velocity. Their sum is hk, exactly.
-                const double fr = b.ar * cw - b.ai * sw;
-                const double fi = b.ar * sw + b.ai * cw;
-                const double gr = b.br * cw - b.bi * sw;
-                const double gi = -(b.br * sw + b.bi * cw);
-                const double hkr = fr + gr, hki = fi + gi;   // == CsModulate's hk
-                const double dfr = fr - gr, dfi = fi - gi;   // the -k half negated
-
-                // P and Q = (hk, hk with the -k half negated) * e^{+i k.x}, the spatial phasor
-                // CsFft's synthesis transform supplies. One sincos serves both.
-                const double th = b.kx * wx + b.kz * wz;
-                const double ct = std::cos(th), st = std::sin(th);
-                const double pRe = hkr * ct - hki * st;
-                const double pIm = hkr * st + hki * ct;
-                const double qRe = dfr * ct - dfi * st;
-                const double qIm = dfr * st + dfi * ct;
-
-                h += 2.0 * pRe;
-                const double p2 = 2.0 * pIm;         // the chop and the slope share it
-                const double pk = p2 * b.invK;
-                dx += pk * b.kx;
-                dz += pk * b.kz;
-                sx -= p2 * b.kx;                     // hx = -2 kx Im[P]
-                sz -= p2 * b.kz;
-                const double q2 = 2.0 * b.w * qRe * b.invK;   // w * k^ * (this pair's elevation)
-                vx += q2 * b.kx;
-                vz += q2 * b.kz;
-                vy += 2.0 * b.w * qIm;               // == d/dt of this pair's height
+            if (!gain) {
+                accumulate(c, t);
+                continue;
             }
+            if (!(gain[c] != 0.0)) continue;            // a cascade its law stood down entirely
+            Sums s;
+            accumulate(c, s);
+            const double g = gain[c];
+            t.dx += g * s.dx;
+            t.h += g * s.h;
+            t.dz += g * s.dz;
+            t.sx += g * s.sx;
+            t.sz += g * s.sz;
+            t.vx += g * s.vx;
+            t.vy += g * s.vy;
+            t.vz += g * s.vz;
+            t.jxx += g * s.jxx;
+            t.jxz += g * s.jxz;
+            t.jzz += g * s.jzz;
         }
     }
     // CsAssemble: float4(fLambda * dx, h, fLambda * dz, 0). The height channel is NOT scaled --
     // and neither is the slope (CsAssemble writes hx/hz raw into the deriv texture) nor the
     // velocity, which is a property of the water and not of a displacement style.
-    out.dx = m_lambda * dx;
-    out.h = h;
-    out.dz = m_lambda * dz;
-    out.sx = sx;
-    out.sz = sz;
-    out.vx = vx;
-    out.vy = vy;
-    out.vz = vz;
+    out.dx = m_lambda * t.dx;
+    out.h = t.h;
+    out.dz = m_lambda * t.dz;
+    out.sx = t.sx;
+    out.sz = t.sz;
+    out.vx = t.vx;
+    out.vy = t.vy;
+    out.vz = t.vz;
+    out.jxx = m_lambda * t.jxx;   // the derivative of the choppy offset carries its lambda
+    out.jxz = m_lambda * t.jxz;
+    out.jzz = m_lambda * t.jzz;
 }
 
 // ONE implementation, not two. The sign ledger above is hard enough to hold in one place, and the

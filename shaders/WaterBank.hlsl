@@ -73,7 +73,8 @@ cbuffer BankCb : register(b0) {
     // on both sides, per the law twelve rows up.
     float4 gDebugA;
     float4 gWaveP;      // M9bc: the z16 page frame: org px x, y, 1/16384, world px at z16
-    float4 gWaveD;      // M9bc: window nx, ny (solver cells = page texels), 0, 0
+    float4 gWaveD;      // M9bc: window nx, ny (solver cells = page texels); zw = the window's NW
+                        // texel in the page frame (step 2: the page texel IS the cell)
     // M9bl: THE SECOND SIXTEEN. kMaxComp went 16 -> 32 because a 16-component directional
     // sum IS a regular comb -- sixteen long-crested trains 1.6 deg apart superpose into a
     // fixed interference lattice, which is what the storm face's straight parallel ridges
@@ -87,6 +88,9 @@ cbuffer BankCb : register(b0) {
     // M9bt: the fold's SECOND moment per band -- the energy-weighted width of ln k. Appended
     // at the end on both sides, per the layout law above.
     float4 gBandKSpread;
+    // THE SOLVER IS TRUTH (the water match, step 1): x = the tide plane the solver was forced by
+    // this frame (NAVD m) -- its deviation is measured from it. Appended at the end on both sides.
+    float4 gSweB;
 };
 
 // M9bl: one component's rows, from whichever half holds it. r = comp >> 1.
@@ -101,10 +105,64 @@ struct BankTile {
     uint dstY;
     float lvl00, lvl10, lvl01, lvl11;   // tide level at corners (atlas stack, CPU rotors)
     float bed00, bed10, bed01, bed11;   // bed at corners (the one height stack)
-    float hsScale;      // local Hs / reference Hs (the global wave grid modulates the sea)
-    float pad0, pad1, pad2;
+    float hs00, hs10, hs01, hs11;       // local Hs / reference Hs at corners (sim/WaveScale.h)
+    // M13 step 2: THE TILE'S PLACE, ADDRESSED ONCE (WaterBankLayer.h's BankTile says how they
+    // are built). lat0/lon0 at the tile's origin, the tangent map at its centre, in degrees and
+    // degrees per metre; placeB.z = 0 means this tile has no place (past the frame's horizon)
+    // and the chart row is all it has.
+    float4 placeA;      // lat0, lon0, dLat/dx, dLon/dx
+    float4 placeB;      // dLat/dz, dLon/dz, valid, spare
+    // M13 step 2: the cascade sea's four planes for this tile (sim/WaveChart.h), in the law's own
+    // order. Per chart: its coordinate at the tile's ORIGIN wrapped into each cascade's period
+    // (rows 0..5), the tangent map of that coordinate over the tile (6..9), its axes said in the
+    // place's east/north (10..13), two spare. bandX/bandY carry the edge distances the shares are
+    // computed from -- the shares themselves are recomputed per texel, as the hull recomputes
+    // them per point, so both processors run one expression.
+    float4 chart[4][4];
+    float4 bandX;       // edgeX at the origin, d/dex, d/dez, the band (m)
+    float4 bandY;       // edgeY at the origin, d/dex, d/dez, 1 = the charts are valid
 };
 StructuredBuffer<BankTile> gTiles : register(t0);
+
+// THE PLACE OF A TEXEL, from its own metres inside the tile. This is what gGeoA used to answer
+// through the anchor-linear chart (lat = orgLat + z / 110574, lon = orgLon + x / 81660), which
+// stands 5.6 m per km north and 1.1 m per km east of the sphere the mesh draws -- 28 m at the
+// rings' own reach, and a different place entirely (215 km) once a gate carries the eye. The
+// rows are exact at the tile's origin and second-order over the tile.
+float2 TilePlace(const BankTile t, float2 exz) {
+    if (t.placeB.z == 0.0f) {   // no rows: the chart, as before
+        return float2(gGeoA.x + (t.orgXZ.y + exz.y) * gGeoA.z,
+                      gGeoA.y + (t.orgXZ.x + exz.x) * gGeoA.w);
+    }
+    return float2(t.placeA.x + exz.x * t.placeA.z + exz.y * t.placeB.x,
+                  t.placeA.y + exz.x * t.placeA.w + exz.y * t.placeB.y);
+}
+
+// THE SHARES AT A TEXEL, from the tile's two edge rows -- WaveChart::Shares, said in HLSL. Half
+// exactly on a cell edge, one a half-band inside it, the neighbour taking the rest.
+void TileShares(const BankTile t, float2 exz, out float w[4]) {
+    const float band = max(t.bandX.w, 1.0f);
+    const float wx = smoothstep(0.0f, 1.0f,
+                                0.5f + (t.bandX.x + exz.x * t.bandX.y + exz.y * t.bandX.z) / band);
+    const float wy = smoothstep(0.0f, 1.0f,
+                                0.5f + (t.bandY.x + exz.x * t.bandY.y + exz.y * t.bandY.z) / band);
+    w[0] = wx * wy;
+    w[1] = (1.0f - wx) * wy;
+    w[2] = wx * (1.0f - wy);
+    w[3] = (1.0f - wx) * (1.0f - wy);
+}
+
+// One chart's coordinate for cascade c at a texel: the tile's origin row (wrapped into that
+// cascade's own period on the CPU) plus the tangent map across the tile. Rows: [0] = cascade 0
+// and 1's origins, [1].xy = cascade 2's, [2] = the tangent map, [3] = the axes.
+float2 ChartUv(const BankTile t, uint k, uint c, float2 exz) {
+    const float2 u0 = (c == 0u) ? t.chart[k][0].xy
+                    : (c == 1u) ? t.chart[k][0].zw
+                                : t.chart[k][1].xy;
+    const float4 j = t.chart[k][2];   // du/dex, du/dez, dv/dex, dv/dez
+    return u0 + float2(j.x * exz.x + j.y * exz.y, j.z * exz.x + j.w * exz.y);
+}
+float4 ChartRot(const BankTile t, uint k) { return t.chart[k][3]; }
 
 #include "Jet.hlsli"
 
@@ -191,10 +249,17 @@ float4 LoadBilinearWrap(uint slot, float2 uv, float dim) {
 // not resident at mip 0 here reads as absent (0) and the caller's window weight drops it.
 // M12 step 4e: the frame, the floor and the read are PageSample.hlsli's (the same lat/lon
 // spelling HeightPages.hlsli takes for the bed).
+// THE SOLVED FIELD'S PAGE TEXEL IS ITS CELL (the water match, step 2). The page provider paints solver
+// cell (i, j) -- row 0 south -- into page texel (winPx + i, winPy + ny - 1 - j) (WaveFieldSource::
+// PaintTile), so a point of the flat frame finds its texel through the solver's own grid: cells from the
+// window's SW corner, flipped to rows from its north edge, offset by the window's texel in the page frame
+// (gWaveD.zw). Through Mercator latitude instead -- the old PageUvLatLon -- the rows came out 0.67 %
+// shorter than the solver's cells (a Mercator texel's metre of latitude is 111319.49 m/deg, the chart's
+// 110574), so the drawn solved waves stood up to 13.6 m north of the bathymetry they were solved over and
+// WaveField::ProbeAt, on the grid, disagreed with them.
 float2 WavePageUv(float2 xz) {
-    const float lat = gGeoA.x + xz.y * gGeoA.z;
-    const float lon = gGeoA.y + xz.x * gGeoA.w;
-    return PageUvLatLon(lat, lon, gWaveP);
+    const float2 cells = (xz - gWaveA.xy) * gWaveA.z;
+    return float2(gWaveD.z + cells.x, gWaveD.w + gWaveD.y - cells.y) * gWaveP.z;
 }
 // M9bl: the finest RESIDENT mip of one plane here (byte = finest mip * 16, conservative
 // per 128th of the page). > 7.5 means nothing is resident at all.
@@ -216,7 +281,10 @@ float4 WavePageSample(float2 uv, uint plane) {
     const float have = WavePageHave(uv, plane);
     if (have > 7.5f) return 0.0f;                 // nothing resident: no opinion
     const float mip = max(round(have), 0.0f);
-    return PageLoad4(gTA[gWaveU.x], uv, 6u + plane, mip);
+    // The byte's decode CENTRE (the water match, step 2): the solve truncates to bytes, so a byte b stands
+    // for [b, b + 1) / 255 and its unbiased value is (b + 0.5) / 255 -- the decode WaveField::ProbeAt has
+    // always used. The UNORM read gives b / 255; the half-LSB is added after the filter, which is linear.
+    return PageLoad4(gTA[gWaveU.x], uv, 6u + plane, mip) + (0.5f / 255.0f);
 }
 
 float4 LoadBilinearClamp(uint slot, float2 texel, float2 dims) {
@@ -340,7 +408,12 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // caught this line writing CORNERS while BankSample reconstructs centers (local -
     // 0.5): every bank field sat half a texel off, 2.4 m at ring 0 and 77 m at ring 5.
     // The corner-lerp f above already used centers; now the whole kernel agrees.
-    const float2 xz = t.orgXZ + (float2(id.xy) + 0.5f) * t.texelM;
+    const float2 exz = (float2(id.xy) + 0.5f) * t.texelM;   // this texel's own metres in the tile
+    const float2 xz = t.orgXZ + exz;
+    // M13 step 2: the texel's PLACE, from the tile's rows (TilePlace above). Every lat/lon read
+    // below -- the bed, the swell shadow -- is asked for here, once, instead of being re-derived
+    // from the chart at each site.
+    const float2 place = TilePlace(t, exz);
 
     // Corner-lerped spatial context (the CPU sampled the atlas stacks at the corners; a tile
     // spans well under the tide's or the wave grid's own resolution, so bilinear is honest
@@ -350,28 +423,47 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // HEIGHT WINDOW, residency-clamped, corner-lerp as the out-of-window fallback.
     const float level = lerp(lerp(t.lvl00, t.lvl10, f.x), lerp(t.lvl01, t.lvl11, f.x), f.y);
     float bed = lerp(lerp(t.bed00, t.bed10, f.x), lerp(t.bed01, t.bed11, f.x), f.y);
+    // The local sea-state scale: one law with the hull's twin (sim/WaveScale.h), continuous across
+    // the tile and across the wave grid's nodes (it was one value per tile, read off one node).
+    const float hsScale = lerp(lerp(t.hs00, t.hs10, f.x), lerp(t.hs01, t.hs11, f.x), f.y);
     if (gSlotsD.x != 0xFFFFFFFFu && gSlotsD.z != 0xFFFFFFFFu) {
         // M9ax: the whole tenant -- the z14 page where it is resident and fine, the cube face
         // everywhere else on the planet -- so shoaling, the current amplification and the
         // depth-limited breaking act on every coast the rings reach, not only inside one page.
-        // The rings are held to page mips >= 2 (their own texels are 1.2 m and up). The corner
-        // lerp above remains only for a bank with no height tenant at all.
-        const float lat = gGeoA.x + xz.y * gGeoA.z;
-        const float lon = gGeoA.y + xz.x * gGeoA.w;
-        bed = HpHeightAt(gTA[gSlotsD.x], gTA[gSlotsD.y], lat, lon, gWinA, gSlotsD.z, 2.0f);
+        // The corner lerp above remains only for a bank with no height tenant at all.
+        const float lat = place.x;
+        const float lon = place.y;
+        // THE BED AT THE RING'S OWN GRAIN (the water match, step 3): the page level whose texel is
+        // no finer than this ring's, floored to a whole level -- mip 0 (9.55 m of Mercator, ~7 m
+        // here) for the rings a hull and an eye stand in, rising with the coarse rings. The constant
+        // 2 it replaces ("their own texels are 1.2 m and up") held every ring to a z14 page's level
+        // 2 -- 28 m texels here -- and beside the jetty the depth laws saw the wall's 28 m average:
+        // the drawn sea stood at a dry weight of 0.14 where the hull, on a 1 m bed, stood at 1.0.
+        // compose/HeightPage gives a hull this bed at the finest level.
+        const float pageTexelM = kHpPageTexelM * cos(lat * 0.01745329252f);
+        const float bedMip = max(floor(log2(max(t.texelM / pageTexelM, 1.0f))), 0.0f);
+        bed = HpHeightAt(gTA[gSlotsD.x], gTA[gSlotsD.y], lat, lon, gWinA, gSlotsD.z, bedMip);
     }
 
-    // The SWE refinement where the solver is resident: dEta on the level, solved currents.
-    float dEta = 0.0f;
+    // THE LEVEL (the water match, step 1 -- the solver is truth). The atlas everywhere; inside the
+    // solver's domain the surface IS the solver's: the tide plane it was forced by (gSweB.x) plus
+    // the deviation it holds, over the domain's weight -- rising from 0 at the grid's edge to 1 one
+    // cell in (the field is defined at cell centres). The old `level + dEta` added the deviation
+    // from a UNIFORM plane to the spatially varying atlas, and a hard 0.1 % edge cut the domain.
+    // TreeWater reads this expression (WeatherManager::SolverRefine) from the same texels,
+    // delivered through a region readback; --water-probe is the gate that the two stand together.
+    float lvl = level;
     float2 cur = 0.0f;
     if (gSwe.z > 0.0f) {
         const float2 uv = (xz - gSwe.xy) * gSwe.zw;
-        if (all(uv > 0.001f) && all(uv < 0.999f)) {
-            const float2 texel = float2(uv.x * gSweDims.x, (1.0f - uv.y) * gSweDims.y);
-            dEta = LoadBilinearClamp(gSlotsA.w, texel, gSweDims.xy).x;
-            const float4 s = LoadBilinearClamp(
-                gSlotsB.x, float2(uv.x * gSweDims.x, (1.0f - uv.y) * gSweDims.y),
-                gSweDims.xy);
+        const float2 texel = float2(uv.x * gSweDims.x, (1.0f - uv.y) * gSweDims.y);
+        const float eCells =
+            min(min(texel.x, gSweDims.x - texel.x), min(texel.y, gSweDims.y - texel.y));
+        const float wDom = smoothstep(0.0f, 1.0f, eCells);
+        if (wDom > 0.0f) {
+            const float dEta = LoadBilinearClamp(gSlotsA.w, texel, gSweDims.xy).x;
+            lvl = lerp(level, gSweB.x + dEta, wDom);
+            const float4 s = LoadBilinearClamp(gSlotsB.x, texel, gSweDims.xy);
             if (s.w > 0.5f) cur = s.xy;
         }
     }
@@ -379,7 +471,6 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // changes between the two runs is the bed itself -- same window, same residency, same
     // solver, same instant.
     if (gDebugA.x != 0.0f) bed = gDebugA.y;
-    const float lvl = level + dEta;
     const float depth = lvl - bed;
     const float dry = smoothstep(0.05f, 0.65f, depth);
 
@@ -393,9 +484,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // through the same lat/lon -> page frame as the bed; nothing resident = exposed.
     float expo = 1.0f;
     if (gSlotsC.y != 0xFFFFFFFFu && gSlotsC.z != 0xFFFFFFFFu && gSlotsD.z != 0xFFFFFFFFu) {
-        const float lat = gGeoA.x + xz.y * gGeoA.z;
-        const float lon = gGeoA.y + xz.x * gGeoA.w;
-        const float2 wuv = PageUvLatLon(lat, lon, gWinA);
+        const float2 wuv = PageUvLatLon(place.x, place.y, gWinA);
         if (all(wuv > 0.0f) && all(wuv < 1.0f)) {
             const float have = round(PageHaveLoad(gTA[gSlotsC.z], wuv, gSlotsD.z));
             if (have <= kHpMaxMip) {
@@ -473,9 +562,19 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // adds bands 0 and 2 in the free fibers so the PS can amplitude-scale the caustic
     // Jacobian and Laplacian it assembles from the cascade derivative textures
     // (ALGEBRA.md caustics: areaJac_fold = 1 + sum w*amp*(J_c - 1); lap folds linearly).
-    float gain0 = t.hsScale * expo;
-    float gain1 = t.hsScale * expo;
-    float gain2 = t.hsScale * expo;
+    float gain0 = hsScale * expo;
+    float gain1 = hsScale * expo;
+    float gain2 = hsScale * expo;
+    // M13 step 2: this texel's shares of the lattice's planes, ONCE -- they are a function of the
+    // texel, not of the band, so the three bands below read them rather than re-deriving them.
+    float chartW[4] = {1.0f, 0.0f, 0.0f, 0.0f};
+    float chartNorm = 1.0f;
+    const bool chartsOn = t.bandY.w != 0.0f;
+    if (chartsOn) {
+        TileShares(t, exz, chartW);
+        chartNorm = sqrt(max(chartW[0] * chartW[0] + chartW[1] * chartW[1] +
+                                 chartW[2] * chartW[2] + chartW[3] * chartW[3], 1e-12f));
+    }
     [unroll] for (uint c = 0; c < 3; ++c) {
         // ---- M9bt: THE FOLD ASKS FOR A FRACTION, NOT A VERDICT. --------------------------
         //
@@ -509,7 +608,7 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         // standing the entrance up toward blocking -- the 7-foot-standing-wave term).
         // proofs/inlet_storm.py runs the SAME pure functions on the SAME fields; the
         // match report holds this kernel to it.
-        float amp = t.hsScale * expo;
+        float amp = hsScale * expo;
         float blocked = 0.0f;
         if (depth > 0.05f) {
             const float cB = BandPhaseSpeed(gBandK[c], max(depth, 0.3f));
@@ -528,13 +627,36 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         // M8: inside the solved window the cascades' structure bands stand down -- the
         // solved field carries shoaling/refraction/limiting per cell, not per band.
         if (c != 2) amp *= 1.0f - wCas;   // M9by: the DELIVERED weight, not the window
-        const float2 cuv = frac(xz / gPatch[c]);
         const float cmip = CascadeMip(c, t.texelM);
-        const float4 s = LoadBilinearWrapMip(gSlotsA[c], cuv, cmip);
+        // ---- M13 step 2: THE BAND IS READ IN THE LATTICE'S OWN PLANES (sim/WaveChart.h). Where
+        // this used to be frac(xz / L) on the root's tangent plane -- one plane for a planet,
+        // which is why a hull carried 2054 km rode a different sea from the one drawn around it
+        // -- the texel's charts are read at their own coordinates and blended variance-
+        // preservingly, the vector channels rotated into this place's east/north first. In a
+        // cell's plateau (nine places in ten) exactly one share is non-zero and this is the
+        // single read it always was.
+        float4 s = 0.0f, dv = 0.0f;
+        if (chartsOn) {
+            [unroll] for (uint k = 0; k < 4u; ++k) {
+                if (chartW[k] < 1e-4f) continue;   // the law's own skip; the norm keeps it
+                const float2 cuvK = frac(ChartUv(t, k, c, exz) / gPatch[c]);
+                const float4 sK = LoadBilinearWrapMip(gSlotsA[c], cuvK, cmip);
+                const float4 dK = LoadBilinearWrapMip(gSlotsE[c], cuvK, cmip);
+                const float4 R = ChartRot(t, k);
+                const float wk = chartW[k] / chartNorm;
+                // The heights and the scalar channels blend as they are; the horizontal pair is
+                // a vector in the chart's axes and turns into the place's.
+                s += wk * float4(R.x * sK.x + R.y * sK.z, sK.y, R.z * sK.x + R.w * sK.z, sK.w);
+                dv += wk * float4(R.x * dK.x + R.y * dK.y, R.z * dK.x + R.w * dK.y, dK.z, dK.w);
+            }
+        } else {
+            const float2 cuv = frac(xz / gPatch[c]);   // no charts (Mars, or no rows): as before
+            s = LoadBilinearWrapMip(gSlotsA[c], cuv, cmip);
+            dv = LoadBilinearWrapMip(gSlotsE[c], cuv, cmip);
+        }
         d += s.xyz * (w * amp);
         // The Jacobian foam lives in the DERIV fiber (the disp fiber's w is zero --
         // the old additive term here read it and contributed nothing since M7).
-        const float4 dv = LoadBilinearWrapMip(gSlotsE[c], cuv, cmip);
         // Monahan-gated: the Jacobian says WHERE a whitecap sits, the wind says HOW MANY
         // there are. Depth/blocking/wake foam stay ungated -- that breaking is geometry
         // and current physics, not wind climatology.
@@ -723,11 +845,12 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // Depth-limited breaking (the Sea.hlsl clamp, bank-side): the GEOMETRY constraint
     // stays; its foam side-effect retired in M8 -- the envelope-based depthFoam above is
     // the disciplined statement of the same physics (test the envelope, never |eta|).
+    // An AMPLITUDE cap (the water match, step 2): the horizontal excursion is linear in the same
+    // amplitude, so the whole displacement scales by the one ratio -- continuous at the cap, where
+    // the old horizontal step to 0.85 (a number from the first sea, with no argument) was not.
+    // TreeWater::At applies the same cap to the hull's water.
     const float hmax = 0.55f * max(depth, 0.05f);
-    if (abs(d.y) > hmax) {
-        d.y *= hmax / abs(d.y);
-        d.xz *= 0.85f;
-    }
+    if (abs(d.y) > hmax) d *= hmax / abs(d.y);
 
     // M7m: EDGE PATTERN INJECTION. Flip the switch and this kernel writes a WORLD-ALIGNED
     // test card into the foam fiber instead of physics: a 50 m checker and a wedge that

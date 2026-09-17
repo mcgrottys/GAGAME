@@ -22,11 +22,13 @@
 #include "render/Camera.h"
 #include "scene/Layer.h"
 #include "sim/GlobeModel.h"
+#include "sim/WaveChart.h"
 
 #include <algorithm>
 #include <condition_variable>
 #include <mutex>
 #include <string>
+#include <unordered_set>
 #include <thread>
 #include <vector>
 
@@ -81,6 +83,9 @@ public:
     // isMars switches the whole shading path (no relief, no live-Earth fields, BC5 normals).
     void SetResidency(ResidencyManager* rm, int surf, int norm, bool isMars) {
         m_res = rm;
+        // M13: this view is a sampler of the one earth cache. Its walk, its prefetch and its
+        // mip floors are all one reader; the extra levels it walks name their own.
+        m_sampler = rm ? rm->Sampler("view") : 0;
         m_surfT = surf;
         m_normT = norm;
         m_streamMars = isMars;
@@ -269,6 +274,10 @@ public:
         int bankSet = -1;             // 0 = the camera's rings, 1 = set B, -1 = none (far)
         float skyUp[3] = {0.0f, 1.0f, 0.0f};   // the zenith of the sky this level SEES, own frame
         float skyDay = -1.0f;         // that sky's daylight; < 0 = the level's own local day
+        // M13: WHICH SAMPLER this level's wants are charged to (ResidencyManager::Sampler).
+        // A Droste level and a gate's window read the same cache the camera does, and each
+        // answers for what it asked for; -1 means the view's own.
+        int sampler = -1;
     };
     // Per frame, BEFORE SetView: the scene's sun as the renderer will write it (the level
     // table's slot 0 carries it -- the globe's shading reads the table, not gSunDir).
@@ -317,6 +326,13 @@ public:
         for (int i = 0; i < 9; ++i) m_gateRows[i] = rows[i];
     }
     // Set B: the rings anchored at the OUTER level's eye (a second WaterBankLayer).
+    // M13 step 2: the cascade sea's plane at the eye (sim/WaveChart.h), for the pixel stage's
+    // sub-ring bands -- the same plane the bank filled its texels from. Off until a frame hands
+    // one over, in which case the pixels read the root's tangent plane, as they always did.
+    void SetWaveChartFrame(const WaveChart::Frame& f, bool on) {
+        m_chartFrame = f;
+        m_chartOn = on;
+    }
     void SetWaterBankB(uint32_t disp, uint32_t param, uint32_t detail, const float* org12,
                        bool on) {
         m_bankB[0] = disp;
@@ -451,6 +467,15 @@ private:
         float gateR0[4];      // rows: TRUE camera frame -> the box's own frame; w = half extent
         float gateR1[4];
         float gateR2[4];
+        // M13 step 2: THE CASCADE SEA'S PLANE AT THE EYE (sim/WaveChart.h) -- appended at the END
+        // on both sides (priors 22). The pixel stage adds the bands a ring texel cannot carry by
+        // reading the cascade DERIVATIVE textures directly, and those reads have to happen in the
+        // same plane the bank filled its texels from, or the fine ripples are a second sea laid
+        // over the first. One plane serves every pixel: a chart cell is hundreds of km across and
+        // a frame's pixels sit inside one.
+        float chartOrg[4];    // the cell's centre on the sphere (m), w = 1 when the rows are live
+        float chartE[4];      // its east, w = the offset along east
+        float chartN[4];      // its north, w = the offset along north
     };
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
@@ -485,7 +510,7 @@ private:
     void EmitMeshlets(int face, double u0, double v0, double size, double arc,
                       float morphStart, float morphEnd, const double camPos[3], uint32_t slot);
     // M10: one walk of the root under a level's eye, emitting records into `slot`.
-    void WalkLevel(const WalkParams& wp, uint32_t slot);
+    void WalkLevel(const WalkParams& wp, uint32_t slot, int sampler);
     bool BuildPso(Gpu& gpu, ShaderCompiler& sc);
     bool BuildMeshPso(Gpu& gpu, ShaderCompiler& sc);
 
@@ -543,9 +568,37 @@ public:
     // M9bk probe: leaves sitting past their own morph band (k == 1: the odd vertices are
     // snapped onto the even ones, so the level renders at HALF the density the walk paid for).
     mutable uint64_t walkMorphFull = 0, walkMorphPart = 0;
+    // M13 step 0 (--water-tiles): WHAT WOULD THE WATER COST ON THE PLANET'S OWN LATTICE? The
+    // counter answers it before a line of the kernel moves: under the plan's rule each water leaf
+    // reads the cube-quadtree tile at its level - 2 (one texel per cell) and the one at level - 3
+    // (the morph's target), so the walk records those two addresses per leaf and this reports the
+    // distinct set -- the number a sampler's reserve has to hold, and the pool bytes it costs at
+    // 128^2 texels x 3 planes x RGBA16F. It counts EVERY leaf: a land test can only take tiles
+    // away, and the plan's gate-free test (the min/max height pyramid) does not exist yet.
+    // Off by default; a std::set touch per leaf is not free.
+    bool waterTileCount = false;
+    mutable std::unordered_set<uint64_t> waterTiles;
+    mutable uint32_t waterTilesByLevel[32] = {};
+    static constexpr uint64_t kWaterTileBytes = 128ull * 128ull * 8ull * 3ull;   // 384 KB a slot
     void WalkReset() {
         walkNodes = walkLeaves = walkWantNs = 0;
         walkMorphFull = walkMorphPart = 0;
+        if (waterTileCount) {
+            waterTiles.clear();
+            for (uint32_t& c : waterTilesByLevel) c = 0;
+        }
+    }
+    // The line the still poses and the Haulover carry are read from.
+    std::string WaterTileReport() const {
+        char b[512];
+        int n = snprintf(b, sizeof(b), "%zu tiles (%.1f MB) from %llu leaves:", waterTiles.size(),
+                         double(waterTiles.size() * kWaterTileBytes) / (1024.0 * 1024.0),
+                         static_cast<unsigned long long>(walkLeaves));
+        for (int L = 0; L < 32; ++L) {
+            if (!waterTilesByLevel[L]) continue;
+            n += snprintf(b + n, sizeof(b) - size_t(n), " L%d %u;", L, waterTilesByLevel[L]);
+        }
+        return std::string(b);
     }
     // The meshlet-record memcpy into the frame's upload buffer (Render), last frame, ms: the
     // one CPU cost of the mesh path inside the RENDER bracket. main reads and zeroes it.
@@ -578,6 +631,7 @@ private:
 
     // M6e/M6i: streaming -- Mars's native pyramids (surf/norm) + the composed channels.
     ResidencyManager* m_res = nullptr;
+    int m_sampler = 0;   // M13: this view's id on the shared cache
     int m_surfT = -1, m_normT = -1;
     int m_colorT = -1, m_winT = -1, m_hgtT = -1, m_hgtWinT = -1;
     // M9ap: pages mode -- window == colorT and these are its slices (6, 7). Otherwise 0.
@@ -640,6 +694,8 @@ private:
     // behind it, so the nearer limb must composite last).
     uint32_t m_limbSlots[kMaxLevels] = {};
     int m_limbCount = 0;
+    WaveChart::Frame m_chartFrame;   // M13 step 2: the plane at the eye
+    bool m_chartOn = false;
     uint32_t m_bankB[3] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
     float m_bankBOrg[12] = {};
     bool m_bankBOn = false;

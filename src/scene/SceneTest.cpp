@@ -72,6 +72,8 @@
 // reverted (the unnamed list appended, `"base": ""` refused) before they were trusted.
 #include "app/Options.h"
 #include "scene/Gateway.h"
+#include "core/Dome.h"
+#include "sim/Ephemeris.h"
 #include "sim/RigidBody.h"
 #include "core/Common.h"
 #include "core/CurrentFieldLoader.h"
@@ -1958,10 +1960,9 @@ bool RunSceneSelfTest() {
             g.Same(fx.Declared().d, 2.0, "[effect] Declare carries the offset");
         }
 
-        // (D) THE ENTITY's freshness fields default to today's behaviour: no cadence, no mirror.
+        // (D) THE ENTITY: the spawn heading, and the solver it reads (by region, never on a clock).
         {
             Entity e;
-            g.Same(e.Declared().mirrorCadence, 0.0, "[entity] mirrorCadence defaults to 0 = never (today's cost)");
             // THE SPAWN HEADING: a spawn without `az` is the translation it always was (the bow
             // north); with `az` the bow turns to that compass heading about the spawn point.
             e.SetSpawn(120.0, 0.0, -10.0);
@@ -1986,21 +1987,15 @@ bool RunSceneSelfTest() {
                        "[entity] ...about the spawn point, which stays where the sugar put it");
             }
             g.True(!e.Active() && !e.Helming(), "[entity] a node without a hull is inert");
-            const PropDecl* mc = EntitySchema().Find("mirrorCadence");
-            g.True(mc && mc->quantity == Quantity::Time && mc->unit.toCanonical == 1.0,
-                   "[entity] the entities section declares mirrorCadence in seconds");
+            g.True(EntitySchema().Find("mirrorCadence") == nullptr,
+                   "[entity] the entities section has no mirror cadence: the hull reads the solver by region every frame");
             WeatherManager wm;
-            g.True(std::isinf(wm.MirrorCadence()), "[entity] the manager's cadence is infinite by default (never)");
-            wm.SetMirrorCadence(0.0);
-            g.True(std::isinf(wm.MirrorCadence()), "[entity] SetMirrorCadence(0) is never");
-            wm.SetMirrorCadence(1.0);
-            g.Same(wm.MirrorCadence(), 1.0, "[entity] SetMirrorCadence(1) is one second");
-            g.Same(wm.MirrorAsOf(), WeatherManager::kNeverRead, "[entity] no mirror was read: asOf is never");
+            g.Same(wm.SolverAsOf(), WeatherManager::kNeverRead, "[entity] no solver has answered: asOf is never");
             FrameInfo fi;
             g.True(fi.asOf == 0.0 && fi.quanta == 0, "[entity] FrameInfo carries asOf and the clock's quanta");
             TreeWater tw;
             tw.Configure(&wm, nullptr, nullptr, nullptr, 1.0, 1.0, 1.0);
-            g.Has(tw.Describe(120.0, -10.0, 0.0), "mirror never read", "[entity] TreeWater::Describe reports the mirror's age (never)");
+            g.Has(tw.Describe(120.0, -10.0, 0.0), "no solver has answered", "[entity] TreeWater::Describe reports that no solver has answered");
         }
 
         // (E) THE GATE: one motor carries a body from a box to a place on the same planet.
@@ -2069,6 +2064,66 @@ bool RunSceneSelfTest() {
                    "[gate] the destination space's up is the planet's radial at Haulover");
             const double tilt = std::acos((std::min)(1.0, upD[1])) * 180.0 / kPiL;
             g.True(tilt > 17.0 && tilt < 20.0, "[gate] ...18-19 degrees from the Merrimack's (the arc between the inlets)");
+            // ---- THE WINDOW'S SKY (M13). The gate draws the far place in THIS frame, turned by
+            // Q = rot(Gm) (GlobeLayer's TrueRel), so the sky inside the box is the dome at the
+            // carried eye TURNED THE SAME WAY -- core/Dome.h asked with Q zE and Q sun. Three
+            // things a merely plausible slab cannot do, each of which the first attempt failed:
+            const Motor KwT = gate.DestinationInSource() * gate.Carry();
+            const Motor GmT = KwT.Inverse();
+            double Ew[3] = {600.0, 2.0, -10.0};   // an eye at the box, carried to the other end
+            KwT.TransformPoint(Ew[0], Ew[1], Ew[2]);
+            double zEw[3];
+            ZenithAt(Ew, R, zEw);
+            // The one sun of one instant (2026-08-28T19:30:00Z), in the root frame, exactly as
+            // the frame loop builds it: the ephemeris at the camera's place, on the root's axes.
+            const double unixW = 1787945400.0;
+            const sun::SolarSystem ssW = sun::Build(unixW);
+            double sdW[3];
+            sun::SunDirFromPlanetPoint(ssW, frM.up, sdW);
+            const float sunRootT[3] = {
+                static_cast<float>(sdW[0] * frM.east[0] + sdW[1] * frM.east[1] + sdW[2] * frM.east[2]),
+                static_cast<float>(sdW[0] * frM.up[0] + sdW[1] * frM.up[1] + sdW[2] * frM.up[2]),
+                static_cast<float>(sdW[0] * frM.north[0] + sdW[1] * frM.north[1] + sdW[2] * frM.north[2])};
+            double uW[3] = {zEw[0], zEw[1], zEw[2]};
+            double sW[3] = {sunRootT[0], sunRootT[1], sunRootT[2]};
+            GmT.TransformDir(uW[0], uW[1], uW[2]);
+            GmT.TransformDir(sW[0], sW[1], sW[2]);
+            const float sunWinT[3] = {static_cast<float>(sW[0]), static_cast<float>(sW[1]),
+                                      static_cast<float>(sW[2])};
+            float rowsW[9], sunDomeW[3];
+            DomeFrame(uW, sunWinT, rowsW, sunDomeW);
+            // (1) The window's own up reads as straight up. (Built from zE instead of Q zE -- the
+            // first attempt -- this is cos 18.56 = 0.948, and every ray reads 18.6 degrees low.)
+            const double upY = double(rowsW[3]) * uW[0] + double(rowsW[4]) * uW[1] +
+                               double(rowsW[5]) * uW[2];
+            g.Near(upY, 1.0, 1e-6, "[gate] the window's sky frame stands the destination's zenith on +y");
+            // (2) A ray along the destination's OWN horizon, drawn through the window, reads
+            // elevation zero -- the sea inside the box meets its own sky, at any angle.
+            double hOwn[3] = {zEw[1] * 1.0 - zEw[2] * 0.0, zEw[2] * 0.0 - zEw[0] * 1.0, 0.0};
+            {   // h = zE x e_z normalised: a horizontal direction at the carried eye
+                const double hl = std::sqrt(hOwn[0] * hOwn[0] + hOwn[1] * hOwn[1] + hOwn[2] * hOwn[2]);
+                for (double& c : hOwn) c /= hl;
+            }
+            double hDrawn[3] = {hOwn[0], hOwn[1], hOwn[2]};
+            GmT.TransformDir(hDrawn[0], hDrawn[1], hDrawn[2]);
+            const double hY = double(rowsW[3]) * hDrawn[0] + double(rowsW[4]) * hDrawn[1] +
+                              double(rowsW[5]) * hDrawn[2];
+            g.Near(hY, 0.0, 1e-6, "[gate] ...so a ray along the destination's horizon reads level in it");
+            // (3) THE ONE SUN, TWO GROUNDS. The sun's elevation through the window is its
+            // elevation AT HAULOVER -- against the ephemeris asked directly there (a different
+            // path: the planet frame, that place's own up), and against NOAA's published solar
+            // position for 25.8997 N 80.1239 W at that instant, +55.460 deg (here: +40.899).
+            double sdH[3];
+            sun::SunDirFromPlanetPoint(ssW, frH.up, sdH);
+            const double elThere = std::asin((std::min)(1.0, (std::max)(-1.0,
+                sdH[0] * frH.up[0] + sdH[1] * frH.up[1] + sdH[2] * frH.up[2]))) * 180.0 / kPiL;
+            const double elWin = std::asin((std::min)(1.0, (std::max)(-1.0, double(sunDomeW[1])))) *
+                                 180.0 / kPiL;
+            g.Near(elWin, elThere, 0.01, "[gate] the sun through the window stands where the ephemeris puts it at the destination");
+            g.Near(elWin, 55.460, 0.05, "[gate] ...which is NOAA's solar position for Haulover at that instant");
+            const double elHere = std::asin((std::min)(1.0, (std::max)(-1.0, double(sunRootT[1])))) *
+                                  180.0 / kPiL;
+            g.Near(elHere, 40.899, 0.05, "[gate] ...while the same sun stands at NOAA's Merrimack elevation here");
             double ox = 0.0, oy = 0.0, oz = 0.0;
             gate.DestinationInSource().TransformPoint(ox, oy, oz);
             double orig[3];
@@ -2092,7 +2147,19 @@ bool RunSceneSelfTest() {
                    "[gate] a TreeWater with no chart places a point by the root's constants, bitwise");
             twG.SetChart(&ch);
             twG.PlaceOf(0.0, 0.0, la0, lo0);
-            g.True(la0 == 25.8997 && lo0 == -80.1239, "[gate] ...and through a gate's chart, at the destination's places");
+            // M13 step 2: the chart's own origin IS the destination -- but the answer now comes
+            // through the frame's rows and two transcendentals (Space::Anchor::PlaceOf, the place
+            // on the sphere the mesh is drawn on) rather than off the declaration, so it is exact
+            // to a nanodegree (a tenth of a millimetre of ground) and not bitwise.
+            g.Near(la0, 25.8997, 1e-9, "[gate] ...and through a gate's chart, at the destination's place");
+            g.Near(lo0, -80.1239, 1e-9, "[gate] ...in longitude too");
+            // And away from the anchor the exact map is what it is FOR: the linear chart drifts
+            // 5.6 m per km north of the sphere, which is what the water used to read.
+            double laE = 0.0, loE = 0.0, laL = 0.0, loL = 0.0;
+            twG.PlaceOf(0.0, 5000.0, laE, loE);
+            ch.LatLonOf(0.0, 5000.0, laL, loL);
+            const double driftM = (laL - laE) * 111195.0;
+            g.Near(driftM, 28.1, 1.5, "[gate] ...and stands 28 m off the linear chart at 5 km north");
             // THE WINDOW'S TEST (Gateway::SeenThrough, the shader's GateThrough line for line). The
             // box at (600, 0, -10) heading east: 8 m deep along x, 60 m across along z, 30 m tall.
             const double eyeW[3] = {500.0, 2.0, -10.0};

@@ -52,6 +52,7 @@
 
 #include "core/Cga.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace ga::sun {
@@ -154,20 +155,55 @@ struct SolarSystem {
 // planes are all grade 1, and those are the only things this file pushes through the mirror.
 inline cga::Mv Mirror(const cga::Mv& n, const cga::Mv& X) { return cga::Gp(cga::Gp(n, X), n) * -1.0; }
 
+// THE CHAIN, from the Earth's place around the sun: its centre (AU, the sun at the origin) and
+// the rotor that turns the heliocentric axes into the Earth's own. Everything below is the same
+// versors whoever supplies those two -- the clock (Build) or a scene (BuildEarth).
+inline SolarSystem BuildChain(const Apparent& app, double ex, double ey, double ez,
+                              const cga::Mv& spinRotor);
+
 inline SolarSystem Build(double unixSeconds) {
+    const Apparent app = Solar(unixSeconds);
+    const double ra = app.raDeg * kDeg, dec = app.decDeg * kDeg;
+    // The sun seen FROM the Earth lies at (RA, dec) and distance R, so the Earth seen from the
+    // SUN lies at exactly minus that.
+    return BuildChain(app, -app.distAu * std::cos(dec) * std::cos(ra),
+                      -app.distAu * std::cos(dec) * std::sin(ra), -app.distAu * std::sin(dec),
+                      cga::Rotor(0.0, 0.0, 1.0, -app.gmstDeg * kDeg));   // about the pole (z_eq)
+}
+
+// THE EARTH, PLACED BY A SCENE. The sun is a light at 0,0,0; the Earth's centre is `atM` metres
+// from it and the Earth is turned `spinDeg` about `axis`. No clock anywhere: the apparent
+// quantities (distance, disc size, subsolar point) are read back OUT of the placement.
+inline SolarSystem BuildEarth(const double atM[3], const double axis[3], double spinDeg) {
+    Apparent app;
+    const double ex = atM[0] / kAuM, ey = atM[1] / kAuM, ez = atM[2] / kAuM;
+    app.distAu = std::sqrt(ex * ex + ey * ey + ez * ez);
+    const double d = (app.distAu > 0.0) ? app.distAu : 1.0;
+    // The sun from the Earth is the direction -at; in the frame's own terms that is an RA and a
+    // declination, kept only for the log and the disc.
+    app.raDeg = Wrap360(std::atan2(-ey, -ex) / kDeg);
+    app.decDeg = std::asin(std::clamp(-ez / d, -1.0, 1.0)) / kDeg;
+    app.gmstDeg = Wrap360(spinDeg);
+    app.subsolarLatDeg = app.decDeg;
+    app.subsolarLonDeg = Wrap180(app.raDeg - app.gmstDeg);
+    app.angRadiusDeg = std::asin(std::min(1.0, kSunRadiusM / (d * kAuM))) / kDeg;
+    app.irradianceWm2 = kTsi1AuWm2 / (d * d);
+    double ax = axis[0], ay = axis[1], az = axis[2];
+    const double al = std::sqrt(ax * ax + ay * ay + az * az);
+    if (al > 0.0) { ax /= al; ay /= al; az /= al; } else { ax = 0.0; ay = 0.0; az = 1.0; }
+    return BuildChain(app, ex, ey, ez, cga::Rotor(ax, ay, az, -spinDeg * kDeg));
+}
+
+inline SolarSystem BuildChain(const Apparent& app, double ex, double ey, double ez,
+                              const cga::Mv& spinRotor) {
     SolarSystem s;
-    s.app = Solar(unixSeconds);
+    s.app = app;
 
     // ---- solar.hci. The sun is the origin, and it is the origin for every consumer, forever.
     s.sunPoint = cga::N0();
     s.sunSphere = cga::DualSphere(s.sunPoint, kSunRadiusM / kAuM);
 
-    // The Earth's centre, in equatorial mean-of-date axes: the sun seen FROM the Earth lies at
-    // (RA, dec) and distance R, so the Earth seen from the SUN lies at exactly minus that.
-    const double ra = s.app.raDeg * kDeg, dec = s.app.decDeg * kDeg;
-    const double ex = -s.app.distAu * std::cos(dec) * std::cos(ra);
-    const double ey = -s.app.distAu * std::cos(dec) * std::sin(ra);
-    const double ez = -s.app.distAu * std::sin(dec);
+    // The Earth's centre, one translator from the sun.
     const cga::Mv T = cga::Translator(ex, ey, ez);
     s.earthPoint = cga::Sandwich(T, s.sunPoint);
     s.earthSphere = cga::DualSphere(s.earthPoint, kEarthRadiusM / kAuM);
@@ -176,7 +212,7 @@ inline SolarSystem Build(double unixSeconds) {
     // T^-1 puts the EARTH at the origin (geocentric); R turns the inertial equinox to Greenwich;
     // D restates the space in Earth radii. M (below) mirrors the last two axes.
     const cga::Mv Tinv = cga::Translator(-ex, -ey, -ez);
-    const cga::Mv R = cga::Rotor(0.0, 0.0, 1.0, -s.app.gmstDeg * kDeg);   // about the pole (z_eq)
+    const cga::Mv& R = spinRotor;
     const cga::Mv D = cga::Dilator(kAuM / kEarthRadiusM);
     s.toPlanetEven = cga::Gp(D, cga::Gp(R, Tinv));
     // The mirror that swaps Y and Z: reflection in the plane whose unit normal is (0,1,-1)/sqrt2.

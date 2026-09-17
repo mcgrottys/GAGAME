@@ -28,6 +28,11 @@
 static float3 sLvlSun = float3(0.0f, 1.0f, 0.0f);
 static float sLvlEyeY = 0.0f;
 static float3 sLvlSkyUp = float3(0.0f, 1.0f, 0.0f);
+// M13: and the distance of the level's own eye from its planet's centre, which is where its sky
+// is marched from (Common.hlsli SkyAirAt). The gate's window is a level: its rays land at the far
+// place, so its surfaces reflect the far place's sky with nothing more said.
+static float sLvlSkyEyeR = 6371000.0f;
+#define GA_SKY_EYE_R (sLvlSkyEyeR)
 #define GA_SUN_DIR (sLvlSun)
 #define GA_EYE_Y (sLvlEyeY)
 #define GA_SKY_UP (sLvlSkyUp)
@@ -107,7 +112,18 @@ cbuffer GlobeCb : register(b1) {
     float4 gGateR0;
     float4 gGateR1;
     float4 gGateR2;
+    // M13 step 2: the cascade sea's plane at the eye (sim/WaveChart.h) -- see GlobeLayer.h.
+    float4 gChartOrg;   // the cell's centre on the sphere (m); w = 1 when these rows are live
+    float4 gChartE;     // its east; w = the cell's offset along east
+    float4 gChartN;     // its north; w = the offset along north
 };
+
+// A surface point's coordinate in that plane: the tangent projection about the cell's own origin
+// plus its offset -- WaveChart::UOf, said in HLSL. `p` is the point in the PLANET frame (metres).
+float2 ChartUOf(float3 p) {
+    const float3 r = p - gChartOrg.xyz;
+    return float2(dot(r, gChartE.xyz) + gChartE.w, dot(r, gChartN.xyz) + gChartN.w);
+}
 
 // ---- M10: the level being drawn (LoadLevel) --------------------------------------------------
 // Six rows per level, filled by GlobeLayer::SetView:
@@ -137,6 +153,7 @@ void LoadLevel(uint slot) {
     sLvlBank = (int)round(r3.w);
     sLvlSun = r4.xyz;
     sLvlSkyUp = r5.xyz;
+    sLvlSkyEyeR = length(r0.xyz);   // the level's eye, sphere-centred, in its own units
     sLvlSkyDay = r5.w;
 }
 
@@ -155,18 +172,10 @@ float3 TrueRel(float3 relOwn) { return sLvlSigma * mul(sLvlQ, relOwn); }
 // origin of the true camera frame) to p reaches the box's entry at or before p: p is seen THROUGH
 // the window. One slab test, in the box's own frame.
 bool GateThrough(float3 p) {
-    const float3x3 R = float3x3(gGateR0.xyz, gGateR1.xyz, gGateR2.xyz);
-    const float3 h = float3(gGateR0.w, gGateR1.w, gGateR2.w);
-    const float3 e = mul(R, -gGateC.xyz);
-    float3 d = mul(R, p);
-    d = lerp(d, float3(1e-12f, 1e-12f, 1e-12f), float3(abs(d) < 1e-12f));
-    const float3 t1 = (-h - e) / d;
-    const float3 t2 = (h - e) / d;
-    const float3 tn = min(t1, t2);
-    const float3 tf = max(t1, t2);
-    const float tEnter = max(max(tn.x, tn.y), tn.z);
-    const float tExit = min(min(tf.x, tf.y), tf.z);
-    return tEnter <= tExit && tExit >= 0.0f && tEnter <= 1.0f;
+    // The slab itself is Common.hlsli's, so the sky's backdrop pixels and these surface pixels
+    // cannot disagree about where the window's edge is.
+    return GateSlabThrough(p, float3x3(gGateR0.xyz, gGateR1.xyz, gGateR2.xyz),
+                           float3(gGateR0.w, gGateR1.w, gGateR2.w), gGateC.xyz);
 }
 
 // THE RIM: how near the ray's entry into the box lies to an EDGE of the face it enters through,
@@ -862,10 +871,25 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
                     exp(-0.125f * kC * kC * (fpxW.x * fpxW.x + fpzW.x * fpzW.x));
                 const float gAy =
                     exp(-0.125f * kC * kC * (fpxW.y * fpxW.y + fpzW.y * fpzW.y));
-                const float4 dv =
-                    gTex[gBankU2[c + 1u]].SampleLevel(sLinearWrap, wxz / gBankB[c], 0);
-                sx += dv.x * wDet * bDet.x * gBankB.w * gAx;
-                sz += dv.y * wDet * bDet.x * gBankB.w * gAy;
+                // M13 step 2: read in the SAME PLANE the bank filled its texels from (the
+                // lattice's chart at the eye), not on the root's tangent plane -- otherwise
+                // these sub-ring bands are a second realization laid over the first, and at a
+                // carried place they are a different sea entirely. The slopes come back in the
+                // chart's axes and are turned into this pixel's east/north below.
+                const float2 cuvP = (gChartOrg.w != 0.0f)
+                                        ? ChartUOf(upT * gGlo.x) / gBankB[c]
+                                        : wxz / gBankB[c];
+                const float4 dv = gTex[gBankU2[c + 1u]].SampleLevel(sLinearWrap, cuvP, 0);
+                float2 slope = float2(dv.x, dv.y);
+                if (gChartOrg.w != 0.0f) {
+                    // The chart's axes said in this pixel's own east/north (a rotation under two
+                    // degrees: the two frames are a cell apart at most).
+                    const float2 R0 = float2(dot(gChartE.xyz, east), dot(gChartN.xyz, east));
+                    const float2 R1 = float2(dot(gChartE.xyz, north), dot(gChartN.xyz, north));
+                    slope = float2(dot(R0, float2(dv.x, dv.y)), dot(R1, float2(dv.x, dv.y)));
+                }
+                sx += slope.x * wDet * bDet.x * gBankB.w * gAx;
+                sz += slope.y * wDet * bDet.x * gBankB.w * gAy;
                 s2 = max(s2 - wDet * bDet.x * bDet.x *
                                   (0.5f * (gAx * gAx + gAy * gAy)) *
                                   (c == 0 ? 0.0004f : (c == 1 ? 0.0018f : 0.0060f)),

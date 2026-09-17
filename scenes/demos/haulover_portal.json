@@ -1,7 +1,7 @@
 {
   "_readme": [
     "THE HAULOVER GATE -- a playable scene. You are at the helm of the Novurania 18 RHIB in the",
-    "Merrimack entrance on the afternoon ebb of 2026-08-28. Ahead, across the channel, stands a",
+    "Merrimack entrance on the afternoon ebb of 2026-08-28, at sunset. Ahead, across the channel, stands a",
     "gate: a 120 m x 30 m x 10 m box, and a window -- through it, faintly outlined, is Haulover's sea.",
     "Drive your boat into it and you come out of Baker's Haulover Inlet, Miami, heading out to sea,",
     "still moving. The box is one motor between two places on the same planet: nothing else moves,",
@@ -21,13 +21,21 @@
   "base": "scenes/merrimack.json",
   "scene": {"name": "haulover-gate", "mode": "world", "view": "sea"},
   "time": {"start": "2026-08-28T19:30:00Z"},
+  "sun": {
+    "_readme": "The sun is a light at 0,0,0 and the Earth is placed around it -- no clock involved, so the tide above keeps its own time. This placement puts the Merrimack at sunset (+1.5 deg) and Haulover in daylight (+20.0 deg): the sun lies along the great circle from one inlet through the other.",
+    "source": "earth",
+    "earth": {"at": [-115661585509.728317, 0.0, 94878451480.563919], "axis": [0, 0, 1], "spin": 107.0777}
+  },
   "sea": {"storm": {"hs": 1.5, "tp": 8, "dir": 95}},
   "views": [
-    {"name": "sea", "follow": {"target": "boat"}}
+    {"name": "sea", "follow": {"target": "boat"}, "interests": [{"name": "boat"}]}
   ],
   "entities": [
     {"name": "boat", "vessel": "rhib.novurania18", "at": {"x": 120, "alt": 0, "z": -10, "az": 86},
      "controller": "helm"}
+  ],
+  "interests": [
+    {"name": "boat", "target": "boat", "radius": 200}
   ],
   "gates": [
     {"name": "haulover", "at": {"x": 450, "alt": 0, "z": 0, "az": 90}, "size": [120, 30, 10],

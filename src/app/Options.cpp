@@ -153,7 +153,13 @@ Options ParseArgs(int argc, char** argv) {
             o.pixFrames = static_cast<uint32_t>(_wtoi(Widen(next("1").c_str()).c_str()));
             if (o.pixFrames == 0) o.pixFrames = 1;
         }
-        else if (a == "--dump-fibers") o.dumpFibers = true;
+        else if (a == "--dump-fibers" || a == "--sky-probe") {
+            // Two flags on one link: the else-if chain below is AT the compiler's
+            // nesting limit (C1061 on one more `else if`), so a new flag joins a
+            // neighbour rather than deepening it.
+            if (a == "--sky-probe") o.skyProbe = true;
+            else o.dumpFibers = true;
+        }
         else if (a == "--lens") {
             const std::string n = next("worldxz");
             o.lens = n == "worldxz" ? 1 : n == "winuv" ? 2 : n == "mip" ? 3
@@ -256,6 +262,8 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--ring-loads") o.ringLoads = true;      // the default; kept for scripts
         else if (a == "--no-ring-loads") o.ringLoads = false;
         else if (a == "--res-trace") o.resTrace = true;
+        // M13 step 0: count the water tiles the walk would want on the planet's own lattice.
+        else if (a == "--water-tiles") o.waterTiles = true;
         // The tree's thread instrument (core/ThreadAudit.h): every tile write, read and delete
         // is scoped, and a run reports how often two threads met at one path. Off by default --
         // it takes a mutex per tile file, which is a different landing schedule.
@@ -275,6 +283,9 @@ Options ParseArgs(int argc, char** argv) {
                 o.traceTo = f1;
             }
         }
+        // The drawn sea against the water each hull reads (app/Tools/WaterProbe.cpp): the scene
+        // depth read back every N recorded frames. An instrument -- its readbacks stop the GPU.
+        else if (a == "--water-probe") o.waterProbeEvery = uint32_t(atoi(next("30").c_str()));
         else if (a == "--tree-audit") o.treeAudit = uint32_t(atoi(next("400").c_str()));
         // After a source is added there is nothing to compare against -- which is exactly when
         // the trees most need building. --warm-trees composes every address regardless.
@@ -729,11 +740,14 @@ SceneArgs Options::ToSets(const Options& o) {
     if (o.predictInline) rawf("--predict-inline");
     if (o.dsSerial) rawf("--ds-serial");
     if (o.resTrace) rawf("--res-trace");
+    if (o.waterTiles) rawf("--water-tiles");
     if (o.threadAudit) rawf("--thread-audit");
     if (o.jobsInline) rawf("--jobs-inline");
     if (o.traceFrom != UINT32_MAX) {
         rawf("--res-trace-frames " + std::to_string(o.traceFrom) + ":" + std::to_string(o.traceTo));
     }
+    if (o.skyProbe) rawf("--sky-probe");
+    if (o.waterProbeEvery) rawf("--water-probe " + std::to_string(o.waterProbeEvery));
     if (o.benchOverlap) rawf("--bench-overlap");
     else if (o.bench) rawf("--bench");
     if (o.gpuTime) rawf("--gpu-time");

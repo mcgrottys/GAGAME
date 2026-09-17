@@ -393,7 +393,9 @@ def part_c(path, tile=384):
         cs = (tl[:, :, 2] + 0.5) / 255.0 * 2.0 - 1.0
         sn = (tl[:, :, 3] + 0.5) / 255.0 * 2.0 - 1.0
         nrm = np.hypot(cs, sn)
-        cs, sn = cs / nrm, sn / nrm              # the cl2 renormalise ProbeAt does
+        cs, sn = cs / nrm, sn / nrm              # at a texel CENTRE the stored spinor is unit to the
+                                                 # byte; between centres ProbeAt keeps the lerp's
+                                                 # length as the amplitude (M9bu), as the kernel does
         wet = (tl[:, :, 0] > 0) if wet is None else (wet | (tl[:, :, 0] > 0))
         dX, dZ = t["dirX"][c], t["dirZ"][c]
         eta += a * cs                            # t = 0: the rotor is identity

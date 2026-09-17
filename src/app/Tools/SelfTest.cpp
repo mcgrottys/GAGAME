@@ -14,6 +14,7 @@
 #include "scene/SceneBuilder.h"
 #include "hal/TileAtlas.h"
 #include "sim/RigidBody.h"
+#include "sim/WaveChart.h"
 #include "sim/SimClock.h"
 #include "sim/Vessel.h"
 
@@ -33,6 +34,8 @@ int RunSelfTest(const Options& opt) {
                                   // Droste link through Space, the lattice against ColorFrame
     ok &= RunComposeSelfTest();   // pure CPU: the layer compositor's contracts
     ok &= RunWaterSelfTest();     // pure CPU: the water atlas' datum/epoch/field gates
+    ok &= RunWaveChartSelfTest();   // M13: the cascade sea's lattice-generated planes -- the
+                                    // partition, the variance-preserving blend, the metric
     ok &= RunTileSelfTest(gpu, sc, opt.shaderDir);
     ok &= RunAtlasSelfTest(gpu, sc, opt.shaderDir);
     ok &= RunThreadSelfTest();    // the thread instrument's own gate: it must SEE a race

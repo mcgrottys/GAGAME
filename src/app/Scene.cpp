@@ -218,6 +218,15 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
                 v.hasAt = true;
                 v.at = *at;
             }
+            if (const JsonValue* ia = ListOf(e, "interests")) {
+                for (const JsonValue& ie : ia->arr) {
+                    const std::string in = ie.Str("name");
+                    if (in.empty()) {
+                        return Refuse(why, "views." + v.p.name + ".interests: an entry needs a name");
+                    }
+                    v.interests.push_back(in);
+                }
+            }
             if (!ok) return false;
             out.views.push_back(std::move(v));
         }
@@ -278,13 +287,31 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             r.Enum("controller", n.p.controller);
             r.F64("throttle", n.p.throttle);
             r.F64("steer", n.p.steer);
-            r.F64("mirrorCadence", n.p.mirrorCadence);   // M12 step 5e: the freshness contract
             if (const JsonValue* at = e.Get("at")) {
                 n.hasAt = true;
                 n.at = *at;
             }
             if (!ok) return false;
             out.entities.push_back(std::move(n));
+        }
+    }
+    if (const JsonValue* a = ListOf(doc, "interests")) {
+        const PropDecl* decl = root.Find("interests");
+        for (const JsonValue& e : a->arr) {
+            SceneInterest n;
+            ElementReader r(scene::ElementChain(*decl, e), e, "interests", why, &ok);
+            r.Str("name", n.p.name);
+            r.Str("target", n.p.target);
+            r.F64("radius", n.p.radius);
+            if (const JsonValue* at = e.Get("at")) {
+                n.hasAt = true;
+                n.at = *at;
+            }
+            if (!ok) return false;
+            if (n.p.target.empty() && !n.hasAt) {
+                return Refuse(why, "interests." + n.p.name + ": an interest follows a `target` or stands `at` a place");
+            }
+            out.interests.push_back(std::move(n));
         }
     }
     if (const JsonValue* a = ListOf(doc, "effects")) {

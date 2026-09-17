@@ -77,6 +77,7 @@
 #include "scene/Route.h"
 #include "scene/WaterComponent.h"
 #include "scene/SceneReload.h"
+#include "sim/Ephemeris.h"   // M13: the one light, kept for every viewpoint
 #include "sim/SimClock.h"
 #include "scene/Entity.h"   // M12 step 5e: the hull as a node (its step state, its water)
 #include "scene/Portal.h"   // M12 step 5e: the Droste link and its cycle as a node
@@ -95,6 +96,7 @@
 #include <memory>
 #include <optional>
 #include <utility>
+#include <set>
 #include <vector>
 
 namespace ga::app {
@@ -174,6 +176,8 @@ private:
     bool m_portalOn = false;    // ...and whether it is enabled (--droste)
     // (M12 step 5e: the `entities` elements are the Entity nodes below, one per element.)
     SceneView m_startView;      // the view `scene.view` names (its optics and its chase camera)
+    // The interests the view named that were logged once (held, or naming nothing).
+    std::set<std::string> m_interestsLogged, m_interestsMissing;
 
     // ---- main()'s block-level locals over the span, in main()'s order (ff2f732 lines
     // 246..1518), then the three function-local statics. Each is reached in the methods
@@ -244,6 +248,17 @@ private:
     std::vector<std::unique_ptr<scene::Entity>> m_entities;
     std::vector<std::unique_ptr<scene::Gateway>> m_gates;
     scene::Entity* m_followed = nullptr;
+    // ---- THE EYE'S OWN CROSSING (M13). A chase eye does not teleport with its subject. When the
+    // hull goes through a window, the eye keeps standing on this side and chases the hull's
+    // APPARENT pose -- pulled back through that window's motor, which is the map the window's
+    // geometry is already drawn by -- so the boat is watched THROUGH the portal, growing smaller
+    // in it, until the eye itself reaches the box. Then the eye crosses by the hull's own rule
+    // (its centre inside the box), and at that instant every ray already starts inside the
+    // window, so nothing on screen moves: it stops marching because it is in.
+    // These are the gates the subject has crossed and the eye has not, oldest first.
+    static constexpr size_t kMaxEyeOwes = 4;
+    std::vector<const scene::Gateway*> m_eyeOwes;
+    uint32_t m_followCarries = 0;   // the subject's carry count as of the last frame
     // M9br: THE WAVE PREFILL, OFF THE FRAME THREAD. When a tide or current bucket rolls,
     // the solve was already backgrounded but the PREFILL was not -- and writing 7359 tiles
     // across 33 planes and every mip takes 11-19 s, on the frame thread, which is the
@@ -255,7 +270,13 @@ private:
     uint64_t m_wavePendingKey = 0;
     uint32_t m_wavePendingTiles = 0, m_wavePendingPlanes = 0;
     double m_wavePendingSec = 0.0;
+    bool m_skyProbed = false;   // --sky-probe reads the tables once
+    // The solar system this frame was lit by -- the one light, so every viewpoint (a gate's
+    // window included) asks it for its own direction instead of borrowing the camera's.
+    sun::SolarSystem m_solar;
+    bool m_solarValid = false;
     bool m_sunLogged = false;   // M9bi: log the placed sun once, with its numbers
+    bool m_winSkyLogged = false;   // M13: the gate window's sky, once -- its up and its sun
     double m_startUnix = 0.0;
     int m_entSta = 0, m_westA = 0, m_westB = 0;
     double m_kWestKm = 0.0;

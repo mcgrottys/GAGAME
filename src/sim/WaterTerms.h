@@ -69,6 +69,22 @@ inline constexpr double kGWave = 9.81;
 // phase speed, SeaChurn.hlsl 0.4 m), because at 15 cm nothing in a wave band is linear anyway.
 inline constexpr double kDepthFloorM = 0.15;
 
+// The mesh's FOLD GUARD floor, shaders/GlobeMesh.hlsl kLatFoldFloor (M9bm). The mesh draws the
+// lateral Gerstner offset scaled by smoothstep(0, 0.35, areaJac), areaJac = det(I + J) of the
+// displacement: fully applied above 0.35, rolled off to zero at the overturn, where neighbouring
+// vertices would cross. 0.35 sits under foamlaw's saturation knee (J = 0.45), so the guard only acts
+// where the foam law has already declared the crest broken -- carried with that argument, not
+// re-derived. A hull that stands on the surface the mesh draws must displace by the same guard.
+inline constexpr double kLatFoldFloor = 0.35;
+
+// The swell shadow's two kernel constants, shaders/WaterBank.hlsl (M7j/M9ba): the exposure page is
+// read at max(have, 3) -- mips >= 3 of the z14 page, ~76 m texels, the grain the line-of-sight march
+// is honest at -- and floored at 0.18, the local chop a wind raises even in the deepest lee (the
+// march's own deep-shadow floor is 0.12; the bank keeps a little more for the sea it makes itself).
+// Carried with the kernel's arguments, not re-derived.
+inline constexpr unsigned kSwellShadowMipFloor = 3;
+inline constexpr double kSwellShadowFloor = 0.18;
+
 // ------------------------------------------------------------------------------------------------
 //  wt - the scalar shims HLSL hands a shader for free.  Written out rather than pulled from
 //  <algorithm> so that Smoothstep is DEMONSTRABLY the HLSL curve: the same 3t^2 - 2t^3 Hermite

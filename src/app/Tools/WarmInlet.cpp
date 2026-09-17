@@ -21,6 +21,9 @@ namespace ga::app::tools {
 // warming is a once-per-machine cost (re-runs drain instantly from disk).
 void RunWarmInlet(const Options& opt, Gpu& gpu, const Compositor& compositor,
                   ResidencyManager& resMgr, int winTenant, int hgtTenant, int hgtWinTenant) {
+    // M13: the warm-up is its own reader of the shared cache -- it asks for a pyramid nobody
+    // is looking at yet, which is exactly the thing a reserve has to be able to tell apart.
+    const int sw = resMgr.Sampler("warm");
     struct WarmRing {
         float a, b;
         uint32_t mip;
@@ -32,20 +35,20 @@ void RunWarmInlet(const Options& opt, Gpu& gpu, const Compositor& compositor,
         {0.00f, 1.00f, 3}, {0.00f, 1.00f, 2}, {0.38f, 0.62f, 1}, {0.44f, 0.56f, 0}};
     if (winTenant >= 0) {
         for (const auto& w : rings) {
-            resMgr.Want(winTenant, 0, w.mip, w.a, w.a, w.b, w.b);
+            resMgr.Want(sw, winTenant, 0, w.mip, w.a, w.a, w.b, w.b);
         }
     }
     if (hgtWinTenant >= 0) {
         // Height paints are pure local math: warm the WHOLE window at mip 2 (~32 MB)
         // so land/sea classification is never a coarse-mip smear anywhere in view.
         const uint32_t hwf = (hgtWinTenant == hgtTenant) ? 6u : 0u;   // M9aq slice
-        resMgr.Want(hgtWinTenant, hwf, 2, 0, 0, 1, 1);
+        resMgr.Want(sw, hgtWinTenant, hwf, 2, 0, 0, 1, 1);
         for (const auto& w : rings) {
-            resMgr.Want(hgtWinTenant, hwf, w.mip, w.a, w.a, w.b, w.b);
+            resMgr.Want(sw, hgtWinTenant, hwf, w.mip, w.a, w.a, w.b, w.b);
         }
     }
     if (hgtTenant >= 0) {
-        for (uint32_t f = 0; f < 6; ++f) resMgr.Want(hgtTenant, f, 4, 0, 0, 1, 1);
+        for (uint32_t f = 0; f < 6; ++f) resMgr.Want(sw, hgtTenant, f, 4, 0, 0, 1, 1);
     }
     Log("[warm] pre-caching composed pyramids (%u fetch budget; composed tiles land "
         "in cache/composed forever)",

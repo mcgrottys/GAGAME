@@ -25,6 +25,7 @@
 #include "hal/TileAtlas.h"
 #include "scene/Layer.h"
 #include "sim/GlobeModel.h"
+#include "sim/WaveChart.h"
 #include "sim/SeaState.h"
 #include "sim/SweSolver.h"
 
@@ -61,6 +62,10 @@ public:
     // Per frame, BEFORE RenderFrame (the SeaLayer::SetTime pattern): ring anchors follow
     // the camera and tile residency commits here, so consumers bind THIS frame's origins.
     void SetFrame(Gpu& gpu, double simUnix, double camX, double camZ);
+    // Per frame, BEFORE RenderFrame: the tide plane the solver is forced by this frame (the value
+    // SeaLayer::SetTime hands it) -- inside the solver's domain the level IS that plane plus the
+    // solver's deviation (the solver is truth), and the kernel needs the plane to say so.
+    void SetTidePlane(double navdM) { m_tidePlane = static_cast<float>(navdM); }
 
     uint32_t DispSrv() const { return m_disp.Srv(); }
     uint32_t ParamSrv() const { return m_param.Srv(); }
@@ -81,6 +86,9 @@ public:
         float texelM = 0.0f;
         float dispX = 0, dispY = 0, dispZ = 0, foam = 0;
         float level = 0, sigma2 = 0, curU = 0, curV = 0;
+        // The detail plane, as the kernel wrote it: the per-band gains of the FULL closure (sea-state
+        // scale x shadow x shoaling x wave-current, before any window stand-down) and the dry weight.
+        float gain0 = 0, gain1 = 0, gain2 = 0, dry = 0;
     };
     void ReadBankPoints(Gpu& gpu, const double* worldXz, int n, BankPoint* out);
 
@@ -108,13 +116,17 @@ public:
     // M8: the solved wave field (may be null / not Ready -- the kernel falls back to
     // the cascade closures outside the window, which is also the fallback everywhere).
     void SetWaveField(const class WaveField* wf) { m_wave = wf; }
-    // M9bc: the wave field's PAGES (the tree's tenant) and the z16 frame they sit in.
+    // M9bc: the wave field's PAGES (the tree's tenant) and the z16 frame they sit in. winPxX/Y: the
+    // window's NW texel in that frame's own pixels (the water match, step 2: the kernel finds a
+    // point's page texel through the solver's grid, from this corner).
     void SetWavePages(uint32_t srv, uint32_t resSrv, double orgPxX, double orgPxY, uint32_t nx,
-                      uint32_t ny) {
+                      uint32_t ny, double winPxX, double winPxY) {
         m_wavePages = srv;
         m_wavePagesRes = resSrv;
         m_waveOrgPx[0] = orgPxX;
         m_waveOrgPx[1] = orgPxY;
+        m_waveWinPx[0] = winPxX;
+        m_waveWinPx[1] = winPxY;
         m_waveNx = nx;
         m_waveNy = ny;
     }
@@ -197,6 +209,10 @@ private:
         // M9bt: the fold's second moment, per band. APPENDED at the end on both sides, per
         // the layout law above -- widening bandKFold in place would slide every row after it.
         float bandKSpread[4];
+        // THE SOLVER IS TRUTH (the water match, step 1): x = the tide plane the solver was forced
+        // by this frame (NAVD m), which its deviation is measured from. APPENDED at the end on
+        // both sides, per the layout law.
+        float sweB[4];
     };
     struct BankTile {
         float orgXZ[2];
@@ -204,13 +220,40 @@ private:
         uint32_t dstX, dstY;
         float lvl[4];
         float bed[4];
-        float hsScale;
-        float pad[3];
+        float hs[4];   // the local sea-state scale at the corners (sim/WaveScale.h)
+        // M13 step 2: THE TILE'S PLACE, ADDRESSED ONCE. The kernel used to turn every texel's
+        // (x, z) into lat/lon through the anchor-linear chart (gGeoA), which stands up to 28 m
+        // from the ground the mesh draws it on at 5 km and 215 km away at Haulover. These rows
+        // are the exact map (Space::Anchor::PlaceOfProjected: the place a ring texel's radial
+        // projection comes from) evaluated in doubles at this tile's ORIGIN, with its tangent
+        // map taken at the tile's CENTRE, so the kernel forms lat/lon per texel as
+        //   lat = placeA.x + ex * placeA.z + ez * placeB.x
+        //   lon = placeA.y + ex * placeA.w + ez * placeB.y
+        // with (ex, ez) the texel's own metres inside the tile -- small, exact, and no
+        // transcendental per texel. placeB.z != 0 marks the rows valid (a tile past this
+        // frame's horizon has no place and keeps the old chart, which is all it ever had).
+        float placeA[4];   // lat0, lon0, dLat/dx, dLon/dx
+        float placeB[4];   // dLat/dz, dLon/dz, valid, spare
+        // M13 step 2: THE CASCADE SEA'S PLANES for this tile (sim/WaveChart.h), addressed once.
+        // Four charts, in the law's own order (the cell, its x neighbour, its y neighbour, the
+        // diagonal), each as: its coordinate at the tile's ORIGIN reduced mod each cascade's
+        // period (so the kernel's floats carry metres, not hundreds of kilometres), the tangent
+        // map of that coordinate over the tile, and its axes said in the place's east/north.
+        // bandX/bandY carry the edge distances the shares are computed from, so the kernel
+        // recomputes the same weights per texel that the hull's twin computes per point.
+        float chart[4][16];   // per chart: u0(c0).xy, u0(c1).xy, u0(c2).xy, J(4), rot(4), 2 spare
+        float bandX[4];       // edgeX at the origin, d/dex, d/dez, the band in metres
+        float bandY[4];       // edgeY at the origin, d/dex, d/dez, charts valid (0 = none)
     };
 
     void ReanchorRing(Gpu& gpu, int m, double camX, double camZ);
     bool TileWet(double wx0, double wz0, double spanM) const;
     void CornerParams(double wx, double wz, float& lvl, float& bed) const;
+    // M13 step 2: the place of a ring point, and the tile rows above. Both go through the
+    // surface's chart where it carries the renderer's rows; without them (a bank built before a
+    // surface, or Mars) they are the anchor-linear law, as everything here was.
+    void PlaceOfRing(double wx, double wz, double& latDeg, double& lonDeg) const;
+    WaveChart m_waveChart;   // M13 step 2: the cascade sea's planes, as the hull's twin has them
 
     std::wstring m_shaderDir;
     SeaLayer* m_sea = nullptr;
@@ -229,6 +272,7 @@ private:
     const class WaveField* m_wave = nullptr;   // M8: the solved wave field (optional)
     uint32_t m_wavePages = UINT32_MAX, m_wavePagesRes = UINT32_MAX;   // M9bc
     double m_waveOrgPx[2] = {0.0, 0.0};
+    double m_waveWinPx[2] = {0.0, 0.0};
     uint32_t m_waveNx = 0, m_waveNy = 0;
     const struct WaterSceneConfig* m_scene = nullptr;   // M8: live scene closures
     float m_boatA[32] = {}, m_boatB[32] = {};           // M8: the fleet (zeros = off)
@@ -243,6 +287,7 @@ private:
     bool m_orgValid[kMips] = {};
     uint8_t m_wet[kMips][kRingTiles * kRingTiles] = {};   // per logical tile
     double m_simUnix = 0, m_camX = 0, m_camZ = 0;
+    float m_tidePlane = 0.0f;   // SetTidePlane: the plane the solver's deviation is measured from
     D3D12_RESOURCE_STATES m_state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     bool m_ready = false;
 };

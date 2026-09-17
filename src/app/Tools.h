@@ -19,11 +19,13 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <vector>
 
 namespace ga {
 class BathyModel;
 class Camera;
 class Compositor;
+class ExposureSource;
 class GisVectorMask;
 class GlobeLayer;
 class GlobeModel;
@@ -37,10 +39,14 @@ class TideModel;
 class TileTree;
 class WaterAtlas;
 class WaterBankLayer;
+class VesselLayer;
 class WaveField;
 class WeatherManager;
 struct SurfaceFrame;
 struct WaterSceneConfig;
+namespace scene {
+class Entity;
+}
 }  // namespace ga
 
 namespace ga::app::tools {
@@ -104,6 +110,18 @@ void RunTrace(const Options& opt, Gpu& gpu, SeaLayer* sea, const Compositor& com
               int hgtWinTenant, double simUnix, WeatherManager& weather);
 // --sea-verify: rendered Hs from the displacement textures against the model's.
 void RunSeaVerify(const Options& opt, Gpu& gpu, SeaLayer* sea);
+
+// ---- Inside the frame loop (an instrument: it reads back and waits).
+
+// --water-probe N: the DRAWN sea (the scene depth lifted to the planet in doubles) against the
+// water each hull reads, with the bank between them, binned by range from the hull.
+void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double planetR,
+                   const std::vector<std::unique_ptr<scene::Entity>>& entities,
+                   WaterBankLayer* waterBank, const VesselLayer* vessels,
+                   const WaterAtlas* atlas, const ExposureSource* exposure,
+                   const WaveField* waveField, const SeaLayer* sea, const SeaState* seaState,
+                   const SurfaceFrame& surface, double oceanNow, double simUnix,
+                   uint32_t recFrame);
 
 }  // namespace ga::app::tools
 

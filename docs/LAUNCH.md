@@ -101,10 +101,16 @@ build\bin\gagame.exe scenes\recipes\storm_rail.json --set capture.frames=1200 --
   between poses), `spiral` (Sᵘ through the portal), `hold`, `turn` — and editing a copy is how a new
   flight is authored.
 - **Entities, portals, effects** are named lists: `entities[]` (`vessel`, `at` — its `az` is the
-  bow's heading, absent = north — `controller` helm|fixed, `throttle`, `steer`, `mirrorCadence` in
-  seconds — 0 = never read the solver's mirror, the shipped physics), `portals[droste]` (`lat`,
+  bow's heading, absent = north — `controller` helm|fixed, `throttle`, `steer`; a hull reads the
+  solver's surface around itself every frame, no setting), `portals[droste]` (`lat`,
   `lon`, `level`, `fill`, `twistDeg`, `lighting`, and the optional destination `toLat`/`toLon`: the
   place the inner globe presents where the root shows the leaf), `effects[slice.plane]`.
+- **Interests** (`interests[]`): a subject (`target`, an entity's name — the interest follows it) or a
+  fixed place (`at` {x, alt, z}) whose water stays resident within `radius` metres at the grain its
+  kernels read: the solved field's pages at the solver's cells, the swell shadow at the bank's floor,
+  the bed at the fine rings' grain. A view holds only the interests it names
+  (`views[].interests: [{"name": ...}]`), so an eye flying in arrives to landed data, and a camera
+  that names none holds none. The Haulover demo's view names its boat.
 - **Gates** (`gates[]`): a cuboid in the root's flat frame (`at` {x, alt, z, az}, `size` [across, up,
   along]) whose far side is a place on the same planet (`toLat`, `toLon`, and the heading `toAz`). A
   hull whose centre of gravity enters the box is carried by one motor into the destination's own

@@ -44,6 +44,7 @@
       { "key": "portals", "type": "list", "field": "none", "element": "portal", "named": true, "reload": "hot", "doc": "the Droste links, by name" },
       { "key": "gates", "type": "list", "field": "none", "element": "gate", "named": true, "reload": "hot", "doc": "the cuboid gates to other places, by name" },
       { "key": "entities", "type": "list", "field": "none", "element": "entity", "named": true, "reload": "hot", "doc": "the vessels, by name" },
+      { "key": "interests", "type": "list", "field": "none", "element": "interest", "named": true, "reload": "hot", "doc": "the subjects and places whose water stays resident for the views that name them, by name" },
       { "key": "effects", "type": "list", "field": "none", "element": "effect", "named": true, "registry": "effect", "typeKey": "type", "reload": "hot", "doc": "the paper visuals, by name, typed" },
       { "key": "layers", "type": "list", "field": "none", "element": "layer", "named": true, "registry": "layer", "typeKey": "name", "reload": "hot", "doc": "the layers in registration order, typed by name" },
       { "key": "nodes", "type": "list", "field": "none", "element": "node", "named": true, "registry": "component", "typeKey": "type", "reload": "hot", "doc": "typed nodes (plugins)" },
@@ -74,9 +75,15 @@
       { "key": "windowDays", "type": "number", "field": "f64", "quantity": "time", "unit": "day", "default": 7, "reload": "hot", "doc": "the tide plot's window (--window-days)" }
     ] },
     { "type": "sun", "keys": [
-      { "key": "source", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "ephemeris", "names": ["ephemeris", "pinned"], "reload": "restart", "doc": "the ephemeris at the scene's time and place, or pinned at az/el (--sun)" },
+      { "key": "source", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "ephemeris", "names": ["ephemeris", "pinned", "earth"], "reload": "restart", "doc": "the ephemeris at the scene's time, pinned at az/el, or the Earth placed around a sun at the origin (sun.earth) with no clock at all" },
       { "key": "az", "type": "number", "field": "f32", "quantity": "angle", "unit": "deg", "default": 112, "reload": "hot", "doc": "pinned azimuth, compass" },
-      { "key": "el", "type": "number", "field": "f32", "quantity": "angle", "unit": "deg", "default": 26, "reload": "hot", "doc": "pinned elevation" }
+      { "key": "el", "type": "number", "field": "f32", "quantity": "angle", "unit": "deg", "default": 26, "reload": "hot", "doc": "pinned elevation" },
+      { "key": "earth", "type": "object", "field": "none", "schema": "sun.earth", "reload": "hot", "doc": "the Earth's place around the sun" }
+    ] },
+    { "type": "sun.earth", "keys": [
+      { "key": "at", "type": "vec3", "field": "double3", "quantity": "length", "unit": "m", "default": [-149597870700, 0, 0], "reload": "restart", "doc": "the Earth's centre; the sun is a light at 0,0,0" },
+      { "key": "axis", "type": "vec3", "field": "double3", "quantity": "1", "unit": "1", "default": [0, 0, 1], "reload": "restart", "doc": "the Earth's spin axis in that frame" },
+      { "key": "spin", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "the Earth's turn about its axis" }
     ] },
     { "type": "sea", "keys": [
       { "key": "storm", "type": "object", "field": "none", "schema": "sea.storm", "reload": "hot", "doc": "the sandbox sea-state override" },
@@ -198,7 +205,8 @@
       { "key": "reversedZ", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "depth 1 at the near plane falling to 0 at infinity (Camera.h)" },
       { "key": "target", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "main", "reload": "restart", "doc": "the target chain this view records into (\"main\" = the renderer's own)" },
       { "key": "viewport", "type": "object", "field": "none", "schema": "view.viewport", "reload": "hot", "doc": "the rectangle of the target" },
-      { "key": "follow", "type": "object", "field": "none", "schema": "view.follow", "reload": "hot", "doc": "the chase camera" }
+      { "key": "follow", "type": "object", "field": "none", "schema": "view.follow", "reload": "hot", "doc": "the chase camera" },
+      { "key": "interests", "type": "list", "field": "none", "element": "view.interest", "named": true, "reload": "hot", "doc": "the subjects and places whose water this view keeps resident, by name" }
     ] },
     { "type": "view.viewport", "keys": [
       { "key": "x", "type": "number", "field": "u32", "quantity": "1", "unit": "px", "default": 0, "reload": "restart", "doc": "left edge in the target" },
@@ -211,6 +219,9 @@
       { "key": "back", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 15, "reload": "hot", "doc": "the eye, behind the target's heading" },
       { "key": "up", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 5, "reload": "hot", "doc": "the eye, above the target" },
       { "key": "aimLift", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0.6, "reload": "hot", "doc": "the aim, above the target's origin" }
+    ] },
+    { "type": "view.interest", "keys": [
+      { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "an interest this view keeps resident (interests[].name)" }
     ] },
     { "type": "rails", "keys": [
       { "key": "active", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "none", "names": ["none", "classic", "zoom", "flood", "jetty", "droste", "droste-out"], "reload": "restart", "doc": "the rail flown (--rail, --rail-zoom, --rail-flood, --rail-jetty, --rail-droste[-out])" },
@@ -260,7 +271,13 @@
       { "key": "controller", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "helm", "names": ["helm", "fixed"], "reload": "hot", "doc": "the keyboard helm, or fixed throttles and helm (--boat-drive)" },
       { "key": "throttle", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "hot", "doc": "fixed: every thruster's throttle" },
       { "key": "steer", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "hot", "doc": "fixed: the commanded steering" },
-      { "key": "mirrorCadence", "type": "number", "field": "f64", "quantity": "time", "unit": "s", "default": 0, "reload": "hot", "doc": "seconds between readbacks of the solver mirror the hull reads; 0 = never (the hull reads the analytic tide and the waves)" }
+      { "key": "recentreM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 1000, "reload": "hot", "doc": "how far this hull may sail from its space's origin before the space moves to its place (the per-subject floating origin; 0 = never, and it rides d^2/2R above the sphere)" }
+    ] },
+    { "type": "interest", "keys": [
+      { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the interest's name (views[].interests names it)" },
+      { "key": "target", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the entity whose surroundings stay resident (\"\" = the fixed `at`)" },
+      { "key": "at", "type": "similarity", "field": "placement", "quantity": "unknown", "unit": "", "default": null, "optional": true, "reload": "restart", "doc": "a fixed place in the flat world frame: {x, alt, z}" },
+      { "key": "radius", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 200, "reload": "restart", "doc": "how far around the subject its water's pages stay resident" }
     ] },
     { "type": "effect", "keys": [
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the effect's name" },

@@ -17,6 +17,7 @@
 
 #include "compose/ColorStackSource.h"
 #include "compose/ExposureSource.h"
+#include "sim/WaterTerms.h"
 #include "compose/GisMask.h"
 #include "compose/HeightStackSource.h"
 #include "compose/TileTree.h"
@@ -26,6 +27,7 @@
 #include "compose/ComposeTree.h"
 #include "compose/DomainSource.h"
 #include "core/CurrentFieldLoader.h"
+#include "core/Dome.h"
 #include "core/GeoGridLoader.h"
 #include "hal/Gpu.h"
 #include "core/Image.h"
@@ -195,17 +197,6 @@ bool ViewEyeOrbit(const SceneView* v, double planetR, Camera& cam) {
     cam = s.lookAt ? scene::OrbitPose(s.lat, s.lon, s.alt, s.tLat, s.tLon, planetR)
                    : scene::GlobeCamera(s.lat, s.lon, s.alt, planetR);
     return true;
-}
-
-// THE ZENITH AT AN EYE: the planet's radial through it, in the tangent frame the loop speaks (the
-// planet's centre sits at (0, -R, 0) there). The gravity-up the M6g block writes into upHint is the
-// same vector at the camera; the skies read it in doubles.
-void ZenithAt(const double p[3], double planetR, double out[3]) {
-    const double gy = p[1] + planetR;
-    const double gl = std::sqrt(p[0] * p[0] + gy * gy + p[2] * p[2]);
-    out[0] = p[0] / gl;
-    out[1] = gy / gl;
-    out[2] = p[2] / gl;
 }
 
 }  // namespace
@@ -608,6 +599,17 @@ std::optional<int> FrameLoop::Session() {
             Log("FATAL: [space] %s", why.c_str());
             return 1;
         }
+        // M13 step 2: THE ROOT CHART BECOMES EXACT. The surface's flat chart carries the rows just
+        // derived and the planet's radius, so every water reader that asks it for a place gets the
+        // point on the sphere the mesh is drawn on instead of the anchor-linear guess (28 m out at
+        // 5 km). The linear numbers stay for the consumers that are still charts (the solvers'
+        // own domains); nothing here re-derives a convention -- these are the renderer's own rows.
+        for (int i = 0; i < 3; ++i) {
+            m_A.surface.flat.east[i] = east0[i];
+            m_A.surface.flat.up[i] = oDir[i];
+            m_A.surface.flat.north[i] = north0[i];
+        }
+        m_A.surface.flat.planetR = planetR;
     }
     // M12 step 5a: the pose maps' bodies moved VERBATIM to scene/Pose.h, so the scene's
     // placement sugar is pinned against the functions the session itself calls; the lambdas
@@ -1054,11 +1056,13 @@ std::optional<int> FrameLoop::Session() {
             waveT = waveTenant.Id();
             waterBank->SetWavePages(resMgr.TextureSrv(waveT), resMgr.ResidencySrv(waveT),
                                     double(waveFrame.orgPxX), double(waveFrame.orgPxY),
-                                    waveFrame.nx, waveFrame.ny);
+                                    waveFrame.nx, waveFrame.ny, double(waveFrame.winPxX),
+                                    double(waveFrame.winPxY));
             if (waterBankB) {   // the same pages: one solve, every level's sea
                 waterBankB->SetWavePages(resMgr.TextureSrv(waveT), resMgr.ResidencySrv(waveT),
                                          double(waveFrame.orgPxX), double(waveFrame.orgPxY),
-                                         waveFrame.nx, waveFrame.ny);
+                                         waveFrame.nx, waveFrame.ny, double(waveFrame.winPxX),
+                                         double(waveFrame.winPxY));
             }
             Log("[wave] wave.field is page tenant %d: %u planes over the z16 window, tiles "
                 "exact bytes of the solve, pyramid prefilled per bucket",
@@ -1286,6 +1290,11 @@ std::optional<int> FrameLoop::Session() {
         eo.vesselLayer = vesselLayer;
         eo.gpu = &gpu;
         eo.gates = &m_gates;
+        eo.swellShadow = m_A.exposureShadow.get();
+        eo.bed = m_A.heightBed.get();
+        eo.rootChart = &m_A.surface.flat;   // M13 step 2: places, not the linear chart
+        eo.planet = &m_planetSpace;         // ... and the two spaces a hull re-centres between
+        eo.rootSpace = &m_tangentSpace;
         e->Configure(eo);
     }
 
@@ -1464,7 +1473,7 @@ void FrameLoop::ApplyWater() {
 // M12 step 5e: THE ENTITIES' STEP, from both clock branches (stepBoat's contract: the quanta
 // COUNT differs between the windowed and the headless clock and nothing else does). The
 // snapshot the hulls read is declared to them (FrameInfo: the clock, its quanta, and asOf --
-// the instant the weather manager's mirrors are coherent at); each entity's step is its own;
+// the instant the solver's delivered answers are coherent at); each entity's step is its own;
 // the hull steps' wall time lands in the profiler's slot 11 as stepBoat's bracket did; and the
 // chase camera is the start view's Follow of the followed hull, placed after the steps as the
 // hand code placed it after the telemetry (and, as there, only once the hull is set down).
@@ -1474,7 +1483,7 @@ void FrameLoop::StepEntities(int quanta, float dt) {
     fi.dt = dt;
     fi.frame = m_frame;
     fi.quanta = quanta;
-    fi.asOf = m_weather.MirrorAsOf();
+    fi.asOf = m_weather.SolverAsOf();
     for (auto& e : m_entities) {
         if (!e->Active()) continue;
         e->Update(fi);
@@ -1488,19 +1497,70 @@ void FrameLoop::StepEntities(int quanta, float dt) {
     // helmsman's inner ear reports. The motor-native view that DOES heel is the
     // first-person one, later. (scene/View.h Follow: the start view's four numbers.)
     if (m_followed && m_followed->Helming() && m_followed->Placed()) {
+        // ---- THE EYE DOES NOT GO THROUGH WITH ITS SUBJECT (M13). A gate carries the hull the
+        // instant its centre of gravity enters the box; the eye trails it by `follow.back` and
+        // is still outside. Teleporting the eye with it was the wrong body obeying the rule --
+        // what a helmsman's camera should do is keep watching the boat THROUGH the window and
+        // follow it in. So the eye owes that gate until the box takes the eye too.
+        if (m_followed->Carries() != m_followCarries) {
+            m_followCarries = m_followed->Carries();
+            if (const scene::Gateway* g = m_followed->LastGate()) {
+                if (m_eyeOwes.size() < kMaxEyeOwes) {
+                    m_eyeOwes.push_back(g);
+                    Log("[gate] '%s' went through '%s'; the eye stays on this side and follows it "
+                        "through the window", m_followed->Name(),
+                        g->Declared().name.c_str());
+                } else {
+                    // A subject that outruns its camera through four windows has left it behind:
+                    // the eye takes the last one whole rather than growing an unbounded chain.
+                    Log("[gate] the eye is %zu windows behind '%s' -- it crosses to catch up",
+                        m_eyeOwes.size(), m_followed->Name());
+                    m_eyeOwes.clear();
+                }
+            }
+        }
+        // The pull-back: every window the eye still owes, outermost first. Gm = (DestinationInSource
+        // * Carry)^-1 is the map the window's own geometry is drawn by, so a hull put through it
+        // lands exactly where the window shows it.
+        Motor pull = Motor::Identity();
+        for (const scene::Gateway* g : m_eyeOwes) {
+            pull = pull * (g->DestinationInSource() * g->Carry()).Inverse();
+        }
         double p[3], f[3];
         m_followed->ChaseFrame(p, f);
-        if (m_followed->InSpace() == nullptr) {
+        if (m_followed->InSpace() == nullptr && m_eyeOwes.empty()) {
             scene::View::Follow(m_startView.p.follow, p, f, m_cam);
         } else {
             // A hull in another space: the same chase, said in ITS frame (y is its up), and the
-            // eye and the aim carried into the root's frame by that space's placement.
+            // eye and the aim carried into the root's frame by that space's placement -- then
+            // pulled back through the windows the eye has not yet walked into.
             const scene::FollowProps& fw = m_startView.p.follow;
             double eye[3] = {p[0] - f[0] * fw.back, p[1] + fw.up, p[2] - f[2] * fw.back};
             double aim[3] = {p[0], p[1] + fw.aimLift, p[2]};
-            const Motor& W = m_followed->SpaceInRoot();
-            W.TransformPoint(eye[0], eye[1], eye[2]);
-            W.TransformPoint(aim[0], aim[1], aim[2]);
+            if (const Space* sp = m_followed->InSpace()) {
+                (void)sp;
+                const Motor& W = m_followed->SpaceInRoot();
+                W.TransformPoint(eye[0], eye[1], eye[2]);
+                W.TransformPoint(aim[0], aim[1], aim[2]);
+            }
+            pull.TransformPoint(eye[0], eye[1], eye[2]);
+            pull.TransformPoint(aim[0], aim[1], aim[2]);
+            // THE EYE CROSSES BY THE HULL'S OWN RULE: its centre inside the box, tested in that
+            // gate's own source space. Every ray from inside the box already starts in the
+            // window (scenetest [gate]), so the picture does not move -- the eye simply stops
+            // looking through the window and stands in the place it was looking at.
+            if (!m_eyeOwes.empty()) {
+                const scene::Gateway* g = m_eyeOwes.front();
+                if (g->Inside(eye[0], eye[1], eye[2])) {
+                    m_eyeOwes.erase(m_eyeOwes.begin());
+                    const Motor Kw = g->DestinationInSource() * g->Carry();
+                    Kw.TransformPoint(eye[0], eye[1], eye[2]);
+                    Kw.TransformPoint(aim[0], aim[1], aim[2]);
+                    Log("[gate] the eye reached '%s' and went through: it is standing in %s now, "
+                        "and stops marching", g->Declared().name.c_str(),
+                        g->Destination().name.c_str());
+                }
+            }
             m_cam.px = eye[0];
             m_cam.py = eye[1];
             m_cam.pz = eye[2];
@@ -1516,6 +1576,20 @@ void FrameLoop::StepEntities(int quanta, float dt) {
         // re-rooted, the hull vanished from its own frame, and the next frame placed a root
         // eye under an inner level's index.
         m_camLevel = 0;
+    }
+    // WHAT EACH HULL IS DRAWN THROUGH, decided once the chase has decided. A hull standing in the
+    // space the eye would be in after walking through every window it owes is drawn at its
+    // apparent pose and clipped to the box; every other hull is drawn where it stands, and cut
+    // away where the window shows the other place.
+    Motor pull = Motor::Identity();
+    for (const scene::Gateway* g : m_eyeOwes) {
+        pull = pull * (g->DestinationInSource() * g->Carry()).Inverse();
+    }
+    const Space* beyond = m_eyeOwes.empty() ? nullptr : &m_eyeOwes.back()->Destination();
+    for (auto& e : m_entities) {
+        const bool through = beyond && e->InSpace() == beyond;
+        e->SetViewCarry(through ? &pull : nullptr, through);
+        e->PublishDraw();
     }
 }
 
@@ -1548,6 +1622,11 @@ bool FrameLoop::Frame() {
     auto& globe = m_A.globe;
     auto& planetR = m_A.planetR;
     auto& resMgr = m_A.resMgr;
+    // M13: THE VIEW'S OWN SAMPLER on the one earth cache. The globe's walk registers the same
+    // name, so a view's walk, its prefetch and the loop's page wants for the same eye are ONE
+    // reader -- the thing a reserve is written against -- while subjects and a gate's window
+    // name their own below.
+    const int sampView = resMgr.Sampler("view");
     auto& gisLayer = m_A.gisLayer;
     // M12 step 4a: the z14 page origin, read off the surface's height window -- the doubles
     // the bank, the trace and the exposure's uv closure below take.
@@ -1996,7 +2075,15 @@ bool FrameLoop::Frame() {
     // (M10 moved this block up from just before RenderFrame: the globe's level table
     // carries the sun, and the walk that fills the table runs before RenderFrame.)
     if (S.sun.source != Scene::kPinned) {
-        const sun::SolarSystem ss = sun::Build(simUnix);
+        // THE EARTH AROUND A LIGHT AT THE ORIGIN. A scene that places the Earth (sun.earth)
+        // gets exactly that placement, every frame, whatever the clock says -- the tide and the
+        // sun are not coupled. Only the ephemeris source reads the time.
+        const sun::SolarSystem ss =
+            (S.sun.source == Scene::kEarth)
+                ? sun::BuildEarth(S.sun.earth.at, S.sun.earth.axis, S.sun.earth.spin)
+                : sun::Build(simUnix);
+        m_solar = ss;
+        m_solarValid = true;
         const double here[3] = {oDir[0], oDir[1], oDir[2]};   // unit = 1 Earth radius
         double sdir[3];
         sun::SunDirFromPlanetPoint(ss, here, sdir);
@@ -2016,9 +2103,11 @@ bool FrameLoop::Frame() {
                                    double(renderer.sunDirTangent[2])) *
                         180.0 / 3.14159265358979;
             if (az < 0.0) az += 360.0;
-            Log("[sun] placed from the ephemeris: subsolar %.3f N %.3f E, %.6f AU "
+            Log("[sun] placed %s: subsolar %.3f N %.3f E, %.6f AU "
                 "(%.1f W/m2), angular radius %.4f deg; from here azimuth %.2f, "
                 "elevation %+.2f  [--sun 112,26 pins the pre-M9bi art direction]",
+                (S.sun.source == Scene::kEarth) ? "by the scene (the Earth around a light at 0,0,0)"
+                                                : "from the ephemeris",
                 ss.app.subsolarLatDeg, ss.app.subsolarLonDeg, ss.app.distAu,
                 ss.app.irradianceWm2, ss.app.angRadiusDeg, az, el);
         }
@@ -2257,37 +2346,34 @@ bool FrameLoop::Frame() {
                 skySun = sunRootF;   // every level's own sun has the root's numbers
             }
         }
-        // THE CAMERA'S OWN DOME stands on the zenith at the eye. The dome reads dot(d, +y) for its
-        // gradient and dot(d, sun) for its disc, so the rows need only carry the zenith onto +y and
-        // the sun rides the same rows: the shortest arc, one rotor, (1 + u.y, u x y) normalised
-        // (Portal::Carry's construction; QRotate turns u onto +y). The identity at the tangent
-        // origin; 18.5 degrees for a camera the gate carried to Haulover, whose dome stood on the
+        // THE CAMERA'S OWN DOME stands on the zenith at the eye (DomeFrame, above): the rows carry
+        // that zenith onto +y and the sun rides the same rotor. The identity at the tangent origin;
+        // 18.5 degrees for a camera the gate carried to Haulover, whose dome stood on the
         // Merrimack's zenith -- a slab of below-horizon grey over the sea.
         float zenSun[3];
         if (domeRel == 0 && mode == 1) {
             const double C[3] = {cam.px, cam.py, cam.pz};
             double u[3];
             ZenithAt(C, planetR, u);
-            double q[4] = {1.0 + u[1], -u[2], 0.0, u[0]};
-            const double qn = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
-            if (qn > 1e-9) {   // (the antipode of +y: no eye stands 12,742 km below the origin)
-                for (double& c : q) c /= qn;
-                for (int c = 0; c < 3; ++c) {
-                    double x = c == 0 ? 1.0 : 0.0, y = c == 1 ? 1.0 : 0.0, zc = c == 2 ? 1.0 : 0.0;
-                    Motor::QRotate(q, x, y, zc);
-                    rows[0 * 3 + c] = static_cast<float>(x);
-                    rows[1 * 3 + c] = static_cast<float>(y);
-                    rows[2 * 3 + c] = static_cast<float>(zc);
-                }
-                double sx = skySun[0], sy = skySun[1], sz = skySun[2];
-                Motor::QRotate(q, sx, sy, sz);
-                zenSun[0] = static_cast<float>(sx);
-                zenSun[1] = static_cast<float>(sy);
-                zenSun[2] = static_cast<float>(sz);
-                skySun = zenSun;
-            }
+            DomeFrame(u, skySun, rows, zenSun);
+            skySun = zenSun;
         }
         sky->SetSkyFrame(rows, skySun);
+        // M13: AND THE AIR ITSELF. The air's two tables (the same for every ray on the planet) and
+        // this eye's distance from the planet's centre; the sky is marched from there. An eye
+        // above the air marches nothing -- the limb shell owns that backdrop (the atmosphere
+        // ledger) -- and every consumer answers with the gradient it always had; the shader
+        // decides that from the radius, per viewpoint, so a re-rooted Droste level (local scale
+        // ~3e6 m) keeps the sky it drew before.
+        {
+            const double C[3] = {cam.px, cam.py, cam.pz};
+            const double gy = C[1] + planetR;
+            sky->SetPlanetRadius(planetR);
+            renderer.skyMsSrv = sky->MultiScatterSrv();
+            renderer.skyTransSrv = sky->TransmittanceSrv();
+            renderer.planetRadiusM = static_cast<float>(planetR);
+            renderer.eyeRadiusM = static_cast<float>(std::sqrt(C[0] * C[0] + gy * gy + C[2] * C[2]));
+        }
         if (globe) globe->SetSpaceSun(spaceSun);
     }
 
@@ -2524,7 +2610,7 @@ bool FrameLoop::Frame() {
                     waveSrc->WindowUv(u0, v0, u1, v1);
                     const uint32_t nPlanes = waveField->Table().nUsed + 1u;
                     for (uint32_t p = 0; p < nPlanes; ++p) {
-                        resMgr.Want(waveT, 6u + p, wantMip, u0, v0, u1, v1);
+                        resMgr.Want(sampView, waveT, 6u + p, wantMip, u0, v0, u1, v1);
                     }
                     PROF_END(10);
                 }
@@ -2601,6 +2687,17 @@ bool FrameLoop::Frame() {
                                 waterBank->DetailSrv(), derivS, patchS, bandKS,
                                 bandRmsS, bandFoldS, sea->heightScale,
                                 waterBank->BaseTexelM(), orgs, S.water.oneWater);
+            // M13 step 2: the cascade sea's plane AT THE EYE, for the pixel stage's sub-ring
+            // bands -- the same plane the bank's texels were filled from. A chart cell is
+            // hundreds of kilometres across, so one frame's pixels sit inside one.
+            {
+                WaveChart wcEye;
+                double dEye[3];
+                const bool onEye = m_A.surface.flat.Exact() &&
+                                   m_A.surface.flat.DirOfProjected(cam.px, cam.pz, dEye);
+                globe->SetWaveChartFrame(onEye ? wcEye.CellAt(dEye).f[0] : WaveChart::Frame{},
+                                         onEye);
+            }
             // M10: set B follows the OUTER level's eye, S(C) -- the sea the camera's
             // planet floats in, seen from where the camera really is in that level's
             // own frame. Off (and not filled) while the camera is at the root.
@@ -2719,7 +2816,13 @@ bool FrameLoop::Frame() {
         // out of the view.
         {
             const scene::Gateway* win = nullptr;
-            if (camLevel == 0) {
+            // THE WINDOW THE EYE IS WALKING INTO WINS. When the subject has gone through a gate
+            // the eye has not, that gate's window is the one the picture depends on -- the boat
+            // is drawn beyond its box and clipped to it -- so it is not a candidate among
+            // near gates, it IS the window, in view or not (a window you are not looking at
+            // simply shows nothing).
+            if (camLevel == 0 && !m_eyeOwes.empty()) win = m_eyeOwes.front();
+            if (camLevel == 0 && !win) {
                 const DirectX::XMFLOAT3 fw = cam.Forward();
                 const double tanH = std::tan(0.5 * double(cam.fovY));
                 const double halfDiag = std::atan(tanH * std::sqrt(1.0 + double(aspect) * double(aspect)));
@@ -2759,7 +2862,28 @@ bool FrameLoop::Frame() {
                 L.gauge = Placement::Rigid(Gm);
                 L.gauge.t[0] = L.gauge.t[1] = L.gauge.t[2] = 0.0;
                 L.reliefExagg = globe->reliefExagg;
-                for (int i = 0; i < 3; ++i) L.sun[i] = sunRootF[i];
+                // M13: THE GATE IS ITS OWN SAMPLER. What the window shows is read from the same
+                // earth cache the camera reads, and the gate answers for it -- so a reserve can
+                // say how much of the planet a window may hold without starving the eye.
+                L.sampler = resMgr.Sampler(("gate." + win->Declared().name).c_str());
+                // THE WINDOW'S VIEWPOINT, LIT BY THE ONE LIGHT. The carried eye E stands at the
+                // other place; the sun as seen from THERE is asked of the solar system at that
+                // place's own planet point (the light at 0,0,0 does the rest) and said in the root
+                // frame, which is the frame this level is drawn in. Not a copy of this frame's sun.
+                const double gyE = E[1] + planetR;
+                const double rE = std::sqrt(E[0] * E[0] + gyE * gyE + E[2] * E[2]);
+                double sunE[3] = {sunRootF[0], sunRootF[1], sunRootF[2]};
+                if (m_solarValid) {
+                    double pE[3], sd[3];
+                    for (int i = 0; i < 3; ++i) {
+                        pE[i] = (east0[i] * E[0] + oDir[i] * gyE + north0[i] * E[2]) / planetR;
+                    }
+                    sun::SunDirFromPlanetPoint(m_solar, pE, sd);
+                    sunE[0] = sd[0] * east0[0] + sd[1] * east0[1] + sd[2] * east0[2];
+                    sunE[1] = sd[0] * oDir[0] + sd[1] * oDir[1] + sd[2] * oDir[2];
+                    sunE[2] = sd[0] * north0[0] + sd[1] * north0[1] + sd[2] * north0[2];
+                }
+                for (int i = 0; i < 3; ++i) L.sun[i] = static_cast<float>(sunE[i]);
                 // Set B follows this carried eye (above) when the scene built it and no Droste
                 // outer level holds it; otherwise the destination's sea is the fold's, ringless.
                 L.bankSet = (waterBankB && !portal.Valid()) ? 1 : -1;
@@ -2782,13 +2906,60 @@ bool FrameLoop::Frame() {
                                        static_cast<float>(0.5 * win->Declared().size[1]),
                                        static_cast<float>(0.5 * win->Declared().size[2])};
                 globe->SetGate(&L, centreRel, rows, half);
+                // The hulls get the same box: a boat that has gone through is drawn beyond it and
+                // kept only where the window shows it, and one on this side is cut away there.
+                // THE RAY, CARRIED. Everything the window shows is where its rays land: the far
+                // place's zenith and the one sun as seen from there, turned into this frame by the
+                // rotation the window's geometry is drawn with (Q = rot(Gm), TrueRel), and E's
+                // distance from the planet's centre. The sky marches the air from there; the hulls
+                // that went through are lit from there. No table of any view.
+                double uW[3] = {zE[0], zE[1], zE[2]};
+                double sW[3] = {sunE[0], sunE[1], sunE[2]};
+                Gm.TransformDir(uW[0], uW[1], uW[2]);
+                Gm.TransformDir(sW[0], sW[1], sW[2]);
+                const float upWin[3] = {static_cast<float>(uW[0]), static_cast<float>(uW[1]),
+                                        static_cast<float>(uW[2])};
+                const float sunWin[3] = {static_cast<float>(sW[0]), static_cast<float>(sW[1]),
+                                         static_cast<float>(sW[2])};
+                // The hulls get the same box: a boat that has gone through is drawn beyond it and
+                // kept only where the window shows it, and one on this side is cut away there.
+                if (m_A.vesselLayer) m_A.vesselLayer->SetGateWindow(rows, half, centreRel, sunWin, true);
+                if (sky) sky->SetGateWindow(rows, half, centreRel, upWin, static_cast<float>(rE), sunWin, true);
+                if (!m_winSkyLogged) {
+                    m_winSkyLogged = true;
+                    const double kDeg = 180.0 / 3.14159265358979;
+                    double cz[3];
+                    const double C[3] = {cam.px, cam.py, cam.pz};
+                    ZenithAt(C, planetR, cz);
+                    const double elH = std::asin(std::clamp(
+                        double(sunRootF[0]) * cz[0] + double(sunRootF[1]) * cz[1] +
+                            double(sunRootF[2]) * cz[2], -1.0, 1.0)) * kDeg;
+                    const double elT = std::asin(std::clamp(
+                        sunE[0] * zE[0] + sunE[1] * zE[1] + sunE[2] * zE[2], -1.0, 1.0)) * kDeg;
+                    const double tilt = std::acos(std::clamp(
+                        cz[0] * zE[0] + cz[1] * zE[1] + cz[2] * zE[2], -1.0, 1.0)) * kDeg;
+                    Log("[gate] '%s': the ground turns %.2f deg between the two places; the one "
+                        "light stands %+.2f deg here and %+.2f deg at %.4f N %.4f W, and the "
+                        "window's rays march that sky",
+                        win->Declared().name.c_str(), tilt, elH, elT, win->Declared().toLat,
+                        -win->Declared().toLon);
+                }
             } else if (!m_gates.empty()) {
                 globe->SetGate(nullptr, nullptr, nullptr, nullptr);
+                const float z9[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+                const float z3[3] = {0, 0, 0};
+                if (m_A.vesselLayer) m_A.vesselLayer->SetGateWindow(z9, z3, z3, z3, false);
+                if (sky) sky->SetGateWindow(z9, z3, z3, z3, 0.0f, z3, false);
             }
         }
         PROF_BEGIN();
         globe->SetView(cam, aspect, viewH, simUnix - startUnix);
         PROF_END(7);
+        // M13 step 0 (--water-tiles): what this view's leaves would ask of a water tenant on the
+        // cube quadtree -- the count that sizes a sampler's reserve, printed every 30 frames.
+        if (opt.waterTiles && (frame % 30u) == 0u) {
+            Log("[water-tiles] frame %u: %s", frame, globe->WaterTileReport().c_str());
+        }
         if (!S.railDirW.empty() && frame >= 150u) {
             walkNodesAcc += globe->walkNodes;
             walkLeavesAcc += globe->walkLeaves;
@@ -2839,6 +3010,13 @@ bool FrameLoop::Frame() {
     const double waterNavd =
         bathy.Ready() ? oceanAt(simUnix) : tide->focusHeight + datumOff;
     lastWaterNavd = waterNavd;   // next frame's camera-pivot rays test against it
+    // THE PLANE THE SOLVER IS FORCED BY, to the banks: inside its domain the level is that plane
+    // plus its deviation (the solver is truth) -- the same value sea->SetTime hands the solver.
+    {
+        const double tidePlane = bathy.Ready() ? waterNavd : tide->focusHeight;
+        if (waterBank) waterBank->SetTidePlane(tidePlane);
+        if (waterBankB) waterBankB->SetTidePlane(tidePlane);
+    }
     PROF_BEGIN();
     if (swe.Ready()) {
         swe.SetBoundaries(static_cast<float>(westAt(simUnix)),
@@ -2890,7 +3068,7 @@ bool FrameLoop::Frame() {
             const float u1 = float(std::clamp(mU(lonC + dLon), 0.0, 1.0));
             const float v0 = float(std::clamp(mV(latC + dLat), 0.0, 1.0));
             const float v1 = float(std::clamp(mV(latC - dLat), 0.0, 1.0));
-            if (u1 > u0 && v1 > v0) resMgr.Want(exposureT, 6u, 3u, u0, v0, u1, v1);
+            if (u1 > u0 && v1 > v0) resMgr.Want(sampView, exposureT, 6u, 3u, u0, v0, u1, v1);
             // M10: and around the outer level's eye, whose sea set B draws.
             if (drosteOuter) {
                 const double latO = BathyModel::kOrgLat + drosteOuterCam[2] / BathyModel::kMPerLat;
@@ -2899,7 +3077,8 @@ bool FrameLoop::Frame() {
                 const float ou1 = float(std::clamp(mU(lonO + dLon), 0.0, 1.0));
                 const float ov0 = float(std::clamp(mV(latO + dLat), 0.0, 1.0));
                 const float ov1 = float(std::clamp(mV(latO - dLat), 0.0, 1.0));
-                if (ou1 > ou0 && ov1 > ov0) resMgr.Want(exposureT, 6u, 3u, ou0, ov0, ou1, ov1);
+                if (ou1 > ou0 && ov1 > ov0)
+                    resMgr.Want(sampView, exposureT, 6u, 3u, ou0, ov0, ou1, ov1);
             }
             if (opt.resTrace && (frame % 150u) == 0u) {
                 // The instrument (--res-trace): what the page holds at the camera vs what
@@ -2920,6 +3099,114 @@ bool FrameLoop::Frame() {
         }
     }
     PROF_END(11);
+    // ---- THE INTERESTS (the water match): the subjects and places the recorded view names keep
+    // their water resident at the grain its kernels read -- the solved field's pages at the solver's
+    // own cells (mip 0), the swell shadow at the bank's floor (kSwellShadowMipFloor), the bed at the
+    // fine rings' grain (mip 0) -- so an eye arriving there finds the data landed rather than
+    // landing. By name, per view: a view that names no interest holds none (a spectator need not
+    // load every boat's water). --water-probe measured the need on a fly-in down the flood rail: for
+    // ~2 s after arriving at the helm the drawn solved sea stood at 0.77-0.92 of the hull's.
+    if (!marsMode && !m_startView.interests.empty()) {
+        const Lattice& page = m_A.surface.winH;
+        const uint32_t pageSlice = m_A.surface.hgtWinSlice;   // the z14 page's slice (0..5: the cube)
+        for (const std::string& iname : m_startView.interests) {
+            const SceneInterest* si = nullptr;
+            for (const SceneInterest& x : S.interests) {
+                if (x.p.name == iname) si = &x;
+            }
+            if (!si) {
+                if (m_interestsMissing.insert(iname).second) {
+                    Log("[interest] view '%s' names '%s', which no interest declares -- nothing held",
+                        m_startView.p.name.c_str(), iname.c_str());
+                }
+                continue;
+            }
+            // Where it stands: the entity's centre of gravity in the root's flat frame (a hull
+            // carried into another space is placed back through its space's motor), or the place.
+            double cx = 0.0, cz = 0.0;
+            bool placed = false;
+            if (!si->p.target.empty()) {
+                for (const auto& e : m_entities) {
+                    if (e->Name() != si->p.target || !e->Hull()) continue;
+                    double c[3] = {0.0, 0.0, 0.0};
+                    e->Hull()->Body().pose.TransformPoint(c[0], c[1], c[2]);
+                    if (e->InSpace()) e->SpaceInRoot().TransformPoint(c[0], c[1], c[2]);
+                    cx = c[0];
+                    cz = c[2];
+                    placed = true;
+                    break;
+                }
+            } else if (si->hasAt) {
+                scene::PoseSugar ps;
+                std::string pwhy;
+                if (scene::ReadPoseSugar(si->at, "interests." + si->p.name + ".at", ps, &pwhy) &&
+                    ps.kind == scene::PoseSugar::Kind::Compass) {
+                    cx = ps.x;
+                    cz = ps.z;
+                    placed = true;
+                }
+            }
+            if (!placed) continue;
+            // M13: a subject is a SAMPLER of the one earth cache -- it answers for the tiles it
+            // holds resident around itself, separately from the view that named it.
+            const int sampI = resMgr.Sampler(("subject." + iname).c_str());
+            const double r = (std::max)(si->p.radius, 0.0);
+            uint32_t held = 0;
+            // The z14 page tenants: the swell shadow and the bed.
+            if (pageSlice != UINT32_MAX && page.kind == Lattice::Kind::Window) {
+                double pxW = 0.0, pyN = 0.0, pxE = 0.0, pyS = 0.0;
+                page.PxOf(BathyModel::kOrgLat + (cz + r) / BathyModel::kMPerLat,
+                          BathyModel::kOrgLon + (cx - r) / BathyModel::kMPerLon, pxW, pyN);
+                page.PxOf(BathyModel::kOrgLat + (cz - r) / BathyModel::kMPerLat,
+                          BathyModel::kOrgLon + (cx + r) / BathyModel::kMPerLon, pxE, pyS);
+                const auto uvOf = [&](double px, long long org) {
+                    return float(std::clamp((px - double(org)) / double(page.faceDim), 0.0, 1.0));
+                };
+                const float u0 = uvOf(pxW, page.orgPxX), u1 = uvOf(pxE, page.orgPxX);
+                const float v0 = uvOf(pyN, page.orgPxY), v1 = uvOf(pyS, page.orgPxY);
+                if (u1 > u0 && v1 > v0) {
+                    if (exposureT >= 0 && exposureSrc && exposureSrc->Valid()) {
+                        resMgr.Want(sampI, exposureT, pageSlice, kSwellShadowMipFloor, u0, v0, u1, v1);
+                        ++held;
+                    }
+                    if (hgtWinTenant >= 0) {
+                        resMgr.Want(sampI, hgtWinTenant, pageSlice, 0u, u0, v0, u1, v1);
+                        ++held;
+                    }
+                }
+            }
+            // The solved field's pages (z16), through the solver's grid (the page texel IS the cell).
+            if (waveSrc && waveT >= 0 && waveSrc->Key() != 0 && waveField && waveField->Ready()) {
+                const WaveField::GpuTable& tab = waveField->Table();
+                const double nx = double(waveFrame.nx), ny = double(waveFrame.ny);
+                const auto cellsOf = [&](double w, double org, double n) {
+                    return std::clamp((w - org) * double(tab.invCell), 0.0, n);
+                };
+                const double cx0 = cellsOf(cx - r, double(tab.orgX), nx);
+                const double cx1 = cellsOf(cx + r, double(tab.orgX), nx);
+                const double cz0 = cellsOf(cz - r, double(tab.orgZ), ny);
+                const double cz1 = cellsOf(cz + r, double(tab.orgZ), ny);
+                if (cx1 > cx0 && cz1 > cz0) {
+                    const double ox = double(waveFrame.winPxX - waveFrame.orgPxX);
+                    const double oy = double(waveFrame.winPxY - waveFrame.orgPxY);
+                    const float u0 = float((ox + cx0) / 16384.0), u1 = float((ox + cx1) / 16384.0);
+                    const float v0 = float((oy + ny - cz1) / 16384.0);
+                    const float v1 = float((oy + ny - cz0) / 16384.0);
+                    const uint32_t planes = tab.nUsed + 1u;
+                    for (uint32_t p = 0; p < planes; ++p)
+                        resMgr.Want(sampI, waveT, 6u + p, 0u, u0, v0, u1, v1);
+                    held += planes;
+                }
+            }
+            if (m_interestsLogged.insert(iname).second) {
+                Log("[interest] view '%s' holds '%s' (%s%s, %.0f m): %u page wants a frame -- the "
+                    "solved field at mip 0, the swell shadow at mip %u, the bed at mip 0",
+                    m_startView.p.name.c_str(), iname.c_str(),
+                    si->p.target.empty() ? "a place" : "follows ", si->p.target.c_str(), r, held,
+                    kSwellShadowMipFloor);
+            }
+        }
+    }
     if (terrain) terrain->waterNavd = static_cast<float>(waterNavd);
     if (globe) globe->waterNavd = static_cast<float>(waterNavd);   // M6j materials
 
@@ -2959,6 +3246,24 @@ bool FrameLoop::Frame() {
     const scene::ViewSet viewSet =
         renderer.OneView(cam, static_cast<float>(simUnix - startUnix));
     renderer.RenderFrame(viewSet);
+    // --sky-probe: the atmosphere's tables, read back once the first one is built and held
+    // against published optical depths (SkyLayer::Probe). Reads back and waits: an instrument.
+    if (opt.skyProbe && sky && frame >= 2u && !m_skyProbed) {
+        m_skyProbed = true;
+        sky->Probe(gpu);
+    }
+    // --water-probe N: the drawn sea against each hull's own water, every N recorded frames
+    // (app/Tools/WaterProbe.cpp). An instrument: it reads back and waits, so never in play.
+    if (opt.waterProbeEvery > 0 && !m_entities.empty()) {
+        const uint32_t probeSettle = S.railDirW.empty() ? 0u : 150u;
+        if (frame >= probeSettle && ((frame - probeSettle) % opt.waterProbeEvery) == 0u) {
+            tools::RunWaterProbe(gpu, renderer, cam, planetR, m_entities, waterBank,
+                                 m_A.vesselLayer, &waterAtlas, exposureSrc.get(),
+                                 m_waveField.get(), sea, &seaState, m_A.surface,
+                                 m_oceanAt ? m_oceanAt(simUnix) : 0.0, simUnix,
+                                 frame - probeSettle);
+        }
+    }
     // --bench-overlap keeps the overlap: RENDER is then record + the BeginFrame fence
     // wait, and the loop mean is the pipelined max(CPU, GPU) a player's frame costs.
     if (opt.bench && !opt.benchOverlap) gpu.WaitIdle();

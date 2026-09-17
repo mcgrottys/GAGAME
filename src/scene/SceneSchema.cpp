@@ -16,6 +16,8 @@ RailKey kRailKey;
 PortalProps kPortal;
 GateProps kGate;
 EntityProps kEntity;
+InterestProps kInterest;
+InterestRef kInterestRef;
 EffectProps kEffect;
 SlicePlaneProps kSlice;
 LayerEntry kLayer;
@@ -91,14 +93,28 @@ const Schema& TimeSchema() {
     return *s;
 }
 
+const Schema& EarthSchema() {
+    static const Schema* s = [] {
+        auto& p = kDoc.sun.earth;
+        Schema* sc = new Schema("sun.earth", &p);
+        sc->Bind("at", p.at, Q::Length, "m", "the Earth's centre; the sun is a light at 0,0,0", R)
+            .Bind("axis", p.axis, Q::Dimensionless, "", "the Earth's spin axis in that frame", R)
+            .Bind("spin", p.spin, Q::Angle, "deg", "the Earth's turn about its axis", R);
+        return sc;
+    }();
+    return *s;
+}
+
 const Schema& SunSchema() {
     static const Schema* s = [] {
         auto& p = kDoc.sun;
         Schema* sc = new Schema("sun", &p);
-        sc->BindEnum("source", p.source, {"ephemeris", "pinned"},
-                     "the ephemeris at the scene's time and place, or pinned at az/el (--sun)", R)
+        sc->BindEnum("source", p.source, {"ephemeris", "pinned", "earth"},
+                     "the ephemeris at the scene's time, pinned at az/el, or the Earth placed "
+                     "around a sun at the origin (sun.earth) with no clock at all", R)
             .Bind("az", p.az, Q::Angle, "deg", "pinned azimuth, compass", H)
-            .Bind("el", p.el, Q::Angle, "deg", "pinned elevation", H);
+            .Bind("el", p.el, Q::Angle, "deg", "pinned elevation", H)
+            .Nest("earth", EarthSchema(), &p.earth, "the Earth's place around the sun");
         return sc;
     }();
     return *s;
@@ -322,6 +338,15 @@ const Schema& FollowSchema() {
     return *s;
 }
 
+const Schema& InterestRefSchema() {
+    static const Schema* s = [] {
+        Schema* sc = new Schema("view.interest", &kInterestRef);
+        sc->Bind("name", kInterestRef.name, "an interest this view keeps resident (interests[].name)", R);
+        return sc;
+    }();
+    return *s;
+}
+
 const Schema& ViewSchema_() {
     static const Schema* s = [] {
         Schema* sc = new Schema("view", &kView);
@@ -336,7 +361,9 @@ const Schema& ViewSchema_() {
             .Bind("reversedZ", kView.reversedZ, "depth 1 at the near plane falling to 0 at infinity (Camera.h)", R)
             .Bind("target", kView.target, "the target chain this view records into (\"main\" = the renderer's own)", R)
             .Nest("viewport", ViewportSchema(), &kView.viewport, "the rectangle of the target")
-            .Nest("follow", FollowSchema(), &kView.follow, "the chase camera");
+            .Nest("follow", FollowSchema(), &kView.follow, "the chase camera")
+            .List("interests", &InterestRefSchema(),
+                  "the subjects and places whose water this view keeps resident, by name");
         return sc;
     }();
     return *s;
@@ -418,6 +445,20 @@ const Schema& GateSchema_() {
     return *s;
 }
 
+const Schema& InterestSchema_() {
+    static const Schema* s = [] {
+        Schema* sc = new Schema("interest", &kInterest);
+        sc->Bind("name", kInterest.name, "the interest's name (views[].interests names it)", R)
+            .Bind("target", kInterest.target, "the entity whose surroundings stay resident (\"\" = the fixed `at`)", R)
+            .Bind("at", kInterest.at, "a fixed place in the flat world frame: {x, alt, z}", R)
+            .Optional()
+            .Bind("radius", kInterest.radius, Q::Length, "m",
+                  "how far around the subject its water's pages stay resident", R);
+        return sc;
+    }();
+    return *s;
+}
+
 const Schema& EntitySchema_() {
     static const Schema* s = [] {
         Schema* sc = new Schema("entity", &kEntity);
@@ -428,8 +469,10 @@ const Schema& EntitySchema_() {
                       "the keyboard helm, or fixed throttles and helm (--boat-drive)", H)
             .Bind("throttle", kEntity.throttle, Q::Dimensionless, "1", "fixed: every thruster's throttle", H)
             .Bind("steer", kEntity.steer, Q::Dimensionless, "1", "fixed: the commanded steering", H)
-            .Bind("mirrorCadence", kEntity.mirrorCadence, Q::Time, "s",
-                  "seconds between readbacks of the solver mirror the hull reads; 0 = never (the hull reads the analytic tide and the waves)", H);
+            .Bind("recentreM", kEntity.recentreM, Q::Length, "m",
+                  "how far this hull may sail from its space's origin before the space moves to "
+                  "its place (the per-subject floating origin; 0 = never, and it rides d^2/2R "
+                  "above the sphere)", H);
         return sc;
     }();
     return *s;
@@ -506,6 +549,7 @@ const Schema& ViewSchema() { return ViewSchema_(); }
 const Schema& PortalSchema() { return PortalSchema_(); }
 const Schema& GateSchema() { return GateSchema_(); }
 const Schema& EntitySchema() { return EntitySchema_(); }
+const Schema& InterestSchema() { return InterestSchema_(); }
 const Schema& NodeSchema() { return NodeSchema_(); }
 const Schema& RailKeySchema() { return RailKeySchema_(); }
 const Schema& SlicePlaneSchema() { return SlicePlaneSchema_(); }
@@ -528,6 +572,7 @@ const Schema& SceneFileSchema() {
             .List("portals", &PortalSchema_(), "the Droste links, by name")
             .List("gates", &GateSchema_(), "the cuboid gates to other places, by name")
             .List("entities", &EntitySchema_(), "the vessels, by name")
+            .List("interests", &InterestSchema_(), "the subjects and places whose water stays resident for the views that name them, by name")
             .List("effects", &EffectSchema(), "the paper visuals, by name, typed", true, "effect", "type")
             .List("layers", &LayerEntrySchema(), "the layers in registration order, typed by name", true, "layer", "name")
             .List("nodes", &NodeSchema_(), "typed nodes (plugins)", true, "component", "type")

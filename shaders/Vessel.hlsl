@@ -22,12 +22,22 @@
 
 cbuffer VesselCb : register(b1) {
     float4 gVsParams;   // x = part count (informational), y = brightness, zw = spare
+    // ---- THE GATE'S WINDOW (M13). A hull that has gone through keeps being DRAWN for an eye
+    // that has not: at its apparent pose (the gate's motor, inverted -- the same map the
+    // window's geometry is drawn by), and clipped here to the box. The eye does not teleport
+    // with its subject; it follows it in and crosses when the box takes it.
+    float4 gVsBoxR0;   // rows: the true camera frame -> the box's own; w = half extent
+    float4 gVsBoxR1;
+    float4 gVsBoxR2;
+    float4 gVsBoxC;    // the box's centre relative to the eye; w != 0 = a window is in view
+    float4 gVsWinSun;  // the one light as seen from the far place: a hull that went through is lit there
 };
 
 struct VesselPart {
     float4 re;      // motor real part: s, r23, r31, r12   (world = hull * attach)
     float4 du;      // motor dual part: q, t01, t02, t03
     float4 half;    // xyz = half extents (m), w = palette index
+    float4 opt;     // x = 1 when this part is seen THROUGH the window, 0 when it is on this side
 };
 StructuredBuffer<VesselPart> gParts : register(t0, space0);
 
@@ -35,6 +45,8 @@ struct VsOut {
     float4 pos : SV_Position;
     float3 col : COLOR0;
     float3 n : NORMAL0;
+    float3 rel : TEXCOORD0;             // the point, relative to the eye: the slab test's input
+    nointerpolation float through : TEXCOORD1;   // which side of the window this part is on
 };
 
 // A box CENTRED on its motor -- unlike Markers.hlsl's pylon, which stands on its origin. A part's
@@ -83,12 +95,28 @@ VsOut VsMain(uint vid : SV_VertexID) {
     // translation onto each box's motor in doubles before the float cast, so a hull 2000 km from
     // the origin is as exact here as one at the Merrimack.
     o.pos = mul(float4(world, 1.0f), gViewProj);
+    o.rel = world;
+    o.through = p.opt.x;
     return o;
 }
 
 float4 PsMain(VsOut i) : SV_Target {
+    // TWO COMPLEMENTARY DISCARDS, the globe's own rule for its levels (Globe.hlsl GateThrough)
+    // applied to hulls: the window's pixels belong to the other place, every other pixel to this
+    // one. So a hull that has gone through shows only where the eye reaches it THROUGH the box,
+    // and a hull on this side is cut away exactly there -- without the second half, a boat
+    // standing behind the portal would be visible through it, which is the one thing a window
+    // must never do.
+    if (gVsBoxC.w != 0.0f) {
+        const bool seen = GateSlabThrough(i.rel, float3x3(gVsBoxR0.xyz, gVsBoxR1.xyz, gVsBoxR2.xyz),
+                                          float3(gVsBoxR0.w, gVsBoxR1.w, gVsBoxR2.w), gVsBoxC.xyz);
+        if (seen != (i.through > 0.5f)) discard;
+    } else if (i.through > 0.5f) {
+        discard;   // no window this frame: what is through it cannot be seen at all
+    }
     const float3 n = normalize(i.n);
-    const float ndl = saturate(dot(n, gSunDir.xyz));
+    const float3 sunHere = (i.through > 0.5f) ? normalize(gVsWinSun.xyz) : gSunDir.xyz;
+    const float ndl = saturate(dot(n, sunHere));
     const float sky = 0.5f + 0.5f * n.y;
     // The sky term is generous on purpose. A hull read against bright water with only a sun
     // term goes to black on every face pointing away from it, and a black silhouette on water

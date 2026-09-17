@@ -33,6 +33,7 @@ add_executable(gagame
   src/app/Tools/TwinSurface.cpp
   src/app/Tools/Trace.cpp
   src/app/Tools/SeaVerify.cpp
+  src/app/Tools/WaterProbe.cpp
   src/core/BuildInfo.cpp
   src/core/GaAst.cpp
   src/core/Lattice.cpp
@@ -43,6 +44,7 @@ add_executable(gagame
   src/core/CrashTrace.cpp
   src/hal/Gpu.cpp
   src/hal/GpuProfiler.cpp
+  src/hal/Readback.cpp
   src/hal/Shader.cpp
   src/core/Window.cpp
   src/core/Image.cpp
@@ -100,6 +102,7 @@ add_executable(gagame
   src/sim/Vessel.cpp
   src/sim/VesselSpecs.cpp
   src/sim/VesselTest.cpp
+  src/sim/WaveChartTest.cpp
   src/sim/WaveField.cpp
   src/sim/WeatherManager.cpp
   src/sim/GlobeModel.cpp
