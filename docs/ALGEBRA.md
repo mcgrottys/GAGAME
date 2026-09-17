@@ -1533,6 +1533,23 @@ model (or a textbook) would hold → what this project measured → the law now 
     either, or an eye above the air (the globe, a Droste level), which still sees the gradient,
     would light its night-side sea.
 
+46. **A fill no world reads keeps nothing warm.** Prior (the corridor of windows, 2026-09-17): filling
+    the second ring set (set B) at the nearest gate's carried eye while no window is on screen keeps
+    the window's sea ready, so a window the eye turns to cannot pop. Measured: the bank kernel writes
+    its three planes and reads none of them, so a fill is a function of its own frame and one that no
+    level reads is thrown away whole -- 1.1 ms of tile list and 0.6 ms of GPU a frame, the whole of the
+    1.85 ms a gate cost with no window in view (ablation by probe switch: anchored-and-unfilled ran at
+    the no-gate time). A window cut into view is bit-identical with the standing fill and without it.
+    What a reader needs ahead of time is what persists: the rings' anchor and tile mapping (kept --
+    set B stands anchored and unfilled) and the resident pages the fill and the mesh read. That second
+    part is the residency's, and at the corridor's helm pose the pool is at its cap (8192 tiles mapped,
+    the view alone wanting 12.6-15.4 k): a window cut into view keeps coarse mips for as long as it was
+    measured (its sampler wants 36 tiles against 238 for a view that faced it from the start), which is
+    priors 30's landing-order hole, not a fill. A prefetch walked through the gates cannot fill that
+    hole either -- its predicted wants yield to real ones -- and it did not: bit-identical again, at
+    +0.15 ms a frame, so it was not kept. Law: a stateless producer runs for its readers; warmth is only
+    ever state (an anchor, a mapping, a resident page); and a warm-up is judged on a HARD CUT against a
+    view that never looked away -- a smooth turn hides the landing behind the edge of the screen.
 
 ## verification — The gate map: which algebra is pinned where
 

@@ -398,6 +398,15 @@ public:
         m_chartFrame = f;
         m_chartOn = on;
     }
+    // Whether any world of this frame's level table reads ring set `set` (DrosteLevel::bankSet):
+    // the bank is stateless, so it is filled for its readers and for nobody else (FrameLoop).
+    // Final once SetDroste and SetGates have run.
+    bool ReadsBankSet(int set) const {
+        for (const DrosteLevel& L : m_levels) {
+            if (L.bankSet == set) return true;
+        }
+        return false;
+    }
     void SetWaterBankB(uint32_t disp, uint32_t param, uint32_t detail, const float* org12,
                        bool on) {
         m_bankB[0] = disp;

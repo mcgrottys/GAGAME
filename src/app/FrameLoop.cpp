@@ -2385,8 +2385,9 @@ bool FrameLoop::Frame() {
     // ---- THE VIEW'S WINDOWS, AND THE SEA BEYOND THE FIRST (scene/Gateway.h WindowChain). The
     // chain is found here, where the eye has its pose, so the second ring set can follow the eye
     // the first window carries -- set B, the bank the Droste outer level uses, when no Droste outer
-    // level already holds it. With no window in view it follows the nearest gate within reach
-    // anyway, so a window the eye turns toward finds its sea already filled. The worlds themselves
+    // level already holds it. With no window in view its rings still stand where the nearest gate
+    // within reach would carry the eye -- anchored and mapped, not filled (the fill is its readers',
+    // below) -- so a window the eye turns toward finds them in place. The worlds themselves
     // are added beside SetView, below, re-measured after the camera's last clamp.
     m_windows.clear();
     if (!drosteOuter && camLevel == 0 && mode == 1 && globe && !m_gates.empty()) {
@@ -2810,9 +2811,11 @@ bool FrameLoop::Frame() {
             }
             // M10: set B follows the OUTER level's eye, S(C) -- the sea the camera's
             // planet floats in, seen from where the camera really is in that level's
-            // own frame. Off (and not filled) while the camera is at the root.
+            // own frame -- or the eye a gate carries (the view's windows, above). Its rings
+            // STAND wherever such an eye is: anchored and mapped here, so the frame a reader
+            // arrives in fills them in place. Whether they are FILLED is the readers' to say,
+            // once the level table is final (below, before the tide).
             if (waterBankB) {
-                waterBankB->enabled = drosteOuter;
                 float orgB[12] = {};
                 if (drosteOuter) {
                     waterBankB->injectPattern = opt.inject;
@@ -3133,6 +3136,14 @@ bool FrameLoop::Frame() {
             PROF_END(8);
         }
     }
+    // SET B IS FILLED FOR ITS READERS. The bank keeps nothing between frames -- every texel is
+    // recomputed from this frame's inputs -- so a fill no world reads is thrown away whole: a
+    // gate in reach with no window in view paid 1.1 ms of tile list and 0.6 ms of GPU for one
+    // every frame (measured 2026-09-17). Its readers are the level table's worlds whose rings
+    // are set B -- the outer Droste level, a window's world -- and the rings already stand where
+    // the next one's eye will be (above), so the frame that first shows a window fills them
+    // before the globe draws it.
+    if (waterBankB) waterBankB->enabled = drosteOuter && globe && globe->ReadsBankSet(1);
 
     PROF_BEGIN();
     tide->SetTime(simUnix, windowSec);
