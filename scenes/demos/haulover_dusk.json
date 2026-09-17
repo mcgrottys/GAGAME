@@ -1,0 +1,20 @@
+{
+  "_readme": [
+    "THE HAULOVER GATE AT DUSK -- the same playable scene, with the Earth turned further round the light:",
+    "the sun has set at the Merrimack (-2.04 deg) and is still up at Haulover (+16.40 deg). Drive into",
+    "the gate and you come out of the dusk into daylight; the window inside that window is this inlet",
+    "again, at dusk, and so on down the corridor. Each world asks its own planet whether it has a sun,",
+    "so the near sea shows no glint while Haulover's sea keeps its own.",
+    "",
+    "Launch from the repo root:  build/bin/gagame.exe scenes/demos/haulover_dusk.json",
+    "",
+    "Controls are haulover_portal.json's. The sun sets behind the boat (azimuth 213.7): steer round,",
+    "or press T and look back. sun.earth.spin is a RESTART key; 107.0777 is the original sunset."
+  ],
+  "base": "scenes/demos/haulover_portal.json",
+  "scene": {"name": "haulover-gate-dusk", "mode": "world", "view": "sea"},
+  "sun": {
+    "source": "earth",
+    "earth": {"at": [-115661585509.728317, 0.0, 94878451480.563919], "axis": [0, 0, 1], "spin": 116.5777}
+  }
+}

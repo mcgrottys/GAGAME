@@ -1,0 +1,28 @@
+{
+  "_readme": [
+    "DUSK AT THE HELM -- the storm sea off the north jetty tip, looking at where the sun went down.",
+    "Before d53bcc0 the waves still caught a sun two degrees under the horizon: a white glint and",
+    "green-lit faces under a sky whose own sun was gone. Now every surface asks the PLANET whether it",
+    "has a sun (PlanetShadow), and the water's mirror shows the twilight glow the air still has.",
+    "",
+    "Launch from the repo root:  build/bin/gagame.exe scenes/demos/merrimack_dusk.json",
+    "",
+    "The sun is the light at 0,0,0 and the Earth is placed around it -- the Haulover demo's place,",
+    "turned further: the sun stands -2.04 deg here, azimuth 213.7. sun.earth.spin is a RESTART key;",
+    "edit it and relaunch to walk the sunset through the disc: 107.0777 = +1.50 deg (the sunset and",
+    "its glint), 111.33 = 0.00 (half the disc down, the glint at half), 112.08 = -0.27 (the last of",
+    "the disc gone), 116.5777 = -2.04 (dusk). The view is fixed at azimuth 213.7, so the sun stays in",
+    "frame for all of them. FLY: W A S D move, Q / E down / up, hold the right mouse button to look."
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {"name": "merrimack-dusk", "mode": "world", "view": "sea"},
+  "time": {"start": "2026-08-28T14:00:00Z"},
+  "sun": {
+    "source": "earth",
+    "earth": {"at": [-115661585509.728317, 0.0, 94878451480.563919], "axis": [0, 0, 1], "spin": 116.5777}
+  },
+  "sea": {"storm": {"hs": 3, "tp": 10, "dir": 95}},
+  "views": [
+    {"name": "sea", "at": {"x": 120, "alt": 7, "z": -10, "az": 213.7, "pitch": 4}}
+  ]
+}

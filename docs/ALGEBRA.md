@@ -444,8 +444,10 @@ already owns (no BLAS — the scene descriptions are our own quadtrees):
 
     L = F(θ)·L_sky(r̂) + (1−F)·[ T_w ⊙ ρ_bed·E_bed + (1 − T_w) ⊙ C_scatter ] + L_glint
 
-- r̂ = −n d n (reflected ray, `cl3`), L_sky the analytic sky radiance (discless sun +
-  gradient), F = Schlick 0.02 + 0.98(1−cosθ)⁵ on the true wave normal.
+- r̂ = −n d n (reflected ray, `cl3`), L_sky the sky radiance on that ray, discless (the
+  marched air since M13; the two-constant gradient only as its fallback, and only the
+  fallback is told the hour — priors 45), F = Schlick 0.02 + 0.98(1−cosθ)⁵ on the true
+  wave normal.
 - The refracted ray (`cl3` rotor) marches into the water and lands on the **bed** — the
   composed height quadtree, found by 2 secant steps; ρ_bed is the composed color there
   (imagery or synth.bed's dry albedo).
@@ -459,6 +461,12 @@ already owns (no BLAS — the scene descriptions are our own quadtrees):
   with its own Schlick factor. The **group envelope** modulates it: σ² ← σ²(0.70 +
   0.60·env) with env the pixel-resolved slope magnitude — spatial glitter grain that
   telescopes off by ~10 km footprints.
+- **Whether there is a sun is the planet's answer, not the facet's.** Every direct-sun term on
+  the globe's surfaces (the glint and the water body on both paths, the land far and near) is
+  multiplied by `PlanetShadow` (Common.hlsli): the share of the sun's disc above the point's
+  dipped horizon, sin(dip) = √(h(2R+h))/(R+h), ramped over the disc's own radius by
+  `SunDiscClear` — the ramp `PortalShadow` already used for the Droste inner globe, so two
+  occluding spheres share one law. The normal only shapes the lobe and the cosine (priors 44).
 - Foam whitens albedo (bank foam channel + churn memory); land takes imagery with the
   hand-edit rock override; sRGB pixels ship as captured (no re-grading — see priors).
 
@@ -1491,6 +1499,39 @@ model (or a textbook) would hold → what this project measured → the law now 
     re-quantize (the worst 4.3 % of pixels by one count plus edge flips to |d| 140). Law: a change to
     any map that builds a rail key, a view or a spawn is gated on the rail as well as the stills; the
     correction is held for the owner with the measurement beside it.
+44. **A surface normal cannot tell whether the sun is up.** Prior: every direct-sun term is gated
+    by `saturate(n·L)`, so a sun below the horizon lights nothing. Measured (the helm under the
+    storm sea, the sun pinned 2° down at azimuth 236, looking at it): a white Cox–Munk glint and
+    green-lit wave faces under a sky whose own sun had already set — on both water paths, and on
+    land slopes at the far shore. On a mirror path n·L = n·V, so a facet that sends the sun into
+    the eye passes the cosine whenever the eye can see it, wherever the sun is: the cosine can
+    never catch this leak. What hid the glint at night was only the lobe's tail — a sun s below
+    the horizon needs a face tilted (s + δ)/2 for an eye looking δ down — and two degrees under,
+    that tilt is the middle of a storm sea's slopes. Only the sky asked the planet (`AtmSunT`).
+    Law: whether a point has a sun is the PLANET's answer there — the share of the disc above its
+    dipped horizon (`PlanetShadow`, on the ramp `PortalShadow` already used for the inner globe) —
+    and the normal only shapes what arrives. The ramp is the sun's own diameter, so at the
+    Merrimack in late August the sun takes 3.0 min to set, as it does. Asked of the planet: at −2°
+    the pixel water moved on 23 % of the frame (max |d| 247, on the glint) and the vertex water on
+    16 % (max |d| 130); at +1°, +4° and +10° both are bit-identical to main once warm. The Haulover
+    gate, its window read through a flat-colour mask: 445 px against an A/A of 443 at the scene's
+    sun, and 485 against 446 with the Earth turned 9.5° so the Merrimack stands at −2.04° and
+    Haulover at +16.40° — the far place keeps its sun while the near sea goes dark. Every verdict
+    here needed its own floor: the demo varies on 9.8 % of its pixels between identical runs, the
+    ebb helm is bimodal (0 or 15–30 k px), the bird 3–7 k px, and the Droste pose 80–320 px — one
+    A/A pair of it had come out bit-identical, and a lens plus two null arms (the term folded to 1;
+    computed, then zeroed) moved it as much as the law did.
+45. **A ramp written for a sky that could not tell the time outlives the sky that can.** Prior: the
+    water's mirror needs its `day` ramp (3 sin(el) + 0.12), or the night sea reflects daylight —
+    true while the sky was two constants. Measured (the helm, the sun pinned low): since M13 the
+    marched sky dims and reddens with the sun by itself, and the ramp dimmed it again. The sea
+    reflected 1.5 % of the twilight glow at −2°, 17 % of the sunset sky at +1°, 33 % at +4° and 64 %
+    at +10°; with the hour taken once, the +1° sea's red mean went 52 → 110 and the −2° sea from
+    near-black to the glow (approved by eye). Law: a correction belongs to the model that lacks the
+    quantity. When the sky learned the hour, the ramp had to move into the gradient fallback that
+    still lacks it (`SkyRadianceDirDiscless(dir, day)`), not stay on every caller — and not vanish
+    either, or an eye above the air (the globe, a Droste level), which still sees the gradient,
+    would light its night-side sea.
 
 
 ## verification — The gate map: which algebra is pinned where

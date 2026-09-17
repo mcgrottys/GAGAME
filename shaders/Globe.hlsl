@@ -206,15 +206,16 @@ float GateRim(float3 p, uint k) {
 // level's own frame (gDrostePortal), so one analytic sphere test shades the whole tower: the sun
 // seen from P is eclipsed by the globe's disc, softened over the sun's own angular radius. One
 // expression -- at the contact (d -> r) the globe's disc fills the half-sky and the ground is in
-// shade; far away the disc shrinks to nothing and so does the shadow.
+// shade; far away the disc shrinks to nothing and so does the shadow. The disc's share past the
+// rim is Common.hlsli's SunDiscClear, the same ramp the planet's own shadow uses (PlanetShadow):
+// two spheres, one law.
 float PortalShadow(float3 pOwnFlat) {
     const float rad = gDrostePortal.w;
     const float3 toC = gDrostePortal.xyz - pOwnFlat;
     const float d = max(length(toC), 1e-6f);
     const float alpha = asin(saturate(rad / d));                  // the globe's angular radius
     const float theta = acos(clamp(dot(toC / d, GA_SUN_DIR), -1.0f, 1.0f));
-    const float kSunR = 0.0047f;                                  // ~0.27 deg, the disc itself
-    return (rad > 0.0f) ? saturate((theta - alpha) / (2.0f * kSunR) + 0.5f) : 1.0f;
+    return (rad > 0.0f) ? SunDiscClear(theta - alpha) : 1.0f;
 }
 
 // Sample the bank at a world-frame XZ: finest ring containing the point wins. Returns false
@@ -583,8 +584,11 @@ float3 WaterVertexColor(float3 dir, float3 rel, float h) {
     if (rUp < 0.02f) rDir = normalize(rDir + (0.02f - rUp) * upT);
 
     // The sun's highlight: the Cox-Munk lobe on the vertex normal, sigma^2 from the bank.
-    // M10: the level's own sun, eclipsed by the inner globe where its disc covers the sun.
-    const float sunVis = PortalShadow(sLvlCamAbs + rel - float3(0.0f, gGlo.x, 0.0f));
+    // M10: the level's own sun, eclipsed by the inner globe where its disc covers the sun --
+    // and by the planet under this vertex once it has set there (PlanetShadow): the wave
+    // normal shapes the lobe, it does not decide whether there is a sun to shape.
+    const float sunVis = PortalShadow(sLvlCamAbs + rel - float3(0.0f, gGlo.x, 0.0f)) *
+                         PlanetShadow(upT, GA_SUN_DIR, h, gGlo.x);
     const float3 hv = normalize(v + GA_SUN_DIR);
     const float ch = saturate(dot(hv, nW));
     const float tt = max(1.0f - ch * ch, 0.0f) / max(ch * ch, 1e-4f);
@@ -601,7 +605,7 @@ float3 WaterVertexColor(float3 dir, float3 rel, float h) {
     const float ndl = saturate(dot(nW, GA_SUN_DIR)) * sunVis;
     float3 col = alb * (0.030f + ndl * SUN_IRR_C * 1.15f);
     col += spec * SUN_IRR_C * 0.85f;
-    col += SkyRadianceDirDiscless(rDir) * (fres * 0.9f * (1.0f - foam)) * SkyDay(day);
+    col += SkyRadianceDirDiscless(rDir, SkyDay(day)) * (fres * 0.9f * (1.0f - foam));
     col += alb * float3(0.010f, 0.014f, 0.028f) * (1.0f - day);   // moonlit-blue night side
     return col;
 }
@@ -974,8 +978,10 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     float3 albW = lerp(cScatter, bedAlb, Tw);
 
     // ---- THE GLINT: the Cox-Munk lobe on the pixel normal, sigma^2 as folded above.
-    // M10: the level's own sun, eclipsed by the inner globe (PortalShadow).
-    const float sunVis = PortalShadow(sLvlCamAbs + rel - float3(0.0f, gGlo.x, 0.0f));
+    // M10: the level's own sun, eclipsed by the inner globe (PortalShadow) and by the planet
+    // under this pixel (PlanetShadow) -- asked of upT, never of nPix.
+    const float sunVis = PortalShadow(sLvlCamAbs + rel - float3(0.0f, gGlo.x, 0.0f)) *
+                         PlanetShadow(upT, GA_SUN_DIR, hp, gGlo.x);
     const float3 hv = normalize(v + GA_SUN_DIR);
     const float ch = saturate(dot(hv, nPix));
     const float tt = max(1.0f - ch * ch, 0.0f) / max(ch * ch, 1e-4f);
@@ -994,7 +1000,8 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // (which is why the horizon band stays pale silver instead of turning green); pointing
     // straight down it returns 0.02 and the endpoint is the water body. No new constant, no
     // branch -- the law already in this function, applied once more.
-    const float3 skyLit = SkyRadianceDirDiscless(rSky) * SkyDay(day);   // M10: the sky it sees
+    // M10: the sky it sees -- the hour rides the gradient only; the march already has it.
+    const float3 skyLit = SkyRadianceDirDiscless(rSky, SkyDay(day));
     const float fresHit = 0.02f + 0.98f * pow(1.0f - saturate(-rUp), 5.0f);
     const float3 mirror = lerp(skyLit, lerp(bodyLit, skyLit, fresHit), seaward);
     float3 col = bodyLit * (1.0f - fres);
@@ -1042,7 +1049,6 @@ float4 PsMain(VsOut i) : SV_Target {
     if (gGateA.x >= 0.0f) {
         if (GateDepth(TrueRel(i.rel)) != LevelGateDepth(i.lvl)) discard;
     }
-    const float sunVis = PortalShadow(sLvlCamAbs + i.rel - float3(0.0f, gGlo.x, 0.0f));
     const float3 up = normalize(i.dir);   // PLANET frame: lat/lon + every texture fetch
     const float3 v = normalize(-i.rel);   // TANGENT frame: geometry + lighting (M6g)
     const float lat = asin(clamp(up.y, -1.0f, 1.0f));
@@ -1081,6 +1087,11 @@ float4 PsMain(VsOut i) : SV_Target {
     // in the estuary window -- gating on it smeared whole towns below sea level. hp is what
     // the data says HERE, at this pixel's own resolution.
     const float hp = ComposedHeightOn() ? ComposedHeight(up, lod) : i.h;
+    // The land's sun: the inner globe's eclipse and the planet's own shadow at this pixel's
+    // ground -- the two factors the water takes, so a shoreline cannot disagree about whether
+    // the sun is up. A hillside leans toward a set sun exactly as a wave face does.
+    const float sunVis = PortalShadow(sLvlCamAbs + i.rel - float3(0.0f, gGlo.x, 0.0f)) *
+                         PlanetShadow(upT, GA_SUN_DIR, hp, gGlo.x);
     // M6i/M6j/M6n: classification by SURVEY far afield; inside the window the LIVE waterline
     // decides through an ANALOG shore band (ComposedLandness) -- the binary cut flickered
     // tile-shaped speckle over the flats whenever the height data's resident level changed

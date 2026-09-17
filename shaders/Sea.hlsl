@@ -326,7 +326,8 @@ float3 SeaVertexColor(float2 xz, float3 rel, float2 U, float2 adv, float depth, 
     float3 refl = reflect(-v, n);
     refl.y = max(refl.y, 0.02f);
     const float f = 0.02f + 0.98f * pow(1.0f - saturate(dot(n, v)), 5.0f);
-    col = lerp(col, SkyRadianceDirDiscless(refl), f);
+    // Daylight 1: this layer never told its gradient the hour (the globe's water does).
+    col = lerp(col, SkyRadianceDirDiscless(refl, 1.0f), f);
 
     // The one glint: the same Cox-Munk lobe, evaluated once per vertex.
     {
@@ -458,7 +459,7 @@ float3 SeaPixelColor(float2 xz, float3 rel, float att, float depth, float dryGua
     // a mirror: one more bounce of the same Schlick, |refl.y| being that hit's cosine. At the
     // horizon it returns 1 (the band stays pale, not green); straight down it returns 0.02 and
     // the endpoint is the water.
-    const float3 skyLit = SkyRadianceDirDiscless(rSky);
+    const float3 skyLit = SkyRadianceDirDiscless(rSky, 1.0f);
     const float fresHit = 0.02f + 0.98f * pow(1.0f - saturate(-refl.y), 5.0f);
     col = lerp(col, lerp(skyLit, lerp(col, skyLit, fresHit), seaward), f);
 
