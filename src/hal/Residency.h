@@ -72,6 +72,18 @@ public:
     static constexpr uint64_t kMapStageBytes = 8ull << 20;   // M9bb: residency-map staging reserve
     static constexpr uint32_t kPoolCapTiles = 8192;      // 512 MB ceiling before eviction
     static constexpr uint32_t kEvictAgeFrames = 4;       // > frame overlap: no in-flight reads
+    // THE POOL'S OWN HEADROOM (2026-09-17). Eviction was demand-driven only: a slot came free
+    // when some other tile needed it, so a view that LEFT a place held that place's tiles until
+    // something else asked. MEASURED with a hull carried 1900 km: 8192 tiles mapped, 2216 of
+    // them wanted -- three quarters of the pool belonged to the river the boat had left, and the
+    // first frames at the new place bought every slot one eviction at a time (each one sorting
+    // all 8192 mapped tiles again). So above the high-water mark the pool releases, every turn,
+    // what nobody has wanted for kReclaimAgeFrames -- oldest first, at most kReclaimPerTurn a
+    // turn. Below the mark nothing is released: holding a tile nobody wants is free while the
+    // slots are, and the cache is the point. The victim rule is the demand path's, unchanged.
+    static constexpr uint32_t kPoolHighWater = kPoolCapTiles - kPoolCapTiles / 8;   // 7168
+    static constexpr uint32_t kReclaimAgeFrames = 60;    // ~2 s at 30 fps: gone, not glanced away
+    static constexpr uint32_t kReclaimPerTurn = 256;     // bounded work, ~6 k stale tiles in 24
 
     // ---- THE SAMPLERS (M13) -------------------------------------------------------------
     // ONE CACHE FOR THE EARTH, MANY READERS. A sampler is anything that will read the planet
@@ -356,6 +368,8 @@ public:
     // and an FNV-1a over the mapped set (face, mip, x, y in key order) -- two runs, or two
     // binaries that issue the same want stream, print the same hash or the difference is real.
     void LogSettleExact(uint32_t heldFrames) const;
+    // The pages ledger (pagesEvery), printed from inside the turn under m_mx.
+    void LogPages() const;
 
     // Step 28 (docs/PERF_EXPERIMENT.md): THE LANDING LEDGER. What one turn did to the tiles
     // between the queue and the sampler, by the class of thing that can go wrong there: a
@@ -387,6 +401,7 @@ public:
         uint32_t batch = 0, direct = 0, ring = 0;   // the mapped batch, by fill path
         uint32_t ringNoBytes = 0;   // ring fills of a tile with no bytes: a garbage fill
         uint32_t evicted = 0;
+        uint32_t reclaimed = 0;     // of `evicted`, the ones the headroom pass took unasked
         uint32_t landedOnly = 0;    // 1: tiles landed and no batch was mapped this turn
         uint32_t barriered = 0;     // tenants transitioned back to shader reads after the copies
         uint32_t stageFree = 0, stageRetiring = 0, inFlightTiles = 0;   // after the turn
@@ -395,6 +410,23 @@ public:
     uint64_t ringNoBytesTotal = 0, landedUnownedTotal = 0, landedOnlyTurns = 0;
     bool traceTurn = false;        // print this turn's ledger (main: --res-trace-frames)
     uint32_t traceRecFrame = 0;    // the recorded frame main labels it with
+
+    // ---- THE PAGES LEDGER (slice pool, stage 0, 2026-09-17) --------------------------------
+    // Every other residency line sums a tenant over its slices, so a page is invisible in them:
+    // the z14 window's want and the cube's arrive as one number. This one splits each tenant by
+    // the lattices its slices sit on -- the cube's six faces as one line, each page as its own --
+    // and counts, per mip, what this frame wanted, how much of that is mapped, and what the pool
+    // holds that nobody wanted. It reads the manager's own state and NO GEOMETRY: to the manager
+    // a cube face and a page are the same thing, a slice of one array, and an instrument that
+    // re-derived the shader's page choice on the CPU would be a second copy of a law the shader
+    // owns. Counted at the settle's own point with the settle's own test (the stamp says this
+    // frame), so under --settle-exact a tenant's lines sum to its [settle-exact] line, and the
+    // tenants' mapped tiles sum to the pool's -- the print checks the second itself.
+    uint32_t pagesEvery = 0;       // main: --pages-trace N prints every Nth turn (0 = never)
+    // What the manager did not already know about a slice: the cache tag of the lattice it sits
+    // on and that lattice's mip-0 ground in metres. Handed over by the declaration
+    // (hal::Tenant::Sparse), once; an unlabelled slice prints by index.
+    void LabelSlices(int tenant, std::vector<std::string> tags, std::vector<double> ground0M);
 
 private:
     struct Tracked;
@@ -462,6 +494,9 @@ private:
         // drops summed over the hold, for LogSettleExact.
         uint32_t exWanted = 0, exMapped = 0, exDeficit = 0, exUnreachable = 0, exStale = 0;
         uint32_t exDropped = 0, exDroppedMapped = 0, exRequeued = 0;
+        // The pages ledger's names for the slices (LabelSlices): empty until declared.
+        std::vector<std::string> sliceTag;
+        std::vector<double> sliceGround0M;
     };
 
 

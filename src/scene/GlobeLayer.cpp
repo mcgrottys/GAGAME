@@ -1979,8 +1979,13 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         }
     }
 
-    const double r = std::sqrt(m_camPos[0] * m_camPos[0] + m_camPos[1] * m_camPos[1] +
-                               m_camPos[2] * m_camPos[2]);
+    // THE EYE'S HEIGHT IS MEASURED FROM THE PLANET'S CENTRE, which in the flat frame sits at
+    // (0, -R, 0) -- not at its origin. Taking |camPos| read true only while the eye stood near
+    // the tangent point and went badly wrong anywhere else: a camera carried 1900 km to the
+    // Bahamas reported "alt -4214 km" in the title bar. gCamAbs below is this same sum, and the
+    // shaders have always had it right; only these two stats lines were reading the wrong length.
+    const double ry = m_camPos[1] + m_radius;
+    const double r = std::sqrt(m_camPos[0] * m_camPos[0] + ry * ry + m_camPos[2] * m_camPos[2]);
     m_cb.glo[0] = static_cast<float>(m_radius);
     m_cb.glo[1] = reliefExagg;
     // z = the draw's unit count: CDLOD nodes on the fallback, meshlet records on the mesh path

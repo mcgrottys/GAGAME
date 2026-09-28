@@ -245,11 +245,15 @@ struct GateProps {
     std::string name;
     bool enabled = true;
     double fromLat = 0.0, fromLon = 0.0;   // where the box stands (absent: the scene's frame)
-    Placement at;                          // the box's centre and heading there: {x, alt, z, az}
+    // ONE BOX, POSED TWICE (scene/Gateway.h BoxPose). Each end is the placement sugar in its own
+    // place's flat frame: {x, alt, z, az[, pitch]} -- the heading about that place's up and the
+    // lean about the box's own across-axis, nose up positive -- or the motor spelling, which
+    // carries any orientation. No `pitch` is no lean, which is the only reason a box is y-up.
+    Placement at;                          // where it stands, and how it faces, at `from`
     double size[3] = {60.0, 30.0, 8.0};    // across, up, along the heading -- metres
     double toLat = 0.0, toLon = 0.0;       // the destination (absent: the scene's frame)
-    Placement toAt;                        // where the box's centre comes out there: {x, alt, z}
-    double toAz = 0.0;                     // the heading the box's forward face leaves along
+    Placement toAt;                        // the same box, posed again at the destination
+    double toAz = 0.0;                     // its heading there when `toAt` names none
 };
 // THE INTERESTS (the water match): a subject or a place whose surroundings stay resident at the
 // grain its water's kernels read, for the views that name one -- so an eye arriving there, or a

@@ -1,0 +1,62 @@
+{
+  "_readme": [
+    "SKYFALL -- a gate to the sky. You start at the helm of the Novurania 18 RHIB in the Merrimack",
+    "entrance at sunset, 330 m short of the box: drive east and you meet it. It is 200 m across and",
+    "120 m tall, and through it, instead of the far side of the river, is the Earth seen straight",
+    "down from 100 km up -- the Great Bahama Bank in daylight, turquoise shallows and islands.",
+    "",
+    "It looks DOWN because the far end of the box leans. A gate is one structure posed twice, and",
+    "neither pose is locked upright: this one's exit is pitched 90 degrees over, so what you drive",
+    "into going east you leave going straight down -- and a window carries ray directions by the",
+    "same motor, which is why a level look into it is a look at the planet from orbit.",
+    "",
+    "Drive in. The carry keeps your motion and turns it with the box, so the boat leaves the river",
+    "at twenty knots and arrives 100 km over the bank pointed at it, bow down (90 degrees of exit",
+    "less the bow-up trim it was planing at). Nothing rights it: a dry hull has no buoyancy and no",
+    "one is steering, so it tumbles the whole way.",
+    "",
+    "IT DOES NOT FALL AT g FOR LONG. The hull carries windage -- the collar and console are drag",
+    "elements in air -- so it accelerates for about half a minute and then holds terminal velocity,",
+    "MEASURED at ~45 m/s (87 kn) tumbling. From 100 km that is a thirty-five minute fall at 1x, so",
+    "press Up twice (time x100) once you are through and it lands in about twenty seconds; press",
+    "Down to come back to real time. It arrives at 87 knots, upside down, and floats.",
+    "",
+    "The camera follows the boat through the window and keeps its chase distance the whole way",
+    "down, so the fall is watched from behind the transom with the planet underneath.",
+    "",
+    "Launch from the repo root:  build/bin/gagame.exe scenes/demos/skyfall.json",
+    "",
+    "HELM   W / S  both throttles ahead / astern      A / D  steer to port / starboard",
+    "       Q / E  split the levers (pivot)           Shift / Ctrl  trim out / in",
+    "T      leave the helm: the camera flies free (the boat keeps its throttles); T again returns",
+    "FLY    W A S D move, Q / E down / up, hold the right mouse button to look, wheel = speed",
+    "TIME   Space pause, Up / Down time x10 / /10, Left / Right nudge.   R reload shaders.",
+    "",
+    "To land sooner instead of higher, lower the exit's `alt` below: at ~4000 m the fall is about",
+    "eighty seconds at 1x, and the window becomes a drone shot rather than a look from orbit."
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {"name": "skyfall", "mode": "world", "view": "sea"},
+  "time": {"start": "2026-08-28T19:30:00Z"},
+  "sun": {
+    "_readme": "The same placement the Haulover gate uses: the Merrimack at sunset (+1.5 deg) and the tropics in full daylight, so the window is a bright Earth in a dusk river.",
+    "source": "earth",
+    "earth": {"at": [-115661585509.728317, 0.0, 94878451480.563919], "axis": [0, 0, 1], "spin": 107.0777}
+  },
+  "sea": {"storm": {"hs": 1.5, "tp": 8, "dir": 95}},
+  "views": [
+    {"name": "sea", "follow": {"target": "boat"}, "interests": [{"name": "boat"}]}
+  ],
+  "entities": [
+    {"name": "boat", "vessel": "rhib.novurania18", "at": {"x": 120, "alt": 0, "z": -10, "az": 86},
+     "controller": "helm"}
+  ],
+  "interests": [
+    {"name": "boat", "target": "boat", "radius": 200}
+  ],
+  "gates": [
+    {"name": "skyfall", "at": {"x": 450, "alt": 0, "z": 0, "az": 90}, "size": [200, 120, 10],
+     "toLat": 24.4, "toLon": -77.9,
+     "toAt": {"x": 0, "alt": 100000, "z": 0, "az": 90, "pitch": -90}}
+  ]
+}

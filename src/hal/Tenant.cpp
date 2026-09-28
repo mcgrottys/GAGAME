@@ -146,6 +146,19 @@ Tenant Tenant::Sparse(Gpu& gpu, ResidencyManager& mgr, TenantDesc desc) {
         return s->Dispatch(r, out, loc);
     };
     s->id = mgr.AddTexturePages(gpu, d.name, dim, d.fiber.fmt, std::move(dispatch), d.slices);
+    // The pages ledger (Residency.h pagesEvery) names each slice by the lattice it sits on --
+    // the one fact about a slice the manager did not already hold.
+    {
+        std::vector<std::string> tags(d.slices);
+        std::vector<double> ground(d.slices, 0.0);
+        for (const SliceBinding& b : d.bindings) {
+            for (uint32_t f = b.first; f < b.first + b.count; ++f) {
+                tags[f] = b.lattice.Tag();
+                ground[f] = b.lattice.GroundRes(0);
+            }
+        }
+        mgr.LabelSlices(s->id, std::move(tags), std::move(ground));
+    }
 
     // ---- the declaration, as the boot log's law.
     std::vector<size_t> order(d.bindings.size());

@@ -53,9 +53,20 @@ bool Place::Build(const Space& planet, double planetR, double lat, double lon,
     return true;
 }
 
+// THE BOX'S POSE, at either end (see the header): put it, turn it to its heading about the place's
+// up, then lean it about its own across-axis. With no lean the second turn is the identity and this
+// is the y-up box the first gates were built as, motor for motor.
+Motor Gateway::BoxPose(double x, double alt, double z, double azDeg, double pitchDeg) {
+    const double o[3] = {0.0, 0.0, 0.0}, upY[3] = {0.0, 1.0, 0.0}, acrossX[3] = {1.0, 0.0, 0.0};
+    Motor m = Motor::Translation(x, alt, z) * Motor::Rotation(o, upY, azDeg * kDeg);
+    // Nose up is positive, as a camera's pitch is: the turn about the box's own across-axis runs
+    // the other way round it, so the sugar's sign is taken out here and nowhere else.
+    if (pitchDeg != 0.0) m = m * Motor::Rotation(o, acrossX, -pitchDeg * kDeg);
+    return m;
+}
+
 bool Gateway::Build(const Space& source, const Space& dest, const Space::Anchor& destChart,
-                    const Space& root, double x, double alt, double z, double azDeg,
-                    const double exit[3]) {
+                    const Space& root, const Motor& entry, const Motor& exit) {
     m_valid = false;
     m_source = &source;
     m_dest = &dest;
@@ -64,11 +75,9 @@ bool Gateway::Build(const Space& source, const Space& dest, const Space::Anchor&
         Log("[gate] '%s' refused: the box needs a size", m_props.name.c_str());
         return false;
     }
-    const double o[3] = {0.0, 0.0, 0.0}, upY[3] = {0.0, 1.0, 0.0};
-    m_entry = Motor::Translation(x, alt, z) * Motor::Rotation(o, upY, azDeg * kDeg);
+    m_entry = entry;
     m_entryInv = m_entry.Inverse();
-    m_exit = Motor::Translation(exit[0], exit[1], exit[2]) *
-             Motor::Rotation(o, upY, m_props.toAz * kDeg);
+    m_exit = exit;
     m_carry = m_exit * m_entryInv;
 
     const Placement dIn = dest.To(source);
@@ -86,22 +95,36 @@ bool Gateway::Build(const Space& source, const Space& dest, const Space::Anchor&
     m_entryInRootInv = m_entryInRoot.Inverse();
     m_window = m_destInRoot * m_carry * srcInRoot.Inverse();
 
+    // Where the two ends stand and which way each one faces, read back off the motors (the sugar's
+    // numbers are the caller's; these are the box's own axes, lean and all).
     double bx = 0.0, by = 0.0, bz = 0.0;
-    m_entryInRoot.TransformPoint(bx, by, bz);
-    double ex = exit[0], ey = exit[1], ez = exit[2];
-    m_destInRoot.TransformPoint(ex, ey, ez);
-    Log("[gate] '%s': a %.0f x %.0f x %.0f m box at (%.1f, %.1f, %.1f) in %s heading %.1f carries "
-        "to %.5f N %.5f E -- (%.1f, %.1f, %.1f) in %s, heading %.1f -- %.0f km away",
-        m_props.name.c_str(), m_props.size[0], m_props.size[1], m_props.size[2], x, alt, z,
-        source.name.c_str(), azDeg, destChart.latDeg, destChart.lonDeg, exit[0], exit[1], exit[2],
-        dest.name.c_str(), m_props.toAz,
-        std::sqrt((ex - bx) * (ex - bx) + (ey - by) * (ey - by) + (ez - bz) * (ez - bz)) / 1000.0);
+    m_entry.TransformPoint(bx, by, bz);
+    double bf[3] = {0.0, 0.0, 1.0};
+    m_entry.TransformDir(bf[0], bf[1], bf[2]);
+    double ex = 0.0, ey = 0.0, ez = 0.0;
+    m_exit.TransformPoint(ex, ey, ez);
+    double ef[3] = {0.0, 0.0, 1.0};
+    m_exit.TransformDir(ef[0], ef[1], ef[2]);
+    const double kDegOf = 180.0 / 3.14159265358979323846;
+    auto azOf = [&](const double f[3]) { return std::atan2(f[0], f[2]) * kDegOf; };
+    auto elOf = [&](const double f[3]) {
+        return std::asin(std::max(-1.0, std::min(1.0, f[1]))) * kDegOf;
+    };
+    double rx = ex, ry = ey, rz = ez;
+    m_destInRoot.TransformPoint(rx, ry, rz);
+    double sx = bx, sy = by, sz = bz;
+    (source.To(root).ToMotor()).TransformPoint(sx, sy, sz);
+    Log("[gate] '%s': a %.0f x %.0f x %.0f m box at (%.1f, %.1f, %.1f) in %s facing %.1f / %+.1f "
+        "carries to %.5f N %.5f E -- (%.1f, %.1f, %.1f) in %s, facing %.1f / %+.1f -- %.0f km away",
+        m_props.name.c_str(), m_props.size[0], m_props.size[1], m_props.size[2], bx, by, bz,
+        source.name.c_str(), azOf(bf), elOf(bf), destChart.latDeg, destChart.lonDeg, ex, ey, ez,
+        dest.name.c_str(), azOf(ef), elOf(ef),
+        std::sqrt((rx - sx) * (rx - sx) + (ry - sy) * (ry - sy) + (rz - sz) * (rz - sz)) / 1000.0);
     m_valid = true;
     return true;
 }
 
-bool Gateway::Build(const Space& planet, const Space& source, double planetR, double x, double alt,
-                    double z, double azDeg) {
+bool Gateway::Build(const Space& planet, const Space& source, double planetR, const Motor& entry) {
     m_valid = false;
     std::string why;
     if (!m_ownDest.Build(planet, planetR, m_props.toLat, m_props.toLon, "gate." + m_props.name,
@@ -110,8 +133,9 @@ bool Gateway::Build(const Space& planet, const Space& source, double planetR, do
             why.c_str());
         return false;
     }
-    const double exit[3] = {0.0, 0.0, 0.0};
-    return Build(source, m_ownDest.space, m_ownDest.chart, source, x, alt, z, azDeg, exit);
+    // The exit is the same structure at the place's origin, turned to the declared heading.
+    return Build(source, m_ownDest.space, m_ownDest.chart, source, entry,
+                 BoxPose(0.0, 0.0, 0.0, m_props.toAz, 0.0));
 }
 
 bool Gateway::SeenThrough(const double eye[3], const double p[3]) const {

@@ -671,6 +671,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         resMgr.ringLoads = S.streaming.ringLoads;
         resMgr.dsSerial = opt.dsSerial;
         resMgr.traceRes = opt.resTrace;
+        resMgr.pagesEvery = opt.pagesEvery;
         int surf = -1, norm = -1;
         if (marsMode) {
             // Mars: color/normal stay NATIVE streams (the rescued sample's pyramids are
