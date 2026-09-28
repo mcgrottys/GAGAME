@@ -827,8 +827,9 @@ Settled by the eight answers of the same day:
 view needs: a gate whose far end leans looks down. Its pages ledger is the per-lattice residency
 instrument step 1 asks for. Its headroom pass is measured (ALGEBRA priors 47 on that branch: 2.5
 times the tiles mapped at a place arrived at) and its rule, that a cache decides every frame what
-it holds, carries into the manager that replaces this one. It is based on `e6acf22`, which is
-still `main`. It was not gated again when it was committed; it is gated before it is merged.
+it holds, carries into the manager that replaces this one. It was based on `e6acf22`, gated
+against it (the review, section 4), and merged the same day on the owner's word: `main` is
+`d7c209d`.
 
 And by three more:
 
@@ -894,10 +895,12 @@ each as its own commit. The other branches named below are not committed.
   the eye is addressed from the eye's own anchor and the error grows with the distance in
   texels, by arithmetic about one part in eight million of it; that growth is not measured
   beyond the 10 km row.
-- **Step 2 is being made** on its own branch, `claude/residency-floor-law`, from `e6acf22`. Its
-  GPU probe measures the law's soundness under the engine's own samplers, against today's law.
-- Step 1 waits for pull request 33 to be merged or refused: its pages ledger is that branch's.
-  The branch passed its gate in everything a settled still can see (the review, section 4).
+- **Step 2 is being made** on its own branch, `claude/residency-floor-law`. Its GPU probe
+  measures the law's soundness under the engine's own samplers, against today's law. It was
+  begun on `e6acf22` and moved onto `d7c209d` when pull request 33 was merged, and its gate is
+  taken there.
+- **Step 1 is being made** on its own branch, `claude/residency-instruments`, from `d7c209d`:
+  the pages ledger came with pull request 33.
 - Renders are taken one engine at a time. Two engines on one GPU were measured to move the
   pictures of both: the unmodified binary differed from itself by 16,669 pixels at one pose.
 - The Scriptorium serves this document and the review through a `plan` tool.
