@@ -176,9 +176,10 @@ What it costs, stated plainly:
 - **Google's imagery is resampled.** Today a z14 window texel IS a Google pixel. On the cube's
   lattice it is not, and the rung rule (ATLAS section 4) then asks for the first rung strictly
   finer than the source: one rung finer, four times the texels, for imagery only.
-- **The window caches are repainted** from the source caches. Counted today: a colour tree holds
-  2,620 z14 and 4,215 to 16,565 z17 tiles. No source is fetched again if the paint asks the zooms
-  already cached; that is checked before the first paint, not after.
+- **The window caches are repainted** from the source caches. Counted: the colour tree written
+  to today holds 4,167 z14 and 7,775 z17 tiles, and the fullest of its older identities 4,270
+  and 16,565. No source is fetched again if the paint asks the zooms already cached; that is
+  checked before the first paint, not after.
 - **The cube's edge runs through the home waters.** On the Merrimack's meridian faces 5 and 2 meet
   at 43.364 N, **60.9 km north of the mouth** (measured). It is the one place a porch must blend,
   and it is near enough to drive to. The mesh's level seams across cube faces are open today and
@@ -202,16 +203,24 @@ Windows one viewer needs at each rank (arithmetic, `stride.py`):
 | 3840 x 2160 | 0.485 | 1 | 4 | 9 | 289 |
 
 The trees on disk say the same (measured: a census of `cache/trees` by file name,
-`tools/hierarchy/tree_census.py`). In the fullest colour tree, after every flight flown so far:
+`tools/hierarchy/tree_census.py`). The cache holds a dozen identities of the colour tree, one
+for every change of its sources or its code, and each holds what was flown while it was
+current. Two of them, the fullest (`earth.color.819596d8`, written on 2026-09-01) and the one
+written to today (`earth.color.c343ccc5`):
 
-| realization | mip 0 | mip 1 | mip 2 | mip 3 and coarser |
-|---|---|---|---|---|
-| the cube (98,304 tiles at mip 0) | 1.5 % | 4.5 % | 11 % | 35 %, 84 %, then all |
-| the z14 window | 9.1 % | 39 % | 83 % | all |
-| the z17 window | 68 % | all | all | all |
+| realization | identity | mip 0 | mip 1 | mip 2 | mip 3 and coarser |
+|---|---|---|---|---|---|
+| the cube (98,304 tiles at mip 0) | the fullest | 1.5 % | 4.5 % | 11 % | 35 %, 84 %, then all |
+| | today's | 1.4 % | 4.4 % | 20 % | 56 %, then all |
+| the z14 window | the fullest | 9.1 % | 39 % | 83 % | all |
+| | today's | 7.8 % | 37 % | 99.5 % | all |
+| the z17 window | the fullest | 68 % | all | all | all |
+| | today's | 25 % | 59 % | 98 % | all |
 
 A window's fine mips are asked for near where an eye has been and nowhere else, and its mip 3 is
 asked for everywhere in it. That is a window three rungs deep whose fourth belongs to its parent.
+An earlier version of this section gave the fullest tree's numbers as "after every flight flown
+so far"; they are one identity's, and the step 4 mapping caught it.
 
 So "global, regional, micro" at seven rungs apart is three ranks and some eighty windows a rank;
 three rungs apart is five ranks and one window a rank, and it is the ladder the engine already has:
@@ -568,15 +577,57 @@ tile's name covers all three**, the source's content, the binding the scene gave
 version of the painting code. A name that no longer matches is never read, so nothing is
 invalidated by hand and nothing stale is served.
 
-Two of the three are in the names today (`kComposeVersion`, `kTileTreeVersion`, `kBlendVersion`
-for the code; the sources' content hashes). The third is not, because bindings do not exist yet.
-And the names stop short in the two places finding 25 found: a composite's key records whether
-each input is present or void and not what it holds, and a leaf is looked up in an archive with
-no key. With the names complete an archive and a loose file cannot disagree, which is git's
-answer to the same question.
+Less of that is in the names today than this section first said (corrected by the step 4
+mapping, 2026-09-28):
 
-Warming a place and packing it are then tools a scene names, run when a place is added, and
-`--warm-trees` and `--pack-trees`, which do nothing today (finding 37), are restored as those.
+- **The code.** `kTileTreeVersion` and the tile's format are in a tree's identity, and
+  `kBlendVersion` in a composite's key. `kComposeVersion` is the flat compositor's and is in no
+  tree's name.
+- **The sources' content.** A colour leaf's identity carries its structure. Google's and the
+  orthos' carry no hash of what they hold, and a height leaf's identity is its name and its
+  unit: the hash of its edits never reaches it (`HeightStackSource.h:79-112`,
+  `DomainSource.h:149`).
+- **The bindings.** Not yet, because bindings do not exist yet.
+- **What each input holds.** A composite's key records whether each input is present or void
+  and not what it holds; a leaf is looked up in an archive with no key at all; and the archive
+  is read before the loose file, while a fold reads and writes loose files only (finding 25).
+  Measured, byte against byte (`tools/hierarchy/archive_stale.py`): 4,577 of the 194,527
+  archived tiles hold bytes their loose file no longer holds, and 1,793 more have lost their
+  loose file to a drop and are still in the archive. All of them are in 22 archives of the
+  identities in use, which were set aside on 2026-09-28 by renaming them in place
+  (`<tag>.gaa.stale`), on the owner's word, until step 4b; the engine reads those trees' loose
+  files meanwhile. Pictures taken before 22:48:48Z that day show the cache as it was.
+
+With the names complete an archive and a loose file cannot disagree, which is git's answer to
+the same question. Step 4b completes them: a leaf's name carries a token of its bytes, a marker's
+token is the hash of its four children's, a composite's key folds its inputs' tokens, and a leaf
+is looked up in an archive by its token. It costs one directory search a lookup, which is what
+three probes cost today, and no tile's bytes are read to find a name.
+
+Warming a place and packing it are then tools a scene names, run when a place is added.
+`--warm-trees` and `--pack-trees` do nothing today (finding 37): their bodies exist and nothing
+dispatches them. Step 4a restores them.
+
+**A third tool retires what nothing uses** (the owner, 2026-09-28: build it). The cache keeps
+every identity a tree has ever had, a dozen of the colour tree alone, and step 4b strands
+today's as well. What makes pruning hard is that some twenty working trees on different
+branches share the one cache, so a tree this build cannot name may be one another branch reads
+daily, and that the file system keeps no usable time of last reading, so a tree that is fully
+painted looks old by its files. The design:
+
+- **A tree says when it was last used.** Every run stamps the frame folders it uses with the
+  time, the engine's revision and the scene. The unit is the lattice's folder and not the
+  node's, because a lattice that is dropped goes stale inside a node that is still live.
+- **The tool lists, and by default does nothing else.** Stamped within the age, kept; stamped
+  and older, stale; never stamped, judged by its newest write and given twice the age.
+- **Retiring is a rename.** A stale folder and its archive move into a dated folder beside the
+  trees, with a manifest and the commands that put them back. Nothing is deleted.
+- **Purging deletes retired folders older than a second age,** and is the only path that does.
+- **It never follows a link,** acts only on names of a tree's form under a root named `trees`,
+  refuses while an engine is running, and asks for the root's own path as its confirmation.
+
+Only the trees are derived: a tree that is gone repaints from the source caches with no fetch.
+No source cache is in the tool's reach. Retiring and purging are run by the owner.
 
 ### 4.15 Sources, and what each may be asked for
 
@@ -597,7 +648,10 @@ Two things follow. **The free allowance is counted in tiles, not in bytes.** A s
 some 20 KB, so 100,000 a month is about 2 GB, and a budget of 5 to 10 GB a day is far more than
 Google gives without charge. The engine's cap for Google is therefore a count, 3,000 a day, which
 keeps a month inside the allowance whatever the day's quota permits; the 5 to 10 GB a day governs
-the open sources. **The colour is a composite of its sources** (the owner, 2026-09-28), and for
+the open sources. That cap is a proposal and not yet code: today's budget is counted per run,
+1,000 by default (`Options.h:62`, the scene's `streaming.tileBudget`), and no run knows what an
+earlier run of the same day fetched. A count kept beside the source's cache is owed before the
+first harvest. **The colour is a composite of its sources** (the owner, 2026-09-28), and for
 now Google fills its base. NAIP and Sentinel-2 between them cover every place named so far at
 rank 2 and, in the United States, at rank 3 and beyond; they enter the same stack as inserts
 above the base, or as the base where a scene says so. No source is the floor by construction.
@@ -853,7 +907,7 @@ Each step names the instrument that can see it fail, and what that instrument ca
 | 1a | The pixel water's two defects (findings 6 and 7), in the shader as it stands | a probe of the cast's landing point against doubles; stills and a rail, before and after, for the owner's eye | the look is his to judge, not a threshold's |
 | 2 | The floor law | storm rail A/B by eye and by SSIM; the settled stills for soundness | a settled still cannot see a transition |
 | 3 | `Lattice` gains the face-plane window: ground metric, box, texel, tag, the plane rows. The address function in C++ and HLSL | `uv_precision.py` as a selftest; GPU readback of the address at random points | nothing downstream reads it yet |
-| 4 | The tree keyed `(face, rung, x, y)`, its names complete (4.14); warming and packing as tools a scene names; paint rank 2 and rank 3 at the Merrimack from the cached sources. The real-data test of sparseness: tiles and bytes a rank, beside the Mercator trees | `--tree-audit` against the Mercator pages at the same ground, within the resampling bound; fetch count zero; a fold after a pack is read back as folded | picture quality: by eye, in the albedo lens |
+| 4 | The tree keyed `(face, rung, x, y)`, in four parts (below the table): 4a the tree made fit for depth, 4b its names completed, 4c the pyramid painted at the Merrimack, 4d the audit across lattices | below the table | picture quality: by eye, in the albedo lens |
 | 5 | The residency manager that tracks the pyramid's tiles, with windows that activate, move and release; the directory and the plane rows uploaded. It replaces the code of findings 2 and 3 | step 1's audit, clean; slot audit; `[settle-exact]` hashes; the storm rail | whether the picture is right |
 | 6 | The shader contract: the walk, the address, the porch and the phase | stills and rail against the Mercator baseline by SSIM and by eye, floors stated; a lens that paints rank and window | bit identity is gone by construction: the lattice changed |
 | 7 | The kernels' bed, the exposure and the wave pages through the same contract; then the water surface as a tenant | `--water-probe` (drawn level against the level the hull reads), standing, per hull; `[kernel]` fingerprints; `--sea-verify` | |
@@ -863,8 +917,29 @@ Each step names the instrument that can see it fail, and what that instrument ca
 | 11 | Gates restated as cells; cages when they are wanted | | |
 | 12 | Not scheduled. The sea accepts a spectrum given as bands from a point source: a buoy's own first, then a music file in a buoy's place (4.16). After it, and only if rings are wanted: a body's displaced volume drives the water, the hull's wake first | the sea synthesised from a buoy's bands, measured back at its place, gives the bands; step 8's gate, with the music in the place of the place. For the second form, the piston's wave height over its stroke against wavemaker theory's ratio | the look, which is the owner's; two dimensions of the closed form, until they are measured |
 
-**Standing, 2026-09-28.** Steps 0 and 3 are committed on `claude/earth-texture-hierarchy-53a3b3`,
-each as its own commit. The other branches named below are not committed.
+**Step 4, in four parts.** A read-only mapping of the tree's code (2026-09-28) tested one
+candidate: the pyramid is `Lattice::Cube(16384 << 17)`, a face 2^31 texels across, so that
+`mip = 17 - rung` is a fixed numbering and a tile is the `TileRequest` it always was. The
+addressing survives as it is: every lattice expression is in doubles, and every key packs the
+mip in 5 bits and x and y in 28. Rung 17, 4.7 mm, is the finest a 32-bit face dimension holds.
+A paint at mip 17 + k is the arithmetic of today's cube at mip k. What does not survive is
+depth, and the mapping found the names short in more places than the review had.
+
+| part | what | gate | blind to |
+|---|---|---|---|
+| 4a | The tree made fit for depth, changing no name, no byte and no picture. The fold holds one stripe where it nests sixteen today (finding 28) and walks a cold chain once, not twice; a tile-native chain stops where its ancestors are already marked; `Prefill` takes a finest mip and whole tiles; the archive assigns an offset to a payload it has written (finding 29); a refused fetch is counted and remembered, so a run says what it WOULD have fetched; the tools that nothing dispatches are dispatched (findings 37, 39) | a counter of stripes held, seen to trip on today's path; every ancestor of a painted leaf equal to the fold of its children, on a 25-level scratch tree; today's depth, old path against new, byte for byte; the six stills' hashes | a driver of contention that twelve threads do not raise |
+| 4b | The names completed (4.14): a leaf's name carries a token of its bytes, a composite's key folds its inputs' tokens and not their presence, a leaf is looked up in an archive by its token, and a height leaf's identity carries its content as a colour leaf's does. The tree's version is raised, so every tree repaints from the source caches on its next flight; nothing is fetched and nothing is deleted | `tools/hierarchy/archive_stale.py`: no archive holds bytes its loose file does not; a fold after a pack is read back as folded; the stills, where the pixels that move are the tiles that were served stale | what a token costs on a disk that is not an NVMe |
+| 4c | The pyramid painted at the Merrimack: ranks 2 and 3 over the ground of today's two windows, from the cached sources, the fetch budget at zero. The real-data test of sparseness: tiles and bytes a rank, beside the Mercator trees | fetches that would have been made: zero; the census | whether the picture is good: nothing draws it until step 6 |
+| 4d | The audit across lattices. Today's audit compares a tree with the flat compositor at the same address and enforces nothing | containment: a pyramid texel lies within the least and the greatest of the page texels around its centre, by one step of the byte. No constant bound is honest: across an edge in the imagery two lattices of nearly equal grain differ by as much as the edge does | a source the two lattices both sample wrongly |
+
+Two things the mapping measured about the cost of depth. A leaf painted in a region nobody has
+flown costs up to 152 tile writes today, because each absent ancestor is painted, folded
+upward, and then folded again by its caller; walked once it is 16. And ten thousand leaves of
+one region make some 3,400 ancestors, so a rank's tiles are about a third more than its leaves.
+
+**Standing, 2026-09-28.** Steps 0 and 3 are in `main`: pull request 34 was merged that day, on
+top of pull request 33, and `main` is `35a9eb7`. The merged tree was built and its selftest run:
+it exits 0. The branches named below are not committed.
 
 - **Step 0 is done**, in `src/hal/Gpu.{h,cpp}`, `src/hal/TileAtlas.{h,cpp}` and
   `shaders/TileWrap.hlsl`. `--selftest` exits 0 with the probes in it, 26 new lines and no old
@@ -897,10 +972,12 @@ each as its own commit. The other branches named below are not committed.
   beyond the 10 km row.
 - **Step 2 is being made** on its own branch, `claude/residency-floor-law`. Its GPU probe
   measures the law's soundness under the engine's own samplers, against today's law. It was
-  begun on `e6acf22` and moved onto `d7c209d` when pull request 33 was merged, and its gate is
-  taken there.
-- **Step 1 is being made** on its own branch, `claude/residency-instruments`, from `d7c209d`:
-  the pages ledger came with pull request 33.
+  begun on `e6acf22` and moves onto `main` as `main` moves; its gate is taken after the archives
+  were set aside, both sides.
+- **Step 1 is being made** on its own branch, `claude/residency-instruments`: the pages ledger
+  came with pull request 33.
+- **Step 4a is being made** on `claude/pyramid-tree`, and **the prune tool** on
+  `claude/tree-prune`.
 - Renders are taken one engine at a time. Two engines on one GPU were measured to move the
   pictures of both: the unmodified binary differed from itself by 16,669 pixels at one pose.
 - The Scriptorium serves this document and the review through a `plan` tool.
