@@ -121,6 +121,13 @@ public:
     // Queried once at Init. Tier 2 is the load-bearing guarantee (NULL-mapped tiles read as zero,
     // writes discarded); Tier 3 adds 3D tiled resources for future volume banks.
     D3D12_TILED_RESOURCES_TIER TiledTier() const { return m_tiledTier; }
+    // Queried once at Init too (HIERARCHY step 0): the GPU virtual address bits the adapter gives
+    // ONE resource and the whole PROCESS. A reserved array pays address space for every slice it
+    // declares before a byte is mapped, and every tenant's arrays share the per-process figure,
+    // so these two numbers are the windows' budget -- read, not taken from the docs' "at least
+    // 40". 0 when the query failed.
+    uint32_t VaBitsPerResource() const { return m_vaBitsPerResource; }
+    uint32_t VaBitsPerProcess() const { return m_vaBitsPerProcess; }
 
     DescriptorHeap& SrvHeap() { return m_srvHeap; }
     // What the adapter actually has, for budget accounting across banks.
@@ -228,6 +235,7 @@ private:
     uint32_t m_frameIndex = 0;
 
     D3D12_TILED_RESOURCES_TIER m_tiledTier = D3D12_TILED_RESOURCES_TIER_NOT_SUPPORTED;
+    uint32_t m_vaBitsPerResource = 0, m_vaBitsPerProcess = 0;   // 0 = not reported
 
     // one-off upload path
     Com<ID3D12CommandAllocator> m_uploadAlloc;
