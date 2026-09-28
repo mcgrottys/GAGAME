@@ -30,5 +30,14 @@ radiometry, frame calculus, and the PRIORS LEDGER (where measured reality diverg
 from textbook/training expectations). No arg lists topics; read `priors` first when
 the engine surprises you.
 
+`plan(name?)` serves what is PROPOSED or FOUND, NOT what is built: the texture-hierarchy
+proposal (`docs/HIERARCHY.md`) and the code reviews beside it (every
+`docs/REVIEW_*.md`), per section. `docs/ALGEBRA.md`, served by `math`, stays the record
+of what is built; these get a tool of their own so a proposal is never read as that
+record. No arg lists the documents and their sections; `plan 4.6` (or `hierarchy 4.6`,
+`review 1`) prints a section, `plan finding 7` prints that row of a review's tables
+under its section and the table's header row, and any other text matches section
+titles, then lines of the text. The documents are chosen by `PlanDocs` in `Program.cs`.
+
 SQLite over MySQL on purpose: one file, zero administration, transactional; the schema is
 plain SQL and ports to MySQL unchanged the day this becomes multi-user.
