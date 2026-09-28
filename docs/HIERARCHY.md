@@ -160,8 +160,8 @@ Today the regional pages are Web-Mercator windows and the globe is a gnomonic cu
 met by resampling wherever a window hands over to the cube. The proposal puts every window on the
 cube's own lattice, in the plane of a cube face. (An earlier version of this section had a
 window extend past the face's square where it needs to. The tree's address is unsigned, so a
-tile past a face's edge has no name today; what the porch at a cube's edge needs from that is
-step 9's to settle, and 4.17 says what is known.) The reasons, in order of weight:
+tile past a face's edge has no name today. Section 4.18 gives it one: an apron is a face of
+its own.) The reasons, in order of weight:
 
 1. **One lattice.** A window's texels ARE the pyramid's texels. Where two windows answer for one
    ground they hold the same bytes, and where a window hands over to its parent it does so at a
@@ -894,7 +894,7 @@ from the edge of its rung-9 block.
   at their seam has no neighbour to read, as a Mercator page has none at its edge today; and at
   the face's own edge the neighbour lies in another plane. A porch needs a margin that both
   windows hold. On one face a following window brings it. Across an edge it means tiles past
-  the face's square, which the tree cannot name. Open, and step 9's.
+  the face's square, which the tree cannot name today. Section 4.18 names them.
 - **The address needs the ground, not the wave.** The point a pixel is addressed by must be the
   undisplaced one; the interpolated position carries the wave's sideways displacement. Step 1a
   adds that interpolant for the water's own sample point, and the address reuses it.
@@ -910,6 +910,65 @@ one pose:
 | 3 | the eye-relative point: the planes about the tangent origin, the undisplaced point | step 3's gate at the pixel stage |
 | 4 | the directory and rank 1, in C++ and in HLSL | the two equal on random ground through a readback |
 | 5 | the old path deleted, and the key | the key-on bytes reproduced; more lines removed than added |
+
+### 4.18 The apron: a window past its face's edge
+
+Design, for step 9. It answers the point 4.17 left open.
+
+**What is needed.** Near an edge of the cube a filter's footprint crosses the edge, and the
+porch's blend runs across it. Both want the window on each side to hold texels on BOTH sides of
+the edge, in its own plane. A face's plane does not stop at the face's square: the central
+projection carries on, and `ComposeCubeDir` already takes a coordinate past 1. The shader needs
+nothing new either: `PageTexel` is the address in the plane, and a texel past the edge is one
+more texel of the window, found by the same modulo. What has no name is the TILE, because a
+tile's address is unsigned and the face's tiles start at zero.
+
+**The answer: an apron is a face of its own.** Beside the six faces the pyramid has their
+aprons: for each face, four strips past its edges and four squares past its corners, 48 in all.
+An apron's tiles count from the edge outward, so their addresses are unsigned like every other,
+and an apron has parents and children of its own by the same halving. Its texel centres are the
+face's own coordinates carried past the edge: for the strip past the edge `s = 1` of a face
+with `N` texels a side, texel `x` stands at `s = 1 + (x + 1/2)(2 / N)`. A window that reaches
+past the edge maps the face's tiles where `X < N` and the apron's where it is not; which it is
+is decided where the manager names a tile to the tree, and nowhere else. The shader cannot tell
+an apron's tile from a face's.
+
+**How wide.** A window answers for a cell only where the cell lies a porch inside the window's
+edge (4.6), and the blend's band is a few hundred texels. So an apron is some sixteen tiles
+deep at a window's finest rung, two at its floor, and exists only where a window has stood by
+an edge. Rank 0 has none: its faces are read through the cube's own views, and the hardware
+filters across them.
+
+**The weight is one more ratio of planes.** The plane through the body's centre that holds the
+edge between two faces has the normal `m = (nA - nB) / sqrt 2`, and the two faces' bisector is
+`nA + nB`. The weight is a smooth step of `(P . m) / (P . (nA + nB))`, which is zero on the
+edge, has the same form seen from either face, and counts the distance from the edge evenly in
+the texels of both. The engine blends across cube edges this way already for the cascade sea
+(`WaveChart`: a partition of unity over a band, with its continuity gated), so this is that
+law given to textures, not a new one.
+
+**What it costs.** Ground within an apron's depth of an edge is painted twice where it was
+painted once, in its own face and in the apron of the face across the edge; by a corner, where
+three faces meet, up to five times. Sixteen tiles are 2.4 km at rank 3's finest rung and 19 km
+at rank 2's. The tree's keys must hold 54 faces where they hold 8: the archive's key gives the
+face three bits today. Step 4b changes the keys anyway, and gives the face six.
+
+**What was considered and not taken.**
+
+- *A signed address.* It breaks the halving that finds a parent, which is a shift, at every
+  site that computes one.
+- *No apron: near an edge, fall to rank 0,* which the hardware filters across faces. Every
+  place on an edge of the cube would then be drawn at 611 m, and an edge runs 61 km north of
+  the Merrimack.
+- *Charts of their own over the edges and the corners,* twenty more planes, blended inside the
+  faces. No apron, and the address would not change, since any plane through the centre gives
+  a ratio of planes. But it is twenty more lattices, each with a pyramid of its own, where the
+  design has one.
+
+**Its gate** is step 9's, as written: a rail across 43.364 N, and a lens that paints the weight.
+And one the apron adds: a texel of an apron and the texel of the face across the edge that
+covers the same ground are painted from the same sources, so they agree within the containment
+of step 4d.
 
 ## 5. Decisions for Mark
 
@@ -988,7 +1047,7 @@ Each step names the instrument that can see it fail, and what that instrument ca
 | 6 | **Before step 5, on standing aligned blocks** (4.17's five commits, the colour and the mask first): the address, the directory, rank 1. Then, with step 5 behind it, the porch and the phase on windows that move | stills and rail against the Mercator baseline by SSIM and by eye, floors stated; a lens that paints rank and window | bit identity is gone by construction: the lattice changed |
 | 7 | The height with the exposure, as one move, and with them the decision on the solver's bed (finding 48); the wave pages, whose solver is re-aligned to a face's plane; then the water surface as a tenant | `--water-probe` (drawn level against the level the hull reads), standing, per hull; `[kernel]` fingerprints; `--sea-verify` | |
 | 8 | A second place, then one in each face of the cube: harvested, declared in a scene file, the boat put in. The politeness budget governs every fetch | `git diff --stat src shaders` is empty between the scene without the place and the scene with it; one ground point read back through two worlds: equal | data quality at the far place |
-| 9 | The porch at the cube's edge | a rail across 43.364 N; a lens that paints the weight | |
+| 9 | The porch at the cube's edge, and the aprons it reads (4.18) | a rail across 43.364 N; a lens that paints the weight; an apron's texel against the texel across the edge, by containment | |
 | 10 | Rank 4 from the 15 cm orthos at the jetty | a texel checkerboard at the helm | |
 | 11 | Gates restated as cells; cages when they are wanted | | |
 | 12 | Not scheduled. The sea accepts a spectrum given as bands from a point source: a buoy's own first, then a music file in a buoy's place (4.16). After it, and only if rings are wanted: a body's displaced volume drives the water, the hull's wake first | the sea synthesised from a buoy's bands, measured back at its place, gives the bands; step 8's gate, with the music in the place of the place. For the second form, the piston's wave height over its stroke against wavemaker theory's ratio | the look, which is the owner's; two dimensions of the closed form, until they are measured |
@@ -1004,7 +1063,7 @@ depth, and the mapping found the names short in more places than the review had.
 | part | what | gate | blind to |
 |---|---|---|---|
 | 4a | The tree made fit for depth, changing no name, no byte and no picture. The fold holds one stripe where it nests sixteen today (finding 28) and walks a cold chain once, not twice; a tile-native chain stops where its ancestors are already marked; `Prefill` takes a finest mip and whole tiles; the archive assigns an offset to a payload it has written (finding 29); a refused fetch is counted and remembered, so a run says what it WOULD have fetched; the tools that nothing dispatches are dispatched (findings 37, 39) | a counter of stripes held, seen to trip on today's path; every ancestor of a painted leaf equal to the fold of its children, on a 25-level scratch tree; today's depth, old path against new, byte for byte; the six stills' hashes | a driver of contention that twelve threads do not raise |
-| 4b | The names completed (4.14): a leaf's name carries a token of its bytes, a composite's key folds its inputs' tokens and not their presence, a leaf is looked up in an archive by its token, and a height leaf's identity carries its content as a colour leaf's does. The tree's version is raised, so every tree repaints from the source caches on its next flight; nothing is fetched and nothing is deleted | `tools/hierarchy/archive_stale.py`: no archive holds bytes its loose file does not; a fold after a pack is read back as folded; the stills, where the pixels that move are the tiles that were served stale | what a token costs on a disk that is not an NVMe |
+| 4b | The names completed (4.14): a leaf's name carries a token of its bytes, a composite's key folds its inputs' tokens and not their presence, a leaf is looked up in an archive by its token, a height leaf's identity carries its content as a colour leaf's does, and the archive's key gives the face six bits where it gives three, for the aprons of 4.18. The tree's version is raised, so every tree repaints from the source caches on its next flight; nothing is fetched and nothing is deleted | `tools/hierarchy/archive_stale.py`: no archive holds bytes its loose file does not; a fold after a pack is read back as folded; the stills, where the pixels that move are the tiles that were served stale | what a token costs on a disk that is not an NVMe |
 | 4c | The pyramid painted at the Merrimack: ranks 2 and 3 over the ground of today's two windows, from the cached sources, the fetch budget at zero. The real-data test of sparseness: tiles and bytes a rank, beside the Mercator trees | fetches that would have been made: zero; the census | whether the picture is good: nothing draws it until step 6 |
 | 4d | The audit across lattices. Today's audit compares a tree with the flat compositor at the same address and enforces nothing | containment: a pyramid texel lies within the least and the greatest of the page texels around its centre, by one step of the byte. No constant bound is honest: across an edge in the imagery two lattices of nearly equal grain differ by as much as the edge does | a source the two lattices both sample wrongly |
 
