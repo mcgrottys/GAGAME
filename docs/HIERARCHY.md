@@ -124,14 +124,20 @@ cube's mip 0, 611.496 m of nominal ground a texel; rung r is that divided by 2^r
 of rung r is a Web-Mercator zoom of 8 + r. Rungs below zero are the cube's own mips. The tree has
 parents and children because a parent is the fold of its children (SPARSE_GA section 43), and it
 has nothing else: no regional texture, no micro texture, no window. **That is the sense in which
-the CPU tree has no LODs.** A physics query reads the finest rung the tree holds at a place and
-never learns what the GPU has mapped. Today it does learn it: `HeightPage` answers from the z14
-page at the Merrimack and from the cube elsewhere.
+the CPU tree has no LODs.** A physics query reads what the sources can paint at a place, at the
+rung it asks for, and learns neither what the cache holds nor what the GPU has mapped: what is
+on disk and what is mapped both depend on where somebody has flown. The CPU's own readers
+already keep to that (`HeightPage` evaluates the sources at the page's texel centres, and
+chooses its page by containment). One path does not: the solver's bed is read on the GPU by
+residency, and the hull reads the solver (finding 48).
 
 On the GPU a page tenant stays what it is today, one reserved `Texture2DArray`. Slices 0 to 5 stay
 the cube's faces with their full chains. Every further slice is a **window**: 16384 texels a side
 at its finest rung, carrying four mips (its own three rungs and one shared with the rank above),
-addressed modulo 16384. A global texel `X` at the window's rung lives at `X mod 16384`, and at mip
+addressed modulo 16384. Its fourth mip is its FLOOR, and the parent of a tile at the floor is
+the same ground in the window of the rank above, not a coarser mip of its own slice; the
+array's further mips exist, because one array has one mip count, and a window leaves them
+unmapped. A global texel `X` at the window's rung lives at `X mod 16384`, and at mip
 m at `(X >> m) mod (16384 >> m)`; those agree for every window origin (measured: 200,000 random
 pairs, no disagreement, `tools/hierarchy/porch_floor.py`), so a WRAP sampler and the hardware's own
 chain read the global lattice correctly at every mip. Finding 4, a page whose coarse mips sit 100 m
@@ -152,8 +158,10 @@ GPU-resident law's "one lattice" carried to the slices.
 
 Today the regional pages are Web-Mercator windows and the globe is a gnomonic cube: two lattices,
 met by resampling wherever a window hands over to the cube. The proposal puts every window on the
-cube's own lattice, in the plane of a cube face, extended past the face's square where a window
-needs it. The reasons, in order of weight:
+cube's own lattice, in the plane of a cube face. (An earlier version of this section had a
+window extend past the face's square where it needs to. The tree's address is unsigned, so a
+tile past a face's edge has no name today; what the porch at a cube's edge needs from that is
+step 9's to settle, and 4.17 says what is known.) The reasons, in order of weight:
 
 1. **One lattice.** A window's texels ARE the pyramid's texels. Where two windows answer for one
    ground they hold the same bytes, and where a window hands over to its parent it does so at a
@@ -282,9 +290,11 @@ whole ladder, of textures a few kilobytes in size, once per pixel for every tena
 pixel resolves its page nineteen times.
 
 **The binding** is the same answer computed on the CPU. The walk of the planet already visits
-every node it draws and already asks for that node's tiles; it can name the node's window and
-hand the mesh stage the window's two planes, as it hands it an anchor and a Jacobian today. A
-rasterized pixel then pays no directory load at all. A ray that leaves the surface (the pixel
+every node it draws and already asks for that node's tiles; it can name the node's window in
+the record it hands the mesh stage, which has 29 spare bits beside its level. The window's
+planes are not the record's: they are the same for every record of one world, so they ride one
+table a world, and a record of 96 bytes stays 96. A rasterized pixel then pays no directory
+load at all. A ray that leaves the surface (the pixel
 water's two rays, a march, a compute kernel) has no node and walks the directory.
 
 The two must be one function. It is written once with a C++ body and an HLSL body, and a gate
@@ -341,17 +351,19 @@ tenant's slices are planes, 33 to a window, so it is given its windows separatel
 The pool is what it is today; the windows change where tiles are addressed, not how many a view
 wants.
 
-Three things in the manager must change first, because windows lean on all three: the tail a
-batch loses at the pool's cap (finding 2), the residency bytes an invalidation erases (finding 3),
-and the residency map's upload, which today re-sends a whole tenant for one dirty byte and is
-capped at 256 slices a turn.
+Three things in the manager must change before a window MOVES, because a moving window leans
+on all three: the tail a batch loses at the pool's cap (finding 2), the residency bytes an
+invalidation erases (finding 3), and the residency map's upload, which today re-sends a whole
+tenant for one dirty byte. A window that stands on an aligned block leans on none of them
+(4.17), which is why the shader's contract is made first, on standing blocks, and the manager
+after it.
 
 ### 4.8 Portals, and several eyes
 
 A gate's world is rasterized, not traced: the far world is walked from the carried eye, drawn in
 this frame by one motor, and a per-pixel slab test keeps each pixel for the world whose depth its
 ray reaches. So every world has its own meshlet records, and the binding of section 4.5 gives each
-record its window and its two planes relative to THAT world's eye. A carried eye is an interest
+record its window, and each world its table of planes relative to THAT world's eye. A carried eye is an interest
 like any other, and windows follow it as they follow the camera; the gate's residency sampler
 already exists.
 
@@ -835,6 +847,70 @@ Schreck, Hafner and Wojtan 2019; dispersion inside a shallow-water solver is Jes
 screen. What the engine would have is the combination: the source is bound in a scene with its
 units checked, and the water it makes is the water the hull reads.
 
+### 4.17 What the code said of 4.1 to 4.8
+
+A second read-only mapping (2026-09-28) walked the residency manager, the wants, and every
+stage's way to a page, and put the design beside them. Where it corrected a section, the
+section now says so. What it changed in the plan:
+
+**A window that stands on an aligned block needs no new manager.** A window whose origin is a
+multiple of 16384 texels of its rung is one block of the cube's lattice at that rung: all of its
+mips line up, its uv stays inside [0, 1), and today's clamp samplers, today's residency map and
+today's per-slice manager are right for it. It is the Mercator page's shape on the other
+lattice. So the order of section 6 is interleaved: the shader's contract first, on standing
+blocks, where a picture tests the pyramid, the address and the directory; then the manager;
+then windows that move. Its price is that a place near a block's edge needs two blocks of a
+rank where a following window would need one: by arithmetic the Merrimack's mouth stands 2.3 km
+from the edge of its rung-9 block.
+
+**What a moving window adds, and the code does not have:**
+
+| what | where it bites |
+|---|---|
+| slots addressed modulo the window | a tile's identity is its slot today (`StampIndex`), and its key holds 21 bits of x and y |
+| a floor that is not the slice's coarsest mip | the parent rule, the boot map and the hold all say `mips - 1` |
+| a want across the modulo seam | `Want` takes one rectangle in a slice's uv, clamped to [0, 0.9999] |
+| a landing checked by address | a DirectStorage copy lands on the slot captured when it was queued, and ownership is checked by slot |
+| the turn at the head of the frame | it runs inside the globe's draw, after the sea and the banks have recorded their reads |
+| a map upload that cannot be deferred | a map that finds no room stays dirty a turn, and after an eviction in that turn it points at zeros |
+| an anisotropic sampler that wraps | the engine has none; step 0 measured the wrap with a trilinear one |
+| origins that are a function of the pose | or the settled stills stop being exact; their hash must cover global tiles and origins |
+| the capacity declared | slices are fixed when the array is made, and a residency sampler exists per gate and per subject, of sixteen |
+
+**What the code forces a decision on:**
+
+- **The solver's bed** (finding 48). The solver reads its bed on the GPU, choosing page or cube
+  and the mip by what is resident, and the hull's level and current are the solver's. Physics
+  reads residency there today. Either the solver stands on a pinned window and is held until
+  that window is whole, or it keeps a bed of its own. The first is the design's: a solver's
+  domain is a standing window (4.1).
+- **The height and the exposure move together.** The bank's kernel and the sea read both through
+  one slice and one row.
+- **The colour and the mask move together.** They share lattices, a tree, rows and wants.
+- **Rank 1 cannot be skipped.** The directory names the next rank, and a cell of a face's
+  directory is four times a rank-2 window: without a window of rank 1 the walk cannot reach
+  rank 2.
+- **The apron at a cube's edge.** Blocks of one rank that tile a face do not overlap, so a filter
+  at their seam has no neighbour to read, as a Mercator page has none at its edge today; and at
+  the face's own edge the neighbour lies in another plane. A porch needs a margin that both
+  windows hold. On one face a following window brings it. Across an edge it means tiles past
+  the face's square, which the tree cannot name. Open, and step 9's.
+- **The address needs the ground, not the wave.** The point a pixel is addressed by must be the
+  undisplaced one; the interpolated position carries the wave's sideways displacement. Step 1a
+  adds that interpolant for the water's own sample point, and the address reuses it.
+
+**The migration, for the colour and the mask at the Merrimack,** with the old path and the new
+chosen by one scene key until the last commit, so that every commit is compared by picture at
+one pose:
+
+| commit | adds | gate |
+|---|---|---|
+| 1 | a slice's binding to one aligned block of a finer cube lattice: slot to global tile and back, and a tree's changes routed to the slot. Nothing reachable | the round trip at every mip; the default run's hashes unchanged |
+| 2 | the key; slices 6 and beyond as blocks of ranks 2 and 3; appended rows; the colour and the mask read by `PageTexelUv` with today's choice between page and cube; the wants in the rung's grid | stills at four poses by SSIM and by eye, the albedo lens; every other tenant's hashes equal across the two arms; no fetch |
+| 3 | the eye-relative point: the planes about the tangent origin, the undisplaced point | step 3's gate at the pixel stage |
+| 4 | the directory and rank 1, in C++ and in HLSL | the two equal on random ground through a readback |
+| 5 | the old path deleted, and the key | the key-on bytes reproduced; more lines removed than added |
+
 ## 5. Decisions for Mark
 
 Settled already, 2026-09-28, and built into the sections above:
@@ -908,9 +984,9 @@ Each step names the instrument that can see it fail, and what that instrument ca
 | 2 | The floor law | storm rail A/B by eye and by SSIM; the settled stills for soundness | a settled still cannot see a transition |
 | 3 | `Lattice` gains the face-plane window: ground metric, box, texel, tag, the plane rows. The address function in C++ and HLSL | `uv_precision.py` as a selftest; GPU readback of the address at random points | nothing downstream reads it yet |
 | 4 | The tree keyed `(face, rung, x, y)`, in four parts (below the table): 4a the tree made fit for depth, 4b its names completed, 4c the pyramid painted at the Merrimack, 4d the audit across lattices | below the table | picture quality: by eye, in the albedo lens |
-| 5 | The residency manager that tracks the pyramid's tiles, with windows that activate, move and release; the directory and the plane rows uploaded. It replaces the code of findings 2 and 3 | step 1's audit, clean; slot audit; `[settle-exact]` hashes; the storm rail | whether the picture is right |
-| 6 | The shader contract: the walk, the address, the porch and the phase | stills and rail against the Mercator baseline by SSIM and by eye, floors stated; a lens that paints rank and window | bit identity is gone by construction: the lattice changed |
-| 7 | The kernels' bed, the exposure and the wave pages through the same contract; then the water surface as a tenant | `--water-probe` (drawn level against the level the hull reads), standing, per hull; `[kernel]` fingerprints; `--sea-verify` | |
+| 5 | **After step 6's standing blocks** (4.17). The residency manager that tracks the pyramid's tiles, with windows that activate, move and release. It replaces the code of findings 2 and 3 | step 1's audit, clean; slot audit; `[settle-exact]` hashes over global tiles and origins; the storm rail | whether the picture is right |
+| 6 | **Before step 5, on standing aligned blocks** (4.17's five commits, the colour and the mask first): the address, the directory, rank 1. Then, with step 5 behind it, the porch and the phase on windows that move | stills and rail against the Mercator baseline by SSIM and by eye, floors stated; a lens that paints rank and window | bit identity is gone by construction: the lattice changed |
+| 7 | The height with the exposure, as one move, and with them the decision on the solver's bed (finding 48); the wave pages, whose solver is re-aligned to a face's plane; then the water surface as a tenant | `--water-probe` (drawn level against the level the hull reads), standing, per hull; `[kernel]` fingerprints; `--sea-verify` | |
 | 8 | A second place, then one in each face of the cube: harvested, declared in a scene file, the boat put in. The politeness budget governs every fetch | `git diff --stat src shaders` is empty between the scene without the place and the scene with it; one ground point read back through two worlds: equal | data quality at the far place |
 | 9 | The porch at the cube's edge | a rail across 43.364 N; a lens that paints the weight | |
 | 10 | Rank 4 from the 15 cm orthos at the jetty | a texel checkerboard at the helm | |
