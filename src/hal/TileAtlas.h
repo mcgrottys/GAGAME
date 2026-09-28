@@ -21,6 +21,9 @@
 //       next write;
 //    5. (Tier 3 only) the same holds for a 3D reserved resource, which the volume grade banks
 //       would use.
+//  and then, after that verdict, HIERARCHY step 0 (docs/HIERARCHY.md section 6): one heap tile
+//  mapped at three places of one reserved array (two slices at mip 0, a third at mip 1), and a
+//  WRAP tap across a reserved slice's edge in the pixel stage, each with a planted failure.
 //
 //  M4 grows this file into the real atlas (occupancy quadtree, batched UpdateTileMappings, heap
 //  pool, grade-signature Cayley skipping). M0 keeps it to the proof.
@@ -39,7 +42,11 @@ namespace ga {
 uint64_t PoolCommittedBytes();
 
 // Runs the whole self-test suite. Logs a detailed report; returns true only if every check on
-// every tile passed. Requires shaders/TileTest.hlsl under shaderDir.
+// every tile passed and every step-0 instrument caught its planted failure (a step-0 fact that
+// does not hold is reported, not failed). Requires shaders/TileTest.hlsl and TileWrap.hlsl
+// under shaderDir.
+// HIERARCHY step 3 follows step 0's verdict: a GATE on the address of a face-plane window
+// (PageTexel against the doubles, and a plant), which needs shaders/TileTexel.hlsl as well.
 bool RunTileSelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir);
 
 // ================================================================================================

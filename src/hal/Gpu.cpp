@@ -2,6 +2,7 @@
 #include "hal/Retire.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <string>
 
@@ -184,6 +185,25 @@ void Gpu::Init(HWND hwnd, uint32_t width, uint32_t height, bool wantDebugLayer,
         if (opts.TiledResourcesTier < D3D12_TILED_RESOURCES_TIER_2) {
             Log("[gpu] WARNING: tiled tier < 2; null-tile reads are UNDEFINED on this adapter");
         }
+    }
+
+    // HIERARCHY step 0: the address bits. The windows' budget is address space, not memory --
+    // a 16384 RGBA8 slice with its chain reserves 1.33 GiB mapped or not -- and the per-process
+    // figure bounds every tenant together. Asked, never assumed; a refusal is said and stored
+    // as 0 rather than failing the boot, because nothing reads the numbers yet.
+    D3D12_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT va{};
+    const HRESULT vaHr = m_device->CheckFeatureSupport(D3D12_FEATURE_GPU_VIRTUAL_ADDRESS_SUPPORT,
+                                                       &va, sizeof(va));
+    if (SUCCEEDED(vaHr)) {
+        m_vaBitsPerResource = va.MaxGPUVirtualAddressBitsPerResource;
+        m_vaBitsPerProcess = va.MaxGPUVirtualAddressBitsPerProcess;
+        Log("[gpu] virtual address bits: %u per resource (%.0f GB), %u per process (%.0f GB)",
+            m_vaBitsPerResource, std::ldexp(1.0, static_cast<int>(m_vaBitsPerResource) - 30),
+            m_vaBitsPerProcess, std::ldexp(1.0, static_cast<int>(m_vaBitsPerProcess) - 30));
+    } else {
+        Log("[gpu] virtual address bits: the GPU_VIRTUAL_ADDRESS_SUPPORT query failed (%s); "
+            "stored as 0",
+            HrString(vaHr).c_str());
     }
 
     D3D12_FEATURE_DATA_D3D12_OPTIONS7 o7{};

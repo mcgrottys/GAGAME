@@ -1,5 +1,8 @@
 // Lattice.cpp - the M9aj bodies of ColorFrame, moved verbatim (M12 step 2b). See Lattice.h.
+// After them, HIERARCHY step 3's face-plane window (FaceWindow), new.
 #include "core/Lattice.h"
+
+#include "core/Space.h"
 
 #include <algorithm>
 #include <cmath>
@@ -111,6 +114,94 @@ ast::Frame Lattice::AstFrame() const {
     // from VNorth(), origin and pitch 0, centres.
     return ast::Frame{kind == Kind::Cube ? "cube.face" : "mercator.px", VNorth(), 0.0, 0.0,
                       0.0, true};
+}
+
+// ---- HIERARCHY step 3: the face-plane window (see Lattice.h) ---------------------------------
+
+void CubeFaceAxes(uint32_t face, double n[3], double a[3], double b[3]) {
+    // ComposeCubeDir's table, row by row: its unnormalized point is n + s a + t b.
+    static const double kAxes[6][3][3] = {
+        {{1, 0, 0}, {0, 0, -1}, {0, -1, 0}},    // 0: (1, -t, -s)
+        {{-1, 0, 0}, {0, 0, 1}, {0, -1, 0}},    // 1: (-1, -t, s)
+        {{0, 1, 0}, {1, 0, 0}, {0, 0, 1}},      // 2: (s, 1, t)
+        {{0, -1, 0}, {1, 0, 0}, {0, 0, -1}},    // 3: (s, -1, -t)
+        {{0, 0, 1}, {1, 0, 0}, {0, -1, 0}},     // 4: (s, -t, 1)
+        {{0, 0, -1}, {-1, 0, 0}, {0, -1, 0}}};  // 5: (-s, -t, -1)
+    const double(&f)[3][3] = kAxes[face < 6 ? face : 5];   // ComposeCubeDir's default is face 5
+    for (int i = 0; i < 3; ++i) {
+        n[i] = f[0][i];
+        a[i] = f[1][i];
+        b[i] = f[2][i];
+    }
+}
+
+double FaceWindow::FaceTexels() const { return std::ldexp(double(Lattice::kFaceDim), rung); }
+
+void FaceWindow::TexelOf(const double P[3], double& x, double& y) const {
+    double n[3], a[3], b[3];
+    CubeFaceAxes(face, n, a, b);
+    const double pn = P[0] * n[0] + P[1] * n[1] + P[2] * n[2];
+    const double s = (P[0] * a[0] + P[1] * a[1] + P[2] * a[2]) / pn;
+    const double t = (P[0] * b[0] + P[1] * b[1] + P[2] * b[2]) / pn;
+    const double N = FaceTexels();
+    x = (s * 0.5 + 0.5) * N - double(anchorX);
+    y = (t * 0.5 + 0.5) * N - double(anchorY);
+}
+
+FaceWindow FaceWindow::Nearest(const double P[3]) const {
+    FaceWindow o = *this;
+    o.anchorX = o.anchorY = 0;
+    double X = 0.0, Y = 0.0;
+    o.TexelOf(P, X, Y);   // anchored at the face's corner: the global texel
+    const double dim = double(Lattice::kFaceDim);
+    o.anchorX = std::llround(X / dim) * static_cast<long long>(Lattice::kFaceDim);
+    o.anchorY = std::llround(Y / dim) * static_cast<long long>(Lattice::kFaceDim);
+    return o;
+}
+
+FaceWindow::Planes FaceWindow::PlanesIn(const Placement& own) const {
+    double n[3], a[3], b[3];
+    CubeFaceAxes(face, n, a, b);
+    const double N = FaceTexels(), k = 0.5 * N;
+    const double s0 = 2.0 * double(anchorX) / N - 1.0;
+    const double t0 = 2.0 * double(anchorY) / N - 1.0;
+    // The three planes through the centre, planet frame. They are not unit, and PullPlane does
+    // not need them to be: its arithmetic is linear in the normal.
+    const double m[3][3] = {{k * (a[0] - s0 * n[0]), k * (a[1] - s0 * n[1]), k * (a[2] - s0 * n[2])},
+                            {k * (b[0] - t0 * n[0]), k * (b[1] - t0 * n[1]), k * (b[2] - t0 * n[2])},
+                            {n[0], n[1], n[2]}};
+    Planes pl{};
+    float* const rows[3] = {pl.u, pl.v, pl.w};
+    for (int i = 0; i < 3; ++i) {
+        // Through the centre (d = 0): n' = R^T m, d' = -(m . own.t) / own.s, so the plane's
+        // value at a point x of own's frame is n' . x - d' = (m . X) / own.s -- the same factor
+        // on every row, which is why it cancels in the ratio.
+        double mn[3], md = 0.0;
+        own.PullPlane(m[i], 0.0, mn, md);
+        rows[i][0] = static_cast<float>(mn[0]);
+        rows[i][1] = static_cast<float>(mn[1]);
+        rows[i][2] = static_cast<float>(mn[2]);
+        rows[i][3] = static_cast<float>(-md);
+    }
+    return pl;
+}
+
+void FaceWindow::PageTexel(const float p[3], const Planes& pl, float& x, float& y) {
+    // dot(p, row.xyz) + row.w, the dot left to right: one named float per operation.
+    auto plane = [p](const float r[4]) {
+        const float m0 = p[0] * r[0];
+        const float m1 = p[1] * r[1];
+        const float m2 = p[2] * r[2];
+        const float d01 = m0 + m1;
+        const float d = d01 + m2;
+        const float e = d + r[3];
+        return e;
+    };
+    const float nu = plane(pl.u);
+    const float nv = plane(pl.v);
+    const float nw = plane(pl.w);
+    x = nu / nw;
+    y = nv / nw;
 }
 
 }  // namespace ga

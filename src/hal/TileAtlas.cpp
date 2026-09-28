@@ -1,7 +1,12 @@
 #include "hal/TileAtlas.h"
 
+#include "core/Lattice.h"
 #include "hal/PixEvents.h"
+#include "hal/Pipeline.h"
+#include "hal/Root.h"
 
+#include <algorithm>
+#include <cmath>
 #include <vector>
 #include <string>
 
@@ -45,11 +50,99 @@ void UavBarrier(ID3D12GraphicsCommandList* cl, ID3D12Resource* res) {
     cl->ResourceBarrier(1, &b);
 }
 
+// ---- HIERARCHY step 0: the probe array. A page tenant's shape at toy size: 1024^2 RGBA8 is 8x8
+// tiles of 128x128 at mip 0, and four mips stop at the one-tile level, so there is no packed tail
+// (the tenants' rule, Residency.cpp) and CopyTiles reaches every tile. Four slices: three for the
+// shared tile, one for the WRAP probe.
+constexpr uint32_t kProbeDim = 1024, kProbeSlices = 4, kProbeMips = 4;
+constexpr uint32_t kProbeTileTexels = 128;   // RGBA8: 64 KB = 128 x 128 x 4 bytes
+constexpr uint32_t kProbeTileBytes = D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES;
+// One upload block per pattern, and the heap tile of the same index that holds it.
+enum ProbeBlock : uint32_t {
+    kBlockA, kBlockB,                        // the shared tile's pattern, the planted tile's
+    kBlockL0, kBlockR0, kBlockL1, kBlockR1,  // the WRAP probe's edges: left/right, mip 0/1
+    kProbeBlocks
+};
+constexpr uint32_t kNullTile = UINT32_MAX;   // MapProbeTiles: this place goes to NULL
+
+constexpr UINT ProbeSub(uint32_t slice, uint32_t mip) { return mip + slice * kProbeMips; }
+
+// Pattern A, byte i of one tile's LINEAR layout (CopyTiles' side: 128 texels a row, 4 bytes a
+// texel, so texel t = i / 4 sits at x = t % 128, y = t / 128). Red = x + 1 and green = y + 1
+// are a different pair at every texel, so a swizzle or an offset error cannot hide; blue
+// scrambles t and alpha carries x ^ y. No byte is 0, so a NULL tile's zeros match nothing, and
+// none is 0xFF, so pattern B -- the planted tile's -- is A with every bit flipped: nonzero as
+// well, and different from A at every one of the 65536 bytes.
+uint8_t PatternA(uint32_t i) {
+    const uint32_t t = i >> 2, x = t & 127u, y = t >> 7;
+    switch (i & 3u) {
+        case 0: return static_cast<uint8_t>(1u + x);
+        case 1: return static_cast<uint8_t>(1u + y);
+        case 2: return static_cast<uint8_t>(1u + (t * 97u) % 251u);
+        default: return static_cast<uint8_t>(0x40u | ((x ^ y) & 0x3Fu));
+    }
+}
+uint8_t PatternB(uint32_t i) { return static_cast<uint8_t>(~PatternA(i)); }
+
+struct TileMatch {
+    uint32_t same = 0;      // bytes equal to the pattern, of 65536
+    uint32_t zero = 0;      // bytes that read exactly 0
+    uint32_t moved = 0;     // pattern A only: texels of A found whole at ANOTHER texel
+    int32_t first = -1;     // byte offset of the first difference; -1 when there is none
+    uint8_t want = 0, got = 0;
+    bool Holds() const { return same == kProbeTileBytes; }
+};
+
+TileMatch MatchTile(const uint8_t* got, uint8_t (*pattern)(uint32_t)) {
+    TileMatch m;
+    for (uint32_t i = 0; i < kProbeTileBytes; ++i) {
+        const uint8_t w = pattern(i);
+        if (got[i] == w) {
+            ++m.same;
+        } else if (m.first < 0) {
+            m.first = static_cast<int32_t>(i);
+            m.want = w;
+            m.got = got[i];
+        }
+        if (got[i] == 0) ++m.zero;
+    }
+    // A mismatch made of A's own texels in another order is the same memory read through another
+    // swizzle -- a different finding from different memory. Every texel of A names its own
+    // position in red and green, so each texel read is checked against where it says it is from.
+    if (pattern == PatternA && m.first >= 0) {
+        for (uint32_t t = 0; t < kProbeTileBytes / 4; ++t) {
+            const uint8_t* p = got + 4 * t;
+            if (p[0] < 1 || p[0] > 128 || p[1] < 1 || p[1] > 128) continue;
+            const uint32_t from = (p[1] - 1u) * 128u + (p[0] - 1u);
+            if (from == t) continue;
+            bool whole = true;
+            for (uint32_t c = 0; c < 4; ++c) whole = whole && p[c] == PatternA(4 * from + c);
+            m.moved += whole ? 1 : 0;
+        }
+    }
+    return m;
+}
+
+void LogMatch(const char* phase, const char* where, const TileMatch& m, const char* pattern) {
+    if (m.first < 0) {
+        Log("[tiletest] %s %s: 65536 of 65536 bytes match pattern %s", phase, where, pattern);
+        return;
+    }
+    const uint32_t t = static_cast<uint32_t>(m.first) / 4;
+    Log("[tiletest] %s %s: %u of 65536 bytes match pattern %s -- first difference at byte %d "
+        "(texel %u,%u channel %u): wanted 0x%02X, read 0x%02X; %u bytes read 0, %u of 16384 "
+        "texels are A's own from another texel",
+        phase, where, m.same, pattern, m.first, t % kProbeTileTexels, t / kProbeTileTexels,
+        static_cast<uint32_t>(m.first) % 4, m.want, m.got, m.zero, m.moved);
+}
+
 // The self-test harness: owns the reserved resources, the heap, the compute pipelines, and the
 // residency bookkeeping the CPU verifies against.
 class TileSelfTest {
 public:
     bool Run(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir);
+    // HIERARCHY step 0, run after the M0 verdict: see the banner above its definition.
+    bool RunHierarchyProbes(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir);
 
 private:
     bool CreatePipelines(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir);
@@ -81,6 +174,23 @@ private:
     uint32_t m_tiles3DTotal = 0;
     D3D12_TILE_SHAPE m_shape3D{};
     bool m_have3D = false;
+
+    // ---- HIERARCHY step 0
+    bool CreateProbeArray(Gpu& gpu);
+    void ProbeState(ID3D12GraphicsCommandList* cl, D3D12_RESOURCE_STATES to);
+    void MapProbeTiles(Gpu& gpu, const D3D12_TILED_RESOURCE_COORDINATE* at,
+                       const uint32_t* heapTile, uint32_t n);
+    void FillProbeTiles(Gpu& gpu, const D3D12_TILED_RESOURCE_COORDINATE* at,
+                        const uint32_t* block, uint32_t n);
+    std::vector<uint8_t> ReadProbeTiles(Gpu& gpu, const D3D12_TILED_RESOURCE_COORDINATE* at,
+                                        uint32_t n);
+    bool ProbeShare(Gpu& gpu);
+    bool ProbeWrap(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir);
+
+    Com<ID3D12Resource> m_probe;     // the probe array (kProbeDim above)
+    Com<ID3D12Heap> m_probeHeap;     // one heap tile per ProbeBlock
+    GpuBuffer m_probeSrc;            // upload: one 64 KB block per ProbeBlock
+    D3D12_RESOURCE_STATES m_probeState = D3D12_RESOURCE_STATE_COPY_DEST;
 };
 
 bool TileSelfTest::CreatePipelines(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir) {
@@ -532,11 +642,639 @@ bool TileSelfTest::Run(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderD
     return pass;
 }
 
+// ================================================================ HIERARCHY step 0: the probes
+// docs/HIERARCHY.md builds its windows on facts Microsoft documents and this engine had never
+// measured. The address bits are asked at boot (Gpu::Init); the other two are probed here, each
+// with a planted failure it must be seen to catch:
+//   share  one heap tile mapped at three places of ONE reserved array -- mip 0 of two slices and
+//          mip 1 of a third -- filled through one place, read back through all three;
+//   wrap   a WRAP tap across one slice's edge, in the pixel stage, plain and under Sample's
+//          min-LOD clamp.
+// The suite fails only when an instrument is broken: a resource refused, a call failing, a
+// planted failure not caught, a copy that does not come back out through its own place. A fact
+// that does not hold is a FINDING, said loudly and not failed: for sharing the design has its
+// fallback (section 4.6: a window carries three mips and mixes the straddling pair by hand).
+bool TileSelfTest::RunHierarchyProbes(Gpu& gpu, ShaderCompiler& sc,
+                                      const std::wstring& shaderDir) {
+    Log("[tiletest] ---- HIERARCHY step 0: one heap tile at three places of one reserved array, "
+        "WRAP across a slice's edge (the address bits are the [gpu] boot line) ----");
+    if (gpu.TiledTier() < D3D12_TILED_RESOURCES_TIER_2) {
+        Log("[tiletest] step0: FAIL -- below tier 2 a NULL place reads undefined bytes, so no "
+            "probe here can be judged");
+        return false;
+    }
+    if (!CreateProbeArray(gpu)) return false;
+    bool sound = ProbeShare(gpu);
+    sound &= ProbeWrap(gpu, sc, shaderDir);
+    // UpdateTileMappings and CopyTiles return nothing: a call the device could not take shows
+    // up as its removal, and every number above would then be the dead device's.
+    const HRESULT removed = gpu.Device()->GetDeviceRemovedReason();
+    if (FAILED(removed)) {
+        Log("[tiletest] step0: FAIL -- the device was removed during the probes: %s",
+            HrString(removed).c_str());
+        sound = false;
+    }
+    Log("[tiletest] ---- step 0 %s ----",
+        sound ? "PASS: every instrument caught its planted failure; the facts are the HOLDS / "
+                "DOES NOT HOLD lines"
+              : "FAIL: an instrument is broken, see above");
+    return sound;
+}
+
+bool TileSelfTest::CreateProbeArray(Gpu& gpu) {
+    // Reserved, NO flags, born a copy destination -- a page tenant's array (Residency.cpp) at toy
+    // size: the probes ask about those arrays, and a UAV or render-target flag could change the
+    // layout the answer depends on.
+    D3D12_RESOURCE_DESC rd{};
+    rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rd.Width = kProbeDim;
+    rd.Height = kProbeDim;
+    rd.DepthOrArraySize = kProbeSlices;
+    rd.MipLevels = kProbeMips;
+    rd.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    rd.SampleDesc.Count = 1;
+    rd.Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE;
+    HRESULT hr = gpu.Device()->CreateReservedResource(&rd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                      IID_PPV_ARGS(&m_probe));
+    if (FAILED(hr)) {
+        Log("[tiletest] step0: FAIL -- the probe array was refused: %s", HrString(hr).c_str());
+        return false;
+    }
+    m_probe->SetName(L"tiletest.step0 array");
+    m_probeState = D3D12_RESOURCE_STATE_COPY_DEST;
+
+    UINT numTiles = 0, numSub = kProbeSlices * kProbeMips;
+    D3D12_PACKED_MIP_INFO packed{};
+    D3D12_TILE_SHAPE shape{};
+    D3D12_SUBRESOURCE_TILING sub[kProbeSlices * kProbeMips]{};
+    gpu.Device()->GetResourceTiling(m_probe.Get(), &numTiles, &packed, &shape, &numSub, 0, sub);
+    Log("[tiletest] step0 array: reserved %ux%u x%u slices x%u mips RGBA8: %u tiles of %ux%u, "
+        "%u standard + %u packed mips, mip 0 %ux%u tiles, mip 1 %ux%u",
+        kProbeDim, kProbeDim, kProbeSlices, kProbeMips, numTiles, shape.WidthInTexels,
+        shape.HeightInTexels, packed.NumStandardMips, packed.NumPackedMips, sub[0].WidthInTiles,
+        sub[0].HeightInTiles, sub[1].WidthInTiles, sub[1].HeightInTiles);
+    // Every address below assumes exactly this tiling, and CopyTiles cannot reach a packed mip:
+    // on any other the probes would measure a shape they do not describe, so they refuse.
+    if (packed.NumPackedMips != 0 || shape.WidthInTexels != kProbeTileTexels ||
+        shape.HeightInTexels != kProbeTileTexels ||
+        sub[0].WidthInTiles != kProbeDim / kProbeTileTexels ||
+        sub[1].WidthInTiles != kProbeDim / 2 / kProbeTileTexels) {
+        Log("[tiletest] step0: FAIL -- not the tiling the probes are written for; refusing to "
+            "run them");
+        return false;
+    }
+
+    D3D12_HEAP_DESC hd{};
+    hd.SizeInBytes = static_cast<uint64_t>(kProbeBlocks) * kProbeTileBytes;
+    hd.Properties = DefaultHeapProps();
+    hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
+    hr = gpu.Device()->CreateHeap(&hd, IID_PPV_ARGS(&m_probeHeap));
+    if (FAILED(hr)) {
+        Log("[tiletest] step0: FAIL -- the probe heap was refused: %s", HrString(hr).c_str());
+        return false;
+    }
+    m_probeHeap->SetName(L"tiletest.step0 heap");
+
+    // The blocks. Probe C's edge tiles are solid: R is the side (left 0, right 255) and B its
+    // complement, G names the mip (64 at mip 0, 192 at mip 1).
+    m_probeSrc = gpu.CreateUploadBuffer(static_cast<uint64_t>(kProbeBlocks) * kProbeTileBytes,
+                                        L"tiletest.step0 patterns");
+    const uint8_t solid[4][4] = {
+        {0, 64, 255, 255}, {255, 64, 0, 255}, {0, 192, 255, 255}, {255, 192, 0, 255}};
+    uint8_t* dst = m_probeSrc.cpu;
+    for (uint32_t i = 0; i < kProbeTileBytes; ++i) {
+        dst[size_t(kBlockA) * kProbeTileBytes + i] = PatternA(i);
+        dst[size_t(kBlockB) * kProbeTileBytes + i] = PatternB(i);
+        for (uint32_t k = 0; k < 4; ++k) {
+            dst[size_t(kBlockL0 + k) * kProbeTileBytes + i] = solid[k][i & 3u];
+        }
+    }
+    return true;
+}
+
+void TileSelfTest::ProbeState(ID3D12GraphicsCommandList* cl, D3D12_RESOURCE_STATES to) {
+    if (m_probeState == to) return;   // before == after fails at Close(), as RunRead says
+    Barrier(cl, m_probe.Get(), m_probeState, to);
+    m_probeState = to;
+}
+
+// n single tiles of the probe array, each onto its heap tile (kNullTile: onto NULL), in ONE
+// UpdateTileMappings with a region and a range per tile.
+void TileSelfTest::MapProbeTiles(Gpu& gpu, const D3D12_TILED_RESOURCE_COORDINATE* at,
+                                 const uint32_t* heapTile, uint32_t n) {
+    std::vector<D3D12_TILE_REGION_SIZE> sizes(n, D3D12_TILE_REGION_SIZE{1, FALSE, 0, 0, 0});
+    std::vector<D3D12_TILE_RANGE_FLAGS> flags(n);
+    std::vector<UINT> starts(n), counts(n, 1);
+    for (uint32_t k = 0; k < n; ++k) {
+        const bool null = heapTile[k] == kNullTile;
+        flags[k] = null ? D3D12_TILE_RANGE_FLAG_NULL : D3D12_TILE_RANGE_FLAG_NONE;
+        starts[k] = null ? 0 : heapTile[k];
+    }
+    gpu.Queue()->UpdateTileMappings(m_probe.Get(), n, at, sizes.data(), m_probeHeap.Get(), n,
+                                    flags.data(), starts.data(), counts.data(),
+                                    D3D12_TILE_MAPPING_FLAG_NONE);
+}
+
+// Upload blocks into places, linear to swizzled: one submission, waited on.
+void TileSelfTest::FillProbeTiles(Gpu& gpu, const D3D12_TILED_RESOURCE_COORDINATE* at,
+                                  const uint32_t* block, uint32_t n) {
+    auto* cl = gpu.BeginUpload();
+    {
+        PixScope scope(cl, "tiletest.step0 fill (CopyTiles, linear -> swizzled)");
+        ProbeState(cl, D3D12_RESOURCE_STATE_COPY_DEST);
+        const D3D12_TILE_REGION_SIZE one{1, FALSE, 0, 0, 0};
+        for (uint32_t k = 0; k < n; ++k) {
+            cl->CopyTiles(m_probe.Get(), &at[k], &one, m_probeSrc.res.Get(),
+                          static_cast<uint64_t>(block[k]) * kProbeTileBytes,
+                          D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE);
+        }
+    }
+    gpu.EndUpload();
+}
+
+// Places out, swizzled to linear, 64 KB each in the order given, into a readback buffer made
+// for this pass alone. Whether a copy that silently did not happen would show is the planted
+// pass's question, not this function's.
+std::vector<uint8_t> TileSelfTest::ReadProbeTiles(Gpu& gpu,
+                                                  const D3D12_TILED_RESOURCE_COORDINATE* at,
+                                                  uint32_t n) {
+    const uint64_t bytes = static_cast<uint64_t>(n) * kProbeTileBytes;
+    D3D12_HEAP_PROPERTIES hp{};
+    hp.Type = D3D12_HEAP_TYPE_READBACK;
+    D3D12_RESOURCE_DESC bd{};
+    bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    bd.Width = bytes;
+    bd.Height = 1;
+    bd.DepthOrArraySize = 1;
+    bd.MipLevels = 1;
+    bd.SampleDesc.Count = 1;
+    bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    Com<ID3D12Resource> rb;
+    GA_CHECK(gpu.Device()->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd,
+                                                  D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                  IID_PPV_ARGS(&rb)));
+    auto* cl = gpu.BeginUpload();
+    {
+        PixScope scope(cl, "tiletest.step0 read (CopyTiles, swizzled -> linear)");
+        ProbeState(cl, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        const D3D12_TILE_REGION_SIZE one{1, FALSE, 0, 0, 0};
+        for (uint32_t k = 0; k < n; ++k) {
+            cl->CopyTiles(m_probe.Get(), &at[k], &one, rb.Get(),
+                          static_cast<uint64_t>(k) * kProbeTileBytes,
+                          D3D12_TILE_COPY_FLAG_SWIZZLED_TILED_RESOURCE_TO_LINEAR_BUFFER);
+        }
+    }
+    gpu.EndUpload();
+    std::vector<uint8_t> out(static_cast<size_t>(bytes));
+    void* p = nullptr;
+    const D3D12_RANGE all{0, static_cast<SIZE_T>(bytes)};
+    GA_CHECK(rb->Map(0, &all, &p));
+    memcpy(out.data(), p, out.size());
+    const D3D12_RANGE none{0, 0};
+    rb->Unmap(0, &none);
+    return out;
+}
+
+bool TileSelfTest::ProbeShare(Gpu& gpu) {
+    // Mip 0 of two slices is one surface shape: two windows of one rank overlapping. Mip 1 of a
+    // third is another mip's dimensions: the rung a window shares with the rank above (section
+    // 4.6), which Microsoft's duplicate-mapping page does not settle. Each is reported apart.
+    const D3D12_TILED_RESOURCE_COORDINATE at[3] = {
+        {0, 0, 0, ProbeSub(0, 0)}, {1, 1, 0, ProbeSub(1, 0)}, {0, 0, 0, ProbeSub(2, 1)}};
+    const char* const where[3] = {"slice 0 mip 0 tile (0,0)", "slice 1 mip 0 tile (1,1)",
+                                  "slice 2 mip 1 tile (0,0)"};
+    TileMatch share[3], planted[3], unmap[3];
+    auto read = [&](TileMatch (&m)[3]) {
+        std::vector<uint8_t> r = ReadProbeTiles(gpu, at, 3);
+        for (uint32_t k = 0; k < 3; ++k) {
+            m[k] = MatchTile(r.data() + size_t(k) * kProbeTileBytes, PatternA);
+        }
+        return r;
+    };
+
+    // 1. SHARE. Three ranges naming one heap offset, not D3D12_TILE_RANGE_FLAG_REUSE_SINGLE_TILE:
+    // a range per tile, each naming its heap tile, is the batch TileAtlas2D::CommitMappings emits
+    // and the one a manager of global tiles would, so it is the path the windows will take.
+    // Filled through the first place ONLY: a copy into two mappings of one tile is undefined
+    // unless the bytes agree.
+    const uint32_t shared[3] = {kBlockA, kBlockA, kBlockA};
+    MapProbeTiles(gpu, at, shared, 3);
+    FillProbeTiles(gpu, at, shared, 1);
+    Log("[tiletest] share: heap tile %u mapped at %s, %s and %s (three ranges naming it, one "
+        "UpdateTileMappings); pattern A copied in through the first place only",
+        kBlockA, where[0], where[1], where[2]);
+    read(share);
+    for (uint32_t k = 0; k < 3; ++k) LogMatch("share  ", where[k], share[k], "A");
+    if (!share[0].Holds()) {
+        Log("[tiletest] share: FAIL -- pattern A did not come back out through the place it went "
+            "in by; the copy path is broken and nothing past it can be judged");
+        return false;
+    }
+
+    // 2. PLANTED. The second place onto another heap tile holding pattern B. The comparison must
+    // fail THERE, that place must read its own B (one tile through its only mapping), and the
+    // other two must not move.
+    const uint32_t other = kBlockB;
+    MapProbeTiles(gpu, &at[1], &other, 1);
+    FillProbeTiles(gpu, &at[1], &other, 1);
+    Log("[tiletest] planted: %s moved to heap tile %u, which holds pattern B (A with every bit "
+        "flipped)",
+        where[1], kBlockB);
+    const std::vector<uint8_t> r2 = read(planted);
+    for (uint32_t k = 0; k < 3; ++k) LogMatch("planted", where[k], planted[k], "A");
+    const TileMatch ownB = MatchTile(r2.data() + kProbeTileBytes, PatternB);
+    const bool caught = !planted[1].Holds() && ownB.Holds();
+    const bool others = planted[0].Holds() && planted[2].Holds() == share[2].Holds();
+    Log("[tiletest] planted: %s reads %u of 65536 bytes of its own pattern B -- the wrong mapping "
+        "is %s, and the other two places are %s",
+        where[1], ownB.same, caught ? "CAUGHT" : "NOT CAUGHT", others ? "unchanged" : "CHANGED");
+    if (!caught || !others) {
+        Log("[tiletest] share: FAIL -- the instrument cannot pin a wrong mapping to its place");
+        return false;
+    }
+
+    // 3. UNMAP. The second place back on the shared tile, the first onto NULL: the other two
+    // must keep reading A, and the first must read zero (tier 2).
+    const D3D12_TILED_RESOURCE_COORDINATE back[2] = {at[1], at[0]};
+    const uint32_t backTo[2] = {kBlockA, kNullTile};
+    MapProbeTiles(gpu, back, backTo, 2);
+    Log("[tiletest] unmap: %s back on heap tile %u, %s mapped to NULL", where[1], kBlockA,
+        where[0]);
+    read(unmap);
+    Log("[tiletest] unmap   %s: %u of 65536 bytes read 0 (tier 2: a NULL place reads zero)",
+        where[0], unmap[0].zero);
+    for (uint32_t k = 1; k < 3; ++k) LogMatch("unmap  ", where[k], unmap[k], "A");
+
+    // The verdict: a place shares where it read A as mapped AND after the first place left.
+    std::string no;
+    for (uint32_t k = 1; k < 3; ++k) {
+        if (share[k].Holds() && unmap[k].Holds()) continue;
+        const TileMatch& m = share[k].Holds() ? unmap[k] : share[k];
+        const uint32_t t = static_cast<uint32_t>(m.first) / 4;
+        char b[256];
+        snprintf(b, sizeof b,
+                 "%s%s (%s): first differing byte %d, texel %u,%u channel %u, wanted 0x%02X, "
+                 "read 0x%02X",
+                 no.empty() ? "" : "; ", where[k],
+                 share[k].Holds() ? "after the unmap" : "as mapped", m.first,
+                 t % kProbeTileTexels, t / kProbeTileTexels,
+                 static_cast<uint32_t>(m.first) % 4, m.want, m.got);
+        no += b;
+    }
+    if (no.empty()) {
+        Log("[tiletest] share: HOLDS on this adapter -- one heap tile reads back as the same 65536 "
+            "bytes through mip 0 of two slices and mip 1 of a third, and the two left keep "
+            "reading it when the first place is unmapped");
+    } else {
+        Log("[tiletest] share: DOES NOT HOLD on this adapter -- %s", no.c_str());
+    }
+    if (unmap[0].zero != kProbeTileBytes) {
+        Log("[tiletest] unmap: the NULL place did NOT read zero (%u of 65536 bytes 0), which "
+            "tier 2 promises",
+            unmap[0].zero);
+    }
+    return true;
+}
+
+bool TileSelfTest::ProbeWrap(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir) {
+    // Slice 3's two edge tiles at mip 0 and at mip 1, solid, each on its own heap tile: every tap
+    // of every row lands in one of them (TileWrap.hlsl's row geometry).
+    constexpr uint32_t kSlice = 3, kW = 16, kRows = 6;
+    const D3D12_TILED_RESOURCE_COORDINATE edge[4] = {
+        {0, 0, 0, ProbeSub(kSlice, 0)},
+        {kProbeDim / kProbeTileTexels - 1, 0, 0, ProbeSub(kSlice, 0)},
+        {0, 0, 0, ProbeSub(kSlice, 1)},
+        {kProbeDim / 2 / kProbeTileTexels - 1, 0, 0, ProbeSub(kSlice, 1)}};
+    const uint32_t solid[4] = {kBlockL0, kBlockR0, kBlockL1, kBlockR1};
+    MapProbeTiles(gpu, edge, solid, 4);
+    FillProbeTiles(gpu, edge, solid, 4);
+
+    // Four root constants, the heap as Texture2DArray[] (space 5, as the shared layout has it),
+    // and the two samplers a row chooses between. A float target keeps the filter's own numbers.
+    hal::RootLayout rl;
+    rl.Constants(0, 4)
+        .Table({hal::SrvRange(0, hal::kUnbounded, 5)})
+        .Sampler(hal::StaticSampler(0, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                                    D3D12_TEXTURE_ADDRESS_MODE_WRAP))
+        .Sampler(hal::StaticSampler(1, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+                                    D3D12_TEXTURE_ADDRESS_MODE_CLAMP));
+    const Com<ID3D12RootSignature> rs = rl.Build(gpu, "tiletest.wrap");
+    hal::GraphicsPipelineDesc pd;
+    pd.rootSig = rs.Get();
+    pd.vs = sc.Compile(shaderDir + L"/TileWrap.hlsl", L"VsWrap", L"vs_6_0");
+    pd.ps = sc.Compile(shaderDir + L"/TileWrap.hlsl", L"PsWrap", L"ps_6_0");
+    pd.rtvFormat = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    pd.dsvFormat = DXGI_FORMAT_UNKNOWN;
+    const Com<ID3D12PipelineState> pso = hal::BuildGraphics(gpu, pd, "tiletest.wrap");
+    if (!pso) {
+        Log("[tiletest] wrap: FAIL -- the probe's pipeline did not build (shaders/TileWrap.hlsl)");
+        return false;
+    }
+
+    // Row r draws mode r / 2 through the WRAP sampler (r even) or the CLAMP one, into a target
+    // cleared to -1: a pixel no draw reached can never pass for a mix.
+    D3D12_CLEAR_VALUE cv{};
+    cv.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    for (float& c : cv.Color) c = -1.0f;
+    GpuTexture rt = gpu.CreateTexture2D(kW, kRows, cv.Format,
+                                        D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                                        D3D12_RESOURCE_STATE_RENDER_TARGET, L"tiletest.wrapRows",
+                                        &cv);
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = gpu.RtvHeap().Cpu(gpu.RtvHeap().Alloc());
+    gpu.Device()->CreateRenderTargetView(rt.res.Get(), nullptr, rtv);
+    const uint32_t srv =
+        gpu.CreateSrvArray(m_probe.Get(), DXGI_FORMAT_R8G8B8A8_UNORM, kProbeMips, kProbeSlices);
+    auto* cl = gpu.BeginUpload();
+    {
+        PixScope scope(cl, "tiletest.step0 wrap (six rows across one slice's edge)");
+        ID3D12DescriptorHeap* heaps[] = {gpu.SrvHeap().Heap()};
+        cl->SetDescriptorHeaps(1, heaps);
+        ProbeState(cl, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        cl->ClearRenderTargetView(rtv, cv.Color, 0, nullptr);
+        cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        cl->SetGraphicsRootSignature(rs.Get());
+        cl->SetPipelineState(pso.Get());
+        cl->SetGraphicsRootDescriptorTable(1, gpu.SrvHeap().Gpu(0));
+        cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        for (uint32_t r = 0; r < kRows; ++r) {
+            const D3D12_VIEWPORT vp{0.0f, float(r), float(kW), 1.0f, 0.0f, 1.0f};
+            const D3D12_RECT sr{0, LONG(r), LONG(kW), LONG(r + 1)};
+            const uint32_t c[4] = {srv, kSlice, r / 2, r & 1u};
+            cl->RSSetViewports(1, &vp);
+            cl->RSSetScissorRects(1, &sr);
+            cl->SetGraphicsRoot32BitConstants(0, 4, c, 0);
+            cl->DrawInstanced(3, 1, 0, 0);
+        }
+    }
+    gpu.EndUpload();
+    uint32_t pitch = 0;
+    const std::vector<uint8_t> px = gpu.ReadbackTexture(rt, &pitch);
+
+    // What a bilinear tap at pixel i reads, as the weight of the RIGHT edge: its position at the
+    // mip, the two texels it straddles wrapped (or clamped) onto the mip's width, and the side
+    // each lands on.
+    auto rightWeight = [](uint32_t i, uint32_t mip, bool wrap) {
+        const double w = double(kProbeDim >> mip);
+        const double p = (1022.5 + 0.25 * i) / 1024.0 * w - 0.5;
+        const double t0 = std::floor(p), f = p - t0;
+        auto right = [w, wrap](double t) {
+            t = wrap ? t - w * std::floor(t / w) : std::clamp(t, 0.0, w - 1.0);
+            return t >= 0.5 * w ? 1.0 : 0.0;
+        };
+        return (1.0 - f) * right(t0) + f * right(t0 + 1.0);
+    };
+    // D3D's floor is eight bits of sub-texel weight, so a tap lands within 1/256 of its mix; the
+    // rows' weights are multiples of 1/8, and WRAP and CLAMP differ by at least 1/8 wherever they
+    // differ at all. 1/128 tells one from the other with room on both sides.
+    constexpr double kTol = 1.0 / 128.0;
+    const char* const kMode[3] = {"SampleLevel(0)     ", "PageSample, clamp 0",
+                                  "PageSample, clamp 1"};
+    bool sound = true, holds = true;
+    for (uint32_t r = 0; r < kRows; ++r) {
+        const uint32_t mode = r / 2, mip = mode == 2 ? 1u : 0u;
+        const bool clampRow = (r & 1u) != 0;
+        const float* v = reinterpret_cast<const float*>(px.data() + size_t(r) * pitch);
+        const double g = (mip ? 192.0 : 64.0) / 255.0;
+        double errWrap = 0.0, errClamp = 0.0, gSum = 0.0;
+        std::string weights;
+        for (uint32_t i = 0; i < kW; ++i) {
+            const float* t = v + 4 * i;
+            for (int wrap = 0; wrap < 2; ++wrap) {
+                const double wr = rightWeight(i, mip, wrap != 0);
+                const double want[4] = {wr, g, 1.0 - wr, 1.0};
+                double& err = wrap ? errWrap : errClamp;
+                for (int c = 0; c < 4; ++c) err = std::max(err, std::fabs(double(t[c]) - want[c]));
+            }
+            gSum += t[1];
+            char b[16];
+            snprintf(b, sizeof b, " %.3f", t[0]);
+            weights += b;
+        }
+        const char* reads = errWrap <= kTol    ? "WRAP's mix"
+                            : errClamp <= kTol ? "CLAMP's edge"
+                                               : "NEITHER";
+        Log("[tiletest] wrap  %s %s: right edge%s | G %.3f (mip %u is %.3f) -> %s (off WRAP's "
+            "mix by %.4f, off CLAMP's edge by %.4f)",
+            clampRow ? "CLAMP" : "WRAP ", kMode[mode], weights.c_str(), gSum / kW, mip, g, reads,
+            errWrap, errClamp);
+        if (clampRow) {
+            sound = sound && errClamp <= kTol;   // the planted failure: the unmixed edge
+        } else {
+            holds = holds && errWrap <= kTol;
+        }
+    }
+    Log("[tiletest] planted: the CLAMP rows %s",
+        sound ? "read the unmixed right edge and are told apart from WRAP's mix (CAUGHT)"
+              : "did NOT read the unmixed edge");
+    if (!sound) {
+        Log("[tiletest] wrap: FAIL -- the instrument cannot tell WRAP from CLAMP");
+        return false;
+    }
+    Log("[tiletest] wrap: %s",
+        holds ? "HOLDS on this adapter -- in the pixel stage a WRAP tap past u = 1 filters with "
+                "the texel at u = 0 of the same slice: SampleLevel and PageSample at mip 0, and "
+                "PageSample clamped onto mip 1"
+              : "DOES NOT HOLD on this adapter -- see the WRAP rows above");
+    return true;
+}
+
+// ================================================================ HIERARCHY step 3: the address
+// docs/HIERARCHY.md 4.4's address of a face-plane window, on this GPU: PageSample.hlsli's own
+// PageTexel in the pixel stage (shaders/TileTexel.hlsl), over spacetest's helm sample at rungs
+// 15 and 9 (core/Lattice.h FaceWindowHelmSample: the points the CPU gate judged). Each point's
+// eye-relative float32 position is one texel of a float texture; each rung is drawn once with
+// the rows FaceWindow::PlanesIn builds and once with the plant (w's cancellation in float32), and
+// the float target is read back. THE GATE is the GPU's texel against the doubles -- under 0.01
+// texel at both rungs, its uv too, and the plant past that at both. The GPU against the CPU twin
+// (FaceWindow::PageTexel) is a RECORD, never the gate: a GPU may fuse a dot's multiply-adds or
+// round a division its own way, and the bit-equal count and the worst ulps say how this one does.
+
+// Common.h's UlpDistance, for float32: the floats between two values (0 for equal values and for
+// the two zeros, UINT32_MAX when either is a NaN).
+uint32_t UlpDistanceF(float a, float b) {
+    if (a != a || b != b) return UINT32_MAX;
+    int32_t ia = 0, ib = 0;
+    memcpy(&ia, &a, sizeof ia);
+    memcpy(&ib, &b, sizeof ib);
+    const int64_t oa = ia < 0 ? int64_t(INT32_MIN) - ia : ia;
+    const int64_t ob = ib < 0 ? int64_t(INT32_MIN) - ib : ib;
+    return static_cast<uint32_t>(oa >= ob ? oa - ob : ob - oa);
+}
+
+// A max that keeps a NaN: a texel that came back NaN must fail the bound, not vanish in a max.
+void Worse(double& worst, double e) {
+    if (!(e <= worst)) worst = e;
+}
+
+bool ProbeAddress(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir) {
+    Log("[tiletest] ---- HIERARCHY step 3: the address of a face-plane window, PageTexel in the "
+        "pixel stage against the doubles (the gate) and against its CPU twin (a record) ----");
+    constexpr uint32_t kW = 64;           // points a row of the texture
+    constexpr double kBound = 0.01;       // texels of the rung: spacetest's bound
+    constexpr float kUnreached = 1e30f;   // the target's clear, which no window's texel can be
+    const double dim = double(Lattice::kFaceDim);
+    const int kRung[2] = {15, 9};
+    const FaceWindowSample s[2] = {FaceWindowHelmSample(kRung[0]), FaceWindowHelmSample(kRung[1])};
+    uint32_t count[2] = {}, row0[2] = {}, rows[2] = {}, H = 0;
+    for (int i = 0; i < 2; ++i) {
+        count[i] = static_cast<uint32_t>(s[i].p.size() / 3);
+        row0[i] = H;
+        rows[i] = (count[i] + kW - 1) / kW;
+        H += rows[i];
+    }
+    if (count[0] == 0 || count[1] == 0) {
+        Log("[tiletest] address: FAIL -- spacetest's helm sample came back empty");
+        return false;
+    }
+
+    // The points, block after block, one RGBA32F texel each (w = 1); the slots past a block's
+    // last point stay 0 and are never judged.
+    std::vector<float> points(size_t(kW) * H * 4, 0.0f);
+    for (int i = 0; i < 2; ++i) {
+        for (uint32_t k = 0; k < count[i]; ++k) {
+            float* t = &points[(size_t(row0[i] + k / kW) * kW + k % kW) * 4];
+            t[0] = s[i].p[3 * k];
+            t[1] = s[i].p[3 * k + 1];
+            t[2] = s[i].p[3 * k + 2];
+            t[3] = 1.0f;
+        }
+    }
+    // Born a copy destination: UploadTexture's barrier starts from COPY_DEST (review finding 43).
+    GpuTexture pts = gpu.CreateTexture2D(kW, H, DXGI_FORMAT_R32G32B32A32_FLOAT,
+                                         D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST,
+                                         L"tiletest.addressPoints");
+    gpu.UploadTexture(pts, points.data(), kW * 16);
+    const uint32_t srv = gpu.CreateSrv(pts.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+
+    // Fourteen root constants (TileTexel.hlsl's TexelCb) and the heap as Texture2D[] (space 1).
+    hal::RootLayout rl;
+    rl.Constants(0, 14).Table({hal::SrvRange(0, hal::kUnbounded, 1)});
+    const Com<ID3D12RootSignature> rs = rl.Build(gpu, "tiletest.address");
+    hal::GraphicsPipelineDesc pd;
+    pd.rootSig = rs.Get();
+    pd.vs = sc.Compile(shaderDir + L"/TileTexel.hlsl", L"VsTexel", L"vs_6_0");
+    pd.ps = sc.Compile(shaderDir + L"/TileTexel.hlsl", L"PsTexel", L"ps_6_0");
+    pd.rtvFormat = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    pd.dsvFormat = DXGI_FORMAT_UNKNOWN;
+    const Com<ID3D12PipelineState> pso = hal::BuildGraphics(gpu, pd, "tiletest.address");
+    if (!pso) {
+        Log("[tiletest] address: FAIL -- the probe's pipeline did not build "
+            "(shaders/TileTexel.hlsl)");
+        return false;
+    }
+
+    // The target: the rows' texels in its first H rows, the plant's in the next H, all cleared to
+    // kUnreached so that a pixel no draw reached fails the gate on its own.
+    D3D12_CLEAR_VALUE cv{};
+    cv.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    for (float& c : cv.Color) c = kUnreached;
+    GpuTexture rt = gpu.CreateTexture2D(kW, 2 * H, cv.Format,
+                                        D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                                        D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                        L"tiletest.addressTexels", &cv);
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = gpu.RtvHeap().Cpu(gpu.RtvHeap().Alloc());
+    gpu.Device()->CreateRenderTargetView(rt.res.Get(), nullptr, rtv);
+    auto* cl = gpu.BeginUpload();
+    {
+        PixScope scope(cl, "tiletest.step3 address (PageTexel over spacetest's helm sample)");
+        ID3D12DescriptorHeap* heaps[] = {gpu.SrvHeap().Heap()};
+        cl->SetDescriptorHeaps(1, heaps);
+        cl->ClearRenderTargetView(rtv, cv.Color, 0, nullptr);
+        cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        cl->SetGraphicsRootSignature(rs.Get());
+        cl->SetPipelineState(pso.Get());
+        cl->SetGraphicsRootDescriptorTable(1, gpu.SrvHeap().Gpu(0));
+        cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        for (uint32_t plant = 0; plant < 2; ++plant) {
+            for (int i = 0; i < 2; ++i) {
+                const FaceWindow::Planes& pl = plant ? s[i].planted : s[i].planes;
+                const uint32_t top = row0[i] + plant * H;
+                const D3D12_VIEWPORT vp{0.0f, float(top), float(kW), float(rows[i]), 0.0f, 1.0f};
+                const D3D12_RECT sr{0, LONG(top), LONG(kW), LONG(top + rows[i])};
+                uint32_t c[14];
+                memcpy(c, pl.u, sizeof pl.u);
+                memcpy(c + 4, pl.v, sizeof pl.v);
+                memcpy(c + 8, pl.w, sizeof pl.w);
+                c[12] = srv;
+                c[13] = plant * H;
+                cl->RSSetViewports(1, &vp);
+                cl->RSSetScissorRects(1, &sr);
+                cl->SetGraphicsRoot32BitConstants(0, 14, c, 0);
+                cl->DrawInstanced(3, 1, 0, 0);
+            }
+        }
+    }
+    gpu.EndUpload();
+    uint32_t pitch = 0;
+    const std::vector<uint8_t> px = gpu.ReadbackTexture(rt, &pitch);
+    auto texel = [&](int i, uint32_t k, uint32_t plant) {
+        const size_t row = row0[i] + k / kW + plant * H;
+        return reinterpret_cast<const float*>(px.data() + row * pitch) + 4 * (k % kW);
+    };
+
+    bool within = true, caught = true;
+    uint32_t unreached = 0;
+    double planted[2] = {};
+    for (int i = 0; i < 2; ++i) {
+        double gate = 0.0, gateUv = 0.0, offTwin = 0.0;
+        uint32_t equal = 0, ulps = 0;
+        for (uint32_t k = 0; k < count[i]; ++k) {
+            const float* g = texel(i, k, 0);
+            const float* q = texel(i, k, 1);
+            unreached += (g[0] == kUnreached ? 1u : 0u) + (q[0] == kUnreached ? 1u : 0u);
+            float twin[2] = {};
+            FaceWindow::PageTexel(&s[i].p[3 * k], s[i].planes, twin[0], twin[1]);
+            for (int c = 0; c < 2; ++c) {
+                const double ref = s[i].ref[2 * k + c];
+                Worse(gate, std::fabs(g[c] - ref));
+                Worse(gateUv, std::fabs(double(g[2 + c]) * dim - ref));
+                Worse(planted[i], std::fabs(q[c] - ref));
+                const uint32_t u = UlpDistanceF(g[c], twin[c]);
+                equal += u == 0 ? 1u : 0u;
+                ulps = (std::max)(ulps, u);
+                Worse(offTwin, std::fabs(double(g[c]) - double(twin[c])));
+            }
+        }
+        within = within && gate < kBound && gateUv < kBound;
+        caught = caught && planted[i] > kBound;
+        Log("[tiletest] address rung %2d: %u points -- the GPU's texel against the doubles worst "
+            "%.6f (its uv x 16384 %.6f); against the CPU twin, a record, %u of %u coordinates "
+            "bit-equal, worst %u ulps (|d| %.3g texel)",
+            kRung[i], count[i], gate, gateUv, equal, 2 * count[i], ulps, offTwin);
+    }
+    Log("[tiletest] address planted (w's cancellation in float32): the GPU's texel against the "
+        "doubles worst %.3g at rung %d and %.3g at rung %d -- %s",
+        planted[0], kRung[0], planted[1], kRung[1],
+        caught ? "CAUGHT: past 0.01 at both" : "NOT CAUGHT: the instrument is blind");
+    if (unreached != 0) {
+        Log("[tiletest] address: FAIL -- %u pixels still hold the clear: no draw reached them",
+            unreached);
+    }
+    const HRESULT removed = gpu.Device()->GetDeviceRemovedReason();
+    if (FAILED(removed)) {
+        Log("[tiletest] address: FAIL -- the device was removed during the draw: %s",
+            HrString(removed).c_str());
+    }
+    const bool pass = within && caught && unreached == 0 && SUCCEEDED(removed);
+    Log("[tiletest] ---- step 3 %s ----",
+        pass ? "PASS: PageTexel on this GPU is within 0.01 texel of the doubles at rungs 15 and "
+               "9, its uv too, and the plant is caught"
+             : "FAIL: see above");
+    return pass;
+}
+
 }  // namespace
 
 bool RunTileSelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir) {
     TileSelfTest test;
-    return test.Run(gpu, sc, shaderDir);
+    const bool m0 = test.Run(gpu, sc, shaderDir);
+    // HIERARCHY step 0 runs AFTER the M0 verdict, never inside it: the gate's lines and its
+    // verdict stay what they were, and a probe fails the suite only when its instrument breaks.
+    const bool step0 = test.RunHierarchyProbes(gpu, sc, shaderDir);
+    // HIERARCHY step 3 after step 0's verdict, the same way. It is a GATE, not a probe: a texel
+    // 0.01 off the doubles fails the suite, as a broken instrument does.
+    const bool step3 = ProbeAddress(gpu, sc, shaderDir);
+    return m0 && step0 && step3;
 }
 
 namespace {
