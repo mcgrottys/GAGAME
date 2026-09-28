@@ -1,5 +1,6 @@
 #include "hal/TileAtlas.h"
 
+#include "core/Lattice.h"
 #include "hal/PixEvents.h"
 #include "hal/Pipeline.h"
 #include "hal/Root.h"
@@ -1077,6 +1078,191 @@ bool TileSelfTest::ProbeWrap(Gpu& gpu, ShaderCompiler& sc, const std::wstring& s
     return true;
 }
 
+// ================================================================ HIERARCHY step 3: the address
+// docs/HIERARCHY.md 4.4's address of a face-plane window, on this GPU: PageSample.hlsli's own
+// PageTexel in the pixel stage (shaders/TileTexel.hlsl), over spacetest's helm sample at rungs
+// 15 and 9 (core/Lattice.h FaceWindowHelmSample: the points the CPU gate judged). Each point's
+// eye-relative float32 position is one texel of a float texture; each rung is drawn once with
+// the rows FaceWindow::PlanesIn builds and once with the plant (w's cancellation in float32), and
+// the float target is read back. THE GATE is the GPU's texel against the doubles -- under 0.01
+// texel at both rungs, its uv too, and the plant past that at both. The GPU against the CPU twin
+// (FaceWindow::PageTexel) is a RECORD, never the gate: a GPU may fuse a dot's multiply-adds or
+// round a division its own way, and the bit-equal count and the worst ulps say how this one does.
+
+// Common.h's UlpDistance, for float32: the floats between two values (0 for equal values and for
+// the two zeros, UINT32_MAX when either is a NaN).
+uint32_t UlpDistanceF(float a, float b) {
+    if (a != a || b != b) return UINT32_MAX;
+    int32_t ia = 0, ib = 0;
+    memcpy(&ia, &a, sizeof ia);
+    memcpy(&ib, &b, sizeof ib);
+    const int64_t oa = ia < 0 ? int64_t(INT32_MIN) - ia : ia;
+    const int64_t ob = ib < 0 ? int64_t(INT32_MIN) - ib : ib;
+    return static_cast<uint32_t>(oa >= ob ? oa - ob : ob - oa);
+}
+
+// A max that keeps a NaN: a texel that came back NaN must fail the bound, not vanish in a max.
+void Worse(double& worst, double e) {
+    if (!(e <= worst)) worst = e;
+}
+
+bool ProbeAddress(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir) {
+    Log("[tiletest] ---- HIERARCHY step 3: the address of a face-plane window, PageTexel in the "
+        "pixel stage against the doubles (the gate) and against its CPU twin (a record) ----");
+    constexpr uint32_t kW = 64;           // points a row of the texture
+    constexpr double kBound = 0.01;       // texels of the rung: spacetest's bound
+    constexpr float kUnreached = 1e30f;   // the target's clear, which no window's texel can be
+    const double dim = double(Lattice::kFaceDim);
+    const int kRung[2] = {15, 9};
+    const FaceWindowSample s[2] = {FaceWindowHelmSample(kRung[0]), FaceWindowHelmSample(kRung[1])};
+    uint32_t count[2] = {}, row0[2] = {}, rows[2] = {}, H = 0;
+    for (int i = 0; i < 2; ++i) {
+        count[i] = static_cast<uint32_t>(s[i].p.size() / 3);
+        row0[i] = H;
+        rows[i] = (count[i] + kW - 1) / kW;
+        H += rows[i];
+    }
+    if (count[0] == 0 || count[1] == 0) {
+        Log("[tiletest] address: FAIL -- spacetest's helm sample came back empty");
+        return false;
+    }
+
+    // The points, block after block, one RGBA32F texel each (w = 1); the slots past a block's
+    // last point stay 0 and are never judged.
+    std::vector<float> points(size_t(kW) * H * 4, 0.0f);
+    for (int i = 0; i < 2; ++i) {
+        for (uint32_t k = 0; k < count[i]; ++k) {
+            float* t = &points[(size_t(row0[i] + k / kW) * kW + k % kW) * 4];
+            t[0] = s[i].p[3 * k];
+            t[1] = s[i].p[3 * k + 1];
+            t[2] = s[i].p[3 * k + 2];
+            t[3] = 1.0f;
+        }
+    }
+    // Born a copy destination: UploadTexture's barrier starts from COPY_DEST (review finding 43).
+    GpuTexture pts = gpu.CreateTexture2D(kW, H, DXGI_FORMAT_R32G32B32A32_FLOAT,
+                                         D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST,
+                                         L"tiletest.addressPoints");
+    gpu.UploadTexture(pts, points.data(), kW * 16);
+    const uint32_t srv = gpu.CreateSrv(pts.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+
+    // Fourteen root constants (TileTexel.hlsl's TexelCb) and the heap as Texture2D[] (space 1).
+    hal::RootLayout rl;
+    rl.Constants(0, 14).Table({hal::SrvRange(0, hal::kUnbounded, 1)});
+    const Com<ID3D12RootSignature> rs = rl.Build(gpu, "tiletest.address");
+    hal::GraphicsPipelineDesc pd;
+    pd.rootSig = rs.Get();
+    pd.vs = sc.Compile(shaderDir + L"/TileTexel.hlsl", L"VsTexel", L"vs_6_0");
+    pd.ps = sc.Compile(shaderDir + L"/TileTexel.hlsl", L"PsTexel", L"ps_6_0");
+    pd.rtvFormat = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    pd.dsvFormat = DXGI_FORMAT_UNKNOWN;
+    const Com<ID3D12PipelineState> pso = hal::BuildGraphics(gpu, pd, "tiletest.address");
+    if (!pso) {
+        Log("[tiletest] address: FAIL -- the probe's pipeline did not build "
+            "(shaders/TileTexel.hlsl)");
+        return false;
+    }
+
+    // The target: the rows' texels in its first H rows, the plant's in the next H, all cleared to
+    // kUnreached so that a pixel no draw reached fails the gate on its own.
+    D3D12_CLEAR_VALUE cv{};
+    cv.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    for (float& c : cv.Color) c = kUnreached;
+    GpuTexture rt = gpu.CreateTexture2D(kW, 2 * H, cv.Format,
+                                        D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                                        D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                        L"tiletest.addressTexels", &cv);
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = gpu.RtvHeap().Cpu(gpu.RtvHeap().Alloc());
+    gpu.Device()->CreateRenderTargetView(rt.res.Get(), nullptr, rtv);
+    auto* cl = gpu.BeginUpload();
+    {
+        PixScope scope(cl, "tiletest.step3 address (PageTexel over spacetest's helm sample)");
+        ID3D12DescriptorHeap* heaps[] = {gpu.SrvHeap().Heap()};
+        cl->SetDescriptorHeaps(1, heaps);
+        cl->ClearRenderTargetView(rtv, cv.Color, 0, nullptr);
+        cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        cl->SetGraphicsRootSignature(rs.Get());
+        cl->SetPipelineState(pso.Get());
+        cl->SetGraphicsRootDescriptorTable(1, gpu.SrvHeap().Gpu(0));
+        cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        for (uint32_t plant = 0; plant < 2; ++plant) {
+            for (int i = 0; i < 2; ++i) {
+                const FaceWindow::Planes& pl = plant ? s[i].planted : s[i].planes;
+                const uint32_t top = row0[i] + plant * H;
+                const D3D12_VIEWPORT vp{0.0f, float(top), float(kW), float(rows[i]), 0.0f, 1.0f};
+                const D3D12_RECT sr{0, LONG(top), LONG(kW), LONG(top + rows[i])};
+                uint32_t c[14];
+                memcpy(c, pl.u, sizeof pl.u);
+                memcpy(c + 4, pl.v, sizeof pl.v);
+                memcpy(c + 8, pl.w, sizeof pl.w);
+                c[12] = srv;
+                c[13] = plant * H;
+                cl->RSSetViewports(1, &vp);
+                cl->RSSetScissorRects(1, &sr);
+                cl->SetGraphicsRoot32BitConstants(0, 14, c, 0);
+                cl->DrawInstanced(3, 1, 0, 0);
+            }
+        }
+    }
+    gpu.EndUpload();
+    uint32_t pitch = 0;
+    const std::vector<uint8_t> px = gpu.ReadbackTexture(rt, &pitch);
+    auto texel = [&](int i, uint32_t k, uint32_t plant) {
+        const size_t row = row0[i] + k / kW + plant * H;
+        return reinterpret_cast<const float*>(px.data() + row * pitch) + 4 * (k % kW);
+    };
+
+    bool within = true, caught = true;
+    uint32_t unreached = 0;
+    double planted[2] = {};
+    for (int i = 0; i < 2; ++i) {
+        double gate = 0.0, gateUv = 0.0, offTwin = 0.0;
+        uint32_t equal = 0, ulps = 0;
+        for (uint32_t k = 0; k < count[i]; ++k) {
+            const float* g = texel(i, k, 0);
+            const float* q = texel(i, k, 1);
+            unreached += (g[0] == kUnreached ? 1u : 0u) + (q[0] == kUnreached ? 1u : 0u);
+            float twin[2] = {};
+            FaceWindow::PageTexel(&s[i].p[3 * k], s[i].planes, twin[0], twin[1]);
+            for (int c = 0; c < 2; ++c) {
+                const double ref = s[i].ref[2 * k + c];
+                Worse(gate, std::fabs(g[c] - ref));
+                Worse(gateUv, std::fabs(double(g[2 + c]) * dim - ref));
+                Worse(planted[i], std::fabs(q[c] - ref));
+                const uint32_t u = UlpDistanceF(g[c], twin[c]);
+                equal += u == 0 ? 1u : 0u;
+                ulps = (std::max)(ulps, u);
+                Worse(offTwin, std::fabs(double(g[c]) - double(twin[c])));
+            }
+        }
+        within = within && gate < kBound && gateUv < kBound;
+        caught = caught && planted[i] > kBound;
+        Log("[tiletest] address rung %2d: %u points -- the GPU's texel against the doubles worst "
+            "%.6f (its uv x 16384 %.6f); against the CPU twin, a record, %u of %u coordinates "
+            "bit-equal, worst %u ulps (|d| %.3g texel)",
+            kRung[i], count[i], gate, gateUv, equal, 2 * count[i], ulps, offTwin);
+    }
+    Log("[tiletest] address planted (w's cancellation in float32): the GPU's texel against the "
+        "doubles worst %.3g at rung %d and %.3g at rung %d -- %s",
+        planted[0], kRung[0], planted[1], kRung[1],
+        caught ? "CAUGHT: past 0.01 at both" : "NOT CAUGHT: the instrument is blind");
+    if (unreached != 0) {
+        Log("[tiletest] address: FAIL -- %u pixels still hold the clear: no draw reached them",
+            unreached);
+    }
+    const HRESULT removed = gpu.Device()->GetDeviceRemovedReason();
+    if (FAILED(removed)) {
+        Log("[tiletest] address: FAIL -- the device was removed during the draw: %s",
+            HrString(removed).c_str());
+    }
+    const bool pass = within && caught && unreached == 0 && SUCCEEDED(removed);
+    Log("[tiletest] ---- step 3 %s ----",
+        pass ? "PASS: PageTexel on this GPU is within 0.01 texel of the doubles at rungs 15 and "
+               "9, its uv too, and the plant is caught"
+             : "FAIL: see above");
+    return pass;
+}
+
 }  // namespace
 
 bool RunTileSelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir) {
@@ -1085,7 +1271,10 @@ bool RunTileSelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     // HIERARCHY step 0 runs AFTER the M0 verdict, never inside it: the gate's lines and its
     // verdict stay what they were, and a probe fails the suite only when its instrument breaks.
     const bool step0 = test.RunHierarchyProbes(gpu, sc, shaderDir);
-    return m0 && step0;
+    // HIERARCHY step 3 after step 0's verdict, the same way. It is a GATE, not a probe: a texel
+    // 0.01 off the doubles fails the suite, as a broken instrument does.
+    const bool step3 = ProbeAddress(gpu, sc, shaderDir);
+    return m0 && step0 && step3;
 }
 
 namespace {

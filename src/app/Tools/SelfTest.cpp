@@ -6,6 +6,7 @@
 #include "compose/WaterAtlas.h"
 #include "hal/DxTest.h"
 #include "core/GaAst.h"
+#include "core/Lattice.h"
 #include "hal/Gpu.h"
 #include "core/Pga.h"
 #include "hal/Shader.h"
@@ -32,6 +33,8 @@ int RunSelfTest(const Options& opt) {
                                   // ledger as executable contract (M7j)
     ok &= RunSpaceSelfTest();     // M12: the frame calculus -- placements, the fold, the
                                   // Droste link through Space, the lattice against ColorFrame
+    ok &= RunFaceWindowSelfTest();   // HIERARCHY step 3: a face-plane window's address, the
+                                     // float32 twin of PageTexel against doubles, and a plant
     ok &= RunComposeSelfTest();   // pure CPU: the layer compositor's contracts
     ok &= RunWaterSelfTest();     // pure CPU: the water atlas' datum/epoch/field gates
     ok &= RunWaveChartSelfTest();   // M13: the cascade sea's lattice-generated planes -- the

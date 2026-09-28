@@ -21,15 +21,42 @@
 //      line, a record and not a gate.
 // A defect planted in Then (a dropped scale factor) was seen to fail blocks 1, 2 and 4 before
 // this gate was trusted (priors 22: a check that cannot fail has not been asked the question).
+//
+// RunFaceWindowSelfTest -- HIERARCHY step 3's gate on core/Lattice.h's FaceWindow, the address
+// of a face-plane window, beside this one because its planes move by PullPlane. It runs AFTER
+// spacetest's verdict, never inside it, so that verdict's lines and its check count stay what
+// they were. What is pinned, and against what:
+//   a. CubeFaceAxes against CubeFaceOfDir (20000 random directions: the (s, t) of the axes is
+//      the inverse's to 1e-12, and the face's normal is the one the direction leans on most)
+//      and against ComposeCubeDir (20000 random face points: back to their own (s, t), 1e-12).
+//   b. tools/hierarchy/uv_precision.py's experiment, point for point -- its random.Random(7),
+//      place, reaches and window: the float32 twin of PageTexel at rungs 6, 9, 12 and 15 against
+//      the double reference, the eye 3 m and 10 km over the Merrimack. THE GATE is the helm's:
+//      under 0.01 texel at every rung (10 km is a record: nothing that high wants rung 15). The
+//      script's numbers are printed beside, and so is the script's own spelling evaluated here,
+//      which must reproduce them -- the harness is its experiment, so what differs is the
+//      spelling (three dots and w, k folded into the rows) and the anchor (the multiple of 16384
+//      nearest the eye, not the script's half-page origin).
+//   c. the same points in the eye's tangent frame (east, up, north): the rows' normals general
+//      vectors, not axes. Same bound.
+//   d. that frame scaled by 0.001 and by 1000, a Droste level's case: same bound, so the scale
+//      cancels.
+//   e. THE PLANT: the rows built the wrong way, w's cancellation taken in float32 (m and the
+//      eye cast first, dotted after). Past the bound at rungs 12 and 15 it is CAUGHT; anything
+//      less and the instrument is blind, which fails the gate.
 #include "core/Space.h"
 
 #include "core/Cga.h"
 #include "core/Common.h"
 #include "core/Droste.h"
+#include "core/Lattice.h"
 #include "core/Pga.h"
 
+#include <algorithm>
 #include <cmath>
+#include <random>
 #include <string>
+#include <vector>
 
 namespace ga {
 
@@ -429,6 +456,430 @@ bool RunSpaceSelfTest() {
         Log("[space] ---- FAIL (%d checks) ----", g.checks);
     }
     return g.ok;
+}
+
+// ================================================================ HIERARCHY step 3: the address
+namespace {
+
+// Python's random.Random(seed).random(), so that this gate walks the very points
+// uv_precision.py walks: MT19937 seeded by init_by_array with the one-word key {seed} (CPython's
+// seeding of an int), and 53 bits from two draws.
+struct PyRandom {
+    uint32_t mt[624];
+    int at = 624;
+    explicit PyRandom(uint32_t seed) {
+        mt[0] = 19650218u;
+        for (uint32_t k = 1; k < 624; ++k) mt[k] = 1812433253u * (mt[k - 1] ^ (mt[k - 1] >> 30)) + k;
+        uint32_t i = 1;
+        for (int k = 624; k > 0; --k) {   // the key has one word, so its index stays 0
+            mt[i] = (mt[i] ^ ((mt[i - 1] ^ (mt[i - 1] >> 30)) * 1664525u)) + seed;
+            if (++i >= 624) {
+                mt[0] = mt[623];
+                i = 1;
+            }
+        }
+        for (int k = 623; k > 0; --k) {
+            mt[i] = (mt[i] ^ ((mt[i - 1] ^ (mt[i - 1] >> 30)) * 1566083941u)) - i;
+            if (++i >= 624) {
+                mt[0] = mt[623];
+                i = 1;
+            }
+        }
+        mt[0] = 0x80000000u;
+    }
+    uint32_t Next() {
+        if (at >= 624) {
+            for (int k = 0; k < 624; ++k) {
+                const uint32_t y = (mt[k] & 0x80000000u) | (mt[(k + 1) % 624] & 0x7fffffffu);
+                mt[k] = mt[(k + 397) % 624] ^ (y >> 1) ^ ((y & 1u) ? 0x9908b0dfu : 0u);
+            }
+            at = 0;
+        }
+        uint32_t y = mt[at++];
+        y ^= y >> 11;
+        y ^= (y << 7) & 0x9d2c5680u;
+        y ^= (y << 15) & 0xefc60000u;
+        y ^= y >> 18;
+        return y;
+    }
+    double Random() {
+        const uint32_t a = Next() >> 5, b = Next() >> 6;
+        return (a * 67108864.0 + b) * (1.0 / 9007199254740992.0);
+    }
+};
+
+// The script's place, sphere and reaches (a rung's ground points are drawn within its reach of
+// the eye), and its RELATIVE column as it printed it, eye 3 m and eye 10 km, for the lines
+// beside this gate's own.
+constexpr double kHelmLatDeg = 42.816, kHelmLonDeg = -70.8125, kSphereR = 6371000.0;
+constexpr int kRungs[4] = {6, 9, 12, 15};
+constexpr double kReachM[4] = {60000.0, 8000.0, 1000.0, 120.0};
+constexpr double kScriptHelm[4] = {0.002594, 0.002472, 0.002508, 0.002919};
+constexpr double kScriptHigh[4] = {0.001980, 0.002772, 0.007176, 0.045293};
+constexpr double kTexelBound = 0.01;   // THE GATE, in texels of the rung
+
+// A max that keeps a NaN: a twin that returned one must fail the bound, not vanish in a max.
+void Worse(double& worst, double e) {
+    if (!(e <= worst)) worst = e;
+}
+
+// One rung of the script's run(): the eye, the script's window origin (the half-page lattice,
+// the eye in its central half), the window this code anchors nearest the eye, and the points
+// that fall inside the script's window -- planet frame, each with its global texel.
+struct AddressRun {
+    FaceWindow win;
+    double eye[3] = {};
+    double org[2] = {};
+    std::vector<double> P;   // x y z per point
+    std::vector<double> X;   // the texel anchored at the face's corner, x y per point
+    size_t Count() const { return P.size() / 3; }
+    // Relative to an anchor: exact, the difference of two doubles a window apart.
+    double Ref(size_t i, int axis, const FaceWindow& w) const {
+        return X[2 * i + axis] - double(axis == 0 ? w.anchorX : w.anchorY);
+    }
+    // The script's origin as a window's anchor. It is a multiple of 8192, not of 16384, so no
+    // WRAP sampler could read it: it is here only to separate the spelling from the anchor.
+    FaceWindow AtOrigin() const {
+        FaceWindow w = win;
+        w.anchorX = static_cast<long long>(org[0]);
+        w.anchorY = static_cast<long long>(org[1]);
+        return w;
+    }
+};
+
+AddressRun RunAt(int rung, double eyeAltM, double reachM) {
+    const double kDegToRad = 3.141592653589793 / 180.0;   // math.radians' own constant
+    auto dirOf = [](double lat, double lon, double d[3]) {   // the script's dir_of
+        const double cl = std::cos(lat);
+        d[0] = cl * std::cos(lon);
+        d[1] = std::sin(lat);
+        d[2] = cl * std::sin(lon);
+    };
+    AddressRun r;
+    const double lat0 = kHelmLatDeg * kDegToRad, lon0 = kHelmLonDeg * kDegToRad;
+    double d0[3], uv[2];
+    dirOf(lat0, lon0, d0);
+    for (int i = 0; i < 3; ++i) r.eye[i] = d0[i] * (kSphereR + eyeAltM);
+    const FaceWindow corner{CubeFaceOfDir(d0, uv), rung, 0, 0};
+    double eu = 0.0, ev = 0.0;
+    corner.TexelOf(r.eye, eu, ev);
+    r.org[0] = std::floor(eu / 8192.0 - 0.5) * 8192.0;
+    r.org[1] = std::floor(ev / 8192.0 - 0.5) * 8192.0;
+    r.win = corner.Nearest(r.eye);
+    PyRandom rnd(7);
+    for (int k = 0; k < 4000; ++k) {
+        const double dn = (rnd.Random() * 2 - 1) * reachM;
+        const double de = (rnd.Random() * 2 - 1) * reachM;
+        const double lat = lat0 + dn / kSphereR;
+        const double lon = lon0 + de / (kSphereR * std::cos(lat0));
+        double d[3];
+        dirOf(lat, lon, d);
+        const double P[3] = {d[0] * kSphereR, d[1] * kSphereR, d[2] * kSphereR};
+        double X = 0.0, Y = 0.0;
+        corner.TexelOf(P, X, Y);
+        const double wu = X - r.org[0], wv = Y - r.org[1];
+        if (!(0.0 <= wu && wu < 16384.0 && 0.0 <= wv && wv < 16384.0)) continue;
+        r.P.insert(r.P.end(), P, P + 3);
+        r.X.push_back(X);
+        r.X.push_back(Y);
+    }
+    return r;
+}
+
+// A planet-frame point in `own`'s frame as the vertex path carries it: the difference from own's
+// origin first, in doubles (the float wall's form), then R^T and the scale, then float32.
+void OwnOf(const Placement& own, const double P[3], float out[3]) {
+    const double rc[4] = {own.r[0], -own.r[1], -own.r[2], -own.r[3]};
+    double x = P[0] - own.t[0], y = P[1] - own.t[1], z = P[2] - own.t[2];
+    Motor::QRotate(rc, x, y, z);
+    out[0] = static_cast<float>(x / own.s);
+    out[1] = static_cast<float>(y / own.s);
+    out[2] = static_cast<float>(z / own.s);
+}
+
+// The worst |twin - reference| over a run's points, given in `own`'s frame, read through `pl`,
+// relative to w's anchor.
+double WorstTexel(const AddressRun& r, const FaceWindow& w, const Placement& own,
+                  const FaceWindow::Planes& pl) {
+    double worst = 0.0;
+    for (size_t i = 0; i < r.Count(); ++i) {
+        float p[3];
+        OwnOf(own, &r.P[3 * i], p);
+        float x = 0.0f, y = 0.0f;
+        FaceWindow::PageTexel(p, pl, x, y);
+        Worse(worst, std::fabs(x - r.Ref(i, 0, w)));
+        Worse(worst, std::fabs(y - r.Ref(i, 1, w)));
+    }
+    return worst;
+}
+double WorstTexel(const AddressRun& r, const FaceWindow& w, const Placement& own) {
+    return WorstTexel(r, w, own, w.PlanesIn(own));
+}
+
+// uv_precision.py's texel_relative_f32 op for op, relative to w's anchor: (A + p_a - s0 p_n) /
+// (E_n + p_n) * k, A = E_a - s0 E_n in doubles -- face 5's coordinates as the script writes them
+// (s = x / z, t = y / z). Not the address under test: at the script's own origin it proves this
+// harness IS the script's experiment, and at the twin's anchor it separates the two changes.
+double WorstScript(const AddressRun& r, const FaceWindow& w) {
+    const double N = w.FaceTexels();
+    double worst = 0.0;
+    for (size_t i = 0; i < r.Count(); ++i) {
+        const double* P = &r.P[3 * i];
+        for (int axis = 0; axis < 2; ++axis) {
+            const double s0 = 2.0 * double(axis == 0 ? w.anchorX : w.anchorY) / N - 1.0;
+            const float A = static_cast<float>(r.eye[axis] - s0 * r.eye[2]);
+            const float k = static_cast<float>(0.5 * N);
+            const float s0f = static_cast<float>(s0);
+            const float pa = static_cast<float>(P[axis] - r.eye[axis]);
+            const float pn = static_cast<float>(P[2] - r.eye[2]);
+            const float en = static_cast<float>(r.eye[2]);
+            const float sum = A + pa;
+            const float lean = s0f * pn;
+            const float num = sum - lean;
+            const float den = en + pn;
+            const float q = num / den;
+            const float texel = q * k;
+            Worse(worst, std::fabs(texel - r.Ref(i, axis, w)));
+        }
+    }
+    return worst;
+}
+
+// THE PLANT: PlanesIn's rows with each w rebuilt the wrong way -- the plane m and own.t cast to
+// float32 first and dotted after, over own.s in float32: the cancellation the rows exist to keep
+// in doubles, taken where it cannot be.
+FaceWindow::Planes Planted(const FaceWindow& w, const Placement& own) {
+    FaceWindow::Planes pl = w.PlanesIn(own);
+    double n[3], a[3], b[3];
+    CubeFaceAxes(w.face, n, a, b);
+    const double N = w.FaceTexels(), k = 0.5 * N;
+    const double s0 = 2.0 * double(w.anchorX) / N - 1.0;
+    const double t0 = 2.0 * double(w.anchorY) / N - 1.0;
+    const double m[3][3] = {{k * (a[0] - s0 * n[0]), k * (a[1] - s0 * n[1]), k * (a[2] - s0 * n[2])},
+                            {k * (b[0] - t0 * n[0]), k * (b[1] - t0 * n[1]), k * (b[2] - t0 * n[2])},
+                            {n[0], n[1], n[2]}};
+    const float t[3] = {static_cast<float>(own.t[0]), static_cast<float>(own.t[1]),
+                        static_cast<float>(own.t[2])};
+    const float s = static_cast<float>(own.s);
+    float* const rows[3] = {pl.u, pl.v, pl.w};
+    for (int i = 0; i < 3; ++i) {
+        const float m0 = static_cast<float>(m[i][0]) * t[0];
+        const float m1 = static_cast<float>(m[i][1]) * t[1];
+        const float m2 = static_cast<float>(m[i][2]) * t[2];
+        const float d01 = m0 + m1;
+        const float d = d01 + m2;
+        rows[i][3] = d / s;
+    }
+    return pl;
+}
+
+// The frames a run is read in: the planet's own axes at the eye (a translation), and the eye's
+// tangent frame -- the engine's rows (FrameLoop: up the eye's direction, east d(dir)/dlon, north
+// = east x up, a proper rotation in this left-handed planet frame).
+Placement AxesAt(const double eye[3]) {
+    Placement o;
+    for (int i = 0; i < 3; ++i) o.t[i] = eye[i];
+    return o;
+}
+Placement TangentAt(const double eye[3]) {
+    const double l = std::sqrt(eye[0] * eye[0] + eye[1] * eye[1] + eye[2] * eye[2]);
+    const double up[3] = {eye[0] / l, eye[1] / l, eye[2] / l};
+    const double yl = std::sqrt(up[0] * up[0] + up[2] * up[2]);
+    const double east[3] = {-up[2] / yl, 0.0, up[0] / yl};
+    const double north[3] = {east[1] * up[2] - east[2] * up[1], east[2] * up[0] - east[0] * up[2],
+                             east[0] * up[1] - east[1] * up[0]};
+    return Placement::Frame(east, up, north, eye);
+}
+
+std::string Four(const double v[4], const char* fmt) {
+    std::string s;
+    char b[32];
+    for (int i = 0; i < 4; ++i) {
+        snprintf(b, sizeof b, fmt, v[i]);
+        s += (i ? " " : "") + std::string(b);
+    }
+    return s;
+}
+
+}  // namespace
+
+bool RunFaceWindowSelfTest() {
+    Gate g;
+
+    // ---- a. the face axes against the cube's two maps ---------------------------------------
+    {
+        std::mt19937 rng(0x3add5u);
+        std::uniform_real_distribution<double> U(-1.0, 1.0), V(0.0, 1.0);
+        auto dot = [](const double x[3], const double y[3]) {
+            return x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+        };
+        double worstInv = 0.0, worstFwd = 0.0;
+        uint32_t faces[6] = {0, 0, 0, 0, 0, 0}, leansElsewhere = 0, directions = 0;
+        while (directions < 20000) {
+            double d[3] = {U(rng), U(rng), U(rng)};
+            const double l = std::sqrt(dot(d, d));
+            if (l < 1e-6) continue;
+            for (double& c : d) c /= l;
+            ++directions;
+            double uv[2], n[3], a[3], b[3];
+            const uint32_t f = CubeFaceOfDir(d, uv);
+            ++faces[f];
+            CubeFaceAxes(f, n, a, b);
+            const double dn = dot(d, n);
+            Worse(worstInv, std::fabs(dot(d, a) / dn - (uv[0] * 2.0 - 1.0)));
+            Worse(worstInv, std::fabs(dot(d, b) / dn - (uv[1] * 2.0 - 1.0)));
+            for (uint32_t o = 0; o < 6; ++o) {   // the face the inverse chose is the one it leans on
+                double no[3], ao[3], bo[3];
+                CubeFaceAxes(o, no, ao, bo);
+                if (dot(d, no) > dn) ++leansElsewhere;
+            }
+        }
+        for (int i = 0; i < 20000; ++i) {
+            const uint32_t f = static_cast<uint32_t>(i % 6);
+            const double u = V(rng), v = V(rng);
+            double d[3], n[3], a[3], b[3];
+            ComposeCubeDir(f, u, v, d);
+            CubeFaceAxes(f, n, a, b);
+            const double dn = dot(d, n);
+            if (!(dn > 0.0)) ++leansElsewhere;
+            Worse(worstFwd, std::fabs(dot(d, a) / dn - (u * 2.0 - 1.0)));
+            Worse(worstFwd, std::fabs(dot(d, b) / dn - (v * 2.0 - 1.0)));
+        }
+        g.Near(worstInv, 0.0, 1e-12, "address a: (s, t) from CubeFaceAxes = CubeFaceOfDir's");
+        g.Near(worstFwd, 0.0, 1e-12,
+               "address a: ComposeCubeDir's point, back through CubeFaceAxes, is its own (s, t)");
+        g.True(leansElsewhere == 0, "address a: every direction leans most on its own face's normal");
+        Log("[space] address a. the face axes: 20000 directions through CubeFaceOfDir (faces "
+            "%u/%u/%u/%u/%u/%u), (s, t) from CubeFaceAxes off the inverse's by at most %.1e; "
+            "20000 points of ComposeCubeDir back to their own (s, t) within %.1e; %u directions "
+            "lean harder on another face's normal",
+            faces[0], faces[1], faces[2], faces[3], faces[4], faces[5], worstInv, worstFwd,
+            leansElsewhere);
+    }
+
+    // ---- b to e. the script's experiment -----------------------------------------------------
+    // Per eye (3 m, then 10 km) and rung: the twin at the anchor nearest the eye (b), the script's
+    // spelling at its own origin and at that anchor, the twin at the script's origin -- the two
+    // changes apart -- then, at the helm, the tangent frame (c), its scalings (d), the plant (e).
+    struct Eye {
+        double altM;
+        const double* printed;
+        double twin[4], scriptOrg[4], scriptNear[4], twinOrg[4], count[4];
+    } eyes[2] = {{3.0, kScriptHelm, {}, {}, {}, {}, {}}, {10000.0, kScriptHigh, {}, {}, {}, {}, {}}};
+    double tangentW[4], milliW[4], kiloW[4], plantW[4];
+    uint32_t face = 0;
+    size_t helmPoints = 0;
+    for (Eye& e : eyes) {
+        for (int r = 0; r < 4; ++r) {
+            const AddressRun run = RunAt(kRungs[r], e.altM, kReachM[r]);
+            const Placement axes = AxesAt(run.eye);
+            e.twin[r] = WorstTexel(run, run.win, axes);
+            e.scriptOrg[r] = WorstScript(run, run.AtOrigin());
+            e.scriptNear[r] = WorstScript(run, run.win);
+            e.twinOrg[r] = WorstTexel(run, run.AtOrigin(), axes);
+            e.count[r] = double(run.Count());
+            if (&e != &eyes[0]) continue;
+            face = run.win.face;
+            helmPoints += run.Count();
+            const Placement tangent = TangentAt(run.eye);
+            Placement milli = tangent, kilo = tangent;   // (not `small`: the RPC headers define it)
+            milli.s *= 0.001;
+            kilo.s *= 1000.0;
+            tangentW[r] = WorstTexel(run, run.win, tangent);
+            milliW[r] = WorstTexel(run, run.win, milli);
+            kiloW[r] = WorstTexel(run, run.win, kilo);
+            plantW[r] = WorstTexel(run, run.win, axes, Planted(run.win, axes));
+        }
+    }
+    g.True(face == 5, "address: the helm is on face 5 (the script's own assertion)");
+    bool within = true, caught = true;
+    for (int r = 0; r < 4; ++r) {
+        within = within && eyes[0].twin[r] < kTexelBound && tangentW[r] < kTexelBound &&
+                 milliW[r] < kTexelBound && kiloW[r] < kTexelBound;
+        if (kRungs[r] >= 12) caught = caught && plantW[r] > kTexelBound;
+    }
+    g.True(within, "address b-d: the twin within 0.01 texel of the doubles at the helm");
+    g.True(caught, "address e: the plant past 0.01 texel at rungs 12 and 15");
+    // The script's spelling at its origin against its printed digits: a record, not the gate (a
+    // different libm could move a last digit without the address being any worse). The spread
+    // of the four at the helm is what the two changes can do to a worst of thousands of roundings.
+    int reproduced = 0;
+    double lo = 1e300, hi = 0.0;
+    for (const Eye& e : eyes) {
+        for (int r = 0; r < 4; ++r) {
+            char a[32], b[32];
+            snprintf(a, sizeof a, "%.6f", e.scriptOrg[r]);
+            snprintf(b, sizeof b, "%.6f", e.printed[r]);
+            reproduced += std::string(a) == b ? 1 : 0;
+            if (&e != &eyes[0]) continue;
+            for (double v : {e.twin[r], e.scriptOrg[r], e.scriptNear[r], e.twinOrg[r]}) {
+                lo = (std::min)(lo, v);
+                hi = (std::max)(hi, v);
+            }
+        }
+    }
+
+    for (const Eye& e : eyes) {
+        const bool helmEye = &e == &eyes[0];
+        Log("[space] address b. the planet's axes, eye %s: rungs 6 9 12 15 over %s points, the "
+            "twin's worst %s texel at the anchor nearest the eye",
+            helmEye ? "3 m (THE GATE, under 0.01 texel)" : "10 km (a record: nothing that high "
+                                                           "wants rung 15)",
+            Four(e.count, "%.0f").c_str(), Four(e.twin, "%.6f").c_str());
+        Log("[space] address b.   beside it: uv_precision.py printed %s; on these points its "
+            "spelling gives %s at its origin and %s at the twin's anchor, and the twin %s at the "
+            "script's origin",
+            Four(e.printed, "%.6f").c_str(), Four(e.scriptOrg, "%.6f").c_str(),
+            Four(e.scriptNear, "%.6f").c_str(), Four(e.twinOrg, "%.6f").c_str());
+    }
+    Log("[space] address b. the script's spelling %s its printed digits here at %d of 8: the same "
+        "points, reference and float32 rounding. What differs is the spelling (three dots and w, "
+        "N/2 folded into the rows) and the anchor (the multiple of 16384 nearest the eye, not the "
+        "script's half-page origin); at the helm the four combinations span %.6f to %.6f texel",
+        reproduced == 8 ? "reproduces" : "does NOT reproduce", reproduced, lo, hi);
+    Log("[space] address c. the eye's tangent frame (east, up, north), eye 3 m: worst %s texel",
+        Four(tangentW, "%.6f").c_str());
+    Log("[space] address d. that frame scaled by 0.001, eye 3 m: worst %s texel",
+        Four(milliW, "%.6f").c_str());
+    Log("[space] address d. that frame scaled by 1000, eye 3 m: worst %s texel",
+        Four(kiloW, "%.6f").c_str());
+    Log("[space] address e. PLANTED, w's cancellation in float32 (the planet's axes, eye 3 m): "
+        "worst %s texel -- %s",
+        Four(plantW, "%.3g").c_str(),
+        caught ? "CAUGHT: past 0.01 at rungs 12 and 15"
+               : "NOT CAUGHT: the instrument cannot see a row built in float32");
+
+    if (g.ok) {
+        Log("[space] address ---- PASS (%d checks over 40000 face directions and %zu points in "
+            "four frames): the face axes against CubeFaceOfDir and ComposeCubeDir; the float32 "
+            "twin of PageTexel within %.2f texel of the doubles at rungs 6, 9, 12 and 15 at the "
+            "helm, in the planet's axes, the eye's tangent frame and that frame scaled by 0.001 "
+            "and 1000; the plant caught ----",
+            g.checks, helmPoints, kTexelBound);
+    } else {
+        Log("[space] address ---- FAIL (%d checks) ----", g.checks);
+    }
+    return g.ok;
+}
+
+FaceWindowSample FaceWindowHelmSample(int rung) {
+    FaceWindowSample s;
+    for (int r = 0; r < 4; ++r) {
+        if (kRungs[r] != rung) continue;
+        const AddressRun run = RunAt(rung, 3.0, kReachM[r]);
+        const Placement axes = AxesAt(run.eye);
+        s.win = run.win;
+        s.planes = run.win.PlanesIn(axes);
+        s.planted = Planted(run.win, axes);
+        for (size_t i = 0; i < run.Count(); ++i) {
+            float p[3];
+            OwnOf(axes, &run.P[3 * i], p);
+            s.p.insert(s.p.end(), p, p + 3);
+            s.ref.push_back(run.Ref(i, 0, run.win));
+            s.ref.push_back(run.Ref(i, 1, run.win));
+        }
+    }
+    return s;
 }
 
 }  // namespace ga

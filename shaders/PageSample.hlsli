@@ -24,6 +24,18 @@
 //                    float32 ulp of 1/8 px, so every rounding difference lands on that grid.
 //                    A consumer takes the spelling of what it HAS (a direction, or lat/lon); a
 //                    kernel switched to the other would move its bed by up to 3.6 m of ground.
+//    PageTexel       the texel of a FACE-PLANE window (HIERARCHY step 3), relative to its
+//                    anchor: two planes through the body's centre over a third, evaluated at a
+//                    point given relative to the eye, in whatever frame the CPU pulled the
+//                    planes into (FaceWindow::PlanesIn, core/Lattice.h). The one large
+//                    cancellation is the planes' w, taken in doubles there; everything added
+//                    here is eye-relative, which is how float32 finds a rung-15 texel (1.9 cm)
+//                    to 0.002 of itself within reach of the helm (tiletest, this GPU), where
+//                    the direction's spelling is 29 texels off. Its CPU twin, op for op, is
+//                    FaceWindow::PageTexel. Nothing reads it yet;
+//    PageTexelUv     the same over the page's texels: a window's uv. The anchor is a multiple
+//                    of the page, so a WRAP sampler's modulo puts every texel where the global
+//                    lattice has it;
 //    PageHave        the residency floor at a uv of one slice, PIXEL stage: a conservative
 //                    GATHER + max -- never sample finer than any texel under the filter
 //                    footprint (M6h: the bilinear ramp read unmapped tiles and mottled the marsh);
@@ -76,6 +88,18 @@ float2 PageUvLatLon(float latDeg, float lonDeg, float4 merc) {
     const float mx = (lonDeg + 180.0f) / 360.0f * merc.w;
     const float my = (0.5f - log(tan(0.7853981634f + latR * 0.5f)) * 0.15915494309f) * merc.w;
     return float2(mx - merc.x, my - merc.y) * merc.z;
+}
+
+// A face-plane window's texel relative to its anchor (HIERARCHY 4.4): (U . p + U.w, V . p + V.w)
+// / (W . p + W.w), p the point relative to the eye in the frame the rows were pulled into. The
+// rows are FaceWindow::PlanesIn's; their w holds the cancellation, so nothing here is large.
+float2 PageTexel(float3 p, float4 planeU, float4 planeV, float4 planeW) {
+    return float2(dot(p, planeU.xyz) + planeU.w, dot(p, planeV.xyz) + planeV.w) /
+           (dot(p, planeW.xyz) + planeW.w);
+}
+// ...and its uv, for a WRAP sampler to take modulo the page.
+float2 PageTexelUv(float3 p, float4 planeU, float4 planeV, float4 planeW) {
+    return PageTexel(p, planeU, planeV, planeW) / kPageDim;
 }
 
 // The residency floor, pixel stage: CONSERVATIVE (gather + max). Smoothness comes from

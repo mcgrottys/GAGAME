@@ -45,6 +45,8 @@ uint64_t PoolCommittedBytes();
 // every tile passed and every step-0 instrument caught its planted failure (a step-0 fact that
 // does not hold is reported, not failed). Requires shaders/TileTest.hlsl and TileWrap.hlsl
 // under shaderDir.
+// HIERARCHY step 3 follows step 0's verdict: a GATE on the address of a face-plane window
+// (PageTexel against the doubles, and a plant), which needs shaders/TileTexel.hlsl as well.
 bool RunTileSelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir);
 
 // ================================================================================================
