@@ -914,6 +914,15 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     }
     lap(1);
 
+    // ---- THE PAGES LEDGER (Residency.h pagesEvery). HERE, at the settle's own point: after the
+    // landed reads claimed their tiles, before the batch is gathered, so its "wanted this frame"
+    // is the settle's to the tile. Not a phase: the lap clock restarts after the print.
+    if (pagesEvery && (m_frame % pagesEvery) == 0u) {
+        std::lock_guard<std::mutex> lk(m_mx);
+        LogPages();
+        lap0 = Clock::now();
+    }
+
     // ---- Step 25: THE EXACT SETTLE (Residency.h settleExact). Harness only: main raises the
     // flag for the held frames of a --settle-exact still, and outside a hold this block is
     // never entered. It runs AFTER the landed reads claimed their tiles (a tile that arrived
@@ -1232,13 +1241,15 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     if (traceTurn) {
         LogSamplers();   // M13: the readers' shares of this turn, beside the turn itself
         Log("[res-turn] rec%u f%u | landed %u batches / %u tiles (lag %u..%u turns), %u retired, "
-            "%u UNOWNED%s | batch %u: direct %u, ring %u, NO-BYTES %u, evicted %u | %u tenants "
+            "%u UNOWNED%s | batch %u: direct %u, ring %u, NO-BYTES %u, evicted %u (%u "
+            "reclaimed) | %u tenants "
             "barriered | landing: free %u, retiring %u, in flight %u tiles / %zu batches | pool "
             "%zu mapped, %zu free | queue: seen %zu, loading %zu, in flight %d",
             traceRecFrame, m_frame, turn.landedBatches, turn.landedTiles, turn.lagMin,
             turn.lagMax, turn.landedRetired, turn.landedUnowned,
             turn.landedOnly ? ", LANDED-ONLY turn" : "", turn.batch, turn.direct, turn.ring,
-            turn.ringNoBytes, turn.evicted, turn.barriered, turn.stageFree, turn.stageRetiring,
+            turn.ringNoBytes, turn.evicted, turn.reclaimed, turn.barriered, turn.stageFree,
+            turn.stageRetiring,
             turn.inFlightTiles, m_inFlightReads.size(), m_mapped.size(), m_freePool.size(),
             m_seen.size(), m_loading.size(), m_inFlight.load());
     }
@@ -1339,7 +1350,7 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
     // Evictions to free pool slots when needed. Never evict: the coarsest mip, tiles seen
     // within the frame-overlap window (the GPU may still read them), or tiles with a mapped
     // child (the classic's pyramid invariant).
-    auto childMapped = [&](const std::shared_ptr<Tracked>& tr) {
+    auto childMapped = [&](const Tracked* tr) {
         if (tr->req.mip == 0) return false;
         for (uint32_t dy = 0; dy < 2; ++dy) {
             for (uint32_t dx = 0; dx < 2; ++dx) {
@@ -1363,6 +1374,75 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
     // Keyed by (tenant, heapChunk); evictions keyed by (tenant, UINT32_MAX).
     std::map<std::pair<int, uint32_t>, PerHeap> calls;
 
+    // ---- THE VICTIMS, CHOSEN ONCE A TURN (2026-09-17). Both paths below -- the headroom pass
+    // and the demand path inside the fill loop -- take from this one list, oldest-unwanted
+    // first. It used to be a full sort of every mapped tile per slot needed, which at the cap is
+    // up to kMaxMapsPerFrame sorts of 8192 entries in a frame.
+    std::vector<Tracked*> victims;
+    size_t nextVictim = 0;
+    bool victimsBuilt = false;
+    auto buildVictims = [&] {
+        victimsBuilt = true;
+        victims.clear();
+        nextVictim = 0;
+        for (const auto& tr : m_mapped) {
+            const Tenant& vt = m_tenants[tr->tenant];
+            if (tr->req.mip == vt.mips - 1) continue;             // the coarsest rung always stays
+            if (tr->lastSeen + kEvictAgeFrames >= m_frame) continue;   // the GPU may still read it
+            if (childMapped(tr.get())) continue;                  // the pyramid invariant
+            victims.push_back(tr.get());
+        }
+        std::sort(victims.begin(), victims.end(), [](const Tracked* a, const Tracked* b) {
+            if (a->lastSeen != b->lastSeen) return a->lastSeen < b->lastSeen;
+            return a->req.mip < b->req.mip;
+        });
+    };
+    // One tile released: its mapping nulled, its residency byte lowered, its slot back in the
+    // pool. It leaves m_mapped in the single compaction after the loop (Untrack marks it), so a
+    // release costs no erase from the middle of an 8192-entry vector.
+    auto release = [&](Tracked* v) {
+        Tenant& vt = m_tenants[v->tenant];
+        auto& ev = calls[{v->tenant, UINT32_MAX}];
+        ev.coords.push_back({v->req.x, v->req.y, 0, v->req.face * vt.mips + v->req.mip});
+        ev.sizes.push_back({1, FALSE, 0, 0, 0});
+        ev.flags.push_back(D3D12_TILE_RANGE_FLAG_NULL);
+        ev.offsets.push_back(0);
+        ev.counts.push_back(1);
+        UpdateResidencyByte(vt, v->req, false);
+        m_freePool.push_back(v->pool);
+        Untrack(vt, v);
+        ++turn.evicted;
+    };
+    // The next victim still eligible: a tile listed before this turn's maps may have acquired a
+    // mapped child since (the fill loop maps as it goes), and the invariant outranks the order.
+    auto takeVictim = [&](uint32_t ageFrames) -> Tracked* {
+        while (nextVictim < victims.size()) {
+            Tracked* v = victims[nextVictim];
+            if (v->lastSeen + ageFrames >= m_frame) return nullptr;   // sorted: none older left
+            ++nextVictim;
+            // The invariant is re-tested because the fill loop MAPS as it goes: a tile listed
+            // parentless a moment ago may have a mapped child by the time its turn comes.
+            if (childMapped(v)) continue;
+            return v;
+        }
+        return nullptr;
+    };
+
+    // ---- THE HEADROOM PASS. Above the mark, release what nobody has wanted for a while --
+    // asked or not. This is what keeps a place the view has left from holding the pool against
+    // the place it has arrived at (Residency.h kPoolHighWater). It rides here, at the head of
+    // the turn that maps, because a turn with an empty batch never calls MapAndFill and needs
+    // no headroom either: the moment anything is wanted again, this runs before it is mapped.
+    if (!settleExact && m_mapped.size() >= kPoolHighWater) {
+        if (!victimsBuilt) buildVictims();
+        while (turn.reclaimed < kReclaimPerTurn) {
+            Tracked* v = takeVictim(kReclaimAgeFrames);
+            if (!v) break;
+            release(v);
+            ++turn.reclaimed;
+        }
+    }
+
     // THE LANDING-SLOT DRAIN STAYS WHERE IT WAS, in the fill loop below. Step 28's patch hoisted
     // it here so the ledger could report a settled `stageFree`, arguing the slots come back in
     // the same turn either way. They do NOT, in one case: an empty `toFill` never reaches the
@@ -1383,34 +1463,12 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
         // shipped one, and this test is the shipped test.
         if (!settleExact && m_freePool.empty() &&
             m_heaps.size() * kPoolChunkTiles >= kPoolCapTiles) {
-            // Pool at budget: evict.
-            std::sort(m_mapped.begin(), m_mapped.end(), [](const auto& a, const auto& b) {
-                if (a->lastSeen != b->lastSeen) return a->lastSeen < b->lastSeen;
-                return a->req.mip < b->req.mip;
-            });
-            bool freed = false;
-            for (auto it = m_mapped.begin(); it != m_mapped.end(); ++it) {
-                auto& victim = *it;
-                Tenant& vt = m_tenants[victim->tenant];
-                if (victim->req.mip == vt.mips - 1) continue;
-                if (victim->lastSeen + kEvictAgeFrames >= m_frame) continue;
-                if (childMapped(victim)) continue;
-                auto& ev = calls[{victim->tenant, UINT32_MAX}];
-                ev.coords.push_back({victim->req.x, victim->req.y, 0,
-                                     victim->req.face * vt.mips + victim->req.mip});
-                ev.sizes.push_back({1, FALSE, 0, 0, 0});
-                ev.flags.push_back(D3D12_TILE_RANGE_FLAG_NULL);
-                ev.offsets.push_back(0);
-                ev.counts.push_back(1);
-                UpdateResidencyByte(vt, victim->req, false);
-                m_freePool.push_back(victim->pool);
-                Untrack(vt, victim.get());   // m_mapped's reference keeps it alive until
-                m_mapped.erase(it);          // this erase, as the map's did
-                freed = true;
-                ++turn.evicted;
-                break;
-            }
-            if (!freed) break;   // nothing evictable yet; try again next frame
+            // Pool at budget: evict. The order was decided once for the turn above; this
+            // takes the next entry still eligible rather than sorting every mapped tile again.
+            if (!victimsBuilt) buildVictims();
+            Tracked* victim = takeVictim(kEvictAgeFrames);
+            if (!victim) break;   // nothing evictable yet; try again next frame
+            release(victim);
         }
         const uint32_t slot = AcquirePoolTile(gpu);
         tile->pool = slot;
@@ -1432,6 +1490,16 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
             UpdateResidencyByte(t, tile->req, true);
         }
         toFill.push_back(tile);
+    }
+
+    // THE EVICTED LEAVE m_mapped IN ONE PASS, not an erase from the middle of an 8192-entry
+    // vector per tile. Untrack cleared each victim's `pos`, and no other tile in m_mapped
+    // carries UINT32_MAX there -- the drop and invalidation paths compact before they return.
+    // The vector held the last reference, so this is also where the victims die.
+    if (turn.evicted) {
+        std::erase_if(m_mapped, [](const std::shared_ptr<Tracked>& p) {
+            return p->pos == UINT32_MAX;
+        });
     }
 
     // Queue-side mapping updates land before this frame's list executes.
@@ -1530,6 +1598,108 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
     }
     // The tenants go back to shader reads in ProcessQueues, after this call returns: the landed
     // loop's copies need that barrier on the turns this call never runs at all.
+}
+
+void ResidencyManager::LabelSlices(int tenant, std::vector<std::string> tags,
+                                   std::vector<double> ground0M) {
+    Tenant& t = m_tenants[tenant];
+    tags.resize(t.faces);
+    ground0M.resize(t.faces, 0.0);
+    t.sliceTag = std::move(tags);
+    t.sliceGround0M = std::move(ground0M);
+}
+
+void ResidencyManager::LogPages() const {
+    // Per tenant: one pass over its tracked tiles into (slice, mip) cells, then one line per run
+    // of consecutive slices that sit on the same lattice. "wanted" is the settle's test (the
+    // stamp says this frame, real or predicted); "held" is mapped and NOT wanted this frame --
+    // what the pool keeps for nobody, the set a reclaim or a released page gives back.
+    struct Cell {
+        uint32_t wanted = 0, predicted = 0, mapped = 0, held = 0;
+    };
+    size_t poolSum = 0;
+    Log("[pages] rec%u f%u | pool %zu mapped, %zu free | per mip: wanted/mapped+held", traceRecFrame,
+        m_frame, m_mapped.size(), m_freePool.size());
+    for (size_t k = 0; k < m_tenants.size(); ++k) {
+        const Tenant& t = m_tenants[k];
+        if (t.tracked.empty()) continue;
+        std::vector<Cell> cells(size_t(t.faces) * t.mips);
+        for (const auto& tr : t.tracked) {
+            const uint32_t st =
+                t.stamp[StampIndex(t, tr->req.face, tr->req.mip, tr->req.x, tr->req.y)];
+            const bool mapped = tr->state == TileState::Mapped;
+            Cell& c = cells[size_t(tr->req.face) * t.mips + tr->req.mip];
+            if ((st >> 1) == m_frame) {
+                ++c.wanted;
+                if (st & 1u) ++c.predicted;
+                if (mapped) ++c.mapped;
+            } else if (mapped) {
+                ++c.held;
+            }
+        }
+        uint32_t tw = 0, tm = 0, th = 0;
+        for (const Cell& c : cells) {
+            tw += c.wanted;
+            tm += c.mapped;
+            th += c.held;
+        }
+        poolSum += tm + th;
+        Log("[pages]   %S: %u slices | wanted %u, mapped %u, held %u", t.name.c_str(), t.faces, tw,
+            tm, th);
+        auto tagOf = [&](uint32_t f) -> std::string {
+            if (f < t.sliceTag.size() && !t.sliceTag[f].empty()) return t.sliceTag[f];
+            return t.sliceTag.empty() ? "slice " + std::to_string(f) : std::string("unbound");
+        };
+        for (uint32_t f0 = 0; f0 < t.faces;) {
+            uint32_t f1 = f0 + 1;
+            const std::string tag = tagOf(f0);
+            // An unlabelled tenant prints slice by slice; a labelled one merges a lattice's run.
+            while (!t.sliceTag.empty() && f1 < t.faces && tagOf(f1) == tag) ++f1;
+            Cell sum;
+            std::string byMip;
+            int finest = -1;
+            for (uint32_t m = 0; m < t.mips; ++m) {
+                Cell cm;
+                for (uint32_t f = f0; f < f1; ++f) {
+                    const Cell& c = cells[size_t(f) * t.mips + m];
+                    cm.wanted += c.wanted;
+                    cm.predicted += c.predicted;
+                    cm.mapped += c.mapped;
+                    cm.held += c.held;
+                }
+                sum.wanted += cm.wanted;
+                sum.predicted += cm.predicted;
+                sum.mapped += cm.mapped;
+                sum.held += cm.held;
+                if ((cm.mapped || cm.held) && finest < 0) finest = static_cast<int>(m);
+                if (cm.wanted || cm.held) {
+                    char b[48];
+                    snprintf(b, sizeof(b), " m%u %u/%u+%u", m, cm.wanted, cm.mapped, cm.held);
+                    byMip += b;
+                }
+            }
+            char range[32];
+            if (f1 - f0 == 1) snprintf(range, sizeof(range), "[%u]", f0);
+            else snprintf(range, sizeof(range), "[%u..%u]", f0, f1 - 1);
+            const double g0 = f0 < t.sliceGround0M.size() ? t.sliceGround0M[f0] : 0.0;
+            char deep[48] = "nothing mapped";
+            if (finest >= 0) {
+                snprintf(deep, sizeof(deep), "finest m%d = %.4g m", finest,
+                         g0 * double(1u << finest));
+            }
+            Log("[pages]     %-8s %-30s %9.4g m at m0 | wanted %u (%u predicted), mapped %u, "
+                "unmapped %u, held %u | %s |%s",
+                range, tag.c_str(), g0, sum.wanted, sum.predicted, sum.mapped,
+                sum.wanted - sum.mapped, sum.held, deep, byMip.empty() ? " -" : byMip.c_str());
+            f0 = f1;
+        }
+    }
+    // Every mapped tile is tracked by exactly one tenant, so the tenants' mapped tiles ARE the
+    // pool's. A disagreement is a tile the bookkeeping lost, and it is said, not summed away.
+    if (poolSum != m_mapped.size()) {
+        Log("[pages] POOL DISAGREES: the tenants hold %zu mapped tiles, the pool %zu", poolSum,
+            m_mapped.size());
+    }
 }
 
 void ResidencyManager::LogSettleExact(uint32_t heldFrames) const {

@@ -1551,6 +1551,29 @@ model (or a textbook) would hold → what this project measured → the law now 
     ever state (an anchor, a mapping, a resident page); and a warm-up is judged on a HARD CUT against a
     view that never looked away -- a smooth turn hides the landing behind the edge of the screen.
 
+47. **A cache that gives up a slot only when asked holds the place you left against the place you
+    are.** Prior (the same corridor, 2026-09-17): the pool at its cap is a budget, and a budget is an
+    input to the streamer (priors 31) -- so a full pool is a full pool, and the tiles in it are as good
+    as any others. Measured, a hull carried 1900 km through a gate: at the destination the pool stood
+    at 8192 tiles mapped and 0 free for 859 turns of a 1400-frame drive, three quarters of it the
+    river the boat had left, and it mapped 297 tiles in all that time. Eviction was demand-driven
+    ONLY -- a slot came free when some other tile asked for it, and each ask sorted all 8192 mapped
+    tiles to choose one victim -- so the place with nothing left to ask kept its tiles by default and
+    the place arriving bought each slot one sort at a time. With a high-water mark (7/8 of the cap)
+    above which the pool releases, unasked, what nobody has wanted for 60 frames -- oldest first, 256
+    a turn, the victim rule otherwise unchanged -- the same drive settles at ~7100 mapped with ~1100
+    slots standing free and maps 750 tiles at the destination, 2.5x. Gates: the resident sets stay
+    EQUAL on all six settled stills (the pass cannot run under an exact hold, where the pool holds the
+    want set by definition), the slot audit is clean over 900 audited frames, and the readers' deficits
+    stay single-tile transients either way. THE STORM RAIL IS THE GATE THAT SEES IT: the first 30 s are
+    the same picture (median SSIM 0.99972, 430 frames bit-identical), and the last 10 s -- water level,
+    pool pinned -- differ past the run-to-run floor (229 frames below SSIM 0.9 against 4 and 11 in the
+    two A/A pairs) while carrying the SAME detail, by compressed size (1122 / 1116 KB against 1122 /
+    1116) and by edge energy (4.42 / 4.32 against 4.40 / 4.33, both inside the within-binary spread).
+    Law: what a cache holds is a decision it makes every frame, not one it makes when cornered; and a
+    change that only moves WHEN a tile lands is gated on a moving instrument against its own A/A floor,
+    never on a settled still, which is defined to hide it.
+
 ## verification — The gate map: which algebra is pinned where
 
 - `pga` — motors: rotation, composition, rigidity, screw log/exp, slerp.

@@ -87,6 +87,8 @@ struct Options {
                                       // depths (SkyLayer::Probe). Once, then the run goes on.
     uint32_t waterProbeEvery = 0;     // --water-probe N: every N recorded frames, the DRAWN sea
                                       // (depth read back) against each hull's own water (WaterProbe)
+    uint32_t pagesEvery = 0;          // --pages-trace N: every Nth residency turn, each tenant split
+                                      // by the lattices its slices sit on (Residency.h pagesEvery)
     uint32_t treeAudit = 0;           // --tree-audit N: compare N tiles/frame, report, exit
     bool warmTrees = false;           // --warm-trees: build them without comparing, then exit
     bool packTrees = false;           // --pack-trees: one archive per node per frame, then exit

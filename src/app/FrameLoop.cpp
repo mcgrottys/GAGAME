@@ -696,30 +696,46 @@ std::optional<int> FrameLoop::Session() {
             m_places.push_back(std::move(pl));
             return true;
         };
+        // A GATE'S BOX, AT EITHER END, IS ONE STRUCTURE POSED TWICE (scene/Gateway.h BoxPose): the
+        // placement sugar, read the same way for the entry and for the exit. The compass spelling
+        // puts it and turns it -- `az` to the heading, `pitch` to the lean, absent meaning no lean,
+        // which is why a box with neither stands y-up -- and the motor spelling carries any
+        // orientation at all. `toAz` remains the exit's heading when its own sugar names none.
+        auto boxPose = [](const JsonValue& sugar, bool has, double azFallback,
+                          const std::string& path, Motor& out, std::string* why) {
+            if (!has) {
+                out = scene::Gateway::BoxPose(0.0, 0.0, 0.0, azFallback, 0.0);
+                return true;
+            }
+            scene::PoseSugar ps;
+            if (!scene::ReadPoseSugar(sugar, path, ps, why)) return false;
+            if (ps.kind == scene::PoseSugar::Kind::MotorForm) {
+                return scene::ResolveMotorSugar(sugar, scene::PoseFrame{}, path, out, why);
+            }
+            if (ps.kind != scene::PoseSugar::Kind::Compass) {
+                if (why) *why = path + ": a box is {x, alt, z, az, pitch} or {motor: {re, du}}";
+                return false;
+            }
+            out = scene::Gateway::BoxPose(ps.x, ps.alt, ps.z, sugar.Get("az") ? ps.az : azFallback,
+                                          sugar.Get("pitch") ? ps.pitch : 0.0);
+            return true;
+        };
         for (const SceneGate& gd : S.gates) {
             if (!gd.p.enabled || marsMode) continue;
-            scene::PoseSugar gs;
+            Motor entry, exit;
             std::string gwhy = "no `at` declared";
             if (!gd.hasAt ||
-                !scene::ReadPoseSugar(gd.at, "gates." + gd.p.name + ".at", gs, &gwhy) ||
-                gs.kind != scene::PoseSugar::Kind::Compass) {
-                Log("[gate] '%s' needs its box in the compass sugar {x, alt, z, az} (%s) -- not built",
-                    gd.p.name.c_str(), gwhy.c_str());
+                !boxPose(gd.at, true, 0.0, "gates." + gd.p.name + ".at", entry, &gwhy)) {
+                Log("[gate] '%s' needs its box in the compass sugar {x, alt, z, az[, pitch]} (%s) "
+                    "-- not built", gd.p.name.c_str(), gwhy.c_str());
                 continue;
             }
-            double exit[3] = {0.0, 0.0, 0.0};
-            if (gd.hasToAt) {
-                scene::PoseSugar ts;
-                std::string twhy;
-                if (!scene::ReadPoseSugar(gd.toAt, "gates." + gd.p.name + ".toAt", ts, &twhy) ||
-                    ts.kind != scene::PoseSugar::Kind::Compass) {
-                    Log("[gate] '%s' needs its exit in the compass sugar {x, alt, z} (%s) -- not built",
-                        gd.p.name.c_str(), twhy.c_str());
-                    continue;
-                }
-                exit[0] = ts.x;
-                exit[1] = ts.alt;
-                exit[2] = ts.z;
+            std::string twhy;
+            if (!boxPose(gd.toAt, gd.hasToAt, gd.p.toAz, "gates." + gd.p.name + ".toAt", exit,
+                         &twhy)) {
+                Log("[gate] '%s' needs its exit in the compass sugar {x, alt, z[, az, pitch]} (%s) "
+                    "-- not built", gd.p.name.c_str(), twhy.c_str());
+                continue;
             }
             PlaceRef from, to;
             if (!placeAt(gd.hasFrom, gd.p.fromLat, gd.p.fromLon, gd.p.name, from) ||
@@ -728,8 +744,7 @@ std::optional<int> FrameLoop::Session() {
             }
             auto gate = std::make_unique<scene::Gateway>();
             gate->Declared() = gd.p;
-            if (gate->Build(*from.space, *to.space, *to.chart, m_tangentSpace, gs.x, gs.alt, gs.z,
-                            gd.at.Get("az") ? gs.az : 0.0, exit)) {
+            if (gate->Build(*from.space, *to.space, *to.chart, m_tangentSpace, entry, exit)) {
                 m_gates.push_back(std::move(gate));
             }
         }

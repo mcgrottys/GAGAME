@@ -2016,7 +2016,8 @@ bool RunSceneSelfTest() {
             gate.Declared().toLat = 25.8997;
             gate.Declared().toLon = -80.1239;
             gate.Declared().toAz = 90.0;
-            g.True(gate.Build(planetG, rootG, R, 600.0, 0.0, -10.0, 90.0) && gate.Valid(),
+            g.True(gate.Build(planetG, rootG, R, Gateway::BoxPose(600.0, 0.0, -10.0, 90.0, 0.0)) &&
+                       gate.Valid(),
                    "[gate] a box at the inlet builds its carry to Haulover");
             // The box: its centre and its forward face.
             g.True(gate.Inside(600.0, 0.0, -10.0), "[gate] the box's centre is inside");
@@ -2198,6 +2199,60 @@ bool RunSceneSelfTest() {
                        "[gate] Window() is DestinationInSource * Carry when the box stands in the root frame");
             }
 
+            // ---- A BOX THAT LEANS (Gateway::BoxPose). Neither end is locked upright: the pose is
+            // the heading and the lean, and a box with no lean is y-up because its sugar said so.
+            {
+                const double oB[3] = {0.0, 0.0, 0.0}, yB[3] = {0.0, 1.0, 0.0};
+                // No lean is the old construction, motor for motor.
+                const Motor plain = Gateway::BoxPose(450.0, 0.0, 0.0, 90.0, 0.0);
+                const Motor was = Motor::Translation(450.0, 0.0, 0.0) *
+                                  Motor::Rotation(oB, yB, 90.0 * kPiL / 180.0);
+                double pr[4], pd[4], wr[4], wd[4];
+                plain.Real(pr);
+                plain.Dual(pd);
+                was.Real(wr);
+                was.Dual(wd);
+                double worst = 0.0;   // (the two spell pi/180 by their own constants: ulps, not bits)
+                for (int i = 0; i < 4; ++i) {
+                    worst = (std::max)(worst, std::fabs(pr[i] - wr[i]));
+                    worst = (std::max)(worst, std::fabs(pd[i] - wd[i]));
+                }
+                // (1e-12 on a dual part that carries 450 m is the last bit of the metre, not a lean.)
+                g.Near(worst, 0.0, 1e-12, "[gate] a box with no lean is the y-up box it always was");
+                // Pitched 90 degrees down, the box's forward is underfoot and its across-axis stays level.
+                const Motor leaning = Gateway::BoxPose(0.0, 100000.0, 0.0, 90.0, -90.0);
+                double lf[3] = {0.0, 0.0, 1.0}, lx[3] = {1.0, 0.0, 0.0};
+                leaning.TransformDir(lf[0], lf[1], lf[2]);
+                leaning.TransformDir(lx[0], lx[1], lx[2]);
+                g.Near(lf[1], -1.0, 1e-12, "[gate] ...and one pitched -90 faces straight down");
+                g.Near(lx[1], 0.0, 1e-12, "[gate] ...on an across-axis that stays level");
+                // A hull that drives in level leaves nose-down: the carry turns the body, not just its place.
+                Place sky;
+                std::string swhy;
+                g.True(sky.Build(planetG, R, 26.0, -74.0, "place.sky", &swhy),
+                       "[gate] the place a sky gate leads to builds");
+                Gateway fall;
+                fall.Declared().name = "skyfall";
+                fall.Declared().size[0] = 200.0;
+                fall.Declared().size[1] = 120.0;
+                fall.Declared().size[2] = 10.0;
+                g.True(fall.Build(rootG, sky.space, sky.chart, rootG, plain, leaning),
+                       "[gate] ...and the gate whose far end leans builds");
+                double dEast[3] = {1.0, 0.0, 0.0};
+                fall.Carry().TransformDir(dEast[0], dEast[1], dEast[2]);
+                g.Near(dEast[1], -1.0, 1e-9,
+                       "[gate] a level east heading carried through it leaves straight down");
+                RigidBody rbF;
+                rbF.pose = Motor::Translation(450.0, 0.0, 0.0) *
+                           Motor::Rotation(oB, yB, 90.0 * kPiL / 180.0);
+                rbF.Carry(fall.Carry());
+                double bowF[3] = {0.0, 0.0, 1.0}, cF[3] = {0.0, 0.0, 0.0};
+                rbF.pose.TransformDir(bowF[0], bowF[1], bowF[2]);
+                rbF.pose.TransformPoint(cF[0], cF[1], cF[2]);
+                g.Near(bowF[1], -1.0, 1e-9, "[gate] ...so a hull that drives in level dives out of it");
+                g.Near(cF[1], 100000.0, 1e-6, "[gate] ...from the altitude its exit was posed at");
+            }
+
             // ---- A WAY BACK, AND THE CORRIDOR (2026-09-16). A second gate stands at Haulover -- in
             // the very space the first carries bodies into -- and leads back to the root frame,
             // coming out 200 m short of the first box. Nothing about it is special: the window
@@ -2221,8 +2276,12 @@ bool RunSceneSelfTest() {
                 }
                 const double atOrigin[3] = {0.0, 0.0, 0.0};
                 const double homeExit[3] = {250.0, 0.0, 0.0};
-                g.True(gA.Build(rootG, hv.space, hv.chart, rootG, 450.0, 0.0, 0.0, 90.0, atOrigin) &&
-                           gB.Build(hv.space, rootG, rootChartG, rootG, 200.0, 0.0, 0.0, 90.0, homeExit),
+                g.True(gA.Build(rootG, hv.space, hv.chart, rootG,
+                                Gateway::BoxPose(450.0, 0.0, 0.0, 90.0, 0.0),
+                                Gateway::BoxPose(atOrigin[0], atOrigin[1], atOrigin[2], 90.0, 0.0)) &&
+                           gB.Build(hv.space, rootG, rootChartG, rootG,
+                                    Gateway::BoxPose(200.0, 0.0, 0.0, 90.0, 0.0),
+                                    Gateway::BoxPose(homeExit[0], homeExit[1], homeExit[2], 90.0, 0.0)),
                        "[gate] a gate standing at Haulover, back to the root frame, builds beside the one that leads there");
                 // Where they stand and where they lead, in the root frame.
                 double hO[3] = {0.0, 0.0, 0.0};

@@ -4,12 +4,17 @@
 //
 //  TWO PLACES, ONE MOTOR. A place is a tangent frame of the planet and the chart that reads the
 //  planet's data there (Place). The box stands at one -- the scene's own flat frame, unless the gate
-//  names another (fromLat, fromLon) -- at Entry, the motor of its sugar {x, alt, z, az}: a turn about
-//  +y to the compass heading, then the translation. It comes out at another place (toLat, toLon;
-//  the scene's own frame when none is named) at Exit: its centre at `toAt` there, heading toAz. The
-//  carry is K = Exit * Entry^-1: a pose relative to the entry box, expressed relative to the exit
-//  box. Both boxes are y-up in their own spaces, so K is a turn about y and a translation; the
-//  planet's curvature between the two places lives in the two spaces' placements, not in the carry.
+//  names another (fromLat, fromLon) -- at Entry, the motor of its sugar {x, alt, z, az[, pitch]}:
+//  the turn to the compass heading and the lean, then the translation (BoxPose). It comes out at
+//  another place (toLat, toLon; the scene's own frame when none is named) at Exit, which is the SAME
+//  structure posed again: `toAt`'s own sugar, or `toAz` alone for a box that only turns. The carry
+//  is K = Exit * Entry^-1: a pose relative to the entry box, expressed relative to the exit box.
+//  NEITHER END IS LOCKED UPRIGHT. A box with no pitch is y-up because its sugar declared no lean,
+//  and then K is a turn about y and a translation, as the first gates were; give the exit a pitch
+//  and K carries the lean with it -- a hull that drives in level leaves nose-down and keeps
+//  falling (there is no air on it to right it), and the window, which carries ray directions the
+//  same way, looks down on the far place from a level look at the box. The planet's curvature
+//  between the two places lives in the two spaces' placements, not in the carry.
 //
 //  ONE SPACE PER PLACE. The caller keeps one space for each place (FrameLoop's registry), so a body
 //  carried to a place stands in the very frame a gate standing there was built in: a gate at
@@ -60,17 +65,24 @@ public:
     GateProps& Declared() { return m_props; }
     const GateProps& Declared() const { return m_props; }
 
-    // The box at `source` (its sugar's numbers, in that place's flat frame), coming out at `dest`
-    // with its centre at exit[] there, heading toAz. `root` is the frame the scene is drawn in --
-    // every view's eye stands in it -- and the window's motor is said there. The spaces and the
-    // chart must outlive the gate. False, logged, when the box has no size.
+    // ONE BOX, POSED TWICE. The two ends are the same structure -- a cuboid of `size` -- put
+    // somewhere and turned: this is that pose, from the compass sugar's numbers, in whichever
+    // place's flat frame the end stands in. The heading turns it about the place's up and the
+    // pitch about the box's own across-axis (nose up positive, a camera's sense), so a box with
+    // no pitch is y-up because nothing asked it to lean, not because a gate must be. A pitch of
+    // -90 stands the box's far face underfoot: what you drive into going east, you leave going
+    // straight down. (Any orientation at all is expressible: the placement sugar's motor
+    // spelling reaches this as a Motor, and Build takes the motors.)
+    static Motor BoxPose(double x, double alt, double z, double azDeg, double pitchDeg);
+    // The box at `source`, coming out as `exit` in `dest` -- both poses said in their own place's
+    // flat frame. `root` is the frame the scene is drawn in -- every view's eye stands in it --
+    // and the window's motor is said there. The spaces and the chart must outlive the gate.
+    // False, logged, when the box has no size.
     bool Build(const Space& source, const Space& dest, const Space::Anchor& destChart,
-               const Space& root, double x, double alt, double z, double azDeg,
-               const double exit[3]);
+               const Space& root, const Motor& entry, const Motor& exit);
     // The first gate's form: the box in the root frame `source`, the destination the place the
     // declaration names (toLat, toLon) -- built and owned here -- and the exit at its origin.
-    bool Build(const Space& planet, const Space& source, double planetR, double x, double alt,
-               double z, double azDeg);
+    bool Build(const Space& planet, const Space& source, double planetR, const Motor& entry);
     bool Valid() const { return m_valid; }
 
     const Space& Source() const { return *m_source; }
