@@ -174,6 +174,7 @@ const SectionNote kSections[] = {
     {"effects", "effect", "the paper visuals (scene/Effect.h), by name, typed by EffectSchemas"},
     {"layers", "layer", "the layers in registration (draw) order, typed by name"},
     {"nodes", "component", "typed nodes (scene/Component.h), by name, typed by ComponentSchemas"},
+    {"prune", "tool", "the tree-prune tool's keys (compose/TreePrune.h): list, or retire and purge on confirm"},
     {"tools", "tool", "the one-shot modes this scene runs (--tool)"},
 };
 

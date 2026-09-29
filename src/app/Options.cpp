@@ -292,7 +292,13 @@ Options ParseArgs(int argc, char** argv) {
             if (a == "--pages-trace") o.pagesEvery = every;
             else o.waterProbeEvery = every;
         }
-        else if (a == "--tree-audit") o.treeAudit = uint32_t(atoi(next("400").c_str()));
+        else if (a == "--tree-audit" || a == "--tree-prune") {
+            // Two tree tools on one link (the chain is at C1061's limit, line ~158). --tree-prune
+            // takes NO argument, so it can never swallow the scene path after it: everything it
+            // is told arrives as prune.* scene keys, and its default is a listing.
+            if (a == "--tree-prune") o.treePrune = true;
+            else o.treeAudit = uint32_t(atoi(next("400").c_str()));
+        }
         // After a source is added there is nothing to compare against -- which is exactly when
         // the trees most need building. --warm-trees composes every address regardless.
         else if (a == "--warm-trees") { o.warmTrees = true; o.treeAudit = 1000000u; }
@@ -714,6 +720,7 @@ SceneArgs Options::ToSets(const Options& o) {
         out.tools.push_back(args.empty() ? name : name + ":" + args);
     };
     if (o.packTiles) tool("pack-tiles");
+    if (o.treePrune) tool("tree-prune");
     if (!o.loadField.empty()) tool("load-field", o.loadField);
     if (o.selftest) tool("selftest");
     if (!o.waterMap.empty()) tool("water-map", Narrow(o.waterMap));

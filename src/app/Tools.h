@@ -46,6 +46,7 @@ struct SurfaceFrame;
 struct WaterSceneConfig;
 namespace scene {
 class Entity;
+struct PruneSection;
 }
 }  // namespace ga
 
@@ -56,6 +57,10 @@ namespace ga::app::tools {
 // --pack-tiles: pack the composed cache into per-realization archives; exit 0. (M12 step
 // 4a: the realizations are the surface's lattices; no scene exists, so main() declares it.)
 int RunPackTiles(const Options& opt, const SurfaceFrame& surface);
+// --tree-prune (--tool tree-prune): the tile trees' tag folders listed by last use, and retired
+// or purged only when the scene's prune.confirm names the root (compose/TreePrune.h). 0 listed
+// or done, 2 refused with nothing changed, 1 stopped at a failed move or delete.
+int RunTreePrune(const scene::PruneSection& prune);
 // --load-field PATH: a file through the loader plugin into a sparse bank; report; exit.
 int RunLoadField(const Options& opt);
 // --selftest: the twelve gates; exit 0 (pass) / 1 (fail).

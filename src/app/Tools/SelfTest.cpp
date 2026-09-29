@@ -3,6 +3,7 @@
 #include "app/Tools.h"
 
 #include "compose/Compositor.h"
+#include "compose/TreePrune.h"
 #include "compose/WaterAtlas.h"
 #include "hal/DxTest.h"
 #include "core/GaAst.h"
@@ -48,6 +49,8 @@ int RunSelfTest(const Options& opt) {
     ok &= scene::RunSceneSelfTest();   // M12 step 5a: the scene's data structures -- the
                                        // registry template, the property table, the fold with
                                        // override, the placement sugar, the shim
+    ok &= RunPruneSelfTest();          // the tree-prune tool's refusals, planted and caught on a
+                                       // scratch root under out\prunetest, never the cache
     gpu.Shutdown();
     return ok ? 0 : 1;
 }

@@ -41,10 +41,14 @@
 //      effects    [{name, type, enabled, ...}]  -- typed through EffectSchemas (slice.plane)
 //      layers     [{name, enabled, ...}]        -- the registration order; typed by name
 //      nodes      [{name, type, enabled, at, children, ...}]   -- typed through ComponentSchemas
+//      prune      {mode, root, ageDays, purgeDays, confirm}  -- the tree-prune tool's keys
 //      tools      [{name, args}]                -- the one-shot modes a scene runs (--tool)
 //
 //  `tools` is the one section past the plan's list: the recipe table's selftest row is
-//  "--tool selftest", and a scene file that runs a tool is that recipe's file form.
+//  "--tool selftest", and a scene file that runs a tool is that recipe's file form. `prune` is
+//  the first tool whose configuration is scene keys rather than one args string, because one of
+//  its keys is a confirmation (compose/TreePrune.h) and an args string has no names to confirm
+//  with.
 //
 //  Every Number here carries the unit its legacy field is in (degrees for a compass azimuth,
 //  hours for a spin-up, frames for a hold), so a file may say "7 km" or "12 kn" and the value
@@ -308,6 +312,16 @@ struct ToolProps {
     std::string name;
     std::string args;
 };
+// THE PRUNE TOOL (compose/TreePrune.h, --tool tree-prune). The mode is `list` unless the scene
+// says otherwise, and `retire` and `purge` act only when `confirm` names the root's full path as
+// the listing printed it; the ages are days. `root` "" is cache\trees.
+struct PruneSection {
+    int mode = 0;                     // list | retire | purge
+    std::string root;
+    double ageDays = 30.0;            // a stamp older than this is STALE (unstamped: twice it)
+    double purgeDays = 7.0;           // a retired batch older than this is deleted by purge
+    std::string confirm;
+};
 
 // The whole document as one prototype (the lists carry no fields).
 struct SceneDocument {
@@ -321,6 +335,7 @@ struct SceneDocument {
     StreamingSection streaming;
     CaptureSection capture;
     RailsSection rails;
+    PruneSection prune;
 };
 
 // The root schema: every section as an Object or a List, in the file's order.

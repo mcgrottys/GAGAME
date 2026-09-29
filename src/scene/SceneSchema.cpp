@@ -553,6 +553,26 @@ const Schema& ToolSchema() {
     return *s;
 }
 
+const Schema& PruneSchema() {
+    static const Schema* s = [] {
+        auto& p = kDoc.prune;
+        Schema* sc = new Schema("prune", &p);
+        sc->BindEnum("mode", p.mode, {"list", "retire", "purge"},
+                     "the tree-prune tool: list changes nothing; retire moves stale tag folders "
+                     "into <root>\\.retired\\<UTC stamp>; purge deletes retired batches", R)
+            .BindPath("root", p.root, "the trees folder (\"\" = cache\\trees)", R)
+            .Bind("ageDays", p.ageDays, Q::Time, "day",
+                  "a stamp older than this is STALE; an unstamped folder gets twice it", R)
+            .Bind("purgeDays", p.purgeDays, Q::Time, "day",
+                  "purge deletes the retired batches older than this", R)
+            .BindPath("confirm", p.confirm,
+                      "retire and purge act only when this is the root's full path as the "
+                      "listing printed it", R);
+        return sc;
+    }();
+    return *s;
+}
+
 }  // namespace
 
 const Schema& ViewSchema() { return ViewSchema_(); }
@@ -586,6 +606,7 @@ const Schema& SceneFileSchema() {
             .List("effects", &EffectSchema(), "the paper visuals, by name, typed", true, "effect", "type")
             .List("layers", &LayerEntrySchema(), "the layers in registration order, typed by name", true, "layer", "name")
             .List("nodes", &NodeSchema_(), "typed nodes (plugins)", true, "component", "type")
+            .Nest("prune", PruneSchema(), &kDoc.prune, "the tree-prune tool's keys")
             .List("tools", &ToolSchema(), "the one-shot modes this scene runs");
         return sc;
     }();

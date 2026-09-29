@@ -1309,7 +1309,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                              {"bathy-map", "dump-water-state", "export", "fidelity-map",
                               "gis-dump", "load-field", "ocean-probe", "pack-tiles", "pack-trees",
                               "sea-verify", "selftest", "swe-cycle", "swe-uv", "trace",
-                              "tree-audit", "twin-surface", "warm-inlet", "warm-trees",
+                              "tree-audit", "tree-prune", "twin-surface", "warm-inlet", "warm-trees",
                               "water-map", "wave-map"}});
             scene::WriteRegistries("docs/registries.json", extra);
         }

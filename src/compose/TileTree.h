@@ -67,12 +67,14 @@
 
 #include <map>
 #include <mutex>
+#include <unordered_set>
 
 #include "compose/ColorStackSource.h"
 #include "compose/ComposeTree.h"
 #include "compose/Compositor.h"
 #include "compose/DomainSource.h"
 #include "compose/TileArchive.h"
+#include "core/BuildInfo.h"
 #include "core/Common.h"
 #include "core/ThreadAudit.h"
 
@@ -177,7 +179,12 @@ inline float H2F(uint16_t h) {
 // Returns whether the tile is now ON DISK under `path`. A caller that ignores it gets the old
 // behaviour; the concurrency gate in ThreadTest.cpp needs to know, because a publish a reader
 // makes fail is the same lost tile as a torn one.
-inline bool WriteTile(const std::string& path, const std::vector<uint8_t>& data) {
+//
+// `loud` false keeps a failure out of the log, and out of the once-only warnings below, for a
+// caller that says its own failure in its own words (StampLive): those warnings speak about
+// TILES, and the first failure of the run is the only one they ever print.
+inline bool WriteTile(const std::string& path, const std::vector<uint8_t>& data,
+                      bool loud = true) {
     threadaudit::WriteScope audit(path);
     static std::atomic<uint32_t> seq{0};
     char stem[24];
@@ -195,7 +202,7 @@ inline bool WriteTile(const std::string& path, const std::vector<uint8_t>& data)
                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
         static std::atomic<bool> warned{false};
-        if (!warned.exchange(true)) {
+        if (loud && !warned.exchange(true)) {
             Log("[tiletree] CANNOT WRITE %s (err %lu) -- painting and storing NOTHING (missing "
                 "folder? disk full?)",
                 path.c_str(), GetLastError());
@@ -206,7 +213,7 @@ inline bool WriteTile(const std::string& path, const std::vector<uint8_t>& data)
     if (!WriteFile(h, data.data(), static_cast<DWORD>(data.size()), &wrote, nullptr) ||
         wrote != static_cast<DWORD>(data.size())) {
         static std::atomic<bool> warned{false};
-        if (!warned.exchange(true)) {
+        if (loud && !warned.exchange(true)) {
             Log("[tiletree] SHORT WRITE %s (%lu of %zu bytes) -- storing NOTHING", path.c_str(),
                 wrote, data.size());
         }
@@ -241,7 +248,7 @@ inline bool WriteTile(const std::string& path, const std::vector<uint8_t>& data)
     CloseHandle(h);
     if (!ok) {
         static std::atomic<bool> warned{false};
-        if (!warned.exchange(true)) {
+        if (loud && !warned.exchange(true)) {
             Log("[tiletree] CANNOT PUBLISH %s (err %lu) -- the tile was written and then LOST",
                 path.c_str(), err);
         }
@@ -286,6 +293,84 @@ inline bool FindRef(const std::string& base, std::string& childId) {
     if (p == std::string::npos) return false;
     childId = name.substr(p + 5);
     return !childId.empty();
+}
+
+// ---- THE TREE SAYS WHEN IT WAS LAST USED ------------------------------------------------------
+// The prune tool (compose/TreePrune.h) has to know which tag folders a run still uses, and no
+// file time can tell it: NTFS keeps no usable last-access time, and a tree that is fully painted
+// is read every day and written never. So every run STAMPS each tag folder it ensures --
+// <node>.<id>\<tag>\.live, one line of JSON: the UTC time, the engine's rev (the [boot] line's)
+// and the scene -- published through WriteTile's temp-and-rename, so a reader sees the whole old
+// stamp or the whole new one. The unit is the TAG folder, not the node's: when the engine stops
+// using a lattice, that lattice's folders go stale inside a node folder that is still live.
+//
+// THE NAME MATCHES NOTHING THAT SCANS A TILE FOLDER. Every scanner, checked: the packer and the
+// index take *.bin; FindRef takes <base>.ref-* and DropCachedAddress <base>_*, where <base> is
+// f<face>_m<mip>_x<x>_y<y>; tools/hierarchy/tree_census.py counts names matching
+// ^f(\d+)_m(\d+)_x(\d+)_y(\d+)...; finding 25's archive audit opens only <tag>.gaa, at the node
+// level. A name that starts with a dot starts none of those, and ".live" ends in none of them.
+//
+// AT MOST ONCE PER FOLDER PER RUN. The tenant dispatcher reads a holder's tree per request
+// (hal/Tenant.cpp), so EnsureFrame runs on every tile of the wave and exposure trees; the set
+// below turns that into one file write per folder. A stamp that cannot be written is said once
+// and is never fatal: the tool judges an unstamped folder by its newest write, at twice the age.
+struct LiveStamps {
+    std::mutex mx;
+    std::unordered_set<std::string> done;   // the folders stamped this run
+    std::string scene, file;                // what every stamp names (SetLiveScene)
+    bool warned = false;
+};
+inline LiveStamps& Live() {
+    static LiveStamps s;
+    return s;
+}
+// main() names the scene once, when it has resolved and before any tree exists.
+inline void SetLiveScene(const std::string& scene, const std::string& file) {
+    LiveStamps& l = Live();
+    std::lock_guard<std::mutex> lk(l.mx);
+    l.scene = scene;
+    l.file = file;
+}
+// A JSON string. A scene path typed on Windows carries backslashes, which JSON forbids bare.
+inline std::string JsonQuote(const std::string& s) {
+    std::string o = "\"";
+    for (const char c : s) {
+        const unsigned u = static_cast<unsigned char>(c);
+        if (u < 0x20) {
+            char b[8];
+            snprintf(b, sizeof(b), "\\u%04x", u);
+            o += b;
+            continue;
+        }
+        if (c == '"' || c == '\\') o += '\\';
+        o += c;
+    }
+    return o + "\"";
+}
+inline void StampLive(const std::string& folder) {
+    LiveStamps& l = Live();
+    std::string line;
+    {
+        std::lock_guard<std::mutex> lk(l.mx);
+        if (!l.done.insert(folder).second) return;
+        SYSTEMTIME t{};
+        GetSystemTime(&t);
+        char utc[32];
+        snprintf(utc, sizeof(utc), "%04u-%02u-%02uT%02u:%02u:%02uZ", t.wYear, t.wMonth, t.wDay,
+                 t.wHour, t.wMinute, t.wSecond);
+        line = "{\"utc\": " + JsonQuote(utc) + ", \"rev\": " + JsonQuote(BuildGitRev()) +
+               ", \"scene\": " + JsonQuote(l.scene) + ", \"file\": " + JsonQuote(l.file) + "}\n";
+    }
+    if (WriteTile(folder + "\\.live", std::vector<uint8_t>(line.begin(), line.end()), false)) {
+        return;
+    }
+    std::lock_guard<std::mutex> lk(l.mx);
+    if (!l.warned) {
+        l.warned = true;
+        Log("[tiletree] cannot stamp %s\\.live -- the tree works as before; the prune tool will "
+            "judge this folder by its newest write",
+            folder.c_str());
+    }
 }
 
 }  // namespace tree_detail
@@ -363,6 +448,7 @@ public:
 
     void EnsureFrame(const std::string& tag) {
         tree_detail::MakeDir(m_root + "\\" + tag);
+        tree_detail::StampLive(m_root + "\\" + tag);   // this run uses the folder (tree_detail)
         for (auto& k : m_kids) k->EnsureFrame(tag);
     }
 
