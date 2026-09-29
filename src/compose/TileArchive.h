@@ -152,35 +152,40 @@ public:
         // sources; an unaligned request can be served from the aligned-down offset, which
         // puts a neighbouring tile's bytes into the tile -- oceans beside mountains.
         const uint64_t payload0 = ((16 + dirBytes) + 65535ull) & ~65535ull;
+        // THE PAYLOADS FIRST, THEN THE DIRECTORY, over room reserved for every candidate. An
+        // offset is where a payload WAS written, never where it was going to be: assigned up
+        // front, one loose file that could not be read shifted every later payload up by its
+        // size, and every later record named its neighbour's bytes -- a tile served as the wrong
+        // ground, with nothing to say so. A candidate that is not written leaves its share of
+        // the room as padding, and the header counts the records written. When every candidate
+        // is read, the file is byte for byte what the up-front layout wrote.
+        {
+            const std::vector<uint8_t> room(static_cast<size_t>(payload0), 0);
+            fwrite(room.data(), 1, room.size(), fo);
+        }
         uint64_t off = payload0;
         std::vector<Rec> sorted;
         sorted.reserve(n);
-        for (uint32_t i : order) {
-            Rec r = recs[i];
-            r.offset = off;
-            off += r.size;
-            sorted.push_back(r);
-        }
-        const uint32_t hdr[4] = {kMagic, kVersion, n, 0u};
-        fwrite(hdr, sizeof(hdr), 1, fo);
-        fwrite(sorted.data(), sizeof(Rec), n, fo);
-        {
-            const std::vector<uint8_t> pad(static_cast<size_t>(payload0 - (16 + dirBytes)), 0);
-            if (!pad.empty()) fwrite(pad.data(), 1, pad.size(), fo);
-        }
         std::vector<uint8_t> buf;
-        uint32_t wrote = 0;
         for (uint32_t k = 0; k < n; ++k) {
             const std::string src = dir + "\\" + names[order[k]];
             FILE* fi = nullptr;
             if (fopen_s(&fi, src.c_str(), "rb") != 0 || !fi) continue;
-            buf.resize(sorted[k].size);
+            buf.resize(recs[order[k]].size);
             const size_t got = fread(buf.data(), 1, buf.size(), fi);
             fclose(fi);
             if (got != buf.size()) continue;
-            fwrite(buf.data(), 1, buf.size(), fo);
-            ++wrote;
+            if (fwrite(buf.data(), 1, buf.size(), fo) != buf.size()) break;
+            Rec r = recs[order[k]];
+            r.offset = off;
+            off += r.size;
+            sorted.push_back(r);
         }
+        const uint32_t wrote = uint32_t(sorted.size());
+        const uint32_t hdr[4] = {kMagic, kVersion, wrote, 0u};
+        _fseeki64(fo, 0, SEEK_SET);
+        fwrite(hdr, sizeof(hdr), 1, fo);
+        if (wrote) fwrite(sorted.data(), sizeof(Rec), wrote, fo);
         fclose(fo);
         Log("[tilearch] packed %s: %u tiles, %u superseded dropped (%.0f%% of the folder), "
             "%.1f MB, directory %.2f MB (loose files kept)",

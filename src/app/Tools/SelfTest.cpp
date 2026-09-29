@@ -4,6 +4,7 @@
 
 #include "compose/Compositor.h"
 #include "compose/TreePrune.h"
+#include "compose/TileTree.h"
 #include "compose/WaterAtlas.h"
 #include "hal/DxTest.h"
 #include "core/GaAst.h"
@@ -43,6 +44,8 @@ int RunSelfTest(const Options& opt) {
     ok &= RunTileSelfTest(gpu, sc, opt.shaderDir);
     ok &= RunAtlasSelfTest(gpu, sc, opt.shaderDir);
     ok &= RunThreadSelfTest();    // the thread instrument's own gate: it must SEE a race
+    ok &= RunTileTreeSelfTest();  // HIERARCHY 4a: the tree fit for a deep pyramid, on scratch
+                                  // roots in out\treetest -- nothing lands in the real cache
     ok &= RunSimClockSelfTest();  // the scene clock: whole quanta, framing-independent
     ok &= RunRigidBodySelfTest();  // M9bq: the body with momentum -- L, T, moment arms
     ok &= RunVesselSelfTest();     // M9bq: the factory + the element laws

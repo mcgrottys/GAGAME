@@ -18,8 +18,10 @@
 //                  data/wave_scene.json overlays through `include` (the M8 law survives:
 //                  authored if absent, never clobbered, hot-reloaded)
 //      streaming  {tileBudget, predictEvery, directStorage, colorTrees, gisGate, seafloor,
-//                  exposure, ringLoads}       -- scene state: they change the picture through
-//                                                residency
+//                  exposure, ringLoads, treeRoot}   -- scene state: they change the picture
+//                                                through residency (treeRoot: where the tile
+//                                                trees are, cache/trees unless a tool's
+//                                                scratch folder is named)
 //      capture    {headless, width, height, frames, dump, hdr, mp4, railDir,
 //                  settle{sync, hold, exact, clearChurn}}
 //      views      [{name, at, fovY, gauge, nearZ, reversedZ, target, viewport{}, follow{}}]
@@ -177,6 +179,7 @@ struct StreamingSection {
     uint32_t tileBudget = 1000, predictEvery = 3;
     bool directStorage = true, colorTrees = true, gisGate = true, seafloor = true,
          exposure = true, ringLoads = true;
+    std::string treeRoot = "cache/trees";   // the folder the tile trees live in (TileTree.h)
 };
 struct SettleProps {
     bool sync = false;

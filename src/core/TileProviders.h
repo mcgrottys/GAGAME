@@ -20,8 +20,10 @@
 
 #include "hal/Residency.h"
 
+#include <atomic>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 
 namespace ga {
@@ -45,6 +47,11 @@ class GoogleTileProvider {
 public:
     // mapType: "satellite" (imagery). Reads the key, restores or creates the tile session.
     bool Init(const std::string& mapType, uint32_t fetchBudget);
+    // The selftest's provider: tiles from `cacheRoot`\<mapType>\z_x_y.jpg and from nowhere
+    // else. No key is read, no session made, and no connection is ever opened: a tile the
+    // folder lacks is refused when the budget is spent and fails when it is not.
+    void InitCacheOnly(const std::string& cacheRoot, const std::string& mapType,
+                       uint32_t fetchBudget);
     bool Ready() const { return !m_session.empty(); }
     const std::string& Attribution() const { return m_attribution; }
     void SetFetchCounter(uint32_t* counter) { m_counter = counter; }
@@ -55,20 +62,37 @@ public:
     std::shared_ptr<std::vector<uint8_t>> Decoded(int z, int x, int y) {
         return DecodedTile(z, x, y);
     }
+    // THE FETCHES A LARGER BUDGET WOULD HAVE MADE: the distinct source tiles (z, x, y) this run
+    // asked for, did not find in the cache, and refused because streaming.tileBudget was
+    // spent. A refusal is remembered for the run -- the budget never comes back -- so a tile is
+    // asked once, not once per texel that falls in it (16384 failed opens a painted tile).
+    uint32_t Refused() const { return m_refusedCount.load(std::memory_order_relaxed); }
+    uint32_t Fetched() const { return m_fetched; }
+    uint32_t Budget() const { return m_budget; }
+    // Cache files this provider tried to open, hit or miss (the selftest's count of asks).
+    uint32_t CacheOpens() const { return m_cacheOpens.load(std::memory_order_relaxed); }
 
 private:
     bool EnsureSession();
     bool FetchTile(int z, int x, int y, std::vector<uint8_t>& jpg);
     std::shared_ptr<std::vector<uint8_t>> DecodedTile(int z, int x, int y);
+    static uint64_t KeyOf(int z, int x, int y) {
+        return (static_cast<uint64_t>(z) << 48) | (static_cast<uint64_t>(x) << 24) |
+               static_cast<uint64_t>(y);
+    }
 
     std::string m_key, m_session, m_mapType = "satellite", m_attribution;
+    std::string m_cacheRoot = "cache\\google";
+    bool m_offline = false;              // InitCacheOnly: no request is ever sent
     uint32_t m_budget = 1000;
     uint32_t m_fetched = 0;
     bool m_budgetLogged = false;
     long long m_lastFetchMs = 0;
-    std::mutex m_mx;                     // guards cache map + throttle clock
+    std::mutex m_mx;                     // guards cache map, refusals + throttle clock
     std::map<uint64_t, std::shared_ptr<std::vector<uint8_t>>> m_decoded;
     std::vector<uint64_t> m_decodedOrder;
+    std::set<uint64_t> m_refused;        // KeyOf of every tile refused for the budget
+    std::atomic<uint32_t> m_refusedCount{0}, m_cacheOpens{0};
     uint32_t* m_counter = nullptr;
 };
 

@@ -60,6 +60,7 @@ add_executable(gagame
   src/compose/ComposeTest.cpp
   src/compose/TreePrune.cpp
   src/compose/TreePruneTest.cpp
+  src/compose/TileTreeTest.cpp
   src/compose/Sources.cpp
   src/compose/GisMask.cpp
   src/compose/GisStencil.cpp

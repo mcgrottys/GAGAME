@@ -111,6 +111,16 @@ public:
         u1 = float(double(m_frame.winPxX - m_frame.orgPxX + m_frame.nx) / 16384.0);
         v1 = float(double(m_frame.winPxY - m_frame.orgPxY + m_frame.ny) / 16384.0);
     }
+    // The same window as whole tiles of mip 0, closed -- the box TileTree::Prefill takes. The
+    // far bound is the tile that STARTS on the window's far edge: the uv box above, read as a
+    // closed box, has always put that tile (void: none of the window is in it) in the prefill,
+    // and a prefill that left it out would leave a different set of files.
+    void WindowTiles(uint32_t& x0, uint32_t& y0, uint32_t& x1, uint32_t& y1) const {
+        x0 = uint32_t((m_frame.winPxX - m_frame.orgPxX) / kTile);
+        y0 = uint32_t((m_frame.winPxY - m_frame.orgPxY) / kTile);
+        x1 = uint32_t((m_frame.winPxX - m_frame.orgPxX + m_frame.nx) / kTile);
+        y1 = uint32_t((m_frame.winPxY - m_frame.orgPxY + m_frame.ny) / kTile);
+    }
 
     // ---- DomainSource
     const char* Name() const override { return "wave.field"; }

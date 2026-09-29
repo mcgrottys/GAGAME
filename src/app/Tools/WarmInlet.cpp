@@ -20,7 +20,8 @@ namespace ga::app::tools {
 // no network, just source reads). Everything lands in the composed forever-cache:
 // warming is a once-per-machine cost (re-runs drain instantly from disk).
 void RunWarmInlet(const Options& opt, Gpu& gpu, const Compositor& compositor,
-                  ResidencyManager& resMgr, int winTenant, int hgtTenant, int hgtWinTenant) {
+                  ResidencyManager& resMgr, int winTenant, uint32_t winSlice, int hgtTenant,
+                  int hgtWinTenant) {
     // M13: the warm-up is its own reader of the shared cache -- it asks for a pyramid nobody
     // is looking at yet, which is exactly the thing a reserve has to be able to tell apart.
     const int sw = resMgr.Sampler("warm");
@@ -33,9 +34,13 @@ void RunWarmInlet(const Options& opt, Gpu& gpu, const Compositor& compositor,
     // report); deeper rings tighten on the inlet.
     const WarmRing rings[] = {
         {0.00f, 1.00f, 3}, {0.00f, 1.00f, 2}, {0.38f, 0.62f, 1}, {0.44f, 0.56f, 0}};
-    if (winTenant >= 0) {
+    // The rings are uv boxes of the z14 PAGE, the colour tenant's window slice. They were asked
+    // of slice 0 -- since M9ap the colour is one tenant and slice 0 is the cube's face 0 -- so
+    // the warm asked for all of face 0 at mips 2 and 3, centred on lon 0 lat 0 in the Atlantic,
+    // and fetched whatever of it the cache lacked, up to the budget.
+    if (winTenant >= 0 && winSlice != UINT32_MAX) {
         for (const auto& w : rings) {
-            resMgr.Want(sw, winTenant, 0, w.mip, w.a, w.a, w.b, w.b);
+            resMgr.Want(sw, winTenant, winSlice, w.mip, w.a, w.a, w.b, w.b);
         }
     }
     if (hgtWinTenant >= 0) {
