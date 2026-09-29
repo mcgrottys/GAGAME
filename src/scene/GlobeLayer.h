@@ -543,10 +543,15 @@ private:
         // reading the cascade DERIVATIVE textures directly, and those reads have to happen in the
         // same plane the bank filled its texels from, or the fine ripples are a second sea laid
         // over the first. One plane serves every pixel: a chart cell is hundreds of km across and
-        // a frame's pixels sit inside one.
-        float chartOrg[4];    // the cell's centre on the sphere (m), w = 1 when the rows are live
-        float chartE[4];      // its east, w = the offset along east
-        float chartN[4];      // its north, w = the offset along north
+        // a frame's pixels sit inside one. The rows say that plane IN THE TANGENT FRAME, about the
+        // tangent point (Globe.hlsl ChartUOf; packed in GlobeLayer.cpp, REVIEW finding 7).
+        float chartOrg[4];    // the constant along east, wrapped to cascade 0 / 1 / 2; w = 1 when
+                              // the rows are live
+        float chartE[4];      // the cell's east in the tangent frame, w = the constant along
+                              // north, wrapped to cascade 0
+        float chartN[4];      // its north in the tangent frame, w = the same, cascade 1
+        float chartCn[4];     // the constant along north, wrapped to cascade 2; yzw spare --
+                              // appended at the END on both sides (priors 22)
     };
     // (dxtest reads the rows' sizes as written, so the chain's is a literal; this holds it.)
     static_assert(sizeof(GlobeCbData::gateBox) == sizeof(float) * 16 * kMaxWindowChain,

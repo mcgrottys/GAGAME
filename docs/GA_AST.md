@@ -57,7 +57,7 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | globe.ps | radiance (accepting state) | frame.out | world.m +v=N | world.m +v=N | - | linear RGB -> tonemap | the render | x1 | Renderer tonemap |
 | color.pages | bed albedo (--pixel-water) | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | sRGB | at the refracted ray's bed hit, 2 secant steps | x1 | Globe.hlsl WaterPixelColor ComposedColor(bedDir) |
 | color.pages | bed albedo (--pixel-water) | sea.ps | mercator.px +v=S | uv01.vS +v=S | - | sRGB | at the refracted ray's bed hit in the flat frame | x1 | Sea.hlsl SeaPixelColor ComposedColor(SeaPlanetDir(bedXZ)) |
-| height.pages | refracted cast (--pixel-water) | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | 2 secant steps, s clamped 0.3..140 m | x1 | Globe.hlsl WaterPixelColor ComposedHeight(CsToPlanet(Pb)) |
+| height.pages | refracted cast (--pixel-water) | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | 2 secant steps, s clamped 0.3..140 m | x1 | Globe.hlsl WaterPixelColor ComposedHeight(CsToPlanet(dirP)) |
 | ocean.fft | cascade.deriv slope (--pixel-water) | globe.ps | patch.wrap +v=N | atlas.texel +v=N | - | slope | +-0.3, prefiltered per axis | x1 | Globe.hlsl WaterPixelColor detail loop |
 | gfs.wind | wind10 (far sigma2, --pixel-water) | globe.ps | raster.row0N +v=S | atlas.texel +v=N | FLIP | m/s | 0..40 | x1 | Globe.hlsl WaterPixelColor wuv; sigma2 = 0.003+0.00512 U |
 | ocean.colour | Kd490 -> Kd(RGB) transfer (--pixel-water) | globe.ps | raster.row0N +v=S | atlas.texel +v=N | FLIP | 1/m | 0.019..6 (Kdw floor) | x1 | Globe.hlsl SampleWaterOptics (Austin-Petzold; M(490)=1) |

@@ -449,7 +449,7 @@ void RegisterPixelWaterEdges() {
     // this one names the CAST specifically.)
     Register({"height.pages", "globe.ps", "refracted cast (--pixel-water)", mercPx, uvS, false,
               "m NAVD", "2 secant steps, s clamped 0.3..140 m", 1.0,
-              "Globe.hlsl WaterPixelColor ComposedHeight(CsToPlanet(Pb))"});
+              "Globe.hlsl WaterPixelColor ComposedHeight(CsToPlanet(dirP))"});
     // The cascade sparkle: bands the PIXEL resolves but the ring texel does not, each under
     // its own per-axis footprint Gaussian. No foam channel is read -- only the slope pair.
     Register({"ocean.fft", "globe.ps", "cascade.deriv slope (--pixel-water)", wrap, atlasN,
