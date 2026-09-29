@@ -1607,6 +1607,15 @@ nothing; the order's turn, its loader, its gather and its release in two steps.
   They are beside today's manager; what the step removes is removed when the key's default
   changes.
 
+**One law more, from Haulover: a tile is held whole or it is not held** (finding 83). 4.11
+says that absence is the coarser ancestor and never zero. Today a composite whose source
+was refused is delivered without that source and mapped, so the map names a tile that
+holds nothing of the ground, the land is black, and the coarser imagery, which is real,
+is not read. A tile that a source refused is not delivered. It is unreachable for the
+run, as a tile that failed four tries is, so the hold can still be exact without it, no
+loader asks for it again and again, and the level above it answers. It is a change in
+the tile tree's composite and in what the loader does with its answer; not built.
+
 ## 5. Decisions for Mark
 
 Settled already, 2026-09-28, and built into the sections above:
