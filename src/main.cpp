@@ -15,6 +15,7 @@
 // ================================================================================================
 #include "core/BuildInfo.h"
 #include "core/CrashTrace.h"
+#include "core/ExitTrail.h"
 #include "core/ThreadAudit.h"
 #include "core/ThreadManager.h"
 #include "app/Assembly.h"
@@ -124,7 +125,16 @@ int main(int argc, char** argv) {
         // declared AFTER the Assembly so it destructs first, as the session locals did before
         // the assembly locals. Run() is main()'s remaining span: Session(), the loop, Finish().
         auto loop = std::make_unique<FrameLoop>(topt, S, *A);
-        return loop->Run();
+        const int rc = loop->Run();
+        // THE SHUTDOWN TRAIL (core/ExitTrail.h): the frame loop and then the assembly, the order
+        // their scope always ended them in, each teardown marked from inside by its members.
+        ExitStep("main: the frame loop destructs");
+        loop.reset();
+        ExitStep("main: the assembly destructs");
+        A.reset();
+        Log("[exit] main returns %d; what follows is the C runtime's own teardown (the static "
+            "job pool, the log)", rc);
+        return rc;
     } catch (const std::exception& e) {
         Log("FATAL: %s", e.what());
         return 1;

@@ -310,7 +310,10 @@ const Schema& CaptureSchema() {
             .BindPath("hdr", p.hdr, "the RGBA16F radiance before the tonemap (--dump-hdr)", R)
             .BindPath("mp4", p.mp4, "pipe rail frames to an encoder (--mp4)", R)
             .BindPath("railDir", p.railDir, "the rail's PNG directory (--rail*)", R)
-            .Nest("settle", SettleSchema(), &p.settle, "the still's hold");
+            .Nest("settle", SettleSchema(), &p.settle, "the still's hold")
+            .Bind("residencyAudit", p.residencyAudit, Q::Dimensionless, "frames",
+                  "the residency audit every N turns: each page tenant's residency bytes against "
+                  "the tiles mapped and landed, and the invalidations applied (--res-audit; 0 = off)", R);
         return sc;
     }();
     return *s;

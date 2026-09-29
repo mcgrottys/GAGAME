@@ -793,6 +793,9 @@ private:
     uint32_t m_meshStatWalks = 0;   // M9d: --mesh-stats prints on the 8th walk
     hal::Pso m_msPso, m_msPsoWire, m_msPsoMeshlet, m_msPsoWireFlat;
     hal::Pso m_psoWire, m_psoMeshlet;
+    // The residency lens (shaders/ResidencyLens.hlsl): built only when debugLens asks for it.
+    hal::Pso m_msPsoLens, m_psoLens;
+    bool ResidencyLensOn() const { return debugLens >= 9 && debugLens <= 11; }
     std::vector<MeshletRec> m_meshlets;
     GpuBuffer m_recBuf[Gpu::kFrameCount];
     GlobeCbData m_cb{};

@@ -10,6 +10,7 @@
 #include "core/GaAst.h"
 #include "core/Lattice.h"
 #include "hal/Gpu.h"
+#include "hal/ResidencyAudit.h"
 #include "core/Pga.h"
 #include "hal/Shader.h"
 #include "core/Space.h"
@@ -43,6 +44,8 @@ int RunSelfTest(const Options& opt) {
                                     // partition, the variance-preserving blend, the metric
     ok &= RunTileSelfTest(gpu, sc, opt.shaderDir);
     ok &= RunAtlasSelfTest(gpu, sc, opt.shaderDir);
+    ok &= RunResidencyAuditSelfTest();   // the residency bytes against the mapped set, on
+                                         // constructed tenants through the real byte rule
     ok &= RunThreadSelfTest();    // the thread instrument's own gate: it must SEE a race
     ok &= RunTileTreeSelfTest();  // HIERARCHY 4a: the tree fit for a deep pyramid, on scratch
                                   // roots in out\treetest -- nothing lands in the real cache

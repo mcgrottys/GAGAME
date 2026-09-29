@@ -685,6 +685,18 @@ bool GlobeLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
         hal::Reload(m_psoMeshlet, [&] { return hal::BuildGraphicsRaw(gpu, d, "globe.meshlet"); },
                     "globe.meshlet");
     }
+    // The residency lens, compiled only when it is asked for: a run without it compiles and
+    // draws exactly what it did before the lens existed.
+    if (ResidencyLensOn()) {
+        ShaderBlob psL =
+            sc.Compile(m_shaderDir + L"/ResidencyLens.hlsl", L"PsResidencyLens", L"ps_6_0");
+        if (psL.Valid()) {
+            d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+            d.PS = {psL.Data(), psL.Size()};
+            hal::Reload(m_psoLens, [&] { return hal::BuildGraphicsRaw(gpu, d, "globe.lens"); },
+                        "globe.lens");
+        }
+    }
     return true;
 }
 
@@ -755,6 +767,21 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
             m_msPsoMeshlet = psoM;
         } else {
             Log("[globe] mesh MESHLET-TINT PSO creation failed (solid path unaffected)");
+        }
+    }
+    // ...and the residency lens (shaders/ResidencyLens.hlsl), only when it is asked for.
+    if (ResidencyLensOn()) {
+        ShaderBlob psL =
+            sc.Compile(m_shaderDir + L"/ResidencyLens.hlsl", L"PsResidencyLens", L"ps_6_5");
+        if (psL.Valid()) {
+            d.fill = D3D12_FILL_MODE_SOLID;
+            d.ps = psL;
+            hal::Pso psoL = hal::BuildMesh(gpu, d, "globe.mesh.lens");
+            if (psoL) {
+                m_msPsoLens = psoL;
+            } else {
+                Log("[globe] mesh RESIDENCY-LENS PSO creation failed (solid path unaffected)");
+            }
         }
     }
     return true;
@@ -2336,6 +2363,7 @@ void GlobeLayer::Render(const FrameContext& ctx) {
         if (surfaceDebug == 1 && m_msPsoWire) msSel = m_msPsoWire.Get();
         else if (surfaceDebug == 2 && m_msPsoMeshlet) msSel = m_msPsoMeshlet.Get();
         else if (surfaceDebug == 3 && m_msPsoWireFlat) msSel = m_msPsoWireFlat.Get();
+        else if (ResidencyLensOn() && m_msPsoLens) msSel = m_msPsoLens.Get();
         ctx.cmd->Pipeline(msSel);
         ctx.cmd->GraphicsConstantsAt(1, cbVa);
         ctx.cmd->GraphicsSrvAt(2, rec.res->GetGPUVirtualAddress());
@@ -2364,6 +2392,7 @@ void GlobeLayer::Render(const FrameContext& ctx) {
     hal::PsoPtr sel = m_pso.Get();
     if (surfaceDebug == 1 && m_psoWire) sel = m_psoWire.Get();
     else if (surfaceDebug == 2 && m_psoMeshlet) sel = m_psoMeshlet.Get();
+    else if (ResidencyLensOn() && m_psoLens) sel = m_psoLens.Get();
     ctx.cmd->Pipeline(sel);
     ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx.cmd->GraphicsConstantsAt(1, cbVa);
