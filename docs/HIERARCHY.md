@@ -1330,10 +1330,24 @@ This section had said 2.3 km, by an arithmetic nobody had run.
     delivers the tide there 2.70 h after the ocean's, where the stations say 1.07 h at
     that kilometre and the model itself is 0.17 h late 10 km downriver. So the radiation
     term, which is there to let reflections out, feeds and drains the reach, and the face
-    is a second mouth. Where the river loses 1.6 h is not found yet. The suspect is the
-    damping a step that every face's flux is multiplied by: a factor a step is a linear
-    friction, and a tide under a linear friction much larger than its frequency travels
-    as a diffusion and falls behind. Being measured.
+    is a second mouth.
+  - **The river loses no time along a channel: the window cuts its bend.** The suspect I
+    named, the damping a step on every face's flux, is cleared: its rate is 1.9e-4 a
+    second, of the order of the tide's frequency and not far above it, and four cycles
+    from the shipped damping to none move the lag at the edge by 0.006 h. The cause is the
+    grid. The river leaves the window through its north edge at 9.5 km west of the anchor
+    and comes back through it 0.8 km further east, and the edge is a wall. Inside the
+    grid the lowest way from the upper reach to the sea crosses land at +7.27 m. So the
+    reach is a pond of 2.64 km2 whose only mouth, once the window is drawn in, is the
+    west face; with today's window it has none and stands still, its range 5 mm. Below
+    the bend the model is right: 0.18 h late 5 km up, where Newburyport is 0.25 h.
+  - **The law it asks for: wherever water meets the window's edge the edge is an open
+    boundary, and carries the data of what lies beyond it.** The north edge's two
+    crossings are boundaries as the west face is. That replaces the solver's compass,
+    the sea to the east and the river in the first column, which 4.15 already names as
+    an assumption a second place cannot keep. It is step 8's. And an instrument, now:
+    at its start a solver floods its grid from its open boundaries and says what water
+    is joined to none of them.
   - **So the first law goes forward as the default and the second does not yet.** The
     window's key stays, its default today's window, until the flow the boundary carries
     goes with the flow it is told and the gap's current does not fall.
