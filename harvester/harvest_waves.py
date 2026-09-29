@@ -13,6 +13,17 @@ that harvester/grib2.py decodes (stdlib only). Politeness per GAMEPLAN.md 6.3:
 
 Ground truth: NDBC realtime2 for buoys 44013 (Boston, directional) + 44098 (Jeffrey's Ledge),
 including 44013's measured spectral density S(f). Output: data/sea/seastate.json.
+
+A PLACE (harvest_place(), or --place NAME --sea lon,lat [--buoys id,id]): the same request
+shape centred on the place's SEAWARD point -- a 1 x 0.75 degree box snapped to the 0.25-degree
+grid -- and the GFS-Wave node NEAREST that point that carries a wave value (land nodes are
+masked in the model), plus the named NDBC buoys; written to data/sea/<NAME>/seastate.json in
+the same schema. Why still the grib filter: the NODD S3 mirror's GFS-Wave grids
+(noaa-gfs-bdp-pds .../wave/gridded/) are packed with GRIB2 template 5.40 (JPEG 2000), which
+the stdlib-only grib2.py cannot decode; the filter re-encodes a subregion with simple packing
+(the playbook's "NOMADS only for grib-filter subsets S3 can't do cheaply"). Place requests go
+through harvester/polite.py (>= 2.5 s apart on NOMADS, budgeted, no contact address) and are
+cached per place (cache/gfswave/<NAME>/), because the cache key does not carry the box.
 """
 
 import json
@@ -42,6 +53,7 @@ VARS = ["HTSGW", "PERPW", "DIRPW", "WVHGT", "WVPER", "WVDIR",
 FHS = list(range(0, 49, 4))
 
 _last_fetch = [0.0]
+_polite = None      # a place harvest routes every request through harvester/polite.py
 
 
 def log(msg):
@@ -49,6 +61,8 @@ def log(msg):
 
 
 def fetch_bytes(url, cache_path, max_age_s=None):
+    if _polite is not None:
+        return _polite.get(url, cache_path)
     if os.path.exists(cache_path):
         age = time.time() - os.path.getmtime(cache_path)
         if max_age_s is None or age < max_age_s:
@@ -90,10 +104,39 @@ def filter_url(base, ymd, cyc, fh, var_flags):
     return base + "?" + urllib.parse.urlencode(params)
 
 
+def _fetch_grib_polite(url, cache):
+    """Place mode: cache-first; a response is written to the cache only once it IS GRIB (so no
+    cache file ever has to be deleted)."""
+    if os.path.exists(cache):
+        with open(cache, "rb") as f:
+            return f.read(), True
+    data, _ = _polite.get(url, None, timeout=90)
+    if data[:4] == b"GRIB" or b"GRIB" in data[:128]:
+        os.makedirs(os.path.dirname(cache), exist_ok=True)
+        with open(cache, "xb") as f:
+            f.write(data)
+    return data, False
+
+
 def fetch_grib(ymd, cyc, fh, var_flags, cache_dir, tag):
     cache = os.path.join(cache_dir, ymd, f"{cyc:02d}z_f{fh:03d}_{tag}.grib2")
     last_err = None
     for base in FILTERS:
+        if _polite is not None:
+            try:
+                data, cached = _fetch_grib_polite(filter_url(base, ymd, cyc, fh, var_flags),
+                                                  cache)
+            except _polite.Stop:
+                raise
+            except Exception as e:  # noqa: BLE001 - try the next endpoint
+                last_err = str(e)
+                continue
+            if data[:4] == b"GRIB" or b"GRIB" in data[:128]:
+                if not cached:
+                    log(f"    fetched f{fh:03d} {tag}: {len(data)} B")
+                return data
+            last_err = f"non-GRIB response ({len(data)} B) from {base.split('/')[-1]}"
+            continue
         try:
             data, cached = fetch_bytes(filter_url(base, ymd, cyc, fh, var_flags), cache)
             if data[:4] == b"GRIB" or b"GRIB" in data[:128]:
@@ -184,7 +227,131 @@ def parse_ndbc_spec(text):
     return None
 
 
+def nearest_wave_node(msg, lat, lon_e):
+    """(row, col, lat, lon_e) of the node nearest (lat, lon_e) whose value is not masked."""
+    best = None
+    for r in range(msg.nj):
+        la = msg.lat1 + r * (msg.dlat if (msg.scan & 0x40) else -msg.dlat)
+        for c in range(msg.ni):
+            if msg.values[r * msg.ni + c] is None:
+                continue
+            lo = (msg.lon1 + c * (-msg.dlon if (msg.scan & 0x80) else msg.dlon)) % 360.0
+            d = math.hypot((lo - lon_e) * math.cos(math.radians(lat)), la - lat)
+            if best is None or d < best[0]:
+                best = (d, r, c, la, lo)
+    if best is None:
+        raise RuntimeError("every node of the subregion is masked (land)")
+    return best[1:]
+
+
+def point_hours(ymd, cyc, cache_dir, key_to_var, node=None, sea=None):
+    """The per-hour record list (the seastate.json 'hours' schema) at one grid node; the node
+    is chosen on the first message set when not given. -> (hours, node)."""
+    hours = []
+    for fh in FHS:
+        data = fetch_grib(ymd, cyc, fh, VARS, cache_dir, "all")
+        msgs = [(key_to_var.get(m.key()), m) for m in grib2.read_messages(data)]
+        if node is None:
+            hs = next(m for v, m in msgs if v == "HTSGW")
+            node = nearest_wave_node(hs, sea[1], sea[0] % 360.0)
+        r, c = node[0], node[1]
+        point = {}
+        for v, m in msgs:
+            if v is None:
+                continue
+            name = f"{v}_{m.level_value}" if v in ("SWELL", "SWPER", "SWDIR") else v
+            point[name] = m.values[r * m.ni + c]
+        entry = {
+            "fh": fh,
+            "wind_ms": point.get("WIND"), "wind_from_deg": point.get("WDIR"),
+            "combined": {"hs": point.get("HTSGW"), "tp": point.get("PERPW"),
+                         "from_deg": point.get("DIRPW")},
+            "partitions": [],
+        }
+        ws = {"hs": point.get("WVHGT"), "tp": point.get("WVPER"),
+              "from_deg": point.get("WVDIR"), "kind": "windsea"}
+        if ws["hs"] and ws["tp"] and ws["tp"] > 0.5:
+            entry["partitions"].append(ws)
+        for i in (1, 2, 3):
+            sw = {"hs": point.get(f"SWELL_{i}"), "tp": point.get(f"SWPER_{i}"),
+                  "from_deg": point.get(f"SWDIR_{i}"), "kind": "swell"}
+            if sw["hs"] and sw["hs"] > 0.02 and sw["tp"] and sw["tp"] > 0.5:
+                entry["partitions"].append(sw)
+        hours.append(entry)
+    return hours, node
+
+
+def harvest_place(place, sea, buoys, out_root=None):
+    """data/sea/<place>/seastate.json for the node nearest `sea` (lon, lat) and the given NDBC
+    buoys. Never overwrites. -> {'files': [(path, bytes)], 'node': (lat, lon), ...}."""
+    global _polite, BOX
+    import polite
+    _polite = polite
+    out_dir = os.path.join(out_root or os.path.join("data", "sea"), place)
+    path = os.path.join(out_dir, "seastate.json")
+    if os.path.exists(path):
+        raise SystemExit(f"refusing to overwrite {path} (places only add)")
+    lon_e = sea[0] % 360.0
+    x0 = math.floor((lon_e - 0.5) * 4) / 4
+    y0 = math.floor((sea[1] - 0.375) * 4) / 4
+    BOX = {"leftlon": x0, "rightlon": x0 + 1.0, "toplat": y0 + 0.75, "bottomlat": y0}
+    cache_dir = os.path.join("cache", "gfswave", place)
+    cyc_dt, ymd, cyc = find_cycle(cache_dir)
+    log(f"[{place}] cycle gfswave {ymd} {cyc:02d}z, box {BOX}")
+    varmap = calibrate(ymd, cyc, os.path.join("cache", "gfswave"))   # the shared, learned keys
+    key_to_var = {tuple(k): v for v, keys in varmap.items() for k in keys}
+    hours, node = point_hours(ymd, cyc, cache_dir, key_to_var, sea=sea)
+    log(f"[{place}] node ({node[2]:.3f}, {node[3] - 360.0:.3f}) nearest the seaward point "
+        f"{sea}; f000 Hs {hours[0]['combined']['hs']} m, {len(hours[0]['partitions'])} partitions")
+
+    ndbc_cache = os.path.join("cache", "ndbc")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H")
+    out_buoys = {}
+    for bid in buoys:
+        met_raw, _ = fetch_bytes(f"{NDBC}/{bid}.txt", os.path.join(ndbc_cache, f"{bid}_{stamp}.txt"))
+        b = parse_ndbc_met(met_raw.decode("utf-8", errors="replace")) or {}
+        try:
+            spec_raw, _ = fetch_bytes(f"{NDBC}/{bid}.data_spec",
+                                      os.path.join(ndbc_cache, f"{bid}_{stamp}.data_spec"))
+            spec = parse_ndbc_spec(spec_raw.decode("utf-8", errors="replace"))
+            if spec:
+                b["spectrum"] = spec
+        except polite.Stop:
+            raise
+        except Exception as e:      # noqa: BLE001
+            log(f"    {bid}.data_spec unavailable ({e})")
+        out_buoys[bid] = b
+        log(f"buoy {bid}: Hs {b.get('hs')} m, DPD {b.get('dpd')} s, MWD {b.get('mwd')} degT"
+            + (f", spectrum {len(b['spectrum']['freq_hz'])} bins" if "spectrum" in b else ""))
+
+    out = {
+        "generated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "source": "GFS-Wave via NOMADS grib filter (S3 mirror grids are JPEG 2000) + NDBC "
+                  "realtime2",
+        "cycle_unix": cyc_dt.timestamp(),
+        "cycle_label": f"gfswave {ymd} {cyc:02d}z",
+        "point_lat": node[2], "point_lon": node[3] - 360.0,
+        "place": place, "sea_point": list(sea), "box": BOX,
+        "hours": hours,
+        "buoys": out_buoys,
+    }
+    os.makedirs(out_dir, exist_ok=True)
+    with open(path, "x", encoding="utf-8") as f:
+        json.dump(out, f, indent=1)
+    log(f"wrote {path}")
+    return {"files": [(path, os.path.getsize(path))], "node": (node[2], node[3] - 360.0),
+            "cycle": out["cycle_label"], "cycle_unix": out["cycle_unix"],
+            "buoys": {k: v.get("obs_unix") for k, v in out_buoys.items()}}
+
+
 def main():
+    args = sys.argv[1:]
+    if "--place" in args:
+        def opt(flag, default=None):
+            return args[args.index(flag) + 1] if flag in args else default
+        harvest_place(opt("--place"), tuple(float(v) for v in opt("--sea").split(",")),
+                      [b for b in opt("--buoys", "").split(",") if b])
+        return
     out_dir = os.path.join("data", "sea")
     cache_dir = os.path.join("cache", "gfswave")
     ndbc_cache = os.path.join("cache", "ndbc")

@@ -232,6 +232,37 @@ class GeoTiff:
                     out[i] = float("nan")
         return out
 
+    # ---- declared georeferencing (what the file SAYS its frame is; nothing here converts)
+    GEOKEY_NAMES = {1024: "GTModelType", 1025: "GTRasterType", 1026: "GTCitation",
+                    2048: "GeographicType", 2049: "GeogCitation", 2050: "GeogGeodeticDatum",
+                    2054: "GeogAngularUnits", 3072: "ProjectedCSType", 3076: "ProjLinearUnits",
+                    4096: "VerticalCSType", 4097: "VerticalCitation", 4098: "VerticalDatum",
+                    4099: "VerticalUnits"}
+
+    def geokeys(self):
+        """GeoKeyDirectory (tag 34735) resolved against its double (34736) and ASCII (34737)
+        parameter tags, plus GDAL's metadata/nodata tags when present. Keys by name."""
+        out = {}
+        d = self.tag(34735)
+        if isinstance(d, list) and len(d) >= 4:
+            dbl = self.tag(34736) or []
+            asc = self.tag(34737) or ""
+            for k in range(d[3]):
+                key, loc, count, val = d[4 + 4 * k:8 + 4 * k]
+                name = self.GEOKEY_NAMES.get(key, str(key))
+                if loc == 0:
+                    out[name] = val
+                elif loc == 34736 and isinstance(dbl, list):
+                    out[name] = dbl[val:val + count] if count > 1 else dbl[val]
+                elif loc == 34737 and isinstance(asc, str):
+                    out[name] = asc[val:val + count].rstrip("|\x00 ")
+        meta = self.tag(42112)
+        if isinstance(meta, str) and meta.strip():
+            out["GDAL_METADATA"] = meta.strip("\x00 ")
+        if self.nodata is not None:
+            out["GDAL_NODATA"] = self.nodata
+        return out
+
     # ---- georef
     def px_of_lon(self, lon):
         return int((lon - self.lon0) / self.sx)

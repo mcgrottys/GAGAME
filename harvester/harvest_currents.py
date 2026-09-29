@@ -15,6 +15,14 @@ Three sources, in descending order of certainty:
 
 Politeness as ever: cached forever where immutable, spaced requests, contact UA.
 Output: data/currents/currents.json (+ gomofs_uv.f32 when the field probe succeeds).
+
+A PLACE (harvest_place(), or --place NAME --box lon0,lat0,lon1,lat1 [--radius-km R]
+[--max-stations N] [--adcp BUOY]): the current-prediction stations nearest the place, found in
+CO-OPS's own station list (weak-and-variable stations skipped, one depth bin per station -- the
+one nearest the surface), the given NDBC ADCP buoy, and optionally a model field handed in by
+the caller, written to data/currents/<NAME>/currents.json in the same schema. The GoMOFS crawl
+above is Gulf-of-Maine code (its catalog path, its GRID) and is NOT run for a place; a place's
+field comes from harvest_place.py (NODD S3). Place requests go through harvester/polite.py.
 """
 
 import json
@@ -47,6 +55,7 @@ GRID = {"lon0": -71.1, "lat0": 41.9, "lon1": -69.3, "lat1": 43.3, "nx": 280, "ny
 KNOT = 0.514444
 
 _last_fetch = [0.0]
+_polite = None      # a place harvest routes every request through harvester/polite.py
 
 
 def log(msg):
@@ -54,6 +63,8 @@ def log(msg):
 
 
 def fetch(url, cache_path, binary=False, max_age_s=None, timeout=90):
+    if _polite is not None:
+        return _polite.fetch_compat(url, cache_path, binary=binary, timeout=timeout)
     if cache_path and os.path.exists(cache_path):
         age = time.time() - os.path.getmtime(cache_path)
         if max_age_s is None or age < max_age_s:
@@ -84,7 +95,7 @@ def fetch(url, cache_path, binary=False, max_age_s=None, timeout=90):
 
 # ================================================================= 1. tidal current predictions
 
-def fetch_tidal_station(sid, name, cache_dir):
+def fetch_tidal_station(sid, name, cache_dir, bin_=None):
     now = datetime.now(timezone.utc)
     begin = now - timedelta(days=10)
     events = []
@@ -97,8 +108,12 @@ def fetch_tidal_station(sid, name, cache_dir):
             "begin_date": b.strftime("%Y%m%d"), "end_date": e.strftime("%Y%m%d"),
             "interval": "MAX_SLACK", "units": "english", "time_zone": "gmt", "format": "json",
         }
+        tag = sid
+        if bin_ is not None:                 # multi-bin (ADCP-derived) stations: name the depth
+            params["bin"] = str(bin_)
+            tag = f"{sid}_b{bin_}"
         url = COOPS + "?" + urllib.parse.urlencode(params)
-        cache = os.path.join(cache_dir, f"{sid}_{params['begin_date']}_{params['end_date']}.json")
+        cache = os.path.join(cache_dir, f"{tag}_{params['begin_date']}_{params['end_date']}.json")
         text, cached = fetch(url, cache)
         data = json.loads(text)
         cp = (data.get("current_predictions") or {}).get("cp") or []
@@ -128,8 +143,11 @@ def fetch_tidal_station(sid, name, cache_dir):
         if not dedup or abs(ev["t"] - dedup[-1]["t"]) > 60:
             dedup.append(ev)
     log(f"[{sid}] {name}: {len(dedup)} events, flood {flood_deg} degT / ebb {ebb_deg} degT")
-    return {"id": sid, "name": name, "flood_deg": flood_deg, "ebb_deg": ebb_deg,
-            "events": dedup}
+    out = {"id": sid, "name": name, "flood_deg": flood_deg, "ebb_deg": ebb_deg,
+           "events": dedup}
+    if bin_ is not None:
+        out["bin"] = bin_
+    return out
 
 
 # ================================================================= 2. NDBC ADCP ground truth
@@ -451,9 +469,108 @@ def resample_arrays(lon, lat, curvilinear, ny, nx, u, v, ang, source):
     return {"u": out_u, "v": out_v, "source": source}
 
 
+# ================================================================= a place
+
+def _km(lat0, lon0, lat1, lon1):
+    return math.hypot((lon1 - lon0) * 111.32 * math.cos(math.radians((lat0 + lat1) / 2)),
+                      (lat1 - lat0) * 110.57)
+
+
+def discover_place(box, radius_km, anchor, max_stations, coops_cache):
+    """Current-prediction stations within radius_km of the box, nearest the anchor first, from
+    CO-OPS's own list (mdapi stations.json?type=currentpredictions, cached forever). Type W
+    (weak and variable: no predictions exist) is skipped; a multi-bin station contributes its
+    bin nearest the surface. -> [(id, name, bin or None, km)]"""
+    raw, _ = fetch("https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json?"
+                   "type=currentpredictions",
+                   os.path.join(coops_cache, "_lists", "currentpredictions.json"))
+    listed = json.loads(raw).get("stations", [])
+    best = {}
+    for st in listed:
+        if st.get("type") == "W":
+            continue
+        lat, lon = float(st.get("lat", 0)), float(st.get("lng", 0))
+        clat = min(max(lat, box["lat0"]), box["lat1"])
+        clon = min(max(lon, box["lon0"]), box["lon1"])
+        if _km(lat, lon, clat, clon) > radius_km:
+            continue
+        depth = st.get("depth")
+        key = (depth if depth is not None else 0.0, st.get("currbin") or 0)
+        cur = best.get(st["id"])
+        if cur is None or key < cur[0]:
+            best[st["id"]] = (key, st, _km(lat, lon, anchor[1], anchor[0]))
+    many_bins = {}
+    for st in listed:
+        many_bins[st["id"]] = many_bins.get(st["id"], 0) + 1
+    picks = sorted(best.values(), key=lambda v: v[2])[:max_stations]
+    return [(st["id"], st.get("name", st["id"]),
+             st.get("currbin") if many_bins[st["id"]] > 1 else None, round(d, 1))
+            for _, st, d in picks]
+
+
+def harvest_place(place, box, radius_km, anchor=None, max_stations=8, adcp=None, field=None,
+                  out_root=None):
+    """data/currents/<place>/currents.json (+ the field's .f32 when `field` is given: a dict
+    with 'u', 'v' float arrays and the grid keys of the schema). Never overwrites.
+    Returns {'files': [(path, bytes)], 'stations': [...], 'adcp': ...}."""
+    global _polite
+    import polite
+    _polite = polite
+    anchor = anchor or ((box["lon0"] + box["lon1"]) / 2, (box["lat0"] + box["lat1"]) / 2)
+    out_dir = os.path.join(out_root or os.path.join("data", "currents"), place)
+    path = os.path.join(out_dir, "currents.json")
+    if os.path.exists(path):
+        raise SystemExit(f"refusing to overwrite {path} (places only add)")
+    cache_dir = os.path.join("cache", "currents")
+    picks = discover_place(box, radius_km, anchor, max_stations, os.path.join("cache", "coops"))
+    log(f"[{place}] {len(picks)} current station(s): "
+        f"{[(s, b, km) for s, _, b, km in picks]}")
+    stations, failed = [], []
+    for sid, name, bin_, km in picks:
+        try:
+            st = fetch_tidal_station(sid, name, cache_dir, bin_)
+            st["km_from_anchor"] = km
+            stations.append(st)
+        except polite.Stop:
+            raise
+        except Exception as e:  # noqa: BLE001
+            log(f"[{sid}] FAILED: {e}")
+            failed.append({"id": sid, "bin": bin_, "why": str(e)})
+    buoy = fetch_adcp(adcp, cache_dir) if adcp else None
+    out = {"generated_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+           "tidal_stations": stations, "buoy_adcp": buoy, "field": None}
+    os.makedirs(out_dir, exist_ok=True)
+    files = []
+    if field:
+        fpath = os.path.join(out_dir, field["file"])
+        with open(fpath, "xb") as f:
+            f.write(struct.pack(f"<{len(field['u'])}f", *field["u"]))
+            f.write(struct.pack(f"<{len(field['v'])}f", *field["v"]))
+        files.append((fpath, os.path.getsize(fpath)))
+        out["field"] = {k: v for k, v in field.items() if k not in ("u", "v")}
+    with open(path, "x", encoding="utf-8") as f:
+        json.dump(out, f, indent=1)
+    files.append((path, os.path.getsize(path)))
+    log(f"wrote {path} ({len(stations)} tidal stations, adcp {'yes' if buoy else 'no'}, "
+        f"field {'yes' if field else 'no'})")
+    return {"files": files, "stations": [(s["id"], s.get("bin")) for s in stations],
+            "failed": failed, "adcp": buoy}
+
+
 # ================================================================= main
 
 def main():
+    args = sys.argv[1:]
+    if "--place" in args:
+        def opt(flag, default=None):
+            return args[args.index(flag) + 1] if flag in args else default
+        lon0, lat0, lon1, lat1 = (float(v) for v in opt("--box").split(","))
+        harvest_place(opt("--place"), {"lon0": lon0, "lat0": lat0, "lon1": lon1, "lat1": lat1},
+                      float(opt("--radius-km", "20")),
+                      anchor=tuple(float(v) for v in opt("--anchor").split(","))
+                      if "--anchor" in args else None,
+                      max_stations=int(opt("--max-stations", "8")), adcp=opt("--adcp"))
+        return
     out_dir = os.path.join("data", "currents")
     cache_dir = os.path.join("cache", "currents")
     os.makedirs(out_dir, exist_ok=True)
