@@ -1756,6 +1756,79 @@ run, as a tile that failed four tries is, so the hold can still be exact without
 loader asks for it again and again, and the level above it answers. It is a change in
 the tile tree's composite and in what the loader does with its answer; not built.
 
+### 4.20 Depth without a bound, and rasters by file
+
+The owner, 2026-09-29: the CPU tosses everything into one cached tile tree on the disk, and
+the GPU reads it without caring whether the data is large or small or where it came from; and
+the precision is to be, in theory, without a bound. Both are this proposal's own premises
+taken to their end. Neither is true of the code today.
+
+**What bounds the depth today.** Every one is a width chosen for a number, and none is a
+property of the structure.
+
+| the bound | where | what it allows |
+|---|---|---|
+| the ranks the shader walks, five | `SurfaceFrame::kMaxRanks`; the rungs 3, 6, 9, 12, 15 in `DeclareBlocks` | 1.9 cm a texel |
+| a face's dimension, 32 bits | `Lattice::Cube(16384 << 17)`, `mip = 17 - rung` | 4.7 mm |
+| a tile's key in the tree: 5 bits of level, 28 of x and of y | `TileTree.h:763`, `TileArchive.h:95` | 0.3 mm |
+| a space's conditioning, 9.49e7 units of its own length | `Space.h:572` | eight decades a space |
+| a double, 53 bits, on a position in the planet's frame | every CPU address | about a nanometre |
+
+Drawn so far: 1.2 m, at rank 3. Ranks 4 and 5 are tested as addresses and not as pictures.
+
+**What takes each bound away.** Five laws, each the relative form of something the engine
+has in an absolute form.
+
+1. **A tile's name is a path.** A tile is named by its parent and by which of the four
+   children it is, so a name grows by two bits a level and no level is the last. On the
+   disk the path is cut into folders every few levels. Step 4b changes every name once, to
+   carry its content's token; the same change makes the name a path.
+2. **A window is placed in its parent,** by which of the 64 parts of the parent's block it
+   is, three bits an axis a rank. The absolute anchor, a multiple of 16,384 texels of the
+   rung, is that path summed; it is kept where 64 bits hold it and is not the definition.
+3. **The walk begins where the eye is.** The shader's chain holds the few ranks about the
+   rung a pixel wants, and the coarsest of them is its root; what is coarser is the floor.
+   The binding gives a mesh its chain. So the shader's cost does not grow with the depth.
+4. **A window's rows are taken in the window's own space.** The planes of its address are
+   computed on the CPU about the eye, in a space whose unit is the window's size, hung
+   under the space of the rank above. A space names eight decades and spaces nest, which
+   the Droste tower already does by `Space::ToRoot` and the nearest common ancestor. The
+   GPU then sees numbers of the size of one window at any depth: 16,384 texels, and ten
+   bits of a float32 left under the texel.
+5. **A leaf may be a root.** What is finer than a planet's frame can place, an entity's own
+   texture, a thing under a microscope, hangs a space of its own under a leaf, in its own
+   unit, as the Droste link hangs the root. Precision begins again in every space.
+
+With 1 to 4 the depth in one planet's tree is bounded by nothing but the double that places
+a source, a nanometre; with 5 by nothing.
+
+**What others have done.** A quadtree key that is a path is common practice: Bing's
+quadkey is a string whose length is its level, to level 23. Google's S2 packs a face and
+thirty levels of a Hilbert curve into 64 bits, a leaf under a square centimetre, and stops
+there because the width does. Rendering relative to the eye is the virtual globes' cure
+for jitter (Cozzi and Ring). What this section adds is only that the three are one habit,
+the relative form, applied to the name, the window and the position alike. I claim nothing
+of it as new.
+
+**A raster is a source by being a file.** The colour's stack is a list written in C++
+(`Assembly.cpp:836-892`): Google, one aerial set and one overlay at paths written in the
+code, the seafloor, the bed, the mask. The engine reads no `.tif`; a harvester converts
+one first; and the plane orthos' projection is UTM zone 19 in the code. So:
+
+- the scene lists sources, a file each or a folder and a pattern;
+- a source's place, projection and grain are read from the file, and a projection the
+  engine does not know is refused by name, never guessed;
+- the order in the stack is the grain's, the coarser under the finer, unless the scene
+  says otherwise;
+- the depth of the tree at a place is the grain of the finest source that covers it, and
+  no constant names a finest grain;
+- the blocks the GPU holds are taken from the sources' footprints until windows follow
+  the eye;
+- and then the list that is written in C++ is the default scene's list, and the code that
+  named each dataset goes.
+
+Being built, the first four and the fifth, in a scratch tree on the blocks of 4.17.
+
 ## 5. Decisions for Mark
 
 Settled already, 2026-09-28, and built into the sections above:
@@ -2097,3 +2170,8 @@ each, from the bottom of the stack up.
 - Tanner, Migdal and Jones, *The Clipmap: A Virtual Mipmap*, 1998; Barrett, *Sparse Virtual
   Textures*, 2008; van Waveren, *Software Virtual Textures*, 2012: cited from memory, not re-read
   for this document.
+- For 4.20. Microsoft, *Bing Maps Tile System* (the quadkey: a string whose length is the level,
+  to level 23): <https://learn.microsoft.com/en-us/bingmaps/articles/bing-maps-tile-system>.
+  Google, *S2 Cells* (a face and thirty levels in 64 bits):
+  <https://s2geometry.io/devguide/s2cell_hierarchy.html>. Both read as search results'
+  summaries of the pages.
