@@ -1303,6 +1303,37 @@ the six pieces of section 6 beneath them.
   picture. The agent's eye and mine had seen the picture rightly. And that the address was
   the suspected cause of the lost detail: commit 3 made the address exact and the picture's
   detail did not move, 0.803 of the Mercator arm's at the bird where it had been 0.800.
+- **Commit 4 is made and gated, and two things of it are owed.** Rank 1 is in the key, a grid
+  of sixteen by sixteen cells stands beside every slice, and the walk is one function with a
+  body in C++ and a body in HLSL: on 15,000 points the two return the same chain, slice for
+  slice, the address within 0.0033 of a texel, and a directory with one cell planted wrong
+  is caught at every point of that cell. Read back from the GPU the directory is as built in
+  all 3,072 cells, 24 of them naming a block. A key whose block has no parent declared is
+  refused whole and said, and the Mercator windows stand.
+
+  **The default path is today's to the byte.** The blocks' code is compiled only when the key
+  is not empty. With the key empty all 68 stages compile to the program they compiled to
+  before the migration began, the pictures are the old binary's to the pixel where two runs
+  of one binary are, and the globe's pass costs what it cost. The commit's first form had
+  not held that: every reader walked for itself into an array, and the default path paid
+  4.9 ms at the helm for code it did not run.
+
+  | the globe's pass, ms | today | key empty | the ladder of commit 3 | the directory |
+  |---|---|---|---|---|
+  | helm | 12.90 | 12.92 | 13.97 | 13.95 |
+  | bird | 6.13 | 6.13 to 6.31 | 6.27 | 7.26 |
+
+  With the key set the directory draws the ladder's picture, SSIM 0.9999 and better at the
+  four poses, but for sixteen pixels that are the same in both runs. Owed: the key set costs
+  a millisecond more than today's path, because the colour is sampled at every rank that
+  wins and only the last sample is used; the rank is to be decided from the residency's
+  levels and the winner sampled once. And the sixteen pixels are the pixel water's bed,
+  read with its pixel's chain where the bed point has left that block; a ray that leaves
+  the surface walks for itself (4.5). Rank 1 answered nowhere in the four frames.
+- **Two gates of this migration were lost to one fault of the harness,** and one the night
+  before in step 2: PowerShell's names ignore case, so a key held in `$K` was overwritten by
+  a loop's `$k`, and thirty runs meant to have the key set ran without it. The rule since: a
+  batch's first run has its own argument line read before the rest are let go.
 - **What the key-on runs painted:** 22,814 files and 1.09 GiB in nine trees, from the source
   caches, the fetch budget at zero. They refused 35 source tiles a run at the helm and 16 at
   the bird. A tile painted while a source was refused is not kept: the paint answers that
