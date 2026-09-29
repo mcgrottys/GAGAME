@@ -1606,6 +1606,19 @@ flown costs up to 152 tile writes today, because each absent ancestor is painted
 upward, and then folded again by its caller; walked once it is 16. And ten thousand leaves of
 one region make some 3,400 ancestors, so a rank's tiles are about a third more than its leaves.
 
+**Step 8, in five parts.** Proposed 2026-09-29 from `docs/PLACE_KEYS.md`; nothing of it is
+built. The first three change no picture and need nothing of steps 5 to 7, so they can be made
+beside them. The last two need step 7: a solver at a second place reads its bed from a window
+that stands there, and today the one bed on the GPU is the Merrimack's.
+
+| part | what | gate | blind to |
+|---|---|---|---|
+| 8a | The chart is the place's. The root place owns a chart, the type the gates already build at a far place (`Space::Anchor`: an anchor, metres a degree, the tangent frame's rows). Every reader of the four constants of `BathyModel.h:25-28` takes the chart from the place: 95 uses in 20 files. The default is today's literals, 81,660 and not the cosine's 81,654.6 | the six stills' hashes and pixels; every stage's DXIL; the selftest; the four names found nowhere outside the default | a reader that holds the anchor as a number of its own |
+| 8b | The keys that exist are obeyed, and a name is the place's: the depth tree takes `data.bathy`, the velocity-gradient bank takes `data.currents`, a layer's name is built from the place's name. The Merrimack's names come out as they are, so no tree's folder moves | the trees' folders listed before and after: equal; the stills' hashes | a name that reaches a folder by a path not read |
+| 8c | The scene declares the place: its name, its anchor, its chart (the cosine at its latitude unless it says otherwise), its stations and its buoy by number, its boxes, its windows. The literals of `docs/PLACE_KEYS.md` become the defaults of keys | `--print-scene` of every shipped scene, before and after: equal but for the new keys at their defaults; the stills' hashes | what is an assumption and not a literal (8d says them) |
+| 8d | The second place, a scene file and nothing else: Haulover's bed, tides, currents and sea state, its chart, a window of each rank over it, the boat put in. It runs on the terms 4.15 names: the sea to the east, no river, the clocks at the focus station, the jet off | `git diff --stat src shaders` is empty between the scene without the place and the scene with it; the solver's level at the focus station against the station's own prediction; pictures, for the owner's eye | data quality at the far place; a coast that faces west |
+| 8e | One ground point read through two worlds: the same texel of the pyramid reached from the Merrimack's scene through a gate and from Haulover's scene standing there | the two reads equal, colour and height, byte for byte | |
+
 **Standing, 2026-09-29.** `main` is `71e3a33`. Steps 0 and 3 came into it with pull request
 34 on 2026-09-28. **The harvest, the prune tool, step 4a, step 1a and step 1 came into it on
 2026-09-29 as pull requests 35 to 39,** committed and merged on the owner's word, one commit
