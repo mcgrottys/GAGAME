@@ -1585,7 +1585,15 @@ one region make some 3,400 ancestors, so a rank's tiles are about a third more t
 
 **Standing, 2026-09-29.** Steps 0 and 3 are in `main`: pull request 34 was merged on
 2026-09-28, on top of pull request 33, and `main` is `35a9eb7`. The merged tree was built and
-its selftest run: it exits 0. The branches named below are not committed.
+its selftest run: it exits 0.
+
+- **Five pieces are committed and stand as pull requests 35 to 39,** on the owner's word of
+  2026-09-29, each on the one before it, none merged: the harvest (35), the prune tool (36),
+  step 4a (37), step 1a (38), step 1 (39). Each stage was built alone from `main` with the
+  stages before it, its selftest exits 0 (244 lines in `main`, then 244, 307, 336, 336 and
+  349), `hal_lint` passes, and the documents the engine writes at its boot were taken into
+  the commit that changes them. They merge from the bottom up. Where a note below says a
+  piece is not committed, it was written before that day's word.
 
 - **The pieces that are made apply together.** A dry run applied six of them to `main` in one
   order: the harvest, the prune tool, step 4a, step 1a, step 1 and step 2's probe. Together
