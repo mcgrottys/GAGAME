@@ -1335,19 +1335,31 @@ This section had said 2.3 km, by an arithmetic nobody had run.
     named, the damping a step on every face's flux, is cleared: its rate is 1.9e-4 a
     second, of the order of the tide's frequency and not far above it, and four cycles
     from the shipped damping to none move the lag at the edge by 0.006 h. The cause is the
-    grid. The river leaves the window through its north edge at 9.5 km west of the anchor
-    and comes back through it 0.8 km further east, and the edge is a wall. Inside the
-    grid the lowest way from the upper reach to the sea crosses land at +7.27 m. So the
-    reach is a pond of 2.64 km2 whose only mouth, once the window is drawn in, is the
-    west face; with today's window it has none and stands still, its range 5 mm. Below
-    the bend the model is right: 0.18 h late 5 km up, where Newburyport is 0.25 h.
+    grid. Drawn in, the window's north edge stands 641 m further south, and the river
+    leaves through it at 9.5 km west of the anchor and comes back through it 0.8 km
+    further east; the edge is a wall. Inside that grid the lowest way from the upper
+    reach to the sea crosses land at +7.27 m, so the reach is a pond of 2.64 km2 whose
+    only mouth is the west face. The survey's own grid holds the bend. But on today's
+    window the reach stood still, its range 5 mm, and the bend lies in the band where
+    the survey fades into the relief beneath it: whether the bed the kernel reads holds
+    the bend is being measured, on the bed read back from the kernel. Below the bend
+    the model is right: 0.18 h late 5 km up, where Newburyport is 0.25 h.
   - **The law it asks for: wherever water meets the window's edge the edge is an open
     boundary, and carries the data of what lies beyond it.** The north edge's two
     crossings are boundaries as the west face is. That replaces the solver's compass,
     the sea to the east and the river in the first column, which 4.15 already names as
     an assumption a second place cannot keep. It is step 8's. And an instrument, now:
-    at its start a solver floods its grid from its open boundaries and says what water
-    is joined to none of them.
+    at its start a solver floods its bed from its open boundaries and says what water
+    is joined to none of them. Its first form flooded the survey's grid, which is not
+    the bed the kernel reads, and so could not see the fault it was made for; it floods
+    the bed read back from the kernel.
+  - **The baselines of the new default,** the whole bed on today's window: the two
+    takes of every pose are one picture. Against `main` the water differs at five poses
+    of six, 157,000 to 711,000 pixels, and the globe not at all; the level at the beach
+    stands 0.028 m under the tide at frame 600 where `main`'s stands 0.552 m under it.
+    On the storm rail the mean SSIM against `main` is 0.956 where `main` against itself
+    is 0.990. The engine's lines for the piece: 350 added, 30 removed, beside 1,227 of
+    instruments.
   - **So the first law goes forward as the default and the second does not yet.** The
     window's key stays, its default today's window, until the flow the boundary carries
     goes with the flow it is told and the gap's current does not fall.
