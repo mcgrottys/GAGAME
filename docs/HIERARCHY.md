@@ -680,6 +680,42 @@ alternative, with a forecast system and five current profilers of its own. All t
 Merrimack included, lie on face 5 of the cube. The edge that exercises the porch is the one
 61 km north of the Merrimack.
 
+**What was harvested, 2026-09-28** (branch `claude/harvest-places`; Python only, nothing
+fetched from Google; 460 requests and 7.75 GB of a budget of 2,000 and 8 GB; no existing file
+changed, and the three New England windows come out of the new code byte for byte as before):
+
+| | Haulover | Chesapeake |
+|---|---|---|
+| the bed | the whole box at 13.7 m, 1538 by 1619, -274 to +17 m NAVD88 | the mouth only, 6075 by 3645: 33 of the bay's 78 tiles, the 45 left listed in the manifest with 9.75 GB to go. The whole bay at this grain is 264 million cells, past the loader's 2^26 |
+| tides | 14 harmonic stations within 40 km, 8723080 first; 11 tied to NAVD88 | 62 harmonic stations |
+| currents | 8 stations, first the one in Bakers Haulover Cut itself, and one profiler on a buoy | 8 stations at the mouth, and the forecast system's surface current as a field |
+| the forecast system | none covers Miami | one whole cycle of CBOFS, 384 MB: level, current, temperature, salinity |
+| waves | the GFS-Wave point off the inlet, two buoys | the GFS-Wave point off the capes, two buoys |
+| not taken | the survey shoreline: Florida's is one file of 247 MB, part of it unreadable | |
+
+Each place has a manifest (`data/places/<place>.json`) naming every file, its source, its
+datum and unit as the source declares them, the instant it is valid for, and each source's own
+words on whether it may be kept.
+
+**What "a place is data and a scene entry" still costs,** counted by the harvest against the
+engine's code. The files are in the formats the engine reads, and four of the scene's `data`
+keys can already point at them. The rest names the Merrimack in code:
+
+- **the anchor of the world**, one longitude and latitude with fixed metres a degree
+  (`BathyModel.h:25-28`), used by the frame loop, the water's tree, the sea, the sources, the
+  wave field and the solver;
+- **the two windows**, built by one function for one place (`SurfaceFrame.cpp:31-49`);
+- **some twenty literal paths and names**: the bed's file reopened whatever the scene says
+  (`Assembly.cpp:485`), the two insets, the currents' file, the water's, the survey's, the
+  river's; one tide station, one buoy, one current station and Boston's, each by its number;
+- **the solver's compass**: the sea to the east and the river to the west (`Swe.hlsl:102`,
+  `:223`);
+- **a projection's zone**: 19, where Haulover is in 17 and the Chesapeake in 18 (finding 36);
+- **a box the forecast is believed in**: 41.5 to 44.5 N (`WeatherManager.cpp:336-337`).
+
+Step 8 is that list turned into keys of the scene, and its gate stays what it was: the source
+tree does not change between the scene without the place and the scene with it.
+
 ### 4.16 Music as a source: the buoy, and the wave machine
 
 The owner, 2026-09-28, as the measure of how abstract the algebra must be: a music file is added
@@ -1046,7 +1082,7 @@ Each step names the instrument that can see it fail, and what that instrument ca
 | 5 | **After step 6's standing blocks** (4.17). The residency manager that tracks the pyramid's tiles, with windows that activate, move and release. It replaces the code of findings 2 and 3 | step 1's audit, clean; slot audit; `[settle-exact]` hashes over global tiles and origins; the storm rail | whether the picture is right |
 | 6 | **Before step 5, on standing aligned blocks** (4.17's five commits, the colour and the mask first): the address, the directory, rank 1. Then, with step 5 behind it, the porch and the phase on windows that move | stills and rail against the Mercator baseline by SSIM and by eye, floors stated; a lens that paints rank and window | bit identity is gone by construction: the lattice changed |
 | 7 | The height with the exposure, as one move, and with them the decision on the solver's bed (finding 48); the wave pages, whose solver is re-aligned to a face's plane; then the water surface as a tenant | `--water-probe` (drawn level against the level the hull reads), standing, per hull; `[kernel]` fingerprints; `--sea-verify` | |
-| 8 | A second place, then one in each face of the cube: harvested, declared in a scene file, the boat put in. The politeness budget governs every fetch | `git diff --stat src shaders` is empty between the scene without the place and the scene with it; one ground point read back through two worlds: equal | data quality at the far place |
+| 8 | A second place, then one in each face of the cube: harvested (Haulover and the Chesapeake's mouth are, 4.15), declared in a scene file, the boat put in. What names the Merrimack in code becomes keys of the scene (4.15's list). The politeness budget governs every fetch | `git diff --stat src shaders` is empty between the scene without the place and the scene with it; one ground point read back through two worlds: equal | data quality at the far place |
 | 9 | The porch at the cube's edge, and the aprons it reads (4.18) | a rail across 43.364 N; a lens that paints the weight; an apron's texel against the texel across the edge, by containment | |
 | 10 | Rank 4 from the 15 cm orthos at the jetty | a texel checkerboard at the helm | |
 | 11 | Gates restated as cells; cages when they are wanted | | |
