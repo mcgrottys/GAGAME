@@ -1095,6 +1095,18 @@ from the edge of its rung-9 block.
   that is absent is an error that is said, not a coarser answer that is read. What the
   experiment built is the first half of that in today's engine, behind a scene key,
   `water.swe.bedWait`, whose default is today's behaviour.
+
+  **And it stands where its sources paint at full weight.** The experiment's bed, read
+  back, shows a second fault of the same kind, in space where the first was in time
+  (finding 68). The solver's grid is the survey's window, cell for cell, and the survey's
+  layer fades into the relief beneath it over the outer 4 % of that window. At the
+  solver's west column the bed is therefore the 15-arcsecond relief, +2.03 m at its
+  lowest, where the survey has the river at -4.21 m; the channel comes back to its
+  surveyed depth 74 columns in. No cell of the west boundary can be wet, so the
+  Merrimack's discharge and its tide have never entered since the bed became the composed
+  height. A fade at a layer's edge is the picture's device. A solver's edge is a
+  boundary condition, and it needs the data: its window is declared inside the band, or
+  the source that carries its boundary is given no band on that side.
 - **The height and the exposure move together.** The bank's kernel and the sea read both through
   one slice and one row.
 - **The colour and the mask move together.** They share lattices, a tree, rows and wants.
@@ -1311,6 +1323,7 @@ And by three more:
 | asked | the evidence | recommended |
 |---|---|---|
 | Is the solver held until its bed is whole, from now, in today's engine? It moves the water of every still and every rail taken so far, so every baseline is taken again | 4.17: the hour of spin-up runs on a bed of 0.0 m, and the basin stands 0.55 m low for minutes | Yes, as a commit of its own, and the baselines after it |
+| Is the solver's window drawn in from the survey's faded edge, so that the river enters? It moves the water as the first does, and the two can share one retaking of the baselines | 4.17, finding 68: the solver's west column stands at +2.03 m where the survey has -4.21 m | Yes, with the first |
 | The pieces that are made and not committed: in which order, and is each a pull request of its own? | section 6, Standing | the harvest, the prune tool, step 4a, step 1a, step 1, each its own |
 | The wave tree has no cap: 226 identities and 58 GiB of the cache's 95.6 (finding 51). Is it given one? | 4.14 | Yes: a count of buckets kept, stated in the scene |
 
