@@ -390,9 +390,37 @@ wants.
 Three things in the manager must change before a window MOVES, because a moving window leans
 on all three: the tail a batch loses at the pool's cap (finding 2), the residency bytes an
 invalidation erases (finding 3), and the residency map's upload, which today re-sends a whole
-tenant for one dirty byte. A window that stands on an aligned block leans on none of them
+tenant for one dirty byte. A window that stands on an aligned block adds nothing to them
 (4.17), which is why the shader's contract is made first, on standing blocks, and the manager
-after it.
+after it. They are today's faults all the same. Step 1's audit saw the first two on today's
+binary, over today's windows, and two more beside them (findings 63 and 64).
+
+**The map is computed, not kept.** The residency byte of a cell is a function of the tiles:
+the finest level L at which the tile over the cell is mapped and its bytes have landed, at L
+and at every coarser level. Today's manager keeps the byte by increments, lowered when a tile
+is mapped and raised when one is unmapped, and the increments equal the function only while
+tiles are mapped from coarse to fine and unmapped from fine to coarse. Four orders of events
+are not that. A parent is invalidated over a mapped child and mapped again, and the byte is
+left coarser than the tiles (finding 3, seen). A parent is evicted while its child waits in
+the same batch (63, seen). A tile is admitted under a chain that is broken above its parent
+(64, seen). A claim is made while the parent's bytes are still in flight (24, read and not
+seen). The last three leave the byte FINER than the tiles, and that is the direction in which
+a sampler reads a NULL tile's zeros.
+
+Each could be mended where it stands. Proposed, one law that mends them together: the byte is
+written from the function, over the footprint of every tile whose state changed in the turn.
+The audit's function is that function, so the audit becomes the gate of the code that
+replaces what it judged. The margin of 4.6 is computed from the same residency, a level at a
+time, so what the GPU reads is one function of the tiles: what is resident at each level,
+and then the margin. A tile mapped under a broken chain is then a tile wasted until its
+parent returns, and never a tile read.
+
+The lost tail is a fault of the queue and not of the byte. On the storm rail the pool is full
+on half of the turns, and from the first of them to the last the manager loads 7,917 tiles,
+gathers them into batches, finds no slot, and leaves them in no queue: as many as the pool
+holds. They are never mapped, each keeps its 64 KB, and what waits beneath them waits for
+good. Returning the tail to its queue is three lines; what it needs with it is a bound, so
+that nothing is loaded that no slot can take, and that bound is the new manager's.
 
 ### 4.8 Portals, and several eyes
 
@@ -1110,12 +1138,12 @@ Each step names the instrument that can see it fail, and what that instrument ca
 | step | what | gate | blind to |
 |---|---|---|---|
 | 0 | Probes in `--selftest`, no behaviour changed: the address bits the adapter reports; one heap tile mapped at two slices and at two mips, filled through one, read through both; WRAP sampling of a reserved slice under a residency clamp | bytes equal, per probe, and seen to fail on a planted wrong mapping | a driver that shares correctly only under load |
-| 1 | Instruments before changes: the residency audit (bytes against the mapped set); a line per shutdown phase, flushed; the residency lens; the pages ledger of the kept branch | the audit run on today's binary over a flight that paints: it reports finding 3 or clears it | the audit sees a wrong byte, not a wrong picture |
+| 1 | Instruments before changes: the residency audit (bytes against the mapped set); a line per shutdown phase, flushed; the residency lens; the pages ledger of the kept branch. Done: it reports finding 3, and finding 2, and two more | the audit run on today's binary over a flight that paints: it reports finding 3 or clears it | the audit sees a wrong byte, not a wrong picture |
 | 1a | The pixel water's two defects (findings 6 and 7), in the shader as it stands | a probe of the cast's landing point against doubles; stills and a rail, before and after, for the owner's eye | the look is his to judge, not a threshold's |
 | 2 | The floor law. The first, a 3 by 3 of cells read bilinear, measured unsound and was not staged; a margin per level is under test (4.6) | the GPU probe of 4.6: no sample holds any of a NULL tile's zero, under the engine's own samplers; then the storm rail A/B by eye and by SSIM | one adapter and one driver; a settled still cannot see a transition |
 | 3 | `Lattice` gains the face-plane window: ground metric, box, texel, tag, the plane rows. The address function in C++ and HLSL | `uv_precision.py` as a selftest; GPU readback of the address at random points | nothing downstream reads it yet |
 | 4 | The tree keyed `(face, rung, x, y)`, in four parts (below the table): 4a the tree made fit for depth, 4b its names completed, 4c the pyramid painted at the Merrimack, 4d the audit across lattices | below the table | picture quality: by eye, in the albedo lens |
-| 5 | **After step 6's standing blocks** (4.17). The residency manager that tracks the pyramid's tiles, with windows that activate, move and release. It replaces the code of findings 2 and 3 | step 1's audit, clean; slot audit; `[settle-exact]` hashes over global tiles and origins; the storm rail | whether the picture is right |
+| 5 | **After step 6's standing blocks** (4.17). The residency manager that tracks the pyramid's tiles, with windows that activate, move and release. It replaces the code of findings 2, 3, 63 and 64, and writes the map from the tiles (4.7) | step 1's audit, clean, over the flight that paints and over the storm rail; slot audit; `[settle-exact]` hashes over global tiles and origins; the storm rail | whether the picture is right |
 | 6 | **Before step 5, on standing aligned blocks** (4.17's five commits, the colour and the mask first): the address, the directory, rank 1. Then, with step 5 behind it, the porch and the phase on windows that move | stills and rail against the Mercator baseline by SSIM and by eye, floors stated; a lens that paints rank and window | bit identity is gone by construction: the lattice changed |
 | 7 | The height with the exposure, as one move, and with them the decision on the solver's bed (finding 48); the wave pages, whose solver is re-aligned to a face's plane; then the water surface as a tenant | `--water-probe` (drawn level against the level the hull reads), standing, per hull; `[kernel]` fingerprints; `--sea-verify` | |
 | 8 | A second place, then one in each face of the cube: harvested (Haulover and the Chesapeake's mouth are, 4.15), declared in a scene file, the boat put in. What names the Merrimack in code becomes keys of the scene (4.15's list). The politeness budget governs every fetch | `git diff --stat src shaders` is empty between the scene without the place and the scene with it; one ground point read back through two worlds: equal | data quality at the far place |
@@ -1190,8 +1218,32 @@ it exits 0. The branches named below are not committed.
   half of one percent (mean PNG bytes of the helm phase, 1,148,106 and 1,149,951 against
   1,142,368 and 1,147,231), and the residency's turn is quicker, 1.16 ms where it was 1.35 to
   1.42. That is what 2026-09-17 measured on the same code before it was committed.
-- **Step 1 is being made** on its own branch, `claude/residency-instruments`: the pages ledger
-  came with pull request 33.
+- **Step 1 is done**, uncommitted on `claude/residency-instruments`, on `35a9eb7`: 17 files,
+  +198 and -11, and four new ones, which are the audit, the shutdown trail and the lens's
+  shader. The pages ledger came with pull request 33. The audit is a pure function of the
+  tiles, compared with the bytes at the end of a turn. Its selftest plants seven faults
+  through the manager's own `UpdateResidencyByte` and catches each where it was planted.
+  With every instrument off, the six stills' settle and predict hashes equal `main`'s.
+- **What the audit saw on today's binary** (2026-09-29, the fetch budget at zero, every run
+  after the archives were set aside). Finding 3, on a flight that paints, which is the storm
+  rail under a swell direction never painted: 210 invalidations, 65 of them over a mapped
+  descendant, all in the exposure's z14 page; bytes coarser than the tiles on 782 of 1,350
+  turns, and 3,072 cells still two mips coarser at the last turn. Finding 2, on the storm
+  rail: from the first turn the pool is full, tiles Loaded and in no queue, 7,917 of them by
+  the end. The landing ledger, counted by itself, gives the same 7,917 in 179 turns; with
+  the audit off it gives 7,954 in 178, so the audit's own cost is not the cause. Finding 24:
+  no hole under bytes in flight, in any run. And two faults the review had not read,
+  findings 63 and 64, both leaving a byte finer than the tiles (4.7).
+- **Thirty boots** of the helm recipe, one at a time: every one exits 0, with the same 21
+  lines of the shutdown trail. The exit-255 race (finding 33) was not met. The trail names
+  the phase on the day it is.
+- **The lens** paints the page that answers by hue, the level the sampler is clamped to by
+  brightness, and the answering tile's outline. It reads what the pixel shader reads, which
+  is three of the five tenants. Its pictures are in the branch's `out\p4c`.
+- What step 1 did not see: the GPU's copy of the map; the order of work inside a frame
+  (finding 34); a fault made and mended within one turn; a wrong tile under a right byte.
+  Auditing every turn costs 30 ms a turn and changes what lands when: with it on, the
+  settled stills orphan about 3,000 tiles, and with it off 0 to 113.
 - **Step 4a is done**, uncommitted on `claude/pyramid-tree`: 17 files, +570 and -99, and a
   selftest of its own. Measured on a scratch tree of 25 levels: a leaf painted where nothing
   has been painted costs 16 writes where it cost 136, and the walk holds one stripe where it
