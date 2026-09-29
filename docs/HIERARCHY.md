@@ -874,10 +874,52 @@ some 20 KB, so 100,000 a month is about 2 GB, and a budget of 5 to 10 GB a day i
 Google gives without charge. The engine's cap for Google is therefore a count, 3,000 a day, which
 keeps a month inside the allowance whatever the day's quota permits; the 5 to 10 GB a day governs
 the open sources. The owner has since set the cap himself (section 5): 100,000 tiles a day and
-5 GB a day. Neither is code yet: today's budget is counted per run,
+5 GB a day. In `main` neither is code: the budget is counted per run,
 1,000 by default (`Options.h:62`, the scene's `streaming.tileBudget`), and no run knows what an
-earlier run of the same day fetched. A count kept beside the source's cache is owed before the
-first harvest. **The colour is a composite of its sources** (the owner, 2026-09-28), and for
+earlier run of the same day fetched.
+
+**The day's count is built** (2026-09-29, in a scratch tree on `71e3a33`, not committed; no
+request has been made with it). One file a UTC day beside the source's cache,
+`cache/google/day_<date>.json`, holds what was asked, the tiles that came and their bytes.
+
+- **It counts what is asked.** A request that fails is counted with one that lands, because
+  the cap is on what is asked of a paid source. A request may go only while the asked are
+  under `streaming.dayTiles` and the bytes under `streaming.dayBytes`. As first built it
+  counted the tiles that came, and a source that answered every request with an error would
+  have been asked on and on (finding 78).
+- **Every engine on the machine counts into the one file,** under one named lock that is
+  never held across the network. The count is read again under the lock before it is
+  written, so two engines lose nothing of each other's.
+- **It fails closed.** A ledger that cannot be read whole is the cap met and not a count of
+  zero. A lock that cannot be had refuses the request. A cap of zero is no request, not no
+  limit.
+- **A run stops asking after eight requests in a row land nothing.** The run's own budget is
+  asked before the ledger, so a run that may not fetch takes neither the lock nor the file:
+  every gate render is such a run.
+- **A body is whole or the request failed,** so a tile cut short is not kept (finding 79).
+- **What it does not promise:** a day can close over its cap by the requests in flight when
+  the cap is met, one a fetching thread at most, and the bytes by those tiles' sizes.
+
+Its test is in the selftest and opens no connection: the engine's own rule with a stand-in
+for the request and one for the clock. Three plants are caught: the count not read again
+under the lock loses a fetch; the first rule lets a sixth request go to a source that failed
+five; the old log line holds a made-up key but for one character (finding 77). Not run by
+anything: a real request; two engine processes at the lock; a body cut short, which needs a
+connection. The engine's lines for it: 590 added and 44 removed, beside 614 of test.
+
+**The finest zoom is the scene's.** The Google source held its zoom to 14 by a literal, and
+its own comment says why: a deeper zoom is a budget decision that a realization makes inside
+a window it owns, and the cube can never demand one. A block that a scene declares is such a
+window. At Haulover zoom 14 is 8.6 m a pixel, so a block of rank 3, 1.19 m a texel, would have
+been painted from zoom 14 enlarged. The literal becomes `streaming.googleZoom`, 14 unless a
+scene says otherwise and 19 at most, and the day's count is what bounds the tiles. A source's
+identity is its name and its structure. At 14 both are the strings they were, so no tree
+moves; at any other zoom the structure names it, so a scene that raises the zoom paints a
+tree of its own and writes nothing finer into a tree that says 14. Tested on the source
+alone, with the clamp left at 14 planted and caught; a scene that asks for 17 has painted
+nothing yet.
+
+**The colour is a composite of its sources** (the owner, 2026-09-28), and for
 now Google fills its base. NAIP and Sentinel-2 between them cover every place named so far at
 rank 2 and, in the United States, at rank 3 and beyond; they enter the same stack as inserts
 above the base, or as the base where a scene says so. No source is the floor by construction.
