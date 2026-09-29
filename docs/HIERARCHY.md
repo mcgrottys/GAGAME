@@ -360,13 +360,51 @@ needs, and a ramp that raises the clamp ahead of a frontier sends the wide footp
 coarse level across it. Today's law has the same fault where the hardware's own level decides,
 under footprints 256 to 512 texels long (finding 61).
 
-**Proposed in its place, and under test in the same probe: a margin per level.** A level may
-be read at a place only where the place stands at least M of THAT level's texels inside what
-is resident at that level, and the same holds at every coarser level; M is the sampler's
-anisotropy and two, ten for the engine's. It is one law at every level, its unit is the texel
-that is read, and with no anisotropy it is today's clamp. The byte is computed where the map is
-written, and the shader's read does not change. Nothing of it is staged until the probe reads
-zero for it.
+**In its place: a margin per level.** A level may be read at a place only where the place
+stands at least M of THAT level's texels inside what is resident at that level, and the same
+holds at every coarser level. It is one law at every level, and its unit is the texel that is
+read. The byte is computed where the map is written. Measured in the same probe, first at
+footprints whose length is a power of two and then at lengths between them, 2^(k + 0.5) and
+2^(k + 0.9): the points that touch a NULL tile under the anisotropic sampler, of 473,088 and
+of 811,008. Under the trilinear sampler every row is zero.
+
+| M, in texels of the level read | gather and max over the floor | bilinear over the floor's 3 by 3 |
+|---|---|---|
+| 2 | 77, not run | 5,471, not run |
+| 4 | 0, then 34 | 497, then 750 |
+| 6 | 0, 0 | 0, then 60 |
+| 8 | 0, 0 | 0, 0 |
+| 10 | 0, 0 | 0, 0 |
+| 12 | 0, 0 | 0, 0 |
+
+The lengths between the powers are what decide it, and the first run had none. A sample
+whose level is L + f reads levels L and L + 1 with its taps at the same places, so in the
+texels of L, the finer of the two, its long axis is 2^f times as long: the reach is
+(N / 2) 2^f texels, and one for the bilinear tap. Measured for a ratio of 8 at levels 6.00,
+6.25, 6.50, 6.75 and 6.90, in texels of mip 6: 4.0 to 4.4, 4.6 to 5.1, 5.4 to 5.9, 6.4 to 6.8
+and 7.0 to 7.4, each under its bound of 5.0, 5.8, 6.7, 7.7 and 8.5. As f goes to one the
+bound goes to N + 1. So **M is the sampler's anisotropy and two**: nine is the bound for the
+engine's sampler, and one texel is kept in hand. M = 8 reads zero at every fraction the probe
+has, and the probe has none above 0.9. The same bound holds where the hardware's own level
+decides, which is where today's law fails: at the lengths between the powers it lets a NULL
+tile into 3,635 samples.
+
+**The read is the bilinear one:** the floor's 3 by 3, read with plain filtering, one sample
+where today's clamp gathers four bytes and takes the largest. Its largest step between samples
+a sixteenth of a cell apart is 0.44 of a mip where the gather's is 7, which is what the floor
+was wanted for. Its cost in sharpness is known on random maps only: 0.43 of a mip in the mean
+beside today's clamp, and 0.26 where no face is dead. A gather over a 5 by 5 floor, the other
+law that read zero at the powers of two, costs 0.20 and 0.19 there and keeps the step of 7.
+On a flight the cost is not measured, and the rail decides. **The want is owed the same
+margin:** what a view reads at a level, grown by M of that level's texels, or the outer band
+of every level reads the level above it. That is at most one more ring of tiles at a
+level's frontier.
+
+What the probe cannot tell: another adapter or driver, or an anisotropy other than 8;
+fractions above 0.9; a frontier other than a cliff, where every level below the coarsest ends
+at once; footprints that cross it at angles other than 0, 45 and 90 degrees; the picture.
+The probe stays in the selftest, so an adapter whose taps reach farther fails the suite and
+says where.
 
 What stands of the first proposal: the construction is gated on the CPU with its plants caught
 (the floor without its neighbours across a face's edge falls short at 534,276 points, all
@@ -1181,7 +1219,7 @@ Each step names the instrument that can see it fail, and what that instrument ca
 | 0 | Probes in `--selftest`, no behaviour changed: the address bits the adapter reports; one heap tile mapped at two slices and at two mips, filled through one, read through both; WRAP sampling of a reserved slice under a residency clamp | bytes equal, per probe, and seen to fail on a planted wrong mapping | a driver that shares correctly only under load |
 | 1 | Instruments before changes: the residency audit (bytes against the mapped set); a line per shutdown phase, flushed; the residency lens; the pages ledger of the kept branch. Done: it reports finding 3, and finding 2, and two more | the audit run on today's binary over a flight that paints: it reports finding 3 or clears it | the audit sees a wrong byte, not a wrong picture |
 | 1a | The pixel water's two defects (findings 6 and 7), in the shader as it stands | a probe of the cast's landing point against doubles; stills and a rail, before and after, for the owner's eye | the look is his to judge, not a threshold's |
-| 2 | The floor law. The first, a 3 by 3 of cells read bilinear, measured unsound and was not staged; a margin per level is under test (4.6) | the GPU probe of 4.6: no sample holds any of a NULL tile's zero, under the engine's own samplers; then the storm rail A/B by eye and by SSIM | one adapter and one driver; a settled still cannot see a transition |
+| 2 | The floor law. The first, a 3 by 3 of cells read bilinear, measured unsound and was not staged. A margin per level, M = 10 texels of the level read, reads zero in the probe (4.6); it is staged next, read bilinear, with the want grown by the same margin | the GPU probe of 4.6: no sample holds any of a NULL tile's zero, under the engine's own samplers; then the storm rail A/B by eye and by SSIM | one adapter and one driver; a settled still cannot see a transition |
 | 3 | `Lattice` gains the face-plane window: ground metric, box, texel, tag, the plane rows. The address function in C++ and HLSL | `uv_precision.py` as a selftest; GPU readback of the address at random points | nothing downstream reads it yet |
 | 4 | The tree keyed `(face, rung, x, y)`, in four parts (below the table): 4a the tree made fit for depth, 4b its names completed, 4c the pyramid painted at the Merrimack, 4d the audit across lattices | below the table | picture quality: by eye, in the albedo lens |
 | 5 | **After step 6's standing blocks** (4.17). The residency manager that tracks the pyramid's tiles, with windows that activate, move and release. It replaces the code of findings 2, 3, 63 and 64, and writes the map from the tiles (4.7) | step 1's audit, clean, over the flight that paints and over the storm rail; slot audit; `[settle-exact]` hashes over global tiles and origins; the storm rail | whether the picture is right |
@@ -1250,7 +1288,9 @@ it exits 0. The branches named below are not committed.
   473,088 samples under the anisotropic sampler, where today's law lets it into 1,606; 4.6
   has the table, the reason, and the law proposed in its place. What the branch holds is the
   probe, the construction with its gates, and the GPU still reading the true map. Its six
-  stills' hashes equal `main`'s.
+  stills' hashes equal `main`'s. The law proposed in its place, a margin per level, reads
+  zero in the same probe from M = 8 up, and M = 6 fails it at footprints whose length lies
+  between two powers of two; the reach that decides it is measured (4.6). Not staged yet.
 - **Pull request 33's rail check, taken with step 2's baselines** (all four runs after the
   archives were set aside). Per frame, `e6acf22` against the merged code: in the flight the
   mean SSIM is 0.998 where two runs of one binary give 0.9993 to 0.9996; in the helm phase,
