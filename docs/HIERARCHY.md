@@ -952,6 +952,14 @@ poses.
   alone is sharp throughout. That is finding 3 seen in a picture: while tiles are painted
   and folded the map's bytes stand coarser than the tiles, and the settle judges the
   tiles. The manager of 4.19 computes the map from what is held, and has no such state.
+- **The gate's scene with blocks at both places,** seven of the eight rows, draws from the
+  cache as the gate did before: the want set of 18,189 tiles resident and exact, the
+  window and its corridor in it. Nothing was fetched for it: its window looks at open sea.
+  It would have asked 589 tiles, most of them at the Merrimack, where a scene that says
+  zoom 17 asks Google for what the cache holds to zoom 14.
+- **The day's count at the end of the test:** 798 requests, 798 tiles, 19,368,775 bytes,
+  of the 4,000 requests the test's scenes allow themselves and the 100,000 the owner
+  allows. 123 of them were the first run's doubled requests.
 
 **The colour is a composite of its sources** (the owner, 2026-09-28), and for
 now Google fills its base. NAIP and Sentinel-2 between them cover every place named so far at
