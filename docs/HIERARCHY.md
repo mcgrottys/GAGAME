@@ -409,6 +409,54 @@ that undone. A slope of one level a region is not the margin measured here: at m
 reach is two and a half regions, and at mip 0 a twenty-fifth of one. I did not find a margin
 stated in texels of the level read; that is two searches, not a survey.
 
+**Staged in the engine, 2026-09-29, and not kept in that form.** Through the manager's own
+map the law touches no NULL tile under either sampler, at footprints of every length the
+probe has. The audit is clean at every audited turn of a still and of the rail. Every
+tenant's hashes are the unstaged binary's at the six poses, and the kernels' fingerprints
+with them. Two things fail it.
+
+It is softer than the random maps said. The clamp it sets, less today's, as a mean over the
+frame's ground, measured with step 1's lens, which resolves whole mips:
+
+| pose | coarser by, mips | ground pixels a level coarser | pixels that differ, of 1,440,000 |
+|---|---|---|---|
+| helm | 0.002 | 0.2 % | 994 |
+| 7 km | 0.004 | 0.4 % | 3,306 |
+| bird | 0.054 | 5.4 % | 181,570 |
+| Droste | 0.078 | 6.3 % | 31,663 |
+| globe | 0.40 | 29.6 % | 94,367 |
+
+It is never finer than today's. At the globe the loss is plain in the picture. To give the
+sharpness back the want would have to grow by what the read reaches, two cells and the
+margin, and that doubles what a view wants: 13,939 tiles more on 14,935 at the helm. And
+the map's refresh costs 1.13 ms in the mean where it cost 0.13, 4.7 ms at the 95th turn in
+a hundred, 50 ms at the worst, though it recomputes only what a turn touched.
+
+Both have one cause: the margin is small and the map's cell is large. Ten texels of the
+level read are 0.078 of a tile at EVERY level, because a tile is 128 of its own level's
+texels. A cell is a tile of mip 0, and its byte can say only that the whole cell may read
+a level or may not. So at the finest level a band of ten texels costs a cell of 128, the
+bilinear read spreads that over two cells more, and at the coarse levels the margin is a
+window ten cells wide to search.
+
+**Proposed in its place: the same law, evaluated where it is exact.** At level L a point's
+place in its own tile is the fraction of `uv * tiles(L)`, and the level may be read unless
+the point stands within 0.078 of an edge or a corner across which the tile is absent. So the
+map carries, beside the byte it has, one byte a TILE at every level: which of the tile's
+eight neighbours are absent. That is a texture of 128 texels a side with a mip chain. The
+shader walks up from the byte's level, a load a level, and the clamp is
+
+    clamp(p) = max( byte, max over L of ( L + 1 - s(d_L) ) )
+    s(d) = smoothstep(m, 2 m, d),   m = M / 128
+
+with `d_L` the point's distance, in tiles of level L, to the nearest edge or corner whose
+tile is absent. It is continuous. It is never finer than the law, because where `d_L` is
+under m it is at least L + 1. It is coarser than the tiles only within 0.16 of a tile of
+where a level ends. A tile that is mapped or released writes eight bytes. And the want
+grows by the margin alone, a neighbour being wanted where a read stands within 0.078 of a
+tile's edge: some tiles in a hundred, not as many again. Nothing of it is built. The probe
+and the lens that judged the first form judge this one.
+
 What the probe cannot tell: another adapter or driver, or an anisotropy other than 8;
 fractions above 0.9; a frontier other than a cliff, where every level below the coarsest ends
 at once; footprints that cross it at angles other than 0, 45 and 90 degrees; the picture.
@@ -1038,8 +1086,10 @@ today's per-slice manager are right for it. It is the Mercator page's shape on t
 lattice. So the order of section 6 is interleaved: the shader's contract first, on standing
 blocks, where a picture tests the pyramid, the address and the directory; then the manager;
 then windows that move. Its price is that a place near a block's edge needs two blocks of a
-rank where a following window would need one: by arithmetic the Merrimack's mouth stands 2.3 km
-from the edge of its rung-9 block.
+rank where a following window would need one. Measured by the first commit's selftest: the
+Merrimack's mouth lies in block (166, 4) of rung 9 on face 5, 1.40 km from its west edge and
+1.76 km from its south edge, so a viewer there needs four blocks of that rung within 8 km.
+This section had said 2.3 km, by an arithmetic nobody had run.
 
 **What a moving window adds, and the code does not have:**
 
@@ -1133,6 +1183,43 @@ one pose:
 | 3 | the eye-relative point: the planes about the tangent origin, the undisplaced point | step 3's gate at the pixel stage |
 | 4 | the directory and rank 1, in C++ and in HLSL | the two equal on random ground through a readback |
 | 5 | the old path deleted, and the key | the key-on bytes reproduced; more lines removed than added |
+
+**Commits 1 and 2 are made and gated, 2026-09-29**, not committed, in a scratch tree that holds
+the six pieces of section 6 beneath them.
+
+- **Commit 1.** A block's binding: +1,394 and -31, of which the engine's are +331. Every
+  tenant's hashes are the unmodified binary's at the six poses; the helm and the globe are
+  the same picture bit for bit, and the others differ by no more than two unmodified runs
+  differ from each other, the bird within that spread and not under it.
+- **Commit 2.** One key, `streaming.faceWindows`, a list of points each with a rung: the
+  engine takes the block of that rung that holds the point and says which. +306 and -17.
+  With the key empty the hashes are the old binary's at the six poses. With it set, the
+  height's, the exposure's and the wave's hashes are equal across the two arms, and the
+  picture against the Mercator windows:
+
+  | pose | SSIM | pixels that differ | floor, key off and key on |
+  |---|---|---|---|
+  | helm | 0.9957 | 6,784 | 0 and 0 |
+  | helm at the ebb | 0.9968 | 4,424 | 411 and 255 |
+  | bird | 0.9693 | 259,623 | 0 and 0 |
+  | 7 km | 0.9890 | 28,446 | 0 and 0 |
+
+- **The two lattices hold the same ground.** Read from the trees' own files, each texel of a
+  pyramid tile against the Mercator pixel that holds its centre, the colour's means agree to
+  0.01 of a step of 255 at rung 9 over 466 tiles, to 0.15 at rungs 8 and 7, to 0.3 at rung 6,
+  with the contrast inside a tile equal to a part in a hundred; the mask's agree to 0.02. So
+  the pyramid is painted right, and the pictures' difference is not in what the tiles hold.
+- **It is in the fine detail.** Smoothed over nineteen pixels the two arms have one tone.
+  The detail at the scale of a pixel is less with the key set: 0.80 of the Mercator arm's at
+  the bird, 0.99 at the helm, 0.98 at 7 km. Suspected, and what commit 3 tests: the address
+  is taken from a direction in float32, 0.43 of a texel wrong at rung 9 by the harness, and
+  the sampler takes its footprint from the difference of neighbouring addresses.
+- **What the key-on runs painted:** 22,814 files and 1.09 GiB in nine trees, from the source
+  caches, the fetch budget at zero. They refused 35 source tiles a run at the helm and 16 at
+  the bird. A tile painted while a source was refused is not kept: the paint answers that
+  it is not complete and the tree stores nothing (`TileTree.h`, read).
+- **Owed by commit 2:** its rows hold four blocks, and the mouth stands by a corner of its
+  block, so one fine block of the four a viewer there needs is not declared.
 
 ### 4.18 The apron: a window past its face's edge
 
@@ -1339,7 +1426,7 @@ Each step names the instrument that can see it fail, and what that instrument ca
 | 0 | Probes in `--selftest`, no behaviour changed: the address bits the adapter reports; one heap tile mapped at two slices and at two mips, filled through one, read through both; WRAP sampling of a reserved slice under a residency clamp | bytes equal, per probe, and seen to fail on a planted wrong mapping | a driver that shares correctly only under load |
 | 1 | Instruments before changes: the residency audit (bytes against the mapped set); a line per shutdown phase, flushed; the residency lens; the pages ledger of the kept branch. Done: it reports finding 3, and finding 2, and two more | the audit run on today's binary over a flight that paints: it reports finding 3 or clears it | the audit sees a wrong byte, not a wrong picture |
 | 1a | The pixel water's two defects (findings 6 and 7), in the shader as it stands | a probe of the cast's landing point against doubles; stills and a rail, before and after, for the owner's eye | the look is his to judge, not a threshold's |
-| 2 | The floor law. The first, a 3 by 3 of cells read bilinear, measured unsound and was not staged. A margin per level, M = 10 texels of the level read, reads zero in the probe (4.6); it is staged next, read bilinear, with the want grown by the same margin | the GPU probe of 4.6: no sample holds any of a NULL tile's zero, under the engine's own samplers; then the storm rail A/B by eye and by SSIM | one adapter and one driver; a settled still cannot see a transition |
+| 2 | The floor law. The first, a 3 by 3 of cells read bilinear, measured unsound and was not staged. A margin per level, M = 10 texels of the level read, reads zero in the probe and in the engine (4.6). Staged by the cell and read bilinear it is sound, softer than it need be and slow to refresh, and is not kept; the same law evaluated by the tile at each level is next | the GPU probe of 4.6: no sample holds any of a NULL tile's zero, under the engine's own samplers; then the storm rail A/B by eye and by SSIM | one adapter and one driver; a settled still cannot see a transition |
 | 3 | `Lattice` gains the face-plane window: ground metric, box, texel, tag, the plane rows. The address function in C++ and HLSL | `uv_precision.py` as a selftest; GPU readback of the address at random points | nothing downstream reads it yet |
 | 4 | The tree keyed `(face, rung, x, y)`, in four parts (below the table): 4a the tree made fit for depth, 4b its names completed, 4c the pyramid painted at the Merrimack, 4d the audit across lattices | below the table | picture quality: by eye, in the albedo lens |
 | 5 | **After step 6's standing blocks** (4.17). The residency manager that tracks the pyramid's tiles, with windows that activate, move and release. Its laws are 4.19's: one order, the held set its first P, the map a function of what is held. It replaces the code of findings 2, 3, 24, 34, 63, 64 and 66 | 4.19's: step 1's audit, clean, over the flight that paints and over the storm rail; no tile read and never mapped; slot audit; `[settle-exact]` hashes over global tiles and origins; the storm rail | whether the picture is right |
