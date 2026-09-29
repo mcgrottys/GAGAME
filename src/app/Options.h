@@ -31,7 +31,8 @@ struct Options {
     bool trace = false;               // --trace lat,lon: the hypervisor walk (M7j)
     uint32_t pixFrames = 0;           // --pix N: programmatic .wpix capture of N frames
     bool dumpFibers = false;          // --dump-fibers: bank planes as PNGs + range gate
-    int lens = 0;                     // --lens worldxz|winuv|mip|ring: value-as-color
+    int lens = 0;                     // --lens worldxz|winuv|mip|ring: value-as-color; 9..11 the
+                                      // residency lens of earth.color / earth.height / gis.landsea
     bool probeCullFar = false;        // step 23 probe: cull beyond the horizon at every altitude
     std::wstring dumpMeshlets;        // step 23 probe: the dump frame's meshlet records
     bool dumpWater = false;           // --dump-water-state: inlet fields for proofs/
@@ -89,9 +90,14 @@ struct Options {
                                       // (depth read back) against each hull's own water (WaterProbe)
     uint32_t pagesEvery = 0;          // --pages-trace N: every Nth residency turn, each tenant split
                                       // by the lattices its slices sit on (Residency.h pagesEvery)
+    uint32_t resAudit = 0;            // --res-audit N: the scene's capture.residencyAudit -- every
+                                      // Nth turn, the residency bytes against the mapped set
+                                      // (hal/ResidencyAudit.h)
     uint32_t treeAudit = 0;           // --tree-audit N: compare N tiles/frame, report, exit
     bool warmTrees = false;           // --warm-trees: build them without comparing, then exit
     bool packTrees = false;           // --pack-trees: one archive per node per frame, then exit
+    bool treePrune = false;           // --tree-prune: list the trees' tag folders by last use,
+                                      // exit; retire and purge are prune.mode + prune.confirm
     bool bench = false;               // --bench: fly the rail, capture nothing, time honestly
     bool benchOverlap = false;        // --bench-overlap: --bench WITHOUT the per-frame WaitIdle --
                                       // the loop mean is then the shipped max(CPU, GPU) pipeline

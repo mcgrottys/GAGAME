@@ -276,7 +276,11 @@ const Schema& StreamingSchema() {
             .Bind("gisGate", p.gisGate, "the vector land/sea gate on the bed (--no-gis-gate)", R)
             .Bind("seafloor", p.seafloor, "the global seafloor relief source (--no-seafloor)", R)
             .Bind("exposure", p.exposure, "the swell-exposure page (--no-exposure)", R)
-            .Bind("ringLoads", p.ringLoads, "the ring gate (--no-ring-loads)", R);
+            .Bind("ringLoads", p.ringLoads, "the ring gate (--no-ring-loads)", R)
+            .Bind("treeRoot", p.treeRoot,
+                  "the folder the tile trees live in; a scratch folder keeps a tool's paints and "
+                  "packs out of the real cache",
+                  R);
         return sc;
     }();
     return *s;
@@ -306,7 +310,10 @@ const Schema& CaptureSchema() {
             .BindPath("hdr", p.hdr, "the RGBA16F radiance before the tonemap (--dump-hdr)", R)
             .BindPath("mp4", p.mp4, "pipe rail frames to an encoder (--mp4)", R)
             .BindPath("railDir", p.railDir, "the rail's PNG directory (--rail*)", R)
-            .Nest("settle", SettleSchema(), &p.settle, "the still's hold");
+            .Nest("settle", SettleSchema(), &p.settle, "the still's hold")
+            .Bind("residencyAudit", p.residencyAudit, Q::Dimensionless, "frames",
+                  "the residency audit every N turns: each page tenant's residency bytes against "
+                  "the tiles mapped and landed, and the invalidations applied (--res-audit; 0 = off)", R);
         return sc;
     }();
     return *s;
@@ -553,6 +560,26 @@ const Schema& ToolSchema() {
     return *s;
 }
 
+const Schema& PruneSchema() {
+    static const Schema* s = [] {
+        auto& p = kDoc.prune;
+        Schema* sc = new Schema("prune", &p);
+        sc->BindEnum("mode", p.mode, {"list", "retire", "purge"},
+                     "the tree-prune tool: list changes nothing; retire moves stale tag folders "
+                     "into <root>\\.retired\\<UTC stamp>; purge deletes retired batches", R)
+            .BindPath("root", p.root, "the trees folder (\"\" = cache\\trees)", R)
+            .Bind("ageDays", p.ageDays, Q::Time, "day",
+                  "a stamp older than this is STALE; an unstamped folder gets twice it", R)
+            .Bind("purgeDays", p.purgeDays, Q::Time, "day",
+                  "purge deletes the retired batches older than this", R)
+            .BindPath("confirm", p.confirm,
+                      "retire and purge act only when this is the root's full path as the "
+                      "listing printed it", R);
+        return sc;
+    }();
+    return *s;
+}
+
 }  // namespace
 
 const Schema& ViewSchema() { return ViewSchema_(); }
@@ -586,6 +613,7 @@ const Schema& SceneFileSchema() {
             .List("effects", &EffectSchema(), "the paper visuals, by name, typed", true, "effect", "type")
             .List("layers", &LayerEntrySchema(), "the layers in registration order, typed by name", true, "layer", "name")
             .List("nodes", &NodeSchema_(), "typed nodes (plugins)", true, "component", "type")
+            .Nest("prune", PruneSchema(), &kDoc.prune, "the tree-prune tool's keys")
             .List("tools", &ToolSchema(), "the one-shot modes this scene runs");
         return sc;
     }();

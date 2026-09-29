@@ -19,6 +19,7 @@
     { "key": "effects", "kind": "list", "node": "effect", "doc": "the paper visuals (scene/Effect.h), by name, typed by EffectSchemas" },
     { "key": "layers", "kind": "list", "node": "layer", "doc": "the layers in registration (draw) order, typed by name" },
     { "key": "nodes", "kind": "list", "node": "component", "doc": "typed nodes (scene/Component.h), by name, typed by ComponentSchemas" },
+    { "key": "prune", "kind": "object", "node": "tool", "doc": "the tree-prune tool's keys (compose/TreePrune.h): list, or retire and purge on confirm" },
     { "key": "tools", "kind": "list", "node": "tool", "doc": "the one-shot modes this scene runs (--tool)" }
   ],
   "placement": [
@@ -48,6 +49,7 @@
       { "key": "effects", "type": "list", "field": "none", "element": "effect", "named": true, "registry": "effect", "typeKey": "type", "reload": "hot", "doc": "the paper visuals, by name, typed" },
       { "key": "layers", "type": "list", "field": "none", "element": "layer", "named": true, "registry": "layer", "typeKey": "name", "reload": "hot", "doc": "the layers in registration order, typed by name" },
       { "key": "nodes", "type": "list", "field": "none", "element": "node", "named": true, "registry": "component", "typeKey": "type", "reload": "hot", "doc": "typed nodes (plugins)" },
+      { "key": "prune", "type": "object", "field": "none", "schema": "prune", "reload": "hot", "doc": "the tree-prune tool's keys" },
       { "key": "tools", "type": "list", "field": "none", "element": "tool", "named": true, "reload": "hot", "doc": "the one-shot modes this scene runs" }
     ] },
     { "type": "scene", "keys": [
@@ -177,7 +179,8 @@
       { "key": "gisGate", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the vector land/sea gate on the bed (--no-gis-gate)" },
       { "key": "seafloor", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the global seafloor relief source (--no-seafloor)" },
       { "key": "exposure", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the swell-exposure page (--no-exposure)" },
-      { "key": "ringLoads", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the ring gate (--no-ring-loads)" }
+      { "key": "ringLoads", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the ring gate (--no-ring-loads)" },
+      { "key": "treeRoot", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "cache/trees", "reload": "restart", "doc": "the folder the tile trees live in; a scratch folder keeps a tool's paints and packs out of the real cache" }
     ] },
     { "type": "capture", "keys": [
       { "key": "headless", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "no window (--headless)" },
@@ -188,7 +191,8 @@
       { "key": "hdr", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the RGBA16F radiance before the tonemap (--dump-hdr)" },
       { "key": "mp4", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "pipe rail frames to an encoder (--mp4)" },
       { "key": "railDir", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the rail's PNG directory (--rail*)" },
-      { "key": "settle", "type": "object", "field": "none", "schema": "capture.settle", "reload": "hot", "doc": "the still's hold" }
+      { "key": "settle", "type": "object", "field": "none", "schema": "capture.settle", "reload": "hot", "doc": "the still's hold" },
+      { "key": "residencyAudit", "type": "number", "field": "u32", "quantity": "1", "unit": "frames", "default": 0, "reload": "restart", "doc": "the residency audit every N turns: each page tenant's residency bytes against the tiles mapped and landed, and the invalidations applied (--res-audit; 0 = off)" }
     ] },
     { "type": "capture.settle", "keys": [
       { "key": "sync", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "hold the dump instant until the residency queues drain (--settle-sync)" },
@@ -297,6 +301,13 @@
       { "key": "enabled", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "hot", "doc": "walked and drawn" },
       { "key": "at", "type": "similarity", "field": "placement", "quantity": "unknown", "unit": "", "default": null, "optional": true, "reload": "hot", "doc": "its placement in the parent (any spelling); absent = identity" },
       { "key": "children", "type": "list", "field": "none", "element": "node", "named": true, "registry": "component", "typeKey": "type", "reload": "hot", "doc": "child nodes, in file order" }
+    ] },
+    { "type": "prune", "keys": [
+      { "key": "mode", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "list", "names": ["list", "retire", "purge"], "reload": "restart", "doc": "the tree-prune tool: list changes nothing; retire moves stale tag folders into <root>\\.retired\\<UTC stamp>; purge deletes retired batches" },
+      { "key": "root", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the trees folder (\"\" = cache\\trees)" },
+      { "key": "ageDays", "type": "number", "field": "f64", "quantity": "time", "unit": "day", "default": 30, "reload": "restart", "doc": "a stamp older than this is STALE; an unstamped folder gets twice it" },
+      { "key": "purgeDays", "type": "number", "field": "f64", "quantity": "time", "unit": "day", "default": 7, "reload": "restart", "doc": "purge deletes the retired batches older than this" },
+      { "key": "confirm", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "retire and purge act only when this is the root's full path as the listing printed it" }
     ] },
     { "type": "tool", "keys": [
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the one-shot mode (--tool name[:args])" },

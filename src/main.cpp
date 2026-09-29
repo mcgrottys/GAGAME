@@ -15,6 +15,7 @@
 // ================================================================================================
 #include "core/BuildInfo.h"
 #include "core/CrashTrace.h"
+#include "core/ExitTrail.h"
 #include "core/ThreadAudit.h"
 #include "core/ThreadManager.h"
 #include "app/Assembly.h"
@@ -23,6 +24,7 @@
 #include "app/Scene.h"
 #include "app/Tools.h"
 #include "compose/SurfaceFrame.h"
+#include "compose/TileTree.h"
 #include "scene/SceneBuilder.h"
 #include "sim/GlobeModel.h"
 
@@ -79,6 +81,9 @@ int main(int argc, char** argv) {
             return 2;
         }
         S.path = sargs.scene;
+        // Every tree folder this run ensures is stamped with the scene that used it
+        // (compose/TileTree.h, StampLive): named here, before anything can build a tree.
+        tree_detail::SetLiveScene(S.scene.name, S.path);
         {
             std::string order;
             for (const std::string& n : S.LayerOrder()) order += (order.empty() ? "" : " ") + n;
@@ -101,6 +106,9 @@ int main(int argc, char** argv) {
         if (S.Tool("pack-tiles")) {
             return tools::RunPackTiles(topt, SurfaceFrame::Merrimack(GlobeModel::kR, false));
         }
+        // The prune tool: the tile trees' folders by last use, before any device and before any
+        // tree exists -- it builds none, so it stamps none. Its keys are the scene's prune.*.
+        if (S.Tool("tree-prune")) return tools::RunTreePrune(S.prune);
 
         // ---- M0 + M4: the self-test path needs a device and the shader compiler, nothing else.
         if (!topt.loadField.empty()) return tools::RunLoadField(topt);
@@ -117,7 +125,16 @@ int main(int argc, char** argv) {
         // declared AFTER the Assembly so it destructs first, as the session locals did before
         // the assembly locals. Run() is main()'s remaining span: Session(), the loop, Finish().
         auto loop = std::make_unique<FrameLoop>(topt, S, *A);
-        return loop->Run();
+        const int rc = loop->Run();
+        // THE SHUTDOWN TRAIL (core/ExitTrail.h): the frame loop and then the assembly, the order
+        // their scope always ended them in, each teardown marked from inside by its members.
+        ExitStep("main: the frame loop destructs");
+        loop.reset();
+        ExitStep("main: the assembly destructs");
+        A.reset();
+        Log("[exit] main returns %d; what follows is the C runtime's own teardown (the static "
+            "job pool, the log)", rc);
+        return rc;
     } catch (const std::exception& e) {
         Log("FATAL: %s", e.what());
         return 1;

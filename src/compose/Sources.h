@@ -35,6 +35,7 @@ public:
                    double groundResM, PaintCtx& ctx) override;
     float Sample(double latRad, double lonRad, double groundResM, const PaintCtx& ctx,
                  uint8_t rgba[4]) override;
+    bool Refusals(uint32_t& refused) const override;
 
 private:
     bool Pixel(int z, double latRad, double lonRad, uint8_t rgb[3]);

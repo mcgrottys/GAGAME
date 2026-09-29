@@ -685,6 +685,18 @@ bool GlobeLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
         hal::Reload(m_psoMeshlet, [&] { return hal::BuildGraphicsRaw(gpu, d, "globe.meshlet"); },
                     "globe.meshlet");
     }
+    // The residency lens, compiled only when it is asked for: a run without it compiles and
+    // draws exactly what it did before the lens existed.
+    if (ResidencyLensOn()) {
+        ShaderBlob psL =
+            sc.Compile(m_shaderDir + L"/ResidencyLens.hlsl", L"PsResidencyLens", L"ps_6_0");
+        if (psL.Valid()) {
+            d.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+            d.PS = {psL.Data(), psL.Size()};
+            hal::Reload(m_psoLens, [&] { return hal::BuildGraphicsRaw(gpu, d, "globe.lens"); },
+                        "globe.lens");
+        }
+    }
     return true;
 }
 
@@ -755,6 +767,21 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
             m_msPsoMeshlet = psoM;
         } else {
             Log("[globe] mesh MESHLET-TINT PSO creation failed (solid path unaffected)");
+        }
+    }
+    // ...and the residency lens (shaders/ResidencyLens.hlsl), only when it is asked for.
+    if (ResidencyLensOn()) {
+        ShaderBlob psL =
+            sc.Compile(m_shaderDir + L"/ResidencyLens.hlsl", L"PsResidencyLens", L"ps_6_5");
+        if (psL.Valid()) {
+            d.fill = D3D12_FILL_MODE_SOLID;
+            d.ps = psL;
+            hal::Pso psoL = hal::BuildMesh(gpu, d, "globe.mesh.lens");
+            if (psoL) {
+                m_msPsoLens = psoL;
+            } else {
+                Log("[globe] mesh RESIDENCY-LENS PSO creation failed (solid path unaffected)");
+            }
         }
     }
     return true;
@@ -2167,15 +2194,45 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
             for (int i = 0; i < 16; ++i) m_cb.gateBox[k * 16 + i] = 0.0f;
         }
     }
-    // M13 step 2: the cascade sea's plane at the eye, for the pixel stage's sub-ring bands.
-    for (int i = 0; i < 3; ++i) {
-        m_cb.chartOrg[i] = static_cast<float>(m_chartFrame.org[i]);
-        m_cb.chartE[i] = static_cast<float>(m_chartFrame.e[i]);
-        m_cb.chartN[i] = static_cast<float>(m_chartFrame.n[i]);
+    // M13 step 2: the cascade sea's plane at the eye, for the pixel stage's sub-ring bands --
+    // SAID IN THE TANGENT FRAME, in doubles (REVIEW finding 7). The chart's law is
+    // u = (P - org) . e + off with every term in the planet frame (sim/WaveChart.h), and the pixel
+    // stage holds its points in the tangent frame. These rows used to be copied across unchanged,
+    // so the ripples were read with axes turned about 19 degrees and one of them squashed to 0.68
+    // -- in a plane unrelated to the one the bank filled its texels by. So the chart's axes are
+    // turned into the tangent frame with the surface's own rows (east, up, north: the
+    // planet-to-tangent rows CsToTangent applies), and the constants are taken about the tangent
+    // point A = R up, with R the radius the pixel's point is measured with (gGlo.x):
+    //     Ce = (A - org) . e + off[0],   Cn = (A - org) . n + off[1]
+    // The pixel then needs only its point less A (Globe.hlsl ChartUOf). Each constant is wrapped
+    // to every cascade's patch -- the lengths the shader divides by (gBankB) -- before the cast:
+    // the patches are periodic, and a constant of 1e5 m has a float grain of 8 mm.
+    {
+        const WaveChart::Frame& f = m_chartFrame;
+        const double* rows[3] = {m_surface->east, m_surface->up, m_surface->north};
+        auto dot3 = [](const double* a, const double* b) {
+            return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        };
+        double fromOrg[3];   // A - org, planet frame
+        for (int i = 0; i < 3; ++i) fromOrg[i] = m_radius * m_surface->up[i] - f.org[i];
+        const double ce = dot3(fromOrg, f.e) + f.off[0];
+        const double cn = dot3(fromOrg, f.n) + f.off[1];
+        // Into [0, L), as WaterBankLayer wraps the kernel's own rows.
+        auto wrapped = [&](double c, int k) {
+            const double L = (m_bankPatch[k] > 1.0f) ? double(m_bankPatch[k]) : 1.0;
+            return static_cast<float>(c - std::floor(c / L) * L);
+        };
+        for (int i = 0; i < 3; ++i) {
+            m_cb.chartOrg[i] = wrapped(ce, i);
+            m_cb.chartE[i] = static_cast<float>(dot3(rows[i], f.e));
+            m_cb.chartN[i] = static_cast<float>(dot3(rows[i], f.n));
+        }
+        m_cb.chartOrg[3] = m_chartOn ? 1.0f : 0.0f;
+        m_cb.chartE[3] = wrapped(cn, 0);
+        m_cb.chartN[3] = wrapped(cn, 1);
+        m_cb.chartCn[0] = wrapped(cn, 2);
+        m_cb.chartCn[1] = m_cb.chartCn[2] = m_cb.chartCn[3] = 0.0f;
     }
-    m_cb.chartOrg[3] = m_chartOn ? 1.0f : 0.0f;
-    m_cb.chartE[3] = static_cast<float>(m_chartFrame.off[0]);
-    m_cb.chartN[3] = static_cast<float>(m_chartFrame.off[1]);
     m_cb.drosteA[0] = static_cast<float>(1 + m_levels.size());
     m_cb.drosteA[1] = static_cast<float>(m_camLevelAbs);
     m_cb.drosteA[2] = static_cast<float>(m_lighting);
@@ -2306,6 +2363,7 @@ void GlobeLayer::Render(const FrameContext& ctx) {
         if (surfaceDebug == 1 && m_msPsoWire) msSel = m_msPsoWire.Get();
         else if (surfaceDebug == 2 && m_msPsoMeshlet) msSel = m_msPsoMeshlet.Get();
         else if (surfaceDebug == 3 && m_msPsoWireFlat) msSel = m_msPsoWireFlat.Get();
+        else if (ResidencyLensOn() && m_msPsoLens) msSel = m_msPsoLens.Get();
         ctx.cmd->Pipeline(msSel);
         ctx.cmd->GraphicsConstantsAt(1, cbVa);
         ctx.cmd->GraphicsSrvAt(2, rec.res->GetGPUVirtualAddress());
@@ -2334,6 +2392,7 @@ void GlobeLayer::Render(const FrameContext& ctx) {
     hal::PsoPtr sel = m_pso.Get();
     if (surfaceDebug == 1 && m_psoWire) sel = m_psoWire.Get();
     else if (surfaceDebug == 2 && m_psoMeshlet) sel = m_psoMeshlet.Get();
+    else if (ResidencyLensOn() && m_psoLens) sel = m_psoLens.Get();
     ctx.cmd->Pipeline(sel);
     ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx.cmd->GraphicsConstantsAt(1, cbVa);

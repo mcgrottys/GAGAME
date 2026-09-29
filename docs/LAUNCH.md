@@ -142,20 +142,25 @@ build\bin\gagame.exe scenes\recipes\storm_rail.json --set capture.frames=1200 --
   marked `restart` in `docs/scene_schema.json` is reported and not applied, a removed key returns to
   its default, and an unknown key refuses the whole reload with its path.
 - **Tools** are one-shot modes by name: `--tool selftest`, `--tool pack-tiles`, `--tool ocean-probe`,
-  ... (`docs/registries.json` lists all twenty); the legacy flags still reach the same tool.
+  ... (`docs/registries.json` lists all twenty-one); the legacy flags still reach the same tool.
+  `tree-prune` is the one whose settings are scene keys, `prune.*` (`launch-data`).
 - **Instruments stay flags** and are never scene data: `--pix`, `--gpu-time`, `--bench`,
   `--no-vsync`, `--res-trace`, `--lens`, `--stencil`, `--albedo`, `--viz`, the `--dump-*` probes.
+  The one exception is the residency audit, which a scene may carry: `capture.residencyAudit`
+  (its flag, `--res-audit N`, writes that key).
 - **For tools that write scenes:** `docs/scene_schema.json` (every key's type, quantity, unit,
   default, doc and hot|restart) and `docs/registries.json` (every nameable thing and its properties)
   are rewritten at each boot from the engine's own tables.
 
 ## launch-verify — The verification loop (run before believing anything)
 
-- `--selftest` (or `--tool selftest`) — the fifteen gates, in run order: pga, dxtest (CB parity,
+- `--selftest` (or `--tool selftest`) — the sixteen gates, in run order: pga, dxtest (CB parity,
   the sampler law, the mesh stage, the view list's scene constants), cga, droste, gatest (GA
   products + fold + frames + AST validation), space (the frame calculus), composetest,
   watertest, tiletest, atlastest, threadtest, simclock, rigid, vessel, scene (properties, the
-  fold, views, water, rails, entities, portals, effects, reload). All must PASS.
+  fold, views, water, rails, entities, portals, effects, reload), prunetest (the tree-prune tool's
+  refusals, each planted and caught on a scratch root it makes under `out\prunetest` and removes
+  when every check passed). All must PASS.
 - `--trace lat,lon` — THE HYPERVISOR: one sample walked through the whole one-water chain
   on the CPU, every transformation printed with its AST edge and frame. First tool when
   the water surprises you; validate against NOAA with the printed station numbers.
@@ -203,6 +208,28 @@ build\bin\gagame.exe scenes\recipes\storm_rail.json --set capture.frames=1200 --
 - `--lens waterdata|bed|level|current|ring|cascade` — data-as-color debug views (flat,
   unlit; compare waterdata 1:1 with the proof figure). `--inject 1|2` — synthetic pattern
   cards for alignment forensics.
+- `--lens residency|residency.height|residency.landsea` — THE RESIDENCY LENS: instead of the
+  picture, what the sampler is allowed to read for earth.color, earth.height or gis.landsea. Hue
+  is the page that answers (violet the cube, green the z14 window, red the z17 detail), chosen as
+  the shaders choose it; brightness is that page's residency floor, the min-LOD its sample is
+  clamped by (mip 0 brightest, a ninth darker per mip); magenta = the page holds nothing; dark
+  grey = no survey page has an opinion (landsea); a black outline marks the answering tile at its
+  floor mip wherever a tile spans 5 to 500 pixels. The swatches at the bottom left are its own key
+  (rows cube, z14, z17 upward; columns mip 0..7; then magenta and grey), so a PNG can be read
+  back against its own colours.
+- `--res-audit N` (the scene's `capture.residencyAudit`) — every Nth residency turn, at the turn's
+  end, every page tenant's residency bytes against the tiles MAPPED AND LANDED
+  (`hal/ResidencyAudit.h`): `[res-audit] ... clean` in one line, or the counts of bytes FINER than
+  what is resident (a sampler sent into a NULL tile), COARSER (a softer picture than the memory
+  holds: review finding 3), HOLES (a mip mapped under a missing one), split cells and ORPHANS
+  (tracked tiles no queue will ever map: finding 2), with the new offenders named. Every applied
+  invalidation is counted, and one that drops a mapped tile over a mapped descendant is logged
+  (`INVALIDATE`) and watched until the tile is mapped again (`REMAPPED`, with the byte over the
+  descendant). At exit it prints what each tree painted and folded. `--selftest` runs it on
+  constructed tenants through the manager's own byte rule, with planted failures.
+- The shutdown trail: every run logs `[exit] <phase>` before each phase of its teardown (Finish,
+  the frame loop's and the assembly's destructors, main's return), flushed, so a run that dies
+  in teardown names the phase it died in.
 - `--water-map f.png` / `--bathy-map f.png` — georeferenced charts with coastline.
 - `--ocean-probe lat,lon` — WeatherManager rungs + provenance at a point.
 - `--albedo` — raw composed color lens; `--stencil` — GIS alignment overlay.
@@ -247,6 +274,32 @@ Large static datasets live in `D:\DataCache\GAGAME\` (300 GB granted 2026-08-31,
 texture / GIS / topology / bathymetry / weather). `data/` holds the
 repo-sized realizations; the composed cache lives beside it and repaints exactly what a
 program edit touches (the soak rule — deleting it only costs a repaint).
+
+**The tile trees, pruned (`--tree-prune`, `compose/TreePrune.h`).** `cache\trees` is derived data,
+and every new source or painting code makes a new tree identity while the old folder stays. Every
+run STAMPS each tag folder it uses (`<node>.<id>\<tag>\.live`: UTC time, rev, scene), and the tool
+judges each tag folder by it: KEEP / STALE (stamped within / past `prune.ageDays`, default 30), and
+for a folder no stamping binary has used, KEEP-UNSTAMPED / STALE-UNSTAMPED by its newest write at
+twice the age. A tag folder travels with its archives beside it, `<tag>.gaa` and `<tag>.gaa.stale`.
+
+```bat
+build\bin\gagame.exe --tree-prune                                   (list: changes nothing)
+build\bin\gagame.exe --tree-prune --set prune.ageDays=14            (list at another age)
+build\bin\gagame.exe --tree-prune --set prune.mode=retire --set prune.confirm=<the root it printed>
+build\bin\gagame.exe --tree-prune --set prune.mode=purge --set prune.confirm=<the root it printed>
+```
+
+`retire` moves every STALE and STALE-UNSTAMPED tag folder, whole, into
+`cache\trees\.retired\<UTC stamp>\<node>.<id>\<tag>` by renames on one volume, deletes nothing, and
+writes `manifest.json` there with a PowerShell undo line for every part; `purge` deletes the retired
+batches older than `prune.purgeDays` (default 7), and only those holding the manifest retire wrote.
+Both list first and act only when `prune.confirm`
+is the root's full path exactly as the listing printed it (junctions resolved: from a worktree,
+`cache\trees` prints the main checkout's), refuse while any other `gagame*.exe` runs, never follow a
+junction, and stop at the first move or delete that fails. `prune.root` may name only a
+`...\cache\trees` or a `trees` folder inside the worktree's own `out\`. A binary built before the
+stamp reads trees without stamping them, so until every branch that runs carries it, read the
+listing before retiring.
 
 ## launch-secrets — Keys and attribution
 

@@ -3,11 +3,14 @@
 #include "app/Tools.h"
 
 #include "compose/Compositor.h"
+#include "compose/TreePrune.h"
+#include "compose/TileTree.h"
 #include "compose/WaterAtlas.h"
 #include "hal/DxTest.h"
 #include "core/GaAst.h"
 #include "core/Lattice.h"
 #include "hal/Gpu.h"
+#include "hal/ResidencyAudit.h"
 #include "core/Pga.h"
 #include "hal/Shader.h"
 #include "core/Space.h"
@@ -41,13 +44,19 @@ int RunSelfTest(const Options& opt) {
                                     // partition, the variance-preserving blend, the metric
     ok &= RunTileSelfTest(gpu, sc, opt.shaderDir);
     ok &= RunAtlasSelfTest(gpu, sc, opt.shaderDir);
+    ok &= RunResidencyAuditSelfTest();   // the residency bytes against the mapped set, on
+                                         // constructed tenants through the real byte rule
     ok &= RunThreadSelfTest();    // the thread instrument's own gate: it must SEE a race
+    ok &= RunTileTreeSelfTest();  // HIERARCHY 4a: the tree fit for a deep pyramid, on scratch
+                                  // roots in out\treetest -- nothing lands in the real cache
     ok &= RunSimClockSelfTest();  // the scene clock: whole quanta, framing-independent
     ok &= RunRigidBodySelfTest();  // M9bq: the body with momentum -- L, T, moment arms
     ok &= RunVesselSelfTest();     // M9bq: the factory + the element laws
     ok &= scene::RunSceneSelfTest();   // M12 step 5a: the scene's data structures -- the
                                        // registry template, the property table, the fold with
                                        // override, the placement sugar, the shim
+    ok &= RunPruneSelfTest();          // the tree-prune tool's refusals, planted and caught on a
+                                       // scratch root under out\prunetest, never the cache
     gpu.Shutdown();
     return ok ? 0 : 1;
 }

@@ -74,7 +74,19 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     g -= frac(g * 0.5f) * 2.0f * k;
 
     const float2 uv = rec.uv0 + g * rec.uvStepCell;
-    const float3 dir = CubeDir(rec.face, uv);   // float dir: fine for SAMPLING always
+    const float3 dir = CubeDir(rec.face, uv);   // float dir: fine for sampling the channels
+    // THE WATER'S SAMPLE POINT (VsOut.geo): the undisplaced point of the geoid under this vertex,
+    // eye-relative in the level's own tangent frame. A fine meshlet has it exactly -- the record's
+    // double-precision anchor plus small offsets, the float wall's own arithmetic, and the base
+    // its position is displaced from -- and the coarse path forms it as it forms its position,
+    // without the displacement.
+    float3 geo;
+    if (fine) {
+        const float2 du = (g - float2(cx0 + 4.0f, cy0 + 4.0f)) * rec.uvStepCell;
+        geo = rec.anchorRel + rec.dPdu * du.x + rec.dPdv * du.y;
+    } else {
+        geo = CsToTangent(dir) * gGlo.x - sLvlCamAbs;
+    }
 
     // Height at the vertex's own density: texels no finer than the vertex spacing feed
     // displacement; anything finer feeds pixel normals instead.
@@ -120,7 +132,11 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     float2 latW = 0.0f;
     if (gBankU.z != 0u) {
         float4 bD, bP, bDet;
-        const float2 bankXZ = (CsToTangent(dir) * gGlo.x).xz;
+        // A fine meshlet reads the bank at its exact point, the level's eye plus geo: the
+        // coordinate made from dir has a third of a metre of grain at the helm (REVIEW finding
+        // 42). A coarse one reads it as it always has; at its distances that grain is under a
+        // pixel.
+        const float2 bankXZ = fine ? sLvlCamAbs.xz + geo.xz : (CsToTangent(dir) * gGlo.x).xz;
         float bT;
         float3 dDdx, dDdz;
         dispWater = BankSampleT(bankXZ, bD, bP, bDet, bT, dDdx, dDdz) ? (bP.x + bD.y) : 0.0f;
@@ -155,12 +171,12 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     o.dir = dir;
     o.h = h;
     if (fine) {
-        const float2 du = (g - float2(cx0 + 4.0f, cy0 + 4.0f)) * rec.uvStepCell;
-        o.rel = rec.anchorRel + rec.dPdu * du.x + rec.dPdv * du.y + rec.upT * disp;
+        o.rel = geo + rec.upT * disp;
     } else {
         o.rel = CsToTangent(dir) * (gGlo.x + disp) - sLvlCamAbs;
     }
     o.rel += float3(latW.x, 0.0f, latW.y);
+    o.geo = geo;   // the label: the lateral term moves the drawn point, never where it is read
     // M9bg: the water's colour, shaded AT THIS VERTEX from its own wave normal (the bank's
     // Loads -- stage-proof) and the analytic sky. The pixel stage does no water work.
     // EVERY vertex is shaded, including dry ones: a shoreline triangle's land corner is still
@@ -296,9 +312,11 @@ VsOut BandDepth(VsOut o) {
     return o;
 }
 
-// The same vertex moved in the tangent plane, then pushed behind.
+// The same vertex moved in the tangent plane, then pushed behind. Its water sample point moves
+// with it, by the same nudge.
 VsOut BandMoved(VsOut o, float3 nudge) {
     o.rel += nudge;
+    o.geo += nudge;
     o.pos = mul(float4(TrueRel(o.rel), 1.0f), gViewProj);   // M10: the gauge, as SurfaceVertex
     return BandDepth(o);
 }

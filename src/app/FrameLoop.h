@@ -68,6 +68,7 @@
 #include "app/Scene.h"
 #include "compose/TileTree.h"
 #include "core/Droste.h"   // M10: the globe within the globe, as one Cl(4,1) versor
+#include "core/ExitTrail.h"   // the shutdown trail: a line before each phase of teardown
 #include "core/Pga.h"
 #include "core/Space.h"   // M12 step 4d: the planet, the tangent frame and the Droste cycle, declared
 #include "hal/Residency.h"
@@ -251,6 +252,8 @@ private:
     // place (scene/Gateway.h Place), so a body carried to a place stands in the very frame a gate
     // there was built in. Heap-held: the gates and the carried hulls point into them.
     std::vector<std::unique_ptr<scene::Place>> m_places;
+    ExitMark m_exitHulls{"frame loop: the places, the gates and the hulls (Entity nodes, each with "
+                         "its TreeWater)"};
     // WHAT THE VIEW SEES THROUGH THE GATES this frame (scene/Gateway.h WindowChain): link 0 is the
     // first window the view enters, link k the window its view meets k windows in. Rebuilt every
     // frame from whatever gates exist, so a gate that moves, grows or appears is simply seen.
@@ -282,6 +285,8 @@ private:
     // once-a-minute freeze. Nothing reads the new tree until the atomic_store below, so it
     // can be built and filled on a worker and swapped in when it is whole.
     std::shared_ptr<TileTree> m_wavePending;
+    ExitMark m_exitPrefill{"frame loop: the wave prefill's pending tree (a prefill still running "
+                           "on a worker writes through references into this object)"};
     std::atomic<bool> m_wavePrefillDone{false};
     std::atomic<bool> m_wavePrefillBusy{false};
     uint64_t m_wavePendingKey = 0;
@@ -307,12 +312,15 @@ private:
     WeatherManager m_weather;
     std::function<WaveFieldConfig(const WaterSceneConfig&)> m_sceneToWaveCfg;
     std::unique_ptr<WaveField> m_waveField;
+    ExitMark m_exitWaveField{"frame loop: ~WaveField -- it waits for its own solve job, which the "
+                             "pool drops if Shutdown came first"};
     int m_wfCtSta = -1;
     std::shared_ptr<WaveFieldSource> m_waveSrc;
     std::shared_ptr<std::shared_ptr<TileTree>> m_waveTree;
     WaveFieldSource::Frame m_waveFrame;
     int m_waveT = -1;
     hal::Tenant m_waveTenant;   // M12 step 3e: the wave planes' declaration (hal/Tenant.h)
+    ExitMark m_exitWave{"frame loop: the wave planes' tenant handle, their tree and its source"};
     Route m_route;
     double m_timeScale = 1.0;
     double m_windowSec = 0.0;
@@ -400,6 +408,9 @@ private:
     std::vector<uint8_t> m_recPixels;
     std::vector<uint64_t> m_railPool;
     int m_loggedLevel = 0;   // Frame(): the Droste level last logged (the gauge step)
+    // The last member dies first: the trail's first line inside ~FrameLoop (core/ExitTrail.h).
+    ExitMark m_exitLoop{"frame loop destructs, last member first: the recorder pipe and the "
+                        "session state, then each marked member in the reverse of its declaration"};
 };
 
 }  // namespace ga::app

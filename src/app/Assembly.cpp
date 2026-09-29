@@ -645,6 +645,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         globe->meshStats = opt.meshStats;
         globe->msSurface = opt.msSurface;
         globe->albedoLens = opt.albedo;
+        // Before Init: the residency lens's pipelines are built there, and only when asked for.
+        globe->debugLens = opt.lens;
         globe->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
         renderer.AddLayer(std::move(globeOwned));
         // M6j: with the unified mesh surface active, the terrain layer stops rendering
@@ -665,6 +667,12 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // tenants themselves once they exist (Declare, at the old SetComposed site), and the
     // tangent frame's rows the session writes into it. Both fills read it.
     surface = SurfaceFrame::Merrimack(planetR, opt.stencil);
+    // The folder every tile tree of this run lives in (streaming.treeRoot), before the first
+    // tree is built. A tool pointed at a scratch folder paints, packs and reads there alone.
+    TileTree::SetTreeRoot(S.streaming.treeRoot);
+    // --warm-trees and --pack-trees are tree-audit's other two modes (Tools/TreeAudit.cpp):
+    // each needs the trees built and ends the run where the audit does.
+    const bool treeTool = S.Tool("tree-audit") || S.Tool("warm-trees") || S.Tool("pack-trees");
 
     if (globe) {
         resMgr.Init(gpu);
@@ -672,6 +680,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         resMgr.dsSerial = opt.dsSerial;
         resMgr.traceRes = opt.resTrace;
         resMgr.pagesEvery = opt.pagesEvery;
+        resMgr.auditEvery = S.capture.residencyAudit;   // the scene's (--res-audit N)
         int surf = -1, norm = -1;
         if (marsMode) {
             // Mars: color/normal stay NATIVE streams (the rescued sample's pyramids are
@@ -703,7 +712,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             // page (the frame the colour window shares, so the near-field land/sea gate
             // and the normals ride CUDEM truth). One provider dispatching on the slice.
             // M9as: fed by the height TileTree when --color-trees is on.
-            if (S.streaming.colorTrees || S.Tool("tree-audit")) {
+            if (S.streaming.colorTrees || treeTool) {
                 auto layers = BuildHeightStack(compositor, hgtCh);
                 std::vector<std::pair<double, std::shared_ptr<DomainSource>>> byRes;
                 const Compositor::Channel& hch = compositor.ChannelAt(hgtCh);
@@ -944,7 +953,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 keepAlive.push_back(land);
                 keepAlive.push_back(mega);
                 PrintTree("earth.color (megatexture)", mega.get());
-                if (S.streaming.colorTrees || S.Tool("tree-audit")) {
+                if (S.streaming.colorTrees || treeTool) {
                     megaTree = std::make_unique<TileTree>(mega.get());
                     megaTree->Print();
                 }
@@ -1028,7 +1037,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                             "classifier falls back to the height sign");
                     }
                 }
-                if (S.Tool("tree-audit")) {
+                if (treeTool) {
                     exitCode = tools::RunTreeAudit(opt, compositor, hgtCh, resMgr, colCh,
                                                    megaTree, heightTree, surface);
                     return nullptr;
@@ -1309,7 +1318,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                              {"bathy-map", "dump-water-state", "export", "fidelity-map",
                               "gis-dump", "load-field", "ocean-probe", "pack-tiles", "pack-trees",
                               "sea-verify", "selftest", "swe-cycle", "swe-uv", "trace",
-                              "tree-audit", "twin-surface", "warm-inlet", "warm-trees",
+                              "tree-audit", "tree-prune", "twin-surface", "warm-inlet", "warm-trees",
                               "water-map", "wave-map"}});
             scene::WriteRegistries("docs/registries.json", extra);
         }

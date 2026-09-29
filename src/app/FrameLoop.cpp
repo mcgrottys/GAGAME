@@ -199,6 +199,22 @@ bool ViewEyeOrbit(const SceneView* v, double planetR, Camera& cam) {
     return true;
 }
 
+// A tree's counters summed over it and every node under it: painted, read from disk, served from
+// its cache, composed, folded, cached composites dropped, and the archive's share -- tiles answered
+// as PLACES (DirectStorage reads them) and through a HANDLE (the bytes cross the CPU) -- the
+// residency audit's closing lines, Finish().
+void TreeTally(TileTree& t, uint64_t (&n)[8]) {
+    n[0] += t.painted.load();
+    n[1] += t.read.load();
+    n[2] += t.hits.load();
+    n[3] += t.composed.load();
+    n[4] += t.folded.load();
+    n[5] += t.dropped.load();
+    n[6] += t.arcPlaces.load();
+    n[7] += t.arcReads.load();
+    for (size_t i = 0; i < t.KidCount(); ++i) TreeTally(t.Kid(i), n);
+}
+
 }  // namespace
 
 FrameLoop::FrameLoop(const Options& opt, const Scene& S, Assembly& A)
@@ -1327,7 +1343,12 @@ std::optional<int> FrameLoop::Session() {
     }
 
     if (S.Tool("warm-inlet") && (winTenant >= 0 || hgtTenant >= 0)) {
-        tools::RunWarmInlet(opt, gpu, compositor, resMgr, winTenant, hgtTenant, hgtWinTenant);
+        tools::RunWarmInlet(opt, gpu, compositor, resMgr, winTenant, surface.winSlice, hgtTenant,
+                            hgtWinTenant);
+        // What the warm did to the trees that serve the pages (the compositor's own counters
+        // above stay at zero when the trees are the providers, which is the default).
+        if (m_A.megaTree) Log("[warm] the colour tree:\n%s", m_A.megaTree->Stats().c_str());
+        if (m_A.heightTree) Log("[warm] the height tree:\n%s", m_A.heightTree->Stats().c_str());
     }
 
     // ---- M6j: channel export mode -- pull data OUT through the manager and exit.
@@ -2641,18 +2662,18 @@ bool FrameLoop::Frame() {
                     waveSrc->SetKey(waveField->LiveKey());
                     wavePendingKey = waveSrc->Key();
                     wavePendingPlanes = waveField->Table().nUsed + 1u;
-                    float u0, v0, u1, v1;
-                    waveSrc->WindowUv(u0, v0, u1, v1);
+                    uint32_t tx0, ty0, tx1, ty1;   // the window in whole mip-0 tiles
+                    waveSrc->WindowTiles(tx0, ty0, tx1, ty1);
                     wavePrefillBusy.store(true, std::memory_order_release);
                     const ColorFrame wf = waveFrame.color;
                     WaveFieldSource* wsrc = waveSrc.get();
                     const uint32_t planes = wavePendingPlanes;
                     Threads().Submit(Lane::Compute, "wave.prefill",
                                      [&wavePending, &wavePrefillDone, &wavePendingTiles,
-                                      &wavePendingSec, wf, wsrc, planes, u0, v0, u1, v1]() {
+                                      &wavePendingSec, wf, wsrc, planes, tx0, ty0, tx1, ty1]() {
                         const auto tp0 = Clock::now();
                         auto fresh = std::make_shared<TileTree>(wsrc, TileTree::Fmt::Raw4);
-                        wavePendingTiles = fresh->Prefill(wf, 0u, planes, u0, v0, u1, v1);
+                        wavePendingTiles = fresh->Prefill(wf, 0u, planes, 0u, tx0, ty0, tx1, ty1);
                         wavePendingSec =
                             std::chrono::duration<double>(Clock::now() - tp0).count();
                         wavePending = fresh;
@@ -3960,6 +3981,10 @@ int FrameLoop::Finish() {
     auto& frameMsSum = m_frameMsSum;
     auto& frameMsN = m_frameMsN;
 
+    // THE SHUTDOWN TRAIL (core/ExitTrail.h): a flushed line before every phase from here to the
+    // last destructor, so a death in teardown names its phase.
+    ExitStep("finish: the loop is over -- the run's reports and dumps");
+
     // M12 step 4d instrument: the [droste] probe's totals over the run -- one line per site
     // (the per-build dumps are above: ProbeDrosteTable, ProbeDive, GlobeLayer::ProbeTransport).
     if (m_portalNode.Valid()) {
@@ -4018,6 +4043,13 @@ int FrameLoop::Finish() {
         ga::ast::Edges().size(), ga::ast::Validate() ? "frames hold" : "FLIP FAILURES",
         compositor.painted.load(), compositor.cacheHits.load(),
         resMgr.fetchesThisRun, resMgr.PendingCount());
+    // The fetches a larger streaming.tileBudget would have made: with the budget at zero, the
+    // run's whole appetite for source tiles it did not have.
+    if (m_A.googleTiles.Ready()) {
+        Log("[google] %u source tiles refused this run (budget %u, %u fetched): the distinct "
+            "fetches a larger budget would have made",
+            m_A.googleTiles.Refused(), m_A.googleTiles.Budget(), m_A.googleTiles.Fetched());
+    }
 
     if (S.Tool("sea-verify") && sea) tools::RunSeaVerify(opt, gpu, sea);
     if (!S.dumpW.empty()) {
@@ -4038,13 +4070,44 @@ int FrameLoop::Finish() {
     if (!S.hdrW.empty()) renderer.DumpHdr(S.hdrW);
     if (!opt.dumpMeshlets.empty() && globe) globe->DumpMeshlets(opt.dumpMeshlets);
 
+    // THE PAINTS BEHIND THE INVALIDATIONS (capture.residencyAudit): what each tree bound to a
+    // tenant painted, read and folded over the run. A fold announces the coarser tile it rewrote
+    // (TileTree::FoldUp -> onChanged -> ResidencyManager::Invalidate), so a run that painted
+    // nothing invalidated nothing, and a run without invalidations cannot have shown finding 3.
+    if (resMgr.auditEvery) {
+        auto tally = [](const char* name, TileTree* t) {
+            if (!t) return;
+            uint64_t n[8] = {};
+            TreeTally(*t, n);
+            Log("[res-audit] tree %-16s %s: painted %llu, read %llu, cache hits %llu, composed %llu, "
+                "folded %llu, cached composites dropped %llu | archive: %llu places, %llu handle "
+                "reads (every node under it, over the run)",
+                name, t->Id().c_str(), static_cast<unsigned long long>(n[0]),
+                static_cast<unsigned long long>(n[1]), static_cast<unsigned long long>(n[2]),
+                static_cast<unsigned long long>(n[3]), static_cast<unsigned long long>(n[4]),
+                static_cast<unsigned long long>(n[5]), static_cast<unsigned long long>(n[6]),
+                static_cast<unsigned long long>(n[7]));
+        };
+        tally("earth.height", m_A.heightTree.get());
+        tally("megatexture", m_A.megaTree.get());
+        if (m_A.exposureTree) tally("swell.exposure", std::atomic_load(m_A.exposureTree.get()).get());
+        if (m_waveTree) tally("wave.field", std::atomic_load(m_waveTree.get()).get());
+    }
+
+    ExitStep("finish: gpu.WaitIdle -- the queue drains");
     gpu.WaitIdle();
+    ExitStep("finish: residency Shutdown -- the loads still running on the pool leave");
     resMgr.Shutdown();
+    ExitStep("finish: scene watch Stop");
     sceneWatch.Stop();   // cancels the pending directory read and joins (logged)
+    ExitStep("finish: renderer Shutdown -- the layers' teardown (the globe joins its worker)");
     renderer.Shutdown();
+    ExitStep("finish: Gpu::Shutdown");
     gpu.Shutdown();
+    ExitStep("finish: window Destroy, thread audit report");
     window.Destroy();
     ga::threadaudit::Report();   // --thread-audit: what the threads did to the tile files
+    ExitStep("finish: the job pool's Shutdown -- the workers join; jobs still queued are dropped");
     ga::Threads().Shutdown();
     Log("done (%u frames)", frame);
     return 0;

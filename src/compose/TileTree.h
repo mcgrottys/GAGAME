@@ -67,12 +67,14 @@
 
 #include <map>
 #include <mutex>
+#include <unordered_set>
 
 #include "compose/ColorStackSource.h"
 #include "compose/ComposeTree.h"
 #include "compose/Compositor.h"
 #include "compose/DomainSource.h"
 #include "compose/TileArchive.h"
+#include "core/BuildInfo.h"
 #include "core/Common.h"
 #include "core/ThreadAudit.h"
 
@@ -85,10 +87,23 @@ inline constexpr int kTileTreeVersion = 2;
 
 // One recursive mutex per tile ADDRESS, striped. 256 is far more than the twelve loader threads
 // can be inside at once, so a collision is rare -- and a collision is only a wait, never a
-// deadlock, because no code path here ever holds two stripes (see TileTree::Stripe).
+// deadlock, because no code path here ever holds two stripes (see TileTree::Stripe; the
+// StripeLock below counts it, and the tiletree selftest holds it to that count).
 inline constexpr size_t kStripes = 256;
 
 namespace tree_detail {
+
+// THE TREE'S I/O, PER THREAD: tile reads and writes that moved bytes, existence probes, and
+// refetch notices. Thread-local, so a caller can read what exactly its own call cost -- the
+// tiletree selftest prices one leaf's chain this way -- and always on, because an increment is
+// nothing beside the file operation it counts.
+struct IoTally {
+    uint64_t reads = 0, writes = 0, probes = 0, announces = 0;
+};
+inline IoTally& Io() {
+    static thread_local IoTally t;
+    return t;
+}
 
 inline uint64_t Fnv1a(uint64_t h, const std::string& s) {
     for (const char c : s) {
@@ -138,6 +153,7 @@ inline bool ReadTile(const std::string& path, std::vector<uint8_t>& out, size_t 
                     got == static_cast<DWORD>(bytes);
     CloseHandle(h);
     if (!ok) out.clear();
+    if (ok) ++Io().reads;
     return ok;
 }
 // M9as: half floats for the height trees. Value and weight both ride as halves; the weight's
@@ -177,7 +193,12 @@ inline float H2F(uint16_t h) {
 // Returns whether the tile is now ON DISK under `path`. A caller that ignores it gets the old
 // behaviour; the concurrency gate in ThreadTest.cpp needs to know, because a publish a reader
 // makes fail is the same lost tile as a torn one.
-inline bool WriteTile(const std::string& path, const std::vector<uint8_t>& data) {
+//
+// `loud` false keeps a failure out of the log, and out of the once-only warnings below, for a
+// caller that says its own failure in its own words (StampLive): those warnings speak about
+// TILES, and the first failure of the run is the only one they ever print.
+inline bool WriteTile(const std::string& path, const std::vector<uint8_t>& data,
+                      bool loud = true) {
     threadaudit::WriteScope audit(path);
     static std::atomic<uint32_t> seq{0};
     char stem[24];
@@ -195,7 +216,7 @@ inline bool WriteTile(const std::string& path, const std::vector<uint8_t>& data)
                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) {
         static std::atomic<bool> warned{false};
-        if (!warned.exchange(true)) {
+        if (loud && !warned.exchange(true)) {
             Log("[tiletree] CANNOT WRITE %s (err %lu) -- painting and storing NOTHING (missing "
                 "folder? disk full?)",
                 path.c_str(), GetLastError());
@@ -206,7 +227,7 @@ inline bool WriteTile(const std::string& path, const std::vector<uint8_t>& data)
     if (!WriteFile(h, data.data(), static_cast<DWORD>(data.size()), &wrote, nullptr) ||
         wrote != static_cast<DWORD>(data.size())) {
         static std::atomic<bool> warned{false};
-        if (!warned.exchange(true)) {
+        if (loud && !warned.exchange(true)) {
             Log("[tiletree] SHORT WRITE %s (%lu of %zu bytes) -- storing NOTHING", path.c_str(),
                 wrote, data.size());
         }
@@ -241,13 +262,14 @@ inline bool WriteTile(const std::string& path, const std::vector<uint8_t>& data)
     CloseHandle(h);
     if (!ok) {
         static std::atomic<bool> warned{false};
-        if (!warned.exchange(true)) {
+        if (loud && !warned.exchange(true)) {
             Log("[tiletree] CANNOT PUBLISH %s (err %lu) -- the tile was written and then LOST",
                 path.c_str(), err);
         }
         DeleteFileA(tmp.c_str());
         return false;
     }
+    ++Io().writes;
     return true;
 }
 // Markers (.void, .fold, .ref-<id>) do NOT need the temp-and-rename above, and it would only
@@ -266,9 +288,27 @@ inline void Touch(const std::string& path) {
     }
 }
 inline bool Exists(const std::string& path) {
+    ++Io().probes;
     return GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 inline void MakeDir(const std::string& path) { CreateDirectoryA(path.c_str(), nullptr); }
+// Every folder on the way down to `path`, then `path` itself: a tree rooted outside
+// cache\trees (a scratch root) may name folders that do not exist yet.
+inline void MakeDirs(const std::string& path) {
+    for (size_t i = path.find('\\'); i != std::string::npos; i = path.find('\\', i + 1)) {
+        if (i > 0 && path[i - 1] != ':') MakeDir(path.substr(0, i));
+    }
+    MakeDir(path);
+}
+// A folder as this file spells it. WriteTile finds a tile's folder by its last backslash, so a
+// root given with forward slashes would put every publish's temp file in the working folder.
+inline std::string Backslashes(std::string s) {
+    for (char& c : s) {
+        if (c == '/') c = '\\';
+    }
+    while (!s.empty() && s.back() == '\\') s.pop_back();
+    return s;
+}
 // Every unlink goes through here: DropCachedAddress deletes tiles on the PARENT node under no
 // lock, and a delete inside someone else's read is the same collision a torn write is.
 inline void Delete(const std::string& path) {
@@ -277,6 +317,7 @@ inline void Delete(const std::string& path) {
 }
 // The one wildcard lookup a stored reference costs: "<base>.ref-*" -> the suffix.
 inline bool FindRef(const std::string& base, std::string& childId) {
+    ++Io().probes;
     WIN32_FIND_DATAA fd{};
     HANDLE h = FindFirstFileA((base + ".ref-*").c_str(), &fd);
     if (h == INVALID_HANDLE_VALUE) return false;
@@ -287,6 +328,138 @@ inline bool FindRef(const std::string& base, std::string& childId) {
     childId = name.substr(p + 5);
     return !childId.empty();
 }
+
+// ---- THE TREE SAYS WHEN IT WAS LAST USED ------------------------------------------------------
+// The prune tool (compose/TreePrune.h) has to know which tag folders a run still uses, and no
+// file time can tell it: NTFS keeps no usable last-access time, and a tree that is fully painted
+// is read every day and written never. So every run STAMPS each tag folder it ensures --
+// <node>.<id>\<tag>\.live, one line of JSON: the UTC time, the engine's rev (the [boot] line's)
+// and the scene -- published through WriteTile's temp-and-rename, so a reader sees the whole old
+// stamp or the whole new one. The unit is the TAG folder, not the node's: when the engine stops
+// using a lattice, that lattice's folders go stale inside a node folder that is still live.
+//
+// THE NAME MATCHES NOTHING THAT SCANS A TILE FOLDER. Every scanner, checked: the packer and the
+// index take *.bin; FindRef takes <base>.ref-* and DropCachedAddress <base>_*, where <base> is
+// f<face>_m<mip>_x<x>_y<y>; tools/hierarchy/tree_census.py counts names matching
+// ^f(\d+)_m(\d+)_x(\d+)_y(\d+)...; finding 25's archive audit opens only <tag>.gaa, at the node
+// level. A name that starts with a dot starts none of those, and ".live" ends in none of them.
+//
+// AT MOST ONCE PER FOLDER PER RUN. The tenant dispatcher reads a holder's tree per request
+// (hal/Tenant.cpp), so EnsureFrame runs on every tile of the wave and exposure trees; the set
+// below turns that into one file write per folder. A stamp that cannot be written is said once
+// and is never fatal: the tool judges an unstamped folder by its newest write, at twice the age.
+struct LiveStamps {
+    std::mutex mx;
+    std::unordered_set<std::string> done;   // the folders stamped this run
+    std::string scene, file;                // what every stamp names (SetLiveScene)
+    bool warned = false;
+};
+inline LiveStamps& Live() {
+    static LiveStamps s;
+    return s;
+}
+// main() names the scene once, when it has resolved and before any tree exists.
+inline void SetLiveScene(const std::string& scene, const std::string& file) {
+    LiveStamps& l = Live();
+    std::lock_guard<std::mutex> lk(l.mx);
+    l.scene = scene;
+    l.file = file;
+}
+// A JSON string. A scene path typed on Windows carries backslashes, which JSON forbids bare.
+inline std::string JsonQuote(const std::string& s) {
+    std::string o = "\"";
+    for (const char c : s) {
+        const unsigned u = static_cast<unsigned char>(c);
+        if (u < 0x20) {
+            char b[8];
+            snprintf(b, sizeof(b), "\\u%04x", u);
+            o += b;
+            continue;
+        }
+        if (c == '"' || c == '\\') o += '\\';
+        o += c;
+    }
+    return o + "\"";
+}
+inline void StampLive(const std::string& folder) {
+    LiveStamps& l = Live();
+    std::string line;
+    {
+        std::lock_guard<std::mutex> lk(l.mx);
+        if (!l.done.insert(folder).second) return;
+        SYSTEMTIME t{};
+        GetSystemTime(&t);
+        char utc[32];
+        snprintf(utc, sizeof(utc), "%04u-%02u-%02uT%02u:%02u:%02uZ", t.wYear, t.wMonth, t.wDay,
+                 t.wHour, t.wMinute, t.wSecond);
+        line = "{\"utc\": " + JsonQuote(utc) + ", \"rev\": " + JsonQuote(BuildGitRev()) +
+               ", \"scene\": " + JsonQuote(l.scene) + ", \"file\": " + JsonQuote(l.file) + "}\n";
+    }
+    if (WriteTile(folder + "\\.live", std::vector<uint8_t>(line.begin(), line.end()), false)) {
+        return;
+    }
+    std::lock_guard<std::mutex> lk(l.mx);
+    if (!l.warned) {
+        l.warned = true;
+        Log("[tiletree] cannot stamp %s\\.live -- the tree works as before; the prune tool will "
+            "judge this folder by its newest write",
+            folder.c_str());
+    }
+}
+
+// THE STRIPE INSTRUMENT. Stripe()'s rule is that a thread holds at most one stripe at a time;
+// every stripe is taken through StripeLock, which keeps the stripes its thread holds and counts
+// the acquisition of a second DISTINCT one. Taking the stripe already held again is the
+// recursive mutex doing its job, not a nesting, and is not counted. `maxHeld` is the most any
+// thread held at once; the tiletree selftest requires 1, and its planted failure -- the fold
+// walk this replaced, kept behind TileTree::FoldWalkForTest -- must drive it past 1.
+struct StripeTally {
+    std::atomic<uint32_t> maxHeld{0};
+    std::atomic<uint64_t> nested{0};   // acquisitions made with another stripe already held
+    void Reset() {
+        maxHeld.store(0);
+        nested.store(0);
+    }
+};
+inline StripeTally& Stripes() {
+    static StripeTally t;
+    return t;
+}
+class StripeLock {
+public:
+    explicit StripeLock(std::recursive_mutex& m) : m_m(m) {
+        m_m.lock();
+        for (int i = 0; i < Depth() && i < kMaxHeld; ++i) {
+            if (Held()[i] == &m) return;   // re-entered: one stripe, held twice
+        }
+        if (Depth() > 0) Stripes().nested.fetch_add(1, std::memory_order_relaxed);
+        if (Depth() < kMaxHeld) Held()[Depth()] = &m;
+        const uint32_t d = uint32_t(++Depth());
+        uint32_t was = Stripes().maxHeld.load(std::memory_order_relaxed);
+        while (d > was && !Stripes().maxHeld.compare_exchange_weak(was, d)) {
+        }
+        m_counted = true;
+    }
+    ~StripeLock() {
+        if (m_counted) --Depth();   // scoped, so the last one counted is the first released
+        m_m.unlock();
+    }
+    StripeLock(const StripeLock&) = delete;
+    StripeLock& operator=(const StripeLock&) = delete;
+
+private:
+    static constexpr int kMaxHeld = 64;
+    static int& Depth() {
+        static thread_local int d = 0;
+        return d;
+    }
+    static const std::recursive_mutex** Held() {
+        static thread_local const std::recursive_mutex* h[kMaxHeld] = {};
+        return h;
+    }
+    std::recursive_mutex& m_m;
+    bool m_counted = false;
+};
 
 }  // namespace tree_detail
 
@@ -307,9 +480,15 @@ public:
 
     // Builds the tree of caches under this node, recursively. Every compose and gate node gets
     // its own folder; every leaf gets one. Nodes are borrowed -- the graph outlives the caches.
-    explicit TileTree(const DomainSource* node, Fmt fmt = Fmt::Rgba8, TileTree* parent = nullptr)
+    // `trees` is the folder the node folders go in: a child takes its parent's, and a root
+    // given none takes TreeRoot() -- the scene's streaming.treeRoot, cache\trees by default. The
+    // selftest's trees are given scratch folders, so no tile of theirs lands in the real cache.
+    explicit TileTree(const DomainSource* node, Fmt fmt = Fmt::Rgba8, TileTree* parent = nullptr,
+                      const std::string& trees = std::string())
         : m_node(node), m_fmt(fmt), m_parent(parent) {
         if (!parent) m_stripes = std::make_unique<std::array<std::recursive_mutex, kStripes>>();
+        m_trees = parent ? parent->m_trees
+                         : tree_detail::Backslashes(trees.empty() ? TreeRoot() : trees);
         const std::string kind = node->NodeKind();
         if (kind == "compose" || kind == "gate") {
             // Under a scalar root every input is FloatW: coverage rides with the value.
@@ -333,11 +512,18 @@ public:
             "#" + std::to_string(kTileTreeVersion) +
                 (fmt == Fmt::Rgba8 ? "" : fmt == Fmt::FloatW ? "fw" : fmt == Fmt::Half ? "h" : "r4"));
         m_id = tree_detail::Hex8(h);
-        m_root = "cache\\trees\\" + tree_detail::Sanitize(node->Name()) + "." + m_id;
-        tree_detail::MakeDir("cache");
-        tree_detail::MakeDir("cache\\trees");
+        m_root = m_trees + "\\" + tree_detail::Sanitize(node->Name()) + "." + m_id;
+        tree_detail::MakeDirs(m_trees);
         tree_detail::MakeDir(m_root);
     }
+
+    // WHERE THE TREES LIVE when a root is built without a folder of its own. Set once, by the
+    // Assembly from the scene's streaming.treeRoot, before the first tree exists; the loader
+    // threads that build trees later only read it.
+    static void SetTreeRoot(const std::string& trees) { TreeRootRef() = tree_detail::Backslashes(trees); }
+    static std::string TreeRoot() { return TreeRootRef(); }
+    // This node's folder: <trees>\<name>.<id>, a frame's tiles in <tag> below it.
+    const std::string& Folder() const { return m_root; }
 
     const std::string& Id() const { return m_id; }
     // M9bb: THE PYRAMID. Fires when a tile of THIS node changed under a consumer that already
@@ -363,6 +549,7 @@ public:
 
     void EnsureFrame(const std::string& tag) {
         tree_detail::MakeDir(m_root + "\\" + tag);
+        tree_detail::StampLive(m_root + "\\" + tag);   // this run uses the folder (tree_detail)
         for (auto& k : m_kids) k->EnsureFrame(tag);
     }
 
@@ -460,6 +647,7 @@ public:
     // ---- accounting --------------------------------------------------------------------------
     std::atomic<uint32_t> painted{0}, read{0}, voids{0}, refs{0}, composed{0}, hits{0};
     std::atomic<uint32_t> folded{0}, dropped{0};   // M9bb: pyramid folds; cached addresses dropped
+    std::atomic<uint32_t> redundant{0};   // M9bd: folds the 4/255 rule found moved nothing
     std::string Stats(int depth = 0) const {
         std::string pad(size_t(depth) * 2, ' ');
         char b[256];
@@ -470,6 +658,13 @@ public:
                  voids.load(), refs.load(), composed.load(), hits.load(), arcPlaces.load(),
                  arcReads.load());
         std::string s = b;
+        // A leaf over a source that fetches says what it could not fetch: with the budget at
+        // zero, this is the number of fetches the run WOULD have made.
+        uint32_t refused = 0;
+        if (m_raw && m_raw->Refusals(refused)) {
+            snprintf(b, sizeof(b), " | %u source tiles refused (fetch budget)", refused);
+            s += b;
+        }
         for (const auto& k : m_kids) s += "\n" + k->Stats(depth + 1);
         return s;
     }
@@ -502,10 +697,29 @@ private:
     // stripe of the address being written. Two different addresses can collide onto one stripe
     // -- that is what striping is -- so any scheme that holds two at once could deadlock on a
     // collision no matter how the acquisition order is argued. Holding one cannot. That is why
-    // FoldUp releases before it announces upward and before it recurses, and why
+    // FoldUp takes each level's stripe in turn and releases it before the level above, why an
+    // absent parent is painted inside its fold without folding itself upward from there, and why
     // DropCachedAddress takes no stripe at all: after the atomic publish a delete leaves no
     // torn state, so a reader either finds the tile or recomposes it, and both are correct.
+    // (tree_detail::StripeLock counts it.)
     std::recursive_mutex& Stripe(const std::string& tag, const TileRequest& r) {
+        TileTree* root = Root();
+        return (*root->m_stripes)[StripeOf(tag, this, r)];
+    }
+
+public:
+    // The stripe of (tag, node, address). EACH FIELD IS ITS OWN WORD: the one word this packed
+    // before -- face << 44 | mip << 40 | y << 20 | x -- ORs its fields over each other once x or
+    // y reach 2^20, which the pyramid's 2^24 tiles a side do (y = 1 with x = 0 and y = 1 with
+    // x = 2^20 were one input), so two addresses differing in one field hashed identically. The
+    // node is mixed too: compose walks to a child at the same address and must not self-lock.
+    static void StripeWords(const TileRequest& r, uint64_t w[4]) {
+        w[0] = r.face;
+        w[1] = r.mip;
+        w[2] = r.x;
+        w[3] = r.y;
+    }
+    static size_t StripeOf(const std::string& tag, const void* node, const TileRequest& r) {
         uint64_t h = tree_detail::Fnv1a(1469598103934665603ull, tag);
         auto mix = [&h](uint64_t v) {
             for (int i = 0; i < 8; ++i) {
@@ -513,13 +727,14 @@ private:
                 h *= 1099511628211ull;
             }
         };
-        mix(reinterpret_cast<uintptr_t>(this));   // the NODE: compose walks to a child at the
-                                                  // same address and must not self-lock on it
-        mix((uint64_t(r.face) << 44) | (uint64_t(r.mip) << 40) | (uint64_t(r.y) << 20) |
-            uint64_t(r.x));
-        TileTree* root = Root();
-        return (*root->m_stripes)[h % kStripes];
+        mix(reinterpret_cast<uintptr_t>(node));
+        uint64_t w[4];
+        StripeWords(r, w);
+        for (const uint64_t v : w) mix(v);
+        return size_t(h % kStripes);
     }
+
+private:
 
     // Returns a SHARED pointer, not a raw one. The raw pointer escaped m_arcMx while Pack()
     // could m_arcs.clear() under it, so a worker inside FromArchive held a dangling archive --
@@ -643,9 +858,15 @@ private:
     }
 
     // ---- leaf: paint ONE source over the frame's addresses -----------------------------------
+    // `own`, when given, asks for the tile as the fold needs an absent parent: painted, and
+    // neither published nor folded upward from here -- FoldInto publishes it once, after the
+    // fold, and its own paint rises with the fold's walk. *own says whether this call painted
+    // (true) or served what was already there (false).
     Status LeafTile(const ColorFrame& frame, const std::string& tag, const TileRequest& r,
-                    const Compositor::TileBox& box, std::vector<uint8_t>& out, TileLoc* loc) {
+                    const Compositor::TileBox& box, std::vector<uint8_t>& out, TileLoc* loc,
+                    bool* own = nullptr) {
         const std::string base = Base(tag, r);
+        if (own) *own = false;
         if (FromArchive(tag, r, 0u, out, loc)) {
             ++read;
             return Status::Content;
@@ -760,6 +981,10 @@ private:
             ++voids;
             return Status::Void;
         }
+        if (own) {
+            *own = true;   // the caller holds this address's stripe and publishes it itself
+            return Status::Content;
+        }
         // PUBLISH ONLY IF NOTHING IS THERE, under this address's stripe. Residency asks for a
         // mip and its parent in the same turn, so two threads can be inside one address at once,
         // and a FOLD may have published this very address while this paint ran. The fold is the
@@ -768,7 +993,7 @@ private:
         // there is also correct for the ordinary case: two painters of one address compute the
         // same bytes, and whoever published already folded it upward.
         {
-            std::lock_guard<std::recursive_mutex> lk(Stripe(tag, r));
+            tree_detail::StripeLock lk(Stripe(tag, r));
             std::vector<uint8_t> already;
             if (tree_detail::ReadTile(base + ".bin", already, TileBytes())) {
                 out.swap(already);
@@ -852,34 +1077,202 @@ private:
             }
         }
     }
+    // THE CHAIN IS WALKED ONCE, one level and one stripe at a time. What rises from a level to
+    // the one above is not one tile but the VERSIONS that level took on this walk, in order: its
+    // own paint first, when it was absent and had to be painted, then each fold that moved it.
+    // That is the sequence the walk this replaced produced -- it painted an absent parent with
+    // LeafTile, which published it and folded its own paint up to the root before the child's
+    // fold went up the same chain again -- and each level's redundancy test is decided against
+    // that sequence, so the same folds in the same order leave the same bytes. What changed is
+    // the cost of a cold chain k levels long: up to k stripes nested and k(k+3)/2 writes before,
+    // one stripe and k writes now. MEASURED (the tiletree selftest, the 25-level pyramid): one
+    // cold FloatW leaf 15 levels below its root cost 135 ancestor writes and held 15 stripes at
+    // once; now 15 and one. The read-modify-publish of ONE address happens under ONE stripe,
+    // inside FoldInto; the announcement and the step to the next level happen out here, with
+    // nothing held.
     void FoldUp(const ColorFrame& frame, const std::string& tag, const TileRequest& r,
                 const std::vector<uint8_t>& child) {
+        if (FoldWalk() == kWalkNested) {
+            FoldUpNested(frame, tag, r, child);
+            return;
+        }
+        if (m_fmt == Fmt::Half) return;
+        std::vector<std::vector<uint8_t>> rising{child};
+        TileRequest c = r;
+        while (!rising.empty() && c.mip < MaxMip(frame)) {
+            const TileRequest p{c.face, c.mip + 1, c.x / 2, c.y / 2};
+            std::vector<std::vector<uint8_t>> next;
+            if (FoldInto(frame, tag, c, p, rising, next)) InvalidateAbove(tag, p);
+            if (FoldStepHook()) FoldStepHook()(p);
+            rising.swap(next);
+            c = p;
+        }
+    }
+
+    // Folds the versions `rising` of the child `c`, in order, into its parent `p`, and publishes
+    // p once. `next` receives the versions p took, for the level above; the return says whether
+    // a fold moved p, so whoever holds it refetches. Holds exactly one stripe: p's, for the
+    // whole read-modify-write -- which is what makes the fold atomic against a LeafTile
+    // publishing the same address.
+    bool FoldInto(const ColorFrame& frame, const std::string& tag, const TileRequest& c,
+                  const TileRequest& p, std::vector<std::vector<uint8_t>>& rising,
+                  std::vector<std::vector<uint8_t>>& next) {
+        if (m_node->TileNative()) {
+            MarkAncestors(frame, tag, c, p);
+            return false;   // the marker chain IS the whole walk; nothing carries
+        }
+        const std::string pbase = Base(tag, p);
+        if (tree_detail::Exists(pbase + ".fold")) {
+            // The parent is derived from its children: nothing to rewrite, but whoever holds
+            // it must refetch, and the level above sees each version through the rebuilt bytes.
+            // Siblings still unpainted stop the chain here; the last of them carries it up. No
+            // stripe: nothing here is written, and the rebuild reads the siblings through
+            // Tile(), which may paint one and fold it upward -- never with an address held.
+            bool any = false;
+            for (const std::vector<uint8_t>& v : rising) {
+                std::vector<uint8_t> parent;
+                if (FoldFromChildren(frame, tag, p, parent, false, &c, &v) != Status::Content) {
+                    continue;
+                }
+                next.push_back(std::move(parent));
+                any = true;
+            }
+            return any;
+        }
+        tree_detail::StripeLock lk(Stripe(tag, p));
+        // A CHILD PUBLISHED SINCE OURS IS THE ONE TO FOLD. The versions in hand are what this
+        // thread wrote at c. If c on disk is no longer the last of them, another thread wrote c
+        // after us -- over ours, under c's stripe -- and carries that up itself; folding ours
+        // here would put p back to a c that no longer exists, after the other thread's fold if
+        // it got here first: a lost fold. The walk this replaced loses it that way, and so does
+        // this one without the read (the tiletree selftest stages the race and sees both).
+        // Alone, c on disk IS the last version, and this changes nothing.
+        {
+            std::vector<uint8_t> now;
+            if (tree_detail::ReadTile(Base(tag, c) + ".bin", now, TileBytes()) &&
+                now != rising.back()) {
+                rising.assign(1, std::move(now));
+            }
+        }
+        Held ph = PeekAt(pbase);
+        std::vector<uint8_t> parent, stored;
+        if (ph == Held::Content) {
+            if (tree_detail::ReadTile(pbase + ".bin", parent, TileBytes())) stored = parent;
+            else ph = Held::Absent;
+        }
+        if (ph == Held::Void) parent.assign(TileBytes(), 0);
+        bool have = ph != Held::Absent, voidMarked = ph == Held::Void, fresh = false, moved = false;
+        for (const std::vector<uint8_t>& v : rising) {
+            if (!have) {
+                // THE ABSENT PARENT IS PAINTED HERE AND NOT FOLDED UPWARD FROM HERE: its own
+                // paint rises with this walk, ahead of the fold, where the nested walk put it.
+                // (Left out, as kWalkChildOnly does for the selftest's evidence, a parent whose
+                // fold is redundant ends the chain with its ancestors never painted, and every
+                // fresh level above a moved one is decided against a different sequence.)
+                Compositor::TileBox pbox{};
+                frame.Box(p, pbox);
+                bool own = false;
+                const Status s = LeafTile(frame, tag, p, pbox, parent, nullptr, &own);
+                if (s == Status::Transient) continue;   // not now: the next version asks again
+                have = true;
+                if (s != Status::Content) {
+                    parent.assign(TileBytes(), 0);   // LeafTile left a .void; the fold takes it
+                    ph = Held::Void;
+                    voidMarked = true;
+                } else if (own) {
+                    fresh = true;
+                    if (FoldWalk() != kWalkChildOnly) next.push_back(parent);
+                }
+            }
+            if (parent.size() != TileBytes()) continue;
+            const std::vector<uint8_t> before = parent;
+            FoldQuadrant(frame, c, v, parent);
+            // M9bd: THE CHAIN STOPS WHERE THE CHILD STOPS MATTERING. A one-tile source folds
+            // into its parent and grandparent and is then invisible: if folding it in moves the
+            // parent by less than 4/255 anywhere, nothing is written and nothing above is
+            // touched -- the composite there keeps its reference to the base tree (the soak rule
+            // already left the small source out of that subset), and no coarse tile is
+            // materialized for it.
+            if (ph != Held::Void && Redundant(before, parent, kFoldRedundantTol)) {
+                parent = before;
+                ++redundant;
+                continue;
+            }
+            ph = Held::Content;
+            moved = true;
+            ++folded;
+            next.push_back(parent);
+        }
+        // Published once, as the last version the walk left it -- unless that is what the disk
+        // already holds (a version and its undoing, which only a concurrent chain produces).
+        if ((fresh || moved) && parent != stored) {
+            if (voidMarked) tree_detail::Delete(pbase + ".void");
+            tree_detail::WriteTile(pbase + ".bin", parent);
+        }
+        return moved;
+    }
+
+    // A tile-native node's parents ARE the fold of their children (a box mean): never painted,
+    // never stored, never read here -- every ancestor gets a marker if it has none, and a
+    // refetch notice. (Reading the children at each level cost 4^m reads per paint: 44 s of
+    // prefill for one bucket.)
+    //
+    // THE MARKING STOPS AT THE FIRST ANCESTOR THAT ALREADY HAS A .fold OR A .bin, because every
+    // writer of either leaves that ancestor's own ancestors marked: this walk goes on upward
+    // until it meets such an ancestor (so, by induction, the one it meets has them); Prefill
+    // marks level by level from its finest mip up, so a parent it marks is marked in the same
+    // prefill; and a tile-native .bin is LeafTile's, whose fold is this walk from its parent. A
+    // .void is not a stop -- a child with content has just arrived under it -- it becomes a
+    // marker and the walk goes on. The notices do not stop where the marking does, when anyone
+    // listens: a derived tile's bytes are rebuilt from what lies below it. (The wave tree binds
+    // no hook and has no parent node, so its walk ends at the first marked ancestor.)
+    void MarkAncestors(const ColorFrame& frame, const std::string& tag, const TileRequest& c,
+                       const TileRequest& p) {
+        tree_detail::StripeLock lk(Stripe(tag, p));
+        const bool listening = bool(onChanged) || m_parent != nullptr;
+        bool marking = true;
+        TileRequest a = p;
+        for (uint32_t m = c.mip + 1; m <= MaxMip(frame); ++m) {
+            if (marking) {
+                const std::string ab = Base(tag, a);
+                if (tree_detail::Exists(ab + ".fold") || tree_detail::Exists(ab + ".bin")) {
+                    marking = false;
+                    if (!listening) return;
+                } else if (tree_detail::Exists(ab + ".void")) {
+                    tree_detail::Delete(ab + ".void");   // a child with content arrived
+                    tree_detail::Touch(ab + ".fold");
+                } else {
+                    tree_detail::Touch(ab + ".fold");
+                }
+            }
+            InvalidateAbove(tag, a);
+            a = TileRequest{a.face, a.mip + 1, a.x / 2, a.y / 2};
+        }
+    }
+
+    // ---- THE WALK THIS REPLACED, kept for the tiletree selftest alone and selected by nothing
+    // else (FoldWalkForTest(kWalkNested)): the planted failure the stripe count must trip on --
+    // an absent parent's LeafTile folds its own paint to the root while FoldInto holds the
+    // parent's stripe -- and the reference the new walk's files are held byte-equal to on
+    // today's depth. Verbatim but for the StripeLock that lets the count see it, the redundant
+    // count, and the pause point.
+    void FoldUpNested(const ColorFrame& frame, const std::string& tag, const TileRequest& r,
+                      const std::vector<uint8_t>& child) {
         if (r.mip >= MaxMip(frame)) return;
         if (m_fmt == Fmt::Half) return;
         const TileRequest p{r.face, r.mip + 1, r.x / 2, r.y / 2};
         std::vector<uint8_t> parent;
-        // The read-modify-publish of ONE address happens under ONE stripe, inside FoldInto. The
-        // announcement and the walk to the next level happen out here, with nothing held: that
-        // is the whole discipline (see Stripe()), and splitting the function is how it stays
-        // true rather than being a comment somebody has to keep honouring.
-        if (!FoldInto(frame, tag, r, p, child, parent)) return;
+        if (!FoldIntoNested(frame, tag, r, p, child, parent)) return;
         InvalidateAbove(tag, p);
-        FoldUp(frame, tag, p, parent);
+        if (FoldStepHook()) FoldStepHook()(p);
+        FoldUpNested(frame, tag, p, parent);
     }
-
-    // Folds `child` into the parent address `p` and publishes it. Returns whether the chain
-    // should carry on upward. Holds exactly one stripe: p's, for the whole read-modify-write --
-    // which is what makes the fold atomic against a LeafTile publishing the same address.
-    bool FoldInto(const ColorFrame& frame, const std::string& tag, const TileRequest& r,
-                  const TileRequest& p, const std::vector<uint8_t>& child,
-                  std::vector<uint8_t>& parent) {
+    bool FoldIntoNested(const ColorFrame& frame, const std::string& tag, const TileRequest& r,
+                        const TileRequest& p, const std::vector<uint8_t>& child,
+                        std::vector<uint8_t>& parent) {
         const std::string pbase = Base(tag, p);
-        std::lock_guard<std::recursive_mutex> lk(Stripe(tag, p));
+        tree_detail::StripeLock lk(Stripe(tag, p));
         if (m_node->TileNative()) {
-            // A tile-native node's parents ARE the fold of their children (a box mean): never
-            // painted, never stored, never read here -- every ancestor gets a marker if it has
-            // none and a refetch notice, and that is the whole chain. (Reading the children at
-            // each level cost 4^m reads per paint: 44 s of prefill for one bucket.)
             TileRequest a = p;
             for (uint32_t m = r.mip + 1; m <= MaxMip(frame); ++m) {
                 const std::string ab = Base(tag, a);
@@ -887,18 +1280,15 @@ private:
                     !tree_detail::Exists(ab + ".fold")) {
                     tree_detail::Touch(ab + ".fold");
                 } else if (tree_detail::Exists(ab + ".void")) {
-                    tree_detail::Delete(ab + ".void");   // a child with content arrived
+                    tree_detail::Delete(ab + ".void");
                     tree_detail::Touch(ab + ".fold");
                 }
                 InvalidateAbove(tag, a);
                 a = TileRequest{a.face, a.mip + 1, a.x / 2, a.y / 2};
             }
-            return false;   // the marker chain IS the whole walk; nothing carries
+            return false;
         }
         if (tree_detail::Exists(pbase + ".fold")) {
-            // The parent is derived from its children: nothing to rewrite, but whoever holds
-            // it must refetch, and the level above sees the change through the rebuilt bytes.
-            // Siblings still unpainted stop the chain here; the last of them carries it up.
             return FoldFromChildren(frame, tag, p, parent, false) == Status::Content;
         }
         Held ph = PeekAt(pbase);
@@ -920,24 +1310,55 @@ private:
         if (parent.size() != TileBytes()) return false;
         const std::vector<uint8_t> before = parent;
         FoldQuadrant(frame, r, child, parent);
-        // M9bd: THE CHAIN STOPS WHERE THE CHILD STOPS MATTERING. A one-tile source folds into
-        // its parent and grandparent and is then invisible: if folding it in moves the parent
-        // by less than 4/255 anywhere, nothing is written and nothing above is touched -- the
-        // composite there keeps its reference to the base tree (the soak rule already left
-        // the small source out of that subset), and no coarse tile is materialized for it.
-        if (ph != Held::Void && Redundant(before, parent, kFoldRedundantTol)) return false;
+        if (ph != Held::Void && Redundant(before, parent, kFoldRedundantTol)) {
+            ++redundant;
+            return false;
+        }
         if (ph == Held::Void) tree_detail::Delete(pbase + ".void");
         tree_detail::WriteTile(pbase + ".bin", parent);
         ++folded;
         return true;
     }
+    static std::atomic<int>& FoldWalkFlag() {
+        static std::atomic<int> walk{kWalkOnce};
+        return walk;
+    }
+    static int FoldWalk() { return FoldWalkFlag().load(std::memory_order_relaxed); }
+    static std::function<void(const TileRequest&)>& FoldStepHook() {
+        static std::function<void(const TileRequest&)> step;
+        return step;
+    }
+
 public:
-    // M9bc: PREFILL THE PYRAMID. Realize every tile of a box at every mip from the root down,
-    // so the disk holds the whole chain before anyone asks: the residency manager's ancestor
-    // walk then reads files and never waits on a paint (no waves popping in). Returns tiles
-    // realized. The box is in the frame's uv; faces/planes are [f0, f1).
-    uint32_t Prefill(const ColorFrame& inherited, uint32_t f0, uint32_t f1, float u0, float v0,
-                     float u1, float v1) {
+    // The tiletree selftest's switch between the walks: kWalkOnce, the one every run uses;
+    // kWalkNested, the walk it replaced (the planted failure, and the byte reference); and
+    // kWalkChildOnly, the one-pass walk WITHOUT an absent parent's own paint rising -- measured,
+    // never used, to show which files it would change. Process-wide; nothing else sets it.
+    static constexpr int kWalkOnce = 0, kWalkNested = 1, kWalkChildOnly = 2;
+    static void FoldWalkForTest(int walk) { FoldWalkFlag().store(walk); }
+    // ...and its pause point: called on the painting thread after each level of either walk is
+    // published and announced, with no stripe held -- the instant a chain carries a version of
+    // a tile that another thread may replace before the level above is folded. Set only while
+    // no walk runs; empty in every run but the selftest's.
+    static void FoldStepForTest(std::function<void(const TileRequest&)> step) {
+        FoldStepHook() = std::move(step);
+    }
+
+    // M9bc: PREFILL THE PYRAMID. Realize every tile of a box at every mip from its finest to the
+    // root, so the disk holds the whole chain before anyone asks: the residency manager's
+    // ancestor walk then reads files and never waits on a paint (no waves popping in). Returns
+    // tiles realized. Faces/planes are [f0, f1).
+    //
+    // THE BOX IS WHOLE TILES OF MIP `finest`, CLOSED: [x0, x1] x [y0, y1]. A coarser mip's box
+    // is its image, x >> (m - finest), clamped to that mip's tiles -- integers throughout, and
+    // no level finer than the caller names. It was a uv box in floats, visited from mip 0: on
+    // the pyramid (2^24 tiles a side at mip 0) a modest box is 10^10 addresses there, a float
+    // uv cannot name every tile, and the 0.9999f clamp on the far edge dropped the last 1677
+    // columns of a face. For every box a float uv could state exactly, the image of its mip-0
+    // box IS what the float arithmetic gave at each mip (the tiletree selftest holds the two
+    // equal at every mip of the wave tree's box).
+    uint32_t Prefill(const ColorFrame& inherited, uint32_t f0, uint32_t f1, uint32_t finest,
+                     uint32_t x0, uint32_t y0, uint32_t x1, uint32_t y1) {
         const ColorFrame& frame = Resolve(inherited);
         const std::string tag = frame.Tag();
         EnsureFrame(tag);
@@ -945,19 +1366,18 @@ public:
         const uint32_t maxMip = MaxMip(frame);
         for (uint32_t f = f0; f < f1; ++f) {
             // Finest first: the level above is then the fold of what was just written.
-            for (uint32_t m = 0; m <= maxMip; ++m) {
-                const uint32_t dim = frame.faceDim >> m;
+            for (uint32_t m = finest; m <= maxMip; ++m) {
+                const uint32_t dim = frame.faceDim >> m, up = m - finest;
                 const uint32_t tw = (std::max)(1u, dim / frame.texW), th = (std::max)(1u, dim / frame.texH);
-                const uint32_t x0 = uint32_t((std::max)(0.0f, u0) * tw), y0 = uint32_t((std::max)(0.0f, v0) * th);
-                const uint32_t x1 = (std::min)(tw - 1, uint32_t((std::min)(0.9999f, u1) * tw));
-                const uint32_t y1 = (std::min)(th - 1, uint32_t((std::min)(0.9999f, v1) * th));
-                for (uint32_t y = y0; y <= y1; ++y) {
-                    for (uint32_t x = x0; x <= x1; ++x) {
+                const uint32_t bx0 = x0 >> up, by0 = y0 >> up;
+                const uint32_t bx1 = (std::min)(tw - 1, x1 >> up), by1 = (std::min)(th - 1, y1 >> up);
+                for (uint32_t y = by0; y <= by1; ++y) {
+                    for (uint32_t x = bx0; x <= bx1; ++x) {
                         const TileRequest r{f, m, x, y};
                         const std::string base = Base(tag, r);
                         if (PeekAt(base) != Held::Absent) { ++n; continue; }
                         std::vector<uint8_t> bytes;
-                        if (m == 0) {
+                        if (m == finest) {
                             if (Tile(frame, tag, r, bytes, nullptr) != Status::Transient) ++n;
                             continue;
                         }
@@ -1003,16 +1423,22 @@ private:
     // M9bd: rebuild a parent from its four children (content, void or markers themselves).
     // Transient if any child is not ready; Void if none has content. `materialize` writes the
     // result as bytes and retires the marker -- for deep levels that are actually served, so
-    // a mip-6 read is one file and not 4^6 of them.
+    // a mip-6 read is one file and not 4^6 of them. `known`, when given, is one child's bytes
+    // as the fold walk carries them: the version it is folding, not whatever was last written.
     Status FoldFromChildren(const ColorFrame& frame, const std::string& tag, const TileRequest& r,
-                            std::vector<uint8_t>& out, bool materialize) {
+                            std::vector<uint8_t>& out, bool materialize,
+                            const TileRequest* known = nullptr,
+                            const std::vector<uint8_t>* knownBytes = nullptr) {
         if (r.mip == 0) return Status::Transient;
         out.assign(TileBytes(), 0);
         bool any = false;
         for (uint32_t k = 0; k < 4; ++k) {
             const TileRequest c{r.face, r.mip - 1, r.x * 2 + (k & 1), r.y * 2 + (k >> 1)};
             std::vector<uint8_t> cb;
-            const Status s = Tile(frame, tag, c, cb, nullptr);
+            const bool isKnown = known && knownBytes && known->face == c.face &&
+                                 known->mip == c.mip && known->x == c.x && known->y == c.y;
+            if (isKnown) cb = *knownBytes;
+            const Status s = isKnown ? Status::Content : Tile(frame, tag, c, cb, nullptr);
             if (s == Status::Transient) return Status::Transient;
             if (s != Status::Content || cb.size() != TileBytes()) continue;
             FoldQuadrant(frame, c, cb, out);
@@ -1039,6 +1465,7 @@ private:
     // A tile of this node changed: consumers holding it refetch; ancestors' cached composites
     // of the same address are dropped (their key folds what children HOLD, not what they say).
     void InvalidateAbove(const std::string& tag, const TileRequest& r) {
+        ++tree_detail::Io().announces;
         if (onChanged) onChanged(tag, r);
         if (m_parent) m_parent->DropCachedAddress(tag, r);
     }
@@ -1267,6 +1694,11 @@ private:
     ColorSource* m_raw = nullptr;
     std::vector<std::unique_ptr<TileTree>> m_kids;
     std::string m_id, m_root;
+    std::string m_trees;   // the folder m_root is in (the constructor's `trees`)
+    static std::string& TreeRootRef() {
+        static std::string trees = "cache\\trees";
+        return trees;
+    }
     std::map<std::string, std::shared_ptr<TileArchive>> m_arcs;
     std::mutex m_arcMx;
     // THE ADDRESS STRIPES, replacing the per-node m_foldMx. Owned by the ROOT so every node of
@@ -1412,5 +1844,12 @@ inline void AuditTileTree(Compositor& comp, int channel, TileTree& tree, const C
         a.texels ? 100.0 * double(a.difTexels) / double(a.texels) : 0.0, a.alphaDif,
         a.skippedStale);
 }
+
+// The tree made fit for a deep pyramid, gated (compose/TileTreeTest.cpp), on synthetic sources
+// under scratch roots in out\treetest: the stripe count and its planted failure, a 25-level
+// chain against an independent fold, today's depth old walk against new byte for byte, twelve
+// threads against the serial tree, the tile-native marker walk and Prefill's integer box, the
+// stripe hash, the archive's offsets, and the fetch provider's refusals.
+bool RunTileTreeSelfTest();
 
 }  // namespace ga

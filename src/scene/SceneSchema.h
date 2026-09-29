@@ -18,10 +18,12 @@
 //                  data/wave_scene.json overlays through `include` (the M8 law survives:
 //                  authored if absent, never clobbered, hot-reloaded)
 //      streaming  {tileBudget, predictEvery, directStorage, colorTrees, gisGate, seafloor,
-//                  exposure, ringLoads}       -- scene state: they change the picture through
-//                                                residency
+//                  exposure, ringLoads, treeRoot}   -- scene state: they change the picture
+//                                                through residency (treeRoot: where the tile
+//                                                trees are, cache/trees unless a tool's
+//                                                scratch folder is named)
 //      capture    {headless, width, height, frames, dump, hdr, mp4, railDir,
-//                  settle{sync, hold, exact, clearChurn}}
+//                  settle{sync, hold, exact, clearChurn}, residencyAudit}
 //      views      [{name, at, fovY, gauge, nearZ, reversedZ, target, viewport{}, follow{}}]
 //                                                    -- `at` in the placement sugar; absent
 //                                                       means the engine's default for the mode.
@@ -41,10 +43,14 @@
 //      effects    [{name, type, enabled, ...}]  -- typed through EffectSchemas (slice.plane)
 //      layers     [{name, enabled, ...}]        -- the registration order; typed by name
 //      nodes      [{name, type, enabled, at, children, ...}]   -- typed through ComponentSchemas
+//      prune      {mode, root, ageDays, purgeDays, confirm}  -- the tree-prune tool's keys
 //      tools      [{name, args}]                -- the one-shot modes a scene runs (--tool)
 //
 //  `tools` is the one section past the plan's list: the recipe table's selftest row is
-//  "--tool selftest", and a scene file that runs a tool is that recipe's file form.
+//  "--tool selftest", and a scene file that runs a tool is that recipe's file form. `prune` is
+//  the first tool whose configuration is scene keys rather than one args string, because one of
+//  its keys is a confirmation (compose/TreePrune.h) and an args string has no names to confirm
+//  with.
 //
 //  Every Number here carries the unit its legacy field is in (degrees for a compass azimuth,
 //  hours for a spin-up, frames for a hold), so a file may say "7 km" or "12 kn" and the value
@@ -173,6 +179,7 @@ struct StreamingSection {
     uint32_t tileBudget = 1000, predictEvery = 3;
     bool directStorage = true, colorTrees = true, gisGate = true, seafloor = true,
          exposure = true, ringLoads = true;
+    std::string treeRoot = "cache/trees";   // the folder the tile trees live in (TileTree.h)
 };
 struct SettleProps {
     bool sync = false;
@@ -184,6 +191,9 @@ struct CaptureSection {
     uint32_t width = 1600, height = 900, frames = 0;
     std::string dump, hdr, mp4, railDir;
     SettleProps settle;
+    // The residency audit every N turns (hal/ResidencyAudit.h); 0 = off, and then it costs one
+    // branch a turn. What the run records about its residency, beside what it records on screen.
+    uint32_t residencyAudit = 0;
 };
 // M12 step 5b: the rectangle of the target a view records into. Zero width or height = the
 // whole target, which is what every recorded frame means; an OFFSET is declarable and the
@@ -308,6 +318,16 @@ struct ToolProps {
     std::string name;
     std::string args;
 };
+// THE PRUNE TOOL (compose/TreePrune.h, --tool tree-prune). The mode is `list` unless the scene
+// says otherwise, and `retire` and `purge` act only when `confirm` names the root's full path as
+// the listing printed it; the ages are days. `root` "" is cache\trees.
+struct PruneSection {
+    int mode = 0;                     // list | retire | purge
+    std::string root;
+    double ageDays = 30.0;            // a stamp older than this is STALE (unstamped: twice it)
+    double purgeDays = 7.0;           // a retired batch older than this is deleted by purge
+    std::string confirm;
+};
 
 // The whole document as one prototype (the lists carry no fields).
 struct SceneDocument {
@@ -321,6 +341,7 @@ struct SceneDocument {
     StreamingSection streaming;
     CaptureSection capture;
     RailsSection rails;
+    PruneSection prune;
 };
 
 // The root schema: every section as an Object or a List, in the file's order.

@@ -47,6 +47,7 @@
 // ================================================================================================
 #pragma once
 
+#include "core/ExitTrail.h"
 #include "compose/ExposurePage.h"
 #include "compose/HeightPage.h"
 #include "compose/ExposureSource.h"
@@ -102,6 +103,9 @@ struct Assembly {
     TideModel model;
     Window window;   // Create()d only when not headless
     Gpu gpu;
+    // THE SHUTDOWN TRAIL (core/ExitTrail.h): each mark is declared right after the member it
+    // names, so it says so right before that member's destructor runs.
+    ExitMark exitGpu{"assembly: ~Gpu -- the device, its queue and what it still owns"};
     // M12 step 4a: THE SHIPPED SURFACE (compose/SurfaceFrame.h) -- the planet radius, the
     // tangent frame's rows, the five lattices, the tenants' ids and page slices, the stencil
     // flag -- built once in Assemble() (SurfaceFrame::Merrimack) and read by both fills.
@@ -112,6 +116,7 @@ struct Assembly {
     SurfaceFrame surface;
     RendererDesc rd;
     Renderer renderer;
+    ExitMark exitRenderer{"assembly: ~Renderer -- the layers it owns and their atlases' heaps"};
     FieldSet fields;
     std::unique_ptr<SkyLayer> skyOwned;   // handed to the renderer; `sky` keeps the handle
     SkyLayer* sky = nullptr;
@@ -169,6 +174,8 @@ struct Assembly {
     VesselLayer* vesselLayer = nullptr;   // M9bq: the hulls, drawn from their specs
     double planetR = 0.0;
     ResidencyManager resMgr;
+    ExitMark exitResMgr{"assembly: ~ResidencyManager -- Shutdown again (waits for any load still "
+                        "inside it), then the tenants' reserved resources and the pool's heaps"};
     MarsBinProvider marsDiff, marsNorm;
     GoogleTileProvider googleTiles;
     // ---- M6i: THE LAYER COMPOSITOR's color side (the height side moved above the
@@ -217,6 +224,8 @@ struct Assembly {
     // when a bucket rolls; they hold their own reference until their paint returns.
     std::shared_ptr<std::shared_ptr<TileTree>> exposureTree;
     int exposureT = -1;
+    ExitMark exitTrees{"assembly: the tile trees -- the exposure holder, the height tree, the "
+                       "megatexture tree (a load still painting holds only its own reference)"};
     // M12 step 3e: THE FOUR DECLARATIONS (hal/Tenant.h) -- the height, exposure, colour and
     // survey tenants as TenantDescs, each Sparse()'d into resMgr and Bind()'d to the tree that
     // feeds it. Declared after the trees they bind (their providers and the exposure holder
@@ -237,6 +246,9 @@ struct Assembly {
     // they now destruct first, before gpu (the statics used to outlive the device).
     TileIndex idxColorCube, idxColorWin, idxColorDet, idxHeightCube;
     TileStream tileStream;
+    // The last member dies first: the trail's first line inside ~Assembly.
+    ExitMark exitStream{"assembly destructs, last member first: ~TileStream -- the DirectStorage "
+                        "queue, its staging buffer and file handles (nothing drains its reads)"};
 
     Assembly() = default;
     Assembly(const Assembly&) = delete;

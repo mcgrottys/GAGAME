@@ -12,6 +12,14 @@ FRAME. The bank's kernel fills its texels by that law. The pixel stage must read
                                        c  = (R up_anchor - org) . e + off, in double, wrapped to
                                             the cascade's period before it is cast
 
+    WALL       the proposed form as the shader now runs it (claude/pixel-water-float-wall): the
+               point it is handed is no longer made from the float direction but from the float
+               wall (REVIEW finding 42) -- the eye plus the mesh stage's undisplaced geoid point
+               (VsOut.geo), built from the meshlet record's doubles -- so x and z are the place
+               that was MEANT, each one float, and it is judged against that place. upT.y is still
+               the float direction's; it only scales the drop below the plane. (The eye stands at
+               the anchor here; an eye at the helm adds one float rounding of eye + geo, ~1e-5 m.)
+
 Errors are taken modulo the cascade's period, since the patch is periodic. float32 is emulated
 operation by operation. No numpy.
 """
@@ -98,7 +106,7 @@ def run(name, lat, lon, reach, samples=4000, seed=5):
     c_e = dot(tuple(a - o for a, o in zip(anchor, org)), e) + off[0]
     c_n = dot(tuple(a - o for a, o in zip(anchor, org)), nn) + off[1]
 
-    worst = {"today": [0.0] * 3, "new": [0.0] * 3, "grain": 0.0}
+    worst = {"today": [0.0] * 3, "new": [0.0] * 3, "wall": [0.0] * 3, "grain": 0.0}
     for _ in range(samples):
         x = (rnd.random() * 2 - 1) * reach
         z = (rnd.random() * 2 - 1) * reach
@@ -116,6 +124,8 @@ def run(name, lat, lon, reach, samples=4000, seed=5):
                              math.sqrt(sum((a - b) ** 2 for a, b in zip(p, p_true))))
         ref = (dot(tuple(a - o for a, o in zip(p, org)), e) + off[0],
                dot(tuple(a - o for a, o in zip(p, org)), nn) + off[1])
+        ref_meant = (dot(tuple(a - o for a, o in zip(p_true, org)), e) + off[0],
+                     dot(tuple(a - o for a, o in zip(p_true, org)), nn) + off[1])
         # ---- today: the planet-frame direction in float32, turned to the tangent frame, times R,
         # against planet-frame rows
         upt = (dot32(tuple(f32(c) for c in east_a), up32),
@@ -131,6 +141,10 @@ def run(name, lat, lon, reach, samples=4000, seed=5):
         q = (wx, qy, wz)
         e32 = tuple(f32(c) for c in e_t)
         n32 = tuple(f32(c) for c in n_t)
+        # ---- the wall: the same formula on the float wall's point (x, z as meant, one float each)
+        gx, gz = f32(x), f32(z)
+        gy = f32(-f32(f32(gx * gx) + f32(gz * gz)) / f32(f32(R) * f32(1.0 + upt[1])))
+        g = (gx, gy, gz)
         for k, period in enumerate(PERIODS):
             worst["today"][k] = max(worst["today"][k], abs(wrap(t_u - ref[0], period)),
                                     abs(wrap(t_v - ref[1], period)))
@@ -140,15 +154,21 @@ def run(name, lat, lon, reach, samples=4000, seed=5):
             p_v = f32(dot32(q, n32) + cn)
             worst["new"][k] = max(worst["new"][k], abs(wrap(p_u - ref[0], period)),
                                   abs(wrap(p_v - ref[1], period)))
+            w_u = f32(dot32(g, e32) + ce)
+            w_v = f32(dot32(g, n32) + cn)
+            worst["wall"][k] = max(worst["wall"][k], abs(wrap(w_u - ref_meant[0], period)),
+                                   abs(wrap(w_v - ref_meant[1], period)))
     ang = math.degrees(math.acos(max(-1.0, min(1.0, dot(e, east_a)))))
     print(f"{name}: the chart cell's centre is {centre_km:.0f} km from the anchor; its east is "
           f"{ang:.2f} deg from the anchor's")
     print(f"    in the tangent frame the chart's east is ({e_t[0]:+.4f}, {e_t[1]:+.4f}, {e_t[2]:+.4f});"
           f" today's rows say ({e[0]:+.4f}, {e[1]:+.4f}, {e[2]:+.4f})")
-    print(f"    the float32 direction's own grain, which both forms inherit: {worst['grain']:.3f} m")
+    print(f"    the float32 direction's own grain, which today and proposed inherit and the wall does "
+          f"not: {worst['grain']:.3f} m")
     for k, period in enumerate(PERIODS):
         print(f"    cascade {k} ({period:5.0f} m patch), within {reach:.0f} m: worst error  today "
-              f"{worst['today'][k]:9.3f} m   proposed {worst['new'][k]:9.6f} m")
+              f"{worst['today'][k]:9.3f} m   proposed {worst['new'][k]:9.6f} m   "
+              f"wall {worst['wall'][k]:9.6f} m")
 
 
 if __name__ == "__main__":

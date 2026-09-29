@@ -46,6 +46,7 @@ struct SurfaceFrame;
 struct WaterSceneConfig;
 namespace scene {
 class Entity;
+struct PruneSection;
 }
 }  // namespace ga
 
@@ -56,6 +57,10 @@ namespace ga::app::tools {
 // --pack-tiles: pack the composed cache into per-realization archives; exit 0. (M12 step
 // 4a: the realizations are the surface's lattices; no scene exists, so main() declares it.)
 int RunPackTiles(const Options& opt, const SurfaceFrame& surface);
+// --tree-prune (--tool tree-prune): the tile trees' tag folders listed by last use, and retired
+// or purged only when the scene's prune.confirm names the root (compose/TreePrune.h). 0 listed
+// or done, 2 refused with nothing changed, 1 stopped at a failed move or delete.
+int RunTreePrune(const scene::PruneSection& prune);
 // --load-field PATH: a file through the loader plugin into a sparse bank; report; exit.
 int RunLoadField(const Options& opt);
 // --selftest: the twelve gates; exit 0 (pass) / 1 (fail).
@@ -89,9 +94,11 @@ void RunSweUv(const Options& opt, Gpu& gpu, const BathyModel& bathy, SweSolver& 
 // --export SPEC: a composed channel out through the manager; exit with the export's code.
 int RunExport(const Options& opt, Gpu& gpu, Compositor& compositor, int hgtCh,
               ResidencyManager& resMgr, int colCh, const SurfaceFrame& surface);
-// --warm-inlet: pre-cache the composed pyramids. Falls through into the frame loop.
+// --warm-inlet: pre-cache the composed pyramids. Falls through into the frame loop. winSlice is
+// the colour tenant's z14 page (SurfaceFrame::winSlice, read off the declaration).
 void RunWarmInlet(const Options& opt, Gpu& gpu, const Compositor& compositor,
-                  ResidencyManager& resMgr, int winTenant, int hgtTenant, int hgtWinTenant);
+                  ResidencyManager& resMgr, int winTenant, uint32_t winSlice, int hgtTenant,
+                  int hgtWinTenant);
 
 // ---- After the frame loop (the scene is live; the run tears down normally afterwards).
 

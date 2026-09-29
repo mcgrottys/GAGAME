@@ -24,6 +24,7 @@ add_executable(gagame
   src/app/Tools/WaterMap.cpp
   src/app/Tools/GisDump.cpp
   src/app/Tools/TreeAudit.cpp
+  src/app/Tools/TreePrune.cpp
   src/app/Tools/FidelityMap.cpp
   src/app/Tools/OceanProbe.cpp
   src/app/Tools/SweUv.cpp
@@ -50,6 +51,7 @@ add_executable(gagame
   src/core/Image.cpp
   src/hal/TileAtlas.cpp
   src/hal/Residency.cpp
+  src/hal/ResidencyAudit.cpp
   src/hal/Tenant.cpp
   src/core/TileProviders.cpp
   src/core/ThreadTest.cpp
@@ -57,6 +59,9 @@ add_executable(gagame
   src/compose/Compositor.cpp
   src/compose/SurfaceFrame.cpp
   src/compose/ComposeTest.cpp
+  src/compose/TreePrune.cpp
+  src/compose/TreePruneTest.cpp
+  src/compose/TileTreeTest.cpp
   src/compose/Sources.cpp
   src/compose/GisMask.cpp
   src/compose/GisStencil.cpp
