@@ -110,16 +110,27 @@ cbuffer GlobeCb : register(b1) {
     float4 gGateA;
     float4 gGateBox[28];
     // M13 step 2: the cascade sea's plane at the eye (sim/WaveChart.h) -- see GlobeLayer.h.
-    float4 gChartOrg;   // the cell's centre on the sphere (m); w = 1 when these rows are live
-    float4 gChartE;     // its east; w = the cell's offset along east
-    float4 gChartN;     // its north; w = the offset along north
+    // Said in the TANGENT frame about the tangent point, per cascade (ChartUOf below).
+    float4 gChartOrg;   // xyz = the constant along east, wrapped to cascade 0 / 1 / 2's patch;
+                        // w = 1 when these rows are live
+    float4 gChartE;     // the cell's east in the tangent frame; w = the constant along north,
+                        // wrapped to cascade 0's patch
+    float4 gChartN;     // its north in the tangent frame; w = the same, cascade 1
+    // Appended at the END (priors 22): the constant along north, wrapped to cascade 2; yzw spare.
+    float4 gChartCn;
 };
 
-// A surface point's coordinate in that plane: the tangent projection about the cell's own origin
-// plus its offset -- WaveChart::UOf, said in HLSL. `p` is the point in the PLANET frame (metres).
-float2 ChartUOf(float3 p) {
-    const float3 r = p - gChartOrg.xyz;
-    return float2(dot(r, gChartE.xyz) + gChartE.w, dot(r, gChartN.xyz) + gChartN.w);
+// A point's coordinate in that plane, for cascade c: WaveChart::UOf, u = (P - org) . e + off,
+// said about the TANGENT POINT A = R up. The chart's law is written in the planet frame and this
+// stage holds its points in the tangent frame, so the CPU turns the chart's axes into the tangent
+// frame and takes the constants (A - org) . e + off there, in doubles, wrapped to each cascade's
+// patch before the cast (the patches are periodic, and a constant of 1e5 m has a float grain of
+// 8 mm). `q` is the point less A, in tangent axes. (REVIEW finding 7: handed a tangent-frame point
+// against the planet-frame rows, this read a coordinate unrelated to the one the bank's kernel
+// filled its texels by -- tools/hierarchy/ripple_chart.py.)
+float2 ChartUOf(float3 q, uint c) {
+    const float cn = (c == 0u) ? gChartE.w : ((c == 1u) ? gChartN.w : gChartCn.x);
+    return float2(dot(q, gChartE.xyz) + gChartOrg[c], dot(q, gChartN.xyz) + cn);
 }
 
 // ---- M10: the level being drawn (LoadLevel) --------------------------------------------------
@@ -626,6 +637,14 @@ struct VsOut {
     // M10: which Droste level drew this fragment -- a slot in the level table. rel above is in
     // THAT level's own frame (the gauge), so PsMain must load the level before it reads rel.
     nointerpolation uint lvl : TEXCOORD5;
+    // THE WATER'S SAMPLE POINT (REVIEW finding 42): the undisplaced point of the geoid under this
+    // fragment, eye-relative in the level's own tangent frame. The water is read at the level's
+    // eye plus this -- the bank's rings and the ripples -- and not at a point made from dir, a
+    // float32 direction whose own grain is about 0.27 m of ground at the Merrimack: turning it
+    // into the tangent frame cancels two numbers near one half to find one near 1e-5, and a helm
+    // pixel is 1 to 3 cm across. The mesh stage makes this from a fine meshlet's
+    // double-precision anchor and small offsets, as it makes rel.
+    float3 geo : TEXCOORD6;
 };
 
 #ifndef GA_MESH_PATH
@@ -679,6 +698,9 @@ VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
     // camera -- the same cancellation profile the planet frame had, now in ONE shared frame.
     const float3 dirT = CsToTangent(dir);
     o.rel = dirT * (gGlo.x + max(h, 0.0f) * gGlo.y) - gCamAbs.xyz;
+    // The water's sample point, undisplaced: made the way rel is made, with rel's precision --
+    // this path has no double-precision anchor to make it from.
+    o.geo = dirT * gGlo.x - gCamAbs.xyz;
     o.wcol = WaterVertexColor(dir, o.rel, h);   // M9bg: the sea, shaded here and nowhere else
     o.pos = mul(float4(o.rel, 1.0f), gViewProj);
     return o;
@@ -810,12 +832,13 @@ WaterOptics SampleWaterOptics(float latDeg, float lonDeg) {
 // Every screen derivative this needs is taken in PsMain under uniform control flow and handed
 // in: the footprint FRAME {fpxW, fpzW}, whose per-axis Gaussian at a band's wavenumber is that
 // band's exact expected attenuation (ALGEBRA "ripple"; an isotropic scalar erred x3000 at
-// grazing). Under-recovered energy sheds into sigma^2 -- never aliased, never deleted.
-float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 rel, float hp,
-                       float latDeg, float lonDeg, float lod, float day, float footPx,
+// grazing). Under-recovered energy sheds into sigma^2 -- never aliased, never deleted. The
+// point the water is read at, wxz, is handed in too: PsMain forms it once from VsOut.geo, and
+// the frame is its screen derivative.
+float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 rel, float2 wxz,
+                       float hp, float latDeg, float lonDeg, float lod, float day, float footPx,
                        float2 fpxW, float2 fpzW) {
     const float3 v = normalize(-rel);
-    const float2 wxz = (upT * gGlo.x).xz;
 
     // ---- THE VOLUME'S OPTICS. K_d and the scattering endpoint are MADE by chlorophyll,
     // sediment and CDOM, so both are measurements (ALGEBRA "optics"). Where the retrieval is
@@ -842,6 +865,7 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     float3 nSmooth = upT;    // ring-texel band limit -> the body's diffuse
     float3 nPix = upT;       // + the bands this pixel resolves -> glint, Fresnel, both rays
     float lvlW = 0.0f;       // live water level here (tide + solver); 0 = geoid far afield
+    float dispW = 0.0f;      // the wave's own vertical displacement here; 0 where no ring reads
     {
         float4 bD, bP, bDet;
         float bT;
@@ -849,6 +873,7 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
         if (BankSampleT(wxz, bD, bP, bDet, bT, bDdx, bDdz)) {
             s2 = max(bP.y, 0.0015f);
             lvlW = bP.x;
+            dispW = bD.y;
             // The wave normal: the tangent bivector's dual, analytic from the reconstruction
             // kernel (priors 21 -- the derivative is still taken at the DATA's grain, because
             // the kernel's 4x4 support IS that grain; what changed is that it is now
@@ -864,6 +889,11 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
             // (wPix - wRing). At altitude wPix <= wRing and every term below vanishes: the
             // far field is untouched, and the tiers stay telescoped because sigma^2 takes
             // back exactly what the slope does not.
+            //
+            // Where the chart reads this point: the geoid point less the tangent point, in
+            // tangent axes (ChartUOf). Its drop below the plane is R (upT.y - 1), written as
+            // -(x^2 + z^2) / (R (1 + upT.y)) so that nothing near R cancels.
+            const float3 qA = float3(wxz.x, -dot(wxz, wxz) / (gGlo.x * (1.0f + upT.y)), wxz.y);
             [unroll] for (uint c = 0; c < 3; ++c) {
                 const float lam = 6.2831853f / gBankFold[c];    // M9c: the band's ENERGY, not
                 const float wRing =                             // its geometric midpoint
@@ -880,15 +910,18 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
                 // lattice's chart at the eye), not on the root's tangent plane -- otherwise
                 // these sub-ring bands are a second realization laid over the first, and at a
                 // carried place they are a different sea entirely. The slopes come back in the
-                // chart's axes and are turned into this pixel's east/north below.
+                // chart's axes and are turned into this pixel's east/north below. The chart is
+                // the CAMERA's own cell for every level: a world seen through a gate still reads
+                // it, which is the wrong cell there -- known, and not mended here.
                 const float2 cuvP = (gChartOrg.w != 0.0f)
-                                        ? ChartUOf(upT * gGlo.x) / gBankB[c]
+                                        ? ChartUOf(qA, c) / gBankB[c]
                                         : wxz / gBankB[c];
                 const float4 dv = gTex[gBankU2[c + 1u]].SampleLevel(sLinearWrap, cuvP, 0);
                 float2 slope = float2(dv.x, dv.y);
                 if (gChartOrg.w != 0.0f) {
                     // The chart's axes said in this pixel's own east/north (a rotation under two
-                    // degrees: the two frames are a cell apart at most).
+                    // degrees: the two frames are a cell apart at most). Both are tangent-frame
+                    // vectors, the rows since the CPU turned them.
                     const float2 R0 = float2(dot(gChartE.xyz, east), dot(gChartN.xyz, east));
                     const float2 R1 = float2(dot(gChartE.xyz, north), dot(gChartN.xyz, north));
                     slope = float2(dot(R0, float2(dv.x, dv.y)), dot(R1, float2(dv.x, dv.y)));
@@ -956,16 +989,36 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     if (footPx < 30.0f && depthW > 0.01f && depthW < 90.0f) {
         // Under 30 m footprints the march MATTERS -- looking through a wave face shifts the
         // bar, and that shift is the whole reason this path is per pixel.
-        const float3 Pw = sLvlCamAbs + rel;   // M10: the level's own eye (the gauge)
-        const float muD = max(-dot(tDir, upT), 0.10f);
+        //
+        // THE CAST IS MADE IN SMALL NUMBERS (REVIEW finding 6). It used to march the drawn
+        // point sphere-centred -- the level's eye plus rel, 6.4e6 m in float, whose ulp is half a
+        // metre -- and take the radius off its length, which put the ray's length out by up to
+        // 1.0 m and its landing by 0.76 m (tools/hierarchy/refraction_cast.py). Split along this
+        // pixel's radial and across it, the ray's point is an altitude and a direction, and both
+        // are small numbers:
+        //     alt(s) = a0 + s mu + s^2 |tPerp|^2 / (2 (R + a0))
+        //     dir(s) = normalize(upT + s / (R + alt(s)) tPerp)
+        // -- the sphere to second order in s / R, which inside the clamp's 140 m leaves out less
+        // than a micrometre. a0 is the altitude of the surface the ray leaves: the live level plus
+        // the wave's own vertical displacement here, the two things the drawn point carried. The
+        // same start, the same two secant steps and the same clamp; no eye enters, and the gauge
+        // is kept because upT and a0 are the level's own. The harness puts the ray's length within
+        // 5 micrometres of doubles and its landing within 22.
+        const float mu = dot(tDir, upT);            // along this pixel's radial; negative is down
+        const float3 tPerp = tDir - mu * upT;       // and across it
+        const float tPerp2 = dot(tPerp, tPerp);
+        const float a0 = lvlW + dispW;
+        const float twoR = 2.0f * (gGlo.x + a0);    // 2 (R + a0): the sphere's fall under the ray
+        const float muD = max(-mu, 0.10f);
         float sP = depthW / muD;
         [unroll] for (int itr = 0; itr < 2; ++itr) {
-            const float3 Pb = Pw + tDir * sP;
-            const float gap =
-                (length(Pb) - gGlo.x) - ComposedHeight(CsToPlanet(normalize(Pb)), lod);
+            const float altP = (a0 + sP * mu) + sP * sP * tPerp2 / twoR;
+            const float3 dirP = normalize(upT + (sP / (gGlo.x + altP)) * tPerp);
+            const float gap = altP - ComposedHeight(CsToPlanet(dirP), lod);
             sP = clamp(sP + gap / muD, 0.3f, 140.0f);
         }
-        bedDir = CsToPlanet(normalize(Pw + tDir * sP));
+        const float altB = (a0 + sP * mu) + sP * sP * tPerp2 / twoR;   // at the landing
+        bedDir = CsToPlanet(normalize(upT + (sP / (gGlo.x + altB)) * tPerp));
         sDown = sP;
     }
     const float3 Tw = exp(-wq.kd * (sDown + depthW));
@@ -1077,8 +1130,14 @@ float4 PsMain(VsOut i) : SV_Target {
     // footprint is a FRAME {fpxW, fpzW}, not a scalar: a grazing sliver resolves across-view
     // ripples while along-view ones alias into crawling shimmer, and only the frame's per-axis
     // Gaussian can say so (ALGEBRA "ripple"; an isotropic max erred x3000 at grazing).
-    const float2 fpxW = ddx((upT * gGlo.x).xz);
-    const float2 fpzW = ddy((upT * gGlo.x).xz);
+    // THE WATER'S SAMPLE POINT, formed once (REVIEW finding 42): the level's eye plus the
+    // undisplaced geoid point the mesh stage carried. It is the same point as the (upT * R).xz
+    // it replaces -- for a point G of the geoid, (upT R).xz = G.xz = eye.xz + (G - eye).xz --
+    // made from the record's doubles instead of from dir's third of a metre of grain, so the
+    // footprint frame, its screen derivative, is the pixel's own ground and not that staircase.
+    const float2 wxzW = sLvlCamAbs.xz + i.geo.xz;
+    const float2 fpxW = ddx(wxzW);
+    const float2 fpzW = ddy(wxzW);
     const float footPxW = length(i.rel) * gWavesB.z;
 
     const float lod = ComposedHeightLod(length(i.rel), gWavesB.z);
@@ -1395,8 +1454,8 @@ float4 PsMain(VsOut i) : SV_Target {
     // of a shoreline pixel is untouched by the choice.
     float3 wcol = i.wcol;
     if (gOptU.w != 0u && gStreamF.z < 0.5f && landness < 0.999f) {
-        wcol = WaterPixelColor(up, upT, east, north, i.rel, hp, degrees(lat), lonDeg, lod, day,
-                               footPxW, fpxW, fpzW);
+        wcol = WaterPixelColor(up, upT, east, north, i.rel, wxzW, hp, degrees(lat), lonDeg, lod,
+                               day, footPxW, fpxW, fpzW);
     }
     if (gStreamF.z < 0.5f) col = lerp(wcol, col, landness);
 
