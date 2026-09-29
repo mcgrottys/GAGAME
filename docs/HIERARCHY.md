@@ -770,6 +770,23 @@ reports lines added and lines removed beside its gate.
 - and the water written twice by hand: the kernel and the hull's twin become two executions of
   one description (4.11), so the second is generated and not maintained.
 
+**Beside the refactor: what no shipped scene runs.** A read-only survey of `main` at
+`71e3a33` (`docs/REMOVAL_LEDGER.md`, 2026-09-29) counted the code reached only by a switch
+no shipped scene sets, or by nothing: 3,876 lines beside the residency manager, 4.7 % of the
+82,883 in `src` and `shaders`. It is a menu, and each row says what would be lost.
+
+- **Five rows lose nothing that runs,** some 550 lines: a layer whose `Render` returns
+  before any draw and whose shader is compiled at every boot, a class only the selftest
+  calls, a queue nothing fills, seven shader functions nothing calls, and a member written
+  and never read. They are being removed in a scratch tree, behind the gates a removal can
+  be held to: every stage's bytecode and six stills, pixel for pixel.
+- **The rest each lose something,** and the largest are the AIS fleet and its closed-form
+  wakes (796 lines), the sea's own tessellated sheet (779) and the Gulf of Maine map (438).
+  They wait for the owner's word, row by row.
+- **The sources by file add one more** (4.20): when a source paints its own level and the
+  tree makes the others, each source's chain of levels, its choice among them and the code
+  that named a dataset go with it.
+
 ### 4.13 Maps, lenses and the GIS bank
 
 A map in the game is a **view with a lens**, and it reads the tiles the game reads (the owner,
@@ -1879,6 +1896,83 @@ one first; and the plane orthos' projection is UTM zone 19 in the code. So:
 
 Being built, the first four and the fifth, in a scratch tree on the blocks of 4.17.
 
+**A source paints its own level, and the tree makes the others.** The owner, 2026-09-29:
+when a raster of any size is inserted, the tree is to make the lower levels, for itself and
+for the rendering. Most of what that needs is in the tree, and one node uses it.
+
+What the code does today, read that day:
+
+- **Every leaf is asked at every level.** A leaf's tile is painted by sampling its source
+  at the tile's own grain (`TileTree.h:926-972`, `Compositor.cpp:301-317`), so every
+  source keeps a chain of levels of its own and picks among them: the plane orthos'
+  (`Sources.cpp:265`), and the raster by file, which decodes its file whole into memory to
+  make one. A raster of 10,000 by 10,000 costs some 530 MB there, and a file past 4 GB is
+  refused.
+- **A parent is the source's resample until a child is painted, and then the child is
+  folded into it** (`TileTree.h:1009-1017`, M9bb). So what a coarse tile holds depends on
+  what has been flown under it.
+- **One node is otherwise.** The wave field paints whole tiles (`TileNative`,
+  `DomainSource.h:98-107`). Its parents are the fold of their children and are never
+  painted (`TileTree.h:1215-1251`), and `Prefill` builds its chain from a finest level to
+  the root (`TileTree.h:1347-1421`, called at `FrameLoop.cpp:2676`). A parent of that kind
+  is folded again from its children each time it is asked for. `FoldFromChildren` can keep
+  what it folds (`materialize`, `TileTree.h:1423-1454`), and no caller asks it to.
+
+The law, in three clauses:
+
+1. **A source paints its own level and no other:** the first level of the lattice whose
+   texel is no coarser than the source's grain, so nothing of the source is lost. It reads
+   its file by the window a tile covers.
+2. **Every coarser level of that source is the fold of the level below,** made when all
+   four children stand, and kept.
+3. **A finer level is the part of the level above, magnified.** It is asked for only under
+   the edge of a finer source, where a composite needs what lies beneath, and it is not
+   kept.
+
+What follows from it:
+
+- **Any size.** The work is by the window and in proportion to the ground asked for. No
+  file is held in memory, and none is decoded whole.
+- **A source is smaller.** Its chain of levels, its choice among them and its filter go.
+  What is left is a place, a grain and a window read.
+- **A tile is a function of the file.** Not of what was flown, nor of the order tiles
+  landed in.
+- **After the first pass the tree is the raster.** Neither the file nor a copy of it is
+  needed to draw. The CPU reads the finest level, and the levels above are the GPU's.
+- **Inserting is a scene entry and a pass.** The pass paints the leaves under the raster's
+  footprint and folds upward. It is a tool a scene names, and the engine runs it behind
+  the frame at the first sight of a file whose tree is not whole. A raster is drawn when
+  its tiles are whole (4.19's law), so it arrives by levels and never half painted.
+
+What it costs, by arithmetic and not yet measured: a level's texel lies between the
+source's grain and half of it on each axis, so a raster's own level holds between one and
+four times its texels, four bytes each; the levels above add a third (section 6: 3,400
+ancestors to 10,000 leaves). One plane ortho of 10,000 by 10,000 at 15 cm falls on rung
+12, whose texel at the Merrimack is some 13 cm by 10 cm and askew (section 6's 523 m by
+395 m at 103 degrees, at rung 0): 1.9 texels of the level to one of the file, about 11,400
+tiles and 0.75 GB, and 1.0 GB with its ancestors, where the file is 0.3 GB of RGB. A tile
+kept compressed is a later decision and would take most of that back.
+
+What it does not change. A source that fetches and has levels of its own, as Google's
+imagery has a picture at every zoom, keeps them: a coarse tile of the planet cannot wait
+for every fine tile beneath it to be fetched. For that source M9bb's fold stays, and with
+it the one tile in the engine whose bytes depend on what was flown. It is named here so
+that it is not mistaken for the law.
+
+Two readers for the pixels, behind the one seam that exists (`FieldLoader::LoadTile`, a
+window). PNG, JPEG and TIFF through the operating system's decoder, asked for a region;
+whether it decodes a region of a large TIFF without decoding the whole is to be measured
+before it is relied on. And rows as they lie, with a manifest that says where: any size,
+by a seek. That second form is what the harvester wrote for the plane orthos, so their
+files are read as they stand and the code that named them goes. What neither reads, a
+TIFF past 4 GB or one compressed in a way the decoder refuses, the harvester turns into
+the second form.
+
+None of it is new. `gdal2tiles` paints base tiles and then makes each overview tile from
+the tiles beneath it, by the average unless told otherwise; `gdaladdo` and the overviews
+of a cloud-optimized GeoTIFF are the same pyramid kept in the file. What this section adds
+is only that the engine's tree already had the fold and used it for one node.
+
 ## 5. Decisions for Mark
 
 Settled already, 2026-09-28, and built into the sections above:
@@ -2224,4 +2318,10 @@ each, from the bottom of the stack up.
   to level 23): <https://learn.microsoft.com/en-us/bingmaps/articles/bing-maps-tile-system>.
   Google, *S2 Cells* (a face and thirty levels in 64 bits):
   <https://s2geometry.io/devguide/s2cell_hierarchy.html>. Both read as search results'
-  summaries of the pages.
+  summaries of the pages. GDAL, `gdal2tiles` (base tiles, then overview tiles made from the
+  tiles beneath; the average by default): <https://gdal.org/en/stable/programs/gdal2tiles.html>.
+  OGC, *Cloud Optimized GeoTIFF* (overviews as reduced-resolution subfiles):
+  <https://docs.ogc.org/is/21-026/21-026.html>. Microsoft, `IWICBitmapSourceTransform`
+  (a decoder asked for a region): <https://learn.microsoft.com/en-us/windows/win32/wic/-wic-imp-iwicbitmapsourcetransform>.
+  All three as search results' summaries; whether the TIFF decoder decodes a region alone is
+  not said there and is to be measured.
