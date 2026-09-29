@@ -1352,8 +1352,29 @@ This section had said 2.3 km, by an arithmetic nobody had run.
   - **So the second law said too much.** Drawn in on every side the window lost the
     bend at an edge that is a wall. **A solver's open boundary stands where its
     sources paint at full weight;** at a wall the window keeps the survey's extent,
-    so that the water inside stays joined. Being measured in that form: the west
-    columns drawn in, the other three sides the survey's.
+    so that the water inside stays joined.
+  - **Measured in that form, the river is whole and fed from both ends.** The west
+    columns drawn in, the other three sides the survey's:
+
+    | | today's window | drawn in on every side | drawn in on the west | the stations, or what is told |
+    |---|---|---|---|---|
+    | the upper reach | joined, its west end a wall | a pond, the face its only mouth | joined, and meets the face | |
+    | its lag and its range against the ocean's | 0.56 h, 1.12 | 2.70 h, 0.83 | 1.18 h, 0.97 | 1.09 h, 0.83 |
+    | 5 km up the river | 0.29 h, 1.05 | 0.18 h, 1.03 | 0.37 h, 1.00 | about 0.35 h, 1.00 |
+    | the flow carried against the flow told, correlation | carries nothing | -0.64 | +0.92 | |
+    | the gap's current against the station's, gain | 0.68 | 0.51 | 0.77 | 1 |
+    | the net through the face over one tide, m3/s | 0 | +16.1 | -29.9 | +17.8 |
+
+    Every measure but the last is nearer the stations than today's. The net is not:
+    48 m3/s more leaves through the face than is told, and the basin stands 2 cm
+    lower for it. Most of that is measured: the first cell inside stands 2.8 cm over
+    the exterior that is told, in the mean of a tide, and the exterior's mean is 4.4
+    cm under the ocean's, because its stage is each station's tide less that
+    station's own mean. A river's mean stands over the sea's. So the stage's datum is
+    suspected and is being measured; it is step 8's with the boundary's law.
+  - **Both laws are the default,** as the owner said, the second in the form the
+    measurements support: the whole bed waited for, and the open boundary's edge
+    drawn in.
   - **The law it asks for: wherever water meets the window's edge the edge is an open
     boundary, and carries the data of what lies beyond it.** The north edge's two
     crossings are boundaries as the west face is. That replaces the solver's compass,
@@ -1370,9 +1391,6 @@ This section had said 2.3 km, by an arithmetic nobody had run.
     On the storm rail the mean SSIM against `main` is 0.956 where `main` against itself
     is 0.990. The engine's lines for the piece: 357 added, 31 removed, beside 1,409 of
     instruments.
-  - **So the first law goes forward as the default and the second does not yet.** The
-    window's key stays, its default today's window, until the flow the boundary carries
-    goes with the flow it is told and the gap's current does not fall.
   - **Closed since:** the new binary with both keys at today's values draws today's
     pictures. At the ebb `main` itself gives three pictures up to 13,666 pixels apart, and
     runs of the new binary are byte for byte runs of `main`. The frames of 52 to 71 ms on
