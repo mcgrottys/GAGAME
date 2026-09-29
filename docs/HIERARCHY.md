@@ -1579,6 +1579,33 @@ the six pieces of section 6 beneath them.
   ray, the ground's plane and the address's own derivative, which is what a read inside a
   branch needs and what the margin law's third form needs too (4.6). It is smooth where a
   difference across the screen is not, and it is the same on every run.
+- **The footprint and the phase, by arithmetic** (designed 2026-09-29, not built). The eye
+  is the origin of the frame the rows were pulled into. A pixel's ray is `d = d0 + i a + j b`,
+  with a and b the image plane's steps a pixel, the same for every pixel of a frame. The
+  surface it meets at P has the unit normal n. Then
+
+      dP/di = t ( a - d (n.a) / (n.d) ),      t = (n.P) / (n.d)
+
+  and the same for j with b: the line in which the ground's plane is cut by the plane
+  through the eye, the ray and its neighbour. The address takes the ground point without
+  its height, so what moves it is the part of dP along the ground, `dp = dP - u (u.dP)`
+  with u the place's up. An address is a ratio of two planes (4.4),
+  `s = (U.p) / (W.p)`, so `ds/dp = (U - s W) / (W.p)` on the planes' vector parts, and
+  `ds/di = (ds/dp) . (dp/di)`. Four such numbers are the footprint, a dozen products in
+  all. It is what `SampleGrad` takes, inside a branch or out of one. At the horizon n.d
+  goes to nothing and the footprint grows without a bound, which is the truth there: the
+  level rises to the slice's coarsest and the rank to the face.
+
+  The phase is the same number read once more. Let r be the footprint in the texels of
+  rank 1's finest level, the longer axis over the sampler's taps or the shorter, whichever
+  is more, and L = log2 r. A rank's texel is an eighth of its parent's, so the level wanted
+  in rank k's slice is L + 3 (k - 1), and the rank to read is the first where that is not
+  negative: k = 1 + ceil(-L / 3), and the face where that is less than one. There the
+  wanted level lies between 0 and 3 and the trilinear pair in levels 0 to 3, inside the
+  slice's eight, with levels 4 to 7 for what is not resident. So **one slice serves any pixel,** one map is gathered and one sample taken.
+  The ranks above it are read only where that map holds nothing, and the porch only at a
+  window's edge. That is 4.3's stride of three seen from the pixel: three levels of its
+  own to a rank, one for the trilinear pair, and four to fall back on.
 - **Two gates of this migration were lost to one fault of the harness,** and one the night
   before in step 2: PowerShell's names ignore case, so a key held in `$K` was overwritten by
   a loop's `$k`, and thirty runs meant to have the key set ran without it. The rule since: a
