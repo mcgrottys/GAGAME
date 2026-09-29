@@ -455,10 +455,10 @@ under M the level's term is L + 1; and a level whose edge is 2 M away or more as
 It is coarser than the tiles only within 0.16 of a tile of where a level ends. As this
 section first wrote it the term was L + 1 - s, which asks L of every level however far
 its edge stands, so the coarsest level always won. The probe caught it before any picture
-was taken: the margins planted too small touched nothing, and the suite failed. A tile that is mapped or released writes eight bytes. And the want
-grows by the margin alone, a neighbour being wanted where a read stands within 0.078 of a
-tile's edge: some tiles in a hundred, not as many again. Nothing of it is built. The probe
-and the lens that judged the first form judge this one.
+was taken: the margins planted too small touched nothing, and the suite failed. A tile that is
+mapped or released writes eight bytes. And the want grows by the margin alone, a neighbour being
+wanted where a read stands within 0.078 of a tile's edge: some tiles in a hundred, not as many
+again. Nothing of it is built. The probe and the lens that judged the first form judge this one.
 
 What the probe cannot tell: another adapter or driver, or an anisotropy other than 8;
 fractions above 0.9; a frontier other than a cliff, where every level below the coarsest ends
@@ -1212,11 +1212,26 @@ the six pieces of section 6 beneath them.
   0.01 of a step of 255 at rung 9 over 466 tiles, to 0.15 at rungs 8 and 7, to 0.3 at rung 6,
   with the contrast inside a tile equal to a part in a hundred; the mask's agree to 0.02. So
   the pyramid is painted right, and the pictures' difference is not in what the tiles hold.
-- **It is in the fine detail.** Smoothed over nineteen pixels the two arms have one tone.
-  The detail at the scale of a pixel is less with the key set: 0.80 of the Mercator arm's at
-  the bird, 0.99 at the helm, 0.98 at 7 km. Suspected, and what commit 3 tests: the address
-  is taken from a direction in float32, 0.43 of a texel wrong at rung 9 by the harness, and
-  the sampler takes its footprint from the difference of neighbouring addresses.
+- **The colour is equal, and the finished picture is not.** In the albedo lens, which shows
+  the colour as it is read and nothing else, the two arms have one tone over the land of the
+  bird's frame, the mean colour equal to a part in ten thousand, and one detail, the rms of
+  luminance less its local mean 0.0336 with the key set and 0.0333 without. In the finished
+  picture the same land is lighter with the key set, its mean luminance 0.476 against 0.464
+  and more than 0.02 apart over 28 % of it, and it has 0.80 to 0.85 of the detail. The water
+  is the same in both. So the difference is made after the colour is read, in what the
+  land is mixed with: the mask's reads, or the mesh stage's. It is not found yet.
+- **Commit 3 is made and gated:** the address is the undisplaced ground point about the eye,
+  the planes taken every frame in doubles, eight rows, the fourth fine block named. Read
+  back from the pixel stage the address is within 0.0016 of a texel at rung 9 and 0.0034
+  at rung 6, and the direction in float32, planted, is 0.35 and 0.045 off and caught. Key
+  off, every hash is the old binary's. Several stages have a direction only and keep its
+  grain: the pixel water's bed, the sea and terrain layers, the lens, and any level but the
+  camera's own.
+- **Two things this section said were wrong, and are withdrawn.** That the land was not
+  lighter with the key set: the tone had been measured in the albedo lens and written of the
+  picture. The agent's eye and mine had seen the picture rightly. And that the address was
+  the suspected cause of the lost detail: commit 3 made the address exact and the picture's
+  detail did not move, 0.803 of the Mercator arm's at the bird where it had been 0.800.
 - **What the key-on runs painted:** 22,814 files and 1.09 GiB in nine trees, from the source
   caches, the fetch budget at zero. They refused 35 source tiles a run at the helm and 16 at
   the bird. A tile painted while a source was refused is not kept: the paint answers that
