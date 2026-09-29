@@ -1296,6 +1296,35 @@ This section had said 2.3 km, by an arithmetic nobody had run.
   height. A fade at a layer's edge is the picture's device. A solver's edge is a
   boundary condition, and it needs the data: its window is declared inside the band, or
   the source that carries its boundary is given no band on that side.
+
+  **Both were built and gated, 2026-09-29, and one of them is not ready** (the keys
+  `water.swe.bedWait` and `water.swe.window`; 64 runs; not committed). The owner had said
+  yes to both together. What the gate measured:
+
+  | | today's settings | whole bed, today's window | whole bed, the window drawn in |
+  |---|---|---|---|
+  | cells of the west boundary that can be wet | 0 | 0 | 18 |
+  | the level less the tide at frame 600, beach and helm | -0.552, -0.552 m | | -0.030, -0.058 |
+  | at frame 5400 | -0.116, -0.251 | | -0.005, -0.032 |
+  | through the west boundary over one tide, m3/s | | 0.0 | +16.1, where it is told +17.8 |
+  | the same, hour by hour | | | against what it is told: correlation -0.64 |
+  | the gap's current against the station's, gain | | 0.68 | 0.51 |
+
+  - **The whole bed is a plain gain.** The low basin of the startup is gone, the wait is
+    252 tiles and a tenth of a second, and the new arm's two runs are one picture at all
+    six poses, where today's differ from each other at four.
+  - **The window drawn in lets the river enter and is not right yet.** Over one tide the
+    boundary carries what it is told to within 1.7 m3/s. Hour by hour it does not: the flow
+    it carries goes with the tide's level (correlation +0.95) and the flow it is told goes
+    with the tide's rate, as a prism's does. At the flood it brings water into the domain
+    from the west where it is told to take it upriver. And the gap's current fell against
+    the station's, where opening the boundary to the prism upriver should have raised it.
+    That boundary had no wet cell since the bed became the composed height, so its law had
+    never carried water. Its terms are being measured, cell by cell, before anything is a
+    default.
+  - **Not closed:** whether the new binary with both keys at today's values draws today's
+    pixels at two poses, where two runs of one binary differ from each other; and frames of
+    70 ms on the storm rail under the new settings, where today's worst is 18.
 - **The height and the exposure move together.** The bank's kernel and the sea read both through
   one slice and one row.
 - **The colour and the mask move together.** They share lattices, a tree, rows and wants.
