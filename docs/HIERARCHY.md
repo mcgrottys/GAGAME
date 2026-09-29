@@ -984,6 +984,39 @@ from the edge of its rung-9 block.
   reads residency there today. Either the solver stands on a pinned window and is held until
   that window is whole, or it keeps a bed of its own. The first is the design's: a solver's
   domain is a standing window (4.1).
+
+  **Measured, 2026-09-29** (branch `claude/solver-bed-resident`; three arms, fifteen runs of
+  5,400 frames, the kernel's own reading of the bed read back over the domain). Today the
+  hour of spin-up integrates on a bed of exactly 0.0 m in every one of the domain's
+  2,187,162 cells. The residency map's copy on the GPU is born zeroed, zero says that mip 0
+  is here, and the residency turn that first writes it comes after the spin-up (finding 66);
+  so the kernel reads mip-0 tiles that nothing has mapped, and they read zero. The tide an
+  hour before the start stands at -0.367 m, under that plain: the basin is dry for the hour,
+  and at frame 600 its level stands 0.552 m under the tide, which is the tide's rise over
+  the hour to 5 mm. The minutes after it are the refill through the real inlet, and that is
+  the beach band.
+
+  | the bed the hour ran on | the level less the tide, frame 600 | frame 5400 |
+  |---|---|---|
+  | today's: 0.0 m in every cell | -0.552 m at the beach, -0.552 at the helm | -0.116, -0.251 |
+  | the whole bed, waited for | -0.028, -0.055 | -0.006, -0.032 |
+  | the coarsest mip, the map written and nothing asked (beach only) | -0.002 | -0.008 |
+
+  Three runs an arm at each pose, and no spread within an arm at frame 600. The wait is 334
+  tiles, 16 residency turns and a tenth of a second, where the time to a first frame varies
+  by 7 to 14 s from run to run. Started on the coarsest bed the level is right at once, and
+  the water sloshes by 0.14 m a minute later, when the fine tiles land under it. So the
+  conjecture's mechanism, a coarse bed that dams the inlet, is refuted: the inlet is open on
+  the coarsest bed. Its class is confirmed: the solver integrated on what residency had not
+  delivered. And in four of today's six runs the pinned domain never became whole in 5,400
+  frames (finding 67), so in play too the bed is what was mapped.
+
+  The first form is taken, and stated as a law: **a solver integrates on a window that
+  stands whole, from its first step.** The window is asked for before the solver starts; the
+  solver starts when it is whole; its tiles are held while the solver runs; and a tile of it
+  that is absent is an error that is said, not a coarser answer that is read. What the
+  experiment built is the first half of that in today's engine, behind a scene key,
+  `water.swe.bedWait`, whose default is today's behaviour.
 - **The height and the exposure move together.** The bank's kernel and the sea read both through
   one slice and one row.
 - **The colour and the mask move together.** They share lattices, a tree, rows and wants.
@@ -1128,8 +1161,16 @@ And by three more:
 | Chesapeake Bay as the second place? | Chesapeake. |
 | Does the colour's base move to sources that may be kept? | The colour is a composite of its sources. For now Google fills the base. |
 
-Nothing is open. Not asked, and done unless refused: the floor law is tried first, by itself
-(step 2), and Google is asked for no more than 3,000 tiles a day (4.15).
+**Open since 2026-09-29.**
+
+| asked | the evidence | recommended |
+|---|---|---|
+| Is the solver held until its bed is whole, from now, in today's engine? It moves the water of every still and every rail taken so far, so every baseline is taken again | 4.17: the hour of spin-up runs on a bed of 0.0 m, and the basin stands 0.55 m low for minutes | Yes, as a commit of its own, and the baselines after it |
+| The pieces that are made and not committed: in which order, and is each a pull request of its own? | section 6, Standing | the harvest, the prune tool, step 4a, step 1a, step 1, each its own |
+| The wave tree has no cap: 226 identities and 58 GiB of the cache's 95.6 (finding 51). Is it given one? | 4.14 | Yes: a count of buckets kept, stated in the scene |
+
+Not asked, and done unless refused: the floor law is tried first, by itself (step 2), and
+Google is asked for no more than 3,000 tiles a day (4.15).
 
 ## 6. The order of work, and the gate for each step
 
@@ -1145,7 +1186,7 @@ Each step names the instrument that can see it fail, and what that instrument ca
 | 4 | The tree keyed `(face, rung, x, y)`, in four parts (below the table): 4a the tree made fit for depth, 4b its names completed, 4c the pyramid painted at the Merrimack, 4d the audit across lattices | below the table | picture quality: by eye, in the albedo lens |
 | 5 | **After step 6's standing blocks** (4.17). The residency manager that tracks the pyramid's tiles, with windows that activate, move and release. It replaces the code of findings 2, 3, 63 and 64, and writes the map from the tiles (4.7) | step 1's audit, clean, over the flight that paints and over the storm rail; slot audit; `[settle-exact]` hashes over global tiles and origins; the storm rail | whether the picture is right |
 | 6 | **Before step 5, on standing aligned blocks** (4.17's five commits, the colour and the mask first): the address, the directory, rank 1. Then, with step 5 behind it, the porch and the phase on windows that move | stills and rail against the Mercator baseline by SSIM and by eye, floors stated; a lens that paints rank and window | bit identity is gone by construction: the lattice changed |
-| 7 | The height with the exposure, as one move, and with them the decision on the solver's bed (finding 48); the wave pages, whose solver is re-aligned to a face's plane; then the water surface as a tenant | `--water-probe` (drawn level against the level the hull reads), standing, per hull; `[kernel]` fingerprints; `--sea-verify` | |
+| 7 | The height with the exposure, as one move, and with them the solver's bed: a solver integrates on a window that stands whole (4.17, measured); the wave pages, whose solver is re-aligned to a face's plane; then the water surface as a tenant | `--water-probe` (drawn level against the level the hull reads), standing, per hull; `[kernel]` fingerprints; `--sea-verify` | |
 | 8 | A second place, then one in each face of the cube: harvested (Haulover and the Chesapeake's mouth are, 4.15), declared in a scene file, the boat put in. What names the Merrimack in code becomes keys of the scene (4.15's list). The politeness budget governs every fetch | `git diff --stat src shaders` is empty between the scene without the place and the scene with it; one ground point read back through two worlds: equal | data quality at the far place |
 | 9 | The porch at the cube's edge, and the aprons it reads (4.18) | a rail across 43.364 N; a lens that paints the weight; an apron's texel against the texel across the edge, by containment | |
 | 10 | Rank 4 from the 15 cm orthos at the jetty | a texel checkerboard at the helm | |
@@ -1234,6 +1275,10 @@ it exits 0. The branches named below are not committed.
   the audit off it gives 7,954 in 178, so the audit's own cost is not the cause. Finding 24:
   no hole under bytes in flight, in any run. And two faults the review had not read,
   findings 63 and 64, both leaving a byte finer than the tiles (4.7).
+- **The solver's bed was measured** (4.17), uncommitted on `claude/solver-bed-resident`: 17
+  files, +474 and -21, and the bed's trace, 215 lines. The eleven kernels that read the
+  bed compile to the bytes they compiled to, so the default run is today's. It found the
+  cause of the startup's low basin, which had stood unproven since it was first seen.
 - **Thirty boots** of the helm recipe, one at a time: every one exits 0, with the same 21
   lines of the shutdown trail. The exit-255 race (finding 33) was not met. The trail names
   the phase on the day it is.
