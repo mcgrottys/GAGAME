@@ -1499,6 +1499,29 @@ the six pieces of section 6 beneath them.
   three directory loads and one colour sample, where today's makes three gathers and three
   samples. The binding of 4.5, a window's index carried in the mesh's record, is what takes
   the directory's loads away from a rasterized pixel, and it is not built.
+- **Commit 4's third form, the footprint taken before the branch, and the decision.** Each
+  rank's footprint was differenced from the screen right after the walk and the winner read
+  once by it. With the key empty the 68 stages are still the old binary's. With it set the
+  horizon is worse and not stable: at the 7 km pose 998 pixels differ from the ladder by
+  more than one level, 329 of them in groups of one rank and one surface, and the form's own
+  two runs differ at 112 pixels of the helm's horizon where the ladder's two runs are one
+  picture. A footprint differenced by hand is not the hardware's, of the two kinds the
+  language offers the coarse is the nearer, and neither is steady where the horizon cuts a
+  group of four. **Where the millisecond is,** by taking one thing away at a time, in ms of
+  the globe's pass at the helm and the bird: the pixel stage's block code compiled as
+  today's, 0.97 and 1.33; the walk's loads, 0.28 and 0.41; the gathers cut to one, 0.19 and
+  0.18; the planes without their divide, 0.13 and 0.01. They do not add exactly.
+
+  **Commit 4 is the directory as it was first gated,** every rank read in turn by the
+  hardware's own footprint under one flow of control, with the read of the window's slice
+  that is not there taken out and finding 82 mended. One sample a read bought 0.05 ms at the
+  helm and cost the horizon. What takes the cost out is three commits, each with its gate,
+  after it: **the binding,** which takes the walk out of the pixel's stage; **the phase,**
+  by which the rank is chosen from the rung the pixel wants and then from what is resident,
+  so that one map is gathered where four are; and **a footprint that is computed,** from the
+  ray, the ground's plane and the address's own derivative, which is what a read inside a
+  branch needs and what the margin law's third form needs too (4.6). It is smooth where a
+  difference across the screen is not, and it is the same on every run.
 - **Two gates of this migration were lost to one fault of the harness,** and one the night
   before in step 2: PowerShell's names ignore case, so a key held in `$K` was overwritten by
   a loop's `$k`, and thirty runs meant to have the key set ran without it. The rule since: a
