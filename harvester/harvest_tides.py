@@ -19,6 +19,14 @@ POLITENESS (GAMEPLAN.md section 6.3): every request carries application=GAGAME a
 User-Agent; every response is cached forever under cache/coops/ and never re-fetched; network
 hits are spaced >= 0.4 s with capped exponential backoff on failure. Total for the default six
 stations: ~90 small requests, once ever. Offline afterwards.
+
+A PLACE (--place NAME --box lon0,lat0,lon1,lat1 [--radius-km R]): the harmonic (type R)
+stations inside the box or within R km of it, found in CO-OPS's own station list (the cached
+mdapi stations.json?type=tidepredictions that harvest_water.py keeps), fitted exactly as above
+and written to data/tides/<NAME>/ -- stations.json + official_<id>_<year>.f32, the same format,
+so TideModel reads it by path. Place requests go through harvester/polite.py (budgeted, >= 1 s
+per host, no contact address) and ask for the fit year in ONE request per station when CO-OPS
+allows it (twelve monthly ones otherwise); a place never overwrites a file.
 """
 
 import json
@@ -64,6 +72,8 @@ if os.path.exists(_extra):
 
 MIN_AMP_M = 0.001      # constituents below 1 mm are dropped from the fit
 _last_fetch = [0.0]
+_polite = None         # a place harvest routes every request through harvester/polite.py
+_year_in_one = [None]  # does CO-OPS hand out a whole year of hourly predictions per request?
 
 
 def log(msg):
@@ -75,6 +85,9 @@ def fetch_json(url, cache_path):
     if os.path.exists(cache_path):
         with open(cache_path, "r", encoding="utf-8") as f:
             return json.load(f), True
+    if _polite is not None:
+        raw, cached = _polite.get(url, cache_path, timeout=60)
+        return json.loads(raw.decode("utf-8")), cached
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
 
     for attempt in range(4):
@@ -147,8 +160,50 @@ def get_harcon(sid, cache_dir):
     return out, cached
 
 
+def _predictions_whole_year(sid, year, cache_dir):
+    """Place harvests only: the fit year in ONE request, when CO-OPS allows the span (the answer
+    is learned once per run). Returns (times, values) or None to fall back to monthly."""
+    if _polite is None or _year_in_one[0] is False:
+        return None
+    if all(os.path.exists(os.path.join(cache_dir, sid, f"pred_{year}_{m:02d}.json"))
+           for m in range(1, 13)):
+        return None                       # the monthly cache is complete: it is the answer
+    params = {
+        "product": "predictions", "application": "GAGAME", "station": sid,
+        "begin_date": f"{year}0101", "end_date": f"{year}1231",
+        "datum": "MLLW", "units": "metric", "time_zone": "gmt",
+        "interval": "h", "format": "json",
+    }
+    cache = os.path.join(cache_dir, sid, f"pred_{year}_all.json")
+    fresh = not os.path.exists(cache)
+    try:
+        data, cached = fetch_json(API + "?" + urllib.parse.urlencode(params), cache)
+    except urllib.error.HTTPError as e:
+        log(f"    one-request year refused for {sid} (HTTP {e.code}); monthly from now on")
+        _year_in_one[0] = False
+        return None
+    preds = data.get("predictions", [])
+    if "error" in data or len(preds) < 8700:
+        log(f"    one-request year refused for {sid} "
+            f"({data.get('error', {}).get('message', len(preds))}); monthly from now on")
+        _year_in_one[0] = False
+        return None
+    if fresh:
+        _year_in_one[0] = True
+        log(f"    fetched {year} in one request: {len(preds)} h")
+    times, values = [], []
+    for p in preds:
+        t = datetime.strptime(p["t"], "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+        times.append(t.timestamp())
+        values.append(float(p["v"]))
+    return times, values
+
+
 def get_predictions_year(sid, year, cache_dir):
     """One year of official hourly predictions, datum MLLW, metric, GMT. 12 monthly requests."""
+    whole = _predictions_whole_year(sid, year, cache_dir)
+    if whole is not None:
+        return whole
     times, values = [], []
     for month in range(1, 13):
         nd = month_days(year, month)
@@ -269,10 +324,45 @@ def haversine_km(lat0, lon0, lat1, lon1):
     return 2 * 6371.0 * math.asin(math.sqrt(a))
 
 
+def box_km(lat, lon, box):
+    """Distance (km) from a point to a lon/lat box; 0 inside."""
+    clat = min(max(lat, box["lat0"]), box["lat1"])
+    clon = min(max(lon, box["lon0"]), box["lon1"])
+    return haversine_km(lat, lon, clat, clon)
+
+
+def discover_place(box, radius_km, cache_dir, anchor=None):
+    """Harmonic (type R) stations inside the box or within radius_km of it, nearest first
+    (ties inside the box broken by distance to `anchor`, so index 0 -- TideModel's focus
+    fallback -- is the station AT the place). The station list is CO-OPS's own metadata
+    (mdapi stations.json?type=tidepredictions), cached forever like every other response.
+    -> ([(id, on_river=False, name)], [the subordinate stations in range, not fitted: they
+    publish offsets to a reference station, not constituents])."""
+    data, _ = fetch_json(f"{MDAPI}/stations.json?type=tidepredictions",
+                         os.path.join(cache_dir, "_lists", "tidepredictions.json"))
+    anchor = anchor or ((box["lon0"] + box["lon1"]) / 2, (box["lat0"] + box["lat1"]) / 2)
+    found, subordinate = [], []
+    for st in data.get("stations", []):
+        lat, lon = float(st.get("lat", 0)), float(st.get("lng", 0))
+        d = box_km(lat, lon, box)
+        if d > radius_km:
+            continue
+        if st.get("type") != "R":
+            subordinate.append({"id": st["id"], "name": st.get("name", "?"),
+                                "reference_id": st.get("reference_id"), "km": round(d, 1)})
+            continue
+        found.append((d, haversine_km(lat, lon, anchor[1], anchor[0]), st["id"],
+                      st.get("name", st["id"])))
+    found.sort()
+    return [(sid, False, name) for _, _, sid, name in found], subordinate
+
+
 def main():
     year = datetime.now(timezone.utc).year
     out_dir = os.path.join("data", "tides")
     cache_dir = os.path.join("cache", "coops")
+    place = box = anchor = None
+    radius_km = 0.0
     args = sys.argv[1:]
     while args:
         a = args.pop(0)
@@ -282,26 +372,78 @@ def main():
             out_dir = args.pop(0)
         elif a == "--cache":
             cache_dir = args.pop(0)
+        elif a == "--place":
+            place = args.pop(0)
+        elif a == "--box":
+            lon0, lat0, lon1, lat1 = (float(v) for v in args.pop(0).split(","))
+            box = {"lon0": lon0, "lat0": lat0, "lon1": lon1, "lat1": lat1}
+        elif a == "--radius-km":
+            radius_km = float(args.pop(0))
+        elif a == "--anchor":
+            anchor = tuple(float(v) for v in args.pop(0).split(","))
         else:
             log(f"ignoring '{a}'")
 
+    if place is None:
+        harvest(STATIONS, year, out_dir, cache_dir)
+        return
+    if box is None:
+        raise SystemExit("--place needs --box lon0,lat0,lon1,lat1")
+    harvest_place(place, box, radius_km, year=year, cache_dir=cache_dir, anchor=anchor)
+
+
+def harvest_place(place, box, radius_km, year=None, cache_dir=None, anchor=None, out_root=None):
+    """The place mode: discover, fit, write data/tides/<place>/ (never overwriting)."""
+    global _polite
+    import polite
+    _polite = polite
+    year = year or datetime.now(timezone.utc).year
+    cache_dir = cache_dir or os.path.join("cache", "coops")
+    out_dir = os.path.join(out_root or os.path.join("data", "tides"), place)
+    stations, subordinate = discover_place(box, radius_km, cache_dir, anchor)
+    log(f"[{place}] {len(stations)} harmonic station(s) within {radius_km:g} km of {box}: "
+        f"{[s[0] for s in stations]}; {len(subordinate)} subordinate station(s) have no "
+        f"constituents of their own (not fitted)")
+    rec = harvest(stations, year, out_dir, cache_dir, exclusive=True, tolerant=True)
+    rec["subordinate"] = subordinate
+    return rec
+
+
+def harvest(stations, year, out_dir, cache_dir, exclusive=False, tolerant=False):
+    """Fit every station and write stations.json + official sidecars into out_dir.
+    exclusive: refuse to replace any file; tolerant: a station that fails is logged and
+    skipped instead of ending the run. Returns {'files': [(path, bytes)], 'failed': [...]}."""
     epoch = datetime(year, 1, 1, tzinfo=timezone.utc).timestamp()
     os.makedirs(out_dir, exist_ok=True)
+    wmode = "xb" if exclusive else "wb"
+    if exclusive and os.path.exists(os.path.join(out_dir, "stations.json")):
+        raise SystemExit(f"refusing to overwrite {out_dir}/stations.json (places only add)")
     log(f"harvest_tides: year {year}, epoch {epoch:.0f}, "
         f"{'numpy' if np is not None else 'pure-python'} solver")
 
     stations_out = []
+    files = []
+    failed = []
     prev = None
     river_km = 0.0
 
-    for sid, on_river, short in STATIONS:
+    for sid, on_river, short in stations:
         log(f"[{sid}] {short}")
-        meta, _ = get_station_meta(sid, cache_dir)
-        harcon, _ = get_harcon(sid, cache_dir)
-        mllw_minus_navd = get_datums(sid, cache_dir)
-        if mllw_minus_navd is not None:
-            log(f"    MLLW - NAVD88 = {mllw_minus_navd:+.3f} m")
-        times, values = get_predictions_year(sid, year, cache_dir)
+        try:
+            meta, _ = get_station_meta(sid, cache_dir)
+            harcon, _ = get_harcon(sid, cache_dir)
+            mllw_minus_navd = get_datums(sid, cache_dir)
+            if mllw_minus_navd is not None:
+                log(f"    MLLW - NAVD88 = {mllw_minus_navd:+.3f} m")
+            if not harcon and tolerant:
+                raise RuntimeError("no harmonic constituents published")
+            times, values = get_predictions_year(sid, year, cache_dir)
+        except Exception as e:  # noqa: BLE001
+            if not tolerant or type(e).__name__ == "Stop":
+                raise
+            log(f"    SKIPPED {sid}: {e}")
+            failed.append({"id": sid, "name": short, "why": str(e)})
+            continue
         log(f"    {meta['name']} ({meta['lat']:.4f}, {meta['lon']:.4f}): "
             f"{len(harcon)} constituents, {len(times)} official hours")
 
@@ -344,8 +486,9 @@ def main():
             prev = (meta["lat"], meta["lon"])
 
         off_file = f"official_{sid}_{year}.f32"
-        with open(os.path.join(out_dir, off_file), "wb") as f:
+        with open(os.path.join(out_dir, off_file), wmode) as f:
             f.write(struct.pack(f"<{len(values)}f", *values))
+        files.append((os.path.join(out_dir, off_file), 4 * len(values)))
 
         stations_out.append({
             "id": sid, "name": short, "full_name": meta["name"],
@@ -367,9 +510,12 @@ def main():
         "stations": stations_out,
     }
     path = os.path.join(out_dir, "stations.json")
-    with open(path, "w", encoding="utf-8") as f:
+    with open(path, wmode.replace("b", ""), encoding="utf-8") as f:
         json.dump(out, f, indent=1)
     log(f"wrote {path} ({len(stations_out)} stations) -- the engine is now network-free")
+    files.append((path, os.path.getsize(path)))
+    return {"files": files, "failed": failed, "stations": stations_out, "year": year,
+            "epoch_unix": epoch}
 
 
 if __name__ == "__main__":
