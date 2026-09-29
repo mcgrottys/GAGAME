@@ -943,7 +943,15 @@ poses.
   the same coast. The height on blocks, with the bed that was harvested there, is what
   mends it (step 7).
 - **On the engine's land the blocks draw the imagery:** the mainland from 7 km, the streets
-  and the bay's islands, the want set resident and exact, no request refused.
+  and the bay's islands, the want set resident and exact, no request refused. From 1.5 km
+  the finest block answers at its mip 1, 2.4 m a texel, from zoom 16; from 300 m at its
+  mip 0, 1.2 m, from zoom 17, over all of the picture but the tiles' outlines.
+- **A picture is taken from the cache, after the run that fetched.** The run that fetched
+  from 300 m settled exact and drew one tile sharp and the rest from texels of 9 m, with
+  every tile of the finest level mapped. The same pose drawn afterwards from the cache
+  alone is sharp throughout. That is finding 3 seen in a picture: while tiles are painted
+  and folded the map's bytes stand coarser than the tiles, and the settle judges the
+  tiles. The manager of 4.19 computes the map from what is held, and has no such state.
 
 **The colour is a composite of its sources** (the owner, 2026-09-28), and for
 now Google fills its base. NAIP and Sentinel-2 between them cover every place named so far at
@@ -1557,6 +1565,39 @@ the pages ledger's count of tiles read and never mapped, which is zero; the sett
 hashes equal from run to run at the bird pose, where today they are not; the solver's pinned
 domain whole in six runs of six; and the lines of `src/hal/Residency.*`, which are 2,670
 today, fewer.
+
+**Built as far as the order's turn, 2026-09-29** (a scratch tree, not committed, beside
+today's manager behind the key `streaming.manager`, whose default is today's). Three parts
+of five are built: the key and the split; the map as a function of what is held, born saying
+nothing; the order's turn, its loader, its gather and its release in two steps.
+
+- **With the key at its default nothing moved:** every settle and prediction hash equal at
+  the six poses, pixels within the floors two runs of one binary make.
+- **The map is right at every audited turn.** On the flight that paints and on the storm
+  rail, 1,350 turns each: no byte finer than the tiles, none coarser, none split, no orphan,
+  and nothing gathered and not filled. The flight painted 100 tiles and invalidated 77 of
+  them over a mapped descendant, which is finding 3's case, and left no coarser cell. On the
+  same rail today's manager showed finding 63 on 20 turns and finding 2's 7,917 orphans.
+- **It livelocked, and the cause is a word of law 2.** The predicted walk speaks every third
+  turn. "Wanted this turn" counted the manager's turns, so the want grew and shrank by some
+  1,600 tiles every third turn, the cut fell inside it, and the same 48 tiles were loaded,
+  let go, mapped and released in a cycle, with 3,900 tiles of the first P never begun. **A
+  want stands until its reader speaks again:** lateness is counted in the reader's own
+  statements. Being built.
+- **With no weight the lost tail is chosen by address,** which is no law. At the helm the
+  want is 14,935 tiles against a cut of 7,808, and of the 7,157 lost the wave field's were
+  5,657. The weight is law 4 and is not built yet: inside the rung that straddles the cut
+  the tile nearest what its reader looks at comes first, whatever its tenant.
+- **The hold lifts the cap, as today's does.** A still is an instrument that makes the held
+  set the want set. With the cap kept in the hold the stills differed from today's in half
+  their pixels, all of it the water, which says what was absent and not whether the picture
+  is right. What the cap loses is judged on the rail and by eye.
+- **The turn is too slow as built:** 4.84 ms in the mean on the storm rail where today's is
+  1.24, because the order is made again on turns when no reader spoke and nothing landed.
+  It is a gate of the next part.
+- **The lines so far:** 458 in the new file and 191 added to the engine's others, 28 removed.
+  They are beside today's manager; what the step removes is removed when the key's default
+  changes.
 
 ## 5. Decisions for Mark
 
