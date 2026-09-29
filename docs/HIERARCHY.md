@@ -1387,11 +1387,29 @@ This section had said 2.3 km, by an arithmetic nobody had run.
     lower for it. Most of that is measured: the first cell inside stands 2.8 cm over
     the exterior that is told, in the mean of a tide, and the exterior's mean is 4.4
     cm under the ocean's, because its stage is each station's tide less that
-    station's own mean. A river's mean stands over the sea's. So the stage's datum is
-    suspected and is being measured; it is step 8's with the boundary's law.
+    station's own mean. A river's mean stands over the sea's. So the stage's datum
+    was suspected, and measured by raising the told stage and leaving the told flow:
+
+    | the told stage raised by | the net through the face, m3/s | the mean step, exterior less the first cell |
+    |---|---|---|
+    | 0 | -29.9 | -0.028 m |
+    | 0.044 m | -5.4 | -0.005 m |
+    | 0.072 m | +10.4 | +0.010 m |
+
+    The net moves by some 560 m3/s a metre of stage and would meet the told +17.8
+    near 0.085 m. So the datum is a part of it and not the whole. What is left, 13
+    to 14 m3/s outward at every one of the three, is the face's own: it carries more
+    when it is deeper, and its step is out of phase with its level, so it pumps over
+    a tide. That term belongs to the boundary's law and not to a datum. Both are
+    step 8's. Nothing was tuned.
   - **Both laws are the default,** as the owner said, the second in the form the
     measurements support: the whole bed waited for, and the open boundary's edge
-    drawn in.
+    drawn in. With them the water stands 0.03 m under the tide at the beach at frame
+    600, where it stood 0.55 m under. And **two runs of one pose are one picture to
+    the byte, at all six poses,** which they were not: the runs of the code before
+    it differ at up to 3,625 pixels at the bird, and `main`'s own at the helm's ebb
+    by hundreds along the waterline (finding 98). A solver that starts on a bed
+    that is still landing starts on a different bed each run.
   - **The law it asks for: wherever water meets the window's edge the edge is an open
     boundary, and carries the data of what lies beyond it.** The north edge's two
     crossings are boundaries as the west face is. That replaces the solver's compass,
@@ -1606,6 +1624,42 @@ the six pieces of section 6 beneath them.
   The ranks above it are read only where that map holds nothing, and the porch only at a
   window's edge. That is 4.3's stride of three seen from the pixel: three levels of its
   own to a rank, one for the trilinear pair, and four to fall back on.
+- **Commit 4 as it is staged** (2026-09-29, in the scratch tree's index, not committed).
+  The directory as it was first gated, and beside it: the read of the window's slice that
+  is not there is out; a node asks of every block the key takes (finding 82); a read at
+  another point walks from that point, which is the pixel water's bed and the sea sheet's,
+  where the refracted ray lands; and the walk reads no cell past the finest rank. With the
+  key empty 68 of 68 stages are the old binary's. The selftest exits 0, and the two bodies
+  of the walk return the same chain at 15,000 of 15,000 points. Against the ladder of
+  commit 3, the same key, build and trees, the fetch budget zero, in pixels that differ by
+  more than one level:
+
+  | pose | against the ladder, two passes | the form's own two runs | the ladder's own |
+  |---|---|---|---|
+  | helm | 1 and 0 | 0 | 1 |
+  | bird | 2 and 3 | 3 | 2 |
+  | the jetty view | 78 and 79 | 1 | 2 |
+  | helm at the ebb | 1,899 and 1,455 | 1,713 | 573 |
+
+  The helm at the ebb gates nothing: its own two runs differ by more than the forms do
+  (finding 98). **The jetty's 78 pixels are the last rows of far ground under the sky,**
+  rows 387 to 392. The lens names the same rank and the same resident level for both forms
+  at every one of them, so what differs is the sampler's footprint, which the language
+  does not define there (finding 99). At 64 of the 78 this form is nearer `main`'s picture
+  than the ladder is, a mean of 10.8 levels from it where the ladder is 27.5; and along
+  the line two neighbours differ by 2.9 levels in this form, 3.6 in `main` and 15.5 in the
+  ladder. So the ladder is the one that stands apart. The guess that the bed's read made
+  them was wrong: with the bed walking for itself the picture did not move by a pixel.
+
+  | the globe's pass, ms, two runs | today | the bed on its pixel's chain | the bed walks (staged) |
+  |---|---|---|---|
+  | helm | 12.89, 12.93 | 13.93, 13.74 | 14.00, 13.76 |
+  | bird | 6.21, 6.13 | 7.26, 7.19 | 7.00, 6.98 |
+
+  The bed's own walk costs nothing that these runs can see at the helm, and the walk's
+  saved load buys 0.2 ms at the bird. The key set still costs 0.8 to 1.0 ms over today,
+  which the three commits after it are for. Counted, this commit alone: 789 lines added
+  and 169 removed, 123 of them two new shader files and 216 the walk's selftest.
 - **Two gates of this migration were lost to one fault of the harness,** and one the night
   before in step 2: PowerShell's names ignore case, so a key held in `$K` was overwritten by
   a loop's `$k`, and thirty runs meant to have the key set ran without it. The rule since: a
