@@ -1270,7 +1270,27 @@ the six pieces of section 6 beneath them.
   picture the same land is lighter with the key set, its mean luminance 0.476 against 0.464
   and more than 0.02 apart over 28 % of it, and it has 0.80 to 0.85 of the detail. The water
   is the same in both. So the difference is made after the colour is read, in what the
-  land is mixed with: the mask's reads, or the mesh stage's. It is not found yet.
+  land is mixed with: the mask's reads, or the mesh stage's.
+- **Found, mended and proven, the same day.** Two lenses were made that paint what the pixel
+  stage mixes by. Landness, the edit mask and the close-up material's weight are equal in
+  the two arms. The imagery's share inside the close-up material is not: 0.337 with the key
+  empty and 0.001 with it set. The function that says how fine the colour's texel is at a
+  pixel knew the Mercator window and not the blocks, so with the key set it answered the
+  cube's 611 m, and within 2.7 km of the eye the close-up material painted its own sand in
+  the photo's place. It was a gap of commit 2's and not a property of the lattice. With the
+  blocks in that one function, over the land of the bird's frame:
+
+  | | tone less the Mercator arm's | tone more than 0.02 apart | detail, rms less the mean over 3, 5, 9 pixels | neighbours' mean difference |
+  |---|---|---|---|---|
+  | before | +0.0118 | 27.8 % | 0.74, 0.83, 0.87 | 0.85 |
+  | after | -0.0009 | 1.9 % | 0.88, 1.00, 1.03 | 1.02 |
+
+  At five pixels and more the two pictures have one detail, and by the mean difference of
+  neighbouring pixels they have one at every scale. At the single pixel the rms is 0.88 of
+  the Mercator arm's, and part of that is the Mercator arm's own: a quarter of its
+  vertical neighbours are the same to the step where a fifth of the pyramid's are, the
+  staircase of an address that is two texels wrong at that zoom. How much of it is that
+  is not measured. With the key empty every hash is the old binary's, at the six poses.
 - **Commit 3 is made and gated:** the address is the undisplaced ground point about the eye,
   the planes taken every frame in doubles, eight rows, the fourth fine block named. Read
   back from the pixel stage the address is within 0.0016 of a texel at rung 9 and 0.0034
