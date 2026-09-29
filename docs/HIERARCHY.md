@@ -1583,17 +1583,19 @@ flown costs up to 152 tile writes today, because each absent ancestor is painted
 upward, and then folded again by its caller; walked once it is 16. And ten thousand leaves of
 one region make some 3,400 ancestors, so a rank's tiles are about a third more than its leaves.
 
-**Standing, 2026-09-29.** Steps 0 and 3 are in `main`: pull request 34 was merged on
-2026-09-28, on top of pull request 33, and `main` is `35a9eb7`. The merged tree was built and
-its selftest run: it exits 0.
+**Standing, 2026-09-29.** `main` is `71e3a33`. Steps 0 and 3 came into it with pull request
+34 on 2026-09-28. **The harvest, the prune tool, step 4a, step 1a and step 1 came into it on
+2026-09-29 as pull requests 35 to 39,** committed and merged on the owner's word, one commit
+each, from the bottom of the stack up.
 
-- **Five pieces are committed and stand as pull requests 35 to 39,** on the owner's word of
-  2026-09-29, each on the one before it, none merged: the harvest (35), the prune tool (36),
-  step 4a (37), step 1a (38), step 1 (39). Each stage was built alone from `main` with the
-  stages before it, its selftest exits 0 (244 lines in `main`, then 244, 307, 336, 336 and
-  349), `hal_lint` passes, and the documents the engine writes at its boot were taken into
-  the commit that changes them. They merge from the bottom up. Where a note below says a
-  piece is not committed, it was written before that day's word.
+- Each stage of that stack was built alone from the `main` before it with the stages
+  beneath it: a clean build, the selftest's exit 0 (244 lines in the old `main`, then 244,
+  307, 336, 336 and 349), `hal_lint` passing, and the documents the engine writes at its
+  boot taken into the commit that changes them. The merged `main` has the tree of the last
+  stage, byte for byte, so what was built and tested is what is in `main`.
+- Where a note below says that a piece of those five is not committed, it was written
+  before that day's word. What is still uncommitted: step 2's probe and its forms of the
+  law, the migration's commits, the solver's bed and window, and the new manager.
 
 - **The pieces that are made apply together.** A dry run applied six of them to `main` in one
   order: the harvest, the prune tool, step 4a, step 1a, step 1 and step 2's probe. Together
