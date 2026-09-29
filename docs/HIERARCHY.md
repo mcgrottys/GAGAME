@@ -1124,7 +1124,6 @@ it exits 0. The branches named below are not committed.
   failure would show.
 - Run under the debug layer, the selftest dies before the probes are reached, in the atlas test
   (findings 43 and 44). The probes themselves drew no message from the layer.
-- **Step 1a is being made** on its own branch, `claude/pixel-water-float-wall`.
 - **Step 3 is done**, in `src/core/Lattice.{h,cpp}` (`CubeFaceAxes`, `FaceWindow`),
   `shaders/PageSample.hlsli` (`PageTexel`, `PageTexelUv`), `src/core/SpaceTest.cpp` and the tile
   selftest. Nothing reads it yet, so it changes no picture. Measured, on the harness's own
@@ -1147,8 +1146,27 @@ it exits 0. The branches named below are not committed.
   were set aside, both sides.
 - **Step 1 is being made** on its own branch, `claude/residency-instruments`: the pages ledger
   came with pull request 33.
-- **Step 4a is being made** on `claude/pyramid-tree`, and **the prune tool** on
-  `claude/tree-prune`.
+- **Step 4a is done**, uncommitted on `claude/pyramid-tree`: 17 files, +570 and -99, and a
+  selftest of its own. Measured on a scratch tree of 25 levels: a leaf painted where nothing
+  has been painted costs 16 writes where it cost 136, and the walk holds one stripe where it
+  held 14. On today's depth the new walk leaves the files today's leaves, byte for byte. The
+  walk this design had asked for, an absent parent painted and not folded, does NOT: it
+  changes six tiles of 33, because today each level's 4/255 test is decided against the
+  parent's own paint already risen. So what rises from a level is the versions it took, in
+  order, and each level is read once and written once. The walk it replaced loses a fold when
+  two threads paint siblings (finding 57); the new one reads the child again under the
+  parent's stripe and does not. The archive's packer, the refusals' count, the tools'
+  dispatch, the stripe's hash and `Prefill` are as section 6 says, each with its plant caught.
+- What step 4a did not see: composite drops compared old against new; a parent served from an
+  archive; one interleaving of the race, not all; `--warm-trees` unbounded on the real cache.
+  And the walk it replaced is still in `TileTree.h`, behind a switch only the selftest sets,
+  as the reference its files are held equal to. It goes when the new walk is accepted.
+- **The prune tool is done**, uncommitted on `claude/tree-prune` (4.14). The cache it listed
+  holds 95.6 GiB in 474 folders, 58 GiB of it the wave tree's 226 identities (finding 51), and
+  nothing in it is stale yet, because nothing was stamped before today.
+- **Step 1a is done**, uncommitted on `claude/pixel-water-float-wall`, moved onto `35a9eb7`,
+  where it draws what it drew: no pixel differs between the two bases, and two runs of it
+  are one picture. The grain of the near water was the sample point (finding 42).
 - Renders are taken one engine at a time. Two engines on one GPU were measured to move the
   pictures of both: the unmodified binary differed from itself by 16,669 pixels at one pose.
 - The Scriptorium serves this document and the review through a `plan` tool.
