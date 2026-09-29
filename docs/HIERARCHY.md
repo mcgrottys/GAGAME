@@ -446,13 +446,16 @@ map carries, beside the byte it has, one byte a TILE at every level: which of th
 eight neighbours are absent. That is a texture of 128 texels a side with a mip chain. The
 shader walks up from the byte's level, a load a level, and the clamp is
 
-    clamp(p) = max( byte, max over L of ( L + 1 - s(d_L) ) )
-    s(d) = smoothstep(m, 2 m, d),   m = M / 128
+    clamp(p) = max( byte, max over L of ( (L + 1) (1 - s(d_L)) ) )
+    s(d) = smoothstep(M, 2 M, d)
 
-with `d_L` the point's distance, in tiles of level L, to the nearest edge or corner whose
+with `d_L` the point's distance, in texels of level L, to the nearest edge or corner whose
 tile is absent. It is continuous. It is never finer than the law, because where `d_L` is
-under m it is at least L + 1. It is coarser than the tiles only within 0.16 of a tile of
-where a level ends. A tile that is mapped or released writes eight bytes. And the want
+under M the level's term is L + 1; and a level whose edge is 2 M away or more asks nothing.
+It is coarser than the tiles only within 0.16 of a tile of where a level ends. As this
+section first wrote it the term was L + 1 - s, which asks L of every level however far
+its edge stands, so the coarsest level always won. The probe caught it before any picture
+was taken: the margins planted too small touched nothing, and the suite failed. A tile that is mapped or released writes eight bytes. And the want
 grows by the margin alone, a neighbour being wanted where a read stands within 0.078 of a
 tile's edge: some tiles in a hundred, not as many again. Nothing of it is built. The probe
 and the lens that judged the first form judge this one.
