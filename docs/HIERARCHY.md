@@ -329,13 +329,49 @@ where it does not hold, the window carries three mips and the one pair that stra
 is fetched twice and mixed by hand: the same law, executed by the shader.
 
 **The floor: what is resident.** Today the clamp is the largest of the four nearest residency
-bytes: sound, and a staircase, so the picture's sharpness steps along tile lines. Proposed: when
-the map is written each byte takes the largest of its 3 by 3 neighbourhood, and the shader reads
-it with plain bilinear filtering. Measured on random maps (`porch_floor.py`, 76,800 samples): never
-finer than today's clamp, so at least as sound; the largest step between samples a sixteenth of a
-cell apart falls from 7 mips to 0.44; the price is 0.15 of a mip of sharpness on average. The same
-widening makes a kernel's single byte cover its four taps (finding 9). This one is independent of
-everything else here and can be tried first.
+bytes: a staircase, so the picture's sharpness steps along tile lines. The first proposal was to
+give each byte the largest of its 3 by 3 neighbourhood and read the map with plain bilinear
+filtering. On random maps it is never finer than today's clamp, the largest step between
+samples a sixteenth of a cell apart falls from 7 mips to 0.44, and it costs 0.15 of a mip
+(`porch_floor.py`). **Measured on the GPU, it is not sound, and it was not staged** (step 2,
+2026-09-29).
+
+The instrument is the M6h case made a probe: a reserved array with some tiles mapped and
+filled and their neighbours NULL, read through `PageSample` at 473,088 points a sampler, under
+footprints of ratio 1, 4 and 8, and the question asked of each point is whether any of a NULL
+tile's zero came into the sample.
+
+| the law | trilinear | anisotropic 8x, the colour's sampler |
+|---|---|---|
+| today's: gather and max, the true map | 0 | 1,606 |
+| the 3 by 3 floor, read bilinear | 0 | 4,221 |
+| a 5 by 5 floor, read bilinear | 0 | 5,471 |
+| the true map read bilinear (M6h, the plant) | 18,463 | 27,575 |
+| gather and max over the 3 by 3 floor | 0 | 77 |
+| gather and max over a 5 by 5 floor | 0 | 0 |
+
+Why: where the clamp decides, this GPU keeps the footprint's ratio and scales the whole
+footprint to the clamped level. At a clamp L a footprint of ratio N reaches N / 2 texels OF
+MIP L along its long axis, and one more for the bilinear tap: measured, 2.00 cells at a clamp
+of 6 for a ratio of 8, which is four texels of mip 6. So the reach is a number of texels of
+the level read, and a number of cells is the wrong unit. A cell is 128 texels of mip 0 and two
+of mip 6: a 3 by 3 of cells is sixty times the margin mip 0 needs and half of what mip 6
+needs, and a ramp that raises the clamp ahead of a frontier sends the wide footprint of a
+coarse level across it. Today's law has the same fault where the hardware's own level decides,
+under footprints 256 to 512 texels long (finding 61).
+
+**Proposed in its place, and under test in the same probe: a margin per level.** A level may
+be read at a place only where the place stands at least M of THAT level's texels inside what
+is resident at that level, and the same holds at every coarser level; M is the sampler's
+anisotropy and two, ten for the engine's. It is one law at every level, its unit is the texel
+that is read, and with no anisotropy it is today's clamp. The byte is computed where the map is
+written, and the shader's read does not change. Nothing of it is staged until the probe reads
+zero for it.
+
+What stands of the first proposal: the construction is gated on the CPU with its plants caught
+(the floor without its neighbours across a face's edge falls short at 534,276 points, all
+within half a cell of an edge), and a kernel's single byte covers its four taps under it
+(finding 9: 0 of 14 million taps in a coarser cell, where the true map has 11,505).
 
 ### 4.7 Residency, sharing and the budget
 
@@ -1076,7 +1112,7 @@ Each step names the instrument that can see it fail, and what that instrument ca
 | 0 | Probes in `--selftest`, no behaviour changed: the address bits the adapter reports; one heap tile mapped at two slices and at two mips, filled through one, read through both; WRAP sampling of a reserved slice under a residency clamp | bytes equal, per probe, and seen to fail on a planted wrong mapping | a driver that shares correctly only under load |
 | 1 | Instruments before changes: the residency audit (bytes against the mapped set); a line per shutdown phase, flushed; the residency lens; the pages ledger of the kept branch | the audit run on today's binary over a flight that paints: it reports finding 3 or clears it | the audit sees a wrong byte, not a wrong picture |
 | 1a | The pixel water's two defects (findings 6 and 7), in the shader as it stands | a probe of the cast's landing point against doubles; stills and a rail, before and after, for the owner's eye | the look is his to judge, not a threshold's |
-| 2 | The floor law | storm rail A/B by eye and by SSIM; the settled stills for soundness | a settled still cannot see a transition |
+| 2 | The floor law. The first, a 3 by 3 of cells read bilinear, measured unsound and was not staged; a margin per level is under test (4.6) | the GPU probe of 4.6: no sample holds any of a NULL tile's zero, under the engine's own samplers; then the storm rail A/B by eye and by SSIM | one adapter and one driver; a settled still cannot see a transition |
 | 3 | `Lattice` gains the face-plane window: ground metric, box, texel, tag, the plane rows. The address function in C++ and HLSL | `uv_precision.py` as a selftest; GPU readback of the address at random points | nothing downstream reads it yet |
 | 4 | The tree keyed `(face, rung, x, y)`, in four parts (below the table): 4a the tree made fit for depth, 4b its names completed, 4c the pyramid painted at the Merrimack, 4d the audit across lattices | below the table | picture quality: by eye, in the albedo lens |
 | 5 | **After step 6's standing blocks** (4.17). The residency manager that tracks the pyramid's tiles, with windows that activate, move and release. It replaces the code of findings 2 and 3 | step 1's audit, clean; slot audit; `[settle-exact]` hashes over global tiles and origins; the storm rail | whether the picture is right |
@@ -1140,10 +1176,20 @@ it exits 0. The branches named below are not committed.
   the eye is addressed from the eye's own anchor and the error grows with the distance in
   texels, by arithmetic about one part in eight million of it; that growth is not measured
   beyond the 10 km row.
-- **Step 2 is being made** on its own branch, `claude/residency-floor-law`. Its GPU probe
-  measures the law's soundness under the engine's own samplers, against today's law. It was
-  begun on `e6acf22` and moves onto `main` as `main` moves; its gate is taken after the archives
-  were set aside, both sides.
+- **Step 2 measured its law and did not stage it** (`claude/residency-floor-law`, on
+  `35a9eb7`, uncommitted). The 3 by 3 floor read bilinear lets a NULL tile into 4,221 of
+  473,088 samples under the anisotropic sampler, where today's law lets it into 1,606; 4.6
+  has the table, the reason, and the law proposed in its place. What the branch holds is the
+  probe, the construction with its gates, and the GPU still reading the true map. Its six
+  stills' hashes equal `main`'s.
+- **Pull request 33's rail check, taken with step 2's baselines** (all four runs after the
+  archives were set aside). Per frame, `e6acf22` against the merged code: in the flight the
+  mean SSIM is 0.998 where two runs of one binary give 0.9993 to 0.9996; in the helm phase,
+  where the pool is at its cap, 0.88 where two runs of one binary give 0.94. So the merged
+  code draws a different arrangement there, past the floor. The detail is the same within a
+  half of one percent (mean PNG bytes of the helm phase, 1,148,106 and 1,149,951 against
+  1,142,368 and 1,147,231), and the residency's turn is quicker, 1.16 ms where it was 1.35 to
+  1.42. That is what 2026-09-17 measured on the same code before it was committed.
 - **Step 1 is being made** on its own branch, `claude/residency-instruments`: the pages ledger
   came with pull request 33.
 - **Step 4a is done**, uncommitted on `claude/pyramid-tree`: 17 files, +570 and -99, and a
