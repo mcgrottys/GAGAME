@@ -191,7 +191,8 @@
       { "key": "hdr", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the RGBA16F radiance before the tonemap (--dump-hdr)" },
       { "key": "mp4", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "pipe rail frames to an encoder (--mp4)" },
       { "key": "railDir", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the rail's PNG directory (--rail*)" },
-      { "key": "settle", "type": "object", "field": "none", "schema": "capture.settle", "reload": "hot", "doc": "the still's hold" }
+      { "key": "settle", "type": "object", "field": "none", "schema": "capture.settle", "reload": "hot", "doc": "the still's hold" },
+      { "key": "residencyAudit", "type": "number", "field": "u32", "quantity": "1", "unit": "frames", "default": 0, "reload": "restart", "doc": "the residency audit every N turns: each page tenant's residency bytes against the tiles mapped and landed, and the invalidations applied (--res-audit; 0 = off)" }
     ] },
     { "type": "capture.settle", "keys": [
       { "key": "sync", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "hold the dump instant until the residency queues drain (--settle-sync)" },

@@ -161,10 +161,14 @@ Options ParseArgs(int argc, char** argv) {
             else o.dumpFibers = true;
         }
         else if (a == "--lens") {
+            // residency[.height|.landsea]: what the sampler is allowed to read -- the page that
+            // answers and the floor its sample is clamped by (shaders/ResidencyLens.hlsl).
             const std::string n = next("worldxz");
             o.lens = n == "worldxz" ? 1 : n == "winuv" ? 2 : n == "mip" ? 3
                      : n == "ring" ? 4 : n == "cascade" ? 5
-                     : n == "waterdata" ? 6 : n == "velgrad" ? 7 : n == "shell" ? 8 : 1;
+                     : n == "waterdata" ? 6 : n == "velgrad" ? 7 : n == "shell" ? 8
+                     : n == "residency" ? 9 : n == "residency.height" ? 10
+                     : n == "residency.landsea" ? 11 : 1;
         }
         else if (a == "--probe-cull-far") o.probeCullFar = true;
         else if (a == "--dump-meshlets") o.dumpMeshlets = Widen(next("meshlets.bin").c_str());
@@ -285,11 +289,14 @@ Options ParseArgs(int argc, char** argv) {
         }
         // The drawn sea against the water each hull reads (app/Tools/WaterProbe.cpp): the scene
         // depth read back every N recorded frames. An instrument -- its readbacks stop the GPU.
-        else if (a == "--water-probe" || a == "--pages-trace") {
-            // Two every-N instruments on one link (the chain is at C1061's limit, line ~158).
+        else if (a == "--water-probe" || a == "--pages-trace" || a == "--res-audit") {
+            // Three every-N instruments on one link (the chain is at C1061's limit, line ~158).
             // --pages-trace is the slice pool's (stage 0): the pages ledger every Nth turn.
+            // --res-audit is the scene's capture.residencyAudit: the residency bytes against the
+            // mapped set every Nth turn (hal/ResidencyAudit.h).
             const uint32_t every = uint32_t(atoi(next("30").c_str()));
             if (a == "--pages-trace") o.pagesEvery = every;
+            else if (a == "--res-audit") o.resAudit = every;
             else o.waterProbeEvery = every;
         }
         else if (a == "--tree-audit" || a == "--tree-prune") {
@@ -521,8 +528,9 @@ JsonValue StartValue(double startUnix) {
     return scene::JsonStr(buf);
 }
 
-const char* kLensNames[] = {"worldxz", "worldxz", "winuv", "mip", "ring",
-                            "cascade", "waterdata", "velgrad", "shell"};
+const char* kLensNames[] = {"worldxz", "worldxz",   "winuv",    "mip",
+                            "ring",    "cascade",   "waterdata", "velgrad",
+                            "shell",   "residency", "residency.height", "residency.landsea"};
 
 }  // namespace
 
@@ -630,6 +638,7 @@ SceneArgs Options::ToSets(const Options& o) {
     if (o.settleHold) set("capture.settle.hold", num(o.settleHold));
     if (o.settleExact) set("capture.settle.exact", JsonBool(true));
     if (o.settleClearChurn) set("capture.settle.clearChurn", JsonBool(true));
+    if (o.resAudit != D.resAudit) set("capture.residencyAudit", num(o.resAudit));
     // ---- views: --globe-cam is the orbit view's eye whether or not it starts there (the
     // code's camGlobe); --cam/--campos override the ACTIVE camera after the mode chose it.
     // M12 step 5d: THE ORBIT EYE IS ALWAYS WRITTEN, BECAUSE ITS DEFAULT IS A FUNCTION OF THE
@@ -745,7 +754,7 @@ SceneArgs Options::ToSets(const Options& o) {
     auto rawf = [&](const std::string& s) { out.raw.push_back(s); };
     if (o.pixFrames) rawf("--pix " + std::to_string(o.pixFrames));
     if (o.dumpFibers) rawf("--dump-fibers");
-    if (o.lens) rawf(std::string("--lens ") + kLensNames[o.lens > 0 && o.lens < 9 ? o.lens : 0]);
+    if (o.lens) rawf(std::string("--lens ") + kLensNames[o.lens > 0 && o.lens < 12 ? o.lens : 0]);
     if (o.probeCullFar) rawf("--probe-cull-far");
     if (!o.dumpMeshlets.empty()) rawf("--dump-meshlets " + Narrow(o.dumpMeshlets));
     if (o.inject) rawf(o.inject == 2 ? "--inject cascade" : "--inject bank");

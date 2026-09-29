@@ -645,6 +645,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         globe->meshStats = opt.meshStats;
         globe->msSurface = opt.msSurface;
         globe->albedoLens = opt.albedo;
+        // Before Init: the residency lens's pipelines are built there, and only when asked for.
+        globe->debugLens = opt.lens;
         globe->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
         renderer.AddLayer(std::move(globeOwned));
         // M6j: with the unified mesh surface active, the terrain layer stops rendering
@@ -678,6 +680,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         resMgr.dsSerial = opt.dsSerial;
         resMgr.traceRes = opt.resTrace;
         resMgr.pagesEvery = opt.pagesEvery;
+        resMgr.auditEvery = S.capture.residencyAudit;   // the scene's (--res-audit N)
         int surf = -1, norm = -1;
         if (marsMode) {
             // Mars: color/normal stay NATIVE streams (the rescued sample's pyramids are

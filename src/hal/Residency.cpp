@@ -803,6 +803,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         bool compact = false;
         for (const auto& [tenant, r] : q) {
             Tracked* tr = Find(tenant, r);
+            if (auditEvery) AuditInvalidation(tenant, r, tr);   // counted before the drop
             if (!tr) continue;
             Tenant& t = m_tenants[tenant];
             const std::shared_ptr<Tracked> keep = t.tracked[tr->pos];   // outlives Untrack
@@ -1333,6 +1334,8 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         stats += fs;
     }
     turnMs = std::chrono::duration<double, std::milli>(Clock::now() - turn0).count();
+    // The residency audit (ResidencyAudit.cpp): the turn's bytes against its tiles, outside turnMs.
+    if (auditEvery && (m_frame % auditEvery) == 0u) LogAudit();
 }
 
 void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,

@@ -23,7 +23,7 @@
 //                                                trees are, cache/trees unless a tool's
 //                                                scratch folder is named)
 //      capture    {headless, width, height, frames, dump, hdr, mp4, railDir,
-//                  settle{sync, hold, exact, clearChurn}}
+//                  settle{sync, hold, exact, clearChurn}, residencyAudit}
 //      views      [{name, at, fovY, gauge, nearZ, reversedZ, target, viewport{}, follow{}}]
 //                                                    -- `at` in the placement sugar; absent
 //                                                       means the engine's default for the mode.
@@ -191,6 +191,9 @@ struct CaptureSection {
     uint32_t width = 1600, height = 900, frames = 0;
     std::string dump, hdr, mp4, railDir;
     SettleProps settle;
+    // The residency audit every N turns (hal/ResidencyAudit.h); 0 = off, and then it costs one
+    // branch a turn. What the run records about its residency, beside what it records on screen.
+    uint32_t residencyAudit = 0;
 };
 // M12 step 5b: the rectangle of the target a view records into. Zero width or height = the
 // whole target, which is what every recorded frame means; an OFFSET is declarable and the

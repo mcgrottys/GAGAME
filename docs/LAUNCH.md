@@ -146,6 +146,8 @@ build\bin\gagame.exe scenes\recipes\storm_rail.json --set capture.frames=1200 --
   `tree-prune` is the one whose settings are scene keys, `prune.*` (`launch-data`).
 - **Instruments stay flags** and are never scene data: `--pix`, `--gpu-time`, `--bench`,
   `--no-vsync`, `--res-trace`, `--lens`, `--stencil`, `--albedo`, `--viz`, the `--dump-*` probes.
+  The one exception is the residency audit, which a scene may carry: `capture.residencyAudit`
+  (its flag, `--res-audit N`, writes that key).
 - **For tools that write scenes:** `docs/scene_schema.json` (every key's type, quantity, unit,
   default, doc and hot|restart) and `docs/registries.json` (every nameable thing and its properties)
   are rewritten at each boot from the engine's own tables.
@@ -206,6 +208,28 @@ build\bin\gagame.exe scenes\recipes\storm_rail.json --set capture.frames=1200 --
 - `--lens waterdata|bed|level|current|ring|cascade` — data-as-color debug views (flat,
   unlit; compare waterdata 1:1 with the proof figure). `--inject 1|2` — synthetic pattern
   cards for alignment forensics.
+- `--lens residency|residency.height|residency.landsea` — THE RESIDENCY LENS: instead of the
+  picture, what the sampler is allowed to read for earth.color, earth.height or gis.landsea. Hue
+  is the page that answers (violet the cube, green the z14 window, red the z17 detail), chosen as
+  the shaders choose it; brightness is that page's residency floor, the min-LOD its sample is
+  clamped by (mip 0 brightest, a ninth darker per mip); magenta = the page holds nothing; dark
+  grey = no survey page has an opinion (landsea); a black outline marks the answering tile at its
+  floor mip wherever a tile spans 5 to 500 pixels. The swatches at the bottom left are its own key
+  (rows cube, z14, z17 upward; columns mip 0..7; then magenta and grey), so a PNG can be read
+  back against its own colours.
+- `--res-audit N` (the scene's `capture.residencyAudit`) — every Nth residency turn, at the turn's
+  end, every page tenant's residency bytes against the tiles MAPPED AND LANDED
+  (`hal/ResidencyAudit.h`): `[res-audit] ... clean` in one line, or the counts of bytes FINER than
+  what is resident (a sampler sent into a NULL tile), COARSER (a softer picture than the memory
+  holds: review finding 3), HOLES (a mip mapped under a missing one), split cells and ORPHANS
+  (tracked tiles no queue will ever map: finding 2), with the new offenders named. Every applied
+  invalidation is counted, and one that drops a mapped tile over a mapped descendant is logged
+  (`INVALIDATE`) and watched until the tile is mapped again (`REMAPPED`, with the byte over the
+  descendant). At exit it prints what each tree painted and folded. `--selftest` runs it on
+  constructed tenants through the manager's own byte rule, with planted failures.
+- The shutdown trail: every run logs `[exit] <phase>` before each phase of its teardown (Finish,
+  the frame loop's and the assembly's destructors, main's return), flushed, so a run that dies
+  in teardown names the phase it died in.
 - `--water-map f.png` / `--bathy-map f.png` — georeferenced charts with coastline.
 - `--ocean-probe lat,lon` — WeatherManager rungs + provenance at a point.
 - `--albedo` — raw composed color lens; `--stencil` — GIS alignment overlay.

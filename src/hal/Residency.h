@@ -43,6 +43,7 @@
 #include "core/TileAddress.h"
 #include "hal/TileStream.h"
 #include "hal/Gpu.h"
+#include "hal/ResidencyAudit.h"
 #include "core/Pga.h"
 
 #include <atomic>
@@ -428,6 +429,17 @@ public:
     // (hal::Tenant::Sparse), once; an unlabelled slice prints by index.
     void LabelSlices(int tenant, std::vector<std::string> tags, std::vector<double> ground0M);
 
+    // ---- THE RESIDENCY AUDIT (hal/ResidencyAudit.h; the bodies live in ResidencyAudit.cpp, so
+    // this class carries the declarations and Residency.cpp two call lines). Every auditEvery-th
+    // turn, at the turn's end -- the bytes this frame's globe samples -- every residency byte
+    // against what the tiles mapped AND landed say it should be: one [res-audit] line when clean,
+    // the new offenders named when not; and the invalidations applied since, with those that
+    // dropped a tile over a mapped descendant, the only kind that can leave finding 3's signature.
+    uint32_t auditEvery = 0;       // main: the scene's capture.residencyAudit (0 = never)
+    void LogAudit();
+    // The audit on CONSTRUCTED tenants, through this class's own UpdateResidencyByte (--selftest).
+    static bool AuditSelfTest();
+
 private:
     struct Tracked;
     struct Tenant {
@@ -659,6 +671,11 @@ private:
     mutable bool m_groundRefusalSaid = false;   // M12 step 3e: DeriveDemand's refusal, once
     Motor m_prevPose;
     bool m_havePrevPose = false;
+
+    // The audit's memory between turns, and its count of one applied invalidation (called with
+    // the tile the address holds, or null, before the drop; ResidencyAudit.cpp).
+    AuditLedger m_audit;
+    void AuditInvalidation(int tenant, const TileRequest& r, const Tracked* tr);
 };
 
 }  // namespace ga
