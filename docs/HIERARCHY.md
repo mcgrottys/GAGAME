@@ -1339,26 +1339,36 @@ This section had said 2.3 km, by an arithmetic nobody had run.
     leaves through it at 9.5 km west of the anchor and comes back through it 0.8 km
     further east; the edge is a wall. Inside that grid the lowest way from the upper
     reach to the sea crosses land at +7.27 m, so the reach is a pond of 2.64 km2 whose
-    only mouth is the west face. The survey's own grid holds the bend. But on today's
-    window the reach stood still, its range 5 mm, and the bend lies in the band where
-    the survey fades into the relief beneath it: whether the bed the kernel reads holds
-    the bend is being measured, on the bed read back from the kernel. Below the bend
-    the model is right: 0.18 h late 5 km up, where Newburyport is 0.25 h.
+    only mouth is the west face. Below the bend the model is right: 0.18 h late 5 km
+    up, where Newburyport is 0.25 h.
+  - **On today's window the river is whole, and its west end is a wall.** The bed read
+    back from the kernel, flooded, joins the upper reach to the sea through the bend,
+    whose highest bed is -2.15 m; every cell of 20.3 km of channel is wet at every
+    tide. The reach I had reported as still, its range 5 mm, was the probe: it stood
+    on a cell whose bed is +2.33 m. The reach's range is 2.46 m. But the west face has
+    no wet cell, so the river is a channel with a dead end: at its upper end the tide
+    is 0.56 h late and 1.12 of the ocean's range, where the stations say 1.09 h and
+    0.83. It lags too little and swings too much, as a closed end does.
+  - **So the second law said too much.** Drawn in on every side the window lost the
+    bend at an edge that is a wall. **A solver's open boundary stands where its
+    sources paint at full weight;** at a wall the window keeps the survey's extent,
+    so that the water inside stays joined. Being measured in that form: the west
+    columns drawn in, the other three sides the survey's.
   - **The law it asks for: wherever water meets the window's edge the edge is an open
     boundary, and carries the data of what lies beyond it.** The north edge's two
     crossings are boundaries as the west face is. That replaces the solver's compass,
     the sea to the east and the river in the first column, which 4.15 already names as
     an assumption a second place cannot keep. It is step 8's. And an instrument, now:
     at its start a solver floods its bed from its open boundaries and says what water
-    is joined to none of them. Its first form flooded the survey's grid, which is not
-    the bed the kernel reads, and so could not see the fault it was made for; it floods
-    the bed read back from the kernel.
+    is joined to none of them. It floods the bed read back from the kernel, after the
+    wait. The solver's grid on the CPU is made from the same composed height and
+    carries the same fade, and the two floods differ by 0.14 to 0.82 km2.
   - **The baselines of the new default,** the whole bed on today's window: the two
     takes of every pose are one picture. Against `main` the water differs at five poses
     of six, 157,000 to 711,000 pixels, and the globe not at all; the level at the beach
     stands 0.028 m under the tide at frame 600 where `main`'s stands 0.552 m under it.
     On the storm rail the mean SSIM against `main` is 0.956 where `main` against itself
-    is 0.990. The engine's lines for the piece: 350 added, 30 removed, beside 1,227 of
+    is 0.990. The engine's lines for the piece: 357 added, 31 removed, beside 1,409 of
     instruments.
   - **So the first law goes forward as the default and the second does not yet.** The
     window's key stays, its default today's window, until the flow the boundary carries
