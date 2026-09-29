@@ -400,6 +400,15 @@ margin:** what a view reads at a level, grown by M of that level's texels, or th
 of every level reads the level above it. That is at most one more ring of tiles at a
 level's frontier.
 
+**What others have done.** The fault is known. Intel's sample of sampler-feedback streaming,
+which is this engine's arrangement (tiled resources, a map of the finest level held a
+region, a clamp in the shader), says that the hardware sampler reaches across tile
+boundaries under anisotropic sampling and meets tiles that are not mapped, and proposes to
+dilate or erode the map until neighbouring regions differ by one level at most; it leaves
+that undone. A slope of one level a region is not the margin measured here: at mip 6 the
+reach is two and a half regions, and at mip 0 a twenty-fifth of one. I did not find a margin
+stated in texels of the level read; that is two searches, not a survey.
+
 What the probe cannot tell: another adapter or driver, or an anisotropy other than 8;
 fractions above 0.9; a frontier other than a cliff, where every level below the coarsest ends
 at once; footprints that cross it at angles other than 0, 45 and 90 degrees; the picture.
@@ -458,7 +467,7 @@ on half of the turns, and from the first of them to the last the manager loads 7
 gathers them into batches, finds no slot, and leaves them in no queue: as many as the pool
 holds. They are never mapped, each keeps its 64 KB, and what waits beneath them waits for
 good. Returning the tail to its queue is three lines; what it needs with it is a bound, so
-that nothing is loaded that no slot can take, and that bound is the new manager's.
+that nothing is loaded that no slot can take, and that bound is the new manager's (4.19).
 
 ### 4.8 Portals, and several eyes
 
@@ -1141,6 +1150,72 @@ And one the apron adds: a texel of an apron and the texel of the face across the
 covers the same ground are painted from the same sources, so they agree within the containment
 of step 4d.
 
+### 4.19 The manager that replaces today's
+
+Proposed, 2026-09-29, from what steps 1 and 2 and the solver-bed experiment measured. Nothing of
+it is built. It is written as laws because every fault seen in today's manager is an order of
+events that a ledger kept by increments did not foresee, and a law has no order of events.
+
+**Two sets, and one order.** What is WANTED is said by the readers every turn: a view, a gate's
+carried eye, a kernel's domain, a prediction. What is HELD is the tiles that have a slot and
+whose bytes have landed. The manager has one order over tiles and nothing else to decide with:
+
+1. a tile of a standing window (a pin) before any other;
+2. then by how lately it was wanted: this turn, within the glance (60 turns today), longer ago;
+3. then the coarser ground before the finer, by rung, across slices and tenants;
+4. then by the reader's own weight, the nearer to what it looks at the sooner.
+
+**The held set is the first P of that order,** P being the pool. The loader reads the first
+tiles of the order that are not held. The evictor releases the last tiles held that are not
+among the first P. They are the two ends of one comparison, and the settled state is a function
+of the wants alone.
+
+What follows from it, each against what was seen:
+
+| the law | what it replaces | the finding it answers |
+|---|---|---|
+| **The map is a function of what is held** (4.7): the finest level held with every coarser one, and then the margin (4.6), written for the cells under the tiles that changed | the byte kept by increments | 3, 63, 64: no order of maps and unmaps can leave it wrong |
+| **A want is closed upward,** as it is today, and with the order that makes the held set closed upward: a parent was wanted at least as lately as its child and is the coarser, so it comes before its child into the pool and leaves after it | the ring gate, the gather's test of the parent, the evictor's test of the children | 63, 64: each tested one level, at one moment |
+| **A tile that lands out of turn waits in the map, not in a queue.** A child whose bytes arrive before its parent's is held, and the map names the coarser level until the parent lands | the gate that holds a request behind its parent | 24 |
+| **Nothing is read from disk that no slot will take.** The loader takes only tiles among the first P; a tile that has left the first P by the time it lands is let go in that turn | the batch, its lost tail, the tiles Loaded and in no queue | 2: 7,917 tiles on the storm rail; 67 |
+| **When the want is larger than the pool, what is lost is the want's own tail:** the finest rung's tiles farthest from what their reader looks at | the landing order | priors 30: at the bird pose 9,176 tiles are wanted of 8,192, and which 984 lose differs run to run |
+| **A tile that is repainted keeps its slot.** The new bytes are read and copied over the old in place; the tile is held throughout and the map does not change | the drop, the raised bytes, the second map in a new slot | 3: and the soft flash over every tile that a fold rewrites |
+| **Release is two steps.** The map stops naming a tile in the turn that decides it; its slot is unmapped and free once no frame in flight can read it | the NULL mapping made in the turn of the eviction | 34 |
+| **The turn is at the head of the frame,** before any reader records a read | a turn inside the globe's draw, after the sea and the banks have recorded theirs | 34; 4.17's table |
+| **A map is born saying that nothing is here,** on the GPU as on the CPU | a map born zeroed, which says that mip 0 is here | 66: the solver's hour on a bed of 0.0 m |
+| **A pin is whole before its reader starts,** and the reader asks: `Whole(pin)` | a pin made inside the frame loop, after the solver has spun up | 48, 67 |
+
+**What others have done.** Coarse before fine on the way in and fine before coarse on the
+way out is the common practice: Intel's sample queues a region's tiles from the coarsest
+level up and releases them from the finest down, by reference counts, never evicts the
+packed mips, and delays an eviction by the frames in flight, rescuing a tile that is wanted
+again before the delay ends. Virtual texturing at large keeps a cache by least recent use
+with the coarsest pages pinned. What this section adds to the practice is small and I do
+not claim it is new: that the two ends are one comparison, so that a want larger than the
+pool loses a tail that the want itself names, and that the map is computed from what is
+held. I did not find either stated; two searches, not a survey.
+
+**What it costs.** One selection a turn, of the first P among the tiles wanted within the
+glance, some twenty thousand: a pass over buckets of (class, lateness, rung) and a partial
+order by weight inside the one bucket that straddles P. A weight for every wanted tile, which
+the want walk has in hand: it knows the reader's centre and the tile. A reserve of slots equal
+to a turn's maps times the frames in flight, 384 of 8,192, because a released slot is not free
+at once. And a repaint in place needs the copy of a tile's bytes onto a mapped tile to be
+ordered with the draws, which the landing of a DirectStorage tile already is.
+
+**What it is not.** It is not a second policy beside the first: the headroom pass of pull
+request 33, which releases what nobody has wanted for a while, is the order's second key and
+is not kept as a pass. It has no notion of a window that moves: that is the binding's (4.5),
+which turns a global tile into a slot; this manager's unit is the global tile, as 4.7 says.
+And it does not choose the pool's size, which stays a budget that is stated.
+
+**Its gate** is step 1's audit, which computes the map's function from the tiles: clean over
+the flight that paints and over the storm rail, with no tile Loaded and in no queue. With it:
+the pages ledger's count of tiles read and never mapped, which is zero; the settled stills'
+hashes equal from run to run at the bird pose, where today they are not; the solver's pinned
+domain whole in six runs of six; and the lines of `src/hal/Residency.*`, which are 2,670
+today, fewer.
+
 ## 5. Decisions for Mark
 
 Settled already, 2026-09-28, and built into the sections above:
@@ -1165,7 +1240,8 @@ Settled already, 2026-09-28, and built into the sections above:
 - The cache is on disk and DirectStorage pulls it; it is wrong for three reasons and one
   mechanism answers them (4.14).
 - Findings 2 and 3 are replaced by the new residency manager, not repaired in the old one. The
-  audit that can see them comes first.
+  audit that can see them comes first. It has come, and it saw both; the manager's laws are
+  proposed in 4.19.
 - The measure of the abstraction is music on the water: a music file is a source of the water's
   physics as a buoy is, and the objects placed with it are shown moved by the water or by the
   music, all by an edit to the scene (4.16). Wanted at some point, not now.
@@ -1222,7 +1298,7 @@ Each step names the instrument that can see it fail, and what that instrument ca
 | 2 | The floor law. The first, a 3 by 3 of cells read bilinear, measured unsound and was not staged. A margin per level, M = 10 texels of the level read, reads zero in the probe (4.6); it is staged next, read bilinear, with the want grown by the same margin | the GPU probe of 4.6: no sample holds any of a NULL tile's zero, under the engine's own samplers; then the storm rail A/B by eye and by SSIM | one adapter and one driver; a settled still cannot see a transition |
 | 3 | `Lattice` gains the face-plane window: ground metric, box, texel, tag, the plane rows. The address function in C++ and HLSL | `uv_precision.py` as a selftest; GPU readback of the address at random points | nothing downstream reads it yet |
 | 4 | The tree keyed `(face, rung, x, y)`, in four parts (below the table): 4a the tree made fit for depth, 4b its names completed, 4c the pyramid painted at the Merrimack, 4d the audit across lattices | below the table | picture quality: by eye, in the albedo lens |
-| 5 | **After step 6's standing blocks** (4.17). The residency manager that tracks the pyramid's tiles, with windows that activate, move and release. It replaces the code of findings 2, 3, 63 and 64, and writes the map from the tiles (4.7) | step 1's audit, clean, over the flight that paints and over the storm rail; slot audit; `[settle-exact]` hashes over global tiles and origins; the storm rail | whether the picture is right |
+| 5 | **After step 6's standing blocks** (4.17). The residency manager that tracks the pyramid's tiles, with windows that activate, move and release. Its laws are 4.19's: one order, the held set its first P, the map a function of what is held. It replaces the code of findings 2, 3, 24, 34, 63, 64 and 66 | 4.19's: step 1's audit, clean, over the flight that paints and over the storm rail; no tile read and never mapped; slot audit; `[settle-exact]` hashes over global tiles and origins; the storm rail | whether the picture is right |
 | 6 | **Before step 5, on standing aligned blocks** (4.17's five commits, the colour and the mask first): the address, the directory, rank 1. Then, with step 5 behind it, the porch and the phase on windows that move | stills and rail against the Mercator baseline by SSIM and by eye, floors stated; a lens that paints rank and window | bit identity is gone by construction: the lattice changed |
 | 7 | The height with the exposure, as one move, and with them the solver's bed: a solver integrates on a window that stands whole (4.17, measured); the wave pages, whose solver is re-aligned to a face's plane; then the water surface as a tenant | `--water-probe` (drawn level against the level the hull reads), standing, per hull; `[kernel]` fingerprints; `--sea-verify` | |
 | 8 | A second place, then one in each face of the cube: harvested (Haulover and the Chesapeake's mouth are, 4.15), declared in a scene file, the boat put in. What names the Merrimack in code becomes keys of the scene (4.15's list). The politeness budget governs every fetch | `git diff --stat src shaders` is empty between the scene without the place and the scene with it; one ground point read back through two worlds: equal | data quality at the far place |
@@ -1381,6 +1457,12 @@ it exits 0. The branches named below are not committed.
   from memory of the book; the search found the theory named and the formula nowhere in full, so
   the harness checks its two limits. MPEG audio's tolerance:
   <https://www.underbit.com/resources/mpeg/audio/compliance>.
+- For 4.6 and 4.19. Intel, *Sampler Feedback Streaming* (the sample's README):
+  <https://github.com/GameTechDev/SamplerFeedbackStreaming/blob/main/README.md>, read through
+  a summary of the page. *How Virtual Textures Really Work*:
+  <https://www.shlom.dev/articles/how-virtual-textures-really-work/>. Van Waveren, *Software
+  Virtual Textures*, 2012: <https://mrelusive.com/publications/papers/Software-Virtual-Textures.pdf>,
+  which I could not read from here and do not cite for any statement.
 - Microsoft: tiled resource tiers
   <https://learn.microsoft.com/windows/win32/api/d3d12/ne-d3d12-d3d12_tiled_resources_tier>;
   tier 4 <https://microsoft.github.io/DirectX-Specs/d3d/D3D12TiledResourceTier4.html>;
