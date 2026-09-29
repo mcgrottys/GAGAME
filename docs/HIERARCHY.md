@@ -1654,6 +1654,40 @@ nothing; the order's turn, its loader, its gather and its release in two steps.
   They are beside today's manager; what the step removes is removed when the key's default
   changes.
 
+**The fourth part, the same day: the stills are one picture, and two gates were written too
+simply.** Lateness in the reader's statements, the weight, the hold that lifts the cap, the
+retire loop's unmaps in one call.
+
+- **In the hold the two managers draw one picture.** Six poses, two runs an arm, all four
+  runs pixel for pixel, every mapped set's hash equal but one run's wave field by six tiles.
+  Two things that are not the map had to be taken out of both arms for it: the solver's
+  spin-up, which under the new manager runs on the real bed and not on 0.0 m (law 9 at
+  work), and the churn, which builds on the tiles that are there.
+- **At a standing camera the held set settles and then changes by no tile,** and nothing is
+  read twice. On the storm rail 3,215 tiles were read again within the glance, where the
+  third part read 18,660 again. They are the prediction's: a tile it asked for, that its
+  next statement no longer holds and the view does not hold yet, is wanted by nobody for
+  some turns, and at the cap what nobody wants now is past the cut. **A prediction is a
+  statement about an interval:** what it asks for stands until the instant it predicted has
+  passed. And a quarter of the tiles released were wanted back while their slot was still
+  retiring, so a tile is taken back from the retire list, as Intel's sample does.
+- **The weight was upside down for the water.** At the cap, in the helm phase, the nearest
+  band of the sea lost its finest wave tiles and the far water kept them, with a straight
+  edge across the picture. The walk's leaves were weighed by their distance from the eye
+  and the wave's wants by a focus point. A want made on a view's behalf takes its weight
+  from that view's eye, whatever the tenant.
+- **What the cap loses is the wave field's finest level,** with or without the weight: at
+  the helm 14,947 tiles are wanted and 7,808 are held, and of the 7,139 lost 5,280 are the
+  wave field's at 2 m. The weight chooses which, not how many. The want is 934 MB and the
+  pool 512 MB: the pool's size is the owner's.
+- **The turn costs 3.1 to 3.4 ms where today's costs 1.2,** and the sort is not the cost:
+  1.55 ms of a pass is the walk over 12,315 tiles, three reads apiece in scattered memory.
+  The turn's work is to go with what changed and with the one rung that straddles the cut.
+- **The order of a frame, measured:** the solver reads its bed before any want of the frame
+  is said, and the terrain and the water bank read before the turn. A turn at the head of
+  the frame, on the wants of the frame before, precedes every read (law 8).
+- **The lines:** `Residency.*` is 3,595 where it was 2,670, both managers standing.
+
 **One law more, from Haulover: a tile is held whole or it is not held** (finding 83). 4.11
 says that absence is the coarser ancestor and never zero. Today a composite whose source
 was refused is delivered without that source and mapped, so the map names a tile that
