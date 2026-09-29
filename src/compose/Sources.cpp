@@ -102,6 +102,12 @@ float GoogleColorSource::Sample(double latRad, double lonRad, double groundResM,
     return 1.0f;
 }
 
+bool GoogleColorSource::Refusals(uint32_t& refused) const {
+    if (!m_prov || !m_prov->Ready()) return false;
+    refused = m_prov->Refused();
+    return true;
+}
+
 // ------------------------------------------------------------------------------ equirect
 
 EquirectHeightSource::EquirectHeightSource(const char* name, const char* structure,

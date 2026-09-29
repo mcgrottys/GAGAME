@@ -94,9 +94,11 @@ void RunSweUv(const Options& opt, Gpu& gpu, const BathyModel& bathy, SweSolver& 
 // --export SPEC: a composed channel out through the manager; exit with the export's code.
 int RunExport(const Options& opt, Gpu& gpu, Compositor& compositor, int hgtCh,
               ResidencyManager& resMgr, int colCh, const SurfaceFrame& surface);
-// --warm-inlet: pre-cache the composed pyramids. Falls through into the frame loop.
+// --warm-inlet: pre-cache the composed pyramids. Falls through into the frame loop. winSlice is
+// the colour tenant's z14 page (SurfaceFrame::winSlice, read off the declaration).
 void RunWarmInlet(const Options& opt, Gpu& gpu, const Compositor& compositor,
-                  ResidencyManager& resMgr, int winTenant, int hgtTenant, int hgtWinTenant);
+                  ResidencyManager& resMgr, int winTenant, uint32_t winSlice, int hgtTenant,
+                  int hgtWinTenant);
 
 // ---- After the frame loop (the scene is live; the run tears down normally afterwards).
 

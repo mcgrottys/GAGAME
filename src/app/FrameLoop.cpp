@@ -1327,7 +1327,12 @@ std::optional<int> FrameLoop::Session() {
     }
 
     if (S.Tool("warm-inlet") && (winTenant >= 0 || hgtTenant >= 0)) {
-        tools::RunWarmInlet(opt, gpu, compositor, resMgr, winTenant, hgtTenant, hgtWinTenant);
+        tools::RunWarmInlet(opt, gpu, compositor, resMgr, winTenant, surface.winSlice, hgtTenant,
+                            hgtWinTenant);
+        // What the warm did to the trees that serve the pages (the compositor's own counters
+        // above stay at zero when the trees are the providers, which is the default).
+        if (m_A.megaTree) Log("[warm] the colour tree:\n%s", m_A.megaTree->Stats().c_str());
+        if (m_A.heightTree) Log("[warm] the height tree:\n%s", m_A.heightTree->Stats().c_str());
     }
 
     // ---- M6j: channel export mode -- pull data OUT through the manager and exit.
@@ -2641,18 +2646,18 @@ bool FrameLoop::Frame() {
                     waveSrc->SetKey(waveField->LiveKey());
                     wavePendingKey = waveSrc->Key();
                     wavePendingPlanes = waveField->Table().nUsed + 1u;
-                    float u0, v0, u1, v1;
-                    waveSrc->WindowUv(u0, v0, u1, v1);
+                    uint32_t tx0, ty0, tx1, ty1;   // the window in whole mip-0 tiles
+                    waveSrc->WindowTiles(tx0, ty0, tx1, ty1);
                     wavePrefillBusy.store(true, std::memory_order_release);
                     const ColorFrame wf = waveFrame.color;
                     WaveFieldSource* wsrc = waveSrc.get();
                     const uint32_t planes = wavePendingPlanes;
                     Threads().Submit(Lane::Compute, "wave.prefill",
                                      [&wavePending, &wavePrefillDone, &wavePendingTiles,
-                                      &wavePendingSec, wf, wsrc, planes, u0, v0, u1, v1]() {
+                                      &wavePendingSec, wf, wsrc, planes, tx0, ty0, tx1, ty1]() {
                         const auto tp0 = Clock::now();
                         auto fresh = std::make_shared<TileTree>(wsrc, TileTree::Fmt::Raw4);
-                        wavePendingTiles = fresh->Prefill(wf, 0u, planes, u0, v0, u1, v1);
+                        wavePendingTiles = fresh->Prefill(wf, 0u, planes, 0u, tx0, ty0, tx1, ty1);
                         wavePendingSec =
                             std::chrono::duration<double>(Clock::now() - tp0).count();
                         wavePending = fresh;
@@ -4018,6 +4023,13 @@ int FrameLoop::Finish() {
         ga::ast::Edges().size(), ga::ast::Validate() ? "frames hold" : "FLIP FAILURES",
         compositor.painted.load(), compositor.cacheHits.load(),
         resMgr.fetchesThisRun, resMgr.PendingCount());
+    // The fetches a larger streaming.tileBudget would have made: with the budget at zero, the
+    // run's whole appetite for source tiles it did not have.
+    if (m_A.googleTiles.Ready()) {
+        Log("[google] %u source tiles refused this run (budget %u, %u fetched): the distinct "
+            "fetches a larger budget would have made",
+            m_A.googleTiles.Refused(), m_A.googleTiles.Budget(), m_A.googleTiles.Fetched());
+    }
 
     if (S.Tool("sea-verify") && sea) tools::RunSeaVerify(opt, gpu, sea);
     if (!S.dumpW.empty()) {

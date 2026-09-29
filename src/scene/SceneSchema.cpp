@@ -276,7 +276,11 @@ const Schema& StreamingSchema() {
             .Bind("gisGate", p.gisGate, "the vector land/sea gate on the bed (--no-gis-gate)", R)
             .Bind("seafloor", p.seafloor, "the global seafloor relief source (--no-seafloor)", R)
             .Bind("exposure", p.exposure, "the swell-exposure page (--no-exposure)", R)
-            .Bind("ringLoads", p.ringLoads, "the ring gate (--no-ring-loads)", R);
+            .Bind("ringLoads", p.ringLoads, "the ring gate (--no-ring-loads)", R)
+            .Bind("treeRoot", p.treeRoot,
+                  "the folder the tile trees live in; a scratch folder keeps a tool's paints and "
+                  "packs out of the real cache",
+                  R);
         return sc;
     }();
     return *s;

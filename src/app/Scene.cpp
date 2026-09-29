@@ -412,6 +412,17 @@ void ToolArgs(const Scene& S, Options& o) {
             o.treeAudit = static_cast<uint32_t>(atoi(t->args.c_str()));
         }
     }
+    // The audit's other two modes, as their flags set them (ParseArgs): warm every address the
+    // incumbent holds, or pack what the trees hold. Named by `--tool` or a scene's tools[] alone,
+    // the fields were never set, and RunTreeAudit would have audited instead.
+    if (S.Tool("warm-trees")) {
+        o.warmTrees = true;
+        if (!o.treeAudit) o.treeAudit = 1000000u;
+    }
+    if (S.Tool("pack-trees")) {
+        o.packTrees = true;
+        if (!o.treeAudit) o.treeAudit = 1u;
+    }
     if (const SceneTool* t = S.Tool("swe-cycle")) {
         if (o.sweCycleH <= 0.0 && !t->args.empty()) o.sweCycleH = atof(t->args.c_str());
     }

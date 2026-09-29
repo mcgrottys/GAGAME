@@ -160,6 +160,16 @@ bool GoogleTileProvider::Init(const std::string& mapType, uint32_t fetchBudget) 
     return EnsureSession();
 }
 
+void GoogleTileProvider::InitCacheOnly(const std::string& cacheRoot, const std::string& mapType,
+                                       uint32_t fetchBudget) {
+    m_cacheRoot = cacheRoot;
+    m_mapType = mapType;
+    m_budget = fetchBudget;
+    m_offline = true;
+    m_session = "offline";   // Ready(): the source samples through it like the real one
+    m_attribution = "Imagery (c) Google";
+}
+
 bool GoogleTileProvider::EnsureSession() {
     // Session tokens live ~2 weeks: cache and REUSE across runs (the polite path -- one
     // createSession, not one per launch).
@@ -206,10 +216,11 @@ bool GoogleTileProvider::EnsureSession() {
 }
 
 bool GoogleTileProvider::FetchTile(int z, int x, int y, std::vector<uint8_t>& jpg) {
-    char path[256];
-    snprintf(path, sizeof(path), "cache\\google\\%s\\z%d_x%d_y%d.jpg", m_mapType.c_str(), z, x,
-             y);
+    char path[320];
+    snprintf(path, sizeof(path), "%s\\%s\\z%d_x%d_y%d.jpg", m_cacheRoot.c_str(),
+             m_mapType.c_str(), z, x, y);
     {
+        m_cacheOpens.fetch_add(1, std::memory_order_relaxed);
         std::ifstream f(path, std::ios::binary);
         if (f) {
             jpg.assign((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -220,6 +231,12 @@ bool GoogleTileProvider::FetchTile(int z, int x, int y, std::vector<uint8_t>& jp
     {
         std::lock_guard<std::mutex> lk(m_mx);
         if (m_fetched >= m_budget) {
+            // Counted once per distinct tile and remembered (DecodedTile asks m_refused first):
+            // the number a zero-budget run prints is the number of fetches it would have made.
+            if (m_refused.insert(KeyOf(z, x, y)).second) {
+                m_refusedCount.store(static_cast<uint32_t>(m_refused.size()),
+                                     std::memory_order_relaxed);
+            }
             if (!m_budgetLogged) {
                 m_budgetLogged = true;
                 Log("[google] per-run fetch budget (%u) reached -- serving cache only "
@@ -243,6 +260,7 @@ bool GoogleTileProvider::FetchTile(int z, int x, int y, std::vector<uint8_t>& jp
         ++m_fetched;
         if (m_counter) *m_counter = m_fetched;
     }
+    if (m_offline) return false;   // InitCacheOnly: the request is never sent
     if (waitMs > 0) std::this_thread::sleep_for(std::chrono::milliseconds(waitMs));
     wchar_t wpath[256];
     swprintf(wpath, 256, L"/v1/2dtiles/%d/%d/%d?session=%S&key=%S", z, x, y, m_session.c_str(),
@@ -255,12 +273,12 @@ bool GoogleTileProvider::FetchTile(int z, int x, int y, std::vector<uint8_t>& jp
 
 // Decode (or serve from the small in-memory LRU) one 256x256 google tile as RGBA.
 std::shared_ptr<std::vector<uint8_t>> GoogleTileProvider::DecodedTile(int z, int x, int y) {
-    const uint64_t key = (static_cast<uint64_t>(z) << 48) | (static_cast<uint64_t>(x) << 24) |
-                         static_cast<uint64_t>(y);
+    const uint64_t key = KeyOf(z, x, y);
     {
         std::lock_guard<std::mutex> lk(m_mx);
         auto it = m_decoded.find(key);
         if (it != m_decoded.end()) return it->second;
+        if (m_refused.count(key)) return nullptr;   // refused once, refused for the run
     }
     std::vector<uint8_t> jpg;
     if (!FetchTile(z, x, y, jpg)) return nullptr;
