@@ -1320,11 +1320,29 @@ This section had said 2.3 km, by an arithmetic nobody had run.
     from the west where it is told to take it upriver. And the gap's current fell against
     the station's, where opening the boundary to the prism upriver should have raised it.
     That boundary had no wet cell since the bed became the composed height, so its law had
-    never carried water. Its terms are being measured, cell by cell, before anything is a
-    default.
-  - **Not closed:** whether the new binary with both keys at today's values draws today's
-    pixels at two poses, where two runs of one binary differ from each other; and frames of
-    70 ms on the storm rail under the new settings, where today's worst is 18.
+    never carried water.
+  - **The boundary's line is right, and the reach behind it is late.** Its terms were
+    traced cell by cell at four instants: the pinned column holds the target exactly, the
+    signs and the datums are right, the clamp never bites, and the flux it carries is the
+    sum of its two terms to 0.4 m3/s. But the water next to it is not the water the law
+    supposes. The reach from the first interior column to the 25th stands flat, 0.69 m
+    under the exterior at the flood and 0.6 m over it at the ebb: the model's river
+    delivers the tide there 2.70 h after the ocean's, where the stations say 1.07 h at
+    that kilometre and the model itself is 0.17 h late 10 km downriver. So the radiation
+    term, which is there to let reflections out, feeds and drains the reach, and the face
+    is a second mouth. Where the river loses 1.6 h is not found yet. The suspect is the
+    damping a step that every face's flux is multiplied by: a factor a step is a linear
+    friction, and a tide under a linear friction much larger than its frequency travels
+    as a diffusion and falls behind. Being measured.
+  - **So the first law goes forward as the default and the second does not yet.** The
+    window's key stays, its default today's window, until the flow the boundary carries
+    goes with the flow it is told and the gap's current does not fall.
+  - **Closed since:** the new binary with both keys at today's values draws today's
+    pictures. At the ebb `main` itself gives three pictures up to 13,666 pixels apart, and
+    runs of the new binary are byte for byte runs of `main`. The frames of 52 to 71 ms on
+    the storm rail are not the wait: two are a residency turn (34 ms, 29 of it releasing
+    and mapping; 40 ms, 36 of it opening files for DirectStorage) and two have no phase
+    that accounts for them.
 - **The height and the exposure move together.** The bank's kernel and the sea read both through
   one slice and one row.
 - **The colour and the mask move together.** They share lattices, a tree, rows and wants.
