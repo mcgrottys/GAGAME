@@ -460,6 +460,57 @@ mapped or released writes eight bytes. And the want grows by the margin alone, a
 wanted where a read stands within 0.078 of a tile's edge: some tiles in a hundred, not as many
 again. Nothing of it is built. The probe and the lens that judged the first form judge this one.
 
+**Built by the tile and gated, 2026-09-29, and not kept in that form either.** It is sound:
+through the engine's own shader function no sample holds any of a NULL tile's zero, under
+either sampler, and the margins planted too small are caught. The flags equal the tiles at
+every audited turn. Every hash is the unstaged binary's. And the manager's cost is today's:
+the map's refresh 0.122 ms in the mean where today's is 0.124, because a tile that flips
+writes its neighbours' bytes and nothing is searched.
+
+| pose | mean level of the clamp: today, by the cell, by the tile | ground a level coarser than today: by the cell, by the tile | pixels that differ from today: by the cell, by the tile |
+|---|---|---|---|
+| helm | 0.009, 0.011, 0.009 | 0.2 %, 0.0 % | 994, 23 |
+| 7 km | 0.019, 0.023, 0.016 | 0.4 %, 0.0 % | 3,306, 928 |
+| bird | 1.020, 1.074, 1.010 | 5.4 %, 0.0 % | 181,570, 10,266 |
+| Droste | 1.839, 1.917, 1.825 | 6.3 %, 0.1 % | 31,663, 1,882 |
+| globe | 0.594, 0.995, 1.792 | 29.6 %, 35.6 % | 94,367, 142,498 |
+
+Near the ground it is what was wanted: nothing a level coarser, and where it differs from
+today's clamp it is the finer, because today's gather coarsens half a cell at a frontier
+and this coarsens some texels. Two things fail it. At the globe it is coarser than either,
+by more than a level in the mean, and the picture has lost its texture there. And the GPU
+pays for the walk: the globe's pass takes 28.0 ms at the helm where it took 13.5, and
+12.8 ms at the bird where it took 6.4, every page read of every pixel loading a level's
+flags at a time.
+
+Why the globe: a level's band is counted in that level's texels, so where the levels read
+are coarse and what is resident of each is a few tiles across, the bands are a large part
+of the ground; and the ramp this form was given runs from M to twice M, twenty texels, a
+sixth of a tile a side. By the tile a wanted region three tiles across keeps its level
+over half its area. Today's clamp gives a coarse level a margin of one or two of its
+texels, which is why today's picture is sharp there and why today's law is the one that is
+not sound there (finding 61).
+
+**What soundness costs, stated once.** A sample's footprint reaches M texels of the level it
+reads. Either the tiles within that reach are resident, which asks of a view one ring of
+tiles beyond what it looks at, at every level (counted as an upper bound: 6,293 more on
+14,935 at the helm, 983 on 1,676 at the globe); or the sample gives way where they are not.
+It can give way in two manners. It can read a coarser level, which is what both forms built
+so far do, and costs a level over the whole reach. Or it can shorten its footprint to what
+is resident around it, and read a coarser level only where the shortest footprint there
+is, a texel and its bilinear tap, would still reach an absent tile.
+
+**The form that follows, proposed: a footprint reads no tile that is absent.** Within M of an
+absent tile the footprint's long axis is cut to the distance, by the gradients handed to the
+sampler; within three texels, the trilinear read's own reach, the level is raised, over a
+ramp of two texels more. The flags and their pyramid stay as built. A cell's byte carries
+one bit more, set where any level over the cell has an absent neighbour, so that a pixel
+far from every frontier loads one byte and walks nothing. A slice read with a clamping
+sampler has no neighbour past its own edge to touch, so its edge sets no flag. The band is
+then five texels where it was twenty, and what is lost inside the reach beyond it is the
+length of a footprint and not a level. Nothing of it is built. Its gate is the same probe,
+the same lens, and the globe's pass no slower than today's.
+
 What the probe cannot tell: another adapter or driver, or an anisotropy other than 8;
 fractions above 0.9; a frontier other than a cliff, where every level below the coarsest ends
 at once; footprints that cross it at angles other than 0, 45 and 90 degrees; the picture.
@@ -1444,7 +1495,7 @@ Each step names the instrument that can see it fail, and what that instrument ca
 | 0 | Probes in `--selftest`, no behaviour changed: the address bits the adapter reports; one heap tile mapped at two slices and at two mips, filled through one, read through both; WRAP sampling of a reserved slice under a residency clamp | bytes equal, per probe, and seen to fail on a planted wrong mapping | a driver that shares correctly only under load |
 | 1 | Instruments before changes: the residency audit (bytes against the mapped set); a line per shutdown phase, flushed; the residency lens; the pages ledger of the kept branch. Done: it reports finding 3, and finding 2, and two more | the audit run on today's binary over a flight that paints: it reports finding 3 or clears it | the audit sees a wrong byte, not a wrong picture |
 | 1a | The pixel water's two defects (findings 6 and 7), in the shader as it stands | a probe of the cast's landing point against doubles; stills and a rail, before and after, for the owner's eye | the look is his to judge, not a threshold's |
-| 2 | The floor law. The first, a 3 by 3 of cells read bilinear, measured unsound and was not staged. A margin per level, M = 10 texels of the level read, reads zero in the probe and in the engine (4.6). Staged by the cell and read bilinear it is sound, softer than it need be and slow to refresh, and is not kept; the same law evaluated by the tile at each level is next | the GPU probe of 4.6: no sample holds any of a NULL tile's zero, under the engine's own samplers; then the storm rail A/B by eye and by SSIM | one adapter and one driver; a settled still cannot see a transition |
+| 2 | The floor law. The first, a 3 by 3 of cells read bilinear, measured unsound and was not staged. A margin per level, M = 10 texels of the level read, reads zero in the probe and in the engine (4.6). Staged by the cell and read bilinear it is sound, softer than it need be and slow to refresh. Evaluated by the tile it is sound, as cheap to keep as today's and sharp near the ground, and it is coarser at the globe and doubles the globe's pass on the GPU. Neither is kept. Next: a footprint shortened to what is resident, the level raised only within the trilinear read's reach | the GPU probe of 4.6: no sample holds any of a NULL tile's zero, under the engine's own samplers; then the storm rail A/B by eye and by SSIM | one adapter and one driver; a settled still cannot see a transition |
 | 3 | `Lattice` gains the face-plane window: ground metric, box, texel, tag, the plane rows. The address function in C++ and HLSL | `uv_precision.py` as a selftest; GPU readback of the address at random points | nothing downstream reads it yet |
 | 4 | The tree keyed `(face, rung, x, y)`, in four parts (below the table): 4a the tree made fit for depth, 4b its names completed, 4c the pyramid painted at the Merrimack, 4d the audit across lattices | below the table | picture quality: by eye, in the albedo lens |
 | 5 | **After step 6's standing blocks** (4.17). The residency manager that tracks the pyramid's tiles, with windows that activate, move and release. Its laws are 4.19's: one order, the held set its first P, the map a function of what is held. It replaces the code of findings 2, 3, 24, 34, 63, 64 and 66 | 4.19's: step 1's audit, clean, over the flight that paints and over the storm rail; no tile read and never mapped; slot audit; `[settle-exact]` hashes over global tiles and origins; the storm rail | whether the picture is right |
