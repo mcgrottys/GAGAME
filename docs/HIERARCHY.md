@@ -873,7 +873,8 @@ Two things follow. **The free allowance is counted in tiles, not in bytes.** A s
 some 20 KB, so 100,000 a month is about 2 GB, and a budget of 5 to 10 GB a day is far more than
 Google gives without charge. The engine's cap for Google is therefore a count, 3,000 a day, which
 keeps a month inside the allowance whatever the day's quota permits; the 5 to 10 GB a day governs
-the open sources. That cap is a proposal and not yet code: today's budget is counted per run,
+the open sources. The owner has since set the cap himself (section 5): 100,000 tiles a day and
+5 GB a day. Neither is code yet: today's budget is counted per run,
 1,000 by default (`Options.h:62`, the scene's `streaming.tileBudget`), and no run knows what an
 earlier run of the same day fetched. A count kept beside the source's cache is owed before the
 first harvest. **The colour is a composite of its sources** (the owner, 2026-09-28), and for
@@ -1525,16 +1526,18 @@ And by three more:
 | Chesapeake Bay as the second place? | Chesapeake. |
 | Does the colour's base move to sources that may be kept? | The colour is a composite of its sources. For now Google fills the base. |
 
-**Open since 2026-09-29.**
+**Asked on 2026-09-29, and answered the same day:**
 
-| asked | the evidence | recommended |
+| asked | answered | where |
 |---|---|---|
-| Is the solver held until its bed is whole, from now, in today's engine? It moves the water of every still and every rail taken so far, so every baseline is taken again | 4.17: the hour of spin-up runs on a bed of 0.0 m, and the basin stands 0.55 m low for minutes | Yes, as a commit of its own, and the baselines after it |
-| Is the solver's window drawn in from the survey's faded edge, so that the river enters? It moves the water as the first does, and the two can share one retaking of the baselines | 4.17, finding 68: the solver's west column stands at +2.03 m where the survey has -4.21 m | Yes, with the first |
-| The pieces that are made and not committed: in which order, and is each a pull request of its own? | section 6, Standing | the harvest, the prune tool, step 4a, step 1a, step 1, each its own |
-| The wave tree has no cap: 226 identities and 58 GiB of the cache's 95.6 (finding 51). Is it given one? | 4.14 | Yes: a count of buckets kept, stated in the scene |
-| Imagery for the second place. The cache holds Google's tiles to z14 at the Merrimack and to z8 everywhere else, so neither harvested place can be drawn finer than 611 m today | 4.15; the cache's own file names | NAIP from a mirror that charges nothing, within the daily budget; Google only after its daily count exists |
-| The looks: the pixel water's fixes, and the colour read from the cube's lattice | the pictures sent; 4.17 | the owner's eye |
+| Are the pieces that are made committed, each a pull request of its own, in the order the dry run applied them? | Yes. | section 6, Standing |
+| Is the solver held until its bed is whole, and its window drawn in from the survey's faded edge so that the river enters? | Yes to both, together. Every baseline is taken again once, after both. | 4.17, findings 48 and 68 |
+| The looks: the pixel water's fixes, and the colour read from the cube's lattice | The pictures look good. | step 1a; 4.17 |
+| Imagery for the second place | Google's tiles for Haulover or the Chesapeake, kept in the cache as the others are, under a cap: 5 GB a day, and 100,000 tiles a day, of which the test should need few. | 4.15 |
+| Is the wave tree given a cap? It is 58 GiB of the cache's 95.6 | No. The cache may hold 200 GB where it might hold 100. | 4.14 |
+
+What is still the owner's to say, each when it comes: the merging of a pull request; and
+the prune tool's two modes that move and delete.
 
 Not asked, and done unless refused: the floor law is tried first, by itself (step 2), and
 Google is asked for no more than 3,000 tiles a day (4.15).
