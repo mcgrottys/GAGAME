@@ -916,8 +916,34 @@ scene says otherwise and 19 at most, and the day's count is what bounds the tile
 identity is its name and its structure. At 14 both are the strings they were, so no tree
 moves; at any other zoom the structure names it, so a scene that raises the zoom paints a
 tree of its own and writes nothing finer into a tree that says 14. Tested on the source
-alone, with the clamp left at 14 planted and caught; a scene that asks for 17 has painted
-nothing yet.
+alone, with the clamp left at 14 planted and caught.
+
+**The first requests, 2026-09-29, at Haulover** (a scratch tree: `main`, the migration's
+form H and the day's count; two scenes that cap themselves at 4,000 requests a day, zoom 17,
+1,500 a run). Before any request the same poses were run with the run's budget at zero,
+which asks nothing and says what would have been asked: 237, 429, 558 and 302 tiles at four
+poses.
+
+- **The first run that fetched asked for every tile twice** (finding 91): the day's count
+  read 250 asked and 250 tiles of 4,779,668 bytes, and the cache gained 127 files of
+  2,527,268. Loader threads that paint neighbouring tiles each fetched the tile they share.
+  Now one thread fetches a tile and the others wait and take what it brought. The next run
+  asked 150 and the cache gained 150.
+- **A run fetches some 250 tiles at most,** the throttle's 80 ms against the settle's hold
+  of 3,000 frames, so a pose is filled over several runs, the coarse zooms first.
+- **What the engine draws at Haulover is its own coast.** The survey's mask does not reach
+  Florida and the global relief is ETOPO's, 4.9 km a sample. The inlet, the barrier island
+  and the bay are open sea to it; its land begins some 3 km west of the true ocean shore,
+  and north of a straight line 2.7 km south of the inlet nothing is land at all. South of
+  that line the cube's height answers at its mip 1, and north of it at its mip 6, 39 km a
+  texel (the residency lens). The line lies at 65/256 of the face, which is also the edge
+  of the inlet's rank 3 block. Why nothing finer is asked of the height north of it is not
+  read. The imagery shows on the engine's land and lies unseen under its sea. It is
+  today's picture of the place and not the blocks': a run with no block declared draws
+  the same coast. The height on blocks, with the bed that was harvested there, is what
+  mends it (step 7).
+- **On the engine's land the blocks draw the imagery:** the mainland from 7 km, the streets
+  and the bay's islands, the want set resident and exact, no request refused.
 
 **The colour is a composite of its sources** (the owner, 2026-09-28), and for
 now Google fills its base. NAIP and Sentinel-2 between them cover every place named so far at
@@ -1621,7 +1647,7 @@ Each step names the instrument that can see it fail, and what that instrument ca
 | 4 | The tree keyed `(face, rung, x, y)`, in four parts (below the table): 4a the tree made fit for depth, 4b its names completed, 4c the pyramid painted at the Merrimack, 4d the audit across lattices | below the table | picture quality: by eye, in the albedo lens |
 | 5 | **After step 6's standing blocks** (4.17). The residency manager that tracks the pyramid's tiles, with windows that activate, move and release. Its laws are 4.19's: one order, the held set its first P, the map a function of what is held. It replaces the code of findings 2, 3, 24, 34, 63, 64 and 66 | 4.19's: step 1's audit, clean, over the flight that paints and over the storm rail; no tile read and never mapped; slot audit; `[settle-exact]` hashes over global tiles and origins; the storm rail | whether the picture is right |
 | 6 | **Before step 5, on standing aligned blocks** (4.17's five commits, the colour and the mask first): the address, the directory, rank 1. Then, with step 5 behind it, the porch and the phase on windows that move | stills and rail against the Mercator baseline by SSIM and by eye, floors stated; a lens that paints rank and window | bit identity is gone by construction: the lattice changed |
-| 7 | The height with the exposure, as one move, and with them the solver's bed: a solver integrates on a window that stands whole (4.17, measured); the wave pages, whose solver is re-aligned to a face's plane; then the water surface as a tenant | `--water-probe` (drawn level against the level the hull reads), standing, per hull; `[kernel]` fingerprints; `--sea-verify` | |
+| 7 | The height with the exposure, as one move, and with them the solver's bed: a solver integrates on a window that stands whole (4.17, measured); the wave pages, as a window on the place's own plane, the solve not moved (below); then the water surface as a tenant | `--water-probe` (drawn level against the level the hull reads), standing, per hull; `[kernel]` fingerprints; `--sea-verify` | |
 | 8 | A second place, then one in each face of the cube: harvested (Haulover and the Chesapeake's mouth are, 4.15), declared in a scene file, the boat put in. What names the Merrimack in code becomes keys of the scene (`docs/PLACE_KEYS.md`, 69 rows), the place's chart first. The politeness budget governs every fetch | `git diff --stat src shaders` is empty between the scene without the place and the scene with it; one ground point read back through two worlds: equal | data quality at the far place |
 | 9 | The porch at the cube's edge, and the aprons it reads (4.18) | a rail across 43.364 N; a lens that paints the weight; an apron's texel against the texel across the edge, by containment | |
 | 10 | Rank 4 from the 15 cm orthos at the jetty | a texel checkerboard at the helm | |
@@ -1671,7 +1697,7 @@ one region make some 3,400 ancestors, so a rank's tiles are about a third more t
 | 7.1 | The functions, called by nothing: the kernels' block form of the bed; the composed height over the chain; a ray's walk without gradients; the two CPU twins on the walk; one helper for a box of latitude and longitude in a block's uv, where three copies of a Mercator form stand (finding 89) | the selftest, the CPU twin against a GPU readback at random ground, a wrong row planted; the hashes | the picture: nothing draws it yet |
 | 7.2 | The move, as one: the height and the exposure declare the blocks in the page's place; the wants, the floors, the interests, the pin and the wait in the blocks' uv; every reader and both twins switched; the kernels given their rows | the key empty: every hash. The key set: the drawn level against the level the hull reads, inside today's floor; the bed within a stated bound of today's, texel against texel; the bed trace, every cell at the finest level of its block; the audit on the new slices; stills by SSIM and by eye | `--water-probe` sees near hulls; the trace sees the solver's bed and not the bank's; the kernels' fingerprints change by design and cannot gate this part |
 | 7.3 | The old path of the two tenants deleted: the page, its rows, its literals, its closures, its tools | the key-set bytes of 7.2 | nothing new: a deletion |
-| 7.4 | The wave pages on the pyramid's lattice. A block's texel on the ground is neither square nor at right angles (523 m by 395 m at 103 degrees at the mouth, at rung 0), so either the solve runs on the lattice's own frame or a node resamples the solve onto it. Not decided | the solved field against the hull's probe | the look, which is the owner's |
+| 7.4 | The wave pages as a window on the place's own plane. The solve is not moved onto the cube's lattice: a block's texel on the ground is neither square nor at right angles (523 m by 395 m at 103 degrees at the mouth, at rung 0), and the solve's closure for a blocked cell, its phase gauge and its refraction are written for square cells on east and north axes. Its grid is declared as a window on the tangent plane at the place, and its address is the law every window has: the map from the direction to a plane's grid is a ratio of planes whatever the plane, a cube's face being six cases of it. The solve's bytes stay exact and the hull's probe and the pages stay one field. What goes is the pages' z16 Mercator frame and its arithmetic | the address against doubles at random ground, as step 3 measured a face window's; the solved field against the hull's probe | a window whose plane is far from its ground: the tangent plane's texel is square at its centre and grows by one part in five million at 3 km |
 | 7.5 | The water surface as a tenant (4.11) | | |
 
 **Step 8, in five parts.** Proposed 2026-09-29 from `docs/PLACE_KEYS.md`; nothing of it is
