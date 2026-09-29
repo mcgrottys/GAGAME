@@ -1894,7 +1894,37 @@ one first; and the plane orthos' projection is UTM zone 19 in the code. So:
 - and then the list that is written in C++ is the default scene's list, and the code that
   named each dataset goes.
 
-Being built, the first four and the fifth, in a scratch tree on the blocks of 4.17.
+**The first slice is built** (2026-09-29, a scratch tree, not committed): the first four and
+the fifth. A scene names a file, or a folder and a pattern, under `sources`. GeoTIFF, PNG and
+JPEG are decoded by the operating system's decoder behind the loader's seam, and the place,
+the projection and the grain are read from the file's own tags, or from a world file and a
+`.prj` beside it. The projections are WGS84 geographic, Web Mercator and UTM in any zone, read
+off the code; any other code is refused by name. `streaming.faceWindows: auto` takes the
+blocks from the sources' footprints and grains.
+
+- **Measured.** The selftest, 22 checks and no failure: nine synthetic rasters in three
+  projections at 0.5 m and 0.05 m each answer the cell that lies at 36 points, within a
+  quarter of a texel; three plants are caught (zone 19 taken for a zone 17 file, rows read
+  from the bottom, a centre taken for a corner); a file replaced by one of its size and one
+  bit apart is another identity; a state plane's code is refused and the run goes on. The
+  place, checked by a second hand: the rasters were made in Python from Snyder's series and
+  the engine, by Newton on its own forward form, logs their centre at 25.854700 N,
+  80.190000 W, which is what Python was given.
+- **Drawn.** Two rasters at Haulover over the cached imagery, 2 km at 0.5 m and 200 m at
+  5 cm, from 1,500 m and from 300 m, no fetch. At 300 m the lens reads rank 5 at 92.6 % of
+  the pixels and rank 4 at the rest. **Ranks 4 and 5 had not been drawn before.** Eight
+  rows were used and one block of rank 4 did not fit, which was said in the log.
+- **Counted.** The engine, 995 lines added and 16 removed; tests, 504. It is new capability
+  and it is larger.
+- **What it cannot do, from reading its code.** It reads a file whole and decodes it whole,
+  and refuses one past 4 GB. It keeps a chain of levels of its own in memory. One file is
+  one source, and its weight falls to a half along its own edge, so two files of one flight
+  laid side by side would show the layer beneath along their seam, up to a half of it. A
+  fourth band is taken for alpha whether or not the file calls it so, which a four-band
+  ortho's near infrared is not. NAD83's geographic codes are refused where its UTM codes are
+  taken. A height in a file is refused by name: no stack takes one yet.
+- **The decoder does not show a GeoTIFF's own overviews** (measured: a file of two
+  directories decodes as one frame). The law below does not need them.
 
 **A source paints its own level, and the tree makes the others.** The owner, 2026-09-29:
 when a raster of any size is inserted, the tree is to make the lower levels, for itself and
@@ -2083,6 +2113,40 @@ depth, and the mapping found the names short in more places than the review had.
 | 4b | The names completed (4.14): a leaf's name carries a token of its bytes, a composite's key folds its inputs' tokens and not their presence, a leaf is looked up in an archive by its token, a height leaf's identity carries its content as a colour leaf's does, and the archive's key gives the face six bits where it gives three, for the aprons of 4.18. The tree's version is raised, so every tree repaints from the source caches on its next flight; nothing is fetched and nothing is deleted | `tools/hierarchy/archive_stale.py`: no archive holds bytes its loose file does not; a fold after a pack is read back as folded; the stills, where the pixels that move are the tiles that were served stale | what a token costs on a disk that is not an NVMe |
 | 4c | The pyramid painted at the Merrimack: ranks 2 and 3 over the ground of today's two windows, from the cached sources, the fetch budget at zero. The real-data test of sparseness: tiles and bytes a rank, beside the Mercator trees | fetches that would have been made: zero; the census | whether the picture is good: nothing draws it until step 6 |
 | 4d | The audit across lattices. Today's audit compares a tree with the flat compositor at the same address and enforces nothing | containment: a pyramid texel lies within the least and the greatest of the page texels around its centre, by one step of the byte. No constant bound is honest: across an edge in the imagery two lattices of nearly equal grain differ by as much as the edge does | a source the two lattices both sample wrongly |
+
+**Step 4b, by the path.** Designed 2026-09-29; nothing of it is built. It is made after the
+sources' second slice, which changes the same file. Section 4.20's first law says a tile's
+name is a path; this is what the path is, and what falls out of it.
+
+- **A level is counted from the root.** A face's root is one tile, 128 texels across the
+  face. A tile's depth is its levels below that, and its path is one digit of four a level:
+  which child. Rung r is depth r + 7. No level is the finest, so no name holds one: today's
+  `mip` is counted from a finest level, and that level is the width that bounds the depth.
+- **A block is a node.** A block of rank k is 16,384 texels of rung 3k, which is the ground
+  of the node at depth 3k. Its eight levels are the tiles at depths 3k to 3k + 7 beneath it.
+- **Each tile belongs to one block:** the block for which it is one of the three finest
+  levels, depths 3k + 5 to 3k + 7. The face keeps all eight of its own. So a block's chain
+  of eight is its own three levels, its parent's three, and two of its grandparent's. That
+  is the sharing step 0 probed (a finer window's level 3 is a coarser window's level 0), and
+  it is 4.3's stride of three, found again on the disk.
+- **On the disk a folder is a block,** named by three digits in its parent's folder, and a
+  file in it is a tile named by the five to seven digits that place it in the block. A
+  space hung under a leaf (4.20's fifth law) is a folder under that leaf's name, and the
+  path goes on.
+- **An archive is a block's,** and its key is the tile's place in the block: two bits of
+  level and seven of x and of y. The 28 bits of x and y and the five of level are gone, and
+  with them the bound of 0.3 mm. At most 21,504 tiles and 1.4 GB an archive. A block the
+  GPU binds reads three archives at most.
+- **The address in memory stays as it is** within one space: 32 bits hold a face to 4.7 mm.
+  What is finer hangs a space of its own.
+
+| part | what | gate | blind to |
+|---|---|---|---|
+| 4b.1 | The path on the disk: folders by block, files by place, the root by name. The address in memory is unchanged; one function turns it into a path and one turns it back | every address of a 25-level scratch tree to its path and back; two addresses never one path; the tiletree selftest on the new names | a file system that folds case, or a path past the system's length: both are measured on this one |
+| 4b.2 | The tokens (4.14): a leaf's name ends in a token of its bytes; a marker's is the hash of its children's; a composite's key folds its inputs' tokens. With them `DropCachedAddress` has nothing to do and goes | a child's bytes changed under a composite that is cached: the composite is not served and is made again, with no drop called; `archive_stale.py` | what a lookup by pattern costs on a disk that is not an NVMe |
+| 4b.3 | The archive by block, its key the place, looked up by token. The packer packs a block | a block packed and read back, tile for tile; a fold after a pack read back as folded; DirectStorage reads a block's chain from its three archives | |
+| 4b.4 | A height leaf's identity carries its content, as a colour leaf's does | an edit changed: the height's tree is another tree | |
+| 4b.5 | The tools follow: the prune tool's stamp and list, the census, `archive_stale.py`. The tree's version is raised, so every tree repaints from the source caches; nothing is fetched and nothing is deleted | the prune tool lists the old trees as unused after the age; fetches that would have been made: zero | |
 
 Two things the mapping measured about the cost of depth. A leaf painted in a region nobody has
 flown costs up to 152 tile writes today, because each absent ancestor is painted, folded
