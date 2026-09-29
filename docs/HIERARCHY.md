@@ -1331,6 +1331,29 @@ the six pieces of section 6 beneath them.
   levels and the winner sampled once. And the sixteen pixels are the pixel water's bed,
   read with its pixel's chain where the bed point has left that block; a ray that leaves
   the surface walks for itself (4.5). Rank 1 answered nowhere in the four frames.
+- **Commit 4's second form: one sample a read, and the bed walks for itself.** The winner
+  is decided from the residency's levels and sampled once; the pixel water's bed walks the
+  directory from where it lands. With the key empty the 68 stages are still the old
+  binary's. With it set, three poses are within their floors and the helm's two bed pixels
+  are the ladder's again. Two things are owed still. At the 7 km pose some 25 pixels of the
+  horizon changed by up to 52 levels: the winner is sampled inside a branch, and where the
+  pixels of one group of four choose different ranks the sampler's footprint is taken from
+  neighbours that did not run the sample, which the language leaves undefined; the old
+  picture leaned on the same thing. The footprint is to be taken before the branch. And the
+  key set still costs a millisecond at the helm:
+
+  | the globe's pass, ms | today | the ladder | the directory | one sample a read |
+  |---|---|---|---|---|
+  | helm | 12.88 | 13.97 | 13.93 | 13.88 |
+  | bird | 6.15 | 6.29 | 7.27 | 6.95 |
+
+  One sample in the place of three bought back 0.05 ms at the helm, so the millisecond is
+  not the colour's samples. It is inside the globe's mesh draw, and the ladder pays it too:
+  it belongs to reading blocks at all, and where in that is being measured by taking things
+  away. Counted from the code, a land pixel with the key set makes five residency gathers,
+  three directory loads and one colour sample, where today's makes three gathers and three
+  samples. The binding of 4.5, a window's index carried in the mesh's record, is what takes
+  the directory's loads away from a rasterized pixel, and it is not built.
 - **Two gates of this migration were lost to one fault of the harness,** and one the night
   before in step 2: PowerShell's names ignore case, so a key held in `$K` was overwritten by
   a loop's `$k`, and thirty runs meant to have the key set ran without it. The rule since: a
