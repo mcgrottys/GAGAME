@@ -1648,6 +1648,32 @@ flown costs up to 152 tile writes today, because each absent ancestor is painted
 upward, and then folded again by its caller; walked once it is 16. And ten thousand leaves of
 one region make some 3,400 ancestors, so a rank's tiles are about a third more than its leaves.
 
+**Step 7, in parts.** Proposed 2026-09-29 from a read-only map of every reader,
+`docs/STEP7_MAP.md`; nothing of it is built. What the map found that the plan did not know:
+
+- **The exposure is read through the height's slice and the height's row** in both of its
+  readers (finding 87). That is the code behind "the height and the exposure move together".
+- **The three kernels cannot call the colour's code.** The solver, the churn and the bank
+  have no surface rows, no directory and no walk; they address by latitude and longitude on
+  lattices of their own and read by loads. One function is owed, the block form of the rule
+  they share, with rows that each kernel's own constants carry.
+- **The vertex's height is read in a way that priors 1 says returns zero** (finding 85). Which
+  holds is measured first, because it decides whether those readers sample or load.
+- **The exposure is read at 76 m and coarser,** which is a rank 1 block's finest level: it
+  can stand on rank 1 alone.
+- **By itself step 7 about breaks even in lines,** some 410 out and 380 in, because every
+  Mercator reader gets a block reader. The deletion is what follows when the colour's last
+  commit and step 7 have both landed: some 250 lines more that then have no reader.
+
+| part | what | gate | blind to |
+|---|---|---|---|
+| 7.0 | Instruments, no picture changed: the solver's bed trace and its wait; `--water-probe` under a recipe (finding 73); the bank's fingerprint over what the kernel reads (finding 75); the lens's height on blocks; a readback of the mesh stage's height against the pixel stage's at one ground (finding 85) | the key empty: every stage's DXIL and the six stills' hashes; the trace's own planted floor | a transition |
+| 7.1 | The functions, called by nothing: the kernels' block form of the bed; the composed height over the chain; a ray's walk without gradients; the two CPU twins on the walk; one helper for a box of latitude and longitude in a block's uv, where three copies of a Mercator form stand (finding 89) | the selftest, the CPU twin against a GPU readback at random ground, a wrong row planted; the hashes | the picture: nothing draws it yet |
+| 7.2 | The move, as one: the height and the exposure declare the blocks in the page's place; the wants, the floors, the interests, the pin and the wait in the blocks' uv; every reader and both twins switched; the kernels given their rows | the key empty: every hash. The key set: the drawn level against the level the hull reads, inside today's floor; the bed within a stated bound of today's, texel against texel; the bed trace, every cell at the finest level of its block; the audit on the new slices; stills by SSIM and by eye | `--water-probe` sees near hulls; the trace sees the solver's bed and not the bank's; the kernels' fingerprints change by design and cannot gate this part |
+| 7.3 | The old path of the two tenants deleted: the page, its rows, its literals, its closures, its tools | the key-set bytes of 7.2 | nothing new: a deletion |
+| 7.4 | The wave pages on the pyramid's lattice. A block's texel on the ground is neither square nor at right angles (523 m by 395 m at 103 degrees at the mouth, at rung 0), so either the solve runs on the lattice's own frame or a node resamples the solve onto it. Not decided | the solved field against the hull's probe | the look, which is the owner's |
+| 7.5 | The water surface as a tenant (4.11) | | |
+
 **Step 8, in five parts.** Proposed 2026-09-29 from `docs/PLACE_KEYS.md`; nothing of it is
 built. The first three change no picture and need nothing of steps 5 to 7, so they can be made
 beside them. The last two need step 7: a solver at a second place reads its bed from a window
