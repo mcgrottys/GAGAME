@@ -827,6 +827,37 @@ keys can already point at them. The rest names the Merrimack in code:
 Step 8 is that list turned into keys of the scene, and its gate stays what it was: the source
 tree does not change between the scene without the place and the scene with it.
 
+**The list was a count. The map is `docs/PLACE_KEYS.md`** (2026-09-29, read-only): 69 rows,
+each with the file and the line, who reads it, the key that carries it today or the key
+proposed, and today's literal as the default. By class: 23 paths and names of data, 7
+identifiers of stations, buoys and gauges, 13 coordinates, zones and boxes, 11 assumptions
+about geography written as code, 5 windows, 10 defaults. What it changes in the plan:
+
+- **The anchor is the physics' chart, and it is the largest item.** The flat frame every
+  solver, kernel and hull works in is degrees times metres a degree frozen at 42.8 N. A bed
+  at Haulover placed by it is solved on cells 0.82 of their true width east to west, and
+  at the Chesapeake 0.92. So a place declares its chart, an anchor with its own metres a
+  degree, and every reader takes the chart from the place. The gates already build a chart
+  at another place by the same law (`Gateway.cpp:39-40`). The Merrimack's default carries
+  the literal 81,660 and not the cosine, which is 81,654.6: a point 10 km from the anchor
+  would move 0.7 m.
+- **Two keys exist and are passed by.** The depth tree reopens the Merrimack's bed whatever
+  `data.bathy` says, and the velocity-gradient bank reopens the default currents' file
+  whatever `data.currents` says.
+- **A name is part of an identity.** The layer built from `data.bathy` is named
+  `noaa.cudem.merrimack` whatever bed it holds, and the station field `tide.stations.ne`;
+  the names reach the trees' folders. A place's data needs the place's name.
+- **What is an assumption and not a literal stays an assumption at step 8, and is said.**
+  The solver's open sea is the half-plane east of a threshold and its river the first
+  column; the boundary clocks are chosen by river kilometre; the entrance jet's axis passes
+  through the origin; every solver's bed is the one z14 page. At Haulover and at the
+  Chesapeake's mouth the sea is to the east, neither tide file has a river kilometre, so
+  the clocks fall to the focus station, and with no station of its name the jet is off.
+  The second place runs on those terms. A coast that faces west does not, and the law that
+  replaces the compass is a boundary the place declares as a plane of its chart.
+- **The zone of a raster falls to 19** for any code the loader does not know, and the codes
+  of zones 17 and 18 in NAD83(2011) are among them. The zone is the file's to declare.
+
 ### 4.16 Music as a source: the buoy, and the wave machine
 
 The owner, 2026-09-28, as the measure of how abstract the algebra must be: a music file is added
@@ -1301,7 +1332,7 @@ Each step names the instrument that can see it fail, and what that instrument ca
 | 5 | **After step 6's standing blocks** (4.17). The residency manager that tracks the pyramid's tiles, with windows that activate, move and release. Its laws are 4.19's: one order, the held set its first P, the map a function of what is held. It replaces the code of findings 2, 3, 24, 34, 63, 64 and 66 | 4.19's: step 1's audit, clean, over the flight that paints and over the storm rail; no tile read and never mapped; slot audit; `[settle-exact]` hashes over global tiles and origins; the storm rail | whether the picture is right |
 | 6 | **Before step 5, on standing aligned blocks** (4.17's five commits, the colour and the mask first): the address, the directory, rank 1. Then, with step 5 behind it, the porch and the phase on windows that move | stills and rail against the Mercator baseline by SSIM and by eye, floors stated; a lens that paints rank and window | bit identity is gone by construction: the lattice changed |
 | 7 | The height with the exposure, as one move, and with them the solver's bed: a solver integrates on a window that stands whole (4.17, measured); the wave pages, whose solver is re-aligned to a face's plane; then the water surface as a tenant | `--water-probe` (drawn level against the level the hull reads), standing, per hull; `[kernel]` fingerprints; `--sea-verify` | |
-| 8 | A second place, then one in each face of the cube: harvested (Haulover and the Chesapeake's mouth are, 4.15), declared in a scene file, the boat put in. What names the Merrimack in code becomes keys of the scene (4.15's list). The politeness budget governs every fetch | `git diff --stat src shaders` is empty between the scene without the place and the scene with it; one ground point read back through two worlds: equal | data quality at the far place |
+| 8 | A second place, then one in each face of the cube: harvested (Haulover and the Chesapeake's mouth are, 4.15), declared in a scene file, the boat put in. What names the Merrimack in code becomes keys of the scene (`docs/PLACE_KEYS.md`, 69 rows), the place's chart first. The politeness budget governs every fetch | `git diff --stat src shaders` is empty between the scene without the place and the scene with it; one ground point read back through two worlds: equal | data quality at the far place |
 | 9 | The porch at the cube's edge, and the aprons it reads (4.18) | a rail across 43.364 N; a lens that paints the weight; an apron's texel against the texel across the edge, by containment | |
 | 10 | Rank 4 from the 15 cm orthos at the jetty | a texel checkerboard at the helm | |
 | 11 | Gates restated as cells; cages when they are wanted | | |
@@ -1327,9 +1358,18 @@ flown costs up to 152 tile writes today, because each absent ancestor is painted
 upward, and then folded again by its caller; walked once it is 16. And ten thousand leaves of
 one region make some 3,400 ancestors, so a rank's tiles are about a third more than its leaves.
 
-**Standing, 2026-09-28.** Steps 0 and 3 are in `main`: pull request 34 was merged that day, on
-top of pull request 33, and `main` is `35a9eb7`. The merged tree was built and its selftest run:
-it exits 0. The branches named below are not committed.
+**Standing, 2026-09-29.** Steps 0 and 3 are in `main`: pull request 34 was merged on
+2026-09-28, on top of pull request 33, and `main` is `35a9eb7`. The merged tree was built and
+its selftest run: it exits 0. The branches named below are not committed.
+
+- **The pieces that are made apply together.** A dry run applied six of them to `main` in one
+  order: the harvest, the prune tool, step 4a, step 1a, step 1 and step 2's probe. Together
+  they build, the selftest exits 0 and `hal_lint` passes. Three files had lines added by two
+  pieces at one place. One conflict no merge shows, and only the selftest found it: the prune
+  tool stamps every folder a run uses, and step 4a's test listed the stamp as a stray file.
+  The engine's lines, counted from the dry run's trees: +1,185 and -156 over the six, beside
+  10,431 of tests, instruments and tools. These are the steps that add instruments; the steps
+  that remove follow them.
 
 - **Step 0 is done**, in `src/hal/Gpu.{h,cpp}`, `src/hal/TileAtlas.{h,cpp}` and
   `shaders/TileWrap.hlsl`. `--selftest` exits 0 with the probes in it, 26 new lines and no old
