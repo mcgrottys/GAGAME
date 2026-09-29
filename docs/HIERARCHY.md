@@ -863,7 +863,7 @@ datum: how much a day, and whether what it sends may be kept.
 | source | covers | grain | may it be kept? | asked how |
 |---|---|---|---|---|
 | Google Map Tiles (satellite) | the planet | to z20 and finer | **Not as the engine keeps it.** The policy forbids pre-fetching, storing or caching beyond what the response's cache headers allow, and forbids offline use | 15,000 tiles a day by default quota, 100,000 a month without charge, billed beyond that; billing must be enabled on the project |
-| NAIP (USDA) | the contiguous United States | 0.3 to 1 m | yes: public domain | cloud-optimized GeoTIFF on AWS open data |
+| NAIP (USDA) | the contiguous United States | 0.3 to 1 m | yes: public domain | cloud-optimized GeoTIFF. The AWS buckets are requester-pays: whoever asks pays for every request. Microsoft's Planetary Computer holds the same collection, 2010 to now, in Azure and lists it through a STAC catalogue; read from search results, not tried |
 | Sentinel-2 cloudless (EOX) | the planet | 10 m | the 2016 mosaic yes, with attribution (CC BY 4.0); later years are non-commercial share-alike | tiles on S3, zoom 7 to 13 |
 | MassGIS orthos | Massachusetts | 15 cm | yes | already harvested |
 | ETOPO 2022, CUDEM (NOAA) | the planet; the US coast | 1.8 km; 3 m | yes | already harvested for New England |
@@ -1533,6 +1533,8 @@ And by three more:
 | Is the solver's window drawn in from the survey's faded edge, so that the river enters? It moves the water as the first does, and the two can share one retaking of the baselines | 4.17, finding 68: the solver's west column stands at +2.03 m where the survey has -4.21 m | Yes, with the first |
 | The pieces that are made and not committed: in which order, and is each a pull request of its own? | section 6, Standing | the harvest, the prune tool, step 4a, step 1a, step 1, each its own |
 | The wave tree has no cap: 226 identities and 58 GiB of the cache's 95.6 (finding 51). Is it given one? | 4.14 | Yes: a count of buckets kept, stated in the scene |
+| Imagery for the second place. The cache holds Google's tiles to z14 at the Merrimack and to z8 everywhere else, so neither harvested place can be drawn finer than 611 m today | 4.15; the cache's own file names | NAIP from a mirror that charges nothing, within the daily budget; Google only after its daily count exists |
+| The looks: the pixel water's fixes, and the colour read from the cube's lattice | the pictures sent; 4.17 | the owner's eye |
 
 Not asked, and done unless refused: the floor law is tried first, by itself (step 2), and
 Google is asked for no more than 3,000 tiles a day (4.15).
@@ -1723,6 +1725,8 @@ its selftest run: it exits 0. The branches named below are not committed.
   <https://www.shlom.dev/articles/how-virtual-textures-really-work/>. Van Waveren, *Software
   Virtual Textures*, 2012: <https://mrelusive.com/publications/papers/Software-Virtual-Textures.pdf>,
   which I could not read from here and do not cite for any statement.
+- For 4.15's NAIP row: <https://registry.opendata.aws/naip/> (the buckets are requester-pays);
+  <https://planetarycomputer.microsoft.com/dataset/naip>. Both as search engines quote them.
 - Microsoft: tiled resource tiers
   <https://learn.microsoft.com/windows/win32/api/d3d12/ne-d3d12-d3d12_tiled_resources_tier>;
   tier 4 <https://microsoft.github.io/DirectX-Specs/d3d/D3D12TiledResourceTier4.html>;
