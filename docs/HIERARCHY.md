@@ -1644,8 +1644,9 @@ whose bytes have landed. The manager has one order over tiles and nothing else t
 
 1. a tile of a standing window (a pin) before any other;
 2. then by how lately it was wanted: this turn, within the glance (60 turns today), longer ago;
-3. then the coarser ground before the finer, by rung, across slices and tenants;
-4. then by the reader's own weight, the nearer to what it looks at the sooner.
+3. then by the size of its texel on its reader's screen, the larger the sooner. (As first
+   written this was two keys, the coarser ground before the finer and then the reader's
+   weight; built, the first outranked the second and lost the nearest ground. See below.)
 
 **The held set is the first P of that order,** P being the pool. The loader reads the first
 tiles of the order that are not held. The evictor releases the last tiles held that are not
@@ -1764,6 +1765,37 @@ retire loop's unmaps in one call.
   is said, and the terrain and the water bank read before the turn. A turn at the head of
   the frame, on the wants of the frame before, precedes every read (law 8).
 - **The lines:** `Residency.*` is 3,595 where it was 2,670, both managers standing.
+
+**The fifth part, and the order's law changed.** The prediction as an interval, the rescue,
+the weight from the eye, the turn's work made to go with what changed, the turn at the head
+of the frame.
+
+- **The stills, the audits and the standing camera hold as before:** in the hold the two
+  managers draw one picture; no byte finer or coarser than the tiles at 1,350 turns of the
+  rail and of a flight that paints; the held set settles and changes by no tile for 437
+  turns.
+- **Tiles read again within the glance, on the storm rail:** 18,660, then 3,215, now 1,729,
+  the prediction's wants standing for its lead of 24 frames. 3,777 tiles a run are taken
+  back from the retire list with no read. Read from the disk over the rail: 16,870, where
+  today's manager reads 21,940 and strands 7,917 of them.
+- **The turn's pass costs a thirteenth of what it cost,** 0.16 ms where it was 1.83. The
+  whole turn is 1.25 to 1.33 ms in the mean where today's was 1.0 to 1.06 that session, its
+  95th in a hundred 4.8 to 5.0 where today's is 5.1. What is left of the difference is the
+  maps it makes at the cap, which today's manager does not make.
+- **The turn is first in the frame's list,** after every want of the frame and before every
+  read. No frame of latency is needed; I had expected one.
+- **The band of smooth water at the cap was the law's, and the law is changed.** The
+  order's third key, the coarser ground before the finer, outranked the weight, so at the
+  cap everything finer than 16 m a texel was lost everywhere, the nearest water with it.
+  **The third and fourth keys become one: the size of a tile's texel on its reader's
+  screen, the larger the sooner.** The want asks for a tile where its texel is about a
+  pixel, so every wanted leaf has about the same size on the screen but where the data's
+  finest level is coarser than a pixel, which is the ground nearest the eye: those are the
+  largest, and they are what was lost. A parent's texel is twice its child's at no greater
+  distance, so the held set stays closed upward, and "the coarser ground first" is what the
+  measure says of a parent and its child and of nothing else. Being built.
+- **Then today's manager is removed,** and the lines of `Residency.*` are counted against
+  the 2,523 of `main`. Both stand today: 3,804.
 
 **One law more, from Haulover: a tile is held whole or it is not held** (finding 83). 4.11
 says that absence is the coarser ancestor and never zero. Today a composite whose source
