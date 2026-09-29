@@ -92,6 +92,8 @@ struct Options {
     uint32_t treeAudit = 0;           // --tree-audit N: compare N tiles/frame, report, exit
     bool warmTrees = false;           // --warm-trees: build them without comparing, then exit
     bool packTrees = false;           // --pack-trees: one archive per node per frame, then exit
+    bool treePrune = false;           // --tree-prune: list the trees' tag folders by last use,
+                                      // exit; retire and purge are prune.mode + prune.confirm
     bool bench = false;               // --bench: fly the rail, capture nothing, time honestly
     bool benchOverlap = false;        // --bench-overlap: --bench WITHOUT the per-frame WaitIdle --
                                       // the loop mean is then the shipped max(CPU, GPU) pipeline
