@@ -110,6 +110,7 @@ struct Scene : scene::SceneDocument {
     std::vector<SceneEffect> effects;
     std::vector<SceneLayer> layers;   // THE REGISTRATION ORDER (= the draw order), as data
     std::vector<SceneTool> tools;
+    std::vector<scene::SourceProps> sources;   // rasters that are sources by being files
     JsonValue waterDoc;               // the `water` section as written (WaterComponent reads it)
 
     const SceneView* View(const std::string& name) const;

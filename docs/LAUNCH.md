@@ -37,6 +37,22 @@ Camera: `--campos x,z` (world metres, ACT0816 anchor, +x east +z north) and
 `--storm 3.0,10,95`); omit for live NOAA conditions. `--tile-budget N` raises the Google
 fetch budget for long rides (default polite; 3000 for rail renders).
 
+The day's cap is the scene's, not a flag's, over every engine on the machine together, per UTC
+day, whichever is met first: `streaming.dayTiles` (default 100000) bounds the Google tile
+REQUESTS sent, whatever came back, and `streaming.dayBytes` (default 5000000000) the bytes of the
+tiles that landed whole; `0` means no request that day, not "no limit". The count lives in
+`cache\google\day_<YYYY-MM-DD>.json` (`{"day", "asked", "tiles", "bytes", "last"}`: requests
+sent; tiles and bytes landed), one file a day, kept as history. Boot logs what today's file
+holds against the caps; a met cap is logged once and refuses requests the way a spent
+`tileBudget` does (the cache still serves). A file that cannot be read as a ledger counts as a
+met cap. A spent `tileBudget` refuses before the ledger is read, and a run stops asking after 8
+requests in a row are sent and land nothing (said once). Requests already in flight when a cap
+is met still go, so a day can close over its cap by those few. `streaming.googleZoom` (default
+14, held to 0..19) is the finest zoom the Google source may be asked for; each step finer is four
+times the tiles. At 14 the source is the one it always was; any other value names itself in the
+source's structure (`, to z17`), so it paints its own tree and never writes finer tiles into the
+z14 one.
+
 ## launch-videos — The rail rides
 
 `--rail-jetty DIR` — ground to space: helm at the gap, tip-to-tip, bird's eye, 800 km

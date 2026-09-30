@@ -67,7 +67,6 @@
 #include "scene/GulfLayer.h"
 #include "scene/SeaLayer.h"
 #include "scene/SkyLayer.h"
-#include "scene/TerrainLayer.h"
 #include "scene/WaterBankLayer.h"
 #include "scene/TideLayer.h"
 #include "compose/Compositor.h"
@@ -75,6 +74,7 @@
 #include "compose/SurfaceFrame.h"
 #include "compose/GisStencil.h"
 #include "compose/Sources.h"
+#include "compose/RasterFileSource.h"
 #include "compose/VectorPack.h"
 #include "compose/WaterAtlas.h"
 #include "scene/VesselLayer.h"
@@ -114,6 +114,7 @@ struct Assembly {
     // and nothing else keeps a reference: a Tenant copies its lattices, the frame loop dies
     // first, the tools take it by reference for the length of a call.
     SurfaceFrame surface;
+    GpuTexture surfaceDirectory;   // HIERARCHY 4.17 commit 4: the blocks' directory (Walk.hlsli)
     RendererDesc rd;
     Renderer renderer;
     ExitMark exitRenderer{"assembly: ~Renderer -- the layers it owns and their atlases' heaps"};
@@ -149,7 +150,11 @@ struct Assembly {
     int hgtCh = -1;
     WaterAtlas waterAtlas;
     BathyModel bathy;
-    TerrainLayer* terrain = nullptr;
+    // THE SOLVERS' GRIDS (HIERARCHY 4.17): the survey windows drawn in to where their sources
+    // paint at full weight (BathyModel::DrawFrom). `bathy` stays the survey's whole window for
+    // what draws or stands on the ground (the foundation sink, the camera's clamp);
+    // every reader of a solver's fields reads it by these.
+    BathyModel bathySwe, bathyBostonSwe;
     SweSolver swe;
     double riverQ = 70.0;
     GulfLayer* gulf = nullptr;
@@ -181,14 +186,15 @@ struct Assembly {
     // ---- M6i: THE LAYER COMPOSITOR's color side (the height side moved above the
     // solver, M6w). Sources register their schemas; channels stack them in order;
     // realizations paint composed quadtrees ONCE and cache every 64KB tile.
-    GoogleColorSource srcGoogle{&googleTiles};
+    // Made in Assemble() with the scene's finest zoom (streaming.googleZoom): the zoom is part of
+    // the source's identity, so it is fixed when the source is made.
+    std::optional<GoogleColorSource> srcGoogle;
     BedSynthSource srcBed;          // M7d: the bed classifier -- the first synthesis
     SeafloorReliefSource srcRelief; // M9av: the seafloor's appearance from the ingested bathymetry
                                     // node; its program is data/bed/bed_rules.json
-    AerialOrthoSource srcAerial;    // M6l: MassGIS 15 cm orthos (loads if harvested)
-    AerialOrthoSource srcOverlay;   // M6o: user GeoTIFF overlays -- ALPHA IS FIBER: a
-                                    // mostly-transparent highlights plane bleeds through
-                                    // the composed quadtree pixel by pixel
+    // The scene's `sources`: rasters that are colour sources by being files (the plane orthos
+    // and the overlays among them, scenes/merrimack.json).
+    std::vector<std::unique_ptr<RasterFileSource>> sceneSources;
     GisStencil gisStencil;   // survey vectors + mask realizations (GSHHG/WDBII)
     // M9ak: the SAME survey, as rings rather than as a parity fill -- the compositor's
     // land/sea gate. Neither .raw mask is opened by this one.

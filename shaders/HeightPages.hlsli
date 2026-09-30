@@ -36,25 +36,24 @@ static const float kHpCubeTexelM = kHpMercCirc / (4.0f * kPageDim);   // 611.496
 static const float kHpPageTexelM = kHpMercCirc / kHpWorldPxZ14;        // 9.5546.. (was 9.55f)
 static const float kHpMaxMip = 6.0f;           // 7 mips
 
-// Direction (x = cos lat cos lon, y = sin lat, z = cos lat sin lon -- Compose.hlsli's
-// convention) -> D3D cube face and its texture uv, the inverse of Compositor::ComposeCubeDir.
-uint HpCubeFace(float3 d, out float2 uv) {
-    const float3 a = abs(d);
-    float s, t;
-    uint face;
-    if (a.x >= a.y && a.x >= a.z) {
-        if (d.x > 0.0f) { face = 0; s = -d.z / a.x; t = -d.y / a.x; }
-        else            { face = 1; s =  d.z / a.x; t = -d.y / a.x; }
-    } else if (a.y >= a.z) {
-        if (d.y > 0.0f) { face = 2; s =  d.x / a.y; t =  d.z / a.y; }
-        else            { face = 3; s =  d.x / a.y; t = -d.z / a.y; }
-    } else {
-        if (d.z > 0.0f) { face = 4; s =  d.x / a.z; t = -d.y / a.z; }
-        else            { face = 5; s = -d.x / a.z; t = -d.y / a.z; }
-    }
-    uv = float2(s, t) * 0.5f + 0.5f;
-    return face;
-}
+// THE BED TRACE (an instrument: SweSolver::TraceBed, shaders/Swe.hlsl CsSweBedTrace). Compiled
+// with HP_TRACE defined, the rule below also records what it chose -- the mip it read at and the
+// slice it read -- and takes a floor under both residency reads, which the planted failure
+// raises to the coarsest mip. Every other kernel compiles without it, and for them the two hooks
+// are the expression they wrap and nothing: the solver, the churn and the bank read the bed they
+// always read.
+#ifdef HP_TRACE
+static float gHpTraceMip = -1.0f;    // the mip the last HpHeightAt read at
+static uint gHpTraceSlice = 0u;      // ...and the slice: a cube face 0..5, or the page's
+static float gHpTraceFloor = 0.0f;   // a residency floor the trace imposes; 0 = the map's own
+#define HP_HAVE(have) max((have), gHpTraceFloor)
+#define HP_CHOSE(mip, slice) gHpTraceMip = (mip); gHpTraceSlice = (slice)
+#else
+#define HP_HAVE(have) (have)
+#define HP_CHOSE(mip, slice)
+#endif
+
+// HpCubeFace (direction -> D3D cube face and its uv) lives in PageSample.hlsli, included above.
 
 // The planet's height (m NAVD) at lat/lon (degrees). winA = the page's lattice row (org px x,
 // org px y, 1/kPageDim, world px at z14: Lattice::Rows); winSlice the page's slice; pageMipMin
@@ -68,16 +67,19 @@ float HpHeightAt(Texture2DArray<float4> arr, Texture2DArray<float4> res, float l
     const float3 dir = float3(cl * cos(lonR), sin(latR), cl * sin(lonR));
     float2 cuv;
     const uint face = HpCubeFace(dir, cuv);
-    const float haveC = clamp(round(PageHaveLoad(res, cuv, face)), 0.0f, kHpMaxMip);
+    const float haveC = clamp(round(HP_HAVE(PageHaveLoad(res, cuv, face))), 0.0f, kHpMaxMip);
     // The page, by containment, where it is at least as fine as the cube. Two residency
     // reads decide; only ONE bilinear is paid (the bank kernel runs this per texel per ring).
     const float2 wuv = PageUvLatLon(latDeg, lonDeg, winA);
     if (all(wuv > 0.0f) && all(wuv < 1.0f)) {
-        const float haveW = clamp(round(PageHaveLoad(res, wuv, winSlice)), pageMipMin, kHpMaxMip);
+        const float haveW =
+            clamp(round(HP_HAVE(PageHaveLoad(res, wuv, winSlice))), pageMipMin, kHpMaxMip);
         if (PageWins(haveC, haveW, float2(kHpCubeTexelM, kHpPageTexelM))) {
+            HP_CHOSE(haveW, winSlice);
             return PageLoad(arr, wuv, winSlice, haveW);
         }
     }
+    HP_CHOSE(haveC, face);
     return PageLoad(arr, cuv, face, haveC);
 }
 

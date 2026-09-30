@@ -24,9 +24,9 @@
 //       A second run streams composed tiles straight off disk: no HTTP, no reprojection, no
 //       resampling -- the paint cost is once per machine per stack version.
 //    4. ONE RENDER PATH -- shaders/Compose.hlsli. The renderer knows CHANNELS, not sources:
-//       earth color is earth color, earth height is earth height. The globe and the terrain
-//       call the SAME ComposedColor/ComposedHeight functions on the SAME constants
-//       (ComposedSurfaceCb, filled by SurfaceFrame::Fill alone), so they CANNOT disagree.
+//       earth color is earth color, earth height is earth height. Every layer that reads them
+//       calls the SAME ComposedColor/ComposedHeight functions on the SAME constants
+//       (ComposedSurfaceCb, filled by SurfaceFrame::Fill alone), so no two CAN disagree.
 //
 //  GA hook: a layer is any object with a Sample(); the stack walk is an ordered composition of
 //  operators. Raster operators over multivector-valued layers (contrast amplification, fades,
@@ -90,6 +90,8 @@ public:
     // (latMin, latMax, lonMin, lonMax radians, groundResM)
     virtual float Sample(double latRad, double lonRad, double groundResM, const PaintCtx& ctx,
                          uint8_t rgba[4]) = 0;
+    // The level it paints on a lattice (DomainSource::OwnMip); -1, every grain.
+    virtual int OwnMip(const Lattice&) const { return -1; }
     // A source that fetches: true, with the distinct source tiles it refused this run because
     // its fetch budget was spent -- the fetches it WOULD have made. False for every source that
     // never fetches, which is all of them but one.
@@ -99,11 +101,18 @@ public:
     }
 };
 
+// Every HeightSource answers in the engine's height frame, kHeightFrame (HeightStackSource.h): a
+// file in another unit or datum is converted where it enters (RasterFileSource), never by a reader.
 class HeightSource {
 public:
     virtual ~HeightSource() = default;
     virtual const SourceInfo& Info() const = 0;
     virtual float Sample(double latRad, double lonRad, double groundResM, float& metres) = 0;
+    // The level it paints on a lattice (DomainSource::OwnMip); -1, every grain. A source with a
+    // level declares its box too, which the tree folds by and keys it with its bytes; the built-in
+    // layers declare none, so their trees keep the key they were painted under.
+    virtual int OwnMip(const Lattice&) const { return -1; }
+    virtual bool Footprint(double&, double&, double&, double&) const { return false; }
 };
 
 // M6v: the two-component fiber -- a WATER-parameter field sample. The value algebra is a
@@ -293,6 +302,25 @@ struct ComposedSurfaceCb {
                       // detail slice. u5[0] == ~0 means the old three-tenant path.
     uint32_t u6[4];   // M9aq HEIGHT PAGES: height array SRV, array residency SRV, window
                       // slice. u6[0] == ~0 means the old cube + window tenants.
+    // HIERARCHY 4.17: THE STANDING BLOCKS (SurfaceFrame::blocks), appended so no row above
+    // moves; at most SurfaceFrame::kMaxBlocks, coarsest rung first. Block i: row i of blkU /
+    // blkV / blkW is one of PageTexelUv's planes about the eye's own tangent frame, anchored on
+    // the multiple of 16384 texels of its rung nearest the eye (SurfaceFrame::BlockRows, commit
+    // 3); blkO[2i], blkO[2i + 1] the whole blocks from that anchor to the block's own origin;
+    // blkG[i] its ground (m) at mip 0; blkS[i] its slice of the colour and the mask. blkE is the
+    // eye in the tangent axes about the planet's centre, for a stage with only a direction.
+    // blkN[0] is the count: 0 is today's Mercator pages.
+    float blkU[32];
+    float blkV[32];
+    float blkW[32];
+    float blkG[8];
+    uint32_t blkS[8];
+    float blkO[16];
+    float blkE[4];
+    uint32_t blkN[4];
+    // HIERARCHY 4.17 commit 4: the directory (SurfaceFrame::directory on the GPU): its SRV and
+    // its slices. UINT32_MAX: none, and no block is found.
+    uint32_t dirU[4];
 };
 
 // M12 step 2b: THE FRAME moved to core/Lattice.h and became the LATTICE every tree and

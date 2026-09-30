@@ -884,6 +884,21 @@ private:
             // stored; rebuild it from them every time it is asked. Nothing is written.
             return FoldFromChildren(frame, tag, r, out, false);
         }
+        // HIERARCHY 4.20: A SOURCE PAINTS ITS OWN LEVEL, AND THE TREE MAKES THE OTHERS. Above the
+        // node's own mip a tile is the fold of its four children, kept, and never painted: its
+        // bytes are a function of the file, not of what was flown or in what order. A tile the
+        // footprint does not touch (the compositor's rule) is void by arithmetic: nothing is read
+        // or written for it. Below the own mip the node paints, magnifying its own texels.
+        const int ownMip = m_node->OwnMip(frame);
+        if (ownMip >= 0 && int(r.mip) > ownMip) {
+            if (!Touching(box)) return Status::Void;
+            const Status s = FoldFromChildren(frame, tag, r, out, true);
+            if (s == Status::Void) {
+                tree_detail::Touch(base + ".void");
+                ++voids;
+            }
+            return s;
+        }
         bool complete = true, anyCover = false, full = false;
         // The node's inputs must hold still for the whole tile (DomainSource::BeginTile).
         m_node->BeginTile();
@@ -1002,8 +1017,16 @@ private:
             }
             tree_detail::WriteTile(base + ".bin", out);
         }
-        FoldUp(frame, tag, r, out);   // outside the stripe: FoldUp takes the PARENT's
+        // Outside the stripe: FoldUp takes the PARENT's. A node with an own mip folds nothing
+        // upward: its parents are folded whole, when asked (above).
+        if (ownMip < 0) FoldUp(frame, tag, r, out);
         return Status::Content;
+    }
+    // The compositor's membership rule (Compositor::Touches) against the node's footprint; a node
+    // that declares none touches every tile.
+    bool Touching(const Compositor::TileBox& b) const {
+        double l0, b0, l1, b1;
+        return !m_node->Footprint(l0, b0, l1, b1) || Compositor::Touches(l0, b0, l1, b1, b);
     }
 
     // ---- M9bb: THE PYRAMID, IN THE COMPOSITOR. A leaf's freshly painted tile is folded into
@@ -1425,6 +1448,8 @@ private:
     // result as bytes and retires the marker -- for deep levels that are actually served, so
     // a mip-6 read is one file and not 4^6 of them. `known`, when given, is one child's bytes
     // as the fold walk carries them: the version it is folding, not whatever was last written.
+    // Its one caller with `materialize` is the own-mip fold (LeafTile), where a child the
+    // footprint does not touch is void by arithmetic and is never asked for.
     Status FoldFromChildren(const ColorFrame& frame, const std::string& tag, const TileRequest& r,
                             std::vector<uint8_t>& out, bool materialize,
                             const TileRequest* known = nullptr,
@@ -1437,6 +1462,11 @@ private:
             std::vector<uint8_t> cb;
             const bool isKnown = known && knownBytes && known->face == c.face &&
                                  known->mip == c.mip && known->x == c.x && known->y == c.y;
+            if (materialize) {
+                Compositor::TileBox kb{};
+                frame.Box(c, kb);
+                if (!Touching(kb)) continue;
+            }
             if (isKnown) cb = *knownBytes;
             const Status s = isKnown ? Status::Content : Tile(frame, tag, c, cb, nullptr);
             if (s == Status::Transient) return Status::Transient;
@@ -1449,6 +1479,7 @@ private:
             const std::string base = Base(tag, r);
             tree_detail::WriteTile(base + ".bin", out);
             tree_detail::Delete(base + ".fold");
+            ++folded;
         }
         return Status::Content;
     }
@@ -1520,6 +1551,7 @@ private:
             got[k] = Held::Content;
             live.push_back(k);
         }
+        if (!complete) g_tileIncomplete = true;   // step 5 E: answered without a source (finding 83)
         const std::string cpath = base + "_" + tree_detail::Hex8(KeyOf(inc, got));
         // THE REFERENCE. Straight alpha makes a lone input's tile the composite exactly --
         // OverFinish divides by the coverage it just multiplied by -- so the record is the

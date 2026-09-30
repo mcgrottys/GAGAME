@@ -39,6 +39,7 @@
       { "key": "sea", "type": "object", "field": "none", "schema": "sea", "reload": "hot", "doc": "the sea state and the datum" },
       { "key": "water", "type": "object", "field": "none", "schema": "water", "reload": "hot", "doc": "the water" },
       { "key": "streaming", "type": "object", "field": "none", "schema": "streaming", "reload": "hot", "doc": "residency: scene state" },
+      { "key": "sources", "type": "list", "field": "none", "element": "source", "named": false, "reload": "hot", "doc": "rasters that are sources by being files, in any order" },
       { "key": "capture", "type": "object", "field": "none", "schema": "capture", "reload": "hot", "doc": "headless capture" },
       { "key": "views", "type": "list", "field": "none", "element": "view", "named": true, "reload": "hot", "doc": "the cameras, by name" },
       { "key": "rails", "type": "object", "field": "none", "schema": "rails", "reload": "hot", "doc": "the camera rails" },
@@ -117,7 +118,9 @@
       { "key": "westBoundary", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the west-boundary deviation; false = zeroed (--swe-west-off)" },
       { "key": "spinupH", "type": "number", "field": "f64", "quantity": "time", "unit": "h", "default": 1, "reload": "restart", "doc": "history integrated before the first frame (--swe-spinup)" },
       { "key": "gain", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 1, "reload": "hot", "doc": "solved-current gain (--swe-gain)" },
-      { "key": "riverQ", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": -1, "reload": "restart", "doc": "river discharge, m^3/s; < 0 = data/river/river.json (--river)" }
+      { "key": "riverQ", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": -1, "reload": "restart", "doc": "river discharge, m^3/s; < 0 = data/river/river.json (--river)" },
+      { "key": "bedWait", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "whole", "names": ["none", "map", "whole"], "reload": "restart", "doc": "what the spin-up waits for before its hour: nothing (the kernel reads whatever it reads before the first residency turn), the residency map (one turn: the coarsest resident mip), or the whole bed (every solver's domain read at mip 0)" },
+      { "key": "window", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "full-weight", "names": ["full-weight", "survey"], "reload": "restart", "doc": "where a solver's grid stands: the survey's window drawn in, on the side of an open face that reads the bed (the west face), to where its source paints at full weight (the band is the source's own feather), the other sides keeping the survey's extent; or the survey's whole window, feather included" }
     ] },
     { "type": "water.bank", "keys": [
       { "key": "flatBed", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "replace the bed with a flat floor (--flat-bed)" },
@@ -173,14 +176,32 @@
     ] },
     { "type": "streaming", "keys": [
       { "key": "tileBudget", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 1000, "reload": "restart", "doc": "hard cap on Google fetches per run (--tile-budget)" },
+      { "key": "dayTiles", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 100000, "reload": "restart", "doc": "cap on Google requests a UTC day, every request sent counted whatever came back, every engine on the machine together (cache/google/day_<date>.json); 0 = no request that day" },
+      { "key": "dayBytes", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 5000000000, "reload": "restart", "doc": "cap on the bytes of Google tiles landed a UTC day, every engine on the machine together; 0 = no request that day" },
+      { "key": "googleZoom", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 14, "reload": "restart", "doc": "the finest zoom the Google source may be asked for, held to 0..19; each step finer is four times the tiles (14 = the source as it was; any other value paints its own tree)" },
       { "key": "predictEvery", "type": "number", "field": "u32", "quantity": "1", "unit": "frames", "default": 3, "reload": "hot", "doc": "prefetch-walk cadence (--predict-every)" },
       { "key": "directStorage", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "NVMe -> GPU tile reads (--no-direct-storage)" },
       { "key": "colorTrees", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "colour and height pages from the trees (--no-color-trees)" },
       { "key": "gisGate", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the vector land/sea gate on the bed (--no-gis-gate)" },
       { "key": "seafloor", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the global seafloor relief source (--no-seafloor)" },
       { "key": "exposure", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the swell-exposure page (--no-exposure)" },
-      { "key": "ringLoads", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the ring gate (--no-ring-loads)" },
+      { "key": "holdMargin", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1.41421356, "reload": "restart", "doc": "the order's hold margin: a held tile, and a tile above a held tile, count for this times their measure, so a tile gives its slot up only to one larger on the screen by more (HIERARCHY 4.19); 1 is the order without it" },
+      { "key": "faceWindows", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "standing blocks of the pyramid for the colour and the mask in place of their Mercator windows: lon,lat,rung entries joined by ';', each the block of that rung holding the point (logged); auto = the blocks the `sources` ask for, rank 1 down to each one's grain over its footprint; empty = the Mercator windows" },
       { "key": "treeRoot", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "cache/trees", "reload": "restart", "doc": "the folder the tile trees live in; a scratch folder keeps a tool's paints and packs out of the real cache" }
+    ] },
+    { "type": "source", "keys": [
+      { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a label (\"\" = the file's own name)" },
+      { "key": "file", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "one raster: a GeoTIFF, or a PNG / JPEG beside its world file" },
+      { "key": "folder", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a folder whose files matching `match` are one source" },
+      { "key": "match", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the folder's pattern, * and ? (\"\" = every file)" },
+      { "key": "manifest", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a manifest of raw rows (the harvester's form: crs, tiles, their bounds), one source" },
+      { "key": "kind", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "colour | height; \"\" = the pixels decide (8-bit, 3 or 4 channels: colour; one channel of 16-bit or float: height)" },
+      { "key": "crs", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "EPSG:nnnn, read only where the file carries none" },
+      { "key": "over", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "restart", "doc": "the stack order's first key, ascending upward (every built-in source is 0); the second is the grain, the coarser under the finer" },
+      { "key": "feather", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0, "reload": "restart", "doc": "the edge of the whole softened over this far (smoothstep); 0 = a hard edge" },
+      { "key": "unit", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a height's unit (m, ft, ftUS), read only where the file names none" },
+      { "key": "datum", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a height's vertical datum (NAVD88, MSL, EGM2008 ...), read only where the file names none" },
+      { "key": "offset", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": null, "optional": true, "reload": "restart", "doc": "added to a height whose datum is not the engine's (NAVD88): the separation at the place; such a file is refused without it, and a file on NAVD88 takes none" }
     ] },
     { "type": "capture", "keys": [
       { "key": "headless", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "no window (--headless)" },

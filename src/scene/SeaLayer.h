@@ -44,7 +44,8 @@ public:
         m_ctSta = currents ? currents->StationIndex("ACT0816") : -1;
     }
 
-    // M5: the bed. heightSrv = the terrain layer's CUDEM texture; geo in world metres.
+    // M5: the bed's survey window, geo in world metres. heightSrv only says a window exists:
+    // the bed itself is the height megatexture (Assembly passes 0).
     void SetBathy(uint32_t heightSrv, float x0, float z0, float sizeX, float sizeZ) {
         m_bathySrv = heightSrv;
         m_bathyGeo[0] = x0;
@@ -70,7 +71,6 @@ public:
     // M12 step 4b: the surface, for the world.flat chart the churn's geoA row is cast from
     // (SurfaceFrame::FlatRows). Must precede the first churn update.
     void SetSurface(const SurfaceFrame* s) { m_surface = s; }
-    void SetBathyCpu(const BathyModel* bm) { m_bathyCpu = bm; }
     // M6i's composed channels + survey masks are the renderer's one surface buffer (b2)
     // since M12 step 4g: the same rows the globe reads, from the same upload.
     uint32_t ChurnTiles() const { return m_churnReady ? m_churn.ResidentCount() : 0; }
@@ -173,8 +173,7 @@ public:
     float buoyAssimAgeH = 6.0f;
     float buoyAssimGainMax = 1.8f;
     // M7: the wave bank consumes the cascade textures; --one-water retires this layer's own
-    // grid DRAW while the compute chain (FFT, SWE, churn) keeps running -- the TerrainLayer
-    // renderEnabled pattern, applied to the sea.
+    // grid DRAW while the compute chain (FFT, SWE, churn) keeps running.
     bool drawEnabled = true;
     uint32_t FftDispSrv(int c) const { return m_fft.DispSrv(c); }
     uint32_t FftDerivSrv(int c) const { return m_fft.DerivSrv(c); }
@@ -311,7 +310,6 @@ private:
 
 
     SweSolver* m_swe = nullptr;
-    const BathyModel* m_bathyCpu = nullptr;
     bool m_peakDirValid = false;   // M7j: never march the default direction
     // M9ba: the exposure page tenant (array SRV, residency SRV) and the node behind it.
     uint32_t m_expSrv = UINT32_MAX, m_expRes = UINT32_MAX;

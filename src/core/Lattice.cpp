@@ -98,6 +98,25 @@ void Lattice::Texel(const TileRequest& r, uint32_t px, uint32_t py, double& latR
     lonRad = (X - 0.5) * 2.0 * kPi;
 }
 
+void Lattice::TexelGround(uint32_t mip, double lat, double lon, double& du, double& dv) const {
+    du = dv = GroundRes(mip) * std::cos(lat);
+    if (kind != Kind::Cube) return;
+    const double d[3] = {std::cos(lat) * std::cos(lon), std::sin(lat), std::cos(lat) * std::sin(lon)};
+    double uv[2], p[3][3];
+    const uint32_t face = CubeFaceOfDir(d, uv);
+    const double s = 1.0 / double(faceDim >> mip), R = kMercCirc / (2.0 * kPi);
+    ComposeCubeDir(face, uv[0], uv[1], p[0]);
+    ComposeCubeDir(face, uv[0] + s, uv[1], p[1]);
+    ComposeCubeDir(face, uv[0], uv[1] + s, p[2]);
+    auto arc = [&](const double* a, const double* b) {   // the angle between two unit vectors, x R
+        const double c[3] = {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
+        return R * std::atan2(std::sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]),
+                              a[0] * b[0] + a[1] * b[1] + a[2] * b[2]);
+    };
+    du = arc(p[0], p[1]);
+    dv = arc(p[0], p[2]);
+}
+
 std::string Lattice::Tag(const char* kindName) const {
     char buf[96];
     if (kind == Kind::Cube) {

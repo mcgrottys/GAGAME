@@ -1,6 +1,7 @@
 #include "sim/BathyModel.h"
 
 #include "compose/Compositor.h"
+#include "compose/Sources.h"
 #include "core/Common.h"
 #include "core/Json.h"
 
@@ -66,6 +67,58 @@ bool BathyModel::Load(const std::string& jsonPath) {
         "NAVD88",
         m_nx, m_ny, m_worldX0, m_worldX0 + m_worldSizeX, m_worldZ0, m_worldZ0 + m_worldSizeZ,
         root.Num("min_m", 0), root.Num("max_m", 0));
+    return true;
+}
+
+bool BathyModel::DrawFrom(const BathyModel& survey, const CudemHeightSource* source, bool drawIn,
+                          bool westOpen, const char* name) {
+    *this = survey;
+    if (!survey.Ready()) return false;
+    int c0 = 0, r0 = 0, c1 = survey.m_nx - 1, r1 = survey.m_ny - 1;
+    const BathyModel* grid = source ? source->Grid() : nullptr;
+    // The source's cells are this lattice's only if the two are one lattice: the same cells
+    // at the same place (the realized solver grid and the raw survey are two loads of one file).
+    const bool sameLattice = grid && grid->m_nx == survey.m_nx && grid->m_ny == survey.m_ny &&
+                             grid->m_lon0 == survey.m_lon0 && grid->m_lat1 == survey.m_lat1 &&
+                             grid->m_dlon == survey.m_dlon && grid->m_dlat == survey.m_dlat;
+    if (!drawIn || !westOpen || !sameLattice || !source->FullWeightCells(c0, r0, c1, r1)) {
+        Log("[swe] %s window: the survey's whole %dx%d cells (%s)", name, m_nx, m_ny,
+            !drawIn     ? "water.swe.window = survey"
+            : !westOpen ? "full-weight, and no edge carries an open face that needs the bed: "
+                          "walls and the sponge keep the survey's extent"
+            : !grid     ? "no survey source to ask"
+                        : "the source stands on another lattice");
+        return false;
+    }
+    // Only the side with an open face is drawn in: the west columns, where the Flather face
+    // reads the bed. The north, south and east keep the survey's extent -- walls, or the sponge
+    // -- so water that crosses their bands (the river's bend in the north band) stays joined.
+    c1 = survey.m_nx - 1;
+    r0 = 0;
+    r1 = survey.m_ny - 1;
+    m_nx = c1 - c0 + 1;
+    m_ny = r1 - r0 + 1;
+    m_lon0 = survey.m_lon0 + c0 * survey.m_dlon;
+    m_lat1 = survey.m_lat1 - r0 * survey.m_dlat;
+    m_elev.resize(static_cast<size_t>(m_nx) * m_ny);
+    for (int y = 0; y < m_ny; ++y) {
+        for (int x = 0; x < m_nx; ++x) {
+            m_elev[static_cast<size_t>(y) * m_nx + x] =
+                survey.m_elev[static_cast<size_t>(y + r0) * survey.m_nx + (x + c0)];
+        }
+    }
+    // The world box by Load's own arithmetic, on the drawn-in lattice.
+    m_worldX0 = static_cast<float>((m_lon0 - kOrgLon) * kMPerLon);
+    m_worldSizeX = static_cast<float>(m_nx * m_dlon * kMPerLon);
+    const double latSouth = m_lat1 - m_ny * m_dlat;
+    m_worldZ0 = static_cast<float>((latSouth - kOrgLat) * kMPerLat);
+    m_worldSizeZ = static_cast<float>(m_ny * m_dlat * kMPerLat);
+    Log("[swe] %s window: drawn in on the west by %d columns, to where %s paints at full weight "
+        "(the west face is an open boundary and reads the bed); north, south and east keep the "
+        "survey's extent -- survey cells [%d..%d] x [%d..%d] of %dx%d; world [%.0f..%.0f] east x "
+        "[%.0f..%.0f] north (m)",
+        name, c0, source->Info().name.c_str(), c0, c1, r0, r1, survey.m_nx, survey.m_ny,
+        m_worldX0, m_worldX0 + m_worldSizeX, m_worldZ0, m_worldZ0 + m_worldSizeZ);
     return true;
 }
 

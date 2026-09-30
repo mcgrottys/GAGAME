@@ -29,6 +29,7 @@
 #include "core/CurrentFieldLoader.h"
 #include "core/Dome.h"
 #include "core/GeoGridLoader.h"
+#include "hal/Context.h"
 #include "hal/Gpu.h"
 #include "core/Image.h"
 #include "hal/PixEvents.h"
@@ -49,7 +50,6 @@
 #include "scene/ViewContext.h"
 #include "scene/SeaLayer.h"
 #include "scene/SkyLayer.h"
-#include "scene/TerrainLayer.h"
 #include "scene/WaterBankLayer.h"
 #include "scene/TideLayer.h"
 #include "compose/Compositor.h"
@@ -222,6 +222,18 @@ FrameLoop::FrameLoop(const Options& opt, const Scene& S, Assembly& A)
 
 int FrameLoop::Run() {
     if (const std::optional<int> rc = Session()) return *rc;
+    // THE BOOT'S LENGTH, from the process's creation to the first frame -- the number a wait
+    // before the first frame (the solver's bed wait) is judged by.
+    {
+        FILETIME created{}, exited{}, kernel{}, user{}, now{};
+        GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user);
+        GetSystemTimeAsFileTime(&now);
+        auto ticks = [](const FILETIME& f) {
+            return (static_cast<uint64_t>(f.dwHighDateTime) << 32) | f.dwLowDateTime;
+        };
+        Log("[boot] the first frame begins %.1f s after the process started",
+            double(ticks(now) - ticks(created)) * 1.0e-7);
+    }
     for (;;) {
         if (!Frame()) break;
     }
@@ -413,12 +425,12 @@ std::optional<int> FrameLoop::Session() {
     auto& marsMode = m_A.marsMode;
     auto& globeModel = m_A.globeModel;
     GlobeModel& activeGlobe = *m_A.activeGlobe;
-    auto& bathyBoston = m_A.bathyBoston;
+    auto& bathyBostonSwe = m_A.bathyBostonSwe;   // HIERARCHY 4.17: the solvers' own grids
+    auto& bathySwe = m_A.bathySwe;
     auto& compositor = m_A.compositor;
     auto& hgtCh = m_A.hgtCh;
     auto& waterAtlas = m_A.waterAtlas;
     auto& bathy = m_A.bathy;
-    auto& terrain = m_A.terrain;
     auto& swe = m_A.swe;
     auto& riverQ = m_A.riverQ;
     auto& gulf = m_A.gulf;
@@ -508,7 +520,6 @@ std::optional<int> FrameLoop::Session() {
         sky->enabled = (m != 1);   // world mode gates the sky per frame by altitude
         tide->enabled = (m == 0);
         if (sea) sea->enabled = (m == 1) && !marsMode && !opt.albedo;
-        if (terrain) terrain->enabled = (m == 1) && !marsMode;
         if (gulf) gulf->enabled = (m == 2);
         if (globe) globe->enabled = (m == 1);
     };
@@ -971,7 +982,7 @@ std::optional<int> FrameLoop::Session() {
     // a fine proxy on this reach): ~5.3 km for the original mouth window, ~15.5 for the
     // M6d wide window (bracketed by Merrimacport/Riverside instead of Newburyport/Salisbury).
     kWestKm =
-        bathy.Ready() ? std::min(20.0, std::abs(bathy.WorldX0()) / 1000.0) : 6.0;
+        bathySwe.Ready() ? std::min(20.0, std::abs(bathySwe.WorldX0()) / 1000.0) : 6.0;
     {
         double bestEnt = 1e9, bestA = -1e9, bestB = 1e9;
         for (size_t i = 0; i < model.Count(); ++i) {
@@ -1035,8 +1046,8 @@ std::optional<int> FrameLoop::Session() {
     // cascade displacement, the one bed) and is the M7 milestone.
     weather.Init(&compositor, hgtCh, &waterAtlas, &model, &globeModel, &seaState,
                  haveCurrents ? &currents : nullptr);
-    if (swe.Ready()) weather.AddExternalWindow("merrimack", &swe, &bathy, oceanAt);
-    if (bathyBoston.Ready()) {
+    if (swe.Ready()) weather.AddExternalWindow("merrimack", &swe, &bathySwe, oceanAt);
+    if (bathyBostonSwe.Ready()) {
         int iBos = -1;
         for (size_t i = 0; i < model.Count(); ++i) {
             if (model.S(i).id == "8443970") iBos = static_cast<int>(i);
@@ -1049,7 +1060,7 @@ std::optional<int> FrameLoop::Session() {
             SweConfig bcfg;
             bcfg.spongeX0 = -2500.0f;   // Mass Bay, east of the outer harbor islands
             bcfg.westBoundary = false;  // the Charles is dammed; the west edge is a wall
-            weather.AddDormantWindow("boston", &bathyBoston, bcfg, oceanAtBoston, 0.5);
+            weather.AddDormantWindow("boston", &bathyBostonSwe, bcfg, oceanAtBoston, 0.5);
             // M9ar: Boston lies inside the z14 height page; its solver reads slice 6 too.
             if (hgtTenant >= 0) {
                 weather.SetHeightPage(resMgr.TextureRes(hgtTenant),
@@ -1113,7 +1124,7 @@ std::optional<int> FrameLoop::Session() {
         // M8 flows into waves: the SWE's SOLVED current drives the dispersion when
         // resident (the bent jet, the tip shear); the ACT proxy is the fallback.
         if (swe.Ready() && sea) {
-            waveField->SetSweCurrent(&swe, &bathy, sea->sweCurrentGain);
+            waveField->SetSweCurrent(&swe, &bathySwe, sea->sweCurrentGain);
         }
         // M12 step 5c: the bank's wave field and its live config pointer (and set B's) are
         // applied BELOW, by the water component's one Apply -- the same call the hot-reload
@@ -1196,9 +1207,104 @@ std::optional<int> FrameLoop::Session() {
     // M5c: give the solver history before the first frame, and run the validation cycle if
     // asked (headless CSV; the ebb/flood-asymmetry and basin-lag gates read from it).
     if (swe.Ready()) {
+        // --bed-trace N: THE BED THE KERNEL READS, read back before the hour is integrated on it
+        // (app/Tools/BedTrace.cpp); a run's readings land in a directory of their own under out/.
+        const bool bedTrace = opt.bedTraceEvery > 0;
+        const double spinT0 = simUnix - S.water.swe.spinupH * 3600.0;
+        if (bedTrace) {
+            char dir[96];
+            snprintf(dir, sizeof(dir), "out/bedtrace/%lld-%lu",
+                     static_cast<long long>(std::time(nullptr)),
+                     static_cast<unsigned long>(GetCurrentProcessId()));
+            m_bedTracer.Configure(bathySwe, dir, [&](uint64_t hist[16]) {
+                return weather.ClaimedMips(resMgr, hgtTenant, hist, "merrimack");
+            });
+            m_bedTracer.Read(gpu, swe, S.water.swe.bedWait ? "before-wait" : "before-spinup",
+                             oceanAt(spinT0));
+        }
+        // THE BED BEFORE THE HOUR (review finding 48). The spin-up integrates on the bed its
+        // kernel reads, and before the first frame nothing has asked for any of the domain and
+        // no residency turn has run. water.swe.bedWait says what the hour waits for: "whole",
+        // every active solver's domain read at mip 0; "map", one residency turn with nothing
+        // asked, so the kernel reads the manager's own map (the coarsest mip) -- a diagnostic.
+        bool bedWhole = false;
+        if (S.water.swe.bedWait == 2 && S.water.swe.spinupH > 0) {
+            const WeatherManager::BedWait bw = weather.WaitForBeds(gpu, resMgr, hgtTenant);
+            bedWhole = bw.done;
+            Log("[swe] bed wait: %u window(s), %u tiles mapped in %u residency turns, %.2f s -- %s "
+                "(%llu of %llu cells read the page at mip 0)",
+                bw.windows, bw.tiles, bw.turns, bw.seconds,
+                bw.done ? "the bed is whole"
+                        : bw.windows ? "NOT whole at the bound; the hour spins up on what there is"
+                                     : "no domain inside the page to wait for",
+                static_cast<unsigned long long>(bw.whole),
+                static_cast<unsigned long long>(bw.cells));
+            if (bedTrace) m_bedTracer.Read(gpu, swe, "before-spinup", oceanAt(spinT0));
+        } else if (S.water.swe.bedWait == 1 && S.water.swe.spinupH > 0) {
+            gpu.WaitIdle();
+            {
+                hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
+                resMgr.ProcessQueues(gpu, up.Native());
+                gpu.EndUpload();
+            }
+            Log("[swe] bed wait: the residency map only (one turn, nothing asked) -- the hour "
+                "integrates on the coarsest resident mip");
+            if (bedTrace) m_bedTracer.Read(gpu, swe, "before-spinup", oceanAt(spinT0));
+        }
+        // A SOLVER'S WINDOW HOLDS ITS WATER: flooded on the bed its kernel reads when the whole-bed
+        // wait finished (the trace reads it back), else on the CPU grid, and the line says which.
+        swe.LogHoldsWater(gpu, bedWhole);
+        // --swe-cycle N: the validation cycle integrates on the bed a run's spin-up would, so
+        // it comes after the wait (before it, the kernel reads a bed no turn has delivered).
         if (S.Tool("swe-cycle")) {
-            return tools::RunSweCycleMode(opt, gpu, currents, haveCurrents, bathy, swe, resMgr,
-                                          simUnix, oceanAt, southAt, westAt, westQAt);
+            // The west boundary's inputs, for the cycle's west log: the two stations that bracket
+            // the boundary's river kilometre (each tide in its own MLLW, less its own mean), the
+            // weight between them, and the entrance's tide and datum link to NAVD88.
+            auto describeWest = [&](double t) {
+                char b[480];
+                snprintf(b, sizeof(b),
+                         "boundary at river km %.2f: %s (km %.2f) %+.3f less mean %.3f | %s (km %.2f) "
+                         "%+.3f less mean %.3f | weight %.3f | entrance %s %+.3f less mean %.3f, "
+                         "MLLW->NAVD %+.3f",
+                         kWestKm, model.S(westA).name.c_str(), model.S(westA).riverKm,
+                         model.Height(westA, t), model.S(westA).meanMllwM,
+                         model.S(westB).name.c_str(), model.S(westB).riverKm,
+                         model.Height(westB, t), model.S(westB).meanMllwM, wT,
+                         model.S(entSta).name.c_str(), model.Height(entSta, t),
+                         model.S(entSta).meanMllwM, datumOff);
+                return std::string(b);
+            };
+            // The stations' own tides over the cycle, a row every 120 s like the cycle's: each in
+            // its own MLLW less its own mean, the river's stations only (out/swe_stations_<pid>.csv).
+            {
+                char sp[96];
+                snprintf(sp, sizeof(sp), "out/swe_stations_%lu.csv",
+                         static_cast<unsigned long>(GetCurrentProcessId()));
+                FILE* sf = nullptr;
+                fopen_s(&sf, sp, "w");
+                if (sf) {
+                    fprintf(sf, "unix");
+                    for (size_t i = 0; i < model.Count(); ++i) {
+                        if (model.S(i).riverKm < 0) continue;
+                        std::string nm = model.S(i).name;
+                        std::replace(nm.begin(), nm.end(), ',', ' ');
+                        fprintf(sf, ",%s@%.2f", nm.c_str(), model.S(i).riverKm);
+                    }
+                    fprintf(sf, "\n");
+                    for (double t = simUnix; t <= simUnix + opt.sweCycleH * 3600.0 + 1.0; t += 120.0) {
+                        fprintf(sf, "%.0f", t);
+                        for (size_t i = 0; i < model.Count(); ++i) {
+                            if (model.S(i).riverKm < 0) continue;
+                            fprintf(sf, ",%.4f", model.Height(i, t) - model.S(i).meanMllwM);
+                        }
+                        fprintf(sf, "\n");
+                    }
+                    fclose(sf);
+                    Log("[swe-cycle] wrote %s", sp);
+                }
+            }
+            return tools::RunSweCycleMode(opt, gpu, currents, haveCurrents, bathySwe, swe, resMgr,
+                                          simUnix, oceanAt, southAt, westAt, westQAt, describeWest);
         }
         if (S.water.swe.spinupH > 0) {
             const auto t0 = std::chrono::steady_clock::now();
@@ -1206,14 +1312,15 @@ std::optional<int> FrameLoop::Session() {
             Log("[swe] spun up %.2f h of history in %.1f s", S.water.swe.spinupH,
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
         }
-        if (S.Tool("swe-uv")) tools::RunSweUv(opt, gpu, bathy, swe);
+        if (bedTrace) m_bedTracer.Read(gpu, swe, "after-spinup", oceanAt(simUnix));
+        if (S.Tool("swe-uv")) tools::RunSweUv(opt, gpu, bathySwe, swe);
         {
             // Spot probes for the log: bar, throat, ocean. dEta pathologies show instantly.
-            const float pts[6] = {900.0f, 100.0f, 250.0f, 60.0f, 2600.0f, 0.0f};
+            const float pts[6] = {900.0f, 100.0f, 250.0f, 60.0f, 2400.0f, 0.0f};
             SweSolver::Probe pr[3];
             swe.ReadProbes(gpu, pts, 3, pr);
             Log("[swe] probes  bar(900,100): dEta %+.3f u %+.2f,%+.2f v%d | throat(250,60): "
-                "dEta %+.3f u %+.2f,%+.2f v%d | ocean(2600,0): dEta %+.3f",
+                "dEta %+.3f u %+.2f,%+.2f v%d | ocean(2400,0): dEta %+.3f",
                 pr[0].dEta, pr[0].u, pr[0].v, pr[0].valid ? 1 : 0, pr[1].dEta, pr[1].u,
                 pr[1].v, pr[1].valid ? 1 : 0, pr[2].dEta);
         }
@@ -1741,7 +1848,6 @@ bool FrameLoop::Frame() {
     auto& hgtCh = m_A.hgtCh;
     auto& waterAtlas = m_A.waterAtlas;
     auto& bathy = m_A.bathy;
-    auto& terrain = m_A.terrain;
     auto& swe = m_A.swe;
     auto& gulf = m_A.gulf;
     auto& waterScene = m_A.waterScene;
@@ -1755,6 +1861,23 @@ bool FrameLoop::Frame() {
     // reader -- the thing a reserve is written against -- while subjects and a gate's window
     // name their own below.
     const int sampView = resMgr.Sampler("view");
+    // Step 5 D, law 8's table: this frame opens here; each layer names its reads as it draws.
+    resMgr.FrameBegin();
+    if (!renderer.beforeLayer) {
+        renderer.beforeLayer = [&resMgr](const char* name) {
+            resMgr.Mark((std::string("read: layer ") + (name ? name : "?")).c_str());
+        };
+    }
+    if (!renderer.atFrameHead) {
+        renderer.atFrameHead = [&resMgr, &gpu](ga::hal::CommandContext& cmd) {
+            resMgr.ProcessQueues(gpu, cmd.Native());
+        };
+        Log("[residency] the turn stands first in each frame's command list (law 8): after every "
+            "want of the frame, which the loop says before RenderFrame, and before every read the "
+            "list records, so every layer of a frame reads one map, with no frame of latency. The "
+            "solver's owned-window batches (weather.Update, on their own upload list ahead of the "
+            "frame's) read the map the turn before made, as the frame before's layers did.");
+    }
     auto& gisLayer = m_A.gisLayer;
     // M12 step 4a: the z14 page origin, read off the surface's height window -- the doubles
     // the bank, the trace and the exposure's uv closure below take.
@@ -2594,6 +2717,7 @@ bool FrameLoop::Frame() {
         // refresh here: nothing in the loop reads them -- step 2 of PERF_EXPERIMENT.)
         if (!marsMode) {
             PROF_BEGIN();
+            resMgr.Mark("read: weather.Update -- the solver steps on its bed");
             weather.Update(gpu, renderer.Shaders(), S.shadersW, simUnix,
                            BathyModel::kOrgLat + cam.pz / BathyModel::kMPerLat,
                            BathyModel::kOrgLon + cam.px / BathyModel::kMPerLon,
@@ -2732,7 +2856,7 @@ bool FrameLoop::Frame() {
                     // mapped onto winPx pixels. Every other tenant chooses this way
                     // (LeafWants: px = arc / (distNear * pixAng)); this one asked for
                     // mip 0 flat, which is why it never formed a gradient and why
-                    // --ring-loads had no parent chain to admit. Now the request walks
+                    // a load waiting on its parent had no chain to climb. Now the request walks
                     // in coarse-first like everything else, and WavePageSample reads
                     // whatever level has landed.
                     // ...biased FINER than that, because the water is the subject of
@@ -2756,8 +2880,27 @@ bool FrameLoop::Frame() {
                     float u0, v0, u1, v1;
                     waveSrc->WindowUv(u0, v0, u1, v1);
                     const uint32_t nPlanes = waveField->Table().nUsed + 1u;
+                    // Step 5 D: each wave tile's weight is its distance from the eye (the order's
+                    // fourth key): the eye's ground point in the window's uv, and its height.
+                    const WaveField::GpuTable& wtabF = waveField->Table();
+                    const double oxF = double(m_waveFrame.winPxX - m_waveFrame.orgPxX);
+                    const double oyF = double(m_waveFrame.winPxY - m_waveFrame.orgPxY);
+                    const float fuW = float((oxF + (cam.px - double(wtabF.orgX)) *
+                                                       double(wtabF.invCell)) / 16384.0);
+                    const float fvW = float((oyF + double(m_waveFrame.ny) -
+                                             (cam.pz - double(wtabF.orgZ)) * double(wtabF.invCell)) /
+                                            16384.0);
                     for (uint32_t p = 0; p < nPlanes; ++p) {
-                        resMgr.Want(sampView, waveT, 6u + p, wantMip, u0, v0, u1, v1);
+                        resMgr.Want(sampView, waveT, 6u + p, wantMip, u0, v0, u1, v1, false,
+                                    float(altV), fuW, fvW);
+                    }
+                    if (!m_focusSaid) {   // say what the wave want's focus is, once
+                        m_focusSaid = true;
+                        Log("[order-weight] the view's eye at world (%.1f, %.1f) m, %.1f m up: the wave "
+                            "window's focus is its ground point at uv (%.5f, %.5f) of the window "
+                            "(%.5f..%.5f x %.5f..%.5f); a wave tile's weight is the distance from the "
+                            "eye to the tile's nearest point",
+                            cam.px, cam.pz, altV, fuW, fvW, u0, u1, v0, v1);
                     }
                     PROF_END(10);
                 }
@@ -3186,14 +3329,24 @@ bool FrameLoop::Frame() {
     PROF_END(4);
     // M12 step 4g: THE ONE SURFACE CONSTANT BUFFER. The surface fills its rows once a frame
     // into the renderer's b2 buffer (Renderer::surfaceCb), which RenderFrame pushes once and
-    // binds for every layer: the globe, the sea, the terrain and the GIS vectors read the
+    // binds for every layer: the globe, the sea and the GIS vectors read the
     // same bytes from one buffer where each carried a copy inside its own cbuffer -- the
-    // globe's refilled every frame from this same SurfaceFrame, the other three once at boot
+    // globe's refilled every frame from this same SurfaceFrame, the others once at boot
     // (Session), and the fingerprints of all of them agreed with the bytes pushed for b2 at
     // every pose (scratchpad/step4g_probe.py). Mars fills too, as the globe's own fill did:
     // its rows say "height cube, no page" (SurfaceFrame.h's banner). The step 0 fingerprint
     // stays, printed when the bytes change, and is the only one.
     if (globe) {
+        // HIERARCHY 4.17 commit 3: the eye the standing blocks' rows are taken about -- the
+        // globe walk's own formula on the same camera (GlobeLayer::CaptureWalk), so the rows and
+        // the mesh records' eye-relative points share one origin, to the double.
+        {
+            SurfaceFrame& sf = m_A.surface;
+            const double ry = sf.planetR + cam.py;
+            for (int k = 0; k < 3; ++k) {
+                sf.eye[k] = sf.up[k] * ry + sf.east[k] * cam.px + sf.north[k] * cam.pz;
+            }
+        }
         m_A.surface.Fill(renderer.surfaceCb, resMgr);
         static uint64_t sLastSurface = 0;
         const uint64_t h = Fnv1aBytes(&renderer.surfaceCb, sizeof(renderer.surfaceCb));
@@ -3267,7 +3420,10 @@ bool FrameLoop::Frame() {
             const float u1 = float(std::clamp(mU(lonC + dLon), 0.0, 1.0));
             const float v0 = float(std::clamp(mV(latC + dLat), 0.0, 1.0));
             const float v1 = float(std::clamp(mV(latC - dLat), 0.0, 1.0));
-            if (u1 > u0 && v1 > v0) resMgr.Want(sampView, exposureT, 6u, 3u, u0, v0, u1, v1);
+            if (u1 > u0 && v1 > v0) {
+                resMgr.Want(sampView, exposureT, 6u, 3u, u0, v0, u1, v1, false, float(altV),
+                            float(mU(lonC)), float(mV(latC)));   // step 5 D: focus, the eye
+            }
             // M10: and around the outer level's eye, whose sea set B draws.
             if (drosteOuter) {
                 const double latO = BathyModel::kOrgLat + drosteOuterCam[2] / BathyModel::kMPerLat;
@@ -3277,7 +3433,8 @@ bool FrameLoop::Frame() {
                 const float ov0 = float(std::clamp(mV(latO + dLat), 0.0, 1.0));
                 const float ov1 = float(std::clamp(mV(latO - dLat), 0.0, 1.0));
                 if (ou1 > ou0 && ov1 > ov0)
-                    resMgr.Want(sampView, exposureT, 6u, 3u, ou0, ov0, ou1, ov1);
+                    resMgr.Want(sampView, exposureT, 6u, 3u, ou0, ov0, ou1, ov1, false, 0.0f,
+                                float(mU(lonO)), float(mV(latO)));
             }
             if (opt.resTrace && (frame % 150u) == 0u) {
                 // The instrument (--res-trace): what the page holds at the camera vs what
@@ -3348,7 +3505,9 @@ bool FrameLoop::Frame() {
             if (!placed) continue;
             // M13: a subject is a SAMPLER of the one earth cache -- it answers for the tiles it
             // holds resident around itself, separately from the view that named it.
-            const int sampI = resMgr.Sampler(("subject." + iname).c_str());
+            // Step 5 D: a subject stands (it follows its hull, and it holds what it asks for as
+            // the solver's domain does), so its wants are the order's first class, a pin.
+            const int sampI = resMgr.Sampler(("subject." + iname).c_str(), true);
             const double r = (std::max)(si->p.radius, 0.0);
             uint32_t held = 0;
             // The z14 page tenants: the swell shadow and the bed.
@@ -3363,13 +3522,19 @@ bool FrameLoop::Frame() {
                 };
                 const float u0 = uvOf(pxW, page.orgPxX), u1 = uvOf(pxE, page.orgPxX);
                 const float v0 = uvOf(pyN, page.orgPxY), v1 = uvOf(pyS, page.orgPxY);
+                double pxC = 0.0, pyC = 0.0;   // step 5 D: the subject, the focus of its weight
+                page.PxOf(BathyModel::kOrgLat + cz / BathyModel::kMPerLat,
+                          BathyModel::kOrgLon + cx / BathyModel::kMPerLon, pxC, pyC);
+                const float fuS = uvOf(pxC, page.orgPxX), fvS = uvOf(pyC, page.orgPxY);
                 if (u1 > u0 && v1 > v0) {
                     if (exposureT >= 0 && exposureSrc && exposureSrc->Valid()) {
-                        resMgr.Want(sampI, exposureT, pageSlice, kSwellShadowMipFloor, u0, v0, u1, v1);
+                        resMgr.Want(sampI, exposureT, pageSlice, kSwellShadowMipFloor, u0, v0, u1,
+                                    v1, false, 0.0f, fuS, fvS);
                         ++held;
                     }
                     if (hgtWinTenant >= 0) {
-                        resMgr.Want(sampI, hgtWinTenant, pageSlice, 0u, u0, v0, u1, v1);
+                        resMgr.Want(sampI, hgtWinTenant, pageSlice, 0u, u0, v0, u1, v1, false, 0.0f,
+                                    fuS, fvS);
                         ++held;
                     }
                 }
@@ -3392,8 +3557,10 @@ bool FrameLoop::Frame() {
                     const float v0 = float((oy + ny - cz1) / 16384.0);
                     const float v1 = float((oy + ny - cz0) / 16384.0);
                     const uint32_t planes = tab.nUsed + 1u;
+                    const float fuS = float((ox + cellsOf(cx, double(tab.orgX), nx)) / 16384.0);
+                    const float fvS = float((oy + ny - cellsOf(cz, double(tab.orgZ), ny)) / 16384.0);
                     for (uint32_t p = 0; p < planes; ++p)
-                        resMgr.Want(sampI, waveT, 6u + p, 0u, u0, v0, u1, v1);
+                        resMgr.Want(sampI, waveT, 6u + p, 0u, u0, v0, u1, v1, false, 0.0f, fuS, fvS);
                     held += planes;
                 }
             }
@@ -3406,7 +3573,6 @@ bool FrameLoop::Frame() {
             }
         }
     }
-    if (terrain) terrain->waterNavd = static_cast<float>(waterNavd);
     if (globe) globe->waterNavd = static_cast<float>(waterNavd);   // M6j materials
 
     // M9o/M9t: the ENGINE's cost. dt (the loop interval) also carries the recorder's
@@ -3434,7 +3600,6 @@ bool FrameLoop::Frame() {
     // ProcessQueues zeroes it inside RenderFrame.
     // (M9bi's sun placement moved to the top of the frame's housekeeping in M10: the
     // globe's level table carries the sun, and the walk that fills it runs before here.)
-    const uint32_t ringHeldBefore = resMgr.ringHeldFrame;
     // M12 step 5b: THE VIEWS SEAM. The renderer records a LIST of views in file order and the
     // session hands it one, built here rather than inside RenderFrame so that the day a scene
     // carries two the loop appends the second and the renderer does not change. The View is
@@ -3498,6 +3663,7 @@ bool FrameLoop::Frame() {
         loopRowOpen = true;   // closed by the next iteration's interval
         railPreMs.push_back(preMs);
         railPool.push_back(PoolCommittedBytes());
+        resMgr.railMaps.push_back(resMgr.turn.direct + resMgr.turn.ring);   // H5: this frame's maps
         railInMs.push_back(inMs);
     } else if (!S.railDirW.empty() && frame >= 150u) {
         if (recPipe.Open()) {
@@ -3518,6 +3684,7 @@ bool FrameLoop::Frame() {
         loopRowOpen = true;
         railPreMs.push_back(preMs);
         railPool.push_back(PoolCommittedBytes());
+        resMgr.railMaps.push_back(resMgr.turn.direct + resMgr.turn.ring);   // H5: this frame's maps
         railInMs.push_back(inMs);
     }
 
@@ -3538,6 +3705,40 @@ bool FrameLoop::Frame() {
         ++frameMsN;
     }
     ++frame;
+    // --bed-trace N: the bed the solver reads, every N frames, beside the solver's own probes
+    // and, under --twin-surface, the three levels at the camera; the first reading keeps the
+    // frame it follows as a still beside --dump's (<name>_f<N>.png). An instrument: it reads
+    // back and waits, after the frame it describes was recorded.
+    if (opt.bedTraceEvery > 0 && m_bedTracer.Configured() && !marsMode &&
+        frame % opt.bedTraceEvery == 0u) {
+        const std::string tag = "f" + std::to_string(frame);
+        if (frame == opt.bedTraceEvery && !S.dumpW.empty()) {
+            std::wstring still = S.dumpW;
+            const size_t dot = still.find_last_of(L'.');
+            still.insert(dot == std::wstring::npos ? still.size() : dot,
+                         L"_f" + std::to_wstring(frame));
+            renderer.DumpPng(still);
+        }
+        m_bedTracer.Read(gpu, swe, tag, oceanAt(simUnix));
+        // --bed-trace-plant: the same instant with the rule's floor at the coarsest mip. The
+        // instrument has to call that bed coarse, or it cannot be trusted to call one fine.
+        if (opt.bedTracePlant && frame == opt.bedTraceEvery && hgtTenant >= 0) {
+            m_bedTracer.Read(gpu, swe, tag + "-planted", oceanAt(simUnix),
+                             static_cast<float>(resMgr.Mips(hgtTenant) - 1u));
+        }
+        if (swe.Ready()) {
+            const float pts[6] = {900.0f, 100.0f, 250.0f, 60.0f, 2400.0f, 0.0f};
+            SweSolver::Probe pr[3];
+            swe.ReadProbes(gpu, pts, 3, pr);
+            Log("[swe] probes  bar(900,100): dEta %+.3f u %+.2f,%+.2f v%d | throat(250,60): "
+                "dEta %+.3f u %+.2f,%+.2f v%d | ocean(2400,0): dEta %+.3f -- frame %u (t+%.1f s)",
+                pr[0].dEta, pr[0].u, pr[0].v, pr[0].valid ? 1 : 0, pr[1].dEta, pr[1].u,
+                pr[1].v, pr[1].valid ? 1 : 0, pr[2].dEta, frame, simUnix - startUnix);
+        }
+        if (S.Tool("twin-surface") && sea && waterBank) {
+            tools::LogLevelsAtCamera(gpu, waterBank, cam, simUnix, weather, lastWaterNavd);
+        }
+    }
     // --dump-both: the solid frame has just been rendered. Dump it, flip BOTH
     // surfaces to wireframe, and take one more lap -- the clock is held above, so
     // the second image is the same instant seen as lines.
@@ -3572,7 +3773,7 @@ bool FrameLoop::Frame() {
             !S.dumpW.empty() && S.capture.headless && !opt.dumpBoth) {
             const uint32_t pend = resMgr.PendingCount();
             const uint32_t reads = resMgr.InFlightReads();
-            const bool quiet = pend == 0 && reads == 0 && ringHeldBefore == 0;
+            const bool quiet = pend == 0 && reads == 0;
             if (!settling) {
                 settling = true;
                 settlePending0 = pend;
@@ -3615,8 +3816,8 @@ bool FrameLoop::Frame() {
                 ++settleFrames;
                 if (settleFrames % 150u == 0u) {
                     Log("[settle-sync] +%u frames at the held instant: pending %u, "
-                        "in-flight reads %u, ring-held %u, pool %.0f MB",
-                        settleFrames, pend, reads, ringHeldBefore,
+                        "in-flight reads %u, pool %.0f MB",
+                        settleFrames, pend, reads,
                         PoolCommittedBytes() / 1048576.0);
                     if (S.capture.settle.exact) {
                         Log("[settle-exact] +%u: wanted %u, mapped %u, deficit %u, "
@@ -3832,8 +4033,33 @@ bool FrameLoop::Frame() {
                     profInMs[kInResTurn] / n, profInHelmMs[kInResTurn] / nH);
                 for (int k = 0; k < kInPhases; ++k) {
                     Log("[rail]     %-32s %6.3f ms %6.3f ms",
-                        ResidencyManager::PhaseName(k), profInMs[k] / n,
-                        profInHelmMs[k] / nH);
+                        ResidencyManager::PhaseName(k),
+                        profInMs[k] / n, profInHelmMs[k] / nH);
+                }
+                {   // law 4: read from disk, and no slot took it
+                    Log("[rail]     order: %llu tiles let go over the run (%llu with bytes read): "
+                        "their loads finished after they had left the first P; %llu loads of a "
+                        "tile let go within the glance (the livelock's count); %llu tiles wanted "
+                        "back while their released slot was retiring (the rescue's count)",
+                        static_cast<unsigned long long>(resMgr.letGoTotal),
+                        static_cast<unsigned long long>(resMgr.letGoReadTotal),
+                        static_cast<unsigned long long>(resMgr.reloadedTotal),
+                        static_cast<unsigned long long>(resMgr.rewantedTotal));
+                    Log("[rail]     order: %llu tiles rescued from the retire list (no read, no "
+                        "new slot); %llu answered not whole and made unreachable; %llu released "
+                        "past the cut, %llu mapped",
+                        static_cast<unsigned long long>(resMgr.rescuedTotal),
+                        static_cast<unsigned long long>(resMgr.incompleteTotal),
+                        static_cast<unsigned long long>(resMgr.releasedTotal),
+                        static_cast<unsigned long long>(resMgr.mappedTotal));
+                    const double pt = double((std::max)(resMgr.passTurns, uint64_t(1)));
+                    Log("[rail]     order: the pass ran on %llu turns and was skipped on %llu (no "
+                        "event); per pass %.3f ms failures + closure, %.3f ms candidates, %.3f ms sort + cut "
+                        "+ tail, %.3f ms release + forget, %.0f entries",
+                        static_cast<unsigned long long>(resMgr.passTurns),
+                        static_cast<unsigned long long>(resMgr.passSkipped), resMgr.passMs[0] / pt,
+                        resMgr.passMs[1] / pt, resMgr.passMs[2] / pt, resMgr.passMs[3] / pt,
+                        double(resMgr.passEntries) / pt);
                 }
                 Log("[jobs] %llu jobs submitted, stream FNV-1a %016llx%s",
                     static_cast<unsigned long long>(ga::Threads().JobsSubmitted()),
@@ -3889,7 +4115,7 @@ bool FrameLoop::Frame() {
                 fprintf(f, "frame,render_ms,render_fps,loop_ms,pool_bytes,pre_ms,resq_ms,"
                            "resq_retire,resq_dsland,resq_sortseen,resq_loads,"
                            "resq_sortload,resq_gather,resq_map,resq_dsenq,resq_ring,"
-                           "resq_resmap,bank_list_ms,meshlet_copy_ms\n");
+                           "resq_resmap,bank_list_ms,meshlet_copy_ms,resq_maps\n");
                 for (size_t i = 0; i < railMs.size(); ++i) {
                     fprintf(f, "%zu,%.4f,%.2f,%.4f,%llu,%.4f", i, double(railMs[i]),
                             railMs[i] > 0.0f ? 1000.0 / double(railMs[i]) : 0.0,
@@ -3902,8 +4128,9 @@ bool FrameLoop::Frame() {
                         i < railInMs.size() ? railInMs[i] : zero;
                     fprintf(f, ",%.4f", double(in[kInResTurn]));
                     for (int k = 0; k < kInPhases; ++k) fprintf(f, ",%.4f", double(in[k]));
-                    fprintf(f, ",%.4f,%.4f\n", double(in[kInBankList]),
-                            double(in[kInMeshCopy]));
+                    fprintf(f, ",%.4f,%.4f,%u\n", double(in[kInBankList]),
+                            double(in[kInMeshCopy]),
+                            i < resMgr.railMaps.size() ? resMgr.railMaps[i] : 0u);
                 }
                 fclose(f);
                 Log("[rail] per-frame series -> %s", csv.c_str());
@@ -3953,12 +4180,25 @@ bool FrameLoop::Frame() {
         }
         if (S.Tool("twin-surface") && !marsMode && sea && waterBank) {
             tools::RunTwinSurface(opt, gpu, seaState, sea, waterScene, waterBank, cam,
-                                  simUnix, weather, waveField);
+                                  simUnix, weather, waveField, lastWaterNavd);
         }
         if (S.Tool("trace") && !marsMode && sea && waterBank) {
             tools::RunTrace(opt, gpu, sea, compositor, hgtCh, waterAtlas, waterBank, globe,
                             resMgr, winOrgX, winOrgY, hgtTenant, hgtWinTenant, simUnix,
                             weather);
+        }
+        // --bed-trace: THE WHOLE BED, the readings' reference. After everything above has read
+        // the run's last instant, the domain is made whole the way the bed wait makes it -- the
+        // same turns, the same trace as its test -- and read once more; every reading of the run
+        // is then held against it.
+        if (opt.bedTraceEvery > 0 && m_bedTracer.Configured() && !marsMode) {
+            const WeatherManager::BedWait bw = weather.WaitForBeds(gpu, resMgr, hgtTenant);
+            Log("[bedtrace] the domain made whole at the run's end: %u tiles mapped in %u turns, "
+                "%.2f s -- %s",
+                bw.tiles, bw.turns, bw.seconds, bw.done ? "whole" : "NOT whole (see the reading)");
+            if (m_bedTracer.Read(gpu, swe, "whole", oceanAt(simUnix))) {
+                m_bedTracer.CompareWithWhole("whole");
+            }
         }
         return false;
     }
@@ -4047,7 +4287,7 @@ int FrameLoop::Finish() {
     // run's whole appetite for source tiles it did not have.
     if (m_A.googleTiles.Ready()) {
         Log("[google] %u source tiles refused this run (budget %u, %u fetched): the distinct "
-            "fetches a larger budget would have made",
+            "fetches a larger budget or day cap would have made",
             m_A.googleTiles.Refused(), m_A.googleTiles.Budget(), m_A.googleTiles.Fetched());
     }
 
@@ -4094,6 +4334,7 @@ int FrameLoop::Finish() {
         if (m_waveTree) tally("wave.field", std::atomic_load(m_waveTree.get()).get());
     }
 
+    resMgr.LogOrderMotion();   // H1: the measure's motion and the cut's crossings (order only)
     ExitStep("finish: gpu.WaitIdle -- the queue drains");
     gpu.WaitIdle();
     ExitStep("finish: residency Shutdown -- the loads still running on the pool leave");

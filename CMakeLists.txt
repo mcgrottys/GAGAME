@@ -35,6 +35,7 @@ add_executable(gagame
   src/app/Tools/Trace.cpp
   src/app/Tools/SeaVerify.cpp
   src/app/Tools/WaterProbe.cpp
+  src/app/Tools/BedTrace.cpp
   src/core/BuildInfo.cpp
   src/core/GaAst.cpp
   src/core/Lattice.cpp
@@ -49,11 +50,17 @@ add_executable(gagame
   src/hal/Shader.cpp
   src/core/Window.cpp
   src/core/Image.cpp
+  src/core/ImageLoader.cpp
   src/hal/TileAtlas.cpp
   src/hal/Residency.cpp
   src/hal/ResidencyAudit.cpp
+  src/hal/ResidencyOrder.cpp
+  src/hal/ResidencyTest.cpp
   src/hal/Tenant.cpp
+  src/hal/TenantTest.cpp
   src/core/TileProviders.cpp
+  src/core/DayLedger.cpp
+  src/core/DayLedgerTest.cpp
   src/core/ThreadTest.cpp
   src/core/ThreadManager.cpp
   src/compose/Compositor.cpp
@@ -63,6 +70,8 @@ add_executable(gagame
   src/compose/TreePruneTest.cpp
   src/compose/TileTreeTest.cpp
   src/compose/Sources.cpp
+  src/compose/RasterFileSource.cpp
+  src/compose/RasterFileTest.cpp
   src/compose/GisMask.cpp
   src/compose/GisStencil.cpp
   src/compose/VectorPack.cpp
@@ -91,7 +100,6 @@ add_executable(gagame
   src/scene/TideLayer.cpp
   src/scene/SeaLayer.cpp
   src/scene/GulfLayer.cpp
-  src/scene/TerrainLayer.cpp
   src/scene/GisLayer.cpp
   src/scene/MarkerLayer.cpp
   src/scene/VesselLayer.cpp

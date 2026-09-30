@@ -131,7 +131,8 @@ struct UnitSpec {
             {"metres", Quantity::Length, 1.0},     {"cm", Quantity::Length, 0.01},
             {"mm", Quantity::Length, 0.001},       {"km", Quantity::Length, 1000.0},
             {"ft", Quantity::Length, 0.3048},      {"feet", Quantity::Length, 0.3048},
-            {"foot", Quantity::Length, 0.3048},    {"fathom", Quantity::Length, 1.8288},
+            {"foot", Quantity::Length, 0.3048},    {"ftus", Quantity::Length, 1200.0 / 3937.0},
+            {"fathom", Quantity::Length, 1.8288},
             {"fathoms", Quantity::Length, 1.8288},
             {"m/s", Quantity::Velocity, 1.0},      {"ms-1", Quantity::Velocity, 1.0},
             {"cm/s", Quantity::Velocity, 0.01},    {"kn", Quantity::Velocity, 0.514444},
@@ -188,7 +189,7 @@ struct UnitSpec {
         // carries one, because only Length has a zero that somebody had to choose.
         if (u.quantity == Quantity::Length && !tail.empty()) {
             static const char* kDatums[] = {"navd88", "navd", "mllw",  "mlw",  "msl",
-                                            "mhhw",   "mhw",  "wgs84", "egm96"};
+                                            "mhhw",   "mhw",  "wgs84", "egm96", "egm2008"};
             for (const char* d : kDatums) {
                 if (tail.find(d) != std::string::npos) {
                     u.datum.assign(d);

@@ -341,6 +341,8 @@ void Renderer::RenderFrame(const scene::ViewSet& set) {
     // opens the whole-frame pair. Null profiler = the default path, no queries at all.
     GpuProfiler* prof = m_prof.get();
     if (prof) prof->BeginFrame(cl, gpuFrameLabel);
+    // Step 5 E, law 8: the residency turn, first in the frame's list, before any layer reads.
+    if (atFrameHead) atFrameHead(cmd);
 
     // ---- the constants: one b0 per view, pushed in VIEW ORDER, then the surface's b2 once.
     // With one view that is the ring's old two pushes in their old order, which is why the
@@ -421,6 +423,7 @@ void Renderer::RenderFrame(const scene::ViewSet& set) {
             if (!l->declared || !l->enabled) continue;
             PixScope scope(cl, l->Name());
             GpuScope gscope(prof, cl, l->Name());
+            if (beforeLayer) beforeLayer(l->Name());   // step 5: where each layer reads, in the frame
             l->Render(v.legacy);
         }
     }

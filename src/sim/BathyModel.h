@@ -19,6 +19,7 @@
 namespace ga {
 
 class Compositor;
+class CudemHeightSource;
 
 class BathyModel {
 public:
@@ -44,6 +45,17 @@ public:
     // bed, the renderer's tiles, and every physics product become the same stack sampled at
     // rungs; a bathymetry disagreement between them is no longer expressible.
     bool RealizeFromChannel(const Compositor& comp, int heightChannel);
+
+    // THE SOLVER'S WINDOW (HIERARCHY 4.17: a solver's OPEN BOUNDARY stands where its sources
+    // paint at full weight). This grid becomes a copy of `survey` -- the lattice `source` paints
+    // from -- drawn in on the side of an open face that reads the bed (the west, `westOpen`) to
+    // the cells where `source` paints at full weight (CudemHeightSource::FullWeightCells); the
+    // other sides keep the survey's extent. The whole of `survey` when `drawIn` is false, when
+    // no side is open, or when the source cannot say or stands on another lattice. Whole cells,
+    // so every cell keeps its place on the survey's lattice. `name` labels the log line. True
+    // when drawn in.
+    bool DrawFrom(const BathyModel& survey, const CudemHeightSource* source, bool drawIn,
+                  bool westOpen, const char* name);
 
     int Nx() const { return m_nx; }
     int Ny() const { return m_ny; }

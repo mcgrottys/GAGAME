@@ -124,14 +124,20 @@ cube's mip 0, 611.496 m of nominal ground a texel; rung r is that divided by 2^r
 of rung r is a Web-Mercator zoom of 8 + r. Rungs below zero are the cube's own mips. The tree has
 parents and children because a parent is the fold of its children (SPARSE_GA section 43), and it
 has nothing else: no regional texture, no micro texture, no window. **That is the sense in which
-the CPU tree has no LODs.** A physics query reads the finest rung the tree holds at a place and
-never learns what the GPU has mapped. Today it does learn it: `HeightPage` answers from the z14
-page at the Merrimack and from the cube elsewhere.
+the CPU tree has no LODs.** A physics query reads what the sources can paint at a place, at the
+rung it asks for, and learns neither what the cache holds nor what the GPU has mapped: what is
+on disk and what is mapped both depend on where somebody has flown. The CPU's own readers
+already keep to that (`HeightPage` evaluates the sources at the page's texel centres, and
+chooses its page by containment). One path does not: the solver's bed is read on the GPU by
+residency, and the hull reads the solver (finding 48).
 
 On the GPU a page tenant stays what it is today, one reserved `Texture2DArray`. Slices 0 to 5 stay
 the cube's faces with their full chains. Every further slice is a **window**: 16384 texels a side
 at its finest rung, carrying four mips (its own three rungs and one shared with the rank above),
-addressed modulo 16384. A global texel `X` at the window's rung lives at `X mod 16384`, and at mip
+addressed modulo 16384. Its fourth mip is its FLOOR, and the parent of a tile at the floor is
+the same ground in the window of the rank above, not a coarser mip of its own slice; the
+array's further mips exist, because one array has one mip count, and a window leaves them
+unmapped. A global texel `X` at the window's rung lives at `X mod 16384`, and at mip
 m at `(X >> m) mod (16384 >> m)`; those agree for every window origin (measured: 200,000 random
 pairs, no disagreement, `tools/hierarchy/porch_floor.py`), so a WRAP sampler and the hardware's own
 chain read the global lattice correctly at every mip. Finding 4, a page whose coarse mips sit 100 m
@@ -152,8 +158,10 @@ GPU-resident law's "one lattice" carried to the slices.
 
 Today the regional pages are Web-Mercator windows and the globe is a gnomonic cube: two lattices,
 met by resampling wherever a window hands over to the cube. The proposal puts every window on the
-cube's own lattice, in the plane of a cube face, extended past the face's square where a window
-needs it. The reasons, in order of weight:
+cube's own lattice, in the plane of a cube face. (An earlier version of this section had a
+window extend past the face's square where it needs to. The tree's address is unsigned, so a
+tile past a face's edge has no name today. Section 4.18 gives it one: an apron is a face of
+its own.) The reasons, in order of weight:
 
 1. **One lattice.** A window's texels ARE the pyramid's texels. Where two windows answer for one
    ground they hold the same bytes, and where a window hands over to its parent it does so at a
@@ -176,9 +184,10 @@ What it costs, stated plainly:
 - **Google's imagery is resampled.** Today a z14 window texel IS a Google pixel. On the cube's
   lattice it is not, and the rung rule (ATLAS section 4) then asks for the first rung strictly
   finer than the source: one rung finer, four times the texels, for imagery only.
-- **The window caches are repainted** from the source caches. Counted today: a colour tree holds
-  2,620 z14 and 4,215 to 16,565 z17 tiles. No source is fetched again if the paint asks the zooms
-  already cached; that is checked before the first paint, not after.
+- **The window caches are repainted** from the source caches. Counted: the colour tree written
+  to today holds 4,167 z14 and 7,775 z17 tiles, and the fullest of its older identities 4,270
+  and 16,565. No source is fetched again if the paint asks the zooms already cached; that is
+  checked before the first paint, not after.
 - **The cube's edge runs through the home waters.** On the Merrimack's meridian faces 5 and 2 meet
   at 43.364 N, **60.9 km north of the mouth** (measured). It is the one place a porch must blend,
   and it is near enough to drive to. The mesh's level seams across cube faces are open today and
@@ -202,16 +211,24 @@ Windows one viewer needs at each rank (arithmetic, `stride.py`):
 | 3840 x 2160 | 0.485 | 1 | 4 | 9 | 289 |
 
 The trees on disk say the same (measured: a census of `cache/trees` by file name,
-`tools/hierarchy/tree_census.py`). In the fullest colour tree, after every flight flown so far:
+`tools/hierarchy/tree_census.py`). The cache holds a dozen identities of the colour tree, one
+for every change of its sources or its code, and each holds what was flown while it was
+current. Two of them, the fullest (`earth.color.819596d8`, written on 2026-09-01) and the one
+written to today (`earth.color.c343ccc5`):
 
-| realization | mip 0 | mip 1 | mip 2 | mip 3 and coarser |
-|---|---|---|---|---|
-| the cube (98,304 tiles at mip 0) | 1.5 % | 4.5 % | 11 % | 35 %, 84 %, then all |
-| the z14 window | 9.1 % | 39 % | 83 % | all |
-| the z17 window | 68 % | all | all | all |
+| realization | identity | mip 0 | mip 1 | mip 2 | mip 3 and coarser |
+|---|---|---|---|---|---|
+| the cube (98,304 tiles at mip 0) | the fullest | 1.5 % | 4.5 % | 11 % | 35 %, 84 %, then all |
+| | today's | 1.4 % | 4.4 % | 20 % | 56 %, then all |
+| the z14 window | the fullest | 9.1 % | 39 % | 83 % | all |
+| | today's | 7.8 % | 37 % | 99.5 % | all |
+| the z17 window | the fullest | 68 % | all | all | all |
+| | today's | 25 % | 59 % | 98 % | all |
 
 A window's fine mips are asked for near where an eye has been and nowhere else, and its mip 3 is
 asked for everywhere in it. That is a window three rungs deep whose fourth belongs to its parent.
+An earlier version of this section gave the fullest tree's numbers as "after every flight flown
+so far"; they are one identity's, and the step 4 mapping caught it.
 
 So "global, regional, micro" at seven rungs apart is three ranks and some eighty windows a rank;
 three rungs apart is five ranks and one window a rank, and it is the ladder the engine already has:
@@ -273,9 +290,11 @@ whole ladder, of textures a few kilobytes in size, once per pixel for every tena
 pixel resolves its page nineteen times.
 
 **The binding** is the same answer computed on the CPU. The walk of the planet already visits
-every node it draws and already asks for that node's tiles; it can name the node's window and
-hand the mesh stage the window's two planes, as it hands it an anchor and a Jacobian today. A
-rasterized pixel then pays no directory load at all. A ray that leaves the surface (the pixel
+every node it draws and already asks for that node's tiles; it can name the node's window in
+the record it hands the mesh stage, which has 29 spare bits beside its level. The window's
+planes are not the record's: they are the same for every record of one world, so they ride one
+table a world, and a record of 96 bytes stays 96. A rasterized pixel then pays no directory
+load at all. A ray that leaves the surface (the pixel
 water's two rays, a march, a compute kernel) has no node and walks the directory.
 
 The two must be one function. It is written once with a C++ body and an HLSL body, and a gate
@@ -310,13 +329,198 @@ where it does not hold, the window carries three mips and the one pair that stra
 is fetched twice and mixed by hand: the same law, executed by the shader.
 
 **The floor: what is resident.** Today the clamp is the largest of the four nearest residency
-bytes: sound, and a staircase, so the picture's sharpness steps along tile lines. Proposed: when
-the map is written each byte takes the largest of its 3 by 3 neighbourhood, and the shader reads
-it with plain bilinear filtering. Measured on random maps (`porch_floor.py`, 76,800 samples): never
-finer than today's clamp, so at least as sound; the largest step between samples a sixteenth of a
-cell apart falls from 7 mips to 0.44; the price is 0.15 of a mip of sharpness on average. The same
-widening makes a kernel's single byte cover its four taps (finding 9). This one is independent of
-everything else here and can be tried first.
+bytes: a staircase, so the picture's sharpness steps along tile lines. The first proposal was to
+give each byte the largest of its 3 by 3 neighbourhood and read the map with plain bilinear
+filtering. On random maps it is never finer than today's clamp, the largest step between
+samples a sixteenth of a cell apart falls from 7 mips to 0.44, and it costs 0.15 of a mip
+(`porch_floor.py`). **Measured on the GPU, it is not sound, and it was not staged** (step 2,
+2026-09-29).
+
+The instrument is the M6h case made a probe: a reserved array with some tiles mapped and
+filled and their neighbours NULL, read through `PageSample` at 473,088 points a sampler, under
+footprints of ratio 1, 4 and 8, and the question asked of each point is whether any of a NULL
+tile's zero came into the sample.
+
+| the law | trilinear | anisotropic 8x, the colour's sampler |
+|---|---|---|
+| today's: gather and max, the true map | 0 | 1,606 |
+| the 3 by 3 floor, read bilinear | 0 | 4,221 |
+| a 5 by 5 floor, read bilinear | 0 | 5,471 |
+| the true map read bilinear (M6h, the plant) | 18,463 | 27,575 |
+| gather and max over the 3 by 3 floor | 0 | 77 |
+| gather and max over a 5 by 5 floor | 0 | 0 |
+
+Why: where the clamp decides, this GPU keeps the footprint's ratio and scales the whole
+footprint to the clamped level. At a clamp L a footprint of ratio N reaches N / 2 texels OF
+MIP L along its long axis, and one more for the bilinear tap: measured, 2.00 cells at a clamp
+of 6 for a ratio of 8, which is four texels of mip 6. So the reach is a number of texels of
+the level read, and a number of cells is the wrong unit. A cell is 128 texels of mip 0 and two
+of mip 6: a 3 by 3 of cells is sixty times the margin mip 0 needs and half of what mip 6
+needs, and a ramp that raises the clamp ahead of a frontier sends the wide footprint of a
+coarse level across it. Today's law has the same fault where the hardware's own level decides,
+under footprints 256 to 512 texels long (finding 61).
+
+**In its place: a margin per level.** A level may be read at a place only where the place
+stands at least M of THAT level's texels inside what is resident at that level, and the same
+holds at every coarser level. It is one law at every level, and its unit is the texel that is
+read. The byte is computed where the map is written. Measured in the same probe, first at
+footprints whose length is a power of two and then at lengths between them, 2^(k + 0.5) and
+2^(k + 0.9): the points that touch a NULL tile under the anisotropic sampler, of 473,088 and
+of 811,008. Under the trilinear sampler every row is zero.
+
+| M, in texels of the level read | gather and max over the floor | bilinear over the floor's 3 by 3 |
+|---|---|---|
+| 2 | 77, not run | 5,471, not run |
+| 4 | 0, then 34 | 497, then 750 |
+| 6 | 0, 0 | 0, then 60 |
+| 8 | 0, 0 | 0, 0 |
+| 10 | 0, 0 | 0, 0 |
+| 12 | 0, 0 | 0, 0 |
+
+The lengths between the powers are what decide it, and the first run had none. A sample
+whose level is L + f reads levels L and L + 1 with its taps at the same places, so in the
+texels of L, the finer of the two, its long axis is 2^f times as long: the reach is
+(N / 2) 2^f texels, and one for the bilinear tap. Measured for a ratio of 8 at levels 6.00,
+6.25, 6.50, 6.75 and 6.90, in texels of mip 6: 4.0 to 4.4, 4.6 to 5.1, 5.4 to 5.9, 6.4 to 6.8
+and 7.0 to 7.4, each under its bound of 5.0, 5.8, 6.7, 7.7 and 8.5. As f goes to one the
+bound goes to N + 1. So **M is the sampler's anisotropy and two**: nine is the bound for the
+engine's sampler, and one texel is kept in hand. M = 8 reads zero at every fraction the probe
+has, and the probe has none above 0.9. The same bound holds where the hardware's own level
+decides, which is where today's law fails: at the lengths between the powers it lets a NULL
+tile into 3,635 samples.
+
+**The read is the bilinear one:** the floor's 3 by 3, read with plain filtering, one sample
+where today's clamp gathers four bytes and takes the largest. Its largest step between samples
+a sixteenth of a cell apart is 0.44 of a mip where the gather's is 7, which is what the floor
+was wanted for. Its cost in sharpness is known on random maps only: 0.43 of a mip in the mean
+beside today's clamp, and 0.26 where no face is dead. A gather over a 5 by 5 floor, the other
+law that read zero at the powers of two, costs 0.20 and 0.19 there and keeps the step of 7.
+On a flight the cost is not measured, and the rail decides. **The want is owed the same
+margin:** what a view reads at a level, grown by M of that level's texels, or the outer band
+of every level reads the level above it. That is at most one more ring of tiles at a
+level's frontier.
+
+**What others have done.** The fault is known. Intel's sample of sampler-feedback streaming,
+which is this engine's arrangement (tiled resources, a map of the finest level held a
+region, a clamp in the shader), says that the hardware sampler reaches across tile
+boundaries under anisotropic sampling and meets tiles that are not mapped, and proposes to
+dilate or erode the map until neighbouring regions differ by one level at most; it leaves
+that undone. A slope of one level a region is not the margin measured here: at mip 6 the
+reach is two and a half regions, and at mip 0 a twenty-fifth of one. I did not find a margin
+stated in texels of the level read; that is two searches, not a survey.
+
+**Staged in the engine, 2026-09-29, and not kept in that form.** Through the manager's own
+map the law touches no NULL tile under either sampler, at footprints of every length the
+probe has. The audit is clean at every audited turn of a still and of the rail. Every
+tenant's hashes are the unstaged binary's at the six poses, and the kernels' fingerprints
+with them. Two things fail it.
+
+It is softer than the random maps said. The clamp it sets, less today's, as a mean over the
+frame's ground, measured with step 1's lens, which resolves whole mips:
+
+| pose | coarser by, mips | ground pixels a level coarser | pixels that differ, of 1,440,000 |
+|---|---|---|---|
+| helm | 0.002 | 0.2 % | 994 |
+| 7 km | 0.004 | 0.4 % | 3,306 |
+| bird | 0.054 | 5.4 % | 181,570 |
+| Droste | 0.078 | 6.3 % | 31,663 |
+| globe | 0.40 | 29.6 % | 94,367 |
+
+It is never finer than today's. At the globe the loss is plain in the picture. To give the
+sharpness back the want would have to grow by what the read reaches, two cells and the
+margin, and that doubles what a view wants: 13,939 tiles more on 14,935 at the helm. And
+the map's refresh costs 1.13 ms in the mean where it cost 0.13, 4.7 ms at the 95th turn in
+a hundred, 50 ms at the worst, though it recomputes only what a turn touched.
+
+Both have one cause: the margin is small and the map's cell is large. Ten texels of the
+level read are 0.078 of a tile at EVERY level, because a tile is 128 of its own level's
+texels. A cell is a tile of mip 0, and its byte can say only that the whole cell may read
+a level or may not. So at the finest level a band of ten texels costs a cell of 128, the
+bilinear read spreads that over two cells more, and at the coarse levels the margin is a
+window ten cells wide to search.
+
+**Proposed in its place: the same law, evaluated where it is exact.** At level L a point's
+place in its own tile is the fraction of `uv * tiles(L)`, and the level may be read unless
+the point stands within 0.078 of an edge or a corner across which the tile is absent. So the
+map carries, beside the byte it has, one byte a TILE at every level: which of the tile's
+eight neighbours are absent. That is a texture of 128 texels a side with a mip chain. The
+shader walks up from the byte's level, a load a level, and the clamp is
+
+    clamp(p) = max( byte, max over L of ( (L + 1) (1 - s(d_L)) ) )
+    s(d) = smoothstep(M, 2 M, d)
+
+with `d_L` the point's distance, in texels of level L, to the nearest edge or corner whose
+tile is absent. It is continuous. It is never finer than the law, because where `d_L` is
+under M the level's term is L + 1; and a level whose edge is 2 M away or more asks nothing.
+It is coarser than the tiles only within 0.16 of a tile of where a level ends. As this
+section first wrote it the term was L + 1 - s, which asks L of every level however far
+its edge stands, so the coarsest level always won. The probe caught it before any picture
+was taken: the margins planted too small touched nothing, and the suite failed. A tile that is
+mapped or released writes eight bytes. And the want grows by the margin alone, a neighbour being
+wanted where a read stands within 0.078 of a tile's edge: some tiles in a hundred, not as many
+again. Nothing of it is built. The probe and the lens that judged the first form judge this one.
+
+**Built by the tile and gated, 2026-09-29, and not kept in that form either.** It is sound:
+through the engine's own shader function no sample holds any of a NULL tile's zero, under
+either sampler, and the margins planted too small are caught. The flags equal the tiles at
+every audited turn. Every hash is the unstaged binary's. And the manager's cost is today's:
+the map's refresh 0.122 ms in the mean where today's is 0.124, because a tile that flips
+writes its neighbours' bytes and nothing is searched.
+
+| pose | mean level of the clamp: today, by the cell, by the tile | ground a level coarser than today: by the cell, by the tile | pixels that differ from today: by the cell, by the tile |
+|---|---|---|---|
+| helm | 0.009, 0.011, 0.009 | 0.2 %, 0.0 % | 994, 23 |
+| 7 km | 0.019, 0.023, 0.016 | 0.4 %, 0.0 % | 3,306, 928 |
+| bird | 1.020, 1.074, 1.010 | 5.4 %, 0.0 % | 181,570, 10,266 |
+| Droste | 1.839, 1.917, 1.825 | 6.3 %, 0.1 % | 31,663, 1,882 |
+| globe | 0.594, 0.995, 1.792 | 29.6 %, 35.6 % | 94,367, 142,498 |
+
+Near the ground it is what was wanted: nothing a level coarser, and where it differs from
+today's clamp it is the finer, because today's gather coarsens half a cell at a frontier
+and this coarsens some texels. Two things fail it. At the globe it is coarser than either,
+by more than a level in the mean, and the picture has lost its texture there. And the GPU
+pays for the walk: the globe's pass takes 28.0 ms at the helm where it took 13.5, and
+12.8 ms at the bird where it took 6.4, every page read of every pixel loading a level's
+flags at a time.
+
+Why the globe: a level's band is counted in that level's texels, so where the levels read
+are coarse and what is resident of each is a few tiles across, the bands are a large part
+of the ground; and the ramp this form was given runs from M to twice M, twenty texels, a
+sixth of a tile a side. By the tile a wanted region three tiles across keeps its level
+over half its area. Today's clamp gives a coarse level a margin of one or two of its
+texels, which is why today's picture is sharp there and why today's law is the one that is
+not sound there (finding 61).
+
+**What soundness costs, stated once.** A sample's footprint reaches M texels of the level it
+reads. Either the tiles within that reach are resident, which asks of a view one ring of
+tiles beyond what it looks at, at every level (counted as an upper bound: 6,293 more on
+14,935 at the helm, 983 on 1,676 at the globe); or the sample gives way where they are not.
+It can give way in two manners. It can read a coarser level, which is what both forms built
+so far do, and costs a level over the whole reach. Or it can shorten its footprint to what
+is resident around it, and read a coarser level only where the shortest footprint there
+is, a texel and its bilinear tap, would still reach an absent tile.
+
+**The form that follows, proposed: a footprint reads no tile that is absent.** Within M of an
+absent tile the footprint's long axis is cut to the distance, by the gradients handed to the
+sampler; within three texels, the trilinear read's own reach, the level is raised, over a
+ramp of two texels more. The flags and their pyramid stay as built. A cell's byte carries
+one bit more, set where any level over the cell has an absent neighbour, so that a pixel
+far from every frontier loads one byte and walks nothing. A slice read with a clamping
+sampler has no neighbour past its own edge to touch, so its edge sets no flag. The band is
+then five texels where it was twenty, and what is lost inside the reach beyond it is the
+length of a footprint and not a level. Nothing of it is built. Its gate is the same probe,
+the same lens, and the globe's pass no slower than today's.
+
+What the probe cannot tell: another adapter or driver, or an anisotropy other than 8;
+fractions above 0.9; a frontier other than a cliff, where every level below the coarsest ends
+at once; footprints that cross it at angles other than 0, 45 and 90 degrees; the picture.
+The probe stays in the selftest, so an adapter whose taps reach farther fails the suite and
+says where.
+
+What stands of the first proposal: the construction is gated on the CPU with its plants caught
+(the floor without its neighbours across a face's edge falls short at 534,276 points, all
+within half a cell of an edge), and a kernel's single byte covers its four taps under it
+(finding 9: 0 of 14 million taps in a coarser cell, where the true map has 11,505).
 
 ### 4.7 Residency, sharing and the budget
 
@@ -332,17 +536,47 @@ tenant's slices are planes, 33 to a window, so it is given its windows separatel
 The pool is what it is today; the windows change where tiles are addressed, not how many a view
 wants.
 
-Three things in the manager must change first, because windows lean on all three: the tail a
-batch loses at the pool's cap (finding 2), the residency bytes an invalidation erases (finding 3),
-and the residency map's upload, which today re-sends a whole tenant for one dirty byte and is
-capped at 256 slices a turn.
+Three things in the manager must change before a window MOVES, because a moving window leans
+on all three: the tail a batch loses at the pool's cap (finding 2), the residency bytes an
+invalidation erases (finding 3), and the residency map's upload, which today re-sends a whole
+tenant for one dirty byte. A window that stands on an aligned block adds nothing to them
+(4.17), which is why the shader's contract is made first, on standing blocks, and the manager
+after it. They are today's faults all the same. Step 1's audit saw the first two on today's
+binary, over today's windows, and two more beside them (findings 63 and 64).
+
+**The map is computed, not kept.** The residency byte of a cell is a function of the tiles:
+the finest level L at which the tile over the cell is mapped and its bytes have landed, at L
+and at every coarser level. Today's manager keeps the byte by increments, lowered when a tile
+is mapped and raised when one is unmapped, and the increments equal the function only while
+tiles are mapped from coarse to fine and unmapped from fine to coarse. Four orders of events
+are not that. A parent is invalidated over a mapped child and mapped again, and the byte is
+left coarser than the tiles (finding 3, seen). A parent is evicted while its child waits in
+the same batch (63, seen). A tile is admitted under a chain that is broken above its parent
+(64, seen). A claim is made while the parent's bytes are still in flight (24, read and not
+seen). The last three leave the byte FINER than the tiles, and that is the direction in which
+a sampler reads a NULL tile's zeros.
+
+Each could be mended where it stands. Proposed, one law that mends them together: the byte is
+written from the function, over the footprint of every tile whose state changed in the turn.
+The audit's function is that function, so the audit becomes the gate of the code that
+replaces what it judged. The margin of 4.6 is computed from the same residency, a level at a
+time, so what the GPU reads is one function of the tiles: what is resident at each level,
+and then the margin. A tile mapped under a broken chain is then a tile wasted until its
+parent returns, and never a tile read.
+
+The lost tail is a fault of the queue and not of the byte. On the storm rail the pool is full
+on half of the turns, and from the first of them to the last the manager loads 7,917 tiles,
+gathers them into batches, finds no slot, and leaves them in no queue: as many as the pool
+holds. They are never mapped, each keeps its 64 KB, and what waits beneath them waits for
+good. Returning the tail to its queue is three lines; what it needs with it is a bound, so
+that nothing is loaded that no slot can take, and that bound is the new manager's (4.19).
 
 ### 4.8 Portals, and several eyes
 
 A gate's world is rasterized, not traced: the far world is walked from the carried eye, drawn in
 this frame by one motor, and a per-pixel slab test keeps each pixel for the world whose depth its
 ray reaches. So every world has its own meshlet records, and the binding of section 4.5 gives each
-record its window and its two planes relative to THAT world's eye. A carried eye is an interest
+record its window, and each world its table of planes relative to THAT world's eye. A carried eye is an interest
 like any other, and windows follow it as they follow the camera; the gate's residency sampler
 already exists.
 
@@ -536,6 +770,23 @@ reports lines added and lines removed beside its gate.
 - and the water written twice by hand: the kernel and the hull's twin become two executions of
   one description (4.11), so the second is generated and not maintained.
 
+**Beside the refactor: what no shipped scene runs.** A read-only survey of `main` at
+`71e3a33` (`docs/REMOVAL_LEDGER.md`, 2026-09-29) counted the code reached only by a switch
+no shipped scene sets, or by nothing: 3,876 lines beside the residency manager, 4.7 % of the
+82,883 in `src` and `shaders`. It is a menu, and each row says what would be lost.
+
+- **Five rows lose nothing that runs,** some 550 lines: a layer whose `Render` returns
+  before any draw and whose shader is compiled at every boot, a class only the selftest
+  calls, a queue nothing fills, seven shader functions nothing calls, and a member written
+  and never read. They are being removed in a scratch tree, behind the gates a removal can
+  be held to: every stage's bytecode and six stills, pixel for pixel.
+- **The rest each lose something,** and the largest are the AIS fleet and its closed-form
+  wakes (796 lines), the sea's own tessellated sheet (779) and the Gulf of Maine map (438).
+  They wait for the owner's word, row by row.
+- **The sources by file add one more** (4.20): when a source paints its own level and the
+  tree makes the others, each source's chain of levels, its choice among them and the code
+  that named a dataset go with it.
+
 ### 4.13 Maps, lenses and the GIS bank
 
 A map in the game is a **view with a lens**, and it reads the tiles the game reads (the owner,
@@ -568,15 +819,57 @@ tile's name covers all three**, the source's content, the binding the scene gave
 version of the painting code. A name that no longer matches is never read, so nothing is
 invalidated by hand and nothing stale is served.
 
-Two of the three are in the names today (`kComposeVersion`, `kTileTreeVersion`, `kBlendVersion`
-for the code; the sources' content hashes). The third is not, because bindings do not exist yet.
-And the names stop short in the two places finding 25 found: a composite's key records whether
-each input is present or void and not what it holds, and a leaf is looked up in an archive with
-no key. With the names complete an archive and a loose file cannot disagree, which is git's
-answer to the same question.
+Less of that is in the names today than this section first said (corrected by the step 4
+mapping, 2026-09-28):
 
-Warming a place and packing it are then tools a scene names, run when a place is added, and
-`--warm-trees` and `--pack-trees`, which do nothing today (finding 37), are restored as those.
+- **The code.** `kTileTreeVersion` and the tile's format are in a tree's identity, and
+  `kBlendVersion` in a composite's key. `kComposeVersion` is the flat compositor's and is in no
+  tree's name.
+- **The sources' content.** A colour leaf's identity carries its structure. Google's and the
+  orthos' carry no hash of what they hold, and a height leaf's identity is its name and its
+  unit: the hash of its edits never reaches it (`HeightStackSource.h:79-112`,
+  `DomainSource.h:149`).
+- **The bindings.** Not yet, because bindings do not exist yet.
+- **What each input holds.** A composite's key records whether each input is present or void
+  and not what it holds; a leaf is looked up in an archive with no key at all; and the archive
+  is read before the loose file, while a fold reads and writes loose files only (finding 25).
+  Measured, byte against byte (`tools/hierarchy/archive_stale.py`): 4,577 of the 194,527
+  archived tiles hold bytes their loose file no longer holds, and 1,793 more have lost their
+  loose file to a drop and are still in the archive. All of them are in 22 archives of the
+  identities in use, which were set aside on 2026-09-28 by renaming them in place
+  (`<tag>.gaa.stale`), on the owner's word, until step 4b; the engine reads those trees' loose
+  files meanwhile. Pictures taken before 22:48:48Z that day show the cache as it was.
+
+With the names complete an archive and a loose file cannot disagree, which is git's answer to
+the same question. Step 4b completes them: a leaf's name carries a token of its bytes, a marker's
+token is the hash of its four children's, a composite's key folds its inputs' tokens, and a leaf
+is looked up in an archive by its token. It costs one directory search a lookup, which is what
+three probes cost today, and no tile's bytes are read to find a name.
+
+Warming a place and packing it are then tools a scene names, run when a place is added.
+`--warm-trees` and `--pack-trees` do nothing today (finding 37): their bodies exist and nothing
+dispatches them. Step 4a restores them.
+
+**A third tool retires what nothing uses** (the owner, 2026-09-28: build it). The cache keeps
+every identity a tree has ever had, a dozen of the colour tree alone, and step 4b strands
+today's as well. What makes pruning hard is that some twenty working trees on different
+branches share the one cache, so a tree this build cannot name may be one another branch reads
+daily, and that the file system keeps no usable time of last reading, so a tree that is fully
+painted looks old by its files. The design:
+
+- **A tree says when it was last used.** Every run stamps the frame folders it uses with the
+  time, the engine's revision and the scene. The unit is the lattice's folder and not the
+  node's, because a lattice that is dropped goes stale inside a node that is still live.
+- **The tool lists, and by default does nothing else.** Stamped within the age, kept; stamped
+  and older, stale; never stamped, judged by its newest write and given twice the age.
+- **Retiring is a rename.** A stale folder and its archive move into a dated folder beside the
+  trees, with a manifest and the commands that put them back. Nothing is deleted.
+- **Purging deletes retired folders older than a second age,** and is the only path that does.
+- **It never follows a link,** acts only on names of a tree's form under a root named `trees`,
+  refuses while an engine is running, and asks for the root's own path as its confirmation.
+
+Only the trees are derived: a tree that is gone repaints from the source caches with no fetch.
+No source cache is in the tool's reach. Retiring and purging are run by the owner.
 
 ### 4.15 Sources, and what each may be asked for
 
@@ -587,7 +880,7 @@ datum: how much a day, and whether what it sends may be kept.
 | source | covers | grain | may it be kept? | asked how |
 |---|---|---|---|---|
 | Google Map Tiles (satellite) | the planet | to z20 and finer | **Not as the engine keeps it.** The policy forbids pre-fetching, storing or caching beyond what the response's cache headers allow, and forbids offline use | 15,000 tiles a day by default quota, 100,000 a month without charge, billed beyond that; billing must be enabled on the project |
-| NAIP (USDA) | the contiguous United States | 0.3 to 1 m | yes: public domain | cloud-optimized GeoTIFF on AWS open data |
+| NAIP (USDA) | the contiguous United States | 0.3 to 1 m | yes: public domain | cloud-optimized GeoTIFF. The AWS buckets are requester-pays: whoever asks pays for every request. Microsoft's Planetary Computer holds the same collection, 2010 to now, in Azure and lists it through a STAC catalogue; read from search results, not tried |
 | Sentinel-2 cloudless (EOX) | the planet | 10 m | the 2016 mosaic yes, with attribution (CC BY 4.0); later years are non-commercial share-alike | tiles on S3, zoom 7 to 13 |
 | MassGIS orthos | Massachusetts | 15 cm | yes | already harvested |
 | ETOPO 2022, CUDEM (NOAA) | the planet; the US coast | 1.8 km; 3 m | yes | already harvested for New England |
@@ -597,7 +890,95 @@ Two things follow. **The free allowance is counted in tiles, not in bytes.** A s
 some 20 KB, so 100,000 a month is about 2 GB, and a budget of 5 to 10 GB a day is far more than
 Google gives without charge. The engine's cap for Google is therefore a count, 3,000 a day, which
 keeps a month inside the allowance whatever the day's quota permits; the 5 to 10 GB a day governs
-the open sources. **The colour is a composite of its sources** (the owner, 2026-09-28), and for
+the open sources. The owner has since set the cap himself (section 5): 100,000 tiles a day and
+5 GB a day. In `main` neither is code: the budget is counted per run,
+1,000 by default (`Options.h:62`, the scene's `streaming.tileBudget`), and no run knows what an
+earlier run of the same day fetched.
+
+**The day's count is built** (2026-09-29, in a scratch tree on `71e3a33`, not committed; no
+request has been made with it). One file a UTC day beside the source's cache,
+`cache/google/day_<date>.json`, holds what was asked, the tiles that came and their bytes.
+
+- **It counts what is asked.** A request that fails is counted with one that lands, because
+  the cap is on what is asked of a paid source. A request may go only while the asked are
+  under `streaming.dayTiles` and the bytes under `streaming.dayBytes`. As first built it
+  counted the tiles that came, and a source that answered every request with an error would
+  have been asked on and on (finding 78).
+- **Every engine on the machine counts into the one file,** under one named lock that is
+  never held across the network. The count is read again under the lock before it is
+  written, so two engines lose nothing of each other's.
+- **It fails closed.** A ledger that cannot be read whole is the cap met and not a count of
+  zero. A lock that cannot be had refuses the request. A cap of zero is no request, not no
+  limit.
+- **A run stops asking after eight requests in a row land nothing.** The run's own budget is
+  asked before the ledger, so a run that may not fetch takes neither the lock nor the file:
+  every gate render is such a run.
+- **A body is whole or the request failed,** so a tile cut short is not kept (finding 79).
+- **What it does not promise:** a day can close over its cap by the requests in flight when
+  the cap is met, one a fetching thread at most, and the bytes by those tiles' sizes.
+
+Its test is in the selftest and opens no connection: the engine's own rule with a stand-in
+for the request and one for the clock. Three plants are caught: the count not read again
+under the lock loses a fetch; the first rule lets a sixth request go to a source that failed
+five; the old log line holds a made-up key but for one character (finding 77). Not run by
+anything: a real request; two engine processes at the lock; a body cut short, which needs a
+connection. The engine's lines for it: 590 added and 44 removed, beside 614 of test.
+
+**The finest zoom is the scene's.** The Google source held its zoom to 14 by a literal, and
+its own comment says why: a deeper zoom is a budget decision that a realization makes inside
+a window it owns, and the cube can never demand one. A block that a scene declares is such a
+window. At Haulover zoom 14 is 8.6 m a pixel, so a block of rank 3, 1.19 m a texel, would have
+been painted from zoom 14 enlarged. The literal becomes `streaming.googleZoom`, 14 unless a
+scene says otherwise and 19 at most, and the day's count is what bounds the tiles. A source's
+identity is its name and its structure. At 14 both are the strings they were, so no tree
+moves; at any other zoom the structure names it, so a scene that raises the zoom paints a
+tree of its own and writes nothing finer into a tree that says 14. Tested on the source
+alone, with the clamp left at 14 planted and caught.
+
+**The first requests, 2026-09-29, at Haulover** (a scratch tree: `main`, the migration's
+form H and the day's count; two scenes that cap themselves at 4,000 requests a day, zoom 17,
+1,500 a run). Before any request the same poses were run with the run's budget at zero,
+which asks nothing and says what would have been asked: 237, 429, 558 and 302 tiles at four
+poses.
+
+- **The first run that fetched asked for every tile twice** (finding 91): the day's count
+  read 250 asked and 250 tiles of 4,779,668 bytes, and the cache gained 127 files of
+  2,527,268. Loader threads that paint neighbouring tiles each fetched the tile they share.
+  Now one thread fetches a tile and the others wait and take what it brought. The next run
+  asked 150 and the cache gained 150.
+- **A run fetches some 250 tiles at most,** the throttle's 80 ms against the settle's hold
+  of 3,000 frames, so a pose is filled over several runs, the coarse zooms first.
+- **What the engine draws at Haulover is its own coast.** The survey's mask does not reach
+  Florida and the global relief is ETOPO's, 4.9 km a sample. The inlet, the barrier island
+  and the bay are open sea to it; its land begins some 3 km west of the true ocean shore,
+  and north of a straight line 2.7 km south of the inlet nothing is land at all. South of
+  that line the cube's height answers at its mip 1, and north of it at its mip 6, 39 km a
+  texel (the residency lens). The line lies at 65/256 of the face, which is also the edge
+  of the inlet's rank 3 block. Why nothing finer is asked of the height north of it is not
+  read. The imagery shows on the engine's land and lies unseen under its sea. It is
+  today's picture of the place and not the blocks': a run with no block declared draws
+  the same coast. The height on blocks, with the bed that was harvested there, is what
+  mends it (step 7).
+- **On the engine's land the blocks draw the imagery:** the mainland from 7 km, the streets
+  and the bay's islands, the want set resident and exact, no request refused. From 1.5 km
+  the finest block answers at its mip 1, 2.4 m a texel, from zoom 16; from 300 m at its
+  mip 0, 1.2 m, from zoom 17, over all of the picture but the tiles' outlines.
+- **A picture is taken from the cache, after the run that fetched.** The run that fetched
+  from 300 m settled exact and drew one tile sharp and the rest from texels of 9 m, with
+  every tile of the finest level mapped. The same pose drawn afterwards from the cache
+  alone is sharp throughout. That is finding 3 seen in a picture: while tiles are painted
+  and folded the map's bytes stand coarser than the tiles, and the settle judges the
+  tiles. The manager of 4.19 computes the map from what is held, and has no such state.
+- **The gate's scene with blocks at both places,** seven of the eight rows, draws from the
+  cache as the gate did before: the want set of 18,189 tiles resident and exact, the
+  window and its corridor in it. Nothing was fetched for it: its window looks at open sea.
+  It would have asked 589 tiles, most of them at the Merrimack, where a scene that says
+  zoom 17 asks Google for what the cache holds to zoom 14.
+- **The day's count at the end of the test:** 798 requests, 798 tiles, 19,368,775 bytes,
+  of the 4,000 requests the test's scenes allow themselves and the 100,000 the owner
+  allows. 123 of them were the first run's doubled requests.
+
+**The colour is a composite of its sources** (the owner, 2026-09-28), and for
 now Google fills its base. NAIP and Sentinel-2 between them cover every place named so far at
 rank 2 and, in the United States, at rank 3 and beyond; they enter the same stack as inserts
 above the base, or as the base where a scene says so. No source is the floor by construction.
@@ -613,6 +994,73 @@ and it is 300 km long, so it exercises ranks 1 to 3 at once. San Francisco Bay i
 alternative, with a forecast system and five current profilers of its own. All three places, the
 Merrimack included, lie on face 5 of the cube. The edge that exercises the porch is the one
 61 km north of the Merrimack.
+
+**What was harvested, 2026-09-28** (branch `claude/harvest-places`; Python only, nothing
+fetched from Google; 460 requests and 7.75 GB of a budget of 2,000 and 8 GB; no existing file
+changed, and the three New England windows come out of the new code byte for byte as before):
+
+| | Haulover | Chesapeake |
+|---|---|---|
+| the bed | the whole box at 13.7 m, 1538 by 1619, -274 to +17 m NAVD88 | the mouth only, 6075 by 3645: 33 of the bay's 78 tiles, the 45 left listed in the manifest with 9.75 GB to go. The whole bay at this grain is 264 million cells, past the loader's 2^26 |
+| tides | 14 harmonic stations within 40 km, 8723080 first; 11 tied to NAVD88 | 62 harmonic stations |
+| currents | 8 stations, first the one in Bakers Haulover Cut itself, and one profiler on a buoy | 8 stations at the mouth, and the forecast system's surface current as a field |
+| the forecast system | none covers Miami | one whole cycle of CBOFS, 384 MB: level, current, temperature, salinity |
+| waves | the GFS-Wave point off the inlet, two buoys | the GFS-Wave point off the capes, two buoys |
+| not taken | the survey shoreline: Florida's is one file of 247 MB, part of it unreadable | |
+
+Each place has a manifest (`data/places/<place>.json`) naming every file, its source, its
+datum and unit as the source declares them, the instant it is valid for, and each source's own
+words on whether it may be kept.
+
+**What "a place is data and a scene entry" still costs,** counted by the harvest against the
+engine's code. The files are in the formats the engine reads, and four of the scene's `data`
+keys can already point at them. The rest names the Merrimack in code:
+
+- **the anchor of the world**, one longitude and latitude with fixed metres a degree
+  (`BathyModel.h:25-28`), used by the frame loop, the water's tree, the sea, the sources, the
+  wave field and the solver;
+- **the two windows**, built by one function for one place (`SurfaceFrame.cpp:31-49`);
+- **some twenty literal paths and names**: the bed's file reopened whatever the scene says
+  (`Assembly.cpp:485`), the two insets, the currents' file, the water's, the survey's, the
+  river's; one tide station, one buoy, one current station and Boston's, each by its number;
+- **the solver's compass**: the sea to the east and the river to the west (`Swe.hlsl:102`,
+  `:223`);
+- **a projection's zone**: 19, where Haulover is in 17 and the Chesapeake in 18 (finding 36);
+- **a box the forecast is believed in**: 41.5 to 44.5 N (`WeatherManager.cpp:336-337`).
+
+Step 8 is that list turned into keys of the scene, and its gate stays what it was: the source
+tree does not change between the scene without the place and the scene with it.
+
+**The list was a count. The map is `docs/PLACE_KEYS.md`** (2026-09-29, read-only): 69 rows,
+each with the file and the line, who reads it, the key that carries it today or the key
+proposed, and today's literal as the default. By class: 23 paths and names of data, 7
+identifiers of stations, buoys and gauges, 13 coordinates, zones and boxes, 11 assumptions
+about geography written as code, 5 windows, 10 defaults. What it changes in the plan:
+
+- **The anchor is the physics' chart, and it is the largest item.** The flat frame every
+  solver, kernel and hull works in is degrees times metres a degree frozen at 42.8 N. A bed
+  at Haulover placed by it is solved on cells 0.82 of their true width east to west, and
+  at the Chesapeake 0.92. So a place declares its chart, an anchor with its own metres a
+  degree, and every reader takes the chart from the place. The gates already build a chart
+  at another place by the same law (`Gateway.cpp:39-40`). The Merrimack's default carries
+  the literal 81,660 and not the cosine, which is 81,654.6: a point 10 km from the anchor
+  would move 0.7 m.
+- **Two keys exist and are passed by.** The depth tree reopens the Merrimack's bed whatever
+  `data.bathy` says, and the velocity-gradient bank reopens the default currents' file
+  whatever `data.currents` says.
+- **A name is part of an identity.** The layer built from `data.bathy` is named
+  `noaa.cudem.merrimack` whatever bed it holds, and the station field `tide.stations.ne`;
+  the names reach the trees' folders. A place's data needs the place's name.
+- **What is an assumption and not a literal stays an assumption at step 8, and is said.**
+  The solver's open sea is the half-plane east of a threshold and its river the first
+  column; the boundary clocks are chosen by river kilometre; the entrance jet's axis passes
+  through the origin; every solver's bed is the one z14 page. At Haulover and at the
+  Chesapeake's mouth the sea is to the east, neither tide file has a river kilometre, so
+  the clocks fall to the focus station, and with no station of its name the jet is off.
+  The second place runs on those terms. A coast that faces west does not, and the law that
+  replaces the compass is a boundary the place declares as a plane of its chart.
+- **The zone of a raster falls to 19** for any code the loader does not know, and the codes
+  of zones 17 and 18 in NAD83(2011) are among them. The zone is the file's to declare.
 
 ### 4.16 Music as a source: the buoy, and the wave machine
 
@@ -781,6 +1229,1038 @@ Schreck, Hafner and Wojtan 2019; dispersion inside a shallow-water solver is Jes
 screen. What the engine would have is the combination: the source is bound in a scene with its
 units checked, and the water it makes is the water the hull reads.
 
+### 4.17 What the code said of 4.1 to 4.8
+
+A second read-only mapping (2026-09-28) walked the residency manager, the wants, and every
+stage's way to a page, and put the design beside them. Where it corrected a section, the
+section now says so. What it changed in the plan:
+
+**A window that stands on an aligned block needs no new manager.** A window whose origin is a
+multiple of 16384 texels of its rung is one block of the cube's lattice at that rung: all of its
+mips line up, its uv stays inside [0, 1), and today's clamp samplers, today's residency map and
+today's per-slice manager are right for it. It is the Mercator page's shape on the other
+lattice. So the order of section 6 is interleaved: the shader's contract first, on standing
+blocks, where a picture tests the pyramid, the address and the directory; then the manager;
+then windows that move. Its price is that a place near a block's edge needs two blocks of a
+rank where a following window would need one. Measured by the first commit's selftest: the
+Merrimack's mouth lies in block (166, 4) of rung 9 on face 5, 1.40 km from its west edge and
+1.76 km from its south edge, so a viewer there needs four blocks of that rung within 8 km.
+This section had said 2.3 km, by an arithmetic nobody had run.
+
+**What a moving window adds, and the code does not have:**
+
+| what | where it bites |
+|---|---|
+| slots addressed modulo the window | a tile's identity is its slot today (`StampIndex`), and its key holds 21 bits of x and y |
+| a floor that is not the slice's coarsest mip | the parent rule, the boot map and the hold all say `mips - 1` |
+| a want across the modulo seam | `Want` takes one rectangle in a slice's uv, clamped to [0, 0.9999] |
+| a landing checked by address | a DirectStorage copy lands on the slot captured when it was queued, and ownership is checked by slot |
+| the turn at the head of the frame | it runs inside the globe's draw, after the sea and the banks have recorded their reads |
+| a map upload that cannot be deferred | a map that finds no room stays dirty a turn, and after an eviction in that turn it points at zeros |
+| an anisotropic sampler that wraps | the engine has none; step 0 measured the wrap with a trilinear one |
+| origins that are a function of the pose | or the settled stills stop being exact; their hash must cover global tiles and origins |
+| the capacity declared | slices are fixed when the array is made, and a residency sampler exists per gate and per subject, of sixteen |
+
+**What the code forces a decision on:**
+
+- **The solver's bed** (finding 48). The solver reads its bed on the GPU, choosing page or cube
+  and the mip by what is resident, and the hull's level and current are the solver's. Physics
+  reads residency there today. Either the solver stands on a pinned window and is held until
+  that window is whole, or it keeps a bed of its own. The first is the design's: a solver's
+  domain is a standing window (4.1).
+
+  **Measured, 2026-09-29** (branch `claude/solver-bed-resident`; three arms, fifteen runs of
+  5,400 frames, the kernel's own reading of the bed read back over the domain). Today the
+  hour of spin-up integrates on a bed of exactly 0.0 m in every one of the domain's
+  2,187,162 cells. The residency map's copy on the GPU is born zeroed, zero says that mip 0
+  is here, and the residency turn that first writes it comes after the spin-up (finding 66);
+  so the kernel reads mip-0 tiles that nothing has mapped, and they read zero. The tide an
+  hour before the start stands at -0.367 m, under that plain: the basin is dry for the hour,
+  and at frame 600 its level stands 0.552 m under the tide, which is the tide's rise over
+  the hour to 5 mm. The minutes after it are the refill through the real inlet, and that is
+  the beach band.
+
+  | the bed the hour ran on | the level less the tide, frame 600 | frame 5400 |
+  |---|---|---|
+  | today's: 0.0 m in every cell | -0.552 m at the beach, -0.552 at the helm | -0.116, -0.251 |
+  | the whole bed, waited for | -0.028, -0.055 | -0.006, -0.032 |
+  | the coarsest mip, the map written and nothing asked (beach only) | -0.002 | -0.008 |
+
+  Three runs an arm at each pose, and no spread within an arm at frame 600. The wait is 334
+  tiles, 16 residency turns and a tenth of a second, where the time to a first frame varies
+  by 7 to 14 s from run to run. Started on the coarsest bed the level is right at once, and
+  the water sloshes by 0.14 m a minute later, when the fine tiles land under it. So the
+  conjecture's mechanism, a coarse bed that dams the inlet, is refuted: the inlet is open on
+  the coarsest bed. Its class is confirmed: the solver integrated on what residency had not
+  delivered. And in four of today's six runs the pinned domain never became whole in 5,400
+  frames (finding 67), so in play too the bed is what was mapped.
+
+  The first form is taken, and stated as a law: **a solver integrates on a window that
+  stands whole, from its first step.** The window is asked for before the solver starts; the
+  solver starts when it is whole; its tiles are held while the solver runs; and a tile of it
+  that is absent is an error that is said, not a coarser answer that is read. What the
+  experiment built is the first half of that in today's engine, behind a scene key,
+  `water.swe.bedWait`, whose default is today's behaviour.
+
+  **And it stands where its sources paint at full weight.** The experiment's bed, read
+  back, shows a second fault of the same kind, in space where the first was in time
+  (finding 68). The solver's grid is the survey's window, cell for cell, and the survey's
+  layer fades into the relief beneath it over the outer 4 % of that window. At the
+  solver's west column the bed is therefore the 15-arcsecond relief, +2.03 m at its
+  lowest, where the survey has the river at -4.21 m; the channel comes back to its
+  surveyed depth 74 columns in. No cell of the west boundary can be wet, so the
+  Merrimack's discharge and its tide have never entered since the bed became the composed
+  height. A fade at a layer's edge is the picture's device. A solver's edge is a
+  boundary condition, and it needs the data: its window is declared inside the band, or
+  the source that carries its boundary is given no band on that side.
+
+  **Both were built and gated, 2026-09-29, and one of them is not ready** (the keys
+  `water.swe.bedWait` and `water.swe.window`; 64 runs; not committed). The owner had said
+  yes to both together. What the gate measured:
+
+  | | today's settings | whole bed, today's window | whole bed, the window drawn in |
+  |---|---|---|---|
+  | cells of the west boundary that can be wet | 0 | 0 | 18 |
+  | the level less the tide at frame 600, beach and helm | -0.552, -0.552 m | | -0.030, -0.058 |
+  | at frame 5400 | -0.116, -0.251 | | -0.005, -0.032 |
+  | through the west boundary over one tide, m3/s | | 0.0 | +16.1, where it is told +17.8 |
+  | the same, hour by hour | | | against what it is told: correlation -0.64 |
+  | the gap's current against the station's, gain | | 0.68 | 0.51 |
+
+  - **The whole bed is a plain gain.** The low basin of the startup is gone, the wait is
+    252 tiles and a tenth of a second, and the new arm's two runs are one picture at all
+    six poses, where today's differ from each other at four.
+  - **The window drawn in lets the river enter and is not right yet.** Over one tide the
+    boundary carries what it is told to within 1.7 m3/s. Hour by hour it does not: the flow
+    it carries goes with the tide's level (correlation +0.95) and the flow it is told goes
+    with the tide's rate, as a prism's does. At the flood it brings water into the domain
+    from the west where it is told to take it upriver. And the gap's current fell against
+    the station's, where opening the boundary to the prism upriver should have raised it.
+    That boundary had no wet cell since the bed became the composed height, so its law had
+    never carried water.
+  - **The boundary's line is right, and the reach behind it is late.** Its terms were
+    traced cell by cell at four instants: the pinned column holds the target exactly, the
+    signs and the datums are right, the clamp never bites, and the flux it carries is the
+    sum of its two terms to 0.4 m3/s. But the water next to it is not the water the law
+    supposes. The reach from the first interior column to the 25th stands flat, 0.69 m
+    under the exterior at the flood and 0.6 m over it at the ebb: the model's river
+    delivers the tide there 2.70 h after the ocean's, where the stations say 1.07 h at
+    that kilometre and the model itself is 0.17 h late 10 km downriver. So the radiation
+    term, which is there to let reflections out, feeds and drains the reach, and the face
+    is a second mouth.
+  - **The river loses no time along a channel: the window cuts its bend.** The suspect I
+    named, the damping a step on every face's flux, is cleared: its rate is 1.9e-4 a
+    second, of the order of the tide's frequency and not far above it, and four cycles
+    from the shipped damping to none move the lag at the edge by 0.006 h. The cause is the
+    grid. Drawn in, the window's north edge stands 641 m further south, and the river
+    leaves through it at 9.5 km west of the anchor and comes back through it 0.8 km
+    further east; the edge is a wall. Inside that grid the lowest way from the upper
+    reach to the sea crosses land at +7.27 m, so the reach is a pond of 2.64 km2 whose
+    only mouth is the west face. Below the bend the model is right: 0.18 h late 5 km
+    up, where Newburyport is 0.25 h.
+  - **On today's window the river is whole, and its west end is a wall.** The bed read
+    back from the kernel, flooded, joins the upper reach to the sea through the bend,
+    whose highest bed is -2.15 m; every cell of 20.3 km of channel is wet at every
+    tide. The reach I had reported as still, its range 5 mm, was the probe: it stood
+    on a cell whose bed is +2.33 m. The reach's range is 2.46 m. But the west face has
+    no wet cell, so the river is a channel with a dead end: at its upper end the tide
+    is 0.56 h late and 1.12 of the ocean's range, where the stations say 1.09 h and
+    0.83. It lags too little and swings too much, as a closed end does.
+  - **So the second law said too much.** Drawn in on every side the window lost the
+    bend at an edge that is a wall. **A solver's open boundary stands where its
+    sources paint at full weight;** at a wall the window keeps the survey's extent,
+    so that the water inside stays joined.
+  - **Measured in that form, the river is whole and fed from both ends.** The west
+    columns drawn in, the other three sides the survey's:
+
+    | | today's window | drawn in on every side | drawn in on the west | the stations, or what is told |
+    |---|---|---|---|---|
+    | the upper reach | joined, its west end a wall | a pond, the face its only mouth | joined, and meets the face | |
+    | its lag and its range against the ocean's | 0.56 h, 1.12 | 2.70 h, 0.83 | 1.18 h, 0.97 | 1.09 h, 0.83 |
+    | 5 km up the river | 0.29 h, 1.05 | 0.18 h, 1.03 | 0.37 h, 1.00 | about 0.35 h, 1.00 |
+    | the flow carried against the flow told, correlation | carries nothing | -0.64 | +0.92 | |
+    | the gap's current against the station's, gain | 0.68 | 0.51 | 0.77 | 1 |
+    | the net through the face over one tide, m3/s | 0 | +16.1 | -29.9 | +17.8 |
+
+    Every measure but the last is nearer the stations than today's. The net is not:
+    48 m3/s more leaves through the face than is told, and the basin stands 2 cm
+    lower for it. Most of that is measured: the first cell inside stands 2.8 cm over
+    the exterior that is told, in the mean of a tide, and the exterior's mean is 4.4
+    cm under the ocean's, because its stage is each station's tide less that
+    station's own mean. A river's mean stands over the sea's. So the stage's datum
+    was suspected, and measured by raising the told stage and leaving the told flow:
+
+    | the told stage raised by | the net through the face, m3/s | the mean step, exterior less the first cell |
+    |---|---|---|
+    | 0 | -29.9 | -0.028 m |
+    | 0.044 m | -5.4 | -0.005 m |
+    | 0.072 m | +10.4 | +0.010 m |
+
+    The net moves by some 560 m3/s a metre of stage and would meet the told +17.8
+    near 0.085 m. So the datum is a part of it and not the whole. What is left, 13
+    to 14 m3/s outward at every one of the three, is the face's own: it carries more
+    when it is deeper, and its step is out of phase with its level, so it pumps over
+    a tide. That term belongs to the boundary's law and not to a datum. Both are
+    step 8's. Nothing was tuned.
+  - **Both laws are the default,** as the owner said, the second in the form the
+    measurements support: the whole bed waited for, and the open boundary's edge
+    drawn in. With them the water stands 0.03 m under the tide at the beach at frame
+    600, where it stood 0.55 m under. And **two runs of one pose are one picture to
+    the byte, at all six poses,** which they were not: the runs of the code before
+    it differ at up to 3,625 pixels at the bird, and `main`'s own at the helm's ebb
+    by hundreds along the waterline (finding 98). A solver that starts on a bed
+    that is still landing starts on a different bed each run.
+  - **The law it asks for: wherever water meets the window's edge the edge is an open
+    boundary, and carries the data of what lies beyond it.** The north edge's two
+    crossings are boundaries as the west face is. That replaces the solver's compass,
+    the sea to the east and the river in the first column, which 4.15 already names as
+    an assumption a second place cannot keep. It is step 8's. And an instrument, now:
+    at its start a solver floods its bed from its open boundaries and says what water
+    is joined to none of them. It floods the bed read back from the kernel, after the
+    wait. The solver's grid on the CPU is made from the same composed height and
+    carries the same fade, and the two floods differ by 0.14 to 0.82 km2.
+  - **The baselines of the new default,** the whole bed on today's window: the two
+    takes of every pose are one picture. Against `main` the water differs at five poses
+    of six, 157,000 to 711,000 pixels, and the globe not at all; the level at the beach
+    stands 0.028 m under the tide at frame 600 where `main`'s stands 0.552 m under it.
+    On the storm rail the mean SSIM against `main` is 0.956 where `main` against itself
+    is 0.990. The engine's lines for the piece: 357 added, 31 removed, beside 1,409 of
+    instruments.
+  - **Closed since:** the new binary with both keys at today's values draws today's
+    pictures. At the ebb `main` itself gives three pictures up to 13,666 pixels apart, and
+    runs of the new binary are byte for byte runs of `main`. The frames of 52 to 71 ms on
+    the storm rail are not the wait: two are a residency turn (34 ms, 29 of it releasing
+    and mapping; 40 ms, 36 of it opening files for DirectStorage) and two have no phase
+    that accounts for them.
+- **The height and the exposure move together.** The bank's kernel and the sea read both through
+  one slice and one row.
+- **The colour and the mask move together.** They share lattices, a tree, rows and wants.
+- **Rank 1 cannot be skipped.** The directory names the next rank, and a cell of a face's
+  directory is four times a rank-2 window: without a window of rank 1 the walk cannot reach
+  rank 2.
+- **The apron at a cube's edge.** Blocks of one rank that tile a face do not overlap, so a filter
+  at their seam has no neighbour to read, as a Mercator page has none at its edge today; and at
+  the face's own edge the neighbour lies in another plane. A porch needs a margin that both
+  windows hold. On one face a following window brings it. Across an edge it means tiles past
+  the face's square, which the tree cannot name today. Section 4.18 names them.
+- **The address needs the ground, not the wave.** The point a pixel is addressed by must be the
+  undisplaced one; the interpolated position carries the wave's sideways displacement. Step 1a
+  adds that interpolant for the water's own sample point, and the address reuses it.
+
+**The migration, for the colour and the mask at the Merrimack,** with the old path and the new
+chosen by one scene key until the last commit, so that every commit is compared by picture at
+one pose:
+
+| commit | adds | gate |
+|---|---|---|
+| 1 | a slice's binding to one aligned block of a finer cube lattice: slot to global tile and back, and a tree's changes routed to the slot. Nothing reachable | the round trip at every mip; the default run's hashes unchanged |
+| 2 | the key; slices 6 and beyond as blocks of ranks 2 and 3; appended rows; the colour and the mask read by `PageTexelUv` with today's choice between page and cube; the wants in the rung's grid | stills at four poses by SSIM and by eye, the albedo lens; every other tenant's hashes equal across the two arms; no fetch |
+| 3 | the eye-relative point: the planes about the tangent origin, the undisplaced point | step 3's gate at the pixel stage |
+| 4 | the directory and rank 1, in C++ and in HLSL | the two equal on random ground through a readback |
+| 5 | the old path deleted, and the key | the key-on bytes reproduced; more lines removed than added |
+
+**Commits 1 and 2 are made and gated, 2026-09-29**, not committed, in a scratch tree that holds
+the six pieces of section 6 beneath them.
+
+- **Commit 1.** A block's binding: +1,394 and -31, of which the engine's are +331. Every
+  tenant's hashes are the unmodified binary's at the six poses; the helm and the globe are
+  the same picture bit for bit, and the others differ by no more than two unmodified runs
+  differ from each other, the bird within that spread and not under it.
+- **Commit 2.** One key, `streaming.faceWindows`, a list of points each with a rung: the
+  engine takes the block of that rung that holds the point and says which. +306 and -17.
+  With the key empty the hashes are the old binary's at the six poses. With it set, the
+  height's, the exposure's and the wave's hashes are equal across the two arms, and the
+  picture against the Mercator windows:
+
+  | pose | SSIM | pixels that differ | floor, key off and key on |
+  |---|---|---|---|
+  | helm | 0.9957 | 6,784 | 0 and 0 |
+  | helm at the ebb | 0.9968 | 4,424 | 411 and 255 |
+  | bird | 0.9693 | 259,623 | 0 and 0 |
+  | 7 km | 0.9890 | 28,446 | 0 and 0 |
+
+- **The two lattices hold the same ground.** Read from the trees' own files, each texel of a
+  pyramid tile against the Mercator pixel that holds its centre, the colour's means agree to
+  0.01 of a step of 255 at rung 9 over 466 tiles, to 0.15 at rungs 8 and 7, to 0.3 at rung 6,
+  with the contrast inside a tile equal to a part in a hundred; the mask's agree to 0.02. So
+  the pyramid is painted right, and the pictures' difference is not in what the tiles hold.
+- **The colour is equal, and the finished picture is not.** In the albedo lens, which shows
+  the colour as it is read and nothing else, the two arms have one tone over the land of the
+  bird's frame, the mean colour equal to a part in ten thousand, and one detail, the rms of
+  luminance less its local mean 0.0336 with the key set and 0.0333 without. In the finished
+  picture the same land is lighter with the key set, its mean luminance 0.476 against 0.464
+  and more than 0.02 apart over 28 % of it, and it has 0.80 to 0.85 of the detail. The water
+  is the same in both. So the difference is made after the colour is read, in what the
+  land is mixed with: the mask's reads, or the mesh stage's.
+- **Found, mended and proven, the same day.** Two lenses were made that paint what the pixel
+  stage mixes by. Landness, the edit mask and the close-up material's weight are equal in
+  the two arms. The imagery's share inside the close-up material is not: 0.337 with the key
+  empty and 0.001 with it set. The function that says how fine the colour's texel is at a
+  pixel knew the Mercator window and not the blocks, so with the key set it answered the
+  cube's 611 m, and within 2.7 km of the eye the close-up material painted its own sand in
+  the photo's place. It was a gap of commit 2's and not a property of the lattice. With the
+  blocks in that one function, over the land of the bird's frame:
+
+  | | tone less the Mercator arm's | tone more than 0.02 apart | detail, rms less the mean over 3, 5, 9 pixels | neighbours' mean difference |
+  |---|---|---|---|---|
+  | before | +0.0118 | 27.8 % | 0.74, 0.83, 0.87 | 0.85 |
+  | after | -0.0009 | 1.9 % | 0.88, 1.00, 1.03 | 1.02 |
+
+  At five pixels and more the two pictures have one detail, and by the mean difference of
+  neighbouring pixels they have one at every scale. At the single pixel the rms is 0.88 of
+  the Mercator arm's, and part of that is the Mercator arm's own: a quarter of its
+  vertical neighbours are the same to the step where a fifth of the pyramid's are, the
+  staircase of an address that is two texels wrong at that zoom. How much of it is that
+  is not measured. With the key empty every hash is the old binary's, at the six poses.
+- **Commit 3 is made and gated:** the address is the undisplaced ground point about the eye,
+  the planes taken every frame in doubles, eight rows, the fourth fine block named. Read
+  back from the pixel stage the address is within 0.0016 of a texel at rung 9 and 0.0034
+  at rung 6, and the direction in float32, planted, is 0.35 and 0.045 off and caught. Key
+  off, every hash is the old binary's. Several stages have a direction only and keep its
+  grain: the pixel water's bed, the sea and terrain layers, the lens, and any level but the
+  camera's own.
+- **Two things this section said were wrong, and are withdrawn.** That the land was not
+  lighter with the key set: the tone had been measured in the albedo lens and written of the
+  picture. The agent's eye and mine had seen the picture rightly. And that the address was
+  the suspected cause of the lost detail: commit 3 made the address exact and the picture's
+  detail did not move, 0.803 of the Mercator arm's at the bird where it had been 0.800.
+- **Commit 4 is made and gated, and two things of it are owed.** Rank 1 is in the key, a grid
+  of sixteen by sixteen cells stands beside every slice, and the walk is one function with a
+  body in C++ and a body in HLSL: on 15,000 points the two return the same chain, slice for
+  slice, the address within 0.0033 of a texel, and a directory with one cell planted wrong
+  is caught at every point of that cell. Read back from the GPU the directory is as built in
+  all 3,072 cells, 24 of them naming a block. A key whose block has no parent declared is
+  refused whole and said, and the Mercator windows stand.
+
+  **The default path is today's to the byte.** The blocks' code is compiled only when the key
+  is not empty. With the key empty all 68 stages compile to the program they compiled to
+  before the migration began, the pictures are the old binary's to the pixel where two runs
+  of one binary are, and the globe's pass costs what it cost. The commit's first form had
+  not held that: every reader walked for itself into an array, and the default path paid
+  4.9 ms at the helm for code it did not run.
+
+  | the globe's pass, ms | today | key empty | the ladder of commit 3 | the directory |
+  |---|---|---|---|---|
+  | helm | 12.90 | 12.92 | 13.97 | 13.95 |
+  | bird | 6.13 | 6.13 to 6.31 | 6.27 | 7.26 |
+
+  With the key set the directory draws the ladder's picture, SSIM 0.9999 and better at the
+  four poses, but for sixteen pixels that are the same in both runs. Owed: the key set costs
+  a millisecond more than today's path, because the colour is sampled at every rank that
+  wins and only the last sample is used; the rank is to be decided from the residency's
+  levels and the winner sampled once. And the sixteen pixels are the pixel water's bed,
+  read with its pixel's chain where the bed point has left that block; a ray that leaves
+  the surface walks for itself (4.5). Rank 1 answered nowhere in the four frames.
+- **Commit 4's second form: one sample a read, and the bed walks for itself.** The winner
+  is decided from the residency's levels and sampled once; the pixel water's bed walks the
+  directory from where it lands. With the key empty the 68 stages are still the old
+  binary's. With it set, three poses are within their floors and the helm's two bed pixels
+  are the ladder's again. Two things are owed still. At the 7 km pose some 25 pixels of the
+  horizon changed by up to 52 levels: the winner is sampled inside a branch, and where the
+  pixels of one group of four choose different ranks the sampler's footprint is taken from
+  neighbours that did not run the sample, which the language leaves undefined; the old
+  picture leaned on the same thing. The footprint is to be taken before the branch. And the
+  key set still costs a millisecond at the helm:
+
+  | the globe's pass, ms | today | the ladder | the directory | one sample a read |
+  |---|---|---|---|---|
+  | helm | 12.88 | 13.97 | 13.93 | 13.88 |
+  | bird | 6.15 | 6.29 | 7.27 | 6.95 |
+
+  One sample in the place of three bought back 0.05 ms at the helm, so the millisecond is
+  not the colour's samples. It is inside the globe's mesh draw, and the ladder pays it too:
+  it belongs to reading blocks at all, and where in that is being measured by taking things
+  away. Counted from the code, a land pixel with the key set makes five residency gathers,
+  three directory loads and one colour sample, where today's makes three gathers and three
+  samples. The binding of 4.5, a window's index carried in the mesh's record, is what takes
+  the directory's loads away from a rasterized pixel, and it is not built.
+- **Commit 4's third form, the footprint taken before the branch, and the decision.** Each
+  rank's footprint was differenced from the screen right after the walk and the winner read
+  once by it. With the key empty the 68 stages are still the old binary's. With it set the
+  horizon is worse and not stable: at the 7 km pose 998 pixels differ from the ladder by
+  more than one level, 329 of them in groups of one rank and one surface, and the form's own
+  two runs differ at 112 pixels of the helm's horizon where the ladder's two runs are one
+  picture. A footprint differenced by hand is not the hardware's, of the two kinds the
+  language offers the coarse is the nearer, and neither is steady where the horizon cuts a
+  group of four. **Where the millisecond is,** by taking one thing away at a time, in ms of
+  the globe's pass at the helm and the bird: the pixel stage's block code compiled as
+  today's, 0.97 and 1.33; the walk's loads, 0.28 and 0.41; the gathers cut to one, 0.19 and
+  0.18; the planes without their divide, 0.13 and 0.01. They do not add exactly.
+
+  **Commit 4 is the directory as it was first gated,** every rank read in turn by the
+  hardware's own footprint under one flow of control, with the read of the window's slice
+  that is not there taken out and finding 82 mended. One sample a read bought 0.05 ms at the
+  helm and cost the horizon. What takes the cost out is three commits, each with its gate,
+  after it: **the binding,** which takes the walk out of the pixel's stage; **the phase,**
+  by which the rank is chosen from the rung the pixel wants and then from what is resident,
+  so that one map is gathered where four are; and **a footprint that is computed,** from the
+  ray, the ground's plane and the address's own derivative, which is what a read inside a
+  branch needs and what the margin law's third form needs too (4.6). It is smooth where a
+  difference across the screen is not, and it is the same on every run.
+- **The footprint and the phase, by arithmetic** (designed 2026-09-29, not built). The eye
+  is the origin of the frame the rows were pulled into. A pixel's ray is `d = d0 + i a + j b`,
+  with a and b the image plane's steps a pixel, the same for every pixel of a frame. The
+  surface it meets at P has the unit normal n. Then
+
+      dP/di = t ( a - d (n.a) / (n.d) ),      t = (n.P) / (n.d)
+
+  and the same for j with b: the line in which the ground's plane is cut by the plane
+  through the eye, the ray and its neighbour. The address takes the ground point without
+  its height, so what moves it is the part of dP along the ground, `dp = dP - u (u.dP)`
+  with u the place's up. An address is a ratio of two planes (4.4),
+  `s = (U.p) / (W.p)`, so `ds/dp = (U - s W) / (W.p)` on the planes' vector parts, and
+  `ds/di = (ds/dp) . (dp/di)`. Four such numbers are the footprint, a dozen products in
+  all. It is what `SampleGrad` takes, inside a branch or out of one. At the horizon n.d
+  goes to nothing and the footprint grows without a bound, which is the truth there: the
+  level rises to the slice's coarsest and the rank to the face.
+
+  The phase is the same number read once more. Let r be the footprint in the texels of
+  rank 1's finest level, the longer axis over the sampler's taps or the shorter, whichever
+  is more, and L = log2 r. A rank's texel is an eighth of its parent's, so the level wanted
+  in rank k's slice is L + 3 (k - 1), and the rank to read is the first where that is not
+  negative: k = 1 + ceil(-L / 3), and the face where that is less than one. There the
+  wanted level lies between 0 and 3 and the trilinear pair in levels 0 to 3, inside the
+  slice's eight, with levels 4 to 7 for what is not resident. So **one slice serves any pixel,** one map is gathered and one sample taken.
+  The ranks above it are read only where that map holds nothing, and the porch only at a
+  window's edge. That is 4.3's stride of three seen from the pixel: three levels of its
+  own to a rank, one for the trilinear pair, and four to fall back on.
+- **Commit 4 as it is staged** (2026-09-29, in the scratch tree's index, not committed).
+  The directory as it was first gated, and beside it: the read of the window's slice that
+  is not there is out; a node asks of every block the key takes (finding 82); a read at
+  another point walks from that point, which is the pixel water's bed and the sea sheet's,
+  where the refracted ray lands; and the walk reads no cell past the finest rank. With the
+  key empty 68 of 68 stages are the old binary's. The selftest exits 0, and the two bodies
+  of the walk return the same chain at 15,000 of 15,000 points. Against the ladder of
+  commit 3, the same key, build and trees, the fetch budget zero, in pixels that differ by
+  more than one level:
+
+  | pose | against the ladder, two passes | the form's own two runs | the ladder's own |
+  |---|---|---|---|
+  | helm | 1 and 0 | 0 | 1 |
+  | bird | 2 and 3 | 3 | 2 |
+  | the jetty view | 78 and 79 | 1 | 2 |
+  | helm at the ebb | 1,899 and 1,455 | 1,713 | 573 |
+
+  The helm at the ebb gates nothing: its own two runs differ by more than the forms do
+  (finding 98). **The jetty's 78 pixels are the last rows of far ground under the sky,**
+  rows 387 to 392. The lens names the same rank and the same resident level for both forms
+  at every one of them, so what differs is the sampler's footprint, which the language
+  does not define there (finding 99). At 64 of the 78 this form is nearer `main`'s picture
+  than the ladder is, a mean of 10.8 levels from it where the ladder is 27.5; and along
+  the line two neighbours differ by 2.9 levels in this form, 3.6 in `main` and 15.5 in the
+  ladder. So the ladder is the one that stands apart. The guess that the bed's read made
+  them was wrong: with the bed walking for itself the picture did not move by a pixel.
+
+  | the globe's pass, ms, two runs | today | the bed on its pixel's chain | the bed walks (staged) |
+  |---|---|---|---|
+  | helm | 12.89, 12.93 | 13.93, 13.74 | 14.00, 13.76 |
+  | bird | 6.21, 6.13 | 7.26, 7.19 | 7.00, 6.98 |
+
+  The bed's own walk costs nothing that these runs can see at the helm, and the walk's
+  saved load buys 0.2 ms at the bird. The key set still costs 0.8 to 1.0 ms over today,
+  which the three commits after it are for. Counted, this commit alone: 789 lines added
+  and 169 removed, 123 of them two new shader files and 216 the walk's selftest.
+- **Two gates of this migration were lost to one fault of the harness,** and one the night
+  before in step 2: PowerShell's names ignore case, so a key held in `$K` was overwritten by
+  a loop's `$k`, and thirty runs meant to have the key set ran without it. The rule since: a
+  batch's first run has its own argument line read before the rest are let go.
+- **What the key-on runs painted:** 22,814 files and 1.09 GiB in nine trees, from the source
+  caches, the fetch budget at zero. They refused 35 source tiles a run at the helm and 16 at
+  the bird. A tile painted while a source was refused is not kept: the paint answers that
+  it is not complete and the tree stores nothing (`TileTree.h`, read).
+- **Owed by commit 2:** its rows hold four blocks, and the mouth stands by a corner of its
+  block, so one fine block of the four a viewer there needs is not declared.
+
+### 4.18 The apron: a window past its face's edge
+
+Design, for step 9. It answers the point 4.17 left open.
+
+**What is needed.** Near an edge of the cube a filter's footprint crosses the edge, and the
+porch's blend runs across it. Both want the window on each side to hold texels on BOTH sides of
+the edge, in its own plane. A face's plane does not stop at the face's square: the central
+projection carries on, and `ComposeCubeDir` already takes a coordinate past 1. The shader needs
+nothing new either: `PageTexel` is the address in the plane, and a texel past the edge is one
+more texel of the window, found by the same modulo. What has no name is the TILE, because a
+tile's address is unsigned and the face's tiles start at zero.
+
+**The answer: an apron is a face of its own.** Beside the six faces the pyramid has their
+aprons: for each face, four strips past its edges and four squares past its corners, 48 in all.
+An apron's tiles count from the edge outward, so their addresses are unsigned like every other,
+and an apron has parents and children of its own by the same halving. Its texel centres are the
+face's own coordinates carried past the edge: for the strip past the edge `s = 1` of a face
+with `N` texels a side, texel `x` stands at `s = 1 + (x + 1/2)(2 / N)`. A window that reaches
+past the edge maps the face's tiles where `X < N` and the apron's where it is not; which it is
+is decided where the manager names a tile to the tree, and nowhere else. The shader cannot tell
+an apron's tile from a face's.
+
+**How wide.** A window answers for a cell only where the cell lies a porch inside the window's
+edge (4.6), and the blend's band is a few hundred texels. So an apron is some sixteen tiles
+deep at a window's finest rung, two at its floor, and exists only where a window has stood by
+an edge. Rank 0 has none: its faces are read through the cube's own views, and the hardware
+filters across them.
+
+**The weight is one more ratio of planes.** The plane through the body's centre that holds the
+edge between two faces has the normal `m = (nA - nB) / sqrt 2`, and the two faces' bisector is
+`nA + nB`. The weight is a smooth step of `(P . m) / (P . (nA + nB))`, which is zero on the
+edge, has the same form seen from either face, and counts the distance from the edge evenly in
+the texels of both. The engine blends across cube edges this way already for the cascade sea
+(`WaveChart`: a partition of unity over a band, with its continuity gated), so this is that
+law given to textures, not a new one.
+
+**What it costs.** Ground within an apron's depth of an edge is painted twice where it was
+painted once, in its own face and in the apron of the face across the edge; by a corner, where
+three faces meet, up to five times. Sixteen tiles are 2.4 km at rank 3's finest rung and 19 km
+at rank 2's. The tree's keys must hold 54 faces where they hold 8: the archive's key gives the
+face three bits today. Step 4b changes the keys anyway, and gives the face six.
+
+**What was considered and not taken.**
+
+- *A signed address.* It breaks the halving that finds a parent, which is a shift, at every
+  site that computes one.
+- *No apron: near an edge, fall to rank 0,* which the hardware filters across faces. Every
+  place on an edge of the cube would then be drawn at 611 m, and an edge runs 61 km north of
+  the Merrimack.
+- *Charts of their own over the edges and the corners,* twenty more planes, blended inside the
+  faces. No apron, and the address would not change, since any plane through the centre gives
+  a ratio of planes. But it is twenty more lattices, each with a pyramid of its own, where the
+  design has one.
+
+**Its gate** is step 9's, as written: a rail across 43.364 N, and a lens that paints the weight.
+And one the apron adds: a texel of an apron and the texel of the face across the edge that
+covers the same ground are painted from the same sources, so they agree within the containment
+of step 4d.
+
+### 4.19 The manager that replaces today's
+
+Proposed, 2026-09-29, from what steps 1 and 2 and the solver-bed experiment measured. Nothing of
+it is built. It is written as laws because every fault seen in today's manager is an order of
+events that a ledger kept by increments did not foresee, and a law has no order of events.
+
+**Two sets, and one order.** What is WANTED is said by the readers every turn: a view, a gate's
+carried eye, a kernel's domain, a prediction. What is HELD is the tiles that have a slot and
+whose bytes have landed. The manager has one order over tiles and nothing else to decide with:
+
+1. a tile of a standing window (a pin) before any other;
+2. then by how lately it was wanted: this turn, within the glance (60 turns today), longer ago;
+3. then by the size of its texel on its reader's screen, the larger the sooner. (As first
+   written this was two keys, the coarser ground before the finer and then the reader's
+   weight; built, the first outranked the second and lost the nearest ground. See below.)
+
+**The held set is the first P of that order,** P being the pool. The loader reads the first
+tiles of the order that are not held. The evictor releases the last tiles held that are not
+among the first P. They are the two ends of one comparison, and the settled state is a function
+of the wants alone.
+
+What follows from it, each against what was seen:
+
+| the law | what it replaces | the finding it answers |
+|---|---|---|
+| **The map is a function of what is held** (4.7): the finest level held with every coarser one, and then the margin (4.6), written for the cells under the tiles that changed | the byte kept by increments | 3, 63, 64: no order of maps and unmaps can leave it wrong |
+| **A want is closed upward,** as it is today, and with the order that makes the held set closed upward: a parent was wanted at least as lately as its child and is the coarser, so it comes before its child into the pool and leaves after it | the ring gate, the gather's test of the parent, the evictor's test of the children | 63, 64: each tested one level, at one moment |
+| **A tile that lands out of turn waits in the map, not in a queue.** A child whose bytes arrive before its parent's is held, and the map names the coarser level until the parent lands | the gate that holds a request behind its parent | 24 |
+| **Nothing is read from disk that no slot will take.** The loader takes only tiles among the first P; a tile that has left the first P by the time it lands is let go in that turn | the batch, its lost tail, the tiles Loaded and in no queue | 2: 7,917 tiles on the storm rail; 67 |
+| **When the want is larger than the pool, what is lost is the want's own tail:** the finest rung's tiles farthest from what their reader looks at | the landing order | priors 30: at the bird pose 9,176 tiles are wanted of 8,192, and which 984 lose differs run to run |
+| **A tile that is repainted keeps its slot.** The new bytes are read and copied over the old in place; the tile is held throughout and the map does not change | the drop, the raised bytes, the second map in a new slot | 3: and the soft flash over every tile that a fold rewrites |
+| **Release is two steps.** The map stops naming a tile in the turn that decides it; its slot is unmapped and free once no frame in flight can read it | the NULL mapping made in the turn of the eviction | 34 |
+| **The turn is at the head of the frame,** before any reader records a read | a turn inside the globe's draw, after the sea and the banks have recorded theirs | 34; 4.17's table |
+| **A map is born saying that nothing is here,** on the GPU as on the CPU | a map born zeroed, which says that mip 0 is here | 66: the solver's hour on a bed of 0.0 m |
+| **A pin is whole before its reader starts,** and the reader asks: `Whole(pin)` | a pin made inside the frame loop, after the solver has spun up | 48, 67 |
+
+**What others have done.** Coarse before fine on the way in and fine before coarse on the
+way out is the common practice: Intel's sample queues a region's tiles from the coarsest
+level up and releases them from the finest down, by reference counts, never evicts the
+packed mips, and delays an eviction by the frames in flight, rescuing a tile that is wanted
+again before the delay ends. Virtual texturing at large keeps a cache by least recent use
+with the coarsest pages pinned. What this section adds to the practice is small and I do
+not claim it is new: that the two ends are one comparison, so that a want larger than the
+pool loses a tail that the want itself names, and that the map is computed from what is
+held. I did not find either stated; two searches, not a survey.
+
+**What it costs.** One selection a turn, of the first P among the tiles wanted within the
+glance, some twenty thousand: a pass over buckets of (class, lateness, rung) and a partial
+order by weight inside the one bucket that straddles P. A weight for every wanted tile, which
+the want walk has in hand: it knows the reader's centre and the tile. A reserve of slots equal
+to a turn's maps times the frames in flight, 384 of 8,192, because a released slot is not free
+at once. And a repaint in place needs the copy of a tile's bytes onto a mapped tile to be
+ordered with the draws, which the landing of a DirectStorage tile already is.
+
+**What it is not.** It is not a second policy beside the first: the headroom pass of pull
+request 33, which releases what nobody has wanted for a while, is the order's second key and
+is not kept as a pass. It has no notion of a window that moves: that is the binding's (4.5),
+which turns a global tile into a slot; this manager's unit is the global tile, as 4.7 says.
+And it does not choose the pool's size, which stays a budget that is stated.
+
+**Its gate** is step 1's audit, which computes the map's function from the tiles: clean over
+the flight that paints and over the storm rail, with no tile Loaded and in no queue. With it:
+the pages ledger's count of tiles read and never mapped, which is zero; the settled stills'
+hashes equal from run to run at the bird pose, where today they are not; the solver's pinned
+domain whole in six runs of six; and the lines of `src/hal/Residency.*`, which are 2,670
+today, fewer.
+
+**Built as far as the order's turn, 2026-09-29** (a scratch tree, not committed, beside
+today's manager behind the key `streaming.manager`, whose default is today's). Three parts
+of five are built: the key and the split; the map as a function of what is held, born saying
+nothing; the order's turn, its loader, its gather and its release in two steps.
+
+- **With the key at its default nothing moved:** every settle and prediction hash equal at
+  the six poses, pixels within the floors two runs of one binary make.
+- **The map is right at every audited turn.** On the flight that paints and on the storm
+  rail, 1,350 turns each: no byte finer than the tiles, none coarser, none split, no orphan,
+  and nothing gathered and not filled. The flight painted 100 tiles and invalidated 77 of
+  them over a mapped descendant, which is finding 3's case, and left no coarser cell. On the
+  same rail today's manager showed finding 63 on 20 turns and finding 2's 7,917 orphans.
+- **It livelocked, and the cause is a word of law 2.** The predicted walk speaks every third
+  turn. "Wanted this turn" counted the manager's turns, so the want grew and shrank by some
+  1,600 tiles every third turn, the cut fell inside it, and the same 48 tiles were loaded,
+  let go, mapped and released in a cycle, with 3,900 tiles of the first P never begun. **A
+  want stands until its reader speaks again:** lateness is counted in the reader's own
+  statements. Being built.
+- **With no weight the lost tail is chosen by address,** which is no law. At the helm the
+  want is 14,935 tiles against a cut of 7,808, and of the 7,157 lost the wave field's were
+  5,657. The weight is law 4 and is not built yet: inside the rung that straddles the cut
+  the tile nearest what its reader looks at comes first, whatever its tenant.
+- **The hold lifts the cap, as today's does.** A still is an instrument that makes the held
+  set the want set. With the cap kept in the hold the stills differed from today's in half
+  their pixels, all of it the water, which says what was absent and not whether the picture
+  is right. What the cap loses is judged on the rail and by eye.
+- **The turn is too slow as built:** 4.84 ms in the mean on the storm rail where today's is
+  1.24, because the order is made again on turns when no reader spoke and nothing landed.
+  It is a gate of the next part.
+- **The lines so far:** 458 in the new file and 191 added to the engine's others, 28 removed.
+  They are beside today's manager; what the step removes is removed when the key's default
+  changes.
+
+**The fourth part, the same day: the stills are one picture, and two gates were written too
+simply.** Lateness in the reader's statements, the weight, the hold that lifts the cap, the
+retire loop's unmaps in one call.
+
+- **In the hold the two managers draw one picture.** Six poses, two runs an arm, all four
+  runs pixel for pixel, every mapped set's hash equal but one run's wave field by six tiles.
+  Two things that are not the map had to be taken out of both arms for it: the solver's
+  spin-up, which under the new manager runs on the real bed and not on 0.0 m (law 9 at
+  work), and the churn, which builds on the tiles that are there.
+- **At a standing camera the held set settles and then changes by no tile,** and nothing is
+  read twice. On the storm rail 3,215 tiles were read again within the glance, where the
+  third part read 18,660 again. They are the prediction's: a tile it asked for, that its
+  next statement no longer holds and the view does not hold yet, is wanted by nobody for
+  some turns, and at the cap what nobody wants now is past the cut. **A prediction is a
+  statement about an interval:** what it asks for stands until the instant it predicted has
+  passed. And a quarter of the tiles released were wanted back while their slot was still
+  retiring, so a tile is taken back from the retire list, as Intel's sample does.
+- **The weight was upside down for the water.** At the cap, in the helm phase, the nearest
+  band of the sea lost its finest wave tiles and the far water kept them, with a straight
+  edge across the picture. The walk's leaves were weighed by their distance from the eye
+  and the wave's wants by a focus point. A want made on a view's behalf takes its weight
+  from that view's eye, whatever the tenant.
+- **What the cap loses is the wave field's finest level,** with or without the weight: at
+  the helm 14,947 tiles are wanted and 7,808 are held, and of the 7,139 lost 5,280 are the
+  wave field's at 2 m. The weight chooses which, not how many. The want is 934 MB and the
+  pool 512 MB: the pool's size is the owner's.
+- **The turn costs 3.1 to 3.4 ms where today's costs 1.2,** and the sort is not the cost:
+  1.55 ms of a pass is the walk over 12,315 tiles, three reads apiece in scattered memory.
+  The turn's work is to go with what changed and with the one rung that straddles the cut.
+- **The order of a frame, measured:** the solver reads its bed before any want of the frame
+  is said, and the terrain and the water bank read before the turn. A turn at the head of
+  the frame, on the wants of the frame before, precedes every read (law 8).
+- **The lines:** `Residency.*` is 3,595 where it was 2,670, both managers standing.
+
+**The fifth part, and the order's law changed.** The prediction as an interval, the rescue,
+the weight from the eye, the turn's work made to go with what changed, the turn at the head
+of the frame.
+
+- **The stills, the audits and the standing camera hold as before:** in the hold the two
+  managers draw one picture; no byte finer or coarser than the tiles at 1,350 turns of the
+  rail and of a flight that paints; the held set settles and changes by no tile for 437
+  turns.
+- **Tiles read again within the glance, on the storm rail:** 18,660, then 3,215, now 1,729,
+  the prediction's wants standing for its lead of 24 frames. 3,777 tiles a run are taken
+  back from the retire list with no read. Read from the disk over the rail: 16,870, where
+  today's manager reads 21,940 and strands 7,917 of them.
+- **The turn's pass costs a thirteenth of what it cost,** 0.16 ms where it was 1.83. The
+  whole turn is 1.25 to 1.33 ms in the mean where today's was 1.0 to 1.06 that session, its
+  95th in a hundred 4.8 to 5.0 where today's is 5.1. What is left of the difference is the
+  maps it makes at the cap, which today's manager does not make.
+- **The turn is first in the frame's list,** after every want of the frame and before every
+  read. No frame of latency is needed; I had expected one.
+- **The band of smooth water at the cap was the law's, and the law is changed.** The
+  order's third key, the coarser ground before the finer, outranked the weight, so at the
+  cap everything finer than 16 m a texel was lost everywhere, the nearest water with it.
+  **The third and fourth keys become one: the size of a tile's texel on its reader's
+  screen, the larger the sooner.** The want asks for a tile where its texel is about a
+  pixel, so every wanted leaf has about the same size on the screen but where the data's
+  finest level is coarser than a pixel, which is the ground nearest the eye: those are the
+  largest, and they are what was lost. A parent's texel is twice its child's at no greater
+  distance, so the held set stays closed upward, and "the coarser ground first" is what the
+  measure says of a parent and its child and of nothing else.
+- **Built, that key gives the near water back and does not hold still.** At the cap the
+  helm's near water carries its waves to the frame's edge, the part 5 picture has no black
+  pixel where today's has 5,512, the six stills in the hold are today's to the pixel, and
+  the audits are clean at all 1,350 turns. But over the storm rail it releases 47,484 tiles
+  where the key before it released 12,104, reloads 7,856 within the glance where that one
+  reloaded 1,729, and its turn costs 2.55 ms in the mean where the bound is 1.35. A camera
+  that stands still has not settled after 600 frames. Not kept as it is.
+- **Why, read in the code and not yet measured.** The want asks for a tile where its texel
+  is about a pixel, so the wanted leaves all measure between one pixel and two, and the cut
+  at the cap falls among them: 11,214 of 19,022 are lost, and the smallest kept and the
+  largest lost meet at 0.0022. Whatever moves a measure by a hundredth moves a hundred tiles
+  across the cut. And the measure as built does move when nothing has: the distance in it is
+  not the tile's but the distance of the mesh's leaf that asked for the tile
+  (`GlobeLayer.cpp:1125`), which changes when the mesh splits or joins a leaf, and with every
+  wave that moves a leaf's bound.
+- **The law, completed: a tile that is held counts for the square root of two of its
+  measure.** A tile gives up its slot only to one whose texel is larger on the screen by
+  more than half a level, which is what the trilinear read hides. The order is still one
+  comparison and the held set its first P; the settled state is a function of the wants to
+  within that half level, and of nothing else where the pool holds what is wanted. It has
+  one number, and the number's limit, one, is the order as it was. To be measured before it
+  is kept: how far a measure moves between two turns of the rail, tile by tile, so that the
+  margin is seen to cover what moves it; and the rail with the margin at one, at the square
+  root of two and at two. The exact form of the measure, the distance to the tile's own
+  nearest ground, is taken if the margin does not settle it.
+- **Measured, the margin was not the cause, and my reading was wrong twice** (2026-09-30).
+  The instrument came first, as asked: the measure of every tile between two passes
+  running. On the standing camera 70,865 of 6.6 million pairs moved by more than a
+  hundredth and the cut ran a three-turn cycle, ten tiles in and ten out, six and ten, none;
+  with the prediction made to speak every frame nothing moved at all and the camera settled
+  at frame 230 with no margin. **The cause is the prediction's cadence.** A tile's weight is
+  made again each frame from the readers that spoke that frame; the prediction speaks every
+  third frame from a walk without a frustum, whose leaf for a tile is nearer, and on the
+  other two the view's statement drops its distance. It was neither the mesh's leaves nor
+  the waves, nor the leaf's distance in place of the tile's: the exact measure, built and
+  measured, changed nothing that mattered. With the margin at the square root of two the
+  standing camera settles (frame 426) and the stills, the audits and part 5 hold, but the
+  rail still reloads 5,900 within the glance against 1,729, because the margin protects
+  only tiles that are held, and a tile still loading has no margin. And the turn costs 2.5
+  to 2.8 ms: the order maps every tile it reads, 21,930 against today's 14,024, and today's
+  leaves 7,900 reads unmapped (finding 2), so the bound of 1.35 ms was today's fault
+  written as a target. The closure under the margin was mended in the law's terms: every
+  tile above a held tile counts as held (0.035 ms a pass).
+- **The law, once more, and with fewer numbers, not more.** A reader's WEIGHT stands until
+  it speaks again, as its want already does (law 1): a tile's measure is taken over the
+  standing statements of every reader that named it, and the prediction's stands for its
+  lead. Then nothing in the measure moves on a standing camera, by construction, and the
+  margin is tried at one first: if it settles and holds the bounds, the margin goes. The
+  bound for the turn is restated as what the order does that today's does not: the mean
+  cost a tile MAPPED no more than today's, and the 95th in a hundred no more than today's
+  in the same batch. The exact measure is not kept: it earned nothing.
+- **Built and measured, the standing weight is the law that settles it, and the turn's cost
+  is stated, not met** (2026-09-30, H5). On the standing camera not one measure of 2.94
+  million pairs moved between two passes, by construction; the camera settles at frame 245
+  with the margin at the square root of two and at 404 with none, so the margin stays, at
+  the root of two. Over the storm rail the reloads within the glance are 249 against 5,902
+  before the law and the bound of 1,729; the rescues 55 against thousands; the six stills
+  in the hold are today's to the pixel with the mapped sets' hashes equal; the audits are
+  clean at all 1,350 turns; the part 5 picture has no black pixel. Two bounds are not met,
+  and both are one number: the turn costs 1.93 ms in the mean where today's costs 1.05, its
+  95th in a hundred 5.71 where today's is 4.68, and a tile mapped 0.108 ms where today's is
+  0.090. Take the pass out and the last is today's: the pass costs 0.36 ms on 1,080 of the
+  1,200 turns, 0.33 ms a turn, and (1.93 − 0.33) ms over 17.8 tiles mapped a turn is 0.090.
+  So the order maps what it reads (21,413 tiles against today's 14,090, today's leaving
+  7,900 reads unmapped, finding 2) at today's price a tile, and pays a third of a
+  millisecond a turn for the map being a function of the held set. That is the cost of the
+  law, not a fault in it, and it is stated here and in the pull request rather than tuned
+  away: a bound that today's manager meets by not doing the work is not a bound.
+- **Today's manager is removed** (2026-09-30, G). Its queues, ring gate, headroom pass,
+  evictor and cap test, the byte kept by increments, its settle ledger and the key
+  `streaming.manager` are gone; `streaming.ringLoads`, inert once the ring gate went, is gone
+  with its line in eleven scenes rather than kept as a key that does nothing. The frame-head
+  hook takes the hal's `CommandContext`, so no Direct3D name stands outside `src/hal`. The
+  gate without it: the selftest, the six stills in the hold pixel for pixel H5's with the
+  mapped sets' hashes equal, part 5 without a black pixel, both audits clean at 1,350 turns,
+  the closure by events equal to the whole walk at every audited pass, and the storm rail
+  twice making H5's decisions to the tile (249 and 251 reloads, 21,413 maps) at 2.19 and
+  2.34 ms in the mean, 7% apart from each other and in another batch than H5's 1.93; the
+  cost stands as stated above. The standing camera settled at frame 408 in this run where
+  H5's settled at 245 with the same order: between frames 101 and 300 its loads stalled with
+  a tile pending every turn and nothing released, which is the loads' and not the order's,
+  and was not measured further. **The lines:** G alone takes 665 engine lines out and puts
+  97 in; the manager as a whole against `main` is engine +1,695 / −629 and tests +277, and
+  `Residency.*` is 3,827 lines (the header 885, the turn 1,642, the order 1,300 of which 176
+  are its selftest) against `main`'s 2,523. The manager is larger than what it replaces by
+  half, and that is said here rather than hidden in the count: what it holds that today's
+  did not is the order itself, the statements that stand, the rescue, the closure, the map
+  written from the held set, and the instruments that found the churn's cause. Two seams
+  are left for step 4b: a tile tree says it answered without a source through a thread-local
+  flag (`g_tileIncomplete`, `TileAddress.h`) that the manager reads after its provider
+  call, where the answer itself should carry it; and a record keeps four readers' standing
+  statements, the oldest replaced by a fifth.
+
+**One law more, from Haulover: a tile is held whole or it is not held** (finding 83). 4.11
+says that absence is the coarser ancestor and never zero. Today a composite whose source
+was refused is delivered without that source and mapped, so the map names a tile that
+holds nothing of the ground, the land is black, and the coarser imagery, which is real,
+is not read. A tile that a source refused is not delivered. It is unreachable for the
+run, as a tile that failed four tries is, so the hold can still be exact without it, no
+loader asks for it again and again, and the level above it answers. It is a change in
+the tile tree's composite and in what the loader does with its answer; not built.
+
+### 4.20 Depth without a bound, and rasters by file
+
+The owner, 2026-09-29: the CPU tosses everything into one cached tile tree on the disk, and
+the GPU reads it without caring whether the data is large or small or where it came from; and
+the precision is to be, in theory, without a bound. Both are this proposal's own premises
+taken to their end. Neither is true of the code today.
+
+**What bounds the depth today.** Every one is a width chosen for a number, and none is a
+property of the structure.
+
+| the bound | where | what it allows |
+|---|---|---|
+| the ranks the shader walks, five | `SurfaceFrame::kMaxRanks`; the rungs 3, 6, 9, 12, 15 in `DeclareBlocks` | 1.9 cm a texel |
+| a face's dimension, 32 bits | `Lattice::Cube(16384 << 17)`, `mip = 17 - rung` | 4.7 mm |
+| a tile's key in the tree: 5 bits of level, 28 of x and of y | `TileTree.h:763`, `TileArchive.h:95` | 0.3 mm |
+| a space's conditioning, 9.49e7 units of its own length | `Space.h:572` | eight decades a space |
+| a double, 53 bits, on a position in the planet's frame | every CPU address | about a nanometre |
+
+Drawn so far: 1.2 m, at rank 3. Ranks 4 and 5 are tested as addresses and not as pictures.
+
+**What takes each bound away.** Five laws, each the relative form of something the engine
+has in an absolute form.
+
+1. **A tile's name is a path.** A tile is named by its parent and by which of the four
+   children it is, so a name grows by two bits a level and no level is the last. On the
+   disk the path is cut into folders every few levels. Step 4b changes every name once, to
+   carry its content's token; the same change makes the name a path.
+2. **A window is placed in its parent,** by which of the 64 parts of the parent's block it
+   is, three bits an axis a rank. The absolute anchor, a multiple of 16,384 texels of the
+   rung, is that path summed; it is kept where 64 bits hold it and is not the definition.
+3. **The walk begins where the eye is.** The shader's chain holds the few ranks about the
+   rung a pixel wants, and the coarsest of them is its root; what is coarser is the floor.
+   The binding gives a mesh its chain. So the shader's cost does not grow with the depth.
+4. **A window's rows are taken in the window's own space.** The planes of its address are
+   computed on the CPU about the eye, in a space whose unit is the window's size, hung
+   under the space of the rank above. A space names eight decades and spaces nest, which
+   the Droste tower already does by `Space::ToRoot` and the nearest common ancestor. The
+   GPU then sees numbers of the size of one window at any depth: 16,384 texels, and ten
+   bits of a float32 left under the texel.
+5. **A leaf may be a root.** What is finer than a planet's frame can place, an entity's own
+   texture, a thing under a microscope, hangs a space of its own under a leaf, in its own
+   unit, as the Droste link hangs the root. Precision begins again in every space.
+
+With 1 to 4 the depth in one planet's tree is bounded by nothing but the double that places
+a source, a nanometre; with 5 by nothing.
+
+**What others have done.** A quadtree key that is a path is common practice: Bing's
+quadkey is a string whose length is its level, to level 23. Google's S2 packs a face and
+thirty levels of a Hilbert curve into 64 bits, a leaf under a square centimetre, and stops
+there because the width does. Rendering relative to the eye is the virtual globes' cure
+for jitter (Cozzi and Ring). What this section adds is only that the three are one habit,
+the relative form, applied to the name, the window and the position alike. I claim nothing
+of it as new.
+
+**A raster is a source by being a file.** The colour's stack is a list written in C++
+(`Assembly.cpp:836-892`): Google, one aerial set and one overlay at paths written in the
+code, the seafloor, the bed, the mask. The engine reads no `.tif`; a harvester converts
+one first; and the plane orthos' projection is UTM zone 19 in the code. So:
+
+- the scene lists sources, a file each or a folder and a pattern;
+- a source's place, projection and grain are read from the file, and a projection the
+  engine does not know is refused by name, never guessed;
+- the order in the stack is the grain's, the coarser under the finer, unless the scene
+  says otherwise;
+- the depth of the tree at a place is the grain of the finest source that covers it, and
+  no constant names a finest grain;
+- the blocks the GPU holds are taken from the sources' footprints until windows follow
+  the eye;
+- and then the list that is written in C++ is the default scene's list, and the code that
+  named each dataset goes.
+
+**The first slice is built** (2026-09-29, a scratch tree, not committed): the first four and
+the fifth. A scene names a file, or a folder and a pattern, under `sources`. GeoTIFF, PNG and
+JPEG are decoded by the operating system's decoder behind the loader's seam, and the place,
+the projection and the grain are read from the file's own tags, or from a world file and a
+`.prj` beside it. The projections are WGS84 geographic, Web Mercator and UTM in any zone, read
+off the code; any other code is refused by name. `streaming.faceWindows: auto` takes the
+blocks from the sources' footprints and grains.
+
+- **Measured.** The selftest, 22 checks and no failure: nine synthetic rasters in three
+  projections at 0.5 m and 0.05 m each answer the cell that lies at 36 points, within a
+  quarter of a texel; three plants are caught (zone 19 taken for a zone 17 file, rows read
+  from the bottom, a centre taken for a corner); a file replaced by one of its size and one
+  bit apart is another identity; a state plane's code is refused and the run goes on. The
+  place, checked by a second hand: the rasters were made in Python from Snyder's series and
+  the engine, by Newton on its own forward form, logs their centre at 25.854700 N,
+  80.190000 W, which is what Python was given.
+- **Drawn.** Two rasters at Haulover over the cached imagery, 2 km at 0.5 m and 200 m at
+  5 cm, from 1,500 m and from 300 m, no fetch. At 300 m the lens reads rank 5 at 92.6 % of
+  the pixels and rank 4 at the rest. **Ranks 4 and 5 had not been drawn before.** Eight
+  rows were used and one block of rank 4 did not fit, which was said in the log.
+- **Counted.** The engine, 995 lines added and 16 removed; tests, 504. It is new capability
+  and it is larger.
+- **What it cannot do, from reading its code.** It reads a file whole and decodes it whole,
+  and refuses one past 4 GB. It keeps a chain of levels of its own in memory. One file is
+  one source, and its weight falls to a half along its own edge, so two files of one flight
+  laid side by side would show the layer beneath along their seam, up to a half of it. A
+  fourth band is taken for alpha whether or not the file calls it so, which a four-band
+  ortho's near infrared is not. NAD83's geographic codes are refused where its UTM codes are
+  taken. A height in a file is refused by name: no stack takes one yet.
+- **The decoder does not show a GeoTIFF's own overviews** (measured: a file of two
+  directories decodes as one frame). The law below does not need them.
+
+**A source paints its own level, and the tree makes the others.** The owner, 2026-09-29:
+when a raster of any size is inserted, the tree is to make the lower levels, for itself and
+for the rendering. Most of what that needs is in the tree, and one node uses it.
+
+What the code does today, read that day:
+
+- **Every leaf is asked at every level.** A leaf's tile is painted by sampling its source
+  at the tile's own grain (`TileTree.h:926-972`, `Compositor.cpp:301-317`), so every
+  source keeps a chain of levels of its own and picks among them: the plane orthos'
+  (`Sources.cpp:265`), and the raster by file, which decodes its file whole into memory to
+  make one. A raster of 10,000 by 10,000 costs some 530 MB there, and a file past 4 GB is
+  refused.
+- **A parent is the source's resample until a child is painted, and then the child is
+  folded into it** (`TileTree.h:1009-1017`, M9bb). So what a coarse tile holds depends on
+  what has been flown under it.
+- **One node is otherwise.** The wave field paints whole tiles (`TileNative`,
+  `DomainSource.h:98-107`). Its parents are the fold of their children and are never
+  painted (`TileTree.h:1215-1251`), and `Prefill` builds its chain from a finest level to
+  the root (`TileTree.h:1347-1421`, called at `FrameLoop.cpp:2676`). A parent of that kind
+  is folded again from its children each time it is asked for. `FoldFromChildren` can keep
+  what it folds (`materialize`, `TileTree.h:1423-1454`), and no caller asks it to.
+
+The law, in three clauses:
+
+1. **A source paints its own level and no other:** the first level of the lattice whose
+   texel is no coarser than the source's grain, so nothing of the source is lost. It reads
+   its file by the window a tile covers.
+2. **Every coarser level of that source is the fold of the level below,** made when all
+   four children stand, and kept.
+3. **A finer level is the part of the level above, magnified.** It is asked for only under
+   the edge of a finer source, where a composite needs what lies beneath, and it is not
+   kept.
+
+What follows from it:
+
+- **Any size.** The work is by the window and in proportion to the ground asked for. No
+  file is held in memory, and none is decoded whole.
+- **A source is smaller.** Its chain of levels, its choice among them and its filter go.
+  What is left is a place, a grain and a window read.
+- **A tile is a function of the file.** Not of what was flown, nor of the order tiles
+  landed in.
+- **After the first pass the tree is the raster.** Neither the file nor a copy of it is
+  needed to draw. The CPU reads the finest level, and the levels above are the GPU's.
+- **Inserting is a scene entry and a pass.** The pass paints the leaves under the raster's
+  footprint and folds upward. It is a tool a scene names, and the engine runs it behind
+  the frame at the first sight of a file whose tree is not whole. A raster is drawn when
+  its tiles are whole (4.19's law), so it arrives by levels and never half painted.
+
+What it costs, by arithmetic and not yet measured: a level's texel lies between the
+source's grain and half of it on each axis, so a raster's own level holds between one and
+four times its texels, four bytes each; the levels above add a third (section 6: 3,400
+ancestors to 10,000 leaves). One plane ortho of 10,000 by 10,000 at 15 cm falls on rung
+12, whose texel at the Merrimack is some 13 cm by 10 cm and askew (section 6's 523 m by
+395 m at 103 degrees, at rung 0): 1.9 texels of the level to one of the file, about 11,400
+tiles and 0.75 GB, and 1.0 GB with its ancestors, where the file is 0.3 GB of RGB. A tile
+kept compressed is a later decision and would take most of that back.
+
+What it does not change. A source that fetches and has levels of its own, as Google's
+imagery has a picture at every zoom, keeps them: a coarse tile of the planet cannot wait
+for every fine tile beneath it to be fetched. For that source M9bb's fold stays, and with
+it the one tile in the engine whose bytes depend on what was flown. It is named here so
+that it is not mistaken for the law.
+
+Two readers for the pixels, behind the one seam that exists (`FieldLoader::LoadTile`, a
+window). PNG, JPEG and TIFF through the operating system's decoder, asked for a region;
+whether it decodes a region of a large TIFF without decoding the whole is to be measured
+before it is relied on. And rows as they lie, with a manifest that says where: any size,
+by a seek. That second form is what the harvester wrote for the plane orthos, so their
+files are read as they stand and the code that named them goes. What neither reads, a
+TIFF past 4 GB or one compressed in a way the decoder refuses, the harvester turns into
+the second form.
+
+None of it is new. `gdal2tiles` paints base tiles and then makes each overview tile from
+the tiles beneath it, by the average unless told otherwise; `gdaladdo` and the overviews
+of a cloud-optimized GeoTIFF are the same pyramid kept in the file. What this section adds
+is only that the engine's tree already had the fold and used it for one node.
+
+**The second slice is built** (2026-09-29, the same scratch tree, not committed), and the
+law holds as written:
+
+- **The tree's rule** is one number from the node, its own level on a lattice, measured
+  between neighbouring texel points at the place; above it a tile is the fold of its four
+  children, kept; a child the footprint does not touch is void by arithmetic; a node with an
+  own level never folds upward. Measured on a 0.5 m file at Haulover: its own level's texel
+  is 0.333 by 0.303 m; the pass makes 36 tiles on 8 levels, the 17 above the own level each
+  the fold of their children byte for byte; asked coarse-first the tree leaves the same 36
+  files; one fold of the coarsest tile visits 36 tiles of the 16,384 under it. Three plants
+  caught. It cost the tree 32 lines.
+- **By the window.** A 256-texel window at the far corner of a 20,000 by 20,000 TIFF decodes
+  in 3 ms (tiled, deflate) and 11 ms (stripped) with 9 MB of working set; a PNG decodes
+  whole, once, into rows under `cache\sources\` and is read by a seek after. A file's
+  identity is its content's hash, kept in an index by size and time so a boot hashes only
+  what changed. A folder, or a manifest of the harvester's rows, is ONE source, its taps
+  clamped at each file's edge as the old source did, so two files cut mid-cell give the one
+  file's tree.
+- **The plane orthos come through it, and their code is gone.** On the pyramid the orthos'
+  own-level tiles are byte for byte what `AerialOrthoSource` painted, 23,255 of 23,255. On
+  the Mercator lattices, whose finest texel is coarser than the file, the level is now an
+  area mean where the old source picked a level: the colour differs by 1.4 of 255 in the
+  mean at z17, 3.1 at z14, and by 24 in the 23 texels of the cube's, which the old source
+  point-sampled. The pass, at boot, once: the two orthos onto the default scene's lattices
+  in 31 s with 103 MB at peak, and onto the pyramid 32,893 tiles on 14 levels in 45 s with
+  94 MB, 1.96 GB of tiles. A second boot takes 0.3 s.
+- **Pictures.** Slice 1's binary against this one, twice each: the helm within a pixel, the
+  bird 1,483 pixels of 0.1 % (SSIM 0.9997), the globe 37 and the droste 16 where no ortho
+  is in view, which is the composites recomposed under new identities and not measured
+  further. Slice 1's two test rasters differ along every grid line, the fold in place of
+  the file's own chain of levels, by up to 60 of 255. The owner's eye judges these.
+- **Counted, honestly:** the engine grew by 480 lines (934 added, 454 removed, 173 of the
+  added being comments), the tests by 345. The class that went was 175 lines; what came is
+  the window, the raw cache, the index, the manifest, the mosaic and the pass. The
+  reductions this law makes possible are in the next slices: the rest of the fixed list as
+  scene entries, and heights by file.
+- **Found on the way:** `Compositor::Touches` takes a box of every longitude at the
+  dateline (finding 103); the pass descends by a cap instead; the compositor's own rule is
+  not changed. A fourth band without an ExtraSamples tag is data now, and NAD83's
+  geographic codes are read as WGS84 and said once per file.
+- **Open, for the third slice:** an entry that must lie ABOVE the seafloor and the bed (the
+  old overlay did); the identity index trusts size and time; the cube's own level reads a
+  file whole once, 22 s for an ortho, because its texel is 4,073 of the file's.
+
+**The third slice is built: a height is a source by being a file** (2026-09-29, the same
+scratch tree, not committed). The same class reads a colour or a height; a height's window
+holds a float a texel, NaN where the file says nothing; 16-bit values are read raw and
+signed where the file's sample format says so (the decoder's own converter bent them: -5
+came out 0.99986). The vertical datum is read from the file's key (NAVD88, EGM96, EGM2008,
+the ellipsoid and three more) and the unit from its own; the engine's frame is what the
+survey's source declares, metres on NAVD88; a file on another datum is taken only with the
+entry's `offset` at the place, and refused by name without one. Heights by file join the
+height stack by `over`, under the owner's hand edits.
+
+- **Measured, a 40 m hill on a 2 m grid in the sea east of the mouth:** the CPU's height at
+  36 points is the hill's function within 0.46 mm, where the grain's bound is 0.62 mm; on
+  the pyramid its own level is mip 8 (1.02 by 0.77 m) and the pass writes 122 tiles on 10
+  levels, every fold byte for byte; on the survey's page its own level is the page's finest
+  (7.0 m); five plants caught (feet as metres, nodata as zero, the offset not added, a datum
+  refused or taken wrongly). The GPU's page reads +14.99 m at the hill's centre and the CPU
+  +14.99, 2 mm apart, inside the half float's quantum there. The solver's bed reads it: at
+  the end of a run its trace at the centre says bed +14.97 m, dry, where without the entry
+  it says -25.13 m, wet. The bird over it changes 96,267 pixels inside the hill's footprint
+  and 658 outside, its lee in the swell. **A height alone makes land;** the colour is the
+  sea floor's, because no colour source covers it.
+- **The real files.** The survey's two GeoTIFFs, read as one source, against the harvester's
+  grid at 2,000 points: the median 5.5 cm apart, the 95th percentile 0.42 m, the largest
+  2.08 m on land; under water the grid is 4.6 cm the deeper in the mean, which is the
+  harvester's rule for a thalweg (half the mean of the wet samples and half the deepest).
+  The relief's 60-second file against the engine's: a median of 9.7 m, because the harvester
+  decimates by whole columns and rounds to 16 bits. The 15-second ring is a straight crop:
+  the file agrees with it at 2,000 of 2,000 cells, so that ring's reader, 81 engine lines and
+  33 of the harvester, can go for one scene entry. Not deleted in this slice.
+- **What the files declare, read from their keys.** The survey's tiles: NAD83 geographic
+  (4269), and no vertical datum nor unit at all; NAVD88 is what NOAA says of them and what
+  the source declares. The relief's files: WGS 84 with "EGM2008 height" (3855); the engine
+  takes them as mean sea level with a 9.2 cm snipping, which is a datum question for step 8.
+- **Counted:** the engine grew by 231 lines (323 added, 92 removed); the tests by 415.
+- **Found on the way.** The scene's builder filled a default `offset` of 0 into every entry,
+  so a foreign datum would have been taken with no offset: mended, one line. And a height
+  source anywhere re-keys the sea floor's relief, the bed's classifier and the wave field
+  for the whole globe, because a node's identity folds every input's (finding 104): the
+  standard bird view, with the hill out of its frame, changes 18,072 pixels of water. That
+  is step 4b's to mend, where a tile's key names only the inputs that touch it.
+- **Not held:** the jetty view with and without the hill could not be compared (its root
+  was still filling when the runs were taken); the island does not show above its horizon.
+
 ## 5. Decisions for Mark
 
 Settled already, 2026-09-28, and built into the sections above:
@@ -805,7 +2285,8 @@ Settled already, 2026-09-28, and built into the sections above:
 - The cache is on disk and DirectStorage pulls it; it is wrong for three reasons and one
   mechanism answers them (4.14).
 - Findings 2 and 3 are replaced by the new residency manager, not repaired in the old one. The
-  audit that can see them comes first.
+  audit that can see them comes first. It has come, and it saw both; the manager's laws are
+  proposed in 4.19.
 - The measure of the abstraction is music on the water: a music file is a source of the water's
   physics as a buoy is, and the objects placed with it are shown moved by the water or by the
   music, all by an edit to the scene (4.16). Wanted at some point, not now.
@@ -839,8 +2320,21 @@ And by three more:
 | Chesapeake Bay as the second place? | Chesapeake. |
 | Does the colour's base move to sources that may be kept? | The colour is a composite of its sources. For now Google fills the base. |
 
-Nothing is open. Not asked, and done unless refused: the floor law is tried first, by itself
-(step 2), and Google is asked for no more than 3,000 tiles a day (4.15).
+**Asked on 2026-09-29, and answered the same day:**
+
+| asked | answered | where |
+|---|---|---|
+| Are the pieces that are made committed, each a pull request of its own, in the order the dry run applied them? | Yes. | section 6, Standing |
+| Is the solver held until its bed is whole, and its window drawn in from the survey's faded edge so that the river enters? | Yes to both, together. Every baseline is taken again once, after both. | 4.17, findings 48 and 68 |
+| The looks: the pixel water's fixes, and the colour read from the cube's lattice | The pictures look good. | step 1a; 4.17 |
+| Imagery for the second place | Google's tiles for Haulover or the Chesapeake, kept in the cache as the others are, under a cap: 5 GB a day, and 100,000 tiles a day, of which the test should need few. | 4.15 |
+| Is the wave tree given a cap? It is 58 GiB of the cache's 95.6 | No. The cache may hold 200 GB where it might hold 100. | 4.14 |
+
+What is still the owner's to say, each when it comes: the merging of a pull request; and
+the prune tool's two modes that move and delete.
+
+Not asked, and done unless refused: the floor law is tried first, by itself (step 2), and
+Google is asked for no more than 3,000 tiles a day (4.15).
 
 ## 6. The order of work, and the gate for each step
 
@@ -849,22 +2343,135 @@ Each step names the instrument that can see it fail, and what that instrument ca
 | step | what | gate | blind to |
 |---|---|---|---|
 | 0 | Probes in `--selftest`, no behaviour changed: the address bits the adapter reports; one heap tile mapped at two slices and at two mips, filled through one, read through both; WRAP sampling of a reserved slice under a residency clamp | bytes equal, per probe, and seen to fail on a planted wrong mapping | a driver that shares correctly only under load |
-| 1 | Instruments before changes: the residency audit (bytes against the mapped set); a line per shutdown phase, flushed; the residency lens; the pages ledger of the kept branch | the audit run on today's binary over a flight that paints: it reports finding 3 or clears it | the audit sees a wrong byte, not a wrong picture |
+| 1 | Instruments before changes: the residency audit (bytes against the mapped set); a line per shutdown phase, flushed; the residency lens; the pages ledger of the kept branch. Done: it reports finding 3, and finding 2, and two more | the audit run on today's binary over a flight that paints: it reports finding 3 or clears it | the audit sees a wrong byte, not a wrong picture |
 | 1a | The pixel water's two defects (findings 6 and 7), in the shader as it stands | a probe of the cast's landing point against doubles; stills and a rail, before and after, for the owner's eye | the look is his to judge, not a threshold's |
-| 2 | The floor law | storm rail A/B by eye and by SSIM; the settled stills for soundness | a settled still cannot see a transition |
+| 2 | The floor law. The first, a 3 by 3 of cells read bilinear, measured unsound and was not staged. A margin per level, M = 10 texels of the level read, reads zero in the probe and in the engine (4.6). Staged by the cell and read bilinear it is sound, softer than it need be and slow to refresh. Evaluated by the tile it is sound, as cheap to keep as today's and sharp near the ground, and it is coarser at the globe and doubles the globe's pass on the GPU. Neither is kept. Next: a footprint shortened to what is resident, the level raised only within the trilinear read's reach | the GPU probe of 4.6: no sample holds any of a NULL tile's zero, under the engine's own samplers; then the storm rail A/B by eye and by SSIM | one adapter and one driver; a settled still cannot see a transition |
 | 3 | `Lattice` gains the face-plane window: ground metric, box, texel, tag, the plane rows. The address function in C++ and HLSL | `uv_precision.py` as a selftest; GPU readback of the address at random points | nothing downstream reads it yet |
-| 4 | The tree keyed `(face, rung, x, y)`, its names complete (4.14); warming and packing as tools a scene names; paint rank 2 and rank 3 at the Merrimack from the cached sources. The real-data test of sparseness: tiles and bytes a rank, beside the Mercator trees | `--tree-audit` against the Mercator pages at the same ground, within the resampling bound; fetch count zero; a fold after a pack is read back as folded | picture quality: by eye, in the albedo lens |
-| 5 | The residency manager that tracks the pyramid's tiles, with windows that activate, move and release; the directory and the plane rows uploaded. It replaces the code of findings 2 and 3 | step 1's audit, clean; slot audit; `[settle-exact]` hashes; the storm rail | whether the picture is right |
-| 6 | The shader contract: the walk, the address, the porch and the phase | stills and rail against the Mercator baseline by SSIM and by eye, floors stated; a lens that paints rank and window | bit identity is gone by construction: the lattice changed |
-| 7 | The kernels' bed, the exposure and the wave pages through the same contract; then the water surface as a tenant | `--water-probe` (drawn level against the level the hull reads), standing, per hull; `[kernel]` fingerprints; `--sea-verify` | |
-| 8 | A second place, then one in each face of the cube: harvested, declared in a scene file, the boat put in. The politeness budget governs every fetch | `git diff --stat src shaders` is empty between the scene without the place and the scene with it; one ground point read back through two worlds: equal | data quality at the far place |
-| 9 | The porch at the cube's edge | a rail across 43.364 N; a lens that paints the weight | |
+| 4 | The tree keyed `(face, rung, x, y)`, in four parts (below the table): 4a the tree made fit for depth, 4b its names completed, 4c the pyramid painted at the Merrimack, 4d the audit across lattices | below the table | picture quality: by eye, in the albedo lens |
+| 5 | **After step 6's standing blocks** (4.17). The residency manager that tracks the pyramid's tiles, with windows that activate, move and release. Its laws are 4.19's: one order, the held set its first P, the map a function of what is held. It replaces the code of findings 2, 3, 24, 34, 63, 64 and 66 | 4.19's: step 1's audit, clean, over the flight that paints and over the storm rail; no tile read and never mapped; slot audit; `[settle-exact]` hashes over global tiles and origins; the storm rail | whether the picture is right |
+| 6 | **Before step 5, on standing aligned blocks** (4.17's five commits, the colour and the mask first): the address, the directory, rank 1. Then, with step 5 behind it, the porch and the phase on windows that move | stills and rail against the Mercator baseline by SSIM and by eye, floors stated; a lens that paints rank and window | bit identity is gone by construction: the lattice changed |
+| 7 | The height with the exposure, as one move, and with them the solver's bed: a solver integrates on a window that stands whole (4.17, measured); the wave pages, as a window on the place's own plane, the solve not moved (below); then the water surface as a tenant | `--water-probe` (drawn level against the level the hull reads), standing, per hull; `[kernel]` fingerprints; `--sea-verify` | |
+| 8 | A second place, then one in each face of the cube: harvested (Haulover and the Chesapeake's mouth are, 4.15), declared in a scene file, the boat put in. What names the Merrimack in code becomes keys of the scene (`docs/PLACE_KEYS.md`, 69 rows), the place's chart first. The politeness budget governs every fetch | `git diff --stat src shaders` is empty between the scene without the place and the scene with it; one ground point read back through two worlds: equal | data quality at the far place |
+| 9 | The porch at the cube's edge, and the aprons it reads (4.18) | a rail across 43.364 N; a lens that paints the weight; an apron's texel against the texel across the edge, by containment | |
 | 10 | Rank 4 from the 15 cm orthos at the jetty | a texel checkerboard at the helm | |
 | 11 | Gates restated as cells; cages when they are wanted | | |
 | 12 | Not scheduled. The sea accepts a spectrum given as bands from a point source: a buoy's own first, then a music file in a buoy's place (4.16). After it, and only if rings are wanted: a body's displaced volume drives the water, the hull's wake first | the sea synthesised from a buoy's bands, measured back at its place, gives the bands; step 8's gate, with the music in the place of the place. For the second form, the piston's wave height over its stroke against wavemaker theory's ratio | the look, which is the owner's; two dimensions of the closed form, until they are measured |
 
-**Standing, 2026-09-28.** Steps 0 and 3 are committed on `claude/earth-texture-hierarchy-53a3b3`,
-each as its own commit. The other branches named below are not committed.
+**Step 4, in four parts.** A read-only mapping of the tree's code (2026-09-28) tested one
+candidate: the pyramid is `Lattice::Cube(16384 << 17)`, a face 2^31 texels across, so that
+`mip = 17 - rung` is a fixed numbering and a tile is the `TileRequest` it always was. The
+addressing survives as it is: every lattice expression is in doubles, and every key packs the
+mip in 5 bits and x and y in 28. Rung 17, 4.7 mm, is the finest a 32-bit face dimension holds.
+A paint at mip 17 + k is the arithmetic of today's cube at mip k. What does not survive is
+depth, and the mapping found the names short in more places than the review had.
+
+| part | what | gate | blind to |
+|---|---|---|---|
+| 4a | The tree made fit for depth, changing no name, no byte and no picture. The fold holds one stripe where it nests sixteen today (finding 28) and walks a cold chain once, not twice; a tile-native chain stops where its ancestors are already marked; `Prefill` takes a finest mip and whole tiles; the archive assigns an offset to a payload it has written (finding 29); a refused fetch is counted and remembered, so a run says what it WOULD have fetched; the tools that nothing dispatches are dispatched (findings 37, 39) | a counter of stripes held, seen to trip on today's path; every ancestor of a painted leaf equal to the fold of its children, on a 25-level scratch tree; today's depth, old path against new, byte for byte; the six stills' hashes | a driver of contention that twelve threads do not raise |
+| 4b | The names completed (4.14): a leaf's name carries a token of its bytes, a composite's key folds its inputs' tokens and not their presence, a leaf is looked up in an archive by its token, a height leaf's identity carries its content as a colour leaf's does, and the archive's key gives the face six bits where it gives three, for the aprons of 4.18. The tree's version is raised, so every tree repaints from the source caches on its next flight; nothing is fetched and nothing is deleted | `tools/hierarchy/archive_stale.py`: no archive holds bytes its loose file does not; a fold after a pack is read back as folded; the stills, where the pixels that move are the tiles that were served stale | what a token costs on a disk that is not an NVMe |
+| 4c | The pyramid painted at the Merrimack: ranks 2 and 3 over the ground of today's two windows, from the cached sources, the fetch budget at zero. The real-data test of sparseness: tiles and bytes a rank, beside the Mercator trees | fetches that would have been made: zero; the census | whether the picture is good: nothing draws it until step 6 |
+| 4d | The audit across lattices. Today's audit compares a tree with the flat compositor at the same address and enforces nothing | containment: a pyramid texel lies within the least and the greatest of the page texels around its centre, by one step of the byte. No constant bound is honest: across an edge in the imagery two lattices of nearly equal grain differ by as much as the edge does | a source the two lattices both sample wrongly |
+
+**Step 4b, by the path.** Designed 2026-09-29; nothing of it is built. It is made after the
+sources' second slice, which changes the same file. Section 4.20's first law says a tile's
+name is a path; this is what the path is, and what falls out of it.
+
+- **A level is counted from the root.** A face's root is one tile, 128 texels across the
+  face. A tile's depth is its levels below that, and its path is one digit of four a level:
+  which child. Rung r is depth r + 7. No level is the finest, so no name holds one: today's
+  `mip` is counted from a finest level, and that level is the width that bounds the depth.
+- **A block is a node.** A block of rank k is 16,384 texels of rung 3k, which is the ground
+  of the node at depth 3k. Its eight levels are the tiles at depths 3k to 3k + 7 beneath it.
+- **Each tile belongs to one block:** the block for which it is one of the three finest
+  levels, depths 3k + 5 to 3k + 7. The face keeps all eight of its own. So a block's chain
+  of eight is its own three levels, its parent's three, and two of its grandparent's. That
+  is the sharing step 0 probed (a finer window's level 3 is a coarser window's level 0), and
+  it is 4.3's stride of three, found again on the disk.
+- **On the disk a folder is a block,** named by three digits in its parent's folder, and a
+  file in it is a tile named by the five to seven digits that place it in the block. A
+  space hung under a leaf (4.20's fifth law) is a folder under that leaf's name, and the
+  path goes on.
+- **An archive is a block's,** and its key is the tile's place in the block: two bits of
+  level and seven of x and of y. The 28 bits of x and y and the five of level are gone, and
+  with them the bound of 0.3 mm. At most 21,504 tiles and 1.4 GB an archive. A block the
+  GPU binds reads three archives at most.
+- **The address in memory stays as it is** within one space: 32 bits hold a face to 4.7 mm.
+  What is finer hangs a space of its own.
+
+| part | what | gate | blind to |
+|---|---|---|---|
+| 4b.1 | The path on the disk: folders by block, files by place, the root by name. The address in memory is unchanged; one function turns it into a path and one turns it back | every address of a 25-level scratch tree to its path and back; two addresses never one path; the tiletree selftest on the new names | a file system that folds case, or a path past the system's length: both are measured on this one |
+| 4b.2 | The tokens (4.14): a leaf's name ends in a token of its bytes; a marker's is the hash of its children's; a composite's key folds its inputs' tokens. With them `DropCachedAddress` has nothing to do and goes | a child's bytes changed under a composite that is cached: the composite is not served and is made again, with no drop called; `archive_stale.py` | what a lookup by pattern costs on a disk that is not an NVMe |
+| 4b.3 | The archive by block, its key the place, looked up by token. The packer packs a block | a block packed and read back, tile for tile; a fold after a pack read back as folded; DirectStorage reads a block's chain from its three archives | |
+| 4b.4 | A height leaf's identity carries its content, as a colour leaf's does | an edit changed: the height's tree is another tree | |
+| 4b.5 | The tools follow: the prune tool's stamp and list, the census, `archive_stale.py`. The tree's version is raised, so every tree repaints from the source caches; nothing is fetched and nothing is deleted | the prune tool lists the old trees as unused after the age; fetches that would have been made: zero | |
+
+Two things the mapping measured about the cost of depth. A leaf painted in a region nobody has
+flown costs up to 152 tile writes today, because each absent ancestor is painted, folded
+upward, and then folded again by its caller; walked once it is 16. And ten thousand leaves of
+one region make some 3,400 ancestors, so a rank's tiles are about a third more than its leaves.
+
+**Step 7, in parts.** Proposed 2026-09-29 from a read-only map of every reader,
+`docs/STEP7_MAP.md`; nothing of it is built. What the map found that the plan did not know:
+
+- **The exposure is read through the height's slice and the height's row** in both of its
+  readers (finding 87). That is the code behind "the height and the exposure move together".
+- **The three kernels cannot call the colour's code.** The solver, the churn and the bank
+  have no surface rows, no directory and no walk; they address by latitude and longitude on
+  lattices of their own and read by loads. One function is owed, the block form of the rule
+  they share, with rows that each kernel's own constants carry.
+- **The vertex's height is read in a way that priors 1 says returns zero** (finding 85). Which
+  holds is measured first, because it decides whether those readers sample or load.
+- **The exposure is read at 76 m and coarser,** which is a rank 1 block's finest level: it
+  can stand on rank 1 alone.
+- **By itself step 7 about breaks even in lines,** some 410 out and 380 in, because every
+  Mercator reader gets a block reader. The deletion is what follows when the colour's last
+  commit and step 7 have both landed: some 250 lines more that then have no reader.
+
+| part | what | gate | blind to |
+|---|---|---|---|
+| 7.0 | Instruments, no picture changed: the solver's bed trace and its wait; `--water-probe` under a recipe (finding 73); the bank's fingerprint over what the kernel reads (finding 75); the lens's height on blocks; a readback of the mesh stage's height against the pixel stage's at one ground (finding 85) | the key empty: every stage's DXIL and the six stills' hashes; the trace's own planted floor | a transition |
+| 7.1 | The functions, called by nothing: the kernels' block form of the bed; the composed height over the chain; a ray's walk without gradients; the two CPU twins on the walk; one helper for a box of latitude and longitude in a block's uv, where three copies of a Mercator form stand (finding 89) | the selftest, the CPU twin against a GPU readback at random ground, a wrong row planted; the hashes | the picture: nothing draws it yet |
+| 7.2 | The move, as one: the height and the exposure declare the blocks in the page's place; the wants, the floors, the interests, the pin and the wait in the blocks' uv; every reader and both twins switched; the kernels given their rows | the key empty: every hash. The key set: the drawn level against the level the hull reads, inside today's floor; the bed within a stated bound of today's, texel against texel; the bed trace, every cell at the finest level of its block; the audit on the new slices; stills by SSIM and by eye | `--water-probe` sees near hulls; the trace sees the solver's bed and not the bank's; the kernels' fingerprints change by design and cannot gate this part |
+| 7.3 | The old path of the two tenants deleted: the page, its rows, its literals, its closures, its tools | the key-set bytes of 7.2 | nothing new: a deletion |
+| 7.4 | The wave pages as a window on the place's own plane. The solve is not moved onto the cube's lattice: a block's texel on the ground is neither square nor at right angles (523 m by 395 m at 103 degrees at the mouth, at rung 0), and the solve's closure for a blocked cell, its phase gauge and its refraction are written for square cells on east and north axes. Its grid is declared as a window on the tangent plane at the place, and its address is the law every window has: the map from the direction to a plane's grid is a ratio of planes whatever the plane, a cube's face being six cases of it. The solve's bytes stay exact and the hull's probe and the pages stay one field. What goes is the pages' z16 Mercator frame and its arithmetic | the address against doubles at random ground, as step 3 measured a face window's; the solved field against the hull's probe | a window whose plane is far from its ground: the tangent plane's texel is square at its centre and grows by one part in five million at 3 km |
+| 7.5 | The water surface as a tenant (4.11) | | |
+
+**Step 8, in five parts.** Proposed 2026-09-29 from `docs/PLACE_KEYS.md`; nothing of it is
+built. The first three change no picture and need nothing of steps 5 to 7, so they can be made
+beside them. The last two need step 7: a solver at a second place reads its bed from a window
+that stands there, and today the one bed on the GPU is the Merrimack's.
+
+| part | what | gate | blind to |
+|---|---|---|---|
+| 8a | The chart is the place's. The root place owns a chart, the type the gates already build at a far place (`Space::Anchor`: an anchor, metres a degree, the tangent frame's rows). Every reader of the four constants of `BathyModel.h:25-28` takes the chart from the place: 95 uses in 20 files. The default is today's literals, 81,660 and not the cosine's 81,654.6 | the six stills' hashes and pixels; every stage's DXIL; the selftest; the four names found nowhere outside the default | a reader that holds the anchor as a number of its own |
+| 8b | The keys that exist are obeyed, and a name is the place's: the depth tree takes `data.bathy`, the velocity-gradient bank takes `data.currents`, a layer's name is built from the place's name. The Merrimack's names come out as they are, so no tree's folder moves | the trees' folders listed before and after: equal; the stills' hashes | a name that reaches a folder by a path not read |
+| 8c | The scene declares the place: its name, its anchor, its chart (the cosine at its latitude unless it says otherwise), its stations and its buoy by number, its boxes, its windows. The literals of `docs/PLACE_KEYS.md` become the defaults of keys | `--print-scene` of every shipped scene, before and after: equal but for the new keys at their defaults; the stills' hashes | what is an assumption and not a literal (8d says them) |
+| 8d | The second place, a scene file and nothing else: Haulover's bed, tides, currents and sea state, its chart, a window of each rank over it, the boat put in. It runs on the terms 4.15 names: the sea to the east, no river, the clocks at the focus station, the jet off | `git diff --stat src shaders` is empty between the scene without the place and the scene with it; the solver's level at the focus station against the station's own prediction; pictures, for the owner's eye | data quality at the far place; a coast that faces west |
+| 8e | One ground point read through two worlds: the same texel of the pyramid reached from the Merrimack's scene through a gate and from Haulover's scene standing there | the two reads equal, colour and height, byte for byte | |
+
+**Standing, 2026-09-29.** `main` is `71e3a33`. Steps 0 and 3 came into it with pull request
+34 on 2026-09-28. **The harvest, the prune tool, step 4a, step 1a and step 1 came into it on
+2026-09-29 as pull requests 35 to 39,** committed and merged on the owner's word, one commit
+each, from the bottom of the stack up.
+
+- Each stage of that stack was built alone from the `main` before it with the stages
+  beneath it: a clean build, the selftest's exit 0 (244 lines in the old `main`, then 244,
+  307, 336, 336 and 349), `hal_lint` passing, and the documents the engine writes at its
+  boot taken into the commit that changes them. The merged `main` has the tree of the last
+  stage, byte for byte, so what was built and tested is what is in `main`.
+- Where a note below says that a piece of those five is not committed, it was written
+  before that day's word. What is still uncommitted: step 2's probe and its forms of the
+  law, the migration's commits, the solver's bed and window, and the new manager.
+
+- **The pieces that are made apply together.** A dry run applied six of them to `main` in one
+  order: the harvest, the prune tool, step 4a, step 1a, step 1 and step 2's probe. Together
+  they build, the selftest exits 0 and `hal_lint` passes. Three files had lines added by two
+  pieces at one place. One conflict no merge shows, and only the selftest found it: the prune
+  tool stamps every folder a run uses, and step 4a's test listed the stamp as a stray file.
+  The engine's lines, counted from the dry run's trees: +1,185 and -156 over the six, beside
+  10,431 of tests, instruments and tools. These are the steps that add instruments; the steps
+  that remove follow them.
 
 - **Step 0 is done**, in `src/hal/Gpu.{h,cpp}`, `src/hal/TileAtlas.{h,cpp}` and
   `shaders/TileWrap.hlsl`. `--selftest` exits 0 with the probes in it, 26 new lines and no old
@@ -878,7 +2485,6 @@ each as its own commit. The other branches named below are not committed.
   failure would show.
 - Run under the debug layer, the selftest dies before the probes are reached, in the atlas test
   (findings 43 and 44). The probes themselves drew no message from the layer.
-- **Step 1a is being made** on its own branch, `claude/pixel-water-float-wall`.
 - **Step 3 is done**, in `src/core/Lattice.{h,cpp}` (`CubeFaceAxes`, `FaceWindow`),
   `shaders/PageSample.hlsli` (`PageTexel`, `PageTexelUv`), `src/core/SpaceTest.cpp` and the tile
   selftest. Nothing reads it yet, so it changes no picture. Measured, on the harness's own
@@ -895,12 +2501,73 @@ each as its own commit. The other branches named below are not committed.
   the eye is addressed from the eye's own anchor and the error grows with the distance in
   texels, by arithmetic about one part in eight million of it; that growth is not measured
   beyond the 10 km row.
-- **Step 2 is being made** on its own branch, `claude/residency-floor-law`. Its GPU probe
-  measures the law's soundness under the engine's own samplers, against today's law. It was
-  begun on `e6acf22` and moved onto `d7c209d` when pull request 33 was merged, and its gate is
-  taken there.
-- **Step 1 is being made** on its own branch, `claude/residency-instruments`, from `d7c209d`:
-  the pages ledger came with pull request 33.
+- **Step 2 measured its law and did not stage it** (`claude/residency-floor-law`, on
+  `35a9eb7`, uncommitted). The 3 by 3 floor read bilinear lets a NULL tile into 4,221 of
+  473,088 samples under the anisotropic sampler, where today's law lets it into 1,606; 4.6
+  has the table, the reason, and the law proposed in its place. What the branch holds is the
+  probe, the construction with its gates, and the GPU still reading the true map. Its six
+  stills' hashes equal `main`'s. The law proposed in its place, a margin per level, reads
+  zero in the same probe from M = 8 up, and M = 6 fails it at footprints whose length lies
+  between two powers of two; the reach that decides it is measured (4.6). Not staged yet.
+- **Pull request 33's rail check, taken with step 2's baselines** (all four runs after the
+  archives were set aside). Per frame, `e6acf22` against the merged code: in the flight the
+  mean SSIM is 0.998 where two runs of one binary give 0.9993 to 0.9996; in the helm phase,
+  where the pool is at its cap, 0.88 where two runs of one binary give 0.94. So the merged
+  code draws a different arrangement there, past the floor. The detail is the same within a
+  half of one percent (mean PNG bytes of the helm phase, 1,148,106 and 1,149,951 against
+  1,142,368 and 1,147,231), and the residency's turn is quicker, 1.16 ms where it was 1.35 to
+  1.42. That is what 2026-09-17 measured on the same code before it was committed.
+- **Step 1 is done**, uncommitted on `claude/residency-instruments`, on `35a9eb7`: 17 files,
+  +198 and -11, and four new ones, which are the audit, the shutdown trail and the lens's
+  shader. The pages ledger came with pull request 33. The audit is a pure function of the
+  tiles, compared with the bytes at the end of a turn. Its selftest plants seven faults
+  through the manager's own `UpdateResidencyByte` and catches each where it was planted.
+  With every instrument off, the six stills' settle and predict hashes equal `main`'s.
+- **What the audit saw on today's binary** (2026-09-29, the fetch budget at zero, every run
+  after the archives were set aside). Finding 3, on a flight that paints, which is the storm
+  rail under a swell direction never painted: 210 invalidations, 65 of them over a mapped
+  descendant, all in the exposure's z14 page; bytes coarser than the tiles on 782 of 1,350
+  turns, and 3,072 cells still two mips coarser at the last turn. Finding 2, on the storm
+  rail: from the first turn the pool is full, tiles Loaded and in no queue, 7,917 of them by
+  the end. The landing ledger, counted by itself, gives the same 7,917 in 179 turns; with
+  the audit off it gives 7,954 in 178, so the audit's own cost is not the cause. Finding 24:
+  no hole under bytes in flight, in any run. And two faults the review had not read,
+  findings 63 and 64, both leaving a byte finer than the tiles (4.7).
+- **The solver's bed was measured** (4.17), uncommitted on `claude/solver-bed-resident`: 17
+  files, +474 and -21, and the bed's trace, 215 lines. The eleven kernels that read the
+  bed compile to the bytes they compiled to, so the default run is today's. It found the
+  cause of the startup's low basin, which had stood unproven since it was first seen.
+- **Thirty boots** of the helm recipe, one at a time: every one exits 0, with the same 21
+  lines of the shutdown trail. The exit-255 race (finding 33) was not met. The trail names
+  the phase on the day it is.
+- **The lens** paints the page that answers by hue, the level the sampler is clamped to by
+  brightness, and the answering tile's outline. It reads what the pixel shader reads, which
+  is three of the five tenants. Its pictures are in the branch's `out\p4c`.
+- What step 1 did not see: the GPU's copy of the map; the order of work inside a frame
+  (finding 34); a fault made and mended within one turn; a wrong tile under a right byte.
+  Auditing every turn costs 30 ms a turn and changes what lands when: with it on, the
+  settled stills orphan about 3,000 tiles, and with it off 0 to 113.
+- **Step 4a is done**, uncommitted on `claude/pyramid-tree`: 17 files, +570 and -99, and a
+  selftest of its own. Measured on a scratch tree of 25 levels: a leaf painted where nothing
+  has been painted costs 16 writes where it cost 136, and the walk holds one stripe where it
+  held 14. On today's depth the new walk leaves the files today's leaves, byte for byte. The
+  walk this design had asked for, an absent parent painted and not folded, does NOT: it
+  changes six tiles of 33, because today each level's 4/255 test is decided against the
+  parent's own paint already risen. So what rises from a level is the versions it took, in
+  order, and each level is read once and written once. The walk it replaced loses a fold when
+  two threads paint siblings (finding 57); the new one reads the child again under the
+  parent's stripe and does not. The archive's packer, the refusals' count, the tools'
+  dispatch, the stripe's hash and `Prefill` are as section 6 says, each with its plant caught.
+- What step 4a did not see: composite drops compared old against new; a parent served from an
+  archive; one interleaving of the race, not all; `--warm-trees` unbounded on the real cache.
+  And the walk it replaced is still in `TileTree.h`, behind a switch only the selftest sets,
+  as the reference its files are held equal to. It goes when the new walk is accepted.
+- **The prune tool is done**, uncommitted on `claude/tree-prune` (4.14). The cache it listed
+  holds 95.6 GiB in 474 folders, 58 GiB of it the wave tree's 226 identities (finding 51), and
+  nothing in it is stale yet, because nothing was stamped before today.
+- **Step 1a is done**, uncommitted on `claude/pixel-water-float-wall`, moved onto `35a9eb7`,
+  where it draws what it drew: no pixel differs between the two bases, and two runs of it
+  are one picture. The grain of the near water was the sample point (finding 42).
 - Renders are taken one engine at a time. Two engines on one GPU were measured to move the
   pictures of both: the unmodified binary differed from itself by 16,669 pixels at one pose.
 - The Scriptorium serves this document and the review through a `plan` tool.
@@ -932,6 +2599,14 @@ each as its own commit. The other branches named below are not committed.
   from memory of the book; the search found the theory named and the formula nowhere in full, so
   the harness checks its two limits. MPEG audio's tolerance:
   <https://www.underbit.com/resources/mpeg/audio/compliance>.
+- For 4.6 and 4.19. Intel, *Sampler Feedback Streaming* (the sample's README):
+  <https://github.com/GameTechDev/SamplerFeedbackStreaming/blob/main/README.md>, read through
+  a summary of the page. *How Virtual Textures Really Work*:
+  <https://www.shlom.dev/articles/how-virtual-textures-really-work/>. Van Waveren, *Software
+  Virtual Textures*, 2012: <https://mrelusive.com/publications/papers/Software-Virtual-Textures.pdf>,
+  which I could not read from here and do not cite for any statement.
+- For 4.15's NAIP row: <https://registry.opendata.aws/naip/> (the buckets are requester-pays);
+  <https://planetarycomputer.microsoft.com/dataset/naip>. Both as search engines quote them.
 - Microsoft: tiled resource tiers
   <https://learn.microsoft.com/windows/win32/api/d3d12/ne-d3d12-d3d12_tiled_resources_tier>;
   tier 4 <https://microsoft.github.io/DirectX-Specs/d3d/D3D12TiledResourceTier4.html>;
@@ -961,3 +2636,14 @@ each as its own commit. The other branches named below are not committed.
 - Tanner, Migdal and Jones, *The Clipmap: A Virtual Mipmap*, 1998; Barrett, *Sparse Virtual
   Textures*, 2008; van Waveren, *Software Virtual Textures*, 2012: cited from memory, not re-read
   for this document.
+- For 4.20. Microsoft, *Bing Maps Tile System* (the quadkey: a string whose length is the level,
+  to level 23): <https://learn.microsoft.com/en-us/bingmaps/articles/bing-maps-tile-system>.
+  Google, *S2 Cells* (a face and thirty levels in 64 bits):
+  <https://s2geometry.io/devguide/s2cell_hierarchy.html>. Both read as search results'
+  summaries of the pages. GDAL, `gdal2tiles` (base tiles, then overview tiles made from the
+  tiles beneath; the average by default): <https://gdal.org/en/stable/programs/gdal2tiles.html>.
+  OGC, *Cloud Optimized GeoTIFF* (overviews as reduced-resolution subfiles):
+  <https://docs.ogc.org/is/21-026/21-026.html>. Microsoft, `IWICBitmapSourceTransform`
+  (a decoder asked for a region): <https://learn.microsoft.com/en-us/windows/win32/wic/-wic-imp-iwicbitmapsourcetransform>.
+  All three as search results' summaries; whether the TIFF decoder decodes a region alone is
+  not said there and is to be measured.

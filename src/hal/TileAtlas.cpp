@@ -1,12 +1,16 @@
 #include "hal/TileAtlas.h"
 
+#include "compose/SurfaceFrame.h"
 #include "core/Lattice.h"
+#include "core/Space.h"
 #include "hal/PixEvents.h"
 #include "hal/Pipeline.h"
 #include "hal/Root.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <random>
 #include <vector>
 #include <string>
 
@@ -1263,6 +1267,394 @@ bool ProbeAddress(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir) {
     return pass;
 }
 
+// ================================================================ HIERARCHY 4.17 commit 3: blocks
+// The standing blocks' address at the pixel stage WITH THE KEY'S OWN ROWS: the Merrimack key's
+// blocks at rungs 6 and 9 (SurfaceFrame::DeclareBlocks), their rows by SurfaceFrame::BlockRows --
+// the function the frame's Fill fills them with -- about the eye's own tangent frame at the helm
+// (east, up, north at the eye: the address block's tangent case), over spacetest's helm sample
+// carried into that frame. THE GATE is the GPU's texel, taken back to the block's own origin by
+// the rows' whole blocks, against the doubles: under 0.01 texel at both rungs, and its uv with
+// the whole blocks added in float32 as CsBlockUv adds them. THE PLANT is commit 2's form, the
+// planes through the planet's centre and the point a float32 direction: past the bound at both.
+bool ProbeBlockAddress(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir) {
+    Log("[tiletest] ---- HIERARCHY 4.17 commit 3: the standing blocks' address with the key's own "
+        "rows (SurfaceFrame::BlockRows), PageTexel in the pixel stage against the doubles ----");
+    constexpr uint32_t kW = 64;
+    constexpr double kBound = 0.01;
+    constexpr float kUnreached = 1e30f;
+    const double dim = double(Lattice::kFaceDim);
+    SurfaceFrame key;
+    // Rank 1 comes first since commit 4 (the directory's law): blocks 0, 1, 2 = rungs 3, 6, 9.
+    if (!key.DeclareBlocks("-70.8125,42.816,3;-70.8125,42.816,6;-70.8125,42.816,9") ||
+        key.blocks.size() != 3) {
+        Log("[tiletest] block address: FAIL -- the Merrimack key declared no blocks");
+        return false;
+    }
+    // The helm eye (spacetest's: 3 m over the mouth on the 6371 km sphere) and its tangent frame.
+    const double kDeg = 3.141592653589793 / 180.0, lat = 42.816 * kDeg, lon = -70.8125 * kDeg;
+    const double eyeR = 6371000.0 + 3.0;
+    const double eye[3] = {std::cos(lat) * std::cos(lon) * eyeR, std::sin(lat) * eyeR,
+                           std::cos(lat) * std::sin(lon) * eyeR};
+    const double el = std::sqrt(eye[0] * eye[0] + eye[1] * eye[1] + eye[2] * eye[2]);
+    const double up[3] = {eye[0] / el, eye[1] / el, eye[2] / el};
+    const double yl = std::sqrt(up[0] * up[0] + up[2] * up[2]);
+    const double east[3] = {-up[2] / yl, 0.0, up[0] / yl};
+    const double north[3] = {east[1] * up[2] - east[2] * up[1], east[2] * up[0] - east[0] * up[2],
+                             east[0] * up[1] - east[1] * up[0]};
+    const Placement own = Placement::Frame(east, up, north, eye);
+    struct Job {
+        FaceWindow::Planes pl{};
+        float off[2] = {0.0f, 0.0f};
+        std::vector<float> p;     // x y z per point
+        std::vector<double> ref;  // the doubles: texel relative to the block's own origin, x y
+        uint32_t n = 0, row0 = 0, rows = 0;
+    };
+    const int kRung[2] = {9, 6};
+    Job job[4];   // the key's rows at rungs 9 and 6, then the plant at rungs 9 and 6
+    for (int i = 0; i < 2; ++i) {
+        const FaceWindowSample s = FaceWindowHelmSample(kRung[i]);
+        const FaceWindow& b = key.blocks[kRung[i] == 6 ? 1 : 2];
+        Job& r = job[i];
+        Job& q = job[2 + i];
+        SurfaceFrame::BlockRows(b, own, eye, r.pl, r.off);
+        q.pl = b.PlanesIn(Placement{});
+        const size_t n = s.p.size() / 3;
+        for (size_t k = 0; k < n; ++k) {
+            const double pe[3] = {s.p[3 * k], s.p[3 * k + 1], s.p[3 * k + 2]};
+            for (int c = 0; c < 2; ++c) {
+                const double ref = s.ref[2 * k + c] +
+                                   double(c ? s.win.anchorY - b.anchorY : s.win.anchorX - b.anchorX);
+                r.ref.push_back(ref);
+                q.ref.push_back(ref);
+            }
+            for (const double* ax : {east, up, north}) {   // the point in the eye's tangent frame
+                r.p.push_back(static_cast<float>(pe[0] * ax[0] + pe[1] * ax[1] + pe[2] * ax[2]));
+            }
+            const double P[3] = {eye[0] + pe[0], eye[1] + pe[1], eye[2] + pe[2]};
+            const double pl = std::sqrt(P[0] * P[0] + P[1] * P[1] + P[2] * P[2]);
+            for (int c = 0; c < 3; ++c) q.p.push_back(static_cast<float>(P[c] / pl));
+        }
+        r.n = q.n = static_cast<uint32_t>(n);
+    }
+    uint32_t H = 0;
+    for (Job& j : job) {
+        j.row0 = H;
+        j.rows = (j.n + kW - 1) / kW;
+        H += j.rows;
+    }
+    if (job[0].n == 0 || job[1].n == 0) {
+        Log("[tiletest] block address: FAIL -- spacetest's helm sample came back empty");
+        return false;
+    }
+    std::vector<float> points(size_t(kW) * H * 4, 0.0f);
+    for (const Job& j : job) {
+        for (uint32_t k = 0; k < j.n; ++k) {
+            float* t = &points[(size_t(j.row0 + k / kW) * kW + k % kW) * 4];
+            t[0] = j.p[3 * k];
+            t[1] = j.p[3 * k + 1];
+            t[2] = j.p[3 * k + 2];
+            t[3] = 1.0f;
+        }
+    }
+    GpuTexture pts = gpu.CreateTexture2D(kW, H, DXGI_FORMAT_R32G32B32A32_FLOAT,
+                                         D3D12_RESOURCE_FLAG_NONE, D3D12_RESOURCE_STATE_COPY_DEST,
+                                         L"tiletest.blockPoints");
+    gpu.UploadTexture(pts, points.data(), kW * 16);
+    const uint32_t srv = gpu.CreateSrv(pts.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+    hal::RootLayout rl;
+    rl.Constants(0, 14).Table({hal::SrvRange(0, hal::kUnbounded, 1)});
+    const Com<ID3D12RootSignature> rs = rl.Build(gpu, "tiletest.blockAddress");
+    hal::GraphicsPipelineDesc pd;
+    pd.rootSig = rs.Get();
+    pd.vs = sc.Compile(shaderDir + L"/TileTexel.hlsl", L"VsTexel", L"vs_6_0");
+    pd.ps = sc.Compile(shaderDir + L"/TileTexel.hlsl", L"PsTexel", L"ps_6_0");
+    pd.rtvFormat = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    pd.dsvFormat = DXGI_FORMAT_UNKNOWN;
+    const Com<ID3D12PipelineState> pso = hal::BuildGraphics(gpu, pd, "tiletest.blockAddress");
+    if (!pso) {
+        Log("[tiletest] block address: FAIL -- the probe's pipeline did not build");
+        return false;
+    }
+    D3D12_CLEAR_VALUE cv{};
+    cv.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    for (float& c : cv.Color) c = kUnreached;
+    GpuTexture rt = gpu.CreateTexture2D(kW, H, cv.Format, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                                        D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                        L"tiletest.blockTexels", &cv);
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = gpu.RtvHeap().Cpu(gpu.RtvHeap().Alloc());
+    gpu.Device()->CreateRenderTargetView(rt.res.Get(), nullptr, rtv);
+    auto* cl = gpu.BeginUpload();
+    {
+        PixScope scope(cl, "tiletest.4.17 block address (the key's rows over spacetest's helm sample)");
+        ID3D12DescriptorHeap* heaps[] = {gpu.SrvHeap().Heap()};
+        cl->SetDescriptorHeaps(1, heaps);
+        cl->ClearRenderTargetView(rtv, cv.Color, 0, nullptr);
+        cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        cl->SetGraphicsRootSignature(rs.Get());
+        cl->SetPipelineState(pso.Get());
+        cl->SetGraphicsRootDescriptorTable(1, gpu.SrvHeap().Gpu(0));
+        cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        for (const Job& j : job) {
+            const D3D12_VIEWPORT vp{0.0f, float(j.row0), float(kW), float(j.rows), 0.0f, 1.0f};
+            const D3D12_RECT sr{0, LONG(j.row0), LONG(kW), LONG(j.row0 + j.rows)};
+            uint32_t c[14];
+            memcpy(c, j.pl.u, sizeof j.pl.u);
+            memcpy(c + 4, j.pl.v, sizeof j.pl.v);
+            memcpy(c + 8, j.pl.w, sizeof j.pl.w);
+            c[12] = srv;
+            c[13] = 0;
+            cl->RSSetViewports(1, &vp);
+            cl->RSSetScissorRects(1, &sr);
+            cl->SetGraphicsRoot32BitConstants(0, 14, c, 0);
+            cl->DrawInstanced(3, 1, 0, 0);
+        }
+    }
+    gpu.EndUpload();
+    uint32_t pitch = 0;
+    const std::vector<uint8_t> px = gpu.ReadbackTexture(rt, &pitch);
+    bool within = true, caught = true;
+    uint32_t unreached = 0;
+    double worst[4] = {}, worstUv[2] = {};
+    for (int ji = 0; ji < 4; ++ji) {
+        const Job& j = job[ji];
+        for (uint32_t k = 0; k < j.n; ++k) {
+            const float* g = reinterpret_cast<const float*>(px.data() + size_t(j.row0 + k / kW) * pitch) +
+                             4 * (k % kW);
+            unreached += g[0] == kUnreached ? 1u : 0u;
+            for (int c = 0; c < 2; ++c) {
+                const double ref = j.ref[2 * k + c];
+                Worse(worst[ji], std::fabs(double(g[c]) + double(j.off[c]) * dim - ref));
+                if (ji < 2) {
+                    const float uv = g[2 + c] + j.off[c];   // CsBlockUv's float32 addition
+                    Worse(worstUv[ji], std::fabs(double(uv) * dim - ref));
+                }
+            }
+        }
+    }
+    for (int i = 0; i < 2; ++i) {
+        within = within && worst[i] < kBound && worstUv[i] < kBound;
+        caught = caught && worst[2 + i] > kBound;
+        Log("[tiletest] block address rung %d, block (%lld,%lld), rows anchored %+.0f,%+.0f blocks "
+            "from it: %u points -- the GPU's texel against the doubles worst %.6f (its uv %.6f); the "
+            "plant, a float32 direction through the centre, worst %.4f",
+            kRung[i], key.blocks[kRung[i] == 6 ? 1 : 2].anchorX / Lattice::kFaceDim,
+            key.blocks[kRung[i] == 6 ? 1 : 2].anchorY / Lattice::kFaceDim, job[i].off[0],
+            job[i].off[1], job[i].n, worst[i], worstUv[i], worst[2 + i]);
+    }
+    const HRESULT removed = gpu.Device()->GetDeviceRemovedReason();
+    const bool pass = within && caught && unreached == 0 && SUCCEEDED(removed);
+    Log("[tiletest] ---- block address %s ----",
+        pass ? "PASS: the key's rows put the GPU within 0.01 texel of the doubles at rungs 9 and 6, "
+               "its uv too, and the float32 direction is CAUGHT past it at both"
+             : (unreached ? "FAIL: pixels no draw reached" : "FAIL: see above"));
+    return pass;
+}
+
+// ================================================================ HIERARCHY 4.17 commit 4: the walk
+// The directory walk's two bodies held equal: Walk.hlsli, run in the pixel stage through
+// TileWalk.hlsl and read back, against SurfaceFrame::Walk in doubles -- the Merrimack key's six
+// blocks (ranks 1 to 3) and their directory, the rows about the helm's tangent frame as the
+// surface fills them (BlockRows). 10,000 ground points of face 5 in and around the blocks (4,000
+// within ~20 km of the mouth, 3,000 within ~150 km, 3,000 within ~800 km) and 1,000 on each other
+// face. THE GATE: every chain the same length and the same slices, every uv within 0.01 texel.
+// THE PLANT: the face-5 cell under the mouth names the rung-6 block where the directory names
+// rank 1's, drawn through the same shader: the chains through that cell must differ.
+bool ProbeWalk(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir) {
+    Log("[tiletest] ---- HIERARCHY 4.17 commit 4: the directory walk, Walk.hlsli in the pixel stage "
+        "against SurfaceFrame::Walk in doubles ----");
+    constexpr uint32_t kW = 64;   // points a row
+    constexpr double kBound = 0.01;
+    constexpr float kUnreached = 1e30f;
+    const double dim = double(Lattice::kFaceDim);
+    SurfaceFrame key;
+    if (!key.DeclareBlocks("-70.8125,42.816,3;-70.8125,42.816,6;-70.8125,42.816,9;-70.849,42.816,9;"
+                           "-70.8125,42.789,9;-70.849,42.789,9") ||
+        key.blocks.size() != 6 || key.directory.empty()) {
+        Log("[tiletest] walk: FAIL -- the Merrimack key declared no directory");
+        return false;
+    }
+    const double kDeg = 3.141592653589793 / 180.0, lat = 42.816 * kDeg, lon = -70.8125 * kDeg;
+    const double R = 6371000.0;
+    const double eye[3] = {std::cos(lat) * std::cos(lon) * (R + 3.0), std::sin(lat) * (R + 3.0),
+                           std::cos(lat) * std::sin(lon) * (R + 3.0)};
+    const double el = std::sqrt(eye[0] * eye[0] + eye[1] * eye[1] + eye[2] * eye[2]);
+    const double up[3] = {eye[0] / el, eye[1] / el, eye[2] / el};
+    const double yl = std::sqrt(up[0] * up[0] + up[2] * up[2]);
+    const double east[3] = {-up[2] / yl, 0.0, up[0] / yl};
+    const double north[3] = {east[1] * up[2] - east[2] * up[1], east[2] * up[0] - east[0] * up[2],
+                             east[0] * up[1] - east[1] * up[0]};
+    const Placement own = Placement::Frame(east, up, north, eye);
+    std::vector<float> rows(8 * 4 * 4, 0.0f);   // RGBA32F 8 x 4
+    for (size_t i = 0; i < key.blocks.size(); ++i) {
+        FaceWindow::Planes pl{};
+        float off[2] = {0.0f, 0.0f};
+        SurfaceFrame::BlockRows(key.blocks[i], own, eye, pl, off);
+        memcpy(&rows[(0 * 8 + i) * 4], pl.u, 16);
+        memcpy(&rows[(1 * 8 + i) * 4], pl.v, 16);
+        memcpy(&rows[(2 * 8 + i) * 4], pl.w, 16);
+        rows[(3 * 8 + i / 2) * 4 + (i & 1) * 2] = off[0];
+        rows[(3 * 8 + i / 2) * 4 + (i & 1) * 2 + 1] = off[1];
+    }
+    // The ground points, planet frame, on the sphere.
+    std::vector<std::array<double, 3>> P;
+    std::mt19937 rng(0x4174u);
+    std::uniform_real_distribution<double> U01(0.0, 1.0);
+    auto add = [&](uint32_t f, double u, double v) {
+        double d[3];
+        ComposeCubeDir(f, (std::min)(0.9999, (std::max)(0.0001, u)), (std::min)(0.9999, (std::max)(0.0001, v)), d);
+        P.push_back({d[0] * R, d[1] * R, d[2] * R});
+    };
+    double m[2];
+    CubeFaceOfDir(eye, m);
+    const double half[3] = {0.0016, 0.012, 0.063};   // ~20, 150 and 800 km of face-5 uv
+    const int many[3] = {4000, 3000, 3000};
+    for (int b = 0; b < 3; ++b) {
+        for (int n = 0; n < many[b]; ++n) {
+            add(5, m[0] + (U01(rng) * 2 - 1) * half[b], m[1] + (U01(rng) * 2 - 1) * half[b]);
+        }
+    }
+    for (uint32_t f = 0; f < 5; ++f) {
+        for (int n = 0; n < 1000; ++n) add(f, U01(rng), U01(rng));
+    }
+    const uint32_t N = uint32_t(P.size()), H = (N + kW - 1) / kW;
+    std::vector<float> pts(size_t(kW) * H * 4, 0.0f), dirs(size_t(kW) * H * 4, 0.0f);
+    for (uint32_t k = 0; k < N; ++k) {
+        const double q[3] = {P[k][0] - eye[0], P[k][1] - eye[1], P[k][2] - eye[2]};
+        const double pl = std::sqrt(P[k][0] * P[k][0] + P[k][1] * P[k][1] + P[k][2] * P[k][2]);
+        float* t = &pts[size_t(k) * 4];
+        float* d = &dirs[size_t(k) * 4];
+        int c = 0;
+        for (const double* ax : {east, up, north}) t[c++] = static_cast<float>(q[0] * ax[0] + q[1] * ax[1] + q[2] * ax[2]);
+        for (int j = 0; j < 3; ++j) d[j] = static_cast<float>(P[k][j] / pl);
+        t[3] = d[3] = 1.0f;
+    }
+    // The directory twice: as built, and planted (the face-5 cell under the mouth names slice 7).
+    const uint32_t dirRows = uint32_t(key.directory.size() / SurfaceFrame::kCells);
+    std::vector<uint16_t> dirTex(size_t(128) * dirRows, SurfaceFrame::kNone);
+    for (uint32_t r = 0; r < dirRows; ++r) {
+        for (uint32_t c = 0; c < SurfaceFrame::kCells; ++c) {
+            dirTex[size_t(r) * 128 + c] = key.directory[size_t(r) * SurfaceFrame::kCells + c];
+        }
+    }
+    std::vector<uint16_t> planted = dirTex;
+    const uint32_t pcx = uint32_t(m[0] * 16.0), pcy = uint32_t(m[1] * 16.0);
+    planted[size_t(5 * 16 + pcy) * 128 + pcx] = 7;
+    auto texture = [&](uint32_t w, uint32_t h, DXGI_FORMAT fmt, const void* data, uint32_t pitch,
+                       const wchar_t* name) {
+        GpuTexture t = gpu.CreateTexture2D(w, h, fmt, D3D12_RESOURCE_FLAG_NONE,
+                                           D3D12_RESOURCE_STATE_COPY_DEST, name);
+        gpu.UploadTexture(t, data, pitch);
+        return t;
+    };
+    GpuTexture tPts = texture(kW, H, DXGI_FORMAT_R32G32B32A32_FLOAT, pts.data(), kW * 16, L"tiletest.walkPoints");
+    GpuTexture tDirs = texture(kW, H, DXGI_FORMAT_R32G32B32A32_FLOAT, dirs.data(), kW * 16, L"tiletest.walkDirs");
+    GpuTexture tRows = texture(8, 4, DXGI_FORMAT_R32G32B32A32_FLOAT, rows.data(), 8 * 16, L"tiletest.walkRows");
+    GpuTexture tDir = texture(128, dirRows, DXGI_FORMAT_R16_UINT, dirTex.data(), 256, L"tiletest.walkDirectory");
+    GpuTexture tBad = texture(128, dirRows, DXGI_FORMAT_R16_UINT, planted.data(), 256, L"tiletest.walkPlanted");
+    const uint32_t sPts = gpu.CreateSrv(tPts.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+    const uint32_t sDirs = gpu.CreateSrv(tDirs.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+    const uint32_t sRows = gpu.CreateSrv(tRows.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+    const uint32_t sDir = gpu.CreateSrv(tDir.res.Get(), DXGI_FORMAT_R16_UINT);
+    const uint32_t sBad = gpu.CreateSrv(tBad.res.Get(), DXGI_FORMAT_R16_UINT);
+    hal::RootLayout rl;
+    rl.Constants(0, 5)
+        .Table({hal::SrvRange(0, hal::kUnbounded, 1)})
+        .Table({hal::SrvRange(0, hal::kUnbounded, 2)});
+    const Com<ID3D12RootSignature> rs = rl.Build(gpu, "tiletest.walk");
+    hal::GraphicsPipelineDesc pd;
+    pd.rootSig = rs.Get();
+    pd.vs = sc.Compile(shaderDir + L"/TileWalk.hlsl", L"VsWalk", L"vs_6_0", {L"GA_BLOCK_RANKS=5"});
+    pd.ps = sc.Compile(shaderDir + L"/TileWalk.hlsl", L"PsWalk", L"ps_6_0", {L"GA_BLOCK_RANKS=5"});
+    pd.rtvFormat = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    pd.dsvFormat = DXGI_FORMAT_UNKNOWN;
+    const Com<ID3D12PipelineState> pso = hal::BuildGraphics(gpu, pd, "tiletest.walk");
+    if (!pso) {
+        Log("[tiletest] walk: FAIL -- the probe's pipeline did not build (shaders/TileWalk.hlsl)");
+        return false;
+    }
+    D3D12_CLEAR_VALUE cv{};
+    cv.Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
+    for (float& c : cv.Color) c = kUnreached;
+    GpuTexture rt = gpu.CreateTexture2D(5 * kW, 2 * H, cv.Format, D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+                                        D3D12_RESOURCE_STATE_RENDER_TARGET, L"tiletest.walkChains", &cv);
+    const D3D12_CPU_DESCRIPTOR_HANDLE rtv = gpu.RtvHeap().Cpu(gpu.RtvHeap().Alloc());
+    gpu.Device()->CreateRenderTargetView(rt.res.Get(), nullptr, rtv);
+    auto* cl = gpu.BeginUpload();
+    {
+        PixScope scope(cl, "tiletest.4.17 walk (Walk.hlsli against SurfaceFrame::Walk)");
+        ID3D12DescriptorHeap* heaps[] = {gpu.SrvHeap().Heap()};
+        cl->SetDescriptorHeaps(1, heaps);
+        cl->ClearRenderTargetView(rtv, cv.Color, 0, nullptr);
+        cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
+        cl->SetGraphicsRootSignature(rs.Get());
+        cl->SetPipelineState(pso.Get());
+        cl->SetGraphicsRootDescriptorTable(1, gpu.SrvHeap().Gpu(0));
+        cl->SetGraphicsRootDescriptorTable(2, gpu.SrvHeap().Gpu(0));
+        cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        for (uint32_t plant = 0; plant < 2; ++plant) {
+            const D3D12_VIEWPORT vp{0.0f, float(plant * H), float(5 * kW), float(H), 0.0f, 1.0f};
+            const D3D12_RECT sr{0, LONG(plant * H), LONG(5 * kW), LONG((plant + 1) * H)};
+            const uint32_t c[5] = {sPts, sDirs, sRows, plant ? sBad : sDir, plant * H};
+            cl->RSSetViewports(1, &vp);
+            cl->RSSetScissorRects(1, &sr);
+            cl->SetGraphicsRoot32BitConstants(0, 5, c, 0);
+            cl->DrawInstanced(3, 1, 0, 0);
+        }
+    }
+    gpu.EndUpload();
+    uint32_t pitch = 0;
+    const std::vector<uint8_t> px = gpu.ReadbackTexture(rt, &pitch);
+    uint32_t chains = 0, sameChain = 0, unreached = 0, plantDiffer = 0, plantThrough = 0, steps = 0;
+    uint32_t perFace[6] = {};
+    double worst = 0.0;
+    for (uint32_t k = 0; k < N; ++k) {
+        SurfaceFrame::WalkStep ref[SurfaceFrame::kMaxRanks];
+        const uint32_t n = key.Walk(P[k].data(), ref);
+        double uv[2];
+        const uint32_t f = CubeFaceOfDir(P[k].data(), uv);
+        ++perFace[f];
+        bool same = true, differ = false;
+        for (uint32_t plant = 0; plant < 2; ++plant) {
+            for (uint32_t s = 0; s < SurfaceFrame::kMaxRanks; ++s) {
+                const float* g = reinterpret_cast<const float*>(px.data() + size_t(plant * H + k / kW) * pitch) +
+                                 4 * (5 * (k % kW) + s);
+                if (g[3] == kUnreached) { ++unreached; continue; }
+                const bool gHas = g[0] >= 0.0f, rHas = s < n;
+                if (plant == 0) {
+                    if (gHas != rHas || (s == 0 && uint32_t(g[3]) != n)) { same = false; continue; }
+                    if (!rHas) continue;
+                    if (uint32_t(g[0] + 0.5f) != ref[s].slice) { same = false; continue; }
+                    Worse(worst, (std::max)(std::fabs(double(g[1]) - ref[s].u), std::fabs(double(g[2]) - ref[s].v)) * dim);
+                    ++steps;
+                } else if (gHas != rHas || (rHas && uint32_t(g[0] + 0.5f) != ref[s].slice)) {
+                    differ = true;
+                }
+            }
+        }
+        ++chains;
+        sameChain += same ? 1u : 0u;
+        const bool through = f == 5 && uint32_t(uv[0] * 16.0) == pcx && uint32_t(uv[1] * 16.0) == pcy;
+        plantThrough += through ? 1u : 0u;
+        plantDiffer += differ ? 1u : 0u;
+    }
+    const bool within = sameChain == chains && worst < kBound && unreached == 0;
+    const bool caught = plantDiffer > 0;
+    Log("[tiletest] walk: %u points (face 0..5: %u %u %u %u %u %u) -- %u of %u chains the same, slice "
+        "for slice; %u steps, uv worst %.6f texel against the doubles; %u pixels unreached",
+        chains, perFace[0], perFace[1], perFace[2], perFace[3], perFace[4], perFace[5], sameChain,
+        chains, steps, worst, unreached);
+    Log("[tiletest] walk planted (face 5's cell (%u,%u) names slice 7 where the directory names 6): "
+        "%u chains differ, %u points lie in that cell -- %s",
+        pcx, pcy, plantDiffer, plantThrough, caught ? "CAUGHT" : "NOT CAUGHT: the readback is blind");
+    const HRESULT removed = gpu.Device()->GetDeviceRemovedReason();
+    const bool pass = within && caught && SUCCEEDED(removed);
+    Log("[tiletest] ---- walk %s ----",
+        pass ? "PASS: the two bodies of the walk agree on every chain, the uv within 0.01 texel, "
+               "and the planted cell is caught"
+             : "FAIL: see above");
+    return pass;
+}
+
 }  // namespace
 
 bool RunTileSelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir) {
@@ -1274,7 +1666,11 @@ bool RunTileSelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     // HIERARCHY step 3 after step 0's verdict, the same way. It is a GATE, not a probe: a texel
     // 0.01 off the doubles fails the suite, as a broken instrument does.
     const bool step3 = ProbeAddress(gpu, sc, shaderDir);
-    return m0 && step0 && step3;
+    // HIERARCHY 4.17 commit 3: the standing blocks' address with the key's own rows, a gate too.
+    const bool blocks = ProbeBlockAddress(gpu, sc, shaderDir);
+    // HIERARCHY 4.17 commit 4: the directory walk's two bodies held equal, a gate too.
+    const bool walk = ProbeWalk(gpu, sc, shaderDir);
+    return m0 && step0 && step3 && blocks && walk;
 }
 
 namespace {

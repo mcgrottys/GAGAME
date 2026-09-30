@@ -1,0 +1,44 @@
+{
+  "_readme": [
+    "THE DROSTE BOAT -- a playable scene. You are at the helm of the Novurania 18 RHIB off the",
+    "north jetty of the Merrimack on the afternoon of 2026-08-28, with the storm sea running. Over",
+    "the mouth hangs the Droste portal: the globe within the globe, this same planet at a smaller",
+    "scale, turned a quarter, with this very inlet and this very boat inside it, and inside that",
+    "one more, three levels deep. Drive into the portal and you dive: the nearest ground becomes",
+    "the next level down and the world is whole again at its new size (the log says when).",
+    "",
+    "Everything drawn is the same data: the colour and the mask on the standing blocks of the",
+    "pyramid, the plane orthos and the survey read straight from their files through the scene's",
+    "`sources`, the solver waiting for its whole bed before it starts, and one water under the boat",
+    "and under the picture.",
+    "",
+    "Launch from the repo root:  build/bin/gagame.exe scenes/demos/droste_boat.json",
+    "",
+    "HELM   W / S  both throttles ahead / astern      A / D  steer to port / starboard",
+    "       Q / E  split the levers (pivot)           Shift / Ctrl  trim out / in",
+    "T      leave the helm: the camera flies free (the boat keeps its throttles); T again returns",
+    "FLY    W A S D move, Q / E down / up, hold the right mouse button to look, wheel = speed",
+    "TIME   Space pause, Up / Down time x10 / /10, Left / Right nudge.   R reload shaders.",
+    "",
+    "The first boot paints the plane orthos into the tree once (about half a minute) and says so."
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {"name": "droste-boat", "mode": "world", "view": "sea"},
+  "time": {"start": "2026-08-28T14:00:00Z"},
+  "sea": {"storm": {"hs": 3, "tp": 10, "dir": 95}},
+  "views": [
+    {"name": "sea", "follow": {"target": "boat"}, "interests": [{"name": "boat"}]}
+  ],
+  "entities": [
+    {"name": "boat", "vessel": "rhib.novurania18", "at": {"x": 120, "alt": 0, "z": -10, "az": 86},
+     "controller": "helm"}
+  ],
+  "interests": [
+    {"name": "boat", "target": "boat", "radius": 200}
+  ],
+  "portals": [
+    {"name": "droste", "enabled": true, "lat": 42.81826, "lon": -70.80045, "level": 16, "fill": 1,
+     "twistDeg": 90, "lighting": "realistic"}
+  ],
+  "rails": {"droste": {"levelSec": 16, "levels": 3}}
+}

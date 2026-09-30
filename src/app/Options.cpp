@@ -153,11 +153,12 @@ Options ParseArgs(int argc, char** argv) {
             o.pixFrames = static_cast<uint32_t>(_wtoi(Widen(next("1").c_str()).c_str()));
             if (o.pixFrames == 0) o.pixFrames = 1;
         }
-        else if (a == "--dump-fibers" || a == "--sky-probe") {
-            // Two flags on one link: the else-if chain below is AT the compiler's
+        else if (a == "--dump-fibers" || a == "--sky-probe" || a == "--bed-trace-plant") {
+            // Three flags on one link: the else-if chain below is AT the compiler's
             // nesting limit (C1061 on one more `else if`), so a new flag joins a
             // neighbour rather than deepening it.
             if (a == "--sky-probe") o.skyProbe = true;
+            else if (a == "--bed-trace-plant") o.bedTracePlant = true;
             else o.dumpFibers = true;
         }
         else if (a == "--lens") {
@@ -168,7 +169,7 @@ Options ParseArgs(int argc, char** argv) {
                      : n == "ring" ? 4 : n == "cascade" ? 5
                      : n == "waterdata" ? 6 : n == "velgrad" ? 7 : n == "shell" ? 8
                      : n == "residency" ? 9 : n == "residency.height" ? 10
-                     : n == "residency.landsea" ? 11 : 1;
+                     : n == "residency.landsea" ? 11 : n == "mix" ? 12 : n == "mix.near" ? 13 : 1;
         }
         else if (a == "--probe-cull-far") o.probeCullFar = true;
         else if (a == "--dump-meshlets") o.dumpMeshlets = Widen(next("meshlets.bin").c_str());
@@ -263,8 +264,6 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--no-exposure") o.exposure = false;
         else if (a == "--gis-dump") o.gisDump = next("gis_gate.pgm");
         // M9al: the ring gate and its instrument. Instrument first, gate second, both off.
-        else if (a == "--ring-loads") o.ringLoads = true;      // the default; kept for scripts
-        else if (a == "--no-ring-loads") o.ringLoads = false;
         else if (a == "--res-trace") o.resTrace = true;
         // M13 step 0: count the water tiles the walk would want on the planet's own lattice.
         else if (a == "--water-tiles") o.waterTiles = true;
@@ -289,14 +288,17 @@ Options ParseArgs(int argc, char** argv) {
         }
         // The drawn sea against the water each hull reads (app/Tools/WaterProbe.cpp): the scene
         // depth read back every N recorded frames. An instrument -- its readbacks stop the GPU.
-        else if (a == "--water-probe" || a == "--pages-trace" || a == "--res-audit") {
-            // Three every-N instruments on one link (the chain is at C1061's limit, line ~158).
+        else if (a == "--water-probe" || a == "--pages-trace" || a == "--res-audit" ||
+                 a == "--bed-trace") {
+            // Four every-N instruments on one link (the chain is at C1061's limit, line ~158).
             // --pages-trace is the slice pool's (stage 0): the pages ledger every Nth turn.
             // --res-audit is the scene's capture.residencyAudit: the residency bytes against the
             // mapped set every Nth turn (hal/ResidencyAudit.h).
+            // --bed-trace is the solver's bed read back through its own kernel (Tools/BedTrace).
             const uint32_t every = uint32_t(atoi(next("30").c_str()));
             if (a == "--pages-trace") o.pagesEvery = every;
             else if (a == "--res-audit") o.resAudit = every;
+            else if (a == "--bed-trace") o.bedTraceEvery = every;
             else o.waterProbeEvery = every;
         }
         else if (a == "--tree-audit" || a == "--tree-prune") {
@@ -403,7 +405,10 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--swe-uv") o.sweUvDump = Widen(next("swe_uv.png").c_str());
         else if (a == "--swe-gain") o.sweGain = static_cast<float>(atof(next("3.2").c_str()));
         else if (a == "--swe-spinup") o.sweSpinupH = atof(next("0.25").c_str());
-        else if (a == "--swe-cycle") o.sweCycleH = atof(next("13").c_str());
+        else if (a == "--swe-cycle" || a == "--swe-cycle-stage") {   // one link: the chain is at
+            if (a == "--swe-cycle") o.sweCycleH = atof(next("13").c_str());   // MSVC's nesting limit
+            else o.sweCycleStageM = atof(next("0").c_str());
+        }
         else if (a == "--water-map") o.waterMap = Widen(next("water_map.png").c_str());
         else if (a == "--wave-map") o.waveMap = Widen(next("wave_map.png").c_str());
         else if (a == "--bathy-map") o.bathyMap = Widen(next("bathy_map.png").c_str());
@@ -530,7 +535,8 @@ JsonValue StartValue(double startUnix) {
 
 const char* kLensNames[] = {"worldxz", "worldxz",   "winuv",    "mip",
                             "ring",    "cascade",   "waterdata", "velgrad",
-                            "shell",   "residency", "residency.height", "residency.landsea"};
+                            "shell",   "residency", "residency.height", "residency.landsea",
+                            "mix",     "mix.near"};
 
 }  // namespace
 
@@ -624,7 +630,6 @@ SceneArgs Options::ToSets(const Options& o) {
     if (o.gisGate != D.gisGate) set("streaming.gisGate", JsonBool(o.gisGate));
     if (o.seafloor != D.seafloor) set("streaming.seafloor", JsonBool(o.seafloor));
     if (o.exposure != D.exposure) set("streaming.exposure", JsonBool(o.exposure));
-    if (o.ringLoads != D.ringLoads) set("streaming.ringLoads", JsonBool(o.ringLoads));
     // ---- capture
     if (o.headless) set("capture.headless", JsonBool(true));
     if (o.width != D.width) set("capture.width", num(o.width));
@@ -754,7 +759,7 @@ SceneArgs Options::ToSets(const Options& o) {
     auto rawf = [&](const std::string& s) { out.raw.push_back(s); };
     if (o.pixFrames) rawf("--pix " + std::to_string(o.pixFrames));
     if (o.dumpFibers) rawf("--dump-fibers");
-    if (o.lens) rawf(std::string("--lens ") + kLensNames[o.lens > 0 && o.lens < 12 ? o.lens : 0]);
+    if (o.lens) rawf(std::string("--lens ") + kLensNames[o.lens > 0 && o.lens < 14 ? o.lens : 0]);
     if (o.probeCullFar) rawf("--probe-cull-far");
     if (!o.dumpMeshlets.empty()) rawf("--dump-meshlets " + Narrow(o.dumpMeshlets));
     if (o.inject) rawf(o.inject == 2 ? "--inject cascade" : "--inject bank");
@@ -771,6 +776,9 @@ SceneArgs Options::ToSets(const Options& o) {
     if (o.skyProbe) rawf("--sky-probe");
     if (o.waterProbeEvery) rawf("--water-probe " + std::to_string(o.waterProbeEvery));
     if (o.pagesEvery) rawf("--pages-trace " + std::to_string(o.pagesEvery));
+    if (o.bedTraceEvery) rawf("--bed-trace " + std::to_string(o.bedTraceEvery));
+    if (o.bedTracePlant) rawf("--bed-trace-plant");
+    if (o.sweCycleStageM != 0) rawf("--swe-cycle-stage " + scene::NumberText(o.sweCycleStageM));
     if (o.benchOverlap) rawf("--bench-overlap");
     else if (o.bench) rawf("--bench");
     if (o.gpuTime) rawf("--gpu-time");

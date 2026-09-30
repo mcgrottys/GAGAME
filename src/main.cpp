@@ -109,6 +109,11 @@ int main(int argc, char** argv) {
         // The prune tool: the tile trees' folders by last use, before any device and before any
         // tree exists -- it builds none, so it stamps none. Its keys are the scene's prune.*.
         if (S.Tool("tree-prune")) return tools::RunTreePrune(S.prune);
+        // One block of --selftest that needs no device: a raster by file and its own level; with
+        // `:real`, the real height files against the harvester's grids (slice 3, part C).
+        if (const SceneTool* t = S.Tool("rastertest")) {
+            return (t->args == "real" ? ga::RunRealHeightsCheck() : ga::RunRasterFileSelfTest()) ? 0 : 1;
+        }
 
         // ---- M0 + M4: the self-test path needs a device and the shader compiler, nothing else.
         if (!topt.loadField.empty()) return tools::RunLoadField(topt);

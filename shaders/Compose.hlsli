@@ -9,8 +9,8 @@
 //
 //  The rows this file reads are Common.hlsli's SurfaceCb (b2): ONE constant buffer, filled
 //  through SurfaceFrame::Fill alone (M12 step 4a) and bound once a frame for every layer (M12
-//  step 4g, where each layer embedded a copy in its own cbuffer). The globe and the terrain
-//  therefore run literally the same code on literally the same constants -- the class of bug
+//  step 4g, where each layer embedded a copy in its own cbuffer). Every layer that reads them
+//  therefore runs literally the same code on literally the same constants -- the class of bug
 //  where two layers disagree about the planet's surface is structurally gone.
 //  M12 step 4e: the reads themselves -- the window uv, the residency floor, the residency-
 //  clamped sample, the cube-versus-page choice -- are PageSample.hlsli's contract, shared with
@@ -81,12 +81,56 @@ float3 CsGroundM() { return gCsGround.xyz; }
 // ground held -- "at least as fine" (the height path's spelling), which with these literals is
 // the strict `<` this path used to write: no two rungs' literal grounds are ever equal in float
 // (9.55 * 64 = 611.2, not 611; 1.19 * 8 = 9.52, not 9.55). Measured, not assumed.
-float3 ComposedColorPages(float3 dir) {
+#if GA_BLOCK_RANKS
+// HIERARCHY 4.17: THE STANDING BLOCKS, compiled in only when the scene's key stands: the engine
+// defines GA_BLOCK_RANKS, the key's ranks (SurfaceFrame::Ranks). With no key, nothing between
+// here and the #endif is compiled, nor the chain's lines in the readers below: every shader is
+// today's, byte for byte, and the old path and the new are chosen by the one key.
+// Commit 3: THE ADDRESS. Block i's rows are PageTexelUv's planes about the eye's own tangent
+// frame, anchored on the multiple of 16384 texels of its rung nearest the eye
+// (SurfaceFrame::BlockRows), so the point p is the UNDISPLACED ground point relative to the eye in
+// that frame -- the mesh stage's geo -- and every number here is small; blkO adds back the whole
+// blocks from that anchor to the block's own origin.
+float CsBlockGround(uint i) {   // by selects, not an index into the row: no local array
+    const float4 g = gCsBlkG[i >> 2];
+    const uint c = i & 3u;
+    return (c == 0u) ? g.x : (c == 1u) ? g.y : (c == 2u) ? g.z : g.w;
+}
+float2 CsBlockUv(uint i, float3 p) {
+    const float4 o = gCsBlkO[i >> 1];
+    return PageTexelUv(p, gCsBlkU[i], gCsBlkV[i], gCsBlkW[i]) + ((i & 1u) != 0u ? o.zw : o.xy);
+}
+// A stage with only a direction makes the point from it, in float32: the direction's own grain
+// (0.43 texel at rung 9, uv_precision.py) and no better. The eye is blkE, about the centre.
+float3 CsPointOfDir(float3 dir) { return CsToTangent(dir) * gCsF.w - gCsBlkE.xyz; }
+#define WALK_UV(i, p) CsBlockUv(i, p)
+#include "Walk.hlsli"
+// Commit 4: THE CHAIN -- the blocks a point lies in, one a rank, coarsest first -- found by the
+// directory ONCE where a stage begins and handed to every reader below (CS_WC): the colour's,
+// the mask's, the texel's grain. No reader of the stage's own point walks for itself.
+WalkChain CsWalk(float3 dir, float3 p) {
+    if (gCsDirU.x == 0xFFFFFFFFu) return (WalkChain)0;
+    return Walk(dir, p, gTexU[gCsDirU.x]);
+}
+// A read at ANOTHER point (the pixel water's bed, where its refracted ray lands) walks from that
+// point: the bed may lie in a block the surface point does not, and the stage's chain moved there
+// would leave that rank unanswered (measured: 78 pixels at the 7 km pose).
+#define CS_WC_PARAM , WalkChain wc
+#define CS_WC , wc
+#define CS_WALK_AT(d) , CsWalk(d, CsPointOfDir(d))
+#else
+#define CS_WC_PARAM
+#define CS_WC
+#define CS_WALK_AT(d)
+#endif
+
+float3 ComposedColorPages(float3 dir CS_WC_PARAM) {
     // The cube, through the cube views over slices 0..5 (hardware-seamless across faces).
     const float haveC = CsHaveCubeArr(gCsU.y, dir);
     float3 c = PageSampleCube(gTexCubeArr[gCsU.x], sAniso, dir, haveC).rgb;
     const float3 g0 = CsGroundM();
     float ground = PageGroundM(g0.x, haveC);
+#if !GA_BLOCK_RANKS   // while blocks stand the z14 window is no page: its slice is unset (SurfaceFrame::Fill)
     if (gCsF.y > 0.5f) {
         const float2 duv = CsWindowUv(dir);
         if (all(duv > 0.0f) && all(duv < 1.0f)) {
@@ -109,11 +153,31 @@ float3 ComposedColorPages(float3 dir) {
             }
         }
     }
+#endif
+#if GA_BLOCK_RANKS
+    // HIERARCHY 4.17: the standing blocks, the stage's chain coarsest rank first, by the same
+    // ladder and no new rule: a block answers where the point's uv lies inside it and its resident
+    // ground is at least as fine as the ground held; a rank with nothing resident ends the chain.
+    [unroll] for (uint k = 0; k < GA_BLOCK_RANKS; ++k) {
+        if (k >= wc.n) break;
+        const uint sl = WalkSlice(wc, k);
+        const float2 buv = WalkUv(wc, k);
+        if (all(buv > 0.0f) && all(buv < 1.0f)) {
+            const float haveB = CsHavePage(gCsU5.y, buv, sl);
+            if (haveB > 7.5f) break;
+            const float gB = PageGroundM(CsBlockGround(sl - 6u), haveB);
+            if (PageWins(gB, ground)) {
+                c = PageSample(gTexArr[gCsU5.x], sAniso, buv, sl, haveB).rgb;
+                ground = gB;
+            }
+        }
+    }
+#endif
     return c;
 }
 
-float3 ComposedColor(float3 dir) {
-    if (gCsU5.x != 0xFFFFFFFFu && gCsF.x > 0.5f) return ComposedColorPages(dir);
+float3 ComposedColor(float3 dir CS_WC_PARAM) {
+    if (gCsU5.x != 0xFFFFFFFFu && gCsF.x > 0.5f) return ComposedColorPages(dir CS_WC);
     float3 c = float3(0.5f, 0.5f, 0.5f);
     if (gCsF.x > 0.5f) {
         // M9z: ANISOTROPIC, and the CalculateLevelOfDetail call is GONE. It collapsed the
@@ -170,18 +234,9 @@ float3 ComposedColor(float3 dir) {
 }
 bool ComposedColorOn() { return gCsF.x > 0.5f; }
 
-// M9av: THE SEAFLOOR THROUGH OPAQUE WATER. The megatexture's ocean texels are DRY seafloor
-// albedo (synth.seafloor.relief: the bathymetry's hillshade times a sediment ramp keyed on
-// datum depth). Beer-Lambert over the measured K_d makes water past a few tens of metres
-// opaque, and the two-flux endpoint (chlorophyll, SPM) IS its colour -- that stays. The floor's
-// SHADING is carried as a modulation of that endpoint's brightness: divide the ramp's own
-// luminance back out of the texel and what remains is the hillshade, flat bed = 1. A map
-// convention, declared: the hue is the measurement, the relief is the floor's, and
-// kSeafloorRelief = 0 removes it.
-static const float kSeafloorRelief = 1.0f;          // 0 = the physical endpoint alone
-static const float kSeafloorReliefContrast = 1.0f;  // hillshade gain over the painted swing (the
-                                                    // user chose the painted swing as is; a
-                                                    // brightened "map ocean" was tried and rejected)
+// M9av: the luminance of the seafloor's dry sediment ramp. The megatexture's ocean texels are
+// DRY seafloor albedo (synth.seafloor.relief: the bathymetry's hillshade times this ramp, keyed
+// on datum depth).
 float SeafloorRampLuma(float depthM) {
     // MIRRORS src/compose/Sources.cpp SeafloorRamp: change both.
     const float d = clamp(depthM, 0.0f, 4000.0f);
@@ -194,56 +249,6 @@ float SeafloorRampLuma(float depthM) {
     else if (d < 1000.0f) c = lerp(c2, c3, (d - 200.0f) / 800.0f);
     else c = lerp(c3, c4, (d - 1000.0f) / 3000.0f);
     return dot(c, float3(0.299f, 0.587f, 0.114f));
-}
-// The endpoint's HUE and brightness are the measurement's (albWater is kept in the signature
-// for the record: a version that redrew the floor through water of that hue at a declared
-// visibility was brighter, greener, and rejected -- the physical water is the look). Only the
-// floor's hillshade rides the endpoint, as a brightness modulation, where the bed term has died.
-float3 SeafloorReliefMod(float3 albSea, float3 albWater, float3 floorAlb, float hp, float opaque) {
-    const float3 L = float3(0.299f, 0.587f, 0.114f);
-    const float ref = SeafloorRampLuma(max(-hp, 0.0f));
-    const float shade0 = dot(floorAlb, L) / max(ref, 1e-3f);          // flat bed = 1
-    const float shade = clamp(1.0f + kSeafloorReliefContrast * (shade0 - 1.0f), 0.30f, 2.2f);
-    return albSea * lerp(1.0f, shade, kSeafloorRelief * saturate(opaque));
-}
-
-// M7g: the effective composed-color texel (metres) RESIDENT at this pixel. Consumers that
-// historically replaced the mosaic outright (the close-up material constants, born when
-// the near field was a 9.5 m blur) ask this and YIELD where the imagery outresolves them.
-float ComposedColorTexelM(float3 dir) {
-    const float3 g0 = CsGroundM();
-    float t = g0.x;   // cube-only worst case
-    if (gCsU5.x != 0xFFFFFFFFu) {
-        // M9ap: the pages path reports the same choice ComposedColorPages makes -- the finest
-        // resident ground of the ladder (PageWins, as a value).
-        t = PageGroundM(g0.x, CsHaveCubeArr(gCsU.y, dir));
-        if (gCsF.y > 0.5f) {
-            const float2 duv = CsWindowUv(dir);
-            if (all(duv > 0.0f) && all(duv < 1.0f)) {
-                t = min(t, PageGroundM(g0.y, CsHavePage(gCsU5.y, duv, gCsU5.z)));
-                if (gCsU5.w != 0xFFFFFFFFu) {
-                    const float2 tuv = duv * gCsDet.z + gCsDet.xy;
-                    if (all(tuv > 0.001f) && all(tuv < 0.999f)) {
-                        t = min(t, PageGroundM(g0.z, CsHavePage(gCsU5.y, tuv, gCsU5.w)));
-                    }
-                }
-            }
-        }
-        return t;
-    }
-    if (gCsF.y > 0.5f && gCsU.z != 0xFFFFFFFFu) {
-        const float2 duv = CsWindowUv(dir);
-        if (all(duv > 0.0f) && all(duv < 1.0f)) {
-            t = PageGroundM(g0.y, CsHave2D(gCsU.w, duv));
-            if (gCsU4.x != 0xFFFFFFFFu) {
-                const float2 tuv = duv * gCsDet.z + gCsDet.xy;
-                if (all(tuv > 0.001f) && all(tuv < 0.999f)) {
-                    t = min(t, PageGroundM(g0.z, CsHave2D(gCsU4.y, tuv)));
-                }
-            }
-        }
-    }
-    return t;
 }
 
 // The planet's composed height (metres), residency-clamped at the caller's lod. Usable from a
@@ -308,9 +313,25 @@ bool ComposedHeightOn() { return gCsF.z > 0.5f; }
 // z14, then the cube face. No page with an opinion here -> false: the classifier falls back
 // to the height sign. The three committed rasters this replaces (window R8G8, global R8,
 // fine edit R8G2) read the .raw parity fills the vector mask refuses; they are gone.
-bool CsMaskSample(float3 dir, out float4 m) {
+bool CsMaskSample(float3 dir CS_WC_PARAM, out float4 m) {
     m = float4(0, 0, 0, 0);
     if (gCsU3.x == 0xFFFFFFFFu) return false;
+#if GA_BLOCK_RANKS
+    // HIERARCHY 4.17: the stage's chain in the pages' order -- the finest with an OPINION answers,
+    // the finest rank first; the Mercator pages are then not the mask's.
+    [unroll] for (int k = GA_BLOCK_RANKS - 1; k >= 0; --k) {
+        if (uint(k) >= wc.n) continue;
+        const uint sl = WalkSlice(wc, uint(k));
+        const float2 buv = WalkUv(wc, uint(k));
+        if (all(buv > 0.001f) && all(buv < 0.999f)) {
+            const float haveB = CsHavePage(gCsU3.y, buv, sl);
+            if (haveB <= 7.5f) {
+                m = PageSampleLevel(gTexArr[gCsU3.x], sLinearClamp, buv, sl, 0.0f, haveB);
+                if (m.a > 0.001f) return true;
+            }
+        }
+    }
+#else
     const float2 duv = CsWindowUv(dir);
     if (all(duv > 0.0f) && all(duv < 1.0f)) {
         if (gCsU5.w != 0xFFFFFFFFu) {   // the z17 page exists in the colour ladder -> ours too
@@ -329,6 +350,7 @@ bool CsMaskSample(float3 dir, out float4 m) {
             if (m.a > 0.001f) return true;
         }
     }
+#endif
     if (gCsU3.z != 0xFFFFFFFFu) {
         const float haveC = CsHaveCubeArr(gCsU3.w, dir);
         if (haveC <= 7.5f) {
@@ -342,9 +364,9 @@ bool CsMaskSample(float3 dir, out float4 m) {
 // The survey land mask, per pixel: land coverage 0..1, or -1 where the survey has no opinion
 // (outside its rings' box, or a planet without GIS). Coverage is un-premultiplied: a texel
 // half surveyed still reports its water fraction, not half of it.
-float ComposedLandMask(float3 dir) {
+float ComposedLandMask(float3 dir CS_WC_PARAM) {
     float4 m;
-    if (!CsMaskSample(dir, m)) return -1.0f;
+    if (!CsMaskSample(dir CS_WC, m)) return -1.0f;
     return 1.0f - m.r / max(m.a, 0.001f);
 }
 
@@ -361,15 +383,15 @@ float ComposedLandMask(float3 dir) {
 // polygon IS a bit); no mask, no window -> height sign vs the waterline (Mars: 0).
 // M7f/M9ay: the hand edits -- (land, edited) at this pixel from the mask pages; the z17 page
 // keeps the jetties at 1.19 m where the ~1 m fine raster used to. (0, 0) with no opinion.
-float2 CsEditMask(float3 dir) {
+float2 CsEditMask(float3 dir CS_WC_PARAM) {
     float4 m;
-    if (!CsMaskSample(dir, m)) return float2(0.0f, 0.0f);
+    if (!CsMaskSample(dir CS_WC, m)) return float2(0.0f, 0.0f);
     const float a = max(m.a, 0.001f);
     return float2(1.0f - m.r / a, m.b / a);
 }
 
-float ComposedLandness(float3 dir, float hp, float waterLevel) {
-    const float lm = ComposedLandMask(dir);
+float ComposedLandness(float3 dir CS_WC_PARAM, float hp, float waterLevel) {
+    const float lm = ComposedLandMask(dir CS_WC);
     float land = (lm >= 0.0f) ? ((lm > 0.5f) ? 1.0f : 0.0f)
                               : ((hp > waterLevel) ? 1.0f : 0.0f);
     if (gCsU2.z != 0xFFFFFFFFu) {
@@ -384,22 +406,22 @@ float ComposedLandness(float3 dir, float hp, float waterLevel) {
     // classifier smears their thin ridges -- the operator's polygon settles it). Bilinear g
     // blends the override's own edge.
     if (gCsU3.x != 0xFFFFFFFFu) {
-        const float2 me = CsEditMask(dir);
+        const float2 me = CsEditMask(dir CS_WC);
         land = lerp(land, (me.x > 0.5f) ? 1.0f : 0.0f, smoothstep(0.2f, 0.8f, me.y));
     }
     return land;
 }
 // The binary view, for consumers that ARE bits (the sea's discard).
-bool ComposedIsLand(float3 dir, float hp, float waterLevel) {
-    return ComposedLandness(dir, hp, waterLevel) > 0.5f;
+bool ComposedIsLand(float3 dir CS_WC_PARAM, float hp, float waterLevel) {
+    return ComposedLandness(dir CS_WC, hp, waterLevel) > 0.5f;
 }
 
 // M6p: strength of a hand-edit declaring LAND here (0 where unedited or edited to water).
 // Geometry consumers floor their display height with it: an operator's jetty stands as a
 // continuous ridge even where the smeared height channel dips under the tide.
-float ComposedEditLand(float3 dir) {
+float ComposedEditLand(float3 dir CS_WC_PARAM) {
     if (gCsU3.x == 0xFFFFFFFFu) return 0.0f;
-    const float2 me = CsEditMask(dir);
+    const float2 me = CsEditMask(dir CS_WC);
     return smoothstep(0.2f, 0.8f, me.y) * ((me.x > 0.5f) ? 1.0f : 0.0f);
 }
 

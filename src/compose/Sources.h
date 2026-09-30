@@ -29,17 +29,24 @@ class GoogleTileProvider;
 // boundaries stop being color-grade seams -- normalization at PAINT time, never at render.
 class GoogleColorSource : public ColorSource {
 public:
-    explicit GoogleColorSource(GoogleTileProvider* prov);
+    // THE FINEST ZOOM IS THE SCENE'S (streaming.googleZoom), held to 0..kMaxZoom. At
+    // kDefaultZoom the name and structure are byte for byte what they were when 14 was a
+    // literal, so no tree moves; at any other cap the structure says so (", to z17").
+    static constexpr int kDefaultZoom = 14, kMaxZoom = 19;
+    explicit GoogleColorSource(GoogleTileProvider* prov, int zoomCap = kDefaultZoom);
     const SourceInfo& Info() const override { return m_info; }
     void BeginTile(double latMin, double latMax, double lonMin, double lonMax,
                    double groundResM, PaintCtx& ctx) override;
     float Sample(double latRad, double lonRad, double groundResM, const PaintCtx& ctx,
                  uint8_t rgba[4]) override;
     bool Refusals(uint32_t& refused) const override;
+    // The zoom a footprint asks for, held to 0..the cap (public for the selftest).
+    int ZoomFor(double groundResM) const;
 
 private:
     bool Pixel(int z, double latRad, double lonRad, uint8_t rgb[3]);
     GoogleTileProvider* m_prov;
+    int m_zoomCap;
     SourceInfo m_info;
 };
 
@@ -83,40 +90,7 @@ private:
     SourceInfo m_info;
 };
 
-// M6l: MassGIS 2023 15 cm plane-flown orthos of the inlet -- the compositor's first
-// INDEPENDENT high-res layer, and the proof case for the alignment contract: the source
-// declares its NATIVE projection (EPSG:6348, NAD83(2011)/UTM 19N, from the GeoJP2 header)
-// and Sample() resolves WGS84 lat/lon into it with the EXACT transverse-Mercator forward --
-// no linear approximations -- then picks the mip whose metres-per-pixel matches the
-// requested paint footprint. Tiles are memory-mapped (a mip chain per 1500 m tile).
-class AerialOrthoSource : public ColorSource {
-public:
-    ~AerialOrthoSource();
-    bool Load(const std::string& jsonPath);
-    const SourceInfo& Info() const override { return m_info; }
-    float Sample(double latRad, double lonRad, double groundResM, const PaintCtx& ctx,
-                 uint8_t rgba[4]) override;
-
-private:
-    struct MipLevel {
-        uint32_t px = 0;
-        uint64_t offset = 0;
-    };
-    struct Tile {
-        double e0 = 0, n0 = 0, e1 = 0, n1 = 0;   // UTM19N bounds
-        const uint8_t* data = nullptr;           // mapped view of the mip chain
-        uint32_t channels = 3;                   // 3 = rgb; 4 = rgba -- ALPHA IS FIBER:
-                                                 // per-pixel alpha multiplies the paint
-                                                 // weight, so a mostly-transparent overlay
-                                                 // (highlights) bleeds through the quadtree
-                                                 // pixel by pixel
-        std::vector<MipLevel> mips;
-    };
-    std::vector<Tile> m_tiles;
-    std::vector<void*> m_handles;   // files + mappings + views, released in the dtor
-    double m_ue0 = 1e18, m_un0 = 1e18, m_ue1 = -1e18, m_un1 = -1e18;
-    SourceInfo m_info;
-};
+// (The plane orthos and the overlays are scene sources now, compose/RasterFileSource.h.)
 
 // A CUDEM topobathy window through an already-loaded, thalweg-preserving BathyModel grid.
 // M6w: any number of focus windows (merrimack, capeann, boston...) stack as separate
@@ -127,6 +101,14 @@ public:
                                const char* name = "noaa.cudem.merrimack");
     const SourceInfo& Info() const override { return m_info; }
     float Sample(double latRad, double lonRad, double groundResM, float& metres) override;
+    // The weight the feather gives a world point (x east, z north, metres) -- Sample's own,
+    // before the data is asked: 1 inside the band the window fades over, 0 at its edge.
+    float EdgeWeight(double x, double z) const;
+    // WHERE THIS SURVEY PAINTS AT FULL WEIGHT, in its own cells: the first and last column and
+    // row whose centres EdgeWeight calls 1 (HIERARCHY 4.17: a solver stands there). False when
+    // no cell does. The band follows the feather: ask again and a new feather gives a new box.
+    bool FullWeightCells(int& c0, int& r0, int& c1, int& r1) const;
+    const BathyModel* Grid() const { return m_bathy; }
 
 private:
     const BathyModel* m_bathy;
@@ -190,8 +172,7 @@ private:
 // the slope, clay on the plain). Global footprint; the alpha is the same waterline band the bed
 // classifier hands land back through, with NO deep cutoff: the tree paints every ocean texel.
 // DRY albedo, like synth.bed: the water's optics (measured K_d, the two-flux endpoint) stay the
-// renderer's, and where they make the water opaque the renderer shades the endpoint by this
-// relief instead of replacing it (Compose.hlsli SeafloorReliefMod).
+// renderer's.
 class SeafloorReliefSource : public ColorSource {
 public:
     bool Load(const std::string& rulesPath, const Compositor* comp, int hgtChannel);

@@ -476,7 +476,7 @@ disjoint by construction, not by luck:
 
 | term | where it applies | what stops it doubling |
 |---|---|---|
-| `AerialPerspective` (haze, 1.3 km scale height) | Sea.hlsl water (both shading paths, once at the end); Globe.hlsl's M6j close-up material; Terrain.hlsl | the Sea PSO is opaque (`ONE`/`ZERO`), so it *replaces* the globe's pixel rather than adding to it; the M6j block is gated `landness > 0` |
+| `AerialPerspective` (haze, 1.3 km scale height) | Sea.hlsl water (both shading paths, once at the end); Globe.hlsl's M6j close-up material | the Sea PSO is opaque (`ONE`/`ZERO`), so it *replaces* the globe's pixel rather than adding to it; the M6j block is gated `landness > 0` |
 | the cloud-volume march | Globe.hlsl PsMain, once, between the shell entry and the ground | one block, one `col = col*T + scat` |
 | the from-space rim | Globe.hlsl PsMain, faded in above 60 km altitude | complementary to the shell: rim is *on* the disc, the shell is *off* it |
 | the Rayleigh shell (`PsSky`) | fullscreen backdrop at reversed-Z infinity with `GREATER_EQUAL` | touches only pixels nothing has drawn |

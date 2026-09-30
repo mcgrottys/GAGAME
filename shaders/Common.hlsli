@@ -106,7 +106,8 @@ TextureCube gTexCube[] : register(t0, space3);   // M6e: streamed planet surface
 
 SamplerState sLinearClamp : register(s0);
 SamplerState sLinearWrap  : register(s1);
-SamplerState sPointClamp  : register(s2);     // for fields that must NOT be filtered; see below
+SamplerState sPointClamp  : register(s2);     // for fields that must NOT be filtered (GA.hlsli
+                                              // NlerpRotor: rotor fields are point-sampled)
 // M9z: anisotropic, for the streamed SURFACE at grazing angles. Used with Sample()'s min-LOD
 // clamp form so the hardware picks the footprint while the residency floor still holds -- a
 // miss must still degrade to the best RESIDENT ancestor, never to unmapped garbage.
@@ -114,11 +115,6 @@ SamplerState sPointClamp  : register(s2);     // for fields that must NOT be fil
 SamplerState sAniso       : register(s3);
 
 #ifndef GA_NO_FIELD_BUFFER
-float2 FieldUv(uint idx, float2 worldXZ) {
-    FieldDesc f = gFields[idx];
-    return worldXZ * f.worldToUv.xy + f.worldToUv.zw;
-}
-
 // Bilinear. Correct for scalars, vectors and independent-channel packings.
 float4 SampleField(uint idx, float2 worldXZ) {
     FieldDesc f = gFields[idx];
@@ -127,25 +123,7 @@ float4 SampleField(uint idx, float2 worldXZ) {
     return v * f.valueScale + f.valueBias;
 }
 
-// Point-sampled. Use for rotor fields -- see the warning on NlerpRotor below.
-float4 SampleFieldPoint(uint idx, float2 worldXZ) {
-    FieldDesc f = gFields[idx];
-    float2 uv = worldXZ * f.worldToUv.xy + f.worldToUv.zw;
-    float4 v = gTex[f.srvIndex].SampleLevel(sPointClamp, saturate(uv), 0);
-    return v * f.valueScale + f.valueBias;
-}
-
 float SampleField1(uint idx, float2 worldXZ) { return SampleField(idx, worldXZ).x; }
-
-// Metres by which a world position lies OUTSIDE the field's extent, per axis, signed.
-// Clamping a PHASE field at the edge is not a neutral extrapolation: the phase stops advancing.
-// Amplitude and wavenumber clamp harmlessly; phase must be CONTINUED.
-float2 FieldOverrun(uint idx, float2 worldXZ) {
-    FieldDesc f = gFields[idx];
-    const float2 uv = worldXZ * f.worldToUv.xy + f.worldToUv.zw;
-    const float2 over = uv - saturate(uv);
-    return over / f.worldToUv.xy;   // back to metres
-}
 #endif  // GA_NO_FIELD_BUFFER
 
 // Reversed-Z with an infinite far plane: ndcZ = nearZ / viewZ, so viewZ = nearZ / ndcZ.
@@ -241,10 +219,6 @@ float3 SunThroughAirAt(float3 up, float3 sunDir, float eyeR) {
     const float Rb = gSkyLut.y;
     const float r = clamp(eyeR, Rb + 1.0f, Rb + kAtmTopM - 1000.0f);
     return AtmSunT(r, clamp(dot(sunDir, up), -1.0f, 1.0f), Rb);
-}
-float3 SunThroughAir() {
-    return SkyAirOn(GA_SKY_EYE_R) ? SunThroughAirAt(GA_SKY_UP, GA_SUN_DIR, GA_SKY_EYE_R)
-                                  : float3(1.0f, 1.0f, 1.0f);
 }
 
 // ---- THE PLANET'S OWN SHADOW, ONCE ----------------------------------------------------------
@@ -400,6 +374,25 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
                        detail slice. x == ~0 means the old three-tenant path. */ \
     uint4  gCsU6;   /* M9aq HEIGHT PAGES: height array SRV, array residency SRV, window \
                        slice. x == ~0 means the old cube + window tenants. */
+// HIERARCHY 4.17: THE STANDING BLOCKS' ROWS, compiled in only when the scene's key stands -- the
+// engine then defines GA_BLOCK_RANKS, the key's ranks (SurfaceFrame::Ranks); with no key the
+// cbuffer below is today's to the byte. ComposedSurfaceCb carries them always, at its end.
+#if GA_BLOCK_RANKS
+#define GA_COMPOSED_CB_BLOCK_ROWS \
+    float4 gCsBlkU[8]; /* per standing block (coarsest rung first) PageTexelUv's planes U, V, W \
+                          about the eye's tangent frame, anchored nearest the eye */ \
+    float4 gCsBlkV[8]; \
+    float4 gCsBlkW[8]; \
+    float4 gCsBlkG[2]; /* per block, its ground texel (m) at mip 0 */ \
+    uint4  gCsBlkS[2]; /* per block, its slice of the colour and the mask */ \
+    float4 gCsBlkO[4]; /* per block (two a row), whole blocks from the anchor to its origin */ \
+    float4 gCsBlkE; /* the eye in the tangent axes about the planet's centre */ \
+    uint4  gCsBlkN; /* x = the block count */ \
+    uint4  gCsDirU; /* commit 4: x = the directory's SRV (Walk.hlsli), y = its slices; \
+                       x == ~0 means no directory */
+#else
+#define GA_COMPOSED_CB_BLOCK_ROWS
+#endif
 
 // M12 step 4g: THE ONE SURFACE CONSTANT BUFFER, on the shared layout's b2 (Renderer.h): the
 // frame loop fills ga::ComposedSurfaceCb once a frame through SurfaceFrame::Fill, RenderFrame
@@ -408,6 +401,7 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
 // DxTest's parity gate holds this cbuffer against the C++ struct, row by row.
 cbuffer SurfaceCb : register(b2) {
     GA_COMPOSED_CB_ROWS
+    GA_COMPOSED_CB_BLOCK_ROWS
 };
 
 // The geometric-algebra toolkit lives in GA.hlsli (M3 moved it out so compute shaders with

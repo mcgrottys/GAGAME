@@ -19,7 +19,7 @@
 //   read during write   -- a reader inside a writer's truncate/flush window (the torn read)
 //   write during read   -- the same collision seen from the other side
 // Plus GA_MAIN_THREAD_ONLY(), for the structures that carry no synchronization at all and are
-// main-thread-only BY CONSTRUCTION today (PageTable, TileIndex, TileAtlas2D, every Gpu entry):
+// main-thread-only BY CONSTRUCTION today (TileIndex, TileAtlas2D, every Gpu entry):
 // an assumption nobody checks is a bug waiting for a thread manager to move the work.
 #pragma once
 

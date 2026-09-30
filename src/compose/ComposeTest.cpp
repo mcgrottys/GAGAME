@@ -402,9 +402,58 @@ bool RunComposeSelfTest() {
               "edit polygon silent outside");
     }
 
+    // ---- the Google source's finest zoom is the scene's (streaming.googleZoom), and part of
+    // what the source IS. Printed line by line; the plant is the clamp left at the old literal.
+    {
+        auto say = [](bool ok, const char* line) {
+            if (ok) Log("[composetest] %s", line);
+            else Check(false, line);
+        };
+        const GoogleColorSource g14(nullptr), g17(nullptr, 17);
+        const std::string today =   // the identity when 14 was a literal, written out
+            "google.satellite|mercator-tile-tree jpeg 256px (sessioned, cache-first)";
+        auto id = [](const GoogleColorSource& g) { return g.Info().name + "|" + g.Info().structure; };
+        // The one check at 17, asked of the source and of the plant alike.
+        auto zoomsAt17 = [](auto zoom) {
+            return zoom(1.19) == 17 && zoom(9.55) == 14 && zoom(611.0) == 8;
+        };
+        char b[512];
+        snprintf(b, sizeof b,
+                 "googleZoom at its default (14): a 1.19 m ask is z%d and a 611 m ask z%d, as when "
+                 "14 was a literal",
+                 g14.ZoomFor(1.19), g14.ZoomFor(611.0));
+        say(g14.ZoomFor(1.19) == 14 && g14.ZoomFor(611.0) == 8, b);
+        snprintf(b, sizeof b, "googleZoom 17: a 1.19 m ask is z%d, a 9.55 m ask z%d, a 611 m ask z%d",
+                 g17.ZoomFor(1.19), g17.ZoomFor(9.55), g17.ZoomFor(611.0));
+        say(zoomsAt17([&](double r) { return g17.ZoomFor(r); }), b);
+        snprintf(b, sizeof b,
+                 "the identity at 14 is today's literal byte for byte (\"%s\", %.0f cm/px): no "
+                 "tree moves",
+                 id(g14).c_str(), g14.Info().cmPerPixel);
+        say(id(g14) == today && g14.Info().cmPerPixel == 955.0, b);
+        snprintf(b, sizeof b,
+                 "the identity at 17 differs (\"%s\", %.1f cm/px): a raised zoom paints its own "
+                 "tree",
+                 id(g17).c_str(), g17.Info().cmPerPixel);
+        say(id(g17) != today && id(g17) == today + ", to z17", b);
+        // PLANTED: ZoomFor as it was, the clamp at the literal 14, with the key at 17.
+        auto planted = [](double r) {
+            constexpr double kCirc = 40075016.686;
+            return std::clamp(static_cast<int>(std::lround(std::log2(kCirc / (256.0 * r)))), 0, 14);
+        };
+        snprintf(b, sizeof b,
+                 "PLANTED, the clamp left at 14 with the key at 17: a 1.19 m ask is z%d, not z17",
+                 planted(1.19));
+        if (!zoomsAt17(planted)) {
+            Log("[composetest] CAUGHT: %s", b);
+        } else {
+            Check(false, "(MISSED) the planted clamp at 14 passed the check at 17");
+        }
+    }
+
     if (g_ok) {
         Log("[composetest] ---- PASS: paint order, weights, alpha, cache, addressing, "
-            "projections ----");
+            "projections, the Google source's zoom cap and its identity ----");
     }
     return g_ok;
 }

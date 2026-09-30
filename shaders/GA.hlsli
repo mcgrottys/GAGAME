@@ -49,9 +49,6 @@ Mv2 GeometricProduct(Mv2 a, Mv2 b) {
     return r;
 }
 
-float ScalarPart(Mv2 m)   { return m.s; }
-float BivectorPart(Mv2 m) { return m.b; }
-
 // Okubo-Weiss from the gradient of a 2D flow: strain^2 - vorticity^2.
 // Negative => rotation-dominated (an eddy); positive => strain-dominated (a shear line).
 float OkuboWeiss(float dudx, float dudy, float dvdx, float dvdy) {

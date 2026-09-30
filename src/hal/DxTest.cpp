@@ -273,7 +273,9 @@ bool RunDxSelfTest() {
         bool okC = true;
         const int cpp = StructBytes(ReadFile(c.cppFile), c.cppStruct, okC, composed);
         std::wstring wpath(c.hlslFile, c.hlslFile + std::strlen(c.hlslFile));
-        const ShaderBlob blob = sc.Compile(wpath, c.entry, c.target);
+        // HIERARCHY 4.17: with the standing blocks' rows compiled in (the key's define), so the
+        // whole of ComposedSurfaceCb is held; with no key the cbuffer is the rows before them.
+        const ShaderBlob blob = sc.Compile(wpath, c.entry, c.target, {L"GA_BLOCK_RANKS=5"});
         Com<ID3D12ShaderReflection> refl;
         if (!blob.Valid() || !ReflectBlob(utils.Get(), blob, refl)) {
             Log("[dxtest] FAIL cb parity: %s (%S) did not compile/reflect", c.hlslFile,

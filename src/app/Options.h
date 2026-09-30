@@ -76,7 +76,6 @@ struct Options {
     bool seafloor = true;             // --no-seafloor: drop the global seafloor relief source
     bool exposure = true;             // --no-exposure: no swell-exposure page (everything exposed)
     std::string gisDump;              // --gis-dump PATH: the gate over the survey box as PGM, exit
-    bool ringLoads = true;            // --no-ring-loads: the old queue, for the A/B (M9al)
     bool resTrace = false;            // --res-trace: residency deficit + slot accounting, per 30 f
     bool waterTiles = false;          // --water-tiles: what the water would cost on the lattice
     bool threadAudit = false;         // --thread-audit: count tile-file collisions between threads
@@ -93,6 +92,10 @@ struct Options {
     uint32_t resAudit = 0;            // --res-audit N: the scene's capture.residencyAudit -- every
                                       // Nth turn, the residency bytes against the mapped set
                                       // (hal/ResidencyAudit.h)
+    uint32_t bedTraceEvery = 0;       // --bed-trace N: the solver's bed read back through its own
+                                      // kernel around the spin-up and every N frames (BedTrace.cpp)
+    bool bedTracePlant = false;       // --bed-trace-plant: one more reading with the residency floor
+                                      // forced to the coarsest mip -- the instrument's planted failure
     uint32_t treeAudit = 0;           // --tree-audit N: compare N tiles/frame, report, exit
     bool warmTrees = false;           // --warm-trees: build them without comparing, then exit
     bool packTrees = false;           // --pack-trees: one archive per node per frame, then exit
@@ -156,6 +159,8 @@ struct Options {
                                       // (M6r: the prism-debt field needs ~an hour to settle;
                                       // costs ~1 s at startup)
     double sweCycleH = 0;             // --swe-cycle N: headless validation over N hours -> CSV
+    double sweCycleStageM = 0;        // --swe-cycle-stage M: the cycle's told west stage raised by M
+                                      // metres (an instrument; the told transport is unchanged)
     std::wstring waveMap;             // --wave-map out.png: the solved field on the solver's
                                       // OWN cells, no camera, mesh, fold or light in the way
     std::wstring waterMap;            // --water-map out.png: the REPROJECTION PROOF -- the

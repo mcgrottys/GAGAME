@@ -36,7 +36,6 @@
 #include "scene/GulfLayer.h"
 #include "scene/SeaLayer.h"
 #include "scene/SkyLayer.h"
-#include "scene/TerrainLayer.h"
 #include "scene/WaterBankLayer.h"
 #include "scene/TideLayer.h"
 #include "compose/Compositor.h"
@@ -201,7 +200,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     auto& hgtCh = A->hgtCh;
     auto& waterAtlas = A->waterAtlas;
     auto& bathy = A->bathy;
-    auto& terrain = A->terrain;
+    auto& bathySwe = A->bathySwe;
+    auto& bathyBostonSwe = A->bathyBostonSwe;
     auto& swe = A->swe;
     auto& riverQ = A->riverQ;
     auto& gulf = A->gulf;
@@ -218,11 +218,16 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     auto& marsDiff = A->marsDiff;
     auto& marsNorm = A->marsNorm;
     auto& googleTiles = A->googleTiles;
-    auto& srcGoogle = A->srcGoogle;
+    // The Google source takes the scene's finest zoom at construction, held to 0..19 (14, the
+    // default, is the source that was a literal).
+    if (S.streaming.googleZoom > static_cast<uint32_t>(GoogleColorSource::kMaxZoom)) {
+        Log("[google] streaming.googleZoom %u is past %d: held to %d", S.streaming.googleZoom,
+            GoogleColorSource::kMaxZoom, GoogleColorSource::kMaxZoom);
+    }
+    auto& srcGoogle = A->srcGoogle.emplace(
+        &A->googleTiles, static_cast<int>((std::min)(S.streaming.googleZoom, 19u)));
     auto& srcBed = A->srcBed;
     auto& srcRelief = A->srcRelief;
-    auto& srcAerial = A->srcAerial;
-    auto& srcOverlay = A->srcOverlay;
     auto& gisStencil = A->gisStencil;
     auto& gisMask = A->gisMask;
     auto& srcGisMask = A->srcGisMask;
@@ -266,6 +271,45 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     const SceneEffect* sliceFx = S.EffectOfType("slice.plane");
     const bool sliceOn = sliceFx != nullptr;
 
+    // A RASTER IS A SOURCE BY BEING A FILE (compose/RasterFileSource.h): the scene's `sources`,
+    // opened before the device, and before the blocks, because `faceWindows: auto` is the blocks
+    // their footprints and grains ask for (SurfaceFrame::AutoKey). Then THE PASS (HIERARCHY
+    // 4.20): each paints its own level and the tree folds the rest, on every lattice the colour
+    // binds below, before the first frame -- or alone, and out, as the `ingest` tool.
+    planetR = (S.scene.planet == "mars") ? 3389500.0 : GlobeModel::kR;
+    surface = SurfaceFrame::Merrimack(planetR, opt.stencil);
+    std::string blockKey = S.streaming.faceWindows;
+    if (S.scene.planet != "mars") {
+        std::vector<RasterEntry> entries;
+        for (const scene::SourceProps& s : S.sources) {
+            entries.push_back({s.file, s.folder, s.match, s.manifest, s.name, s.kind, s.crs, s.over,
+                               s.feather, s.unit, s.datum, s.offset, s.hasOffset});
+        }
+        A->sceneSources = LoadRasterSources(entries);
+        if (blockKey == "auto") {
+            std::vector<SurfaceFrame::BlockWant> wants;
+            for (const auto& s : A->sceneSources) {
+                const SourceInfo& i = s->Info();
+                if (!s->Height()) wants.push_back({i.name, i.lon0, i.lat0, i.lon1, i.lat1, s->GrainM()});
+            }
+            blockKey = SurfaceFrame::AutoKey(wants);
+            Log("[surface] streaming.faceWindows auto: %zu source(s) ask for '%s'", wants.size(),
+                blockKey.c_str());
+        }
+        surface.DeclareBlocks(blockKey);
+    }
+    // The folder every tile tree of this run lives in (streaming.treeRoot), before the first
+    // tree is built. A tool pointed at a scratch folder paints, packs and reads there alone.
+    TileTree::SetTreeRoot(S.streaming.treeRoot);
+    if (S.streaming.colorTrees || S.Tool("ingest")) {
+        IngestSources(A->sceneSources,
+                      surface.blocks.empty()
+                          ? std::vector<Lattice>{surface.cube, surface.win, surface.det}
+                          : std::vector<Lattice>{surface.cube, hal::BlockBinding::Pyramid(128, 128)},
+                      {surface.cubeH, surface.winH});   // the height page's two lattices
+    }
+    if (S.Tool("ingest")) return nullptr;
+
     // ---- M1: the tide viewer.
     if (!model.Load(S.data.tides)) {
         Log("FATAL: no tide data at '%s'.", S.data.tides.c_str());
@@ -295,6 +339,20 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     rd.shaderDir = shaderDir;
     renderer.Init(gpu, rd);
     if (opt.gpuTime) renderer.EnableGpuProfiler();
+    // M12 step 4a: THE SHIPPED SURFACE, declared once (compose/SurfaceFrame.h): the planet's
+    // radius, the cube and the Merrimack windows the tenants below are declared on, the
+    // tenants themselves once they exist (Declare, at the old SetComposed site), and the
+    // tangent frame's rows the session writes into it. Both fills read it.
+    // HIERARCHY 4.17: declared HERE, before the first layer compiles a shader, because the scene's
+    // key decides what they compile: the standing blocks' code (Compose.hlsli) is compiled in only
+    // when the key stands, as GA_BLOCK_RANKS = its ranks; with no key, or a refused one, every
+    // shader is today's, byte for byte.
+    // (planetR, the surface and its blocks were declared before the device, with the sources.)
+    if (!surface.blocks.empty()) {
+        renderer.Shaders().Always(L"GA_BLOCK_RANKS=" + std::to_wstring(surface.Ranks()));
+        Log("[surface] the standing blocks' shader code is compiled in: GA_BLOCK_RANKS=%u",
+            surface.Ranks());
+    }
 
     fields.Init(gpu, L".", 1.0f, 1.0f);
 
@@ -408,10 +466,25 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             srcCudem = std::make_unique<CudemHeightSource>(&bathyRaw);
             hstack.push_back(srcCudem.get());
         }
+        // The scene's heights by file join in the default order (StackOrder: `over`, then the
+        // coarser under the finer), and the hand edits, the owner's own corrections, stay on top.
+        for (const auto& s : A->sceneSources) {
+            if (s->Height()) hstack.push_back(s.get());
+        }
+        StackOrder(hstack);
         if (srcEdits.Load("data/gis/edits.geojson", 2.5f)) {
             hstack.push_back(&srcEdits);
         }
         hgtCh = compositor.AddHeightChannel("earth.height", std::move(hstack));
+    }
+    // Boston's dormant solver stands by the same law and the same code as the Merrimack's
+    // (below). Its west edge is a wall (the Charles is dammed: FrameLoop's config), so no side
+    // carries an open face that reads the bed and it keeps the survey's extent. Its grid is its
+    // own copy: the activation realizes the bed into it, and the survey the source reads stays
+    // the file.
+    if (bathyBoston.Ready()) {
+        bathyBostonSwe.DrawFrom(bathyBoston, srcCudemBos.get(), S.water.swe.window == 0, false,
+                                "boston");
     }
 
     // M6v/M8i: THE WATER ATLAS -- water parameters through the same registry. 18 phasor
@@ -424,8 +497,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         return nullptr;
     }
 
-    // M5: the CUDEM terrain. Registered AFTER tide (chart) and BEFORE sea so the opaque
-    // land draws first and the water covers only what it actually stands above.
+    // M5: the CUDEM bathymetry.
     // M6w: the SOLVER'S grid realizes from the channel -- one bed for the solver, the
     // renderer, and every future physics product. Fallback (no channel): raw + walls.
     if (haveBathyRaw && bathy.Load(S.data.bathy)) {
@@ -434,11 +506,15 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         } else {
             bathy.ApplyMaskEdits("data/gis/edits.geojson", 2.5f);
         }
-        auto terrOwned = std::make_unique<TerrainLayer>();
-        terrain = terrOwned.get();
-        terrain->Configure(shaderDir, &bathy);
-        terrain->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
-        renderer.AddLayer(std::move(terrOwned));
+        // THE SOLVER STANDS WHERE ITS SOURCES PAINT AT FULL WEIGHT (HIERARCHY 4.17). The survey
+        // fades into the layer beneath it over a band at every edge (its feather), so there the
+        // composed bed is neither the survey nor the ground beneath: measured on the west edge
+        // (finding 68), the channel's last 750 m were a ramp up to +2.03 m, and the river had not
+        // entered since the bed became the composed height. The band is asked of the source, and
+        // only the open face's side is drawn in: drawn in on every side the window lost the
+        // river's bend in the north band, and the reach behind the face became a pond.
+        bathySwe.DrawFrom(bathy, srcCudem.get(), S.water.swe.window == 0,
+                          SweConfig{}.westBoundary, "merrimack");
         // M9k/M9n: THE BED, through GA Load -> normalize -> GA Compose (the six-layer
         // height stack, LayeredOver) -> a reserved, paged, mipped sparse array. Built HERE,
         // before anything binds a bed, because the consumers below now take the bank: the
@@ -455,11 +531,11 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             // 0.0000 m across all 2187162 texels, through GA Load -> normalize -> Compose
             // (six layers, LayeredOver) -> a reserved, paged, mipped sparse array. M9an:
             // the committed texture is GONE; the bank is the bed and there is no fallback.
-            // The sea keeps the survey's WORLD frame (the eta atlas is aligned to it);
+            // The sea keeps the SOLVER's world frame (the eta atlas is aligned to it);
             // 0 in the SRV slot means "a survey window exists" and is never sampled.
             Log("[bed] the sea and the solver read the height megatexture -- the only bed");
-            sea->SetBathy(0u, bathy.WorldX0(), bathy.WorldZ0(), bathy.WorldSizeX(),
-                          bathy.WorldSizeZ());
+            sea->SetBathy(0u, bathySwe.WorldX0(), bathySwe.WorldZ0(), bathySwe.WorldSizeX(),
+                          bathySwe.WorldSizeZ());
         }
     } else {
         Log("[main] no bathymetry (run: py -3 harvester\\harvest_bathy.py); open-ocean sea");
@@ -467,7 +543,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
 
     // M5c: the sparse shallow-water solver -- the estuary's own hydrodynamics, tide-forced
     // offshore and river-forced upstream, feeding the sea's mean surface and currents.
-    if (terrain && sea && S.water.swe.enabled) {
+    if (bathy.Ready() && sea && S.water.swe.enabled) {
         // ---- M9m: THE COMPOSE TREE, and the tide step that forced it into existence.
         //
         // Depth is not a dataset anyone ships. It is water level minus bed, and those two
@@ -538,13 +614,12 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                                                          : "DIVERGENT -- check the link");
             }
         }
-        swe.Init(gpu, renderer.Shaders(), shaderDir, bathy);   // bed bound below
+        swe.Init(gpu, renderer.Shaders(), shaderDir, bathySwe);   // bed bound below
         // M6r: the discharge is LIVE again -- it rides the Flather boundary's u_ext (the
         // station stage still carries it into eta; the prism term dwarfs it either way).
         riverQ = (S.water.swe.riverQ > 0) ? S.water.swe.riverQ
                                          : LoadRiverDischarge("data/river/river.json");
         sea->SetSwe(&swe);
-        sea->SetBathyCpu(&bathy);
     }
     if (haveCurrents && currents.Field().Valid()) {
         auto gulfOwned = std::make_unique<GulfLayer>();
@@ -588,7 +663,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     if (sea && bathy.Ready() && !marsMode) {
         auto wbOwned = std::make_unique<WaterBankLayer>();
         waterBank = wbOwned.get();
-        waterBank->Configure(shaderDir, sea, &swe, &bathy, &waterAtlas, &compositor,
+        waterBank->Configure(shaderDir, sea, &swe, &bathySwe, &waterAtlas, &compositor,
                              hgtCh, &globeModel, &seaState);
         waterBank->SetBaseTexel(waterScene.bankTexelM);   // M8h ring density (scene)
         waterBank->SetSurface(&surface);   // M12 step 4b: the world.flat chart, for the geoA row
@@ -613,7 +688,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         if ((droste || !S.gates.empty()) && S.water.oneWater) {
             auto wbB = std::make_unique<WaterBankLayer>();
             waterBankB = wbB.get();
-            waterBankB->Configure(shaderDir, sea, &swe, &bathy, &waterAtlas, &compositor,
+            waterBankB->Configure(shaderDir, sea, &swe, &bathySwe, &waterAtlas, &compositor,
                                   hgtCh, &globeModel, &seaState);
             waterBankB->SetBaseTexel(waterScene.bankTexelM);
             waterBankB->SetSurface(&surface);
@@ -649,9 +724,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         globe->debugLens = opt.lens;
         globe->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
         renderer.AddLayer(std::move(globeOwned));
-        // M6j: with the unified mesh surface active, the terrain layer stops rendering
-        // (it keeps the heightfield the SWE physics and the sea's bed read).
-        if (terrain && globe->MeshPathActive()) terrain->renderEnabled = false;
     } else {
         Log("[main] no globe data (run: py -3 harvester\\harvest_globe.py)");
     }
@@ -661,22 +733,15 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // streams Google 2D tiles (cache-first, throttled, budget-capped) reprojected onto the
     // same cube faces. Residency is driven by the CDLOD walk, clamped by residency-map
     // cubes, prefetched along the camera's screw.
-    planetR = marsMode ? 3389500.0 : GlobeModel::kR;
-    // M12 step 4a: THE SHIPPED SURFACE, declared once (compose/SurfaceFrame.h): the planet's
-    // radius, the cube and the Merrimack windows the tenants below are declared on, the
-    // tenants themselves once they exist (Declare, at the old SetComposed site), and the
-    // tangent frame's rows the session writes into it. Both fills read it.
-    surface = SurfaceFrame::Merrimack(planetR, opt.stencil);
-    // The folder every tile tree of this run lives in (streaming.treeRoot), before the first
-    // tree is built. A tool pointed at a scratch folder paints, packs and reads there alone.
-    TileTree::SetTreeRoot(S.streaming.treeRoot);
+    // planetR and THE SHIPPED SURFACE were declared before the device, and the tree root with
+    // them (HIERARCHY 4.17: the key decides what the layers compile).
     // --warm-trees and --pack-trees are tree-audit's other two modes (Tools/TreeAudit.cpp):
     // each needs the trees built and ends the run where the audit does.
     const bool treeTool = S.Tool("tree-audit") || S.Tool("warm-trees") || S.Tool("pack-trees");
 
     if (globe) {
         resMgr.Init(gpu);
-        resMgr.ringLoads = S.streaming.ringLoads;
+        resMgr.holdMargin = static_cast<float>(S.streaming.holdMargin);   // H2: 1 is F's order
         resMgr.dsSerial = opt.dsSerial;
         resMgr.traceRes = opt.resTrace;
         resMgr.pagesEvery = opt.pagesEvery;
@@ -713,25 +778,21 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             // and the normals ride CUDEM truth). One provider dispatching on the slice.
             // M9as: fed by the height TileTree when --color-trees is on.
             if (S.streaming.colorTrees || treeTool) {
+                // The channel's own order, the one the CPU's stack reads (the height stack above:
+                // StackOrder, the hand edits last), so the GPU's bed and the CPU's are one over.
                 auto layers = BuildHeightStack(compositor, hgtCh);
-                std::vector<std::pair<double, std::shared_ptr<DomainSource>>> byRes;
                 const Compositor::Channel& hch = compositor.ChannelAt(hgtCh);
-                for (size_t i = 0; i < layers.size() && i < hch.height.size(); ++i) {
-                    byRes.push_back({hch.height[i]->Info().cmPerPixel, layers[i]});
-                }
-                std::stable_sort(byRes.begin(), byRes.end(),
-                                 [](const auto& a, const auto& b) { return a.first > b.first; });
                 auto dc = std::make_shared<DomainCompositor>();
                 dc->SetBlend(DomainCompositor::Blend::LayeredOver);
                 std::string order;
-                for (auto& p : byRes) {
-                    if (dc->Add(p.second)) order += " " + std::string(p.second->Name()) +
-                                                    "(" + std::to_string(int(p.first)) + "cm)";
+                for (size_t i = 0; i < layers.size() && i < hch.height.size(); ++i) {
+                    if (dc->Add(layers[i])) order += " " + std::string(layers[i]->Name()) + "(" +
+                                                     std::to_string(int(hch.height[i]->Info().cmPerPixel)) + "cm)";
                 }
                 heightRoot = std::make_shared<CompositeSource>("earth.height", dc);
                 for (auto& l : layers) megaKeep.push_back(l);
-                Log("[height-tree] compose order, coarsest first (the deepest tree paints "
-                    "last):%s",
+                Log("[height-tree] compose order, bottom to top (the channel's: `over`, the coarser "
+                    "under the finer, the hand edits last):%s",
                     order.c_str());
                 heightTree = std::make_unique<TileTree>(heightRoot.get(), TileTree::Fmt::Half);
                 heightTree->Print();
@@ -832,25 +893,27 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             }
             // earth.color: the Google mercator tree, realized twice -- the global cube
             // and the Merrimack z14 window (same stack, deeper footprint).
-            if (googleTiles.Init("satellite", S.streaming.tileBudget)) {
+            DayCaps dayCaps;   // the scene's day caps (streaming.dayTiles / dayBytes)
+            dayCaps.tiles = S.streaming.dayTiles;
+            dayCaps.bytes = DayCaps::FromScene(S.streaming.dayBytes);
+            if (googleTiles.Init("satellite", S.streaming.tileBudget, dayCaps)) {
                 googleTiles.SetFetchCounter(&resMgr.fetchesThisRun);
-                // M6l: the MassGIS 15 cm plane orthos paint ABOVE Google wherever they
-                // have coverage -- the compositor's first independent high-res layer,
-                // aligned by its own declared projection (EPSG:6348), not by luck.
                 std::vector<ColorSource*> colorStack{&srcGoogle};
                 size_t bedLayer = SIZE_MAX, maskLayer = SIZE_MAX;
                 // M7x (user catch): the ortho was painting its capture-day WATER over the
                 // drained-bed albedo -- a hard-edged dark rectangle the sea shader then
                 // attenuated AGAIN. Photos are LAND authorities; the bed classifier is
                 // the WATER authority. The stack order encodes that ranking: google under
-                // aerial (both photos, finer wins), bed above both (its height-band alpha
-                // reclaims everything below the intertidal ramp and hands land back to
-                // the photos above +1.2 m NAVD), hand overlays on top of everything.
-                bool srcAerialLoaded = false, srcOverlayLoaded = false;
-                if (srcAerial.Load("data/aerial/aerial.json")) {
-                    colorStack.push_back(&srcAerial);
-                    srcAerialLoaded = true;
+                // the scene's photos (the plane orthos among them: finer wins), bed above
+                // both (its height-band alpha reclaims everything below the intertidal ramp
+                // and hands land back to the photos above +1.2 m NAVD).
+                // The scene's `sources` join the photos, and the photos stand in their default
+                // order (StackOrder: `over`, then the coarser grain under the finer).
+                for (const auto& s : A->sceneSources) {
+                    if (!s->Height()) colorStack.push_back(s.get());
                 }
+                StackOrder(colorStack);
+                const std::vector<ColorSource*> photos = colorStack;   // (the stack moves below)
                 // M9av: the GLOBAL seafloor under the bed classifier -- the ingested
                 // bathymetry's hillshade x sediment ramp, every ocean texel; the classifier
                 // keeps its authority inside its own box by painting over it.
@@ -863,10 +926,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 if (srcBed.Load("data/bed/bed_rules.json", &compositor, hgtCh)) {
                     colorStack.push_back(&srcBed);
                     bedLayer = colorStack.size() - 1;
-                }
-                if (srcOverlay.Load("data/overlay/overlay.json")) {
-                    colorStack.push_back(&srcOverlay);
-                    srcOverlayLoaded = true;
                 }
                 // M9ak: THE GATE. The user's rule: "the GIS mask gates, the height band
                 // refines". srcBed is the WATER authority and its alpha is a height band,
@@ -930,8 +989,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                     }
                     return std::make_shared<CompositeSource>(name, dc);
                 };
-                std::vector<std::shared_ptr<DomainSource>> landIn{leaf(&srcGoogle)};
-                if (srcAerialLoaded) landIn.push_back(leaf(&srcAerial));
+                std::vector<std::shared_ptr<DomainSource>> landIn;
+                for (ColorSource* s : photos) landIn.push_back(leaf(s));
                 std::shared_ptr<DomainSource> land = over("earth.land", landIn);
                 std::shared_ptr<DomainSource> mega;
                 std::vector<std::shared_ptr<DomainSource>> seaIn;
@@ -944,9 +1003,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                         seaGated = std::make_shared<GateSource>("seafloor<gis", sea,
                                                                 leaf(&srcGisMask));
                     }
-                    std::vector<std::shared_ptr<DomainSource>> megaIn{land, seaGated};
-                    if (srcOverlayLoaded) megaIn.push_back(leaf(&srcOverlay));
-                    mega = over("earth.color", megaIn);
+                    mega = over("earth.color", {land, seaGated});
                 } else {
                     mega = land;
                 }
@@ -981,16 +1038,73 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 cd.semantics = hal::Semantics::Texture;
                 cd.residence = hal::Residence::Streamable;
                 cd.absence = hal::Absence::Unloaded;
-                cd.slices = 8;
+                cd.slices = surface.blocks.empty() ? 8u : 6u + uint32_t(surface.blocks.size());
                 cd.bindings.push_back({0, 6, cCubeL, mkColor(cCubeL), "paint cube faces"});
                 // M12 step 4c: the two pages realize ONE edge of the diagram ("paint mercator
                 // pages": both slices, one row -- the lattice tag beside each tells them
                 // apart), and the row is registered from these words (SurfaceFrame::
                 // RegisterEdges), so a binding names the edge it realizes, not the edge plus
                 // a zoom.
-                cd.bindings.push_back({6, 1, cWinL, mkColor(cWinL), "paint mercator pages"});
-                cd.bindings.push_back({7, 1, cDetL, mkColor(cDetL), "paint mercator pages"});
+                if (surface.blocks.empty()) {
+                    cd.bindings.push_back({6, 1, cWinL, mkColor(cWinL), "paint mercator pages"});
+                    cd.bindings.push_back({7, 1, cDetL, mkColor(cDetL), "paint mercator pages"});
+                } else {
+                    // HIERARCHY 4.17 commit 2: the standing blocks in place of the two pages,
+                    // slice 6 + i, painted by the tree on the pyramid's lattice (it is asked
+                    // the global tile; the binding keeps the slot).
+                    const Lattice pyr = hal::BlockBinding::Pyramid(cd.fiber.texW, cd.fiber.texH);
+                    for (size_t i = 0; i < surface.blocks.size(); ++i) {
+                        cd.blocks.push_back({6u + uint32_t(i), surface.Block(i), mkColor(pyr),
+                                             "paint pyramid blocks"});
+                    }
+                }
                 colorTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(cd));
+                // HIERARCHY 4.17 commit 4: the directory beside the blocks' slices (the colour's
+                // and the mask's alike), up once as one R16_UINT texture, slices stacked; rows
+                // of 128 texels keep the upload's pitch at 256 bytes, the first 16 are the cells.
+                if (!surface.blocks.empty() && !surface.directory.empty()) {
+                    const uint32_t rows = uint32_t(surface.directory.size() / SurfaceFrame::kCells);
+                    std::vector<uint16_t> texels(size_t(128) * rows, SurfaceFrame::kNone);
+                    for (uint32_t r = 0; r < rows; ++r) {
+                        for (uint32_t c = 0; c < SurfaceFrame::kCells; ++c) {
+                            texels[size_t(r) * 128 + c] =
+                                surface.directory[size_t(r) * SurfaceFrame::kCells + c];
+                        }
+                    }
+                    A->surfaceDirectory = gpu.CreateTexture2D(128, rows, DXGI_FORMAT_R16_UINT,
+                                                           D3D12_RESOURCE_FLAG_NONE,
+                                                           D3D12_RESOURCE_STATE_COPY_DEST,
+                                                           L"surface.directory");
+                    gpu.UploadTexture(A->surfaceDirectory, texels.data(), 128 * sizeof(uint16_t));
+                    surface.dirSrv = gpu.CreateSrv(A->surfaceDirectory.res.Get(), DXGI_FORMAT_R16_UINT);
+                    Log("[surface] the directory: %u slices of %ux%u cells up as SRV %u",
+                        rows / SurfaceFrame::kCells, SurfaceFrame::kCells, SurfaceFrame::kCells,
+                        surface.dirSrv);
+                    // Read back as the GPU holds it: the cells that name a block, slice by slice,
+                    // and whether every cell is the one built.
+                    uint32_t pitch = 0, named = 0, same = 0, before = 0;
+                    std::string bySlice;
+                    const std::vector<uint8_t> back = gpu.ReadbackTexture(A->surfaceDirectory, &pitch);
+                    for (uint32_t r = 0; r < rows && back.size() >= size_t(rows) * pitch; ++r) {
+                        for (uint32_t c = 0; c < SurfaceFrame::kCells; ++c) {
+                            const size_t at = size_t(r) * pitch + c * sizeof(uint16_t);
+                            const uint16_t v = uint16_t(back[at] | (back[at + 1] << 8));
+                            named += (v != SurfaceFrame::kNone) ? 1u : 0u;
+                            same += (v == surface.directory[size_t(r) * SurfaceFrame::kCells + c]) ? 1u : 0u;
+                        }
+                        if ((r + 1) % SurfaceFrame::kCells == 0) {
+                            if (named > before) {
+                                bySlice += " s" + std::to_string(r / SurfaceFrame::kCells) + ":" +
+                                           std::to_string(named - before);
+                            }
+                            before = named;
+                        }
+                    }
+                    Log("[surface] the directory read back: %u of %u cells name a block (by slice:%s); "
+                        "%u of %u cells as built",
+                        named, rows * SurfaceFrame::kCells, bySlice.c_str(), same,
+                        rows * SurfaceFrame::kCells);
+                }
                 colorCubeT = colorTenant.Id();
                 // M9bb: a fold or a drop below changed a root tile: the colour tenant
                 // refetches that address (the frame's tag names the page slice) -- Tenant::Bind.
@@ -1019,13 +1133,24 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                         md.semantics = hal::Semantics::Texture;
                         md.residence = hal::Residence::Streamable;
                         md.absence = hal::Absence::Unloaded;
-                        md.slices = 8;
+                        md.slices = surface.blocks.empty() ? 8u
+                                                           : 6u + uint32_t(surface.blocks.size());
                         md.bindings.push_back({0, 6, cCubeL, gt->Provider(cCubeL),
                                                "paint survey mask (cube faces)"});
-                        md.bindings.push_back({6, 1, cWinL, gt->Provider(cWinL),
-                                               "paint survey mask (z14 page)"});
-                        md.bindings.push_back({7, 1, cDetL, gt->Provider(cDetL),
-                                               "paint survey mask (z17 page)"});
+                        if (surface.blocks.empty()) {
+                            md.bindings.push_back({6, 1, cWinL, gt->Provider(cWinL),
+                                                   "paint survey mask (z14 page)"});
+                            md.bindings.push_back({7, 1, cDetL, gt->Provider(cDetL),
+                                                   "paint survey mask (z17 page)"});
+                        } else {   // HIERARCHY 4.17 commit 2: the colour's blocks, its slices
+                            const Lattice pyr =
+                                hal::BlockBinding::Pyramid(md.fiber.texW, md.fiber.texH);
+                            for (size_t i = 0; i < surface.blocks.size(); ++i) {
+                                md.blocks.push_back({6u + uint32_t(i), surface.Block(i),
+                                                     gt->Provider(pyr),
+                                                     "paint survey mask (pyramid blocks)"});
+                            }
+                        }
                         landseaTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(md));
                         maskTenant = landseaTenant.Id();
                         landseaTenant.Bind(*gt);   // its folds invalidate the slice its tag names
@@ -1127,9 +1252,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                         DomainCompositor::PageGeo geo;
                         const double mpt = swe.CellM() * double(1u << lvl);
                         geo.lon0 = BathyModel::kOrgLon +
-                                   (bathy.WorldX0() + 0.5 * mpt) / BathyModel::kMPerLon;
+                                   (bathySwe.WorldX0() + 0.5 * mpt) / BathyModel::kMPerLon;
                         geo.lat0 = BathyModel::kOrgLat +
-                                   (bathy.WorldZ0() + 0.5 * mpt) / BathyModel::kMPerLat;
+                                   (bathySwe.WorldZ0() + 0.5 * mpt) / BathyModel::kMPerLat;
                         geo.dLon = mpt / BathyModel::kMPerLon;
                         geo.dLat = mpt / BathyModel::kMPerLat;
 
@@ -1248,9 +1373,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 }
             }
             globe->SetVelGradLens(
-                swe.VelGradSrv(), bathy.WorldX0(), bathy.WorldZ0(), bathy.WorldSizeX(),
-                bathy.WorldSizeZ(), swe.VelGradResMapSrv(),
-                static_cast<float>(bathy.WorldSizeX() / (std::max)(1u, swe.Nx())),
+                swe.VelGradSrv(), bathySwe.WorldX0(), bathySwe.WorldZ0(), bathySwe.WorldSizeX(),
+                bathySwe.WorldSizeZ(), swe.VelGradResMapSrv(),
+                static_cast<float>(bathySwe.WorldSizeX() / (std::max)(1u, swe.Nx())),
                 static_cast<float>(swe.VelGradResMapW()),
                 static_cast<float>(swe.VelGradResMapH()), swe.VelGradMips());
         }
@@ -1316,8 +1441,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                              {"f32", "json"}});
             extra.push_back({"tool", "a one-shot mode in `tools[]` (--tool name[:args])",
                              {"bathy-map", "dump-water-state", "export", "fidelity-map",
-                              "gis-dump", "load-field", "ocean-probe", "pack-tiles", "pack-trees",
-                              "sea-verify", "selftest", "swe-cycle", "swe-uv", "trace",
+                              "gis-dump", "ingest", "load-field", "ocean-probe", "pack-tiles",
+                              "pack-trees", "rastertest", "sea-verify", "selftest", "swe-cycle",
+                              "swe-uv", "trace",
                               "tree-audit", "tree-prune", "twin-surface", "warm-inlet", "warm-trees",
                               "water-map", "wave-map"}});
             scene::WriteRegistries("docs/registries.json", extra);

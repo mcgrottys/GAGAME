@@ -24,6 +24,7 @@ LayerEntry kLayer;
 TideLayerProps kTide;
 NodeProps kNode;
 ToolProps kTool;
+SourceProps kSource;
 
 using Q = Quantity;
 constexpr Reload H = Reload::Hot;
@@ -160,7 +161,11 @@ const Schema& SweSchema() {
             .Bind("westBoundary", p.westBoundary, "the west-boundary deviation; false = zeroed (--swe-west-off)", R)
             .Bind("spinupH", p.spinupH, Q::Time, "h", "history integrated before the first frame (--swe-spinup)", R)
             .Bind("gain", p.gain, Q::Dimensionless, "1", "solved-current gain (--swe-gain)", H)
-            .Bind("riverQ", p.riverQ, Q::Dimensionless, "1", "river discharge, m^3/s; < 0 = data/river/river.json (--river)", R);
+            .Bind("riverQ", p.riverQ, Q::Dimensionless, "1", "river discharge, m^3/s; < 0 = data/river/river.json (--river)", R)
+            .BindEnum("bedWait", p.bedWait, {"none", "map", "whole"},
+                      "what the spin-up waits for before its hour: nothing (the kernel reads whatever it reads before the first residency turn), the residency map (one turn: the coarsest resident mip), or the whole bed (every solver's domain read at mip 0)", R)
+            .BindEnum("window", p.window, {"full-weight", "survey"},
+                      "where a solver's grid stands: the survey's window drawn in, on the side of an open face that reads the bed (the west face), to where its source paints at full weight (the band is the source's own feather), the other sides keeping the survey's extent; or the survey's whole window, feather included", R);
         return sc;
     }();
     return *s;
@@ -270,17 +275,71 @@ const Schema& StreamingSchema() {
         auto& p = kDoc.streaming;
         Schema* sc = new Schema("streaming", &p);
         sc->Bind("tileBudget", p.tileBudget, Q::Dimensionless, "1", "hard cap on Google fetches per run (--tile-budget)", R)
+            .Bind("dayTiles", p.dayTiles, Q::Dimensionless, "1",
+                  "cap on Google requests a UTC day, every request sent counted whatever came "
+                  "back, every engine on the machine together (cache/google/day_<date>.json); "
+                  "0 = no request that day",
+                  R)
+            .Bind("dayBytes", p.dayBytes, Q::Dimensionless, "1",
+                  "cap on the bytes of Google tiles landed a UTC day, every engine on the machine "
+                  "together; 0 = no request that day",
+                  R)
+            .Bind("googleZoom", p.googleZoom, Q::Dimensionless, "1",
+                  "the finest zoom the Google source may be asked for, held to 0..19; each step "
+                  "finer is four times the tiles (14 = the source as it was; any other value "
+                  "paints its own tree)",
+                  R)
             .Bind("predictEvery", p.predictEvery, Q::Dimensionless, "frames", "prefetch-walk cadence (--predict-every)", H)
             .Bind("directStorage", p.directStorage, "NVMe -> GPU tile reads (--no-direct-storage)", R)
             .Bind("colorTrees", p.colorTrees, "colour and height pages from the trees (--no-color-trees)", R)
             .Bind("gisGate", p.gisGate, "the vector land/sea gate on the bed (--no-gis-gate)", R)
             .Bind("seafloor", p.seafloor, "the global seafloor relief source (--no-seafloor)", R)
             .Bind("exposure", p.exposure, "the swell-exposure page (--no-exposure)", R)
-            .Bind("ringLoads", p.ringLoads, "the ring gate (--no-ring-loads)", R)
+            .Bind("holdMargin", p.holdMargin, Q::Dimensionless, "1",
+                  "the order's hold margin: a held tile, and a tile above a held tile, count for "
+                  "this times their measure, so a tile gives its slot up only to one larger on the "
+                  "screen by more (HIERARCHY 4.19); 1 is the order without it",
+                  R)
+            .Bind("faceWindows", p.faceWindows,
+                  "standing blocks of the pyramid for the colour and the mask in place of their "
+                  "Mercator windows: lon,lat,rung entries joined by ';', each the block of that "
+                  "rung holding the point (logged); auto = the blocks the `sources` ask for, "
+                  "rank 1 down to each one's grain over its footprint; empty = the Mercator windows",
+                  R)
             .Bind("treeRoot", p.treeRoot,
                   "the folder the tile trees live in; a scratch folder keeps a tool's paints and "
                   "packs out of the real cache",
                   R);
+        return sc;
+    }();
+    return *s;
+}
+
+const Schema& SourceSchema() {
+    static const Schema* s = [] {
+        Schema* sc = new Schema("source", &kSource);
+        sc->Bind("name", kSource.name, "a label (\"\" = the file's own name)", R)
+            .BindPath("file", kSource.file, "one raster: a GeoTIFF, or a PNG / JPEG beside its world file", R)
+            .BindPath("folder", kSource.folder, "a folder whose files matching `match` are one source", R)
+            .Bind("match", kSource.match, "the folder's pattern, * and ? (\"\" = every file)", R)
+            .BindPath("manifest", kSource.manifest,
+                      "a manifest of raw rows (the harvester's form: crs, tiles, their bounds), one source", R)
+            .Bind("kind", kSource.kind,
+                  "colour | height; \"\" = the pixels decide (8-bit, 3 or 4 channels: colour; one "
+                  "channel of 16-bit or float: height)", R)
+            .Bind("crs", kSource.crs, "EPSG:nnnn, read only where the file carries none", R)
+            .Bind("over", kSource.over, Q::Dimensionless, "1",
+                  "the stack order's first key, ascending upward (every built-in source is 0); "
+                  "the second is the grain, the coarser under the finer", R)
+            .Bind("feather", kSource.feather, Q::Length, "m",
+                  "the edge of the whole softened over this far (smoothstep); 0 = a hard edge", R)
+            .Bind("unit", kSource.unit, "a height's unit (m, ft, ftUS), read only where the file names none", R)
+            .Bind("datum", kSource.datum,
+                  "a height's vertical datum (NAVD88, MSL, EGM2008 ...), read only where the file names none", R)
+            .Bind("offset", kSource.offset, Q::Length, "m",
+                  "added to a height whose datum is not the engine's (NAVD88): the separation at the "
+                  "place; such a file is refused without it, and a file on NAVD88 takes none", R)
+            .Optional();   // absent is not 0: the builder must not complete it (SourceProps::hasOffset)
         return sc;
     }();
     return *s;
@@ -603,6 +662,7 @@ const Schema& SceneFileSchema() {
             .Nest("sea", SeaSchema(), &kDoc.sea, "the sea state and the datum")
             .Nest("water", WaterSchema(), &kDoc.water, "the water")
             .Nest("streaming", StreamingSchema(), &kDoc.streaming, "residency: scene state")
+            .List("sources", &SourceSchema(), "rasters that are sources by being files, in any order", false)
             .Nest("capture", CaptureSchema(), &kDoc.capture, "headless capture")
             .List("views", &ViewSchema_(), "the cameras, by name")
             .Nest("rails", RailsSchema(), &kDoc.rails, "the camera rails")

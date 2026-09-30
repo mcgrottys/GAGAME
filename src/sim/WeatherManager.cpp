@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <thread>
 
 namespace ga {
 
@@ -51,6 +52,14 @@ void WeatherManager::AddDormantWindow(const char* name, BathyModel* bathy,
                                       const SweConfig& cfg,
                                       std::function<double(double)> oceanAt,
                                       double spinupHours) {
+    // Said once here too: a dormant window's solver only Inits on activation.
+    if (bathy && bathy->Ready()) {
+        SweConfig named = cfg;
+        named.name = name;
+        LogWindowHoldsWater(*bathy, named,
+                            "dormant: on the CPU bed, its survey before an activation realizes the "
+                            "bed, and the kernel's bed may differ");
+    }
     Window w;
     w.name = name;
     w.bathy = bathy;
@@ -183,8 +192,8 @@ void WeatherManager::ReadMirrors(Gpu& gpu, double simUnix, double maxAge) {
     }
 }
 
-void WeatherManager::PinDomains(ResidencyManager& res, int hgtTenant) {
-    if (hgtTenant < 0 || !m_hgtArr) return;
+bool WeatherManager::DomainUv(const BathyModel& b, float& u0, float& v0, float& u1,
+                              float& v1) const {
     const double piP = 3.14159265358979, n14 = 16384.0 * 256.0;
     // M12 step 4b: the origin is the window lattice's (an integer below 2^24: the double the
     // two members held, exactly).
@@ -198,20 +207,26 @@ void WeatherManager::PinDomains(ResidencyManager& res, int hgtTenant) {
                 static_cast<double>(m_hgtWin.orgPxY)) /
                16384.0;
     };
+    const double lon1 = b.Lon0() + b.Nx() * b.Dlon();
+    const double lat0 = b.Lat1() - b.Ny() * b.Dlat();
+    u0 = float((std::max)(0.0, mercU(b.Lon0())));
+    u1 = float((std::min)(1.0, mercU(lon1)));
+    v0 = float((std::max)(0.0, mercV(b.Lat1())));
+    v1 = float((std::min)(1.0, mercV(lat0)));
+    return u1 > u0 && v1 > v0;
+}
+
+void WeatherManager::PinDomains(ResidencyManager& res, int hgtTenant) {
+    if (hgtTenant < 0 || !m_hgtArr) return;
     std::string pinned;
     for (const Window& w : m_windows) {
         if (!w.active || !w.bathy || !w.bathy->Ready()) continue;
-        const BathyModel& b = *w.bathy;
-        const double lon1 = b.Lon0() + b.Nx() * b.Dlon();
-        const double lat0 = b.Lat1() - b.Ny() * b.Dlat();
-        const float u0 = float((std::max)(0.0, mercU(b.Lon0())));
-        const float u1 = float((std::min)(1.0, mercU(lon1)));
-        const float v0 = float((std::max)(0.0, mercV(b.Lat1())));
-        const float v1 = float((std::min)(1.0, mercV(lat0)));
-        const bool inside = u1 > u0 && v1 > v0;
+        float u0 = 0.0f, v0 = 0.0f, u1 = 0.0f, v1 = 0.0f;
+        const bool inside = DomainUv(*w.bathy, u0, v0, u1, v1);
         // M13: the solver's domain is its own reader of the shared cache -- it pins the bed
         // under its lattice whether or not any view is looking there.
-        if (inside) res.Want(res.Sampler("solver"), hgtTenant, m_hgtSlice, 0u, u0, v0, u1, v1);
+        // Step 5: a standing reader, the order's first class (HIERARCHY 4.19).
+        if (inside) res.Want(res.Sampler("solver", true), hgtTenant, m_hgtSlice, 0u, u0, v0, u1, v1);
         if (!m_pinLogged) {
             char line[160];
             snprintf(line, sizeof(line), " %s uv %.4f..%.4f x %.4f..%.4f (%s)", w.name.c_str(),
@@ -224,6 +239,98 @@ void WeatherManager::PinDomains(ResidencyManager& res, int hgtTenant) {
         Log("[weather] solver domains pinned on height page slice %u mip 0:%s", m_hgtSlice,
             pinned.c_str());
     }
+}
+
+uint64_t WeatherManager::ClaimedMips(const ResidencyManager& res, int hgtTenant,
+                                     uint64_t hist[16], const char* only) const {
+    for (int m = 0; m < 16; ++m) hist[m] = 0;
+    if (hgtTenant < 0 || !m_hgtArr) return 0;
+    uint64_t n = 0;
+    for (const Window& w : m_windows) {
+        if (!w.active || !w.bathy || !w.bathy->Ready()) continue;
+        if (only && w.name != only) continue;
+        float u0 = 0.0f, v0 = 0.0f, u1 = 0.0f, v1 = 0.0f;
+        if (!DomainUv(*w.bathy, u0, v0, u1, v1)) continue;
+        // A quarter of a byte's span apart, both edges included: the map is at tile grain, so
+        // this is a few thousand reads of the manager's own bytes.
+        const int nu = static_cast<int>(std::ceil((u1 - u0) * 512.0f));
+        const int nv = static_cast<int>(std::ceil((v1 - v0) * 512.0f));
+        for (int j = 0; j <= nv; ++j) {
+            const float v = v0 + (v1 - v0) * float(j) / float((std::max)(nv, 1));
+            for (int i = 0; i <= nu; ++i) {
+                const float u = u0 + (u1 - u0) * float(i) / float((std::max)(nu, 1));
+                ++hist[(std::min)(res.ResidentMipAt(hgtTenant, m_hgtSlice, u, v), 15u)];
+                ++n;
+            }
+        }
+    }
+    return n;
+}
+
+WeatherManager::BedWait WeatherManager::WaitForBeds(Gpu& gpu, ResidencyManager& res,
+                                                    int hgtTenant, const char* only) {
+    BedWait bw;
+    if (hgtTenant < 0 || !m_hgtArr) return bw;
+    struct Domain {
+        SweSolver* solver;
+        float u0, v0, u1, v1;
+    };
+    std::vector<Domain> domains;
+    for (Window& w : m_windows) {
+        if (!w.active || !w.solver || !w.solver->Ready() || !w.bathy || !w.bathy->Ready()) continue;
+        if (only && w.name != only) continue;
+        Domain d{w.solver, 0.0f, 0.0f, 0.0f, 0.0f};
+        if (DomainUv(*w.bathy, d.u0, d.v0, d.u1, d.v1)) domains.push_back(d);
+    }
+    bw.windows = static_cast<uint32_t>(domains.size());
+    if (domains.empty()) return bw;
+    const auto t0 = std::chrono::steady_clock::now();
+    const int sampler = res.Sampler("solver");
+    const uint32_t mapped0 = res.MappedCount();
+    // The turn fills the frame's upload-ring slot, which a frame still in flight may be copying
+    // from (an activation inside the loop); boot has nothing in flight and this costs nothing.
+    gpu.WaitIdle();
+    // The manager's claim is read before the kernel's (it is cheap); the trace is the answer.
+    auto claimed = [&] {
+        uint64_t hist[16];
+        const uint64_t n = ClaimedMips(res, hgtTenant, hist, only);
+        return n > 0 && hist[0] == n;
+    };
+    SweSolver::BedTrace trace;
+    for (;;) {
+        // Asked again every turn, as the pin asks every frame: the ring gate admits a level only
+        // under a mapped parent, so one ask brings one ring.
+        for (const Domain& d : domains) {
+            res.Want(sampler, hgtTenant, m_hgtSlice, 0u, d.u0, d.v0, d.u1, d.v1);
+        }
+        {
+            hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
+            res.ProcessQueues(gpu, up.Native());
+            gpu.EndUpload();
+        }
+        ++bw.turns;
+        bw.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        if (claimed()) {
+            bw.cells = bw.whole = 0;
+            for (const Domain& d : domains) {
+                if (!d.solver->TraceBed(gpu, trace)) continue;
+                const uint32_t page = d.solver->PageSlice();
+                for (size_t i = 0; i < trace.bed.size(); ++i) {
+                    ++bw.cells;
+                    if (trace.mip[i] == 0 && trace.slice[i] == page) ++bw.whole;
+                }
+            }
+            if (bw.cells > 0 && bw.whole == bw.cells) {
+                bw.done = true;
+                break;
+            }
+        }
+        if (bw.seconds > kBedWaitMaxS) break;
+        // The loads run on the Io lane; a turn that finds nothing landed has nothing to map.
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    bw.tiles = res.MappedCount() - mapped0;
+    return bw;
 }
 
 void WeatherManager::Update(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,

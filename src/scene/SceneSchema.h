@@ -17,11 +17,14 @@
 //                  wavefield{...}, closures{...}, fleet{...}}   -- the last three are what
 //                  data/wave_scene.json overlays through `include` (the M8 law survives:
 //                  authored if absent, never clobbered, hot-reloaded)
-//      streaming  {tileBudget, predictEvery, directStorage, colorTrees, gisGate, seafloor,
-//                  exposure, ringLoads, treeRoot}   -- scene state: they change the picture
+//      streaming  {tileBudget, dayTiles, dayBytes, googleZoom, predictEvery, directStorage,
+//                  colorTrees, gisGate, seafloor, exposure, holdMargin, faceWindows, treeRoot}
+//                                                -- scene state: they change the picture
 //                                                through residency (treeRoot: where the tile
-//                                                trees are, cache/trees unless a tool's
-//                                                scratch folder is named)
+//                                                trees are, cache/trees unless a tool's scratch
+//                                                folder is named; dayTiles/dayBytes: the day's
+//                                                cap on Google requests, core/DayLedger.h;
+//                                                googleZoom: the Google source's finest zoom)
 //      capture    {headless, width, height, frames, dump, hdr, mp4, railDir,
 //                  settle{sync, hold, exact, clearChurn}, residencyAudit}
 //      views      [{name, at, fovY, gauge, nearZ, reversedZ, target, viewport{}, follow{}}]
@@ -129,6 +132,9 @@ struct SweProps {
     double spinupH = 1.0;
     float gain = 1.0f;
     double riverQ = -1.0;             // m^3/s; < 0 = data/river/river.json
+    int bedWait = 2;                  // none | map | whole: what the spin-up waits for (finding 48)
+    int window = 0;                   // full-weight | survey: where the solver's grid stands (4.17):
+                                      // the open face's side drawn in, the walls the survey's
 };
 struct BankProps {
     bool flatBed = false;
@@ -177,9 +183,23 @@ struct WaterSection {
 };
 struct StreamingSection {
     uint32_t tileBudget = 1000, predictEvery = 3;
+    // THE DAY'S CAP on Google, every engine on the machine together, per UTC day, whichever is
+    // met first (core/DayLedger.h): dayTiles bounds the requests SENT, whatever came back;
+    // dayBytes the bytes landed. Zero is no request that day, not "no limit".
+    uint32_t dayTiles = 100000;
+    double dayBytes = 5.0e9;          // a double: 5 GB does not fit the u32 field
+    // The finest zoom the Google source may be asked for, held to 0..19; each step finer is four
+    // times the tiles. 14 is the source as it was; any other value names itself in the source's
+    // structure, so it paints its own tree (compose/Sources.h).
+    uint32_t googleZoom = 14;
     bool directStorage = true, colorTrees = true, gisGate = true, seafloor = true,
-         exposure = true, ringLoads = true;
+         exposure = true;
+    double holdMargin = 1.41421356;   // order: a held tile counts for this times its measure
     std::string treeRoot = "cache/trees";   // the folder the tile trees live in (TileTree.h)
+    // HIERARCHY 4.17 commit 2: standing blocks of the pyramid for the colour and the mask, in
+    // place of their Mercator windows -- "lon,lat,rung" entries joined by ';' (SurfaceFrame::
+    // DeclareBlocks). Empty is today's path.
+    std::string faceWindows;
 };
 struct SettleProps {
     bool sync = false;
@@ -234,6 +254,17 @@ struct DrosteRail {
 struct RailsSection {
     int active = 0;                   // none | classic | zoom | flood | jetty | droste | droste-out
     DrosteRail droste;                // keys: List(RailKey), unnamed
+};
+// A RASTER IS A SOURCE BY BEING A FILE (compose/RasterFileSource.h): one file, a folder and a
+// pattern, or a manifest of raw rows -- one source each. `kind` and `crs` are read only where the
+// file cannot say (a CRS it carries wins); `over` is the stack order's first key, the grain its
+// second; `feather` (m) softens the edge of the whole. A height's `unit` and `datum` are read only
+// where the file names none; `offset` (m) is read only where it is written (hasOffset: 0 is a
+// separation too), and a height off the engine's datum is taken only with it.
+struct SourceProps {
+    std::string name, file, folder, match, manifest, kind, crs, unit, datum;
+    double over = 0.0, feather = 0.0, offset = 0.0;
+    bool hasOffset = false;
 };
 struct PortalProps {
     std::string name;

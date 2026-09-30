@@ -3,7 +3,6 @@
 #include "core/Json.h"
 #include "core/TileProviders.h"
 
-#include <windows.h>
 
 #include <algorithm>
 #include <cmath>
@@ -48,19 +47,26 @@ float Bilinear(const std::vector<int16_t>& g, int nx, int ny, double fx, double 
 
 // ------------------------------------------------------------------------------ Google
 
-GoogleColorSource::GoogleColorSource(GoogleTileProvider* prov) : m_prov(prov) {
-    m_info = {"google.satellite", "mercator-tile-tree jpeg 256px (sessioned, cache-first)",
-              "EPSG:3857 web-mercator",
-              955.0 /* z14 politeness cap at the equator */, -180, -85, 180, 85};
+GoogleColorSource::GoogleColorSource(GoogleTileProvider* prov, int zoomCap)
+    : m_prov(prov), m_zoomCap(std::clamp(zoomCap, 0, kMaxZoom)) {
+    // The structure is half the source's identity (name|structure, ColorStackSource.h): at the
+    // default it is today's string exactly; at any other cap it names the cap, so a scene that
+    // raises the zoom paints its own tree. cmPerPixel is the cap's grain at the equator (955 at
+    // z14, halved a step finer); only the registry log and the fidelity map read it.
+    std::string structure = "mercator-tile-tree jpeg 256px (sessioned, cache-first)";
+    if (m_zoomCap != kDefaultZoom) structure += ", to z" + std::to_string(m_zoomCap);
+    m_info = {"google.satellite", structure, "EPSG:3857 web-mercator",
+              std::ldexp(955.0, kDefaultZoom - m_zoomCap), -180, -85, 180, 85};
 }
 
 // Zoom from the requested footprint: z such that Mercator metres/px matches groundResM.
-// Capped at 14 -- deeper zooms are a budget decision a REALIZATION makes by asking for a
-// finer groundRes only inside a window it owns; the global cube can never demand them.
-static int ZoomFor(double groundResM) {
+// Capped at the scene's streaming.googleZoom (14 unless a scene says otherwise) -- deeper
+// zooms are a budget decision a REALIZATION makes by asking for a finer groundRes only inside
+// a window it owns; the global cube can never demand them, and the day's ledger bounds the count.
+int GoogleColorSource::ZoomFor(double groundResM) const {
     constexpr double kCirc = 40075016.686;
     return std::clamp(static_cast<int>(std::lround(std::log2(kCirc / (256.0 * groundResM)))),
-                      0, 14);
+                      0, m_zoomCap);
 }
 
 bool GoogleColorSource::Pixel(int z, double latRad, double lonRad, uint8_t rgb[3]) {
@@ -166,148 +172,6 @@ float WindowHeightSource::Sample(double latRad, double lonRad, double, float& me
     return Feather(edge, m_feather);   // the old render-time NeWeight feather, at paint time
 }
 
-// ------------------------------------------------------------------------------ aerial ortho
-
-AerialOrthoSource::~AerialOrthoSource() {
-    // Handles were pushed as (view, mapping, file) triples per tile.
-    for (size_t i = 0; i + 2 < m_handles.size(); i += 3) {
-        UnmapViewOfFile(m_handles[i]);
-        CloseHandle(m_handles[i + 1]);
-        CloseHandle(m_handles[i + 2]);
-    }
-}
-
-bool AerialOrthoSource::Load(const std::string& jsonPath) {
-    std::ifstream f(jsonPath, std::ios::binary);
-    if (!f) return false;
-    std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
-    std::string err;
-    const JsonValue v = JsonParser::Parse(text, &err);
-    const JsonValue* tiles = v.Get("tiles");
-    if (!tiles || tiles->arr.empty()) return false;
-    const std::string dir = jsonPath.substr(0, jsonPath.find_last_of("/\\") + 1);
-
-    double lonMin = 180, lonMax = -180, latMin = 90, latMax = -90;
-    for (const JsonValue& t : tiles->arr) {
-        Tile tile;
-        tile.e0 = t.Num("utm_e0", 0);
-        tile.n0 = t.Num("utm_n0", 0);
-        tile.e1 = t.Num("utm_e1", 0);
-        tile.n1 = t.Num("utm_n1", 0);
-        tile.channels = static_cast<uint32_t>(t.Num("channels", 3));
-        const std::string path = dir + t.Str("file");
-        const std::wstring wpath(path.begin(), path.end());
-        HANDLE file = CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (file == INVALID_HANDLE_VALUE) {
-            Log("[aerial] missing %s; skipping tile", path.c_str());
-            continue;
-        }
-        HANDLE mapping = CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
-        const void* view =
-            mapping ? MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0) : nullptr;
-        if (!view) {
-            CloseHandle(mapping);
-            CloseHandle(file);
-            continue;
-        }
-        m_handles.push_back(const_cast<void*>(view));
-        m_handles.push_back(mapping);
-        m_handles.push_back(file);
-        tile.data = static_cast<const uint8_t*>(view);
-        if (const JsonValue* mips = t.Get("mips")) {
-            for (const JsonValue& m : mips->arr) {
-                tile.mips.push_back({static_cast<uint32_t>(m.Num("px", 0)),
-                                     static_cast<uint64_t>(m.Num("offset", 0))});
-            }
-        }
-        if (tile.mips.empty()) continue;
-        m_ue0 = (std::min)(m_ue0, tile.e0);
-        m_un0 = (std::min)(m_un0, tile.n0);
-        m_ue1 = (std::max)(m_ue1, tile.e1);
-        m_un1 = (std::max)(m_un1, tile.n1);
-        if (const JsonValue* bb = t.Get("wgs84_bbox"); bb && bb->arr.size() == 4) {
-            lonMin = (std::min)(lonMin, bb->arr[0].number);
-            latMin = (std::min)(latMin, bb->arr[1].number);
-            lonMax = (std::max)(lonMax, bb->arr[2].number);
-            latMax = (std::max)(latMax, bb->arr[3].number);
-        }
-        m_tiles.push_back(std::move(tile));
-    }
-    if (m_tiles.empty()) return false;
-    // Identity from the json when present, so one class serves both the MassGIS orthos and
-    // any user GeoTIFF overlay ("highlights") dropped through harvest_overlay.py.
-    m_info = {v.Str("name", "massgis.coq2023"),
-              v.Str("structure", "jp2 ortho, 1500 m USNG tiles, plane-flown leaf-off"),
-              v.Str("crs", "EPSG:6348 NAD83(2011)/UTM 19N (~1 m vs WGS84, uncorrected)"),
-              v.Num("cm_per_px", 15.0), lonMin, latMin, lonMax, latMax};
-    Log("[aerial] %s: %zu tiles mapped (UTM E %.0f..%.0f, N %.0f..%.0f, %uch)",
-        m_info.name.c_str(), m_tiles.size(), m_ue0, m_ue1, m_un0, m_un1,
-        m_tiles[0].channels);
-    return true;
-}
-
-float AerialOrthoSource::Sample(double latRad, double lonRad, double groundResM,
-                                const PaintCtx&, uint8_t rgba[4]) {
-    if (m_tiles.empty()) return 0.0f;
-    static const TransverseMercator kUtm19 = TransverseMercator::Utm(19);
-    double E, N;
-    kUtm19.Forward(latRad, lonRad, E, N);
-    if (E <= m_ue0 || E >= m_ue1 || N <= m_un0 || N >= m_un1) return 0.0f;
-    for (const Tile& t : m_tiles) {
-        if (E < t.e0 || E >= t.e1 || N < t.n0 || N >= t.n1) continue;
-        // Meters-per-pixel contract: pick the mip whose GROUND resolution matches the paint
-        // footprint (groundResM is Mercator-equatorial; x cos(lat) makes it true metres).
-        // The tile's own native m/px anchors the pick -- 15 cm orthos and 50 cm overlays
-        // ride the same code.
-        const double nativeM = (t.e1 - t.e0) / t.mips[0].px;
-        const double wantM = groundResM * std::cos(latRad);
-        const int lvl = std::clamp(
-            static_cast<int>(std::floor(std::log2((std::max)(wantM, nativeM) / nativeM))),
-            0, static_cast<int>(t.mips.size()) - 1);
-        const MipLevel& mp = t.mips[lvl];
-        const double pxPerM = mp.px / (t.e1 - t.e0);
-        const double fx = (E - t.e0) * pxPerM - 0.5;
-        const double fy = (t.n1 - N) * pxPerM - 0.5;   // row 0 = north
-        const int x0 = std::clamp(static_cast<int>(std::floor(fx)), 0,
-                                  static_cast<int>(mp.px) - 2);
-        const int y0 = std::clamp(static_cast<int>(std::floor(fy)), 0,
-                                  static_cast<int>(mp.px) - 2);
-        const double tx = std::clamp(fx - x0, 0.0, 1.0), ty = std::clamp(fy - y0, 0.0, 1.0);
-        const uint8_t* base = t.data + mp.offset;
-        const uint32_t nc = t.channels;
-        auto texel = [&](int x, int y) {
-            return base + (static_cast<size_t>(y) * mp.px + x) * nc;
-        };
-        const uint8_t* p00 = texel(x0, y0);
-        const uint8_t* p10 = texel(x0 + 1, y0);
-        const uint8_t* p01 = texel(x0, y0 + 1);
-        const uint8_t* p11 = texel(x0 + 1, y0 + 1);
-        auto bilerp = [&](uint32_t c) {
-            const double a = p00[c] * (1 - tx) + p10[c] * tx;
-            const double b = p01[c] * (1 - tx) + p11[c] * tx;
-            return a * (1 - ty) + b * ty;
-        };
-        for (uint32_t c = 0; c < 3; ++c) {
-            rgba[c] = static_cast<uint8_t>(bilerp(c) + 0.5);
-        }
-        rgba[3] = 255;
-        // Feather against the UNION boundary (interior tile seams stay seamless -- one
-        // flight, one capture), 25 m wide.
-        const double dm = (std::min)((std::min)(E - m_ue0, m_ue1 - E),
-                                     (std::min)(N - m_un0, m_un1 - N));
-        const double tfe = std::clamp(dm / 25.0, 0.0, 1.0);
-        float w = static_cast<float>(tfe * tfe * (3.0 - 2.0 * tfe));
-        // ALPHA IS FIBER: a 4-channel plane's per-pixel alpha multiplies the paint weight,
-        // so a mostly-transparent overlay (a GeoTIFF of highlights) bleeds through the
-        // composed quadtree pixel by pixel -- flat image and quad tree meet in the paint
-        // loop's lerp, never in a special case.
-        if (nc >= 4) w *= static_cast<float>(bilerp(3) / 255.0);
-        return w;
-    }
-    return 0.0f;
-}
-
 // ------------------------------------------------------------------------------ CUDEM
 
 CudemHeightSource::CudemHeightSource(const BathyModel* bathy, double featherFrac,
@@ -398,14 +262,44 @@ float CudemHeightSource::Sample(double latRad, double lonRad, double, float& met
     const double z = (latRad * 180.0 / kPi - BathyModel::kOrgLat) * BathyModel::kMPerLat;
     const float v = m_bathy->SampleWorld(static_cast<float>(x), static_cast<float>(z));
     if (v < -9000.0f) return 0.0f;   // outside the grid, or nodata
+    metres = v;
+    return EdgeWeight(x, z);
+}
+
+float CudemHeightSource::EdgeWeight(double x, double z) const {
     const double ex = (std::min)(x - m_bathy->WorldX0(),
                                  m_bathy->WorldX0() + m_bathy->WorldSizeX() - x) /
                       m_bathy->WorldSizeX();
     const double ez = (std::min)(z - m_bathy->WorldZ0(),
                                  m_bathy->WorldZ0() + m_bathy->WorldSizeZ() - z) /
                       m_bathy->WorldSizeZ();
-    metres = v;
     return Feather((std::min)(ex, ez), m_feather);
+}
+
+bool CudemHeightSource::FullWeightCells(int& c0, int& r0, int& c1, int& r1) const {
+    if (!m_bathy || !m_bathy->Ready()) return false;
+    const int nx = m_bathy->Nx(), ny = m_bathy->Ny();
+    // A cell's centre on the lattice, in the world frame Sample puts a sample point in (the
+    // linear lon/lat map both frames were built with); the other axis held at the window's
+    // middle, where only the axis being walked can bring the weight under one.
+    auto x = [&](int c) {
+        return (m_bathy->Lon0() + (c + 0.5) * m_bathy->Dlon() - BathyModel::kOrgLon) *
+               BathyModel::kMPerLon;
+    };
+    auto z = [&](int r) {
+        return (m_bathy->Lat1() - (r + 0.5) * m_bathy->Dlat() - BathyModel::kOrgLat) *
+               BathyModel::kMPerLat;
+    };
+    const double xMid = x(nx / 2), zMid = z(ny / 2);
+    c0 = 0;
+    while (c0 < nx && EdgeWeight(x(c0), zMid) < 1.0f) ++c0;
+    c1 = nx - 1;
+    while (c1 >= c0 && EdgeWeight(x(c1), zMid) < 1.0f) --c1;
+    r0 = 0;
+    while (r0 < ny && EdgeWeight(xMid, z(r0)) < 1.0f) ++r0;
+    r1 = ny - 1;
+    while (r1 >= r0 && EdgeWeight(xMid, z(r1)) < 1.0f) --r1;
+    return c0 <= c1 && r0 <= r1;
 }
 
 // ------------------------------------------------------------------- the bed classifier
@@ -686,8 +580,7 @@ const char* kSeafloorRulesDefault = R"JSON({
 )JSON";
 
 // Dry sediment albedo by datum depth: sand on the shelf, silt down the slope, clay on the plain.
-// MIRRORED in shaders/Compose.hlsli SeafloorRampLuma -- change both, or the renderer's shading
-// recovery drifts.
+// MIRRORED in shaders/Compose.hlsli SeafloorRampLuma -- change both.
 void SeafloorRamp(float depthM, float rgb[3]) {
     static const float kD[5] = {0.0f, 40.0f, 200.0f, 1000.0f, 4000.0f};
     static const float kC[5][3] = {{0.66f, 0.60f, 0.46f}, {0.56f, 0.52f, 0.42f},

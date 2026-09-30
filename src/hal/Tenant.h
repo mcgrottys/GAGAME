@@ -108,8 +108,37 @@
 //      holds the want set (Residency.h settleExact).
 //
 //  DX12-first: the fiber's format is DXGI's and the manager's texture is the reserved
-//  Texture2DArray it always was; nothing here is virtual. Retire.h beside this file states the
-//  temporal-ownership contract the residency manager keeps by turn count.
+//  Texture2DArray it always was; nothing here is virtual. The residency manager keeps the
+//  temporal-ownership contract (Context.h) by TURN COUNT, not by fence: a dropped tile's NULL
+//  map and a DirectStorage landing slot retire 4 turns later (kEvictAgeFrames,
+//  kStageRetireFrames), longer than the frame ring's overlap.
+//
+//  HIERARCHY 4.17, COMMIT 1: A SLICE THAT STANDS FOR ONE ALIGNED BLOCK OF THE PYRAMID. The
+//  pyramid (docs/HIERARCHY.md 4.1) is the cube's own lattice carried to rung 17,
+//  Lattice::Cube(16384 << 17): a face 2^31 texels across and mip = 17 - rung, so rung 0 is
+//  today's cube and rung r has 16384 2^r texels across a face. An ALIGNED BLOCK of rung r is the
+//  square of 16384 of its texels whose origin is (bx, by) 16384, 2^r blocks a side, and a slice
+//  bound to one (BlockBinding) holds at its own mip m the pyramid's mip 17 - r + m, its tile
+//  (x, y) being the pyramid's
+//      X = bx tilesX(m) + x,   Y = by tilesY(m) + y,
+//  with tilesX(m) and tilesY(m) the slice's own tiles a side in the fiber's tile shape. The
+//  origin is a multiple of the slice's size, so every one of those numbers is an integer at every
+//  mip the slice carries: the slice's chain IS the pyramid's over that ground, its uv never
+//  leaves [0, 1), and today's clamp samplers, residency map and per-slice manager are right for
+//  it unchanged (4.17: a window that stands on an aligned block needs no new manager). The SLOT
+//  is the manager's address and the GLOBAL tile is the tree's, and the binding is the one place
+//  the two meet:
+//    * the dispatcher asks the binding's provider, or the tree in the holder ON THE PYRAMID'S
+//      LATTICE, for the slot's global tile -- the manager never holds a global coordinate, whose
+//      x reaches 2^24 where its key keeps 21 bits;
+//    * the change law turns a tree's change on the pyramid's lattice back into a slot for EVERY
+//      block slice that holds the tile, because one pyramid tile can lie in several: a rung-6
+//      block's mip 3 and the mip 0 of the rung-3 block over the same ground are the same tiles,
+//      which is the fact the phase law and tile sharing stand on. A change on any other lattice
+//      takes the one law above, unchanged.
+//  No shipped tenant declares a block. The [tenant-binding] selftest (hal/TenantTest.cpp)
+//  reaches the dispatch and the routing through Unregistered(), the same declaration with no
+//  manager and no GPU.
 // ================================================================================================
 #pragma once
 
@@ -119,6 +148,7 @@
 #include "hal/Residency.h"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -151,6 +181,52 @@ struct SliceBinding {
     const char* astField = "";       // the GA AST edge this binding realizes
 };
 
+// ONE slice standing for one aligned block of the pyramid (the banner). A POD: the pure
+// functions below are the whole of the translation, and the tile shape is always the caller's
+// (the tenant's fiber), never assumed. They answer for a block Refusal() accepts.
+struct BlockBinding {
+    static constexpr int kFinestRung = 17;   // the finest a 32-bit face dimension holds (4.7 mm)
+    static constexpr uint32_t kPyramidDim = Lattice::kFaceDim << kFinestRung;   // 2^31
+
+    uint32_t face = 0;
+    int rung = 0;              // 0 = today's cube (16384 a face); r has 16384 2^r a face
+    uint32_t bx = 0, by = 0;   // the block's origin is (bx, by) 16384 texels of the rung
+
+    // The lattice every block stands on, in a tile shape; its Tag() names the tree's changes.
+    static Lattice Pyramid(uint32_t texW, uint32_t texH) {
+        return Lattice::Cube(kPyramidDim, texW, texH);
+    }
+    // The mips a slice carries in a tile shape: the residency manager's chain, 16384 halved
+    // down to the level one tile spans (AddTextureInternal) -- 8 for 128x128, 7 for 256x128. A
+    // shape that is not a power of two on each axis, or wider than a slice, tiles no block: 0.
+    static uint32_t Mips(uint32_t texW, uint32_t texH);
+    // Slot to global: the pyramid's tile that the slot (x, y) at the slice's mip holds. False
+    // for a slot outside the slice's grid or at a mip the slice does not carry. slot.face is not
+    // read: which slice it is, is the caller's.
+    bool Global(const TileRequest& slot, uint32_t texW, uint32_t texH, TileRequest& global) const;
+    // Global to slot: whether the pyramid's tile lies in this block at a mip this slice carries,
+    // and the slot if so (slot.face 0: the slice is the caller's).
+    bool Slot(const TileRequest& global, uint32_t texW, uint32_t texH, TileRequest& slot) const;
+    // The block's ground: its face-uv box, exact (a block's width is 2^-rung). The four corner
+    // directions follow through ComposeCubeDir(face, u, v).
+    void Ground(double& u0, double& v0, double& u1, double& v1) const;
+    // The ground resolution of the slice's mip m: the pyramid's at mip 17 - rung + m.
+    double GroundRes(uint32_t mip) const;
+    // Empty when the block may be bound at `slice`; else why not: a rung outside 0 to 17, a face
+    // that is not the cube's, a block outside its face, or one of the cube's own six slices.
+    std::string Refusal(uint32_t slice) const;
+};
+
+// The declaration of a slice by a block, beside the slices declared by a lattice. The provider
+// is asked the PYRAMID'S tile, never the slot; empty, the tree in the holder answers on the
+// pyramid's lattice.
+struct BlockSlice {
+    uint32_t slice = 0;
+    BlockBinding block;
+    TileProviderFn provider;
+    const char* astField = "";
+};
+
 struct TenantDesc {
     const wchar_t* name = L"";
     const char* astNode = "";
@@ -163,6 +239,9 @@ struct TenantDesc {
     std::vector<uint8_t> absentTile;
     uint32_t slices = 0;
     std::vector<SliceBinding> bindings;
+    // HIERARCHY 4.17: slices declared by the aligned block of the pyramid each stands for. No
+    // shipped tenant declares one yet; a tenant that does still declares a lattice binding.
+    std::vector<BlockSlice> blocks;
     // The swapped trees (exposure, wave): where the tree lives, read per request. Bound by
     // Sparse() before the first request -- see the banner on why it rides the declaration.
     std::shared_ptr<std::shared_ptr<TileTree>> holder;
@@ -176,20 +255,34 @@ public:
     Tenant() = default;
     // AddTexturePages + the dispatcher, after the declaration's gates (bindings inside the
     // slices and disjoint, one face dimension, the lattices' tile shape the fiber's, a
-    // 64 KB absentTile or none, a holder where a binding has no provider). Throws on a
-    // malformed declaration, as every hal builder does at boot. Logs the [tenant] line.
+    // 64 KB absentTile or none, a holder where a binding has no provider; a block slice
+    // Refusal() accepts, inside the slices, bound once, in a tenant of 16384-texel slices whose
+    // fiber's tiles tile a block, with a provider or a holder). Throws on a malformed
+    // declaration, as every hal builder does at boot. Logs the [tenant] line.
     static Tenant Sparse(Gpu& gpu, ResidencyManager& mgr, TenantDesc desc);
+    // The same declaration with no manager and no GPU: the same gates, the same dispatcher and
+    // change law, with each invalidation handed to `invalidate` instead of a manager's queue.
+    // Id() is -1 and nothing is registered. No site ships it: the [tenant-binding] selftest
+    // reaches the block slices' dispatch and routing through it, pure CPU.
+    static Tenant Unregistered(TenantDesc desc, std::function<void(const TileRequest&)> invalidate);
 
     int Id() const;
     bool Valid() const { return m_s != nullptr; }
-    // The lattice slice `slice` sits on; null for an unbound slice.
+    // The lattice slice `slice` sits on; null for an unbound slice and for a block slice.
     const Lattice* LatticeOf(uint32_t slice) const;
+    // The block a block slice stands for; null for any other slice.
+    const BlockBinding* BlockOf(uint32_t slice) const;
     // The first slice of the binding whose lattice.Tag() is `latticeTag`; an undeclared tag
     // routes to the cube binding (else the first) and is said once.
     uint32_t SliceOf(const std::string& latticeTag) const;
-    // tree.SetLattice(the first binding's lattice) and tree.onChanged = the one invalidation
-    // law: Invalidate(Id(), {SliceOf(tag) + r.face, r.mip, r.x, r.y}).
+    // tree.SetLattice(the first binding's lattice) and tree.onChanged = Changed.
     void Bind(TileTree& tree);
+    // THE ONE INVALIDATION LAW, what Bind(tree) hangs on onChanged: a change on the pyramid's
+    // lattice invalidates the slot of every block slice that holds the tile; any other change
+    // invalidates {SliceOf(tag) + r.face, r.mip, r.x, r.y}.
+    void Changed(const std::string& latticeTag, const TileRequest& r) const;
+    // THE DISPATCHER the manager holds, asked directly: the slice's tile as the manager gets it.
+    bool Dispatch(const TileRequest& r, std::vector<uint8_t>& out, TileLoc* loc) const;
     // The holder the dispatcher reads per request (std::atomic_load, as the lambdas did).
     void Bind(std::shared_ptr<std::shared_ptr<TileTree>> holder);
     const TenantDesc& Desc() const;
@@ -198,5 +291,11 @@ private:
     struct State;
     std::shared_ptr<State> m_s;
 };
+
+// HIERARCHY 4.17 commit 1's gate (hal/TenantTest.cpp), run from --selftest after the address
+// block: the block binding's round trip, ground, nesting and the Merrimack's blocks, the
+// dispatch and the change routing through an Unregistered tenant, and three planted failures.
+// Pure CPU; it writes nothing.
+bool RunTenantBindingSelfTest();
 
 }  // namespace ga::hal

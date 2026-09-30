@@ -373,6 +373,31 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             out.tools.push_back(std::move(t));
         }
     }
+    if (const JsonValue* a = ListOf(doc, "sources")) {
+        const PropDecl* decl = root.Find("sources");
+        for (const JsonValue& e : a->arr) {
+            scene::SourceProps s;
+            ElementReader r(scene::ElementChain(*decl, e), e, "sources", why, &ok);
+            r.Str("name", s.name);
+            r.Str("file", s.file);
+            r.Str("folder", s.folder);
+            r.Str("match", s.match);
+            r.Str("manifest", s.manifest);
+            r.Str("kind", s.kind);
+            r.Str("crs", s.crs);
+            r.F64("over", s.over);
+            r.F64("feather", s.feather);
+            r.Str("unit", s.unit);
+            r.Str("datum", s.datum);
+            r.F64("offset", s.offset);
+            s.hasOffset = e.Get("offset") != nullptr;
+            if (!ok) return false;
+            if (s.file.empty() + s.folder.empty() + s.manifest.empty() != 2) {
+                return Refuse(why, "sources: an entry names a file, a folder and a match, or a manifest -- one of the three");
+            }
+            out.sources.push_back(std::move(s));
+        }
+    }
     return true;
 }
 

@@ -184,6 +184,14 @@ public:
         int winT = -1, hgtWinT = -1, detWinT = -1;
         uint32_t winFace = 0, hgtWinFace = 0, detFace = 0;
         double detOrg[2] = {}, detSize = 1.0, det17Org[2] = {};
+        // HIERARCHY 4.17 commit 2: the standing blocks (SurfaceFrame::blocks), block i at
+        // slice 6 + i of the colour and the mask; blockN 0 is today's Mercator pages. As many
+        // as the key takes (SurfaceFrame::kMaxBlocks, held equal in GlobeLayer.cpp): with four,
+        // a key of six blocks left its two finest asked at their floor alone.
+        static constexpr uint32_t kBlocks = 8;
+        uint32_t blockN = 0, blockFace[kBlocks] = {};
+        int blockRung[kBlocks] = {};
+        long long blockAx[kBlocks] = {}, blockAy[kBlocks] = {};
         bool probeCullFar = false;   // step 23 probe
         // M10: an OCCLUDING SPHERE in this walk's own frame (centre, radius; radius 0 = none).
         // For a level the camera's planet floats in, that planet hides most of it: a node whose
@@ -240,6 +248,7 @@ public:
         int tenant;
         uint32_t face, mip;
         float u0, v0, u1, v1;
+        float nearM = 0.0f;   // step 5: the leaf's distance, the want's weight
     };
     // Post the prefetch walk for this frame: `cam` is the frame's clamped camera (its planet
     // position and pixel angle are the walk's, exactly as SetView's are), `pred` the

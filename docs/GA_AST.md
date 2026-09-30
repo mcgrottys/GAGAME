@@ -11,7 +11,7 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | color.pages | page-sample | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | sRGB | finest containing page, residency-clamped mip | x1 | Compose.hlsli ComposedColorPages (no flip: both vS) |
 | height.pages | height | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | vertex + pixel classification (M9bg: the refracted cast retired) | x1 | Compose.hlsli ComposedHeightPages |
 | google.tiles | fetch | compose.stack | mercator.px +v=S | mercator.px +v=S | - | sRGB bytes | zoom = f(groundResM) | x1 | GoogleColorSource::ZoomFor |
-| massgis.ortho | fetch | compose.stack | latlon.deg +v=N | mercator.px +v=S | FLIP | sRGB bytes | EPSG:6348 UTM19N declared | x1 | AerialOrthoSource (TM forward) |
+| massgis.ortho | fetch | compose.stack | latlon.deg +v=N | mercator.px +v=S | FLIP | sRGB bytes | EPSG:6348 UTM19N from its manifest | x1 | RasterFileSource (TM forward) |
 | height.stack | classify | synth.bed | latlon.deg +v=N | latlon.deg +v=N | - | m NAVD -> dry albedo | 3 samples/texel | x1 | BedSynthSource::Sample (M7d cross-channel edge) |
 | globe.walk | wants | residency.mgr | uv01.vS +v=S | uv01.vS +v=S | - | mip requests | mips 0..7 + floor 4..7 | x1 | GlobeLayer node walk + M7g mip floor |
 | residency.mgr | have-map | globe.ps | resmap.texel +v=S | uv01.vS +v=S | - | finest mip * 16 (R8) | 0..7*16 | x1 | CsHave2D residency clamp |

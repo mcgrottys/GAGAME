@@ -26,10 +26,14 @@
 #include "scene/Layer.h"
 
 #include <cmath>
+#include <functional>
 #include <memory>
 #include <vector>
 
 namespace ga {
+namespace hal {
+class CommandContext;   // hal/Context.h: the frame's list, the frame-head hook's argument
+}
 
 // Mirrored in shaders/Common.hlsli. If you change one, change the other; the static_assert below
 // only catches size drift, not field reordering.
@@ -95,6 +99,11 @@ struct RendererDesc {
 
 class Renderer {
 public:
+    // Step 5 (HIERARCHY 4.19, law 8): called with a layer's name just before it records its
+    // draws, so the residency manager's frame table can say where each reader reads. Empty: none.
+    std::function<void(const char*)> beforeLayer;
+    // Step 5 E (law 8): called first in each frame's command list, before any layer records.
+    std::function<void(hal::CommandContext&)> atFrameHead;   // (the hal's list: no D3D here)
     void Init(Gpu& gpu, const RendererDesc& desc);
     void Shutdown();
 
@@ -153,7 +162,7 @@ public:
 
     // M12 step 4g: THE SURFACE CONSTANT BUFFER (b2). The frame loop fills these rows once a
     // frame through SurfaceFrame::Fill; RenderFrame pushes them once and binds root parameter 4
-    // (b2) before any layer records, so the globe, the sea, the terrain and the GIS vectors
+    // (b2) before any layer records, so the globe, the sea and the GIS vectors
     // read one buffer where each carried a copy of these rows inside its own cbuffer. Zero
     // until filled: every composed channel reads "off".
     ComposedSurfaceCb surfaceCb{};

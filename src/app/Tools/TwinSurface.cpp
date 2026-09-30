@@ -44,10 +44,34 @@ namespace ga::app::tools {
 //  out there the question is not "do the two agree" but "does the CPU know
 //  where the bottom is at all".
 // ==================================================================
+// THE THREE LEVELS THAT MUST AGREE at the camera (the startup transient, measured 2026-09-10):
+// the classifier's -- the scalar the surface classifier holds the bed against, the tide plane --
+// the bank's -- the level plane the GPU draws, which inside a solver's domain carries the
+// solver's deviation -- and the CPU's -- what a hull reads, WeatherManager::Query, the solver
+// being truth. A basin the solver holds below the tide splits the first from the other two.
+void LogLevelsAtCamera(Gpu& gpu, WaterBankLayer* waterBank, const Camera& cam, double simUnix,
+                       WeatherManager& weather, double classifierNavd) {
+    weather.RefreshMirrorsTo(gpu, simUnix);
+    const double xz[2] = {cam.px, cam.pz};
+    WaterBankLayer::BankPoint bp{};
+    if (waterBank) waterBank->ReadBankPoints(gpu, xz, 1, &bp);
+    const double lat = BathyModel::kOrgLat + cam.pz / BathyModel::kMPerLat;
+    const double lon = BathyModel::kOrgLon + cam.px / BathyModel::kMPerLon;
+    const WeatherSample q = weather.Query(lat, lon, simUnix, 1.0);
+    const double bank = bp.valid ? double(bp.level) : classifierNavd;
+    const double spread = (std::max)({classifierNavd, bank, q.levelNavd}) -
+                          (std::min)({classifierNavd, bank, q.levelNavd});
+    Log("[twin] water level at the camera (%.0f, %.0f): classifier %+.3f | bank %+.3f%s | CPU "
+        "%+.3f (%s) m NAVD88 -- spread %.3f m",
+        cam.px, cam.pz, classifierNavd, bank, bp.valid ? "" : " (NO BANK POINT)", q.levelNavd,
+        q.levelSrc, spread);
+}
+
 void RunTwinSurface(const Options&, Gpu& gpu, const SeaState& seaState, SeaLayer* sea,
                     const WaterSceneConfig& waterScene, WaterBankLayer* waterBank,
                     const Camera& cam, double simUnix, WeatherManager& weather,
-                    const std::unique_ptr<WaveField>& waveField) {
+                    const std::unique_ptr<WaveField>& waveField, double classifierNavd) {
+    LogLevelsAtCamera(gpu, waterBank, cam, simUnix, weather, classifierNavd);
     weather.RefreshMirrorsTo(gpu, simUnix);
     TreeWater tw;
     tw.Configure(&weather, waveField.get(), &sea->Ocean(), &seaState,

@@ -18,7 +18,7 @@
 //  carries no hardware type at all, and the rule "Direct3D lives in src/hal/" (tools/hal_lint.py)
 //  becomes checkable instead of remembered.
 //
-//  TEMPORAL OWNERSHIP (the review's point, made a contract in step 3e's Retire): a context is
+//  TEMPORAL OWNERSHIP (the review's point, made a contract in step 3e): a context is
 //  valid for ONE recording -- the frame ring's list between BeginFrame and EndFrame, or the
 //  immediate-upload list between BeginUpload and EndUpload -- and it says which by Who().
 //  Nothing recorded through it survives the submission it belongs to; anything a recorded

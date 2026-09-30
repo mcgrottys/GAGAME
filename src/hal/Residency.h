@@ -55,6 +55,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace ga {
@@ -66,26 +67,10 @@ public:
     // thousands, so most of the view rode coarse fallbacks for the whole flight (the vintage
     // patchwork). Loads are disk/CPU paints; feed as many workers as the machine has.
     static constexpr uint32_t kMaxLoadsInFlight = 48;
-    // M9af: slots held open for tiles that are NOT on disk, so preferring cached reads cannot
-    // starve the painting that fills the cache. 12 of 48 = a quarter.
-    static constexpr uint32_t kPaintReserve = 12;
     static constexpr uint32_t kMaxMapsPerFrame = 96;     // tiles mapped+filled per frame
     static constexpr uint64_t kMapStageBytes = 8ull << 20;   // M9bb: residency-map staging reserve
     static constexpr uint32_t kPoolCapTiles = 8192;      // 512 MB ceiling before eviction
     static constexpr uint32_t kEvictAgeFrames = 4;       // > frame overlap: no in-flight reads
-    // THE POOL'S OWN HEADROOM (2026-09-17). Eviction was demand-driven only: a slot came free
-    // when some other tile needed it, so a view that LEFT a place held that place's tiles until
-    // something else asked. MEASURED with a hull carried 1900 km: 8192 tiles mapped, 2216 of
-    // them wanted -- three quarters of the pool belonged to the river the boat had left, and the
-    // first frames at the new place bought every slot one eviction at a time (each one sorting
-    // all 8192 mapped tiles again). So above the high-water mark the pool releases, every turn,
-    // what nobody has wanted for kReclaimAgeFrames -- oldest first, at most kReclaimPerTurn a
-    // turn. Below the mark nothing is released: holding a tile nobody wants is free while the
-    // slots are, and the cache is the point. The victim rule is the demand path's, unchanged.
-    static constexpr uint32_t kPoolHighWater = kPoolCapTiles - kPoolCapTiles / 8;   // 7168
-    static constexpr uint32_t kReclaimAgeFrames = 60;    // ~2 s at 30 fps: gone, not glanced away
-    static constexpr uint32_t kReclaimPerTurn = 256;     // bounded work, ~6 k stale tiles in 24
-
     // ---- THE SAMPLERS (M13) -------------------------------------------------------------
     // ONE CACHE FOR THE EARTH, MANY READERS. A sampler is anything that will read the planet
     // and can be named: a view's walk, a subject whose surroundings stay resident, a gate's
@@ -99,7 +84,9 @@ public:
     // Register (or find) a sampler by name; ids are handed out in registration order and are
     // stable for the run. Beyond kMaxSamplers the last id is shared and the overflow is logged
     // once -- a crowded scene loses accounting, never tiles.
-    int Sampler(const char* name);
+    // `pin` (step 5): the reader stands, as a solver's domain does, and what it asks for is the
+    // order's first class (HIERARCHY 4.19). Asking once with it marks the sampler for the run.
+    int Sampler(const char* name, bool pin = false);
     int Samplers() const { return static_cast<int>(m_samplers.size()); }
     const char* SamplerName(int id) const {
         return (id >= 0 && id < Samplers()) ? m_samplers[id].c_str() : "?";
@@ -114,6 +101,15 @@ public:
     void LogSamplers() const;
 
     void Init(Gpu& gpu);
+    // THE MANAGER is HIERARCHY 4.19's one order over tiles (ResidencyOrder.cpp): the held set is
+    // the order's first P, the map a function of what is held. H2, streaming.holdMargin: a held
+    // tile, and a tile above a held one, count for this times their measure (1: no margin).
+    float holdMargin = 1.41421356f;
+    // Law 8's table (step 5 D): the frame loop opens each frame and names each read; the wants and
+    // the turn name themselves. One frame's order is logged once ([frame-table]).
+    void FrameBegin();
+    void Mark(const char* what);
+
     // Idempotent, and the destructor calls it: the pool outlives this object and its jobs
     // capture `this`, so leaving without draining them is a use-after-free waiting for a
     // slow load. main still calls it explicitly at every early exit.
@@ -143,11 +139,12 @@ public:
     uint32_t TextureSrvCube(int tenant) const { return m_tenants[tenant].srvCube; }
     uint32_t ResidencySrvCube(int tenant) const { return m_tenants[tenant].resMapSrvCube; }
 
-    // Tiles known but not yet mapped (seen + loading + in flight). The warm-cache loop drains
-    // this to zero before the camera ever moves.
-    uint32_t PendingCount() const {
-        return static_cast<uint32_t>(m_seen.size() + m_loading.size());
-    }
+    // Tiles known but not yet mapped. The warm-cache loop drains this to zero before the camera
+    // ever moves. The tiles of the order's first P not held yet, whatever they wait on.
+    uint32_t PendingCount() const { return m_orderPending; }
+    // Tiles mapped in the pool, every tenant (a DirectStorage tile counts from its map, before its
+    // bytes land). The solver's bed wait reports the tiles it waited for as the growth of this.
+    uint32_t MappedCount() const { return static_cast<uint32_t>(m_mapped.size()); }
 
     uint32_t TextureSrv(int tenant) const { return m_tenants[tenant].srv; }
     uint32_t Mips(int tenant) const { return m_tenants[tenant].mips; }
@@ -163,6 +160,52 @@ public:
         if (y >= rdim) y = rdim - 1;
         return t.resCpu[face][static_cast<size_t>(y) * rdim + x] / 16u;
     }
+
+    // ---- THE FLOOR LAW (docs/HIERARCHY.md 4.6): PROPOSED, MEASURED, AND NOT STAGED ------------
+    // The proposal: the map the GPU reads is the true one with each byte the largest (the
+    // coarsest) of its 3 x 3, read BILINEAR. A bilinear read mixes the four bytes around its
+    // sample; each of those, being the largest of its own 3 x 3, is at least the largest of the
+    // four TRUE bytes there, so the mix is never finer than the gather + max in effect -- and it
+    // is continuous, where the gather's sharpness steps along tile lines (porch_floor.py: the
+    // largest step between samples a sixteenth of a cell apart falls from 7 mips to 0.44, for
+    // 0.15 of a mip on average). The same widening would let a kernel's ONE byte (PageHaveLoad)
+    // cover the four texels PageLoad4 reads around it (review finding 9). --selftest's [restest]
+    // holds this construction to all of that, and it holds.
+    //
+    // WHY THE GPU STILL READS THE TRUE MAP. A clamp that is never finer is not a read that is
+    // never outside what is resident. Measured on this GPU ([restest] gpu): once an anisotropic
+    // footprint minifies, the sampler keeps its tap count and spaces the taps by the CLAMPED
+    // mip's texels -- an 8:1 footprint of 8 texels under a clamp of 6.5 reaches 2.7 cells, where
+    // one bilinear tap reaches half a cell. The floor ramps the clamp through intermediate coarse
+    // mips in the cell before a frontier, so the colour's anisotropic taps (sAniso) cross it: under
+    // the anisotropic sampler the floor touched NULL tiles the gather + max kept out at 2615 of the
+    // probe's points, and a second ring (5 x 5) at 5394. The trilinear sampler and the kernels'
+    // taps stay sound under it. The construction is kept, gated, for the law that replaces it.
+    //
+    // A cube face's border takes its neighbours from the face across the edge: the true cell
+    // under the direction of the point one cell further along in this face's plane
+    // (ComposeCubeDir past the square, CubeFaceOfDir), found once per map size (CubeFloorRing).
+    // At a corner, where three faces meet, the geometry gives what it gives. Slices 0..5 of a
+    // tenant with six or more are the cube (its cube views say so); every other slice is a
+    // window and clamps at its edge, as the sampler does. The map is square (rdim) while a
+    // tenant's tile grid need not be (UpdateResidencyByte's sx, sy): the dilation is in MAP
+    // cells, which are what the shader's bilinear mixes.
+    //
+    // The cube's border, per map size: for faces 0..5, the flat index (face * rdim^2 + y * rdim
+    // + x) of the true cell under each cell of a one-cell ring around the face, in the padded
+    // map's raster order -- rdim + 2 above, then the left and the right cell of each of the
+    // rdim rows, then rdim + 2 below: 4 rdim + 4 a face.
+    static std::vector<uint32_t> CubeFloorRing(uint32_t rdim);
+    // Slice s of `in` inside that ring: (rdim + 2)^2 bytes. With `cubeRing`, the border reads
+    // the neighbouring faces; without one it repeats the slice's own edge (a window's clamp).
+    static void FloorPad(const std::vector<std::vector<uint8_t>>& in, uint32_t rdim, uint32_t s,
+                         const std::vector<uint32_t>* cubeRing, std::vector<uint8_t>& padded);
+    // The floor map: every byte the largest of its 3 x 3 in `in`. `cubeRing` (null: every slice
+    // clamps) is CubeFloorRing(rdim) and serves slices 0..5.
+    static void FloorMap(const std::vector<std::vector<uint8_t>>& in, uint32_t rdim,
+                         const std::vector<uint32_t>* cubeRing,
+                         std::vector<std::vector<uint8_t>>& out);
+
     ID3D12Resource* TextureRes(int tenant) const { return m_tenants[tenant].res.Get(); }
     ID3D12Resource* ResidencyRes(int tenant) const { return m_tenants[tenant].resMap.res.Get(); }
     D3D12_RESOURCE_STATES TextureState(int tenant) const { return m_tenants[tenant].state; }
@@ -211,8 +254,13 @@ public:
     }
 
     // `sampler` is an id from Sampler(); every call site names the reader it belongs to.
+    // Step 5 D: the want's WEIGHT, the order's fourth key: `nearM`, metres
+    // from the reader's eye to the rect (a walk's leaf gives its own distance), and, for a reader
+    // of one wide rect, its focus in the slice's uv -- a tile's weight is then its distance from
+    // the focus on the ground and up to the eye's height (nearM). Negative focus: none.
     void Want(int sampler, int tenant, uint32_t face, uint32_t mip, float u0, float v0, float u1,
-              float v1, bool predicted = false);
+              float v1, bool predicted = false, float nearM = 0.0f, float focusU = -1.0f,
+              float focusV = -1.0f);
     // M9ba: DROP a tenant's every tile -- its provider's identity moved (the exposure node's
     // bucket rolled), so what is mapped is a different field now. Residency bytes go to
     // "nothing" this frame (consumers read absence, never the stale tile); the pool slots are
@@ -237,6 +285,7 @@ public:
     // Screw-prefetch input: this frame's camera pose motor. The manager keeps the previous one
     // and hands back the extrapolated pose for the caller to run its node walk a second time
     // with `predicted = true`.
+    // Step 5 E (1a): the prediction's lead, `aheadSeconds` frames, is how long its wants stand.
     Motor PredictNextPose(const Motor& current, double aheadSeconds);
 
     // One call per frame, on the frame command list (mapping updates are queue-side and land
@@ -271,19 +320,7 @@ public:
     // The picture is made of the deficit; the slots are why it is what it is.
     bool traceRes = false;
     uint32_t traceEvery = 30;
-    // M9al: RING LOADS. The user's proposal: do not ask for the finest mip a node needs in one
-    // go -- admit a new request only if its PARENT is already mapped, so every pass advances
-    // the whole view by one mip and neighbouring ground never differs by more than a ring.
-    // What it changes is the QUEUE, not the invariant: coarse-before-fine MAPPING was always
-    // enforced; REQUESTING was not, so on a fast descent the 48 load slots fill with finest-
-    // mip tiles that are not on disk, each a paint, while the next ring of the ground the
-    // camera is actually over queues behind them. Measured (section 32: frame 600 of the rail,
-    // baseline patchy, ring uniformly sharp; timing a wash) and made the DEFAULT by the user.
-    // --no-ring-loads is the A/B.
-    bool ringLoads = true;
     bool dsSerial = false;   // M9ap diagnostic: one DirectStorage batch in flight at a time
-    uint32_t ringHeld = 0;       // requests deferred by the gate, cumulative
-    uint32_t ringHeldFrame = 0;  // ...and this frame alone
 
     // THE TURN'S CPU COST, BY PHASE. ProcessQueues runs inside GlobeLayer::Render, i.e. inside
     // the [rail] RENDER bracket, and was the only unnamed CPU work in it: the descent's record
@@ -297,10 +334,10 @@ public:
     static const char* PhaseName(int k) {
         static const char* kNames[kPhases] = {
             "invalidate + retire (NULL maps)", "DS landed: fence poll + CopyTiles",
-            "sort m_seen",                     "start loads",
-            "sort m_loading",                  "gather mappable",
-            "map: evict + UpdateTileMappings", "fill: DS OpenFile + Enqueue",
-            "fill: ring memcpy + CopyTiles",   "residency map memcpy + copies"};
+            "the order: buckets + first P",    "the loader: first P not held",
+            "release past P + let go",         "gather: first P loaded, to slots",
+            "map: UpdateTileMappings",         "fill: DS OpenFile + Enqueue",
+            "fill: ring memcpy + CopyTiles",   "map from held + copies"};
         return (k >= 0 && k < kPhases) ? kNames[k] : "?";
     }
     double phaseMs[kPhases] = {};
@@ -309,50 +346,11 @@ public:
     // with PendingCount() this is "nothing is still landing" -- what --settle-sync waits for.
     uint32_t InFlightReads() const { return static_cast<uint32_t>(m_inFlightReads.size()); }
 
-    // Step 25 (docs/PERF_EXPERIMENT.md): --settle-exact. THE RESIDENT SET IS THE WANT SET.
-    //
-    // --settle-sync's quiet test (pending 0, no in-flight read, nothing ring-held) fires over
-    // two different resident sets: a request the ring gate held and the walk then stopped
-    // asking for is neither pending nor resident, and what stays MAPPED is whatever the 240
-    // real frames happened to land -- tiles the predicted walk asked for, tiles wanted at a
-    // finer mip on the approach than at the pose. MEASURED (step 21's first attempt, bird,
-    // --settle-sync --settle-hold 400, two runs, both quiet at pending 0): --lens bed differed
-    // by 2.1 % of the pixels with max |d| 217, whole tiles resident at different mips; the
-    // ring-held totals were 3.31 M against 3.11 M. The picture the shader samples is the
-    // finest mapped mip under each pixel (the residency byte clamps the LOD there), so a
-    // mapped tile the walk does not want is not inert: it is what a still is made of.
-    //
-    // While main raises settleExact (the held frames of a --settle-exact still), every
-    // ProcessQueues turn reads the walk's own record -- the per-tile frame stamp Want()
-    // writes down the whole ancestor column -- and (a) counts the DEFICIT, the stamped tiles
-    // not mapped at their mip; (b) DROPS every tracked tile whose stamp is stale (not wanted
-    // this frame at that mip) through Untrack + DropOne, the invalidation's own path: the
-    // residency byte rises now, the NULL map and the pool slot follow kEvictAgeFrames later,
-    // a tile still crossing the bus on a DirectStorage batch waits for its fence, and a tile
-    // is only dropped once it has been unwanted for kEvictAgeFrames turns (the evictor's own
-    // age rule); the coarsest mip is the floor and is never dropped; (c) leaves the issuing to
-    // the walks, which run every held frame at the fixed pose; (d) reports the turn as EXACT
-    // when the deficit is zero, no stale tile is tracked, and nothing is pending, in flight
-    // or retiring -- main dumps after kEvictAgeFrames + 4 consecutive exact turns. A wanted
-    // tile that can never land -- its own load failed, or an ancestor's did, so the ring gate
-    // holds its children forever -- is excluded from the deficit BY ITS STATE (the manager
-    // knows), never by a timeout.
-    //
-    // THE POOL DURING THE HOLD IS THE WANT SET. MEASURED (bird, the first exact run): the
-    // walk wants 9176 tiles (573 MB) and kPoolCapTiles is 8192 (512 MB); at the cap the
-    // evictor finds no victim (every mapped tile is wanted every frame), MapAndFill breaks
-    // out of its batch, and the batch's remaining tiles -- already erased from m_loading --
-    // are lost in state Loaded, tracked and unqueued, until something invalidates them.
-    // Which 984 tiles lose is decided by landing order: that is the race a quiet
-    // --settle-sync fired over. So while settleExact is raised MapAndFill's cap test is
-    // skipped (the pool grows to the want set, bounded by the walk) and the exact turn
-    // returns a wanted Loaded tile in no queue to m_loading. The ledger prints the mapped
-    // total against the shipped cap so an over-cap pose is named. Outside a hold settleExact
-    // is false and this is the shipped turn, call for call.
+    // --settle-exact (an instrument): while main raises settleExact (the held frames of a still),
+    // the order's cut is the want set whole, the pool may grow past its budget, and a turn is
+    // EXACT when every wanted tile is held and nothing is stale, pending, in flight or retiring.
+    // main dumps after kEvictAgeFrames + 4 exact turns (OrderTurn keeps the ledger).
     bool settleExact = false;
-    // Of ringHeldFrame: requests held under a parent whose load FAILED. They can never be
-    // admitted, so the exact settle counts them as unreachable, not as deficit.
-    uint32_t ringHeldDeadFrame = 0;
     struct SettleTurn {
         uint32_t wanted = 0;        // tracked tiles stamped by this frame's walks
         uint32_t mapped = 0;        // ... of which mapped at their mip
@@ -360,7 +358,6 @@ public:
         uint32_t unreachable = 0;   // ... wanted, and never will land (Failed, or under one)
         uint32_t stale = 0;         // tracked, not wanted this frame, still tracked after the turn
         uint32_t dropped = 0;       // stale tiles dropped this turn
-        uint32_t requeued = 0;      // wanted, Loaded, in no queue (the cap's casualties) -> m_loading
         uint32_t pending = 0, reads = 0, retiring = 0;
         bool exact = false;
     };
@@ -409,6 +406,34 @@ public:
     };
     TurnLedger turn;
     uint64_t ringNoBytesTotal = 0, landedUnownedTotal = 0, landedOnlyTurns = 0;
+    // Step 5: what the order's turn decided (OrderTurn), printed under the [res-turn] line. A
+    // tile LET GO had its load finish after it left the first P: its bytes (letGoRead) or its
+    // archive place were dropped in that turn, never mapped (law 4).
+    struct OrderTurnLedger {
+        uint32_t candidates = 0, cut = 0, firstPHeld = 0, pending = 0, waiting = 0;
+        uint32_t letGo = 0, letGoRead = 0, forgotten = 0, lost = 0;
+        // The livelock's instrument: a load started for a tile let go within the glance. And
+        // the rescue's number: a tile released past P, back in the first P while its old slot
+        // still held its bytes (the retire delay), so it is read again into a new slot.
+        uint32_t reloaded = 0, rewanted = 0;
+        uint32_t pass = 0;   // 1: the order was recomputed this turn (an event), 0: not
+        uint32_t rescued = 0;      // 1b: taken back from the retire list, no read, no new slot
+        uint32_t incomplete = 0;   // finding 83: loads that answered a tile not whole
+        // H1: tiles that crossed the pass's cut since the pass before (in: into the first P), and
+        // the readers whose statement changed this turn (a bit a reader).
+        uint32_t crossIn = 0, crossOut = 0, spoke = 0;
+    };
+    // H1: the measure's motion over the run, one line (the frame loop calls it at the end).
+    void LogOrderMotion() const;
+    uint64_t rescuedTotal = 0, incompleteTotal = 0;
+    // Decision 5: the order's pass runs on events only. Its turns, the turns it skipped, the
+    // entries it ordered and its time by part: statements, candidates, sort + cut, release + forget.
+    uint64_t passTurns = 0, passSkipped = 0, passEntries = 0;
+    double passMs[4] = {};
+    OrderTurnLedger orderTurn;
+    uint64_t letGoTotal = 0, letGoReadTotal = 0, reloadedTotal = 0, rewantedTotal = 0;
+    uint64_t releasedTotal = 0, mappedTotal = 0;   // an untraced rail's releases and maps
+    std::vector<uint32_t> railMaps;   // H5: the tiles each recorded frame's turn mapped (the frame loop)
     bool traceTurn = false;        // print this turn's ledger (main: --res-trace-frames)
     uint32_t traceRecFrame = 0;    // the recorded frame main labels it with
 
@@ -437,8 +462,11 @@ public:
     // dropped a tile over a mapped descendant, the only kind that can leave finding 3's signature.
     uint32_t auditEvery = 0;       // main: the scene's capture.residencyAudit (0 = never)
     void LogAudit();
-    // The audit on CONSTRUCTED tenants, through this class's own UpdateResidencyByte (--selftest).
+    // The audit on CONSTRUCTED tenants, through this class's own byte writer (--selftest).
     static bool AuditSelfTest();
+    // One pass of it through the one byte writer, WriteHeldFootprint, fed the constructed tiles as
+    // its held set (the map a function of what is held).
+    static bool AuditSuite();
 
 private:
     struct Tracked;
@@ -505,10 +533,14 @@ private:
         // Step 25: the exact settle's per-tenant ledger -- the last turn's counts and the
         // drops summed over the hold, for LogSettleExact.
         uint32_t exWanted = 0, exMapped = 0, exDeficit = 0, exUnreachable = 0, exStale = 0;
-        uint32_t exDropped = 0, exDroppedMapped = 0, exRequeued = 0;
+        uint32_t exDropped = 0, exDroppedMapped = 0;
         // The pages ledger's names for the slices (LabelSlices): empty until declared.
         std::vector<std::string> sliceTag;
         std::vector<double> sliceGround0M;
+        // Step 5: floor(log2 of the slice's mip-0 texel in metres), the order's rung at mip 0
+        // (kNoRung for a slice that declared no ground); and the exact hold's lost tail.
+        std::vector<int> sliceRung0;
+        uint32_t exLost = 0;
     };
 
 
@@ -526,10 +558,17 @@ private:
         uint64_t stageOffset = 0;   // where its bytes landed in the device buffer
         bool dropped = false;       // M9ba: identity moved under it; discard when it lands
         uint32_t pos = UINT32_MAX;  // step 4: its index in the tenant's `tracked` list
+        // Step 5: its bytes are on the GPU -- the boot's fill, a ring fill with a
+        // whole tile, a DirectStorage batch whose fence signalled. HELD = Mapped and landed.
+        bool landed = false;
+        uint32_t firstP = 0;          // the last pass that placed it among the first P
+        uint32_t rec = UINT32_MAX;    // step 5 E: its record in m_rec
     };
     struct Retiring {
         std::shared_ptr<Tracked> tile;
         uint32_t frame;
+        bool rewanted = false;   // step 5: counted once as wanted back before its slot was free
+        bool rescuable = false;  // step 5 E: released past P (bytes still good), not a drop
     };
     std::vector<Retiring> m_retiring;   // M9ba: dropped-while-mapped, NULL-mapped after overlap
     std::mutex m_invMx;
@@ -608,7 +647,6 @@ private:
     // One load, on a Lane::Io job. Was the body of LoaderThread's loop.
     void RunLoad(const std::shared_ptr<Tracked>& job);
     uint32_t AcquirePoolTile(Gpu& gpu);
-    void UpdateResidencyByte(Tenant& t, const TileRequest& r, bool mapped);
     void MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
                     const std::vector<std::shared_ptr<Tracked>>& batch);
 
@@ -618,7 +656,6 @@ private:
     std::vector<uint32_t> m_freePool;
 
     // (The tracked set lives per tenant: Tenant::slot + Tenant::tracked, step 4.)
-    std::deque<std::shared_ptr<Tracked>> m_seen;
     std::vector<std::shared_ptr<Tracked>> m_loading;
     std::vector<std::shared_ptr<Tracked>> m_mapped;
     // M13: the sampler registry and this frame's per-sampler tile counts.
@@ -672,10 +709,179 @@ private:
     Motor m_prevPose;
     bool m_havePrevPose = false;
 
+    // ---- STEP 5, THE ORDER'S MANAGER (ResidencyOrder.cpp; docs/HIERARCHY.md 4.19) ----------------
+    // LAW 1: THE MAP IS A FUNCTION OF WHAT IS HELD. The byte over every mip-0 cell under tile r is
+    // the finest mip at which the tile over the cell is held with every coarser one held, times
+    // 16; 255 where the coarsest is not held. Written from the tilings and `held` alone: no
+    // increment, so no order of maps and unmaps can leave it wrong (findings 3, 63, 64).
+    using HeldFn = bool (*)(const void* ctx, uint32_t face, uint32_t mip, uint32_t x, uint32_t y);
+    static void WriteHeldFootprint(Tenant& t, const TileRequest& r, HeldFn held, const void* ctx);
+    // The engine's predicate: the slot array's tile is Mapped and landed. ctx is the Tenant.
+    static bool HeldInSlots(const void* ctx, uint32_t face, uint32_t mip, uint32_t x, uint32_t y);
+    // A tile whose held state changed this turn; ApplyChanged rewrites every such footprint once
+    // the turn's maps, claims and releases are all made, before the map goes up.
+    std::vector<std::pair<int, TileRequest>> m_changed;
+    void NoteChanged(int tenant, const TileRequest& r) {
+        m_changed.push_back({tenant, r});
+        m_edgeNotes.push_back({tenant, r});   // H2's closure, by events
+    }
+    void ApplyChanged();
+    // LAW 9: the map born saying nothing, then written from the boot's held floor and sent to the
+    // GPU on an upload that waits, so no reader ever meets the zeroed copy (finding 66).
+    void BirthMap(Gpu& gpu, int tenant);
+    // LAWS 2, 4, 5: THE ORDER and its cut (OrderTurn). P is the pool less a reserve for the slots
+    // a release keeps until no frame in flight can read them: a turn's maps times the overlap.
+    static constexpr uint32_t kSlotReserve = kMaxMapsPerFrame * kEvictAgeFrames;   // 384
+    static constexpr uint32_t kGlanceTurns = 60;   // "within the glance": ~2 s at 30 fps
+    // Room for rung 17 (4.7 mm, floor(log2) = -8) up to a planet's width (2^23 m) and their mips:
+    // a parent's bucket strictly before its child's everywhere (the selftest holds it).
+    static constexpr uint32_t kRungs = 56, kRungTop = 32;         // bucket = kRungTop - rung
+    static constexpr uint32_t kBuckets = 2u * 3u * kRungs;        // (pin, lateness, rung)
+    static constexpr int kNoRung = -1000;
+    struct OrderEntry {
+        uint32_t bucket = 0, weight = 0;   // weight: the order's fourth key, the nearer the lower
+        uint64_t key = 0;                  // the address, the tie's breaker (MakeKey)
+        Tracked* tile = nullptr;
+    };
+    std::vector<OrderEntry> m_ord, m_ordSorted, m_need;
+    std::unordered_map<uint64_t, uint32_t> m_letGoAt;   // address -> the turn it was let go
+    uint32_t m_orderPending = 0;   // first-P tiles not held (PendingCount)
+    uint16_t m_pinMask = 0;        // the samplers that stand (Sampler(name, true))
+    // Decides the turn's loads (toLoad), its releases and let-gos, and the batch to map.
+    void OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
+                   std::vector<std::shared_ptr<Tracked>>& batch);
+    static uint32_t RungIndex(const Tenant& t, uint32_t face, uint32_t mip);
+    bool UnderFailed(const Tenant& t, const Tracked* tr) const;
+    static uint32_t RungIndexOf(int r0, uint32_t mip, uint32_t mips, int rungTop, int rungs);
+    // STEP 5 E: WHAT THE ORDER READS OF A TILE, IN ONE ARRAY (decision 3). Written when a reader
+    // marks the tile (OrderNote), when the tile is tracked or untracked (Track, Untrack: one
+    // record a tracked tile, swap-removed), when it is held; read front to back by the pass.
+    static constexpr uint64_t kStatementBasis = 14695981039346656037ull;
+    static constexpr uint16_t kNoBucket = 0xFFFFu;
+    enum : uint8_t { kHeldBit = 1, kFloorBit = 2, kDeadBit = 4, kInPBit = 8, kForgetBit = 16,
+                     kWasInBit = 32,     // H1: in the first P at the pass before (the instrument's)
+                     kUpBit = 64 };      // H2: not held, above a held tile: counts as held (the pass's)
+    struct OrdRec {
+        uint64_t key = 0;          // MakeKey: the address, the tie's breaker
+        Tracked* tile = nullptr;
+        uint32_t weight = 0;       // the least distance, m, from the eye of a reader of `stamp`'s frame
+        uint32_t stamp = 0;        // the frame of its last statement, any reader
+        uint32_t predUntil = 0;    // 1a: a prediction's want stands until this frame
+        uint32_t pinFrame = 0;     // the last frame a standing reader (a pin) asked for it
+        uint16_t mask = 0;         // the readers of `stamp`'s frame
+        uint16_t bucket = kNoBucket;
+        uint8_t rung = 0, flags = 0;
+        float texel = 0.0f;        // F: the tile's texel on the ground, m (0: a slice without ground)
+        uint32_t meas = 0;         // F: the measure's bits, texel / distance from the eye (the pass)
+        // H1, the instrument (nothing decides by them): the record at the last pass that ordered it.
+        uint32_t ppass = 0;        // that pass's number (passTurns; 0: never ordered)
+        uint32_t pmeas = 0;        // its measure's bits then
+        uint16_t pmask = 0, pbucket = kNoBucket;   // its readers and its bucket then
+        // H5, THE WEIGHT STANDS WITH ITS STATEMENT: each reader's own last distance for the tile
+        // and the frame it said it; a reader that speaks again replaces its own slot only. The
+        // pass takes the nearest over the readers whose statement stands (`weight` above is the
+        // pass's result: the distance its measure was made from).
+        static constexpr int kSlots = 4;
+        int8_t ssid[kSlots] = {-1, -1, -1, -1};
+        uint32_t sstamp[kSlots] = {}, sweight[kSlots] = {};
+    };
+    static int SlotFor(const OrdRec& r, int sid);   // H5: the reader's slot, a free one, or the oldest
+    static void SlotApply(OrdRec& r, int sid, uint32_t stampFrame, uint32_t wbits);
+    // H5: the distance the pass measures from: the nearest over the standing statements.
+    static uint32_t StandingWeight(const OrdRec& r, uint32_t now, int predSid, uint32_t predLead,
+                                   const uint32_t* sampLast);
+    // H2's closure by events (the law of MarkAboveHeld, walked only from where it can break): the
+    // held-state changes since the last pass, and the held tiles whose parent was not held then.
+    std::vector<std::pair<int, TileRequest>> m_edgeNotes, m_orphans;
+    void FindOrphans();
+    static void MarkUpFrom(std::vector<OrdRec>& rec, uint32_t i,
+                           uint32_t (*parentOf)(const void*, uint32_t), const void* ctx);
+    uint64_t m_closureChecks = 0, m_closureMissTurns = 0, m_closureMissMax = 0, m_orphansMax = 0;
+    // H1: THE MEASURE'S MOTION between two passes, tile by tile, and the cut's crossings, over the run.
+    struct OrderMotion {
+        uint64_t pairs = 0;          // records ordered by two passes running
+        uint64_t left[4] = {};       // ... whose measure moved by more than 1.01, 1.1, 1.41, 2
+        float qmax = 1.0f, qmaxPrev = 0.0f, qmaxNow = 0.0f;   // the largest move and its measures
+        uint64_t qmaxKey = 0;
+        uint32_t qmaxFrame = 0;
+        uint64_t crossIn = 0, crossOut = 0, passesCrossed = 0;
+        uint32_t lastCrossFrame = 0;
+        uint64_t crossOwn[6] = {};   // crossings by their own move: none, 1.01, 1.1, 1.41, 2, more
+        uint64_t heldOutGap[5] = {}; // held tiles crossing out, the cut's smallest kept over theirs
+        uint32_t printed[2] = {};    // crossing lines printed from frame 400 and from frame 1060
+    } m_motion;
+    // F (HIERARCHY 4.19, the order's third and fourth keys made one): the size of a tile's texel on
+    // its reader's screen, texel / max(distance from the eye to its nearest point, texel), the
+    // larger the sooner; its bucket is -floor(log2) of it. A parent's texel is twice its child's at
+    // no greater distance, so its bucket is never after its child's (the selftest holds it).
+    static float Measure(float texel, float dist);
+    static uint32_t MeasureBucket(float measure);
+    std::vector<OrdRec> m_rec;
+    struct PendNote {   // a mark made before its tile is tracked (Want tracks right after)
+        int tenant = -1;
+        size_t idx = 0;
+        OrdRec r;
+    } m_pend;
+    int m_predSid = -1;
+    uint32_t m_predLead = 0;                  // 1a: frames ahead the prediction places the eye
+    uint32_t m_sampLast[kMaxSamplers] = {};   // the frame each reader last spoke
+    uint32_t m_pinSpoke = 0;                  // ... the latest a standing reader spoke
+    uint32_t m_stFrame[kMaxSamplers] = {};    // a reader's statement: its frame and its hash
+    uint64_t m_stHash[kMaxSamplers] = {}, m_stHashLatest[kMaxSamplers] = {};
+    std::vector<std::pair<int, TileRequest>> m_failedKeys;   // failed or not whole, for the pass
+    void OrderNote(Tenant& t, Tracked* tr, int tenant, int sid, uint32_t stampFrame, uint32_t face,
+                   uint32_t m, uint32_t x, uint32_t y, size_t idx, float nearM, float fu, float fv);
+    void RecApply(OrdRec& r, int sid, uint32_t stampFrame, uint32_t wbits) const;
+    void RecAdd(Tenant& t, int tenant, Tracked* tr);
+    void RecDrop(Tracked* tr);
+    void Rescue(OrderTurnLedger& L);
+    // The straddling rung's boundary in metres from the eye (decision 2's line).
+    uint32_t m_cutRung = kNoBucket, m_keptFar = 0, m_lostNear = 0, m_keptFarKey = 0, m_lostNearKey = 0;
+    float m_cutKeptM[kRungs] = {}, m_cutLostM[kRungs] = {};   // F: by rung, metres from the eye
+    uint64_t m_keptFarTile = 0, m_lostNearTile = 0;
+    // Decision 5: the events that recompute the order, and the pass's own snapshot of them.
+    void OrderPass(OrderTurnLedger& L);
+    std::string TileName(uint64_t key) const;   // "tenant [slice] mip (x,y)" from MakeKey's bits
+    // H2 (HIERARCHY 4.19, the law completed): A TILE THAT IS HELD COUNTS FOR THE MARGIN TIMES ITS
+    // MEASURE, and so does every tile above a held one (the held set stays closed upward: a parent
+    // is never after its held child). The pass's pieces, static so the selftest drives them:
+    static float PassMeasure(float texel, uint32_t weightBits, bool countsHeld, float margin);
+    // kUpBit on every record above a held one, up to the first held ancestor; parentOf gives the
+    // record of the nearest tracked ancestor, or UINT32_MAX.
+    static void MarkAboveHeld(std::vector<OrdRec>& rec, uint32_t (*parentOf)(const void*, uint32_t),
+                              const void* ctx);
+    static uint32_t ParentRecInSlots(const void* ctx, uint32_t i);   // ctx: the manager
+    // The cut: kInPBit on the first `cut` records of the order (count: records a bucket; mid:
+    // scratch, the straddling bucket's records, its first `keep` kept). The straddling bucket.
+    static uint32_t CutOrder(std::vector<OrdRec>& rec, const std::vector<uint32_t>& count,
+                             uint32_t cut, std::vector<uint32_t>& mid, uint32_t& keep);
+    static bool OrderSelfTest();
+    uint64_t m_trackEpoch = 0, m_failEvents = 0, m_claimEvents = 0;
+    uint64_t m_passEpoch = ~0ull, m_passFails = ~0ull, m_passClaims = ~0ull;
+    bool m_passHold = false;
+    uint32_t m_passFrame = 0, m_passCut = 0, m_nextExpiry = 0;
+    // The want's tail past the cut, by tenant and rung, from the last pass; CountTail at any cut.
+    uint32_t m_tailTenant[16] = {}, m_tailRung[kRungs] = {}, m_tailTotal = 0, m_wantTotal = 0;
+    void CountTail(uint32_t cut, uint32_t* byTenant, uint32_t* byRung, uint32_t& tail,
+                   uint32_t& wanted) const;
+    void FlushNullMaps(Gpu& gpu, std::vector<std::pair<int, D3D12_TILED_RESOURCE_COORDINATE>>& nulls);
+    static constexpr uint32_t kMarkFrame = 200;   // the frame law 8's table is taken from
+    uint32_t m_markFrame = 0;
+    std::vector<std::string> m_marks;
+
     // The audit's memory between turns, and its count of one applied invalidation (called with
     // the tile the address holds, or null, before the drop; ResidencyAudit.cpp).
     AuditLedger m_audit;
     void AuditInvalidation(int tenant, const TileRequest& r, const Tracked* tr);
 };
+
+class ShaderCompiler;
+// The residency manager's own gate (ResidencyTest.cpp): the floor law held to its arithmetic on
+// the CPU -- sound on the cube's faces and a window, the kernels' taps covered, porch_floor.py's
+// numbers reproduced, each check seen to catch a planted defect -- and, against the law in
+// effect, on this GPU through the engine's own samplers (shaders/ResidencyFloor.hlsl). Logs
+// [restest]; true when every instrument works and sees what it exists to see. Whether a floor
+// could be staged is a finding it prints, measured afresh every run.
+bool RunResidencySelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir);
 
 }  // namespace ga

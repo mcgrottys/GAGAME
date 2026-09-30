@@ -17,6 +17,13 @@
 
 namespace ga {
 
+// Step 5 E (review finding 83; HIERARCHY 4.19, "a tile is held whole or it is not held"): set on
+// the calling thread by a tile tree that answers a tile without one of its sources (a refused
+// fetch: the composite skips the child, `complete` is false, the tile is returned and not
+// stored). The residency manager clears it before its provider call and reads it
+// after, on the same thread; a tile not whole is not delivered.
+inline thread_local bool g_tileIncomplete = false;
+
 // A provider fills one 64KB tile's worth of LINEAR data for a texture tenant. Runs on a worker
 // thread; must be self-contained and cache-first (HTTP providers throttle themselves and honor
 // a hard per-run fetch budget). Returns false if the tile cannot be produced (kept NULL).
