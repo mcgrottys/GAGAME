@@ -24,6 +24,7 @@ LayerEntry kLayer;
 TideLayerProps kTide;
 NodeProps kNode;
 ToolProps kTool;
+SourceProps kSource;
 
 using Q = Quantity;
 constexpr Reload H = Reload::Hot;
@@ -298,12 +299,32 @@ const Schema& StreamingSchema() {
             .Bind("faceWindows", p.faceWindows,
                   "standing blocks of the pyramid for the colour and the mask in place of their "
                   "Mercator windows: lon,lat,rung entries joined by ';', each the block of that "
-                  "rung holding the point (logged); empty = the Mercator windows",
+                  "rung holding the point (logged); auto = the blocks the `sources` ask for, "
+                  "rank 1 down to each one's grain over its footprint; empty = the Mercator windows",
                   R)
             .Bind("treeRoot", p.treeRoot,
                   "the folder the tile trees live in; a scratch folder keeps a tool's paints and "
                   "packs out of the real cache",
                   R);
+        return sc;
+    }();
+    return *s;
+}
+
+const Schema& SourceSchema() {
+    static const Schema* s = [] {
+        Schema* sc = new Schema("source", &kSource);
+        sc->Bind("name", kSource.name, "a label (\"\" = the file's own name)", R)
+            .BindPath("file", kSource.file, "one raster: a GeoTIFF, or a PNG / JPEG beside its world file", R)
+            .BindPath("folder", kSource.folder, "a folder whose every file matching `match` is a source", R)
+            .Bind("match", kSource.match, "the folder's pattern, * and ? (\"\" = every file)", R)
+            .Bind("kind", kSource.kind,
+                  "colour | height; \"\" = the pixels decide (8-bit, 3 or 4 channels: colour; one "
+                  "channel of 16-bit or float: height)", R)
+            .Bind("crs", kSource.crs, "EPSG:nnnn, read only where the file carries none", R)
+            .Bind("over", kSource.over, Q::Dimensionless, "1",
+                  "the stack order's first key, ascending upward (every built-in source is 0); "
+                  "the second is the grain, the coarser under the finer", R);
         return sc;
     }();
     return *s;
@@ -626,6 +647,7 @@ const Schema& SceneFileSchema() {
             .Nest("sea", SeaSchema(), &kDoc.sea, "the sea state and the datum")
             .Nest("water", WaterSchema(), &kDoc.water, "the water")
             .Nest("streaming", StreamingSchema(), &kDoc.streaming, "residency: scene state")
+            .List("sources", &SourceSchema(), "rasters that are sources by being files, in any order", false)
             .Nest("capture", CaptureSchema(), &kDoc.capture, "headless capture")
             .List("views", &ViewSchema_(), "the cameras, by name")
             .Nest("rails", RailsSchema(), &kDoc.rails, "the camera rails")

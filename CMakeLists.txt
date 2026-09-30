@@ -50,6 +50,7 @@ add_executable(gagame
   src/hal/Shader.cpp
   src/core/Window.cpp
   src/core/Image.cpp
+  src/core/ImageLoader.cpp
   src/hal/TileAtlas.cpp
   src/hal/Residency.cpp
   src/hal/ResidencyAudit.cpp
@@ -68,6 +69,8 @@ add_executable(gagame
   src/compose/TreePruneTest.cpp
   src/compose/TileTreeTest.cpp
   src/compose/Sources.cpp
+  src/compose/RasterFileSource.cpp
+  src/compose/RasterFileTest.cpp
   src/compose/GisMask.cpp
   src/compose/GisStencil.cpp
   src/compose/VectorPack.cpp

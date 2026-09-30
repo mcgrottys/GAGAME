@@ -28,13 +28,15 @@
 // PNG is read back against its own colours whatever the exposure and the tonemap did to them.
 // The cube is violet, not blue, so the sky can never be read as the cube.
 #if GA_BLOCK_RANKS
-// HIERARCHY 4.17: with the key, a fourth row -- rank 1's block (76 m), cyan -- above the three; a
-// rank 2 block is painted as the z14 page (green), rank 3 and finer as the z17 (red).
-static const float3 kResLensHue[4] = {float3(0.60f, 0.25f, 1.00f), float3(0.15f, 1.00f, 0.30f),
-                                      float3(1.00f, 0.30f, 0.10f), float3(0.10f, 0.75f, 1.00f)};
-#define GA_RES_LENS_LAST 3
-#define GA_RES_LENS_ROWS 4.0f
-int ResLensRankPage(uint k) { return (k == 0u) ? 3 : (k == 1u) ? 1 : 2; }   // chain step k: rank k+1
+// HIERARCHY 4.17: with the key, rank 1's block (76 m) is cyan, a rank 2 block is painted as the
+// z14 page (green) and a rank 3 block as the z17 (red); rank 4 (15 cm) is yellow and rank 5 (1.9 cm)
+// white, rows five and six of the key, so a source's deepest blocks are told apart.
+static const float3 kResLensHue[6] = {float3(0.60f, 0.25f, 1.00f), float3(0.15f, 1.00f, 0.30f),
+                                      float3(1.00f, 0.30f, 0.10f), float3(0.10f, 0.75f, 1.00f),
+                                      float3(1.00f, 0.92f, 0.15f), float3(1.00f, 1.00f, 1.00f)};
+#define GA_RES_LENS_LAST 5
+#define GA_RES_LENS_ROWS 6.0f
+int ResLensRankPage(uint k) { return (k == 0u) ? 3 : (k == 1u) ? 1 : (k == 2u) ? 2 : int(k) + 1; }
 #else
 static const float3 kResLensHue[3] = {float3(0.60f, 0.25f, 1.00f), float3(0.15f, 1.00f, 0.30f),
                                       float3(1.00f, 0.30f, 0.10f)};

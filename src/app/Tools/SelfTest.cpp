@@ -3,6 +3,7 @@
 #include "app/Tools.h"
 
 #include "compose/Compositor.h"
+#include "compose/RasterFileSource.h"
 #include "compose/TreePrune.h"
 #include "compose/TileTree.h"
 #include "compose/WaterAtlas.h"
@@ -48,6 +49,8 @@ int RunSelfTest(const Options& opt) {
     ok &= hal::RunTenantBindingSelfTest();   // HIERARCHY 4.17 commit 1: a slice bound to one
                                              // aligned block of the pyramid, and three plants
     ok &= RunComposeSelfTest();   // pure CPU: the layer compositor's contracts
+    ok &= RunRasterFileSelfTest();   // a raster is a source by being a file: its own GeoTIFFs and
+                                     // PNGs under out\rastertest, placement, order, identity, plants
     ok &= RunWaterSelfTest();     // pure CPU: the water atlas' datum/epoch/field gates
     ok &= RunWaveChartSelfTest();   // M13: the cascade sea's lattice-generated planes -- the
                                     // partition, the variance-preserving blend, the metric

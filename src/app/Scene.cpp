@@ -373,6 +373,25 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             out.tools.push_back(std::move(t));
         }
     }
+    if (const JsonValue* a = ListOf(doc, "sources")) {
+        const PropDecl* decl = root.Find("sources");
+        for (const JsonValue& e : a->arr) {
+            scene::SourceProps s;
+            ElementReader r(scene::ElementChain(*decl, e), e, "sources", why, &ok);
+            r.Str("name", s.name);
+            r.Str("file", s.file);
+            r.Str("folder", s.folder);
+            r.Str("match", s.match);
+            r.Str("kind", s.kind);
+            r.Str("crs", s.crs);
+            r.F64("over", s.over);
+            if (!ok) return false;
+            if (s.file.empty() == s.folder.empty()) {
+                return Refuse(why, "sources: an entry names a file, or a folder and a match -- one of the two");
+            }
+            out.sources.push_back(std::move(s));
+        }
+    }
     return true;
 }
 

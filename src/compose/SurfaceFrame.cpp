@@ -7,6 +7,7 @@
 #include "sim/BathyModel.h"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -114,6 +115,91 @@ bool SurfaceFrame::DeclareBlocks(const std::string& key) {
     }
     BuildDirectory();
     return true;
+}
+
+std::string SurfaceFrame::AutoKey(std::vector<BlockWant> wants) {
+    std::stable_sort(wants.begin(), wants.end(),
+                     [](const BlockWant& a, const BlockWant& b) { return a.grainM < b.grainM; });
+    const double kDeg = 3.141592653589793 / 180.0;
+    std::vector<FaceWindow> got;
+    std::string key;
+    for (const BlockWant& w : wants) {
+        // THE RANK THAT HOLDS ITS GRAIN: the first whose mip-0 texel, read as every source reads
+        // the ground it is asked at (the pyramid's GroundRes x cos(lat)), is no coarser than it.
+        const double c = std::cos(0.5 * (w.lat0 + w.lat1) * kDeg);
+        auto ground = [&](uint32_t rung) {
+            return hal::BlockBinding{0u, int(rung), 0u, 0u}.GroundRes(0) * c;
+        };
+        uint32_t rank = 1;
+        while (rank < kMaxRanks && ground(3 * rank) > w.grainM) ++rank;
+        if (ground(3 * rank) > w.grainM) {
+            const int need = int(std::ceil(std::log2(ground(0) / w.grainM)));
+            Log("[surface] faceWindows auto: %s's grain %.4g m is finer than the finest rank the "
+                "directory walks (rank %u, rung %u: %.4g m a texel here); it would need rung %d%s "
+                "-- painted at rung %u",
+                w.name.c_str(), w.grainM, rank, 3 * rank, ground(3 * rank), need,
+                need > hal::BlockBinding::kFinestRung ? ", past the pyramid's own finest too" : "",
+                3 * rank);
+        }
+        for (uint32_t r = 1; r <= rank; ++r) {
+            // The blocks of the rank's rung its footprint touches: per face, the span of block
+            // indices over a grid of its points.
+            const long long side = 1ll << (3 * r);   // blocks a face side at this rung
+            long long x0[6], y0[6], x1[6], y1[6];
+            for (int f = 0; f < 6; ++f) {
+                x0[f] = y0[f] = LLONG_MAX;
+                x1[f] = y1[f] = LLONG_MIN;
+            }
+            const int n = 32;
+            for (int i = 0; i <= n * (n + 1) + n; ++i) {
+                const double lon = (w.lon0 + (w.lon1 - w.lon0) * (i % (n + 1)) / n) * kDeg;
+                const double lat = (w.lat0 + (w.lat1 - w.lat0) * (i / (n + 1)) / n) * kDeg;
+                const double d[3] = {std::cos(lat) * std::cos(lon), std::sin(lat),
+                                     std::cos(lat) * std::sin(lon)};
+                double uv[2];
+                const uint32_t f = CubeFaceOfDir(d, uv);
+                const long long bx = (std::min)(side - 1, static_cast<long long>(std::floor(uv[0] * side)));
+                const long long by = (std::min)(side - 1, static_cast<long long>(std::floor(uv[1] * side)));
+                x0[f] = (std::min)(x0[f], bx);
+                x1[f] = (std::max)(x1[f], bx);
+                y0[f] = (std::min)(y0[f], by);
+                y1[f] = (std::max)(y1[f], by);
+            }
+            unsigned long long missed = 0;
+            for (uint32_t f = 0; f < 6; ++f) {
+                if (x0[f] == LLONG_MAX) continue;
+                const unsigned long long cols = x1[f] - x0[f] + 1, count = cols * (y1[f] - y0[f] + 1);
+                for (unsigned long long k = 0; k < count; ++k) {
+                    if (got.size() >= kMaxBlocks) {
+                        missed += count - k;   // (at most: one of these may be declared already)
+                        break;
+                    }
+                    const long long bx = x0[f] + static_cast<long long>(k % cols);
+                    const long long by = y0[f] + static_cast<long long>(k / cols);
+                    const FaceWindow b{f, int(3 * r), bx * Lattice::kFaceDim, by * Lattice::kFaceDim};
+                    bool have = false;
+                    for (const FaceWindow& g : got) {
+                        have = have || (g.face == b.face && g.rung == b.rung &&
+                                        g.anchorX == b.anchorX && g.anchorY == b.anchorY);
+                    }
+                    if (have) continue;
+                    got.push_back(b);
+                    double d[3];
+                    ComposeCubeDir(f, (bx + 0.5) / double(side), (by + 0.5) / double(side), d);
+                    char e[96];
+                    snprintf(e, sizeof(e), "%.9f,%.9f,%u;", std::atan2(d[2], d[0]) / kDeg,
+                             std::atan2(d[1], std::hypot(d[0], d[2])) / kDeg, 3 * r);
+                    key += e;
+                }
+            }
+            if (missed) {
+                Log("[surface] faceWindows auto: %s: %llu block(s) of rank %u over its footprint "
+                    "(%.6f..%.6f E, %.6f..%.6f N) did not fit -- the rows carry %u",
+                    w.name.c_str(), missed, r, w.lon0, w.lon1, w.lat0, w.lat1, kMaxBlocks);
+            }
+        }
+    }
+    return key;
 }
 
 void SurfaceFrame::BuildDirectory() {

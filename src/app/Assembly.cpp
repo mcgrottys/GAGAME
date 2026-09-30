@@ -312,7 +312,28 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // shader is today's, byte for byte.
     planetR = (S.scene.planet == "mars") ? 3389500.0 : GlobeModel::kR;
     surface = SurfaceFrame::Merrimack(planetR, opt.stencil);
-    if (S.scene.planet != "mars") surface.DeclareBlocks(S.streaming.faceWindows);
+    // A RASTER IS A SOURCE BY BEING A FILE (compose/RasterFileSource.h): the scene's `sources`,
+    // opened before the blocks, because `faceWindows: auto` is the blocks their footprints and
+    // grains ask for (SurfaceFrame::AutoKey).
+    std::string blockKey = S.streaming.faceWindows;
+    if (S.scene.planet != "mars") {
+        std::vector<RasterEntry> entries;
+        for (const scene::SourceProps& s : S.sources) {
+            entries.push_back({s.file, s.folder, s.match, s.name, s.kind, s.crs, s.over});
+        }
+        A->sceneSources = LoadRasterSources(entries);
+        if (blockKey == "auto") {
+            std::vector<SurfaceFrame::BlockWant> wants;
+            for (const auto& s : A->sceneSources) {
+                const SourceInfo& i = s->Info();
+                wants.push_back({i.name, i.lon0, i.lat0, i.lon1, i.lat1, s->GrainM()});
+            }
+            blockKey = SurfaceFrame::AutoKey(wants);
+            Log("[surface] streaming.faceWindows auto: %zu source(s) ask for '%s'", wants.size(),
+                blockKey.c_str());
+        }
+        surface.DeclareBlocks(blockKey);
+    }
     if (!surface.blocks.empty()) {
         renderer.Shaders().Always(L"GA_BLOCK_RANKS=" + std::to_wstring(surface.Ranks()));
         Log("[surface] the standing blocks' shader code is compiled in: GA_BLOCK_RANKS=%u",
@@ -876,11 +897,13 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 // aerial (both photos, finer wins), bed above both (its height-band alpha
                 // reclaims everything below the intertidal ramp and hands land back to
                 // the photos above +1.2 m NAVD), hand overlays on top of everything.
-                bool srcAerialLoaded = false, srcOverlayLoaded = false;
-                if (srcAerial.Load("data/aerial/aerial.json")) {
-                    colorStack.push_back(&srcAerial);
-                    srcAerialLoaded = true;
-                }
+                bool srcOverlayLoaded = false;
+                if (srcAerial.Load("data/aerial/aerial.json")) colorStack.push_back(&srcAerial);
+                // The scene's `sources` join the photos, and the photos stand in their default
+                // order (StackOrder: `over`, then the coarser grain under the finer).
+                for (const auto& s : A->sceneSources) colorStack.push_back(s.get());
+                StackOrder(colorStack);
+                const std::vector<ColorSource*> photos = colorStack;   // (the stack moves below)
                 // M9av: the GLOBAL seafloor under the bed classifier -- the ingested
                 // bathymetry's hillshade x sediment ramp, every ocean texel; the classifier
                 // keeps its authority inside its own box by painting over it.
@@ -960,8 +983,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                     }
                     return std::make_shared<CompositeSource>(name, dc);
                 };
-                std::vector<std::shared_ptr<DomainSource>> landIn{leaf(&srcGoogle)};
-                if (srcAerialLoaded) landIn.push_back(leaf(&srcAerial));
+                std::vector<std::shared_ptr<DomainSource>> landIn;
+                for (ColorSource* s : photos) landIn.push_back(leaf(s));
                 std::shared_ptr<DomainSource> land = over("earth.land", landIn);
                 std::shared_ptr<DomainSource> mega;
                 std::vector<std::shared_ptr<DomainSource>> seaIn;

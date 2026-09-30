@@ -39,6 +39,7 @@
       { "key": "sea", "type": "object", "field": "none", "schema": "sea", "reload": "hot", "doc": "the sea state and the datum" },
       { "key": "water", "type": "object", "field": "none", "schema": "water", "reload": "hot", "doc": "the water" },
       { "key": "streaming", "type": "object", "field": "none", "schema": "streaming", "reload": "hot", "doc": "residency: scene state" },
+      { "key": "sources", "type": "list", "field": "none", "element": "source", "named": false, "reload": "hot", "doc": "rasters that are sources by being files, in any order" },
       { "key": "capture", "type": "object", "field": "none", "schema": "capture", "reload": "hot", "doc": "headless capture" },
       { "key": "views", "type": "list", "field": "none", "element": "view", "named": true, "reload": "hot", "doc": "the cameras, by name" },
       { "key": "rails", "type": "object", "field": "none", "schema": "rails", "reload": "hot", "doc": "the camera rails" },
@@ -185,8 +186,17 @@
       { "key": "seafloor", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the global seafloor relief source (--no-seafloor)" },
       { "key": "exposure", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the swell-exposure page (--no-exposure)" },
       { "key": "ringLoads", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the ring gate (--no-ring-loads)" },
-      { "key": "faceWindows", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "standing blocks of the pyramid for the colour and the mask in place of their Mercator windows: lon,lat,rung entries joined by ';', each the block of that rung holding the point (logged); empty = the Mercator windows" },
+      { "key": "faceWindows", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "standing blocks of the pyramid for the colour and the mask in place of their Mercator windows: lon,lat,rung entries joined by ';', each the block of that rung holding the point (logged); auto = the blocks the `sources` ask for, rank 1 down to each one's grain over its footprint; empty = the Mercator windows" },
       { "key": "treeRoot", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "cache/trees", "reload": "restart", "doc": "the folder the tile trees live in; a scratch folder keeps a tool's paints and packs out of the real cache" }
+    ] },
+    { "type": "source", "keys": [
+      { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a label (\"\" = the file's own name)" },
+      { "key": "file", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "one raster: a GeoTIFF, or a PNG / JPEG beside its world file" },
+      { "key": "folder", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a folder whose every file matching `match` is a source" },
+      { "key": "match", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the folder's pattern, * and ? (\"\" = every file)" },
+      { "key": "kind", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "colour | height; \"\" = the pixels decide (8-bit, 3 or 4 channels: colour; one channel of 16-bit or float: height)" },
+      { "key": "crs", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "EPSG:nnnn, read only where the file carries none" },
+      { "key": "over", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "restart", "doc": "the stack order's first key, ascending upward (every built-in source is 0); the second is the grain, the coarser under the finer" }
     ] },
     { "type": "capture", "keys": [
       { "key": "headless", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "no window (--headless)" },

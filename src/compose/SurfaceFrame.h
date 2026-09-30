@@ -155,6 +155,17 @@ struct SurfaceFrame {
     // point stands inside it; a place near a block's edge is two entries. A malformed key is
     // refused aloud and leaves the blocks empty.
     bool DeclareBlocks(const std::string& key);
+    // `faceWindows: auto` -- THE BLOCKS FROM THE SOURCES. For every source, the chain of blocks from
+    // rank 1 down to the rank that holds its grain, over its footprint, the finest sources first,
+    // until the rows (kMaxBlocks) are used; what did not fit, and a grain finer than the finest
+    // rank, are logged. Returned as the key DeclareBlocks reads (each block's centre at its rung),
+    // so the directory's law is checked where it always was.
+    struct BlockWant {
+        std::string name;
+        double lon0, lat0, lon1, lat1;   // the footprint, degrees
+        double grainM;                   // its ground sample distance, metres
+    };
+    static std::string AutoKey(std::vector<BlockWant> wants);
     // Block i as the tenants declare it (hal/Tenant.h).
     hal::BlockBinding Block(size_t i) const;
     // M12 step 4c: THE TENANTS' OWN WORDS FOR THE DIAGRAM, read off their declarations by

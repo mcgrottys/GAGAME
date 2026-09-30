@@ -74,6 +74,7 @@
 #include "compose/SurfaceFrame.h"
 #include "compose/GisStencil.h"
 #include "compose/Sources.h"
+#include "compose/RasterFileSource.h"
 #include "compose/VectorPack.h"
 #include "compose/WaterAtlas.h"
 #include "scene/VesselLayer.h"
@@ -195,6 +196,8 @@ struct Assembly {
     AerialOrthoSource srcOverlay;   // M6o: user GeoTIFF overlays -- ALPHA IS FIBER: a
                                     // mostly-transparent highlights plane bleeds through
                                     // the composed quadtree pixel by pixel
+    // The scene's `sources`: rasters that are colour sources by being files.
+    std::vector<std::unique_ptr<RasterFileSource>> sceneSources;
     GisStencil gisStencil;   // survey vectors + mask realizations (GSHHG/WDBII)
     // M9ak: the SAME survey, as rings rather than as a parity fill -- the compositor's
     // land/sea gate. Neither .raw mask is opened by this one.
