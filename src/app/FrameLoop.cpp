@@ -4203,7 +4203,7 @@ int FrameLoop::Finish() {
     // run's whole appetite for source tiles it did not have.
     if (m_A.googleTiles.Ready()) {
         Log("[google] %u source tiles refused this run (budget %u, %u fetched): the distinct "
-            "fetches a larger budget would have made",
+            "fetches a larger budget or day cap would have made",
             m_A.googleTiles.Refused(), m_A.googleTiles.Budget(), m_A.googleTiles.Fetched());
     }
 

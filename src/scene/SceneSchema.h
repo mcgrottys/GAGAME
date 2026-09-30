@@ -17,11 +17,14 @@
 //                  wavefield{...}, closures{...}, fleet{...}}   -- the last three are what
 //                  data/wave_scene.json overlays through `include` (the M8 law survives:
 //                  authored if absent, never clobbered, hot-reloaded)
-//      streaming  {tileBudget, predictEvery, directStorage, colorTrees, gisGate, seafloor,
-//                  exposure, ringLoads, treeRoot}   -- scene state: they change the picture
+//      streaming  {tileBudget, dayTiles, dayBytes, googleZoom, predictEvery, directStorage,
+//                  colorTrees, gisGate, seafloor, exposure, ringLoads, treeRoot}
+//                                                -- scene state: they change the picture
 //                                                through residency (treeRoot: where the tile
-//                                                trees are, cache/trees unless a tool's
-//                                                scratch folder is named)
+//                                                trees are, cache/trees unless a tool's scratch
+//                                                folder is named; dayTiles/dayBytes: the day's
+//                                                cap on Google requests, core/DayLedger.h;
+//                                                googleZoom: the Google source's finest zoom)
 //      capture    {headless, width, height, frames, dump, hdr, mp4, railDir,
 //                  settle{sync, hold, exact, clearChurn}, residencyAudit}
 //      views      [{name, at, fovY, gauge, nearZ, reversedZ, target, viewport{}, follow{}}]
@@ -180,6 +183,15 @@ struct WaterSection {
 };
 struct StreamingSection {
     uint32_t tileBudget = 1000, predictEvery = 3;
+    // THE DAY'S CAP on Google, every engine on the machine together, per UTC day, whichever is
+    // met first (core/DayLedger.h): dayTiles bounds the requests SENT, whatever came back;
+    // dayBytes the bytes landed. Zero is no request that day, not "no limit".
+    uint32_t dayTiles = 100000;
+    double dayBytes = 5.0e9;          // a double: 5 GB does not fit the u32 field
+    // The finest zoom the Google source may be asked for, held to 0..19; each step finer is four
+    // times the tiles. 14 is the source as it was; any other value names itself in the source's
+    // structure, so it paints its own tree (compose/Sources.h).
+    uint32_t googleZoom = 14;
     bool directStorage = true, colorTrees = true, gisGate = true, seafloor = true,
          exposure = true, ringLoads = true;
     std::string treeRoot = "cache/trees";   // the folder the tile trees live in (TileTree.h)

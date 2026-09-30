@@ -186,7 +186,9 @@ struct Assembly {
     // ---- M6i: THE LAYER COMPOSITOR's color side (the height side moved above the
     // solver, M6w). Sources register their schemas; channels stack them in order;
     // realizations paint composed quadtrees ONCE and cache every 64KB tile.
-    GoogleColorSource srcGoogle{&googleTiles};
+    // Made in Assemble() with the scene's finest zoom (streaming.googleZoom): the zoom is part of
+    // the source's identity, so it is fixed when the source is made.
+    std::optional<GoogleColorSource> srcGoogle;
     BedSynthSource srcBed;          // M7d: the bed classifier -- the first synthesis
     SeafloorReliefSource srcRelief; // M9av: the seafloor's appearance from the ingested bathymetry
                                     // node; its program is data/bed/bed_rules.json

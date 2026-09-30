@@ -55,6 +55,8 @@ add_executable(gagame
   src/hal/ResidencyAudit.cpp
   src/hal/Tenant.cpp
   src/core/TileProviders.cpp
+  src/core/DayLedger.cpp
+  src/core/DayLedgerTest.cpp
   src/core/ThreadTest.cpp
   src/core/ThreadManager.cpp
   src/compose/Compositor.cpp

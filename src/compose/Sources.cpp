@@ -48,19 +48,26 @@ float Bilinear(const std::vector<int16_t>& g, int nx, int ny, double fx, double 
 
 // ------------------------------------------------------------------------------ Google
 
-GoogleColorSource::GoogleColorSource(GoogleTileProvider* prov) : m_prov(prov) {
-    m_info = {"google.satellite", "mercator-tile-tree jpeg 256px (sessioned, cache-first)",
-              "EPSG:3857 web-mercator",
-              955.0 /* z14 politeness cap at the equator */, -180, -85, 180, 85};
+GoogleColorSource::GoogleColorSource(GoogleTileProvider* prov, int zoomCap)
+    : m_prov(prov), m_zoomCap(std::clamp(zoomCap, 0, kMaxZoom)) {
+    // The structure is half the source's identity (name|structure, ColorStackSource.h): at the
+    // default it is today's string exactly; at any other cap it names the cap, so a scene that
+    // raises the zoom paints its own tree. cmPerPixel is the cap's grain at the equator (955 at
+    // z14, halved a step finer); only the registry log and the fidelity map read it.
+    std::string structure = "mercator-tile-tree jpeg 256px (sessioned, cache-first)";
+    if (m_zoomCap != kDefaultZoom) structure += ", to z" + std::to_string(m_zoomCap);
+    m_info = {"google.satellite", structure, "EPSG:3857 web-mercator",
+              std::ldexp(955.0, kDefaultZoom - m_zoomCap), -180, -85, 180, 85};
 }
 
 // Zoom from the requested footprint: z such that Mercator metres/px matches groundResM.
-// Capped at 14 -- deeper zooms are a budget decision a REALIZATION makes by asking for a
-// finer groundRes only inside a window it owns; the global cube can never demand them.
-static int ZoomFor(double groundResM) {
+// Capped at the scene's streaming.googleZoom (14 unless a scene says otherwise) -- deeper
+// zooms are a budget decision a REALIZATION makes by asking for a finer groundRes only inside
+// a window it owns; the global cube can never demand them, and the day's ledger bounds the count.
+int GoogleColorSource::ZoomFor(double groundResM) const {
     constexpr double kCirc = 40075016.686;
     return std::clamp(static_cast<int>(std::lround(std::log2(kCirc / (256.0 * groundResM)))),
-                      0, 14);
+                      0, m_zoomCap);
 }
 
 bool GoogleColorSource::Pixel(int z, double latRad, double lonRad, uint8_t rgb[3]) {

@@ -175,6 +175,9 @@
     ] },
     { "type": "streaming", "keys": [
       { "key": "tileBudget", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 1000, "reload": "restart", "doc": "hard cap on Google fetches per run (--tile-budget)" },
+      { "key": "dayTiles", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 100000, "reload": "restart", "doc": "cap on Google requests a UTC day, every request sent counted whatever came back, every engine on the machine together (cache/google/day_<date>.json); 0 = no request that day" },
+      { "key": "dayBytes", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 5000000000, "reload": "restart", "doc": "cap on the bytes of Google tiles landed a UTC day, every engine on the machine together; 0 = no request that day" },
+      { "key": "googleZoom", "type": "number", "field": "u32", "quantity": "1", "unit": "1", "default": 14, "reload": "restart", "doc": "the finest zoom the Google source may be asked for, held to 0..19; each step finer is four times the tiles (14 = the source as it was; any other value paints its own tree)" },
       { "key": "predictEvery", "type": "number", "field": "u32", "quantity": "1", "unit": "frames", "default": 3, "reload": "hot", "doc": "prefetch-walk cadence (--predict-every)" },
       { "key": "directStorage", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "NVMe -> GPU tile reads (--no-direct-storage)" },
       { "key": "colorTrees", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "colour and height pages from the trees (--no-color-trees)" },

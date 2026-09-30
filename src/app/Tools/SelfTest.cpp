@@ -7,6 +7,7 @@
 #include "compose/TileTree.h"
 #include "compose/WaterAtlas.h"
 #include "hal/DxTest.h"
+#include "core/DayLedger.h"
 #include "core/GaAst.h"
 #include "core/Lattice.h"
 #include "hal/Gpu.h"
@@ -35,6 +36,9 @@ int RunSelfTest(const Options& opt) {
                                   // reflection, the sampler law, AST anchors)
     ok &= RunGaSelfTest();        // pure CPU: GA products + the frame/orientation
                                   // ledger as executable contract (M7j)
+    ok &= RunDayLedgerSelfTest();   // the day's cap on Google fetches: the engine's ledger, lock
+                                    // and date, a stand-in request and clock, out\daytest, no
+                                    // network
     ok &= RunSpaceSelfTest();     // M12: the frame calculus -- placements, the fold, the
                                   // Droste link through Space, the lattice against ColorFrame
     ok &= RunFaceWindowSelfTest();   // HIERARCHY step 3: a face-plane window's address, the

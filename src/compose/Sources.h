@@ -29,17 +29,24 @@ class GoogleTileProvider;
 // boundaries stop being color-grade seams -- normalization at PAINT time, never at render.
 class GoogleColorSource : public ColorSource {
 public:
-    explicit GoogleColorSource(GoogleTileProvider* prov);
+    // THE FINEST ZOOM IS THE SCENE'S (streaming.googleZoom), held to 0..kMaxZoom. At
+    // kDefaultZoom the name and structure are byte for byte what they were when 14 was a
+    // literal, so no tree moves; at any other cap the structure says so (", to z17").
+    static constexpr int kDefaultZoom = 14, kMaxZoom = 19;
+    explicit GoogleColorSource(GoogleTileProvider* prov, int zoomCap = kDefaultZoom);
     const SourceInfo& Info() const override { return m_info; }
     void BeginTile(double latMin, double latMax, double lonMin, double lonMax,
                    double groundResM, PaintCtx& ctx) override;
     float Sample(double latRad, double lonRad, double groundResM, const PaintCtx& ctx,
                  uint8_t rgba[4]) override;
     bool Refusals(uint32_t& refused) const override;
+    // The zoom a footprint asks for, held to 0..the cap (public for the selftest).
+    int ZoomFor(double groundResM) const;
 
 private:
     bool Pixel(int z, double latRad, double lonRad, uint8_t rgb[3]);
     GoogleTileProvider* m_prov;
+    int m_zoomCap;
     SourceInfo m_info;
 };
 

@@ -220,7 +220,14 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     auto& marsDiff = A->marsDiff;
     auto& marsNorm = A->marsNorm;
     auto& googleTiles = A->googleTiles;
-    auto& srcGoogle = A->srcGoogle;
+    // The Google source takes the scene's finest zoom at construction, held to 0..19 (14, the
+    // default, is the source that was a literal).
+    if (S.streaming.googleZoom > static_cast<uint32_t>(GoogleColorSource::kMaxZoom)) {
+        Log("[google] streaming.googleZoom %u is past %d: held to %d", S.streaming.googleZoom,
+            GoogleColorSource::kMaxZoom, GoogleColorSource::kMaxZoom);
+    }
+    auto& srcGoogle = A->srcGoogle.emplace(
+        &A->googleTiles, static_cast<int>((std::min)(S.streaming.googleZoom, 19u)));
     auto& srcBed = A->srcBed;
     auto& srcRelief = A->srcRelief;
     auto& srcAerial = A->srcAerial;
@@ -852,7 +859,10 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             }
             // earth.color: the Google mercator tree, realized twice -- the global cube
             // and the Merrimack z14 window (same stack, deeper footprint).
-            if (googleTiles.Init("satellite", S.streaming.tileBudget)) {
+            DayCaps dayCaps;   // the scene's day caps (streaming.dayTiles / dayBytes)
+            dayCaps.tiles = S.streaming.dayTiles;
+            dayCaps.bytes = DayCaps::FromScene(S.streaming.dayBytes);
+            if (googleTiles.Init("satellite", S.streaming.tileBudget, dayCaps)) {
                 googleTiles.SetFetchCounter(&resMgr.fetchesThisRun);
                 // M6l: the MassGIS 15 cm plane orthos paint ABOVE Google wherever they
                 // have coverage -- the compositor's first independent high-res layer,

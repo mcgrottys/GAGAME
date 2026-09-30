@@ -274,6 +274,20 @@ const Schema& StreamingSchema() {
         auto& p = kDoc.streaming;
         Schema* sc = new Schema("streaming", &p);
         sc->Bind("tileBudget", p.tileBudget, Q::Dimensionless, "1", "hard cap on Google fetches per run (--tile-budget)", R)
+            .Bind("dayTiles", p.dayTiles, Q::Dimensionless, "1",
+                  "cap on Google requests a UTC day, every request sent counted whatever came "
+                  "back, every engine on the machine together (cache/google/day_<date>.json); "
+                  "0 = no request that day",
+                  R)
+            .Bind("dayBytes", p.dayBytes, Q::Dimensionless, "1",
+                  "cap on the bytes of Google tiles landed a UTC day, every engine on the machine "
+                  "together; 0 = no request that day",
+                  R)
+            .Bind("googleZoom", p.googleZoom, Q::Dimensionless, "1",
+                  "the finest zoom the Google source may be asked for, held to 0..19; each step "
+                  "finer is four times the tiles (14 = the source as it was; any other value "
+                  "paints its own tree)",
+                  R)
             .Bind("predictEvery", p.predictEvery, Q::Dimensionless, "frames", "prefetch-walk cadence (--predict-every)", H)
             .Bind("directStorage", p.directStorage, "NVMe -> GPU tile reads (--no-direct-storage)", R)
             .Bind("colorTrees", p.colorTrees, "colour and height pages from the trees (--no-color-trees)", R)
