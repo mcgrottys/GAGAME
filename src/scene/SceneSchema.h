@@ -195,6 +195,10 @@ struct StreamingSection {
     bool directStorage = true, colorTrees = true, gisGate = true, seafloor = true,
          exposure = true, ringLoads = true;
     std::string treeRoot = "cache/trees";   // the folder the tile trees live in (TileTree.h)
+    // HIERARCHY 4.17 commit 2: standing blocks of the pyramid for the colour and the mask, in
+    // place of their Mercator windows -- "lon,lat,rung" entries joined by ';' (SurfaceFrame::
+    // DeclareBlocks). Empty is today's path.
+    std::string faceWindows;
 };
 struct SettleProps {
     bool sync = false;

@@ -78,6 +78,7 @@
 #include "core/Space.h"
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace ga {
@@ -86,6 +87,7 @@ struct ComposedSurfaceCb;
 class ResidencyManager;
 namespace hal {
 class Tenant;
+struct BlockBinding;
 }
 
 struct SurfaceFrame {
@@ -107,6 +109,20 @@ struct SurfaceFrame {
     // (detT is the colour tenant: M9ap), the height tenant its z14 page at hgtWinSlice.
     int colorT = -1, hgtT = -1, maskT = -1, detT = -1;
     uint32_t winSlice = UINT32_MAX, detSlice = UINT32_MAX, hgtWinSlice = UINT32_MAX;
+    // HIERARCHY 4.17 commit 2: THE STANDING BLOCKS (the scene's streaming.faceWindows). With the
+    // key set the colour and the mask hold, in place of their two Mercator windows, aligned blocks
+    // of the pyramid: block i is slice 6 + i of both, a face-plane window anchored on a multiple
+    // of 16384 texels of its rung (FaceWindow, core/Lattice.h -- the address the rows and the
+    // wants use), coarsest rung first. Empty is today's path; the height keeps its window.
+    static constexpr uint32_t kMaxBlocks = 4;   // the rows ComposedSurfaceCb carries
+    std::vector<FaceWindow> blocks;
+    // The key, parsed: "lon,lat,rung" entries (degrees east and north) joined by ';'. Each point
+    // is given the block of its rung that holds it, and the block is LOGGED with how far the
+    // point stands inside it; a place near a block's edge is two entries. A malformed key is
+    // refused aloud and leaves the blocks empty.
+    bool DeclareBlocks(const std::string& key);
+    // Block i as the tenants declare it (hal/Tenant.h).
+    hal::BlockBinding Block(size_t i) const;
     // M12 step 4c: THE TENANTS' OWN WORDS FOR THE DIAGRAM, read off their declarations by
     // Declare() beside the ids and the slices: the node a tenant is (TenantDesc::astNode) and,
     // per binding, the edge it realizes (SliceBinding::astField), its slice range and its

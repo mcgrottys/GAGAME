@@ -682,6 +682,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // tenants themselves once they exist (Declare, at the old SetComposed site), and the
     // tangent frame's rows the session writes into it. Both fills read it.
     surface = SurfaceFrame::Merrimack(planetR, opt.stencil);
+    // HIERARCHY 4.17 commit 2: the scene's standing blocks for the colour and the mask, if any.
+    if (!marsMode) surface.DeclareBlocks(S.streaming.faceWindows);
     // The folder every tile tree of this run lives in (streaming.treeRoot), before the first
     // tree is built. A tool pointed at a scratch folder paints, packs and reads there alone.
     TileTree::SetTreeRoot(S.streaming.treeRoot);
@@ -999,15 +1001,26 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 cd.semantics = hal::Semantics::Texture;
                 cd.residence = hal::Residence::Streamable;
                 cd.absence = hal::Absence::Unloaded;
-                cd.slices = 8;
+                cd.slices = surface.blocks.empty() ? 8u : 6u + uint32_t(surface.blocks.size());
                 cd.bindings.push_back({0, 6, cCubeL, mkColor(cCubeL), "paint cube faces"});
                 // M12 step 4c: the two pages realize ONE edge of the diagram ("paint mercator
                 // pages": both slices, one row -- the lattice tag beside each tells them
                 // apart), and the row is registered from these words (SurfaceFrame::
                 // RegisterEdges), so a binding names the edge it realizes, not the edge plus
                 // a zoom.
-                cd.bindings.push_back({6, 1, cWinL, mkColor(cWinL), "paint mercator pages"});
-                cd.bindings.push_back({7, 1, cDetL, mkColor(cDetL), "paint mercator pages"});
+                if (surface.blocks.empty()) {
+                    cd.bindings.push_back({6, 1, cWinL, mkColor(cWinL), "paint mercator pages"});
+                    cd.bindings.push_back({7, 1, cDetL, mkColor(cDetL), "paint mercator pages"});
+                } else {
+                    // HIERARCHY 4.17 commit 2: the standing blocks in place of the two pages,
+                    // slice 6 + i, painted by the tree on the pyramid's lattice (it is asked
+                    // the global tile; the binding keeps the slot).
+                    const Lattice pyr = hal::BlockBinding::Pyramid(cd.fiber.texW, cd.fiber.texH);
+                    for (size_t i = 0; i < surface.blocks.size(); ++i) {
+                        cd.blocks.push_back({6u + uint32_t(i), surface.Block(i), mkColor(pyr),
+                                             "paint pyramid blocks"});
+                    }
+                }
                 colorTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(cd));
                 colorCubeT = colorTenant.Id();
                 // M9bb: a fold or a drop below changed a root tile: the colour tenant
@@ -1037,13 +1050,24 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                         md.semantics = hal::Semantics::Texture;
                         md.residence = hal::Residence::Streamable;
                         md.absence = hal::Absence::Unloaded;
-                        md.slices = 8;
+                        md.slices = surface.blocks.empty() ? 8u
+                                                           : 6u + uint32_t(surface.blocks.size());
                         md.bindings.push_back({0, 6, cCubeL, gt->Provider(cCubeL),
                                                "paint survey mask (cube faces)"});
-                        md.bindings.push_back({6, 1, cWinL, gt->Provider(cWinL),
-                                               "paint survey mask (z14 page)"});
-                        md.bindings.push_back({7, 1, cDetL, gt->Provider(cDetL),
-                                               "paint survey mask (z17 page)"});
+                        if (surface.blocks.empty()) {
+                            md.bindings.push_back({6, 1, cWinL, gt->Provider(cWinL),
+                                                   "paint survey mask (z14 page)"});
+                            md.bindings.push_back({7, 1, cDetL, gt->Provider(cDetL),
+                                                   "paint survey mask (z17 page)"});
+                        } else {   // HIERARCHY 4.17 commit 2: the colour's blocks, its slices
+                            const Lattice pyr =
+                                hal::BlockBinding::Pyramid(md.fiber.texW, md.fiber.texH);
+                            for (size_t i = 0; i < surface.blocks.size(); ++i) {
+                                md.blocks.push_back({6u + uint32_t(i), surface.Block(i),
+                                                     gt->Provider(pyr),
+                                                     "paint survey mask (pyramid blocks)"});
+                            }
+                        }
                         landseaTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(md));
                         maskTenant = landseaTenant.Id();
                         landseaTenant.Bind(*gt);   // its folds invalidate the slice its tag names

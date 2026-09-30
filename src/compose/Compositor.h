@@ -293,6 +293,17 @@ struct ComposedSurfaceCb {
                       // detail slice. u5[0] == ~0 means the old three-tenant path.
     uint32_t u6[4];   // M9aq HEIGHT PAGES: height array SRV, array residency SRV, window
                       // slice. u6[0] == ~0 means the old cube + window tenants.
+    // HIERARCHY 4.17 commit 2: THE STANDING BLOCKS (SurfaceFrame::blocks), appended so no row
+    // above moves; at most SurfaceFrame::kMaxBlocks, coarsest rung first. Block i: row i of
+    // blkU / blkV / blkW is one of PageTexelUv's planes (FaceWindow::PlanesIn, the planet's
+    // frame through its centre), blkG[i] its ground (m) at mip 0, blkS[i] its slice of the
+    // colour and the mask. blkN[0] is the count: 0 is today's Mercator pages.
+    float blkU[16];
+    float blkV[16];
+    float blkW[16];
+    float blkG[4];
+    uint32_t blkS[4];
+    uint32_t blkN[4];
 };
 
 // M12 step 2b: THE FRAME moved to core/Lattice.h and became the LATTICE every tree and

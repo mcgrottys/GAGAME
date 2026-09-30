@@ -65,6 +65,13 @@ float3 ResidencyLens(float3 dir, int tenant, float2 px) {
     const float2 duv = CsWindowUv(dir);
     const float2 tuv = duv * gCsDet.z + gCsDet.xy;
     const float2 fwC = fwidth(cuv), fwW = fwidth(duv), fwT = fwidth(tuv);
+    // HIERARCHY 4.17 commit 2: each standing block's uv and derivative, here too. A block is
+    // painted as the page of its rank (rung / 3): rank 2 as the z14 page, rank 3 as the z17.
+    float2 buv[4], fwB[4];
+    [unroll] for (uint k = 0; k < 4; ++k) {
+        buv[k] = PageTexelUv(dir, gCsBlkU[k], gCsBlkV[k], gCsBlkW[k]);
+        fwB[k] = fwidth(buv[k]);
+    }
     int page = 0;
     float have = 99.0f, mips = 8.0f;
     float2 uv = cuv, fw = fwC, tiles = float2(128.0f, 128.0f);   // tiles a side at mip 0
@@ -95,6 +102,18 @@ float3 ResidencyLens(float3 dir, int tenant, float2 px) {
                 }
             }
         }
+        for (uint i = 0; i < gCsBlkN.x; ++i) {   // the standing blocks, ComposedColorPages' ladder
+            if (!(all(buv[i] > 0.0f) && all(buv[i] < 1.0f))) continue;
+            const float hB = CsHavePage(gCsU5.y, buv[i], gCsBlkS[i]);
+            const float gB = PageGroundM(gCsBlkG[i], hB);
+            if (PageWins(gB, ground)) {
+                page = clamp(int(round(log2(g0.x / gCsBlkG[i]) / 3.0f)) - 1, 1, 2);
+                have = hB;
+                ground = gB;
+                uv = buv[i];
+                fw = fwB[i];
+            }
+        }
     } else if (tenant == 1) {
         // earth.height: ComposedHeightPages' choice; its tiles are 256 x 128 texels, 7 mips.
         if (gCsU6.x == 0xFFFFFFFFu || gCsF.z < 0.5f) return float3(0.3f, 0.3f, 0.3f);
@@ -114,7 +133,19 @@ float3 ResidencyLens(float3 dir, int tenant, float2 px) {
         // gis.landsea: CsMaskSample's order -- the finest page with an OPINION answers.
         if (gCsU3.x == 0xFFFFFFFFu) return float3(0.3f, 0.3f, 0.3f);
         page = -1;
-        if (inW) {
+        for (int i = int(gCsBlkN.x) - 1; i >= 0 && page < 0; --i) {   // the standing blocks
+            if (!(all(buv[i] > 0.001f) && all(buv[i] < 0.999f))) continue;
+            const float hB = CsHavePage(gCsU3.y, buv[i], gCsBlkS[i]);
+            if (hB <= 7.5f &&
+                PageSampleLevel(gTexArr[gCsU3.x], sLinearClamp, buv[i], gCsBlkS[i], 0.0f, hB).a >
+                    0.001f) {
+                page = clamp(int(round(log2(CsGroundM().x / gCsBlkG[i]) / 3.0f)) - 1, 1, 2);
+                have = hB;
+                uv = buv[i];
+                fw = fwB[i];
+            }
+        }
+        if (inW && gCsBlkN.x == 0) {
             if (gCsU5.w != 0xFFFFFFFFu && all(tuv > 0.001f) && all(tuv < 0.999f)) {
                 const float hD = CsHavePage(gCsU3.y, tuv, 7u);
                 if (hD <= 7.5f &&

@@ -109,6 +109,21 @@ float3 ComposedColorPages(float3 dir) {
             }
         }
     }
+    // HIERARCHY 4.17 commit 2: the standing blocks (SurfaceFrame::blocks), coarsest rung first,
+    // by the same ladder and no new rule: a block answers where the direction's uv lies inside it
+    // and its resident ground is at least as fine as the ground held. The address is PageTexelUv
+    // on its planes in the planet's frame through its centre, the direction itself the point.
+    for (uint i = 0; i < gCsBlkN.x; ++i) {
+        const float2 buv = PageTexelUv(dir, gCsBlkU[i], gCsBlkV[i], gCsBlkW[i]);
+        if (all(buv > 0.0f) && all(buv < 1.0f)) {
+            const float haveB = CsHavePage(gCsU5.y, buv, gCsBlkS[i]);
+            const float gB = PageGroundM(gCsBlkG[i], haveB);
+            if (PageWins(gB, ground)) {
+                c = PageSample(gTexArr[gCsU5.x], sAniso, buv, gCsBlkS[i], haveB).rgb;
+                ground = gB;
+            }
+        }
+    }
     return c;
 }
 
@@ -252,8 +267,20 @@ bool ComposedHeightOn() { return gCsF.z > 0.5f; }
 bool CsMaskSample(float3 dir, out float4 m) {
     m = float4(0, 0, 0, 0);
     if (gCsU3.x == 0xFFFFFFFFu) return false;
+    // HIERARCHY 4.17 commit 2: the standing blocks in the pages' order -- the finest with an
+    // OPINION answers, the finest rung first; the Mercator pages are then not the mask's.
+    for (int i = int(gCsBlkN.x) - 1; i >= 0; --i) {
+        const float2 buv = PageTexelUv(dir, gCsBlkU[i], gCsBlkV[i], gCsBlkW[i]);
+        if (all(buv > 0.001f) && all(buv < 0.999f)) {
+            const float haveB = CsHavePage(gCsU3.y, buv, gCsBlkS[i]);
+            if (haveB <= 7.5f) {
+                m = PageSampleLevel(gTexArr[gCsU3.x], sLinearClamp, buv, gCsBlkS[i], 0.0f, haveB);
+                if (m.a > 0.001f) return true;
+            }
+        }
+    }
     const float2 duv = CsWindowUv(dir);
-    if (all(duv > 0.0f) && all(duv < 1.0f)) {
+    if (gCsBlkN.x == 0 && all(duv > 0.0f) && all(duv < 1.0f)) {
         if (gCsU5.w != 0xFFFFFFFFu) {   // the z17 page exists in the colour ladder -> ours too
             const float2 tuv = duv * gCsDet.z + gCsDet.xy;
             if (all(tuv > 0.001f) && all(tuv < 0.999f)) {

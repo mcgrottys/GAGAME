@@ -1202,7 +1202,7 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
             const uint32_t dm = static_cast<uint32_t>(dmip);
             if (wp.winT >= 0) emit(wp.winT, wp.winFace, dm, wu0, wv0, wu1, wv1);
             if (wp.hgtWinT >= 0) emit(wp.hgtWinT, wp.hgtWinFace, dm, wu0, wv0, wu1, wv1);
-            if (wp.maskT >= 0) emit(wp.maskT, 6u, dm, wu0, wv0, wu1, wv1);
+            if (wp.maskT >= 0 && wp.blockN == 0) emit(wp.maskT, 6u, dm, wu0, wv0, wu1, wv1);
         }
         // M7f: the z17 DETAIL window rides the same node box, 8x finer frame.
         if (wp.detWinT >= 0) {
@@ -1224,6 +1224,45 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
                 if (wp.maskT >= 0) emit(wp.maskT, 7u, em, du0f, dv0f, du1f, dv1f);
             }
         }
+    }
+    // HIERARCHY 4.17 commit 2: the standing blocks' demand, in each block's OWN uv: the node's
+    // nine points projected on the block's face plane in doubles (FaceWindow::TexelOf), the mip
+    // the same on-screen texel math against the block's own chain. A node reaching past that
+    // plane's horizon has no projection there and asks nothing of the block.
+    for (uint32_t b = 0; b < wp.blockN; ++b) {
+        const FaceWindow bw{wp.blockFace[b], wp.blockRung[b], wp.blockAx[b], wp.blockAy[b]};
+        double bn[3], ba[3], bb[3];
+        CubeFaceAxes(bw.face, bn, ba, bb);
+        double bmin[2] = {1e18, 1e18}, bmax[2] = {-1e18, -1e18};
+        bool behind = false;
+        for (int cy = 0; cy < 3 && !behind; ++cy) {
+            for (int cx = 0; cx < 3; ++cx) {
+                double d[3];
+                CubeDirD(face, u0 + size * cx * 0.5, v0 + size * cy * 0.5, d);
+                if (d[0] * bn[0] + d[1] * bn[1] + d[2] * bn[2] <= 1e-6) {
+                    behind = true;
+                    break;
+                }
+                double tx = 0.0, ty = 0.0;
+                bw.TexelOf(d, tx, ty);
+                bmin[0] = (std::min)(bmin[0], tx);
+                bmax[0] = (std::max)(bmax[0], tx);
+                bmin[1] = (std::min)(bmin[1], ty);
+                bmax[1] = (std::max)(bmax[1], ty);
+            }
+        }
+        const double dim = double(Lattice::kFaceDim);
+        if (behind || bmax[0] <= 0.0 || bmax[1] <= 0.0 || bmin[0] >= dim || bmin[1] >= dim) continue;
+        const double bspan = (std::max)(bmax[0] - bmin[0], bmax[1] - bmin[1]);   // texels, mip 0
+        const int bmip = (std::max)(
+            0, static_cast<int>(std::ceil(std::log2((std::max)(bspan / (std::max)(px, 16.0), 1.0)))));
+        const float bu0 = static_cast<float>((std::max)(bmin[0] / dim, 0.0));
+        const float bv0 = static_cast<float>((std::max)(bmin[1] / dim, 0.0));
+        const float bu1 = static_cast<float>((std::min)(bmax[0] / dim, 1.0));
+        const float bv1 = static_cast<float>((std::min)(bmax[1] / dim, 1.0));
+        const uint32_t slice = 6u + b, bm = static_cast<uint32_t>(bmip);
+        if (wp.colorT >= 0) emit(wp.colorT, slice, bm, bu0, bv0, bu1, bv1);
+        if (wp.maskT >= 0) emit(wp.maskT, slice, bm, bu0, bv0, bu1, bv1);
     }
 }
 
@@ -1416,7 +1455,8 @@ void GlobeLayer::SetSurface(const SurfaceFrame* s) {
     m_detOrg[0] = static_cast<double>(s->win.orgPxX);
     m_detOrg[1] = static_cast<double>(s->win.orgPxY);
     m_detSize = static_cast<double>(s->win.faceDim);
-    m_detWinT = s->detT;   // M7f: the z17 detail page
+    // M7f: the z17 detail page -- none where standing blocks replace it (HIERARCHY 4.17).
+    m_detWinT = s->detSlice != UINT32_MAX ? s->detT : -1;
     m_det17Org[0] = static_cast<double>(s->det.orgPxX);
     m_det17Org[1] = static_cast<double>(s->det.orgPxY);
 }
@@ -1473,6 +1513,14 @@ GlobeLayer::WalkParams GlobeLayer::CaptureWalk(const Camera& cam, float viewport
     wp.detOrg[0] = m_detOrg[0];
     wp.detOrg[1] = m_detOrg[1];
     wp.detSize = m_detSize;
+    wp.blockN = uint32_t((std::min)(m_surface->blocks.size(), size_t(4)));
+    for (uint32_t i = 0; i < wp.blockN; ++i) {
+        const FaceWindow& b = m_surface->blocks[i];
+        wp.blockFace[i] = b.face;
+        wp.blockRung[i] = b.rung;
+        wp.blockAx[i] = b.anchorX;
+        wp.blockAy[i] = b.anchorY;
+    }
     wp.det17Org[0] = m_det17Org[0];
     wp.det17Org[1] = m_det17Org[1];
     wp.probeCullFar = probeCullFar;
@@ -2128,9 +2176,15 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
             m_res->Want(m_sampler, m_hgtWinT, m_hgtWinFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
         if (m_detWinT >= 0)
             m_res->Want(m_sampler, m_detWinT, m_detFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
-        if (m_maskT >= 0) {
+        if (m_maskT >= 0 && (!m_surface || m_surface->blocks.empty())) {
             m_res->Want(m_sampler, m_maskT, 6u, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
             m_res->Want(m_sampler, m_maskT, 7u, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
+        }
+        // HIERARCHY 4.17 commit 2: the standing blocks' floor, whole, in the colour and the mask.
+        for (size_t i = 0; m_surface && i < m_surface->blocks.size(); ++i) {
+            const uint32_t slice = 6u + uint32_t(i);
+            if (m_colorT >= 0) m_res->Want(m_sampler, m_colorT, slice, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
+            if (m_maskT >= 0) m_res->Want(m_sampler, m_maskT, slice, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
         }
     }
     // M12 step 4g: the composed-surface rows are the renderer's one buffer (b2), filled by

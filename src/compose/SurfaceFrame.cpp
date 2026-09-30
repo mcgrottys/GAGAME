@@ -6,12 +6,94 @@
 #include "hal/Tenant.h"
 #include "sim/BathyModel.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <string>
 
 namespace ga {
+
+bool SurfaceFrame::DeclareBlocks(const std::string& key) {
+    blocks.clear();
+    struct Entry {
+        FaceWindow win;
+        double lat, lon, inside;   // how far inside the block's nearest edge, texels of its rung
+    };
+    std::vector<Entry> got;
+    std::string text;
+    for (const char ch : key) {
+        if (ch != '"') text += ch;   // a value quoted on a command line arrives with its quotes
+    }
+    size_t at = 0;
+    while (at < text.size()) {
+        const size_t end = (std::min)(text.find(';', at), text.size());
+        const std::string e = text.substr(at, end - at);
+        at = end + 1;
+        if (e.find_first_not_of(" \t") == std::string::npos) continue;
+        double lon = 0.0, lat = 0.0;
+        int rung = -1;
+        if (std::sscanf(e.c_str(), " %lf , %lf , %d", &lon, &lat, &rung) != 3 || rung < 0 ||
+            rung > 17 || lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) {
+            Log("[surface] streaming.faceWindows: '%s' is not lon,lat,rung (degrees, a rung of 0 "
+                "to 17) -- the key is REFUSED and the Mercator windows stand",
+                e.c_str());
+            return false;
+        }
+        // The block of that rung holding the point: the point's texel on its face's lattice at
+        // the rung, divided into blocks of 16384 (FaceWindow's anchor is the block's origin).
+        const double kDeg = 3.141592653589793 / 180.0;
+        const double d[3] = {std::cos(lat * kDeg) * std::cos(lon * kDeg), std::sin(lat * kDeg),
+                             std::cos(lat * kDeg) * std::sin(lon * kDeg)};
+        double uv[2];
+        const uint32_t face = CubeFaceOfDir(d, uv);
+        const double N = std::ldexp(double(Lattice::kFaceDim), rung), dim = Lattice::kFaceDim;
+        const double X = uv[0] * N, Y = uv[1] * N;
+        const long long last = (1ll << rung) - 1;
+        const long long bx = (std::min)(last, static_cast<long long>(std::floor(X / dim)));
+        const long long by = (std::min)(last, static_cast<long long>(std::floor(Y / dim)));
+        const FaceWindow w{face, rung, bx * Lattice::kFaceDim, by * Lattice::kFaceDim};
+        const double inside = (std::min)((std::min)(X - w.anchorX, w.anchorX + dim - X),
+                                         (std::min)(Y - w.anchorY, w.anchorY + dim - Y));
+        bool twice = false;
+        for (const Entry& g : got) {
+            twice = twice || (g.win.face == w.face && g.win.rung == w.rung &&
+                              g.win.anchorX == w.anchorX && g.win.anchorY == w.anchorY);
+        }
+        if (twice) {
+            Log("[surface] streaming.faceWindows: %.5f N %.5f E at rung %d names a block already "
+                "declared -- once is enough",
+                lat, lon, rung);
+            continue;
+        }
+        got.push_back({w, lat, lon, inside});
+    }
+    if (got.size() > kMaxBlocks) {
+        Log("[surface] streaming.faceWindows: %zu blocks, the rows carry %u -- the key is REFUSED "
+            "and the Mercator windows stand",
+            got.size(), kMaxBlocks);
+        return false;
+    }
+    std::stable_sort(got.begin(), got.end(),
+                     [](const Entry& a, const Entry& b) { return a.win.rung < b.win.rung; });
+    for (size_t i = 0; i < got.size(); ++i) {
+        const FaceWindow& w = got[i].win;
+        blocks.push_back(w);
+        const double g0 = Block(i).GroundRes(0);
+        Log("[surface] streaming.faceWindows: %.5f N %.5f E at rung %d -> slice %zu = face %u "
+            "block (%lld,%lld) of the pyramid, %.4g m a texel at its mip 0; the point stands %.0f "
+            "texels (%.2f km nominal) inside its nearest edge",
+            got[i].lat, got[i].lon, w.rung, 6 + i, w.face, w.anchorX / Lattice::kFaceDim,
+            w.anchorY / Lattice::kFaceDim, g0, got[i].inside, got[i].inside * g0 / 1000.0);
+    }
+    return true;
+}
+
+hal::BlockBinding SurfaceFrame::Block(size_t i) const {
+    const FaceWindow& w = blocks[i];
+    return hal::BlockBinding{w.face, w.rung, uint32_t(w.anchorX / Lattice::kFaceDim),
+                             uint32_t(w.anchorY / Lattice::kFaceDim)};
+}
 
 SurfaceFrame SurfaceFrame::Merrimack(double planetR, bool stencil) {
     SurfaceFrame s;
@@ -54,8 +136,10 @@ SurfaceFrame SurfaceFrame::Merrimack(double planetR, bool stencil) {
 void SurfaceFrame::Declare(const hal::Tenant& color, const hal::Tenant& height,
                            const hal::Tenant& mask) {
     colorT = color.Id();
-    winSlice = color.Valid() ? color.SliceOf(win.Tag()) : UINT32_MAX;
-    detSlice = color.Valid() ? color.SliceOf(det.Tag()) : UINT32_MAX;
+    // HIERARCHY 4.17 commit 2: with standing blocks the colour declares no Mercator page, and
+    // SliceOf would route an undeclared tag to the cube's slice 0 -- so it is not asked.
+    winSlice = (color.Valid() && blocks.empty()) ? color.SliceOf(win.Tag()) : UINT32_MAX;
+    detSlice = (color.Valid() && blocks.empty()) ? color.SliceOf(det.Tag()) : UINT32_MAX;
     detT = colorT;   // M9ap: the z17 page is a slice of the colour tenant (was detTenant)
     hgtT = height.Id();
     hgtWinSlice = height.Valid() ? height.SliceOf(winH.Tag()) : UINT32_MAX;
@@ -149,7 +233,9 @@ void SurfaceFrame::Fill(ComposedSurfaceCb& cb, const ResidencyManager& rm) const
     // M9ap: the pages path. One tenant; the cube views cover slices 0..5, the array view
     // carries the Mercator pages. The old window/detail SRVs are left unset so nothing can
     // read a second texture by accident.
-    const bool pages = cubeOn && winOn && window == colorCube && winSlice != UINT32_MAX;
+    // HIERARCHY 4.17 commit 2: standing blocks are pages too (the array SRV and its residency).
+    const bool pages = cubeOn && ((winOn && window == colorCube && winSlice != UINT32_MAX) ||
+                                  !blocks.empty());
     cb.u5[0] = pages ? rm.TextureSrv(colorCube) : UINT32_MAX;
     cb.u5[1] = pages ? rm.ResidencySrv(colorCube) : UINT32_MAX;
     cb.u5[2] = pages ? winSlice : UINT32_MAX;
@@ -224,6 +310,25 @@ void SurfaceFrame::Fill(ComposedSurfaceCb& cb, const ResidencyManager& rm) const
     cb.ground[1] = static_cast<float>(win.GroundRes(0));
     cb.ground[2] = static_cast<float>(det.GroundRes(0));
     cb.ground[3] = 0.0f;
+    // HIERARCHY 4.17 commit 2: THE STANDING BLOCKS' ROWS, appended. Per block, PageTexelUv's
+    // three planes in the planet's frame through its centre (FaceWindow::PlanesIn of the
+    // identity placement: until commit 3 brings the eye-relative point, a pixel's point is the
+    // direction it already has), its ground at mip 0 and its slice; then the count. All zero
+    // with no blocks.
+    const uint32_t nb = pages ? uint32_t((std::min)(blocks.size(), size_t(kMaxBlocks))) : 0u;
+    for (uint32_t i = 0; i < kMaxBlocks; ++i) {
+        FaceWindow::Planes pl{};
+        if (i < nb) pl = blocks[i].PlanesIn(Placement{});
+        for (int k = 0; k < 4; ++k) {
+            cb.blkU[4 * i + k] = pl.u[k];
+            cb.blkV[4 * i + k] = pl.v[k];
+            cb.blkW[4 * i + k] = pl.w[k];
+        }
+        cb.blkG[i] = i < nb ? static_cast<float>(Block(i).GroundRes(0)) : 0.0f;
+        cb.blkS[i] = i < nb ? 6u + i : 0u;
+        cb.blkN[i] = 0u;
+    }
+    cb.blkN[0] = nb;
 }
 
 }  // namespace ga

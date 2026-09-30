@@ -373,7 +373,14 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
     uint4  gCsU5;   /* M9ap PAGES: colour array SRV, array residency SRV, window slice, \
                        detail slice. x == ~0 means the old three-tenant path. */ \
     uint4  gCsU6;   /* M9aq HEIGHT PAGES: height array SRV, array residency SRV, window \
-                       slice. x == ~0 means the old cube + window tenants. */
+                       slice. x == ~0 means the old cube + window tenants. */ \
+    float4 gCsBlkU[4]; /* HIERARCHY 4.17 commit 2: per standing block (coarsest rung first) \
+                          PageTexelUv's planes U, V, W, the planet's frame through its centre */ \
+    float4 gCsBlkV[4]; \
+    float4 gCsBlkW[4]; \
+    float4 gCsBlkG; /* per block, its ground texel (m) at mip 0 */ \
+    uint4  gCsBlkS; /* per block, its slice of the colour and the mask */ \
+    uint4  gCsBlkN; /* x = the block count; 0 = today's Mercator pages */
 
 // M12 step 4g: THE ONE SURFACE CONSTANT BUFFER, on the shared layout's b2 (Renderer.h): the
 // frame loop fills ga::ComposedSurfaceCb once a frame through SurfaceFrame::Fill, RenderFrame
