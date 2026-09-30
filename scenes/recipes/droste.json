@@ -105,8 +105,7 @@
     "colorTrees": true,
     "gisGate": true,
     "seafloor": true,
-    "exposure": true,
-    "ringLoads": true
+    "exposure": true
   },
   "capture": {
     "headless": true,

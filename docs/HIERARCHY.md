@@ -1943,8 +1943,47 @@ of the frame.
   bound for the turn is restated as what the order does that today's does not: the mean
   cost a tile MAPPED no more than today's, and the 95th in a hundred no more than today's
   in the same batch. The exact measure is not kept: it earned nothing.
-- **Then today's manager is removed,** and the lines of `Residency.*` are counted against
-  the 2,523 of `main`. Both stand today: 4,426.
+- **Built and measured, the standing weight is the law that settles it, and the turn's cost
+  is stated, not met** (2026-09-30, H5). On the standing camera not one measure of 2.94
+  million pairs moved between two passes, by construction; the camera settles at frame 245
+  with the margin at the square root of two and at 404 with none, so the margin stays, at
+  the root of two. Over the storm rail the reloads within the glance are 249 against 5,902
+  before the law and the bound of 1,729; the rescues 55 against thousands; the six stills
+  in the hold are today's to the pixel with the mapped sets' hashes equal; the audits are
+  clean at all 1,350 turns; the part 5 picture has no black pixel. Two bounds are not met,
+  and both are one number: the turn costs 1.93 ms in the mean where today's costs 1.05, its
+  95th in a hundred 5.71 where today's is 4.68, and a tile mapped 0.108 ms where today's is
+  0.090. Take the pass out and the last is today's: the pass costs 0.36 ms on 1,080 of the
+  1,200 turns, 0.33 ms a turn, and (1.93 − 0.33) ms over 17.8 tiles mapped a turn is 0.090.
+  So the order maps what it reads (21,413 tiles against today's 14,090, today's leaving
+  7,900 reads unmapped, finding 2) at today's price a tile, and pays a third of a
+  millisecond a turn for the map being a function of the held set. That is the cost of the
+  law, not a fault in it, and it is stated here and in the pull request rather than tuned
+  away: a bound that today's manager meets by not doing the work is not a bound.
+- **Today's manager is removed** (2026-09-30, G). Its queues, ring gate, headroom pass,
+  evictor and cap test, the byte kept by increments, its settle ledger and the key
+  `streaming.manager` are gone; `streaming.ringLoads`, inert once the ring gate went, is gone
+  with its line in eleven scenes rather than kept as a key that does nothing. The frame-head
+  hook takes the hal's `CommandContext`, so no Direct3D name stands outside `src/hal`. The
+  gate without it: the selftest, the six stills in the hold pixel for pixel H5's with the
+  mapped sets' hashes equal, part 5 without a black pixel, both audits clean at 1,350 turns,
+  the closure by events equal to the whole walk at every audited pass, and the storm rail
+  twice making H5's decisions to the tile (249 and 251 reloads, 21,413 maps) at 2.19 and
+  2.34 ms in the mean, 7% apart from each other and in another batch than H5's 1.93; the
+  cost stands as stated above. The standing camera settled at frame 408 in this run where
+  H5's settled at 245 with the same order: between frames 101 and 300 its loads stalled with
+  a tile pending every turn and nothing released, which is the loads' and not the order's,
+  and was not measured further. **The lines:** G alone takes 665 engine lines out and puts
+  97 in; the manager as a whole against `main` is engine +1,695 / −629 and tests +277, and
+  `Residency.*` is 3,827 lines (the header 885, the turn 1,642, the order 1,300 of which 176
+  are its selftest) against `main`'s 2,523. The manager is larger than what it replaces by
+  half, and that is said here rather than hidden in the count: what it holds that today's
+  did not is the order itself, the statements that stand, the rescue, the closure, the map
+  written from the held set, and the instruments that found the churn's cause. Two seams
+  are left for step 4b: a tile tree says it answered without a source through a thread-local
+  flag (`g_tileIncomplete`, `TileAddress.h`) that the manager reads after its provider
+  call, where the answer itself should carry it; and a record keeps four readers' standing
+  statements, the oldest replaced by a fifth.
 
 **One law more, from Haulover: a tile is held whole or it is not held** (finding 83). 4.11
 says that absence is the coarser ancestor and never zero. Today a composite whose source

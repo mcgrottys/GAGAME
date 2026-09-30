@@ -1551,6 +1551,7 @@ private:
             got[k] = Held::Content;
             live.push_back(k);
         }
+        if (!complete) g_tileIncomplete = true;   // step 5 E: answered without a source (finding 83)
         const std::string cpath = base + "_" + tree_detail::Hex8(KeyOf(inc, got));
         // THE REFERENCE. Straight alpha makes a lone input's tile the composite exactly --
         // OverFinish divides by the coverage it just multiplied by -- so the record is the

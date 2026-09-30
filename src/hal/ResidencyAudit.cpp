@@ -396,7 +396,6 @@ void ResidencyManager::LogAudit() {
     for (const auto& b : m_inFlightReads) {
         for (const auto& tile : b.tiles) reading.push_back(tile.get());
     }
-    for (const auto& tile : m_seen) queued.push_back(tile.get());
     for (const auto& tile : m_loading) queued.push_back(tile.get());
     std::sort(reading.begin(), reading.end());
     std::sort(queued.begin(), queued.end());
@@ -432,7 +431,11 @@ void ResidencyManager::LogAudit() {
                 x.state = static_cast<AuditState>(static_cast<uint8_t>(tr->state));
                 x.landed = tr->state == TileState::Mapped &&
                            !std::binary_search(reading.begin(), reading.end(), tr.get());
-                x.queued = std::binary_search(queued.begin(), queued.end(), tr.get());
+                // Step 5: a Seen tile is in the order by construction (every tracked
+                // tile is judged every turn); a Loading or a Loaded one must be in m_loading, or
+                // nothing will map it or let it go: finding 2's orphan.
+                x.queued = std::binary_search(queued.begin(), queued.end(), tr.get()) ||
+                           tr->state == TileState::Seen;
                 a.tiles.push_back(x);
                 if (tr->state == TileState::Mapped) ++(tr->loc.Valid() ? byPlace[k] : byBytes[k]);
             }
@@ -575,7 +578,7 @@ void ResidencyManager::LogAudit() {
 //  not a copy of it. Each planted failure must be CAUGHT at the cell it was planted in; an audit
 //  that flags the rule's own correct sequences, or misses a plant, fails the suite.
 // ================================================================================================
-bool ResidencyManager::AuditSelfTest() {
+bool ResidencyManager::AuditSuite() {
     bool ok = true;
     // Unstarted: UpdateResidencyByte reads the tilings and writes the bytes, and nothing else --
     // no device, no pool, no thread takes part in the rule under test.
@@ -583,6 +586,16 @@ bool ResidencyManager::AuditSelfTest() {
     struct Model {
         Tenant t;
         std::vector<AuditTile> tiles;
+    };
+    // STEP 5's writer (order): the map a function of the held set, the held set the model's own
+    // tiles -- Mapped and landed, the audit's definition of resident.
+    auto heldIn = [](const void* ctx, uint32_t f, uint32_t m, uint32_t x, uint32_t y) -> bool {
+        for (const AuditTile& a : static_cast<const Model*>(ctx)->tiles) {
+            if (a.face == f && a.mip == m && a.x == x && a.y == y) {
+                return a.state == AuditState::Mapped && a.landed;
+            }
+        }
+        return false;
     };
     // A tenant on the manager's layout: faces x mips planes of (bw >> m) x (bh >> m) tiles, the
     // map at max(bw, bh) a side, every byte born "coarsest" as AddTextureInternal writes it.
@@ -602,14 +615,14 @@ bool ResidencyManager::AuditSelfTest() {
         }
         const uint32_t rdim = (std::max)(bw, bh);
         md.t.resMap.width = md.t.resMap.height = rdim;
-        md.t.resCpu.assign(faces, std::vector<uint8_t>(size_t(rdim) * rdim,
-                                                        static_cast<uint8_t>((mips - 1) * 16)));
+        // The map is born saying nothing (law 9).
+        md.t.resCpu.assign(faces, std::vector<uint8_t>(size_t(rdim) * rdim, uint8_t(255)));
         md.tiles.clear();
     };
     // Mapped through the real rule and held landed; `claim` false is a DirectStorage tile whose
     // fence has not signalled: Mapped, no byte written, not landed (MapAndFill's claim-if-ring).
+    // Under step 5's writer the footprint is rewritten from the held set whatever the claim.
     auto map = [&](Model& md, uint32_t f, uint32_t m, uint32_t x, uint32_t y, bool claim = true) {
-        if (claim) mgr.UpdateResidencyByte(md.t, TileRequest{f, m, x, y}, true);
         AuditTile a;
         a.face = f;
         a.mip = m;
@@ -618,13 +631,14 @@ bool ResidencyManager::AuditSelfTest() {
         a.state = AuditState::Mapped;
         a.landed = claim;
         md.tiles.push_back(a);
+        WriteHeldFootprint(md.t, TileRequest{f, m, x, y}, heldIn, &md);
     };
     // Dropped: the real rule's max(), and gone from the set (DropOne and the evictor's release).
     auto unmap = [&](Model& md, uint32_t f, uint32_t m, uint32_t x, uint32_t y) {
-        mgr.UpdateResidencyByte(md.t, TileRequest{f, m, x, y}, false);
         std::erase_if(md.tiles, [&](const AuditTile& a) {
             return a.face == f && a.mip == m && a.x == x && a.y == y;
         });
+        WriteHeldFootprint(md.t, TileRequest{f, m, x, y}, heldIn, &md);
     };
     auto plain = [](const Model& md) {
         AuditTenant a;
@@ -728,6 +742,13 @@ bool ResidencyManager::AuditSelfTest() {
             ok = false;
         }
     };
+    // Step 5's writer over a gap: the tile waits in the map and no byte names it (law 3).
+    auto noFiner = [&](const char* what, const std::pair<AuditResult, std::vector<AuditTenant>>& r) {
+        Log("[res-audit] %s through step 5's writer: %llu cells FINER than the tiles -- %s", what,
+            static_cast<unsigned long long>(r.first.sum.finer),
+            r.first.sum.finer ? "the writer named a tile under a gap" : "the map names the whole chain");
+        if (r.first.sum.finer) ok = false;
+    };
 
     // ---- 0. The controls: the rule's own orders audit clean on both grids.
     {
@@ -736,9 +757,10 @@ bool ResidencyManager::AuditSelfTest() {
         buildB(b);
         const auto r = run({&a, &b});
         const bool clean = r.first.Clean() && r.first.mapped == a.tiles.size() + b.tiles.size();
-        Log("[res-audit] control: the real UpdateResidencyByte, mapped coarse to fine and evicted "
+        Log("[res-audit] control: the real %s, mapped coarse to fine and evicted "
             "fine to coarse on a square and a 2:1 tile grid (%u tiles mapped), audits %s -- %s",
-            r.first.mapped, clean ? "CLEAN" : "NOT CLEAN", summary(r.first).c_str());
+            "WriteHeldFootprint", r.first.mapped,
+            clean ? "CLEAN" : "NOT CLEAN", summary(r.first).c_str());
         if (!clean) {
             ok = false;
             for (size_t i = 0; i < r.first.offenders.size() && i < 4; ++i) {
@@ -774,7 +796,9 @@ bool ResidencyManager::AuditSelfTest() {
         Model a;
         buildA(a);
         map(a, 0, 0, 6, 6);
-        expect("plant 4, a mip mapped under a missing parent", run({&a}), AuditKind::Hole, 0, 0, 6, 6);
+        const auto r = run({&a});
+        expect("plant 4, a mip mapped under a missing parent", r, AuditKind::Hole, 0, 0, 6, 6);
+        noFiner("plant 4", r);
     }
     // ---- 5. Finding 2's batch tail: m0 (5,5) Loaded, tracked, in no queue.
     {
@@ -800,9 +824,9 @@ bool ResidencyManager::AuditSelfTest() {
         map(a, 0, 2, 1, 1, false);
         map(a, 0, 1, 2, 2);
         const auto r = run({&a});
-        expect("plant 6, a claim over a parent whose bytes are in flight", r, AuditKind::Finer, 0,
-               0, 4, 4);
+        // The writer names the whole chain, m3; the child waits in the map as a HOLE (law 3).
         expect("plant 6, ...and the chain's gap is named", r, AuditKind::Hole, 0, 0, 4, 4);
+        noFiner("plant 6", r);
     }
     // ---- 7. A split cell on the 2:1 grid: one of cell (2,3)'s two map texels written alone.
     {
@@ -829,11 +853,12 @@ bool ResidencyManager::AuditSelfTest() {
             ++holeCells;
             if (o.byte / 16u == o.truth) ++holeBytesTrue;
         }
-        Log("[res-audit] finding 3, replayed through the real UpdateResidencyByte on a constructed "
+        Log("[res-audit] finding 3, replayed through the real %s on a constructed "
             "tenant: map P = m2 (2,2) and its child C = m1 (4,4): %s. Unmap P (the invalidation's "
             "DropOne): %u HOLE cells under C, and on %u of them the byte says the truth of the "
             "broken chain (%s) -- the rule is right while the hole stands (%s)",
-            before ? "clean" : "NOT CLEAN", holeCells, holeBytesTrue,
+            "WriteHeldFootprint", before ? "clean" : "NOT CLEAN",
+            holeCells, holeBytesTrue,
             MipText(byteAt(a, 1, 8, 8) / 16u, a.t.mips).c_str(), summary(r2.first).c_str());
         if (!before || holeCells != 4 || holeBytesTrue != 4) ok = false;
         map(a, 1, 2, 2, 2);
@@ -842,21 +867,75 @@ bool ResidencyManager::AuditSelfTest() {
         for (const AuditOffender& o : r3.first.offenders) {
             coarse += (o.kind == AuditKind::Coarser && o.face == 1) ? 1u : 0u;
         }
-        Log("[res-audit] finding 3: map P again -- the audit reports %s; %u COARSER cells, every "
-            "one of C's four: the byte came back to P's mip and C's finer claim is never restored",
-            summary(r3.first).c_str(), coarse);
-        expect("finding 3, P mapped again over its mapped child C", r3, AuditKind::Coarser, 0, 1, 8,
-               8);
-        if (coarse != 4 || r3.first.sum.finer || r3.first.sum.holes) ok = false;
+        {
+            // The answer to finding 3: the footprint is rewritten from the held set, so P's
+            // return names C's mip again under C and nothing is left coarser.
+            (void)coarse;
+            const bool clean = r3.first.Clean();
+            Log("[res-audit] finding 3 through step 5's writer: map P again -- the audit reports %s, "
+                "%s: the byte over C says %s again",
+                summary(r3.first).c_str(), clean ? "CLEAN" : "NOT CLEAN",
+                MipText(byteAt(a, 1, 8, 8) / 16u, a.t.mips).c_str());
+            if (!clean) ok = false;
+        }
     }
-    Log(ok ? "[res-audit] ---- PASS: the real byte rule audits clean in the orders it assumes, on a "
-             "square and a 2:1 grid; 7 planted failures CAUGHT where they were planted (a byte "
-             "lowered, a byte raised, a tile unmapped under its byte, a hole, an orphaned batch "
-             "tail, a claim over bytes in flight, a split cell); finding 3's own sequence through "
-             "the real rule reads as a hole while the parent is gone and as COARSER over the "
-             "child once it is back ----"
-           : "[res-audit] ---- FAIL ----");
+    {
+        Log(ok ? "[res-audit] ---- PASS (step 5's writer, WriteHeldFootprint): the controls clean on "
+                 "both grids from a map born saying nothing; the 7 plants CAUGHT where they were "
+                 "planted, a tile under a missing parent and a claim over a parent in flight as HOLES "
+                 "with no byte finer than the tiles (law 3); finding 3's sequence reads clean once P "
+                 "is back ----"
+               : "[res-audit] ---- FAIL (step 5's writer) ----");
+    }
     return ok;
+}
+
+bool ResidencyManager::AuditSelfTest() {
+    const bool order = AuditSuite();   // the one writer: the map a function of the held set
+    // STEP 5 D, THE ORDER'S RUNG KEY (the coordinator's finding a). The held set is closed upward
+    // by construction only if a parent's bucket comes strictly before its child's: at every rung
+    // of the pyramid, 0 (611 m) to 17 (4.7 mm), and every mip of a window standing on it. With too
+    // few buckets the finest rungs clamp into one, and a parent and its child are then ordered by
+    // weight: the plant (the bucket range this manager was first built with) must fail at rung 16.
+    // F: the key is the measure, texel / max(distance, texel). For every rung of the pyramid, every
+    // mip of a window on it and eye distances from 1 m to 10,000 km, a parent (twice the texel, at
+    // no greater distance: the child's distance, the worst case) is never in a bucket after its
+    // child's. The plant is the texel taken the wrong way up the mips (halving with the mip).
+    auto closedUp = [](bool inverted, uint32_t& pairs, int& badRung, uint32_t& badMip) {
+        pairs = 0;
+        badRung = -1;
+        badMip = 0;
+        const double rung0M = 6371000.0 * 1.5707963267948966 / 16384.0;   // the cube's mip 0
+        for (int k = 0; k <= 17; ++k) {
+            const double g0 = rung0M / double(1 << k);
+            for (uint32_t m = 0; m + 1 < 8; ++m) {
+                const float tc = static_cast<float>(inverted ? g0 / double(1u << m) : g0 * double(1u << m));
+                const float tp = static_cast<float>(inverted ? g0 / double(2u << m) : g0 * double(2u << m));
+                for (double d = 1.0; d <= 1.0e7; d *= 1.3) {
+                    ++pairs;
+                    const uint32_t child = MeasureBucket(Measure(tc, static_cast<float>(d)));
+                    const uint32_t parent = MeasureBucket(Measure(tp, static_cast<float>(d)));
+                    if (parent > child && badRung < 0) {
+                        badRung = k;
+                        badMip = m;
+                    }
+                }
+            }
+        }
+        return badRung < 0;
+    };
+    uint32_t pairs = 0, badMip = 0, plantPairs = 0, plantMip = 0;
+    int badRung = -1, plantRung = -1;
+    const bool keyOk = closedUp(false, pairs, badRung, badMip);
+    const bool plantCaught = !closedUp(true, plantPairs, plantRung, plantMip);
+    Log("[res-audit] the order's key, the texel's size on the reader's screen: a parent's bucket never "
+        "after its child's at rungs 0 to 17, mips 0 to 7 and eye distances 1 m to 10,000 km (%u "
+        "pairs): %s; the plant, the texel taken the wrong way up the mips, %s",
+        pairs, keyOk ? "HOLDS" : "FAILS", plantCaught ? "is caught" : "is NOT caught");
+    if (!keyOk) Log("[res-audit]   the key fails first at rung %d, mip %u", badRung, badMip);
+    if (plantCaught) Log("[res-audit]   the plant fails first at rung %d, mip %u", plantRung, plantMip);
+    const bool marginOk = OrderSelfTest();   // H2: the hold's margin and the closure under it
+    return order && keyOk && plantCaught && marginOk;
 }
 
 bool RunResidencyAuditSelfTest() { return ResidencyManager::AuditSelfTest(); }

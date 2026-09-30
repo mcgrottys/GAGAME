@@ -1118,6 +1118,9 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
     // over-asked: it bought the same seam fix at double the p99, because every node in the
     // frame requested a level finer than its geometry justifies.)
     const double distNear = (std::max)(dist - arc * 0.5, 1.0);
+    // Step 5: the same distance is the want's WEIGHT, the order's fourth key (HIERARCHY 4.19):
+    // the nearer to what the reader looks at, the sooner.
+    const float nearW = static_cast<float>(distNear);
     if (!wp.wants) return;
     // The node's span in pixels at its nearest point: one number, the same for the cube mip
     // and both window mips below (the walk used to recompute it in each block; the same
@@ -1134,11 +1137,11 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
     const float tv1 = static_cast<float>(1.0 - v0);
     const uint32_t f = static_cast<uint32_t>(face);
     const uint32_t m = static_cast<uint32_t>(mip);
-    if (wp.surfT >= 0) emit(wp.surfT, f, m, tu0, tv0, tu1, tv1);
-    if (wp.normT >= 0) emit(wp.normT, f, m, tu0, tv0, tu1, tv1);
-    if (wp.colorT >= 0) emit(wp.colorT, f, m, tu0, tv0, tu1, tv1);
-    if (wp.hgtT >= 0) emit(wp.hgtT, f, m, tu0, tv0, tu1, tv1);
-    if (wp.maskT >= 0) emit(wp.maskT, f, m, tu0, tv0, tu1, tv1);
+    if (wp.surfT >= 0) emit(wp.surfT, f, m, tu0, tv0, tu1, tv1, nearW);
+    if (wp.normT >= 0) emit(wp.normT, f, m, tu0, tv0, tu1, tv1, nearW);
+    if (wp.colorT >= 0) emit(wp.colorT, f, m, tu0, tv0, tu1, tv1, nearW);
+    if (wp.hgtT >= 0) emit(wp.hgtT, f, m, tu0, tv0, tu1, tv1, nearW);
+    if (wp.maskT >= 0) emit(wp.maskT, f, m, tu0, tv0, tu1, tv1, nearW);
     // M6f: the window's demand -- the node's corners in Mercator z14-pixel space,
     // intersected with the window; its mip matches the same on-screen texel math against
     // the window's OWN pyramid (mip 0 = z14). Color and height windows share the frame,
@@ -1200,9 +1203,9 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
             const float wu1 = static_cast<float>((std::min)(du1, 1.0));
             const float wv1 = static_cast<float>((std::min)(dv1, 1.0));
             const uint32_t dm = static_cast<uint32_t>(dmip);
-            if (wp.winT >= 0) emit(wp.winT, wp.winFace, dm, wu0, wv0, wu1, wv1);
-            if (wp.hgtWinT >= 0) emit(wp.hgtWinT, wp.hgtWinFace, dm, wu0, wv0, wu1, wv1);
-            if (wp.maskT >= 0 && wp.blockN == 0) emit(wp.maskT, 6u, dm, wu0, wv0, wu1, wv1);
+            if (wp.winT >= 0) emit(wp.winT, wp.winFace, dm, wu0, wv0, wu1, wv1, nearW);
+            if (wp.hgtWinT >= 0) emit(wp.hgtWinT, wp.hgtWinFace, dm, wu0, wv0, wu1, wv1, nearW);
+            if (wp.maskT >= 0 && wp.blockN == 0) emit(wp.maskT, 6u, dm, wu0, wv0, wu1, wv1, nearW);
         }
         // M7f: the z17 DETAIL window rides the same node box, 8x finer frame.
         if (wp.detWinT >= 0) {
@@ -1220,8 +1223,8 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
                 const float dv0f = static_cast<float>((std::max)(ev0, 0.0));
                 const float du1f = static_cast<float>((std::min)(eu1, 1.0));
                 const float dv1f = static_cast<float>((std::min)(ev1, 1.0));
-                emit(wp.detWinT, wp.detFace, em, du0f, dv0f, du1f, dv1f);
-                if (wp.maskT >= 0) emit(wp.maskT, 7u, em, du0f, dv0f, du1f, dv1f);
+                emit(wp.detWinT, wp.detFace, em, du0f, dv0f, du1f, dv1f, nearW);
+                if (wp.maskT >= 0) emit(wp.maskT, 7u, em, du0f, dv0f, du1f, dv1f, nearW);
             }
         }
     }
@@ -1261,8 +1264,9 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
         const float bu1 = static_cast<float>((std::min)(bmax[0] / dim, 1.0));
         const float bv1 = static_cast<float>((std::min)(bmax[1] / dim, 1.0));
         const uint32_t slice = 6u + b, bm = static_cast<uint32_t>(bmip);
-        if (wp.colorT >= 0) emit(wp.colorT, slice, bm, bu0, bv0, bu1, bv1);
-        if (wp.maskT >= 0) emit(wp.maskT, slice, bm, bu0, bv0, bu1, bv1);
+        // The block's tiles carry the leaf's own distance as their weight, as the cube's do.
+        if (wp.colorT >= 0) emit(wp.colorT, slice, bm, bu0, bv0, bu1, bv1, nearW);
+        if (wp.maskT >= 0) emit(wp.maskT, slice, bm, bu0, bv0, bu1, bv1, nearW);
     }
 }
 
@@ -1584,8 +1588,8 @@ void GlobeLayer::PredictWalk() {
                         uint32_t /*seen*/) {
             ++leaves;
             auto emit = [&](int tenant, uint32_t f, uint32_t mip, float u0r, float v0r,
-                            float u1r, float v1r) {
-                out.push_back(WantRect{tenant, f, mip, u0r, v0r, u1r, v1r});
+                            float u1r, float v1r, float nearW) {
+                out.push_back(WantRect{tenant, f, mip, u0r, v0r, u1r, v1r, nearW});
             };
             LeafWants(wp, face, u0, v0, size, arc, dist, emit);
         };
@@ -1619,7 +1623,7 @@ void GlobeLayer::ReplayPredictWants() {
     const auto w1 = std::chrono::steady_clock::now();
     // The worker is idle until the next post, so the rects are ours under the lock.
     for (const WantRect& r : m_predict.rects) {
-        m_res->Want(m_sampler, r.tenant, r.face, r.mip, r.u0, r.v0, r.u1, r.v1, true);
+        m_res->Want(m_sampler, r.tenant, r.face, r.mip, r.u0, r.v0, r.u1, r.v1, true, r.nearM);
     }
     const auto w2 = std::chrono::steady_clock::now();
     ++predictWalks;
@@ -1653,7 +1657,9 @@ void GlobeLayer::WalkLevel(const WalkParams& wp, uint32_t slot, int sampler) {
         ++walkLeaves;
         const auto wt0 = std::chrono::steady_clock::now();
         auto emit = [&](int tenant, uint32_t f, uint32_t mip, float u0r, float v0r, float u1r,
-                        float v1r) { m_res->Want(sampler, tenant, f, mip, u0r, v0r, u1r, v1r); };
+                        float v1r, float nearW) {
+            m_res->Want(sampler, tenant, f, mip, u0r, v0r, u1r, v1r, false, nearW);
+        };
         LeafWants(wp, face, u0, v0, size, arc, dist, emit);
         walkWantNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                    std::chrono::steady_clock::now() - wt0).count());
@@ -2376,10 +2382,8 @@ void GlobeLayer::Render(const FrameContext& ctx) {
 
     // M6e: the residency manager's per-frame turn -- loads started, budgeted tiles mapped and
     // filled, residency maps refreshed -- BEFORE the surface samples any of it.
-    if (m_res) {
-        GpuScope gscope(ctx.prof, ctx.cmd->Native(), "globe.residency");
-        m_res->ProcessQueues(*ctx.gpu, ctx.cmd->Native());
-    }
+    // (The residency turn stands at the head of the frame's command list, law 8: FrameLoop's
+    // hook on the renderer, before any layer records a read.)
 
     const D3D12_GPU_VIRTUAL_ADDRESS cbVa = ctx.gpu->PushConstants(&m_cb, sizeof(m_cb));
 

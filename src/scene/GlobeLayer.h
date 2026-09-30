@@ -248,6 +248,7 @@ public:
         int tenant;
         uint32_t face, mip;
         float u0, v0, u1, v1;
+        float nearM = 0.0f;   // step 5: the leaf's distance, the want's weight
     };
     // Post the prefetch walk for this frame: `cam` is the frame's clamped camera (its planet
     // position and pixel angle are the walk's, exactly as SetView's are), `pred` the

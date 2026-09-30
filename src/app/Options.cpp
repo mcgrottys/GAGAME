@@ -264,8 +264,6 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--no-exposure") o.exposure = false;
         else if (a == "--gis-dump") o.gisDump = next("gis_gate.pgm");
         // M9al: the ring gate and its instrument. Instrument first, gate second, both off.
-        else if (a == "--ring-loads") o.ringLoads = true;      // the default; kept for scripts
-        else if (a == "--no-ring-loads") o.ringLoads = false;
         else if (a == "--res-trace") o.resTrace = true;
         // M13 step 0: count the water tiles the walk would want on the planet's own lattice.
         else if (a == "--water-tiles") o.waterTiles = true;
@@ -632,7 +630,6 @@ SceneArgs Options::ToSets(const Options& o) {
     if (o.gisGate != D.gisGate) set("streaming.gisGate", JsonBool(o.gisGate));
     if (o.seafloor != D.seafloor) set("streaming.seafloor", JsonBool(o.seafloor));
     if (o.exposure != D.exposure) set("streaming.exposure", JsonBool(o.exposure));
-    if (o.ringLoads != D.ringLoads) set("streaming.ringLoads", JsonBool(o.ringLoads));
     // ---- capture
     if (o.headless) set("capture.headless", JsonBool(true));
     if (o.width != D.width) set("capture.width", num(o.width));

@@ -76,7 +76,6 @@ struct Options {
     bool seafloor = true;             // --no-seafloor: drop the global seafloor relief source
     bool exposure = true;             // --no-exposure: no swell-exposure page (everything exposed)
     std::string gisDump;              // --gis-dump PATH: the gate over the survey box as PGM, exit
-    bool ringLoads = true;            // --no-ring-loads: the old queue, for the A/B (M9al)
     bool resTrace = false;            // --res-trace: residency deficit + slot accounting, per 30 f
     bool waterTiles = false;          // --water-tiles: what the water would cost on the lattice
     bool threadAudit = false;         // --thread-audit: count tile-file collisions between threads

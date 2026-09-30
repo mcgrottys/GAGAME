@@ -295,7 +295,11 @@ const Schema& StreamingSchema() {
             .Bind("gisGate", p.gisGate, "the vector land/sea gate on the bed (--no-gis-gate)", R)
             .Bind("seafloor", p.seafloor, "the global seafloor relief source (--no-seafloor)", R)
             .Bind("exposure", p.exposure, "the swell-exposure page (--no-exposure)", R)
-            .Bind("ringLoads", p.ringLoads, "the ring gate (--no-ring-loads)", R)
+            .Bind("holdMargin", p.holdMargin, Q::Dimensionless, "1",
+                  "the order's hold margin: a held tile, and a tile above a held tile, count for "
+                  "this times their measure, so a tile gives its slot up only to one larger on the "
+                  "screen by more (HIERARCHY 4.19); 1 is the order without it",
+                  R)
             .Bind("faceWindows", p.faceWindows,
                   "standing blocks of the pyramid for the colour and the mask in place of their "
                   "Mercator windows: lon,lat,rung entries joined by ';', each the block of that "

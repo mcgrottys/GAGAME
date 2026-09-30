@@ -407,6 +407,7 @@ private:
     // resident set equal to the want set. kEvictAgeFrames past the last drop its NULL map
     // has landed; the +4 is one more overlap window with nothing moving.
     uint32_t m_settleExactQuiet = 0;
+    bool m_focusSaid = false;   // step 5 E: the wave want's focus, said once
     static constexpr uint32_t kSettleExactFrames = ResidencyManager::kEvictAgeFrames + 4u;
     FramePipe m_recPipe;
     std::vector<uint8_t> m_recPixels;

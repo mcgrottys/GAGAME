@@ -741,7 +741,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
 
     if (globe) {
         resMgr.Init(gpu);
-        resMgr.ringLoads = S.streaming.ringLoads;
+        resMgr.holdMargin = static_cast<float>(S.streaming.holdMargin);   // H2: 1 is F's order
         resMgr.dsSerial = opt.dsSerial;
         resMgr.traceRes = opt.resTrace;
         resMgr.pagesEvery = opt.pagesEvery;

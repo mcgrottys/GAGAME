@@ -26,10 +26,14 @@
 #include "scene/Layer.h"
 
 #include <cmath>
+#include <functional>
 #include <memory>
 #include <vector>
 
 namespace ga {
+namespace hal {
+class CommandContext;   // hal/Context.h: the frame's list, the frame-head hook's argument
+}
 
 // Mirrored in shaders/Common.hlsli. If you change one, change the other; the static_assert below
 // only catches size drift, not field reordering.
@@ -95,6 +99,11 @@ struct RendererDesc {
 
 class Renderer {
 public:
+    // Step 5 (HIERARCHY 4.19, law 8): called with a layer's name just before it records its
+    // draws, so the residency manager's frame table can say where each reader reads. Empty: none.
+    std::function<void(const char*)> beforeLayer;
+    // Step 5 E (law 8): called first in each frame's command list, before any layer records.
+    std::function<void(hal::CommandContext&)> atFrameHead;   // (the hal's list: no D3D here)
     void Init(Gpu& gpu, const RendererDesc& desc);
     void Shutdown();
 
