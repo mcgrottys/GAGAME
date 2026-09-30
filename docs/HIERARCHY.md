@@ -1891,9 +1891,34 @@ of the frame.
   finest level is coarser than a pixel, which is the ground nearest the eye: those are the
   largest, and they are what was lost. A parent's texel is twice its child's at no greater
   distance, so the held set stays closed upward, and "the coarser ground first" is what the
-  measure says of a parent and its child and of nothing else. Being built.
+  measure says of a parent and its child and of nothing else.
+- **Built, that key gives the near water back and does not hold still.** At the cap the
+  helm's near water carries its waves to the frame's edge, the part 5 picture has no black
+  pixel where today's has 5,512, the six stills in the hold are today's to the pixel, and
+  the audits are clean at all 1,350 turns. But over the storm rail it releases 47,484 tiles
+  where the key before it released 12,104, reloads 7,856 within the glance where that one
+  reloaded 1,729, and its turn costs 2.55 ms in the mean where the bound is 1.35. A camera
+  that stands still has not settled after 600 frames. Not kept as it is.
+- **Why, read in the code and not yet measured.** The want asks for a tile where its texel
+  is about a pixel, so the wanted leaves all measure between one pixel and two, and the cut
+  at the cap falls among them: 11,214 of 19,022 are lost, and the smallest kept and the
+  largest lost meet at 0.0022. Whatever moves a measure by a hundredth moves a hundred tiles
+  across the cut. And the measure as built does move when nothing has: the distance in it is
+  not the tile's but the distance of the mesh's leaf that asked for the tile
+  (`GlobeLayer.cpp:1125`), which changes when the mesh splits or joins a leaf, and with every
+  wave that moves a leaf's bound.
+- **The law, completed: a tile that is held counts for the square root of two of its
+  measure.** A tile gives up its slot only to one whose texel is larger on the screen by
+  more than half a level, which is what the trilinear read hides. The order is still one
+  comparison and the held set its first P; the settled state is a function of the wants to
+  within that half level, and of nothing else where the pool holds what is wanted. It has
+  one number, and the number's limit, one, is the order as it was. To be measured before it
+  is kept: how far a measure moves between two turns of the rail, tile by tile, so that the
+  margin is seen to cover what moves it; and the rail with the margin at one, at the square
+  root of two and at two. The exact form of the measure, the distance to the tile's own
+  nearest ground, is taken if the margin does not settle it.
 - **Then today's manager is removed,** and the lines of `Residency.*` are counted against
-  the 2,523 of `main`. Both stand today: 3,804.
+  the 2,523 of `main`. Both stand today: 3,854.
 
 **One law more, from Haulover: a tile is held whole or it is not held** (finding 83). 4.11
 says that absence is the coarser ancestor and never zero. Today a composite whose source
