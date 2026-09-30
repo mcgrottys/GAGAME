@@ -15,6 +15,7 @@
 #include "core/Pga.h"
 #include "hal/Residency.h"
 #include "hal/Shader.h"
+#include "hal/Tenant.h"
 #include "core/Space.h"
 #include "core/ThreadAudit.h"
 #include "scene/SceneBuilder.h"
@@ -44,6 +45,8 @@ int RunSelfTest(const Options& opt) {
                                   // Droste link through Space, the lattice against ColorFrame
     ok &= RunFaceWindowSelfTest();   // HIERARCHY step 3: a face-plane window's address, the
                                      // float32 twin of PageTexel against doubles, and a plant
+    ok &= hal::RunTenantBindingSelfTest();   // HIERARCHY 4.17 commit 1: a slice bound to one
+                                             // aligned block of the pyramid, and three plants
     ok &= RunComposeSelfTest();   // pure CPU: the layer compositor's contracts
     ok &= RunWaterSelfTest();     // pure CPU: the water atlas' datum/epoch/field gates
     ok &= RunWaveChartSelfTest();   // M13: the cascade sea's lattice-generated planes -- the
