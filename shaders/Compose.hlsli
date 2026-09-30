@@ -207,45 +207,6 @@ float3 SeafloorReliefMod(float3 albSea, float3 albWater, float3 floorAlb, float 
     return albSea * lerp(1.0f, shade, kSeafloorRelief * saturate(opaque));
 }
 
-// M7g: the effective composed-color texel (metres) RESIDENT at this pixel. Consumers that
-// historically replaced the mosaic outright (the close-up material constants, born when
-// the near field was a 9.5 m blur) ask this and YIELD where the imagery outresolves them.
-float ComposedColorTexelM(float3 dir) {
-    const float3 g0 = CsGroundM();
-    float t = g0.x;   // cube-only worst case
-    if (gCsU5.x != 0xFFFFFFFFu) {
-        // M9ap: the pages path reports the same choice ComposedColorPages makes -- the finest
-        // resident ground of the ladder (PageWins, as a value).
-        t = PageGroundM(g0.x, CsHaveCubeArr(gCsU.y, dir));
-        if (gCsF.y > 0.5f) {
-            const float2 duv = CsWindowUv(dir);
-            if (all(duv > 0.0f) && all(duv < 1.0f)) {
-                t = min(t, PageGroundM(g0.y, CsHavePage(gCsU5.y, duv, gCsU5.z)));
-                if (gCsU5.w != 0xFFFFFFFFu) {
-                    const float2 tuv = duv * gCsDet.z + gCsDet.xy;
-                    if (all(tuv > 0.001f) && all(tuv < 0.999f)) {
-                        t = min(t, PageGroundM(g0.z, CsHavePage(gCsU5.y, tuv, gCsU5.w)));
-                    }
-                }
-            }
-        }
-        return t;
-    }
-    if (gCsF.y > 0.5f && gCsU.z != 0xFFFFFFFFu) {
-        const float2 duv = CsWindowUv(dir);
-        if (all(duv > 0.0f) && all(duv < 1.0f)) {
-            t = PageGroundM(g0.y, CsHave2D(gCsU.w, duv));
-            if (gCsU4.x != 0xFFFFFFFFu) {
-                const float2 tuv = duv * gCsDet.z + gCsDet.xy;
-                if (all(tuv > 0.001f) && all(tuv < 0.999f)) {
-                    t = min(t, PageGroundM(g0.z, CsHave2D(gCsU4.y, tuv)));
-                }
-            }
-        }
-    }
-    return t;
-}
-
 // The planet's composed height (metres), residency-clamped at the caller's lod. Usable from a
 // VERTEX shader (no gradient intrinsics). The height WINDOW (same Mercator frame as the color
 // window; CUDEM-fine near the estuary) overlays the cube exactly the way color does, so the

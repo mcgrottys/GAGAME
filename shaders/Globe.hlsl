@@ -1459,29 +1459,22 @@ float4 PsMain(VsOut i) : SV_Target {
     }
     if (gStreamF.z < 0.5f) col = lerp(wcol, col, landness);
 
-    // ---- M6j: the CLOSE-UP material model, now in the planet shader -- wet sand at the LIVE
-    // waterline, dunes, riprap on steep rock, lit the way the terrain layer lit them (sun +
-    // sky ambient + near haze). This block is what let TerrainLayer retire as a renderer:
-    // physics that a mosaic cannot know owns the last few hundred metres, the mosaic owns the
-    // aerial, and the crossfade between them is the ONE distance ramp.
+    // ---- M6j: the CLOSE-UP material model, now in the planet shader -- the land's albedo is
+    // the imagery's at whatever grain it has, and over it what no photo can know: wet sand at
+    // the LIVE waterline and the surveyed rock of the edit polygons, lit by the relief's own
+    // normal the way the terrain layer lit them (sun + sky ambient + near haze). The generic
+    // beach, dune-grass and riprap constants are gone: they were guesses by height and slope
+    // that painted every land within 2.7 km of the eye, a farm upriver as a dune.
     const float distC = length(i.rel);
     if (gStreamF.z < 0.5f && landness > 0.0f && distC < 2700.0f && CsHeightWindowOn()) {
         const float2 wuv = CsWindowUv(up);
         if (all(wuv > 0.0f) && all(wuv < 1.0f)) {
             const float2 grF = ComposedHeightGrad(up, -8.0f);   // true slope, finest resident
-            const float slope = length(grF);
             const float3 nM = normalize(upT - east * grF.x - north * grF.y);
             const float water = gWavesB.w;
-            float3 matAlb;
+            float3 matAlb = alb;
             if (hp - water < 0.35f) matAlb = float3(0.38f, 0.34f, 0.27f);   // wet sand band
-            else if (hp < 3.6f) matAlb = float3(0.70f, 0.64f, 0.50f);       // beach and flats
-            else matAlb = float3(0.28f, 0.37f, 0.20f);                      // dune grass
-            if (slope > 0.42f && hp > water - 1.5f) {
-                matAlb = lerp(matAlb, float3(0.36f, 0.35f, 0.34f),
-                              saturate((slope - 0.42f) * 3.0f));            // riprap
-            }
-            // M7e: a surveyed structure is DARK rock at every distance -- the near-material
-            // pale riprap was overriding the edit-land boulder paint inside 2.7 km.
+            // M7e: a surveyed structure is DARK rock at every distance.
             const float elm = ComposedEditLand(up);
             if (elm > 0.01f) {
                 const float2 rxz2 = (CsToTangent(up) * gGlo.x).xz;
@@ -1493,15 +1486,6 @@ float4 PsMain(VsOut i) : SV_Target {
                                    rn2),
                               saturate(elm * 1.5f));
             }
-            // M7g: the generic beach/dune constants were painted when the near field was
-            // a 9.5 m blur; with the z17 rung resident the ORTHO is the better beach. The
-            // tide's wet band and the surveyed rock keep full authority -- they know what
-            // no photo can (the live waterline, the edit polygons).
-            const float imgTexM = ComposedColorTexelM(up);
-            const float imgFine = 1.0f - smoothstep(1.5f, 6.0f, imgTexM);
-            const float generic =
-                (hp - water < 0.35f || elm > 0.01f) ? 0.0f : 1.0f;
-            matAlb = lerp(matAlb, alb, imgFine * generic * 0.85f);
             const float ndlM = saturate(dot(nM, GA_SUN_DIR)) * sunVis;
             // M10 (a pre-existing bug the Droste night found): the sky's ambient here ignored
             // the hour. Every other term in this shader dims its skylight by `day`; this one did
