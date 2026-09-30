@@ -3299,6 +3299,16 @@ bool FrameLoop::Frame() {
     // its rows say "height cube, no page" (SurfaceFrame.h's banner). The step 0 fingerprint
     // stays, printed when the bytes change, and is the only one.
     if (globe) {
+        // HIERARCHY 4.17 commit 3: the eye the standing blocks' rows are taken about -- the
+        // globe walk's own formula on the same camera (GlobeLayer::CaptureWalk), so the rows and
+        // the mesh records' eye-relative points share one origin, to the double.
+        {
+            SurfaceFrame& sf = m_A.surface;
+            const double ry = sf.planetR + cam.py;
+            for (int k = 0; k < 3; ++k) {
+                sf.eye[k] = sf.up[k] * ry + sf.east[k] * cam.px + sf.north[k] * cam.pz;
+            }
+        }
         m_A.surface.Fill(renderer.surfaceCb, resMgr);
         static uint64_t sLastSurface = 0;
         const uint64_t h = Fnv1aBytes(&renderer.surfaceCb, sizeof(renderer.surfaceCb));

@@ -89,6 +89,17 @@ bool SurfaceFrame::DeclareBlocks(const std::string& key) {
     return true;
 }
 
+void SurfaceFrame::BlockRows(const FaceWindow& block, const Placement& own, const double eye[3],
+                             FaceWindow::Planes& rows, float off[2]) {
+    double n[3], a[3], b[3];
+    CubeFaceAxes(block.face, n, a, b);
+    const bool facing = eye[0] * n[0] + eye[1] * n[1] + eye[2] * n[2] > 0.0;
+    const FaceWindow anchored = facing ? block.Nearest(eye) : block;
+    rows = anchored.PlanesIn(own);
+    off[0] = static_cast<float>((anchored.anchorX - block.anchorX) / Lattice::kFaceDim);
+    off[1] = static_cast<float>((anchored.anchorY - block.anchorY) / Lattice::kFaceDim);
+}
+
 hal::BlockBinding SurfaceFrame::Block(size_t i) const {
     const FaceWindow& w = blocks[i];
     return hal::BlockBinding{w.face, w.rung, uint32_t(w.anchorX / Lattice::kFaceDim),
@@ -310,15 +321,18 @@ void SurfaceFrame::Fill(ComposedSurfaceCb& cb, const ResidencyManager& rm) const
     cb.ground[1] = static_cast<float>(win.GroundRes(0));
     cb.ground[2] = static_cast<float>(det.GroundRes(0));
     cb.ground[3] = 0.0f;
-    // HIERARCHY 4.17 commit 2: THE STANDING BLOCKS' ROWS, appended. Per block, PageTexelUv's
-    // three planes in the planet's frame through its centre (FaceWindow::PlanesIn of the
-    // identity placement: until commit 3 brings the eye-relative point, a pixel's point is the
-    // direction it already has), its ground at mip 0 and its slice; then the count. All zero
-    // with no blocks.
+    // HIERARCHY 4.17: THE STANDING BLOCKS' ROWS, appended. Per block (commit 3) PageTexelUv's
+    // three planes about the eye's own tangent frame (east, up, north at the anchor, origin the
+    // eye: the frame the mesh stage's undisplaced point geo lives in), taken in doubles every
+    // frame on the anchor nearest the eye, and the whole blocks back to its own origin; its
+    // ground at mip 0 and its slice; the eye about the planet's centre in those axes; then the
+    // count. All zero with no blocks.
     const uint32_t nb = pages ? uint32_t((std::min)(blocks.size(), size_t(kMaxBlocks))) : 0u;
+    const Placement own = Placement::Frame(east, up, north, eye);
     for (uint32_t i = 0; i < kMaxBlocks; ++i) {
         FaceWindow::Planes pl{};
-        if (i < nb) pl = blocks[i].PlanesIn(Placement{});
+        float off[2] = {0.0f, 0.0f};
+        if (i < nb) BlockRows(blocks[i], own, eye, pl, off);
         for (int k = 0; k < 4; ++k) {
             cb.blkU[4 * i + k] = pl.u[k];
             cb.blkV[4 * i + k] = pl.v[k];
@@ -326,9 +340,17 @@ void SurfaceFrame::Fill(ComposedSurfaceCb& cb, const ResidencyManager& rm) const
         }
         cb.blkG[i] = i < nb ? static_cast<float>(Block(i).GroundRes(0)) : 0.0f;
         cb.blkS[i] = i < nb ? 6u + i : 0u;
-        cb.blkN[i] = 0u;
+        cb.blkO[2 * i] = off[0];
+        cb.blkO[2 * i + 1] = off[1];
     }
+    const double* const axes[3] = {east, up, north};
+    for (int k = 0; k < 3; ++k) {
+        const double* x = axes[k];
+        cb.blkE[k] = nb ? static_cast<float>(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]) : 0.0f;
+    }
+    cb.blkE[3] = 0.0f;
     cb.blkN[0] = nb;
+    cb.blkN[1] = cb.blkN[2] = cb.blkN[3] = 0u;
 }
 
 }  // namespace ga

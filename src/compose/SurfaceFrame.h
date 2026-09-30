@@ -114,8 +114,19 @@ struct SurfaceFrame {
     // of the pyramid: block i is slice 6 + i of both, a face-plane window anchored on a multiple
     // of 16384 texels of its rung (FaceWindow, core/Lattice.h -- the address the rows and the
     // wants use), coarsest rung first. Empty is today's path; the height keeps its window.
-    static constexpr uint32_t kMaxBlocks = 4;   // the rows ComposedSurfaceCb carries
+    static constexpr uint32_t kMaxBlocks = 8;   // the rows ComposedSurfaceCb carries
     std::vector<FaceWindow> blocks;
+    // HIERARCHY 4.17 commit 3: THE EYE the blocks' rows are taken about, planet frame, doubles --
+    // the globe walk's own (GlobeLayer::CaptureWalk), written by the session before every Fill,
+    // so the rows and the mesh records' eye-relative points share one origin.
+    double eye[3] = {0.0, 0.0, 0.0};
+    // One block's rows about a frame `own` whose origin is `eye` (planet frame): FaceWindow::
+    // PlanesIn of the block re-anchored on the multiple of 16384 texels of its rung nearest the
+    // eye, so every number a shader handles is small, and the whole blocks from that anchor to
+    // the block's own origin (off), which the shader adds to the uv. A face the eye stands
+    // behind keeps the block's own anchor.
+    static void BlockRows(const FaceWindow& block, const Placement& own, const double eye[3],
+                          FaceWindow::Planes& rows, float off[2]);
     // The key, parsed: "lon,lat,rung" entries (degrees east and north) joined by ';'. Each point
     // is given the block of its rung that holds it, and the block is LOGGED with how far the
     // point stands inside it; a place near a block's edge is two entries. A malformed key is

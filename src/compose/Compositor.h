@@ -293,16 +293,21 @@ struct ComposedSurfaceCb {
                       // detail slice. u5[0] == ~0 means the old three-tenant path.
     uint32_t u6[4];   // M9aq HEIGHT PAGES: height array SRV, array residency SRV, window
                       // slice. u6[0] == ~0 means the old cube + window tenants.
-    // HIERARCHY 4.17 commit 2: THE STANDING BLOCKS (SurfaceFrame::blocks), appended so no row
-    // above moves; at most SurfaceFrame::kMaxBlocks, coarsest rung first. Block i: row i of
-    // blkU / blkV / blkW is one of PageTexelUv's planes (FaceWindow::PlanesIn, the planet's
-    // frame through its centre), blkG[i] its ground (m) at mip 0, blkS[i] its slice of the
-    // colour and the mask. blkN[0] is the count: 0 is today's Mercator pages.
-    float blkU[16];
-    float blkV[16];
-    float blkW[16];
-    float blkG[4];
-    uint32_t blkS[4];
+    // HIERARCHY 4.17: THE STANDING BLOCKS (SurfaceFrame::blocks), appended so no row above
+    // moves; at most SurfaceFrame::kMaxBlocks, coarsest rung first. Block i: row i of blkU /
+    // blkV / blkW is one of PageTexelUv's planes about the eye's own tangent frame, anchored on
+    // the multiple of 16384 texels of its rung nearest the eye (SurfaceFrame::BlockRows, commit
+    // 3); blkO[2i], blkO[2i + 1] the whole blocks from that anchor to the block's own origin;
+    // blkG[i] its ground (m) at mip 0; blkS[i] its slice of the colour and the mask. blkE is the
+    // eye in the tangent axes about the planet's centre, for a stage with only a direction.
+    // blkN[0] is the count: 0 is today's Mercator pages.
+    float blkU[32];
+    float blkV[32];
+    float blkW[32];
+    float blkG[8];
+    uint32_t blkS[8];
+    float blkO[16];
+    float blkE[4];
     uint32_t blkN[4];
 };
 

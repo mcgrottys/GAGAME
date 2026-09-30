@@ -169,7 +169,7 @@ Options ParseArgs(int argc, char** argv) {
                      : n == "ring" ? 4 : n == "cascade" ? 5
                      : n == "waterdata" ? 6 : n == "velgrad" ? 7 : n == "shell" ? 8
                      : n == "residency" ? 9 : n == "residency.height" ? 10
-                     : n == "residency.landsea" ? 11 : 1;
+                     : n == "residency.landsea" ? 11 : n == "mix" ? 12 : n == "mix.near" ? 13 : 1;
         }
         else if (a == "--probe-cull-far") o.probeCullFar = true;
         else if (a == "--dump-meshlets") o.dumpMeshlets = Widen(next("meshlets.bin").c_str());
@@ -537,7 +537,8 @@ JsonValue StartValue(double startUnix) {
 
 const char* kLensNames[] = {"worldxz", "worldxz",   "winuv",    "mip",
                             "ring",    "cascade",   "waterdata", "velgrad",
-                            "shell",   "residency", "residency.height", "residency.landsea"};
+                            "shell",   "residency", "residency.height", "residency.landsea",
+                            "mix",     "mix.near"};
 
 }  // namespace
 
@@ -761,7 +762,7 @@ SceneArgs Options::ToSets(const Options& o) {
     auto rawf = [&](const std::string& s) { out.raw.push_back(s); };
     if (o.pixFrames) rawf("--pix " + std::to_string(o.pixFrames));
     if (o.dumpFibers) rawf("--dump-fibers");
-    if (o.lens) rawf(std::string("--lens ") + kLensNames[o.lens > 0 && o.lens < 12 ? o.lens : 0]);
+    if (o.lens) rawf(std::string("--lens ") + kLensNames[o.lens > 0 && o.lens < 14 ? o.lens : 0]);
     if (o.probeCullFar) rawf("--probe-cull-far");
     if (!o.dumpMeshlets.empty()) rawf("--dump-meshlets " + Narrow(o.dumpMeshlets));
     if (o.inject) rawf(o.inject == 2 ? "--inject cascade" : "--inject bank");

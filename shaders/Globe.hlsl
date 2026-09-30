@@ -1103,6 +1103,11 @@ float4 PsMain(VsOut i) : SV_Target {
         if (GateDepth(TrueRel(i.rel)) != LevelGateDepth(i.lvl)) discard;
     }
     const float3 up = normalize(i.dir);   // PLANET frame: lat/lon + every texture fetch
+    // HIERARCHY 4.17 commit 3: the point the standing blocks are addressed by -- the undisplaced
+    // ground point the mesh stage carried, eye-relative in the camera's own level (slot 0, whose
+    // frame the rows are about). A fragment of another level, a Droste globe or a window's
+    // world, has only its direction, taken into the root's frame at the direction's grain.
+    const float3 blkP = (i.lvl == 0u) ? i.geo : CsPointOfDir(up);
     const float3 v = normalize(-i.rel);   // TANGENT frame: geometry + lighting (M6g)
     const float lat = asin(clamp(up.y, -1.0f, 1.0f));
     const float lonDeg = degrees(atan2(up.z, up.x));
@@ -1167,7 +1172,7 @@ float4 PsMain(VsOut i) : SV_Target {
     const float hpC = ComposedHeightOn() ? ComposedHeight(up, max(lod, -5.0f)) : i.h;
     const float landness =
         (gStreamF.z > 0.5f) ? ((hp > 0.0f) ? 1.0f : 0.0f)
-                            : ComposedLandness(up, hpC, gWavesB.w);
+                            : ComposedLandness(up, blkP, hpC, gWavesB.w);
     float3 n = upT;
     float3 alb;
     float spec = 0.0f;
@@ -1209,13 +1214,13 @@ float4 PsMain(VsOut i) : SV_Target {
     // M9bg: gated on landness as well -- the imagery is now a LAND albedo only (the water
     // carries no texture at all), so an open-water pixel must not pay for the fetch.
     if (ComposedColorOn() && gStreamF.z < 0.5f && landness > 0.0f) {
-        const float3 img = ComposedColor(up);
+        const float3 img = ComposedColor(up, blkP);
         alb = lerp(alb, img, landness);
         // M7e: a surveyed STRUCTURE wears rock, not the photo under it -- beneath a jetty
         // footprint the imagery is a smear of foam and water, which rendered the jetties as
         // grey blobs. Boulder-scale hash grain, cell size folded to the pixel footprint so
         // the rock never shimmers from altitude.
-        const float elp = ComposedEditLand(up);
+        const float elp = ComposedEditLand(up, blkP);
         if (elp > 0.01f && landness > 0.0f) {
             const float2 rxz = (CsToTangent(up) * gGlo.x).xz;
             const float cellM = max(0.7f, length(i.rel) * gWavesB.z);
@@ -1247,7 +1252,7 @@ float4 PsMain(VsOut i) : SV_Target {
     // The stencil still draws. Everything below this line is presentation.
     if (gTexIdx2.w != 0u) {
         const float3 lens =
-            (ComposedColorOn() && gStreamF.z < 0.5f) ? ComposedColor(up) : alb;
+            (ComposedColorOn() && gStreamF.z < 0.5f) ? ComposedColor(up, blkP) : alb;
         return float4(ApplyComposedStencil(lens, up), 1.0f);
     }
 
@@ -1257,7 +1262,7 @@ float4 PsMain(VsOut i) : SV_Target {
     // (its v is SOUTH -- the gradient direction proves it). mip: the height window's
     // residency heat. ring: the bank's rings with a 4-texel checker (bank addressing on
     // screen). These test the GA the cheap way: patterns survive correct products.
-    if (gBankA.z > 0.5f) {
+    if (gBankA.z > 0.5f && gBankA.z < 11.5f) {   // 12 and 13 are the mix lenses, at the end
         const float2 wxzL = (CsToTangent(up) * gGlo.x).xz;
         const int lensId = (int)(gBankA.z + 0.5f);
         float3 lc = float3(0.05f, 0.05f, 0.08f);
@@ -1466,6 +1471,7 @@ float4 PsMain(VsOut i) : SV_Target {
     // beach, dune-grass and riprap constants are gone: they were guesses by height and slope
     // that painted every land within 2.7 km of the eye, a farm upriver as a dune.
     const float distC = length(i.rel);
+    float lensNearW = 0.0f;   // the mix lens's record of this block's mix
     if (gStreamF.z < 0.5f && landness > 0.0f && distC < 2700.0f && CsHeightWindowOn()) {
         const float2 wuv = CsWindowUv(up);
         if (all(wuv > 0.0f) && all(wuv < 1.0f)) {
@@ -1475,7 +1481,7 @@ float4 PsMain(VsOut i) : SV_Target {
             float3 matAlb = alb;
             if (hp - water < 0.35f) matAlb = float3(0.38f, 0.34f, 0.27f);   // wet sand band
             // M7e: a surveyed structure is DARK rock at every distance.
-            const float elm = ComposedEditLand(up);
+            const float elm = ComposedEditLand(up, blkP);
             if (elm > 0.01f) {
                 const float2 rxz2 = (CsToTangent(up) * gGlo.x).xz;
                 const float cell2 = max(0.7f, distC * gWavesB.z);
@@ -1500,6 +1506,7 @@ float4 PsMain(VsOut i) : SV_Target {
             // the wet-sand treatment, and the shore band grades instead of popping.
             col = lerp(col, colNear,
                        (1.0f - saturate((distC - 500.0f) / 2200.0f)) * 0.92f * landness);
+            lensNearW = (1.0f - saturate((distC - 500.0f) / 2200.0f)) * 0.92f * landness;
         }
     }
 
@@ -1588,6 +1595,16 @@ float4 PsMain(VsOut i) : SV_Target {
                    0.55f * GateRim(TrueRel(i.rel), LevelGateDepth(i.lvl) - 1u));
     }
     col = ApplyComposedStencil(col, up);   // M6i: --stencil alignment overlay (off = no-op)
+    // THE MIX LENSES, off unless asked for: what this stage mixes the land by, where it decides.
+    // --lens mix (12): r = landness (the water's colour comes in by 1 - landness), g = the edit
+    // mask's land, b = its edited weight. --lens mix.near (13): r = the close-up material's
+    // weight, which is the wet band's alone now that the land's constants are out (the
+    // imagery's share is whole, and no texel is judged): g and b are 0.
+    if (gBankA.z > 11.5f) {
+        const float2 meL = CsEditMask(up, blkP);
+        col = (gBankA.z < 12.5f) ? float3(landness, meL.x, meL.y)
+                                 : float3(lensNearW, 0.0f, 0.0f);
+    }
     return float4(col, 1.0f);
 }
 

@@ -106,15 +106,18 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     // M6n: the mix is ANALOG (ComposedLandness): a half-emerged flat sits halfway between
     // the drowned plane and its true height, so streaming height data slides shorelines
     // smoothly instead of popping plateau edges (the flats speckle, geometry side).
+    // HIERARCHY 4.17 commit 3: the standing blocks are addressed by the undisplaced point geo
+    // (above) in the camera's own level; another level's vertex has its direction only.
+    const float3 blkP = (rec.level == 0u) ? geo : CsPointOfDir(dir);
     const float landness =
-        ComposedLandness(dir, ComposedHeight(dir, max(vl, -4.0f)), gWavesB.w);
+        ComposedLandness(dir, blkP, ComposedHeight(dir, max(vl, -4.0f)), gWavesB.w);
     // M6p/M8g: an operator's LAND edit floors the display height where the height
     // channel's SMEAR dips -- but at an ABSOLUTE crest elevation (NAVD, scene
     // jettyCrestNavd), never relative to the live tide. The old floor tracked the
     // waterline (+1.2 m), which made the jetty unsinkable by construction; the real
     // north jetty goes awash at high water (the user's catch). Surveyed data taller
     // than the floor still wins through the max below.
-    const float editFloor = ComposedEditLand(dir) * gBankE.w;
+    const float editFloor = ComposedEditLand(dir, blkP) * gBankE.w;
     // M10: the relief exaggeration is a display choice made at the level's OWN altitude.
     const float dispLand = max(max(h, 0.0f) * sLvlExag, editFloor * sLvlExag);
     // M7: ONE WATER. In one-water mode the vertex samples THE WAVE VERTEX BANK -- level
