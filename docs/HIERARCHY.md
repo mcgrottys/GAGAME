@@ -2109,6 +2109,50 @@ the tiles beneath it, by the average unless told otherwise; `gdaladdo` and the o
 of a cloud-optimized GeoTIFF are the same pyramid kept in the file. What this section adds
 is only that the engine's tree already had the fold and used it for one node.
 
+**The second slice is built** (2026-09-29, the same scratch tree, not committed), and the
+law holds as written:
+
+- **The tree's rule** is one number from the node, its own level on a lattice, measured
+  between neighbouring texel points at the place; above it a tile is the fold of its four
+  children, kept; a child the footprint does not touch is void by arithmetic; a node with an
+  own level never folds upward. Measured on a 0.5 m file at Haulover: its own level's texel
+  is 0.333 by 0.303 m; the pass makes 36 tiles on 8 levels, the 17 above the own level each
+  the fold of their children byte for byte; asked coarse-first the tree leaves the same 36
+  files; one fold of the coarsest tile visits 36 tiles of the 16,384 under it. Three plants
+  caught. It cost the tree 32 lines.
+- **By the window.** A 256-texel window at the far corner of a 20,000 by 20,000 TIFF decodes
+  in 3 ms (tiled, deflate) and 11 ms (stripped) with 9 MB of working set; a PNG decodes
+  whole, once, into rows under `cache\sources\` and is read by a seek after. A file's
+  identity is its content's hash, kept in an index by size and time so a boot hashes only
+  what changed. A folder, or a manifest of the harvester's rows, is ONE source, its taps
+  clamped at each file's edge as the old source did, so two files cut mid-cell give the one
+  file's tree.
+- **The plane orthos come through it, and their code is gone.** On the pyramid the orthos'
+  own-level tiles are byte for byte what `AerialOrthoSource` painted, 23,255 of 23,255. On
+  the Mercator lattices, whose finest texel is coarser than the file, the level is now an
+  area mean where the old source picked a level: the colour differs by 1.4 of 255 in the
+  mean at z17, 3.1 at z14, and by 24 in the 23 texels of the cube's, which the old source
+  point-sampled. The pass, at boot, once: the two orthos onto the default scene's lattices
+  in 31 s with 103 MB at peak, and onto the pyramid 32,893 tiles on 14 levels in 45 s with
+  94 MB, 1.96 GB of tiles. A second boot takes 0.3 s.
+- **Pictures.** Slice 1's binary against this one, twice each: the helm within a pixel, the
+  bird 1,483 pixels of 0.1 % (SSIM 0.9997), the globe 37 and the droste 16 where no ortho
+  is in view, which is the composites recomposed under new identities and not measured
+  further. Slice 1's two test rasters differ along every grid line, the fold in place of
+  the file's own chain of levels, by up to 60 of 255. The owner's eye judges these.
+- **Counted, honestly:** the engine grew by 480 lines (934 added, 454 removed, 173 of the
+  added being comments), the tests by 345. The class that went was 175 lines; what came is
+  the window, the raw cache, the index, the manifest, the mosaic and the pass. The
+  reductions this law makes possible are in the next slices: the rest of the fixed list as
+  scene entries, and heights by file.
+- **Found on the way:** `Compositor::Touches` takes a box of every longitude at the
+  dateline (finding 103); the pass descends by a cap instead; the compositor's own rule is
+  not changed. A fourth band without an ExtraSamples tag is data now, and NAD83's
+  geographic codes are read as WGS84 and said once per file.
+- **Open, for the third slice:** an entry that must lie ABOVE the seafloor and the bed (the
+  old overlay did); the identity index trusts size and time; the cube's own level reads a
+  file whole once, 22 s for an ortho, because its texel is 4,073 of the file's.
+
 ## 5. Decisions for Mark
 
 Settled already, 2026-09-28, and built into the sections above:
