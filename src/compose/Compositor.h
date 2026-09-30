@@ -101,11 +101,18 @@ public:
     }
 };
 
+// Every HeightSource answers in the engine's height frame, kHeightFrame (HeightStackSource.h): a
+// file in another unit or datum is converted where it enters (RasterFileSource), never by a reader.
 class HeightSource {
 public:
     virtual ~HeightSource() = default;
     virtual const SourceInfo& Info() const = 0;
     virtual float Sample(double latRad, double lonRad, double groundResM, float& metres) = 0;
+    // The level it paints on a lattice (DomainSource::OwnMip); -1, every grain. A source with a
+    // level declares its box too, which the tree folds by and keys it with its bytes; the built-in
+    // layers declare none, so their trees keep the key they were painted under.
+    virtual int OwnMip(const Lattice&) const { return -1; }
+    virtual bool Footprint(double&, double&, double&, double&) const { return false; }
 };
 
 // M6v: the two-component fiber -- a WATER-parameter field sample. The value algebra is a

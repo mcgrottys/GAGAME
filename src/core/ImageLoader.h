@@ -40,8 +40,13 @@
 //
 //  THE PAYLOAD is colour: four channels, 0..255 as floats, straight alpha, and alpha 0 where the
 //  file says nodata (every colour channel equal to GDAL's nodata value) -- absence, not black.
-//  A file of one channel of 16-bit or float is kind HEIGHT, which no stack takes from a file yet:
-//  refused by name. The identity is in Structure(): FNV-1a 64 of every byte of the file and of its
+//  A file of one channel of 32-bit float or 16-bit integer is kind HEIGHT (slice 3): one channel,
+//  the file's own numbers (a 16-bit one read raw and signed where SampleFormat, 339, says 2: WIC's
+//  converter would normalize it), NaN where it says nodata. Its unit and datum are the file's words
+//  where it has them -- VerticalCSTypeGeoKey (4096) by the table in ImageLoader.cpp, and
+//  VerticalUnitsGeoKey (4099) -- as valueUnit ("m NAVD88", "m EGM2008", "" for none); a vertical
+//  code not in the table is refused by name. The source converts (RasterFileSource.h).
+//  The identity is in Structure(): FNV-1a 64 of every byte of the file and of its
 //  sidecars, and of the declared crs. The file's own is kept in cache\sources\identity.json with
 //  its size and time, and hashed again only when either changed (ContentHash).
 //

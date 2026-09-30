@@ -257,10 +257,13 @@ struct RailsSection {
 // A RASTER IS A SOURCE BY BEING A FILE (compose/RasterFileSource.h): one file, a folder and a
 // pattern, or a manifest of raw rows -- one source each. `kind` and `crs` are read only where the
 // file cannot say (a CRS it carries wins); `over` is the stack order's first key, the grain its
-// second; `feather` (m) softens the edge of the whole.
+// second; `feather` (m) softens the edge of the whole. A height's `unit` and `datum` are read only
+// where the file names none; `offset` (m) is read only where it is written (hasOffset: 0 is a
+// separation too), and a height off the engine's datum is taken only with it.
 struct SourceProps {
-    std::string name, file, folder, match, manifest, kind, crs;
-    double over = 0.0, feather = 0.0;
+    std::string name, file, folder, match, manifest, kind, crs, unit, datum;
+    double over = 0.0, feather = 0.0, offset = 0.0;
+    bool hasOffset = false;
 };
 struct PortalProps {
     std::string name;

@@ -328,7 +328,14 @@ const Schema& SourceSchema() {
                   "the stack order's first key, ascending upward (every built-in source is 0); "
                   "the second is the grain, the coarser under the finer", R)
             .Bind("feather", kSource.feather, Q::Length, "m",
-                  "the edge of the whole softened over this far (smoothstep); 0 = a hard edge", R);
+                  "the edge of the whole softened over this far (smoothstep); 0 = a hard edge", R)
+            .Bind("unit", kSource.unit, "a height's unit (m, ft, ftUS), read only where the file names none", R)
+            .Bind("datum", kSource.datum,
+                  "a height's vertical datum (NAVD88, MSL, EGM2008 ...), read only where the file names none", R)
+            .Bind("offset", kSource.offset, Q::Length, "m",
+                  "added to a height whose datum is not the engine's (NAVD88): the separation at the "
+                  "place; such a file is refused without it, and a file on NAVD88 takes none", R)
+            .Optional();   // absent is not 0: the builder must not complete it (SourceProps::hasOffset)
         return sc;
     }();
     return *s;

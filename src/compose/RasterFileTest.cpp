@@ -7,11 +7,14 @@
 
 #include "compose/ColorStackSource.h"
 #include "compose/DomainSource.h"
+#include "compose/HeightStackSource.h"
+#include "compose/Sources.h"
 #include "compose/SurfaceFrame.h"
 #include "compose/TileTree.h"
 #include "core/Common.h"
 #include "core/Image.h"
 #include "core/ImageLoader.h"
+#include "sim/GlobeModel.h"
 
 #include <algorithm>
 #include <chrono>
@@ -22,6 +25,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -70,6 +74,7 @@ struct TiffImage {
     std::vector<uint8_t> px;
     uint32_t subfile;   // NewSubfileType: 1 = a reduced-resolution copy (an overview)
     int extra = 2;      // ExtraSamples of a fourth band: 2 unassociated alpha, 0 data, -1 absent
+    int fmt = 1;        // SampleFormat (339): 1 unsigned, 2 signed, 3 float
 };
 struct GeoTags {
     std::vector<double> scale, tie;
@@ -116,6 +121,7 @@ bool WriteTiff(const std::string& path, const std::vector<TiffImage>& imgs, cons
         e.push_back({279, 4, 1, uint32_t(im.px.size())});
         e.push_back({284, 3, 1, 1});
         if (im.spp == 4 && im.extra >= 0) e.push_back({338, 3, 1, uint32_t(im.extra)});
+        if (im.fmt != 1) e.push_back({339, 3, 1, uint32_t(im.fmt)});
         if (k == 0 && !g.scale.empty()) arr(33550, 12, uint32_t(g.scale.size()), g.scale.data(), g.scale.size() * 8);
         if (k == 0 && !g.tie.empty()) arr(33922, 12, uint32_t(g.tie.size()), g.tie.data(), g.tie.size() * 8);
         if (k == 0 && !g.keys.empty()) arr(34735, 3, uint32_t(g.keys.size()), g.keys.data(), g.keys.size() * 2);
@@ -313,16 +319,36 @@ void FoldQuarter(const std::vector<uint8_t>& child, uint32_t qx, uint32_t qy, st
         }
     }
 }
+// ...and a height's (FloatW: value, weight; 256 x 128): the weight-weighted mean of the 2 x 2, the
+// weight their mean -- FoldQuadrant's law for FloatW, said again.
+void FoldQuarterF(const std::vector<uint8_t>& child, uint32_t qx, uint32_t qy, std::vector<uint8_t>& parent) {
+    const float* s = reinterpret_cast<const float*>(child.data());
+    float* d = reinterpret_cast<float*>(parent.data());
+    for (uint32_t py = 0; py < 64; ++py) {
+        for (uint32_t px = 0; px < 128; ++px) {
+            double vw = 0.0, ws = 0.0;
+            for (uint32_t k = 0; k < 4; ++k) {
+                const size_t i = (size_t(2 * py + (k >> 1)) * 256 + (2 * px + (k & 1))) * 2;
+                vw += double(s[i]) * s[i + 1];
+                ws += s[i + 1];
+            }
+            const size_t o = (size_t(qy * 64 + py) * 256 + (qx * 128 + px)) * 2;
+            d[o] = ws > 0.0 ? float(vw / ws) : 0.0f;
+            d[o + 1] = float(ws * 0.25);
+        }
+    }
+}
 // Every tile above the own mip against the fold of its four children as they stand on disk. A
 // child the footprint does not touch (the compositor's rule) is void by arithmetic; one it touches
-// must stand, as a tile or a void. Returns the tiles that fail.
+// must stand, as a tile or a void. Returns the tiles that fail. `fw`: a height's FloatW tiles.
 int Unfolded(const std::string& dir, const Lattice& L, int own, const SourceInfo& fp, int& checked,
-             std::string& first) {
+             std::string& first, bool fw = false) {
+    const size_t bytes = fw ? 262144 : 65536;
     int bad = 0;
     for (const auto& t : TilesIn(dir)) {
         if (int(t.second.mip) <= own || t.first.find(".bin") == std::string::npos) continue;
         ++checked;
-        std::vector<uint8_t> fold(65536, 0);
+        std::vector<uint8_t> fold(bytes, 0);
         bool standing = true;
         for (uint32_t k = 0; k < 4; ++k) {
             const TileRequest c{t.second.face, t.second.mip - 1, t.second.x * 2 + (k & 1), t.second.y * 2 + (k >> 1)};
@@ -332,8 +358,8 @@ int Unfolded(const std::string& dir, const Lattice& L, int own, const SourceInfo
             const std::string base = dir + "\\" + TileName(c);
             if (std::filesystem::exists(base + ".void")) continue;
             const std::vector<uint8_t> cb = Bytes(base + ".bin");
-            if (cb.size() != 65536) standing = false;
-            else FoldQuarter(cb, k & 1, k >> 1, fold);
+            if (cb.size() != bytes) standing = false;
+            else (fw ? FoldQuarterF : FoldQuarter)(cb, k & 1, k >> 1, fold);
         }
         if (!standing || Bytes(dir + "\\" + t.first) != fold) {
             if (first.empty()) first = t.first + (standing ? ": not the fold of its children" : ": a child it needs does not stand");
@@ -368,6 +394,106 @@ public:
 class Shifted : public RasterFileSource {
 public:
     int OwnMip(const Lattice& l) const override { return RasterFileSource::OwnMip(l) + 1; }
+};
+
+// ---- A HEIGHT (slice 3): out\s3\make_hill.py's hill, written again here, uncompressed:
+//     v = -25 + 40 2^-(r / 300 m)^2  metres NAVD88,  r <= 600 m about UTM 19N (354636, 4742174),
+// nodata -9999 beyond, 600 x 600 texels of 2 m from the corner (354036, 4742774).
+constexpr double kHillE = 354636.0, kHillN = 4742174.0, kHillR = 600.0, kHillG = 2.0;
+double Hill(double E, double N) {
+    const double q = std::hypot(E - kHillE, N - kHillN) / 300.0;
+    return -25.0 + 40.0 * std::exp2(-q * q);
+}
+// Its texels as a file holds them: in `unit` metres, on a datum `shift` metres under NAVD88.
+std::vector<uint8_t> HillPixels(double unit, double shift) {
+    const uint32_t n = uint32_t(2.0 * kHillR / kHillG);
+    std::vector<uint8_t> px(size_t(n) * n * 4);
+    for (uint32_t y = 0; y < n; ++y) {
+        for (uint32_t x = 0; x < n; ++x) {
+            const double E = kHillE - kHillR + (x + 0.5) * kHillG, N = kHillN + kHillR - (y + 0.5) * kHillG;
+            const float v = std::hypot(E - kHillE, N - kHillN) > kHillR ? -9999.0f : float((Hill(E, N) - shift) / unit);
+            std::memcpy(&px[(size_t(y) * n + x) * 4], &v, 4);
+        }
+    }
+    return px;
+}
+// Written as the test's other rasters, one strip, float32 (SampleFormat 3), its vertical CRS `vert`.
+Raster WriteHill(const std::string& file, double unit, double shift, uint16_t vert) {
+    const Raster r{file, 32619, kHillE - kHillR, kHillN + kHillR, kHillG, -kHillG};
+    GeoTags t = TagsOf(r, 32619, "-9999");
+    t.keys[3] = 4;
+    t.keys.insert(t.keys.end(), {4096, 0, 1, vert});
+    const uint32_t n = uint32_t(2.0 * kHillR / kHillG);
+    TiffImage im{n, n, 1, 32, HillPixels(unit, shift), 0};
+    im.fmt = 3;
+    WriteTiff(file, {im}, t);
+    return r;
+}
+// The layer beneath, -20 m everywhere at a coarse grain: where the file has no value, the stack must
+// answer it.
+class Floor : public HeightSource {
+public:
+    SourceInfo info{"test.floor", "constant -20 m", "EPSG:4326", 100000.0, -180, -90, 180, 90};
+    const SourceInfo& Info() const override { return info; }
+    float Sample(double, double, double, float& m) override {
+        m = -20.0f;
+        return 1.0f;
+    }
+};
+// THE CPU'S HEIGHT through the door every CPU reader takes (Compositor::SampleHeightStack), the
+// hill over the floor, asked at the file's grain at 36 points: nine anchors (seven inside the disc,
+// one just outside its rim, one in a corner), each a quarter texel off in the four diagonals.
+// Inside, the hill's own function within `tol`; outside, the floor exactly. Returns the misses.
+int HillMisses(const Compositor& c, int ch, const Raster& r, double tol, double* worst) {
+    const double a[9][2] = {{300, 300}, {375, 300}, {300, 225}, {225, 300}, {505, 300},
+                            {300, 95},  {595, 300}, {514, 514}, {12, 12}};
+    int bad = 0;
+    if (worst) *worst = 0.0;
+    for (const auto& p : a) {
+        for (int k = 0; k < 4; ++k) {
+            const double px = p[0] + ((k & 1) ? 0.25 : -0.25), py = p[1] + ((k & 2) ? 0.25 : -0.25);
+            const double E = r.ox + px * r.sx, N = r.oy + py * r.sy;
+            double lat = 0.0, lon = 0.0;
+            PixelLatLon(r, px, py, lat, lon);
+            const double h = c.SampleHeightStack(ch, lat, lon, kHillG / std::cos(lat));
+            const bool in = std::hypot(E - kHillE, N - kHillN) <= kHillR;
+            const double d = std::abs(h - (in ? Hill(E, N) : -20.0));
+            if (in && worst) *worst = (std::max)(*worst, d);
+            bad += (in ? d <= tol : d == 0.0) ? 0 : 1;
+        }
+    }
+    return bad;
+}
+// A leaf's own-mip tile as TileTree::LeafTile paints a FloatW node: per texel, at the level's grain.
+std::vector<uint8_t> PaintF(const DomainSource& node, const Lattice& L, const TileRequest& r) {
+    std::vector<uint8_t> out(262144, 0);
+    float* d = reinterpret_cast<float*>(out.data());
+    for (uint32_t py = 0; py < L.texH; ++py) {
+        for (uint32_t px = 0; px < L.texW; ++px) {
+            double lat = 0, lon = 0;
+            L.Texel(r, px, py, lat, lon);
+            DomainQuery q;
+            q.lon = lon * (180.0 / 3.14159265358979);   // LeafTile's own constant
+            q.lat = lat * (180.0 / 3.14159265358979);
+            q.groundM = L.GroundRes(r.mip);
+            DomainValue v;
+            if (!node.SampleAt(q, v) || v.weight <= 0.0f) continue;
+            d[(size_t(py) * L.texW + px) * 2] = v.c[0];
+            d[(size_t(py) * L.texW + px) * 2 + 1] = (std::min)(1.0f, v.weight);
+        }
+    }
+    return out;
+}
+// PLANT: nodata read as zero -- where the file has no value inside its box, 0 m at full weight.
+class ZeroNoData : public RasterFileSource {
+public:
+    float Sample(double la, double lo, double g, float& m) override {
+        const float w = RasterFileSource::Sample(la, lo, g, m);
+        const SourceInfo& i = Info();
+        if (w > 0.0f || lo < i.lon0 * kD2R || lo > i.lon1 * kD2R || la < i.lat0 * kD2R || la > i.lat1 * kD2R) return w;
+        m = 0.0f;
+        return 1.0f;
+    }
 };
 
 }  // namespace
@@ -570,8 +696,9 @@ bool RunRasterFileSelfTest() {
         RasterFileSource h;
         why.clear();
         const bool heightTook = h.Load(reg, hr.file, none, &why);
-        Check(!heightTook && why.find("height") != std::string::npos,
-              "one channel of 16 bits is kind height, refused by name: %s", why.c_str());
+        Check(!heightTook && why.find("not declared") != std::string::npos,
+              "one channel of 16 bits is kind height; with no vertical CRS in its GeoKeys and none in "
+              "its entry it is refused by name: %s", why.c_str());
     }
 
     // ---- 6. A FILE WITH AN OVERVIEW: WIC shows no reduced-resolution IFD (core/ImageLoader.h), so
@@ -836,10 +963,298 @@ bool RunRasterFileSelfTest() {
               "called alpha (338 = 2) weighs %.3f (the gradient's 56/255)", wData, cData[0], cData[1],
               cData[2], wAlpha);
     }
+
+    // ---- 11. A HEIGHT IS A SOURCE BY BEING A FILE (slice 3): the hill, over a floor, through the
+    // CPU's door; its levels on the pyramid and the z14 height page; its unit and datum, planted --
+    {
+        // THE BOUND the grain allows: bilinear between texel centres errs by at most
+        // h^2/8 (max|f_xx| + max|f_yy|); for A 2^-(r/w)^2, |f_xx| <= 2 ln2 A / w^2 = 6.16e-4 per m
+        // (at the peak), so with h = 2 m, 0.616 mm -- and the float32 the file holds adds 2 um.
+        const double tol = 0.5 * 2.0 * (2.0 * std::log(2.0) * 40.0 / (300.0 * 300.0)) + 5e-6;
+        Floor floor;
+        Compositor comp;
+        const Raster hr = WriteHill("out/rastertest/hill.tif", 1.0, 0.0, 5703);
+        RasterFileSource hill;
+        why.clear();
+        const bool took = hill.Load(reg, hr.file, none, &why);
+        double worst = 0.0;
+        const int ch = comp.AddHeightChannel("test.hill", {&floor, &hill});
+        int bad = took ? HillMisses(comp, ch, hr, tol, &worst) : -1;
+        Check(took && bad == 0, "a float32 DEM in EPSG:32619 on NAVD88 (5703): the CPU's height through "
+              "SampleHeightStack at 36 points is the hill's function within %.3f mm (worst %.4f mm) "
+              "inside the disc, and the floor under it exactly outside (%d missed%s%s)", tol * 1e3,
+              worst * 1e3, bad, took ? "" : ": ", took ? "" : why.c_str());
+        {
+            std::vector<HeightSource*> st{&hill, &floor};   // handed over upside down
+            StackOrder(st);
+            Check(st[0] == &floor, "the default order puts the coarse floor under the 2 m hill");
+        }
+        // ---- the levels: the own mip on the pyramid (a height's tile) and on the z14 page, the pass,
+        // each fold byte for byte, and the same files asked coarse-first
+        const Lattice lats[3] = {Lattice::Cube(Lattice::kFaceDim << 17, 256, 128),
+                                 Lattice::Window(1263360, 1538048, 14, 256, 128),
+                                 Lattice::Cube(Lattice::kFaceDim, 256, 128)};
+        const char* names[3] = {"the pyramid", "the z14 height page (winH)", "the cube (cubeH)"};
+        HeightLayerSource layer(&hill, kHeightFrame);
+        const double la = 42.81833 * kD2R, lo = -70.778161 * kD2R;
+        for (int k = 0; k < 3 && took; ++k) {
+            const Lattice& L = lats[k];
+            const std::string tg = L.Tag();
+            const int om = hill.OwnMip(L);
+            double a0 = 0, b0 = 0, a1 = 0, b1 = 0;
+            L.TexelGround(uint32_t(om), la, lo, a0, b0);
+            L.TexelGround(uint32_t(om + 1), la, lo, a1, b1);
+            if (k == 2) {   // the cube: the own mip alone, as the boot's pass takes it
+                Check(om == 0 && (std::max)(a0, b0) > 2.0, "the own mip on %s: %d, its texel %.1f x %.1f m, "
+                      "coarser than the grain, so the level is the area mean", names[k], om, a0, b0);
+                continue;
+            }
+            TileTree ta(&layer, TileTree::Fmt::FloatW, nullptr, trees + "/hill_fine_" + std::to_string(k));
+            const IngestStats sa = Ingest(ta, L);
+            const std::string dir = ta.Folder() + "\\" + tg;
+            int checked = 0, own = 0, paintBad = 0;
+            std::string first;
+            const int unf = Unfolded(dir, L, om, hill.Info(), checked, first, true);
+            for (const auto& t : TilesIn(dir)) {
+                if (int(t.second.mip) != om || t.first.find(".bin") == std::string::npos) continue;
+                ++own;
+                paintBad += PaintF(layer, L, t.second) != Bytes(dir + "\\" + t.first) ? 1 : 0;
+            }
+            TileTree tb(&layer, TileTree::Fmt::FloatW, nullptr, trees + "/hill_coarse_" + std::to_string(k));
+            tb.EnsureFrame(tg);
+            auto order = TilesIn(dir);
+            std::stable_sort(order.begin(), order.end(), [](const auto& x, const auto& y) { return x.second.mip > y.second.mip; });
+            std::vector<uint8_t> bytes;
+            for (const auto& t : order) tb.Tile(L, tg, t.second, bytes, nullptr);
+            size_t names2 = 0;
+            const size_t differ = Unequal(dir, tb.Folder() + "\\" + tg, names2);
+            Check(om >= 0 && (std::max)(a0, b0) <= 2.0 + (k == 1 ? 1e9 : 0.0) && unf == 0 && checked > 0 &&
+                      own > 0 && paintBad == 0 && differ == 0 && names2 == order.size(),
+                  "%s: own mip %d, its texel %.3f x %.3f m at the hill (the next coarser %.3f x %.3f); the "
+                  "pass %u tiles on %u levels; %d above the own mip, each the fold of its children byte for "
+                  "byte (%d not%s%s); %d own-mip tiles, each the source's paint (%d not); asked coarse-first, "
+                  "the same %zu files (%zu differ)", names[k], om, a0, b0, a1, b1, sa.tiles, sa.levels,
+                  checked, unf, first.empty() ? "" : ", first ", first.c_str(), own, paintBad, names2, differ);
+        }
+        // ---- the value, declared: feet, a datum and its offset, nodata -- and a plant each
+        const GeoRef good = hill.Ref();
+        GeoRef p = good;
+        p.valueUnit = "m EGM2008";
+        why.clear();
+        const bool refusedPlant = !hill.Place(p, &why);
+        Check(refusedPlant, "PLANT a datum refused when it should be taken (the NAVD88 file read as EGM2008): "
+              "%s -- %s", refusedPlant ? "CAUGHT, the file this block took is refused" : "NOT caught", why.c_str());
+        hill.Place(good, nullptr);
+        {
+            ZeroNoData z;
+            z.Load(reg, hr.file, none, &why);
+            const int zc = comp.AddHeightChannel("test.zero", {&floor, &z});
+            const int zb = HillMisses(comp, zc, hr, tol, nullptr);
+            Check(zb > 0, "PLANT nodata read as zero: %s (%d of 36 points wrong: the floor's -20 m read as 0)",
+                  zb ? "CAUGHT" : "NOT caught", zb);
+        }
+        const Raster fr = WriteHill("out/rastertest/hill_ft.tif", 0.3048, 0.0, 8228);
+        RasterFileSource ft;
+        why.clear();
+        const bool ftTook = ft.Load(reg, fr.file, none, &why);
+        const int fc = comp.AddHeightChannel("test.ft", {&floor, &ft});
+        bad = ftTook ? HillMisses(comp, fc, fr, tol, &worst) : -1;
+        Check(ftTook && bad == 0, "the hill in feet (NAVD88 height ft, 8228) is metres at 36 points (worst %.4f mm, %d missed)%s%s",
+              worst * 1e3, bad, ftTook ? "" : ": ", ftTook ? "" : why.c_str());
+        if (ftTook) {
+            const GeoRef fg = ft.Ref();
+            GeoRef fp = fg;
+            fp.valueUnit = "m NAVD88";
+            ft.Place(fp, nullptr);
+            const int fb = HillMisses(comp, fc, fr, tol, nullptr);
+            Check(fb > 0, "PLANT feet read as metres: %s (%d of 36 points wrong)", fb ? "CAUGHT" : "NOT caught", fb);
+            ft.Place(fg, nullptr);
+        }
+        const Raster er = WriteHill("out/rastertest/hill_egm.tif", 1.0, 0.5, 3855);
+        RasterFileSource bare;
+        why.clear();
+        const bool bareTook = bare.Load(reg, er.file, none, &why);
+        Check(!bareTook && why.find("EGM2008") != std::string::npos && why.find("NAVD88") != std::string::npos,
+              "a file on EGM2008 (3855) with no offset in its entry is refused, naming both datums: %s", why.c_str());
+        GeoRef bp = bare.Ref();
+        bp.valueUnit = "m NAVD88";
+        const bool plantTook = bare.Place(bp, nullptr);
+        Check(plantTook, "PLANT a datum taken when it should not be (the EGM2008 file read as NAVD88, no "
+              "offset): %s", plantTook ? "CAUGHT, the file refused above is taken" : "NOT caught");
+        RasterEntry ee;
+        ee.offset = 0.5;
+        ee.hasOffset = true;
+        RasterFileSource egm;
+        why.clear();
+        const bool egmTook = egm.Load(reg, er.file, ee, &why);
+        const int gc = comp.AddHeightChannel("test.egm", {&floor, &egm});
+        bad = egmTook ? HillMisses(comp, gc, er, tol, &worst) : -1;
+        Check(egmTook && bad == 0, "the hill on EGM2008 with the entry's offset +0.5 m is the NAVD88 hill at 36 "
+              "points (worst %.4f mm, %d missed)%s%s", worst * 1e3, bad, egmTook ? "" : ": ", egmTook ? "" : why.c_str());
+        if (egmTook) {
+            const GeoRef eg = egm.Ref();
+            GeoRef ep = eg;
+            ep.valueUnit = "m NAVD88";
+            egm.Place(ep, nullptr);
+            const int eb = HillMisses(comp, gc, er, tol, nullptr);
+            Check(eb > 0, "PLANT the offset not added (the EGM2008 file read as NAVD88): %s (%d of 36 points wrong)",
+                  eb ? "CAUGHT" : "NOT caught", eb);
+            egm.Place(eg, nullptr);
+        }
+        {   // 16 bits, signed where the file says so (SampleFormat 2): WIC's own converter would not
+            const Raster sr = Make(4326, 0.5, "out/rastertest/height_i16.tif");
+            std::vector<uint8_t> px(size_t(kW) * kW * 2);
+            for (uint32_t y = 0; y < kW; ++y) {
+                for (uint32_t x = 0; x < kW; ++x) {
+                    const int16_t v = y < kW / 2 ? int16_t(-5) : int16_t(12);
+                    std::memcpy(&px[(size_t(y) * kW + x) * 2], &v, 2);
+                }
+            }
+            GeoTags t = TagsOf(sr, 4326);
+            t.keys[3] = 4;
+            t.keys.insert(t.keys.end(), {4096, 0, 1, 5703});
+            TiffImage im{kW, kW, 1, 16, px, 0};
+            im.fmt = 2;
+            WriteTiff(sr.file, {im}, t);
+            RasterFileSource s16;
+            why.clear();
+            const bool loaded = s16.Load(reg, sr.file, none, &why);
+            float top = 0.0f, low = 0.0f;
+            double lat = 0.0, lon = 0.0;
+            PixelLatLon(sr, 128.0, 60.0, lat, lon);
+            const float wt = loaded ? s16.Sample(lat, lon, 1e-4, top) : 0.0f;
+            PixelLatLon(sr, 128.0, 200.0, lat, lon);
+            const float wl = loaded ? s16.Sample(lat, lon, 1e-4, low) : 0.0f;
+            Check(loaded && wt == 1.0f && wl == 1.0f && top == -5.0f && low == 12.0f,
+                  "a signed 16-bit height (SampleFormat 2) reads -5 and 12 m where the file holds them: %.2f, "
+                  "%.2f%s%s", top, low, loaded ? "" : " -- ", loaded ? "" : why.c_str());
+        }
+    }
     Sweep(trees);
 
     Log("[rastertest] ---- %s: %d checks, %d FAIL", gFails ? "FAIL" : "PASS", gChecks, gFails);
     return gFails == 0;
+}
+
+// ---- slice 3, part C (`--tool rastertest:real`): the real files through the general path against
+// the harvester's products as the engine reads them today, at 2,000 random points each, read only.
+namespace {
+void Distribution(const char* what, std::vector<double> d) {
+    if (d.empty()) {
+        Log("[realheights] %s: no point had both", what);
+        return;
+    }
+    double mean = 0.0;
+    for (double v : d) mean += v;
+    mean /= double(d.size());
+    for (double& v : d) v = std::abs(v);
+    std::sort(d.begin(), d.end());
+    size_t within = 0;
+    for (double v : d) within += v <= 0.5 ? 1 : 0;
+    Log("[realheights] %s: %zu points; |d| median %.4f m, 95th %.4f, max %.4f; mean d %+.4f; |d| <= 0.5 m at %.1f %%",
+        what, d.size(), d[d.size() / 2], d[size_t(0.95 * double(d.size() - 1))], d.back(), mean,
+        100.0 * double(within) / double(d.size()));
+}
+}  // namespace
+
+bool RunRealHeightsCheck() {
+    std::mt19937_64 rng(20260929);
+    std::uniform_real_distribution<double> u01(0.0, 1.0);
+    // C.1 THE CUDEM TILES, both, as ONE source (a folder), against CudemHeightSource over the
+    // harvester's 13.7 m grid (data/bathy/merrimack.json): the file's own bilinear at its grain.
+    RasterEntry ce;
+    ce.folder = "cache/bathy";
+    ce.match = "ncei19_*.tif";
+    ce.name = "noaa.cudem.ninth";
+    ce.kind = "height";
+    ce.unit = "m";
+    ce.datum = "NAVD88";
+    const auto cud = LoadRasterSources({ce});
+    BathyModel bm;
+    if (cud.size() != 1 || !bm.Load("data/bathy/merrimack.json")) return false;
+    CudemHeightSource grid(&bm);
+    std::vector<double> all, sub, other;
+    struct Big { double d, lat, lon, file, harv; };
+    std::vector<Big> big;
+    for (int i = 0; i < 2000; ++i) {
+        const double lon = bm.Lon0() + u01(rng) * bm.Nx() * bm.Dlon(), lat = bm.Lat1() - u01(rng) * bm.Ny() * bm.Dlat();
+        float f = 0.0f, h = 0.0f;
+        if (cud[0]->Sample(lat * kD2R, lon * kD2R, 1e-3, f) <= 0.0f || grid.Sample(lat * kD2R, lon * kD2R, 0.0, h) <= 0.0f) continue;
+        const double d = double(f) - double(h);
+        all.push_back(d);
+        (h < -1.0f ? sub : other).push_back(d);
+        big.push_back({std::abs(d), lat, lon, f, h});
+    }
+    Distribution("C.1 CUDEM file (bilinear, its own 1/9\") - harvester grid (13.7 m), all", all);
+    Distribution("C.1   where the grid is subtidal (< -1 m NAVD88: the thalweg rule's cells)", sub);
+    Distribution("C.1   where it is not (flats, marsh, land: plain means)", other);
+    std::sort(big.begin(), big.end(), [](const Big& a, const Big& b) { return a.d > b.d; });
+    for (size_t i = 0; i < big.size() && i < 8; ++i) {
+        Log("[realheights] C.1   large: %.6f N %.6f E (world x %+.0f z %+.0f m): file %+.2f, grid %+.2f m", big[i].lat,
+            big[i].lon, (big[i].lon - BathyModel::kOrgLon) * BathyModel::kMPerLon,
+            (big[i].lat - BathyModel::kOrgLat) * BathyModel::kMPerLat, big[i].file, big[i].harv);
+    }
+    // C.2 ETOPO: the 60" file against the global relief (GlobeModel's etopo_8192.i16, box-decimated
+    // by the harvester), and the 15" file against the NE ring (ne_15s.i16, a crop), each read at
+    // its own numbers (offset 0 declared: the comparison is of numbers, not of datums).
+    GlobeModel gm;
+    if (!gm.Load("data/globe/globe.json")) return false;
+    RasterEntry e60;
+    e60.file = "cache/globe/ETOPO_2022_v1_60s_surface.tif";
+    e60.name = "noaa.etopo2022.60s";
+    e60.hasOffset = true;
+    RasterEntry e15 = e60;
+    e15.file = "cache/globe/ETOPO_2022_v1_15s_N45W075_surface.tif";
+    e15.name = "noaa.etopo2022.15s";
+    const auto et = LoadRasterSources({e60, e15});
+    if (et.size() != 2) return false;
+    EquirectHeightSource rel("noaa.etopo2022", "equirect-grid int16 8192x4096", 489200.0, &gm.Elev(), gm.Nx(), gm.Ny());
+    WindowHeightSource ne("noaa.etopo15s.ne", "window-grid int16 1440x1200", 46100.0, &gm.NeElev(), gm.NeNx(),
+                          gm.NeNy(), gm.NeLon0(), gm.NeLat1(), gm.NeDLon(), gm.NeDLat());
+    std::vector<double> dp, dc, dn;
+    size_t roundEq = 0;
+    for (int i = 0; i < 2000; ++i) {
+        // the global relief: a point uniform on the sphere, and the cell it falls in, at its centre
+        const double lat = std::asin(2.0 * u01(rng) - 1.0), lon = (2.0 * u01(rng) - 1.0) * kPi;
+        float f = 0.0f, h = 0.0f;
+        if (et[0]->Sample(lat, lon, 1e-3, f) > 0.0f && rel.Sample(lat, lon, 0.0, h) > 0.0f) dp.push_back(double(f) - h);
+        const double cx = std::floor((lon / kD2R + 180.0) / 360.0 * gm.Nx()), cy = std::floor((90.0 - lat / kD2R) / 180.0 * gm.Ny());
+        const double clon = -180.0 + (cx + 0.5) * 360.0 / gm.Nx(), clat = 90.0 - (cy + 0.5) * 180.0 / gm.Ny();
+        const double cell = 180.0 / gm.Ny() * kA * kD2R;   // the cell's side as a global file counts metres (at its centre, the equator)
+        float fb = 0.0f;
+        if (et[0]->Sample(clat * kD2R, clon * kD2R, cell / std::cos(clat * kD2R), fb) > 0.0f) {
+            dc.push_back(double(fb) - gm.Elev()[size_t(cy) * gm.Nx() + size_t(cx)]);
+        }
+        // the NE ring: a cell of ne_15s at its centre, which is the 15" file's texel centre
+        const double nx = std::floor(u01(rng) * gm.NeNx()), ny = std::floor(u01(rng) * gm.NeNy());
+        const double nlon = gm.NeLon0() + (nx + 0.5) * gm.NeDLon(), nlat = gm.NeLat1() + (ny + 0.5) * gm.NeDLat();
+        float g15 = 0.0f, n15 = 0.0f;
+        if (et[1]->Sample(nlat * kD2R, nlon * kD2R, 1e-3, g15) > 0.0f && ne.Sample(nlat * kD2R, nlon * kD2R, 0.0, n15) > 0.0f) {
+            dn.push_back(double(g15) - n15);
+            roundEq += std::lround(g15) == std::lround(n15) ? 1 : 0;
+        }
+    }
+    Distribution("C.2 ETOPO 60\" file (bilinear) - the engine's relief (bilinear on 8192x4096 int16)", dp);
+    Distribution("C.2   the file's area mean over a relief cell - that cell's int16", dc);
+    Distribution("C.2 ETOPO 15\" file at a ne_15s cell's centre - that cell's int16", dn);
+    Log("[realheights] C.2   the 15\" file rounded equals ne_15s at %zu of %zu cells", roundEq, dn.size());
+    // A SECOND HAND: the hill Python wrote (out\s3\make_hill.py: deflate, the float predictor, tiled)
+    // at the 36 points, against this file's closed form.
+    RasterEntry he;
+    he.file = "out/s3/hill.tif";
+    std::vector<std::unique_ptr<RasterFileSource>> hs;
+    if (std::filesystem::exists(he.file)) hs = LoadRasterSources({he});
+    if (hs.size() == 1) {
+        Floor floor;
+        Compositor comp;
+        const int ch = comp.AddHeightChannel("hill.py", {&floor, hs[0].get()});
+        const Raster hr{he.file, 32619, kHillE - kHillR, kHillN + kHillR, kHillG, -kHillG};
+        double worst = 0.0;
+        const int bad = HillMisses(comp, ch, hr, 6.2e-4, &worst);
+        Log("[realheights] the hill Python wrote, through the CPU's door: %d of 36 points missed, worst %.4f mm (bound 0.62)",
+            bad, worst * 1e3);
+    }
+    return true;
 }
 
 }  // namespace ga

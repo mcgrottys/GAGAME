@@ -73,6 +73,10 @@
 
 namespace ga {
 
+// THE ENGINE'S HEIGHT FRAME: the CUDEM grid's own declaration (GeoGridLoader.h), which every layer
+// of the stack answers in and the GPU's height page stores.
+inline constexpr const char* kHeightFrame = "m NAVD88";
+
 // ================================================================================================
 //  HeightLayerSource -- one Compositor height layer, wearing the DomainSource interface.
 // ================================================================================================
@@ -89,6 +93,17 @@ public:
     uint32_t Channels() const override { return 1; }
     const UnitSpec& Unit() const override { return m_unit; }
     const char* NodeKind() const override { return "load"; }
+
+    // HIERARCHY 4.20, as ColorLayerSource: the level, the box, and the bytes of a source that
+    // declares a box (a raster by file); every other layer keeps the name|unit key it had.
+    int OwnMip(const Lattice& l) const override { return m_src ? m_src->OwnMip(l) : -1; }
+    bool Footprint(double& a, double& b, double& c, double& d) const override {
+        return m_src && m_src->Footprint(a, b, c, d);
+    }
+    std::string Identity() const override {
+        double a, b, c, d;
+        return DomainSource::Identity() + (Footprint(a, b, c, d) ? "|" + m_src->Info().structure : "");
+    }
 
     bool SampleAt(const DomainQuery& q, DomainValue& out) const override {
         out.weight = 0.0f;
@@ -134,7 +149,7 @@ inline std::vector<std::shared_ptr<DomainSource>> BuildHeightStack(const Composi
     const Compositor::Channel& ch = comp.ChannelAt(heightChannel);
     for (HeightSource* h : ch.height) {
         if (!h) continue;
-        auto layer = std::make_shared<HeightLayerSource>(h, "m NAVD88");
+        auto layer = std::make_shared<HeightLayerSource>(h, kHeightFrame);
         // The formerly-MSL layers are the ones the probe displaces -- they are the ones whose
         // datum is an estimate, so they are the ones whose error is worth bounding.
         if (probeM != 0.0 && h->Info().name.rfind("noaa.etopo", 0) == 0) {

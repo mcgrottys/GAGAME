@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -165,13 +166,14 @@ public:
     const char* Structure() const override { return m_structure.c_str(); }
     const GeoRef& Ref() const override { return m_ref; }
     uint8_t GradeSig() const override { return kG0; }
-    uint32_t Channels() const override { return 4; }
-    // RGBA as 0..255 floats; a texel the file calls nodata, or gives alpha 0, stays all zero.
+    uint32_t Channels() const override { return m_height ? 1 : 4; }
+    // RGBA as 0..255 floats; a texel the file calls nodata, or gives alpha 0, stays all zero. A
+    // height: its one channel, NaN where the file says nodata.
     bool LoadTile(uint32_t tx, uint32_t ty, uint32_t tw, uint32_t th, TilePayload& out) override {
         out.width = tw;
         out.height = th;
-        out.channels = 4;
-        out.data.assign(size_t(tw) * th * 4, 0.0f);
+        out.channels = Channels();
+        out.data.assign(size_t(tw) * th * out.channels, m_height ? NAN : 0.0f);
         out.allNoData = true;
         out.coverage = 0.0f;
         const uint64_t x0 = uint64_t(tx) * tw, y0 = uint64_t(ty) * th;
@@ -184,6 +186,14 @@ public:
         for (uint32_t r = 0; r < h; ++r) {
             for (uint32_t c = 0; c < w; ++c) {
                 uint8_t* p = &px[(size_t(r) * w + c) * 4];
+                if (m_height) {
+                    float v;
+                    std::memcpy(&v, p, 4);
+                    if (std::isnan(v) || m_ref.IsNoData(v)) continue;
+                    out.data[size_t(r) * tw + c] = v;
+                    ++real;
+                    continue;
+                }
                 if (m_dataBand) p[3] = 255;   // a fourth band the file does not call alpha
                 const bool nodata = m_ref.hasNoData && m_ref.IsNoData(p[0]) &&
                                     m_ref.IsNoData(p[1]) && m_ref.IsNoData(p[2]);
@@ -197,7 +207,9 @@ public:
         out.coverage = float(real) / float(tw * th);
         return real > 0;
     }
-    // A window's RGBA8: WIC's converter for the rectangle, one decode at a time; or the rows.
+    // A window's four bytes a texel -- RGBA8, or a height's float32 -- from WIC for the rectangle,
+    // one decode at a time (a height from the frame itself, 16 bits widened in place from the
+    // last texel); or the rows.
     bool Pixels(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint8_t* dst) {
         if (m_rows.h != INVALID_HANDLE_VALUE) {
             std::vector<uint8_t> row(size_t(w) * m_rows.nc);
@@ -215,16 +227,36 @@ public:
         (void)co;
         std::lock_guard<std::mutex> lk(m_mx);
         const WICRect rc{INT(x), INT(y), INT(w), INT(h)};
-        return SUCCEEDED(m_conv->CopyPixels(&rc, w * 4, w * h * 4, dst));
+        if (m_bits != 16) return SUCCEEDED(m_conv->CopyPixels(&rc, w * 4, w * h * 4, dst));
+        if (FAILED(m_conv->CopyPixels(&rc, w * 2, w * h * 2, dst))) return false;
+        for (size_t i = size_t(w) * h; i-- > 0;) {
+            uint16_t u;
+            std::memcpy(&u, dst + 2 * i, 2);
+            const float f = m_signed ? float(int16_t(u)) : float(u);
+            std::memcpy(dst + 4 * i, &f, 4);
+        }
+        return true;
     }
 
-    std::string m_name, m_structure;
+    std::string m_name, m_structure, m_unit;
     GeoRef m_ref;
-    Com<IWICFormatConverter> m_conv;   // the decoder's frame, converted to RGBA8
+    Com<IWICBitmapSource> m_conv;   // the decoder's frame: converted to RGBA8, or a height's own
     std::mutex m_mx;
     RowFile m_rows;
-    bool m_dataBand = false;
+    bool m_dataBand = false, m_height = false, m_signed = false;
+    UINT m_bits = 32;
 };
+
+// A VERTICAL CRS (GeoKey 4096) as the unit and datum UnitSpec reads (core/GaUnits.h); 4099, where the
+// file has it, names the unit instead. Every other code is refused by name: a depth's sign, a geoid's
+// separation and a user's datum are never guessed.
+struct Vertical {
+    int epsg;
+    const char* unit;
+};
+const Vertical kVertical[] = {{5703, "m NAVD88"},  {6360, "ftUS NAVD88"}, {8228, "ft NAVD88"},
+                              {5773, "m EGM96"},   {3855, "m EGM2008"},   {5714, "m MSL"},
+                              {4979, "m WGS84"}};
 
 }  // namespace
 
@@ -356,12 +388,13 @@ std::unique_ptr<FieldLoader> OpenImageFile(const std::string& path, const GeoRef
                                      : said == "sRGB byte";
     const bool height = said.empty() ? (chan == 1 && (bpp == 16 || rep == WICPixelFormatNumericRepresentationFloat))
                                      : !colour;
-    if (height) {
-        return refuse("kind height (" + std::to_string(chan) + " channel of " +
-                      std::to_string(bpp) + " bits): no stack takes a height from a file yet, "
-                      "and this slice paints colour");
+    if (height && (chan != 1 || (bpp != 16 && !(bpp == 32 && rep == WICPixelFormatNumericRepresentationFloat)))) {
+        return refuse("kind height, but " + std::to_string(chan) + " channel(s) of " +
+                      std::to_string(bpp) + " bits: a height is one channel of 32-bit float or 16-bit integer");
     }
-    if (!colour) {
+    L->m_height = height;
+    L->m_bits = height ? bpp : 32;   // a colour window is the converter's RGBA8
+    if (!colour && !height) {
         return refuse(std::to_string(chan) + " channels in " + std::to_string(bpp) +
                       " bits is neither colour (8-bit, 3 or 4 channels) nor height (one channel "
                       "of 16-bit or float); an entry that says kind colour paints it as colour");
@@ -376,7 +409,7 @@ std::unique_ptr<FieldLoader> OpenImageFile(const std::string& path, const GeoRef
     g.height = h;
     g.centers = true;
     bool affine = false;
-    int epsg = 0;
+    int epsg = 0, vert = 0, vunit = 0;
     std::string from, side;
     Com<IWICMetadataQueryReader> q;
     if (tiff && SUCCEEDED(f0->GetMetadataQueryReader(&q))) {
@@ -386,12 +419,16 @@ std::unique_ptr<FieldLoader> OpenImageFile(const std::string& path, const GeoRef
         const std::vector<uint16_t> keys = QueryShorts(q.Get(), L"/ifd/{ushort=34735}");
         int model = 0, raster = 1, geo = 0, proj = 0;
         for (size_t i = 4; keys.size() >= 4 && i + 3 < keys.size() && (i - 4) / 4 < keys[3]; i += 4) {
-            if (keys[i + 1] != 0) continue;   // held in another tag: none of the four read here
+            if (keys[i + 1] != 0) continue;   // held in another tag: none of the six read here
             if (keys[i] == 1024) model = keys[i + 3];
             if (keys[i] == 1025) raster = keys[i + 3];
             if (keys[i] == 2048) geo = keys[i + 3];
             if (keys[i] == 3072) proj = keys[i + 3];
+            if (keys[i] == 4096) vert = keys[i + 3];
+            if (keys[i] == 4099) vunit = keys[i + 3];
         }
+        const std::vector<uint16_t> fmt = QueryShorts(q.Get(), L"/ifd/{ushort=339}");
+        L->m_signed = !fmt.empty() && fmt[0] == 2;   // SampleFormat: 2 is a signed integer
         if (!keys.empty()) {
             epsg = model == 2 ? geo : (proj ? proj : geo);
             if (epsg == 0 || epsg == 32767) {
@@ -478,19 +515,34 @@ std::unique_ptr<FieldLoader> OpenImageFile(const std::string& path, const GeoRef
     if (!(g.scaleX > 0.0) || g.scaleY == 0.0) {
         return refuse("its pixel is not a positive width by a non-zero height");
     }
+    if (height) {   // ---- A HEIGHT'S UNIT AND DATUM, as the file names them ("" where it does not)
+        const char* v = "";
+        for (const Vertical& k : kVertical) v = k.epsg == vert ? k.unit : v;
+        if (!*v && vert != 0 && vert != 32767) {
+            return refuse("its vertical CRS EPSG:" + std::to_string(vert) +
+                          " is not one this engine names (5703, 6360, 8228, 5773, 3855, 5714, 4979)");
+        }
+        const char* u = vunit == 9001 ? "m" : vunit == 9002 ? "ft" : vunit == 9003 ? "ftUS" : "";
+        if (!*u && vunit != 0) return refuse("its vertical unit (GeoKey 4099 = " + std::to_string(vunit) + ") is not m, ft or US ft");
+        L->m_unit = *u ? std::string(u) + (std::strchr(v, ' ') ? std::strchr(v, ' ') : "") : v;
+        g.valueUnit = L->m_unit.c_str();
+    }
 
-    // ---- THE PIXELS: a converter to RGBA8 kept on the frame. A TIFF decodes the window asked
-    // for; a PNG or a JPEG decodes from its first row every time, so it is decoded once, in bands,
-    // to raw rows named by its content's hash, and read by a seek from there.
-    hr = fac->CreateFormatConverter(&L->m_conv);
-    if (SUCCEEDED(hr)) {
-        hr = L->m_conv->Initialize(f0.Get(), GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone,
-                                   nullptr, 0.0, WICBitmapPaletteTypeCustom);
+    // ---- THE PIXELS: a converter to RGBA8 kept on the frame, or a height's frame as it is. A TIFF
+    // decodes the window asked for; a PNG or a JPEG decodes from its first row every time, so it is
+    // decoded once, in bands, to raw rows named by its content's hash, and read by a seek from there.
+    Com<IWICFormatConverter> conv;
+    if (!height) hr = fac->CreateFormatConverter(&conv);
+    if (!height && SUCCEEDED(hr)) {
+        hr = conv->Initialize(f0.Get(), GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone,
+                              nullptr, 0.0, WICBitmapPaletteTypeCustom);
     }
     if (FAILED(hr)) return refuse(Hr("WIC cannot convert its pixels to RGBA", hr));
+    if (height) L->m_conv = f0;
+    else L->m_conv = conv;
     std::string rows;
     if (!tiff) {
-        rows = std::string(kSources) + "/" + Hex(own) + ".rgba";
+        rows = std::string(kSources) + "/" + Hex(own) + (height ? ".f32" : ".rgba");
         std::error_code ec;
         if (std::filesystem::file_size(rows, ec) != uint64_t(w) * h * 4 || ec) {
             std::filesystem::create_directories(kSources, ec);
@@ -512,8 +564,11 @@ std::unique_ptr<FieldLoader> OpenImageFile(const std::string& path, const GeoRef
     L->m_name = std::filesystem::path(path).stem().string();
     L->m_ref = g;
     char s[400];
-    snprintf(s, sizeof(s), "%s %ux%u rgba8%s, %s from %s, fnv64 %016llx (r2)",
-             tiff ? "geotiff" : ext.c_str() + 1, w, h, L->m_dataBand ? " (band 4 data)" : "",
+    const std::string what = !height ? std::string("rgba8") + (L->m_dataBand ? " (band 4 data)" : "")
+                             : std::string(bpp == 16 ? (L->m_signed ? "int16" : "uint16") : "float32") +
+                                   " height (" + (L->m_unit.empty() ? "no unit or datum of its own" : L->m_unit) + ")";
+    snprintf(s, sizeof(s), "%s %ux%u %s, %s from %s, fnv64 %016llx (r2)",
+             tiff ? "geotiff" : ext.c_str() + 1, w, h, what.c_str(),
              g.Describe().c_str(), from.c_str(), static_cast<unsigned long long>(fnv));
     L->m_structure = s;
     Log("[raster] %s: its bytes' hash %s%s", path.c_str(), indexed ? "from the index" : "taken, and indexed",

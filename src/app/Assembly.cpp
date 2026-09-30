@@ -283,14 +283,14 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         std::vector<RasterEntry> entries;
         for (const scene::SourceProps& s : S.sources) {
             entries.push_back({s.file, s.folder, s.match, s.manifest, s.name, s.kind, s.crs, s.over,
-                               s.feather});
+                               s.feather, s.unit, s.datum, s.offset, s.hasOffset});
         }
         A->sceneSources = LoadRasterSources(entries);
         if (blockKey == "auto") {
             std::vector<SurfaceFrame::BlockWant> wants;
             for (const auto& s : A->sceneSources) {
                 const SourceInfo& i = s->Info();
-                wants.push_back({i.name, i.lon0, i.lat0, i.lon1, i.lat1, s->GrainM()});
+                if (!s->Height()) wants.push_back({i.name, i.lon0, i.lat0, i.lon1, i.lat1, s->GrainM()});
             }
             blockKey = SurfaceFrame::AutoKey(wants);
             Log("[surface] streaming.faceWindows auto: %zu source(s) ask for '%s'", wants.size(),
@@ -302,9 +302,11 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // tree is built. A tool pointed at a scratch folder paints, packs and reads there alone.
     TileTree::SetTreeRoot(S.streaming.treeRoot);
     if (S.streaming.colorTrees || S.Tool("ingest")) {
-        IngestSources(A->sceneSources, surface.blocks.empty()
-                                           ? std::vector<Lattice>{surface.cube, surface.win, surface.det}
-                                           : std::vector<Lattice>{surface.cube, hal::BlockBinding::Pyramid(128, 128)});
+        IngestSources(A->sceneSources,
+                      surface.blocks.empty()
+                          ? std::vector<Lattice>{surface.cube, surface.win, surface.det}
+                          : std::vector<Lattice>{surface.cube, hal::BlockBinding::Pyramid(128, 128)},
+                      {surface.cubeH, surface.winH});   // the height page's two lattices
     }
     if (S.Tool("ingest")) return nullptr;
 
@@ -464,6 +466,12 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             srcCudem = std::make_unique<CudemHeightSource>(&bathyRaw);
             hstack.push_back(srcCudem.get());
         }
+        // The scene's heights by file join in the default order (StackOrder: `over`, then the
+        // coarser under the finer), and the hand edits, the owner's own corrections, stay on top.
+        for (const auto& s : A->sceneSources) {
+            if (s->Height()) hstack.push_back(s.get());
+        }
+        StackOrder(hstack);
         if (srcEdits.Load("data/gis/edits.geojson", 2.5f)) {
             hstack.push_back(&srcEdits);
         }
@@ -770,25 +778,21 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             // and the normals ride CUDEM truth). One provider dispatching on the slice.
             // M9as: fed by the height TileTree when --color-trees is on.
             if (S.streaming.colorTrees || treeTool) {
+                // The channel's own order, the one the CPU's stack reads (the height stack above:
+                // StackOrder, the hand edits last), so the GPU's bed and the CPU's are one over.
                 auto layers = BuildHeightStack(compositor, hgtCh);
-                std::vector<std::pair<double, std::shared_ptr<DomainSource>>> byRes;
                 const Compositor::Channel& hch = compositor.ChannelAt(hgtCh);
-                for (size_t i = 0; i < layers.size() && i < hch.height.size(); ++i) {
-                    byRes.push_back({hch.height[i]->Info().cmPerPixel, layers[i]});
-                }
-                std::stable_sort(byRes.begin(), byRes.end(),
-                                 [](const auto& a, const auto& b) { return a.first > b.first; });
                 auto dc = std::make_shared<DomainCompositor>();
                 dc->SetBlend(DomainCompositor::Blend::LayeredOver);
                 std::string order;
-                for (auto& p : byRes) {
-                    if (dc->Add(p.second)) order += " " + std::string(p.second->Name()) +
-                                                    "(" + std::to_string(int(p.first)) + "cm)";
+                for (size_t i = 0; i < layers.size() && i < hch.height.size(); ++i) {
+                    if (dc->Add(layers[i])) order += " " + std::string(layers[i]->Name()) + "(" +
+                                                     std::to_string(int(hch.height[i]->Info().cmPerPixel)) + "cm)";
                 }
                 heightRoot = std::make_shared<CompositeSource>("earth.height", dc);
                 for (auto& l : layers) megaKeep.push_back(l);
-                Log("[height-tree] compose order, coarsest first (the deepest tree paints "
-                    "last):%s",
+                Log("[height-tree] compose order, bottom to top (the channel's: `over`, the coarser "
+                    "under the finer, the hand edits last):%s",
                     order.c_str());
                 heightTree = std::make_unique<TileTree>(heightRoot.get(), TileTree::Fmt::Half);
                 heightTree->Print();
@@ -905,7 +909,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 // and hands land back to the photos above +1.2 m NAVD).
                 // The scene's `sources` join the photos, and the photos stand in their default
                 // order (StackOrder: `over`, then the coarser grain under the finer).
-                for (const auto& s : A->sceneSources) colorStack.push_back(s.get());
+                for (const auto& s : A->sceneSources) {
+                    if (!s->Height()) colorStack.push_back(s.get());
+                }
                 StackOrder(colorStack);
                 const std::vector<ColorSource*> photos = colorStack;   // (the stack moves below)
                 // M9av: the GLOBAL seafloor under the bed classifier -- the ingested

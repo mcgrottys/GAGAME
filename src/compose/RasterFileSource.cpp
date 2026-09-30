@@ -2,6 +2,7 @@
 
 #include "compose/ColorStackSource.h"
 #include "compose/DomainSource.h"
+#include "compose/HeightStackSource.h"
 #include "compose/TileTree.h"
 #include "core/Common.h"
 #include "core/ImageLoader.h"
@@ -58,8 +59,8 @@ std::unique_ptr<FieldLoader> OpenOne(const LoaderRegistry& reg, const std::strin
     if (!L) {
         Fail(why, reg.Knows(ext.empty() ? ext : ext.substr(1)) ? ImageLoaderWhy()
                                                                : "no loader reads " + ext);
-    } else if (L->Channels() != 4) {
-        Fail(why, "its loader gives no colour (RGBA)");
+    } else if (L->Channels() != 4 && L->Channels() != 1) {
+        Fail(why, "its loader gives neither colour (RGBA) nor a height (one channel)");
         L.reset();
     }
     return L;
@@ -100,6 +101,7 @@ bool RasterFileSource::Open(std::vector<std::unique_ptr<FieldLoader>> files, con
     }
     m_over = e.over;
     m_feather = e.feather;
+    m_entry = e;
     if (!Placed(why)) return false;
     // THE IDENTITY: one file's structure, or the set's, and the feather that weighs it.
     char b[96];
@@ -117,6 +119,7 @@ bool RasterFileSource::Open(std::vector<std::unique_ptr<FieldLoader>> files, con
         snprintf(b, sizeof(b), ", feather %g m", m_feather);
         m_info.structure += b;
     }
+    if (m_height) m_info.structure += ", " + m_valued;
     m_info.name = e.name.empty() ? std::filesystem::path(label).stem().string() : e.name;
     Log("[raster] %s: %s -- grain %.4g m, %.6f..%.6f E, %.6f..%.6f N, %zu file(s), over %g",
         m_info.name.c_str(), m_info.structure.c_str(), m_grainM, m_info.lon0, m_info.lon1,
@@ -152,6 +155,9 @@ bool RasterFileSource::Placed(std::string* why) {
         if (std::abs(std::abs(g.scaleX) / std::abs(r0.scaleX) - 1.0) > 1e-9 ||
             std::abs(std::abs(g.scaleY) / std::abs(r0.scaleY) - 1.0) > 1e-9) {
             return Fail(why, "it mixes grains -- one source is one grain");
+        }
+        if (f.loader->Channels() != m_files[0]->loader->Channels() || std::strcmp(g.valueUnit, r0.valueUnit)) {
+            return Fail(why, "it mixes kinds or units -- one source is one kind of value in one unit");
         }
         f.w = g.width;
         f.h = g.height;
@@ -194,7 +200,59 @@ bool RasterFileSource::Placed(std::string* why) {
     m_gy = std::abs(r0.scaleY) * m_my;
     m_grainM = (std::min)(m_gx, m_gy);
     m_info.cmPerPixel = 100.0 * m_grainM;
+    m_height = m_files[0]->loader->Channels() == 1;
+    return !m_height || Valued(why);
+}
+
+// A HEIGHT'S VALUE, declared and never guessed (HIERARCHY 4.11): the unit and the datum the file
+// names (its GeoKeys, as the loader reads them into valueUnit), else the entry's -- where both
+// speak and differ, the file's stands and that is said. On the engine's datum it is taken as it
+// is; on another, only with the entry's offset, the separation at the place, added here once.
+bool RasterFileSource::Valued(std::string* why) {
+    const UnitSpec file = UnitSpec::Parse(m_files[0]->ref.valueUnit), frame = UnitSpec::Parse(kHeightFrame);
+    const UnitSpec unit = UnitSpec::Parse(m_entry.unit.c_str());
+    const UnitSpec datum = UnitSpec::Parse(("m " + m_entry.datum).c_str());
+    const bool fileUnit = file.quantity == Quantity::Length;
+    const char* n = m_files[0]->loader->Name();
+    if (fileUnit && !m_entry.unit.empty() && unit.toCanonical != file.toCanonical) {
+        Log("[raster] %s: the file's own unit (%s) stands; the entry's '%s' is not read", n, file.raw.c_str(),
+            m_entry.unit.c_str());
+    }
+    if (!file.datum.empty() && !m_entry.datum.empty() && datum.datum != file.datum) {
+        Log("[raster] %s: the file's own datum %s stands; the entry's '%s' is not read", n, file.datum.c_str(),
+            m_entry.datum.c_str());
+    }
+    const double scale = fileUnit ? file.toCanonical : unit.quantity == Quantity::Length ? unit.toCanonical : 0.0;
+    const std::string d = !file.datum.empty() ? file.datum : datum.datum;
+    if (scale <= 0.0) {
+        return Fail(why, "its unit is not declared: the file names none, and the entry's unit '" + m_entry.unit +
+                             "' is not a length (m, ft, ftUS)");
+    }
+    if (d.empty()) {
+        return Fail(why, "its datum is not declared: the file names none, and the entry's datum '" +
+                             m_entry.datum + "' is none this engine names (NAVD88, MSL, EGM96, EGM2008, WGS84 ...)");
+    }
+    if (d != frame.datum && !m_entry.hasOffset) {
+        return Fail(why, "its datum is " + d + " and the engine's is " + frame.datum +
+                             ": it is taken only with the entry's offset, the separation at the place, in metres");
+    }
+    if (d == frame.datum && m_entry.hasOffset) {
+        Log("[raster] %s: on %s already, so the entry's offset %+g m is not added", n, d.c_str(), m_entry.offset);
+    }
+    m_vScale = scale;
+    m_vOffset = d == frame.datum ? 0.0 : m_entry.offset;
+    char b[160];
+    snprintf(b, sizeof(b), "height on %s x%.10g %+.6g m -> %s", d.c_str(), m_vScale, m_vOffset, kHeightFrame);
+    m_valued = b;
     return true;
+}
+
+bool RasterFileSource::Footprint(double& lon0, double& lat0, double& lon1, double& lat1) const {
+    lon0 = m_info.lon0;
+    lat0 = m_info.lat0;
+    lon1 = m_info.lon1;
+    lat1 = m_info.lat1;
+    return !m_files.empty();
 }
 
 int RasterFileSource::OwnMip(const Lattice& lattice) const {
@@ -275,9 +333,12 @@ std::shared_ptr<const std::vector<uint8_t>> RasterFileSource::Window(size_t file
             return it->second->second;
         }
     }
-    auto px = std::make_shared<std::vector<uint8_t>>(size_t(kWin) * kWin * 4, uint8_t(0));
+    auto px = std::make_shared<std::vector<uint8_t>>(size_t(kWin) * kWin * 4, uint8_t(m_height ? 0xFF : 0));
     TilePayload tp;
-    if (m_files[file]->loader->LoadTile(wx, wy, kWin, kWin, tp)) {
+    const bool got = m_files[file]->loader->LoadTile(wx, wy, kWin, kWin, tp);
+    if (m_height && tp.data.size() * 4 == px->size()) {
+        std::memcpy(px->data(), tp.data.data(), px->size());   // a height's floats; NaN (0xFF..) is absence
+    } else if (got && !m_height) {
         for (size_t k = 0; k < px->size(); ++k) (*px)[k] = static_cast<uint8_t>(tp.data[k]);
     }
     std::lock_guard<std::mutex> lk(m_cacheMx);
@@ -385,14 +446,52 @@ float RasterFileSource::Sample(double latRad, double lonRad, double groundResM, 
                                            (std::max)(1.0, sv), rgba);
         if (alpha <= 0.0) return 0.0f;
         rgba[3] = 255;
-        float w = 1.0f;
-        if (m_feather > 0.0) {   // against the whole's box, the orthos' 25 m smoothstep
-            const double dm = (std::min)((std::min)(x - m_ux0, m_ux1 - x) * m_mx,
-                                         (std::min)(y - m_uy0, m_uy1 - y) * m_my);
-            const double t = std::clamp(dm / m_feather, 0.0, 1.0);
-            w = static_cast<float>(t * t * (3.0 - 2.0 * t));
+        return Feathered(x, y) * static_cast<float>(alpha);
+    }
+    return 0.0f;
+}
+
+// The entry's feather against the whole's box, the orthos' 25 m smoothstep; 1 with none.
+float RasterFileSource::Feathered(double x, double y) const {
+    if (m_feather <= 0.0) return 1.0f;
+    const double dm = (std::min)((std::min)(x - m_ux0, m_ux1 - x) * m_mx,
+                                 (std::min)(y - m_uy0, m_uy1 - y) * m_my);
+    const double t = std::clamp(dm / m_feather, 0.0, 1.0);
+    return static_cast<float>(t * t * (3.0 - 2.0 * t));
+}
+
+// A HEIGHT: the colour's area mean in one channel -- a texel weighs 1 where the file has a number
+// and 0 where it said nodata (NaN in the window) -- over the box asked for, never under one texel,
+// so a box of one texel is the bilinear between centres, taps clamped at the file's edge. The
+// weight is the part of the box the file has, times the feather; the number is in kHeightFrame.
+float RasterFileSource::Sample(double latRad, double lonRad, double groundResM, float& metres) {
+    double x = 0.0, y = 0.0;
+    if (!m_height || m_files.empty() || !ToCrs(latRad, lonRad, x, y)) return 0.0f;
+    if (x <= m_ux0 || x >= m_ux1 || y <= m_uy0 || y >= m_uy1) return 0.0f;   // outside the whole
+    for (size_t i = 0; i < m_files.size(); ++i) {
+        const File& f = *m_files[i];
+        if (x < f.x0 || x >= f.x1 || y < f.yLo || y >= f.yHi) continue;
+        const double s = groundResM * std::cos(latRad);
+        const double su = (std::max)(1.0, s / m_gx), sv = (std::max)(1.0, s / m_gy);
+        const double uc = (x - f.x0) * f.kx, vc = (f.down ? f.yHi - y : y - f.yLo) * f.ky;
+        const double u0 = (std::max)(0.0, uc - 0.5 * su), u1 = (std::min)(double(f.w), uc + 0.5 * su);
+        const double v0 = (std::max)(0.0, vc - 0.5 * sv), v1 = (std::min)(double(f.h), vc + 0.5 * sv);
+        double acc = 0.0, have = 0.0, area = 0.0;
+        for (int j = static_cast<int>(v0); j < v1; ++j) {
+            const double wy = (std::min)(v1, j + 1.0) - (std::max)(v0, double(j));
+            for (int k = static_cast<int>(u0); k < u1; ++k) {
+                const double w = ((std::min)(u1, k + 1.0) - (std::max)(u0, double(k))) * wy;
+                float t;
+                std::memcpy(&t, Texel(i, k, j), 4);
+                area += w;
+                if (std::isnan(t)) continue;
+                acc += w * t;
+                have += w;
+            }
         }
-        return w * static_cast<float>(alpha);
+        if (have <= 0.0 || area <= 0.0) return 0.0f;
+        metres = static_cast<float>(acc / have * m_vScale + m_vOffset);
+        return Feathered(x, y) * static_cast<float>(have / area);
     }
     return 0.0f;
 }
@@ -436,17 +535,6 @@ std::vector<std::unique_ptr<RasterFileSource>> LoadRasterSources(
         }
     }
     return out;
-}
-
-void StackOrder(std::vector<ColorSource*>& stack) {
-    auto over = [](const ColorSource* s) {
-        const auto* r = dynamic_cast<const RasterFileSource*>(s);
-        return r ? r->Over() : 0.0;
-    };
-    std::stable_sort(stack.begin(), stack.end(), [&](const ColorSource* a, const ColorSource* b) {
-        if (over(a) != over(b)) return over(a) < over(b);
-        return a->Info().cmPerPixel > b->Info().cmPerPixel;   // the coarser under the finer
-    });
 }
 
 // ---- THE PASS ---------------------------------------------------------------------------------
@@ -557,12 +645,15 @@ IngestStats Ingest(TileTree& tree, const Lattice& lattice) {
 }
 
 void IngestSources(const std::vector<std::unique_ptr<RasterFileSource>>& sources,
-                   const std::vector<Lattice>& lattices) {
+                   const std::vector<Lattice>& colour, const std::vector<Lattice>& height) {
     for (const auto& src : sources) {
-        auto layer = std::make_shared<ColorLayerSource>(src.get());
-        const std::shared_ptr<DomainSource> leaf = NormalizeToSi(layer);
-        TileTree tree(leaf ? leaf.get() : layer.get());   // the megatexture's leaf folder
-        for (const Lattice& l : lattices) {
+        // The leaf folder the stack's tree keeps for it: the megatexture's (a colour, normalized),
+        // or the height tree's (FloatW, in the frame).
+        std::shared_ptr<DomainSource> layer, leaf;
+        if (src->Height()) layer = std::make_shared<HeightLayerSource>(src.get(), kHeightFrame);
+        else leaf = NormalizeToSi(layer = std::make_shared<ColorLayerSource>(src.get()));
+        TileTree tree(leaf ? leaf.get() : layer.get(), src->Height() ? TileTree::Fmt::FloatW : TileTree::Fmt::Rgba8);
+        for (const Lattice& l : src->Height() ? height : colour) {
             const IngestStats st = Ingest(tree, l);
             if (st.whole) {
                 Log("[ingest] %s on %s: whole (own mip %d)", src->Info().name.c_str(), l.Tag().c_str(), st.own);
