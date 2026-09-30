@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 
 namespace ga {
@@ -737,6 +738,93 @@ void ResidencyManager::UpdateResidencyByte(Tenant& t, const TileRequest& r, bool
     t.resDirty = true;
 }
 
+// ---- THE FLOOR LAW (Residency.h): the construction, gated by [restest], not staged ---------
+
+std::vector<uint32_t> ResidencyManager::CubeFloorRing(uint32_t rdim) {
+    std::vector<uint32_t> ring;
+    ring.reserve(size_t(6) * (4 * rdim + 4));
+    const int n = static_cast<int>(rdim);
+    const auto index = [n](double c) {
+        return static_cast<uint32_t>(std::clamp(static_cast<int>(std::floor(c * n)), 0, n - 1));
+    };
+    for (uint32_t f = 0; f < 6; ++f) {
+        // The cell past the square at (x, y), one of them -1 or rdim: its centre's direction in
+        // this face's plane, and the true cell of the face that direction falls in.
+        const auto cell = [&](int x, int y) {
+            double d[3], uv[2];
+            ComposeCubeDir(f, (x + 0.5) / n, (y + 0.5) / n, d);
+            const uint32_t g = CubeFaceOfDir(d, uv);
+            return (g * rdim + index(uv[1])) * rdim + index(uv[0]);
+        };
+        for (int x = -1; x <= n; ++x) ring.push_back(cell(x, -1));
+        for (int y = 0; y < n; ++y) {
+            ring.push_back(cell(-1, y));
+            ring.push_back(cell(n, y));
+        }
+        for (int x = -1; x <= n; ++x) ring.push_back(cell(x, n));
+    }
+    return ring;
+}
+
+void ResidencyManager::FloorPad(const std::vector<std::vector<uint8_t>>& in, uint32_t rdim,
+                                uint32_t s, const std::vector<uint32_t>* cubeRing,
+                                std::vector<uint8_t>& padded) {
+    const uint32_t p = rdim + 2;
+    padded.resize(size_t(p) * p);
+    for (uint32_t y = 0; y < rdim; ++y) {
+        memcpy(&padded[size_t(y + 1) * p + 1], &in[s][size_t(y) * rdim], rdim);
+    }
+    if (cubeRing) {
+        const uint32_t* r = cubeRing->data() + size_t(s) * (4 * rdim + 4);
+        const uint32_t n2 = rdim * rdim;
+        const auto at = [&](uint32_t i) { return in[i / n2][i % n2]; };
+        for (uint32_t x = 0; x < p; ++x) padded[x] = at(*r++);
+        for (uint32_t y = 1; y <= rdim; ++y) {
+            padded[size_t(y) * p] = at(*r++);
+            padded[size_t(y) * p + p - 1] = at(*r++);
+        }
+        for (uint32_t x = 0; x < p; ++x) padded[size_t(p - 1) * p + x] = at(*r++);
+        return;
+    }
+    for (uint32_t y = 1; y <= rdim; ++y) {
+        padded[size_t(y) * p] = padded[size_t(y) * p + 1];
+        padded[size_t(y) * p + p - 1] = padded[size_t(y) * p + p - 2];
+    }
+    memcpy(&padded[0], &padded[p], p);
+    memcpy(&padded[size_t(p - 1) * p], &padded[size_t(p - 2) * p], p);
+}
+
+void ResidencyManager::FloorMap(const std::vector<std::vector<uint8_t>>& in, uint32_t rdim,
+                                const std::vector<uint32_t>* cubeRing,
+                                std::vector<std::vector<uint8_t>>& out) {
+    // `out` is written while `in`'s neighbours are still being read: never the same maps.
+    const uint32_t p = rdim + 2;
+    std::vector<uint8_t> pad, rows(size_t(p) * rdim);
+    out.resize(in.size());
+    for (uint32_t s = 0; s < in.size(); ++s) {
+        FloorPad(in, rdim, s, (s < 6 && in.size() >= 6) ? cubeRing : nullptr, pad);
+        // The 3 x 3 as two passes of three: the largest across each padded row, then the
+        // largest of three of those down.
+        for (uint32_t y = 0; y < p; ++y) {
+            const uint8_t* a = &pad[size_t(y) * p];
+            uint8_t* r = &rows[size_t(y) * rdim];
+            for (uint32_t x = 0; x < rdim; ++x) {
+                r[x] = (std::max)((std::max)(a[x], a[x + 1]), a[x + 2]);
+            }
+        }
+        out[s].resize(size_t(rdim) * rdim);
+        for (uint32_t y = 0; y < rdim; ++y) {
+            const uint8_t* r0 = &rows[size_t(y) * rdim];
+            const uint8_t* r1 = r0 + rdim;
+            const uint8_t* r2 = r1 + rdim;
+            uint8_t* o = &out[s][size_t(y) * rdim];
+            for (uint32_t x = 0; x < rdim; ++x) {
+                o[x] = (std::max)((std::max)(r0[x], r1[x]), r2[x]);
+            }
+        }
+    }
+}
+
 bool ResidencyManager::DropOne(const std::shared_ptr<Tracked>& tr) {
     tr->dropped = true;
     if (tr->state != TileState::Mapped) return false;
@@ -1266,6 +1354,10 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     // read the height tenant's map, believed mip 3 was resident under the helm, sampled its own
     // unmapped mip 3 and got zeros -- a flat sea with the node saying 0.85. Regions now sit
     // past the tile slab, one per tenant index, and can never touch a tile fill either.
+    //
+    // WHAT GOES UP IS THE TRUE MAP. The floor law (Residency.h) would stage FloorMap(resCpu)
+    // here instead, and was measured unsound under the colour's anisotropic sampler; it is
+    // not staged.
     uint64_t mapStage = static_cast<uint64_t>(kMaxMapsPerFrame) * 65536;
     for (auto& t : m_tenants) {
         if (!t.resDirty) continue;

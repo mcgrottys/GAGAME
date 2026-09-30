@@ -13,6 +13,7 @@
 #include "hal/Gpu.h"
 #include "hal/ResidencyAudit.h"
 #include "core/Pga.h"
+#include "hal/Residency.h"
 #include "hal/Shader.h"
 #include "core/Space.h"
 #include "core/ThreadAudit.h"
@@ -64,6 +65,8 @@ int RunSelfTest(const Options& opt) {
                                        // override, the placement sugar, the shim
     ok &= RunPruneSelfTest();          // the tree-prune tool's refusals, planted and caught on a
                                        // scratch root under out\prunetest, never the cache
+    ok &= RunResidencySelfTest(gpu, sc, opt.shaderDir);   // the floor law: its arithmetic on the
+                                                          // CPU, its reads on this GPU's samplers
     gpu.Shutdown();
     return ok ? 0 : 1;
 }

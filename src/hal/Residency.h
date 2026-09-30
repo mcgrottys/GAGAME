@@ -166,6 +166,52 @@ public:
         if (y >= rdim) y = rdim - 1;
         return t.resCpu[face][static_cast<size_t>(y) * rdim + x] / 16u;
     }
+
+    // ---- THE FLOOR LAW (docs/HIERARCHY.md 4.6): PROPOSED, MEASURED, AND NOT STAGED ------------
+    // The proposal: the map the GPU reads is the true one with each byte the largest (the
+    // coarsest) of its 3 x 3, read BILINEAR. A bilinear read mixes the four bytes around its
+    // sample; each of those, being the largest of its own 3 x 3, is at least the largest of the
+    // four TRUE bytes there, so the mix is never finer than the gather + max in effect -- and it
+    // is continuous, where the gather's sharpness steps along tile lines (porch_floor.py: the
+    // largest step between samples a sixteenth of a cell apart falls from 7 mips to 0.44, for
+    // 0.15 of a mip on average). The same widening would let a kernel's ONE byte (PageHaveLoad)
+    // cover the four texels PageLoad4 reads around it (review finding 9). --selftest's [restest]
+    // holds this construction to all of that, and it holds.
+    //
+    // WHY THE GPU STILL READS THE TRUE MAP. A clamp that is never finer is not a read that is
+    // never outside what is resident. Measured on this GPU ([restest] gpu): once an anisotropic
+    // footprint minifies, the sampler keeps its tap count and spaces the taps by the CLAMPED
+    // mip's texels -- an 8:1 footprint of 8 texels under a clamp of 6.5 reaches 2.7 cells, where
+    // one bilinear tap reaches half a cell. The floor ramps the clamp through intermediate coarse
+    // mips in the cell before a frontier, so the colour's anisotropic taps (sAniso) cross it: under
+    // the anisotropic sampler the floor touched NULL tiles the gather + max kept out at 2615 of the
+    // probe's points, and a second ring (5 x 5) at 5394. The trilinear sampler and the kernels'
+    // taps stay sound under it. The construction is kept, gated, for the law that replaces it.
+    //
+    // A cube face's border takes its neighbours from the face across the edge: the true cell
+    // under the direction of the point one cell further along in this face's plane
+    // (ComposeCubeDir past the square, CubeFaceOfDir), found once per map size (CubeFloorRing).
+    // At a corner, where three faces meet, the geometry gives what it gives. Slices 0..5 of a
+    // tenant with six or more are the cube (its cube views say so); every other slice is a
+    // window and clamps at its edge, as the sampler does. The map is square (rdim) while a
+    // tenant's tile grid need not be (UpdateResidencyByte's sx, sy): the dilation is in MAP
+    // cells, which are what the shader's bilinear mixes.
+    //
+    // The cube's border, per map size: for faces 0..5, the flat index (face * rdim^2 + y * rdim
+    // + x) of the true cell under each cell of a one-cell ring around the face, in the padded
+    // map's raster order -- rdim + 2 above, then the left and the right cell of each of the
+    // rdim rows, then rdim + 2 below: 4 rdim + 4 a face.
+    static std::vector<uint32_t> CubeFloorRing(uint32_t rdim);
+    // Slice s of `in` inside that ring: (rdim + 2)^2 bytes. With `cubeRing`, the border reads
+    // the neighbouring faces; without one it repeats the slice's own edge (a window's clamp).
+    static void FloorPad(const std::vector<std::vector<uint8_t>>& in, uint32_t rdim, uint32_t s,
+                         const std::vector<uint32_t>* cubeRing, std::vector<uint8_t>& padded);
+    // The floor map: every byte the largest of its 3 x 3 in `in`. `cubeRing` (null: every slice
+    // clamps) is CubeFloorRing(rdim) and serves slices 0..5.
+    static void FloorMap(const std::vector<std::vector<uint8_t>>& in, uint32_t rdim,
+                         const std::vector<uint32_t>* cubeRing,
+                         std::vector<std::vector<uint8_t>>& out);
+
     ID3D12Resource* TextureRes(int tenant) const { return m_tenants[tenant].res.Get(); }
     ID3D12Resource* ResidencyRes(int tenant) const { return m_tenants[tenant].resMap.res.Get(); }
     D3D12_RESOURCE_STATES TextureState(int tenant) const { return m_tenants[tenant].state; }
@@ -680,5 +726,14 @@ private:
     AuditLedger m_audit;
     void AuditInvalidation(int tenant, const TileRequest& r, const Tracked* tr);
 };
+
+class ShaderCompiler;
+// The residency manager's own gate (ResidencyTest.cpp): the floor law held to its arithmetic on
+// the CPU -- sound on the cube's faces and a window, the kernels' taps covered, porch_floor.py's
+// numbers reproduced, each check seen to catch a planted defect -- and, against the law in
+// effect, on this GPU through the engine's own samplers (shaders/ResidencyFloor.hlsl). Logs
+// [restest]; true when every instrument works and sees what it exists to see. Whether a floor
+// could be staged is a finding it prints, measured afresh every run.
+bool RunResidencySelfTest(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir);
 
 }  // namespace ga

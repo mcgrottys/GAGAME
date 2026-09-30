@@ -53,6 +53,7 @@ add_executable(gagame
   src/hal/TileAtlas.cpp
   src/hal/Residency.cpp
   src/hal/ResidencyAudit.cpp
+  src/hal/ResidencyTest.cpp
   src/hal/Tenant.cpp
   src/core/TileProviders.cpp
   src/core/DayLedger.cpp
