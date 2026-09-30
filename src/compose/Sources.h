@@ -205,8 +205,7 @@ private:
 // the slope, clay on the plain). Global footprint; the alpha is the same waterline band the bed
 // classifier hands land back through, with NO deep cutoff: the tree paints every ocean texel.
 // DRY albedo, like synth.bed: the water's optics (measured K_d, the two-flux endpoint) stay the
-// renderer's, and where they make the water opaque the renderer shades the endpoint by this
-// relief instead of replacing it (Compose.hlsli SeafloorReliefMod).
+// renderer's.
 class SeafloorReliefSource : public ColorSource {
 public:
     bool Load(const std::string& rulesPath, const Compositor* comp, int hgtChannel);

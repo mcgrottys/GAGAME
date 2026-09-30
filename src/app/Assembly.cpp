@@ -36,7 +36,6 @@
 #include "scene/GulfLayer.h"
 #include "scene/SeaLayer.h"
 #include "scene/SkyLayer.h"
-#include "scene/TerrainLayer.h"
 #include "scene/WaterBankLayer.h"
 #include "scene/TideLayer.h"
 #include "compose/Compositor.h"
@@ -203,7 +202,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     auto& bathy = A->bathy;
     auto& bathySwe = A->bathySwe;
     auto& bathyBostonSwe = A->bathyBostonSwe;
-    auto& terrain = A->terrain;
     auto& swe = A->swe;
     auto& riverQ = A->riverQ;
     auto& gulf = A->gulf;
@@ -442,8 +440,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         return nullptr;
     }
 
-    // M5: the CUDEM terrain. Registered AFTER tide (chart) and BEFORE sea so the opaque
-    // land draws first and the water covers only what it actually stands above.
+    // M5: the CUDEM bathymetry.
     // M6w: the SOLVER'S grid realizes from the channel -- one bed for the solver, the
     // renderer, and every future physics product. Fallback (no channel): raw + walls.
     if (haveBathyRaw && bathy.Load(S.data.bathy)) {
@@ -461,11 +458,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         // river's bend in the north band, and the reach behind the face became a pond.
         bathySwe.DrawFrom(bathy, srcCudem.get(), S.water.swe.window == 0,
                           SweConfig{}.westBoundary, "merrimack");
-        auto terrOwned = std::make_unique<TerrainLayer>();
-        terrain = terrOwned.get();
-        terrain->Configure(shaderDir, &bathy);
-        terrain->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
-        renderer.AddLayer(std::move(terrOwned));
         // M9k/M9n: THE BED, through GA Load -> normalize -> GA Compose (the six-layer
         // height stack, LayeredOver) -> a reserved, paged, mipped sparse array. Built HERE,
         // before anything binds a bed, because the consumers below now take the bank: the
@@ -494,7 +486,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
 
     // M5c: the sparse shallow-water solver -- the estuary's own hydrodynamics, tide-forced
     // offshore and river-forced upstream, feeding the sea's mean surface and currents.
-    if (terrain && sea && S.water.swe.enabled) {
+    if (bathy.Ready() && sea && S.water.swe.enabled) {
         // ---- M9m: THE COMPOSE TREE, and the tide step that forced it into existence.
         //
         // Depth is not a dataset anyone ships. It is water level minus bed, and those two
@@ -571,7 +563,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         riverQ = (S.water.swe.riverQ > 0) ? S.water.swe.riverQ
                                          : LoadRiverDischarge("data/river/river.json");
         sea->SetSwe(&swe);
-        sea->SetBathyCpu(&bathy);
     }
     if (haveCurrents && currents.Field().Valid()) {
         auto gulfOwned = std::make_unique<GulfLayer>();
@@ -676,9 +667,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         globe->debugLens = opt.lens;
         globe->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
         renderer.AddLayer(std::move(globeOwned));
-        // M6j: with the unified mesh surface active, the terrain layer stops rendering
-        // (it keeps the heightfield the SWE physics and the sea's bed read).
-        if (terrain && globe->MeshPathActive()) terrain->renderEnabled = false;
     } else {
         Log("[main] no globe data (run: py -3 harvester\\harvest_globe.py)");
     }

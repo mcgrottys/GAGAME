@@ -49,7 +49,6 @@
 #include "scene/ViewContext.h"
 #include "scene/SeaLayer.h"
 #include "scene/SkyLayer.h"
-#include "scene/TerrainLayer.h"
 #include "scene/WaterBankLayer.h"
 #include "scene/TideLayer.h"
 #include "compose/Compositor.h"
@@ -431,7 +430,6 @@ std::optional<int> FrameLoop::Session() {
     auto& hgtCh = m_A.hgtCh;
     auto& waterAtlas = m_A.waterAtlas;
     auto& bathy = m_A.bathy;
-    auto& terrain = m_A.terrain;
     auto& swe = m_A.swe;
     auto& riverQ = m_A.riverQ;
     auto& gulf = m_A.gulf;
@@ -521,7 +519,6 @@ std::optional<int> FrameLoop::Session() {
         sky->enabled = (m != 1);   // world mode gates the sky per frame by altitude
         tide->enabled = (m == 0);
         if (sea) sea->enabled = (m == 1) && !marsMode && !opt.albedo;
-        if (terrain) terrain->enabled = (m == 1) && !marsMode;
         if (gulf) gulf->enabled = (m == 2);
         if (globe) globe->enabled = (m == 1);
     };
@@ -1850,7 +1847,6 @@ bool FrameLoop::Frame() {
     auto& hgtCh = m_A.hgtCh;
     auto& waterAtlas = m_A.waterAtlas;
     auto& bathy = m_A.bathy;
-    auto& terrain = m_A.terrain;
     auto& swe = m_A.swe;
     auto& gulf = m_A.gulf;
     auto& waterScene = m_A.waterScene;
@@ -3295,9 +3291,9 @@ bool FrameLoop::Frame() {
     PROF_END(4);
     // M12 step 4g: THE ONE SURFACE CONSTANT BUFFER. The surface fills its rows once a frame
     // into the renderer's b2 buffer (Renderer::surfaceCb), which RenderFrame pushes once and
-    // binds for every layer: the globe, the sea, the terrain and the GIS vectors read the
+    // binds for every layer: the globe, the sea and the GIS vectors read the
     // same bytes from one buffer where each carried a copy inside its own cbuffer -- the
-    // globe's refilled every frame from this same SurfaceFrame, the other three once at boot
+    // globe's refilled every frame from this same SurfaceFrame, the others once at boot
     // (Session), and the fingerprints of all of them agreed with the bytes pushed for b2 at
     // every pose (scratchpad/step4g_probe.py). Mars fills too, as the globe's own fill did:
     // its rows say "height cube, no page" (SurfaceFrame.h's banner). The step 0 fingerprint
@@ -3515,7 +3511,6 @@ bool FrameLoop::Frame() {
             }
         }
     }
-    if (terrain) terrain->waterNavd = static_cast<float>(waterNavd);
     if (globe) globe->waterNavd = static_cast<float>(waterNavd);   // M6j materials
 
     // M9o/M9t: the ENGINE's cost. dt (the loop interval) also carries the recorder's

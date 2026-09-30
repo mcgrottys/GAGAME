@@ -153,7 +153,7 @@ public:
 
     // M12 step 4g: THE SURFACE CONSTANT BUFFER (b2). The frame loop fills these rows once a
     // frame through SurfaceFrame::Fill; RenderFrame pushes them once and binds root parameter 4
-    // (b2) before any layer records, so the globe, the sea, the terrain and the GIS vectors
+    // (b2) before any layer records, so the globe, the sea and the GIS vectors
     // read one buffer where each carried a copy of these rows inside its own cbuffer. Zero
     // until filled: every composed channel reads "off".
     ComposedSurfaceCb surfaceCb{};

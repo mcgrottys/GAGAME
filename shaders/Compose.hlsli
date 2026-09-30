@@ -9,8 +9,8 @@
 //
 //  The rows this file reads are Common.hlsli's SurfaceCb (b2): ONE constant buffer, filled
 //  through SurfaceFrame::Fill alone (M12 step 4a) and bound once a frame for every layer (M12
-//  step 4g, where each layer embedded a copy in its own cbuffer). The globe and the terrain
-//  therefore run literally the same code on literally the same constants -- the class of bug
+//  step 4g, where each layer embedded a copy in its own cbuffer). Every layer that reads them
+//  therefore runs literally the same code on literally the same constants -- the class of bug
 //  where two layers disagree about the planet's surface is structurally gone.
 //  M12 step 4e: the reads themselves -- the window uv, the residency floor, the residency-
 //  clamped sample, the cube-versus-page choice -- are PageSample.hlsli's contract, shared with
@@ -170,18 +170,9 @@ float3 ComposedColor(float3 dir) {
 }
 bool ComposedColorOn() { return gCsF.x > 0.5f; }
 
-// M9av: THE SEAFLOOR THROUGH OPAQUE WATER. The megatexture's ocean texels are DRY seafloor
-// albedo (synth.seafloor.relief: the bathymetry's hillshade times a sediment ramp keyed on
-// datum depth). Beer-Lambert over the measured K_d makes water past a few tens of metres
-// opaque, and the two-flux endpoint (chlorophyll, SPM) IS its colour -- that stays. The floor's
-// SHADING is carried as a modulation of that endpoint's brightness: divide the ramp's own
-// luminance back out of the texel and what remains is the hillshade, flat bed = 1. A map
-// convention, declared: the hue is the measurement, the relief is the floor's, and
-// kSeafloorRelief = 0 removes it.
-static const float kSeafloorRelief = 1.0f;          // 0 = the physical endpoint alone
-static const float kSeafloorReliefContrast = 1.0f;  // hillshade gain over the painted swing (the
-                                                    // user chose the painted swing as is; a
-                                                    // brightened "map ocean" was tried and rejected)
+// M9av: the luminance of the seafloor's dry sediment ramp. The megatexture's ocean texels are
+// DRY seafloor albedo (synth.seafloor.relief: the bathymetry's hillshade times this ramp, keyed
+// on datum depth).
 float SeafloorRampLuma(float depthM) {
     // MIRRORS src/compose/Sources.cpp SeafloorRamp: change both.
     const float d = clamp(depthM, 0.0f, 4000.0f);
@@ -194,17 +185,6 @@ float SeafloorRampLuma(float depthM) {
     else if (d < 1000.0f) c = lerp(c2, c3, (d - 200.0f) / 800.0f);
     else c = lerp(c3, c4, (d - 1000.0f) / 3000.0f);
     return dot(c, float3(0.299f, 0.587f, 0.114f));
-}
-// The endpoint's HUE and brightness are the measurement's (albWater is kept in the signature
-// for the record: a version that redrew the floor through water of that hue at a declared
-// visibility was brighter, greener, and rejected -- the physical water is the look). Only the
-// floor's hillshade rides the endpoint, as a brightness modulation, where the bed term has died.
-float3 SeafloorReliefMod(float3 albSea, float3 albWater, float3 floorAlb, float hp, float opaque) {
-    const float3 L = float3(0.299f, 0.587f, 0.114f);
-    const float ref = SeafloorRampLuma(max(-hp, 0.0f));
-    const float shade0 = dot(floorAlb, L) / max(ref, 1e-3f);          // flat bed = 1
-    const float shade = clamp(1.0f + kSeafloorReliefContrast * (shade0 - 1.0f), 0.30f, 2.2f);
-    return albSea * lerp(1.0f, shade, kSeafloorRelief * saturate(opaque));
 }
 
 // The planet's composed height (metres), residency-clamped at the caller's lod. Usable from a

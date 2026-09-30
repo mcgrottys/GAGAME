@@ -202,7 +202,7 @@ void GlobeLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSignatur
     if (!BuildPso(gpu, sc)) throw std::runtime_error("globe PSO failed");
 
     // M6j: the unified mesh-shader surface (orbit to helm, one pipeline). Falls back to the
-    // classic VS path -- and the terrain layer -- if the device or compile says no.
+    // classic VS path if the device or compile says no.
     if (msSurface && BuildMeshPso(gpu, sc)) {
         for (uint32_t i = 0; i < Gpu::kFrameCount; ++i) {
             m_recBuf[i] = gpu.CreateUploadBuffer(
@@ -210,10 +210,9 @@ void GlobeLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSignatur
                 L"globe.meshlets (per-frame records)");
         }
         m_msPath = true;
-        Log("[globe] mesh-shader surface ACTIVE (unified orbit-to-helm; terrain layer "
-            "retires as a renderer)");
+        Log("[globe] mesh-shader surface ACTIVE (unified orbit-to-helm)");
     } else if (msSurface) {
-        Log("[globe] mesh-shader surface unavailable; classic VS path + terrain layer");
+        Log("[globe] mesh-shader surface unavailable; classic VS path");
     }
 
     // M6i: no committed relief texture any more -- the composed height cube (ETOPO + NE 15s +
@@ -850,8 +849,7 @@ bool SplitAt(const WalkParams& wp, int level, double arc, double dist) {
     // M6j/M8h: the mesh path walks two rungs past CUDEM scale (level 18 = 1.19 m vertex
     // spacing -- level 16's 4.77 m exactly saturated the old 4.8 m bank ring and could
     // not articulate what a finer ring stores; the user's call: more wave vertices).
-    // The fallback VS path keeps its classic depth (the terrain layer covers the near
-    // field). The distance split (dist < 3*arc) reaches level 18 only within ~115 m of
+    // The fallback VS path keeps its classic depth. The distance split (dist < 3*arc) reaches level 18 only within ~115 m of
     // the eye, so the record budget grows by a few hundred, not thousands. (wp.maxDepth is
     // 18 on the mesh path and kMaxDepth on the fallback -- CaptureWalk.)
     bool split = level < wp.maxDepth && dist < arc * GlobeLayer::kLodFactor;

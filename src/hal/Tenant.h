@@ -108,8 +108,10 @@
 //      holds the want set (Residency.h settleExact).
 //
 //  DX12-first: the fiber's format is DXGI's and the manager's texture is the reserved
-//  Texture2DArray it always was; nothing here is virtual. Retire.h beside this file states the
-//  temporal-ownership contract the residency manager keeps by turn count.
+//  Texture2DArray it always was; nothing here is virtual. The residency manager keeps the
+//  temporal-ownership contract (Context.h) by TURN COUNT, not by fence: a dropped tile's NULL
+//  map and a DirectStorage landing slot retire 4 turns later (kEvictAgeFrames,
+//  kStageRetireFrames), longer than the frame ring's overlap.
 // ================================================================================================
 #pragma once
 

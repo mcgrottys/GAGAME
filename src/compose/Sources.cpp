@@ -723,8 +723,7 @@ const char* kSeafloorRulesDefault = R"JSON({
 )JSON";
 
 // Dry sediment albedo by datum depth: sand on the shelf, silt down the slope, clay on the plain.
-// MIRRORED in shaders/Compose.hlsli SeafloorRampLuma -- change both, or the renderer's shading
-// recovery drifts.
+// MIRRORED in shaders/Compose.hlsli SeafloorRampLuma -- change both.
 void SeafloorRamp(float depthM, float rgb[3]) {
     static const float kD[5] = {0.0f, 40.0f, 200.0f, 1000.0f, 4000.0f};
     static const float kC[5][3] = {{0.66f, 0.60f, 0.46f}, {0.56f, 0.52f, 0.42f},

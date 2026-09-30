@@ -24,9 +24,9 @@
 //       A second run streams composed tiles straight off disk: no HTTP, no reprojection, no
 //       resampling -- the paint cost is once per machine per stack version.
 //    4. ONE RENDER PATH -- shaders/Compose.hlsli. The renderer knows CHANNELS, not sources:
-//       earth color is earth color, earth height is earth height. The globe and the terrain
-//       call the SAME ComposedColor/ComposedHeight functions on the SAME constants
-//       (ComposedSurfaceCb, filled by SurfaceFrame::Fill alone), so they CANNOT disagree.
+//       earth color is earth color, earth height is earth height. Every layer that reads them
+//       calls the SAME ComposedColor/ComposedHeight functions on the SAME constants
+//       (ComposedSurfaceCb, filled by SurfaceFrame::Fill alone), so no two CAN disagree.
 //
 //  GA hook: a layer is any object with a Sample(); the stack walk is an ordered composition of
 //  operators. Raster operators over multivector-valued layers (contrast amplification, fades,

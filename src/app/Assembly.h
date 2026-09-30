@@ -67,7 +67,6 @@
 #include "scene/GulfLayer.h"
 #include "scene/SeaLayer.h"
 #include "scene/SkyLayer.h"
-#include "scene/TerrainLayer.h"
 #include "scene/WaterBankLayer.h"
 #include "scene/TideLayer.h"
 #include "compose/Compositor.h"
@@ -151,10 +150,9 @@ struct Assembly {
     BathyModel bathy;
     // THE SOLVERS' GRIDS (HIERARCHY 4.17): the survey windows drawn in to where their sources
     // paint at full weight (BathyModel::DrawFrom). `bathy` stays the survey's whole window for
-    // what draws or stands on the ground (the terrain, the foundation sink, the camera's clamp);
+    // what draws or stands on the ground (the foundation sink, the camera's clamp);
     // every reader of a solver's fields reads it by these.
     BathyModel bathySwe, bathyBostonSwe;
-    TerrainLayer* terrain = nullptr;
     SweSolver swe;
     double riverQ = 70.0;
     GulfLayer* gulf = nullptr;

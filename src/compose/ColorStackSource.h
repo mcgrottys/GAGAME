@@ -11,11 +11,11 @@
 //  with nothing in between, and far imagery starved because three tenants bid separately for
 //  tiles while the one that covers the whole planet was already at its finest.
 //
-//  THE CAP IS ON A PAGE, NOT ON THE ADDRESS SPACE. PageTable/LevelLadder already model the
+//  THE CAP IS ON A PAGE, NOT ON THE ADDRESS SPACE. PageAddr/LevelLadder already model the
 //  planet as PageAddr{level, x, y} with 16384-texel pages and a strict halving per level, so a
 //  ladder can run from centimetres to the whole globe in ONE space with pages resident only
 //  where data exists. Sparse residency IS the level-of-detail mechanism; the rungs were a
-//  workaround for a limit that the page table had already removed.
+//  workaround for a limit that the page address space had already removed.
 //
 //  So imagery joins every other field on the standard path, and this file is its first arrow:
 //

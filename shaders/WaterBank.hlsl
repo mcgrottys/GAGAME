@@ -389,8 +389,7 @@ void WakeOne(float4 A, float4 B, float2 posM, float sampleM, inout float eta,
 }
 
 // M7n: THE COINCIDENCE CARD. Quadrant shading (4 distinct levels -- any flip or rotation
-// permutes them visibly) + thin border lines at the wrap seams. Globe.hlsl carries the
-// SAME function for the PS half of the two-color test; the two must stay identical.
+// permutes them visibly) + thin border lines at the wrap seams.
 float CardPattern(float2 uv) {
     const float2 f = frac(uv);
     float v = 0.20f + 0.30f * step(0.5f, f.x) + 0.40f * step(0.5f, f.y);

@@ -94,7 +94,6 @@ add_executable(gagame
   src/scene/TideLayer.cpp
   src/scene/SeaLayer.cpp
   src/scene/GulfLayer.cpp
-  src/scene/TerrainLayer.cpp
   src/scene/GisLayer.cpp
   src/scene/MarkerLayer.cpp
   src/scene/VesselLayer.cpp

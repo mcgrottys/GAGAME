@@ -21,9 +21,9 @@
 //  Reload() is that rule. What keeps the OLD pipeline alive while a list in flight may still
 //  name it is not this file and not the frame ring (which holds an allocator and a list, no
 //  pipeline references): Renderer::ReloadShaders swaps under a WaitIdle, so no recorded list
-//  outlives the swap. The day a reload stops draining the GPU, the replaced pipeline goes
-//  through hal::Retire (Retire.h) keyed to the fence the current recording will signal --
-//  step 3e stated that contract and found no site that needs it yet.
+//  outlives the swap. The day a reload stops draining the GPU, the replaced pipeline must be
+//  released on the fence the current recording will signal, not on the swap -- step 3e stated
+//  that contract and found no site that needs it yet.
 //
 //  THE MESH PIPELINE (step 3f). The globe's unified surface has no vertex stage -- a mesh
 //  shader stands in its place -- and D3D12 describes that only through the subobject STREAM
