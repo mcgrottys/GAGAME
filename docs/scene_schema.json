@@ -117,7 +117,9 @@
       { "key": "westBoundary", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the west-boundary deviation; false = zeroed (--swe-west-off)" },
       { "key": "spinupH", "type": "number", "field": "f64", "quantity": "time", "unit": "h", "default": 1, "reload": "restart", "doc": "history integrated before the first frame (--swe-spinup)" },
       { "key": "gain", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 1, "reload": "hot", "doc": "solved-current gain (--swe-gain)" },
-      { "key": "riverQ", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": -1, "reload": "restart", "doc": "river discharge, m^3/s; < 0 = data/river/river.json (--river)" }
+      { "key": "riverQ", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": -1, "reload": "restart", "doc": "river discharge, m^3/s; < 0 = data/river/river.json (--river)" },
+      { "key": "bedWait", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "whole", "names": ["none", "map", "whole"], "reload": "restart", "doc": "what the spin-up waits for before its hour: nothing (the kernel reads whatever it reads before the first residency turn), the residency map (one turn: the coarsest resident mip), or the whole bed (every solver's domain read at mip 0)" },
+      { "key": "window", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "full-weight", "names": ["full-weight", "survey"], "reload": "restart", "doc": "where a solver's grid stands: the survey's window drawn in, on the side of an open face that reads the bed (the west face), to where its source paints at full weight (the band is the source's own feather), the other sides keeping the survey's extent; or the survey's whole window, feather included" }
     ] },
     { "type": "water.bank", "keys": [
       { "key": "flatBed", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "replace the bed with a flat floor (--flat-bed)" },

@@ -93,6 +93,32 @@ public:
     // (AUDIT_WATER item 6): an active Boston solver read slice 6 at whatever mip the camera
     // had left there, and with no globe layer nothing warmed the page for anyone.
     void PinDomains(ResidencyManager& res, int hgtTenant);
+    // THE BED BEFORE THE HOUR (review finding 48). A spin-up integrates on the bed its kernel
+    // reads, and the kernel reads the height tenant through the residency map; before the first
+    // frame nothing of any domain has been asked for. This asks for the active windows' lattices
+    // at mip 0 -- the pin's own rectangles, or the one window named -- and runs residency turns
+    // on upload lists until the bed the kernel reads IS that bed. "Landed" is what the solver's
+    // own bed trace reads (SweSolver::TraceBed), never the manager's claim alone: a
+    // DirectStorage tile is Mapped before its bytes land (review finding 24), and the kernel
+    // reads the residency map a turn uploads, not the one the manager holds. Bounded: a bed that
+    // is not whole after kBedWaitMaxS is reported and the spin-up goes on over what there is.
+    struct BedWait {
+        uint32_t windows = 0;          // windows waited for (inside the page)
+        uint32_t turns = 0;            // residency turns taken
+        uint32_t tiles = 0;            // tiles mapped over the wait, every tenant
+        uint64_t cells = 0, whole = 0; // lattice cells traced, and those reading the page at mip 0
+        double seconds = 0.0;
+        bool done = false;             // every window's bed read whole
+    };
+    BedWait WaitForBeds(Gpu& gpu, ResidencyManager& res, int hgtTenant,
+                        const char* only = nullptr);
+    static constexpr double kBedWaitMaxS = 60.0;
+    // What the MANAGER claims over the active domains (or the one named): its own residency map,
+    // the CPU copy, histogrammed by mip (15 = nothing). The kernel reads the GPU copy the turns
+    // upload, so where the two disagree the bed trace (SweSolver::TraceBed) is the one to believe.
+    // Returns the samples taken.
+    uint64_t ClaimedMips(const ResidencyManager& res, int hgtTenant, uint64_t hist[16],
+                         const char* only = nullptr) const;
     // Force a dormant window up (the probe harness; interactive uses the camera rule).
     bool Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
                   const char* name, double simUnix);
@@ -166,6 +192,9 @@ private:
     };
     static constexpr double kMirrorDt = 2.0;      // a mirror may lag the asking clock this much
     void ReadMirrors(Gpu& gpu, double simUnix, double maxAge);
+    // A window's lattice as a rectangle of the height page's uv (the pin's, and the bed wait's);
+    // false where it does not reach inside the page.
+    bool DomainUv(const BathyModel& b, float& u0, float& v0, float& u1, float& v1) const;
     static constexpr double kActivateAltM = 30000.0;
     bool m_pinLogged = false;
 

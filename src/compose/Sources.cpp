@@ -398,14 +398,44 @@ float CudemHeightSource::Sample(double latRad, double lonRad, double, float& met
     const double z = (latRad * 180.0 / kPi - BathyModel::kOrgLat) * BathyModel::kMPerLat;
     const float v = m_bathy->SampleWorld(static_cast<float>(x), static_cast<float>(z));
     if (v < -9000.0f) return 0.0f;   // outside the grid, or nodata
+    metres = v;
+    return EdgeWeight(x, z);
+}
+
+float CudemHeightSource::EdgeWeight(double x, double z) const {
     const double ex = (std::min)(x - m_bathy->WorldX0(),
                                  m_bathy->WorldX0() + m_bathy->WorldSizeX() - x) /
                       m_bathy->WorldSizeX();
     const double ez = (std::min)(z - m_bathy->WorldZ0(),
                                  m_bathy->WorldZ0() + m_bathy->WorldSizeZ() - z) /
                       m_bathy->WorldSizeZ();
-    metres = v;
     return Feather((std::min)(ex, ez), m_feather);
+}
+
+bool CudemHeightSource::FullWeightCells(int& c0, int& r0, int& c1, int& r1) const {
+    if (!m_bathy || !m_bathy->Ready()) return false;
+    const int nx = m_bathy->Nx(), ny = m_bathy->Ny();
+    // A cell's centre on the lattice, in the world frame Sample puts a sample point in (the
+    // linear lon/lat map both frames were built with); the other axis held at the window's
+    // middle, where only the axis being walked can bring the weight under one.
+    auto x = [&](int c) {
+        return (m_bathy->Lon0() + (c + 0.5) * m_bathy->Dlon() - BathyModel::kOrgLon) *
+               BathyModel::kMPerLon;
+    };
+    auto z = [&](int r) {
+        return (m_bathy->Lat1() - (r + 0.5) * m_bathy->Dlat() - BathyModel::kOrgLat) *
+               BathyModel::kMPerLat;
+    };
+    const double xMid = x(nx / 2), zMid = z(ny / 2);
+    c0 = 0;
+    while (c0 < nx && EdgeWeight(x(c0), zMid) < 1.0f) ++c0;
+    c1 = nx - 1;
+    while (c1 >= c0 && EdgeWeight(x(c1), zMid) < 1.0f) --c1;
+    r0 = 0;
+    while (r0 < ny && EdgeWeight(xMid, z(r0)) < 1.0f) ++r0;
+    r1 = ny - 1;
+    while (r1 >= r0 && EdgeWeight(xMid, z(r1)) < 1.0f) --r1;
+    return c0 <= c1 && r0 <= r1;
 }
 
 // ------------------------------------------------------------------- the bed classifier

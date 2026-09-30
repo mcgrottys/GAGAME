@@ -148,6 +148,9 @@ public:
     uint32_t PendingCount() const {
         return static_cast<uint32_t>(m_seen.size() + m_loading.size());
     }
+    // Tiles mapped in the pool, every tenant (a DirectStorage tile counts from its map, before its
+    // bytes land). The solver's bed wait reports the tiles it waited for as the growth of this.
+    uint32_t MappedCount() const { return static_cast<uint32_t>(m_mapped.size()); }
 
     uint32_t TextureSrv(int tenant) const { return m_tenants[tenant].srv; }
     uint32_t Mips(int tenant) const { return m_tenants[tenant].mips; }

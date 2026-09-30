@@ -160,7 +160,11 @@ const Schema& SweSchema() {
             .Bind("westBoundary", p.westBoundary, "the west-boundary deviation; false = zeroed (--swe-west-off)", R)
             .Bind("spinupH", p.spinupH, Q::Time, "h", "history integrated before the first frame (--swe-spinup)", R)
             .Bind("gain", p.gain, Q::Dimensionless, "1", "solved-current gain (--swe-gain)", H)
-            .Bind("riverQ", p.riverQ, Q::Dimensionless, "1", "river discharge, m^3/s; < 0 = data/river/river.json (--river)", R);
+            .Bind("riverQ", p.riverQ, Q::Dimensionless, "1", "river discharge, m^3/s; < 0 = data/river/river.json (--river)", R)
+            .BindEnum("bedWait", p.bedWait, {"none", "map", "whole"},
+                      "what the spin-up waits for before its hour: nothing (the kernel reads whatever it reads before the first residency turn), the residency map (one turn: the coarsest resident mip), or the whole bed (every solver's domain read at mip 0)", R)
+            .BindEnum("window", p.window, {"full-weight", "survey"},
+                      "where a solver's grid stands: the survey's window drawn in, on the side of an open face that reads the bed (the west face), to where its source paints at full weight (the band is the source's own feather), the other sides keeping the survey's extent; or the survey's whole window, feather included", R);
         return sc;
     }();
     return *s;

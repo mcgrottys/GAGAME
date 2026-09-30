@@ -129,6 +129,9 @@ struct SweProps {
     double spinupH = 1.0;
     float gain = 1.0f;
     double riverQ = -1.0;             // m^3/s; < 0 = data/river/river.json
+    int bedWait = 2;                  // none | map | whole: what the spin-up waits for (finding 48)
+    int window = 0;                   // full-weight | survey: where the solver's grid stands (4.17):
+                                      // the open face's side drawn in, the walls the survey's
 };
 struct BankProps {
     bool flatBed = false;

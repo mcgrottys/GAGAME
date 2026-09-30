@@ -9,6 +9,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <queue>
+#include <string>
+#include <utility>
 
 namespace ga {
 
@@ -42,10 +45,75 @@ void SweSolver::SetHeightPage(Gpu& gpu, hal::Resource heightArr, hal::Resource r
     // bit; the [kernel] swe hash is the gate).
     window.Rows(m_cb.winA);
     m_cb.pageB[0] = static_cast<float>(slice);
+    m_bedArr = heightArr;
+    m_bedRes = resMapArr;
+    m_bedMips = mips;
     m_bedBound = true;
     Log("[swe] bed bound to the height megatexture: page slice %u, %u mips, residency-clamped "
         "per texel -- the solver, the water shading and the globe read ONE bed",
         slice, mips);
+}
+
+bool SweSolver::TraceBed(Gpu& gpu, BedTrace& out, float floorMip) {
+    if (!m_ready || !m_bedBound || !m_sc) return false;
+    if (!m_traceK) {
+        // Built on the first call: b0 the solver's own constants (BedAt reads its lattice rows
+        // from them), b1 the floor, and a table of the solver's two bed views and the target.
+        m_traceRs = hal::RootLayout{}
+                        .Cbv(0)
+                        .Cbv(1)
+                        .Table({hal::SrvRange(1, 2), hal::UavRange(4, 1)})
+                        .Build(gpu, "swe.bedtrace");
+        m_traceRs->SetName(L"swe bed trace root signature");
+        m_traceK = hal::BuildCompute(gpu, m_traceRs.Get(),
+                                     m_sc->Compile(m_shaderDir + L"/Swe.hlsl", L"CsSweBedTrace",
+                                                   L"cs_6_0", {L"HP_TRACE=1"}),
+                                     "swe.bedtrace");
+        if (!m_traceK) return false;
+        m_traceTex = gpu.CreateTexture2D(m_cb.nx, m_cb.ny, DXGI_FORMAT_R32G32_FLOAT,
+                                         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                         D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                         L"swe.bedtrace (BedAt, mip + 16 slice)");
+        m_traceTable = hal::Table::Alloc(gpu, 3, "swe.bedtrace");
+        m_traceTable.SrvArray(0, m_bedArr, DXGI_FORMAT_R16_FLOAT, 0, UINT32_MAX, m_bedMips);
+        m_traceTable.SrvArray(1, m_bedRes, DXGI_FORMAT_R8_UNORM, 0, UINT32_MAX, 1);
+        m_traceTable.Uav2D(2, m_traceTex.res.Get(), DXGI_FORMAT_R32G32_FLOAT);
+    }
+    struct {
+        float floorMip, pad[3];
+    } tc{floorMip, {0.0f, 0.0f, 0.0f}};
+    {
+        hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
+        up.BindHeaps();
+        up.ComputeRoot(m_traceRs.Get());
+        up.ComputeConstants(0, m_cb);
+        up.ComputeConstants(1, tc);
+        up.ComputeTable(2, m_traceTable.Base());
+        up.Pipeline(m_traceK.Get());
+        up.Dispatch((m_cb.nx + 15) / 16, (m_cb.ny + 15) / 16, 1);
+        gpu.EndUpload();
+    }
+    uint32_t pitch = 0;
+    const std::vector<uint8_t> raw = gpu.ReadbackTexture(m_traceTex, &pitch);
+    out.nx = m_cb.nx;
+    out.ny = m_cb.ny;
+    const size_t n = size_t(out.nx) * out.ny;
+    out.bed.resize(n);
+    out.mip.resize(n);
+    out.slice.resize(n);
+    for (uint32_t y = 0; y < out.ny; ++y) {
+        const float* row = reinterpret_cast<const float*>(&raw[size_t(y) * pitch]);
+        for (uint32_t x = 0; x < out.nx; ++x) {
+            const size_t i = size_t(y) * out.nx + x;
+            // A cell the rule never reached keeps the trace's -1: it reads as mip 15, slice 15.
+            const float c = row[x * 2 + 1];
+            const uint32_t code = (c < 0.0f) ? 255u : static_cast<uint32_t>(c + 0.5f);
+            out.bed[i] = row[x * 2];
+            out.mip[i] = static_cast<uint8_t>(code & 15u);
+            out.slice[i] = static_cast<uint8_t>(code >> 4);
+        }
+    }
+    return true;
 }
 
 void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
@@ -243,6 +311,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     if (hasSound) {
         Log("[swe] south boundary strip active (Plum Island Sound rows %u..%u)", ny - 8, ny - 1);
     }
+    m_cfg = cfg;
 
     // M9ax: the derived currents as a bank over the wet tiles. Grade 1 (a vector field);
     // RGBA16F keeps the (u, v, |U|, valid) fiber the consumers already read. Same residency as
@@ -607,6 +676,7 @@ int SweSolver::Record(hal::CommandContext& cmd, Gpu& gpu, double simUnix, float 
     for (const float bed : m_westBed) area += (std::max)(lvl - bed, 0.0f) * m_cb.dy;
     m_cb.westUext =
         (area > 1.0f) ? std::clamp(m_westQ / area, -1.5f, 1.5f) : 0.0f;
+    m_westArea = area;
 
     cmd.ComputeRoot(m_rs.Get());
     LogCbFingerprint();
@@ -680,6 +750,79 @@ std::vector<uint8_t> SweSolver::ReadFluxRaw(Gpu& gpu, uint32_t* outW, uint32_t* 
     *outW = wrap.width;
     *outH = wrap.height;
     return gpu.ReadbackTexture(wrap, outPitch);
+}
+
+bool SweSolver::TraceWestFace(Gpu& gpu, std::vector<WestFaceRow>& rows) {
+    if (!m_ready || !m_bedBound || !m_sc) return false;
+    if (!m_westK) {
+        // The solver's own layout with the trace's target beside it: b0, t0 the tile list, and a
+        // table of the solver's six views and u5.
+        m_westRs = hal::RootLayout{}
+                       .Cbv(0)
+                       .Srv(0)
+                       .Table({hal::SrvRange(1, 2), hal::UavRange(0, 4), hal::UavRange(5, 1)})
+                       .Build(gpu, "swe.westtrace");
+        m_westRs->SetName(L"swe west trace root signature");
+        m_westK = hal::BuildCompute(gpu, m_westRs.Get(),
+                                    m_sc->Compile(m_shaderDir + L"/Swe.hlsl", L"CsSweFlux", L"cs_6_0",
+                                                  {L"SWE_WEST_TRACE=1"}),
+                                    "swe.westtrace");
+        if (!m_westK) return false;
+        m_westTex = gpu.CreateTexture2D(4, m_cb.ny, DXGI_FORMAT_R32G32B32A32_FLOAT,
+                                        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                        L"swe.westtrace (the Flather face's terms)");
+        m_westTable = hal::Table::Alloc(gpu, 7, "swe.westtrace");
+        m_westTable.SrvArray(0, m_bedArr, DXGI_FORMAT_R16_FLOAT, 0, UINT32_MAX, m_bedMips);
+        m_westTable.SrvArray(1, m_bedRes, DXGI_FORMAT_R8_UNORM, 0, UINT32_MAX, 1);
+        m_westTable.Uav2D(2, m_eta.Res(), DXGI_FORMAT_R32_FLOAT);
+        m_westTable.Uav2D(3, m_flux.Res(), DXGI_FORMAT_R32G32_FLOAT);
+        m_westTable.UavArray(4, m_uvBank.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
+        m_westTable.UavArray(5, m_velGrad.Res(), DXGI_FORMAT_R16G16B16A16_FLOAT, 0, 1);
+        m_westTable.Uav2D(6, m_westTex.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+    }
+    {
+        hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
+        up.BindHeaps();
+        if (m_etaState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+            up.Barrier(m_eta.Res(), m_etaState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            m_etaState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
+        if (m_uvState != D3D12_RESOURCE_STATE_UNORDERED_ACCESS) {
+            up.Barrier(m_uvBank.Res(), m_uvState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            m_uvState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        }
+        up.ComputeRoot(m_westRs.Get());
+        up.ComputeConstants(0, m_cb);
+        const auto& fl = m_flux.ResidentList();
+        up.ComputeSrvAt(1, gpu.PushConstants(fl.data(), fl.size() * 4));
+        up.ComputeTable(2, m_westTable.Base());
+        up.Pipeline(m_westK.Get());
+        up.Dispatch(m_flux.TileW() / 16, m_flux.TileH() / 16, static_cast<UINT>(fl.size()));
+        gpu.EndUpload();
+    }
+    uint32_t pitch = 0;
+    const std::vector<uint8_t> raw = gpu.ReadbackTexture(m_westTex, &pitch);
+    rows.assign(m_cb.ny, WestFaceRow{});
+    for (uint32_t y = 0; y < m_cb.ny && size_t(y) * pitch + sizeof(WestFaceRow) <= raw.size(); ++y) {
+        memcpy(&rows[y], &raw[size_t(y) * pitch], sizeof(WestFaceRow));   // 4 texels = 16 floats
+    }
+    return true;
+}
+
+double SweSolver::WestTransport(Gpu& gpu) {
+    if (!m_ready) return 0.0;
+    uint32_t w = 0, h = 0, pitch = 0;
+    const std::vector<uint8_t> raw = ReadFluxRaw(gpu, &w, &h, &pitch);
+    double q = 0.0;
+    // Column 0's east face is the Flather face (Swe.hlsl CsSweFlux, t.x < riverBox.x); a NULL
+    // tile reads zero, which is no transport.
+    for (uint32_t y = 0; y < m_cb.ny && size_t(y) * pitch + 4 <= raw.size(); ++y) {
+        float qx = 0.0f;
+        memcpy(&qx, &raw[size_t(y) * pitch], 4);
+        q += qx;
+    }
+    return q;
 }
 
 void SweSolver::ReadFields(Gpu& gpu, std::vector<float>& etaOut, uint32_t& etaW,
@@ -767,6 +910,371 @@ void SweSolver::ReadProbes(Gpu& gpu, const float* xzPairs, int count, Probe* out
         out[i].v = HalfToFloat(px[1]);
         out[i].valid = HalfToFloat(px[3]) > 0.5f;
     }
+}
+
+WaterHold FloodWindow(const float* bed, int nx, int ny, float level, int spongeCol0, bool westFace,
+                      bool plantCrossEdge, std::vector<int>* labels) {
+    WaterHold h;
+    const size_t n = size_t(nx) * size_t(ny);
+    const auto face = [&](size_t i) {
+        return westFace && i % size_t(nx) == 0 && bed[i] > -9000.0f && bed[i] < 2.0f;
+    };
+    const auto wet = [&](size_t i) { return (bed[i] > -9000.0f && bed[i] < level) || face(i); };
+    const auto edgeCell = [&](int e, int t) {   // e: 0 N, 1 S, 2 W, 3 E; t along that edge
+        return (e == 0)   ? size_t(t)
+               : (e == 1) ? size_t(ny - 1) * nx + t
+               : (e == 2) ? size_t(t) * nx
+                          : size_t(t) * nx + size_t(nx - 1);
+    };
+    for (int r = 0; r < ny; ++r) h.faceCells += face(size_t(r) * nx) ? 1 : 0;
+    std::vector<int> label(n, -1);
+    std::vector<size_t> q;
+    int id = 0;
+    for (size_t s = 0; s < n; ++s) {
+        if (label[s] >= 0 || !wet(s)) continue;
+        WaterPiece p;
+        p.id = id;
+        p.c0 = nx;
+        p.r0 = ny;
+        p.c1 = p.r1 = -1;
+        bool sea = false, edge = false, crossed[4] = {false, false, false, false};
+        q.assign(1, s);
+        label[s] = id;
+        for (size_t k = 0; k < q.size(); ++k) {
+            const size_t i = q[k];
+            const int c = int(i % size_t(nx)), r = int(i / size_t(nx));
+            ++p.cells;
+            p.c0 = (std::min)(p.c0, c);
+            p.c1 = (std::max)(p.c1, c);
+            p.r0 = (std::min)(p.r0, r);
+            p.r1 = (std::max)(p.r1, r);
+            sea = sea || c >= spongeCol0;
+            p.face = p.face || face(i);
+            const auto visit = [&](size_t j) {
+                if (label[j] < 0 && wet(j)) {
+                    label[j] = id;
+                    q.push_back(j);
+                }
+            };
+            if (c > 0) visit(i - 1);
+            if (c + 1 < nx) visit(i + 1);
+            if (r > 0) visit(i - size_t(nx));
+            if (r + 1 < ny) visit(i + size_t(nx));
+            const int e = (r == 0) ? 0 : (r == ny - 1) ? 1 : (c == 0) ? 2 : (c == nx - 1) ? 3 : -1;
+            edge = edge || e >= 0;
+            if (plantCrossEdge && e >= 0 && !crossed[e]) {   // THE PLANT: the flood runs along the
+                crossed[e] = true;                            // outside of an edge it reaches
+                for (int t = 0; t < ((e < 2) ? nx : ny); ++t) visit(edgeCell(e, t));
+            }
+        }
+        // Where the piece meets the window's edge; for the sponge's water only where the edge is
+        // no boundary (not the sponge's columns, not the west face): the crossings a law must open.
+        std::vector<WaterPiece::EdgeRun>& runs = sea ? h.crossings : p.runs;
+        for (int e = 0; edge && e < 4; ++e) {
+            const int len = (e < 2) ? nx : ny;
+            WaterPiece::EdgeRun run{"NSWE"[e], -1, -1, 1.0e9f};
+            for (int t = 0; t <= len; ++t) {
+                const size_t j = (t < len) ? edgeCell(e, t) : 0;
+                const bool open = sea && (int(j % size_t(nx)) >= spongeCol0 || face(j));
+                if (t < len && label[j] == id && !open) {
+                    if (run.from < 0) run.from = t;
+                    run.to = t;
+                    run.deepest = (std::min)(run.deepest, bed[j]);
+                } else if (run.from >= 0) {
+                    runs.push_back(run);
+                    run = WaterPiece::EdgeRun{"NSWE"[e], -1, -1, 1.0e9f};
+                }
+            }
+        }
+        if (sea) {
+            h.joined += p.cells;
+        } else {
+            h.pieces.push_back(std::move(p));
+        }
+        h.sea.push_back(sea ? 1 : 0);
+        ++id;
+    }
+    std::stable_sort(h.pieces.begin(), h.pieces.end(),
+                     [](const WaterPiece& a, const WaterPiece& b) { return a.cells > b.cells; });
+    if (labels) *labels = std::move(label);
+    return h;
+}
+
+FloodParting CompareFloods(const float* grid, const float* kernel, int nx, int ny, float level,
+                           int spongeCol0, bool westFace) {
+    FloodParting f;
+    std::vector<int> gl, kl;
+    const WaterHold g = FloodWindow(grid, nx, ny, level, spongeCol0, westFace, false, &gl);
+    const WaterHold k = FloodWindow(kernel, nx, ny, level, spongeCol0, westFace, false, &kl);
+    f.gridJoined = g.joined;
+    f.kernelJoined = k.joined;
+    const size_t n = size_t(nx) * size_t(ny);
+    std::vector<int> share(k.sea.size(), 0);   // by the kernel's label: its cells the grid joins
+    for (size_t i = 0; i < n; ++i) {
+        const bool gj = gl[i] >= 0 && g.sea[size_t(gl[i])];
+        const bool kj = kl[i] >= 0 && k.sea[size_t(kl[i])];
+        f.gridOnly += (gj && !kj) ? 1 : 0;
+        f.kernelOnly += (kj && !gj) ? 1 : 0;
+        if (gj && !kj && kl[i] >= 0) ++share[size_t(kl[i])];
+    }
+    int best = -1;
+    for (size_t id = 0; id < share.size(); ++id) {
+        if (share[id] > 0 && (best < 0 || share[id] > share[size_t(best)])) best = int(id);
+    }
+    if (best < 0) return f;
+    for (const WaterPiece& p : k.pieces) {
+        if (p.id == best) f.piece = p;
+    }
+    f.piece.cells = share[size_t(best)];
+    // Where it parts from the sea: the lowest crest on its way there over the kernel's bed, a
+    // minimax walk 4-connected like the kernel's faces; the crest is the walk's highest cell (the
+    // one nearest the piece where the walk's top is flat).
+    std::vector<float> top(n, 3.0e38f);
+    std::vector<int> prev(n, -1);
+    using Item = std::pair<float, int>;
+    std::priority_queue<Item, std::vector<Item>, std::greater<Item>> open;
+    for (size_t i = 0; i < n; ++i) {
+        if (kl[i] == best) {
+            top[i] = kernel[i];
+            open.push({kernel[i], int(i)});
+        }
+    }
+    int goal = -1;
+    while (!open.empty()) {
+        const Item it = open.top();
+        open.pop();
+        const size_t i = size_t(it.second);
+        if (it.first > top[i]) continue;
+        if (kl[i] >= 0 && k.sea[size_t(kl[i])]) {
+            goal = it.second;
+            break;
+        }
+        const int c = int(i % size_t(nx)), r = int(i / size_t(nx));
+        const int nb[4] = {c > 0 ? it.second - 1 : -1, c + 1 < nx ? it.second + 1 : -1,
+                           r > 0 ? it.second - nx : -1, r + 1 < ny ? it.second + nx : -1};
+        for (const int j : nb) {
+            if (j < 0 || kernel[size_t(j)] < -9000.0f) continue;
+            const float m = (std::max)(it.first, kernel[size_t(j)]);
+            if (m < top[size_t(j)]) {
+                top[size_t(j)] = m;
+                prev[size_t(j)] = it.second;
+                open.push({m, j});
+            }
+        }
+    }
+    if (goal < 0) return f;
+    float hi = -3.0e38f;
+    for (int i = goal; i >= 0; i = prev[size_t(i)]) {
+        if (kernel[size_t(i)] >= hi) {
+            hi = kernel[size_t(i)];
+            f.crestCell = i;
+        }
+    }
+    f.crestKernel = kernel[size_t(f.crestCell)];
+    f.crestGrid = grid[size_t(f.crestCell)];
+    return f;
+}
+
+void SweSolver::LogHoldsWater(Gpu& gpu, bool traced) {
+    if (!m_ready || !m_bathy) return;
+    BedTrace bt;
+    if (traced && TraceBed(gpu, bt) && bt.bed.size() == size_t(m_cb.nx) * m_cb.ny) {
+        LogWindowHoldsWater(*m_bathy, m_cfg, "on the kernel's bed, traced after the whole-bed wait",
+                            &bt.bed);
+    } else {
+        LogWindowHoldsWater(*m_bathy, m_cfg,
+                            "on the CPU bed, the survey's grid: the whole-bed wait did not run or "
+                            "finish, and the kernel's bed may differ");
+    }
+}
+
+void LogWindowHoldsWater(const BathyModel& bathy, const SweConfig& cfg, const char* when,
+                         const std::vector<float>* kernelBed) {
+    constexpr float kLevel = 1.0f;   // m NAVD88: the level the flood stands at
+    const int nx = bathy.Nx(), ny = bathy.Ny();
+    if (nx < 2 || ny < 2) return;
+    const float dx = bathy.WorldSizeX() / nx, dz = bathy.WorldSizeZ() / ny;
+    const double km2 = double(dx) * dz / 1.0e6;
+    int spongeCol0 = nx;
+    for (int c = 0; c < nx; ++c) {
+        if (bathy.WorldX0() + (c + 0.5f) * dx > cfg.spongeX0) {
+            spongeCol0 = c;
+            break;
+        }
+    }
+    const float* grid = &bathy.Elev()[0];
+    const bool kernel = kernelBed && kernelBed->size() == size_t(nx) * size_t(ny);
+    const float* bed = kernel ? kernelBed->data() : grid;
+    const WaterHold h = FloodWindow(bed, nx, ny, kLevel, spongeCol0, cfg.westBoundary);
+    const auto X = [&](int c) { return bathy.WorldX0() + (c + 0.5f) * dx; };
+    const auto Z = [&](int r) { return bathy.WorldZ0() + bathy.WorldSizeZ() - (r + 0.5f) * dz; };
+    int all = 0, atEdge = 0, edgeCells = 0;
+    for (const WaterPiece& p : h.pieces) {
+        all += p.cells;
+        if (!p.runs.empty()) {
+            ++atEdge;
+            edgeCells += p.cells;
+        }
+    }
+    char b[640];
+    const auto runText = [&](const WaterPiece::EdgeRun& r) {   // z ascending on the W and E edges
+        char t[96];
+        const bool ns = r.edge == 'N' || r.edge == 'S';
+        snprintf(t, sizeof(t), " %c %s %.0f..%.0f (deepest %+.2f)", r.edge, ns ? "x" : "z",
+                 ns ? X(r.from) : Z(r.to), ns ? X(r.to) : Z(r.from), r.deepest);
+        return std::string(t);
+    };
+    snprintf(b, sizeof(b),
+             "[swe] %s window (%s): does it hold its water? flooded at %+.2f m NAVD, 4-connected, "
+             "from the sponge (x > %.0f m) and the west face (%d wet-capable cells): %.2f km^2 "
+             "joined to the sponge; not joined to it: %zu pieces, %.2f km^2, %d at the window's "
+             "edge (%.2f km^2)",
+             cfg.name ? cfg.name : "?", when, kLevel, cfg.spongeX0, h.faceCells, h.joined * km2,
+             h.pieces.size(), all * km2, atEdge, edgeCells * km2);
+    std::string s = b;
+    int shown = 0;
+    for (const WaterPiece& p : h.pieces) {
+        if (p.runs.empty()) continue;
+        if (++shown > 4) {
+            s += " | ...";
+            break;
+        }
+        snprintf(b, sizeof(b), " | %.3f km^2 %s, x %.0f..%.0f z %.0f..%.0f m, meets", p.cells * km2,
+                 p.face ? "held by the west face alone" : "joined to none", X(p.c0), X(p.c1),
+                 Z(p.r1), Z(p.r0));
+        s += b;
+        for (size_t k = 0; k < p.runs.size() && k < 4; ++k) s += (k ? "," : "") + runText(p.runs[k]);
+        if (p.runs.size() > 4) s += " +" + std::to_string(p.runs.size() - 4) + " more";
+    }
+    std::vector<WaterPiece::EdgeRun> cross = h.crossings;   // the deepest first
+    std::stable_sort(cross.begin(), cross.end(),
+                     [](const WaterPiece::EdgeRun& u, const WaterPiece::EdgeRun& w) { return u.deepest < w.deepest; });
+    if (!cross.empty()) {
+        s += " | the sponge's water meets the edge where it is no boundary: " + std::to_string(cross.size()) +
+             " runs, the deepest";
+        for (size_t k = 0; k < cross.size() && k < 4; ++k) s += (k ? "," : "") + runText(cross[k]);
+    }
+    for (const WaterPiece& p : h.pieces) {
+        if (!p.runs.empty()) continue;
+        snprintf(b, sizeof(b), " | the largest away from the edge: %.3f km^2 %s, x %.0f..%.0f z %.0f..%.0f m",
+                 p.cells * km2, p.face ? "held by the west face alone" : "joined to none", X(p.c0),
+                 X(p.c1), Z(p.r1), Z(p.r0));
+        s += b;
+        break;
+    }
+    Log("%s", s.c_str());
+    if (!kernel) return;
+    // Beside it, the survey's grid flooded by the same law: where the two beds' water parts.
+    const FloodParting f = CompareFloods(grid, bed, nx, ny, kLevel, spongeCol0, cfg.westBoundary);
+    const char* name = cfg.name ? cfg.name : "?";
+    if (f.gridOnly == 0 && f.kernelOnly == 0) {
+        Log("[swe] %s window: the survey's grid, flooded by the same law, joins the same water to "
+            "the sponge as the kernel's bed (%.2f km^2)",
+            name, f.gridJoined * km2);
+        return;
+    }
+    snprintf(b, sizeof(b),
+             "[swe] %s window: the survey's grid joins %.2f km^2 that the kernel's bed does not (its "
+             "flood joins %.2f km^2 to the sponge, the kernel's %.2f), and the kernel's bed joins "
+             "%.2f km^2 that the grid does not",
+             name, f.gridOnly * km2, f.gridJoined * km2, f.kernelJoined * km2, f.kernelOnly * km2);
+    std::string t = b;
+    if (f.piece.id >= 0) {
+        snprintf(b, sizeof(b), "; the largest of it, %.3f km^2 of the kernel's water %s (x %.0f..%.0f z %.0f..%.0f m),",
+                 f.piece.cells * km2, f.piece.face ? "held by the west face alone" : "joined to none",
+                 X(f.piece.c0), X(f.piece.c1), Z(f.piece.r1), Z(f.piece.r0));
+        t += b;
+        if (f.crestCell >= 0) {
+            const int cc = f.crestCell % nx, cr = f.crestCell / nx;
+            snprintf(b, sizeof(b),
+                     " parts from the sea at cell (%d, %d), world (%.0f, %.0f): the kernel's bed "
+                     "%+.2f m, the grid's %+.2f m -- the lowest crest on the kernel's way to the sea",
+                     cc, cr, X(cc), Z(cr), f.crestKernel, f.crestGrid);
+            t += b;
+        } else {
+            t += " and the kernel's bed has no way from it to the sea";
+        }
+    }
+    Log("%s", t.c_str());
+}
+
+// The instrument's gate, on a made-up window 64 x 40: land at +5 m, the open sea in the last 8
+// columns (the sponge from column 56), and a channel at -3 m from the west edge (row 20) that runs
+// east to column 20, turns north out through the north edge, comes back in at column 30 and runs on
+// to the sea -- the Merrimack's bend in miniature. WHOLE closes the bend inside the grid (row 2).
+bool RunWaterHoldSelfTest() {
+    constexpr int nx = 64, ny = 40, kSponge = 56;
+    const auto make = [&](bool whole) {
+        std::vector<float> b(size_t(nx) * ny, 5.0f);
+        for (int r = 0; r < ny; ++r) {
+            for (int c = kSponge; c < nx; ++c) b[size_t(r) * nx + c] = -10.0f;
+        }
+        for (int t = 0; t <= 20; ++t) {
+            b[size_t(20) * nx + t] = -3.0f;   // the channel from the west edge
+            b[size_t(t) * nx + 20] = -3.0f;   // north to the edge
+            b[size_t(t) * nx + 30] = -3.0f;   // and back from it
+        }
+        for (int c = 30; c < kSponge; ++c) b[size_t(20) * nx + c] = -3.0f;
+        for (int c = 20; whole && c <= 30; ++c) b[size_t(2) * nx + c] = -3.0f;
+        return b;
+    };
+    int checks = 0;
+    bool ok = true;
+    const auto expect = [&](bool cond, const char* what) {
+        ++checks;
+        if (!cond) {
+            ok = false;
+            Log("[waterhold]   FAIL %s", what);
+        }
+    };
+    const std::vector<float> cut = make(false), whole = make(true);
+    const WaterHold a = FloodWindow(cut.data(), nx, ny, 1.0f, kSponge, false);
+    expect(a.pieces.size() == 1 && a.pieces[0].cells == 41 && !a.pieces[0].face,
+           "a channel cut by the north edge is reported: one piece of 41 cells, joined to none");
+    bool north = false, west = false;
+    for (size_t k = 0; !a.pieces.empty() && k < a.pieces[0].runs.size(); ++k) {
+        const WaterPiece::EdgeRun& r = a.pieces[0].runs[k];
+        north = north || (r.edge == 'N' && r.from == 20 && r.to == 20 && r.deepest == -3.0f);
+        west = west || (r.edge == 'W' && r.from == 20 && r.to == 20);
+    }
+    expect(north && west, "it meets the north edge at column 20 (deepest -3) and the west edge at row 20");
+    expect(a.crossings.size() == 1 && a.crossings[0].edge == 'N' && a.crossings[0].from == 30 &&
+               a.crossings[0].to == 30,
+           "the sea's water meets the edge where it is no boundary once: the north edge at column 30");
+    const WaterHold f = FloodWindow(cut.data(), nx, ny, 1.0f, kSponge, true);
+    expect(f.faceCells == 1 && f.pieces.size() == 1 && f.pieces[0].face,
+           "with a west face, the cut channel is held by the face alone");
+    const WaterHold w = FloodWindow(whole.data(), nx, ny, 1.0f, kSponge, false);
+    expect(w.pieces.empty() && w.joined > 0, "a whole channel is not reported");
+    const WaterHold p = FloodWindow(cut.data(), nx, ny, 1.0f, kSponge, false, true);
+    expect(p.pieces.empty(),
+           "PLANT (the flood crosses the edge): the cut channel joins the sea, so the first check "
+           "would fail on it -- caught");
+    // THE TWO BEDS: the grid (the bend whole) against a kernel's bed with a band raised to +2 m
+    // along the north edge, as the fade into the 15-arcsecond relief raises one (finding 68).
+    std::vector<float> raised = whole;
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < kSponge; ++c) {
+            raised[size_t(r) * nx + c] = (std::max)(raised[size_t(r) * nx + c], 2.0f);
+        }
+    }
+    const WaterHold rk = FloodWindow(raised.data(), nx, ny, 1.0f, kSponge, false);
+    expect(w.pieces.empty() && rk.pieces.size() == 1 && rk.pieces[0].cells == 37,
+           "two beds: the reach is joined on the grid and cut on the raised bed (one piece, 37 cells)");
+    const FloodParting fp = CompareFloods(whole.data(), raised.data(), nx, ny, 1.0f, kSponge, false);
+    expect(fp.gridOnly == 54 && fp.kernelOnly == 0 && fp.piece.cells == 37 && fp.crestCell >= 0 &&
+               fp.crestCell / nx < 4 && fp.crestKernel == 2.0f && fp.crestGrid == -3.0f,
+           "the grid joins 54 cells the raised bed does not, and the reach parts from the sea at a "
+           "band cell: +2 on the kernel's bed, -3 on the grid's");
+    if (ok) {
+        Log("[waterhold] ---- PASS (%d checks): a channel the window's edge cuts is reported with "
+            "where it meets the edge, held by the west face alone when it has one, a whole one is "
+            "not, and the plant (the flood across the edge) is caught",
+            checks);
+    } else {
+        Log("[waterhold] ---- FAIL");
+    }
+    return ok;
 }
 
 }  // namespace ga

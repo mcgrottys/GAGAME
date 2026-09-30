@@ -201,6 +201,23 @@ float FaceUpdate(float q, int2 t, int2 nbr, float faceLen, float span) {
     return clamp(q, -0.25f * Vnbr / gDt, 0.25f * Vself / gDt);
 }
 
+// THE WEST TRACE (an instrument: SweSolver::TraceWestFace). CsSweFlux compiled with SWE_WEST_TRACE
+// records the Flather face's terms as it makes them -- the kernel's own expressions, not a copy --
+// and writes them for the exterior column instead of the flux: the traced state does not advance.
+// Without the define the hooks are nothing and the kernel is the one the solver runs.
+RWTexture2D<float4> gWestTrace : register(u5);   // 4 texels a row of the exterior column
+#ifdef SWE_WEST_TRACE
+static float4 gWtFace = 0.0f;   // etaX, etaI, sill, hf
+static float4 gWtLaw = 0.0f;    // u_ext, the radiation term, ub, q before the clamp
+static float4 gWtClamp = 0.0f;  // q after the clamp, the clamp's two bounds, 1 = the row is pinned
+static float gWtHi = 0.0f;      // the first interior cell's depth
+#define SWE_WEST_LAW(rad, ub, qRaw, lo, hi) gWtLaw = float4(gWestUext, (rad), (ub), (qRaw)); gWtClamp.yz = float2((lo), (hi))
+#define SWE_WEST_ROW(etaX, etaI, sill, hf, hI, q) gWtFace = float4((etaX), (etaI), (sill), (hf)); gWtClamp.xw = float2((q), 1.0f); gWtHi = (hI)
+#else
+#define SWE_WEST_LAW(rad, ub, qRaw, lo, hi)
+#define SWE_WEST_ROW(etaX, etaI, sill, hf, hI, q)
+#endif
+
 [numthreads(16, 16, 1)]
 void CsSweFlux(uint3 id : SV_DispatchThreadID) {
     if (id.x >= gFluxTileW || id.y >= gFluxTileH) return;
@@ -231,12 +248,24 @@ void CsSweFlux(uint3 id : SV_DispatchThreadID) {
             const float ub = gWestUext + sqrt(gGravity / hf) * (etaX - etaI);
             const float V = gDx * gDy / gDt;                // positivity, as everywhere
             q.x = clamp(hf * gDy * ub, -0.25f * hI * V, 0.25f * hf * V);
+            SWE_WEST_LAW(sqrt(gGravity / hf) * (etaX - etaI), ub, hf * gDy * ub, -0.25f * hI * V,
+                         0.25f * hf * V);
         }
+        SWE_WEST_ROW(etaX, etaI, sill, hf, hI, q.x);
     }
 
     // Kill reflections off the sponge: waves entering the analytic ocean just fade.
     const float sp = SpongeAt(t);
     if (sp > 0.0f) q *= 1.0f - 0.5f * sp * gSpongeRate;
+#ifdef SWE_WEST_TRACE
+    if (t.x == 0) {
+        gWestTrace[uint2(0, t.y)] = gWtFace;
+        gWestTrace[uint2(1, t.y)] = gWtLaw;
+        gWestTrace[uint2(2, t.y)] = gWtClamp;
+        gWestTrace[uint2(3, t.y)] = float4(EtaAt(t), gWtHi, BedAt(t), BedAt(t + int2(1, 0)));
+    }
+    return;
+#endif
     gFlux[t] = q;
 }
 
@@ -309,4 +338,30 @@ void CsSweDerive(uint3 id : SV_DispatchThreadID) {
     const float u = 0.5f * (qc.x + qw) / (h * gDy);
     const float v = -0.5f * (qc.y + qn) / (h * gDx);   // texture +y is south; world v is north
     gUv[uint3(t, 0)] = float4(u, v, length(float2(u, v)), 1.0f);
+}
+
+// ---- the bed trace (an instrument: SweSolver::TraceBed) -------------------------------------
+// THE BED THE SOLVER READS, read back. BedAt over the whole lattice -- the kernel's own function
+// through the rule's own residency reads, so what comes back is the bed the flux and height
+// kernels integrate on at this instant, not a second reader's idea of it -- with the mip the
+// rule read at and the slice it read from (HeightPages.hlsli, HP_TRACE); the floor is the
+// planted failure's (0 = the residency map's own). TraceBed compiles it with HP_TRACE. Without it
+// -- the dxtest compiles every entry it finds, with no defines -- the same kernel writes the bed
+// and -1 where the choice would be, and nothing else in this file reads the two bindings below.
+cbuffer SweTraceCb : register(b1) {
+    float gTraceFloor;
+    float gTracePadA, gTracePadB, gTracePadC;
+};
+RWTexture2D<float2> gBedTrace : register(u4);   // x = BedAt (m NAVD), y = mip + 16 * slice
+
+[numthreads(16, 16, 1)]
+void CsSweBedTrace(uint3 id : SV_DispatchThreadID) {
+    if (id.x >= gNx || id.y >= gNy) return;
+#ifdef HP_TRACE
+    gHpTraceFloor = gTraceFloor;
+    const float bed = BedAt(int2(id.xy));
+    gBedTrace[id.xy] = float2(bed, gHpTraceMip + 16.0f * float(gHpTraceSlice));
+#else
+    gBedTrace[id.xy] = float2(BedAt(int2(id.xy)), -1.0f);
+#endif
 }

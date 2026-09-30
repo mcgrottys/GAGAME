@@ -19,6 +19,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace ga {
@@ -106,10 +107,16 @@ void RunWarmInlet(const Options& opt, Gpu& gpu, const Compositor& compositor,
 void RunDumpWaterState(const Options& opt, Gpu& gpu, SeaLayer* sea, double simUnix,
                        WeatherManager& weather);
 // --twin-surface: the keystone gate -- CPU TreeWater against the GPU bank at range rings.
+// `classifierNavd` is the level the surface classifier holds the bed against (the tide plane).
 void RunTwinSurface(const Options& opt, Gpu& gpu, const SeaState& seaState, SeaLayer* sea,
                     const WaterSceneConfig& waterScene, WaterBankLayer* waterBank,
                     const Camera& cam, double simUnix, WeatherManager& weather,
-                    const std::unique_ptr<WaveField>& waveField);
+                    const std::unique_ptr<WaveField>& waveField, double classifierNavd);
+// THE THREE LEVELS THAT MUST AGREE at the camera (the startup transient's measurement): the
+// classifier's, the bank's and the CPU's. RunTwinSurface prints it first; --bed-trace prints it
+// at its readings. Reads back and waits.
+void LogLevelsAtCamera(Gpu& gpu, WaterBankLayer* waterBank, const Camera& cam, double simUnix,
+                       WeatherManager& weather, double classifierNavd);
 // --trace lat,lon: one sample through the state diagram, eleven steps to the GPU texel.
 void RunTrace(const Options& opt, Gpu& gpu, SeaLayer* sea, const Compositor& compositor, int hgtCh,
               const WaterAtlas& waterAtlas, WaterBankLayer* waterBank, GlobeLayer* globe,
@@ -129,6 +136,47 @@ void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double plane
                    const WaveField* waveField, const SeaLayer* sea, const SeaState* seaState,
                    const SurfaceFrame& surface, double oceanNow, double simUnix,
                    uint32_t recFrame);
+
+// --bed-trace N: THE BED THE SOLVER READS (app/Tools/BedTrace.cpp). The solver's own BedAt read
+// back through its own kernel (SweSolver::TraceBed) just before the spin-up, just after it, every
+// N frames, and once more at the end of the run with the domain made whole. Each reading logs the
+// mips the rule read at, the cells reading exactly 0.0 (the value of a tile that is not there),
+// and the cells of the inlet's throat whose bed lies below the tide plane -- whether the inlet
+// is open; the end compares every reading with the whole one. `--bed-trace-plant` adds one
+// reading with the rule's residency floor forced to the coarsest mip: the instrument must be seen
+// to call that bed coarse.
+class BedTracer {
+public:
+    // What the residency manager CLAIMS over the solver's domain: its own map, by mip, and the
+    // samples taken (WeatherManager::ClaimedMips). Printed beside what the kernel read.
+    using ClaimFn = std::function<uint64_t(uint64_t hist[16])>;
+    // The throat's cross-section, found once on the CPU bed, which is geometry here and nothing
+    // else (the count reads the trace): the narrowest run of wet-capable cells that crosses the
+    // solver's throat point, looked for within kThroatSearchM of it along the channel.
+    void Configure(const BathyModel& bathy, const std::string& dir, ClaimFn claim = {});
+    // One reading, logged under `label` and kept for the comparison at the end. `tideNavd` is the
+    // plane the throat's cells are held against; `floorMip` the rule's floor (the planted read).
+    bool Read(Gpu& gpu, SweSolver& swe, const std::string& label, double tideNavd,
+              float floorMip = 0.0f);
+    // The reading taken with the domain made whole, and every kept reading against it.
+    void CompareWithWhole(const std::string& wholeLabel) const;
+    bool Configured() const { return m_nx > 0; }
+
+private:
+    static constexpr double kThroatX = 250.0, kThroatZ = 60.0;   // the solver's own probe
+    static constexpr double kThroatSearchM = 300.0;
+    static constexpr float kWetCapableNavd = 1.2f;   // SweSolver::Init's wet-capable bed
+    struct Reading {
+        std::string label;
+        std::vector<float> bed;
+    };
+    std::vector<Reading> m_kept;
+    std::string m_dir;
+    ClaimFn m_claim;
+    uint32_t m_nx = 0, m_ny = 0;
+    double m_dxM = 0.0, m_dyM = 0.0, m_worldX0 = 0.0, m_worldZ1 = 0.0;
+    uint32_t m_throatCol = 0, m_throatRow0 = 0, m_throatRow1 = 0;   // inclusive rows
+};
 
 }  // namespace ga::app::tools
 

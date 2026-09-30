@@ -48,6 +48,50 @@ struct SweConfig {
                                 // off, and the west edge is a wall like any land)
 };
 
+// A SOLVER'S WINDOW HOLDS ITS WATER (an instrument, said once where a window is made): the grid
+// flooded 4-connected (the kernel's faces) through cells whose bed is under `level`, from its open
+// boundaries -- the sponge's cells (world x past spongeX0) and the west face's wet-capable cells
+// (column 0, bed under 2 m, when the window has a west boundary). Water the sponge's flood does not
+// reach is listed, largest first, with where it meets the window's edge. `plantCrossEdge` lets the
+// flood run along the outside of an edge it reaches: the selftest's plant, a cut channel made whole.
+struct WaterPiece {
+    struct EdgeRun {
+        char edge;      // 'N', 'S', 'W', 'E'
+        int from, to;   // cells along the edge: columns for N and S, rows for W and E
+        float deepest;
+    };
+    int id = -1;                          // its label in the flood's label map
+    int cells = 0;
+    int c0 = 0, r0 = 0, c1 = 0, r1 = 0;   // its box, cells
+    bool face = false;                    // the west face reaches it (so it is held by the face alone)
+    std::vector<EdgeRun> runs;            // where it meets the window's edge
+};
+struct WaterHold {
+    int joined = 0;      // cells the sponge's flood reaches
+    int faceCells = 0;   // the west face's seeds
+    std::vector<WaterPiece> pieces;
+    std::vector<WaterPiece::EdgeRun> crossings;   // the sponge's water at the edge, not a boundary
+    std::vector<uint8_t> sea;                     // by label: 1 = the sponge's flood reaches it
+};
+WaterHold FloodWindow(const float* bed, int nx, int ny, float level, int spongeCol0, bool westFace,
+                      bool plantCrossEdge = false, std::vector<int>* labels = nullptr);
+// The two beds' floods side by side: the cells the grid's joins that the kernel's does not (and
+// back), the largest piece of the kernel's water the grid's joins, and where it parts from the
+// sea -- the cell of the lowest crest on its way there over the kernel's bed, and that cell's bed
+// in each.
+struct FloodParting {
+    int gridJoined = 0, kernelJoined = 0;   // the cells each bed's flood joins to the sponge
+    int gridOnly = 0, kernelOnly = 0;
+    WaterPiece piece;       // the kernel's piece (cells = those of it the grid joins); id -1 = none
+    int crestCell = -1;
+    float crestKernel = 0.0f, crestGrid = 0.0f;
+};
+FloodParting CompareFloods(const float* grid, const float* kernel, int nx, int ny, float level,
+                           int spongeCol0, bool westFace);
+void LogWindowHoldsWater(const BathyModel& bathy, const SweConfig& cfg, const char* when,
+                         const std::vector<float>* kernelBed = nullptr);
+bool RunWaterHoldSelfTest();
+
 class SweSolver {
 public:
     static constexpr uint32_t kMaxSubsteps = 16;
@@ -146,12 +190,50 @@ public:
                     std::vector<float>& uv4Out, uint32_t& uvW, uint32_t& uvH);
     // Debug: raw readback of the flux bank (padded dims, RGBA32F). outW/outH = padded texels.
     std::vector<uint8_t> ReadFluxRaw(Gpu& gpu, uint32_t* outW, uint32_t* outH, uint32_t* outPitch);
+    // The transport through the west boundary, m^3/s (+east): the Flather faces' flux summed down
+    // the exterior column -- what the river actually brings in, beside what the boundary was told
+    // to carry (SetBoundaries' westQ). A full readback of the flux bank: tools only.
+    double WestTransport(Gpu& gpu);
+    // THE WEST FACE, read back (an instrument): for each row of the exterior column, the Flather
+    // face's terms as the flux kernel makes them for its next substep on this instant's state
+    // (CsSweFlux compiled with SWE_WEST_TRACE: its own expressions, and no flux written). One row
+    // per lattice row; `pinned` is the kernel's own test (the column is the exterior and its bed
+    // below +2 m).
+    struct WestFaceRow {
+        float etaX, etaI, sill, hf;      // the exterior level, the first interior surface, the
+                                         // face's sill and its depth (m NAVD, m)
+        float uext, rad, ub, qRaw;       // u_ext, the radiation term, ub (m/s), q before the clamp
+        float q, qLo, qHi, pinned;       // q after it (m^3/s, +east), the clamp's bounds, 1 = pinned
+        float dEta0, hI, bed0, bed1;     // the exterior cell's eta, the interior depth, both beds
+    };
+    bool TraceWestFace(Gpu& gpu, std::vector<WestFaceRow>& rows);
+    float WestArea() const { return m_westArea; }   // the live section u_ext was last divided by
     Probe ReadProbe(Gpu& gpu, float wx, float wz) {
         const float p[2] = {wx, wz};
         Probe out{};
         ReadProbes(gpu, p, 1, &out);
         return out;
     }
+
+    // ---- THE BED THE KERNEL READS (the bed trace: an instrument, never on the frame path). The
+    // solver's own BedAt over its whole lattice, through the rule and the residency map the flux
+    // and height kernels read at this instant (Swe.hlsl CsSweBedTrace), read back with the mip
+    // the rule read at and the slice it read. The CPU bed (BathyModel) is a different reader of
+    // the same stack and cannot see what residency did to this one. `floorMip` raises the rule's
+    // residency floor for this read alone (the planted failure: the coarsest mip). It records on
+    // its own upload list and waits, so it is never called inside a frame's recording.
+    struct BedTrace {
+        uint32_t nx = 0, ny = 0;
+        std::vector<float> bed;       // m NAVD88, row 0 north, nx * ny
+        std::vector<uint8_t> mip;     // the mip the rule read at
+        std::vector<uint8_t> slice;   // the slice it read: a cube face 0..5, or the page's
+    };
+    bool TraceBed(Gpu& gpu, BedTrace& out, float floorMip = 0.0f);
+    // A SOLVER'S WINDOW HOLDS ITS WATER, said once: `traced` = the whole-bed wait finished, so the
+    // trace reads the kernel's bed back and the line floods that (and the CPU grid's flood beside
+    // it where the two differ); otherwise the CPU grid, and the line says the kernel's may differ.
+    void LogHoldsWater(Gpu& gpu, bool traced);
+    uint32_t PageSlice() const { return static_cast<uint32_t>(m_cb.pageB[0]); }
 
     std::string stats;         // "swe 476t 31/54MB 16ss" for the title bar
     double SimTime() const { return m_simTime; }
@@ -258,7 +340,22 @@ private:
     float m_southDEta = 0;
     float m_westQ = 0;                 // west transport target, m^3/s (+east)
     std::vector<float> m_westBed;      // exterior-column bed depths: the live section area
+    SweConfig m_cfg;                   // as Init was given it (the holds-water line)
     bool m_bedBound = false;           // M9ar: SetHeightPage has run
+    // The bed trace's own binding (TraceBed): the height tenant as SetHeightPage bound it, and the
+    // kernel, table and target built on its first call -- nothing of it exists in a run without.
+    hal::Resource m_bedArr = nullptr, m_bedRes = nullptr;
+    uint32_t m_bedMips = 0;
+    hal::RootSignatureRef m_traceRs;
+    hal::Pso m_traceK;
+    hal::Table m_traceTable;   // [t1 height page, t2 its residency map, u4 the trace]
+    GpuTexture m_traceTex;     // RG32F: BedAt, mip + 16 * slice
+    // The west trace's (TraceWestFace): the flux kernel under SWE_WEST_TRACE, its table and target.
+    hal::RootSignatureRef m_westRs;
+    hal::Pso m_westK;
+    hal::Table m_westTable;    // [t1, t2, u0 eta, u1 flux, u2 uv, u3 mv, u5 the trace]
+    GpuTexture m_westTex;      // RGBA32F, 4 x ny
+    float m_westArea = 0.0f;   // Record's live west section, m^2
     uint64_t m_cbFp = 0;               // M12 step 4b: the [kernel] swe cb fingerprint's last value
     float m_lastTideNavd = 0;          // for the tide-plane rate (prism source term)
     double m_lastTideTime = 0;

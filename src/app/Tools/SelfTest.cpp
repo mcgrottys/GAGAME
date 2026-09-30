@@ -20,6 +20,7 @@
 #include "sim/RigidBody.h"
 #include "sim/WaveChart.h"
 #include "sim/SimClock.h"
+#include "sim/SweSolver.h"
 #include "sim/Vessel.h"
 
 namespace ga::app::tools {
@@ -52,6 +53,8 @@ int RunSelfTest(const Options& opt) {
     ok &= RunSimClockSelfTest();  // the scene clock: whole quanta, framing-independent
     ok &= RunRigidBodySelfTest();  // M9bq: the body with momentum -- L, T, moment arms
     ok &= RunVesselSelfTest();     // M9bq: the factory + the element laws
+    ok &= RunWaterHoldSelfTest();  // a solver's window holds its water: a cut channel is
+                                   // reported, a whole one is not, the plant is caught
     ok &= scene::RunSceneSelfTest();   // M12 step 5a: the scene's data structures -- the
                                        // registry template, the property table, the fold with
                                        // override, the placement sugar, the shim

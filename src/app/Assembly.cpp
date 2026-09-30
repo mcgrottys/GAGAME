@@ -201,6 +201,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     auto& hgtCh = A->hgtCh;
     auto& waterAtlas = A->waterAtlas;
     auto& bathy = A->bathy;
+    auto& bathySwe = A->bathySwe;
+    auto& bathyBostonSwe = A->bathyBostonSwe;
     auto& terrain = A->terrain;
     auto& swe = A->swe;
     auto& riverQ = A->riverQ;
@@ -413,6 +415,15 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         }
         hgtCh = compositor.AddHeightChannel("earth.height", std::move(hstack));
     }
+    // Boston's dormant solver stands by the same law and the same code as the Merrimack's
+    // (below). Its west edge is a wall (the Charles is dammed: FrameLoop's config), so no side
+    // carries an open face that reads the bed and it keeps the survey's extent. Its grid is its
+    // own copy: the activation realizes the bed into it, and the survey the source reads stays
+    // the file.
+    if (bathyBoston.Ready()) {
+        bathyBostonSwe.DrawFrom(bathyBoston, srcCudemBos.get(), S.water.swe.window == 0, false,
+                                "boston");
+    }
 
     // M6v/M8i: THE WATER ATLAS -- water parameters through the same registry. 18 phasor
     // channels (water.tide.M2..O1): equilibrium base <- EOT20 global medium <- the NE
@@ -434,6 +445,15 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         } else {
             bathy.ApplyMaskEdits("data/gis/edits.geojson", 2.5f);
         }
+        // THE SOLVER STANDS WHERE ITS SOURCES PAINT AT FULL WEIGHT (HIERARCHY 4.17). The survey
+        // fades into the layer beneath it over a band at every edge (its feather), so there the
+        // composed bed is neither the survey nor the ground beneath: measured on the west edge
+        // (finding 68), the channel's last 750 m were a ramp up to +2.03 m, and the river had not
+        // entered since the bed became the composed height. The band is asked of the source, and
+        // only the open face's side is drawn in: drawn in on every side the window lost the
+        // river's bend in the north band, and the reach behind the face became a pond.
+        bathySwe.DrawFrom(bathy, srcCudem.get(), S.water.swe.window == 0,
+                          SweConfig{}.westBoundary, "merrimack");
         auto terrOwned = std::make_unique<TerrainLayer>();
         terrain = terrOwned.get();
         terrain->Configure(shaderDir, &bathy);
@@ -455,11 +475,11 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             // 0.0000 m across all 2187162 texels, through GA Load -> normalize -> Compose
             // (six layers, LayeredOver) -> a reserved, paged, mipped sparse array. M9an:
             // the committed texture is GONE; the bank is the bed and there is no fallback.
-            // The sea keeps the survey's WORLD frame (the eta atlas is aligned to it);
+            // The sea keeps the SOLVER's world frame (the eta atlas is aligned to it);
             // 0 in the SRV slot means "a survey window exists" and is never sampled.
             Log("[bed] the sea and the solver read the height megatexture -- the only bed");
-            sea->SetBathy(0u, bathy.WorldX0(), bathy.WorldZ0(), bathy.WorldSizeX(),
-                          bathy.WorldSizeZ());
+            sea->SetBathy(0u, bathySwe.WorldX0(), bathySwe.WorldZ0(), bathySwe.WorldSizeX(),
+                          bathySwe.WorldSizeZ());
         }
     } else {
         Log("[main] no bathymetry (run: py -3 harvester\\harvest_bathy.py); open-ocean sea");
@@ -538,7 +558,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                                                          : "DIVERGENT -- check the link");
             }
         }
-        swe.Init(gpu, renderer.Shaders(), shaderDir, bathy);   // bed bound below
+        swe.Init(gpu, renderer.Shaders(), shaderDir, bathySwe);   // bed bound below
         // M6r: the discharge is LIVE again -- it rides the Flather boundary's u_ext (the
         // station stage still carries it into eta; the prism term dwarfs it either way).
         riverQ = (S.water.swe.riverQ > 0) ? S.water.swe.riverQ
@@ -588,7 +608,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     if (sea && bathy.Ready() && !marsMode) {
         auto wbOwned = std::make_unique<WaterBankLayer>();
         waterBank = wbOwned.get();
-        waterBank->Configure(shaderDir, sea, &swe, &bathy, &waterAtlas, &compositor,
+        waterBank->Configure(shaderDir, sea, &swe, &bathySwe, &waterAtlas, &compositor,
                              hgtCh, &globeModel, &seaState);
         waterBank->SetBaseTexel(waterScene.bankTexelM);   // M8h ring density (scene)
         waterBank->SetSurface(&surface);   // M12 step 4b: the world.flat chart, for the geoA row
@@ -613,7 +633,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         if ((droste || !S.gates.empty()) && S.water.oneWater) {
             auto wbB = std::make_unique<WaterBankLayer>();
             waterBankB = wbB.get();
-            waterBankB->Configure(shaderDir, sea, &swe, &bathy, &waterAtlas, &compositor,
+            waterBankB->Configure(shaderDir, sea, &swe, &bathySwe, &waterAtlas, &compositor,
                                   hgtCh, &globeModel, &seaState);
             waterBankB->SetBaseTexel(waterScene.bankTexelM);
             waterBankB->SetSurface(&surface);
@@ -1127,9 +1147,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                         DomainCompositor::PageGeo geo;
                         const double mpt = swe.CellM() * double(1u << lvl);
                         geo.lon0 = BathyModel::kOrgLon +
-                                   (bathy.WorldX0() + 0.5 * mpt) / BathyModel::kMPerLon;
+                                   (bathySwe.WorldX0() + 0.5 * mpt) / BathyModel::kMPerLon;
                         geo.lat0 = BathyModel::kOrgLat +
-                                   (bathy.WorldZ0() + 0.5 * mpt) / BathyModel::kMPerLat;
+                                   (bathySwe.WorldZ0() + 0.5 * mpt) / BathyModel::kMPerLat;
                         geo.dLon = mpt / BathyModel::kMPerLon;
                         geo.dLat = mpt / BathyModel::kMPerLat;
 
@@ -1248,9 +1268,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 }
             }
             globe->SetVelGradLens(
-                swe.VelGradSrv(), bathy.WorldX0(), bathy.WorldZ0(), bathy.WorldSizeX(),
-                bathy.WorldSizeZ(), swe.VelGradResMapSrv(),
-                static_cast<float>(bathy.WorldSizeX() / (std::max)(1u, swe.Nx())),
+                swe.VelGradSrv(), bathySwe.WorldX0(), bathySwe.WorldZ0(), bathySwe.WorldSizeX(),
+                bathySwe.WorldSizeZ(), swe.VelGradResMapSrv(),
+                static_cast<float>(bathySwe.WorldSizeX() / (std::max)(1u, swe.Nx())),
                 static_cast<float>(swe.VelGradResMapW()),
                 static_cast<float>(swe.VelGradResMapH()), swe.VelGradMips());
         }

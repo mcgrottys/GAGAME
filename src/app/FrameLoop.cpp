@@ -222,6 +222,18 @@ FrameLoop::FrameLoop(const Options& opt, const Scene& S, Assembly& A)
 
 int FrameLoop::Run() {
     if (const std::optional<int> rc = Session()) return *rc;
+    // THE BOOT'S LENGTH, from the process's creation to the first frame -- the number a wait
+    // before the first frame (the solver's bed wait) is judged by.
+    {
+        FILETIME created{}, exited{}, kernel{}, user{}, now{};
+        GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user);
+        GetSystemTimeAsFileTime(&now);
+        auto ticks = [](const FILETIME& f) {
+            return (static_cast<uint64_t>(f.dwHighDateTime) << 32) | f.dwLowDateTime;
+        };
+        Log("[boot] the first frame begins %.1f s after the process started",
+            double(ticks(now) - ticks(created)) * 1.0e-7);
+    }
     for (;;) {
         if (!Frame()) break;
     }
@@ -413,7 +425,8 @@ std::optional<int> FrameLoop::Session() {
     auto& marsMode = m_A.marsMode;
     auto& globeModel = m_A.globeModel;
     GlobeModel& activeGlobe = *m_A.activeGlobe;
-    auto& bathyBoston = m_A.bathyBoston;
+    auto& bathyBostonSwe = m_A.bathyBostonSwe;   // HIERARCHY 4.17: the solvers' own grids
+    auto& bathySwe = m_A.bathySwe;
     auto& compositor = m_A.compositor;
     auto& hgtCh = m_A.hgtCh;
     auto& waterAtlas = m_A.waterAtlas;
@@ -971,7 +984,7 @@ std::optional<int> FrameLoop::Session() {
     // a fine proxy on this reach): ~5.3 km for the original mouth window, ~15.5 for the
     // M6d wide window (bracketed by Merrimacport/Riverside instead of Newburyport/Salisbury).
     kWestKm =
-        bathy.Ready() ? std::min(20.0, std::abs(bathy.WorldX0()) / 1000.0) : 6.0;
+        bathySwe.Ready() ? std::min(20.0, std::abs(bathySwe.WorldX0()) / 1000.0) : 6.0;
     {
         double bestEnt = 1e9, bestA = -1e9, bestB = 1e9;
         for (size_t i = 0; i < model.Count(); ++i) {
@@ -1035,8 +1048,8 @@ std::optional<int> FrameLoop::Session() {
     // cascade displacement, the one bed) and is the M7 milestone.
     weather.Init(&compositor, hgtCh, &waterAtlas, &model, &globeModel, &seaState,
                  haveCurrents ? &currents : nullptr);
-    if (swe.Ready()) weather.AddExternalWindow("merrimack", &swe, &bathy, oceanAt);
-    if (bathyBoston.Ready()) {
+    if (swe.Ready()) weather.AddExternalWindow("merrimack", &swe, &bathySwe, oceanAt);
+    if (bathyBostonSwe.Ready()) {
         int iBos = -1;
         for (size_t i = 0; i < model.Count(); ++i) {
             if (model.S(i).id == "8443970") iBos = static_cast<int>(i);
@@ -1049,7 +1062,7 @@ std::optional<int> FrameLoop::Session() {
             SweConfig bcfg;
             bcfg.spongeX0 = -2500.0f;   // Mass Bay, east of the outer harbor islands
             bcfg.westBoundary = false;  // the Charles is dammed; the west edge is a wall
-            weather.AddDormantWindow("boston", &bathyBoston, bcfg, oceanAtBoston, 0.5);
+            weather.AddDormantWindow("boston", &bathyBostonSwe, bcfg, oceanAtBoston, 0.5);
             // M9ar: Boston lies inside the z14 height page; its solver reads slice 6 too.
             if (hgtTenant >= 0) {
                 weather.SetHeightPage(resMgr.TextureRes(hgtTenant),
@@ -1113,7 +1126,7 @@ std::optional<int> FrameLoop::Session() {
         // M8 flows into waves: the SWE's SOLVED current drives the dispersion when
         // resident (the bent jet, the tip shear); the ACT proxy is the fallback.
         if (swe.Ready() && sea) {
-            waveField->SetSweCurrent(&swe, &bathy, sea->sweCurrentGain);
+            waveField->SetSweCurrent(&swe, &bathySwe, sea->sweCurrentGain);
         }
         // M12 step 5c: the bank's wave field and its live config pointer (and set B's) are
         // applied BELOW, by the water component's one Apply -- the same call the hot-reload
@@ -1196,9 +1209,104 @@ std::optional<int> FrameLoop::Session() {
     // M5c: give the solver history before the first frame, and run the validation cycle if
     // asked (headless CSV; the ebb/flood-asymmetry and basin-lag gates read from it).
     if (swe.Ready()) {
+        // --bed-trace N: THE BED THE KERNEL READS, read back before the hour is integrated on it
+        // (app/Tools/BedTrace.cpp); a run's readings land in a directory of their own under out/.
+        const bool bedTrace = opt.bedTraceEvery > 0;
+        const double spinT0 = simUnix - S.water.swe.spinupH * 3600.0;
+        if (bedTrace) {
+            char dir[96];
+            snprintf(dir, sizeof(dir), "out/bedtrace/%lld-%lu",
+                     static_cast<long long>(std::time(nullptr)),
+                     static_cast<unsigned long>(GetCurrentProcessId()));
+            m_bedTracer.Configure(bathySwe, dir, [&](uint64_t hist[16]) {
+                return weather.ClaimedMips(resMgr, hgtTenant, hist, "merrimack");
+            });
+            m_bedTracer.Read(gpu, swe, S.water.swe.bedWait ? "before-wait" : "before-spinup",
+                             oceanAt(spinT0));
+        }
+        // THE BED BEFORE THE HOUR (review finding 48). The spin-up integrates on the bed its
+        // kernel reads, and before the first frame nothing has asked for any of the domain and
+        // no residency turn has run. water.swe.bedWait says what the hour waits for: "whole",
+        // every active solver's domain read at mip 0; "map", one residency turn with nothing
+        // asked, so the kernel reads the manager's own map (the coarsest mip) -- a diagnostic.
+        bool bedWhole = false;
+        if (S.water.swe.bedWait == 2 && S.water.swe.spinupH > 0) {
+            const WeatherManager::BedWait bw = weather.WaitForBeds(gpu, resMgr, hgtTenant);
+            bedWhole = bw.done;
+            Log("[swe] bed wait: %u window(s), %u tiles mapped in %u residency turns, %.2f s -- %s "
+                "(%llu of %llu cells read the page at mip 0)",
+                bw.windows, bw.tiles, bw.turns, bw.seconds,
+                bw.done ? "the bed is whole"
+                        : bw.windows ? "NOT whole at the bound; the hour spins up on what there is"
+                                     : "no domain inside the page to wait for",
+                static_cast<unsigned long long>(bw.whole),
+                static_cast<unsigned long long>(bw.cells));
+            if (bedTrace) m_bedTracer.Read(gpu, swe, "before-spinup", oceanAt(spinT0));
+        } else if (S.water.swe.bedWait == 1 && S.water.swe.spinupH > 0) {
+            gpu.WaitIdle();
+            {
+                hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);
+                resMgr.ProcessQueues(gpu, up.Native());
+                gpu.EndUpload();
+            }
+            Log("[swe] bed wait: the residency map only (one turn, nothing asked) -- the hour "
+                "integrates on the coarsest resident mip");
+            if (bedTrace) m_bedTracer.Read(gpu, swe, "before-spinup", oceanAt(spinT0));
+        }
+        // A SOLVER'S WINDOW HOLDS ITS WATER: flooded on the bed its kernel reads when the whole-bed
+        // wait finished (the trace reads it back), else on the CPU grid, and the line says which.
+        swe.LogHoldsWater(gpu, bedWhole);
+        // --swe-cycle N: the validation cycle integrates on the bed a run's spin-up would, so
+        // it comes after the wait (before it, the kernel reads a bed no turn has delivered).
         if (S.Tool("swe-cycle")) {
-            return tools::RunSweCycleMode(opt, gpu, currents, haveCurrents, bathy, swe, resMgr,
-                                          simUnix, oceanAt, southAt, westAt, westQAt);
+            // The west boundary's inputs, for the cycle's west log: the two stations that bracket
+            // the boundary's river kilometre (each tide in its own MLLW, less its own mean), the
+            // weight between them, and the entrance's tide and datum link to NAVD88.
+            auto describeWest = [&](double t) {
+                char b[480];
+                snprintf(b, sizeof(b),
+                         "boundary at river km %.2f: %s (km %.2f) %+.3f less mean %.3f | %s (km %.2f) "
+                         "%+.3f less mean %.3f | weight %.3f | entrance %s %+.3f less mean %.3f, "
+                         "MLLW->NAVD %+.3f",
+                         kWestKm, model.S(westA).name.c_str(), model.S(westA).riverKm,
+                         model.Height(westA, t), model.S(westA).meanMllwM,
+                         model.S(westB).name.c_str(), model.S(westB).riverKm,
+                         model.Height(westB, t), model.S(westB).meanMllwM, wT,
+                         model.S(entSta).name.c_str(), model.Height(entSta, t),
+                         model.S(entSta).meanMllwM, datumOff);
+                return std::string(b);
+            };
+            // The stations' own tides over the cycle, a row every 120 s like the cycle's: each in
+            // its own MLLW less its own mean, the river's stations only (out/swe_stations_<pid>.csv).
+            {
+                char sp[96];
+                snprintf(sp, sizeof(sp), "out/swe_stations_%lu.csv",
+                         static_cast<unsigned long>(GetCurrentProcessId()));
+                FILE* sf = nullptr;
+                fopen_s(&sf, sp, "w");
+                if (sf) {
+                    fprintf(sf, "unix");
+                    for (size_t i = 0; i < model.Count(); ++i) {
+                        if (model.S(i).riverKm < 0) continue;
+                        std::string nm = model.S(i).name;
+                        std::replace(nm.begin(), nm.end(), ',', ' ');
+                        fprintf(sf, ",%s@%.2f", nm.c_str(), model.S(i).riverKm);
+                    }
+                    fprintf(sf, "\n");
+                    for (double t = simUnix; t <= simUnix + opt.sweCycleH * 3600.0 + 1.0; t += 120.0) {
+                        fprintf(sf, "%.0f", t);
+                        for (size_t i = 0; i < model.Count(); ++i) {
+                            if (model.S(i).riverKm < 0) continue;
+                            fprintf(sf, ",%.4f", model.Height(i, t) - model.S(i).meanMllwM);
+                        }
+                        fprintf(sf, "\n");
+                    }
+                    fclose(sf);
+                    Log("[swe-cycle] wrote %s", sp);
+                }
+            }
+            return tools::RunSweCycleMode(opt, gpu, currents, haveCurrents, bathySwe, swe, resMgr,
+                                          simUnix, oceanAt, southAt, westAt, westQAt, describeWest);
         }
         if (S.water.swe.spinupH > 0) {
             const auto t0 = std::chrono::steady_clock::now();
@@ -1206,14 +1314,15 @@ std::optional<int> FrameLoop::Session() {
             Log("[swe] spun up %.2f h of history in %.1f s", S.water.swe.spinupH,
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
         }
-        if (S.Tool("swe-uv")) tools::RunSweUv(opt, gpu, bathy, swe);
+        if (bedTrace) m_bedTracer.Read(gpu, swe, "after-spinup", oceanAt(simUnix));
+        if (S.Tool("swe-uv")) tools::RunSweUv(opt, gpu, bathySwe, swe);
         {
             // Spot probes for the log: bar, throat, ocean. dEta pathologies show instantly.
-            const float pts[6] = {900.0f, 100.0f, 250.0f, 60.0f, 2600.0f, 0.0f};
+            const float pts[6] = {900.0f, 100.0f, 250.0f, 60.0f, 2400.0f, 0.0f};
             SweSolver::Probe pr[3];
             swe.ReadProbes(gpu, pts, 3, pr);
             Log("[swe] probes  bar(900,100): dEta %+.3f u %+.2f,%+.2f v%d | throat(250,60): "
-                "dEta %+.3f u %+.2f,%+.2f v%d | ocean(2600,0): dEta %+.3f",
+                "dEta %+.3f u %+.2f,%+.2f v%d | ocean(2400,0): dEta %+.3f",
                 pr[0].dEta, pr[0].u, pr[0].v, pr[0].valid ? 1 : 0, pr[1].dEta, pr[1].u,
                 pr[1].v, pr[1].valid ? 1 : 0, pr[2].dEta);
         }
@@ -3538,6 +3647,40 @@ bool FrameLoop::Frame() {
         ++frameMsN;
     }
     ++frame;
+    // --bed-trace N: the bed the solver reads, every N frames, beside the solver's own probes
+    // and, under --twin-surface, the three levels at the camera; the first reading keeps the
+    // frame it follows as a still beside --dump's (<name>_f<N>.png). An instrument: it reads
+    // back and waits, after the frame it describes was recorded.
+    if (opt.bedTraceEvery > 0 && m_bedTracer.Configured() && !marsMode &&
+        frame % opt.bedTraceEvery == 0u) {
+        const std::string tag = "f" + std::to_string(frame);
+        if (frame == opt.bedTraceEvery && !S.dumpW.empty()) {
+            std::wstring still = S.dumpW;
+            const size_t dot = still.find_last_of(L'.');
+            still.insert(dot == std::wstring::npos ? still.size() : dot,
+                         L"_f" + std::to_wstring(frame));
+            renderer.DumpPng(still);
+        }
+        m_bedTracer.Read(gpu, swe, tag, oceanAt(simUnix));
+        // --bed-trace-plant: the same instant with the rule's floor at the coarsest mip. The
+        // instrument has to call that bed coarse, or it cannot be trusted to call one fine.
+        if (opt.bedTracePlant && frame == opt.bedTraceEvery && hgtTenant >= 0) {
+            m_bedTracer.Read(gpu, swe, tag + "-planted", oceanAt(simUnix),
+                             static_cast<float>(resMgr.Mips(hgtTenant) - 1u));
+        }
+        if (swe.Ready()) {
+            const float pts[6] = {900.0f, 100.0f, 250.0f, 60.0f, 2400.0f, 0.0f};
+            SweSolver::Probe pr[3];
+            swe.ReadProbes(gpu, pts, 3, pr);
+            Log("[swe] probes  bar(900,100): dEta %+.3f u %+.2f,%+.2f v%d | throat(250,60): "
+                "dEta %+.3f u %+.2f,%+.2f v%d | ocean(2400,0): dEta %+.3f -- frame %u (t+%.1f s)",
+                pr[0].dEta, pr[0].u, pr[0].v, pr[0].valid ? 1 : 0, pr[1].dEta, pr[1].u,
+                pr[1].v, pr[1].valid ? 1 : 0, pr[2].dEta, frame, simUnix - startUnix);
+        }
+        if (S.Tool("twin-surface") && sea && waterBank) {
+            tools::LogLevelsAtCamera(gpu, waterBank, cam, simUnix, weather, lastWaterNavd);
+        }
+    }
     // --dump-both: the solid frame has just been rendered. Dump it, flip BOTH
     // surfaces to wireframe, and take one more lap -- the clock is held above, so
     // the second image is the same instant seen as lines.
@@ -3953,12 +4096,25 @@ bool FrameLoop::Frame() {
         }
         if (S.Tool("twin-surface") && !marsMode && sea && waterBank) {
             tools::RunTwinSurface(opt, gpu, seaState, sea, waterScene, waterBank, cam,
-                                  simUnix, weather, waveField);
+                                  simUnix, weather, waveField, lastWaterNavd);
         }
         if (S.Tool("trace") && !marsMode && sea && waterBank) {
             tools::RunTrace(opt, gpu, sea, compositor, hgtCh, waterAtlas, waterBank, globe,
                             resMgr, winOrgX, winOrgY, hgtTenant, hgtWinTenant, simUnix,
                             weather);
+        }
+        // --bed-trace: THE WHOLE BED, the readings' reference. After everything above has read
+        // the run's last instant, the domain is made whole the way the bed wait makes it -- the
+        // same turns, the same trace as its test -- and read once more; every reading of the run
+        // is then held against it.
+        if (opt.bedTraceEvery > 0 && m_bedTracer.Configured() && !marsMode) {
+            const WeatherManager::BedWait bw = weather.WaitForBeds(gpu, resMgr, hgtTenant);
+            Log("[bedtrace] the domain made whole at the run's end: %u tiles mapped in %u turns, "
+                "%.2f s -- %s",
+                bw.tiles, bw.turns, bw.seconds, bw.done ? "whole" : "NOT whole (see the reading)");
+            if (m_bedTracer.Read(gpu, swe, "whole", oceanAt(simUnix))) {
+                m_bedTracer.CompareWithWhole("whole");
+            }
         }
         return false;
     }

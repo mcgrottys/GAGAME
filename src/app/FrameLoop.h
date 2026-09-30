@@ -66,6 +66,7 @@
 #include "app/FramePipe.h"
 #include "app/Options.h"
 #include "app/Scene.h"
+#include "app/Tools.h"   // --bed-trace: the instrument keeps its readings for the run's end
 #include "compose/TileTree.h"
 #include "core/Droste.h"   // M10: the globe within the globe, as one Cl(4,1) versor
 #include "core/ExitTrail.h"   // the shutdown trail: a line before each phase of teardown
@@ -293,6 +294,9 @@ private:
     uint32_t m_wavePendingTiles = 0, m_wavePendingPlanes = 0;
     double m_wavePendingSec = 0.0;
     bool m_skyProbed = false;   // --sky-probe reads the tables once
+    // --bed-trace N: the solver's bed read back around the spin-up, every N frames and at the
+    // end (app/Tools/BedTrace.cpp); unconfigured without the flag, and then nothing reads it.
+    tools::BedTracer m_bedTracer;
     // The solar system this frame was lit by -- the one light, so every viewpoint (a gate's
     // window included) asks it for its own direction instead of borrowing the camera's.
     sun::SolarSystem m_solar;
