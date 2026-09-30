@@ -1917,8 +1917,34 @@ of the frame.
   margin is seen to cover what moves it; and the rail with the margin at one, at the square
   root of two and at two. The exact form of the measure, the distance to the tile's own
   nearest ground, is taken if the margin does not settle it.
+- **Measured, the margin was not the cause, and my reading was wrong twice** (2026-09-30).
+  The instrument came first, as asked: the measure of every tile between two passes
+  running. On the standing camera 70,865 of 6.6 million pairs moved by more than a
+  hundredth and the cut ran a three-turn cycle, ten tiles in and ten out, six and ten, none;
+  with the prediction made to speak every frame nothing moved at all and the camera settled
+  at frame 230 with no margin. **The cause is the prediction's cadence.** A tile's weight is
+  made again each frame from the readers that spoke that frame; the prediction speaks every
+  third frame from a walk without a frustum, whose leaf for a tile is nearer, and on the
+  other two the view's statement drops its distance. It was neither the mesh's leaves nor
+  the waves, nor the leaf's distance in place of the tile's: the exact measure, built and
+  measured, changed nothing that mattered. With the margin at the square root of two the
+  standing camera settles (frame 426) and the stills, the audits and part 5 hold, but the
+  rail still reloads 5,900 within the glance against 1,729, because the margin protects
+  only tiles that are held, and a tile still loading has no margin. And the turn costs 2.5
+  to 2.8 ms: the order maps every tile it reads, 21,930 against today's 14,024, and today's
+  leaves 7,900 reads unmapped (finding 2), so the bound of 1.35 ms was today's fault
+  written as a target. The closure under the margin was mended in the law's terms: every
+  tile above a held tile counts as held (0.035 ms a pass).
+- **The law, once more, and with fewer numbers, not more.** A reader's WEIGHT stands until
+  it speaks again, as its want already does (law 1): a tile's measure is taken over the
+  standing statements of every reader that named it, and the prediction's stands for its
+  lead. Then nothing in the measure moves on a standing camera, by construction, and the
+  margin is tried at one first: if it settles and holds the bounds, the margin goes. The
+  bound for the turn is restated as what the order does that today's does not: the mean
+  cost a tile MAPPED no more than today's, and the 95th in a hundred no more than today's
+  in the same batch. The exact measure is not kept: it earned nothing.
 - **Then today's manager is removed,** and the lines of `Residency.*` are counted against
-  the 2,523 of `main`. Both stand today: 3,854.
+  the 2,523 of `main`. Both stand today: 4,426.
 
 **One law more, from Haulover: a tile is held whole or it is not held** (finding 83). 4.11
 says that absence is the coarser ancestor and never zero. Today a composite whose source
