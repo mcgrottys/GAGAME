@@ -2153,6 +2153,49 @@ law holds as written:
   old overlay did); the identity index trusts size and time; the cube's own level reads a
   file whole once, 22 s for an ortho, because its texel is 4,073 of the file's.
 
+**The third slice is built: a height is a source by being a file** (2026-09-29, the same
+scratch tree, not committed). The same class reads a colour or a height; a height's window
+holds a float a texel, NaN where the file says nothing; 16-bit values are read raw and
+signed where the file's sample format says so (the decoder's own converter bent them: -5
+came out 0.99986). The vertical datum is read from the file's key (NAVD88, EGM96, EGM2008,
+the ellipsoid and three more) and the unit from its own; the engine's frame is what the
+survey's source declares, metres on NAVD88; a file on another datum is taken only with the
+entry's `offset` at the place, and refused by name without one. Heights by file join the
+height stack by `over`, under the owner's hand edits.
+
+- **Measured, a 40 m hill on a 2 m grid in the sea east of the mouth:** the CPU's height at
+  36 points is the hill's function within 0.46 mm, where the grain's bound is 0.62 mm; on
+  the pyramid its own level is mip 8 (1.02 by 0.77 m) and the pass writes 122 tiles on 10
+  levels, every fold byte for byte; on the survey's page its own level is the page's finest
+  (7.0 m); five plants caught (feet as metres, nodata as zero, the offset not added, a datum
+  refused or taken wrongly). The GPU's page reads +14.99 m at the hill's centre and the CPU
+  +14.99, 2 mm apart, inside the half float's quantum there. The solver's bed reads it: at
+  the end of a run its trace at the centre says bed +14.97 m, dry, where without the entry
+  it says -25.13 m, wet. The bird over it changes 96,267 pixels inside the hill's footprint
+  and 658 outside, its lee in the swell. **A height alone makes land;** the colour is the
+  sea floor's, because no colour source covers it.
+- **The real files.** The survey's two GeoTIFFs, read as one source, against the harvester's
+  grid at 2,000 points: the median 5.5 cm apart, the 95th percentile 0.42 m, the largest
+  2.08 m on land; under water the grid is 4.6 cm the deeper in the mean, which is the
+  harvester's rule for a thalweg (half the mean of the wet samples and half the deepest).
+  The relief's 60-second file against the engine's: a median of 9.7 m, because the harvester
+  decimates by whole columns and rounds to 16 bits. The 15-second ring is a straight crop:
+  the file agrees with it at 2,000 of 2,000 cells, so that ring's reader, 81 engine lines and
+  33 of the harvester, can go for one scene entry. Not deleted in this slice.
+- **What the files declare, read from their keys.** The survey's tiles: NAD83 geographic
+  (4269), and no vertical datum nor unit at all; NAVD88 is what NOAA says of them and what
+  the source declares. The relief's files: WGS 84 with "EGM2008 height" (3855); the engine
+  takes them as mean sea level with a 9.2 cm snipping, which is a datum question for step 8.
+- **Counted:** the engine grew by 231 lines (323 added, 92 removed); the tests by 415.
+- **Found on the way.** The scene's builder filled a default `offset` of 0 into every entry,
+  so a foreign datum would have been taken with no offset: mended, one line. And a height
+  source anywhere re-keys the sea floor's relief, the bed's classifier and the wave field
+  for the whole globe, because a node's identity folds every input's (finding 104): the
+  standard bird view, with the hill out of its frame, changes 18,072 pixels of water. That
+  is step 4b's to mend, where a tile's key names only the inputs that touch it.
+- **Not held:** the jetty view with and without the hill could not be compared (its root
+  was still filling when the runs were taken); the island does not show above its horizon.
+
 ## 5. Decisions for Mark
 
 Settled already, 2026-09-28, and built into the sections above:
