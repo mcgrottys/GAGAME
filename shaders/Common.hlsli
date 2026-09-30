@@ -373,16 +373,26 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
     uint4  gCsU5;   /* M9ap PAGES: colour array SRV, array residency SRV, window slice, \
                        detail slice. x == ~0 means the old three-tenant path. */ \
     uint4  gCsU6;   /* M9aq HEIGHT PAGES: height array SRV, array residency SRV, window \
-                       slice. x == ~0 means the old cube + window tenants. */ \
-    float4 gCsBlkU[8]; /* HIERARCHY 4.17: per standing block (coarsest rung first) PageTexelUv's \
-                          planes U, V, W about the eye's tangent frame, anchored nearest the eye */ \
+                       slice. x == ~0 means the old cube + window tenants. */
+// HIERARCHY 4.17: THE STANDING BLOCKS' ROWS, compiled in only when the scene's key stands -- the
+// engine then defines GA_BLOCK_RANKS, the key's ranks (SurfaceFrame::Ranks); with no key the
+// cbuffer below is today's to the byte. ComposedSurfaceCb carries them always, at its end.
+#if GA_BLOCK_RANKS
+#define GA_COMPOSED_CB_BLOCK_ROWS \
+    float4 gCsBlkU[8]; /* per standing block (coarsest rung first) PageTexelUv's planes U, V, W \
+                          about the eye's tangent frame, anchored nearest the eye */ \
     float4 gCsBlkV[8]; \
     float4 gCsBlkW[8]; \
     float4 gCsBlkG[2]; /* per block, its ground texel (m) at mip 0 */ \
     uint4  gCsBlkS[2]; /* per block, its slice of the colour and the mask */ \
     float4 gCsBlkO[4]; /* per block (two a row), whole blocks from the anchor to its origin */ \
     float4 gCsBlkE; /* the eye in the tangent axes about the planet's centre */ \
-    uint4  gCsBlkN; /* x = the block count; 0 = today's Mercator pages */
+    uint4  gCsBlkN; /* x = the block count */ \
+    uint4  gCsDirU; /* commit 4: x = the directory's SRV (Walk.hlsli), y = its slices; \
+                       x == ~0 means no directory */
+#else
+#define GA_COMPOSED_CB_BLOCK_ROWS
+#endif
 
 // M12 step 4g: THE ONE SURFACE CONSTANT BUFFER, on the shared layout's b2 (Renderer.h): the
 // frame loop fills ga::ComposedSurfaceCb once a frame through SurfaceFrame::Fill, RenderFrame
@@ -391,6 +401,7 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
 // DxTest's parity gate holds this cbuffer against the C++ struct, row by row.
 cbuffer SurfaceCb : register(b2) {
     GA_COMPOSED_CB_ROWS
+    GA_COMPOSED_CB_BLOCK_ROWS
 };
 
 // The geometric-algebra toolkit lives in GA.hlsli (M3 moved it out so compute shaders with

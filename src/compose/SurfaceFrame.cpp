@@ -76,6 +76,32 @@ bool SurfaceFrame::DeclareBlocks(const std::string& key) {
     }
     std::stable_sort(got.begin(), got.end(),
                      [](const Entry& a, const Entry& b) { return a.win.rung < b.win.rung; });
+    // HIERARCHY 4.17 commit 4: THE DIRECTORY'S LAW. Only a rank's rung (3, 6, 9, 12, 15) makes a
+    // block an eighth of its parent, so that a directory cell lies in one block of the next rank or
+    // in none; and every block but rank 1's needs its parent declared, or no walk reaches it
+    // (rank 1 cannot be skipped).
+    for (const Entry& e : got) {
+        const FaceWindow& w = e.win;
+        const char* why = nullptr;
+        if (w.rung < 3 || w.rung % 3 != 0 || w.rung > 3 * int(kMaxRanks)) {
+            why = "its rung is not a rank's (3, 6, 9, 12 or 15)";
+        } else if (w.rung > 3) {
+            const long long px = w.anchorX / Lattice::kFaceDim / 8 * Lattice::kFaceDim;
+            const long long py = w.anchorY / Lattice::kFaceDim / 8 * Lattice::kFaceDim;
+            bool parent = false;
+            for (const Entry& g : got) {
+                parent = parent || (g.win.face == w.face && g.win.rung == w.rung - 3 &&
+                                    g.win.anchorX == px && g.win.anchorY == py);
+            }
+            if (!parent) why = "the block of the rank above, which a walk must pass, is not declared";
+        }
+        if (why) {
+            Log("[surface] streaming.faceWindows: %.5f N %.5f E at rung %d: %s -- the key is REFUSED "
+                "and the Mercator windows stand",
+                e.lat, e.lon, w.rung, why);
+            return false;
+        }
+    }
     for (size_t i = 0; i < got.size(); ++i) {
         const FaceWindow& w = got[i].win;
         blocks.push_back(w);
@@ -86,7 +112,53 @@ bool SurfaceFrame::DeclareBlocks(const std::string& key) {
             got[i].lat, got[i].lon, w.rung, 6 + i, w.face, w.anchorX / Lattice::kFaceDim,
             w.anchorY / Lattice::kFaceDim, g0, got[i].inside, got[i].inside * g0 / 1000.0);
     }
+    BuildDirectory();
     return true;
+}
+
+void SurfaceFrame::BuildDirectory() {
+    const uint32_t slices = 6u + uint32_t(blocks.size());
+    directory.assign(size_t(slices) * kCells * kCells, kNone);
+    for (uint32_t s = 0; s < slices; ++s) {
+        const bool isFace = s < 6u;
+        const uint32_t face = isFace ? s : blocks[s - 6].face;
+        const int rung = isFace ? 0 : blocks[s - 6].rung;
+        const long long ox = isFace ? 0 : blocks[s - 6].anchorX / Lattice::kFaceDim;
+        const long long oy = isFace ? 0 : blocks[s - 6].anchorY / Lattice::kFaceDim;
+        for (uint32_t cy = 0; cy < kCells; ++cy) {
+            for (uint32_t cx = 0; cx < kCells; ++cx) {
+                // The next rank's block under this cell: 8 a side in this block, a cell half of one.
+                const long long cbx = (ox * 8 + cx / 2) * Lattice::kFaceDim;
+                const long long cby = (oy * 8 + cy / 2) * Lattice::kFaceDim;
+                for (size_t i = 0; i < blocks.size(); ++i) {
+                    const FaceWindow& b = blocks[i];
+                    if (b.face == face && b.rung == rung + 3 && b.anchorX == cbx && b.anchorY == cby) {
+                        directory[(size_t(s) * kCells + cy) * kCells + cx] = uint16_t(6 + i);
+                    }
+                }
+            }
+        }
+    }
+}
+
+uint32_t SurfaceFrame::Walk(const double P[3], WalkStep out[kMaxRanks]) const {
+    if (blocks.empty() || directory.empty()) return 0;
+    auto cell = [&](uint32_t slice, double u, double v) {
+        const int cx = (std::max)(0, (std::min)(int(kCells) - 1, int(std::floor(u * kCells))));
+        const int cy = (std::max)(0, (std::min)(int(kCells) - 1, int(std::floor(v * kCells))));
+        return directory[(size_t(slice) * kCells + cy) * kCells + cx];
+    };
+    double uv[2];
+    const uint32_t face = CubeFaceOfDir(P, uv);
+    uint16_t s = cell(face, uv[0], uv[1]);
+    uint32_t n = 0;
+    while (n < kMaxRanks && s != kNone && s >= 6u && size_t(s - 6u) < blocks.size()) {
+        double x = 0.0, y = 0.0;
+        blocks[s - 6u].TexelOf(P, x, y);   // relative to the block's own origin
+        out[n++] = {s, x / Lattice::kFaceDim, y / Lattice::kFaceDim};
+        s = cell(s, x / Lattice::kFaceDim, y / Lattice::kFaceDim);
+    }
+    return n;
 }
 
 void SurfaceFrame::BlockRows(const FaceWindow& block, const Placement& own, const double eye[3],
@@ -351,6 +423,10 @@ void SurfaceFrame::Fill(ComposedSurfaceCb& cb, const ResidencyManager& rm) const
     cb.blkE[3] = 0.0f;
     cb.blkN[0] = nb;
     cb.blkN[1] = cb.blkN[2] = cb.blkN[3] = 0u;
+    // HIERARCHY 4.17 commit 4: the directory the shader walks (Walk.hlsli), and its slices.
+    cb.dirU[0] = (nb && dirSrv != UINT32_MAX) ? dirSrv : UINT32_MAX;
+    cb.dirU[1] = nb ? 6u + nb : 0u;
+    cb.dirU[2] = cb.dirU[3] = 0u;
 }
 
 }  // namespace ga

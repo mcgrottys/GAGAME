@@ -53,25 +53,7 @@ static float gHpTraceFloor = 0.0f;   // a residency floor the trace imposes; 0 =
 #define HP_CHOSE(mip, slice)
 #endif
 
-// Direction (x = cos lat cos lon, y = sin lat, z = cos lat sin lon -- Compose.hlsli's
-// convention) -> D3D cube face and its texture uv, the inverse of Compositor::ComposeCubeDir.
-uint HpCubeFace(float3 d, out float2 uv) {
-    const float3 a = abs(d);
-    float s, t;
-    uint face;
-    if (a.x >= a.y && a.x >= a.z) {
-        if (d.x > 0.0f) { face = 0; s = -d.z / a.x; t = -d.y / a.x; }
-        else            { face = 1; s =  d.z / a.x; t = -d.y / a.x; }
-    } else if (a.y >= a.z) {
-        if (d.y > 0.0f) { face = 2; s =  d.x / a.y; t =  d.z / a.y; }
-        else            { face = 3; s =  d.x / a.y; t = -d.z / a.y; }
-    } else {
-        if (d.z > 0.0f) { face = 4; s =  d.x / a.z; t = -d.y / a.z; }
-        else            { face = 5; s = -d.x / a.z; t = -d.y / a.z; }
-    }
-    uv = float2(s, t) * 0.5f + 0.5f;
-    return face;
-}
+// HpCubeFace (direction -> D3D cube face and its uv) lives in PageSample.hlsli, included above.
 
 // The planet's height (m NAVD) at lat/lon (degrees). winA = the page's lattice row (org px x,
 // org px y, 1/kPageDim, world px at z14: Lattice::Rows); winSlice the page's slice; pageMipMin

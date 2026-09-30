@@ -185,10 +185,13 @@ public:
         uint32_t winFace = 0, hgtWinFace = 0, detFace = 0;
         double detOrg[2] = {}, detSize = 1.0, det17Org[2] = {};
         // HIERARCHY 4.17 commit 2: the standing blocks (SurfaceFrame::blocks), block i at
-        // slice 6 + i of the colour and the mask; blockN 0 is today's Mercator pages.
-        uint32_t blockN = 0, blockFace[4] = {};
-        int blockRung[4] = {};
-        long long blockAx[4] = {}, blockAy[4] = {};
+        // slice 6 + i of the colour and the mask; blockN 0 is today's Mercator pages. As many
+        // as the key takes (SurfaceFrame::kMaxBlocks, held equal in GlobeLayer.cpp): with four,
+        // a key of six blocks left its two finest asked at their floor alone.
+        static constexpr uint32_t kBlocks = 8;
+        uint32_t blockN = 0, blockFace[kBlocks] = {};
+        int blockRung[kBlocks] = {};
+        long long blockAx[kBlocks] = {}, blockAy[kBlocks] = {};
         bool probeCullFar = false;   // step 23 probe
         // M10: an OCCLUDING SPHERE in this walk's own frame (centre, radius; radius 0 = none).
         // For a level the camera's planet floats in, that planet hides most of it: a node whose

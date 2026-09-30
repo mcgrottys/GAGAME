@@ -1,5 +1,7 @@
 #include "hal/Shader.h"
 
+#include <cstring>
+
 namespace ga {
 
 void ShaderCompiler::Init() {
@@ -33,6 +35,7 @@ ShaderBlob ShaderCompiler::Compile(const std::wstring& path, const wchar_t* entr
         L"-HV", L"2021",
     };
     for (const auto& d : defines) { argStore.push_back(L"-D"); argStore.push_back(d); }
+    for (const auto& d : m_always) { argStore.push_back(L"-D"); argStore.push_back(d); }
 
     std::vector<const wchar_t*> args;
     args.reserve(argStore.size());
@@ -68,7 +71,32 @@ ShaderBlob ShaderCompiler::Compile(const std::wstring& path, const wchar_t* entr
     }
 
     result->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&out.blob), nullptr);
-    if (!out.Valid()) Log("[shader] no object produced for %S %S", path.c_str(), entry);
+    if (!out.Valid()) {
+        Log("[shader] no object produced for %S %S", path.c_str(), entry);
+        return out;
+    }
+    // HIERARCHY 4.17: THE PROGRAM, a line a stage -- FNV-1a over the container's DXIL part, the
+    // code the driver compiles (its debug parts carry the source text and line numbers, not it).
+    const uint8_t* b = static_cast<const uint8_t*>(out.Data());
+    uint32_t parts = 0;
+    if (out.Size() >= 32 && std::memcmp(b, "DXBC", 4) == 0) std::memcpy(&parts, b + 28, 4);
+    for (uint32_t k = 0; k < parts && 32 + 4 * size_t(k) + 4 <= out.Size(); ++k) {
+        uint32_t off = 0, bytes = 0;
+        std::memcpy(&off, b + 32 + 4 * size_t(k), 4);
+        if (size_t(off) + 8 > out.Size() || std::memcmp(b + off, "DXIL", 4) != 0) continue;
+        std::memcpy(&bytes, b + off + 4, 4);
+        if (size_t(off) + 8 + bytes > out.Size()) break;
+        uint64_t h = 1469598103934665603ull;
+        for (uint32_t j = 0; j < bytes; ++j) {
+            h ^= b[off + 8 + j];
+            h *= 1099511628211ull;
+        }
+        const size_t name = path.find_last_of(L"/\\");
+        Log("[shader] %S %S %S: DXIL %016llx, %u bytes%s", path.c_str() + (name == std::wstring::npos ? 0 : name + 1),
+            entry, target, static_cast<unsigned long long>(h), bytes,
+            (defines.empty() && m_always.empty()) ? "" : " (with defines)");
+        break;
+    }
     return out;
 }
 

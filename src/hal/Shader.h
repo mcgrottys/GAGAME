@@ -28,8 +28,12 @@ public:
     // A failed hot reload must not take the viewer down; the caller keeps the previous PSO.
     ShaderBlob Compile(const std::wstring& path, const wchar_t* entry, const wchar_t* target,
                        const std::vector<std::wstring>& defines = {});
+    // HIERARCHY 4.17: a define every later compile carries -- the standing blocks'
+    // GA_BLOCK_RANKS, set once the scene's key stands and before the first layer compiles.
+    void Always(std::wstring define) { m_always.push_back(std::move(define)); }
 
 private:
+    std::vector<std::wstring> m_always;
     Com<IDxcUtils> m_utils;
     Com<IDxcCompiler3> m_compiler;
     Com<IDxcIncludeHandler> m_includes;

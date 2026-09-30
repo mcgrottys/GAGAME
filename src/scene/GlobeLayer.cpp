@@ -1513,7 +1513,9 @@ GlobeLayer::WalkParams GlobeLayer::CaptureWalk(const Camera& cam, float viewport
     wp.detOrg[0] = m_detOrg[0];
     wp.detOrg[1] = m_detOrg[1];
     wp.detSize = m_detSize;
-    wp.blockN = uint32_t((std::min)(m_surface->blocks.size(), size_t(4)));
+    static_assert(WalkParams::kBlocks == SurfaceFrame::kMaxBlocks,
+                  "a node asks of every block the key takes");
+    wp.blockN = uint32_t((std::min)(m_surface->blocks.size(), size_t(WalkParams::kBlocks)));
     for (uint32_t i = 0; i < wp.blockN; ++i) {
         const FaceWindow& b = m_surface->blocks[i];
         wp.blockFace[i] = b.face;

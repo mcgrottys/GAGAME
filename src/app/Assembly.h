@@ -113,6 +113,7 @@ struct Assembly {
     // and nothing else keeps a reference: a Tenant copies its lattices, the frame loop dies
     // first, the tools take it by reference for the length of a call.
     SurfaceFrame surface;
+    GpuTexture surfaceDirectory;   // HIERARCHY 4.17 commit 4: the blocks' directory (Walk.hlsli)
     RendererDesc rd;
     Renderer renderer;
     ExitMark exitRenderer{"assembly: ~Renderer -- the layers it owns and their atlases' heaps"};

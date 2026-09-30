@@ -309,6 +309,9 @@ struct ComposedSurfaceCb {
     float blkO[16];
     float blkE[4];
     uint32_t blkN[4];
+    // HIERARCHY 4.17 commit 4: the directory (SurfaceFrame::directory on the GPU): its SRV and
+    // its slices. UINT32_MAX: none, and no block is found.
+    uint32_t dirU[4];
 };
 
 // M12 step 2b: THE FRAME moved to core/Lattice.h and became the LATTICE every tree and

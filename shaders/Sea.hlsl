@@ -437,7 +437,7 @@ float3 SeaPixelColor(float2 xz, float3 rel, float att, float depth, float dryGua
     if (gBathyU.x != 0xFFFFFFFFu) {
         const float3 T = exp(-gSigmaW.rgb * (sP + dd));
         float3 bedAlb = float3(0.42f, 0.38f, 0.28f);
-        if (ComposedColorOn()) bedAlb = ComposedColor(SeaPlanetDir(bedXZ));
+        if (ComposedColorOn()) bedAlb = ComposedColor(SeaPlanetDir(bedXZ) CS_WALK_AT(SeaPlanetDir(bedXZ)));
         col = lerp(col, bedAlb * (0.35f + 0.75f * ndl) * SUN_IRR_C, T);
     }
 
@@ -544,12 +544,17 @@ float4 PsMain(VsOut i) : SV_Target {
     // the surveyed window the ocean sheet simply must not be drawn over land, and that cut is
     // a classification, at the pixel's own resolution (M6i). Inside the window the SWE wet/dry
     // and the terrain depth own it, so the gate stays out of the estuary's way.
+#if GA_BLOCK_RANKS
+    // HIERARCHY 4.17: the chain, once for the pixel, for its land question (the bed's colour under
+    // --pixel-water walks from the bed, where its ray lands).
+    const WalkChain wc = CsWalk(SeaPlanetDir(i.worldXZ), CsPointOfDir(SeaPlanetDir(i.worldXZ)));
+#endif
     {
         const float2 buv = (i.worldXZ - gBathyGeo.xy) * gBathyGeo.zw;
         const bool surveyed =
             gBathyU.x != 0xFFFFFFFFu && all(buv > 0.002f) && all(buv < 0.998f);
         if (!surveyed && ComposedHeightOn() &&
-            ComposedIsLand(SeaPlanetDir(i.worldXZ), gSea.x - i.sh.x, gSea.x) &&
+            ComposedIsLand(SeaPlanetDir(i.worldXZ) CS_WC, gSea.x - i.sh.x, gSea.x) &&
             i.sh.x < 0.75f) {
             discard;
         }

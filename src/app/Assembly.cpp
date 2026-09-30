@@ -302,6 +302,22 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     rd.shaderDir = shaderDir;
     renderer.Init(gpu, rd);
     if (opt.gpuTime) renderer.EnableGpuProfiler();
+    // M12 step 4a: THE SHIPPED SURFACE, declared once (compose/SurfaceFrame.h): the planet's
+    // radius, the cube and the Merrimack windows the tenants below are declared on, the
+    // tenants themselves once they exist (Declare, at the old SetComposed site), and the
+    // tangent frame's rows the session writes into it. Both fills read it.
+    // HIERARCHY 4.17: declared HERE, before the first layer compiles a shader, because the scene's
+    // key decides what they compile: the standing blocks' code (Compose.hlsli) is compiled in only
+    // when the key stands, as GA_BLOCK_RANKS = its ranks; with no key, or a refused one, every
+    // shader is today's, byte for byte.
+    planetR = (S.scene.planet == "mars") ? 3389500.0 : GlobeModel::kR;
+    surface = SurfaceFrame::Merrimack(planetR, opt.stencil);
+    if (S.scene.planet != "mars") surface.DeclareBlocks(S.streaming.faceWindows);
+    if (!surface.blocks.empty()) {
+        renderer.Shaders().Always(L"GA_BLOCK_RANKS=" + std::to_wstring(surface.Ranks()));
+        Log("[surface] the standing blocks' shader code is compiled in: GA_BLOCK_RANKS=%u",
+            surface.Ranks());
+    }
 
     fields.Init(gpu, L".", 1.0f, 1.0f);
 
@@ -676,14 +692,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // streams Google 2D tiles (cache-first, throttled, budget-capped) reprojected onto the
     // same cube faces. Residency is driven by the CDLOD walk, clamped by residency-map
     // cubes, prefetched along the camera's screw.
-    planetR = marsMode ? 3389500.0 : GlobeModel::kR;
-    // M12 step 4a: THE SHIPPED SURFACE, declared once (compose/SurfaceFrame.h): the planet's
-    // radius, the cube and the Merrimack windows the tenants below are declared on, the
-    // tenants themselves once they exist (Declare, at the old SetComposed site), and the
-    // tangent frame's rows the session writes into it. Both fills read it.
-    surface = SurfaceFrame::Merrimack(planetR, opt.stencil);
-    // HIERARCHY 4.17 commit 2: the scene's standing blocks for the colour and the mask, if any.
-    if (!marsMode) surface.DeclareBlocks(S.streaming.faceWindows);
+    // planetR and THE SHIPPED SURFACE were declared after renderer.Init, before the first layer
+    // compiled (HIERARCHY 4.17: the key decides what they compile).
     // The folder every tile tree of this run lives in (streaming.treeRoot), before the first
     // tree is built. A tool pointed at a scratch folder paints, packs and reads there alone.
     TileTree::SetTreeRoot(S.streaming.treeRoot);
@@ -1022,6 +1032,52 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                     }
                 }
                 colorTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(cd));
+                // HIERARCHY 4.17 commit 4: the directory beside the blocks' slices (the colour's
+                // and the mask's alike), up once as one R16_UINT texture, slices stacked; rows
+                // of 128 texels keep the upload's pitch at 256 bytes, the first 16 are the cells.
+                if (!surface.blocks.empty() && !surface.directory.empty()) {
+                    const uint32_t rows = uint32_t(surface.directory.size() / SurfaceFrame::kCells);
+                    std::vector<uint16_t> texels(size_t(128) * rows, SurfaceFrame::kNone);
+                    for (uint32_t r = 0; r < rows; ++r) {
+                        for (uint32_t c = 0; c < SurfaceFrame::kCells; ++c) {
+                            texels[size_t(r) * 128 + c] =
+                                surface.directory[size_t(r) * SurfaceFrame::kCells + c];
+                        }
+                    }
+                    A->surfaceDirectory = gpu.CreateTexture2D(128, rows, DXGI_FORMAT_R16_UINT,
+                                                           D3D12_RESOURCE_FLAG_NONE,
+                                                           D3D12_RESOURCE_STATE_COPY_DEST,
+                                                           L"surface.directory");
+                    gpu.UploadTexture(A->surfaceDirectory, texels.data(), 128 * sizeof(uint16_t));
+                    surface.dirSrv = gpu.CreateSrv(A->surfaceDirectory.res.Get(), DXGI_FORMAT_R16_UINT);
+                    Log("[surface] the directory: %u slices of %ux%u cells up as SRV %u",
+                        rows / SurfaceFrame::kCells, SurfaceFrame::kCells, SurfaceFrame::kCells,
+                        surface.dirSrv);
+                    // Read back as the GPU holds it: the cells that name a block, slice by slice,
+                    // and whether every cell is the one built.
+                    uint32_t pitch = 0, named = 0, same = 0, before = 0;
+                    std::string bySlice;
+                    const std::vector<uint8_t> back = gpu.ReadbackTexture(A->surfaceDirectory, &pitch);
+                    for (uint32_t r = 0; r < rows && back.size() >= size_t(rows) * pitch; ++r) {
+                        for (uint32_t c = 0; c < SurfaceFrame::kCells; ++c) {
+                            const size_t at = size_t(r) * pitch + c * sizeof(uint16_t);
+                            const uint16_t v = uint16_t(back[at] | (back[at + 1] << 8));
+                            named += (v != SurfaceFrame::kNone) ? 1u : 0u;
+                            same += (v == surface.directory[size_t(r) * SurfaceFrame::kCells + c]) ? 1u : 0u;
+                        }
+                        if ((r + 1) % SurfaceFrame::kCells == 0) {
+                            if (named > before) {
+                                bySlice += " s" + std::to_string(r / SurfaceFrame::kCells) + ":" +
+                                           std::to_string(named - before);
+                            }
+                            before = named;
+                        }
+                    }
+                    Log("[surface] the directory read back: %u of %u cells name a block (by slice:%s); "
+                        "%u of %u cells as built",
+                        named, rows * SurfaceFrame::kCells, bySlice.c_str(), same,
+                        rows * SurfaceFrame::kCells);
+                }
                 colorCubeT = colorTenant.Id();
                 // M9bb: a fold or a drop below changed a root tile: the colour tenant
                 // refetches that address (the frame's tag names the page slice) -- Tenant::Bind.

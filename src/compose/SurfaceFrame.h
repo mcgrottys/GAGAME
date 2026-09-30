@@ -127,6 +127,29 @@ struct SurfaceFrame {
     // behind keeps the block's own anchor.
     static void BlockRows(const FaceWindow& block, const Placement& own, const double eye[3],
                           FaceWindow::Planes& rows, float off[2]);
+    // HIERARCHY 4.17 commit 4: THE DIRECTORY. Beside every slice of the colour and the mask (the
+    // faces 0..5, then block i at 6 + i) a grid of kCells x kCells cells, each naming the slice of
+    // the next rank's block the cell lies in, or kNone: a face's cells name rank 1. A rank's
+    // block is an eighth of its parent and a cell a sixteenth, so with aligned blocks a cell lies
+    // in one block or in none (DeclareBlocks refuses a key where that does not hold). Built from
+    // the blocks alone -- the ground and what exists, never a camera -- and uploaded once by the
+    // Assembly as one R16_UINT texture, the slices stacked down it (dirSrv).
+    static constexpr uint32_t kCells = 16, kMaxRanks = 5;
+    // HIERARCHY 4.17: the key's ranks (the finest block's rung / 3, blocks sorted coarsest first):
+    // the shaders' GA_BLOCK_RANKS, 0 with no key.
+    uint32_t Ranks() const { return blocks.empty() ? 0u : uint32_t(blocks.back().rung) / 3u; }
+    static constexpr uint16_t kNone = 0xFFFFu;
+    std::vector<uint16_t> directory;   // (slice * kCells + y) * kCells + x
+    uint32_t dirSrv = UINT32_MAX;
+    void BuildDirectory();
+    // THE WALK, its C++ body (shaders/Walk.hlsli is the HLSL one): the blocks a planet-frame point
+    // lies in, one a rank, coarsest first -- each its slice and its own uv, in doubles. Returns
+    // how many.
+    struct WalkStep {
+        uint32_t slice;
+        double u, v;
+    };
+    uint32_t Walk(const double P[3], WalkStep out[kMaxRanks]) const;
     // The key, parsed: "lon,lat,rung" entries (degrees east and north) joined by ';'. Each point
     // is given the block of its rung that holds it, and the block is LOGGED with how far the
     // point stands inside it; a place near a block's edge is two entries. A malformed key is
