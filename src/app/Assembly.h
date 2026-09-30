@@ -192,11 +192,8 @@ struct Assembly {
     BedSynthSource srcBed;          // M7d: the bed classifier -- the first synthesis
     SeafloorReliefSource srcRelief; // M9av: the seafloor's appearance from the ingested bathymetry
                                     // node; its program is data/bed/bed_rules.json
-    AerialOrthoSource srcAerial;    // M6l: MassGIS 15 cm orthos (loads if harvested)
-    AerialOrthoSource srcOverlay;   // M6o: user GeoTIFF overlays -- ALPHA IS FIBER: a
-                                    // mostly-transparent highlights plane bleeds through
-                                    // the composed quadtree pixel by pixel
-    // The scene's `sources`: rasters that are colour sources by being files.
+    // The scene's `sources`: rasters that are colour sources by being files (the plane orthos
+    // and the overlays among them, scenes/merrimack.json).
     std::vector<std::unique_ptr<RasterFileSource>> sceneSources;
     GisStencil gisStencil;   // survey vectors + mask realizations (GSHHG/WDBII)
     // M9ak: the SAME survey, as rings rather than as a parity fill -- the compositor's

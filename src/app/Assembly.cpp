@@ -228,8 +228,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         &A->googleTiles, static_cast<int>((std::min)(S.streaming.googleZoom, 19u)));
     auto& srcBed = A->srcBed;
     auto& srcRelief = A->srcRelief;
-    auto& srcAerial = A->srcAerial;
-    auto& srcOverlay = A->srcOverlay;
     auto& gisStencil = A->gisStencil;
     auto& gisMask = A->gisMask;
     auto& srcGisMask = A->srcGisMask;
@@ -273,6 +271,43 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     const SceneEffect* sliceFx = S.EffectOfType("slice.plane");
     const bool sliceOn = sliceFx != nullptr;
 
+    // A RASTER IS A SOURCE BY BEING A FILE (compose/RasterFileSource.h): the scene's `sources`,
+    // opened before the device, and before the blocks, because `faceWindows: auto` is the blocks
+    // their footprints and grains ask for (SurfaceFrame::AutoKey). Then THE PASS (HIERARCHY
+    // 4.20): each paints its own level and the tree folds the rest, on every lattice the colour
+    // binds below, before the first frame -- or alone, and out, as the `ingest` tool.
+    planetR = (S.scene.planet == "mars") ? 3389500.0 : GlobeModel::kR;
+    surface = SurfaceFrame::Merrimack(planetR, opt.stencil);
+    std::string blockKey = S.streaming.faceWindows;
+    if (S.scene.planet != "mars") {
+        std::vector<RasterEntry> entries;
+        for (const scene::SourceProps& s : S.sources) {
+            entries.push_back({s.file, s.folder, s.match, s.manifest, s.name, s.kind, s.crs, s.over,
+                               s.feather});
+        }
+        A->sceneSources = LoadRasterSources(entries);
+        if (blockKey == "auto") {
+            std::vector<SurfaceFrame::BlockWant> wants;
+            for (const auto& s : A->sceneSources) {
+                const SourceInfo& i = s->Info();
+                wants.push_back({i.name, i.lon0, i.lat0, i.lon1, i.lat1, s->GrainM()});
+            }
+            blockKey = SurfaceFrame::AutoKey(wants);
+            Log("[surface] streaming.faceWindows auto: %zu source(s) ask for '%s'", wants.size(),
+                blockKey.c_str());
+        }
+        surface.DeclareBlocks(blockKey);
+    }
+    // The folder every tile tree of this run lives in (streaming.treeRoot), before the first
+    // tree is built. A tool pointed at a scratch folder paints, packs and reads there alone.
+    TileTree::SetTreeRoot(S.streaming.treeRoot);
+    if (S.streaming.colorTrees || S.Tool("ingest")) {
+        IngestSources(A->sceneSources, surface.blocks.empty()
+                                           ? std::vector<Lattice>{surface.cube, surface.win, surface.det}
+                                           : std::vector<Lattice>{surface.cube, hal::BlockBinding::Pyramid(128, 128)});
+    }
+    if (S.Tool("ingest")) return nullptr;
+
     // ---- M1: the tide viewer.
     if (!model.Load(S.data.tides)) {
         Log("FATAL: no tide data at '%s'.", S.data.tides.c_str());
@@ -310,30 +345,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // key decides what they compile: the standing blocks' code (Compose.hlsli) is compiled in only
     // when the key stands, as GA_BLOCK_RANKS = its ranks; with no key, or a refused one, every
     // shader is today's, byte for byte.
-    planetR = (S.scene.planet == "mars") ? 3389500.0 : GlobeModel::kR;
-    surface = SurfaceFrame::Merrimack(planetR, opt.stencil);
-    // A RASTER IS A SOURCE BY BEING A FILE (compose/RasterFileSource.h): the scene's `sources`,
-    // opened before the blocks, because `faceWindows: auto` is the blocks their footprints and
-    // grains ask for (SurfaceFrame::AutoKey).
-    std::string blockKey = S.streaming.faceWindows;
-    if (S.scene.planet != "mars") {
-        std::vector<RasterEntry> entries;
-        for (const scene::SourceProps& s : S.sources) {
-            entries.push_back({s.file, s.folder, s.match, s.name, s.kind, s.crs, s.over});
-        }
-        A->sceneSources = LoadRasterSources(entries);
-        if (blockKey == "auto") {
-            std::vector<SurfaceFrame::BlockWant> wants;
-            for (const auto& s : A->sceneSources) {
-                const SourceInfo& i = s->Info();
-                wants.push_back({i.name, i.lon0, i.lat0, i.lon1, i.lat1, s->GrainM()});
-            }
-            blockKey = SurfaceFrame::AutoKey(wants);
-            Log("[surface] streaming.faceWindows auto: %zu source(s) ask for '%s'", wants.size(),
-                blockKey.c_str());
-        }
-        surface.DeclareBlocks(blockKey);
-    }
+    // (planetR, the surface and its blocks were declared before the device, with the sources.)
     if (!surface.blocks.empty()) {
         renderer.Shaders().Always(L"GA_BLOCK_RANKS=" + std::to_wstring(surface.Ranks()));
         Log("[surface] the standing blocks' shader code is compiled in: GA_BLOCK_RANKS=%u",
@@ -713,11 +725,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // streams Google 2D tiles (cache-first, throttled, budget-capped) reprojected onto the
     // same cube faces. Residency is driven by the CDLOD walk, clamped by residency-map
     // cubes, prefetched along the camera's screw.
-    // planetR and THE SHIPPED SURFACE were declared after renderer.Init, before the first layer
-    // compiled (HIERARCHY 4.17: the key decides what they compile).
-    // The folder every tile tree of this run lives in (streaming.treeRoot), before the first
-    // tree is built. A tool pointed at a scratch folder paints, packs and reads there alone.
-    TileTree::SetTreeRoot(S.streaming.treeRoot);
+    // planetR and THE SHIPPED SURFACE were declared before the device, and the tree root with
+    // them (HIERARCHY 4.17: the key decides what the layers compile).
     // --warm-trees and --pack-trees are tree-audit's other two modes (Tools/TreeAudit.cpp):
     // each needs the trees built and ends the run where the audit does.
     const bool treeTool = S.Tool("tree-audit") || S.Tool("warm-trees") || S.Tool("pack-trees");
@@ -885,20 +894,15 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             dayCaps.bytes = DayCaps::FromScene(S.streaming.dayBytes);
             if (googleTiles.Init("satellite", S.streaming.tileBudget, dayCaps)) {
                 googleTiles.SetFetchCounter(&resMgr.fetchesThisRun);
-                // M6l: the MassGIS 15 cm plane orthos paint ABOVE Google wherever they
-                // have coverage -- the compositor's first independent high-res layer,
-                // aligned by its own declared projection (EPSG:6348), not by luck.
                 std::vector<ColorSource*> colorStack{&srcGoogle};
                 size_t bedLayer = SIZE_MAX, maskLayer = SIZE_MAX;
                 // M7x (user catch): the ortho was painting its capture-day WATER over the
                 // drained-bed albedo -- a hard-edged dark rectangle the sea shader then
                 // attenuated AGAIN. Photos are LAND authorities; the bed classifier is
                 // the WATER authority. The stack order encodes that ranking: google under
-                // aerial (both photos, finer wins), bed above both (its height-band alpha
-                // reclaims everything below the intertidal ramp and hands land back to
-                // the photos above +1.2 m NAVD), hand overlays on top of everything.
-                bool srcOverlayLoaded = false;
-                if (srcAerial.Load("data/aerial/aerial.json")) colorStack.push_back(&srcAerial);
+                // the scene's photos (the plane orthos among them: finer wins), bed above
+                // both (its height-band alpha reclaims everything below the intertidal ramp
+                // and hands land back to the photos above +1.2 m NAVD).
                 // The scene's `sources` join the photos, and the photos stand in their default
                 // order (StackOrder: `over`, then the coarser grain under the finer).
                 for (const auto& s : A->sceneSources) colorStack.push_back(s.get());
@@ -916,10 +920,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 if (srcBed.Load("data/bed/bed_rules.json", &compositor, hgtCh)) {
                     colorStack.push_back(&srcBed);
                     bedLayer = colorStack.size() - 1;
-                }
-                if (srcOverlay.Load("data/overlay/overlay.json")) {
-                    colorStack.push_back(&srcOverlay);
-                    srcOverlayLoaded = true;
                 }
                 // M9ak: THE GATE. The user's rule: "the GIS mask gates, the height band
                 // refines". srcBed is the WATER authority and its alpha is a height band,
@@ -997,9 +997,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                         seaGated = std::make_shared<GateSource>("seafloor<gis", sea,
                                                                 leaf(&srcGisMask));
                     }
-                    std::vector<std::shared_ptr<DomainSource>> megaIn{land, seaGated};
-                    if (srcOverlayLoaded) megaIn.push_back(leaf(&srcOverlay));
-                    mega = over("earth.color", megaIn);
+                    mega = over("earth.color", {land, seaGated});
                 } else {
                     mega = land;
                 }
@@ -1437,8 +1435,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                              {"f32", "json"}});
             extra.push_back({"tool", "a one-shot mode in `tools[]` (--tool name[:args])",
                              {"bathy-map", "dump-water-state", "export", "fidelity-map",
-                              "gis-dump", "load-field", "ocean-probe", "pack-tiles", "pack-trees",
-                              "sea-verify", "selftest", "swe-cycle", "swe-uv", "trace",
+                              "gis-dump", "ingest", "load-field", "ocean-probe", "pack-tiles",
+                              "pack-trees", "rastertest", "sea-verify", "selftest", "swe-cycle",
+                              "swe-uv", "trace",
                               "tree-audit", "tree-prune", "twin-surface", "warm-inlet", "warm-trees",
                               "water-map", "wave-map"}});
             scene::WriteRegistries("docs/registries.json", extra);

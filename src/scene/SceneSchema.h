@@ -254,12 +254,13 @@ struct RailsSection {
     int active = 0;                   // none | classic | zoom | flood | jetty | droste | droste-out
     DrosteRail droste;                // keys: List(RailKey), unnamed
 };
-// A RASTER IS A SOURCE BY BEING A FILE (compose/RasterFileSource.h): one file, or a folder and a
-// pattern whose every match is a source. `kind` and `crs` are read only where the file cannot say
-// (a CRS it carries wins); `over` is the stack order's first key, the grain its second.
+// A RASTER IS A SOURCE BY BEING A FILE (compose/RasterFileSource.h): one file, a folder and a
+// pattern, or a manifest of raw rows -- one source each. `kind` and `crs` are read only where the
+// file cannot say (a CRS it carries wins); `over` is the stack order's first key, the grain its
+// second; `feather` (m) softens the edge of the whole.
 struct SourceProps {
-    std::string name, file, folder, match, kind, crs;
-    double over = 0.0;
+    std::string name, file, folder, match, manifest, kind, crs;
+    double over = 0.0, feather = 0.0;
 };
 struct PortalProps {
     std::string name;

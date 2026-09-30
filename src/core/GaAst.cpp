@@ -157,7 +157,7 @@ void RegisterKnownComposeEdges() {
     Register({"google.tiles", "compose.stack", "fetch", mercPx, mercPx, false, "sRGB bytes",
               "zoom = f(groundResM)", 1.0, "GoogleColorSource::ZoomFor"});
     Register({"massgis.ortho", "compose.stack", "fetch", latlon, mercPx, true, "sRGB bytes",
-              "EPSG:6348 UTM19N declared", 1.0, "AerialOrthoSource (TM forward)"});
+              "EPSG:6348 UTM19N from its manifest", 1.0, "RasterFileSource (TM forward)"});
     Register({"height.stack", "synth.bed", "classify", latlon, latlon, false,
               "m NAVD -> dry albedo", "3 samples/texel", 1.0,
               "BedSynthSource::Sample (M7d cross-channel edge)"});

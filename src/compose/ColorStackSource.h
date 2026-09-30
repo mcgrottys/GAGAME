@@ -84,6 +84,7 @@ public:
         lon0 = si.lon0; lat0 = si.lat0; lon1 = si.lon1; lat1 = si.lat1;
         return true;
     }
+    int OwnMip(const Lattice& l) const override { return m_src ? m_src->OwnMip(l) : -1; }
     // The tile-wise path needs the per-tile context the point API cannot carry: BeginTile is
     // where the vector GIS mask sweeps its rings once per tile. Exposed so TileTree can run it.
     ColorSource* Raw() const { return m_src; }

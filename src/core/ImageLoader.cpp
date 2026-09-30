@@ -1,12 +1,13 @@
 #include "core/ImageLoader.h"
 
 #include "core/Common.h"
+#include "core/Json.h"
 
 #include <windows.h>
 #include <wincodec.h>
 
+#include <algorithm>
 #include <cctype>
-#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -14,6 +15,7 @@
 #include <fstream>
 #include <initializer_list>
 #include <iterator>
+#include <mutex>
 #include <vector>
 
 namespace ga {
@@ -21,6 +23,7 @@ namespace ga {
 namespace {
 
 thread_local std::string tWhy;
+const char* kSources = "cache/sources";   // the index and the raw rows of sequential formats
 
 bool ReadAll(const std::string& path, std::vector<uint8_t>& out) {
     std::ifstream f(path, std::ios::binary);
@@ -42,6 +45,23 @@ std::string Hr(const char* what, HRESULT hr) {
     char b[128];
     snprintf(b, sizeof(b), "%s (HRESULT 0x%08lX)", what, static_cast<unsigned long>(hr));
     return b;
+}
+
+std::string Hex(uint64_t v) {
+    char b[24];
+    snprintf(b, sizeof(b), "%016llx", static_cast<unsigned long long>(v));
+    return b;
+}
+
+// Written beside, then moved over: a reader sees the whole old file or the whole new one.
+bool Publish(const std::string& path, const void* p, size_t n) {
+    const std::string tmp = path + ".tmp";
+    {
+        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
+        f.write(static_cast<const char*>(p), std::streamsize(n));
+        if (!f) return false;
+    }
+    return MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
 }
 
 // ---- the shapes the GeoTIFF tags arrive in through WIC's metadata query reader ------------------
@@ -108,28 +128,37 @@ int PrjEpsg(const std::string& t) {
     return atoi(t.c_str() + i);
 }
 
-// One frame, straight RGBA8, through WIC's converter.
-bool DecodeRgba(IWICImagingFactory* fac, IWICBitmapFrameDecode* frame, uint32_t w, uint32_t h,
-                std::vector<uint8_t>& out, std::string& why) {
-    const unsigned long long bytes = 4ull * w * h;
-    if (bytes > UINT_MAX) {
-        why = "it decodes to more than 4 GB, and this slice decodes a file whole";
-        return false;
+// Rows as they lie in a file: `nc` bytes a texel, `w` texels a row, from `base`. A read is a seek
+// (a positional ReadFile), so threads read one file at once without a lock.
+struct RowFile {
+    HANDLE h = INVALID_HANDLE_VALUE;
+    uint64_t base = 0;
+    uint32_t w = 0, nc = 0;
+    ~RowFile() {
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
     }
-    Com<IWICFormatConverter> conv;
-    HRESULT hr = fac->CreateFormatConverter(&conv);
-    if (SUCCEEDED(hr)) {
-        hr = conv->Initialize(frame, GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone,
-                              nullptr, 0.0, WICBitmapPaletteTypeCustom);
+    bool Open(const std::string& path, uint64_t at, uint32_t width, uint32_t height, uint32_t chans) {
+        std::error_code ec;
+        if (std::filesystem::file_size(path, ec) < at + uint64_t(width) * height * chans || ec) return false;
+        h = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL, nullptr);
+        base = at;
+        w = width;
+        nc = chans;
+        return h != INVALID_HANDLE_VALUE;
     }
-    if (SUCCEEDED(hr)) {
-        out.resize(static_cast<size_t>(bytes));
-        hr = conv->CopyPixels(nullptr, 4 * w, static_cast<UINT>(bytes), out.data());
+    bool Read(uint32_t x, uint32_t y, uint32_t n, uint8_t* dst) const {
+        const uint64_t at = base + (uint64_t(y) * w + x) * nc;
+        OVERLAPPED o{};
+        o.Offset = DWORD(at);
+        o.OffsetHigh = DWORD(at >> 32);
+        DWORD got = 0;
+        return ReadFile(h, dst, n * nc, &got, &o) && got == n * nc;
     }
-    if (FAILED(hr)) why = Hr("WIC cannot decode its pixels", hr);
-    return SUCCEEDED(hr);
-}
+};
 
+// One file of any size: its decoder kept on the file and asked for a window (a TIFF), or its raw
+// rows (a manifest's file; a PNG or a JPEG decoded once).
 class ImageLoader : public FieldLoader {
 public:
     const char* Name() const override { return m_name.c_str(); }
@@ -143,10 +172,19 @@ public:
         out.height = th;
         out.channels = 4;
         out.data.assign(size_t(tw) * th * 4, 0.0f);
+        out.allNoData = true;
+        out.coverage = 0.0f;
+        const uint64_t x0 = uint64_t(tx) * tw, y0 = uint64_t(ty) * th;
+        if (x0 >= m_ref.width || y0 >= m_ref.height) return false;
+        const uint32_t w = uint32_t((std::min)(uint64_t(tw), m_ref.width - x0));
+        const uint32_t h = uint32_t((std::min)(uint64_t(th), m_ref.height - y0));
+        std::vector<uint8_t> px(size_t(w) * h * 4);
+        if (!Pixels(uint32_t(x0), uint32_t(y0), w, h, px.data())) return false;
         uint32_t real = 0;
-        for (uint32_t r = 0; r < th && ty * th + r < m_ref.height; ++r) {
-            for (uint32_t c = 0; c < tw && tx * tw + c < m_ref.width; ++c) {
-                const uint8_t* p = &m_px[(size_t(ty * th + r) * m_ref.width + tx * tw + c) * 4];
+        for (uint32_t r = 0; r < h; ++r) {
+            for (uint32_t c = 0; c < w; ++c) {
+                uint8_t* p = &px[(size_t(r) * w + c) * 4];
+                if (m_dataBand) p[3] = 255;   // a fourth band the file does not call alpha
                 const bool nodata = m_ref.hasNoData && m_ref.IsNoData(p[0]) &&
                                     m_ref.IsNoData(p[1]) && m_ref.IsNoData(p[2]);
                 if (nodata || p[3] == 0) continue;
@@ -159,21 +197,90 @@ public:
         out.coverage = float(real) / float(tw * th);
         return real > 0;
     }
+    // A window's RGBA8: WIC's converter for the rectangle, one decode at a time; or the rows.
+    bool Pixels(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint8_t* dst) {
+        if (m_rows.h != INVALID_HANDLE_VALUE) {
+            std::vector<uint8_t> row(size_t(w) * m_rows.nc);
+            for (uint32_t r = 0; r < h; ++r) {
+                if (!m_rows.Read(x, y + r, w, row.data())) return false;
+                uint8_t* d = dst + size_t(r) * w * 4;
+                for (uint32_t c = 0; c < w; ++c) {
+                    for (uint32_t k = 0; k < 3; ++k) d[c * 4 + k] = row[c * m_rows.nc + k];
+                    d[c * 4 + 3] = m_rows.nc == 4 ? row[c * 4 + 3] : 255;
+                }
+            }
+            return true;
+        }
+        static thread_local const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        (void)co;
+        std::lock_guard<std::mutex> lk(m_mx);
+        const WICRect rc{INT(x), INT(y), INT(w), INT(h)};
+        return SUCCEEDED(m_conv->CopyPixels(&rc, w * 4, w * h * 4, dst));
+    }
 
     std::string m_name, m_structure;
     GeoRef m_ref;
-    std::vector<uint8_t> m_px;   // RGBA8, straight alpha, row 0 = the file's first row
+    Com<IWICFormatConverter> m_conv;   // the decoder's frame, converted to RGBA8
+    std::mutex m_mx;
+    RowFile m_rows;
+    bool m_dataBand = false;
 };
 
 }  // namespace
 
 const std::string& ImageLoaderWhy() { return tWhy; }
 
+uint64_t ContentHash(const std::string& path, bool* indexed) {
+    static std::mutex mx;
+    std::lock_guard<std::mutex> lk(mx);
+    std::error_code ec;
+    const std::string key = std::filesystem::absolute(path, ec).generic_string();
+    const std::string size = std::to_string(std::filesystem::file_size(path, ec));
+    if (ec) return 0;
+    const std::string time =
+        std::to_string(std::filesystem::last_write_time(path, ec).time_since_epoch().count());
+    const std::string index = std::string(kSources) + "/identity.json";
+    std::vector<uint8_t> text;
+    ReadAll(index, text);
+    const JsonValue doc = JsonParser::Parse(std::string(text.begin(), text.end()), nullptr);
+    const JsonValue* files = doc.Get("files");
+    for (size_t i = 0; files && i < files->arr.size(); ++i) {
+        const JsonValue& f = files->arr[i];
+        if (f.Str("path") == key && f.Str("size") == size && f.Str("time") == time) {
+            if (indexed) *indexed = true;
+            return std::strtoull(f.Str("fnv64").c_str(), nullptr, 16);
+        }
+    }
+    uint64_t h = 1469598103934665603ull;
+    std::ifstream in(path, std::ios::binary);
+    std::vector<char> buf(size_t(4) << 20);
+    while (in) {
+        in.read(buf.data(), std::streamsize(buf.size()));
+        Fnv(h, buf.data(), size_t(in.gcount()));
+    }
+    std::string out = "{\"files\": [\n";
+    auto row = [&out](const std::string& p, const std::string& s, const std::string& t,
+                      const std::string& v) {
+        out += (out.size() > 13 ? ",\n" : "") + std::string("  {\"path\": \"") + p + "\", \"size\": \"" +
+               s + "\", \"time\": \"" + t + "\", \"fnv64\": \"" + v + "\"}";
+    };
+    for (size_t i = 0; files && i < files->arr.size(); ++i) {
+        const JsonValue& f = files->arr[i];
+        if (f.Str("path") != key) row(f.Str("path"), f.Str("size"), f.Str("time"), f.Str("fnv64"));
+    }
+    row(key, size, time, Hex(h));
+    out += "\n]}\n";
+    std::filesystem::create_directories(kSources, ec);
+    Publish(index, out.data(), out.size());
+    if (indexed) *indexed = false;
+    return h;
+}
+
 bool CrsOfEpsg(int epsg, CrsKind& kind, int& zone, bool& south, std::string* why) {
     zone = 0;
     south = false;
     kind = CrsKind::Unknown;
-    if (epsg == 4326) kind = CrsKind::Geographic;
+    if (epsg == 4326 || epsg == 4269 || epsg == 6318) kind = CrsKind::Geographic;   // NAD83 as WGS84
     if (epsg == 3857) kind = CrsKind::WebMercator;
     if (epsg >= 32601 && epsg <= 32660) zone = epsg - 32600;
     if (epsg >= 32701 && epsg <= 32760) {
@@ -185,8 +292,8 @@ bool CrsOfEpsg(int epsg, CrsKind& kind, int& zone, bool& south, std::string* why
     if (zone) kind = CrsKind::TransverseMercator;
     if (kind == CrsKind::Unknown && why) {
         *why = "EPSG:" + std::to_string(epsg) +
-               " is not a projection this engine evaluates (4326, 3857, UTM 32601-32660, "
-               "32701-32760, 26901-26923, 6330-6348)";
+               " is not a projection this engine evaluates (4326, 4269, 6318, 3857, UTM "
+               "32601-32660, 32701-32760, 26901-26923, 6330-6348)";
     }
     return kind != CrsKind::Unknown;
 }
@@ -206,22 +313,21 @@ std::unique_ptr<FieldLoader> OpenImageFile(const std::string& path, const GeoRef
         tWhy = std::move(why);
         return nullptr;
     };
-    std::vector<uint8_t> bytes;
-    if (!ReadAll(path, bytes) || bytes.empty()) return refuse("the file cannot be read");
-    if (bytes.size() > UINT_MAX) return refuse("the file is over 4 GB, and this slice reads a file whole");
+    bool indexed = false;
+    const uint64_t own = ContentHash(path, &indexed);   // the file's bytes, not held
+    if (own == 0) return refuse("the file cannot be read");
     static thread_local const HRESULT co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     (void)co;   // RPC_E_CHANGED_MODE: the thread's COM is someone else's, and WIC still works
+    auto L = std::make_unique<ImageLoader>();
     Com<IWICImagingFactory> fac;
-    Com<IWICStream> stream;
     Com<IWICBitmapDecoder> dec;
     Com<IWICBitmapFrameDecode> f0;
     HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
                                   IID_PPV_ARGS(&fac));
-    if (SUCCEEDED(hr)) hr = fac->CreateStream(&stream);
-    if (SUCCEEDED(hr)) hr = stream->InitializeFromMemory(bytes.data(), DWORD(bytes.size()));
+    const std::wstring wpath(path.begin(), path.end());
     if (SUCCEEDED(hr)) {
-        hr = fac->CreateDecoderFromStream(stream.Get(), nullptr, WICDecodeMetadataCacheOnDemand,
-                                          &dec);
+        hr = fac->CreateDecoderFromFilename(wpath.c_str(), nullptr, GENERIC_READ,
+                                            WICDecodeMetadataCacheOnDemand, &dec);
     }
     if (SUCCEEDED(hr)) hr = dec->GetFrame(0, &f0);
     if (FAILED(hr)) return refuse(Hr("WIC cannot decode it", hr));
@@ -263,8 +369,7 @@ std::unique_ptr<FieldLoader> OpenImageFile(const std::string& path, const GeoRef
 
     // ---- WHERE: the file's tags, else its world file; the CRS from its GeoKeys, else its .prj,
     // else the entry's -----------------------------------------------------------------------------
-    uint64_t fnv = 1469598103934665603ull;
-    Fnv(fnv, bytes.data(), bytes.size());
+    uint64_t fnv = own;
     GeoRef g;
     g.provenance = CrsProvenance::Embedded;
     g.width = w;
@@ -318,13 +423,16 @@ std::unique_ptr<FieldLoader> OpenImageFile(const std::string& path, const GeoRef
             g.hasNoData = true;
             g.noData = std::strtod(nd.c_str(), nullptr);   // "nan" reads as NaN, which IsNoData knows
         }
+        // A FOURTH BAND is alpha only where ExtraSamples (338) says 1 or 2.
+        const std::vector<uint16_t> extra = QueryShorts(q.Get(), L"/ifd/{ushort=338}");
+        L->m_dataBand = chan == 4 && (extra.empty() || (extra[0] != 1 && extra[0] != 2));
     }
     std::vector<uint8_t> sb;
     if (!affine) {
-        const char* own = ext == ".png" ? ".pgw" : (ext == ".jpg" || ext == ".jpeg") ? ".jgw" : ".tfw";
-        if (!Sidecar(path, {own, ".wld"}, side, sb)) {
+        const char* sc = ext == ".png" ? ".pgw" : (ext == ".jpg" || ext == ".jpeg") ? ".jgw" : ".tfw";
+        if (!Sidecar(path, {sc, ".wld"}, side, sb)) {
             return refuse(std::string("no georeference: no GeoTIFF tags, and no world file (") +
-                          own + " or .wld) beside it");
+                          sc + " or .wld) beside it");
         }
         Fnv(fnv, sb.data(), sb.size());
         const std::string t(sb.begin(), sb.end());
@@ -360,6 +468,10 @@ std::unique_ptr<FieldLoader> OpenImageFile(const std::string& path, const GeoRef
     bool south = false;
     std::string why;
     if (!CrsOfEpsg(epsg, g.kind, zone, south, &why)) return refuse(why);
+    if (epsg == 4269 || epsg == 6318) {
+        Log("[raster] %s: EPSG:%d is NAD83 geographic, read as WGS84 (they differ by about 1 m)",
+            path.c_str(), epsg);
+    }
     g.epsg = epsg;
     g.linearUnit = g.kind == CrsKind::Geographic ? "deg" : "m";
     g.valueUnit = "sRGB byte";
@@ -367,16 +479,109 @@ std::unique_ptr<FieldLoader> OpenImageFile(const std::string& path, const GeoRef
         return refuse("its pixel is not a positive width by a non-zero height");
     }
 
-    auto L = std::make_unique<ImageLoader>();
-    if (!DecodeRgba(fac.Get(), f0.Get(), w, h, L->m_px, why)) return refuse(why);
+    // ---- THE PIXELS: a converter to RGBA8 kept on the frame. A TIFF decodes the window asked
+    // for; a PNG or a JPEG decodes from its first row every time, so it is decoded once, in bands,
+    // to raw rows named by its content's hash, and read by a seek from there.
+    hr = fac->CreateFormatConverter(&L->m_conv);
+    if (SUCCEEDED(hr)) {
+        hr = L->m_conv->Initialize(f0.Get(), GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone,
+                                   nullptr, 0.0, WICBitmapPaletteTypeCustom);
+    }
+    if (FAILED(hr)) return refuse(Hr("WIC cannot convert its pixels to RGBA", hr));
+    std::string rows;
+    if (!tiff) {
+        rows = std::string(kSources) + "/" + Hex(own) + ".rgba";
+        std::error_code ec;
+        if (std::filesystem::file_size(rows, ec) != uint64_t(w) * h * 4 || ec) {
+            std::filesystem::create_directories(kSources, ec);
+            std::ofstream f(rows + ".tmp", std::ios::binary | std::ios::trunc);
+            std::vector<uint8_t> band(size_t(w) * 256 * 4);
+            for (UINT y = 0; y < h && f; y += 256) {
+                const UINT n = (std::min)(256u, h - y);
+                if (!L->Pixels(0, y, w, n, band.data())) return refuse("WIC cannot decode its rows");
+                f.write(reinterpret_cast<const char*>(band.data()), std::streamsize(size_t(w) * n * 4));
+            }
+            f.close();
+            if (!f || !MoveFileExA((rows + ".tmp").c_str(), rows.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+                return refuse("its rows cannot be written to " + rows);
+            }
+        }
+        if (!L->m_rows.Open(rows, 0, w, h, 4)) return refuse("its rows cannot be read from " + rows);
+        L->m_conv.Reset();
+    }
     L->m_name = std::filesystem::path(path).stem().string();
     L->m_ref = g;
-    char s[320];
-    snprintf(s, sizeof(s), "%s %ux%u rgba8, %s from %s, fnv64 %016llx (r1)",
-             tiff ? "geotiff" : ext.c_str() + 1, w, h, g.Describe().c_str(), from.c_str(),
-             static_cast<unsigned long long>(fnv));
+    char s[400];
+    snprintf(s, sizeof(s), "%s %ux%u rgba8%s, %s from %s, fnv64 %016llx (r2)",
+             tiff ? "geotiff" : ext.c_str() + 1, w, h, L->m_dataBand ? " (band 4 data)" : "",
+             g.Describe().c_str(), from.c_str(), static_cast<unsigned long long>(fnv));
     L->m_structure = s;
+    Log("[raster] %s: its bytes' hash %s%s", path.c_str(), indexed ? "from the index" : "taken, and indexed",
+        rows.empty() ? "; windows decoded from the file" : ("; decoded once to " + rows).c_str());
     return L;
+}
+
+std::vector<std::unique_ptr<FieldLoader>> OpenManifest(const std::string& path, std::string* why) {
+    std::vector<std::unique_ptr<FieldLoader>> out;
+    std::vector<uint8_t> text;
+    if (!ReadAll(path, text) || text.empty()) {
+        if (why) *why = "the manifest cannot be read";
+        return out;
+    }
+    std::string err;
+    const JsonValue v = JsonParser::Parse(std::string(text.begin(), text.end()), &err);
+    const std::string crs = v.Str("crs");
+    const size_t at = crs.find("EPSG:");
+    const int epsg = at == std::string::npos ? 0 : atoi(crs.c_str() + at + 5);
+    CrsKind kind = CrsKind::Unknown;
+    int zone = 0;
+    bool south = false;
+    std::string w = "its crs '" + crs + "' names no EPSG code";
+    const JsonValue* tiles = v.Get("tiles");
+    if (!CrsOfEpsg(epsg, kind, zone, south, epsg ? &w : nullptr) || !tiles || tiles->arr.empty()) {
+        if (why) *why = (tiles && !tiles->arr.empty()) ? w : "it names no tiles" + (err.empty() ? "" : " (" + err + ")");
+        return out;
+    }
+    uint64_t mfnv = 1469598103934665603ull;
+    Fnv(mfnv, text.data(), text.size());
+    const std::string dir = path.substr(0, path.find_last_of("/\\") + 1);
+    for (const JsonValue& t : tiles->arr) {
+        const std::string file = dir + t.Str("file");
+        const uint32_t px = static_cast<uint32_t>(t.Num("px", 0));
+        const uint32_t nc = static_cast<uint32_t>(t.Num("channels", 3));
+        const JsonValue* mips = t.Get("mips");
+        const uint64_t off = (mips && !mips->arr.empty()) ? uint64_t(mips->arr[0].Num("offset", 0)) : 0;
+        auto L = std::make_unique<ImageLoader>();
+        uint64_t fnv = mfnv;
+        const uint64_t own = ContentHash(file);
+        Fnv(fnv, &own, sizeof(own));
+        if (!px || (nc != 3 && nc != 4) || !own || !L->m_rows.Open(file, off, px, px, nc)) {
+            Log("[raster] %s: its tile %s cannot be read as %u x %u x %u rows; the set goes on without it",
+                path.c_str(), file.c_str(), px, px, nc);
+            continue;
+        }
+        GeoRef& g = L->m_ref;
+        g.provenance = CrsProvenance::Declared;
+        g.epsg = epsg;
+        g.kind = kind;
+        g.width = g.height = px;
+        g.centers = true;
+        g.originX = t.Num("utm_e0", 0);
+        g.scaleX = (t.Num("utm_e1", 0) - g.originX) / px;
+        g.originY = t.Num("utm_n1", 0);
+        g.scaleY = -(g.originY - t.Num("utm_n0", 0)) / px;
+        g.linearUnit = kind == CrsKind::Geographic ? "deg" : "m";
+        g.valueUnit = "sRGB byte";
+        L->m_name = std::filesystem::path(file).stem().string();
+        char s[400];
+        snprintf(s, sizeof(s), "rows %ux%u x%u at %llu, %s from its manifest, fnv64 %016llx (r2)", px,
+                 px, nc, static_cast<unsigned long long>(off), g.Describe().c_str(),
+                 static_cast<unsigned long long>(fnv));
+        L->m_structure = s;
+        out.push_back(std::move(L));
+    }
+    if (out.empty() && why) *why = "none of its tiles can be read";
+    return out;
 }
 
 void RegisterImageLoaders(LoaderRegistry& reg) {

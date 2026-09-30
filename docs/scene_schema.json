@@ -192,11 +192,13 @@
     { "type": "source", "keys": [
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a label (\"\" = the file's own name)" },
       { "key": "file", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "one raster: a GeoTIFF, or a PNG / JPEG beside its world file" },
-      { "key": "folder", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a folder whose every file matching `match` is a source" },
+      { "key": "folder", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a folder whose files matching `match` are one source" },
       { "key": "match", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the folder's pattern, * and ? (\"\" = every file)" },
+      { "key": "manifest", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a manifest of raw rows (the harvester's form: crs, tiles, their bounds), one source" },
       { "key": "kind", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "colour | height; \"\" = the pixels decide (8-bit, 3 or 4 channels: colour; one channel of 16-bit or float: height)" },
       { "key": "crs", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "EPSG:nnnn, read only where the file carries none" },
-      { "key": "over", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "restart", "doc": "the stack order's first key, ascending upward (every built-in source is 0); the second is the grain, the coarser under the finer" }
+      { "key": "over", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0, "reload": "restart", "doc": "the stack order's first key, ascending upward (every built-in source is 0); the second is the grain, the coarser under the finer" },
+      { "key": "feather", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0, "reload": "restart", "doc": "the edge of the whole softened over this far (smoothstep); 0 = a hard edge" }
     ] },
     { "type": "capture", "keys": [
       { "key": "headless", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "no window (--headless)" },

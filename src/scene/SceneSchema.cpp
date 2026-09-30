@@ -316,15 +316,19 @@ const Schema& SourceSchema() {
         Schema* sc = new Schema("source", &kSource);
         sc->Bind("name", kSource.name, "a label (\"\" = the file's own name)", R)
             .BindPath("file", kSource.file, "one raster: a GeoTIFF, or a PNG / JPEG beside its world file", R)
-            .BindPath("folder", kSource.folder, "a folder whose every file matching `match` is a source", R)
+            .BindPath("folder", kSource.folder, "a folder whose files matching `match` are one source", R)
             .Bind("match", kSource.match, "the folder's pattern, * and ? (\"\" = every file)", R)
+            .BindPath("manifest", kSource.manifest,
+                      "a manifest of raw rows (the harvester's form: crs, tiles, their bounds), one source", R)
             .Bind("kind", kSource.kind,
                   "colour | height; \"\" = the pixels decide (8-bit, 3 or 4 channels: colour; one "
                   "channel of 16-bit or float: height)", R)
             .Bind("crs", kSource.crs, "EPSG:nnnn, read only where the file carries none", R)
             .Bind("over", kSource.over, Q::Dimensionless, "1",
                   "the stack order's first key, ascending upward (every built-in source is 0); "
-                  "the second is the grain, the coarser under the finer", R);
+                  "the second is the grain, the coarser under the finer", R)
+            .Bind("feather", kSource.feather, Q::Length, "m",
+                  "the edge of the whole softened over this far (smoothstep); 0 = a hard edge", R);
         return sc;
     }();
     return *s;

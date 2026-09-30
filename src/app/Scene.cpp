@@ -382,12 +382,14 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             r.Str("file", s.file);
             r.Str("folder", s.folder);
             r.Str("match", s.match);
+            r.Str("manifest", s.manifest);
             r.Str("kind", s.kind);
             r.Str("crs", s.crs);
             r.F64("over", s.over);
+            r.F64("feather", s.feather);
             if (!ok) return false;
-            if (s.file.empty() == s.folder.empty()) {
-                return Refuse(why, "sources: an entry names a file, or a folder and a match -- one of the two");
+            if (s.file.empty() + s.folder.empty() + s.manifest.empty() != 2) {
+                return Refuse(why, "sources: an entry names a file, a folder and a match, or a manifest -- one of the three");
             }
             out.sources.push_back(std::move(s));
         }

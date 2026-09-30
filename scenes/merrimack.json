@@ -137,5 +137,9 @@
     {"name": "markers", "enabled": true}
   ],
   "nodes": [],
-  "tools": []
+  "tools": [],
+  "sources": [
+    {"name": "massgis.coq2023", "manifest": "data/aerial/aerial.json", "feather": 25},
+    {"name": "user.highlights", "manifest": "data/overlay/overlay.json", "feather": 25, "over": 1}
+  ]
 }

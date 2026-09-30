@@ -90,6 +90,8 @@ public:
     // (latMin, latMax, lonMin, lonMax radians, groundResM)
     virtual float Sample(double latRad, double lonRad, double groundResM, const PaintCtx& ctx,
                          uint8_t rgba[4]) = 0;
+    // The level it paints on a lattice (DomainSource::OwnMip); -1, every grain.
+    virtual int OwnMip(const Lattice&) const { return -1; }
     // A source that fetches: true, with the distinct source tiles it refused this run because
     // its fetch budget was spent -- the fetches it WOULD have made. False for every source that
     // never fetches, which is all of them but one.

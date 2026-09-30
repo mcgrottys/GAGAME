@@ -90,40 +90,7 @@ private:
     SourceInfo m_info;
 };
 
-// M6l: MassGIS 2023 15 cm plane-flown orthos of the inlet -- the compositor's first
-// INDEPENDENT high-res layer, and the proof case for the alignment contract: the source
-// declares its NATIVE projection (EPSG:6348, NAD83(2011)/UTM 19N, from the GeoJP2 header)
-// and Sample() resolves WGS84 lat/lon into it with the EXACT transverse-Mercator forward --
-// no linear approximations -- then picks the mip whose metres-per-pixel matches the
-// requested paint footprint. Tiles are memory-mapped (a mip chain per 1500 m tile).
-class AerialOrthoSource : public ColorSource {
-public:
-    ~AerialOrthoSource();
-    bool Load(const std::string& jsonPath);
-    const SourceInfo& Info() const override { return m_info; }
-    float Sample(double latRad, double lonRad, double groundResM, const PaintCtx& ctx,
-                 uint8_t rgba[4]) override;
-
-private:
-    struct MipLevel {
-        uint32_t px = 0;
-        uint64_t offset = 0;
-    };
-    struct Tile {
-        double e0 = 0, n0 = 0, e1 = 0, n1 = 0;   // UTM19N bounds
-        const uint8_t* data = nullptr;           // mapped view of the mip chain
-        uint32_t channels = 3;                   // 3 = rgb; 4 = rgba -- ALPHA IS FIBER:
-                                                 // per-pixel alpha multiplies the paint
-                                                 // weight, so a mostly-transparent overlay
-                                                 // (highlights) bleeds through the quadtree
-                                                 // pixel by pixel
-        std::vector<MipLevel> mips;
-    };
-    std::vector<Tile> m_tiles;
-    std::vector<void*> m_handles;   // files + mappings + views, released in the dtor
-    double m_ue0 = 1e18, m_un0 = 1e18, m_ue1 = -1e18, m_un1 = -1e18;
-    SourceInfo m_info;
-};
+// (The plane orthos and the overlays are scene sources now, compose/RasterFileSource.h.)
 
 // A CUDEM topobathy window through an already-loaded, thalweg-preserving BathyModel grid.
 // M6w: any number of focus windows (merrimack, capeann, boston...) stack as separate

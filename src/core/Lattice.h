@@ -183,6 +183,11 @@ struct Lattice {
                double& lonRad) const;
     // The realization's cache folder name -- "cube16k", "window_z14_1263360_1538048".
     std::string Tag(const char* kindName = "window") const;
+    // HIERARCHY 4.20: a texel of `mip` on the ground at a place, metres, along each of its axes --
+    // measured between neighbouring texels' points, since a cube face's texel is 0.6 to 1.3 of
+    // GroundRes and askew; a Mercator texel is GroundRes x cos(lat) on both.
+    void TexelGround(uint32_t mip, double latRad, double lonRad, double& alongU,
+                     double& alongV) const;
 
     // ---- the declarations a frame carried nowhere ---------------------------------------------
     // The projection family this lattice is flat in (Projections.h for the exact forms).
