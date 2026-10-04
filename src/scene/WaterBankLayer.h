@@ -102,6 +102,7 @@ public:
     void SetWindows(const SurfaceFrame::ChainRows& rows, const double eye[3]) {
         SurfaceFrame::KernelRows(rows, m_hw);
         for (int i = 0; i < 3; ++i) m_hwEye[i] = eye[i];
+        if (m_surface) m_surface->StandingKernel(eye, m_st);   // the solver's window about the same frame
         m_hwOn = rows.K > 0;
     }
     int injectPattern = 0;   // M7m/M7n: 1 = bank world card, 2 = cascade-edge card
@@ -234,6 +235,9 @@ private:
         float hwW[20];
         float hwO[12];
         uint32_t hwS[8];
+        // THE SOLVER'S STANDING WINDOW about the rings' frame (SurfaceFrame::StandingKernel): a texel
+        // reads the solver where its ground lies in it. Appended at the END on both sides.
+        float stU[4], stV[4], stW[4], stO[4];
     };
     struct BankTile {
         float orgXZ[2];
@@ -316,6 +320,7 @@ private:
     float m_traceFloorUsed = 0.0f;
     ShaderCompiler* m_sc = nullptr;
     SurfaceFrame::KernelWindowRows m_hw{};   // PHASE B2: SetWindows
+    float m_st[16] = {};                     // ...and the solver's standing window
     double m_hwEye[3] = {};
     bool m_hwOn = false;
     float m_baseTexelM = 4.8f;

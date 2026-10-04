@@ -69,6 +69,12 @@ float2 PageTexel(float3 p, float4 planeU, float4 planeV, float4 planeW) {
 float2 PageTexelUv(float3 p, float4 planeU, float4 planeV, float4 planeW) {
     return PageTexel(p, planeU, planeV, planeW) / kPageDim;
 }
+// A point in ONE window's box (Window.hlsli's membership, one chain entry): its address by the
+// planes plus the box's offset in [0, 1); O.z = 1 where the window stands, 0 none.
+bool PageInBox(float3 p, float4 planeU, float4 planeV, float4 planeW, float4 O) {
+    const float2 b = PageTexelUv(p, planeU, planeV, planeW) + O.xy;
+    return O.z > 0.0f && all(b >= 0.0f) && all(b < 1.0f);
+}
 
 // The residency floor, pixel stage: CONSERVATIVE (gather + max). Smoothness comes from
 // trilinear WITHIN resident data, never from interpolating the map below what is resident.

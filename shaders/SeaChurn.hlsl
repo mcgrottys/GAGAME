@@ -35,6 +35,7 @@ cbuffer ChurnCb : register(b0) {
     // then its rows (WindowRows.hlsli). Appended at the END on both sides.
     float4 gEyeT;
     HP_WINDOW_ROWS_DECL
+    HP_STANDING_ROWS_DECL   // the solver's standing window about the churn's frame (appended LAST)
 };
 
 #define HP_WINDOW_ROWS 1
@@ -58,14 +59,16 @@ SamplerState sClamp : register(s1);
 // PHASE B2: the windows' chain at the texel's own point -- the flat world point (the sea's world IS
 // the tangent frame about the anchor's ground: Sea.hlsl's SeaPoint) about the camera's eye -- read at
 // the churn's own texel; the direction (for the cube) by the flat chart, as before.
+float3 ChurnPoint(float2 world) {
+    const float drop = dot(world, world) / (2.0f * gEyeT.w);
+    return float3(world.x - gEyeT.x, -drop - gEyeT.y, world.y - gEyeT.z);
+}
 float PageBedAt(float2 world) {
     const float lat = gGeoA.x + world.y * gGeoA.z;
     const float lon = gGeoA.y + world.x * gGeoA.w;
     const float latR = lat * 0.01745329252f, lonR = lon * 0.01745329252f;
     const float3 dir = float3(cos(latR) * cos(lonR), sin(latR), cos(latR) * sin(lonR));
-    const float drop = dot(world, world) / (2.0f * gEyeT.w);
-    const float3 p = float3(world.x - gEyeT.x, -drop - gEyeT.y, world.y - gEyeT.z);
-    return HpHeightChain(gBathy, gBathyRes, dir, WindowChain(p, 0u), gTexelM);
+    return HpHeightChain(gBathy, gBathyRes, dir, WindowChain(ChurnPoint(world), 0u), gTexelM);
 }
 
 uint2 TileTexel(uint3 id) {
@@ -111,7 +114,7 @@ void CsChurnUpdate(uint3 id : SV_DispatchThreadID) {
         // Gaussian band: a tile-shaped white blanket across the flats at every strong ebb.
         float2 U = JetVelocity(world, gJetA.x, gJetA.y, gJetA.z, gJetB.xy, gJetB.zw);
         float depth = 30.0f;
-        if (gSweM.x > 0.5f) {
+        if (gSweM.x > 0.5f && InSolver(ChurnPoint(world))) {   // the cell's ground in the solver's window
             const float2 buv = (world - gBathyG.xy) * gBathyG.zw;
             if (all(buv > 0.001f) && all(buv < 0.999f)) {
                 const float2 suv = float2(buv.x, 1.0f - buv.y);
