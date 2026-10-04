@@ -278,6 +278,57 @@ longitude, where the shader starts from `asin` and `atan2` of a float32 directio
 the ratio's error at rung 15 rises to 0.045 texel, because the point is then 10 km from the eye;
 nothing at that height wants rung 15.
 
+**The same law for a Mercator window, and for every read** (2026-09-30; the owner: "do one law
+for every read"). The land shimmered and stepped under a moving eye: two stills 0.36 m apart over
+the beach differed at 624,205 pixels. Every land read -- the colour, the mask, the height that
+displaces each vertex, the exposure page -- was addressed through a unit float32 direction, whose
+ulp at the planet's radius is 0.4 m of ground; the table above says what that costs at each rung.
+The water had already left this behind (finding 42) and the blocks path was born without it, but
+the Mercator windows and the height had not. The law, stated once: **a chart coordinate is the
+anchor's coordinate, held in doubles on the CPU, plus the chart's exact difference from the
+anchor, formed in the shader from the small eye-relative offset.** For a face window that is the
+ratio of two planes above. For a Mercator window, with the eye E at geocentric latitude phi,
+|E| = R_E, rho_E = R_E cos phi, and the point W = E + p, p = (p_e, p_n, p_u) in the eye's tangent
+frame, exactly:
+
+    a    = rho_E + p_u cos phi - p_n sin phi
+    dlon = atan2(p_e, a)
+    q    = p_e^2 / (sqrt(a^2 + p_e^2) + a)
+    dlat = atan2(p_n - q sin phi,  R_E + p_u + q cos phi)
+    dpsi = atanh( 2 (cos phi ch - sin phi sh) sh / (cos^2 phi - sin phi cos phi 2 sh ch + 2 sin^2 phi sh^2) ),
+           sh = sin(dlat / 2), ch = cos(dlat / 2)
+    px   = (E_px - org) + ( dlon_deg / 360,  -dpsi / 2 pi ) N
+
+Every large number stands alone in a denominator, where it is only relatively wrong; every
+difference of two numbers near one is written as the small quantity it is (`q` is
+`sqrt(a^2 + p_e^2) - a` without the cancellation; `dpsi` is the Gudermannian's difference in
+its product form). Emulated in float32 in the shader's own order against a double reference
+(`tools/hierarchy/uv_precision.py`, spelling d): worst 0.0008 px at z14, 0.0012 at z17, 0.0012
+at z20, 0.0015 at z23, where today's spelling errs 0.25, 2.0, 17 and 143. The kernels that read
+the bed by static texels of the anchor-linear map (the solver, the churn, the bank) do not move
+with the eye and are not in this; the migration's later commit that deletes the Mercator path
+deletes these lines with it, and the blocks keep the law by the ratio of planes.
+
+**The height's third rung** (2026-10-01; the owner: "it's the jetties... something isn't
+following the right precision"). Read in the code: the height tenant had the cube (611 m) and the
+z14 window (9.55 m) and no z17 window, while the colour and the survey mask have theirs at 1.19 m.
+So at a jetty the mask said "structure" at 1.19 m and the colour was read at 1.19 m, but the
+vertex displacement, the pixel's height, the normal's gradient and the close-up material's slope
+came from a 9.55 m bilinear field with the survey edits' crest painted into it, under vertices a
+metre apart: the terraces and the blocky steps. Built: slice [7] of `earth.height`, the z17 window
+on the colour's z17 lattice, wanted beside the colour's detail, read by `ComposedHeightPages` as
+the colour reads its detail (by containment, `PageWins`), and the ladder's floor made one named
+number, `kCsHeightLodFloor = -9`, the finest rung's mip 0, where a literal -8 (the z14's mip 0)
+stood in five readers; the kernels keep slice 6. Measured: at the jetty every pixel's height read
+moves from the z14 at mip 0 to the z17 at mip 0 (a lens that writes the mip SAMPLED, not the mip
+held: the first build read the new rung at mip 1 because of the literal floor, which the hold
+alone could not show); the flank changes by about 68,000 pixels at the jetty pose and 135,000
+standing on the jetty, the crest, which is the edits' constant, by none; every other tenant's
+mapped set is unchanged. Found on the way: no height source declares an own level, so every
+window level is painted by sampling the source at the texel centre, the CUDEM through the
+bathymetry model's own interpolation and the edits by point in polygon; 4.20's fold law is not
+yet the height's. The pyramid's blocks subsume both windows later.
+
 ### 4.5 Finding the window: the directory and the binding
 
 **The directory** is a 16 by 16 grid beside every slice, two 16-bit slice numbers a cell. A rank's
@@ -2571,6 +2622,31 @@ each, from the bottom of the stack up.
 - Renders are taken one engine at a time. Two engines on one GPU were measured to move the
   pictures of both: the unmodified binary differed from itself by 16,669 pixels at one pose.
 - The Scriptorium serves this document and the review through a `plan` tool.
+
+**Step 6 as built, 2026-10-03 to 2026-10-05 (the owner: "avoid all instances of binding to
+specific locations aside from the camera ... a shared position in the global GA tree with the
+portals causing a lookup").** Stated from the algebra and built so (`out/integration/
+plan_eye_windows.md`): a level's window at rank k is the 16384-texel box about ITS OWN eye's
+address (4.4's ratio of planes), placed modulo 16384 (4.1), aligned to 1024 texels and stepping
+by whole tiles when the eye has drifted 1024 texels from its centre; membership of a point is
+one ratio and one compare a rank (`shaders/Window.hlsli`, `SurfaceFrame::Chain`, equal to
+doubles within 0.003 texel at 10,000 points), so the directory is not read for a following
+window; a level is a versor and its rows are the root's rows pulled about its eye (`RowsOf`,
+eight sets, 46 slices a tenant at the Haulover corridor); a window set belongs to the GROUND,
+not to a position in the level table (crossing the gate moves 4 slices where the positional
+form moved 40); on a move only the slots whose global tile changed are touched (`Tenant::Move`:
+3.49 M kept tiles keep their slots in the selftest, no byte copied on 122 moves of the rail); a
+window's chain ends at its mip 3, its floor, and the rank above answers beyond (mips 4-7
+neither wanted nor mapped: -257 MB at the helm); a tile finer than every source that paints it
+answers no bytes and the reader magnifies the parent (4.20; a gate's level is its layer's). The
+key `streaming.faceWindows`, the chooser from the sources' footprints and the Mercator colour and
+mask branches are gone. Gates: two worlds reading one ground point equal to the byte, rank for
+rank (19/19 at the Merrimack, 21/21 at Haulover); the six stills within SSIM 0.992 of the
+Mercator path's in one batch; the rail's frame-to-frame SSIM unchanged. Found: the cache under
+a junction changes between batches (every rail paints; a fold rewrites the parent chain), so
+stills are comparable only within one batch. Owed: the height and the exposure (step 7, in
+progress), the porch at a box's edge, the apron, the Google tiles behind rank 1 at the Merrimack
+(the owner's word), the leaf's paint below its own level (not kept by the law, still stored).
 
 ## 7. Sources
 

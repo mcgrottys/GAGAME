@@ -66,6 +66,10 @@ The three largest outside the residency manager:
 
 ---
 
+## 7. Removed on 2026-09-30: the rock hash (a constant painted over the imagery)
+
+`Globe.hlsl`'s two rock terms -- the far path's hash per 0.7 m cell with its facet normals, and the close-up block's blend -- painted a two-tone constant wherever `ComposedEditLand` was above 0.01, addressed through the float32 direction (0.38 m of grain). At the South Jetty the mask is 1.0 over 93% of the visible ground, so the whole surface wore hashed rock: the owner's "shimmering, blocky land". Found by ablation after every other term was cleared (the pixel water, the land albedo, the cloud jitter, the wet-sand threshold, the land normal, the stored tile, the colour read); with it off the grain measure (mean |3x3 Laplacian| of luma over the ground) fell from 30.5 to 2.1, the raw colour read's level. Removed whole: 40 shader lines, no C++. What is lost: a rock look on the jetties where the Mercator window's imagery (Google at z14) is a smear; the 15 cm orthos on the pyramid draw the jetties as they are once the blocks path reads them (`streaming.faceWindows`).
+
 ## 1. The switches
 
 Every flag in `src/app/Options.cpp` and key in `src/scene/SceneSchema.cpp` that picks one of
