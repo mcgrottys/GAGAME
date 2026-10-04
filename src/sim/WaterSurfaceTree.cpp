@@ -419,14 +419,10 @@ SurfaceSample TreeWater::Evaluate(double wx, double wz, double simUnix, bool dis
     // through the same period); the dry weight takes every wave off water too thin to carry one. The
     // hull rides the sea the renderer draws; the header says why, and --height-scale 1.0 is the
     // physics-truth run.
-    double k = dry * m_heightScale;
-    // ---- DEPTH-LIMITED BREAKING, the kernel's cap: no displacement taller than 0.55 of the depth.
-    // An AMPLITUDE cap, so the whole displacement -- and the slope and the orbital velocity that are
-    // linear in the same amplitude -- scales by the one ratio: continuous at the cap, where the
-    // kernel's horizontal step to 0.85 was not.
-    const double hmax = 0.55 * wt::Max(depth, 0.05);
-    const double hY = std::abs(k * dispY);
-    if (hY > hmax) k *= hmax / hY;
+    const double k = dry * m_heightScale;
+    // NO CAP ON THE HEIGHT (the owner, 2026-10-04): the depth-limited breaking cap (0.55 of the
+    // depth) is gone here as in the kernel (WaterBank.hlsl) and the sheet (Sea.hlsl); the hull
+    // rides the sea the renderer draws, uncut.
     double eta = k * dispY;
     double sx = k * slopeX, sz = k * slopeZ;
     s.dx = k * dispX;

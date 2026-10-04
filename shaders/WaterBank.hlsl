@@ -874,18 +874,14 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // noise textures it with everything else).
     foam = max(foam, sternF * 0.42f);
 
-    // Depth-limited breaking (the Sea.hlsl clamp, bank-side): the GEOMETRY constraint
-    // stays; its foam side-effect retired in M8 -- the envelope-based depthFoam above is
-    // the disciplined statement of the same physics (test the envelope, never |eta|).
-    // An AMPLITUDE cap (the water match, step 2): the horizontal excursion is linear in the same
-    // amplitude, so the whole displacement scales by the one ratio -- continuous at the cap, where
-    // the old horizontal step to 0.85 (a number from the first sea, with no argument) was not.
-    // TreeWater::At applies the same cap to the hull's water.
-    const float hmax = 0.55f * max(depth, 0.05f);
+    // NO CAP ON THE HEIGHT (the owner, 2026-10-04: the flat-topped sea at Haulover was the
+    // depth-limited breaking clamp |eta| <= 0.55 h, a min on the displacement). The surface is
+    // the data the bands and the solver say; what breaks is said by the foam (depthFoam above,
+    // from the envelope), never by cutting the geometry. The hull's water (WaterSurfaceTree) and
+    // the sea sheet (Sea.hlsl) say the same.
 #ifdef BANK_TRACE
     const float dyPre = abs(d.y);
 #endif
-    if (abs(d.y) > hmax) d *= hmax / abs(d.y);
 
     // M7m: EDGE PATTERN INJECTION. Flip the switch and this kernel writes a WORLD-ALIGNED
     // test card into the foam fiber instead of physics: a 50 m checker and a wedge that
