@@ -102,12 +102,12 @@ public:
         m_estGeo[2] = lonSpan;
         m_estGeo[3] = latSpan;
     }
-    // M7: per-frame wave-bank binding (SRVs + ring origins), and the one-water switch.
+    // M7: per-frame wave-bank binding (SRVs + ring origins).
     void SetWaterBank(uint32_t dispSrv, uint32_t paramSrv, uint32_t detailSrv,
                       const uint32_t derivSrv[3], const float patchL[3],
                       const float bandK[3], const float bandRms[3], const float bandFold[3],
                       float heightScale,
-                      float baseTexelM, const float* org12, bool oneWater) {
+                      float baseTexelM, const float* org12) {
         m_bankSrv[0] = dispSrv;
         m_bankSrv[1] = paramSrv;
         m_bankSrv[2] = detailSrv;
@@ -121,7 +121,6 @@ public:
         m_bankExag = heightScale;
         m_bankBase = baseTexelM;
         for (int i = 0; i < 12; ++i) m_bankOrg[i] = org12[i];
-        m_oneWater = oneWater;
     }
     // M12 step 4a: THE SURFACE, declared once (compose/SurfaceFrame.h). The globe keeps
     // copies of what its walk reads (the tenant ids and the radius: CaptureWalk captures them
@@ -756,7 +755,6 @@ private:
     float m_bankExag = 1.15f;
     float m_bankBase = 4.8f;
     float m_bankOrg[12] = {};
-    bool m_oneWater = false;
 
     std::vector<NodeData> m_nodes;
     // M10: the Droste levels of this frame (slots 1..n; slot 0 is the camera's own).

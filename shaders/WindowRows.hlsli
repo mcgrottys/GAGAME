@@ -11,4 +11,8 @@
 #define GA_WINDOW_ROWS_HLSLI
 #define HP_WINDOW_ROWS_DECL \
     float4 gHwU[5]; float4 gHwV[5]; float4 gHwW[5]; float4 gHwO[3]; uint4 gHwS[2];
+// THE SOLVER'S STANDING WINDOW (SurfaceFrame::StandingKernel) as one chain entry about the reader's
+// own frame: a point reads the solver where its ground lies in that box (InSolver). The LAST rows.
+#define HP_STANDING_ROWS_DECL float4 gStU; float4 gStV; float4 gStW; float4 gStO;
+#define InSolver(p) PageInBox(p, gStU, gStV, gStW, gStO)
 #endif

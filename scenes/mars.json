@@ -30,7 +30,6 @@
     "datum": {"fromStation": true, "mllwToNavd": -1.3}
   },
   "water": {
-    "oneWater": true,
     "pixelWater": true,
     "foam": 1,
     "edgePx": 12,

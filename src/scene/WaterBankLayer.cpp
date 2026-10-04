@@ -545,7 +545,7 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
                         };
                         double p0[3], pxp[3], pxm[3], pzp[3], pzm[3];
                         const double h = 0.5 * tileSpan;
-                        const bool okP = m_hwOn && ok && pointOf(ox, oz, p0) && pointOf(cx + h, cz, pxp) &&
+                        const bool okP = ok && pointOf(ox, oz, p0) && pointOf(cx + h, cz, pxp) &&
                                          pointOf(cx - h, cz, pxm) && pointOf(cx, cz + h, pzp) &&
                                          pointOf(cx, cz - h, pzm);
                         for (int c = 0; c < 3; ++c) {
@@ -719,6 +719,7 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.sweB[1] = cb.sweB[2] = cb.sweB[3] = 0.0f;
     static_assert(sizeof(SurfaceFrame::KernelWindowRows) == sizeof(float) * 80, "the kernels' rows");
     memcpy(cb.hwU, &m_hw, sizeof(m_hw));   // PHASE B2: hwU..hwS, KernelRows' packing
+    memcpy(cb.stU, m_st, sizeof(m_st));   // stU..stO, StandingKernel's packing
     cb.debugA[0] = flatBed ? 1.0f : 0.0f;   // M9p: the A/B that proves the bed moves geometry
     cb.debugA[1] = flatBedNavd;
     cb.debugA[2] = cb.debugA[3] = 0.0f;

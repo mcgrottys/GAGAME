@@ -340,6 +340,19 @@ SurfaceFrame::ChainRows SurfaceFrame::StandingRows(
     return r;
 }
 
+void SurfaceFrame::StandingKernel(const double origin[3], float out[16]) const {
+    const ChainRows r = StandingRows(Placement::Frame(east, up, north, origin), origin);
+    for (int c = 0; c < 4; ++c) {
+        out[c] = r.pl[0].u[c];
+        out[4 + c] = r.pl[0].v[c];
+        out[8 + c] = r.pl[0].w[c];
+    }
+    out[12] = r.off[0][0];
+    out[13] = r.off[0][1];
+    out[14] = r.K ? 1.0f : 0.0f;
+    out[15] = 0.0f;
+}
+
 int SurfaceFrame::SliceRects(const hal::BlockBinding& b, double x0, double y0, double x1, double y1,
                              float out[4][4]) {
     const double dim = Lattice::kFaceDim;

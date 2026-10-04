@@ -36,6 +36,7 @@
       { "key": "data", "type": "object", "field": "none", "schema": "data", "reload": "hot", "doc": "the data files" },
       { "key": "time", "type": "object", "field": "none", "schema": "time", "reload": "hot", "doc": "the scene clock" },
       { "key": "sun", "type": "object", "field": "none", "schema": "sun", "reload": "hot", "doc": "the sun" },
+      { "key": "air", "type": "object", "field": "none", "schema": "air", "reload": "hot", "doc": "the air of the day: its aerosol, the picture's white" },
       { "key": "sea", "type": "object", "field": "none", "schema": "sea", "reload": "hot", "doc": "the sea state and the datum" },
       { "key": "water", "type": "object", "field": "none", "schema": "water", "reload": "hot", "doc": "the water" },
       { "key": "streaming", "type": "object", "field": "none", "schema": "streaming", "reload": "hot", "doc": "residency: scene state" },
@@ -88,6 +89,11 @@
       { "key": "axis", "type": "vec3", "field": "double3", "quantity": "1", "unit": "1", "default": [0, 0, 1], "reload": "restart", "doc": "the Earth's spin axis in that frame" },
       { "key": "spin", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "the Earth's turn about its axis" }
     ] },
+    { "type": "air", "keys": [
+      { "key": "aod550", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": -1, "reload": "restart", "doc": "the day's aerosol optical depth at 550 nm, the air's one row that changes with the day (src/scene/Air.h); < 0 = the planet's typical value (Earth 0.10, the Maritime Aerosol Network's open-ocean mean; Mars's dust 0.5)" },
+      { "key": "angstrom", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": -1, "reload": "restart", "doc": "the aerosol's Angstrom exponent: its optical depth scales as (lambda / 550 nm)^-angstrom per channel, single-scattering albedo and phase unchanged; < 0 = the planet's typical value (Earth 0.6, the maritime mean; Mars's dust 0)" },
+      { "key": "exposure", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 0, "reload": "restart", "doc": "the tonemap's scale; 0 = the law: 1 / the luminance of a white level surface under a zenith sun through this air (its sun and its sky), so a sunlit white is the display's white; > 0 overrides it" }
+    ] },
     { "type": "sea", "keys": [
       { "key": "storm", "type": "object", "field": "none", "schema": "sea.storm", "reload": "hot", "doc": "the sandbox sea-state override" },
       { "key": "datum", "type": "object", "field": "none", "schema": "sea.datum", "reload": "hot", "doc": "the MLLW -> NAVD88 link" }
@@ -102,7 +108,6 @@
       { "key": "mllwToNavd", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": -1.3, "reload": "restart", "doc": "tide (m MLLW) + this = NAVD88 (--datum)" }
     ] },
     { "type": "water", "keys": [
-      { "key": "oneWater", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "water geometry from the wave bank alone (--no-one-water)" },
       { "key": "pixelWater", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "shade the water per pixel (--no-pixel-water)" },
       { "key": "foam", "type": "number", "field": "f32", "quantity": "1", "unit": "1", "default": 1, "reload": "hot", "doc": "sea-mode whitecap intensity (--foam)" },
       { "key": "edgePx", "type": "number", "field": "f32", "quantity": "1", "unit": "px", "default": 12, "reload": "hot", "doc": "tessellated edge target (--edge-px)" },
@@ -186,7 +191,6 @@
       { "key": "seafloor", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the global seafloor relief source (--no-seafloor)" },
       { "key": "exposure", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the swell-exposure page (--no-exposure)" },
       { "key": "holdMargin", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 1.41421356, "reload": "restart", "doc": "the order's hold margin: a held tile, and a tile above a held tile, count for this times their measure, so a tile gives its slot up only to one larger on the screen by more (HIERARCHY 4.19); 1 is the order without it" },
-      { "key": "faceWindows", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "standing blocks of the pyramid for the colour and the mask in place of their Mercator windows: lon,lat,rung entries joined by ';', each the block of that rung holding the point (logged); auto = the blocks the `sources` ask for, rank 1 down to each one's grain over its footprint; empty = the Mercator windows" },
       { "key": "treeRoot", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "cache/trees", "reload": "restart", "doc": "the folder the tile trees live in; a scratch folder keeps a tool's paints and packs out of the real cache" }
     ] },
     { "type": "source", "keys": [

@@ -96,6 +96,7 @@ cbuffer BankCb : register(b0) {
     // level whose eye the rings stand about (bank A: the camera's world; set B: the window's world),
     // its chain found at each texel's own point (BankTile.point*). Appended at the END on both sides.
     HP_WINDOW_ROWS_DECL
+    HP_STANDING_ROWS_DECL   // the solver's standing window about the rings' frame (appended LAST)
 };
 
 // M9bl: one component's rows, from whichever half holds it. r = comp >> 1.
@@ -451,7 +452,8 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // PHASE B2: the texel's direction (the cube's read) and its chain (the windows').
     const float latR = place.x * 0.01745329252f, lonR = place.y * 0.01745329252f;
     const float3 dirT = float3(cos(latR) * cos(lonR), sin(latR), cos(latR) * sin(lonR));
-    WalkChain wcT = WindowChain(t.pointA.xyz + exz.x * t.pointX.xyz + exz.y * t.pointZ.xyz, 0u);
+    const float3 pT = t.pointA.xyz + exz.x * t.pointX.xyz + exz.y * t.pointZ.xyz;
+    WalkChain wcT = WindowChain(pT, 0u);
     if (t.pointA.w == 0.0f) wcT.n = 0u;
 #ifdef BANK_TRACE
     float traceMip = 0.0f;
@@ -489,7 +491,9 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // delivered through a region readback; --water-probe is the gate that the two stand together.
     float lvl = level;
     float2 cur = 0.0f;
-    if (gSwe.z > 0.0f) {
+    // The solver is read where the texel's GROUND lies in its standing window (the point the
+    // windows' chain is given); the rect then finds the cell.
+    if (gSwe.z > 0.0f && t.pointA.w != 0.0f && InSolver(pT)) {
         const float2 uv = (xz - gSwe.xy) * gSwe.zw;
         const float2 texel = float2(uv.x * gSweDims.x, (1.0f - uv.y) * gSweDims.y);
         const float eCells =
@@ -874,18 +878,14 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // noise textures it with everything else).
     foam = max(foam, sternF * 0.42f);
 
-    // Depth-limited breaking (the Sea.hlsl clamp, bank-side): the GEOMETRY constraint
-    // stays; its foam side-effect retired in M8 -- the envelope-based depthFoam above is
-    // the disciplined statement of the same physics (test the envelope, never |eta|).
-    // An AMPLITUDE cap (the water match, step 2): the horizontal excursion is linear in the same
-    // amplitude, so the whole displacement scales by the one ratio -- continuous at the cap, where
-    // the old horizontal step to 0.85 (a number from the first sea, with no argument) was not.
-    // TreeWater::At applies the same cap to the hull's water.
-    const float hmax = 0.55f * max(depth, 0.05f);
+    // NO CAP ON THE HEIGHT (the owner, 2026-10-04: the flat-topped sea at Haulover was the
+    // depth-limited breaking clamp |eta| <= 0.55 h, a min on the displacement). The surface is
+    // the data the bands and the solver say; what breaks is said by the foam (depthFoam above,
+    // from the envelope), never by cutting the geometry. The hull's water (WaterSurfaceTree) and
+    // the sea sheet (Sea.hlsl) say the same.
 #ifdef BANK_TRACE
     const float dyPre = abs(d.y);
 #endif
-    if (abs(d.y) > hmax) d *= hmax / abs(d.y);
 
     // M7m: EDGE PATTERN INJECTION. Flip the switch and this kernel writes a WORLD-ALIGNED
     // test card into the foam fiber instead of physics: a 50 m checker and a wedge that
