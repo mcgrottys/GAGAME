@@ -191,8 +191,6 @@ struct Options {
     // the water nobody was looking at. --no-one-water / --no-pixel-water are the escape
     // hatches; the positive forms still parse, so existing scripts and the storm-rail recipe
     // are unchanged.
-    bool oneWater = true;             // --no-one-water: M7 -- water geometry from the wave
-                                      // vertex bank alone (SeaLayer's grid retires)
     bool pixelWater = true;           // --no-pixel-water: M9bh -- shade the water per PIXEL
                                       // (the two rays: sky mirror + refracted bed cast,
                                       // translucent, no foam). Off = M9bg vertex-shaded.

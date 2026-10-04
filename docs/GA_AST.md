@@ -22,10 +22,7 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | exposure.node | exposure | water.bank | mercator.px +v=S | uv01.vS +v=S | - | 0..1 exposure | 0.12..1 | x1 | WaterBank.hlsl CsBankFill (1-uv.y), floor 0.18 |
 | churn.kernel | churn | water.bank | atlas.texel +v=N | atlas.texel +v=N | - | 0..1 aeration (remembered foam, MAX-composited) | 0..1 | x1 | WaterBank.hlsl CsBankFill flat |
 | height.pages | bed | churn.kernel | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | z14 slice; -30 m off the page | x1 | SeaChurn.hlsl PageBedAt |
-| height.pages | bed | sea.ps (inactive) | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | cube + z14 page | x1 | Sea.hlsl BedAt -> ComposedHeight(SeaPlanetDir) |
 | height.pages | bed | swe.solver | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | z14 slice; +100 m wall off the page | x1 | Swe.hlsl BedAt (lattice -> lat/lon -> page uv, residency-clamped) |
-| swe.solver | eta | sea.ps (inactive) | raster.row0N +v=S | atlas.texel +v=N | FLIP | m dEta | +-1.5 | x1 | Sea.hlsl SweDEta (1-uv.y) |
-| exposure.node | exposure | sea.ps (inactive) | mercator.px +v=S | uv01.vS +v=S | - | 0..1 exposure | 0.12..1 | x1 | Sea.hlsl SweShadow (uv.x, 1-uv.y) |
 | compose.stack | corners | water.bank | world.m +v=N | world.m +v=N | - | m NAVD level/bed + hsScale | hsScale 0.15..3 | x1 | WaterBankLayer CornerParams (CPU) |
 | compose.stack | bed (per cell) | wave.solver | world.m +v=N | atlas.texel +v=N | - | m NAVD | -40..15 | x1 | WaveField.h SolveNow (SampleHeightStack) |
 | water.atlas | level bucket | wave.solver | world.m +v=N | world.m +v=N | - | m NAVD | 0.25 m buckets | x1 | WaveField.h BucketKey |
@@ -51,10 +48,8 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | sea.peakdir | LOS march over the height stack (M9ba) | exposure.node | world.m +v=N | world.m +v=N | - | 0..1 exposure | 0.12..1; rebuilt on dir/level move | x1 | SeaLayer::BuildShadowMask (CPU) |
 | compose.stack | paint survey mask | mask.pages | latlon.deg +v=N | mercator.px +v=S | FLIP | water coverage / edited / surveyed (bytes) | cube + z14 + z17 pages | x1 | TileTree::Provider over gis.landsea (GisMaskSource sweep) |
 | mask.pages | classifier + edit override | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | land 0..1, edited 0..1, or no opinion | finest page with an opinion | x1 | Compose.hlsli CsMaskSample / ComposedLandness |
-| mask.pages | classifier + edit override | sea.ps (inactive) | mercator.px +v=S | uv01.vS +v=S | - | land bit | ComposedIsLand | x1 | Sea.hlsl ComposedIsLand |
 | globe.ps | radiance (accepting state) | frame.out | world.m +v=N | world.m +v=N | - | linear RGB -> tonemap | the render | x1 | Renderer tonemap |
 | color.pages | bed albedo (--pixel-water) | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | sRGB | at the refracted ray's bed hit, 2 secant steps | x1 | Globe.hlsl WaterPixelColor ComposedColor(bedDir) |
-| color.pages | bed albedo (--pixel-water) | sea.ps | mercator.px +v=S | uv01.vS +v=S | - | sRGB | at the refracted ray's bed hit in the flat frame | x1 | Sea.hlsl SeaPixelColor ComposedColor(SeaPlanetDir(bedXZ)) |
 | height.pages | refracted cast (--pixel-water) | globe.ps | mercator.px +v=S | uv01.vS +v=S | - | m NAVD | 2 secant steps, s clamped 0.3..140 m | x1 | Globe.hlsl WaterPixelColor ComposedHeight(CsToPlanet(dirP)) |
 | ocean.fft | cascade.deriv slope (--pixel-water) | globe.ps | patch.wrap +v=N | atlas.texel +v=N | - | slope | +-0.3, prefiltered per axis | x1 | Globe.hlsl WaterPixelColor detail loop |
 | gfs.wind | wind10 (far sigma2, --pixel-water) | globe.ps | raster.row0N +v=S | atlas.texel +v=N | FLIP | m/s | 0..40 | x1 | Globe.hlsl WaterPixelColor wuv; sigma2 = 0.003+0.00512 U |
@@ -63,6 +58,5 @@ Nodes are GA engines; edges carry geometric products. `+v=N` / `+v=S` is the sec
 | water.bank | shading: normal/sigma2/level (--pixel-water) | globe.ps | atlas.texel +v=N | atlas.texel +v=N | - | m / sigma2 / m NAVD | rings 1.2..38 m/texel | x1 | Globe.hlsl WaterPixelColor (one BankSampleT, analytic normal) |
 | sim.clock | unix -> apparent RA/dec/distance | solar.sun | scalar.params +v=N | solar.au +v=N | - | deg / deg / AU | dec +-23.44, 0.98329..1.01671 AU | x1 | Ephemeris.h Solar (Astronomical Almanac low-precision series, ~0.01 deg) |
 | solar.sun | sun direction (versor chain, tangent frame) | globe.ps | solar.au +v=N | world.m +v=N | - | unit vector | T,R,M,D then CsToTangent; topocentric, 8.8 arcsec of parallax | x1 | Ephemeris.h Build + SunDirFromPlanetPoint -> Renderer sunDirTangent (gSunDir) |
-| solar.sun | sun direction (versor chain, tangent frame) | sea.ps | solar.au +v=N | world.m +v=N | - | unit vector | the same gSunDir -- one place, every layer | x1 | Renderer SceneConstants sunDir (Sea.hlsl gSunDir) |
 | solar.sun | sun direction (per-vertex water shading) | globe.mesh | solar.au +v=N | world.m +v=N | - | unit vector | WaterVertexColor's lambert + Cox-Munk lobe | x1 | Globe.hlsl WaterVertexColor (gSunDir) |
 | solar.sun | angular radius -> the sky's disc | globe.ps | solar.au +v=N | world.m +v=N | - | deg | 0.2621..0.2710 over a year (Earth-Sun distance) | x1 | Common.hlsli SkyRadianceDir smoothstep(gMisc.y, gMisc.z, cosA) |

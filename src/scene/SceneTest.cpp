@@ -672,7 +672,7 @@ bool RunSceneSelfTest() {
             g.True(ctl && ctl->str == "fixed", "--boat-drive is the fixed controller");
         }
         {
-            const auto s = Options::ToSets(parse({"--sea", "--one-water", "--pixel-water", "--headless",
+            const auto s = Options::ToSets(parse({"--sea", "--pixel-water", "--headless",
                                                   "--rail-flood", "out/rail", "--frames", "300",
                                                   "--storm", "3.0,10,95", "--start", "2026-08-28T14:00:00",
                                                   "--tile-budget", "3000"}));

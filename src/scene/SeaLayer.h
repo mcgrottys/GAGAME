@@ -30,9 +30,6 @@ namespace ga {
 
 class SeaLayer : public Layer {
 public:
-    static constexpr uint32_t kPatches = 64;    // tessellated patches per side (M5b)
-    static constexpr uint32_t kSpecSamples = 96;
-
     void Configure(const std::wstring& shaderDir, const SeaState* sea) {
         m_shaderDir = shaderDir;
         m_sea = sea;
@@ -47,7 +44,7 @@ public:
     // M5: the bed's survey window, geo in world metres. heightSrv only says a window exists:
     // the bed itself is the height megatexture (Assembly passes 0).
     void SetBathy(uint32_t heightSrv, float x0, float z0, float sizeX, float sizeZ) {
-        m_bathySrv = heightSrv;
+        (void)heightSrv;
         m_bathyGeo[0] = x0;
         m_bathyGeo[1] = z0;
         m_bathyGeo[2] = 1.0f / sizeX;
@@ -159,12 +156,6 @@ public:
     std::string statusNote;  // "f012" style label for the title bar
     std::string currentStatus;   // "ebb 0.72 m/s" for the title bar
     std::string atlasStats;      // "churn 34/2048 t 2.1 MB" for the title bar
-    float foamIntensity = 1.0f;
-    // M9bh --pixel-water: shade in PsMain (the refracted bed cast -- translucent, foamless)
-    // instead of the M9bg domain-shader default. The tessellation and the displacement are
-    // untouched; only the stage that paints changes.
-    bool pixelWater = false;
-    float targetEdgePx = 12.0f;  // tessellated triangle edge target, screen pixels
     // The CUDEM window holds roughly a third of the real tidal prism, so the solved currents run
     // ~3x under the ACT0816 predictions; this gain (calibrated from the --swe-cycle run, peak
     // ACT / peak solved) restores the magnitude while the solver keeps the spatial shape.
@@ -182,16 +173,9 @@ public:
     // M8 buoy assimilation closures (data/wave_scene.json; main mirrors them here)
     float buoyAssimAgeH = 6.0f;
     float buoyAssimGainMax = 1.8f;
-    // M7: the wave bank consumes the cascade textures; --one-water retires this layer's own
-    // grid DRAW while the compute chain (FFT, SWE, churn) keeps running.
-    bool drawEnabled = true;
     uint32_t FftDispSrv(int c) const { return m_fft.DispSrv(c); }
     uint32_t FftDerivSrv(int c) const { return m_fft.DerivSrv(c); }
     float FftPatchL(int c) const { return m_fft.PatchL(c); }
-    bool atlasVisualize = false;   // V key: draw the tile grid + residency over the water
-    // M9b: G key / --wireframe. Shading cannot tell geometry from normals (priors 8); the
-    // raster fill can. Same shaders, same displacement, lines instead of faces.
-    bool wireframe = false;
     // Harness only: raised by main for the frames a still is HELD at one instant
     // (--settle-sync / --settle-hold). The churn is a stateful atlas -- at a held instant
     // dtSim is 0 and CsChurnUpdate reduces to max(old, src), so the foam can only CLIMB, once
@@ -221,30 +205,6 @@ public:
     }
 
 private:
-    struct SeaCbData {
-        float sea[4];       // seaLevel, gridSpan, foamIntensity, skirtStart
-        float snap[4];
-        uint32_t dispSrv[4];
-        uint32_t derivSrv[4];
-        float patchL[4];    // xyz sizes, w = quads per side
-        float fadeD[4];
-        float jet[4];       // signed speed, half width, seaward decay, enabled
-        float jetDir[4];    // flood-toward xy, ebb-toward xy
-        float waveC[4];     // c0 peak, peak dir xy, advection wrap time
-        float bandK[4];     // representative WAVENUMBER per cascade (rad/m); the shader derives
-                            // phase speed from the local depth (M5b)
-        uint32_t churnU[4]; // churn SRV, residency-mask SRV, visualize, unused
-        float churnF[4];    // atlas origin xy, 1/domain, churn foam gain
-        float churnF2[4];   // tile world size xy, tile counts xy
-        uint32_t bathyU[4]; // CUDEM heightfield SRV (0xFFFFFFFF = open-ocean mode)
-        float bathyGeo[4];  // world x0, z0, 1/sizeX, 1/sizeZ
-        uint32_t sweU[4];   // M5c: eta SRV, uv SRV, solver on, swell-shadow mask SRV
-        float sweF[4];      // bathy grid dims xy, 1 / eta-atlas padded dims zw
-        float sweG[4];      // x = prism-truncation current gain
-        float bandSig[4];   // M6t: xyz = per-cascade mean-square SLOPE (exaggeration baked),
-                            // w = the sub-resolved floor, calibrated so xyz+w sums to the
-                            // globe's Cox-Munk sigma^2(wind) -- grade shedding conserves it
-    };
     // Mirrored in shaders/SeaChurn.hlsl. (Count float4 rows on BOTH sides after any edit -- a
     // shader field without its mirror here reads garbage past the push; see the gSweG incident.)
     struct ChurnCbData {
@@ -278,26 +238,17 @@ private:
         uint32_t hwS[8];
         float stU[4], stV[4], stW[4], stO[4];   // the solver's standing window about the churn's frame; LAST
     };
-    struct SpecCbData {
-        float rect[4];
-        float axis[4];      // fMax, sMax, nSamples, hasBuoy
-        float colM[4];
-        float colB[4];
-        float model[kSpecSamples / 4][4];
-        float buoy[kSpecSamples / 4][4];
-    };
-
-    bool BuildPsos(Gpu& gpu, ShaderCompiler& sc);
-
     std::wstring m_shaderDir;
     const SeaState* m_sea = nullptr;
-    hal::RootSignature m_rootSig = nullptr;
-    hal::Pso m_seaPso, m_specPso, m_seaPsoWire;
     OceanFft m_fft;
     OceanCpu m_oceanCpu;   // M9bq: the hull's copy of the same three cascades
 
-    SeaCbData m_seaCb{};
-    SpecCbData m_specCb{};
+    // What the churn and the solver take from SetTime: the level, the entrance jet, the chop band's
+    // wavenumber and the churn tiles' span.
+    float m_seaLevel = 0.0f;
+    float m_jet[4] = {}, m_jetDir[4] = {};
+    float m_chopK = 0.0f;
+    float m_churnSpan[2] = {1.0f, 1.0f};
     int m_lastHour = -1;
     float m_tSec = 0;
     bool m_haveData = false;
@@ -306,7 +257,6 @@ private:
     Gpu* m_gpu = nullptr;
     const CurrentModel* m_currents = nullptr;
     int m_ctSta = -1;
-    uint32_t m_bathySrv = UINT32_MAX;
     float m_bathyGeo[4] = {0, 0, 1, 1};
     float m_cPeak = 10.0f;     // peak-partition phase speed for the amplification factor
     float m_peakDirX = -1.0f, m_peakDirZ = 0.0f;

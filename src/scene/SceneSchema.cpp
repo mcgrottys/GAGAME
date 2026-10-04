@@ -276,8 +276,7 @@ const Schema& WaterSchema() {
     static const Schema* s = [] {
         auto& p = kDoc.water;
         Schema* sc = new Schema("water", &p);
-        sc->Bind("oneWater", p.oneWater, "water geometry from the wave bank alone (--no-one-water)", R)
-            .Bind("pixelWater", p.pixelWater, "shade the water per pixel (--no-pixel-water)", R)
+        sc->Bind("pixelWater", p.pixelWater, "shade the water per pixel (--no-pixel-water)", R)
             .Bind("foam", p.foam, Q::Dimensionless, "1", "sea-mode whitecap intensity (--foam)", H)
             .Bind("edgePx", p.edgePx, Q::Dimensionless, "px", "tessellated edge target (--edge-px)", H)
             .Bind("heightScale", p.heightScale, Q::Dimensionless, "1", "wave vertical exaggeration (--height-scale)", H)

@@ -1429,7 +1429,7 @@ GlobeLayer::WalkParams GlobeLayer::CaptureWalk(const Camera& cam, float viewport
     wp.maxDepth = m_msPath ? 18 : kMaxDepth;   // M6j/M8h, see WalkNode
     // M9bk: the wave-grain rule rides the mesh path in one-water mode only -- that is where
     // the bank IS the water's geometry. Off elsewhere, so nothing but the helm changes.
-    wp.waveGrainM = (m_msPath && m_oneWater) ? m_bankBase : 0.0f;
+    wp.waveGrainM = (m_msPath && m_bankSrv[0] != 0xFFFFFFFFu) ? m_bankBase : 0.0f;
     wp.waveMaxDepth = kWaveMaxDepth;
     wp.pixAng = cam.fovY / (std::max)(viewportH, 1.0f);
     wp.wants = m_res && (m_surfT >= 0 || m_colorT >= 0 || m_hgtT >= 0);
@@ -2019,7 +2019,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     // M7: the wave vertex bank rows (one-water mode).
     m_cb.bankU[0] = m_bankSrv[0];
     m_cb.bankU[1] = m_bankSrv[1];
-    m_cb.bankU[2] = (m_oneWater && m_bankSrv[0] != 0xFFFFFFFFu) ? 1u : 0u;
+    m_cb.bankU[2] = (m_bankSrv[0] != 0xFFFFFFFFu) ? 1u : 0u;
     m_cb.bankU[3] = 512u;
     m_cb.bankA[0] = m_bankBase;
     m_cb.bankA[1] = 6.0f;

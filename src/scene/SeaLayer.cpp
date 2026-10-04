@@ -16,10 +16,9 @@ namespace ga {
 void SeaLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
                     hal::RootSignature rootSig) {
     (void)fields;
-    m_rootSig = rootSig;
+    (void)rootSig;
     if (!m_sea || !m_sea->Ready()) throw std::runtime_error("SeaLayer needs a SeaState");
     m_gpu = &gpu;
-    if (!BuildPsos(gpu, sc)) throw std::runtime_error("sea PSOs could not be created");
     m_fft.Init(gpu, sc, m_shaderDir);
     if (gpu.TiledTier() >= D3D12_TILED_RESOURCES_TIER_2) {
         InitChurn(gpu, sc);
@@ -97,55 +96,7 @@ void SeaLayer::InitChurn(Gpu& gpu, ShaderCompiler& sc) {
     m_churnReady = true;
 }
 
-bool SeaLayer::BuildPsos(Gpu& gpu, ShaderCompiler& sc) {
-    // The spectrum plot: lines, no depth.
-    auto makePso = [&](const wchar_t* file, bool lines, bool depth, const char* tag) {
-        const std::wstring path = m_shaderDir + L"/" + file;
-        hal::GraphicsPipelineDesc d;
-        d.rootSig = m_rootSig;
-        d.vs = sc.Compile(path, L"VsMain", L"vs_6_0");
-        d.ps = sc.Compile(path, L"PsMain", L"ps_6_0");
-        d.depthClip = TRUE;
-        d.depthTest = depth;
-        d.depthWrite = depth;   // reversed-Z GREATER, the default comparison
-        d.topology = lines ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE
-                           : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
-        return hal::BuildGraphics(gpu, d, tag);
-    };
-    // The sea itself tessellates (M5b): VS emits control points, HS sets screen-space edge
-    // factors, DS displaces -- vqview's chain, ported.
-    auto makeSeaPso = [&](D3D12_FILL_MODE fill, const char* tag) {
-        const std::wstring path = m_shaderDir + L"/Sea.hlsl";
-        hal::GraphicsPipelineDesc d;
-        d.rootSig = m_rootSig;
-        d.vs = sc.Compile(path, L"VsMain", L"vs_6_0");
-        d.hs = sc.Compile(path, L"HsMain", L"hs_6_0");
-        d.ds = sc.Compile(path, L"DsMain", L"ds_6_0");
-        d.ps = sc.Compile(path, L"PsMain", L"ps_6_0");
-        // The builder refuses an invalid VS or PS; the tessellation stages are this site's.
-        if (!d.hs.Valid() || !d.ds.Valid()) return hal::Pso();
-        d.fill = fill;
-        d.depthClip = TRUE;
-        d.depthTest = true;
-        d.depthWrite = true;
-        d.topology = D3D12_PRIMITIVE_TOPOLOGY_TYPE_PATCH;
-        return hal::BuildGraphics(gpu, d, tag);
-    };
-
-    // The sea and its spectrum plot swap together or not at all. M9b: the tessellated sea in
-    // wireframe -- the DS-displaced patch grid, so the screen-space edge density and the actual
-    // vertex heave are both visible -- is optional: a failure there leaves the solid PSO alone.
-    hal::ReloadSet set;
-    if (!set.Add(m_seaPso, makeSeaPso(D3D12_FILL_MODE_SOLID, "sea"))) return false;
-    if (!set.Add(m_specPso, makePso(L"SpecPlot.hlsl", true, false, "sea.spec"))) return false;
-    set.Commit();
-    hal::Reload(m_seaPsoWire, [&] { return makeSeaPso(D3D12_FILL_MODE_WIREFRAME, "sea.wire"); },
-                "sea.wire");
-    return true;
-}
-
 void SeaLayer::ReloadShaders(Gpu& gpu, ShaderCompiler& sc) {
-    if (!BuildPsos(gpu, sc)) Log("[sea] reload failed; keeping the previous PSOs");
     if (!m_fft.ReloadShaders(gpu, sc)) Log("[sea] ocean compute reload failed; keeping previous");
 }
 
@@ -406,55 +357,18 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
             const double ex2 = heightScale * heightScale;   // geometry is exaggerated; the
                                                             // shed variance must match it
             const double coxMunk = 0.003 + 0.00512 * windMs;
+            float bandSig[4];
             double sum = 0.0;
             for (int c = 0; c < 3; ++c) {
-                m_seaCb.bandSig[c] = static_cast<float>(mss[c] * ex2);
+                bandSig[c] = static_cast<float>(mss[c] * ex2);
                 sum += mss[c] * ex2;
             }
-            m_seaCb.bandSig[3] = static_cast<float>(std::max(coxMunk - sum, 0.0015));
+            bandSig[3] = static_cast<float>(std::max(coxMunk - sum, 0.0015));
             Log("[sea] slope variance: bands %.4f/%.4f/%.4f + floor %.4f (Cox-Munk %.4f at "
                 "%.1f m/s -- the far field is the same pixel the globe draws)",
-                m_seaCb.bandSig[0], m_seaCb.bandSig[1], m_seaCb.bandSig[2], m_seaCb.bandSig[3],
+                bandSig[0], bandSig[1], bandSig[2], bandSig[3],
                 coxMunk, windMs);
         }
-
-        // ---- spectrum plot: model + buoy on a shared axis
-        const float fMax = 0.35f;
-        const BuoyObs* buoy = m_sea->Buoy("44013");
-        float sMax = 1e-3f;
-        float model[kSpecSamples], meas[kSpecSamples];
-        for (uint32_t i = 0; i < kSpecSamples; ++i) {
-            const double f = fMax * i / (kSpecSamples - 1);
-            model[i] = static_cast<float>(SeaState::SpectrumAt(parts, activeParts, f));
-            sMax = std::max(sMax, model[i]);
-            meas[i] = -1.0f;
-            if (buoy && buoy->specFreqHz.size() > 1) {
-                const auto& fq = buoy->specFreqHz;
-                if (f >= fq.front() && f <= fq.back()) {
-                    size_t k = 0;
-                    while (k + 2 < fq.size() && fq[k + 1] < f) ++k;
-                    const float t = static_cast<float>((f - fq[k]) / (fq[k + 1] - fq[k]));
-                    meas[i] = buoy->specDens[k] + t * (buoy->specDens[k + 1] - buoy->specDens[k]);
-                    sMax = std::max(sMax, meas[i]);
-                }
-            }
-        }
-        for (uint32_t i = 0; i < kSpecSamples; ++i) {
-            m_specCb.model[i / 4][i % 4] = model[i];
-            m_specCb.buoy[i / 4][i % 4] = meas[i];
-        }
-        m_specCb.rect[0] = 0.35f;
-        m_specCb.rect[1] = -0.95f;
-        m_specCb.rect[2] = 0.95f;
-        m_specCb.rect[3] = -0.45f;
-        m_specCb.axis[0] = fMax;
-        m_specCb.axis[1] = sMax * 1.15f;
-        m_specCb.axis[2] = static_cast<float>(kSpecSamples);
-        m_specCb.axis[3] = (buoy && !buoy->specFreqHz.empty()) ? 1.0f : 0.0f;
-        const float colM[4] = {2.2f, 1.1f, 0.2f, 1};
-        const float colB[4] = {1.4f, 1.5f, 1.6f, 1};
-        memcpy(m_specCb.colM, colM, sizeof(colM));
-        memcpy(m_specCb.colB, colB, sizeof(colB));
 
         Log("[sea] %s %s: %d partitions, model Hs %.2f m (buoy 44013 %.2f m)",
             m_sea->CycleLabel().c_str(), statusNote.c_str(), activeParts, hsModel, hsBuoy);
@@ -462,32 +376,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
 
     m_tSec = static_cast<float>(simUnix - m_sea->CycleUnix());
 
-    // Grid centre snapped to cascade-0 texels so vertices never swim against the texture.
-    const double texel = m_fft.PatchL(0) / OceanFft::kN;
-    m_seaCb.snap[0] = static_cast<float>(std::floor(camX / texel) * texel);
-    m_seaCb.snap[1] = static_cast<float>(std::floor(camZ / texel) * texel);
-    m_seaCb.snap[2] = pixelWater ? 1.0f : 0.0f;   // M9bh: which stage shades this surface
-    m_seaCb.sea[0] = static_cast<float>(seaLevelM);
-    m_seaCb.sea[1] = 3600.0f;    // grid span, m
-    m_seaCb.sea[2] = foamIntensity * m_windGate;
-    m_seaCb.sea[3] = 0.80f;      // skirt start
-    for (uint32_t c = 0; c < OceanFft::kCascades; ++c) {
-        m_seaCb.dispSrv[c] = m_fft.DispSrv(c);
-        m_seaCb.derivSrv[c] = m_fft.DerivSrv(c);
-        m_seaCb.patchL[c] = m_fft.PatchL(c);
-    }
-    m_seaCb.patchL[3] = targetEdgePx;
-    // M6t: the hand-tuned per-cascade fade DISTANCES are retired -- CascadeFade now folds each
-    // band by the pixel's ground FOOTPRINT vs the band's wavelength (screen-resolution- and
-    // zoom-aware), and the folded variance moves into the glint lobe instead of vanishing.
-    // M6u: the row carries the model Hs instead (the far field's storm whitening -- the same
-    // term the globe's ocean applies).
-    m_seaCb.fadeD[0] = static_cast<float>(hsModel);
-    // M9c: yzw carry the FOLD's wavenumber per cascade (the M6u spares), so this path folds
-    // on the same number the bank and the globe PS do.
-    m_seaCb.fadeD[1] = m_bandKFold[0];
-    m_seaCb.fadeD[2] = m_bandKFold[1];
-    m_seaCb.fadeD[3] = m_bandKFold[2];
+    m_seaLevel = static_cast<float>(seaLevelM);
 
     // ---- M3: the entrance jet, live from the ACT0816 prediction clock
     double signedMs = 0.0;
@@ -504,21 +393,14 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
         currentStatus = cs;
     }
     const double d2r = 3.14159265358979 / 180.0;
-    m_seaCb.jet[0] = static_cast<float>(signedMs);
-    m_seaCb.jet[1] = 380.0f;
-    m_seaCb.jet[2] = 1600.0f;
-    m_seaCb.jet[3] = (m_currents && m_ctSta >= 0) ? 1.0f : 0.0f;
-    m_seaCb.jetDir[0] = static_cast<float>(std::sin(floodDeg * d2r));
-    m_seaCb.jetDir[1] = static_cast<float>(std::cos(floodDeg * d2r));
-    m_seaCb.jetDir[2] = static_cast<float>(std::sin(ebbDeg * d2r));
-    m_seaCb.jetDir[3] = static_cast<float>(std::cos(ebbDeg * d2r));
-    // waveC.x carries the LOOK-side height exaggeration (band phase speeds now come from depth
-    // + gBandK, so the old deep-water cPeak slot was free).
-    m_seaCb.waveC[0] = heightScale;
-    m_seaCb.waveC[1] = m_peakDirX;
-    m_seaCb.waveC[2] = m_peakDirZ;
-    m_seaCb.waveC[3] = static_cast<float>(std::fmod(m_tSec, 1024.0f));
-
+    m_jet[0] = static_cast<float>(signedMs);
+    m_jet[1] = 380.0f;
+    m_jet[2] = 1600.0f;
+    m_jet[3] = (m_currents && m_ctSta >= 0) ? 1.0f : 0.0f;
+    m_jetDir[0] = static_cast<float>(std::sin(floodDeg * d2r));
+    m_jetDir[1] = static_cast<float>(std::cos(floodDeg * d2r));
+    m_jetDir[2] = static_cast<float>(std::sin(ebbDeg * d2r));
+    m_jetDir[3] = static_cast<float>(std::cos(ebbDeg * d2r));
     // Representative wavenumber per cascade band (geometric mid of the same 60 m / 12 m cuts
     // OceanFft uses). The SHADER turns these into phase speeds at the local depth -- in deep
     // water ~18/6.5/1.9 m/s, but an 11 s swell over the 4 m bar drops to ~6 m/s, which is why
@@ -526,16 +408,9 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
     const double kPiD = 3.14159265358979;
     const double kCut[4] = {2.0 * kPiD / 756.0, 2.0 * kPiD / 60.0, 2.0 * kPiD / 12.0,
                             0.9 * kPiD * OceanFft::kN / 47.0};
-    for (int c = 0; c < 3; ++c) {
-        m_seaCb.bandK[c] = static_cast<float>(std::sqrt(kCut[c] * kCut[c + 1]));
-    }
-    m_seaCb.bandK[3] = 0.0f;
+    m_chopK = static_cast<float>(std::sqrt(kCut[2] * kCut[3]));   // the chop band, the churn's
 
     // ---- M4: churn atlas bindings + residency policy
-    m_seaCb.churnU[0] = m_churnReady ? m_churn.Srv() : UINT32_MAX;
-    m_seaCb.churnU[1] = m_churnReady ? m_maskTex.srv : UINT32_MAX;
-    m_seaCb.churnU[2] = atlasVisualize ? 1u : 0u;
-    m_seaCb.churnU[3] = m_expRes;   // M9ba: the exposure tenant's residency map
     // M9az: THE CHURN FOLLOWS THE CAMERA. The 16 km domain used to sit on the station: memory
     // could not exist +-8 km from Newburyport, Boston's window included. The atlas is now a
     // toroidal clipmap on a WORLD-anchored tile lattice -- the window's origin snaps to a tile
@@ -548,37 +423,15 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
         const double half = 0.5 * kChurnDomainM;
         m_churnOrgX = static_cast<float>(std::floor((camX - half) / spanX) * spanX);
         m_churnOrgZ = static_cast<float>(std::floor((camZ - half) / spanZ) * spanZ);
-        m_seaCb.churnF2[0] = spanX;
-        m_seaCb.churnF2[1] = spanZ;
-        m_seaCb.churnF2[2] = static_cast<float>(m_churn.TilesX());
-        m_seaCb.churnF2[3] = static_cast<float>(m_churn.TilesY());
+        m_churnSpan[0] = spanX;
+        m_churnSpan[1] = spanZ;
     }
-    m_seaCb.churnF[0] = m_churnOrgX;
-    m_seaCb.churnF[1] = m_churnOrgZ;
-    m_seaCb.churnF[2] = 1.0f / kChurnDomainM;
-    m_seaCb.churnF[3] = 1.05f;   // churn -> foam gain
     if (m_churnReady) UpdateChurnResidency(*m_gpu, simUnix, signedMs);
-
-    m_seaCb.bathyU[0] = m_bathySrv;
-    memcpy(m_seaCb.bathyGeo, m_bathyGeo, sizeof(m_bathyGeo));
 
     // M9ba: the swell exposure is a tree node driven from main (ExposureSource::Set on the
     // peak direction and the level); nothing is built here any more.
 
-    // ---- M5c: solver bindings. NULL-tile eta reads = "the tide plane is right here".
-    const bool sweOn = m_swe && m_swe->Ready();
-    m_seaCb.sweU[0] = sweOn ? m_swe->EtaSrv() : UINT32_MAX;
-    m_seaCb.sweU[1] = sweOn ? m_swe->UvSrv() : UINT32_MAX;
-    m_seaCb.sweU[2] = sweOn ? 1u : 0u;
-    m_seaCb.sweU[3] = m_expSrv;    // M9ba: the exposure page tenant's array SRV
-    if (sweOn) {
-        m_seaCb.sweF[0] = static_cast<float>(m_swe->Nx());
-        m_seaCb.sweF[1] = static_cast<float>(m_swe->Ny());
-        m_seaCb.sweF[2] = 1.0f / m_swe->PadW();
-        m_seaCb.sweF[3] = 1.0f / m_swe->PadH();
-        if (!m_swe->stats.empty()) atlasStats += "  " + m_swe->stats;
-    }
-    m_seaCb.sweG[0] = sweCurrentGain;
+    if (m_swe && m_swe->Ready() && !m_swe->stats.empty()) atlasStats += "  " + m_swe->stats;
     m_simUnix = simUnix;
     m_haveData = true;
 }
@@ -610,7 +463,7 @@ void SeaLayer::UpdateChurnResidency(Gpu& gpu, double simUnix, double signedMs) {
     // M9az: walk the WINDOW's tiles (world lattice), not the atlas' slots. Each world tile maps
     // to one slot; a slot that held a different world tile last frame has changed hands.
     const uint32_t NX = m_churn.TilesX(), NY = m_churn.TilesY();
-    const float spanX = m_seaCb.churnF2[0], spanZ = m_seaCb.churnF2[1];
+    const float spanX = m_churnSpan[0], spanZ = m_churnSpan[1];
     const int32_t T0x = static_cast<int32_t>(std::floor(m_churnOrgX / spanX));
     const int32_t T0y = static_cast<int32_t>(std::floor(m_churnOrgZ / spanZ));
     if (m_slotWorldX.size() != size_t(NX) * NY) {
@@ -624,7 +477,7 @@ void SeaLayer::UpdateChurnResidency(Gpu& gpu, double simUnix, double signedMs) {
         sy = uint32_t(my);
     };
     const bool jetOn = std::abs(signedMs) > onset;
-    const float ex = m_seaCb.jetDir[2], ez = m_seaCb.jetDir[3];
+    const float ex = m_jetDir[2], ez = m_jetDir[3];
     for (uint32_t j = 0; j < NY; ++j) {
         for (uint32_t i = 0; i < NX; ++i) {
             const int32_t Tx = T0x + int32_t(i), Ty = T0y + int32_t(j);
@@ -644,8 +497,8 @@ void SeaLayer::UpdateChurnResidency(Gpu& gpu, double simUnix, double signedMs) {
             const float along = wx * ex + wz * ez;
             const float px = wx - along * ex, pz = wz - along * ez;
             const float cross2 = px * px + pz * pz;
-            float env = std::exp(-cross2 / (m_seaCb.jet[1] * m_seaCb.jet[1]));
-            env *= (along > 0) ? std::exp(-along / m_seaCb.jet[2]) : 1.0f;
+            float env = std::exp(-cross2 / (m_jet[1] * m_jet[1]));
+            env *= (along > 0) ? std::exp(-along / m_jet[2]) : 1.0f;
             // M5c: a WIDE superset -- the deposit is geographic (solved currents + depth), so
             // an over-mapped tile just holds zeros, while an under-mapped one punches a
             // visible NULL rectangle into the middle of real breaking.
@@ -718,10 +571,10 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
     if (doUpdate || !m_pendingClear.empty()) {
         barrierTo(D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-        m_churnCb.originX = m_seaCb.churnF[0];
-        m_churnCb.originZ = m_seaCb.churnF[1];
-        m_churnCb.window[0] = std::floor(m_churnOrgX / m_seaCb.churnF2[0]);
-        m_churnCb.window[1] = std::floor(m_churnOrgZ / m_seaCb.churnF2[1]);
+        m_churnCb.originX = m_churnOrgX;
+        m_churnCb.originZ = m_churnOrgZ;
+        m_churnCb.window[0] = std::floor(m_churnOrgX / m_churnSpan[0]);
+        m_churnCb.window[1] = std::floor(m_churnOrgZ / m_churnSpan[1]);
         m_churnCb.window[2] = static_cast<float>(m_churn.TilesY());
         m_churnCb.window[3] = 0.0f;
         m_churnCb.texelM = kChurnTexelM;
@@ -731,13 +584,13 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
         m_churnCb.tileH = m_churn.TileH();
         m_churnCb.dt = m_churnDt;
         m_churnCb.tau = static_cast<float>(kChurnTau);
-        memcpy(m_churnCb.jetA, m_seaCb.jet, 16);
-        memcpy(m_churnCb.jetB, m_seaCb.jetDir, 16);
+        memcpy(m_churnCb.jetA, m_jet, 16);
+        memcpy(m_churnCb.jetB, m_jetDir, 16);
         // M5c: the chop-band WAVENUMBER -- the kernel derives phase speed from the local depth,
-        // exactly like Sea.hlsl (misc[0] was the deep-water speed when churn had no bathy).
-        m_churnCb.miscC[0] = m_seaCb.bandK[2];
+        // (misc[0] was the deep-water speed when churn had no bathy).
+        m_churnCb.miscC[0] = m_chopK;
         m_churnCb.miscC[1] = m_fft.PatchL(2);
-        m_churnCb.miscC[2] = m_seaCb.waveC[3];
+        m_churnCb.miscC[2] = static_cast<float>(std::fmod(m_tSec, 1024.0f));
         m_churnCb.miscC[3] = 0;
         memcpy(m_churnCb.bathyG, m_bathyGeo, sizeof(m_bathyGeo));
         // M12 step 4b: the world.flat chart's row and the height window's row come from the
@@ -750,8 +603,8 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
         m_churnCb.sweM[1] = sweCurrentGain;
         m_churnCb.sweM[2] = 500.0f;   // the same seaward handover ramp as Sea.hlsl's JetU
         m_churnCb.sweM[3] = 900.0f;
-        m_churnCb.waveD[0] = m_seaCb.waveC[1];
-        m_churnCb.waveD[1] = m_seaCb.waveC[2];
+        m_churnCb.waveD[0] = m_peakDirX;
+        m_churnCb.waveD[1] = m_peakDirZ;
         m_churnCb.waveD[2] = 1.0f;
         m_churnCb.waveD[3] = 1.0f;
         {   // M12 step 4b instrument: the churn kernel's constant buffer, fingerprinted after
@@ -792,7 +645,7 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
 }
 
 void SeaLayer::Simulate(const FrameContext& ctx) {
-    if (!m_haveData || !m_seaPso) return;
+    if (!m_haveData) return;
     if (!m_swe || !m_swe->Ready()) return;
     // THE SOLVER STEPS FOR ITS CONSUMERS, NOT FOR THE CAMERA (the water match, step 3). It stepped
     // inside Render, and Render runs only while the sea is `enabled` -- which the frame loop clears
@@ -803,11 +656,11 @@ void SeaLayer::Simulate(const FrameContext& ctx) {
     // and blind to where the eye is. Once a frame, however many views draw the sea.
     if (!enabled && !m_swe->Demanded()) return;
     GpuScope gscope(ctx.prof, ctx.cmd->Native(), "sea.swe");
-    m_swe->Record(*ctx.cmd, *ctx.gpu, m_simUnix, m_seaCb.sea[0]);
+    m_swe->Record(*ctx.cmd, *ctx.gpu, m_simUnix, m_seaLevel);
 }
 
 void SeaLayer::Render(const FrameContext& ctx) {
-    if (!m_haveData || !m_seaPso) return;
+    if (!m_haveData) return;
 
     // The compute chain records into the same command list; compute bindings do not disturb the
     // graphics root signature the Renderer already set. (The solver stepped in Simulate, before any
@@ -821,21 +674,6 @@ void SeaLayer::Render(const FrameContext& ctx) {
         RecordChurn(ctx);
     }
 
-    GpuScope gdraw(drawEnabled ? ctx.prof : nullptr, ctx.cmd->Native(), "sea.draw");
-    if (drawEnabled) {
-        PixScope scope(ctx.cmd->Native(), "sea.surface (tessellated: screen-space edge density)");
-        ctx.cmd->Pipeline((wireframe && m_seaPsoWire) ? m_seaPsoWire.Get() : m_seaPso.Get());
-        ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_4_CONTROL_POINT_PATCHLIST);
-        ctx.cmd->GraphicsConstants(1, m_seaCb);
-        ctx.cmd->Draw(4 * kPatches * kPatches, 1, 0, 0);
-    }
-    if (drawEnabled) {
-        PixScope scope(ctx.cmd->Native(), "sea.spectrum (solid=model, dashed=buoy 44013)");
-        ctx.cmd->Pipeline(m_specPso.Get());
-        ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_LINESTRIP);
-        ctx.cmd->GraphicsConstants(1, m_specCb);
-        ctx.cmd->Draw(kSpecSamples, 3, 0, 0);
-    }
 }
 
 }  // namespace ga

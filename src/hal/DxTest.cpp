@@ -141,8 +141,6 @@ const CbContract kCbs[] = {
      L"CsBankFill", L"cs_6_0"},
     {"src/scene/GlobeLayer.h", "GlobeCbData", "shaders/Globe.hlsl", "GlobeCb", L"PsMain",
      L"ps_6_0"},
-    {"src/scene/SeaLayer.h", "SeaCbData", "shaders/Sea.hlsl", "SeaCb", L"PsMain",
-     L"ps_6_0"},
     {"src/scene/SeaLayer.h", "ChurnCbData", "shaders/SeaChurn.hlsl", "ChurnCb",
      L"CsChurnUpdate", L"cs_6_0"},
     {"src/sim/SweSolver.h", "SweCbData", "shaders/Swe.hlsl", "SweCb", L"CsSweHeight",
