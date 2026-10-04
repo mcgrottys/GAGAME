@@ -524,16 +524,10 @@ VsOut DsMain(HsPatch hs, float2 uv : SV_DomainLocation, const OutputPatch<VsCtl,
     }
     d *= dryGuard * gWaveC.x;   // look-side exaggeration applies before the breaking clamp
 
-    // Depth-limited breaking: the surface cannot heave beyond ~0.55 h. What the clamp removes
-    // comes back as foam through `brk`. An AMPLITUDE cap, so the whole displacement scales by the
-    // one ratio (WaterBank.hlsl's law: continuous at the cap).
-    const float hmax = 0.55f * max(depth, 0.05f);
-    const float yAbs = abs(d.y);
+    // NO CAP ON THE HEIGHT (the owner, 2026-10-04): the depth-limited breaking clamp is gone
+    // from every water (WaterBank.hlsl, WaterSurfaceTree.cpp); `brk` stays a row of the vertex
+    // and reads 0 until breaking is a law of the data, not a min on the geometry.
     o.brk = 0.0f;
-    if (yAbs > hmax) {
-        o.brk = saturate((yAbs - hmax) / max(hmax, 0.2f));
-        d *= hmax / yAbs;
-    }
 
     // M6g one-world: the flat frame is the tangent at the estuary origin; the sea rides the
     // SPHERE, so far vertices take the curvature drop (28 m by the window edge). Physics stays
