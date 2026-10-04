@@ -5,6 +5,10 @@ Three spellings of the same window coordinate, against a double reference:
   (b) MERCATOR   float32 lat/lon -> absolute Mercator px -> uv   (today's PageUv spelling)
   (c) RELATIVE   eye-relative float32 position, the large terms cancelled in double on the CPU:
                  W = k * (A + p.a - s0 * p.n) / (En + p.n)       (a ratio of two plane evaluations)
+  (d) MERC ABOUT the Mercator window about the anchor (plan_address.md; PageSample.hlsli's
+                 PageMercAbout + PageUvAbout, op for op in the shader's order): the eye's px less
+                 the window's origin from doubles, plus the chart's exact difference formed from the
+                 eye-relative float32 point -- the same zoom as (b), so its column sits beside (b)'s.
 
 Every float32 operation is rounded after it happens (struct round trip), in the order a shader
 would run them. No numpy (absent on this machine).
@@ -65,6 +69,43 @@ def merc_px_f32(lat, lon, z):
     return (mx, my)
 
 
+def _ser(u, c):
+    acc = f32(c[-1])
+    for k in reversed(c[:-1]):
+        acc = f32(f32(acc * u) + f32(k))
+    return acc
+
+
+_ATAN = [1.0, -1 / 3, 1 / 5, -1 / 7, 1 / 9, -1 / 11, 1 / 13]
+_ATANH = [1.0, 1 / 3, 1 / 5, 1 / 7, 1 / 9, 1 / 11, 1 / 13]
+
+
+def merc_about_f32(p_enu, eyeA, k, epx):
+    """PageMercAbout then PageUvAbout, float32 op by op. p_enu: the point in the eye's east,
+    north, up (the shader's three dots, taken as exact here); eyeA = (sin phi, cos phi, rho_E,
+    R_E); k = world px / 2 pi; epx = the eye's px less the window's origin. Returns window px."""
+    pe, pn, pu = (f32(c) for c in p_enu)
+    sphi, cphi, rho, re = (f32(c) for c in eyeA)
+    a = f32(f32(rho + f32(pu * cphi)) - f32(pn * sphi))
+    if abs(pe) < f32(0.25 * a):
+        t = f32(pe / a)
+        dlon = f32(t * _ser(f32(t * t), _ATAN))
+    else:
+        dlon = f32(math.atan2(pe, a))
+    h2 = f32(f32(pe * pe) + f32(pn * pn))
+    ru = f32(re + pu)
+    w = f32(math.sqrt(f32(f32(ru * ru) + h2)))
+    d = f32(f32(h2 + f32(pu * f32(f32(2.0 * re) + pu))) / f32(w + re))
+    s = f32(f32(f32(pn * cphi) + f32(sphi * f32(pu - d))) / w)
+    x = f32(s / f32(f32(cphi * cphi) - f32(sphi * s)))
+    if abs(x) < 0.25:
+        dpsi = f32(x * _ser(f32(x * x), _ATANH))
+    else:
+        dpsi = f32(0.5 * f32(math.log(f32(f32(1.0 + x) / f32(1.0 - x)))))
+    kf = f32(k)
+    return (f32(f32(epx[0]) + f32(dlon * kf)), f32(f32(epx[1]) + f32(f32(-dpsi) * kf)))
+
+
 def texel_relative_f32(P, E, rung, org):
     """Window texel from the eye-relative position. `org` = the window's origin, in face texels."""
     n = 16384.0 * (2.0 ** rung)
@@ -92,9 +133,21 @@ def run(name, lat0, lon0, eye_alt, reach_m, rung, samples=4000, seed=7):
     eu, ev = texel_ref(E, rung)
     # the window: 16384 texels, origin snapped to the half-page lattice, eye in its central half
     org = (math.floor(eu / 8192.0 - 0.5) * 8192.0, math.floor(ev / 8192.0 - 0.5) * 8192.0)
-    worst = {"direct": 0.0, "merc": 0.0, "rel": 0.0}
+    worst = {"direct": 0.0, "merc": 0.0, "rel": 0.0, "about": 0.0}
     inside = 0
     mz = 8 + rung                                       # the Mercator zoom of the same nominal grain
+    # (d)'s window: 16384 px with the eye's px 8192 in, its origin a whole px; the eye's frame.
+    rE = math.sqrt(sum(c * c for c in E))
+    sphi, cphi = E[1] / rE, math.hypot(E[0], E[2]) / rE
+    ex_d, ey_d = merc_px_ref(math.asin(sphi), math.atan2(E[2], E[0]), mz)
+    morg = (math.floor(ex_d) - 8192.0, math.floor(ey_d) - 8192.0)
+    epx = (ex_d - morg[0], ey_d - morg[1])
+    eyeA = (sphi, cphi, rE * cphi, rE)
+    kmz = 256.0 * (2.0 ** mz) / (2.0 * math.pi)
+    lonE = math.atan2(E[2], E[0])
+    eE = (-math.sin(lonE), 0.0, math.cos(lonE))
+    eN = (-sphi * math.cos(lonE), cphi, -sphi * math.sin(lonE))
+    eU = tuple(c / rE for c in E)
     for _ in range(samples):
         # a ground point within reach of the eye
         dn = (rnd.random() * 2 - 1) * reach_m
@@ -115,10 +168,15 @@ def run(name, lat0, lon0, eye_alt, reach_m, rung, samples=4000, seed=7):
         worst["merc"] = max(worst["merc"], abs(fu - mu), abs(fv - mv))
         qu, qv = texel_relative_f32(P, E, rung, org)
         worst["rel"] = max(worst["rel"], abs(qu - wu), abs(qv - wv))
+        pr = tuple(P[i] - E[i] for i in range(3))
+        penu = tuple(sum(pr[i] * ax[i] for i in range(3)) for ax in (eE, eN, eU))
+        au, av = merc_about_f32(penu, eyeA, kmz, epx)
+        worst["about"] = max(worst["about"], abs(au - (mu - morg[0])), abs(av - (mv - morg[1])))
     tau = TAU0 / (2.0 ** rung)
     print(f"{name:<26} rung {rung:>2} (z{mz:<2}, {tau:9.4f} m nominal)  reach {reach_m:>8.0f} m  "
           f"n={inside:<5} worst texel error:  direct {worst['direct']:10.4f}   "
-          f"mercator {worst['merc']:10.4f}   relative {worst['rel']:10.6f}")
+          f"mercator {worst['merc']:10.4f}   relative {worst['rel']:10.6f}   "
+          f"merc about {worst['about']:9.6f}")
 
 
 if __name__ == "__main__":

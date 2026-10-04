@@ -1207,8 +1207,9 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
             if (wp.hgtWinT >= 0) emit(wp.hgtWinT, wp.hgtWinFace, dm, wu0, wv0, wu1, wv1, nearW);
             if (wp.maskT >= 0 && wp.blockN == 0) emit(wp.maskT, 6u, dm, wu0, wv0, wu1, wv1, nearW);
         }
-        // M7f: the z17 DETAIL window rides the same node box, 8x finer frame.
-        if (wp.detWinT >= 0) {
+        // M7f: the z17 DETAIL window rides the same node box, 8x finer frame -- the colour's,
+        // the mask's and the height's z17 pages alike.
+        if (wp.detWinT >= 0 || wp.hgtDetT >= 0) {
             const double eu0 = (mmin[0] * 8.0 - wp.det17Org[0]) / 16384.0;
             const double ev0 = (mmin[1] * 8.0 - wp.det17Org[1]) / 16384.0;
             const double eu1 = (mmax[0] * 8.0 - wp.det17Org[0]) / 16384.0;
@@ -1223,8 +1224,9 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
                 const float dv0f = static_cast<float>((std::max)(ev0, 0.0));
                 const float du1f = static_cast<float>((std::min)(eu1, 1.0));
                 const float dv1f = static_cast<float>((std::min)(ev1, 1.0));
-                emit(wp.detWinT, wp.detFace, em, du0f, dv0f, du1f, dv1f, nearW);
-                if (wp.maskT >= 0) emit(wp.maskT, 7u, em, du0f, dv0f, du1f, dv1f, nearW);
+                if (wp.detWinT >= 0) emit(wp.detWinT, wp.detFace, em, du0f, dv0f, du1f, dv1f, nearW);
+                if (wp.detWinT >= 0 && wp.maskT >= 0) emit(wp.maskT, 7u, em, du0f, dv0f, du1f, dv1f, nearW);
+                if (wp.hgtDetT >= 0) emit(wp.hgtDetT, wp.hgtDetFace, em, du0f, dv0f, du1f, dv1f, nearW);
             }
         }
     }
@@ -1461,6 +1463,8 @@ void GlobeLayer::SetSurface(const SurfaceFrame* s) {
     m_detSize = static_cast<double>(s->win.faceDim);
     // M7f: the z17 detail page -- none where standing blocks replace it (HIERARCHY 4.17).
     m_detWinT = s->detSlice != UINT32_MAX ? s->detT : -1;
+    m_hgtDetT = s->hgtDetSlice != UINT32_MAX ? s->hgtT : -1;   // the z17 height page
+    m_hgtDetFace = s->hgtDetSlice != UINT32_MAX ? s->hgtDetSlice : 0u;
     m_det17Org[0] = static_cast<double>(s->det.orgPxX);
     m_det17Org[1] = static_cast<double>(s->det.orgPxY);
 }
@@ -1511,6 +1515,8 @@ GlobeLayer::WalkParams GlobeLayer::CaptureWalk(const Camera& cam, float viewport
     wp.winT = m_winT;
     wp.hgtWinT = m_hgtWinT;
     wp.detWinT = m_detWinT;
+    wp.hgtDetT = m_hgtDetT;
+    wp.hgtDetFace = m_hgtDetFace;
     wp.winFace = m_winFace;
     wp.hgtWinFace = m_hgtWinFace;
     wp.detFace = m_detFace;
@@ -2184,6 +2190,8 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
             m_res->Want(m_sampler, m_hgtWinT, m_hgtWinFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
         if (m_detWinT >= 0)
             m_res->Want(m_sampler, m_detWinT, m_detFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
+        if (m_hgtDetT >= 0)
+            m_res->Want(m_sampler, m_hgtDetT, m_hgtDetFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
         if (m_maskT >= 0 && (!m_surface || m_surface->blocks.empty())) {
             m_res->Want(m_sampler, m_maskT, 6u, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
             m_res->Want(m_sampler, m_maskT, 7u, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);

@@ -24,6 +24,11 @@
 //                    float32 ulp of 1/8 px, so every rounding difference lands on that grid.
 //                    A consumer takes the spelling of what it HAS (a direction, or lat/lon); a
 //                    kernel switched to the other would move its bed by up to 3.6 m of ground.
+//    PageUvAbout     the same window uv of a POINT given relative to an anchor held in doubles
+//                    (PageMercAbout: the chart's exact difference from the anchor, from small
+//                    numbers only) -- 0.0015 px at z23 where PageUv errs 143 px. Every pixel-,
+//                    vertex- and mesh-stage reader of a Mercator window takes this one; PageUv
+//                    is kept for the addr lens (ResidencyLens.hlsl), which draws its error;
 //    PageTexel       the texel of a FACE-PLANE window (HIERARCHY step 3), relative to its
 //                    anchor: two planes through the body's centre over a third, evaluated at a
 //                    point given relative to the eye, in whatever frame the CPU pulled the
@@ -88,6 +93,55 @@ float2 PageUvLatLon(float latDeg, float lonDeg, float4 merc) {
     const float mx = (lonDeg + 180.0f) / 360.0f * merc.w;
     const float my = (0.5f - log(tan(0.7853981634f + latR * 0.5f)) * 0.15915494309f) * merc.w;
     return float2(mx - merc.x, my - merc.y) * merc.z;
+}
+
+// THE MERCATOR ABOUT AN ANCHOR (plan_address.md): a Mercator window's coordinate is the anchor's,
+// held in doubles on the CPU, plus the chart's exact difference from it, formed here from the small
+// point p = W - E. p is given in any frame; eE, eN, eU are the anchor's own east, north and up in
+// that frame, so (pe, pn, pu) is p in the anchor's tangent frame. eyeA = (sin phi, cos phi,
+// rho_E = R_E cos phi, R_E) of the anchor E (geocentric: dir.y = sin lat). Returns the difference
+// in RADIANS: x = dlon, y = dpsi (the isometric latitude, psi = atanh(sin lat)).
+//   dlon = atan2(pe, a),  a = rho_E + pu cos phi - pn sin phi            (W's own meridian plane)
+//   sin phi' - sin phi = (pn cos phi + sin phi (pu - D)) / |W|,
+//       D = |W| - R_E = (pe^2 + pn^2 + pu (2 R_E + pu)) / (|W| + R_E)   (no two numbers near one)
+//   dpsi = atanh(s / (cos^2 phi - sin phi s)),  s = sin phi' - sin phi
+// The brief's sin/cos(dlat / 2) difference form is the same number; this one takes no sin, cos or
+// log of a small argument, because the GPU's intrinsics are held to an ABSOLUTE error there (the
+// D3D spec's sincos: 0.0008) and a difference of 2e-4 rad would lose its digits in them. The two
+// odd series below are atan and atanh to float precision for |t| < 1/4 (the first omitted term,
+// t^15 / 15, is 6e-11 of t); past 1/4 -- a point 1,600 km from the anchor -- the intrinsic's
+// absolute error is relatively small. tools/hierarchy/uv_precision.py, spelling (d), emulates
+// these lines in float32 in this order.
+float PageAtanSeries(float t) {   // atan(t), |t| < 1/4
+    const float u = t * t;
+    return t * (1.0f + u * (-1.0f / 3.0f + u * (1.0f / 5.0f + u * (-1.0f / 7.0f + u * (1.0f / 9.0f +
+                u * (-1.0f / 11.0f + u * (1.0f / 13.0f)))))));
+}
+float PageAtanhSeries(float t) {  // atanh(t), |t| < 1/4
+    const float u = t * t;
+    return t * (1.0f + u * (1.0f / 3.0f + u * (1.0f / 5.0f + u * (1.0f / 7.0f + u * (1.0f / 9.0f +
+                u * (1.0f / 11.0f + u * (1.0f / 13.0f)))))));
+}
+float2 PageMercAbout(float3 p, float4 eyeA, float3 eE, float3 eN, float3 eU) {
+    const float pe = dot(p, eE), pn = dot(p, eN), pu = dot(p, eU);
+    const float sphi = eyeA.x, cphi = eyeA.y, rho = eyeA.z, re = eyeA.w;
+    const float a = (rho + pu * cphi) - pn * sphi;
+    const float dlon = (abs(pe) < 0.25f * a) ? PageAtanSeries(pe / a) : atan2(pe, a);
+    const float h2 = pe * pe + pn * pn;
+    const float ru = re + pu;
+    const float w = sqrt(ru * ru + h2);
+    const float d = (h2 + pu * (2.0f * re + pu)) / (w + re);
+    const float s = (pn * cphi + sphi * (pu - d)) / w;
+    const float x = s / (cphi * cphi - sphi * s);
+    const float dpsi = (abs(x) < 0.25f) ? PageAtanhSeries(x)
+                                        : 0.5f * log((1.0f + x) / (1.0f - x));
+    return float2(dlon, dpsi);
+}
+// ...and a window's uv from it: (the anchor's px less the window's origin, from doubles) plus the
+// difference in world px (k = the window's world px / 2 pi), over the page. Mercator rows grow
+// SOUTH, so the psi difference enters negated.
+float2 PageUvAbout(float2 dm, float2 eyePx, float k) {
+    return (eyePx + float2(dm.x, -dm.y) * k) / kPageDim;
 }
 
 // A face-plane window's texel relative to its anchor (HIERARCHY 4.4): (U . p + U.w, V . p + V.w)

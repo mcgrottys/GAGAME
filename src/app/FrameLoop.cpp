@@ -3353,6 +3353,15 @@ bool FrameLoop::Frame() {
         if (h != sLastSurface) {
             sLastSurface = h;
             Log("[surface] main fill FNV-1a %016llx", static_cast<unsigned long long>(h));
+            // The anchor every Mercator read is taken about (plan_address.md), in full, so a
+            // reader of --lens addr's truth squares can take their points' px in doubles.
+            const SurfaceFrame& sf = m_A.surface;
+            Log("[addr] eye %.17g %.17g %.17g R %.17g east %.17g %.17g %.17g up %.17g %.17g "
+                "%.17g north %.17g %.17g %.17g win %lld %lld z%d det %lld %lld z%d",
+                sf.eye[0], sf.eye[1], sf.eye[2], sf.planetR, sf.east[0], sf.east[1], sf.east[2],
+                sf.up[0], sf.up[1], sf.up[2], sf.north[0], sf.north[1], sf.north[2],
+                sf.win.orgPxX, sf.win.orgPxY, sf.win.zBase, sf.det.orgPxX, sf.det.orgPxY,
+                sf.det.zBase);
         }
     }
     renderer.waterLevel = static_cast<float>(tide->focusHeight);

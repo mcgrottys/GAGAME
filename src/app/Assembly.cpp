@@ -810,21 +810,24 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 hd.semantics = hal::Semantics::Texture;
                 hd.residence = hal::Residence::Streamable;
                 hd.absence = hal::Absence::Unloaded;
-                hd.slices = 7;
+                hd.slices = 8;   // 7: the z17 page, on the colour's z17 ground (surface.detH)
                 const Lattice& hCubeL = surface.cubeH;   // M12 step 4a: the surface's lattices
                 const Lattice& hWinL = surface.winH;
+                const Lattice& hDetL = surface.detH;
                 hd.bindings.push_back({0, 6, hCubeL,
                                        (S.streaming.colorTrees && heightTree)
                                            ? heightTree->Provider(hCubeL)
                                            : compositor.CubeHeight(hgtCh),
                                        "paint cube faces"});
-                hd.bindings.push_back({6, 1, hWinL,
-                                       (S.streaming.colorTrees && heightTree)
-                                           ? heightTree->Provider(hWinL)
-                                           : compositor.WindowHeight(hgtCh, hWinL.orgPxX,
-                                                                     hWinL.orgPxY, hWinL.faceDim,
-                                                                     hWinL.zBase),
-                                       "paint mercator page"});
+                auto mkHeightPage = [&](const Lattice& l) -> TileProviderFn {
+                    return (S.streaming.colorTrees && heightTree)
+                               ? heightTree->Provider(l)
+                               : compositor.WindowHeight(hgtCh, l.orgPxX, l.orgPxY, l.faceDim,
+                                                         l.zBase);
+                };
+                // The two pages realize one edge, as the colour's do (one row, two slices).
+                hd.bindings.push_back({6, 1, hWinL, mkHeightPage(hWinL), "paint mercator page"});
+                hd.bindings.push_back({7, 1, hDetL, mkHeightPage(hDetL), "paint mercator page"});
                 heightTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(hd));
                 hgtTenant = heightTenant.Id();
                 // The same page's finest texels for a hull's depth laws (compose/HeightPage).

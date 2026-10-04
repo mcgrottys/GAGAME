@@ -299,6 +299,8 @@ SurfaceFrame SurfaceFrame::Merrimack(double planetR, bool stencil) {
         s.det = Lattice::Window(static_cast<long long>(det17OrgX),
                                 static_cast<long long>(det17OrgY), 17);
     }
+    // The height's z17 page: the colour's z17 ground, in the height's 256x128 tiles.
+    s.detH = Lattice::Window(s.det.orgPxX, s.det.orgPxY, s.det.zBase, 256, 128);
     return s;
 }
 
@@ -312,6 +314,11 @@ void SurfaceFrame::Declare(const hal::Tenant& color, const hal::Tenant& height,
     detT = colorT;   // M9ap: the z17 page is a slice of the colour tenant (was detTenant)
     hgtT = height.Id();
     hgtWinSlice = height.Valid() ? height.SliceOf(winH.Tag()) : UINT32_MAX;
+    // The z17 page only where a binding declares it (SliceOf routes an undeclared tag to slice 0).
+    hgtDetSlice = UINT32_MAX;
+    for (const hal::SliceBinding& b : height.Desc().bindings) {   // empty when undeclared
+        if (b.lattice.SameGround(detH)) hgtDetSlice = b.first;
+    }
     maskT = mask.Id();
     // M12 step 4c: the tenants' own words for the diagram, read off the same declarations.
     // An empty Tenant's Desc() is the empty declaration: no node, no bindings, no row.
@@ -421,7 +428,7 @@ void SurfaceFrame::Fill(ComposedSurfaceCb& cb, const ResidencyManager& rm) const
     cb.u6[0] = hpages ? rm.TextureSrv(heightCube) : UINT32_MAX;
     cb.u6[1] = hpages ? rm.ResidencySrv(heightCube) : UINT32_MAX;
     cb.u6[2] = hpages ? hgtWinSlice : UINT32_MAX;
-    cb.u6[3] = UINT32_MAX;
+    cb.u6[3] = hpages ? hgtDetSlice : UINT32_MAX;   // the z17 page's slice (UINT32_MAX = none)
     cb.u2[0] = hgtOn ? (hpages ? rm.TextureSrvCube(heightCube) : rm.TextureSrv(heightCube))
                      : UINT32_MAX;
     cb.u2[1] = hgtOn ? (hpages ? rm.ResidencySrvCube(heightCube) : rm.ResidencySrv(heightCube))
@@ -513,6 +520,55 @@ void SurfaceFrame::Fill(ComposedSurfaceCb& cb, const ResidencyManager& rm) const
     cb.dirU[0] = (nb && dirSrv != UINT32_MAX) ? dirSrv : UINT32_MAX;
     cb.dirU[1] = nb ? 6u + nb : 0u;
     cb.dirU[2] = cb.dirU[3] = 0u;
+    // THE ANCHOR OF EVERY MERCATOR READ (plan_address.md), appended. The eye is `eye` above --
+    // the globe walk's own formula on the camera, the point the level-0 records' anchorRel and
+    // sLvlCamAbs are relative to -- and everything large about it is taken here in doubles: its
+    // latitude and longitude (geocentric, as dir.y = sin lat), its own tangent frame said in the
+    // tangent axes geo lives in, and its Mercator px less each window's origin. The longitude is
+    // taken on the turn nearest the window's centre, so a point of the window seen from the far
+    // side of the planet lands in it and not a world away.
+    const double re = std::sqrt(eye[0] * eye[0] + eye[1] * eye[1] + eye[2] * eye[2]);
+    const double rho = std::sqrt(eye[0] * eye[0] + eye[2] * eye[2]);
+    for (int k = 0; k < 4; ++k) {
+        cb.eyeA[k] = cb.eyeE[k] = cb.eyeN[k] = cb.eyeU[k] = cb.eyeT[k] = cb.eyePx[k] = 0.0f;
+    }
+    if (re > 0.0) {
+        const double kPi = 3.14159265358979323846;
+        const double sphi = eye[1] / re, cphi = rho / re;
+        const double lon = std::atan2(eye[2], eye[0]);
+        const double sl = std::sin(lon), cl = std::cos(lon);
+        const double e[3] = {-sl, 0.0, cl};
+        const double n[3] = {-sphi * cl, cphi, -sphi * sl};
+        const double u[3] = {eye[0] / re, eye[1] / re, eye[2] / re};
+        auto inAxes = [&](const double v[3], float out[4]) {
+            for (int k = 0; k < 3; ++k) {
+                const double* x = axes[k];
+                out[k] = static_cast<float>(x[0] * v[0] + x[1] * v[1] + x[2] * v[2]);
+            }
+        };
+        cb.eyeA[0] = static_cast<float>(sphi);
+        cb.eyeA[1] = static_cast<float>(cphi);
+        cb.eyeA[2] = static_cast<float>(rho);
+        cb.eyeA[3] = static_cast<float>(re);
+        inAxes(e, cb.eyeE);
+        inAxes(n, cb.eyeN);
+        inAxes(u, cb.eyeU);
+        inAxes(eye, cb.eyeT);
+        cb.eyeT[1] = static_cast<float>(up[0] * eye[0] + up[1] * eye[1] + up[2] * eye[2] - planetR);
+        cb.eyeE[3] = static_cast<float>(win.WorldPx() / (2.0 * kPi));
+        cb.eyeN[3] = static_cast<float>(det.WorldPx() / (2.0 * kPi));
+        const double psi = std::atanh((std::max)(-1.0 + 1e-15, (std::min)(1.0 - 1e-15, sphi)));
+        auto px = [&](const Lattice& w, float out[2]) {
+            const double world = w.WorldPx();
+            const double half = 0.5 * double(w.faceDim);
+            double x = (lon / (2.0 * kPi) + 0.5) * world - (double(w.orgPxX) + half);
+            x -= world * std::floor(x / world + 0.5);   // the turn nearest the window's centre
+            out[0] = static_cast<float>(x + half);
+            out[1] = static_cast<float>((0.5 - psi / (2.0 * kPi)) * world - double(w.orgPxY));
+        };
+        px(win, cb.eyePx);
+        px(det, cb.eyePx + 2);
+    }
 }
 
 }  // namespace ga

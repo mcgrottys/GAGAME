@@ -45,9 +45,24 @@ float CsHave2D(uint mapSrv, float2 uv) {
     return max(max(g.x, g.y), max(g.z, g.w)) * 255.0f / 16.0f;
 }
 
-// The Mercator-window uv for a planet direction: every window realization (color AND height)
-// shares ONE frame (gCsMerc), so their texels describe the same ground by construction.
-float2 CsWindowUv(float3 dir) { return PageUv(dir, gCsMerc); }
+// ONE LAW FOR EVERY READ (plan_address.md): a Mercator window is addressed by a POINT p, the ground
+// point relative to the camera's own eye in the tangent axes -- the frame VsOut.geo lives in -- and
+// its uv is the eye's px, taken in doubles on the CPU (gCsEyePx), plus the chart's exact difference
+// from the eye, formed from p alone (PageMercAbout). Every window realization (colour, height,
+// mask, exposure) shares the z14 frame and the z17 detail its own, so their texels describe the
+// same ground by construction, as they did through gCsMerc.
+// The point: a fragment or vertex of the camera's own level has geo (the level-0 records' doubles
+// plus small offsets); a stage or a level with only a direction makes the point from it, at the
+// direction's grain (0.43 texel at z17, uv_precision.py) and no better -- CsPointOfDir.
+float3 CsPointOfDir(float3 dir) {
+    return (CsToTangent(dir) * gCsF.w - float3(0.0f, gCsF.w, 0.0f)) - gCsEyeT.xyz;
+}
+float2 CsMercAt(float3 p) {
+    return PageMercAbout(p, gCsEyeA, gCsEyeE.xyz, gCsEyeN.xyz, gCsEyeU.xyz);
+}
+float2 CsWindowUvAt(float3 p) { return PageUvAbout(CsMercAt(p), gCsEyePx.xy, gCsEyeE.w); }
+// ...and the z17 detail window's twin, from its own origin (no longer the z14 uv scaled).
+float2 CsDetailUvAt(float3 p) { return PageUvAbout(CsMercAt(p), gCsEyePx.zw, gCsEyeN.w); }
 
 // The planet's composed color along a PLANET-frame unit radial. Residency maps sample
 // BILINEAR so mip seams ramp instead of snapping (M6h); the window overlay feathers over the
@@ -71,6 +86,9 @@ float CsHaveCubeArr(uint mapSrv, float3 dir) {
 // Exact, the page's mip 6 IS the cube's mip 0 and the z17's mip 3 the z14's mip 0, and
 // PageWins takes the page there.
 float3 CsGroundM() { return gCsGround.xyz; }
+// The height ladder's lod floor (cube lod): the finest rung's mip 0, the z17 page (1.1943 m =
+// 611.496 m / 2^9). Every reader that asks for the finest resident height asks for this.
+static const float kCsHeightLodFloor = -9.0f;
 
 // M9ap: THE PAGES PATH. One texture, pages selected by CONTAINMENT and by what is actually
 // resident: every page is the same megatexture at a different ground resolution, so the page
@@ -100,9 +118,8 @@ float2 CsBlockUv(uint i, float3 p) {
     const float4 o = gCsBlkO[i >> 1];
     return PageTexelUv(p, gCsBlkU[i], gCsBlkV[i], gCsBlkW[i]) + ((i & 1u) != 0u ? o.zw : o.xy);
 }
-// A stage with only a direction makes the point from it, in float32: the direction's own grain
-// (0.43 texel at rung 9, uv_precision.py) and no better. The eye is blkE, about the centre.
-float3 CsPointOfDir(float3 dir) { return CsToTangent(dir) * gCsF.w - gCsBlkE.xyz; }
+// A stage with only a direction makes the point from it (CsPointOfDir, above: one for the blocks
+// and the Mercator pages alike).
 #define WALK_UV(i, p) CsBlockUv(i, p)
 #include "Walk.hlsli"
 // Commit 4: THE CHAIN -- the blocks a point lies in, one a rank, coarsest first -- found by the
@@ -124,7 +141,7 @@ WalkChain CsWalk(float3 dir, float3 p) {
 #define CS_WALK_AT(d)
 #endif
 
-float3 ComposedColorPages(float3 dir CS_WC_PARAM) {
+float3 ComposedColorPages(float3 dir, float3 p CS_WC_PARAM) {
     // The cube, through the cube views over slices 0..5 (hardware-seamless across faces).
     const float haveC = CsHaveCubeArr(gCsU.y, dir);
     float3 c = PageSampleCube(gTexCubeArr[gCsU.x], sAniso, dir, haveC).rgb;
@@ -132,7 +149,7 @@ float3 ComposedColorPages(float3 dir CS_WC_PARAM) {
     float ground = PageGroundM(g0.x, haveC);
 #if !GA_BLOCK_RANKS   // while blocks stand the z14 window is no page: its slice is unset (SurfaceFrame::Fill)
     if (gCsF.y > 0.5f) {
-        const float2 duv = CsWindowUv(dir);
+        const float2 duv = CsWindowUvAt(p);
         if (all(duv > 0.0f) && all(duv < 1.0f)) {
             const float haveW = CsHavePage(gCsU5.y, duv, gCsU5.z);
             const float gW = PageGroundM(g0.y, haveW);
@@ -141,7 +158,7 @@ float3 ComposedColorPages(float3 dir CS_WC_PARAM) {
                 ground = gW;
             }
             if (gCsU5.w != 0xFFFFFFFFu) {
-                const float2 tuv = duv * gCsDet.z + gCsDet.xy;
+                const float2 tuv = CsDetailUvAt(p);
                 if (all(tuv > 0.0f) && all(tuv < 1.0f)) {
                     const float haveD = CsHavePage(gCsU5.y, tuv, gCsU5.w);
                     const float gD = PageGroundM(g0.z, haveD);
@@ -176,8 +193,8 @@ float3 ComposedColorPages(float3 dir CS_WC_PARAM) {
     return c;
 }
 
-float3 ComposedColor(float3 dir CS_WC_PARAM) {
-    if (gCsU5.x != 0xFFFFFFFFu && gCsF.x > 0.5f) return ComposedColorPages(dir CS_WC);
+float3 ComposedColor(float3 dir, float3 p CS_WC_PARAM) {
+    if (gCsU5.x != 0xFFFFFFFFu && gCsF.x > 0.5f) return ComposedColorPages(dir, p CS_WC);
     float3 c = float3(0.5f, 0.5f, 0.5f);
     if (gCsF.x > 0.5f) {
         // M9z: ANISOTROPIC, and the CalculateLevelOfDetail call is GONE. It collapsed the
@@ -191,7 +208,7 @@ float3 ComposedColor(float3 dir CS_WC_PARAM) {
         c = gTexCube[gCsU.x].Sample(sAniso, dir, have).rgb;
     }
     if (gCsF.y > 0.5f) {
-        const float2 duv = CsWindowUv(dir);
+        const float2 duv = CsWindowUvAt(p);
         if (all(duv > 0.0f) && all(duv < 1.0f)) {
             const float2 fe = smoothstep(0.0f, 0.06f, duv) * smoothstep(1.0f, 0.94f, duv);
             // `want` survives here because it GATES the hand-off below, not just the fetch --
@@ -208,7 +225,7 @@ float3 ComposedColor(float3 dir CS_WC_PARAM) {
             // M7f: the DETAIL window (z17, ~1.2 m px) -- the ladder's third rung, in the
             // same Mercator frame, so the near field stops being capped at 9.5 m texels.
             if (gCsU4.x != 0xFFFFFFFFu) {
-                const float2 tuv = duv * gCsDet.z + gCsDet.xy;
+                const float2 tuv = CsDetailUvAt(p);
                 if (all(tuv > 0.0f) && all(tuv < 1.0f)) {
                     const float2 fd =
                         smoothstep(0.0f, 0.04f, tuv) * smoothstep(1.0f, 0.96f, tuv);
@@ -259,38 +276,61 @@ float SeafloorRampLuma(float depthM) {
 // M9aq: is there a height window at all, on either path? (Globe.hlsl gates its near-field
 // material on this.)
 bool CsHeightWindowOn() { return gCsU6.x != 0xFFFFFFFFu || gCsU2.z != 0xFFFFFFFFu; }
-// The height window's resident mip at a window uv, on either path.
-float CsHaveHeightWin(float2 duv) {
-    if (gCsU6.x != 0xFFFFFFFFu) return CsHavePage(gCsU6.y, duv, gCsU6.z);
-    return CsHave2D(gCsU2.w, duv);
+// The height window's resident mip at a window uv, on either path, said in z14 mips: where the
+// z17 page holds p finer, its mip less 3 (the z17's mip 3 is the z14's mip 0), so below 0.
+float CsHaveHeightWin(float2 duv, float3 p) {
+    if (gCsU6.x == 0xFFFFFFFFu) return CsHave2D(gCsU2.w, duv);
+    float have = CsHavePage(gCsU6.y, duv, gCsU6.z);
+    const float2 tuv = CsDetailUvAt(p);
+    if (gCsU6.w != 0xFFFFFFFFu && all(tuv > 0.0f) && all(tuv < 1.0f)) {
+        have = min(have, CsHavePage(gCsU6.y, tuv, gCsU6.w) - 3.0f);
+    }
+    return have;
 }
 
 // M9aq: THE HEIGHT PAGES PATH. Same rule as colour: the cube through its cube views, the z14
-// page through the array view, the page chosen by containment and by what is resident --
-// no feather, because both pages are the same height field at different ground resolutions.
-float ComposedHeightPages(float3 dir, float lod) {
+// and z17 pages through the array view, the page chosen by containment and by what is resident
+// -- no feather, because the pages are the same height field at different ground resolutions.
+float ComposedHeightPages(float3 dir, float3 p, float lod) {
     const float haveC = CsHaveCubeArr(gCsU2.y, dir);
     float h = PageSampleLevelCube(gTexCubeArr[gCsU2.x], sLinearClamp, dir, lod, haveC).x;
-    const float2 duv = CsWindowUv(dir);
+    const float3 g0 = CsGroundM();
+    float ground = PageGroundM(g0.x, haveC);
+    const float2 duv = CsWindowUvAt(p);
     if (all(duv > 0.0f) && all(duv < 1.0f)) {
         // The window pyramid runs ~6 mips finer than the cube at the same footprint.
         const float wantW = clamp(lod + 6.0f, 0.0f, gCsG.z);
         const float haveW = CsHavePage(gCsU6.y, duv, gCsU6.z);
+        const float gW = PageGroundM(g0.y, haveW);
         // Take the page where its resident texel is at least as fine as the cube's.
-        if (PageWins(haveC, haveW, CsGroundM().xy)) {
+        if (PageWins(gW, ground)) {
             h = PageSampleLevel(gTexArr[gCsU6.x], sLinearClamp, duv, gCsU6.z, wantW, haveW).x;
+            ground = gW;
+        }
+        // The z17 page, ~9 mips finer than the cube, where its resident texel is at least as
+        // fine as the ground held (ComposedColorPages' detail rung).
+        if (gCsU6.w != 0xFFFFFFFFu) {
+            const float2 tuv = CsDetailUvAt(p);
+            if (all(tuv > 0.0f) && all(tuv < 1.0f)) {
+                const float wantD = clamp(lod + 9.0f, 0.0f, gCsG.z);
+                const float haveD = CsHavePage(gCsU6.y, tuv, gCsU6.w);
+                if (PageWins(PageGroundM(g0.z, haveD), ground)) {
+                    h = PageSampleLevel(gTexArr[gCsU6.x], sLinearClamp, tuv, gCsU6.w, wantD,
+                                        haveD).x;
+                }
+            }
         }
     }
     return h;
 }
 
-float ComposedHeight(float3 dir, float lod) {
+float ComposedHeight(float3 dir, float3 p, float lod) {
     if (gCsF.z < 0.5f) return 0.0f;
-    if (gCsU6.x != 0xFFFFFFFFu) return ComposedHeightPages(dir, lod);
+    if (gCsU6.x != 0xFFFFFFFFu) return ComposedHeightPages(dir, p, lod);
     const float have = CsHaveCube(gCsU2.y, dir);
     float h = gTexCube[gCsU2.x].SampleLevel(sLinearClamp, dir, max(lod, have)).x;
     if (gCsU2.z != 0xFFFFFFFFu) {
-        const float2 duv = CsWindowUv(dir);
+        const float2 duv = CsWindowUvAt(p);
         if (all(duv > 0.0f) && all(duv < 1.0f)) {
             const float2 fe = smoothstep(0.0f, 0.06f, duv) * smoothstep(1.0f, 0.94f, duv);
             // The window pyramid runs ~6 mips finer than the cube at the same footprint
@@ -313,7 +353,7 @@ bool ComposedHeightOn() { return gCsF.z > 0.5f; }
 // z14, then the cube face. No page with an opinion here -> false: the classifier falls back
 // to the height sign. The three committed rasters this replaces (window R8G8, global R8,
 // fine edit R8G2) read the .raw parity fills the vector mask refuses; they are gone.
-bool CsMaskSample(float3 dir CS_WC_PARAM, out float4 m) {
+bool CsMaskSample(float3 dir, float3 p CS_WC_PARAM, out float4 m) {
     m = float4(0, 0, 0, 0);
     if (gCsU3.x == 0xFFFFFFFFu) return false;
 #if GA_BLOCK_RANKS
@@ -332,10 +372,10 @@ bool CsMaskSample(float3 dir CS_WC_PARAM, out float4 m) {
         }
     }
 #else
-    const float2 duv = CsWindowUv(dir);
+    const float2 duv = CsWindowUvAt(p);
     if (all(duv > 0.0f) && all(duv < 1.0f)) {
         if (gCsU5.w != 0xFFFFFFFFu) {   // the z17 page exists in the colour ladder -> ours too
-            const float2 tuv = duv * gCsDet.z + gCsDet.xy;
+            const float2 tuv = CsDetailUvAt(p);
             if (all(tuv > 0.001f) && all(tuv < 0.999f)) {
                 const float haveD = CsHavePage(gCsU3.y, tuv, 7u);
                 if (haveD <= 7.5f) {   // the finest resident level: want 0, floored to have
@@ -364,9 +404,9 @@ bool CsMaskSample(float3 dir CS_WC_PARAM, out float4 m) {
 // The survey land mask, per pixel: land coverage 0..1, or -1 where the survey has no opinion
 // (outside its rings' box, or a planet without GIS). Coverage is un-premultiplied: a texel
 // half surveyed still reports its water fraction, not half of it.
-float ComposedLandMask(float3 dir CS_WC_PARAM) {
+float ComposedLandMask(float3 dir, float3 p CS_WC_PARAM) {
     float4 m;
-    if (!CsMaskSample(dir CS_WC, m)) return -1.0f;
+    if (!CsMaskSample(dir, p CS_WC, m)) return -1.0f;
     return 1.0f - m.r / max(m.a, 0.001f);
 }
 
@@ -383,19 +423,19 @@ float ComposedLandMask(float3 dir CS_WC_PARAM) {
 // polygon IS a bit); no mask, no window -> height sign vs the waterline (Mars: 0).
 // M7f/M9ay: the hand edits -- (land, edited) at this pixel from the mask pages; the z17 page
 // keeps the jetties at 1.19 m where the ~1 m fine raster used to. (0, 0) with no opinion.
-float2 CsEditMask(float3 dir CS_WC_PARAM) {
+float2 CsEditMask(float3 dir, float3 p CS_WC_PARAM) {
     float4 m;
-    if (!CsMaskSample(dir CS_WC, m)) return float2(0.0f, 0.0f);
+    if (!CsMaskSample(dir, p CS_WC, m)) return float2(0.0f, 0.0f);
     const float a = max(m.a, 0.001f);
     return float2(1.0f - m.r / a, m.b / a);
 }
 
-float ComposedLandness(float3 dir CS_WC_PARAM, float hp, float waterLevel) {
-    const float lm = ComposedLandMask(dir CS_WC);
+float ComposedLandness(float3 dir, float3 p CS_WC_PARAM, float hp, float waterLevel) {
+    const float lm = ComposedLandMask(dir, p CS_WC);
     float land = (lm >= 0.0f) ? ((lm > 0.5f) ? 1.0f : 0.0f)
                               : ((hp > waterLevel) ? 1.0f : 0.0f);
     if (gCsU2.z != 0xFFFFFFFFu) {
-        const float2 duv = CsWindowUv(dir);
+        const float2 duv = CsWindowUvAt(p);
         if (all(duv > 0.0f) && all(duv < 1.0f)) {
             land = smoothstep(waterLevel - 0.15f, waterLevel + 0.25f, hp);
         }
@@ -406,22 +446,22 @@ float ComposedLandness(float3 dir CS_WC_PARAM, float hp, float waterLevel) {
     // classifier smears their thin ridges -- the operator's polygon settles it). Bilinear g
     // blends the override's own edge.
     if (gCsU3.x != 0xFFFFFFFFu) {
-        const float2 me = CsEditMask(dir CS_WC);
+        const float2 me = CsEditMask(dir, p CS_WC);
         land = lerp(land, (me.x > 0.5f) ? 1.0f : 0.0f, smoothstep(0.2f, 0.8f, me.y));
     }
     return land;
 }
 // The binary view, for consumers that ARE bits (the sea's discard).
-bool ComposedIsLand(float3 dir CS_WC_PARAM, float hp, float waterLevel) {
-    return ComposedLandness(dir CS_WC, hp, waterLevel) > 0.5f;
+bool ComposedIsLand(float3 dir, float3 p CS_WC_PARAM, float hp, float waterLevel) {
+    return ComposedLandness(dir, p CS_WC, hp, waterLevel) > 0.5f;
 }
 
 // M6p: strength of a hand-edit declaring LAND here (0 where unedited or edited to water).
 // Geometry consumers floor their display height with it: an operator's jetty stands as a
 // continuous ridge even where the smeared height channel dips under the tide.
-float ComposedEditLand(float3 dir CS_WC_PARAM) {
+float ComposedEditLand(float3 dir, float3 p CS_WC_PARAM) {
     if (gCsU3.x == 0xFFFFFFFFu) return 0.0f;
-    const float2 me = CsEditMask(dir CS_WC);
+    const float2 me = CsEditMask(dir, p CS_WC);
     return smoothstep(0.2f, 0.8f, me.y) * ((me.x > 0.5f) ? 1.0f : 0.0f);
 }
 
@@ -429,13 +469,13 @@ float ComposedEditLand(float3 dir CS_WC_PARAM) {
 // geometry (GisLayer) -- this shader-side part draws what must be compared against them:
 //   red     OUR composed height channel's zero-crossing (thin, fwidth-scaled)
 //   blue    the shared Mercator window frame;  white  0.05-degree graticule
-float3 ApplyComposedStencil(float3 col, float3 dir) {
+float3 ApplyComposedStencil(float3 col, float3 dir, float3 p) {
     if (gCsG.w < 0.5f) return col;
-    const float h = ComposedHeight(dir, -8.0f);   // finest RESIDENT height everywhere
+    const float h = ComposedHeight(dir, p, kCsHeightLodFloor);   // finest RESIDENT height everywhere
     const float fw = max(fwidth(h), 0.05f);
     const float coastH = 1.0f - smoothstep(1.0f * fw, 2.5f * fw, abs(h));
     col = lerp(col, float3(1.0f, 0.12f, 0.10f), coastH * 0.8f);
-    const float2 duv = CsWindowUv(dir);
+    const float2 duv = CsWindowUvAt(p);
     if (all(duv > -0.01f) && all(duv < 1.01f)) {
         const float2 e = min(abs(duv), abs(1.0f - duv));
         const float frame = 1.0f - smoothstep(0.0f, 0.003f, min(e.x, e.y));
@@ -452,27 +492,30 @@ float3 ApplyComposedStencil(float3 col, float3 dir) {
 // angular size; the caller owns that). gCsG.y is one texel's arc in radians. CONTINUOUS and
 // allowed NEGATIVE: the cube clamps at its mip 0, and the window realization picks up exactly
 // where the cube runs out (lod -6 = z14 texels) -- the climb-the-quadtree rule, in the
-// sampler, with no branch anywhere.
+// sampler, with no branch anywhere. The floor is kCsHeightLodFloor (above).
 float ComposedHeightLod(float dist, float pixAngRad) {
     const float texelM = gCsG.y * gCsF.w;
     const float pixM = dist * pixAngRad;
-    return clamp(log2(max(pixM / texelM, 0.00390625f)), -8.0f, gCsG.x);
+    return clamp(log2(max(pixM / texelM, exp2(kCsHeightLodFloor))), kCsHeightLodFloor, gCsG.x);
 }
 
 // Central-difference height gradient by eps-rotated directions: uniform-METRE steps at any
 // latitude, no pole singularity, no per-source branch -- the equirect/NE-window fork this
 // replaces needed both. Returns d(height)/d(metres) east and north; eps scales with lod so
-// derivatives ride the same footprint the height fetch does.
-float2 ComposedHeightGrad(float3 dir, float lod) {
+// derivatives ride the same footprint the height fetch does. The four points step from p by the
+// same arc along the same axes, taken into the tangent axes (small numbers; the step's radial
+// sag, eps^2 R / 2, is a micrometre at the finest lod and moves no latitude or longitude).
+float2 ComposedHeightGrad(float3 dir, float3 p, float lod) {
     const float eps = gCsG.y * exp2(lod);
     float3 eP = cross(float3(0.0f, 1.0f, 0.0f), dir);
     eP = (dot(eP, eP) < 1e-8f) ? float3(1.0f, 0.0f, 0.0f) : normalize(eP);
     const float3 nP = cross(dir, eP);
-    const float hE = ComposedHeight(normalize(dir + eP * eps), lod);
-    const float hW = ComposedHeight(normalize(dir - eP * eps), lod);
-    const float hN = ComposedHeight(normalize(dir + nP * eps), lod);
-    const float hS = ComposedHeight(normalize(dir - nP * eps), lod);
     const float texM = eps * gCsF.w;
+    const float3 sE = CsToTangent(eP) * texM, sN = CsToTangent(nP) * texM;
+    const float hE = ComposedHeight(normalize(dir + eP * eps), p + sE, lod);
+    const float hW = ComposedHeight(normalize(dir - eP * eps), p - sE, lod);
+    const float hN = ComposedHeight(normalize(dir + nP * eps), p + sN, lod);
+    const float hS = ComposedHeight(normalize(dir - nP * eps), p - sN, lod);
     return float2(hE - hW, hN - hS) / (2.0f * texM);
 }
 

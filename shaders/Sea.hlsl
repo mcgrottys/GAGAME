@@ -61,6 +61,13 @@ float3 SeaPlanetDir(float2 xz) {
     const float drop = dot(xz, xz) / (2.0f * gCsF.w);
     return CsToPlanet(normalize(float3(xz.x, -drop + gCsF.w, xz.y)));
 }
+// ...and the same point as the Mercator reads address it (plan_address.md): relative to the
+// camera's eye in the tangent axes, from the flat world's own small numbers -- the sea's world IS
+// the tangent frame about the anchor's ground, and gCsEyeT is the flat camera in it.
+float3 SeaPoint(float2 xz) {
+    const float drop = dot(xz, xz) / (2.0f * gCsF.w);
+    return float3(xz.x - gCsEyeT.x, -drop - gCsEyeT.y, xz.y - gCsEyeT.z);
+}
 
 // M5: the bottom. Inside the surveyed CUDEM window, the real bed (physics-grade). M6i: outside
 // it, the COMPOSED HEIGHT CHANNEL -- the NE 15s shelf, ETOPO beyond -- instead of a pretend
@@ -75,7 +82,7 @@ float BedAt(float2 xz, out bool surveyed) {
         const float2 uv = (xz - gBathyGeo.xy) * gBathyGeo.zw;
         if (all(uv > 0.002f) && all(uv < 0.998f)) surveyed = true;
     }
-    if (ComposedHeightOn()) return ComposedHeight(SeaPlanetDir(xz), surveyed ? -8.0f : -2.0f);
+    if (ComposedHeightOn()) return ComposedHeight(SeaPlanetDir(xz), SeaPoint(xz), surveyed ? kCsHeightLodFloor : -2.0f);
     return -30.0f;
 }
 float BedAt(float2 xz) {
@@ -111,7 +118,7 @@ float SweDEta(float2 xz) {
 // the helm and the near field lay flat). Loads, manual bilinear, like the bank kernel.
 float SweShadow(float2 xz) {
     if (gSweU.w == 0xFFFFFFFFu || gChurnU.w == 0xFFFFFFFFu) return 1.0f;
-    const float2 uv = CsWindowUv(SeaPlanetDir(xz));
+    const float2 uv = CsWindowUvAt(SeaPoint(xz));
     if (any(uv < 0.0f) || any(uv > 1.0f)) return 1.0f;
     const uint slice = gCsU6.z;
     const int2 rc = int2(clamp(uv * 128.0f, 0.0f, 127.0f));
@@ -437,7 +444,7 @@ float3 SeaPixelColor(float2 xz, float3 rel, float att, float depth, float dryGua
     if (gBathyU.x != 0xFFFFFFFFu) {
         const float3 T = exp(-gSigmaW.rgb * (sP + dd));
         float3 bedAlb = float3(0.42f, 0.38f, 0.28f);
-        if (ComposedColorOn()) bedAlb = ComposedColor(SeaPlanetDir(bedXZ) CS_WALK_AT(SeaPlanetDir(bedXZ)));
+        if (ComposedColorOn()) bedAlb = ComposedColor(SeaPlanetDir(bedXZ), SeaPoint(bedXZ) CS_WALK_AT(SeaPlanetDir(bedXZ)));
         col = lerp(col, bedAlb * (0.35f + 0.75f * ndl) * SUN_IRR_C, T);
     }
 
@@ -554,7 +561,7 @@ float4 PsMain(VsOut i) : SV_Target {
         const bool surveyed =
             gBathyU.x != 0xFFFFFFFFu && all(buv > 0.002f) && all(buv < 0.998f);
         if (!surveyed && ComposedHeightOn() &&
-            ComposedIsLand(SeaPlanetDir(i.worldXZ) CS_WC, gSea.x - i.sh.x, gSea.x) &&
+            ComposedIsLand(SeaPlanetDir(i.worldXZ), SeaPoint(i.worldXZ) CS_WC, gSea.x - i.sh.x, gSea.x) &&
             i.sh.x < 0.75f) {
             discard;
         }

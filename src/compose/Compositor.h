@@ -301,7 +301,8 @@ struct ComposedSurfaceCb {
     uint32_t u5[4];   // M9ap PAGES: colour array SRV, array residency SRV, window slice,
                       // detail slice. u5[0] == ~0 means the old three-tenant path.
     uint32_t u6[4];   // M9aq HEIGHT PAGES: height array SRV, array residency SRV, window
-                      // slice. u6[0] == ~0 means the old cube + window tenants.
+                      // slice, z17 detail slice (~0 = none; the lane was spare). u6[0] == ~0
+                      // means the old cube + window tenants.
     // HIERARCHY 4.17: THE STANDING BLOCKS (SurfaceFrame::blocks), appended so no row above
     // moves; at most SurfaceFrame::kMaxBlocks, coarsest rung first. Block i: row i of blkU /
     // blkV / blkW is one of PageTexelUv's planes about the eye's own tangent frame, anchored on
@@ -321,6 +322,18 @@ struct ComposedSurfaceCb {
     // HIERARCHY 4.17 commit 4: the directory (SurfaceFrame::directory on the GPU): its SRV and
     // its slices. UINT32_MAX: none, and no block is found.
     uint32_t dirU[4];
+    // THE ANCHOR OF EVERY MERCATOR READ (plan_address.md; PageSample.hlsli's PageMercAbout),
+    // appended at the END: the camera's own eye (SurfaceFrame::eye, the point the level-0 mesh
+    // records' geo is relative to), from doubles. eyeA = sin phi, cos phi, R_E cos phi, R_E;
+    // eyeE / eyeN / eyeU its own east, north and up in the tangent axes, w = the z14 and z17
+    // world px / 2 pi; eyeT the eye in the tangent axes less (0, R, 0); eyePx its px less the
+    // window's origin, z14 then z17.
+    float eyeA[4];
+    float eyeE[4];
+    float eyeN[4];
+    float eyeU[4];
+    float eyeT[4];
+    float eyePx[4];
 };
 
 // M12 step 2b: THE FRAME moved to core/Lattice.h and became the LATTICE every tree and

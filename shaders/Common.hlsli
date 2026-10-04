@@ -373,10 +373,11 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
     uint4  gCsU5;   /* M9ap PAGES: colour array SRV, array residency SRV, window slice, \
                        detail slice. x == ~0 means the old three-tenant path. */ \
     uint4  gCsU6;   /* M9aq HEIGHT PAGES: height array SRV, array residency SRV, window \
-                       slice. x == ~0 means the old cube + window tenants. */
+                       slice, z17 detail slice (~0 = none). x == ~0 means the old cube + \
+                       window tenants. */
 // HIERARCHY 4.17: THE STANDING BLOCKS' ROWS, compiled in only when the scene's key stands -- the
 // engine then defines GA_BLOCK_RANKS, the key's ranks (SurfaceFrame::Ranks); with no key the
-// cbuffer below is today's to the byte. ComposedSurfaceCb carries them always, at its end.
+// cbuffer holds them as a pad (the eye's rows follow). ComposedSurfaceCb carries them always.
 #if GA_BLOCK_RANKS
 #define GA_COMPOSED_CB_BLOCK_ROWS \
     float4 gCsBlkU[8]; /* per standing block (coarsest rung first) PageTexelUv's planes U, V, W \
@@ -391,8 +392,20 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
     uint4  gCsDirU; /* commit 4: x = the directory's SRV (Walk.hlsli), y = its slices; \
                        x == ~0 means no directory */
 #else
-#define GA_COMPOSED_CB_BLOCK_ROWS
+// With no key the blocks' 35 rows are held as one pad, so the rows appended after them sit where
+// ComposedSurfaceCb has them (the C++ struct carries the blocks always).
+#define GA_COMPOSED_CB_BLOCK_ROWS float4 gCsBlkPad[35];
 #endif
+// THE ANCHOR OF EVERY MERCATOR READ (plan_address.md), appended at the END: the camera's own eye
+// E, the point VsOut.geo is relative to (the level-0 records' eye and sLvlCamAbs), in doubles on
+// the CPU (SurfaceFrame::Fill). PageSample.hlsli's PageMercAbout is formed from these.
+#define GA_COMPOSED_CB_EYE_ROWS \
+    float4 gCsEyeA;  /* sin phi, cos phi, rho_E = R_E cos phi, R_E (geocentric) */ \
+    float4 gCsEyeE;  /* the eye's own east in the tangent axes; w = z14 world px / 2 pi */ \
+    float4 gCsEyeN;  /* its north in the tangent axes; w = z17 world px / 2 pi */ \
+    float4 gCsEyeU;  /* its up in the tangent axes; w spare */ \
+    float4 gCsEyeT;  /* the eye in the tangent axes less (0, R, 0): the flat camera; w spare */ \
+    float4 gCsEyePx; /* the eye's px less the window's origin: z14 x, y; z17 x, y */
 
 // M12 step 4g: THE ONE SURFACE CONSTANT BUFFER, on the shared layout's b2 (Renderer.h): the
 // frame loop fills ga::ComposedSurfaceCb once a frame through SurfaceFrame::Fill, RenderFrame
@@ -402,6 +415,7 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
 cbuffer SurfaceCb : register(b2) {
     GA_COMPOSED_CB_ROWS
     GA_COMPOSED_CB_BLOCK_ROWS
+    GA_COMPOSED_CB_EYE_ROWS
 };
 
 // The geometric-algebra toolkit lives in GA.hlsli (M3 moved it out so compute shaders with

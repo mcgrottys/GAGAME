@@ -96,10 +96,14 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     // CDLOD morph blends the height SOURCE along with the grid so ring handovers cannot
     // step into cliffs.
     const float texelM = gCsG.y * gGlo.x;
-    const float vlod = clamp(log2(max(rec.arc / 32.0f, 0.01f) / texelM), -8.0f, gCsG.x);
-    const float vl = (rec.arc <= 2600.0f) ? -8.0f : vlod;
-    const float vlP = (rec.arc <= 1300.0f) ? -8.0f : vlod + 1.0f;
-    float h = lerp(ComposedHeight(dir, vl), ComposedHeight(dir, vlP), k);
+    const float vlod = clamp(log2(max(rec.arc / 32.0f, 0.01f) / texelM), kCsHeightLodFloor, gCsG.x);
+    const float vl = (rec.arc <= 2600.0f) ? kCsHeightLodFloor : vlod;
+    const float vlP = (rec.arc <= 1300.0f) ? kCsHeightLodFloor : vlod + 1.0f;
+    // THE ADDRESS (plan_address.md): every Mercator read of this vertex is addressed by its
+    // undisplaced point geo in the camera's own level (slot 0: the records' doubles, the eye the
+    // surface rows are taken about); another level's vertex has its direction only.
+    const float3 pA = (rec.level == 0u) ? geo : CsPointOfDir(dir);
+    float h = lerp(ComposedHeight(dir, pA, vl), ComposedHeight(dir, pA, vlP), k);
     // Geometry obeys the same classifier the pixels use: WATER rides ~2 m BELOW the live
     // waterline (not the geoid -- at low tide the geoid stands PROUD of the real sea and
     // buries the FFT surface; this was the M6j flat-sea bug). Land keeps its height.
@@ -110,17 +114,17 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     // HIERARCHY 4.17: THE CHAIN, found once for the vertex and handed to both reads below: the
     // blocks under its undisplaced point geo (above), in the camera's own level; another level's
     // vertex has its direction only.
-    const WalkChain wc = CsWalk(dir, (rec.level == 0u) ? geo : CsPointOfDir(dir));
+    const WalkChain wc = CsWalk(dir, pA);
 #endif
     const float landness =
-        ComposedLandness(dir CS_WC, ComposedHeight(dir, max(vl, -4.0f)), gWavesB.w);
+        ComposedLandness(dir, pA CS_WC, ComposedHeight(dir, pA, max(vl, -4.0f)), gWavesB.w);
     // M6p/M8g: an operator's LAND edit floors the display height where the height
     // channel's SMEAR dips -- but at an ABSOLUTE crest elevation (NAVD, scene
     // jettyCrestNavd), never relative to the live tide. The old floor tracked the
     // waterline (+1.2 m), which made the jetty unsinkable by construction; the real
     // north jetty goes awash at high water (the user's catch). Surveyed data taller
     // than the floor still wins through the max below.
-    const float editFloor = ComposedEditLand(dir CS_WC) * gBankE.w;
+    const float editFloor = ComposedEditLand(dir, pA CS_WC) * gBankE.w;
     // M10: the relief exaggeration is a display choice made at the level's OWN altitude.
     const float dispLand = max(max(h, 0.0f) * sLvlExag, editFloor * sLvlExag);
     // M7: ONE WATER. In one-water mode the vertex samples THE WAVE VERTEX BANK -- level

@@ -228,7 +228,7 @@ bool RunGaSelfTest() {
         };
         const ast::Frame cube{"cube.face", true, 0, 0, 0};       // GaAst.cpp's, as it was
         const ast::Frame mercPx{"mercator.px", false, 0, 0, 0};
-        // The radius is no lattice's business; the five lattices are the shipped ones.
+        // The radius is no lattice's business; the six lattices are the shipped ones.
         const SurfaceFrame s = SurfaceFrame::Merrimack(6371000.0, false);
         const struct {
             const char* name;
@@ -236,7 +236,7 @@ bool RunGaSelfTest() {
             const ast::Frame* want;
         } lat[] = {{"cube", &s.cube, &cube},    {"cubeH", &s.cubeH, &cube},
                    {"win", &s.win, &mercPx},    {"det", &s.det, &mercPx},
-                   {"winH", &s.winH, &mercPx}};
+                   {"winH", &s.winH, &mercPx},  {"detH", &s.detH, &mercPx}};
         for (const auto& x : lat) {
             const ast::Frame f = x.l->AstFrame();
             if (!same(f, *x.want)) {

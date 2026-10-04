@@ -98,17 +98,20 @@ struct SurfaceFrame {
     double up[3] = {0.0, 1.0, 0.0};
     double north[3] = {0.0, 0.0, 1.0};
     // The lattices (core/Lattice.h). The colour and the survey sit on the first three; the
-    // height and the exposure on the two 256x128 tilings of the same ground.
+    // height on the three 256x128 tilings of the same ground (the exposure on the z14's).
     Lattice cube;    // the 16k quad-sphere, 128x128 tiles
     Lattice win;     // the Merrimack z14 window
     Lattice det;     // its z17 detail window
     Lattice cubeH;   // the same cube, 256x128 tiles
     Lattice winH;    // the same z14 window, 256x128 tiles
+    Lattice detH;    // the same z17 window, 256x128 tiles
     // The tenants realized on them (-1 = none) and the slices their pages are (UINT32_MAX =
     // none): the colour tenant holds the z14 page at winSlice and the z17 page at detSlice
-    // (detT is the colour tenant: M9ap), the height tenant its z14 page at hgtWinSlice.
+    // (detT is the colour tenant: M9ap), the height tenant its z14 page at hgtWinSlice and its
+    // z17 page at hgtDetSlice.
     int colorT = -1, hgtT = -1, maskT = -1, detT = -1;
-    uint32_t winSlice = UINT32_MAX, detSlice = UINT32_MAX, hgtWinSlice = UINT32_MAX;
+    uint32_t winSlice = UINT32_MAX, detSlice = UINT32_MAX, hgtWinSlice = UINT32_MAX,
+             hgtDetSlice = UINT32_MAX;
     // HIERARCHY 4.17 commit 2: THE STANDING BLOCKS (the scene's streaming.faceWindows). With the
     // key set the colour and the mask hold, in place of their two Mercator windows, aligned blocks
     // of the pyramid: block i is slice 6 + i of both, a face-plane window anchored on a multiple

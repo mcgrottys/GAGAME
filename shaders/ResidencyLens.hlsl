@@ -64,7 +64,7 @@ float2 ResLensCubeUv(float3 d) {
     }
     return st / ma * 0.5f + 0.5f;
 }
-float3 ResidencyLens(float3 dir CS_WC_PARAM, int tenant, float2 px) {
+float3 ResidencyLens(float3 dir, float3 p CS_WC_PARAM, int tenant, float2 px) {
     // The key, bottom left: 16 px cells, 14 px swatches.
     const float2 kp = float2(px.x - 6.0f, (gViewport.y - 6.0f) - px.y);
     if (all(kp >= 0.0f) && kp.x < 9.0f * 16.0f && kp.y < GA_RES_LENS_ROWS * 16.0f) {
@@ -76,8 +76,8 @@ float3 ResidencyLens(float3 dir CS_WC_PARAM, int tenant, float2 px) {
     // Every page's uv and its screen derivative, taken here under uniform control flow: the
     // tile outline needs the derivative of whichever page answers.
     const float2 cuv = ResLensCubeUv(dir);
-    const float2 duv = CsWindowUv(dir);
-    const float2 tuv = duv * gCsDet.z + gCsDet.xy;
+    const float2 duv = CsWindowUvAt(p);   // the readers' own address (plan_address.md)
+    const float2 tuv = CsDetailUvAt(p);
     const float2 fwC = fwidth(cuv), fwW = fwidth(duv), fwT = fwidth(tuv);
 #if GA_BLOCK_RANKS
     // HIERARCHY 4.17: the chain's derivative, rank 1's; a rank's block is an eighth of its
@@ -142,13 +142,25 @@ float3 ResidencyLens(float3 dir CS_WC_PARAM, int tenant, float2 px) {
         mips = 7.0f;
         tiles = float2(64.0f, 128.0f);
         have = CsHaveCubeArr(gCsU2.y, dir);
+        const float3 g0 = CsGroundM();
+        float ground = PageGroundM(g0.x, have);
         if (inW) {
             const float hW = CsHavePage(gCsU6.y, duv, gCsU6.z);
-            if (PageWins(have, hW, CsGroundM().xy)) {
+            if (PageWins(PageGroundM(g0.y, hW), ground)) {
                 page = 1;
                 have = hW;
+                ground = PageGroundM(g0.y, hW);
                 uv = duv;
                 fw = fwW;
+            }
+            if (gCsU6.w != 0xFFFFFFFFu && all(tuv > 0.0f) && all(tuv < 1.0f)) {
+                const float hD = CsHavePage(gCsU6.y, tuv, gCsU6.w);
+                if (PageWins(PageGroundM(g0.z, hD), ground)) {
+                    page = 2;
+                    have = hD;
+                    uv = tuv;
+                    fw = fwT;
+                }
             }
         }
     } else {
@@ -222,8 +234,71 @@ float3 ResidencyLens(float3 dir CS_WC_PARAM, int tenant, float2 px) {
     return c;
 }
 
+// ---- THE ADDRESS LENS (--lens addr; plan_address.md): per pixel, how far today's spelling of the
+// window address -- PageUv of the float32 direction -- lies from the address every reader now takes,
+// PageUvAbout of the pixel's point, in z17 TEXELS (the detail window's own grid; PageUv's z17 uv is
+// its z14 uv scaled by gCsDet, as the readers formed it). Written to the HDR target raw, so
+// --dump-hdr holds the numbers: r = that distance in z17 texels, g and a = its two components
+// (old less new: east, south), b = 0.25 on a pixel of the camera's own level (its point is geo)
+// and 0.5 on another level's (its point is the direction's, and the distance is the direction's
+// own grain). The z14 distance is the z17's over 8 (the readers made the z17 uv from the z14's).
+// The picture (--dump) is the tonemapped r: black is no error.
+// THE TRUTH SQUARES, bottom left: two 256 x 256 blocks of pixels that each address a known point,
+// q = (16 i, 0, 16 j) m in the tangent axes about the eye (i, j = -128..127, exact in float), so a
+// reader holding the eye in doubles ([addr] in the log) can take each point's z17 px in doubles
+// and hold the GPU's numbers against it. Left: PageUvAbout of q (the new address). Right: PageUv of
+// the float32 direction of the same point (today's spelling, as the readers formed it). A pixel
+// holds its z17 px as r = frac(x), g = floor(x) mod 2048, b = frac(y), a = floor(y) mod 2048.
+float4 AddrLens(float3 dir, float3 p, bool own, float2 px) {
+    const float2 kp = float2(px.x - 8.0f, (gViewport.y - 8.0f) - px.y);
+    if (all(kp >= 0.0f) && kp.x < 512.0f && kp.y < 256.0f) {
+        const float2 ij = floor(float2(fmod(kp.x, 256.0f), kp.y)) - 128.0f;
+        const float3 q = float3(ij.x * 16.0f, 0.0f, ij.y * 16.0f);
+        float2 t;
+        if (kp.x < 256.0f) {
+            t = CsDetailUvAt(q) * kPageDim;
+        } else {
+            const float3 d =
+                normalize(CsToPlanet(q + gCsEyeT.xyz + float3(0.0f, gCsF.w, 0.0f)));
+            t = (PageUv(d, gCsMerc) * gCsDet.z + gCsDet.xy) * kPageDim;
+        }
+        return float4(frac(t.x), fmod(floor(t.x), 2048.0f), frac(t.y), fmod(floor(t.y), 2048.0f));
+    }
+    const float2 duvOld = PageUv(dir, gCsMerc);
+    const float2 tuvOld = duvOld * gCsDet.z + gCsDet.xy;
+    const float2 tuvNew = CsDetailUvAt(p);
+    const float2 d17 = (tuvOld - tuvNew) * kPageDim;
+    return float4(length(d17), d17.x, own ? 0.25f : 0.5f, d17.y);
+}
+
+// THE HEIGHT READ (--lens residency.height, --dump-hdr's alpha): the rung and the mip ComposedHeightPages
+// actually SAMPLES at the pixel's own lod (PsMain's hp: ComposedHeightLod), max(want, have) of the
+// rung that answers -- the read, not the hold. alpha = 10 x rung (0 cube, 1 z14, 2 z17) + that mip.
+float HeightReadLens(float3 dir, float3 p, float lod) {
+    if (gCsU6.x == 0xFFFFFFFFu || gCsF.z < 0.5f) return -1.0f;
+    const float haveC = CsHaveCubeArr(gCsU2.y, dir);
+    const float3 g0 = CsGroundM();
+    float ground = PageGroundM(g0.x, haveC), r = max(clamp(lod, 0.0f, gCsG.x), haveC);
+    const float2 duv = CsWindowUvAt(p);
+    if (all(duv > 0.0f) && all(duv < 1.0f)) {
+        const float haveW = CsHavePage(gCsU6.y, duv, gCsU6.z);
+        if (PageWins(PageGroundM(g0.y, haveW), ground)) {
+            r = 10.0f + max(clamp(lod + 6.0f, 0.0f, gCsG.z), haveW);
+            ground = PageGroundM(g0.y, haveW);
+        }
+        const float2 tuv = CsDetailUvAt(p);
+        if (gCsU6.w != 0xFFFFFFFFu && all(tuv > 0.0f) && all(tuv < 1.0f)) {
+            const float haveD = CsHavePage(gCsU6.y, tuv, gCsU6.w);
+            if (PageWins(PageGroundM(g0.z, haveD), ground)) {
+                r = 20.0f + max(clamp(lod + 9.0f, 0.0f, gCsG.z), haveD);
+            }
+        }
+    }
+    return r;
+}
+
 // The lens's entry point: the globe draws with it (GlobeLayer: m_msPsoLens / m_psoLens) only when
-// --lens residency* is on. The gauge, the gate and the slice-plane discards are PsMain's own, so
+// --lens residency* or --lens addr is on. The gauge, the gate and the slice-plane discards are PsMain's own, so
 // the lens paints exactly the fragments the picture would.
 float4 PsResidencyLens(VsOut i) : SV_Target {
     LoadLevel(i.lvl);
@@ -234,9 +309,15 @@ float4 PsResidencyLens(VsOut i) : SV_Target {
     if (gBankA.w > 0.5f) {
         if ((CsToTangent(up) * gGlo.x).z > gBankC.w) discard;
     }
-#if GA_BLOCK_RANKS
     // HIERARCHY 4.17: the pixel's chain at PsMain's own point, so the lens shows what it reads.
-    const WalkChain wc = CsWalk(up, (i.lvl == 0u) ? i.geo : CsPointOfDir(up));
+    const float3 pA = (i.lvl == 0u) ? i.geo : CsPointOfDir(up);
+#if GA_BLOCK_RANKS
+    const WalkChain wc = CsWalk(up, pA);
 #endif
-    return float4(ResidencyLens(up CS_WC, int(gBankA.z + 0.5f) - 9, i.pos.xy), 1.0f);
+    if (gBankA.z > 13.5f) return AddrLens(up, pA, i.lvl == 0u, i.pos.xy);
+    const int tenant = int(gBankA.z + 0.5f) - 9;
+    const float a = (tenant == 1)
+                        ? HeightReadLens(up, pA, ComposedHeightLod(length(i.rel), gWavesB.z))
+                        : 1.0f;
+    return float4(ResidencyLens(up, pA CS_WC, tenant, i.pos.xy), a);
 }

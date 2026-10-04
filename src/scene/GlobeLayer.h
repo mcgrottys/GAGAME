@@ -181,8 +181,8 @@ public:
         float pixAng = 1.0e-3f;     // one pixel's angle: the relief-mip selector
         bool wants = false;         // a residency manager and at least one cube tenant
         int surfT = -1, normT = -1, colorT = -1, hgtT = -1, maskT = -1;
-        int winT = -1, hgtWinT = -1, detWinT = -1;
-        uint32_t winFace = 0, hgtWinFace = 0, detFace = 0;
+        int winT = -1, hgtWinT = -1, detWinT = -1, hgtDetT = -1;
+        uint32_t winFace = 0, hgtWinFace = 0, detFace = 0, hgtDetFace = 0;
         double detOrg[2] = {}, detSize = 1.0, det17Org[2] = {};
         // HIERARCHY 4.17 commit 2: the standing blocks (SurfaceFrame::blocks), block i at
         // slice 6 + i of the colour and the mask; blockN 0 is today's Mercator pages. As many
@@ -726,6 +726,8 @@ private:
     uint32_t m_winFace = 0, m_detFace = 0;
     uint32_t m_hgtWinFace = 0;   // M9aq: heightWindow == hgtT -> slice 6
     int m_detWinT = -1;
+    int m_hgtDetT = -1;           // the z17 height page (the height tenant at hgtDetSlice)
+    uint32_t m_hgtDetFace = 0;
     double m_det17Org[2] = {0.0, 0.0};
     int m_maskT = -1;   // M9ay: the survey mask page tenant
     double m_detOrg[2] = {0, 0};
@@ -803,8 +805,9 @@ private:
     hal::Pso m_msPso, m_msPsoWire, m_msPsoMeshlet, m_msPsoWireFlat;
     hal::Pso m_psoWire, m_psoMeshlet;
     // The residency lens (shaders/ResidencyLens.hlsl): built only when debugLens asks for it.
+    // 14 is the address lens (--lens addr), the same file's AddrLens.
     hal::Pso m_msPsoLens, m_psoLens;
-    bool ResidencyLensOn() const { return debugLens >= 9 && debugLens <= 11; }
+    bool ResidencyLensOn() const { return (debugLens >= 9 && debugLens <= 11) || debugLens == 14; }
     std::vector<MeshletRec> m_meshlets;
     GpuBuffer m_recBuf[Gpu::kFrameCount];
     GlobeCbData m_cb{};
