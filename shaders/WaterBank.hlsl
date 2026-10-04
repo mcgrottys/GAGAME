@@ -96,6 +96,7 @@ cbuffer BankCb : register(b0) {
     // level whose eye the rings stand about (bank A: the camera's world; set B: the window's world),
     // its chain found at each texel's own point (BankTile.point*). Appended at the END on both sides.
     HP_WINDOW_ROWS_DECL
+    HP_STANDING_ROWS_DECL   // the solver's standing window about the rings' frame (appended LAST)
 };
 
 // M9bl: one component's rows, from whichever half holds it. r = comp >> 1.
@@ -451,7 +452,8 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // PHASE B2: the texel's direction (the cube's read) and its chain (the windows').
     const float latR = place.x * 0.01745329252f, lonR = place.y * 0.01745329252f;
     const float3 dirT = float3(cos(latR) * cos(lonR), sin(latR), cos(latR) * sin(lonR));
-    WalkChain wcT = WindowChain(t.pointA.xyz + exz.x * t.pointX.xyz + exz.y * t.pointZ.xyz, 0u);
+    const float3 pT = t.pointA.xyz + exz.x * t.pointX.xyz + exz.y * t.pointZ.xyz;
+    WalkChain wcT = WindowChain(pT, 0u);
     if (t.pointA.w == 0.0f) wcT.n = 0u;
 #ifdef BANK_TRACE
     float traceMip = 0.0f;
@@ -489,7 +491,9 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // delivered through a region readback; --water-probe is the gate that the two stand together.
     float lvl = level;
     float2 cur = 0.0f;
-    if (gSwe.z > 0.0f) {
+    // The solver is read where the texel's GROUND lies in its standing window (the point the
+    // windows' chain is given); the rect then finds the cell.
+    if (gSwe.z > 0.0f && t.pointA.w != 0.0f && InSolver(pT)) {
         const float2 uv = (xz - gSwe.xy) * gSwe.zw;
         const float2 texel = float2(uv.x * gSweDims.x, (1.0f - uv.y) * gSweDims.y);
         const float eCells =

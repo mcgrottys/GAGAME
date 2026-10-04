@@ -62,6 +62,9 @@ public:
         SurfaceFrame::KernelRows(rows, m_churnHw);
         if (!m_surface) return;
         const SurfaceFrame& sf = *m_surface;
+        float st[16];
+        sf.StandingKernel(eye, st);   // the solver's standing window about the churn's frame
+        memcpy(m_churnCb.stU, st, sizeof(st));
         const double* ax[3] = {sf.east, sf.up, sf.north};
         for (int c = 0; c < 3; ++c) {
             m_churnEyeT[c] = static_cast<float>(eye[0] * ax[c][0] + eye[1] * ax[c][1] + eye[2] * ax[c][2] -
@@ -273,6 +276,7 @@ private:
         float hwW[20];
         float hwO[12];
         uint32_t hwS[8];
+        float stU[4], stV[4], stW[4], stO[4];   // the solver's standing window about the churn's frame; LAST
     };
     struct SpecCbData {
         float rect[4];
