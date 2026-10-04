@@ -1,4 +1,5 @@
 #include "scene/GlobeLayer.h"
+#include "scene/Air.h"
 #include "core/ThreadManager.h"
 
 #include "hal/GpuProfiler.h"
@@ -2243,7 +2244,8 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     for (int i = 0; i < 3; ++i) m_skyCb.spaceSun[i] = m_spaceSun[i];
     m_skyCb.spaceSun[3] = 0.0f;
     if (m_drosteOn && m_msPath && !albedoLens) {
-        const double top = m_radius + 60000.0;   // Globe.hlsl kAtmTop
+        // The top of the planet's air (scene/Air.h), the same the sky's integral ends at.
+        const double top = m_radius + AirOf(m_streamMars ? "mars" : "earth").row[4][1];
         struct Cand { uint32_t slot; double dist; };
         Cand cand[kMaxLevels];
         int nc = 0;

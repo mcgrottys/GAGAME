@@ -33,6 +33,12 @@ cbuffer SceneCb : register(b0) {
     float4   gSkyLut;        // M13: the AIR's table and this eye's place in it:
                              // x = multiple-scattering slot (a number; -1 = none),
                              // y = the planet's radius, z = the eye's (metres), w spare
+    // THE PLANET'S AIR (src/scene/Air.h, Atmosphere.hlsli AtmAirRows), appended at the END:
+    float4   gAirRay;        // Rayleigh scattering rgb (1/m at the ground), scale height (m)
+    float4   gAirMieS;       // aerosol scattering rgb, scale height
+    float4   gAirMieE;       // aerosol extinction rgb, Henyey-Greenstein g
+    float4   gAirOzo;        // ozone absorption rgb (at the tent's peak), the tent's centre (m)
+    float4   gAirTop;        // the tent's half-width, the top of the air (m), ground albedo, gain
 };
 
 #define gTime        (gParams0.x)
@@ -78,9 +84,13 @@ struct FieldDesc {
 #define FIELD_MULTIVECTOR2  3
 #define FIELD_ROTOR3        4
 
-static const float3 SKY_HI_C = float3(0.200f, 0.360f, 0.600f);   // zenith radiance
-static const float3 SKY_LO_C = float3(0.720f, 0.790f, 0.860f);   // horizon radiance
 static const float3 SUN_IRR_C = float3(1.350f, 1.283f, 1.161f);
+// THE ONE SUN. SUN_IRR_C is the engine's unit of light: the radiance a white Lambertian surface
+// facing the sun returns (E / pi). The sun's irradiance at the top of the air is therefore
+// pi SUN_IRR_C, and it is the only light: the sky is the air's integral times it (Common.hlsli
+// SkyAir), a surface is lit by it through the air to its point (SunAt) and by the sky's irradiance
+// (SkyAmbient). Sky and ground in one unit, by construction.
+static const float3 kSunE = 3.14159265f * SUN_IRR_C;
 
 // A shader that needs root param 2's SRV for its OWN per-draw list (the globe's CDLOD node
 // buffer) defines GA_NO_FIELD_BUFFER before including this file and binds t0/space0 itself;
@@ -182,46 +192,76 @@ uint WindowChainDepth(float3 p, float4 boxes[28], uint n) {
     return k;
 }
 
-// ---- THE SKY, ONCE (M13) --------------------------------------------------------------------
-// Defined here so the sky layer and every reflection cannot disagree -- and MARCHED, not looked
-// up: the ray integrates the air from its own viewpoint under the one sun (Atmosphere.hlsli
-// AtmRay). A shader that draws another viewpoint (the globe's gate window and Droste levels) hands
-// its own zenith, sun and eye radius through the three macros, exactly as it already did for the
-// sun; the march then IS that place's sky, with nothing else to tell it.
+// ---- THE SKY, ONCE (M13; one integral since 2026-10-05) ------------------------------------------
+// Defined here so the sky layer, the globe's backdrop and every reflection cannot disagree. The
+// sky is ONE line integral (Atmosphere.hlsli AtmRay): the light the air scatters toward the eye
+// along the ray, from where the ray enters the air -- the eye itself, inside it -- to where it
+// leaves it or meets the ground, under the one sun. The eye's position says only where the ray
+// starts. There is no ceiling, no fallback and no second march: the helm's dome, the limb seen
+// from orbit and the air over the disc are this one function, and the planet's air is rows
+// (gAir*, src/scene/Air.h), never a branch.
 //
-// Without the air's table -- a tool, a test, a pass that runs before the sky layer, or an eye
-// above the air, where the limb shell owns the backdrop -- the shipped gradient answers, byte for
-// byte. A missing sky is a wrong sky, not a black one.
+// A shader that draws another viewpoint (the globe's gate window and Droste levels) hands its own
+// zenith, sun and eye radius through the three macros, exactly as it already did for the sun; the
+// integral then IS that place's sky, with nothing else to tell it.
 #ifndef GA_SKY_EYE_R
 #define GA_SKY_EYE_R (gSkyLut.z)
 #endif
 #include "Atmosphere.hlsli"
 
-static const uint kSkySteps = 6u;   // exponentially spaced (Atmosphere.hlsli AtmRay)
+#define GA_AIR (AtmAirRows(gAirRay, gAirMieS, gAirMieE, gAirOzo, gAirTop))
+static const uint kSkySteps = 10u;   // exponential from the segment's start (Atmosphere.hlsli AtmRay)
 
-// The marched sky belongs to an eye INSIDE the air. Past 60 km the from-space rim has faded in and
-// the limb shell owns the backdrop (the atmosphere ledger: four disjoint terms), so the cut is
-// that altitude and not the top of the air -- a viewpoint between the two would otherwise draw
-// both.
-static const float kSkyAirCeilingM = 60000.0f;
-bool SkyAirOn(float eyeR) {
-    return gSkyLut.x >= 0.0f && eyeR < gSkyLut.y + kSkyAirCeilingM;
-}
-
-// The air along a ray from a viewpoint: its zenith, its sun, its distance from the planet centre.
-float3 SkyAirAt(float3 dir, float3 up, float3 sunDir, float eyeR) {
+// THE AIR along a ray from a viewpoint -- its zenith `up`, its sun, its distance eyeR from the
+// planet's centre -- to the exit, the ground or tMax, in the engine's radiance; T what survives
+// over that segment, tGround where the ray met the ground (-1: it did not). With no table yet the
+// slot is -1 and the orders past the first are not added: the same integral, one term fewer.
+float3 SkyAir(float3 dir, float3 up, float3 sunDir, float eyeR, float tMax, out float3 T,
+              out float tGround) {
+    const AtmAir air = GA_AIR;
     float3 fms;
-    const float Rb = gSkyLut.y;
-    const float r = clamp(eyeR, Rb + 1.0f, Rb + kAtmTopM - 1000.0f);
-    return AtmRay(r, dir, up, sunDir, kSkySteps, int(gSkyLut.x), Rb, Rb + kAtmTopM, fms) *
-           kAtmGain;
+    return AtmRay(air, eyeR, dir, up, sunDir, kSkySteps, int(gSkyLut.x), gSkyLut.y, tMax, T, fms,
+                  tGround) * kSunE;
 }
 
-// THE SUN'S OWN COLOUR through the air from a viewpoint -- why a setting sun is red.
-float3 SunThroughAirAt(float3 up, float3 sunDir, float eyeR) {
+// THE SKY along a ray, which has no end: the air; where it meets the ground, the ground's bounce
+// seen through the air in front of it; and -- weighted by `disc` -- the SUN, drawn once at its
+// true angular size (gMisc.yz, M9bi) and coloured by the same transmittance, which is why a
+// setting sun is red. A ray the planet stops sees no sun.
+float3 SkyAlong(float3 dir, float3 up, float3 sunDir, float eyeR, float disc) {
+    float3 T;
+    float tG;
+    float3 L = SkyAir(dir, up, sunDir, eyeR, 3.0e38f, T, tG);
+    if (tG >= 0.0f) {
+        const AtmAir air = GA_AIR;
+        L += T * AtmGroundBounce(air, eyeR, dir, up, sunDir, tG, gSkyLut.y) * kSunE;
+    } else {
+        L += disc * SUN_IRR_C * T * smoothstep(gMisc.y, gMisc.z, dot(dir, sunDir)) * 12.0f;
+    }
+    return L;
+}
+
+// ---- A SURFACE'S LIGHT, FROM THE SAME SUN AND THE SAME AIR --------------------------------------
+// In the engine's unit (SUN_IRR_C = E / pi): a Lambertian albedo a under these returns
+// a (SunAt cos + SkyAmbient). `up` is the point's own zenith, heightM its height above the sphere.
+// The SUN at the point: the one sun through the air to it (Atmosphere.hlsli AtmSunT, the closed
+// form every step of the sky's integral is lit by) -- why a sunset ground is red and dim.
+float3 SunAt(float3 up, float heightM) {
     const float Rb = gSkyLut.y;
-    const float r = clamp(eyeR, Rb + 1.0f, Rb + kAtmTopM - 1000.0f);
-    return AtmSunT(r, clamp(dot(sunDir, up), -1.0f, 1.0f), Rb);
+    return SUN_IRR_C * AtmSunT(GA_AIR, Rb + max(heightM, 0.0f),
+                               clamp(dot(GA_SUN_DIR, up), -1.0f, 1.0f), Rb);
+}
+// The SKY's irradiance on a surface of normal n: the integral's radiance over the hemisphere,
+// tabulated with the air (SkyLut.hlsl CsMultiScatter, the table's second half: a level surface at
+// a height under a sun angle), tilted by the split-hemisphere (1 + n.up)/2. No table yet: none.
+float3 SkyAmbient(float3 n, float3 up, float heightM) {
+    if (gSkyLut.x < 0.0f) return float3(0.0f, 0.0f, 0.0f);
+    const float Rb = gSkyLut.y;
+    const float r = Rb + max(heightM, 0.0f);
+    const float3 eHat = AtmFetch(uint(gSkyLut.x),
+                                 AtmMsUv(r, clamp(dot(GA_SUN_DIR, up), -1.0f, 1.0f), Rb,
+                                         Rb + GA_AIR.top), kAtmMsDims, 32);
+    return SUN_IRR_C * eHat * (0.5f + 0.5f * dot(n, up));
 }
 
 // ---- THE PLANET'S OWN SHADOW, ONCE ----------------------------------------------------------
@@ -249,107 +289,59 @@ float PlanetShadow(float3 up, float3 sunDir, float heightM, float planetR) {
     return SunDiscClear(dot(up, sunDir) + sqrt(h * (2.0f * planetR + h)) / (planetR + h));
 }
 
-// The gradient that shipped, kept as the fallback and for callers with only an elevation to give
-// (asked, when the air is on, along the sun's own meridian at that elevation).
-float3 SkyRadiance(float ey) {
-    if (SkyAirOn(GA_SKY_EYE_R)) {
-        const float3 up = GA_SKY_UP;
-        const float3 m = GA_SUN_DIR - up * dot(GA_SUN_DIR, up);
-        const float ml = length(m);
-        const float3 sh = (ml > 1e-6f) ? m / ml : float3(1.0f, 0.0f, 0.0f);
-        const float c = clamp(ey, -1.0f, 1.0f);
-        return SkyAirAt(normalize(up * c + sh * sqrt(max(1.0f - c * c, 0.0f))), up, GA_SUN_DIR,
-                        GA_SKY_EYE_R);
-    }
-    return lerp(SKY_LO_C, SKY_HI_C, smoothstep(0.0f, 0.30f, ey));
-}
-
-// The FULL directional form, sun included. Use this for anything that reflects the sky.
+// The sky, asked with an EXPLICIT viewpoint: its zenith, its sun, its distance from the planet's
+// centre, all in the frame the ray is in. The gate's window is the destination's sky -- a ray the
+// gate carried to the other side of the planet, the one sun asked at ITS OWN PLACE (the ephemeris
+// is evaluated there, in doubles, and handed here already in that frame).
 // ** THE SUN MUST BE IN HERE ** -- vqview measured an entire HDR frame under 1.0 luminance when
-// the reflection used the gradient-only form; no tonemapper can invent a missing highlight.
-// The same radiance, asked with an EXPLICIT sun: the gate's window is the destination's sky, and
-// the destination's sun is the one sun asked at ITS OWN PLACE (the ephemeris is evaluated there,
-// in doubles, and handed here already in that frame) rather than this frame's sun turned around.
-// A viewpoint that is not this frame's -- a ray the gate carried to the other side of the
-// planet: its own zenith, sun and eye radius, all in the frame the ray is in. The same march.
+// the reflection used a sky without it; no tonemapper can invent a missing highlight.
 float3 SkyRadianceAt(float3 dir, float3 up, float3 sunDir, float eyeR) {
-    if (!SkyAirOn(eyeR)) {
-        const float ey = dot(dir, up);
-        float3 col = SkyRadiance(ey);
-        const float cosA = dot(dir, sunDir);
-        col += SUN_IRR_C * (smoothstep(gMisc.y, gMisc.z, cosA) * 12.0f +
-                            pow(saturate(cosA), 350.0f) * 0.35f + pow(saturate(cosA), 12.0f) * 0.05f);
-        return lerp(col, SKY_LO_C * 0.45f, smoothstep(0.0f, -0.06f, ey));
-    }
-    return SkyAirAt(dir, up, sunDir, eyeR) +
-           SUN_IRR_C * SunThroughAirAt(up, sunDir, eyeR) *
-               smoothstep(gMisc.y, gMisc.z, dot(dir, sunDir)) * 12.0f;
+    return SkyAlong(dir, up, sunDir, eyeR, 1.0f);
 }
 
+// The sky from this shader's own eye (the dome; anything that mirrors it whole).
 float3 SkyRadianceDir(float3 dir) {
-    const float ey = dot(dir, GA_SKY_UP);
-    if (SkyAirOn(GA_SKY_EYE_R)) return SkyRadianceAt(dir, GA_SKY_UP, GA_SUN_DIR, GA_SKY_EYE_R);
-    float3 col = SkyRadiance(ey);
-    const float cosA = dot(dir, GA_SUN_DIR);
-    // M9bi: the disc is the sun's ACTUAL angular size (gMisc.yz, from the Earth-Sun distance
-    // of this frame), not the two hand-picked cosines that stood here -- those spanned 0.44 to
-    // 0.99 degrees against a true radius of 0.2666, so the sun was drawn 1.7x to 3.7x too wide.
-    const float disc = smoothstep(gMisc.y, gMisc.z, cosA);
-    const float halo = pow(saturate(cosA), 350.0f) * 0.35f + pow(saturate(cosA), 12.0f) * 0.05f;
-    col += SUN_IRR_C * (disc * 12.0f + halo);
-    // Below the horizon there is no sky, so darken rather than mirroring the horizon band.
-    return lerp(col, SKY_LO_C * 0.45f, smoothstep(0.0f, -0.06f, ey));
+    return SkyAlong(dir, GA_SKY_UP, GA_SUN_DIR, GA_SKY_EYE_R, 1.0f);
 }
 
-// M6t: the sky WITHOUT the specular sun disc (halo kept -- that is scattered skylight, not
-// the mirror image). For surfaces that carry their own explicit sun lobe: the unified water
-// BRDF owns the sun through Cox-Munk at every scale, and the mirror disc here on top of a
-// helm-tight lobe would count the sun twice.
+// With only an elevation to give (the haze's colour, a slope's skylight): the sky along the sun's
+// own meridian at that elevation, from the eye.
+float3 SkyRadiance(float ey) {
+    const float3 up = GA_SKY_UP;
+    const float3 m = GA_SUN_DIR - up * dot(GA_SUN_DIR, up);
+    const float ml = length(m);
+    const float3 sh = (ml > 1e-6f) ? m / ml : float3(1.0f, 0.0f, 0.0f);
+    const float c = clamp(ey, -1.0f, 1.0f);
+    return SkyAlong(normalize(up * c + sh * sqrt(max(1.0f - c * c, 0.0f))), up, GA_SUN_DIR,
+                    GA_SKY_EYE_R, 0.0f);
+}
+
+// M6t: the sky WITHOUT the specular sun disc, for surfaces that carry their own explicit sun lobe
+// (the unified water BRDF owns the sun through Cox-Munk at every scale; the mirror disc on top of
+// a helm-tight lobe would count the sun twice). The aureole stays: the Mie lobe IS the halo.
 //
-// `day` is the caller's daylight, and only the GRADIENT takes it. The march already carries the
-// hour -- the sky over a set sun is dark, or glowing, because the air is -- and the water that
-// multiplied the march by its ramp of the sun's height (3 sin(el) + 0.12) darkened a twilight
-// sea twice: it reflected 0.015 of the glow at -2 deg and 0.17 of it at +1. The gradient is the
-// same two colours at noon and at midnight, so it is still told the hour: an eye above the air
-// (the globe, a Droste level) keeps its night-side sea dark.
+// A REFLECTION IS SEEN FROM THE WATER, so the integral starts at the sea's surface (the planet's
+// radius), under the zenith the shader hands it: from the helm that is the eye's own sky to a few
+// metres, and from orbit it is still the sky above the sea -- the eye's own radius would put the
+// mirror's ray above the air, and the sea would reflect black space.
+//
+// `day` is kept for its callers and no longer read: the gradient it dimmed is gone, and the
+// integral carries the hour by itself -- the sky over a set sun is dark, or glowing, because the
+// air is (ALGEBRA priors 45).
 float3 SkyRadianceDirDiscless(float3 dir, float day) {
-    const float ey = dot(dir, GA_SKY_UP);
-    // The march carries the aureole (the Mie lobe IS the halo); what this form must not add is the
-    // specular disc, and it does not.
-    if (SkyAirOn(GA_SKY_EYE_R)) return SkyAirAt(dir, GA_SKY_UP, GA_SUN_DIR, GA_SKY_EYE_R);
-    float3 col = SkyRadiance(ey);
-    const float cosA = dot(dir, GA_SUN_DIR);
-    col += SUN_IRR_C * (pow(saturate(cosA), 350.0f) * 0.35f + pow(saturate(cosA), 12.0f) * 0.05f);
-    return lerp(col, SKY_LO_C * 0.45f, smoothstep(0.0f, -0.06f, ey)) * day;
+    return SkyAlong(dir, GA_SKY_UP, GA_SUN_DIR, gSkyLut.y, 0.0f);
 }
 
-// Aerial perspective: exponential extinction toward the sky colour along the view ray. The 6 km
-// scale keeps mid-field wave contrast alive on the open sea; vqview's 2.5 km suited a 470 m
-// scene.
-// M10: AerialPerspectiveDay is the same haze with the hour in it. The light the haze scatters
-// toward the eye is the SKY's, so it dims with the sky: at day = 1 it is AerialPerspective
-// exactly (every existing caller keeps its bytes), at night the air still attenuates but adds
-// no daylight.
-float3 AerialPerspectiveDay(float3 col, float3 viewDir, float range, float day) {
-    // Height-integrated airmass (M6b): haze density falls off exp(-y/H), so the effective path
-    // is the integral of density along the ray, not its raw length -- a helm-height horizontal
-    // view keeps the sea-level look, while a view DOWN from 2.6 km no longer drowns the estuary
-    // in fog (the pre-M6b constant-density version did exactly that the moment the camera could
-    // fly). Closed form: L_eff = H/dy * (exp(-y0/H) - exp(-(y0+L*dy)/H)), dy != 0.
-    const float H = 1300.0f;                       // haze scale height, m
-    const float y0 = max(GA_EYE_Y, 0.0f);
-    const float dy = viewDir.y;
-    float leff;
-    if (abs(dy) < 1e-3f) {
-        leff = range * exp(-y0 / H);
-    } else {
-        leff = (H / dy) * (exp(-y0 / H) - exp(-(y0 + range * dy) / H));
-    }
-    const float t = 1.0f - exp(-max(leff, 0.0f) / 6000.0f);
-    return lerp(col, SkyRadiance(viewDir.y) * day, saturate(t));
-}
+// THE AIR IN FRONT OF A SURFACE: the sky's own integral (SkyAir) along the view ray from the eye to
+// the surface point `range` away; the surface is seen through what survives of it. It replaces
+// the haze's closed form (a 1.3 km scale height, a 6 km extinction and the sky's colour lerped in,
+// with the hour passed beside it): the haze near the eye and the limb from orbit are one function
+// of the ray, and the hour is the air's (a sun under the planet lights none of it).
 float3 AerialPerspective(float3 col, float3 viewDir, float range) {
-    return AerialPerspectiveDay(col, viewDir, range, 1.0f);
+    float3 T;
+    float tG;
+    const float3 L = SkyAir(viewDir, GA_SKY_UP, GA_SUN_DIR, GA_SKY_EYE_R, range, T, tG);
+    return col * T + L;
 }
 
 // M6i: the composed-surface constants -- the rows every shader samples a planet's composed

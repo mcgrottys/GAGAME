@@ -109,7 +109,8 @@ float4 PsMain(VsOut i) : SV_Target {
     // numbers vqview calibrated for the Merrimack. No colour ramp.
     const float3 deep = gBscat.rgb / max(gSigmaW.rgb, 1e-4f);
     const float ndl = saturate(dot(n, gSunDir.xyz));
-    float3 col = deep * (0.35f + 0.65f * ndl) * SUN_IRR_C;
+    const float3 upR = float3(0.0f, 1.0f, 0.0f);
+    float3 col = deep * (SkyAmbient(n, upR, 0.0f) + 0.65f * ndl * SunAt(upR, 0.0f));
 
     // Fresnel-weighted sky reflection, from the one shared sky model.
     const float3 r = reflect(-v, n);

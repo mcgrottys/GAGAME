@@ -306,6 +306,7 @@ private:
     uint32_t m_wavePendingTiles = 0, m_wavePendingPlanes = 0;
     double m_wavePendingSec = 0.0;
     bool m_skyProbed = false;   // --sky-probe reads the tables once
+    float m_skyAtR[3] = {};     // --sky-probe: the eye's radius, three ways, this frame
     // --bed-trace N: the solver's bed read back around the spin-up, every N frames and at the
     // end (app/Tools/BedTrace.cpp); unconfigured without the flag, and then nothing reads it.
     tools::BedTracer m_bedTracer;

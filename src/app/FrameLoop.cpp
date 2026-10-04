@@ -2840,19 +2840,53 @@ bool FrameLoop::Frame() {
             skySun = zenSun;
         }
         sky->SetSkyFrame(rows, skySun);
-        // M13: AND THE AIR ITSELF. The air's one table (the same for every ray on the planet) and
-        // this eye's distance from the planet's centre; the sky is marched from there. An eye
-        // above the air marches nothing -- the limb shell owns that backdrop (the atmosphere
-        // ledger) -- and every consumer answers with the gradient it always had; the shader
-        // decides that from the radius, per viewpoint, so a re-rooted Droste level (local scale
-        // ~3e6 m) keeps the sky it drew before.
+        // M13: AND THE AIR ITSELF. The planet's air (its rows, scene/Air.h), the air's one table
+        // (the same for every ray on the planet) and this eye's distance from the planet's
+        // centre: the sky is the one integral along each ray from max(the eye, the air's entry)
+        // to the exit or the ground (Atmosphere.hlsli AtmRay), wherever the eye is.
         {
-            const double C[3] = {cam.px, cam.py, cam.pz};
+            // The eye in the DOME's frame: the dome is the sky of level camLevel + domeRel (the
+            // root's under realistic Droste lighting), so its integral starts where the eye stands
+            // in THAT level -- a few hundred metres up in the root's air, not ~3e6 m out in the
+            // camera level's own units (S^k: Droste.h Portal::Apply, the same map the rows'
+            // rotation is the turning part of). Without Droste domeRel = 0 and this is the eye.
+            double C[3] = {cam.px, cam.py, cam.pz};
+            if (domeRel != 0) {
+                const double c0[3] = {cam.px, cam.py, cam.pz};
+                portal.Apply(double(-domeRel), c0, C);
+            }
             const double gy = C[1] + planetR;
             sky->SetPlanetRadius(planetR);
+            // the planet's air on the scene's day (air.aod550): the table's and the rows'
+            sky->SetAir(AirOf(S.scene.planet, S.air.aod550, S.air.angstrom));
+            renderer.air = AirOf(S.scene.planet, S.air.aod550, S.air.angstrom);
             renderer.skyMsSrv = sky->MultiScatterSrv();
             renderer.planetRadiusM = static_cast<float>(planetR);
             renderer.eyeRadiusM = static_cast<float>(std::sqrt(C[0] * C[0] + gy * gy + C[2] * C[2]));
+            // --sky-probe: the eye's radius as each consumer receives it -- the scene constants'
+            // (above), the globe level row's (GlobeLayer fillLevel: each component summed in
+            // doubles and cast, the length taken in float as Globe.hlsl LoadLevel takes it), and
+            // the eye's true distance from the planet's centre in doubles (the camera's position
+            // is a Euclidean point of the tangent frame: Rail::AimCamera copies the rail's eye,
+            // resolved through PlanetToFlatPose, a rotation) -- and the sun in the eye's zenith
+            // frame turned so +x is the view's azimuth (SkyLayer::SetProbeEye, CsSkyAt).
+            if (opt.skyProbe && mode == 1) {
+                const float fx = static_cast<float>(C[0]), fy = static_cast<float>(gy),
+                            fz = static_cast<float>(C[2]);
+                m_skyAtR[0] = renderer.eyeRadiusM;
+                m_skyAtR[1] = std::sqrt(fx * fx + fy * fy + fz * fz);
+                m_skyAtR[2] = static_cast<float>(std::sqrt(C[0] * C[0] + gy * gy + C[2] * C[2]));
+                DirectX::XMFLOAT3 f3, r3, u3;
+                cam.ViewBasis(f3, r3, u3);
+                const float fd[3] = {rows[0] * f3.x + rows[1] * f3.y + rows[2] * f3.z,
+                                     rows[3] * f3.x + rows[4] * f3.y + rows[5] * f3.z,
+                                     rows[6] * f3.x + rows[7] * f3.y + rows[8] * f3.z};
+                const float az = std::atan2(fd[2], fd[0]);
+                const float ca = std::cos(az), sa = std::sin(az);
+                const float sl[3] = {skySun[0] * ca + skySun[2] * sa, skySun[1],
+                                     -skySun[0] * sa + skySun[2] * ca};
+                sky->SetProbeEye(m_skyAtR, sl);
+            }
         }
         if (globe) globe->SetSpaceSun(spaceSun);
     }
@@ -3243,16 +3277,15 @@ bool FrameLoop::Frame() {
         }
         // (--albedo: the water stands down too -- textures judged as layered images,
         // nothing else in the frame; the lit look retunes separately.)
-        // M10: under REALISTIC Droste lighting the sky belongs to the OUTERMOST world:
-        // every inner level sits a few hundred metres up in the root's air, so from
-        // anywhere inside the tower the backdrop is the root's low sky, never space.
-        // APPEALING gives each level its own -- its orbit reads as an orbit.
-        const bool rootSky = portal.Valid() && portalDecl.lighting == 0 && camLevel > 0;
-        sky->enabled = (altV < 9000.0 || rootSky) && !marsMode && !opt.albedo;   // low haze dome...
-        if (globe) globe->skyPassEnabled = !sky->enabled && !opt.albedo;   // ...or the
-                                                    // limb shell, never both at once
-                                                    // (--albedo: neither -- textures)
+        // ONE BACKDROP, ONE INTEGRAL (2026-10-05): the sky layer's dome is the backdrop at every
+        // altitude and on every planet -- the sky is the one integral from the eye or the air's
+        // entry (Common.hlsli SkyAlong), so there is nothing to hand over to. The 9 km switch to
+        // the globe's shell that stood here was the coast rail's 44 s pop: two models of the sky
+        // at one radius (the dipped horizon 1.28 against 0.63). The globe's backdrop pass draws
+        // only under appealing Droste lighting, where the levels' skies cross-fade below.
+        sky->enabled = !opt.albedo;   // (--albedo: textures alone, no sky)
         if (globe) {
+            globe->skyPassEnabled = false;
             globe->skyPassWeight = 1.0f;
             globe->skyOwnAir = 1.0f;
         }
@@ -3856,9 +3889,32 @@ bool FrameLoop::Frame() {
     renderer.RenderFrame(viewSet);
     // --sky-probe: the atmosphere's tables, read back once the first one is built and held
     // against published optical depths (SkyLayer::Probe). Reads back and waits: an instrument.
+    // THE PICTURE'S WHITE (air.exposure): a scene's own value, or the law -- 1 / the luminance of
+    // a white level surface under a zenith sun through the scene's air, sun and sky, from the
+    // same functions the frame lights with (SkyLayer::WhiteNoonY, read back once per table).
+    if (S.air.exposure > 0.0f) {
+        renderer.SetExposure(S.air.exposure);
+    } else if (sky) {
+        const float w = sky->WhiteNoonY(gpu);
+        if (w > 0.0f && std::abs(renderer.Exposure() - 1.0f / w) > 1e-6f * (1.0f / w)) {
+            renderer.SetExposure(1.0f / w);
+            Log("[exposure] the law: a sunlit white at noon through this air has luminance %.4f "
+                "in the engine's unit; exposure %.4f (air.exposure = 0)", w, 1.0f / w);
+        }
+    }
     if (opt.skyProbe && sky && frame >= 2u && !m_skyProbed) {
         m_skyProbed = true;
         sky->Probe(gpu);
+    }
+    if (opt.skyProbe && sky && mode == 1) {
+        const uint32_t settleN = S.railDirW.empty() ? 0u : 150u;
+        char tag[256];
+        std::snprintf(tag, sizeof(tag),
+                      "frame %u rec %d alt %.1f m dome %d shell %d R %.2f/%.2f/%.2f m", frame,
+                      int(frame) - int(settleN), altV, sky->enabled ? 1 : 0,
+                      (globe && globe->skyPassEnabled) ? 1 : 0, m_skyAtR[0], m_skyAtR[1],
+                      m_skyAtR[2]);
+        sky->ProbeAt(gpu, tag);
     }
     // --water-probe N: the drawn sea against each hull's own water, every N recorded frames
     // (app/Tools/WaterProbe.cpp). An instrument: it reads back and waits, so never in play.

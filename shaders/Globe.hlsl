@@ -29,7 +29,7 @@ static float3 sLvlSun = float3(0.0f, 1.0f, 0.0f);
 static float sLvlEyeY = 0.0f;
 static float3 sLvlSkyUp = float3(0.0f, 1.0f, 0.0f);
 // M13: and the distance of the level's own eye from its planet's centre, which is where its sky
-// is marched from (Common.hlsli SkyAirAt). The gate's window is a level: its rays land at the far
+// is marched from (Common.hlsli SkyAlong). The gate's window is a level: its rays land at the far
 // place, so its surfaces reflect the far place's sky with nothing more said.
 static float sLvlSkyEyeR = 6371000.0f;
 #define GA_SKY_EYE_R (sLvlSkyEyeR)
@@ -622,8 +622,8 @@ float3 WaterVertexColor(float3 dir, float3 rel, float h) {
 
     const float day = saturate(dot(GA_SUN_DIR, upT) * 3.0f + 0.12f);
     const float ndl = saturate(dot(nW, GA_SUN_DIR)) * sunVis;
-    float3 col = alb * (0.030f + ndl * SUN_IRR_C * 1.15f);
-    col += spec * SUN_IRR_C * 0.85f;
+    float3 col = alb * (SkyAmbient(nW, upT, h) + ndl * SunAt(upT, h) * 1.15f);
+    col += spec * SunAt(upT, h) * 0.85f;
     col += SkyRadianceDirDiscless(rDir, SkyDay(day)) * (fres * 0.9f * (1.0f - foam));
     col += alb * float3(0.010f, 0.014f, 0.028f) * (1.0f - day);   // moonlit-blue night side
     return col;
@@ -1065,7 +1065,7 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // ---- THE COMBINE. Energy SPLITS: the body dims by exactly the Fresnel the mirror takes,
     // and the mirror itself is part sky, part the very water it stands on.
     const float ndl = saturate(dot(nSmooth, GA_SUN_DIR)) * sunVis;   // the body, smooth normal
-    const float3 bodyLit = albW * (0.030f + ndl * SUN_IRR_C * 1.15f);
+    const float3 bodyLit = albW * (SkyAmbient(nSmooth, upT, hp) + ndl * SunAt(upT, hp) * 1.15f);
     // What the seaward share HITS is another wave, and that wave is water too: at its own
     // grazing angle it is mostly a mirror, and only steeply-down rays see into it. So the
     // seaward endpoint is one more bounce of the SAME Schlick, on the flat sea's normal --
@@ -1078,7 +1078,7 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     const float fresHit = 0.02f + 0.98f * pow(1.0f - saturate(-rUp), 5.0f);
     const float3 mirror = lerp(skyLit, lerp(bodyLit, skyLit, fresHit), seaward);
     float3 col = bodyLit * (1.0f - fres);
-    col += spec * SUN_IRR_C * 0.85f;
+    col += spec * SunAt(upT, hp) * 0.85f;
     col += mirror * (fres * 0.9f);
     col += albW * (1.0f - fres) * float3(0.010f, 0.014f, 0.028f) * (1.0f - day);   // night side
     return col;
@@ -1513,8 +1513,8 @@ float4 PsMain(VsOut i) : SV_Target {
     }
 
     const float ndl = saturate(dot(n, GA_SUN_DIR)) * (1.0f - 0.75f * overhead) * sunVis;
-    float3 col = alb * (0.030f + ndl * SUN_IRR_C * 1.15f);
-    col += spec * SUN_IRR_C * 0.85f * (1.0f - overhead);
+    float3 col = alb * (SkyAmbient(n, upT, hp) + ndl * SunAt(upT, hp) * 1.15f);
+    col += spec * SunAt(upT, hp) * 0.85f * (1.0f - overhead);
     col += skyReflAdd * day * (1.0f - 0.6f * overhead);   // M7c: the reflected ray, skyward
     col += alb * float3(0.010f, 0.014f, 0.028f) * (1.0f - day);   // moonlit-blue night side
 
@@ -1559,9 +1559,10 @@ float4 PsMain(VsOut i) : SV_Target {
             // seen, because the root helm is always in daylight. Now it takes the same `day` and
             // the same moonlit floor the far-field mix below uses: one law, day or night.
             const float skyD = SkyDay(day);
-            float3 colNear = matAlb * (SUN_IRR_C * ndlM + SkyRadiance(dot(nM, GA_SKY_UP)) * (0.55f * skyD) +
+            float3 colNear = matAlb * (SunAt(upT, hp) * ndlM + SkyAmbient(nM, upT, hp) +
                                        float3(0.010f, 0.014f, 0.028f) * (1.0f - skyD));
-            colNear = AerialPerspectiveDay(colNear, normalize(i.rel), distC, skyD);
+            // (Its air is the one in front of every globe pixel: the integral below, after the
+            // clouds -- not a haze of its own.)
             // M6n: the material weight rides landness too -- a half-emerged flat takes half
             // the wet-sand treatment, and the shore band grades instead of popping.
             col = lerp(col, colNear,
@@ -1578,16 +1579,18 @@ float4 PsMain(VsOut i) : SV_Target {
         col = col * T + scat;
     }
 
-    // The atmosphere, as seen ON the disc: grazing rays cross a long air path. M6j: this is a
-    // FROM-SPACE effect and now fades in above 60 km -- inside the atmosphere it was pouring
-    // grey-blue over every oblique view of the imagery (the "washed out when zooming in"
-    // report; the near-field haze budget belongs to AerialPerspective alone).
-    const float rim = pow(1.0f - saturate(dot(upT, v)), 3.0f) *
-                      smoothstep(60000.0f, 250000.0f, length(sLvlCamAbs) - gGlo.x);
-    // Mars wears a THIN dusty shell, not Earth's blue one.
-    const float3 rimCol = (gStreamF.z > 0.5f) ? float3(0.72f, 0.42f, 0.24f)
-                                              : float3(0.42f, 0.58f, 0.92f);
-    col = lerp(col, rimCol * (0.15f + 1.05f * day), rim * (gStreamF.z > 0.5f ? 0.18f : 0.55f));
+    // THE AIR ON THE DISC: the sky's own integral (Common.hlsli SkyAir), from the eye -- or, from
+    // orbit, the ray's entry into the air -- to this point; the surface is seen through what
+    // survives of it. It replaces the from-space rim (a hand-tinted Fresnel term faded in over
+    // 60-250 km, Mars by a branch), so the limb past the disc's edge and the haze on it are one
+    // function on both sides of the edge, from the helm to orbit, and Mars is its own rows.
+    {
+        float3 airT;
+        float airG;
+        const float3 airL = SkyAir(normalize(i.rel), normalize(sLvlCamAbs), GA_SUN_DIR,
+                                   length(sLvlCamAbs), length(i.rel), airT, airG);
+        col = col * airT + airL;
+    }
 
     // M6d: the Mv2 wind bank's curl, on demand (V). Violet = NH-cyclonic (+), amber = anti-
     // cyclonic. NULL tiles read zero and tint nothing: calm air costs neither memory nor a
@@ -1623,17 +1626,13 @@ float4 PsMain(VsOut i) : SV_Target {
     return float4(col, 1.0f);
 }
 
-// ------------------------------------------------------------------ the atmosphere shell
+// ------------------------------------------------------------------ the sky, from wherever the eye is
 //
-// Fullscreen backdrop drawn BEFORE the surface (depth off): rays that MISS the planet march a
-// thin Rayleigh shell, which is what puts the blue limb past the edge of the disc and the
-// sunrise ring on the terminator. Rays that hit the planet output space black and let the
-// surface overdraw. Single scattering, 6 steps, scale height 8 km -- a sketch of Bruneton with
-// the same phase conventions, not a claim to be him.
-
-static const float3 kBetaR = float3(5.8e-6f, 13.5e-6f, 33.1e-6f);
-static const float kAtmTop = 60000.0f;
-static const float kRayleighH = 8000.0f;
+// Fullscreen backdrop drawn BEFORE the surface (depth off; GREATER_EQUAL against reversed-Z
+// infinity, so it touches only pixels nothing has drawn): the SAME integral the sky layer's dome
+// and every reflection ask (Common.hlsli SkyAlong), from the camera's own eye. From orbit the ray
+// starts at its entry into the air -- that is the limb past the disc and the sunrise ring on the
+// terminator; from the helm it starts at the eye. Nothing here knows which.
 
 struct SkyVsOut {
     float4 pos : SV_Position;
@@ -1666,82 +1665,37 @@ cbuffer GlobeSkyCb : register(b3) {
     float4 gSkySpaceSun;   // M10: the space backdrop's sun (Droste only; camera frame)
 };
 
-// The shell's single scatter along [t0, t0 + span] of a ray from ro (sphere-centred, in the
-// planet's own units) lit by `sun`: the light it adds, and in odView the optical depth it puts
-// in front of whatever lies behind it. 6 steps, Chapman-lite sun transmittance.
-float3 ShellScatter(float3 ro, float3 rd, float t0, float span, float3 sun, out float odView) {
-    const uint kSteps = 6;
-    const float dt = span / kSteps;
-    float3 sum = 0.0f;
-    odView = 0.0f;
-    [unroll] for (uint s = 0; s < kSteps; ++s) {
-        const float3 p = ro + rd * (t0 + (s + 0.5f) * dt);
-        const float h = max(length(p) - gGlo.x, 0.0f);
-        const float dens = exp(-h / kRayleighH);
-        odView += dens * dt;
-        // Sun transmittance out of the shell from p: one closed-form-ish estimate via the
-        // grazing airmass (Chapman-lite).
-        const float cosSun = dot(normalize(p), sun);
-        const float am = dens * kRayleighH * 2.2f / max(cosSun + 0.18f, 0.02f);
-        const float3 sunT = exp(-kBetaR * max(am, 0.0f));
-        sum += dens * dt * sunT * exp(-kBetaR * odView);
-    }
-    const float mu = dot(rd, sun);
-    const float phaseR = 0.0596831f * (1.0f + mu * mu);   // 3/(16 pi)
-    float3 col = sum * kBetaR * phaseR * 22.0f * SUN_IRR_C;
-    if (gStreamF.z > 0.5f) {   // Mars: 1% of Earth's air, dust-toned
-        col = dot(col, float3(0.33f, 0.34f, 0.33f)) * float3(1.15f, 0.55f, 0.30f) * 0.30f;
-    }
-    return col;
-}
-
 float4 PsSky(SkyVsOut i) : SV_Target {
     const float2 ndc = i.dir.xy;
     const float3 rd = normalize(gSkyFwd.xyz + gSkyRight.xyz * (ndc.x * gSkyFwd.w * gSkyRight.w)
                                 + gSkyUp.xyz * (ndc.y * gSkyFwd.w));
     const float3 ro = gCamAbs.xyz;
+    const float eyeR = length(ro);
+    const float3 up = ro / eyeR;
 
-    // Planet hit? Space stays black; the surface pass owns the disc.
-    const float b = dot(ro, rd);
-    const float cPlan = dot(ro, ro) - gGlo.x * gGlo.x;
-    if (b * b - cPlan > 0.0f && -b - sqrt(max(b * b - cPlan, 0.0f)) > 0.0f) {
-        return float4(0, 0, 0, 1);
+    // The camera level's own air, at its share of the space backdrop (gSkyLvl.y: exactly 1
+    // without Droste), and its ground where the ray meets it.
+    float3 T;
+    float tG;
+    float3 col = SkyAir(rd, up, gSunDir.xyz, eyeR, 3.0e38f, T, tG);
+    if (tG >= 0.0f) {
+        col += T * AtmGroundBounce(GA_AIR, eyeR, rd, up, gSunDir.xyz, tG, gSkyLut.y) * kSunE;
     }
-
-    // The sun itself. Without Droste it shows only where the ray leaves the shell toward it (the
-    // shipped backdrop); under Droste the backdrop is space, and space has the sun in it
-    // wherever the planet is not -- a limb in front of it (PsLimb) dims it by its own air. Whose
-    // sun: under appealing lighting every level has one, and space shows the one of the level
-    // whose orbit called for it (gSkySpaceSun) -- not the camera's, which is the gauge.
+    col *= gSkyLvl.y;
+    // The sun, through the same air (Common.hlsli SkyAlong's disc, line for line). Under Droste
+    // (gSkyLvl.z) space has the sun in it wherever the planet is not, and whose sun: the level's
+    // whose orbit called for it (gSkySpaceSun), not the camera's, which is the gauge -- seen
+    // through the camera level's air by that air's share.
     const float3 sunSky = (gSkyLvl.z > 0.5f) ? gSkySpaceSun.xyz : gSunDir.xyz;
-    const float mu = dot(rd, sunSky);
-    const float3 sunDisc = SUN_IRR_C * smoothstep(0.9998f, 0.99995f, mu) * 4.0f;
-    const float3 bare = (gSkyLvl.z > 0.5f) ? sunDisc : float3(0.0f, 0.0f, 0.0f);
-
-    // Atmosphere shell chord.
-    const float top = gGlo.x + kAtmTop;
-    const float cTop = dot(ro, ro) - top * top;
-    const float disc = b * b - cTop;
-    if (disc <= 0.0f) return float4(bare, 1);
-    const float t0 = max(-b - sqrt(disc), 0.0f);
-    const float t1 = -b + sqrt(disc);
-    const float span = t1 - t0;
-    if (span <= 0.0f) return float4(bare, 1);
-
-    // M10: the camera level's own air, at its share of the space backdrop (gSkyLvl.y: exactly 1
-    // without Droste).
-    float odView;
-    float3 col = ShellScatter(ro, rd, t0, span, gSunDir.xyz, odView) * gSkyLvl.y;
-
-    // The sun itself, when the ray leaves the shell toward it.
-    col += sunDisc;
+    const float3 sunT = (tG >= 0.0f) ? float3(0.0f, 0.0f, 0.0f) : lerp(float3(1.0f, 1.0f, 1.0f), T, gSkyLvl.y);
+    col += SUN_IRR_C * sunT * smoothstep(gMisc.y, gMisc.z, dot(rd, sunSky)) * 12.0f;
     return float4(col, 1.0f);
 }
 
 // ------------------------------------------------------------------ M10: the limbs
 //
-// Every planet in the Droste tower whose air the eye is OUTSIDE of wears its limb: the same
-// shell, scattered by the same function, in that level's own frame (its eye, its sun), drawn
+// Every planet in the Droste tower whose air the eye is OUTSIDE of wears its limb: the sky's
+// one integral (Common.hlsli SkyAir), in that level's own frame (its eye, its sun), drawn
 // after the surface over whatever lies behind it. The backdrop above could not do this -- it
 // touches only empty pixels, and an inner globe's limb lies over the outer world's sea. Blended
 // as light added plus the light behind carried through (dual source: dst = scatter + dst * T),
@@ -1762,7 +1716,7 @@ LimbOut PsLimb(SkyVsOut i) {
     const float3 rd = mul(rdT, sLvlQ);   // Q^T: the same ray in the level's own frame
     const float3 ro = sLvlCamAbs;
     const float R = gGlo.x;
-    const float top = R + kAtmTop;
+    const float top = R + GA_AIR.top;   // where the planet's air ends (its rows)
     // The closest approach as a vector (ro - rd b), not b^2 - c: an inner globe's eye sits
     // ~1.7e7 own-metres out, where b^2 - c cancels away kilometres of the limb.
     const float b = dot(ro, rd);
@@ -1787,6 +1741,8 @@ LimbOut PsLimb(SkyVsOut i) {
     float3 scatter = 0.0f;
     float3 trans = 0.0f;
     const float t0c = -b - sqrt(max(top * top - rc * rc, 0.0f));
+    const float eyeR = length(ro);
+    const float3 up = ro / eyeR;
     const uint kSub = 8u;
     [unroll] for (uint s = 0; s < kSub; ++s) {
         const float h = hc + foot * ((float(s) + 0.5f) / float(kSub) - 0.5f);
@@ -1794,13 +1750,12 @@ LimbOut PsLimb(SkyVsOut i) {
         const float3 rdS = normalize(pSub - ro);
         const float bS = dot(ro, rdS);
         const float rS = length(ro - rdS * bS);
-        if (rS < R) { trans += 1.0f; continue; }         // the disc's part of the pixel
-        if (rS >= top) { trans += 1.0f; continue; }      // clear of the air
-        const float hwS = sqrt(top * top - rS * rS);
-        const float t0S = max(-bS - hwS, 0.0f);
-        float od;
-        scatter += ShellScatter(ro, rdS, t0S, (hwS - bS) - t0S, GA_SUN_DIR, od);
-        trans += exp(-kBetaR * od);
+        // The disc's part of the pixel: its air is on its own pixels (PsMain), not added here.
+        if (rS < R) { trans += 1.0f; continue; }
+        float3 T;
+        float tG;
+        scatter += SkyAir(rdS, up, GA_SUN_DIR, eyeR, 3.0e38f, T, tG);
+        trans += T;
     }
     LimbOut o;
     o.scatter = float4(scatter / float(kSub), 0.0f);

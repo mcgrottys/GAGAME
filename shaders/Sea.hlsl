@@ -331,7 +331,8 @@ float3 SeaVertexColor(float2 xz, float3 rel, float2 U, float2 adv, float depth, 
     // The body: the scattering asymptote, one Lambert term. No bed, no imagery.
     const float3 deep = gBscat.rgb / max(gSigmaW.rgb, 1e-4f);
     const float ndl = saturate(dot(n, gSunDir.xyz));
-    float3 col = deep * (0.30f + 0.70f * ndl) * SUN_IRR_C;
+    const float3 upS = float3(0.0f, 1.0f, 0.0f);
+    float3 col = deep * (SkyAmbient(n, upS, 0.0f) + 0.70f * ndl * SunAt(upS, 0.0f));
 
     // The sky mirror, horizon-clamped (a steep shoaling face must read as horizon sky, not
     // the near-black a below-horizon ray would give).
@@ -350,7 +351,7 @@ float3 SeaVertexColor(float2 xz, float3 rel, float2 U, float2 adv, float depth, 
                       (4.0f * 3.14159265f * sig2 * max(ch * ch * ch * ch, 1e-4f));
         glint *= (0.02f + 0.98f * pow(1.0f - saturate(dot(v, hv)), 5.0f)) *
                  saturate(dot(gSunDir.xyz, n));
-        col += glint * SUN_IRR_C * 0.85f;
+        col += glint * SunAt(upS, 0.0f) * 0.85f;
     }
 
     // Whitecaps: the Jacobian foam, current blocking of the chop, and the depth-limited
@@ -445,12 +446,14 @@ float3 SeaPixelColor(float2 xz, float3 rel, float att, float depth, float dryGua
     // The body: the b/sigma asymptote, opened up toward the sunlit bed as the two-way
     // extinction thins. Where there is no survey there is no bed to see -- the asymptote is
     // the whole answer, which is exactly what open ocean looks like.
-    float3 col = (gBscat.rgb / max(gSigmaW.rgb, 1e-4f)) * (0.30f + 0.70f * ndl) * SUN_IRR_C;
+    const float3 upS = float3(0.0f, 1.0f, 0.0f);
+    const float3 sunS = SunAt(upS, 0.0f), skyS = SkyAmbient(n, upS, 0.0f);
+    float3 col = (gBscat.rgb / max(gSigmaW.rgb, 1e-4f)) * (skyS + 0.70f * ndl * sunS);
     if (gBathyU.x != 0xFFFFFFFFu) {
         const float3 T = exp(-gSigmaW.rgb * (sP + dd));
         float3 bedAlb = float3(0.42f, 0.38f, 0.28f);
         if (ComposedColorOn()) bedAlb = ComposedColor(SeaPlanetDir(bedXZ), SeaPoint(bedXZ) CS_WALK_AT(SeaPoint(bedXZ), 0u));
-        col = lerp(col, bedAlb * (0.35f + 0.75f * ndl) * SUN_IRR_C, T);
+        col = lerp(col, bedAlb * (skyS + 0.75f * ndl * sunS), T);
     }
 
     // ---- RAY 1, REFLECTED: horizon-clamped (a steep shoaling face must read as horizon sky,
@@ -484,7 +487,7 @@ float3 SeaPixelColor(float2 xz, float3 rel, float att, float depth, float dryGua
                       (4.0f * 3.14159265f * sig2 * max(ch * ch * ch * ch, 1e-4f));
         glint *= (0.02f + 0.98f * pow(1.0f - saturate(dot(v, hv)), 5.0f)) *
                  saturate(dot(gSunDir.xyz, n));
-        col += glint * SUN_IRR_C * 0.85f;
+        col += glint * sunS * 0.85f;
     }
 
     return AerialPerspective(col, normalize(rel), distCam);
