@@ -19,33 +19,136 @@
     "FLY    W A S D move, Q / E down / up, hold the right mouse button to look, wheel = speed",
     "TIME   Space pause, Up / Down time x10 / /10, Left / Right nudge.   R reload shaders.",
     "",
-    "Haulover renders only as well as the engine's data there: the global relief floods its barrier",
-    "island, so the water there is open sea until Haulover's own terrain is brought in."
+    "Haulover's own terrain is in the tree: NOAA's ninth-arc-second CUDEM tiles (FL n26X00 and n26X25,",
+    "w080X25; NAVD88 metres), harvested 2026-09-28 (data/places/haulover.json), are named below as a",
+    "height source by their files and folded onto the pyramid at first boot (about ten seconds). What",
+    "the renderer READS at Haulover today is the cube's level of that fold (611 m texels): the finer",
+    "levels wait for the blocks path (HIERARCHY 4.17) to stand there, so the inlet's shape is coarse",
+    "and the water is open sea. The Merrimack is as it is in the other demos.",
+    "",
+    "2026-09-30: runs on the residency manager of HIERARCHY 4.19 with a 2 GB pool, every read",
+    "addressed about the eye (4.4), and the land as its imagery (the painted rock is out)."
   ],
   "base": "scenes/merrimack.json",
-  "scene": {"name": "haulover-gate", "mode": "world", "view": "sea"},
-  "time": {"start": "2026-08-28T19:30:00Z"},
+  "scene": {
+    "name": "haulover-gate",
+    "mode": "world",
+    "view": "sea"
+  },
+  "time": {
+    "start": "2026-08-28T19:30:00Z"
+  },
   "sun": {
     "_readme": "The sun is a light at 0,0,0 and the Earth is placed around it -- no clock involved, so the tide above keeps its own time. This placement puts the Merrimack at sunset (+1.5 deg) and Haulover in daylight (+20.0 deg): the sun lies along the great circle from one inlet through the other.",
     "source": "earth",
-    "earth": {"at": [-115661585509.728317, 0.0, 94878451480.563919], "axis": [0, 0, 1], "spin": 107.0777}
+    "earth": {
+      "at": [
+        -115661585509.72832,
+        0.0,
+        94878451480.56392
+      ],
+      "axis": [
+        0,
+        0,
+        1
+      ],
+      "spin": 107.0777
+    }
   },
-  "sea": {"storm": {"hs": 1.5, "tp": 8, "dir": 95}},
+  "sea": {
+    "storm": {
+      "hs": 1.5,
+      "tp": 8,
+      "dir": 95
+    }
+  },
   "views": [
-    {"name": "sea", "follow": {"target": "boat"}, "interests": [{"name": "boat"}]}
+    {
+      "name": "sea",
+      "follow": {
+        "target": "boat"
+      },
+      "interests": [
+        {
+          "name": "boat"
+        }
+      ]
+    }
   ],
   "entities": [
-    {"name": "boat", "vessel": "rhib.novurania18", "at": {"x": 120, "alt": 0, "z": -10, "az": 86},
-     "controller": "helm"}
+    {
+      "name": "boat",
+      "vessel": "rhib.novurania18",
+      "at": {
+        "x": 120,
+        "alt": 0,
+        "z": -10,
+        "az": 86
+      },
+      "controller": "helm"
+    }
   ],
   "interests": [
-    {"name": "boat", "target": "boat", "radius": 200}
+    {
+      "name": "boat",
+      "target": "boat",
+      "radius": 200
+    }
   ],
   "gates": [
-    {"name": "haulover", "at": {"x": 450, "alt": 0, "z": 0, "az": 90}, "size": [120, 30, 10],
-     "toLat": 25.8997, "toLon": -80.1239, "toAz": 90},
-    {"name": "merrimack", "fromLat": 25.8997, "fromLon": -80.1239,
-     "at": {"x": 200, "alt": 0, "z": 0, "az": 90}, "size": [120, 30, 10],
-     "toAt": {"x": 250, "alt": 0, "z": 0}, "toAz": 90}
+    {
+      "name": "haulover",
+      "at": {
+        "x": 450,
+        "alt": 0,
+        "z": 0,
+        "az": 90
+      },
+      "size": [
+        120,
+        30,
+        10
+      ],
+      "toLat": 25.8997,
+      "toLon": -80.1239,
+      "toAz": 90
+    },
+    {
+      "name": "merrimack",
+      "fromLat": 25.8997,
+      "fromLon": -80.1239,
+      "at": {
+        "x": 200,
+        "alt": 0,
+        "z": 0,
+        "az": 90
+      },
+      "size": [
+        120,
+        30,
+        10
+      ],
+      "toAt": {
+        "x": 250,
+        "alt": 0,
+        "z": 0
+      },
+      "toAz": 90
+    }
+  ],
+  "sources": [
+    {
+      "name": "massgis.coq2023",
+      "manifest": "data/aerial/aerial.json",
+      "feather": 25
+    },
+    {
+      "name": "noaa.cudem.haulover",
+      "folder": "D:/DataCache/GAGAME/cudem/FL",
+      "match": "ncei19_n26X*_w080X25_2018v1.tif",
+      "kind": "height",
+      "unit": "m",
+      "datum": "NAVD88"
+    }
   ]
 }

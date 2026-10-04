@@ -272,7 +272,10 @@ public:
     // M9bb: ONE tile changed on disk (a pyramid fold rewrote it, or a composite of it was
     // dropped): forget what is mapped at that address so the next Want refetches. Safe from
     // any thread -- it queues; ProcessQueues applies it on the main thread with Drop's rules.
-    void Invalidate(int tenant, const TileRequest& r);
+    // B11: `moved` -- the slot's GROUND changed (a window's step, Tenant::Move), not the tile's
+    // version: the old bytes are another place's and are let go at once (readers fall to the
+    // parent); the version law (old bytes held until the replacement lands) is for a repaint.
+    void Invalidate(int tenant, const TileRequest& r, bool moved = false);
     // PHASE A1 (the window's step, an instrument): the pool slot of a held tile -- mapped and
     // landed -- at a slot address, or UINT32_MAX. A tile a step kept is held at the same pool slot
     // the turns after it: its bytes were never moved, re-read or copied.
@@ -644,7 +647,8 @@ private:
     };
     std::vector<Retiring> m_retiring;   // M9ba: dropped-while-mapped, NULL-mapped after overlap
     std::mutex m_invMx;
-    std::vector<std::pair<int, TileRequest>> m_invQ;   // M9bb: invalidations from paint threads
+    struct Inv { int tenant; TileRequest req; bool moved; };
+    std::vector<Inv> m_invQ;   // M9bb: invalidations from paint threads; B11: moved = ground changed
     // Marks the tile dropped and, when it was mapped, retires it. Returns that -- the caller
     // compacts m_mapped ONCE afterwards (erase_if on `dropped`, order kept) instead of a
     // std::find per tile: Drop() of a 23-slice tenant was O(dropped x mapped).

@@ -265,8 +265,8 @@ struct Tenant::State {
         q.face = SliceOf(tag) + r.face;
         Invalidate(q);
     }
-    void Invalidate(const TileRequest& q) const {
-        if (mgr) mgr->Invalidate(id, q);
+    void Invalidate(const TileRequest& q, bool moved = false) const {
+        if (mgr) mgr->Invalidate(id, q, moved);
         else if (sink) sink(q);
     }
     // The [tenant] line: the declaration as the boot log's law (Tenant.h's banner), bindings and
@@ -497,7 +497,7 @@ uint32_t Tenant::Move(uint32_t slice, const BlockBinding& to) {
                 if (ha == hb && (!ha || (a.face == b.face && a.mip == b.mip && a.x == b.x && a.y == b.y))) {
                     continue;
                 }
-                m_s->Invalidate(TileRequest{slice, m, x, y});
+                m_s->Invalidate(TileRequest{slice, m, x, y}, /*moved=*/true);   // B11: the ground moved
                 ++told;
             }
         }

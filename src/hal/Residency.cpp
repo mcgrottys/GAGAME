@@ -890,9 +890,9 @@ bool ResidencyManager::DropOne(const std::shared_ptr<Tracked>& tr) {
     return true;
 }
 
-void ResidencyManager::Invalidate(int tenant, const TileRequest& r) {
+void ResidencyManager::Invalidate(int tenant, const TileRequest& r, bool moved) {
     std::lock_guard<std::mutex> lk(m_invMx);
-    m_invQ.push_back({tenant, r});
+    m_invQ.push_back({tenant, r, moved});
 }
 
 void ResidencyManager::Drop(int tenant) {
@@ -946,13 +946,15 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     if (traceRes && m_frame <= kSlotAuditFrames) AuditSlots();
     // M9bb: apply the invalidations the painting threads queued (one tile each).
     {
-        std::vector<std::pair<int, TileRequest>> q;
+        std::vector<Inv> q;
         {
             std::lock_guard<std::mutex> lk(m_invMx);
             q.swap(m_invQ);
         }
         bool compact = false;
-        for (const auto& [tenant, r] : q) {
+        for (const Inv& inv : q) {
+            const int tenant = inv.tenant;
+            const TileRequest& r = inv.req;
             Tracked* tr = Find(tenant, r);
             if (auditEvery) AuditInvalidation(tenant, r, tr);   // counted before the drop
             if (!tr) continue;
@@ -960,7 +962,9 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             // THE VERSION LAW: a HELD tile is not released by a change -- its version is. Its bytes
             // stay mapped and held (stale in the ledger) until its replacement lands whole, then
             // swap in place, in one turn (MapAndFill's refill); its children keep their parent.
-            if (tr->state == TileState::Mapped && tr->landed && !tr->dropped) {
+            // B11: NOT when the slot's ground moved (a window's step): the held bytes are another
+            // place's, and a reader addressing the slot would draw them there. Let go now.
+            if (!inv.moved && tr->state == TileState::Mapped && tr->landed && !tr->dropped) {
                 tr->stale = true;
                 bool asked = false;
                 for (Refresh& f : m_refresh) {
