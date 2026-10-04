@@ -13,7 +13,7 @@
 //      time       {start, timeScale, paused, windowDays}
 //      sun        {source, az, el}             -- ephemeris, or pinned at az/el
 //      sea        {storm{hs, tp, dir}, datum{fromStation, mllwToNavd}}
-//      water      {oneWater, pixelWater, foam, edgePx, heightScale, swe{...}, bank{...},
+//      water      {pixelWater, foam, edgePx, heightScale, swe{...}, bank{...},
 //                  wavefield{...}, closures{...}, fleet{...}}   -- the last three are what
 //                  data/wave_scene.json overlays through `include` (the M8 law survives:
 //                  authored if absent, never clobbered, hot-reloaded)
@@ -185,7 +185,7 @@ struct FleetProps {
     bool enabled = false;             // boats: List(FleetBoat), unnamed
 };
 struct WaterSection {
-    bool oneWater = true, pixelWater = true;
+    bool pixelWater = true;
     float foam = 1.0f, edgePx = 12.0f, heightScale = 1.15f;
     SweProps swe;
     BankProps bank;

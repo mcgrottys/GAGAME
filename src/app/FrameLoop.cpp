@@ -1780,8 +1780,6 @@ std::optional<int> FrameLoop::Session() {
 // the live section and data/wave_scene.json reach that component through one door.
 void FrameLoop::ApplyWater() {
     if (SeaLayer* sea = m_A.sea) {
-        sea->foamIntensity = m_live.water.foam;
-        sea->targetEdgePx = m_live.water.edgePx;
         sea->heightScale = m_live.water.heightScale;
         sea->sweCurrentGain = m_live.water.swe.gain;
     }
@@ -2388,19 +2386,11 @@ bool FrameLoop::Frame() {
             // M9b: THE GEOMETRY QUESTION, answered by the rasterizer. Shading sells
             // amplitude the geometry may not actually have (priors 8), so the honest
             // check is to stop filling the triangles. G cycles shipped -> wireframe
-            // -> meshlet tint. Both surfaces flip together: in one-water mode the
-            // globe mesh IS the sea, and off it the SeaLayer grid is what draws.
-            const int mode = globe ? (globe->surfaceDebug + 1) % 3
-                                   : ((sea && !sea->wireframe) ? 1 : 0);
-            if (globe) globe->surfaceDebug = mode;
-            if (sea) sea->wireframe = (mode == 1);
+            // -> meshlet tint. The globe mesh IS the sea.
+            if (globe) globe->surfaceDebug = (globe->surfaceDebug + 1) % 3;
         }
         if (in.keyPressed['V']) {
-            if (mode == 1 && globe && altOf(cam) > 6000.0) {
-                globe->windOverlay = !globe->windOverlay;
-            } else if (sea) {
-                sea->atlasVisualize = !sea->atlasVisualize;
-            }
+            if (mode == 1 && globe && altOf(cam) > 6000.0) globe->windOverlay = !globe->windOverlay;
         }
         if (in.keyPressed[VK_TAB] && (sea || gulf || globe)) {
             int next = mode;
@@ -3243,7 +3233,7 @@ bool FrameLoop::Frame() {
             globe->SetWaterBank(waterBank->DispSrv(), waterBank->ParamSrv(),
                                 waterBank->DetailSrv(), derivS, patchS, bandKS,
                                 bandRmsS, bandFoldS, sea->heightScale,
-                                waterBank->BaseTexelM(), orgs, S.water.oneWater);
+                                waterBank->BaseTexelM(), orgs);
             // M13 step 2: the cascade sea's plane AT THE EYE, for the pixel stage's sub-ring
             // bands -- the same plane the bank's texels were filled from. A chart cell is
             // hundreds of kilometres across, so one frame's pixels sit inside one.
@@ -4070,7 +4060,6 @@ bool FrameLoop::Frame() {
         renderer.DumpPng(S.dumpW);
         dumpedSolid = true;
         if (globe) globe->surfaceDebug = 1;
-        if (sea) sea->wireframe = true;
         return true;
     }
     if (S.capture.frames &&

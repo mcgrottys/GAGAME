@@ -356,13 +356,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         sea = seaOwned.get();
         sea->Configure(shaderDir, &seaState);
         sea->SetSurface(&surface);   // M12 step 4b: the world.flat chart, for the churn's geoA row
-        sea->foamIntensity = S.water.foam;
-        sea->pixelWater = S.water.pixelWater;   // M9bh: shade in PsMain, not DsMain
-        sea->targetEdgePx = S.water.edgePx;
         sea->sweCurrentGain = S.water.swe.gain;
         sea->heightScale = S.water.heightScale;
-        sea->atlasVisualize = opt.viz;
-        sea->wireframe = opt.surfaceDebug == 1;
         sea->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
         if (S.sea.storm.hs > 0.01f) sea->SetStorm(S.sea.storm.hs, S.sea.storm.tp, S.sea.storm.dir);
         renderer.AddLayer(std::move(seaOwned));
@@ -671,7 +666,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         // (And for a scene with GATES: the sea seen through a gate's window is seen from the
         // carried eye, so it needs rings anchored there -- the same second bank, the same law.
         // With a gate in reach and no window in view the rings stand anchored and unfilled.)
-        if ((droste || !S.gates.empty()) && S.water.oneWater) {
+        if (droste || !S.gates.empty()) {
             auto wbB = std::make_unique<WaterBankLayer>();
             waterBankB = wbB.get();
             waterBankB->Configure(shaderDir, sea, &swe, &bathySwe, &waterAtlas, &compositor,
@@ -683,11 +678,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             waterBankB->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             waterBankB->enabled = false;   // until the camera has a level above it
             renderer.AddLayer(std::move(wbB));
-        }
-        sea->drawEnabled = !S.water.oneWater;
-        if (S.water.oneWater) {
-            Log("[waterbank] ONE-WATER: the SeaLayer grid retires; the globe's meshlets "
-                "displace from the bank");
         }
     }
 
@@ -1342,7 +1332,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         // declares no page tenant and gets no paint row, which is the truth of it.
         surface.RegisterEdges();
         ga::ast::RegisterKnownWaterEdges();
-        ga::ast::SetActive("sea.ps", !S.water.oneWater);
         // M9bh: --pixel-water re-opens eight edges into the pixel stage (the two rays
         // and what they read). Declared only when the flag is on -- an edge for a mode
         // the run is not in is graph rot wearing the other sign.

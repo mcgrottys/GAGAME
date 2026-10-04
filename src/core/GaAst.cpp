@@ -227,16 +227,9 @@ void RegisterKnownWaterEdges() {
     // resolve (AUDIT_WATER item 5).
     Register({"height.pages", "churn.kernel", "bed", mercPxW, uvSW, false, "m NAVD",
               "z14 slice; -30 m off the page", 1.0, "SeaChurn.hlsl PageBedAt"});
-    Register({"height.pages", "sea.ps", "bed", mercPxW, uvSW, false, "m NAVD",
-              "cube + z14 page", 1.0, "Sea.hlsl BedAt -> ComposedHeight(SeaPlanetDir)"});
     Register({"height.pages", "swe.solver", "bed", mercPxW, uvSW, false, "m NAVD",
               "z14 slice; +100 m wall off the page", 1.0,
               "Swe.hlsl BedAt (lattice -> lat/lon -> page uv, residency-clamped)"});
-    Register({"swe.solver", "sea.ps", "eta", rowS, atlasN, true, "m dEta", "+-1.5", 1.0,
-              "Sea.hlsl SweDEta (1-uv.y)"});
-    Register({"exposure.node", "sea.ps", "exposure", mercPxW, uvSW, false, "0..1 exposure",
-              "0.12..1", 1.0, "Sea.hlsl SweShadow (uv.x, 1-uv.y)"});
-    // M9bg: `churn.kernel -> sea.ps` retired -- the churn atlas was a per-pixel foam texture.
     Register({"compose.stack", "water.bank", "corners", worldM, worldM, false,
               "m NAVD level/bed + hsScale", "hsScale 0.15..3", 1.0,
               "WaterBankLayer CornerParams (CPU)"});
@@ -337,8 +330,6 @@ void RegisterKnownWaterEdges() {
     Register({"mask.pages", "globe.ps", "classifier + edit override", mercPxW, uvSW, false,
               "land 0..1, edited 0..1, or no opinion", "finest page with an opinion", 1.0,
               "Compose.hlsli CsMaskSample / ComposedLandness"});
-    Register({"mask.pages", "sea.ps", "classifier + edit override", mercPxW, uvSW, false, "land bit",
-              "ComposedIsLand", 1.0, "Sea.hlsl ComposedIsLand"});
     Register({"globe.ps", "frame.out", "radiance (accepting state)", worldM, worldM,
               false, "linear RGB -> tonemap", "the render", 1.0, "Renderer tonemap"});
 }
@@ -403,9 +394,6 @@ void RegisterSolarEdges() {
               tangent, false, "unit vector",
               "T,R,M,D then CsToTangent; topocentric, 8.8 arcsec of parallax", 1.0,
               "Ephemeris.h Build + SunDirFromPlanetPoint -> Renderer sunDirTangent (gSunDir)"});
-    Register({"solar.sun", "sea.ps", "sun direction (versor chain, tangent frame)", solarAu,
-              tangent, false, "unit vector", "the same gSunDir -- one place, every layer", 1.0,
-              "Renderer SceneConstants sunDir (Sea.hlsl gSunDir)"});
     Register({"solar.sun", "globe.mesh", "sun direction (per-vertex water shading)", solarAu,
               tangent, false, "unit vector", "WaterVertexColor's lambert + Cox-Munk lobe", 1.0,
               "Globe.hlsl WaterVertexColor (gSunDir)"});
@@ -440,9 +428,6 @@ void RegisterPixelWaterEdges() {
     Register({"color.pages", "globe.ps", "bed albedo (--pixel-water)", mercPx, uvS, false,
               "sRGB", "at the refracted ray's bed hit, 2 secant steps", 1.0,
               "Globe.hlsl WaterPixelColor ComposedColor(bedDir)"});
-    Register({"color.pages", "sea.ps", "bed albedo (--pixel-water)", mercPx, uvS, false,
-              "sRGB", "at the refracted ray's bed hit in the flat frame", 1.0,
-              "Sea.hlsl SeaPixelColor ComposedColor(SeaPlanetDir(bedXZ))"});
     // The height quadtree IS the scene description the refracted ray traces against; the
     // secant loop reads it at the pixel's own lod. (The vertex+pixel classification edge
     // already registered in RegisterKnownComposeEdges covers the same producer/field, so

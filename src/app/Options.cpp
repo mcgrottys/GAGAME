@@ -429,8 +429,6 @@ Options ParseArgs(int argc, char** argv) {
         }
         else if (a == "--ocean-probe") o.oceanProbe = next("42.35,-70.65");
         // M9bp: both are the DEFAULT now; the positive forms stay so scripts keep parsing.
-        else if (a == "--one-water") o.oneWater = true;
-        else if (a == "--no-one-water") o.oneWater = false;
         else if (a == "--pixel-water") o.pixelWater = true;
         else if (a == "--no-pixel-water") o.pixelWater = false;
         else if (a == "--sun") {
@@ -620,7 +618,6 @@ SceneArgs Options::ToSets(const Options& o) {
         set("sea.datum.mllwToNavd", f32(o.datumOff));
     }
     // ---- water
-    if (o.oneWater != D.oneWater) set("water.oneWater", JsonBool(o.oneWater));
     if (o.pixelWater != D.pixelWater) set("water.pixelWater", JsonBool(o.pixelWater));
     if (o.foam != D.foam) set("water.foam", f32(o.foam));
     if (o.edgePx != D.edgePx) set("water.edgePx", f32(o.edgePx));

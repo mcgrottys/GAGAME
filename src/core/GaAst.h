@@ -42,7 +42,7 @@ struct Frame {
 
 struct Edge {
     const char* from;    // producing node ("swe.solver", "ocean.fft", "churn.kernel", ...)
-    const char* to;      // consuming node ("water.bank", "sea.ps", "globe.ps", ...)
+    const char* to;      // consuming node ("water.bank", "globe.ps", ...)
     const char* field;   // "eta", "cascade.disp", "churn", "shadow", ...
     Frame src, dst;
     bool flip;           // does the SAMPLING CODE apply a v-flip on this edge?
