@@ -29,29 +29,34 @@ void SweSolver::LogCbFingerprint() {
     }
 }
 
-void SweSolver::SetHeightPage(Gpu& gpu, hal::Resource heightArr, hal::Resource resMapArr,
-                              uint32_t slice, uint32_t mips, const Lattice& window) {
-    (void)gpu;   // the table carries the device
-    // M9ax: the WHOLE tenant -- cube faces and the page -- so the kernel resolves the bed
-    // anywhere, not only inside the one page (ArraySize -1 = every slice).
+void SweSolver::SetBed(Gpu& gpu, hal::Resource heightArr, hal::Resource resMapArr, uint32_t mips,
+                       const BedWindow& w) {
+    (void)gpu;
     m_table.SrvArray(0, heightArr, DXGI_FORMAT_R16_FLOAT, 0, UINT32_MAX, mips);
     m_table.SrvArray(1, resMapArr, DXGI_FORMAT_R8_UNORM, 0, UINT32_MAX, 1);
-    // Lattice texel -> lat/lon: row 0 is the NORTH edge, so latitude walks south.
     m_cb.geoLL[0] = static_cast<float>(m_bathy->Lon0());
     m_cb.geoLL[1] = static_cast<float>(m_bathy->Lat1());
     m_cb.geoLL[2] = static_cast<float>(m_bathy->Dlon());
     m_cb.geoLL[3] = static_cast<float>(-m_bathy->Dlat());
-    // M12 step 4b: the page frame row from the window's lattice (the old four casts bit for
-    // bit; the [kernel] swe hash is the gate).
-    window.Rows(m_cb.winA);
-    m_cb.pageB[0] = static_cast<float>(slice);
+    constexpr double kD2R = 3.14159265358979323846 / 180.0;
+    m_cb.standA[0] = static_cast<float>((m_bathy->Lat1() - w.latC) * kD2R);
+    m_cb.standA[1] = static_cast<float>((m_bathy->Lon0() - w.lonC) * kD2R);
+    m_cb.standA[2] = static_cast<float>(-m_bathy->Dlat() * kD2R);
+    m_cb.standA[3] = static_cast<float>(m_bathy->Dlon() * kD2R);
+    m_cb.standB[0] = static_cast<float>(std::sin(w.latC * kD2R));
+    m_cb.standB[1] = static_cast<float>(std::cos(w.latC * kD2R));
+    m_cb.standB[2] = static_cast<float>(w.R);
+    m_cb.standB[3] = m_cb.dx;   // the cell's grain: its east-west side
+    static_assert(sizeof(w.rows) == sizeof(float) * 80, "the kernels' rows");
+    memcpy(m_cb.hwU, w.rows, sizeof(w.rows));
+    m_bedSlice = w.slice;   // the standing window's slice (PageSlice)
     m_bedArr = heightArr;
     m_bedRes = resMapArr;
     m_bedMips = mips;
     m_bedBound = true;
-    Log("[swe] bed bound to the height megatexture: page slice %u, %u mips, residency-clamped "
-        "per texel -- the solver, the water shading and the globe read ONE bed",
-        slice, mips);
+    Log("[swe] bed bound to the standing window: slice %u, about %.5f N %.5f E, %u mips, the "
+        "cell's grain %.2f m -- the solver reads the pyramid through its own window",
+        w.slice, w.latC, w.lonC, mips, double(m_cb.dx));
 }
 
 bool SweSolver::TraceBed(Gpu& gpu, BedTrace& out, float floorMip) {

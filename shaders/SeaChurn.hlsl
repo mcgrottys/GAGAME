@@ -16,6 +16,8 @@
 // ================================================================================================
 #include "Jet.hlsli"
 
+#include "WindowRows.hlsli"
+
 cbuffer ChurnCb : register(b0) {
     float gOriginX, gOriginZ, gTexelM, gDomainM;
     uint  gTilesX, gTileW, gTileH, gListCount;
@@ -28,11 +30,14 @@ cbuffer ChurnCb : register(b0) {
     float4 gBathyG;  // M5c: world x0, z0, 1/sizeX, 1/sizeZ of the CUDEM (row 0 = north)
     float4 gSweM;    // M5c: x = solved-field on, y = current gain, zw = seaward blend x-range
     float4 gGeoA;    // M9ar: world -> lat/lon: orgLat, orgLon, 1/mPerLat, 1/mPerLon
-    float4 gWinA;    // M9ar: height page frame: org px x, org px y, 1/16384, world px at z14
-    float4 gPageB;   // M9ax: x = the z14 page's slice
     float4 gWindow;  // M9az: x, y = world tile index of the window's origin; z = atlas tiles in y in the tenant's array
+    // PHASE B2: the camera's world's windows -- its eye in the tangent axes less (0, R, 0), w = R,
+    // then its rows (WindowRows.hlsli). Appended at the END on both sides.
+    float4 gEyeT;
+    HP_WINDOW_ROWS_DECL
 };
 
+#define HP_WINDOW_ROWS 1
 #include "HeightPages.hlsli"
 
 StructuredBuffer<uint> gTileList : register(t0);
@@ -50,10 +55,17 @@ SamplerState sWrap : register(s0);
 SamplerState sClamp : register(s1);
 
 // The bed at a world point: the flat-one-world map to lat/lon, then the page-or-cube rule.
+// PHASE B2: the windows' chain at the texel's own point -- the flat world point (the sea's world IS
+// the tangent frame about the anchor's ground: Sea.hlsl's SeaPoint) about the camera's eye -- read at
+// the churn's own texel; the direction (for the cube) by the flat chart, as before.
 float PageBedAt(float2 world) {
     const float lat = gGeoA.x + world.y * gGeoA.z;
     const float lon = gGeoA.y + world.x * gGeoA.w;
-    return HpHeightAt(gBathy, gBathyRes, lat, lon, gWinA, uint(gPageB.x), 0.0f);
+    const float latR = lat * 0.01745329252f, lonR = lon * 0.01745329252f;
+    const float3 dir = float3(cos(latR) * cos(lonR), sin(latR), cos(latR) * sin(lonR));
+    const float drop = dot(world, world) / (2.0f * gEyeT.w);
+    const float3 p = float3(world.x - gEyeT.x, -drop - gEyeT.y, world.y - gEyeT.z);
+    return HpHeightChain(gBathy, gBathyRes, dir, WindowChain(p, 0u), gTexelM);
 }
 
 uint2 TileTexel(uint3 id) {

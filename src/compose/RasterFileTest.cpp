@@ -727,30 +727,6 @@ bool RunRasterFileSelfTest() {
               "at its grain (%u,%u,%u)", coarse[0], coarse[1], coarse[2], fine[0], fine[1], fine[2]);
     }
 
-    // ---- 7. faceWindows auto: the blocks the grains ask for, walked -----------------------------
-    {
-        const double lat = 25.8547, lon = -80.19, dLat = 1000.0 / 111320.0,
-                     dLon = dLat / std::cos(lat * kD2R);
-        const std::string key = SurfaceFrame::AutoKey(
-            {{"two_km_050", lon - dLon, lat - dLat, lon + dLon, lat + dLat, 0.5},
-             {"two_hundred_m_005", lon - 0.1 * dLon, lat - 0.1 * dLat, lon + 0.1 * dLon, lat + 0.1 * dLat, 0.05}});
-        SurfaceFrame sf;
-        const bool declared = sf.DeclareBlocks(key);
-        std::string rungs;
-        for (const FaceWindow& b : sf.blocks) rungs += std::to_string(b.rung) + " ";
-        auto walk = [&](double la, double lo) {
-            const double d[3] = {std::cos(la * kD2R) * std::cos(lo * kD2R), std::sin(la * kD2R),
-                                 std::cos(la * kD2R) * std::sin(lo * kD2R)};
-            SurfaceFrame::WalkStep steps[SurfaceFrame::kMaxRanks];
-            return sf.Walk(d, steps);
-        };
-        const uint32_t atCentre = walk(lat, lon), atCorner = walk(lat + 0.9 * dLat, lon + 0.9 * dLon);
-        Check(declared && sf.blocks.size() <= SurfaceFrame::kMaxBlocks && atCentre == 5 && atCorner >= 3,
-              "auto: %zu blocks (rungs %s); the 0.05 m file's centre walks %u ranks, the 0.5 m file's "
-              "corner %u (4 where its rank-4 block found a row)", sf.blocks.size(), rungs.c_str(),
-              atCentre, atCorner);
-    }
-
     // ---- 8. A SOURCE PAINTS ITS OWN LEVEL, AND THE TREE MAKES THE OTHERS (HIERARCHY 4.20), on
     // the pyramid's lattice, in scratch roots of this run under out\rastertest\trees ------------
     const std::string trees = "out/rastertest/trees/" + std::to_string(GetCurrentProcessId()) + "_" +
@@ -877,6 +853,112 @@ bool RunRasterFileSelfTest() {
             const int caught = Unfolded(dirOf(td), pyr, om, sh.Info(), ck, f1);
             Check(caught > 0, "PLANT the own mip off by one (%d for %d): %s (%d: %s)", sh.OwnMip(pyr), om,
                   caught ? "CAUGHT" : "NOT caught", caught, f1.c_str());
+        }
+        // 5. PHASE A4, 4.20's third clause: A TILE FINER THAN EVERY SOURCE'S OWN LEVEL IS THE LEVEL
+        // ABOVE, MAGNIFIED. The tree's provider answers it with no bytes and g_tileMagnified, and
+        // writes nothing for it; a compose is magnified only below the finest of the sources that
+        // touch the tile, and never where one of them has every level (a vector).
+        {
+            TileRequest own{};
+            bool found = false;
+            for (const auto& t : filesA) {
+                if (found || int(t.second.mip) != om || t.first.find(".bin") == std::string::npos) continue;
+                own = t.second;
+                found = true;
+            }
+            // A child and a grandchild whose centres lie inside the raster (the tile at the corner
+            // may lie past its edge, void by arithmetic -- the first run of this gate asked one).
+            const SourceInfo& si = src.Info();
+            auto inside = [&](const TileRequest& r) {
+                TileBox b{};
+                pyr.Box(r, b);
+                const double la = 0.5 * (b.latMin + b.latMax) / kD2R, lo = 0.5 * (b.lonMin + b.lonMax) / kD2R;
+                return la > si.lat0 && la < si.lat1 && lo > si.lon0 && lo < si.lon1;
+            };
+            TileRequest child{own.face, own.mip - 1, own.x * 2, own.y * 2};
+            for (uint32_t k = 0; k < 4 && !inside(child); ++k) child = {own.face, own.mip - 1, own.x * 2 + (k & 1), own.y * 2 + (k >> 1)};
+            TileRequest grand{child.face, child.mip - 1, child.x * 2, child.y * 2};
+            for (uint32_t k = 0; k < 4 && !inside(grand); ++k) grand = {child.face, child.mip - 1, child.x * 2 + (k & 1), child.y * 2 + (k >> 1)};
+            found = found && inside(child) && inside(grand);
+            auto ask = [](const TileProviderFn& fn, const TileRequest& r, size_t& bytes) {
+                g_tileMagnified = false;
+                std::vector<uint8_t> o;
+                fn(r, o, nullptr);
+                bytes = o.size();
+                const bool m = g_tileMagnified;
+                g_tileMagnified = false;
+                return m;
+            };
+            TileTree tm(&layer, TileTree::Fmt::Rgba8, nullptr, trees + "/magnified");
+            const TileProviderFn fn = tm.Provider(pyr);
+            size_t bo = 0, bc = 0, bg = 0;
+            const bool mo = ask(fn, own, bo), mc = ask(fn, child, bc), mg = ask(fn, grand, bg);
+            const size_t written = TilesIn(dirOf(tm)).size();
+            Check(found && om >= 2 && !mo && bo == 65536 && mc && bc == 0 && mg && bg == 0 &&
+                      tm.magnified.load() == 2 && written == 1,
+                  "the raster's own level (mip %d) answers bytes (%zu), its child at mip %d and grandchild "
+                  "at mip %d answer the parent magnified (%s, %zu bytes; %s, %zu bytes), %u magnified, "
+                  "%zu file written (the own tile's)", om, bo, om - 1, om - 2, mc ? "magnified" : "BYTES", bc,
+                  mg ? "magnified" : "BYTES", bg, tm.magnified.load(), written);
+            // Beside a vector (a source of every level whose footprint is the raster's), never.
+            class Vector : public ColorSource {
+            public:
+                SourceInfo info;
+                const SourceInfo& Info() const override { return info; }
+                float Sample(double, double, double, const PaintCtx&, uint8_t rgba[4]) override {
+                    rgba[0] = rgba[1] = rgba[2] = rgba[3] = 200;
+                    return 1.0f;
+                }
+            } vec;
+            vec.info = src.Info();
+            vec.info.name = "test.vector";
+            vec.info.cmPerPixel = 0.0;
+            ColorLayerSource vecL(&vec);
+            auto keep = [](DomainSource* d) { return std::shared_ptr<DomainSource>(d, [](DomainSource*) {}); };
+            auto dc = std::make_shared<DomainCompositor>();
+            dc->SetBlend(DomainCompositor::Blend::LayeredOver);
+            dc->Add(keep(&layer));
+            dc->Add(keep(&vecL));
+            CompositeSource both("test.both", dc);
+            TileTree tv(&both, TileTree::Fmt::Rgba8, nullptr, trees + "/beside_vector");
+            size_t bv = 0;
+            const bool mv = ask(tv.Provider(pyr), child, bv);
+            Check(!mv && bv == 65536, "beside a vector of every level the raster's child is not magnified "
+                  "(%s, %zu bytes): the vector has something of its own there", mv ? "MAGNIFIED" : "bytes", bv);
+            // GATED by the same vector, it is: a gate paints nothing, it multiplies the weight of
+            // what it gates, so the gated tile's level is the raster's.
+            GateSource gated("test.gated", keep(&layer), keep(&vecL));
+            TileTree tg(&gated, TileTree::Fmt::Rgba8, nullptr, trees + "/gated");
+            size_t bg2 = 0;
+            const bool mg2 = ask(tg.Provider(pyr), child, bg2);
+            Check(mg2 && bg2 == 0, "gated by a vector of every level the raster's child IS magnified (%s, "
+                  "%zu bytes): a gate has no level of its own", mg2 ? "magnified" : "BYTES", bg2);
+            // Google at its cap: its finest at the place is the cap's pixel on the ground.
+            GoogleColorSource g(nullptr, 14);
+            TileBox gb{};
+            pyr.Box(own, gb);
+            const int gf = g.FinestMip(pyr, gb.latMin, gb.latMax, gb.lonMin, gb.lonMax);
+            const double lat = 0.5 * (gb.latMin + gb.latMax), lon = 0.5 * (gb.lonMin + gb.lonMax);
+            const double grain = 40075016.686 / 256.0 / 16384.0 * std::cos(lat);
+            double a0 = 0, b0 = 0, a1 = 0, b1 = 0;
+            pyr.TexelGround(uint32_t(gf), lat, lon, a0, b0);
+            pyr.TexelGround(uint32_t(gf + 1), lat, lon, a1, b1);
+            Check(gf > 0 && (std::max)(a0, b0) <= grain && (std::max)(a1, b1) > grain,
+                  "Google at z14 here: its finest is mip %d (texel %.2f x %.2f m) under its pixel of %.2f m "
+                  "(the next coarser %.2f x %.2f m)", gf, a0, b0, grain, a1, b1);
+            // PLANT the raster declared with every level: its child is painted, bytes of its own.
+            class Every : public RasterFileSource {
+            public:
+                int FinestMip(const Lattice&, double, double, double, double) const override { return -1; }
+            } ev;
+            ev.Load(reg, ar.file, none, &why);
+            ColorLayerSource evl(&ev);
+            TileTree te(&evl, TileTree::Fmt::Rgba8, nullptr, trees + "/every");
+            size_t be = 0;
+            const bool me = ask(te.Provider(pyr), child, be);
+            Check(!me && be == 65536, "PLANT the raster declared with every level: its child at mip %d is "
+                  "answered with %zu bytes of its own where it is the parent magnified: %s", om - 1, be,
+                  !me ? "CAUGHT" : "NOT caught");
         }
     }
 

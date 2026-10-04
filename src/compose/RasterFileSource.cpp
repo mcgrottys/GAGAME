@@ -259,14 +259,7 @@ int RasterFileSource::OwnMip(const Lattice& lattice) const {
     if (m_files.empty()) return -1;
     const double lat = 0.5 * (m_info.lat0 + m_info.lat1) * kD2R;
     const double lon = 0.5 * (m_info.lon0 + m_info.lon1) * kD2R;
-    int own = 0;
-    for (uint32_t m = 0; m <= lattice.MaxMip(); ++m) {
-        double a = 0.0, b = 0.0;
-        lattice.TexelGround(m, lat, lon, a, b);
-        if ((std::max)(a, b) > m_grainM * (1.0 + 1e-9)) break;
-        own = static_cast<int>(m);
-    }
-    return own;
+    return (std::max)(lattice.LevelOf(m_grainM, lat, lon), 0);
 }
 
 bool RasterFileSource::ToCrs(double lat, double lon, double& x, double& y) const {

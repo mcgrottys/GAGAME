@@ -3,7 +3,6 @@
 #include "app/Tools.h"
 
 #include "compose/Compositor.h"
-#include "compose/SurfaceFrame.h"
 #include "core/Common.h"
 #include "hal/Gpu.h"
 #include "core/Image.h"
@@ -32,8 +31,7 @@ namespace {
 //         surface consumes, hand-inspectable in any DCC tool
 // ================================================================================================
 static int RunChannelExport(const std::string& spec, const std::wstring& outPath,
-                            Compositor& comp, int colCh, int hgtCh,
-                            const SurfaceFrame& surface) {
+                            Compositor& comp, int colCh, int hgtCh) {
     std::string name = spec;
     uint32_t mip = 2;
     if (const size_t c = spec.find(':'); c != std::string::npos) {
@@ -43,19 +41,7 @@ static int RunChannelExport(const std::string& spec, const std::wstring& outPath
     TileProviderFn fn;
     bool height = false;
     uint32_t tileW = 128, tileH = 128, face = 0;
-    if (name == "earth.color.window" && colCh >= 0) {
-        fn = comp.WindowColor(colCh, surface.win.orgPxX, surface.win.orgPxY,
-                              surface.win.faceDim, surface.win.zBase);
-    } else if (name == "earth.color.inlet" && colCh >= 0) {
-        // M6l: a z19 export-only realization (~22 cm ground at this latitude) centred on the
-        // MassGIS ortho coverage -- deep enough to JUDGE the 15 cm aerial layer's painting.
-        fn = comp.WindowColor(colCh, 40699567, 49405858, 16384, 19);
-    } else if (name == "earth.height.window" && hgtCh >= 0) {
-        fn = comp.WindowHeight(hgtCh, surface.winH.orgPxX, surface.winH.orgPxY,
-                               surface.winH.faceDim, surface.winH.zBase);
-        height = true;
-        tileW = 256;
-    } else if (name.rfind("earth.color.cube.f", 0) == 0 && colCh >= 0) {
+    if (name.rfind("earth.color.cube.f", 0) == 0 && colCh >= 0) {
         face = static_cast<uint32_t>(name.back() - '0') % 6;
         fn = comp.CubeColor(colCh);
     } else if ((name.rfind("earth.height.cube.f", 0) == 0 ||
@@ -67,7 +53,6 @@ static int RunChannelExport(const std::string& spec, const std::wstring& outPath
         tileW = 256;
     } else {
         Log("[export] unknown channel '%s' (or its stack is not configured). Channels: "
-            "earth.color.window, earth.color.inlet (z19), earth.height.window, "
             "earth.color.cube.f0..5, earth|mars.height.cube.f0..5",
             name.c_str());
         return 1;
@@ -177,9 +162,9 @@ static int RunChannelExport(const std::string& spec, const std::wstring& outPath
 }  // namespace
 
 int RunExport(const Options& opt, Gpu& gpu, Compositor& compositor, int hgtCh,
-              ResidencyManager& resMgr, int colCh, const SurfaceFrame& surface) {
+              ResidencyManager& resMgr, int colCh) {
     const int rc =
-        RunChannelExport(opt.exportSpec, opt.exportOut, compositor, colCh, hgtCh, surface);
+        RunChannelExport(opt.exportSpec, opt.exportOut, compositor, colCh, hgtCh);
     gpu.WaitIdle();
     resMgr.Shutdown();
     return rc;

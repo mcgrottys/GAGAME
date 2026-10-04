@@ -146,6 +146,12 @@ public:
     // coarser tile is the fold of its four children, kept; a finer one is the source magnified.
     // -1: the node answers at every grain (every node but a raster by file).
     virtual int OwnMip(const Lattice&) const { return -1; }
+    // PHASE A4, 4.20's third clause: THE FINEST LEVEL the source has anything of its own for over a
+    // box (lat0, lat1, lon0, lon1 radians); a finer tile is the level above, magnified, and holds
+    // no bytes of its own (TileTree::Magnified). A raster's is its own level; a source with levels
+    // of its own (Google) the finest it serves at the place; a product of the height the height's
+    // grain there; -1, every level: a vector, exact at any grain.
+    virtual int FinestMip(const Lattice& l, double, double, double, double) const { return OwnMip(l); }
     // M9am: WHAT A CACHE MAY KEY THIS NODE'S OUTPUT ON. A leaf's tiles on disk are a function of
     // the data it reads and nothing else, so the default is name + unit; a loader that knows its
     // structure (a tile tree, a file version) says so, and a wrapper that changes nothing
@@ -423,6 +429,9 @@ public:
         return m_inner->Footprint(a, b, c, d);
     }
     int OwnMip(const Lattice& l) const override { return m_inner->OwnMip(l); }
+    int FinestMip(const Lattice& l, double a, double b, double c, double d) const override {
+        return m_inner->FinestMip(l, a, b, c, d);
+    }
     bool SampleAt(const DomainQuery& q, DomainValue& out) const override {
         if (!m_inner->SampleAt(q, out)) return false;
         const uint32_t n = m_inner->Channels();

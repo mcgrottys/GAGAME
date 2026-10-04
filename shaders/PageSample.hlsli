@@ -3,7 +3,8 @@
 //
 //  A page tenant (hal::Tenant) is one reserved Texture2DArray whose slices are pages of the
 //  shared (level, x, y) space -- the cube's six faces (slices 0..5, read through the cube views,
-//  hardware-seamless across faces) and the Mercator pages (the z14 window, the z17 detail) --
+//  hardware-seamless across faces) and the windows of the pyramid (PHASE B3: the Mercator pages
+//  and their spellings, PageUv / PageUvLatLon / PageUvAbout, are deleted) --
 //  with a residency-map array beside it: R8, a byte per 128th of the page, the finest resident
 //  mip times 16, conservative by construction (the coarsest answer of the tiles it covers).
 //  Every consumer of one -- Compose.hlsli's pixel-stage colour, height and survey-mask reads;
@@ -11,19 +12,6 @@
 //  and WaterBank's own exposure and wave-page reads -- shares what is stated here and nothing
 //  else:
 //
-//    PageUv          the window uv of a planet DIRECTION (Compose.hlsli's CsWindowUv, moved);
-//    PageUvLatLon    the same Mercator closed form from lat/lon in DEGREES -- the kernels'
-//                    spelling (HeightPages.hlsli's, which WaterBank.hlsl repeated twice). TWO
-//                    spellings and not one, because they are NOT bit-identical. Measured in
-//                    float32, the shaders' ops in the shaders' order, over the solver's
-//                    1863x1174 cells, the bank's six rings at the helm and a 4096^2 grid of the
-//                    whole z14 page (step 4e, scratchpad/step4e_uv_ab.py): 10-13 % of the texels
-//                    differ, by one to three EIGHTHS of a mip-0 texel -- the asin / atan2 round
-//                    trip of the direction, and beneath it the `/ (2 pi)` against
-//                    `* 0.15915494309f` (5 % on its own). A window pixel near 1.5e6 has a
-//                    float32 ulp of 1/8 px, so every rounding difference lands on that grid.
-//                    A consumer takes the spelling of what it HAS (a direction, or lat/lon); a
-//                    kernel switched to the other would move its bed by up to 3.6 m of ground.
 //    PageTexel       the texel of a FACE-PLANE window (HIERARCHY step 3), relative to its
 //                    anchor: two planes through the body's centre over a third, evaluated at a
 //                    point given relative to the eye, in whatever frame the CPU pulled the
@@ -32,7 +20,7 @@
 //                    here is eye-relative, which is how float32 finds a rung-15 texel (1.9 cm)
 //                    to 0.002 of itself within reach of the helm (tiletest, this GPU), where
 //                    the direction's spelling is 29 texels off. Its CPU twin, op for op, is
-//                    FaceWindow::PageTexel. Nothing reads it yet;
+//                    FaceWindow::PageTexel. Every window reader takes it;
 //    PageTexelUv     the same over the page's texels: a window's uv. The anchor is a multiple
 //                    of the page, so a WRAP sampler's modulo puts every texel where the global
 //                    lattice has it;
@@ -69,26 +57,6 @@
 static const float kPagePi = 3.14159265358979f;
 static const float kPageDim = 16384.0f;      // a page's texels a side (Lattice::kFaceDim)
 static const float kPageResDim = 128.0f;     // its residency map: a byte per 128 texels (one tile)
-
-// The window uv of a planet direction: every window realization (colour AND height, the masks,
-// the exposure) shares ONE frame -- the merc row: origin px x, origin px y, 1 / page texels,
-// world px at the window's zoom (Lattice::Rows) -- so their texels describe the same ground by
-// construction.
-float2 PageUv(float3 dir, float4 merc) {
-    const float lat = asin(clamp(dir.y, -1.0f, 1.0f));
-    const float lonDeg = degrees(atan2(dir.z, dir.x));
-    const float mx = (lonDeg + 180.0f) / 360.0f * merc.w;
-    const float my = (0.5f - log(tan(0.785398163f + lat * 0.5f)) / (2.0f * kPagePi)) * merc.w;
-    return (float2(mx, my) - merc.xy) * merc.z;
-}
-// The kernels' spelling of the same frame, from lat/lon in degrees (the banner says why it is
-// its own).
-float2 PageUvLatLon(float latDeg, float lonDeg, float4 merc) {
-    const float latR = latDeg * 0.01745329252f;
-    const float mx = (lonDeg + 180.0f) / 360.0f * merc.w;
-    const float my = (0.5f - log(tan(0.7853981634f + latR * 0.5f)) * 0.15915494309f) * merc.w;
-    return float2(mx - merc.x, my - merc.y) * merc.z;
-}
 
 // A face-plane window's texel relative to its anchor (HIERARCHY 4.4): (U . p + U.w, V . p + V.w)
 // / (W . p + W.w), p the point relative to the eye in the frame the rows were pulled into. The
@@ -136,6 +104,31 @@ float4 PageLoad4(Texture2DArray<float4> arr, float2 uv, uint slice, float mip) {
 }
 float PageLoad(Texture2DArray<float4> arr, float2 uv, uint slice, float mip) {
     return PageLoad4(arr, uv, slice, mip).x;
+}
+// PHASE B1 (plan_phase_b.md): THE SAME TWO READS ON A WINDOW. A window is addressed modulo the page
+// (HIERARCHY 4.1: a global texel X lives at X mod 16384, at mip m at (X >> m) mod (16384 >> m)), so
+// its uv is taken modulo 1 and a bilinear tap past an edge is the texel on the far side of the
+// modulo -- the global texel beside it, which the slice holds wherever the box holds that ground.
+// The residency byte likewise, at the uv modulo 1.
+float PageHaveLoadWrap(Texture2DArray<float4> map, float2 uv, uint slice) {
+    return PageHaveLoad(map, frac(uv), slice);
+}
+float4 PageLoad4Wrap(Texture2DArray<float4> arr, float2 uv, uint slice, float mip) {
+    const float dim = kPageDim / exp2(mip);
+    const int idim = int(dim);
+    const float2 tf = frac(uv) * dim - 0.5f;
+    const float2 t0 = floor(tf);
+    const float2 fr = tf - t0;
+    float4 acc = 0.0f;
+    [unroll] for (int k = 0; k < 4; ++k) {
+        const int2 tc = (int2(t0) + int2(k & 1, k >> 1) + idim) % idim;
+        acc += ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y) *
+               arr.Load(int4(tc, int(slice), int(mip)));
+    }
+    return acc;
+}
+float PageLoadWrap(Texture2DArray<float4> arr, float2 uv, uint slice, float mip) {
+    return PageLoad4Wrap(arr, uv, slice, mip).x;
 }
 
 // The pixel-stage sample: the hardware's footprint, the residency floor as the min-LOD clamp.

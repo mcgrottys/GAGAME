@@ -23,9 +23,10 @@ int RunTreeAudit(const Options& opt, Compositor& compositor, int hgtCh,
                  ResidencyManager& resMgr, int colCh,
                  const std::unique_ptr<TileTree>& megaTree,
                  const std::unique_ptr<TileTree>& heightTree, const SurfaceFrame& surface) {
-    // M12 step 4a: the realizations the render path uses ARE the surface's lattices.
-    const ColorFrame frames[] = {surface.cube, surface.win, surface.det};
-    const ColorFrame hframes[] = {surface.cubeH, surface.winH};
+    // M12 step 4a: the realizations the render path uses ARE the surface's lattices (PHASE B3:
+    // the cubes; the Mercator windows are deleted).
+    const ColorFrame frames[] = {surface.cube};
+    const ColorFrame hframes[] = {surface.cubeH};
     if (opt.packTrees) {
         std::vector<std::string> tags;
         for (const ColorFrame& f : frames) tags.push_back(f.Tag());

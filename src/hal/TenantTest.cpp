@@ -996,6 +996,126 @@ bool RunTenantBindingSelfTest() {
             c5.Said().c_str(), caughtC ? "CAUGHT" : "NOT CAUGHT: a shared tile would reach one slice");
     }
 
+    // ---- 7. PHASE A1: A WINDOW ABOUT AN EYE (Tenant.h's banner). Random windows of every rank's
+    // rung on every face, origins multiples of 1024 texels: (a) the round trip, slot -> global ->
+    // slot at mips 0..7 and global -> slot -> global for the box's own tiles at mips 0..3; (b) the
+    // window's mips nest slot for slot, a parent slot the child's >> 1, at mips 0..3; (c) THE STEP,
+    // through Move on an Unregistered tenant: the slots told are exactly those whose global tile
+    // changed, every tile inside both boxes keeps its slot (no byte has anywhere to go), and the
+    // count of a one-quantum step is 8 x 128 + 4 x 64 + 2 x 32 + 1 x 16 = 1360. THE PLANT: a window
+    // placed from its origin (slot = index - origin, not modulo) moves every slot on every step.
+    {
+        Verdict va, vb, vc;
+        std::mt19937 wr(0x4131u);
+        const Shape s = kShapes[0];
+        uint64_t steps = 0, told = 0, kept = 0, oneQuantum = 0, plantMoved = 0, plantSteps = 0;
+        for (int r = 3; r <= 15; r += 3) {
+            const uint64_t N = uint64_t(Lattice::kFaceDim) << r;
+            std::uniform_int_distribution<uint64_t> org(0, (N - Lattice::kFaceDim) / 1024);
+            for (uint32_t f = 0; f < 6; ++f) {
+                for (int n = 0; n < 3; ++n) {
+                    const BlockBinding a = BlockBinding::At(f, r, org(wr) * 1024, org(wr) * 1024);
+                    va.Check(a.Refusal(6).empty(), [&] { return Blk(a) + " refused: " + a.Refusal(6); });
+                    for (uint32_t m = 0; m < 8; ++m) {
+                        const uint32_t tw = (Lattice::kFaceDim >> m) / s.w;
+                        for (uint32_t k = 0; k < 64; ++k) {
+                            const TileRequest sl{0, m, uint32_t(wr() % tw), uint32_t(wr() % tw)};
+                            TileRequest g, back;
+                            const bool ok1 = a.Global(sl, s.w, s.h, g);
+                            const bool ok2 = ok1 && a.Slot(g, s.w, s.h, back);
+                            va.Check(ok2 && Same(back, sl), [&] { return Blk(a) + " slot " + Req(sl) + " did not come back"; });
+                            if (m < 3 && ok1) {
+                                TileRequest gp, sp{0, m + 1, sl.x >> 1, sl.y >> 1};
+                                const bool okp = a.Global(sp, s.w, s.h, gp);
+                                vb.Check(okp && gp.x == (g.x >> 1) && gp.y == (g.y >> 1) && gp.mip == g.mip + 1,
+                                         [&] { return Blk(a) + " slot " + Req(sl) + "'s parent slot holds " + Req(gp) +
+                                                      ", not the parent of " + Req(g); });
+                            }
+                        }
+                    }
+                    // (c) the step, one to twenty quanta, through Move.
+                    const int q[4] = {1, 2, 9, 20};
+                    for (int i = 0; i < 4; ++i) {
+                        const int64_t dx = int64_t(q[i]) * 1024 * ((wr() & 1) ? 1 : -1);
+                        const int64_t dy = (i & 1) ? int64_t(q[(i + 1) & 3]) * 1024 : 0;
+                        const int64_t nx = std::clamp<int64_t>(int64_t(a.OrgX()) + dx, 0, int64_t(N - Lattice::kFaceDim));
+                        const int64_t ny = std::clamp<int64_t>(int64_t(a.OrgY()) + dy, 0, int64_t(N - Lattice::kFaceDim));
+                        const BlockBinding b = BlockBinding::At(f, r, uint64_t(nx), uint64_t(ny));
+                        if (b == a) continue;
+                        std::vector<TileRequest> sunk;
+                        TenantDesc d;
+                        d.name = L"tenant-binding window";
+                        d.fiber = {DXGI_FORMAT_R8G8B8A8_UNORM, s.w, s.h, ""};
+                        d.slices = 7;
+                        d.bindings.push_back({0, 6, Lattice::Cube(Lattice::kFaceDim), cubeProvider, ""});
+                        d.blocks.push_back({6, a, blockProvider, ""});
+                        Tenant t = Tenant::Unregistered(std::move(d), [&](const TileRequest& x) { sunk.push_back(x); });
+                        const uint32_t n2 = t.Move(6, b);
+                        ++steps;
+                        told += n2;
+                        std::set<std::tuple<uint32_t, uint32_t, uint32_t>> said;
+                        for (const TileRequest& x : sunk) said.insert({x.mip, x.x, x.y});
+                        vc.Check(sunk.size() == n2 && said.size() == n2, [&] { return std::string("Move's count is not what it told"); });
+                        uint64_t changed = 0, plant = 0;
+                        const uint64_t keptBefore = kept;
+                        for (uint32_t m = 0; m < 4; ++m) {
+                            const uint32_t tw = (Lattice::kFaceDim >> m) / s.w;
+                            const uint64_t oa = a.OrgX() / (uint64_t(s.w) << m), ob = b.OrgX() / (uint64_t(s.w) << m);
+                            const uint64_t pa = a.OrgY() / (uint64_t(s.h) << m), pb = b.OrgY() / (uint64_t(s.h) << m);
+                            for (uint32_t y = 0; y < tw; ++y) {
+                                for (uint32_t x = 0; x < tw; ++x) {
+                                    TileRequest ga, gb;
+                                    a.Global({0, m, x, y}, s.w, s.h, ga);
+                                    b.Global({0, m, x, y}, s.w, s.h, gb);
+                                    const bool diff = !Same(ga, gb);
+                                    changed += diff;
+                                    vc.Check(diff == (said.count({m, x, y}) > 0), [&] {
+                                        return Blk(b) + Fmt(" m%u (%u,%u): told %d, changed %d", m, x, y,
+                                                            int(said.count({m, x, y})), int(diff));
+                                    });
+                                    // A tile inside both boxes keeps its slot.
+                                    const bool inB = ga.x >= ob && ga.x < ob + tw && ga.y >= pb && ga.y < pb + tw;
+                                    if (inB) {
+                                        TileRequest sb;
+                                        vc.Check(b.Slot(ga, s.w, s.h, sb) && sb.x == x && sb.y == y,
+                                                 [&] { return Blk(b) + " a tile in both boxes left its slot"; });
+                                        ++kept;
+                                    }
+                                    // THE PLANT: placed from the origin, x - O.
+                                    const bool pin = ga.x - oa < tw && ga.y - pa < tw;
+                                    const bool pinB = ga.x >= ob && ga.x < ob + tw && ga.y >= pb && ga.y < pb + tw;
+                                    if (pin && pinB && (ga.x - ob != ga.x - oa || ga.y - pb != ga.y - pa)) ++plant;
+                                }
+                            }
+                        }
+                        vc.Check(changed == n2, [&] { return Fmt("changed %llu, told %u", (unsigned long long)changed, n2); });
+                        if (q[i] == 1 && dy == 0 && uint64_t(std::llabs(int64_t(b.OrgX()) - int64_t(a.OrgX()))) == 1024) {
+                            ++oneQuantum;
+                            vc.Check(n2 == 1360, [&] { return Fmt("a one-quantum step told %u, not 1360", n2); });
+                        }
+                        if (kept > keptBefore) {   // the plant is seen only where the boxes overlap
+                            ++plantSteps;
+                            plantMoved += plant > 0;
+                        }
+                    }
+                }
+            }
+        }
+        const bool caught = plantMoved == plantSteps && plantSteps > 0;
+        ok = ok && !va.fails && !vb.fails && !vc.fails && caught;
+        Log("[tenant-binding] 7. windows about an eye (origins multiples of 1024 texels, rungs 3..15, "
+            "every face): (a) the round trip %s; (b) the window's mips nest slot for slot %s; (c) %llu "
+            "steps through Move told %llu slots, every one a slot whose tile changed and none other, "
+            "%llu tiles inside both boxes kept their slots, %llu one-quantum steps told 1360 each -- %s",
+            va.Said().c_str(), vb.Said().c_str(), (unsigned long long)steps,
+            (unsigned long long)told, (unsigned long long)kept, (unsigned long long)oneQuantum,
+            vc.Said().c_str());
+        Log("[tenant-binding] 7. PLANTED a window placed from its origin (slot = index - origin): its "
+            "kept tiles moved slot on %llu of %llu steps -- %s",
+            (unsigned long long)plantMoved, (unsigned long long)plantSteps,
+            caught ? "CAUGHT" : "NOT CAUGHT: the step's instrument cannot see a placement");
+    }
+
     // ---- the refusals: the binding's own words, and the declaration's
     {
         Verdict vr;

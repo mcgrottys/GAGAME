@@ -21,6 +21,7 @@
 #include "compose/Compositor.h"
 #include "compose/WaterAtlas.h"
 #include "core/Lattice.h"
+#include "hal/Tenant.h"
 #include "sim/BathyModel.h"
 #include "sim/CurrentModel.h"
 #include "sim/GlobeModel.h"
@@ -71,17 +72,19 @@ public:
                            std::function<double(double)> oceanAt);
     void AddDormantWindow(const char* name, BathyModel* bathy, const SweConfig& cfg,
                           std::function<double(double)> oceanAt, double spinupHours);
-    // M9ar: the bed every OWNED solver binds at activation -- a slice of the height page
-    // tenant. There is no per-window bed texture any more.
-    // M12 step 4b: `window` is the z14 lattice the page sits on (the surface's winH), handed
-    // on to every owned solver at activation.
-    void SetHeightPage(hal::Resource heightArr, hal::Resource resMapArr, uint32_t slice,
-                       uint32_t mips, const Lattice& window) {
+    // M9ar: the bed every OWNED solver binds at activation -- the height page tenant. There is
+    // no per-window bed texture any more.
+    // PHASE B2 (D4): the bed is the STANDING WINDOW (SurfaceFrame::StandAbout) at its slice; every
+    // owned solver binds the same window (it reads it where the window holds its cells, the cube
+    // elsewhere), and the pin and the wait ask for its tiles in its own uv.
+    void SetHeightPage(hal::Resource heightArr, hal::Resource resMapArr, uint32_t mips,
+                       const hal::BlockBinding& standing, const SweSolver::BedWindow& bed) {
         m_hgtArr = heightArr;
         m_hgtRes = resMapArr;
-        m_hgtSlice = slice;
+        m_hgtSlice = bed.slice;
         m_hgtMips = mips;
-        m_hgtWin = window;
+        m_stand = standing;
+        m_bed = bed;
     }
 
     // Per frame (or before a physics batch): lazy activation and owned-solver advancement.
@@ -171,7 +174,8 @@ private:
     hal::Resource m_hgtArr = nullptr;   // M9ar: borrowed from the residency manager
     hal::Resource m_hgtRes = nullptr;
     uint32_t m_hgtSlice = 6, m_hgtMips = 7;
-    Lattice m_hgtWin;   // M12 step 4b: the z14 height window the page sits on
+    hal::BlockBinding m_stand{};      // PHASE B2: the standing window
+    SweSolver::BedWindow m_bed{};     // ...and its rows, for every owned solver
     struct Window {
         std::string name;
         SweSolver* solver = nullptr;              // external, or owned.get()
@@ -194,7 +198,8 @@ private:
     void ReadMirrors(Gpu& gpu, double simUnix, double maxAge);
     // A window's lattice as a rectangle of the height page's uv (the pin's, and the bed wait's);
     // false where it does not reach inside the page.
-    bool DomainUv(const BathyModel& b, float& u0, float& v0, float& u1, float& v1) const;
+    // PHASE B2: the domain's rectangles in the standing window's uv (modulo 16384: one, two or four).
+    int DomainRects(const BathyModel& b, float out[4][4]) const;
     static constexpr double kActivateAltM = 30000.0;
     bool m_pinLogged = false;
 

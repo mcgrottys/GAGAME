@@ -16,6 +16,8 @@
 //  Flux channels: x = +x (east), y = +y (south), z = -x (west), w = -y (north).
 // ================================================================================================
 
+#include "WindowRows.hlsli"
+
 cbuffer SweCb : register(b0) {
     uint  gNx, gNy;              // bathy grid dims (1701 x 890)
     uint  gEtaTilesX, gFluxTilesX;
@@ -38,15 +40,42 @@ cbuffer SweCb : register(b0) {
     float gTideRate;             // M6r: d(tide plane)/dt, m/s -- the prism source term
     float gPadA, gPadB, gPadC;
     float4 gGeoLL;               // M9ar: lattice -> lat/lon: lon0, lat1, dlon, -dlat (deg/texel)
-    float4 gWinA;                // M9ar: height page frame: org px x, org px y, 1/16384, world px
-    float4 gPageB;               // M9ax: x = the z14 page's slice in the tenant's array
+    // PHASE B2 (D4): the standing window's address of a cell (SweSolver::SetBed): its offsets from
+    // the centre (rad), the steps (rad); the centre's sin and cos of latitude, R, the cell's grain.
+    float4 gStandA;
+    float4 gStandB;
+    HP_WINDOW_ROWS_DECL
 };
 
+#define HP_WINDOW_ROWS 1
 #include "HeightPages.hlsli"
+
+// A small angle's sine to float precision for |x| < 0.02 rad (a domain is kilometres): the GPU's
+// sin is held to an ABSOLUTE error of 0.0008 near zero, which would lose these digits.
+float SweSinSmall(float x) {
+    const float u = x * x;
+    return x * (1.0f - u * (1.0f / 6.0f - u * (1.0f / 120.0f)));
+}
+// THE CELL'S POINT about the standing window's centre C, in C's east / up / north: the exact
+// difference of two points of the sphere, from the small offsets (dphi, dlam) alone --
+//   e = R cos phi sin dlam
+//   n = R (sin dphi + sin phiC cos phi 2 sin^2(dlam / 2))
+//   u = R (-2 sin^2(dphi / 2) - cos phi cos phiC 2 sin^2(dlam / 2))
+// with cos phi = cos phiC cos dphi - sin phiC sin dphi. No two large numbers are subtracted.
+float3 SwePointAbout(float dphi, float dlam) {
+    const float sp = gStandB.x, cp = gStandB.y, R = gStandB.z;
+    const float sdp = SweSinSmall(dphi), sh = SweSinSmall(0.5f * dphi);
+    const float cdp = 1.0f - 2.0f * sh * sh;
+    const float cphi = cp * cdp - sp * sdp;
+    const float sl = SweSinSmall(0.5f * dlam);
+    const float hav = 2.0f * sl * sl;
+    return float3(R * cphi * SweSinSmall(dlam), R * (-2.0f * sh * sh - cphi * cp * hav),
+                  R * (sdp + sp * cphi * hav));
+}
 
 StructuredBuffer<uint> gTileList : register(t0);
 // M9ar: THE BED IS THE HEIGHT MEGATEXTURE. M9ax: the tenant's WHOLE array (cube faces 0..5 and
-// the z14 page, gPageB.x) with its residency-map array, resolved per texel by HeightPages.hlsli
+// the eye's windows and the standing window: PHASE B2/B3) with its residency-map array, resolved by HeightPages.hlsli
 // exactly as the pixel stage resolves it. There is no solver-private copy of the bed, and no
 // wall past the page: a lattice anywhere on the planet has a bed.
 Texture2DArray<float4> gBathy    : register(t1);   // NAVD88 m; R16F loads as .x
@@ -79,7 +108,12 @@ float BedAt(int2 t) {
     // and at least as fine as the cube, the cube face otherwise (HeightPages.hlsli).
     const float lon = gGeoLL.x + (t.x + 0.5f) * gGeoLL.z;
     const float lat = gGeoLL.y + (t.y + 0.5f) * gGeoLL.w;
-    return HpHeightAt(gBathy, gBathyRes, lat, lon, gWinA, uint(gPageB.x), 0.0f);
+    // PHASE B2 (D4): the standing window's chain at the cell's own point, at the cell's grain; the
+    // cube by the direction where the window does not hold it.
+    const float latR = lat * 0.01745329252f, lonR = lon * 0.01745329252f;
+    const float3 dir = float3(cos(latR) * cos(lonR), sin(latR), cos(latR) * sin(lonR));
+    const float3 p = SwePointAbout(gStandA.x + (t.y + 0.5f) * gStandA.z, gStandA.y + (t.x + 0.5f) * gStandA.w);
+    return HpHeightChain(gBathy, gBathyRes, dir, WindowChain(p, 0u), gStandB.w);
 }
 
 float EtaAt(int2 t) {

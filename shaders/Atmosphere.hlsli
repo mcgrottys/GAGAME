@@ -40,38 +40,50 @@
 #ifndef GA_ATMOSPHERE_HLSLI
 #define GA_ATMOSPHERE_HLSLI
 
-// ---- the measured air ---------------------------------------------------------------------
-static const float3 kAtmRayS = float3(5.802e-6f, 13.558e-6f, 33.100e-6f);   // scattering, 1/m
-static const float  kAtmRayH = 8000.0f;                                     // scale height, m
-static const float  kAtmMieS = 3.996e-6f;
-static const float  kAtmMieE = 4.440e-6f;
-static const float  kAtmMieH = 1200.0f;
-static const float  kAtmMieG = 0.80f;
-static const float3 kAtmOzoA = float3(0.650e-6f, 1.881e-6f, 0.085e-6f);     // absorption, 1/m
-static const float  kAtmOzoC = 25000.0f;   // the layer's centre
-static const float  kAtmOzoW = 15000.0f;   // its half-width (a tent, zero outside)
-static const float  kAtmTopM = 100000.0f;  // the air ends here (the Karman line, near enough)
-static const float  kAtmAlbedo = 0.1f;     // the ground under the multiple-scattering estimate
+// ---- the measured air, AS ROWS ----------------------------------------------------------------
+// A planet enters the sky only through these numbers (src/scene/Air.h: Earth's are the reference
+// air above, Mars's its CO2 and dust): there is no planet named anywhere below. The rows ride the
+// scene constants (Common.hlsli gAir*) and the sky table's own (SkyLut.hlsl), in Air.h's order.
+struct AtmAir {
+    float3 rayS;  float rayH;    // Rayleigh scattering (1/m at the ground), scale height (m)
+    float3 mieS;  float mieH;    // aerosol scattering, scale height
+    float3 mieE;  float mieG;    // aerosol extinction, Henyey-Greenstein g
+    float3 ozoA;  float ozoC;    // ozone absorption at the tent's peak, the tent's centre (m)
+    float  ozoW;  float top;     // the tent's half-width; the top of the air (m above the ground)
+    float  albedo;               // the ground under the multiple-scattering estimate
+    float2 invH;                 // 1 / (Rayleigh, aerosol) scale heights
+    float2 rootHalfInvH;         // sqrt(1 / 2H): Chapman's sqrt(x / 2) = sqrt(r) times this
+};
+AtmAir AtmAirRows(float4 r0, float4 r1, float4 r2, float4 r3, float4 r4) {
+    AtmAir a;
+    a.rayS = r0.xyz; a.rayH = r0.w;
+    a.mieS = r1.xyz; a.mieH = r1.w;
+    a.mieE = r2.xyz; a.mieG = r2.w;
+    a.ozoA = r3.xyz; a.ozoC = r3.w;
+    a.ozoW = r4.x;   a.top = r4.y;   a.albedo = r4.z;
+    a.invH = 1.0f / max(float2(a.rayH, a.mieH), 1.0f);
+    a.rootHalfInvH = sqrt(0.5f * a.invH);
+    return a;
+}
 
 // The densities at a height above the ground, each 1 at sea level (ozone's tent peaks at 1).
-void AtmDensity(float h, out float rayD, out float mieD, out float ozoD) {
-    rayD = exp(-max(h, 0.0f) / kAtmRayH);
-    mieD = exp(-max(h, 0.0f) / kAtmMieH);
-    ozoD = max(0.0f, 1.0f - abs(h - kAtmOzoC) / kAtmOzoW);
+void AtmDensity(AtmAir air, float h, out float rayD, out float mieD, out float ozoD) {
+    rayD = exp(-max(h, 0.0f) * air.invH.x);
+    mieD = exp(-max(h, 0.0f) * air.invH.y);
+    ozoD = max(0.0f, 1.0f - abs(h - air.ozoC) / max(air.ozoW, 1.0f));
 }
 
 // What a metre of air at that height takes out of a beam, per channel.
-float3 AtmExtinction(float h) {
+float3 AtmExtinction(AtmAir air, float h) {
     float rayD, mieD, ozoD;
-    AtmDensity(h, rayD, mieD, ozoD);
-    return kAtmRayS * rayD + kAtmMieE.xxx * mieD + kAtmOzoA * ozoD;
+    AtmDensity(air, h, rayD, mieD, ozoD);
+    return air.rayS * rayD + air.mieE * mieD + air.ozoA * ozoD;
 }
 
 // The two phase functions. Rayleigh is exact for molecules; Henyey-Greenstein is the standard
 // one-parameter stand-in for the forward-thrown aerosol lobe.
 float AtmPhaseR(float mu) { return 0.0596831f * (1.0f + mu * mu); }   // 3/(16 pi)
-float AtmPhaseM(float mu) {
-    const float g = kAtmMieG;
+float AtmPhaseM(float g, float mu) {
     const float d = 1.0f + g * g - 2.0f * g * mu;
     return 0.0795775f * (1.0f - g * g) / max(d * sqrt(max(d, 1e-6f)), 1e-6f);   // 1/(4 pi)
 }
@@ -112,15 +124,10 @@ void AtmMsParams(float2 uv, float Rb, float Rt, out float r, out float muS) {
     r = Rb + saturate(uv.y) * (Rt - Rb);
 }
 
-// ---- THE RAY, MARCHED (M13). No table of the view: every ray -- a pixel's, a mirror's, one the
-// gate carried to the other side of the planet -- integrates the air from wherever it actually is,
-// under the one sun. What the sun delivers to each step is the closed form above; what IS
-// tabulated is a property of the air alone, identical for every ray on the planet: what every
-// scattering order past the first adds at a height under a sun angle (multiple scattering).
-//
 // MANUAL BILINEAR, NOT SampleLevel -- priors 1: the sea shades in the DOMAIN stage and the table
 // is built in COMPUTE, and a bindless sample outside the pixel stage returns zero on this adapter.
-float3 AtmFetch(uint slot, float2 uv, float2 dims) {
+// xOff: the table's second half (x + 32) holds the SKY'S IRRADIANCE on a level surface.
+float3 AtmFetch(uint slot, float2 uv, float2 dims, int xOff = 0) {
     const float2 tf = uv * dims - 0.5f;
     const float2 t0 = floor(tf);
     const float2 fr = tf - t0;
@@ -128,16 +135,15 @@ float3 AtmFetch(uint slot, float2 uv, float2 dims) {
     [unroll] for (int k = 0; k < 4; ++k) {
         const int2 tc = clamp(int2(t0) + int2(k & 1, k >> 1), int2(0, 0), int2(dims) - int2(1, 1));
         acc += ((k & 1) ? fr.x : 1.0f - fr.x) * ((k >> 1) ? fr.y : 1.0f - fr.y) *
-               gTex[slot][tc].rgb;
+               gTex[slot][tc + int2(xOff, 0)].rgb;
     }
     return acc;
 }
 static const float2 kAtmMsDims = float2(32.0f, 32.0f);
 
-// THE ONE DECLARED GAIN: the march answers in the model's units (per unit solar irradiance); the
-// engine's radiance is a relative unit a tonemapper set. This carries one into the other, chosen
-// against the sky the engine drew at noon. It is the only number here that is not a measurement.
-static const float kAtmGain = 18.0f;
+// THE UNIT: the march answers PER UNIT OF THE SUN'S IRRADIANCE at the top of the air (radiance in
+// sr^-1, irradiance dimensionless). The one sun multiplies it (Common.hlsli kSunE), the same sun
+// every surface is lit by -- there is no second, declared gain.
 
 // ---- WHAT THE SUN DELIVERS, IN CLOSED FORM -----------------------------------------------------
 // What reaches a point from the sun is exp(-tau), tau the air's column along the sun ray, and the
@@ -159,7 +165,7 @@ static const float kAtmGain = 18.0f;
 // grazing column, H rho(b) 2 sqrt(pi b / 2H), less what the reversed ray would see -- which meets
 // the upper form exactly at z = 90 deg, so the column is one continuous function of the angle.
 //
-// OZONE is not exponential -- a tent, 15 km either side of 25 km -- and its column is closed too.
+// OZONE is not exponential -- a tent, ozoW either side of ozoC -- and its column is closed too.
 // Through spherical shells, a ray whose tangent radius is b crosses the shell at radius K with
 // airmass K / sqrt(K^2 - b^2) = [K / sqrt(K + b)] (K - b)^(-1/2). The bracket moves by under
 // 0.2 % across the layer for any ray, so it is taken at the layer's centre; what remains -- the
@@ -173,9 +179,6 @@ static const float kAtmGain = 18.0f;
 // THE PLANET blocks a sinking ray whose tangent radius is inside it. That is the whole shadow
 // test -- which is what makes dusk -- and it needs no intersection.
 static const float kAtmSqrtPi = 1.77245385f;
-static const float2 kAtmHs = float2(kAtmRayH, kAtmMieH);   // (the compiler folds these three)
-static const float2 kAtmInvHs = 1.0f / kAtmHs;
-static const float2 kAtmRootHalfInvH = sqrt(0.5f * kAtmInvHs);   // sqrt(x / 2) = sqrt(r) times this
 
 // E(t) in erfcx(y) = t exp(E(t)).
 float2 AtmErfcxExponent(float2 t) {
@@ -192,25 +195,26 @@ float2 AtmErfcxExponent(float2 t) {
 }
 
 // What reaches a point at radius r from the sun at zenith cosine muS.
-float3 AtmSunT(float r, float muS, float Rb) {
+float3 AtmSunT(AtmAir air, float r, float muS, float Rb) {
     const float h = max(r - Rb, 0.0f);
     const float sink = (muS < 0.0f) ? 1.0f : 0.0f;
     const float s = sqrt(max(1.0f - muS * muS, 0.0f));
     const float b = r * s;                          // the ray's tangent radius
     const float drop = r * muS * muS / (1.0f + s);  // r - b, without cancellation
+    const float2 hs = float2(air.rayH, air.mieH);
 
     // Rayleigh and aerosols together: H rho(r) ch(x, |z|), and the tangent point's full column
     // (whose exponent is never positive for a ray the planet lets through).
-    const float2 sx = sqrt(r) * kAtmRootHalfInvH;   // sqrt(x / 2)
+    const float2 sx = sqrt(r) * air.rootHalfInvH;   // sqrt(x / 2)
     const float2 t = 1.0f / (1.0f + 0.5f * abs(muS) * sx);
-    const float2 up = kAtmHs * kAtmSqrtPi * sx * t * exp(AtmErfcxExponent(t) - h * kAtmInvHs);
-    const float2 tangent = 2.0f * kAtmHs * kAtmSqrtPi * sqrt(b) * kAtmRootHalfInvH *
-                           exp(min((drop - h) * kAtmInvHs, 0.0f));
+    const float2 up = hs * kAtmSqrtPi * sx * t * exp(AtmErfcxExponent(t) - h * air.invH);
+    const float2 tangent = 2.0f * hs * kAtmSqrtPi * sqrt(b) * air.rootHalfInvH *
+                           exp(min((drop - h) * air.invH, 0.0f));
     const float2 col = up + sink * (tangent - 2.0f * up);
 
     // Ozone: the three ramps from b out to the layer's top, and from b out to r.
-    const float R2 = Rb + kAtmOzoC;
-    const float3 knots = float3(R2 - kAtmOzoW, R2, R2 + kAtmOzoW);
+    const float R2 = Rb + air.ozoC;
+    const float3 knots = float3(R2 - air.ozoW, R2, R2 + air.ozoW);
     const float3 p = knots - b;
     const float3 lam = sqrt(max(p, 0.0f));
     const float3 neg = 2.0f * max(-p, 0.0f);
@@ -218,73 +222,101 @@ float3 AtmSunT(float r, float muS, float Rb) {
     const float3 eIn = max(sqrt(drop) - lam, 0.0f);
     const float3 psiOut = eOut * ((knots.z - knots) + lam * eOut + neg);
     const float3 psiIn = eIn * ((r - knots) + lam * eIn + neg);
-    const float ozo = (0.6666667f / kAtmOzoW) * R2 * rsqrt(R2 + b) *
+    const float ozo = (0.6666667f / max(air.ozoW, 1.0f)) * R2 * rsqrt(R2 + b) *
                       dot(float3(1.0f, -2.0f, 1.0f), psiOut + (2.0f * sink - 1.0f) * psiIn);
 
-    const float3 tau = kAtmRayS * col.x + kAtmMieE.xxx * col.y + kAtmOzoA * ozo;
+    const float3 tau = air.rayS * col.x + air.mieE * col.y + air.ozoA * ozo;
     return (1.0f - sink * step(b, Rb)) * exp(-tau);
 }
 
-// The radiance along `dir` from a point at radius r whose zenith is `up`, lit by `sunDir`.
-// msSlot < 0 marches single scattering only (the multiple-scattering table is built with it) and
-// returns in `fms` the isotropic response that table needs.
-float3 AtmRay(float r, float3 dir, float3 up, float3 sunDir, uint steps, int msSlot, float Rb,
-              float Rt, out float3 fms) {
+// ---- THE SKY: ONE LINE INTEGRAL, FROM WHEREVER THE EYE IS ---------------------------------------
+// The light the air scatters toward the eye along `dir`, from where the ray ENTERS the air to
+// where it LEAVES it, strikes the GROUND, or reaches tMax (a surface the caller is shading):
+//
+//     L = integral over [t0, t1] of T(t0, t) [ T_sun(t) (sigma_R p_R + sigma_M p_M) + sigma_s ms(t) ] dt
+//
+// The eye's position says only where the segment starts: inside the air t0 = 0, the eye itself;
+// above it, t0 is the ray's entry into the shell. There is no ceiling and no second model -- the
+// limb seen from orbit, the sky from the helm and the haze over the disc are this one segment.
+// Out: T, what survives over the segment (the sun's disc and a surface behind are seen through
+// it); tGround, the distance at which the ray met the ground, or -1.
+//
+// r is the eye's distance from the planet's centre and `up` its zenith; the geometry is carried
+// by the tangent radius b and the distance tc to the tangent point (rr^2 = b^2 + (t - tc)^2), so a
+// point a hundred kilometres along a grazing ray keeps its metres at three planet radii.
+//
+// STEPS CROWDED TOWARD THE START. `steps` steps spaced exponentially from where the segment
+// begins, t = t0 + (t1 - t0) (e^{g i/n} - 1)/(e^g - 1) -- the old march's spacing, now from
+// max(eye, entry). Measured against the even-stepped reference (--sky-probe), this beats
+// crowding the steps at the segment's lowest (densest) point by 2-8x on the horizon: a grazing
+// path is optically THICK (blue's tau along the horizon is ~19), so the light that reaches the eye
+// comes from the first optical depth beside it, not from the dense air at the tangent, which the
+// air in front has already put out.
+//
+// The orders past the first are read at EVERY step, under that step's own sun: the table is a
+// property of the air (a height and a sun angle), not of the eye.
+float3 AtmRay(AtmAir air, float r, float3 dir, float3 up, float3 sunDir, uint steps, int msSlot,
+              float Rb, float tMax, out float3 T, out float3 fms, out float tGround) {
+    T = 1.0f;
     fms = 0.0f;
+    tGround = -1.0f;
+    const float Rt = Rb + air.top;
     const float mu = dot(dir, up);
     const float muS = dot(sunDir, up);
     const float nu = dot(dir, sunDir);
-    const float ground = AtmRaySphere(r, mu, Rb);
-    const float disc = r * r * (mu * mu - 1.0f) + Rt * Rt;
-    const float top = max(0.0f, -r * mu + sqrt(max(disc, 0.0f)));
-    const float dist = (ground > 0.0f) ? ground : top;
-    if (dist <= 0.0f) return 0.0f;
+    const float b2 = r * r * max(1.0f - mu * mu, 0.0f);   // the tangent radius, squared
+    const float tc = -r * mu;                              // the distance to the tangent point
+    if (b2 >= Rt * Rt) return 0.0f;                        // the ray never meets the air
+    const float hw = sqrt(Rt * Rt - b2);
+    const float t0 = max(tc - hw, 0.0f);                   // the eye, or the air's entry
+    const float tTop = tc + hw;                            // the air's exit
+    const bool hits = (b2 < Rb * Rb) && (tc > 0.0f);       // the ground stands in the way
+    const float tG = hits ? tc - sqrt(Rb * Rb - b2) : tTop;
+    const float t1 = min(tG, tMax);
+    if (hits && tG <= tMax) tGround = max(tG, 0.0f);   // (an eye standing on the ground: 0)
+    if (t1 <= t0) return 0.0f;
     const float phaseR = AtmPhaseR(nu);
-    const float phaseM = AtmPhaseM(nu);
-    // The orders past the first are a smooth ambient: read once per ray, at its origin, and
-    // weighted by each step's own scattering coefficient below.
-    const float3 msHere = (msSlot >= 0)
-        ? AtmFetch(uint(msSlot), AtmMsUv(r, muS, Rb, Rt), kAtmMsDims) : float3(0.0f, 0.0f, 0.0f);
-    float3 L = 0.0f;
-    float3 T = 1.0f;
-    // STEPS CROWDED TOWARD THE ORIGIN. A ray from near the ground crosses most of its air in the
-    // first few kilometres (Rayleigh's scale height is 8 km, the aerosols' 1.2), so the steps are
-    // spaced exponentially from where the ray starts: t_i = d (e^{g i/n} - 1)/(e^g - 1). With the
-    // in-step integral done analytically, a handful of such steps holds the column.
+    const float phaseM = AtmPhaseM(air.mieG, nu);
     const float g = 3.0f;
     const float eg = exp(g) - 1.0f;
-    float tPrev = 0.0f;
+    const float len = t1 - t0;
+    float3 L = 0.0f;
+    float tPrev = t0;
     for (uint i = 0u; i < steps; ++i) {
-        const float tNext = dist * (exp(g * float(i + 1u) / float(steps)) - 1.0f) / eg;
+        const float tNext = t0 + len * (exp(g * float(i + 1u) / float(steps)) - 1.0f) / eg;
         const float ds = tNext - tPrev;
         const float t = 0.5f * (tPrev + tNext);
         tPrev = tNext;
-        const float rr = sqrt(max(r * r + t * t + 2.0f * r * mu * t, 0.0f));
+        const float rr = sqrt(b2 + (t - tc) * (t - tc));
         float rayD, mieD, ozoD;
-        AtmDensity(rr - Rb, rayD, mieD, ozoD);
-        const float3 sigS = kAtmRayS * rayD + kAtmMieS.xxx * mieD;
-        const float3 sigE = max(kAtmRayS * rayD + kAtmMieE.xxx * mieD + kAtmOzoA * ozoD, 1e-12f);
+        AtmDensity(air, rr - Rb, rayD, mieD, ozoD);
+        const float3 sigS = air.rayS * rayD + air.mieS * mieD;
+        const float3 sigE = max(air.rayS * rayD + air.mieE * mieD + air.ozoA * ozoD, 1e-12f);
         // The sun's zenith cosine AT THAT POINT: air a hundred kilometres along the ray stands under
         // a different sun angle, and that is the whole geometry of a sunset.
         const float muSp = clamp((muS * r + t * nu) / max(rr, 1e-6f), -1.0f, 1.0f);
-        float3 S = AtmSunT(rr, muSp, Rb) *
-                   (kAtmRayS * rayD * phaseR + kAtmMieS.xxx * mieD * phaseM);
-        S += msHere * sigS;
+        float3 S = AtmSunT(air, rr, muSp, Rb) *
+                   (air.rayS * rayD * phaseR + air.mieS * mieD * phaseM);
+        if (msSlot >= 0) {
+            S += AtmFetch(uint(msSlot), AtmMsUv(rr, muSp, Rb, Rt), kAtmMsDims) * sigS;
+        }
         const float3 Tstep = exp(-sigE * ds);
         // The step integrated analytically (Hillaire), so few steps do not band.
         L += T * (S - S * Tstep) / sigE;
         fms += T * (sigS - sigS * Tstep) / sigE;
         T *= Tstep;
     }
-    // The ground, when the ray reaches it: a Lambert bounce of the direct sun.
-    if (ground > 0.0f) {
-        const float3 n = normalize(up * r + dir * ground);
-        const float muSg = dot(n, sunDir);
-        if (muSg > 0.0f) {
-            L += T * kAtmAlbedo * muSg * AtmSunT(Rb, muSg, Rb) * 0.3183099f;
-        }
-    }
     return L;
+}
+
+// The ground where a ray from the eye met it (AtmRay's tGround): a Lambert bounce of the direct
+// sun, in the march's units (the caller carries it through the segment's T).
+float3 AtmGroundBounce(AtmAir air, float r, float3 dir, float3 up, float3 sunDir, float tGround,
+                       float Rb) {
+    const float3 n = normalize(up * r + dir * tGround);
+    const float muSg = dot(n, sunDir);
+    return (muSg > 0.0f) ? air.albedo * muSg * AtmSunT(air, Rb, muSg, Rb) * 0.3183099f
+                         : float3(0.0f, 0.0f, 0.0f);
 }
 
 #endif  // GA_ATMOSPHERE_HLSLI

@@ -19,6 +19,8 @@
 //  accepting state samples the bank; it never asks who computed what.
 // ================================================================================================
 
+#include "WindowRows.hlsli"
+
 cbuffer BankCb : register(b0) {
     float4 gOrg;        // xy = window origin (world m, snapped), z = base texel m, w = time s
     float4 gPatch;      // xyz = cascade patch sizes m, w = height exaggeration
@@ -34,7 +36,6 @@ cbuffer BankCb : register(b0) {
     uint4  gSlotsD;     // x = height window SRV, y = its residency-map SRV (M7q),
                         // z = the window's SLICE when x/y are array views (M9aq), else ~0
     float4 gGeoA;       // world->latlon: orgLat, orgLon, 1/mPerLat, 1/mPerLon
-    float4 gWinA;       // height window: org px x, org px y, 1/sizePx, full-world px z14
     uint4  gSlotsE;     // M8 foamlaw: cascade DERIV SRVs x3 (hx, hz, J, foam)
     float4 gRmsRef;     // M8: unit-sea rms envelope per band (xyz), w spare
     // ---- M8 THE SOLVED WAVE FIELD (ALGEBRA.md wavefield; src/sim/WaveField) ----
@@ -91,6 +92,10 @@ cbuffer BankCb : register(b0) {
     // THE SOLVER IS TRUTH (the water match, step 1): x = the tide plane the solver was forced by
     // this frame (NAVD m) -- its deviation is measured from it. Appended at the end on both sides.
     float4 gSweB;
+    // PHASE B2 (out/integration/plan_phase_b.md): THE WINDOWS THE RINGS STAND IN -- the rows of the
+    // level whose eye the rings stand about (bank A: the camera's world; set B: the window's world),
+    // its chain found at each texel's own point (BankTile.point*). Appended at the END on both sides.
+    HP_WINDOW_ROWS_DECL
 };
 
 // M9bl: one component's rows, from whichever half holds it. r = comp >> 1.
@@ -121,6 +126,13 @@ struct BankTile {
     float4 chart[4][4];
     float4 bandX;       // edgeX at the origin, d/dex, d/dez, the band (m)
     float4 bandY;       // edgeY at the origin, d/dex, d/dez, 1 = the charts are valid
+    // PHASE B2: THE TILE'S POINT for the windows' address -- the texel's ground point relative to
+    // its level's eye in the tangent axes the rows were pulled into: pointA at the tile's origin
+    // (w = 1 valid), its derivative along the ring's x and z at the tile's centre (midpoint rule).
+    // The windows' planes are central, so the sphere's sag across a tile (radial) moves no address.
+    float4 pointA;
+    float4 pointX;
+    float4 pointZ;
 };
 StructuredBuffer<BankTile> gTiles : register(t0);
 
@@ -173,6 +185,7 @@ float4 ChartRot(const BankTile t, uint k) { return t.chart[k][3]; }
 // bring-up; the mesh stage showed the same).
 Texture2D gT[] : register(t0, space1);
 Texture2DArray gTA[] : register(t0, space5);   // M9aq: the height PAGE tenant's array views
+#define HP_WINDOW_ROWS 1
 #include "HeightPages.hlsli"
 RWTexture2D<float4> gU[] : register(u0, space2);
 
@@ -413,6 +426,16 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // below -- the bed, the swell shadow -- is asked for here, once, instead of being re-derived
     // from the chart at each site.
     const float2 place = TilePlace(t, exz);
+#ifdef BANK_TRACE
+    // PHASE B0, THE BANK'S BED TRACE (WaterBankLayer::TraceBank): this entry is compiled with
+    // HP_TRACE and BANK_TRACE and dispatched beside the fill on a traced frame; it computes what
+    // the fill computes and writes, in place of the banks, the bed it read, the slice and mip the
+    // rule chose (255 = the corner lerp: no tenant), the depth and the vertical excursion before
+    // the breaking clamp. gDebugA.w is the planted residency floor (0 = the map's own).
+    gHpTraceFloor = gDebugA.w;
+    gHpTraceSlice = 255u;
+    gHpTraceMip = 0.0f;
+#endif
 
     // Corner-lerped spatial context (the CPU sampled the atlas stacks at the corners; a tile
     // spans well under the tide's or the wave grid's own resolution, so bilinear is honest
@@ -425,7 +448,16 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // The local sea-state scale: one law with the hull's twin (sim/WaveScale.h), continuous across
     // the tile and across the wave grid's nodes (it was one value per tile, read off one node).
     const float hsScale = lerp(lerp(t.hs00, t.hs10, f.x), lerp(t.hs01, t.hs11, f.x), f.y);
-    if (gSlotsD.x != 0xFFFFFFFFu && gSlotsD.z != 0xFFFFFFFFu) {
+    // PHASE B2: the texel's direction (the cube's read) and its chain (the windows').
+    const float latR = place.x * 0.01745329252f, lonR = place.y * 0.01745329252f;
+    const float3 dirT = float3(cos(latR) * cos(lonR), sin(latR), cos(latR) * sin(lonR));
+    WalkChain wcT = WindowChain(t.pointA.xyz + exz.x * t.pointX.xyz + exz.y * t.pointZ.xyz, 0u);
+    if (t.pointA.w == 0.0f) wcT.n = 0u;
+#ifdef BANK_TRACE
+    float traceMip = 0.0f;
+    uint traceSlice = 255u;
+#endif
+    if (gSlotsD.x != 0xFFFFFFFFu) {
         // M9ax: the whole tenant -- the z14 page where it is resident and fine, the cube face
         // everywhere else on the planet -- so shoaling, the current amplification and the
         // depth-limited breaking act on every coast the rings reach, not only inside one page.
@@ -439,9 +471,13 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         // 2 -- 28 m texels here -- and beside the jetty the depth laws saw the wall's 28 m average:
         // the drawn sea stood at a dry weight of 0.14 where the hull, on a 1 m bed, stood at 1.0.
         // compose/HeightPage gives a hull this bed at the finest level.
-        const float pageTexelM = kHpPageTexelM * cos(lat * 0.01745329252f);
-        const float bedMip = max(floor(log2(max(t.texelM / pageTexelM, 1.0f))), 0.0f);
-        bed = HpHeightAt(gTA[gSlotsD.x], gTA[gSlotsD.y], lat, lon, gWinA, gSlotsD.z, bedMip);
+        // PHASE B2: the pyramid's windows at the ring's own grain (HpHeightChain: each rank at the
+        // finest level no finer than the ring's texel, the cube where no window holds the texel).
+        bed = HpHeightChain(gTA[gSlotsD.x], gTA[gSlotsD.y], dirT, wcT, t.texelM);
+#ifdef BANK_TRACE
+        traceMip = gHpTraceMip;
+        traceSlice = gHpTraceSlice;
+#endif
     }
 
     // THE LEVEL (the water match, step 1 -- the solver is truth). The atlas everywhere; inside the
@@ -481,15 +517,12 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // north), so the same (1 - v) flip applies.
     // M9ba: the exposure is a PAGE of the swell.exposure tenant (z14 slice, mips >= 3), read
     // through the same lat/lon -> page frame as the bed; nothing resident = exposed.
+    // PHASE B2: window slices alone (D2), at its grain -- 76 m, rung 3, today's floor; no window
+    // holding the texel is no opinion: exposed.
     float expo = 1.0f;
-    if (gSlotsC.y != 0xFFFFFFFFu && gSlotsC.z != 0xFFFFFFFFu && gSlotsD.z != 0xFFFFFFFFu) {
-        const float2 wuv = PageUvLatLon(place.x, place.y, gWinA);
-        if (all(wuv > 0.0f) && all(wuv < 1.0f)) {
-            const float have = round(PageHaveLoad(gTA[gSlotsC.z], wuv, gSlotsD.z));
-            if (have <= kHpMaxMip) {
-                expo = max(PageLoad(gTA[gSlotsC.y], wuv, gSlotsD.z, max(have, 3.0f)), 0.18f);
-            }
-        }
+    if (gSlotsC.y != 0xFFFFFFFFu && gSlotsC.z != 0xFFFFFFFFu) {
+        const float e = HpChainRead(gTA[gSlotsC.y], gTA[gSlotsC.z], dirT, wcT, HpRankGround(0u), false, -1.0f);
+        if (e >= 0.0f) expo = max(e, 0.18f);
     }
 
     // M8: the solved wave field's window weight -- inside it the solved field OWNS the
@@ -849,6 +882,9 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // the old horizontal step to 0.85 (a number from the first sea, with no argument) was not.
     // TreeWater::At applies the same cap to the hull's water.
     const float hmax = 0.55f * max(depth, 0.05f);
+#ifdef BANK_TRACE
+    const float dyPre = abs(d.y);
+#endif
     if (abs(d.y) > hmax) d *= hmax / abs(d.y);
 
     // M7m: EDGE PATTERN INJECTION. Flip the switch and this kernel writes a WORLD-ALIGNED
@@ -876,6 +912,10 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     }
 
     const uint2 dst = uint2(t.dstX + id.x, t.dstY + id.y);
+#ifdef BANK_TRACE
+    gU[gSlotsC.w][dst] = float4(bed, float(traceSlice) * 16.0f + traceMip, depth, dyPre);
+    return;
+#endif
     gU[gSlotsB.y][dst] = float4(d, saturate(foam * dry));
     // M9e: THE STORM-SEA CEILING, applied to the WHOLE shed. The solved field has always
     // clamped its own contribution to gFoamA.z ("past it the surface is breaking, and

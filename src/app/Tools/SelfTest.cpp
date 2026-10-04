@@ -51,6 +51,7 @@ int RunSelfTest(const Options& opt) {
     ok &= RunComposeSelfTest();   // pure CPU: the layer compositor's contracts
     ok &= RunRasterFileSelfTest();   // a raster is a source by being a file: its own GeoTIFFs and
                                      // PNGs under out\rastertest, placement, order, identity, plants
+                                     // twins of the same ground (containment), a planted origin caught
     ok &= RunWaterSelfTest();     // pure CPU: the water atlas' datum/epoch/field gates
     ok &= RunWaveChartSelfTest();   // M13: the cascade sea's lattice-generated planes -- the
                                     // partition, the variance-preserving blend, the metric

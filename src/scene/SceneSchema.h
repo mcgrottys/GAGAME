@@ -18,7 +18,7 @@
 //                  data/wave_scene.json overlays through `include` (the M8 law survives:
 //                  authored if absent, never clobbered, hot-reloaded)
 //      streaming  {tileBudget, dayTiles, dayBytes, googleZoom, predictEvery, directStorage,
-//                  colorTrees, gisGate, seafloor, exposure, holdMargin, faceWindows, treeRoot}
+//                  colorTrees, gisGate, seafloor, exposure, holdMargin, treeRoot}
 //                                                -- scene state: they change the picture
 //                                                through residency (treeRoot: where the tile
 //                                                trees are, cache/trees unless a tool's scratch
@@ -115,6 +115,18 @@ struct SunSection {
     float az = 112.0f, el = 26.0f;
     EarthPlacement earth;
 };
+// THE AIR OF THE DAY (src/scene/Air.h): the planet's air is rows of measurements; what changes from
+// day to day is the aerosol, and the picture's white follows from the one sun through that air.
+struct AirSection {
+    float aod550 = -1.0f;   // the aerosol optical depth at 550 nm; < 0 = the planet's typical
+                            // value (Earth 0.10, the maritime mean; Mars's dust 0.5)
+    float angstrom = -1.0f; // the aerosol's Angstrom exponent: its column scales as
+                            // (lambda / 550 nm)^-angstrom; < 0 = the planet's typical value
+                            // (Earth 0.6, the maritime mean; Mars's dust 0)
+    float exposure = 0.0f;  // the tonemap's scale; 0 = THE LAW: 1 / the luminance of a white level
+                            // surface under a zenith sun through this air (sun + sky), so a
+                            // sunlit white is the display's white
+};
 struct StormProps {
     float hs = 0.0f, tp = 10.0f, dir = 90.0f;
 };
@@ -196,10 +208,6 @@ struct StreamingSection {
          exposure = true;
     double holdMargin = 1.41421356;   // order: a held tile counts for this times its measure
     std::string treeRoot = "cache/trees";   // the folder the tile trees live in (TileTree.h)
-    // HIERARCHY 4.17 commit 2: standing blocks of the pyramid for the colour and the mask, in
-    // place of their Mercator windows -- "lon,lat,rung" entries joined by ';' (SurfaceFrame::
-    // DeclareBlocks). Empty is today's path.
-    std::string faceWindows;
 };
 struct SettleProps {
     bool sync = false;
@@ -367,6 +375,7 @@ struct SceneDocument {
     DataSection data;
     TimeSection time;
     SunSection sun;
+    AirSection air;
     SeaSection sea;
     WaterSection water;
     StreamingSection streaming;

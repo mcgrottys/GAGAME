@@ -168,6 +168,133 @@ namespace ga::app {
 
 namespace {
 
+// PHASE B2: A READER'S GROUND, WANTED ON THE WINDOWS. The ground within `halfM` of a planet point,
+// at `rung`, in every live world's windows: in each, the finest rank that holds that rung within
+// its floor (mip = its rung less `rung`, at most 3) -- the rank the readers' coarsest-first ladder
+// answers with -- in the window's own uv (SurfaceFrame::SliceRectsAbout). Returns the rectangles.
+uint32_t WantGround(ResidencyManager& rm, const SurfaceFrame& sf, int sampler, int tenant, const double p[3],
+                    double halfM, int rung) {
+    if (tenant < 0) return 0;
+    const double r = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+    if (!(r > 0.0)) return 0;
+    const double dir[3] = {p[0] / r, p[1] / r, p[2] / r};
+    uint32_t n = 0;
+    for (uint32_t s = 0; s < sf.slotsLive; ++s) {
+        const uint32_t set = sf.slotSet[s];
+        if (set == SurfaceFrame::kNoSet) continue;
+        const SurfaceFrame::EyeWindows& ew = sf.bound[set];
+        int best = -1;
+        for (uint32_t k = 1; k <= ew.K; ++k) {
+            const int rk = ew.box[k - 1].rung;
+            if (rk >= rung && rk - rung <= int(hal::BlockBinding::kFloorMip)) best = int(k);
+        }
+        if (best < 0) continue;
+        const hal::BlockBinding& b = ew.box[best - 1];
+        float rect[4][4];
+        const int c = SurfaceFrame::SliceRectsAbout(b, dir, halfM, sf.planetR, rect);
+        for (int i = 0; i < c; ++i) {
+            rm.Want(sampler, tenant, SurfaceFrame::WindowSlice(set, uint32_t(best)), uint32_t(b.rung - rung),
+                    rect[i][0], rect[i][1], rect[i][2], rect[i][3]);
+        }
+        n += uint32_t(c);
+    }
+    return n;
+}
+// PHASE B2w: THE NEAR GROUND, an instrument. The pixels of the frame's bottom third, 16 x 6 rays
+// from the camera to the sphere; at each ground point the colour's ladder as ComposedColorPages
+// climbs it (the cube, then the camera world's windows coarsest first, a rank answering where its
+// residency byte is within its floor and its ground at least as fine as the ground held -- the
+// footprint's own break is not taken: what is HELD answers) from the manager's CPU map. Returned:
+// the median answering ground (m), how many points each rank answers, and the misses -- a point
+// within a rank's pixel distance (where its mip-0 texel is one pixel) whose byte for that rank says
+// nothing (255) though the chain holds it.
+struct NearGround {
+    uint32_t points = 0, byRank[6] = {}, miss[6] = {};
+    double groundMed = 0.0, mipMean = 0.0;
+};
+NearGround MeasureNearGround(const SurfaceFrame& sf, const ResidencyManager& rm, int colorT, const Camera& cam,
+                             float aspect, double planetR, double viewH) {
+    NearGround ng;
+    if (colorT < 0 || sf.slotsLive == 0) return ng;
+    DirectX::XMFLOAT3 f, r, u;
+    cam.ViewBasis(f, r, u);
+    const double th = std::tan(0.5 * double(cam.fovY));
+    const double camP[3] = {cam.px, cam.py, cam.pz};
+    double P0[3];
+    {
+        const double ry = sf.planetR + camP[1];
+        for (int k = 0; k < 3; ++k) P0[k] = sf.up[k] * ry + sf.east[k] * camP[0] + sf.north[k] * camP[2];
+    }
+    const SurfaceFrame::ChainRows rows = sf.SlotRows(0);
+    const double pixAng = double(cam.fovY) / (std::max)(viewH, 1.0);
+    std::vector<double> grounds;
+    double mipSum = 0.0;
+    for (int j = 0; j < 6; ++j) {
+        const double yN = -1.0 / 3.0 - (2.0 / 3.0) * (double(j) + 0.5) / 6.0;
+        for (int i = 0; i < 16; ++i) {
+            const double xN = -0.97 + 1.94 * (double(i) + 0.5) / 16.0;
+            const double dT[3] = {f.x + r.x * xN * th * aspect + u.x * yN * th,
+                                  f.y + r.y * xN * th * aspect + u.y * yN * th,
+                                  f.z + r.z * xN * th * aspect + u.z * yN * th};
+            double d[3];
+            for (int k = 0; k < 3; ++k) d[k] = sf.east[k] * dT[0] + sf.up[k] * dT[1] + sf.north[k] * dT[2];
+            const double dl = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+            for (double& c : d) c /= dl;
+            const double b = P0[0] * d[0] + P0[1] * d[1] + P0[2] * d[2];
+            const double c = P0[0] * P0[0] + P0[1] * P0[1] + P0[2] * P0[2] - planetR * planetR;
+            const double disc = b * b - c;
+            if (disc < 0.0) continue;
+            const double t = -b - std::sqrt(disc);
+            if (t <= 0.0) continue;
+            const double G[3] = {P0[0] + t * d[0], P0[1] + t * d[1], P0[2] + t * d[2]};
+            // The cube, by direction (the hardware cube's v: LeafWants' flip).
+            const double gl = std::sqrt(G[0] * G[0] + G[1] * G[1] + G[2] * G[2]);
+            const double gd[3] = {G[0] / gl, G[1] / gl, G[2] / gl};
+            double cuv[2];
+            const uint32_t face = CubeFaceOfDir(gd, cuv);
+            const uint32_t haveC = rm.ResidentMipAt(colorT, face, float(cuv[0]), float(1.0 - cuv[1]));
+            double ground = sf.cube.GroundRes(0) * std::ldexp(1.0, int((std::min)(haveC, 15u)));
+            int rank = 0;
+            uint32_t mip = haveC;
+            // The windows' chain at the point, about the camera world's eye.
+            const double q[3] = {G[0] - sf.slotEye[0][0], G[1] - sf.slotEye[0][1], G[2] - sf.slotEye[0][2]};
+            const float p[3] = {float(q[0] * sf.east[0] + q[1] * sf.east[1] + q[2] * sf.east[2]),
+                                float(q[0] * sf.up[0] + q[1] * sf.up[1] + q[2] * sf.up[2]),
+                                float(q[0] * sf.north[0] + q[1] * sf.north[1] + q[2] * sf.north[2])};
+            SurfaceFrame::WalkStep st[SurfaceFrame::kMaxRanks];
+            const uint32_t n = SurfaceFrame::Chain(p, rows, st);
+            for (uint32_t k = 0; k < n; ++k) {
+                const double fu = st[k].u - std::floor(st[k].u), fv = st[k].v - std::floor(st[k].v);
+                const uint32_t have = rm.ResidentMipAt(colorT, st[k].slice, float(fu), float(fv));
+                const double g0 = rows.ground[k];
+                if (t <= g0 / pixAng && have >= 15u) ++ng.miss[k + 1];
+                if (have > hal::BlockBinding::kFloorMip) continue;
+                const double g = g0 * std::ldexp(1.0, int(have));
+                if (g <= ground) {
+                    ground = g;
+                    rank = int(k) + 1;
+                    mip = have;
+                }
+            }
+            ++ng.points;
+            ++ng.byRank[rank];
+            grounds.push_back(ground);
+            mipSum += double(mip);
+        }
+    }
+    if (!grounds.empty()) {
+        std::nth_element(grounds.begin(), grounds.begin() + grounds.size() / 2, grounds.end());
+        ng.groundMed = grounds[grounds.size() / 2];
+        ng.mipMean = mipSum / double(grounds.size());
+    }
+    return ng;
+}
+// The planet point of a flat root-frame point (x, y up, z), the eyes' own formula.
+void PlanetOf(const SurfaceFrame& sf, const double c[3], double out[3]) {
+    const double ry = sf.planetR + c[1];
+    for (int k = 0; k < 3; ++k) out[k] = sf.up[k] * ry + sf.east[k] * c[0] + sf.north[k] * c[2];
+}
+
 // ================================================================================================
 //  M12 step 5d: A VIEW'S DECLARED EYE, IN THE SESSION'S OWN CALLS. The sugar's NUMBERS -- read by
 //  the one parser, in the declared units (scene::ReadPoseSugar) -- go to Camera::SetFromCompass
@@ -444,9 +571,7 @@ std::optional<int> FrameLoop::Session() {
     auto& gisLayer = m_A.gisLayer;
     auto& exchange = m_A.exchange;
     auto& surface = m_A.surface;   // M12 step 4a: the shipped surface, declared once
-    auto& winTenant = m_A.winTenant;
     auto& hgtTenant = m_A.hgtTenant;
-    auto& hgtWinTenant = m_A.hgtWinTenant;
     auto& colCh = m_A.colCh;
     auto& mode = m_mode;
     auto& applyMode = m_applyMode;
@@ -1061,11 +1186,12 @@ std::optional<int> FrameLoop::Session() {
             bcfg.spongeX0 = -2500.0f;   // Mass Bay, east of the outer harbor islands
             bcfg.westBoundary = false;  // the Charles is dammed; the west edge is a wall
             weather.AddDormantWindow("boston", &bathyBostonSwe, bcfg, oceanAtBoston, 0.5);
-            // M9ar: Boston lies inside the z14 height page; its solver reads slice 6 too.
-            if (hgtTenant >= 0) {
-                weather.SetHeightPage(resMgr.TextureRes(hgtTenant),
-                                      resMgr.ResidencyRes(hgtTenant), 6u,
-                                      resMgr.Mips(hgtTenant), surface.winH);
+            // PHASE B2 (D4): every owned solver binds the standing window (it reads it where the
+            // window holds its cells, the cube elsewhere).
+            // A height of no windows (Mars's cube) has no standing window: no bed is bound.
+            if (hgtTenant >= 0 && surface.standingRank && surface.hgtWindows) {
+                weather.SetHeightPage(resMgr.TextureRes(hgtTenant), resMgr.ResidencyRes(hgtTenant),
+                                      resMgr.Mips(hgtTenant), surface.standing, m_A.bedWindow);
             }
         }
     }
@@ -1203,6 +1329,21 @@ std::optional<int> FrameLoop::Session() {
     // f(simUnix) on it (ping-pong at the ends), so scrubbing time scrubs the
     // traffic and headless renders are deterministic. No state anywhere.
     if (waterBank) route.Load("data/gis/route_merrimack.json");
+    // --bank-trace (Phase B0): every fill of both banks is traced; its readings land in a
+    // directory of their own under out/.
+    if (opt.bankTraceEvery > 0 && waterBank) {
+        char dir[96];
+        snprintf(dir, sizeof(dir), "out/banktrace/%lld-%lu", static_cast<long long>(std::time(nullptr)),
+                 static_cast<unsigned long>(GetCurrentProcessId()));
+        m_bankTraceDir = dir;
+        for (WaterBankLayer* b : {waterBank, waterBankB}) {
+            if (!b) continue;
+            b->traceOn = true;
+            b->traceFloor = opt.bankTracePlant ? 6.0f : 0.0f;
+        }
+        Log("[banktrace] every fill traced%s; readings every %u frames and at the end, in %s",
+            opt.bankTracePlant ? " WITH THE PLANTED FLOOR (mip 6)" : "", opt.bankTraceEvery, dir);
+    }
 
     // M5c: give the solver history before the first frame, and run the validation cycle if
     // asked (headless CSV; the ebb/flood-asymmetry and basin-lag gates read from it).
@@ -1449,9 +1590,8 @@ std::optional<int> FrameLoop::Session() {
         }
     }
 
-    if (S.Tool("warm-inlet") && (winTenant >= 0 || hgtTenant >= 0)) {
-        tools::RunWarmInlet(opt, gpu, compositor, resMgr, winTenant, surface.winSlice, hgtTenant,
-                            hgtWinTenant);
+    if (S.Tool("warm-inlet") && hgtTenant >= 0) {
+        tools::RunWarmInlet(opt, gpu, compositor, resMgr, hgtTenant);
         // What the warm did to the trees that serve the pages (the compositor's own counters
         // above stay at zero when the trees are the providers, which is the default).
         if (m_A.megaTree) Log("[warm] the colour tree:\n%s", m_A.megaTree->Stats().c_str());
@@ -1460,7 +1600,7 @@ std::optional<int> FrameLoop::Session() {
 
     // ---- M6j: channel export mode -- pull data OUT through the manager and exit.
     if (S.Tool("export")) {
-        return tools::RunExport(opt, gpu, compositor, hgtCh, resMgr, colCh, surface);
+        return tools::RunExport(opt, gpu, compositor, hgtCh, resMgr, colCh);
     }
 
     // ---- The instrumentation block's runtime part; its members and their notes are
@@ -1778,6 +1918,77 @@ void FrameLoop::StepEntities(int quanta, float dt) {
     // (What each hull is drawn through is decided with the view's windows: PublishHulls.)
 }
 
+void FrameLoop::ApplyWindowSteps(const std::vector<SurfaceFrame::Moved>& moved) {
+    ResidencyManager& rm = m_A.resMgr;
+    // Three turns on: every tile a step kept is held at the pool slot it was held at, or the
+    // step moved bytes.
+    if (!m_keptCheck.empty() && m_frame >= m_keptCheckAt) {
+        uint32_t same = 0, gone = 0, moved2 = 0;
+        for (const KeptTile& k : m_keptCheck) {
+            const uint32_t now = rm.HeldPool(k.tenant, k.req);
+            if (now == k.pool) ++same;
+            else if (now == UINT32_MAX) ++gone;
+            else ++moved2;
+        }
+        m_windowKeptMoved += moved2;
+        Log("[eye-windows] three turns after the step: of %zu tiles kept, %u held at the same pool "
+            "slot, %u released since (the order's own cut), %u at another slot",
+            m_keptCheck.size(), same, gone, moved2);
+        m_keptCheck.clear();
+    }
+    if (moved.empty()) return;
+    // PHASE B2: the four tenants that share the windows (slice i the same ground in all).
+    const hal::Tenant* tenants[4] = {&m_A.colorTenant, &m_A.landseaTenant, &m_A.heightTenant,
+                                     &m_A.exposureTenant};
+    for (const SurfaceFrame::Moved& mv : moved) {
+        for (const hal::Tenant* tp : tenants) {
+            hal::Tenant& t = *const_cast<hal::Tenant*>(tp);
+            if (!t.Valid()) continue;
+            hal::BlockBinding from;
+            if (!t.BlockOf(mv.slice, from)) continue;
+            // Before the move: what the slice holds at the window's mips, by slot.
+            std::vector<KeptTile> held;
+            const uint32_t tW = t.Desc().fiber.texW, tH = t.Desc().fiber.texH;
+            for (uint32_t m = 0; m < 4; ++m) {
+                const uint32_t tw = (Lattice::kFaceDim >> m) / tW, th = (Lattice::kFaceDim >> m) / tH;
+                for (uint32_t y = 0; y < th; ++y) {
+                    for (uint32_t x = 0; x < tw; ++x) {
+                        const TileRequest r{mv.slice, m, x, y};
+                        const uint32_t p = rm.HeldPool(t.Id(), r);
+                        if (p != UINT32_MAX) held.push_back({t.Id(), r, p});
+                    }
+                }
+            }
+            const uint32_t told = t.Move(mv.slice, mv.to);
+            uint32_t left = 0;
+            for (const KeptTile& h : held) {
+                TileRequest a, b;
+                const bool ha = from.Global({0, h.req.mip, h.req.x, h.req.y}, tW, tH, a);
+                const bool hb = mv.to.Global({0, h.req.mip, h.req.x, h.req.y}, tW, tH, b);
+                const bool kept = ha && hb && a.face == b.face && a.mip == b.mip && a.x == b.x && a.y == b.y;
+                if (kept) {
+                    m_keptCheck.push_back(h);
+                    ++m_windowKept;
+                } else {
+                    ++left;
+                }
+            }
+            ++m_windowSteps;
+            m_windowTold += told;
+            m_windowLeft += left;
+            Log("[eye-windows] frame %llu: %S slice %u (rank %d, face %u) (%llu,%llu) -> (%llu,%llu): "
+                "%u slots told (their tile changed), %u of them held a tile (leave); %zu held tiles "
+                "kept at their slots",
+                static_cast<unsigned long long>(m_frame), t.Desc().name, mv.slice,
+                mv.to.rung / 3, mv.to.face, static_cast<unsigned long long>(from.OrgX()),
+                static_cast<unsigned long long>(from.OrgY()),
+                static_cast<unsigned long long>(mv.to.OrgX()),
+                static_cast<unsigned long long>(mv.to.OrgY()), told, left, held.size() - left);
+        }
+    }
+    m_keptCheckAt = m_frame + 3;
+}
+
 scene::ViewCone FrameLoop::ViewConeOf(const Camera& cam, float aspect, float viewH) const {
     scene::ViewCone v;
     v.eye[0] = cam.px;
@@ -1881,10 +2092,7 @@ bool FrameLoop::Frame() {
     auto& gisLayer = m_A.gisLayer;
     // M12 step 4a: the z14 page origin, read off the surface's height window -- the doubles
     // the bank, the trace and the exposure's uv closure below take.
-    const double winOrgX = static_cast<double>(m_A.surface.winH.orgPxX);
-    const double winOrgY = static_cast<double>(m_A.surface.winH.orgPxY);
     auto& hgtTenant = m_A.hgtTenant;
-    auto& hgtWinTenant = m_A.hgtWinTenant;
     auto& exposureSrc = m_A.exposureSrc;
     auto& exposureRoot = m_A.exposureRoot;
     auto& exposureTree = m_A.exposureTree;
@@ -2265,15 +2473,17 @@ bool FrameLoop::Frame() {
         // (pending 2992 -> 3004). The held frame names the unheld dump's moment; there
         // is no off-by-one. The same clamp is what puts --dump-both's wireframe on the
         // solid frame's crests, which is the second reason not to move it.
-        if ((opt.dumpBoth || settling) && S.capture.frames && recFrame >= S.capture.frames) {
-            recFrame = S.capture.frames - 1u;
-        }
+        const bool heldFrame = (opt.dumpBoth || settling) && S.capture.frames && recFrame >= S.capture.frames;
+        if (heldFrame) recFrame = S.capture.frames - 1u;
         simUnix = startUnix + static_cast<double>(recFrame) * (timeScale / 30.0);
         // The headless clock is frame-indexed, so a frame is worth exactly
         // timeScale/30 seconds of world; the boat owes that many whole quanta. Rounding
         // rather than truncating keeps the owed time from drifting slow over a long
         // rail, and at the default scale it is an exact 8.
-        StepEntities(static_cast<int>(std::lround((timeScale / 30.0) / SimClock::kDt)), dt);
+        // A HELD frame is the same instant: the entities owe no time on it, as the churn below is
+        // frozen for it -- or the hull (and the chase eye on it) moves through the hold, and the view's
+        // wants are a function of the hold's length, not of the pose (the seabed's two settles, B9).
+        StepEntities(heldFrame ? 0 : static_cast<int>(std::lround((timeScale / 30.0) / SimClock::kDt)), dt);
         // The churn atlas is stateful and its kernel only climbs at a frozen dt, so a
         // held frame would advance the foam the hold's length decides. Freeze it for
         // exactly the held frames (SeaLayer.h freezeChurn).
@@ -2630,19 +2840,53 @@ bool FrameLoop::Frame() {
             skySun = zenSun;
         }
         sky->SetSkyFrame(rows, skySun);
-        // M13: AND THE AIR ITSELF. The air's one table (the same for every ray on the planet) and
-        // this eye's distance from the planet's centre; the sky is marched from there. An eye
-        // above the air marches nothing -- the limb shell owns that backdrop (the atmosphere
-        // ledger) -- and every consumer answers with the gradient it always had; the shader
-        // decides that from the radius, per viewpoint, so a re-rooted Droste level (local scale
-        // ~3e6 m) keeps the sky it drew before.
+        // M13: AND THE AIR ITSELF. The planet's air (its rows, scene/Air.h), the air's one table
+        // (the same for every ray on the planet) and this eye's distance from the planet's
+        // centre: the sky is the one integral along each ray from max(the eye, the air's entry)
+        // to the exit or the ground (Atmosphere.hlsli AtmRay), wherever the eye is.
         {
-            const double C[3] = {cam.px, cam.py, cam.pz};
+            // The eye in the DOME's frame: the dome is the sky of level camLevel + domeRel (the
+            // root's under realistic Droste lighting), so its integral starts where the eye stands
+            // in THAT level -- a few hundred metres up in the root's air, not ~3e6 m out in the
+            // camera level's own units (S^k: Droste.h Portal::Apply, the same map the rows'
+            // rotation is the turning part of). Without Droste domeRel = 0 and this is the eye.
+            double C[3] = {cam.px, cam.py, cam.pz};
+            if (domeRel != 0) {
+                const double c0[3] = {cam.px, cam.py, cam.pz};
+                portal.Apply(double(-domeRel), c0, C);
+            }
             const double gy = C[1] + planetR;
             sky->SetPlanetRadius(planetR);
+            // the planet's air on the scene's day (air.aod550): the table's and the rows'
+            sky->SetAir(AirOf(S.scene.planet, S.air.aod550, S.air.angstrom));
+            renderer.air = AirOf(S.scene.planet, S.air.aod550, S.air.angstrom);
             renderer.skyMsSrv = sky->MultiScatterSrv();
             renderer.planetRadiusM = static_cast<float>(planetR);
             renderer.eyeRadiusM = static_cast<float>(std::sqrt(C[0] * C[0] + gy * gy + C[2] * C[2]));
+            // --sky-probe: the eye's radius as each consumer receives it -- the scene constants'
+            // (above), the globe level row's (GlobeLayer fillLevel: each component summed in
+            // doubles and cast, the length taken in float as Globe.hlsl LoadLevel takes it), and
+            // the eye's true distance from the planet's centre in doubles (the camera's position
+            // is a Euclidean point of the tangent frame: Rail::AimCamera copies the rail's eye,
+            // resolved through PlanetToFlatPose, a rotation) -- and the sun in the eye's zenith
+            // frame turned so +x is the view's azimuth (SkyLayer::SetProbeEye, CsSkyAt).
+            if (opt.skyProbe && mode == 1) {
+                const float fx = static_cast<float>(C[0]), fy = static_cast<float>(gy),
+                            fz = static_cast<float>(C[2]);
+                m_skyAtR[0] = renderer.eyeRadiusM;
+                m_skyAtR[1] = std::sqrt(fx * fx + fy * fy + fz * fz);
+                m_skyAtR[2] = static_cast<float>(std::sqrt(C[0] * C[0] + gy * gy + C[2] * C[2]));
+                DirectX::XMFLOAT3 f3, r3, u3;
+                cam.ViewBasis(f3, r3, u3);
+                const float fd[3] = {rows[0] * f3.x + rows[1] * f3.y + rows[2] * f3.z,
+                                     rows[3] * f3.x + rows[4] * f3.y + rows[5] * f3.z,
+                                     rows[6] * f3.x + rows[7] * f3.y + rows[8] * f3.z};
+                const float az = std::atan2(fd[2], fd[0]);
+                const float ca = std::cos(az), sa = std::sin(az);
+                const float sl[3] = {skySun[0] * ca + skySun[2] * sa, skySun[1],
+                                     -skySun[0] * sa + skySun[2] * ca};
+                sky->SetProbeEye(m_skyAtR, sl);
+            }
         }
         if (globe) globe->SetSpaceSun(spaceSun);
     }
@@ -2958,18 +3202,41 @@ bool FrameLoop::Frame() {
                 bandFoldS[c] = sea->BandKFold(c);
             }
             waterBank->injectPattern = opt.inject;
-            if (hgtWinTenant >= 0) {
-                // M9aq: in pages mode the window is slice 6 of the height array.
-                waterBank->SetHeightWindow(resMgr.TextureSrv(hgtWinTenant),
-                                           resMgr.ResidencySrv(hgtWinTenant),
-                                           m_A.surface.winH,
-                                           hgtWinTenant == hgtTenant ? 6u : UINT32_MAX);
+            // PHASE B2: THE WINDOWS THE RINGS STAND IN. Set A's rings stand about the camera: its
+            // world's (slot 0) rows about its eye; set B's about the outer level's eye: the rows of
+            // the world whose eye stands there (none within a kilometre: the cube alone).
+            waterBank->SetWindows(m_A.surface.SlotRows(0), m_A.surface.slotEye[0]);
+            // PHASE B2: A READER WANTS WHAT IT READS -- every ring its bed at its own grain (the rung
+            // whose texel is at most the ring's), over its span, about the eye its rings stand at.
+            {
+                const int sampB = resMgr.Sampler("bank");
+                auto ringWants = [&](const double c[3]) {
+                    double E[3];
+                    PlanetOf(m_A.surface, c, E);
+                    for (int mR = 0; mR < WaterBankLayer::kMips; ++mR) {
+                        const double texel = waterBank->BaseTexelM() * double(1 << mR);
+                        const int rung = std::clamp(
+                            int(std::ceil(std::log2(m_A.surface.cube.GroundRes(0) / texel))), 0, 15);
+                        WantGround(resMgr, m_A.surface, sampB, hgtTenant, E,
+                                   0.5 * WaterBankLayer::kRingTexels * texel, rung);
+                    }
+                };
+                const double camP[3] = {cam.px, cam.py, cam.pz};
+                ringWants(camP);
+                if (waterBankB && drosteOuter) ringWants(drosteOuterCam);
+            }
+            if (waterBankB) {
+                double EB[3];
+                PlanetOf(m_A.surface, drosteOuterCam, EB);
+                const uint32_t sB = drosteOuter ? m_A.surface.SlotNear(EB, 1000.0) : UINT32_MAX;
+                waterBankB->SetWindows(sB == UINT32_MAX ? SurfaceFrame::ChainRows{} : m_A.surface.SlotRows(sB),
+                                       sB == UINT32_MAX ? EB : m_A.surface.slotEye[sB]);
+            }
+            if (hgtTenant >= 0) {
+                // PHASE B3: the height tenant's array; the rings read its windows by the rows above.
+                waterBank->SetHeightWindow(resMgr.TextureSrv(hgtTenant), resMgr.ResidencySrv(hgtTenant));
                 if (waterBankB) {
-                    waterBankB->SetHeightWindow(resMgr.TextureSrv(hgtWinTenant),
-                                                resMgr.ResidencySrv(hgtWinTenant),
-                                                m_A.surface.winH,
-                                                hgtWinTenant == hgtTenant ? 6u
-                                                                          : UINT32_MAX);
+                    waterBankB->SetHeightWindow(resMgr.TextureSrv(hgtTenant), resMgr.ResidencySrv(hgtTenant));
                 }
             }
             globe->windGateVal = sea->WindGate();
@@ -3010,16 +3277,15 @@ bool FrameLoop::Frame() {
         }
         // (--albedo: the water stands down too -- textures judged as layered images,
         // nothing else in the frame; the lit look retunes separately.)
-        // M10: under REALISTIC Droste lighting the sky belongs to the OUTERMOST world:
-        // every inner level sits a few hundred metres up in the root's air, so from
-        // anywhere inside the tower the backdrop is the root's low sky, never space.
-        // APPEALING gives each level its own -- its orbit reads as an orbit.
-        const bool rootSky = portal.Valid() && portalDecl.lighting == 0 && camLevel > 0;
-        sky->enabled = (altV < 9000.0 || rootSky) && !marsMode && !opt.albedo;   // low haze dome...
-        if (globe) globe->skyPassEnabled = !sky->enabled && !opt.albedo;   // ...or the
-                                                    // limb shell, never both at once
-                                                    // (--albedo: neither -- textures)
+        // ONE BACKDROP, ONE INTEGRAL (2026-10-05): the sky layer's dome is the backdrop at every
+        // altitude and on every planet -- the sky is the one integral from the eye or the air's
+        // entry (Common.hlsli SkyAlong), so there is nothing to hand over to. The 9 km switch to
+        // the globe's shell that stood here was the coast rail's 44 s pop: two models of the sky
+        // at one radius (the dipped horizon 1.28 against 0.63). The globe's backdrop pass draws
+        // only under appealing Droste lighting, where the levels' skies cross-fade below.
+        sky->enabled = !opt.albedo;   // (--albedo: textures alone, no sky)
         if (globe) {
+            globe->skyPassEnabled = false;
             globe->skyPassWeight = 1.0f;
             globe->skyOwnAir = 1.0f;
         }
@@ -3274,6 +3540,59 @@ bool FrameLoop::Frame() {
                 }
             }
         }
+        // THE EYE'S WINDOWS STEP (SurfaceFrame::Follow), before the walk wants by them. PHASE A2:
+        // every slot of the frame's level table -- the camera's eye (the globe walk's own formula,
+        // Fill's below), then each Droste level's and gate world's eye in its own frame -- names
+        // its ranks and its boxes; a box that stepped is moved in the colour and the mask
+        // (hal::Tenant::Move: the slots whose tile changed are told, every other keeps its tile);
+        // the rows draw the boxes of the frame before (SurfaceFrame::drawn), by when the turn has
+        // told the map. A slot past the table holds no rank.
+        {
+            SurfaceFrame& sf = m_A.surface;
+            const double pixAng = double(cam.fovY) / (std::max)(double(viewH), 1.0);
+            std::vector<SurfaceFrame::Moved> moved;
+            // The slots' eyes, then their claims (SurfaceFrame::Assign: a set is the ground's),
+            // then every set follows the eye of the slot that claimed it, or holds none.
+            double eyes[SurfaceFrame::kWindowSlots][3] = {};
+            uint32_t n = 0;
+            for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) {
+                const double camS[3] = {cam.px, cam.py, cam.pz};
+                const double* c = s == 0 ? camS : (s < globe->LevelSlots() ? globe->LevelCam(s) : nullptr);
+                if (!c) break;
+                const double ry = sf.planetR + c[1];
+                for (int k = 0; k < 3; ++k) eyes[s][k] = sf.up[k] * ry + sf.east[k] * c[0] + sf.north[k] * c[2];
+                n = s + 1;
+            }
+            uint32_t was[SurfaceFrame::kWindowSlots];
+            for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) was[s] = sf.slotSet[s];
+            sf.Assign(n, eyes, pixAng);
+            for (uint32_t s = 0; s < n; ++s) {
+                if (sf.slotSet[s] != was[s]) {
+                    Log("[eye-windows] frame %llu: slot %u claims set %d (it read %d)",
+                        static_cast<unsigned long long>(frame), s, int(sf.slotSet[s]),
+                        was[s] == SurfaceFrame::kNoSet ? -1 : int(was[s]));
+                }
+            }
+            for (uint32_t w = 0; w < SurfaceFrame::kWindowSlots; ++w) {
+                const double* e = nullptr;
+                for (uint32_t s = 0; s < n; ++s) {
+                    if (sf.slotSet[s] == w) e = eyes[s];
+                }
+                const uint32_t K0 = sf.bound[w].K;
+                sf.Follow(w, e, pixAng, moved);
+                if (sf.bound[w].K != K0) {
+                    Log("[eye-windows] frame %llu: set %u holds %u rank(s) (was %u)",
+                        static_cast<unsigned long long>(frame), w, sf.bound[w].K, K0);
+                }
+            }
+            ApplyWindowSteps(moved);
+            // PHASE B2w: what the step did this frame, for the near ground's ledger.
+            m_ngMoves = uint32_t(moved.size());
+            m_ngClaims = 0;
+            m_ngK = 0;
+            for (uint32_t s = 0; s < n; ++s) m_ngClaims += sf.slotSet[s] != was[s] ? 1u : 0u;
+            for (uint32_t w = 0; w < SurfaceFrame::kWindowSlots; ++w) m_ngK += sf.bound[w].K;
+        }
         PROF_BEGIN();
         globe->SetView(cam, aspect, viewH, simUnix - startUnix);
         PROF_END(7);
@@ -3353,6 +3672,12 @@ bool FrameLoop::Frame() {
         if (h != sLastSurface) {
             sLastSurface = h;
             Log("[surface] main fill FNV-1a %016llx", static_cast<unsigned long long>(h));
+            // The eye and the tangent frame the rows are taken about, in full.
+            const SurfaceFrame& sf = m_A.surface;
+            Log("[addr] eye %.17g %.17g %.17g R %.17g east %.17g %.17g %.17g up %.17g %.17g "
+                "%.17g north %.17g %.17g %.17g",
+                sf.eye[0], sf.eye[1], sf.eye[2], sf.planetR, sf.east[0], sf.east[1], sf.east[2],
+                sf.up[0], sf.up[1], sf.up[2], sf.north[0], sf.north[1], sf.north[2]);
         }
     }
     renderer.waterLevel = static_cast<float>(tide->focusHeight);
@@ -3385,6 +3710,8 @@ bool FrameLoop::Frame() {
         pixArmed = true;
     }
     PROF_BEGIN();
+    // PHASE B2: the churn stands in the camera's world: slot 0's windows about its eye.
+    if (sea) sea->SetChurnWindows(m_A.surface.SlotRows(0), m_A.surface.slotEye[0]);
     if (sea) sea->SetTime(simUnix, bathy.Ready() ? waterNavd : tide->focusHeight,
                           cam.px, cam.pz);
     PROF_END(5);
@@ -3403,58 +3730,27 @@ bool FrameLoop::Frame() {
             Log("[exposure] bucket rolled -> tree %s", fresh->Id().c_str());
         }
         if (exposureSrc->Valid()) {
-            const double piP = 3.14159265358979, n14 = 16384.0 * 256.0;
-            const double latC = BathyModel::kOrgLat + cam.pz / BathyModel::kMPerLat;
-            const double lonC = BathyModel::kOrgLon + cam.px / BathyModel::kMPerLon;
-            const double dLat = 20000.0 / BathyModel::kMPerLat;
-            const double dLon = 20000.0 / BathyModel::kMPerLon;
-            auto mU = [&](double lonDeg) {
-                return ((lonDeg + 180.0) / 360.0 * n14 - winOrgX) / 16384.0;
-            };
-            auto mV = [&](double latDeg) {
-                const double l = latDeg * piP / 180.0;
-                return ((0.5 - std::log(std::tan(piP * 0.25 + l * 0.5)) / (2.0 * piP)) *
-                            n14 - winOrgY) / 16384.0;
-            };
-            const float u0 = float(std::clamp(mU(lonC - dLon), 0.0, 1.0));
-            const float u1 = float(std::clamp(mU(lonC + dLon), 0.0, 1.0));
-            const float v0 = float(std::clamp(mV(latC + dLat), 0.0, 1.0));
-            const float v1 = float(std::clamp(mV(latC - dLat), 0.0, 1.0));
-            if (u1 > u0 && v1 > v0) {
-                resMgr.Want(sampView, exposureT, 6u, 3u, u0, v0, u1, v1, false, float(altV),
-                            float(mU(lonC)), float(mV(latC)));   // step 5 D: focus, the eye
-            }
-            // M10: and around the outer level's eye, whose sea set B draws.
+            // PHASE B2: the ground the bank's rings reach (+-20 km) about the camera's eye and the
+            // outer level's (set B's), at the exposure's grain (rung 3), on the windows.
+            double E[3];
+            const double camP[3] = {cam.px, cam.py, cam.pz};
+            PlanetOf(m_A.surface, camP, E);
+            WantGround(resMgr, m_A.surface, sampView, exposureT, E, 20000.0, 3);
             if (drosteOuter) {
-                const double latO = BathyModel::kOrgLat + drosteOuterCam[2] / BathyModel::kMPerLat;
-                const double lonO = BathyModel::kOrgLon + drosteOuterCam[0] / BathyModel::kMPerLon;
-                const float ou0 = float(std::clamp(mU(lonO - dLon), 0.0, 1.0));
-                const float ou1 = float(std::clamp(mU(lonO + dLon), 0.0, 1.0));
-                const float ov0 = float(std::clamp(mV(latO + dLat), 0.0, 1.0));
-                const float ov1 = float(std::clamp(mV(latO - dLat), 0.0, 1.0));
-                if (ou1 > ou0 && ov1 > ov0)
-                    resMgr.Want(sampView, exposureT, 6u, 3u, ou0, ov0, ou1, ov1, false, 0.0f,
-                                float(mU(lonO)), float(mV(latO)));
-            }
-            if (opt.resTrace && (frame % 150u) == 0u) {
-                // The instrument (--res-trace): what the page holds at the camera vs what
-                // the node says, and what the manager believes about the tiles under it.
-                const float uc = float(std::clamp(mU(lonC), 0.0, 1.0));
-                const float vc = float(std::clamp(mV(latC), 0.0, 1.0));
-                Log("[exposure] frame %u cam (%.4f, %.4f): page z14 resident mip %u, node "
-                    "%.2f, tree %s",
-                    frame, latC, lonC, resMgr.ResidentMipAt(exposureT, 6u, uc, vc),
-                    exposureSrc->At(latC, lonC), std::atomic_load(exposureTree.get())->Id().c_str());
-                for (uint32_t mm = 3; mm <= 5; ++mm) {
-                    const uint32_t dim = 16384u >> mm;
-                    const TileRequest tq{6u, mm, uint32_t(uc * dim) / 256u, uint32_t(vc * dim) / 128u};
-                    Log("[exposure]   mip %u tile (%u,%u): %s", mm, tq.x, tq.y,
-                        resMgr.DebugTile(exposureT, tq).c_str());
-                }
+                PlanetOf(m_A.surface, drosteOuterCam, E);
+                WantGround(resMgr, m_A.surface, sampView, exposureT, E, 20000.0, 3);
             }
         }
     }
     PROF_END(11);
+    // Phase B0: the two-worlds probe's height and exposure lanes read the exposure's own views; the
+    // windows' floors are ~0 while neither tenant has windows (Phase B2 gives them).
+    if (globe) {
+        globe->probeX[0] = exposureT >= 0 ? resMgr.TextureSrv(exposureT) : 0xFFFFFFFFu;
+        globe->probeX[1] = exposureT >= 0 ? resMgr.ResidencySrv(exposureT) : 0xFFFFFFFFu;
+        globe->probeX[2] = m_A.surface.hgtWindows ? hal::BlockBinding::kFloorMip : 0xFFFFFFFFu;
+        globe->probeX[3] = exposureT >= 0 ? hal::BlockBinding::kFloorMip : 0xFFFFFFFFu;
+    }
     // ---- THE INTERESTS (the water match): the subjects and places the recorded view names keep
     // their water resident at the grain its kernels read -- the solved field's pages at the solver's
     // own cells (mip 0), the swell shadow at the bank's floor (kSwellShadowMipFloor), the bed at the
@@ -3463,8 +3759,6 @@ bool FrameLoop::Frame() {
     // load every boat's water). --water-probe measured the need on a fly-in down the flood rail: for
     // ~2 s after arriving at the helm the drawn solved sea stood at 0.77-0.92 of the hull's.
     if (!marsMode && !m_startView.interests.empty()) {
-        const Lattice& page = m_A.surface.winH;
-        const uint32_t pageSlice = m_A.surface.hgtWinSlice;   // the z14 page's slice (0..5: the cube)
         for (const std::string& iname : m_startView.interests) {
             const SceneInterest* si = nullptr;
             for (const SceneInterest& x : S.interests) {
@@ -3510,33 +3804,15 @@ bool FrameLoop::Frame() {
             const int sampI = resMgr.Sampler(("subject." + iname).c_str(), true);
             const double r = (std::max)(si->p.radius, 0.0);
             uint32_t held = 0;
-            // The z14 page tenants: the swell shadow and the bed.
-            if (pageSlice != UINT32_MAX && page.kind == Lattice::Kind::Window) {
-                double pxW = 0.0, pyN = 0.0, pxE = 0.0, pyS = 0.0;
-                page.PxOf(BathyModel::kOrgLat + (cz + r) / BathyModel::kMPerLat,
-                          BathyModel::kOrgLon + (cx - r) / BathyModel::kMPerLon, pxW, pyN);
-                page.PxOf(BathyModel::kOrgLat + (cz - r) / BathyModel::kMPerLat,
-                          BathyModel::kOrgLon + (cx + r) / BathyModel::kMPerLon, pxE, pyS);
-                const auto uvOf = [&](double px, long long org) {
-                    return float(std::clamp((px - double(org)) / double(page.faceDim), 0.0, 1.0));
-                };
-                const float u0 = uvOf(pxW, page.orgPxX), u1 = uvOf(pxE, page.orgPxX);
-                const float v0 = uvOf(pyN, page.orgPxY), v1 = uvOf(pyS, page.orgPxY);
-                double pxC = 0.0, pyC = 0.0;   // step 5 D: the subject, the focus of its weight
-                page.PxOf(BathyModel::kOrgLat + cz / BathyModel::kMPerLat,
-                          BathyModel::kOrgLon + cx / BathyModel::kMPerLon, pxC, pyC);
-                const float fuS = uvOf(pxC, page.orgPxX), fvS = uvOf(pyC, page.orgPxY);
-                if (u1 > u0 && v1 > v0) {
-                    if (exposureT >= 0 && exposureSrc && exposureSrc->Valid()) {
-                        resMgr.Want(sampI, exposureT, pageSlice, kSwellShadowMipFloor, u0, v0, u1,
-                                    v1, false, 0.0f, fuS, fvS);
-                        ++held;
-                    }
-                    if (hgtWinTenant >= 0) {
-                        resMgr.Want(sampI, hgtWinTenant, pageSlice, 0u, u0, v0, u1, v1, false, 0.0f,
-                                    fuS, fvS);
-                        ++held;
-                    }
+            // PHASE B2: the swell shadow (rung 3) and the bed (the hull's rung) on the windows.
+            {
+                double c[3] = {cx, 0.0, cz}, P[3];
+                PlanetOf(m_A.surface, c, P);
+                if (exposureT >= 0 && exposureSrc && exposureSrc->Valid()) {
+                    held += WantGround(resMgr, m_A.surface, sampI, exposureT, P, r, 3);
+                }
+                if (hgtTenant >= 0 && m_A.heightBed && m_A.heightBed->Rung() >= 0) {
+                    held += WantGround(resMgr, m_A.surface, sampI, hgtTenant, P, r, m_A.heightBed->Rung());
                 }
             }
             // The solved field's pages (z16), through the solver's grid (the page texel IS the cell).
@@ -3613,9 +3889,32 @@ bool FrameLoop::Frame() {
     renderer.RenderFrame(viewSet);
     // --sky-probe: the atmosphere's tables, read back once the first one is built and held
     // against published optical depths (SkyLayer::Probe). Reads back and waits: an instrument.
+    // THE PICTURE'S WHITE (air.exposure): a scene's own value, or the law -- 1 / the luminance of
+    // a white level surface under a zenith sun through the scene's air, sun and sky, from the
+    // same functions the frame lights with (SkyLayer::WhiteNoonY, read back once per table).
+    if (S.air.exposure > 0.0f) {
+        renderer.SetExposure(S.air.exposure);
+    } else if (sky) {
+        const float w = sky->WhiteNoonY(gpu);
+        if (w > 0.0f && std::abs(renderer.Exposure() - 1.0f / w) > 1e-6f * (1.0f / w)) {
+            renderer.SetExposure(1.0f / w);
+            Log("[exposure] the law: a sunlit white at noon through this air has luminance %.4f "
+                "in the engine's unit; exposure %.4f (air.exposure = 0)", w, 1.0f / w);
+        }
+    }
     if (opt.skyProbe && sky && frame >= 2u && !m_skyProbed) {
         m_skyProbed = true;
         sky->Probe(gpu);
+    }
+    if (opt.skyProbe && sky && mode == 1) {
+        const uint32_t settleN = S.railDirW.empty() ? 0u : 150u;
+        char tag[256];
+        std::snprintf(tag, sizeof(tag),
+                      "frame %u rec %d alt %.1f m dome %d shell %d R %.2f/%.2f/%.2f m", frame,
+                      int(frame) - int(settleN), altV, sky->enabled ? 1 : 0,
+                      (globe && globe->skyPassEnabled) ? 1 : 0, m_skyAtR[0], m_skyAtR[1],
+                      m_skyAtR[2]);
+        sky->ProbeAt(gpu, tag);
     }
     // --water-probe N: the drawn sea against each hull's own water, every N recorded frames
     // (app/Tools/WaterProbe.cpp). An instrument: it reads back and waits, so never in play.
@@ -3626,7 +3925,7 @@ bool FrameLoop::Frame() {
                                  m_A.vesselLayer, &waterAtlas, exposureSrc.get(),
                                  m_waveField.get(), sea, &seaState, m_A.surface,
                                  m_oceanAt ? m_oceanAt(simUnix) : 0.0, simUnix,
-                                 frame - probeSettle);
+                                 frame - probeSettle, &m_windows);
         }
     }
     // --bench-overlap keeps the overlap: RENDER is then record + the BeginFrame fence
@@ -3709,6 +4008,30 @@ bool FrameLoop::Frame() {
     // and, under --twin-surface, the three levels at the camera; the first reading keeps the
     // frame it follows as a still beside --dump's (<name>_f<N>.png). An instrument: it reads
     // back and waits, after the frame it describes was recorded.
+    // --near-ground N (Phase B2w): the near ground's rank and mip, the misses, and the turn's releases.
+    if (opt.nearGroundEvery > 0 && frame % opt.nearGroundEvery == 0u) {
+        const float aspect = float(S.capture.width) / float((std::max)(1u, S.capture.height));
+        const NearGround ng = MeasureNearGround(m_A.surface, resMgr, m_A.surface.colorT, cam, aspect, planetR, double(S.capture.height));
+        const auto& rl = resMgr.releaseLedger;
+        Log("[nearground] f %u alt %.1f | %u pts: cube %u r1 %u r2 %u r3 %u r4 %u r5 %u | ground med %.3f m mip mean %.2f "
+            "| misses r1..r5 %u %u %u %u %u | moves %u claims %u K %u | released cut %u (named %u) invalidated %u "
+            "(named %u) | starved %u (past the glance %u) stuck %u | stale held %u, refreshed %llu, refused %llu "
+            "| guard %llu",
+            frame, cam.py, ng.points, ng.byRank[0], ng.byRank[1], ng.byRank[2], ng.byRank[3], ng.byRank[4],
+            ng.byRank[5], ng.groundMed, ng.mipMean, ng.miss[1], ng.miss[2], ng.miss[3], ng.miss[4], ng.miss[5],
+            m_ngMoves, m_ngClaims, m_ngK, rl.cut, rl.cutNamed, rl.invalidated, rl.invalidatedNamed,
+            resMgr.starvedNow, resMgr.starvedPast, resMgr.stuckPast, resMgr.staleHeld,
+            static_cast<unsigned long long>(resMgr.refreshedTotal),
+            static_cast<unsigned long long>(resMgr.refreshRefusedTotal),
+            static_cast<unsigned long long>(resMgr.releasedUnderRefusedTotal));
+    }
+    // --bank-trace N (Phase B0): the bank's bed under its rings as the frame just drawn read it,
+    // every N frames (and at the run's end, below). The trace rides every fill; this reads it.
+    if (opt.bankTraceEvery > 0 && !m_bankTraceDir.empty() && frame % opt.bankTraceEvery == 0u) {
+        const std::string tag = "f" + std::to_string(frame);
+        if (waterBank) waterBank->TraceRead(gpu, m_bankTraceDir, tag);
+        if (waterBankB && waterBankB->enabled) waterBankB->TraceRead(gpu, m_bankTraceDir, tag + "_B");
+    }
     if (opt.bedTraceEvery > 0 && m_bedTracer.Configured() && !marsMode &&
         frame % opt.bedTraceEvery == 0u) {
         const std::string tag = "f" + std::to_string(frame);
@@ -4046,10 +4369,11 @@ bool FrameLoop::Frame() {
                         static_cast<unsigned long long>(resMgr.reloadedTotal),
                         static_cast<unsigned long long>(resMgr.rewantedTotal));
                     Log("[rail]     order: %llu tiles rescued from the retire list (no read, no "
-                        "new slot); %llu answered not whole and made unreachable; %llu released "
-                        "past the cut, %llu mapped",
+                        "new slot); %llu answered not whole and made unreachable (%llu held tiles released "
+                        "under one by the guard, must be 0); %llu released past the cut, %llu mapped",
                         static_cast<unsigned long long>(resMgr.rescuedTotal),
                         static_cast<unsigned long long>(resMgr.incompleteTotal),
+                        static_cast<unsigned long long>(resMgr.releasedUnderRefusedTotal),
                         static_cast<unsigned long long>(resMgr.releasedTotal),
                         static_cast<unsigned long long>(resMgr.mappedTotal));
                     const double pt = double((std::max)(resMgr.passTurns, uint64_t(1)));
@@ -4175,6 +4499,11 @@ bool FrameLoop::Frame() {
             }
         }
         if (opt.dumpFibers && waterBank) waterBank->DumpFibers(gpu);
+        // --bank-trace (Phase B0): the bank's bed as the run's last frame read it -- the still's.
+        if (opt.bankTraceEvery > 0 && !m_bankTraceDir.empty()) {
+            if (waterBank) waterBank->TraceRead(gpu, m_bankTraceDir, "final");
+            if (waterBankB && waterBankB->enabled) waterBankB->TraceRead(gpu, m_bankTraceDir, "final_B");
+        }
         if (S.Tool("dump-water-state") && !marsMode && sea) {
             tools::RunDumpWaterState(opt, gpu, sea, simUnix, weather);
         }
@@ -4184,8 +4513,7 @@ bool FrameLoop::Frame() {
         }
         if (S.Tool("trace") && !marsMode && sea && waterBank) {
             tools::RunTrace(opt, gpu, sea, compositor, hgtCh, waterAtlas, waterBank, globe,
-                            resMgr, winOrgX, winOrgY, hgtTenant, hgtWinTenant, simUnix,
-                            weather);
+                            resMgr, simUnix, weather);
         }
         // --bed-trace: THE WHOLE BED, the readings' reference. After everything above has read
         // the run's last instant, the domain is made whole the way the bed wait makes it -- the
@@ -4220,7 +4548,42 @@ int FrameLoop::Finish() {
     auto& dumpedSolid = m_dumpedSolid;
     auto& frameMsSum = m_frameMsSum;
     auto& frameMsN = m_frameMsN;
-
+    // PHASE A1: WHAT THE EYE'S WINDOWS HOLD at the end of the run (D4: ranks 4 and 5 are the
+    // tree's magnified parents where no source paints that fine), slice by slice, and the steps.
+    {
+        const hal::Tenant* tenants[2] = {&m_A.colorTenant, &m_A.landseaTenant};
+        for (const hal::Tenant* tp : tenants) {
+            if (!tp->Valid()) continue;
+            for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) {
+            std::string per;
+            uint32_t sum = 0;
+            for (uint32_t k = 1; k <= SurfaceFrame::kMaxRanks; ++k) {
+                const uint32_t slice = SurfaceFrame::WindowSlice(s, k);
+                uint32_t held[2] = {0, 0};
+                for (uint32_t m = 0; m < 8; ++m) {
+                    const uint32_t tw = (Lattice::kFaceDim >> m) / 128u;
+                    for (uint32_t y = 0; y < tw; ++y) {
+                        for (uint32_t x = 0; x < tw; ++x) {
+                            if (resMgr.HeldPool(tp->Id(), {slice, m, x, y}) != UINT32_MAX) ++held[m < 4 ? 0 : 1];
+                        }
+                    }
+                }
+                char b[160];
+                snprintf(b, sizeof(b), " r%u: %u held at mips 0..3 + %u at 4..7 (%.1f MB);", k, held[0],
+                         held[1], (held[0] + held[1]) * 65536.0 / 1048576.0);
+                per += b;
+                sum += held[0] + held[1];
+            }
+            if (sum) Log("[eye-windows] at the end, %S slot %u:%s", tp->Desc().name, s, per.c_str());
+            }
+        }
+        Log("[eye-windows] the run's steps: %llu (slice moves), %llu slots told, %llu held tiles left, "
+            "%llu kept at their slots, %llu kept tiles found at another pool slot three turns on",
+            static_cast<unsigned long long>(m_windowSteps), static_cast<unsigned long long>(m_windowTold),
+            static_cast<unsigned long long>(m_windowLeft), static_cast<unsigned long long>(m_windowKept),
+            static_cast<unsigned long long>(m_windowKeptMoved));
+        if (m_A.megaTree) Log("[eye-windows] the colour tree this run:\n%s", m_A.megaTree->Stats().c_str());
+    }
     // THE SHUTDOWN TRAIL (core/ExitTrail.h): a flushed line before every phase from here to the
     // last destructor, so a death in teardown names its phase.
     ExitStep("finish: the loop is over -- the run's reports and dumps");

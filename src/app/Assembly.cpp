@@ -235,11 +235,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     auto& gisLayer = A->gisLayer;
     auto& exchange = A->exchange;
     auto& colorCubeT = A->colorCubeT;
-    auto& winTenant = A->winTenant;
     auto& hgtTenant = A->hgtTenant;
-    auto& hgtWinTenant = A->hgtWinTenant;
     auto& maskTenant = A->maskTenant;
-    auto& detTenant = A->detTenant;
     auto& colCh = A->colCh;
     auto& megaKeep = A->megaKeep;
     auto& megaTree = A->megaTree;
@@ -256,8 +253,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     auto& colorTenant = A->colorTenant;
     auto& landseaTenant = A->landseaTenant;
     auto& idxColorCube = A->idxColorCube;
-    auto& idxColorWin = A->idxColorWin;
-    auto& idxColorDet = A->idxColorDet;
     auto& idxHeightCube = A->idxHeightCube;
     auto& tileStream = A->tileStream;
 
@@ -272,13 +267,19 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     const bool sliceOn = sliceFx != nullptr;
 
     // A RASTER IS A SOURCE BY BEING A FILE (compose/RasterFileSource.h): the scene's `sources`,
-    // opened before the device, and before the blocks, because `faceWindows: auto` is the blocks
-    // their footprints and grains ask for (SurfaceFrame::AutoKey). Then THE PASS (HIERARCHY
-    // 4.20): each paints its own level and the tree folds the rest, on every lattice the colour
-    // binds below, before the first frame -- or alone, and out, as the `ingest` tool.
+    // opened before the device. Then THE PASS (HIERARCHY 4.20): each paints its own level and the
+    // tree folds the rest, on every lattice the colour binds below, before the first frame -- or
+    // alone, and out, as the `ingest` tool. (PHASE A1: the windows are the eye's, not the
+    // sources'; nothing here chooses one.)
     planetR = (S.scene.planet == "mars") ? 3389500.0 : GlobeModel::kR;
     surface = SurfaceFrame::Merrimack(planetR, opt.stencil);
-    std::string blockKey = S.streaming.faceWindows;
+    // PHASE B2 (D1): THE WINDOWS' STEP, a whole tile at the floor of every tenant that shares them --
+    // the colour and the mask (128 x 128), the height and the exposure (256 x 128): 2048 x 1024.
+    surface.ShareWindows(128, 128);
+    surface.ShareWindows(256, 128);
+    Log("[surface] the windows step by %u x %u texels of their rank: a whole tile at the floor (mip 3) "
+        "of every tenant sharing them",
+        surface.step[0], surface.step[1]);
     if (S.scene.planet != "mars") {
         std::vector<RasterEntry> entries;
         for (const scene::SourceProps& s : S.sources) {
@@ -286,27 +287,14 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                                s.feather, s.unit, s.datum, s.offset, s.hasOffset});
         }
         A->sceneSources = LoadRasterSources(entries);
-        if (blockKey == "auto") {
-            std::vector<SurfaceFrame::BlockWant> wants;
-            for (const auto& s : A->sceneSources) {
-                const SourceInfo& i = s->Info();
-                if (!s->Height()) wants.push_back({i.name, i.lon0, i.lat0, i.lon1, i.lat1, s->GrainM()});
-            }
-            blockKey = SurfaceFrame::AutoKey(wants);
-            Log("[surface] streaming.faceWindows auto: %zu source(s) ask for '%s'", wants.size(),
-                blockKey.c_str());
-        }
-        surface.DeclareBlocks(blockKey);
     }
     // The folder every tile tree of this run lives in (streaming.treeRoot), before the first
     // tree is built. A tool pointed at a scratch folder paints, packs and reads there alone.
     TileTree::SetTreeRoot(S.streaming.treeRoot);
     if (S.streaming.colorTrees || S.Tool("ingest")) {
         IngestSources(A->sceneSources,
-                      surface.blocks.empty()
-                          ? std::vector<Lattice>{surface.cube, surface.win, surface.det}
-                          : std::vector<Lattice>{surface.cube, hal::BlockBinding::Pyramid(128, 128)},
-                      {surface.cubeH, surface.winH});   // the height page's two lattices
+                      std::vector<Lattice>{surface.cube, hal::BlockBinding::Pyramid(128, 128)},
+                      {surface.cubeH});   // PHASE B3: the z14 height page deleted (the pyramid is painted on demand)
     }
     if (S.Tool("ingest")) return nullptr;
 
@@ -343,16 +331,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // radius, the cube and the Merrimack windows the tenants below are declared on, the
     // tenants themselves once they exist (Declare, at the old SetComposed site), and the
     // tangent frame's rows the session writes into it. Both fills read it.
-    // HIERARCHY 4.17: declared HERE, before the first layer compiles a shader, because the scene's
-    // key decides what they compile: the standing blocks' code (Compose.hlsli) is compiled in only
-    // when the key stands, as GA_BLOCK_RANKS = its ranks; with no key, or a refused one, every
-    // shader is today's, byte for byte.
-    // (planetR, the surface and its blocks were declared before the device, with the sources.)
-    if (!surface.blocks.empty()) {
-        renderer.Shaders().Always(L"GA_BLOCK_RANKS=" + std::to_wstring(surface.Ranks()));
-        Log("[surface] the standing blocks' shader code is compiled in: GA_BLOCK_RANKS=%u",
-            surface.Ranks());
-    }
+    // (planetR and the surface were declared before the device, with the sources. PHASE A1: the
+    // eye's windows are the one compiled path; Compose.hlsli holds GA_BLOCK_RANKS = 5 itself.)
 
     fields.Init(gpu, L".", 1.0f, 1.0f);
 
@@ -515,13 +495,19 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         // river's bend in the north band, and the reach behind the face became a pond.
         bathySwe.DrawFrom(bathy, srcCudem.get(), S.water.swe.window == 0,
                           SweConfig{}.westBoundary, "merrimack");
+        // PHASE B2 (D4): THE SOLVER'S DOMAIN IS ONE STANDING RANK-2 WINDOW about its centre (rank 2:
+        // the finest whose texel is at most the solver's cell), held whole before the solver starts.
+        if (bathySwe.Ready()) {
+            surface.StandAbout(bathySwe.Lat1() - 0.5 * bathySwe.Ny() * bathySwe.Dlat(),
+                               bathySwe.Lon0() + 0.5 * bathySwe.Nx() * bathySwe.Dlon(), 2u);
+        }
         // M9k/M9n: THE BED, through GA Load -> normalize -> GA Compose (the six-layer
         // height stack, LayeredOver) -> a reserved, paged, mipped sparse array. Built HERE,
         // before anything binds a bed, because the consumers below now take the bank: the
         // solver, the sea shader, the churn kernel and the water bank all read one bed and
         // it has to exist before the first of them asks.
         // M9ar: the bed bank is NOT built. The height megatexture (the height page tenant,
-        // slice 6 = the z14 survey page) is the only bed on the GPU; the solver, the sea
+        // the cube and the eye's windows) is the only bed on the GPU; the solver, the sea
         // shader, the water bank and the globe all read it. The bank was a second
         // realization of the same six layers -- proved equal at 0.0000 m in section 28,
         // which is exactly why it can go.
@@ -722,6 +708,18 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         globe->albedoLens = opt.albedo;
         // Before Init: the residency lens's pipelines are built there, and only when asked for.
         globe->debugLens = opt.lens;
+        if (!opt.groundProbe.empty()) {   // Phase A0: lat,lon in degrees -> the planet direction
+            double lat = 0.0, lon = 0.0;
+            if (sscanf_s(opt.groundProbe.c_str(), " %lf , %lf", &lat, &lon) == 2) {
+                const double k = 3.141592653589793 / 180.0;
+                globe->groundProbeOn = true;
+                globe->groundProbeDir[0] = std::cos(lat * k) * std::cos(lon * k);
+                globe->groundProbeDir[1] = std::sin(lat * k);
+                globe->groundProbeDir[2] = std::cos(lat * k) * std::sin(lon * k);
+            } else {
+                Log("[ground-probe] '%s' is not lat,lon -- the probe is off", opt.groundProbe.c_str());
+            }
+        }
         globe->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
         renderer.AddLayer(std::move(globeOwned));
     } else {
@@ -746,6 +744,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         resMgr.traceRes = opt.resTrace;
         resMgr.pagesEvery = opt.pagesEvery;
         resMgr.auditEvery = S.capture.residencyAudit;   // the scene's (--res-audit N)
+        resMgr.starvePlant = opt.starvePlant;           // the watchdog's plant (0 = off)
         int surf = -1, norm = -1;
         if (marsMode) {
             // Mars: color/normal stay NATIVE streams (the rescued sample's pyramids are
@@ -767,15 +766,14 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                                                   compositor.CubeHeight(hgtCh));
             }
             // M12 step 4a: Mars's height cube into the surface's declaration -- an int, not
-            // a hal::Tenant (AddTextureCube), with no window page: hgtWinSlice stays
-            // undeclared (was SetComposed(-1, -1, hgtTenant, -1, 0.0, 0.0, 1.0)).
+            // a hal::Tenant (AddTextureCube), with no windows.
             surface.hgtT = hgtTenant;
         } else {
             // earth.height REGISTERED above the solver (M6w) -- here it becomes GPU
-            // tenants: the global cube and the Merrimack z14 window.
-            // M9aq: ONE height tenant -- pages 0..5 the cube faces, 6 the z14 Mercator
-            // page (the frame the colour window shares, so the near-field land/sea gate
-            // and the normals ride CUDEM truth). One provider dispatching on the slice.
+            // tenants: the global cube and the eye's windows.
+            // M9aq: ONE height tenant -- pages 0..5 the cube faces, then the eye's windows
+            // (the colour's slices, so the near-field land/sea gate and the normals ride
+            // CUDEM truth).
             // M9as: fed by the height TileTree when --color-trees is on.
             if (S.streaming.colorTrees || treeTool) {
                 // The channel's own order, the one the CPU's stack reads (the height stack above:
@@ -799,7 +797,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             }
             {
                 // M12 step 3e: THE DECLARATION (hal/Tenant.h). Slices 0..5 the cube faces on
-                // the 16k quad-sphere, 6 the Merrimack z14 page; R16F metres NAVD88 in 256x128
+                // the 16k quad-sphere, then the eye's windows; R16F metres NAVD88 in 256x128
                 // tiles; a missing tile is not loaded yet, and the residency clamp reads the
                 // coarser level. The providers are the height tree on each binding's lattice,
                 // or the incumbent compositor's when the trees are off.
@@ -810,34 +808,49 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 hd.semantics = hal::Semantics::Texture;
                 hd.residence = hal::Residence::Streamable;
                 hd.absence = hal::Absence::Unloaded;
-                hd.slices = 7;
+                hd.slices = SurfaceFrame::WindowSlices();
                 const Lattice& hCubeL = surface.cubeH;   // M12 step 4a: the surface's lattices
-                const Lattice& hWinL = surface.winH;
                 hd.bindings.push_back({0, 6, hCubeL,
                                        (S.streaming.colorTrees && heightTree)
                                            ? heightTree->Provider(hCubeL)
                                            : compositor.CubeHeight(hgtCh),
                                        "paint cube faces"});
-                hd.bindings.push_back({6, 1, hWinL,
-                                       (S.streaming.colorTrees && heightTree)
-                                           ? heightTree->Provider(hWinL)
-                                           : compositor.WindowHeight(hgtCh, hWinL.orgPxX,
-                                                                     hWinL.orgPxY, hWinL.faceDim,
-                                                                     hWinL.zBase),
-                                       "paint mercator page"});
+                // PHASE B2: THE EYE'S WINDOWS -- the colour's slices, the
+                // same ground (HIERARCHY 4.1) -- and the standing window, painted by the height tree
+                // on the pyramid (it is asked the global tile; the binding keeps the slot).
+                if (heightTree) {
+                    surface.WindowBlocks(hd.blocks,
+                                         heightTree->Provider(hal::BlockBinding::Pyramid(256, 128)),
+                                         "paint pyramid windows");
+                }
                 heightTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(hd));
                 hgtTenant = heightTenant.Id();
-                // The same page's finest texels for a hull's depth laws (compose/HeightPage).
-                heightBed = std::make_unique<HeightPage>(&compositor, hgtCh, hWinL, hCubeL);
+                // PHASE B2: the hull's bed is the pyramid at the grain of the finest ring (the ring
+                // law's rung: the finest whose texel is at most the ring's), by direction anywhere.
+                {
+                    const double base = waterBank ? waterBank->BaseTexelM() : 1.2;
+                    const uint32_t rung = uint32_t(std::clamp(
+                        int(std::ceil(std::log2(surface.cube.GroundRes(0) / (std::max)(base, 1e-3)))), 0, 15));
+                    heightBed = std::make_unique<HeightPage>(&compositor, hgtCh, rung);
+                    Log("[height] the hull's bed: the pyramid at rung %u (the finest ring's %.2f m)", rung, base);
+                }
                 // M9bb: a fold or a drop below changed a root tile: the tenant refetches that
                 // address (the tree's tag names the slice) -- the one law, Tenant::Bind.
                 if (heightTree) heightTenant.Bind(*heightTree);
-                hgtWinTenant = hgtTenant;   // pages mode: the window is slice 6
-                // M9ar: the solver's bed, and the churn kernel's, is slice 6 of this tenant.
-                if (swe.Ready()) {
-                    swe.SetHeightPage(gpu, resMgr.TextureRes(hgtTenant),
-                                      resMgr.ResidencyRes(hgtTenant), 6u,
-                                      resMgr.Mips(hgtTenant), surface.winH);
+                // PHASE B2 (D4): the solver's bed is the standing window's chain.
+                if (swe.Ready() && surface.standingRank) {
+                    const Placement own = surface.StandingFrame();
+                    const SurfaceFrame::ChainRows rows = surface.StandingRows(own, surface.standingCentre);
+                    SurfaceFrame::KernelWindowRows kw;
+                    SurfaceFrame::KernelRows(rows, kw);
+                    SweSolver::BedWindow& bw = A->bedWindow;
+                    memcpy(bw.rows, &kw, sizeof(kw));
+                    bw.slice = SurfaceFrame::kStandingSlice;
+                    bw.latC = bathySwe.Lat1() - 0.5 * bathySwe.Ny() * bathySwe.Dlat();
+                    bw.lonC = bathySwe.Lon0() + 0.5 * bathySwe.Nx() * bathySwe.Dlon();
+                    bw.R = planetR;
+                    swe.SetBed(gpu, resMgr.TextureRes(hgtTenant), resMgr.ResidencyRes(hgtTenant),
+                               resMgr.Mips(hgtTenant), bw);
                 }
                     if (sea && hgtCh >= 0 && S.streaming.exposure) {
                         exposureSrc = std::make_shared<ExposureSource>(&compositor, hgtCh);
@@ -847,10 +860,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                         exposureRoot = std::make_shared<CompositeSource>("swell.exposure", xdc);
                         exposureTree = std::make_shared<std::shared_ptr<TileTree>>(
                             std::make_shared<TileTree>(exposureRoot.get(), TileTree::Fmt::Half));
-                        // M12 step 3e: THE DECLARATION. One page, slice 6, on the Merrimack
-                        // z14 lattice, painted by the tree in the holder (a bucket roll swaps
-                        // it; the dispatcher reads it per request). The cube faces are not
-                        // this node's frame: an unbound slice answers "fully exposed" (R16F
+                        // M12 step 3e: THE DECLARATION, painted by the tree in the holder (a
+                        // bucket roll swaps it; the dispatcher reads it per request). The cube
+                        // faces are not this node's frame: an unbound slice answers "fully exposed" (R16F
                         // 1.0 = 0x3C00) so the boot's coarsest loads and any stray want land
                         // once instead of retrying forever.
                         hal::TenantDesc xd;
@@ -866,33 +878,34 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                             uint16_t* h = reinterpret_cast<uint16_t*>(xd.absentTile.data());
                             for (size_t i = 0; i < 32768; ++i) h[i] = 0x3C00u;
                         }
-                        xd.slices = 7;
-                        const uint32_t exposureSlice = 6u;   // the z14 page (slices 0..5: the cube)
-                        xd.bindings.push_back({exposureSlice, 1, surface.winH, nullptr, "exposure"});
+                        // PHASE B2 (D2): window slices alone -- the exposure is read from the eye's
+                        // windows and never from the cube, so it declares no lattice; its tree paints
+                        // on the pyramid (Tenant::Bind), the cube's slices answer "exposed".
+                        xd.slices = SurfaceFrame::WindowSlices();
                         xd.holder = exposureTree;
+                        surface.WindowBlocks(xd.blocks, nullptr, "exposure");
                         exposureTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(xd));
                         exposureT = exposureTenant.Id();
-                        exposureTenant.Bind(**exposureTree);   // its folds invalidate slice 6
+                        exposureTenant.Bind(**exposureTree);   // its folds invalidate the windows' tiles
                         sea->SetExposurePage(resMgr.TextureSrv(exposureT),
                                              resMgr.ResidencySrv(exposureT), exposureSrc.get());
                         // The same texels for whoever floats in them, at the floor the bank reads
                         // them at (WaterTerms.h kSwellShadowMipFloor): the node asked where the
                         // painter asks it, quantized as the page stores it.
-                        exposureShadow = std::make_unique<ExposurePage>(
-                            exposureSrc.get(), surface.winH, exposureSlice, kSwellShadowMipFloor);
+                        // PHASE B2: on the pyramid at rung 3 (76 m: the grain the bank reads it at).
+                        exposureShadow = std::make_unique<ExposurePage>(exposureSrc.get(), 3u);
                         Log("[exposure] swell.exposure is page tenant %d: the LOS march over "
-                            "the height stack, cached per (direction, level) bucket, read at "
-                            "page mips >= 3 (%.0f m)",
-                            exposureT, 9.55 * 8.0);
+                            "the height stack, cached per (direction, level) bucket, on the eye's "
+                            "windows alone, read at rung 3 (%.1f m nominal)",
+                            exposureT, surface.cube.GroundRes(0) / 8.0);
                     }
                 if (sea) {
                     sea->SetHeightPage(resMgr.TextureRes(hgtTenant),
-                                       resMgr.ResidencyRes(hgtTenant), 6u,
-                                       resMgr.Mips(hgtTenant), surface.winH);
+                                       resMgr.ResidencyRes(hgtTenant), resMgr.Mips(hgtTenant));
                 }
             }
-            // earth.color: the Google mercator tree, realized twice -- the global cube
-            // and the Merrimack z14 window (same stack, deeper footprint).
+            // earth.color: the Google mercator tree, realized on the global cube and the
+            // eye's windows (same stack, deeper footprint).
             DayCaps dayCaps;   // the scene's day caps (streaming.dayTiles / dayBytes)
             dayCaps.tiles = S.streaming.dayTiles;
             dayCaps.bytes = DayCaps::FromScene(S.streaming.dayBytes);
@@ -1019,17 +1032,14 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                                                         : compositor.ColorRealization(colCh, f);
                 };
                 // M9ap: NO INSET TEXTURES. The planet's colour is ONE tenant -- a reserved
-                // Texture2DArray of pages: slices 0..5 the cube faces, 6 the z14 Mercator
-                // page, 7 the z17 page -- with one SRV, one residency map, one budget, and
+                // Texture2DArray of pages: slices 0..5 the cube faces, then the eye's
+                // windows -- with one SRV, one residency map, one budget, and
                 // one provider that dispatches on the slice. The three tenants this
                 // replaces were three pages of a ladder with hand-off fades between them.
-                // M12 step 3e: THE DECLARATION -- the three pages above as slice bindings on
-                // their lattices (the surface's, step 4a: the z17 origin is computed in
-                // SurfaceFrame::Merrimack); sRGB colour with the coverage in the alpha,
+                // M12 step 3e: THE DECLARATION -- the cube as a slice binding on its lattice,
+                // the windows as blocks; sRGB colour with the coverage in the alpha,
                 // 128x128 tiles; a missing tile is not loaded yet (the residency map clamps).
                 const Lattice& cCubeL = surface.cube;
-                const Lattice& cWinL = surface.win;
-                const Lattice& cDetL = surface.det;
                 hal::TenantDesc cd;
                 cd.name = L"earth.color (megatexture pages)";
                 cd.astNode = "color.pages";
@@ -1038,79 +1048,21 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 cd.semantics = hal::Semantics::Texture;
                 cd.residence = hal::Residence::Streamable;
                 cd.absence = hal::Absence::Unloaded;
-                cd.slices = surface.blocks.empty() ? 8u : 6u + uint32_t(surface.blocks.size());
+                cd.slices = SurfaceFrame::WindowSlices();
                 cd.bindings.push_back({0, 6, cCubeL, mkColor(cCubeL), "paint cube faces"});
-                // M12 step 4c: the two pages realize ONE edge of the diagram ("paint mercator
-                // pages": both slices, one row -- the lattice tag beside each tells them
-                // apart), and the row is registered from these words (SurfaceFrame::
-                // RegisterEdges), so a binding names the edge it realizes, not the edge plus
-                // a zoom.
-                if (surface.blocks.empty()) {
-                    cd.bindings.push_back({6, 1, cWinL, mkColor(cWinL), "paint mercator pages"});
-                    cd.bindings.push_back({7, 1, cDetL, mkColor(cDetL), "paint mercator pages"});
-                } else {
-                    // HIERARCHY 4.17 commit 2: the standing blocks in place of the two pages,
-                    // slice 6 + i, painted by the tree on the pyramid's lattice (it is asked
-                    // the global tile; the binding keeps the slot).
-                    const Lattice pyr = hal::BlockBinding::Pyramid(cd.fiber.texW, cd.fiber.texH);
-                    for (size_t i = 0; i < surface.blocks.size(); ++i) {
-                        cd.blocks.push_back({6u + uint32_t(i), surface.Block(i), mkColor(pyr),
-                                             "paint pyramid blocks"});
-                    }
-                }
+                // PHASE A1: THE EYE'S WINDOWS, slot s's rank k at
+                // SurfaceFrame::WindowSlice(s, k), painted by the tree on the pyramid's lattice
+                // (it is asked the global tile; the binding keeps the slot). Each is born on its
+                // rung's first block of face 0 and moved to its eye by the frame loop's step
+                // (SurfaceFrame::Follow, hal::Tenant::Move) before its first want.
+                surface.WindowBlocks(cd.blocks,
+                                     mkColor(hal::BlockBinding::Pyramid(cd.fiber.texW, cd.fiber.texH)),
+                                     "paint pyramid windows");
                 colorTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(cd));
-                // HIERARCHY 4.17 commit 4: the directory beside the blocks' slices (the colour's
-                // and the mask's alike), up once as one R16_UINT texture, slices stacked; rows
-                // of 128 texels keep the upload's pitch at 256 bytes, the first 16 are the cells.
-                if (!surface.blocks.empty() && !surface.directory.empty()) {
-                    const uint32_t rows = uint32_t(surface.directory.size() / SurfaceFrame::kCells);
-                    std::vector<uint16_t> texels(size_t(128) * rows, SurfaceFrame::kNone);
-                    for (uint32_t r = 0; r < rows; ++r) {
-                        for (uint32_t c = 0; c < SurfaceFrame::kCells; ++c) {
-                            texels[size_t(r) * 128 + c] =
-                                surface.directory[size_t(r) * SurfaceFrame::kCells + c];
-                        }
-                    }
-                    A->surfaceDirectory = gpu.CreateTexture2D(128, rows, DXGI_FORMAT_R16_UINT,
-                                                           D3D12_RESOURCE_FLAG_NONE,
-                                                           D3D12_RESOURCE_STATE_COPY_DEST,
-                                                           L"surface.directory");
-                    gpu.UploadTexture(A->surfaceDirectory, texels.data(), 128 * sizeof(uint16_t));
-                    surface.dirSrv = gpu.CreateSrv(A->surfaceDirectory.res.Get(), DXGI_FORMAT_R16_UINT);
-                    Log("[surface] the directory: %u slices of %ux%u cells up as SRV %u",
-                        rows / SurfaceFrame::kCells, SurfaceFrame::kCells, SurfaceFrame::kCells,
-                        surface.dirSrv);
-                    // Read back as the GPU holds it: the cells that name a block, slice by slice,
-                    // and whether every cell is the one built.
-                    uint32_t pitch = 0, named = 0, same = 0, before = 0;
-                    std::string bySlice;
-                    const std::vector<uint8_t> back = gpu.ReadbackTexture(A->surfaceDirectory, &pitch);
-                    for (uint32_t r = 0; r < rows && back.size() >= size_t(rows) * pitch; ++r) {
-                        for (uint32_t c = 0; c < SurfaceFrame::kCells; ++c) {
-                            const size_t at = size_t(r) * pitch + c * sizeof(uint16_t);
-                            const uint16_t v = uint16_t(back[at] | (back[at + 1] << 8));
-                            named += (v != SurfaceFrame::kNone) ? 1u : 0u;
-                            same += (v == surface.directory[size_t(r) * SurfaceFrame::kCells + c]) ? 1u : 0u;
-                        }
-                        if ((r + 1) % SurfaceFrame::kCells == 0) {
-                            if (named > before) {
-                                bySlice += " s" + std::to_string(r / SurfaceFrame::kCells) + ":" +
-                                           std::to_string(named - before);
-                            }
-                            before = named;
-                        }
-                    }
-                    Log("[surface] the directory read back: %u of %u cells name a block (by slice:%s); "
-                        "%u of %u cells as built",
-                        named, rows * SurfaceFrame::kCells, bySlice.c_str(), same,
-                        rows * SurfaceFrame::kCells);
-                }
                 colorCubeT = colorTenant.Id();
                 // M9bb: a fold or a drop below changed a root tile: the colour tenant
                 // refetches that address (the frame's tag names the page slice) -- Tenant::Bind.
                 if (megaTree) colorTenant.Bind(*megaTree);
-                winTenant = colorCubeT;   // pages mode: window == cube, slice 6
-                detTenant = colorCubeT;   // slice 7
                 // M9ay: THE SURVEY AS A PAGE TENANT. gis.landsea's own tree -- the vector
                 // rings swept per tile on the SAME addresses as the imagery and the bed --
                 // feeds a third page tenant (r = water coverage, b = edited, a = surveyed).
@@ -1133,24 +1085,13 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                         md.semantics = hal::Semantics::Texture;
                         md.residence = hal::Residence::Streamable;
                         md.absence = hal::Absence::Unloaded;
-                        md.slices = surface.blocks.empty() ? 8u
-                                                           : 6u + uint32_t(surface.blocks.size());
+                        md.slices = SurfaceFrame::WindowSlices();
                         md.bindings.push_back({0, 6, cCubeL, gt->Provider(cCubeL),
                                                "paint survey mask (cube faces)"});
-                        if (surface.blocks.empty()) {
-                            md.bindings.push_back({6, 1, cWinL, gt->Provider(cWinL),
-                                                   "paint survey mask (z14 page)"});
-                            md.bindings.push_back({7, 1, cDetL, gt->Provider(cDetL),
-                                                   "paint survey mask (z17 page)"});
-                        } else {   // HIERARCHY 4.17 commit 2: the colour's blocks, its slices
-                            const Lattice pyr =
-                                hal::BlockBinding::Pyramid(md.fiber.texW, md.fiber.texH);
-                            for (size_t i = 0; i < surface.blocks.size(); ++i) {
-                                md.blocks.push_back({6u + uint32_t(i), surface.Block(i),
-                                                     gt->Provider(pyr),
-                                                     "paint survey mask (pyramid blocks)"});
-                            }
-                        }
+                        // PHASE A1: the colour's windows, its slices (PHASE B2: one declaration).
+                        surface.WindowBlocks(md.blocks,
+                                             gt->Provider(hal::BlockBinding::Pyramid(md.fiber.texW, md.fiber.texH)),
+                                             "paint survey mask (pyramid windows)");
                         landseaTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(md));
                         maskTenant = landseaTenant.Id();
                         landseaTenant.Bind(*gt);   // its folds invalidate the slice its tag names
@@ -1185,18 +1126,12 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             // NVMe paging worth doing shows up directly: terabytes of tree, megabytes of map.
             {
                 idxColorCube.Scan("earth.color", "cube16k");
-                idxColorWin.Scan("earth.color", surface.win.Tag());
-                idxColorDet.Scan("earth.color", surface.det.Tag());
                 idxHeightCube.Scan("earth.height", "cube16k");
                 idxColorCube.Report();
-                idxColorWin.Report();
-                idxColorDet.Report();
                 idxHeightCube.Report();
                 // Each tenant gets the index of its OWN realization -- the scheduler then
                 // prefers loads that are a read over loads that are a paint.
                 resMgr.SetTileIndex(colorCubeT, &idxColorCube);
-                resMgr.SetTileIndex(winTenant, &idxColorWin);
-                resMgr.SetTileIndex(detTenant, &idxColorDet);
                 resMgr.SetTileIndex(hgtTenant, &idxHeightCube);
                 // M9ag: the NVMe -> GPU reader. Created once; a machine without the
                 // redist or with a driver that declines keeps the ReadFile path.

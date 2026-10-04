@@ -40,6 +40,10 @@ public:
     float Sample(double latRad, double lonRad, double groundResM, const PaintCtx& ctx,
                  uint8_t rgba[4]) override;
     bool Refusals(uint32_t& refused) const override;
+    // A4: its finest, the cap's pixel on the ground at the box's centre (Pixel reads that zoom
+    // below it, and a finer tile is the level above magnified). Its coarser levels stay its own
+    // zooms, folded as M9bb folds them (HIERARCHY 4.20: a source with levels of its own keeps them).
+    int FinestMip(const Lattice& l, double lat0, double lat1, double lon0, double lon1) const override;
     // The zoom a footprint asks for, held to 0..the cap (public for the selftest).
     int ZoomFor(double groundResM) const;
 
@@ -139,6 +143,9 @@ public:
     const SourceInfo& Info() const override { return m_info; }
     float Sample(double latRad, double lonRad, double groundResM, const PaintCtx& ctx,
                  uint8_t rgba[4]) override;
+    // A4: the height's grain at the box's centre (it is a product of the height), and every level
+    // where a zone's ring touches the box (a vector, exact at any grain).
+    int FinestMip(const Lattice& l, double lat0, double lat1, double lon0, double lon1) const override;
 
 private:
     struct Rule {
@@ -179,6 +186,8 @@ public:
     const SourceInfo& Info() const override { return m_info; }
     float Sample(double latRad, double lonRad, double groundResM, const PaintCtx& ctx,
                  uint8_t rgba[4]) override;
+    // A4: a product of the height, so the height's grain at the box's centre.
+    int FinestMip(const Lattice& l, double lat0, double lat1, double lon0, double lon1) const override;
 
 private:
     const Compositor* m_comp = nullptr;

@@ -2,8 +2,8 @@
 //  ExposurePage - the swell shadow's page texels, evaluated on the CPU for a hull (the water match,
 //  step 3).
 //
-//  THE KERNEL READS A PAGE: the exposure tenant's z14 slice at max(have, kSwellShadowMipFloor),
-//  bilinear over texel centres, floored at kSwellShadowFloor. Its texels are the node's own answers:
+//  THE KERNEL READS THE EYE'S WINDOWS: the exposure tenant's windows of the one pyramid at rung 3 (rank
+//  1's mip 0), bilinear over texel centres, floored at kSwellShadowFloor. Its texels are the node's own answers:
 //  TileTree paints texel (i, j) of mip m as ExposureSource::SampleAt at the lattice's texel centre with
 //  groundM = GroundRes(m), and the Half root stores it through the one quantization (tree_detail::F2H).
 //  So the CPU does not need the GPU's copy of a texel to hold the same number -- it can ask the node at
@@ -22,7 +22,7 @@
 //  ones every ~56 m; texels are memoised per (direction, level) bucket, dropped when the bucket rolls.
 //
 //  Absence: no valid swell direction is no field (the node refuses to march toward a default, and the
-//  page reads nothing resident); outside the page is no opinion. A texel the node could not answer is
+//  page reads nothing resident). A texel the node could not answer is
 //  the Half compose's zero, exactly as the page stores it. Single-threaded, like TreeWater's memo.
 // ================================================================================================
 #pragma once
@@ -43,18 +43,23 @@ class ExposurePage : public PlaceField {
 public:
     static constexpr size_t kMaxHeld = 4096;   // texels memoised before the memo starts over
 
-    // `page` is the lattice the tenant's `slice` is a page of; `mip` the level the kernel's floor
-    // reads (WaterTerms.h kSwellShadowMipFloor).
-    ExposurePage(const ExposureSource* src, const Lattice& page, uint32_t slice, uint32_t mip)
-        : m_src(src), m_page(page), m_slice(slice), m_mip(mip) {}
+    // PHASE B1 (out/integration/plan_phase_b.md): THE TWIN ON THE PYRAMID, as HeightPage's: the
+    // exposure's windows are the pyramid's texels, so the twin is the pyramid's lattice at `rung` (the
+    // floor the bank reads the exposure at: 76 m, rung 3, rank 1's mip 0), by direction, anywhere.
+    ExposurePage(const ExposureSource* src, uint32_t rung)
+        : m_src(src), m_page(Lattice::Cube(Lattice::kFaceDim << 17, 256, 128)),
+          m_mip(17u - rung) {}
 
     bool Read(double latDeg, double lonDeg, double& value) const override {
-        if (!m_src || !m_src->Valid() || m_page.kind != Lattice::Kind::Window) return false;
-        double px = 0.0, py = 0.0;
-        m_page.PxOf(latDeg, lonDeg, px, py);
-        const double u = (px - double(m_page.orgPxX)) / double(m_page.faceDim);
-        const double v = (py - double(m_page.orgPxY)) / double(m_page.faceDim);
-        if (!(u > 0.0 && u < 1.0 && v > 0.0 && v < 1.0)) return false;   // the kernels' test
+        if (!m_src || !m_src->Valid()) return false;
+        // The pyramid's face by direction.
+        constexpr double kD2R = 3.14159265358979 / 180.0;
+        const double la = latDeg * kD2R, lo = lonDeg * kD2R;
+        const double cl = std::cos(la);
+        const double d[3] = {cl * std::cos(lo), std::sin(la), cl * std::sin(lo)};
+        double uv[2] = {0.0, 0.0};
+        m_slice = CubeFaceOfDir(d, uv);
+        const double u = uv[0], v = uv[1];
         const uint64_t params = m_src->Params();
         if (params != m_params || m_memo.size() > kMaxHeld) {
             m_memo.clear();
@@ -82,7 +87,8 @@ public:
 
 private:
     float Texel(uint32_t ix, uint32_t iy) const {
-        const uint64_t key = (uint64_t(ix) << 32) | uint64_t(iy);
+        // (the pyramid's face in the top 3 bits; x and y 30 bits each)
+        const uint64_t key = (uint64_t(m_slice) << 60) | (uint64_t(ix) << 30) | uint64_t(iy);
         const auto it = m_memo.find(key);
         if (it != m_memo.end()) return it->second;
         // The painter's own address: the tile (texW x texH) holding the texel, and its pixel inside.
@@ -106,7 +112,8 @@ private:
 
     const ExposureSource* m_src = nullptr;
     Lattice m_page;
-    uint32_t m_slice = 0, m_mip = 0;
+    mutable uint32_t m_slice = 0;   // the face of the last read
+    uint32_t m_mip = 0;
     mutable uint64_t m_params = ~0ull;
     mutable std::unordered_map<uint64_t, float> m_memo;
     mutable uint64_t m_evaluations = 0;

@@ -153,7 +153,7 @@ void RegisterKnownComposeEdges() {
     // water is vertex-shaded now and takes NO imagery at all; the colour pages feed land only.
     Register({"height.pages", "globe.ps", "height", mercPx, uvS, false, "m NAVD",
               "vertex + pixel classification (M9bg: the refracted cast retired)", 1.0,
-              "Compose.hlsli ComposedHeightPages"});
+              "Compose.hlsli ComposedHeightChain"});
     Register({"google.tiles", "compose.stack", "fetch", mercPx, mercPx, false, "sRGB bytes",
               "zoom = f(groundResM)", 1.0, "GoogleColorSource::ZoomFor"});
     Register({"massgis.ortho", "compose.stack", "fetch", latlon, mercPx, true, "sRGB bytes",
@@ -194,7 +194,7 @@ void RegisterKnownWaterEdges() {
     Register({"height.pages", "water.bank", "bed per texel", mercPxW, uvSW, false,
               "m NAVD", "z14 slice only (AUDIT_WATER item 5); float merc ~0.25 px ulp "
               "(gatest-bounded); residency-clamped mips 2..7",
-              1.0, "WaterBank.hlsl gTA[slice 6] (same formulation as CsWindowUv)"});
+              1.0, "WaterBank.hlsl HpHeightChain (the windows' chain at the ring's grain)"});
     const Frame wrap{"patch.wrap", true, 0, 0, 0};
     const Frame atlasN{"atlas.texel", true, 0, 0, 0};
     const Frame rowS{"raster.row0N", false, 0, 0, 0};

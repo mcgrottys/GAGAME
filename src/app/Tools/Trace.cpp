@@ -23,8 +23,7 @@ namespace ga::app::tools {
 
 void RunTrace(const Options& opt, Gpu& gpu, SeaLayer* sea, const Compositor& compositor,
               int hgtCh, const WaterAtlas& waterAtlas, WaterBankLayer* waterBank,
-              GlobeLayer* globe, const ResidencyManager& resMgr, double winOrgX,
-              double winOrgY, int hgtTenant, int hgtWinTenant, double simUnix,
+              GlobeLayer* globe, const ResidencyManager& resMgr, double simUnix,
               WeatherManager& weather) {
     weather.RefreshMirrorsTo(gpu, simUnix);   // a no-op after the export above
     const double tlat = opt.traceLat, tlon = opt.traceLon;
@@ -88,73 +87,8 @@ void RunTrace(const Options& opt, Gpu& gpu, SeaLayer* sea, const Compositor& com
     Log("[trace] ==== cross-check: NOAA tides at 8440452, GoMOFS currents, "
         "GFS-Wave Hs -- the provenance strings above name the rungs ====");
     waterBank->TraceProbe(gpu, wx, wz);
-    // Step 11: THE COMPOSED TILES THEMSELVES. Same point, three answers
-    // that must agree: the CPU stack (the law), the resident GPU texel of
-    // the height window (what the renderer actually reads), and the
-    // residency map that says which mip that is. stack -> cache -> GPU,
-    // end to end.
-    if (hgtWinTenant >= 0 && hgtCh >= 0) {
-        const double piT = 3.14159265358979;
-        const double n14 = 16384.0 * 256.0;
-        const double mxT = (tlon + 180.0) / 360.0 * n14;
-        const double myT =
-            (0.5 - std::log(std::tan(piT * 0.25 + tlat * piT / 360.0)) /
-                       (2.0 * piT)) *
-            n14;
-        const double uT = (mxT - winOrgX) / 16384.0;
-        const double vT = (myT - winOrgY) / 16384.0;
-        if (uT > 0.0 && uT < 1.0 && vT > 0.0 && vT < 1.0) {
-            const uint32_t hwfT = (hgtWinTenant == hgtTenant) ? 6u : 0u;
-            const uint32_t mipT = resMgr.ResidentMipAt(
-                hgtWinTenant, hwfT, static_cast<float>(uT),
-                static_cast<float>(vT));
-            if (mipT <= 7) {
-                const uint32_t dimT = 16384u >> mipT;
-                uint32_t txT = static_cast<uint32_t>(uT * dimT);
-                uint32_t tyT = static_cast<uint32_t>(vT * dimT);
-                if (txT >= dimT) txT = dimT - 1;
-                if (tyT >= dimT) tyT = dimT - 1;
-                uint8_t pxT[16] = {};
-                float gpuH = 0.0f;
-                if (gpu.ReadbackTexel(resMgr.TextureRes(hgtWinTenant),
-                                      hwfT * resMgr.Mips(hgtWinTenant) + mipT,
-                                      txT, tyT,
-                                      resMgr.TextureState(hgtWinTenant),
-                                      pxT)) {
-                    const uint16_t h16 =
-                        static_cast<uint16_t>(pxT[0] | (pxT[1] << 8));
-                    const uint32_t sT = (h16 >> 15) & 1u,
-                                   eT = (h16 >> 10) & 31u,
-                                   mT2 = h16 & 1023u;
-                    gpuH = (eT == 0)
-                               ? 0.0f
-                               : std::ldexp(1.0f + mT2 / 1024.0f,
-                                            static_cast<int>(eT) - 15) *
-                                     (sT ? -1.0f : 1.0f);
-                }
-                // CPU stack at the TEXEL CENTRE, at the texel's own res.
-                const double pxC = winOrgX + (txT + 0.5) * (1 << mipT);
-                const double pyC = winOrgY + (tyT + 0.5) * (1 << mipT);
-                const double lonC = pxC / n14 * 360.0 - 180.0;
-                const double latC =
-                    std::atan(std::sinh(piT * (1.0 - 2.0 * pyC / n14)));
-                const float cpuH = compositor.SampleHeightStack(
-                    hgtCh, latC, lonC * piT / 180.0,
-                    9.55 * (1 << mipT));
-                const float dH = std::abs(gpuH - cpuH);
-                const float tol =
-                    0.06f + 0.02f * std::abs(cpuH);
-                Log("[trace] 11 compose  height.pages z14 mip %u texel "
-                    "(%u,%u): GPU %+.2f m vs CPU stack %+.2f m  %s "
-                    "(edge compose.stack->height.pages, |d| %.3f tol %.3f)",
-                    mipT, txT, tyT, gpuH, cpuH,
-                    dH <= tol ? "MATCH" : "MISMATCH", dH, tol);
-            } else {
-                Log("[trace] 11 compose  height.pages z14: nothing resident "
-                    "at this uv yet");
-            }
-        }
-    }
+    // Step 11 (the z14 height page's texel against the CPU stack) is deleted with the Mercator
+    // pages (PHASE B3).
     // M9ba: the exposure field is the tree folder cache\trees\swell.exposure.*
 }
 

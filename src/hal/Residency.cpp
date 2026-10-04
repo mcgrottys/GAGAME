@@ -61,12 +61,14 @@ void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
         // tile -- so the tile claimed residency over whatever the pool slot last held. It showed
         // as 20% of the globe changing against the reference. A null here means "bytes, please",
         // which is the contract every provider already implemented.
-        const bool canStream = m_stream && m_stream->Available();
+        const bool canStream = m_stream && m_stream->Available() && !job->refresh;
         const auto t0 = std::chrono::steady_clock::now();
         g_tileIncomplete = false;   // step 5 E: a tree says here if its answer is not whole
+        g_tileMagnified = false;    // PHASE A4: ... or if it is the level above, magnified
         const bool ok =
             m_tenants[job->tenant].provider(job->req, data, canStream ? &loc : nullptr);
         const bool whole = !g_tileIncomplete;
+        const bool magnified = g_tileMagnified;
         // M9al: read or paint? The provider does not say, but its clock does -- a 64 KB file
         // is well under a millisecond, a composed tile is tens.
         const uint64_t us = static_cast<uint64_t>(
@@ -84,7 +86,19 @@ void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
             // step-11 MISMATCH). Retry a few times; then leave the tile honestly UNMAPPED so
             // consumers fall back to the coarser REAL mip (Tier-2 nulls never reach them,
             // because the claim is only ever written on a true map).
-            if (ok && whole) {
+            if (job->refresh && (!ok || !whole || magnified)) {
+                // THE VERSION LAW: a replacement that is not whole, magnified or failed is a refusal
+                // of this attempt -- the held tile keeps its bytes; no mark on the address, no retry
+                // until the tree changes for it again.
+                job->state = TileState::Failed;
+                job->incomplete = ok;
+            } else if (ok && magnified) {
+                // PHASE A4: nothing to map; the parent answers. Never retried (it is arithmetic).
+                job->state = TileState::Failed;
+                job->magnified = true;
+                ++m_failEvents;
+                m_failedKeys.push_back({job->tenant, job->req});
+            } else if (ok && whole) {
                 job->loc = loc;
                 job->data = std::move(data);
                 job->state = TileState::Loaded;
@@ -92,13 +106,15 @@ void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
                 // Step 5 E (finding 83): a tile not whole is not delivered: it is
                 // unreachable for the run, as a tile that failed four tries is, and said.
                 job->state = TileState::Failed;
+                job->incomplete = true;   // the version law: retried when the tree next changes
                 ++m_failedLoads;
                 ++m_failEvents;
                 ++incompleteTotal;
                 m_failedKeys.push_back({job->tenant, job->req});
                 if (incompleteTotal <= 12) {
                     Log("[residency] order: %S f%u m%u (%u,%u) answered without one of its sources "
-                        "(not whole): not delivered, unreachable for the run (finding 83)",
+                        "(not whole): not delivered; refused this attempt, asked again when the tree "
+                        "next changes for it; its children wait until then (finding 83, the version law)",
                         m_tenants[job->tenant].name.c_str(), job->req.face, job->req.mip,
                         job->req.x, job->req.y);
                 }
@@ -118,7 +134,7 @@ void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
 
 int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t faceDim,
                                          DXGI_FORMAT fmt, TileProviderFn provider,
-                                         uint32_t faces) {
+                                         uint32_t faces, std::vector<uint8_t> sliceTop) {
     Tenant t;
     t.name = name;
     t.fmt = fmt;
@@ -144,6 +160,11 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
     }
     uint32_t mips = 1;
     while ((faceDim >> (mips - 1)) > (std::max)(tileW, tileH)) ++mips;
+    // F1: each slice's coarsest held mip; a window's is its floor, the rest the array's.
+    t.sliceTop.assign(faces, static_cast<uint8_t>(mips - 1));
+    for (uint32_t f = 0; f < faces && f < sliceTop.size(); ++f) {
+        t.sliceTop[f] = static_cast<uint8_t>((std::min)(uint32_t(sliceTop[f]), mips - 1));
+    }
 
     D3D12_RESOURCE_DESC rd{};
     rd.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -313,6 +334,10 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
         std::vector<TileRequest> failedBoot;
         const uint32_t coarsest = mips - 1;
         for (uint32_t f = 0; f < faces; ++f) {
+            // F1: a slice whose chain ends below the array's coarsest (a window) is born saying
+            // nothing and fills by its wants once its box is placed: its floor is the rank above's
+            // ground, not the planet's, and nothing of it stands before the eye does.
+            if (TopOf(tn, f) != coarsest) continue;
             const auto& ti = tn.tilings[f * mips + coarsest];
             const uint32_t tw = (std::max)(1u, static_cast<uint32_t>(ti.WidthInTiles));
             const uint32_t th = (std::max)(1u, static_cast<uint32_t>(ti.HeightInTiles));
@@ -428,7 +453,19 @@ void ResidencyManager::Want(int sampler, int tenant, uint32_t face, uint32_t mip
         ++predictedCalls;
     }
     Tenant& t = m_tenants[tenant];
+    // A slice the tenant does not have is no want (Mars's height cube has six faces and no windows:
+    // a reader that names a window slice of it asks for nothing). Said once a tenant.
+    if (face >= t.faces) {
+        if (!t.saidNoSlice) {
+            t.saidNoSlice = true;
+            Log("[residency] %S: slice %u wanted by %s, the tenant has %u -- no want (said once)", t.name.c_str(),
+                face, SamplerName(sampler), t.faces);
+        }
+        return;
+    }
     if (mip >= t.mips) mip = t.mips - 1;
+    const uint32_t topF = TopOf(t, face);
+    if (mip > topF) return;   // F1: above a window's floor nothing is held, so nothing is wanted
 
     // M9w: THE ANCESTOR RE-WALK, SHORT-CIRCUITED.
     //
@@ -540,7 +577,7 @@ void ResidencyManager::Want(int sampler, int tenant, uint32_t face, uint32_t mip
     // wave or exposure tenants the later Wants ask for. A ring-held ancestor is unstamped by
     // design and reads as not fresh, so it keeps the scan climbing, never stops it.
     int top = -1;   // coarsest level with work; -1 = the whole column is fresh
-    for (uint32_t m = mip; m < t.mips; ++m) {
+    for (uint32_t m = mip; m <= topF; ++m) {
         const uint32_t plane = face * t.mips + m;
         const Rect r = rectAt(plane);
         bool allFresh = true;
@@ -566,7 +603,7 @@ void ResidencyManager::Want(int sampler, int tenant, uint32_t face, uint32_t mip
     if (focusU < 0.0f) {
         uint32_t wb = 0;
         if (nearM > 0.0f) memcpy(&wb, &nearM, sizeof(wb));
-        for (uint32_t mm = mip; mm < t.mips; ++mm) {
+        for (uint32_t mm = mip; mm <= topF; ++mm) {
             const uint32_t plane = face * t.mips + mm;
             const Rect r = rectAt(plane);
             for (uint32_t y = r.y0; y <= r.y1; ++y) {
@@ -853,9 +890,9 @@ bool ResidencyManager::DropOne(const std::shared_ptr<Tracked>& tr) {
     return true;
 }
 
-void ResidencyManager::Invalidate(int tenant, const TileRequest& r) {
+void ResidencyManager::Invalidate(int tenant, const TileRequest& r, bool moved) {
     std::lock_guard<std::mutex> lk(m_invMx);
-    m_invQ.push_back({tenant, r});
+    m_invQ.push_back({tenant, r, moved});
 }
 
 void ResidencyManager::Drop(int tenant) {
@@ -902,23 +939,54 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         lap0 = t;
     };
     ++m_frame;
+    releaseLedger = ReleaseLedger{};   // PHASE B2w
     Mark("turn: the residency manager's (at the head of the frame's command list)");
     // Step 4: the slot array's bring-up gate rides the trace flag for the first thousand
     // frames (a full scan of every slot array; not a cost the bench ever pays).
     if (traceRes && m_frame <= kSlotAuditFrames) AuditSlots();
     // M9bb: apply the invalidations the painting threads queued (one tile each).
     {
-        std::vector<std::pair<int, TileRequest>> q;
+        std::vector<Inv> q;
         {
             std::lock_guard<std::mutex> lk(m_invMx);
             q.swap(m_invQ);
         }
         bool compact = false;
-        for (const auto& [tenant, r] : q) {
+        for (const Inv& inv : q) {
+            const int tenant = inv.tenant;
+            const TileRequest& r = inv.req;
             Tracked* tr = Find(tenant, r);
             if (auditEvery) AuditInvalidation(tenant, r, tr);   // counted before the drop
             if (!tr) continue;
             Tenant& t = m_tenants[tenant];
+            // THE VERSION LAW: a HELD tile is not released by a change -- its version is. Its bytes
+            // stay mapped and held (stale in the ledger) until its replacement lands whole, then
+            // swap in place, in one turn (MapAndFill's refill); its children keep their parent.
+            // B11: NOT when the slot's ground moved (a window's step): the held bytes are another
+            // place's, and a reader addressing the slot would draw them there. Let go now.
+            if (!inv.moved && tr->state == TileState::Mapped && tr->landed && !tr->dropped) {
+                tr->stale = true;
+                bool asked = false;
+                for (Refresh& f : m_refresh) {
+                    if (f.held.get() == tr) {
+                        f.again = true;
+                        asked = true;
+                        break;
+                    }
+                }
+                if (!asked) {
+                    auto job = std::make_shared<Tracked>();
+                    job->tenant = tr->tenant;
+                    job->req = tr->req;
+                    job->refresh = true;
+                    m_refresh.push_back({t.tracked[tr->pos], job, false});
+                }
+                continue;
+            }
+            if (tr->state == TileState::Mapped) {   // PHASE B2w: a held tile let go by a change
+                ++releaseLedger.invalidated;
+                if (tr->lastSeen + 1u >= m_frame) ++releaseLedger.invalidatedNamed;
+            }
             const std::shared_ptr<Tracked> keep = t.tracked[tr->pos];   // outlives Untrack
             Untrack(t, tr);
             if (DropOne(keep)) compact = true;
@@ -1043,13 +1111,13 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     // ---- THE ORDER (ResidencyOrder.cpp): one comparison decides the loads, the releases, the
     // let-gos and the batch to map. The loads are submitted after m_mx is released: under
     // --jobs-inline a Submit runs the job on this thread, and RunLoad takes m_mx.
-    std::vector<std::shared_ptr<Tracked>> toLoad, batch;
-    OrderTurn(toLoad, batch);
+    std::vector<std::shared_ptr<Tracked>> toLoad, batch, refills;
+    OrderTurn(toLoad, batch, refills);
     for (const auto& tile : toLoad) {
         Threads().Submit(Lane::Io, "residency.load", [this, tile] { RunLoad(tile); });
     }
 
-    if (!batch.empty()) MapAndFill(gpu, cl, batch);   // phases 6..8 bracket themselves
+    if (!batch.empty() || !refills.empty()) MapAndFill(gpu, cl, batch, refills);   // phases 6..8
     // ---- THE BARRIER THE LANDED COPIES NEVER HAD. The landed loop above moves a tenant to
     // COPY_DEST and records the CopyTiles that swizzle its arrived tiles in; the transition back
     // to shader reads used to live at the tail of MapAndFill, which a turn with an EMPTY BATCH
@@ -1212,7 +1280,8 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
 }
 
 void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
-                                  const std::vector<std::shared_ptr<Tracked>>& batch) {
+                                  const std::vector<std::shared_ptr<Tracked>>& batch,
+                                  const std::vector<std::shared_ptr<Tracked>>& refills) {
     PixMarker(cl, "residency.mapAndFill");
     // Phase brackets (header, phaseMs): 6 = evict + map + barriers, 7 = the DirectStorage
     // per-tile OpenFile + Enqueue and the Submit, 8 = the ring memcpy + CopyTiles.
@@ -1286,6 +1355,9 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
         }
     }
     phase(6);
+    // THE VERSION LAW'S SWAP: a refill writes the replacement's whole bytes into the held tile's own
+    // pool slot through the ring, recorded at the head of this frame's list like every fill: the
+    // frame that reads it reads the new version; no frame reads neither.
     std::vector<std::shared_ptr<Tracked>> direct;
     for (const auto& tile : toFill) {
         Tenant& t = m_tenants[tile->tenant];
@@ -1353,6 +1425,23 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
         tile->data.clear();
         tile->data.shrink_to_fit();
         phase(8);
+    }
+    for (size_t i = 0; i + 1 < refills.size(); i += 2) {   // (held, job) pairs
+        const std::shared_ptr<Tracked>& held = refills[i];
+        const std::shared_ptr<Tracked>& job = refills[i + 1];
+        Tenant& t = m_tenants[held->tenant];
+        const D3D12_TILED_RESOURCE_COORDINATE coord{
+            held->req.x, held->req.y, 0, held->req.face * t.mips + held->req.mip};
+        const D3D12_TILE_REGION_SIZE size{1, FALSE, 0, 0, 0};
+        memcpy(ring.cpu + off, job->data.data(), 65536);
+        cl->CopyTiles(t.res.Get(), &coord, &size, ring.res.Get(), off,
+                      D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE);
+        off += 65536;
+        ++m_ringTiles;
+        held->stale = false;
+        ++refreshedTotal;
+        job->data.clear();
+        job->data.shrink_to_fit();
     }
     if (!direct.empty()) {
         InFlightRead f;
@@ -1496,9 +1585,11 @@ void ResidencyManager::LogSettleExact(uint32_t heldFrames) const {
         }
         if (!t.exWanted && !t.exDropped && keys.empty()) continue;
         Log("[settle-exact]   %-44S wanted %u, mapped %u, deficit %u, unreachable %u, stale %u "
-            "| dropped %u over the hold (%u were mapped) | mapped set %zu tiles, FNV-1a %016llx",
+            "| dropped %u over the hold (%u were mapped) | mapped set %zu tiles, FNV-1a %016llx"
+            " | magnified %u",
             t.name.c_str(), t.exWanted, t.exMapped, t.exDeficit, t.exUnreachable, t.exStale,
-            t.exDropped, t.exDroppedMapped, keys.size(), static_cast<unsigned long long>(h));
+            t.exDropped, t.exDroppedMapped, keys.size(), static_cast<unsigned long long>(h),
+            t.exMagnified);
         // The tiles that keep a hold from being exact, NAMED: the wanted-and-unmapped set by
         // state and mip, whether each still sits in a queue, and the first few by address.
         // (The gate's rule: a hold that never becomes exact names its tiles; it is the next
@@ -1537,6 +1628,33 @@ void ResidencyManager::LogSettleExact(uint32_t heldFrames) const {
                 byState[0], byState[1], byState[2], byState[4], queued, dropped, mips.c_str(),
                 named.c_str());
         }
+    }
+    {
+        // THE PARENT FIRST (4.7): the tiles of the order still waiting on a parent not held, and
+        // that parent -- its state, whether it lands, whether this turn wants it.
+        uint32_t waiting = 0;
+        std::string named;
+        for (const OrderEntry& e : m_need) {
+            const Tracked* tr = e.tile;
+            if (tr->state == TileState::Mapped && tr->landed) continue;
+            const Tracked* at = nullptr;
+            if (ParentGate(m_tenants[tr->tenant], tr, &at) != Gate::Wait) continue;
+            if (++waiting > 6) continue;
+            char b[320];
+            if (!at) {
+                snprintf(b, sizeof(b), " %s under an UNTRACKED parent;", TileName(MakeKey(tr->tenant, tr->req)).c_str());
+            } else {
+                const Tenant& t = m_tenants[at->tenant];
+                const size_t idx = StampIndex(t, at->req.face, at->req.mip, at->req.x, at->req.y);
+                snprintf(b, sizeof(b), " %s under %s (state %d, landed %d, retries %d, wanted now %d, pos %s);",
+                         TileName(MakeKey(tr->tenant, tr->req)).c_str(),
+                         TileName(MakeKey(at->tenant, at->req)).c_str(), int(at->state), int(at->landed),
+                         int(at->retries), int((t.stamp[idx] >> 1) == m_frame),
+                         at->pos == UINT32_MAX ? "untracked" : "tracked");
+            }
+            named += b;
+        }
+        if (waiting) Log("[settle-exact]   waiting on a parent not held: %u;%s", waiting, named.c_str());
     }
     const size_t poolTiles = m_mapped.size();
     {
@@ -1584,10 +1702,13 @@ void ResidencyManager::LogSettleExact(uint32_t heldFrames) const {
     Log("[settle-exact] pool: %zu tiles mapped (%.0f MB); the pool's budget is %u tiles (%.0f MB)",
         poolTiles, poolTiles / 16.0, kPoolCapTiles, kPoolCapTiles / 16.0);
     Log("[settle-exact] held %u frames: wanted %u, mapped %u, deficit %u, unreachable %u, stale "
-        "%u, pending %u, in-flight reads %u, retiring %u -- %s",
+        "%u, pending %u, in-flight reads %u, retiring %u, magnified %u, released under a refused "
+        "parent %llu (must be 0) -- %s",
         heldFrames, settleTurn.wanted, settleTurn.mapped, settleTurn.deficit,
         settleTurn.unreachable, settleTurn.stale, settleTurn.pending, settleTurn.reads,
-        settleTurn.retiring, settleTurn.exact ? "EXACT" : "not exact");
+        settleTurn.retiring, settleTurn.magnified,
+        static_cast<unsigned long long>(releasedUnderRefusedTotal),
+        settleTurn.exact ? "EXACT" : "not exact");
 }
 
 void ResidencyManager::RegisterField(const char* name, std::function<uint64_t()> residentBytes,

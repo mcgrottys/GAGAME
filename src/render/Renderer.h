@@ -23,6 +23,7 @@
 #include "hal/Root.h"
 #include "hal/Shader.h"
 #include "render/Camera.h"
+#include "scene/Air.h"
 #include "scene/Layer.h"
 
 #include <cmath>
@@ -58,6 +59,10 @@ struct SceneConstants {
     // eye's own (both metres: the table was built for that altitude and is read at it), w spare.
     // Appended at the END on both sides, and dxtest compares the rows by name (priors 22).
     float skyLut[4];
+    // THE PLANET'S AIR (scene/Air.h): the five rows the sky's one integral reads -- what the air
+    // scatters and absorbs, how it thins, where it ends. Earth and Mars are two fills of these
+    // rows; no shader names a planet. Appended at the END on both sides (Common.hlsli gAir*).
+    float air[5][4];
 };
 static_assert(sizeof(SceneConstants) % 16 == 0, "SceneConstants must be 16-byte aligned");
 
@@ -83,6 +88,7 @@ struct SceneFill {
     // eye's place in the air; the sky is marched from there.
     uint32_t skyMsSrv = 0xFFFFFFFFu;
     float planetRadiusM = 6371000.0f, eyeRadiusM = 6371000.0f;
+    AirRows air = EarthAir();   // the planet's air (scene/Air.h)
 };
 
 namespace scene {
@@ -117,6 +123,10 @@ public:
     const std::vector<std::unique_ptr<Layer>>& Layers() const { return m_layers; }
 
     void OnResize(uint32_t width, uint32_t height);
+    // The tonemap's scale (gParams1.w): the scene's air.exposure, or by default its law -- 1 / the
+    // luminance of a sunlit white at noon through the scene's air (SkyLayer::WhiteNoonY).
+    void SetExposure(float e) { m_desc.exposure = e; }
+    float Exposure() const { return m_desc.exposure; }
     void ReloadShaders();
 
     // Records and submits one frame. Presents when not headless.
@@ -179,6 +189,7 @@ public:
     // constants (the dome, the sea's mirror and the haze must read ONE sky).
     uint32_t skyMsSrv = 0xFFFFFFFFu;
     float planetRadiusM = 6371000.0f, eyeRadiusM = 6371000.0f;
+    AirRows air = EarthAir();   // the scene's planet's air, in every shader's rows (scene/Air.h)
     float sunDirTangent[3] = {0.0f, 1.0f, 0.0f};
     // The sun's own angular RADIUS at the current Earth-Sun distance (0.2621..0.2710 deg over a
     // year). A direction cannot have one; only something at a distance can, and the disc in the

@@ -1,5 +1,7 @@
 #include "sim/WeatherManager.h"
 
+#include "compose/SurfaceFrame.h"
+
 #include "core/Common.h"
 #include "hal/Residency.h"
 
@@ -99,7 +101,7 @@ bool WeatherManager::Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& 
         SweConfig cfg = w.cfg;
         cfg.name = w.name.c_str();
         w.owned->Init(gpu, sc, shaderDir, *w.bathy, cfg);
-        w.owned->SetHeightPage(gpu, m_hgtArr, m_hgtRes, m_hgtSlice, m_hgtMips, m_hgtWin);
+        w.owned->SetBed(gpu, m_hgtArr, m_hgtRes, m_hgtMips, m_bed);   // PHASE B2: the standing window
         w.solver = w.owned.get();
         auto zero = [](double) { return 0.0; };
         w.solver->Spinup(gpu, simUnix, w.spinupHours, w.oceanAt, zero, zero, zero);
@@ -192,28 +194,10 @@ void WeatherManager::ReadMirrors(Gpu& gpu, double simUnix, double maxAge) {
     }
 }
 
-bool WeatherManager::DomainUv(const BathyModel& b, float& u0, float& v0, float& u1,
-                              float& v1) const {
-    const double piP = 3.14159265358979, n14 = 16384.0 * 256.0;
-    // M12 step 4b: the origin is the window lattice's (an integer below 2^24: the double the
-    // two members held, exactly).
-    auto mercU = [&](double lonDeg) {
-        return ((lonDeg + 180.0) / 360.0 * n14 - static_cast<double>(m_hgtWin.orgPxX)) /
-               16384.0;
-    };
-    auto mercV = [&](double latDeg) {
-        const double l = latDeg * piP / 180.0;
-        return ((0.5 - std::log(std::tan(piP * 0.25 + l * 0.5)) / (2.0 * piP)) * n14 -
-                static_cast<double>(m_hgtWin.orgPxY)) /
-               16384.0;
-    };
+int WeatherManager::DomainRects(const BathyModel& b, float out[4][4]) const {
     const double lon1 = b.Lon0() + b.Nx() * b.Dlon();
     const double lat0 = b.Lat1() - b.Ny() * b.Dlat();
-    u0 = float((std::max)(0.0, mercU(b.Lon0())));
-    u1 = float((std::min)(1.0, mercU(lon1)));
-    v0 = float((std::max)(0.0, mercV(b.Lat1())));
-    v1 = float((std::min)(1.0, mercV(lat0)));
-    return u1 > u0 && v1 > v0;
+    return SurfaceFrame::SliceRectsLL(m_stand, lat0, b.Lon0(), b.Lat1(), lon1, out);
 }
 
 void WeatherManager::PinDomains(ResidencyManager& res, int hgtTenant) {
@@ -221,22 +205,29 @@ void WeatherManager::PinDomains(ResidencyManager& res, int hgtTenant) {
     std::string pinned;
     for (const Window& w : m_windows) {
         if (!w.active || !w.bathy || !w.bathy->Ready()) continue;
-        float u0 = 0.0f, v0 = 0.0f, u1 = 0.0f, v1 = 0.0f;
-        const bool inside = DomainUv(*w.bathy, u0, v0, u1, v1);
+        float r[4][4];
+        const int n = DomainRects(*w.bathy, r);
         // M13: the solver's domain is its own reader of the shared cache -- it pins the bed
         // under its lattice whether or not any view is looking there.
-        // Step 5: a standing reader, the order's first class (HIERARCHY 4.19).
-        if (inside) res.Want(res.Sampler("solver", true), hgtTenant, m_hgtSlice, 0u, u0, v0, u1, v1);
+        // Step 5: a standing reader, the order's first class (HIERARCHY 4.19). PHASE B2: in the
+        // standing window's uv.
+        for (int k = 0; k < n; ++k) {
+            res.Want(res.Sampler("solver", true), hgtTenant, m_hgtSlice, 0u, r[k][0], r[k][1], r[k][2], r[k][3]);
+        }
         if (!m_pinLogged) {
-            char line[160];
-            snprintf(line, sizeof(line), " %s uv %.4f..%.4f x %.4f..%.4f (%s)", w.name.c_str(),
-                     u0, u1, v0, v1, inside ? "inside the page" : "OUTSIDE -- unpinned");
+            char line[200];
+            snprintf(line, sizeof(line), " %s in %d rectangle(s)%s", w.name.c_str(), n,
+                     n ? "" : " -- OUTSIDE the standing window, unpinned");
             pinned += line;
+            for (int k = 0; k < n; ++k) {
+                snprintf(line, sizeof(line), " uv %.4f..%.4f x %.4f..%.4f", r[k][0], r[k][2], r[k][1], r[k][3]);
+                pinned += line;
+            }
         }
     }
     if (!m_pinLogged && !pinned.empty()) {
         m_pinLogged = true;
-        Log("[weather] solver domains pinned on height page slice %u mip 0:%s", m_hgtSlice,
+        Log("[weather] solver domains pinned on the standing window, slice %u mip 0:%s", m_hgtSlice,
             pinned.c_str());
     }
 }
@@ -246,19 +237,30 @@ uint64_t WeatherManager::ClaimedMips(const ResidencyManager& res, int hgtTenant,
     for (int m = 0; m < 16; ++m) hist[m] = 0;
     if (hgtTenant < 0 || !m_hgtArr) return 0;
     uint64_t n = 0;
+    constexpr double kD2R = 3.14159265358979323846 / 180.0;
+    const FaceWindow fw{m_stand.face, m_stand.rung, 0, 0};
+    const double dim = Lattice::kFaceDim;
     for (const Window& w : m_windows) {
         if (!w.active || !w.bathy || !w.bathy->Ready()) continue;
         if (only && w.name != only) continue;
-        float u0 = 0.0f, v0 = 0.0f, u1 = 0.0f, v1 = 0.0f;
-        if (!DomainUv(*w.bathy, u0, v0, u1, v1)) continue;
-        // A quarter of a byte's span apart, both edges included: the map is at tile grain, so
-        // this is a few thousand reads of the manager's own bytes.
-        const int nu = static_cast<int>(std::ceil((u1 - u0) * 512.0f));
-        const int nv = static_cast<int>(std::ceil((v1 - v0) * 512.0f));
+        const BathyModel& b = *w.bathy;
+        // A sample every few cells over the domain, its slice uv modulo the page (PHASE B2): the
+        // map is at tile grain, so this is a few thousand reads of the manager's own bytes.
+        const int nu = 256, nv = 256;
         for (int j = 0; j <= nv; ++j) {
-            const float v = v0 + (v1 - v0) * float(j) / float((std::max)(nv, 1));
+            const double lat = (b.Lat1() - b.Ny() * b.Dlat() * double(j) / nv) * kD2R;
             for (int i = 0; i <= nu; ++i) {
-                const float u = u0 + (u1 - u0) * float(i) / float((std::max)(nu, 1));
+                const double lon = (b.Lon0() + b.Nx() * b.Dlon() * double(i) / nu) * kD2R;
+                const double d[3] = {std::cos(lat) * std::cos(lon), std::sin(lat), std::cos(lat) * std::sin(lon)};
+                double X = 0.0, Y = 0.0;
+                fw.TexelOf(d, X, Y);
+                if (X < double(m_stand.OrgX()) || Y < double(m_stand.OrgY()) ||
+                    X >= double(m_stand.OrgX()) + dim || Y >= double(m_stand.OrgY()) + dim) {
+                    ++hist[15];
+                    ++n;
+                    continue;
+                }
+                const float u = float(std::fmod(X, dim) / dim), v = float(std::fmod(Y, dim) / dim);
                 ++hist[(std::min)(res.ResidentMipAt(hgtTenant, m_hgtSlice, u, v), 15u)];
                 ++n;
             }
@@ -273,14 +275,16 @@ WeatherManager::BedWait WeatherManager::WaitForBeds(Gpu& gpu, ResidencyManager& 
     if (hgtTenant < 0 || !m_hgtArr) return bw;
     struct Domain {
         SweSolver* solver;
-        float u0, v0, u1, v1;
+        float r[4][4];   // PHASE B2: its rectangles in the standing window's uv
+        int n;
     };
     std::vector<Domain> domains;
     for (Window& w : m_windows) {
         if (!w.active || !w.solver || !w.solver->Ready() || !w.bathy || !w.bathy->Ready()) continue;
         if (only && w.name != only) continue;
-        Domain d{w.solver, 0.0f, 0.0f, 0.0f, 0.0f};
-        if (DomainUv(*w.bathy, d.u0, d.v0, d.u1, d.v1)) domains.push_back(d);
+        Domain d{w.solver, {}, 0};
+        d.n = DomainRects(*w.bathy, d.r);
+        if (d.n) domains.push_back(d);
     }
     bw.windows = static_cast<uint32_t>(domains.size());
     if (domains.empty()) return bw;
@@ -301,7 +305,9 @@ WeatherManager::BedWait WeatherManager::WaitForBeds(Gpu& gpu, ResidencyManager& 
         // Asked again every turn, as the pin asks every frame: the ring gate admits a level only
         // under a mapped parent, so one ask brings one ring.
         for (const Domain& d : domains) {
-            res.Want(sampler, hgtTenant, m_hgtSlice, 0u, d.u0, d.v0, d.u1, d.v1);
+            for (int k = 0; k < d.n; ++k) {
+                res.Want(sampler, hgtTenant, m_hgtSlice, 0u, d.r[k][0], d.r[k][1], d.r[k][2], d.r[k][3]);
+            }
         }
         {
             hal::CommandContext up(gpu, gpu.BeginUpload(), hal::Owner::Upload);

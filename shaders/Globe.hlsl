@@ -29,7 +29,7 @@ static float3 sLvlSun = float3(0.0f, 1.0f, 0.0f);
 static float sLvlEyeY = 0.0f;
 static float3 sLvlSkyUp = float3(0.0f, 1.0f, 0.0f);
 // M13: and the distance of the level's own eye from its planet's centre, which is where its sky
-// is marched from (Common.hlsli SkyAirAt). The gate's window is a level: its rays land at the far
+// is marched from (Common.hlsli SkyAlong). The gate's window is a level: its rays land at the far
 // place, so its surfaces reflect the far place's sky with nothing more said.
 static float sLvlSkyEyeR = 6371000.0f;
 #define GA_SKY_EYE_R (sLvlSkyEyeR)
@@ -118,6 +118,14 @@ cbuffer GlobeCb : register(b1) {
     float4 gChartN;     // its north in the tangent frame; w = the same, cascade 1
     // Appended at the END (priors 22): the constant along north, wrapped to cascade 2; yzw spare.
     float4 gChartCn;
+    // Phase A0: THE TWO-WORLDS PROBE (--ground-probe; ResidencyLens.hlsl's BlockProbe), appended
+    // at the END (priors 22): G's planet direction, w = slots filled; per slot G less its eye.
+    float4 gProbeG;
+    float4 gProbeP[8];
+    // Phase B0: the probe's height and exposure lanes, appended at the END (priors 22): x = the
+    // exposure's array SRV, y = its residency SRV, z = the height windows' floor mip, w = the
+    // exposure windows' floor mip (~0 = that tenant has no windows).
+    uint4 gProbeX;
 };
 
 // A point's coordinate in that plane, for cascade c: WaveChart::UOf, u = (P - org) . e + off,
@@ -614,8 +622,8 @@ float3 WaterVertexColor(float3 dir, float3 rel, float h) {
 
     const float day = saturate(dot(GA_SUN_DIR, upT) * 3.0f + 0.12f);
     const float ndl = saturate(dot(nW, GA_SUN_DIR)) * sunVis;
-    float3 col = alb * (0.030f + ndl * SUN_IRR_C * 1.15f);
-    col += spec * SUN_IRR_C * 0.85f;
+    float3 col = alb * (SkyAmbient(nW, upT, h) + ndl * SunAt(upT, h) * 1.15f);
+    col += spec * SunAt(upT, h) * 0.85f;
     col += SkyRadianceDirDiscless(rDir, SkyDay(day)) * (fres * 0.9f * (1.0f - foam));
     col += alb * float3(0.010f, 0.014f, 0.028f) * (1.0f - day);   // moonlit-blue night side
     return col;
@@ -672,7 +680,9 @@ VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
     // floor of 3 keeps the displacement footprint at the ~5 km the 32x32 grids can actually
     // articulate (the deepest vertex spacing); finer height texels feed PIXEL normals instead.
     const float vlod = max(ComposedHeightLod(d0, gWavesB.z), 3.0f);
-    float h = ComposedHeight(dir, vlod);
+    // The address: this path has no double-precision anchor, so its point is the direction's
+    // (CsPointOfDir, about the camera's eye: the camera's level's windows).
+    float h = ComposedHeightAt(dir, CsPointOfDir(dir), vlod, 0u);
 
     // M6g foundation sink: inside the CUDEM window the ESTUARY mesh is this same surface at
     // 13.7 m; the globe dips a few metres under it (feathered -- continuous) so the sharp data
@@ -835,9 +845,14 @@ WaterOptics SampleWaterOptics(float latDeg, float lonDeg) {
 // grazing). Under-recovered energy sheds into sigma^2 -- never aliased, never deleted. The
 // point the water is read at, wxz, is handed in too: PsMain forms it once from VsOut.geo, and
 // the frame is its screen derivative.
+// pA is the pixel's address point (PsMain's), `own` whether it is geo (the camera's own level):
+// the bed's point is then the ray's own, pA lifted to the surface the ray leaves plus s along it;
+// another level's bed has only its direction -- for the Mercator height. PHASE A2: the colour's
+// windows are every level's own, so the bed's colour point is the ray's in every level: geo, the
+// pixel's point relative to its level's eye, lifted and walked the same way (slot lvl).
 float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 rel, float2 wxz,
                        float hp, float latDeg, float lonDeg, float lod, float day, float footPx,
-                       float2 fpxW, float2 fpzW) {
+                       float2 fpxW, float2 fpzW, float3 pA, bool own, float3 geo, uint lvl) {
     const float3 v = normalize(-rel);
 
     // ---- THE VOLUME'S OPTICS. K_d and the scattering endpoint are MADE by chlorophyll,
@@ -986,6 +1001,8 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
         normalize(etaR * dIn + (etaR * ci - sqrt(max(1.0f - st2, 0.0f))) * nPix);
     float sDown = depthW;      // the vertical closed form: exact where parallax is subpixel
     float3 bedDir = up;
+    float3 bedP = pA;
+    float3 bedW = geo;   // the bed's point in its level (the windows' address)
     if (footPx < 30.0f && depthW > 0.01f && depthW < 90.0f) {
         // Under 30 m footprints the march MATTERS -- looking through a wave face shifts the
         // bar, and that shift is the whole reason this path is per pixel.
@@ -1014,16 +1031,19 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
         [unroll] for (int itr = 0; itr < 2; ++itr) {
             const float altP = (a0 + sP * mu) + sP * sP * tPerp2 / twoR;
             const float3 dirP = normalize(upT + (sP / (gGlo.x + altP)) * tPerp);
-            const float gap = altP - ComposedHeight(CsToPlanet(dirP), lod);
+            // PHASE B2: the bed under the ray at its own point in its level, through its level's windows.
+            const float gap = altP - ComposedHeightAt(CsToPlanet(dirP), geo + upT * a0 + sP * tDir, lod, lvl);
             sP = clamp(sP + gap / muD, 0.3f, 140.0f);
         }
         const float altB = (a0 + sP * mu) + sP * sP * tPerp2 / twoR;   // at the landing
         bedDir = CsToPlanet(normalize(upT + (sP / (gGlo.x + altB)) * tPerp));
+        bedP = own ? pA + upT * a0 + sP * tDir : CsPointOfDir(bedDir);
+        bedW = geo + upT * a0 + sP * tDir;
         sDown = sP;
     }
     const float3 Tw = exp(-wq.kd * (sDown + depthW));
     const float3 bedAlb = (ComposedColorOn() && gStreamF.z < 0.5f)
-                              ? ComposedColor(bedDir CS_WALK_AT(bedDir))
+                              ? ComposedColor(bedDir, bedP CS_WALK_AT(bedW, lvl))
                               : float3(0.44f, 0.40f, 0.31f);
     // THE TRANSLUCENCY. Albedos mix and the surface lights ONCE -- the engine's radiometry
     // everywhere else -- so this path cannot disagree with the vertex path about EXPOSURE,
@@ -1045,7 +1065,7 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     // ---- THE COMBINE. Energy SPLITS: the body dims by exactly the Fresnel the mirror takes,
     // and the mirror itself is part sky, part the very water it stands on.
     const float ndl = saturate(dot(nSmooth, GA_SUN_DIR)) * sunVis;   // the body, smooth normal
-    const float3 bodyLit = albW * (0.030f + ndl * SUN_IRR_C * 1.15f);
+    const float3 bodyLit = albW * (SkyAmbient(nSmooth, upT, hp) + ndl * SunAt(upT, hp) * 1.15f);
     // What the seaward share HITS is another wave, and that wave is water too: at its own
     // grazing angle it is mostly a mirror, and only steeply-down rays see into it. So the
     // seaward endpoint is one more bounce of the SAME Schlick, on the flat sea's normal --
@@ -1058,7 +1078,7 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     const float fresHit = 0.02f + 0.98f * pow(1.0f - saturate(-rUp), 5.0f);
     const float3 mirror = lerp(skyLit, lerp(bodyLit, skyLit, fresHit), seaward);
     float3 col = bodyLit * (1.0f - fres);
-    col += spec * SUN_IRR_C * 0.85f;
+    col += spec * SunAt(upT, hp) * 0.85f;
     col += mirror * (fres * 0.9f);
     col += albW * (1.0f - fres) * float3(0.010f, 0.014f, 0.028f) * (1.0f - day);   // night side
     return col;
@@ -1093,6 +1113,72 @@ float4 PsWireFlat(VsOut i) : SV_Target {
     return float4(f * 2.2f, f * 2.2f, f * 2.3f, 1.0f);
 }
 
+// THE CLOUD MARCH, IN SMALL NUMBERS. It used to march p = eye + rd t sphere-centred (|p| ~ 6.4e6 m,
+// a float ulp of half a metre) and take the radius off |p| -- every sample's altitude out by up
+// to 0.5 m, differently per pixel, and the shell's entry likewise (|ro|^2 - top^2). Here the eye
+// is an altitude a0 (from its flat offsets: |c + R y|^2 - R^2 = |c|^2 + 2 R c.y, no radius
+// against a radius) and every point of the ray is an altitude and a direction from t alone,
+// EXACTLY (not to second order: the ray reaches hundreds of km):
+//     |p|^2 - r0^2 = t (2 r0 mu + t),  alt(t) = a0 + t (2 r0 mu + t) / (|p| + r0),
+//     dir(t) = normalize(upE + t / (r0 + t mu) tPerp),  r0 = R + a0, mu = rd . upE,
+// and the sun-ward sample (900 m up the radial and 900 m toward the sun) the same way from its
+// own point: q = r1 d + 900 sun, r1 = R + alt + 900, |q|^2 - r1^2 = 900 (2 r1 (d . sun) + 900).
+// The per-pixel jitter is the design's (step-banding into noise) and stays.
+float CloudMarch(float3 rel, float2 pix, out float3 scat) {
+    scat = 0.0f;
+    const float3 ro = sLvlCamAbs;   // M10: the level's own eye marches its own sky
+    const float3 rd = normalize(rel);
+    const float R = gGlo.x, H = gCloudA.y;
+    const float3 c = float3(ro.x, sLvlEyeY, ro.z);   // the eye about the anchor, small
+    const float a0 = (dot(c, c) + 2.0f * R * c.y) / (length(ro) + R);
+    const float r0 = R + a0;
+    const float3 upE = normalize(ro);
+    const float mu = dot(rd, upE);
+    const float3 tPerp = rd - mu * upE;
+    const float b = r0 * mu;
+    const float cc = (a0 - H) * (2.0f * R + a0 + H);   // r0^2 - (R + H)^2
+    const float disc = b * b - cc;
+    if (disc <= 0.0f) return 1.0f;
+    const float tShell = -b - sqrt(disc);                  // entering the cloud shell
+    const float t0 = max(tShell, 0.0f);
+    const float t1 = length(rel);                          // the ground
+    const float span = t1 - t0;
+    if (span <= 1.0f) return 1.0f;
+    const uint kSteps = 14;
+    const float dt = span / kSteps;
+    // Per-pixel jitter turns residual step-banding into noise the eye forgives.
+    const float jit = frac(sin(dot(pix, float2(12.9898f, 78.233f))) * 43758.5f);
+    float T = 1.0f;
+    const float muS = dot(rd, GA_SUN_DIR);
+    const float phase = 0.55f + 0.45f * muS;            // cheap forward lobe
+    [loop] for (uint s = 0; s < kSteps && T > 0.02f; ++s) {
+        const float t = t0 + (s + jit) * dt;
+        const float q = t * (2.0f * r0 * mu + t);
+        const float alt = a0 + q / (sqrt(r0 * r0 + q) + r0);
+        if (alt < 0.0f || alt > H) continue;
+        const float3 pdT = normalize(upE + (t / (r0 + t * mu)) * tPerp);
+        const float3 uvw = float3(ReliefUv(CsToPlanet(pdT)), alt / H);   // texturing: planet lat/lon
+        const float dens = gTex3D[gTexIdx.w].SampleLevel(sLinearClamp, uvw, 0).x;
+        if (dens <= 0.0f) continue;
+        const float sigma = dens * gCloudA.x;
+        const float stepT = exp(-sigma * dt);
+        // One sun-ward sample above approximates self-shadowing. Geometry stays
+        // tangent (shared sun); only the texture lookup rotates to planet.
+        const float r1 = R + (alt + 900.0f);
+        const float q1 = 900.0f * (2.0f * r1 * dot(pdT, GA_SUN_DIR) + 900.0f);
+        const float altL = (alt + 900.0f) + q1 / (sqrt(r1 * r1 + q1) + r1);
+        const float3 luvw = float3(ReliefUv(CsToPlanet(normalize(pdT + (900.0f / r1) * GA_SUN_DIR))),
+                                   altL / H);
+        const float lDens = gTex3D[gTexIdx.w].SampleLevel(sLinearClamp, luvw, 0).x;
+        const float sunT = exp(-lDens * gCloudA.x * 1500.0f) *
+                           saturate(dot(pdT, GA_SUN_DIR) * 3.0f + 0.1f);
+        const float3 cloudCol = SUN_IRR_C * (sunT * phase * gCloudA.z + 0.06f) + 0.02f;
+        scat += T * (1.0f - stepT) * cloudCol;
+        T *= stepT;
+    }
+    return T;
+}
+
 float4 PsMain(VsOut i) : SV_Target {
     // M10: THE GAUGE FIRST. i.rel, the eye, the sun and the bank set are all the drawing
     // level's own; everything below is the root's shading, unchanged, run in that frame.
@@ -1103,14 +1189,17 @@ float4 PsMain(VsOut i) : SV_Target {
         if (GateDepth(TrueRel(i.rel)) != LevelGateDepth(i.lvl)) discard;
     }
     const float3 up = normalize(i.dir);   // PLANET frame: lat/lon + every texture fetch
-#if GA_BLOCK_RANKS
-    // HIERARCHY 4.17: THE CHAIN, found once for the pixel and handed to every read below (CS_WC):
-    // the blocks under its undisplaced ground point, which the mesh stage carried eye-relative in
-    // the camera's own level (slot 0, whose frame the rows are about). A fragment of another level,
-    // a Droste globe or a window's world, has only its direction, taken into the root's frame at
-    // the direction's grain.
-    const WalkChain wc = CsWalk(up, (i.lvl == 0u) ? i.geo : CsPointOfDir(up));
-#endif
+    // THE ADDRESS (plan_address.md): every Mercator read below is addressed by this pixel's
+    // undisplaced ground point, eye-relative in the tangent axes -- the mesh stage's geo in the
+    // camera's own level (slot 0, whose eye the surface rows are taken about); a fragment of
+    // another level, a Droste globe or a window's world, has only its direction.
+    const bool ownLvl = (i.lvl == 0u);
+    const float3 pA = ownLvl ? i.geo : CsPointOfDir(up);
+    // THE CHAIN, found once for the pixel and handed to every read below (CS_WC): the windows of
+    // the pixel's OWN level (PHASE A2) that hold its undisplaced ground point, relative to that
+    // level's eye -- the mesh stage's geo in every level, the frame that level's rows are about.
+    // (pA, the Mercator height's point, stays the camera's until Phase B moves the height.)
+    const WalkChain wc = CsChain(i.geo, i.lvl);
     const float3 v = normalize(-i.rel);   // TANGENT frame: geometry + lighting (M6g)
     const float lat = asin(clamp(up.y, -1.0f, 1.0f));
     const float lonDeg = degrees(atan2(up.z, up.x));
@@ -1153,7 +1242,8 @@ float4 PsMain(VsOut i) : SV_Target {
     // vertex height (i.h) is footprint-floored for displacement (~5 km) and foundation-sunk
     // in the estuary window -- gating on it smeared whole towns below sea level. hp is what
     // the data says HERE, at this pixel's own resolution.
-    const float hp = ComposedHeightOn() ? ComposedHeight(up, lod) : i.h;
+    // PHASE B2: the height on the pixel's OWN level's windows, at its own point (the chain above).
+    const float hp = ComposedHeightOn() ? ComposedHeightChain(up, lod CS_WC) : i.h;
     // The land's sun: the inner globe's eclipse and the planet's own shadow at this pixel's
     // ground -- the two factors the water takes, so a shoreline cannot disagree about whether
     // the sun is up. A hillside leans toward a set sun exactly as a wave face does.
@@ -1172,10 +1262,10 @@ float4 PsMain(VsOut i) : SV_Target {
     // M7f: classification input sharpens one rung, 38 m -> 19 m (window mip 1): the fine
     // edit mask owns the structures now, so the height-driven shoreline can afford the
     // finer level -- half the staircase, same residency-stable contract.
-    const float hpC = ComposedHeightOn() ? ComposedHeight(up, max(lod, -5.0f)) : i.h;
+    const float hpC = ComposedHeightOn() ? ComposedHeightChain(up, max(lod, -5.0f) CS_WC) : i.h;
     const float landness =
         (gStreamF.z > 0.5f) ? ((hp > 0.0f) ? 1.0f : 0.0f)
-                            : ComposedLandness(up CS_WC, hpC, gWavesB.w);
+                            : ComposedLandness(up, pA CS_WC, hpC, gWavesB.w);
     float3 n = upT;
     float3 alb;
     float spec = 0.0f;
@@ -1193,7 +1283,7 @@ float4 PsMain(VsOut i) : SV_Target {
         // LAND side: normals from the composed height cube -- one gradient, no equirect/NE
         // fork, no pole singularity. Modest slope gain (the vertical exaggeration is a
         // display choice; shading at x25 would posterize the continents).
-        const float2 gr = ComposedHeightGrad(up, lod);
+        const float2 gr = ComposedHeightGradAt(up, i.geo, lod, i.lvl);
         const float kSlopeGain = 4.0f;
         const float3 nLand =
             normalize(upT - east * (gr.x * kSlopeGain) - north * (gr.y * kSlopeGain));
@@ -1217,36 +1307,11 @@ float4 PsMain(VsOut i) : SV_Target {
     // M9bg: gated on landness as well -- the imagery is now a LAND albedo only (the water
     // carries no texture at all), so an open-water pixel must not pay for the fetch.
     if (ComposedColorOn() && gStreamF.z < 0.5f && landness > 0.0f) {
-        const float3 img = ComposedColor(up CS_WC);
+        const float3 img = ComposedColor(up, pA CS_WC);
         alb = lerp(alb, img, landness);
-        // M7e: a surveyed STRUCTURE wears rock, not the photo under it -- beneath a jetty
-        // footprint the imagery is a smear of foam and water, which rendered the jetties as
-        // grey blobs. Boulder-scale hash grain, cell size folded to the pixel footprint so
-        // the rock never shimmers from altitude.
-        const float elp = ComposedEditLand(up CS_WC);
-        if (elp > 0.01f && landness > 0.0f) {
-            const float2 rxz = (CsToTangent(up) * gGlo.x).xz;
-            const float cellM = max(0.7f, length(i.rel) * gWavesB.z);
-            const float2 rc = floor(rxz / cellM);
-            const float rn = frac(sin(dot(rc, float2(127.1f, 311.7f))) * 43758.5453f);
-            const float3 rock =
-                lerp(float3(0.15f, 0.14f, 0.13f), float3(0.33f, 0.30f, 0.26f), rn);
-            const float rockW = saturate(elp * 1.5f) * landness;
-            alb = lerp(alb, rock, rockW);
-            // M8g: riprap FACETS. Albedo grain alone still lit as one continuous grease
-            // (the Vaseline jetty) -- a boulder pile's signature is per-block NORMALS.
-            // Each hash cell gets a fixed random tilt; amplitude folds away as the pixel
-            // footprint approaches the boulder size (same law as every detail band: fold,
-            // never alias), so from altitude the jetty relaxes to the smooth ridge.
-            const float fp = length(i.rel) * gWavesB.z;
-            const float facetW = rockW * (1.0f - smoothstep(0.35f, 1.4f, fp));
-            if (facetW > 0.01f) {
-                const float fx = frac(sin(dot(rc, float2(269.5f, 183.3f))) * 43758.5453f);
-                const float fz = frac(sin(dot(rc, float2(419.2f, 371.9f))) * 43758.5453f);
-                n = normalize(n + (east * (fx - 0.5f) + north * (fz - 0.5f)) *
-                                      (1.1f * facetW));
-            }
-        }
+        // The land is the imagery (the owner's law): the surveyed structures' rock -- a hash per
+        // 0.7 m cell addressed through the float32 direction, painted over the photo with facet
+        // normals -- is gone; the edit mask still decides landness and the structures' geometry.
     }
 
     // ---- M6j --albedo: the TEXTURE-WORK lens. Raw composed color (or Mars's raw pyramid) --
@@ -1255,8 +1320,8 @@ float4 PsMain(VsOut i) : SV_Target {
     // The stencil still draws. Everything below this line is presentation.
     if (gTexIdx2.w != 0u) {
         const float3 lens =
-            (ComposedColorOn() && gStreamF.z < 0.5f) ? ComposedColor(up CS_WC) : alb;
-        return float4(ApplyComposedStencil(lens, up), 1.0f);
+            (ComposedColorOn() && gStreamF.z < 0.5f) ? ComposedColor(up, pA CS_WC) : alb;
+        return float4(ApplyComposedStencil(lens, up, pA), 1.0f);
     }
 
     // ---- M7m: THE SANITY LENSES -- values as color, so a domain error is a broken
@@ -1265,11 +1330,7 @@ float4 PsMain(VsOut i) : SV_Target {
     // (its v is SOUTH -- the gradient direction proves it). mip: the height window's
     // residency heat. ring: the bank's rings with a 4-texel checker (bank addressing on
     // screen). These test the GA the cheap way: patterns survive correct products.
-#if GA_BLOCK_RANKS
     if (gBankA.z > 0.5f && gBankA.z < 11.5f) {   // 12 and 13 are the mix lenses, at the end
-#else
-    if (gBankA.z > 0.5f) {
-#endif
         const float2 wxzL = (CsToTangent(up) * gGlo.x).xz;
         const int lensId = (int)(gBankA.z + 0.5f);
         float3 lc = float3(0.05f, 0.05f, 0.08f);
@@ -1380,14 +1441,18 @@ float4 PsMain(VsOut i) : SV_Target {
             return float4(caL, float(midL >> 8u), float(midL & 255u),
                           (i.mid & 0x80000000u) ? 9.0f : 7.0f);
         } else if (lensId == 2) {
-            const float2 duvL = CsWindowUv(up);
-            if (all(duvL > 0.0f) && all(duvL < 1.0f)) lc = float3(duvL, 0.0f);
+            // PHASE B2: rank 2's window address at the pixel (where the old z14 page stood).
+            if (wc.n >= 2u) lc = float3(frac(WalkUv(wc, 1u)), 0.0f);
         } else if (lensId == 3) {
-            const float2 duvL = CsWindowUv(up);
-            if (CsHeightWindowOn() && all(duvL > 0.0f) && all(duvL < 1.0f)) {
-                const float mL = CsHaveHeightWin(duvL);
-                lc = lerp(float3(0.1f, 0.85f, 0.25f), float3(0.9f, 0.12f, 0.1f),
-                          saturate(mL / 7.0f));
+            // PHASE B2: the finest rank holding the HEIGHT here to its floor -- green rank 1 to red
+            // rank 5 -- darker by its resident mip.
+            [unroll] for (uint kL = 0; kL < GA_BLOCK_RANKS; ++kL) {
+                if (kL >= wc.n) break;
+                const float mL = CsHaveWindow(gCsU6.y, WalkUv(wc, kL), WalkSlice(wc, kL));
+                if (mL <= kCsHeightWindowFloor) {
+                    lc = lerp(float3(0.1f, 0.85f, 0.25f), float3(0.9f, 0.12f, 0.1f), float(kL) / 4.0f) *
+                         (1.0f - mL / 5.0f);
+                }
             }
         } else if (lensId == 6) {
             // M7p: WATER AS DATA -- flat, unlit, comparable 1:1 with the 2D proof figure
@@ -1448,8 +1513,8 @@ float4 PsMain(VsOut i) : SV_Target {
     }
 
     const float ndl = saturate(dot(n, GA_SUN_DIR)) * (1.0f - 0.75f * overhead) * sunVis;
-    float3 col = alb * (0.030f + ndl * SUN_IRR_C * 1.15f);
-    col += spec * SUN_IRR_C * 0.85f * (1.0f - overhead);
+    float3 col = alb * (SkyAmbient(n, upT, hp) + ndl * SunAt(upT, hp) * 1.15f);
+    col += spec * SunAt(upT, hp) * 0.85f * (1.0f - overhead);
     col += skyReflAdd * day * (1.0f - 0.6f * overhead);   // M7c: the reflected ray, skyward
     col += alb * float3(0.010f, 0.014f, 0.028f) * (1.0f - day);   // moonlit-blue night side
 
@@ -1467,7 +1532,7 @@ float4 PsMain(VsOut i) : SV_Target {
     float3 wcol = i.wcol;
     if (gOptU.w != 0u && gStreamF.z < 0.5f && landness < 0.999f) {
         wcol = WaterPixelColor(up, upT, east, north, i.rel, wxzW, hp, degrees(lat), lonDeg, lod,
-                               day, footPxW, fpxW, fpzW);
+                               day, footPxW, fpxW, fpzW, pA, ownLvl, i.geo, i.lvl);
     }
     if (gStreamF.z < 0.5f) col = lerp(wcol, col, landness);
 
@@ -1478,29 +1543,15 @@ float4 PsMain(VsOut i) : SV_Target {
     // beach, dune-grass and riprap constants are gone: they were guesses by height and slope
     // that painted every land within 2.7 km of the eye, a farm upriver as a dune.
     const float distC = length(i.rel);
-#if GA_BLOCK_RANKS
     float lensNearW = 0.0f;   // the mix lens's record of this block's mix
-#endif
-    if (gStreamF.z < 0.5f && landness > 0.0f && distC < 2700.0f && CsHeightWindowOn()) {
-        const float2 wuv = CsWindowUv(up);
-        if (all(wuv > 0.0f) && all(wuv < 1.0f)) {
-            const float2 grF = ComposedHeightGrad(up, -8.0f);   // true slope, finest resident
+    // PHASE B2 (D5): a law of the eye's distance, not of a page -- every place gets it.
+    if (gStreamF.z < 0.5f && landness > 0.0f && distC < 2700.0f) {
+        {
+            const float2 grF = ComposedHeightGradAt(up, i.geo, kCsHeightLodFloor, i.lvl);   // true slope, finest resident
             const float3 nM = normalize(upT - east * grF.x - north * grF.y);
             const float water = gWavesB.w;
             float3 matAlb = alb;
             if (hp - water < 0.35f) matAlb = float3(0.38f, 0.34f, 0.27f);   // wet sand band
-            // M7e: a surveyed structure is DARK rock at every distance.
-            const float elm = ComposedEditLand(up CS_WC);
-            if (elm > 0.01f) {
-                const float2 rxz2 = (CsToTangent(up) * gGlo.x).xz;
-                const float cell2 = max(0.7f, distC * gWavesB.z);
-                const float rn2 =
-                    frac(sin(dot(floor(rxz2 / cell2), float2(127.1f, 311.7f))) * 43758.5453f);
-                matAlb = lerp(matAlb,
-                              lerp(float3(0.15f, 0.14f, 0.13f), float3(0.33f, 0.30f, 0.26f),
-                                   rn2),
-                              saturate(elm * 1.5f));
-            }
             const float ndlM = saturate(dot(nM, GA_SUN_DIR)) * sunVis;
             // M10 (a pre-existing bug the Droste night found): the sky's ambient here ignored
             // the hour. Every other term in this shader dims its skylight by `day`; this one did
@@ -1508,82 +1559,38 @@ float4 PsMain(VsOut i) : SV_Target {
             // seen, because the root helm is always in daylight. Now it takes the same `day` and
             // the same moonlit floor the far-field mix below uses: one law, day or night.
             const float skyD = SkyDay(day);
-            float3 colNear = matAlb * (SUN_IRR_C * ndlM + SkyRadiance(dot(nM, GA_SKY_UP)) * (0.55f * skyD) +
+            float3 colNear = matAlb * (SunAt(upT, hp) * ndlM + SkyAmbient(nM, upT, hp) +
                                        float3(0.010f, 0.014f, 0.028f) * (1.0f - skyD));
-            colNear = AerialPerspectiveDay(colNear, normalize(i.rel), distC, skyD);
+            // (Its air is the one in front of every globe pixel: the integral below, after the
+            // clouds -- not a haze of its own.)
             // M6n: the material weight rides landness too -- a half-emerged flat takes half
             // the wet-sand treatment, and the shore band grades instead of popping.
             col = lerp(col, colNear,
                        (1.0f - saturate((distC - 500.0f) / 2200.0f)) * 0.92f * landness);
-#if GA_BLOCK_RANKS
             lensNearW = (1.0f - saturate((distC - 500.0f) / 2200.0f)) * 0.92f * landness;
-#endif
         }
     }
 
     // ...and a short march through the volume bank renders the clouds themselves. NULL tiles
     // read zero: over clear air every sample is the hardware's answer, not a branch's.
     if (gTexIdx.w != 0xFFFFFFFFu) {
-        const float3 ro = sLvlCamAbs;   // M10: the level's own eye marches its own sky
-        const float3 rd = normalize(i.rel);
-        const float top = gGlo.x + gCloudA.y;
-        const float b = dot(ro, rd);
-        const float cc = dot(ro, ro) - top * top;
-        const float disc = b * b - cc;
-        if (disc > 0.0f) {
-            const float tShell = -b - sqrt(disc);                  // entering the cloud shell
-            const float t0 = max(tShell, 0.0f);
-            const float t1 = length(i.rel);                        // the ground
-            const float span = t1 - t0;
-            if (span > 1.0f) {
-                const uint kSteps = 14;
-                const float dt = span / kSteps;
-                // Per-pixel jitter turns residual step-banding into noise the eye forgives.
-                const float jit = frac(sin(dot(i.pos.xy, float2(12.9898f, 78.233f))) * 43758.5f);
-                float T = 1.0f;
-                float3 scat = 0.0f;
-                const float mu = dot(rd, GA_SUN_DIR);
-                const float phase = 0.55f + 0.45f * mu;            // cheap forward lobe
-                [loop] for (uint s = 0; s < kSteps && T > 0.02f; ++s) {
-                    const float3 p = ro + rd * (t0 + (s + jit) * dt);
-                    const float pr = length(p);
-                    const float alt = pr - gGlo.x;
-                    if (alt < 0.0f || alt > gCloudA.y) continue;
-                    const float3 pd = CsToPlanet(p / pr);   // texturing needs planet lat/lon
-                    const float3 uvw = float3(ReliefUv(pd), alt / gCloudA.y);
-                    const float dens = gTex3D[gTexIdx.w].SampleLevel(sLinearClamp, uvw, 0).x;
-                    if (dens <= 0.0f) continue;
-                    const float sigma = dens * gCloudA.x;
-                    const float stepT = exp(-sigma * dt);
-                    // One sun-ward sample above approximates self-shadowing. Geometry stays
-                    // tangent (shared sun); only the texture lookup rotates to planet.
-                    const float3 pdT = p / pr;
-                    const float3 lpT = pdT * (pr + 900.0f) + GA_SUN_DIR * 900.0f;
-                    const float3 luvw = float3(ReliefUv(CsToPlanet(normalize(lpT))),
-                                               (length(lpT) - gGlo.x) / gCloudA.y);
-                    const float lDens = gTex3D[gTexIdx.w].SampleLevel(sLinearClamp, luvw, 0).x;
-                    const float sunT = exp(-lDens * gCloudA.x * 1500.0f) *
-                                       saturate(dot(pdT, GA_SUN_DIR) * 3.0f + 0.1f);
-                    const float3 cloudCol =
-                        SUN_IRR_C * (sunT * phase * gCloudA.z + 0.06f) + 0.02f;
-                    scat += T * (1.0f - stepT) * cloudCol;
-                    T *= stepT;
-                }
-                col = col * T + scat;
-            }
-        }
+        float3 scat;
+        const float T = CloudMarch(i.rel, i.pos.xy, scat);
+        col = col * T + scat;
     }
 
-    // The atmosphere, as seen ON the disc: grazing rays cross a long air path. M6j: this is a
-    // FROM-SPACE effect and now fades in above 60 km -- inside the atmosphere it was pouring
-    // grey-blue over every oblique view of the imagery (the "washed out when zooming in"
-    // report; the near-field haze budget belongs to AerialPerspective alone).
-    const float rim = pow(1.0f - saturate(dot(upT, v)), 3.0f) *
-                      smoothstep(60000.0f, 250000.0f, length(sLvlCamAbs) - gGlo.x);
-    // Mars wears a THIN dusty shell, not Earth's blue one.
-    const float3 rimCol = (gStreamF.z > 0.5f) ? float3(0.72f, 0.42f, 0.24f)
-                                              : float3(0.42f, 0.58f, 0.92f);
-    col = lerp(col, rimCol * (0.15f + 1.05f * day), rim * (gStreamF.z > 0.5f ? 0.18f : 0.55f));
+    // THE AIR ON THE DISC: the sky's own integral (Common.hlsli SkyAir), from the eye -- or, from
+    // orbit, the ray's entry into the air -- to this point; the surface is seen through what
+    // survives of it. It replaces the from-space rim (a hand-tinted Fresnel term faded in over
+    // 60-250 km, Mars by a branch), so the limb past the disc's edge and the haze on it are one
+    // function on both sides of the edge, from the helm to orbit, and Mars is its own rows.
+    {
+        float3 airT;
+        float airG;
+        const float3 airL = SkyAir(normalize(i.rel), normalize(sLvlCamAbs), GA_SUN_DIR,
+                                   length(sLvlCamAbs), length(i.rel), airT, airG);
+        col = col * airT + airL;
+    }
 
     // M6d: the Mv2 wind bank's curl, on demand (V). Violet = NH-cyclonic (+), amber = anti-
     // cyclonic. NULL tiles read zero and tint nothing: calm air costs neither memory nor a
@@ -1605,33 +1612,27 @@ float4 PsMain(VsOut i) : SV_Target {
         col = lerp(col, float3(0.75f, 0.92f, 1.0f),
                    0.55f * GateRim(TrueRel(i.rel), LevelGateDepth(i.lvl) - 1u));
     }
-    col = ApplyComposedStencil(col, up);   // M6i: --stencil alignment overlay (off = no-op)
-#if GA_BLOCK_RANKS
-    // THE MIX LENSES, with the key, off unless asked for: what this stage mixes the land by, where it decides.
+    col = ApplyComposedStencil(col, up, pA);   // M6i: --stencil alignment overlay (off = no-op)
+    // THE MIX LENSES, off unless asked for: what this stage mixes the land by, where it decides.
     // --lens mix (12): r = landness (the water's colour comes in by 1 - landness), g = the edit
     // mask's land, b = its edited weight. --lens mix.near (13): r = the close-up material's
     // weight, which is the wet band's alone now that the land's constants are out (the
     // imagery's share is whole, and no texel is judged): g and b are 0.
     if (gBankA.z > 11.5f) {
-        const float2 meL = CsEditMask(up CS_WC);
+        const float2 meL = CsEditMask(up, pA CS_WC);
         col = (gBankA.z < 12.5f) ? float3(landness, meL.x, meL.y)
                                  : float3(lensNearW, 0.0f, 0.0f);
     }
-#endif
     return float4(col, 1.0f);
 }
 
-// ------------------------------------------------------------------ the atmosphere shell
+// ------------------------------------------------------------------ the sky, from wherever the eye is
 //
-// Fullscreen backdrop drawn BEFORE the surface (depth off): rays that MISS the planet march a
-// thin Rayleigh shell, which is what puts the blue limb past the edge of the disc and the
-// sunrise ring on the terminator. Rays that hit the planet output space black and let the
-// surface overdraw. Single scattering, 6 steps, scale height 8 km -- a sketch of Bruneton with
-// the same phase conventions, not a claim to be him.
-
-static const float3 kBetaR = float3(5.8e-6f, 13.5e-6f, 33.1e-6f);
-static const float kAtmTop = 60000.0f;
-static const float kRayleighH = 8000.0f;
+// Fullscreen backdrop drawn BEFORE the surface (depth off; GREATER_EQUAL against reversed-Z
+// infinity, so it touches only pixels nothing has drawn): the SAME integral the sky layer's dome
+// and every reflection ask (Common.hlsli SkyAlong), from the camera's own eye. From orbit the ray
+// starts at its entry into the air -- that is the limb past the disc and the sunrise ring on the
+// terminator; from the helm it starts at the eye. Nothing here knows which.
 
 struct SkyVsOut {
     float4 pos : SV_Position;
@@ -1664,82 +1665,37 @@ cbuffer GlobeSkyCb : register(b3) {
     float4 gSkySpaceSun;   // M10: the space backdrop's sun (Droste only; camera frame)
 };
 
-// The shell's single scatter along [t0, t0 + span] of a ray from ro (sphere-centred, in the
-// planet's own units) lit by `sun`: the light it adds, and in odView the optical depth it puts
-// in front of whatever lies behind it. 6 steps, Chapman-lite sun transmittance.
-float3 ShellScatter(float3 ro, float3 rd, float t0, float span, float3 sun, out float odView) {
-    const uint kSteps = 6;
-    const float dt = span / kSteps;
-    float3 sum = 0.0f;
-    odView = 0.0f;
-    [unroll] for (uint s = 0; s < kSteps; ++s) {
-        const float3 p = ro + rd * (t0 + (s + 0.5f) * dt);
-        const float h = max(length(p) - gGlo.x, 0.0f);
-        const float dens = exp(-h / kRayleighH);
-        odView += dens * dt;
-        // Sun transmittance out of the shell from p: one closed-form-ish estimate via the
-        // grazing airmass (Chapman-lite).
-        const float cosSun = dot(normalize(p), sun);
-        const float am = dens * kRayleighH * 2.2f / max(cosSun + 0.18f, 0.02f);
-        const float3 sunT = exp(-kBetaR * max(am, 0.0f));
-        sum += dens * dt * sunT * exp(-kBetaR * odView);
-    }
-    const float mu = dot(rd, sun);
-    const float phaseR = 0.0596831f * (1.0f + mu * mu);   // 3/(16 pi)
-    float3 col = sum * kBetaR * phaseR * 22.0f * SUN_IRR_C;
-    if (gStreamF.z > 0.5f) {   // Mars: 1% of Earth's air, dust-toned
-        col = dot(col, float3(0.33f, 0.34f, 0.33f)) * float3(1.15f, 0.55f, 0.30f) * 0.30f;
-    }
-    return col;
-}
-
 float4 PsSky(SkyVsOut i) : SV_Target {
     const float2 ndc = i.dir.xy;
     const float3 rd = normalize(gSkyFwd.xyz + gSkyRight.xyz * (ndc.x * gSkyFwd.w * gSkyRight.w)
                                 + gSkyUp.xyz * (ndc.y * gSkyFwd.w));
     const float3 ro = gCamAbs.xyz;
+    const float eyeR = length(ro);
+    const float3 up = ro / eyeR;
 
-    // Planet hit? Space stays black; the surface pass owns the disc.
-    const float b = dot(ro, rd);
-    const float cPlan = dot(ro, ro) - gGlo.x * gGlo.x;
-    if (b * b - cPlan > 0.0f && -b - sqrt(max(b * b - cPlan, 0.0f)) > 0.0f) {
-        return float4(0, 0, 0, 1);
+    // The camera level's own air, at its share of the space backdrop (gSkyLvl.y: exactly 1
+    // without Droste), and its ground where the ray meets it.
+    float3 T;
+    float tG;
+    float3 col = SkyAir(rd, up, gSunDir.xyz, eyeR, 3.0e38f, T, tG);
+    if (tG >= 0.0f) {
+        col += T * AtmGroundBounce(GA_AIR, eyeR, rd, up, gSunDir.xyz, tG, gSkyLut.y) * kSunE;
     }
-
-    // The sun itself. Without Droste it shows only where the ray leaves the shell toward it (the
-    // shipped backdrop); under Droste the backdrop is space, and space has the sun in it
-    // wherever the planet is not -- a limb in front of it (PsLimb) dims it by its own air. Whose
-    // sun: under appealing lighting every level has one, and space shows the one of the level
-    // whose orbit called for it (gSkySpaceSun) -- not the camera's, which is the gauge.
+    col *= gSkyLvl.y;
+    // The sun, through the same air (Common.hlsli SkyAlong's disc, line for line). Under Droste
+    // (gSkyLvl.z) space has the sun in it wherever the planet is not, and whose sun: the level's
+    // whose orbit called for it (gSkySpaceSun), not the camera's, which is the gauge -- seen
+    // through the camera level's air by that air's share.
     const float3 sunSky = (gSkyLvl.z > 0.5f) ? gSkySpaceSun.xyz : gSunDir.xyz;
-    const float mu = dot(rd, sunSky);
-    const float3 sunDisc = SUN_IRR_C * smoothstep(0.9998f, 0.99995f, mu) * 4.0f;
-    const float3 bare = (gSkyLvl.z > 0.5f) ? sunDisc : float3(0.0f, 0.0f, 0.0f);
-
-    // Atmosphere shell chord.
-    const float top = gGlo.x + kAtmTop;
-    const float cTop = dot(ro, ro) - top * top;
-    const float disc = b * b - cTop;
-    if (disc <= 0.0f) return float4(bare, 1);
-    const float t0 = max(-b - sqrt(disc), 0.0f);
-    const float t1 = -b + sqrt(disc);
-    const float span = t1 - t0;
-    if (span <= 0.0f) return float4(bare, 1);
-
-    // M10: the camera level's own air, at its share of the space backdrop (gSkyLvl.y: exactly 1
-    // without Droste).
-    float odView;
-    float3 col = ShellScatter(ro, rd, t0, span, gSunDir.xyz, odView) * gSkyLvl.y;
-
-    // The sun itself, when the ray leaves the shell toward it.
-    col += sunDisc;
+    const float3 sunT = (tG >= 0.0f) ? float3(0.0f, 0.0f, 0.0f) : lerp(float3(1.0f, 1.0f, 1.0f), T, gSkyLvl.y);
+    col += SUN_IRR_C * sunT * smoothstep(gMisc.y, gMisc.z, dot(rd, sunSky)) * 12.0f;
     return float4(col, 1.0f);
 }
 
 // ------------------------------------------------------------------ M10: the limbs
 //
-// Every planet in the Droste tower whose air the eye is OUTSIDE of wears its limb: the same
-// shell, scattered by the same function, in that level's own frame (its eye, its sun), drawn
+// Every planet in the Droste tower whose air the eye is OUTSIDE of wears its limb: the sky's
+// one integral (Common.hlsli SkyAir), in that level's own frame (its eye, its sun), drawn
 // after the surface over whatever lies behind it. The backdrop above could not do this -- it
 // touches only empty pixels, and an inner globe's limb lies over the outer world's sea. Blended
 // as light added plus the light behind carried through (dual source: dst = scatter + dst * T),
@@ -1760,7 +1716,7 @@ LimbOut PsLimb(SkyVsOut i) {
     const float3 rd = mul(rdT, sLvlQ);   // Q^T: the same ray in the level's own frame
     const float3 ro = sLvlCamAbs;
     const float R = gGlo.x;
-    const float top = R + kAtmTop;
+    const float top = R + GA_AIR.top;   // where the planet's air ends (its rows)
     // The closest approach as a vector (ro - rd b), not b^2 - c: an inner globe's eye sits
     // ~1.7e7 own-metres out, where b^2 - c cancels away kilometres of the limb.
     const float b = dot(ro, rd);
@@ -1785,6 +1741,8 @@ LimbOut PsLimb(SkyVsOut i) {
     float3 scatter = 0.0f;
     float3 trans = 0.0f;
     const float t0c = -b - sqrt(max(top * top - rc * rc, 0.0f));
+    const float eyeR = length(ro);
+    const float3 up = ro / eyeR;
     const uint kSub = 8u;
     [unroll] for (uint s = 0; s < kSub; ++s) {
         const float h = hc + foot * ((float(s) + 0.5f) / float(kSub) - 0.5f);
@@ -1792,13 +1750,12 @@ LimbOut PsLimb(SkyVsOut i) {
         const float3 rdS = normalize(pSub - ro);
         const float bS = dot(ro, rdS);
         const float rS = length(ro - rdS * bS);
-        if (rS < R) { trans += 1.0f; continue; }         // the disc's part of the pixel
-        if (rS >= top) { trans += 1.0f; continue; }      // clear of the air
-        const float hwS = sqrt(top * top - rS * rS);
-        const float t0S = max(-bS - hwS, 0.0f);
-        float od;
-        scatter += ShellScatter(ro, rdS, t0S, (hwS - bS) - t0S, GA_SUN_DIR, od);
-        trans += exp(-kBetaR * od);
+        // The disc's part of the pixel: its air is on its own pixels (PsMain), not added here.
+        if (rS < R) { trans += 1.0f; continue; }
+        float3 T;
+        float tG;
+        scatter += SkyAir(rdS, up, GA_SUN_DIR, eyeR, 3.0e38f, T, tG);
+        trans += T;
     }
     LimbOut o;
     o.scatter = float4(scatter / float(kSub), 0.0f);

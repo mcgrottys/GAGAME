@@ -227,6 +227,10 @@ void FillSceneConstantsFrozen(const SceneFill& f, SceneConstants& sc) {
     sc.skyLut[1] = f.planetRadiusM;
     sc.skyLut[2] = f.eyeRadiusM;
     sc.skyLut[3] = 0.0f;
+    // The planet's air (scene/Air.h), grown with the live fill as the sky's table was.
+    for (int i = 0; i < 5; ++i) {
+        for (int c = 0; c < 4; ++c) sc.air[i][c] = f.air.row[i][c];
+    }
 }
 
 // The six poses the M12 gate renders (tools/stills.sh, plus gate_stills.sh's droste), built the

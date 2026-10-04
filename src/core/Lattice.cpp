@@ -117,6 +117,18 @@ void Lattice::TexelGround(uint32_t mip, double lat, double lon, double& du, doub
     dv = arc(p[0], p[2]);
 }
 
+int Lattice::LevelOf(double grainM, double lat, double lon) const {
+    if (!(grainM > 0.0)) return -1;
+    int own = 0;
+    for (uint32_t m = 0; m <= MaxMip(); ++m) {
+        double a = 0.0, b = 0.0;
+        TexelGround(m, lat, lon, a, b);
+        if ((std::max)(a, b) > grainM * (1.0 + 1e-9)) break;
+        own = static_cast<int>(m);
+    }
+    return own;
+}
+
 std::string Lattice::Tag(const char* kindName) const {
     char buf[96];
     if (kind == Kind::Cube) {

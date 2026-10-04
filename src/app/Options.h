@@ -33,6 +33,7 @@ struct Options {
     bool dumpFibers = false;          // --dump-fibers: bank planes as PNGs + range gate
     int lens = 0;                     // --lens worldxz|winuv|mip|ring: value-as-color; 9..11 the
                                       // residency lens of earth.color / earth.height / gis.landsea
+    std::string groundProbe;          // --ground-probe lat,lon: A0's two-worlds probe (lens blocks)
     bool probeCullFar = false;        // step 23 probe: cull beyond the horizon at every altitude
     std::wstring dumpMeshlets;        // step 23 probe: the dump frame's meshlet records
     bool dumpWater = false;           // --dump-water-state: inlet fields for proofs/
@@ -96,6 +97,15 @@ struct Options {
                                       // kernel around the spin-up and every N frames (BedTrace.cpp)
     bool bedTracePlant = false;       // --bed-trace-plant: one more reading with the residency floor
                                       // forced to the coarsest mip -- the instrument's planted failure
+    uint32_t bankTraceEvery = 0;      // --bank-trace N (Phase B0): the water bank's bed under its rings,
+                                      // the source and mip read, hmax of the breaking clamp, every N
+                                      // frames and at the run's end (WaterBankLayer::TraceRead)
+    uint32_t starvePlant = 0;         // --starve-plant S: the loader skips slice S (the watchdog's plant; 0 = off)
+    uint32_t nearGroundEvery = 0;     // --near-ground N (Phase B2w): every N frames, the rank and mip that
+                                      // answer the colour under the frame's bottom third, the misses
+                                      // within each rank's pixel distance, and the turn's releases
+    bool bankTracePlant = false;      // --bank-trace-plant: the bank's trace with the rule's residency
+                                      // floor forced to mip 6 for the whole run (the planted failure)
     uint32_t treeAudit = 0;           // --tree-audit N: compare N tiles/frame, report, exit
     bool warmTrees = false;           // --warm-trees: build them without comparing, then exit
     bool packTrees = false;           // --pack-trees: one archive per node per frame, then exit

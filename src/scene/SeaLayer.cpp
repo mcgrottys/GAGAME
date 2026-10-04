@@ -693,7 +693,7 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
     // first use (overwriting the null views).
     if (!m_churnSweWired && m_swe && m_swe->Ready()) {
         m_churnTable.Srv2D(1, m_swe->UvRes(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-        // M9ar: the bed is slice m_hgtSlice of the height PAGE tenant, plus its residency map.
+        // M9ar: the bed is the height tenant (PHASE B3: its windows' slices), plus its residency map.
         if (m_hgtArr && m_hgtRes) {
             // M9ax: the whole tenant (cube faces + the page); the slice rides the CB.
             m_churnTable.SrvArray(2, m_hgtArr, DXGI_FORMAT_R16_FLOAT, 0, UINT32_MAX, m_hgtMips);
@@ -744,8 +744,8 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
         // surface and the window's lattice (the old eight casts bit for bit; the [kernel]
         // hash below is the gate).
         m_surface->FlatRows(m_churnCb.geoA);
-        m_hgtWin.Rows(m_churnCb.winA);
-        m_churnCb.pageB[0] = static_cast<float>(m_hgtSlice);
+        memcpy(m_churnCb.eyeT, m_churnEyeT, sizeof(m_churnEyeT));   // PHASE B2
+        memcpy(m_churnCb.hwU, &m_churnHw, sizeof(m_churnHw));
         m_churnCb.sweM[0] = m_churnSweWired ? 1.0f : 0.0f;
         m_churnCb.sweM[1] = sweCurrentGain;
         m_churnCb.sweM[2] = 500.0f;   // the same seaward handover ramp as Sea.hlsl's JetU

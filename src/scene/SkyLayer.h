@@ -3,9 +3,11 @@
 #pragma once
 
 #include "hal/Gpu.h"
+#include "scene/Air.h"
 #include "scene/Layer.h"
 #include "scene/WindowBox.h"
 
+#include <cstring>
 #include <string>
 
 namespace ga {
@@ -22,6 +24,10 @@ public:
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
               hal::RootSignature rootSig) override;
     void ReloadShaders(Gpu& gpu, ShaderCompiler& sc) override;
+    // The air's table is built here, once, for every DECLARED sky whatever `enabled` says: it is
+    // a property of the air that every surface's reflection and the globe's backdrop read too,
+    // and a dome switched off in orbit must not leave them an unbuilt table.
+    void Simulate(const FrameContext& ctx) override { RunLuts(ctx); }
     void Render(const FrameContext& ctx) override;
 
     // M10: WHOSE sky. The dome is evaluated in its own world's frame: rows take a view ray from
@@ -54,11 +60,37 @@ public:
     // height under a sun angle -- built once and the same for every ray on the planet. There is
     // no table of the VIEW (every ray marches the air from where it is) and none of the sun's
     // transmittance (a closed form). The renderer publishes the slot in the scene constants.
-    uint32_t MultiScatterSrv() const { return m_msTex.srv; }
-    void SetPlanetRadius(double planetR) { m_planetR = planetR; }
+    // No slot until the table is built: an unbuilt table read as one would be garbage, and none
+    // is the integral's single scattering alone (the same function, one term fewer).
+    uint32_t MultiScatterSrv() const { return m_lutStatic ? m_msTex.srv : UINT32_MAX; }
+    void SetPlanetRadius(double planetR) {
+        if (planetR != m_planetR) m_lutStatic = false;
+        m_planetR = planetR;
+    }
+    // The planet's air (scene/Air.h): the table is the air's, so a new air rebuilds it.
+    void SetAir(const AirRows& air) {
+        if (std::memcmp(&air, &m_air, sizeof(AirRows)) != 0) m_lutStatic = false;
+        m_air = air;
+    }
     // --sky-probe: the closed-form transmittance and the marched table it replaced, read back
     // and held against a brute-force integral and against published optical depths.
     void Probe(Gpu& gpu);
+    // --sky-probe, per frame: the eye's three radii as the frame carries them (the scene
+    // constants' gSkyLut.z, the globe's level row, the eye's true distance in doubles) and the
+    // sun in the eye's zenith frame (+y up, +x the view's azimuth); ProbeAt reads the sky the
+    // kernel answered for each and logs one line tagged `tag`.
+    void SetProbeEye(const float radii[3], const float sunLocal[3]) {
+        m_atOn = m_probe;
+        for (int i = 0; i < 3; ++i) {
+            m_atR[i] = radii[i];
+            m_atSun[i] = sunLocal[i];
+        }
+    }
+    void ProbeAt(Gpu& gpu, const char* tag);
+    // THE PICTURE'S WHITE (the tonemap's law, air.exposure = 0): the luminance a white level
+    // Lambertian surface returns under a zenith sun through this air, sun and sky, in the engine's
+    // unit -- read back once per built table (SkyLut.hlsl CsSkyUnits row 0). 0 until built.
+    float WhiteNoonY(Gpu& gpu);
 
 private:
     bool BuildPso(Gpu& gpu, ShaderCompiler& sc);
@@ -79,13 +111,29 @@ private:
     // transmittance tables (float32, so the comparison is not the storage's).
     static constexpr uint32_t kTransW = 256, kTransH = 64;
     static constexpr uint32_t kMsW = 32, kMsH = 32;
-    GpuTexture m_msTex, m_transTex, m_anaTex;
-    uint32_t m_msUav = UINT32_MAX, m_transUav = UINT32_MAX, m_anaUav = UINT32_MAX;
+    // --sky-probe's curve (SkyLut.hlsl CsSkyCurve): the eye's altitude log-spaced from 1 m to two
+    // planet radii, against two suns x three rays x five models.
+    static constexpr uint32_t kCurveW = 512, kCurveModels = 5, kCurveH = 2 * 3 * kCurveModels;
+    GpuTexture m_msTex, m_transTex, m_anaTex, m_curveTex, m_atTex, m_unitTex;
+    uint32_t m_atUav = UINT32_MAX, m_unitUav = UINT32_MAX;
+    hal::Pso m_csAt, m_csUnits, m_csColour;
+    GpuTexture m_colourTex;
+    uint32_t m_colourUav = UINT32_MAX;
+    void ProbeColour(Gpu& gpu);
+    void ProbeUnits(Gpu& gpu);
+    uint32_t m_tableGen = 0, m_whiteGen = 0;
+    float m_whiteY = 0.0f;
+    bool m_atOn = false;
+    float m_atR[3] = {}, m_atSun[3] = {};
+    uint32_t m_msUav = UINT32_MAX, m_transUav = UINT32_MAX, m_anaUav = UINT32_MAX,
+             m_curveUav = UINT32_MAX;
     hal::RootSignatureRef m_lutRs;
-    hal::Pso m_csMs, m_csTrans, m_csAna;
+    hal::Pso m_csMs, m_csTrans, m_csAna, m_csCurve;
+    void ProbeCurve(Gpu& gpu);
     bool m_lutStatic = false;   // the constant tables are built on the first frame
     bool m_probe = false;
     double m_planetR = 6371000.0;
+    AirRows m_air = EarthAir();
 };
 
 }  // namespace ga

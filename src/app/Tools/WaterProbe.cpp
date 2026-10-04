@@ -10,6 +10,7 @@
 #include "render/Camera.h"
 #include "render/Renderer.h"
 #include "scene/Entity.h"
+#include "scene/Gateway.h"
 #include "scene/SeaLayer.h"
 #include "scene/VesselLayer.h"
 #include "scene/WaterBankLayer.h"
@@ -68,6 +69,13 @@ struct Bin {
     double sumL = 0, sumL2 = 0;                   // bank level - phys level
     double sumW2 = 0;                             // (bank waves - phys waves)^2
     double wc = 0, wg = 0, wcg = 0;               // wave rms and correlation, phys vs bank
+    // The worst sample, whole (the far bands' question): where it is in the hull's chart and on the
+    // planet, what was drawn there, the hull's water and bed, and the bank's answer; and how many
+    // samples stand more than 0.5 m over the hull's water.
+    int nOver = 0;
+    double wx = 0, wz = 0, wLat = 0, wLon = 0, wDrawn = 0, wPhys = 0, wBed = 0, wBank = 0;
+    int wRing = -1;
+    float wDry = 0;
 };
 
 }  // namespace
@@ -236,7 +244,7 @@ void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double plane
                    const WaterAtlas* atlas, const ExposureSource* exposure,
                    const WaveField* waveField, const SeaLayer* seaLayer, const SeaState* seaState,
                    const SurfaceFrame& surface, double oceanNow, double simUnix,
-                   uint32_t recFrame) {
+                   uint32_t recFrame, const std::vector<scene::WindowLink>* windows) {
     std::vector<float> depth;
     if (!renderer.ReadDepth(depth)) {
         Log("[wprobe] rec%u: the depth readback failed", recFrame);
@@ -260,6 +268,7 @@ void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double plane
     std::vector<Sample> samples;
     samples.reserve((W / step) * (H / step));
     double reprojMax = 0.0;
+    int otherLevel = 0;   // pixels of another level, left out
     for (uint32_t py = step / 2; py < H; py += step) {
         for (uint32_t px = step / 2; px < W; px += step) {
             const float d = depth[size_t(py) * W + px];
@@ -278,6 +287,12 @@ void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double plane
             const double ry = (1.0 - double(DirectX::XMVectorGetY(c))) * 0.5 * double(H) - 0.5;
             reprojMax = (std::max)(reprojMax, std::hypot(rx - double(px), ry - double(py)));
             if (vessels && vessels->Occupies(s.p[0], s.p[1], s.p[2], 0.05)) continue;
+            // A pixel of another level (seen through a gate's window) is not this world's water:
+            // the depth the shaders keep a level by (ChainDepth, Globe.hlsl GateChainDepth).
+            if (windows && !windows->empty() && scene::ChainDepth(*windows, eye, s.p) != 0) {
+                ++otherLevel;
+                continue;
+            }
             samples.push_back(s);
         }
     }
@@ -348,8 +363,20 @@ void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double plane
                 ++b.n;
                 b.sumD += dD;
                 b.sumD2 += dD * dD;
-                if (std::abs(dD) > std::abs(b.maxD)) b.maxD = dD;
                 const WaterBankLayer::BankPoint& bp = bank[k];
+                if (dD > 0.5) ++b.nOver;
+                if (std::abs(dD) > std::abs(b.maxD)) {
+                    b.maxD = dD;
+                    b.wx = lx;
+                    b.wz = lz;
+                    sea.PlaceOf(lx, lz, b.wLat, b.wLon);
+                    b.wDrawn = hDrawn;
+                    b.wPhys = s.heightNavd;
+                    b.wBed = s.bedNavd;
+                    b.wRing = bp.valid ? bp.ring : -1;
+                    b.wBank = bp.valid ? double(bp.level) + double(bp.dispY) : 0.0;
+                    b.wDry = bp.valid ? bp.dry : 0.0f;
+                }
                 if (bp.valid && r < 10.0) {
                     bankLevelNear += double(bp.level);
                     ++nBankNear;
@@ -373,11 +400,15 @@ void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double plane
                 break;
             }
         }
+        // THE HEADING (the pass rail's 28 degrees): the bow (body +z) as a bearing in the hull's
+        // space (x east, z north), beside the CG's place, so successive readings give the track.
+        double bow[3] = {0.0, 0.0, 1.0};
+        e->Hull()->Body().pose.TransformDir(bow[0], bow[1], bow[2]);
         Log("[wprobe] rec%u '%s' cg (%.1f, %+.3f, %.1f) | freeboard in its water %+.3f m | "
-            "plane-over-sphere lift %+.3f m | %zu samples (%d dry or uncovered) | reprojection max "
-            "%.3f px",
+            "plane-over-sphere lift %+.3f m | %zu samples (%d dry or uncovered, %d of another level "
+            "left out) | reprojection max %.3f px | bow bearing %.1f deg in its space",
             recFrame, e->Name(), cg[0], cg[1], cg[2], atCg.valid ? cg[1] - atCg.heightNavd : 0.0,
-            cgDrawn - cg[1], samples.size(), skippedDry, reprojMax);
+            cgDrawn - cg[1], samples.size(), skippedDry, otherLevel, reprojMax, Bearing(bow[0], bow[2]));
         Log("[wprobe]   level at the hull (%.5f, %.5f): hull reads %+.3f | corner law (atlas @500 m) "
             "%+.3f | bank within 10 m %+.3f (n=%d) | ocean station %+.3f -> bank-corner %+.3f, "
             "corner-hull %+.3f",
@@ -483,6 +514,11 @@ void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double plane
                     "no bank here",
                     b.r0, (std::min)(b.r1, 99999.0), b.n, mean, rms, b.maxD);
             }
+            Log("[wprobe]     worst of %4.0f-%-5.0f m: at (%.1f, %.1f) in the hull's chart = %.6f N %.6f E | "
+                "drawn %+.3f, the hull's water %+.3f over its bed %+.3f | bank ring %d %+.3f (dry weight "
+                "%.2f) | %d of %d samples stand > 0.5 m over the hull's water",
+                b.r0, (std::min)(b.r1, 99999.0), b.wx, b.wz, b.wLat, b.wLon, b.wDrawn, b.wPhys, b.wBed,
+                b.wRing, b.wBank, double(b.wDry), b.nOver, b.n);
         }
     }
 }

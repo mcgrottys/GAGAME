@@ -2,13 +2,10 @@
 //  HeightPage - the bed the water kernels read, evaluated on the CPU for a hull (the water match,
 //  step 3).
 //
-//  THE KERNELS READ THE HEIGHT TENANT (HeightPages.hlsli HpHeightAt): the z14 page by containment where
-//  its texel is at least as fine as the cube's, else the cube face -- bilinear over texel centres at the
-//  resident level, held to the consumer's floor. The bank's floor is now its ring's own grain, so the
-//  rings a hull and an eye stand in read the page's finest level (mip 0: 9.55 m of Mercator, ~7 m at the
-//  Merrimack). That level's texels are the height stack painted at their centres with the level's
-//  ground resolution and stored through the one quantization; --trace step 11 holds a GPU texel against
-//  exactly this CPU evaluation (Compositor::SampleHeightStack at the centre, GroundRes). So a hull's
+//  THE KERNELS READ THE HEIGHT TENANT'S WINDOWS (HeightPages.hlsli HpHeightChain): the eye's windows
+//  of the one pyramid, each ring at its own grain. A window's texels ARE the pyramid's, painted at
+//  their centres with the level's ground resolution and stored through the one quantization, so the
+//  twin is the pyramid's lattice at the rung the finest ring reads, by direction, anywhere. So a hull's
 //  depth laws -- the dry weight, shoaling, the wave-current gain's phase speed, the breaking cap -- can
 //  stand on the bed the drawn sea stands on, without reading a single texel back.
 //
@@ -21,8 +18,7 @@
 //  jetty that disagreement put the kernel's water at a dry weight of 0.14 and the hull's at 1.0, and the
 //  drawn sea stood 0.41 m rms off the hull's.
 //
-//  Outside the page: the cube face at its finest level (611 m), as the kernels fall back. Texels are
-//  memoised (the bed does not change under a hull); single-threaded, like TreeWater's memo.
+//  Texels are memoised (the bed does not change under a hull); single-threaded, like TreeWater's memo.
 // ================================================================================================
 #pragma once
 
@@ -42,43 +38,40 @@ class HeightPage : public PlaceField {
 public:
     static constexpr size_t kMaxHeld = 1u << 16;   // texels memoised before the memo starts over
 
-    // `page` the Mercator window the tenant's page slice sits on, `cube` its cube faces' lattice.
-    HeightPage(const Compositor* comp, int channel, const Lattice& page, const Lattice& cube)
-        : m_comp(comp), m_ch(channel), m_page(page), m_cube(cube) {}
+    // PHASE B1 (out/integration/plan_phase_b.md): THE TWIN ON THE PYRAMID. The kernels read the
+    // windows of the one pyramid (HeightPages.hlsli HpHeightChain), and a window's texels ARE the
+    // pyramid's (HIERARCHY 4.1: slice i at the global texel modulo 16384), so the twin needs no
+    // window and no eye: the pyramid's lattice at `rung` (16384 2^rung texels a face, in the height's
+    // 256 x 128 tiles), each texel the stack at its centre with that rung's ground, through the one
+    // quantization -- a function of the place alone, at the grain the rings a hull stands in read
+    // (the rung whose texel the finest ring's is: WaterBankLayer's base texel).
+    HeightPage(const Compositor* comp, int channel, uint32_t rung)
+        : m_comp(comp), m_ch(channel), m_cube(Lattice::Cube(Lattice::kFaceDim << 17, 256, 128)),
+          m_rung(int(rung)) {}
+    int Rung() const { return m_rung; }
 
     bool Read(double latDeg, double lonDeg, double& value) const override {
         if (!m_comp || m_ch < 0) return false;
         if (m_memo.size() > kMaxHeld) m_memo.clear();
         constexpr double kD2R = 3.14159265358979 / 180.0;
-        // The page by containment (the kernels' test: strictly inside).
-        if (m_page.kind == Lattice::Kind::Window) {
-            double px = 0.0, py = 0.0;
-            m_page.PxOf(latDeg, lonDeg, px, py);
-            const double u = (px - double(m_page.orgPxX)) / double(m_page.faceDim);
-            const double v = (py - double(m_page.orgPxY)) / double(m_page.faceDim);
-            if (u > 0.0 && u < 1.0 && v > 0.0 && v < 1.0) {
-                value = Bilinear(kPageFace, m_page, u, v);
-                return true;
-            }
-        }
+        // The pyramid at its rung, by direction (HpCubeFace's CPU twin).
         // The cube face by direction (HpCubeFace's CPU twin).
         const double la = latDeg * kD2R, lo = lonDeg * kD2R;
         const double cl = std::cos(la);
         const double d[3] = {cl * std::cos(lo), std::sin(la), cl * std::sin(lo)};
         double uv[2] = {0.0, 0.0};
         const uint32_t face = CubeFaceOfDir(d, uv);
-        value = Bilinear(face, m_cube, uv[0], uv[1]);
+        value = BilinearAt(face, m_cube, 17u - uint32_t(m_rung), uv[0], uv[1]);
         return true;
     }
 
     size_t Held() const { return m_memo.size(); }
 
 private:
-    static constexpr uint32_t kPageFace = 7u;   // a memo key's face for the page, past the cube's 0..5
-
-    // PageLoad4's law at the finest level, in doubles: centres at -0.5, four taps clamped.
-    double Bilinear(uint32_t face, const Lattice& lat, double u, double v) const {
-        const uint32_t dim = lat.faceDim;
+    // PageLoad4's law in doubles at a lattice's mip (the pyramid's rungs are its mips 17 - rung):
+    // centres at -0.5, four taps clamped.
+    double BilinearAt(uint32_t face, const Lattice& lat, uint32_t mip, double u, double v) const {
+        const uint32_t dim = lat.faceDim >> mip;
         const double tx = u * dim - 0.5, ty = v * dim - 0.5;
         const double fx0 = std::floor(tx), fy0 = std::floor(ty);
         const double frx = tx - fx0, fry = ty - fy0;
@@ -88,21 +81,22 @@ private:
         };
         const uint32_t x0 = clampI(fx0), x1 = clampI(fx0 + 1.0);
         const uint32_t y0 = clampI(fy0), y1 = clampI(fy0 + 1.0);
-        return (double(Texel(face, lat, x0, y0)) * (1.0 - frx) +
-                double(Texel(face, lat, x1, y0)) * frx) * (1.0 - fry) +
-               (double(Texel(face, lat, x0, y1)) * (1.0 - frx) +
-                double(Texel(face, lat, x1, y1)) * frx) * fry;
+        return (double(Texel(face, lat, x0, y0, mip)) * (1.0 - frx) +
+                double(Texel(face, lat, x1, y0, mip)) * frx) * (1.0 - fry) +
+               (double(Texel(face, lat, x0, y1, mip)) * (1.0 - frx) +
+                double(Texel(face, lat, x1, y1, mip)) * frx) * fry;
     }
 
-    float Texel(uint32_t face, const Lattice& lat, uint32_t ix, uint32_t iy) const {
-        const uint64_t key = (uint64_t(face) << 56) | (uint64_t(ix) << 28) | uint64_t(iy);
+    float Texel(uint32_t face, const Lattice& lat, uint32_t ix, uint32_t iy, uint32_t mip = 0) const {
+        // (face 3 bits, x and y 30 bits each: a rung-15 face is 2^29 texels a side)
+        const uint64_t key = (uint64_t(face) << 60) | (uint64_t(ix) << 30) | uint64_t(iy);
         const auto it = m_memo.find(key);
         if (it != m_memo.end()) return it->second;
-        // The painter's address at level 0: the tile holding the texel and its pixel inside.
-        const TileRequest r{face == kPageFace ? 0u : face, 0u, ix / lat.texW, iy / lat.texH};
+        // The painter's address at the level: the tile holding the texel and its pixel inside.
+        const TileRequest r{face, mip, ix / lat.texW, iy / lat.texH};
         double latR = 0.0, lonR = 0.0;
         lat.Texel(r, ix % lat.texW, iy % lat.texH, latR, lonR);
-        const float h = m_comp->SampleHeightStack(m_ch, latR, lonR, lat.GroundRes(0));
+        const float h = m_comp->SampleHeightStack(m_ch, latR, lonR, lat.GroundRes(mip));
         const float q = HalfToFloat(tree_detail::F2H(h));   // the one quantization: the GPU's
         m_memo.emplace(key, q);
         return q;
@@ -110,7 +104,8 @@ private:
 
     const Compositor* m_comp = nullptr;
     int m_ch = -1;
-    Lattice m_page, m_cube;
+    Lattice m_cube;    // the pyramid
+    int m_rung = 0;    // the rung the twin reads
     mutable std::unordered_map<uint64_t, float> m_memo;
 };
 

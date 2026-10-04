@@ -104,8 +104,8 @@ AuditResult AuditResidency(const std::vector<AuditTenant>& tenants, size_t keep)
             }
             st[base[p] + size_t(a.y) * t.tilesW[p] + a.x] = v;
         }
-        const uint32_t top = t.mips - 1;
         for (uint32_t f = 0; f < t.faces; ++f) {
+            const uint32_t top = f < t.top.size() ? t.top[f] : t.mips - 1;   // F1: the slice's floor
             const size_t p0 = size_t(f) * t.mips;
             const uint32_t bw = t.tilesW[p0], bh = t.tilesH[p0];
             // A tile's footprint in mip-0 cells, per mip: UpdateResidencyByte's own arithmetic.
@@ -420,6 +420,7 @@ void ResidencyManager::LogAudit() {
             }
             a.mapDim = t.resMap.width;
             a.bytes = &t.resCpu;
+            a.top.assign(t.sliceTop.begin(), t.sliceTop.end());
             if (t.resDirty) deferred += " " + a.name;
             a.tiles.reserve(t.tracked.size());
             for (const auto& tr : t.tracked) {
@@ -652,6 +653,7 @@ bool ResidencyManager::AuditSuite() {
         a.mapDim = md.t.resMap.width;
         a.bytes = &md.t.resCpu;
         a.tiles = md.tiles;
+        a.top.assign(md.t.sliceTop.begin(), md.t.sliceTop.end());
         return a;
     };
     // The byte of a cell, written whole (every map texel of it) or one texel alone.
@@ -877,6 +879,51 @@ bool ResidencyManager::AuditSuite() {
                 summary(r3.first).c_str(), clean ? "CLEAN" : "NOT CLEAN",
                 MipText(byteAt(a, 1, 8, 8) / 16u, a.t.mips).c_str());
             if (!clean) ok = false;
+        }
+    }
+    // ---- 6. F1: A WINDOW'S FLOOR. A slice whose chain ends at mip 3 (16 x 16 tiles, 6 mips): its
+    // byte is computed from mips 0..3 alone, 255 where the floor's tile is not held (the rank above
+    // answers), and nothing above the floor is ever held or spoken of.
+    {
+        auto buildW = [&](Model& w) {
+            make(w, L"selftest.window", 1, 16, 16, 6);
+            w.t.sliceTop.assign(1, uint8_t(3));
+            map(w, 0, 3, 0, 0);
+            map(w, 0, 3, 1, 0);
+            map(w, 0, 2, 0, 0);
+            map(w, 0, 1, 0, 0);
+            map(w, 0, 0, 0, 0);
+        };
+        Model w;
+        buildW(w);
+        const auto r = run({&w});
+        const uint8_t b0 = byteAt(w, 0, 0, 0), b8 = byteAt(w, 0, 8, 0), b12 = byteAt(w, 0, 12, 12);
+        const bool clean = r.first.Clean() && b0 == 0 && b8 == 48 && b12 == 255;
+        Log("[res-audit] window floor: a slice held to its mip 3 audits %s (%s); the byte over a cell "
+            "on m0 says %u, on the floor alone %u, under an unheld floor tile %u (255: the rank above "
+            "answers) -- %s", clean ? "CLEAN" : "NOT CLEAN", summary(r.first).c_str(), b0, b8, b12,
+            clean ? "right" : "WRONG");
+        if (!clean) ok = false;
+        {   // PLANT a: the audit without the floor -- the chain must reach mips 4..5, never held.
+            auto rr = run({&w});
+            rr.second[0].top.clear();
+            rr.first = AuditResidency(rr.second, 4096);
+            expect("plant 8, a window's floor forgotten by the audit", rr, AuditKind::Finer, 0, 0, 0, 0);
+        }
+        {   // PLANT b: a byte raised past the floor, mip 4, which the slice never holds.
+            Model w2;
+            buildW(w2);
+            setByte(w2, 0, 8, 0, uint8_t(4 * 16), true);
+            expect("plant 9, a window byte raised past its floor", run({&w2}), AuditKind::Coarser, 0, 0, 8, 0);
+        }
+        {   // PLANT c: the writer without the floor (today's chain to the array's coarsest): the
+            // floor's tiles held, the bytes say nothing -- key7km's rank 5 at A4.
+            Model w3;
+            buildW(w3);
+            w3.t.sliceTop.clear();
+            WriteHeldFootprint(w3.t, TileRequest{0, 3, 0, 0}, heldIn, &w3);
+            w3.t.sliceTop.assign(1, uint8_t(3));
+            expect("plant 10, the writer's chain past a window's floor", run({&w3}), AuditKind::Coarser, 0, 0, 0, 0);
         }
     }
     {

@@ -121,6 +121,27 @@ const Schema& SunSchema() {
     return *s;
 }
 
+const Schema& AirSchema() {
+    static const Schema* s = [] {
+        auto& p = kDoc.air;
+        Schema* sc = new Schema("air", &p);
+        sc->Bind("aod550", p.aod550, Q::Dimensionless, "",
+                 "the day's aerosol optical depth at 550 nm, the air's one row that changes with the "
+                 "day (src/scene/Air.h); < 0 = the planet's typical value (Earth 0.10, the "
+                 "Maritime Aerosol Network's open-ocean mean; Mars's dust 0.5)", R)
+            .Bind("angstrom", p.angstrom, Q::Dimensionless, "",
+                  "the aerosol's Angstrom exponent: its optical depth scales as (lambda / 550 nm)"
+                  "^-angstrom per channel, single-scattering albedo and phase unchanged; < 0 = the "
+                  "planet's typical value (Earth 0.6, the maritime mean; Mars's dust 0)", R)
+            .Bind("exposure", p.exposure, Q::Dimensionless, "",
+                  "the tonemap's scale; 0 = the law: 1 / the luminance of a white level surface "
+                  "under a zenith sun through this air (its sun and its sky), so a sunlit white "
+                  "is the display's white; > 0 overrides it", R);
+        return sc;
+    }();
+    return *s;
+}
+
 const Schema& StormSchema() {
     static const Schema* s = [] {
         auto& p = kDoc.sea.storm;
@@ -299,12 +320,6 @@ const Schema& StreamingSchema() {
                   "the order's hold margin: a held tile, and a tile above a held tile, count for "
                   "this times their measure, so a tile gives its slot up only to one larger on the "
                   "screen by more (HIERARCHY 4.19); 1 is the order without it",
-                  R)
-            .Bind("faceWindows", p.faceWindows,
-                  "standing blocks of the pyramid for the colour and the mask in place of their "
-                  "Mercator windows: lon,lat,rung entries joined by ';', each the block of that "
-                  "rung holding the point (logged); auto = the blocks the `sources` ask for, "
-                  "rank 1 down to each one's grain over its footprint; empty = the Mercator windows",
                   R)
             .Bind("treeRoot", p.treeRoot,
                   "the folder the tile trees live in; a scratch folder keeps a tool's paints and "
@@ -659,6 +674,7 @@ const Schema& SceneFileSchema() {
             .Nest("data", DataSchema(), &kDoc.data, "the data files")
             .Nest("time", TimeSchema(), &kDoc.time, "the scene clock")
             .Nest("sun", SunSchema(), &kDoc.sun, "the sun")
+            .Nest("air", AirSchema(), &kDoc.air, "the air of the day: its aerosol, the picture's white")
             .Nest("sea", SeaSchema(), &kDoc.sea, "the sea state and the datum")
             .Nest("water", WaterSchema(), &kDoc.water, "the water")
             .Nest("streaming", StreamingSchema(), &kDoc.streaming, "residency: scene state")

@@ -11,8 +11,12 @@
 #include "sim/WaveField.h"
 #include "sim/WaveScale.h"
 
+#include "hal/Views.h"
+
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
+#include <map>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -41,6 +45,7 @@ void WaterBankLayer::Configure(const std::wstring& shaderDir, SeaLayer* sea, Swe
 
 void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSignature) {
     if (!m_sea) return;
+    m_sc = &sc;
     // The mip ladder side by side: ring m occupies texels [m*512, (m+1)*512) x [0, 512).
     m_disp.Init(gpu, kMips * kRingTexels, kRingTexels, DXGI_FORMAT_R16G16B16A16_FLOAT,
                 L"water.disp (the wave vertex bank)");
@@ -523,6 +528,34 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
                     t.placeB[1] = static_cast<float>(dLonDz);
                     t.placeB[2] = ok ? 1.0f : 0.0f;
                     t.placeB[3] = 0.0f;
+                    // PHASE B2: THE TILE'S POINT for the windows' address, in doubles: the ground
+                    // point (the radial through the ring point, at the planet's radius) less the
+                    // rows' eye, in the tangent axes; at the origin, and its derivative at the
+                    // centre by the midpoint rule.
+                    {
+                        const SurfaceFrame& sf = *m_surface;
+                        auto pointOf = [&](double x, double z, double p[3]) {
+                            double d[3];
+                            if (!chart.DirOfProjected(x, z, d)) return false;
+                            const double q[3] = {d[0] * sf.planetR - m_hwEye[0], d[1] * sf.planetR - m_hwEye[1],
+                                                 d[2] * sf.planetR - m_hwEye[2]};
+                            const double* ax[3] = {sf.east, sf.up, sf.north};
+                            for (int c = 0; c < 3; ++c) p[c] = q[0] * ax[c][0] + q[1] * ax[c][1] + q[2] * ax[c][2];
+                            return true;
+                        };
+                        double p0[3], pxp[3], pxm[3], pzp[3], pzm[3];
+                        const double h = 0.5 * tileSpan;
+                        const bool okP = m_hwOn && ok && pointOf(ox, oz, p0) && pointOf(cx + h, cz, pxp) &&
+                                         pointOf(cx - h, cz, pxm) && pointOf(cx, cz + h, pzp) &&
+                                         pointOf(cx, cz - h, pzm);
+                        for (int c = 0; c < 3; ++c) {
+                            t.pointA[c] = okP ? static_cast<float>(p0[c]) : 0.0f;
+                            t.pointX[c] = okP ? static_cast<float>((pxp[c] - pxm[c]) / (2.0 * h)) : 0.0f;
+                            t.pointZ[c] = okP ? static_cast<float>((pzp[c] - pzm[c]) / (2.0 * h)) : 0.0f;
+                        }
+                        t.pointA[3] = okP ? 1.0f : 0.0f;
+                        t.pointX[3] = t.pointZ[3] = 0.0f;
+                    }
 
                     // ---- THE CASCADE SEA'S PLANES for this tile (sim/WaveChart.h). The
                     // neighbourhood is found at the tile's centre -- a tile is at most 5 km and a
@@ -665,13 +698,12 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.peakDir[3] = 0.0f;
     cb.slotsD[0] = m_hgtWinSrv;
     cb.slotsD[1] = m_hgtWinResSrv;
-    cb.slotsD[2] = m_hgtWinSlice;   // M9aq: the page, or ~0 for the old window
+    cb.slotsD[2] = 0xFFFFFFFFu;   // PHASE B3: the page's slice lane, no page
     cb.slotsD[3] = 0xFFFFFFFFu;
     // M12 step 4b: the world.flat chart's row and the height window's row come from the
     // surface and the window's lattice (the old eight casts bit for bit; the [kernel] hash
     // below is the gate).
     m_surface->FlatRows(cb.geoA);
-    m_hgtWin.Rows(cb.winA);
     // M8 foamlaw: the deriv fibers carry the Jacobian foam (the crest's area 2-blade
     // degenerating -- provably the same event the Miche steepness names), and the band
     // rms envelopes let the kernel normalize eta for the crest gate and depth excess.
@@ -685,6 +717,8 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.bandKSpread[3] = 0.0f;
     cb.sweB[0] = m_tidePlane;   // the solver is truth: its level is this plane plus its deviation
     cb.sweB[1] = cb.sweB[2] = cb.sweB[3] = 0.0f;
+    static_assert(sizeof(SurfaceFrame::KernelWindowRows) == sizeof(float) * 80, "the kernels' rows");
+    memcpy(cb.hwU, &m_hw, sizeof(m_hw));   // PHASE B2: hwU..hwS, KernelRows' packing
     cb.debugA[0] = flatBed ? 1.0f : 0.0f;   // M9p: the A/B that proves the bed moves geometry
     cb.debugA[1] = flatBedNavd;
     cb.debugA[2] = cb.debugA[3] = 0.0f;
@@ -777,6 +811,33 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     ctx.cmd->Pipeline(m_fill.Get());
     ctx.cmd->Dispatch(kTileTexels / 16, kTileTexels / 16,
                       static_cast<UINT>(tiles.size()));
+    // PHASE B0: THE BANK'S BED TRACE (the header): the same kernel on the same rows and tiles,
+    // compiled with HP_TRACE and BANK_TRACE, writing its readings to a target of its own.
+    if (traceOn && m_sc) {
+        if (!m_traceK) {
+            m_traceK = hal::BuildCompute(
+                *ctx.gpu, m_rs.Get(),
+                m_sc->Compile(m_shaderDir + L"/WaterBank.hlsl", L"CsBankFill", L"cs_6_0",
+                              {L"HP_TRACE=1", L"BANK_TRACE=1"}),
+                "waterbank.trace");
+            m_traceTex = ctx.gpu->CreateTexture2D(kMips * kRingTexels, kRingTexels,
+                                                  DXGI_FORMAT_R32G32B32A32_FLOAT,
+                                                  D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+                                                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                  L"waterbank.trace (bed, slice*16+mip, depth, |dy|)");
+            m_traceUav = hal::Uav2D(*ctx.gpu, m_traceTex.res.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
+        }
+        if (m_traceK) {
+            BankCbData tcb = cb;
+            tcb.slotsC[3] = m_traceUav;
+            tcb.debugA[3] = traceFloor;
+            ctx.cmd->ComputeConstants(0, tcb);
+            ctx.cmd->Pipeline(m_traceK.Get());
+            ctx.cmd->Dispatch(kTileTexels / 16, kTileTexels / 16, static_cast<UINT>(tiles.size()));
+            m_traceTiles = tiles;
+            m_traceFloorUsed = traceFloor;
+        }
+    }
 
     auto toSrv = [&](TileAtlas2D& bank) {
         ctx.cmd->Barrier(bank.Res(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
@@ -794,6 +855,143 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
              kMips * kRingTiles * kRingTiles,
              tiles.size() * 2.0 * 64.0 * 2.0);
     stats = s;
+}
+
+// PHASE B0: THE BANK'S BED TRACE, read back (the header). Per ring: where it stands (its centre's
+// place), the bed's sources and mips by share of the ring's texels, the bed, the depth, and the
+// breaking clamp's hmax = 0.55 max(depth, 0.05) over the wet texels with the share it cut (|dy|
+// past hmax); then the centre texel of ring 0, the eye's own. Lens images: <label>_hmax.png (0 m
+// dark blue .. 4 m red, no tile black) and <label>_source.png (the cube violet, the z14 page green,
+// the z17 page red, a window by its rank's hue -- cyan, green, red, yellow, white for ranks 1..5 --
+// the corner lerp grey; darker by the mip read); the raw planes <label>_trace.f32 (3072 x 512 x 4).
+bool WaterBankLayer::TraceRead(Gpu& gpu, const std::string& dir, const std::string& label) {
+    if (!m_traceK || m_traceTiles.empty()) {
+        Log("[banktrace] %s: no trace was dispatched", label.c_str());
+        return false;
+    }
+    uint32_t pitch = 0;
+    const std::vector<uint8_t> raw = gpu.ReadbackTexture(m_traceTex, &pitch);
+    const uint32_t W = kMips * kRingTexels, H = kRingTexels;
+    std::vector<float> plane(size_t(W) * H * 4, 0.0f);
+    std::vector<uint8_t> have(size_t(W) * H, 0);
+    for (const BankTile& t : m_traceTiles) {
+        for (uint32_t y = 0; y < uint32_t(kTileTexels); ++y) {
+            const float* row = reinterpret_cast<const float*>(&raw[size_t(t.dstY + y) * pitch]);
+            for (uint32_t x = 0; x < uint32_t(kTileTexels); ++x) {
+                const size_t i = size_t(t.dstY + y) * W + (t.dstX + x);
+                for (int c = 0; c < 4; ++c) plane[i * 4 + c] = row[(t.dstX + x) * 4 + c];
+                have[i] = 1;
+            }
+        }
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    if (FILE* f = nullptr; fopen_s(&f, (dir + "/" + label + "_trace.f32").c_str(), "wb") == 0 && f) {
+        fwrite(plane.data(), sizeof(float), plane.size(), f);
+        fclose(f);
+    }
+    auto sourceName = [&](uint32_t slice) {
+        char b[48];
+        if (slice == 255u) return std::string("corner-lerp");
+        if (slice < 6u) snprintf(b, sizeof(b), "cube f%u", slice);
+        else if (slice == SurfaceFrame::kStandingSlice) snprintf(b, sizeof(b), "standing window");
+        else snprintf(b, sizeof(b), "window set %u r%u", (slice - 6u) / SurfaceFrame::kMaxRanks,
+                      (slice - 6u) % SurfaceFrame::kMaxRanks + 1u);
+        return std::string(b);
+    };
+    auto pct = [](std::vector<float>& v, double q) {
+        if (v.empty()) return 0.0f;
+        const size_t k = size_t(q * double(v.size() - 1));
+        std::nth_element(v.begin(), v.begin() + k, v.end());
+        return v[k];
+    };
+    Log("[banktrace] %s%s: %zu tiles traced", label.c_str(),
+        m_traceFloorUsed > 0.0f ? " [PLANTED: the rule's residency floor forced to mip 6]" : "",
+        m_traceTiles.size());
+    for (int m = 0; m < kMips; ++m) {
+        const double texel = m_baseTexelM * (1 << m);
+        const double cx = m_orgX[m] + 0.5 * kRingTexels * texel;
+        const double cz = m_orgZ[m] + 0.5 * kRingTexels * texel;
+        double lat = 0.0, lon = 0.0;
+        PlaceOfRing(cx, cz, lat, lon);
+        std::map<uint32_t, uint64_t> src;
+        std::vector<float> bed, depth, hmax;
+        uint64_t n = 0, cut = 0, wet = 0;
+        for (uint32_t y = 0; y < H; ++y) {
+            for (uint32_t x = uint32_t(m) * kRingTexels; x < uint32_t(m + 1) * kRingTexels; ++x) {
+                const size_t i = size_t(y) * W + x;
+                if (!have[i]) continue;
+                ++n;
+                const float* p = &plane[i * 4];
+                const uint32_t code = uint32_t((std::max)(p[1], 0.0f) + 0.5f);
+                ++src[code];
+                bed.push_back(p[0]);
+                depth.push_back(p[2]);
+                const float hm = 0.55f * (std::max)(p[2], 0.05f);
+                if (p[2] > 0.05f) {
+                    ++wet;
+                    hmax.push_back(hm);
+                }
+                if (p[3] > hm) ++cut;
+            }
+        }
+        if (!n) {
+            Log("[banktrace]   ring %d (%.1f m texels): centre %.5f N %.5f E -- no wet tile", m,
+                texel, lat, lon);
+            continue;
+        }
+        std::string s;
+        for (const auto& [code, c] : src) {
+            char b[96];
+            snprintf(b, sizeof(b), " %s m%u %.1f%%", sourceName(code / 16u).c_str(), code % 16u,
+                     100.0 * double(c) / double(n));
+            s += b;
+        }
+        Log("[banktrace]   ring %d (%.1f m texels): centre %.5f N %.5f E, %llu texels | the bed "
+            "read%s | bed p5 %+.2f p50 %+.2f p95 %+.2f m | depth p50 %.2f m | hmax over the wet "
+            "(%llu) p5 %.2f p50 %.2f p95 %.2f m | the clamp cut %.2f%% of the texels",
+            m, texel, lat, lon, static_cast<unsigned long long>(n), s.c_str(), pct(bed, 0.05),
+            pct(bed, 0.5), pct(bed, 0.95), pct(depth, 0.5), static_cast<unsigned long long>(wet),
+            pct(hmax, 0.05), pct(hmax, 0.5), pct(hmax, 0.95), 100.0 * double(cut) / double(n));
+    }
+    {   // ring 0's centre texel: the eye's own
+        const size_t i = size_t(H / 2) * W + kRingTexels / 2;
+        const float* p = &plane[i * 4];
+        const uint32_t code = uint32_t((std::max)(p[1], 0.0f) + 0.5f);
+        Log("[banktrace]   the eye's texel (ring 0 centre): %s, bed %+.3f m (%s m%u), depth %.3f "
+            "m, hmax %.3f m, |dy| before the clamp %.3f m",
+            have[i] ? "wet tile" : "NO TILE", p[0], sourceName(code / 16u).c_str(), code % 16u,
+            p[2], 0.55f * (std::max)(p[2], 0.05f), p[3]);
+    }
+    // The lens images.
+    std::vector<uint8_t> hm(size_t(W) * H * 4, 0), sc(size_t(W) * H * 4, 0);
+    const float ramp[5][3] = {{20, 30, 120}, {20, 190, 220}, {40, 200, 60}, {240, 220, 30},
+                              {230, 40, 30}};
+    const float hue[9][3] = {{0.60f, 0.25f, 1.00f}, {0.15f, 1.00f, 0.30f}, {1.00f, 0.30f, 0.10f},
+                             {0.10f, 0.75f, 1.00f}, {0.15f, 1.00f, 0.30f}, {1.00f, 0.30f, 0.10f},
+                             {1.00f, 0.92f, 0.15f}, {1.00f, 1.00f, 1.00f}, {0.5f, 0.5f, 0.5f}};
+    for (size_t i = 0; i < size_t(W) * H; ++i) {
+        hm[i * 4 + 3] = sc[i * 4 + 3] = 255;
+        if (!have[i]) continue;
+        const float* p = &plane[i * 4];
+        const float t = std::clamp(0.55f * (std::max)(p[2], 0.05f) / 4.0f, 0.0f, 1.0f) * 4.0f;
+        const int a = (std::min)(int(t), 3);
+        const float f = t - float(a);
+        for (int c = 0; c < 3; ++c) {
+            hm[i * 4 + c] = uint8_t(ramp[a][c] + (ramp[a + 1][c] - ramp[a][c]) * f);
+        }
+        const uint32_t code = uint32_t((std::max)(p[1], 0.0f) + 0.5f);
+        const uint32_t slice = code / 16u, mip = code % 16u;
+        int h = 8;   // the corner lerp
+        if (slice < 6u) h = 0;
+        else if (slice != 255u) h = 3 + int((slice - 6u) % SurfaceFrame::kMaxRanks);
+        const float b = 1.0f - float(mip) / 9.0f;
+        for (int c = 0; c < 3; ++c) sc[i * 4 + c] = uint8_t(hue[h][c] * b * 255.0f);
+    }
+    const std::wstring wdir(dir.begin(), dir.end()), wl(label.begin(), label.end());
+    SavePng(wdir + L"/" + wl + L"_hmax.png", hm.data(), W, H, W * 4, hm.size());
+    SavePng(wdir + L"/" + wl + L"_source.png", sc.data(), W, H, W * 4, sc.size());
+    return true;
 }
 
 }  // namespace ga

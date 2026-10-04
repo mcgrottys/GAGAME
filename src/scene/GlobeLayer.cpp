@@ -1,4 +1,5 @@
 #include "scene/GlobeLayer.h"
+#include "scene/Air.h"
 #include "core/ThreadManager.h"
 
 #include "hal/GpuProfiler.h"
@@ -786,10 +787,6 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
     return true;
 }
 
-// sin(1.4844) -- the old latitude clamp, moved onto the sine so the Mercator bound needs no
-// asin. Monotonic, so clamping either side of it is the same statement.
-static const double kSinLatClamp = std::sin(1.4844);
-
 namespace {
 
 // Step 5 (docs/PERF_EXPERIMENT.md): THE NODE WALK AS A PURE FUNCTION OF WalkParams.
@@ -1093,7 +1090,7 @@ void WalkNode(const WalkParams& wp, uint64_t& nodes, int face, int level, double
 // at once; the prefetch walk records them and the main thread replays them.
 template <class Emit>
 void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size, double arc,
-               double dist, Emit& emit) {
+               double dist, uint32_t seen, Emit& emit) {
     // M6e: this leaf's on-screen span decides which streamed-texture mip it WANTS; the
     // residency manager turns wants into loads/mappings on its own budgets. The CDLOD walk IS
     // the sampling feedback -- deterministic, no readback pass (the classic had to render one).
@@ -1142,101 +1139,25 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
     if (wp.colorT >= 0) emit(wp.colorT, f, m, tu0, tv0, tu1, tv1, nearW);
     if (wp.hgtT >= 0) emit(wp.hgtT, f, m, tu0, tv0, tu1, tv1, nearW);
     if (wp.maskT >= 0) emit(wp.maskT, f, m, tu0, tv0, tu1, tv1, nearW);
-    // M6f: the window's demand -- the node's corners in Mercator z14-pixel space,
-    // intersected with the window; its mip matches the same on-screen texel math against
-    // the window's OWN pyramid (mip 0 = z14). Color and height windows share the frame,
-    // so one rect feeds both.
-    if (wp.winT >= 0 || wp.hgtWinT >= 0) {
-        double mmin[2] = {1e18, 1e18}, mmax[2] = {-1e18, -1e18};
-        double s1min = 1e18, s1max = -1e18;
-        for (int cy = 0; cy < 3; ++cy) {
-            for (int cx = 0; cx < 3; ++cx) {
-                // M9y: THE SAME MERCATOR, WITHOUT asin AND tan.
-                //
-                // This ran nine times per leaf -- 653 leaves a frame, so ~29000
-                // transcendental calls -- to bound a node in z14 pixel space. Four of the
-                // five per corner were avoidable, because CubeDirD already hands back the
-                // unit direction and d[1] IS sin(latitude):
-                //
-                //   tan(pi/4 + phi/2) == (1 + sin phi) / cos phi == (1 + d1) / sqrt(1 - d1^2)
-                //
-                // so asin (to get phi) and tan (to undo it) cancel algebraically. What is
-                // left is one log and one sqrt. The latitude clamp moves onto the SINE,
-                // which is exactly equivalent because asin is monotonic on [-1, 1].
-                double d[3];
-                CubeDirD(face, u0 + size * cx * 0.5, v0 + size * cy * 0.5, d);
-                const double lon = std::atan2(d[2], d[0]);
-                const double n14 = 16384.0 * 256.0;
-                const double mx = (lon / 3.14159265358979 * 0.5 + 0.5) * n14;
-                // my is STRICTLY DECREASING in d[1], so its extremes over the corners are
-                // f() of the extremes of the sine -- track the sine here and evaluate the
-                // log exactly twice, after the loop, instead of nine times inside it.
-                // Monotonicity, not approximation: the same two numbers come out.
-                s1min = (std::min)(s1min, d[1]);
-                s1max = (std::max)(s1max, d[1]);
-                mmin[0] = (std::min)(mmin[0], mx);
-                mmax[0] = (std::max)(mmax[0], mx);
-            }
-        }
-        // The two log evaluations the loop above no longer does nine times each. Decreasing
-        // in the sine, so the largest sine gives the smallest y.
-        {
-            const double n14 = 16384.0 * 256.0;
-            const double lo = std::clamp(s1min, -kSinLatClamp, kSinLatClamp);
-            const double hi = std::clamp(s1max, -kSinLatClamp, kSinLatClamp);
-            const double k = n14 / (2.0 * 3.14159265358979);
-            mmin[1] = 0.5 * n14 - std::log((1.0 + hi) / std::sqrt(1.0 - hi * hi)) * k;
-            mmax[1] = 0.5 * n14 - std::log((1.0 + lo) / std::sqrt(1.0 - lo * lo)) * k;
-        }
-        const double du0 = (mmin[0] - wp.detOrg[0]) / wp.detSize;
-        const double dv0 = (mmin[1] - wp.detOrg[1]) / wp.detSize;
-        const double du1 = (mmax[0] - wp.detOrg[0]) / wp.detSize;
-        const double dv1 = (mmax[1] - wp.detOrg[1]) / wp.detSize;
-        if (du1 > 0.0 && dv1 > 0.0 && du0 < 1.0 && dv0 < 1.0) {
-            const double span = (std::max)(du1 - du0, dv1 - dv0);
-            const double texAtMip0W = span * 16384.0;
-            const int dmip = (std::max)(
-                0, static_cast<int>(std::ceil(
-                       std::log2((std::max)(texAtMip0W / (std::max)(px, 16.0), 1.0)))));
-            const float wu0 = static_cast<float>((std::max)(du0, 0.0));
-            const float wv0 = static_cast<float>((std::max)(dv0, 0.0));
-            const float wu1 = static_cast<float>((std::min)(du1, 1.0));
-            const float wv1 = static_cast<float>((std::min)(dv1, 1.0));
-            const uint32_t dm = static_cast<uint32_t>(dmip);
-            if (wp.winT >= 0) emit(wp.winT, wp.winFace, dm, wu0, wv0, wu1, wv1, nearW);
-            if (wp.hgtWinT >= 0) emit(wp.hgtWinT, wp.hgtWinFace, dm, wu0, wv0, wu1, wv1, nearW);
-            if (wp.maskT >= 0 && wp.blockN == 0) emit(wp.maskT, 6u, dm, wu0, wv0, wu1, wv1, nearW);
-        }
-        // M7f: the z17 DETAIL window rides the same node box, 8x finer frame.
-        if (wp.detWinT >= 0) {
-            const double eu0 = (mmin[0] * 8.0 - wp.det17Org[0]) / 16384.0;
-            const double ev0 = (mmin[1] * 8.0 - wp.det17Org[1]) / 16384.0;
-            const double eu1 = (mmax[0] * 8.0 - wp.det17Org[0]) / 16384.0;
-            const double ev1 = (mmax[1] * 8.0 - wp.det17Org[1]) / 16384.0;
-            if (eu1 > 0.0 && ev1 > 0.0 && eu0 < 1.0 && ev0 < 1.0) {
-                const double spanD = (std::max)(eu1 - eu0, ev1 - ev0);
-                const int emip = (std::max)(
-                    0, static_cast<int>(std::ceil(std::log2(
-                           (std::max)(spanD * 16384.0 / (std::max)(px, 16.0), 1.0)))));
-                const uint32_t em = static_cast<uint32_t>(emip);
-                const float du0f = static_cast<float>((std::max)(eu0, 0.0));
-                const float dv0f = static_cast<float>((std::max)(ev0, 0.0));
-                const float du1f = static_cast<float>((std::min)(eu1, 1.0));
-                const float dv1f = static_cast<float>((std::min)(ev1, 1.0));
-                emit(wp.detWinT, wp.detFace, em, du0f, dv0f, du1f, dv1f, nearW);
-                if (wp.maskT >= 0) emit(wp.maskT, 7u, em, du0f, dv0f, du1f, dv1f, nearW);
-            }
-        }
-    }
-    // HIERARCHY 4.17 commit 2: the standing blocks' demand, in each block's OWN uv: the node's
-    // nine points projected on the block's face plane in doubles (FaceWindow::TexelOf), the mip
-    // the same on-screen texel math against the block's own chain. A node reaching past that
-    // plane's horizon has no projection there and asks nothing of the block.
-    for (uint32_t b = 0; b < wp.blockN; ++b) {
-        const FaceWindow bw{wp.blockFace[b], wp.blockRung[b], wp.blockAx[b], wp.blockAy[b]};
+    // PHASE A2: EVERY WORLD THAT SEES THE LEAF ASKS IT OF ITS OWN WINDOWS (D5): the walk's worlds
+    // whose bit is in `seen`, each its slot's slices; a walk of no shared worlds asks for its own.
+    const uint32_t worlds = wp.worldCount > 0 ? uint32_t(wp.worldCount) : 1u;
+    for (uint32_t wi = 0; wi < worlds; ++wi) {
+    if (wp.worldCount > 0 && !(seen & (1u << wi))) continue;
+    const uint32_t ws = wp.worldCount > 0 ? wp.worlds[wi].slot : wp.walkSlot;
+    if (ws >= WalkParams::kSlots) continue;
+    // PHASE A1: THE EYE'S WINDOWS' DEMAND. The node's nine points on the window's face plane, in
+    // doubles, as global texels of its rung (FaceWindow::TexelOf about the face's corner); the
+    // part inside the box [origin, origin + 16384); the mip the same on-screen texel math against
+    // the window's chain, and none past its floor (mip 3: past it the rank above is asked, by the
+    // same law); the rectangle placed in the slice MODULO 16384 (Tenant.h's banner), so a box that
+    // straddles a multiple of 16384 asks two or four rectangles. A node reaching past that plane's
+    // horizon has no projection there and asks nothing of the window.
+    for (uint32_t b = 0; b < wp.wnK[ws]; ++b) {
+        const FaceWindow bw{wp.wnFace[ws][b], wp.wnRung[ws][b], 0, 0};
         double bn[3], ba[3], bb[3];
         CubeFaceAxes(bw.face, bn, ba, bb);
-        double bmin[2] = {1e18, 1e18}, bmax[2] = {-1e18, -1e18};
+        double bmin[2] = {1e300, 1e300}, bmax[2] = {-1e300, -1e300};
         bool behind = false;
         for (int cy = 0; cy < 3 && !behind; ++cy) {
             for (int cx = 0; cx < 3; ++cx) {
@@ -1248,10 +1169,10 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
                 }
                 double tx = 0.0, ty = 0.0;
                 bw.TexelOf(d, tx, ty);
-                bmin[0] = (std::min)(bmin[0], tx);
-                bmax[0] = (std::max)(bmax[0], tx);
-                bmin[1] = (std::min)(bmin[1], ty);
-                bmax[1] = (std::max)(bmax[1], ty);
+                bmin[0] = (std::min)(bmin[0], tx - double(wp.wnAx[ws][b]));
+                bmax[0] = (std::max)(bmax[0], tx - double(wp.wnAx[ws][b]));
+                bmin[1] = (std::min)(bmin[1], ty - double(wp.wnAy[ws][b]));
+                bmax[1] = (std::max)(bmax[1], ty - double(wp.wnAy[ws][b]));
             }
         }
         const double dim = double(Lattice::kFaceDim);
@@ -1259,15 +1180,39 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
         const double bspan = (std::max)(bmax[0] - bmin[0], bmax[1] - bmin[1]);   // texels, mip 0
         const int bmip = (std::max)(
             0, static_cast<int>(std::ceil(std::log2((std::max)(bspan / (std::max)(px, 16.0), 1.0)))));
-        const float bu0 = static_cast<float>((std::max)(bmin[0] / dim, 0.0));
-        const float bv0 = static_cast<float>((std::max)(bmin[1] / dim, 0.0));
-        const float bu1 = static_cast<float>((std::min)(bmax[0] / dim, 1.0));
-        const float bv1 = static_cast<float>((std::min)(bmax[1] / dim, 1.0));
-        const uint32_t slice = 6u + b, bm = static_cast<uint32_t>(bmip);
-        // The block's tiles carry the leaf's own distance as their weight, as the cube's do.
-        if (wp.colorT >= 0) emit(wp.colorT, slice, bm, bu0, bv0, bu1, bv1, nearW);
-        if (wp.maskT >= 0) emit(wp.maskT, slice, bm, bu0, bv0, bu1, bv1, nearW);
+        if (bmip > 3) continue;
+        const uint32_t slice = SurfaceFrame::WindowSlice(wp.wnSet[ws], b + 1), bm = static_cast<uint32_t>(bmip);
+        // Per axis the box's part, then that part in the slice: [a, a + len) modulo 16384.
+        double lo[2][2], hi[2][2];
+        int pieces[2];
+        const long long org[2] = {wp.wnAx[ws][b], wp.wnAy[ws][b]};
+        for (int ax = 0; ax < 2; ++ax) {
+            const double c0 = (std::max)(bmin[ax], 0.0), c1 = (std::min)(bmax[ax], dim);
+            const double a = double((org[ax] % Lattice::kFaceDim)) + c0;
+            const double s0 = a >= dim ? a - dim : a, s1 = s0 + (c1 - c0);
+            pieces[ax] = s1 > dim ? 2 : 1;
+            lo[ax][0] = s0 / dim;
+            hi[ax][0] = (std::min)(s1, dim) / dim;
+            lo[ax][1] = 0.0;
+            hi[ax][1] = (s1 - dim) / dim;
+        }
+        for (int py = 0; py < pieces[1]; ++py) {
+            for (int px2 = 0; px2 < pieces[0]; ++px2) {
+                const float r0 = static_cast<float>(lo[0][px2]), r1 = static_cast<float>(hi[0][px2]);
+                const float q0 = static_cast<float>(lo[1][py]), q1 = static_cast<float>(hi[1][py]);
+                // The window's tiles carry the leaf's own distance as their weight, as the cube's do.
+                if (wp.colorT >= 0) emit(wp.colorT, slice, bm, r0, q0, r1, q1, nearW);
+                if (wp.maskT >= 0) emit(wp.maskT, slice, bm, r0, q0, r1, q1, nearW);
+                // PHASE B2: the height on the same windows, at the same mip but never finer than its
+                // finest read (kCsHeightLodFloor: rung 9), and none past the floor.
+                if (wp.hgtT >= 0 && wp.hgtWindows) {
+                    const int hm = (std::max)(int(bm), wp.wnRung[ws][b] - 9);
+                    if (hm <= 3) emit(wp.hgtT, slice, uint32_t(hm), r0, q0, r1, q1, nearW);
+                }
+            }
+        }
     }
+    }   // the worlds
 }
 
 }  // namespace
@@ -1440,29 +1385,14 @@ void GlobeLayer::SeamTable() {
 // M12 step 4a: the surface, handed over once at assembly (compose/SurfaceFrame.h). The walk
 // and the mip-floor wants read the copies below (CaptureWalk captures them into every
 // WalkParams); the tangent frame's rows and the fill are read from the surface itself, because
-// the session writes the rows after this call. The values are the ones SetComposed and
-// SetPlanetRadius used to receive: the window is the colour tenant's page at winSlice, the
-// height window the height tenant's at hgtWinSlice, the detail page the colour tenant's at
-// detSlice; where a slice is undeclared (no tenant, or Mars's height cube without a page) the
-// window is -1 and its face the 0 the old `pages` test produced.
+// the session writes the rows after this call. PHASE B3: the tenants alone; their windows are
+// the eye's (SurfaceFrame::bound), read per walk.
 void GlobeLayer::SetSurface(const SurfaceFrame* s) {
     m_surface = s;
     m_radius = s->planetR;
     m_maskT = s->maskT;   // M9ay: the survey mask pages (same slices as the colour)
     m_colorT = s->colorT;
-    m_winT = s->winSlice != UINT32_MAX ? s->colorT : -1;   // M9ap: the z14 page, slice winSlice
-    m_winFace = s->winSlice != UINT32_MAX ? s->winSlice : 0u;
-    m_detFace = s->detSlice != UINT32_MAX ? s->detSlice : 0u;
-    m_hgtWinFace = s->hgtWinSlice != UINT32_MAX ? s->hgtWinSlice : 0u;
     m_hgtT = s->hgtT;
-    m_hgtWinT = s->hgtWinSlice != UINT32_MAX ? s->hgtT : -1;   // M9aq: the z14 height page
-    m_detOrg[0] = static_cast<double>(s->win.orgPxX);
-    m_detOrg[1] = static_cast<double>(s->win.orgPxY);
-    m_detSize = static_cast<double>(s->win.faceDim);
-    // M7f: the z17 detail page -- none where standing blocks replace it (HIERARCHY 4.17).
-    m_detWinT = s->detSlice != UINT32_MAX ? s->detT : -1;
-    m_det17Org[0] = static_cast<double>(s->det.orgPxX);
-    m_det17Org[1] = static_cast<double>(s->det.orgPxY);
 }
 
 // Step 5: everything the node walk reads, captured. SetView fills one for the real walk
@@ -1507,28 +1437,30 @@ GlobeLayer::WalkParams GlobeLayer::CaptureWalk(const Camera& cam, float viewport
     wp.normT = m_normT;
     wp.colorT = m_colorT;
     wp.hgtT = m_hgtT;
+    wp.hgtWindows = m_surface && m_surface->hgtWindows;
     wp.maskT = m_maskT;
-    wp.winT = m_winT;
-    wp.hgtWinT = m_hgtWinT;
-    wp.detWinT = m_detWinT;
-    wp.winFace = m_winFace;
-    wp.hgtWinFace = m_hgtWinFace;
-    wp.detFace = m_detFace;
-    wp.detOrg[0] = m_detOrg[0];
-    wp.detOrg[1] = m_detOrg[1];
-    wp.detSize = m_detSize;
-    static_assert(WalkParams::kBlocks == SurfaceFrame::kMaxBlocks,
-                  "a node asks of every block the key takes");
-    wp.blockN = uint32_t((std::min)(m_surface->blocks.size(), size_t(WalkParams::kBlocks)));
-    for (uint32_t i = 0; i < wp.blockN; ++i) {
-        const FaceWindow& b = m_surface->blocks[i];
-        wp.blockFace[i] = b.face;
-        wp.blockRung[i] = b.rung;
-        wp.blockAx[i] = b.anchorX;
-        wp.blockAy[i] = b.anchorY;
+    static_assert(WalkParams::kBlocks == SurfaceFrame::kMaxRanks, "a node asks of every rank");
+    static_assert(WalkParams::kSlots == SurfaceFrame::kWindowSlots && WalkParams::kSlots == kMaxLevels,
+                  "a window set a slot of the level table");
+    // PHASE A2: every slot's windows as the tenants are bound to them (SurfaceFrame::bound).
+    for (uint32_t s = 0; s < WalkParams::kSlots; ++s) {
+        // PHASE A3: the set slot s claimed this frame (SurfaceFrame::Assign).
+        const uint32_t set = s < m_surface->slotsLive ? m_surface->slotSet[s] : SurfaceFrame::kNoSet;
+        wp.wnSet[s] = set == SurfaceFrame::kNoSet ? 0u : set;
+        if (set == SurfaceFrame::kNoSet) {
+            wp.wnK[s] = 0;
+            continue;
+        }
+        const SurfaceFrame::EyeWindows& ew = m_surface->bound[set];
+        wp.wnK[s] = (std::min)(ew.K, uint32_t(WalkParams::kBlocks));
+        for (uint32_t i = 0; i < wp.wnK[s]; ++i) {
+            const hal::BlockBinding& b = ew.box[i];
+            wp.wnFace[s][i] = b.face;
+            wp.wnRung[s][i] = b.rung;
+            wp.wnAx[s][i] = static_cast<long long>(b.OrgX());
+            wp.wnAy[s][i] = static_cast<long long>(b.OrgY());
+        }
     }
-    wp.det17Org[0] = m_det17Org[0];
-    wp.det17Org[1] = m_det17Org[1];
     wp.probeCullFar = probeCullFar;
     return wp;
 }
@@ -1585,13 +1517,13 @@ void GlobeLayer::PredictWalk() {
         const auto t0 = std::chrono::steady_clock::now();
         uint64_t nodes = 0, leaves = 0;
         auto leaf = [&](int face, double u0, double v0, double size, double arc, double dist,
-                        uint32_t /*seen*/) {
+                        uint32_t seen) {
             ++leaves;
             auto emit = [&](int tenant, uint32_t f, uint32_t mip, float u0r, float v0r,
                             float u1r, float v1r, float nearW) {
                 out.push_back(WantRect{tenant, f, mip, u0r, v0r, u1r, v1r, nearW});
             };
-            LeafWants(wp, face, u0, v0, size, arc, dist, emit);
+            LeafWants(wp, face, u0, v0, size, arc, dist, seen, emit);
         };
         // Step 24: the same face order as the real walk -- one geometry, one order.
         for (int i = 0; i < 6; ++i) {
@@ -1660,7 +1592,7 @@ void GlobeLayer::WalkLevel(const WalkParams& wp, uint32_t slot, int sampler) {
                         float v1r, float nearW) {
             m_res->Want(sampler, tenant, f, mip, u0r, v0r, u1r, v1r, false, nearW);
         };
-        LeafWants(wp, face, u0, v0, size, arc, dist, emit);
+        LeafWants(wp, face, u0, v0, size, arc, dist, seen, emit);
         walkWantNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                    std::chrono::steady_clock::now() - wt0).count());
 
@@ -1959,6 +1891,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         if (angR < double(m_wp.pixAng) * 0.5) continue;
         WalkParams wp = m_wp;
         wp.worldCount = 0;
+        wp.walkSlot = slot;
         for (int i = 0; i < 3; ++i) wp.camPos[i] = L.cam[i];
         planetOf(L.cam, wp.camPlanet);
         {
@@ -2174,27 +2107,6 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     // ---- M6i: the composed channels + the one-world frame, through the ONE fill function
     // the terrain also uses -- the two layers cannot disagree about this math (M12 step 4a:
     // SurfaceFrame::Fill, the surface's own; the fingerprint below is the gate).
-    // M7g: THE MIP FLOOR. The top of every window pyramid (mips 4..7, ~85 tiles, a few
-    // MB) is wanted EVERY frame: high-altitude views sample one consistent capture instead
-    // of a residency-shaped patchwork of vintages, and a fast ascent can never outrun the
-    // loader into grey -- the coarse rung is always there to fall back on.
-    for (int fm = 4; fm <= 7; ++fm) {
-        if (m_winT >= 0) m_res->Want(m_sampler, m_winT, m_winFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
-        if (m_hgtWinT >= 0)
-            m_res->Want(m_sampler, m_hgtWinT, m_hgtWinFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
-        if (m_detWinT >= 0)
-            m_res->Want(m_sampler, m_detWinT, m_detFace, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
-        if (m_maskT >= 0 && (!m_surface || m_surface->blocks.empty())) {
-            m_res->Want(m_sampler, m_maskT, 6u, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
-            m_res->Want(m_sampler, m_maskT, 7u, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
-        }
-        // HIERARCHY 4.17 commit 2: the standing blocks' floor, whole, in the colour and the mask.
-        for (size_t i = 0; m_surface && i < m_surface->blocks.size(); ++i) {
-            const uint32_t slice = 6u + uint32_t(i);
-            if (m_colorT >= 0) m_res->Want(m_sampler, m_colorT, slice, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
-            if (m_maskT >= 0) m_res->Want(m_sampler, m_maskT, slice, fm, 0.0f, 0.0f, 1.0f, 1.0f, false);
-        }
-    }
     // M12 step 4g: the composed-surface rows are the renderer's one buffer (b2), filled by
     // the frame loop from this same SurfaceFrame; the globe's own fill and its step 0
     // fingerprint (equal to the frame loop's at every pose it was ever read) are gone.
@@ -2240,6 +2152,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
             fillLevel(static_cast<uint32_t>(li + 1), L.cam, L.sigma, L.Q, L.reliefExagg, L.sun,
                       L.bankSet, L.skyUp, L.skyDay);
         }
+        EyeInstruments();   // Phase A0: the levels' blocks logged, the two-worlds probe's rows
     }
     // THE VIEW'S WINDOWS: only where their levels are walked (the mesh path); on the fallback a
     // window with no world behind it would be a hole, so there are none.
@@ -2331,7 +2244,8 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     for (int i = 0; i < 3; ++i) m_skyCb.spaceSun[i] = m_spaceSun[i];
     m_skyCb.spaceSun[3] = 0.0f;
     if (m_drosteOn && m_msPath && !albedoLens) {
-        const double top = m_radius + 60000.0;   // Globe.hlsl kAtmTop
+        // The top of the planet's air (scene/Air.h), the same the sky's integral ends at.
+        const double top = m_radius + AirOf(m_streamMars ? "mars" : "earth").row[4][1];
         struct Cand { uint32_t slot; double dist; };
         Cand cand[kMaxLevels];
         int nc = 0;
@@ -2459,6 +2373,117 @@ void GlobeLayer::Render(const FrameContext& ctx) {
     ctx.cmd->GraphicsSrvAt(
         2, ctx.gpu->PushConstants(m_nodes.data(), m_nodes.size() * sizeof(NodeData)));
     ctx.cmd->Draw(32 * 32 * 6, static_cast<UINT>(m_nodes.size()), 0, 0);
+}
+
+
+// ---- Phase A0 (plan_eye_windows.md): THE INSTRUMENTS, no behaviour changed. -------------------
+// (1) Per slot of the frame's level table (slot 0 the camera, then m_levels), the cells its OWN eye
+// names -- rank k's cell is the eye's own address at rung 3k floored at 16384 texels (HIERARCHY
+// 4.4: X = u N, a ratio of two planes; cell = floor(X / 16384)), ranks 1..K with
+// K = 1 + ceil(-L / 3), L = log2 of the pixel's footprint at the eye's altitude over rank 1's
+// texel on the ground there (4.17's measure) -- beside what every slot is BOUND to today: the
+// surface's windows. Logged on the frames where
+// any of it changes.
+// (2) The two-worlds probe's rows (--ground-probe): G, and per slot G less that slot's eye in the
+// tangent axes, in doubles, so the lens reads G as each world addresses it.
+void GlobeLayer::EyeInstruments() {
+    memset(m_cb.probeG, 0, sizeof(m_cb.probeG));
+    memset(m_cb.probeP, 0, sizeof(m_cb.probeP));
+    for (int i = 0; i < 4; ++i) m_cb.probeX[i] = probeX[i];
+    if (!m_surface) return;
+    const SurfaceFrame& sf = *m_surface;
+    const double R = m_radius;
+    auto planetOf = [&](const double c[3], double out[3]) {
+        const double ry = R + c[1];
+        for (int i = 0; i < 3; ++i) out[i] = sf.up[i] * ry + sf.east[i] * c[0] + sf.north[i] * c[2];
+    };
+    const size_t slots = 1u + m_levels.size();
+    auto camOf = [&](size_t s) -> const double* { return s == 0 ? m_camPos : m_levels[s - 1].cam; };
+    ++m_eyeFrame;
+    std::string text, key;   // key: the cells and the binding only, so a moving eye logs when they change
+    char buf[256];
+    for (size_t s = 0; s < slots; ++s) {
+        double E[3];
+        planetOf(camOf(s), E);
+        const double rE = std::sqrt(E[0] * E[0] + E[1] * E[1] + E[2] * E[2]);
+        const double d[3] = {E[0] / rE, E[1] / rE, E[2] / rE};
+        // THE MEASURE, the law's own function (SurfaceFrame::RanksAt).
+        uint32_t face = 0;
+        double Lm = 0.0;
+        const int K = SurfaceFrame::RanksAt(E, R, double(m_wp.pixAng), &face, &Lm);
+        const double alt = rE - R;
+        snprintf(buf, sizeof(buf), "\n[eye-blocks]   slot %zu rel %d: face %u, alt %.0f m, K %d (L %.2f) --",
+                 s, s == 0 ? 0 : m_levels[s - 1].rel, face, alt, K, Lm);
+        text += buf;
+        key += "|";
+        for (int k = 1; k <= K; ++k) {
+            const FaceWindow w{face, 3 * k, 0, 0};
+            double X = 0.0, Y = 0.0;
+            w.TexelOf(d, X, Y);
+            const long long cx = static_cast<long long>(std::floor(X / Lattice::kFaceDim));
+            const long long cy = static_cast<long long>(std::floor(Y / Lattice::kFaceDim));
+            snprintf(buf, sizeof(buf), " r%d (%lld,%lld) org (%lld,%lld)", k, cx, cy,
+                     cx * Lattice::kFaceDim, cy * Lattice::kFaceDim);
+            text += buf;
+            key += buf;
+        }
+    }
+    // What each slot is bound to: its own windows (PHASE A2).
+    std::string bound;
+    for (size_t s = 0; s < slots && s < SurfaceFrame::kWindowSlots; ++s) {
+        const uint32_t set = sf.slotSet[s];
+        snprintf(buf, sizeof(buf), "\n[eye-blocks]   slot %zu bound (set %d):", s,
+                 set == SurfaceFrame::kNoSet ? -1 : int(set));
+        bound += buf;
+        if (set == SurfaceFrame::kNoSet) continue;
+        const SurfaceFrame::EyeWindows& ew = sf.bound[set];
+        for (uint32_t i = 0; i < ew.K; ++i) {
+            const hal::BlockBinding& b = ew.box[i];
+            snprintf(buf, sizeof(buf), " slice %u = r%d face %u box org (%llu,%llu);",
+                     SurfaceFrame::WindowSlice(set, i + 1), b.rung / 3, b.face,
+                     static_cast<unsigned long long>(b.OrgX()), static_cast<unsigned long long>(b.OrgY()));
+            bound += buf;
+        }
+        if (!ew.K) bound += " none (K 0: the cube)";
+    }
+    text += bound;
+    key += bound;
+    if (key != m_eyeLast) {
+        m_eyeLast = key;
+        Log("[eye-blocks] frame %llu, %zu slot(s):%s", static_cast<unsigned long long>(m_eyeFrame),
+            slots, text.c_str());
+    }
+    // (2) the probe's rows.
+    if (!groundProbeOn) return;
+    double Gt[3];   // G on the sphere, in the tangent axes, less (0, R, 0): geo's own coordinates
+    {
+        const double* G = groundProbeDir;
+        Gt[0] = R * (sf.east[0] * G[0] + sf.east[1] * G[1] + sf.east[2] * G[2]);
+        Gt[1] = R * (sf.up[0] * G[0] + sf.up[1] * G[1] + sf.up[2] * G[2]) - R;
+        Gt[2] = R * (sf.north[0] * G[0] + sf.north[1] * G[1] + sf.north[2] * G[2]);
+    }
+    const size_t filled = (std::min)(slots, size_t(kMaxLevels));
+    for (int i = 0; i < 3; ++i) m_cb.probeG[i] = static_cast<float>(groundProbeDir[i]);
+    m_cb.probeG[3] = static_cast<float>(filled);
+    for (size_t s = 0; s < filled; ++s) {
+        const double* c = camOf(s);
+        for (int i = 0; i < 3; ++i) m_cb.probeP[4 * s + i] = static_cast<float>(Gt[i] - c[i]);
+        m_cb.probeP[4 * s + 3] = 1.0f;
+    }
+    static std::string sLastProbe;
+    std::string t;
+    for (size_t s = 0; s < filled; ++s) {
+        const double* c = camOf(s);
+        snprintf(buf, sizeof(buf), " slot %zu p %.3f %.3f %.3f;", s, Gt[0] - c[0], Gt[1] - c[1],
+                 Gt[2] - c[2]);
+        t += buf;
+    }
+    if (m_eyeFrame % 30 == 1 || t.size() != sLastProbe.size()) {
+        Log("[ground-probe] frame %llu dir %.12f %.12f %.12f, %zu slot(s):%s",
+            static_cast<unsigned long long>(m_eyeFrame), groundProbeDir[0], groundProbeDir[1],
+            groundProbeDir[2], filled, t.c_str());
+    }
+    sLastProbe = t;
 }
 
 }  // namespace ga

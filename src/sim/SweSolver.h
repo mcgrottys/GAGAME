@@ -96,13 +96,21 @@ class SweSolver {
 public:
     static constexpr uint32_t kMaxSubsteps = 16;
 
-    // M9ar: bind the bed -- slice `slice` of the height PAGE tenant's array, with its residency
-    // map, so the solver reads the same megatexture the water shading and the globe read, at
-    // whatever mip is resident. Must be called before the first Step; there is no bed otherwise.
-    // M12 step 4b: `window` is the z14 lattice the page sits on (the surface's winH); its
-    // Rows() are the kernel's winA row.
-    void SetHeightPage(Gpu& gpu, hal::Resource heightArr, hal::Resource resMapArr,
-                       uint32_t slice, uint32_t mips, const Lattice& window);
+    // M9ar: bind the bed -- the height tenant's array with its residency map, so the solver reads
+    // the same megatexture the water shading and the globe read. Must be called before the first
+    // Step; there is no bed otherwise.
+    // PHASE B2 (D4): THE SOLVER'S DOMAIN IS A STANDING WINDOW (SurfaceFrame::StandAbout), held whole
+    // before the spin-up. The kernel reads its bed through that window's chain (one entry, rank 2:
+    // SurfaceFrame::StandingRows about the domain's centre, KernelRows' packing in `rows`), each cell's
+    // point formed from its offsets in latitude and longitude from the centre (small numbers: no
+    // large cancellation), at its own cell's grain. latC/lonC the centre (degrees), R the planet's.
+    struct BedWindow {
+        float rows[80];   // SurfaceFrame::KernelWindowRows, as KernelRows packs it
+        uint32_t slice = UINT32_MAX;
+        double latC = 0.0, lonC = 0.0, R = 0.0;
+    };
+    void SetBed(Gpu& gpu, hal::Resource heightArr, hal::Resource resMapArr, uint32_t mips,
+                const BedWindow& w);
     bool BedBound() const { return m_bedBound; }
 
     void Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
@@ -233,7 +241,7 @@ public:
     // trace reads the kernel's bed back and the line floods that (and the CPU grid's flood beside
     // it where the two differ); otherwise the CPU grid, and the line says the kernel's may differ.
     void LogHoldsWater(Gpu& gpu, bool traced);
-    uint32_t PageSlice() const { return static_cast<uint32_t>(m_cb.pageB[0]); }
+    uint32_t PageSlice() const { return m_bedSlice; }
 
     std::string stats;         // "swe 476t 31/54MB 16ss" for the title bar
     double SimTime() const { return m_simTime; }
@@ -306,8 +314,17 @@ private:
         // equiangular: lon0, lat1 (north edge), dlon, -dlat in degrees per texel), then the
         // Mercator page frame (org px x, org px y, 1/16384, world px at z14). Appended LAST.
         float geoLL[4];
-        float winA[4];
-        float pageB[4];   // M9ax: x = the z14 page's slice. APPENDED LAST (both sides).
+        // PHASE B2 (D4): THE STANDING WINDOW's address of a cell. standA = the first cell row's and
+        // column's offset from the centre (rad: lat1 - latC, lon0 - lonC), the row step (-dlat) and
+        // the column step (dlon), rad; standB = sin and cos of the centre's latitude, R, the cell's
+        // grain (m). Then the window's rows (WindowRows.hlsli). APPENDED AT THE END on both sides.
+        float standA[4];
+        float standB[4];
+        float hwU[20];
+        float hwV[20];
+        float hwW[20];
+        float hwO[12];
+        uint32_t hwS[8];
         // M9h: the GoMOFS ingest rows. APPENDED AT THE END on both sides -- a same-size
         // insertion in the middle passes the byte-parity gate and silently offsets every later
         // row (the lesson WaterBank.hlsl:44 records, nearly repeated here).
@@ -341,7 +358,8 @@ private:
     float m_westQ = 0;                 // west transport target, m^3/s (+east)
     std::vector<float> m_westBed;      // exterior-column bed depths: the live section area
     SweConfig m_cfg;                   // as Init was given it (the holds-water line)
-    bool m_bedBound = false;           // M9ar: SetHeightPage has run
+    bool m_bedBound = false;           // M9ar: SetBed has run
+    uint32_t m_bedSlice = UINT32_MAX;  // PHASE B3: the standing window's slice (was the z14 page's)
     // The bed trace's own binding (TraceBed): the height tenant as SetHeightPage bound it, and the
     // kernel, table and target built on its first call -- nothing of it exists in a run without.
     hal::Resource m_bedArr = nullptr, m_bedRes = nullptr;
