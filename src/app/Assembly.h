@@ -114,7 +114,6 @@ struct Assembly {
     // and nothing else keeps a reference: a Tenant copies its lattices, the frame loop dies
     // first, the tools take it by reference for the length of a call.
     SurfaceFrame surface;
-    GpuTexture surfaceDirectory;   // HIERARCHY 4.17 commit 4: the blocks' directory (Walk.hlsli)
     RendererDesc rd;
     Renderer renderer;
     ExitMark exitRenderer{"assembly: ~Renderer -- the layers it owns and their atlases' heaps"};
@@ -156,6 +155,7 @@ struct Assembly {
     // every reader of a solver's fields reads it by these.
     BathyModel bathySwe, bathyBostonSwe;
     SweSolver swe;
+    SweSolver::BedWindow bedWindow{};   // PHASE B2 (D4): the standing window's rows, for the weather manager
     double riverQ = 70.0;
     GulfLayer* gulf = nullptr;
     WaterSceneConfig waterScene;
@@ -204,11 +204,9 @@ struct Assembly {
     GisLayer* gisLayer = nullptr;
 
     Exchange exchange;       // M6j: the plugin bus -- named GA buffer channels
-    // M12 step 4a: the z14 window origin and the z17 detail origin are `surface`'s
-    // (SurfaceFrame::Merrimack writes them down, once); the ids below are the tenants'.
-    int colorCubeT = -1, winTenant = -1, hgtTenant = -1, hgtWinTenant = -1;
+    // The tenants' ids (PHASE B3: their windows are the eye's, SurfaceFrame::bound).
+    int colorCubeT = -1, hgtTenant = -1;
     int maskTenant = -1;   // M9ay: the survey mask pages (gis.landsea's tree)
-    int detTenant = -1;   // M7f: z17 detail color window
     int colCh = -1;   // color channel id (hgtCh registered above the solver, M6w)
     // M9am: the megatexture graph and its on-disk tile cache. Declared HERE, beside the
     // tenants that hold providers into them, so they cannot die first.
@@ -250,7 +248,7 @@ struct Assembly {
     // M9ae: the composed cache's index (one entry per TILE), and M9ag: the NVMe -> GPU reader.
     // Both were function-local statics inside main()'s residency block; as the last members
     // they now destruct first, before gpu (the statics used to outlive the device).
-    TileIndex idxColorCube, idxColorWin, idxColorDet, idxHeightCube;
+    TileIndex idxColorCube, idxHeightCube;
     TileStream tileStream;
     // The last member dies first: the trail's first line inside ~Assembly.
     ExitMark exitStream{"assembly destructs, last member first: ~TileStream -- the DirectStorage "

@@ -300,12 +300,6 @@ const Schema& StreamingSchema() {
                   "this times their measure, so a tile gives its slot up only to one larger on the "
                   "screen by more (HIERARCHY 4.19); 1 is the order without it",
                   R)
-            .Bind("faceWindows", p.faceWindows,
-                  "standing blocks of the pyramid for the colour and the mask in place of their "
-                  "Mercator windows: lon,lat,rung entries joined by ';', each the block of that "
-                  "rung holding the point (logged); auto = the blocks the `sources` ask for, "
-                  "rank 1 down to each one's grain over its footprint; empty = the Mercator windows",
-                  R)
             .Bind("treeRoot", p.treeRoot,
                   "the folder the tile trees live in; a scratch folder keeps a tool's paints and "
                   "packs out of the real cache",

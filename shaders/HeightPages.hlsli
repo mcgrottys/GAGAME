@@ -1,39 +1,23 @@
 // ================================================================================================
-//  HeightPages.hlsli -- M9ax: THE BED FROM THE HEIGHT PAGE TENANT, FOR COMPUTE.
+//  HeightPages.hlsli -- M9ax: THE BED FROM THE HEIGHT PAGE TENANT, FOR COMPUTE. PHASE B3: on the
+//  windows of the pyramid alone.
 //
-//  The pixel stage resolves the planet's height with ComposedHeightPages (Compose.hlsli): the
-//  z14 Mercator page by containment where its resident texel is at least as fine as the cube's,
-//  else the cube face by direction, the residency map clamping the mip. The three kernels that
-//  simulate on the bed -- the SWE solver, the churn, the wave bank -- each carried their own copy
-//  of HALF that rule: the page only, with a wall / -30 m / a CPU corner lerp outside it
-//  (AUDIT_WATER item 5, "the keyhole"). This is the whole rule, once, for any stage: manual
-//  bilinear Loads, because a bindless SampleLevel outside the pixel stage returns zero
-//  (ALGEBRA priors 1), on the tenant's full array view (slices 0..5 the cube faces, 6 the z14
-//  page) and its residency-map array. M12 step 4e: the reads are PageSample.hlsli's contract
-//  (PageHaveLoad, PageLoad, PageWins) -- the same law the pixel stage binds its views to.
-//
-//  Frames (GaAst: height.pages -> {swe.solver, churn.kernel, water.bank}, merc-uv, no flip):
-//  lat/lon -> Mercator px -> page uv is PageUvLatLon, the lat/lon spelling of the window frame
-//  (measured NOT bit-identical to PageUv of the same direction: PageSample.hlsli's banner);
-//  lat/lon -> direction -> cube face uv is ComposeCubeDir's inverse (the D3D cube convention
-//  the tiles were painted in).
+//  The three kernels that simulate on the bed -- the SWE solver, the churn, the wave bank -- read
+//  the planet's height by one rule, HpHeightChain below: the cube by direction, then the ranks of
+//  the kernel's own chain of windows (its rows, WindowRows.hlsli), each at the kernel's own grain,
+//  by manual bilinear Loads (a bindless SampleLevel outside the pixel stage returns zero: ALGEBRA
+//  priors 1). The pixel stage's form is Compose.hlsli's ComposedHeightChain. The Mercator page this
+//  file read (HpHeightAt, PageUvLatLon, the z14 constants) is deleted.
 // ================================================================================================
 #ifndef HEIGHT_PAGES_HLSLI
 #define HEIGHT_PAGES_HLSLI
 
 #include "PageSample.hlsli"
 
-// M12 step 4f: the two ground resolutions are the lattices' own (Lattice::GroundRes(0):
-// kMercCirc / (4 faceDim) for the cube, kMercCirc / world px at z14 for the page), folded at
-// compile time from the constants this file declares -- the kernels' rows carry no ground and
-// nothing else changes -- and bit-identical to the floats the surface's gCsGround row carries
-// (a division by a power of two commutes with rounding: 0x4418dfc2 and 0x4118dfc2 both ways).
-// Exact, the page's mip 6 equals the cube's mip 0 and PageWins takes the page there, where
-// 611.0f and 9.55f (9.55 * 64 = 611.2 > 611) took the cube.
+// The cube's ground resolution, the lattice's own (Lattice::GroundRes(0): kMercCirc / (4 faceDim)),
+// folded at compile time; a rank's is it over 8^k (HpRankGround).
 static const float kHpMercCirc = 40075016.686f;   // Web-Mercator equator, m (Lattice::kMercCirc)
-static const float kHpWorldPxZ14 = 4194304.0f;    // (1 << 14) * 256 px (Lattice::WorldPx at z14)
-static const float kHpCubeTexelM = kHpMercCirc / (4.0f * kPageDim);   // 611.496.. (was 611.0f)
-static const float kHpPageTexelM = kHpMercCirc / kHpWorldPxZ14;        // 9.5546.. (was 9.55f)
+static const float kHpCubeTexelM = kHpMercCirc / (4.0f * kPageDim);   // 611.496..
 static const float kHpMaxMip = 6.0f;           // 7 mips
 
 // THE BED TRACE (an instrument: SweSolver::TraceBed, shaders/Swe.hlsl CsSweBedTrace). Compiled
@@ -43,8 +27,8 @@ static const float kHpMaxMip = 6.0f;           // 7 mips
 // are the expression they wrap and nothing: the solver, the churn and the bank read the bed they
 // always read.
 #ifdef HP_TRACE
-static float gHpTraceMip = -1.0f;    // the mip the last HpHeightAt read at
-static uint gHpTraceSlice = 0u;      // ...and the slice: a cube face 0..5, or the page's
+static float gHpTraceMip = -1.0f;    // the mip the last read chose
+static uint gHpTraceSlice = 0u;      // ...and the slice: a cube face 0..5, or a window's
 static float gHpTraceFloor = 0.0f;   // a residency floor the trace imposes; 0 = the map's own
 #define HP_HAVE(have) max((have), gHpTraceFloor)
 #define HP_CHOSE(mip, slice) gHpTraceMip = (mip); gHpTraceSlice = (slice)
@@ -55,32 +39,88 @@ static float gHpTraceFloor = 0.0f;   // a residency floor the trace imposes; 0 =
 
 // HpCubeFace (direction -> D3D cube face and its uv) lives in PageSample.hlsli, included above.
 
-// The planet's height (m NAVD) at lat/lon (degrees). winA = the page's lattice row (org px x,
-// org px y, 1/kPageDim, world px at z14: Lattice::Rows); winSlice the page's slice; pageMipMin
-// the coarsest-allowed page mip a consumer wants to be held to (the bank rings ask their own
-// grain -- mip 0 for the fine rings; the solver 0).
-float HpHeightAt(Texture2DArray<float4> arr, Texture2DArray<float4> res, float latDeg,
-                 float lonDeg, float4 winA, uint winSlice, float pageMipMin) {
-    const float latR = latDeg * 0.01745329252f;
-    const float lonR = lonDeg * 0.01745329252f;
-    const float cl = cos(latR);
-    const float3 dir = float3(cl * cos(lonR), sin(latR), cl * sin(lonR));
+// ---- PHASE B1 (out/integration/plan_phase_b.md): THE BED BY THE CHAIN, the kernels' block form.
+// The Mercator page's rule with the page replaced by the windows of the pyramid (HIERARCHY 4.1): the
+// cube by direction, then the ranks of the kernel's own chain, coarsest first -- each read at the
+// level of the kernel's own grain (texelM, metres: the bank's ring, the churn's texel, the solver's
+// cell): the finest level of the rank no finer than that grain, m_k = max(floor(log2(texelM /
+// g_k)), 0), g_k the rank's mip-0 ground -- and taken where it is resident to that level or finer
+// and at least as fine as the ground held (PageWins). A grain past a window's floor (the coarsest
+// mip a window holds, HP_WINDOW_FLOOR) leaves the point to the rank above, which holds that ground
+// at its own finer mips, and every finer rank with it. One bilinear is paid, at the winner, by
+// Loads with the taps modulo the page (priors 1: no sampler outside the pixel stage).
+//
+// The chain wc is Window.hlsli's, found by the kernel at ITS point from ITS rows (the kernel's
+// cbuffer carries HP_WINDOW_ROWS_DECL; HP_WINDOW_ROWS turns the chain's accessors onto them) --
+// the address is a ratio of planes at the kernel's own point, as every reader's is.
+#ifndef HP_WINDOW_FLOOR
+#define HP_WINDOW_FLOOR 3.0f
+#endif
+// The reads, as hooks: the tenant's own by default; the selftest's synthetic tenant names its own
+// (TileBed.hlsl), so one body is held against its C++ twin.
+#ifndef HP_FETCH_WIN
+#define HP_FETCH_WIN(arr, uv, slice, mip) PageLoadWrap(arr, uv, slice, mip)
+#define HP_HAVE_WIN(res, uv, slice) PageHaveLoadWrap(res, uv, slice)
+#define HP_FETCH_CUBE(arr, uv, face, mip) PageLoad(arr, uv, face, mip)
+#define HP_HAVE_CUBE(res, uv, face) PageHaveLoad(res, uv, face)
+#endif
+// The rows a kernel carries for its chain: WindowRows.hlsli's HP_WINDOW_ROWS_DECL, the last rows of
+// its cbuffer.
+#ifdef HP_WINDOW_ROWS
+#define WIN_UV(s, i, p) PageTexelUv(p, gHwU[i], gHwV[i], gHwW[i])
+#define WIN_OFF(s, i) ((((i) & 1u) != 0u) ? gHwO[(i) >> 1].zw : gHwO[(i) >> 1].xy)
+#define WIN_SLICE(s, i) (((i) < 4u) ? gHwS[0][(i)] : gHwS[1].x)
+#define WIN_K(s) gHwS[1].y
+// PHASE B2: the rank of the chain's first entry, less one (0 for the eye's windows; a standing
+// window's chain starts at its own rank).
+#define HP_WIN_RANK0 gHwS[1].z
+#include "Window.hlsli"
+#endif
+// A rank's mip-0 ground: the pyramid's nominal texel at rung 3 (k + 1) (BlockBinding::GroundRes(0)).
+float HpRankGround(uint k) { return kHpCubeTexelM / exp2(3.0f * float(k + 1u)); }
+#ifndef HP_WIN_RANK0
+#define HP_WIN_RANK0 0u
+#endif
+#ifdef GA_WINDOW_HLSLI
+// The rule, for a tenant with the cube (the height) or without it (the exposure: window slices
+// alone, PHASE B2's D2 -- where no window answers, `none`).
+float HpChainRead(Texture2DArray<float4> arr, Texture2DArray<float4> res, float3 dir, WalkChain wc,
+                  float texelM, bool cube, float none) {
     float2 cuv;
     const uint face = HpCubeFace(dir, cuv);
-    const float haveC = clamp(round(HP_HAVE(PageHaveLoad(res, cuv, face))), 0.0f, kHpMaxMip);
-    // The page, by containment, where it is at least as fine as the cube. Two residency
-    // reads decide; only ONE bilinear is paid (the bank kernel runs this per texel per ring).
-    const float2 wuv = PageUvLatLon(latDeg, lonDeg, winA);
-    if (all(wuv > 0.0f) && all(wuv < 1.0f)) {
-        const float haveW =
-            clamp(round(HP_HAVE(PageHaveLoad(res, wuv, winSlice))), pageMipMin, kHpMaxMip);
-        if (PageWins(haveC, haveW, float2(kHpCubeTexelM, kHpPageTexelM))) {
-            HP_CHOSE(haveW, winSlice);
-            return PageLoad(arr, wuv, winSlice, haveW);
+    const float haveC = clamp(round(HP_HAVE(HP_HAVE_CUBE(res, cuv, face))), 0.0f, kHpMaxMip);
+    float ground = cube ? PageGroundM(kHpCubeTexelM, haveC) : 3.0e38f;
+    uint sl = face;
+    float2 uv = cuv;
+    float mip = haveC;
+    bool win = false;
+    [unroll] for (uint k = 0; k < GA_BLOCK_RANKS; ++k) {
+        if (k >= wc.n) break;
+        const float g0 = HpRankGround(k + HP_WIN_RANK0);
+        const float want = max(floor(log2(max(texelM, 1e-6f) / g0)), 0.0f);
+        if (want > HP_WINDOW_FLOOR) break;
+        const uint s = WalkSlice(wc, k);
+        const float2 u = WalkUv(wc, k);
+        const float haveB = round(HP_HAVE(HP_HAVE_WIN(res, u, s)));
+        if (haveB > HP_WINDOW_FLOOR) continue;
+        const float m = max(haveB, want);
+        const float gB = PageGroundM(g0, m);
+        if (PageWins(gB, ground)) {
+            sl = s;
+            uv = u;
+            mip = m;
+            ground = gB;
+            win = true;
         }
     }
-    HP_CHOSE(haveC, face);
-    return PageLoad(arr, cuv, face, haveC);
+    HP_CHOSE(win || cube ? mip : -1.0f, sl);
+    if (win) return HP_FETCH_WIN(arr, uv, sl, mip);
+    return cube ? HP_FETCH_CUBE(arr, cuv, face, haveC) : none;
 }
+float HpHeightChain(Texture2DArray<float4> arr, Texture2DArray<float4> res, float3 dir, WalkChain wc,
+                    float texelM) {
+    return HpChainRead(arr, res, dir, wc, texelM, true, 0.0f);
+}
+#endif
 
 #endif

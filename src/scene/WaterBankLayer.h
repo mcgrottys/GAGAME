@@ -31,6 +31,7 @@
 
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace ga {
 
@@ -95,20 +96,33 @@ public:
     // M7k --dump-fibers: export the three bank planes as PNGs + validate the value
     // ranges against the AST's declarations -- the hypervisor for whole fields.
     void DumpFibers(Gpu& gpu);
+    // PHASE B2: THE WINDOWS THE RINGS STAND IN, set each frame by the frame loop: the rows of the
+    // level whose eye the rings stand about (its slot's, SurfaceFrame::RowsOf), that eye (planet
+    // frame) and the tangent axes the rows were pulled into. No rows (K 0): the cube alone.
+    void SetWindows(const SurfaceFrame::ChainRows& rows, const double eye[3]) {
+        SurfaceFrame::KernelRows(rows, m_hw);
+        for (int i = 0; i < 3; ++i) m_hwEye[i] = eye[i];
+        m_hwOn = rows.K > 0;
+    }
     int injectPattern = 0;   // M7m/M7n: 1 = bank world card, 2 = cascade-edge card
-    // M7q: the composed height WINDOW, per texel, in the kernel -- the corner-lerp bed
-    // quantized depth to ~600 m patches and the M7p physics inherited the blockiness (the
-    // data lens showed breaking bands cutting at tile edges; the user called it).
-    // M9aq: `slice` != ~0 means srv/resMapSrv are Texture2DArray views of the height PAGE
-    // tenant and the window is that slice; ~0 is the old single-face window.
-    // M12 step 4b: `window` is the z14 lattice the page sits on (the surface's winH); its
-    // Rows() are the kernel's winA row.
-    void SetHeightWindow(uint32_t srv, uint32_t resMapSrv, const Lattice& window,
-                         uint32_t slice = 0xFFFFFFFFu) {
+    // PHASE B0 (out/integration/plan_phase_b.md): THE BANK'S BED TRACE (--bank-trace). With traceOn
+    // every fill is followed by the same kernel compiled with HP_TRACE and BANK_TRACE, which writes
+    // in place of the banks what the fill read and decided per texel -- the bed, the slice and mip
+    // the bed's rule chose (or the corner lerp), the depth, the vertical excursion before the
+    // breaking clamp -- into a texture of its own. TraceRead reads the last one back and says it per
+    // ring: where the rings stand, the bed's sources and mips, the bed, and hmax = 0.55 depth (the
+    // clamp) with the share of texels it cut; two lens images (hmax, the source) and the raw planes
+    // go to `dir`. traceFloor plants a residency floor under the rule's reads (the instrument must
+    // then call the bed coarse). An instrument: off, nothing is compiled, dispatched or read.
+    bool traceOn = false;
+    float traceFloor = 0.0f;
+    bool TraceRead(Gpu& gpu, const std::string& dir, const std::string& label);
+    // M7q: the composed height, per texel, in the kernel -- the corner-lerp bed quantized depth
+    // to ~600 m patches. PHASE B3: the height tenant's array views (its cube and its windows); the
+    // rows are SetWindows'.
+    void SetHeightWindow(uint32_t srv, uint32_t resMapSrv) {
         m_hgtWinSrv = srv;
         m_hgtWinResSrv = resMapSrv;
-        m_hgtWinSlice = slice;
-        m_hgtWin = window;
     }
     // M12 step 4b: the surface, for the world.flat chart the geoA row is cast from
     // (SurfaceFrame::FlatRows). Must precede the first Render.
@@ -176,7 +190,6 @@ private:
         float peakDir[4];     // M7p: peak propagation dir xy, z valid (gPeakDir)
         uint32_t slotsD[4];   // M7q: height window SRV, its residency-map SRV
         float geoA[4];        // world->latlon: orgLat, orgLon, 1/mPerLat, 1/mPerLon
-        float winA[4];        // window: org px x, org px y, 1/sizePx, full-world px (z14)
         uint32_t slotsE[4];   // M8 foamlaw: cascade DERIV SRVs x3 (Jacobian foam union)
         float rmsRef[4];      // M8: unit-sea rms envelope per band (crest gate / excess)
         uint32_t waveU[4];    // M9bc wavefield: page tenant SRV, its residency SRV, nUsed, env plane
@@ -213,6 +226,14 @@ private:
         // by this frame (NAVD m), which its deviation is measured from. APPENDED at the end on
         // both sides, per the layout law.
         float sweB[4];
+        // PHASE B2: THE WINDOWS THE RINGS STAND IN (WindowRows.hlsli's HP_WINDOW_ROWS_DECL), the
+        // rows of the level whose eye the rings stand about -- SurfaceFrame::KernelRows' packing,
+        // appended at the END on both sides.
+        float hwU[20];
+        float hwV[20];
+        float hwW[20];
+        float hwO[12];
+        uint32_t hwS[8];
     };
     struct BankTile {
         float orgXZ[2];
@@ -244,6 +265,12 @@ private:
         float chart[4][16];   // per chart: u0(c0).xy, u0(c1).xy, u0(c2).xy, J(4), rot(4), 2 spare
         float bandX[4];       // edgeX at the origin, d/dex, d/dez, the band in metres
         float bandY[4];       // edgeY at the origin, d/dex, d/dez, charts valid (0 = none)
+        // PHASE B2: the tile's point for the windows' address (WaterBank.hlsl BankTile): the
+        // ground point at the tile's origin relative to the rows' eye in the tangent axes (w = 1
+        // valid), and its derivative along the ring's x and z at the tile's centre.
+        float pointA[4];
+        float pointX[4];
+        float pointZ[4];
     };
 
     void ReanchorRing(Gpu& gpu, int m, double camX, double camZ);
@@ -263,8 +290,6 @@ private:
     Compositor* m_comp = nullptr;
     int m_hgtCh = -1;
     uint32_t m_hgtWinSrv = 0xFFFFFFFFu, m_hgtWinResSrv = 0xFFFFFFFFu;
-    uint32_t m_hgtWinSlice = 0xFFFFFFFFu;
-    Lattice m_hgtWin;   // M12 step 4b: the z14 height window the page sits on (winA = Rows)
     const SurfaceFrame* m_surface = nullptr;   // M12 step 4b: the world.flat chart (geoA)
     uint64_t m_cbFp = 0;   // M12 step 4b: the [kernel] waterbank cb fingerprint's last value
     const GlobeModel* m_globe = nullptr;
@@ -282,6 +307,17 @@ private:
                                              // churn joins it next)
     hal::RootSignatureRef m_rs;
     hal::Pso m_fill;
+    // PHASE B0: the bank's bed trace (traceOn above): its kernel, its target and that target's
+    // bindless UAV, and the tile list of the fill it last traced.
+    hal::Pso m_traceK;
+    GpuTexture m_traceTex;
+    uint32_t m_traceUav = 0xFFFFFFFFu;
+    std::vector<BankTile> m_traceTiles;
+    float m_traceFloorUsed = 0.0f;
+    ShaderCompiler* m_sc = nullptr;
+    SurfaceFrame::KernelWindowRows m_hw{};   // PHASE B2: SetWindows
+    double m_hwEye[3] = {};
+    bool m_hwOn = false;
     float m_baseTexelM = 4.8f;
     float m_orgX[kMips] = {}, m_orgZ[kMips] = {};
     bool m_orgValid[kMips] = {};

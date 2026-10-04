@@ -45,24 +45,13 @@ float CsHave2D(uint mapSrv, float2 uv) {
     return max(max(g.x, g.y), max(g.z, g.w)) * 255.0f / 16.0f;
 }
 
-// ONE LAW FOR EVERY READ (plan_address.md): a Mercator window is addressed by a POINT p, the ground
-// point relative to the camera's own eye in the tangent axes -- the frame VsOut.geo lives in -- and
-// its uv is the eye's px, taken in doubles on the CPU (gCsEyePx), plus the chart's exact difference
-// from the eye, formed from p alone (PageMercAbout). Every window realization (colour, height,
-// mask, exposure) shares the z14 frame and the z17 detail its own, so their texels describe the
-// same ground by construction, as they did through gCsMerc.
-// The point: a fragment or vertex of the camera's own level has geo (the level-0 records' doubles
-// plus small offsets); a stage or a level with only a direction makes the point from it, at the
-// direction's grain (0.43 texel at z17, uv_precision.py) and no better -- CsPointOfDir.
+// THE POINT a window is addressed by: the ground point relative to the level's eye in the tangent
+// axes -- the frame VsOut.geo lives in. A stage with only a direction makes it from that, about the
+// camera's eye, at the direction's grain (0.43 texel at rung 9, uv_precision.py) and no better --
+// CsPointOfDir. (PHASE B3: the Mercator windows and their anchor rows are deleted.)
 float3 CsPointOfDir(float3 dir) {
     return (CsToTangent(dir) * gCsF.w - float3(0.0f, gCsF.w, 0.0f)) - gCsEyeT.xyz;
 }
-float2 CsMercAt(float3 p) {
-    return PageMercAbout(p, gCsEyeA, gCsEyeE.xyz, gCsEyeN.xyz, gCsEyeU.xyz);
-}
-float2 CsWindowUvAt(float3 p) { return PageUvAbout(CsMercAt(p), gCsEyePx.xy, gCsEyeE.w); }
-// ...and the z17 detail window's twin, from its own origin (no longer the z14 uv scaled).
-float2 CsDetailUvAt(float3 p) { return PageUvAbout(CsMercAt(p), gCsEyePx.zw, gCsEyeN.w); }
 
 // The planet's composed color along a PLANET-frame unit radial. Residency maps sample
 // BILINEAR so mip seams ramp instead of snapping (M6h); the window overlay feathers over the
@@ -80,14 +69,11 @@ float CsHavePage(uint mapSrv, float2 uv, uint slice) {
 float CsHaveCubeArr(uint mapSrv, float3 dir) {
     return PageHaveCube(gTexCubeArr[mapSrv], sLinearClamp, dir);
 }
-// The ground texel (metres) at mip 0 of the three rungs -- the cube, the z14 window, the z17
-// detail: the surface's own row (gCsGround, SurfaceFrame::Fill from Lattice::GroundRes(0):
-// 611.496.., 9.5546.., 1.1943..), M12 step 4f, where the literals 611 / 9.55 / 1.19 stood.
-// Exact, the page's mip 6 IS the cube's mip 0 and the z17's mip 3 the z14's mip 0, and
-// PageWins takes the page there.
+// The ground texel (metres) at the cube's mip 0: the surface's own row (gCsGround.x, SurfaceFrame::Fill
+// from Lattice::GroundRes(0): 611.496..); a rank's is CsBlockGround.
 float3 CsGroundM() { return gCsGround.xyz; }
-// The height ladder's lod floor (cube lod): the finest rung's mip 0, the z17 page (1.1943 m =
-// 611.496 m / 2^9). Every reader that asks for the finest resident height asks for this.
+// The height ladder's lod floor (cube lod): rung 9's mip 0 (1.1943 m = 611.496 m / 2^9), rank 3's,
+// where the z17 page stood. Every reader that asks for the finest resident height asks for this.
 static const float kCsHeightLodFloor = -9.0f;
 
 // M9ap: THE PAGES PATH. One texture, pages selected by CONTAINMENT and by what is actually
@@ -99,47 +85,60 @@ static const float kCsHeightLodFloor = -9.0f;
 // ground held -- "at least as fine" (the height path's spelling), which with these literals is
 // the strict `<` this path used to write: no two rungs' literal grounds are ever equal in float
 // (9.55 * 64 = 611.2, not 611; 1.19 * 8 = 9.52, not 9.55). Measured, not assumed.
-#if GA_BLOCK_RANKS
-// HIERARCHY 4.17: THE STANDING BLOCKS, compiled in only when the scene's key stands: the engine
-// defines GA_BLOCK_RANKS, the key's ranks (SurfaceFrame::Ranks). With no key, nothing between
-// here and the #endif is compiled, nor the chain's lines in the readers below: every shader is
-// today's, byte for byte, and the old path and the new are chosen by the one key.
-// Commit 3: THE ADDRESS. Block i's rows are PageTexelUv's planes about the eye's own tangent
-// frame, anchored on the multiple of 16384 texels of its rung nearest the eye
-// (SurfaceFrame::BlockRows), so the point p is the UNDISPLACED ground point relative to the eye in
-// that frame -- the mesh stage's geo -- and every number here is small; blkO adds back the whole
-// blocks from that anchor to the block's own origin.
-float CsBlockGround(uint i) {   // by selects, not an index into the row: no local array
-    const float4 g = gCsBlkG[i >> 2];
-    const uint c = i & 3u;
+// PHASE A1 (out/integration/plan_eye_windows.md): THE EYE'S WINDOWS, the one compiled path.
+// Rank k + 1's window is a box of 16384 texels of rung 3 (k + 1) about the eye, placed MODULO
+// 16384 (HIERARCHY 4.1; hal/Tenant.h's banner). Its rows are PageTexelUv's planes about the eye's
+// own tangent frame anchored on the multiple of 16384 nearest the eye, so the address is the
+// point's texel less that anchor over 16384 -- the uv a WRAP sampler reads modulo 16384 at every
+// mip, whatever the box's origin -- and gCsBlkO the box's origin less the anchor: a point is in
+// the box where address + gCsBlkO lies in [0, 1). The point p is the UNDISPLACED ground point
+// relative to the eye in that frame -- the mesh stage's geo -- so every number here is small.
+// PHASE A2: the eye is the LEVEL's (below).
+// A window is read at its mips 0..3 alone (kCsWindowFloor): its own three rungs and its floor.
+#ifndef GA_BLOCK_RANKS
+#define GA_BLOCK_RANKS 5
+#endif
+static const float kCsWindowFloor = 3.0f;
+// PHASE A2: every level has its own windows, about ITS eye -- slot s of the level table (0 the
+// camera, then the Droste levels and the gate worlds), its rank k + 1 at row 5 s + k -- and its
+// readers address them by the level's own point (relative to its eye: the mesh stage's geo in that
+// level), so two worlds that see one piece of ground read one tile.
+float CsBlockGround(uint k) {   // the rank's ground at mip 0, the pyramid's: by selects, no local array
+    const float4 g = gCsRankG[k >> 2];
+    const uint c = k & 3u;
     return (c == 0u) ? g.x : (c == 1u) ? g.y : (c == 2u) ? g.z : g.w;
 }
-float2 CsBlockUv(uint i, float3 p) {
-    const float4 o = gCsBlkO[i >> 1];
-    return PageTexelUv(p, gCsBlkU[i], gCsBlkV[i], gCsBlkW[i]) + ((i & 1u) != 0u ? o.zw : o.xy);
+float2 CsWinUv(uint s, uint k, float3 p) {
+    const uint j = 5u * s + k;
+    return PageTexelUv(p, gCsWinU[j], gCsWinV[j], gCsWinW[j]);
 }
-// A stage with only a direction makes the point from it (CsPointOfDir, above: one for the blocks
-// and the Mercator pages alike).
-#define WALK_UV(i, p) CsBlockUv(i, p)
-#include "Walk.hlsli"
-// Commit 4: THE CHAIN -- the blocks a point lies in, one a rank, coarsest first -- found by the
-// directory ONCE where a stage begins and handed to every reader below (CS_WC): the colour's,
-// the mask's, the texel's grain. No reader of the stage's own point walks for itself.
-WalkChain CsWalk(float3 dir, float3 p) {
-    if (gCsDirU.x == 0xFFFFFFFFu) return (WalkChain)0;
-    return Walk(dir, p, gTexU[gCsDirU.x]);
+float2 CsWinOff(uint s, uint k) {
+    const uint j = 5u * s + k;
+    const float4 o = gCsWinO[j >> 1];
+    return (j & 1u) != 0u ? o.zw : o.xy;
 }
-// A read at ANOTHER point (the pixel water's bed, where its refracted ray lands) walks from that
-// point: the bed may lie in a block the surface point does not, and the stage's chain moved there
-// would leave that rank unanswered (measured: 78 pixels at the 7 km pose).
+uint CsWinSlice(uint s, uint k) {
+    const uint j = 5u * s + k;
+    return gCsWinS[j >> 2][j & 3u];
+}
+// THE CHAIN, ARITHMETIC (Window.hlsli, one body with the selftest's): one ratio and one compare a
+// rank, the ranks from 1 up to the first whose box does not hold p.
+#define WIN_UV(s, i, p) CsWinUv(s, i, p)
+#define WIN_OFF(s, i) CsWinOff(s, i)
+#define WIN_SLICE(s, i) CsWinSlice(s, i)
+#define WIN_K(s) gCsWinK[(s) >> 2][(s) & 3u]
+#include "Window.hlsli"
+// The level's chain at its own point: p relative to slot s's eye, in the tangent axes.
+WalkChain CsChain(float3 p, uint s) { return WindowChain(p, min(s, 7u)); }
+// A rank's residency floor at an address: the gather wraps as the sample does.
+float CsHaveWindow(uint mapSrv, float2 uv, uint slice) {
+    return PageHave(gTexArr[mapSrv], sLinearWrap, uv, slice);
+}
 #define CS_WC_PARAM , WalkChain wc
 #define CS_WC , wc
-#define CS_WALK_AT(d) , CsWalk(d, CsPointOfDir(d))
-#else
-#define CS_WC_PARAM
-#define CS_WC
-#define CS_WALK_AT(d)
-#endif
+// A read at ANOTHER point (the pixel water's bed, where its refracted ray lands) takes that
+// point's own chain, in its level (the point relative to that level's eye).
+#define CS_WALK_AT(p, s) , CsChain(p, s)
 
 float3 ComposedColorPages(float3 dir, float3 p CS_WC_PARAM) {
     // The cube, through the cube views over slices 0..5 (hardware-seamless across faces).
@@ -147,49 +146,24 @@ float3 ComposedColorPages(float3 dir, float3 p CS_WC_PARAM) {
     float3 c = PageSampleCube(gTexCubeArr[gCsU.x], sAniso, dir, haveC).rgb;
     const float3 g0 = CsGroundM();
     float ground = PageGroundM(g0.x, haveC);
-#if !GA_BLOCK_RANKS   // while blocks stand the z14 window is no page: its slice is unset (SurfaceFrame::Fill)
-    if (gCsF.y > 0.5f) {
-        const float2 duv = CsWindowUvAt(p);
-        if (all(duv > 0.0f) && all(duv < 1.0f)) {
-            const float haveW = CsHavePage(gCsU5.y, duv, gCsU5.z);
-            const float gW = PageGroundM(g0.y, haveW);
-            if (PageWins(gW, ground)) {
-                c = PageSample(gTexArr[gCsU5.x], sAniso, duv, gCsU5.z, haveW).rgb;
-                ground = gW;
-            }
-            if (gCsU5.w != 0xFFFFFFFFu) {
-                const float2 tuv = CsDetailUvAt(p);
-                if (all(tuv > 0.0f) && all(tuv < 1.0f)) {
-                    const float haveD = CsHavePage(gCsU5.y, tuv, gCsU5.w);
-                    const float gD = PageGroundM(g0.z, haveD);
-                    if (PageWins(gD, ground)) {
-                        c = PageSample(gTexArr[gCsU5.x], sAniso, tuv, gCsU5.w, haveD).rgb;
-                        ground = gD;
-                    }
-                }
-            }
-        }
-    }
-#endif
-#if GA_BLOCK_RANKS
-    // HIERARCHY 4.17: the standing blocks, the stage's chain coarsest rank first, by the same
-    // ladder and no new rule: a block answers where the point's uv lies inside it and its resident
-    // ground is at least as fine as the ground held; a rank with nothing resident ends the chain.
+    // PHASE A1: the eye's windows, the chain coarsest rank first, by the same ladder: a rank
+    // answers where its resident ground is at least as fine as the ground held, read at its mips
+    // 0..3 alone -- a rank whose footprint or floor is past its mip 3 leaves the pixel to the rank
+    // above, which holds that ground at its mip 0 (the window's FLOOR, HIERARCHY 4.1).
     [unroll] for (uint k = 0; k < GA_BLOCK_RANKS; ++k) {
         if (k >= wc.n) break;
         const uint sl = WalkSlice(wc, k);
         const float2 buv = WalkUv(wc, k);
-        if (all(buv > 0.0f) && all(buv < 1.0f)) {
-            const float haveB = CsHavePage(gCsU5.y, buv, sl);
-            if (haveB > 7.5f) break;
-            const float gB = PageGroundM(CsBlockGround(sl - 6u), haveB);
-            if (PageWins(gB, ground)) {
-                c = PageSample(gTexArr[gCsU5.x], sAniso, buv, sl, haveB).rgb;
-                ground = gB;
-            }
+        const float lodB = gTexArr[gCsU5.x].CalculateLevelOfDetail(sAnisoWrap, buv);
+        if (lodB > kCsWindowFloor) break;
+        const float haveB = CsHaveWindow(gCsU5.y, buv, sl);
+        if (haveB > kCsWindowFloor) continue;
+        const float gB = PageGroundM(CsBlockGround(k), haveB);
+        if (PageWins(gB, ground)) {
+            c = PageSample(gTexArr[gCsU5.x], sAnisoWrap, buv, sl, haveB).rgb;
+            ground = gB;
         }
     }
-#endif
     return c;
 }
 
@@ -206,42 +180,6 @@ float3 ComposedColor(float3 dir, float3 p CS_WC_PARAM) {
         // footprint: `have` was the only value the old form needed to keep.
         const float have = CsHaveCube(gCsU.y, dir);
         c = gTexCube[gCsU.x].Sample(sAniso, dir, have).rgb;
-    }
-    if (gCsF.y > 0.5f) {
-        const float2 duv = CsWindowUvAt(p);
-        if (all(duv > 0.0f) && all(duv < 1.0f)) {
-            const float2 fe = smoothstep(0.0f, 0.06f, duv) * smoothstep(1.0f, 0.94f, duv);
-            // `want` survives here because it GATES the hand-off below, not just the fetch --
-            // a scalar decision genuinely needs a scalar. The fetch itself goes anisotropic.
-            const float want = gTex[gCsU.z].CalculateLevelOfDetail(sLinearClamp, duv);
-            const float have = CsHave2D(gCsU.w, duv);
-            const float4 w = gTex[gCsU.z].Sample(sAniso, duv, int2(0, 0), have);
-            // M7h: the window HANDS OFF to the cube when the view outresolves even its
-            // pinned floor (want past ~mip 6): a rung that cannot add detail must vanish,
-            // or its different-zoom capture sits as a vintage RECTANGLE on the planet.
-            // Symmetric with the z17 rung's finer-only gate below.
-            const float hand = 1.0f - smoothstep(5.5f, 7.0f, want);
-            c = lerp(c, w.rgb, fe.x * fe.y * w.a * hand);
-            // M7f: the DETAIL window (z17, ~1.2 m px) -- the ladder's third rung, in the
-            // same Mercator frame, so the near field stops being capped at 9.5 m texels.
-            if (gCsU4.x != 0xFFFFFFFFu) {
-                const float2 tuv = CsDetailUvAt(p);
-                if (all(tuv > 0.0f) && all(tuv < 1.0f)) {
-                    const float2 fd =
-                        smoothstep(0.0f, 0.04f, tuv) * smoothstep(1.0f, 0.96f, tuv);
-                    const float wantD =
-                        gTex[gCsU4.x].CalculateLevelOfDetail(sLinearClamp, tuv);
-                    const float haveD = CsHave2D(gCsU4.y, tuv);
-                    const float lodD = max(wantD, haveD);
-                    const float4 d = gTex[gCsU4.x].Sample(sAniso, tuv, int2(0, 0), haveD);
-                    // Take the detail rung only where it is actually FINER than what the
-                    // z14 window just delivered (z17 mip m == z14 mip m-3): a half-warmed
-                    // detail tile must never replace sharper coarse truth with mush.
-                    const float finer = saturate(max(want, have) + 3.0f - lodD);
-                    c = lerp(c, d.rgb, fd.x * fd.y * d.a * finer);
-                }
-            }
-        }
     }
     // M6j final word on "conversion": NO lift at all. The 1.35 exposure compensation matched
     // the old curve hack at mid-tones but pushed bright land cover (marsh tan) over the
@@ -268,83 +206,62 @@ float SeafloorRampLuma(float depthM) {
     return dot(c, float3(0.299f, 0.587f, 0.114f));
 }
 
-// The planet's composed height (metres), residency-clamped at the caller's lod. Usable from a
-// VERTEX shader (no gradient intrinsics). The height WINDOW (same Mercator frame as the color
-// window; CUDEM-fine near the estuary) overlays the cube exactly the way color does, so the
-// land/sea gate and the shading normals stop being 611 m/px approximations where finer truth
-// exists. Off -> 0 (a smooth sphere).
-// M9aq: is there a height window at all, on either path? (Globe.hlsl gates its near-field
-// material on this.)
-bool CsHeightWindowOn() { return gCsU6.x != 0xFFFFFFFFu || gCsU2.z != 0xFFFFFFFFu; }
-// The height window's resident mip at a window uv, on either path, said in z14 mips: where the
-// z17 page holds p finer, its mip less 3 (the z17's mip 3 is the z14's mip 0), so below 0.
-float CsHaveHeightWin(float2 duv, float3 p) {
-    if (gCsU6.x == 0xFFFFFFFFu) return CsHave2D(gCsU2.w, duv);
-    float have = CsHavePage(gCsU6.y, duv, gCsU6.z);
-    const float2 tuv = CsDetailUvAt(p);
-    if (gCsU6.w != 0xFFFFFFFFu && all(tuv > 0.0f) && all(tuv < 1.0f)) {
-        have = min(have, CsHavePage(gCsU6.y, tuv, gCsU6.w) - 3.0f);
-    }
-    return have;
-}
 
-// M9aq: THE HEIGHT PAGES PATH. Same rule as colour: the cube through its cube views, the z14
-// and z17 pages through the array view, the page chosen by containment and by what is resident
-// -- no feather, because the pages are the same height field at different ground resolutions.
-float ComposedHeightPages(float3 dir, float3 p, float lod) {
+
+bool ComposedHeightOn() { return gCsF.z > 0.5f; }
+
+// ---- PHASE B1 (out/integration/plan_phase_b.md): THE COMPOSED HEIGHT OVER THE CHAIN. The height
+// on the eye's windows, read as ComposedColorPages reads the colour: the cube through its cube
+// views, then the ranks of the reader's own chain coarsest first -- each at the level the reader's
+// footprint wants of it, lod + 3 (k + 1) (rank k + 1 is 3 (k + 1) rungs finer than the cube), and
+// only to the window's floor: a footprint past it leaves the point to the rank above, which holds
+// that ground at its mip 0 (HIERARCHY 4.1) -- taken where it is resident to its floor and at least
+// as fine as the ground held. Every height reader takes its level's chain at its OWN point (the
+// vertex's, the pixel's, a gradient's four, the bed's cast), so two worlds that see one ground read
+// one tile. A sample at an explicit level: vertex-, mesh- and pixel-safe.
+static const float kCsHeightWindowFloor = 3.0f;
+float ComposedHeightChain(float3 dir, float lod CS_WC_PARAM) {
+    if (gCsF.z < 0.5f) return 0.0f;
+    if (gCsU6.x == 0xFFFFFFFFu) {   // a height cube alone, no pages (Mars's MOLA)
+        return gTexCube[gCsU2.x].SampleLevel(sLinearClamp, dir, max(lod, CsHaveCube(gCsU2.y, dir))).x;
+    }
     const float haveC = CsHaveCubeArr(gCsU2.y, dir);
     float h = PageSampleLevelCube(gTexCubeArr[gCsU2.x], sLinearClamp, dir, lod, haveC).x;
-    const float3 g0 = CsGroundM();
-    float ground = PageGroundM(g0.x, haveC);
-    const float2 duv = CsWindowUvAt(p);
-    if (all(duv > 0.0f) && all(duv < 1.0f)) {
-        // The window pyramid runs ~6 mips finer than the cube at the same footprint.
-        const float wantW = clamp(lod + 6.0f, 0.0f, gCsG.z);
-        const float haveW = CsHavePage(gCsU6.y, duv, gCsU6.z);
-        const float gW = PageGroundM(g0.y, haveW);
-        // Take the page where its resident texel is at least as fine as the cube's.
-        if (PageWins(gW, ground)) {
-            h = PageSampleLevel(gTexArr[gCsU6.x], sLinearClamp, duv, gCsU6.z, wantW, haveW).x;
-            ground = gW;
-        }
-        // The z17 page, ~9 mips finer than the cube, where its resident texel is at least as
-        // fine as the ground held (ComposedColorPages' detail rung).
-        if (gCsU6.w != 0xFFFFFFFFu) {
-            const float2 tuv = CsDetailUvAt(p);
-            if (all(tuv > 0.0f) && all(tuv < 1.0f)) {
-                const float wantD = clamp(lod + 9.0f, 0.0f, gCsG.z);
-                const float haveD = CsHavePage(gCsU6.y, tuv, gCsU6.w);
-                if (PageWins(PageGroundM(g0.z, haveD), ground)) {
-                    h = PageSampleLevel(gTexArr[gCsU6.x], sLinearClamp, tuv, gCsU6.w, wantD,
-                                        haveD).x;
-                }
-            }
+    float ground = PageGroundM(CsGroundM().x, haveC);
+    [unroll] for (uint k = 0; k < GA_BLOCK_RANKS; ++k) {
+        if (k >= wc.n) break;
+        const float want = lod + 3.0f * float(k + 1u);
+        if (want > kCsHeightWindowFloor) break;
+        const uint sl = WalkSlice(wc, k);
+        const float2 buv = WalkUv(wc, k);
+        const float haveB = CsHaveWindow(gCsU6.y, buv, sl);
+        if (haveB > kCsHeightWindowFloor) continue;
+        const float gB = PageGroundM(CsBlockGround(k), haveB);
+        if (PageWins(gB, ground)) {
+            h = PageSampleLevel(gTexArr[gCsU6.x], sLinearWrap, buv, sl, max(want, 0.0f), haveB).x;
+            ground = gB;
         }
     }
     return h;
 }
-
-float ComposedHeight(float3 dir, float3 p, float lod) {
-    if (gCsF.z < 0.5f) return 0.0f;
-    if (gCsU6.x != 0xFFFFFFFFu) return ComposedHeightPages(dir, p, lod);
-    const float have = CsHaveCube(gCsU2.y, dir);
-    float h = gTexCube[gCsU2.x].SampleLevel(sLinearClamp, dir, max(lod, have)).x;
-    if (gCsU2.z != 0xFFFFFFFFu) {
-        const float2 duv = CsWindowUvAt(p);
-        if (all(duv > 0.0f) && all(duv < 1.0f)) {
-            const float2 fe = smoothstep(0.0f, 0.06f, duv) * smoothstep(1.0f, 0.94f, duv);
-            // The window pyramid runs ~6 mips finer than the cube at the same footprint
-            // (611 m cube texels vs 9.55 m z14 pixels), so the matching window mip is lod+6.
-            const float wantW = clamp(lod + 6.0f, 0.0f, gCsG.z);
-            const float haveW = CsHave2D(gCsU2.w, duv);
-            const float hw = gTex[gCsU2.z].SampleLevel(sLinearClamp, duv,
-                                                       max(wantW, haveW)).x;
-            h = lerp(h, hw, fe.x * fe.y);
-        }
-    }
-    return h;
+// ...at a point of level s: its own chain there.
+float ComposedHeightAt(float3 dir, float3 p, float lod, uint s) {
+    return ComposedHeightChain(dir, lod, CsChain(p, s));
 }
-bool ComposedHeightOn() { return gCsF.z > 0.5f; }
+// ComposedHeightGrad's law on the chain: each of the four points walks its own chain in its level.
+float2 ComposedHeightGradAt(float3 dir, float3 p, float lod, uint s) {
+    const float eps = gCsG.y * exp2(lod);
+    float3 eP = cross(float3(0.0f, 1.0f, 0.0f), dir);
+    eP = (dot(eP, eP) < 1e-8f) ? float3(1.0f, 0.0f, 0.0f) : normalize(eP);
+    const float3 nP = cross(dir, eP);
+    const float texM = eps * gCsF.w;
+    const float3 sE = CsToTangent(eP) * texM, sN = CsToTangent(nP) * texM;
+    const float hE = ComposedHeightAt(normalize(dir + eP * eps), p + sE, lod, s);
+    const float hW = ComposedHeightAt(normalize(dir - eP * eps), p - sE, lod, s);
+    const float hN = ComposedHeightAt(normalize(dir + nP * eps), p + sN, lod, s);
+    const float hS = ComposedHeightAt(normalize(dir - nP * eps), p - sN, lod, s);
+    return float2(hE - hW, hN - hS) / (2.0f * texM);
+}
 
 // M9ay: THE SURVEY AS PAGES. gis.landsea's own tree -- the vector rings swept per tile on the
 // same addresses as the imagery and the bed -- is a page tenant: r = water coverage (1 water,
@@ -356,41 +273,18 @@ bool ComposedHeightOn() { return gCsF.z > 0.5f; }
 bool CsMaskSample(float3 dir, float3 p CS_WC_PARAM, out float4 m) {
     m = float4(0, 0, 0, 0);
     if (gCsU3.x == 0xFFFFFFFFu) return false;
-#if GA_BLOCK_RANKS
-    // HIERARCHY 4.17: the stage's chain in the pages' order -- the finest with an OPINION answers,
-    // the finest rank first; the Mercator pages are then not the mask's.
+    // PHASE A1: the eye's windows in the pages' order -- the finest with an OPINION answers, the
+    // finest rank first -- at their mips 0..3 alone.
     [unroll] for (int k = GA_BLOCK_RANKS - 1; k >= 0; --k) {
         if (uint(k) >= wc.n) continue;
         const uint sl = WalkSlice(wc, uint(k));
         const float2 buv = WalkUv(wc, uint(k));
-        if (all(buv > 0.001f) && all(buv < 0.999f)) {
-            const float haveB = CsHavePage(gCsU3.y, buv, sl);
-            if (haveB <= 7.5f) {
-                m = PageSampleLevel(gTexArr[gCsU3.x], sLinearClamp, buv, sl, 0.0f, haveB);
-                if (m.a > 0.001f) return true;
-            }
-        }
-    }
-#else
-    const float2 duv = CsWindowUvAt(p);
-    if (all(duv > 0.0f) && all(duv < 1.0f)) {
-        if (gCsU5.w != 0xFFFFFFFFu) {   // the z17 page exists in the colour ladder -> ours too
-            const float2 tuv = CsDetailUvAt(p);
-            if (all(tuv > 0.001f) && all(tuv < 0.999f)) {
-                const float haveD = CsHavePage(gCsU3.y, tuv, 7u);
-                if (haveD <= 7.5f) {   // the finest resident level: want 0, floored to have
-                    m = PageSampleLevel(gTexArr[gCsU3.x], sLinearClamp, tuv, 7u, 0.0f, haveD);
-                    if (m.a > 0.001f) return true;
-                }
-            }
-        }
-        const float haveW = CsHavePage(gCsU3.y, duv, 6u);
-        if (haveW <= 7.5f) {
-            m = PageSampleLevel(gTexArr[gCsU3.x], sLinearClamp, duv, 6u, 0.0f, haveW);
+        const float haveB = CsHaveWindow(gCsU3.y, buv, sl);
+        if (haveB <= kCsWindowFloor) {
+            m = PageSampleLevel(gTexArr[gCsU3.x], sLinearWrap, buv, sl, 0.0f, haveB);
             if (m.a > 0.001f) return true;
         }
     }
-#endif
     if (gCsU3.z != 0xFFFFFFFFu) {
         const float haveC = CsHaveCubeArr(gCsU3.w, dir);
         if (haveC <= 7.5f) {
@@ -434,12 +328,6 @@ float ComposedLandness(float3 dir, float3 p CS_WC_PARAM, float hp, float waterLe
     const float lm = ComposedLandMask(dir, p CS_WC);
     float land = (lm >= 0.0f) ? ((lm > 0.5f) ? 1.0f : 0.0f)
                               : ((hp > waterLevel) ? 1.0f : 0.0f);
-    if (gCsU2.z != 0xFFFFFFFFu) {
-        const float2 duv = CsWindowUvAt(p);
-        if (all(duv > 0.0f) && all(duv < 1.0f)) {
-            land = smoothstep(waterLevel - 0.15f, waterLevel + 0.25f, hp);
-        }
-    }
     // M6p: HAND EDITS ARE LAW. The window mask is R8G8 -- g flags texels painted by
     // data/gis/edits.geojson, and a flagged texel's mask value overrides survey and the
     // live tide alike (the survey shoreline predates the jetties, and the stabilized height
@@ -468,19 +356,13 @@ float ComposedEditLand(float3 dir, float3 p CS_WC_PARAM) {
 // M6i debug: the alignment overlay (--stencil). The survey VECTORS render as real line
 // geometry (GisLayer) -- this shader-side part draws what must be compared against them:
 //   red     OUR composed height channel's zero-crossing (thin, fwidth-scaled)
-//   blue    the shared Mercator window frame;  white  0.05-degree graticule
+//   white   0.05-degree graticule (PHASE B3: the Mercator window's frame is gone)
 float3 ApplyComposedStencil(float3 col, float3 dir, float3 p) {
     if (gCsG.w < 0.5f) return col;
-    const float h = ComposedHeight(dir, p, kCsHeightLodFloor);   // finest RESIDENT height everywhere
+    const float h = ComposedHeightAt(dir, p, kCsHeightLodFloor, 0u);   // finest RESIDENT height everywhere
     const float fw = max(fwidth(h), 0.05f);
     const float coastH = 1.0f - smoothstep(1.0f * fw, 2.5f * fw, abs(h));
     col = lerp(col, float3(1.0f, 0.12f, 0.10f), coastH * 0.8f);
-    const float2 duv = CsWindowUvAt(p);
-    if (all(duv > -0.01f) && all(duv < 1.01f)) {
-        const float2 e = min(abs(duv), abs(1.0f - duv));
-        const float frame = 1.0f - smoothstep(0.0f, 0.003f, min(e.x, e.y));
-        col = lerp(col, float3(0.2f, 0.4f, 1.0f), frame * 0.9f);
-    }
     const float latDeg = degrees(asin(clamp(dir.y, -1.0f, 1.0f)));
     const float lonDeg = degrees(atan2(dir.z, dir.x));
     const float2 g = abs(frac(float2(lonDeg, latDeg) / 0.05f + 0.5f) - 0.5f);
@@ -499,24 +381,5 @@ float ComposedHeightLod(float dist, float pixAngRad) {
     return clamp(log2(max(pixM / texelM, exp2(kCsHeightLodFloor))), kCsHeightLodFloor, gCsG.x);
 }
 
-// Central-difference height gradient by eps-rotated directions: uniform-METRE steps at any
-// latitude, no pole singularity, no per-source branch -- the equirect/NE-window fork this
-// replaces needed both. Returns d(height)/d(metres) east and north; eps scales with lod so
-// derivatives ride the same footprint the height fetch does. The four points step from p by the
-// same arc along the same axes, taken into the tangent axes (small numbers; the step's radial
-// sag, eps^2 R / 2, is a micrometre at the finest lod and moves no latitude or longitude).
-float2 ComposedHeightGrad(float3 dir, float3 p, float lod) {
-    const float eps = gCsG.y * exp2(lod);
-    float3 eP = cross(float3(0.0f, 1.0f, 0.0f), dir);
-    eP = (dot(eP, eP) < 1e-8f) ? float3(1.0f, 0.0f, 0.0f) : normalize(eP);
-    const float3 nP = cross(dir, eP);
-    const float texM = eps * gCsF.w;
-    const float3 sE = CsToTangent(eP) * texM, sN = CsToTangent(nP) * texM;
-    const float hE = ComposedHeight(normalize(dir + eP * eps), p + sE, lod);
-    const float hW = ComposedHeight(normalize(dir - eP * eps), p - sE, lod);
-    const float hN = ComposedHeight(normalize(dir + nP * eps), p + sN, lod);
-    const float hS = ComposedHeight(normalize(dir - nP * eps), p - sN, lod);
-    return float2(hE - hW, hN - hS) / (2.0f * texM);
-}
 
 #endif  // GA_COMPOSE_HLSLI

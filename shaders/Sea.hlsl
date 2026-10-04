@@ -82,7 +82,8 @@ float BedAt(float2 xz, out bool surveyed) {
         const float2 uv = (xz - gBathyGeo.xy) * gBathyGeo.zw;
         if (all(uv > 0.002f) && all(uv < 0.998f)) surveyed = true;
     }
-    if (ComposedHeightOn()) return ComposedHeight(SeaPlanetDir(xz), SeaPoint(xz), surveyed ? kCsHeightLodFloor : -2.0f);
+    // PHASE B2: on the camera's world's windows (slot 0), at the sea point's own address.
+    if (ComposedHeightOn()) return ComposedHeightAt(SeaPlanetDir(xz), SeaPoint(xz), surveyed ? kCsHeightLodFloor : -2.0f, 0u);
     return -30.0f;
 }
 float BedAt(float2 xz) {
@@ -116,26 +117,30 @@ float SweDEta(float2 xz) {
 // PRIORS 1: this runs in the DOMAIN shader too, and a bindless SampleLevel outside the pixel
 // stage returns ZERO on this GPU (the first version did exactly that: the node said 0.85 at
 // the helm and the near field lay flat). Loads, manual bilinear, like the bank kernel.
+// PHASE B2: the exposure is window slices alone (D2), read on the camera's world's windows at its
+// grain, 76 m (rung 3: today's floor), the ranks coarsest first as every bed read; no window here
+// is no opinion -- exposed.
 float SweShadow(float2 xz) {
     if (gSweU.w == 0xFFFFFFFFu || gChurnU.w == 0xFFFFFFFFu) return 1.0f;
-    const float2 uv = CsWindowUvAt(SeaPoint(xz));
-    if (any(uv < 0.0f) || any(uv > 1.0f)) return 1.0f;
-    const uint slice = gCsU6.z;
-    const int2 rc = int2(clamp(uv * 128.0f, 0.0f, 127.0f));
-    const float haveB = gTexArr[gChurnU.w].Load(int4(rc, int(slice), 0)).x * 15.9375f;
-    if (haveB > 7.5f) return 1.0f;
-    const int mip = int(max(round(haveB), 3.0f));
-    const float dim = 16384.0f / exp2(float(mip));
-    const float2 tf = uv * dim - 0.5f;
-    const float2 t0 = floor(tf);
-    const float2 fr = tf - t0;
-    const int2 i0 = clamp(int2(t0), int2(0, 0), int2(dim - 1.0f, dim - 1.0f));
-    const int2 i1 = clamp(int2(t0) + 1, int2(0, 0), int2(dim - 1.0f, dim - 1.0f));
-    const float a = gTexArr[gSweU.w].Load(int4(i0.x, i0.y, int(slice), mip)).x;
-    const float b = gTexArr[gSweU.w].Load(int4(i1.x, i0.y, int(slice), mip)).x;
-    const float c = gTexArr[gSweU.w].Load(int4(i0.x, i1.y, int(slice), mip)).x;
-    const float d = gTexArr[gSweU.w].Load(int4(i1.x, i1.y, int(slice), mip)).x;
-    return lerp(lerp(a, b, fr.x), lerp(c, d, fr.x), fr.y);
+    const WalkChain wc = CsChain(SeaPoint(xz), 0u);
+    const float grain = CsBlockGround(0u);   // rank 1's mip 0: rung 3
+    float ground = 3.0e38f, v = 1.0f;
+    [unroll] for (uint k = 0; k < GA_BLOCK_RANKS; ++k) {
+        if (k >= wc.n) break;
+        const float want = max(floor(log2(grain / CsBlockGround(k))), 0.0f);
+        if (want > kCsWindowFloor) break;
+        const uint sl = WalkSlice(wc, k);
+        const float2 uv = WalkUv(wc, k);
+        const float haveB = round(PageHaveLoadWrap(gTexArr[gChurnU.w], uv, sl));
+        if (haveB > kCsWindowFloor) continue;
+        const float m = max(haveB, want);
+        const float g = PageGroundM(CsBlockGround(k), m);
+        if (PageWins(g, ground)) {
+            v = PageLoadWrap(gTexArr[gSweU.w], uv, sl, m);
+            ground = g;
+        }
+    }
+    return v;
 }
 
 float2 JetU(float2 xz) {
@@ -444,7 +449,7 @@ float3 SeaPixelColor(float2 xz, float3 rel, float att, float depth, float dryGua
     if (gBathyU.x != 0xFFFFFFFFu) {
         const float3 T = exp(-gSigmaW.rgb * (sP + dd));
         float3 bedAlb = float3(0.42f, 0.38f, 0.28f);
-        if (ComposedColorOn()) bedAlb = ComposedColor(SeaPlanetDir(bedXZ), SeaPoint(bedXZ) CS_WALK_AT(SeaPlanetDir(bedXZ)));
+        if (ComposedColorOn()) bedAlb = ComposedColor(SeaPlanetDir(bedXZ), SeaPoint(bedXZ) CS_WALK_AT(SeaPoint(bedXZ), 0u));
         col = lerp(col, bedAlb * (0.35f + 0.75f * ndl) * SUN_IRR_C, T);
     }
 
@@ -551,11 +556,9 @@ float4 PsMain(VsOut i) : SV_Target {
     // the surveyed window the ocean sheet simply must not be drawn over land, and that cut is
     // a classification, at the pixel's own resolution (M6i). Inside the window the SWE wet/dry
     // and the terrain depth own it, so the gate stays out of the estuary's way.
-#if GA_BLOCK_RANKS
-    // HIERARCHY 4.17: the chain, once for the pixel, for its land question (the bed's colour under
-    // --pixel-water walks from the bed, where its ray lands).
-    const WalkChain wc = CsWalk(SeaPlanetDir(i.worldXZ), CsPointOfDir(SeaPlanetDir(i.worldXZ)));
-#endif
+    // The chain, once for the pixel, for its land question (the bed's colour under --pixel-water
+    // takes the bed's own, where its ray lands).
+    const WalkChain wc = CsChain(SeaPoint(i.worldXZ), 0u);   // the camera's world, at the sea point (PHASE B2)
     {
         const float2 buv = (i.worldXZ - gBathyGeo.xy) * gBathyGeo.zw;
         const bool surveyed =

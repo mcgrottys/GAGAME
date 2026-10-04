@@ -18,7 +18,7 @@
 //                  data/wave_scene.json overlays through `include` (the M8 law survives:
 //                  authored if absent, never clobbered, hot-reloaded)
 //      streaming  {tileBudget, dayTiles, dayBytes, googleZoom, predictEvery, directStorage,
-//                  colorTrees, gisGate, seafloor, exposure, holdMargin, faceWindows, treeRoot}
+//                  colorTrees, gisGate, seafloor, exposure, holdMargin, treeRoot}
 //                                                -- scene state: they change the picture
 //                                                through residency (treeRoot: where the tile
 //                                                trees are, cache/trees unless a tool's scratch
@@ -196,10 +196,6 @@ struct StreamingSection {
          exposure = true;
     double holdMargin = 1.41421356;   // order: a held tile counts for this times its measure
     std::string treeRoot = "cache/trees";   // the folder the tile trees live in (TileTree.h)
-    // HIERARCHY 4.17 commit 2: standing blocks of the pyramid for the colour and the mask, in
-    // place of their Mercator windows -- "lon,lat,rung" entries joined by ';' (SurfaceFrame::
-    // DeclareBlocks). Empty is today's path.
-    std::string faceWindows;
 };
 struct SettleProps {
     bool sync = false;

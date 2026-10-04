@@ -58,6 +58,7 @@ struct AuditTenant {
     std::string name;
     uint32_t faces = 0, mips = 0;
     std::vector<uint32_t> tilesW, tilesH;   // per plane (face * mips + mip), in tiles
+    std::vector<uint32_t> top;              // per face, the coarsest mip it holds (F1); empty = mips - 1
     uint32_t mapDim = 0;                     // the residency map's side: it is square, uv-addressed
     const std::vector<std::vector<uint8_t>>* bytes = nullptr;   // per slice, mapDim * mapDim
     std::vector<AuditTile> tiles;            // every tracked tile, in any state

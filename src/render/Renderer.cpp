@@ -93,6 +93,10 @@ hal::RootLayout Renderer::SharedGraphicsLayout() {
         // covers it, and the taps are paid on every surface pixel.
         .Sampler(hal::StaticSampler(3, D3D12_FILTER_ANISOTROPIC, D3D12_TEXTURE_ADDRESS_MODE_CLAMP,
                                     8))
+        // PHASE A1: s4 is s3 that WRAPS -- the eye's windows are placed modulo 16384 (HIERARCHY
+        // 4.1), so the hardware reads the global lattice from the address's fraction at every
+        // mip whatever the window's origin. Appended: s0..s3 stand where every shader has them.
+        .Sampler(hal::StaticSampler(4, D3D12_FILTER_ANISOTROPIC, D3D12_TEXTURE_ADDRESS_MODE_WRAP, 8))
         .Flags(D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
     return rl;
 }

@@ -57,16 +57,23 @@ public:
     // M5c: the shallow-water solver (owned by main; recorded into this layer's command list
     // each frame) and the CPU bathy grid the swell-shadow march walks.
     void SetSwe(SweSolver* swe) { m_swe = swe; }
-    // M9ar: the churn kernel's bed -- slice `slice` of the height page tenant, residency-clamped.
-    // M12 step 4b: `window` is the z14 lattice the page sits on (the surface's winH); its
-    // Rows() are the kernel's winA row.
-    void SetHeightPage(hal::Resource heightArr, hal::Resource resMapArr, uint32_t slice,
-                       uint32_t mips, const Lattice& window) {
+    // PHASE B2: the churn's windows (the camera's world's rows) and the camera's eye, planet frame.
+    void SetChurnWindows(const SurfaceFrame::ChainRows& rows, const double eye[3]) {
+        SurfaceFrame::KernelRows(rows, m_churnHw);
+        if (!m_surface) return;
+        const SurfaceFrame& sf = *m_surface;
+        const double* ax[3] = {sf.east, sf.up, sf.north};
+        for (int c = 0; c < 3; ++c) {
+            m_churnEyeT[c] = static_cast<float>(eye[0] * ax[c][0] + eye[1] * ax[c][1] + eye[2] * ax[c][2] -
+                                                (c == 1 ? sf.planetR : 0.0));
+        }
+        m_churnEyeT[3] = static_cast<float>(sf.planetR);
+    }
+    // The height tenant's array and residency map, the churn's bed (PHASE B3: its windows' slices).
+    void SetHeightPage(hal::Resource heightArr, hal::Resource resMapArr, uint32_t mips) {
         m_hgtArr = heightArr;
         m_hgtRes = resMapArr;
-        m_hgtSlice = slice;
         m_hgtMips = mips;
-        m_hgtWin = window;
     }
     // M12 step 4b: the surface, for the world.flat chart the churn's geoA row is cast from
     // (SurfaceFrame::FlatRows). Must precede the first churn update.
@@ -253,12 +260,19 @@ private:
         // from gSweM on rotated (the churn read its current gain from the longitude for a
         // week; priors 22). The order here IS the shader's.
         float geoA[4];
-        float winA[4];
-        float pageB[4];  // M9ax: x = the z14 page's slice
         // M9az: THE WINDOW. The atlas is addressed TOROIDALLY on a world-anchored tile lattice
         // (slot = world tile mod atlas tiles), and the domain is the +-8 km window around the
         // camera: x, y = the world tile index of the window's origin, z = atlas tiles in y.
         float window[4];
+        // PHASE B2: THE WINDOWS THE CHURN STANDS IN -- the camera's world's (slot 0), its chain at
+        // each texel's own point: the flat world point about the camera's eye (eyeT: the eye in the
+        // tangent axes less (0, R, 0); w = R). Appended at the END on both sides.
+        float eyeT[4];
+        float hwU[20];
+        float hwV[20];
+        float hwW[20];
+        float hwO[12];
+        uint32_t hwS[8];
     };
     struct SpecCbData {
         float rect[4];
@@ -328,9 +342,10 @@ private:
                                            //  t4 its residency map (M9ar), u0 churn]
     hal::Resource m_hgtArr = nullptr;    // M9ar: borrowed from the residency manager
     hal::Resource m_hgtRes = nullptr;
-    uint32_t m_hgtSlice = 6, m_hgtMips = 7;
-    Lattice m_hgtWin;   // M12 step 4b: the z14 height window the page sits on (winA = Rows)
+    uint32_t m_hgtMips = 7;
     const SurfaceFrame* m_surface = nullptr;   // M12 step 4b: the world.flat chart (geoA)
+    SurfaceFrame::KernelWindowRows m_churnHw{};   // PHASE B2: SetChurnWindows
+    float m_churnEyeT[4] = {};
     bool m_churnSweWired = false;          // t2/t3 start as null views; wired when the solver is
     GpuTexture m_maskTex;                  // tilesX x tilesY R8: residency for the visualizer
     std::vector<uint8_t> m_maskCpu;

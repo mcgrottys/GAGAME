@@ -131,6 +131,18 @@ private:
     // M12 step 5e: the entities' step (stepBoat's one path from both clock branches), the
     // profiler slot the hull steps kept, and the chase camera after them.
     void StepEntities(int quanta, float dt);
+    // PHASE A1: the windows that stepped, moved in the colour and the mask (hal::Tenant::Move),
+    // with the step's instrument: per step the slots told and how many of them held a tile (the
+    // leaving), the tiles kept and their pool slots, checked three turns on (WindowStepCheck).
+    void ApplyWindowSteps(const std::vector<SurfaceFrame::Moved>& moved);
+    struct KeptTile {
+        int tenant;
+        TileRequest req;
+        uint32_t pool;
+    };
+    std::vector<KeptTile> m_keptCheck;
+    uint64_t m_keptCheckAt = 0, m_windowSteps = 0, m_windowTold = 0, m_windowLeft = 0,
+             m_windowKept = 0, m_windowKeptMoved = 0;
 
     // M12 step 5c: the solved wave field re-Configured at the water scene's live window --
     // today's hot-reload lines, moved verbatim. It reads what the SESSION owns (the compositor,
@@ -297,6 +309,9 @@ private:
     // --bed-trace N: the solver's bed read back around the spin-up, every N frames and at the
     // end (app/Tools/BedTrace.cpp); unconfigured without the flag, and then nothing reads it.
     tools::BedTracer m_bedTracer;
+    // --bank-trace N (Phase B0): where the water bank's bed readings go (WaterBankLayer::TraceRead).
+    std::string m_bankTraceDir;
+    uint32_t m_ngMoves = 0, m_ngClaims = 0, m_ngK = 0;   // PHASE B2w: the frame's steps, for --near-ground
     // The solar system this frame was lit by -- the one light, so every viewpoint (a gate's
     // window included) asks it for its own direction instead of borrowing the camera's.
     sun::SolarSystem m_solar;

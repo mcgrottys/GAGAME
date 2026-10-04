@@ -19,40 +19,15 @@
 //  THE DECLARATION. A SurfaceFrame is what the shipped surface IS: the planet's radius; the
 //  tangent frame's rows (planet -> tangent: east, up at the anchor, north -- the doubles the
 //  session computes from the anchor and writes here, once); the lattices every realization
-//  sits on (core/Lattice.h): the 16k quad-sphere, the Merrimack z14 window and its z17 detail
-//  window in the colour's 128x128 tiling, and the same cube and z14 window in the height's
-//  256x128 tiling; the tenants realized on them, as the ids and the page slices read off
-//  their declarations (hal::Tenant::Id, and SliceOf of the lattice's own Tag -- the numbers
-//  the sites used to write as 6 and 7); and the stencil flag. Merrimack() writes the two
-//  origins down -- the z14 window at tile (4935, 6008), the z17 window centred on 42.8160 N,
-//  70.8125 W -- and no other line of the engine outside its tests does. Fill() is
-//  FillComposedCb's body, moved: its former parameters are read from the members at the top
-//  and the arithmetic below them is the old text.
+//  sits on (core/Lattice.h): the 16k quad-sphere in the colour's 128x128 tiles and in the
+//  height's 256x128; the tenants realized on them (hal::Tenant::Id); the eye's windows below;
+//  and the stencil flag. PHASE B3: the Mercator z14 and z17 windows, their origins, their rows
+//  (merc, det, u4) and their slices are deleted: every page past the faces is an eye's window.
+//  Fill() writes the composed-surface rows.
 //
-//  WHAT `window` IS. The body tells a colour cube from a colour window and a height cube from
-//  a height window, because they were once separate tenants; since M9ap/M9aq the window IS a
-//  slice of the one page tenant (Assembly.cpp assigns winTenant = colorCubeT and hgtWinTenant
-//  = hgtTenant right after Sparse() and nowhere else), so here the window is the colour tenant
-//  at winSlice and the height window the height tenant at hgtWinSlice -- and there is NO
-//  window (-1) where the slice is undeclared: Mars declares its MOLA height cube with no page
-//  (Assembly.cpp's SetComposed(-1, -1, hgtTenant, -1, ...)), and Compose.hlsli turns the
-//  height-window path on from gCsU2.z alone, so a window that is merely the tenant again would
-//  have lit it. The body's `!pages` branches are then reachable only for Mars's cube, and are
-//  kept as they were: this step moves, a later one prunes.
-//
-//  THE MERC ROW comes from Lattice::Rows(), which is the old four casts bit for bit: both
-//  origins are below 2^24 and exact in float whether cast from the double or the integer,
-//  1/16384 is 2^-14, and the world-pixel expression is the same text.
-//
-//  THE KERNEL ROWS (step 4b). The water bank, the churn and the solver each hand-filled a
-//  winA row {org px x, org px y, 1/16384, 16384*256} from two origin doubles their
-//  SetHeightPage / SetHeightWindow had been passed plus two literals, and the bank and the
-//  churn a geoA row from BathyModel's four constants -- the world.flat chart in floats. The
-//  three now take the height window's Lattice and fill winA from its Rows(); the chart lives
-//  here as `flat` (core/Space.h's Anchor, written by Merrimack from the same constants) and
-//  the bank and the churn read geoA through FlatRows(), the sites' own casts (a double
-//  division, then one cast). The gate: a [kernel] FNV-1a of each kernel's constant buffer,
-//  printed at its upload when it changes, equal before and after the move.
+//  THE KERNEL ROWS (step 4b). The bank and the churn read the world.flat chart (`flat`,
+//  core/Space.h's Anchor, written by Merrimack from BathyModel's constants -- Phase C's) through
+//  FlatRows(); their height reads carry the windows' rows (KernelRows).
 //
 //  THE DIAGRAM'S PAINT ROWS (step 4c). GaAst.cpp's compose table hand-wrote the four rows
 //  `compose.stack -> color.pages / height.pages` -- the z14 origin as a literal in a range
@@ -76,6 +51,7 @@
 
 #include "core/Lattice.h"
 #include "core/Space.h"
+#include "hal/Tenant.h"
 
 #include <cstdint>
 #include <string>
@@ -85,10 +61,6 @@ namespace ga {
 
 struct ComposedSurfaceCb;
 class ResidencyManager;
-namespace hal {
-class Tenant;
-struct BlockBinding;
-}
 
 struct SurfaceFrame {
     double planetR = 0.0;
@@ -97,26 +69,17 @@ struct SurfaceFrame {
     double east[3] = {1.0, 0.0, 0.0};
     double up[3] = {0.0, 1.0, 0.0};
     double north[3] = {0.0, 0.0, 1.0};
-    // The lattices (core/Lattice.h). The colour and the survey sit on the first three; the
-    // height on the three 256x128 tilings of the same ground (the exposure on the z14's).
+    // The lattices (core/Lattice.h): the colour and the survey on the cube's 128x128 tiles, the
+    // height and the exposure on its 256x128 tiles.
     Lattice cube;    // the 16k quad-sphere, 128x128 tiles
-    Lattice win;     // the Merrimack z14 window
-    Lattice det;     // its z17 detail window
     Lattice cubeH;   // the same cube, 256x128 tiles
-    Lattice winH;    // the same z14 window, 256x128 tiles
-    Lattice detH;    // the same z17 window, 256x128 tiles
-    // The tenants realized on them (-1 = none) and the slices their pages are (UINT32_MAX =
-    // none): the colour tenant holds the z14 page at winSlice and the z17 page at detSlice
-    // (detT is the colour tenant: M9ap), the height tenant its z14 page at hgtWinSlice and its
-    // z17 page at hgtDetSlice.
-    int colorT = -1, hgtT = -1, maskT = -1, detT = -1;
-    uint32_t winSlice = UINT32_MAX, detSlice = UINT32_MAX, hgtWinSlice = UINT32_MAX,
-             hgtDetSlice = UINT32_MAX;
-    // HIERARCHY 4.17 commit 2: THE STANDING BLOCKS (the scene's streaming.faceWindows). With the
-    // key set the colour and the mask hold, in place of their two Mercator windows, aligned blocks
-    // of the pyramid: block i is slice 6 + i of both, a face-plane window anchored on a multiple
-    // of 16384 texels of its rung (FaceWindow, core/Lattice.h -- the address the rows and the
-    // wants use), coarsest rung first. Empty is today's path; the height keeps its window.
+    // The tenants realized on them (-1 = none).
+    int colorT = -1, hgtT = -1, maskT = -1;
+    bool hgtWindows = false;   // PHASE B2: the height tenant declares the eye's windows
+    // HIERARCHY 4.17 commit 2: THE STANDING BLOCKS -- aligned blocks of the pyramid, each a
+    // face-plane window anchored on a multiple of 16384 texels of its rung (FaceWindow,
+    // core/Lattice.h), coarsest rung first, PHASE A1: the engine
+    // declares none (the colour's and the mask's windows are the eye's); the selftests do.
     static constexpr uint32_t kMaxBlocks = 8;   // the rows ComposedSurfaceCb carries
     std::vector<FaceWindow> blocks;
     // HIERARCHY 4.17 commit 3: THE EYE the blocks' rows are taken about, planet frame, doubles --
@@ -130,47 +93,137 @@ struct SurfaceFrame {
     // behind keeps the block's own anchor.
     static void BlockRows(const FaceWindow& block, const Placement& own, const double eye[3],
                           FaceWindow::Planes& rows, float off[2]);
-    // HIERARCHY 4.17 commit 4: THE DIRECTORY. Beside every slice of the colour and the mask (the
-    // faces 0..5, then block i at 6 + i) a grid of kCells x kCells cells, each naming the slice of
-    // the next rank's block the cell lies in, or kNone: a face's cells name rank 1. A rank's
-    // block is an eighth of its parent and a cell a sixteenth, so with aligned blocks a cell lies
-    // in one block or in none (DeclareBlocks refuses a key where that does not hold). Built from
-    // the blocks alone -- the ground and what exists, never a camera -- and uploaded once by the
-    // Assembly as one R16_UINT texture, the slices stacked down it (dirSrv).
-    static constexpr uint32_t kCells = 16, kMaxRanks = 5;
-    // HIERARCHY 4.17: the key's ranks (the finest block's rung / 3, blocks sorted coarsest first):
-    // the shaders' GA_BLOCK_RANKS, 0 with no key.
-    uint32_t Ranks() const { return blocks.empty() ? 0u : uint32_t(blocks.back().rung) / 3u; }
-    static constexpr uint16_t kNone = 0xFFFFu;
-    std::vector<uint16_t> directory;   // (slice * kCells + y) * kCells + x
-    uint32_t dirSrv = UINT32_MAX;
-    void BuildDirectory();
-    // THE WALK, its C++ body (shaders/Walk.hlsli is the HLSL one): the blocks a planet-frame point
-    // lies in, one a rank, coarsest first -- each its slice and its own uv, in doubles. Returns
-    // how many.
+    static constexpr uint32_t kMaxRanks = 5;
+    // A chain's step (SurfaceFrame::Chain): rank k + 1's slice and its own uv, in doubles.
     struct WalkStep {
         uint32_t slice;
         double u, v;
     };
-    uint32_t Walk(const double P[3], WalkStep out[kMaxRanks]) const;
-    // The key, parsed: "lon,lat,rung" entries (degrees east and north) joined by ';'. Each point
-    // is given the block of its rung that holds it, and the block is LOGGED with how far the
-    // point stands inside it; a place near a block's edge is two entries. A malformed key is
-    // refused aloud and leaves the blocks empty.
+    // STANDING blocks, declared by "lon,lat,rung" entries (degrees east and north) joined by ';'.
+    // Each point is given the block of its rung that holds it, and the block is LOGGED with how
+    // far the point stands inside it. A malformed list is refused aloud and leaves the blocks
+    // empty. PHASE A1: the scene's key is gone and the engine declares none -- a following window
+    // is the eye's (below) -- so these serve the selftests' standing windows
+    // (and a solver's domain, later) alone.
     bool DeclareBlocks(const std::string& key);
-    // `faceWindows: auto` -- THE BLOCKS FROM THE SOURCES. For every source, the chain of blocks from
-    // rank 1 down to the rank that holds its grain, over its footprint, the finest sources first,
-    // until the rows (kMaxBlocks) are used; what did not fit, and a grain finer than the finest
-    // rank, are logged. Returned as the key DeclareBlocks reads (each block's centre at its rung),
-    // so the directory's law is checked where it always was.
-    struct BlockWant {
-        std::string name;
-        double lon0, lat0, lon1, lat1;   // the footprint, degrees
-        double grainM;                   // its ground sample distance, metres
-    };
-    static std::string AutoKey(std::vector<BlockWant> wants);
     // Block i as the tenants declare it (hal/Tenant.h).
     hal::BlockBinding Block(size_t i) const;
+
+    // ---- PHASE A1 (out/integration/plan_eye_windows.md): THE EYE'S WINDOWS. -------------------
+    // Rank k's window about an eye is HIERARCHY 4.1's: a box of 16384 texels of rung 3k on the
+    // face the eye stands over, about the eye's own address (4.4: X = u N, a ratio of two planes),
+    // placed modulo 16384 (hal/Tenant.h's banner). Its origin is the eye's address less 8192,
+    // rounded to kWindowStep -- so the box is whole tiles at the window's mips 0..3 -- and held on
+    // the face. It STEPS when the eye's address has left the box's centre by more than
+    // kWindowStep on either axis (4.19's held-set law on the box, the margin in texels of the rank:
+    // the eye drifts that far before the box re-centres). K, the ranks live, is the eye's measure
+    // (RanksAt, HIERARCHY 4.17): 1 + ceil(-L / 3), L = log2 of the pixel's footprint at the eye's
+    // altitude over rank 1's texel on the ground there, clamped to 0..kMaxRanks.
+    static constexpr uint32_t kWindowStep = 1024;   // texels of the rank: quantum and margin both
+    // PHASE B2 (D1): THE STEP IS A WHOLE TILE AT THE FLOOR FOR EVERY TENANT SHARING THE WINDOWS, per
+    // axis: step = the largest tile side of the sharing tenants x 2^3 -- with the height's 256 x 128,
+    // 2048 texels in x and 1024 in y for all four. kWindowStep is the 128 x 128 value, the start.
+    uint32_t step[2] = {kWindowStep, kWindowStep};
+    void ShareWindows(uint32_t texW, uint32_t texH);
+    // PHASE B2 (D4): THE STANDING WINDOW -- a solver's domain: one window of a rank about a fixed
+    // place, held whole before the solver starts (water.swe.bedWait), at slice kStandingSlice of
+    // every tenant. No blocks, no directory. Its rows about any frame `own` (origin `origin`, planet
+    // frame): StandingRows -- one chain entry, its rank said by rank0.
+    static constexpr uint32_t kStandingSlice = 6u + 8u * 5u;
+    hal::BlockBinding standing{};
+    uint32_t standingRank = 0;          // 0 = none
+    double standingCentre[3] = {};      // the place it stands about, planet frame (on the sphere)
+    bool StandAbout(double latDeg, double lonDeg, uint32_t rank);
+    // PHASE B2: the window slices a tenant declares -- every set's ranks (WindowSlice) and the
+    // standing window -- painted by `provider` on the pyramid. One declaration for the four tenants:
+    // slice i is the same ground in all of them (HIERARCHY 4.1).
+    void WindowBlocks(std::vector<hal::BlockSlice>& out, const TileProviderFn& provider,
+                      const char* astField) const;
+    // The standing window's frame: its centre on the sphere and its east / up / north there.
+    Placement StandingFrame() const;
+    // A2: one set a slot of the globe's level table (GlobeLayer::kMaxLevels, held equal there).
+    static constexpr uint32_t kWindowSlots = 8;
+    struct EyeWindows {
+        uint32_t K = 0;
+        hal::BlockBinding box[kMaxRanks];   // rank k + 1's window (rung 3 (k + 1))
+    };
+    // PHASE A3: A WINDOW SET IS THE GROUND'S, NOT THE TABLE'S. There are kWindowSlots sets of K
+    // windows, set w at the slices WindowSlice(w, k); each frame every slot of the level table
+    // claims a set (Assign) -- the one whose boxes already hold its eye, rank for rank, else the
+    // one it held, else a free one -- and the set follows that slot's eye (Follow). A world that
+    // changes its place in the table (the eye goes through a gate: the world that was slot 1 is now
+    // slot 0) keeps its windows and their tiles; nothing is told, nothing is loaded again.
+    // What the tenants are bound to and the walk wants (bound), and what the rows draw (drawn):
+    // the bound windows of the frame before, so a reader never sees a box whose leaving tiles the
+    // manager has not yet been told of (FrameLoop's step). Indexed by SET.
+    EyeWindows bound[kWindowSlots], drawn[kWindowSlots];
+    static constexpr uint32_t kNoSet = 0xFFFFFFFFu;
+    uint32_t slotSet[kWindowSlots] = {0, 1, 2, 3, 4, 5, 6, 7};   // the set each slot reads
+    // The slice of the colour and the mask that holds set `w`'s rank `rank` (1..kMaxRanks).
+    static uint32_t WindowSlice(uint32_t w, uint32_t rank) { return 6u + w * kMaxRanks + rank - 1u; }
+    // The claim: slots 0..n-1 with their eyes (planet frame) take their sets; the other slots none.
+    void Assign(uint32_t n, const double eyes[][3], double pixAng);
+    static uint32_t WindowSlices() { return 6u + kWindowSlots * kMaxRanks + 1u; }   // + the standing
+    // THE MEASURE: the ranks an eye (planet frame, metres) wants on a planet of radius R at a
+    // pixel of angle pixAng; its face and L are handed back for the log.
+    static int RanksAt(const double eye[3], double R, double pixAng, uint32_t* face = nullptr,
+                       double* L = nullptr);
+    // THE STEP: `slot`'s windows about `eye`. drawn takes the windows bound before; then K and the
+    // boxes are found again. The slices whose box changed are appended to `moved` with their new
+    // binding, for the tenants (hal::Tenant::Move).
+    struct Moved {
+        uint32_t slice;
+        hal::BlockBinding to;
+    };
+    // Set `w` about `eye`. `eye` null: no slot claimed the set this frame; it holds no rank (its
+    // slices keep their bindings and their tiles, for the order to release or a slot to claim).
+    void Follow(uint32_t w, const double eye[3], double pixAng, std::vector<Moved>& moved);
+    // A2: each slot's eye (planet frame, doubles) as Assign took it, for its rows (Fill).
+    double slotEye[kWindowSlots][3] = {};
+    uint32_t slotsLive = 1;
+    // A slot's windows as the readers hold them: per rank its planes about the frame `own` (origin
+    // the eye, BlockRows: anchored on the multiple of 16384 nearest it), its box's origin less that
+    // anchor in 16384s, its slice and its mip-0 ground; and K. What Fill writes, and the selftest.
+    struct ChainRows {
+        uint32_t K = 0;
+        FaceWindow::Planes pl[kMaxRanks] = {};
+        float off[kMaxRanks][2] = {};
+        uint32_t slice[kMaxRanks] = {};
+        double ground[kMaxRanks] = {};
+        uint32_t rank0 = 0;   // PHASE B2: entry k is rank rank0 + k + 1 (a standing window starts anywhere)
+    };
+    ChainRows StandingRows(const Placement& own, const double origin[3]) const;
+    // PHASE B2: a kernel's rows -- slot `slot`'s windows as bound now (the boxes this frame's readers
+    // draw), about that slot's eye (slotEye) in the tangent axes; and the slot whose eye stands
+    // nearest a planet point (the bank's rings stand about one), within `reachM`, else ~0.
+    ChainRows SlotRows(uint32_t slot) const;
+    uint32_t SlotNear(const double p[3], double reachM) const;
+    // PHASE B2: A WANT IN A WINDOW'S UV. The rectangles of a window slice (addressed modulo 16384)
+    // that hold the global texels [x0, x1) x [y0, y1) of its rung, clipped to its box: one, two or
+    // four -- what LeafWants does for a node, for any reader. Returns how many.
+    static int SliceRects(const hal::BlockBinding& b, double x0, double y0, double x1, double y1,
+                          float out[4][4]);
+    // ...of the ground within `halfM` metres of a planet direction, or of a lat/lon box (degrees).
+    static int SliceRectsAbout(const hal::BlockBinding& b, const double dir[3], double halfM,
+                               double planetR, float out[4][4]);
+    static int SliceRectsLL(const hal::BlockBinding& b, double lat0, double lon0, double lat1,
+                            double lon1, float out[4][4]);
+    static ChainRows RowsOf(const EyeWindows& w, uint32_t slot, const Placement& own, const double eye[3]);
+    // THE CHAIN, its C++ body (shaders/Window.hlsli is the HLSL one), op for op in float32: each
+    // rank's address FaceWindow::PageTexel over 16384, plus its offset, in [0, 1); the ranks from 1
+    // up to the first that does not hold p. Every rank's address is written; returns the chain's
+    // length.
+    static uint32_t Chain(const float p[3], const ChainRows& rows, WalkStep out[kMaxRanks]);
+    // PHASE B1 (out/integration/plan_phase_b.md): THE ROWS A KERNEL CARRIES (shaders/WindowRows.hlsli
+    // HP_WINDOW_ROWS_DECL, the last rows of the bank's, the churn's and the solver's cbuffers): the
+    // same rows RowsOf gives a level, in the kernels' packing -- rank k + 1's planes U, V, W, the
+    // box's origin less the anchor two ranks a row, the slices of ranks 1..4, then rank 5's and K.
+    struct KernelWindowRows {
+        float u[20], v[20], w[20];
+        float o[12];
+        uint32_t s[8];
+    };
+    static void KernelRows(const ChainRows& rows, KernelWindowRows& out);
     // M12 step 4c: THE TENANTS' OWN WORDS FOR THE DIAGRAM, read off their declarations by
     // Declare() beside the ids and the slices: the node a tenant is (TenantDesc::astNode) and,
     // per binding, the edge it realizes (SliceBinding::astField), its slice range and its
@@ -195,12 +248,11 @@ struct SurfaceFrame {
     // from BathyModel's constants.
     Space::Anchor flat;
 
-    // The Merrimack estuary's shipped surface on a planet of radius planetR: the lattices,
-    // with the two window origins written here and nowhere else. The tenants come later
-    // (Declare), the frame rows from the session.
+    // The shipped surface on a planet of radius planetR: the lattices and the flat chart. The
+    // tenants come later (Declare), the frame rows from the session.
     static SurfaceFrame Merrimack(double planetR, bool stencil);
-    // The tenants, once they exist: ids and page slices read off the declarations. An empty
-    // Tenant (never declared) leaves -1 / UINT32_MAX, as the ints did.
+    // The tenants, once they exist: ids read off the declarations. An empty Tenant (never
+    // declared) leaves -1.
     void Declare(const hal::Tenant& color, const hal::Tenant& height, const hal::Tenant& mask);
     // M12 step 4c: the compose pillar's paint rows, registered from the declaration (the
     // banner). Called by the Assembly after Declare() and before the AST's hand table and its

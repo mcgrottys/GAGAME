@@ -92,6 +92,8 @@ public:
                          uint8_t rgba[4]) = 0;
     // The level it paints on a lattice (DomainSource::OwnMip); -1, every grain.
     virtual int OwnMip(const Lattice&) const { return -1; }
+    // The finest level it has anything of its own for, over a box (radians; DomainSource::FinestMip).
+    virtual int FinestMip(const Lattice& l, double, double, double, double) const { return OwnMip(l); }
     // A source that fetches: true, with the distinct source tiles it refused this run because
     // its fetch budget was spent -- the fetches it WOULD have made. False for every source that
     // never fetches, which is all of them but one.
@@ -287,53 +289,36 @@ struct ComposedSurfaceCb {
     uint32_t u2[4];   // height cube SRV + residency map, height WINDOW SRV + residency map
     uint32_t u3[4];   // GIS survey stencil: window SRV (R8G8 coast,river), global SRV (R8)
     float f[4];       // color cube on, window on, height on, planet radius (m)
-    float merc[4];    // window org px x, org px y, 1/sizePx, full-world px at window zBase
     float g[4];       // height cube max lod, height texel arc (rad), height window max lod,
                       // stencil overlay on
     float r0[4];      // planet->tangent rotation rows (east / up / north)
     float r1[4];
     float r2[4];
-    uint32_t u4[4];   // M7f: detail color window (z17) SRV + residency, fine edit mask SRV
-    float det[4];     // detail uv from window uv: offset xy, scale z; w = fine edit mask on
-    float ground[4];  // M12 step 4f: ground texel (m) at mip 0 -- the cube, the z14 window,
-                      // the z17 detail (Lattice::GroundRes(0)); w spare. Was ed[4], the fine
-                      // edit mask box, dead since M9ay.
-    uint32_t u5[4];   // M9ap PAGES: colour array SRV, array residency SRV, window slice,
-                      // detail slice. u5[0] == ~0 means the old three-tenant path.
-    uint32_t u6[4];   // M9aq HEIGHT PAGES: height array SRV, array residency SRV, window
-                      // slice, z17 detail slice (~0 = none; the lane was spare). u6[0] == ~0
-                      // means the old cube + window tenants.
-    // HIERARCHY 4.17: THE STANDING BLOCKS (SurfaceFrame::blocks), appended so no row above
-    // moves; at most SurfaceFrame::kMaxBlocks, coarsest rung first. Block i: row i of blkU /
-    // blkV / blkW is one of PageTexelUv's planes about the eye's own tangent frame, anchored on
-    // the multiple of 16384 texels of its rung nearest the eye (SurfaceFrame::BlockRows, commit
-    // 3); blkO[2i], blkO[2i + 1] the whole blocks from that anchor to the block's own origin;
-    // blkG[i] its ground (m) at mip 0; blkS[i] its slice of the colour and the mask. blkE is the
-    // eye in the tangent axes about the planet's centre, for a stage with only a direction.
-    // blkN[0] is the count: 0 is today's Mercator pages.
-    float blkU[32];
-    float blkV[32];
-    float blkW[32];
-    float blkG[8];
-    uint32_t blkS[8];
-    float blkO[16];
-    float blkE[4];
-    uint32_t blkN[4];
-    // HIERARCHY 4.17 commit 4: the directory (SurfaceFrame::directory on the GPU): its SRV and
-    // its slices. UINT32_MAX: none, and no block is found.
-    uint32_t dirU[4];
-    // THE ANCHOR OF EVERY MERCATOR READ (plan_address.md; PageSample.hlsli's PageMercAbout),
-    // appended at the END: the camera's own eye (SurfaceFrame::eye, the point the level-0 mesh
-    // records' geo is relative to), from doubles. eyeA = sin phi, cos phi, R_E cos phi, R_E;
-    // eyeE / eyeN / eyeU its own east, north and up in the tangent axes, w = the z14 and z17
-    // world px / 2 pi; eyeT the eye in the tangent axes less (0, R, 0); eyePx its px less the
-    // window's origin, z14 then z17.
-    float eyeA[4];
-    float eyeE[4];
-    float eyeN[4];
-    float eyeU[4];
+    float ground[4];  // M12 step 4f: ground texel (m) at the cube's mip 0 (Lattice::GroundRes(0));
+                      // yzw spare (PHASE B3: the pages' grounds are gone).
+    uint32_t u5[4];   // M9ap PAGES: colour array SRV, array residency SRV; zw spare (PHASE B3).
+                      // u5[0] == ~0 means the old three-tenant path.
+    uint32_t u6[4];   // M9aq HEIGHT PAGES: height array SRV, array residency SRV; zw spare
+                      // (PHASE B3). u6[0] == ~0: a height cube alone (Mars).
+    // THE CAMERA'S EYE (plan_address.md), appended at the END: the eye in the tangent axes less
+    // (0, R, 0), from doubles (SurfaceFrame::eye) -- CsPointOfDir's. PHASE B3: the Mercator
+    // anchor's other rows (eyeA, eyeE, eyeN, eyeU, eyePx) and merc, u4, det are deleted.
     float eyeT[4];
-    float eyePx[4];
+    // PHASE A2 (out/integration/plan_eye_windows.md): THE EYE'S WINDOWS, PER LEVEL, appended at the
+    // END (the standing blocks' 35 rows above are gone, both sides at once). Slot s of the frame's
+    // level table (0 the camera, then the Droste levels and the gate worlds), rank k + 1, at row
+    // 5 s + k: winU / winV / winW PageTexelUv's planes about THAT slot's own eye (its tangent
+    // frame's axes, origin its eye: the frame its mesh records' geo lives in), anchored on the
+    // multiple of 16384 texels nearest it; winO the box's origin less that anchor in 16384s, two
+    // (slot, rank) a row; winS its slice of the colour and the mask, four a row; winK the ranks
+    // live per slot, four a row; rankG rank k + 1's ground (m) at mip 0, the pyramid's own.
+    float winU[160];
+    float winV[160];
+    float winW[160];
+    float winO[80];
+    uint32_t winS[40];
+    uint32_t winK[8];
+    float rankG[8];
 };
 
 // M12 step 2b: THE FRAME moved to core/Lattice.h and became the LATTICE every tree and

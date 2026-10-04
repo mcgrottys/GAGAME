@@ -23,6 +23,10 @@ namespace ga {
 // stored). The residency manager clears it before its provider call and reads it
 // after, on the same thread; a tile not whole is not delivered.
 inline thread_local bool g_tileIncomplete = false;
+// PHASE A4 (HIERARCHY 4.20, the third clause), the same channel: set by a tree whose tile is
+// finer than every source's own level, so the level above magnified -- no bytes; the manager
+// maps nothing for it and the reader's residency byte names the parent.
+inline thread_local bool g_tileMagnified = false;
 
 // A provider fills one 64KB tile's worth of LINEAR data for a texture tenant. Runs on a worker
 // thread; must be self-contained and cache-first (HTTP providers throttle themselves and honor

@@ -85,6 +85,9 @@ public:
         return true;
     }
     int OwnMip(const Lattice& l) const override { return m_src ? m_src->OwnMip(l) : -1; }
+    int FinestMip(const Lattice& l, double a, double b, double c, double d) const override {
+        return m_src ? m_src->FinestMip(l, a, b, c, d) : -1;
+    }
     // The tile-wise path needs the per-tile context the point API cannot carry: BeginTile is
     // where the vector GIS mask sweeps its rings once per tile. Exposed so TileTree can run it.
     ColorSource* Raw() const { return m_src; }

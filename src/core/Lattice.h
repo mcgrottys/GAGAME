@@ -188,6 +188,10 @@ struct Lattice {
     // GroundRes and askew; a Mercator texel is GroundRes x cos(lat) on both.
     void TexelGround(uint32_t mip, double latRad, double lonRad, double& alongU,
                      double& alongV) const;
+    // The level of a grain at a place: the coarsest mip whose texel there (TexelGround, either
+    // axis) is no coarser than grainM, so nothing of the grain is lost; 0 where even mip 0 is
+    // coarser; -1 for no grain (grainM <= 0: a source that answers at every level).
+    int LevelOf(double grainM, double latRad, double lonRad) const;
 
     // ---- the declarations a frame carried nowhere ---------------------------------------------
     // The projection family this lattice is flat in (Projections.h for the exact forms).
@@ -222,14 +226,6 @@ struct Lattice {
     bool SameGround(const Lattice& o) const {
         return kind == o.kind && texW == o.texW && texH == o.texH && faceDim == o.faceDim &&
                orgPxX == o.orgPxX && orgPxY == o.orgPxY && zBase == o.zBase;
-    }
-    // The constant-buffer row every kernel repeats by hand: origin px x, origin px y,
-    // 1 / page texels, world px at zBase (ComposedSurfaceCb::merc, WaterBank's winA).
-    void Rows(float out[4]) const {
-        out[0] = static_cast<float>(orgPxX);
-        out[1] = static_cast<float>(orgPxY);
-        out[2] = static_cast<float>(faceDim > 0 ? 1.0 / double(faceDim) : 0.0);
-        out[3] = static_cast<float>((1ll << zBase) * 256ll);
     }
     // World pixels at zBase (the Mercator closed form, the closed forms WaveFieldSource::Align used to carry).
     double WorldPx() const { return double((1ll << zBase) * 256ll); }

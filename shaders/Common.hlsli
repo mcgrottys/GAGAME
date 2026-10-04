@@ -113,6 +113,9 @@ SamplerState sPointClamp  : register(s2);     // for fields that must NOT be fil
 // miss must still degrade to the best RESIDENT ancestor, never to unmapped garbage.
 // PIXEL SHADERS ONLY: Sample() needs derivatives. The height path stays on SampleLevel.
 SamplerState sAniso       : register(s3);
+// PHASE A1: s3 that WRAPS, for the eye's windows (placed modulo 16384, HIERARCHY 4.1). Their
+// residency gathers take s1, the trilinear that wraps.
+SamplerState sAnisoWrap   : register(s4);
 
 #ifndef GA_NO_FIELD_BUFFER
 // Bilinear. Correct for scalars, vectors and independent-channel packings.
@@ -360,52 +363,33 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
     uint4  gCsU3;   /* M9ay survey MASK PAGES: array SRV, array residency, cube SRV, cube \
                        residency (r = water coverage, b = edited, a = surveyed) */ \
     float4 gCsF;    /* color cube on, window on, height on, planet radius (m) */ \
-    float4 gCsMerc; /* window org px x, org px y, 1/sizePx, full-world px at window zoom */ \
     float4 gCsG;    /* height cube max lod, height texel arc (rad), height window max lod, \
                        stencil overlay on */ \
     float4 gCsR0;   /* planet->tangent rotation rows (east / up / north) */ \
     float4 gCsR1; \
     float4 gCsR2; \
-    uint4  gCsU4;   /* M7f: DETAIL color window (z17) SRV + residency, fine edit mask SRV */ \
-    float4 gCsDet;  /* detail uv from window uv: offset xy, scale z; w = fine edit mask on */ \
-    float4 gCsGround; /* M12 step 4f: ground texel (m) at mip 0 -- cube, z14 window, z17 \
-                         detail (Lattice::GroundRes(0)); w spare. Was gCsEd, dead since M9ay */ \
-    uint4  gCsU5;   /* M9ap PAGES: colour array SRV, array residency SRV, window slice, \
-                       detail slice. x == ~0 means the old three-tenant path. */ \
-    uint4  gCsU6;   /* M9aq HEIGHT PAGES: height array SRV, array residency SRV, window \
-                       slice, z17 detail slice (~0 = none). x == ~0 means the old cube + \
-                       window tenants. */
-// HIERARCHY 4.17: THE STANDING BLOCKS' ROWS, compiled in only when the scene's key stands -- the
-// engine then defines GA_BLOCK_RANKS, the key's ranks (SurfaceFrame::Ranks); with no key the
-// cbuffer holds them as a pad (the eye's rows follow). ComposedSurfaceCb carries them always.
-#if GA_BLOCK_RANKS
-#define GA_COMPOSED_CB_BLOCK_ROWS \
-    float4 gCsBlkU[8]; /* per standing block (coarsest rung first) PageTexelUv's planes U, V, W \
-                          about the eye's tangent frame, anchored nearest the eye */ \
-    float4 gCsBlkV[8]; \
-    float4 gCsBlkW[8]; \
-    float4 gCsBlkG[2]; /* per block, its ground texel (m) at mip 0 */ \
-    uint4  gCsBlkS[2]; /* per block, its slice of the colour and the mask */ \
-    float4 gCsBlkO[4]; /* per block (two a row), whole blocks from the anchor to its origin */ \
-    float4 gCsBlkE; /* the eye in the tangent axes about the planet's centre */ \
-    uint4  gCsBlkN; /* x = the block count */ \
-    uint4  gCsDirU; /* commit 4: x = the directory's SRV (Walk.hlsli), y = its slices; \
-                       x == ~0 means no directory */
-#else
-// With no key the blocks' 35 rows are held as one pad, so the rows appended after them sit where
-// ComposedSurfaceCb has them (the C++ struct carries the blocks always).
-#define GA_COMPOSED_CB_BLOCK_ROWS float4 gCsBlkPad[35];
-#endif
-// THE ANCHOR OF EVERY MERCATOR READ (plan_address.md), appended at the END: the camera's own eye
-// E, the point VsOut.geo is relative to (the level-0 records' eye and sLvlCamAbs), in doubles on
-// the CPU (SurfaceFrame::Fill). PageSample.hlsli's PageMercAbout is formed from these.
+    float4 gCsGround; /* M12 step 4f: ground texel (m) at the cube's mip 0 (Lattice::GroundRes(0)); \
+                         yzw spare (PHASE B3: the pages' grounds are gone) */ \
+    uint4  gCsU5;   /* M9ap PAGES: colour array SRV, array residency SRV; zw spare (PHASE B3: \
+                       the page slices). x == ~0 means the old three-tenant path. */ \
+    uint4  gCsU6;   /* M9aq HEIGHT PAGES: height array SRV, array residency SRV; zw spare \
+                       (PHASE B3). x == ~0: a height cube alone (Mars). */
+// THE CAMERA'S EYE (plan_address.md), appended at the END: for a stage with only a direction
+// (CsPointOfDir), the point VsOut.geo is relative to, in doubles on the CPU (SurfaceFrame::Fill).
+// PHASE B3: the Mercator anchor's other rows (eyeA/E/N/U, eyePx) are deleted.
 #define GA_COMPOSED_CB_EYE_ROWS \
-    float4 gCsEyeA;  /* sin phi, cos phi, rho_E = R_E cos phi, R_E (geocentric) */ \
-    float4 gCsEyeE;  /* the eye's own east in the tangent axes; w = z14 world px / 2 pi */ \
-    float4 gCsEyeN;  /* its north in the tangent axes; w = z17 world px / 2 pi */ \
-    float4 gCsEyeU;  /* its up in the tangent axes; w spare */ \
-    float4 gCsEyeT;  /* the eye in the tangent axes less (0, R, 0): the flat camera; w spare */ \
-    float4 gCsEyePx; /* the eye's px less the window's origin: z14 x, y; z17 x, y */
+    float4 gCsEyeT;  /* the eye in the tangent axes less (0, R, 0): the flat camera; w spare */
+// PHASE A2: THE EYE'S WINDOWS, PER LEVEL (SurfaceFrame::Fill; ComposedSurfaceCb's last rows):
+// slot s's rank k + 1 at row 5 s + k.
+#define GA_COMPOSED_CB_WINDOW_ROWS \
+    float4 gCsWinU[40]; /* PageTexelUv's planes U, V, W about slot s's own eye, anchored on the \
+                           multiple of 16384 texels nearest it */ \
+    float4 gCsWinV[40]; \
+    float4 gCsWinW[40]; \
+    float4 gCsWinO[20]; /* the box's origin less the anchor, in 16384s, two (slot, rank) a row */ \
+    uint4  gCsWinS[10]; /* the slice of the colour and the mask, four a row */ \
+    uint4  gCsWinK[2];  /* K, the ranks live, per slot, four a row */ \
+    float4 gCsRankG[2]; /* rank k + 1's ground texel (m) at mip 0 */
 
 // M12 step 4g: THE ONE SURFACE CONSTANT BUFFER, on the shared layout's b2 (Renderer.h): the
 // frame loop fills ga::ComposedSurfaceCb once a frame through SurfaceFrame::Fill, RenderFrame
@@ -414,8 +398,8 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
 // DxTest's parity gate holds this cbuffer against the C++ struct, row by row.
 cbuffer SurfaceCb : register(b2) {
     GA_COMPOSED_CB_ROWS
-    GA_COMPOSED_CB_BLOCK_ROWS
     GA_COMPOSED_CB_EYE_ROWS
+    GA_COMPOSED_CB_WINDOW_ROWS
 };
 
 // The geometric-algebra toolkit lives in GA.hlsli (M3 moved it out so compute shaders with

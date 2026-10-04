@@ -48,6 +48,7 @@ struct WaterSceneConfig;
 namespace scene {
 class Entity;
 struct PruneSection;
+struct WindowLink;
 }
 }  // namespace ga
 
@@ -94,12 +95,10 @@ std::optional<int> RunOceanProbe(const Options& opt, const TideModel& model, Gpu
 void RunSweUv(const Options& opt, Gpu& gpu, const BathyModel& bathy, SweSolver& swe);
 // --export SPEC: a composed channel out through the manager; exit with the export's code.
 int RunExport(const Options& opt, Gpu& gpu, Compositor& compositor, int hgtCh,
-              ResidencyManager& resMgr, int colCh, const SurfaceFrame& surface);
-// --warm-inlet: pre-cache the composed pyramids. Falls through into the frame loop. winSlice is
-// the colour tenant's z14 page (SurfaceFrame::winSlice, read off the declaration).
+              ResidencyManager& resMgr, int colCh);
+// --warm-inlet: pre-cache the height cube. Falls through into the frame loop.
 void RunWarmInlet(const Options& opt, Gpu& gpu, const Compositor& compositor,
-                  ResidencyManager& resMgr, int winTenant, uint32_t winSlice, int hgtTenant,
-                  int hgtWinTenant);
+                  ResidencyManager& resMgr, int hgtTenant);
 
 // ---- After the frame loop (the scene is live; the run tears down normally afterwards).
 
@@ -120,8 +119,7 @@ void LogLevelsAtCamera(Gpu& gpu, WaterBankLayer* waterBank, const Camera& cam, d
 // --trace lat,lon: one sample through the state diagram, eleven steps to the GPU texel.
 void RunTrace(const Options& opt, Gpu& gpu, SeaLayer* sea, const Compositor& compositor, int hgtCh,
               const WaterAtlas& waterAtlas, WaterBankLayer* waterBank, GlobeLayer* globe,
-              const ResidencyManager& resMgr, double winOrgX, double winOrgY, int hgtTenant,
-              int hgtWinTenant, double simUnix, WeatherManager& weather);
+              const ResidencyManager& resMgr, double simUnix, WeatherManager& weather);
 // --sea-verify: rendered Hs from the displacement textures against the model's.
 void RunSeaVerify(const Options& opt, Gpu& gpu, SeaLayer* sea);
 
@@ -135,7 +133,7 @@ void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double plane
                    const WaterAtlas* atlas, const ExposureSource* exposure,
                    const WaveField* waveField, const SeaLayer* sea, const SeaState* seaState,
                    const SurfaceFrame& surface, double oceanNow, double simUnix,
-                   uint32_t recFrame);
+                   uint32_t recFrame, const std::vector<scene::WindowLink>* windows);
 
 // --bed-trace N: THE BED THE SOLVER READS (app/Tools/BedTrace.cpp). The solver's own BedAt read
 // back through its own kernel (SweSolver::TraceBed) just before the spin-up, just after it, every

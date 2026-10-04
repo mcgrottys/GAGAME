@@ -16,17 +16,12 @@ namespace ga::app::tools {
 // and the compositor keeps writing loose files as it paints, so anything painted after a
 // pack must still be findable the old way.
 int RunPackTiles(const Options&, const SurfaceFrame& surface) {
-    // M12 step 4a: the window realizations are the surface's lattices' own tags
-    // (Lattice::Tag); the z19 inlet is Tools/Export.cpp's export-only realization.
-    const std::string winTag = surface.win.Tag(), detTag = surface.det.Tag(),
-                      winHTag = surface.winH.Tag();
+    // PHASE B3: the cubes alone -- the Mercator windows' realizations are deleted (the eye's
+    // windows are the pyramid's, which the trees pack: --pack-trees).
+    (void)surface;
     const char* jobs[][2] = {
         {"earth.color", "cube16k"},
-        {"earth.color", winTag.c_str()},
-        {"earth.color", detTag.c_str()},
-        {"earth.color", "window_z19_40699567_49405858"},
         {"earth.height", "cube16k"},
-        {"earth.height", winHTag.c_str()},
         {"mars.height", "cube16k"},
     };
     uint32_t total = 0;

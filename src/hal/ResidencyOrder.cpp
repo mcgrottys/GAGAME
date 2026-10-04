@@ -30,7 +30,8 @@ bool ResidencyManager::HeldInSlots(const void* ctx, uint32_t face, uint32_t mip,
 void ResidencyManager::WriteHeldFootprint(Tenant& t, const TileRequest& r, HeldFn held,
                                           const void* ctx) {
     if (r.face >= t.faces || r.mip >= t.mips || t.resMap.width == 0) return;
-    const uint32_t face = r.face, top = t.mips - 1, p0 = face * t.mips;
+    const uint32_t face = r.face, top = TopOf(t, r.face), p0 = face * t.mips;
+    if (r.mip > top) return;   // F1: above the slice's floor no tile is held and no byte speaks
     const uint32_t bw = t.tilings[p0].WidthInTiles, bh = t.tilings[p0].HeightInTiles;
     const uint32_t rdim = t.resMap.width;
     // The map is square and uv-addressed; a mip-0 cell spans sx x sy of its texels
@@ -196,15 +197,30 @@ uint32_t ResidencyManager::RungIndex(const Tenant& t, uint32_t face, uint32_t mi
     return RungIndexOf(r0, mip, t.mips, static_cast<int>(kRungTop), static_cast<int>(kRungs));
 }
 
-bool ResidencyManager::UnderFailed(const Tenant& t, const Tracked* tr) const {
+ResidencyManager::Gate ResidencyManager::ParentGate(const Tenant& t, const Tracked* tr,
+                                                   const Tracked** at) const {
+    // Up the chain to the first HELD ancestor. A refused one on the way (not magnified) makes the
+    // tile unreachable, however far up: its parent can never land under it. Any other ancestor not
+    // held on the way (tracked and coming, or not tracked) makes it wait.
+    if (at) *at = nullptr;
+    bool first = true, waiting = false;
     uint32_t x = tr->req.x, y = tr->req.y;
-    for (uint32_t m = tr->req.mip + 1; m < t.mips; ++m) {
+    for (uint32_t m = tr->req.mip + 1; m <= TopOf(t, tr->req.face); ++m) {
         x >>= 1;
         y >>= 1;
         const Tracked* p = t.slot[StampIndex(t, tr->req.face, m, x, y)];
-        if (p && p->state == TileState::Failed) return true;
+        if (p && p->state == TileState::Failed && p->magnified) continue;   // answered as its parent
+        if (first && at) *at = p;
+        first = false;
+        if (!p) {   // not tracked: not held
+            waiting = true;
+            continue;
+        }
+        if (p->state == TileState::Mapped && p->landed) return waiting ? Gate::Wait : Gate::Open;
+        if (p->state == TileState::Failed) return Gate::Refused;
+        waiting = true;
     }
-    return false;
+    return waiting ? Gate::Wait : Gate::Open;   // the floor reached: no parent above
 }
 
 namespace {
@@ -436,7 +452,7 @@ void ResidencyManager::FindOrphans() {
     cand.erase(std::unique(cand.begin(), cand.end(), [&](const auto& a, const auto& b) { return key(a) == key(b); }),
                cand.end());
     for (const auto& [k, r] : cand) {
-        if (!heldAt(k, r) || r.mip + 1u >= m_tenants[k].mips) continue;
+        if (!heldAt(k, r) || r.mip >= TopOf(m_tenants[k], r.face)) continue;   // F1: a floor has no parent
         if (heldAt(k, TileRequest{r.face, r.mip + 1u, r.x >> 1, r.y >> 1})) continue;
         m_orphans.push_back({k, r});
     }
@@ -448,7 +464,7 @@ uint32_t ResidencyManager::ParentRecInSlots(const void* ctx, uint32_t i) {
     const Tracked* tr = M.m_rec[i].tile;
     const Tenant& t = M.m_tenants[tr->tenant];
     uint32_t x = tr->req.x, y = tr->req.y;
-    for (uint32_t m = tr->req.mip + 1; m < t.mips; ++m) {   // the nearest tracked ancestor
+    for (uint32_t m = tr->req.mip + 1; m <= TopOf(t, tr->req.face); ++m) {   // the nearest tracked ancestor
         x >>= 1;
         y >>= 1;
         const Tracked* p = t.slot[StampIndex(t, tr->req.face, m, x, y)];
@@ -677,11 +693,51 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
     ++passTurns;
     m_passFrame = m_frame;
     // ---- (a) failures and tiles not whole, said by the loads since the last pass: unreachable.
+    std::vector<const Tracked*> refused;   // refused this pass, not held: the guard walks down from them
     for (const auto& [k, r] : m_failedKeys) {
         const Tracked* tr = Find(k, r);
         if (tr && tr->rec != UINT32_MAX) m_rec[tr->rec].flags |= kDeadBit;
+        if (tr && tr->state == TileState::Failed && !tr->magnified) refused.push_back(tr);
     }
     m_failedKeys.clear();
+    // ---- (a'') THE GUARD (4.7 at the moment a parent is refused): a tile held under a parent
+    // refused and not held is released this turn. The loader asks no child before its parent is
+    // held and the version law keeps a refused replacement's tile held, so this should never fire;
+    // its count must read 0.
+    if (!refused.empty()) {
+        // Down from each refused tile through the tracked slots below it (a held tile under it has
+        // a tracked chain to it: the want walk tracks every ancestor of what it asks for).
+        bool compact = false;
+        std::vector<Tracked*> under;
+        std::vector<const Tracked*> stack(refused.begin(), refused.end());
+        while (!stack.empty()) {
+            const Tracked* p = stack.back();
+            stack.pop_back();
+            if (p->req.mip == 0) continue;
+            const Tenant& t = m_tenants[p->tenant];
+            for (uint32_t j = 0; j < 4u; ++j) {
+                Tracked* c = t.slot[StampIndex(t, p->req.face, p->req.mip - 1u, 2u * p->req.x + (j & 1u),
+                                               2u * p->req.y + (j >> 1))];
+                if (!c) continue;
+                if (c->state == TileState::Mapped && c->landed && !c->dropped && c->pos != UINT32_MAX) {
+                    under.push_back(c);
+                }
+                stack.push_back(c);
+            }
+        }
+        for (Tracked* tr : under) {
+            Tenant& t = m_tenants[tr->tenant];
+            const std::shared_ptr<Tracked> keep = t.tracked[tr->pos];
+            if (releasedUnderRefusedTotal < 12) {
+                Log("[residency] order: THE GUARD released %s, held under a refused parent not held",
+                    TileName(MakeKey(tr->tenant, tr->req)).c_str());
+            }
+            Untrack(t, tr);
+            if (DropOne(keep)) compact = true;
+            ++releasedUnderRefusedTotal;
+        }
+        if (compact) std::erase_if(m_mapped, [](const std::shared_ptr<Tracked>& p) { return p->dropped; });
+    }
     // ---- (a') H2, THE HELD SET CLOSED UPWARD UNDER THE MARGIN. A child that lands before its
     // parent (law 3) is held while the parent is not; it would count for the margin and its parent
     // only for its measure, which is no less than the child's but may be less than the margin
@@ -912,6 +968,8 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
     }
     bool compact = false;
     for (Tracked* tr : release) {
+        ++releaseLedger.cut;   // PHASE B2w
+        if (tr->lastSeen + 1u >= m_frame) ++releaseLedger.cutNamed;
         Tenant& t = m_tenants[tr->tenant];
         const std::shared_ptr<Tracked> keep = t.tracked[tr->pos];   // outlives Untrack
         Untrack(t, tr);
@@ -1010,7 +1068,8 @@ void ResidencyManager::Rescue(OrderTurnLedger& L) {
 }
 
 void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
-                                 std::vector<std::shared_ptr<Tracked>>& batch) {
+                                 std::vector<std::shared_ptr<Tracked>>& batch,
+                                 std::vector<std::shared_ptr<Tracked>>& refills) {
     using Clock = std::chrono::steady_clock;
     auto c0 = Clock::now();
     const auto lapTo = [&](int k) {
@@ -1069,16 +1128,80 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
     letGoReadTotal += L.letGoRead;
     lapTo(4);
 
+    // ---- THE VERSION LAW: the replacements of held tiles. A finished load: whole -> a refill (the
+    // swap, in MapAndFill); refused, or its version changed again, or its tile no longer held ->
+    // let go (the old bytes stand; a refusal waits for the tree's next change). Then the asked ones
+    // take the queue first: they are drawn tiles.
+    staleHeld = 0;
+    for (size_t i = 0; i < m_refresh.size();) {
+        Refresh& f = m_refresh[i];
+        Tracked* h = f.held.get();
+        const bool stillHeld = h->state == TileState::Mapped && h->landed && !h->dropped && h->pos != UINT32_MAX;
+        const TileState js = f.job->state;
+        if (js == TileState::Loading) {
+            ++i;
+            continue;
+        }
+        if (!stillHeld) {   // released by the cut or dropped meanwhile: nothing to swap
+            h->stale = false;
+            m_refresh.erase(m_refresh.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+        if (js == TileState::Loaded && !f.again && refills.size() / 2 < kMaxMapsPerFrame / 2) {
+            refills.push_back(f.held);
+            refills.push_back(f.job);
+            m_refresh.erase(m_refresh.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+        if (js == TileState::Failed && !f.again) {   // refused: the old bytes stand, stale
+            ++refreshRefusedTotal;
+            m_refresh.erase(m_refresh.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+        if (js != TileState::Seen) {   // finished, but its version changed again: ask anew
+            auto job = std::make_shared<Tracked>();
+            job->tenant = h->tenant;
+            job->req = h->req;
+            job->refresh = true;
+            f.job = job;
+            f.again = false;
+        }
+        if (m_inFlight < static_cast<int>(kMaxLoadsInFlight)) {
+            f.job->state = TileState::Loading;
+            toLoad.push_back(f.job);
+            ++m_inFlight;
+        }
+        ++i;
+    }
+    for (const Refresh& f : m_refresh) staleHeld += f.held->stale ? 1u : 0u;
+
     // ---- THE LOADER: the first tiles of the order not held and with no job (the last pass's
-    // list; an untrack is an event, so every tile in it is still tracked).
+    // list; an untrack is an event, so every tile in it is still tracked). It STOPS when the queue
+    // is at capacity (after B3: a turn's cost is bounded by the queue, not by the pool); the
+    // settle's exact hold walks on, because its ledger counts every pending tile.
     uint32_t pending = 0;
-    for (const OrderEntry& e : m_need) {
+    m_loaderStop = m_need.size();
+    for (size_t ni = 0; ni < m_need.size(); ++ni) {
+        const OrderEntry& e = m_need[ni];
         Tracked* tr = e.tile;
         if (tr->state == TileState::Mapped && tr->landed) continue;
+        // A tile under a refused parent not held is unreachable as its parent is (until the tree
+        // changes for that parent): never named, and not pending. A tile whose parent is not held
+        // yet is pending and not asked: it comes the turn after its parent lands (4.7).
+        const Gate gate = ParentGate(m_tenants[tr->tenant], tr);
+        if (gate == Gate::Refused) continue;
         ++pending;
-        if (m_inFlight >= static_cast<int>(kMaxLoadsInFlight)) continue;
+        if (m_inFlight >= static_cast<int>(kMaxLoadsInFlight)) {
+            if (!settleExact) {
+                m_loaderStop = ni;
+                pending += static_cast<uint32_t>(m_need.size() - ni - 1);   // the rest, uncounted
+                break;
+            }
+            continue;
+        }
         if (tr->state != TileState::Seen || tr->pos == UINT32_MAX) continue;
-        if (m_failedLoads && UnderFailed(m_tenants[tr->tenant], tr)) continue;   // never named
+        if (gate == Gate::Wait) continue;   // its parent first
+        if (starvePlant != 0 && tr->req.face == starvePlant) continue;   // the watchdog's plant
         if (!m_letGoAt.empty()) {   // the livelock's instrument: read and let go within the glance
             const auto it = m_letGoAt.find(e.key);
             if (it != m_letGoAt.end() && m_frame - it->second <= kGlanceTurns) {
@@ -1094,6 +1217,7 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
     }
     m_orderPending = pending;
     L.pending = pending;
+    StarveWatch();
     if ((m_frame & 63u) == 0u) {
         std::erase_if(m_letGoAt, [&](const auto& kv) { return m_frame - kv.second > kGlanceTurns; });
     }
@@ -1104,7 +1228,7 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
     const size_t made = m_heaps.size() * kPoolChunkTiles;
     const size_t slots = settleExact ? SIZE_MAX
                                      : m_freePool.size() + (made < kPoolCapTiles ? kPoolCapTiles - made : 0u);
-    const size_t maxBatch = (std::min)(static_cast<size_t>(kMaxMapsPerFrame), slots);
+    const size_t maxBatch = (std::min)(static_cast<size_t>(kMaxMapsPerFrame) - refills.size() / 2, slots);
     for (const OrderEntry& e : m_need) {
         if (batch.size() >= maxBatch) break;
         Tracked* tr = e.tile;
@@ -1176,6 +1300,7 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
         for (size_t k = 0; k < m_tenants.size(); ++k) {
             Tenant& t = m_tenants[k];
             uint32_t wanted = 0, mapped = 0, deficit = 0, stale = 0, lost = 0, unreachable = 0;
+            uint32_t magnified = 0;
             for (const auto& sp : t.tracked) {
                 const Tracked* tr = sp.get();
                 const size_t idx = StampIndex(t, tr->req.face, tr->req.mip, tr->req.x, tr->req.y);
@@ -1185,6 +1310,10 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
                     ++wanted;
                     if (tr->state == TileState::Mapped) ++mapped;
                     if (tr->state == TileState::Failed) {
+                        ++(tr->magnified ? magnified : unreachable);
+                        continue;
+                    }
+                    if (!held && ParentGate(t, tr) == Gate::Refused) {   // under a refused parent
                         ++unreachable;
                         continue;
                     }
@@ -1200,10 +1329,12 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
             t.exStale = stale;
             t.exLost = lost;
             t.exUnreachable = unreachable;
+            t.exMagnified = magnified;
             settleTurn.wanted += wanted;
             settleTurn.mapped += mapped;
             settleTurn.deficit += deficit;
             settleTurn.unreachable += unreachable;
+            settleTurn.magnified += magnified;
             settleTurn.stale += stale;
             L.lost += lost;
         }
@@ -1214,6 +1345,128 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
         settleTurn.exact = settleTurn.deficit == 0 && settleTurn.stale == 0 &&
                            settleTurn.pending == 0 && settleTurn.reads == 0 &&
                            settleTurn.retiring == 0;
+    }
+}
+
+// THE WATCHDOG (Residency.h): starved = in the first P, not held, no load in flight, no retiring
+// slot; in flight = Loading, Loaded (waiting for the gather) or Mapped with its bytes not landed.
+void ResidencyManager::StarveWatch() {
+    starvedNow = starvedPast = stuckPast = 0;
+    if (m_need.empty()) return;
+    // THE PRINT'S OWN COST: whole lines are capped a turn (kStarveLinesPerTurn, the first in the
+    // order); every tile due a line is counted by its reason in one summary line instead.
+    uint32_t lines = 0, due = 0;
+    std::vector<std::pair<std::string, uint32_t>> byWhy;
+    std::vector<uint64_t> ret;
+    for (const Retiring& R : m_retiring) ret.push_back(MakeKey(R.tile->tenant, R.tile->req));
+    std::sort(ret.begin(), ret.end());
+    // Only the entries the loader passed over this turn (to where the queue stopped it): the rest
+    // wait behind the queue, which is latency, not a stall.
+    const size_t walk = (std::min)(m_loaderStop, m_need.size());
+    for (size_t ni = 0; ni < walk; ++ni) {
+        const OrderEntry& e = m_need[ni];
+        Tracked* tr = e.tile;
+        const bool held = tr->state == TileState::Mapped && tr->landed;
+        const bool flight = tr->state == TileState::Loading || tr->state == TileState::Loaded ||
+                            (tr->state == TileState::Mapped && !tr->landed);
+        const bool retiring = std::binary_search(ret.begin(), ret.end(), e.key);
+        uint8_t cls = held || retiring ? 0 : flight ? 2 : 1;
+        if (cls == 1) {
+            // Under a refused parent: unreachable, not starved. Waiting on a TRACKED parent: latency
+            // behind it (the parent is watched itself). Waiting on an untracked one stays starved.
+            const Tracked* at = nullptr;
+            const Gate g = ParentGate(m_tenants[tr->tenant], tr, &at);
+            if (g == Gate::Refused || (g == Gate::Wait && at)) cls = 0;
+        }
+        if (cls == 0) {
+            tr->starveClass = 0;
+            continue;
+        }
+        if (tr->starveClass != cls || tr->starveSeen + 1u != m_frame) {
+            tr->starveSince = m_frame;
+            tr->starvePrinted = 0;
+        }
+        tr->starveClass = cls;
+        tr->starveSeen = m_frame;
+        if (cls == 1) ++starvedNow;
+        const uint32_t age = m_frame - tr->starveSince;
+        const uint32_t past = cls == 1 ? kGlanceTurns : kStarvePrintTurns;
+        if (age <= past) continue;
+        ++(cls == 1 ? starvedPast : stuckPast);
+        if (tr->starvePrinted != 0 && m_frame - tr->starvePrinted < kStarvePrintTurns) continue;
+        tr->starvePrinted = m_frame;
+        ++starvedPrinted;
+        ++due;
+        // Its whole state: the reader's statement, its slot, and why no load was started.
+        const Tenant& t = m_tenants[tr->tenant];
+        std::string readers = "none", why;
+        float dist = 0.0f, meas = 0.0f;
+        uint32_t stamp = 0, bucket = kNoBucket;
+        if (tr->rec != UINT32_MAX) {
+            const OrdRec& r = m_rec[tr->rec];
+            readers.clear();
+            for (int i = 0; i < kMaxSamplers; ++i) {
+                if (!((r.mask >> i) & 1u)) continue;
+                if (!readers.empty()) readers += "+";
+                readers += SamplerName(i);
+            }
+            if (readers.empty()) readers = "none";
+            dist = BitsWeight(r.weight);
+            memcpy(&meas, &r.meas, sizeof(meas));
+            stamp = r.stamp;
+            bucket = r.bucket;
+        }
+        const char* st = tr->state == TileState::Seen ? "Seen" : tr->state == TileState::Loading ? "Loading"
+                         : tr->state == TileState::Loaded ? "Loaded" : tr->state == TileState::Mapped ? "Mapped"
+                         : tr->state == TileState::Failed ? "Failed" : "?";
+        if (cls == 2) {
+            why = tr->state == TileState::Mapped ? "mapped, its bytes never landed (the copy's fence)"
+                  : tr->state == TileState::Loaded ? "loaded, never gathered (no slot given to it)"
+                                                   : "its load never returned";
+        } else if (tr->state == TileState::Failed) {
+            why = tr->magnified ? "magnified (the tree answered it as its parent; never mapped, by law)"
+                                : "failed (" + std::to_string(tr->retries) + " retries)";
+        } else if (tr->pos == UINT32_MAX) {
+            why = "untracked";
+        } else if (m_inFlight >= static_cast<int>(kMaxLoadsInFlight)) {
+            why = "the queue full (" + std::to_string(m_inFlight.load()) + " in flight of " +
+                  std::to_string(kMaxLoadsInFlight) + ")";
+        } else if (ParentGate(t, tr) == Gate::Wait) {
+            why = "its parent is not tracked (never asked)";
+        } else if (starvePlant != 0 && tr->req.face == starvePlant) {
+            why = "PLANTED: --starve-plant skips its slice";
+        } else {
+            why = "NOTHING: the loader passed it with room in the queue";
+        }
+        {
+            // The reason's kind (a failed parent's name stripped), for the summary.
+            const std::string kind = why.substr(0, why.find(" earth") == std::string::npos ? why.find(" (")
+                                                                                            : why.find(" earth"));
+            bool found = false;
+            for (auto& [k, n] : byWhy) {
+                if (k == kind) { ++n; found = true; break; }
+            }
+            if (!found) byWhy.push_back({kind, 1u});
+        }
+        if (lines >= kStarveLinesPerTurn) continue;
+        ++lines;
+        const std::string global = t.namer ? t.namer(tr->req) : std::string();
+        const std::string slot = tr->pool == UINT32_MAX ? std::string("none") : std::to_string(tr->pool);
+        Log("[%s] f%u | %s%s%s | %s for %u turns (since f%u) | state %s, slot %s | readers %s, last "
+            "stamp f%u, distance %.0f m, measure %.4g, bucket %s %u 2^-%u | why no load: %s | in flight "
+            "%d, retiring %zu, first P not held %zu",
+            cls == 1 ? "starved" : "stuck", m_frame, TileName(e.key).c_str(), global.empty() ? "" : " = ",
+            global.c_str(), cls == 1 ? "starved" : "in flight", age, tr->starveSince, st, slot.c_str(),
+            readers.c_str(), stamp, dist, meas, bucket == kNoBucket ? "-" : (bucket / kRungs < 3u ? "pin" : "want"),
+            bucket == kNoBucket ? 0u : (bucket / kRungs) % 3u, bucket == kNoBucket ? 0u : bucket % kRungs,
+            why.c_str(), m_inFlight.load(), m_retiring.size(), m_need.size());
+    }
+    if (due > lines) {
+        std::string w;
+        for (const auto& [kd, n] : byWhy) w += " " + std::to_string(n) + " " + kd + ";";
+        Log("[starved] f%u | %u more past the glance this turn (whole lines capped at %u) -- by why:%s | "
+            "starved now %u, past the glance %u, stuck %u",
+            m_frame, due - lines, kStarveLinesPerTurn, w.c_str(), starvedNow, starvedPast, stuckPast);
     }
 }
 

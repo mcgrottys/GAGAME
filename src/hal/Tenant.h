@@ -139,6 +139,19 @@
 //  No shipped tenant declares a block. The [tenant-binding] selftest (hal/TenantTest.cpp)
 //  reaches the dispatch and the routing through Unregistered(), the same declaration with no
 //  manager and no GPU.
+//
+//  PHASE A1 (plan_eye_windows.md): A WINDOW ABOUT AN EYE. HIERARCHY 4.1's window is the same
+//  binding with an origin that is not a block's: (bx, by) 16384 + (sx, sy) texels of its rung, the
+//  box of 16384 texels a side the eye stands in, placed MODULO 16384. A slot then holds the global
+//  tile whose index is the slot's modulo the slice's tiles a side -- at mip m the box's own tiles,
+//  [O_m, O_m + tiles), O_m = origin / (tile << m) -- so when the box steps, a tile still inside it
+//  keeps its slot and its bytes, and only the slots whose global tile changed are told so (Move):
+//  the tree's change law said in reverse, one Invalidate a slot. The origin is a multiple of 1024
+//  texels, so the box is whole tiles at mips 0..3 -- the window's own three rungs and its FLOOR
+//  (4.1) -- and those mips nest slot for slot (a parent slot is its child's >> 1). The slice's
+//  further mips exist because an array has one mip count; they are not read for a window (the
+//  shaders stop at mip 3, Compose.hlsli) and Move leaves them as they are: today's manager asks
+//  their slots for its parent chain, nothing more. An aligned block is the window with sx = sy = 0.
 // ================================================================================================
 #pragma once
 
@@ -191,6 +204,20 @@ struct BlockBinding {
     uint32_t face = 0;
     int rung = 0;              // 0 = today's cube (16384 a face); r has 16384 2^r a face
     uint32_t bx = 0, by = 0;   // the block's origin is (bx, by) 16384 texels of the rung
+    uint32_t sx = 0, sy = 0;   // ...plus (sx, sy) texels: a window's origin within that block
+                               // (Phase A1: a multiple of the slice's mip-3 tile; 0 = a block)
+
+    // The origin, texels of the rung at mip 0.
+    uint64_t OrgX() const { return uint64_t(bx) * Lattice::kFaceDim + sx; }
+    uint64_t OrgY() const { return uint64_t(by) * Lattice::kFaceDim + sy; }
+    // The window whose origin is (ox, oy) texels of `rung` on `face`.
+    static BlockBinding At(uint32_t face, int rung, uint64_t ox, uint64_t oy) {
+        return BlockBinding{face, rung, uint32_t(ox / Lattice::kFaceDim), uint32_t(oy / Lattice::kFaceDim),
+                            uint32_t(ox % Lattice::kFaceDim), uint32_t(oy % Lattice::kFaceDim)};
+    }
+    bool operator==(const BlockBinding& o) const {
+        return face == o.face && rung == o.rung && OrgX() == o.OrgX() && OrgY() == o.OrgY();
+    }
 
     // The lattice every block stands on, in a tile shape; its Tag() names the tree's changes.
     static Lattice Pyramid(uint32_t texW, uint32_t texH) {
@@ -200,6 +227,11 @@ struct BlockBinding {
     // down to the level one tile spans (AddTextureInternal) -- 8 for 128x128, 7 for 256x128. A
     // shape that is not a power of two on each axis, or wider than a slice, tiles no block: 0.
     static uint32_t Mips(uint32_t texW, uint32_t texH);
+    // F1 (HIERARCHY 4.1): a window's FLOOR, the coarsest mip a block slice holds -- its own three
+    // rungs and the floor, the ground of the rank above's mip 0. The manager holds, wants and
+    // speaks of nothing above it (ResidencyManager::Tenant::sliceTop); the reader stops there too
+    // (Compose.hlsli kCsWindowFloor).
+    static constexpr uint32_t kFloorMip = 3;
     // Slot to global: the pyramid's tile that the slot (x, y) at the slice's mip holds. False
     // for a slot outside the slice's grid or at a mip the slice does not carry. slot.face is not
     // read: which slice it is, is the caller's.
@@ -208,13 +240,14 @@ struct BlockBinding {
     // and the slot if so (slot.face 0: the slice is the caller's).
     bool Slot(const TileRequest& global, uint32_t texW, uint32_t texH, TileRequest& slot) const;
     // The block's ground: its face-uv box, exact (a block's width is 2^-rung). The four corner
-    // directions follow through ComposeCubeDir(face, u, v).
+    // directions follow through ComposeCubeDir(face, u, v). A window's is its box's.
     void Ground(double& u0, double& v0, double& u1, double& v1) const;
     // The ground resolution of the slice's mip m: the pyramid's at mip 17 - rung + m.
     double GroundRes(uint32_t mip) const;
     // Empty when the block may be bound at `slice`; else why not: a rung outside 0 to 17, a face
     // that is not the cube's, a block outside its face, or one of the cube's own six slices.
-    std::string Refusal(uint32_t slice) const;
+    // PHASE B2 (D1): in the tenant's tile shape -- a window's origin is a whole tile at the floor.
+    std::string Refusal(uint32_t slice, uint32_t texW = 128, uint32_t texH = 128) const;
 };
 
 // The declaration of a slice by a block, beside the slices declared by a lattice. The provider
@@ -270,8 +303,14 @@ public:
     bool Valid() const { return m_s != nullptr; }
     // The lattice slice `slice` sits on; null for an unbound slice and for a block slice.
     const Lattice* LatticeOf(uint32_t slice) const;
-    // The block a block slice stands for; null for any other slice.
-    const BlockBinding* BlockOf(uint32_t slice) const;
+    // The block a block slice stands for (a copy: a window's moves); false for any other slice.
+    bool BlockOf(uint32_t slice, BlockBinding& out) const;
+    // PHASE A1: THE WINDOW STEPS (the banner). Slice `slice` now stands for `to`; every slot of its
+    // window mips (0..3) whose global tile changed is invalidated, and every other keeps its tile,
+    // its slot and its bytes. Returns the slots invalidated (the same number enter as leave: a slot
+    // is the place of one identity at a time). Main thread; the dispatcher reads the binding under
+    // the same lock from the loaders.
+    uint32_t Move(uint32_t slice, const BlockBinding& to);
     // The first slice of the binding whose lattice.Tag() is `latticeTag`; an undeclared tag
     // routes to the cube binding (else the first) and is said once.
     uint32_t SliceOf(const std::string& latticeTag) const;

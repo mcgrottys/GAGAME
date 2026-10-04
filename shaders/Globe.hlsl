@@ -118,6 +118,14 @@ cbuffer GlobeCb : register(b1) {
     float4 gChartN;     // its north in the tangent frame; w = the same, cascade 1
     // Appended at the END (priors 22): the constant along north, wrapped to cascade 2; yzw spare.
     float4 gChartCn;
+    // Phase A0: THE TWO-WORLDS PROBE (--ground-probe; ResidencyLens.hlsl's BlockProbe), appended
+    // at the END (priors 22): G's planet direction, w = slots filled; per slot G less its eye.
+    float4 gProbeG;
+    float4 gProbeP[8];
+    // Phase B0: the probe's height and exposure lanes, appended at the END (priors 22): x = the
+    // exposure's array SRV, y = its residency SRV, z = the height windows' floor mip, w = the
+    // exposure windows' floor mip (~0 = that tenant has no windows).
+    uint4 gProbeX;
 };
 
 // A point's coordinate in that plane, for cascade c: WaveChart::UOf, u = (P - org) . e + off,
@@ -673,8 +681,8 @@ VsOut VsMain(uint vid : SV_VertexID, uint inst : SV_InstanceID) {
     // articulate (the deepest vertex spacing); finer height texels feed PIXEL normals instead.
     const float vlod = max(ComposedHeightLod(d0, gWavesB.z), 3.0f);
     // The address: this path has no double-precision anchor, so its point is the direction's
-    // (CsPointOfDir, the grain the blocks' fallback takes too).
-    float h = ComposedHeight(dir, CsPointOfDir(dir), vlod);
+    // (CsPointOfDir, about the camera's eye: the camera's level's windows).
+    float h = ComposedHeightAt(dir, CsPointOfDir(dir), vlod, 0u);
 
     // M6g foundation sink: inside the CUDEM window the ESTUARY mesh is this same surface at
     // 13.7 m; the globe dips a few metres under it (feathered -- continuous) so the sharp data
@@ -839,10 +847,12 @@ WaterOptics SampleWaterOptics(float latDeg, float lonDeg) {
 // the frame is its screen derivative.
 // pA is the pixel's address point (PsMain's), `own` whether it is geo (the camera's own level):
 // the bed's point is then the ray's own, pA lifted to the surface the ray leaves plus s along it;
-// another level's bed has only its direction.
+// another level's bed has only its direction -- for the Mercator height. PHASE A2: the colour's
+// windows are every level's own, so the bed's colour point is the ray's in every level: geo, the
+// pixel's point relative to its level's eye, lifted and walked the same way (slot lvl).
 float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 rel, float2 wxz,
                        float hp, float latDeg, float lonDeg, float lod, float day, float footPx,
-                       float2 fpxW, float2 fpzW, float3 pA, bool own) {
+                       float2 fpxW, float2 fpzW, float3 pA, bool own, float3 geo, uint lvl) {
     const float3 v = normalize(-rel);
 
     // ---- THE VOLUME'S OPTICS. K_d and the scattering endpoint are MADE by chlorophyll,
@@ -992,6 +1002,7 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
     float sDown = depthW;      // the vertical closed form: exact where parallax is subpixel
     float3 bedDir = up;
     float3 bedP = pA;
+    float3 bedW = geo;   // the bed's point in its level (the windows' address)
     if (footPx < 30.0f && depthW > 0.01f && depthW < 90.0f) {
         // Under 30 m footprints the march MATTERS -- looking through a wave face shifts the
         // bar, and that shift is the whole reason this path is per pixel.
@@ -1020,18 +1031,19 @@ float3 WaterPixelColor(float3 up, float3 upT, float3 east, float3 north, float3 
         [unroll] for (int itr = 0; itr < 2; ++itr) {
             const float altP = (a0 + sP * mu) + sP * sP * tPerp2 / twoR;
             const float3 dirP = normalize(upT + (sP / (gGlo.x + altP)) * tPerp);
-            const float3 pP = own ? pA + upT * a0 + sP * tDir : CsPointOfDir(CsToPlanet(dirP));
-            const float gap = altP - ComposedHeight(CsToPlanet(dirP), pP, lod);
+            // PHASE B2: the bed under the ray at its own point in its level, through its level's windows.
+            const float gap = altP - ComposedHeightAt(CsToPlanet(dirP), geo + upT * a0 + sP * tDir, lod, lvl);
             sP = clamp(sP + gap / muD, 0.3f, 140.0f);
         }
         const float altB = (a0 + sP * mu) + sP * sP * tPerp2 / twoR;   // at the landing
         bedDir = CsToPlanet(normalize(upT + (sP / (gGlo.x + altB)) * tPerp));
         bedP = own ? pA + upT * a0 + sP * tDir : CsPointOfDir(bedDir);
+        bedW = geo + upT * a0 + sP * tDir;
         sDown = sP;
     }
     const float3 Tw = exp(-wq.kd * (sDown + depthW));
     const float3 bedAlb = (ComposedColorOn() && gStreamF.z < 0.5f)
-                              ? ComposedColor(bedDir, bedP CS_WALK_AT(bedDir))
+                              ? ComposedColor(bedDir, bedP CS_WALK_AT(bedW, lvl))
                               : float3(0.44f, 0.40f, 0.31f);
     // THE TRANSLUCENCY. Albedos mix and the surface lights ONCE -- the engine's radiometry
     // everywhere else -- so this path cannot disagree with the vertex path about EXPOSURE,
@@ -1101,6 +1113,72 @@ float4 PsWireFlat(VsOut i) : SV_Target {
     return float4(f * 2.2f, f * 2.2f, f * 2.3f, 1.0f);
 }
 
+// THE CLOUD MARCH, IN SMALL NUMBERS. It used to march p = eye + rd t sphere-centred (|p| ~ 6.4e6 m,
+// a float ulp of half a metre) and take the radius off |p| -- every sample's altitude out by up
+// to 0.5 m, differently per pixel, and the shell's entry likewise (|ro|^2 - top^2). Here the eye
+// is an altitude a0 (from its flat offsets: |c + R y|^2 - R^2 = |c|^2 + 2 R c.y, no radius
+// against a radius) and every point of the ray is an altitude and a direction from t alone,
+// EXACTLY (not to second order: the ray reaches hundreds of km):
+//     |p|^2 - r0^2 = t (2 r0 mu + t),  alt(t) = a0 + t (2 r0 mu + t) / (|p| + r0),
+//     dir(t) = normalize(upE + t / (r0 + t mu) tPerp),  r0 = R + a0, mu = rd . upE,
+// and the sun-ward sample (900 m up the radial and 900 m toward the sun) the same way from its
+// own point: q = r1 d + 900 sun, r1 = R + alt + 900, |q|^2 - r1^2 = 900 (2 r1 (d . sun) + 900).
+// The per-pixel jitter is the design's (step-banding into noise) and stays.
+float CloudMarch(float3 rel, float2 pix, out float3 scat) {
+    scat = 0.0f;
+    const float3 ro = sLvlCamAbs;   // M10: the level's own eye marches its own sky
+    const float3 rd = normalize(rel);
+    const float R = gGlo.x, H = gCloudA.y;
+    const float3 c = float3(ro.x, sLvlEyeY, ro.z);   // the eye about the anchor, small
+    const float a0 = (dot(c, c) + 2.0f * R * c.y) / (length(ro) + R);
+    const float r0 = R + a0;
+    const float3 upE = normalize(ro);
+    const float mu = dot(rd, upE);
+    const float3 tPerp = rd - mu * upE;
+    const float b = r0 * mu;
+    const float cc = (a0 - H) * (2.0f * R + a0 + H);   // r0^2 - (R + H)^2
+    const float disc = b * b - cc;
+    if (disc <= 0.0f) return 1.0f;
+    const float tShell = -b - sqrt(disc);                  // entering the cloud shell
+    const float t0 = max(tShell, 0.0f);
+    const float t1 = length(rel);                          // the ground
+    const float span = t1 - t0;
+    if (span <= 1.0f) return 1.0f;
+    const uint kSteps = 14;
+    const float dt = span / kSteps;
+    // Per-pixel jitter turns residual step-banding into noise the eye forgives.
+    const float jit = frac(sin(dot(pix, float2(12.9898f, 78.233f))) * 43758.5f);
+    float T = 1.0f;
+    const float muS = dot(rd, GA_SUN_DIR);
+    const float phase = 0.55f + 0.45f * muS;            // cheap forward lobe
+    [loop] for (uint s = 0; s < kSteps && T > 0.02f; ++s) {
+        const float t = t0 + (s + jit) * dt;
+        const float q = t * (2.0f * r0 * mu + t);
+        const float alt = a0 + q / (sqrt(r0 * r0 + q) + r0);
+        if (alt < 0.0f || alt > H) continue;
+        const float3 pdT = normalize(upE + (t / (r0 + t * mu)) * tPerp);
+        const float3 uvw = float3(ReliefUv(CsToPlanet(pdT)), alt / H);   // texturing: planet lat/lon
+        const float dens = gTex3D[gTexIdx.w].SampleLevel(sLinearClamp, uvw, 0).x;
+        if (dens <= 0.0f) continue;
+        const float sigma = dens * gCloudA.x;
+        const float stepT = exp(-sigma * dt);
+        // One sun-ward sample above approximates self-shadowing. Geometry stays
+        // tangent (shared sun); only the texture lookup rotates to planet.
+        const float r1 = R + (alt + 900.0f);
+        const float q1 = 900.0f * (2.0f * r1 * dot(pdT, GA_SUN_DIR) + 900.0f);
+        const float altL = (alt + 900.0f) + q1 / (sqrt(r1 * r1 + q1) + r1);
+        const float3 luvw = float3(ReliefUv(CsToPlanet(normalize(pdT + (900.0f / r1) * GA_SUN_DIR))),
+                                   altL / H);
+        const float lDens = gTex3D[gTexIdx.w].SampleLevel(sLinearClamp, luvw, 0).x;
+        const float sunT = exp(-lDens * gCloudA.x * 1500.0f) *
+                           saturate(dot(pdT, GA_SUN_DIR) * 3.0f + 0.1f);
+        const float3 cloudCol = SUN_IRR_C * (sunT * phase * gCloudA.z + 0.06f) + 0.02f;
+        scat += T * (1.0f - stepT) * cloudCol;
+        T *= stepT;
+    }
+    return T;
+}
+
 float4 PsMain(VsOut i) : SV_Target {
     // M10: THE GAUGE FIRST. i.rel, the eye, the sun and the bank set are all the drawing
     // level's own; everything below is the root's shading, unchanged, run in that frame.
@@ -1117,14 +1195,11 @@ float4 PsMain(VsOut i) : SV_Target {
     // another level, a Droste globe or a window's world, has only its direction.
     const bool ownLvl = (i.lvl == 0u);
     const float3 pA = ownLvl ? i.geo : CsPointOfDir(up);
-#if GA_BLOCK_RANKS
-    // HIERARCHY 4.17: THE CHAIN, found once for the pixel and handed to every read below (CS_WC):
-    // the blocks under its undisplaced ground point, which the mesh stage carried eye-relative in
-    // the camera's own level (slot 0, whose frame the rows are about). A fragment of another level,
-    // a Droste globe or a window's world, has only its direction, taken into the root's frame at
-    // the direction's grain.
-    const WalkChain wc = CsWalk(up, pA);
-#endif
+    // THE CHAIN, found once for the pixel and handed to every read below (CS_WC): the windows of
+    // the pixel's OWN level (PHASE A2) that hold its undisplaced ground point, relative to that
+    // level's eye -- the mesh stage's geo in every level, the frame that level's rows are about.
+    // (pA, the Mercator height's point, stays the camera's until Phase B moves the height.)
+    const WalkChain wc = CsChain(i.geo, i.lvl);
     const float3 v = normalize(-i.rel);   // TANGENT frame: geometry + lighting (M6g)
     const float lat = asin(clamp(up.y, -1.0f, 1.0f));
     const float lonDeg = degrees(atan2(up.z, up.x));
@@ -1167,7 +1242,8 @@ float4 PsMain(VsOut i) : SV_Target {
     // vertex height (i.h) is footprint-floored for displacement (~5 km) and foundation-sunk
     // in the estuary window -- gating on it smeared whole towns below sea level. hp is what
     // the data says HERE, at this pixel's own resolution.
-    const float hp = ComposedHeightOn() ? ComposedHeight(up, pA, lod) : i.h;
+    // PHASE B2: the height on the pixel's OWN level's windows, at its own point (the chain above).
+    const float hp = ComposedHeightOn() ? ComposedHeightChain(up, lod CS_WC) : i.h;
     // The land's sun: the inner globe's eclipse and the planet's own shadow at this pixel's
     // ground -- the two factors the water takes, so a shoreline cannot disagree about whether
     // the sun is up. A hillside leans toward a set sun exactly as a wave face does.
@@ -1186,7 +1262,7 @@ float4 PsMain(VsOut i) : SV_Target {
     // M7f: classification input sharpens one rung, 38 m -> 19 m (window mip 1): the fine
     // edit mask owns the structures now, so the height-driven shoreline can afford the
     // finer level -- half the staircase, same residency-stable contract.
-    const float hpC = ComposedHeightOn() ? ComposedHeight(up, pA, max(lod, -5.0f)) : i.h;
+    const float hpC = ComposedHeightOn() ? ComposedHeightChain(up, max(lod, -5.0f) CS_WC) : i.h;
     const float landness =
         (gStreamF.z > 0.5f) ? ((hp > 0.0f) ? 1.0f : 0.0f)
                             : ComposedLandness(up, pA CS_WC, hpC, gWavesB.w);
@@ -1207,7 +1283,7 @@ float4 PsMain(VsOut i) : SV_Target {
         // LAND side: normals from the composed height cube -- one gradient, no equirect/NE
         // fork, no pole singularity. Modest slope gain (the vertical exaggeration is a
         // display choice; shading at x25 would posterize the continents).
-        const float2 gr = ComposedHeightGrad(up, pA, lod);
+        const float2 gr = ComposedHeightGradAt(up, i.geo, lod, i.lvl);
         const float kSlopeGain = 4.0f;
         const float3 nLand =
             normalize(upT - east * (gr.x * kSlopeGain) - north * (gr.y * kSlopeGain));
@@ -1254,11 +1330,7 @@ float4 PsMain(VsOut i) : SV_Target {
     // (its v is SOUTH -- the gradient direction proves it). mip: the height window's
     // residency heat. ring: the bank's rings with a 4-texel checker (bank addressing on
     // screen). These test the GA the cheap way: patterns survive correct products.
-#if GA_BLOCK_RANKS
     if (gBankA.z > 0.5f && gBankA.z < 11.5f) {   // 12 and 13 are the mix lenses, at the end
-#else
-    if (gBankA.z > 0.5f) {
-#endif
         const float2 wxzL = (CsToTangent(up) * gGlo.x).xz;
         const int lensId = (int)(gBankA.z + 0.5f);
         float3 lc = float3(0.05f, 0.05f, 0.08f);
@@ -1369,15 +1441,18 @@ float4 PsMain(VsOut i) : SV_Target {
             return float4(caL, float(midL >> 8u), float(midL & 255u),
                           (i.mid & 0x80000000u) ? 9.0f : 7.0f);
         } else if (lensId == 2) {
-            const float2 duvL = CsWindowUvAt(pA);
-            if (all(duvL > 0.0f) && all(duvL < 1.0f)) lc = float3(duvL, 0.0f);
+            // PHASE B2: rank 2's window address at the pixel (where the old z14 page stood).
+            if (wc.n >= 2u) lc = float3(frac(WalkUv(wc, 1u)), 0.0f);
         } else if (lensId == 3) {
-            const float2 duvL = CsWindowUvAt(pA);
-            if (CsHeightWindowOn() && all(duvL > 0.0f) && all(duvL < 1.0f)) {
-                const float mL = CsHaveHeightWin(duvL, pA);
-                lc = lerp(float3(0.1f, 0.85f, 0.25f), float3(0.9f, 0.12f, 0.1f),
-                          saturate(mL / 7.0f));
-                lc.b = max(lc.b, saturate(-mL / 3.0f));   // the z17 page: blue 1/3 a mip finer
+            // PHASE B2: the finest rank holding the HEIGHT here to its floor -- green rank 1 to red
+            // rank 5 -- darker by its resident mip.
+            [unroll] for (uint kL = 0; kL < GA_BLOCK_RANKS; ++kL) {
+                if (kL >= wc.n) break;
+                const float mL = CsHaveWindow(gCsU6.y, WalkUv(wc, kL), WalkSlice(wc, kL));
+                if (mL <= kCsHeightWindowFloor) {
+                    lc = lerp(float3(0.1f, 0.85f, 0.25f), float3(0.9f, 0.12f, 0.1f), float(kL) / 4.0f) *
+                         (1.0f - mL / 5.0f);
+                }
             }
         } else if (lensId == 6) {
             // M7p: WATER AS DATA -- flat, unlit, comparable 1:1 with the 2D proof figure
@@ -1457,7 +1532,7 @@ float4 PsMain(VsOut i) : SV_Target {
     float3 wcol = i.wcol;
     if (gOptU.w != 0u && gStreamF.z < 0.5f && landness < 0.999f) {
         wcol = WaterPixelColor(up, upT, east, north, i.rel, wxzW, hp, degrees(lat), lonDeg, lod,
-                               day, footPxW, fpxW, fpzW, pA, ownLvl);
+                               day, footPxW, fpxW, fpzW, pA, ownLvl, i.geo, i.lvl);
     }
     if (gStreamF.z < 0.5f) col = lerp(wcol, col, landness);
 
@@ -1468,13 +1543,11 @@ float4 PsMain(VsOut i) : SV_Target {
     // beach, dune-grass and riprap constants are gone: they were guesses by height and slope
     // that painted every land within 2.7 km of the eye, a farm upriver as a dune.
     const float distC = length(i.rel);
-#if GA_BLOCK_RANKS
     float lensNearW = 0.0f;   // the mix lens's record of this block's mix
-#endif
-    if (gStreamF.z < 0.5f && landness > 0.0f && distC < 2700.0f && CsHeightWindowOn()) {
-        const float2 wuv = CsWindowUvAt(pA);
-        if (all(wuv > 0.0f) && all(wuv < 1.0f)) {
-            const float2 grF = ComposedHeightGrad(up, pA, kCsHeightLodFloor);   // true slope, finest resident
+    // PHASE B2 (D5): a law of the eye's distance, not of a page -- every place gets it.
+    if (gStreamF.z < 0.5f && landness > 0.0f && distC < 2700.0f) {
+        {
+            const float2 grF = ComposedHeightGradAt(up, i.geo, kCsHeightLodFloor, i.lvl);   // true slope, finest resident
             const float3 nM = normalize(upT - east * grF.x - north * grF.y);
             const float water = gWavesB.w;
             float3 matAlb = alb;
@@ -1493,63 +1566,16 @@ float4 PsMain(VsOut i) : SV_Target {
             // the wet-sand treatment, and the shore band grades instead of popping.
             col = lerp(col, colNear,
                        (1.0f - saturate((distC - 500.0f) / 2200.0f)) * 0.92f * landness);
-#if GA_BLOCK_RANKS
             lensNearW = (1.0f - saturate((distC - 500.0f) / 2200.0f)) * 0.92f * landness;
-#endif
         }
     }
 
     // ...and a short march through the volume bank renders the clouds themselves. NULL tiles
     // read zero: over clear air every sample is the hardware's answer, not a branch's.
     if (gTexIdx.w != 0xFFFFFFFFu) {
-        const float3 ro = sLvlCamAbs;   // M10: the level's own eye marches its own sky
-        const float3 rd = normalize(i.rel);
-        const float top = gGlo.x + gCloudA.y;
-        const float b = dot(ro, rd);
-        const float cc = dot(ro, ro) - top * top;
-        const float disc = b * b - cc;
-        if (disc > 0.0f) {
-            const float tShell = -b - sqrt(disc);                  // entering the cloud shell
-            const float t0 = max(tShell, 0.0f);
-            const float t1 = length(i.rel);                        // the ground
-            const float span = t1 - t0;
-            if (span > 1.0f) {
-                const uint kSteps = 14;
-                const float dt = span / kSteps;
-                // Per-pixel jitter turns residual step-banding into noise the eye forgives.
-                const float jit = frac(sin(dot(i.pos.xy, float2(12.9898f, 78.233f))) * 43758.5f);
-                float T = 1.0f;
-                float3 scat = 0.0f;
-                const float mu = dot(rd, GA_SUN_DIR);
-                const float phase = 0.55f + 0.45f * mu;            // cheap forward lobe
-                [loop] for (uint s = 0; s < kSteps && T > 0.02f; ++s) {
-                    const float3 p = ro + rd * (t0 + (s + jit) * dt);
-                    const float pr = length(p);
-                    const float alt = pr - gGlo.x;
-                    if (alt < 0.0f || alt > gCloudA.y) continue;
-                    const float3 pd = CsToPlanet(p / pr);   // texturing needs planet lat/lon
-                    const float3 uvw = float3(ReliefUv(pd), alt / gCloudA.y);
-                    const float dens = gTex3D[gTexIdx.w].SampleLevel(sLinearClamp, uvw, 0).x;
-                    if (dens <= 0.0f) continue;
-                    const float sigma = dens * gCloudA.x;
-                    const float stepT = exp(-sigma * dt);
-                    // One sun-ward sample above approximates self-shadowing. Geometry stays
-                    // tangent (shared sun); only the texture lookup rotates to planet.
-                    const float3 pdT = p / pr;
-                    const float3 lpT = pdT * (pr + 900.0f) + GA_SUN_DIR * 900.0f;
-                    const float3 luvw = float3(ReliefUv(CsToPlanet(normalize(lpT))),
-                                               (length(lpT) - gGlo.x) / gCloudA.y);
-                    const float lDens = gTex3D[gTexIdx.w].SampleLevel(sLinearClamp, luvw, 0).x;
-                    const float sunT = exp(-lDens * gCloudA.x * 1500.0f) *
-                                       saturate(dot(pdT, GA_SUN_DIR) * 3.0f + 0.1f);
-                    const float3 cloudCol =
-                        SUN_IRR_C * (sunT * phase * gCloudA.z + 0.06f) + 0.02f;
-                    scat += T * (1.0f - stepT) * cloudCol;
-                    T *= stepT;
-                }
-                col = col * T + scat;
-            }
-        }
+        float3 scat;
+        const float T = CloudMarch(i.rel, i.pos.xy, scat);
+        col = col * T + scat;
     }
 
     // The atmosphere, as seen ON the disc: grazing rays cross a long air path. M6j: this is a
@@ -1584,8 +1610,7 @@ float4 PsMain(VsOut i) : SV_Target {
                    0.55f * GateRim(TrueRel(i.rel), LevelGateDepth(i.lvl) - 1u));
     }
     col = ApplyComposedStencil(col, up, pA);   // M6i: --stencil alignment overlay (off = no-op)
-#if GA_BLOCK_RANKS
-    // THE MIX LENSES, with the key, off unless asked for: what this stage mixes the land by, where it decides.
+    // THE MIX LENSES, off unless asked for: what this stage mixes the land by, where it decides.
     // --lens mix (12): r = landness (the water's colour comes in by 1 - landness), g = the edit
     // mask's land, b = its edited weight. --lens mix.near (13): r = the close-up material's
     // weight, which is the wet band's alone now that the land's constants are out (the
@@ -1595,7 +1620,6 @@ float4 PsMain(VsOut i) : SV_Target {
         col = (gBankA.z < 12.5f) ? float3(landness, meL.x, meL.y)
                                  : float3(lensNearW, 0.0f, 0.0f);
     }
-#endif
     return float4(col, 1.0f);
 }
 

@@ -102,10 +102,6 @@ public:
         m_estGeo[2] = lonSpan;
         m_estGeo[3] = latSpan;
     }
-    // M6i: the composed channels -- the tenants realized from the layer compositor's stacks.
-    // colorCube/window carry the color channel (cube + Mercator z14 window), heightCube and
-    // heightWindow the height channel (same window FRAME as color); -1 = absent. Wants for
-    // all of them come from the SAME CDLOD walk.
     // M7: per-frame wave-bank binding (SRVs + ring origins), and the one-water switch.
     void SetWaterBank(uint32_t dispSrv, uint32_t paramSrv, uint32_t detailSrv,
                       const uint32_t derivSrv[3], const float patchL[3],
@@ -128,8 +124,8 @@ public:
         m_oneWater = oneWater;
     }
     // M12 step 4a: THE SURFACE, declared once (compose/SurfaceFrame.h). The globe keeps
-    // copies of what its walk and its mip-floor wants read (the tenant ids, the page slices,
-    // the z14 and z17 origins, the radius: CaptureWalk captures them into every WalkParams)
+    // copies of what its walk reads (the tenant ids and the radius: CaptureWalk captures them
+    // into every WalkParams)
     // and reads the tangent frame's rows and the fill from the surface itself. Must precede
     // the first SetView, as SetResidency must.
     void SetSurface(const SurfaceFrame* s);
@@ -181,17 +177,17 @@ public:
         float pixAng = 1.0e-3f;     // one pixel's angle: the relief-mip selector
         bool wants = false;         // a residency manager and at least one cube tenant
         int surfT = -1, normT = -1, colorT = -1, hgtT = -1, maskT = -1;
-        int winT = -1, hgtWinT = -1, detWinT = -1, hgtDetT = -1;
-        uint32_t winFace = 0, hgtWinFace = 0, detFace = 0, hgtDetFace = 0;
-        double detOrg[2] = {}, detSize = 1.0, det17Org[2] = {};
-        // HIERARCHY 4.17 commit 2: the standing blocks (SurfaceFrame::blocks), block i at
-        // slice 6 + i of the colour and the mask; blockN 0 is today's Mercator pages. As many
-        // as the key takes (SurfaceFrame::kMaxBlocks, held equal in GlobeLayer.cpp): with four,
-        // a key of six blocks left its two finest asked at their floor alone.
-        static constexpr uint32_t kBlocks = 8;
-        uint32_t blockN = 0, blockFace[kBlocks] = {};
-        int blockRung[kBlocks] = {};
-        long long blockAx[kBlocks] = {}, blockAy[kBlocks] = {};
+        bool hgtWindows = false;   // PHASE B2: the height tenant reads the eye's windows too
+        // PHASE A2: every slot's windows (SurfaceFrame::bound[s]), rank i + 1 at slice
+        // SurfaceFrame::WindowSlice(s, i + 1) of the colour and the mask: its face, its rung and
+        // its box's origin in texels of the rung; wnK[s] is the slot's K. walkSlot is the slot
+        // this walk draws for when it walks no shared worlds.
+        static constexpr uint32_t kBlocks = 5, kSlots = 8;
+        uint32_t walkSlot = 0;
+        uint32_t wnSet[kSlots] = {};   // PHASE A3: the window set each slot claimed
+        uint32_t wnK[kSlots] = {}, wnFace[kSlots][kBlocks] = {};
+        int wnRung[kSlots][kBlocks] = {};
+        long long wnAx[kSlots][kBlocks] = {}, wnAy[kSlots][kBlocks] = {};
         bool probeCullFar = false;   // step 23 probe
         // M10: an OCCLUDING SPHERE in this walk's own frame (centre, radius; radius 0 = none).
         // For a level the camera's planet floats in, that planet hides most of it: a node whose
@@ -271,6 +267,13 @@ public:
     bool MeshPathActive() const { return m_msPath; }
     bool probeCullFar = false;      // step 23 probe: horizon cull at every altitude (+0.1 rad)
     void DumpMeshlets(const std::wstring& path) const;   // step 23 probe: the records drawn
+    // Phase A0: --ground-probe, G's planet direction (GlobeLayer::EyeInstruments).
+    bool groundProbeOn = false;
+    double groundProbeDir[3] = {0.0, 1.0, 0.0};
+    // Phase B0: the probe's height and exposure lanes (ResidencyLens.hlsl ProbeRankTexel): the
+    // exposure tenant's views, and each tenant's window floor (~0 = no windows), set by the frame
+    // loop.
+    uint32_t probeX[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
     int debugLens = 0;              // M7m: --lens (1 worldxz, 2 winuv, 3 mip, 4 ring,
                                     // 7 velgrad -- the derived div/curl bank)
     // M9h: the grad(flow) bank and the grid it lives on, for lens 7.
@@ -561,6 +564,15 @@ private:
         float chartN[4];      // its north in the tangent frame, w = the same, cascade 1
         float chartCn[4];     // the constant along north, wrapped to cascade 2; yzw spare --
                               // appended at the END on both sides (priors 22)
+        // Phase A0: THE TWO-WORLDS PROBE (--ground-probe, read by --lens blocks) -- appended at the
+        // END on both sides (priors 22). G's planet direction, w = the slots filled; per slot, G
+        // less that slot's eye in the tangent axes (doubles, cast), w = 1 where filled.
+        float probeG[4];
+        float probeP[32];
+        // Phase B0: the probe's height and exposure lanes -- appended at the END on both sides
+        // (priors 22): the exposure's array SRV and residency SRV, the height windows' floor mip,
+        // the exposure windows' floor mip (~0 = that tenant has no windows).
+        uint32_t probeX[4];
     };
     // (dxtest reads the rows' sizes as written, so the chain's is a literal; this holds it.)
     static_assert(sizeof(GlobeCbData::gateBox) == sizeof(float) * 16 * kMaxWindowChain,
@@ -721,17 +733,8 @@ private:
     ResidencyManager* m_res = nullptr;
     int m_sampler = 0;   // M13: this view's id on the shared cache
     int m_surfT = -1, m_normT = -1;
-    int m_colorT = -1, m_winT = -1, m_hgtT = -1, m_hgtWinT = -1;
-    // M9ap: pages mode -- window == colorT and these are its slices (6, 7). Otherwise 0.
-    uint32_t m_winFace = 0, m_detFace = 0;
-    uint32_t m_hgtWinFace = 0;   // M9aq: heightWindow == hgtT -> slice 6
-    int m_detWinT = -1;
-    int m_hgtDetT = -1;           // the z17 height page (the height tenant at hgtDetSlice)
-    uint32_t m_hgtDetFace = 0;
-    double m_det17Org[2] = {0.0, 0.0};
+    int m_colorT = -1, m_hgtT = -1;
     int m_maskT = -1;   // M9ay: the survey mask page tenant
-    double m_detOrg[2] = {0, 0};
-    double m_detSize = 1;
     bool m_streamMars = false;
     double m_radius = GlobeModel::kR;
     // M12 step 4a: THE SURFACE (SetSurface). The tenant, slice, origin and radius members
@@ -758,6 +761,16 @@ private:
     std::vector<NodeData> m_nodes;
     // M10: the Droste levels of this frame (slots 1..n; slot 0 is the camera's own).
     std::vector<DrosteLevel> m_levels;
+    // Phase A0: the levels' blocks log (changed frames only) and the probe's rows.
+    void EyeInstruments();
+public:
+    // PHASE A2: the frame's level table as SetDroste / SetGates left it, for the windows' step:
+    // how many slots (the camera's and the extra levels), and an extra slot's eye in its own frame.
+    size_t LevelSlots() const { return 1u + m_levels.size(); }
+    const double* LevelCam(size_t slot) const { return slot ? m_levels[slot - 1].cam : nullptr; }
+private:
+    uint64_t m_eyeFrame = 0;
+    std::string m_eyeLast;
     int m_gateFirst = -1;                      // the first window level's slot in the table
     int m_gateCount = 0;                       // how many windows deep the view's chain goes
     WindowBox m_gateBoxes[kMaxWindowChain];
@@ -805,9 +818,9 @@ private:
     hal::Pso m_msPso, m_msPsoWire, m_msPsoMeshlet, m_msPsoWireFlat;
     hal::Pso m_psoWire, m_psoMeshlet;
     // The residency lens (shaders/ResidencyLens.hlsl): built only when debugLens asks for it.
-    // 14 is the address lens (--lens addr), the same file's AddrLens.
+    // (14 was the address lens, --lens addr: deleted with the Mercator pages, B3.)
     hal::Pso m_msPsoLens, m_psoLens;
-    bool ResidencyLensOn() const { return (debugLens >= 9 && debugLens <= 11) || debugLens == 14; }
+    bool ResidencyLensOn() const { return (debugLens >= 9 && debugLens <= 11) || debugLens >= 14; }
     std::vector<MeshletRec> m_meshlets;
     GpuBuffer m_recBuf[Gpu::kFrameCount];
     GlobeCbData m_cb{};

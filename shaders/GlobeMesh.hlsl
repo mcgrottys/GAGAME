@@ -103,21 +103,19 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     // undisplaced point geo in the camera's own level (slot 0: the records' doubles, the eye the
     // surface rows are taken about); another level's vertex has its direction only.
     const float3 pA = (rec.level == 0u) ? geo : CsPointOfDir(dir);
-    float h = lerp(ComposedHeight(dir, pA, vl), ComposedHeight(dir, pA, vlP), k);
+    // THE CHAIN, found once for the vertex and handed to every read below: its OWN level's windows
+    // (PHASE A2) that hold its undisplaced point geo (above), relative to that level's eye. PHASE B2:
+    // the height reads it too.
+    const WalkChain wc = CsChain(geo, rec.level);
+    float h = lerp(ComposedHeightChain(dir, vl CS_WC), ComposedHeightChain(dir, vlP CS_WC), k);
     // Geometry obeys the same classifier the pixels use: WATER rides ~2 m BELOW the live
     // waterline (not the geoid -- at low tide the geoid stands PROUD of the real sea and
     // buries the FFT surface; this was the M6j flat-sea bug). Land keeps its height.
     // M6n: the mix is ANALOG (ComposedLandness): a half-emerged flat sits halfway between
     // the drowned plane and its true height, so streaming height data slides shorelines
     // smoothly instead of popping plateau edges (the flats speckle, geometry side).
-#if GA_BLOCK_RANKS
-    // HIERARCHY 4.17: THE CHAIN, found once for the vertex and handed to both reads below: the
-    // blocks under its undisplaced point geo (above), in the camera's own level; another level's
-    // vertex has its direction only.
-    const WalkChain wc = CsWalk(dir, pA);
-#endif
     const float landness =
-        ComposedLandness(dir, pA CS_WC, ComposedHeight(dir, pA, max(vl, -4.0f)), gWavesB.w);
+        ComposedLandness(dir, pA CS_WC, ComposedHeightChain(dir, max(vl, -4.0f) CS_WC), gWavesB.w);
     // M6p/M8g: an operator's LAND edit floors the display height where the height
     // channel's SMEAR dips -- but at an ABSOLUTE crest elevation (NAVD, scene
     // jettyCrestNavd), never relative to the live tide. The old floor tracked the

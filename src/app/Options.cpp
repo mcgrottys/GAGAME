@@ -153,12 +153,14 @@ Options ParseArgs(int argc, char** argv) {
             o.pixFrames = static_cast<uint32_t>(_wtoi(Widen(next("1").c_str()).c_str()));
             if (o.pixFrames == 0) o.pixFrames = 1;
         }
-        else if (a == "--dump-fibers" || a == "--sky-probe" || a == "--bed-trace-plant") {
-            // Three flags on one link: the else-if chain below is AT the compiler's
+        else if (a == "--dump-fibers" || a == "--sky-probe" || a == "--bed-trace-plant" ||
+                 a == "--bank-trace-plant") {
+            // Four flags on one link: the else-if chain below is AT the compiler's
             // nesting limit (C1061 on one more `else if`), so a new flag joins a
             // neighbour rather than deepening it.
             if (a == "--sky-probe") o.skyProbe = true;
             else if (a == "--bed-trace-plant") o.bedTracePlant = true;
+            else if (a == "--bank-trace-plant") o.bankTracePlant = true;
             else o.dumpFibers = true;
         }
         else if (a == "--lens") {
@@ -170,8 +172,11 @@ Options ParseArgs(int argc, char** argv) {
                      : n == "waterdata" ? 6 : n == "velgrad" ? 7 : n == "shell" ? 8
                      : n == "residency" ? 9 : n == "residency.height" ? 10
                      : n == "residency.landsea" ? 11 : n == "mix" ? 12 : n == "mix.near" ? 13
-                     : n == "addr" ? 14 : 1;
+                     : n == "cloudalt" ? 15 : n == "blocks" ? 16 : 1;
         }
+        // Phase A0 (plan_eye_windows.md): one ground point (lat,lon, degrees) read back through every
+        // world of the frame, in --lens blocks' bottom-left strip (ResidencyLens.hlsl BlockProbe).
+        else if (a == "--ground-probe") o.groundProbe = next("");
         else if (a == "--probe-cull-far") o.probeCullFar = true;
         else if (a == "--dump-meshlets") o.dumpMeshlets = Widen(next("meshlets.bin").c_str());
         else if (a == "--dump-water-state") o.dumpWater = true;
@@ -290,7 +295,7 @@ Options ParseArgs(int argc, char** argv) {
         // The drawn sea against the water each hull reads (app/Tools/WaterProbe.cpp): the scene
         // depth read back every N recorded frames. An instrument -- its readbacks stop the GPU.
         else if (a == "--water-probe" || a == "--pages-trace" || a == "--res-audit" ||
-                 a == "--bed-trace") {
+                 a == "--bed-trace" || a == "--bank-trace" || a == "--near-ground") {
             // Four every-N instruments on one link (the chain is at C1061's limit, line ~158).
             // --pages-trace is the slice pool's (stage 0): the pages ledger every Nth turn.
             // --res-audit is the scene's capture.residencyAudit: the residency bytes against the
@@ -300,6 +305,12 @@ Options ParseArgs(int argc, char** argv) {
             if (a == "--pages-trace") o.pagesEvery = every;
             else if (a == "--res-audit") o.resAudit = every;
             else if (a == "--bed-trace") o.bedTraceEvery = every;
+            // --bank-trace is the water bank's bed (Phase B0): WaterBankLayer::TraceRead.
+            else if (a == "--bank-trace") o.bankTraceEvery = every;
+            // --near-ground is Phase B2w's: the rank and mip under the frame's bottom third.
+            else if (a == "--near-ground") o.nearGroundEvery = every;
+            // --starve-plant S: the watchdog's plant -- the loader never starts a load of slice S.
+            else if (a == "--starve-plant") o.starvePlant = every;
             else o.waterProbeEvery = every;
         }
         else if (a == "--tree-audit" || a == "--tree-prune") {
@@ -332,7 +343,7 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--export") {
             // M6j utility: pull a composed channel OUT through the manager -- the same
             // provider path the renderer streams. <channel>[:mip] <out.(png|raw|obj)>
-            o.exportSpec = next("earth.color.window:2");
+            o.exportSpec = next("earth.color.cube.f5:2");
             o.exportOut = Widen(next("export.png").c_str());
         }
         else if (a == "--cam") {
@@ -537,7 +548,7 @@ JsonValue StartValue(double startUnix) {
 const char* kLensNames[] = {"worldxz", "worldxz",   "winuv",    "mip",
                             "ring",    "cascade",   "waterdata", "velgrad",
                             "shell",   "residency", "residency.height", "residency.landsea",
-                            "mix",     "mix.near", "addr"};
+                            "mix",     "mix.near", "worldxz",  "cloudalt", "blocks"};  // 14: --lens addr, deleted (B3)
 
 }  // namespace
 
@@ -760,7 +771,8 @@ SceneArgs Options::ToSets(const Options& o) {
     auto rawf = [&](const std::string& s) { out.raw.push_back(s); };
     if (o.pixFrames) rawf("--pix " + std::to_string(o.pixFrames));
     if (o.dumpFibers) rawf("--dump-fibers");
-    if (o.lens) rawf(std::string("--lens ") + kLensNames[o.lens > 0 && o.lens < 15 ? o.lens : 0]);
+    if (o.lens) rawf(std::string("--lens ") + kLensNames[o.lens > 0 && o.lens < 17 ? o.lens : 0]);
+    if (!o.groundProbe.empty()) rawf("--ground-probe " + o.groundProbe);
     if (o.probeCullFar) rawf("--probe-cull-far");
     if (!o.dumpMeshlets.empty()) rawf("--dump-meshlets " + Narrow(o.dumpMeshlets));
     if (o.inject) rawf(o.inject == 2 ? "--inject cascade" : "--inject bank");
@@ -779,6 +791,10 @@ SceneArgs Options::ToSets(const Options& o) {
     if (o.pagesEvery) rawf("--pages-trace " + std::to_string(o.pagesEvery));
     if (o.bedTraceEvery) rawf("--bed-trace " + std::to_string(o.bedTraceEvery));
     if (o.bedTracePlant) rawf("--bed-trace-plant");
+    if (o.bankTraceEvery) rawf("--bank-trace " + std::to_string(o.bankTraceEvery));
+    if (o.bankTracePlant) rawf("--bank-trace-plant");
+    if (o.nearGroundEvery) rawf("--near-ground " + std::to_string(o.nearGroundEvery));
+    if (o.starvePlant) rawf("--starve-plant " + std::to_string(o.starvePlant));
     if (o.sweCycleStageM != 0) rawf("--swe-cycle-stage " + scene::NumberText(o.sweCycleStageM));
     if (o.benchOverlap) rawf("--bench-overlap");
     else if (o.bench) rawf("--bench");

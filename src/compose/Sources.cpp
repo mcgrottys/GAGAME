@@ -108,6 +108,13 @@ float GoogleColorSource::Sample(double latRad, double lonRad, double groundResM,
     return 1.0f;
 }
 
+int GoogleColorSource::FinestMip(const Lattice& l, double lat0, double lat1, double lon0,
+                                 double lon1) const {
+    constexpr double kCirc = 40075016.686;
+    const double lat = 0.5 * (lat0 + lat1);
+    return l.LevelOf(std::ldexp(kCirc / 256.0, -m_zoomCap) * std::cos(lat), lat, 0.5 * (lon0 + lon1));
+}
+
 bool GoogleColorSource::Refusals(uint32_t& refused) const {
     if (!m_prov || !m_prov->Ready()) return false;
     refused = m_prov->Refused();
@@ -460,6 +467,19 @@ const BedSynthSource::Rule* BedSynthSource::PickRule(double slope) const {
     return &m_rules.back();
 }
 
+int BedSynthSource::FinestMip(const Lattice& l, double lat0, double lat1, double lon0,
+                              double lon1) const {
+    if (!m_comp) return -1;
+    for (const Zone& z : m_zones) {
+        if (!(z.lon1 * kPi / 180.0 < lon0 || z.lon0 * kPi / 180.0 > lon1 || z.lat1 * kPi / 180.0 < lat0 ||
+              z.lat0 * kPi / 180.0 > lat1)) {
+            return -1;
+        }
+    }
+    const double lat = 0.5 * (lat0 + lat1), lon = 0.5 * (lon0 + lon1);
+    return l.LevelOf(m_comp->HeightGrainM(m_hgtCh, lat, lon), lat, lon);
+}
+
 float BedSynthSource::Sample(double latRad, double lonRad, double groundResM,
                              const PaintCtx&, uint8_t rgba[4]) {
     if (!m_comp || m_rules.empty()) return 0.0f;
@@ -649,6 +669,13 @@ bool SeafloorReliefSource::Load(const std::string& rulesPath, const Compositor* 
     m_info.lon1 = 180.0;
     m_info.lat1 = 90.0;
     return true;
+}
+
+int SeafloorReliefSource::FinestMip(const Lattice& l, double lat0, double lat1, double lon0,
+                                    double lon1) const {
+    if (!m_comp) return -1;
+    const double lat = 0.5 * (lat0 + lat1), lon = 0.5 * (lon0 + lon1);
+    return l.LevelOf(m_comp->HeightGrainM(m_hgtCh, lat, lon), lat, lon);
 }
 
 float SeafloorReliefSource::Sample(double latRad, double lonRad, double groundResM,

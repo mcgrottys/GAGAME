@@ -617,6 +617,17 @@ public:
         const std::string tag = frame.Tag();
         EnsureFrame(tag);
         return [this, frame, tag](const TileRequest& r, std::vector<uint8_t>& out, TileLoc* loc) {
+            // PHASE A4 (HIERARCHY 4.20, the third clause): a tile finer than every source's own
+            // level is the level above, magnified. It has no bytes and nothing is mapped for it
+            // (g_tileMagnified): the reader's residency byte names the parent, and the sampler
+            // magnifies it.
+            if (Magnified(frame, r)) {
+                g_tileMagnified = true;
+                out.clear();
+                if (loc) *loc = TileLoc{};
+                ++magnified;
+                return true;
+            }
             const Status st = Tile(frame, tag, r, out, loc);
             if (st != Status::Content) {
                 out.assign(65536, 0);
@@ -648,6 +659,38 @@ public:
     std::atomic<uint32_t> painted{0}, read{0}, voids{0}, refs{0}, composed{0}, hits{0};
     std::atomic<uint32_t> folded{0}, dropped{0};   // M9bb: pyramid folds; cached addresses dropped
     std::atomic<uint32_t> redundant{0};   // M9bd: folds the 4/255 rule found moved nothing
+    std::atomic<uint32_t> magnified{0};   // PHASE A4: tiles answered as their parent, magnified
+
+    // PHASE A4: THE FINEST LEVEL ANY SOURCE UNDER THIS NODE HAS OF ITS OWN over a box: a leaf's
+    // FinestMip there, a compose the finest of the children that touch the box (the membership
+    // KidsHeld keys with), -1 if any of them has every level, kNoSource if none touches. A GATE
+    // paints nothing -- it multiplies the weight of what it gates, texel by texel -- so it has no
+    // level of its own: its level is its layer's (child 0), however exact the gate (the mask's own
+    // tenant, where the vector paints coverage, keeps every level).
+    static constexpr int kNoSource = 0x7FFFFFFF;
+    int FinestAt(const ColorFrame& inherited, const Compositor::TileBox& box) const {
+        const ColorFrame& frame = Resolve(inherited);
+        if (m_kids.empty()) {
+            return Touching(box) ? m_node->FinestMip(frame, box.latMin, box.latMax, box.lonMin, box.lonMax)
+                                 : kNoSource;
+        }
+        const bool gate = std::string(m_node->NodeKind()) == "gate";
+        int f = kNoSource;
+        for (size_t i = 0; i < (gate ? size_t(1) : m_kids.size()); ++i) {
+            if (!KidIn(i, box)) continue;
+            const int k = m_kids[i]->FinestAt(frame, box);
+            if (k < 0) return -1;
+            f = (std::min)(f, k);
+        }
+        return f;
+    }
+    // A tile finer than that level: its parent, magnified.
+    bool Magnified(const ColorFrame& inherited, const TileRequest& r) const {
+        Compositor::TileBox box{};
+        Resolve(inherited).Box(r, box);
+        const int f = FinestAt(inherited, box);
+        return f != kNoSource && int(r.mip) < f;
+    }
     std::string Stats(int depth = 0) const {
         std::string pad(size_t(depth) * 2, ' ');
         char b[256];
@@ -658,6 +701,10 @@ public:
                  voids.load(), refs.load(), composed.load(), hits.load(), arcPlaces.load(),
                  arcReads.load());
         std::string s = b;
+        if (magnified.load()) {
+            snprintf(b, sizeof(b), " | %u magnified (no bytes: the parent)", magnified.load());
+            s += b;
+        }
         // A leaf over a source that fetches says what it could not fetch: with the budget at
         // zero, this is the number of fetches the run WOULD have made.
         uint32_t refused = 0;
@@ -792,21 +839,23 @@ private:
         return Held::Absent;
     }
 
+    // The SAME membership test the incumbent uses -- a declared footprint must span ~2 texels of
+    // this tile to be in its subset; an undeclared one is in where it may cover.
+    bool KidIn(size_t i, const Compositor::TileBox& box) const {
+        constexpr double kR2D = 180.0 / 3.14159265358979;
+        double fl0, fb0, fl1, fb1;
+        return m_kids[i]->m_node->Footprint(fl0, fb0, fl1, fb1)
+                   ? Compositor::Touches(fl0, fb0, fl1, fb1, box)
+                   : m_kids[i]->m_node->MayCover(box.lonMin * kR2D, box.latMin * kR2D,
+                                                 box.lonMax * kR2D, box.latMax * kR2D);
+    }
     // Which children can touch this tile, and what each holds. False if any is still Absent.
     bool KidsHeld(const ColorFrame& frame, const std::string& tag, const TileRequest& r,
                   const Compositor::TileBox& box, std::vector<size_t>& inc,
                   std::vector<Held>& held) {
-        constexpr double kR2D = 180.0 / 3.14159265358979;
         bool all = true;
         for (size_t i = 0; i < m_kids.size(); ++i) {
-            // The SAME membership test the incumbent uses -- a declared footprint must span
-            // ~2 texels of this tile to be in its subset; an undeclared one is always in.
-            double fl0, fb0, fl1, fb1;
-            const bool in = m_kids[i]->m_node->Footprint(fl0, fb0, fl1, fb1)
-                                ? Compositor::Touches(fl0, fb0, fl1, fb1, box)
-                                : m_kids[i]->m_node->MayCover(box.lonMin * kR2D, box.latMin * kR2D,
-                                                              box.lonMax * kR2D, box.latMax * kR2D);
-            if (!in) continue;   // absent: not in this tile's subset at all
+            if (!KidIn(i, box)) continue;   // absent: not in this tile's subset at all
             inc.push_back(i);
             const Held h = m_kids[i]->Peek(frame, tag, r);
             held.push_back(h);

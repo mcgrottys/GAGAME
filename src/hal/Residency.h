@@ -69,7 +69,7 @@ public:
     static constexpr uint32_t kMaxLoadsInFlight = 48;
     static constexpr uint32_t kMaxMapsPerFrame = 96;     // tiles mapped+filled per frame
     static constexpr uint64_t kMapStageBytes = 8ull << 20;   // M9bb: residency-map staging reserve
-    static constexpr uint32_t kPoolCapTiles = 8192;      // 512 MB ceiling before eviction
+    static constexpr uint32_t kPoolCapTiles = 32768;     // 2 GB ceiling before eviction (the owner's, 2026-10-03)
     static constexpr uint32_t kEvictAgeFrames = 4;       // > frame overlap: no in-flight reads
     // ---- THE SAMPLERS (M13) -------------------------------------------------------------
     // ONE CACHE FOR THE EARTH, MANY READERS. A sampler is anything that will read the planet
@@ -131,9 +131,11 @@ public:
     // with hand-off fades in the shader that each rung needed to know about its neighbour to
     // compute. A page's slice IS its `face` in every TileRequest. Slices 0..5 are also viewed
     // as a TextureCube so the globe keeps hardware-seamless cube filtering.
+    // `sliceTop`, per slice, the coarsest mip it holds (F1: a window's floor); empty, or a value
+    // past the array's, is the array's coarsest.
     int AddTexturePages(Gpu& gpu, const wchar_t* name, uint32_t dim, DXGI_FORMAT fmt,
-                        TileProviderFn provider, uint32_t pages) {
-        return AddTextureInternal(gpu, name, dim, fmt, std::move(provider), pages);
+                        TileProviderFn provider, uint32_t pages, std::vector<uint8_t> sliceTop = {}) {
+        return AddTextureInternal(gpu, name, dim, fmt, std::move(provider), pages, std::move(sliceTop));
     }
     // The cube views over slices 0..5 of a page tenant (UINT32_MAX for other tenants).
     uint32_t TextureSrvCube(int tenant) const { return m_tenants[tenant].srvCube; }
@@ -271,6 +273,13 @@ public:
     // dropped): forget what is mapped at that address so the next Want refetches. Safe from
     // any thread -- it queues; ProcessQueues applies it on the main thread with Drop's rules.
     void Invalidate(int tenant, const TileRequest& r);
+    // PHASE A1 (the window's step, an instrument): the pool slot of a held tile -- mapped and
+    // landed -- at a slot address, or UINT32_MAX. A tile a step kept is held at the same pool slot
+    // the turns after it: its bytes were never moved, re-read or copied.
+    uint32_t HeldPool(int tenant, const TileRequest& r) const {
+        const Tracked* t = Find(tenant, r);
+        return (t && t->state == TileState::Mapped && t->landed) ? t->pool : UINT32_MAX;
+    }
     // Debug: what the manager believes about one tile (state, pool slot, bytes it carried).
     std::string DebugTile(int tenant, const TileRequest& r) const {
         const Tracked* t = Find(tenant, r);
@@ -356,6 +365,7 @@ public:
         uint32_t mapped = 0;        // ... of which mapped at their mip
         uint32_t deficit = 0;       // ... wanted, not mapped, and able to land (+ live ring-held)
         uint32_t unreachable = 0;   // ... wanted, and never will land (Failed, or under one)
+        uint32_t magnified = 0;     // ... wanted, and the level above magnified (PHASE A4): no bytes
         uint32_t stale = 0;         // tracked, not wanted this frame, still tracked after the turn
         uint32_t dropped = 0;       // stale tiles dropped this turn
         uint32_t pending = 0, reads = 0, retiring = 0;
@@ -433,6 +443,12 @@ public:
     OrderTurnLedger orderTurn;
     uint64_t letGoTotal = 0, letGoReadTotal = 0, reloadedTotal = 0, rewantedTotal = 0;
     uint64_t releasedTotal = 0, mappedTotal = 0;   // an untraced rail's releases and maps
+    // PHASE B2w: THE RELEASES OF A TURN, and those of a tile a reader's statement of the frame before
+    // (the one this turn acts on) still named -- by the order's cut (pool pressure) and by an
+    // invalidation (a window's step, Tenant::Move, or a repaint). Reset every turn.
+    struct ReleaseLedger {
+        uint32_t cut = 0, cutNamed = 0, invalidated = 0, invalidatedNamed = 0;
+    } releaseLedger;
     std::vector<uint32_t> railMaps;   // H5: the tiles each recorded frame's turn mapped (the frame loop)
     bool traceTurn = false;        // print this turn's ledger (main: --res-trace-frames)
     uint32_t traceRecFrame = 0;    // the recorded frame main labels it with
@@ -453,6 +469,28 @@ public:
     // on and that lattice's mip-0 ground in metres. Handed over by the declaration
     // (hal::Tenant::Sparse), once; an unlabelled slice prints by index.
     void LabelSlices(int tenant, std::vector<std::string> tags, std::vector<double> ground0M);
+    // THE STARVED TILE'S GLOBAL NAME (the watchdog below): a tenant of block slices tells the slot
+    // tile's pyramid tile (hal::Tenant::Sparse hands it over); empty = the slot's own name alone.
+    void SetTileNamer(int tenant, std::function<std::string(const TileRequest&)> namer) {
+        if (tenant >= 0 && tenant < static_cast<int>(m_tenants.size())) m_tenants[tenant].namer = std::move(namer);
+    }
+    // ---- THE WATCHDOG, a law of the ledger (nothing here acts). Every turn, a tile of the first P
+    // that is not held, has no load in flight and no retiring slot is STARVED; one starved past the
+    // glance (kGlanceTurns) is printed once with its whole state ("[starved]") and again every
+    // kStarvePrintTurns while it lasts. A tile whose load stays in flight past kStarvePrintTurns is
+    // printed the same way ("[stuck]"): the same stall seen from the loader's side.
+    static constexpr uint32_t kStarvePrintTurns = 600;
+    static constexpr uint32_t kStarveLinesPerTurn = 16;   // whole lines a turn; the rest summed
+    uint32_t starvePlant = 0;   // the plant: the loader never starts a load of this slice (0 = off)
+    uint32_t starvedNow = 0, starvedPast = 0, stuckPast = 0;   // this turn's counts
+    uint64_t starvedPrinted = 0;                                // over the run
+    // THE VERSION LAW's ledger: replacements swapped in whole / refused (old bytes kept), and the
+    // held tiles standing at an old version this turn.
+    uint64_t refreshedTotal = 0, refreshRefusedTotal = 0;
+    // THE GUARD: held tiles released because their parent was refused while not held. By the
+    // loader's order (ParentGate) it cannot happen; it must read 0.
+    uint64_t releasedUnderRefusedTotal = 0;
+    uint32_t staleHeld = 0;
 
     // ---- THE RESIDENCY AUDIT (hal/ResidencyAudit.h; the bodies live in ResidencyAudit.cpp, so
     // this class carries the declarations and Residency.cpp two call lines). Every auditEvery-th
@@ -533,15 +571,27 @@ private:
         // Step 25: the exact settle's per-tenant ledger -- the last turn's counts and the
         // drops summed over the hold, for LogSettleExact.
         uint32_t exWanted = 0, exMapped = 0, exDeficit = 0, exUnreachable = 0, exStale = 0;
+        uint32_t exMagnified = 0;   // PHASE A4: wanted tiles that are their parent, magnified
         uint32_t exDropped = 0, exDroppedMapped = 0;
         // The pages ledger's names for the slices (LabelSlices): empty until declared.
         std::vector<std::string> sliceTag;
+        std::function<std::string(const TileRequest&)> namer;   // SetTileNamer
+        bool saidNoSlice = false;   // Want: a slice past its faces, said once
         std::vector<double> sliceGround0M;
         // Step 5: floor(log2 of the slice's mip-0 texel in metres), the order's rung at mip 0
         // (kNoRung for a slice that declared no ground); and the exact hold's lost tail.
         std::vector<int> sliceRung0;
         uint32_t exLost = 0;
+        // F1 (HIERARCHY 4.1): the coarsest mip each slice HOLDS, its chain's end -- the array's
+        // coarsest (mips - 1) for every slice but a window, whose FLOOR is its mip 3: the same
+        // ground in the rank above answers beyond it, so its mips above are neither wanted nor
+        // mapped, and its residency byte is computed from its mips up to the floor alone (255,
+        // nothing held, where the floor's tile is not held: the rank above answers).
+        std::vector<uint8_t> sliceTop;
     };
+    static uint32_t TopOf(const Tenant& t, uint32_t face) {
+        return face < t.sliceTop.size() ? t.sliceTop[face] : t.mips - 1u;
+    }
 
 
     enum class TileState : uint8_t { Seen, Loading, Loaded, Mapped, Failed };
@@ -553,6 +603,10 @@ private:
         TileState state = TileState::Seen;
         bool predicted = false;
         uint8_t retries = 0;             // M7w: failed loads retry, then go honestly NULL
+        // PHASE A4: the tree answered it as the level above, magnified (g_tileMagnified): it holds
+        // no bytes and is never mapped -- the Failed state's law, "honestly NULL so consumers fall
+        // back to the coarser REAL mip", which is what it is -- and the ledger counts it apart.
+        bool magnified = false;
         std::vector<uint8_t> data;       // empty when loc is valid: the bytes stayed on disk
         TileLoc loc;
         uint64_t stageOffset = 0;   // where its bytes landed in the device buffer
@@ -563,7 +617,25 @@ private:
         bool landed = false;
         uint32_t firstP = 0;          // the last pass that placed it among the first P
         uint32_t rec = UINT32_MAX;    // step 5 E: its record in m_rec
+        // The watchdog: since when it has been starved (1) or in flight (2), the turn last seen
+        // so, and the turn last printed (0 = never).
+        uint32_t starveSince = 0, starveSeen = 0, starvePrinted = 0;
+        uint8_t starveClass = 0;
+        // THE VERSION LAW (after B3): an invalidation changes a held tile's VERSION, not its
+        // presence. `stale` -- held at an old version, its replacement asked; `refresh` -- this
+        // Tracked is that replacement's load (never in the slot array); `incomplete` -- answered
+        // not whole: a refusal of this attempt, retried when the tree next changes for the tile;
+        // while it is not held, it blocks its children (they are unreachable as it is).
+        bool stale = false, refresh = false, incomplete = false;
     };
+    // A held tile's replacement in flight: the held tile (its bytes stay mapped), the load, and
+    // whether its version changed again while the load was out (then the load is let go and a new
+    // one asked).
+    struct Refresh {
+        std::shared_ptr<Tracked> held, job;
+        bool again = false;
+    };
+    std::vector<Refresh> m_refresh;
     struct Retiring {
         std::shared_ptr<Tracked> tile;
         uint32_t frame;
@@ -643,12 +715,13 @@ private:
     };
 
     int AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t faceDim, DXGI_FORMAT fmt,
-                           TileProviderFn provider, uint32_t faces);
+                           TileProviderFn provider, uint32_t faces, std::vector<uint8_t> sliceTop = {});
     // One load, on a Lane::Io job. Was the body of LoaderThread's loop.
     void RunLoad(const std::shared_ptr<Tracked>& job);
     uint32_t AcquirePoolTile(Gpu& gpu);
     void MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
-                    const std::vector<std::shared_ptr<Tracked>>& batch);
+                    const std::vector<std::shared_ptr<Tracked>>& batch,
+                    const std::vector<std::shared_ptr<Tracked>>& refills);
 
     Gpu* m_gpu = nullptr;
     std::vector<Tenant> m_tenants;
@@ -749,9 +822,15 @@ private:
     uint16_t m_pinMask = 0;        // the samplers that stand (Sampler(name, true))
     // Decides the turn's loads (toLoad), its releases and let-gos, and the batch to map.
     void OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
-                   std::vector<std::shared_ptr<Tracked>>& batch);
+                   std::vector<std::shared_ptr<Tracked>>& batch,
+                   std::vector<std::shared_ptr<Tracked>>& refills);
     static uint32_t RungIndex(const Tenant& t, uint32_t face, uint32_t mip);
-    bool UnderFailed(const Tenant& t, const Tracked* tr) const;
+    // THE MAP LAW AS THE LOADER'S ORDER (4.7: mapped coarse to fine): a tile is asked for only when
+    // its nearest ancestor that is not magnified is HELD (Open). Not held yet -> Wait (wanted,
+    // pending, asked next turn). Refused and not held -> Refused (unreachable, as its parent is,
+    // until the tree changes for it). `at` gets that ancestor (null when untracked or none).
+    enum class Gate : uint8_t { Open, Wait, Refused };
+    Gate ParentGate(const Tenant& t, const Tracked* tr, const Tracked** at = nullptr) const;
     static uint32_t RungIndexOf(int r0, uint32_t mip, uint32_t mips, int rungTop, int rungs);
     // STEP 5 E: WHAT THE ORDER READS OF A TILE, IN ONE ARRAY (decision 3). Written when a reader
     // marks the tile (OrderNote), when the tile is tracked or untracked (Track, Untrack: one
@@ -841,7 +920,9 @@ private:
     uint64_t m_keptFarTile = 0, m_lostNearTile = 0;
     // Decision 5: the events that recompute the order, and the pass's own snapshot of them.
     void OrderPass(OrderTurnLedger& L);
-    std::string TileName(uint64_t key) const;   // "tenant [slice] mip (x,y)" from MakeKey's bits
+    std::string TileName(uint64_t key) const;
+    void StarveWatch();   // the watchdog's turn (ResidencyOrder.cpp, after the loader)
+    size_t m_loaderStop = 0;   // the m_need index the loader stopped at (the queue at capacity)   // "tenant [slice] mip (x,y)" from MakeKey's bits
     // H2 (HIERARCHY 4.19, the law completed): A TILE THAT IS HELD COUNTS FOR THE MARGIN TIMES ITS
     // MEASURE, and so does every tile above a held one (the held set stays closed upward: a parent
     // is never after its held child). The pass's pieces, static so the selftest drives them:

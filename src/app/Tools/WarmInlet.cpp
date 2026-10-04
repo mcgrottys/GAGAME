@@ -15,43 +15,13 @@
 
 namespace ga::app::tools {
 
-// M6f/M6i: pre-warm the composed pyramids -- the Merrimack window coarse-to-z14 in
-// rings, plus the planet-wide height cube at a working mip (height paints are LOCAL:
-// no network, just source reads). Everything lands in the composed forever-cache:
-// warming is a once-per-machine cost (re-runs drain instantly from disk).
+// M6f/M6i: pre-warm the composed pyramids -- the planet-wide height cube at a working mip
+// (height paints are LOCAL: no network, just source reads). PHASE B3: the Merrimack window's
+// rings are deleted with the Mercator pages; the eye's windows are wanted by their readers.
 void RunWarmInlet(const Options& opt, Gpu& gpu, const Compositor& compositor,
-                  ResidencyManager& resMgr, int winTenant, uint32_t winSlice, int hgtTenant,
-                  int hgtWinTenant) {
-    // M13: the warm-up is its own reader of the shared cache -- it asks for a pyramid nobody
-    // is looking at yet, which is exactly the thing a reserve has to be able to tell apart.
+                  ResidencyManager& resMgr, int hgtTenant) {
+    // M13: the warm-up is its own reader of the shared cache.
     const int sw = resMgr.Sampler("warm");
-    struct WarmRing {
-        float a, b;
-        uint32_t mip;
-    };
-    // Mip 2 covers the WHOLE window (one zoom level = one color grading across the
-    // view -- the patchwork of per-zoom gradings was half of the "uneven shading"
-    // report); deeper rings tighten on the inlet.
-    const WarmRing rings[] = {
-        {0.00f, 1.00f, 3}, {0.00f, 1.00f, 2}, {0.38f, 0.62f, 1}, {0.44f, 0.56f, 0}};
-    // The rings are uv boxes of the z14 PAGE, the colour tenant's window slice. They were asked
-    // of slice 0 -- since M9ap the colour is one tenant and slice 0 is the cube's face 0 -- so
-    // the warm asked for all of face 0 at mips 2 and 3, centred on lon 0 lat 0 in the Atlantic,
-    // and fetched whatever of it the cache lacked, up to the budget.
-    if (winTenant >= 0 && winSlice != UINT32_MAX) {
-        for (const auto& w : rings) {
-            resMgr.Want(sw, winTenant, winSlice, w.mip, w.a, w.a, w.b, w.b);
-        }
-    }
-    if (hgtWinTenant >= 0) {
-        // Height paints are pure local math: warm the WHOLE window at mip 2 (~32 MB)
-        // so land/sea classification is never a coarse-mip smear anywhere in view.
-        const uint32_t hwf = (hgtWinTenant == hgtTenant) ? 6u : 0u;   // M9aq slice
-        resMgr.Want(sw, hgtWinTenant, hwf, 2, 0, 0, 1, 1);
-        for (const auto& w : rings) {
-            resMgr.Want(sw, hgtWinTenant, hwf, w.mip, w.a, w.a, w.b, w.b);
-        }
-    }
     if (hgtTenant >= 0) {
         for (uint32_t f = 0; f < 6; ++f) resMgr.Want(sw, hgtTenant, f, 4, 0, 0, 1, 1);
     }
