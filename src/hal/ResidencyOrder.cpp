@@ -1281,15 +1281,16 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
             snprintf(b, sizeof(b), " %S %u;", m_tenants[k].name.c_str(), m_tailTenant[k]);
             ten += b;
         }
+        // F9: a record's bucket is class * kRungs + MeasureBucket (the measure's power of two,
+        // texel over distance), so its low part is a MEASURE bucket; it was printed as a rung.
         for (uint32_t r = 0; r < kRungs; ++r) {
             if (!m_tailRung[r]) continue;
             char b[48];
-            snprintf(b, sizeof(b), " 2^%d m %u;", static_cast<int>(kRungTop) - static_cast<int>(r),
-                     m_tailRung[r]);
+            snprintf(b, sizeof(b), " 2^-%u %u;", r, m_tailRung[r]);
             rung += b;
         }
         Log("[order-tail] rec%u f%u | the want's tail past the cut: %u of %u wanted | by tenant:%s | "
-            "by rung (texel):%s",
+            "by measure (texel over distance):%s",
             traceRecFrame, m_frame, m_tailTotal, m_wantTotal, ten.c_str(), rung.c_str());
         if (m_cutRung != kNoBucket) {
             const auto name = [&](uint64_t key) {

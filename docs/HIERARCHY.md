@@ -582,6 +582,17 @@ two windows of one rank that overlap (two viewers a few kilometres apart, a stan
 a following one). It is never shared across a cube edge, where the lattices differ, and never
 between two tenants.
 
+**A window is an address, and one address is one window** (F9, 2026-10-05). A set's window at a
+rank is its face, its rung and its box's origin. Two claimed sets whose windows at a rank are one
+address read one slice there: the later set's rows name the earlier set's slice
+(`SurfaceFrame::Share`, after every step), the walk asks that slice once for the ground any of its
+worlds sees (`LeafWants`, a bit per slice over the leaf's worlds), and the later set's own slice
+is unread, its tiles released by the order. Windows that differ stay their own: rank 5 across a
+corridor of facing gates (the carried eyes stand a tile apart), rank 4 at a step boundary. This is
+4.8's sentence made literal: two worlds that see one piece of ground read one tile through one
+window. Measured on the seven-deep Haulover pose: of the 40 ranks the eight sets hold, 16 read
+another set's window; the wants a turn and the walk's time are in `out/pc/CHANGES.md` F9.
+
 The budget: sixty-four windows in the four surface tenants are 256 GiB of address space. The wave
 tenant's slices are planes, 33 to a window, so it is given its windows separately: 44 GiB each.
 The pool is what it is today; the windows change where tiles are addressed, not how many a view

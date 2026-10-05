@@ -783,7 +783,7 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
         // the gate for the lattice-row moves (winA, geoA from the surface) and for the fills
         // of 4e/4f. Logs when the hash changes, as the [surface] fills do; a member, not a
         // static, because the Droste set-B bank is a second instance.
-        const uint64_t h = Fnv1aBytes(&cb, sizeof(cb));
+        const uint64_t h = CbTrace() ? Fnv1aBytes(&cb, sizeof(cb)) : m_cbFp;   // F9: --cb-trace
         if (h != m_cbFp) {
             m_cbFp = h;
             Log("[kernel] waterbank cb FNV-1a %016llx", static_cast<unsigned long long>(h));
