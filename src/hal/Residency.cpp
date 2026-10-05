@@ -882,6 +882,39 @@ void ResidencyManager::FloorMap(const std::vector<std::vector<uint8_t>>& in, uin
     }
 }
 
+// 4.7: a tile's bytes landed: it is held, and so is every other slot mapped to its address.
+void ResidencyManager::Landed(Tracked* tile) {
+    tile->landed = true;
+    if (tile->rec != UINT32_MAX) m_rec[tile->rec].flags |= kHeldBit;
+    NoteChanged(tile->tenant, tile->req);
+    if (!tile->gkey) return;
+    Tenant& t = m_tenants[tile->tenant];
+    const auto it = t.held.find(tile->gkey);
+    if (it == t.held.end()) return;
+    it->second.landed = true;
+    for (Tracked* s : it->second.slots) {
+        if (s == tile || s->landed || s->state != TileState::Mapped) continue;
+        s->landed = true;
+        if (s->rec != UINT32_MAX) m_rec[s->rec].flags |= kHeldBit;
+        NoteChanged(s->tenant, s->req);
+    }
+}
+
+// 4.7: a retiring slot lets go of its address; the pool slot is freed with the last of them.
+void ResidencyManager::ReleaseSlot(Tenant& t, Tracked& tile) {
+    if (tile.pool == UINT32_MAX) return;
+    if (tile.gkey) {
+        const auto it = t.held.find(tile.gkey);
+        if (it != t.held.end() && it->second.pool == tile.pool) {
+            auto& v = it->second.slots;
+            v.erase(std::remove(v.begin(), v.end(), &tile), v.end());
+            if (!v.empty()) return;   // the address stays held by another slot
+            t.held.erase(it);
+        }
+    }
+    m_freePool.push_back(tile.pool);
+}
+
 bool ResidencyManager::DropOne(const std::shared_ptr<Tracked>& tr) {
     tr->dropped = true;
     if (tr->state != TileState::Mapped) return false;
@@ -1013,7 +1046,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
                                                    it->tile->req.x, it->tile->req.y, 0,
                                                    it->tile->req.face * t.mips + it->tile->req.mip}});
         }
-        if (it->tile->pool != UINT32_MAX) m_freePool.push_back(it->tile->pool);
+        ReleaseSlot(t, *it->tile);   // 4.7: the pool slot goes with the last slot of its address
         it->tile->state = TileState::Failed;
         it = m_retiring.erase(it);
     }
@@ -1068,9 +1101,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
                 cl->CopyTiles(t.res.Get(), &coord, &size, m_stream->StagingBuffer(),
                               tile->stageOffset,
                               D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE);
-                tile->landed = true;   // held: the map names it from this turn (law 1)
-                if (tile->rec != UINT32_MAX) m_rec[tile->rec].flags |= kHeldBit;
-                NoteChanged(tile->tenant, tile->req);
+                Landed(tile.get());   // held: the map names it from this turn (law 1); 4.7: its address's slots too
                 ++m_claimEvents;
                 ++m_directLanded;
             }
@@ -1313,11 +1344,41 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
     // of the turn, after the fill loop has drained, so it reports the same number.
     turn.batch = static_cast<uint32_t>(batch.size());
 
-    std::vector<std::shared_ptr<Tracked>> toFill;
+    std::vector<std::shared_ptr<Tracked>> toFill, aliases;
     for (const auto& tile : batch) {
         Tenant& t = m_tenants[tile->tenant];
+        // 4.7: a mapping of bytes another slot read -- the address's pool slot, no read, no fill.
+        if (tile->alias) {
+            const auto it = t.held.find(tile->gkey);
+            if (it == t.held.end() || it->second.pool == UINT32_MAX) {
+                tile->alias = false;   // the address was let go meanwhile: ask again next turn
+                tile->state = TileState::Seen;
+                continue;
+            }
+            Tenant::Held& h = it->second;
+            tile->pool = h.pool;
+            h.slots.push_back(tile.get());
+            auto& mc = calls[{tile->tenant, h.pool >> 16}];
+            mc.coords.push_back({tile->req.x, tile->req.y, 0, tile->req.face * t.mips + tile->req.mip});
+            mc.sizes.push_back({1, FALSE, 0, 0, 0});
+            mc.flags.push_back(D3D12_TILE_RANGE_FLAG_NONE);
+            mc.offsets.push_back(h.pool & 0xFFFF);
+            mc.counts.push_back(1);
+            tile->state = TileState::Mapped;
+            m_mapped.push_back(tile);
+            aliases.push_back(tile);
+            ++sharedMapsTotal;
+            continue;
+        }
         const uint32_t slot = AcquirePoolTile(gpu);
         tile->pool = slot;
+        if (tile->gkey) {   // the address is held by this slot's read
+            Tenant::Held& h = t.held[tile->gkey];
+            h.pool = slot;
+            h.landed = false;
+            h.reader = tile->req;
+            h.slots.push_back(tile.get());
+        }
         auto& mc = calls[{tile->tenant, slot >> 16}];
         mc.coords.push_back(
             {tile->req.x, tile->req.y, 0, tile->req.face * t.mips + tile->req.mip});
@@ -1415,16 +1476,19 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
                       D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE);
         // Step 5: a ring fill is readable when this frame's list executes -- held, if it carried
         // a whole tile. A fill without bytes is garbage and the map never names it.
-        if (n == 65536) {
-            tile->landed = true;
-            if (tile->rec != UINT32_MAX) m_rec[tile->rec].flags |= kHeldBit;
-            NoteChanged(tile->tenant, tile->req);
-        }
+        if (n == 65536) Landed(tile.get());
         off += 65536;
         ++m_ringTiles;
         tile->data.clear();
         tile->data.shrink_to_fit();
         phase(8);
+    }
+    // 4.7: an alias of an address whose bytes have landed is held from this turn (the mapping
+    // above lands when this frame's list executes, as a ring fill does).
+    for (const auto& tile : aliases) {
+        Tenant& t = m_tenants[tile->tenant];
+        const auto it = t.held.find(tile->gkey);
+        if (it != t.held.end() && it->second.landed) Landed(tile.get());
     }
     for (size_t i = 0; i + 1 < refills.size(); i += 2) {   // (held, job) pairs
         const std::shared_ptr<Tracked>& held = refills[i];
@@ -1477,9 +1541,11 @@ void ResidencyManager::LogPages() const {
     struct Cell {
         uint32_t wanted = 0, predicted = 0, mapped = 0, held = 0;
     };
-    size_t poolSum = 0;
-    Log("[pages] rec%u f%u | pool %zu mapped, %zu free | per mip: wanted/mapped+held", traceRecFrame,
-        m_frame, m_mapped.size(), m_freePool.size());
+    size_t poolSum = 0, shared = 0;
+    for (const auto& tr : m_mapped) shared += tr->alias ? 1u : 0u;
+    Log("[pages] rec%u f%u | pool %zu mapped (%zu of them shared mappings: one tile, many windows), %zu free | "
+        "per mip: wanted/mapped+held",
+        traceRecFrame, m_frame, m_mapped.size(), shared, m_freePool.size());
     for (size_t k = 0; k < m_tenants.size(); ++k) {
         const Tenant& t = m_tenants[k];
         if (t.tracked.empty()) continue;

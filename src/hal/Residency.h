@@ -491,6 +491,14 @@ public:
     void SetTileNamer(int tenant, std::function<std::string(const TileRequest&)> namer) {
         if (tenant >= 0 && tenant < static_cast<int>(m_tenants.size())) m_tenants[tenant].namer = std::move(namer);
     }
+    // ONE TILE, MANY WINDOWS (HIERARCHY 4.7; 2026-10-04): a slot's ADDRESS in the pyramid, from
+    // the tenant of block slices (hal::Tenant::Sparse: BlockBinding::Global). The pool holds
+    // bytes by address, once; a slot is a mapping of its address's bytes. A tenant that hands
+    // over no function shares nothing (the cube's faces, a plane: today's path).
+    void SetGlobalOf(int tenant, std::function<bool(const TileRequest&, TileRequest&)> fn) {
+        if (tenant >= 0 && tenant < static_cast<int>(m_tenants.size())) m_tenants[tenant].globalOf = std::move(fn);
+    }
+    uint64_t sharedMapsTotal = 0;   // mappings made without a read, this run
     // ---- THE WATCHDOG, a law of the ledger (nothing here acts). Every turn, a tile of the first P
     // that is not held, has no load in flight and no retiring slot is STARVED; one starved past the
     // glance (kGlanceTurns) is printed once with its whole state ("[starved]") and again every
@@ -605,7 +613,30 @@ private:
         // mapped, and its residency byte is computed from its mips up to the floor alone (255,
         // nothing held, where the floor's tile is not held: the rank above answers).
         std::vector<uint8_t> sliceTop;
+        // 4.7: the slot's address in the pyramid (SetGlobalOf), and what is HELD by address:
+        // its pool slot (none while its read is on the way), the slots mapped to it, whether its
+        // bytes have landed, and the slot whose read fills it.
+        std::function<bool(const TileRequest&, TileRequest&)> globalOf;
+        struct Held {
+            uint32_t pool = UINT32_MAX;
+            bool landed = false;
+            TileRequest reader;             // the slot whose read fills the address
+            std::vector<Tracked*> slots;    // the slots mapped to the pool slot (refs)
+        };
+        std::unordered_map<uint64_t, Held> held;
     };
+    // The address packed: face 3 bits, the pyramid's mip 6, x and y 26 each (rung 17's 2^24 tiles).
+    static uint64_t AddressKey(const TileRequest& g) {
+        return (uint64_t(g.face & 7u) << 58) | (uint64_t(g.mip & 63u) << 52) |
+               (uint64_t(g.y & 0x3FFFFFFu) << 26) | uint64_t(g.x & 0x3FFFFFFu);
+    }
+    // A slot's address key, 0 for a slot of no address.
+    static uint64_t KeyOf(const Tenant& t, const TileRequest& r) {
+        TileRequest g;
+        return (t.globalOf && t.globalOf(r, g)) ? AddressKey(g) : 0ull;
+    }
+    void Landed(Tracked* tile);                    // held from this turn: it and every slot of its address
+    void ReleaseSlot(Tenant& t, Tracked& tile);    // a retiring slot lets go of its address
     static uint32_t TopOf(const Tenant& t, uint32_t face) {
         return face < t.sliceTop.size() ? t.sliceTop[face] : t.mips - 1u;
     }
@@ -644,6 +675,9 @@ private:
         // not whole: a refusal of this attempt, retried when the tree next changes for the tile;
         // while it is not held, it blocks its children (they are unreachable as it is).
         bool stale = false, refresh = false, incomplete = false;
+        // 4.7: the slot's address (0: none) and whether it is a mapping of bytes another slot read.
+        uint64_t gkey = 0;
+        bool alias = false;
     };
     // A held tile's replacement in flight: the held tile (its bytes stay mapped), the load, and
     // whether its version changed again while the load was out (then the load is let go and a new

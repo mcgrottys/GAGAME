@@ -375,6 +375,14 @@ Tenant Tenant::Sparse(Gpu& gpu, ResidencyManager& mgr, TenantDesc desc) {
         }
         mgr.LabelSlices(s->id, std::move(tags), std::move(ground));
     }
+    // 4.7: the address of a block slice's slot (ResidencyManager::SetGlobalOf): the pool holds
+    // bytes by address, once, and every slot of the address is a mapping of them.
+    if (!d.blocks.empty()) {
+        mgr.SetGlobalOf(s->id, [s](const TileRequest& r, TileRequest& g) {
+            const BlockSlice* k = s->BlockOf(r.face);
+            return k && s->BindingCopy(*k).Global(r, s->desc.fiber.texW, s->desc.fiber.texH, g);
+        });
+    }
     // The watchdog's global name for a block slice's tile (ResidencyManager::SetTileNamer).
     if (!d.blocks.empty()) {
         mgr.SetTileNamer(s->id, [s](const TileRequest& r) {
