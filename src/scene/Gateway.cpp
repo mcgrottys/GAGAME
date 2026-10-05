@@ -222,42 +222,49 @@ Candidate Evaluate(const Gateway& g, const Motor& pull, const ViewCone& v, const
     c.dist = std::sqrt(Dot(dc, dc));
     const double* sz = g.Declared().size;
     double zMin = kInf, zMax = -kInf, x0 = kInf, x1 = -kInf, y0 = kInf, y1 = -kInf;
-    bool straddles = false;
+    // F12: THE WINDOW IS THE BOX'S PART IN FRONT OF THE EYE'S PLANE. The rays that reach a box
+    // are bounded by the corners of what stands in front: its own corners there, and where its
+    // edges cross the plane. A box abeam of the eye crosses the plane far off to one side and
+    // bounds nothing of the view; a box the eye stands in crosses it on every side and bounds
+    // the whole of it. (The crossing was once answered "the whole view" wherever it fell: a gate
+    // two kilometres abeam was a window the size of the screen for the frames it took to pass.)
+    double vx[8], vy[8], vzs[8];
     for (int k = 0; k < 8; ++k) {
         double p[3] = {((k & 1) ? 0.5 : -0.5) * sz[0], ((k & 2) ? 0.5 : -0.5) * sz[1],
                        ((k & 4) ? 0.5 : -0.5) * sz[2]};
         c.boxInRoot.TransformPoint(p[0], p[1], p[2]);
         const double rel[3] = {p[0] - v.eye[0], p[1] - v.eye[1], p[2] - v.eye[2]};
-        const double vz = Dot(rel, v.fwd);
-        zMin = (std::min)(zMin, vz);
-        zMax = (std::max)(zMax, vz);
-        if (vz <= kFront) {
-            straddles = true;
-            continue;
-        }
-        const double tx = Dot(rel, v.right) / vz, ty = Dot(rel, v.up) / vz;
+        vx[k] = Dot(rel, v.right);
+        vy[k] = Dot(rel, v.up);
+        vzs[k] = Dot(rel, v.fwd);
+        zMin = (std::min)(zMin, vzs[k]);
+        zMax = (std::max)(zMax, vzs[k]);
+    }
+    const auto take = [&](double x, double y, double z) {
+        const double tx = x / z, ty = y / z;
         x0 = (std::min)(x0, tx);
         x1 = (std::max)(x1, tx);
         y0 = (std::min)(y0, ty);
         y1 = (std::max)(y1, ty);
+    };
+    for (int k = 0; k < 8; ++k) {
+        if (vzs[k] > kFront) take(vx[k], vy[k], vzs[k]);
+        for (int b = 1; b < 8; b <<= 1) {   // its three edges, each once
+            const int j = k | b;
+            if (j == k || (vzs[k] > kFront) == (vzs[j] > kFront)) continue;
+            const double t = (kFront - vzs[k]) / (vzs[j] - vzs[k]);
+            take(vx[k] + t * (vx[j] - vx[k]), vy[k] + t * (vy[j] - vy[k]), kFront);
+        }
     }
     c.zBox = zMin;
     // Wholly behind the eye, or wholly nearer than the windows it would have to be seen through.
     if (!open || zMax <= (std::max)(zNear, kFront)) return c;
-    if (straddles) {
-        // The box reaches round the eye's plane (the eye is in it, or beside it): its rays are not
-        // bounded by a rectangle, so the view so far is the bound -- conservative, never short.
-        for (int i = 0; i < 4; ++i) c.rect[i] = rect[i];
-        c.zNear = zNear;
-        c.visible = true;
-        return c;
-    }
     c.rect[0] = (std::max)(rect[0], x0);
     c.rect[1] = (std::min)(rect[1], x1);
     c.rect[2] = (std::max)(rect[2], y0);
     c.rect[3] = (std::min)(rect[3], y1);
     if (!(c.rect[0] < c.rect[1] && c.rect[2] < c.rect[3])) return c;
-    c.zNear = (std::max)(zNear, zMin);
+    c.zNear = (std::max)(zNear, zMin);   // a box round the eye's plane: the view's own so far
     c.visible = true;
     return c;
 }

@@ -2005,6 +2005,15 @@ of the frame.
   bound for the turn is restated as what the order does that today's does not: the mean
   cost a tile MAPPED no more than today's, and the 95th in a hundred no more than today's
   in the same batch. The exact measure is not kept: it earned nothing.
+- **A reader silent in a turn when another spoke has said nothing** (2026-10-05, F12). "Stands
+  until it speaks again" had no end for a reader that never spoke again: a gate's window out
+  of the view left its last statement standing, 20,000 tiles at measure 1 for 1,200 frames in
+  the owner's log, starved behind a full queue, and the want at 50k against 32k. The pins'
+  rule, said of every reader: a statement stands while its reader spoke in the latest turn
+  any reader spoke (the prediction apart, an interval); a turn no reader speaks in (a tool's
+  wait) leaves every statement standing. A reader's silence is an event the order is made
+  again on. Measured on a boat circling before the gate: the want back at 31k with the window
+  out of view, 52 starved reports to none.
 - **Built and measured, the standing weight is the law that settles it, and the turn's cost
   is stated, not met** (2026-09-30, H5). On the standing camera not one measure of 2.94
   million pairs moved between two passes, by construction; the camera settles at frame 245

@@ -501,6 +501,7 @@ void ResidencyManager::Want(int sampler, int tenant, uint32_t face, uint32_t mip
     if (m_markFrame == kMarkFrame) Mark(("want: " + std::string(SamplerName(sid))).c_str());
     {   // when each reader last spoke, and a standing reader
         m_sampLast[sid] = stampFrame;
+        if (sid != m_predSid) m_lastSpoke = (std::max)(m_lastSpoke, stampFrame);
         if ((m_pinMask >> sid) & 1u) m_pinSpoke = (std::max)(m_pinSpoke, stampFrame);
     }
     if (m_sampFrame != stampFrame) {

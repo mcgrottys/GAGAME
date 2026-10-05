@@ -2443,6 +2443,29 @@ bool RunSceneSelfTest() {
                 LinkPlanes(owed[0], vc, ownPl);
                 g.True(ownPl[4][0] * 10.0 + ownPl[4][3] < 0.0,
                        "[gate] ...and its world's walk culls everything");
+                // F12: A BOX ABEAM IS NO WINDOW. The first box 2 km off to the right of an eye looking
+                // north: its corners straddle the eye's plane (the view turned through it), and the
+                // part in front of the plane bounds nothing of the view. Once the straddle was answered
+                // "the whole view": a corridor the size of the screen for the frames it took to pass.
+                ViewCone abeam = vc;
+                abeam.eye[0] = -1550.0;   // 2 km west of the box, in its own plane (z = 0)...
+                {
+                    const double fN[3] = {0.0, 0.0, 1.0}, rN[3] = {1.0, 0.0, 0.0};
+                    for (int i = 0; i < 3; ++i) {   // ...looking north: the box's 120 m span crosses the eye's plane
+                        abeam.fwd[i] = fN[i];
+                        abeam.right[i] = rN[i];
+                    }
+                }
+                g.True(WindowChain(both, {}, abeam, 7, 2.0e4).empty(),
+                       "[gate] a box 2 km abeam, crossing the eye's plane, is no window");
+                // THE EYE INSIDE THE BOX: every ray starts in the window -- the view's own rectangle.
+                ViewCone inside = vc;
+                inside.eye[0] = 450.0;
+                const std::vector<WindowLink> fromIn = WindowChain(both, {}, inside, 7, 2.0e4);
+                g.True(!fromIn.empty() && fromIn[0].gate == &gA && fromIn[0].visible &&
+                           std::fabs(fromIn[0].rect[0] + vc.tanX) < 1e-9 && std::fabs(fromIn[0].rect[1] - vc.tanX) < 1e-9 &&
+                           std::fabs(fromIn[0].rect[2] + vc.tanY) < 1e-9 && std::fabs(fromIn[0].rect[3] - vc.tanY) < 1e-9,
+                       "[gate] an eye inside the box sees the whole view through it");
             }
         }
     }
