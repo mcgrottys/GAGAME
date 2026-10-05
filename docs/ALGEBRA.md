@@ -679,12 +679,14 @@ Rayleigh sea's L = √(1 − exp(−1/excess²)) (physics section, BreakFactor),
 bank kernel and the hull's twin apply to the cascade bands; min(1, 1/excess), with its corner
 at excess 1, is gone. (0.60 is the observed Hs saturation.)
 
-**The phase gauge and the spinor.** Each component wants ∇φ = k·d̂; that field is curl-free
-only where depth contours ⊥ propagation, so a definite GAUGE is chosen: cumsum of k·d_e
-along x plus cumsum of the ROW-MEAN of k·d_n along y (a single reference column would
-print its depth profile as horizontal bands). Gauge anchors that must be declared or the
-field is ambiguous: φ = 0 at the northwest corner texel center; x runs west→east
-left-inclusive; y integrates the row-mean southward. Phase ships as (cos φ, sin φ) — the
+**The phase and the spinor.** Each component's phase is the eikonal solution |∇φ| = k over
+the window (eight Godunov sweeps, the inflow edges held at the incident deep-water plane
+k_inf·d̂ between sweeps), not a line integral of k·d̂ along a chosen route: that integral is
+path-dependent wherever ∇k is not parallel to d̂, and printed its route into the sea as
+banding. The gauge is the residual |∇φ|/k − 1 over the wet interior as a distribution
+(creases where ray families meet are caustics and sit in its tail); it runs as a selftest on a
+field of its own (`RunWaveFieldSelfTest`: p50 < 0.2 %, p90 < 1 %, and a phase scaled by 1.1 reads
+0.1), not inside every solve. Phase ships as (cos φ, sin φ) — the
 cl2 law verbatim; bilinear error of unit spinors is ≤ 0.16·δ³ with δ = k|d_axis|Δ/2
 (peak band ≈ 2e-3 rad at 18 samples/λ, below the 8-bit storage floor; worst single-axis
 case 0.131 rad at the blocked-k hold, whose 0.25 factor exists to keep δ < π/2).

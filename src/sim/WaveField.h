@@ -123,8 +123,13 @@ public:
     // block = true (headless renders): solve SYNCHRONOUSLY on a key roll instead --
     // a deterministic dump must never race a background solve (the flat-helm catch:
     // short runs sampled the bank before the field landed).
+    // reader = someone will read the answer this frame (the frame decides: the window wanted at
+    // a level under the pyramid's top, or a hull probed the window within the second). A bucket
+    // roll with no reader is noted once and waits; a field is solved for a reader.
     bool Update(Gpu& gpu, double simUnix, const PartParam* parts, int nParts,
-                bool block = false);
+                bool block = false, bool reader = true);
+    const WaveFieldConfig& Config() const { return m_cfg; }
+    double LastProbeRead() const { return m_probeReadT.load(std::memory_order_relaxed); }
 
 
     // The GPU contract, valid when Ready(): window georef + packing + per-component rows.
@@ -309,6 +314,8 @@ private:
     std::vector<float> m_curU, m_curV;            // solve-grid planes, main-thread owned
     uint64_t m_curSig = 0;                        // quantized content hash -> bucket key
     double m_curReadT = -1e18;                    // last refresh (sim s)
+    mutable std::atomic<double> m_probeReadT{-1e18};   // the last probe inside the window (sim s)
+    uint64_t m_waitingKey = 0;                    // a roll noted once while no one reads
 
     GpuTable m_table{};
     std::shared_ptr<const Solved> m_live;   // M9bc: the adopted solve, swapped atomically
@@ -332,5 +339,8 @@ private:
 
 
 };
+
+// The eikonal sweep and its gauge on a field of their own (sim/WaveField.cpp, --selftest).
+bool RunWaveFieldSelfTest();
 
 }  // namespace ga
