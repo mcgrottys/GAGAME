@@ -7,6 +7,7 @@
 #include "hal/Root.h"
 #include "hal/Views.h"
 #include "scene/FieldSet.h"
+#include "sim/Stations.h"
 
 #include <algorithm>
 #include <cmath>
@@ -409,10 +410,35 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
 
     m_seaLevel = static_cast<float>(seaLevelM);
 
-    // ---- M3: the entrance jet, live from the ACT0816 prediction clock
+    // ---- M3: the jet, live from its station's prediction clock. PHASE C3: A TERM OF THE CURRENT
+    // STATION AT ITS OWN PLACE -- the station nearest the eye of those the solver's domain holds
+    // (sim/Stations.h), its axis through that place along its own bearings, in the solver's chart.
     double signedMs = 0.0;
-    double floodDeg = 285.0, ebbDeg = 105.0;
-    if (m_currents && m_ctSta >= 0) {
+    double floodDeg = 0.0, ebbDeg = 0.0;
+    m_ctSta = -1;
+    if (m_currents && m_surface && m_swe && m_swe->Domain().Ready()) {
+        const SweDomain& d = m_swe->Domain();
+        double P[3];
+        PlanetPoint(camX, camZ, P);
+        const double r = std::sqrt(P[0] * P[0] + P[1] * P[1] + P[2] * P[2]);
+        const double k = 180.0 / 3.14159265358979323846;
+        m_ctSta = NearestStation(*m_currents, std::asin(P[1] / r) * k, std::atan2(P[2], P[0]) * k,
+                                 [&](double la, double lo) { return d.Holds(la, lo); });
+        if (m_ctSta >= 0) {
+            const TidalCurrentStation& st = m_currents->S(size_t(m_ctSta));
+            d.CellOf(st.lat, st.lon, m_jetAt[0], m_jetAt[1]);
+            m_jetAt[2] = d.dx;
+            m_jetAt[3] = d.dy;
+        }
+    }
+    if (m_ctSta != m_jetSaid) {
+        m_jetSaid = m_ctSta;
+        const TidalCurrentStation* st = m_ctSta < 0 ? nullptr : &m_currents->S(size_t(m_ctSta));
+        if (!st) Log("[jet] no current station in the solver's domain: no jet");
+        if (st) Log("[jet] the current station nearest the eye: %s '%s' at %.5f N %.5f E (cell %.2f, %.2f), flood %.0f / ebb %.0f degT",
+                    st->id.c_str(), st->name.c_str(), st->lat, st->lon, m_jetAt[0], m_jetAt[1], st->floodDeg, st->ebbDeg);
+    }
+    if (m_ctSta >= 0) {
         signedMs = m_currents->SignedSpeed(static_cast<size_t>(m_ctSta), simUnix);
         const TidalCurrentStation& st = m_currents->S(static_cast<size_t>(m_ctSta));
         floodDeg = st.floodDeg;
@@ -427,7 +453,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
     m_jet[0] = static_cast<float>(signedMs);
     m_jet[1] = 380.0f;
     m_jet[2] = 1600.0f;
-    m_jet[3] = (m_currents && m_ctSta >= 0) ? 1.0f : 0.0f;
+    m_jet[3] = m_ctSta >= 0 ? 1.0f : 0.0f;
     m_jetDir[0] = static_cast<float>(std::sin(floodDeg * d2r));
     m_jetDir[1] = static_cast<float>(std::cos(floodDeg * d2r));
     m_jetDir[2] = static_cast<float>(std::sin(ebbDeg * d2r));
@@ -473,6 +499,21 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
 // line-of-sight, not diffraction -- honest about what it is, and it reads right: calm in the
 // lee of the north jetty while the bar outside stays violent.
 
+void SeaLayer::PlanetPoint(double wx, double wz, double P[3]) const {
+    const SurfaceFrame& sf = *m_surface;   // the tangent frame about the anchor's ground (ChurnPoint)
+    const double drop = (wx * wx + wz * wz) / (2.0 * sf.planetR);
+    for (int c = 0; c < 3; ++c) P[c] = wx * sf.east[c] + (sf.planetR - drop) * sf.up[c] + wz * sf.north[c];
+}
+
+bool SeaLayer::JetMetres(double wx, double wz, float& east, float& north) const {
+    double P[3], tx = 0.0, ty = 0.0;
+    PlanetPoint(wx, wz, P);
+    if (!m_swe->Domain().CellOfDir(P, tx, ty)) return false;
+    east = static_cast<float>((tx - m_jetAt[0]) * m_jetAt[2]);
+    north = static_cast<float>((m_jetAt[1] - ty) * m_jetAt[3]);
+    return true;
+}
+
 void SeaLayer::UpdateChurnResidency(Gpu& gpu, double simUnix, double signedMs) {
     if (!m_churnReady) return;
     const double dtSim = simUnix - m_prevChurnT;
@@ -507,7 +548,7 @@ void SeaLayer::UpdateChurnResidency(Gpu& gpu, double simUnix, double signedMs) {
         sx = uint32_t(mx);
         sy = uint32_t(my);
     };
-    const bool jetOn = std::abs(signedMs) > onset;
+    const bool jetOn = m_ctSta >= 0 && std::abs(signedMs) > onset;
     const float ex = m_jetDir[2], ez = m_jetDir[3];
     for (uint32_t j = 0; j < NY; ++j) {
         for (uint32_t i = 0; i < NX; ++i) {
@@ -522,11 +563,10 @@ void SeaLayer::UpdateChurnResidency(Gpu& gpu, double simUnix, double signedMs) {
                 m_lastActive[slot] = -1.0e18;
                 if (m_churn.IsResident(sx, sy)) m_pendingClear.push_back(slot);
             }
-            if (!jetOn) continue;
-            const float wx = (float(Tx) + 0.5f) * spanX;
-            const float wz = (float(Ty) + 0.5f) * spanZ;
-            const float along = wx * ex + wz * ez;
-            const float px = wx - along * ex, pz = wz - along * ez;
+            float je = 0.0f, jn = 0.0f;   // PHASE C3: about the jet's station
+            if (!jetOn || !JetMetres((Tx + 0.5) * spanX, (Ty + 0.5) * spanZ, je, jn)) continue;
+            const float along = je * ex + jn * ez;
+            const float px = je - along * ex, pz = jn - along * ez;
             const float cross2 = px * px + pz * pz;
             float env = std::exp(-cross2 / (m_jet[1] * m_jet[1]));
             env *= (along > 0) ? std::exp(-along / m_jet[2]) : 1.0f;
@@ -631,7 +671,8 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
         memcpy(m_churnCb.hwU, &m_churnHw, sizeof(m_churnHw));
         m_churnCb.sweM[0] = m_churnSweWired ? 1.0f : 0.0f;
         m_churnCb.sweM[1] = sweCurrentGain;
-        m_churnCb.sweM[2] = 500.0f;   // the same seaward handover ramp as Sea.hlsl's JetU
+        m_churnCb.sweM[2] = 500.0f;   // the seaward handover ramp, along the ebb from the station
+        for (int c = 0; c < 4; ++c) m_churnCb.jetC[c] = static_cast<float>(m_jetAt[c]);   // PHASE C3
         m_churnCb.sweM[3] = 900.0f;
         m_churnCb.waveD[0] = m_peakDirX;
         m_churnCb.waveD[1] = m_peakDirZ;

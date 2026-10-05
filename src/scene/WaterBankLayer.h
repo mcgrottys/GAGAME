@@ -52,7 +52,7 @@ public:
 
     void Configure(const std::wstring& shaderDir, SeaLayer* sea, SweSolver* swe,
                    const WaterAtlas* atlas, Compositor* comp,
-                   int hgtCh, const GlobeModel* globe, const SeaState* seaState);
+                   int hgtCh, const GlobeModel* globe);
 
     const char* Name() const override { return "waterbank"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
@@ -298,7 +298,6 @@ private:
     const SurfaceFrame* m_surface = nullptr;   // M12 step 4b: the world.flat chart (geoA)
     uint64_t m_cbFp = 0;   // M12 step 4b: the [kernel] waterbank cb fingerprint's last value
     const GlobeModel* m_globe = nullptr;
-    const SeaState* m_seaState = nullptr;
     const class WaveField* m_wave = nullptr;   // M8: the solved wave field (optional)
     uint32_t m_wavePages = UINT32_MAX, m_wavePagesRes = UINT32_MAX;   // M9bc
     double m_waveOrgPx[2] = {0.0, 0.0};

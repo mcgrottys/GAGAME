@@ -961,7 +961,7 @@ uint64_t WaveField::BucketKey(double simUnix, const PartParam* parts, int nParts
         m_atlas ? m_atlas->MslNavd(latC, lonC) + m_atlas->Level(latC, lonC, simUnix) : 0.0;
     mixD(std::round(levelRaw / m_cfg.tideBucketM) * m_cfg.tideBucketM);
     const double sRaw = (m_currents && m_actSta >= 0 &&
-                         size_t(m_actSta) < m_currents->StationCount())
+                         size_t(m_actSta) < m_currents->Count())
                             ? m_currents->SignedSpeed(size_t(m_actSta), simUnix)
                             : 0.0;
     mixD(std::round(sRaw / m_cfg.currentBucketMs) * m_cfg.currentBucketMs);
@@ -1060,7 +1060,7 @@ WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
     in.level = std::round(levelRaw / m_cfg.tideBucketM) * m_cfg.tideBucketM;
 
     const double sRaw = (m_currents && m_actSta >= 0 &&
-                         size_t(m_actSta) < m_currents->StationCount())
+                         size_t(m_actSta) < m_currents->Count())
                             ? m_currents->SignedSpeed(size_t(m_actSta), simUnix)
                             : 0.0;
     in.currentMs = std::round(sRaw / m_cfg.currentBucketMs) * m_cfg.currentBucketMs;

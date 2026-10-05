@@ -99,10 +99,9 @@ bool TideModel::Load(const std::string& jsonPath) {
     m_focus = 0;
     for (size_t i = 0; i < m_stations.size(); ++i) {
         if (m_stations[i].riverKm > m_totalKm) m_totalKm = m_stations[i].riverKm;
-        if (m_stations[i].id == "8440466") m_focus = static_cast<int>(i);   // Newburyport
     }
-    Log("[tide] %zu stations, epoch %.0f, river profile %.1f km, focus '%s'", m_stations.size(),
-        m_epochUnix, m_totalKm, m_stations[m_focus].name.c_str());
+    Log("[tide] %zu stations, epoch %.0f, river profile %.1f km", m_stations.size(), m_epochUnix,
+        m_totalKm);
     return !m_stations.empty();
 }
 

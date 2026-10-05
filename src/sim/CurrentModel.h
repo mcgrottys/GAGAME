@@ -12,6 +12,7 @@
 // ================================================================================================
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -25,7 +26,8 @@ struct TidalEvent {
 
 struct TidalCurrentStation {
     std::string id, name;
-    double floodDeg = 285, ebbDeg = 105;   // compass, direction the water flows TOWARD
+    double lat = NAN, lon = NAN;           // PHASE C3: its place -- the file's, else the scene's
+    double floodDeg = NAN, ebbDeg = NAN;   // compass, direction the water flows TOWARD
     std::vector<TidalEvent> events;
 };
 
@@ -44,9 +46,10 @@ public:
     bool Load(const std::string& jsonPath);
     bool Ready() const { return !m_stations.empty() || m_field.Valid(); }
 
-    size_t StationCount() const { return m_stations.size(); }
+    size_t Count() const { return m_stations.size(); }
     const TidalCurrentStation& S(size_t i) const { return m_stations[i]; }
-    int StationIndex(const char* id) const;
+    // PHASE C3: a station whose file says nothing of its place stands where the scene says.
+    void Place(const std::string& id, double latDeg, double lonDeg);
 
     // Signed speed in m/s (+ flood, - ebb) at any time; 0 outside the fetched window.
     double SignedSpeed(size_t sta, double unixT) const;

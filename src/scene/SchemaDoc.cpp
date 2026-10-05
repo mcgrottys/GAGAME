@@ -177,6 +177,7 @@ const SectionNote kSections[] = {
     {"nodes", "component", "typed nodes (scene/Component.h), by name, typed by ComponentSchemas"},
     {"prune", "tool", "the tree-prune tool's keys (compose/TreePrune.h): list, or retire and purge on confirm"},
     {"tools", "tool", "the one-shot modes this scene runs (--tool)"},
+    {"stations", "station", "where a station of the data stands when its file does not say (PHASE C3)"},
 };
 
 // The placement sugar: ONE parser, four spellings (scene/Props.h ResolvePlacement).

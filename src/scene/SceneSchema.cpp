@@ -24,6 +24,7 @@ LayerEntry kLayer;
 TideLayerProps kTide;
 NodeProps kNode;
 ToolProps kTool;
+StationProps kStation;
 SourceProps kSource;
 
 using Q = Quantity;
@@ -75,7 +76,9 @@ const Schema& DataSchema() {
             .BindPath("tides", p.tides, "the tide stations (--tides)", R)
             .BindPath("seastate", p.seastate, "the sea state (--seastate)", R)
             .BindPath("currents", p.currents, "the currents (--currents)", R)
-            .BindPath("bathy", p.bathy, "the bathymetry (--bathy)", R);
+            .BindPath("bathy", p.bathy, "the bathymetry (--bathy)", R)
+            .Bind("tideFocus", p.tideFocus,
+                  "the tide station whose clock and datum link the water takes (\"\" = the nearest the solver's anchor)", R);
         return sc;
     }();
     return *s;
@@ -158,7 +161,7 @@ const Schema& DatumSchema() {
         auto& p = kDoc.sea.datum;
         Schema* sc = new Schema("sea.datum", &p);
         sc->Bind("fromStation", p.fromStation, "CO-OPS resolves MLLW -> NAVD88 per station; false = mllwToNavd", R)
-            .Bind("mllwToNavd", p.mllwToNavd, Q::Length, "m", "tide (m MLLW) + this = NAVD88 (--datum)", R);
+            .Bind("mllwToNavd", p.mllwToNavd, Q::Length, "m", "tide (m MLLW) + this = NAVD88", R);
         return sc;
     }();
     return *s;
@@ -637,6 +640,17 @@ const Schema& ToolSchema() {
     return *s;
 }
 
+const Schema& StationSchema() {
+    static const Schema* s = [] {
+        Schema* sc = new Schema("station", &kStation);
+        sc->Bind("name", kStation.name, "the station's id in its file", R)
+            .Bind("lat", kStation.lat, Q::Angle, "deg", "its latitude", R)
+            .Bind("lon", kStation.lon, Q::Angle, "deg", "its longitude", R);
+        return sc;
+    }();
+    return *s;
+}
+
 const Schema& PruneSchema() {
     static const Schema* s = [] {
         auto& p = kDoc.prune;
@@ -682,6 +696,7 @@ const Schema& SceneFileSchema() {
             .Nest("water", WaterSchema(), &kDoc.water, "the water")
             .Nest("streaming", StreamingSchema(), &kDoc.streaming, "residency: scene state")
             .List("sources", &SourceSchema(), "rasters that are sources by being files, in any order", false)
+            .List("stations", &StationSchema(), "where a station of the data stands when its file does not say", false)
             .Nest("capture", CaptureSchema(), &kDoc.capture, "headless capture")
             .List("views", &ViewSchema_(), "the cameras, by name")
             .Nest("rails", RailsSchema(), &kDoc.rails, "the camera rails")

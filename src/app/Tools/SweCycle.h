@@ -16,6 +16,7 @@
 #include "hal/Residency.h"
 #include "sim/BathyModel.h"
 #include "sim/CurrentModel.h"
+#include "sim/Stations.h"
 #include "sim/SweSolver.h"
 
 #include <algorithm>
@@ -478,7 +479,14 @@ int RunSweCycleMode(const Options& opt, Gpu& gpu, const CurrentModel& currents, 
         Log("[swe-cycle] the told west stage raised by %+.3f m (--swe-cycle-stage)", stageM);
     }
     swe.Spinup(gpu, simUnix, 2.0, oceanAt, westAtStage, southAt, westQAt);
-    const int ctSta = haveCurrents ? currents.StationIndex("ACT0816") : -1;
+    // PHASE C3: the current station nearest the throat's search centre that the domain holds.
+    int ctSta = -1;
+    if (haveCurrents) {
+        double la = 0.0, lo = 0.0;
+        grid.flat.LatLonOf(0.0, 0.0, la, lo);
+        ctSta = NearestStation(currents, la, lo,
+                               [&](double a, double b) { return swe.Domain().Holds(a, b); });
+    }
     RunSweCycle(gpu, swe, oceanAt, westAtStage, southAt, westQAt,
                 haveCurrents ? &currents : nullptr, ctSta, grid, simUnix,
                 opt.sweCycleH, describeWest, focus);

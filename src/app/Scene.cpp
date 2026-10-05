@@ -398,6 +398,18 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             out.sources.push_back(std::move(s));
         }
     }
+    if (const JsonValue* a = ListOf(doc, "stations")) {
+        const PropDecl* decl = root.Find("stations");
+        for (const JsonValue& e : a->arr) {
+            scene::StationProps s;
+            ElementReader r(scene::ElementChain(*decl, e), e, "stations", why, &ok);
+            r.Str("name", s.name);
+            r.F64("lat", s.lat);
+            r.F64("lon", s.lon);
+            if (!ok) return false;
+            out.stations.push_back(std::move(s));
+        }
+    }
     return true;
 }
 

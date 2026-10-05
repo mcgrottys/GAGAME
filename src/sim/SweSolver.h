@@ -41,7 +41,7 @@ namespace ga {
 // M6x: the solver is a WINDOW TYPE now, not the Merrimack. Per-window knobs; defaults preserve the
 // validated estuary behavior.
 struct SweConfig {
-    const char* name = "merrimack";
+    const char* name = "swe";   // PHASE C3: the scene names it (Assembly: scene.name)
     // PHASE C1: THE SPONGE STANDS ON THE OPEN SIDES. A side of the domain is open sea when every cell
     // along it can be wet (bed under +1.2 m NAVD, the residency law's own bound) and no river enters
     // there; the sponge's ramp begins spongeM metres in from an open side and is whole 700 m nearer it

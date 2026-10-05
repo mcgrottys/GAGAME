@@ -161,8 +161,6 @@ struct Options {
     float camX = 1e9f, camZ = 1e9f;   // --campos x,z world override (sea mode)
     std::string view;                 // --view NAME: a camera saved with F5 (data/views.json)
     std::string bathyPath = "data/bathy/merrimack.json";
-    float datumOff = -1.30f;          // tide (m MLLW) + this = water level in NAVD88
-    bool datumSet = false;            // --datum given: overrides the CO-OPS datum resolution
     bool sweOff = false;              // --swe-off: analytic tide plane only (pre-M5c behaviour)
     bool sweWestOff = false;          // --swe-west-off: zero the west-boundary deviation
     double sweSpinupH = 1.0;          // solver history integrated before the first frame

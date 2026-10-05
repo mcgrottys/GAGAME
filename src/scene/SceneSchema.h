@@ -95,6 +95,7 @@ struct DataSection {
     std::string seastate = "data/sea/seastate.json";
     std::string currents = "data/currents/currents.json";
     std::string bathy = "data/bathy/merrimack.json";
+    std::string tideFocus;            // PHASE C3: a tide station's id; "" = the nearest the water's anchor
 };
 struct TimeSection {
     std::string start = "now";        // "now", "YYYY-MM-DDTHH:MM:SSZ" or unix seconds
@@ -132,7 +133,7 @@ struct StormProps {
 };
 struct DatumProps {
     bool fromStation = true;          // CO-OPS resolves MLLW -> NAVD88; false = mllwToNavd
-    float mllwToNavd = -1.30f;
+    float mllwToNavd = 0.0f;          // PHASE C3: no place's number; the scene declares its own
 };
 struct SeaSection {
     StormProps storm;
@@ -363,6 +364,11 @@ struct NodeProps {
 struct ToolProps {
     std::string name;
     std::string args;
+};
+// PHASE C3: where a station of the scene's data stands when its own file does not say.
+struct StationProps {
+    std::string name;                 // the station's id in its file
+    double lat = 0.0, lon = 0.0;
 };
 // THE PRUNE TOOL (compose/TreePrune.h, --tool tree-prune). The mode is `list` unless the scene
 // says otherwise, and `retire` and `purge` act only when `confirm` names the root's full path as

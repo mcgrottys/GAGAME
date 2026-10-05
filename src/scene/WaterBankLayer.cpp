@@ -30,8 +30,7 @@ constexpr double kD2R = kPiD / 180.0;
 
 void WaterBankLayer::Configure(const std::wstring& shaderDir, SeaLayer* sea, SweSolver* swe,
                                const WaterAtlas* atlas,
-                               Compositor* comp, int hgtCh, const GlobeModel* globe,
-                               const SeaState* seaState) {
+                               Compositor* comp, int hgtCh, const GlobeModel* globe) {
     m_shaderDir = shaderDir;
     m_sea = sea;
     m_swe = swe;
@@ -39,7 +38,6 @@ void WaterBankLayer::Configure(const std::wstring& shaderDir, SeaLayer* sea, Swe
     m_comp = comp;
     m_hgtCh = hgtCh;
     m_globe = globe;
-    m_seaState = seaState;
 }
 
 void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSignature) {

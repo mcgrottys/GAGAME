@@ -235,5 +235,10 @@
   "sources": [
     {"name": "massgis.coq2023", "manifest": "data/aerial/aerial.json", "feather": 25},
     {"name": "user.highlights", "manifest": "data/overlay/overlay.json", "feather": 25, "over": 1}
+  ],
+  "stations": [
+    {"name": "ACT0816", "lat": 42.81833, "lon": -70.81},
+    {"name": "ACT0821", "lat": 42.81333, "lon": -70.86833},
+    {"name": "ACT0826", "lat": 42.705, "lon": -70.78833}
   ]
 }

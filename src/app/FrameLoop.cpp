@@ -79,6 +79,7 @@
 #include "sim/Ephemeris.h"   // M9bi: the sun as a place, in Cl(4,1)
 #include "sim/GlobeModel.h"
 #include "sim/WaveField.h"
+#include "sim/Stations.h"
 #include "sim/WaveFieldSource.h"
 #include "sim/CurrentModel.h"
 #include "sim/SeaState.h"
@@ -1095,10 +1096,10 @@ std::optional<int> FrameLoop::Session() {
     }
     startUnix = simUnix;
 
-    // M5c boundary clocks. Ocean = the ENTRANCE station (the physically right open-water
-    // level; Newburyport stays the chart focus). West = the river tide interpolated to the
-    // window's west edge (~km 6, between Newburyport at 4.4 and Salisbury Point at 8.2),
-    // expressed as a DEVIATION from the ocean tide so the datum offset cancels.
+    // M5c boundary clocks. Ocean = the station at the river's km 0 (the open-water level; the
+    // focus is the station nearest the solver's anchor, PHASE C3). West = the river tide
+    // interpolated to the river's entry, expressed as a DEVIATION from the ocean tide so the
+    // datum offset cancels.
     entSta = model.Focus(); westA = model.Focus(); westB = model.Focus();
     // The west edge's along-channel kilometre tracks the WINDOW (straight-line distance is
     // a fine proxy on this reach): ~5.3 km for the original mouth window, ~15.5 for the
@@ -1210,7 +1211,7 @@ std::optional<int> FrameLoop::Session() {
     weather.Init(&compositor, hgtCh, &waterAtlas, &model, &globeModel, &seaState,
                  haveCurrents ? &currents : nullptr);
     if (sea) weather.SetSeaSources(sea->Sources());   // PHASE C2: the sea state's sources
-    if (swe.Ready()) weather.AddExternalWindow("merrimack", &swe, oceanAt);
+    if (swe.Ready()) weather.AddExternalWindow(S.scene.name.c_str(), &swe, oceanAt);   // C3: the scene's name
     if (bathyBostonSwe.Ready()) {
         int iBos = -1;
         for (size_t i = 0; i < model.Count(); ++i) {
@@ -1277,9 +1278,13 @@ std::optional<int> FrameLoop::Session() {
     // window's whole pyramid is prefilled before the tenant is told.
     if (waterBank && hgtCh >= 0) {
         waveField = std::make_unique<WaveField>();
-        wfCtSta = haveCurrents ? currents.StationIndex("ACT0816") : -1;
         WaveFieldConfig wcfg = sceneToWaveCfg(waterScene);
         waveFrame = WaveFieldSource::Align(wcfg);
+        // PHASE C3: the field's current station is the one nearest its window's centre that the
+        // solver's domain holds (sim/Stations.h); none, no station current.
+        double wla = 0.0, wlo = 0.0;
+        surface.flat.LatLonOf(wcfg.orgX + 0.5 * wcfg.nx * wcfg.cellM, wcfg.orgZ + 0.5 * wcfg.ny * wcfg.cellM, wla, wlo);
+        wfCtSta = NearestStation(currents, wla, wlo, [&](double a, double b) { return swe.Ready() && swe.Domain().Holds(a, b); });
         Log("[wave] grid aligned to the z16 page: cell %.3f m, %d x %d cells, window px "
             "(%lld, %lld), frame org (%lld, %lld)",
             wcfg.cellM, wcfg.nx, wcfg.ny, waveFrame.winPxX, waveFrame.winPxY,
@@ -1398,7 +1403,7 @@ std::optional<int> FrameLoop::Session() {
                      static_cast<long long>(std::time(nullptr)),
                      static_cast<unsigned long>(GetCurrentProcessId()));
             m_bedTracer.Configure(tools::SweToolGrid{&swe.Domain(), surface.flat}, dir, [&](uint64_t hist[16]) {
-                return weather.ClaimedMips(resMgr, hgtTenant, hist, "merrimack");
+                return weather.ClaimedMips(resMgr, hgtTenant, hist, S.scene.name.c_str());
             });
             m_bedTracer.Read(gpu, swe, S.water.swe.bedWait ? "before-wait" : "before-spinup",
                              oceanAt(spinT0));

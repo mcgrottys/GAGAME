@@ -71,8 +71,10 @@ bool CurrentModel::Load(const std::string& jsonPath) {
             TidalCurrentStation s;
             s.id = js.Str("id");
             s.name = js.Str("name", s.id.c_str());
-            s.floodDeg = js.Num("flood_deg", 285);
-            s.ebbDeg = js.Num("ebb_deg", 105);
+            s.lat = js.Num("lat", NAN);
+            s.lon = js.Num("lon", NAN);
+            s.floodDeg = js.Num("flood_deg", NAN);
+            s.ebbDeg = js.Num("ebb_deg", NAN);
             if (const JsonValue* evs = js.Get("events");
                 evs && evs->type == JsonValue::Type::Array) {
                 for (const JsonValue& je : evs->arr) {
@@ -88,7 +90,7 @@ bool CurrentModel::Load(const std::string& jsonPath) {
     if (const JsonValue* adcp = root.Get("buoy_adcp");
         adcp && adcp->type == JsonValue::Type::Object) {
         adcpValid = true;
-        adcpId = adcp->Str("id", "44029");
+        adcpId = adcp->Str("id", "");
         adcpMs = adcp->Num("ms", 0);
         adcpTowardDeg = adcp->Num("toward_deg", 0);
         adcpObsUnix = adcp->Num("obs_unix", 0);
@@ -128,11 +130,12 @@ bool CurrentModel::Load(const std::string& jsonPath) {
     return Ready();
 }
 
-int CurrentModel::StationIndex(const char* id) const {
-    for (size_t i = 0; i < m_stations.size(); ++i) {
-        if (m_stations[i].id == id) return static_cast<int>(i);
+void CurrentModel::Place(const std::string& id, double latDeg, double lonDeg) {
+    for (TidalCurrentStation& s : m_stations) {
+        if (s.id != id || std::isfinite(s.lat)) continue;
+        s.lat = latDeg;
+        s.lon = lonDeg;
     }
-    return -1;
 }
 
 double CurrentModel::SignedSpeed(size_t sta, double unixT) const {

@@ -43,11 +43,9 @@ public:
     const std::vector<const SeaState*>& Sources() const { return m_sources; }
     const WaveScale& Scale() const { return m_scale; }
 
-    // M3: the ACT0816 tidal clock drives the entrance jet and its wave steepening.
-    void SetCurrents(const CurrentModel* currents) {
-        m_currents = currents;
-        m_ctSta = currents ? currents->StationIndex("ACT0816") : -1;
-    }
+    // M3: a current station's tidal clock drives the jet and its wave steepening. PHASE C3: the
+    // station is the one nearest the eye that the solver's domain holds (SetTime); none, no jet.
+    void SetCurrents(const CurrentModel* currents) { m_currents = currents; }
 
     // M5c: the shallow-water solver (owned by main; recorded into this layer's command list
     // each frame) and the CPU bathy grid the swell-shadow march walks.
@@ -233,7 +231,8 @@ private:
         float hwW[20];
         float hwO[12];
         uint32_t hwS[8];
-        float svU[4], svV[4], svW[4], svO[4];   // PHASE C1: the solver's chart about the churn's frame; LAST
+        float svU[4], svV[4], svW[4], svO[4];   // PHASE C1: the solver's chart about the churn's frame
+        float jetC[4];   // PHASE C3: the jet's station, its cell in the solver's chart, and the cell (m); LAST
     };
     std::wstring m_shaderDir;
     const SeaState* m_sea = nullptr;
@@ -257,6 +256,12 @@ private:
     Gpu* m_gpu = nullptr;
     const CurrentModel* m_currents = nullptr;
     int m_ctSta = -1;
+    int m_jetSaid = -2;
+    double m_jetAt[4] = {};   // PHASE C3: the jet's station's cell (tx, ty) and the cell dx, dy (m)
+    // A point of the churn's flat world on the planet; and in metres east and north of the jet's
+    // station in the solver's chart (the planes about the domain's anchor), false where it has none.
+    void PlanetPoint(double wx, double wz, double P[3]) const;
+    bool JetMetres(double wx, double wz, float& east, float& north) const;
     float m_cPeak = 10.0f;     // peak-partition phase speed for the amplification factor
     float m_peakDirX = -1.0f, m_peakDirZ = 0.0f;
     float m_bandRms[3] = {};   // M8: unit-sea rms envelope per band (sqrt(2 m0) * exag)

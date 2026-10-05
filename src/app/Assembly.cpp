@@ -54,6 +54,7 @@
 #include "sim/GlobeModel.h"
 #include "sim/CurrentModel.h"
 #include "sim/SeaState.h"
+#include "sim/Stations.h"
 #include "sim/SweSolver.h"
 #include "sim/TideModel.h"
 #include "sim/WaterTerms.h"
@@ -387,13 +388,11 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
 
     // M3: currents -- the ACT tidal clock for the sea's jet, the GoMOFS field for the gulf.
     haveCurrents = currents.Load(S.data.currents);
+    for (const scene::StationProps& st : S.stations) currents.Place(st.name, st.lat, st.lon);
     if (haveCurrents && sea) sea->SetCurrents(&currents);
     if (!haveCurrents) {
         Log("[main] no currents (run: py -3 harvester\\harvest_currents.py)");
     }
-
-    // M5c: the MLLW -> NAVD88 join, now resolved from CO-OPS datums unless --datum forces it.
-    datumOff = !S.sea.datum.fromStation ? S.sea.datum.mllwToNavd : ResolveDatum(model);
 
     // ---- M6w: THE ONE BED. The planets' CPU models, the raw CUDEM planes, and the
     // composed HEIGHT channel all come up BEFORE the solver -- because the solver's bed
@@ -537,6 +536,20 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                     "two cells -- no solver", lon0, lat0, lon1, lat1);
             }
         }
+        // PHASE C3: THE TIDE FOCUS is the station the water's point asks for: its reader is the
+        // solver (its ocean clock, its NAVD88 bed), so the point is its anchor and the stations those
+        // its domain holds (sim/Stations.h); data.tideFocus names one instead.
+        if (sweDomain.Ready()) {
+            const std::string& id = S.data.tideFocus;
+            const int fi = NearestStation(model, sweDomain.latC, sweDomain.lonC,
+                                          [&](double la, double lo) { return sweDomain.Holds(la, lo); });
+            for (size_t i = 0; i < model.Count(); ++i) {
+                if (id.empty() ? int(i) == fi : model.S(i).id == id) model.SetFocus(int(i));
+            }
+            const TideStation& f = model.S(model.Focus());
+            Log("[tide] focus %s '%s' at %.5f N %.5f E (%s)", f.id.c_str(), f.name.c_str(), f.lat, f.lon,
+                id.empty() ? "the nearest the solver's anchor in its domain" : "data.tideFocus");
+        }
         // M9k/M9n: THE BED, through GA Load -> normalize -> GA Compose (the six-layer
         // height stack, LayeredOver) -> a reserved, paged, mipped sparse array. Built HERE,
         // before anything binds a bed, because the consumers below now take the bank: the
@@ -560,6 +573,9 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     } else {
         Log("[main] no bathymetry (run: py -3 harvester\\harvest_bathy.py); open-ocean sea");
     }
+
+    // M5c: the MLLW -> NAVD88 join, the focus station's CO-OPS link unless the scene declares one.
+    datumOff = !S.sea.datum.fromStation ? S.sea.datum.mllwToNavd : ResolveDatum(model);
 
     // M5c: the sparse shallow-water solver -- the estuary's own hydrodynamics, tide-forced
     // offshore and river-forced upstream, feeding the sea's mean surface and currents.
@@ -635,6 +651,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             }
         }
         SweConfig sweCfg;
+        sweCfg.name = S.scene.name.c_str();
         sweCfg.spongeM = S.water.swe.sponge;
         sweCfg.westBoundary = S.water.swe.river == 0;
         swe.Init(gpu, renderer.Shaders(), shaderDir, sweDomain, sweCfg);   // bed bound below
@@ -686,8 +703,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     if (sea && bathy.Ready() && !marsMode) {
         auto wbOwned = std::make_unique<WaterBankLayer>();
         waterBank = wbOwned.get();
-        waterBank->Configure(shaderDir, sea, &swe, &waterAtlas, &compositor,
-                             hgtCh, &globeModel, &seaState);
+        waterBank->Configure(shaderDir, sea, &swe, &waterAtlas, &compositor, hgtCh, &globeModel);
         waterBank->SetBaseTexel(waterScene.bankTexelM);   // M8h ring density (scene)
         waterBank->SetSurface(&surface);   // M12 step 4b: the world.flat chart, for the geoA row
         waterBank->flatBed = S.water.bank.flatBed;
@@ -711,8 +727,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         if (droste || !S.gates.empty()) {
             auto wbB = std::make_unique<WaterBankLayer>();
             waterBankB = wbB.get();
-            waterBankB->Configure(shaderDir, sea, &swe, &waterAtlas, &compositor,
-                                  hgtCh, &globeModel, &seaState);
+            waterBankB->Configure(shaderDir, sea, &swe, &waterAtlas, &compositor, hgtCh, &globeModel);
             waterBankB->SetBaseTexel(waterScene.bankTexelM);
             waterBankB->SetSurface(&surface);
             waterBankB->flatBed = S.water.bank.flatBed;

@@ -4,8 +4,9 @@
 #ifndef GA_JET_HLSLI
 #define GA_JET_HLSLI
 
-// Analytic ebb/flood jet: channel axis through the origin along the ebb direction, Gaussian
-// across-channel, exponential decay seaward, plateau upstream. signedMs: + flood, - ebb.
+// Analytic ebb/flood jet: channel axis through its current station (xz: metres east and north of
+// it) along the ebb direction, Gaussian across-channel, exponential decay seaward, plateau
+// upstream. signedMs: + flood, - ebb.
 float2 JetVelocity(float2 xz, float signedMs, float halfWidth, float seawardDecay,
                    float2 floodDir, float2 ebbDir) {
     const float along = dot(xz, ebbDir);

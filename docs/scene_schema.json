@@ -20,7 +20,8 @@
     { "key": "layers", "kind": "list", "node": "layer", "doc": "the layers in registration (draw) order, typed by name" },
     { "key": "nodes", "kind": "list", "node": "component", "doc": "typed nodes (scene/Component.h), by name, typed by ComponentSchemas" },
     { "key": "prune", "kind": "object", "node": "tool", "doc": "the tree-prune tool's keys (compose/TreePrune.h): list, or retire and purge on confirm" },
-    { "key": "tools", "kind": "list", "node": "tool", "doc": "the one-shot modes this scene runs (--tool)" }
+    { "key": "tools", "kind": "list", "node": "tool", "doc": "the one-shot modes this scene runs (--tool)" },
+    { "key": "stations", "kind": "list", "node": "station", "doc": "where a station of the data stands when its file does not say (PHASE C3)" }
   ],
   "placement": [
     { "spelling": "compass", "keys": ["x", "alt", "z", "az", "pitch"], "doc": "the flat world frame in metres and compass degrees: Camera::SetFromCompass, then FromCamera" },
@@ -41,6 +42,7 @@
       { "key": "water", "type": "object", "field": "none", "schema": "water", "reload": "hot", "doc": "the water" },
       { "key": "streaming", "type": "object", "field": "none", "schema": "streaming", "reload": "hot", "doc": "residency: scene state" },
       { "key": "sources", "type": "list", "field": "none", "element": "source", "named": false, "reload": "hot", "doc": "rasters that are sources by being files, in any order" },
+      { "key": "stations", "type": "list", "field": "none", "element": "station", "named": false, "reload": "hot", "doc": "where a station of the data stands when its file does not say" },
       { "key": "capture", "type": "object", "field": "none", "schema": "capture", "reload": "hot", "doc": "headless capture" },
       { "key": "views", "type": "list", "field": "none", "element": "view", "named": true, "reload": "hot", "doc": "the cameras, by name" },
       { "key": "rails", "type": "object", "field": "none", "schema": "rails", "reload": "hot", "doc": "the camera rails" },
@@ -70,7 +72,8 @@
       { "key": "tides", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "data/tides/stations.json", "reload": "restart", "doc": "the tide stations (--tides)" },
       { "key": "seastate", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "data/sea/seastate.json", "reload": "restart", "doc": "the sea state (--seastate)" },
       { "key": "currents", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "data/currents/currents.json", "reload": "restart", "doc": "the currents (--currents)" },
-      { "key": "bathy", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "data/bathy/merrimack.json", "reload": "restart", "doc": "the bathymetry (--bathy)" }
+      { "key": "bathy", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "data/bathy/merrimack.json", "reload": "restart", "doc": "the bathymetry (--bathy)" },
+      { "key": "tideFocus", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the tide station whose clock and datum link the water takes (\"\" = the nearest the solver's anchor)" }
     ] },
     { "type": "time", "keys": [
       { "key": "start", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "now", "reload": "restart", "doc": "\"now\", \"YYYY-MM-DDTHH:MM:SSZ\" or unix seconds (--start)" },
@@ -106,7 +109,7 @@
     ] },
     { "type": "sea.datum", "keys": [
       { "key": "fromStation", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "CO-OPS resolves MLLW -> NAVD88 per station; false = mllwToNavd" },
-      { "key": "mllwToNavd", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": -1.3, "reload": "restart", "doc": "tide (m MLLW) + this = NAVD88 (--datum)" }
+      { "key": "mllwToNavd", "type": "number", "field": "f32", "quantity": "length", "unit": "m", "default": 0, "reload": "restart", "doc": "tide (m MLLW) + this = NAVD88" }
     ] },
     { "type": "water", "keys": [
       { "key": "pixelWater", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "shade the water per pixel (--no-pixel-water)" },
@@ -210,6 +213,11 @@
       { "key": "unit", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a height's unit (m, ft, ftUS), read only where the file names none" },
       { "key": "datum", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a height's vertical datum (NAVD88, MSL, EGM2008 ...), read only where the file names none" },
       { "key": "offset", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": null, "optional": true, "reload": "restart", "doc": "added to a height whose datum is not the engine's (NAVD88): the separation at the place; such a file is refused without it, and a file on NAVD88 takes none" }
+    ] },
+    { "type": "station", "keys": [
+      { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the station's id in its file" },
+      { "key": "lat", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "its latitude" },
+      { "key": "lon", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "its longitude" }
     ] },
     { "type": "capture", "keys": [
       { "key": "headless", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "no window (--headless)" },

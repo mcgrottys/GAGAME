@@ -408,10 +408,6 @@ Options ParseArgs(int argc, char** argv) {
             }
         }
         else if (a == "--bathy") o.bathyPath = next("data/bathy/merrimack.json");
-        else if (a == "--datum") {
-            o.datumOff = static_cast<float>(atof(next("-1.30").c_str()));
-            o.datumSet = true;
-        }
         else if (a == "--swe-off") o.sweOff = true;
         else if (a == "--swe-west-off") o.sweWestOff = true;   // diagnostic: west strip = ocean clock
         else if (a == "--swe-uv") o.sweUvDump = Widen(next("swe_uv.png").c_str());
@@ -612,10 +608,6 @@ SceneArgs Options::ToSets(const Options& o) {
         set("sea.storm.hs", f32(o.stormHs));
         set("sea.storm.tp", f32(o.stormTp));
         set("sea.storm.dir", f32(o.stormDir));
-    }
-    if (o.datumSet) {
-        set("sea.datum.fromStation", JsonBool(false));
-        set("sea.datum.mllwToNavd", f32(o.datumOff));
     }
     // ---- water
     if (o.pixelWater != D.pixelWater) set("water.pixelWater", JsonBool(o.pixelWater));
