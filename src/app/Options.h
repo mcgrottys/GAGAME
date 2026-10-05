@@ -54,9 +54,6 @@ struct Options {
     uint32_t frames = 0;              // 0 = run until the window closes
     std::wstring dump;
     std::wstring shaderDir = L"shaders";
-    std::string tidesPath = "data/tides/stations.json";
-    std::string seaPath = "data/sea/seastate.json";
-    std::string currentsPath = "data/currents/currents.json";
     bool seaStart = false;            // begin in the open-sea view (TAB cycles views)
     bool gulfStart = false;           // begin in the gulf map view
     bool globeStart = false;          // begin on the planet (M6)
@@ -209,16 +206,13 @@ struct Options {
                                       // metric + walled jetties the solver's throat core
                                       // reads 0.93 vs ACT 1.06 -- honest at gain 1
     // ---- M10 THE DROSTE LINK (src/core/Droste.h): the root's address, hung as a leaf.
-    bool droste = false;              // --droste: link the root under a leaf of itself
-    // PHASE C5: --droste-at (the leaf's place) is deleted: it mirrored portals[].lat/lon/level.
-    int drosteLevel = 16;             // the portal's quadtree level (16 = a 153 m leaf)
-    double drosteFill = 1.0;          // --droste-fill f: the inner globe's diameter / leaf span
-    double drosteTwistDeg = 90.0;     // --droste-twist deg: the twist per level about north
-    int drosteLight = 0;              // --droste-light realistic|appealing (the lighting A/B)
+    // PHASE C5/C5b: --droste, --droste-at, -fill, -twist, -light, -level-sec, -levels are deleted:
+    // each mirrored a portals[] or rails.droste key. `droste` is set by the --rail-droste* recipes.
+    bool droste = false;
     bool railDroste = false;          // --rail-droste DIR: the storm rail, then the dive
     bool railDrosteOut = false;       // --rail-droste-out DIR: in two levels, turn, fly out
-    double drosteLevelSec = 16.0;     // --droste-level-sec s: rail seconds per level
-    int drosteLevels = 3;             // --droste-levels n: how deep the dive rail goes
+    double drosteLevelSec = 16.0;     // the dive rail's frame budget (rails.droste.levelSec's default)
+    int drosteLevels = 3;             // (rails.droste.levels' default)
     // ---- M12 step 5a: THE SCENE FRONT DOOR (scene/SceneBuilder.h). A positional scene file,
     // --set a.b.c=value overrides in command-line order, --tool name[:args], and --print-scene
     // (the resolved document to stdout, exit 0, before the pool, the boot line and any device

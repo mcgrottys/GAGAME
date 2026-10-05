@@ -90,9 +90,6 @@ Options ParseArgs(int argc, char** argv) {
         }
         else if (a == "--dump") o.dump = Widen(next("out.png").c_str());
         else if (a == "--shaders") o.shaderDir = Widen(next("shaders").c_str());
-        else if (a == "--tides") o.tidesPath = next("data/tides/stations.json");
-        else if (a == "--seastate") o.seaPath = next("data/sea/seastate.json");
-        else if (a == "--currents") o.currentsPath = next("data/currents/currents.json");
         else if (a == "--sea") o.seaStart = true;
         else if (a == "--gulf") o.gulfStart = true;
         else if (a == "--globe") o.globeStart = true;
@@ -121,15 +118,6 @@ Options ParseArgs(int argc, char** argv) {
             o.railDrosteOut = true;
             o.droste = true;
         }
-        else if (a == "--droste") o.droste = true;
-        else if (a == "--droste-fill") o.drosteFill = std::clamp(atof(next("1").c_str()), 0.05, 2.0);
-        else if (a == "--droste-twist") o.drosteTwistDeg = atof(next("90").c_str());
-        else if (a == "--droste-light") {
-            const std::string n = next("realistic");
-            o.drosteLight = (n == "appealing" || n == "1") ? 1 : 0;
-        }
-        else if (a == "--droste-level-sec") o.drosteLevelSec = std::clamp(atof(next("16").c_str()), 2.0, 120.0);
-        else if (a == "--droste-levels") o.drosteLevels = std::clamp(atoi(next("3").c_str()), 1, 6);
         else if (a == "--trace") {
             // M7j: THE HYPERVISOR. One sample walked through the whole one-water chain on
             // the CPU, every transformation printed with its AST edge -- validate against
@@ -579,9 +567,6 @@ SceneArgs Options::ToSets(const Options& o) {
     if (o.planet != D.planet) set("scene.planet", str(o.planet));
     // ---- data
     if (o.shaderDir != D.shaderDir) set("data.shaders", wstr(o.shaderDir));
-    if (o.tidesPath != D.tidesPath) set("data.tides", str(o.tidesPath));
-    if (o.seaPath != D.seaPath) set("data.seastate", str(o.seaPath));
-    if (o.currentsPath != D.currentsPath) set("data.currents", str(o.currentsPath));
     // ---- time
     if (o.startUnix != D.startUnix) set("time.start", StartValue(o.startUnix));
     if (o.timeScale != D.timeScale) set("time.timeScale", num(o.timeScale));
@@ -675,15 +660,9 @@ SceneArgs Options::ToSets(const Options& o) {
                        : o.railFlood ? "flood" : o.railZoom ? "zoom" : !o.rail.empty() ? "classic"
                                                                                        : nullptr;
     if (rail) set("rails.active", str(rail));
-    if (o.drosteLevelSec != D.drosteLevelSec) set("rails.droste.levelSec", num(o.drosteLevelSec));
-    if (o.drosteLevels != D.drosteLevels) set("rails.droste.levels", num(o.drosteLevels));
     // ---- portals
     if (o.droste) {
-        set("portals.droste.enabled", JsonBool(true));
-        set("portals.droste.level", num(o.drosteLevel));
-        set("portals.droste.fill", num(o.drosteFill));
-        set("portals.droste.twistDeg", num(o.drosteTwistDeg));
-        set("portals.droste.lighting", str(o.drosteLight == 1 ? "appealing" : "realistic"));
+        set("portals.droste.enabled", JsonBool(true));   // the --rail-droste* recipes' portal
     }
     // ---- entities
     if (!o.boat.empty()) {
