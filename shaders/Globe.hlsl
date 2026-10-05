@@ -1262,7 +1262,8 @@ float4 PsMain(VsOut i) : SV_Target {
     // M7f: classification input sharpens one rung, 38 m -> 19 m (window mip 1): the fine
     // edit mask owns the structures now, so the height-driven shoreline can afford the
     // finer level -- half the staircase, same residency-stable contract.
-    const float hpC = ComposedHeightOn() ? ComposedHeightChain(up, max(lod, -5.0f) CS_WC) : i.h;
+    const float lodC = max(lod, -5.0f);   // the classifier's level: hp itself where no coarser
+    const float hpC = ComposedHeightOn() ? ((lodC == lod) ? hp : ComposedHeightChain(up, lodC CS_WC)) : i.h;
     const float landness =
         (gStreamF.z > 0.5f) ? ((hp > 0.0f) ? 1.0f : 0.0f)
                             : ComposedLandness(up, pA CS_WC, hpC, gWavesB.w);
@@ -1283,7 +1284,10 @@ float4 PsMain(VsOut i) : SV_Target {
         // LAND side: normals from the composed height cube -- one gradient, no equirect/NE
         // fork, no pole singularity. Modest slope gain (the vertical exaggeration is a
         // display choice; shading at x25 would posterize the continents).
-        const float2 gr = ComposedHeightGradAt(up, i.geo, lod, i.lvl);
+        // The land's gradient where there is land in the pixel: on open water the land side is
+        // mixed in with weight landness = 0 (lerp(wcol, col, 0) is wcol), so its four height
+        // reads were dead there.
+        const float2 gr = (landness > 0.0f) ? ComposedHeightGradAt(up, i.geo, lod, i.lvl) : float2(0.0f, 0.0f);
         const float kSlopeGain = 4.0f;
         const float3 nLand =
             normalize(upT - east * (gr.x * kSlopeGain) - north * (gr.y * kSlopeGain));
