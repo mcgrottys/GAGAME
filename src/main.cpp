@@ -104,7 +104,8 @@ int main(int argc, char** argv) {
         // M12 step 4a: a disk job with no scene; the shipped surface's declaration (its
         // realization tags) is all the packer reads.
         if (S.Tool("pack-tiles")) {
-            return tools::RunPackTiles(topt, SurfaceFrame::Merrimack(GlobeModel::kR, false));
+            return tools::RunPackTiles(topt, SurfaceFrame::About(GlobeModel::kR, false,
+                                                                 S.place.anchor[1], S.place.anchor[0]));
         }
         // The prune tool: the tile trees' folders by last use, before any device and before any
         // tree exists -- it builds none, so it stamps none. Its keys are the scene's prune.*.

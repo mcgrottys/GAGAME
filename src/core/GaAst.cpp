@@ -180,12 +180,11 @@ void RegisterKnownWaterEdges() {
     // M7r: the M7q per-texel bed chain, with its PRECISION contract. The kernel repeats
     // CsWindowUv's formulation (absolute float mercator px minus org): ~0.25 px ulp at
     // z14 = ~2.4 m ground -- bounded by gatest's merc-chain test, invisible under 9.55 m
-    // texels. The world->latlon step is the FLAT-ONE-WORLD map (mPerLon frozen at the
-    // anchor): absolute georegistration drifts ~0.2 km at the window's far corners, but
-    // every water consumer shares the same map, so the water cannot disagree with itself.
-    Register({"world.flat", "latlon.deg", "anchor-linear map", worldM, latlonW, false,
-              "deg", "mPerLon frozen at anchor; shared by ALL water consumers", 1.0,
-              "BathyModel::kOrgLat/kMPerLat convention"});
+    // texels. PHASE C5: the world->latlon step is the scene's place.anchor tangent plane, read
+    // as a ratio of planes in doubles (Space::Anchor) -- exact, no frozen metres-per-degree.
+    Register({"world.flat", "latlon.deg", "anchor tangent chart (exact)", worldM, latlonW, false,
+              "deg", "the tangent plane about place.anchor; shared by ALL water consumers", 1.0,
+              "Space::Anchor about the scene's place.anchor"});
     // Declared merc->uv (both +v=SOUTH, no flip): the north/south inversion happens
     // INSIDE the mercator closed form (the latlon->merc edge above carries flip=true),
     // exactly as the M7l window-sample edge documents. First registration of this edge

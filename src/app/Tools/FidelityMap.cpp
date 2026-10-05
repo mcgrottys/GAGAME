@@ -118,7 +118,8 @@ void HsvToRgb(double h, double s, double v, uint8_t& r, uint8_t& g, uint8_t& b) 
     b = static_cast<uint8_t>(std::clamp(bb, 0.0, 1.0) * 255.0);
 }
 
-void RenderFidelityMap(Compositor& comp, VectorPack& vec, const std::wstring& outPath) {
+void RenderFidelityMap(Compositor& comp, VectorPack& vec, const std::wstring& outPath,
+                       const Space::Anchor& chart) {
     // ---- 1. the registry, grouped. Sources that declare the same structure, resolution and
     // box ARE the same rung wearing 18 constituent names; the legend says so once.
     struct ChanRow {
@@ -193,9 +194,10 @@ void RenderFidelityMap(Compositor& comp, VectorPack& vec, const std::wstring& ou
     };
     const Panel kPanels[] = {
         {"GLOBAL  180 DEG", 0.0, -30.0, 180.0},
-        {"GULF OF MAINE  8 DEG", 42.9, -69.6, 8.0},
-        {"THE ESTUARY  0.8 DEG", 42.78, -70.83, 0.8},
-        {"THE INLET  0.08 DEG", 42.8165, -70.8125, 0.08},
+        // PHASE C4: the rungs about the scene's place.anchor.
+        {"THE REGION  8 DEG", chart.latDeg, chart.lonDeg, 8.0},
+        {"THE ESTUARY  0.8 DEG", chart.latDeg, chart.lonDeg, 0.8},
+        {"THE INLET  0.08 DEG", chart.latDeg, chart.lonDeg, 0.08},
     };
     const int kNP = static_cast<int>(sizeof(kPanels) / sizeof(kPanels[0]));
     const int PW = 430, PH = 300, PAD = 14, LEFT = 200, TOP = 46;
@@ -393,10 +395,10 @@ void RenderFidelityMap(Compositor& comp, VectorPack& vec, const std::wstring& ou
 
 }  // namespace
 
-void RunFidelityMap(const Options& opt, Compositor& compositor) {
+void RunFidelityMap(const Options& opt, Compositor& compositor, const Space::Anchor& chart) {
     VectorPack fidVec;
     fidVec.Load("data/vectors/vectors.vpack");
-    RenderFidelityMap(compositor, fidVec, opt.fidelityMap);
+    RenderFidelityMap(compositor, fidVec, opt.fidelityMap, chart);
     // No early return: the flag forces headless + 1 frame, so the run falls
     // through to the NORMAL teardown. Tearing down by hand from this deep in
     // the wiring exits 9 -- the layers and residency tenants are live here,

@@ -4,7 +4,6 @@
 #include "core/GaAst.h"
 #include "hal/Residency.h"
 #include "hal/Tenant.h"
-#include "sim/BathyModel.h"
 
 #include <algorithm>
 #include <climits>
@@ -464,18 +463,13 @@ hal::BlockBinding SurfaceFrame::Block(size_t i) const {
                              uint32_t(w.anchorY / Lattice::kFaceDim)};
 }
 
-SurfaceFrame SurfaceFrame::Merrimack(double planetR, bool stencil) {
+SurfaceFrame SurfaceFrame::About(double planetR, bool stencil, double latDeg, double lonDeg) {
     SurfaceFrame s;
     s.planetR = planetR;
     s.stencil = stencil;
-    // M12 step 4b: the world.flat chart -- BathyModel.h's anchor (the ACT0816 entrance
-    // station) and its two frozen metres-per-degree, the constants the kernels' geoA row was
-    // cast from at three sites.
-    s.flat.latDeg = BathyModel::kOrgLat;
-    s.flat.lonDeg = BathyModel::kOrgLon;
-    s.flat.mPerLat = BathyModel::kMPerLat;
-    s.flat.mPerLon = BathyModel::kMPerLon;
-    s.flat.linear = true;
+    // PHASE C4: the world.flat chart is the tangent plane about the SCENE's place (place.anchor),
+    // exact: a ratio of planes in doubles, no metres-per-degree.
+    s.flat = Space::Anchor::About(latDeg, lonDeg, planetR);
     // The 16k quad-sphere in the two tile shapes.
     s.cube = Lattice::Cube(Lattice::kFaceDim);
     s.cubeH = Lattice::Cube(Lattice::kFaceDim, 256, 128);

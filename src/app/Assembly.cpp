@@ -274,7 +274,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // alone, and out, as the `ingest` tool. (PHASE A1: the windows are the eye's, not the
     // sources'; nothing here chooses one.)
     planetR = (S.scene.planet == "mars") ? 3389500.0 : GlobeModel::kR;
-    surface = SurfaceFrame::Merrimack(planetR, opt.stencil);
+    surface = SurfaceFrame::About(planetR, opt.stencil, S.place.anchor[1], S.place.anchor[0]);
     // PHASE B2 (D1): THE WINDOWS' STEP, a whole tile at the floor of every tenant that shares them --
     // the colour and the mask (128 x 128), the height and the exposure (256 x 128): 2048 x 1024.
     surface.ShareWindows(128, 128);
@@ -376,7 +376,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             sea->AddSource(src.get());
             A->seaSources.push_back(std::move(src));
         }
-        sea->SetSurface(&surface);   // M12 step 4b: the world.flat chart, for the churn's geoA row
+        sea->SetSurface(&surface);   // the world.flat chart, for the churn's tangent rows (PHASE C5)
         sea->sweCurrentGain = S.water.swe.gain;
         sea->heightScale = S.water.heightScale;
         sea->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
@@ -456,7 +456,12 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             hstack.push_back(srcCudemBos.get());
         }
         if (haveBathyRaw) {
-            srcCudem = std::make_unique<CudemHeightSource>(&bathyRaw);
+            // PHASE C5: the survey's name is its file's (the scene's data.bathy), not a place's.
+            std::string stem = S.data.bathy;
+            stem = stem.substr(stem.find_last_of("/\\") + 1);
+            stem = stem.substr(0, stem.find('.'));
+            srcCudem = std::make_unique<CudemHeightSource>(&bathyRaw, 0.04,
+                                                           ("noaa.cudem." + stem).c_str());
             hstack.push_back(srcCudem.get());
         }
         // The scene's heights by file join in the default order (StackOrder: `over`, then the
@@ -486,7 +491,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // RG16F window tiles on demand. The sim manager consumes these next.
     waterAtlas.Init(compositor, model, "data/water");
     if (S.Tool("water-map") || S.Tool("bathy-map")) {
-        exitCode = tools::RunWaterMap(opt, gpu, globeModel, compositor, hgtCh, waterAtlas);
+        exitCode = tools::RunWaterMap(opt, gpu, globeModel, compositor, hgtCh, waterAtlas, surface.flat);
         return nullptr;
     }
 
@@ -507,7 +512,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         // only the open face's side is drawn in: drawn in on every side the window lost the
         // river's bend in the north band, and the reach behind the face became a pond.
         bathySwe.DrawFrom(bathy, srcCudem.get(), S.water.swe.window == 0, S.water.swe.river == 0,
-                          "merrimack");
+                          S.scene.name.c_str());
         // PHASE C1 (out/integration/plan_phase_c.md): THE SOLVER'S DOMAIN -- the scene's lat/lon box
         // (water.swe.box; zeros = the survey's window as `window` draws it), its anchor the box's
         // centre, its cells the survey's angular cell over the box in true metres at the anchor
@@ -593,7 +598,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         {
             LoaderRegistry breg;
             breg.Register("json", GeoGridLoader::Open);
-            if (auto bld = breg.Open("data/bathy/merrimack.json")) {
+            if (auto bld = breg.Open(S.data.bathy)) {   // PHASE C5: the scene's survey
                 auto bed = Normalize(std::make_shared<RasterSource>(std::move(bld), 0),
                                      UnitSpec::Of(Quantity::Length, "NAVD88"));
                 // The tide arrives in the frame its harmonics were fitted in, with every
@@ -704,7 +709,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         waterBank = wbOwned.get();
         waterBank->Configure(shaderDir, sea, &swe, &waterAtlas, &compositor, hgtCh, &globeModel);
         waterBank->SetBaseTexel(waterScene.bankTexelM);   // M8h ring density (scene)
-        waterBank->SetSurface(&surface);   // M12 step 4b: the world.flat chart, for the geoA row
+        waterBank->SetSurface(&surface);   // the world.flat chart: the rings' places (PHASE C5)
         waterBank->flatBed = S.water.bank.flatBed;
         waterBank->flatBedNavd = S.water.bank.flatBedNavd;
         if (S.water.bank.flatBed) {
@@ -1379,7 +1384,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         // --water-map exit, because earth.color is registered 200 lines later than
         // earth.height -- the first cut rendered a sheet with the skin channel simply
         // missing, which is the exact class of error this picture exists to catch.
-        if (S.Tool("fidelity-map")) tools::RunFidelityMap(opt, compositor);
+        if (S.Tool("fidelity-map")) tools::RunFidelityMap(opt, compositor, surface.flat);
         // M7j: the GA AST -- the state diagram printed and validated EVERY run, so a
         // frame mismatch or an orphaned field is a boot-time report, not a debugging
         // session. (The workflow as an AST: domains, axes, units, scales, ranges.)

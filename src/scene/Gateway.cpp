@@ -36,10 +36,7 @@ bool Place::Build(const Space& planet, double planetR, double lat, double lon,
     chart = Space::Anchor{};
     chart.latDeg = lat;
     chart.lonDeg = lon;
-    chart.mPerLat = 110574.0;
-    chart.mPerLon = 111320.0 * std::cos(lat * kDeg);
-    chart.linear = true;
-    // M13 step 2: and the EXACT map beside it -- the frame's own rows (the same ones the space's
+    // M13 step 2 / PHASE C5: the EXACT map, the only one -- the frame's own rows (the same ones the space's
     // placement was built from) and the planet's radius, so a carried hull's water is read at the
     // place, not at the linear chart's drift from this anchor.
     for (int i = 0; i < 3; ++i) {

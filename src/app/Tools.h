@@ -74,7 +74,7 @@ int RunSelfTest(const Options& opt);
 
 // --water-map / --bathy-map: the reprojection proof (Lambert conformal sheet); exit 0.
 int RunWaterMap(const Options& opt, Gpu& gpu, const GlobeModel& globeModel, Compositor& compositor,
-                int hgtCh, const WaterAtlas& waterAtlas);
+                int hgtCh, const WaterAtlas& waterAtlas, const Space::Anchor& chart);
 // --gis-dump PATH: the survey gate over its box as a PGM; std::exit(0) from inside.
 void RunGisDump(const Options& opt, const GisVectorMask& gisMask);
 // --tree-audit N (--pack-trees, --warm-trees): compare / pack / warm the tile trees; exit 0.
@@ -82,7 +82,7 @@ int RunTreeAudit(const Options& opt, Compositor& compositor, int hgtCh, Residenc
                  int colCh, const std::unique_ptr<TileTree>& megaTree,
                  const std::unique_ptr<TileTree>& heightTree, const SurfaceFrame& surface);
 // --fidelity-map PATH: the heterogeneity sheet. Falls through (no early return, as before).
-void RunFidelityMap(const Options& opt, Compositor& compositor);
+void RunFidelityMap(const Options& opt, Compositor& compositor, const Space::Anchor& chart);
 // --ocean-probe lat,lon: the weather manager's verification harness. The exit code when
 // "lat,lon" parsed; nullopt when it did not, and the run goes on exactly as it always has.
 std::optional<int> RunOceanProbe(const Options& opt, const TideModel& model, Gpu& gpu,
@@ -140,7 +140,7 @@ struct SweFocusProbe {
 void RunSweUv(const Options& opt, Gpu& gpu, const SweToolGrid& grid, SweSolver& swe);
 // --export SPEC: a composed channel out through the manager; exit with the export's code.
 int RunExport(const Options& opt, Gpu& gpu, Compositor& compositor, int hgtCh,
-              ResidencyManager& resMgr, int colCh);
+              ResidencyManager& resMgr, int colCh, const Space::Anchor& chart);
 // --warm-inlet: pre-cache the height cube. Falls through into the frame loop.
 void RunWarmInlet(const Options& opt, Gpu& gpu, const Compositor& compositor,
                   ResidencyManager& resMgr, int hgtTenant);
@@ -149,22 +149,24 @@ void RunWarmInlet(const Options& opt, Gpu& gpu, const Compositor& compositor,
 
 // --dump-water-state: the inlet box's fields as ws_*.f32 + ws_meta.json for proofs/.
 void RunDumpWaterState(const Options& opt, Gpu& gpu, SeaLayer* sea, double simUnix,
-                       WeatherManager& weather);
+                       WeatherManager& weather, const Space::Anchor& chart);
 // --twin-surface: the keystone gate -- CPU TreeWater against the GPU bank at range rings.
 // `classifierNavd` is the level the surface classifier holds the bed against (the tide plane).
 void RunTwinSurface(const Options& opt, Gpu& gpu, const SeaState& seaState, SeaLayer* sea,
                     const WaterSceneConfig& waterScene, WaterBankLayer* waterBank,
                     const Camera& cam, double simUnix, WeatherManager& weather,
-                    const std::unique_ptr<WaveField>& waveField, double classifierNavd);
+                    const std::unique_ptr<WaveField>& waveField, double classifierNavd,
+                    const Space::Anchor& chart);
 // THE THREE LEVELS THAT MUST AGREE at the camera (the startup transient's measurement): the
 // classifier's, the bank's and the CPU's. RunTwinSurface prints it first; --bed-trace prints it
 // at its readings. Reads back and waits.
 void LogLevelsAtCamera(Gpu& gpu, WaterBankLayer* waterBank, const Camera& cam, double simUnix,
-                       WeatherManager& weather, double classifierNavd);
+                       WeatherManager& weather, double classifierNavd, const Space::Anchor& chart);
 // --trace lat,lon: one sample through the state diagram, eleven steps to the GPU texel.
 void RunTrace(const Options& opt, Gpu& gpu, SeaLayer* sea, const Compositor& compositor, int hgtCh,
               const WaterAtlas& waterAtlas, WaterBankLayer* waterBank, GlobeLayer* globe,
-              const ResidencyManager& resMgr, double simUnix, WeatherManager& weather);
+              const ResidencyManager& resMgr, double simUnix, WeatherManager& weather,
+              const Space::Anchor& chart);
 // --sea-verify: rendered Hs from the displacement textures against the model's.
 void RunSeaVerify(const Options& opt, Gpu& gpu, SeaLayer* sea);
 

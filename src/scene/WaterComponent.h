@@ -63,6 +63,7 @@
 #pragma once
 
 #include "core/SceneConfig.h"
+#include "compose/Compositor.h"
 #include "scene/Component.h"
 
 #include <cstdint>
@@ -111,6 +112,7 @@ public:
         GlobeLayer* globe = nullptr;
         WaveField* waveField = nullptr;       // non-null exactly when the session built one
         const WaterAtlas* atlas = nullptr;    // the datum envelope the AUTO edit floor reads
+        const HeightSource* structures = nullptr;   // PHASE C4: the mask source; the floor is read at its place
         Rebuild* rebuild = nullptr;
         const char* path = nullptr;           // the scene file (Assembly::kScenePath)
         WaterSceneWatch* watch = nullptr;     // the directory watcher (Assembly::sceneWatch)

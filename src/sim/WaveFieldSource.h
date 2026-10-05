@@ -27,7 +27,7 @@
 #include "core/GaUnits.h"
 #include "core/Lattice.h"
 #include "hal/Residency.h"
-#include "sim/BathyModel.h"
+#include "core/Space.h"
 #include "sim/WaveField.h"
 
 #include <atomic>
@@ -57,13 +57,15 @@ public:
     // Align the solver's grid to the z16 page. cell = the page texel in WORLD metres at the
     // window's centre latitude (Mercator is conformal: x and y spacing agree to 0.01% over the
     // window); origin = the SW corner of a page texel; nx, ny rounded up to tile multiples.
-    static Frame Align(WaveFieldConfig& cfg) {
+    // PHASE C4: the request is metres about the scene's anchor (`chart`, exact); its corners'
+    // places snap to the page lattice, and the grid's cells ARE that lattice's texels.
+    static Frame Align(WaveFieldConfig& cfg, const Space::Anchor& chart) {
         constexpr double kD2R = 3.14159265358979 / 180.0;
         const double sizeX = cfg.nx * cfg.cellM, sizeZ = cfg.ny * cfg.cellM;
-        const double latC = BathyModel::kOrgLat + (cfg.orgZ + 0.5 * sizeZ) / BathyModel::kMPerLat;
+        double latC = 0.0, lonC = 0.0, lonW = 0.0, latN = 0.0;
+        chart.LatLonOf(cfg.orgX + 0.5 * sizeX, cfg.orgZ + 0.5 * sizeZ, latC, lonC);
+        chart.LatLonOf(cfg.orgX, cfg.orgZ + sizeZ, latN, lonW);
         const double cell = kMercCircM / kWorldPx * std::cos(latC * kD2R);
-        const double lonW = BathyModel::kOrgLon + cfg.orgX / BathyModel::kMPerLon;
-        const double latN = BathyModel::kOrgLat + (cfg.orgZ + sizeZ) / BathyModel::kMPerLat;
         // M12 step 4b: the page lattice's own closed form (Lattice::PxOf on a z16 window).
         // MercX / MercY were its text: a 44.6 M-input sweep (the window's span, a global
         // grid, a random global set, the shipped window's lonW / latN) found the doubles
@@ -78,8 +80,9 @@ public:
         // The SW corner of the window in world metres, from the page texel lattice.
         const double lon0 = double(X0) / kWorldPx * 360.0 - 180.0;
         const double latS = LatOfMercY(double(Y0 + cfg.ny));
-        cfg.orgX = (lon0 - BathyModel::kOrgLon) * BathyModel::kMPerLon;
-        cfg.orgZ = (latS - BathyModel::kOrgLat) * BathyModel::kMPerLat;
+        chart.FlatOf(latS, lon0, cfg.orgX, cfg.orgZ);   // the SW corner, about the anchor
+        cfg.pxX0 = X0;
+        cfg.pxY0 = Y0;
         Frame f;
         f.winPxX = X0;
         f.winPxY = Y0;

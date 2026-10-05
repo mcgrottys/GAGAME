@@ -102,12 +102,12 @@ private:
 class CudemHeightSource : public HeightSource {
 public:
     explicit CudemHeightSource(const BathyModel* bathy, double featherFrac = 0.04,
-                               const char* name = "noaa.cudem.merrimack");
+                               const char* name = "noaa.cudem");   // PHASE C5: callers name the survey
     const SourceInfo& Info() const override { return m_info; }
     float Sample(double latRad, double lonRad, double groundResM, float& metres) override;
     // The weight the feather gives a world point (x east, z north, metres) -- Sample's own,
     // before the data is asked: 1 inside the band the window fades over, 0 at its edge.
-    float EdgeWeight(double x, double z) const;
+    float EdgeWeight(double lon, double lat) const;
     // WHERE THIS SURVEY PAINTS AT FULL WEIGHT, in its own cells: the first and last column and
     // row whose centres EdgeWeight calls 1 (HIERARCHY 4.17: a solver stands there). False when
     // no cell does. The band follows the feather: ask again and a new feather gives a new box.

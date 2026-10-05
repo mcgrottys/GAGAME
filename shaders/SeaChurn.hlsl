@@ -26,13 +26,16 @@ cbuffer ChurnCb : register(b0) {
                      // y = patchL2, z = advWrapT, w unused
     float4 gWaveD;   // xy = peak propagation dir, z = deriv texture valid, w = source gain
     float4 gSweM;    // M5c: x = solved-field on, y = current gain, zw unused (C3b: no jet to blend)
-    float4 gGeoA;    // M9ar: world -> lat/lon: orgLat, orgLon, 1/mPerLat, 1/mPerLon
     float4 gWindow;  // M9az: x, y = world tile index of the window's origin; z = atlas tiles in y in the tenant's array
     // PHASE B2: the camera's world's windows -- its eye in the tangent axes less (0, R, 0), w = R,
     // then its rows (WindowRows.hlsli). Appended at the END on both sides.
     float4 gEyeT;
     HP_WINDOW_ROWS_DECL
-    HP_SOLVER_ROWS_DECL     // the solver's chart about the churn's frame (appended LAST)
+    HP_SOLVER_ROWS_DECL     // the solver's chart about the churn's frame
+    // PHASE C5: the world.flat chart's rows in the planet frame (gTanU.w = R), appended LAST.
+    float4 gTanE;
+    float4 gTanU;
+    float4 gTanN;
 };
 
 #define HP_WINDOW_ROWS 1
@@ -52,19 +55,17 @@ RWTexture2D<float> gChurnTex : register(u0);
 SamplerState sWrap : register(s0);
 SamplerState sClamp : register(s1);
 
-// The bed at a world point: the flat-one-world map to lat/lon, then the page-or-cube rule.
+// The bed at a world point: its direction by the chart's rows, then the page-or-cube rule.
 // PHASE B2: the windows' chain at the texel's own point -- the flat world point (the sea's world IS
 // the tangent frame about the anchor's ground: Sea.hlsl's SeaPoint) about the camera's eye -- read at
-// the churn's own texel; the direction (for the cube) by the flat chart, as before.
+// the churn's own texel; the direction (for the cube) by the chart's rows.
 float3 ChurnPoint(float2 world) {
     const float drop = dot(world, world) / (2.0f * gEyeT.w);
     return float3(world.x - gEyeT.x, -drop - gEyeT.y, world.y - gEyeT.z);
 }
 float PageBedAt(float2 world) {
-    const float lat = gGeoA.x + world.y * gGeoA.z;
-    const float lon = gGeoA.y + world.x * gGeoA.w;
-    const float latR = lat * 0.01745329252f, lonR = lon * 0.01745329252f;
-    const float3 dir = float3(cos(latR) * cos(lonR), sin(latR), cos(latR) * sin(lonR));
+    // The direction of the flat point, by the chart's rows (the exact map, Space::Anchor::PlaceOf).
+    const float3 dir = normalize(gTanU.xyz + (gTanE.xyz * world.x + gTanN.xyz * world.y) / gTanU.w);
     return HpHeightChain(gBathy, gBathyRes, dir, WindowChain(ChurnPoint(world), 0u), gTexelM);
 }
 

@@ -68,7 +68,7 @@ public:
         m_hgtRes = resMapArr;
         m_hgtMips = mips;
     }
-    // M12 step 4b: the surface, for the world.flat chart the churn's geoA row is cast from
+    // the surface, for the world.flat chart the churn's tangent rows are cast from
     // (SurfaceFrame::FlatRows). Must precede the first churn update.
     void SetSurface(const SurfaceFrame* s) { m_surface = s; }
     // M6i's composed channels + survey masks are the renderer's one surface buffer (b2)
@@ -122,9 +122,10 @@ public:
     // M9ba --trace: the CPU mirror of the page read -- the node itself, at the page's
     // ~76 m grain, so the hypervisor prints what the GPU will see.
     float ShadowAtWorld(float x, float z) const {
-        if (!m_exposure) return 1.0f;
-        return m_exposure->At(BathyModel::kOrgLat + z / BathyModel::kMPerLat,
-                              BathyModel::kOrgLon + x / BathyModel::kMPerLon);
+        if (!m_exposure || !m_surface) return 1.0f;
+        double la = 0.0, lo = 0.0;
+        m_surface->flat.LatLonOf(x, z, la, lo);   // PHASE C5: the exact chart
+        return m_exposure->At(la, lo);
     }
 
     const char* Name() const override { return "sea"; }
@@ -206,12 +207,8 @@ private:
         float miscC[4];  // x = chop-band wavenumber (M5c; was deep phase speed); gMiscC
         float waveD[4];
         float sweM[4];   // M5c: solved-field on, current gain; zw unused (C3b)
-        // M9ar: THE BED IS THE HEIGHT MEGATEXTURE. world -> lat/lon (orgLat, orgLon, 1/mPerLat,
-        // 1/mPerLon) and the page frame (org px x, y, 1/16384, world px at z14). Appended LAST
-        // -- and M9ax found them inserted BEFORE sweM on this side only: same bytes, every row
-        // from gSweM on rotated (the churn read its current gain from the longitude for a
-        // week; priors 22). The order here IS the shader's.
-        float geoA[4];
+        // The order here IS the shader's (M9ax found rows inserted on one side only: every row
+        // after them rotated; priors 22).
         // M9az: THE WINDOW. The atlas is addressed TOROIDALLY on a world-anchored tile lattice
         // (slot = world tile mod atlas tiles), and the domain is the +-8 km window around the
         // camera: x, y = the world tile index of the window's origin, z = atlas tiles in y.
@@ -225,7 +222,8 @@ private:
         float hwW[20];
         float hwO[12];
         uint32_t hwS[8];
-        float svU[4], svV[4], svW[4], svO[4];   // PHASE C1: the solver's chart about the churn's frame; LAST
+        float svU[4], svV[4], svW[4], svO[4];   // PHASE C1: the solver's chart about the churn's frame
+        float tanE[4], tanU[4], tanN[4];        // PHASE C5: world.flat's rows (tanU[3] = R); LAST
     };
     std::wstring m_shaderDir;
     const SeaState* m_sea = nullptr;
@@ -285,7 +283,7 @@ private:
     hal::Resource m_hgtArr = nullptr;    // M9ar: borrowed from the residency manager
     hal::Resource m_hgtRes = nullptr;
     uint32_t m_hgtMips = 7;
-    const SurfaceFrame* m_surface = nullptr;   // M12 step 4b: the world.flat chart (geoA)
+    const SurfaceFrame* m_surface = nullptr;   // the world.flat chart (PHASE C5: exact)
     SurfaceFrame::KernelWindowRows m_churnHw{};   // PHASE B2: SetChurnWindows
     float m_churnEyeT[4] = {};
     bool m_churnSweWired = false;          // t2/t3 start as null views; wired when the solver is

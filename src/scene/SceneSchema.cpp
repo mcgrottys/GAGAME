@@ -76,9 +76,20 @@ const Schema& DataSchema() {
             .BindPath("tides", p.tides, "the tide stations (--tides)", R)
             .BindPath("seastate", p.seastate, "the sea state (--seastate)", R)
             .BindPath("currents", p.currents, "the currents (--currents)", R)
-            .BindPath("bathy", p.bathy, "the bathymetry (--bathy)", R)
+            .BindPath("bathy", p.bathy, "the bathymetry survey (\"\" = none)", R)
+            .BindPath("route", p.route, "the chart's channel route, a geojson (\"\" = none)", R)
             .Bind("tideFocus", p.tideFocus,
                   "the tide station whose clock and datum link the water takes (\"\" = the nearest the solver's anchor)", R);
+        return sc;
+    }();
+    return *s;
+}
+
+const Schema& PlaceSchema() {
+    static const Schema* s = [] {
+        auto& p = kDoc.place;
+        Schema* sc = new Schema("place", &p);
+        sc->BindLonLat("anchor", p.anchor, "the place world.flat stands about, [lon, lat] degrees: every {x, alt, z} without a place of its own is in its tangent plane, exactly", R);
         return sc;
     }();
     return *s;
@@ -213,8 +224,8 @@ const Schema& WavefieldSchema() {
         auto& p = kDoc.water.wavefield;
         Schema* sc = new Schema("water.wavefield", &p);
         sc->Bind("enabled", p.enabled, "the solved wave field", H)
-            .Bind("orgX", p.orgX, Q::Length, "m", "window origin, world x", H)
-            .Bind("orgZ", p.orgZ, Q::Length, "m", "window origin, world z", H)
+            .Bind("orgX", p.orgX, Q::Length, "m", "window origin east of place.anchor, in its tangent plane", H)
+            .Bind("orgZ", p.orgZ, Q::Length, "m", "window origin north of place.anchor, in its tangent plane", H)
             .Bind("nx", p.nx, Q::Dimensionless, "1", "cells east", H)
             .Bind("ny", p.ny, Q::Dimensionless, "1", "cells north", H)
             .Bind("cellM", p.cellM, Q::Length, "m", "cell size", H)
@@ -689,6 +700,7 @@ const Schema& SceneFileSchema() {
             .Nest("scene", SceneSchema_(), &kDoc.scene, "the scene: name, mode, planet, start view")
             .List("include", &IncludeSchema(), "overlays applied over this file, in order", false)
             .Nest("data", DataSchema(), &kDoc.data, "the data files")
+            .Nest("place", PlaceSchema(), &kDoc.place, "the scene's place: the anchor world.flat stands about")
             .Nest("time", TimeSchema(), &kDoc.time, "the scene clock")
             .Nest("sun", SunSchema(), &kDoc.sun, "the sun")
             .Nest("air", AirSchema(), &kDoc.air, "the air of the day: its aerosol, the picture's white")

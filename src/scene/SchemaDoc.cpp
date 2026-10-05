@@ -74,6 +74,7 @@ const char* TypeName(PropType t) {
         case PropType::DualSphere: return "dualSphere";
         case PropType::Color: return "color";
         case PropType::Box: return "latLonBox";
+        case PropType::LonLat: return "lonLat";
         case PropType::Path: return "path";
         case PropType::Object: return "object";
         case PropType::List: return "list";
@@ -90,6 +91,7 @@ const char* FieldName(Field f) {
         case Field::I32: return "i32";
         case Field::U32: return "u32";
         case Field::Str: return "string";
+        case Field::D2: return "double2";
         case Field::D3: return "double3";
         case Field::D4: return "double4";
         case Field::F4: return "float4";

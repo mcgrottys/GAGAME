@@ -41,6 +41,7 @@
 #include "core/FieldLoader.h"
 #include "core/GaUnits.h"
 #include "core/GeoRef.h"
+#include "core/ImageLoader.h"
 #include "core/GradeField.h"
 #include "compose/Projections.h"
 #include "core/PageTable.h"
@@ -265,13 +266,14 @@ public:
                 return true;
             }
             case CrsKind::TransverseMercator: {
-                // UTM zone from the EPSG code where it is one of the standard bands; the
-                // engine's own orthos are EPSG:6348 (UTM 19N).
-                int zone = 19;
-                if (g.epsg >= 32601 && g.epsg <= 32660) zone = g.epsg - 32600;
-                else if (g.epsg >= 32701 && g.epsg <= 32760) zone = g.epsg - 32700;
-                else if (g.epsg == 6348) zone = 19;
-                const TransverseMercator tm = TransverseMercator::Utm(zone);
+                // PHASE C4: the zone is the file's own declaration, by the one EPSG law
+                // (core/ImageLoader.h CrsOfEpsg); a code it cannot place is refused, no zone 19.
+                CrsKind k = CrsKind::Geographic;
+                int zone = 0;
+                bool south = false;
+                if (!CrsOfEpsg(g.epsg, k, zone, south, nullptr) || zone <= 0) return false;
+                TransverseMercator tm = TransverseMercator::Utm(zone);
+                tm.falseN = south ? 10000000.0 : 0.0;
                 tm.Forward(lat * kD2R, lon * kD2R, x, y);
                 return true;
             }

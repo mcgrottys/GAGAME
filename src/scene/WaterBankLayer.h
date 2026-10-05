@@ -128,7 +128,7 @@ public:
         m_hgtWinSrv = srv;
         m_hgtWinResSrv = resMapSrv;
     }
-    // M12 step 4b: the surface, for the world.flat chart the geoA row is cast from
+    // the surface, for the world.flat chart the rings' places are read through
     // (SurfaceFrame::FlatRows). Must precede the first Render.
     void SetSurface(const SurfaceFrame* s) { m_surface = s; }
     // M8: the solved wave field (may be null / not Ready -- the kernel falls back to
@@ -192,7 +192,6 @@ private:
         float churn[4];       // xy origin, z 1/domain, w atlas texels
         float peakDir[4];     // M7p: peak propagation dir xy, z valid (gPeakDir)
         uint32_t slotsD[4];   // M7q: height window SRV, its residency-map SRV
-        float geoA[4];        // world->latlon: orgLat, orgLon, 1/mPerLat, 1/mPerLon
         uint32_t slotsE[4];   // M8 foamlaw: cascade DERIV SRVs x3 (Jacobian foam union)
         float rmsRef[4];      // M8: unit-sea rms envelope per band (crest gate / excess)
         uint32_t waveU[4];    // M9bc wavefield: page tenant SRV, its residency SRV, nUsed, env plane
@@ -295,7 +294,7 @@ private:
     Compositor* m_comp = nullptr;
     int m_hgtCh = -1;
     uint32_t m_hgtWinSrv = 0xFFFFFFFFu, m_hgtWinResSrv = 0xFFFFFFFFu;
-    const SurfaceFrame* m_surface = nullptr;   // M12 step 4b: the world.flat chart (geoA)
+    const SurfaceFrame* m_surface = nullptr;   // the world.flat chart (PHASE C5: exact)
     uint64_t m_cbFp = 0;   // M12 step 4b: the [kernel] waterbank cb fingerprint's last value
     const GlobeModel* m_globe = nullptr;
     const class WaveField* m_wave = nullptr;   // M8: the solved wave field (optional)

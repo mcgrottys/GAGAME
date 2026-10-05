@@ -35,6 +35,7 @@
       { "key": "scene", "type": "object", "field": "none", "schema": "scene", "reload": "hot", "doc": "the scene: name, mode, planet, start view" },
       { "key": "include", "type": "list", "field": "none", "element": "include", "named": false, "reload": "hot", "doc": "overlays applied over this file, in order" },
       { "key": "data", "type": "object", "field": "none", "schema": "data", "reload": "hot", "doc": "the data files" },
+      { "key": "place", "type": "object", "field": "none", "schema": "place", "reload": "hot", "doc": "the scene's place: the anchor world.flat stands about" },
       { "key": "time", "type": "object", "field": "none", "schema": "time", "reload": "hot", "doc": "the scene clock" },
       { "key": "sun", "type": "object", "field": "none", "schema": "sun", "reload": "hot", "doc": "the sun" },
       { "key": "air", "type": "object", "field": "none", "schema": "air", "reload": "hot", "doc": "the air of the day: its aerosol, the picture's white" },
@@ -57,7 +58,7 @@
       { "key": "tools", "type": "list", "field": "none", "element": "tool", "named": true, "reload": "hot", "doc": "the one-shot modes this scene runs" }
     ] },
     { "type": "scene", "keys": [
-      { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "merrimack", "reload": "restart", "doc": "the scene's name (a label, read into the boot's [scene] line)" },
+      { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the scene's name (a label, read into the boot's [scene] line)" },
       { "key": "mode", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "world", "names": ["chart", "world", "gulf"], "reload": "restart", "doc": "the layer-enable law: the M1 chart, the one world (estuary + planet), the gulf map" },
       { "key": "planet", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "earth", "reload": "restart", "doc": "earth | mars" },
       { "key": "view", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "sea", "reload": "restart", "doc": "the start camera: a name in views[]" }
@@ -72,8 +73,12 @@
       { "key": "tides", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "data/tides/stations.json", "reload": "restart", "doc": "the tide stations (--tides)" },
       { "key": "seastate", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "data/sea/seastate.json", "reload": "restart", "doc": "the sea state (--seastate)" },
       { "key": "currents", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "data/currents/currents.json", "reload": "restart", "doc": "the currents (--currents)" },
-      { "key": "bathy", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "data/bathy/merrimack.json", "reload": "restart", "doc": "the bathymetry (--bathy)" },
+      { "key": "bathy", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the bathymetry survey (\"\" = none)" },
+      { "key": "route", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the chart's channel route, a geojson (\"\" = none)" },
       { "key": "tideFocus", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the tide station whose clock and datum link the water takes (\"\" = the nearest the solver's anchor)" }
+    ] },
+    { "type": "place", "keys": [
+      { "key": "anchor", "type": "lonLat", "field": "double2", "quantity": "angle", "unit": "deg", "default": [0, 0], "reload": "restart", "doc": "the place world.flat stands about, [lon, lat] degrees: every {x, alt, z} without a place of its own is in its tangent plane, exactly" }
     ] },
     { "type": "time", "keys": [
       { "key": "start", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "now", "reload": "restart", "doc": "\"now\", \"YYYY-MM-DDTHH:MM:SSZ\" or unix seconds (--start)" },
@@ -140,8 +145,8 @@
     ] },
     { "type": "water.wavefield", "keys": [
       { "key": "enabled", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "hot", "doc": "the solved wave field" },
-      { "key": "orgX", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": -1400, "reload": "hot", "doc": "window origin, world x" },
-      { "key": "orgZ", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": -800, "reload": "hot", "doc": "window origin, world z" },
+      { "key": "orgX", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": -1400, "reload": "hot", "doc": "window origin east of place.anchor, in its tangent plane" },
+      { "key": "orgZ", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": -800, "reload": "hot", "doc": "window origin north of place.anchor, in its tangent plane" },
       { "key": "nx", "type": "number", "field": "i32", "quantity": "1", "unit": "1", "default": 1600, "reload": "hot", "doc": "cells east" },
       { "key": "ny", "type": "number", "field": "i32", "quantity": "1", "unit": "1", "default": 1000, "reload": "hot", "doc": "cells north" },
       { "key": "cellM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 2, "reload": "hot", "doc": "cell size" },
@@ -282,8 +287,8 @@
     { "type": "portal", "keys": [
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the portal's name" },
       { "key": "enabled", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "link the root under a leaf of itself (--droste)" },
-      { "key": "lat", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 42.81826, "reload": "restart", "doc": "the leaf's place (--droste-at)" },
-      { "key": "lon", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": -70.80045, "reload": "restart", "doc": "the leaf's place" },
+      { "key": "lat", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "the leaf's place (--droste-at)" },
+      { "key": "lon", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": 0, "reload": "restart", "doc": "the leaf's place" },
       { "key": "toLat", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": null, "optional": true, "reload": "restart", "doc": "the DESTINATION: the place the inner globe presents where the root shows this leaf (the root turned by the shortest arc carrying it onto the leaf's place, then twisted); with toLon; absent = the leaf's own place" },
       { "key": "toLon", "type": "number", "field": "f64", "quantity": "angle", "unit": "deg", "default": null, "optional": true, "reload": "restart", "doc": "the destination's longitude (with toLat)" },
       { "key": "level", "type": "number", "field": "i32", "quantity": "1", "unit": "1", "default": 16, "reload": "restart", "doc": "the quadtree level (16 = a 153 m leaf)" },

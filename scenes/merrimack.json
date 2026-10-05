@@ -14,7 +14,9 @@
     {"file": "scenes/views/builtin.json", "at": "", "optional": false},
     {"file": "data/wave_scene.json", "at": "water", "optional": true}
   ],
+  "place": {"anchor": [-70.81, 42.81833]},
   "data": {
+    "route": "data/gis/route_merrimack.json",
     "shaders": "shaders",
     "tides": "data/tides/stations.json",
     "seastate": "data/sea/seastate.json",

@@ -432,15 +432,13 @@ bool RunSpaceSelfTest() {
             g.Near(F.Pow(3.0).s, -1.0, 0.0, "an odd whole power keeps the parity");
         }
 
-        // The anchor chart round-trips.
-        Space::Anchor an;
-        an.latDeg = 42.81833; an.lonDeg = -70.81; an.mPerLat = 110574.0; an.mPerLon = 81660.0;
-        an.linear = true;
+        // The anchor chart round-trips (PHASE C5: the exact tangent chart; test data at the anchor).
+        const Space::Anchor an = Space::Anchor::About(42.81833, -70.81, 6371000.0);
         double la, lo, fx, fz;
         an.LatLonOf(1234.5, -678.9, la, lo);
         an.FlatOf(la, lo, fx, fz);
-        g.Near(fx, 1234.5, 1e-9, "anchor chart x round-trips");
-        g.Near(fz, -678.9, 1e-9, "anchor chart z round-trips");
+        g.Near(fx, 1234.5, 1e-6, "anchor chart x round-trips");
+        g.Near(fz, -678.9, 1e-6, "anchor chart z round-trips");
     }
 
     if (g.ok) {

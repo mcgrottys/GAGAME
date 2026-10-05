@@ -86,10 +86,10 @@ void GulfLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
         const double toward = std::fmod(std::atan2(mu, mv) * 180.0 / kPi + 360.0, 360.0);
         if (m_currents->adcpValid) {
             snprintf(buf, sizeof(buf),
-                     "44029 obs %.2f m/s @%03.0f | GoMOFS %.2f @%03.0f",
+                     "%s obs %.2f m/s @%03.0f | GoMOFS %.2f @%03.0f", m_currents->adcpId.c_str(),
                      m_currents->adcpMs, m_currents->adcpTowardDeg, ms, toward);
         } else {
-            snprintf(buf, sizeof(buf), "GoMOFS at 44029: %.2f m/s @%03.0f", ms, toward);
+            snprintf(buf, sizeof(buf), "GoMOFS at %s: %.2f m/s @%03.0f", m_currents->adcpId.c_str(), ms, toward);
         }
         validation = buf;
         Log("[gulf] %s", buf);

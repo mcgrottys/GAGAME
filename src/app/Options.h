@@ -13,6 +13,7 @@
 #include "core/Json.h"
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -47,7 +48,8 @@ struct Options {
     bool sliceOn = false;             // --slice d: the cutaway plane (M7o)
     double sliceD = 0.0;              // plane offset, world z metres
     int inject = 0;                   // --inject [bank|cascade]: edge test cards
-    double traceLat = 42.816, traceLon = -70.81;
+    double traceLat = std::numeric_limits<double>::quiet_NaN(),   // PHASE C4: NaN = the scene's
+           traceLon = std::numeric_limits<double>::quiet_NaN();   // place.anchor
     bool debugLayer = false;
     uint32_t frames = 0;              // 0 = run until the window closes
     std::wstring dump;
@@ -160,7 +162,6 @@ struct Options {
     float camAlt = -1, camAz = 246, camPitch = -5;   // --cam alt,az,pitch override
     float camX = 1e9f, camZ = 1e9f;   // --campos x,z world override (sea mode)
     std::string view;                 // --view NAME: a camera saved with F5 (data/views.json)
-    std::string bathyPath = "data/bathy/merrimack.json";
     bool sweOff = false;              // --swe-off: analytic tide plane only (pre-M5c behaviour)
     bool sweWestOff = false;          // --swe-west-off: zero the west-boundary deviation
     double sweSpinupH = 1.0;          // solver history integrated before the first frame
@@ -209,9 +210,8 @@ struct Options {
                                       // reads 0.93 vs ACT 1.06 -- honest at gain 1
     // ---- M10 THE DROSTE LINK (src/core/Droste.h): the root's address, hung as a leaf.
     bool droste = false;              // --droste: link the root under a leaf of itself
-    double drosteLat = 42.81826;      // --droste-at lat,lon[,level]: the leaf is the one at this
-    double drosteLon = -70.80045;     // place (default: the entrance mouth, east of the jetty
-    int drosteLevel = 16;             // tips) and this quadtree level (16 = a 153 m leaf)
+    // PHASE C5: --droste-at (the leaf's place) is deleted: it mirrored portals[].lat/lon/level.
+    int drosteLevel = 16;             // the portal's quadtree level (16 = a 153 m leaf)
     double drosteFill = 1.0;          // --droste-fill f: the inner globe's diameter / leaf span
     double drosteTwistDeg = 90.0;     // --droste-twist deg: the twist per level about north
     int drosteLight = 0;              // --droste-light realistic|appealing (the lighting A/B)

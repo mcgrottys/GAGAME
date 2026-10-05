@@ -1272,9 +1272,8 @@ bool RunRealHeightsCheck() {
     Distribution("C.1   where it is not (flats, marsh, land: plain means)", other);
     std::sort(big.begin(), big.end(), [](const Big& a, const Big& b) { return a.d > b.d; });
     for (size_t i = 0; i < big.size() && i < 8; ++i) {
-        Log("[realheights] C.1   large: %.6f N %.6f E (world x %+.0f z %+.0f m): file %+.2f, grid %+.2f m", big[i].lat,
-            big[i].lon, (big[i].lon - BathyModel::kOrgLon) * BathyModel::kMPerLon,
-            (big[i].lat - BathyModel::kOrgLat) * BathyModel::kMPerLat, big[i].file, big[i].harv);
+        Log("[realheights] C.1   large: %.6f N %.6f E: file %+.2f, grid %+.2f m", big[i].lat,
+            big[i].lon, big[i].file, big[i].harv);
     }
     // C.2 ETOPO: the 60" file against the global relief (GlobeModel's etopo_8192.i16, box-decimated
     // by the harvester), and the 15" file against the NE ring (ne_15s.i16, a crop), each read at

@@ -125,15 +125,12 @@ void WaterBankLayer::SetFrame(Gpu& gpu, double simUnix, double camX, double camZ
 // M13 step 2: the place a ring point holds, on the sphere the mesh is drawn on. The rings are a
 // RADIAL PROJECTION onto the root's tangent plane -- the mesh reads them at (R d.x, R d.z) of a
 // vertex's direction -- so the place of (wx, wz) is the direction that projects there
-// (Space::Anchor::PlaceOfProjected). Where the surface never wrote its rows this is the
-// anchor-linear chart, exactly as every line here used to be.
+// (Space::Anchor::PlaceOfProjected). PHASE C5: no anchor-linear fallback; a point past the frame's
+// horizon has no place, and answers the anchor's own.
 void WaterBankLayer::PlaceOfRing(double wx, double wz, double& latDeg, double& lonDeg) const {
-    if (m_surface && m_surface->flat.Exact() &&
-        m_surface->flat.PlaceOfProjected(wx, wz, latDeg, lonDeg)) {
-        return;
-    }
-    latDeg = BathyModel::kOrgLat + wz / BathyModel::kMPerLat;
-    lonDeg = BathyModel::kOrgLon + wx / BathyModel::kMPerLon;
+    if (m_surface && m_surface->flat.PlaceOfProjected(wx, wz, latDeg, lonDeg)) return;
+    latDeg = m_surface ? m_surface->flat.latDeg : 0.0;
+    lonDeg = m_surface ? m_surface->flat.lonDeg : 0.0;
 }
 
 bool WaterBankLayer::TileWet(double wx0, double wz0, double spanM) const {
@@ -693,10 +690,6 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.slotsD[1] = m_hgtWinResSrv;
     cb.slotsD[2] = 0xFFFFFFFFu;   // PHASE B3: the page's slice lane, no page
     cb.slotsD[3] = 0xFFFFFFFFu;
-    // M12 step 4b: the world.flat chart's row and the height window's row come from the
-    // surface and the window's lattice (the old eight casts bit for bit; the [kernel] hash
-    // below is the gate).
-    m_surface->FlatRows(cb.geoA);
     // M8 foamlaw: the deriv fibers carry the Jacobian foam (the crest's area 2-blade
     // degenerating -- provably the same event the Miche steepness names), and the band
     // rms envelopes let the kernel normalize eta for the crest gate and depth excess.

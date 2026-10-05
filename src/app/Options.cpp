@@ -122,15 +122,6 @@ Options ParseArgs(int argc, char** argv) {
             o.droste = true;
         }
         else if (a == "--droste") o.droste = true;
-        else if (a == "--droste-at") {
-            const std::string v = next("42.81826,-70.80045,16");
-            double la = o.drosteLat, lo = o.drosteLon;
-            int lv = o.drosteLevel;
-            const int n = sscanf_s(v.c_str(), "%lf,%lf,%d", &la, &lo, &lv);
-            if (n >= 2) { o.drosteLat = la; o.drosteLon = lo; }
-            if (n >= 3) o.drosteLevel = std::clamp(lv, 4, 20);
-            o.droste = true;
-        }
         else if (a == "--droste-fill") o.drosteFill = std::clamp(atof(next("1").c_str()), 0.05, 2.0);
         else if (a == "--droste-twist") o.drosteTwistDeg = atof(next("90").c_str());
         else if (a == "--droste-light") {
@@ -143,9 +134,9 @@ Options ParseArgs(int argc, char** argv) {
             // M7j: THE HYPERVISOR. One sample walked through the whole one-water chain on
             // the CPU, every transformation printed with its AST edge -- validate against
             // external tools, find the failing step BEFORE the GPU is involved.
-            if (swscanf(Widen(next("42.816,-70.81").c_str()).c_str(), L"%lf,%lf",
-                        &o.traceLat, &o.traceLon) != 2) {
-                o.traceLat = 42.816; o.traceLon = -70.81;
+            // PHASE C4: "" (or no point) = the scene's place.anchor.
+            if (swscanf(Widen(next("").c_str()).c_str(), L"%lf,%lf", &o.traceLat, &o.traceLon) != 2) {
+                o.traceLat = o.traceLon = std::numeric_limits<double>::quiet_NaN();
             }
             o.trace = true;
         }
@@ -407,7 +398,6 @@ Options ParseArgs(int argc, char** argv) {
                 exit(2);
             }
         }
-        else if (a == "--bathy") o.bathyPath = next("data/bathy/merrimack.json");
         else if (a == "--swe-off") o.sweOff = true;
         else if (a == "--swe-west-off") o.sweWestOff = true;   // diagnostic: west strip = ocean clock
         else if (a == "--swe-uv") o.sweUvDump = Widen(next("swe_uv.png").c_str());
@@ -423,7 +413,7 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--fidelity-map") {
             o.fidelityMap = Widen(next("fidelity_map.png").c_str());
         }
-        else if (a == "--ocean-probe") o.oceanProbe = next("42.35,-70.65");
+        else if (a == "--ocean-probe") o.oceanProbe = next("");   // PHASE C4: the point is the caller's
         // M9bp: both are the DEFAULT now; the positive forms stay so scripts keep parsing.
         else if (a == "--pixel-water") o.pixelWater = true;
         else if (a == "--no-pixel-water") o.pixelWater = false;
@@ -592,7 +582,6 @@ SceneArgs Options::ToSets(const Options& o) {
     if (o.tidesPath != D.tidesPath) set("data.tides", str(o.tidesPath));
     if (o.seaPath != D.seaPath) set("data.seastate", str(o.seaPath));
     if (o.currentsPath != D.currentsPath) set("data.currents", str(o.currentsPath));
-    if (o.bathyPath != D.bathyPath) set("data.bathy", str(o.bathyPath));
     // ---- time
     if (o.startUnix != D.startUnix) set("time.start", StartValue(o.startUnix));
     if (o.timeScale != D.timeScale) set("time.timeScale", num(o.timeScale));
@@ -691,8 +680,6 @@ SceneArgs Options::ToSets(const Options& o) {
     // ---- portals
     if (o.droste) {
         set("portals.droste.enabled", JsonBool(true));
-        set("portals.droste.lat", num(o.drosteLat));
-        set("portals.droste.lon", num(o.drosteLon));
         set("portals.droste.level", num(o.drosteLevel));
         set("portals.droste.fill", num(o.drosteFill));
         set("portals.droste.twistDeg", num(o.drosteTwistDeg));
@@ -752,7 +739,10 @@ SceneArgs Options::ToSets(const Options& o) {
     if (o.warmInlet) tool("warm-inlet");
     if (o.dumpWater) tool("dump-water-state");
     if (o.twinSurface) tool("twin-surface");
-    if (o.trace) tool("trace", scene::NumberText(o.traceLat) + "," + scene::NumberText(o.traceLon));
+    if (o.trace) {
+        tool("trace", std::isnan(o.traceLat) ? std::string()
+                                             : scene::NumberText(o.traceLat) + "," + scene::NumberText(o.traceLon));
+    }
     if (o.seaVerify) tool("sea-verify");
     if (!o.waveMap.empty()) tool("wave-map", Narrow(o.waveMap));
     for (const std::string& t : o.tools) out.tools.push_back(t);

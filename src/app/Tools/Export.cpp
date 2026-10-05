@@ -31,7 +31,7 @@ namespace {
 //         surface consumes, hand-inspectable in any DCC tool
 // ================================================================================================
 static int RunChannelExport(const std::string& spec, const std::wstring& outPath,
-                            Compositor& comp, int colCh, int hgtCh) {
+                            Compositor& comp, int colCh, int hgtCh, double anchorLatDeg) {
     std::string name = spec;
     uint32_t mip = 2;
     if (const size_t c = spec.find(':'); c != std::string::npos) {
@@ -103,7 +103,7 @@ static int RunChannelExport(const std::string& spec, const std::wstring& outPath
             return 1;
         }
         const double worldPx = static_cast<double>((1ll << 14) * 256ll >> mip);
-        const double ground = 40075016.686 / worldPx * std::cos(42.8 * 3.14159265 / 180.0);
+        const double ground = 40075016.686 / worldPx * std::cos(anchorLatDeg * 3.14159265 / 180.0);
         FILE* f = nullptr;
         _wfopen_s(&f, outPath.c_str(), L"w");
         if (!f) return 1;
@@ -162,9 +162,9 @@ static int RunChannelExport(const std::string& spec, const std::wstring& outPath
 }  // namespace
 
 int RunExport(const Options& opt, Gpu& gpu, Compositor& compositor, int hgtCh,
-              ResidencyManager& resMgr, int colCh) {
+              ResidencyManager& resMgr, int colCh, const Space::Anchor& chart) {
     const int rc =
-        RunChannelExport(opt.exportSpec, opt.exportOut, compositor, colCh, hgtCh);
+        RunChannelExport(opt.exportSpec, opt.exportOut, compositor, colCh, hgtCh, chart.latDeg);
     gpu.WaitIdle();
     resMgr.Shutdown();
     return rc;

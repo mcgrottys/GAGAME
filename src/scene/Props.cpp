@@ -221,6 +221,10 @@ Schema& Schema::BindBox(const char* key, double (&f)[4], const char* doc, Reload
     Unit(Add(key, PropType::Box, Field::D4, &f, doc, r), Quantity::Angle, "deg");
     return *this;
 }
+Schema& Schema::BindLonLat(const char* key, double (&f)[2], const char* doc, Reload r) {
+    Unit(Add(key, PropType::LonLat, Field::D2, &f, doc, r), Quantity::Angle, "deg");
+    return *this;
+}
 Schema& Schema::Nest(const char* key, const Schema& sub, const void* subPrototype,
                      const char* doc) {
     Add(key, PropType::Object, Field::None, subPrototype, doc, Reload::Hot).sub = &sub;
@@ -564,9 +568,11 @@ bool ParseProp(const PropDecl& d, const JsonValue& v, const std::string& path, P
         }
         case PropType::Vec3:
         case PropType::Box:
+        case PropType::LonLat:
         case PropType::Color: {
-            const int need = d.type == PropType::Vec3 ? 3 : d.type == PropType::Box ? 4 : 3;
-            const int most = d.type == PropType::Vec3 ? 3 : 4;
+            const int need = d.type == PropType::Vec3 ? 3 : d.type == PropType::Box ? 4
+                           : d.type == PropType::LonLat ? 2 : 3;
+            const int most = d.type == PropType::Vec3 ? 3 : d.type == PropType::LonLat ? 2 : 4;
             if (v.type != JsonValue::Type::Array || static_cast<int>(v.arr.size()) < need ||
                 static_cast<int>(v.arr.size()) > most) {
                 return Refuse(why, path + ": expected an array of " + std::to_string(most));
@@ -622,6 +628,7 @@ JsonValue PropToJson(const PropDecl& d, const PropValue& v) {
         case PropType::Vec3: return NumArray(v.v, 3);
         case PropType::Color:
         case PropType::Box: return NumArray(v.v, 4);
+        case PropType::LonLat: return NumArray(v.v, 2);
         case PropType::DualSphere: {
             JsonValue o = JsonObj();
             JsonSet(o, "c", NumArray(v.v, 3));
@@ -647,6 +654,7 @@ bool PropEqual(const PropDecl& d, const PropValue& a, const PropValue& b) {
         case PropType::Path:
         case PropType::Enum: return a.s == b.s;
         case PropType::Vec3: return a.v[0] == b.v[0] && a.v[1] == b.v[1] && a.v[2] == b.v[2];
+        case PropType::LonLat: return a.v[0] == b.v[0] && a.v[1] == b.v[1];
         case PropType::Color:
         case PropType::Box:
         case PropType::DualSphere:
@@ -710,6 +718,11 @@ PropSet PropSet::Defaults(const Schema& s, const void* instance) {
             }
             case Field::U32: v.n = *reinterpret_cast<const uint32_t*>(at); break;
             case Field::Str: v.s = *reinterpret_cast<const std::string*>(at); break;
+            case Field::D2: {
+                const double* p = reinterpret_cast<const double*>(at);
+                v.v[0] = p[0]; v.v[1] = p[1];
+                break;
+            }
             case Field::D3: {
                 const double* p = reinterpret_cast<const double*>(at);
                 v.v[0] = p[0]; v.v[1] = p[1]; v.v[2] = p[2];
@@ -790,6 +803,11 @@ bool PropSet::ApplyTo(void* instance, const PoseFrame* frame, std::string* why) 
                 break;
             case Field::U32: *reinterpret_cast<uint32_t*>(at) = static_cast<uint32_t>(v.n); break;
             case Field::Str: *reinterpret_cast<std::string*>(at) = v.s; break;
+            case Field::D2: {
+                double* p = reinterpret_cast<double*>(at);
+                p[0] = v.v[0]; p[1] = v.v[1];
+                break;
+            }
             case Field::D3: {
                 double* p = reinterpret_cast<double*>(at);
                 p[0] = v.v[0]; p[1] = v.v[1]; p[2] = v.v[2];

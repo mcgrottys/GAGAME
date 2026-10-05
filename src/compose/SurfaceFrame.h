@@ -25,9 +25,9 @@
 //  (merc, det, u4) and their slices are deleted: every page past the faces is an eye's window.
 //  Fill() writes the composed-surface rows.
 //
-//  THE KERNEL ROWS (step 4b). The bank and the churn read the world.flat chart (`flat`,
-//  core/Space.h's Anchor, written by Merrimack from BathyModel's constants -- Phase C's) through
-//  FlatRows(); their height reads carry the windows' rows (KernelRows).
+//  THE KERNEL ROWS (step 4b). The churn reads the world.flat chart (`flat`, core/Space.h's
+//  Anchor about the scene's place.anchor) through TangentRows(); their height reads carry the
+//  windows' rows (KernelRows).
 //
 //  THE DIAGRAM'S PAINT ROWS (step 4c). GaAst.cpp's compose table hand-wrote the four rows
 //  `compose.stack -> color.pages / height.pages` -- the z14 origin as a literal in a range
@@ -242,15 +242,13 @@ struct SurfaceFrame {
     };
     AstTenant colorAst, hgtAst;
     bool stencil = false;   // --stencil: the GIS alignment overlay
-    // M12 step 4b: THE WORLD.FLAT CHART (core/Space.h's Anchor) -- the anchor-linear lat/lon
-    // <-> metres map of BathyModel.h (lat = orgLat + z / mPerLat, lon = orgLon + x / mPerLon,
-    // mPerLon frozen at the anchor) that the kernels' geoA row is made of. Merrimack writes it
-    // from BathyModel's constants.
+    // THE WORLD.FLAT CHART (core/Space.h's Anchor): the tangent plane about the scene's
+    // place.anchor, exact (PHASE C4/C5: the anchor-linear map and its geoA row are deleted).
     Space::Anchor flat;
 
     // The shipped surface on a planet of radius planetR: the lattices and the flat chart. The
     // tenants come later (Declare), the frame rows from the session.
-    static SurfaceFrame Merrimack(double planetR, bool stencil);
+    static SurfaceFrame About(double planetR, bool stencil, double latDeg, double lonDeg);
     // The tenants, once they exist: ids read off the declarations. An empty Tenant (never
     // declared) leaves -1.
     void Declare(const hal::Tenant& color, const hal::Tenant& height, const hal::Tenant& mask);
@@ -260,13 +258,17 @@ struct SurfaceFrame {
     void RegisterEdges() const;
     // THE ONE FILL of the composed-surface rows (was FillComposedCb, Compositor.cpp).
     void Fill(ComposedSurfaceCb& cb, const ResidencyManager& rm) const;
-    // M12 step 4b: the kernels' geoA row -- {orgLat, orgLon, 1/mPerLat, 1/mPerLon} as floats,
-    // the old four casts bit for bit (a double division, then one cast, as the sites wrote).
-    void FlatRows(float geoA[4]) const {
-        geoA[0] = static_cast<float>(flat.latDeg);
-        geoA[1] = static_cast<float>(flat.lonDeg);
-        geoA[2] = static_cast<float>(1.0 / flat.mPerLat);
-        geoA[3] = static_cast<float>(1.0 / flat.mPerLon);
+    // PHASE C5: the kernels' tangent rows -- the chart's east, up and north in the planet frame
+    // (w = R on the up row), for a kernel that turns a flat point into its direction.
+    void TangentRows(float e[4], float u[4], float n[4]) const {
+        for (int i = 0; i < 3; ++i) {
+            e[i] = static_cast<float>(flat.east[i]);
+            u[i] = static_cast<float>(flat.up[i]);
+            n[i] = static_cast<float>(flat.north[i]);
+        }
+        e[3] = 0.0f;
+        u[3] = static_cast<float>(flat.planetR);
+        n[3] = 0.0f;
     }
 };
 

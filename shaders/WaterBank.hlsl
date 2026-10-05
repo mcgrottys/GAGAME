@@ -34,7 +34,6 @@ cbuffer BankCb : register(b0) {
     float4 gPeakDir;    // xy = peak propagation dir (world unit), z = valid, w unused
     uint4  gSlotsD;     // x = height window SRV, y = its residency-map SRV (M7q),
                         // z = the window's SLICE when x/y are array views (M9aq), else ~0
-    float4 gGeoA;       // world->latlon: orgLat, orgLon, 1/mPerLat, 1/mPerLon
     uint4  gSlotsE;     // M8 foamlaw: cascade DERIV SRVs x3 (hx, hz, J, foam)
     float4 gRmsRef;     // M8: unit-sea rms envelope per band (xyz), w spare
     // ---- M8 THE SOLVED WAVE FIELD (ALGEBRA.md wavefield; src/sim/WaveField) ----
@@ -136,16 +135,10 @@ struct BankTile {
 };
 StructuredBuffer<BankTile> gTiles : register(t0);
 
-// THE PLACE OF A TEXEL, from its own metres inside the tile. This is what gGeoA used to answer
-// through the anchor-linear chart (lat = orgLat + z / 110574, lon = orgLon + x / 81660), which
-// stands 5.6 m per km north and 1.1 m per km east of the sphere the mesh draws -- 28 m at the
-// rings' own reach, and a different place entirely (215 km) once a gate carries the eye. The
-// rows are exact at the tile's origin and second-order over the tile.
+// THE PLACE OF A TEXEL, from its own metres inside the tile: the tile's rows, exact at its origin
+// and second-order over the tile (PHASE C5: the anchor-linear fallback and its gGeoA row are gone;
+// a tile past the frame's horizon has no place and no rows).
 float2 TilePlace(const BankTile t, float2 exz) {
-    if (t.placeB.z == 0.0f) {   // no rows: the chart, as before
-        return float2(gGeoA.x + (t.orgXZ.y + exz.y) * gGeoA.z,
-                      gGeoA.y + (t.orgXZ.x + exz.x) * gGeoA.w);
-    }
     return float2(t.placeA.x + exz.x * t.placeA.z + exz.y * t.placeB.x,
                   t.placeA.y + exz.x * t.placeA.w + exz.y * t.placeB.y);
 }

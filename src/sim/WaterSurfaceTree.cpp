@@ -15,14 +15,6 @@ namespace ga {
 
 namespace {
 
-// The flat world frame is the ACT0816 tangent plane, and WeatherManager::WorldOf is its forward
-// map. This is its exact inverse -- same four constants, so the round trip is exact by
-// construction rather than by agreement.
-void LatLonOf(double wx, double wz, double& latDeg, double& lonDeg) {
-    lonDeg = BathyModel::kOrgLon + wx / BathyModel::kMPerLon;
-    latDeg = BathyModel::kOrgLat + wz / BathyModel::kMPerLat;
-}
-
 // HLSL's smoothstep, so the window feather is the same curve on both processors.
 double SmoothStep(double e0, double e1, double x) {
     if (e1 <= e0) return (x < e0) ? 0.0 : 1.0;
@@ -104,15 +96,12 @@ void TreeWater::ChartEdgeM(double wx, double wz, double& ex, double& ez) const {
 
 // M13 step 2: THE PLACE, not the chart's guess. Space::Anchor::PlaceOf carries the point through
 // the space's own frame rows onto the sphere the mesh is drawn on and reads its direction; where a
-// space handed us no rows (planetR 0) it is the anchor-linear law, exactly as before. The hull's
+// hull with no space has no place (PHASE C5: the anchor-linear law is gone). The hull's
 // own y is not passed: a place is a direction, and a metre of altitude turns it by 1.6e-7 degrees
 // (1 cm of ground at 6371 km) -- below the float the kernels carry it in.
 void TreeWater::PlaceOf(double wx, double wz, double& latDeg, double& lonDeg) const {
-    if (m_hasChart) {
-        m_chart.PlaceOf(wx, 0.0, wz, latDeg, lonDeg);
-    } else {
-        LatLonOf(wx, wz, latDeg, lonDeg);
-    }
+    latDeg = lonDeg = 0.0;
+    if (m_hasChart) m_chart.PlaceOf(wx, 0.0, wz, latDeg, lonDeg);
 }
 
 // The same point said in the ROOT space's flat frame -- the frame the solved wave field's window
@@ -121,22 +110,18 @@ void TreeWater::PlaceOf(double wx, double wz, double& latDeg, double& lonDeg) co
 // which is the IDENTITY for a hull in the root space; the lat/lon round trip it replaces was not,
 // once the places became exact, and it would have put the 28 m chart drift under every root hull.
 void TreeWater::RootOf(double wx, double wz, double& rx, double& rz) const {
-    if (!m_hasChart) {
+    if (!m_hasChart || !m_hasRoot) {   // the root's own frame (PHASE C5: no lat/lon round trip)
         rx = wx;
         rz = wz;
         return;
     }
-    if (m_chart.Exact() && m_hasRoot && m_root.Exact()) {
+    {
         double p[3];
         m_chart.PlanetOf(wx, 0.0, wz, p);
         rx = p[0] * m_root.east[0] + p[1] * m_root.east[1] + p[2] * m_root.east[2];
         rz = p[0] * m_root.north[0] + p[1] * m_root.north[1] + p[2] * m_root.north[2];
         return;
     }
-    double la = 0.0, lo = 0.0;
-    m_chart.LatLonOf(wx, wz, la, lo);
-    rx = (lo - BathyModel::kOrgLon) * BathyModel::kMPerLon;
-    rz = (la - BathyModel::kOrgLat) * BathyModel::kMPerLat;
 }
 
 void TreeWater::SetBoats(const WakeBoat* boats, int count) {
@@ -479,7 +464,7 @@ void TreeWater::WindAt(double wx, double wz, double simUnix, double out[3]) cons
     out[0] = out[1] = out[2] = 0.0;
     if (!m_wx) return;
     double latDeg = 0.0, lonDeg = 0.0;
-    LatLonOf(wx, wz, latDeg, lonDeg);
+    PlaceOf(wx, wz, latDeg, lonDeg);
     const WeatherSample q = m_wx->Query(latDeg, lonDeg, simUnix, 1.0);
     if (!q.windSrc || q.windSrc[0] == '-') return;   // no wind data is calm, and says so
     out[0] = double(q.windU);   // east
@@ -490,7 +475,7 @@ void TreeWater::WindAt(double wx, double wz, double simUnix, double out[3]) cons
 std::string TreeWater::Describe(double wx, double wz, double simUnix) const {
     if (!m_wx) return "water.tree: NO TREE ATTACHED (answers valid=false everywhere)";
     double latDeg = 0.0, lonDeg = 0.0;
-    LatLonOf(wx, wz, latDeg, lonDeg);
+    PlaceOf(wx, wz, latDeg, lonDeg);
     const WeatherSample q = m_wx->Query(latDeg, lonDeg, simUnix, 1.0);
     // THE AGE IT READS. Inside a solver's domain the level and the current are the solver's, as of
     // the region it last delivered (WeatherManager::RequestRegion); this says that instant, or that

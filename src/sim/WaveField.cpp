@@ -52,7 +52,6 @@
 #include "core/ThreadManager.h"
 
 #include "hal/Gpu.h"
-#include "sim/BathyModel.h"
 #include "sim/SweSolver.h"
 
 #include <algorithm>
@@ -953,10 +952,8 @@ uint64_t WaveField::BucketKey(double simUnix, const PartParam* parts, int nParts
     mixD(m_cfg.gammaHs);
     mixD(m_cfg.minSamplesPerLambda);
 
-    const double latC =
-        (m_cfg.orgZ + 0.5 * m_cfg.ny * m_cfg.cellM) / BathyModel::kMPerLat + BathyModel::kOrgLat;
-    const double lonC =
-        (m_cfg.orgX + 0.5 * m_cfg.nx * m_cfg.cellM) / BathyModel::kMPerLon + BathyModel::kOrgLon;
+    double latC = 0.0, lonC = 0.0;
+    m_cfg.PlaceOfCell(0.5 * m_cfg.nx, 0.5 * m_cfg.ny, latC, lonC);
     const double levelRaw =
         m_atlas ? m_atlas->MslNavd(latC, lonC) + m_atlas->Level(latC, lonC, simUnix) : 0.0;
     mixD(std::round(levelRaw / m_cfg.tideBucketM) * m_cfg.tideBucketM);
@@ -995,17 +992,15 @@ void WaveField::RefreshSweCurrent(Gpu& gpu, double simUnix) {
     const size_t cells = size_t(m_cfg.nx) * size_t(m_cfg.ny);
     m_curU.assign(cells, 0.0f);
     m_curV.assign(cells, 0.0f);
-    // PHASE C1: the wave field's grid stands in world.flat (its own chart: WaveFieldSource, C4's);
-    // each cell's place, then the solver's cell under it by the solver's own planes.
+    // PHASE C4: each cell's place is its page texel's (WaveFieldConfig::PlaceOfCell), then the
+    // solver's cell under it by the solver's own planes.
     const SweDomain& dom = m_swe->Domain();
     for (int j = 0; j < m_cfg.ny; ++j) {
-        const double wz = m_cfg.orgZ + (double(j) + 0.5) * m_cfg.cellM;
         const size_t row = size_t(j) * size_t(m_cfg.nx);
         for (int i = 0; i < m_cfg.nx; ++i) {
-            const double wx = m_cfg.orgX + (double(i) + 0.5) * m_cfg.cellM;
-            double tx = 0.0, ty = 0.0;
-            if (!dom.CellOf(BathyModel::kOrgLat + wz / BathyModel::kMPerLat,
-                            BathyModel::kOrgLon + wx / BathyModel::kMPerLon, tx, ty) ||
+            double la = 0.0, lo = 0.0, tx = 0.0, ty = 0.0;
+            m_cfg.PlaceOfCell(double(i) + 0.5, double(j) + 0.5, la, lo);
+            if (!dom.CellOf(la, lo, tx, ty) ||
                 tx < 0.0 || ty < 0.0 || tx >= double(uw) || ty >= double(uh)) {
                 continue;
             }
@@ -1042,10 +1037,8 @@ WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
 
     // level at the WINDOW CENTER, bucketed -- the solve happens AT the bucket, so two frames
     // in the same bucket ask the identical question and the cache answers the second one.
-    const double latC =
-        (m_cfg.orgZ + 0.5 * ny * m_cfg.cellM) / BathyModel::kMPerLat + BathyModel::kOrgLat;
-    const double lonC =
-        (m_cfg.orgX + 0.5 * nx * m_cfg.cellM) / BathyModel::kMPerLon + BathyModel::kOrgLon;
+    double latC = 0.0, lonC = 0.0;
+    m_cfg.PlaceOfCell(0.5 * nx, 0.5 * ny, latC, lonC);
     // THE DATUM LINE (kept deliberately, once per solve): the still-water level this
     // field was solved at, decomposed into the two rungs that make it. Every depth in
     // the solve is bed-to-this, so a quiet bias here IS a wrong wave field -- and twice
@@ -1091,16 +1084,11 @@ WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
     if (m_comp && m_hgtCh >= 0) {
         ParallelRows(ny, [&](int j0, int j1) {
             for (int j = j0; j < j1; ++j) {
-                const double latR = ((m_cfg.orgZ + (double(j) + 0.5) * m_cfg.cellM) /
-                                         BathyModel::kMPerLat +
-                                     BathyModel::kOrgLat) *
-                                    (kPiW / 180.0);
                 const size_t row = size_t(j) * size_t(nx);
                 for (int i = 0; i < nx; ++i) {
-                    const double lonR = ((m_cfg.orgX + (double(i) + 0.5) * m_cfg.cellM) /
-                                             BathyModel::kMPerLon +
-                                         BathyModel::kOrgLon) *
-                                        (kPiW / 180.0);
+                    double la = 0.0, lo = 0.0;   // PHASE C4: the cell's page texel's place
+                    m_cfg.PlaceOfCell(double(i) + 0.5, double(j) + 0.5, la, lo);
+                    const double latR = la * (kPiW / 180.0), lonR = lo * (kPiW / 180.0);
                     in.bed[row + i] =
                         m_comp->SampleHeightStack(m_hgtCh, latR, lonR, m_cfg.cellM);
                 }

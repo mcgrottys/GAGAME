@@ -26,6 +26,7 @@
 #pragma once
 
 #include <atomic>
+#include <cmath>
 #include <memory>
 #include <cstdint>
 #include <string>
@@ -46,10 +47,21 @@ class Gpu;
 class CurrentModel;
 
 struct WaveFieldConfig {
-    // The solve window, world metres (BathyModel frame: x east, z north, ACT0816 anchor).
-    // Covers the throat, both jetties, the bar, and the ebb shoal; row 0 = SOUTH
-    // (+v = +z = north, the patch.wrap family -- no flips into the bank kernel).
+    // PHASE C4: the place of a point of the grid, in cells (a cell's centre is i + 0.5, j + 0.5;
+    // j counts north from the south row): the z16 page lattice's own (Web Mercator, 2^24 px).
+    void PlaceOfCell(double ci, double cj, double& latDeg, double& lonDeg) const {
+        const double worldPx = 16777216.0, pi = 3.14159265358979;
+        const double X = double(pxX0) + ci, Y = double(pxY0) + double(ny) - cj;
+        lonDeg = X / worldPx * 360.0 - 180.0;
+        const double n = pi * (1.0 - 2.0 * Y / worldPx);
+        latDeg = (2.0 * std::atan(std::exp(n)) - pi * 0.5) * 180.0 / pi;
+    }
+    // The solve window, metres about the scene's place.anchor in its tangent plane (x east,
+    // z north); row 0 = SOUTH (+v = +z = north, the patch.wrap family -- no flips into the bank
+    // kernel). PHASE C4: Align turns it into a box of z16 page texels (pxX0, pxY0 = its NW
+    // texel), and a cell's place is THAT texel's (PlaceOfCell) -- no metres-per-degree.
     double orgX = -1400.0, orgZ = -800.0;
+    long long pxX0 = 0, pxY0 = 0;
     int nx = 1600, ny = 1000;
     double cellM = 2.0;
     int nComp = 32;                    // M9bp: see SceneConfig wfComps (16 was the comb)

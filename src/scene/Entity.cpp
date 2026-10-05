@@ -241,9 +241,6 @@ void Entity::Recentre(double simUnix) {
     m_ownChart = Space::Anchor{};
     m_ownChart.latDeg = lat;
     m_ownChart.lonDeg = lon;
-    m_ownChart.mPerLat = 110574.0;
-    m_ownChart.mPerLon = 111320.0 * std::cos(lat * 3.14159265358979323846 / 180.0);
-    m_ownChart.linear = true;
     for (int i = 0; i < 3; ++i) {
         m_ownChart.east[i] = fr.east[i];
         m_ownChart.up[i] = fr.up[i];

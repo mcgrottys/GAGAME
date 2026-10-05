@@ -485,7 +485,7 @@ void FrameLoop::ProbeDive(double f, const double c0[3], const double f0[3], cons
 void FrameLoop::ReconfigureWaveField(const WaterSceneConfig& cfg) {
     if (!m_waveField || !m_sceneToWaveCfg) return;
     WaveFieldConfig wcfg2 = m_sceneToWaveCfg(cfg);
-    m_waveFrame = WaveFieldSource::Align(wcfg2);   // M9bc: the page grid
+    m_waveFrame = WaveFieldSource::Align(wcfg2, m_A.surface.flat);   // M9bc: the page grid
     m_waveField->Configure(wcfg2, &m_A.compositor, m_A.hgtCh, &m_A.waterAtlas, &m_A.model,
                            m_entSta, m_A.haveCurrents ? &m_A.currents : nullptr, m_wfCtSta);
 }
@@ -701,8 +701,8 @@ std::optional<int> FrameLoop::Session() {
     // estuary layers were always in it, and the old mode-switch handoff -- the last
     // smoke-and-mirror in the engine -- is DELETED. The pose maps below survive only to
     // express orbit keyframes and cull volumes. (Mars anchors its frame at (0N, 0E).)
-    GlobeModel::LatLonDir(marsMode ? 0.0 : BathyModel::kOrgLat,
-                          marsMode ? 0.0 : BathyModel::kOrgLon, oDir);
+    // PHASE C4: about the scene's place.anchor (the surface's chart; Mars names 0 N 0 E).
+    GlobeModel::LatLonDir(m_A.surface.flat.latDeg, m_A.surface.flat.lonDeg, oDir);
     {
         const double yl = std::sqrt(oDir[0] * oDir[0] + oDir[2] * oDir[2]);
         east0[0] = -oDir[2] / yl; east0[1] = 0.0; east0[2] = oDir[0] / yl;   // d(dir)/dlon
@@ -740,7 +740,7 @@ std::optional<int> FrameLoop::Session() {
         m_planetSpace.name = "planet.re";
         m_planetSpace.unitM = planetR;
         m_planetSpace.extentM = 2.0 * planetR;
-        m_tangentSpace.name = marsMode ? "tangent.mars" : "tangent.merrimack";
+        m_tangentSpace.name = "tangent.anchor";   // PHASE C5: the scene's place.anchor
         m_tangentSpace.unitM = planetR;
         m_tangentSpace.extentM = 2.0 * planetR;
         m_tangentSpace.parent = &m_planetSpace;
@@ -1278,11 +1278,11 @@ std::optional<int> FrameLoop::Session() {
     if (waterBank && hgtCh >= 0) {
         waveField = std::make_unique<WaveField>();
         WaveFieldConfig wcfg = sceneToWaveCfg(waterScene);
-        waveFrame = WaveFieldSource::Align(wcfg);
+        waveFrame = WaveFieldSource::Align(wcfg, surface.flat);
         // PHASE C3: the field's current station is the one nearest its window's centre that the
         // solver's domain holds (sim/Stations.h); none, no station current.
         double wla = 0.0, wlo = 0.0;
-        surface.flat.LatLonOf(wcfg.orgX + 0.5 * wcfg.nx * wcfg.cellM, wcfg.orgZ + 0.5 * wcfg.ny * wcfg.cellM, wla, wlo);
+        wcfg.PlaceOfCell(0.5 * wcfg.nx, 0.5 * wcfg.ny, wla, wlo);
         wfCtSta = NearestStation(currents, wla, wlo, [&](double a, double b) { return swe.Ready() && swe.Domain().Holds(a, b); });
         Log("[wave] grid aligned to the z16 page: cell %.3f m, %d x %d cells, window px "
             "(%lld, %lld), frame org (%lld, %lld)",
@@ -1362,6 +1362,7 @@ std::optional<int> FrameLoop::Session() {
     wo.globe = globe;
     wo.waveField = waveField.get();
     wo.atlas = &waterAtlas;
+    wo.structures = &m_A.srcEdits;   // PHASE C4: the jetty floor's place is the mask source's
     wo.rebuild = &m_waveRebuild;
     wo.path = m_A.kScenePath;
     wo.watch = &m_A.sceneWatch;
@@ -1372,7 +1373,7 @@ std::optional<int> FrameLoop::Session() {
     // M8 THE FLEET: the AIS traffic lane (harvest_route.py) -- boats are pure
     // f(simUnix) on it (ping-pong at the ends), so scrubbing time scrubs the
     // traffic and headless renders are deterministic. No state anywhere.
-    if (waterBank) route.Load("data/gis/route_merrimack.json");
+    if (waterBank && !S.data.route.empty()) route.Load(S.data.route.c_str(), m_A.surface.flat);   // PHASE C5
     // --bank-trace (Phase B0): every fill of both banks is traced; its readings land in a
     // directory of their own under out/.
     if (opt.bankTraceEvery > 0 && waterBank) {
@@ -1538,7 +1539,9 @@ std::optional<int> FrameLoop::Session() {
 
     groundAt = [&](double x, double z) -> double {
         if (mode == 1 && bathy.Ready() && !marsMode) {
-            const float b = bathy.SampleWorld(static_cast<float>(x), static_cast<float>(z));
+            double gla = 0.0, glo = 0.0;   // PHASE C5: the flat point's place, then the survey
+            m_A.surface.flat.LatLonOf(x, z, gla, glo);
+            const float b = bathy.SampleLatLon(gla, glo);
             if (b > -9000.0f) {
                 return std::max(static_cast<double>(b), lastWaterNavd);
             }
@@ -1660,7 +1663,7 @@ std::optional<int> FrameLoop::Session() {
 
     // ---- M6j: channel export mode -- pull data OUT through the manager and exit.
     if (S.Tool("export")) {
-        return tools::RunExport(opt, gpu, compositor, hgtCh, resMgr, colCh);
+        return tools::RunExport(opt, gpu, compositor, hgtCh, resMgr, colCh, m_A.surface.flat);
     }
 
     // ---- The instrumentation block's runtime part; its members and their notes are
@@ -3012,10 +3015,9 @@ bool FrameLoop::Frame() {
         if (!marsMode) {
             PROF_BEGIN();
             resMgr.Mark("read: weather.Update -- the solver steps on its bed");
-            weather.Update(gpu, renderer.Shaders(), S.shadersW, simUnix,
-                           BathyModel::kOrgLat + cam.pz / BathyModel::kMPerLat,
-                           BathyModel::kOrgLon + cam.px / BathyModel::kMPerLon,
-                           altV);
+            double cla = 0.0, clo = 0.0;   // PHASE C5: the camera's place by the exact chart
+            m_A.surface.flat.LatLonOf(cam.px, cam.pz, cla, clo);
+            weather.Update(gpu, renderer.Shaders(), S.shadersW, simUnix, cla, clo, altV);
             // M9ay: every ACTIVE window's lattice at mip 0, from the manager that owns them.
             weather.PinDomains(resMgr, hgtTenant);
             PROF_END(0);
@@ -4110,7 +4112,8 @@ bool FrameLoop::Frame() {
                 pr[1].v, pr[1].valid ? 1 : 0, pr[2].dEta, frame, simUnix - startUnix);
         }
         if (S.Tool("twin-surface") && sea && waterBank) {
-            tools::LogLevelsAtCamera(gpu, waterBank, cam, simUnix, weather, lastWaterNavd);
+            tools::LogLevelsAtCamera(gpu, waterBank, cam, simUnix, weather, lastWaterNavd,
+                                     m_A.surface.flat);
         }
     }
     // --dump-both: the solid frame has just been rendered. Dump it, flip BOTH
@@ -4555,15 +4558,15 @@ bool FrameLoop::Frame() {
             if (waterBankB && waterBankB->enabled) waterBankB->TraceRead(gpu, m_bankTraceDir, "final_B");
         }
         if (S.Tool("dump-water-state") && !marsMode && sea) {
-            tools::RunDumpWaterState(opt, gpu, sea, simUnix, weather);
+            tools::RunDumpWaterState(opt, gpu, sea, simUnix, weather, m_A.surface.flat);
         }
         if (S.Tool("twin-surface") && !marsMode && sea && waterBank) {
             tools::RunTwinSurface(opt, gpu, seaState, sea, waterScene, waterBank, cam,
-                                  simUnix, weather, waveField, lastWaterNavd);
+                                  simUnix, weather, waveField, lastWaterNavd, m_A.surface.flat);
         }
         if (S.Tool("trace") && !marsMode && sea && waterBank) {
             tools::RunTrace(opt, gpu, sea, compositor, hgtCh, waterAtlas, waterBank, globe,
-                            resMgr, simUnix, weather);
+                            resMgr, simUnix, weather, m_A.surface.flat);
         }
         // --bed-trace: THE WHOLE BED, the readings' reference. After everything above has read
         // the run's last instant, the domain is made whole the way the bed wait makes it -- the

@@ -50,13 +50,13 @@ namespace ga::app::tools {
 // solver's deviation -- and the CPU's -- what a hull reads, WeatherManager::Query, the solver
 // being truth. A basin the solver holds below the tide splits the first from the other two.
 void LogLevelsAtCamera(Gpu& gpu, WaterBankLayer* waterBank, const Camera& cam, double simUnix,
-                       WeatherManager& weather, double classifierNavd) {
+                       WeatherManager& weather, double classifierNavd, const Space::Anchor& chart) {
     weather.RefreshMirrorsTo(gpu, simUnix);
     const double xz[2] = {cam.px, cam.pz};
     WaterBankLayer::BankPoint bp{};
     if (waterBank) waterBank->ReadBankPoints(gpu, xz, 1, &bp);
-    const double lat = BathyModel::kOrgLat + cam.pz / BathyModel::kMPerLat;
-    const double lon = BathyModel::kOrgLon + cam.px / BathyModel::kMPerLon;
+    double lat = 0.0, lon = 0.0;
+    chart.LatLonOf(cam.px, cam.pz, lat, lon);
     const WeatherSample q = weather.Query(lat, lon, simUnix, 1.0);
     const double bank = bp.valid ? double(bp.level) : classifierNavd;
     const double spread = (std::max)({classifierNavd, bank, q.levelNavd}) -
@@ -70,8 +70,9 @@ void LogLevelsAtCamera(Gpu& gpu, WaterBankLayer* waterBank, const Camera& cam, d
 void RunTwinSurface(const Options&, Gpu& gpu, const SeaState& seaState, SeaLayer* sea,
                     const WaterSceneConfig& waterScene, WaterBankLayer* waterBank,
                     const Camera& cam, double simUnix, WeatherManager& weather,
-                    const std::unique_ptr<WaveField>& waveField, double classifierNavd) {
-    LogLevelsAtCamera(gpu, waterBank, cam, simUnix, weather, classifierNavd);
+                    const std::unique_ptr<WaveField>& waveField, double classifierNavd,
+                    const Space::Anchor& chart) {
+    LogLevelsAtCamera(gpu, waterBank, cam, simUnix, weather, classifierNavd, chart);
     weather.RefreshMirrorsTo(gpu, simUnix);
     TreeWater tw;
     tw.Configure(&weather, waveField.get(), &sea->Ocean(), &seaState,
@@ -132,8 +133,7 @@ void RunTwinSurface(const Options&, Gpu& gpu, const SeaState& seaState, SeaLayer
             // The same split on the CPU side: the mean surface straight from the
             // one point evaluator, and the waves as the remainder.
             double qlat = 0.0, qlon = 0.0;
-            qlon = BathyModel::kOrgLon + wx / BathyModel::kMPerLon;
-            qlat = BathyModel::kOrgLat + wz / BathyModel::kMPerLat;
+            chart.LatLonOf(wx, wz, qlat, qlon);
             const double cpuLevel =
                 weather.Query(qlat, qlon, simUnix, 1.0).levelNavd;
             const double dL = cpuLevel - double(bp[idx].level);
