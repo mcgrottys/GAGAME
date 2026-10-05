@@ -821,6 +821,20 @@ using WalkParams = GlobeLayer::WalkParams;
 // ramps in the wireframe.
 //
 // This returns the handover for either rule, so the band tracks whichever one is binding.
+// THE FIELD'S OWN GRAIN, EXACTLY: THE RING LADDER. The bank's ring m has texel grain * 2^m and
+// reaches 256 of its texels from the eye, so the ring that holds range d is the first whose reach
+// passes d, and the field there is stored at THAT ring's texel -- a step, grain * 2^m, not the
+// d / 256 the rule first took for it. d / 256 is the finest a ring could be at d, true only on a
+// ring's outer edge; everywhere else inside ring 1 (305..609 m at the shipped 1.19 m) it asked the
+// mesh for cells under the data's texel, and the cells' own power-of-two ladder rounded that down
+// to grain: four vertices for every texel of data across the whole annulus. MEASURED (helm,
+// --mesh-stats, 2026-10-05): 23,700 of 41,500 records were 1.19 m cells between 150 m and 1 km.
+double RingTexel(double grain, double d) {
+    double t = grain;
+    while (d > 256.0 * t && t < 1.0e7) t *= 2.0;
+    return t;
+}
+
 double SplitRange(const WalkParams& wp, double arc) {
     double d = arc * GlobeLayer::kLodFactor;
     if (wp.waveGrainM > 0.0f) {
@@ -828,13 +842,15 @@ double SplitRange(const WalkParams& wp, double arc) {
         const double grain =
             static_cast<double>(wp.waveGrainM) / GlobeLayer::kWaveOversample;
         if (cell > grain) {
-            // The wave rule splits while cell > max(grain, dist*c); with cell past the grain
-            // floor that is dist < cell/c, and the range gate caps it at the rings' reach.
-            const double c = (std::max)(1.0 / 256.0,
-                                        static_cast<double>(wp.pixAng) *
-                                            GlobeLayer::kWavePxFloor);
+            // The wave rule splits while cell > max(the ring's texel at the node's near point, the
+            // pixel floor). A cell on the ladder is past the ring's texel while its near point,
+            // dist - arc / 2, lies within 128 of its own cells (the rings below its own); the
+            // pixel floor is dist < cell / (pixAng * floor); the range gate caps both.
+            const double ringRange = 128.0 * cell * GlobeLayer::kWaveOversample + 0.5 * arc;
+            const double pxRange =
+                cell / (static_cast<double>(wp.pixAng) * GlobeLayer::kWavePxFloor);
             const double reach = GlobeLayer::kWaveRings * 256.0 * wp.waveGrainM;
-            d = (std::max)(d, (std::min)(cell / c, reach));
+            d = (std::max)(d, (std::min)((std::min)(ringRange, pxRange), reach));
         }
     }
     return d;
@@ -886,8 +902,10 @@ bool SplitAt(const WalkParams& wp, int level, double arc, double dist) {
         const double reach = GlobeLayer::kWaveRings * 256.0 * wp.waveGrainM;
         if (dist < reach) {
             const double cell = arc / 32.0;
+            // The texel of the ring that holds the node's NEAR point (RingTexel, above): a node
+            // reaching into a finer ring is cut at that ring's grain.
             const double waveTexel =
-                (std::max)(static_cast<double>(wp.waveGrainM), dist / 256.0) /
+                RingTexel(static_cast<double>(wp.waveGrainM), (std::max)(dist - 0.5 * arc, 0.0)) /
                 GlobeLayer::kWaveOversample;
             const double pxFloor = dist * wp.pixAng * GlobeLayer::kWavePxFloor;
             split = cell > (std::max)(waveTexel, pxFloor);
