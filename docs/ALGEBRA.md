@@ -395,10 +395,21 @@ shadow, floor 0.18 in the bank for local chop). hsScale is ONE continuous law
 everywhere; the bank carries it at its tiles' corners, the hull's twin at its point. The
 twin (`TreeWater::At`) applies the whole gain per cascade, on the solver's current only.
 
-**Depth-limited breaking** (bank kernel, after displacement): |η| ≤ 0.55·h, excess
-converted to foam; matches the classical H ≤ 0.78 h with H = 2η. An AMPLITUDE cap: the
-horizontal excursion is linear in the same amplitude, so the whole displacement scales by
-0.55·h/|η| (continuous at the cap; the first sea stepped the horizontal to 0.85).
+**Depth-limited breaking as a dissipation law** (F7, 2026-10-04; the |η| ≤ 0.55·h clamp of the
+first sea left on 2026-10-04 at the owner's word: no min or max on a height): the clipped
+Rayleigh sea. Wave heights at a point are Rayleigh about their rms; no wave stands taller than
+Hmax, every wave that would has broken down to it (Battjes & Janssen 1978), and Hmax is theirs:
+Hmax(k, h) = (0.88/k)·tanh(γ·k·h/0.88) with γ = 0.60 the observed Hs saturation and k the sea's
+energy-weighted wavenumber at the point — Miche's steepness limit 0.88/k in deep water, γ·h at
+the shore, one tanh between (measured at the Haulover bar: with the depth limit alone the
+hull's slope ran to 42°, the shoaled 10 m comps being ak ≈ 0.6). The surviving energy of the
+clipped distribution is
+E/E_raw = 1 − exp(−(Hmax/Hrms_raw)²), so with excess = Hrms_raw/Hmax every amplitude at the
+point carries L = √(1 − exp(−1/excess²)): deep water untouched (exponentially), the shore's
+rms tending to the limit from below, no corner anywhere. One function (WaterTerms.h
+BreakFactor, Jet.hlsli its twin) for the cascade bands in the bank kernel and the hull's
+twin (one factor on the three bands from the raw envelope they make) and for the solved
+field's cells (below). The raw excess stays the foam's indicator.
 
 **The 7-foot-standing-wave term** (why the entrance stands up): an 11 s swell in 4 m of
 water has c ≈ 6 m/s, so a 1 m/s ebb reaches r ≈ −0.17 — a third of the way to blocking —
@@ -661,18 +672,21 @@ port that diffs against the reference textures must keep it so.
 left the sum 6.8× over the limit in the shallows (measured 63.9% of cells at N=4, 96.8%
 at N=16); capping the coherent sum Σa bites in deep water (it dropped offshore Hs 3.12 →
 2.25 m) because Σa grows like N while Hs grows like √N. The law lives on the rms envelope:
-Hs = 2√2·rms ≤ 0.60·h, one UNIFORM scale factor on every a_i (spectral shape and
+Hs = 2√2·rms against 0.60·h, one UNIFORM scale factor on every a_i (spectral shape and
 directions survive), and excess = rms_raw/rms_limit > 1 is the breaking indicator — "does
-the sea here want to be taller than the water allows". (0.60 is the observed Hs
-saturation; the bank kernel's |η| ≤ 0.55·h is the separate Hmax-family closure at a
-different pipeline point — never conflate them.)
+the sea here want to be taller than the water allows". F7: the factor is the clipped
+Rayleigh sea's L = √(1 − exp(−1/excess²)) (physics section, BreakFactor), the same law the
+bank kernel and the hull's twin apply to the cascade bands; min(1, 1/excess), with its corner
+at excess 1, is gone. (0.60 is the observed Hs saturation.)
 
-**The phase gauge and the spinor.** Each component wants ∇φ = k·d̂; that field is curl-free
-only where depth contours ⊥ propagation, so a definite GAUGE is chosen: cumsum of k·d_e
-along x plus cumsum of the ROW-MEAN of k·d_n along y (a single reference column would
-print its depth profile as horizontal bands). Gauge anchors that must be declared or the
-field is ambiguous: φ = 0 at the northwest corner texel center; x runs west→east
-left-inclusive; y integrates the row-mean southward. Phase ships as (cos φ, sin φ) — the
+**The phase and the spinor.** Each component's phase is the eikonal solution |∇φ| = k over
+the window (eight Godunov sweeps, the inflow edges held at the incident deep-water plane
+k_inf·d̂ between sweeps), not a line integral of k·d̂ along a chosen route: that integral is
+path-dependent wherever ∇k is not parallel to d̂, and printed its route into the sea as
+banding. The gauge is the residual |∇φ|/k − 1 over the wet interior as a distribution
+(creases where ray families meet are caustics and sit in its tail); it runs as a selftest on a
+field of its own (`RunWaveFieldSelfTest`: p50 < 0.2 %, p90 < 1 %, and a phase scaled by 1.1 reads
+0.1), not inside every solve. Phase ships as (cos φ, sin φ) — the
 cl2 law verbatim; bilinear error of unit spinors is ≤ 0.16·δ³ with δ = k|d_axis|Δ/2
 (peak band ≈ 2e-3 rad at 18 samples/λ, below the 8-bit storage floor; worst single-axis
 case 0.131 rad at the blocked-k hold, whose 0.25 factor exists to keep δ < π/2).

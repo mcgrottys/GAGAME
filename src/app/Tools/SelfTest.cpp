@@ -23,6 +23,7 @@
 #include "hal/TileAtlas.h"
 #include "sim/RigidBody.h"
 #include "sim/WaveChart.h"
+#include "sim/WaveField.h"
 #include "sim/SimClock.h"
 #include "sim/SweSolver.h"
 #include "sim/Vessel.h"
@@ -53,6 +54,7 @@ int RunSelfTest(const Options& opt) {
                                      // PNGs under out\rastertest, placement, order, identity, plants
                                      // twins of the same ground (containment), a planted origin caught
     ok &= RunWaterSelfTest();     // pure CPU: the water atlas' datum/epoch/field gates
+    ok &= RunWaveFieldSelfTest();   // F8: the eikonal sweep and its gauge, out of the solve
     ok &= RunWaveChartSelfTest();   // M13: the cascade sea's lattice-generated planes -- the
                                     // partition, the variance-preserving blend, the metric
     ok &= RunTileSelfTest(gpu, sc, opt.shaderDir);

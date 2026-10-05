@@ -111,6 +111,15 @@ constexpr double kWaveMaxMip = 6.0;
 // M9bn: how many levels FINER than the screen rule the water asks for. Water is this
 // engine's subject; a coarse mip on it reads as structure (the page grid), not softness.
 constexpr double kWaterMipBias = 2.0;
+// The chord between two places on a sphere of radius R, by the haversine (well conditioned where
+// acos is not): the eye's distance to a window whatever chart either stands in. Near the window it
+// is the chart distance to one part in a billion.
+static double ChordM(double R, double lat0, double lon0, double lat1, double lon1) {
+    const double d = 3.14159265358979 / 180.0;
+    const double sa = std::sin(0.5 * (lat1 - lat0) * d), so = std::sin(0.5 * (lon1 - lon0) * d);
+    const double hav = sa * sa + std::cos(lat0 * d) * std::cos(lat1 * d) * so * so;
+    return 2.0 * R * std::sqrt((std::min)((std::max)(hav, 0.0), 1.0));
+}
 
 void FormatTitle(wchar_t* buf, size_t n, double simUnix, double timeScale, bool paused,
                  const TideModel& model, const TideLayer& tide, double windowDays,
@@ -2631,6 +2640,8 @@ bool FrameLoop::Frame() {
     std::vector<GlobeLayer::DrosteLevel> drosteLv;
     bool drosteOuter = false;
     double drosteOuterCam[3] = {0.0, 0.0, 0.0};
+    bool drosteOuterSeen = false;   // F8: the outer eye SEES (a Droste level, or a window in view);
+                                    // the eye a gate within reach would carry only places the rings
     float sunRootF[3];
     renderer.SunDir(sunRootF);
     float sunCamF[3] = {sunRootF[0], sunRootF[1], sunRootF[2]};
@@ -2806,6 +2817,7 @@ bool FrameLoop::Frame() {
     // below) -- so a window the eye turns toward finds them in place. The worlds themselves
     // are added beside SetView, below, re-measured after the camera's last clamp.
     m_windows.clear();
+    drosteOuterSeen = drosteOuter;   // a Droste outer level is seen
     if (!drosteOuter && camLevel == 0 && mode == 1 && globe && !m_gates.empty()) {
         const float viewHw = S.capture.headless ? static_cast<float>(S.capture.height)
                                                 : static_cast<float>(std::max(1u, window.Height()));
@@ -2818,6 +2830,7 @@ bool FrameLoop::Frame() {
         if (!m_windows.empty()) {
             m_windows.front().carry.TransformPoint(E[0], E[1], E[2]);
             drosteOuter = true;
+            drosteOuterSeen = true;   // the window is in view: its eye reads
         } else {
             double best = kWindowReachM;
             const scene::Gateway* nearest = nullptr;
@@ -3048,9 +3061,88 @@ bool FrameLoop::Frame() {
             // (frame >= 2: the first frames run on the boot clock before --start
             // settles; solving them caches a real answer for the wrong instant.)
             if (waveField && sea && waterScene.wfEnabled && frame >= 2) {
+                // A FIELD IS SOLVED FOR A READER (F8). The level the view asks of the window is
+                // computed here, once, from the solve's own window (the want below reads it): when
+                // the pyramid's top answers it (the clamp binds: the window stands under eight
+                // pixels) nothing seen changes with a solve, and unless a hull probed the window
+                // this second a bucket roll waits for the next reader.
+                const WaveFieldConfig& wtab = waveField->Config();   // the window: the solve's own
+                const double cellW = wtab.cellM;
+                const double spanW = double(wtab.nx) * cellW;
+                const double cxW = double(wtab.orgX) + spanW * 0.5;
+                const double czW = double(wtab.orgZ) + double(wtab.ny) * cellW * 0.5;
+                // The eye's distance to the window ON THE PLANET. A chart metre is its chart's
+                // own: at Haulover the eye's (522, 72) in that place's chart landed inside the
+                // Merrimack window's box, and a field 2,054 km away was wanted, cache-hit and
+                // prefilled every run. The window's centre by its own texel's place, the eye's by
+                // the exact chart, one chord between them (ChordM), the altitude on top.
+                double latW = 0.0, lonW = 0.0, latE = 0.0, lonE = 0.0;
+                wtab.PlaceOfCell(0.5 * wtab.nx, 0.5 * wtab.ny, latW, lonW);
+                m_A.surface.flat.LatLonOf(cam.px, cam.pz, latE, lonE);
+                const double chordW = ChordM(m_A.planetR, latW, lonW, latE, lonE);
+                const double distOwn = (std::max)(std::sqrt(chordW * chordW + cam.py * cam.py), 1.0);
+                double distW = distOwn;      // the nearer eye: places the rings and the wants
+                double distSeen = distOwn;   // the nearer eye THAT SEES: the reader
+                // M10: the outer level's sea is the SAME solve seen from S(C); the
+                // nearer of the two eyes decides the mip (one tenant, one want).
+                if (drosteOuter) {
+                    const double ox = drosteOuterCam[0] - cxW;
+                    const double oz = drosteOuterCam[2] - czW;
+                    const double distOuter = (std::max)(std::sqrt(
+                        ox * ox + drosteOuterCam[1] * drosteOuterCam[1] + oz * oz), 1.0);
+                    distW = (std::min)(distW, distOuter);
+                    if (drosteOuterSeen) distSeen = (std::min)(distSeen, distOuter);
+                }
+                const double vhW = S.capture.headless
+                                       ? double(S.capture.height)
+                                       : double((std::max)(1u, window.Height()));
+                const double pixAngW =
+                    double(cam.fovY) / (std::max)(vhW, 1.0);
+                const double winPx = spanW / (distW * (std::max)(pixAngW, 1e-9));
+                const double seenPx = spanW / (distSeen * (std::max)(pixAngW, 1e-9));
+                // The mip the window can actually be SEEN at: nx texels across
+                // mapped onto winPx pixels. Every other tenant chooses this way
+                // (LeafWants: px = arc / (distNear * pixAng)); this one asked for
+                // mip 0 flat, which is why it never formed a gradient and why
+                // a load waiting on its parent had no chain to climb. Now the request walks
+                // in coarse-first like everything else, and WavePageSample reads
+                // whatever level has landed.
+                // ...biased FINER than that, because the water is the subject of
+                // this renderer and must never be the coarsest thing on screen.
+                // The screen rule alone is right for imagery, where a coarse mip
+                // just looks soft; on the solved field a coarse level is a
+                // structured artefact -- the shallow water showed the page's own
+                // texel grid as faint rectangles (the user's catch). Two levels
+                // of bias put the window at mip 0 well before the helm arrives,
+                // and it costs nothing at altitude: the clamp to kWaveMaxMip is
+                // already binding there, so the orbit legs request exactly what
+                // they requested before and the imagery keeps its loader slots.
+                const double texAcross = (std::max)(double(wtab.nx), 1.0);
+                const auto levelAt = [&](double px) {   // the level a window of px pixels asks
+                    const double lvl =
+                        std::ceil(std::log2((std::max)(texAcross / (std::max)(px, 1.0), 1.0))) -
+                        kWaterMipBias;
+                    return static_cast<uint32_t>((std::min)((std::max)(lvl, 0.0), kWaveMaxMip));
+                };
+                const uint32_t wantMip = levelAt(winPx);
+                const uint32_t seenMip = levelAt(seenPx);   // F8: by the eyes that see
+
+                const bool waveReader = !(waveSrc && waveT >= 0) || double(seenMip) < kWaveMaxMip ||
+                                        waveField->LastProbeRead() + 1.0 >= simUnix;
+                if (waveReader != m_waveReaderSaid) {   // the reader's state, said on change
+                    m_waveReaderSaid = waveReader;
+                    Log("[wave] frame %llu: %s -- the window stands %.1f px across to the eyes that see "
+                        "it (%.1f km; level %u, top %g) and %.1f px to the nearer eye (%.1f km; level %u "
+                        "wanted); last probe inside it %.1f s ago; the eye %.5f N %.5f E, the window "
+                        "%.5f N %.5f E",
+                        static_cast<unsigned long long>(frame),
+                        waveReader ? "a reader" : "no reader: a bucket roll waits", seenPx,
+                        distSeen * 1e-3, seenMip, kWaveMaxMip, winPx, distW * 1e-3, wantMip,
+                        simUnix - waveField->LastProbeRead(), latE, lonE, latW, lonW);
+                }
                 PROF_BEGIN();
                 waveField->Update(gpu, simUnix, sea->Parts(), sea->activeParts,
-                                  S.capture.headless);
+                                  S.capture.headless, waveReader);
                 PROF_END(2);
                 // No pages on the GPU for this field (no tenant): nothing to wait for, live at once.
                 if (!(waveSrc && waveT >= 0)) waveField->Publish();
@@ -3124,52 +3216,6 @@ bool FrameLoop::Frame() {
                     // water anyway. At 3.8 km of window this crosses at ~40 km, which
                     // the flood rail reaches ~17 s in: fourteen seconds of lead before
                     // the helm, so the field is long resident by the time it matters.
-                    const auto& wtab = waveField->Table();
-                    const double cellW = 1.0 / (std::max)(double(wtab.invCell), 1e-9);
-                    const double spanW = double(wtab.nx) * cellW;
-                    const double cxW = double(wtab.orgX) + spanW * 0.5;
-                    const double czW = double(wtab.orgZ) + double(wtab.ny) * cellW * 0.5;
-                    const double dxW = cam.px - cxW, dzW = cam.pz - czW;
-                    double distW = (std::max)(
-                        std::sqrt(dxW * dxW + cam.py * cam.py + dzW * dzW), 1.0);
-                    // M10: the outer level's sea is the SAME solve seen from S(C); the
-                    // nearer of the two eyes decides the mip (one tenant, one want).
-                    if (drosteOuter) {
-                        const double ox = drosteOuterCam[0] - cxW;
-                        const double oz = drosteOuterCam[2] - czW;
-                        distW = (std::min)(distW, (std::max)(std::sqrt(
-                            ox * ox + drosteOuterCam[1] * drosteOuterCam[1] + oz * oz), 1.0));
-                    }
-                    const double vhW = S.capture.headless
-                                           ? double(S.capture.height)
-                                           : double((std::max)(1u, window.Height()));
-                    const double pixAngW =
-                        double(cam.fovY) / (std::max)(vhW, 1.0);
-                    const double winPx = spanW / (distW * (std::max)(pixAngW, 1e-9));
-                    // The mip the window can actually be SEEN at: nx texels across
-                    // mapped onto winPx pixels. Every other tenant chooses this way
-                    // (LeafWants: px = arc / (distNear * pixAng)); this one asked for
-                    // mip 0 flat, which is why it never formed a gradient and why
-                    // a load waiting on its parent had no chain to climb. Now the request walks
-                    // in coarse-first like everything else, and WavePageSample reads
-                    // whatever level has landed.
-                    // ...biased FINER than that, because the water is the subject of
-                    // this renderer and must never be the coarsest thing on screen.
-                    // The screen rule alone is right for imagery, where a coarse mip
-                    // just looks soft; on the solved field a coarse level is a
-                    // structured artefact -- the shallow water showed the page's own
-                    // texel grid as faint rectangles (the user's catch). Two levels
-                    // of bias put the window at mip 0 well before the helm arrives,
-                    // and it costs nothing at altitude: the clamp to kWaveMaxMip is
-                    // already binding there, so the orbit legs request exactly what
-                    // they requested before and the imagery keeps its loader slots.
-                    const double texAcross = (std::max)(double(wtab.nx), 1.0);
-                    const double lvl =
-                        std::ceil(std::log2((std::max)(texAcross /
-                                                       (std::max)(winPx, 1.0), 1.0))) -
-                        kWaterMipBias;
-                    const uint32_t wantMip = static_cast<uint32_t>(
-                        (std::min)((std::max)(lvl, 0.0), kWaveMaxMip));
                     PROF_BEGIN();
                     float u0, v0, u1, v1;
                     waveSrc->WindowUv(u0, v0, u1, v1);
