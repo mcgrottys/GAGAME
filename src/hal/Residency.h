@@ -283,6 +283,20 @@ public:
         const Tracked* t = Find(tenant, r);
         return (t && t->state == TileState::Mapped && t->landed) ? t->pool : UINT32_MAX;
     }
+    // F4 (2026-10-04, the corridor's struggle): THE STEP TELLS THE TILES IT TRACKS, NOT THE BOX.
+    // f(req, heldPool) for every tile the manager tracks in slice `slice` of `tenant` (the slot
+    // array's; a replacement's load is not a tile), heldPool its pool slot when held (mapped and
+    // landed) else UINT32_MAX. A window's step (Tenant::Move) and the step's ledger ask this; a
+    // slice that tracks nothing -- a set just claimed by a world of the corridor -- is a step of
+    // no work. Before it, each step asked every one of the box's 21,760 slots twice (a six-slot
+    // claim: 5 million asks in one frame), whether or not the slot held anything.
+    template <class F> void ForTrackedIn(int tenant, uint32_t slice, F&& f) const {
+        if (tenant < 0 || size_t(tenant) >= m_tenants.size()) return;
+        for (const std::shared_ptr<Tracked>& tr : m_tenants[size_t(tenant)].tracked) {
+            if (tr->req.face != slice || tr->refresh) continue;
+            f(tr->req, (tr->state == TileState::Mapped && tr->landed) ? tr->pool : UINT32_MAX);
+        }
+    }
     // Debug: what the manager believes about one tile (state, pool slot, bytes it carried).
     std::string DebugTile(int tenant, const TileRequest& r) const {
         const Tracked* t = Find(tenant, r);

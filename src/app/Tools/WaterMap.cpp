@@ -36,17 +36,21 @@ namespace {
 // come from, so the chart IS the channel (all three CUDEM insets, the NE-15s base, the
 // hand-edit structures, one surface).
 void RenderWaterMap(Compositor& comp, const WaterAtlas& wa, VectorPack& vec,
-                    const GlobeModel& gm, const std::wstring& outPath,
+                    const GlobeModel& gm, const std::wstring& outPath, const Space::Anchor& chart,
                     int bathyChannel = -1) {
     const int H = 1500;
     int W = 1800;   // trimmed to the sheet's true aspect below
     const double kD2R = 3.14159265358979 / 180.0;
-    const double lon0 = -71.15, lon1 = -70.30, lat0 = 42.18, lat1 = 43.02;
+    // PHASE C4: the sheet stands about the scene's place.anchor, 0.85 x 0.84 degrees.
+    const double lon0 = chart.lonDeg - 0.425, lon1 = chart.lonDeg + 0.425;
+    const double lat0 = chart.latDeg - 0.42, lat1 = chart.latDeg + 0.42;
 
-    // The print sheet: a Lambert conformal cone laid over the focus box (standard parallels
-    // inside it) -- chosen for the PAGE, proving realizations are free to pick projections.
-    LambertConformalConic lcc{42.35 * kD2R, 42.90 * kD2R, 42.0 * kD2R, -70.725 * kD2R,
-                              0.0, 0.0};
+    // The print sheet: a Lambert conformal cone laid over the focus box (standard parallels a
+    // sixth inside it, the origin at its south edge) -- chosen for the PAGE, proving
+    // realizations are free to pick projections.
+    const double sp = (lat1 - lat0) / 6.0;
+    LambertConformalConic lcc{(lat0 + sp) * kD2R, (lat1 - sp) * kD2R, lat0 * kD2R,
+                              0.5 * (lon0 + lon1) * kD2R, 0.0, 0.0};
     lcc.Derive();
     double xMin = 1e18, xMax = -1e18, yMin = 1e18, yMax = -1e18;
     for (int k = 0; k <= 100; ++k) {
@@ -227,14 +231,15 @@ void RenderWaterMap(Compositor& comp, const WaterAtlas& wa, VectorPack& vec,
 }  // namespace
 
 int RunWaterMap(const Options& opt, Gpu& gpu, const GlobeModel& globeModel,
-                Compositor& compositor, int hgtCh, const WaterAtlas& waterAtlas) {
+                Compositor& compositor, int hgtCh, const WaterAtlas& waterAtlas,
+                const Space::Anchor& chart) {
     VectorPack mapVec;
     mapVec.Load("data/vectors/vectors.vpack");
     if (!opt.waterMap.empty()) {
-        RenderWaterMap(compositor, waterAtlas, mapVec, globeModel, opt.waterMap);
+        RenderWaterMap(compositor, waterAtlas, mapVec, globeModel, opt.waterMap, chart);
     }
     if (!opt.bathyMap.empty()) {
-        RenderWaterMap(compositor, waterAtlas, mapVec, globeModel, opt.bathyMap,
+        RenderWaterMap(compositor, waterAtlas, mapVec, globeModel, opt.bathyMap, chart,
                        hgtCh);
     }
     gpu.WaitIdle();

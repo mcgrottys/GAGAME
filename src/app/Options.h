@@ -13,6 +13,7 @@
 #include "core/Json.h"
 
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -47,14 +48,12 @@ struct Options {
     bool sliceOn = false;             // --slice d: the cutaway plane (M7o)
     double sliceD = 0.0;              // plane offset, world z metres
     int inject = 0;                   // --inject [bank|cascade]: edge test cards
-    double traceLat = 42.816, traceLon = -70.81;
+    double traceLat = std::numeric_limits<double>::quiet_NaN(),   // PHASE C4: NaN = the scene's
+           traceLon = std::numeric_limits<double>::quiet_NaN();   // place.anchor
     bool debugLayer = false;
     uint32_t frames = 0;              // 0 = run until the window closes
     std::wstring dump;
     std::wstring shaderDir = L"shaders";
-    std::string tidesPath = "data/tides/stations.json";
-    std::string seaPath = "data/sea/seastate.json";
-    std::string currentsPath = "data/currents/currents.json";
     bool seaStart = false;            // begin in the open-sea view (TAB cycles views)
     bool gulfStart = false;           // begin in the gulf map view
     bool globeStart = false;          // begin on the planet (M6)
@@ -86,6 +85,7 @@ struct Options {
     bool skyProbe = false;            // --sky-probe: read the atmosphere's tables back off
                                       // the device and hold them against published optical
                                       // depths (SkyLayer::Probe). Once, then the run goes on.
+    uint32_t hullProbeEvery = 0;      // --hull-probe N: the hull's water, bank and drawn (HullProbe)
     uint32_t waterProbeEvery = 0;     // --water-probe N: every N recorded frames, the DRAWN sea
                                       // (depth read back) against each hull's own water (WaterProbe)
     uint32_t pagesEvery = 0;          // --pages-trace N: every Nth residency turn, each tenant split
@@ -160,9 +160,6 @@ struct Options {
     float camAlt = -1, camAz = 246, camPitch = -5;   // --cam alt,az,pitch override
     float camX = 1e9f, camZ = 1e9f;   // --campos x,z world override (sea mode)
     std::string view;                 // --view NAME: a camera saved with F5 (data/views.json)
-    std::string bathyPath = "data/bathy/merrimack.json";
-    float datumOff = -1.30f;          // tide (m MLLW) + this = water level in NAVD88
-    bool datumSet = false;            // --datum given: overrides the CO-OPS datum resolution
     bool sweOff = false;              // --swe-off: analytic tide plane only (pre-M5c behaviour)
     bool sweWestOff = false;          // --swe-west-off: zero the west-boundary deviation
     double sweSpinupH = 1.0;          // solver history integrated before the first frame
@@ -210,17 +207,13 @@ struct Options {
                                       // metric + walled jetties the solver's throat core
                                       // reads 0.93 vs ACT 1.06 -- honest at gain 1
     // ---- M10 THE DROSTE LINK (src/core/Droste.h): the root's address, hung as a leaf.
-    bool droste = false;              // --droste: link the root under a leaf of itself
-    double drosteLat = 42.81826;      // --droste-at lat,lon[,level]: the leaf is the one at this
-    double drosteLon = -70.80045;     // place (default: the entrance mouth, east of the jetty
-    int drosteLevel = 16;             // tips) and this quadtree level (16 = a 153 m leaf)
-    double drosteFill = 1.0;          // --droste-fill f: the inner globe's diameter / leaf span
-    double drosteTwistDeg = 90.0;     // --droste-twist deg: the twist per level about north
-    int drosteLight = 0;              // --droste-light realistic|appealing (the lighting A/B)
+    // PHASE C5/C5b: --droste, --droste-at, -fill, -twist, -light, -level-sec, -levels are deleted:
+    // each mirrored a portals[] or rails.droste key. `droste` is set by the --rail-droste* recipes.
+    bool droste = false;
     bool railDroste = false;          // --rail-droste DIR: the storm rail, then the dive
     bool railDrosteOut = false;       // --rail-droste-out DIR: in two levels, turn, fly out
-    double drosteLevelSec = 16.0;     // --droste-level-sec s: rail seconds per level
-    int drosteLevels = 3;             // --droste-levels n: how deep the dive rail goes
+    double drosteLevelSec = 16.0;     // the dive rail's frame budget (rails.droste.levelSec's default)
+    int drosteLevels = 3;             // (rails.droste.levels' default)
     // ---- M12 step 5a: THE SCENE FRONT DOOR (scene/SceneBuilder.h). A positional scene file,
     // --set a.b.c=value overrides in command-line order, --tool name[:args], and --print-scene
     // (the resolved document to stdout, exit 0, before the pool, the boot line and any device

@@ -241,9 +241,6 @@ void Entity::Recentre(double simUnix) {
     m_ownChart = Space::Anchor{};
     m_ownChart.latDeg = lat;
     m_ownChart.lonDeg = lon;
-    m_ownChart.mPerLat = 110574.0;
-    m_ownChart.mPerLon = 111320.0 * std::cos(lat * 3.14159265358979323846 / 180.0);
-    m_ownChart.linear = true;
     for (int i = 0; i < 3; ++i) {
         m_ownChart.east[i] = fr.east[i];
         m_ownChart.up[i] = fr.up[i];
@@ -357,7 +354,7 @@ void Entity::Update(const FrameInfo& fi) {
                       waterScene ? waterScene->wfChop : 1.0f);
     // The cascade sea's context, as the bank kernel is handed it this frame (one wave rule).
     if (sea) {
-        boatSea.SetCascadeSea(sea->PeakDirX(), sea->PeakDirZ(), sea->PeakDirValid(), sea->StormOn());
+        boatSea.SetCascadeSea(sea->PeakDirX(), sea->PeakDirZ(), sea->PeakDirValid(), sea->Scale());
     }
     boatSea.SetSwellShadow(m_o.swellShadow);
     boatSea.SetBed(m_o.bed);

@@ -336,6 +336,7 @@ void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double plane
         double cgLat = 0.0, cgLon = 0.0;
         sea.PlaceOf(cg[0], cg[2], cgLat, cgLon);
         const double levelHull = sea.MeanLevelAt(cg[0], cg[2], simUnix);
+        const WeatherSample hullQ = sea.MeanStateAt(cg[0], cg[2], simUnix);   // PHASE C1: its source
         const double levelCorner = (atlas && atlas->Ready())
                                        ? atlas->MslNavd(cgLat, cgLon) +
                                              atlas->Level(cgLat, cgLon, simUnix, 500.0)
@@ -415,6 +416,13 @@ void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double plane
             cgLat, cgLon, levelHull, levelCorner, nBankNear ? bankLevelNear / nBankNear : 0.0,
             nBankNear, oceanNow, nBankNear ? bankLevelNear / nBankNear - levelCorner : 0.0,
             levelCorner - levelHull);
+        Log("[wprobe]   level source at the hull: %s %+.3f m NAVD | current %s (%+.2f, %+.2f m/s)",
+            hullQ.levelSrc, hullQ.levelNavd, hullQ.currentSrc, double(hullQ.u), double(hullQ.v));
+        Log("[wprobe]   sea state at the hull: Hs %.2f m Tp %.1f s from %.0f [%s] | the field's band "
+            "scale x%.3f over the synthesis's Hs %.3f m (-> Hs %.3f m)",
+            double(hullQ.hs), double(hullQ.tp), double(hullQ.dirDeg), hullQ.waveSrc,
+            sea.SeaScaleAt(cgLat, cgLon), sea.SeaScaleRef(),
+            sea.SeaScaleAt(cgLat, cgLon) * sea.SeaScaleRef());
         // THE WAVE GAINS AT THE HULL that only the kernel applies today: the swell shadow (the node's
         // own march, once -- an instrument can afford it) and the solved window's weight.
         // (Timed: what one texel of the page costs the node to paint at 76 m -- the price of any CPU

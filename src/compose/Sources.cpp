@@ -184,13 +184,10 @@ float WindowHeightSource::Sample(double latRad, double lonRad, double, float& me
 CudemHeightSource::CudemHeightSource(const BathyModel* bathy, double featherFrac,
                                      const char* name)
     : m_bathy(bathy), m_feather(featherFrac) {
-    const double lon0 = BathyModel::kOrgLon + bathy->WorldX0() / BathyModel::kMPerLon;
-    const double lat0 = BathyModel::kOrgLat + bathy->WorldZ0() / BathyModel::kMPerLat;
     m_info = {name,
               "geotiff-window float32 (thalweg-preserving resample)",
-              "local tangent metres @ ACT0816 (from EPSG:4326 GeoTIFF)", 1370.0, lon0, lat0,
-              lon0 + bathy->WorldSizeX() / BathyModel::kMPerLon,
-              lat0 + bathy->WorldSizeZ() / BathyModel::kMPerLat};
+              "local tangent metres @ ACT0816 (from EPSG:4326 GeoTIFF)", 1370.0, bathy->Lon0(),
+              bathy->Lat0(), bathy->Lon1(), bathy->Lat1()};
 }
 
 // ------------------------------------------------------------------------------ hand edits
@@ -265,21 +262,18 @@ float EditsHeightSource::Sample(double latRad, double lonRad, double, float& met
 
 float CudemHeightSource::Sample(double latRad, double lonRad, double, float& metres) {
     if (!m_bathy || !m_bathy->Ready()) return 0.0f;
-    const double x = (lonRad * 180.0 / kPi - BathyModel::kOrgLon) * BathyModel::kMPerLon;
-    const double z = (latRad * 180.0 / kPi - BathyModel::kOrgLat) * BathyModel::kMPerLat;
-    const float v = m_bathy->SampleWorld(static_cast<float>(x), static_cast<float>(z));
+    const double lon = lonRad * 180.0 / kPi, lat = latRad * 180.0 / kPi;
+    const float v = m_bathy->SampleLatLon(lat, lon);
     if (v < -9000.0f) return 0.0f;   // outside the grid, or nodata
     metres = v;
-    return EdgeWeight(x, z);
+    return EdgeWeight(lon, lat);
 }
 
-float CudemHeightSource::EdgeWeight(double x, double z) const {
-    const double ex = (std::min)(x - m_bathy->WorldX0(),
-                                 m_bathy->WorldX0() + m_bathy->WorldSizeX() - x) /
-                      m_bathy->WorldSizeX();
-    const double ez = (std::min)(z - m_bathy->WorldZ0(),
-                                 m_bathy->WorldZ0() + m_bathy->WorldSizeZ() - z) /
-                      m_bathy->WorldSizeZ();
+// PHASE C5: the feather in the survey's own fractions of its extent, by lon and lat.
+float CudemHeightSource::EdgeWeight(double lon, double lat) const {
+    const double sx = m_bathy->Lon1() - m_bathy->Lon0(), sz = m_bathy->Lat1() - m_bathy->Lat0();
+    const double ex = (std::min)(lon - m_bathy->Lon0(), m_bathy->Lon1() - lon) / sx;
+    const double ez = (std::min)(lat - m_bathy->Lat0(), m_bathy->Lat1() - lat) / sz;
     return Feather((std::min)(ex, ez), m_feather);
 }
 
@@ -289,14 +283,8 @@ bool CudemHeightSource::FullWeightCells(int& c0, int& r0, int& c1, int& r1) cons
     // A cell's centre on the lattice, in the world frame Sample puts a sample point in (the
     // linear lon/lat map both frames were built with); the other axis held at the window's
     // middle, where only the axis being walked can bring the weight under one.
-    auto x = [&](int c) {
-        return (m_bathy->Lon0() + (c + 0.5) * m_bathy->Dlon() - BathyModel::kOrgLon) *
-               BathyModel::kMPerLon;
-    };
-    auto z = [&](int r) {
-        return (m_bathy->Lat1() - (r + 0.5) * m_bathy->Dlat() - BathyModel::kOrgLat) *
-               BathyModel::kMPerLat;
-    };
+    auto x = [&](int c) { return m_bathy->Lon0() + (c + 0.5) * m_bathy->Dlon(); };
+    auto z = [&](int r) { return m_bathy->Lat1() - (r + 0.5) * m_bathy->Dlat(); };
     const double xMid = x(nx / 2), zMid = z(ny / 2);
     c0 = 0;
     while (c0 < nx && EdgeWeight(x(c0), zMid) < 1.0f) ++c0;

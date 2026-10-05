@@ -68,7 +68,10 @@ public:
     // A stateful window. External windows (the Merrimack: driven by the render loop) are
     // mirrored only; OWNED windows (Boston) are advanced by Update() and spun up lazily
     // when the camera enters their footprint below the activation altitude.
-    void AddExternalWindow(const char* name, SweSolver* solver, const BathyModel* bathy,
+    // PHASE C1: a window stands where its solver's domain does (its lat/lon box); no world.flat.
+    // PHASE C2: the scene's sea-state sources (SeaLayer::Sources), for Query's period and direction.
+    void SetSeaSources(const std::vector<const SeaState*>& s) { m_seaSources = s; }
+    void AddExternalWindow(const char* name, SweSolver* solver,
                            std::function<double(double)> oceanAt);
     void AddDormantWindow(const char* name, BathyModel* bathy, const SweConfig& cfg,
                           std::function<double(double)> oceanAt, double spinupHours);
@@ -78,7 +81,9 @@ public:
     // owned solver binds the same window (it reads it where the window holds its cells, the cube
     // elsewhere), and the pin and the wait ask for its tiles in its own uv.
     void SetHeightPage(hal::Resource heightArr, hal::Resource resMapArr, uint32_t mips,
-                       const hal::BlockBinding& standing, const SweSolver::BedWindow& bed) {
+                       const hal::BlockBinding& standing, const SweSolver::BedWindow& bed,
+                       double planetR) {
+        m_planetR = planetR;
         m_hgtArr = heightArr;
         m_hgtRes = resMapArr;
         m_hgtSlice = bed.slice;
@@ -176,13 +181,18 @@ private:
     uint32_t m_hgtSlice = 6, m_hgtMips = 7;
     hal::BlockBinding m_stand{};      // PHASE B2: the standing window
     SweSolver::BedWindow m_bed{};     // ...and its rows, for every owned solver
+    double m_planetR = 0.0;           // PHASE C1: an owned solver's chart is placed on this planet
+    std::vector<const SeaState*> m_seaSources;   // PHASE C2
     struct Window {
         std::string name;
         SweSolver* solver = nullptr;              // external, or owned.get()
         std::unique_ptr<SweSolver> owned;
-        const BathyModel* bathy = nullptr;
-        BathyModel* bathyMut = nullptr;       // dormant windows: realized from the channel
-                                              // on activation (the one bed, lazily)
+        const BathyModel* bathy = nullptr;    // dormant windows: the survey whose box and cells
+                                              // the domain takes on activation (the bed: the stack)
+        double box[4] = {0.0, 0.0, 0.0, 0.0}; // PHASE C1: lat0, lon0, lat1, lon1 (degrees)
+        bool InBox(double latDeg, double lonDeg) const {
+            return latDeg > box[0] && latDeg < box[2] && lonDeg > box[1] && lonDeg < box[3];
+        }
         std::function<double(double)> oceanAt;    // NAVD level clock for forcing + queries
         SweConfig cfg;
         double spinupHours = 0.5;
@@ -199,7 +209,7 @@ private:
     // A window's lattice as a rectangle of the height page's uv (the pin's, and the bed wait's);
     // false where it does not reach inside the page.
     // PHASE B2: the domain's rectangles in the standing window's uv (modulo 16384: one, two or four).
-    int DomainRects(const BathyModel& b, float out[4][4]) const;
+    int DomainRects(const Window& w, float out[4][4]) const;
     static constexpr double kActivateAltM = 30000.0;
     bool m_pinLogged = false;
 

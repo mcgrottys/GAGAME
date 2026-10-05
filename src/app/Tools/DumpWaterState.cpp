@@ -17,7 +17,7 @@ namespace ga::app::tools {
 // so proofs/inlet_storm.py -- the user's own vqview wave model -- can run
 // the independent 2D storm figure on the exact data this engine uses.
 void RunDumpWaterState(const Options&, Gpu& gpu, SeaLayer* sea, double simUnix,
-                       WeatherManager& weather) {
+                       WeatherManager& weather, const Space::Anchor& chart) {
     // The export reads the solver mirrors through Query: bring them to this
     // instant first (the one readback of the run; the loop never did one).
     weather.RefreshMirrorsTo(gpu, simUnix);
@@ -29,10 +29,8 @@ void RunDumpWaterState(const Options&, Gpu& gpu, SeaLayer* sea, double simUnix,
         for (int i2 = 0; i2 < nxW; ++i2) {
             const double wxD = bx0 + (i2 + 0.5) * cellW;
             const double wzD = bz0 + (j + 0.5) * cellW;
-            const double latD =
-                BathyModel::kOrgLat + wzD / BathyModel::kMPerLat;
-            const double lonD =
-                BathyModel::kOrgLon + wxD / BathyModel::kMPerLon;
+            double latD = 0.0, lonD = 0.0;   // PHASE C4: the box about the scene's anchor
+            chart.LatLonOf(wxD, wzD, latD, lonD);
             const WeatherSample q =
                 weather.Query(latD, lonD, simUnix, cellW);
             const size_t at = static_cast<size_t>(j) * nxW + i2;
@@ -55,7 +53,9 @@ void RunDumpWaterState(const Options&, Gpu& gpu, SeaLayer* sea, double simUnix,
     wr("ws_u.f32", uW);
     wr("ws_v.f32", vW);
     wr("ws_shadow.f32", shW);
-    const WeatherSample qc = weather.Query(42.816, -70.79, simUnix, 500.0);
+    double qcLat = 0.0, qcLon = 0.0;   // the box's centre
+    chart.LatLonOf(bx0 + 0.5 * nxW * cellW, bz0 + 0.5 * nyW * cellW, qcLat, qcLon);
+    const WeatherSample qc = weather.Query(qcLat, qcLon, simUnix, 500.0);
     if (FILE* fj2 = fopen("ws_meta.json", "wb")) {
         fprintf(fj2,
                 "{ \"x0\": %.1f, \"z0\": %.1f, \"cell\": %.1f, "

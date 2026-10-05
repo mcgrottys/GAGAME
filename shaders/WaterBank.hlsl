@@ -25,7 +25,6 @@ cbuffer BankCb : register(b0) {
     float4 gOrg;        // xy = window origin (world m, snapped), z = base texel m, w = time s
     float4 gPatch;      // xyz = cascade patch sizes m, w = height exaggeration
     float4 gBandK;      // xyz = representative wavenumber per cascade, w = list count
-    float4 gSwe;        // xy = swe world x0/z0, zw = 1/sizeX, 1/sizeZ (0 = solver absent)
     float4 gSweDims;    // xy = swe grid nx/ny, zw = 1 / eta-atlas padded dims
     float4 gMisc;       // x = tile texels, y = seaLevel fallback, zw unused
     uint4  gSlotsA;     // cascade disp SRV slots x3, swe eta SRV slot
@@ -35,7 +34,6 @@ cbuffer BankCb : register(b0) {
     float4 gPeakDir;    // xy = peak propagation dir (world unit), z = valid, w unused
     uint4  gSlotsD;     // x = height window SRV, y = its residency-map SRV (M7q),
                         // z = the window's SLICE when x/y are array views (M9aq), else ~0
-    float4 gGeoA;       // world->latlon: orgLat, orgLon, 1/mPerLat, 1/mPerLon
     uint4  gSlotsE;     // M8 foamlaw: cascade DERIV SRVs x3 (hx, hz, J, foam)
     float4 gRmsRef;     // M8: unit-sea rms envelope per band (xyz), w spare
     // ---- M8 THE SOLVED WAVE FIELD (ALGEBRA.md wavefield; src/sim/WaveField) ----
@@ -96,7 +94,7 @@ cbuffer BankCb : register(b0) {
     // level whose eye the rings stand about (bank A: the camera's world; set B: the window's world),
     // its chain found at each texel's own point (BankTile.point*). Appended at the END on both sides.
     HP_WINDOW_ROWS_DECL
-    HP_STANDING_ROWS_DECL   // the solver's standing window about the rings' frame (appended LAST)
+    HP_SOLVER_ROWS_DECL     // the solver's chart about the rings' frame (appended LAST)
 };
 
 // M9bl: one component's rows, from whichever half holds it. r = comp >> 1.
@@ -137,16 +135,10 @@ struct BankTile {
 };
 StructuredBuffer<BankTile> gTiles : register(t0);
 
-// THE PLACE OF A TEXEL, from its own metres inside the tile. This is what gGeoA used to answer
-// through the anchor-linear chart (lat = orgLat + z / 110574, lon = orgLon + x / 81660), which
-// stands 5.6 m per km north and 1.1 m per km east of the sphere the mesh draws -- 28 m at the
-// rings' own reach, and a different place entirely (215 km) once a gate carries the eye. The
-// rows are exact at the tile's origin and second-order over the tile.
+// THE PLACE OF A TEXEL, from its own metres inside the tile: the tile's rows, exact at its origin
+// and second-order over the tile (PHASE C5: the anchor-linear fallback and its gGeoA row are gone;
+// a tile past the frame's horizon has no place and no rows).
 float2 TilePlace(const BankTile t, float2 exz) {
-    if (t.placeB.z == 0.0f) {   // no rows: the chart, as before
-        return float2(gGeoA.x + (t.orgXZ.y + exz.y) * gGeoA.z,
-                      gGeoA.y + (t.orgXZ.x + exz.x) * gGeoA.w);
-    }
     return float2(t.placeA.x + exz.x * t.placeA.z + exz.y * t.placeB.x,
                   t.placeA.y + exz.x * t.placeA.w + exz.y * t.placeB.y);
 }
@@ -491,13 +483,12 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // delivered through a region readback; --water-probe is the gate that the two stand together.
     float lvl = level;
     float2 cur = 0.0f;
-    // The solver is read where the texel's GROUND lies in its standing window (the point the
-    // windows' chain is given); the rect then finds the cell.
-    if (gSwe.z > 0.0f && t.pointA.w != 0.0f && InSolver(pT)) {
-        const float2 uv = (xz - gSwe.xy) * gSwe.zw;
-        const float2 texel = float2(uv.x * gSweDims.x, (1.0f - uv.y) * gSweDims.y);
+    // The solver is read where the texel's GROUND lies in its chart (PHASE C1: the domain's planes at
+    // the point the windows' chain is given); the planes give the cell.
+    if (gSvO.z > 0.0f && t.pointA.w != 0.0f && SolverDen(pT) > 0.0f) {
+        const float2 texel = SolverCell(pT);
         const float eCells =
-            min(min(texel.x, gSweDims.x - texel.x), min(texel.y, gSweDims.y - texel.y));
+            min(min(texel.x, gSvO.x - texel.x), min(texel.y, gSvO.y - texel.y));
         const float wDom = smoothstep(0.0f, 1.0f, eCells);
         if (wDom > 0.0f) {
             const float dEta = LoadBilinearClamp(gSlotsA.w, texel, gSweDims.xy).x;

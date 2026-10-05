@@ -3,8 +3,8 @@
 //  vqview-inlet Route contract with its lesson intact: waypoints are evenly spaced in
 //  LONGITUDE, not distance, so stepping by index makes a vessel surge on bends -- At(s) walks
 //  by cumulative arc length and the per-class AIS speed means what it says. The lane itself
-//  is data/gis/route_merrimack.json (harvest_route.py: 9 days / 7087 AIS reports distilled to
-//  where boats actually run, georeferenced into the engine's world frame).
+//  is the scene's data.route (harvest_route.py: 9 days / 7087 AIS reports distilled to where
+//  boats actually run); each waypoint's lon/lat is placed by the scene's chart.
 // ================================================================================================
 #pragma once
 
@@ -20,7 +20,9 @@ namespace ga {
 
 class Route {
 public:
-    bool Load(const char* path) {
+    // PHASE C5: a waypoint stands at its lon/lat; the chart (the scene's place.anchor) places it.
+    template <class Chart>
+    bool Load(const char* path, const Chart& chart) {
         FILE* f = fopen(path, "rb");
         if (!f) {
             Log("[route] %s missing -- run harvester/harvest_route.py", path);
@@ -42,8 +44,10 @@ public:
         m_z.clear();
         m_cum.clear();
         for (const JsonValue& p : wp->arr) {
-            m_x.push_back(p.Num("x", 0.0));
-            m_z.push_back(p.Num("z", 0.0));
+            double x = 0.0, z = 0.0;
+            chart.FlatOf(p.Num("lat", 0.0), p.Num("lon", 0.0), x, z);
+            m_x.push_back(x);
+            m_z.push_back(z);
         }
         m_cum.push_back(0.0);
         for (size_t i = 1; i < m_x.size(); ++i) {

@@ -20,7 +20,7 @@
 #include "compose/Compositor.h"
 #include "compose/DomainSource.h"
 #include "core/GaUnits.h"
-#include "sim/BathyModel.h"
+#include "sim/GlobeModel.h"
 
 #include <algorithm>
 #include <atomic>
@@ -78,7 +78,7 @@ public:
     std::string Identity() const override {
         const uint64_t p = m_params.load();
         char b[96];
-        snprintf(b, sizeof(b), "swell.exposure|v3 fan5x26 best-ray march %.0fm to %.0fm|dir%03d|lvl%+d|",
+        snprintf(b, sizeof(b), "swell.exposure|v4 fan5x26 best-ray march %.0fm to %.0fm|dir%03d|lvl%+d|",
                  kStepMinM, kMaxRangeM, DirBucket(p), LevelBucket(p));
         std::string id = b;
         if (m_comp && m_hgtCh >= 0) {
@@ -143,8 +143,9 @@ public:
             const double ang = ang0 + kFanDeg[r] * kD2R;
             // Propagation direction (unit, world east/north); the march goes TOWARD the source.
             const double dirX = std::cos(ang), dirZ = std::sin(ang);
-            const double dLat = -dirZ * stepM / BathyModel::kMPerLat * kD2R;
-            const double dLon = -dirX * stepM / BathyModel::kMPerLon * kD2R;
+            // PHASE C5: the step's angle on the sphere at the march's own latitude (radians).
+            const double dLat = -dirZ * stepM / GlobeModel::kR;
+            const double dLon = -dirX * stepM / (GlobeModel::kR * std::cos(lat0));
             double lat = lat0, lon = lon0;
             double excess = 0.0;   // worst blocker height above the water line en route
             for (int s = 0; s < maxSteps; ++s) {

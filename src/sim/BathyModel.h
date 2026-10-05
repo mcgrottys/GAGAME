@@ -1,15 +1,9 @@
 // ================================================================================================
-//  BathyModel - M5: the CUDEM topobathy grid, georeferenced into the engine's world frame.
+//  BathyModel - M5: a CUDEM topobathy survey on its own lon/lat lattice (row 0 north), NAVD88.
 //
-//  The world frame is anchored at the ACT0816 Merrimack-entrance current station -- the SAME
-//  origin the tidal jet and churn atlas have used since M3, which is what makes the terrain
-//  drop into place around the existing physics: x = metres east, z = metres north of
-//  (42.81833 N, 70.81 W).
-//
-//  DATUM NOTE: CUDEM elevations are NAVD88; the tide model speaks MLLW. Near Newburyport MLLW
-//  sits ~1.30 m below NAVD88 zero (the fitted MSL-above-MLLW, with NAVD88 ~ local MSL on this
-//  coast), so water_NAVD = tide_MLLW - 1.30. Tunable via --datum until the proper CO-OPS NAVD
-//  datum fetch lands in M5b.
+//  PHASE C5: the survey knows no world frame. The frozen anchor and its two metres-per-degree
+//  (the old world.flat) are DELETED; a reader asks at a place (SampleLatLon), and the scene's
+//  place.anchor chart (core/Space.h) turns a flat point into its place where it needs one.
 // ================================================================================================
 #pragma once
 
@@ -23,10 +17,6 @@ class CudemHeightSource;
 
 class BathyModel {
 public:
-    static constexpr double kOrgLon = -70.81;
-    static constexpr double kOrgLat = 42.81833;
-    static constexpr double kMPerLon = 81660.0;    // 111320 * cos(42.818 deg)
-    static constexpr double kMPerLat = 110574.0;
 
     bool Load(const std::string& jsonPath);
     bool Ready() const { return m_nx > 0; }
@@ -69,20 +59,17 @@ public:
     double Dlon() const { return m_dlon; }
     double Dlat() const { return m_dlat; }
 
-    // World-frame extent of the grid (x east, z north, metres from the origin).
-    float WorldX0() const { return m_worldX0; }
-    float WorldZ0() const { return m_worldZ0; }
-    float WorldSizeX() const { return m_worldSizeX; }
-    float WorldSizeZ() const { return m_worldSizeZ; }
 
-    // Bilinear sample at a world position; -9999 outside the grid or over nodata.
-    float SampleWorld(float x, float z) const;
+
+    double Lat0() const { return m_lat1 - m_ny * m_dlat; }   // the south edge
+    double Lon1() const { return m_lon0 + m_nx * m_dlon; }   // the east edge
+    // Bilinear sample at a place (degrees); -9999 outside the grid or over nodata.
+    float SampleLatLon(double latDeg, double lonDeg) const;
 
 private:
     int m_nx = 0, m_ny = 0;
     double m_lon0 = 0, m_lat1 = 0, m_dlon = 0, m_dlat = 0;   // row 0 = north
     std::vector<float> m_elev;
-    float m_worldX0 = 0, m_worldZ0 = 0, m_worldSizeX = 1, m_worldSizeZ = 1;
 };
 
 }  // namespace ga

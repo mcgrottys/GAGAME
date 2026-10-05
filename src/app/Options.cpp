@@ -90,9 +90,6 @@ Options ParseArgs(int argc, char** argv) {
         }
         else if (a == "--dump") o.dump = Widen(next("out.png").c_str());
         else if (a == "--shaders") o.shaderDir = Widen(next("shaders").c_str());
-        else if (a == "--tides") o.tidesPath = next("data/tides/stations.json");
-        else if (a == "--seastate") o.seaPath = next("data/sea/seastate.json");
-        else if (a == "--currents") o.currentsPath = next("data/currents/currents.json");
         else if (a == "--sea") o.seaStart = true;
         else if (a == "--gulf") o.gulfStart = true;
         else if (a == "--globe") o.globeStart = true;
@@ -121,31 +118,13 @@ Options ParseArgs(int argc, char** argv) {
             o.railDrosteOut = true;
             o.droste = true;
         }
-        else if (a == "--droste") o.droste = true;
-        else if (a == "--droste-at") {
-            const std::string v = next("42.81826,-70.80045,16");
-            double la = o.drosteLat, lo = o.drosteLon;
-            int lv = o.drosteLevel;
-            const int n = sscanf_s(v.c_str(), "%lf,%lf,%d", &la, &lo, &lv);
-            if (n >= 2) { o.drosteLat = la; o.drosteLon = lo; }
-            if (n >= 3) o.drosteLevel = std::clamp(lv, 4, 20);
-            o.droste = true;
-        }
-        else if (a == "--droste-fill") o.drosteFill = std::clamp(atof(next("1").c_str()), 0.05, 2.0);
-        else if (a == "--droste-twist") o.drosteTwistDeg = atof(next("90").c_str());
-        else if (a == "--droste-light") {
-            const std::string n = next("realistic");
-            o.drosteLight = (n == "appealing" || n == "1") ? 1 : 0;
-        }
-        else if (a == "--droste-level-sec") o.drosteLevelSec = std::clamp(atof(next("16").c_str()), 2.0, 120.0);
-        else if (a == "--droste-levels") o.drosteLevels = std::clamp(atoi(next("3").c_str()), 1, 6);
         else if (a == "--trace") {
             // M7j: THE HYPERVISOR. One sample walked through the whole one-water chain on
             // the CPU, every transformation printed with its AST edge -- validate against
             // external tools, find the failing step BEFORE the GPU is involved.
-            if (swscanf(Widen(next("42.816,-70.81").c_str()).c_str(), L"%lf,%lf",
-                        &o.traceLat, &o.traceLon) != 2) {
-                o.traceLat = 42.816; o.traceLon = -70.81;
+            // PHASE C4: "" (or no point) = the scene's place.anchor.
+            if (swscanf(Widen(next("").c_str()).c_str(), L"%lf,%lf", &o.traceLat, &o.traceLon) != 2) {
+                o.traceLat = o.traceLon = std::numeric_limits<double>::quiet_NaN();
             }
             o.trace = true;
         }
@@ -294,7 +273,7 @@ Options ParseArgs(int argc, char** argv) {
         }
         // The drawn sea against the water each hull reads (app/Tools/WaterProbe.cpp): the scene
         // depth read back every N recorded frames. An instrument -- its readbacks stop the GPU.
-        else if (a == "--water-probe" || a == "--pages-trace" || a == "--res-audit" ||
+        else if (a == "--water-probe" || a == "--hull-probe" || a == "--pages-trace" || a == "--res-audit" ||
                  a == "--bed-trace" || a == "--bank-trace" || a == "--near-ground") {
             // Four every-N instruments on one link (the chain is at C1061's limit, line ~158).
             // --pages-trace is the slice pool's (stage 0): the pages ledger every Nth turn.
@@ -311,6 +290,7 @@ Options ParseArgs(int argc, char** argv) {
             else if (a == "--near-ground") o.nearGroundEvery = every;
             // --starve-plant S: the watchdog's plant -- the loader never starts a load of slice S.
             else if (a == "--starve-plant") o.starvePlant = every;
+            else if (a == "--hull-probe") o.hullProbeEvery = every;
             else o.waterProbeEvery = every;
         }
         else if (a == "--tree-audit" || a == "--tree-prune") {
@@ -407,11 +387,6 @@ Options ParseArgs(int argc, char** argv) {
                 exit(2);
             }
         }
-        else if (a == "--bathy") o.bathyPath = next("data/bathy/merrimack.json");
-        else if (a == "--datum") {
-            o.datumOff = static_cast<float>(atof(next("-1.30").c_str()));
-            o.datumSet = true;
-        }
         else if (a == "--swe-off") o.sweOff = true;
         else if (a == "--swe-west-off") o.sweWestOff = true;   // diagnostic: west strip = ocean clock
         else if (a == "--swe-uv") o.sweUvDump = Widen(next("swe_uv.png").c_str());
@@ -427,7 +402,7 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--fidelity-map") {
             o.fidelityMap = Widen(next("fidelity_map.png").c_str());
         }
-        else if (a == "--ocean-probe") o.oceanProbe = next("42.35,-70.65");
+        else if (a == "--ocean-probe") o.oceanProbe = next("");   // PHASE C4: the point is the caller's
         // M9bp: both are the DEFAULT now; the positive forms stay so scripts keep parsing.
         else if (a == "--pixel-water") o.pixelWater = true;
         else if (a == "--no-pixel-water") o.pixelWater = false;
@@ -593,10 +568,6 @@ SceneArgs Options::ToSets(const Options& o) {
     if (o.planet != D.planet) set("scene.planet", str(o.planet));
     // ---- data
     if (o.shaderDir != D.shaderDir) set("data.shaders", wstr(o.shaderDir));
-    if (o.tidesPath != D.tidesPath) set("data.tides", str(o.tidesPath));
-    if (o.seaPath != D.seaPath) set("data.seastate", str(o.seaPath));
-    if (o.currentsPath != D.currentsPath) set("data.currents", str(o.currentsPath));
-    if (o.bathyPath != D.bathyPath) set("data.bathy", str(o.bathyPath));
     // ---- time
     if (o.startUnix != D.startUnix) set("time.start", StartValue(o.startUnix));
     if (o.timeScale != D.timeScale) set("time.timeScale", num(o.timeScale));
@@ -612,10 +583,6 @@ SceneArgs Options::ToSets(const Options& o) {
         set("sea.storm.hs", f32(o.stormHs));
         set("sea.storm.tp", f32(o.stormTp));
         set("sea.storm.dir", f32(o.stormDir));
-    }
-    if (o.datumSet) {
-        set("sea.datum.fromStation", JsonBool(false));
-        set("sea.datum.mllwToNavd", f32(o.datumOff));
     }
     // ---- water
     if (o.pixelWater != D.pixelWater) set("water.pixelWater", JsonBool(o.pixelWater));
@@ -694,17 +661,9 @@ SceneArgs Options::ToSets(const Options& o) {
                        : o.railFlood ? "flood" : o.railZoom ? "zoom" : !o.rail.empty() ? "classic"
                                                                                        : nullptr;
     if (rail) set("rails.active", str(rail));
-    if (o.drosteLevelSec != D.drosteLevelSec) set("rails.droste.levelSec", num(o.drosteLevelSec));
-    if (o.drosteLevels != D.drosteLevels) set("rails.droste.levels", num(o.drosteLevels));
     // ---- portals
     if (o.droste) {
-        set("portals.droste.enabled", JsonBool(true));
-        set("portals.droste.lat", num(o.drosteLat));
-        set("portals.droste.lon", num(o.drosteLon));
-        set("portals.droste.level", num(o.drosteLevel));
-        set("portals.droste.fill", num(o.drosteFill));
-        set("portals.droste.twistDeg", num(o.drosteTwistDeg));
-        set("portals.droste.lighting", str(o.drosteLight == 1 ? "appealing" : "realistic"));
+        set("portals.droste.enabled", JsonBool(true));   // the --rail-droste* recipes' portal
     }
     // ---- entities
     if (!o.boat.empty()) {
@@ -760,7 +719,10 @@ SceneArgs Options::ToSets(const Options& o) {
     if (o.warmInlet) tool("warm-inlet");
     if (o.dumpWater) tool("dump-water-state");
     if (o.twinSurface) tool("twin-surface");
-    if (o.trace) tool("trace", scene::NumberText(o.traceLat) + "," + scene::NumberText(o.traceLon));
+    if (o.trace) {
+        tool("trace", std::isnan(o.traceLat) ? std::string()
+                                             : scene::NumberText(o.traceLat) + "," + scene::NumberText(o.traceLon));
+    }
     if (o.seaVerify) tool("sea-verify");
     if (!o.waveMap.empty()) tool("wave-map", Narrow(o.waveMap));
     for (const std::string& t : o.tools) out.tools.push_back(t);

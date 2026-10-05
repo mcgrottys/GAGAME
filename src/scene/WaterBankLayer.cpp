@@ -29,18 +29,15 @@ constexpr double kD2R = kPiD / 180.0;
 }  // namespace
 
 void WaterBankLayer::Configure(const std::wstring& shaderDir, SeaLayer* sea, SweSolver* swe,
-                               const BathyModel* sweBathy, const WaterAtlas* atlas,
-                               Compositor* comp, int hgtCh, const GlobeModel* globe,
-                               const SeaState* seaState) {
+                               const WaterAtlas* atlas,
+                               Compositor* comp, int hgtCh, const GlobeModel* globe) {
     m_shaderDir = shaderDir;
     m_sea = sea;
     m_swe = swe;
-    m_sweBathy = sweBathy;
     m_atlas = atlas;
     m_comp = comp;
     m_hgtCh = hgtCh;
     m_globe = globe;
-    m_seaState = seaState;
 }
 
 void WaterBankLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet&, hal::RootSignature) {
@@ -128,15 +125,12 @@ void WaterBankLayer::SetFrame(Gpu& gpu, double simUnix, double camX, double camZ
 // M13 step 2: the place a ring point holds, on the sphere the mesh is drawn on. The rings are a
 // RADIAL PROJECTION onto the root's tangent plane -- the mesh reads them at (R d.x, R d.z) of a
 // vertex's direction -- so the place of (wx, wz) is the direction that projects there
-// (Space::Anchor::PlaceOfProjected). Where the surface never wrote its rows this is the
-// anchor-linear chart, exactly as every line here used to be.
+// (Space::Anchor::PlaceOfProjected). PHASE C5: no anchor-linear fallback; a point past the frame's
+// horizon has no place, and answers the anchor's own.
 void WaterBankLayer::PlaceOfRing(double wx, double wz, double& latDeg, double& lonDeg) const {
-    if (m_surface && m_surface->flat.Exact() &&
-        m_surface->flat.PlaceOfProjected(wx, wz, latDeg, lonDeg)) {
-        return;
-    }
-    latDeg = BathyModel::kOrgLat + wz / BathyModel::kMPerLat;
-    lonDeg = BathyModel::kOrgLon + wx / BathyModel::kMPerLon;
+    if (m_surface && m_surface->flat.PlaceOfProjected(wx, wz, latDeg, lonDeg)) return;
+    latDeg = m_surface ? m_surface->flat.latDeg : 0.0;
+    lonDeg = m_surface ? m_surface->flat.lonDeg : 0.0;
 }
 
 bool WaterBankLayer::TileWet(double wx0, double wz0, double spanM) const {
@@ -481,8 +475,8 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     // for (the Gulf point) -- mid-ocean waves track their OWN storm, not ours. One law with the
     // hull's twin (sim/WaveScale.h), carried at the tile's corners and lerped per texel like the
     // level and the bed, so the scale is continuous across tiles and across the grid's nodes.
-    const WaveScale waveScale =
-        WaveScale::For(m_globe, m_seaState, m_sea && m_sea->StormOn(), m_simUnix);
+    static const WaveScale kNone{};
+    const WaveScale& waveScale = m_sea ? m_sea->Scale() : kNone;   // PHASE C2: the field
     for (int m = 0; m < kMips; ++m) {
         const double texel = m_baseTexelM * (1 << m);
         const double tileSpan = kTileTexels * texel;
@@ -505,7 +499,7 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
                     // the whole sea, and only a CPU-vs-GPU cross-check found it.
                     double cLat = 0.0, cLon = 0.0;
                     PlaceOfRing(cx, cz, cLat, cLon);
-                    t.hs[k] = static_cast<float>(waveScale.At(cLat, cLon));
+                    t.hs[k] = static_cast<float>(waveScale.At(m_globe, cLat, cLon));
                 }
                 // M13 step 2: the tile's place rows -- the exact map at its origin, its tangent
                 // map at its centre (the midpoint rule; see BankTile). The kernel forms every
@@ -662,11 +656,7 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     for (int c = 0; c < 3; ++c) {
         cb.bandK[c] = static_cast<float>(std::sqrt(kCut[c] * kCut[c + 1]));
     }
-    if (m_swe && m_swe->Ready() && m_sweBathy) {
-        cb.swe[0] = m_sweBathy->WorldX0();
-        cb.swe[1] = m_sweBathy->WorldZ0();
-        cb.swe[2] = 1.0f / m_sweBathy->WorldSizeX();
-        cb.swe[3] = 1.0f / m_sweBathy->WorldSizeZ();
+    if (m_swe && m_swe->Ready()) {
         cb.sweDims[0] = static_cast<float>(m_swe->Nx());
         cb.sweDims[1] = static_cast<float>(m_swe->Ny());
         cb.sweDims[2] = 1.0f / m_swe->PadW();
@@ -700,10 +690,6 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.slotsD[1] = m_hgtWinResSrv;
     cb.slotsD[2] = 0xFFFFFFFFu;   // PHASE B3: the page's slice lane, no page
     cb.slotsD[3] = 0xFFFFFFFFu;
-    // M12 step 4b: the world.flat chart's row and the height window's row come from the
-    // surface and the window's lattice (the old eight casts bit for bit; the [kernel] hash
-    // below is the gate).
-    m_surface->FlatRows(cb.geoA);
     // M8 foamlaw: the deriv fibers carry the Jacobian foam (the crest's area 2-blade
     // degenerating -- provably the same event the Miche steepness names), and the band
     // rms envelopes let the kernel normalize eta for the crest gate and depth excess.
@@ -719,7 +705,7 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.sweB[1] = cb.sweB[2] = cb.sweB[3] = 0.0f;
     static_assert(sizeof(SurfaceFrame::KernelWindowRows) == sizeof(float) * 80, "the kernels' rows");
     memcpy(cb.hwU, &m_hw, sizeof(m_hw));   // PHASE B2: hwU..hwS, KernelRows' packing
-    memcpy(cb.stU, m_st, sizeof(m_st));   // stU..stO, StandingKernel's packing
+    memcpy(cb.svU, m_sv, sizeof(m_sv));   // svU..svO, SweDomain::KernelRows' packing
     cb.debugA[0] = flatBed ? 1.0f : 0.0f;   // M9p: the A/B that proves the bed moves geometry
     cb.debugA[1] = flatBedNavd;
     cb.debugA[2] = cb.debugA[3] = 0.0f;

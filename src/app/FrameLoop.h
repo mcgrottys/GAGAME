@@ -143,6 +143,16 @@ private:
     std::vector<KeptTile> m_keptCheck;
     uint64_t m_keptCheckAt = 0, m_windowSteps = 0, m_windowTold = 0, m_windowLeft = 0,
              m_windowKept = 0, m_windowKeptMoved = 0;
+    // 2026-10-04 (the corridor's struggle): the eight slowest frames of the run, each with the
+    // window steps it made and the slots those steps told -- printed at the end beside [perf].
+    struct SlowFrame {
+        double ms = 0.0, walkMs = 0.0, cpuMs = 0.0, turnMs = 0.0;   // whole; globe.SetView; the sections; the residency turn
+        uint32_t frame = 0, depth = 0, moves = 0;
+        uint64_t told = 0;
+    };
+    SlowFrame m_slow[8];
+    uint64_t m_windowToldAtFrame = 0;
+    double m_profSumAtFrame = 0.0, m_profWalkAtFrame = 0.0;
 
     // M12 step 5c: the solved wave field re-Configured at the water scene's live window --
     // today's hot-reload lines, moved verbatim. It reads what the SESSION owns (the compositor,

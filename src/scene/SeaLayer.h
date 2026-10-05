@@ -22,6 +22,7 @@
 #include "sim/OceanCpu.h"
 #include "sim/SeaState.h"
 #include "sim/SweSolver.h"
+#include "sim/WaveScale.h"
 
 #include <string>
 #include <vector>
@@ -33,23 +34,15 @@ public:
     void Configure(const std::wstring& shaderDir, const SeaState* sea) {
         m_shaderDir = shaderDir;
         m_sea = sea;
+        m_sources = {sea};
     }
+    // PHASE C2: the scene's sea-state sources, data.seastate's first (the synthesis's), then the
+    // `sources` entries of kind "seastate" in their order; and the field they make (WaveScale), which
+    // the bank's tile corners and the hull's twin read.
+    void AddSource(const SeaState* s) { m_sources.push_back(s); }
+    const std::vector<const SeaState*>& Sources() const { return m_sources; }
+    const WaveScale& Scale() const { return m_scale; }
 
-    // M3: the ACT0816 tidal clock drives the entrance jet and its wave steepening.
-    void SetCurrents(const CurrentModel* currents) {
-        m_currents = currents;
-        m_ctSta = currents ? currents->StationIndex("ACT0816") : -1;
-    }
-
-    // M5: the bed's survey window, geo in world metres. heightSrv only says a window exists:
-    // the bed itself is the height megatexture (Assembly passes 0).
-    void SetBathy(uint32_t heightSrv, float x0, float z0, float sizeX, float sizeZ) {
-        (void)heightSrv;
-        m_bathyGeo[0] = x0;
-        m_bathyGeo[1] = z0;
-        m_bathyGeo[2] = 1.0f / sizeX;
-        m_bathyGeo[3] = 1.0f / sizeZ;
-    }
 
     // M5c: the shallow-water solver (owned by main; recorded into this layer's command list
     // each frame) and the CPU bathy grid the swell-shadow march walks.
@@ -59,9 +52,9 @@ public:
         SurfaceFrame::KernelRows(rows, m_churnHw);
         if (!m_surface) return;
         const SurfaceFrame& sf = *m_surface;
-        float st[16];
-        sf.StandingKernel(eye, st);   // the solver's standing window about the churn's frame
-        memcpy(m_churnCb.stU, st, sizeof(st));
+        float sv[16] = {};
+        if (m_swe) m_swe->Domain().KernelRows(sf.east, sf.up, sf.north, eye, sv);   // PHASE C1: the solver's chart
+        memcpy(m_churnCb.svU, sv, sizeof(sv));
         const double* ax[3] = {sf.east, sf.up, sf.north};
         for (int c = 0; c < 3; ++c) {
             m_churnEyeT[c] = static_cast<float>(eye[0] * ax[c][0] + eye[1] * ax[c][1] + eye[2] * ax[c][2] -
@@ -75,7 +68,7 @@ public:
         m_hgtRes = resMapArr;
         m_hgtMips = mips;
     }
-    // M12 step 4b: the surface, for the world.flat chart the churn's geoA row is cast from
+    // the surface, for the world.flat chart the churn's tangent rows are cast from
     // (SurfaceFrame::FlatRows). Must precede the first churn update.
     void SetSurface(const SurfaceFrame* s) { m_surface = s; }
     // M6i's composed channels + survey masks are the renderer's one surface buffer (b2)
@@ -129,9 +122,10 @@ public:
     // M9ba --trace: the CPU mirror of the page read -- the node itself, at the page's
     // ~76 m grain, so the hypervisor prints what the GPU will see.
     float ShadowAtWorld(float x, float z) const {
-        if (!m_exposure) return 1.0f;
-        return m_exposure->At(BathyModel::kOrgLat + z / BathyModel::kMPerLat,
-                              BathyModel::kOrgLon + x / BathyModel::kMPerLon);
+        if (!m_exposure || !m_surface) return 1.0f;
+        double la = 0.0, lo = 0.0;
+        m_surface->flat.LatLonOf(x, z, la, lo);   // PHASE C5: the exact chart
+        return m_exposure->At(la, lo);
     }
 
     const char* Name() const override { return "sea"; }
@@ -151,10 +145,9 @@ public:
     double MeasureRenderedHs(Gpu& gpu) { return m_fft.MeasureHs(gpu); }
 
     double hsModel = 0;      // 4 sqrt(m0) of the active parameterization
-    double hsBuoy = 0;       // latest 44013 observation
+    double hsBuoy = 0;       // the mean of the sea-state file's own buoys
     int activeParts = 0;
     std::string statusNote;  // "f012" style label for the title bar
-    std::string currentStatus;   // "ebb 0.72 m/s" for the title bar
     std::string atlasStats;      // "churn 34/2048 t 2.1 MB" for the title bar
     // The CUDEM window holds roughly a third of the real tidal prism, so the solved currents run
     // ~3x under the ACT0816 predictions; this gain (calibrated from the --swe-cycle run, peak
@@ -211,18 +204,11 @@ private:
         float originX, originZ, texelM, domainM;
         uint32_t tilesX, tileW, tileH, listCount;
         float dt, tau, pad0, pad1;
-        float jetA[4];
-        float jetB[4];
         float miscC[4];  // x = chop-band wavenumber (M5c; was deep phase speed); gMiscC
         float waveD[4];
-        float bathyG[4]; // M5c: CUDEM world x0, z0, 1/sizeX, 1/sizeZ
-        float sweM[4];   // M5c: solved-field on, current gain, seaward blend x-range
-        // M9ar: THE BED IS THE HEIGHT MEGATEXTURE. world -> lat/lon (orgLat, orgLon, 1/mPerLat,
-        // 1/mPerLon) and the page frame (org px x, y, 1/16384, world px at z14). Appended LAST
-        // -- and M9ax found them inserted BEFORE sweM on this side only: same bytes, every row
-        // from gSweM on rotated (the churn read its current gain from the longitude for a
-        // week; priors 22). The order here IS the shader's.
-        float geoA[4];
+        float sweM[4];   // M5c: solved-field on, current gain; zw unused (C3b)
+        // The order here IS the shader's (M9ax found rows inserted on one side only: every row
+        // after them rotated; priors 22).
         // M9az: THE WINDOW. The atlas is addressed TOROIDALLY on a world-anchored tile lattice
         // (slot = world tile mod atlas tiles), and the domain is the +-8 km window around the
         // camera: x, y = the world tile index of the window's origin, z = atlas tiles in y.
@@ -236,17 +222,20 @@ private:
         float hwW[20];
         float hwO[12];
         uint32_t hwS[8];
-        float stU[4], stV[4], stW[4], stO[4];   // the solver's standing window about the churn's frame; LAST
+        float svU[4], svV[4], svW[4], svO[4];   // PHASE C1: the solver's chart about the churn's frame
+        float tanE[4], tanU[4], tanN[4];        // PHASE C5: world.flat's rows (tanU[3] = R); LAST
     };
     std::wstring m_shaderDir;
     const SeaState* m_sea = nullptr;
+    std::vector<const SeaState*> m_sources;   // PHASE C2: m_sea first
+    WaveScale m_scale;
+    int PartsOf(const SeaState& src, double simUnix, bool storm, PartParam parts[4], bool log) const;
     OceanFft m_fft;
     OceanCpu m_oceanCpu;   // M9bq: the hull's copy of the same three cascades
 
-    // What the churn and the solver take from SetTime: the level, the entrance jet, the chop band's
+    // What the churn and the solver take from SetTime: the level, the chop band's
     // wavenumber and the churn tiles' span.
     float m_seaLevel = 0.0f;
-    float m_jet[4] = {}, m_jetDir[4] = {};
     float m_chopK = 0.0f;
     float m_churnSpan[2] = {1.0f, 1.0f};
     int m_lastHour = -1;
@@ -255,9 +244,6 @@ private:
     float m_stormHs = 0, m_stormTp = 10, m_stormDir = 90;
     float m_windGate = 1.0f;   // Monahan-style wind gate on whitecap coverage
     Gpu* m_gpu = nullptr;
-    const CurrentModel* m_currents = nullptr;
-    int m_ctSta = -1;
-    float m_bathyGeo[4] = {0, 0, 1, 1};
     float m_cPeak = 10.0f;     // peak-partition phase speed for the amplification factor
     float m_peakDirX = -1.0f, m_peakDirZ = 0.0f;
     float m_bandRms[3] = {};   // M8: unit-sea rms envelope per band (sqrt(2 m0) * exag)
@@ -273,7 +259,7 @@ private:
     static constexpr float kChurnTexelM = 2.0f;
     static constexpr double kChurnTau = 90.0;      // sim-seconds of streak memory
     void InitChurn(Gpu& gpu, ShaderCompiler& sc);
-    void UpdateChurnResidency(Gpu& gpu, double simUnix, double signedMs);
+    void UpdateChurnResidency(Gpu& gpu, double simUnix);
     void RecordChurn(const FrameContext& ctx);
 
 
@@ -297,7 +283,7 @@ private:
     hal::Resource m_hgtArr = nullptr;    // M9ar: borrowed from the residency manager
     hal::Resource m_hgtRes = nullptr;
     uint32_t m_hgtMips = 7;
-    const SurfaceFrame* m_surface = nullptr;   // M12 step 4b: the world.flat chart (geoA)
+    const SurfaceFrame* m_surface = nullptr;   // the world.flat chart (PHASE C5: exact)
     SurfaceFrame::KernelWindowRows m_churnHw{};   // PHASE B2: SetChurnWindows
     float m_churnEyeT[4] = {};
     bool m_churnSweWired = false;          // t2/t3 start as null views; wired when the solver is

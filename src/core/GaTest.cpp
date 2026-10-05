@@ -229,7 +229,7 @@ bool RunGaSelfTest() {
         const ast::Frame cube{"cube.face", true, 0, 0, 0};       // GaAst.cpp's, as it was
         // The radius is no lattice's business; the lattices are the shipped ones (PHASE B3: the
         // cubes; the Mercator windows and their page-sample row's check are deleted).
-        const SurfaceFrame s = SurfaceFrame::Merrimack(6371000.0, false);
+        const SurfaceFrame s = SurfaceFrame::About(6371000.0, false, 42.81833, -70.81);
         const struct {
             const char* name;
             const Lattice* l;

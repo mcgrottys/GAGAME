@@ -927,7 +927,9 @@ bool PrefillGates() {
     // ---- today's lattice: the wave tree's own call (FrameLoop's wave.prefill), on the shipped
     // window (WaveFieldConfig's defaults are data/wave_scene.json's), a synthetic node on it.
     WaveFieldConfig cfg;
-    const WaveFieldSource::Frame wf = WaveFieldSource::Align(cfg);
+    // The shipped window about the shipped scenes' anchor (test data, pinned at the anchor).
+    const WaveFieldSource::Frame wf =
+        WaveFieldSource::Align(cfg, Space::Anchor::About(42.81833, -70.81, 6371000.0));
     const WaveFieldSource shipped(nullptr, wf);
     float u0, v0, u1, v1;
     shipped.WindowUv(u0, v0, u1, v1);

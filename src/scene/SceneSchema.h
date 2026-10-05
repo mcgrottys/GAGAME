@@ -79,10 +79,11 @@
 namespace ga::scene {
 
 struct SceneSection {
-    std::string name = "merrimack";
+    std::string name;                 // PHASE C5: no place's name; every shipped root scene says its own
     int mode = 1;                     // chart | world | gulf
     std::string planet = "earth";
     std::string view = "sea";         // the start camera: a name in `views`
+    int windowDepth = 7;              // how many windows deep the view reaches through facing gates
 };
 struct IncludeEntry {
     std::string file;
@@ -94,7 +95,16 @@ struct DataSection {
     std::string tides = "data/tides/stations.json";
     std::string seastate = "data/sea/seastate.json";
     std::string currents = "data/currents/currents.json";
-    std::string bathy = "data/bathy/merrimack.json";
+    std::string bathy;                // PHASE C5: "" = no survey; the shipped scenes name theirs
+    std::string route;                // PHASE C5: the chart's channel route (geojson); "" = none
+    std::string tideFocus;            // PHASE C3: a tide station's id; "" = the nearest the water's anchor
+};
+// PHASE C4: THE SCENE'S PLACE. world.flat is the tangent plane about `anchor` ([lon, lat]), exact;
+// every {x, alt, z} the scene writes without a place of its own stands in it. No default place:
+// [0, 0] is the planet frame's own origin (the Mars scene's frame), and every shipped Earth
+// scene names its anchor.
+struct PlaceSection {
+    double anchor[2] = {0.0, 0.0};
 };
 struct TimeSection {
     std::string start = "now";        // "now", "YYYY-MM-DDTHH:MM:SSZ" or unix seconds
@@ -132,11 +142,12 @@ struct StormProps {
 };
 struct DatumProps {
     bool fromStation = true;          // CO-OPS resolves MLLW -> NAVD88; false = mllwToNavd
-    float mllwToNavd = -1.30f;
+    float mllwToNavd = 0.0f;          // PHASE C3: no place's number; the scene declares its own
 };
 struct SeaSection {
     StormProps storm;
     DatumProps datum;
+    double box[4] = {0.0, 0.0, 0.0, 0.0};   // PHASE C2: data.seastate's place when its file says none
 };
 struct SweProps {
     bool enabled = true;
@@ -147,6 +158,12 @@ struct SweProps {
     int bedWait = 2;                  // none | map | whole: what the spin-up waits for (finding 48)
     int window = 0;                   // full-weight | survey: where the solver's grid stands (4.17):
                                       // the open face's side drawn in, the walls the survey's
+    // PHASE C1: THE SOLVER'S DOMAIN -- a lat/lon box [lon0, lat0, lon1, lat1] (zeros: the survey's
+    // window, as `window` draws it), the sponge's start from an open side, and the side a river
+    // enters by (west | none).
+    double box[4] = {0.0, 0.0, 0.0, 0.0};
+    float sponge = 1866.0f;
+    int river = 0;
 };
 struct BankProps {
     bool flatBed = false;
@@ -154,7 +171,7 @@ struct BankProps {
 };
 struct WavefieldProps {
     bool enabled = true;
-    double orgX = -1400.0, orgZ = -800.0;
+    double orgX = -1400.0, orgZ = -800.0;   // PHASE C4: the window's SW corner about place.anchor (m)
     int nx = 1600, ny = 1000;
     double cellM = 2.0;
     int comps = 32;
@@ -277,7 +294,7 @@ struct SourceProps {
 struct PortalProps {
     std::string name;
     bool enabled = true;
-    double lat = 42.81826, lon = -70.80045;
+    double lat = 0.0, lon = 0.0;      // PHASE C5: the shipped portals name their leaf
     // THE DESTINATION: the place the inner globe presents where the root shows this leaf. Both
     // keys are optional and read only when BOTH are declared (ScenePortal::hasTo) -- 0 N 0 E is a
     // real place, so presence is carried beside the numbers, never inferred from them.
@@ -357,6 +374,11 @@ struct ToolProps {
     std::string name;
     std::string args;
 };
+// PHASE C3: where a station of the scene's data stands when its own file does not say.
+struct StationProps {
+    std::string name;                 // the station's id in its file
+    double lat = 0.0, lon = 0.0;
+};
 // THE PRUNE TOOL (compose/TreePrune.h, --tool tree-prune). The mode is `list` unless the scene
 // says otherwise, and `retire` and `purge` act only when `confirm` names the root's full path as
 // the listing printed it; the ages are days. `root` "" is cache\trees.
@@ -373,6 +395,7 @@ struct SceneDocument {
     std::string base;                 // the inherited scene file; "" = none
     SceneSection scene;
     DataSection data;
+    PlaceSection place;
     TimeSection time;
     SunSection sun;
     AirSection air;

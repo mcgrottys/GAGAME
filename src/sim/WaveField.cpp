@@ -52,7 +52,6 @@
 #include "core/ThreadManager.h"
 
 #include "hal/Gpu.h"
-#include "sim/BathyModel.h"
 #include "sim/SweSolver.h"
 
 #include <algorithm>
@@ -953,15 +952,13 @@ uint64_t WaveField::BucketKey(double simUnix, const PartParam* parts, int nParts
     mixD(m_cfg.gammaHs);
     mixD(m_cfg.minSamplesPerLambda);
 
-    const double latC =
-        (m_cfg.orgZ + 0.5 * m_cfg.ny * m_cfg.cellM) / BathyModel::kMPerLat + BathyModel::kOrgLat;
-    const double lonC =
-        (m_cfg.orgX + 0.5 * m_cfg.nx * m_cfg.cellM) / BathyModel::kMPerLon + BathyModel::kOrgLon;
+    double latC = 0.0, lonC = 0.0;
+    m_cfg.PlaceOfCell(0.5 * m_cfg.nx, 0.5 * m_cfg.ny, latC, lonC);
     const double levelRaw =
         m_atlas ? m_atlas->MslNavd(latC, lonC) + m_atlas->Level(latC, lonC, simUnix) : 0.0;
     mixD(std::round(levelRaw / m_cfg.tideBucketM) * m_cfg.tideBucketM);
     const double sRaw = (m_currents && m_actSta >= 0 &&
-                         size_t(m_actSta) < m_currents->StationCount())
+                         size_t(m_actSta) < m_currents->Count())
                             ? m_currents->SignedSpeed(size_t(m_actSta), simUnix)
                             : 0.0;
     mixD(std::round(sRaw / m_cfg.currentBucketMs) * m_cfg.currentBucketMs);
@@ -984,7 +981,7 @@ uint64_t WaveField::BucketKey(double simUnix, const PartParam* parts, int nParts
 // the bucket key. The solve then eats exactly the bytes the key describes -- content
 // identity, so the same flow always finds its cache and a changed flow always re-solves.
 void WaveField::RefreshSweCurrent(Gpu& gpu, double simUnix) {
-    if (!m_swe || !m_sweBathy || !m_swe->Ready()) return;
+    if (!m_swe || !m_swe->Ready()) return;
     if (simUnix - m_curReadT < 90.0 && !m_curU.empty()) return;   // solve-cadence refresh
     if (m_inFlight.load()) return;   // never swap planes under a running solve
     m_curReadT = simUnix;
@@ -995,19 +992,19 @@ void WaveField::RefreshSweCurrent(Gpu& gpu, double simUnix) {
     const size_t cells = size_t(m_cfg.nx) * size_t(m_cfg.ny);
     m_curU.assign(cells, 0.0f);
     m_curV.assign(cells, 0.0f);
-    const double x0 = m_sweBathy->WorldX0(), z0 = m_sweBathy->WorldZ0();
-    const double sx = m_sweBathy->WorldSizeX(), sz = m_sweBathy->WorldSizeZ();
+    // PHASE C4: each cell's place is its page texel's (WaveFieldConfig::PlaceOfCell), then the
+    // solver's cell under it by the solver's own planes.
+    const SweDomain& dom = m_swe->Domain();
     for (int j = 0; j < m_cfg.ny; ++j) {
-        const double wz = m_cfg.orgZ + (double(j) + 0.5) * m_cfg.cellM;
-        const double v = (wz - z0) / sz;
-        if (v < 0.0 || v > 1.0) continue;
-        const int iy = (std::min)(int((1.0 - v) * uh), int(uh) - 1);   // row 0 = NORTH
         const size_t row = size_t(j) * size_t(m_cfg.nx);
         for (int i = 0; i < m_cfg.nx; ++i) {
-            const double wx = m_cfg.orgX + (double(i) + 0.5) * m_cfg.cellM;
-            const double u = (wx - x0) / sx;
-            if (u < 0.0 || u > 1.0) continue;
-            const int ix = (std::min)(int(u * uw), int(uw) - 1);
+            double la = 0.0, lo = 0.0, tx = 0.0, ty = 0.0;
+            m_cfg.PlaceOfCell(double(i) + 0.5, double(j) + 0.5, la, lo);
+            if (!dom.CellOf(la, lo, tx, ty) ||
+                tx < 0.0 || ty < 0.0 || tx >= double(uw) || ty >= double(uh)) {
+                continue;
+            }
+            const int ix = int(tx), iy = int(ty);   // row 0 = NORTH
             const float* s = &uv4[(size_t(iy) * uw + size_t(ix)) * 4];
             if (s[3] < 0.5f) continue;   // solver-invalid: sponge or dry
             // quantize to 0.05 m/s -- the sig hashes EXACTLY what the solve eats
@@ -1040,10 +1037,8 @@ WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
 
     // level at the WINDOW CENTER, bucketed -- the solve happens AT the bucket, so two frames
     // in the same bucket ask the identical question and the cache answers the second one.
-    const double latC =
-        (m_cfg.orgZ + 0.5 * ny * m_cfg.cellM) / BathyModel::kMPerLat + BathyModel::kOrgLat;
-    const double lonC =
-        (m_cfg.orgX + 0.5 * nx * m_cfg.cellM) / BathyModel::kMPerLon + BathyModel::kOrgLon;
+    double latC = 0.0, lonC = 0.0;
+    m_cfg.PlaceOfCell(0.5 * nx, 0.5 * ny, latC, lonC);
     // THE DATUM LINE (kept deliberately, once per solve): the still-water level this
     // field was solved at, decomposed into the two rungs that make it. Every depth in
     // the solve is bed-to-this, so a quiet bias here IS a wrong wave field -- and twice
@@ -1058,7 +1053,7 @@ WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
     in.level = std::round(levelRaw / m_cfg.tideBucketM) * m_cfg.tideBucketM;
 
     const double sRaw = (m_currents && m_actSta >= 0 &&
-                         size_t(m_actSta) < m_currents->StationCount())
+                         size_t(m_actSta) < m_currents->Count())
                             ? m_currents->SignedSpeed(size_t(m_actSta), simUnix)
                             : 0.0;
     in.currentMs = std::round(sRaw / m_cfg.currentBucketMs) * m_cfg.currentBucketMs;
@@ -1089,16 +1084,11 @@ WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
     if (m_comp && m_hgtCh >= 0) {
         ParallelRows(ny, [&](int j0, int j1) {
             for (int j = j0; j < j1; ++j) {
-                const double latR = ((m_cfg.orgZ + (double(j) + 0.5) * m_cfg.cellM) /
-                                         BathyModel::kMPerLat +
-                                     BathyModel::kOrgLat) *
-                                    (kPiW / 180.0);
                 const size_t row = size_t(j) * size_t(nx);
                 for (int i = 0; i < nx; ++i) {
-                    const double lonR = ((m_cfg.orgX + (double(i) + 0.5) * m_cfg.cellM) /
-                                             BathyModel::kMPerLon +
-                                         BathyModel::kOrgLon) *
-                                        (kPiW / 180.0);
+                    double la = 0.0, lo = 0.0;   // PHASE C4: the cell's page texel's place
+                    m_cfg.PlaceOfCell(double(i) + 0.5, double(j) + 0.5, la, lo);
+                    const double latR = la * (kPiW / 180.0), lonR = lo * (kPiW / 180.0);
                     in.bed[row + i] =
                         m_comp->SampleHeightStack(m_hgtCh, latR, lonR, m_cfg.cellM);
                 }
@@ -1174,6 +1164,29 @@ WaveField::GpuTable WaveField::DisplayTable(const GpuTable& raw) const {
 
 void WaveField::AdoptTable(const GpuTable& t) { m_table = DisplayTable(t); }
 
+void WaveField::Offer(Solved&& s, const char* how) {
+    const uint64_t key = s.key;
+    m_nextKey = key;
+    std::atomic_store(&m_next, std::shared_ptr<const Solved>(std::make_shared<Solved>(std::move(s))));
+    char buf[160];
+    snprintf(buf, sizeof(buf), "wave %ux%u key %016llx (%s, pages pending)", m_cfg.nx, m_cfg.ny,
+             static_cast<unsigned long long>(key), how);
+    stats = buf;
+}
+
+void WaveField::Publish() {
+    std::shared_ptr<const Solved> n = Next();
+    if (!n) return;
+    AdoptTable(n->table);
+    m_liveKey = n->key;
+    std::atomic_store(&m_live, n);
+    std::atomic_store(&m_next, std::shared_ptr<const Solved>());
+    char buf[160];
+    snprintf(buf, sizeof(buf), "wave %ux%u lvl %+.2f key %016llx (live)", m_table.nx, m_table.ny,
+             double(m_table.level), static_cast<unsigned long long>(m_liveKey));
+    stats = buf;
+}
+
 bool WaveField::LoadCache(uint64_t key, Solved& out) const {
     char path[128];
     CachePathFor(key, path, sizeof(path));
@@ -1204,33 +1217,19 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
         WaitForSolve();   // the job stores m_resultReady before it clears m_solveRunning
         m_resultReady.store(false);
         m_inFlight.store(false);
-        AdoptTable(m_result.table);
-        m_liveKey = m_result.key;
-        std::atomic_store(&m_live, std::shared_ptr<const Solved>(
-                                       std::make_shared<Solved>(std::move(m_result))));
-        char buf[160];
-        snprintf(buf, sizeof(buf), "wave %ux%u lvl %+.2f key %016llx (solved)", m_table.nx,
-                 m_table.ny, double(m_table.level),
-                 static_cast<unsigned long long>(m_liveKey));
-        stats = buf;
-        PruneWaveCache(m_liveKey);   // a solve just wrote ~112 MB; keep the budget
+        const uint64_t solvedKey = m_result.key;
+        Offer(std::move(m_result), "solved");
+        PruneWaveCache(solvedKey);   // a solve just wrote ~112 MB; keep the budget
     }
 
     const uint64_t key = BucketKey(simUnix, parts, nParts);
-    if (key != m_liveKey && !m_inFlight.load()) {
+    if (key != NextKey() && !m_inFlight.load()) {
         Solved s;
         if (LoadCache(key, s)) {
-            // cache hits upload synchronously: they must not flicker through the async path.
-            AdoptTable(s.table);
-            m_liveKey = key;
+            // a cache hit is offered like a solve: its pages swap in, then it is live.
             s.key = key;
-            std::atomic_store(&m_live,
-                              std::shared_ptr<const Solved>(std::make_shared<Solved>(std::move(s))));
-            char buf[160];
-            snprintf(buf, sizeof(buf), "wave %ux%u lvl %+.2f key %016llx (cache)", m_table.nx,
-                     m_table.ny, double(m_table.level), static_cast<unsigned long long>(key));
-            stats = buf;
-            Log("[wave] cache hit %016llx -- adopted without a solve",
+            Offer(std::move(s), "cache");
+            Log("[wave] cache hit %016llx -- offered without a solve",
                 static_cast<unsigned long long>(key));
         } else if (block) {
             // headless determinism: the dump frames must see the field, so eat the
@@ -1238,12 +1237,9 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
             std::vector<PartParam> pcopy;
             if (parts && nParts > 0) pcopy.assign(parts, parts + nParts);
             Solved s2 = SolveNow(key, simUnix, pcopy);
-            AdoptTable(s2.table);
-            m_liveKey = key;
             s2.key = key;
-            std::atomic_store(&m_live,
-                              std::shared_ptr<const Solved>(std::make_shared<Solved>(std::move(s2))));
-            PruneWaveCache(m_liveKey);   // the blocking solve wrote a cache entry too
+            Offer(std::move(s2), "solved now");
+            PruneWaveCache(key);   // the blocking solve wrote a cache entry too
         } else {
             std::vector<PartParam> pcopy;
             if (parts && nParts > 0) pcopy.assign(parts, parts + nParts);

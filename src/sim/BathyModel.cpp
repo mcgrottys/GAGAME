@@ -2,6 +2,7 @@
 
 #include "compose/Compositor.h"
 #include "compose/Sources.h"
+#include "sim/GlobeModel.h"
 #include "core/Common.h"
 #include "core/Json.h"
 
@@ -43,7 +44,7 @@ bool BathyModel::Load(const std::string& jsonPath) {
     m_lat1 = root.Num("lat1", 0);
     m_dlon = root.Num("dlon", 0);
     m_dlat = root.Num("dlat", 0);
-    const std::string file = DirOf(jsonPath) + "/" + root.Str("file", "merrimack.f32");
+    const std::string file = DirOf(jsonPath) + "/" + root.Str("file", "");   // the json names its raster
     const size_t n = static_cast<size_t>(m_nx) * m_ny;
     std::ifstream f(file, std::ios::binary);
     if (!f || n == 0 || n > (1u << 26)) {
@@ -58,15 +59,8 @@ bool BathyModel::Load(const std::string& jsonPath) {
         return false;
     }
 
-    m_worldX0 = static_cast<float>((m_lon0 - kOrgLon) * kMPerLon);
-    m_worldSizeX = static_cast<float>(m_nx * m_dlon * kMPerLon);
-    const double latSouth = m_lat1 - m_ny * m_dlat;
-    m_worldZ0 = static_cast<float>((latSouth - kOrgLat) * kMPerLat);
-    m_worldSizeZ = static_cast<float>(m_ny * m_dlat * kMPerLat);
-    Log("[bathy] %dx%d, world [%.0f..%.0f] east x [%.0f..%.0f] north (m), range %.1f..%.1f m "
-        "NAVD88",
-        m_nx, m_ny, m_worldX0, m_worldX0 + m_worldSizeX, m_worldZ0, m_worldZ0 + m_worldSizeZ,
-        root.Num("min_m", 0), root.Num("max_m", 0));
+    Log("[bathy] %dx%d, %.5f..%.5f E x %.5f..%.5f N, range %.1f..%.1f m NAVD88", m_nx, m_ny,
+        m_lon0, Lon1(), Lat0(), m_lat1, root.Num("min_m", 0), root.Num("max_m", 0));
     return true;
 }
 
@@ -107,18 +101,12 @@ bool BathyModel::DrawFrom(const BathyModel& survey, const CudemHeightSource* sou
                 survey.m_elev[static_cast<size_t>(y + r0) * survey.m_nx + (x + c0)];
         }
     }
-    // The world box by Load's own arithmetic, on the drawn-in lattice.
-    m_worldX0 = static_cast<float>((m_lon0 - kOrgLon) * kMPerLon);
-    m_worldSizeX = static_cast<float>(m_nx * m_dlon * kMPerLon);
-    const double latSouth = m_lat1 - m_ny * m_dlat;
-    m_worldZ0 = static_cast<float>((latSouth - kOrgLat) * kMPerLat);
-    m_worldSizeZ = static_cast<float>(m_ny * m_dlat * kMPerLat);
     Log("[swe] %s window: drawn in on the west by %d columns, to where %s paints at full weight "
         "(the west face is an open boundary and reads the bed); north, south and east keep the "
-        "survey's extent -- survey cells [%d..%d] x [%d..%d] of %dx%d; world [%.0f..%.0f] east x "
-        "[%.0f..%.0f] north (m)",
+        "survey's extent -- survey cells [%d..%d] x [%d..%d] of %dx%d; %.5f..%.5f E x "
+        "%.5f..%.5f N",
         name, c0, source->Info().name.c_str(), c0, c1, r0, r1, survey.m_nx, survey.m_ny,
-        m_worldX0, m_worldX0 + m_worldSizeX, m_worldZ0, m_worldZ0 + m_worldSizeZ);
+        m_lon0, Lon1(), Lat0(), m_lat1);
     return true;
 }
 
@@ -192,7 +180,7 @@ bool BathyModel::RealizeFromChannel(const Compositor& comp, int heightChannel) {
     const double d2r = 3.14159265358979 / 180.0;
     // The rung: sample at this grid's own cell size (the finer channel data arrives as the
     // stack's box means -- coarsening is measurement, per the resampling doctrine).
-    const double resM = m_dlat * kMPerLat;
+    const double resM = m_dlat * d2r * GlobeModel::kR;   // PHASE C5: the cell's true north side
     int filled = 0, moved = 0, big = 0;
     float worst = 0.0f;
     for (int y = 0; y < m_ny; ++y) {
@@ -218,11 +206,11 @@ bool BathyModel::RealizeFromChannel(const Compositor& comp, int heightChannel) {
     return true;
 }
 
-float BathyModel::SampleWorld(float x, float z) const {
+float BathyModel::SampleLatLon(double latDeg, double lonDeg) const {
     if (!Ready()) return -9999.0f;
     // Row 0 = north: v grows southward.
-    const double fx = (x - m_worldX0) / m_worldSizeX * m_nx - 0.5;
-    const double fy = (1.0 - (z - m_worldZ0) / m_worldSizeZ) * m_ny - 0.5;
+    const double fx = (lonDeg - m_lon0) / m_dlon - 0.5;
+    const double fy = (m_lat1 - latDeg) / m_dlat - 0.5;
     const int x0 = static_cast<int>(std::floor(fx));
     const int y0 = static_cast<int>(std::floor(fy));
     if (x0 < 0 || y0 < 0 || x0 + 1 >= m_nx || y0 + 1 >= m_ny) return -9999.0f;

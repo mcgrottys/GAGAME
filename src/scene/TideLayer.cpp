@@ -9,16 +9,12 @@
 namespace ga {
 
 namespace {
-// One colour per station, order-stable, bright enough to read after the ACES curve.
+// One colour per station by its order in the tide file (PHASE C3: no station is named here),
+// bright enough to read after the ACES curve: cyan, orange, violet, green, pink, grey, ...
 constexpr float kPalette[8][4] = {
-    {0.30f, 1.80f, 1.90f, 1},   // entrance: cyan
-    {2.30f, 1.10f, 0.15f, 1},   // Newburyport: orange
-    {1.30f, 0.55f, 2.20f, 1},   // Salisbury Point: violet
-    {0.45f, 1.90f, 0.55f, 1},   // Merrimacport: green
-    {2.20f, 0.55f, 1.20f, 1},   // Riverside: pink
-    {0.85f, 0.95f, 1.05f, 1},   // Boston reference: grey
-    {1.50f, 1.50f, 0.30f, 1},
-    {1.00f, 1.00f, 1.00f, 1},
+    {0.30f, 1.80f, 1.90f, 1}, {2.30f, 1.10f, 0.15f, 1}, {1.30f, 0.55f, 2.20f, 1},
+    {0.45f, 1.90f, 0.55f, 1}, {2.20f, 0.55f, 1.20f, 1}, {0.85f, 0.95f, 1.05f, 1},
+    {1.50f, 1.50f, 0.30f, 1}, {1.00f, 1.00f, 1.00f, 1},
 };
 constexpr double kTwoPi = 6.283185307179586476925;
 }  // namespace

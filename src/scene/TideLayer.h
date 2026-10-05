@@ -1,10 +1,10 @@
 // ================================================================================================
 //  TideLayer - M1's two views of the same analytic tide:
 //
-//    1. THE RIBBON: the lower Merrimack as a strip, x = along-channel distance (100 scene metres
-//       per river km), height = the tide interpolated between the five harmonic stations,
+//    1. THE RIBBON: a river as a strip, x = along-channel distance (100 scene metres per river
+//       km), height = the tide interpolated between the stations the file gives a river km,
 //       vertically exaggerated. Scrub time fast and you SEE the tide wave propagate upriver --
-//       the ~13-minute Newburyport lag and the hours to Riverside are real data, live.
+//       the lags between the stations are real data, live. A file with no river km: no ribbon.
 //    2. THE CURVES: a screen-space overlay plotting each station's h(t) across the scrub window,
 //       our analytic sum drawn solid, NOAA's official predictions drawn dashed underneath, plus
 //       the 'now' cursor and the MLLW zero line. The dashed and solid curves lying on top of each

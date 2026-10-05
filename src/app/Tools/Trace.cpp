@@ -24,18 +24,19 @@ namespace ga::app::tools {
 void RunTrace(const Options& opt, Gpu& gpu, SeaLayer* sea, const Compositor& compositor,
               int hgtCh, const WaterAtlas& waterAtlas, WaterBankLayer* waterBank,
               GlobeLayer* globe, const ResidencyManager& resMgr, double simUnix,
-              WeatherManager& weather) {
+              WeatherManager& weather, const Space::Anchor& chart) {
     weather.RefreshMirrorsTo(gpu, simUnix);   // a no-op after the export above
-    const double tlat = opt.traceLat, tlon = opt.traceLon;
-    const double wx = (tlon - BathyModel::kOrgLon) * BathyModel::kMPerLon;
-    const double wz = (tlat - BathyModel::kOrgLat) * BathyModel::kMPerLat;
+    // PHASE C4: no point given = the scene's place.anchor.
+    const bool given = !std::isnan(opt.traceLat) && !std::isnan(opt.traceLon);
+    const double tlat = given ? opt.traceLat : chart.latDeg, tlon = given ? opt.traceLon : chart.lonDeg;
+    double wx = 0.0, wz = 0.0;
+    chart.FlatOf(tlat, tlon, wx, wz);
     Log("[trace] ==== ONE SAMPLE THROUGH THE STATE DIAGRAM ====");
     Log("[trace] input       lat %.5f lon %.5f  t %.0f unix", tlat, tlon,
         simUnix);
     Log("[trace] 1 frame     latlon.deg -> world.m: x %+.1f z %+.1f  "
-        "(org %.5f,%.5f; mPerLon %.0f mPerLat %.0f; +x=east +z=north)",
-        wx, wz, BathyModel::kOrgLat, BathyModel::kOrgLon,
-        BathyModel::kMPerLon, BathyModel::kMPerLat);
+        "(the tangent plane about %.5f,%.5f, exact; +x=east +z=north)",
+        wx, wz, chart.latDeg, chart.lonDeg);
     const WeatherSample wq = weather.Query(tlat, tlon, simUnix, 30.0);
     Log("[trace] 2 bed       compose.stack SampleHeightStack: %+.2f m NAVD "
         "[%s]  (edge compose.stack->water.bank corners)",
@@ -58,12 +59,13 @@ void RunTrace(const Options& opt, Gpu& gpu, SeaLayer* sea, const Compositor& com
         wt::Smoothstep(0.05, 0.65, double(wq.depthM)),
         0.55 * (std::max)(static_cast<double>(wq.depthM), 0.05));
     // The one law the bank's tile corners and the hull's twin read (sim/WaveScale.h).
-    const WaveScale scaleT = WaveScale::For(weather.Globe(), sea ? sea->State() : nullptr,
-                                            sea && sea->StormOn(), simUnix);
+    static const WaveScale kNone{};
+    const WaveScale& scaleT = sea ? sea->Scale() : kNone;
     Log("[trace] 6 sea state Hs %.2f m Tp %.1f s dir %.0f [%s] -> hsScale "
-        "%.2f  (the grid's nodes bilinear over the reference %.2f m%s, clamp 0.15..3)",
-        wq.hs, wq.tp, wq.dirDeg, wq.waveSrc, scaleT.At(tlat, tlon), scaleT.hsRef,
-        scaleT.storm ? "; a declared storm IS the reference" : "");
+        "%.2f  (the grid's nodes bilinear, %zu source(s) over them, over the reference %.2f m, "
+        "clamp 0.15..3)",
+        wq.hs, wq.tp, wq.dirDeg, wq.waveSrc, scaleT.At(weather.Globe(), tlat, tlon),
+        scaleT.sources.size(), scaleT.hsRef);
     const float expoT = sea->ShadowAtWorld(static_cast<float>(wx),
                                            static_cast<float>(wz));
     Log("[trace] 7 exposure  swell.exposure node (page z14 mips >= 3, no flip, "

@@ -26,6 +26,7 @@
 #pragma once
 
 #include <atomic>
+#include <cmath>
 #include <memory>
 #include <cstdint>
 #include <string>
@@ -46,10 +47,21 @@ class Gpu;
 class CurrentModel;
 
 struct WaveFieldConfig {
-    // The solve window, world metres (BathyModel frame: x east, z north, ACT0816 anchor).
-    // Covers the throat, both jetties, the bar, and the ebb shoal; row 0 = SOUTH
-    // (+v = +z = north, the patch.wrap family -- no flips into the bank kernel).
+    // PHASE C4: the place of a point of the grid, in cells (a cell's centre is i + 0.5, j + 0.5;
+    // j counts north from the south row): the z16 page lattice's own (Web Mercator, 2^24 px).
+    void PlaceOfCell(double ci, double cj, double& latDeg, double& lonDeg) const {
+        const double worldPx = 16777216.0, pi = 3.14159265358979;
+        const double X = double(pxX0) + ci, Y = double(pxY0) + double(ny) - cj;
+        lonDeg = X / worldPx * 360.0 - 180.0;
+        const double n = pi * (1.0 - 2.0 * Y / worldPx);
+        latDeg = (2.0 * std::atan(std::exp(n)) - pi * 0.5) * 180.0 / pi;
+    }
+    // The solve window, metres about the scene's place.anchor in its tangent plane (x east,
+    // z north); row 0 = SOUTH (+v = +z = north, the patch.wrap family -- no flips into the bank
+    // kernel). PHASE C4: Align turns it into a box of z16 page texels (pxX0, pxY0 = its NW
+    // texel), and a cell's place is THAT texel's (PlaceOfCell) -- no metres-per-degree.
     double orgX = -1400.0, orgZ = -800.0;
+    long long pxX0 = 0, pxY0 = 0;
     int nx = 1600, ny = 1000;
     double cellM = 2.0;
     int nComp = 32;                    // M9bp: see SceneConfig wfComps (16 was the comb)
@@ -101,9 +113,8 @@ public:
     // read back on the main thread at a quantized cadence, resampled onto the solve
     // grid (row-0-north flip declared), scaled by the prism-truncation gain, and their
     // quantized bytes join the bucket key: content identity, not a clock.
-    void SetSweCurrent(class SweSolver* swe, const class BathyModel* bathy, float gain) {
+    void SetSweCurrent(class SweSolver* swe, float gain) {
         m_swe = swe;
-        m_sweBathy = bathy;
         m_sweGain = gain;
     }
 
@@ -137,6 +148,21 @@ public:
     std::shared_ptr<const Solved> Live() const { return std::atomic_load(&m_live); }
     uint64_t LiveKey() const { return m_liveKey; }
     bool Ready() const { return Live() != nullptr; }
+    // 2026-10-04 (the owner's "boat and waves don't align"): ONE SWAP FOR EVERY READER. A finished
+    // solve is NEXT, not live: the pages are painted from it (SolvedFor), and only when its tree is
+    // swapped in on the GPU (FrameLoop: the tenant's holder and Drop) does Publish make it live for
+    // the hull's twin and the bank's table in the same frame. Before this the twin and the table
+    // flipped the instant the solve finished, seconds before the pages landed: old bytes under a
+    // new table (+4 m readings), the hull on a sea the screen did not show.
+    std::shared_ptr<const Solved> Next() const { return std::atomic_load(&m_next); }
+    uint64_t NextKey() const { return Next() ? m_nextKey : m_liveKey; }   // the newest solve's key
+    std::shared_ptr<const Solved> SolvedFor(uint64_t key) const {
+        std::shared_ptr<const Solved> n = Next();
+        if (n && n->key == key) return n;
+        std::shared_ptr<const Solved> l = Live();
+        return (l && l->key == key) ? l : nullptr;
+    }
+    void Publish();   // next -> live (the table adopted), the frame the pages are swapped in
 
     // The hypervisor's step 9c AND the water a hull floats in: evaluate the SOLVED field at
     // a world point on the CPU (bilinear on the packed planes, spinor advanced by the same
@@ -279,7 +305,6 @@ private:
     const CurrentModel* m_currents = nullptr;
     int m_actSta = -1;
     class SweSolver* m_swe = nullptr;             // M8: the real flow (optional)
-    const class BathyModel* m_sweBathy = nullptr;
     float m_sweGain = 3.2f;                       // prism-truncation magnitude restore
     std::vector<float> m_curU, m_curV;            // solve-grid planes, main-thread owned
     uint64_t m_curSig = 0;                        // quantized content hash -> bucket key
@@ -288,6 +313,9 @@ private:
     GpuTable m_table{};
     std::shared_ptr<const Solved> m_live;   // M9bc: the adopted solve, swapped atomically
     uint64_t m_liveKey = 0;
+    std::shared_ptr<const Solved> m_next;   // a finished solve whose pages are not yet on the GPU
+    uint64_t m_nextKey = 0;
+    void Offer(Solved&& s, const char* how);   // s -> next
 
     // background solve plumbing: one worker at a time, result handed over by flag
     std::atomic<bool> m_solveRunning{false};   // the pool job is live (replaces joining m_worker)

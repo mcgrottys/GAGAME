@@ -51,8 +51,8 @@ public:
     static constexpr int kRingTexels = kRingTiles * kTileTexels;
 
     void Configure(const std::wstring& shaderDir, SeaLayer* sea, SweSolver* swe,
-                   const BathyModel* sweBathy, const WaterAtlas* atlas, Compositor* comp,
-                   int hgtCh, const GlobeModel* globe, const SeaState* seaState);
+                   const WaterAtlas* atlas, Compositor* comp,
+                   int hgtCh, const GlobeModel* globe);
 
     const char* Name() const override { return "waterbank"; }
     void Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
@@ -102,7 +102,10 @@ public:
     void SetWindows(const SurfaceFrame::ChainRows& rows, const double eye[3]) {
         SurfaceFrame::KernelRows(rows, m_hw);
         for (int i = 0; i < 3; ++i) m_hwEye[i] = eye[i];
-        if (m_surface) m_surface->StandingKernel(eye, m_st);   // the solver's window about the same frame
+        // PHASE C1: the solver's chart about the same frame (zeros: no solver).
+        if (m_surface && m_swe) {
+            m_swe->Domain().KernelRows(m_surface->east, m_surface->up, m_surface->north, eye, m_sv);
+        }
         m_hwOn = rows.K > 0;
     }
     int injectPattern = 0;   // M7m/M7n: 1 = bank world card, 2 = cascade-edge card
@@ -125,7 +128,7 @@ public:
         m_hgtWinSrv = srv;
         m_hgtWinResSrv = resMapSrv;
     }
-    // M12 step 4b: the surface, for the world.flat chart the geoA row is cast from
+    // the surface, for the world.flat chart the rings' places are read through
     // (SurfaceFrame::FlatRows). Must precede the first Render.
     void SetSurface(const SurfaceFrame* s) { m_surface = s; }
     // M8: the solved wave field (may be null / not Ready -- the kernel falls back to
@@ -181,7 +184,6 @@ private:
         float org[4];
         float patch[4];
         float bandK[4];
-        float swe[4];
         float sweDims[4];
         float misc[4];
         uint32_t slotsA[4];
@@ -190,7 +192,6 @@ private:
         float churn[4];       // xy origin, z 1/domain, w atlas texels
         float peakDir[4];     // M7p: peak propagation dir xy, z valid (gPeakDir)
         uint32_t slotsD[4];   // M7q: height window SRV, its residency-map SRV
-        float geoA[4];        // world->latlon: orgLat, orgLon, 1/mPerLat, 1/mPerLon
         uint32_t slotsE[4];   // M8 foamlaw: cascade DERIV SRVs x3 (Jacobian foam union)
         float rmsRef[4];      // M8: unit-sea rms envelope per band (crest gate / excess)
         uint32_t waveU[4];    // M9bc wavefield: page tenant SRV, its residency SRV, nUsed, env plane
@@ -235,9 +236,9 @@ private:
         float hwW[20];
         float hwO[12];
         uint32_t hwS[8];
-        // THE SOLVER'S STANDING WINDOW about the rings' frame (SurfaceFrame::StandingKernel): a texel
-        // reads the solver where its ground lies in it. Appended at the END on both sides.
-        float stU[4], stV[4], stW[4], stO[4];
+        // PHASE C1: THE SOLVER'S CHART about the rings' frame (SweDomain::KernelRows): a texel reads
+        // the solver where its ground lies in the domain's cells. Appended at the END on both sides.
+        float svU[4], svV[4], svW[4], svO[4];
     };
     struct BankTile {
         float orgXZ[2];
@@ -289,15 +290,13 @@ private:
     std::wstring m_shaderDir;
     SeaLayer* m_sea = nullptr;
     SweSolver* m_swe = nullptr;
-    const BathyModel* m_sweBathy = nullptr;
     const WaterAtlas* m_atlas = nullptr;
     Compositor* m_comp = nullptr;
     int m_hgtCh = -1;
     uint32_t m_hgtWinSrv = 0xFFFFFFFFu, m_hgtWinResSrv = 0xFFFFFFFFu;
-    const SurfaceFrame* m_surface = nullptr;   // M12 step 4b: the world.flat chart (geoA)
+    const SurfaceFrame* m_surface = nullptr;   // the world.flat chart (PHASE C5: exact)
     uint64_t m_cbFp = 0;   // M12 step 4b: the [kernel] waterbank cb fingerprint's last value
     const GlobeModel* m_globe = nullptr;
-    const SeaState* m_seaState = nullptr;
     const class WaveField* m_wave = nullptr;   // M8: the solved wave field (optional)
     uint32_t m_wavePages = UINT32_MAX, m_wavePagesRes = UINT32_MAX;   // M9bc
     double m_waveOrgPx[2] = {0.0, 0.0};
@@ -320,7 +319,7 @@ private:
     float m_traceFloorUsed = 0.0f;
     ShaderCompiler* m_sc = nullptr;
     SurfaceFrame::KernelWindowRows m_hw{};   // PHASE B2: SetWindows
-    float m_st[16] = {};                     // ...and the solver's standing window
+    float m_sv[16] = {};                     // ...and the solver's chart
     double m_hwEye[3] = {};
     bool m_hwOn = false;
     float m_baseTexelM = 4.8f;

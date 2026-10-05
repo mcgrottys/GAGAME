@@ -435,19 +435,49 @@ struct Space {
     const Space* parent = nullptr;
     Placement link;               // own -> parent
 
-    // The chart onto the exchange frame (ATLAS tier 1) where this space has one: the
-    // anchor-linear world.flat map of BathyModel.h (lat = orgLat + z / mPerLat, lon = orgLon +
-    // x / mPerLon, mPerLon frozen at the anchor) -- what the kernels' geoA row is made of.
+    // The chart onto the exchange frame (ATLAS tier 1) where this space has one: the space's own
+    // tangent plane about its anchor, read as a RATIO OF PLANES in doubles (HIERARCHY 4.4).
+    // PHASE C5: the anchor-linear map (two frozen metres-per-degree) is DELETED; a ground point
+    // (x, z) and its place are each other's image through the frame's rows below, exactly.
     struct Anchor {
-        double latDeg = 0.0, lonDeg = 0.0, mPerLat = 0.0, mPerLon = 0.0;
-        bool linear = false;
+        double latDeg = 0.0, lonDeg = 0.0;
+        // The ground point (x, 0, z) of this flat frame -> its place (the central projection's
+        // inverse: the direction of east x + up R + north z).
         void LatLonOf(double x, double z, double& outLatDeg, double& outLonDeg) const {
-            outLatDeg = latDeg + z / mPerLat;
-            outLonDeg = lonDeg + x / mPerLon;
+            PlaceOf(x, 0.0, z, outLatDeg, outLonDeg);
         }
-        void FlatOf(double inLatDeg, double inLonDeg, double& x, double& z) const {
-            x = (inLonDeg - lonDeg) * mPerLon;
-            z = (inLatDeg - latDeg) * mPerLat;
+        // A place -> the point of the tangent plane on its ray from the centre: x = R (E.d)/(U.d),
+        // z = R (N.d)/(U.d), a ratio of planes about the anchor. No place beyond the frame's
+        // horizon (U.d <= 0) has one: x = z = 0 and false.
+        bool FlatOf(double inLatDeg, double inLonDeg, double& x, double& z) const {
+            const double d2r = 3.14159265358979323846 / 180.0;
+            const double la = inLatDeg * d2r, lo = inLonDeg * d2r;
+            const double d[3] = {std::cos(la) * std::cos(lo), std::sin(la), std::cos(la) * std::sin(lo)};
+            const double u = up[0] * d[0] + up[1] * d[1] + up[2] * d[2];
+            x = z = 0.0;
+            if (!(u > 0.0)) return false;
+            x = planetR * (east[0] * d[0] + east[1] * d[1] + east[2] * d[2]) / u;
+            z = planetR * (north[0] * d[0] + north[1] * d[1] + north[2] * d[2]) / u;
+            return true;
+        }
+        // The chart about a place: its rows are the engine's tangent frame there (FrameLoop's
+        // derivation, said once: up = the place's direction, east = d(up)/dlon, north = east x up).
+        static Anchor About(double inLatDeg, double inLonDeg, double R) {
+            Anchor a;
+            a.latDeg = inLatDeg;
+            a.lonDeg = inLonDeg;
+            const double d2r = 3.14159265358979 / 180.0;   // GlobeModel::LatLonDir's, bit for bit
+            const double la = inLatDeg * d2r, lo = inLonDeg * d2r;
+            a.up[0] = std::cos(la) * std::cos(lo);
+            a.up[1] = std::sin(la);
+            a.up[2] = std::cos(la) * std::sin(lo);
+            const double yl = std::sqrt(a.up[0] * a.up[0] + a.up[2] * a.up[2]);
+            a.east[0] = -a.up[2] / yl; a.east[1] = 0.0; a.east[2] = a.up[0] / yl;
+            a.north[0] = a.east[1] * a.up[2] - a.east[2] * a.up[1];
+            a.north[1] = a.east[2] * a.up[0] - a.east[0] * a.up[2];
+            a.north[2] = a.east[0] * a.up[1] - a.east[1] * a.up[0];
+            a.planetR = R;
+            return a;
         }
 
         // ---- M13: THE PLACE, EXACTLY -- the same point on the sphere the mesh is drawn on.
@@ -476,13 +506,8 @@ struct Space {
             const double ry = planetR + y;
             for (int i = 0; i < 3; ++i) out[i] = east[i] * x + up[i] * ry + north[i] * z;
         }
-        // Its place. Falls back to the linear chart where the rows were never written, so a caller
-        // that has not been given them keeps its old answer instead of a wrong new one.
+        // Its place.
         void PlaceOf(double x, double y, double z, double& outLatDeg, double& outLonDeg) const {
-            if (!Exact()) {
-                LatLonOf(x, z, outLatDeg, outLonDeg);
-                return;
-            }
             double p[3];
             PlanetOf(x, y, z, p);
             const double len = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
@@ -533,13 +558,7 @@ struct Space {
         }
         bool PlaceOfProjected(double x, double z, double& outLatDeg, double& outLonDeg) const {
             double p[3];
-            if (!DirOfProjected(x, z, p)) {
-                if (!Exact()) {
-                    LatLonOf(x, z, outLatDeg, outLonDeg);
-                    return true;
-                }
-                return false;
-            }
+            if (!DirOfProjected(x, z, p)) return false;
             const double r2d = 180.0 / 3.14159265358979323846;
             outLatDeg = std::asin((p[1] < -1.0) ? -1.0 : (p[1] > 1.0 ? 1.0 : p[1])) * r2d;
             outLonDeg = std::atan2(p[2], p[0]) * r2d;

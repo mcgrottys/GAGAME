@@ -33,9 +33,9 @@ std::optional<int> RunOceanProbe(const Options& opt, const TideModel& model, Gpu
                                  WeatherManager& weather) {
     double plat = 0, plon = 0;
     if (sscanf_s(opt.oceanProbe.c_str(), "%lf,%lf", &plat, &plon) == 2) {
-        // The external merrimack window needs its history before it can be mirrored
+        // The external solver window needs its history before it can be mirrored
         // (interactive runs spin it up right after this block).
-        Log("[wx] probe: spinning the merrimack window");
+        Log("[wx] probe: spinning the solver's window");
         if (swe.Ready()) swe.Spinup(gpu, simUnix, 0.5, oceanAt, westAt, southAt,
                                     westQAt);
         Log("[wx] probe: manager update at the probe point");

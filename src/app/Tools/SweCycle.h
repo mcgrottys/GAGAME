@@ -16,6 +16,7 @@
 #include "hal/Residency.h"
 #include "sim/BathyModel.h"
 #include "sim/CurrentModel.h"
+#include "sim/Stations.h"
 #include "sim/SweSolver.h"
 
 #include <algorithm>
@@ -192,33 +193,39 @@ inline void LogWestBoundary(Gpu& gpu, SweSolver& swe, double hours, double tide,
 // attenuation must EMERGE), and the river's standing slope upstream.
 template <typename F, typename G, typename H, typename Q>
 void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G westAt, H southAt, Q westQAt,
-                 const CurrentModel* currents, int ctSta, const BathyModel& bathy,
+                 const CurrentModel* currents, int ctSta, const SweToolGrid& grid,
                  double startUnix, double hours,
-                 const std::function<std::string(double)>& describeWest = {}) {
+                 const std::function<std::string(double)>& describeWest = {},
+                 const SweFocusProbe* focus = nullptr) {
     std::vector<float> bedGpu;   // the kernel's bed, read once for the west profiles
     auto tideAt = oceanAt;
 
     // River probe: the deepest channel cell near x = -5000 m.
-    const int nx = bathy.Nx(), ny = bathy.Ny();
-    const int ix = static_cast<int>((-5000.0f - bathy.WorldX0()) / bathy.WorldSizeX() * nx);
+    const SweDomain& dom = *grid.dom;
+    const int nx = int(dom.nx), ny = int(dom.ny);
+    double ctx = 0.0, cty = 0.0;
+    grid.CellOfFlat(-5000.0, 0.0, ctx, cty);
+    const int ix = std::clamp(int(ctx), 0, nx - 1);
     int iyBest = ny / 2;
     float eBest = 1e9f;
     for (int iy = 0; iy < ny; ++iy) {
-        const float e = bathy.Elev()[iy * nx + ix];
+        const float e = dom.elev[size_t(iy) * nx + ix];
         if (e > -9000.0f && e < eBest) {
             eBest = e;
             iyBest = iy;
         }
     }
-    const float riverZ = bathy.WorldZ0() + bathy.WorldSizeZ() * (1.0f - (iyBest + 0.5f) / ny);
-    Log("[swe-cycle] river probe (-5000, %.0f), bed %.1f m", riverZ, eBest);
+    double riverXd = 0.0, riverZd = 0.0;
+    grid.FlatOfCell(ix + 0.5, iyBest + 0.5, riverXd, riverZd);
+    const float riverX = float(riverXd), riverZ = float(riverZd);
+    Log("[swe-cycle] river probe (%.0f, %.0f), bed %.1f m", riverX, riverZ, eBest);
 
     // Throat probe: the deepest channel cell within 150 m of the ACT0816 station -- the jet
     // core, not whatever shoal the exact origin lands on.
     float throatX = 0, throatZ = 0, tBest = 1e9f;
     for (float wz = -150; wz <= 150; wz += 10) {
         for (float wx = -150; wx <= 150; wx += 10) {
-            const float e = bathy.SampleWorld(wx, wz);
+            const float e = grid.BedAtFlat(wx, wz);
             if (e > -9000.0f && e < tBest) {
                 tBest = e;
                 throatX = wx;
@@ -236,14 +243,15 @@ void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G westAt, H southAt, Q wes
     int iyW = ny / 2;
     float eW = 1e9f;
     for (int iy = 0; iy < ny; ++iy) {
-        const float e = bathy.Elev()[iy * nx + ixW];
+        const float e = dom.elev[size_t(iy) * nx + ixW];
         if (e > -9000.0f && e < eW) {
             eW = e;
             iyW = iy;
         }
     }
-    const float westX = bathy.WorldX0() + bathy.WorldSizeX() * (ixW + 0.5f) / nx;
-    const float westZ = bathy.WorldZ0() + bathy.WorldSizeZ() * (1.0f - (iyW + 0.5f) / ny);
+    double westXd = 0.0, westZd = 0.0;
+    grid.FlatOfCell(ixW + 0.5, iyW + 0.5, westXd, westZd);
+    const float westX = float(westXd), westZ = float(westZd);
     Log("[swe-cycle] west probe (%.0f, %.0f), bed %.1f m, %d cells in from the west boundary",
         westX, westZ, eW, kWestIn);
 
@@ -281,10 +289,12 @@ void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G westAt, H southAt, Q wes
                 }
             }
         }
-        const int c1 = static_cast<int>((350.0f - bathy.WorldX0()) / bathy.WorldSizeX() * nx);
+        double gx = 0.0, gy = 0.0;
+        grid.CellOfFlat(350.0, 0.0, gx, gy);
+        const int c1 = int(gx);
         for (float wz = -350.0f; wz <= 150.0f; wz += 5.0f) {
-            const int iy = static_cast<int>((bathy.WorldZ0() + bathy.WorldSizeZ() - wz) /
-                                            bathy.WorldSizeZ() * ny);
+            grid.CellOfFlat(350.0, wz, gx, gy);
+            const int iy = int(std::floor(gy));
             if (iy < 0 || iy >= ny || c1 < 1 || c1 >= nx) continue;
             if (bedGpu[size_t(iy) * nx + c1] < b1) {
                 b1 = bedGpu[size_t(iy) * nx + c1];
@@ -299,13 +309,14 @@ void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G westAt, H southAt, Q wes
             const float crest = LowestCrest(bedGpu, nx, ny, r0 * nx + c0, r1 * nx + c1, crestCell);
             if (crestCell >= 0) {
                 const int cc = crestCell % nx, cr = crestCell / nx;
+                double crX = 0.0, crZ = 0.0;
+                grid.FlatOfCell(cc + 0.5, cr + 0.5, crX, crZ);
                 Log("[thalweg] the lowest crest between the edge and the gap: bed %+.2f m NAVD at "
                     "(%d, %d), world (%.0f, %.0f)",
-                    crest, cc, cr, bathy.WorldX0() + bathy.WorldSizeX() * (cc + 0.5f) / nx,
-                    bathy.WorldZ0() + bathy.WorldSizeZ() * (1.0f - (cr + 0.5f) / ny));
+                    crest, cc, cr, crX, crZ);
                 level = (std::max)(1.0f, crest + 0.5f);
             }
-            thalweg = FindThalweg(bedGpu, nx, ny, bathy.WorldSizeX() / nx, bathy.WorldSizeZ() / ny,
+            thalweg = FindThalweg(bedGpu, nx, ny, float(dom.dx), float(dom.dy),
                                   c0, r0, c1, r1, level);
         }
         Log("[thalweg] %zu cells from (%d, %d) bed %.2f to the gap (%d, %d) bed %.2f, %.0f m along "
@@ -325,9 +336,8 @@ void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G westAt, H southAt, Q wes
         FILE* hf = nullptr;
         fopen_s(&hf, tp, "w");
         if (hf) {
-            fprintf(hf, "nx %d ny %d x0 %.3f z0 %.3f sizeX %.3f sizeZ %.3f cells %zu\n", nx, ny,
-                    bathy.WorldX0(), bathy.WorldZ0(), bathy.WorldSizeX(), bathy.WorldSizeZ(),
-                    thalweg.size());
+            fprintf(hf, "nx %d ny %d anchor %.7f %.7f dx %.4f dy %.4f cells %zu\n", nx, ny,
+                    dom.latC, dom.lonC, dom.dx, dom.dy, thalweg.size());
             for (const ThalwegCell& c : thalweg) {
                 fprintf(hf, "%d %d %.2f %.3f\n", c.col, c.row, c.s, bedGpu[size_t(c.row) * nx + c.col]);
             }
@@ -353,7 +363,19 @@ void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G westAt, H southAt, Q wes
     fprintf(f,
             "unix,tide_navd,act_pred_ms,ocean_deta,throat_deta,throat_u,throat_v,basin_deta,"
             "river_deta,west_target,gap_u,river_u,river_valid,west_deta,west_u,west_valid,west_q,"
-            "west_q_target\n");
+            "west_q_target,focus_level,focus_pred\n");
+    double ftx = -1.0, fty = -1.0;
+    const bool haveFocus = focus && focus->pred && dom.CellOf(focus->lat, focus->lon, ftx, fty) &&
+                           ftx >= 0.0 && fty >= 0.0 && ftx < nx && fty < ny;
+    if (focus) {
+        Log("[swe-cycle] focus probe: station %s at %.5f N %.5f E -> cell (%.2f, %.2f) of %dx%d%s, "
+            "bed %+.2f m", focus->id.c_str(), focus->lat, focus->lon, ftx, fty, nx, ny,
+            haveFocus ? "" : " -- OUTSIDE the domain",
+            haveFocus ? double(dom.elev[size_t(fty) * nx + size_t(ftx)]) : 0.0);
+    }
+    double fSum = 0.0, fSq = 0.0, fMax = 0.0, fLo = 1e9, fHi = -1e9, pLo = 1e9, pHi = -1e9;
+    double fLoT = 0.0, fHiT = 0.0, pLoT = 0.0, pHiT = 0.0;
+    int fN = 0;
     const double endUnix = startUnix + hours * 3600.0;
     int rows = 0;
     for (double t = startUnix; t <= endUnix; t += 120.0) {
@@ -361,17 +383,20 @@ void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G westAt, H southAt, Q wes
         // 4 named probes + a 6-point transect across the jetty gap (x = 350) whose valid-point
         // mean is the fair section current to hold against ACT0816.
         // The ocean probe at 2400: inside the full sponge of the drawn-in grid too.
-        const float fixedPts[22] = {2400.0f, 0.0f,   throatX, throatZ, -2500.0f, -900.0f,
-                                    -5000.0f, riverZ, 350.0f, -350.0f, 350.0f,  -250.0f,
+        float fixedPts[22] = {2400.0f, 0.0f,   throatX, throatZ, -2500.0f, -900.0f,
+                              riverX,  riverZ, 350.0f, -350.0f, 350.0f,  -250.0f,
                                     350.0f,  -150.0f, 350.0f, -50.0f,  350.0f,  50.0f,
                                     350.0f,  150.0f, westX,  westZ};
         // The 11 probes, then the channel's path (one readback serves both).
+        grid.CellsOfFlat(fixedPts, 11);   // the tools' points (world.flat) to the solver's cells
         std::vector<float> pts(fixedPts, fixedPts + 22);
         for (const ThalwegCell& c : thalweg) {
-            pts.push_back(bathy.WorldX0() + bathy.WorldSizeX() * (c.col + 0.5f) / nx);
-            pts.push_back(bathy.WorldZ0() + bathy.WorldSizeZ() * (1.0f - (c.row + 0.5f) / ny));
+            pts.push_back(c.col + 0.5f);
+            pts.push_back(c.row + 0.5f);
         }
-        std::vector<SweSolver::Probe> pr(11 + thalweg.size());
+        pts.push_back(float(ftx));   // the focus station, last
+        pts.push_back(float(fty));
+        std::vector<SweSolver::Probe> pr(12 + thalweg.size());
         swe.ReadProbes(gpu, pts.data(), static_cast<int>(pr.size()), pr.data());
         if (tf) {
             const float head[2] = {static_cast<float>((t - startUnix) / 3600.0),
@@ -397,11 +422,24 @@ void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G westAt, H southAt, Q wes
         gapU = gapN ? gapU / gapN : 0.0f;
         const double act =
             (currents && ctSta >= 0) ? currents->SignedSpeed(static_cast<size_t>(ctSta), t) : 0.0;
+        const double fLevel = haveFocus ? tideAt(t) + double(pr.back().dEta) : 0.0;
+        const double fPred = haveFocus ? focus->pred(t) : 0.0;
+        if (haveFocus) {
+            const double dd = fLevel - fPred;
+            fSum += dd;
+            fSq += dd * dd;
+            fMax = (std::max)(fMax, std::abs(dd));
+            ++fN;
+            if (fLevel < fLo) { fLo = fLevel; fLoT = t; }
+            if (fLevel > fHi) { fHi = fLevel; fHiT = t; }
+            if (fPred < pLo) { pLo = fPred; pLoT = t; }
+            if (fPred > pHi) { pHi = fPred; pHiT = t; }
+        }
         fprintf(f, "%.0f,%.4f,%.3f,%.4f,%.4f,%.3f,%.3f,%.4f,%.4f,%.4f,%.3f,%.3f,%d,%.4f,%.3f,%d,"
-                   "%.2f,%.2f\n",
+                   "%.2f,%.2f,%.4f,%.4f\n",
                 t, tideAt(t), act, ocean.dEta, throat.dEta, throat.u, throat.v, basin.dEta,
                 river.dEta, westAt(t), gapU, river.u, river.valid ? 1 : 0, west.dEta, west.u,
-                west.valid ? 1 : 0, westQ, westQAt(t));
+                west.valid ? 1 : 0, westQ, westQAt(t), fLevel, fPred);
         // The west boundary at hours 0, 3, 6 and 9 (a row every 120 s).
         if (rows % 90 == 0 && rows <= 270) {
             LogWestBoundary(gpu, swe, (t - startUnix) / 3600.0, tideAt(t), westAt(t), westQAt(t),
@@ -415,15 +453,24 @@ void RunSweCycle(Gpu& gpu, SweSolver& swe, F oceanAt, G westAt, H southAt, Q wes
     fclose(f);
     if (tf) fclose(tf);
     Log("[swe-cycle] wrote %s (%d rows)", path, rows);
+    if (fN > 0) {
+        Log("[swe-cycle] focus %s over %.2f h, %d rows: solver - prediction mean %+.4f m, rms %.4f m, "
+            "max |d| %.4f m; solver low %+.3f at +%.2f h, high %+.3f at +%.2f h (range %.3f m); "
+            "prediction low %+.3f at +%.2f h, high %+.3f at +%.2f h (range %.3f m)",
+            focus->id.c_str(), hours, fN, fSum / fN, std::sqrt(fSq / fN), fMax, fLo,
+            (fLoT - startUnix) / 3600.0, fHi, (fHiT - startUnix) / 3600.0, fHi - fLo, pLo,
+            (pLoT - startUnix) / 3600.0, pHi, (pHiT - startUnix) / 3600.0, pHi - pLo);
+    }
 }
 
 // The mode: spin the solver up two hours of history, integrate opt.sweCycleH hours to
 // out/swe_cycle_<pid>.csv, tear down, exit 0.
 template <typename Ocean, typename South, typename West, typename WestQ>
 int RunSweCycleMode(const Options& opt, Gpu& gpu, const CurrentModel& currents, bool haveCurrents,
-                    const BathyModel& bathy, SweSolver& swe, ResidencyManager& resMgr,
+                    const SweToolGrid& grid, SweSolver& swe, ResidencyManager& resMgr,
                     double simUnix, Ocean oceanAt, South southAt, West westAt, WestQ westQAt,
-                    const std::function<std::string(double)>& describeWest = {}) {
+                    const std::function<std::string(double)>& describeWest = {},
+                    const SweFocusProbe* focus = nullptr) {
     // --swe-cycle-stage M (an instrument, the net-flow measurement): the told exterior's stage
     // raised by a constant M metres; its rate, and so the told transport, is unchanged.
     const double stageM = opt.sweCycleStageM;
@@ -432,10 +479,17 @@ int RunSweCycleMode(const Options& opt, Gpu& gpu, const CurrentModel& currents, 
         Log("[swe-cycle] the told west stage raised by %+.3f m (--swe-cycle-stage)", stageM);
     }
     swe.Spinup(gpu, simUnix, 2.0, oceanAt, westAtStage, southAt, westQAt);
-    const int ctSta = haveCurrents ? currents.StationIndex("ACT0816") : -1;
+    // PHASE C3: the current station nearest the throat's search centre that the domain holds.
+    int ctSta = -1;
+    if (haveCurrents) {
+        double la = 0.0, lo = 0.0;
+        grid.flat.LatLonOf(0.0, 0.0, la, lo);
+        ctSta = NearestStation(currents, la, lo,
+                               [&](double a, double b) { return swe.Domain().Holds(a, b); });
+    }
     RunSweCycle(gpu, swe, oceanAt, westAtStage, southAt, westQAt,
-                haveCurrents ? &currents : nullptr, ctSta, bathy, simUnix,
-                opt.sweCycleH, describeWest);
+                haveCurrents ? &currents : nullptr, ctSta, grid, simUnix,
+                opt.sweCycleH, describeWest, focus);
     gpu.WaitIdle();
     resMgr.Shutdown();
     gpu.Shutdown();

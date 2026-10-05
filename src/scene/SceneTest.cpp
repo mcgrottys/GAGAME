@@ -113,6 +113,9 @@
 
 namespace ga::scene {
 
+// PHASE C5: the self-tests pinned at the shipped scenes' anchor keep their numbers as test data.
+constexpr double kTestLat = 42.81833, kTestLon = -70.81;
+
 namespace {
 
 struct Gate {
@@ -364,7 +367,7 @@ bool RunSceneSelfTest() {
         g.True(bad.Get("len")->src == "the survey", "and keeps its provenance");
 
         TestProps out;
-        PoseFrame fr = FrameFromAnchor(BathyModel::kOrgLat, BathyModel::kOrgLon, R);
+        PoseFrame fr = FrameFromAnchor(kTestLat, kTestLon, R);
         const bool applied = ps.ApplyTo(&out, &fr, &why);
         g.True(applied, (std::string("ApplyTo: ") + why).c_str());
         g.True(!out.on && out.f == 2.5f && out.mode == 2 && out.label == "y" && out.path == "c" &&
@@ -466,7 +469,7 @@ bool RunSceneSelfTest() {
 
     // ---- 4. The placement sugar against the session's functions -------------------------------
     {
-        const PoseFrame fr = FrameFromAnchor(BathyModel::kOrgLat, BathyModel::kOrgLon, R);
+        const PoseFrame fr = FrameFromAnchor(kTestLat, kTestLon, R);
         g.True(fr.valid, "the anchor's tangent rows are a proper rotation");
         std::string why;
         Placement got;
@@ -1400,7 +1403,7 @@ bool RunSceneSelfTest() {
                     cHelm.SetFromCompass(522.0, 7.0, 72.0, 246.0f, -4.0f);
                     railKeys.push_back({0.0, poseMotor(camGlobe)});
                     railKeys.push_back({3.0, orbKey(41.2, -66.5, 500000.0,
-                                                    BathyModel::kOrgLat, BathyModel::kOrgLon)});
+                                                    kTestLat, kTestLon)});
                     railKeys.push_back({5.0, poseMotor(cHover)});
                     railKeys.push_back({10.0, poseMotor(cHover)});
                     railKeys.push_back({15.0, poseMotor(cHelm)});
@@ -1581,7 +1584,7 @@ bool RunSceneSelfTest() {
             } else if (strcmp(name, "classic") == 0) {
                 std::vector<JsonValue> k;
                 k.push_back(keyView(0.0, "orbit"));
-                k.push_back(keyAt(3.0, orbit(41.2, -66.5, 500000.0, BathyModel::kOrgLat, BathyModel::kOrgLon)));
+                k.push_back(keyAt(3.0, orbit(41.2, -66.5, 500000.0, kTestLat, kTestLon)));
                 k.push_back(keyAt(5.0, compass(-200.0, 1800.0, -2500.0, 22.0, -46.0)));
                 k.push_back(keyAt(10.0, compass(-200.0, 1800.0, -2500.0, 22.0, -46.0)));
                 k.push_back(keyAt(15.0, compass(522.0, 7.0, 72.0, 246.0, -4.0)));
@@ -1677,7 +1680,7 @@ bool RunSceneSelfTest() {
         for (const RailCase& rc : cases) {
             const double planetR = rc.mars ? kMarsR : R;
             const PoseFrame fr = rc.mars ? FrameFromAnchor(0.0, 0.0, kMarsR)
-                                         : FrameFromAnchor(BathyModel::kOrgLat, BathyModel::kOrgLon, R);
+                                         : FrameFromAnchor(kTestLat, kTestLon, R);
             // (1) THE PRINTED TABLE vs THE CHECKED-IN FILE.
             const JsonValue doc = railDoc(rc.name, rc.readme, kMarsR);
             const std::string printed = SceneBuilder::WriteJson(doc);
@@ -1811,7 +1814,7 @@ bool RunSceneSelfTest() {
         // (B) THE PORTAL NODE: its cycle IS the session's declaration -- Space::Cycle over the
         // tangent space with Placement::Similar of the link BuildPortal resolved.
         {
-            const PoseFrame fr = FrameFromAnchor(BathyModel::kOrgLat, BathyModel::kOrgLon, R);
+            const PoseFrame fr = FrameFromAnchor(kTestLat, kTestLon, R);
             Space planet, tangent;
             planet.name = "planet.re";
             planet.unitM = R;
@@ -1822,6 +1825,8 @@ bool RunSceneSelfTest() {
             tangent.link = Placement::Frame(fr.east, fr.up, fr.north, anchor);
             Portal node;
             node.Declared().name = "droste";
+            node.Declared().lat = 42.81826;   // PHASE C5: the shipped portal's leaf, as test data
+            node.Declared().lon = -70.80045;
             Portal::Observers po;
             po.east = fr.east;
             po.up = fr.up;
@@ -1876,6 +1881,8 @@ bool RunSceneSelfTest() {
             const double hLat = 25.8997, hLon = -80.1239;   // Baker's Haulover Inlet
             Portal to;
             to.Declared().name = "droste";
+            to.Declared().lat = 42.81826;
+            to.Declared().lon = -70.80045;
             to.SetDestination(hLat, hLon);
             to.Configure(po);
             g.True(to.Build() && to.Valid() && to.HasDestination(), "[portal] a portal with a destination builds");
@@ -2000,7 +2007,7 @@ bool RunSceneSelfTest() {
 
         // (E) THE GATE: one motor carries a body from a box to a place on the same planet.
         {
-            const PoseFrame frM = FrameFromAnchor(BathyModel::kOrgLat, BathyModel::kOrgLon, R);
+            const PoseFrame frM = FrameFromAnchor(kTestLat, kTestLon, R);
             Space planetG, rootG;
             planetG.name = "planet.re";
             planetG.unitM = R;
@@ -2138,14 +2145,13 @@ bool RunSceneSelfTest() {
             ch.LatLonOf(1000.0, -500.0, la, lo);
             ch.FlatOf(la, lo, rx, rz);
             g.Near(std::fabs(rx - 1000.0) + std::fabs(rz + 500.0), 0.0, 1e-9, "[gate] the destination's chart round-trips");
-            g.Near(la, 25.8997 - 500.0 / 110574.0, 1e-12, "[gate] ...by the engine's law at the place");
-            // THE WATER: with no chart a TreeWater places a point by the root's constants, bitwise.
+            g.Near(la, 25.8997 - 500.0 / R * 180.0 / 3.14159265358979323846, 1e-6,
+                   "[gate] ...by the exact tangent chart at the place");
+            // THE WATER: with no chart a TreeWater has no place (PHASE C5: no root constants).
             TreeWater twG;
             double la0 = 0.0, lo0 = 0.0;
             twG.PlaceOf(120.0, -10.0, la0, lo0);
-            g.True(la0 == BathyModel::kOrgLat + (-10.0) / BathyModel::kMPerLat &&
-                       lo0 == BathyModel::kOrgLon + 120.0 / BathyModel::kMPerLon,
-                   "[gate] a TreeWater with no chart places a point by the root's constants, bitwise");
+            g.True(la0 == 0.0 && lo0 == 0.0, "[gate] a TreeWater with no chart has no place");
             twG.SetChart(&ch);
             twG.PlaceOf(0.0, 0.0, la0, lo0);
             // M13 step 2: the chart's own origin IS the destination -- but the answer now comes
@@ -2154,13 +2160,13 @@ bool RunSceneSelfTest() {
             // to a nanodegree (a tenth of a millimetre of ground) and not bitwise.
             g.Near(la0, 25.8997, 1e-9, "[gate] ...and through a gate's chart, at the destination's place");
             g.Near(lo0, -80.1239, 1e-9, "[gate] ...in longitude too");
-            // And away from the anchor the exact map is what it is FOR: the linear chart drifts
-            // 5.6 m per km north of the sphere, which is what the water used to read.
+            // PHASE C5: the chart IS the exact map now (the linear one, 28 m off at 5 km north, is
+            // deleted), so the chart and the water read one place.
             double laE = 0.0, loE = 0.0, laL = 0.0, loL = 0.0;
             twG.PlaceOf(0.0, 5000.0, laE, loE);
             ch.LatLonOf(0.0, 5000.0, laL, loL);
             const double driftM = (laL - laE) * 111195.0;
-            g.Near(driftM, 28.1, 1.5, "[gate] ...and stands 28 m off the linear chart at 5 km north");
+            g.Near(driftM, 0.0, 1e-6, "[gate] ...and the chart and the water read one place at 5 km north");
             // THE WINDOW'S TEST (Gateway::SeenThrough, the shader's GateThrough line for line). The
             // box at (600, 0, -10) heading east: 8 m deep along x, 60 m across along z, 30 m tall.
             const double eyeW[3] = {500.0, 2.0, -10.0};
@@ -2262,9 +2268,7 @@ bool RunSceneSelfTest() {
                 std::string pwhy;
                 g.True(hv.Build(planetG, R, 25.8997, -80.1239, "place.haulover", &pwhy),
                        "[gate] Haulover is a place: a tangent frame and its chart");
-                Space::Anchor rootChartG;
-                rootChartG.latDeg = BathyModel::kOrgLat;
-                rootChartG.lonDeg = BathyModel::kOrgLon;
+                const Space::Anchor rootChartG = Space::Anchor::About(kTestLat, kTestLon, R);
                 Gateway gA, gB;
                 gA.Declared().name = "there";
                 gB.Declared().name = "back";

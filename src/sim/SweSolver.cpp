@@ -15,6 +15,142 @@
 
 namespace ga {
 
+// ---- PHASE C1: THE SOLVER'S CHART (SweSolver.h) ------------------------------------------------
+
+namespace {
+constexpr double kSweD2R = 3.14159265358979323846 / 180.0;
+double Dot3(const double a[3], const double b[3]) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+void DirOf(double latDeg, double lonDeg, double d[3]) {   // GlobeModel::LatLonDir's convention
+    const double la = latDeg * kSweD2R, lo = lonDeg * kSweD2R;
+    d[0] = std::cos(la) * std::cos(lo);
+    d[1] = std::sin(la);
+    d[2] = std::cos(la) * std::sin(lo);
+}
+}  // namespace
+
+void SweDomain::Place(double boxLat0, double boxLon0, double boxLat1, double boxLon1,
+                      uint32_t cellsX, uint32_t cellsY, double planetR) {
+    lat0 = boxLat0;
+    lon0 = boxLon0;
+    lat1 = boxLat1;
+    lon1 = boxLon1;
+    nx = cellsX;
+    ny = cellsY;
+    R = planetR;
+    latC = 0.5 * (lat0 + lat1);
+    lonC = 0.5 * (lon0 + lon1);
+    DirOf(latC, lonC, A);
+    const double lo = lonC * kSweD2R;
+    E[0] = -std::sin(lo);
+    E[1] = 0.0;
+    E[2] = std::cos(lo);
+    // north = east x up in this planet frame (FrameLoop's M6i note: an odd permutation of ECEF)
+    N[0] = E[1] * A[2] - E[2] * A[1];
+    N[1] = E[2] * A[0] - E[0] * A[2];
+    N[2] = E[0] * A[1] - E[1] * A[0];
+    dx = R * std::cos(latC * kSweD2R) * (lon1 - lon0) * kSweD2R / double(nx);
+    dy = R * (lat1 - lat0) * kSweD2R / double(ny);
+    // tx = (R (P.E) / (P.A) + nx dx / 2) / dx,  ty = (ny dy / 2 - R (P.N) / (P.A)) / dy
+    for (int i = 0; i < 3; ++i) {
+        U[i] = R / dx * E[i] + 0.5 * double(nx) * A[i];
+        V[i] = 0.5 * double(ny) * A[i] - R / dy * N[i];
+    }
+    elev.clear();
+    sponge.clear();
+    openSides = 0;
+}
+
+bool SweDomain::CellOfDir(const double P[3], double& tx, double& ty) const {
+    const double pa = Dot3(P, A);
+    if (!Ready() || !(pa > 0.0)) return false;
+    tx = Dot3(P, U) / pa;
+    ty = Dot3(P, V) / pa;
+    return true;
+}
+
+bool SweDomain::CellOf(double latDeg, double lonDeg, double& tx, double& ty) const {
+    double d[3];
+    DirOf(latDeg, lonDeg, d);
+    return CellOfDir(d, tx, ty);
+}
+
+void SweDomain::LatLonOf(double tx, double ty, double& latDeg, double& lonDeg) const {
+    const double s = (tx - 0.5 * double(nx)) * dx / R, t = (0.5 * double(ny) - ty) * dy / R;
+    double p[3];
+    for (int i = 0; i < 3; ++i) p[i] = A[i] + s * E[i] + t * N[i];
+    const double l = std::sqrt(Dot3(p, p));
+    latDeg = std::asin(p[1] / l) / kSweD2R;
+    lonDeg = std::atan2(p[2], p[0]) / kSweD2R;
+}
+
+bool SweDomain::Holds(double latDeg, double lonDeg) const {
+    double tx = 0.0, ty = 0.0;
+    return CellOf(latDeg, lonDeg, tx, ty) && tx >= 0.0 && ty >= 0.0 && tx < double(nx) &&
+           ty < double(ny);
+}
+
+void SweDomain::FillBed(const std::function<float(double, double, double)>& bedAt) {
+    elev.assign(size_t(nx) * ny, -9999.0f);
+    const double grain = (std::max)(dx, dy);   // RealizeFromChannel's: the cell's larger side
+    for (uint32_t j = 0; j < ny; ++j) {
+        for (uint32_t i = 0; i < nx; ++i) {
+            double la = 0.0, lo = 0.0;
+            LatLonOf(i + 0.5, j + 0.5, la, lo);
+            elev[size_t(j) * nx + i] = bedAt(la, lo, grain);
+        }
+    }
+}
+
+double SweDomain::SpongeAt(int i, int j, double spongeM) const {
+    double d = 1.0e300;
+    if (openSides & 1u) d = (std::min)(d, (j + 0.5) * dy);
+    if (openSides & 2u) d = (std::min)(d, (double(ny) - j - 0.5) * dy);
+    if (openSides & 4u) d = (std::min)(d, (i + 0.5) * dx);
+    if (openSides & 8u) d = (std::min)(d, (double(nx) - i - 0.5) * dx);
+    const double t = std::clamp((d - (spongeM - 700.0)) / 700.0, 0.0, 1.0);
+    return 1.0 - t * t * (3.0 - 2.0 * t);   // the kernel's 1 - smoothstep(d0 - 700, d0, d)
+}
+
+void SweDomain::Bound(const SweConfig& cfg) {
+    openSides = 0;
+    if (!Ready() || elev.size() != size_t(nx) * ny) return;
+    const auto wet = [&](size_t i) { return elev[i] > -9000.0f && elev[i] < 1.2f; };
+    for (int side = 0; side < 4; ++side) {
+        if (side == 2 && cfg.westBoundary) continue;   // the river's side is the Flather face
+        const int len = side < 2 ? int(nx) : int(ny);
+        bool open = true;
+        for (int k = 0; k < len && open; ++k) {
+            const size_t i = side == 0   ? size_t(k)
+                             : side == 1 ? size_t(ny - 1) * nx + k
+                             : side == 2 ? size_t(k) * nx
+                                         : size_t(k) * nx + (nx - 1);
+            open = wet(i);
+        }
+        if (open) openSides |= 1u << side;
+    }
+    sponge.assign(size_t(nx) * ny, 0);
+    for (uint32_t j = 0; j < ny; ++j) {
+        for (uint32_t i = 0; i < nx; ++i) {
+            sponge[size_t(j) * nx + i] = SpongeAt(int(i), int(j), cfg.spongeM) > 0.0 ? 1 : 0;
+        }
+    }
+}
+
+void SweDomain::KernelRows(const double east[3], const double up[3], const double north[3],
+                           const double origin[3], float out[16]) const {
+    for (int k = 0; k < 16; ++k) out[k] = 0.0f;
+    if (!Ready()) return;
+    const double* ax[3] = {east, up, north};
+    const double* pl[3] = {U, V, A};
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) out[4 * r + c] = static_cast<float>(Dot3(pl[r], ax[c]) / R);
+        out[4 * r + 3] = static_cast<float>(Dot3(pl[r], origin) / R);
+    }
+    out[12] = static_cast<float>(nx);
+    out[13] = static_cast<float>(ny);
+    out[14] = 1.0f;
+}
+
 void SweSolver::LogCbFingerprint() {
     // M12 step 4b instrument: the solver's constant buffer, fingerprinted at every upload --
     // the gate for the lattice-row moves (winA from the surface's lattice) and for the fills
@@ -34,19 +170,17 @@ void SweSolver::SetBed(Gpu& gpu, hal::Resource heightArr, hal::Resource resMapAr
     (void)gpu;
     m_table.SrvArray(0, heightArr, DXGI_FORMAT_R16_FLOAT, 0, UINT32_MAX, mips);
     m_table.SrvArray(1, resMapArr, DXGI_FORMAT_R8_UNORM, 0, UINT32_MAX, 1);
-    m_cb.geoLL[0] = static_cast<float>(m_bathy->Lon0());
-    m_cb.geoLL[1] = static_cast<float>(m_bathy->Lat1());
-    m_cb.geoLL[2] = static_cast<float>(m_bathy->Dlon());
-    m_cb.geoLL[3] = static_cast<float>(-m_bathy->Dlat());
-    constexpr double kD2R = 3.14159265358979323846 / 180.0;
-    m_cb.standA[0] = static_cast<float>((m_bathy->Lat1() - w.latC) * kD2R);
-    m_cb.standA[1] = static_cast<float>((m_bathy->Lon0() - w.lonC) * kD2R);
-    m_cb.standA[2] = static_cast<float>(-m_bathy->Dlat() * kD2R);
-    m_cb.standA[3] = static_cast<float>(m_bathy->Dlon() * kD2R);
-    m_cb.standB[0] = static_cast<float>(std::sin(w.latC * kD2R));
-    m_cb.standB[1] = static_cast<float>(std::cos(w.latC * kD2R));
-    m_cb.standB[2] = static_cast<float>(w.R);
-    m_cb.standB[3] = m_cb.dx;   // the cell's grain: its east-west side
+    const SweDomain& d = m_dom;
+    m_cb.cellX[0] = static_cast<float>((0.5 - 0.5 * double(d.nx)) * d.dx / d.R);
+    m_cb.cellX[1] = static_cast<float>(d.dx / d.R);
+    m_cb.cellX[2] = static_cast<float>((0.5 * double(d.ny) - 0.5) * d.dy / d.R);
+    m_cb.cellX[3] = static_cast<float>(-d.dy / d.R);
+    for (int i = 0; i < 3; ++i) {
+        m_cb.anc[i] = static_cast<float>(d.A[i]);
+        m_cb.east[i] = static_cast<float>(d.E[i]);
+    }
+    m_cb.anc[3] = static_cast<float>(d.R);
+    m_cb.east[3] = m_cb.dx;   // the cell's grain: its east-west side
     static_assert(sizeof(w.rows) == sizeof(float) * 80, "the kernels' rows");
     memcpy(m_cb.hwU, w.rows, sizeof(w.rows));
     m_bedSlice = w.slice;   // the standing window's slice (PageSlice)
@@ -56,7 +190,7 @@ void SweSolver::SetBed(Gpu& gpu, hal::Resource heightArr, hal::Resource resMapAr
     m_bedBound = true;
     Log("[swe] bed bound to the standing window: slice %u, about %.5f N %.5f E, %u mips, the "
         "cell's grain %.2f m -- the solver reads the pyramid through its own window",
-        w.slice, w.latC, w.lonC, mips, double(m_cb.dx));
+        w.slice, m_dom.latC, m_dom.lonC, mips, double(m_cb.dx));
 }
 
 bool SweSolver::TraceBed(Gpu& gpu, BedTrace& out, float floorMip) {
@@ -122,13 +256,20 @@ bool SweSolver::TraceBed(Gpu& gpu, BedTrace& out, float floorMip) {
 }
 
 void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
-                     const BathyModel& bathy,
-                     const SweConfig& cfg) {
-    m_bathy = &bathy;
+                     const SweDomain& dom, const SweConfig& cfg) {
+    m_dom = dom;
+    m_dom.Bound(cfg);
     m_sc = &sc;
     m_shaderDir = shaderDir;
-    const uint32_t nx = bathy.Nx(), ny = bathy.Ny();
-    const float dx = bathy.WorldSizeX() / nx;
+    const uint32_t nx = m_dom.nx, ny = m_dom.ny;
+    const float dx = static_cast<float>(m_dom.dx);
+    Log("[swe] %s domain: box %.5f..%.5f N x %.5f..%.5f E about its anchor %.6f N %.6f E, %ux%u "
+        "cells of %.3f x %.3f m (true, at the anchor) -- open sides%s%s%s%s%s, the sponge %.0f m in "
+        "from them; river face: %s",
+        cfg.name, m_dom.lat0, m_dom.lat1, m_dom.lon0, m_dom.lon1, m_dom.latC, m_dom.lonC, nx, ny,
+        m_dom.dx, m_dom.dy, m_dom.openSides ? "" : " none", (m_dom.openSides & 1u) ? " N" : "",
+        (m_dom.openSides & 2u) ? " S" : "", (m_dom.openSides & 4u) ? " W" : "",
+        (m_dom.openSides & 8u) ? " E" : "", double(cfg.spongeM), cfg.westBoundary ? "west" : "none");
 
     // Two grade banks over the bathy grid, padded up to tile multiples internally by the atlas.
     m_eta.Init(gpu, nx, ny, DXGI_FORMAT_R32_FLOAT, L"swe.eta (dEta from the tide plane)");
@@ -174,7 +315,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
 
     // Static residency: everything that can ever be wet -- bed below max tide + surge + wave
     // margin. Land and dune tiles stay NULL forever; their reads are the hardware zero.
-    const auto& elev = bathy.Elev();
+    const auto& elev = m_dom.elev;
     auto mapWet = [&](auto& bank) {
         for (uint32_t ty = 0; ty < bank.TilesY(); ++ty) {
             for (uint32_t tx = 0; tx < bank.TilesX(); ++tx) {
@@ -259,7 +400,7 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     // Timestep from the deepest resident water (pipe scheme + damping tolerate ~0.6 dx / c).
     // M6r: the CUDEM grid is equiangular, so texels are ANISOTROPIC in metres (dlon*mPerLon =
     // 10.08 east vs dlat*mPerLat = 13.65 north); the CFL rides the smaller axis.
-    const float dyM = bathy.WorldSizeZ() / ny;
+    const float dyM = static_cast<float>(m_dom.dy);
     float deepest = 0.0f;
     for (float e : elev) {
         if (e > -9000.0f) deepest = (std::min)(deepest, e);
@@ -275,12 +416,12 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
     m_cb.etaTileH = m_eta.TileH();
     m_cb.fluxTileW = m_flux.TileW();
     m_cb.fluxTileH = m_flux.TileH();
-    m_cb.worldX0 = bathy.WorldX0();
+    m_cb.spongeSides = static_cast<float>(m_dom.openSides);
     m_cb.dx = dx;
     m_cb.dy = dyM;
     m_cb.dt = m_dt;
     m_cb.damp = 0.99995f;   // background linear part only; the real friction is quadratic drag
-    m_cb.spongeX0 = cfg.spongeX0;         // ramp start: past the bar, before the open sea
+    m_cb.spongeD0 = cfg.spongeM;          // ramp start from an open side: past the bar, before the open sea
     m_cb.spongeRate = m_dt / 10.0f;       // full-strength deviations die in ~10 s
     m_cb.gravity = 9.81f;
     // M6r: the west boundary is FLATHER now -- one exterior column pinned to the river-tide
@@ -388,28 +529,23 @@ void SweSolver::Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir
 
 // ---- THE REGION READBACK (the water match, step 1: the solver is truth) ---------------------------
 
-bool SweSolver::TexelOf(double worldX, double worldZ, double& tx, double& ty) const {
-    if (!m_ready || !m_bathy) return false;
-    // The kernel's own map (WaterBank.hlsl): uv over the bathy's world box, row 0 the NORTH edge.
-    const double u = (worldX - double(m_bathy->WorldX0())) / double(m_bathy->WorldSizeX());
-    const double v = (worldZ - double(m_bathy->WorldZ0())) / double(m_bathy->WorldSizeZ());
-    tx = u * double(m_cb.nx);
-    ty = (1.0 - v) * double(m_cb.ny);
-    return true;
+bool SweSolver::TexelOf(double latDeg, double lonDeg, double& tx, double& ty) const {
+    // The readers' own map (WaterBank.hlsl's solver rows): the domain's planes, in doubles.
+    return m_ready && m_dom.CellOf(latDeg, lonDeg, tx, ty);
 }
 
-double SweSolver::DomainWeight(double worldX, double worldZ) const {
+double SweSolver::DomainWeight(double latDeg, double lonDeg) const {
     double tx = 0.0, ty = 0.0;
-    if (!TexelOf(worldX, worldZ, tx, ty)) return 0.0;
+    if (!TexelOf(latDeg, lonDeg, tx, ty)) return 0.0;
     const double e = (std::min)((std::min)(tx, double(m_cb.nx) - tx),
                                 (std::min)(ty, double(m_cb.ny) - ty));
     const double t = std::clamp(e, 0.0, 1.0);
     return t * t * (3.0 - 2.0 * t);   // HLSL smoothstep(0, 1, e)
 }
 
-void SweSolver::RequestRegion(double worldX, double worldZ, double radiusM) {
+void SweSolver::RequestRegion(double latDeg, double lonDeg, double radiusM) {
     double tx = 0.0, ty = 0.0;
-    if (!TexelOf(worldX, worldZ, tx, ty) || !(radiusM >= 0.0)) return;
+    if (!TexelOf(latDeg, lonDeg, tx, ty) || !(radiusM >= 0.0)) return;
     // The texels a bilinear read of any point within the radius touches: floor(t - 0.5) and the
     // one past it, at both ends.
     const double rx = radiusM / double(m_cb.dx), ry = radiusM / double(m_cb.dy);
@@ -478,9 +614,9 @@ bool Reconstruct(double tx, double ty, uint32_t nx, uint32_t ny, At at, SweSolve
 
 }  // namespace
 
-bool SweSolver::DeviationAt(double worldX, double worldZ, Deviation& out) const {
+bool SweSolver::DeviationAt(double latDeg, double lonDeg, Deviation& out) const {
     double tx = 0.0, ty = 0.0;
-    if (m_regions.empty() || !TexelOf(worldX, worldZ, tx, ty)) return false;
+    if (m_regions.empty() || !TexelOf(latDeg, lonDeg, tx, ty)) return false;
     for (const DeliveredRegion& r : m_regions) {
         const auto at = [&r](int ix, int iy, float& e, float c[4]) {
             if (ix < int(r.rect.x0) || iy < int(r.rect.y0) || ix >= int(r.rect.x0 + r.rect.w) ||
@@ -500,11 +636,11 @@ bool SweSolver::DeviationAt(double worldX, double worldZ, Deviation& out) const 
     return false;
 }
 
-bool SweSolver::DeviationFromFields(double worldX, double worldZ, const std::vector<float>& eta,
+bool SweSolver::DeviationFromFields(double latDeg, double lonDeg, const std::vector<float>& eta,
                                     uint32_t etaRowW, const std::vector<float>& uv4,
                                     uint32_t uvRowW, double asOf, Deviation& out) const {
     double tx = 0.0, ty = 0.0;
-    if (eta.empty() || uv4.empty() || !TexelOf(worldX, worldZ, tx, ty)) return false;
+    if (eta.empty() || uv4.empty() || !TexelOf(latDeg, lonDeg, tx, ty)) return false;
     const auto at = [&](int ix, int iy, float& e, float c[4]) {
         const size_t ie = size_t(iy) * etaRowW + size_t(ix);
         const size_t iu = (size_t(iy) * uvRowW + size_t(ix)) * 4;
@@ -876,9 +1012,9 @@ void SweSolver::ReadFields(Gpu& gpu, std::vector<float>& etaOut, uint32_t& etaW,
     }
 }
 
-void SweSolver::ReadProbes(Gpu& gpu, const float* xzPairs, int count, Probe* out) {
+void SweSolver::ReadProbes(Gpu& gpu, const float* cellPairs, int count, Probe* out) {
     for (int i = 0; i < count; ++i) out[i] = Probe{0, 0, 0, false};
-    if (!m_ready || !m_bathy || count <= 0) return;
+    if (!m_ready || count <= 0) return;
 
     uint32_t etaPitch = 0, uvPitch = 0;
     GpuTexture wrap;
@@ -899,12 +1035,9 @@ void SweSolver::ReadProbes(Gpu& gpu, const float* xzPairs, int count, Probe* out
     m_uvState = uvWrap.state;
 
     for (int i = 0; i < count; ++i) {
-        const float wx = xzPairs[i * 2], wz = xzPairs[i * 2 + 1];
-        const int tx =
-            static_cast<int>((wx - m_bathy->WorldX0()) / m_bathy->WorldSizeX() * m_cb.nx);
-        // Bathy row 0 is the NORTHERN edge; world z grows north.
-        const int ty = static_cast<int>((m_bathy->WorldZ0() + m_bathy->WorldSizeZ() - wz) /
-                                        m_bathy->WorldSizeZ() * m_cb.ny);
+        // Row 0 is the NORTHERN edge; cell i spans [i, i + 1).
+        const int tx = static_cast<int>(std::floor(cellPairs[i * 2]));
+        const int ty = static_cast<int>(std::floor(cellPairs[i * 2 + 1]));
         if (tx < 0 || ty < 0 || tx >= static_cast<int>(m_cb.nx) ||
             ty >= static_cast<int>(m_cb.ny)) {
             continue;
@@ -917,7 +1050,7 @@ void SweSolver::ReadProbes(Gpu& gpu, const float* xzPairs, int count, Probe* out
     }
 }
 
-WaterHold FloodWindow(const float* bed, int nx, int ny, float level, int spongeCol0, bool westFace,
+WaterHold FloodWindow(const float* bed, int nx, int ny, float level, const uint8_t* sponge, bool westFace,
                       bool plantCrossEdge, std::vector<int>* labels) {
     WaterHold h;
     const size_t n = size_t(nx) * size_t(ny);
@@ -953,7 +1086,7 @@ WaterHold FloodWindow(const float* bed, int nx, int ny, float level, int spongeC
             p.c1 = (std::max)(p.c1, c);
             p.r0 = (std::min)(p.r0, r);
             p.r1 = (std::max)(p.r1, r);
-            sea = sea || c >= spongeCol0;
+            sea = sea || sponge[i] != 0;
             p.face = p.face || face(i);
             const auto visit = [&](size_t j) {
                 if (label[j] < 0 && wet(j)) {
@@ -980,7 +1113,7 @@ WaterHold FloodWindow(const float* bed, int nx, int ny, float level, int spongeC
             WaterPiece::EdgeRun run{"NSWE"[e], -1, -1, 1.0e9f};
             for (int t = 0; t <= len; ++t) {
                 const size_t j = (t < len) ? edgeCell(e, t) : 0;
-                const bool open = sea && (int(j % size_t(nx)) >= spongeCol0 || face(j));
+                const bool open = sea && (sponge[j] != 0 || face(j));
                 if (t < len && label[j] == id && !open) {
                     if (run.from < 0) run.from = t;
                     run.to = t;
@@ -1006,11 +1139,11 @@ WaterHold FloodWindow(const float* bed, int nx, int ny, float level, int spongeC
 }
 
 FloodParting CompareFloods(const float* grid, const float* kernel, int nx, int ny, float level,
-                           int spongeCol0, bool westFace) {
+                           const uint8_t* sponge, bool westFace) {
     FloodParting f;
     std::vector<int> gl, kl;
-    const WaterHold g = FloodWindow(grid, nx, ny, level, spongeCol0, westFace, false, &gl);
-    const WaterHold k = FloodWindow(kernel, nx, ny, level, spongeCol0, westFace, false, &kl);
+    const WaterHold g = FloodWindow(grid, nx, ny, level, sponge, westFace, false, &gl);
+    const WaterHold k = FloodWindow(kernel, nx, ny, level, sponge, westFace, false, &kl);
     f.gridJoined = g.joined;
     f.kernelJoined = k.joined;
     const size_t n = size_t(nx) * size_t(ny);
@@ -1081,38 +1214,33 @@ FloodParting CompareFloods(const float* grid, const float* kernel, int nx, int n
 }
 
 void SweSolver::LogHoldsWater(Gpu& gpu, bool traced) {
-    if (!m_ready || !m_bathy) return;
+    if (!m_ready) return;
     BedTrace bt;
     if (traced && TraceBed(gpu, bt) && bt.bed.size() == size_t(m_cb.nx) * m_cb.ny) {
-        LogWindowHoldsWater(*m_bathy, m_cfg, "on the kernel's bed, traced after the whole-bed wait",
+        LogWindowHoldsWater(m_dom, m_cfg, "on the kernel's bed, traced after the whole-bed wait",
                             &bt.bed);
     } else {
-        LogWindowHoldsWater(*m_bathy, m_cfg,
-                            "on the CPU bed, the survey's grid: the whole-bed wait did not run or "
+        LogWindowHoldsWater(m_dom, m_cfg,
+                            "on the CPU bed, the stack at the cells: the whole-bed wait did not run or "
                             "finish, and the kernel's bed may differ");
     }
 }
 
-void LogWindowHoldsWater(const BathyModel& bathy, const SweConfig& cfg, const char* when,
+void LogWindowHoldsWater(const SweDomain& dom, const SweConfig& cfg, const char* when,
                          const std::vector<float>* kernelBed) {
     constexpr float kLevel = 1.0f;   // m NAVD88: the level the flood stands at
-    const int nx = bathy.Nx(), ny = bathy.Ny();
-    if (nx < 2 || ny < 2) return;
-    const float dx = bathy.WorldSizeX() / nx, dz = bathy.WorldSizeZ() / ny;
+    const int nx = int(dom.nx), ny = int(dom.ny);
+    if (nx < 2 || ny < 2 || dom.elev.size() != size_t(nx) * ny || dom.sponge.size() != dom.elev.size()) return;
+    const float dx = float(dom.dx), dz = float(dom.dy);
     const double km2 = double(dx) * dz / 1.0e6;
-    int spongeCol0 = nx;
-    for (int c = 0; c < nx; ++c) {
-        if (bathy.WorldX0() + (c + 0.5f) * dx > cfg.spongeX0) {
-            spongeCol0 = c;
-            break;
-        }
-    }
-    const float* grid = &bathy.Elev()[0];
+    const uint8_t* spongeCells = dom.sponge.data();
+    const float* grid = dom.elev.data();
     const bool kernel = kernelBed && kernelBed->size() == size_t(nx) * size_t(ny);
     const float* bed = kernel ? kernelBed->data() : grid;
-    const WaterHold h = FloodWindow(bed, nx, ny, kLevel, spongeCol0, cfg.westBoundary);
-    const auto X = [&](int c) { return bathy.WorldX0() + (c + 0.5f) * dx; };
-    const auto Z = [&](int r) { return bathy.WorldZ0() + bathy.WorldSizeZ() - (r + 0.5f) * dz; };
+    const WaterHold h = FloodWindow(bed, nx, ny, kLevel, spongeCells, cfg.westBoundary);
+    // Places in the domain's chart: metres east of its west side, north of its south side.
+    const auto X = [&](int c) { return (c + 0.5f) * dx; };
+    const auto Z = [&](int r) { return (ny - r - 0.5f) * dz; };
     int all = 0, atEdge = 0, edgeCells = 0;
     for (const WaterPiece& p : h.pieces) {
         all += p.cells;
@@ -1131,10 +1259,10 @@ void LogWindowHoldsWater(const BathyModel& bathy, const SweConfig& cfg, const ch
     };
     snprintf(b, sizeof(b),
              "[swe] %s window (%s): does it hold its water? flooded at %+.2f m NAVD, 4-connected, "
-             "from the sponge (x > %.0f m) and the west face (%d wet-capable cells): %.2f km^2 "
+             "from the sponge (%.0f m in from an open side) and the west face (%d wet-capable cells): %.2f km^2 "
              "joined to the sponge; not joined to it: %zu pieces, %.2f km^2, %d at the window's "
              "edge (%.2f km^2)",
-             cfg.name ? cfg.name : "?", when, kLevel, cfg.spongeX0, h.faceCells, h.joined * km2,
+             cfg.name ? cfg.name : "?", when, kLevel, double(cfg.spongeM), h.faceCells, h.joined * km2,
              h.pieces.size(), all * km2, atEdge, edgeCells * km2);
     std::string s = b;
     int shown = 0;
@@ -1170,7 +1298,7 @@ void LogWindowHoldsWater(const BathyModel& bathy, const SweConfig& cfg, const ch
     Log("%s", s.c_str());
     if (!kernel) return;
     // Beside it, the survey's grid flooded by the same law: where the two beds' water parts.
-    const FloodParting f = CompareFloods(grid, bed, nx, ny, kLevel, spongeCol0, cfg.westBoundary);
+    const FloodParting f = CompareFloods(grid, bed, nx, ny, kLevel, spongeCells, cfg.westBoundary);
     const char* name = cfg.name ? cfg.name : "?";
     if (f.gridOnly == 0 && f.kernelOnly == 0) {
         Log("[swe] %s window: the survey's grid, flooded by the same law, joins the same water to "
@@ -1223,6 +1351,11 @@ bool RunWaterHoldSelfTest() {
         for (int c = 20; whole && c <= 30; ++c) b[size_t(2) * nx + c] = -3.0f;
         return b;
     };
+    std::vector<uint8_t> spongeMask(size_t(nx) * ny, 0);   // the sponge's columns
+    for (int r = 0; r < ny; ++r) {
+        for (int c = kSponge; c < nx; ++c) spongeMask[size_t(r) * nx + c] = 1;
+    }
+    const uint8_t* sp = spongeMask.data();
     int checks = 0;
     bool ok = true;
     const auto expect = [&](bool cond, const char* what) {
@@ -1233,7 +1366,7 @@ bool RunWaterHoldSelfTest() {
         }
     };
     const std::vector<float> cut = make(false), whole = make(true);
-    const WaterHold a = FloodWindow(cut.data(), nx, ny, 1.0f, kSponge, false);
+    const WaterHold a = FloodWindow(cut.data(), nx, ny, 1.0f, sp, false);
     expect(a.pieces.size() == 1 && a.pieces[0].cells == 41 && !a.pieces[0].face,
            "a channel cut by the north edge is reported: one piece of 41 cells, joined to none");
     bool north = false, west = false;
@@ -1246,12 +1379,12 @@ bool RunWaterHoldSelfTest() {
     expect(a.crossings.size() == 1 && a.crossings[0].edge == 'N' && a.crossings[0].from == 30 &&
                a.crossings[0].to == 30,
            "the sea's water meets the edge where it is no boundary once: the north edge at column 30");
-    const WaterHold f = FloodWindow(cut.data(), nx, ny, 1.0f, kSponge, true);
+    const WaterHold f = FloodWindow(cut.data(), nx, ny, 1.0f, sp, true);
     expect(f.faceCells == 1 && f.pieces.size() == 1 && f.pieces[0].face,
            "with a west face, the cut channel is held by the face alone");
-    const WaterHold w = FloodWindow(whole.data(), nx, ny, 1.0f, kSponge, false);
+    const WaterHold w = FloodWindow(whole.data(), nx, ny, 1.0f, sp, false);
     expect(w.pieces.empty() && w.joined > 0, "a whole channel is not reported");
-    const WaterHold p = FloodWindow(cut.data(), nx, ny, 1.0f, kSponge, false, true);
+    const WaterHold p = FloodWindow(cut.data(), nx, ny, 1.0f, sp, false, true);
     expect(p.pieces.empty(),
            "PLANT (the flood crosses the edge): the cut channel joins the sea, so the first check "
            "would fail on it -- caught");
@@ -1263,10 +1396,10 @@ bool RunWaterHoldSelfTest() {
             raised[size_t(r) * nx + c] = (std::max)(raised[size_t(r) * nx + c], 2.0f);
         }
     }
-    const WaterHold rk = FloodWindow(raised.data(), nx, ny, 1.0f, kSponge, false);
+    const WaterHold rk = FloodWindow(raised.data(), nx, ny, 1.0f, sp, false);
     expect(w.pieces.empty() && rk.pieces.size() == 1 && rk.pieces[0].cells == 37,
            "two beds: the reach is joined on the grid and cut on the raised bed (one piece, 37 cells)");
-    const FloodParting fp = CompareFloods(whole.data(), raised.data(), nx, ny, 1.0f, kSponge, false);
+    const FloodParting fp = CompareFloods(whole.data(), raised.data(), nx, ny, 1.0f, sp, false);
     expect(fp.gridOnly == 54 && fp.kernelOnly == 0 && fp.piece.cells == 37 && fp.crestCell >= 0 &&
                fp.crestCell / nx < 4 && fp.crestKernel == 2.0f && fp.crestGrid == -3.0f,
            "the grid joins 54 cells the raised bed does not, and the reach parts from the sea at a "

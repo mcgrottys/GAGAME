@@ -52,7 +52,10 @@ public:
     size_t Count() const { return m_stations.size(); }
     const TideStation& S(size_t i) const { return m_stations[i]; }
     double EpochUnix() const { return m_epochUnix; }
-    int Focus() const { return m_focus; }            // Newburyport when present, else 0
+    // PHASE C3: the station the water's point asks for (Assembly: data.tideFocus, else the one
+    // nearest the solver's anchor among those its domain holds -- sim/Stations.h).
+    int Focus() const { return m_focus; }
+    void SetFocus(int i) { m_focus = i; }
     double TotalRiverKm() const { return m_totalKm; }
 
     // Metres above MLLW, analytic, valid for any t (accuracy degrades slowly outside fit year).

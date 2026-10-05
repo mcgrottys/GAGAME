@@ -15,13 +15,6 @@ namespace ga {
 
 namespace {
 constexpr double kD2R = 3.14159265358979 / 180.0;
-
-// lon/lat (deg) -> the flat world frame (the ACT0816 tangent). The same linear constants
-// every window's georef was built with, so the round trip is exact by construction.
-void WorldOf(double latDeg, double lonDeg, double& x, double& z) {
-    x = (lonDeg - BathyModel::kOrgLon) * BathyModel::kMPerLon;
-    z = (latDeg - BathyModel::kOrgLat) * BathyModel::kMPerLat;
-}
 }  // namespace
 
 void WeatherManager::Init(Compositor* comp, int heightChannel, const WaterAtlas* atlas,
@@ -37,12 +30,17 @@ void WeatherManager::Init(Compositor* comp, int heightChannel, const WaterAtlas*
 }
 
 void WeatherManager::AddExternalWindow(const char* name, SweSolver* solver,
-                                       const BathyModel* bathy,
                                        std::function<double(double)> oceanAt) {
     Window w;
     w.name = name;
     w.solver = solver;
-    w.bathy = bathy;
+    if (solver && solver->Ready()) {
+        const SweDomain& d = solver->Domain();
+        w.box[0] = d.lat0;
+        w.box[1] = d.lon0;
+        w.box[2] = d.lat1;
+        w.box[3] = d.lon1;
+    }
     w.oceanAt = std::move(oceanAt);
     w.active = solver && solver->Ready();
     snprintf(w.levelTag, sizeof(w.levelTag), "swe.%s + stations", name);
@@ -54,18 +52,17 @@ void WeatherManager::AddDormantWindow(const char* name, BathyModel* bathy,
                                       const SweConfig& cfg,
                                       std::function<double(double)> oceanAt,
                                       double spinupHours) {
-    // Said once here too: a dormant window's solver only Inits on activation.
-    if (bathy && bathy->Ready()) {
-        SweConfig named = cfg;
-        named.name = name;
-        LogWindowHoldsWater(*bathy, named,
-                            "dormant: on the CPU bed, its survey before an activation realizes the "
-                            "bed, and the kernel's bed may differ");
-    }
+    // PHASE C1: a dormant window's domain (and its holds-water line) is made on activation, from the
+    // survey's box and cells and the stack's bed.
     Window w;
     w.name = name;
     w.bathy = bathy;
-    w.bathyMut = bathy;
+    if (bathy && bathy->Ready()) {
+        w.box[0] = bathy->Lat1() - bathy->Ny() * bathy->Dlat();
+        w.box[1] = bathy->Lon0();
+        w.box[2] = bathy->Lat1();
+        w.box[3] = bathy->Lon0() + bathy->Nx() * bathy->Dlon();
+    }
     w.cfg = cfg;
     w.cfg.name = nullptr;   // points at the caller's literal; rebound on activation
     w.oceanAt = std::move(oceanAt);
@@ -84,11 +81,15 @@ bool WeatherManager::Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& 
         Log("[weather] spinning up the %s window (%dx%d cells, %.1f h of history -- a "
             "one-time cost as the region becomes RESIDENT)",
             w.name.c_str(), w.bathy->Nx(), w.bathy->Ny(), w.spinupHours);
-        // The window's bed realizes from the ONE height channel first (M6w): CUDEM inset,
-        // shelf beyond, hand edits on top -- lazily, as part of the activation cost.
-        if (w.bathyMut && m_comp && m_hgtCh >= 0) {
-            w.bathyMut->RealizeFromChannel(*m_comp, m_hgtCh);
-        }
+        // The window's bed is the ONE height channel at its cells (M6w): CUDEM inset, shelf
+        // beyond, hand edits on top -- lazily, as part of the activation cost.
+        if (!m_comp || m_hgtCh < 0 || !(m_planetR > 0.0)) return false;
+        SweDomain dom;
+        dom.Place(w.box[0], w.box[1], w.box[2], w.box[3], uint32_t(w.bathy->Nx()),
+                  uint32_t(w.bathy->Ny()), m_planetR);
+        dom.FillBed([&](double la, double lo, double resM) {
+            return m_comp->SampleHeightStack(m_hgtCh, la * kD2R, lo * kD2R, resM);
+        });
         // M9ar: NO per-window bed texture. The owned solver reads the height megatexture --
         // the same page slice the Merrimack solver, the sea shader and the water bank read.
         if (!m_hgtArr || !m_hgtRes) {
@@ -100,7 +101,8 @@ bool WeatherManager::Activate(Gpu& gpu, ShaderCompiler& sc, const std::wstring& 
         w.owned = std::make_unique<SweSolver>();
         SweConfig cfg = w.cfg;
         cfg.name = w.name.c_str();
-        w.owned->Init(gpu, sc, shaderDir, *w.bathy, cfg);
+        w.owned->Init(gpu, sc, shaderDir, dom, cfg);
+        LogWindowHoldsWater(w.owned->Domain(), cfg, "on activation: on the CPU bed, the stack at the cells");
         w.owned->SetBed(gpu, m_hgtArr, m_hgtRes, m_hgtMips, m_bed);   // PHASE B2: the standing window
         w.solver = w.owned.get();
         auto zero = [](double) { return 0.0; };
@@ -119,16 +121,11 @@ void WeatherManager::RefreshMirrorsTo(Gpu& gpu, double simUnix) {
 }
 
 void WeatherManager::RequestRegion(double latDeg, double lonDeg, double radiusM) {
-    double x = 0.0, z = 0.0;
-    WorldOf(latDeg, lonDeg, x, z);
     for (Window& w : m_windows) {
-        if (!w.active || !w.solver || !w.solver->Ready() || !w.bathy) continue;
-        // A region may reach a window whose box its centre is outside of.
-        if (x + radiusM < w.bathy->WorldX0() || x - radiusM > w.bathy->WorldX0() + w.bathy->WorldSizeX() ||
-            z + radiusM < w.bathy->WorldZ0() || z - radiusM > w.bathy->WorldZ0() + w.bathy->WorldSizeZ()) {
-            continue;
-        }
-        w.solver->RequestRegion(x, z, radiusM);
+        if (!w.active || !w.solver || !w.solver->Ready()) continue;
+        // A region may reach a window whose box its centre is outside of: the solver's own chart
+        // says which of its cells the region touches, and none is nothing.
+        w.solver->RequestRegion(latDeg, lonDeg, radiusM);
     }
 }
 
@@ -149,14 +146,12 @@ void WeatherManager::SolverRefine(double latDeg, double lonDeg, double unixT,
                                   WeatherSample& s) const {
     const Window* w = WindowAt(latDeg, lonDeg);
     if (!w || !w->solver || !w->solver->Ready()) return;
-    double x = 0.0, z = 0.0;
-    WorldOf(latDeg, lonDeg, x, z);
-    const double wDom = w->solver->DomainWeight(x, z);
+    const double wDom = w->solver->DomainWeight(latDeg, lonDeg);
     if (!(wDom > 0.0)) return;
     SweSolver::Deviation d;
     const bool have =
-        w->solver->DeviationAt(x, z, d) ||
-        w->solver->DeviationFromFields(x, z, w->eta, w->etaW, w->uv4, w->uvW, w->mirrorT, d);
+        w->solver->DeviationAt(latDeg, lonDeg, d) ||
+        w->solver->DeviationFromFields(latDeg, lonDeg, w->eta, w->etaW, w->uv4, w->uvW, w->mirrorT, d);
     if (!have) {
         // THE SOLVER OWNS THIS SURFACE AND HAS NOT ANSWERED HERE. The atlas is not its answer.
         s.levelSrc = "-";
@@ -194,19 +189,17 @@ void WeatherManager::ReadMirrors(Gpu& gpu, double simUnix, double maxAge) {
     }
 }
 
-int WeatherManager::DomainRects(const BathyModel& b, float out[4][4]) const {
-    const double lon1 = b.Lon0() + b.Nx() * b.Dlon();
-    const double lat0 = b.Lat1() - b.Ny() * b.Dlat();
-    return SurfaceFrame::SliceRectsLL(m_stand, lat0, b.Lon0(), b.Lat1(), lon1, out);
+int WeatherManager::DomainRects(const Window& w, float out[4][4]) const {
+    return SurfaceFrame::SliceRectsLL(m_stand, w.box[0], w.box[1], w.box[2], w.box[3], out);
 }
 
 void WeatherManager::PinDomains(ResidencyManager& res, int hgtTenant) {
     if (hgtTenant < 0 || !m_hgtArr) return;
     std::string pinned;
     for (const Window& w : m_windows) {
-        if (!w.active || !w.bathy || !w.bathy->Ready()) continue;
+        if (!w.active || !(w.box[2] > w.box[0])) continue;
         float r[4][4];
-        const int n = DomainRects(*w.bathy, r);
+        const int n = DomainRects(w, r);
         // M13: the solver's domain is its own reader of the shared cache -- it pins the bed
         // under its lattice whether or not any view is looking there.
         // Step 5: a standing reader, the order's first class (HIERARCHY 4.19). PHASE B2: in the
@@ -241,16 +234,15 @@ uint64_t WeatherManager::ClaimedMips(const ResidencyManager& res, int hgtTenant,
     const FaceWindow fw{m_stand.face, m_stand.rung, 0, 0};
     const double dim = Lattice::kFaceDim;
     for (const Window& w : m_windows) {
-        if (!w.active || !w.bathy || !w.bathy->Ready()) continue;
+        if (!w.active || !(w.box[2] > w.box[0])) continue;
         if (only && w.name != only) continue;
-        const BathyModel& b = *w.bathy;
         // A sample every few cells over the domain, its slice uv modulo the page (PHASE B2): the
         // map is at tile grain, so this is a few thousand reads of the manager's own bytes.
         const int nu = 256, nv = 256;
         for (int j = 0; j <= nv; ++j) {
-            const double lat = (b.Lat1() - b.Ny() * b.Dlat() * double(j) / nv) * kD2R;
+            const double lat = (w.box[2] - (w.box[2] - w.box[0]) * double(j) / nv) * kD2R;
             for (int i = 0; i <= nu; ++i) {
-                const double lon = (b.Lon0() + b.Nx() * b.Dlon() * double(i) / nu) * kD2R;
+                const double lon = (w.box[1] + (w.box[3] - w.box[1]) * double(i) / nu) * kD2R;
                 const double d[3] = {std::cos(lat) * std::cos(lon), std::sin(lat), std::cos(lat) * std::sin(lon)};
                 double X = 0.0, Y = 0.0;
                 fw.TexelOf(d, X, Y);
@@ -280,10 +272,10 @@ WeatherManager::BedWait WeatherManager::WaitForBeds(Gpu& gpu, ResidencyManager& 
     };
     std::vector<Domain> domains;
     for (Window& w : m_windows) {
-        if (!w.active || !w.solver || !w.solver->Ready() || !w.bathy || !w.bathy->Ready()) continue;
+        if (!w.active || !w.solver || !w.solver->Ready()) continue;
         if (only && w.name != only) continue;
         Domain d{w.solver, {}, 0};
-        d.n = DomainRects(*w.bathy, d.r);
+        d.n = DomainRects(w, d.r);
         if (d.n) domains.push_back(d);
     }
     bw.windows = static_cast<uint32_t>(domains.size());
@@ -347,12 +339,7 @@ void WeatherManager::Update(Gpu& gpu, ShaderCompiler& sc, const std::wstring& sh
         if (!w.active && w.bathy && w.bathy->Ready() && camAltM < kActivateAltM) {
             // Residency rises on zoom: the camera entering a dormant window's footprint IS
             // the demand signal, exactly as a CDLOD node entering the frustum demands tiles.
-            double x, z;
-            WorldOf(camLatDeg, camLonDeg, x, z);
-            if (x > w.bathy->WorldX0() && x < w.bathy->WorldX0() + w.bathy->WorldSizeX() &&
-                z > w.bathy->WorldZ0() && z < w.bathy->WorldZ0() + w.bathy->WorldSizeZ()) {
-                Activate(gpu, sc, shaderDir, w.name.c_str(), simUnix);
-            }
+            if (w.InBox(camLatDeg, camLonDeg)) Activate(gpu, sc, shaderDir, w.name.c_str(), simUnix);
         }
         if (w.active && w.owned) {
             // Owned windows advance on their own submits; at real time this is one 64-substep
@@ -377,12 +364,10 @@ int WeatherManager::ActiveWindows() const {
 }
 
 const WeatherManager::Window* WeatherManager::WindowAt(double latDeg, double lonDeg) const {
-    double x, z;
-    WorldOf(latDeg, lonDeg, x, z);
     for (const Window& w : m_windows) {
-        if (!w.active || !w.bathy) continue;
-        if (x > w.bathy->WorldX0() && x < w.bathy->WorldX0() + w.bathy->WorldSizeX() &&
-            z > w.bathy->WorldZ0() && z < w.bathy->WorldZ0() + w.bathy->WorldSizeZ()) {
+        if (!w.active) continue;
+        if (w.solver && w.solver->Ready() ? w.solver->Domain().Holds(latDeg, lonDeg)
+                                          : w.InBox(latDeg, lonDeg)) {
             return &w;
         }
     }
@@ -446,16 +431,20 @@ WeatherSample WeatherManager::Query(double latDeg, double lonDeg, double unixT,
             }
         }
     }
-    if (m_sea && m_sea->Ready() && latDeg > 41.5 && latDeg < 44.5 && lonDeg > -71.2 &&
-        lonDeg < -68.5) {
-        const int hi = m_sea->HourIndex(unixT);
-        const SeaHour& h = m_sea->Hour(hi);
-        if (!h.parts.empty()) {
-            s.tp = static_cast<float>(h.combinedTp);
-            s.dirDeg = static_cast<float>(h.combinedFromDeg);
-            if (s.hs <= 0.0f) s.hs = static_cast<float>(h.combinedHs);
-            s.waveSrc = "gfswave gulf point (Hs/Tp/dir)";
-        }
+    // PHASE C2: period and direction (and Hs where the grid has none) from the sea-state source
+    // whose box holds the place, the later listed on top (WaveScale's order) -- each file at its own
+    // place and clock; no box in code.
+    for (const SeaState* src : m_seaSources) {
+        if (!src || !src->Ready() || !src->HasBox()) continue;
+        double b[4];
+        src->Box(b);
+        if (latDeg < b[0] || latDeg > b[2] || lonDeg < b[1] || lonDeg > b[3]) continue;
+        const SeaHour& h = src->Hour(src->HourIndex(unixT));
+        if (h.parts.empty()) continue;
+        s.tp = static_cast<float>(h.combinedTp);
+        s.dirDeg = static_cast<float>(h.combinedFromDeg);
+        if (s.hs <= 0.0f) s.hs = static_cast<float>(h.combinedHs);
+        s.waveSrc = src->Label().c_str();
     }
 
     // ---- wind: the global GFS 10 m vector grid.

@@ -1,20 +1,8 @@
-// The entrance tidal jet and the wave-current amplification, as PURE FUNCTIONS of their
-// parameters -- shared by Sea.hlsl (display) and SeaChurn.hlsl (the sparse churn simulation),
-// which must agree exactly about where the water is breaking.
+// The wave-current amplification, as PURE FUNCTIONS of their parameters -- shared by the water
+// bank and SeaChurn.hlsl, which must agree exactly about where the water is breaking. PHASE C3b:
+// the analytic entrance jet is deleted; the current is the solver's own (sim/WaterTerms.h twins these).
 #ifndef GA_JET_HLSLI
 #define GA_JET_HLSLI
-
-// Analytic ebb/flood jet: channel axis through the origin along the ebb direction, Gaussian
-// across-channel, exponential decay seaward, plateau upstream. signedMs: + flood, - ebb.
-float2 JetVelocity(float2 xz, float signedMs, float halfWidth, float seawardDecay,
-                   float2 floodDir, float2 ebbDir) {
-    const float along = dot(xz, ebbDir);
-    const float crossd = length(xz - along * ebbDir);
-    float env = exp(-(crossd * crossd) / (halfWidth * halfWidth));
-    env *= (along > 0.0f) ? exp(-along / seawardDecay) : smoothstep(-4000.0f, -2500.0f, along);
-    const float2 flow = (signedMs >= 0.0f) ? floodDir : ebbDir;
-    return flow * abs(signedMs) * env;
-}
 
 // Finite-depth phase speed for a band's representative wavenumber: c = sqrt(g/k tanh(kh)).
 // THE 7-FOOT-STANDING-WAVE TERM: in 4 m of water an 11 s swell slows from ~17 m/s to ~6, so a

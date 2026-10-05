@@ -52,6 +52,7 @@
 #include "sim/PlaceField.h"
 #include "sim/SeaState.h"
 #include "sim/WaterSurface.h"
+#include "sim/WaveScale.h"
 #include "sim/WaveChart.h"
 #include "sim/WaveField.h"
 #include "sim/WeatherManager.h"
@@ -92,11 +93,11 @@ public:
     // current on it), and whether its partitions are a declared storm (whose height IS the reference,
     // WaveScale). The sea layer owns both; whoever steps a hull hands them in, every step. Until then
     // there is no peak (the gain is 1, as the kernel's is without one) and no storm.
-    void SetCascadeSea(double peakDirX, double peakDirZ, bool peakValid, bool storm) {
+    void SetCascadeSea(double peakDirX, double peakDirZ, bool peakValid, const WaveScale& scale) {
         m_peakDirX = peakDirX;
         m_peakDirZ = peakDirZ;
         m_peakValid = peakValid;
-        m_storm = storm;
+        m_scale = scale;   // PHASE C2: the sea-state field the bank's corners read
     }
     // THE SWELL SHADOW, as the kernel reads it (the water match, step 3): the exposure page's texels
     // at a place (compose/ExposurePage -- the node asked at the texel centres the painter asks it at,
@@ -182,7 +183,7 @@ private:
     double m_sampleM = 0.5;
     double m_peakDirX = 0.0, m_peakDirZ = 0.0;
     bool m_peakValid = false;
-    bool m_storm = false;
+    WaveScale m_scale;
     const PlaceField* m_shadow = nullptr;
     const PlaceField* m_bed = nullptr;
     // The bed at a place: the kernels' page (SetBed) or the slow field's.
@@ -249,7 +250,13 @@ private:
     mutable WeatherSample m_memo;
     const WeatherSample& SlowAt(double wx, double wz, double simUnix) const;
     // The mean state at a point: the memoised slow field, refined by the solver at the point.
+public:
+    // PHASE C1: public for --water-probe, which names the level's source at the hull.
     WeatherSample MeanStateAt(double wx, double wz, double simUnix) const;
+    // PHASE C2: the sea-state field's scale at a place, as the hull's bands take it (= the bank's).
+    double SeaScaleAt(double latDeg, double lonDeg) const { return m_scale.At(m_wx->Globe(), latDeg, lonDeg); }
+    double SeaScaleRef() const { return m_scale.hsRef; }
+private:
 };
 
 }  // namespace ga

@@ -299,15 +299,17 @@ float WaterComponent::EditFloorNavd() const {
     float floorNavd = m_o.config->jettyCrestNavd;
     if (floorNavd <= -90.0f) {
         floorNavd = 1.8f;
-        if (m_o.atlas && m_o.atlas->Ready()) {
+        if (m_o.atlas && m_o.atlas->Ready() && m_o.structures) {
+            // PHASE C4: at the structures' own place -- the centre of the mask source's georef.
+            const SourceInfo& in = m_o.structures->Info();
             float elo = 0.0f, ehi = 0.0f;
-            m_o.atlas->EnvelopeNavd(42.8190, -70.8031, 0.0, &elo, &ehi);
+            m_o.atlas->EnvelopeNavd(0.5 * (in.lat0 + in.lat1), 0.5 * (in.lon0 + in.lon1), 0.0, &elo, &ehi);
             // Anchored to the TOP plane: a decayed structure is awash at spring high but a
             // continuous ridge below mid-tide. (lo + margin was the first draft -- that floors
             // at MLLW, which rescues the smear only at dead low.) Surveyed crests taller than
             // the floor still win.
             floorNavd = ehi - 0.45f;
-            Log("[datum] envelope at north jetty: lo %+.2f hi %+.2f m NAVD "
+            Log("[datum] envelope at the structures: lo %+.2f hi %+.2f m NAVD "
                 "(synodic-month min/max) -> edit floor %+.2f",
                 elo, ehi, floorNavd);
         }

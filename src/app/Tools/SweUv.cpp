@@ -21,7 +21,7 @@ namespace {
 // M5c debug: the solved surface-current field as a picture. u east = red, u west = blue,
 // v north = green tint, brightness = speed; land/invalid = dark grey. The fastest way to SEE
 // whether the throat jet, the eddies, and the boundary plumbing are doing physics or nonsense.
-void DumpSweUv(Gpu& gpu, SweSolver& swe, const BathyModel& bathy, const std::wstring& path) {
+void DumpSweUv(Gpu& gpu, SweSolver& swe, const SweToolGrid& grid, const std::wstring& path) {
     const uint32_t nx = swe.Nx(), ny = swe.Ny();
     std::vector<float> pts(static_cast<size_t>(nx) * ny * 2);
     // One giant batch is wasteful; sample the texture directly through ReadProbes' machinery
@@ -29,8 +29,8 @@ void DumpSweUv(Gpu& gpu, SweSolver& swe, const BathyModel& bathy, const std::wst
     for (uint32_t y = 0; y < ny; ++y) {
         for (uint32_t x = 0; x < nx; ++x) {
             const size_t i = (static_cast<size_t>(y) * nx + x) * 2;
-            pts[i + 0] = bathy.WorldX0() + (x + 0.5f) / nx * bathy.WorldSizeX();
-            pts[i + 1] = bathy.WorldZ0() + bathy.WorldSizeZ() * (1.0f - (y + 0.5f) / ny);
+            pts[i + 0] = x + 0.5f;   // the cell's centre (ReadProbes reads cells)
+            pts[i + 1] = y + 0.5f;
         }
     }
     std::vector<SweSolver::Probe> pr(static_cast<size_t>(nx) * ny);
@@ -92,7 +92,9 @@ void DumpSweUv(Gpu& gpu, SweSolver& swe, const BathyModel& bathy, const std::wst
     // consecutive sections differ only by the storage filling between them; a jump reveals a
     // leak, a flat profile with a weak gap says the demand never concentrated.
     for (const float wx : {-12000.0f, -5000.0f, -2500.0f, 0.0f, 350.0f, 900.0f, 1600.0f}) {
-        const int ix = static_cast<int>((wx - bathy.WorldX0()) / bathy.WorldSizeX() * nx);
+        double sx = -1.0, sy = 0.0;
+        grid.CellOfFlat(wx, 0.0, sx, sy);
+        const int ix = static_cast<int>(std::floor(sx));
         if (ix < 0 || ix >= static_cast<int>(nx)) continue;
         double q = 0.0;
         for (uint32_t y = 0; y < ny; ++y) {
@@ -104,8 +106,8 @@ void DumpSweUv(Gpu& gpu, SweSolver& swe, const BathyModel& bathy, const std::wst
 
 }  // namespace
 
-void RunSweUv(const Options& opt, Gpu& gpu, const BathyModel& bathy, SweSolver& swe) {
-    DumpSweUv(gpu, swe, bathy, opt.sweUvDump);
+void RunSweUv(const Options& opt, Gpu& gpu, const SweToolGrid& grid, SweSolver& swe) {
+    DumpSweUv(gpu, swe, grid, opt.sweUvDump);
 }
 
 }  // namespace ga::app::tools

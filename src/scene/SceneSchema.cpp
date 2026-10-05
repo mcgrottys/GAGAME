@@ -24,6 +24,7 @@ LayerEntry kLayer;
 TideLayerProps kTide;
 NodeProps kNode;
 ToolProps kTool;
+StationProps kStation;
 SourceProps kSource;
 
 using Q = Quantity;
@@ -50,7 +51,10 @@ const Schema& SceneSchema_() {
             .BindEnum("mode", p.mode, {"chart", "world", "gulf"},
                       "the layer-enable law: the M1 chart, the one world (estuary + planet), the gulf map", R)
             .Bind("planet", p.planet, "earth | mars", R)
-            .Bind("view", p.view, "the start camera: a name in views[]", R);
+            .Bind("view", p.view, "the start camera: a name in views[]", R)
+            .Bind("windowDepth", p.windowDepth, Q::Dimensionless, "1",
+                  "how many windows deep the view reaches through facing gates (1..7): each world seen "
+                  "is walked and its tiles wanted, so this is the gates' frame cost", R);
         return sc;
     }();
     return *s;
@@ -75,7 +79,20 @@ const Schema& DataSchema() {
             .BindPath("tides", p.tides, "the tide stations (--tides)", R)
             .BindPath("seastate", p.seastate, "the sea state (--seastate)", R)
             .BindPath("currents", p.currents, "the currents (--currents)", R)
-            .BindPath("bathy", p.bathy, "the bathymetry (--bathy)", R);
+            .BindPath("bathy", p.bathy, "the bathymetry survey (\"\" = none)", R)
+            .BindPath("route", p.route, "the chart's channel route, a geojson (\"\" = none)", R)
+            .Bind("tideFocus", p.tideFocus,
+                  "the tide station whose clock and datum link the water takes (\"\" = the nearest the solver's anchor)", R);
+        return sc;
+    }();
+    return *s;
+}
+
+const Schema& PlaceSchema() {
+    static const Schema* s = [] {
+        auto& p = kDoc.place;
+        Schema* sc = new Schema("place", &p);
+        sc->BindLonLat("anchor", p.anchor, "the place world.flat stands about, [lon, lat] degrees: every {x, alt, z} without a place of its own is in its tangent plane, exactly", R);
         return sc;
     }();
     return *s;
@@ -158,7 +175,7 @@ const Schema& DatumSchema() {
         auto& p = kDoc.sea.datum;
         Schema* sc = new Schema("sea.datum", &p);
         sc->Bind("fromStation", p.fromStation, "CO-OPS resolves MLLW -> NAVD88 per station; false = mllwToNavd", R)
-            .Bind("mllwToNavd", p.mllwToNavd, Q::Length, "m", "tide (m MLLW) + this = NAVD88 (--datum)", R);
+            .Bind("mllwToNavd", p.mllwToNavd, Q::Length, "m", "tide (m MLLW) + this = NAVD88", R);
         return sc;
     }();
     return *s;
@@ -168,7 +185,8 @@ const Schema& SeaSchema() {
         auto& p = kDoc.sea;
         Schema* sc = new Schema("sea", &p);
         sc->Nest("storm", StormSchema(), &p.storm, "the sandbox sea-state override")
-            .Nest("datum", DatumSchema(), &p.datum, "the MLLW -> NAVD88 link");
+            .Nest("datum", DatumSchema(), &p.datum, "the MLLW -> NAVD88 link")
+            .BindBox("box", p.box, "where data.seastate's forecast stands when its file carries no box, [lon0, lat0, lon1, lat1] degrees; zeros = nowhere (the grid alone)", R);
         return sc;
     }();
     return *s;
@@ -186,7 +204,10 @@ const Schema& SweSchema() {
             .BindEnum("bedWait", p.bedWait, {"none", "map", "whole"},
                       "what the spin-up waits for before its hour: nothing (the kernel reads whatever it reads before the first residency turn), the residency map (one turn: the coarsest resident mip), or the whole bed (every solver's domain read at mip 0)", R)
             .BindEnum("window", p.window, {"full-weight", "survey"},
-                      "where a solver's grid stands: the survey's window drawn in, on the side of an open face that reads the bed (the west face), to where its source paints at full weight (the band is the source's own feather), the other sides keeping the survey's extent; or the survey's whole window, feather included", R);
+                      "where a solver's grid stands: the survey's window drawn in, on the side of an open face that reads the bed (the west face), to where its source paints at full weight (the band is the source's own feather), the other sides keeping the survey's extent; or the survey's whole window, feather included", R)
+            .BindBox("box", p.box, "the solver's domain, [lon0, lat0, lon1, lat1] degrees: its anchor is the box's centre, its cells the survey's angular cell over it in true metres at that latitude, its bed the stack's; zeros = the survey's window (`window`)", R)
+            .Bind("sponge", p.sponge, Q::Length, "m", "where the offshore sponge's ramp begins, in from an open side of the domain (a side whose every cell can be wet and that no river enters); whole 700 m nearer it", R)
+            .BindEnum("river", p.river, {"west", "none"}, "the side of the domain a river enters by (the Flather face and its clock); none = no river", R);
         return sc;
     }();
     return *s;
@@ -206,8 +227,8 @@ const Schema& WavefieldSchema() {
         auto& p = kDoc.water.wavefield;
         Schema* sc = new Schema("water.wavefield", &p);
         sc->Bind("enabled", p.enabled, "the solved wave field", H)
-            .Bind("orgX", p.orgX, Q::Length, "m", "window origin, world x", H)
-            .Bind("orgZ", p.orgZ, Q::Length, "m", "window origin, world z", H)
+            .Bind("orgX", p.orgX, Q::Length, "m", "window origin east of place.anchor, in its tangent plane", H)
+            .Bind("orgZ", p.orgZ, Q::Length, "m", "window origin north of place.anchor, in its tangent plane", H)
             .Bind("nx", p.nx, Q::Dimensionless, "1", "cells east", H)
             .Bind("ny", p.ny, Q::Dimensionless, "1", "cells north", H)
             .Bind("cellM", p.cellM, Q::Length, "m", "cell size", H)
@@ -339,7 +360,7 @@ const Schema& SourceSchema() {
             .BindPath("manifest", kSource.manifest,
                       "a manifest of raw rows (the harvester's form: crs, tiles, their bounds), one source", R)
             .Bind("kind", kSource.kind,
-                  "colour | height; \"\" = the pixels decide (8-bit, 3 or 4 channels: colour; one "
+                  "colour | height | seastate (a sea-state file: its forecast and buoys at its box); \"\" = the pixels decide (8-bit, 3 or 4 channels: colour; one "
                   "channel of 16-bit or float: height)", R)
             .Bind("crs", kSource.crs, "EPSG:nnnn, read only where the file carries none", R)
             .Bind("over", kSource.over, Q::Dimensionless, "1",
@@ -633,6 +654,17 @@ const Schema& ToolSchema() {
     return *s;
 }
 
+const Schema& StationSchema() {
+    static const Schema* s = [] {
+        Schema* sc = new Schema("station", &kStation);
+        sc->Bind("name", kStation.name, "the station's id in its file", R)
+            .Bind("lat", kStation.lat, Q::Angle, "deg", "its latitude", R)
+            .Bind("lon", kStation.lon, Q::Angle, "deg", "its longitude", R);
+        return sc;
+    }();
+    return *s;
+}
+
 const Schema& PruneSchema() {
     static const Schema* s = [] {
         auto& p = kDoc.prune;
@@ -671,6 +703,7 @@ const Schema& SceneFileSchema() {
             .Nest("scene", SceneSchema_(), &kDoc.scene, "the scene: name, mode, planet, start view")
             .List("include", &IncludeSchema(), "overlays applied over this file, in order", false)
             .Nest("data", DataSchema(), &kDoc.data, "the data files")
+            .Nest("place", PlaceSchema(), &kDoc.place, "the scene's place: the anchor world.flat stands about")
             .Nest("time", TimeSchema(), &kDoc.time, "the scene clock")
             .Nest("sun", SunSchema(), &kDoc.sun, "the sun")
             .Nest("air", AirSchema(), &kDoc.air, "the air of the day: its aerosol, the picture's white")
@@ -678,6 +711,7 @@ const Schema& SceneFileSchema() {
             .Nest("water", WaterSchema(), &kDoc.water, "the water")
             .Nest("streaming", StreamingSchema(), &kDoc.streaming, "residency: scene state")
             .List("sources", &SourceSchema(), "rasters that are sources by being files, in any order", false)
+            .List("stations", &StationSchema(), "where a station of the data stands when its file does not say", false)
             .Nest("capture", CaptureSchema(), &kDoc.capture, "headless capture")
             .List("views", &ViewSchema_(), "the cameras, by name")
             .Nest("rails", RailsSchema(), &kDoc.rails, "the camera rails")
