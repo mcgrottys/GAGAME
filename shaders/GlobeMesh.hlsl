@@ -107,22 +107,27 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     // (PHASE A2) that hold its undisplaced point geo (above), relative to that level's eye. PHASE B2:
     // the height reads it too.
     const WalkChain wc = CsChain(geo, rec.level);
-    float h = lerp(ComposedHeightChain(dir, vl CS_WC), ComposedHeightChain(dir, vlP CS_WC), k);
+    // The morph's second height only where the morph is on (lerp(a, b, 0) is a); the classifier's
+    // coarser height is this one where its lod is no coarser.
+    const float hA = ComposedHeightChain(dir, vl CS_WC);
+    const float h = (k > 0.0f) ? lerp(hA, ComposedHeightChain(dir, vlP CS_WC), k) : hA;
+    const float vlC = max(vl, -4.0f);
+    const float hC = (vlC == vl) ? hA : ComposedHeightChain(dir, vlC CS_WC);
     // Geometry obeys the same classifier the pixels use: WATER rides ~2 m BELOW the live
     // waterline (not the geoid -- at low tide the geoid stands PROUD of the real sea and
     // buries the FFT surface; this was the M6j flat-sea bug). Land keeps its height.
     // M6n: the mix is ANALOG (ComposedLandness): a half-emerged flat sits halfway between
     // the drowned plane and its true height, so streaming height data slides shorelines
     // smoothly instead of popping plateau edges (the flats speckle, geometry side).
-    const float landness =
-        ComposedLandness(dir, pA CS_WC, ComposedHeightChain(dir, max(vl, -4.0f) CS_WC), gWavesB.w);
+    float editLand;
+    const float landness = ComposedLandnessEdit(dir, pA CS_WC, hC, gWavesB.w, editLand);
     // M6p/M8g: an operator's LAND edit floors the display height where the height
     // channel's SMEAR dips -- but at an ABSOLUTE crest elevation (NAVD, scene
     // jettyCrestNavd), never relative to the live tide. The old floor tracked the
     // waterline (+1.2 m), which made the jetty unsinkable by construction; the real
     // north jetty goes awash at high water (the user's catch). Surveyed data taller
     // than the floor still wins through the max below.
-    const float editFloor = ComposedEditLand(dir, pA CS_WC) * gBankE.w;
+    const float editFloor = editLand * gBankE.w;
     // M10: the relief exaggeration is a display choice made at the level's OWN altitude.
     const float dispLand = max(max(h, 0.0f) * sLvlExag, editFloor * sLvlExag);
     // M7: ONE WATER. In one-water mode the vertex samples THE WAVE VERTEX BANK -- level
@@ -192,7 +197,7 @@ VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     // three bank probes would interpolate a black corner into the surf. Over land the bank's
     // tiles are NULL and read zero, so a dry vertex costs three cheap Loads and lands on the
     // shallow tint -- the right colour for exactly the pixels that mix it.
-    o.wcol = WaterVertexColor(dir, o.rel, h);
+    o.wcol = (gOptU.w != 0u) ? float3(0.0f, 0.0f, 0.0f) : WaterVertexColor(dir, o.rel, h);   // dead under pixel water
     // M10: the one outward step of the gauge -- rel stays in the level's own frame for the
     // pixel stage; the rasterizer gets the true camera-relative position (s^k Q^k rel). Level 0
     // is the identity, so the camera's own planet rasterizes exactly as it always did.

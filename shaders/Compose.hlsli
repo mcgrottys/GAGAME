@@ -324,34 +324,37 @@ float2 CsEditMask(float3 dir, float3 p CS_WC_PARAM) {
     return float2(1.0f - m.r / a, m.b / a);
 }
 
-float ComposedLandness(float3 dir, float3 p CS_WC_PARAM, float hp, float waterLevel) {
-    const float lm = ComposedLandMask(dir, p CS_WC);
+// ONE MASK READ FOR THE LANDNESS AND THE EDIT FLOOR. ComposedLandness read the mask twice (the survey,
+// then the edits) and the geometry's edit floor a third time, the same pages at the same point: a
+// vertex paid three CsMaskSample walks for one answer. One read; the two answers formed from it
+// exactly as the three readers formed theirs (no opinion: lm -1, me 0; else lm = 1 - r/a,
+// me = (1 - r/a, b/a)). ComposedLandness is this with the edit dropped; the mesh stage takes both.
+float ComposedLandnessEdit(float3 dir, float3 p CS_WC_PARAM, float hp, float waterLevel, out float editLand) {
+    float4 m;
+    const bool op = CsMaskSample(dir, p CS_WC, m);
+    const float a = max(m.a, 0.001f);
+    const float lm = op ? (1.0f - m.r / a) : -1.0f;
+    const float2 me = op ? float2(1.0f - m.r / a, m.b / a) : float2(0.0f, 0.0f);
     float land = (lm >= 0.0f) ? ((lm > 0.5f) ? 1.0f : 0.0f)
                               : ((hp > waterLevel) ? 1.0f : 0.0f);
-    // M6p: HAND EDITS ARE LAW. The window mask is R8G8 -- g flags texels painted by
-    // data/gis/edits.geojson, and a flagged texel's mask value overrides survey and the
-    // live tide alike (the survey shoreline predates the jetties, and the stabilized height
-    // classifier smears their thin ridges -- the operator's polygon settles it). Bilinear g
-    // blends the override's own edge.
+    editLand = 0.0f;
     if (gCsU3.x != 0xFFFFFFFFu) {
-        const float2 me = CsEditMask(dir, p CS_WC);
+        // M6p: HAND EDITS ARE LAW. A flagged texel's mask value overrides survey and the live tide
+        // alike (the survey shoreline predates the jetties); bilinear g blends the override's edge.
         land = lerp(land, (me.x > 0.5f) ? 1.0f : 0.0f, smoothstep(0.2f, 0.8f, me.y));
+        editLand = smoothstep(0.2f, 0.8f, me.y) * ((me.x > 0.5f) ? 1.0f : 0.0f);
     }
     return land;
+}
+float ComposedLandness(float3 dir, float3 p CS_WC_PARAM, float hp, float waterLevel) {
+    float editLand;
+    return ComposedLandnessEdit(dir, p CS_WC, hp, waterLevel, editLand);
 }
 // The binary view, for consumers that ARE bits (the sea's discard).
 bool ComposedIsLand(float3 dir, float3 p CS_WC_PARAM, float hp, float waterLevel) {
     return ComposedLandness(dir, p CS_WC, hp, waterLevel) > 0.5f;
 }
 
-// M6p: strength of a hand-edit declaring LAND here (0 where unedited or edited to water).
-// Geometry consumers floor their display height with it: an operator's jetty stands as a
-// continuous ridge even where the smeared height channel dips under the tide.
-float ComposedEditLand(float3 dir, float3 p CS_WC_PARAM) {
-    if (gCsU3.x == 0xFFFFFFFFu) return 0.0f;
-    const float2 me = CsEditMask(dir, p CS_WC);
-    return smoothstep(0.2f, 0.8f, me.y) * ((me.x > 0.5f) ? 1.0f : 0.0f);
-}
 
 // M6i debug: the alignment overlay (--stencil). The survey VECTORS render as real line
 // geometry (GisLayer) -- this shader-side part draws what must be compared against them:
