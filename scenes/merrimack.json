@@ -25,7 +25,8 @@
   "sun": {"source": "ephemeris", "az": 112, "el": 26},
   "sea": {
     "storm": {"hs": 0, "tp": 10, "dir": 90},
-    "datum": {"fromStation": true, "mllwToNavd": -1.3}
+    "datum": {"fromStation": true, "mllwToNavd": -1.3},
+    "box": [-71.2, 41.5, -68.5, 44.5]
   },
   "water": {
     "pixelWater": true,

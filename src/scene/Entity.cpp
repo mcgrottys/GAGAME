@@ -357,7 +357,7 @@ void Entity::Update(const FrameInfo& fi) {
                       waterScene ? waterScene->wfChop : 1.0f);
     // The cascade sea's context, as the bank kernel is handed it this frame (one wave rule).
     if (sea) {
-        boatSea.SetCascadeSea(sea->PeakDirX(), sea->PeakDirZ(), sea->PeakDirValid(), sea->StormOn());
+        boatSea.SetCascadeSea(sea->PeakDirX(), sea->PeakDirZ(), sea->PeakDirValid(), sea->Scale());
     }
     boatSea.SetSwellShadow(m_o.swellShadow);
     boatSea.SetBed(m_o.bed);

@@ -59,6 +59,15 @@ bool SeaState::Load(const std::string& jsonPath) {
 
     m_cycleUnix = root.Num("cycle_unix", 0);
     m_cycleLabel = root.Str("cycle_label", "gfswave ?");
+    m_label = jsonPath;
+    // PHASE C2: THE FILE SAYS WHERE IT IS -- its forecast's box (the harvester's grib subregion,
+    // longitudes 0..360), when it carries one.
+    if (const JsonValue* box = root.Get("box"); box && box->type == JsonValue::Type::Object) {
+        const auto lon = [](double l) { return l > 180.0 ? l - 360.0 : l; };
+        const double b[4] = {box->Num("bottomlat", 0), lon(box->Num("leftlon", 0)),
+                             box->Num("toplat", 0), lon(box->Num("rightlon", 0))};
+        SetBox(b);
+    }
 
     if (const JsonValue* hours = root.Get("hours");
         hours && hours->type == JsonValue::Type::Array) {
@@ -121,11 +130,21 @@ bool SeaState::Load(const std::string& jsonPath) {
     return Ready();
 }
 
-const BuoyObs* SeaState::Buoy(const char* id) const {
+double SeaState::BuoyHs(double simUnix, double maxAgeS, int* n) const {
+    double sum = 0.0;
+    int k = 0;
     for (const BuoyObs& b : m_buoys) {
-        if (b.id == id) return &b;
+        if (!b.valid || !(b.hs > 0.05) || !(std::abs(simUnix - b.obsUnix) < maxAgeS)) continue;
+        sum += b.hs;
+        ++k;
     }
-    return nullptr;
+    if (n) *n = k;
+    return k ? sum / k : 0.0;
+}
+
+void SeaState::SetBox(const double b[4]) {
+    m_hasBox = b[2] > b[0] && b[3] > b[1];
+    for (int i = 0; i < 4; ++i) m_box[i] = b[i];
 }
 
 int SeaState::HourIndex(double simUnix) const {

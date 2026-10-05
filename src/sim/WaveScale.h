@@ -17,9 +17,13 @@
 //  the sea, and the sea there is the cascades' own -- scale 1, exactly what it is where the grid is
 //  missing altogether -- blended as a value, so the scale stays continuous across every coast.
 //
-//  A DECLARED STORM IS THE REFERENCE. A storm rewrites the partitions, not the product, so the grid
-//  is stale by definition (WaterBankLayer's M8 note: ratioing it painted a 17x tile staircase along
-//  the grid's land/sea edge). Under a storm the scale is 1 everywhere.
+//  PHASE C2: THE SEA STATE IS A FIELD OF SOURCES OVER THE GRID. Each sea-state file is a source by
+//  being a file (the scene names it: data.seastate, and `sources` entries of kind "seastate"), placed
+//  by its own box; its Hs is the one law the synthesis uses (SeaLayer::PartsOf: its forecast hour at
+//  its own clock, its own buoys assimilated; data.seastate's replaced by a declared storm). A source
+//  paints over the grid (LayeredOver, the later listed on top) at full weight inside its box, its
+//  weight falling to 0 one grid node (0.25 deg) outside it. Where data.seastate's box holds a place
+//  the scale is its Hs over itself: 1. The storm is no longer the planet's: it is that source's sea.
 //
 //  The clamp [0.15, 3] on a node's ratio is the bank's own (carried, not re-derived): a grid node an
 //  order of magnitude from the reference is a different sea than the cascades can stand in for.
@@ -27,34 +31,38 @@
 #pragma once
 
 #include "sim/GlobeModel.h"
-#include "sim/SeaState.h"
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace ga {
 
 struct WaveScale {
-    const GlobeModel* grid = nullptr;
-    double hsRef = 1.0;    // the reference the cascades were synthesised for, m
-    bool storm = false;    // the partitions are a declared storm: the scale is 1
+    struct Source {
+        double box[4] = {0.0, 0.0, 0.0, 0.0};   // lat0, lon0, lat1, lon1, degrees
+        double hs = 0.0;                         // its Hs now, m
+    };
+    double hsRef = 1.0;              // the Hs the cascades were synthesised for, m (SeaLayer)
+    std::vector<Source> sources;     // over the grid, the later on top
+    static constexpr double kFeatherDeg = 0.25;   // one gfswave node
 
-    // The law's inputs at one instant. The reference is the forecast hour's combined Hs, floored at
-    // 0.3 m (a calm reference would divide the grid by nearly nothing); 1 m when no sea state loaded.
-    static WaveScale For(const GlobeModel* grid, const SeaState* reference, bool storm,
-                         double unixT) {
-        WaveScale s;
-        s.grid = grid;
-        s.storm = storm;
-        s.hsRef = (reference && reference->Ready())
-                      ? (std::max)(reference->Hour(reference->HourIndex(unixT)).combinedHs, 0.3)
-                      : 1.0;
+    // The scale at a place: the grid's, then every source over it by its weight there.
+    double At(const GlobeModel* grid, double latDeg, double lonDeg) const {
+        double s = GridAt(grid, latDeg, lonDeg);
+        for (const Source& src : sources) {
+            const double d = (std::max)((std::max)(src.box[0] - latDeg, latDeg - src.box[2]),
+                                        (std::max)(src.box[1] - lonDeg, lonDeg - src.box[3]));
+            const double t = std::clamp(d / kFeatherDeg, 0.0, 1.0);
+            const double w = 1.0 - t * t * (3.0 - 2.0 * t);
+            if (w > 0.0) s += w * (std::clamp(src.hs / hsRef, 0.15, 3.0) - s);
+        }
         return s;
     }
 
-    // The scale at a place.
-    double At(double latDeg, double lonDeg) const {
-        if (storm || !grid) return 1.0;
+    // The grid's node ratio, bilinear; 1 where it has no opinion.
+    double GridAt(const GlobeModel* grid, double latDeg, double lonDeg) const {
+        if (!grid) return 1.0;
         const int nx = grid->WavesNx(), ny = grid->WavesNy();
         const std::vector<float>& hs = grid->Hs();
         if (nx < 2 || ny < 2 || hs.size() < size_t(nx) * size_t(ny)) return 1.0;

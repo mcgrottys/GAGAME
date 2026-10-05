@@ -123,6 +123,7 @@ struct Assembly {
     std::unique_ptr<TideLayer> tideOwned;
     TideLayer* tide = nullptr;
     SeaState seaState;
+    std::vector<std::unique_ptr<SeaState>> seaSources;   // PHASE C2: `sources` of kind "seastate"
     SeaLayer* sea = nullptr;
     CurrentModel currents;
     bool haveCurrents = false;

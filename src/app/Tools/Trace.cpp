@@ -58,12 +58,13 @@ void RunTrace(const Options& opt, Gpu& gpu, SeaLayer* sea, const Compositor& com
         wt::Smoothstep(0.05, 0.65, double(wq.depthM)),
         0.55 * (std::max)(static_cast<double>(wq.depthM), 0.05));
     // The one law the bank's tile corners and the hull's twin read (sim/WaveScale.h).
-    const WaveScale scaleT = WaveScale::For(weather.Globe(), sea ? sea->State() : nullptr,
-                                            sea && sea->StormOn(), simUnix);
+    static const WaveScale kNone{};
+    const WaveScale& scaleT = sea ? sea->Scale() : kNone;
     Log("[trace] 6 sea state Hs %.2f m Tp %.1f s dir %.0f [%s] -> hsScale "
-        "%.2f  (the grid's nodes bilinear over the reference %.2f m%s, clamp 0.15..3)",
-        wq.hs, wq.tp, wq.dirDeg, wq.waveSrc, scaleT.At(tlat, tlon), scaleT.hsRef,
-        scaleT.storm ? "; a declared storm IS the reference" : "");
+        "%.2f  (the grid's nodes bilinear, %zu source(s) over them, over the reference %.2f m, "
+        "clamp 0.15..3)",
+        wq.hs, wq.tp, wq.dirDeg, wq.waveSrc, scaleT.At(weather.Globe(), tlat, tlon),
+        scaleT.sources.size(), scaleT.hsRef);
     const float expoT = sea->ShadowAtWorld(static_cast<float>(wx),
                                            static_cast<float>(wz));
     Log("[trace] 7 exposure  swell.exposure node (page z14 mips >= 3, no flip, "

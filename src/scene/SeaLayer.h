@@ -22,6 +22,7 @@
 #include "sim/OceanCpu.h"
 #include "sim/SeaState.h"
 #include "sim/SweSolver.h"
+#include "sim/WaveScale.h"
 
 #include <string>
 #include <vector>
@@ -33,7 +34,14 @@ public:
     void Configure(const std::wstring& shaderDir, const SeaState* sea) {
         m_shaderDir = shaderDir;
         m_sea = sea;
+        m_sources = {sea};
     }
+    // PHASE C2: the scene's sea-state sources, data.seastate's first (the synthesis's), then the
+    // `sources` entries of kind "seastate" in their order; and the field they make (WaveScale), which
+    // the bank's tile corners and the hull's twin read.
+    void AddSource(const SeaState* s) { m_sources.push_back(s); }
+    const std::vector<const SeaState*>& Sources() const { return m_sources; }
+    const WaveScale& Scale() const { return m_scale; }
 
     // M3: the ACT0816 tidal clock drives the entrance jet and its wave steepening.
     void SetCurrents(const CurrentModel* currents) {
@@ -141,7 +149,7 @@ public:
     double MeasureRenderedHs(Gpu& gpu) { return m_fft.MeasureHs(gpu); }
 
     double hsModel = 0;      // 4 sqrt(m0) of the active parameterization
-    double hsBuoy = 0;       // latest 44013 observation
+    double hsBuoy = 0;       // the mean of the sea-state file's own buoys
     int activeParts = 0;
     std::string statusNote;  // "f012" style label for the title bar
     std::string currentStatus;   // "ebb 0.72 m/s" for the title bar
@@ -229,6 +237,9 @@ private:
     };
     std::wstring m_shaderDir;
     const SeaState* m_sea = nullptr;
+    std::vector<const SeaState*> m_sources;   // PHASE C2: m_sea first
+    WaveScale m_scale;
+    int PartsOf(const SeaState& src, double simUnix, bool storm, PartParam parts[4], bool log) const;
     OceanFft m_fft;
     OceanCpu m_oceanCpu;   // M9bq: the hull's copy of the same three cascades
 

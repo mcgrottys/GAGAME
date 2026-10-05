@@ -284,6 +284,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     if (S.scene.planet != "mars") {
         std::vector<RasterEntry> entries;
         for (const scene::SourceProps& s : S.sources) {
+            if (s.kind == "seastate") continue;   // PHASE C2: a sea state, not a raster (below)
             entries.push_back({s.file, s.folder, s.match, s.manifest, s.name, s.kind, s.crs, s.over,
                                s.feather, s.unit, s.datum, s.offset, s.hasOffset});
         }
@@ -353,9 +354,27 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
 
     // The open sea (M2) is optional until harvest_waves.py has run once.
     if (seaState.Load(S.data.seastate)) {
+        // PHASE C2: THE SEA STATE IS A FIELD OF SOURCES. data.seastate's file stands where it says,
+        // or where sea.box places a file that says nothing; every `sources` entry of kind "seastate"
+        // is one more, a source by being a file.
+        if (!seaState.HasBox()) {   // the key is [lon0, lat0, lon1, lat1]; the box lat0, lon0, lat1, lon1
+            const double* k = S.sea.box;
+            const double b[4] = {k[1], k[0], k[3], k[2]};
+            seaState.SetBox(b);
+        }
         auto seaOwned = std::make_unique<SeaLayer>();
         sea = seaOwned.get();
         sea->Configure(shaderDir, &seaState);
+        for (const scene::SourceProps& s : S.sources) {
+            if (s.kind != "seastate") continue;
+            auto src = std::make_unique<SeaState>();
+            if (!src->Load(s.file)) {
+                Log("[sea] source %s: %s unreadable -- not a source", s.name.c_str(), s.file.c_str());
+                continue;
+            }
+            sea->AddSource(src.get());
+            A->seaSources.push_back(std::move(src));
+        }
         sea->SetSurface(&surface);   // M12 step 4b: the world.flat chart, for the churn's geoA row
         sea->sweCurrentGain = S.water.swe.gain;
         sea->heightScale = S.water.heightScale;

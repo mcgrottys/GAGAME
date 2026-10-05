@@ -26,7 +26,8 @@ void SeaLayer::Init(Gpu& gpu, ShaderCompiler& sc, FieldSet& fields,
         Log("[sea] tiled tier < 2: churn atlas disabled (dense fallback not built)");
     }
 
-    if (const BuoyObs* b = m_sea->Buoy("44013")) hsBuoy = b->hs;
+    int nb = 0;
+    hsBuoy = m_sea->BuoyHs(0.0, 1.0e300, &nb);   // PHASE C2: the mean of the file's own buoys
 }
 
 void SeaLayer::InitChurn(Gpu& gpu, ShaderCompiler& sc) {
@@ -107,22 +108,24 @@ void SeaLayer::SetStorm(float hs, float tp, float fromDeg) {
     m_lastHour = -1;   // force a respectrum on the next SetTime
 }
 
-void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double camZ) {
-    if (!m_sea || !m_sea->Ready()) return;
-
-    const int hour = m_sea->HourIndex(simUnix);
-    if (hour != m_lastHour) {
-        m_lastHour = hour;
-        PartParam parts[4];
-        if (m_stormHs > 0.01f) {
+int SeaLayer::PartsOf(const SeaState& src, double simUnix, bool storm, PartParam parts[4],
+                      bool log) const {
+    // PHASE C2: ONE LAW FOR EVERY SEA-STATE SOURCE -- the partitions a file's forecast hour gives, the
+    // wind sea filled where it has none, and its own buoys' reading assimilated; or, for the source a
+    // declared storm replaces (data.seastate's), the storm. The synthesis takes data.seastate's; the
+    // field (WaveScale) takes every source's Hs from the same function, so where data.seastate's own
+    // box holds a texel its scale is 1 by construction.
+    int activeParts = 0;
+    const int hour = src.HourIndex(simUnix);
+    if (storm) {
             // Sandbox storm: the named swell carries 85% of the energy, a fresher wind sea 25%
             // of the height on a slightly shorter period, 30 degrees off.
             parts[0] = SeaState::MakePartition(m_stormHs * 0.92, m_stormTp, m_stormDir, false);
             parts[1] = SeaState::MakePartition(m_stormHs * 0.40, m_stormTp * 0.55,
                                                m_stormDir + 30.0, true);
             activeParts = 2;
-        } else {
-            activeParts = m_sea->BuildParams(hour, parts);
+    } else {
+            activeParts = src.BuildParams(hour, parts);
             // M9a: THE MISSING WIND SEA. On light-wind hours GFS-Wave's partitioning hands
             // back swell trains ONLY -- and a swell partition is a Gaussian of
             // sigF = clamp(0.10/Tp^2, 0.004, 0.02) Hz: ~4 mHz wide, with no tail at all. So
@@ -138,7 +141,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
             // own combined Hs: PM is the fetch-UNLIMITED answer and no coastal hour is that.
             bool hasWindSea = false;
             for (int i = 0; i < activeParts; ++i) hasWindSea |= parts[i].gamma > 0.0f;
-            const SeaHour& hr = m_sea->Hour(hour);
+            const SeaHour& hr = src.Hour(hour);
             double pmHs = 0.0, pmTp = 0.0;
             if (!hasWindSea && activeParts < 4 && windSeaFill > 0.0f &&
                 SeaState::WindSeaPm(hr.windMs, &pmHs, &pmTp)) {
@@ -147,37 +150,47 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
                 if (pmHs > 0.02) {
                     parts[activeParts++] =
                         SeaState::MakePartition(pmHs, pmTp, hr.windFromDeg, true);
-                    Log("[sea] f%03d has no wind-sea partition (wind %.1f m/s): filled with "
+                    if (log) Log("[sea] f%03d has no wind-sea partition (wind %.1f m/s): filled with "
                         "Pierson-Moskowitz Hs %.2f m Tp %.1f s (lambda %.1f m) -- cascades "
                         "1-2 were exactly zero",
                         static_cast<int>(hr.fh), hr.windMs, pmHs, pmTp, 1.56 * pmTp * pmTp);
                 }
             }
         }
-        const uint32_t seed = static_cast<uint32_t>(m_sea->CycleUnix() / 3600.0) * 2654435761u;
-        // M8 BUOY ASSIMILATION (the user's call: the single-point measurements should
-        // STEER the model, not just grade it). One scalar: the measured buoy Hs over
-        // the forecast's, applied to every partition's energy BEFORE synthesis -- the
-        // epoch-ladder philosophy one product over (point authority corrects the global
-        // model; the L2 stations already do this to EOT20). Guards: never under a
-        // --storm override (that is an explicit sandbox), only a fresh observation
-        // (< 3 h), gain clamped [0.6, 1.8] (a closure -- past it the forecast and the
-        // buoy disagree about the WORLD, and a scalar cannot fix that).
-        if (m_stormHs <= 0.01f && activeParts > 0) {
-            const BuoyObs* bo = m_sea->Buoy("44013");
-            const double hsFc = SeaState::SignificantHeight(parts, activeParts);
-            if (bo && bo->valid && bo->hs > 0.05 && hsFc > 0.05 &&
-                std::abs(simUnix - bo->obsUnix) < buoyAssimAgeH * 3600.0) {
-                const double g = std::clamp(bo->hs / hsFc, 1.0 / buoyAssimGainMax,
-                                            static_cast<double>(buoyAssimGainMax));
-                for (int i = 0; i < activeParts; ++i) {
-                    parts[i].specScale *= static_cast<float>(g * g);   // energy ~ Hs^2
-                }
-                Log("[sea] buoy 44013 assimilated: Hs %.2f obs vs %.2f forecast -> "
-                    "gain %.2f on every partition (age %.1f h)",
-                    bo->hs, hsFc, g, std::abs(simUnix - bo->obsUnix) / 3600.0);
+    // M8 BUOY ASSIMILATION (the user's call: the single-point measurements should STEER the model,
+    // not just grade it). One scalar on every partition's energy BEFORE synthesis: the measured Hs
+    // over the forecast's, clamped [1/gmax, gmax]; never under a storm; only fresh observations.
+    // PHASE C2: the measurement is the source's OWN stations -- the mean of the file's buoys that
+    // are fresh (< buoyAssimAgeH) -- not one buoy named in code.
+    if (!storm && activeParts > 0) {
+        int nb = 0;
+        const double hsObs = src.BuoyHs(simUnix, buoyAssimAgeH * 3600.0, &nb);
+        const double hsFc = SeaState::SignificantHeight(parts, activeParts);
+        if (nb > 0 && hsObs > 0.05 && hsFc > 0.05) {
+            const double g = std::clamp(hsObs / hsFc, 1.0 / buoyAssimGainMax,
+                                        static_cast<double>(buoyAssimGainMax));
+            for (int i = 0; i < activeParts; ++i) {
+                parts[i].specScale *= static_cast<float>(g * g);   // energy ~ Hs^2
+            }
+            if (log) {
+                Log("[sea] %s: %d buoy(s) assimilated: Hs %.2f obs (their mean) vs %.2f forecast "
+                    "-> gain %.2f on every partition",
+                    src.Label().c_str(), nb, hsObs, hsFc, g);
             }
         }
+    }
+    return activeParts;
+}
+
+void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double camZ) {
+    if (!m_sea || !m_sea->Ready()) return;
+
+    const int hour = m_sea->HourIndex(simUnix);
+    if (hour != m_lastHour) {
+        m_lastHour = hour;
+        PartParam parts[4];
+        activeParts = PartsOf(*m_sea, simUnix, StormOn(), parts, true);
+        const uint32_t seed = static_cast<uint32_t>(m_sea->CycleUnix() / 3600.0) * 2654435761u;
         m_fft.SetSeaState(parts, activeParts, seed);
         // M9bq: THE CPU TWIN IS FED FROM THE SAME CALL SITE, with the same partitions and the
         // same seed, so the two processors cannot come to disagree about what sea this is. A
@@ -191,6 +204,24 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
             m_oceanCpu.SetSeaState(parts, activeParts, seed, pl, lo, hi, m_fft.Lambda());
         }
         hsModel = SeaState::SignificantHeight(parts, activeParts);
+        // PHASE C2: THE SEA STATE AS A FIELD (sim/WaveScale.h). The reference is the Hs the cascades
+        // were synthesised for; every source with a place (its file's box, or sea.box for
+        // data.seastate's) carries its own Hs by the same law (PartsOf), at its own clock.
+        m_scale.hsRef = hsModel > 1e-3 ? hsModel : 1.0;
+        m_scale.sources.clear();
+        for (const SeaState* src : m_sources) {
+            if (!src || !src->Ready() || !src->HasBox()) continue;
+            PartParam sp[4];
+            const int n = PartsOf(*src, simUnix, src == m_sea && StormOn(), sp, false);
+            WaveScale::Source fs;
+            src->Box(fs.box);
+            fs.hs = SeaState::SignificantHeight(sp, n);
+            m_scale.sources.push_back(fs);
+            Log("[sea] field source %s: box %.3f..%.3f N x %.3f..%.3f E, Hs %.3f m (scale %.3f over "
+                "the reference %.3f m)%s",
+                src->Label().c_str(), fs.box[0], fs.box[2], fs.box[1], fs.box[3], fs.hs,
+                fs.hs / m_scale.hsRef, m_scale.hsRef, src == m_sea && StormOn() ? " -- the storm" : "");
+        }
         for (int i = 0; i < 4; ++i) m_parts[i] = (i < activeParts) ? parts[i] : PartParam{};
         if (activeParts > 0) {
             // M7j: the hypervisor's second catch -- parts[0] is FILE order, not energy
@@ -370,7 +401,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
                 coxMunk, windMs);
         }
 
-        Log("[sea] %s %s: %d partitions, model Hs %.2f m (buoy 44013 %.2f m)",
+        Log("[sea] %s %s: %d partitions, model Hs %.2f m (its buoys %.2f m)",
             m_sea->CycleLabel().c_str(), statusNote.c_str(), activeParts, hsModel, hsBuoy);
     }
 

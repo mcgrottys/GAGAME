@@ -69,6 +69,8 @@ public:
     // mirrored only; OWNED windows (Boston) are advanced by Update() and spun up lazily
     // when the camera enters their footprint below the activation altitude.
     // PHASE C1: a window stands where its solver's domain does (its lat/lon box); no world.flat.
+    // PHASE C2: the scene's sea-state sources (SeaLayer::Sources), for Query's period and direction.
+    void SetSeaSources(const std::vector<const SeaState*>& s) { m_seaSources = s; }
     void AddExternalWindow(const char* name, SweSolver* solver,
                            std::function<double(double)> oceanAt);
     void AddDormantWindow(const char* name, BathyModel* bathy, const SweConfig& cfg,
@@ -180,6 +182,7 @@ private:
     hal::BlockBinding m_stand{};      // PHASE B2: the standing window
     SweSolver::BedWindow m_bed{};     // ...and its rows, for every owned solver
     double m_planetR = 0.0;           // PHASE C1: an owned solver's chart is placed on this planet
+    std::vector<const SeaState*> m_seaSources;   // PHASE C2
     struct Window {
         std::string name;
         SweSolver* solver = nullptr;              // external, or owned.get()

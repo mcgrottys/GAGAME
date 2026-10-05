@@ -137,6 +137,7 @@ struct DatumProps {
 struct SeaSection {
     StormProps storm;
     DatumProps datum;
+    double box[4] = {0.0, 0.0, 0.0, 0.0};   // PHASE C2: data.seastate's place when its file says none
 };
 struct SweProps {
     bool enabled = true;

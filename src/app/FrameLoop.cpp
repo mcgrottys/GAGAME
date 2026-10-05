@@ -139,7 +139,7 @@ void FormatTitle(wchar_t* buf, size_t n, double simUnix, double timeScale, bool 
     if (mode == 1 && sea) {
         swprintf(buf, n,
                  L"GAGAME SEA  |  %04d-%02d-%02d %02d:%02d:%02d UTC  |  %s%.0fx  |  tide %.2f m  "
-                 L"|  %hs  |  Hs model %.2f m (44013 obs %.2f m)  |  %hs %hs  |  %hs",
+                 L"|  %hs  |  Hs model %.2f m (buoys obs %.2f m)  |  %hs %hs  |  %hs",
                  g.tm_year + 1900, g.tm_mon + 1, g.tm_mday, g.tm_hour, g.tm_min, g.tm_sec,
                  paused ? L"PAUSED " : L"", timeScale, tide.focusHeight,
                  sea->currentStatus.empty() ? "no current data" : sea->currentStatus.c_str(),
@@ -1209,6 +1209,7 @@ std::optional<int> FrameLoop::Session() {
     // cascade displacement, the one bed) and is the M7 milestone.
     weather.Init(&compositor, hgtCh, &waterAtlas, &model, &globeModel, &seaState,
                  haveCurrents ? &currents : nullptr);
+    if (sea) weather.SetSeaSources(sea->Sources());   // PHASE C2: the sea state's sources
     if (swe.Ready()) weather.AddExternalWindow("merrimack", &swe, oceanAt);
     if (bathyBostonSwe.Ready()) {
         int iBos = -1;

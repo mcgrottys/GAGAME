@@ -431,16 +431,20 @@ WeatherSample WeatherManager::Query(double latDeg, double lonDeg, double unixT,
             }
         }
     }
-    if (m_sea && m_sea->Ready() && latDeg > 41.5 && latDeg < 44.5 && lonDeg > -71.2 &&
-        lonDeg < -68.5) {
-        const int hi = m_sea->HourIndex(unixT);
-        const SeaHour& h = m_sea->Hour(hi);
-        if (!h.parts.empty()) {
-            s.tp = static_cast<float>(h.combinedTp);
-            s.dirDeg = static_cast<float>(h.combinedFromDeg);
-            if (s.hs <= 0.0f) s.hs = static_cast<float>(h.combinedHs);
-            s.waveSrc = "gfswave gulf point (Hs/Tp/dir)";
-        }
+    // PHASE C2: period and direction (and Hs where the grid has none) from the sea-state source
+    // whose box holds the place, the later listed on top (WaveScale's order) -- each file at its own
+    // place and clock; no box in code.
+    for (const SeaState* src : m_seaSources) {
+        if (!src || !src->Ready() || !src->HasBox()) continue;
+        double b[4];
+        src->Box(b);
+        if (latDeg < b[0] || latDeg > b[2] || lonDeg < b[1] || lonDeg > b[3]) continue;
+        const SeaHour& h = src->Hour(src->HourIndex(unixT));
+        if (h.parts.empty()) continue;
+        s.tp = static_cast<float>(h.combinedTp);
+        s.dirDeg = static_cast<float>(h.combinedFromDeg);
+        if (s.hs <= 0.0f) s.hs = static_cast<float>(h.combinedHs);
+        s.waveSrc = src->Label().c_str();
     }
 
     // ---- wind: the global GFS 10 m vector grid.

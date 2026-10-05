@@ -168,7 +168,8 @@ const Schema& SeaSchema() {
         auto& p = kDoc.sea;
         Schema* sc = new Schema("sea", &p);
         sc->Nest("storm", StormSchema(), &p.storm, "the sandbox sea-state override")
-            .Nest("datum", DatumSchema(), &p.datum, "the MLLW -> NAVD88 link");
+            .Nest("datum", DatumSchema(), &p.datum, "the MLLW -> NAVD88 link")
+            .BindBox("box", p.box, "where data.seastate's forecast stands when its file carries no box, [lon0, lat0, lon1, lat1] degrees; zeros = nowhere (the grid alone)", R);
         return sc;
     }();
     return *s;
@@ -342,7 +343,7 @@ const Schema& SourceSchema() {
             .BindPath("manifest", kSource.manifest,
                       "a manifest of raw rows (the harvester's form: crs, tiles, their bounds), one source", R)
             .Bind("kind", kSource.kind,
-                  "colour | height; \"\" = the pixels decide (8-bit, 3 or 4 channels: colour; one "
+                  "colour | height | seastate (a sea-state file: its forecast and buoys at its box); \"\" = the pixels decide (8-bit, 3 or 4 channels: colour; one "
                   "channel of 16-bit or float: height)", R)
             .Bind("crs", kSource.crs, "EPSG:nnnn, read only where the file carries none", R)
             .Bind("over", kSource.over, Q::Dimensionless, "1",

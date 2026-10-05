@@ -480,8 +480,8 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     // for (the Gulf point) -- mid-ocean waves track their OWN storm, not ours. One law with the
     // hull's twin (sim/WaveScale.h), carried at the tile's corners and lerped per texel like the
     // level and the bed, so the scale is continuous across tiles and across the grid's nodes.
-    const WaveScale waveScale =
-        WaveScale::For(m_globe, m_seaState, m_sea && m_sea->StormOn(), m_simUnix);
+    static const WaveScale kNone{};
+    const WaveScale& waveScale = m_sea ? m_sea->Scale() : kNone;   // PHASE C2: the field
     for (int m = 0; m < kMips; ++m) {
         const double texel = m_baseTexelM * (1 << m);
         const double tileSpan = kTileTexels * texel;
@@ -504,7 +504,7 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
                     // the whole sea, and only a CPU-vs-GPU cross-check found it.
                     double cLat = 0.0, cLon = 0.0;
                     PlaceOfRing(cx, cz, cLat, cLon);
-                    t.hs[k] = static_cast<float>(waveScale.At(cLat, cLon));
+                    t.hs[k] = static_cast<float>(waveScale.At(m_globe, cLat, cLon));
                 }
                 // M13 step 2: the tile's place rows -- the exact map at its origin, its tangent
                 // map at its centre (the midpoint rule; see BankTile). The kernel forms every

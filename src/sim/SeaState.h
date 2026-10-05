@@ -64,7 +64,15 @@ public:
 
     double CycleUnix() const { return m_cycleUnix; }
     const std::string& CycleLabel() const { return m_cycleLabel; }
-    const BuoyObs* Buoy(const char* id) const;
+    // PHASE C2: the file's OWN stations: the mean Hs of its buoys observed within maxAgeS of simUnix
+    // (n = how many), 0 when none.
+    double BuoyHs(double simUnix, double maxAgeS, int* n) const;
+    // ...and its PLACE: lat0, lon0, lat1, lon1 (degrees), from the file's `box`, or set by the scene
+    // (sea.box) for a file that carries none. A file with no box is a source of nowhere.
+    bool HasBox() const { return m_hasBox; }
+    void Box(double out[4]) const { for (int i = 0; i < 4; ++i) out[i] = m_box[i]; }
+    void SetBox(const double b[4]);
+    const std::string& Label() const { return m_label; }
 
     // Nearest forecast entry for a sim time (entries may be several hours apart; clamped).
     int HourIndex(double simUnix) const;
@@ -91,6 +99,9 @@ private:
     std::vector<BuoyObs> m_buoys;
     double m_cycleUnix = 0;
     std::string m_cycleLabel;
+    std::string m_label;            // the file's path
+    double m_box[4] = {0.0, 0.0, 0.0, 0.0};
+    bool m_hasBox = false;
 };
 
 }  // namespace ga

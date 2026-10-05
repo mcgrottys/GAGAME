@@ -229,7 +229,7 @@ bool TreeWater::BandGains(double wx, double wz, double simUnix, double gains[Oce
     PlaceOf(wx, wz, latDeg, lonDeg);
     const double depth = q.levelNavd - BedAt(q, latDeg, lonDeg);
     dry = wt::Smoothstep(0.05, 0.65, depth);
-    const double hsScale = WaveScale::For(m_wx->Globe(), m_sea, m_storm, simUnix).At(latDeg, lonDeg);
+    const double hsScale = m_scale.At(m_wx->Globe(), latDeg, lonDeg);
     BandLaw(q, depth, hsScale, ExposureAt(latDeg, lonDeg), gains);
     return true;
 }
@@ -281,8 +281,7 @@ SurfaceSample TreeWater::Evaluate(double wx, double wz, double simUnix, bool dis
     const double depth = q.levelNavd - s.bedNavd;
     const double dry = wt::Smoothstep(0.05, 0.65, depth);
     const double expo = ExposureAt(latDeg, lonDeg);
-    const double hsScale =
-        WaveScale::For(m_wx->Globe(), m_sea, m_storm, simUnix).At(latDeg, lonDeg);
+    const double hsScale = m_scale.At(m_wx->Globe(), latDeg, lonDeg);
 
     // ---- THE WAVES, in CsBankFill's order and with its weights. The solved field owns the
     // window and the cascades own everywhere else; wWin is the one blend and it is the same
@@ -505,12 +504,10 @@ std::string TreeWater::Describe(double wx, double wz, double simUnix) const {
     }
     // THE BAND LAWS' INPUTS (one wave rule): the sea-state scale, the peak the wave-current gain
     // projects on, and the one term the hull does not read yet -- the swell shadow (exposed).
-    const WaveScale scale = WaveScale::For(m_wx->Globe(), m_sea, m_storm, simUnix);
     char laws[240];
     snprintf(laws, sizeof(laws),
-             "sea state x%.2f (%s, ref Hs %.2f m) | peak %s | swell shadow %s x%.3f",
-             scale.At(latDeg, lonDeg), m_storm ? "a declared storm is the reference" : "grid",
-             scale.hsRef, m_peakValid ? "valid" : "none (wave-current gain 1)",
+             "sea state x%.2f (the grid and %zu source(s), ref Hs %.2f m) | peak %s | swell shadow %s x%.3f",
+             m_scale.At(m_wx->Globe(), latDeg, lonDeg), m_scale.sources.size(), m_scale.hsRef, m_peakValid ? "valid" : "none (wave-current gain 1)",
              m_shadow ? "the page's texels" : "NOT READ (exposed)", ExposureAt(latDeg, lonDeg));
     char bedLaw[96];
     snprintf(bedLaw, sizeof(bedLaw), "bed %s %+.2f m", m_bed ? "the page's texels" : "the slow field",
