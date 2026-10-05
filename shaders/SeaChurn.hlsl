@@ -8,7 +8,7 @@
 //  that is memory, so it cannot be stateless. But it only exists along the entrance bar, so
 //  99% of the domain stays NULL: reads-as-zero everywhere else, dispatches walk the resident
 //  tile list only, and writes never touch unmapped tiles by construction (the residency policy
-//  maps ahead of the jet, and freshly mapped tiles are CLEARED before first use -- their pool
+//  maps ahead of the current, and freshly mapped tiles are CLEARED before first use -- their pool
 //  memory is undefined).
 //
 //  Kernels are list-driven: Dispatch(tileW/16, tileH/16, listCount); id.xy spans one tile,
@@ -22,20 +22,17 @@ cbuffer ChurnCb : register(b0) {
     float gOriginX, gOriginZ, gTexelM, gDomainM;
     uint  gTilesX, gTileW, gTileH, gListCount;
     float gDt, gTau, gPad0, gPad1;
-    float4 gJetA;    // signedMs, halfWidth, seawardDecay, enabled
-    float4 gJetB;    // floodDir xy, ebbDir xy
     float4 gMiscC;   // x = chop-band WAVENUMBER (rad/m; M5c -- was deep phase speed),
                      // y = patchL2, z = advWrapT, w unused
     float4 gWaveD;   // xy = peak propagation dir, z = deriv texture valid, w = source gain
-    float4 gSweM;    // M5c: x = solved-field on, y = current gain, zw = seaward blend range (along the ebb)
+    float4 gSweM;    // M5c: x = solved-field on, y = current gain, zw unused (C3b: no jet to blend)
     float4 gGeoA;    // M9ar: world -> lat/lon: orgLat, orgLon, 1/mPerLat, 1/mPerLon
     float4 gWindow;  // M9az: x, y = world tile index of the window's origin; z = atlas tiles in y in the tenant's array
     // PHASE B2: the camera's world's windows -- its eye in the tangent axes less (0, R, 0), w = R,
     // then its rows (WindowRows.hlsli). Appended at the END on both sides.
     float4 gEyeT;
     HP_WINDOW_ROWS_DECL
-    HP_SOLVER_ROWS_DECL     // the solver's chart about the churn's frame
-    float4 gJetC;           // PHASE C3: the jet's station's cell in that chart, and the cell (m); LAST
+    HP_SOLVER_ROWS_DECL     // the solver's chart about the churn's frame (appended LAST)
 };
 
 #define HP_WINDOW_ROWS 1
@@ -107,31 +104,22 @@ void CsChurnUpdate(uint3 id : SV_DispatchThreadID) {
         (float2(T) * float2(gTileW, gTileH) + float2(id.xy) + 0.5f) * gTexelM;
 
     float src = 0.0f;
-    if (gJetA.w > 0.5f) {
-        // M5c: the same current the WAVES feel -- the solved field inside the estuary (real
-        // channel shape), the analytic jet seaward of the tips, blended on a ramp along the ebb. The M4 analytic-only version deposited over its whole geography-blind
-        // Gaussian band: a tile-shaped white blanket across the flats at every strong ebb.
-        // PHASE C3: the jet stands at its station -- the point in metres east and north of it in the
-        // solver's chart (gJetA.w is 0 where no station is held, so the chart stands here).
-        const float3 cp = ChurnPoint(world);
-        const float2 jc = SolverDen(cp) > 0.0f ? SolverCell(cp) : gJetC.xy + 1e6f;
-        const float2 jx = float2(jc.x - gJetC.x, gJetC.y - jc.y) * gJetC.zw;
-        float2 U = JetVelocity(jx, gJetA.x, gJetA.y, gJetA.z, gJetB.xy, gJetB.zw);
+    {
+        // THE ONE WATER (PHASE C3b): the current the waves feel is the solver's own, the channel's
+        // ebb and flood plume included; outside its domain's cells there is none.
+        float2 U = 0.0f;
         float depth = 30.0f;
+        const float3 cp = ChurnPoint(world);
         if (gSweM.x > 0.5f && gSvO.z > 0.0f && SolverDen(cp) > 0.0f) {   // the cell's ground in the solver's chart
             const float2 suv = SolverCell(cp) / gSvO.xy;   // row 0 north, as the bank's texture
             if (all(suv > 0.001f) && all(suv < 0.999f)) {
                 depth = -PageBedAt(world);   // refined below by the level
                 const float4 s = gSweUv.SampleLevel(sClamp, suv, 0);
-                if (s.w > 0.5f) {
-                    U = lerp(s.xy * gSweM.y, U, smoothstep(gSweM.z, gSweM.w, dot(jx, gJetB.zw)));
-                }
+                if (s.w > 0.5f) U = s.xy * gSweM.y;
             }
         }
-        // Chop phase speed at the LOCAL depth (gMiscC.x is the band wavenumber since M5c).
-        // gJetA.x carries the analytic water level offset... the bed is NAVD; treat the water
-        // level as ~0 NAVD for the churn's coarse purposes (sub-metre level error moves the
-        // blocking threshold negligibly against a 2 m/s jet).
+        // Chop phase speed at the LOCAL depth (gMiscC.x is the band wavenumber since M5c). The bed
+        // is NAVD; the water level is taken as ~0 NAVD for the churn's coarse purposes.
         const float cChop = BandPhaseSpeed(gMiscC.x, max(depth, 0.4f));
         const float blocked = (depth > 0.4f) ? WaveCurrentAmp(U, gWaveD.xy, cChop).y : 0.0f;
         if (blocked > 0.0f) {

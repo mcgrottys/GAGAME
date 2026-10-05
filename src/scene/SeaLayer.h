@@ -43,9 +43,6 @@ public:
     const std::vector<const SeaState*>& Sources() const { return m_sources; }
     const WaveScale& Scale() const { return m_scale; }
 
-    // M3: a current station's tidal clock drives the jet and its wave steepening. PHASE C3: the
-    // station is the one nearest the eye that the solver's domain holds (SetTime); none, no jet.
-    void SetCurrents(const CurrentModel* currents) { m_currents = currents; }
 
     // M5c: the shallow-water solver (owned by main; recorded into this layer's command list
     // each frame) and the CPU bathy grid the swell-shadow march walks.
@@ -150,7 +147,6 @@ public:
     double hsBuoy = 0;       // the mean of the sea-state file's own buoys
     int activeParts = 0;
     std::string statusNote;  // "f012" style label for the title bar
-    std::string currentStatus;   // "ebb 0.72 m/s" for the title bar
     std::string atlasStats;      // "churn 34/2048 t 2.1 MB" for the title bar
     // The CUDEM window holds roughly a third of the real tidal prism, so the solved currents run
     // ~3x under the ACT0816 predictions; this gain (calibrated from the --swe-cycle run, peak
@@ -207,11 +203,9 @@ private:
         float originX, originZ, texelM, domainM;
         uint32_t tilesX, tileW, tileH, listCount;
         float dt, tau, pad0, pad1;
-        float jetA[4];
-        float jetB[4];
         float miscC[4];  // x = chop-band wavenumber (M5c; was deep phase speed); gMiscC
         float waveD[4];
-        float sweM[4];   // M5c: solved-field on, current gain, seaward blend x-range
+        float sweM[4];   // M5c: solved-field on, current gain; zw unused (C3b)
         // M9ar: THE BED IS THE HEIGHT MEGATEXTURE. world -> lat/lon (orgLat, orgLon, 1/mPerLat,
         // 1/mPerLon) and the page frame (org px x, y, 1/16384, world px at z14). Appended LAST
         // -- and M9ax found them inserted BEFORE sweM on this side only: same bytes, every row
@@ -231,8 +225,7 @@ private:
         float hwW[20];
         float hwO[12];
         uint32_t hwS[8];
-        float svU[4], svV[4], svW[4], svO[4];   // PHASE C1: the solver's chart about the churn's frame
-        float jetC[4];   // PHASE C3: the jet's station, its cell in the solver's chart, and the cell (m); LAST
+        float svU[4], svV[4], svW[4], svO[4];   // PHASE C1: the solver's chart about the churn's frame; LAST
     };
     std::wstring m_shaderDir;
     const SeaState* m_sea = nullptr;
@@ -242,10 +235,9 @@ private:
     OceanFft m_fft;
     OceanCpu m_oceanCpu;   // M9bq: the hull's copy of the same three cascades
 
-    // What the churn and the solver take from SetTime: the level, the entrance jet, the chop band's
+    // What the churn and the solver take from SetTime: the level, the chop band's
     // wavenumber and the churn tiles' span.
     float m_seaLevel = 0.0f;
-    float m_jet[4] = {}, m_jetDir[4] = {};
     float m_chopK = 0.0f;
     float m_churnSpan[2] = {1.0f, 1.0f};
     int m_lastHour = -1;
@@ -254,14 +246,6 @@ private:
     float m_stormHs = 0, m_stormTp = 10, m_stormDir = 90;
     float m_windGate = 1.0f;   // Monahan-style wind gate on whitecap coverage
     Gpu* m_gpu = nullptr;
-    const CurrentModel* m_currents = nullptr;
-    int m_ctSta = -1;
-    int m_jetSaid = -2;
-    double m_jetAt[4] = {};   // PHASE C3: the jet's station's cell (tx, ty) and the cell dx, dy (m)
-    // A point of the churn's flat world on the planet; and in metres east and north of the jet's
-    // station in the solver's chart (the planes about the domain's anchor), false where it has none.
-    void PlanetPoint(double wx, double wz, double P[3]) const;
-    bool JetMetres(double wx, double wz, float& east, float& north) const;
     float m_cPeak = 10.0f;     // peak-partition phase speed for the amplification factor
     float m_peakDirX = -1.0f, m_peakDirZ = 0.0f;
     float m_bandRms[3] = {};   // M8: unit-sea rms envelope per band (sqrt(2 m0) * exag)
@@ -277,7 +261,7 @@ private:
     static constexpr float kChurnTexelM = 2.0f;
     static constexpr double kChurnTau = 90.0;      // sim-seconds of streak memory
     void InitChurn(Gpu& gpu, ShaderCompiler& sc);
-    void UpdateChurnResidency(Gpu& gpu, double simUnix, double signedMs);
+    void UpdateChurnResidency(Gpu& gpu, double simUnix);
     void RecordChurn(const FrameContext& ctx);
 
 

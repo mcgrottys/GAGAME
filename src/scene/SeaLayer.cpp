@@ -7,7 +7,6 @@
 #include "hal/Root.h"
 #include "hal/Views.h"
 #include "scene/FieldSet.h"
-#include "sim/Stations.h"
 
 #include <algorithm>
 #include <cmath>
@@ -410,54 +409,6 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
 
     m_seaLevel = static_cast<float>(seaLevelM);
 
-    // ---- M3: the jet, live from its station's prediction clock. PHASE C3: A TERM OF THE CURRENT
-    // STATION AT ITS OWN PLACE -- the station nearest the eye of those the solver's domain holds
-    // (sim/Stations.h), its axis through that place along its own bearings, in the solver's chart.
-    double signedMs = 0.0;
-    double floodDeg = 0.0, ebbDeg = 0.0;
-    m_ctSta = -1;
-    if (m_currents && m_surface && m_swe && m_swe->Domain().Ready()) {
-        const SweDomain& d = m_swe->Domain();
-        double P[3];
-        PlanetPoint(camX, camZ, P);
-        const double r = std::sqrt(P[0] * P[0] + P[1] * P[1] + P[2] * P[2]);
-        const double k = 180.0 / 3.14159265358979323846;
-        m_ctSta = NearestStation(*m_currents, std::asin(P[1] / r) * k, std::atan2(P[2], P[0]) * k,
-                                 [&](double la, double lo) { return d.Holds(la, lo); });
-        if (m_ctSta >= 0) {
-            const TidalCurrentStation& st = m_currents->S(size_t(m_ctSta));
-            d.CellOf(st.lat, st.lon, m_jetAt[0], m_jetAt[1]);
-            m_jetAt[2] = d.dx;
-            m_jetAt[3] = d.dy;
-        }
-    }
-    if (m_ctSta != m_jetSaid) {
-        m_jetSaid = m_ctSta;
-        const TidalCurrentStation* st = m_ctSta < 0 ? nullptr : &m_currents->S(size_t(m_ctSta));
-        if (!st) Log("[jet] no current station in the solver's domain: no jet");
-        if (st) Log("[jet] the current station nearest the eye: %s '%s' at %.5f N %.5f E (cell %.2f, %.2f), flood %.0f / ebb %.0f degT",
-                    st->id.c_str(), st->name.c_str(), st->lat, st->lon, m_jetAt[0], m_jetAt[1], st->floodDeg, st->ebbDeg);
-    }
-    if (m_ctSta >= 0) {
-        signedMs = m_currents->SignedSpeed(static_cast<size_t>(m_ctSta), simUnix);
-        const TidalCurrentStation& st = m_currents->S(static_cast<size_t>(m_ctSta));
-        floodDeg = st.floodDeg;
-        ebbDeg = st.ebbDeg;
-        char cs[48];
-        if (std::abs(signedMs) < 0.05) snprintf(cs, sizeof(cs), "slack");
-        else snprintf(cs, sizeof(cs), "%s %.2f m/s", signedMs > 0 ? "flood" : "ebb",
-                      std::abs(signedMs));
-        currentStatus = cs;
-    }
-    const double d2r = 3.14159265358979 / 180.0;
-    m_jet[0] = static_cast<float>(signedMs);
-    m_jet[1] = 380.0f;
-    m_jet[2] = 1600.0f;
-    m_jet[3] = m_ctSta >= 0 ? 1.0f : 0.0f;
-    m_jetDir[0] = static_cast<float>(std::sin(floodDeg * d2r));
-    m_jetDir[1] = static_cast<float>(std::cos(floodDeg * d2r));
-    m_jetDir[2] = static_cast<float>(std::sin(ebbDeg * d2r));
-    m_jetDir[3] = static_cast<float>(std::cos(ebbDeg * d2r));
     // Representative wavenumber per cascade band (geometric mid of the same 60 m / 12 m cuts
     // OceanFft uses). The SHADER turns these into phase speeds at the local depth -- in deep
     // water ~18/6.5/1.9 m/s, but an 11 s swell over the 4 m bar drops to ~6 m/s, which is why
@@ -483,7 +434,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
         m_churnSpan[0] = spanX;
         m_churnSpan[1] = spanZ;
     }
-    if (m_churnReady) UpdateChurnResidency(*m_gpu, simUnix, signedMs);
+    if (m_churnReady) UpdateChurnResidency(*m_gpu, simUnix);
 
     // M9ba: the swell exposure is a tree node driven from main (ExposureSource::Set on the
     // peak direction and the level); nothing is built here any more.
@@ -499,22 +450,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
 // line-of-sight, not diffraction -- honest about what it is, and it reads right: calm in the
 // lee of the north jetty while the bar outside stays violent.
 
-void SeaLayer::PlanetPoint(double wx, double wz, double P[3]) const {
-    const SurfaceFrame& sf = *m_surface;   // the tangent frame about the anchor's ground (ChurnPoint)
-    const double drop = (wx * wx + wz * wz) / (2.0 * sf.planetR);
-    for (int c = 0; c < 3; ++c) P[c] = wx * sf.east[c] + (sf.planetR - drop) * sf.up[c] + wz * sf.north[c];
-}
-
-bool SeaLayer::JetMetres(double wx, double wz, float& east, float& north) const {
-    double P[3], tx = 0.0, ty = 0.0;
-    PlanetPoint(wx, wz, P);
-    if (!m_swe->Domain().CellOfDir(P, tx, ty)) return false;
-    east = static_cast<float>((tx - m_jetAt[0]) * m_jetAt[2]);
-    north = static_cast<float>((m_jetAt[1] - ty) * m_jetAt[3]);
-    return true;
-}
-
-void SeaLayer::UpdateChurnResidency(Gpu& gpu, double simUnix, double signedMs) {
+void SeaLayer::UpdateChurnResidency(Gpu& gpu, double simUnix) {
     if (!m_churnReady) return;
     const double dtSim = simUnix - m_prevChurnT;
     m_prevChurnT = simUnix;
@@ -527,11 +463,11 @@ void SeaLayer::UpdateChurnResidency(Gpu& gpu, double simUnix, double signedMs) {
         m_churnDt = static_cast<float>(std::clamp(dtSim, 0.0, 30.0));
     }
 
-    // Map every tile whose worst-case opposing current can block the chop band; keep tiles warm
-    // for several decay constants after the breaking stops so lingering wash stays visible.
-    // Deep-water chop speed as the conservative onset (shallow water only blocks EARLIER).
-    const float bandC2 = 1.86f;
-    const double onset = 0.16 * bandC2;
+    // PHASE C3b: map every tile the solver's current can reach -- a tile whose centre stands on the
+    // solver's lattice over a bed that can be wet (+1.2 m NAVD, the residency law's own bound); keep
+    // tiles warm for several decay constants after they leave so lingering wash stays visible. An
+    // over-mapped tile just holds zeros (the deposit is the solved current + depth).
+    const SweDomain* dom = (m_swe && m_swe->Domain().Ready() && m_surface) ? &m_swe->Domain() : nullptr;
     // M9az: walk the WINDOW's tiles (world lattice), not the atlas' slots. Each world tile maps
     // to one slot; a slot that held a different world tile last frame has changed hands.
     const uint32_t NX = m_churn.TilesX(), NY = m_churn.TilesY();
@@ -548,8 +484,6 @@ void SeaLayer::UpdateChurnResidency(Gpu& gpu, double simUnix, double signedMs) {
         sx = uint32_t(mx);
         sy = uint32_t(my);
     };
-    const bool jetOn = m_ctSta >= 0 && std::abs(signedMs) > onset;
-    const float ex = m_jetDir[2], ez = m_jetDir[3];
     for (uint32_t j = 0; j < NY; ++j) {
         for (uint32_t i = 0; i < NX; ++i) {
             const int32_t Tx = T0x + int32_t(i), Ty = T0y + int32_t(j);
@@ -563,17 +497,14 @@ void SeaLayer::UpdateChurnResidency(Gpu& gpu, double simUnix, double signedMs) {
                 m_lastActive[slot] = -1.0e18;
                 if (m_churn.IsResident(sx, sy)) m_pendingClear.push_back(slot);
             }
-            float je = 0.0f, jn = 0.0f;   // PHASE C3: about the jet's station
-            if (!jetOn || !JetMetres((Tx + 0.5) * spanX, (Ty + 0.5) * spanZ, je, jn)) continue;
-            const float along = je * ex + jn * ez;
-            const float px = je - along * ex, pz = jn - along * ez;
-            const float cross2 = px * px + pz * pz;
-            float env = std::exp(-cross2 / (m_jet[1] * m_jet[1]));
-            env *= (along > 0) ? std::exp(-along / m_jet[2]) : 1.0f;
-            // M5c: a WIDE superset -- the deposit is geographic (solved currents + depth), so
-            // an over-mapped tile just holds zeros, while an under-mapped one punches a
-            // visible NULL rectangle into the middle of real breaking.
-            if (env * std::abs(signedMs) > onset * 0.35) {
+            if (!dom) continue;
+            const double wx = (Tx + 0.5) * spanX, wz = (Ty + 0.5) * spanZ;
+            const SurfaceFrame& sf = *m_surface;   // the tangent frame about the anchor's ground (ChurnPoint)
+            const double drop = (wx * wx + wz * wz) / (2.0 * sf.planetR);
+            double P[3], tx = -1.0, ty = -1.0;
+            for (int c = 0; c < 3; ++c) P[c] = wx * sf.east[c] + (sf.planetR - drop) * sf.up[c] + wz * sf.north[c];
+            if (!dom->CellOfDir(P, tx, ty) || tx < 0.0 || ty < 0.0 || tx >= dom->nx || ty >= dom->ny) continue;
+            if (dom->elev[size_t(ty) * dom->nx + size_t(tx)] < 1.2f) {
                 m_lastActive[slot] = simUnix;
                 if (!m_churn.IsResident(sx, sy)) m_churn.RequestMap(sx, sy);
             }
@@ -655,8 +586,6 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
         m_churnCb.tileH = m_churn.TileH();
         m_churnCb.dt = m_churnDt;
         m_churnCb.tau = static_cast<float>(kChurnTau);
-        memcpy(m_churnCb.jetA, m_jet, 16);
-        memcpy(m_churnCb.jetB, m_jetDir, 16);
         // M5c: the chop-band WAVENUMBER -- the kernel derives phase speed from the local depth,
         // (misc[0] was the deep-water speed when churn had no bathy).
         m_churnCb.miscC[0] = m_chopK;
@@ -671,9 +600,8 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
         memcpy(m_churnCb.hwU, &m_churnHw, sizeof(m_churnHw));
         m_churnCb.sweM[0] = m_churnSweWired ? 1.0f : 0.0f;
         m_churnCb.sweM[1] = sweCurrentGain;
-        m_churnCb.sweM[2] = 500.0f;   // the seaward handover ramp, along the ebb from the station
-        for (int c = 0; c < 4; ++c) m_churnCb.jetC[c] = static_cast<float>(m_jetAt[c]);   // PHASE C3
-        m_churnCb.sweM[3] = 900.0f;
+        m_churnCb.sweM[2] = 0.0f;   // PHASE C3b: no jet, no hand-over ramp
+        m_churnCb.sweM[3] = 0.0f;
         m_churnCb.waveD[0] = m_peakDirX;
         m_churnCb.waveD[1] = m_peakDirZ;
         m_churnCb.waveD[2] = 1.0f;

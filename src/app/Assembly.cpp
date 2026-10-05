@@ -389,7 +389,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     // M3: currents -- the ACT tidal clock for the sea's jet, the GoMOFS field for the gulf.
     haveCurrents = currents.Load(S.data.currents);
     for (const scene::StationProps& st : S.stations) currents.Place(st.name, st.lat, st.lon);
-    if (haveCurrents && sea) sea->SetCurrents(&currents);
     if (!haveCurrents) {
         Log("[main] no currents (run: py -3 harvester\\harvest_currents.py)");
     }
