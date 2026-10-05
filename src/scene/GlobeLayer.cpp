@@ -1142,6 +1142,45 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
     // PHASE A2: EVERY WORLD THAT SEES THE LEAF ASKS IT OF ITS OWN WINDOWS (D5): the walk's worlds
     // whose bit is in `seen`, each its slot's slices; a walk of no shared worlds asks for its own.
     const uint32_t worlds = wp.worldCount > 0 ? uint32_t(wp.worldCount) : 1u;
+    // F5 (2026-10-04, the corridor's walk): THE ADDRESS IS PROJECTIVE. A corner's texel on a
+    // window's face is (s, t) = (d . a, d . b) / (d . n), the face's own; its rung only scales it,
+    // X = (s / 2 + 1 / 2) N_rung. So the nine corners are projected ONCE per face the windows
+    // stand on, lazily, and every (world, rank) below reads them by a scale and its origin -- the
+    // same operations in the same order as FaceWindow::TexelOf, so the texels are the bits they
+    // were. Before this each of the corridor's eight worlds re-derived the nine directions and
+    // the nine projections at each of its five ranks: 360 per leaf, 72 ms of walk at seven deep.
+    double cDir[9][3];
+    bool cDirDone = false;
+    double cST[6][9][2];
+    bool cFaceDone[6] = {}, cBehind[6] = {};
+    auto cornersOn = [&](uint32_t f) -> const double (*)[2] {
+        if (!cDirDone) {
+            for (int cy = 0; cy < 3; ++cy) {
+                for (int cx = 0; cx < 3; ++cx) {
+                    CubeDirD(face, u0 + size * cx * 0.5, v0 + size * cy * 0.5, cDir[cy * 3 + cx]);
+                }
+            }
+            cDirDone = true;
+        }
+        if (!cFaceDone[f]) {
+            double bn[3], ba[3], bb[3];
+            CubeFaceAxes(f, bn, ba, bb);
+            bool behind = false;
+            for (int c = 0; c < 9 && !behind; ++c) {
+                const double* d = cDir[c];
+                const double pn = d[0] * bn[0] + d[1] * bn[1] + d[2] * bn[2];
+                if (pn <= 1e-6) {
+                    behind = true;
+                    break;
+                }
+                cST[f][c][0] = (d[0] * ba[0] + d[1] * ba[1] + d[2] * ba[2]) / pn;
+                cST[f][c][1] = (d[0] * bb[0] + d[1] * bb[1] + d[2] * bb[2]) / pn;
+            }
+            cBehind[f] = behind;
+            cFaceDone[f] = true;
+        }
+        return cBehind[f] ? nullptr : cST[f];
+    };
     for (uint32_t wi = 0; wi < worlds; ++wi) {
     if (wp.worldCount > 0 && !(seen & (1u << wi))) continue;
     const uint32_t ws = wp.worldCount > 0 ? wp.worlds[wi].slot : wp.walkSlot;
@@ -1154,29 +1193,21 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
     // straddles a multiple of 16384 asks two or four rectangles. A node reaching past that plane's
     // horizon has no projection there and asks nothing of the window.
     for (uint32_t b = 0; b < wp.wnK[ws]; ++b) {
-        const FaceWindow bw{wp.wnFace[ws][b], wp.wnRung[ws][b], 0, 0};
-        double bn[3], ba[3], bb[3];
-        CubeFaceAxes(bw.face, bn, ba, bb);
+        const uint32_t bf = wp.wnFace[ws][b] < 6 ? wp.wnFace[ws][b] : 5;   // CubeFaceAxes' default
+        const double (*st)[2] = cornersOn(bf);
+        if (!st) continue;   // the leaf reaches past the face's horizon: no projection there
+        const double N = std::ldexp(double(Lattice::kFaceDim), wp.wnRung[ws][b]);   // FaceTexels
         double bmin[2] = {1e300, 1e300}, bmax[2] = {-1e300, -1e300};
-        bool behind = false;
-        for (int cy = 0; cy < 3 && !behind; ++cy) {
-            for (int cx = 0; cx < 3; ++cx) {
-                double d[3];
-                CubeDirD(face, u0 + size * cx * 0.5, v0 + size * cy * 0.5, d);
-                if (d[0] * bn[0] + d[1] * bn[1] + d[2] * bn[2] <= 1e-6) {
-                    behind = true;
-                    break;
-                }
-                double tx = 0.0, ty = 0.0;
-                bw.TexelOf(d, tx, ty);
-                bmin[0] = (std::min)(bmin[0], tx - double(wp.wnAx[ws][b]));
-                bmax[0] = (std::max)(bmax[0], tx - double(wp.wnAx[ws][b]));
-                bmin[1] = (std::min)(bmin[1], ty - double(wp.wnAy[ws][b]));
-                bmax[1] = (std::max)(bmax[1], ty - double(wp.wnAy[ws][b]));
-            }
+        for (int c = 0; c < 9; ++c) {
+            const double tx = (st[c][0] * 0.5 + 0.5) * N - 0.0;   // TexelOf, anchored at the corner
+            const double ty = (st[c][1] * 0.5 + 0.5) * N - 0.0;
+            bmin[0] = (std::min)(bmin[0], tx - double(wp.wnAx[ws][b]));
+            bmax[0] = (std::max)(bmax[0], tx - double(wp.wnAx[ws][b]));
+            bmin[1] = (std::min)(bmin[1], ty - double(wp.wnAy[ws][b]));
+            bmax[1] = (std::max)(bmax[1], ty - double(wp.wnAy[ws][b]));
         }
         const double dim = double(Lattice::kFaceDim);
-        if (behind || bmax[0] <= 0.0 || bmax[1] <= 0.0 || bmin[0] >= dim || bmin[1] >= dim) continue;
+        if (bmax[0] <= 0.0 || bmax[1] <= 0.0 || bmin[0] >= dim || bmin[1] >= dim) continue;
         const double bspan = (std::max)(bmax[0] - bmin[0], bmax[1] - bmin[1]);   // texels, mip 0
         const int bmip = (std::max)(
             0, static_cast<int>(std::ceil(std::log2((std::max)(bspan / (std::max)(px, 16.0), 1.0)))));

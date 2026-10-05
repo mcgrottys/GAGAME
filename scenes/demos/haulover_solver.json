@@ -1,0 +1,35 @@
+{
+  "_readme": [
+    "THE SOLVER AT HAULOVER (PHASE C1, out/integration/plan_phase_c.md). The Haulover gate scene with",
+    "the shallow-water solver standing at Baker's Haulover Inlet instead of the Merrimack: its domain is",
+    "the harvested place's box (data/places/haulover.json), its anchor the box's centre, its cells the",
+    "survey's angular cell over the box in true metres there, its bed the one height stack (Haulover's",
+    "CUDEM tiles where they cover), its tide stations Haulover's own (data/tides/haulover), and no",
+    "river: the sponge stands on whichever sides of the box are open sea by the bed. Nothing in the",
+    "code names this place; only these keys do. PHASE C3: its tide focus and datum link are the station",
+    "nearest the solver's anchor (Haulover Pier), its currents Haulover's own file, and the jet stands at",
+    "the current station the domain holds (Bakers Haulover Cut), placed by CO-OPS's station list."
+  ],
+  "base": "scenes/demos/haulover_portal.json",
+  "scene": {"name": "haulover-solver"},
+  "data": {"tides": "data/tides/haulover/stations.json", "currents": "data/currents/haulover/currents.json"},
+  "sources": [
+    {"name": "massgis.coq2023", "manifest": "data/aerial/aerial.json", "feather": 25},
+    {"name": "noaa.cudem.haulover", "folder": "D:/DataCache/GAGAME/cudem/FL",
+     "match": "ncei19_n26X*_w080X25_2018v1.tif", "kind": "height", "unit": "m", "datum": "NAVD88"},
+    {"name": "gfswave.haulover", "file": "data/sea/haulover/seastate.json", "kind": "seastate"}
+  ],
+  "water": {
+    "swe": {"box": [-80.22, 25.82, -80.03, 26.02], "river": "none"}
+  },
+  "stations": [
+    {"name": "ACT8141", "lat": 25.9, "lon": -80.12333},
+    {"name": "MIH0813", "lat": 25.7855, "lon": -80.183952},
+    {"name": "MIH0812", "lat": 25.78178, "lon": -80.180603},
+    {"name": "MIH0808", "lat": 25.77335, "lon": -80.156921},
+    {"name": "MIH0805", "lat": 25.767771, "lon": -80.143417},
+    {"name": "MIH0806", "lat": 25.765779, "lon": -80.145821},
+    {"name": "MIH0804", "lat": 25.7646, "lon": -80.137428},
+    {"name": "MIH0901", "lat": 25.76405, "lon": -80.13394}
+  ]
+}

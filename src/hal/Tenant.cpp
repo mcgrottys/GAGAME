@@ -487,16 +487,32 @@ uint32_t Tenant::Move(uint32_t slice, const BlockBinding& to) {
     const uint32_t tw0 = m_s->desc.fiber.texW, th0 = m_s->desc.fiber.texH;
     const uint32_t mips = (std::min)(4u, BlockBinding::Mips(tw0, th0));
     uint32_t told = 0;
+    auto changed = [&](const TileRequest& s) {   // the slot (face 0): its ground under from vs to
+        TileRequest a, b;
+        const bool ha = from.Global(s, tw0, th0, a), hb = to.Global(s, tw0, th0, b);
+        return !(ha == hb && (!ha || (a.face == b.face && a.mip == b.mip && a.x == b.x && a.y == b.y)));
+    };
+    if (m_s->mgr) {
+        // F4: the tiles the manager tracks in the slice, told where their ground changed; the
+        // slots that hold nothing have nothing to be told (a claimed set's step is free).
+        std::vector<TileRequest> tracked;
+        m_s->mgr->ForTrackedIn(m_s->id, slice, [&](const TileRequest& q, uint32_t) {
+            if (q.mip < mips) tracked.push_back(q);
+        });
+        for (const TileRequest& q : tracked) {
+            if (!changed(TileRequest{0, q.mip, q.x, q.y})) continue;
+            m_s->Invalidate(q, /*moved=*/true);   // B11: the ground moved
+            ++told;
+        }
+        return told;
+    }
+    // No manager tracks the slice (Unregistered: the caller's sink): any slot may hold, so every
+    // slot whose ground changed is told.
     for (uint32_t m = 0; m < mips; ++m) {
         const uint32_t side = Lattice::kFaceDim >> m, tw = side / tw0, th = side / th0;
         for (uint32_t y = 0; y < th; ++y) {
             for (uint32_t x = 0; x < tw; ++x) {
-                const TileRequest s{0, m, x, y};
-                TileRequest a, b;
-                const bool ha = from.Global(s, tw0, th0, a), hb = to.Global(s, tw0, th0, b);
-                if (ha == hb && (!ha || (a.face == b.face && a.mip == b.mip && a.x == b.x && a.y == b.y))) {
-                    continue;
-                }
+                if (!changed(TileRequest{0, m, x, y})) continue;
                 m_s->Invalidate(TileRequest{slice, m, x, y}, /*moved=*/true);   // B11: the ground moved
                 ++told;
             }

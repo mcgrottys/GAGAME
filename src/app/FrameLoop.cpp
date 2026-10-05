@@ -2007,19 +2007,13 @@ void FrameLoop::ApplyWindowSteps(const std::vector<SurfaceFrame::Moved>& moved) 
             if (!t.Valid()) continue;
             hal::BlockBinding from;
             if (!t.BlockOf(mv.slice, from)) continue;
-            // Before the move: what the slice holds at the window's mips, by slot.
+            // Before the move: what the slice holds at the window's mips (F4: the tracked tiles,
+            // not a walk of the box's slots).
             std::vector<KeptTile> held;
             const uint32_t tW = t.Desc().fiber.texW, tH = t.Desc().fiber.texH;
-            for (uint32_t m = 0; m < 4; ++m) {
-                const uint32_t tw = (Lattice::kFaceDim >> m) / tW, th = (Lattice::kFaceDim >> m) / tH;
-                for (uint32_t y = 0; y < th; ++y) {
-                    for (uint32_t x = 0; x < tw; ++x) {
-                        const TileRequest r{mv.slice, m, x, y};
-                        const uint32_t p = rm.HeldPool(t.Id(), r);
-                        if (p != UINT32_MAX) held.push_back({t.Id(), r, p});
-                    }
-                }
-            }
+            rm.ForTrackedIn(t.Id(), mv.slice, [&](const TileRequest& r, uint32_t pool) {
+                if (r.mip < 4 && pool != UINT32_MAX) held.push_back({t.Id(), r, pool});
+            });
             const uint32_t told = t.Move(mv.slice, mv.to);
             uint32_t left = 0;
             for (const KeptTile& h : held) {
@@ -4062,6 +4056,26 @@ bool FrameLoop::Frame() {
     if (frame >= 10) {   // skip warm-up: PSO/upload stalls are not frame cost
         frameMsSum += dt * 1000.0;
         ++frameMsN;
+        const double ms = dt * 1000.0;
+        int w = 0;
+        for (int i = 1; i < 8; ++i) {
+            if (m_slow[i].ms < m_slow[w].ms) w = i;
+        }
+        double sum = 0.0;
+        for (int k = 0; k < kProfN; ++k) sum += profMs[k];
+        double turnMs = 0.0;
+        for (double p : resMgr.phaseMs) turnMs += p;
+        if (ms > m_slow[w].ms) {
+            m_slow[w] = {ms, profMs[7] - m_profWalkAtFrame, sum - m_profSumAtFrame, turnMs, frame,
+                         uint32_t(m_windows.size()), m_ngMoves, m_windowTold - m_windowToldAtFrame};
+        }
+    }
+    m_windowToldAtFrame = m_windowTold;
+    m_profWalkAtFrame = profMs[7];
+    {
+        double sum = 0.0;
+        for (int k = 0; k < kProfN; ++k) sum += profMs[k];
+        m_profSumAtFrame = sum;
     }
     ++frame;
     // --bed-trace N: the bed the solver reads, every N frames, beside the solver's own probes
@@ -4687,6 +4701,27 @@ int FrameLoop::Finish() {
         Log("[perf] mean frame %.2f ms over %u frames (%.0f fps)%s", frameMsSum / frameMsN,
             frameMsN, 1000.0 / (frameMsSum / frameMsN),
             S.capture.headless ? "" : (gpu.TearingEnabled() ? " [no-vsync, tearing]" : " [vsync]"));
+        std::sort(std::begin(m_slow), std::end(m_slow),
+                  [](const SlowFrame& a, const SlowFrame& b) { return a.ms > b.ms; });
+        std::string s;
+        for (const SlowFrame& f : m_slow) {
+            if (!(f.ms > 0.0)) continue;
+            char b[160];
+            snprintf(b, sizeof(b),
+                     "%sf%u %.1f ms (%u deep; walk %.1f, sections %.1f, residency turn %.1f; %u window steps, "
+                     "%llu slots told)",
+                     s.empty() ? "" : "; ", f.frame, f.ms, f.depth, f.walkMs, f.cpuMs, f.turnMs, f.moves,
+                     static_cast<unsigned long long>(f.told));
+            s += b;
+        }
+        Log("[perf] slowest frames: %s", s.c_str());
+        Log("[perf] globe.SetView (the walk) %.2f ms a frame on average", m_profMs[7] / (std::max)(1u, frameMsN));
+        if (globe) {
+            Log("[perf] the last frame's walk: %llu nodes, %llu leaves, leaf emit (Want + window rects) %.2f ms, "
+                "%llu tile touches",
+                static_cast<unsigned long long>(globe->walkNodes), static_cast<unsigned long long>(globe->walkLeaves),
+                double(globe->walkWantNs) / 1e6, static_cast<unsigned long long>(resMgr.wantTouches));
+        }
     }
     // Step 5: the predicted request stream's hash, every run (Residency.h): two runs of
     // the same flight that print different hashes asked the manager for different tiles.
