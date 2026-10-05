@@ -85,6 +85,7 @@ struct Options {
     bool skyProbe = false;            // --sky-probe: read the atmosphere's tables back off
                                       // the device and hold them against published optical
                                       // depths (SkyLayer::Probe). Once, then the run goes on.
+    uint32_t hullProbeEvery = 0;      // --hull-probe N: the hull's water, bank and drawn (HullProbe)
     uint32_t waterProbeEvery = 0;     // --water-probe N: every N recorded frames, the DRAWN sea
                                       // (depth read back) against each hull's own water (WaterProbe)
     uint32_t pagesEvery = 0;          // --pages-trace N: every Nth residency turn, each tenant split

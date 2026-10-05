@@ -35,6 +35,7 @@ add_executable(gagame
   src/app/Tools/Trace.cpp
   src/app/Tools/SeaVerify.cpp
   src/app/Tools/WaterProbe.cpp
+  src/app/Tools/HullProbe.cpp
   src/app/Tools/BedTrace.cpp
   src/core/BuildInfo.cpp
   src/core/GaAst.cpp

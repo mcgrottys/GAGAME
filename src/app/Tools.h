@@ -181,6 +181,12 @@ void RunWaterProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double plane
                    const WaveField* waveField, const SeaLayer* sea, const SeaState* seaState,
                    const SurfaceFrame& surface, double oceanNow, double simUnix,
                    uint32_t recFrame, const std::vector<scene::WindowLink>* windows);
+// --hull-probe N: at each hull, the twin, the bank and the drawn surface (app/Tools/HullProbe.cpp).
+void RunHullProbe(Gpu& gpu, Renderer& renderer, const Camera& cam, double planetR,
+                  const std::vector<std::unique_ptr<scene::Entity>>& entities,
+                  WaterBankLayer* waterBank, const VesselLayer* vessels,
+                  const ExposureSource* exposure, double simUnix, uint32_t frame,
+                  const std::vector<scene::WindowLink>* windows);
 
 // --bed-trace N: THE BED THE SOLVER READS (app/Tools/BedTrace.cpp). The solver's own BedAt read
 // back through its own kernel (SweSolver::TraceBed) just before the spin-up, just after it, every

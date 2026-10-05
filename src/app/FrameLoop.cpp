@@ -3980,6 +3980,10 @@ bool FrameLoop::Frame() {
                                  frame - probeSettle, &m_windows);
         }
     }
+    if (opt.hullProbeEvery > 0 && !m_entities.empty() && (frame % opt.hullProbeEvery) == 0u) {
+        tools::RunHullProbe(gpu, renderer, cam, planetR, m_entities, waterBank, m_A.vesselLayer,
+                            exposureSrc.get(), simUnix, frame, &m_windows);
+    }
     // --bench-overlap keeps the overlap: RENDER is then record + the BeginFrame fence
     // wait, and the loop mean is the pipelined max(CPU, GPU) a player's frame costs.
     if (opt.bench && !opt.benchOverlap) gpu.WaitIdle();

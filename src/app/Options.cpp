@@ -273,7 +273,7 @@ Options ParseArgs(int argc, char** argv) {
         }
         // The drawn sea against the water each hull reads (app/Tools/WaterProbe.cpp): the scene
         // depth read back every N recorded frames. An instrument -- its readbacks stop the GPU.
-        else if (a == "--water-probe" || a == "--pages-trace" || a == "--res-audit" ||
+        else if (a == "--water-probe" || a == "--hull-probe" || a == "--pages-trace" || a == "--res-audit" ||
                  a == "--bed-trace" || a == "--bank-trace" || a == "--near-ground") {
             // Four every-N instruments on one link (the chain is at C1061's limit, line ~158).
             // --pages-trace is the slice pool's (stage 0): the pages ledger every Nth turn.
@@ -290,6 +290,7 @@ Options ParseArgs(int argc, char** argv) {
             else if (a == "--near-ground") o.nearGroundEvery = every;
             // --starve-plant S: the watchdog's plant -- the loader never starts a load of slice S.
             else if (a == "--starve-plant") o.starvePlant = every;
+            else if (a == "--hull-probe") o.hullProbeEvery = every;
             else o.waterProbeEvery = every;
         }
         else if (a == "--tree-audit" || a == "--tree-prune") {
