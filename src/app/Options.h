@@ -77,6 +77,7 @@ struct Options {
     bool exposure = true;             // --no-exposure: no swell-exposure page (everything exposed)
     std::string gisDump;              // --gis-dump PATH: the gate over the survey box as PGM, exit
     bool resTrace = false;            // --res-trace: residency deficit + slot accounting, per 30 f
+    bool cbTrace = false;             // --cb-trace: the surface's and the kernels' CB fingerprints (F9)
     bool waterTiles = false;          // --water-tiles: what the water would cost on the lattice
     bool threadAudit = false;         // --thread-audit: count tile-file collisions between threads
     bool jobsInline = false;          // --jobs-inline: every job on the calling thread, in order

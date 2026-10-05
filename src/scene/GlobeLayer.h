@@ -187,6 +187,7 @@ public:
         uint32_t wnK[kSlots] = {}, wnFace[kSlots][kBlocks] = {};
         int wnRung[kSlots][kBlocks] = {};
         long long wnAx[kSlots][kBlocks] = {}, wnAy[kSlots][kBlocks] = {};
+        uint32_t wnSlice[kSlots][kBlocks] = {};   // F9: the slice each rank reads (shared or its own)
         bool probeCullFar = false;   // step 23 probe
         // M10: an OCCLUDING SPHERE in this walk's own frame (centre, radius; radius 0 = none).
         // For a level the camera's planet floats in, that planet hides most of it: a node whose

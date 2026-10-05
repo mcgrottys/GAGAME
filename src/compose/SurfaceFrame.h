@@ -159,6 +159,13 @@ struct SurfaceFrame {
     EyeWindows bound[kWindowSlots], drawn[kWindowSlots];
     static constexpr uint32_t kNoSet = 0xFFFFFFFFu;
     uint32_t slotSet[kWindowSlots] = {0, 1, 2, 3, 4, 5, 6, 7};   // the set each slot reads
+    // F9: THE SLICE SET w's RANK k READS. A window is an address (face, rung, origin); two claimed
+    // sets whose boxes at a rank are one address are one window there, and the later reads the
+    // earlier's slice (Share, after every Follow). Its own slice is then unread: no want, no
+    // mapping, and the order releases what it held. sharedRanks counts the ranks read elsewhere.
+    uint32_t slice[kWindowSlots][kMaxRanks] = {};
+    uint32_t sharedRanks = 0;
+    void Share();
     // The slice of the colour and the mask that holds set `w`'s rank `rank` (1..kMaxRanks).
     static uint32_t WindowSlice(uint32_t w, uint32_t rank) { return 6u + w * kMaxRanks + rank - 1u; }
     // The claim: slots 0..n-1 with their eyes (planet frame) take their sets; the other slots none.
@@ -208,7 +215,9 @@ struct SurfaceFrame {
                                double planetR, float out[4][4]);
     static int SliceRectsLL(const hal::BlockBinding& b, double lat0, double lon0, double lat1,
                             double lon1, float out[4][4]);
-    static ChainRows RowsOf(const EyeWindows& w, uint32_t slot, const Placement& own, const double eye[3]);
+    // slices: the slice each rank reads (F9, SurfaceFrame::slice[set]); null = the set's own.
+    static ChainRows RowsOf(const EyeWindows& w, uint32_t slot, const Placement& own, const double eye[3],
+                            const uint32_t* slices = nullptr);
     // THE CHAIN, its C++ body (shaders/Window.hlsli is the HLSL one), op for op in float32: each
     // rank's address FaceWindow::PageTexel over 16384, plus its offset, in [0, 1); the ranks from 1
     // up to the first that does not hold p. Every rank's address is written; returns the chain's

@@ -158,7 +158,7 @@ void SweSolver::LogCbFingerprint() {
     // varies (the tide plane, its rate, u_ext) change it per batch, so the log is the solver's
     // whole CPU-side trajectory. A member, not a static: an owned Boston window is a second
     // instance.
-    const uint64_t h = Fnv1aBytes(&m_cb, sizeof(m_cb));
+    const uint64_t h = CbTrace() ? Fnv1aBytes(&m_cb, sizeof(m_cb)) : m_cbFp;   // F9: --cb-trace
     if (h != m_cbFp) {
         m_cbFp = h;
         Log("[kernel] swe cb FNV-1a %016llx", static_cast<unsigned long long>(h));

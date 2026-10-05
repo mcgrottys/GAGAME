@@ -612,7 +612,7 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
             // hashed here carries it as zero so the fingerprint is the fill and nothing else.
             ChurnCbData fp = m_churnCb;
             fp.listCount = 0;
-            const uint64_t h = Fnv1aBytes(&fp, sizeof(fp));
+            const uint64_t h = CbTrace() ? Fnv1aBytes(&fp, sizeof(fp)) : m_churnCbFp;   // F9: --cb-trace
             if (h != m_churnCbFp) {
                 m_churnCbFp = h;
                 Log("[kernel] churn cb FNV-1a %016llx", static_cast<unsigned long long>(h));
