@@ -957,6 +957,9 @@ private:
     uint32_t m_predLead = 0;                  // 1a: frames ahead the prediction places the eye
     uint32_t m_sampLast[kMaxSamplers] = {};   // the frame each reader last spoke
     uint32_t m_pinSpoke = 0;                  // ... the latest a standing reader spoke
+    // F12: THE LATEST TURN ANY READER SPOKE (the prediction apart: its statement is an interval).
+    // A reader silent in a turn when another spoke has said nothing: its statement stands no more.
+    uint32_t m_lastSpoke = 0;
     uint32_t m_stFrame[kMaxSamplers] = {};    // a reader's statement: its frame and its hash
     uint64_t m_stHash[kMaxSamplers] = {}, m_stHashLatest[kMaxSamplers] = {};
     std::vector<std::pair<int, TileRequest>> m_failedKeys;   // failed or not whole, for the pass

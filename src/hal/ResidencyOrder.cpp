@@ -150,7 +150,8 @@ void ResidencyManager::BirthMap(Gpu& gpu, int tenant) {
 //  THE ORDER (laws 2, 4 and 5; HIERARCHY 4.19). One comparison over every tile the manager knows:
 //    1. a pin (a tile a standing reader asked for, or the floor a slice keeps) first;
 //    2. then how lately it was wanted: 0 in a reader's standing statement, 1 in an earlier one
-//       within the glance, 2 older. A reader's statement stands until it speaks again; a
+//       within the glance, 2 older. A reader's statement stands until it speaks again, and a
+//       reader silent in a turn when another spoke has said nothing (F12); a
 //       PREDICTION is a statement about an interval (1a): what it asks for stands until the
 //       instant it predicted has passed, its lead of `m_predLead` frames;
 //    3. then THE SIZE OF THE TILE'S TEXEL ON ITS READER'S SCREEN (F: the third and fourth keys made
@@ -781,6 +782,12 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
     uint32_t wantSet = 0;
     m_nextExpiry = UINT32_MAX;
     const uint32_t now = m_frame;
+    // F12: WHOSE STATEMENT STANDS. A reader's stands until it speaks again -- and a reader silent
+    // in a turn when another spoke has spoken: it said nothing (a window that left the view, a
+    // subject that left the scene). The pins' rule (m_pinSpoke), said of every reader. A turn in
+    // which no reader spoke (a tool's wait) leaves every statement standing.
+    uint32_t live[kMaxSamplers];
+    for (int s = 0; s < kMaxSamplers; ++s) live[s] = m_sampLast[s] == m_lastSpoke ? m_sampLast[s] : 0u;
     for (OrdRec& r : m_rec) {
         const bool countsHeld = (r.flags & (kHeldBit | kUpBit)) != 0;   // H2
         r.flags = static_cast<uint8_t>((r.flags & ~(kInPBit | kForgetBit | kWasInBit | kUpBit)) |
@@ -798,7 +805,7 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
                  mk && !stand; mk = static_cast<uint16_t>(mk & (mk - 1))) {
                 unsigned s = 0;
                 while (!((mk >> s) & 1u)) ++s;
-                stand = m_sampLast[s] == r.stamp;   // its reader has not spoken since
+                stand = live[s] == r.stamp;   // its reader has not spoken since, nor been silent
             }
         }
         const uint32_t late = stand ? 0u : (r.stamp != 0u && now - r.stamp <= kGlanceTurns) ? 1u : 2u;
@@ -812,7 +819,7 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
             r.bucket = kNoBucket;
             continue;
         }
-        r.weight = StandingWeight(r, now, m_predSid, m_predLead, m_sampLast);   // H5
+        r.weight = StandingWeight(r, now, m_predSid, m_predLead, live);   // H5
         const float meas = PassMeasure(r.texel, r.weight, countsHeld, margin);
         memcpy(&r.meas, &meas, sizeof(r.meas));
         r.bucket = static_cast<uint16_t>(((pin ? 0u : 1u) * 3u + late) * kRungs + MeasureBucket(meas));
@@ -1089,6 +1096,16 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
             L.spoke |= 1u << s;   // H1: who said something else
         }
         m_stHashLatest[s] = m_stHash[s];
+    }
+    // F12: ...and one that said something last time and is silent while another speaks has said
+    // something else too: nothing. The order is made again without its statement.
+    if (m_lastSpoke == m_frame) {
+        for (int s = 0; s < kMaxSamplers; ++s) {
+            if (s == m_predSid || m_stFrame[s] == m_frame || m_stHashLatest[s] == 0ull) continue;
+            m_stHashLatest[s] = 0ull;
+            spoke = true;
+            L.spoke |= 1u << s;
+        }
     }
     const bool dirty = spoke || passTurns == 0 || m_trackEpoch != m_passEpoch ||
                        m_failEvents != m_passFails || m_claimEvents != m_passClaims ||

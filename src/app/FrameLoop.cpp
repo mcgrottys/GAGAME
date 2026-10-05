@@ -3622,8 +3622,18 @@ bool FrameLoop::Frame() {
                         if (!names.empty()) names += " -> ";
                         names += "'" + l.gate->Declared().name + "'";
                     }
-                    Log("[gate] the view reaches %d window%s deep: %s", n, n == 1 ? "" : "s",
-                        names.c_str());
+                    // F12: what the first window is on the screen, and how far its box stands.
+                    const scene::WindowLink& W0 = m_windows.front();
+                    double bc0[3] = {0.0, 0.0, 0.0};
+                    W0.boxInRoot.TransformPoint(bc0[0], bc0[1], bc0[2]);
+                    const double dW = std::sqrt((bc0[0] - cam.px) * (bc0[0] - cam.px) +
+                                                (bc0[1] - cam.py) * (bc0[1] - cam.py) +
+                                                (bc0[2] - cam.pz) * (bc0[2] - cam.pz));
+                    Log("[gate] the view reaches %d window%s deep: %s | the first is %.0f x %.0f px "
+                        "of the screen, its box %.0f m off",
+                        n, n == 1 ? "" : "s", names.c_str(),
+                        W0.visible ? (W0.rect[1] - W0.rect[0]) / view.pixTan : 0.0,
+                        W0.visible ? (W0.rect[3] - W0.rect[2]) / view.pixTan : 0.0, dW);
                     m_windowDepthLogged = n;
                     m_windowRecordsDue = true;
                 }
