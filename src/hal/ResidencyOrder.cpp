@@ -1209,6 +1209,34 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
                 ++reloadedTotal;
             }
         }
+        // 4.7: ONE TILE, MANY WINDOWS. A slot whose address is held takes no read: it is a mapping
+        // (alias), gathered as a loaded tile is. One whose address has a read on the way waits for
+        // it. One whose address has a record with no reader behind it any more (failed, let go,
+        // dropped before it mapped) takes the read itself.
+        {
+            Tenant& tn = m_tenants[tr->tenant];
+            if (!tr->gkey) tr->gkey = KeyOf(tn, tr->req);
+            if (tr->gkey) {
+                auto hit = tn.held.find(tr->gkey);
+                if (hit != tn.held.end()) {
+                    if (hit->second.pool != UINT32_MAX) {
+                        tr->alias = true;
+                        tr->state = TileState::Loaded;   // the gather maps it this turn
+                        m_loading.push_back(tn.tracked[tr->pos]);   // in the queue, as a read is: let go if it leaves the first P
+                        continue;
+                    }
+                    const Tracked* rd = Find(tr->tenant, hit->second.reader);
+                    if (rd && rd != tr && rd->gkey == tr->gkey &&
+                        (rd->state == TileState::Loading || rd->state == TileState::Loaded)) {
+                        continue;   // its bytes are on the way for another slot
+                    }
+                    tn.held.erase(hit);
+                }
+                Tenant::Held& h = tn.held[tr->gkey];   // the read is this slot's
+                h.reader = tr->req;
+            }
+            tr->alias = false;   // a read, whatever this slot was before
+        }
         tr->state = TileState::Loading;
         const std::shared_ptr<Tracked> sp = m_tenants[tr->tenant].tracked[tr->pos];
         m_loading.push_back(sp);
