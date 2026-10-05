@@ -41,16 +41,6 @@ public:
         m_ctSta = currents ? currents->StationIndex("ACT0816") : -1;
     }
 
-    // M5: the bed's survey window, geo in world metres. heightSrv only says a window exists:
-    // the bed itself is the height megatexture (Assembly passes 0).
-    void SetBathy(uint32_t heightSrv, float x0, float z0, float sizeX, float sizeZ) {
-        (void)heightSrv;
-        m_bathyGeo[0] = x0;
-        m_bathyGeo[1] = z0;
-        m_bathyGeo[2] = 1.0f / sizeX;
-        m_bathyGeo[3] = 1.0f / sizeZ;
-    }
-
     // M5c: the shallow-water solver (owned by main; recorded into this layer's command list
     // each frame) and the CPU bathy grid the swell-shadow march walks.
     void SetSwe(SweSolver* swe) { m_swe = swe; }
@@ -59,9 +49,9 @@ public:
         SurfaceFrame::KernelRows(rows, m_churnHw);
         if (!m_surface) return;
         const SurfaceFrame& sf = *m_surface;
-        float st[16];
-        sf.StandingKernel(eye, st);   // the solver's standing window about the churn's frame
-        memcpy(m_churnCb.stU, st, sizeof(st));
+        float sv[16] = {};
+        if (m_swe) m_swe->Domain().KernelRows(sf.east, sf.up, sf.north, eye, sv);   // PHASE C1: the solver's chart
+        memcpy(m_churnCb.svU, sv, sizeof(sv));
         const double* ax[3] = {sf.east, sf.up, sf.north};
         for (int c = 0; c < 3; ++c) {
             m_churnEyeT[c] = static_cast<float>(eye[0] * ax[c][0] + eye[1] * ax[c][1] + eye[2] * ax[c][2] -
@@ -215,7 +205,6 @@ private:
         float jetB[4];
         float miscC[4];  // x = chop-band wavenumber (M5c; was deep phase speed); gMiscC
         float waveD[4];
-        float bathyG[4]; // M5c: CUDEM world x0, z0, 1/sizeX, 1/sizeZ
         float sweM[4];   // M5c: solved-field on, current gain, seaward blend x-range
         // M9ar: THE BED IS THE HEIGHT MEGATEXTURE. world -> lat/lon (orgLat, orgLon, 1/mPerLat,
         // 1/mPerLon) and the page frame (org px x, y, 1/16384, world px at z14). Appended LAST
@@ -236,7 +225,7 @@ private:
         float hwW[20];
         float hwO[12];
         uint32_t hwS[8];
-        float stU[4], stV[4], stW[4], stO[4];   // the solver's standing window about the churn's frame; LAST
+        float svU[4], svV[4], svW[4], svO[4];   // PHASE C1: the solver's chart about the churn's frame; LAST
     };
     std::wstring m_shaderDir;
     const SeaState* m_sea = nullptr;
@@ -257,7 +246,6 @@ private:
     Gpu* m_gpu = nullptr;
     const CurrentModel* m_currents = nullptr;
     int m_ctSta = -1;
-    float m_bathyGeo[4] = {0, 0, 1, 1};
     float m_cPeak = 10.0f;     // peak-partition phase speed for the amplification factor
     float m_peakDirX = -1.0f, m_peakDirZ = 0.0f;
     float m_bandRms[3] = {};   // M8: unit-sea rms envelope per band (sqrt(2 m0) * exag)

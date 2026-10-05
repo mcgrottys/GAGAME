@@ -73,6 +73,7 @@ const char* TypeName(PropType t) {
         case PropType::Similarity: return "similarity";
         case PropType::DualSphere: return "dualSphere";
         case PropType::Color: return "color";
+        case PropType::Box: return "latLonBox";
         case PropType::Path: return "path";
         case PropType::Object: return "object";
         case PropType::List: return "list";

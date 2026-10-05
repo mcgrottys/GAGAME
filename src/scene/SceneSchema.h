@@ -147,6 +147,12 @@ struct SweProps {
     int bedWait = 2;                  // none | map | whole: what the spin-up waits for (finding 48)
     int window = 0;                   // full-weight | survey: where the solver's grid stands (4.17):
                                       // the open face's side drawn in, the walls the survey's
+    // PHASE C1: THE SOLVER'S DOMAIN -- a lat/lon box [lon0, lat0, lon1, lat1] (zeros: the survey's
+    // window, as `window` draws it), the sponge's start from an open side, and the side a river
+    // enters by (west | none).
+    double box[4] = {0.0, 0.0, 0.0, 0.0};
+    float sponge = 1866.0f;
+    int river = 0;
 };
 struct BankProps {
     bool flatBed = false;

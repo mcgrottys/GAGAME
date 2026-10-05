@@ -154,6 +154,7 @@ struct Assembly {
     // what draws or stands on the ground (the foundation sink, the camera's clamp);
     // every reader of a solver's fields reads it by these.
     BathyModel bathySwe, bathyBostonSwe;
+    SweDomain sweDomain;   // PHASE C1: the solver's chart (the scene's box) and its CPU bed
     SweSolver swe;
     SweSolver::BedWindow bedWindow{};   // PHASE B2 (D4): the standing window's rows, for the weather manager
     double riverQ = 70.0;

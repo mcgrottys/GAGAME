@@ -984,7 +984,7 @@ uint64_t WaveField::BucketKey(double simUnix, const PartParam* parts, int nParts
 // the bucket key. The solve then eats exactly the bytes the key describes -- content
 // identity, so the same flow always finds its cache and a changed flow always re-solves.
 void WaveField::RefreshSweCurrent(Gpu& gpu, double simUnix) {
-    if (!m_swe || !m_sweBathy || !m_swe->Ready()) return;
+    if (!m_swe || !m_swe->Ready()) return;
     if (simUnix - m_curReadT < 90.0 && !m_curU.empty()) return;   // solve-cadence refresh
     if (m_inFlight.load()) return;   // never swap planes under a running solve
     m_curReadT = simUnix;
@@ -995,19 +995,21 @@ void WaveField::RefreshSweCurrent(Gpu& gpu, double simUnix) {
     const size_t cells = size_t(m_cfg.nx) * size_t(m_cfg.ny);
     m_curU.assign(cells, 0.0f);
     m_curV.assign(cells, 0.0f);
-    const double x0 = m_sweBathy->WorldX0(), z0 = m_sweBathy->WorldZ0();
-    const double sx = m_sweBathy->WorldSizeX(), sz = m_sweBathy->WorldSizeZ();
+    // PHASE C1: the wave field's grid stands in world.flat (its own chart: WaveFieldSource, C4's);
+    // each cell's place, then the solver's cell under it by the solver's own planes.
+    const SweDomain& dom = m_swe->Domain();
     for (int j = 0; j < m_cfg.ny; ++j) {
         const double wz = m_cfg.orgZ + (double(j) + 0.5) * m_cfg.cellM;
-        const double v = (wz - z0) / sz;
-        if (v < 0.0 || v > 1.0) continue;
-        const int iy = (std::min)(int((1.0 - v) * uh), int(uh) - 1);   // row 0 = NORTH
         const size_t row = size_t(j) * size_t(m_cfg.nx);
         for (int i = 0; i < m_cfg.nx; ++i) {
             const double wx = m_cfg.orgX + (double(i) + 0.5) * m_cfg.cellM;
-            const double u = (wx - x0) / sx;
-            if (u < 0.0 || u > 1.0) continue;
-            const int ix = (std::min)(int(u * uw), int(uw) - 1);
+            double tx = 0.0, ty = 0.0;
+            if (!dom.CellOf(BathyModel::kOrgLat + wz / BathyModel::kMPerLat,
+                            BathyModel::kOrgLon + wx / BathyModel::kMPerLon, tx, ty) ||
+                tx < 0.0 || ty < 0.0 || tx >= double(uw) || ty >= double(uh)) {
+                continue;
+            }
+            const int ix = int(tx), iy = int(ty);   // row 0 = NORTH
             const float* s = &uv4[(size_t(iy) * uw + size_t(ix)) * 4];
             if (s[3] < 0.5f) continue;   // solver-invalid: sponge or dry
             // quantize to 0.05 m/s -- the sig hashes EXACTLY what the solve eats

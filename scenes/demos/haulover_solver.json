@@ -1,0 +1,17 @@
+{
+  "_readme": [
+    "THE SOLVER AT HAULOVER (PHASE C1, out/integration/plan_phase_c.md). The Haulover gate scene with",
+    "the shallow-water solver standing at Baker's Haulover Inlet instead of the Merrimack: its domain is",
+    "the harvested place's box (data/places/haulover.json), its anchor the box's centre, its cells the",
+    "survey's angular cell over the box in true metres there, its bed the one height stack (Haulover's",
+    "CUDEM tiles where they cover), its tide stations Haulover's own (data/tides/haulover), and no",
+    "river: the sponge stands on whichever sides of the box are open sea by the bed. Nothing in the",
+    "code names this place; only these keys do."
+  ],
+  "base": "scenes/demos/haulover_portal.json",
+  "scene": {"name": "haulover-solver"},
+  "data": {"tides": "data/tides/haulover/stations.json"},
+  "water": {
+    "swe": {"box": [-80.22, 25.82, -80.03, 26.02], "river": "none"}
+  }
+}

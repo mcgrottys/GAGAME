@@ -25,7 +25,6 @@ cbuffer BankCb : register(b0) {
     float4 gOrg;        // xy = window origin (world m, snapped), z = base texel m, w = time s
     float4 gPatch;      // xyz = cascade patch sizes m, w = height exaggeration
     float4 gBandK;      // xyz = representative wavenumber per cascade, w = list count
-    float4 gSwe;        // xy = swe world x0/z0, zw = 1/sizeX, 1/sizeZ (0 = solver absent)
     float4 gSweDims;    // xy = swe grid nx/ny, zw = 1 / eta-atlas padded dims
     float4 gMisc;       // x = tile texels, y = seaLevel fallback, zw unused
     uint4  gSlotsA;     // cascade disp SRV slots x3, swe eta SRV slot
@@ -96,7 +95,7 @@ cbuffer BankCb : register(b0) {
     // level whose eye the rings stand about (bank A: the camera's world; set B: the window's world),
     // its chain found at each texel's own point (BankTile.point*). Appended at the END on both sides.
     HP_WINDOW_ROWS_DECL
-    HP_STANDING_ROWS_DECL   // the solver's standing window about the rings' frame (appended LAST)
+    HP_SOLVER_ROWS_DECL     // the solver's chart about the rings' frame (appended LAST)
 };
 
 // M9bl: one component's rows, from whichever half holds it. r = comp >> 1.
@@ -491,13 +490,12 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // delivered through a region readback; --water-probe is the gate that the two stand together.
     float lvl = level;
     float2 cur = 0.0f;
-    // The solver is read where the texel's GROUND lies in its standing window (the point the
-    // windows' chain is given); the rect then finds the cell.
-    if (gSwe.z > 0.0f && t.pointA.w != 0.0f && InSolver(pT)) {
-        const float2 uv = (xz - gSwe.xy) * gSwe.zw;
-        const float2 texel = float2(uv.x * gSweDims.x, (1.0f - uv.y) * gSweDims.y);
+    // The solver is read where the texel's GROUND lies in its chart (PHASE C1: the domain's planes at
+    // the point the windows' chain is given); the planes give the cell.
+    if (gSvO.z > 0.0f && t.pointA.w != 0.0f && SolverDen(pT) > 0.0f) {
+        const float2 texel = SolverCell(pT);
         const float eCells =
-            min(min(texel.x, gSweDims.x - texel.x), min(texel.y, gSweDims.y - texel.y));
+            min(min(texel.x, gSvO.x - texel.x), min(texel.y, gSvO.y - texel.y));
         const float wDom = smoothstep(0.0f, 1.0f, eCells);
         if (wDom > 0.0f) {
             const float dEta = LoadBilinearClamp(gSlotsA.w, texel, gSweDims.xy).x;

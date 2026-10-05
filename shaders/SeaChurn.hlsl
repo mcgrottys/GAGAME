@@ -27,7 +27,6 @@ cbuffer ChurnCb : register(b0) {
     float4 gMiscC;   // x = chop-band WAVENUMBER (rad/m; M5c -- was deep phase speed),
                      // y = patchL2, z = advWrapT, w unused
     float4 gWaveD;   // xy = peak propagation dir, z = deriv texture valid, w = source gain
-    float4 gBathyG;  // M5c: world x0, z0, 1/sizeX, 1/sizeZ of the CUDEM (row 0 = north)
     float4 gSweM;    // M5c: x = solved-field on, y = current gain, zw = seaward blend x-range
     float4 gGeoA;    // M9ar: world -> lat/lon: orgLat, orgLon, 1/mPerLat, 1/mPerLon
     float4 gWindow;  // M9az: x, y = world tile index of the window's origin; z = atlas tiles in y in the tenant's array
@@ -35,7 +34,7 @@ cbuffer ChurnCb : register(b0) {
     // then its rows (WindowRows.hlsli). Appended at the END on both sides.
     float4 gEyeT;
     HP_WINDOW_ROWS_DECL
-    HP_STANDING_ROWS_DECL   // the solver's standing window about the churn's frame (appended LAST)
+    HP_SOLVER_ROWS_DECL     // the solver's chart about the churn's frame (appended LAST)
 };
 
 #define HP_WINDOW_ROWS 1
@@ -114,10 +113,10 @@ void CsChurnUpdate(uint3 id : SV_DispatchThreadID) {
         // Gaussian band: a tile-shaped white blanket across the flats at every strong ebb.
         float2 U = JetVelocity(world, gJetA.x, gJetA.y, gJetA.z, gJetB.xy, gJetB.zw);
         float depth = 30.0f;
-        if (gSweM.x > 0.5f && InSolver(ChurnPoint(world))) {   // the cell's ground in the solver's window
-            const float2 buv = (world - gBathyG.xy) * gBathyG.zw;
-            if (all(buv > 0.001f) && all(buv < 0.999f)) {
-                const float2 suv = float2(buv.x, 1.0f - buv.y);
+        const float3 cp = ChurnPoint(world);
+        if (gSweM.x > 0.5f && gSvO.z > 0.0f && SolverDen(cp) > 0.0f) {   // the cell's ground in the solver's chart
+            const float2 suv = SolverCell(cp) / gSvO.xy;   // row 0 north, as the bank's texture
+            if (all(suv > 0.001f) && all(suv < 0.999f)) {
                 depth = -PageBedAt(world);   // refined below by the level
                 const float4 s = gSweUv.SampleLevel(sClamp, suv, 0);
                 if (s.w > 0.5f) {

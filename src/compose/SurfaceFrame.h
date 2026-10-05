@@ -193,9 +193,6 @@ struct SurfaceFrame {
         uint32_t rank0 = 0;   // PHASE B2: entry k is rank rank0 + k + 1 (a standing window starts anywhere)
     };
     ChainRows StandingRows(const Placement& own, const double origin[3]) const;
-    // ...as a reader's four LAST cbuffer rows (WindowRows.hlsli's HP_STANDING_ROWS_DECL) about the
-    // tangent frame at `origin`: planes U, V, W, then (offset, 1 = a solver stands, 0). Zeros: none.
-    void StandingKernel(const double origin[3], float out[16]) const;
     // PHASE B2: a kernel's rows -- slot `slot`'s windows as bound now (the boxes this frame's readers
     // draw), about that slot's eye (slotEye) in the tangent axes; and the slot whose eye stands
     // nearest a planet point (the bank's rings stand about one), within `reachM`, else ~0.

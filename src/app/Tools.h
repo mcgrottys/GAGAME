@@ -15,6 +15,8 @@
 #pragma once
 
 #include "app/Options.h"
+#include "core/Space.h"
+#include "sim/SweSolver.h"
 
 #include <functional>
 #include <memory>
@@ -90,9 +92,52 @@ std::optional<int> RunOceanProbe(const Options& opt, const TideModel& model, Gpu
                                  const std::function<double(double)>& westAt,
                                  const std::function<double(double)>& westQAt,
                                  WeatherManager& weather);
+// PHASE C1: THE TOOLS' GRID. The solver's cells are its own chart (SweDomain); the tools' points still
+// stand in world.flat (their keys are C4's), so a tool takes a point to its place through the flat
+// chart and then to the solver's cell, and back. The one place the tools meet both charts.
+struct SweToolGrid {
+    const SweDomain* dom = nullptr;
+    Space::Anchor flat;
+    bool CellOfFlat(double x, double z, double& tx, double& ty) const {
+        double la = 0.0, lo = 0.0;
+        flat.LatLonOf(x, z, la, lo);
+        return dom->CellOf(la, lo, tx, ty);
+    }
+    void FlatOfCell(double tx, double ty, double& x, double& z) const {
+        double la = 0.0, lo = 0.0;
+        dom->LatLonOf(tx, ty, la, lo);
+        flat.FlatOf(la, lo, x, z);
+    }
+    // Points of world.flat (x, z pairs) turned into cells in place (-1 where the chart has none).
+    void CellsOfFlat(float* xz, int n) const {
+        for (int i = 0; i < n; ++i) {
+            double tx = -1.0, ty = -1.0;
+            if (!CellOfFlat(xz[2 * i], xz[2 * i + 1], tx, ty)) tx = ty = -1.0;
+            xz[2 * i] = float(tx);
+            xz[2 * i + 1] = float(ty);
+        }
+    }
+    // The CPU bed at a point of world.flat (the nearest cell's); -9999 off the grid.
+    float BedAtFlat(double x, double z) const {
+        double tx = 0.0, ty = 0.0;
+        if (!CellOfFlat(x, z, tx, ty) || tx < 0.0 || ty < 0.0 || tx >= dom->nx || ty >= dom->ny) {
+            return -9999.0f;
+        }
+        return dom->elev[size_t(ty) * dom->nx + size_t(tx)];
+    }
+};
+
+// PHASE C1: the tide focus station as a probe of --swe-cycle -- the solver's level at the station's
+// own place (by the solver's chart) beside the station's own prediction (TideModel), NAVD m.
+struct SweFocusProbe {
+    std::string id;
+    double lat = 0.0, lon = 0.0;
+    std::function<double(double)> pred;
+};
+
 // --swe-cycle N: RunSweCycleMode, a template -- see Tools/SweCycle.h (included below).
 // --swe-uv PATH: the solved current field after spin-up, as pictures. Falls through.
-void RunSweUv(const Options& opt, Gpu& gpu, const BathyModel& bathy, SweSolver& swe);
+void RunSweUv(const Options& opt, Gpu& gpu, const SweToolGrid& grid, SweSolver& swe);
 // --export SPEC: a composed channel out through the manager; exit with the export's code.
 int RunExport(const Options& opt, Gpu& gpu, Compositor& compositor, int hgtCh,
               ResidencyManager& resMgr, int colCh);
@@ -151,7 +196,7 @@ public:
     // The throat's cross-section, found once on the CPU bed, which is geometry here and nothing
     // else (the count reads the trace): the narrowest run of wet-capable cells that crosses the
     // solver's throat point, looked for within kThroatSearchM of it along the channel.
-    void Configure(const BathyModel& bathy, const std::string& dir, ClaimFn claim = {});
+    void Configure(const SweToolGrid& grid, const std::string& dir, ClaimFn claim = {});
     // One reading, logged under `label` and kept for the comparison at the end. `tideNavd` is the
     // plane the throat's cells are held against; `floorMip` the rule's floor (the planted read).
     bool Read(Gpu& gpu, SweSolver& swe, const std::string& label, double tideNavd,

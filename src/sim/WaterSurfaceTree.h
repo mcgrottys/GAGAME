@@ -249,7 +249,10 @@ private:
     mutable WeatherSample m_memo;
     const WeatherSample& SlowAt(double wx, double wz, double simUnix) const;
     // The mean state at a point: the memoised slow field, refined by the solver at the point.
+public:
+    // PHASE C1: public for --water-probe, which names the level's source at the hull.
     WeatherSample MeanStateAt(double wx, double wz, double simUnix) const;
+private:
 };
 
 }  // namespace ga

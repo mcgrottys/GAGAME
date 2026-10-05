@@ -186,7 +186,10 @@ const Schema& SweSchema() {
             .BindEnum("bedWait", p.bedWait, {"none", "map", "whole"},
                       "what the spin-up waits for before its hour: nothing (the kernel reads whatever it reads before the first residency turn), the residency map (one turn: the coarsest resident mip), or the whole bed (every solver's domain read at mip 0)", R)
             .BindEnum("window", p.window, {"full-weight", "survey"},
-                      "where a solver's grid stands: the survey's window drawn in, on the side of an open face that reads the bed (the west face), to where its source paints at full weight (the band is the source's own feather), the other sides keeping the survey's extent; or the survey's whole window, feather included", R);
+                      "where a solver's grid stands: the survey's window drawn in, on the side of an open face that reads the bed (the west face), to where its source paints at full weight (the band is the source's own feather), the other sides keeping the survey's extent; or the survey's whole window, feather included", R)
+            .BindBox("box", p.box, "the solver's domain, [lon0, lat0, lon1, lat1] degrees: its anchor is the box's centre, its cells the survey's angular cell over it in true metres at that latitude, its bed the stack's; zeros = the survey's window (`window`)", R)
+            .Bind("sponge", p.sponge, Q::Length, "m", "where the offshore sponge's ramp begins, in from an open side of the domain (a side whose every cell can be wet and that no river enters); whole 700 m nearer it", R)
+            .BindEnum("river", p.river, {"west", "none"}, "the side of the domain a river enters by (the Flather face and its clock); none = no river", R);
         return sc;
     }();
     return *s;

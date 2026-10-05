@@ -201,6 +201,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     auto& waterAtlas = A->waterAtlas;
     auto& bathy = A->bathy;
     auto& bathySwe = A->bathySwe;
+    auto& sweDomain = A->sweDomain;
     auto& bathyBostonSwe = A->bathyBostonSwe;
     auto& swe = A->swe;
     auto& riverQ = A->riverQ;
@@ -488,13 +489,34 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         // entered since the bed became the composed height. The band is asked of the source, and
         // only the open face's side is drawn in: drawn in on every side the window lost the
         // river's bend in the north band, and the reach behind the face became a pond.
-        bathySwe.DrawFrom(bathy, srcCudem.get(), S.water.swe.window == 0,
-                          SweConfig{}.westBoundary, "merrimack");
-        // PHASE B2 (D4): THE SOLVER'S DOMAIN IS ONE STANDING RANK-2 WINDOW about its centre (rank 2:
-        // the finest whose texel is at most the solver's cell), held whole before the solver starts.
-        if (bathySwe.Ready()) {
-            surface.StandAbout(bathySwe.Lat1() - 0.5 * bathySwe.Ny() * bathySwe.Dlat(),
-                               bathySwe.Lon0() + 0.5 * bathySwe.Nx() * bathySwe.Dlon(), 2u);
+        bathySwe.DrawFrom(bathy, srcCudem.get(), S.water.swe.window == 0, S.water.swe.river == 0,
+                          "merrimack");
+        // PHASE C1 (out/integration/plan_phase_c.md): THE SOLVER'S DOMAIN -- the scene's lat/lon box
+        // (water.swe.box; zeros = the survey's window as `window` draws it), its anchor the box's
+        // centre, its cells the survey's angular cell over the box in true metres at the anchor
+        // (SweDomain: a ratio of planes about the anchor, HIERARCHY 4.4), its CPU bed the one stack
+        // at every cell. PHASE B2 (D4): ONE STANDING RANK-2 WINDOW about the anchor (rank 2: the
+        // finest whose texel is at most the solver's cell), held whole before the solver starts.
+        if (bathySwe.Ready() && hgtCh >= 0 && !marsMode) {
+            const double* bx = S.water.swe.box;
+            const bool own = bx[0] != 0.0 || bx[1] != 0.0 || bx[2] != 0.0 || bx[3] != 0.0;
+            const double lon0 = own ? bx[0] : bathySwe.Lon0();
+            const double lat0 = own ? bx[1] : bathySwe.Lat1() - bathySwe.Ny() * bathySwe.Dlat();
+            const double lon1 = own ? bx[2] : bathySwe.Lon0() + bathySwe.Nx() * bathySwe.Dlon();
+            const double lat1 = own ? bx[3] : bathySwe.Lat1();
+            const auto cx = static_cast<uint32_t>(std::lround((lon1 - lon0) / bathySwe.Dlon()));
+            const auto cy = static_cast<uint32_t>(std::lround((lat1 - lat0) / bathySwe.Dlat()));
+            if (lon1 > lon0 && lat1 > lat0 && cx > 1 && cy > 1) {
+                constexpr double kD2Rd = 3.14159265358979323846 / 180.0;
+                sweDomain.Place(lat0, lon0, lat1, lon1, cx, cy, planetR);
+                sweDomain.FillBed([&](double la, double lo, double resM) {
+                    return compositor.SampleHeightStack(hgtCh, la * kD2Rd, lo * kD2Rd, resM);
+                });
+                surface.StandAbout(sweDomain.latC, sweDomain.lonC, 2u);
+            } else {
+                Log("[swe] water.swe.box [%.5f, %.5f, %.5f, %.5f] REFUSED: not a box of at least "
+                    "two cells -- no solver", lon0, lat0, lon1, lat1);
+            }
         }
         // M9k/M9n: THE BED, through GA Load -> normalize -> GA Compose (the six-layer
         // height stack, LayeredOver) -> a reserved, paged, mipped sparse array. Built HERE,
@@ -515,8 +537,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             // The sea keeps the SOLVER's world frame (the eta atlas is aligned to it);
             // 0 in the SRV slot means "a survey window exists" and is never sampled.
             Log("[bed] the sea and the solver read the height megatexture -- the only bed");
-            sea->SetBathy(0u, bathySwe.WorldX0(), bathySwe.WorldZ0(), bathySwe.WorldSizeX(),
-                          bathySwe.WorldSizeZ());
         }
     } else {
         Log("[main] no bathymetry (run: py -3 harvester\\harvest_bathy.py); open-ocean sea");
@@ -524,7 +544,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
 
     // M5c: the sparse shallow-water solver -- the estuary's own hydrodynamics, tide-forced
     // offshore and river-forced upstream, feeding the sea's mean surface and currents.
-    if (bathy.Ready() && sea && S.water.swe.enabled) {
+    if (bathy.Ready() && sea && S.water.swe.enabled && sweDomain.Ready()) {
         // ---- M9m: THE COMPOSE TREE, and the tide step that forced it into existence.
         //
         // Depth is not a dataset anyone ships. It is water level minus bed, and those two
@@ -595,7 +615,10 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                                                          : "DIVERGENT -- check the link");
             }
         }
-        swe.Init(gpu, renderer.Shaders(), shaderDir, bathySwe);   // bed bound below
+        SweConfig sweCfg;
+        sweCfg.spongeM = S.water.swe.sponge;
+        sweCfg.westBoundary = S.water.swe.river == 0;
+        swe.Init(gpu, renderer.Shaders(), shaderDir, sweDomain, sweCfg);   // bed bound below
         // M6r: the discharge is LIVE again -- it rides the Flather boundary's u_ext (the
         // station stage still carries it into eta; the prism term dwarfs it either way).
         riverQ = (S.water.swe.riverQ > 0) ? S.water.swe.riverQ
@@ -644,7 +667,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     if (sea && bathy.Ready() && !marsMode) {
         auto wbOwned = std::make_unique<WaterBankLayer>();
         waterBank = wbOwned.get();
-        waterBank->Configure(shaderDir, sea, &swe, &bathySwe, &waterAtlas, &compositor,
+        waterBank->Configure(shaderDir, sea, &swe, &waterAtlas, &compositor,
                              hgtCh, &globeModel, &seaState);
         waterBank->SetBaseTexel(waterScene.bankTexelM);   // M8h ring density (scene)
         waterBank->SetSurface(&surface);   // M12 step 4b: the world.flat chart, for the geoA row
@@ -669,7 +692,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         if (droste || !S.gates.empty()) {
             auto wbB = std::make_unique<WaterBankLayer>();
             waterBankB = wbB.get();
-            waterBankB->Configure(shaderDir, sea, &swe, &bathySwe, &waterAtlas, &compositor,
+            waterBankB->Configure(shaderDir, sea, &swe, &waterAtlas, &compositor,
                                   hgtCh, &globeModel, &seaState);
             waterBankB->SetBaseTexel(waterScene.bankTexelM);
             waterBankB->SetSurface(&surface);
@@ -836,9 +859,6 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                     SweSolver::BedWindow& bw = A->bedWindow;
                     memcpy(bw.rows, &kw, sizeof(kw));
                     bw.slice = SurfaceFrame::kStandingSlice;
-                    bw.latC = bathySwe.Lat1() - 0.5 * bathySwe.Ny() * bathySwe.Dlat();
-                    bw.lonC = bathySwe.Lon0() + 0.5 * bathySwe.Nx() * bathySwe.Dlon();
-                    bw.R = planetR;
                     swe.SetBed(gpu, resMgr.TextureRes(hgtTenant), resMgr.ResidencyRes(hgtTenant),
                                resMgr.Mips(hgtTenant), bw);
                 }
@@ -1172,16 +1192,18 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                     for (uint32_t lvl = 3; lvl < vb.MipCount(); ++lvl) {
                         const uint32_t w = (std::max)(1u, swe.Nx() >> lvl);
                         const uint32_t h = (std::max)(1u, swe.Ny() >> lvl);
-                        // The page's own lat/lon extent, EXACTLY -- not the anchor-linear
-                        // form, which is declared valid only near its anchor.
+                        // PHASE C1: the page about the solver's own anchor -- its box's south-west
+                        // corner, the level's texel in degrees at the anchor's latitude (the domain's
+                        // chart to second order across the box; these levels are 80 m and up).
                         DomainCompositor::PageGeo geo;
+                        const SweDomain& sd = swe.Domain();
                         const double mpt = swe.CellM() * double(1u << lvl);
-                        geo.lon0 = BathyModel::kOrgLon +
-                                   (bathySwe.WorldX0() + 0.5 * mpt) / BathyModel::kMPerLon;
-                        geo.lat0 = BathyModel::kOrgLat +
-                                   (bathySwe.WorldZ0() + 0.5 * mpt) / BathyModel::kMPerLat;
-                        geo.dLon = mpt / BathyModel::kMPerLon;
-                        geo.dLat = mpt / BathyModel::kMPerLat;
+                        const double mPerLat = sd.R * 3.14159265358979323846 / 180.0;
+                        const double mPerLon = mPerLat * std::cos(sd.latC * 3.14159265358979323846 / 180.0);
+                        geo.lon0 = sd.lon0 + 0.5 * mpt / mPerLon;
+                        geo.lat0 = sd.lat0 + 0.5 * mpt / mPerLat;
+                        geo.dLon = mpt / mPerLon;
+                        geo.dLat = mpt / mPerLat;
 
                         std::vector<float> uv, cov;
                         const uint32_t covered =
@@ -1297,10 +1319,14 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                     }
                 }
             }
+            // The lens draws in world.flat (the globe's chart, C4/C5's): the domain's box through it.
+            double lx0 = 0.0, lz0 = 0.0, lx1 = 0.0, lz1 = 0.0;
+            surface.flat.FlatOf(swe.Domain().lat0, swe.Domain().lon0, lx0, lz0);
+            surface.flat.FlatOf(swe.Domain().lat1, swe.Domain().lon1, lx1, lz1);
             globe->SetVelGradLens(
-                swe.VelGradSrv(), bathySwe.WorldX0(), bathySwe.WorldZ0(), bathySwe.WorldSizeX(),
-                bathySwe.WorldSizeZ(), swe.VelGradResMapSrv(),
-                static_cast<float>(bathySwe.WorldSizeX() / (std::max)(1u, swe.Nx())),
+                swe.VelGradSrv(), float(lx0), float(lz0), float(lx1 - lx0), float(lz1 - lz0),
+                swe.VelGradResMapSrv(),
+                static_cast<float>((lx1 - lx0) / (std::max)(1u, swe.Nx())),
                 static_cast<float>(swe.VelGradResMapW()),
                 static_cast<float>(swe.VelGradResMapH()), swe.VelGradMips());
         }

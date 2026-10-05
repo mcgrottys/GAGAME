@@ -101,9 +101,8 @@ public:
     // read back on the main thread at a quantized cadence, resampled onto the solve
     // grid (row-0-north flip declared), scaled by the prism-truncation gain, and their
     // quantized bytes join the bucket key: content identity, not a clock.
-    void SetSweCurrent(class SweSolver* swe, const class BathyModel* bathy, float gain) {
+    void SetSweCurrent(class SweSolver* swe, float gain) {
         m_swe = swe;
-        m_sweBathy = bathy;
         m_sweGain = gain;
     }
 
@@ -279,7 +278,6 @@ private:
     const CurrentModel* m_currents = nullptr;
     int m_actSta = -1;
     class SweSolver* m_swe = nullptr;             // M8: the real flow (optional)
-    const class BathyModel* m_sweBathy = nullptr;
     float m_sweGain = 3.2f;                       // prism-truncation magnitude restore
     std::vector<float> m_curU, m_curV;            // solve-grid planes, main-thread owned
     uint64_t m_curSig = 0;                        // quantized content hash -> bucket key

@@ -217,6 +217,10 @@ Schema& Schema::BindColor(const char* key, float (&f)[4], const char* doc, Reloa
     Add(key, PropType::Color, Field::F4, &f, doc, r);
     return *this;
 }
+Schema& Schema::BindBox(const char* key, double (&f)[4], const char* doc, Reload r) {
+    Unit(Add(key, PropType::Box, Field::D4, &f, doc, r), Quantity::Angle, "deg");
+    return *this;
+}
 Schema& Schema::Nest(const char* key, const Schema& sub, const void* subPrototype,
                      const char* doc) {
     Add(key, PropType::Object, Field::None, subPrototype, doc, Reload::Hot).sub = &sub;
@@ -559,8 +563,9 @@ bool ParseProp(const PropDecl& d, const JsonValue& v, const std::string& path, P
             break;
         }
         case PropType::Vec3:
+        case PropType::Box:
         case PropType::Color: {
-            const int need = d.type == PropType::Vec3 ? 3 : 3;
+            const int need = d.type == PropType::Vec3 ? 3 : d.type == PropType::Box ? 4 : 3;
             const int most = d.type == PropType::Vec3 ? 3 : 4;
             if (v.type != JsonValue::Type::Array || static_cast<int>(v.arr.size()) < need ||
                 static_cast<int>(v.arr.size()) > most) {
@@ -615,7 +620,8 @@ JsonValue PropToJson(const PropDecl& d, const PropValue& v) {
         case PropType::Path: return JsonStr(v.s);
         case PropType::Enum: return JsonStr(v.s);
         case PropType::Vec3: return NumArray(v.v, 3);
-        case PropType::Color: return NumArray(v.v, 4);
+        case PropType::Color:
+        case PropType::Box: return NumArray(v.v, 4);
         case PropType::DualSphere: {
             JsonValue o = JsonObj();
             JsonSet(o, "c", NumArray(v.v, 3));
@@ -642,6 +648,7 @@ bool PropEqual(const PropDecl& d, const PropValue& a, const PropValue& b) {
         case PropType::Enum: return a.s == b.s;
         case PropType::Vec3: return a.v[0] == b.v[0] && a.v[1] == b.v[1] && a.v[2] == b.v[2];
         case PropType::Color:
+        case PropType::Box:
         case PropType::DualSphere:
             return a.v[0] == b.v[0] && a.v[1] == b.v[1] && a.v[2] == b.v[2] && a.v[3] == b.v[3];
         case PropType::Motor:

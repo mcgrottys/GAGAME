@@ -23,14 +23,14 @@ cbuffer SweCb : register(b0) {
     uint  gEtaTilesX, gFluxTilesX;
     uint  gEtaTileW, gEtaTileH, gFluxTileW, gFluxTileH;
     uint  gListCount;
-    float gWorldX0;
+    float gSpongeSides;          // PHASE C1: the open sides, a bitmask: 1 N, 2 S, 4 W, 8 E
     float gDy;                   // M6r: north-south texel metres (equiangular CUDEM grid:
                                  // dy = 13.65 != dx = 10.08 -- the per-axis metric)
     float gWestUext;             // M6r: Flather's u_ext (m/s, +east): the west TRANSPORT
                                  // (river Q minus the upriver prism demand) over the live
                                  // section area -- radiation alone cannot carry a prism
     float gDx, gDt, gDamp, gTideNavd;
-    float gSpongeX0, gSpongeRate, gRiverDEta, gGravity;   // gRiverDEta = west-boundary target
+    float gSpongeD0, gSpongeRate, gRiverDEta, gGravity;   // gRiverDEta = west-boundary target
                                                           // DEVIATION (river tide - ocean tide)
     float4 gRiverBox;            // x = west EXTERIOR column width (texels; Flather pin, M6r),
                                  // y = relax rate per substep (south strip only),
@@ -39,38 +39,27 @@ cbuffer SweCb : register(b0) {
                                  // outside the window, so its tide enters as data too (M6d)
     float gTideRate;             // M6r: d(tide plane)/dt, m/s -- the prism source term
     float gPadA, gPadB, gPadC;
-    float4 gGeoLL;               // M9ar: lattice -> lat/lon: lon0, lat1, dlon, -dlat (deg/texel)
-    // PHASE B2 (D4): the standing window's address of a cell (SweSolver::SetBed): its offsets from
-    // the centre (rad), the steps (rad); the centre's sin and cos of latitude, R, the cell's grain.
-    float4 gStandA;
-    float4 gStandB;
+    // PHASE C1: a cell's place in the domain's chart (SweSolver::SetBed): the first cell's centre in
+    // the anchor's tangent plane over R and the steps (s0, ds, t0, dt); the anchor's up and R; its
+    // east and the cell's grain (m). North = east x up.
+    float4 gCellX;
+    float4 gAnc;
+    float4 gEast;
     HP_WINDOW_ROWS_DECL
 };
 
 #define HP_WINDOW_ROWS 1
 #include "HeightPages.hlsli"
 
-// A small angle's sine to float precision for |x| < 0.02 rad (a domain is kilometres): the GPU's
-// sin is held to an ABSOLUTE error of 0.0008 near zero, which would lose these digits.
-float SweSinSmall(float x) {
-    const float u = x * x;
-    return x * (1.0f - u * (1.0f / 6.0f - u * (1.0f / 120.0f)));
-}
-// THE CELL'S POINT about the standing window's centre C, in C's east / up / north: the exact
-// difference of two points of the sphere, from the small offsets (dphi, dlam) alone --
-//   e = R cos phi sin dlam
-//   n = R (sin dphi + sin phiC cos phi 2 sin^2(dlam / 2))
-//   u = R (-2 sin^2(dphi / 2) - cos phi cos phiC 2 sin^2(dlam / 2))
-// with cos phi = cos phiC cos dphi - sin phiC sin dphi. No two large numbers are subtracted.
-float3 SwePointAbout(float dphi, float dlam) {
-    const float sp = gStandB.x, cp = gStandB.y, R = gStandB.z;
-    const float sdp = SweSinSmall(dphi), sh = SweSinSmall(0.5f * dphi);
-    const float cdp = 1.0f - 2.0f * sh * sh;
-    const float cphi = cp * cdp - sp * sdp;
-    const float sl = SweSinSmall(0.5f * dlam);
-    const float hav = 2.0f * sl * sl;
-    return float3(R * cphi * SweSinSmall(dlam), R * (-2.0f * sh * sh - cphi * cp * hav),
-                  R * (sdp + sp * cphi * hav));
+// THE CELL'S POINT about the domain's anchor C (the standing window's centre), in C's east / up /
+// north: the cell's place (s, t) in the anchor's tangent plane (over R) carried onto the sphere along
+// its ray from the centre -- R (s k, k - 1, t k), k = 1 / sqrt(1 + s^2 + t^2), with k - 1 taken as
+// -q / (sqrt(1 + q) (1 + sqrt(1 + q))) so no two large numbers are subtracted.
+float3 SwePointAbout(float s, float t) {
+    const float q = s * s + t * t;
+    const float r = sqrt(1.0f + q);
+    const float k = 1.0f / r;
+    return gAnc.w * float3(s * k, -q / (r * (1.0f + r)), t * k);
 }
 
 StructuredBuffer<uint> gTileList : register(t0);
@@ -104,16 +93,12 @@ RWTexture2DArray<float4> gMv : register(u3);
 
 float BedAt(int2 t) {
     if (any(t < 0) || t.x >= (int)gNx || t.y >= (int)gNy) return 100.0f;   // outside = wall
-    // Lattice texel centre -> lat/lon -> the planet's height: the page where it is resident
-    // and at least as fine as the cube, the cube face otherwise (HeightPages.hlsli).
-    const float lon = gGeoLL.x + (t.x + 0.5f) * gGeoLL.z;
-    const float lat = gGeoLL.y + (t.y + 0.5f) * gGeoLL.w;
-    // PHASE B2 (D4): the standing window's chain at the cell's own point, at the cell's grain; the
-    // cube by the direction where the window does not hold it.
-    const float latR = lat * 0.01745329252f, lonR = lon * 0.01745329252f;
-    const float3 dir = float3(cos(latR) * cos(lonR), sin(latR), cos(latR) * sin(lonR));
-    const float3 p = SwePointAbout(gStandA.x + (t.y + 0.5f) * gStandA.z, gStandA.y + (t.x + 0.5f) * gStandA.w);
-    return HpHeightChain(gBathy, gBathyRes, dir, WindowChain(p, 0u), gStandB.w);
+    // PHASE C1: the cell's centre in the domain's chart -> its point on the sphere; the standing
+    // window's chain there at the cell's grain (PHASE B2 D4), the cube by the direction where the
+    // window does not hold it.
+    const float s = gCellX.x + float(t.x) * gCellX.y, tn = gCellX.z + float(t.y) * gCellX.w;
+    const float3 dir = normalize(gAnc.xyz + s * gEast.xyz + tn * cross(gEast.xyz, gAnc.xyz));
+    return HpHeightChain(gBathy, gBathyRes, dir, WindowChain(SwePointAbout(s, tn), 0u), gEast.w);
 }
 
 float EtaAt(int2 t) {
@@ -133,9 +118,17 @@ float SurfaceAt(int2 t, out float h) {
 // The offshore sponge, RAMPED: 0 inside the estuary and over the entrance bar (live SWE), 1 in
 // open water where the stateless ocean is the truth. A hard sponge edge is a reflecting wall --
 // the first cut had one, and the deep zone checkerboarded and flooded the throat with slosh.
+// PHASE C1: it stands on the domain's OPEN SIDES (SweDomain::Bound: every cell along the side can be
+// wet, and no river enters there), by the cell's distance to the nearest of them.
 float SpongeAt(int2 t) {
-    const float worldX = gWorldX0 + (t.x + 0.5f) * gDx;
-    return smoothstep(gSpongeX0, gSpongeX0 + 700.0f, worldX);
+    const uint sides = (uint)gSpongeSides;
+    const float2 c = float2(t) + 0.5f;
+    float d = 3.0e38f;
+    if (sides & 1u) d = min(d, c.y * gDy);
+    if (sides & 2u) d = min(d, (float(gNy) - c.y) * gDy);
+    if (sides & 4u) d = min(d, c.x * gDx);
+    if (sides & 8u) d = min(d, (float(gNx) - c.x) * gDx);
+    return 1.0f - smoothstep(gSpongeD0 - 700.0f, gSpongeD0, d);
 }
 
 uint2 EtaTexel(uint3 id) {

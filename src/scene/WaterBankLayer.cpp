@@ -29,13 +29,12 @@ constexpr double kD2R = kPiD / 180.0;
 }  // namespace
 
 void WaterBankLayer::Configure(const std::wstring& shaderDir, SeaLayer* sea, SweSolver* swe,
-                               const BathyModel* sweBathy, const WaterAtlas* atlas,
+                               const WaterAtlas* atlas,
                                Compositor* comp, int hgtCh, const GlobeModel* globe,
                                const SeaState* seaState) {
     m_shaderDir = shaderDir;
     m_sea = sea;
     m_swe = swe;
-    m_sweBathy = sweBathy;
     m_atlas = atlas;
     m_comp = comp;
     m_hgtCh = hgtCh;
@@ -662,11 +661,7 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     for (int c = 0; c < 3; ++c) {
         cb.bandK[c] = static_cast<float>(std::sqrt(kCut[c] * kCut[c + 1]));
     }
-    if (m_swe && m_swe->Ready() && m_sweBathy) {
-        cb.swe[0] = m_sweBathy->WorldX0();
-        cb.swe[1] = m_sweBathy->WorldZ0();
-        cb.swe[2] = 1.0f / m_sweBathy->WorldSizeX();
-        cb.swe[3] = 1.0f / m_sweBathy->WorldSizeZ();
+    if (m_swe && m_swe->Ready()) {
         cb.sweDims[0] = static_cast<float>(m_swe->Nx());
         cb.sweDims[1] = static_cast<float>(m_swe->Ny());
         cb.sweDims[2] = 1.0f / m_swe->PadW();
@@ -719,7 +714,7 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
     cb.sweB[1] = cb.sweB[2] = cb.sweB[3] = 0.0f;
     static_assert(sizeof(SurfaceFrame::KernelWindowRows) == sizeof(float) * 80, "the kernels' rows");
     memcpy(cb.hwU, &m_hw, sizeof(m_hw));   // PHASE B2: hwU..hwS, KernelRows' packing
-    memcpy(cb.stU, m_st, sizeof(m_st));   // stU..stO, StandingKernel's packing
+    memcpy(cb.svU, m_sv, sizeof(m_sv));   // svU..svO, SweDomain::KernelRows' packing
     cb.debugA[0] = flatBed ? 1.0f : 0.0f;   // M9p: the A/B that proves the bed moves geometry
     cb.debugA[1] = flatBedNavd;
     cb.debugA[2] = cb.debugA[3] = 0.0f;

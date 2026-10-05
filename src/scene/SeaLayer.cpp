@@ -592,7 +592,6 @@ void SeaLayer::RecordChurn(const FrameContext& ctx) {
         m_churnCb.miscC[1] = m_fft.PatchL(2);
         m_churnCb.miscC[2] = static_cast<float>(std::fmod(m_tSec, 1024.0f));
         m_churnCb.miscC[3] = 0;
-        memcpy(m_churnCb.bathyG, m_bathyGeo, sizeof(m_bathyGeo));
         // M12 step 4b: the world.flat chart's row and the height window's row come from the
         // surface and the window's lattice (the old eight casts bit for bit; the [kernel]
         // hash below is the gate).

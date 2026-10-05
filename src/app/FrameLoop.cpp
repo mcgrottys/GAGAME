@@ -778,12 +778,9 @@ std::optional<int> FrameLoop::Session() {
     if (mode == 1 && S.scene.view == "orbit") cam = camGlobe;
     if (globe) {
         // (M12 step 4a: the rows above went into the surface the globe reads -- SetSurface.)
-        if (bathy.Ready()) {
-            const double lon0 = BathyModel::kOrgLon + bathy.WorldX0() / BathyModel::kMPerLon;
-            const double lat1 = BathyModel::kOrgLat +
-                                (bathy.WorldZ0() + bathy.WorldSizeZ()) / BathyModel::kMPerLat;
-            globe->SetEstuaryWindow(lon0, lat1, bathy.WorldSizeX() / BathyModel::kMPerLon,
-                                    bathy.WorldSizeZ() / BathyModel::kMPerLat);
+        if (bathy.Ready()) {   // the survey's own lat/lon extent (PHASE C1: no world.flat)
+            globe->SetEstuaryWindow(bathy.Lon0(), bathy.Lat1(), bathy.Nx() * bathy.Dlon(),
+                                    bathy.Ny() * bathy.Dlat());
         }
     }
     // ---- M10: THE DROSTE LINK (src/core/Droste.h). The root's ADDRESS, hung as a leaf:
@@ -1106,8 +1103,49 @@ std::optional<int> FrameLoop::Session() {
     // The west edge's along-channel kilometre tracks the WINDOW (straight-line distance is
     // a fine proxy on this reach): ~5.3 km for the original mouth window, ~15.5 for the
     // M6d wide window (bracketed by Merrimacport/Riverside instead of Newburyport/Salisbury).
-    kWestKm =
-        bathySwe.Ready() ? std::min(20.0, std::abs(bathySwe.WorldX0()) / 1000.0) : 6.0;
+    // PHASE C1: the river's ENTRY keys it -- the deepest cell of the domain's river side, its
+    // kilometre that point's projection onto the stations' river profile (consecutive stations by
+    // riverKm, in a chart about the entry at its own latitude). Not |WorldX0|.
+    kWestKm = 6.0;
+    if (swe.Ready() && S.water.swe.river == 0) {
+        const SweDomain& sd = swe.Domain();
+        int rBest = -1;
+        float eBest = 1.0e9f;
+        for (uint32_t r = 0; r < sd.ny; ++r) {
+            const float e = sd.elev[size_t(r) * sd.nx];
+            if (e < eBest) {
+                eBest = e;
+                rBest = int(r);
+            }
+        }
+        double la = 0.0, lo = 0.0;
+        sd.LatLonOf(0.5, rBest + 0.5, la, lo);
+        std::vector<size_t> prof;
+        for (size_t i = 0; i < model.Count(); ++i) {
+            if (model.S(i).riverKm >= 0) prof.push_back(i);
+        }
+        std::sort(prof.begin(), prof.end(),
+                  [&](size_t a, size_t b) { return model.S(a).riverKm < model.S(b).riverKm; });
+        const double mLat = 111194.93, mLon = mLat * std::cos(la * 3.14159265358979323846 / 180.0);
+        double bestD = 1.0e300, km = -1.0;
+        for (size_t k = 0; k + 1 < prof.size(); ++k) {
+            const auto& a = model.S(prof[k]);
+            const auto& b = model.S(prof[k + 1]);
+            const double ax = (a.lon - lo) * mLon, ay = (a.lat - la) * mLat;
+            const double bx = (b.lon - lo) * mLon, by = (b.lat - la) * mLat;
+            const double vx = bx - ax, vy = by - ay, vv = vx * vx + vy * vy;
+            const double t = vv > 0.0 ? std::clamp(-(ax * vx + ay * vy) / vv, 0.0, 1.0) : 0.0;
+            const double px = ax + t * vx, py = ay + t * vy, d = px * px + py * py;
+            if (d < bestD) {
+                bestD = d;
+                km = a.riverKm + t * (b.riverKm - a.riverKm);
+            }
+        }
+        if (km >= 0.0) kWestKm = std::min(20.0, km);
+        Log("[swe] the river's entry: the river side's deepest cell (row %d, bed %+.2f m) at %.5f N "
+            "%.5f E, %.2f km up the stations' profile (%.0f m off it) -> the west clock at km %.2f",
+            rBest, double(eBest), la, lo, km, std::sqrt(bestD), kWestKm);
+    }
     {
         double bestEnt = 1e9, bestA = -1e9, bestB = 1e9;
         for (size_t i = 0; i < model.Count(); ++i) {
@@ -1171,7 +1209,7 @@ std::optional<int> FrameLoop::Session() {
     // cascade displacement, the one bed) and is the M7 milestone.
     weather.Init(&compositor, hgtCh, &waterAtlas, &model, &globeModel, &seaState,
                  haveCurrents ? &currents : nullptr);
-    if (swe.Ready()) weather.AddExternalWindow("merrimack", &swe, &bathySwe, oceanAt);
+    if (swe.Ready()) weather.AddExternalWindow("merrimack", &swe, oceanAt);
     if (bathyBostonSwe.Ready()) {
         int iBos = -1;
         for (size_t i = 0; i < model.Count(); ++i) {
@@ -1183,17 +1221,18 @@ std::optional<int> FrameLoop::Session() {
                 return model.Height(static_cast<size_t>(iBos), t) + bosOff;
             };
             SweConfig bcfg;
-            bcfg.spongeX0 = -2500.0f;   // Mass Bay, east of the outer harbor islands
             bcfg.westBoundary = false;  // the Charles is dammed; the west edge is a wall
             weather.AddDormantWindow("boston", &bathyBostonSwe, bcfg, oceanAtBoston, 0.5);
-            // PHASE B2 (D4): every owned solver binds the standing window (it reads it where the
-            // window holds its cells, the cube elsewhere).
-            // A height of no windows (Mars's cube) has no standing window: no bed is bound.
-            if (hgtTenant >= 0 && surface.standingRank && surface.hgtWindows) {
-                weather.SetHeightPage(resMgr.TextureRes(hgtTenant), resMgr.ResidencyRes(hgtTenant),
-                                      resMgr.Mips(hgtTenant), surface.standing, m_A.bedWindow);
-            }
         }
+    }
+    // PHASE B2 (D4): every solver binds the standing window (it reads it where the window holds its
+    // cells, the cube elsewhere), and the pin and the whole-bed wait ask for its tiles. PHASE C1: this
+    // stood inside the Boston block, so a scene without Boston's station (Haulover's tides) had no
+    // bed wait and no pin for its own solver. A height of no windows (Mars's cube) binds none.
+    if (hgtTenant >= 0 && surface.standingRank && surface.hgtWindows) {
+        weather.SetHeightPage(resMgr.TextureRes(hgtTenant), resMgr.ResidencyRes(hgtTenant),
+                              resMgr.Mips(hgtTenant), surface.standing, m_A.bedWindow,
+                              m_A.planetR);
     }
 
     if (S.Tool("ocean-probe")) {
@@ -1250,7 +1289,7 @@ std::optional<int> FrameLoop::Session() {
         // M8 flows into waves: the SWE's SOLVED current drives the dispersion when
         // resident (the bent jet, the tip shear); the ACT proxy is the fallback.
         if (swe.Ready() && sea) {
-            waveField->SetSweCurrent(&swe, &bathySwe, sea->sweCurrentGain);
+            waveField->SetSweCurrent(&swe, sea->sweCurrentGain);
         }
         // M12 step 5c: the bank's wave field and its live config pointer (and set B's) are
         // applied BELOW, by the water component's one Apply -- the same call the hot-reload
@@ -1357,7 +1396,7 @@ std::optional<int> FrameLoop::Session() {
             snprintf(dir, sizeof(dir), "out/bedtrace/%lld-%lu",
                      static_cast<long long>(std::time(nullptr)),
                      static_cast<unsigned long>(GetCurrentProcessId()));
-            m_bedTracer.Configure(bathySwe, dir, [&](uint64_t hist[16]) {
+            m_bedTracer.Configure(tools::SweToolGrid{&swe.Domain(), surface.flat}, dir, [&](uint64_t hist[16]) {
                 return weather.ClaimedMips(resMgr, hgtTenant, hist, "merrimack");
             });
             m_bedTracer.Read(gpu, swe, S.water.swe.bedWait ? "before-wait" : "before-spinup",
@@ -1444,8 +1483,22 @@ std::optional<int> FrameLoop::Session() {
                     Log("[swe-cycle] wrote %s", sp);
                 }
             }
-            return tools::RunSweCycleMode(opt, gpu, currents, haveCurrents, bathySwe, swe, resMgr,
-                                          simUnix, oceanAt, southAt, westAt, westQAt, describeWest);
+            // PHASE C1: the tide focus station as a probe -- its own prediction, in NAVD by the scene's
+            // datum link (oceanAt's), beside the solver's level at its place.
+            tools::SweFocusProbe focusProbe;
+            if (model.Count() > 0) {
+                const int fi = model.Focus();
+                focusProbe.id = model.S(size_t(fi)).id;
+                focusProbe.lat = model.S(size_t(fi)).lat;
+                focusProbe.lon = model.S(size_t(fi)).lon;
+                focusProbe.pred = [&model, fi, &datumOff](double t) {
+                    return model.Height(size_t(fi), t) + datumOff;
+                };
+            }
+            return tools::RunSweCycleMode(opt, gpu, currents, haveCurrents,
+                                          tools::SweToolGrid{&swe.Domain(), surface.flat}, swe, resMgr,
+                                          simUnix, oceanAt, southAt, westAt, westQAt, describeWest,
+                                          &focusProbe);
         }
         if (S.water.swe.spinupH > 0) {
             const auto t0 = std::chrono::steady_clock::now();
@@ -1454,10 +1507,12 @@ std::optional<int> FrameLoop::Session() {
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
         }
         if (bedTrace) m_bedTracer.Read(gpu, swe, "after-spinup", oceanAt(simUnix));
-        if (S.Tool("swe-uv")) tools::RunSweUv(opt, gpu, bathySwe, swe);
+        if (S.Tool("swe-uv")) tools::RunSweUv(opt, gpu, tools::SweToolGrid{&swe.Domain(), surface.flat}, swe);
         {
-            // Spot probes for the log: bar, throat, ocean. dEta pathologies show instantly.
-            const float pts[6] = {900.0f, 100.0f, 250.0f, 60.0f, 2400.0f, 0.0f};
+            // Spot probes for the log: bar, throat, ocean. dEta pathologies show instantly. The
+            // points are the tools' (world.flat, C4's keys): their places, then the solver's cells.
+            float pts[6] = {900.0f, 100.0f, 250.0f, 60.0f, 2400.0f, 0.0f};
+            tools::SweToolGrid{&swe.Domain(), surface.flat}.CellsOfFlat(pts, 3);
             SweSolver::Probe pr[3];
             swe.ReadProbes(gpu, pts, 3, pr);
             Log("[swe] probes  bar(900,100): dEta %+.3f u %+.2f,%+.2f v%d | throat(250,60): "
@@ -4040,7 +4095,8 @@ bool FrameLoop::Frame() {
                              static_cast<float>(resMgr.Mips(hgtTenant) - 1u));
         }
         if (swe.Ready()) {
-            const float pts[6] = {900.0f, 100.0f, 250.0f, 60.0f, 2400.0f, 0.0f};
+            float pts[6] = {900.0f, 100.0f, 250.0f, 60.0f, 2400.0f, 0.0f};
+            tools::SweToolGrid{&swe.Domain(), m_A.surface.flat}.CellsOfFlat(pts, 3);
             SweSolver::Probe pr[3];
             swe.ReadProbes(gpu, pts, 3, pr);
             Log("[swe] probes  bar(900,100): dEta %+.3f u %+.2f,%+.2f v%d | throat(250,60): "

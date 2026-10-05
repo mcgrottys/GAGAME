@@ -60,7 +60,8 @@
 namespace ga::scene {
 
 enum class PropType : uint8_t {
-    Bool, Number, String, Enum, Vec3, Motor, Similarity, DualSphere, Color, Path, Object, List
+    Bool, Number, String, Enum, Vec3, Motor, Similarity, DualSphere, Color, Path, Object, List,
+    Box   // PHASE C1: a lat/lon box [lon0, lat0, lon1, lat1], degrees
 };
 enum class Reload : uint8_t { Hot, Restart };
 // What the bound field IS, so ApplyTo writes the right width and ToJson prints by the number
@@ -145,6 +146,8 @@ public:
     Schema& BindSphere(const char* key, double (&f)[4], Quantity q, const char* unit,
                        const char* doc, Reload r = Reload::Hot);
     Schema& BindColor(const char* key, float (&f)[4], const char* doc, Reload r = Reload::Hot);
+    // PHASE C1: a lat/lon box, [lon0, lat0, lon1, lat1] in degrees; all zeros = the owner's default.
+    Schema& BindBox(const char* key, double (&f)[4], const char* doc, Reload r = Reload::Hot);
     // A nested section: `sub` was built over `subPrototype`, which lies inside this prototype.
     Schema& Nest(const char* key, const Schema& sub, const void* subPrototype, const char* doc);
     // A named array of `element`s (null element = typed only by the registry `poly` names).
@@ -168,7 +171,7 @@ public:
     // Replaced whole by an overlay (a versor or a colour is a value, not a namespace).
     static bool Atomic(PropType t) {
         return t == PropType::Vec3 || t == PropType::Motor || t == PropType::Similarity ||
-               t == PropType::DualSphere || t == PropType::Color;
+               t == PropType::DualSphere || t == PropType::Color || t == PropType::Box;
     }
 
 private:

@@ -29,7 +29,6 @@
 #include "hal/Shader.h"
 #include "hal/TileAtlas.h"
 #include "hal/Views.h"
-#include "sim/BathyModel.h"
 
 #include <algorithm>
 #include <cmath>
@@ -39,18 +38,62 @@
 
 namespace ga {
 
-// M6x: the solver is a WINDOW TYPE now, not the Merrimack. Per-window knobs that used to be
-// hardcoded Merrimack-isms; defaults preserve the validated estuary behavior.
+// M6x: the solver is a WINDOW TYPE now, not the Merrimack. Per-window knobs; defaults preserve the
+// validated estuary behavior.
 struct SweConfig {
     const char* name = "merrimack";
-    float spongeX0 = 1400.0f;   // world-x where the offshore sponge ramps in (open sea east)
-    bool westBoundary = true;   // the Flather river boundary (Boston's rivers are dammed:
-                                // off, and the west edge is a wall like any land)
+    // PHASE C1: THE SPONGE STANDS ON THE OPEN SIDES. A side of the domain is open sea when every cell
+    // along it can be wet (bed under +1.2 m NAVD, the residency law's own bound) and no river enters
+    // there; the sponge's ramp begins spongeM metres in from an open side and is whole 700 m nearer it
+    // (water.swe.sponge; 1866 m = where today's world-x ramp began, 1400 m east of the old origin).
+    float spongeM = 1866.0f;
+    bool westBoundary = true;   // the Flather river face on the domain's west side (water.swe.river
+                                // = "west"); false: no river (Boston's are dammed; Haulover has none)
+};
+
+// PHASE C1 (out/integration/plan_phase_c.md): THE SOLVER'S CHART. A domain is declared by a lat/lon box
+// (water.swe.box); its ANCHOR is the box's centre and its lattice a window of its own planes there
+// (HIERARCHY 4.4: a ratio of planes about an anchor in doubles). A point P of the body (planet frame,
+// any scale) has the cell coordinates
+//     tx = (U . P) / (A . P),   ty = (V . P) / (A . P)
+// -- the central projection onto the anchor's tangent plane, east and north there as the axes, a cell
+// a true dx by dy metres at the anchor (the box's width at its own latitude over nx, its height over
+// ny), row 0 north, cell i spanning [i, i + 1). Orthogonal at the anchor and conformal to (r / R)^2
+// within the box. Nothing here reads BathyModel's anchor or its frozen metres.
+struct SweDomain {
+    double lat0 = 0.0, lon0 = 0.0, lat1 = 0.0, lon1 = 0.0;   // the box, degrees
+    double latC = 0.0, lonC = 0.0, R = 0.0;                  // its anchor, and the planet's radius
+    double A[3] = {}, E[3] = {}, N[3] = {};                  // up, east, north at the anchor
+    double U[3] = {}, V[3] = {};                             // the cells' planes (through the centre)
+    uint32_t nx = 0, ny = 0;
+    double dx = 0.0, dy = 0.0;                               // a cell, metres (true, at the anchor)
+    std::vector<float> elev;      // the bed at the cell centres, m NAVD88, row 0 north (the stack's)
+    uint32_t openSides = 0;       // bit 0 N, 1 S, 2 W, 3 E: the sides that are open sea (Bound)
+    std::vector<uint8_t> sponge;  // per cell: 1 where the sponge acts (the flood's seeds)
+    bool Ready() const { return nx > 0 && ny > 0; }
+    void Place(double boxLat0, double boxLon0, double boxLat1, double boxLon1, uint32_t cellsX,
+               uint32_t cellsY, double planetR);
+    // The cell coordinates of a planet direction or a place; false on the far hemisphere.
+    bool CellOfDir(const double P[3], double& tx, double& ty) const;
+    bool CellOf(double latDeg, double lonDeg, double& tx, double& ty) const;
+    void LatLonOf(double tx, double ty, double& latDeg, double& lonDeg) const;
+    bool Holds(double latDeg, double lonDeg) const;   // the lattice holds the place
+    // The bed at every cell's centre, from the one stack (bedAt(lat, lon, the cell's grain), degrees).
+    void FillBed(const std::function<float(double, double, double)>& bedAt);
+    // The open sides and the sponge's cells, from the bed (elev filled first).
+    void Bound(const SweConfig& cfg);
+    // A cell's sponge weight (the kernel's SpongeAt, in doubles).
+    double SpongeAt(int i, int j, double spongeM) const;
+    // THE ROWS A READER CARRIES (WindowRows.hlsli HP_SOLVER_ROWS_DECL): the planes U, V, W about a
+    // frame whose origin is `origin` and whose axes are east / up / north (planet frame), over R so
+    // their w is the cell at the origin; then (nx, ny, 1 = a solver stands, 0). Zeros: none.
+    void KernelRows(const double east[3], const double up[3], const double north[3],
+                    const double origin[3], float out[16]) const;
 };
 
 // A SOLVER'S WINDOW HOLDS ITS WATER (an instrument, said once where a window is made): the grid
 // flooded 4-connected (the kernel's faces) through cells whose bed is under `level`, from its open
-// boundaries -- the sponge's cells (world x past spongeX0) and the west face's wet-capable cells
+// boundaries -- the sponge's cells (SweDomain::sponge) and the west face's wet-capable cells
 // (column 0, bed under 2 m, when the window has a west boundary). Water the sponge's flood does not
 // reach is listed, largest first, with where it meets the window's edge. `plantCrossEdge` lets the
 // flood run along the outside of an edge it reaches: the selftest's plant, a cut channel made whole.
@@ -73,7 +116,7 @@ struct WaterHold {
     std::vector<WaterPiece::EdgeRun> crossings;   // the sponge's water at the edge, not a boundary
     std::vector<uint8_t> sea;                     // by label: 1 = the sponge's flood reaches it
 };
-WaterHold FloodWindow(const float* bed, int nx, int ny, float level, int spongeCol0, bool westFace,
+WaterHold FloodWindow(const float* bed, int nx, int ny, float level, const uint8_t* sponge, bool westFace,
                       bool plantCrossEdge = false, std::vector<int>* labels = nullptr);
 // The two beds' floods side by side: the cells the grid's joins that the kernel's does not (and
 // back), the largest piece of the kernel's water the grid's joins, and where it parts from the
@@ -87,8 +130,8 @@ struct FloodParting {
     float crestKernel = 0.0f, crestGrid = 0.0f;
 };
 FloodParting CompareFloods(const float* grid, const float* kernel, int nx, int ny, float level,
-                           int spongeCol0, bool westFace);
-void LogWindowHoldsWater(const BathyModel& bathy, const SweConfig& cfg, const char* when,
+                           const uint8_t* sponge, bool westFace);
+void LogWindowHoldsWater(const SweDomain& dom, const SweConfig& cfg, const char* when,
                          const std::vector<float>* kernelBed = nullptr);
 bool RunWaterHoldSelfTest();
 
@@ -101,21 +144,20 @@ public:
     // Step; there is no bed otherwise.
     // PHASE B2 (D4): THE SOLVER'S DOMAIN IS A STANDING WINDOW (SurfaceFrame::StandAbout), held whole
     // before the spin-up. The kernel reads its bed through that window's chain (one entry, rank 2:
-    // SurfaceFrame::StandingRows about the domain's centre, KernelRows' packing in `rows`), each cell's
-    // point formed from its offsets in latitude and longitude from the centre (small numbers: no
-    // large cancellation), at its own cell's grain. latC/lonC the centre (degrees), R the planet's.
+    // SurfaceFrame::StandingRows about the domain's ANCHOR, KernelRows' packing in `rows`), each cell's
+    // point its place in the anchor's tangent plane carried onto the sphere (small numbers: no large
+    // cancellation), at its own cell's grain. PHASE C1: the window stands about the domain's anchor.
     struct BedWindow {
         float rows[80];   // SurfaceFrame::KernelWindowRows, as KernelRows packs it
         uint32_t slice = UINT32_MAX;
-        double latC = 0.0, lonC = 0.0, R = 0.0;
     };
     void SetBed(Gpu& gpu, hal::Resource heightArr, hal::Resource resMapArr, uint32_t mips,
                 const BedWindow& w);
     bool BedBound() const { return m_bedBound; }
 
     void Init(Gpu& gpu, ShaderCompiler& sc, const std::wstring& shaderDir,
-              const BathyModel& bathy,
-              const SweConfig& cfg = {});
+              const SweDomain& dom, const SweConfig& cfg = {});
+    const SweDomain& Domain() const { return m_dom; }
     bool Ready() const { return m_ready; }
 
     // Boundary targets, as DEVIATIONS from the ocean tide plane (NAVD m). West = the
@@ -185,13 +227,13 @@ public:
     float PadW() const { return static_cast<float>(m_eta.TilesX() * m_eta.TileW()); }
     float PadH() const { return static_cast<float>(m_eta.TilesY() * m_eta.TileH()); }
 
-    // Synchronous full-texture readbacks for validation probes (world metres). Headless use.
-    // The batch form shares ONE eta + ONE uv readback across all points.
+    // Synchronous full-texture readbacks for validation probes at CELL coordinates (tx, ty pairs:
+    // SweDomain::CellOf). Headless use. One eta + one uv readback serve all points.
     struct Probe {
         float dEta, u, v;
         bool valid;
     };
-    void ReadProbes(Gpu& gpu, const float* xzPairs, int count, Probe* out);
+    void ReadProbes(Gpu& gpu, const float* cellPairs, int count, Probe* out);
     // M6x: the full-field CPU MIRROR for the weather manager -- eta (PADDED atlas dims) and
     // the derived currents (exact bathy dims, xyzw = u, v, speed, valid), one readback each.
     void ReadFields(Gpu& gpu, std::vector<float>& etaOut, uint32_t& etaW, uint32_t& etaH,
@@ -216,8 +258,8 @@ public:
     };
     bool TraceWestFace(Gpu& gpu, std::vector<WestFaceRow>& rows);
     float WestArea() const { return m_westArea; }   // the live section u_ext was last divided by
-    Probe ReadProbe(Gpu& gpu, float wx, float wz) {
-        const float p[2] = {wx, wz};
+    Probe ReadProbe(Gpu& gpu, float tx, float ty) {
+        const float p[2] = {tx, ty};
         Probe out{};
         ReadProbes(gpu, p, 1, &out);
         return out;
@@ -256,7 +298,7 @@ public:
     // Gpu::kFrameCount frames later, always, and never by a flush. A request lives one frame: a
     // consumer that wants its answer kept fresh asks every frame (the answers stay until newer
     // ones replace them). The upload-list paths (Spinup, AdvanceTo) serve nothing.
-    void RequestRegion(double worldX, double worldZ, double radiusM);
+    void RequestRegion(double latDeg, double lonDeg, double radiusM);
     // Someone asked for a region this frame: the solver is wanted whether or not any view draws it
     // (SeaLayer::Simulate steps it on this as well as on the drawn sea).
     bool Demanded() const { return !m_requests.empty(); }
@@ -269,18 +311,18 @@ public:
     // THE KERNEL'S RECONSTRUCTION, at a point of the flat frame (shaders/WaterBank.hlsl: texel =
     // (u Nx, (1 - v) Ny), centres at -0.5, bilinear, clamped to the grid), from the newest
     // delivered region holding all four texels. False where no delivered region holds them.
-    bool DeviationAt(double worldX, double worldZ, Deviation& out) const;
+    bool DeviationAt(double latDeg, double lonDeg, Deviation& out) const;
     // The same reconstruction over whole-field arrays (the tools' mirror: eta at rows of etaRowW,
     // the current's four channels at rows of uvRowW), so the two transports cannot disagree about
     // the law. False when the arrays are empty.
-    bool DeviationFromFields(double worldX, double worldZ, const std::vector<float>& eta,
+    bool DeviationFromFields(double latDeg, double lonDeg, const std::vector<float>& eta,
                              uint32_t etaRowW, const std::vector<float>& uv4, uint32_t uvRowW,
                              double asOf, Deviation& out) const;
     // THE DOMAIN'S WEIGHT: the solver's surface owns a point in proportion to how far inside the
     // grid it stands, rising from 0 at the grid's edge to 1 one cell in -- the field is defined at
     // cell centres and has no support of its own nearer the edge than that. The kernel's
     // expression, in the kernel's texel units.
-    double DomainWeight(double worldX, double worldZ) const;
+    double DomainWeight(double latDeg, double lonDeg) const;
     // The newest delivered region's clock; a large negative number when none has been delivered.
     double DeliveredAsOf() const { return m_regions.empty() ? -1.0e18 : m_regions.front().asOf; }
 
@@ -297,12 +339,12 @@ private:
         uint32_t nx, ny, etaTilesX, fluxTilesX;
         uint32_t etaTileW, etaTileH, fluxTileW, fluxTileH;
         uint32_t listCount;
-        float worldX0;
+        float spongeSides;   // PHASE C1: the open sides, a bitmask (SweDomain::openSides)
         float dy;   // M6r: north-south texel size -- the CUDEM grid is EQUIANGULAR, so
                     // dy = dlat*mPerLat (13.65 m) != dx = dlon*mPerLon (10.08 m)
         float westUext;   // M6r: Flather's u_ext (m/s, +east) = westQ / live west section area
         float dx, dt, damp, tideNavd;
-        float spongeX0, spongeRate, riverDEta, gravity;
+        float spongeD0, spongeRate, riverDEta, gravity;   // spongeD0: the ramp's start from an open side, m
         float riverBox[4];
         // M6r: d(tideNavd)/dt. The eta bank stores deviation from a MOVING plane; the plane's
         // rise is booked as debt in every wet-capable interior cell so the prism must actually
@@ -310,16 +352,13 @@ private:
         // gap carried only the deviation dynamics).
         float tideRate;
         float padA, padB, padC;
-        // M9ar: THE BED IS THE HEIGHT MEGATEXTURE. Lattice texel -> lat/lon (this grid is
-        // equiangular: lon0, lat1 (north edge), dlon, -dlat in degrees per texel), then the
-        // Mercator page frame (org px x, org px y, 1/16384, world px at z14). Appended LAST.
-        float geoLL[4];
-        // PHASE B2 (D4): THE STANDING WINDOW's address of a cell. standA = the first cell row's and
-        // column's offset from the centre (rad: lat1 - latC, lon0 - lonC), the row step (-dlat) and
-        // the column step (dlon), rad; standB = sin and cos of the centre's latitude, R, the cell's
-        // grain (m). Then the window's rows (WindowRows.hlsli). APPENDED AT THE END on both sides.
-        float standA[4];
-        float standB[4];
+        // PHASE C1: A CELL'S POINT in the domain's chart. cellX = the first cell's centre in the anchor's
+        // tangent plane over R (east s0, north t0) and the steps (dx / R, -dy / R): cell (i, j) at
+        // (s0 + i ds, t0 + j dt); anc = the anchor's up (planet frame) and R; east = its east and the
+        // cell's grain (m). Then the standing window's rows (WindowRows.hlsli).
+        float cellX[4];
+        float anc[4];
+        float east[4];
         float hwU[20];
         float hwV[20];
         float hwW[20];
@@ -331,7 +370,7 @@ private:
     };
 
     bool m_ready = false;
-    const BathyModel* m_bathy = nullptr;
+    SweDomain m_dom;   // PHASE C1: the solver's own chart and its CPU bed
 
     TileAtlas2D m_eta, m_flux;
     // M9h: grad(flow) -- residency derived from the Cayley closure, not a physics policy.
@@ -381,8 +420,8 @@ private:
     bool m_pendingReset = true;
 
     // ---- the region readback (RequestRegion / DeviationAt) --------------------------------------
-    // A point of the flat frame in the kernel's continuous texel coordinates (u Nx, (1 - v) Ny).
-    bool TexelOf(double worldX, double worldZ, double& tx, double& ty) const;
+    // A place in the kernel's continuous cell coordinates (the domain's chart).
+    bool TexelOf(double latDeg, double lonDeg, double& tx, double& ty) const;
     // Read what the ring delivered for this frame's slot, then copy this frame's requests into it.
     void CollectRegions(Gpu& gpu);
     void ServeRegions(hal::CommandContext& cmd, Gpu& gpu,

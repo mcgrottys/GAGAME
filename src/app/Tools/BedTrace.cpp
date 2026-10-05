@@ -28,15 +28,17 @@ void WriteRaw(const std::string& path, const void* data, size_t bytes) {
 
 }  // namespace
 
-void BedTracer::Configure(const BathyModel& bathy, const std::string& dir, ClaimFn claim) {
-    if (!bathy.Ready()) return;
+void BedTracer::Configure(const SweToolGrid& grid, const std::string& dir, ClaimFn claim) {
+    if (!grid.dom || !grid.dom->Ready()) return;
     m_claim = std::move(claim);
-    m_nx = static_cast<uint32_t>(bathy.Nx());
-    m_ny = static_cast<uint32_t>(bathy.Ny());
-    m_dxM = double(bathy.WorldSizeX()) / m_nx;
-    m_dyM = double(bathy.WorldSizeZ()) / m_ny;
-    m_worldX0 = bathy.WorldX0();
-    m_worldZ1 = double(bathy.WorldZ0()) + double(bathy.WorldSizeZ());
+    m_nx = grid.dom->nx;
+    m_ny = grid.dom->ny;
+    m_dxM = grid.dom->dx;
+    m_dyM = grid.dom->dy;
+    // PHASE C1: positions in the log are metres in the domain's chart (east of its west side, north
+    // of its south side); the throat's point is the tools' (world.flat), taken to its cell.
+    m_worldX0 = 0.0;
+    m_worldZ1 = m_ny * m_dyM;
     m_dir = dir;
     std::error_code ec;
     std::filesystem::create_directories(m_dir, ec);
@@ -46,9 +48,11 @@ void BedTracer::Configure(const BathyModel& bathy, const std::string& dir, Claim
     // column within kThroatSearchM of it, and the narrowest run is the throat -- jetty to jetty,
     // because the jetties are walls in the realized bed. The CPU bed chooses WHERE; what the
     // readings count there is the kernel's own bed.
-    const std::vector<float>& e = bathy.Elev();
-    const int col0 = static_cast<int>((kThroatX - m_worldX0) / (m_dxM * m_nx) * m_nx);
-    const int row = static_cast<int>((m_worldZ1 - kThroatZ) / (m_dyM * m_ny) * m_ny);
+    const std::vector<float>& e = grid.dom->elev;
+    double thx = 0.0, thy = 0.0;
+    grid.CellOfFlat(kThroatX, kThroatZ, thx, thy);
+    const int col0 = static_cast<int>(std::floor(thx));
+    const int row = std::clamp(static_cast<int>(std::floor(thy)), 0, int(m_ny) - 1);
     const int reach = static_cast<int>(std::lround(kThroatSearchM / m_dxM));
     m_throatCol = uint32_t((std::max)(col0, 0));
     m_throatRow0 = 1;   // an empty run until one is found
