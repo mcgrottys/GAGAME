@@ -190,6 +190,54 @@ inline double ShoalFactor(double kBand, double depth) {
     return wt::Clamp(std::sqrt(cgDeep / wt::Max(cg, 0.05)), 0.75, 1.7);
 }
 
+// ================================================================================================
+//  2b. BreakFactor -- shaders/Jet.hlsli (F7, 2026-10-04).  BREAKING AS A DISSIPATION LAW: the
+//  clipped Rayleigh sea.  The sea's wave heights at a point are Rayleigh about their rms; in water
+//  of depth h no wave stands taller than Hmax = gammaHs * h (the observed saturation, 0.60): every
+//  wave that would has broken DOWN TO IT.  The energy that survives is the clipped distribution's,
+//  and the clipped Rayleigh distribution (Battjes and Janssen, 1978: the broken waves pile at
+//  Hmax) has
+//
+//      E_clipped / E_raw = 1 - exp( -(Hmax / Hrms_raw)^2 ),        excess = Hrms_raw / Hmax,
+//      L = sqrt(E_clipped / E_raw) = sqrt( 1 - exp(-1 / excess^2) ),
+//
+//  one factor on every amplitude at the point (the spectral shape and the directions survive,
+//  as the solver's limiter already held).  Its limits are the whole physical content and
+//  GaTest pins them: excess -> 0 (deep water), L -> 1 exponentially -- a deep sea is not
+//  touched; excess -> infinity (the shore), L * excess -> 1 from below -- the rms tends to the
+//  limit and never reaches it.  No min, no max, no clamp on a height anywhere: the surface stays
+//  the data the bands and the solver say, scaled by what the water can carry.  What replaces:
+//  the solver's min(1, 1/excess) (a corner at excess 1), and, for the cascade bands, NOTHING --
+//  they had shoaled to ShoalFactor's 1.7 and stopped there, with no breaking at all since the
+//  |eta| <= 0.55 h clamp left (the flat-topped sea the owner saw); the 40-degree slopes at the
+//  bar were theirs.  `excess` is Hs_raw / (gammaHs h) with Hs = 2 sqrt(2) rms, the solver's
+//  definition and the bank kernel's depth-excess trigger, so the breaking indicator (foam) and
+//  the dissipation read one number.
+// ================================================================================================
+inline constexpr double kGammaHs = 0.60;   // Hs <= gammaHs * h: the observed saturation (WaveField.h)
+
+//  THE HEIGHT A WAVE CAN STAND TO, Battjes and Janssen's own (1978, their eq. for Hm):
+//
+//      Hmax(k, h) = (0.88 / k) tanh( gammaHs k h / 0.88 ),
+//
+//  whose two limits are the whole physical content: deep water (kh large), Hmax -> 0.88 / k, the
+//  Miche steepness limit (H k = 0.88 is ak = 0.44, the cap the glint's shed already rides); the
+//  shore (kh small), Hmax -> gammaHs h, the depth limit. One tanh between them, no min of the two.
+//  `k` is the sea's energy-weighted wavenumber at the point (sum a^2 k / sum a^2: the solver's
+//  components, the bank's bands). MEASURED why the depth limit alone is not enough (out/pc/break,
+//  the Haulover bar, 3.4-6.4 m): with Hs held to 0.6 h the hull's slope ran to 42 degrees, because
+//  the comps shoaled there are 10-12 m long and a 2 m sea on them is ak ~ 0.6, past Miche; the
+//  steepness limit binds first and brings Hmax to 1.4 m where 0.6 h said 2.0.
+inline double BreakHmax(double k, double depth) {
+    const double kk = wt::Max(k, 1e-6);
+    return (0.88 / kk) * std::tanh(kGammaHs * kk * wt::Max(depth, 0.05) / 0.88);
+}
+
+inline double BreakFactor(double excess) {
+    if (!(excess > 1e-6)) return 1.0;
+    return std::sqrt(1.0 - std::exp(-1.0 / (excess * excess)));
+}
+
 // ------------------------------------------------------------------------------------------------
 //  What WaveCurrentAmp answers with.  Two numbers that are NOT interchangeable: `amp` multiplies
 //  the band's height, `blocked` drives breaking FOAM.  The shader returns them as a float2 and

@@ -23,6 +23,21 @@ float ShoalFactor(float kBand, float depth) {
     return clamp(sqrt(cgDeep / max(cg, 0.05f)), 0.75f, 1.7f);
 }
 
+// F7: BREAKING AS A DISSIPATION LAW, the clipped Rayleigh sea (sim/WaterTerms.h BreakFactor):
+// L = sqrt(1 - exp(-1/excess^2)) on every amplitude, excess = Hs_raw / (0.60 h). Deep: 1; the
+// shore: rms -> the limit from below. No cap on a height anywhere.
+// F7b: the height a wave can stand to (WaterTerms.h BreakHmax): Miche's 0.88/k in deep water,
+// 0.60 h at the shore, one tanh between. k the sea's energy-weighted wavenumber at the point.
+float BreakHmax(float k, float depth) {
+    const float kk = max(k, 1e-6f);
+    return (0.88f / kk) * tanh(0.60f * kk * max(depth, 0.05f) / 0.88f);
+}
+
+float BreakFactor(float excess) {
+    if (!(excess > 1e-6f)) return 1.0f;
+    return sqrt(1.0f - exp(-1.0f / (excess * excess)));
+}
+
 // Linear wave-action amplification over a collinear current: r = U_parallel / c0. Opposing
 // (r < 0) shortens and STEEPENS toward blocking at r = -1/4; past it real waves BREAK, so the
 // growth saturates and the second component reports the blocking fraction (drives breaking foam).

@@ -201,6 +201,18 @@ void TreeWater::BandLaw(const WeatherSample& q, double depth, double hsScale, do
         }
         gain[c] = amp;
     }
+    // F7: BREAKING, the clipped Rayleigh sea (WaterTerms.h BreakFactor): the raw envelope the
+    // gains make against what the depth allows, one factor on every band -- the kernel's brk.
+    double rms2 = 0.0, rms2k = 0.0;
+    for (int c = 0; c < OceanCpu::kCascades; ++c) {
+        const double e = gain[c] * gain[c] * m_bandRms[c] * m_bandRms[c];
+        rms2 += e;
+        rms2k += e * (m_ocean ? m_ocean->BandK(c) : 0.0);
+    }
+    const double kEff = rms2k / wt::Max(rms2, 1e-12);   // F7b: the sea's energy-weighted wavenumber
+    const double excess = std::sqrt(rms2) * 2.8284271247461903 / BreakHmax(kEff, depth);
+    const double brk = BreakFactor(excess);
+    for (int c = 0; c < OceanCpu::kCascades; ++c) gain[c] *= brk;
 }
 
 bool TreeWater::BandGains(double wx, double wz, double simUnix, double gains[OceanCpu::kCascades],

@@ -49,6 +49,7 @@
 #include "sim/CurrentModel.h"
 
 #include "sim/WaveField.h"
+#include "sim/WaterTerms.h"   // F7: BreakFactor, the clipped Rayleigh sea
 #include "core/ThreadManager.h"
 
 #include "hal/Gpu.h"
@@ -435,6 +436,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
     std::vector<double> kbuf(cells), phibuf(cells), feik(cells);
     std::vector<float> aRaw(size_t(nc) * cells);
     std::vector<double> sumsq(cells, 0.0), sumA(cells, 0.0);
+    std::vector<double> sumsqk(cells, 0.0);   // F7b: sum a^2 k, for the energy-weighted wavenumber
     std::vector<double> eta(cells, 0.0);   // --wave-map only: sum a cos(phi) at t = 0
     std::atomic<long long> blockedCells{0};
     const int icDiag = nc / 2;   // one component carries the phase-gauge instrument
@@ -494,6 +496,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
                     kbuf[idx] = k;
                     aPlane[idx] = float(ar);
                     sumsq[idx] += ar * ar;   // rows are disjoint across threads
+                    sumsqk[idx] += ar * ar * k;
                     sumA[idx] += ar;
                 }
             }
@@ -713,17 +716,20 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
         });
     }
 
-    // -- the TOTAL-Hs limiter: Hs = 2 sqrt2 rms <= gammaHs * h, ONE uniform factor per cell
+    // -- the TOTAL-Hs limiter: Hs = 2 sqrt2 rms against gammaHs * h, ONE uniform factor per cell
     //    on every a_i (spectral shape and directions survive); excess > 1 is the breaking
-    //    indicator -- "does the sea here want to be taller than the water allows".
+    //    indicator -- "does the sea here want to be taller than the water allows". F7: the
+    //    factor is the clipped Rayleigh sea's (WaterTerms.h BreakFactor), not min(1, 1/excess):
+    //    the rms tends to the limit from below and the law has no corner at excess 1.
     std::vector<double> lim(cells);   // (and eta below, which carries the same factor)
     double rmsFieldMax = 0.0, sumFieldMax = 0.0;
     for (size_t idx = 0; idx < cells; ++idx) {
         const double rmsRaw = std::sqrt(sumsq[idx]);
-        const double hLim = (h[idx] > 0.05) ? h[idx] : 0.05;
-        const double rmsLim = (cfg.gammaHs * hLim) / (2.0 * std::sqrt(2.0));
+        // F7b: the height the sea can stand to at this cell, by its energy-weighted wavenumber.
+        const double kEff = sumsqk[idx] / ((sumsq[idx] > 1e-12) ? sumsq[idx] : 1e-12);
+        const double rmsLim = BreakHmax(kEff, h[idx]) / (2.0 * std::sqrt(2.0));
         const double exc = rmsRaw / ((rmsLim > 1e-6) ? rmsLim : 1e-6);
-        const double L = (std::min)(1.0, 1.0 / ((exc > 1e-6) ? exc : 1e-6));
+        const double L = BreakFactor(exc);
         lim[idx] = L;
         rmsFieldMax = (std::max)(rmsFieldMax, rmsRaw * L);
         sumFieldMax = (std::max)(sumFieldMax, sumA[idx] * L);
@@ -742,8 +748,8 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
             for (int i = 0; i < nx; ++i) {
                 const size_t idx = row + size_t(i);
                 const double rmsRaw = std::sqrt(sumsq[idx]);
-                const double hLim = (h[idx] > 0.05) ? h[idx] : 0.05;
-                const double rmsLim = (cfg.gammaHs * hLim) / (2.0 * std::sqrt(2.0));
+                const double kEff = sumsqk[idx] / ((sumsq[idx] > 1e-12) ? sumsq[idx] : 1e-12);
+                const double rmsLim = BreakHmax(kEff, h[idx]) / (2.0 * std::sqrt(2.0));
                 const double exc = rmsRaw / ((rmsLim > 1e-6) ? rmsLim : 1e-6);
                 uint8_t* px = &atlas[arow + size_t(i) * 4];
                 px[0] = Quant8(rmsRaw * lim[idx], envMax);

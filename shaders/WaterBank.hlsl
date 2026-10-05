@@ -589,9 +589,39 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // adds bands 0 and 2 in the free fibers so the PS can amplitude-scale the caustic
     // Jacobian and Laplacian it assembles from the cascade derivative textures
     // (ALGEBRA.md caustics: areaJac_fold = 1 + sum w*amp*(J_c - 1); lap folds linearly).
-    float gain0 = hsScale * expo;
-    float gain1 = hsScale * expo;
-    float gain2 = hsScale * expo;
+    // F7: THE BANDS' GAINS FIRST (shoaling, the wave-current gain), then the sea's depth excess
+    // from the raw envelope they make, then BREAKING: one factor on every band (Jet.hlsli
+    // BreakFactor, the clipped Rayleigh sea). The raw excess stays the foam's indicator below.
+    float gainC[3], blockedC[3];
+    [unroll] for (uint cg = 0; cg < 3; ++cg) {
+        float amp = hsScale * expo;
+        float blocked = 0.0f;
+        if (depth > 0.05f) {
+            const float cB = BandPhaseSpeed(gBandK[cg], max(depth, 0.3f));
+            float2 ab = (gPeakDir.z > 0.5f) ? WaveCurrentAmp(cur, gPeakDir.xy, cB)
+                                            : float2(1.0f, 0.0f);
+            ab.x *= ShoalFactor(gBandK[cg], depth);
+            amp *= ab.x;
+            blocked = ab.y;
+        }
+        gainC[cg] = amp;
+        blockedC[cg] = blocked;
+    }
+    const float envRmsRaw =
+        max(sqrt(gainC[0] * gainC[0] * gRmsRef.x * gRmsRef.x +
+                 gainC[1] * gainC[1] * gRmsRef.y * gRmsRef.y +
+                 gainC[2] * gainC[2] * gRmsRef.z * gRmsRef.z), 1e-4f);
+    // F7b: the sea's energy-weighted wavenumber at this texel, and the height it can stand to.
+    const float e0 = gainC[0] * gainC[0] * gRmsRef.x * gRmsRef.x;
+    const float e1 = gainC[1] * gainC[1] * gRmsRef.y * gRmsRef.y;
+    const float e2 = gainC[2] * gainC[2] * gRmsRef.z * gRmsRef.z;
+    const float kEff = (e0 * gBandK.x + e1 * gBandK.y + e2 * gBandK.z) / max(e0 + e1 + e2, 1e-12f);
+    const float excessC =
+        (envRmsRaw / max(gPatch.w, 1e-3f)) * 2.8284271f / BreakHmax(kEff, depth);
+    const float brk = BreakFactor(excessC);
+    float gain0 = gainC[0] * brk;
+    float gain1 = gainC[1] * brk;
+    float gain2 = gainC[2] * brk;
     // M13 step 2: this texel's shares of the lattice's planes, ONCE -- they are a function of the
     // texel, not of the band, so the three bands below read them rather than re-deriving them.
     float chartW[4] = {1.0f, 0.0f, 0.0f, 0.0f};
@@ -635,22 +665,11 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         // standing the entrance up toward blocking -- the 7-foot-standing-wave term).
         // proofs/inlet_storm.py runs the SAME pure functions on the SAME fields; the
         // match report holds this kernel to it.
-        float amp = hsScale * expo;
-        float blocked = 0.0f;
-        if (depth > 0.05f) {
-            const float cB = BandPhaseSpeed(gBandK[c], max(depth, 0.3f));
-            float2 ab = (gPeakDir.z > 0.5f) ? WaveCurrentAmp(cur, gPeakDir.xy, cB)
-                                            : float2(1.0f, 0.0f);
-            ab.x *= ShoalFactor(gBandK[c], depth);
-            amp *= ab.x;
-            blocked = ab.y;
-        }
+        float amp = gainC[c] * brk;   // F7: the band's gain, broken down to what the water carries
+        const float blocked = blockedC[c];
         // The detail-plane gains ship the FULL closure (the PS sparkle and caustic
         // tiers key on them everywhere -- zeroing them inside the solved window killed
         // the throat's caustics; the waterdata lens convicted it in one probe).
-        if (c == 0) gain0 = amp;
-        if (c == 1) gain1 = amp;
-        if (c == 2) gain2 = amp;
         // M8: inside the solved window the cascades' structure bands stand down -- the
         // solved field carries shoaling/refraction/limiting per cell, not per band.
         if (c != 2) amp *= 1.0f - wCas;   // M9by: the DELIVERED weight, not the window
@@ -832,16 +851,11 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
     // is commensurate with d.y as written; no second gPatch.w here.) Inside the solved
     // window the solver's OWN envelope and breaking indicator take over -- they carry
     // per-cell shoaling/refraction/limiting the band closures can only approximate.
-    const float envRmsC =
-        max(sqrt(gain0 * gain0 * gRmsRef.x * gRmsRef.x +
-                 gain1 * gain1 * gRmsRef.y * gRmsRef.y +
-                 gain2 * gain2 * gRmsRef.z * gRmsRef.z), 1e-4f);
+    // F7: the envelope the crest gate normalizes by is the DELIVERED one (broken down); the
+    // excess the foam reads is the RAW one, computed with the gains above -- both say what the
+    // sea wants against what the water allows, as the solver's env slice does inside the window.
+    const float envRmsC = max(envRmsRaw * brk, 1e-4f);
     const float envRms = lerp(envRmsC, max(rmsW * gPatch.w, 1e-4f), wCas);
-    // The breaking indicator is PHYSICAL: divide the display exaggeration back out
-    // (the exaggerated envelope inflated depth foam ~15% everywhere -- part of the
-    // "rapids" look the user called; the solved excW is physical by construction).
-    const float excessC =
-        (envRmsC / max(gPatch.w, 1e-3f)) * 2.8284271f / (0.60f * max(depth, 0.05f));
     const float excess = lerp(excessC, excW, wCas);
     // The kernel writes PURE physics foam (triggers x crest); the visual BREAKUP is the
     // pixel stage's job -- noise at ring resolution folded its fine octaves away and

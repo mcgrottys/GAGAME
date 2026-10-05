@@ -101,7 +101,7 @@ public:
     // chosen path -- that integral was path-dependent (the
     // field has curl wherever grad k is not parallel to d^), so it printed the integration
     // route into the sea as banding. Every cached solve carries the old, walked phase.
-    static constexpr uint32_t kSolverVersion = 9;
+    static constexpr uint32_t kSolverVersion = 10;   // F7: the breaking law (BreakFactor, BreakHmax) is in the solve
 
     void Configure(const WaveFieldConfig& cfg, const Compositor* comp, int hgtChannel,
                    const WaterAtlas* atlas, const TideModel* tides, int entranceStation,

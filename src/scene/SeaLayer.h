@@ -101,6 +101,8 @@ public:
     // the bank kernel scales by its per-texel gains for the depth-excess trigger and
     // the crest gate; the globe PS scales the same way for the tanh peak shaping.
     float BandRms(int c) const { return m_bandRms[c]; }
+    // F7: the same, physical (the vertical exaggeration divided out), for the hull's twin.
+    double BandRmsPhysical(int c) const { return double(m_bandRms[c]) / double(heightScale); }
     // M9c: the wavenumber the FOLD should judge this band by -- energy-weighted, not the
     // band's geometric midpoint. Only the fold weight reads it; the physics keeps gBandK.
     float BandKFold(int c) const { return m_bandKFold[c]; }
