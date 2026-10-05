@@ -77,7 +77,8 @@ void RunTwinSurface(const Options&, Gpu& gpu, const SeaState& seaState, SeaLayer
     TreeWater tw;
     tw.Configure(&weather, waveField.get(), &sea->Ocean(), &seaState,
                  sea->heightScale, waterScene.wfExag, waterScene.wfChop);
-    tw.SetCascadeSea(sea->PeakDirX(), sea->PeakDirZ(), sea->PeakDirValid(), sea->Scale());
+    const double bandRms[3] = {sea->BandRmsPhysical(0), sea->BandRmsPhysical(1), sea->BandRmsPhysical(2)};
+    tw.SetCascadeSea(sea->PeakDirX(), sea->PeakDirZ(), sea->PeakDirValid(), sea->Scale(), bandRms);
     Log("[twin] %s", tw.Describe(cam.px, cam.pz, simUnix).c_str());
 
     constexpr int kRings = 4, kPer = 64;

@@ -16,6 +16,7 @@
 #include "compose/DomainSource.h"
 #include "compose/SurfaceFrame.h"   // M12 step 4c: the shipped lattices, against the table's frames
 #include "CurrentFieldLoader.h"
+#include "sim/WaterTerms.h"   // F7: BreakFactor
 #include "FieldLoader.h"
 #include "GeoRef.h"
 #include "PageTable.h"
@@ -353,15 +354,30 @@ bool RunGaSelfTest() {
             const double h = 0.8;
             const double lim = 0.60 * h / (2.0 * std::sqrt(2.0));
             const double excess = std::sqrt(rms2) / lim;
-            const double s = (std::min)(1.0, 1.0 / excess);
+            const double s = BreakFactor(excess);   // F7: the clipped Rayleigh sea
             double rms2After = 0.0;
             for (int i = 0; i < 16; ++i) rms2After += (a[i] * s) * (a[i] * s);
-            if (std::sqrt(rms2After) > lim * (1.0 + 1e-12) && excess > 1.0) {
-                Log("[gatest] FAIL wavefield: limiter exceeds rms cap");
+            if (std::sqrt(rms2After) > lim * (1.0 + 1e-12)) {
+                Log("[gatest] FAIL wavefield: breaking leaves the rms above the limit");
                 ok = false;
             }
             Near((a[3] * s) / (a[7] * s), a[3] / a[7], 1e-12,
                  "wavefield: limiter preserves spectral shape", ok);
+            // The law's limits: a deep sea untouched; at the shore the rms tends to the limit
+            // from below; and it is monotone -- more excess, less of it carried.
+            Near(BreakFactor(0.3), 1.0, 1e-4, "breaking: deep water untouched", ok);
+            // F7b: the height a wave can stand to -- the Miche steepness in deep water (0.88/k),
+            // the depth limit (0.60 h) at the shore.
+            Near(BreakHmax(0.5, 500.0) * 0.5, 0.88, 1e-9, "breaking: deep Hmax is Miche's 0.88/k", ok);
+            Near(BreakHmax(0.01, 0.5), 0.60 * 0.5, 1e-4, "breaking: shallow Hmax is 0.60 h", ok);
+            Near(BreakFactor(100.0) * 100.0, 1.0, 1e-3, "breaking: the shore's rms tends to the limit", ok);
+            for (int i = 1; i < 40; ++i) {
+                const double x0 = 0.1 * i, x1 = 0.1 * (i + 1);
+                if (BreakFactor(x1) > BreakFactor(x0) || BreakFactor(x1) * x1 > 1.0 + 1e-12) {
+                    Log("[gatest] FAIL breaking: not monotone or over the limit at excess %.2f", x1);
+                    ok = false;
+                }
+            }
         }
         // Spinor bilinear phase-error bound: lerp of unit spinors e^{+-i delta} has
         // |arg error| <= 0.16*delta^3 for delta <= 0.94, amplitude >= cos(delta).

@@ -49,6 +49,7 @@
 #include "sim/CurrentModel.h"
 
 #include "sim/WaveField.h"
+#include "sim/WaterTerms.h"   // F7: BreakFactor, the clipped Rayleigh sea
 #include "core/ThreadManager.h"
 
 #include "hal/Gpu.h"
@@ -300,6 +301,96 @@ void BuildCurrentPlanes(const WaveFieldConfig& cfg, double level, double signedM
 // per component (rows parallel; the gauge cumsum sequential -- cheap), then the TOTAL-Hs
 // limiter (ONE uniform factor on the rms envelope; per-line caps measured 6.8x over in the
 // shallows, ALGEBRA.md) and the truncating quantizer into the 2-wide slice atlas.
+// THE EIKONAL SWEEP, as a function: the phase of one component over the window, |grad phi| = feik,
+// by eight Godunov sweeps (two rounds of the four orders), the inflow edges held at the incident
+// deep-water plane k_inf d^ between sweeps. Out of Solve so the selftest can run it on a field of
+// its own (RunWaveFieldSelfTest) -- the gauge that used to run INSIDE every solve (two more
+// integrations and a residual over 1.75 million cells, printing the same answer each time) runs
+// there now, once, where a failure fails the build and not a frame.
+void EikonalSweep(int nx, int ny, double dxm, double kInfC, double d0, double d1,
+                         const std::vector<double>& feik, std::vector<double>& phibuf) {
+    const double kInf = 1e30;
+    const int ib = (d0 >= 0.0) ? 0 : (nx - 1);      // the inflow corner
+    const int jb = (d1 >= 0.0) ? 0 : (ny - 1);
+    auto seed = [&]() {
+        for (int i = 0; i < nx; ++i) {
+            phibuf[size_t(jb) * size_t(nx) + size_t(i)] =
+                kInfC * d0 * double(i - ib) * dxm;
+        }
+        for (int j = 0; j < ny; ++j) {
+            phibuf[size_t(j) * size_t(nx) + size_t(ib)] =
+                kInfC * d1 * double(j - jb) * dxm;
+        }
+    };
+    seed();
+    for (int pass = 0; pass < 8; ++pass) {          // two rounds of the four orders
+        seed();
+        const bool xr = (pass & 1) != 0, yr = (pass & 2) != 0;
+        for (int jj = 0; jj < ny; ++jj) {
+            const int j = yr ? (ny - 1 - jj) : jj;
+            const size_t row = size_t(j) * size_t(nx);
+            for (int ii = 0; ii < nx; ++ii) {
+                const int i = xr ? (nx - 1 - ii) : ii;
+                const size_t idx = row + size_t(i);
+                const double ax = (std::min)((i > 0) ? phibuf[idx - 1] : kInf,
+                                             (i + 1 < nx) ? phibuf[idx + 1] : kInf);
+                const double ay =
+                    (std::min)((j > 0) ? phibuf[idx - size_t(nx)] : kInf,
+                               (j + 1 < ny) ? phibuf[idx + size_t(nx)] : kInf);
+                const double lo = (ax < ay) ? ax : ay;
+                if (lo >= kInf) continue;
+                const double f = feik[idx] * dxm;
+                const double dif = ax - ay;
+                const double cand = (std::abs(dif) >= f)
+                                        ? (lo + f)
+                                        : 0.5 * (ax + ay +
+                                                 std::sqrt(2.0 * f * f - dif * dif));
+                if (cand < phibuf[idx]) phibuf[idx] = cand;
+            }
+        }
+    }
+    seed();   // the last sweep must not be allowed to undercut it either
+
+}
+
+// THE GAUGE: |grad phi| / k - 1 over the wet interior, as a distribution. An eikonal solution is
+// allowed kinks: where two ray families meet (behind a jetty, over a focusing shoal) the viscosity
+// solution takes first arrival and creases, and a centred difference across a crease reads a
+// gradient that is not the local one. Those cells are the physics (the crease is a caustic), so
+// the percentiles say how much of the field is smooth and the max how sharp the sharpest crease
+// is, reported apart. Sampled only where all four neighbours are wet: across the waterline the
+// speed field steps from the wet k to the shoreline limit on purpose.
+struct EikonalGauge {
+    double p50 = 0.0, p90 = 0.0, p99 = 0.0, max = 0.0;
+    size_t cells = 0;
+};
+EikonalGauge GaugeOf(int nx, int ny, double cellM, const std::vector<double>& h,
+                            const std::vector<double>& kbuf, const std::vector<double>& phibuf) {
+    std::vector<double> rs;
+    rs.reserve(size_t(nx) * size_t(ny) / 4);
+    for (int j = 1; j < ny - 1; ++j) {
+        const size_t row = size_t(j) * size_t(nx);
+        for (int i = 1; i < nx - 1; ++i) {
+            const size_t idx = row + size_t(i);
+            if (h[idx] <= 0.0 || h[idx - 1] <= 0.0 || h[idx + 1] <= 0.0 ||
+                h[idx - size_t(nx)] <= 0.0 || h[idx + size_t(nx)] <= 0.0) continue;
+            const double gx = (phibuf[idx + 1] - phibuf[idx - 1]) / (2.0 * cellM);
+            const double gz = (phibuf[idx + size_t(nx)] - phibuf[idx - size_t(nx)]) / (2.0 * cellM);
+            rs.push_back(std::abs(std::sqrt(gx * gx + gz * gz) - kbuf[idx]) / kbuf[idx]);
+        }
+    }
+    std::sort(rs.begin(), rs.end());
+    EikonalGauge g;
+    g.cells = rs.size();
+    if (rs.empty()) return g;
+    auto pct = [&](double q) { return rs[(std::min)(rs.size() - 1, size_t(q * double(rs.size())))]; };
+    g.p50 = pct(0.50);
+    g.p90 = pct(0.90);
+    g.p99 = pct(0.99);
+    g.max = rs.back();
+    return g;
+}
+
 void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& table) {
     const auto t0 = std::chrono::steady_clock::now();
     const WaveFieldConfig& cfg = in.cfg;
@@ -435,9 +526,9 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
     std::vector<double> kbuf(cells), phibuf(cells), feik(cells);
     std::vector<float> aRaw(size_t(nc) * cells);
     std::vector<double> sumsq(cells, 0.0), sumA(cells, 0.0);
+    std::vector<double> sumsqk(cells, 0.0);   // F7b: sum a^2 k, for the energy-weighted wavenumber
     std::vector<double> eta(cells, 0.0);   // --wave-map only: sum a cos(phi) at t = 0
     std::atomic<long long> blockedCells{0};
-    const int icDiag = nc / 2;   // one component carries the phase-gauge instrument
     bool uploaded[WaveField::kMaxComp] = {};
     int nUp = 0;
 
@@ -494,6 +585,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
                     kbuf[idx] = k;
                     aPlane[idx] = float(ar);
                     sumsq[idx] += ar * ar;   // rows are disjoint across threads
+                    sumsqk[idx] += ar * ar * k;
                     sumA[idx] += ar;
                 }
             }
@@ -586,109 +678,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
             //
             // Re-applied after every sweep so it stays a boundary condition rather than an
             // initial guess the sweep is free to undercut.
-            const int ib = (d0 >= 0.0) ? 0 : (nx - 1);      // the inflow corner
-            const int jb = (d1 >= 0.0) ? 0 : (ny - 1);
-            const double kInfC = (sig * sig) / kGrav;       // deep-water k of this component
-            auto seed = [&]() {
-                for (int i = 0; i < nx; ++i) {
-                    phibuf[size_t(jb) * size_t(nx) + size_t(i)] =
-                        kInfC * d0 * double(i - ib) * dxm;
-                }
-                for (int j = 0; j < ny; ++j) {
-                    phibuf[size_t(j) * size_t(nx) + size_t(ib)] =
-                        kInfC * d1 * double(j - jb) * dxm;
-                }
-            };
-            seed();
-            for (int pass = 0; pass < 8; ++pass) {          // two rounds of the four orders
-                seed();
-                const bool xr = (pass & 1) != 0, yr = (pass & 2) != 0;
-                for (int jj = 0; jj < ny; ++jj) {
-                    const int j = yr ? (ny - 1 - jj) : jj;
-                    const size_t row = size_t(j) * size_t(nx);
-                    for (int ii = 0; ii < nx; ++ii) {
-                        const int i = xr ? (nx - 1 - ii) : ii;
-                        const size_t idx = row + size_t(i);
-                        const double ax = (std::min)((i > 0) ? phibuf[idx - 1] : kInf,
-                                                     (i + 1 < nx) ? phibuf[idx + 1] : kInf);
-                        const double ay =
-                            (std::min)((j > 0) ? phibuf[idx - size_t(nx)] : kInf,
-                                       (j + 1 < ny) ? phibuf[idx + size_t(nx)] : kInf);
-                        const double lo = (ax < ay) ? ax : ay;
-                        if (lo >= kInf) continue;
-                        const double f = feik[idx] * dxm;
-                        const double dif = ax - ay;
-                        const double cand = (std::abs(dif) >= f)
-                                                ? (lo + f)
-                                                : 0.5 * (ax + ay +
-                                                         std::sqrt(2.0 * f * f - dif * dif));
-                        if (cand < phibuf[idx]) phibuf[idx] = cand;
-                    }
-                }
-            }
-            seed();   // the last sweep must not be allowed to undercut it either
-        }
-        if (ic == icDiag) {
-            // The instrument that says the walk was never salvageable: the SAME k field,
-            // integrated by two legal routes to every cell, and the largest disagreement
-            // between them. A phase is a phase; if these differ by more than a fraction of a
-            // radian the quantity was not one.
-            std::vector<double> pa(cells), pb(cells);
-            for (int j = 0; j < ny; ++j) {   // north up the west edge, then east along rows
-                const size_t row = size_t(j) * size_t(nx);
-                pa[row] = (j > 0) ? (pa[row - size_t(nx)] +
-                                     kbuf[row - size_t(nx)] * d1 * cfg.cellM)
-                                  : 0.0;
-                for (int i = 1; i < nx; ++i)
-                    pa[row + i] = pa[row + i - 1] + kbuf[row + i - 1] * d0 * cfg.cellM;
-            }
-            for (int i = 0; i < nx; ++i) {   // east along the south edge, then north up cols
-                pb[i] = (i > 0) ? (pb[i - 1] + kbuf[i - 1] * d0 * cfg.cellM) : 0.0;
-                for (int j = 1; j < ny; ++j) {
-                    const size_t idx = size_t(j) * size_t(nx) + size_t(i);
-                    pb[idx] = pb[idx - size_t(nx)] + kbuf[idx - size_t(nx)] * d1 * cfg.cellM;
-                }
-            }
-            // The residual is a DISTRIBUTION, and a max is the wrong number to quote: an
-            // eikonal solution is allowed kinks. Where two ray families meet -- behind a
-            // jetty, over a focusing shoal -- the viscosity solution takes first arrival and
-            // creases, and a centred difference across a crease reads a gradient that is not
-            // the local one. Those cells are the physics (that crease is a caustic), so the
-            // percentiles say how much of the field is smooth and the max says how sharp the
-            // sharpest crease is, and they are reported separately rather than blended into
-            // one alarming number. Sampled only where all four neighbours are wet: across the
-            // waterline the speed field steps from the wet k to the shoreline limit on
-            // purpose, so a difference taken over that step measures the beach, not the wave.
-            double gap = 0.0;
-            std::vector<double> rs;
-            rs.reserve(cells / 4);
-            for (int j = 1; j < ny - 1; ++j) {
-                const size_t row = size_t(j) * size_t(nx);
-                for (int i = 1; i < nx - 1; ++i) {
-                    const size_t idx = row + size_t(i);
-                    if (h[idx] <= 0.0) continue;
-                    gap = (std::max)(gap, std::abs(pa[idx] - pb[idx]));
-                    if (h[idx - 1] <= 0.0 || h[idx + 1] <= 0.0 ||
-                        h[idx - size_t(nx)] <= 0.0 || h[idx + size_t(nx)] <= 0.0) continue;
-                    const double gx = (phibuf[idx + 1] - phibuf[idx - 1]) / (2.0 * cfg.cellM);
-                    const double gz = (phibuf[idx + size_t(nx)] - phibuf[idx - size_t(nx)]) /
-                                      (2.0 * cfg.cellM);
-                    rs.push_back(std::abs(std::sqrt(gx * gx + gz * gz) - kbuf[idx]) /
-                                 kbuf[idx]);
-                }
-            }
-            std::sort(rs.begin(), rs.end());
-            auto pct = [&](double q) {
-                return rs.empty() ? 0.0 : rs[(std::min)(rs.size() - 1,
-                                                        size_t(q * double(rs.size())))];
-            };
-            Log("[wave] phase gauge (comp %d, T %.1f s): the old walk disagreed with itself "
-                "by %.0f rad (%.1f wavelengths) between two routes -- the phase it wrote was "
-                "not a function of position. Eikonal |grad phi|/k residual over %zu open-water "
-                "cells: p50 %.2f%%, p90 %.2f%%, p99 %.1f%%, max %.0f%% (the tail is the "
-                "caustic creases, where first arrival is meant to fold)",
-                ic, T, gap, gap / (2.0 * kPiW), rs.size(), pct(0.50) * 100.0,
-                pct(0.90) * 100.0, pct(0.99) * 100.0, (rs.empty() ? 0.0 : rs.back()) * 100.0);
+            EikonalSweep(nx, ny, dxm, (sig * sig) / kGrav, d0, d1, feik, phibuf);
         }
 
         double kFieldMax = 0.0;
@@ -713,17 +703,20 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
         });
     }
 
-    // -- the TOTAL-Hs limiter: Hs = 2 sqrt2 rms <= gammaHs * h, ONE uniform factor per cell
+    // -- the TOTAL-Hs limiter: Hs = 2 sqrt2 rms against gammaHs * h, ONE uniform factor per cell
     //    on every a_i (spectral shape and directions survive); excess > 1 is the breaking
-    //    indicator -- "does the sea here want to be taller than the water allows".
+    //    indicator -- "does the sea here want to be taller than the water allows". F7: the
+    //    factor is the clipped Rayleigh sea's (WaterTerms.h BreakFactor), not min(1, 1/excess):
+    //    the rms tends to the limit from below and the law has no corner at excess 1.
     std::vector<double> lim(cells);   // (and eta below, which carries the same factor)
     double rmsFieldMax = 0.0, sumFieldMax = 0.0;
     for (size_t idx = 0; idx < cells; ++idx) {
         const double rmsRaw = std::sqrt(sumsq[idx]);
-        const double hLim = (h[idx] > 0.05) ? h[idx] : 0.05;
-        const double rmsLim = (cfg.gammaHs * hLim) / (2.0 * std::sqrt(2.0));
+        // F7b: the height the sea can stand to at this cell, by its energy-weighted wavenumber.
+        const double kEff = sumsqk[idx] / ((sumsq[idx] > 1e-12) ? sumsq[idx] : 1e-12);
+        const double rmsLim = BreakHmax(kEff, h[idx]) / (2.0 * std::sqrt(2.0));
         const double exc = rmsRaw / ((rmsLim > 1e-6) ? rmsLim : 1e-6);
-        const double L = (std::min)(1.0, 1.0 / ((exc > 1e-6) ? exc : 1e-6));
+        const double L = BreakFactor(exc);
         lim[idx] = L;
         rmsFieldMax = (std::max)(rmsFieldMax, rmsRaw * L);
         sumFieldMax = (std::max)(sumFieldMax, sumA[idx] * L);
@@ -742,8 +735,8 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
             for (int i = 0; i < nx; ++i) {
                 const size_t idx = row + size_t(i);
                 const double rmsRaw = std::sqrt(sumsq[idx]);
-                const double hLim = (h[idx] > 0.05) ? h[idx] : 0.05;
-                const double rmsLim = (cfg.gammaHs * hLim) / (2.0 * std::sqrt(2.0));
+                const double kEff = sumsqk[idx] / ((sumsq[idx] > 1e-12) ? sumsq[idx] : 1e-12);
+                const double rmsLim = BreakHmax(kEff, h[idx]) / (2.0 * std::sqrt(2.0));
                 const double exc = rmsRaw / ((rmsLim > 1e-6) ? rmsLim : 1e-6);
                 uint8_t* px = &atlas[arow + size_t(i) * 4];
                 px[0] = Quant8(rmsRaw * lim[idx], envMax);
@@ -1207,7 +1200,7 @@ void WaveField::StoreCache(const Solved& s) const {
 }
 
 bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nParts,
-                       bool block) {
+                       bool block, bool reader) {
     if (!m_comp || m_hgtCh < 0 || !m_atlas) return false;
     RefreshSweCurrent(gpu, simUnix);   // flows into waves (throttled + inFlight-guarded)
 
@@ -1224,6 +1217,21 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
 
     const uint64_t key = BucketKey(simUnix, parts, nParts);
     if (key != NextKey() && !m_inFlight.load()) {
+        // A FIELD IS SOLVED FOR A READER. The key is content and rolls when the content does;
+        // the solve is work and is done when someone will read the answer -- the window at a
+        // level under the pyramid's top, or a hull probing the window (the frame decides, by the
+        // same rule every tenant's want uses). Without one the roll is noted once and the field
+        // stays what it was; the next reader's frame finds the key still moved and solves then.
+        // Measured 2026-10-04: standing at Haulover, the Merrimack field solved twice in 13 s,
+        // 11.8 s each on the compute lane, for no reader (out/pc/CHANGES.md F8).
+        if (!reader) {
+            if (m_waitingKey != key) {
+                m_waitingKey = key;
+                Log("[wave] bucket rolled to %016llx with no reader: the field waits",
+                    static_cast<unsigned long long>(key));
+            }
+            return false;
+        }
         Solved s;
         if (LoadCache(key, s)) {
             // a cache hit is offered like a solve: its pages swap in, then it is live.
@@ -1269,6 +1277,7 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix) const 
     const double gx = (wx - double(t.orgX)) * double(t.invCell) - 0.5;
     const double gz = (wz - double(t.orgZ)) * double(t.invCell) - 0.5;
     if (gx < -0.5 || gz < -0.5 || gx > double(nx) - 0.5 || gz > double(ny) - 0.5) return p;
+    m_probeReadT.store(simUnix, std::memory_order_relaxed);   // a reader (the hull's twin)
     const double fx = (std::min)((std::max)(gx, 0.0), double(nx - 1));
     const double fz = (std::min)((std::max)(gz, 0.0), double(ny - 1));
     const int i0 = (std::min)(int(fx), nx - 2);
@@ -1358,6 +1367,56 @@ WaveField::Probe WaveField::ProbeAt(double wx, double wz, double simUnix) const 
     p.excess = float(bil(t.envSlice, 1) * double(t.excMax));
     p.valid = true;
     return p;
+}
+
+// THE GAUGE AS A SELFTEST. A smooth shoaling k over a wet window; the sweep's phase must have
+// |grad phi| = k to the percentiles below, the inflow edges must carry the incident plane
+// exactly, and the instrument must SEE a wrong phase: the same field scaled by 1.1 reads a
+// residual of 0.1 at its median. The thresholds are the solver's own measured residual on the
+// Merrimack field (p50 0.08 %, p90 0.68 %) with room; a smooth field has no caustic creases, so
+// its p99 is held too.
+bool RunWaveFieldSelfTest() {
+    const int nx = 160, ny = 120;
+    const double cellM = 10.0, T = 8.0, sig = 2.0 * 3.14159265358979 / T;
+    const double kInfC = sig * sig / 9.81;
+    const double prop = 0.9;   // travel direction, radians from north through east
+    const double d0 = std::sin(prop), d1 = std::cos(prop);
+    const size_t cells = size_t(nx) * size_t(ny);
+    std::vector<double> h(cells, 20.0), k(cells), phi(cells, 1e30);   // phi starts far (the sweep lowers it)
+    for (int j = 0; j < ny; ++j)
+        for (int i = 0; i < nx; ++i) {
+            const double u = double(i) / nx, v = double(j) / ny;
+            k[size_t(j) * nx + i] = kInfC * (1.0 + 0.5 * u + 0.3 * v * v);   // a shoaling k
+        }
+    wavecore::EikonalSweep(nx, ny, cellM, kInfC, d0, d1, k, phi);
+    bool ok = true;
+    // the inflow edges: the incident plane, exactly
+    const int ib = (d0 >= 0.0) ? 0 : (nx - 1), jb = (d1 >= 0.0) ? 0 : (ny - 1);
+    for (int i = 0; i < nx; ++i) {
+        const double want = kInfC * d0 * double(i - ib) * cellM;
+        if (std::abs(phi[size_t(jb) * nx + i] - want) > 1e-9) {
+            Log("[wavetest] FAIL: inflow row phase %.6f, the plane says %.6f", phi[size_t(jb) * nx + i], want);
+            ok = false;
+            break;
+        }
+    }
+    const wavecore::EikonalGauge g = wavecore::GaugeOf(nx, ny, cellM, h, k, phi);
+    Log("[wavetest] eikonal residual |grad phi|/k over %zu cells: p50 %.3f%% p90 %.3f%% p99 %.3f%% max %.2f%%",
+        g.cells, g.p50 * 100.0, g.p90 * 100.0, g.p99 * 100.0, g.max * 100.0);
+    if (!(g.cells > cells / 2 && g.p50 < 0.002 && g.p90 < 0.01 && g.p99 < 0.03)) {
+        Log("[wavetest] FAIL: the sweep's phase is not eikonal to the pinned percentiles");
+        ok = false;
+    }
+    // the instrument sees a wrong phase
+    std::vector<double> wrong(phi);
+    for (double& x : wrong) x *= 1.1;
+    const wavecore::EikonalGauge w = wavecore::GaugeOf(nx, ny, cellM, h, k, wrong);
+    if (!(std::abs(w.p50 - 0.1) < 0.005)) {
+        Log("[wavetest] FAIL: the gauge read p50 %.4f on a phase scaled by 1.1 (0.1 expected)", w.p50);
+        ok = false;
+    }
+    Log("[wavetest] %s", ok ? "PASS" : "FAIL");
+    return ok;
 }
 
 }  // namespace ga
