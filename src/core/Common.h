@@ -105,6 +105,14 @@ inline std::string UlpWord(const double* a, const double* b, int count, UlpTally
     return s;
 }
 
+// F9: THE CONSTANT BUFFERS' FINGERPRINTS (--cb-trace). The M12 step 4b gate: the surface's rows and
+// the three kernels' buffers hashed at their fill, printed when the hash moves. The eye is in the
+// bytes, so the hash moves every frame; the instrument runs when it is asked for.
+inline bool& CbTrace() {
+    static bool on = false;
+    return on;
+}
+
 inline void Log(const char* fmt, ...) {
     char buf[2048];
     va_list ap;

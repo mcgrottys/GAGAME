@@ -250,6 +250,7 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--gis-dump") o.gisDump = next("gis_gate.pgm");
         // M9al: the ring gate and its instrument. Instrument first, gate second, both off.
         else if (a == "--res-trace") o.resTrace = true;
+        else if (a == "--cb-trace") o.cbTrace = true;
         // M13 step 0: count the water tiles the walk would want on the planet's own lattice.
         else if (a == "--water-tiles") o.waterTiles = true;
         // The tree's thread instrument (core/ThreadAudit.h): every tile write, read and delete

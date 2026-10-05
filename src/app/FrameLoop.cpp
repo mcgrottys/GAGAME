@@ -2040,6 +2040,7 @@ void FrameLoop::ApplyWindowSteps(const std::vector<SurfaceFrame::Moved>& moved) 
             ++m_windowSteps;
             m_windowTold += told;
             m_windowLeft += left;
+            if (!told && held.empty()) continue;   // F9: a step that told nothing and kept nothing is silent
             Log("[eye-windows] frame %llu: %S slice %u (rank %d, face %u) (%llu,%llu) -> (%llu,%llu): "
                 "%u slots told (their tile changed), %u of them held a tile (leave); %zu held tiles "
                 "kept at their slots",
@@ -3681,6 +3682,14 @@ bool FrameLoop::Frame() {
                         static_cast<unsigned long long>(frame), w, sf.bound[w].K, K0);
                 }
             }
+            // F9: the windows that are one address read one slice; said when the count changes.
+            sf.Share();
+            if (sf.sharedRanks != m_sharedRanksSaid) {
+                m_sharedRanksSaid = sf.sharedRanks;
+                Log("[eye-windows] frame %llu: %u rank(s) of the claimed sets read another set's window "
+                    "(one address, one slice)",
+                    static_cast<unsigned long long>(frame), sf.sharedRanks);
+            }
             ApplyWindowSteps(moved);
             // PHASE B2w: what the step did this frame, for the near ground's ledger.
             m_ngMoves = uint32_t(moved.size());
@@ -3763,8 +3772,10 @@ bool FrameLoop::Frame() {
             }
         }
         m_A.surface.Fill(renderer.surfaceCb, resMgr);
+        // F9: the fingerprint carries the eye, so "when it changes" is every frame; it prints under
+        // --cb-trace, with the kernels' (the M12 step 4b gate, whole, when asked for).
         static uint64_t sLastSurface = 0;
-        const uint64_t h = Fnv1aBytes(&renderer.surfaceCb, sizeof(renderer.surfaceCb));
+        const uint64_t h = CbTrace() ? Fnv1aBytes(&renderer.surfaceCb, sizeof(renderer.surfaceCb)) : sLastSurface;
         if (h != sLastSurface) {
             sLastSurface = h;
             Log("[surface] main fill FNV-1a %016llx", static_cast<unsigned long long>(h));

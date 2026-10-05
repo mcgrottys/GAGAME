@@ -285,7 +285,31 @@ bool SurfaceFrame::StandAbout(double latDeg, double lonDeg, uint32_t rank) {
 SurfaceFrame::ChainRows SurfaceFrame::SlotRows(uint32_t slot) const {
     if (slot >= slotsLive || slotSet[slot] == kNoSet) return ChainRows{};
     const uint32_t set = slotSet[slot];
-    return RowsOf(bound[set], set, Placement::Frame(east, up, north, slotEye[slot]), slotEye[slot]);
+    return RowsOf(bound[set], set, Placement::Frame(east, up, north, slotEye[slot]), slotEye[slot],
+                  slice[set]);
+}
+
+void SurfaceFrame::Share() {
+    bool claimed[kWindowSlots] = {};
+    for (uint32_t s = 0; s < slotsLive; ++s) {
+        if (slotSet[s] != kNoSet) claimed[slotSet[s]] = true;
+    }
+    sharedRanks = 0;
+    for (uint32_t w = 0; w < kWindowSlots; ++w) {
+        for (uint32_t k = 0; k < kMaxRanks; ++k) {
+            uint32_t owner = w;
+            if (claimed[w] && k < bound[w].K) {
+                for (uint32_t v = 0; v < w; ++v) {   // the lowest claimed set at the same address
+                    if (claimed[v] && k < bound[v].K && bound[v].box[k] == bound[w].box[k]) {
+                        owner = v;
+                        break;
+                    }
+                }
+            }
+            slice[w][k] = WindowSlice(owner, k + 1);
+            if (owner != w) ++sharedRanks;
+        }
+    }
 }
 
 uint32_t SurfaceFrame::SlotNear(const double p[3], double reachM) const {
@@ -411,7 +435,8 @@ int SurfaceFrame::SliceRectsLL(const hal::BlockBinding& b, double lat0, double l
 }
 
 SurfaceFrame::ChainRows SurfaceFrame::RowsOf(const EyeWindows& w, uint32_t slot,
-                                             const Placement& own, const double eye[3]) {
+                                             const Placement& own, const double eye[3],
+                                             const uint32_t* slices) {
     ChainRows r;
     r.K = (std::min)(w.K, kMaxRanks);
     for (uint32_t i = 0; i < r.K; ++i) {
@@ -419,7 +444,7 @@ SurfaceFrame::ChainRows SurfaceFrame::RowsOf(const EyeWindows& w, uint32_t slot,
         const FaceWindow box{b.face, b.rung, static_cast<long long>(b.OrgX()),
                              static_cast<long long>(b.OrgY())};
         BlockRows(box, own, eye, r.pl[i], r.off[i]);
-        r.slice[i] = WindowSlice(slot, i + 1);
+        r.slice[i] = slices ? slices[i] : WindowSlice(slot, i + 1);
         r.ground[i] = b.GroundRes(0);
     }
     return r;

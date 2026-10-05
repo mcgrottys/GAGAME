@@ -1181,6 +1181,11 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
         }
         return cBehind[f] ? nullptr : cST[f];
     };
+    // F9: A WINDOW ASKS ONCE FOR THE GROUND ANY OF ITS WORLDS SEES. Worlds at one place read one
+    // slice at the ranks where their boxes are one address (SurfaceFrame::Share); the first world
+    // that sees the leaf asks it of that slice, the rest find it asked. A bit per slice (40 window
+    // slices, from 6) across this leaf's worlds.
+    uint64_t asked = 0;
     for (uint32_t wi = 0; wi < worlds; ++wi) {
     if (wp.worldCount > 0 && !(seen & (1u << wi))) continue;
     const uint32_t ws = wp.worldCount > 0 ? wp.worlds[wi].slot : wp.walkSlot;
@@ -1193,6 +1198,10 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
     // straddles a multiple of 16384 asks two or four rectangles. A node reaching past that plane's
     // horizon has no projection there and asks nothing of the window.
     for (uint32_t b = 0; b < wp.wnK[ws]; ++b) {
+        const uint32_t slice = wp.wnSlice[ws][b];
+        const uint64_t sliceBit = slice >= 6u && slice < 70u ? (1ull << (slice - 6u)) : 0ull;
+        if (asked & sliceBit) continue;   // this window was asked for the leaf by an earlier world
+        asked |= sliceBit;
         const uint32_t bf = wp.wnFace[ws][b] < 6 ? wp.wnFace[ws][b] : 5;   // CubeFaceAxes' default
         const double (*st)[2] = cornersOn(bf);
         if (!st) continue;   // the leaf reaches past the face's horizon: no projection there
@@ -1212,7 +1221,7 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
         const int bmip = (std::max)(
             0, static_cast<int>(std::ceil(std::log2((std::max)(bspan / (std::max)(px, 16.0), 1.0)))));
         if (bmip > 3) continue;
-        const uint32_t slice = SurfaceFrame::WindowSlice(wp.wnSet[ws], b + 1), bm = static_cast<uint32_t>(bmip);
+        const uint32_t bm = static_cast<uint32_t>(bmip);
         // Per axis the box's part, then that part in the slice: [a, a + len) modulo 16384.
         double lo[2][2], hi[2][2];
         int pieces[2];
@@ -1490,6 +1499,7 @@ GlobeLayer::WalkParams GlobeLayer::CaptureWalk(const Camera& cam, float viewport
             wp.wnRung[s][i] = b.rung;
             wp.wnAx[s][i] = static_cast<long long>(b.OrgX());
             wp.wnAy[s][i] = static_cast<long long>(b.OrgY());
+            wp.wnSlice[s][i] = m_surface->slice[set][i];
         }
     }
     wp.probeCullFar = probeCullFar;

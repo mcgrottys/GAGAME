@@ -793,6 +793,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         resMgr.holdMargin = static_cast<float>(S.streaming.holdMargin);   // H2: 1 is F's order
         resMgr.dsSerial = opt.dsSerial;
         resMgr.traceRes = opt.resTrace;
+        CbTrace() = opt.cbTrace;   // F9: the CB fingerprints print when asked for
         resMgr.pagesEvery = opt.pagesEvery;
         resMgr.auditEvery = S.capture.residencyAudit;   // the scene's (--res-audit N)
         resMgr.starvePlant = opt.starvePlant;           // the watchdog's plant (0 = off)
