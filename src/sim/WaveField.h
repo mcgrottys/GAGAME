@@ -148,6 +148,21 @@ public:
     std::shared_ptr<const Solved> Live() const { return std::atomic_load(&m_live); }
     uint64_t LiveKey() const { return m_liveKey; }
     bool Ready() const { return Live() != nullptr; }
+    // 2026-10-04 (the owner's "boat and waves don't align"): ONE SWAP FOR EVERY READER. A finished
+    // solve is NEXT, not live: the pages are painted from it (SolvedFor), and only when its tree is
+    // swapped in on the GPU (FrameLoop: the tenant's holder and Drop) does Publish make it live for
+    // the hull's twin and the bank's table in the same frame. Before this the twin and the table
+    // flipped the instant the solve finished, seconds before the pages landed: old bytes under a
+    // new table (+4 m readings), the hull on a sea the screen did not show.
+    std::shared_ptr<const Solved> Next() const { return std::atomic_load(&m_next); }
+    uint64_t NextKey() const { return Next() ? m_nextKey : m_liveKey; }   // the newest solve's key
+    std::shared_ptr<const Solved> SolvedFor(uint64_t key) const {
+        std::shared_ptr<const Solved> n = Next();
+        if (n && n->key == key) return n;
+        std::shared_ptr<const Solved> l = Live();
+        return (l && l->key == key) ? l : nullptr;
+    }
+    void Publish();   // next -> live (the table adopted), the frame the pages are swapped in
 
     // The hypervisor's step 9c AND the water a hull floats in: evaluate the SOLVED field at
     // a world point on the CPU (bilinear on the packed planes, spinor advanced by the same
@@ -298,6 +313,9 @@ private:
     GpuTable m_table{};
     std::shared_ptr<const Solved> m_live;   // M9bc: the adopted solve, swapped atomically
     uint64_t m_liveKey = 0;
+    std::shared_ptr<const Solved> m_next;   // a finished solve whose pages are not yet on the GPU
+    uint64_t m_nextKey = 0;
+    void Offer(Solved&& s, const char* how);   // s -> next
 
     // background solve plumbing: one worker at a time, result handed over by flag
     std::atomic<bool> m_solveRunning{false};   // the pool job is live (replaces joining m_worker)

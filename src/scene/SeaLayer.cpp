@@ -208,6 +208,7 @@ void SeaLayer::SetTime(double simUnix, double seaLevelM, double camX, double cam
         // were synthesised for; every source with a place (its file's box, or sea.box for
         // data.seastate's) carries its own Hs by the same law (PartsOf), at its own clock.
         m_scale.hsRef = hsModel > 1e-3 ? hsModel : 1.0;
+        m_scale.storm = StormOn();   // a declared storm is the planet's sea (WaveScale.h)
         m_scale.sources.clear();
         for (const SeaState* src : m_sources) {
             if (!src || !src->Ready() || !src->HasBox()) continue;

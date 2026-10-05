@@ -51,7 +51,10 @@ const Schema& SceneSchema_() {
             .BindEnum("mode", p.mode, {"chart", "world", "gulf"},
                       "the layer-enable law: the M1 chart, the one world (estuary + planet), the gulf map", R)
             .Bind("planet", p.planet, "earth | mars", R)
-            .Bind("view", p.view, "the start camera: a name in views[]", R);
+            .Bind("view", p.view, "the start camera: a name in views[]", R)
+            .Bind("windowDepth", p.windowDepth, Q::Dimensionless, "1",
+                  "how many windows deep the view reaches through facing gates (1..7): each world seen "
+                  "is walked and its tiles wanted, so this is the gates' frame cost", R);
         return sc;
     }();
     return *s;

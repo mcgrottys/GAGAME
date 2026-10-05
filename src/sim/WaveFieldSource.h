@@ -157,8 +157,9 @@ public:
     // carries this node's key -- the tree never caches a tile of the wrong identity.
     bool PaintTile(const ColorFrame& frame, const TileRequest& r, uint32_t texW, uint32_t texH,
                    std::vector<DomainValue>& vals) const override {
-        std::shared_ptr<const WaveField::Solved> s = m_wf ? m_wf->Live() : nullptr;
-        if (!s || s->key != m_key.load()) return false;
+        // The solve of THIS node's key: next (its pages are being painted) or live.
+        std::shared_ptr<const WaveField::Solved> s = m_wf ? m_wf->SolvedFor(m_key.load()) : nullptr;
+        if (!s) return false;
         const WaveField::GpuTable& t = s->table;
         const uint32_t nx = t.nx, ny = t.ny;
         if (nx == 0 || ny == 0 || r.face > t.nUsed) return false;

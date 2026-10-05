@@ -45,10 +45,14 @@ struct WaveScale {
     };
     double hsRef = 1.0;              // the Hs the cascades were synthesised for, m (SeaLayer)
     std::vector<Source> sources;     // over the grid, the later on top
+    // 2026-10-04 (the owner: Haulover flat under the storm): a declared storm is a SANDBOX sea, the
+    // planet's, not one source's box -- the scale is 1 everywhere while it stands.
+    bool storm = false;
     static constexpr double kFeatherDeg = 0.25;   // one gfswave node
 
     // The scale at a place: the grid's, then every source over it by its weight there.
     double At(const GlobeModel* grid, double latDeg, double lonDeg) const {
+        if (storm) return 1.0;
         double s = GridAt(grid, latDeg, lonDeg);
         for (const Source& src : sources) {
             const double d = (std::max)((std::max)(src.box[0] - latDeg, latDeg - src.box[2]),

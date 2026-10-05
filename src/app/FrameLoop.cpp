@@ -2818,7 +2818,8 @@ bool FrameLoop::Frame() {
         const float aspectW =
             (S.capture.headless ? static_cast<float>(S.capture.width) : window.Width()) / viewHw;
         m_windows = scene::WindowChain(GateList(), m_eyeOwes, ViewConeOf(cam, aspectW, viewHw),
-                                       kMaxWindowChain, kWindowReachM);
+                                       (std::max)(1, (std::min)(S.scene.windowDepth, kMaxWindowChain)),
+                                       kWindowReachM);
         double E[3] = {cam.px, cam.py, cam.pz};
         if (!m_windows.empty()) {
             m_windows.front().carry.TransformPoint(E[0], E[1], E[2]);
@@ -3057,6 +3058,8 @@ bool FrameLoop::Frame() {
                 waveField->Update(gpu, simUnix, sea->Parts(), sea->activeParts,
                                   S.capture.headless);
                 PROF_END(2);
+                // No pages on the GPU for this field (no tenant): nothing to wait for, live at once.
+                if (!(waveSrc && waveT >= 0)) waveField->Publish();
                 // M9bc: the solve moved -> a new tree under the same tenant, its
                 // pyramid prefilled to disk, the old tiles dropped, then the wants.
                 // Publish a finished prefill. Only the swap and the Drop touch the
@@ -3064,6 +3067,7 @@ bool FrameLoop::Frame() {
                 if (wavePrefillDone.load(std::memory_order_acquire)) {
                     std::atomic_store(waveTree.get(), wavePending);
                     resMgr.Drop(waveT);
+                    waveField->Publish();   // ONE SWAP: the twin and the bank's table flip with the pages
                     Log("[wave] bucket %016llx -> tree %s: %u tiles prefilled (%u planes, "
                         "every mip) in %.2f s on a worker -- the frame did not wait",
                         static_cast<unsigned long long>(wavePendingKey),
@@ -3076,12 +3080,12 @@ bool FrameLoop::Frame() {
                 // Kick a new one when the bucket has rolled and none is in flight. The
                 // busy flag matters: the source's key is mutated here, so a second job
                 // over the same source would be filling a tree whose identity moved.
-                if (waveSrc && waveT >= 0 && waveField->Ready() &&
-                    waveField->LiveKey() != waveSrc->Key() &&
+                if (waveSrc && waveT >= 0 && waveField->Next() &&
+                    waveField->NextKey() != waveSrc->Key() &&
                     !wavePrefillBusy.load(std::memory_order_acquire)) {
-                    waveSrc->SetKey(waveField->LiveKey());
+                    waveSrc->SetKey(waveField->NextKey());
                     wavePendingKey = waveSrc->Key();
-                    wavePendingPlanes = waveField->Table().nUsed + 1u;
+                    wavePendingPlanes = waveField->Next()->table.nUsed + 1u;
                     uint32_t tx0, ty0, tx1, ty1;   // the window in whole mip-0 tiles
                     waveSrc->WindowTiles(tx0, ty0, tx1, ty1);
                     wavePrefillBusy.store(true, std::memory_order_release);

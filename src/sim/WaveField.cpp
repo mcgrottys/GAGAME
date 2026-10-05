@@ -1164,6 +1164,29 @@ WaveField::GpuTable WaveField::DisplayTable(const GpuTable& raw) const {
 
 void WaveField::AdoptTable(const GpuTable& t) { m_table = DisplayTable(t); }
 
+void WaveField::Offer(Solved&& s, const char* how) {
+    const uint64_t key = s.key;
+    m_nextKey = key;
+    std::atomic_store(&m_next, std::shared_ptr<const Solved>(std::make_shared<Solved>(std::move(s))));
+    char buf[160];
+    snprintf(buf, sizeof(buf), "wave %ux%u key %016llx (%s, pages pending)", m_cfg.nx, m_cfg.ny,
+             static_cast<unsigned long long>(key), how);
+    stats = buf;
+}
+
+void WaveField::Publish() {
+    std::shared_ptr<const Solved> n = Next();
+    if (!n) return;
+    AdoptTable(n->table);
+    m_liveKey = n->key;
+    std::atomic_store(&m_live, n);
+    std::atomic_store(&m_next, std::shared_ptr<const Solved>());
+    char buf[160];
+    snprintf(buf, sizeof(buf), "wave %ux%u lvl %+.2f key %016llx (live)", m_table.nx, m_table.ny,
+             double(m_table.level), static_cast<unsigned long long>(m_liveKey));
+    stats = buf;
+}
+
 bool WaveField::LoadCache(uint64_t key, Solved& out) const {
     char path[128];
     CachePathFor(key, path, sizeof(path));
@@ -1194,33 +1217,19 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
         WaitForSolve();   // the job stores m_resultReady before it clears m_solveRunning
         m_resultReady.store(false);
         m_inFlight.store(false);
-        AdoptTable(m_result.table);
-        m_liveKey = m_result.key;
-        std::atomic_store(&m_live, std::shared_ptr<const Solved>(
-                                       std::make_shared<Solved>(std::move(m_result))));
-        char buf[160];
-        snprintf(buf, sizeof(buf), "wave %ux%u lvl %+.2f key %016llx (solved)", m_table.nx,
-                 m_table.ny, double(m_table.level),
-                 static_cast<unsigned long long>(m_liveKey));
-        stats = buf;
-        PruneWaveCache(m_liveKey);   // a solve just wrote ~112 MB; keep the budget
+        const uint64_t solvedKey = m_result.key;
+        Offer(std::move(m_result), "solved");
+        PruneWaveCache(solvedKey);   // a solve just wrote ~112 MB; keep the budget
     }
 
     const uint64_t key = BucketKey(simUnix, parts, nParts);
-    if (key != m_liveKey && !m_inFlight.load()) {
+    if (key != NextKey() && !m_inFlight.load()) {
         Solved s;
         if (LoadCache(key, s)) {
-            // cache hits upload synchronously: they must not flicker through the async path.
-            AdoptTable(s.table);
-            m_liveKey = key;
+            // a cache hit is offered like a solve: its pages swap in, then it is live.
             s.key = key;
-            std::atomic_store(&m_live,
-                              std::shared_ptr<const Solved>(std::make_shared<Solved>(std::move(s))));
-            char buf[160];
-            snprintf(buf, sizeof(buf), "wave %ux%u lvl %+.2f key %016llx (cache)", m_table.nx,
-                     m_table.ny, double(m_table.level), static_cast<unsigned long long>(key));
-            stats = buf;
-            Log("[wave] cache hit %016llx -- adopted without a solve",
+            Offer(std::move(s), "cache");
+            Log("[wave] cache hit %016llx -- offered without a solve",
                 static_cast<unsigned long long>(key));
         } else if (block) {
             // headless determinism: the dump frames must see the field, so eat the
@@ -1228,12 +1237,9 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
             std::vector<PartParam> pcopy;
             if (parts && nParts > 0) pcopy.assign(parts, parts + nParts);
             Solved s2 = SolveNow(key, simUnix, pcopy);
-            AdoptTable(s2.table);
-            m_liveKey = key;
             s2.key = key;
-            std::atomic_store(&m_live,
-                              std::shared_ptr<const Solved>(std::make_shared<Solved>(std::move(s2))));
-            PruneWaveCache(m_liveKey);   // the blocking solve wrote a cache entry too
+            Offer(std::move(s2), "solved now");
+            PruneWaveCache(key);   // the blocking solve wrote a cache entry too
         } else {
             std::vector<PartParam> pcopy;
             if (parts && nParts > 0) pcopy.assign(parts, parts + nParts);
