@@ -2274,6 +2274,8 @@ bool FrameLoop::Frame() {
     float dt = std::chrono::duration<float>(now - last).count();
     last = now;
     const auto preT0 = Clock::now();   // M9u: everything before RenderFrame
+    double profAtStart[kProfN];
+    for (int k = 0; k < kProfN; ++k) profAtStart[k] = profMs[k];
     // The interval just measured is the previous frame's whole loop (its render, its
     // capture, this iteration's message pump): close that frame's row with it. It used
     // to be pushed beside the CURRENT frame's render time, so every metrics.csv row
@@ -3142,8 +3144,15 @@ bool FrameLoop::Frame() {
                         simUnix - waveField->LastProbeRead(), latE, lonE, latW, lonW);
                 }
                 PROF_BEGIN();
-                waveField->Update(gpu, simUnix, sea->Parts(), sea->activeParts,
-                                  S.capture.headless, waveReader);
+                // F13: the blocking path (the field read or solved ON the frame) is for the runs
+                // whose frames must see it -- a dump, a rail, a settle -- not for every headless
+                // run: a measurement of the frame's cost wants the frame the player gets.
+                const bool waveBlock = S.capture.headless &&
+                                       (!S.capture.dump.empty() || !S.capture.hdr.empty() ||
+                                        !S.capture.mp4.empty() || !S.capture.railDir.empty() ||
+                                        S.capture.settle.sync || S.capture.settle.hold ||
+                                        S.capture.settle.exact);
+                waveField->Update(gpu, simUnix, sea->Parts(), sea->activeParts, waveBlock, waveReader);
                 PROF_END(2);
                 // No pages on the GPU for this field (no tenant): nothing to wait for, live at once.
                 if (!(waveSrc && waveT >= 0)) waveField->Publish();
@@ -3153,7 +3162,7 @@ bool FrameLoop::Frame() {
                 // residency manager, and both stay on this thread.
                 if (wavePrefillDone.load(std::memory_order_acquire)) {
                     std::atomic_store(waveTree.get(), wavePending);
-                    resMgr.Drop(waveT);
+                    resMgr.Reload(waveT);   // F13: the held tiles hold until their replacements land
                     waveField->Publish();   // ONE SWAP: the twin and the bank's table flip with the pages
                     Log("[wave] bucket %016llx -> tree %s: %u tiles prefilled (%u planes, "
                         "every mip) in %.2f s on a worker -- the frame did not wait",
@@ -3179,7 +3188,7 @@ bool FrameLoop::Frame() {
                     const ColorFrame wf = waveFrame.color;
                     WaveFieldSource* wsrc = waveSrc.get();
                     const uint32_t planes = wavePendingPlanes;
-                    Threads().Submit(Lane::Compute, "wave.prefill",
+                    Threads().Submit(Lane::Long, "wave.prefill",
                                      [&wavePending, &wavePrefillDone, &wavePendingTiles,
                                       &wavePendingSec, wf, wsrc, planes, tx0, ty0, tx1, ty1]() {
                         const auto tp0 = Clock::now();
@@ -4061,6 +4070,8 @@ bool FrameLoop::Frame() {
         resMgr.phaseMs[k] = 0.0;
     }
     inMs[kInResTurn] = static_cast<float>(resMgr.turnMs);
+    m_slowTurnMs = resMgr.turnMs;    // F13: the slow-frame line read phaseMs after this zeroing: 0.0 always
+    m_slowRenderMs = renderMs;
     resMgr.turnMs = 0.0;
     if (waterBank) {
         inMs[kInBankList] = static_cast<float>(waterBank->tileListMs);
@@ -4130,10 +4141,9 @@ bool FrameLoop::Frame() {
         }
         double sum = 0.0;
         for (int k = 0; k < kProfN; ++k) sum += profMs[k];
-        double turnMs = 0.0;
-        for (double p : resMgr.phaseMs) turnMs += p;
+        const double turnMs = m_slowTurnMs;
         if (ms > m_slow[w].ms) {
-            m_slow[w] = {ms, profMs[7] - m_profWalkAtFrame, sum - m_profSumAtFrame, turnMs, frame,
+            m_slow[w] = {ms, profMs[7] - m_profWalkAtFrame, sum - m_profSumAtFrame, turnMs, gpu.lastFenceWaitMs, m_slowRenderMs, frame,
                          uint32_t(m_windows.size()), m_ngMoves, m_windowTold - m_windowToldAtFrame};
         }
     }
@@ -4672,6 +4682,19 @@ bool FrameLoop::Frame() {
         }
         return false;
     }
+    {   // F13 (instrument): a slow frame's parts, this frame's own -- before RenderFrame, in it, after it
+        const float postMs = std::chrono::duration<float>(Clock::now() - rf0).count() * 1000.0f - m_slowRenderMs;
+        if (preMs + m_slowRenderMs + postMs > 80.0f) {
+            std::string parts;
+            for (int k = 0; k < kProfN; ++k) {
+                char b[32];
+                snprintf(b, sizeof(b), " %d:%.1f", k, profMs[k] - profAtStart[k]);
+                parts += b;
+            }
+            Log("[perf-slow] f%llu: before the render %.1f ms, the render %.1f, after it %.1f; the brackets%s",
+                static_cast<unsigned long long>(frame), preMs, m_slowRenderMs, postMs, parts.c_str());
+        }
+    }
     return true;
 }
 
@@ -4775,9 +4798,9 @@ int FrameLoop::Finish() {
             if (!(f.ms > 0.0)) continue;
             char b[160];
             snprintf(b, sizeof(b),
-                     "%sf%u %.1f ms (%u deep; walk %.1f, sections %.1f, residency turn %.1f; %u window steps, "
+                     "%sf%u %.1f ms (%u deep; walk %.1f, sections %.1f, residency turn %.1f, gpu wait %.1f, render %.1f; %u window steps, "
                      "%llu slots told)",
-                     s.empty() ? "" : "; ", f.frame, f.ms, f.depth, f.walkMs, f.cpuMs, f.turnMs, f.moves,
+                     s.empty() ? "" : "; ", f.frame, f.ms, f.depth, f.walkMs, f.cpuMs, f.turnMs, f.fenceMs, f.renderMs, f.moves,
                      static_cast<unsigned long long>(f.told));
             s += b;
         }

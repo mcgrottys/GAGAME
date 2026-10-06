@@ -988,18 +988,79 @@ void SweSolver::ReadFields(Gpu& gpu, std::vector<float>& etaOut, uint32_t& etaW,
     uvWrap.state = m_uvState;
     const std::vector<uint8_t> uvData = gpu.ReadbackTexture(uvWrap, &uvPitch);
     m_uvState = uvWrap.state;
+    UnpackFields(m_cb.nx, m_cb.ny, etaData, etaPitch, uvData, uvPitch, etaOut, etaW, etaH, uv4Out, uvW, uvH);
+}
 
+SweSolver::FieldsRead SweSolver::ReadFieldsDetach() {
+    FieldsRead r;
+    r.eta = m_rbEta;
+    r.uv = m_rbUv;
+    r.nx = m_cb.nx;
+    r.ny = m_cb.ny;
+    m_rbEta = Gpu::TextureReadback{};
+    m_rbUv = Gpu::TextureReadback{};
+    return r;
+}
+
+void SweSolver::UnpackRead(Gpu& gpu, FieldsRead& r, std::vector<float>& etaOut, uint32_t& etaW,
+                           uint32_t& etaH, std::vector<float>& uv4Out, uint32_t& uvW, uint32_t& uvH) {
+    etaW = etaH = uvW = uvH = 0;
+    if (!r.eta.Pending() || !r.uv.Pending()) return;
+    const uint32_t etaPitch = r.eta.rowPitch, uvPitch = r.uv.rowPitch;
+    const std::vector<uint8_t> etaData = gpu.ReadbackTake(r.eta);
+    const std::vector<uint8_t> uvData = gpu.ReadbackTake(r.uv);
+    UnpackFields(r.nx, r.ny, etaData, etaPitch, uvData, uvPitch, etaOut, etaW, etaH, uv4Out, uvW, uvH);
+}
+
+bool SweSolver::ReadFieldsBegin(Gpu& gpu) {
+    if (!m_ready || m_rbEta.Pending()) return false;
+    GpuTexture wrap;
+    wrap.res = m_eta.Res();
+    wrap.format = DXGI_FORMAT_R32_FLOAT;
+    wrap.width = m_eta.TilesX() * m_eta.TileW();
+    wrap.height = m_eta.TilesY() * m_eta.TileH();
+    wrap.state = m_etaState;
+    m_rbEta = gpu.ReadbackTextureBegin(wrap);
+    GpuTexture uvWrap;
+    uvWrap.res = m_uvBank.Res();
+    uvWrap.format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    uvWrap.width = m_uvBank.TilesX() * m_uvBank.TileW();
+    uvWrap.height = m_uvBank.TilesY() * m_uvBank.TileH();
+    uvWrap.state = m_uvState;
+    m_rbUv = gpu.ReadbackTextureBegin(uvWrap);
+    return true;
+}
+
+bool SweSolver::ReadFieldsReady(const Gpu& gpu) const {
+    return m_rbEta.Pending() && m_rbUv.Pending() && gpu.ReadbackReady(m_rbUv);
+}
+
+void SweSolver::ReadFieldsTake(Gpu& gpu, std::vector<float>& etaOut, uint32_t& etaW,
+                               uint32_t& etaH, std::vector<float>& uv4Out, uint32_t& uvW,
+                               uint32_t& uvH) {
+    etaW = etaH = uvW = uvH = 0;
+    if (!ReadFieldsReady(gpu)) return;
+    const uint32_t etaPitch = m_rbEta.rowPitch, uvPitch = m_rbUv.rowPitch;
+    const std::vector<uint8_t> etaData = gpu.ReadbackTake(m_rbEta);
+    const std::vector<uint8_t> uvData = gpu.ReadbackTake(m_rbUv);
+    UnpackFields(m_cb.nx, m_cb.ny, etaData, etaPitch, uvData, uvPitch, etaOut, etaW, etaH, uv4Out, uvW, uvH);
+}
+
+void SweSolver::UnpackFields(uint32_t nx, uint32_t ny, const std::vector<uint8_t>& etaData,
+                             uint32_t etaPitch, const std::vector<uint8_t>& uvData, uint32_t uvPitch,
+                             std::vector<float>& etaOut, uint32_t& etaW, uint32_t& etaH,
+                             std::vector<float>& uv4Out, uint32_t& uvW, uint32_t& uvH) {
     // The eta RESOURCE desc is the LOGICAL grid (nx x ny) -- the tile-multiple padding lives
     // in the atlas' addressing, not the texture dims. (ReadProbes' padded wrap dims were
     // cosmetic; a row loop that trusts them runs off the readback buffer.)
-    etaW = m_cb.nx;
-    etaH = m_cb.ny;
+    etaW = nx;
+    etaH = ny;
     etaOut.resize(static_cast<size_t>(etaW) * etaH);
     for (uint32_t y = 0; y < etaH; ++y) {
         memcpy(&etaOut[static_cast<size_t>(y) * etaW], &etaData[y * etaPitch], etaW * 4);
     }
-    uvW = m_cb.nx;
-    uvH = m_cb.ny;
+    uvW = nx;
+    uvH = ny;
     uv4Out.resize(static_cast<size_t>(uvW) * uvH * 4);
     for (uint32_t y = 0; y < uvH; ++y) {
         const uint16_t* px = reinterpret_cast<const uint16_t*>(&uvData[y * uvPitch]);

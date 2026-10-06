@@ -924,6 +924,45 @@ bool ResidencyManager::DropOne(const std::shared_ptr<Tracked>& tr) {
     return true;
 }
 
+void ResidencyManager::Reload(int tenant) {
+    Tenant& t = m_tenants[tenant];
+    uint32_t held = 0, mapped = 0, inflight = 0;
+    std::vector<const Tracked*> twice;   // stale already: their replacement on the way is old too
+    for (size_t i = 0; i < t.tracked.size();) {
+        const std::shared_ptr<Tracked> tr = t.tracked[i];
+        if (tr->state == TileState::Mapped && tr->landed && !tr->dropped) {
+            if (!tr->stale || !tr->refill) {
+                tr->stale = true;
+                auto job = std::make_shared<Tracked>();
+                job->tenant = tr->tenant;
+                job->req = tr->req;
+                job->refresh = true;
+                tr->refill = job;
+                m_refresh.push_back({tr, job, false});
+            } else {
+                twice.push_back(tr.get());
+            }
+            ++held;
+            ++i;
+            continue;
+        }
+        Untrack(t, tr.get());   // swaps the last in: i is not advanced
+        if (DropOne(tr)) ++mapped; else ++inflight;
+    }
+    if (mapped) {
+        std::erase_if(m_mapped, [](const std::shared_ptr<Tracked>& p) { return p->dropped; });
+    }
+    if (!twice.empty()) {
+        std::sort(twice.begin(), twice.end());
+        for (Refresh& f : m_refresh) {
+            if (std::binary_search(twice.begin(), twice.end(), f.held.get())) f.again = true;
+        }
+    }
+    Log("[residency] %S: the identity moved: %u held tiles stay drawn, stale, asked anew in the order; "
+        "%u mapped (not landed) and %u in flight for the old identity dropped",
+        t.name.c_str(), held, mapped, inflight);
+}
+
 void ResidencyManager::Invalidate(int tenant, const TileRequest& r, bool moved) {
     std::lock_guard<std::mutex> lk(m_invMx);
     m_invQ.push_back({tenant, r, moved});
@@ -1013,6 +1052,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
                     job->tenant = tr->tenant;
                     job->req = tr->req;
                     job->refresh = true;
+                    tr->refill = job;
                     m_refresh.push_back({t.tracked[tr->pos], job, false});
                 }
                 continue;

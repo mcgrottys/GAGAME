@@ -181,7 +181,7 @@ void ParallelRows(int ny, const std::function<void(int, int)>& fn) {
     const unsigned hw = std::thread::hardware_concurrency();
     const int nThreads = (std::max)(4, (hw > 2u) ? int(hw - 2u) : 4);
     const int chunk = (ny + nThreads - 1) / nThreads;
-    Threads().ParallelFor(Lane::Compute, "wave.rows", ny, chunk, fn);
+    Threads().ParallelFor(Lane::Long, "wave.rows", ny, chunk, fn);   // F13: seconds of rows
 }
 
 void CachePathFor(uint64_t key, char* buf, size_t n) {
@@ -975,50 +975,98 @@ uint64_t WaveField::BucketKey(double simUnix, const PartParam* parts, int nParts
 // identity, so the same flow always finds its cache and a changed flow always re-solves.
 void WaveField::RefreshSweCurrent(Gpu& gpu, double simUnix) {
     if (!m_swe || !m_swe->Ready()) return;
-    if (simUnix - m_curReadT < 90.0 && !m_curU.empty()) return;   // solve-cadence refresh
-    if (m_inFlight.load()) return;   // never swap planes under a running solve
-    m_curReadT = simUnix;
-    std::vector<float> eta, uv4;
-    uint32_t ew = 0, eh = 0, uw = 0, uh = 0;
-    m_swe->ReadFields(gpu, eta, ew, eh, uv4, uw, uh);
-    if (uw < 2 || uh < 2) return;
-    const size_t cells = size_t(m_cfg.nx) * size_t(m_cfg.ny);
-    m_curU.assign(cells, 0.0f);
-    m_curV.assign(cells, 0.0f);
-    // PHASE C4: each cell's place is its page texel's (WaveFieldConfig::PlaceOfCell), then the
-    // solver's cell under it by the solver's own planes.
-    const SweDomain& dom = m_swe->Domain();
-    for (int j = 0; j < m_cfg.ny; ++j) {
-        const size_t row = size_t(j) * size_t(m_cfg.nx);
-        for (int i = 0; i < m_cfg.nx; ++i) {
-            double la = 0.0, lo = 0.0, tx = 0.0, ty = 0.0;
-            m_cfg.PlaceOfCell(double(i) + 0.5, double(j) + 0.5, la, lo);
-            if (!dom.CellOf(la, lo, tx, ty) ||
-                tx < 0.0 || ty < 0.0 || tx >= double(uw) || ty >= double(uh)) {
-                continue;
-            }
-            const int ix = int(tx), iy = int(ty);   // row 0 = NORTH
-            const float* s = &uv4[(size_t(iy) * uw + size_t(ix)) * 4];
-            if (s[3] < 0.5f) continue;   // solver-invalid: sponge or dry
-            // quantize to 0.05 m/s -- the sig hashes EXACTLY what the solve eats
-            m_curU[row + i] =
-                std::round(s[0] * m_sweGain / 0.05f) * 0.05f;
-            m_curV[row + i] =
-                std::round(s[1] * m_sweGain / 0.05f) * 0.05f;
+    // F13: ASKED ON ONE FRAME, RESAMPLED ON A WORKER, ADOPTED ON A LATER FRAME. The synchronous
+    // read drained the queue, and the resample of 2.2 million cells after it took a quarter of a
+    // second on the main thread: the one hitch the frame felt of the roll, every 90 s.
+    if (m_curJob) {
+        if (!m_curJob->done.load(std::memory_order_acquire)) return;
+        if (m_inFlight.load()) return;   // never swap planes under a running solve
+        CurJob& j = *m_curJob;
+        m_curU.swap(j.U);
+        m_curV.swap(j.V);
+        if (j.h != m_curSig && !j.U.empty()) {
+            m_curSig = j.h;
+            Log("[wave] swe current refreshed: sig %016llx (gain %.1f, 0.05 m/s buckets): %zu of %zu "
+                "cells moved since the last, the largest by %.2f m/s%s",
+                static_cast<unsigned long long>(j.h), m_sweGain, j.moved, m_curU.size(), j.worst,
+                j.first ? " (the first)" : "");
         }
+        m_curJob.reset();
+        return;
     }
-    uint64_t h = 14695981039346656037ull;
-    auto mixB = [&h](const void* p, size_t n) {
-        const uint8_t* b = static_cast<const uint8_t*>(p);
-        for (size_t i = 0; i < n; ++i) h = (h ^ b[i]) * 1099511628211ull;
-    };
-    mixB(m_curU.data(), m_curU.size() * sizeof(float));
-    mixB(m_curV.data(), m_curV.size() * sizeof(float));
-    if (h != m_curSig) {
-        m_curSig = h;
-        Log("[wave] swe current refreshed: sig %016llx (gain %.1f, 0.05 m/s buckets)",
-            static_cast<unsigned long long>(h), m_sweGain);
+    if (!m_swe->ReadFieldsPending()) {
+        if (simUnix - m_curReadT < 90.0 && !m_curU.empty()) return;   // solve-cadence refresh
+        if (m_inFlight.load()) return;
+        m_swe->ReadFieldsBegin(gpu);
+        return;
     }
+    if (!m_swe->ReadFieldsReady(gpu)) return;
+    m_curReadT = simUnix;
+    auto job = std::make_shared<CurJob>();
+    job->read = m_swe->ReadFieldsDetach();
+    job->oldU = m_curU;   // what the last refresh ate: the instrument's reference
+    job->oldV = m_curV;
+    job->first = m_curU.empty();
+    m_curJob = job;
+    const SweDomain* dom = &m_swe->Domain();
+    const float gain = m_sweGain;
+    const WaveFieldConfig cfg = m_cfg;
+    Gpu* gp = &gpu;
+    Threads().Submit(Lane::Long, "wave.current", [job, dom, gain, cfg, gp]() {
+        const size_t cells = size_t(cfg.nx) * size_t(cfg.ny);
+        std::vector<float> eta;
+        uint32_t ew = 0, eh = 0;
+        SweSolver::UnpackRead(*gp, job->read, eta, ew, eh, job->uv4, job->uw, job->uh);
+        if (job->uw < 2 || job->uh < 2) {   // nothing read: the last flow stands
+            job->U = job->oldU;
+            job->V = job->oldV;
+            job->done.store(true, std::memory_order_release);
+            return;
+        }
+        job->U.assign(cells, 0.0f);
+        job->V.assign(cells, 0.0f);
+        // PHASE C4: each cell's place is its page texel's (WaveFieldConfig::PlaceOfCell), then
+        // the solver's cell under it by the solver's own planes.
+        for (int j = 0; j < cfg.ny; ++j) {
+            const size_t row = size_t(j) * size_t(cfg.nx);
+            for (int i = 0; i < cfg.nx; ++i) {
+                double la = 0.0, lo = 0.0, tx = 0.0, ty = 0.0;
+                cfg.PlaceOfCell(double(i) + 0.5, double(j) + 0.5, la, lo);
+                if (!dom->CellOf(la, lo, tx, ty) ||
+                    tx < 0.0 || ty < 0.0 || tx >= double(job->uw) || ty >= double(job->uh)) {
+                    continue;
+                }
+                const int ix = int(tx), iy = int(ty);   // row 0 = NORTH
+                const float* s = &job->uv4[(size_t(iy) * job->uw + size_t(ix)) * 4];
+                if (s[3] < 0.5f) continue;   // solver-invalid: sponge or dry
+                // quantize to 0.05 m/s -- the sig hashes EXACTLY what the solve eats
+                job->U[row + i] = std::round(s[0] * gain / 0.05f) * 0.05f;
+                job->V[row + i] = std::round(s[1] * gain / 0.05f) * 0.05f;
+            }
+        }
+        uint64_t h = 14695981039346656037ull;
+        auto mixB = [&h](const void* p, size_t n) {
+            const uint8_t* b = static_cast<const uint8_t*>(p);
+            for (size_t i = 0; i < n; ++i) h = (h ^ b[i]) * 1099511628211ull;
+        };
+        mixB(job->U.data(), job->U.size() * sizeof(float));
+        mixB(job->V.data(), job->V.size() * sizeof(float));
+        job->h = h;
+        // WHAT MOVED: the cells whose quantized flow differs from the last refresh's, and the
+        // largest step -- the roll's cause, in the units the solve eats.
+        if (job->oldU.size() == cells) {
+            for (size_t i = 0; i < cells; ++i) {
+                const float du = std::fabs(job->U[i] - job->oldU[i]);
+                const float dv = std::fabs(job->V[i] - job->oldV[i]);
+                if (du > 0.0f || dv > 0.0f) ++job->moved;
+                job->worst = (std::max)(job->worst, (std::max)(du, dv));
+            }
+        }
+        job->oldU.clear();
+        job->oldV.clear();
+        job->uv4.clear();
+        job->done.store(true, std::memory_order_release);
+    });
 }
 
 WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
@@ -1118,11 +1166,20 @@ void WaveField::SolveAsync(uint64_t key, double simUnix, std::vector<PartParam> 
     m_solveRunning.store(true, std::memory_order_release);
     Log("[wave] bucket rolled -> background solve (key %016llx)",
         static_cast<unsigned long long>(key));
-    // Lane::Compute, not Io: this runs for seconds and would otherwise hold one of the twelve
-    // loader slots for the whole solve. Its own ParallelRows is a nested ParallelFor on the same
-    // lane, which is safe because that caller does its own share of the chunks.
-    Threads().Submit(Lane::Compute, "wave.solve", [this, key, simUnix, p = std::move(parts)]() {
-        Solved s = SolveNow(key, simUnix, p);
+    // Lane::Long (F13; was Compute): this runs for seconds. Not Io, which would hold one of the
+    // twelve loader slots for the whole solve; not Compute, whose queue the frame's short work
+    // shares -- the predicted walk's join waited 60-190 ms behind the rows. Its own ParallelRows
+    // is a nested ParallelFor on the same lane, safe because that caller does its own share.
+    Threads().Submit(Lane::Long, "wave.solve", [this, key, simUnix, p = std::move(parts)]() {
+        Solved s;
+        if (LoadCache(key, s)) {   // F13: the cache first, on this worker (294 MB a read)
+            s.key = key;
+            Log("[wave] cache hit %016llx -- read on a worker, offered without a solve",
+                static_cast<unsigned long long>(key));
+        } else {
+            s = SolveNow(key, simUnix, p);
+            PruneWaveCache(key);   // a solve just wrote ~294 MB; keep the budget (here, not on the frame)
+        }
         m_result = std::move(s);
         m_resultReady.store(true, std::memory_order_release);
         m_solveRunning.store(false, std::memory_order_release);
@@ -1210,9 +1267,7 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
         WaitForSolve();   // the job stores m_resultReady before it clears m_solveRunning
         m_resultReady.store(false);
         m_inFlight.store(false);
-        const uint64_t solvedKey = m_result.key;
-        Offer(std::move(m_result), "solved");
-        PruneWaveCache(solvedKey);   // a solve just wrote ~112 MB; keep the budget
+        Offer(std::move(m_result), "solved");   // (the prune of the cache ran on the solve's worker)
     }
 
     const uint64_t key = BucketKey(simUnix, parts, nParts);
@@ -1232,8 +1287,12 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
             }
             return false;
         }
+        // F13: THE CACHE IS READ WHERE THE SOLVE IS MADE. A hit was read here, on the frame:
+        // 294 MB in 65-130 ms at the helm, the roll's hitch whenever a bucket came back. The
+        // asynchronous path looks the key up on its worker first and solves only on a miss; the
+        // blocking path (the dump frames) reads here as before.
         Solved s;
-        if (LoadCache(key, s)) {
+        if (block && LoadCache(key, s)) {
             // a cache hit is offered like a solve: its pages swap in, then it is live.
             s.key = key;
             Offer(std::move(s), "cache");

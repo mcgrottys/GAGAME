@@ -269,6 +269,12 @@ public:
     // NULL-mapped after the frame-overlap window (priors 19: something recorded may still read
     // them); loads in flight for the old identity are discarded when they land.
     void Drop(int tenant);
+    // F13: THE IDENTITY MOVED UNDER EVERY TILE, AND THE HELD ONES HOLD. The version law
+    // (Invalidate, the refill in MapAndFill) said of a whole tenant: a held tile stays mapped and
+    // drawn, stale, and is asked anew in the order at its own measure; its replacement lands whole
+    // and swaps in place. Loads in flight for the old identity are discarded as Drop discards
+    // them. Nothing reads absence: the picture keeps the field it had until the new one lands.
+    void Reload(int tenant);
     // M9bb: ONE tile changed on disk (a pyramid fold rewrote it, or a composite of it was
     // dropped): forget what is mapped at that address so the next Want refetches. Safe from
     // any thread -- it queues; ProcessQueues applies it on the main thread with Drop's rules.
@@ -675,6 +681,7 @@ private:
         // not whole: a refusal of this attempt, retried when the tree next changes for the tile;
         // while it is not held, it blocks its children (they are unreachable as it is).
         bool stale = false, refresh = false, incomplete = false;
+        std::shared_ptr<Tracked> refill;   // F13: a stale held tile's replacement on its way (m_refresh)
         // 4.7: the slot's address (0: none) and whether it is a mapping of bytes another slot read.
         uint64_t gkey = 0;
         bool alias = false;

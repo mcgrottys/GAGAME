@@ -145,8 +145,11 @@ private:
              m_windowKept = 0, m_windowKeptMoved = 0;
     // 2026-10-04 (the corridor's struggle): the eight slowest frames of the run, each with the
     // window steps it made and the slots those steps told -- printed at the end beside [perf].
+    double m_slowTurnMs = 0.0, m_slowRenderMs = 0.0;   // F13: this frame's, for the slow-frame line
     struct SlowFrame {
         double ms = 0.0, walkMs = 0.0, cpuMs = 0.0, turnMs = 0.0;   // whole; globe.SetView; the sections; the residency turn
+        double fenceMs = 0.0;   // F13: the wait for the GPU at BeginFrame
+        double renderMs = 0.0;  // F13: RenderFrame whole (the residency turn inside it)
         uint32_t frame = 0, depth = 0, moves = 0;
         uint64_t told = 0;
     };

@@ -183,6 +183,22 @@ public:
     // ---- readback: copies a texture to system memory. Synchronous; only used by --dump.
     std::vector<uint8_t> ReadbackTexture(GpuTexture& tex, uint32_t* outRowPitch,
                                          uint32_t mip = 0);
+    // F13: THE SAME COPY, WITHOUT THE WAIT. Begin records the copy on its own list, submits it
+    // and signals a fence; Ready says whether the fence passed; Take maps the bytes and releases
+    // the buffer. Each carries its own allocator and list, so any number stand at once. For a
+    // reader that needs a field now and then (the wave solve's current, every 90 s) and must not
+    // drain the queue for it: the synchronous one cost a quarter of a second a time at the helm.
+    struct TextureReadback {
+        Com<ID3D12Resource> buf;
+        Com<ID3D12CommandAllocator> alloc;
+        Com<ID3D12GraphicsCommandList> list;
+        uint64_t fence = 0, bytes = 0;
+        uint32_t rowPitch = 0;
+        bool Pending() const { return buf != nullptr; }
+    };
+    TextureReadback ReadbackTextureBegin(GpuTexture& tex, uint32_t mip = 0);
+    bool ReadbackReady(const TextureReadback& rb) const;
+    std::vector<uint8_t> ReadbackTake(TextureReadback& rb);
     // M7l: one texel of one subresource -- the hypervisor's compose-tile cross-check.
     // Returns up to 16 bytes of the texel in out; true on success.
     bool ReadbackTexel(ID3D12Resource* res, uint32_t subresource, uint32_t x, uint32_t y,
@@ -192,6 +208,9 @@ public:
                                         D3D12_RESOURCE_STATES currentState);
 
     // Immediate-submit helper for one-off setup work (texture uploads, buffer initialisation).
+    // F13 (instrument): how long BeginFrame waited for the frame it reuses, ms (the GPU's part
+    // of a slow frame, told apart from the CPU's).
+    double lastFenceWaitMs = 0.0;
     ID3D12GraphicsCommandList* BeginUpload();
     void EndUpload();
 

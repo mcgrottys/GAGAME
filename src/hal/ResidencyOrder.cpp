@@ -943,7 +943,9 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
     // The first P not held, in the order: the loader's list and the gather's.
     m_need.clear();
     for (const OrdRec& r : m_rec) {
-        if (!(r.flags & kInPBit) || (r.flags & kHeldBit)) continue;
+        // F13: a held tile whose bytes went stale (the version law) is in the loader's list at
+        // its own measure: its refill competes with every other load as a want does.
+        if (!(r.flags & kInPBit) || ((r.flags & kHeldBit) && !r.tile->stale)) continue;
         m_need.push_back({r.bucket, r.meas, r.key, r.tile});
         r.tile->firstP = now;
     }
@@ -1161,17 +1163,20 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
         }
         if (!stillHeld) {   // released by the cut or dropped meanwhile: nothing to swap
             h->stale = false;
+            h->refill.reset();
             m_refresh.erase(m_refresh.begin() + static_cast<std::ptrdiff_t>(i));
             continue;
         }
         if (js == TileState::Loaded && !f.again && refills.size() / 2 < kMaxMapsPerFrame / 2) {
             refills.push_back(f.held);
             refills.push_back(f.job);
+            h->refill.reset();
             m_refresh.erase(m_refresh.begin() + static_cast<std::ptrdiff_t>(i));
             continue;
         }
         if (js == TileState::Failed && !f.again) {   // refused: the old bytes stand, stale
             ++refreshRefusedTotal;
+            h->refill.reset();
             m_refresh.erase(m_refresh.begin() + static_cast<std::ptrdiff_t>(i));
             continue;
         }
@@ -1181,14 +1186,10 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
             job->req = h->req;
             job->refresh = true;
             f.job = job;
+            h->refill = job;
             f.again = false;
         }
-        if (m_inFlight < static_cast<int>(kMaxLoadsInFlight)) {
-            f.job->state = TileState::Loading;
-            toLoad.push_back(f.job);
-            ++m_inFlight;
-        }
-        ++i;
+        ++i;   // F13: the job is asked from the loader's list below, at the held tile's measure
     }
     for (const Refresh& f : m_refresh) staleHeld += f.held->stale ? 1u : 0u;
 
@@ -1201,7 +1202,25 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
     for (size_t ni = 0; ni < m_need.size(); ++ni) {
         const OrderEntry& e = m_need[ni];
         Tracked* tr = e.tile;
-        if (tr->state == TileState::Mapped && tr->landed) continue;
+        if (tr->state == TileState::Mapped && tr->landed) {
+            if (!tr->stale || tr->dropped) continue;
+            // F13: a stale held tile: its refresh job takes the queue here, in the order.
+            ++pending;
+            if (m_inFlight >= static_cast<int>(kMaxLoadsInFlight)) {
+                if (!settleExact) {
+                    m_loaderStop = ni;
+                    pending += static_cast<uint32_t>(m_need.size() - ni - 1);
+                    break;
+                }
+                continue;
+            }
+            if (tr->refill && tr->refill->state == TileState::Seen) {
+                tr->refill->state = TileState::Loading;
+                toLoad.push_back(tr->refill);
+                ++m_inFlight;
+            }
+            continue;
+        }
         // A tile under a refused parent not held is unreachable as its parent is (until the tree
         // changes for that parent): never named, and not pending. A tile whose parent is not held
         // yet is pending and not asked: it comes the turn after its parent lands (4.7).

@@ -29,6 +29,11 @@
 //                  reaches the disk in exactly the order and concurrency it used to.
 //   Lane::Compute  short fork/join work. Any pool thread; served before Io so a blocked
 //                  ParallelFor is never stuck behind a paint.
+//   Lane::Long     F13: work that runs for seconds -- the wave solve and its row helpers, the
+//                  prefill, the current's resample. Served last, and with Io it leaves
+//                  kReserve threads free, so the frame's short work always finds one: measured,
+//                  the predicted walk's join waited 60-190 ms behind the solve's rows when the
+//                  solve was Compute work.
 //
 // DETERMINISM. Every submission is folded into an FNV-1a over (lane, tag, index) in submission
 // order -- JobsHash(), printed as [jobs] -- and --jobs-inline runs every Submit and ParallelFor
@@ -52,7 +57,7 @@
 
 namespace ga {
 
-enum class Lane : int { Compute = 0, Io = 1, kCount = 2 };
+enum class Lane : int { Compute = 0, Io = 1, Long = 2, kCount = 3 };
 
 class ThreadManager {
 public:
@@ -94,8 +99,16 @@ private:
 
     std::vector<std::thread> m_threads;
     std::deque<Job> m_q[int(Lane::kCount)];
-    int m_active[int(Lane::kCount)] = {0, 0};
-    int m_cap[int(Lane::kCount)] = {0, 0};
+    int m_active[int(Lane::kCount)] = {0, 0, 0};
+    int m_cap[int(Lane::kCount)] = {0, 0, 0};
+    static constexpr int kReserve = 2;   // F13: threads Io and Long together leave to Compute
+    // A lane's job may start: under its own cap, and (Io, Long) under the pool less the reserve.
+    bool MayStart(int L) const {
+        if (m_active[L] >= m_cap[L]) return false;
+        if (L == int(Lane::Compute)) return true;
+        return m_active[int(Lane::Io)] + m_active[int(Lane::Long)] <
+               static_cast<int>(m_threads.size()) - kReserve;
+    }
     std::mutex m_mx;
     std::condition_variable m_cv;      // work available, or quitting
     bool m_quit = false;
