@@ -291,7 +291,7 @@ void ResidencyManager::RecApply(OrdRec& r, int sid, uint32_t stampFrame, uint32_
     if ((m_pinMask >> sid) & 1u) r.pinFrame = stampFrame;
 }
 
-void ResidencyManager::OrderNote(Tenant& t, Tracked* tr, int tenant, int sid, uint32_t stampFrame,
+void ResidencyManager::OrderNote(Tenant& t, uint32_t rec, int tenant, int sid, uint32_t stampFrame,
                                  uint32_t face, uint32_t m, uint32_t x, uint32_t y, size_t idx,
                                  float nearM, float fu, float fv) {
     // THE WEIGHT (decision 2): metres from the reader's eye to the tile's NEAREST point. A walk's
@@ -325,8 +325,8 @@ void ResidencyManager::OrderNote(Tenant& t, Tracked* tr, int tenant, int sid, ui
         m_stHash[sid] = kStatementBasis;
     }
     m_stHash[sid] = (m_stHash[sid] ^ key) * 1099511628211ull;
-    if (tr && tr->rec != UINT32_MAX) {
-        RecApply(m_rec[tr->rec], sid, stampFrame, wb);
+    if (rec != UINT32_MAX) {
+        RecApply(m_rec[rec], sid, stampFrame, wb);
         return;
     }
     // Not tracked yet: Want tracks it right after this mark, and RecAdd takes this note.
@@ -359,6 +359,7 @@ void ResidencyManager::RecAdd(Tenant& t, int tenant, Tracked* tr) {
                                    (tr->state == TileState::Failed ? kDeadBit : 0));
     r.bucket = kNoBucket;
     tr->rec = static_cast<uint32_t>(m_rec.size());
+    t.recIx[idx] = tr->rec;   // F20: beside the stamp
     m_rec.push_back(r);
 }
 
@@ -366,9 +367,16 @@ void ResidencyManager::RecDrop(Tracked* tr) {
     const uint32_t i = tr->rec;
     if (i == UINT32_MAX || i >= m_rec.size()) return;
     tr->rec = UINT32_MAX;
+    {
+        Tenant& t = m_tenants[tr->tenant];
+        t.recIx[StampIndex(t, tr->req.face, tr->req.mip, tr->req.x, tr->req.y)] = UINT32_MAX;
+    }
     if (i + 1 != m_rec.size()) {
         m_rec[i] = m_rec.back();
-        m_rec[i].tile->rec = i;
+        Tracked* mv = m_rec[i].tile;
+        mv->rec = i;
+        Tenant& tm = m_tenants[mv->tenant];   // F20: the moved record's index, where its stamp is
+        tm.recIx[StampIndex(tm, mv->req.face, mv->req.mip, mv->req.x, mv->req.y)] = i;
     }
     m_rec.pop_back();
 }
@@ -1060,7 +1068,7 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
     bool compact = false;
     for (Tracked* tr : release) {
         ++releaseLedger.cut;   // PHASE B2w
-        if (tr->lastSeen + 1u >= m_frame) ++releaseLedger.cutNamed;
+        if (LastSeenOf(tr) + 1u >= m_frame) ++releaseLedger.cutNamed;
         Tenant& t = m_tenants[tr->tenant];
         const std::shared_ptr<Tracked> keep = t.tracked[tr->pos];   // outlives Untrack
         Untrack(t, tr);

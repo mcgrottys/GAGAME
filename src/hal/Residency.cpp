@@ -219,6 +219,7 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
         t.want.assign(acc, uint16_t(0));   // M13: which samplers asked, this frame
         t.least.assign(acc, 0u);           // F19: the least distance said this frame, and whose
         t.leastSid.assign(acc, uint8_t(255));
+        t.recIx.assign(acc, UINT32_MAX);   // F20: the record's index beside the stamp
         t.slot.assign(acc, nullptr);   // step 4: the Tracked at the same index
         Log("[residency] %S: stamp array %u tiles (%.2f MB) + sampler mask (%.2f MB) + slot "
             "array (%.2f MB) -- Want()'s hot question, WHO asked it, and the tile itself, all "
@@ -533,12 +534,12 @@ void ResidencyManager::Want(int sampler, int tenant, uint32_t face, uint32_t mip
     // Mark a tile for this sampler. The mask is only meaningful while the stamp is this
     // frame's, so a stale stamp starts the mask over rather than adding to last frame's.
     const auto mark = [&](uint32_t& st, uint16_t& w, uint32_t newStamp, uint32_t mm, uint32_t xx,
-                          uint32_t yy, size_t idx, Tracked* trk) {
+                          uint32_t yy, size_t idx, uint32_t rec) {
         const bool sameFrame = (st >> 1) == stampFrame;
         const uint16_t was = sameFrame ? w : uint16_t(0);
         if (!(was & bit)) {
             // Step 5: the reader's statement and the tile's record (OrderNote).
-            OrderNote(t, trk, tenant, sid, stampFrame, face, mm, xx, yy, idx, nearM, focusU, focusV);
+            OrderNote(t, rec, tenant, sid, stampFrame, face, mm, xx, yy, idx, nearM, focusU, focusV);
             ++m_sampTiles[sid];
             if (was == 0) {
                 ++m_sampAlone[sid];
@@ -635,10 +636,10 @@ void ResidencyManager::Want(int sampler, int tenant, uint32_t face, uint32_t mip
                     if (t.leastSid[ix] == uint8_t(sid) && wb >= t.least[ix]) continue;
                     t.least[ix] = wb;
                     t.leastSid[ix] = uint8_t(sid);
-                    const Tracked* tr = t.slot[ix];
-                    if (!tr || tr->rec == UINT32_MAX) continue;
+                    const uint32_t ri = t.recIx[ix];   // F20: the record by its index, no tile
+                    if (ri == UINT32_MAX) continue;
                     ++wantWeightRecs;
-                    OrdRec& o = m_rec[tr->rec];   // H5: this reader's own slot, this frame
+                    OrdRec& o = m_rec[ri];   // H5: this reader's own slot, this frame
                     for (int k = 0; k < OrdRec::kSlots; ++k) {
                         if (o.ssid[k] == sid && o.sstamp[k] == stampFrame && wb < o.sweight[k]) o.sweight[k] = wb;
                     }
@@ -657,26 +658,27 @@ void ResidencyManager::Want(int sampler, int tenant, uint32_t face, uint32_t mip
             const size_t rowBase = size_t(t.stampBase[plane]) + size_t(y) * t.stampW[plane];
             uint32_t* stampRow = t.stamp.data() + rowBase;
             uint16_t* wantRow = t.want.data() + rowBase;
-            Tracked** slotRow = t.slot.data() + rowBase;
+            const uint32_t* recRow = t.recIx.data() + rowBase;
             for (uint32_t x = r.x0; x <= r.x1; ++x) {
                 ++wantTouches;
                 // The stamp answers "already handled this frame" without touching the tile at
-                // all. It is written on every path below, so it stays exactly as true as
-                // lastSeen/predicted are -- they remain the authority for eviction; this is a
-                // cache of the one question the walk asks.
+                // all. It is written on every path below, and it IS the authority (F20): its
+                // frame is the tile's last naming (LastSeenOf), its bit 0 whether the tile was
+                // last asked for by a prediction only.
                 uint32_t& st = stampRow[x];
                 uint16_t& wt = wantRow[x];
                 if (fresh(st, wt)) {
                     ++wantHits;
                     continue;
                 }
-                // Step 4: the tile itself sits at the same index. No key, no tree.
-                if (Tracked* tr = slotRow[x]) {
+                // Step 4 / F20: the tile's record sits at the same index. No key, no tree, no tile.
+                const uint32_t ri = recRow[x];
+                if (ri != UINT32_MAX) {
                     ++wantMarks;   // F19
-                    tr->lastSeen = m_frame;
-                    if (!predicted) tr->predicted = false;
-                    mark(st, wt, (stampFrame << 1) | (tr->predicted ? 1u : 0u),
-                         static_cast<uint32_t>(m), x, y, rowBase + x, tr);
+                    // a speculative tile stays so only under another speculative touch
+                    const bool spec = predicted && (st & 1u) != 0;
+                    mark(st, wt, (stampFrame << 1) | (spec ? 1u : 0u),
+                         static_cast<uint32_t>(m), x, y, rowBase + x, ri);
                     continue;
                 }
                 ++wantTracks;   // F19
@@ -685,7 +687,7 @@ void ResidencyManager::Want(int sampler, int tenant, uint32_t face, uint32_t mip
                 // walk asks again -- by which time the parent has landed, or has not, and the
                 // answer is the same question one ring later. Nothing is lost, and no load slot
                 // is ever spent on a tile more than one level from being displayable.
-                mark(st, wt, myStamp, static_cast<uint32_t>(m), x, y, rowBase + x, nullptr);
+                mark(st, wt, myStamp, static_cast<uint32_t>(m), x, y, rowBase + x, UINT32_MAX);
                 auto tr = std::make_shared<Tracked>();
                 tr->tenant = tenant;
                 tr->req = TileRequest{face, static_cast<uint32_t>(m), x, y};
@@ -790,10 +792,14 @@ void ResidencyManager::AuditSlots() const {
         size_t live = 0;
         for (const Tracked* p : t.slot) live += p != nullptr;
         bool ok = live == t.tracked.size();
+        for (size_t ix = 0; ok && ix < t.recIx.size(); ++ix) {   // F20: and no index without a tile
+            if (t.recIx[ix] != UINT32_MAX && !t.slot[ix]) ok = false;
+        }
         for (size_t i = 0; ok && i < t.tracked.size(); ++i) {
             const Tracked* p = t.tracked[i].get();
-            ok = p->pos == i && p->tenant == static_cast<int>(k) &&
-                 t.slot[StampIndex(t, p->req.face, p->req.mip, p->req.x, p->req.y)] == p;
+            const size_t ix = StampIndex(t, p->req.face, p->req.mip, p->req.x, p->req.y);
+            ok = p->pos == i && p->tenant == static_cast<int>(k) && t.slot[ix] == p &&
+                 t.recIx[ix] == p->rec;   // F20: the record's index beside the stamp is the tile's
         }
         if (!ok) {
             Log("[residency] SLOT AUDIT FAILED f%u %S: %zu live slots, %zu tracked", m_frame,
@@ -1111,7 +1117,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             }
             if (tr->state == TileState::Mapped) {   // PHASE B2w: a held tile let go by a change
                 ++releaseLedger.invalidated;
-                if (tr->lastSeen + 1u >= m_frame) ++releaseLedger.invalidatedNamed;
+                if (LastSeenOf(tr) + 1u >= m_frame) ++releaseLedger.invalidatedNamed;
             }
             const std::shared_ptr<Tracked> keep = t.tracked[tr->pos];   // outlives Untrack
             Untrack(t, tr);
