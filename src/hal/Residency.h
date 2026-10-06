@@ -221,7 +221,27 @@ public:
     // visited once per descendant. Counting touches against unique inserts separates
     // "the hash map is slow" from "we are asking it the same question hundreds of times".
     mutable uint64_t wantTouches = 0, wantHits = 0;
-    void WantStatsReset() { wantTouches = wantHits = 0; }
+    // F19 (the CPU walk's instrument): WHAT A WANT SPENDS, by phase. Calls by the slice asked
+    // (a cube face, a window slice, a field with a focus); the column scan's stamp reads
+    // (wantTouches, above); the weight loop's visits (a slot read and a record chased per tile per
+    // level, fresh or not); the marks and the tracks; and the cycles of each phase (__rdtsc,
+    // wantProfile on: a headless run is a measurement).
+    bool wantProfile = false;
+    mutable uint64_t wantCalls = 0, wantCube = 0, wantWindow = 0, wantField = 0;
+    mutable uint64_t wantWeightVisits = 0, wantWeightRecs = 0, wantMarks = 0, wantTracks = 0;
+    mutable uint64_t wantCycScan = 0, wantCycWeight = 0, wantCycMark = 0;
+    // F19's audit (on with the residency audit, capture.residencyAudit): after a want, the reader's
+    // statement on every tile of the column is no farther than the want's distance -- the law the
+    // chase on every visit kept; a statement is only ever a visit's distance, so this bound makes
+    // it the least of them. Counted, never acted on.
+    mutable uint64_t wantAuditChecks = 0, wantAuditFails = 0;
+    void WantStatsReset() {
+        wantTouches = wantHits = 0;
+        wantCalls = wantCube = wantWindow = wantField = 0;
+        wantWeightVisits = wantWeightRecs = wantMarks = wantTracks = 0;
+        wantCycScan = wantCycWeight = wantCycMark = 0;
+        wantAuditChecks = wantAuditFails = 0;
+    }
     // Step 5 (docs/PERF_EXPERIMENT.md): THE PREDICTED REQUEST STREAM, HASHED IN CALL ORDER.
     // FNV-1a over (tenant, face, mip, the rect's four float bit patterns) of every
     // Want(predicted = true), for the whole run. It is the A/B instrument for any change to
@@ -597,6 +617,17 @@ private:
         // same arithmetic as the stamp and only meaningful while the stamp is this frame's.
         // 2 B per virtual tile beside the stamp's 4 and the slot's 8.
         std::vector<uint16_t> want;
+        // F19: THE LEAST DISTANCE SAID OF THE TILE THIS FRAME (WeightBits), dense beside the stamp
+        // and meaningful while the stamp is this frame's. A leaf's want gives every tile of its
+        // column its distance and a tile's weight is the least of its leaves'; this is that least,
+        // kept where the stamp is, so a tile's record is chased only when a reader says a lesser
+        // distance than any said so far -- not on every visit of every leaf under it (140,000
+        // chases a frame at the helm, 2.1 ms, for 20,000 distinct tiles). PER READER: the least
+        // is the reader's in `leastSid`; another reader's visit chases its own statement and takes
+        // the pair over, so each reader's statement is exactly the least of its own visits (a
+        // prediction's stands for its lead across frames, so the least cannot be the frame's).
+        std::vector<uint32_t> least;
+        std::vector<uint8_t> leastSid;
         std::vector<uint32_t> stampBase;   // offset of each (face, mip) plane into stamp
         std::vector<uint32_t> stampW;      // that plane's width in tiles, for the row stride
         // Step 4 (docs/PERF_EXPERIMENT.md): THE SLOT ARRAY BESIDE IT. The map the M9x note

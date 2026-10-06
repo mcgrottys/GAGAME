@@ -401,6 +401,14 @@ private:
     uint64_t m_walkNodesAcc = 0, m_walkLeavesAcc = 0, m_walkWantNsAcc = 0, m_walkFrames = 0;
     uint64_t m_morphFullAcc = 0, m_morphPartAcc = 0;
     uint64_t m_wantTouchAcc = 0, m_wantHitAcc = 0;
+    // F19: the walk's breakdown over the run (from frame 150), printed in [perf] at the exit.
+    uint64_t m_walkMeshNsAcc = 0, m_walkMsFrames = 0;
+    double m_walkMsAcc = 0.0;
+    GlobeLayer::LeafStats m_leafAcc;
+    uint64_t m_wantCallsAcc = 0, m_wantCubeAcc = 0, m_wantWindowAcc = 0, m_wantFieldAcc = 0;
+    uint64_t m_wantWVisitAcc = 0, m_wantWRecAcc = 0, m_wantMarkAcc = 0, m_wantTrackAcc = 0;
+    uint64_t m_wantCycScanAcc = 0, m_wantCycWeightAcc = 0, m_wantCycMarkAcc = 0;
+    uint64_t m_wantAuditChecksAcc = 0, m_wantAuditFailsAcc = 0;
     static constexpr const char* kProfName[kProfN] = {
         "weather.Update", "scene hot-reload stat", "waveField.Update",
         "waterBank.SetFrame", "tide.SetTime", "sea.SetTime",

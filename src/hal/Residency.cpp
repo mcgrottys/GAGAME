@@ -1,4 +1,5 @@
 #include "hal/Residency.h"
+#include <intrin.h>   // F19: __rdtsc, the want's phases
 #include "core/ThreadManager.h"
 
 #include <atomic>
@@ -216,6 +217,8 @@ int ResidencyManager::AddTextureInternal(Gpu& gpu, const wchar_t* name, uint32_t
         }
         t.stamp.assign(acc, 0u);
         t.want.assign(acc, uint16_t(0));   // M13: which samplers asked, this frame
+        t.least.assign(acc, 0u);           // F19: the least distance said this frame, and whose
+        t.leastSid.assign(acc, uint8_t(255));
         t.slot.assign(acc, nullptr);   // step 4: the Tracked at the same index
         Log("[residency] %S: stamp array %u tiles (%.2f MB) + sampler mask (%.2f MB) + slot "
             "array (%.2f MB) -- Want()'s hot question, WHO asked it, and the tile itself, all "
@@ -474,6 +477,9 @@ void ResidencyManager::Want(int sampler, int tenant, uint32_t face, uint32_t mip
     if (mip >= t.mips) mip = t.mips - 1;
     const uint32_t topF = TopOf(t, face);
     if (mip > topF) return;   // F1: above a window's floor nothing is held, so nothing is wanted
+    ++wantCalls;   // F19
+    if (focusU >= 0.0f) ++wantField; else if (face < 6) ++wantCube; else ++wantWindow;
+    const uint64_t cyc0 = wantProfile ? __rdtsc() : 0ull;
 
     // M9w: THE ANCESTOR RE-WALK, SHORT-CIRCUITED.
     //
@@ -606,6 +612,8 @@ void ResidencyManager::Want(int sampler, int tenant, uint32_t face, uint32_t mip
         if (allFresh) break;
         top = static_cast<int>(m);
     }
+    const uint64_t cyc1 = wantProfile ? __rdtsc() : 0ull;
+    wantCycScan += cyc1 - cyc0;
     // Step 5 E (decision 2): a walk's want gives every tile of its column its leaf's distance, and
     // an ancestor's weight is the least of its leaves' -- including the ancestors the column scan
     // skips because this reader already stamped them this frame.
@@ -618,8 +626,18 @@ void ResidencyManager::Want(int sampler, int tenant, uint32_t face, uint32_t mip
             for (uint32_t y = r.y0; y <= r.y1; ++y) {
                 const size_t rowBase = size_t(t.stampBase[plane]) + size_t(y) * t.stampW[plane];
                 for (uint32_t x = r.x0; x <= r.x1; ++x) {
-                    const Tracked* tr = t.slot[rowBase + x];
+                    ++wantWeightVisits;   // F19
+                    const size_t ix = rowBase + x;
+                    // F19: the least said this frame is beside the stamp; a tile not yet said this
+                    // frame is said by the mark below (OrderNote), and a tile said at no greater
+                    // distance than this leaf's has nothing to learn from it.
+                    if ((t.stamp[ix] >> 1) != stampFrame) continue;
+                    if (t.leastSid[ix] == uint8_t(sid) && wb >= t.least[ix]) continue;
+                    t.least[ix] = wb;
+                    t.leastSid[ix] = uint8_t(sid);
+                    const Tracked* tr = t.slot[ix];
                     if (!tr || tr->rec == UINT32_MAX) continue;
+                    ++wantWeightRecs;
                     OrdRec& o = m_rec[tr->rec];   // H5: this reader's own slot, this frame
                     for (int k = 0; k < OrdRec::kSlots; ++k) {
                         if (o.ssid[k] == sid && o.sstamp[k] == stampFrame && wb < o.sweight[k]) o.sweight[k] = wb;
@@ -628,6 +646,8 @@ void ResidencyManager::Want(int sampler, int tenant, uint32_t face, uint32_t mip
             }
         }
     }
+    const uint64_t cyc2 = wantProfile ? __rdtsc() : 0ull;
+    wantCycWeight += cyc2 - cyc1;
     if (top < 0) return;
 
     for (int m = top; m >= static_cast<int>(mip); --m) {
@@ -652,12 +672,14 @@ void ResidencyManager::Want(int sampler, int tenant, uint32_t face, uint32_t mip
                 }
                 // Step 4: the tile itself sits at the same index. No key, no tree.
                 if (Tracked* tr = slotRow[x]) {
+                    ++wantMarks;   // F19
                     tr->lastSeen = m_frame;
                     if (!predicted) tr->predicted = false;
                     mark(st, wt, (stampFrame << 1) | (tr->predicted ? 1u : 0u),
                          static_cast<uint32_t>(m), x, y, rowBase + x, tr);
                     continue;
                 }
+                ++wantTracks;   // F19
                 // M9al: THE RING GATE. A new request below the coarsest level is admitted only
                 // if its parent is already MAPPED. The tile stays unstamped, so next frame's
                 // walk asks again -- by which time the parent has landed, or has not, and the
@@ -670,6 +692,28 @@ void ResidencyManager::Want(int sampler, int tenant, uint32_t face, uint32_t mip
                 tr->lastSeen = m_frame;
                 tr->predicted = predicted;
                 Track(t, tr);
+            }
+        }
+    }
+    if (wantProfile) wantCycMark += __rdtsc() - cyc2;
+    if (auditEvery && focusU < 0.0f) {   // F19's audit: the statement is no farther than this want
+        uint32_t wb = 0;
+        if (nearM > 0.0f) memcpy(&wb, &nearM, sizeof(wb));
+        for (uint32_t mm = mip; mm <= topF; ++mm) {
+            const uint32_t plane = face * t.mips + mm;
+            const Rect r = rectAt(plane);
+            for (uint32_t y = r.y0; y <= r.y1; ++y) {
+                const size_t rowBase = size_t(t.stampBase[plane]) + size_t(y) * t.stampW[plane];
+                for (uint32_t x = r.x0; x <= r.x1; ++x) {
+                    const Tracked* tr = t.slot[rowBase + x];
+                    if (!tr || tr->rec == UINT32_MAX) continue;
+                    const OrdRec& o = m_rec[tr->rec];
+                    for (int k = 0; k < OrdRec::kSlots; ++k) {
+                        if (o.ssid[k] != sid || o.sstamp[k] != stampFrame) continue;
+                        ++wantAuditChecks;
+                        if (o.sweight[k] > wb) ++wantAuditFails;
+                    }
+                }
             }
         }
     }

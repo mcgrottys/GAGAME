@@ -1108,7 +1108,7 @@ void WalkNode(const WalkParams& wp, uint64_t& nodes, int face, int level, double
 // at once; the prefetch walk records them and the main thread replays them.
 template <class Emit>
 void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size, double arc,
-               double dist, uint32_t seen, Emit& emit) {
+               double dist, uint32_t seen, Emit& emit, GlobeLayer::LeafStats* st = nullptr) {
     // M6e: this leaf's on-screen span decides which streamed-texture mip it WANTS; the
     // residency manager turns wants into loads/mappings on its own budgets. The CDLOD walk IS
     // the sampling feedback -- deterministic, no readback pass (the classic had to render one).
@@ -1157,6 +1157,7 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
     if (wp.colorT >= 0) emit(wp.colorT, f, m, tu0, tv0, tu1, tv1, nearW);
     if (wp.hgtT >= 0) emit(wp.hgtT, f, m, tu0, tv0, tu1, tv1, nearW);
     if (wp.maskT >= 0) emit(wp.maskT, f, m, tu0, tv0, tu1, tv1, nearW);
+    if (st) st->cube += (wp.surfT >= 0) + (wp.normT >= 0) + (wp.colorT >= 0) + (wp.hgtT >= 0) + (wp.maskT >= 0);
     // PHASE A2: EVERY WORLD THAT SEES THE LEAF ASKS IT OF ITS OWN WINDOWS (D5): the walk's worlds
     // whose bit is in `seen`, each its slot's slices; a walk of no shared worlds asks for its own.
     const uint32_t worlds = wp.worldCount > 0 ? uint32_t(wp.worldCount) : 1u;
@@ -1173,6 +1174,7 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
     bool cFaceDone[6] = {}, cBehind[6] = {};
     auto cornersOn = [&](uint32_t f) -> const double (*)[2] {
         if (!cDirDone) {
+            if (st) ++st->corners;
             for (int cy = 0; cy < 3; ++cy) {
                 for (int cx = 0; cx < 3; ++cx) {
                     CubeDirD(face, u0 + size * cx * 0.5, v0 + size * cy * 0.5, cDir[cy * 3 + cx]);
@@ -1218,27 +1220,40 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
     for (uint32_t b = 0; b < wp.wnK[ws]; ++b) {
         const uint32_t slice = wp.wnSlice[ws][b];
         const uint64_t sliceBit = slice >= 6u && slice < 70u ? (1ull << (slice - 6u)) : 0ull;
-        if (asked & sliceBit) continue;   // this window was asked for the leaf by an earlier world
+        if (st) ++st->worlds;
+        if (asked & sliceBit) {   // this window was asked for the leaf by an earlier world
+            if (st) ++st->winAsked;
+            continue;
+        }
         asked |= sliceBit;
         const uint32_t bf = wp.wnFace[ws][b] < 6 ? wp.wnFace[ws][b] : 5;   // CubeFaceAxes' default
-        const double (*st)[2] = cornersOn(bf);
-        if (!st) continue;   // the leaf reaches past the face's horizon: no projection there
+        const double (*cst)[2] = cornersOn(bf);
+        if (!cst) {   // the leaf reaches past the face's horizon: no projection there
+            if (st) ++st->winBehind;
+            continue;
+        }
         const double N = std::ldexp(double(Lattice::kFaceDim), wp.wnRung[ws][b]);   // FaceTexels
         double bmin[2] = {1e300, 1e300}, bmax[2] = {-1e300, -1e300};
         for (int c = 0; c < 9; ++c) {
-            const double tx = (st[c][0] * 0.5 + 0.5) * N - 0.0;   // TexelOf, anchored at the corner
-            const double ty = (st[c][1] * 0.5 + 0.5) * N - 0.0;
+            const double tx = (cst[c][0] * 0.5 + 0.5) * N - 0.0;   // TexelOf, anchored at the corner
+            const double ty = (cst[c][1] * 0.5 + 0.5) * N - 0.0;
             bmin[0] = (std::min)(bmin[0], tx - double(wp.wnAx[ws][b]));
             bmax[0] = (std::max)(bmax[0], tx - double(wp.wnAx[ws][b]));
             bmin[1] = (std::min)(bmin[1], ty - double(wp.wnAy[ws][b]));
             bmax[1] = (std::max)(bmax[1], ty - double(wp.wnAy[ws][b]));
         }
         const double dim = double(Lattice::kFaceDim);
-        if (bmax[0] <= 0.0 || bmax[1] <= 0.0 || bmin[0] >= dim || bmin[1] >= dim) continue;
+        if (bmax[0] <= 0.0 || bmax[1] <= 0.0 || bmin[0] >= dim || bmin[1] >= dim) {
+            if (st) ++st->winOut;
+            continue;
+        }
         const double bspan = (std::max)(bmax[0] - bmin[0], bmax[1] - bmin[1]);   // texels, mip 0
         const int bmip = (std::max)(
             0, static_cast<int>(std::ceil(std::log2((std::max)(bspan / (std::max)(px, 16.0), 1.0)))));
-        if (bmip > 3) continue;
+        if (bmip > 3) {
+            if (st) ++st->winFloor;
+            continue;
+        }
         const uint32_t bm = static_cast<uint32_t>(bmip);
         // Per axis the box's part, then that part in the slice: [a, a + len) modulo 16384.
         double lo[2][2], hi[2][2];
@@ -1261,6 +1276,7 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
                 // The window's tiles carry the leaf's own distance as their weight, as the cube's do.
                 if (wp.colorT >= 0) emit(wp.colorT, slice, bm, r0, q0, r1, q1, nearW);
                 if (wp.maskT >= 0) emit(wp.maskT, slice, bm, r0, q0, r1, q1, nearW);
+                if (st) st->win += (wp.colorT >= 0) + (wp.maskT >= 0);
                 // PHASE B2: the height on the same windows, at the same mip but never finer than its
                 // finest read (kCsHeightLodFloor: rung 9), and none past the floor.
                 if (wp.hgtT >= 0 && wp.hgtWindows) {
@@ -1582,7 +1598,7 @@ void GlobeLayer::PredictWalk() {
                             float u1r, float v1r, float nearW) {
                 out.push_back(WantRect{tenant, f, mip, u0r, v0r, u1r, v1r, nearW});
             };
-            LeafWants(wp, face, u0, v0, size, arc, dist, seen, emit);
+            LeafWants(wp, face, u0, v0, size, arc, dist, seen, emit, nullptr);
         };
         // Step 24: the same face order as the real walk -- one geometry, one order.
         for (int i = 0; i < 6; ++i) {
@@ -1651,9 +1667,17 @@ void GlobeLayer::WalkLevel(const WalkParams& wp, uint32_t slot, int sampler) {
                         float v1r, float nearW) {
             m_res->Want(sampler, tenant, f, mip, u0r, v0r, u1r, v1r, false, nearW);
         };
-        LeafWants(wp, face, u0, v0, size, arc, dist, seen, emit);
-        walkWantNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                   std::chrono::steady_clock::now() - wt0).count());
+        LeafWants(wp, face, u0, v0, size, arc, dist, seen, emit, &leafStats);
+        const auto wt1 = std::chrono::steady_clock::now();
+        walkWantNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(wt1 - wt0).count());
+        struct MeshClock {   // F19: the leaf's meshlets, clocked to the leaf's end
+            const GlobeLayer* g;
+            std::chrono::steady_clock::time_point t0;
+            ~MeshClock() {
+                g->walkMeshNs += uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                              std::chrono::steady_clock::now() - t0).count());
+            }
+        } meshClock{this, wt1};
 
         // Per-LEVEL morph ramp (identical on both sides of every seam = crack-free): fade this
         // LOD out across the band where its parent would still be split.
