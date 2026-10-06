@@ -54,6 +54,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <cctype>
 #include <cmath>
@@ -657,6 +658,9 @@ public:
 
     // ---- accounting --------------------------------------------------------------------------
     std::atomic<uint32_t> painted{0}, read{0}, voids{0}, refs{0}, composed{0}, hits{0};
+    // F15 (instrument): the leaf's steps on the clock (microseconds summed, calls), see LeafTile.
+    std::atomic<uint64_t> usArchive{0}, usProbe{0}, usRead{0}, usFold{0}, usPaint{0}, usPublish{0}, usFoldUp{0};
+    std::atomic<uint32_t> nArchive{0}, nProbe{0}, nRead{0}, nFold{0}, nPaint{0}, nPublish{0}, nFoldUp{0};
     std::atomic<uint32_t> folded{0}, dropped{0};   // M9bb: pyramid folds; cached addresses dropped
     std::atomic<uint32_t> redundant{0};   // M9bd: folds the 4/255 rule found moved nothing
     std::atomic<uint32_t> magnified{0};   // PHASE A4: tiles answered as their parent, magnified
@@ -709,6 +713,18 @@ public:
         std::string s = b;
         if (magnified.load()) {
             snprintf(b, sizeof(b), " | %u magnified (no bytes: the parent)", magnified.load());
+            s += b;
+        }
+        if (nArchive.load()) {   // F15: ms a call, by step (calls)
+            auto ms = [](const std::atomic<uint64_t>& us, const std::atomic<uint32_t>& n) {
+                return n.load() ? double(us.load()) / (1000.0 * n.load()) : 0.0;
+            };
+            snprintf(b, sizeof(b),
+                     " | leaf ms a call: archive %.2f (%u), probe %.2f (%u), read %.2f (%u), fold %.1f (%u), "
+                     "paint %.1f (%u), publish %.1f (%u), fold-up %.1f (%u)",
+                     ms(usArchive, nArchive), nArchive.load(), ms(usProbe, nProbe), nProbe.load(),
+                     ms(usRead, nRead), nRead.load(), ms(usFold, nFold), nFold.load(), ms(usPaint, nPaint),
+                     nPaint.load(), ms(usPublish, nPublish), nPublish.load(), ms(usFoldUp, nFoldUp), nFoldUp.load());
             s += b;
         }
         // A leaf over a source that fetches says what it could not fetch: with the budget at
@@ -922,22 +938,43 @@ private:
                     bool* own = nullptr) {
         const std::string base = Base(tag, r);
         if (own) *own = false;
-        if (FromArchive(tag, r, 0u, out, loc)) {
+        // F15 (instrument): the leaf's steps on the clock, summed per node (Stats). A mask load
+        // measured 35-57 ms at the loader with the sweep itself not the cost; these say which
+        // step is -- the archive probe, the directory probes, the read, the paint, the publish.
+        using LeafClock = std::chrono::steady_clock;
+        LeafClock::time_point tc = LeafClock::now();
+        auto lap = [&](std::atomic<uint64_t>& us, std::atomic<uint32_t>& n) {
+            const LeafClock::time_point t = LeafClock::now();
+            us += uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(t - tc).count());
+            ++n;
+            tc = t;
+        };
+        const bool arc = FromArchive(tag, r, 0u, out, loc);
+        lap(usArchive, nArchive);
+        if (arc) {
             ++read;
             return Status::Content;
         }
-        if (tree_detail::Exists(base + ".void")) {
+        const bool isVoid = tree_detail::Exists(base + ".void");
+        lap(usProbe, nProbe);
+        if (isVoid) {
             ++hits;
             return Status::Void;
         }
-        if (tree_detail::ReadTile(base + ".bin", out, TileBytes())) {
+        const bool got = tree_detail::ReadTile(base + ".bin", out, TileBytes());
+        lap(usRead, nRead);
+        if (got) {
             ++read;
             return Status::Content;
         }
-        if (tree_detail::Exists(base + ".fold")) {
+        const bool isFold = tree_detail::Exists(base + ".fold");
+        lap(usProbe, nProbe);
+        if (isFold) {
             // M9bd: a REDUNDANT parent -- within 4/255 of the fold of its children -- was never
             // stored; rebuild it from them every time it is asked. Nothing is written.
-            return FoldFromChildren(frame, tag, r, out, false);
+            const Status s = FoldFromChildren(frame, tag, r, out, false);
+            lap(usFold, nFold);
+            return s;
         }
         // HIERARCHY 4.20: A SOURCE PAINTS ITS OWN LEVEL, AND THE TREE MAKES THE OTHERS. Above the
         // node's own mip a tile is the fold of its four children, kept, and never painted: its
@@ -952,6 +989,7 @@ private:
                 tree_detail::Touch(base + ".void");
                 ++voids;
             }
+            lap(usFold, nFold);
             return s;
         }
         bool complete = true, anyCover = false, full = false;
@@ -1043,7 +1081,9 @@ private:
         }
         // The snapshot went stale while this tile painted: its texels are two different fields
         // and the identity it would be stored under names only one of them. Never cached.
-        if (!m_node->EndTile()) return Status::Transient;
+        const bool ended = m_node->EndTile();
+        lap(usPaint, nPaint);
+        if (!ended) return Status::Transient;
         if (!complete) return Status::Transient;   // never cached; the next run repaints
         ++painted;
         if (!anyCover) {
@@ -1068,13 +1108,16 @@ private:
             if (tree_detail::ReadTile(base + ".bin", already, TileBytes())) {
                 out.swap(already);
                 ++hits;
+                lap(usPublish, nPublish);
                 return Status::Content;
             }
             tree_detail::WriteTile(base + ".bin", out);
         }
+        lap(usPublish, nPublish);
         // Outside the stripe: FoldUp takes the PARENT's. A node with an own mip folds nothing
         // upward: its parents are folded whole, when asked (above).
         if (ownMip < 0) FoldUp(frame, tag, r, out);
+        lap(usFoldUp, nFoldUp);
         return Status::Content;
     }
     // The compositor's membership rule (Compositor::Touches) against the node's footprint; a node

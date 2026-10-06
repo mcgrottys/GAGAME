@@ -1007,6 +1007,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                     gisMask.Load("data/gis/")) {
                     srcGisMask.Refresh();   // the rings are loaded: declare the real box
                     if (S.Tool("gis-dump")) tools::RunGisDump(opt, gisMask);
+                    if (S.Tool("gis-sweep-test")) tools::RunGisSweepTest(gisMask);   // F15
                     colorStack.push_back(&srcGisMask);
                     maskLayer = colorStack.size() - 1;
                 }
@@ -1441,7 +1442,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                              {"f32", "json"}});
             extra.push_back({"tool", "a one-shot mode in `tools[]` (--tool name[:args])",
                              {"bathy-map", "dump-water-state", "export", "fidelity-map",
-                              "gis-dump", "ingest", "load-field", "ocean-probe", "pack-tiles",
+                              "gis-dump", "gis-sweep-test", "ingest", "load-field", "ocean-probe", "pack-tiles",
                               "pack-trees", "rastertest", "sea-verify", "selftest", "swe-cycle",
                               "swe-uv", "trace",
                               "tree-audit", "tree-prune", "twin-surface", "warm-inlet", "warm-trees",
