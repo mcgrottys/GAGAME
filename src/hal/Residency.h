@@ -628,6 +628,13 @@ private:
         // prediction's stands for its lead across frames, so the least cannot be the frame's).
         std::vector<uint32_t> least;
         std::vector<uint8_t> leastSid;
+        // F20: THE RECORD'S INDEX BESIDE THE STAMP (UINT32_MAX = untracked). A mark reached its
+        // record through the tile -- the slot's pointer, then the record's index in it: two
+        // misses in a chain, 18,000 times a frame at the helm, 2.1 ms. The index sits where the
+        // stamp is (RecAdd writes it, RecDrop moves it), so a mark reads the stamp row, the
+        // index row, and the record: one miss. The tile itself is not touched by a mark; what
+        // the mark wrote in it (lastSeen, predicted) the stamp holds (LastSeenOf, bit 0).
+        std::vector<uint32_t> recIx;
         std::vector<uint32_t> stampBase;   // offset of each (face, mip) plane into stamp
         std::vector<uint32_t> stampW;      // that plane's width in tiles, for the row stride
         // Step 4 (docs/PERF_EXPERIMENT.md): THE SLOT ARRAY BESIDE IT. The map the M9x note
@@ -723,7 +730,7 @@ private:
     struct Tracked {
         int tenant;
         TileRequest req;
-        uint32_t lastSeen = 0;
+        uint32_t lastSeen = 0;           // the frame it was tracked (F20: since, the stamp: LastSeenOf)
         uint32_t pool = UINT32_MAX;      // (chunk << 16) | tileInChunk when mapped
         TileState state = TileState::Seen;
         bool predicted = false;
@@ -801,6 +808,12 @@ private:
         const auto& ti = t.tilings[r.face * t.mips + r.mip];
         if (r.x >= ti.WidthInTiles || r.y >= ti.HeightInTiles) return nullptr;
         return t.slot[StampIndex(t, r.face, r.mip, r.x, r.y)];
+    }
+    // F20: the frame a reader last named the tile, from the stamp (stamps are frame + 1; 0 = never).
+    uint32_t LastSeenOf(const Tracked* tr) const {
+        const Tenant& t = m_tenants[tr->tenant];
+        const uint32_t s = t.stamp[StampIndex(t, tr->req.face, tr->req.mip, tr->req.x, tr->req.y)] >> 1;
+        return s ? s - 1u : 0u;
     }
     void Track(Tenant& t, const std::shared_ptr<Tracked>& tr);
     void Untrack(Tenant& t, Tracked* tr);
@@ -1044,7 +1057,7 @@ private:
     uint32_t m_stFrame[kMaxSamplers] = {};    // a reader's statement: its frame and its hash
     uint64_t m_stHash[kMaxSamplers] = {}, m_stHashLatest[kMaxSamplers] = {};
     std::vector<std::pair<int, TileRequest>> m_failedKeys;   // failed or not whole, for the pass
-    void OrderNote(Tenant& t, Tracked* tr, int tenant, int sid, uint32_t stampFrame, uint32_t face,
+    void OrderNote(Tenant& t, uint32_t rec, int tenant, int sid, uint32_t stampFrame, uint32_t face,
                    uint32_t m, uint32_t x, uint32_t y, size_t idx, float nearM, float fu, float fv);
     void RecApply(OrdRec& r, int sid, uint32_t stampFrame, uint32_t wbits) const;
     void RecAdd(Tenant& t, int tenant, Tracked* tr);
