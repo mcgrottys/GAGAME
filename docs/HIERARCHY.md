@@ -1954,6 +1954,14 @@ of the frame.
   largest, and they are what was lost. A parent's texel is twice its child's at no greater
   distance, so the held set stays closed upward, and "the coarser ground first" is what the
   measure says of a parent and its child and of nothing else.
+- **A field's planes are one tile** (F18, 2026-10-06). A field tenant's slices are the planes
+  of one value at one address -- the wave field's 33 -- and the shader adds them, a plane not
+  landed as zero; a tile with some planes held is a partial sum, which is no value. The planes
+  are the fiber and the cut is over the base: the tie inside a bucket is by the address with
+  its face last, so a tile's planes stand together and one tile at most straddles the cut, and
+  that tile goes whole -- the kept planes of the pivot's tile are let go, so the held set is
+  never more than the cut. Before this the cut at the helm kept slice 13 of a wave tile and
+  lost slice 37 of the same tile at the same measure (`[order-cut]`, every helm log).
 - **Built, that key gives the near water back and does not hold still.** At the cap the
   helm's near water carries its waves to the frame's edge, the part 5 picture has no black
   pixel where today's has 5,512, the six stills in the hold are today's to the pixel, and

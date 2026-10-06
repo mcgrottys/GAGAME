@@ -180,7 +180,9 @@ struct Fiber {
     const char* quantity = "";   // "m NAVD88 (half float)", "sRGB colour, alpha = coverage"
 };
 // A NULL tile MEANS zero (a field: the shader adds it) or absent (a texture: the residency
-// map clamps to the finest resident ancestor).
+// map clamps to the finest resident ancestor). A field's slices are the PLANES of one value at
+// one address, so the tile the order holds or lets go is all of them (F18): a tile with some
+// planes landed is a partial sum, which is no value at all.
 enum class Semantics : uint8_t { Field, Texture };
 // What it COSTS to bring a tile back.
 enum class Residence : uint8_t { Streamable, Recomputable, Volatile };

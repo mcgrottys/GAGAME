@@ -407,6 +407,8 @@ Tenant Tenant::Sparse(Gpu& gpu, ResidencyManager& mgr, TenantDesc desc) {
     }
     // F14: the magnified question, answered without a load (ResidencyManager::SetMagnifiedOf).
     mgr.SetMagnifiedOf(s->id, [s](const TileRequest& r) { return s->MagnifiedAt(r); });
+    // F18: a field's slices are the planes of one value, so the order's tile is all of them.
+    mgr.SetPlanesOneTile(s->id, d.semantics == Semantics::Field);
     // The watchdog's global name for a block slice's tile (ResidencyManager::SetTileNamer).
     if (!d.blocks.empty()) {
         mgr.SetTileNamer(s->id, [s](const TileRequest& r) {
