@@ -475,7 +475,8 @@ uint32_t ResidencyManager::ParentRecInSlots(const void* ctx, uint32_t i) {
 }
 
 uint32_t ResidencyManager::CutOrder(std::vector<OrdRec>& rec, const std::vector<uint32_t>& count,
-                                    uint32_t cut, std::vector<uint32_t>& mid, uint32_t& keep) {
+                                    uint32_t cut, std::vector<uint32_t>& mid, uint32_t& keep,
+                                    uint16_t units, uint32_t* unitPlanes) {
     uint32_t acc = 0, s = kBuckets;
     for (uint32_t b = 0; b < kBuckets; ++b) {
         if (acc + count[b] > cut) {
@@ -495,10 +496,26 @@ uint32_t ResidencyManager::CutOrder(std::vector<OrdRec>& rec, const std::vector<
             const OrdRec &ra = rec[a], &rb = rec[b];
             if (ra.meas != rb.meas) return ra.meas > rb.meas;
             const uint32_t ma = uint32_t(ra.key >> 42) & 0x3Fu, mb = uint32_t(rb.key >> 42) & 0x3Fu;
-            return ma != mb ? ma > mb : ra.key < rb.key;   // a tie: the coarser mip, the address
+            // a tie: the coarser mip, the address (F18: a tile's planes together, its face last)
+            return ma != mb ? ma > mb : TieKey(ra.key, units) < TieKey(rb.key, units);
         };
         keep = cut - acc;
         std::nth_element(mid.begin(), mid.begin() + keep, mid.end(), byWeight);
+        // F18: THE CUT IS OVER TILES. The first record lost is the pivot; if its tile is a field's,
+        // the planes of that tile among the kept are let go with it -- the tile goes whole, and the
+        // held set is never more than the cut. One tile at most straddles: its planes are
+        // consecutive in the order (TieKey), so no other tile is parted by this cut.
+        if (units && keep > 0 && keep < mid.size()) {
+            const uint64_t lost = rec[mid[keep]].key;
+            if ((units >> (lost >> 56)) & 1u) {
+                const uint64_t kNoFace = ~(uint64_t(0xFFu) << 48), tile = lost & kNoFace;
+                const auto e = std::partition(mid.begin(), mid.begin() + keep,
+                                              [&](uint32_t i) { return (rec[i].key & kNoFace) != tile; });
+                const uint32_t moved = keep - static_cast<uint32_t>(e - mid.begin());
+                keep -= moved;
+                if (unitPlanes) *unitPlanes += moved;
+            }
+        }
         for (uint32_t j = 0; j < keep; ++j) rec[mid[j]].flags |= kInPBit;
     }
     for (OrdRec& r : rec) {
@@ -637,6 +654,54 @@ bool ResidencyManager::OrderSelfTest() {
         closed ? "HOLDS" : "FAILS", broken ? "CAUGHT" : "NOT CAUGHT");
     ok = ok && closed && broken;
     // (4) H5, THE WEIGHT STANDS WITH ITS STATEMENT: the view (every frame) and the prediction (its
+    // (3) F18: A FIELD'S PLANES ARE ONE TILE. Three tiles of four planes at one measure (one bucket,
+    // one tie), the cut at 6 records. Without the unit the cut keeps a tile and a half; with it the
+    // half is let go: 4 kept, every kept tile whole, and the loser is the pivot's tile. A cut at 8
+    // keeps two tiles whole either way (the plant: the unit never changes a cut on a tile's edge).
+    {
+        const float m = std::ldexp(1.1f, -9);
+        auto field = [&](uint32_t cut, uint16_t units, uint32_t& keptOut, bool& wholeOut, uint32_t& planesOut) {
+            std::vector<OrdRec> w;
+            for (uint32_t x = 0; x < 3; ++x) {
+                for (uint32_t f = 6; f < 10; ++f) {
+                    OrdRec r;
+                    r.key = MakeKey(1, TileRequest{f, 0, x, 0});
+                    r.texel = 0.6f;
+                    r.weight = WeightBits(r.texel / m);
+                    r.rung = 3;
+                    memcpy(&r.meas, &m, sizeof(m));
+                    r.bucket = static_cast<uint16_t>(3u * kRungs + MeasureBucket(m));
+                    w.push_back(r);
+                }
+            }
+            std::vector<uint32_t> count(kBuckets + 1, 0u);
+            for (const OrdRec& r : w) ++count[r.bucket];
+            std::vector<uint32_t> mid;
+            uint32_t keep = 0;
+            planesOut = 0;
+            CutOrder(w, count, cut, mid, keep, units, &planesOut);
+            keptOut = 0;
+            wholeOut = true;
+            for (uint32_t x = 0; x < 3; ++x) {
+                uint32_t k = 0;
+                for (uint32_t f = 0; f < 4; ++f) k += (w[x * 4 + f].flags & kInPBit) != 0;
+                keptOut += k;
+                wholeOut = wholeOut && (k == 0 || k == 4);
+            }
+        };
+        uint32_t k6u = 0, k6p = 0, k8u = 0, p6u = 0, p6p = 0, p8u = 0;
+        bool w6u = false, w6p = false, w8u = false;
+        field(6, 0, k6p, w6p, p6p);        // the plant: no unit, the cut parts a tile
+        field(6, 1u << 1, k6u, w6u, p6u);  // the unit: the parted tile goes whole
+        field(8, 1u << 1, k8u, w8u, p8u);  // on a tile's edge the unit changes nothing
+        const bool unitOk = k6u == 4 && w6u && p6u == 2 && k8u == 8 && w8u && p8u == 0;
+        Log("[order-test] a field's planes are one tile (F18): 3 tiles x 4 planes at one measure, the cut "
+            "at 6: without the unit %u kept, whole tiles %s (the plant: %s); with it %u kept, whole tiles "
+            "%s, %u planes let go; at 8: %u kept, whole %s, %u let go -- %s",
+            k6p, w6p ? "yes" : "no", (k6p == 6 && !w6p) ? "CAUGHT" : "NOT CAUGHT", k6u, w6u ? "yes" : "no",
+            p6u, k8u, w8u ? "yes" : "no", p8u, unitOk ? "HOLDS" : "FAILS");
+        ok = ok && unitOk && k6p == 6 && !w6p;
+    }
     // lead 24) on one tile. The prediction's nearer distance stands on the frames it is silent; a
     // reader that speaks again replaces its own slot only; a statement that no longer stands leaves
     // the measure. The plant is F's rule: the weight remade each frame from the readers who spoke.
@@ -835,7 +900,13 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
     m_passCut = cut;
     std::vector<uint32_t> mid;   // record indices of the straddling bucket
     uint32_t kept = 0;   // of the straddling bucket
-    const uint32_t s = CutOrder(m_rec, count, cut, mid, kept);
+    const uint16_t units = UnitTenants();   // F18: the tenants whose planes are one tile
+    uint32_t unitPlanes = 0;
+    const uint32_t s = CutOrder(m_rec, count, cut, mid, kept, units, &unitPlanes);
+    if (unitPlanes) {
+        ++loader.unitCuts;
+        loader.unitPlanes += unitPlanes;
+    }
     if (s < kBuckets) {
         // The straddling bucket's boundary in the measure's terms: the smallest measure kept, the
         // largest lost; and, by rung, the farthest kept and the nearest lost in metres from the eye.
@@ -843,9 +914,12 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
         m_keptFar = UINT32_MAX;   // here: the smallest measure kept
         m_lostNear = 0;           // here: the largest measure lost
         for (uint32_t i = 0; i < kRungs; ++i) m_cutKeptM[i] = m_cutLostM[i] = -1.0f;
+        m_cutUnitPlanes = unitPlanes;   // F18: mid[kept .. kept + unitPlanes) are the pivot's tile's
+        m_cutUnitMeas = unitPlanes ? m_rec[mid[kept]].meas : 0u;
         for (uint32_t j = 0; j < mid.size(); ++j) {
             const OrdRec& r = m_rec[mid[j]];
             const float d = BitsWeight(r.weight);
+            if (j >= kept && j < kept + unitPlanes) continue;   // let go with its tile, by the law, not by the measure
             if (j < kept) {
                 if (r.meas <= m_keptFar) {
                     m_keptFar = r.meas;
@@ -949,11 +1023,11 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
         m_need.push_back({r.bucket, r.meas, r.key, r.tile});
         r.tile->firstP = now;
     }
-    std::sort(m_need.begin(), m_need.end(), [](const OrderEntry& a, const OrderEntry& b) {
+    std::sort(m_need.begin(), m_need.end(), [units](const OrderEntry& a, const OrderEntry& b) {
         if (a.bucket != b.bucket) return a.bucket < b.bucket;
         if (a.weight != b.weight) return a.weight > b.weight;   // the measure, the larger the sooner
         const uint32_t ma = uint32_t(a.key >> 42) & 0x3Fu, mb = uint32_t(b.key >> 42) & 0x3Fu;
-        return ma != mb ? ma > mb : a.key < b.key;
+        return ma != mb ? ma > mb : TieKey(a.key, units) < TieKey(b.key, units);   // F18: a tile's planes together
     });
     // The want's tail past this cut, by tenant and rung ([order-tail]).
     for (uint32_t i = 0; i < 16; ++i) m_tailTenant[i] = 0;
@@ -1384,14 +1458,21 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
                          static_cast<int>(kRungTop) - static_cast<int>(r), m_cutKeptM[r], m_cutLostM[r]);
                 byRung += b;
             }
+            char unit[160] = "";
+            if (m_cutUnitPlanes) {   // F18
+                snprintf(unit, sizeof(unit), " | the pivot's tile let go whole: %u kept planes at measure %.3g",
+                         m_cutUnitPlanes, BitsWeight(m_cutUnitMeas));
+            }
+            const bool noneKept = m_keptFar == UINT32_MAX;
             Log("[order-cut] rec%u f%u | the straddling bucket: class %s, lateness %u, measure 2^-%u | "
-                "smallest measure kept %.3g (%s) | largest lost %.3g (%s) | %s | in metres from the eye, "
+                "smallest measure kept %s (%s) | largest lost %.3g (%s) | %s%s | in metres from the eye, "
                 "by rung:%s",
                 traceRecFrame, m_frame, cls < 3u ? "pin" : "want", cls % 3u, m_cutRung % kRungs,
-                BitsWeight(m_keptFar), name(m_keptFarTile).c_str(), BitsWeight(m_lostNear),
+                noneKept ? "none" : std::to_string(BitsWeight(m_keptFar)).c_str(),
+                noneKept ? "the bucket keeps nothing" : name(m_keptFarTile).c_str(), BitsWeight(m_lostNear),
                 name(m_lostNearTile).c_str(),
-                m_lostNear == 0 || m_keptFar >= m_lostNear ? "they do not cross" : "THEY CROSS",
-                byRung.c_str());
+                m_lostNear == 0 || noneKept || m_keptFar >= m_lostNear ? "they do not cross" : "THEY CROSS",
+                unit, byRung.c_str());
         }
     }
     lapTo(5);
@@ -1630,7 +1711,8 @@ void ResidencyManager::LogLoader() const {
     Log("[loader] %llu turns, stopped at the cap (%u in flight) on %llu (%.0f%%); in flight as a turn began "
         "%.1f on average, pending (first P, not held) %.0f | issued %llu reads + %llu refills, %llu slots mapped to bytes already held, %llu "
         "known magnified without a load | a read's way from its issue to the batch that mapped it: %.2f "
-        "turns on average over %llu",
+        "turns on average over %llu | the cut fell inside a field tile's planes on %llu passes and let "
+        "%llu kept planes go with it (F18)",
         static_cast<unsigned long long>(l.turns), kMaxLoadsInFlight,
         static_cast<unsigned long long>(l.turnsAtCap), 100.0 * double(l.turnsAtCap) / turns,
         double(l.inFlightAtTurn) / turns, double(l.pendingAtTurn) / turns,
@@ -1638,7 +1720,8 @@ void ResidencyManager::LogLoader() const {
         static_cast<unsigned long long>(l.refills), static_cast<unsigned long long>(l.aliases),
         static_cast<unsigned long long>(l.magnifiedKnown),
         double(l.gatherTurns) / double((std::max)(l.gathered, uint64_t(1))),
-        static_cast<unsigned long long>(l.gathered));
+        static_cast<unsigned long long>(l.gathered), static_cast<unsigned long long>(l.unitCuts),
+        static_cast<unsigned long long>(l.unitPlanes));
     for (const Tenant& t : m_tenants) {
         const uint64_t n = uint64_t(t.loadsRead) + t.loadsPaint;
         if (!n && !t.magnifiedKnown) continue;

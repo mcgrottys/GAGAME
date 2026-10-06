@@ -517,6 +517,14 @@ public:
     void SetMagnifiedOf(int tenant, TileQueryFn fn) {
         if (tenant >= 0 && tenant < static_cast<int>(m_tenants.size())) m_tenants[tenant].magnifiedOf = std::move(fn);
     }
+    // F18: A FIELD'S PLANES ARE ONE TILE. A field tenant's slices are the planes of one value at one
+    // address (the shader adds them: a plane not landed is zero), so the tile the order cuts is all
+    // of them: the planes are the fiber, the cut is over the base. Declared by the tenant
+    // (Semantics::Field); the order ties by the address with its face last, and the cut inside the
+    // straddling bucket lets a tile go whole rather than keep some of its planes.
+    void SetPlanesOneTile(int tenant, bool on) {
+        if (tenant >= 0 && tenant < static_cast<int>(m_tenants.size())) m_tenants[tenant].planesOneTile = on;
+    }
     // F14: THE LOADER'S LEDGER over the run (LogLoader at the exit): what the order issued a turn,
     // the turns it stopped at the cap, the queue's depth as a turn began, and a load's way from
     // issue to the batch that maps it, in turns. The per-tenant halves (read/paint/failed/
@@ -525,6 +533,7 @@ public:
         uint64_t turns = 0, turnsAtCap = 0, inFlightAtTurn = 0, pendingAtTurn = 0;
         uint64_t reads = 0, refills = 0, aliases = 0, magnifiedKnown = 0;
         uint64_t gathered = 0, gatherTurns = 0;
+        uint64_t unitCuts = 0, unitPlanes = 0;   // F18: the cut fell inside a tile's planes; the planes let go with it
     };
     LoaderLedger loader;
     void LogLoader() const;
@@ -610,6 +619,7 @@ private:
         std::vector<std::shared_ptr<Tracked>> tracked;
         TileProviderFn provider;
         TileQueryFn magnifiedOf;   // F14: known without a load (SetMagnifiedOf); empty = ask the provider
+        bool planesOneTile = false;   // F18: the slices are planes of one value; the cut's unit is all of them
         // Residency map (base-tile granularity, per face): byte = finest resident mip * 16.
         GpuTexture resMap;
         uint32_t resMapSrv = UINT32_MAX;
@@ -1013,6 +1023,7 @@ private:
     uint32_t m_cutRung = kNoBucket, m_keptFar = 0, m_lostNear = 0, m_keptFarKey = 0, m_lostNearKey = 0;
     float m_cutKeptM[kRungs] = {}, m_cutLostM[kRungs] = {};   // F: by rung, metres from the eye
     uint64_t m_keptFarTile = 0, m_lostNearTile = 0;
+    uint32_t m_cutUnitPlanes = 0, m_cutUnitMeas = 0;   // F18: the pivot's tile let go whole: its kept planes, their measure
     // Decision 5: the events that recompute the order, and the pass's own snapshot of them.
     void OrderPass(OrderTurnLedger& L);
     std::string TileName(uint64_t key) const;
@@ -1029,8 +1040,23 @@ private:
     static uint32_t ParentRecInSlots(const void* ctx, uint32_t i);   // ctx: the manager
     // The cut: kInPBit on the first `cut` records of the order (count: records a bucket; mid:
     // scratch, the straddling bucket's records, its first `keep` kept). The straddling bucket.
+    // `units`: the tenants (a bit each) whose faces are planes of one tile (F18); `unitPlanes`
+    // counts the kept planes let go so the straddling tile goes whole.
     static uint32_t CutOrder(std::vector<OrdRec>& rec, const std::vector<uint32_t>& count,
-                             uint32_t cut, std::vector<uint32_t>& mid, uint32_t& keep);
+                             uint32_t cut, std::vector<uint32_t>& mid, uint32_t& keep,
+                             uint16_t units = 0, uint32_t* unitPlanes = nullptr);
+    // F18: the tie's key. For a tenant whose faces are one tile the face is the LAST word of the
+    // address, so a tile's planes stand together in the order and one tile at most straddles a cut.
+    static uint64_t TieKey(uint64_t key, uint16_t units) {
+        if (!((units >> (key >> 56)) & 1u)) return key;
+        const uint64_t face = (key >> 48) & 0xFFu;
+        return (key & 0xFF00000000000000ull) | ((key & 0x0000FFFFFFFFFFFFull) << 8) | face;
+    }
+    uint16_t UnitTenants() const {
+        uint16_t m = 0;
+        for (size_t i = 0; i < m_tenants.size() && i < 16; ++i) if (m_tenants[i].planesOneTile) m |= uint16_t(1u << i);
+        return m;
+    }
     static bool OrderSelfTest();
     uint64_t m_trackEpoch = 0, m_failEvents = 0, m_claimEvents = 0;
     uint64_t m_passEpoch = ~0ull, m_passFails = ~0ull, m_passClaims = ~0ull;
