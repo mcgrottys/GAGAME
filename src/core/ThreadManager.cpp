@@ -24,6 +24,7 @@ void ThreadManager::Init(int threads, int ioCap) {
                              : (std::min)(12, (std::max)(4, hw > 2u ? static_cast<int>(hw) - 2 : 4));
     m_cap[int(Lane::Compute)] = n;
     m_cap[int(Lane::Io)] = (std::min)(io, n);
+    m_cap[int(Lane::Long)] = (std::max)(1, n - kReserve);
     m_quit = false;
     m_threads.reserve(static_cast<size_t>(n));
     for (int i = 0; i < n; ++i) m_threads.emplace_back([this] { Worker(); });
@@ -97,7 +98,7 @@ void ThreadManager::Worker() {
             m_cv.wait(lk, [this] {
                 if (m_quit) return true;
                 for (int L = 0; L < int(Lane::kCount); ++L) {
-                    if (!m_q[L].empty() && m_active[L] < m_cap[L]) return true;
+                    if (!m_q[L].empty() && MayStart(L)) return true;
                 }
                 return false;
             });
@@ -105,7 +106,7 @@ void ThreadManager::Worker() {
             // Compute before Io, always: a ParallelFor's caller is BLOCKED on its chunks and a
             // paint is tens of milliseconds. Lane order is the priority.
             for (int L = 0; L < int(Lane::kCount); ++L) {
-                if (m_q[L].empty() || m_active[L] >= m_cap[L]) continue;
+                if (m_q[L].empty() || !MayStart(L)) continue;
                 fn = std::move(m_q[L].front().fn);
                 m_q[L].pop_front();
                 ++m_active[L];
@@ -124,7 +125,7 @@ void ThreadManager::Worker() {
             std::lock_guard<std::mutex> lk(m_mx);
             --m_active[lane];
             for (int L = 0; L < int(Lane::kCount); ++L) {
-                if (!m_q[L].empty() && m_active[L] < m_cap[L]) {
+                if (!m_q[L].empty() && MayStart(L)) {
                     wake = true;
                     break;
                 }

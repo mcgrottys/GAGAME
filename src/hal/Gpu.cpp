@@ -1,6 +1,7 @@
-#include "hal/Gpu.h"
+﻿#include "hal/Gpu.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -311,10 +312,13 @@ void Gpu::Shutdown() {
 
 ID3D12GraphicsCommandList* Gpu::BeginFrame() {
     // Wait only for the frame we are about to reuse, not for the GPU to go idle.
+    lastFenceWaitMs = 0.0;
     if (m_frameFence[m_frameIndex] != 0 &&
         m_fence->GetCompletedValue() < m_frameFence[m_frameIndex]) {
+        const auto t0 = std::chrono::steady_clock::now();
         GA_CHECK(m_fence->SetEventOnCompletion(m_frameFence[m_frameIndex], m_fenceEvent));
         WaitForSingleObject(m_fenceEvent, INFINITE);
+        lastFenceWaitMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     }
     m_cbOffset[m_frameIndex] = 0;
     GA_CHECK(m_alloc[m_frameIndex]->Reset());
@@ -800,6 +804,72 @@ std::vector<uint8_t> Gpu::ReadbackTexture(GpuTexture& tex, uint32_t* outRowPitch
     rb->Unmap(0, &none);
 
     if (outRowPitch) *outRowPitch = fp.Footprint.RowPitch;
+    return out;
+}
+
+Gpu::TextureReadback Gpu::ReadbackTextureBegin(GpuTexture& tex, uint32_t mip) {
+    TextureReadback rb;
+    D3D12_RESOURCE_DESC d = tex.res->GetDesc();
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
+    UINT numRows = 0;
+    UINT64 rowBytes = 0, total = 0;
+    m_device->GetCopyableFootprints(&d, mip, 1, 0, &fp, &numRows, &rowBytes, &total);
+    const auto hp = HeapProps(D3D12_HEAP_TYPE_READBACK);
+    const auto rd = BufferDesc(total);
+    GA_CHECK(m_device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                              D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                              IID_PPV_ARGS(&rb.buf)));
+    GA_CHECK(m_device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+                                             IID_PPV_ARGS(&rb.alloc)));
+    GA_CHECK(m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, rb.alloc.Get(),
+                                         nullptr, IID_PPV_ARGS(&rb.list)));
+    auto* cl = rb.list.Get();
+    const D3D12_RESOURCE_STATES was = tex.state;
+    D3D12_RESOURCE_BARRIER br{};
+    br.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    br.Transition.pResource = tex.res.Get();
+    br.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    if (was != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+        br.Transition.StateBefore = was;
+        br.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        cl->ResourceBarrier(1, &br);
+    }
+    D3D12_TEXTURE_COPY_LOCATION dst{}, src{};
+    dst.pResource = rb.buf.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint = fp;
+    src.pResource = tex.res.Get();
+    src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    src.SubresourceIndex = mip;
+    cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    if (was != D3D12_RESOURCE_STATE_COPY_SOURCE) {
+        br.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        br.Transition.StateAfter = was;
+        cl->ResourceBarrier(1, &br);
+    }
+    GA_CHECK(cl->Close());
+    ID3D12CommandList* lists[] = {cl};
+    m_queue->ExecuteCommandLists(1, lists);
+    rb.fence = ++m_fenceValue;
+    GA_CHECK(m_queue->Signal(m_fence.Get(), rb.fence));
+    rb.bytes = total;
+    rb.rowPitch = fp.Footprint.RowPitch;
+    return rb;
+}
+
+bool Gpu::ReadbackReady(const TextureReadback& rb) const {
+    return rb.Pending() && m_fence->GetCompletedValue() >= rb.fence;
+}
+
+std::vector<uint8_t> Gpu::ReadbackTake(TextureReadback& rb) {
+    std::vector<uint8_t> out(static_cast<size_t>(rb.bytes));
+    void* p = nullptr;
+    D3D12_RANGE all{0, static_cast<SIZE_T>(rb.bytes)};
+    GA_CHECK(rb.buf->Map(0, &all, &p));
+    memcpy(out.data(), p, static_cast<size_t>(rb.bytes));
+    D3D12_RANGE none{0, 0};
+    rb.buf->Unmap(0, &none);
+    rb = TextureReadback{};
     return out;
 }
 

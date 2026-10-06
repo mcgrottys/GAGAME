@@ -36,6 +36,7 @@
 #include "compose/Compositor.h"
 #include "compose/WaterAtlas.h"
 #include "sim/SeaState.h"
+#include "sim/SweSolver.h"   // F13: the current's read, handed to a worker (CurJob)
 #include "sim/TideModel.h"
 
 namespace ga {
@@ -314,6 +315,18 @@ private:
     std::vector<float> m_curU, m_curV;            // solve-grid planes, main-thread owned
     uint64_t m_curSig = 0;                        // quantized content hash -> bucket key
     double m_curReadT = -1e18;                    // last refresh (sim s)
+    // F13: the resample of the read-back flow, on a worker; adopted on the main thread when done.
+    struct CurJob {
+        SweSolver::FieldsRead read;   // the two readbacks, mapped and unpacked on the worker
+        std::vector<float> uv4, U, V, oldU, oldV;
+        uint32_t uw = 0, uh = 0;
+        uint64_t h = 0;
+        size_t moved = 0;
+        float worst = 0.0f;
+        bool first = false;
+        std::atomic<bool> done{false};
+    };
+    std::shared_ptr<CurJob> m_curJob;
     mutable std::atomic<double> m_probeReadT{-1e18};   // the last probe inside the window (sim s)
     uint64_t m_waitingKey = 0;                    // a roll noted once while no one reads
 

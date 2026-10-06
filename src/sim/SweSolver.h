@@ -236,6 +236,25 @@ public:
     void ReadProbes(Gpu& gpu, const float* cellPairs, int count, Probe* out);
     // M6x: the full-field CPU MIRROR for the weather manager -- eta (PADDED atlas dims) and
     // the derived currents (exact bathy dims, xyzw = u, v, speed, valid), one readback each.
+    // F13: the same fields WITHOUT the drain: Begin submits the two copies and returns; Ready
+    // says whether their fence passed; Take unpacks them exactly as ReadFields does. A reader on
+    // a cadence (the wave solve's current, every 90 s) asks on one frame and reads on a later one.
+    bool ReadFieldsBegin(Gpu& gpu);
+    bool ReadFieldsPending() const { return m_rbEta.Pending(); }
+    bool ReadFieldsReady(const Gpu& gpu) const;
+    void ReadFieldsTake(Gpu& gpu, std::vector<float>& etaOut, uint32_t& etaW, uint32_t& etaH,
+                        std::vector<float>& uv4Out, uint32_t& uvW, uint32_t& uvH);
+    // ...and the same read handed to ANOTHER THREAD: Detach gives the two finished readbacks
+    // away (the solver forgets them); Unpack maps and unpacks them wherever it is called -- the
+    // map and the half-to-float loop are 100 ms the frame need not pay. Only the grid's size is
+    // read of the solver, by value, at Detach.
+    struct FieldsRead {
+        Gpu::TextureReadback eta, uv;
+        uint32_t nx = 0, ny = 0;
+    };
+    FieldsRead ReadFieldsDetach();
+    static void UnpackRead(Gpu& gpu, FieldsRead& r, std::vector<float>& etaOut, uint32_t& etaW,
+                           uint32_t& etaH, std::vector<float>& uv4Out, uint32_t& uvW, uint32_t& uvH);
     void ReadFields(Gpu& gpu, std::vector<float>& etaOut, uint32_t& etaW, uint32_t& etaH,
                     std::vector<float>& uv4Out, uint32_t& uvW, uint32_t& uvH);
     // Debug: raw readback of the flux bank (padded dims, RGBA32F). outW/outH = padded texels.
@@ -389,6 +408,11 @@ private:
     hal::Table m_table;   // [t1 height page, t2 its residency map, u0 eta, u1 flux, u2 uv, u3 mv]
     D3D12_RESOURCE_STATES m_etaState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     D3D12_RESOURCE_STATES m_uvState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    Gpu::TextureReadback m_rbEta, m_rbUv;   // F13: the asynchronous read of the two fields
+    static void UnpackFields(uint32_t nx, uint32_t ny, const std::vector<uint8_t>& etaData,
+                             uint32_t etaPitch, const std::vector<uint8_t>& uvData, uint32_t uvPitch,
+                             std::vector<float>& etaOut, uint32_t& etaW, uint32_t& etaH,
+                             std::vector<float>& uv4Out, uint32_t& uvW, uint32_t& uvH);
 
     SweCbData m_cb{};
     double m_simTime = 0;
