@@ -223,6 +223,12 @@ struct StreamingSection {
     uint32_t googleZoom = 14;
     bool directStorage = true, colorTrees = true, gisGate = true, seafloor = true,
          exposure = true;
+    // F16 (HIERARCHY 4.20, the third clause): THE SURVEY'S GRAIN, metres -- the finest level the
+    // land/sea mask has anything of its own for. A mask tile finer than it is its parent,
+    // magnified: never painted, stored or loaded. The survey's shoreline (NOAA CUSP, NAD83 against
+    // WGS84 "~1 m, documented not corrected") and the NHD water polygons (1:24,000) have nothing
+    // below a metre; before this the mask held 913,717 tiles at 1.9-7.5 cm texels. 0 = every grain.
+    double gisGrainM = 1.0;
     double holdMargin = 1.41421356;   // order: a held tile counts for this times its measure
     std::string treeRoot = "cache/trees";   // the folder the tile trees live in (TileTree.h)
 };

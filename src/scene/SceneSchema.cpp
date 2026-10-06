@@ -334,6 +334,11 @@ const Schema& StreamingSchema() {
             .Bind("directStorage", p.directStorage, "NVMe -> GPU tile reads (--no-direct-storage)", R)
             .Bind("colorTrees", p.colorTrees, "colour and height pages from the trees (--no-color-trees)", R)
             .Bind("gisGate", p.gisGate, "the vector land/sea gate on the bed (--no-gis-gate)", R)
+            .Bind("gisGrainM", p.gisGrainM, Q::Length, "m",
+                  "the survey's grain: the finest level the land/sea mask has anything of its own "
+                  "for; a mask tile finer than it is its parent, magnified -- never painted, stored "
+                  "or loaded (HIERARCHY 4.20); 0 = every grain",
+                  R)
             .Bind("seafloor", p.seafloor, "the global seafloor relief source (--no-seafloor)", R)
             .Bind("exposure", p.exposure, "the swell-exposure page (--no-exposure)", R)
             .Bind("holdMargin", p.holdMargin, Q::Dimensionless, "1",

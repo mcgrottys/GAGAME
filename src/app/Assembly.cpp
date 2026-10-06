@@ -1006,6 +1006,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 if (S.streaming.gisGate && (bedIdx != SIZE_MAX || reliefLayer != SIZE_MAX) &&
                     gisMask.Load("data/gis/")) {
                     srcGisMask.Refresh();   // the rings are loaded: declare the real box
+                    srcGisMask.SetGrain(S.streaming.gisGrainM);   // F16: the survey's grain
                     if (S.Tool("gis-dump")) tools::RunGisDump(opt, gisMask);
                     if (S.Tool("gis-sweep-test")) tools::RunGisSweepTest(gisMask);   // F15
                     colorStack.push_back(&srcGisMask);
@@ -1153,6 +1154,13 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                         surface.WindowBlocks(md.blocks,
                                              gt->Provider(hal::BlockBinding::Pyramid(md.fiber.texW, md.fiber.texH)),
                                              "paint survey mask (pyramid windows)");
+                        // F16: the mask knows its finer tiles are the parent magnified (the
+                        // survey's grain), so the question is declared here too (F14).
+                        md.bindings.back().magnified = gt->MagnifiedQuery(cCubeL);
+                        {
+                            const TileQueryFn q = gt->MagnifiedQuery(hal::BlockBinding::Pyramid(md.fiber.texW, md.fiber.texH));
+                            for (hal::BlockSlice& k : md.blocks) k.magnified = q;
+                        }
                         landseaTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(md));
                         maskTenant = landseaTenant.Id();
                         landseaTenant.Bind(*gt);   // its folds invalidate the slice its tag names
