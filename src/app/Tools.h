@@ -77,6 +77,9 @@ int RunWaterMap(const Options& opt, Gpu& gpu, const GlobeModel& globeModel, Comp
                 int hgtCh, const WaterAtlas& waterAtlas, const Space::Anchor& chart);
 // --gis-dump PATH: the survey gate over its box as a PGM; std::exit(0) from inside.
 void RunGisDump(const Options& opt, const GisVectorMask& gisMask);
+// F15: --tool gis-sweep-test. The one-column tile against the full sweep, byte for byte, over
+// a grid of tiles at five grains around the survey's centre; exits 0 on PASS.
+void RunGisSweepTest(const GisVectorMask& gisMask);
 // --tree-audit N (--pack-trees, --warm-trees): compare / pack / warm the tile trees; exit 0.
 int RunTreeAudit(const Options& opt, Compositor& compositor, int hgtCh, ResidencyManager& resMgr,
                  int colCh, const std::unique_ptr<TileTree>& megaTree,

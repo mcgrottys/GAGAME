@@ -45,9 +45,20 @@
 //  edge that crosses it, however far south -- so latitude cannot prune, and must not. Bucketing
 //  the 1.26 M edges by longitude turns a column from "walk every ring that overlaps" (the big
 //  coast ring alone is 32727 points, walked 512 times a tile) into a few hundred edge tests.
+//
+//  THE SWEEP IS OVER THE EDGES THAT MEET THE TILE (F15, 2026-10-05). Parity down a meridian changes
+//  only at a crossing, and across a tile's columns the crossings inside the tile's band change only
+//  where an edge enters the box; so a tile no edge meets has one parity in every cell, and one column
+//  decides it -- the crossings south of the tile are counted in that column as in any other. Each edge
+//  carries its exact bounds on the sphere (its ends' longitudes; its ends' latitudes extended to the
+//  circle's vertex when the arc passes it, since a great circle bulges poleward of the chord), and a
+//  tile is swept in full only when some edge's bounds meet its box. Held byte-identical to the full
+//  sweep over 720 tiles from 20 km to 2 m (--tool gis-sweep-test); at the helm 94% of tiles are one
+//  column, and the paint of a mask tile measured 1.2 ms against 35-57 ms before.
 // ================================================================================================
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -81,7 +92,21 @@ public:
     // Row 0 is latMax. Column-major internally, because a column is a meridian.
     // M9ay: out is dim*dim*2 bytes: [value (255 water / 0 land), flags (1 surveyed, 2 edited)].
     void RasterizeGate(double latMin, double latMax, double lonMin, double lonMax, uint32_t dim,
-                       std::vector<uint8_t>& out) const;
+                       std::vector<uint8_t>& out) const {
+        RasterizeGateImpl(latMin, latMax, lonMin, lonMax, dim, out, true);
+    }
+    // F15: the sweep with every column computed, whatever the edges say -- the reference the
+    // one-column tile is held against (--tool gis-sweep-test), never the path a tile takes.
+    void RasterizeGateFull(double latMin, double latMax, double lonMin, double lonMax, uint32_t dim,
+                           std::vector<uint8_t>& out) const {
+        RasterizeGateImpl(latMin, latMax, lonMin, lonMax, dim, out, false);
+    }
+    // F15: how many tiles were decided by one column (no ring edge meets the tile) and how
+    // many were swept in full, this run.
+    void SweepCounts(uint32_t& full, uint32_t& one) const {
+        full = m_sweptFull.load();
+        one = m_sweptOne.load();
+    }
 
     size_t RingCount() const { return m_coast.size() + m_water.size() + m_edits.size(); }
     size_t PointCount() const { return m_pts.size(); }
@@ -93,7 +118,8 @@ public:
 private:
     struct Ring {
         uint32_t first = 0, count = 0;
-        float lon0 = 0, lat0 = 0, lon1 = 0, lat1 = 0;   // degrees
+        float lon0 = 0, lat0 = 0, lon1 = 0, lat1 = 0;   // degrees, of the vertices
+        float alat0 = 0, alat1 = 0;   // F15: of the arcs (a great circle bulges past its ends)
         uint8_t waterValue = 0;   // edits only: what "inside" asserts (0 land, 255 water)
     };
     struct Vec3 {
@@ -107,6 +133,12 @@ private:
         std::vector<uint32_t> ring;      // the ring each edge belongs to (per-feature parity)
         std::vector<uint32_t> start;     // bucket -> first entry in `edge` (size buckets+1)
         std::vector<uint32_t> edge;      // entries: indices into a/b
+        // F15: EACH EDGE'S EXACT BOUNDS ON THE SPHERE (degrees). Its longitudes are its ends'
+        // (an arc under 180 degrees is monotone in longitude); its latitudes are its ends'
+        // extended to the circle's vertex when the arc passes it -- a great circle bulges
+        // poleward of the chord, so the ends alone would miss a crossing. A tile no edge's
+        // bounds meet is decided by one column (RasterizeGate).
+        std::vector<float> lonLo, lonHi, latLo, latHi;
     };
 
     // stitchClip: the file is a coastline CLIPPED to a box (open pieces ending on its edges);
@@ -115,6 +147,14 @@ private:
     void LoadEdits(const std::string& path);
     void BuildIndex(const std::vector<Ring>& rings, EdgeIndex& idx);
     int Bucket(double lonDeg) const;
+    // F15: does any edge of the set meet the box (degrees)? Exact by the edges' bounds: a false
+    // means no arc enters the box; a true means the full sweep decides. A box past the survey's
+    // longitude span answers true (its columns outside the survey are their own case).
+    bool Touches(const EdgeIndex& idx, double latMin, double latMax, double lonMin,
+                 double lonMax) const;
+    void RasterizeGateImpl(double latMin, double latMax, double lonMin, double lonMax,
+                           uint32_t dim, std::vector<uint8_t>& out, bool allowOneColumn) const;
+    mutable std::atomic<uint32_t> m_sweptFull{0}, m_sweptOne{0};
     // Crossing latitudes of one edge set with the meridian at `lonDeg`, appended to `xs`.
     void Crossings(const EdgeIndex& idx, double lonDeg, std::vector<double>& xs) const;
     // The same crossings tagged by ring, for sets whose members OVERLAP (the NHD water

@@ -12,6 +12,8 @@ namespace {
 
 constexpr double kPi = 3.14159265358979;
 constexpr double kD2R = kPi / 180.0;
+// F15: an arc's exact latitude bounds (defined with the index below; used by the edits' loader).
+void ArcLatBounds(double ax, double ay, double az, double bx, double by, double bz, double& lo, double& hi);
 
 }  // namespace
 
@@ -236,7 +238,22 @@ void GisVectorMask::LoadEdits(const std::string& path) {
                     r.lat1 = (std::max)(r.lat1, float(latD));
                 }
             }
-            if (r.count >= 3) m_edits.push_back(r);
+            if (r.count >= 3) {
+                // F15: the ring's arcs' latitudes, for the edge test (Touches): the vertices'
+                // box, widened where an arc passes its circle's vertex.
+                double lo = r.lat0, hi = r.lat1;
+                for (uint32_t i = 0; i < r.count; ++i) {
+                    const Vec3& A = m_pts[r.first + i];
+                    const Vec3& B = m_pts[r.first + ((i + 1) % r.count)];
+                    double t0 = 0.0, t1 = 0.0;
+                    ArcLatBounds(A.x, A.y, A.z, B.x, B.y, B.z, t0, t1);
+                    lo = (std::min)(lo, t0);
+                    hi = (std::max)(hi, t1);
+                }
+                r.alat0 = float(lo - 1e-6);
+                r.alat1 = float(hi + 1e-6);
+                m_edits.push_back(r);
+            }
         }
     }
 }
@@ -293,6 +310,35 @@ int GisVectorMask::Bucket(double lonDeg) const {
     return static_cast<int>(t * m_buckets);
 }
 
+// F15: THE ARC'S LATITUDES. The ends bound an arc's longitudes (under 180 degrees it is monotone
+// in longitude) but not its latitudes: the great circle through A and B has a vertex -- the
+// projection of the pole onto its plane, h = z - (z.n)n -- and an arc that passes h reaches the
+// vertex's latitude, poleward of both ends. h lies on the minor arc A->B iff (A x h).n > 0 and
+// (h x B).n > 0 (the same side test the meet uses). The same for -h, the southern vertex.
+namespace {
+void ArcLatBounds(double ax, double ay, double az, double bx, double by, double bz, double& lo,
+                  double& hi) {
+    const double la = std::asin((std::max)(-1.0, (std::min)(1.0, az))) / kD2R;
+    const double lb = std::asin((std::max)(-1.0, (std::min)(1.0, bz))) / kD2R;
+    lo = (std::min)(la, lb);
+    hi = (std::max)(la, lb);
+    const double nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+    const double n2 = nx * nx + ny * ny + nz * nz;
+    if (n2 < 1e-30) return;   // A and B coincide: no arc
+    const double hx = -nz * nx, hy = -nz * ny, hz = n2 - nz * nz;   // z - (z.n)n, scaled by n2
+    const double h2 = hx * hx + hy * hy + hz * hz;
+    if (h2 < 1e-30) return;   // the circle is the equator: its latitude is its ends'
+    const double vertex = std::asin((std::max)(-1.0, (std::min)(1.0, hz / std::sqrt(h2)))) / kD2R;
+    auto onArc = [&](double px, double py, double pz) {
+        const double c1 = (ay * pz - az * py) * nx + (az * px - ax * pz) * ny + (ax * py - ay * px) * nz;
+        const double c2 = (py * bz - pz * by) * nx + (pz * bx - px * bz) * ny + (px * by - py * bx) * nz;
+        return c1 > 0.0 && c2 > 0.0;
+    };
+    if (onArc(hx, hy, hz)) hi = (std::max)(hi, vertex);
+    if (onArc(-hx, -hy, -hz)) lo = (std::min)(lo, -vertex);
+}
+}  // namespace
+
 // Longitude only. Parity along a meridian depends on every edge that crosses it however far
 // south of the tile, so latitude cannot prune here and must not be allowed to.
 void GisVectorMask::BuildIndex(const std::vector<Ring>& rings, EdgeIndex& idx) {
@@ -309,6 +355,16 @@ void GisVectorMask::BuildIndex(const std::vector<Ring>& rings, EdgeIndex& idx) {
             const double lb = std::atan2(m_pts[bi].y, m_pts[bi].x) / kD2R;
             double l0 = (std::min)(la, lb), l1 = (std::max)(la, lb);
             if (l1 - l0 > 180.0) { l0 = m_lon0; l1 = m_lon1; }   // dateline-spanning: take all
+            {   // F15: the edge's exact bounds, widened by a float's grain (0.1 m) so a rounding
+                // can only make a tile sweep in full, never miss an edge.
+                double t0 = 0.0, t1 = 0.0;
+                ArcLatBounds(m_pts[ai].x, m_pts[ai].y, m_pts[ai].z, m_pts[bi].x, m_pts[bi].y,
+                             m_pts[bi].z, t0, t1);
+                idx.lonLo.push_back(float(l0 - 1e-6));
+                idx.lonHi.push_back(float(l1 + 1e-6));
+                idx.latLo.push_back(float(t0 - 1e-6));
+                idx.latHi.push_back(float(t1 + 1e-6));
+            }
             const int b0 = Bucket((std::max)(l0, m_lon0));
             const int b1 = Bucket((std::min)(l1, m_lon1 - 1e-9));
             lo.push_back(b0 < 0 ? 0u : uint32_t(b0));
@@ -420,8 +476,33 @@ void GisVectorMask::FillParity(std::vector<double>& xs, double latMin, double la
     }
 }
 
-void GisVectorMask::RasterizeGate(double latMin, double latMax, double lonMin, double lonMax,
-                                  uint32_t dim, std::vector<uint8_t>& out) const {
+bool GisVectorMask::Touches(const EdgeIndex& idx, double latMin, double latMax, double lonMin,
+                            double lonMax) const {
+    if (idx.start.empty()) return false;
+    const int b0 = Bucket(lonMin), b1 = Bucket(lonMax);
+    if (b0 < 0 || b1 < 0) return true;
+    for (int b = b0; b <= b1; ++b) {
+        for (uint32_t k = idx.start[b]; k < idx.start[b + 1]; ++k) {
+            const uint32_t e = idx.edge[k];
+            if (idx.lonHi[e] >= lonMin && idx.lonLo[e] <= lonMax && idx.latHi[e] >= latMin &&
+                idx.latLo[e] <= latMax) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// F15: THE SWEEP IS OVER THE EDGES THAT MEET THE TILE. Parity down a meridian changes only at a
+// crossing, and across the tile's columns the set of crossings inside the tile's band changes
+// only where an edge enters the box: a tile no edge meets has the same parity in every column
+// and every row, and one column decides it (the crossings south of the tile are counted in that
+// column as in any other). A tile some edge meets is swept as before, every column. The two are
+// the same function; the second is the first with its 255 other columns computed and discarded
+// (--tool gis-sweep-test holds them equal, byte for byte).
+void GisVectorMask::RasterizeGateImpl(double latMin, double latMax, double lonMin, double lonMax,
+                                      uint32_t dim, std::vector<uint8_t>& out,
+                                      bool allowOneColumn) const {
     // 255 everywhere: water, or no survey here. A gate's default must be PERMISSIVE -- the one
     // thing it must never do is delete a layer because it had no opinion.
     // M9ay: TWO BYTES A CELL -- [value, flags]. value: 255 water, 0 land. flags bit 0 =
@@ -430,12 +511,29 @@ void GisVectorMask::RasterizeGate(double latMin, double latMax, double lonMin, d
     // carry no opinion, which the source reports as weight 0 -- never as "water".
     out.assign(static_cast<size_t>(dim) * dim * 2u, 0u);
     if (m_coast.empty()) return;
+    bool one = allowOneColumn && lonMin >= m_lon0 && lonMax <= m_lon1 &&
+               !Touches(m_coastIdx, latMin, latMax, lonMin, lonMax) &&
+               !Touches(m_waterIdx, latMin, latMax, lonMin, lonMax);
+    for (size_t i = 0; one && i < m_edits.size(); ++i) {
+        const Ring& e = m_edits[i];
+        if (e.lon1 >= lonMin && e.lon0 <= lonMax && e.alat1 >= latMin && e.alat0 <= latMax) one = false;
+    }
+    {
+        const uint32_t n = 1u + (one ? m_sweptOne.fetch_add(1u) + m_sweptFull.load()
+                                     : m_sweptFull.fetch_add(1u) + m_sweptOne.load());
+        if ((n & 4095u) == 0u) {
+            Log("[gismask] %u tiles swept: %u by one column (no ring edge meets the tile), %u in full",
+                n, m_sweptOne.load(), m_sweptFull.load());
+        }
+    }
     std::vector<uint8_t> col(dim), ecol(dim);
     std::vector<double> xs;
     std::vector<std::pair<uint32_t, double>> tagged;
     const double dLat = (latMax - latMin) / double(dim);
-    for (uint32_t cx = 0; cx < dim; ++cx) {
-        const double lon = lonMin + (double(cx) + 0.5) * (lonMax - lonMin) / double(dim);
+    const uint32_t columns = one ? 1u : dim;
+    for (uint32_t cx = 0; cx < columns; ++cx) {
+        const double lon = one ? 0.5 * (lonMin + lonMax)
+                               : lonMin + (double(cx) + 0.5) * (lonMax - lonMin) / double(dim);
         if (lon < m_lon0 || lon > m_lon1) continue;   // outside the survey: no opinion
         std::fill(col.begin(), col.end(), 255u);
         std::fill(ecol.begin(), ecol.end(), 0u);
@@ -470,9 +568,14 @@ void GisVectorMask::RasterizeGate(double latMin, double latMax, double lonMin, d
         for (uint32_t row = 0; row < dim; ++row) {
             const double lat = latMax - (double(row) + 0.5) * dLat;   // row 0 = latMax
             const bool surveyed = lat >= m_lat0 && lat <= m_lat1;
-            const size_t i = (static_cast<size_t>(row) * dim + cx) * 2u;
-            out[i] = col[row];
-            out[i + 1] = static_cast<uint8_t>((surveyed ? 1u : 0u) | (ecol[row] ? 2u : 0u));
+            const uint8_t v = col[row];
+            const uint8_t f = static_cast<uint8_t>((surveyed ? 1u : 0u) | (ecol[row] ? 2u : 0u));
+            const uint32_t c0 = one ? 0u : cx, c1 = one ? dim : cx + 1u;
+            for (uint32_t c = c0; c < c1; ++c) {
+                const size_t i = (static_cast<size_t>(row) * dim + c) * 2u;
+                out[i] = v;
+                out[i + 1] = f;
+            }
         }
     }
 }

@@ -88,6 +88,6 @@
       ] }
     ] },
     { "registry": "loader", "selects": "a field file type (core/FieldLoader.h LoaderRegistry)", "names": ["f32", "json"] },
-    { "registry": "tool", "selects": "a one-shot mode in `tools[]` (--tool name[:args])", "names": ["bathy-map", "dump-water-state", "export", "fidelity-map", "gis-dump", "ingest", "load-field", "ocean-probe", "pack-tiles", "pack-trees", "rastertest", "sea-verify", "selftest", "swe-cycle", "swe-uv", "trace", "tree-audit", "tree-prune", "twin-surface", "warm-inlet", "warm-trees", "water-map", "wave-map"] }
+    { "registry": "tool", "selects": "a one-shot mode in `tools[]` (--tool name[:args])", "names": ["bathy-map", "dump-water-state", "export", "fidelity-map", "gis-dump", "gis-sweep-test", "ingest", "load-field", "ocean-probe", "pack-tiles", "pack-trees", "rastertest", "sea-verify", "selftest", "swe-cycle", "swe-uv", "trace", "tree-audit", "tree-prune", "twin-surface", "warm-inlet", "warm-trees", "water-map", "wave-map"] }
   ]
 }
