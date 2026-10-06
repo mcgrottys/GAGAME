@@ -2207,7 +2207,11 @@ The law, in three clauses:
    nothing is mapped for it, and its residency byte names the parent. Measured (2026-10-05,
    the helm, 6,000 frames): 56-61k of the colour tenant's 60-67k loads had been such answers,
    near half of what the queue's 48 slots carried; with the question declared, 77,694 tiles
-   were decided without a load and the colour tenant loaded 7,762.
+   were decided without a load and the colour tenant loaded 7,762. A vector source is exact
+   at every grain, so it must say where its information ends: the land/sea mask declares the
+   survey's grain (`streaming.gisGrainM`, metres; `GisMaskSource::FinestMip` is that grain's
+   level at the box's place, `OwnMip` stays -1 so the coarser levels are painted, not folded).
+   Before it, the mask tree held 1,081,979 tiles of which 913,717 were at 1.9-7.5 cm texels.
 
 What follows from it:
 

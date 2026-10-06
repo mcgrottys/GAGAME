@@ -193,6 +193,16 @@ public:
     // this after Load; the zero-file tree directory is what caught it.
     void Refresh();
     const SourceInfo& Info() const override { return m_info; }
+    // F16: THE SURVEY'S GRAIN (scene: streaming.gisGrainM). FinestMip answers the level of that
+    // grain at the box's own place (Lattice::LevelOf): a tile finer than it is its parent,
+    // magnified (HIERARCHY 4.20, the third clause), decided before any load (hal::Tenant, F14).
+    // OwnMip stays -1 -- a vector is exact at every COARSER grain too, so the levels above are
+    // painted as they always were, not folded from children down to the grain.
+    void SetGrain(double metres) { m_grainM = metres; }
+    int FinestMip(const Lattice& l, double lat0, double lat1, double lon0, double lon1) const override {
+        if (!(m_grainM > 0.0)) return -1;
+        return (std::max)(l.LevelOf(m_grainM, 0.5 * (lat0 + lat1), 0.5 * (lon0 + lon1)), 0);
+    }
     void BeginTile(double latMin, double latMax, double lonMin, double lonMax, double groundResM,
                    PaintCtx& ctx) override;
     float Sample(double latRad, double lonRad, double groundResM, const PaintCtx& ctx,
@@ -209,6 +219,7 @@ private:
     static constexpr uint32_t kGridDim = 256;
     const GisVectorMask* m_mask = nullptr;
     SourceInfo m_info;
+    double m_grainM = 0.0;   // F16: 0 = every grain
 };
 
 }  // namespace ga
