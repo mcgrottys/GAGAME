@@ -93,6 +93,7 @@
 
 #include <array>
 #include <chrono>
+#include <intrin.h>   // F19: __rdtsc
 #include <cmath>
 #include <cstdio>
 #include <ctime>
@@ -3434,6 +3435,7 @@ bool FrameLoop::Frame() {
             (S.capture.headless ? static_cast<float>(S.capture.width) : window.Width()) / viewH;
         globe->WalkReset();
         resMgr.WantStatsReset();
+        resMgr.wantProfile = S.capture.headless;   // F19: a headless run is a measurement
         // M6e screw-prefetch: extrapolate the pose ~0.8 s ahead along its own screw and
         // let the walk under THAT camera queue tiles early (predicted priority).
         // M9v: THE PREFETCH WALK, AMORTIZED. Measured at 3.25 ms per frame at helm --
@@ -3737,7 +3739,7 @@ bool FrameLoop::Frame() {
         if (opt.waterTiles && (frame % 30u) == 0u) {
             Log("[water-tiles] frame %u: %s", frame, globe->WaterTileReport().c_str());
         }
-        if (!S.railDirW.empty() && frame >= 150u) {
+        if ((!S.railDirW.empty() || S.capture.headless) && frame >= 150u) {   // F19: every measured run
             walkNodesAcc += globe->walkNodes;
             walkLeavesAcc += globe->walkLeaves;
             walkWantNsAcc += globe->walkWantNs;
@@ -3746,6 +3748,19 @@ bool FrameLoop::Frame() {
             wantTouchAcc += resMgr.wantTouches;
             wantHitAcc += resMgr.wantHits;
             ++walkFrames;
+            m_walkMeshNsAcc += globe->walkMeshNs;
+            const GlobeLayer::LeafStats& ls = globe->leafStats;
+            m_leafAcc.cube += ls.cube; m_leafAcc.win += ls.win; m_leafAcc.winAsked += ls.winAsked;
+            m_leafAcc.winBehind += ls.winBehind; m_leafAcc.winOut += ls.winOut; m_leafAcc.winFloor += ls.winFloor;
+            m_leafAcc.corners += ls.corners; m_leafAcc.worlds += ls.worlds;
+            m_wantCallsAcc += resMgr.wantCalls; m_wantCubeAcc += resMgr.wantCube;
+            m_wantWindowAcc += resMgr.wantWindow; m_wantFieldAcc += resMgr.wantField;
+            m_wantWVisitAcc += resMgr.wantWeightVisits; m_wantWRecAcc += resMgr.wantWeightRecs;
+            m_wantMarkAcc += resMgr.wantMarks; m_wantTrackAcc += resMgr.wantTracks;
+            m_wantCycScanAcc += resMgr.wantCycScan; m_wantCycWeightAcc += resMgr.wantCycWeight;
+            m_wantCycMarkAcc += resMgr.wantCycMark;
+            m_wantAuditChecksAcc += resMgr.wantAuditChecks;
+            m_wantAuditFailsAcc += resMgr.wantAuditFails;
         }
         if (predictFrame) {
             PROF_BEGIN();
@@ -4806,6 +4821,44 @@ int FrameLoop::Finish() {
         }
         Log("[perf] slowest frames: %s", s.c_str());
         Log("[perf] globe.SetView (the walk) %.2f ms a frame on average", m_profMs[7] / (std::max)(1u, frameMsN));
+        if (globe && m_walkFrames) {   // F19: the walk's breakdown, a frame's mean from frame 150
+            const double nf = double(m_walkFrames);
+            // the rdtsc rate: measured here, once, against the steady clock
+            const auto c0 = std::chrono::steady_clock::now();
+            const uint64_t t0 = __rdtsc();
+            while (std::chrono::steady_clock::now() - c0 < std::chrono::milliseconds(20)) {}
+            const double tscPerNs = double(__rdtsc() - t0) /
+                                    double(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                               std::chrono::steady_clock::now() - c0).count());
+            const auto ms = [&](uint64_t cyc) { return double(cyc) / tscPerNs / 1e6 / nf; };
+            const double walkMs = m_profMs[7] / (std::max)(1u, frameMsN);
+            const double emitMs = double(m_walkWantNsAcc) / nf / 1e6, meshMs = double(m_walkMeshNsAcc) / nf / 1e6;
+            Log("[walk] a frame's mean over %llu frames: %.0f nodes, %.0f leaves; SetView %.2f ms = leaf emit "
+                "%.2f + meshlets %.2f + the walk's own (cull, split, the leaf's rest) %.2f",
+                static_cast<unsigned long long>(m_walkFrames), double(m_walkNodesAcc) / nf, double(m_walkLeavesAcc) / nf,
+                walkMs, emitMs, meshMs, walkMs - emitMs - meshMs);
+            Log("[walk]   the leaf's emit: %.0f cube wants, %.0f window wants of %.0f (world, slice) pairs "
+                "(%.0f found asked by an earlier world, %.0f behind the face, %.0f outside the box, %.0f past "
+                "the floor), %.0f corner projections",
+                double(m_leafAcc.cube) / nf, double(m_leafAcc.win) / nf, double(m_leafAcc.worlds) / nf,
+                double(m_leafAcc.winAsked) / nf, double(m_leafAcc.winBehind) / nf, double(m_leafAcc.winOut) / nf,
+                double(m_leafAcc.winFloor) / nf, double(m_leafAcc.corners) / nf);
+            Log("[walk]   Want(): %.0f calls (%.0f cube, %.0f window, %.0f field) | the column scan %.0f stamp "
+                "reads (%.0f fresh) %.2f ms | the weight loop %.0f slot visits, %.0f records chased, %.2f ms | "
+                "the marks %.0f, the tracks %.0f, %.2f ms%s",
+                double(m_wantCallsAcc) / nf, double(m_wantCubeAcc) / nf, double(m_wantWindowAcc) / nf,
+                double(m_wantFieldAcc) / nf, double(m_wantTouchAcc) / nf, double(m_wantHitAcc) / nf,
+                ms(m_wantCycScanAcc), double(m_wantWVisitAcc) / nf, double(m_wantWRecAcc) / nf,
+                ms(m_wantCycWeightAcc), double(m_wantMarkAcc) / nf, double(m_wantTrackAcc) / nf,
+                ms(m_wantCycMarkAcc), resMgr.wantProfile ? "" : " (phases unclocked: wantProfile off)");
+            if (resMgr.auditEvery) {
+                Log("[walk]   the audit: %llu statements checked against the want that said them, %llu farther than "
+                    "it said -- %s",
+                    static_cast<unsigned long long>(m_wantAuditChecksAcc),
+                    static_cast<unsigned long long>(m_wantAuditFailsAcc),
+                    m_wantAuditFailsAcc ? "THE LEAST IS NOT THE READER'S" : "every statement is the least its reader said");
+            }
+        }
         if (globe) {
             Log("[perf] the last frame's walk: %llu nodes, %llu leaves, leaf emit (Want + window rects) %.2f ms, "
                 "%llu tile touches",

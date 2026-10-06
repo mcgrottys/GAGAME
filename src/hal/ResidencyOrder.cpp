@@ -310,6 +310,14 @@ void ResidencyManager::OrderNote(Tenant& t, Tracked* tr, int tenant, int sid, ui
         w = static_cast<float>(std::hypot(std::hypot(du, dv) * side, double(nearM)));
     }
     const uint32_t wb = WeightBits(w);
+    // F19: the least distance said of the tile this frame (the stamp is still the old one here:
+    // Want's mark writes it after this note).
+    if ((t.stamp[idx] >> 1) == stampFrame && t.leastSid[idx] == uint8_t(sid)) {
+        t.least[idx] = (std::min)(t.least[idx], wb);
+    } else {
+        t.least[idx] = wb;
+        t.leastSid[idx] = uint8_t(sid);
+    }
     // THE STATEMENT's hash, in call order: did this reader say something else this frame.
     const uint64_t key = MakeKey(tenant, TileRequest{face, m, x, y});
     if (m_stFrame[sid] != stampFrame) {

@@ -665,6 +665,15 @@ private:
     // Those two want opposite fixes, so they are counted apart before either is attempted.
 public:
     mutable uint64_t walkNodes = 0, walkLeaves = 0, walkWantNs = 0;
+    // F19 (the CPU walk's instrument): what a leaf's emit is made of -- the cube wants, the window
+    // wants asked and the ones a world found asked, behind the face, outside the box or past the
+    // floor; the corner projections; and the meshlets' time, beside the emit's.
+    struct LeafStats {
+        uint64_t cube = 0, win = 0, winAsked = 0, winBehind = 0, winOut = 0, winFloor = 0, corners = 0;
+        uint64_t worlds = 0;   // (world, slice) pairs considered
+    };
+    mutable LeafStats leafStats;
+    mutable uint64_t walkMeshNs = 0;
     // M9bk probe: leaves sitting past their own morph band (k == 1: the odd vertices are
     // snapped onto the even ones, so the level renders at HALF the density the walk paid for).
     mutable uint64_t walkMorphFull = 0, walkMorphPart = 0;
@@ -682,6 +691,8 @@ public:
     static constexpr uint64_t kWaterTileBytes = 128ull * 128ull * 8ull * 3ull;   // 384 KB a slot
     void WalkReset() {
         walkNodes = walkLeaves = walkWantNs = 0;
+        leafStats = LeafStats{};
+        walkMeshNs = 0;
         walkMorphFull = walkMorphPart = 0;
         if (waterTileCount) {
             waterTiles.clear();
