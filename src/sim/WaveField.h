@@ -296,7 +296,7 @@ private:
     // The closure ITSELF, so the two readers of a solve cannot drift: AdoptTable bakes it
     // into m_table for the upload path, ProbeAt applies it to its own snapshot's table.
     GpuTable DisplayTable(const GpuTable& raw) const;
-    void RefreshSweCurrent(Gpu& gpu, double simUnix);
+    void RefreshSweCurrent(Gpu& gpu, double simUnix, bool block);
     void SolveAsync(uint64_t key, double simUnix, std::vector<PartParam> parts);
     Solved SolveNow(uint64_t key, double simUnix, const std::vector<PartParam>& parts) const;
     bool LoadCache(uint64_t key, Solved& out) const;
@@ -320,13 +320,21 @@ private:
         SweSolver::FieldsRead read;   // the two readbacks, mapped and unpacked on the worker
         std::vector<float> uv4, U, V, oldU, oldV;
         uint32_t uw = 0, uh = 0;
-        uint64_t h = 0;
+        uint64_t h = 0;            // the signature of what landed (the last one's when nothing was read)
         size_t moved = 0;
         float worst = 0.0f;
         bool first = false;
         std::atomic<bool> done{false};
     };
     std::shared_ptr<CurJob> m_curJob;
+    // F17: THE FLOW IS PART OF THE KEY'S CONTENT. When a solver stands, the first solve waits for
+    // its first flow to land (whatever it held): a key formed before it names the proxy jet, and
+    // that field was solved, cached and drawn for 90 s at every start since F13. The resample is
+    // one function, run on a worker (the frame) or inline (the blocking path: dumps, rails,
+    // settles, whose first frame must see the field).
+    bool m_flowKnown = false;
+    bool m_flowWaitSaid = false;
+    static void ResampleFlow(CurJob& j, const SweDomain& dom, float gain, const WaveFieldConfig& cfg, Gpu& gpu);
     mutable std::atomic<double> m_probeReadT{-1e18};   // the last probe inside the window (sim s)
     uint64_t m_waitingKey = 0;                    // a roll noted once while no one reads
 

@@ -58,6 +58,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <thread>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -973,7 +974,63 @@ uint64_t WaveField::BucketKey(double simUnix, const PartParam* parts, int nParts
 // by the prism-truncation gain, QUANTIZE to 0.05 m/s, and hash the quantized bytes into
 // the bucket key. The solve then eats exactly the bytes the key describes -- content
 // identity, so the same flow always finds its cache and a changed flow always re-solves.
-void WaveField::RefreshSweCurrent(Gpu& gpu, double simUnix) {
+void WaveField::ResampleFlow(CurJob& j, const SweDomain& dom, float gain, const WaveFieldConfig& cfg, Gpu& gpu) {
+    const size_t cells = size_t(cfg.nx) * size_t(cfg.ny);
+    std::vector<float> eta;
+    uint32_t ew = 0, eh = 0;
+    SweSolver::UnpackRead(gpu, j.read, eta, ew, eh, j.uv4, j.uw, j.uh);
+    if (j.uw < 2 || j.uh < 2) {   // nothing read: the last flow stands (and so does its signature)
+        j.U = j.oldU;
+        j.V = j.oldV;
+        j.done.store(true, std::memory_order_release);
+        return;
+    }
+    j.U.assign(cells, 0.0f);
+    j.V.assign(cells, 0.0f);
+    // PHASE C4: each cell's place is its page texel's (WaveFieldConfig::PlaceOfCell), then
+    // the solver's cell under it by the solver's own planes.
+    for (int jj = 0; jj < cfg.ny; ++jj) {
+        const size_t row = size_t(jj) * size_t(cfg.nx);
+        for (int i = 0; i < cfg.nx; ++i) {
+            double la = 0.0, lo = 0.0, tx = 0.0, ty = 0.0;
+            cfg.PlaceOfCell(double(i) + 0.5, double(jj) + 0.5, la, lo);
+            if (!dom.CellOf(la, lo, tx, ty) ||
+                tx < 0.0 || ty < 0.0 || tx >= double(j.uw) || ty >= double(j.uh)) {
+                continue;
+            }
+            const int ix = int(tx), iy = int(ty);   // row 0 = NORTH
+            const float* sp = &j.uv4[(size_t(iy) * j.uw + size_t(ix)) * 4];
+            if (sp[3] < 0.5f) continue;   // solver-invalid: sponge or dry
+            // quantize to 0.05 m/s -- the sig hashes EXACTLY what the solve eats
+            j.U[row + i] = std::round(sp[0] * gain / 0.05f) * 0.05f;
+            j.V[row + i] = std::round(sp[1] * gain / 0.05f) * 0.05f;
+        }
+    }
+    uint64_t h = 14695981039346656037ull;
+    auto mixB = [&h](const void* p, size_t n) {
+        const uint8_t* bb = static_cast<const uint8_t*>(p);
+        for (size_t i = 0; i < n; ++i) h = (h ^ bb[i]) * 1099511628211ull;
+    };
+    mixB(j.U.data(), j.U.size() * sizeof(float));
+    mixB(j.V.data(), j.V.size() * sizeof(float));
+    j.h = h;
+    // WHAT MOVED: the cells whose quantized flow differs from the last refresh's, and the
+    // largest step -- the roll's cause, in the units the solve eats.
+    if (j.oldU.size() == cells) {
+        for (size_t i = 0; i < cells; ++i) {
+            const float du = std::fabs(j.U[i] - j.oldU[i]);
+            const float dv = std::fabs(j.V[i] - j.oldV[i]);
+            if (du > 0.0f || dv > 0.0f) ++j.moved;
+            j.worst = (std::max)(j.worst, (std::max)(du, dv));
+        }
+    }
+    j.oldU.clear();
+    j.oldV.clear();
+    j.uv4.clear();
+    j.done.store(true, std::memory_order_release);
+}
+
+void WaveField::RefreshSweCurrent(Gpu& gpu, double simUnix, bool block) {
     if (!m_swe || !m_swe->Ready()) return;
     // F13: ASKED ON ONE FRAME, RESAMPLED ON A WORKER, ADOPTED ON A LATER FRAME. The synchronous
     // read drained the queue, and the resample of 2.2 million cells after it took a quarter of a
@@ -984,7 +1041,12 @@ void WaveField::RefreshSweCurrent(Gpu& gpu, double simUnix) {
         CurJob& j = *m_curJob;
         m_curU.swap(j.U);
         m_curV.swap(j.V);
-        if (j.h != m_curSig && !j.U.empty()) {
+        m_flowKnown = true;   // F17: the first flow has landed; the key may form (Update)
+        // F17: the LIVE planes are tested, not the job's. After the swap the job holds the planes
+        // the last refresh ate, which are empty the first time; tested there, the first flow was
+        // adopted but never signed, so the first solve ate the proxy jet and the key could not
+        // roll until the second refresh, 90 s on -- the chaotic water at every start since F13.
+        if (j.h != m_curSig && !m_curU.empty()) {
             m_curSig = j.h;
             Log("[wave] swe current refreshed: sig %016llx (gain %.1f, 0.05 m/s buckets): %zu of %zu "
                 "cells moved since the last, the largest by %.2f m/s%s",
@@ -997,8 +1059,11 @@ void WaveField::RefreshSweCurrent(Gpu& gpu, double simUnix) {
     if (!m_swe->ReadFieldsPending()) {
         if (simUnix - m_curReadT < 90.0 && !m_curU.empty()) return;   // solve-cadence refresh
         if (m_inFlight.load()) return;
-        m_swe->ReadFieldsBegin(gpu);
-        return;
+        if (!m_swe->ReadFieldsBegin(gpu)) return;
+        if (!block) return;
+        // F17: the blocking path eats the read here -- the copy was executed on the queue as it
+        // was recorded, so its fence completes without the frame.
+        while (!m_swe->ReadFieldsReady(gpu)) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     if (!m_swe->ReadFieldsReady(gpu)) return;
     m_curReadT = simUnix;
@@ -1007,65 +1072,19 @@ void WaveField::RefreshSweCurrent(Gpu& gpu, double simUnix) {
     job->oldU = m_curU;   // what the last refresh ate: the instrument's reference
     job->oldV = m_curV;
     job->first = m_curU.empty();
+    job->h = m_curSig;    // nothing read keeps the last signature
     m_curJob = job;
     const SweDomain* dom = &m_swe->Domain();
     const float gain = m_sweGain;
     const WaveFieldConfig cfg = m_cfg;
     Gpu* gp = &gpu;
+    if (block) {   // F17: inline, then adopted at once -- the frame that asked sees the flow
+        ResampleFlow(*job, *dom, gain, cfg, gpu);
+        RefreshSweCurrent(gpu, simUnix, block);
+        return;
+    }
     Threads().Submit(Lane::Long, "wave.current", [job, dom, gain, cfg, gp]() {
-        const size_t cells = size_t(cfg.nx) * size_t(cfg.ny);
-        std::vector<float> eta;
-        uint32_t ew = 0, eh = 0;
-        SweSolver::UnpackRead(*gp, job->read, eta, ew, eh, job->uv4, job->uw, job->uh);
-        if (job->uw < 2 || job->uh < 2) {   // nothing read: the last flow stands
-            job->U = job->oldU;
-            job->V = job->oldV;
-            job->done.store(true, std::memory_order_release);
-            return;
-        }
-        job->U.assign(cells, 0.0f);
-        job->V.assign(cells, 0.0f);
-        // PHASE C4: each cell's place is its page texel's (WaveFieldConfig::PlaceOfCell), then
-        // the solver's cell under it by the solver's own planes.
-        for (int j = 0; j < cfg.ny; ++j) {
-            const size_t row = size_t(j) * size_t(cfg.nx);
-            for (int i = 0; i < cfg.nx; ++i) {
-                double la = 0.0, lo = 0.0, tx = 0.0, ty = 0.0;
-                cfg.PlaceOfCell(double(i) + 0.5, double(j) + 0.5, la, lo);
-                if (!dom->CellOf(la, lo, tx, ty) ||
-                    tx < 0.0 || ty < 0.0 || tx >= double(job->uw) || ty >= double(job->uh)) {
-                    continue;
-                }
-                const int ix = int(tx), iy = int(ty);   // row 0 = NORTH
-                const float* s = &job->uv4[(size_t(iy) * job->uw + size_t(ix)) * 4];
-                if (s[3] < 0.5f) continue;   // solver-invalid: sponge or dry
-                // quantize to 0.05 m/s -- the sig hashes EXACTLY what the solve eats
-                job->U[row + i] = std::round(s[0] * gain / 0.05f) * 0.05f;
-                job->V[row + i] = std::round(s[1] * gain / 0.05f) * 0.05f;
-            }
-        }
-        uint64_t h = 14695981039346656037ull;
-        auto mixB = [&h](const void* p, size_t n) {
-            const uint8_t* b = static_cast<const uint8_t*>(p);
-            for (size_t i = 0; i < n; ++i) h = (h ^ b[i]) * 1099511628211ull;
-        };
-        mixB(job->U.data(), job->U.size() * sizeof(float));
-        mixB(job->V.data(), job->V.size() * sizeof(float));
-        job->h = h;
-        // WHAT MOVED: the cells whose quantized flow differs from the last refresh's, and the
-        // largest step -- the roll's cause, in the units the solve eats.
-        if (job->oldU.size() == cells) {
-            for (size_t i = 0; i < cells; ++i) {
-                const float du = std::fabs(job->U[i] - job->oldU[i]);
-                const float dv = std::fabs(job->V[i] - job->oldV[i]);
-                if (du > 0.0f || dv > 0.0f) ++job->moved;
-                job->worst = (std::max)(job->worst, (std::max)(du, dv));
-            }
-        }
-        job->oldU.clear();
-        job->oldV.clear();
-        job->uv4.clear();
-        job->done.store(true, std::memory_order_release);
+        ResampleFlow(*job, *dom, gain, cfg, *gp);
     });
 }
 
@@ -1259,7 +1278,7 @@ void WaveField::StoreCache(const Solved& s) const {
 bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nParts,
                        bool block, bool reader) {
     if (!m_comp || m_hgtCh < 0 || !m_atlas) return false;
-    RefreshSweCurrent(gpu, simUnix);   // flows into waves (throttled + inFlight-guarded)
+    RefreshSweCurrent(gpu, simUnix, block);   // flows into waves (throttled + inFlight-guarded)
 
     // hand over a finished background solve first: the old field stays live until the new
     // one is WHOLE (double-buffer by construction -- the renderer never sees a half solve).
@@ -1270,6 +1289,18 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
         Offer(std::move(m_result), "solved");   // (the prune of the cache ran on the solve's worker)
     }
 
+    // F17: THE KEY IS CONTENT, AND THE FLOW IS PART OF IT. A key formed before the solver's first
+    // flow has landed names the proxy jet; that field was solved, cached and drawn for the first
+    // 90 s of every run since the read went asynchronous (F13). The field waits as it does for a
+    // reader. Scenes with no solver have no flow to wait for and solve as before.
+    if (m_swe && m_swe->Ready() && !m_flowKnown) {
+        if (!m_flowWaitSaid) {
+            m_flowWaitSaid = true;
+            Log("[wave] the field waits for the solver's first flow: the key is content, and a "
+                "flow not yet read is not a key");
+        }
+        return false;
+    }
     const uint64_t key = BucketKey(simUnix, parts, nParts);
     if (key != NextKey() && !m_inFlight.load()) {
         // A FIELD IS SOLVED FOR A READER. The key is content and rolls when the content does;
