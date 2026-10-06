@@ -1199,6 +1199,9 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
     // settle's exact hold walks on, because its ledger counts every pending tile.
     uint32_t pending = 0;
     m_loaderStop = m_need.size();
+    ++loader.turns;
+    loader.inFlightAtTurn += static_cast<uint64_t>((std::max)(m_inFlight.load(), 0));
+    const auto issuedAt = std::chrono::steady_clock::now();
     for (size_t ni = 0; ni < m_need.size(); ++ni) {
         const OrderEntry& e = m_need[ni];
         Tracked* tr = e.tile;
@@ -1216,8 +1219,11 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
             }
             if (tr->refill && tr->refill->state == TileState::Seen) {
                 tr->refill->state = TileState::Loading;
+                tr->refill->issuedTurn = m_frame;
+                tr->refill->issuedAt = issuedAt;
                 toLoad.push_back(tr->refill);
                 ++m_inFlight;
+                ++L.refills;
             }
             continue;
         }
@@ -1226,6 +1232,22 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
         // yet is pending and not asked: it comes the turn after its parent lands (4.7).
         const Gate gate = ParentGate(m_tenants[tr->tenant], tr);
         if (gate == Gate::Refused) continue;
+        // F14: a tile the tree answers as its parent, magnified, is known here by arithmetic and
+        // takes no slot of the queue: Failed + magnified now, the state a load's answer gave it
+        // (its children walk past it in ParentGate as they did; nothing is mapped, by law).
+        if (tr->state == TileState::Seen && !tr->magKnown) {
+            tr->magKnown = true;
+            const Tenant& tq = m_tenants[tr->tenant];
+            if (tq.magnifiedOf && tq.magnifiedOf(tr->req)) {
+                tr->state = TileState::Failed;
+                tr->magnified = true;
+                ++m_failEvents;
+                m_failedKeys.push_back({tr->tenant, tr->req});
+                ++L.magnifiedKnown;
+                ++m_tenants[tr->tenant].magnifiedKnown;
+                continue;
+            }
+        }
         ++pending;
         if (m_inFlight >= static_cast<int>(kMaxLoadsInFlight)) {
             if (!settleExact) {
@@ -1259,6 +1281,7 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
                         tr->alias = true;
                         tr->state = TileState::Loaded;   // the gather maps it this turn
                         m_loading.push_back(tn.tracked[tr->pos]);   // in the queue, as a read is: let go if it leaves the first P
+                        ++L.aliases;
                         continue;
                     }
                     const Tracked* rd = Find(tr->tenant, hit->second.reader);
@@ -1274,13 +1297,23 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
             tr->alias = false;   // a read, whatever this slot was before
         }
         tr->state = TileState::Loading;
+        tr->issuedTurn = m_frame;
+        tr->issuedAt = issuedAt;
         const std::shared_ptr<Tracked> sp = m_tenants[tr->tenant].tracked[tr->pos];
         m_loading.push_back(sp);
         toLoad.push_back(sp);
         ++m_inFlight;
+        ++L.issued;
     }
     m_orderPending = pending;
     L.pending = pending;
+    L.atCap = m_loaderStop < m_need.size();
+    loader.turnsAtCap += L.atCap ? 1u : 0u;
+    loader.pendingAtTurn += pending;
+    loader.reads += L.issued;
+    loader.refills += L.refills;
+    loader.aliases += L.aliases;
+    loader.magnifiedKnown += L.magnifiedKnown;
     StarveWatch();
     if ((m_frame & 63u) == 0u) {
         std::erase_if(m_letGoAt, [&](const auto& kv) { return m_frame - kv.second > kGlanceTurns; });
@@ -1298,6 +1331,10 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
         Tracked* tr = e.tile;
         if (tr->state != TileState::Loaded || tr->pos == UINT32_MAX) continue;
         batch.push_back(m_tenants[tr->tenant].tracked[tr->pos]);
+        if (!tr->alias) {   // F14: from the turn it was issued to the turn its bytes are mapped
+            ++loader.gathered;
+            loader.gatherTurns += m_frame - tr->issuedTurn;
+        }
     }
     if (!batch.empty()) {
         std::vector<const Tracked*> taken;
@@ -1587,6 +1624,33 @@ std::string ResidencyManager::TileName(uint64_t key) const {
 }
 
 // H1: the measure's motion over the run, and the cut's crossings (OrderPass keeps the ledger).
+void ResidencyManager::LogLoader() const {
+    const LoaderLedger& l = loader;
+    const double turns = double((std::max)(l.turns, uint64_t(1)));
+    Log("[loader] %llu turns, stopped at the cap (%u in flight) on %llu (%.0f%%); in flight as a turn began "
+        "%.1f on average, pending (first P, not held) %.0f | issued %llu reads + %llu refills, %llu slots mapped to bytes already held, %llu "
+        "known magnified without a load | a read's way from its issue to the batch that mapped it: %.2f "
+        "turns on average over %llu",
+        static_cast<unsigned long long>(l.turns), kMaxLoadsInFlight,
+        static_cast<unsigned long long>(l.turnsAtCap), 100.0 * double(l.turnsAtCap) / turns,
+        double(l.inFlightAtTurn) / turns, double(l.pendingAtTurn) / turns,
+        static_cast<unsigned long long>(l.reads),
+        static_cast<unsigned long long>(l.refills), static_cast<unsigned long long>(l.aliases),
+        static_cast<unsigned long long>(l.magnifiedKnown),
+        double(l.gatherTurns) / double((std::max)(l.gathered, uint64_t(1))),
+        static_cast<unsigned long long>(l.gathered));
+    for (const Tenant& t : m_tenants) {
+        const uint64_t n = uint64_t(t.loadsRead) + t.loadsPaint;
+        if (!n && !t.magnifiedKnown) continue;
+        Log("[loader]   %S: %llu loads -- %u read (%.2f ms each), %u painted (%.1f ms each); of them %u "
+            "answered magnified, %u failed or not whole | queue wait %.2f ms a load | %u known magnified, no load",
+            t.name.c_str(), static_cast<unsigned long long>(n), t.loadsRead,
+            t.loadsRead ? double(t.readUs) / (1000.0 * t.loadsRead) : 0.0, t.loadsPaint,
+            t.loadsPaint ? double(t.paintUs) / (1000.0 * t.loadsPaint) : 0.0, t.loadsMagnified,
+            t.loadsFailed, n ? double(t.queueUs) / (1000.0 * double(n)) : 0.0, t.magnifiedKnown);
+    }
+}
+
 void ResidencyManager::LogOrderMotion() const {
     if (!passTurns) return;
     const OrderMotion& M = m_motion;

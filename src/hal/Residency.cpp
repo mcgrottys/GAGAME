@@ -63,6 +63,11 @@ void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
         // which is the contract every provider already implemented.
         const bool canStream = m_stream && m_stream->Available() && !job->refresh;
         const auto t0 = std::chrono::steady_clock::now();
+        // F14: the queue wait -- from the order's Submit to here. Large while the Io lane is
+        // saturated; near zero while the cap alone bounds the loader.
+        const uint64_t qus = job->issuedAt.time_since_epoch().count() == 0
+            ? 0ull
+            : static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(t0 - job->issuedAt).count());
         g_tileIncomplete = false;   // step 5 E: a tree says here if its answer is not whole
         g_tileMagnified = false;    // PHASE A4: ... or if it is the level above, magnified
         const bool ok =
@@ -80,6 +85,9 @@ void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
                 Tenant& tn = m_tenants[job->tenant];
                 if (us < 4000) { ++tn.loadsRead; tn.readUs += us; }
                 else           { ++tn.loadsPaint; tn.paintUs += us; }
+                tn.queueUs += qus;
+                if (ok && magnified) ++tn.loadsMagnified;
+                else if (!ok || !whole) ++tn.loadsFailed;
             }
             // M7w: a failed load must NEVER fabricate a zero tile -- mapping zeros makes the
             // residency map swear real data exists where the GPU holds bed=0 / black (the
@@ -1260,6 +1268,9 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
                 turn.reclaimed, o.letGo, o.letGoRead, o.forgotten,
                 turn.batch - turn.direct - turn.ring, o.reloaded, o.rewanted, o.rescued,
                 o.incomplete, o.pass, o.crossIn, o.crossOut, o.spoke);
+            Log("[res-turn]   loader: issued %u reads + %u refills, %u slots mapped to held bytes, %u known "
+                "magnified without a load%s",
+                o.issued, o.refills, o.aliases, o.magnifiedKnown, o.atCap ? " | STOPPED AT THE CAP" : "");
         }
     }
     lap0 = Clock::now();

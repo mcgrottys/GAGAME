@@ -867,6 +867,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                                            ? heightTree->Provider(hCubeL)
                                            : compositor.CubeHeight(hgtCh),
                                        "paint cube faces"});
+                if (S.streaming.colorTrees && heightTree) hd.bindings.back().magnified = heightTree->MagnifiedQuery(hCubeL);   // F14
                 // PHASE B2: THE EYE'S WINDOWS -- the colour's slices, the
                 // same ground (HIERARCHY 4.1) -- and the standing window, painted by the height tree
                 // on the pyramid (it is asked the global tile; the binding keeps the slot).
@@ -874,6 +875,8 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                     surface.WindowBlocks(hd.blocks,
                                          heightTree->Provider(hal::BlockBinding::Pyramid(256, 128)),
                                          "paint pyramid windows");
+                    const TileQueryFn q = heightTree->MagnifiedQuery(hal::BlockBinding::Pyramid(256, 128));   // F14
+                    for (hal::BlockSlice& k : hd.blocks) k.magnified = q;
                 }
                 heightTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(hd));
                 hgtTenant = heightTenant.Id();
@@ -1099,6 +1102,10 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 cd.absence = hal::Absence::Unloaded;
                 cd.slices = SurfaceFrame::WindowSlices();
                 cd.bindings.push_back({0, 6, cCubeL, mkColor(cCubeL), "paint cube faces"});
+                // F14: what the tree knows of a tile without painting it -- its parent, magnified
+                // (HIERARCHY 4.20, the third clause) -- declared beside the provider so the order
+                // never spends a load to be told.
+                if (S.streaming.colorTrees && megaTree) cd.bindings.back().magnified = megaTree->MagnifiedQuery(cCubeL);
                 // PHASE A1: THE EYE'S WINDOWS, slot s's rank k at
                 // SurfaceFrame::WindowSlice(s, k), painted by the tree on the pyramid's lattice
                 // (it is asked the global tile; the binding keeps the slot). Each is born on its
@@ -1107,6 +1114,10 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                 surface.WindowBlocks(cd.blocks,
                                      mkColor(hal::BlockBinding::Pyramid(cd.fiber.texW, cd.fiber.texH)),
                                      "paint pyramid windows");
+                if (S.streaming.colorTrees && megaTree) {
+                    const TileQueryFn q = megaTree->MagnifiedQuery(hal::BlockBinding::Pyramid(cd.fiber.texW, cd.fiber.texH));
+                    for (hal::BlockSlice& k : cd.blocks) k.magnified = q;
+                }
                 colorTenant = hal::Tenant::Sparse(gpu, resMgr, std::move(cd));
                 colorCubeT = colorTenant.Id();
                 // M9bb: a fold or a drop below changed a root tile: the colour tenant

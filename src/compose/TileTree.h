@@ -691,6 +691,12 @@ public:
         const int f = FinestAt(inherited, box);
         return f != kNoSource && int(r.mip) < f;
     }
+    // F14: the same question as a function a binding declares beside its provider (the frame
+    // resolved once and carried, as Provider carries it), for the order to ask before a load.
+    TileQueryFn MagnifiedQuery(const ColorFrame& inherited) {
+        const ColorFrame frame = Resolve(inherited);
+        return [this, frame](const TileRequest& r) { return Magnified(frame, r); };
+    }
     std::string Stats(int depth = 0) const {
         std::string pad(size_t(depth) * 2, ' ');
         char b[256];

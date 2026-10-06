@@ -236,6 +236,28 @@ struct Tenant::State {
         if (!t) return false;
         return t->Provider(b->lattice)(w, out, loc);
     }
+    // F14: THE QUESTION BEFORE THE LOAD (ResidencyManager::SetMagnifiedOf): is the slot's tile
+    // its parent, magnified? Resolved as Dispatch resolves it -- the binding's slice on its
+    // lattice, a block slice's global tile on the pyramid's -- and asked of the tree in the
+    // binding's own question when it declared one (beside its provider: TileTree::MagnifiedQuery),
+    // else the tree in the holder. A slice with neither is unknown here and loads as before.
+    bool MagnifiedAt(const TileRequest& r) const {
+        const SliceBinding* b = BindingOf(r.face);
+        if (!b) {
+            const BlockSlice* k = BlockOf(r.face);
+            if (!k) return false;
+            TileRequest g;
+            if (!BindingCopy(*k).Global(r, desc.fiber.texW, desc.fiber.texH, g)) return false;
+            if (k->magnified) return k->magnified(g);
+            const std::shared_ptr<TileTree> t = Held();
+            return t && t->Magnified(pyramid, g);
+        }
+        TileRequest w = r;
+        w.face = r.face - b->first;
+        if (b->magnified) return b->magnified(w);
+        const std::shared_ptr<TileTree> t = Held();
+        return t && t->Magnified(b->lattice, w);
+    }
     // THE BLOCK HALF (the banner): the slot's tile of the pyramid, asked of the binding's
     // provider or of the tree in the holder ON THE PYRAMID'S LATTICE. A slot outside the slice's
     // grid has no global tile and answers false, as a provider does for a tile it cannot make.
@@ -383,6 +405,8 @@ Tenant Tenant::Sparse(Gpu& gpu, ResidencyManager& mgr, TenantDesc desc) {
             return k && s->BindingCopy(*k).Global(r, s->desc.fiber.texW, s->desc.fiber.texH, g);
         });
     }
+    // F14: the magnified question, answered without a load (ResidencyManager::SetMagnifiedOf).
+    mgr.SetMagnifiedOf(s->id, [s](const TileRequest& r) { return s->MagnifiedAt(r); });
     // The watchdog's global name for a block slice's tile (ResidencyManager::SetTileNamer).
     if (!d.blocks.empty()) {
         mgr.SetTileNamer(s->id, [s](const TileRequest& r) {

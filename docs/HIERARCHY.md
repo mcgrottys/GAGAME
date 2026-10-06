@@ -2199,7 +2199,15 @@ The law, in three clauses:
    four children stand, and kept.
 3. **A finer level is the part of the level above, magnified.** It is asked for only under
    the edge of a finer source, where a composite needs what lies beneath, and it is not
-   kept.
+   kept. Whether a tile is such a level is arithmetic over the sources' own levels, so a
+   binding declares the question beside its provider (`TileTree::MagnifiedQuery`, the
+   `magnified` of a `SliceBinding` or `BlockSlice`; `hal::Tenant::MagnifiedAt` resolves the
+   slot as `Dispatch` does and hands it to the manager by `SetMagnifiedOf`), and the order
+   answers it on the main thread before any load: the tile is refused as its parent at once,
+   nothing is mapped for it, and its residency byte names the parent. Measured (2026-10-05,
+   the helm, 6,000 frames): 56-61k of the colour tenant's 60-67k loads had been such answers,
+   near half of what the queue's 48 slots carried; with the question declared, 77,694 tiles
+   were decided without a load and the colour tenant loaded 7,762.
 
 What follows from it:
 

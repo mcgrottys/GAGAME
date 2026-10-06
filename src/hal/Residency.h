@@ -47,6 +47,7 @@
 #include "core/Pga.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -455,6 +456,10 @@ public:
         // H1: tiles that crossed the pass's cut since the pass before (in: into the first P), and
         // the readers whose statement changed this turn (a bit a reader).
         uint32_t crossIn = 0, crossOut = 0, spoke = 0;
+        // F14: the loader's turn -- reads issued (and refills), slots mapped to bytes held (no
+        // read), tiles known magnified without a load, and whether it stopped at the cap.
+        uint32_t issued = 0, refills = 0, aliases = 0, magnifiedKnown = 0;
+        bool atCap = false;
     };
     // H1: the measure's motion over the run, one line (the frame loop calls it at the end).
     void LogOrderMotion() const;
@@ -504,6 +509,25 @@ public:
     void SetGlobalOf(int tenant, std::function<bool(const TileRequest&, TileRequest&)> fn) {
         if (tenant >= 0 && tenant < static_cast<int>(m_tenants.size())) m_tenants[tenant].globalOf = std::move(fn);
     }
+    // F14 (HIERARCHY 4.20, the third clause, asked before the load): a tile finer than every
+    // source's own level is the level above, magnified -- no bytes, nothing mapped, its residency
+    // byte names the parent. The tree knows this by arithmetic; a tenant that hands the question
+    // over has it answered in the order (Failed + magnified, the same state a load's answer gave)
+    // and never spends one of the queue's slots on it. One that hands over nothing loads as before.
+    void SetMagnifiedOf(int tenant, TileQueryFn fn) {
+        if (tenant >= 0 && tenant < static_cast<int>(m_tenants.size())) m_tenants[tenant].magnifiedOf = std::move(fn);
+    }
+    // F14: THE LOADER'S LEDGER over the run (LogLoader at the exit): what the order issued a turn,
+    // the turns it stopped at the cap, the queue's depth as a turn began, and a load's way from
+    // issue to the batch that maps it, in turns. The per-tenant halves (read/paint/failed/
+    // magnified, queue wait, work) live on Tenant.
+    struct LoaderLedger {
+        uint64_t turns = 0, turnsAtCap = 0, inFlightAtTurn = 0, pendingAtTurn = 0;
+        uint64_t reads = 0, refills = 0, aliases = 0, magnifiedKnown = 0;
+        uint64_t gathered = 0, gatherTurns = 0;
+    };
+    LoaderLedger loader;
+    void LogLoader() const;
     uint64_t sharedMapsTotal = 0;   // mappings made without a read, this run
     // ---- THE WATCHDOG, a law of the ledger (nothing here acts). Every turn, a tile of the first P
     // that is not held, has no load in flight and no retiring slot is STARVED; one starved past the
@@ -585,6 +609,7 @@ private:
         std::vector<Tracked*> slot;
         std::vector<std::shared_ptr<Tracked>> tracked;
         TileProviderFn provider;
+        TileQueryFn magnifiedOf;   // F14: known without a load (SetMagnifiedOf); empty = ask the provider
         // Residency map (base-tile granularity, per face): byte = finest resident mip * 16.
         GpuTexture resMap;
         uint32_t resMapSrv = UINT32_MAX;
@@ -599,6 +624,11 @@ private:
         // read a file; one that took longer painted. Updated under m_mx by the workers.
         uint32_t loadsRead = 0, loadsPaint = 0;
         uint64_t readUs = 0, paintUs = 0;
+        // F14: the rest of where the slots went -- loads that answered nothing (magnified by the
+        // provider, failed or not whole), and the queue wait from the order's Submit to the job's
+        // first instruction, summed (the Io lane's saturation, told apart from the cap's).
+        uint32_t loadsMagnified = 0, loadsFailed = 0, magnifiedKnown = 0;
+        uint64_t queueUs = 0;
         // Step 25: the exact settle's per-tenant ledger -- the last turn's counts and the
         // drops summed over the hold, for LogSettleExact.
         uint32_t exWanted = 0, exMapped = 0, exDeficit = 0, exUnreachable = 0, exStale = 0;
@@ -661,6 +691,9 @@ private:
         // no bytes and is never mapped -- the Failed state's law, "honestly NULL so consumers fall
         // back to the coarser REAL mip", which is what it is -- and the ledger counts it apart.
         bool magnified = false;
+        bool magKnown = false;           // F14: the magnified question asked of the tree once
+        uint32_t issuedTurn = 0;         // F14: the turn its load was issued (the ledger's latency)
+        std::chrono::steady_clock::time_point issuedAt{};
         std::vector<uint8_t> data;       // empty when loc is valid: the bytes stayed on disk
         TileLoc loc;
         uint64_t stageOffset = 0;   // where its bytes landed in the device buffer

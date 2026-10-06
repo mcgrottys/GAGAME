@@ -50,5 +50,9 @@ struct TileLoc {
 
 using TileProviderFn =
     std::function<bool(const TileRequest&, std::vector<uint8_t>& out64k, TileLoc* loc)>;
+// F14: a question about a tile that needs no bytes to answer -- "is this tile its parent,
+// magnified?" is arithmetic over the sources' own levels (HIERARCHY 4.20), and the order asks it
+// on the main thread instead of spending a load to be told.
+using TileQueryFn = std::function<bool(const TileRequest&)>;
 
 }  // namespace ga
