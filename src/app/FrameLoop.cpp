@@ -4883,6 +4883,7 @@ int FrameLoop::Finish() {
         if (m_waveTree) tally("wave.field", std::atomic_load(m_waveTree.get()).get());
     }
 
+    resMgr.LogLoader();        // F14: the loader's ledger over the run
     resMgr.LogOrderMotion();   // H1: the measure's motion and the cut's crossings (order only)
     ExitStep("finish: gpu.WaitIdle -- the queue drains");
     gpu.WaitIdle();

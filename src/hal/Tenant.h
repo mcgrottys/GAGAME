@@ -192,6 +192,7 @@ struct SliceBinding {
     Lattice lattice;                 // the ground these slices tile
     TileProviderFn provider;         // paints one tile of it; empty = the tree in the holder
     const char* astField = "";       // the GA AST edge this binding realizes
+    TileQueryFn magnified;           // F14: knows a tile is its parent magnified, without painting
 };
 
 // ONE slice standing for one aligned block of the pyramid (the banner). A POD: the pure
@@ -258,6 +259,7 @@ struct BlockSlice {
     BlockBinding block;
     TileProviderFn provider;
     const char* astField = "";
+    TileQueryFn magnified;   // F14: as SliceBinding's
 };
 
 struct TenantDesc {
