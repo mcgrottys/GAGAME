@@ -293,6 +293,11 @@ private:
     // windows shows -- pulled back through the windows, so a boat is seen wherever a window shows
     // its place, its own reflection down the corridor included.
     void PublishHulls();
+    // THE WINDSHIELD (scene `hud`): the readouts on the glass, rebuilt each frame.
+    void DrawGlass(float dt);
+    float m_glassMs = 0.0f;    // the frame time, smoothed over ~0.5 s
+    float m_glassAge = 0.0f;   // seconds since the readout was last reprinted
+    std::string m_glassText;
     scene::Entity* m_followed = nullptr;
     // ---- THE EYE'S OWN CROSSING (M13). A chase eye does not teleport with its subject. When the
     // hull goes through a window, the eye keeps standing on this side and chases the hull's

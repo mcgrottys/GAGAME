@@ -418,6 +418,31 @@ const Schema& CaptureSchema() {
     return *s;
 }
 
+const Schema& MinimapSchema() {
+    static const Schema* s = [] {
+        auto& p = kDoc.hud.minimap;
+        Schema* sc = new Schema("hud.minimap", &p);
+        sc->Bind("enabled", p.enabled, "the second eye in the bottom-right corner: drag to turn the planet, wheel to zoom, Reset to return", R)
+            .Bind("follow", p.follow, "the entity the marker stands on and Reset centres over", R)
+            .Bind("size", p.size, Q::Dimensionless, "1", "the square's side as a fraction of the target's height", R)
+            .Bind("margin", p.margin, Q::Dimensionless, "px", "the gap to the bottom-right corner", R)
+            .Bind("homeAltM", p.homeAltM, Q::Length, "m", "Reset: the eye this far above the followed entity", R)
+            .Bind("minAltM", p.minAltM, Q::Length, "m", "the zoom's floor above the sea", R);
+        return sc;
+    }();
+    return *s;
+}
+const Schema& HudSchema() {
+    static const Schema* s = [] {
+        auto& p = kDoc.hud;
+        Schema* sc = new Schema("hud", &p);
+        sc->Bind("fps", p.fps, "the frame rate, top left", R)
+            .Nest("minimap", MinimapSchema(), &p.minimap, "the globe in the corner");
+        return sc;
+    }();
+    return *s;
+}
+
 const Schema& ViewportSchema() {
     static const Schema* s = [] {
         auto& p = kView.viewport;
@@ -718,6 +743,7 @@ const Schema& SceneFileSchema() {
             .List("sources", &SourceSchema(), "rasters that are sources by being files, in any order", false)
             .List("stations", &StationSchema(), "where a station of the data stands when its file does not say", false)
             .Nest("capture", CaptureSchema(), &kDoc.capture, "headless capture")
+            .Nest("hud", HudSchema(), &kDoc.hud, "the windshield: readouts and the minimap on the glass")
             .List("views", &ViewSchema_(), "the cameras, by name")
             .Nest("rails", RailsSchema(), &kDoc.rails, "the camera rails")
             .List("portals", &PortalSchema_(), "the Droste links, by name")

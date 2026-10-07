@@ -4030,6 +4030,7 @@ bool FrameLoop::Frame() {
     // gravity-up and speed clamps, the Droste gauge, the bank's centre, the exposure and GIS
     // probes -- still reads `cam` directly (5d moves them, with the scene wired).
     PublishHulls();   // after the view has decided what it looks through this frame
+    DrawGlass(dt);    // the windshield's readouts, rebuilt for this frame
     const scene::ViewSet viewSet =
         renderer.OneView(cam, static_cast<float>(simUnix - startUnix));
     renderer.RenderFrame(viewSet);
@@ -5005,5 +5006,27 @@ int FrameLoop::Finish() {
 
 #undef PROF_BEGIN
 #undef PROF_END
+
+// THE WINDSHIELD (scene/HudLayer.h): the glass is rebuilt every frame from what the frame knows.
+// The frame rate is the wall clock's, smoothed over about half a second (the exponential mean of
+// the frame time, not of its inverse, so one slow frame reads as the time it cost) and printed
+// four times a second so it can be read.
+void FrameLoop::DrawGlass(float dt) {
+    HudLayer* hud = m_A.hud;
+    if (!hud) return;
+    hud->Begin();
+    if (m_S.hud.fps && dt > 0.0f) {
+        const float k = 1.0f - std::exp(-dt / 0.5f);
+        m_glassMs = m_glassMs > 0.0f ? m_glassMs + k * (dt * 1000.0f - m_glassMs) : dt * 1000.0f;
+        m_glassAge += dt;
+        if (m_glassAge >= 0.25f || m_glassText.empty()) {
+            m_glassAge = 0.0f;
+            char line[48];
+            snprintf(line, sizeof(line), "%.0f FPS  %.1f MS", 1000.0f / m_glassMs, m_glassMs);
+            m_glassText = line;
+        }
+        hud->Text(16.0f, 16.0f, 3.0f, m_glassText, {1.0f, 1.0f, 1.0f, 0.95f});
+    }
+}
 
 }  // namespace ga::app

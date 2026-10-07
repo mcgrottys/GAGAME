@@ -32,6 +32,7 @@
 #include "scene/FieldSet.h"
 #include "scene/GisLayer.h"
 #include "scene/GlobeLayer.h"
+#include "scene/HudLayer.h"
 #include "scene/MarkerLayer.h"
 #include "scene/GulfLayer.h"
 #include "scene/SeaLayer.h"
@@ -236,6 +237,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     auto& srcGisMask = A->srcGisMask;
     auto& vectors = A->vectors;
     auto& gisLayer = A->gisLayer;
+    auto& hud = A->hud;
     auto& exchange = A->exchange;
     auto& colorCubeT = A->colorCubeT;
     auto& hgtTenant = A->hgtTenant;
@@ -1484,6 +1486,13 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             mkOwned->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             mkOwned->enabled = !opt.albedo;   // the lens shows textures, nothing else
             renderer.AddLayer(std::move(mkOwned));
+        }
+        if (S.hud.fps || S.hud.minimap.enabled) {
+            auto hudOwned = std::make_unique<HudLayer>();
+            hudOwned->Configure(shaderDir);
+            hudOwned->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
+            hud = hudOwned.get();
+            renderer.AddOverlay(std::move(hudOwned));
         }
         globe->SetResidency(&resMgr, surf, norm, marsMode);
         globe->SetSurface(&surface);   // M12 step 4a: its radius, frame, lattices and tenants

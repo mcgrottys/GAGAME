@@ -169,6 +169,11 @@ void Renderer::AddLayer(std::unique_ptr<Layer> layer) {
     m_layers.push_back(std::move(layer));
 }
 
+void Renderer::AddOverlay(std::unique_ptr<Layer> layer) {
+    Log("[renderer] + overlay '%s'", layer->Name());
+    m_overlays.push_back(std::move(layer));
+}
+
 Layer* Renderer::FindLayer(const char* name) {
     for (auto& l : m_layers) {
         if (strcmp(l->Name(), name) == 0) return l.get();
@@ -187,6 +192,7 @@ void Renderer::ReloadShaders() {
     Log("[renderer] reloading shaders");
     CreateTonemapPso();
     for (auto& l : m_layers) l->ReloadShaders(*m_gpu, m_shaders);
+    for (auto& o : m_overlays) o->ReloadShaders(*m_gpu, m_shaders);
 }
 
 // ================================================================================================
@@ -444,6 +450,7 @@ void Renderer::RenderFrame(const scene::ViewSet& set) {
         cmd.Barrier(m_ldrTarget, D3D12_RESOURCE_STATE_RENDER_TARGET);
         const auto ldrRtv = m_gpu->RtvHeap().Cpu(m_ldrRtv);
         cmd.Targets(ldrRtv, nullptr);
+        cmd.Viewport(m_width, m_height);   // the whole frame, whichever view recorded last
         cmd.Pipeline(m_tonemapPso.Get());
         cmd.GraphicsConstantsAt(0, sceneCbs[0]);   // the frame's exposure: view 0's rows
         if (m_fieldTableVa) cmd.GraphicsSrvAt(2, m_fieldTableVa);
@@ -451,6 +458,22 @@ void Renderer::RenderFrame(const scene::ViewSet& set) {
         struct { uint32_t srv; uint32_t pad[3]; } tm{m_sceneColor.srv, {0, 0, 0}};
         cmd.GraphicsConstants(1, tm);
         cmd.DrawFullscreen();   // fullscreen triangle from SV_VertexID, no vertex buffer
+    }
+
+    // ---- the windshield: over the whole display-referred frame, after the curve.
+    for (auto& o : m_overlays) {
+        if (!o->enabled) continue;
+        PixScope scope(cl, o->Name());
+        GpuScope gscope(prof, cl, o->Name());
+        FrameContext oc = set.views[0].legacy;
+        oc.gpu = m_gpu;
+        oc.cmd = &cmd;
+        oc.sceneCb = sceneCbs[0];
+        oc.width = m_width;
+        oc.height = m_height;
+        oc.prof = prof;
+        oc.viewIndex = set.views[0].index;
+        o->Render(oc);
     }
 
     // ---- to the swapchain, when there is one

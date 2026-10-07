@@ -65,6 +65,7 @@
 #include "scene/GisLayer.h"
 #include "scene/GlobeLayer.h"
 #include "scene/GulfLayer.h"
+#include "scene/HudLayer.h"
 #include "scene/SeaLayer.h"
 #include "scene/SkyLayer.h"
 #include "scene/WaterBankLayer.h"
@@ -204,6 +205,7 @@ struct Assembly {
     GisMaskSource srcGisMask{&gisMask};
     VectorPack vectors;      // M6p: lossless vector layers, LOD by wedge importance
     GisLayer* gisLayer = nullptr;
+    HudLayer* hud = nullptr;   // the windshield (scene `hud`): an overlay, after the tonemap
 
     Exchange exchange;       // M6j: the plugin bus -- named GA buffer channels
     // The tenants' ids (PHASE B3: their windows are the eye's, SurfaceFrame::bound).
