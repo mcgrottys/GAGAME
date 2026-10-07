@@ -4,6 +4,7 @@
 #include "sim/WaterSurfaceTree.h"
 
 #include "core/Common.h"
+#include "core/ThreadManager.h"
 #include "sim/BathyModel.h"
 #include "sim/WaterTerms.h"
 #include "sim/WaveScale.h"
@@ -11,6 +12,7 @@
 #include <algorithm>
 #include <intrin.h>
 #include <cmath>
+#include <vector>
 
 namespace ga {
 
@@ -255,24 +257,27 @@ SurfaceSample TreeWater::AtLabel(double wx, double wz, double simUnix) const {
 std::atomic<uint64_t> TreeWater::s_evals{0}, TreeWater::s_cycState{0}, TreeWater::s_cycBed{0},
     TreeWater::s_cycProbe{0}, TreeWater::s_cycCascade{0}, TreeWater::s_cycRest{0};
 
-SurfaceSample TreeWater::Evaluate(double wx, double wz, double simUnix, bool displaced) const {
-    SurfaceSample s;
-    if (!m_wx) return s;   // valid stays false: no tree attached is not flat water
+void TreeWater::Prepare(double wx, double wz, double simUnix, Prep& p) const {
+    p.ok = false;
+    if (!m_wx) return;   // valid stays false: no tree attached is not flat water
     ++s_evals;
-    uint64_t cyc = __rdtsc();   // F21: the instrument's laps
+    uint64_t cyc = __rdtsc();   // F21: the instrument's laps (the prepare)
     auto lap = [&](std::atomic<uint64_t>& into) { const uint64_t n = __rdtsc(); into += n - cyc; cyc = n; };
 
-    const WeatherSample q = MeanStateAt(wx, wz, simUnix);
+    p.q = MeanStateAt(wx, wz, simUnix);
+    const WeatherSample& q = p.q;
     lap(s_cycState);
 
     // ---- THE COVERAGE GATE. Test the PROVENANCE, never the value: a bed of 0.0 is what both a
     // point at datum and a point nothing covers return, and only one of those is a measurement.
     const bool haveBed = q.bedSrc && q.bedSrc[0] != '-';
     const bool haveLevel = q.levelSrc && q.levelSrc[0] != '-';
-    if (!haveBed || !haveLevel) return s;
+    if (!haveBed || !haveLevel) return;
 
-    double latDeg = 0.0, lonDeg = 0.0;
+    double& latDeg = p.latDeg;
+    double& lonDeg = p.lonDeg;
     PlaceOf(wx, wz, latDeg, lonDeg);
+    SurfaceSample& s = p.s;
     s.bedNavd = BedAt(q, latDeg, lonDeg);   // the bed the kernels read (SetBed)
     s.heightNavd = q.levelNavd;             // mean surface: tide atlas + any solver refinement
     s.vx = double(q.u);                     // surface current, east
@@ -283,10 +288,10 @@ SurfaceSample TreeWater::Evaluate(double wx, double wz, double simUnix, bool dis
     // The depth under the mean surface; the dry weight every displacement rides (the kernel's `dry`);
     // the local sea-state scale (WaveScale, the one law the bank's tile corners carry); the swell
     // shadow, the page texels the kernel read (ExposureAt).
-    const double depth = q.levelNavd - s.bedNavd;
-    const double dry = wt::Smoothstep(0.05, 0.65, depth);
-    const double expo = ExposureAt(latDeg, lonDeg);
-    const double hsScale = m_scale.At(m_wx->Globe(), latDeg, lonDeg);
+    const double depth = p.depth = q.levelNavd - s.bedNavd;
+    p.dry = wt::Smoothstep(0.05, 0.65, depth);
+    p.expo = ExposureAt(latDeg, lonDeg);
+    p.hsScale = m_scale.At(m_wx->Globe(), latDeg, lonDeg);
     lap(s_cycBed);
 
     // ---- THE WAVES, in CsBankFill's order and with its weights. The solved field owns the
@@ -309,9 +314,24 @@ SurfaceSample TreeWater::Evaluate(double wx, double wz, double simUnix, bool dis
     // cascades own entire, exactly as they do everywhere outside the window -- so wWin starts
     // at zero and is raised only by a probe that answered. Streaming then changes WHICH
     // description carries the sea, never HOW MUCH sea there is.
-    double rwx = 0.0, rwz = 0.0;   // this point in the root's flat frame (the window, the wakes)
-    RootOf(wx, wz, rwx, rwz);
-    const double wGeom = WindowWeight(rwx, rwz);
+    RootOf(wx, wz, p.rwx, p.rwz);   // this point in the root's flat frame (the window, the wakes)
+    p.wGeom = WindowWeight(p.rwx, p.rwz);
+    // the cascade sea's planes at this point (ChartsAt holds a cell: the memoised part)
+    p.nCh = ChartsAt(wx, wz, p.ch);
+    p.norm = WaveChart::Norm(p.ch, p.nCh);
+    p.ok = true;
+}
+
+SurfaceSample TreeWater::Finish(const Prep& p, double wx, double wz, double simUnix, bool displaced) const {
+    SurfaceSample s = p.s;
+    if (!p.ok) return s;
+    uint64_t cyc = __rdtsc();   // F21: the instrument's laps (the finish)
+    auto lap = [&](std::atomic<uint64_t>& into) { const uint64_t n = __rdtsc(); into += n - cyc; cyc = n; };
+    const WeatherSample& q = p.q;
+    const double latDeg = p.latDeg, lonDeg = p.lonDeg;
+    const double depth = p.depth, dry = p.dry, expo = p.expo, hsScale = p.hsScale;
+    const double rwx = p.rwx, rwz = p.rwz, wGeom = p.wGeom;
+    (void)latDeg; (void)lonDeg;
     double wWin = 0.0;
 
     double dispX = 0.0, dispY = 0.0, dispZ = 0.0;   // wave displacement, physical metres
@@ -359,9 +379,9 @@ SurfaceSample TreeWater::Evaluate(double wx, double wz, double simUnix, bool dis
         // and tensor channels rotated into THIS place's east/north first (a chart's axes are its
         // cell's, up to two degrees away). The kernel runs this same expression per texel, which
         // is what makes a carried hull ride the sea that is drawn around it.
-        WaveChart::Chart ch[WaveChart::kMax];
-        const int nCh = ChartsAt(wx, wz, ch);
-        const double norm = WaveChart::Norm(ch, nCh);
+        const int nCh = p.nCh;
+        const WaveChart::Chart* ch = p.ch;
+        const double norm = p.norm;
         for (int i = 0; i < nCh; ++i) {
             if (ch[i].w < WaveChart::kSkip) continue;   // the law's own skip; the norm keeps it
             OceanSample o;
@@ -482,6 +502,25 @@ SurfaceSample TreeWater::Evaluate(double wx, double wz, double simUnix, bool dis
     s.valid = true;
     lap(s_cycRest);
     return s;
+}
+
+SurfaceSample TreeWater::Evaluate(double wx, double wz, double simUnix, bool displaced) const {
+    Prep p;
+    Prepare(wx, wz, simUnix, p);
+    return Finish(p, wx, wz, simUnix, displaced);
+}
+
+void TreeWater::AtMany(const double* xz, int n, double simUnix, SurfaceSample* out) const {
+    if (n <= 0) return;
+    // F22: the memoised part in order on this thread; the pure part across the pool, the caller
+    // participating (ThreadManager::ParallelFor), each point's arithmetic the one At() does.
+    std::vector<Prep> preps(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) Prepare(xz[2 * i], xz[2 * i + 1], simUnix, preps[static_cast<size_t>(i)]);
+    Threads().ParallelFor(Lane::Compute, "hull.water", n, 4, [&](int a, int b) {
+        for (int i = a; i < b; ++i) {
+            out[i] = Finish(preps[static_cast<size_t>(i)], xz[2 * i], xz[2 * i + 1], simUnix, true);
+        }
+    });
 }
 
 void TreeWater::WindAt(double wx, double wz, double simUnix, double out[3]) const {

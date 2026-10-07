@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace ga {
 
@@ -798,9 +799,136 @@ Bivector Vessel::NetWrench(const WaterSurface& sea, const VesselControls& c, dou
     return w;
 }
 
+// ================================================================================================
+//  F22: the step's water, asked once.
+// ================================================================================================
+bool Vessel::s_batchWater = true;
+bool Vessel::s_batchAudit = false;
+std::atomic<uint64_t> Vessel::s_batchSteps{0}, Vessel::s_batchPoints{0}, Vessel::s_batchMisses{0},
+    Vessel::s_batchHits{0}, Vessel::s_auditChecks{0}, Vessel::s_auditFails{0};
+
+namespace {
+// THE TABLE: the batch's answers served by the point's own doubles; a point not in it is asked of
+// the sea behind it and counted (the planing panels). Air and wind go to the sea behind it.
+class TableSea : public WaterSurface {
+public:
+    TableSea(const WaterSurface& sea, const std::vector<double>& xz, const std::vector<SurfaceSample>& out)
+        : m_sea(sea), m_xz(xz), m_out(out) {}
+    const char* Name() const override { return m_sea.Name(); }
+    SurfaceSample At(double wx, double wz, double simUnix) const override {
+        const size_t n = m_out.size();
+        for (size_t i = 0; i < n; ++i) {
+            if (m_xz[2 * i] == wx && m_xz[2 * i + 1] == wz) {
+                ++Vessel::s_batchHits;
+                return m_out[i];
+            }
+        }
+        ++Vessel::s_batchMisses;
+        return m_sea.At(wx, wz, simUnix);
+    }
+    void WindAt(double wx, double wz, double simUnix, double out[3]) const override {
+        m_sea.WindAt(wx, wz, simUnix, out);
+    }
+private:
+    const WaterSurface& m_sea;
+    const std::vector<double>& m_xz;
+    const std::vector<SurfaceSample>& m_out;
+};
+}  // namespace
+
+// The points the force loops ask, each by the loop's own body point and the same ToWorld, so the
+// doubles match the loops' to the bit: Buoyancy's stations (0, 0, z); Collar's five slices at the
+// tube's offsets; Drag's, Planing's and Foil's mounts (the foil at the helm's angle and tilt);
+// the running thrusters at the helm's; and the CG the telemetry asks. Not listed: the planing
+// panels (their place is the step's lambda state): asked live, counted as misses.
+void Vessel::WaterPoints(const VesselControls& c, std::vector<double>& xz) const {
+    xz.clear();
+    auto add = [&](const double atBody[3]) {
+        double wc[3];
+        m_body.ToWorld(atBody, wc);
+        xz.push_back(wc[0]);
+        xz.push_back(wc[2]);
+    };
+    int thrusterIdx = 0;
+    for (const Element& e : m_spec.elements) {
+        switch (e.kind) {
+            case ElementKind::Buoyancy:
+                for (const Section& st : e.stations) {
+                    const double bodyC[3] = {0.0, 0.0, st.z};
+                    add(bodyC);
+                }
+                break;
+            case ElementKind::Collar: {
+                const double z0 = e.tubeZ0.v, z1 = e.tubeZ1.v;
+                if (std::abs(z1 - z0) < 1e-6) break;
+                constexpr int kSlices = 5;
+                for (int i = 0; i < kSlices; ++i) {
+                    const double u = (i + 0.5) / kSlices;
+                    const double z = z0 + (z1 - z0) * u;
+                    const double r = e.tubeR0.v + (e.tubeR1.v - e.tubeR0.v) * u;
+                    if (r <= 1e-6) continue;
+                    const double atBody[3] = {e.tubeXOffset.v, e.tubeYOffset.v, z};
+                    add(atBody);
+                }
+                break;
+            }
+            case ElementKind::Drag:
+            case ElementKind::Planing: {
+                double atBody[3];
+                e.mount.Origin(0.0, atBody);
+                add(atBody);
+                break;
+            }
+            case ElementKind::Foil: {
+                const double q = e.mount.jointed ? c.steer : 0.0;
+                double atBody[3];
+                e.mount.Origin(q, atBody, c.tilt);
+                add(atBody);
+                break;
+            }
+            case ElementKind::Thruster: {
+                const int i = thrusterIdx++;
+                if (i >= VesselControls::kMaxThrusters || !c.running[i]) break;
+                double atBody[3], fwdBody[3];
+                e.mount.Origin(c.steer, atBody, c.tilt);
+                e.mount.Forward(c.steer, fwdBody, c.tilt);
+                add(atBody);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+    const double cg[3] = {0.0, 0.0, 0.0};
+    add(cg);
+}
+
 void Vessel::Step(const WaterSurface& sea, const VesselControls& c, double simUnix, double dt) {
     m_dt = dt;
-    const Bivector w = NetWrench(sea, c, simUnix);
+    Bivector w;
+    if (s_batchWater) {
+        std::vector<double> xz;
+        WaterPoints(c, xz);
+        std::vector<SurfaceSample> out(xz.size() / 2);
+        sea.AtMany(xz.data(), static_cast<int>(out.size()), simUnix, out.data());
+        ++s_batchSteps;
+        s_batchPoints += out.size();
+        if (s_batchAudit) {   // every answer against the point asked live, bit for bit
+            for (size_t i = 0; i < out.size(); ++i) {
+                const SurfaceSample live = sea.At(xz[2 * i], xz[2 * i + 1], simUnix);
+                const double* a = &out[i].heightNavd;
+                const double* b = &live.heightNavd;
+                bool same = out[i].valid == live.valid && out[i].foam == live.foam && out[i].sigma2 == live.sigma2;
+                for (int k = 0; k < 11 && same; ++k) same = std::memcmp(&a[k], &b[k], sizeof(double)) == 0;
+                ++s_auditChecks;
+                if (!same) ++s_auditFails;
+            }
+        }
+        const TableSea table(sea, xz, out);
+        w = NetWrench(table, c, simUnix);
+    } else {
+        w = NetWrench(sea, c, simUnix);
+    }
 
     // ADDED MASS IS ENTRAINED WATER, so a hull with no water around it has none. It was applied
     // unconditionally, which meant an AIRBORNE boat still carried 495 kg of heave added mass

@@ -129,6 +129,14 @@ public:
     void PlaceOf(double wx, double wz, double& latDeg, double& lonDeg) const;
 
     const char* Name() const override { return "water.tree"; }
+    // F22: the batch (WaterSurface::AtMany). One evaluation is two parts: PREPARE -- the memoised
+    // reads (the slow field's 8 m cell, the chart's cell, the bed's and the shadow's texel memos),
+    // in order on the calling thread as they always were -- and FINISH -- the solved field's probe,
+    // the cascades, the wakes, the Newton step: pure, every input in the Prep, so the pool runs it.
+    // At() is Finish(Prepare()) line for line; AtMany prepares the points in order and finishes
+    // them across the Compute lane. The hull's 139 evaluations a frame at the helm were 4.7 ms on
+    // the main thread, 4.2 of them the cascades.
+    void AtMany(const double* xz, int n, double simUnix, SurfaceSample* out) const override;
     // THE SURFACE THE MESH DRAWS, at a point of the world (the water match, step 3). The mesh places
     // each particle at its label plus its lateral offset, so the water standing over a point came
     // from a label behind it: the height, normal and offset here are that particle's, found by one
@@ -169,6 +177,19 @@ private:
     double CascadeTime(double simUnix) const;
     // At and AtLabel: one assembly; `displaced` stands the answer on the drawn surface.
     SurfaceSample Evaluate(double wx, double wz, double simUnix, bool displaced) const;
+    struct Prep {
+        bool ok = false;
+        WeatherSample q;
+        double latDeg = 0.0, lonDeg = 0.0;
+        SurfaceSample s;             // the bed, the mean surface, the current, as the gate passed them
+        double depth = 0.0, dry = 0.0, expo = 1.0, hsScale = 1.0;
+        double rwx = 0.0, rwz = 0.0, wGeom = 0.0;
+        int nCh = 0;
+        WaveChart::Chart ch[WaveChart::kMax];
+        double norm = 1.0;
+    };
+    void Prepare(double wx, double wz, double simUnix, Prep& p) const;
+    SurfaceSample Finish(const Prep& p, double wx, double wz, double simUnix, bool displaced) const;
     // The kernel's cascade loop's gains, once for At and BandGains.
     void BandLaw(const WeatherSample& q, double depth, double hsScale, double expo,
                  double gain[OceanCpu::kCascades]) const;

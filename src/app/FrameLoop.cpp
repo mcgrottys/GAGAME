@@ -3437,6 +3437,7 @@ bool FrameLoop::Frame() {
         globe->WalkReset();
         resMgr.WantStatsReset();
         resMgr.wantProfile = S.capture.headless;   // F19: a headless run is a measurement
+        Vessel::s_batchAudit = S.capture.residencyAudit != 0;   // F22: the batch against the point, live
         // M6e screw-prefetch: extrapolate the pose ~0.8 s ahead along its own screw and
         // let the walk under THAT camera queue tiles early (predicted priority).
         // M9v: THE PREFETCH WALK, AMORTIZED. Measured at 3.25 ms per frame at helm --
@@ -4847,9 +4848,20 @@ int FrameLoop::Finish() {
                 const double nf = double((std::max)(1u, frameMsN));
                 const auto ms = [&](const std::atomic<uint64_t>& c) { return double(c.load()) / tscPerNs / 1e6 / nf; };
                 Log("[cpu]   the hull's water, a frame's mean: %.0f evaluations; the mean state %.2f ms, the bed + "
-                    "exposure + scale %.2f, the solved field's probe %.2f, the cascades %.2f, the rest %.2f",
+                    "exposure + scale %.2f, the solved field's probe %.2f, the cascades %.2f, the rest %.2f "
+                    "(thread-summed: the pool's time, not the frame's)",
                     double(TreeWater::s_evals.load()) / nf, ms(TreeWater::s_cycState), ms(TreeWater::s_cycBed),
                     ms(TreeWater::s_cycProbe), ms(TreeWater::s_cycCascade), ms(TreeWater::s_cycRest));
+                Log("[cpu]   the step's water asked once (F22): %.0f steps, %.1f points a step, the table hit %.0f and "
+                    "missed %.0f a frame%s",
+                    double(Vessel::s_batchSteps.load()), double(Vessel::s_batchPoints.load()) /
+                    double((std::max)(Vessel::s_batchSteps.load(), uint64_t(1))),
+                    double(Vessel::s_batchHits.load()) / nf, double(Vessel::s_batchMisses.load()) / nf,
+                    Vessel::s_batchAudit
+                        ? (" | the audit: " + std::to_string(Vessel::s_auditChecks.load()) + " answers against the point asked live, " +
+                           std::to_string(Vessel::s_auditFails.load()) + " differ -- " +
+                           (Vessel::s_auditFails.load() ? "THE BATCH IS NOT THE POINT'S" : "bit for bit")).c_str()
+                        : "");
             }
         }
         if (globe && m_walkFrames) {   // F19: the walk's breakdown, a frame's mean from frame 150
