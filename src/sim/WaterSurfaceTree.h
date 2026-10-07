@@ -48,6 +48,7 @@
 // ================================================================================================
 #pragma once
 
+#include <atomic>
 #include "sim/OceanCpu.h"
 #include "sim/PlaceField.h"
 #include "sim/SeaState.h"
@@ -258,6 +259,11 @@ private:
 public:
     // PHASE C1: public for --water-probe, which names the level's source at the hull.
     WeatherSample MeanStateAt(double wx, double wz, double simUnix) const;
+public:
+    // F21 (the instrument): what one evaluation spends, by part, in rdtsc cycles over the process
+    // ([cpu] at the exit): the mean state (tide + solver), the bed + exposure + scale, the solved
+    // field's probe, the cascades, the rest (wakes, the Newton step).
+    static std::atomic<uint64_t> s_evals, s_cycState, s_cycBed, s_cycProbe, s_cycCascade, s_cycRest;
     // PHASE C2: the sea-state field's scale at a place, as the hull's bands take it (= the bank's).
     double SeaScaleAt(double latDeg, double lonDeg) const { return m_scale.At(m_wx->Globe(), latDeg, lonDeg); }
     double SeaScaleRef() const { return m_scale.hsRef; }

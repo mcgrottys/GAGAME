@@ -413,7 +413,7 @@ private:
         "weather.Update", "scene hot-reload stat", "waveField.Update",
         "waterBank.SetFrame", "tide.SetTime", "sea.SetTime",
         "groundAt (cam clamp)", "globe.SetView", "globe.PredictWants", "swe (solver step)",
-        "wave-plane Wants (17)", "exposure roll + Want"};
+        "wave-plane Wants (17)", "exposure + the entities' steps"};
     std::chrono::steady_clock::time_point m_profT0;
     bool m_profHelm = false;
     // The section brackets accumulate only over the frames the [rail] series keeps (a rail's

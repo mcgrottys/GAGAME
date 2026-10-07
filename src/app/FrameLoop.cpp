@@ -78,6 +78,7 @@
 #include "sim/BathyModel.h"
 #include "sim/Ephemeris.h"   // M9bi: the sun as a place, in Cl(4,1)
 #include "sim/GlobeModel.h"
+#include "sim/OceanCpu.h"
 #include "sim/WaveField.h"
 #include "sim/Stations.h"
 #include "sim/WaveFieldSource.h"
@@ -4821,6 +4822,36 @@ int FrameLoop::Finish() {
         }
         Log("[perf] slowest frames: %s", s.c_str());
         Log("[perf] globe.SetView (the walk) %.2f ms a frame on average", m_profMs[7] / (std::max)(1u, frameMsN));
+        {   // F21: THE CPU FRAME'S BRACKETS, a frame's mean, every measured run (the rail printed them alone)
+            std::string cpu;
+            double sum = 0.0;
+            for (int k = 0; k < kProfN; ++k) {
+                char b[64];
+                const double v = m_profMs[k] / (std::max)(1u, frameMsN);
+                sum += v;
+                snprintf(b, sizeof(b), "%s%s %.2f", k ? ", " : "", kProfName[k], v);
+                cpu += b;
+            }
+            Log("[cpu] the frame's brackets, a frame's mean (ms): %s | bracketed %.2f of the %.2f ms frame", cpu.c_str(), sum,
+                frameMsSum / frameMsN);
+            Log("[cpu]   the cascade sea on the CPU: %.0f samples a frame, the rotors built %.1f times a frame (F21)",
+                double(OceanCpu::s_samples.load()) / (std::max)(1u, frameMsN),
+                double(OceanCpu::s_rotorBuilds.load()) / (std::max)(1u, frameMsN));
+            {   // F21: one water evaluation, by part (TreeWater::Evaluate's laps)
+                const auto c0 = std::chrono::steady_clock::now();
+                const uint64_t t0 = __rdtsc();
+                while (std::chrono::steady_clock::now() - c0 < std::chrono::milliseconds(20)) {}
+                const double tscPerNs = double(__rdtsc() - t0) /
+                                        double(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                   std::chrono::steady_clock::now() - c0).count());
+                const double nf = double((std::max)(1u, frameMsN));
+                const auto ms = [&](const std::atomic<uint64_t>& c) { return double(c.load()) / tscPerNs / 1e6 / nf; };
+                Log("[cpu]   the hull's water, a frame's mean: %.0f evaluations; the mean state %.2f ms, the bed + "
+                    "exposure + scale %.2f, the solved field's probe %.2f, the cascades %.2f, the rest %.2f",
+                    double(TreeWater::s_evals.load()) / nf, ms(TreeWater::s_cycState), ms(TreeWater::s_cycBed),
+                    ms(TreeWater::s_cycProbe), ms(TreeWater::s_cycCascade), ms(TreeWater::s_cycRest));
+            }
+        }
         if (globe && m_walkFrames) {   // F19: the walk's breakdown, a frame's mean from frame 150
             const double nf = double(m_walkFrames);
             // the rdtsc rate: measured here, once, against the steady clock

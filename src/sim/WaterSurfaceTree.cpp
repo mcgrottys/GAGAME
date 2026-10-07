@@ -9,6 +9,7 @@
 #include "sim/WaveScale.h"
 
 #include <algorithm>
+#include <intrin.h>
 #include <cmath>
 
 namespace ga {
@@ -251,11 +252,18 @@ SurfaceSample TreeWater::AtLabel(double wx, double wz, double simUnix) const {
     return Evaluate(wx, wz, simUnix, false);
 }
 
+std::atomic<uint64_t> TreeWater::s_evals{0}, TreeWater::s_cycState{0}, TreeWater::s_cycBed{0},
+    TreeWater::s_cycProbe{0}, TreeWater::s_cycCascade{0}, TreeWater::s_cycRest{0};
+
 SurfaceSample TreeWater::Evaluate(double wx, double wz, double simUnix, bool displaced) const {
     SurfaceSample s;
     if (!m_wx) return s;   // valid stays false: no tree attached is not flat water
+    ++s_evals;
+    uint64_t cyc = __rdtsc();   // F21: the instrument's laps
+    auto lap = [&](std::atomic<uint64_t>& into) { const uint64_t n = __rdtsc(); into += n - cyc; cyc = n; };
 
     const WeatherSample q = MeanStateAt(wx, wz, simUnix);
+    lap(s_cycState);
 
     // ---- THE COVERAGE GATE. Test the PROVENANCE, never the value: a bed of 0.0 is what both a
     // point at datum and a point nothing covers return, and only one of those is a measurement.
@@ -279,6 +287,7 @@ SurfaceSample TreeWater::Evaluate(double wx, double wz, double simUnix, bool dis
     const double dry = wt::Smoothstep(0.05, 0.65, depth);
     const double expo = ExposureAt(latDeg, lonDeg);
     const double hsScale = m_scale.At(m_wx->Globe(), latDeg, lonDeg);
+    lap(s_cycBed);
 
     // ---- THE WAVES, in CsBankFill's order and with its weights. The solved field owns the
     // window and the cascades own everywhere else; wWin is the one blend and it is the same
@@ -330,6 +339,7 @@ SurfaceSample TreeWater::Evaluate(double wx, double wz, double simUnix, bool dis
             jacZZ += wS * m_waveChop * double(p.jzz);
         }
     }
+    lap(s_cycProbe);
     if (m_ocean && m_ocean->Ready()) {
         // THE PER-BAND LAW, the kernel's (CsBankFill's cascade loop), one gain per cascade: the
         // local sea-state scale and the swell shadow; in water, the band's shoaling (Green's law at
@@ -380,6 +390,7 @@ SurfaceSample TreeWater::Evaluate(double wx, double wz, double simUnix, bool dis
             jacZZ += w * (c2 * R[2] + d2 * R[3]);
         }
     }
+    lap(s_cycCascade);
 
     // ---- THE WAKES. Closed form and stateless, so the CPU runs the same law the bank does
     // rather than a cheaper stand-in -- WaterTerms.h carries the signed stationary phase and the
@@ -469,6 +480,7 @@ SurfaceSample TreeWater::Evaluate(double wx, double wz, double simUnix, bool dis
 
     s.depthM = s.heightNavd - s.bedNavd;
     s.valid = true;
+    lap(s_cycRest);
     return s;
 }
 

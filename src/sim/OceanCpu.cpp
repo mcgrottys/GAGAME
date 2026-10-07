@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 namespace ga {
 
@@ -280,6 +281,7 @@ void OceanCpu::SetSeaState(const PartParam* parts, int count, uint32_t seed, con
         m_bin[c] = std::move(all);
     }
 
+    ++m_epoch;   // F21: the memo's key moves with the bins
     m_ready = true;
     Log("[oceancpu] %d partitions, seed %08x: retained %d/%d/%d pairs, residual %.3f/%.3f/%.3f%%, "
         "Hs %.3f m", n, seed, RetainedBins(0), RetainedBins(1), RetainedBins(2),
@@ -331,25 +333,73 @@ void OceanCpu::Sample(double wx, double wz, double tSec, OceanSample& out) const
     SampleBand(wx, wz, tSec, 0.0, nullptr, out);
 }
 
+bool OceanCpu::s_rotorMemo = true;
+std::atomic<uint64_t> OceanCpu::s_samples{0}, OceanCpu::s_rotorBuilds{0};
+
+namespace {
+// F21: THE ROTOR MEMO, the thread's own (OceanCpu.h, THREADING / F21). (cos wt, sin wt) per bin
+// of each cascade at one instant of one sea state: keyed on the object, its epoch and tSec,
+// built per cascade on first use. Never shared between threads, so nothing is locked.
+struct RotorMemo {
+    const OceanCpu* owner = nullptr;
+    uint64_t epoch = ~0ull;
+    double t = 0.0;
+    bool built[OceanCpu::kCascades] = {};
+    std::vector<double> cw[OceanCpu::kCascades], sw[OceanCpu::kCascades];
+};
+thread_local RotorMemo t_rotor;
+}  // namespace
+
 void OceanCpu::SampleBand(double wx, double wz, double tSec, double minLambda, const double* gain,
                           OceanSample& out) const {
+    ++s_samples;
     // The eight running sums, in the order OceanSample names them.
     struct Sums {
         double dx = 0.0, h = 0.0, dz = 0.0, sx = 0.0, sz = 0.0, vx = 0.0, vy = 0.0, vz = 0.0;
         double jxx = 0.0, jxz = 0.0, jzz = 0.0;
     };
+    // F21: the memo for this instant, this sea state, this object; a mismatch starts it over.
+    RotorMemo& rm = t_rotor;
+    const bool memo = s_rotorMemo;
+    if (memo && (rm.owner != this || rm.epoch != m_epoch || rm.t != tSec)) {
+        rm.owner = this;
+        rm.epoch = m_epoch;
+        rm.t = tSec;
+        for (int c = 0; c < kCascades; ++c) rm.built[c] = false;
+    }
     // One cascade's bins into the sums it is handed. Without a gain array they are the totals
     // themselves -- the one pass this always was, term for term; with one, each cascade sums on
     // its own and joins the totals by its gain (every channel is linear in a cascade's bins, so
     // that is exact).
     const auto accumulate = [&](int c, Sums& a) {
+        const double* mcw = nullptr;
+        const double* msw = nullptr;
+        if (memo) {
+            if (!rm.built[c]) {   // this cascade's rotors at this instant, once per thread
+                const size_t n = m_bin[c].size();
+                rm.cw[c].resize(n);
+                rm.sw[c].resize(n);
+                for (size_t i = 0; i < n; ++i) {
+                    // -w, mirroring CsModulate: paired with the e^{+ik.x} synthesis below this
+                    // is what makes a bin travel along +k, i.e. toward its partition's dirTo.
+                    const double wt = -m_bin[c][i].w * tSec;
+                    rm.cw[c][i] = std::cos(wt);
+                    rm.sw[c][i] = std::sin(wt);
+                }
+                rm.built[c] = true;
+                ++s_rotorBuilds;
+            }
+            mcw = rm.cw[c].data();
+            msw = rm.sw[c].data();
+        }
+        size_t bi = 0;
         for (const Bin& b : m_bin[c]) {
+            const size_t i = bi++;
             // b.invK is 1/|k|, so 2*pi*invK is this bin's wavelength.
             if (minLambda > 1e-6 && 6.283185307179586 * b.invK < minLambda) continue;
-            // -w, mirroring CsModulate: paired with the e^{+ik.x} synthesis below this
-            // is what makes a bin travel along +k, i.e. toward its partition's dirTo.
+            // the rotor: the memo's, or (the selftest's cold sum) the same expressions here
             const double wt = -b.w * tSec;
-            const double cw = std::cos(wt), sw = std::sin(wt);
+            const double cw = memo ? mcw[i] : std::cos(wt), sw = memo ? msw[i] : std::sin(wt);
             // The two halves of CsModulate's hk, kept APART rather than added: they travel
             // opposite ways, so their orbital velocities have opposite k^ and only their
             // difference is the pair's horizontal velocity. Their sum is hk, exactly.
@@ -457,4 +507,70 @@ double OceanCpu::Variance(int cascade) const {
     return m_varKept[cascade];
 }
 
+
+// ================================================================================================
+//  F21: the memo against the cold sum. A synthetic sea in the shipped cascade geometry (patches
+//  756 / 186 / 47 m, the FFT's cuts at 60 and 12 m, lambda 1.1); 48 points over 2 km at three
+//  instants, each sampled cold (the memo off) and memoed (first the build, then the hits), the
+//  band-limited form with gains as the hull asks it, every channel compared bit for bit. The
+//  plant: the memo keyed an instant a nanosecond off -- its rotors are another instant's and the
+//  sums must differ.
+// ================================================================================================
+bool RunOceanCpuSelfTest() {
+    OceanCpu o;
+    PartParam parts[2] = {SeaState::MakePartition(1.5, 8.0, 90.0, false),
+                          SeaState::MakePartition(0.6, 4.0, 200.0, true)};
+    const float pl[3] = {756.0f, 186.0f, 47.0f};
+    const float kPi = 3.14159265f;
+    const float cut01 = 2.0f * kPi / 60.0f, cut12 = 2.0f * kPi / 12.0f;
+    const float lo[3] = {2.0f * kPi / pl[0], cut01, cut12};
+    const float hi[3] = {cut01, cut12, 0.9f * kPi * 256.0f / pl[2]};
+    o.SetSeaState(parts, 2, 0x5eed1234u, pl, lo, hi, 1.1);
+    const bool was = OceanCpu::s_rotorMemo;
+    uint32_t seed = 7u;
+    auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return double(seed >> 8) / double(1u << 24); };
+    const double gain[3] = {0.7, 1.0, 0.4};
+    int checks = 0, bad = 0;
+    double worst = 0.0;
+    const double ts[3] = {0.0, 37.25, 86400.5};
+    for (int ti = 0; ti < 3; ++ti) {
+        for (int k = 0; k < 48; ++k) {
+            const double x = (rnd() - 0.5) * 2000.0, z = (rnd() - 0.5) * 2000.0;
+            const double minL = (k & 1) ? 2.0 * 0.6 : 0.0;
+            OceanSample a, b;
+            OceanCpu::s_rotorMemo = false;
+            o.SampleForHull(x, z, ts[ti], minL, (k & 2) ? gain : nullptr, a);
+            OceanCpu::s_rotorMemo = true;
+            o.SampleForHull(x, z, ts[ti], minL, (k & 2) ? gain : nullptr, b);
+            const double* pa = &a.dx;
+            const double* pb = &b.dx;
+            for (int i = 0; i < 11; ++i) {
+                ++checks;
+                if (std::memcmp(&pa[i], &pb[i], sizeof(double)) != 0) {
+                    ++bad;
+                    worst = (std::max)(worst, std::fabs(pa[i] - pb[i]));
+                }
+            }
+        }
+    }
+    // the plant: the memo of a neighbouring instant answering this one
+    OceanSample p0, p1;
+    OceanCpu::s_rotorMemo = true;
+    o.SampleForHull(120.0, -40.0, 37.25, 0.0, nullptr, p0);          // builds at 37.25
+    t_rotor.t = 37.25 + 1e-9;                                          // the memo now claims 37.25 + 1 ns
+    o.SampleForHull(120.0, -40.0, 37.25 + 1e-9, 0.0, nullptr, p1);   // hits the 37.25 rotors
+    OceanCpu::s_rotorMemo = false;
+    OceanSample p2;
+    o.SampleForHull(120.0, -40.0, 37.25 + 1e-9, 0.0, nullptr, p2);   // the honest answer there
+    const bool plantCaught = std::memcmp(&p1.h, &p2.h, sizeof(double)) != 0;
+    OceanCpu::s_rotorMemo = was;
+    t_rotor = RotorMemo{};
+    Log("[oceancpu-test] the rotor memo against the cold sum: %d channels over 48 points x 3 instants "
+        "(band-limited and gained as the hull asks), %d differ (worst %.3g) -- %s; the plant, the memo of an "
+        "instant 1 ns off answering: %s",
+        checks, bad, worst, bad == 0 ? "BIT FOR BIT" : "NOT THE SAME", plantCaught ? "CAUGHT" : "NOT CAUGHT");
+    const bool ok = bad == 0 && plantCaught;
+    Log(ok ? "[oceancpu-test] ---- PASS ----" : "[oceancpu-test] ---- FAIL ----");
+    return ok;
+}
 }  // namespace ga
