@@ -36,6 +36,13 @@ public:
     // The free surface at a world point and instant. `valid` false means no coverage -- the
     // caller must treat that as "I do not know", never as flat water at datum zero.
     virtual SurfaceSample At(double wx, double wz, double simUnix) const = 0;
+    // F22: MANY POINTS AT ONE INSTANT -- a hull's step asks its water once. The default is At()
+    // in order, point by point; an implementation that can answer the points in parallel does
+    // (TreeWater: the memoised part in order, the pure part across the pool), each point's
+    // arithmetic the one At() does. xz is n pairs; out is n samples.
+    virtual void AtMany(const double* xz, int n, double simUnix, SurfaceSample* out) const {
+        for (int i = 0; i < n; ++i) out[i] = At(xz[2 * i], xz[2 * i + 1], simUnix);
+    }
 
     // The wind at a point, world frame, m/s. Defaults to still so an implementation that has no
     // weather says so by being calm rather than by being wrong.

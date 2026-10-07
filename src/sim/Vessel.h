@@ -34,6 +34,7 @@
 // ================================================================================================
 #pragma once
 
+#include <atomic>
 #include "core/Common.h"
 #include "sim/Medium.h"
 #include "sim/RigidBody.h"
@@ -83,6 +84,17 @@ public:
     bool Build(const VesselSpec& spec, const Motor& pose);
 
     void Step(const WaterSurface& sea, const VesselControls& c, double simUnix, double dt);
+    // F22: THE STEP ASKS ITS WATER ONCE. The points the force loops will ask (the stations, the
+    // collar's slices, the mounts, the CG -- by the same ToWorld of the same body points, so the
+    // doubles are the loops' own) are listed, answered by one WaterSurface::AtMany, and the loops
+    // read the table; a point the table lacks (the planing panels, whose place is the step's own
+    // state) is asked live and counted. Off only in the selftest, which holds the two bit for bit.
+    static bool s_batchWater;
+    static std::atomic<uint64_t> s_batchSteps, s_batchPoints, s_batchMisses, s_batchHits;
+    // ...and the audit (the residency audit's flag): every table entry re-asked live, compared bit
+    // for bit; a difference is the batch answering other than the point would.
+    static bool s_batchAudit;
+    static std::atomic<uint64_t> s_auditChecks, s_auditFails;
 
     const RigidBody& Body() const { return m_body; }
     RigidBody& Body() { return m_body; }
@@ -98,6 +110,7 @@ public:
     Bivector NetWrench(const WaterSurface& sea, const VesselControls& c, double simUnix);
 
 private:
+    void WaterPoints(const VesselControls& c, std::vector<double>& xz) const;   // F22
     Bivector Buoyancy(const Element& e, const WaterSurface& sea, double simUnix);
     Bivector Collar(const Element& e, const WaterSurface& sea, double simUnix);
     Bivector Planing(const Element& e, const WaterSurface& sea, double simUnix);
