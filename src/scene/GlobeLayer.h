@@ -76,6 +76,19 @@ public:
     void ReloadShaders(Gpu& gpu, ShaderCompiler& sc) override;
     void Render(const FrameContext& ctx) override;
 
+    // ANOTHER EYE: the minimap, a split screen's second player, a remote player's view. It walks
+    // the same planet from its own camera, after the first eye's SetView, with no Droste levels
+    // or gate worlds of its own, under its own exaggeration, zenith and residency sampler
+    // ("eye<view>"), and keeps what it walked for Render at ctx.viewIndex == view. The layer's
+    // working set stays the first eye's, so nothing the first eye reads afterwards has moved.
+    static constexpr uint32_t kMaxOtherEyes = 3;
+    void SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float aspect, float viewportH,
+                      double simTime, float exagg, const float skyUp[3], bool skyPass);
+    // The eye stops drawing (its walk is not refreshed this frame).
+    void DropOtherView(uint32_t view) {
+        if (view > 0 && view <= kMaxOtherEyes) m_other[view - 1].valid = false;
+    }
+
     // Once per frame before RenderFrame: camera in the PLANET frame + projection aspect and
     // viewport height in pixels (the relief-mip selector needs the pixel's angular size).
     void SetView(const Camera& cam, float aspect, float viewportH, double simTime);
@@ -844,6 +857,27 @@ private:
     // (posted and not yet replayed). `posted` and `quit` existed to drive a parked thread and
     // are gone with it.
     WalkParams m_wp{};
+    // ANOTHER EYE's walk, kept for its own Render (SetOtherView), and the flag that keeps the
+    // first eye's instruments and title out of it.
+    struct OtherEye {
+        GlobeCbData cb{};
+        SkyCbData skyCb{};
+        std::vector<MeshletRec> meshlets;
+        std::vector<NodeData> nodes;
+        uint32_t limbSlots[kMaxLevels] = {};
+        int limbCount = 0;
+        bool skyPass = true;
+        float skyWeight = 1.0f;
+        int sampler = -1;
+        bool valid = false;
+        GpuBuffer recBuf[Gpu::kFrameCount];
+    };
+    OtherEye m_other[kMaxOtherEyes];
+    bool m_borrowed = false;
+    void RenderEye(const FrameContext& ctx, const GlobeCbData& cbData, const SkyCbData& skyCbData,
+                   const std::vector<MeshletRec>& meshlets, const std::vector<NodeData>& nodes,
+                   const uint32_t* limbSlots, int limbCount, GpuBuffer& rec, bool skyPass,
+                   float skyWeight);
     struct PredictJob {
         std::mutex mx;
         std::condition_variable cv;

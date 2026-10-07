@@ -84,6 +84,7 @@
 #include "scene/Entity.h"   // M12 step 5e: the hull as a node (its step state, its water)
 #include "scene/Portal.h"   // M12 step 5e: the Droste link and its cycle as a node
 #include "scene/Gateway.h"     // the cuboid gates to other places on the planet
+#include "scene/Minimap.h"     // the second eye in the corner of the glass (scene hud.minimap)
 #include "scene/Rail.h"     // M12 step 5e: the rails as data
 #include "sim/VesselSpec.h"
 #include "sim/WaveField.h"
@@ -295,6 +296,16 @@ private:
     void PublishHulls();
     // THE WINDSHIELD (scene `hud`): the readouts on the glass, rebuilt each frame.
     void DrawGlass(float dt);
+    // THE SECOND EYE (scene hud.minimap, scene/Minimap.h): stepped and walked once a frame after
+    // the first eye has settled, and appended to the frame's views as view 1.
+    void MinimapFrame(float dt);
+    scene::Minimap m_minimap;
+    bool m_minimapReady = false;     // configured (the planet and its pole are known)
+    bool m_minimapDrawn = false;     // walked this frame: the views get a second element
+    bool m_minimapSky = false;       // its own dome is set: the sky layer draws in it
+    ComposedSurfaceCb m_minimapSurface{};   // b2 about the minimap's eye
+    double m_minimapSubject[3] = {};
+    bool m_minimapHasSubject = false;
     float m_glassMs = 0.0f;    // the frame time, smoothed over ~0.5 s
     float m_glassAge = 0.0f;   // seconds since the readout was last reprinted
     std::string m_glassText;

@@ -45,6 +45,7 @@
       { "key": "sources", "type": "list", "field": "none", "element": "source", "named": false, "reload": "hot", "doc": "rasters that are sources by being files, in any order" },
       { "key": "stations", "type": "list", "field": "none", "element": "station", "named": false, "reload": "hot", "doc": "where a station of the data stands when its file does not say" },
       { "key": "capture", "type": "object", "field": "none", "schema": "capture", "reload": "hot", "doc": "headless capture" },
+      { "key": "hud", "type": "object", "field": "none", "schema": "hud", "reload": "hot", "doc": "the windshield: readouts and the minimap on the glass" },
       { "key": "views", "type": "list", "field": "none", "element": "view", "named": true, "reload": "hot", "doc": "the cameras, by name" },
       { "key": "rails", "type": "object", "field": "none", "schema": "rails", "reload": "hot", "doc": "the camera rails" },
       { "key": "portals", "type": "list", "field": "none", "element": "portal", "named": true, "reload": "hot", "doc": "the Droste links, by name" },
@@ -243,6 +244,18 @@
       { "key": "hold", "type": "number", "field": "u32", "quantity": "1", "unit": "frames", "default": 0, "reload": "restart", "doc": "hold it for exactly N frames (--settle-hold)" },
       { "key": "exact", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "hold until the resident set IS the want set (--settle-exact)" },
       { "key": "clearChurn", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "zero the churn atlas at the first held frame (--settle-clear-churn)" }
+    ] },
+    { "type": "hud", "keys": [
+      { "key": "fps", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "the frame rate, top left" },
+      { "key": "minimap", "type": "object", "field": "none", "schema": "hud.minimap", "reload": "hot", "doc": "the globe in the corner" }
+    ] },
+    { "type": "hud.minimap", "keys": [
+      { "key": "enabled", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": false, "reload": "restart", "doc": "the second eye in the bottom-right corner: drag to turn the planet, wheel to zoom, Reset to return" },
+      { "key": "follow", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "boat", "reload": "restart", "doc": "the entity the marker stands on and Reset centres over" },
+      { "key": "size", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0.34, "reload": "restart", "doc": "the square's side as a fraction of the target's height" },
+      { "key": "margin", "type": "number", "field": "u32", "quantity": "1", "unit": "px", "default": 16, "reload": "restart", "doc": "the gap to the bottom-right corner" },
+      { "key": "homeAltM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 6000000, "reload": "restart", "doc": "Reset: the eye this far above the followed entity" },
+      { "key": "minAltM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 2, "reload": "restart", "doc": "the zoom's floor above the sea" }
     ] },
     { "type": "view", "keys": [
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the view's name" },

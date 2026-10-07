@@ -204,14 +204,19 @@ void SkyLayer::Render(const FrameContext& ctx) {
         float winUp[kMaxWindowChain * 4];           // ...and the viewpoint each depth lands in
         float winSun[kMaxWindowChain * 4];
     } cb{};
+    const uint32_t other = ctx.viewIndex;   // 0: the first eye's dome and windows
+    if (other > kMaxOtherEyes) return;
+    const float* rot = other ? m_otherRot[other - 1] : m_rot;
+    const float* sun = other ? m_otherSun[other - 1] : m_sun;
+    const int winN = other ? 0 : m_winN;
     for (int i = 0; i < 3; ++i) {
-        cb.r0[i] = m_rot[i];
-        cb.r1[i] = m_rot[3 + i];
-        cb.r2[i] = m_rot[6 + i];
-        cb.sun[i] = m_sun[i];
+        cb.r0[i] = rot[i];
+        cb.r1[i] = rot[3 + i];
+        cb.r2[i] = rot[6 + i];
+        cb.sun[i] = sun[i];
     }
-    cb.winA[0] = static_cast<float>(m_winN);   // the one number the shader's walk reads
-    for (int k = 0; k < m_winN; ++k) {
+    cb.winA[0] = static_cast<float>(winN);   // the one number the shader's walk reads
+    for (int k = 0; k < winN; ++k) {
         m_winBoxes[k].Pack(cb.box + k * 16);
         for (int i = 0; i < 4; ++i) cb.winUp[k * 4 + i] = m_winUp[k * 4 + i];
         for (int i = 0; i < 3; ++i) cb.winSun[k * 4 + i] = m_winSun[k * 3 + i];

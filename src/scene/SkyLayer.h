@@ -40,6 +40,15 @@ public:
         for (int i = 0; i < 3; ++i) m_sun[i] = sun[i];
     }
 
+    // ANOTHER EYE's dome (the minimap's, a second player's): the same rows and sun for that eye's
+    // own zenith, drawn when ctx.viewIndex == view. It looks through no window of its own yet.
+    static constexpr uint32_t kMaxOtherEyes = 3;
+    void SetOtherFrame(uint32_t view, const float rows[9], const float sun[3]) {
+        if (view == 0 || view > kMaxOtherEyes) return;
+        for (int i = 0; i < 9; ++i) m_otherRot[view - 1][i] = rows[i];
+        for (int i = 0; i < 3; ++i) m_otherSun[view - 1][i] = sun[i];
+    }
+
     // M13: A WINDOW HAS A SKY -- the sky of the place its rays land in. A window is a transform on
     // the whole view, so the backdrop walks the same chain of slab tests the globe clips with, and
     // a pixel k windows deep marches the air from the k-th place: its zenith, the one sun as seen
@@ -103,6 +112,8 @@ private:
     float m_rot[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
     float m_sun[3] = {0.0f, 1.0f, 0.0f};
     int m_winN = 0;
+    float m_otherRot[kMaxOtherEyes][9] = {};
+    float m_otherSun[kMaxOtherEyes][3] = {};
     WindowBox m_winBoxes[kMaxWindowChain];
     float m_winUp[kMaxWindowChain * 4] = {};
     float m_winSun[kMaxWindowChain * 3] = {};

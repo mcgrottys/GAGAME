@@ -147,6 +147,12 @@ void View::Basis(const Motor& pose, const double up[3], double fwd[3], double ri
 Motor View::Level(const Motor& pose, const double up[3]) {
     double f[3], r[3], u[3];
     Basis(pose, up, f, r, u);
+    double p[3] = {0.0, 0.0, 0.0};
+    pose.TransformPoint(p[0], p[1], p[2]);
+    return Frame(p, f, u);
+}
+
+Motor View::Frame(const double p[3], const double f[3], const double u[3]) {
     // THE ROTOR FROM THE FRAME. The rotation takes (e1, e2, e3) to (f, u, -r) -- the frame
     // scene::FromCamera's two turns produce -- and it is built as the two turns that ARE the
     // re-levelling: aim, then roll about the aim. Both angles come from atan2, which is
@@ -167,8 +173,6 @@ Motor View::Level(const Motor& pose, const double up[3]) {
     double c[3];
     Cross3(u1, u, c);
     const Motor roll = Motor::Rotation(org, f, std::atan2(Dot3(f, c), Dot3(u1, u)));
-    double p[3] = {0.0, 0.0, 0.0};
-    pose.TransformPoint(p[0], p[1], p[2]);
     return Motor::Translation(p[0], p[1], p[2]) * roll * aim;
 }
 

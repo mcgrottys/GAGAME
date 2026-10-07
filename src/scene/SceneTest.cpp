@@ -71,6 +71,7 @@
 // trusted (priors 22). The three checks of block 11 were seen to fail with BOTH step 5d fixes
 // reverted (the unnamed list appended, `"base": ""` refused) before they were trusted.
 #include "app/Options.h"
+#include "core/Window.h"
 #include "scene/Gateway.h"
 #include "core/Dome.h"
 #include "sim/Ephemeris.h"
@@ -86,6 +87,7 @@
 #include "scene/Component.h"
 #include "scene/Entity.h"
 #include "scene/GlobeLayer.h"
+#include "scene/Minimap.h"
 #include "scene/Node.h"
 #include "scene/Portal.h"
 #include "scene/Rail.h"
@@ -2613,6 +2615,107 @@ bool RunSceneSelfTest() {
         g.Has(badWhy, "water.nope", "[reload] and the refusal names the path");
     }
 
+    // ---- 11. [minimap] the second eye's hand (scene/Minimap.h) ----------------------------------
+    // Headless runs never move a mouse, so the laws are pinned here: home puts the subject at the
+    // rectangle's centre at homeAltM; a drag keeps the grabbed point under the cursor; the wheel
+    // never crosses the floor or the ceiling; Reset walks back to home exactly; a point behind the
+    // limb is hidden; and what the minimap took never reaches the first eye.
+    {
+        const double R = 6371000.0, lat = kTestLat * 3.14159265358979323846 / 180.0;
+        const double pole[3] = {0.0, std::sin(lat), std::cos(lat)};
+        MinimapProps mp;
+        mp.enabled = true;
+        Minimap mm;
+        mm.Configure(mp, R, pole);
+        const uint32_t W = 1600, H = 900;
+        const Minimap::Rect r = mm.Place(W, H);
+        const double subj[3] = {120.0, 0.0, -10.0};
+        mm.Step(0.0f, subj);
+        float sx = 0.0f, sy = 0.0f;
+        const float cx = r.x + 0.5f * r.w, cy = r.y + 0.5f * r.h;
+        g.True(mm.Project(subj, r, sx, sy), "[minimap] home sees its subject");
+        g.Near(sx, cx, 0.05, "[minimap] home puts the subject at the centre (x)");
+        g.Near(sy, cy, 0.05, "[minimap] home puts the subject at the centre (y)");
+        g.Near(mm.Altitude(), mp.homeAltM, 1e-2, "[minimap] home stands homeAltM up");
+        const double north[3] = {subj[0], subj[1], subj[2] + 50000.0};   // 50 km north of it
+        g.True(mm.Project(north, r, sx, sy) && sy < cy, "[minimap] north is up at home");
+
+        // a drag: press, then the cursor moves; the grabbed point follows the cursor
+        InputState in;
+        in.mouseX = cx + 30.0f;
+        in.mouseY = cy + 20.0f;
+        in.lmb = true;
+        double grab[3];
+        mm.Pick(r, in.mouseX, in.mouseY, grab);
+        mm.Input(in, W, H);
+        g.True(!in.lmb, "[minimap] the press is the minimap's, not the first eye's");
+        double worst = 0.0;
+        const float path[4][2] = {{80.0f, -10.0f}, {-60.0f, 70.0f}, {140.0f, 120.0f}, {-130.0f, -140.0f}};
+        for (const auto& step : path) {
+            InputState mv;
+            mv.mouseX = cx + step[0];
+            mv.mouseY = cy + step[1];
+            mv.lmb = true;
+            mv.mouseDx = 5.0f;
+            mm.Input(mv, W, H);
+            g.True(mv.mouseDx == 0.0f && !mv.lmb, "[minimap] a drag never reaches the first eye");
+            float gx = 0.0f, gy = 0.0f;
+            if (mm.Project(grab, r, gx, gy)) {
+                worst = (std::max)(worst, double(std::hypot(gx - mv.mouseX, gy - mv.mouseY)));
+            } else {
+                worst = 1e30;
+            }
+        }
+        Log("[minimap] grab: the grabbed point stays %.4f px from the cursor over a 4-step drag", worst);
+        g.True(worst < 0.05, "[minimap] the grabbed point stays under the cursor");
+        InputState up;
+        up.mouseX = cx;
+        up.mouseY = cy;
+        mm.Input(up, W, H);
+
+        // the wheel: in to the floor, out to the ceiling
+        for (int i = 0; i < 300; ++i) {
+            InputState wh;
+            wh.mouseX = cx;
+            wh.mouseY = cy;
+            wh.wheel = 1.0f;
+            mm.Input(wh, W, H);
+            if (i == 0) g.True(wh.wheel == 0.0f, "[minimap] the wheel is the minimap's");
+        }
+        const double low = mm.Altitude();
+        Log("[minimap] wheel in x300: %.4f m above the sea (floor %.2f m)", low, mp.minAltM);
+        g.True(low >= mp.minAltM - 1e-6 && low < mp.minAltM + 0.5, "[minimap] the wheel reaches the floor and never crosses it");
+        for (int i = 0; i < 300; ++i) {
+            InputState wh;
+            wh.mouseX = cx;
+            wh.mouseY = cy;
+            wh.wheel = -1.0f;
+            mm.Input(wh, W, H);
+        }
+        g.True(mm.Altitude() <= 8.0 * R + 1.0, "[minimap] the wheel never backs out past eight radii");
+
+        // Reset: the walk ends on home exactly
+        mm.Reset();
+        for (int i = 0; i < 40; ++i) mm.Step(0.05f, subj);
+        g.True(!mm.Resetting(), "[minimap] the walk home ends");
+        g.True(mm.Project(subj, r, sx, sy), "[minimap] Reset sees its subject");
+        g.Near(sx, cx, 0.05, "[minimap] Reset puts the subject at the centre (x)");
+        g.Near(sy, cy, 0.05, "[minimap] Reset puts the subject at the centre (y)");
+        g.Near(mm.Altitude(), mp.homeAltM, 1e-2, "[minimap] Reset stands homeAltM up");
+
+        // the far side of the planet is behind the limb
+        const double antipode[3] = {0.0, -2.0 * R, 0.0};
+        g.True(!mm.Project(antipode, r, sx, sy), "[minimap] the antipode is hidden behind the limb");
+        // the button is the minimap's, and pressing it starts the walk
+        const Minimap::Rect b = Minimap::Button(r);
+        InputState bp;
+        bp.mouseX = b.x + 0.5f * b.w;
+        bp.mouseY = b.y + 0.5f * b.h;
+        bp.lmb = true;
+        mm.Input(bp, W, H);
+        g.True(mm.Resetting() && !bp.lmb, "[minimap] the button starts Reset and keeps its press");
+    }
+
     if (g.ok) {
         Log("[scene] ---- PASS (%d checks): Registry<T> == VesselRegistry / LoaderRegistry on the "
             "built-in kinds, the property table (defaults, units through GaUnits, the Velocity-"
@@ -2633,8 +2736,9 @@ bool RunSceneSelfTest() {
             "whole scene of 5f (the address and the pick, a Hot key applied, a Restart key "
             "reported and not applied, a removed key back to its declared default, a named-array "
             "remove named by the residue, a list under a target as a value -- hot where consumed, "
-            "reported where not --, idempotence, and an unknown key refusing the candidate whole) "
-            "----",
+            "reported where not --, idempotence, and an unknown key refusing the candidate whole), "
+            "and [minimap] the second eye's hand (home, the grab, the wheel's floor and ceiling, "
+            "Reset, the limb, what it keeps from the first eye) ----",
             g.checks);
     } else {
         Log("[scene] ---- FAIL (%d checks) ----", g.checks);

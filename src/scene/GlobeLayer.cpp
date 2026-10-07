@@ -2022,11 +2022,13 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         // sampler (a gate's window does); one that does not is part of this view's reading.
         WalkLevel(wp, slot, L.sampler >= 0 ? L.sampler : m_sampler);
     }
-    ProbeTransport(probeRows, probeN);
+    if (!m_borrowed) ProbeTransport(probeRows, probeN);
     if (m_msPath) SeamTable();
     // M8h: a dropped leaf is a hole. Report on the transition (once per episode), with
     // the count -- the fix is a coarser view or a bigger kMaxMeshlets, not silence.
-    if (m_meshletDrops > 0 && !m_dropsReported) {
+    if (m_borrowed) {
+        // another eye's walk: the instruments and the title are the first eye's
+    } else if (m_meshletDrops > 0 && !m_dropsReported) {
         Log("[globe] meshlet budget hit: %u leaves dropped (%zu/%u records) -- holes "
             "until the view coarsens",
             m_meshletDrops, m_meshlets.size(), kMaxMeshlets);
@@ -2042,7 +2044,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     } else if (m_meshletDrops == 0) {
         m_dropsReported = false;
     }
-    if (meshStats && ++m_meshStatWalks == 8) {
+    if (meshStats && !m_borrowed && ++m_meshStatWalks == 8) {
         // Log-spaced distance buckets from the eye. Every record carries its own
         // camera-relative anchor and its node's ground span, so cell = arc/32 is the
         // vertex spacing this meshlet actually emits -- no inference from pixels.
@@ -2235,7 +2237,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
             fillLevel(static_cast<uint32_t>(li + 1), L.cam, L.sigma, L.Q, L.reliefExagg, L.sun,
                       L.bankSet, L.skyUp, L.skyDay);
         }
-        EyeInstruments();   // Phase A0: the levels' blocks logged, the two-worlds probe's rows
+        if (!m_borrowed) EyeInstruments();   // Phase A0: the levels' blocks logged, the probe's rows
     }
     // THE VIEW'S WINDOWS: only where their levels are walked (the mesh path); on the fallback a
     // window with no world behind it would be a hole, so there are none.
@@ -2355,6 +2357,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     }
     // (M6h: the M6b destination beacon is fully retired -- row and shader block deleted.)
 
+    if (m_borrowed) return;
     char s[96];
     if (m_msPath) {
         snprintf(s, sizeof(s), "globe %zu meshlets (MS)  alt %.0f km", m_meshlets.size(),
@@ -2373,7 +2376,23 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
 }
 
 void GlobeLayer::Render(const FrameContext& ctx) {
-    if (!m_pso || (m_nodes.empty() && m_meshlets.empty())) return;
+    if (ctx.viewIndex == 0) {
+        RenderEye(ctx, m_cb, m_skyCb, m_meshlets, m_nodes, m_limbSlots, m_limbCount,
+                  m_recBuf[ctx.gpu->FrameIndex()], skyPassEnabled, skyPassWeight);
+        return;
+    }
+    const uint32_t k = ctx.viewIndex - 1;
+    if (k >= kMaxOtherEyes || !m_other[k].valid) return;
+    OtherEye& o = m_other[k];
+    RenderEye(ctx, o.cb, o.skyCb, o.meshlets, o.nodes, o.limbSlots, o.limbCount,
+              o.recBuf[ctx.gpu->FrameIndex()], o.skyPass, o.skyWeight);
+}
+
+void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
+                           const SkyCbData& skyCbData, const std::vector<MeshletRec>& meshlets,
+                           const std::vector<NodeData>& nodes, const uint32_t* limbSlots,
+                           int limbCount, GpuBuffer& rec, bool skyPass, float skyWeight) {
+    if (!m_pso || (nodes.empty() && meshlets.empty())) return;
     PixScope scope(ctx.cmd->Native(),
                    "globe (atmosphere shell + quad-sphere CDLOD + sparse cloud volume)");
 
@@ -2382,24 +2401,24 @@ void GlobeLayer::Render(const FrameContext& ctx) {
     // (The residency turn stands at the head of the frame's command list, law 8: FrameLoop's
     // hook on the renderer, before any layer records a read.)
 
-    const D3D12_GPU_VIRTUAL_ADDRESS cbVa = ctx.gpu->PushConstants(&m_cb, sizeof(m_cb));
+    const D3D12_GPU_VIRTUAL_ADDRESS cbVa = ctx.gpu->PushConstants(&cbData, sizeof(cbData));
 
     // 1) The atmosphere backdrop: limb scatter + sun for every ray that misses the planet.
-    if (m_skyPso && skyPassEnabled) {
+    if (m_skyPso && skyPass) {
         GpuScope gscope(ctx.prof, ctx.cmd->Native(), "globe.sky");
         PixMarker(ctx.cmd->Native(), "globe.sky (single-scatter shell: the limb past the disc)");
         ctx.cmd->Pipeline(m_skyPso.Get());
-        const float w = std::clamp(skyPassWeight, 0.0f, 1.0f);
+        const float w = std::clamp(skyWeight, 0.0f, 1.0f);
         const float bf[4] = {w, w, w, w};
         ctx.cmd->Native()->OMSetBlendFactor(bf);
         ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         ctx.cmd->GraphicsConstantsAt(1, cbVa);
-        ctx.cmd->GraphicsConstants(5, m_skyCb);   // b3 (M12 step 4g: b2 is the surface's)
+        ctx.cmd->GraphicsConstants(5, skyCbData);   // b3 (M12 step 4g: b2 is the surface's)
         ctx.cmd->Draw(3, 1, 0, 0);
     }
 
     // 2) The surface (which marches the sparse cloud bank on its way down).
-    if (m_msPath && m_msPso && !m_meshlets.empty()) {
+    if (m_msPath && m_msPso && !meshlets.empty()) {
         // M6j: the unified surface -- meshlet records ride a frame-indexed upload buffer,
         // one DispatchMesh amplifies them from the composed channels.
         if (!ctx.cmd->MeshCapable()) {   // no List6 on this runtime: the classic path (3f)
@@ -2407,11 +2426,10 @@ void GlobeLayer::Render(const FrameContext& ctx) {
             return;
         }
         GpuScope gscope(ctx.prof, ctx.cmd->Native(), "globe.mesh");
-        GpuBuffer& rec = m_recBuf[ctx.gpu->FrameIndex()];
-        const size_t bytes = m_meshlets.size() * sizeof(MeshletRec);
+        const size_t bytes = meshlets.size() * sizeof(MeshletRec);
         const auto copy0 = std::chrono::steady_clock::now();   // meshletCopyMs bracket
-        memcpy(rec.cpu, m_meshlets.data(), bytes);
-        meshletCopyMs = std::chrono::duration<double, std::milli>(
+        memcpy(rec.cpu, meshlets.data(), bytes);
+        if (ctx.viewIndex == 0) meshletCopyMs = std::chrono::duration<double, std::milli>(
                             std::chrono::steady_clock::now() - copy0)
                             .count();
         hal::PsoPtr msSel = m_msPso.Get();
@@ -2423,21 +2441,21 @@ void GlobeLayer::Render(const FrameContext& ctx) {
         ctx.cmd->GraphicsConstantsAt(1, cbVa);
         ctx.cmd->GraphicsSrvAt(2, rec.res->GetGPUVirtualAddress());
         // M10: 2-D, because one dimension caps at 65535 groups (GlobeMesh.hlsl folds y*65535+x).
-        const UINT n = static_cast<UINT>(m_meshlets.size());
+        const UINT n = static_cast<UINT>(meshlets.size());
         ctx.cmd->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
 
         // 3) M10: the limbs of every planet whose air the eye is outside of, over the surface
         // just drawn (SetView chose the slots, farthest first).
-        if (m_limbPso && m_limbCount > 0) {
+        if (m_limbPso && limbCount > 0) {
             GpuScope lscope(ctx.prof, ctx.cmd->Native(), "globe.limbs");
             PixMarker(ctx.cmd->Native(),
                       "globe.limbs (each level's shell over what lies behind it)");
             ctx.cmd->Pipeline(m_limbPso.Get());
             ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             ctx.cmd->GraphicsConstantsAt(1, cbVa);
-            for (int li = 0; li < m_limbCount; ++li) {
-                SkyCbData lc = m_skyCb;
-                lc.lvl[0] = static_cast<float>(m_limbSlots[li]);
+            for (int li = 0; li < limbCount; ++li) {
+                SkyCbData lc = skyCbData;
+                lc.lvl[0] = static_cast<float>(limbSlots[li]);
                 ctx.cmd->GraphicsConstants(5, lc);   // b3
                 ctx.cmd->Draw(3, 1, 0, 0);
             }
@@ -2454,10 +2472,102 @@ void GlobeLayer::Render(const FrameContext& ctx) {
     // Root param 2 normally carries the FieldSet; the renderer re-binds it every frame and the
     // globe draws last, so the CDLOD node list borrows the slot for this draw.
     ctx.cmd->GraphicsSrvAt(
-        2, ctx.gpu->PushConstants(m_nodes.data(), m_nodes.size() * sizeof(NodeData)));
-    ctx.cmd->Draw(32 * 32 * 6, static_cast<UINT>(m_nodes.size()), 0, 0);
+        2, ctx.gpu->PushConstants(nodes.data(), nodes.size() * sizeof(NodeData)));
+    ctx.cmd->Draw(32 * 32 * 6, static_cast<UINT>(nodes.size()), 0, 0);
 }
 
+
+// ANOTHER EYE (GlobeLayer.h SetOtherView). The layer's working set is the first eye's: every
+// member SetView writes is set aside, the walk runs from the other camera with no Droste levels
+// and no gate worlds of its own, what it walked is moved into that eye's slot, and the first
+// eye's set is put back -- so nothing the first eye's frame reads afterwards has moved.
+void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float aspect,
+                              float viewportH, double simTime, float exagg, const float skyUp[3],
+                              bool skyPass) {
+    if (view == 0 || view > kMaxOtherEyes || !m_res) return;
+    OtherEye& o = m_other[view - 1];
+    if (m_msPath && !o.recBuf[0].res) {
+        for (uint32_t i = 0; i < Gpu::kFrameCount; ++i) {
+            o.recBuf[i] = gpu.CreateUploadBuffer(
+                static_cast<uint64_t>(kMaxMeshlets) * sizeof(MeshletRec),
+                L"globe.meshlets (another eye's per-frame records)");
+        }
+    }
+    // ---- set the first eye's working set aside
+    const GlobeCbData cb0 = m_cb;
+    const SkyCbData sky0 = m_skyCb;
+    std::vector<MeshletRec> meshlets0;
+    meshlets0.swap(m_meshlets);
+    std::vector<NodeData> nodes0;
+    nodes0.swap(m_nodes);
+    std::vector<LeafKey> keys0;
+    keys0.swap(m_leafKeys);
+    std::vector<DrosteLevel> levels0;
+    levels0.swap(m_levels);
+    uint32_t limbs0[kMaxLevels];
+    memcpy(limbs0, m_limbSlots, sizeof(limbs0));
+    const int limbCount0 = m_limbCount;
+    const WalkParams wp0 = m_wp;
+    const double camPos0[3] = {m_camPos[0], m_camPos[1], m_camPos[2]};
+    const float vh0 = m_viewportH;
+    const uint32_t drops0 = m_meshletDrops;
+    uint32_t rec0[kMaxLevels];
+    memcpy(rec0, levelRecords, sizeof(rec0));
+    const float exagg0 = reliefExagg, own0 = skyOwnAir;
+    const float up0[3] = {m_camSkyUp[0], m_camSkyUp[1], m_camSkyUp[2]};
+    const float day0 = m_camSkyDay;
+    const bool drosteOn0 = m_drosteOn;
+    const int gateFirst0 = m_gateFirst, gateCount0 = m_gateCount;
+    const int sampler0 = m_sampler;
+
+    // ---- this eye: its own exaggeration, zenith and sampler; one world, its own
+    reliefExagg = exagg;
+    skyOwnAir = 1.0f;
+    for (int i = 0; i < 3; ++i) m_camSkyUp[i] = skyUp[i];
+    m_camSkyDay = -1.0f;
+    m_drosteOn = false;
+    m_gateFirst = -1;
+    m_gateCount = 0;
+    if (o.sampler < 0) o.sampler = m_res->Sampler(("eye" + std::to_string(view)).c_str());
+    m_sampler = o.sampler;
+    m_borrowed = true;
+    SetView(cam, aspect, viewportH, simTime);
+    m_borrowed = false;
+
+    // ---- keep what it walked
+    o.cb = m_cb;
+    o.skyCb = m_skyCb;
+    o.meshlets.swap(m_meshlets);
+    o.nodes.swap(m_nodes);
+    memcpy(o.limbSlots, m_limbSlots, sizeof(o.limbSlots));
+    o.limbCount = m_limbCount;
+    o.skyPass = skyPass;
+    o.skyWeight = 1.0f;
+    o.valid = true;
+
+    // ---- and put the first eye's back
+    m_cb = cb0;
+    m_skyCb = sky0;
+    m_meshlets.swap(meshlets0);
+    m_nodes.swap(nodes0);
+    m_leafKeys.swap(keys0);
+    m_levels.swap(levels0);
+    memcpy(m_limbSlots, limbs0, sizeof(limbs0));
+    m_limbCount = limbCount0;
+    m_wp = wp0;
+    for (int i = 0; i < 3; ++i) m_camPos[i] = camPos0[i];
+    m_viewportH = vh0;
+    m_meshletDrops = drops0;
+    memcpy(levelRecords, rec0, sizeof(rec0));
+    reliefExagg = exagg0;
+    skyOwnAir = own0;
+    for (int i = 0; i < 3; ++i) m_camSkyUp[i] = up0[i];
+    m_camSkyDay = day0;
+    m_drosteOn = drosteOn0;
+    m_gateFirst = gateFirst0;
+    m_gateCount = gateCount0;
+    m_sampler = sampler0;
+}
 
 // ---- Phase A0 (plan_eye_windows.md): THE INSTRUMENTS, no behaviour changed. -------------------
 // (1) Per slot of the frame's level table (slot 0 the camera, then m_levels), the cells its OWN eye

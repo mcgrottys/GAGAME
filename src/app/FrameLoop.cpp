@@ -2295,6 +2295,9 @@ bool FrameLoop::Frame() {
 
     if (!S.capture.headless) {
         InputState in = window.Input();   // by value: gestures may consume wheel
+        // The minimap's rectangle takes its own mouse first: a press, a drag or a wheel that
+        // begins over it never reaches the first eye's gestures.
+        if (m_minimapReady) m_minimap.Input(in, window.Width(), window.Height());
 
         if (mode != 2) {   // the gulf map keeps its plain controls
             if (in.lmb && !lmbWas) {
@@ -4030,9 +4033,24 @@ bool FrameLoop::Frame() {
     // gravity-up and speed clamps, the Droste gauge, the bank's centre, the exposure and GIS
     // probes -- still reads `cam` directly (5d moves them, with the scene wired).
     PublishHulls();   // after the view has decided what it looks through this frame
+    MinimapFrame(dt);   // the second eye, walked after the first has settled
     DrawGlass(dt);    // the windshield's readouts, rebuilt for this frame
-    const scene::ViewSet viewSet =
+    scene::ViewSet viewSet =
         renderer.OneView(cam, static_cast<float>(simUnix - startUnix));
+    if (m_minimapDrawn) {
+        // THE SECOND EYE, view 1: its rectangle of the same target, its own b0 and b2, and only
+        // the layers that are the planet itself -- the sea's compute and the camera-anchored
+        // banks belong to the first eye this step (they are not keyed by view yet).
+        const uint32_t W = renderer.Width(), H = renderer.Height();
+        const scene::Minimap::Rect r = m_minimap.Place(W, H);
+        const Camera& mc = m_minimap.Cam();
+        scene::ViewContext v1 = renderer.ViewOf(
+            mc, static_cast<float>(simUnix - startUnix), 1, uint32_t(r.x), uint32_t(r.y),
+            uint32_t(r.w), uint32_t(r.h), static_cast<float>(m_A.planetR + m_minimap.Altitude()));
+        v1.drawMask = renderer.LayerBit("globe") | (m_minimapSky ? renderer.LayerBit("sky") : 0);
+        v1.surface = &m_minimapSurface;
+        viewSet.views.push_back(v1);
+    }
     renderer.RenderFrame(viewSet);
     // --sky-probe: the atmosphere's tables, read back once the first one is built and held
     // against published optical depths (SkyLayer::Probe). Reads back and waits: an instrument.
@@ -5027,6 +5045,96 @@ void FrameLoop::DrawGlass(float dt) {
         }
         hud->Text(16.0f, 16.0f, 3.0f, m_glassText, {1.0f, 1.0f, 1.0f, 0.95f});
     }
+    if (m_minimapDrawn) {
+        // The minimap's glass: its frame, the followed entity's marker, its altitude, Reset.
+        const scene::Minimap::Rect r =
+            m_minimap.Place(m_A.renderer.Width(), m_A.renderer.Height());
+        hud->Rect(r.x - 2.0f, r.y - 2.0f, r.w + 4.0f, r.h + 4.0f, HudLayer::Frame,
+                  {0.85f, 0.9f, 1.0f, 0.85f}, 2.0f);
+        float mx = 0.0f, my = 0.0f;
+        if (m_minimapHasSubject && m_minimap.Project(m_minimapSubject, r, mx, my)) {
+            hud->Rect(mx - 9.0f, my - 9.0f, 18.0f, 18.0f, HudLayer::Ring, {0.0f, 0.0f, 0.0f, 0.6f}, 4.5f);
+            hud->Rect(mx - 8.0f, my - 8.0f, 16.0f, 16.0f, HudLayer::Ring, {1.0f, 0.45f, 0.1f, 1.0f}, 2.5f);
+            hud->Rect(mx - 2.5f, my - 2.5f, 5.0f, 5.0f, HudLayer::Ring, {1.0f, 0.45f, 0.1f, 1.0f});
+        }
+        const double alt = m_minimap.Altitude();
+        char a[32];
+        if (alt >= 10000.0) snprintf(a, sizeof(a), "%.0f KM", alt / 1000.0);
+        else if (alt >= 100.0) snprintf(a, sizeof(a), "%.2f KM", alt / 1000.0);
+        else snprintf(a, sizeof(a), "%.1f M", alt);
+        hud->Text(r.x + 8.0f, r.y + r.h - 22.0f, 2.0f, a, {1.0f, 1.0f, 1.0f, 0.9f});
+        const scene::Minimap::Rect b = scene::Minimap::Button(r);
+        hud->Rect(b.x, b.y, b.w, b.h, HudLayer::Fill, {0.05f, 0.07f, 0.1f, 0.65f});
+        hud->Rect(b.x, b.y, b.w, b.h, HudLayer::Frame, {0.85f, 0.9f, 1.0f, 0.9f}, 1.5f);
+        // the home glyph: a ring with its centre, the button's whole meaning
+        const float c = b.w * 0.5f, rr = b.w * 0.28f;
+        hud->Rect(b.x + c - rr, b.y + c - rr, 2.0f * rr, 2.0f * rr, HudLayer::Ring,
+                  {1.0f, 1.0f, 1.0f, 0.95f}, 2.0f);
+        hud->Rect(b.x + c - 2.0f, b.y + c - 2.0f, 4.0f, 4.0f, HudLayer::Fill, {1.0f, 1.0f, 1.0f, 0.95f});
+    }
+}
+
+// THE SECOND EYE, once a frame (scene/Minimap.h). The followed entity's point in the root frame is
+// its hull's origin under the placement of the space it lives in (Entity::DrawFrame: identity in
+// the root, the destination's after a gate), so the marker stands at Haulover once the boat is
+// there. The globe walks the planet again from this eye (GlobeLayer::SetOtherView: same tiles,
+// same pool, its own sampler), and the surface rows are filled about this eye -- the records and
+// the rows share one origin to the double, as the first eye's do.
+void FrameLoop::MinimapFrame(float dt) {
+    m_minimapDrawn = false;
+    GlobeLayer* globe = m_A.globe;
+    if (!m_S.hud.minimap.enabled || !globe || !globe->enabled) return;
+    SurfaceFrame& sf = m_A.surface;
+    if (!m_minimapReady) {
+        // the pole in the root's tangent frame: the planet's +y read through the frame's rows
+        const double pole[3] = {sf.east[1], sf.up[1], sf.north[1]};
+        m_minimap.Configure(m_S.hud.minimap, m_A.planetR, pole);
+        m_minimapReady = true;
+    }
+    m_minimapHasSubject = false;
+    for (const auto& e : m_entities) {
+        if (!e || !e->Hull() || e->Name() != m_S.hud.minimap.follow) continue;
+        double p[3] = {0.0, 0.0, 0.0};
+        e->Hull()->Body().pose.TransformPoint(p[0], p[1], p[2]);
+        e->DrawFrame().TransformPoint(p[0], p[1], p[2]);
+        for (int i = 0; i < 3; ++i) m_minimapSubject[i] = p[i];
+        m_minimapHasSubject = true;
+        break;
+    }
+    m_minimap.Step(dt, m_minimapHasSubject ? m_minimapSubject : nullptr);
+
+    const Camera& mc = m_minimap.Cam();
+    const uint32_t W = m_A.renderer.Width(), H = m_A.renderer.Height();
+    const scene::Minimap::Rect r = m_minimap.Place(W, H);
+    if (r.w < 8.0f || r.h < 8.0f) return;
+    const double alt = m_minimap.Altitude();
+    double zen[3];
+    const double C[3] = {mc.px, mc.py, mc.pz};
+    ZenithAt(C, m_A.planetR, zen);
+    const float up[3] = {float(zen[0]), float(zen[1]), float(zen[2])};
+    const float exagg = static_cast<float>(std::clamp(alt / 250000.0, 1.0, 20.0));
+    // ONE BACKDROP, ONE INTEGRAL, as the first eye has it: the sky layer's dome on this eye's own
+    // zenith (core/Dome.h, the root's sun carried onto it), marched from this eye's radius (b0),
+    // and the globe's backdrop pass off.
+    bool skyDome = false;
+    if (SkyLayer* sky = m_A.sky; sky && sky->enabled) {
+        float sunRoot[3], rows[9], zs[3];
+        m_A.renderer.SunDir(sunRoot);
+        DomeFrame(zen, sunRoot, rows, zs);
+        sky->SetOtherFrame(1, rows, zs);
+        skyDome = true;
+    }
+    globe->SetOtherView(m_A.gpu, 1, mc, r.w / r.h, r.h, m_simUnix - m_startUnix, exagg, up,
+                        !skyDome);
+    m_minimapSky = skyDome;
+    // b2 about this eye: the frame's rows, with the eye moved and put back (Fill is const)
+    double eye0[3];
+    for (int k = 0; k < 3; ++k) eye0[k] = sf.eye[k];
+    const double ry = sf.planetR + mc.py;
+    for (int k = 0; k < 3; ++k) sf.eye[k] = sf.up[k] * ry + sf.east[k] * mc.px + sf.north[k] * mc.pz;
+    sf.Fill(m_minimapSurface, m_A.resMgr);
+    for (int k = 0; k < 3; ++k) sf.eye[k] = eye0[k];
+    m_minimapDrawn = true;
 }
 
 }  // namespace ga::app

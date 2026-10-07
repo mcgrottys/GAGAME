@@ -71,6 +71,15 @@ struct ViewContext {
     hal::CommandContext* cmd = nullptr;
     const char* target = "main";
     ViewRect viewport;
+    // WHAT THIS VIEW DRAWS: bit i = the renderer's i-th layer (registration order), beside the
+    // scene's standing `declared`. `enabled` was one flag per layer that the main eye wrote;
+    // drawing is a view's decision, so a second eye in orbit can leave the sea undrawn while the
+    // first stands on it. Renderer::OneView fills it from `enabled`, which is what one view meant.
+    uint64_t drawMask = ~0ull;
+    // THE SURFACE ROWS ABOUT THIS EYE (b2: ComposedSurfaceCb). Every read is addressed about an
+    // eye, and the globe's records and these rows must share it to the double; null = the
+    // renderer's own surfaceCb, which is the first eye's.
+    const ComposedSurfaceCb* surface = nullptr;
     FrameContext legacy;
 };
 
