@@ -2003,9 +2003,11 @@ void FrameLoop::ApplyWindowSteps(const std::vector<SurfaceFrame::Moved>& moved) 
             else ++moved2;
         }
         m_windowKeptMoved += moved2;
-        Log("[eye-windows] three turns after the step: of %zu tiles kept, %u held at the same pool "
-            "slot, %u released since (the order's own cut), %u at another slot",
-            m_keptCheck.size(), same, gone, moved2);
+        if (rm.traceRes) {   // housekeeping: the per-step lines are --res-trace's; the run's ledger stays
+            Log("[eye-windows] three turns after the step: of %zu tiles kept, %u held at the same pool "
+                "slot, %u released since (the order's own cut), %u at another slot",
+                m_keptCheck.size(), same, gone, moved2);
+        }
         m_keptCheck.clear();
     }
     if (moved.empty()) return;
@@ -2043,6 +2045,7 @@ void FrameLoop::ApplyWindowSteps(const std::vector<SurfaceFrame::Moved>& moved) 
             m_windowTold += told;
             m_windowLeft += left;
             if (!told && held.empty()) continue;   // F9: a step that told nothing and kept nothing is silent
+            if (!rm.traceRes) continue;            // housekeeping: the step's line is --res-trace's
             Log("[eye-windows] frame %llu: %S slice %u (rank %d, face %u) (%llu,%llu) -> (%llu,%llu): "
                 "%u slots told (their tile changed), %u of them held a tile (leave); %zu held tiles "
                 "kept at their slots",
