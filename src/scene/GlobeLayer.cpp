@@ -2531,10 +2531,14 @@ void GlobeLayer::EyeInstruments() {
     }
     text += bound;
     key += bound;
+    // Housekeeping (2026-10-06): the per-step print is the residency instrument's (--res-trace);
+    // it was 39 % of a helm run's log. The end-of-run ledgers stay.
     if (key != m_eyeLast) {
         m_eyeLast = key;
-        Log("[eye-blocks] frame %llu, %zu slot(s):%s", static_cast<unsigned long long>(m_eyeFrame),
-            slots, text.c_str());
+        if (m_res && m_res->traceRes) {
+            Log("[eye-blocks] frame %llu, %zu slot(s):%s", static_cast<unsigned long long>(m_eyeFrame),
+                slots, text.c_str());
+        }
     }
     // (2) the probe's rows.
     if (!groundProbeOn) return;
