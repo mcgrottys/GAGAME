@@ -123,6 +123,7 @@ int main(int argc, char** argv) {
         if (S.Tool("selftest")) return tools::RunSelfTest(topt);
         // F25: a wave cache entry's own planes solved again by this binary, compared byte for byte.
         if (const SceneTool* t = S.Tool("wave-recheck")) return WaveField::RecheckCache(t->args) ? 0 : 1;
+        if (const SceneTool* t = S.Tool("wave-converge")) return WaveField::ConvergeCache(t->args) ? 0 : 1;   // F27
 
         // ---- M12 step 1c: the scene, built as one object (app/Assembly.h). Its members
         // are the locals that used to stand here, under the same names, so what follows is

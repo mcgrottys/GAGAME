@@ -104,7 +104,8 @@ public:
     // chosen path -- that integral was path-dependent (the
     // field has curl wherever grad k is not parallel to d^), so it printed the integration
     // route into the sea as banding. Every cached solve carries the old, walked phase.
-    static constexpr uint32_t kSolverVersion = 10;   // F7: the breaking law (BreakFactor, BreakHmax) is in the solve
+    // F28: 11, was 10 -- the eikonal is swept until still; every cached two-round phase re-solves.
+    static constexpr uint32_t kSolverVersion = 11;   // F7 (10): the breaking law (BreakFactor, BreakHmax) is in the solve
 
     void Configure(const WaveFieldConfig& cfg, const Compositor* comp, int hgtChannel,
                    const WaterAtlas* atlas, const TideModel* tides, int entranceStation,
@@ -127,6 +128,10 @@ public:
     // input planes solved again by this binary, the atlas and table compared byte for byte with
     // what the binary that wrote the entry produced. No device, no scene data. True when equal.
     static bool RecheckCache(const std::string& path);
+    // F27 (the instrument): `--tool wave-converge:cache/wave/<key>.bin` -- how many more rounds of the
+    // four sweep orders the entry's phase needs to stand still, per component, and how much of the
+    // drawn phase the solve's two rounds differ from the still one in. The law is not touched.
+    static bool ConvergeCache(const std::string& path);
 
     // Per frame, main thread. parts/n = the live GFS-Wave partition set (SeaLayer's).
     // Kicks a background solve when a bucket rolls; uploads + swaps when one finishes.
