@@ -130,12 +130,21 @@
 //  would have cost the other 87%.  If a hull ever needs many stations per step, the ROTOR half is
 //  the one to hoist -- e^{iwt} does not depend on
 //  the query point, so a caller sampling P points at one instant can compute it once per bin
-//  instead of P times and halve the transcendental count.  That is deliberately not done here:
-//  it needs mutable state or a second entry point, and neither belongs in a const query until a
-//  measurement says the single-point cost is actually the problem.
+//  instead of P times and halve the transcendental count.
+//
+//  F21 (2026-10-06): THE MEASUREMENT CAME. At the helm the hull's step was 7.0 ms of a 17.2 ms CPU
+//  frame ([cpu], FrameLoop): two 60 Hz steps a frame, each ~73 stations and tube slices, each
+//  point up to four charts, every sample paying the rotor sincos per bin again at the same
+//  instant. THE ROTOR IS HOISTED, per thread: a thread_local memo of (cos wt, sin wt) per bin,
+//  keyed on (this, the bin list's epoch, tSec), built per cascade on first use at an instant and
+//  read by every later sample at that instant. The values are the same expressions in the same
+//  order, so every channel is bit for bit what the cold sum gives (RunOceanCpuSelfTest holds it,
+//  and a planted instant off by a nanosecond is caught). Const stays const: the memo is the
+//  thread's, not the object's; a thread never shares it, and a sea state's change moves the epoch.
 // ================================================================================================
 #pragma once
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <vector>
@@ -216,6 +225,11 @@ struct OceanSample {
 class OceanCpu {
 public:
     static constexpr int kCascades = 3;      // OceanFft::kCascades
+    // F21: the rotor memo (above). Off only in the selftest, which holds the memoed sum to the cold
+    // one bit for bit. The counters are process-wide instruments: samples taken, and the instants a
+    // thread built a cascade's rotors for ([cpu] at the exit).
+    static bool s_rotorMemo;
+    static std::atomic<uint64_t> s_samples, s_rotorBuilds;
     static constexpr int kN = 256;           // OceanFft::kN -- the spectral grid is kN x kN
 
     // Truncation policy. kResidualTarget is what we AIM to drop; kMaxBins is the hard cap that
@@ -327,11 +341,15 @@ private:
                     OceanSample& out) const;
 
     std::vector<Bin> m_bin[kCascades];
+    uint64_t m_epoch = 0;               // F21: moves with every SetSeaState; the memo's key
     double m_varAll[kCascades] = {};    // realized variance over every pair with energy
     double m_varKept[kCascades] = {};   // realized variance of the retained pairs
     double m_kLo[kCascades] = {}, m_kHi[kCascades] = {};   // the band cuts, rad/m (OceanFft's)
     double m_lambda = 1.1;
     bool m_ready = false;
 };
+
+// F21: the memo against the cold sum, bit for bit, and the plant (an instant a nanosecond off).
+bool RunOceanCpuSelfTest();
 
 }  // namespace ga
