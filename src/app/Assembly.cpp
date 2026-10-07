@@ -58,6 +58,7 @@
 #include "sim/SweSolver.h"
 #include "sim/TideModel.h"
 #include "sim/WaterTerms.h"
+#include "sim/WaveField.h"
 #include "app/Options.h"
 #include "app/Tools.h"
 
@@ -793,6 +794,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         resMgr.holdMargin = static_cast<float>(S.streaming.holdMargin);   // H2: 1 is F's order
         resMgr.dsSerial = opt.dsSerial;
         resMgr.traceRes = opt.resTrace;
+        WaveField::SetSolveAudit(opt.waveAudit);   // F25: the solve's instrument
         CbTrace() = opt.cbTrace;   // F9: the CB fingerprints print when asked for
         resMgr.pagesEvery = opt.pagesEvery;
         resMgr.auditEvery = S.capture.residencyAudit;   // the scene's (--res-audit N)
@@ -1454,7 +1456,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                               "pack-trees", "rastertest", "sea-verify", "selftest", "swe-cycle",
                               "swe-uv", "trace",
                               "tree-audit", "tree-prune", "twin-surface", "warm-inlet", "warm-trees",
-                              "water-map", "wave-map"}});
+                              "water-map", "wave-map", "wave-recheck"}});
             scene::WriteRegistries("docs/registries.json", extra);
         }
         // The survey pack loads whenever it exists: the land MASKS are the default

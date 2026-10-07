@@ -27,6 +27,7 @@
 #include "compose/TileTree.h"
 #include "scene/SceneBuilder.h"
 #include "sim/GlobeModel.h"
+#include "sim/WaveField.h"
 
 #include <exception>
 #include <memory>
@@ -120,6 +121,8 @@ int main(int argc, char** argv) {
         if (!topt.loadField.empty()) return tools::RunLoadField(topt);
 
         if (S.Tool("selftest")) return tools::RunSelfTest(topt);
+        // F25: a wave cache entry's own planes solved again by this binary, compared byte for byte.
+        if (const SceneTool* t = S.Tool("wave-recheck")) return WaveField::RecheckCache(t->args) ? 0 : 1;
 
         // ---- M12 step 1c: the scene, built as one object (app/Assembly.h). Its members
         // are the locals that used to stand here, under the same names, so what follows is
