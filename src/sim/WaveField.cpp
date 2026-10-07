@@ -392,7 +392,23 @@ EikonalGauge GaugeOf(int nx, int ny, double cellM, const std::vector<double>& h,
     return g;
 }
 
-void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& table) {
+// F25: the last solve's wavenumbers, by cell and component, with the planes they answer
+// (WaveField.h m_memo). A cell whose depth and flow are bit for bit what they were, in a
+// component whose frequency and direction are what they were, asked the same question of the
+// same function; its k is the memo's. Everything else is solved. The blocked bit rides along
+// (it is a statistic of the solve, not a plane the GPU reads).
+struct Memo {
+    int nx = 0, ny = 0, nc = 0;
+    std::vector<double> h;                 // the depth plane the k planes were solved on
+    std::vector<float> u, v;               // the flow planes
+    double sig[WaveField::kMaxComp] = {}, d0[WaveField::kMaxComp] = {}, d1[WaveField::kMaxComp] = {};
+    std::vector<double> k;                 // nc planes of nx*ny
+    std::vector<uint8_t> blocked;          // nc planes of nx*ny bits (nx is a multiple of 8)
+};
+static bool g_solveAudit = false;
+
+void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& table,
+           Memo* memo) {
     const auto t0 = std::chrono::steady_clock::now();
     const WaveFieldConfig& cfg = in.cfg;
     const int nx = cfg.nx, ny = cfg.ny;
@@ -524,7 +540,21 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
     const double kHold = BracketGrid()[kBracketN - 1] * 0.25;
 
     // -- per-component solve ---------------------------------------------------------------
-    std::vector<double> kbuf(cells), phibuf(cells), feik(cells);
+    // F25: the k planes are the memo's (or a solve-local one when no memo was given). The memo
+    // stands for a component when its grid, frequency and direction are what they were; a cell
+    // in a standing component keeps its k when its depth and flow are what they were.
+    Memo local;
+    Memo& M = memo ? *memo : local;
+    const bool memoGrid = (M.nx == nx && M.ny == ny && M.nc == nc && M.k.size() == size_t(nc) * cells &&
+                           M.h.size() == cells && M.u.size() == cells && M.v.size() == cells &&
+                           in.u.size() == cells && in.v.size() == cells);
+    if (!memoGrid) {
+        M.nx = nx; M.ny = ny; M.nc = nc;
+        M.k.assign(size_t(nc) * cells, 0.0);
+        M.blocked.assign(size_t(nc) * ((cells + 7) / 8), 0);
+        for (int c = 0; c < WaveField::kMaxComp; ++c) M.sig[c] = M.d0[c] = M.d1[c] = 0.0;
+    }
+    std::atomic<size_t> cellsSolved{0}, cellsKept{0};
     std::vector<float> aRaw(size_t(nc) * cells);
     std::vector<double> sumsq(cells, 0.0), sumA(cells, 0.0);
     std::vector<double> sumsqk(cells, 0.0);   // F7b: sum a^2 k, for the energy-weighted wavenumber
@@ -547,9 +577,14 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
         const double cosTh0 = std::cos(th0), sinTh0 = std::sin(th0);
         const double a0 = aTot * wts[ic];
         float* aPlane = aRaw.data() + size_t(ic) * cells;
+        double* kbuf = M.k.data() + size_t(ic) * cells;
+        uint8_t* kblk = M.blocked.data() + size_t(ic) * ((cells + 7) / 8);
+        // F25: the component stands in the memo when it asks what it asked last time
+        const bool compStands = memoGrid && M.sig[ic] == sig && M.d0[ic] == d0 && M.d1[ic] == d1;
 
         ParallelRows(ny, [&](int j0, int j1) {
             long long nb = 0;
+            size_t ns = 0, nk = 0;
             for (int j = j0; j < j1; ++j) {
                 const size_t row = size_t(j) * size_t(nx);
                 for (int i = 0; i < nx; ++i) {
@@ -564,7 +599,19 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
                     const double along = double(in.u[idx]) * d0 + double(in.v[idx]) * d1;
                     const double uopp = (along < 0.0) ? -along : 0.0;   // only opposing shortens
                     bool blocked = false;
-                    const double k = SolveDispersion(sig, hf, uopp, blocked);
+                    double k;
+                    if (compStands && h[idx] == M.h[idx] && in.u[idx] == M.u[idx] &&
+                        in.v[idx] == M.v[idx]) {   // F25: the same question, the memo's answer
+                        k = kbuf[idx];
+                        blocked = (kblk[idx >> 3] >> (idx & 7)) & 1u;
+                        ++nk;
+                    } else {
+                        k = SolveDispersion(sig, hf, uopp, blocked);
+                        ++ns;
+                        // rows are whole bytes (nx a multiple of 8): no two threads share one
+                        if (blocked) kblk[idx >> 3] |= uint8_t(1u << (idx & 7));
+                        else kblk[idx >> 3] &= uint8_t(~(1u << (idx & 7)));
+                    }
                     if (blocked) ++nb;
                     const double c = (2.0 * kPiW / k) / T;
                     double kh = k * hf;
@@ -591,7 +638,12 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
                 }
             }
             blockedCells += nb;
+            cellsSolved += ns;
+            cellsKept += nk;
         });
+        M.sig[ic] = sig;
+        M.d0[ic] = d0;
+        M.d1[ic] = d1;
 
         table.sigma[ic] = float(sig);
         table.dirX[ic] = float(d0);
@@ -601,6 +653,28 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
         if (lambdaDeep < cfg.minSamplesPerLambda * cfg.cellM) continue;   // the fold gate
         uploaded[ic] = true;
         ++nUp;
+    }
+    // the memo's planes are the ones just answered (compared against the old ones above)
+    M.h = h;
+    M.u = in.u;
+    M.v = in.v;
+    const double secsDisp = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+    // F25: THE PHASE, EVERY COMPONENT ON ITS OWN THREAD. The eikonal is one component's and reads
+    // nothing of another's (its k plane, its sweep buffers, its atlas slice, its kMax); the grid
+    // was walked 32 times in a row on one thread (4.5 s). Under --wave-map the components run in
+    // order on one thread so eta's sum is the sum it always was, to the bit.
+    const int compGrain = cfg.mapPath.empty() ? 1 : nc;
+    Threads().ParallelFor(Lane::Long, "wave.comps", nc, compGrain, [&](int c0, int c1) {
+    std::vector<double> phibuf(cells), feik(cells);
+    for (int ic = c0; ic < c1; ++ic) {
+        if (!uploaded[ic]) continue;
+        const double T = in.tp * (fp / fr[ic]);
+        const double sig = 2.0 * kPiW / T;
+        const double prop = Wrap360(dirs[ic] + 180.0) * (kPiW / 180.0);   // travel TOWARD
+        const double d0 = std::sin(prop), d1 = std::cos(prop);            // (east, north)
+        const double* kbuf = M.k.data() + size_t(ic) * cells;
+        const float* aPlane = aRaw.data() + size_t(ic) * cells;
 
         // ---- M9bw: THE PHASE IS A FIELD, NOT A PATH. -----------------------------------
         //
@@ -688,8 +762,8 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
         table.kMax[ic] = float(kMax);
 
         const int sx = (ic & 1) * nx, sy = (ic >> 1) * ny;
-        ParallelRows(ny, [&](int j0, int j1) {
-            for (int j = j0; j < j1; ++j) {
+        {
+            for (int j = 0; j < ny; ++j) {
                 const size_t arow = (size_t(sy + j) * aw + size_t(sx)) * 4;
                 const size_t row = size_t(j) * size_t(nx);
                 for (int i = 0; i < nx; ++i) {
@@ -701,8 +775,10 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
                     eta[row + i] += double(aPlane[row + i]) * std::cos(ph);
                 }
             }
-        });
+        }
     }
+    });
+    const double secsEik = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() - secsDisp;
 
     // -- the TOTAL-Hs limiter: Hs = 2 sqrt2 rms against gammaHs * h, ONE uniform factor per cell
     //    on every a_i (spectral shape and directions survive); excess > 1 is the breaking
@@ -811,6 +887,9 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
         nx, ny, nc, secs, nUp, nc, cfg.minSamplesPerLambda * cfg.cellM,
         100.0 * double(blockedCells.load()) / (double(nc) * double(cells)), in.level,
         in.currentMs);
+    Log("[wave]   the dispersion %.1f s: %zu cells solved, %zu kept from the memo (F25); the phase %.1f s, "
+        "%d components in parallel; the rest %.1f s",
+        secsDisp, cellsSolved.load(), cellsKept.load(), secsEik, nUp, secs - secsDisp - secsEik);
 }
 
 bool WriteCache(const char* path, uint64_t key, const Inputs& in,
@@ -1167,7 +1246,28 @@ WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
 
     Solved out;
     out.key = key;
-    wavecore::Solve(in, out.atlas, out.table);
+    if (!m_memo) m_memo = std::make_shared<wavecore::Memo>();
+    wavecore::Solve(in, out.atlas, out.table, m_memo.get());
+    if (wavecore::g_solveAudit) {   // F25: the same question cold, and the cache's answer
+        Solved cold;
+        wavecore::Solve(in, cold.atlas, cold.table, nullptr);
+        size_t dA = 0;
+        for (size_t i = 0; i < out.atlas.size() && i < cold.atlas.size(); ++i) dA += out.atlas[i] != cold.atlas[i];
+        dA += (out.atlas.size() > cold.atlas.size() ? out.atlas.size() : cold.atlas.size()) -
+              (out.atlas.size() < cold.atlas.size() ? out.atlas.size() : cold.atlas.size());
+        const bool dT = std::memcmp(&out.table, &cold.table, sizeof(GpuTable)) != 0;
+        Log("[wave-audit] the memo's solve against a cold one (key %016llx): %zu of %zu atlas bytes differ, "
+            "the table %s", static_cast<unsigned long long>(key), dA, out.atlas.size(),
+            dT ? "DIFFERS" : "equal");
+        Solved disk;
+        if (LoadCache(key, disk)) {
+            size_t dD = 0;
+            for (size_t i = 0; i < out.atlas.size() && i < disk.atlas.size(); ++i) dD += out.atlas[i] != disk.atlas[i];
+            Log("[wave-audit] the solve against the cache's entry for its key: %zu of %zu atlas bytes differ, "
+                "the table %s", dD, disk.atlas.size(),
+                std::memcmp(&out.table, &disk.table, sizeof(GpuTable)) != 0 ? "DIFFERS" : "equal");
+        }
+    }
 
     // v2 cache: the answer AND the question (input planes), so the offline checker can hold
     // this solve to the python proof without the engine. StoreCache below stays the
@@ -1176,6 +1276,61 @@ WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
     CachePathFor(key, path, sizeof(path));
     wavecore::WriteCache(path, key, in, out.atlas, out.table, true);
     return out;
+}
+
+void WaveField::SetSolveAudit(bool on) { wavecore::g_solveAudit = on; }
+
+bool WaveField::RecheckCache(const std::string& path) {
+    using namespace wavecore;
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) { Log("[wave-recheck] cannot open %s", path.c_str()); return false; }
+    CacheHead hd;
+    GpuTable table{};
+    std::vector<uint8_t> atlas;
+    Inputs in;
+    bool ok = fread(&hd, sizeof(hd), 1, f) == 1 && hd.magic == kCacheMagic &&
+              hd.version == kCacheVersion && hd.hasInputs == 1u &&
+              hd.tableBytes == sizeof(GpuTable);
+    if (ok) {
+        atlas.resize(size_t(hd.atlasW) * size_t(hd.atlasH) * 4);
+        const size_t cells = size_t(hd.nx) * size_t(hd.ny);
+        in.bed.resize(cells); in.u.resize(cells); in.v.resize(cells);
+        ok = fread(&table, sizeof(table), 1, f) == 1 &&
+             fread(atlas.data(), 1, atlas.size(), f) == atlas.size() &&
+             fread(in.bed.data(), sizeof(float), cells, f) == cells &&
+             fread(in.u.data(), sizeof(float), cells, f) == cells &&
+             fread(in.v.data(), sizeof(float), cells, f) == cells;
+    }
+    fclose(f);
+    if (!ok) { Log("[wave-recheck] %s is not a v2 entry with input planes", path.c_str()); return false; }
+    in.cfg.nx = int(hd.nx);
+    in.cfg.ny = int(hd.ny);
+    in.cfg.nComp = int(hd.nComp);
+    in.cfg.cellM = hd.cellM;
+    in.cfg.spreadDeg = hd.spreadDeg;
+    in.cfg.barNormalDeg = hd.barNormalDeg;
+    in.cfg.gammaHs = hd.gammaHs;
+    in.cfg.minSamplesPerLambda = hd.minSamplesPerLambda;
+    in.cfg.orgX = hd.orgX;
+    in.cfg.orgZ = hd.orgZ;
+    in.cfg.featherM = table.feather;
+    in.level = hd.level;
+    in.currentMs = hd.currentMs;
+    in.hs = hd.hs;
+    in.tp = hd.tp;
+    in.mwdFromDeg = hd.mwdDeg;
+    std::vector<uint8_t> atlas2;
+    GpuTable table2{};
+    Solve(in, atlas2, table2, nullptr);
+    size_t d = 0;
+    const size_t n = (std::min)(atlas.size(), atlas2.size());
+    for (size_t i = 0; i < n; ++i) d += atlas[i] != atlas2[i];
+    d += (std::max)(atlas.size(), atlas2.size()) - n;
+    const bool dT = std::memcmp(&table, &table2, sizeof(GpuTable)) != 0;
+    Log("[wave-recheck] %s (key %016llx): this binary's solve of the entry's own planes: %zu of %zu atlas "
+        "bytes differ, the table %s", path.c_str(), static_cast<unsigned long long>(hd.key), d, atlas.size(),
+        dT ? "DIFFERS" : "equal");
+    return d == 0 && !dT;
 }
 
 void WaveField::SolveAsync(uint64_t key, double simUnix, std::vector<PartParam> parts) {
@@ -1191,7 +1346,7 @@ void WaveField::SolveAsync(uint64_t key, double simUnix, std::vector<PartParam> 
     // is a nested ParallelFor on the same lane, safe because that caller does its own share.
     Threads().Submit(Lane::Long, "wave.solve", [this, key, simUnix, p = std::move(parts)]() {
         Solved s;
-        if (LoadCache(key, s)) {   // F13: the cache first, on this worker (294 MB a read)
+        if (!wavecore::g_solveAudit && LoadCache(key, s)) {   // F13: the cache first, on this worker (294 MB a read)
             s.key = key;
             Log("[wave] cache hit %016llx -- read on a worker, offered without a solve",
                 static_cast<unsigned long long>(key));
@@ -1323,7 +1478,7 @@ bool WaveField::Update(Gpu& gpu, double simUnix, const PartParam* parts, int nPa
         // asynchronous path looks the key up on its worker first and solves only on a miss; the
         // blocking path (the dump frames) reads here as before.
         Solved s;
-        if (block && LoadCache(key, s)) {
+        if (block && !wavecore::g_solveAudit && LoadCache(key, s)) {
             // a cache hit is offered like a solve: its pages swap in, then it is live.
             s.key = key;
             Offer(std::move(s), "cache");

@@ -41,6 +41,8 @@
 
 namespace ga {
 
+namespace wavecore { struct Memo; }   // F25: the last solve's wavenumbers, by cell (WaveField.cpp)
+
 class Gpu;
 // Used by reference in Configure() and held as a pointer below. It was never declared here and
 // the header only ever compiled because every existing includer happened to pull CurrentModel.h
@@ -118,6 +120,13 @@ public:
         m_swe = swe;
         m_sweGain = gain;
     }
+    // F25 (the instrument): every solve is made twice, with the memo and cold, and against the
+    // cache's entry for its key when one stands; the differing bytes are printed ([wave-audit]).
+    static void SetSolveAudit(bool on);
+    // F25 (the instrument): `--tool wave-recheck:cache/wave/<key>.bin` -- a v2 cache entry's own
+    // input planes solved again by this binary, the atlas and table compared byte for byte with
+    // what the binary that wrote the entry produced. No device, no scene data. True when equal.
+    static bool RecheckCache(const std::string& path);
 
     // Per frame, main thread. parts/n = the live GFS-Wave partition set (SeaLayer's).
     // Kicks a background solve when a bucket rolls; uploads + swaps when one finishes.
@@ -313,6 +322,17 @@ private:
     class SweSolver* m_swe = nullptr;             // M8: the real flow (optional)
     float m_sweGain = 3.2f;                       // prism-truncation magnitude restore
     std::vector<float> m_curU, m_curV;            // solve-grid planes, main-thread owned
+    // F25: THE DISPERSION IS A FUNCTION OF THE CELL. k(sigma, h, along) depends on nothing but the
+    // cell's depth, its flow along the component and the component itself, and finding it is the
+    // solve's cost (96 brackets + 48 bisections of a tanh, 11 s of 20 at 1920x1152x32). A current
+    // change moves 2-8 % of the cells (measured 2026-10-06, four rolls at the helm); the rest ask
+    // the question they asked last time. The memo is the last solve's k planes with the planes
+    // they were solved on; one solve at a time reads and writes it (SolveNow: the worker or the
+    // blocking frame, never both -- m_inFlight). 610 MB at the Merrimack window, from the first
+    // solve on. The phase is NOT local -- a first-arrival field carries any upstream change to
+    // everything downstream (20-62 % of a component's cells moved per roll) -- so it is solved
+    // whole, every component on its own thread.
+    mutable std::shared_ptr<wavecore::Memo> m_memo;
     uint64_t m_curSig = 0;                        // quantized content hash -> bucket key
     double m_curReadT = -1e18;                    // last refresh (sim s)
     // F13: the resample of the read-back flow, on a worker; adopted on the main thread when done.
