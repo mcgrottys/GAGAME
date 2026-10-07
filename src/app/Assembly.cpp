@@ -1456,7 +1456,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
                               "pack-trees", "rastertest", "sea-verify", "selftest", "swe-cycle",
                               "swe-uv", "trace",
                               "tree-audit", "tree-prune", "twin-surface", "warm-inlet", "warm-trees",
-                              "water-map", "wave-map", "wave-recheck"}});
+                              "water-map", "wave-converge", "wave-map", "wave-recheck"}});
             scene::WriteRegistries("docs/registries.json", extra);
         }
         // The survey pack loads whenever it exists: the land MASKS are the default

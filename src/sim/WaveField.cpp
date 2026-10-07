@@ -57,12 +57,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <thread>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <mutex>
 
 namespace ga {
 
@@ -308,8 +310,17 @@ void BuildCurrentPlanes(const WaveFieldConfig& cfg, double level, double signedM
 // its own (RunWaveFieldSelfTest) -- the gauge that used to run INSIDE every solve (two more
 // integrations and a residual over 1.75 million cells, printing the same answer each time) runs
 // there now, once, where a failure fails the build and not a frame.
-void EikonalSweep(int nx, int ny, double dxm, double kInfC, double d0, double d1,
-                         const std::vector<double>& feik, std::vector<double>& phibuf) {
+// F28: THE SWEEP RUNS UNTIL IT IS STILL. Two rounds of the four orders were a count written into
+// the law, and the count was wrong where it mattered: measured on the helm window (the converge
+// tool, 2026-10-06), a third round still moved up to 970k cells of a component by up to 35 rad,
+// the field was still only after 3-8 more rounds, and 4.6-5.4 % of the drawn phase cells -- the
+// whole inlet between the jetties, the basin, the river -- were a two-round iterate, not the
+// eikonal solution. A fixed point has no number in it: a round of the four orders is swept until
+// a round moves no cell (the update only lowers, bounded below by the seed, so it ends). Returns
+// the rounds it took. `passes` > 0 is the instrument's probe (the converge tool): exactly that
+// many passes from the phase it is given, no fixed point.
+int EikonalSweep(int nx, int ny, double dxm, double kInfC, double d0, double d1,
+                        const std::vector<double>& feik, std::vector<double>& phibuf, int passes = 0) {
     const double kInf = 1e30;
     const int ib = (d0 >= 0.0) ? 0 : (nx - 1);      // the inflow corner
     const int jb = (d1 >= 0.0) ? 0 : (ny - 1);
@@ -324,7 +335,18 @@ void EikonalSweep(int nx, int ny, double dxm, double kInfC, double d0, double d1
         }
     };
     seed();
-    for (int pass = 0; pass < 8; ++pass) {          // two rounds of the four orders
+    constexpr int kRoundCap = 256;   // a guard on the loop, not a law: never reached (3-8 measured)
+    int rounds = 0;
+    bool moved = true;
+    for (int pass = 0; passes > 0 ? (pass < passes) : (moved || (pass & 3) != 0); ++pass) {
+        if ((pass & 3) == 0) {   // a round begins: nothing has moved in it yet
+            if (passes <= 0 && rounds >= kRoundCap) {
+                Log("[wave] eikonal: %d rounds and still moving -- the guard stopped it", rounds);
+                break;
+            }
+            moved = false;
+            ++rounds;
+        }
         seed();
         const bool xr = (pass & 1) != 0, yr = (pass & 2) != 0;
         for (int jj = 0; jj < ny; ++jj) {
@@ -346,12 +368,15 @@ void EikonalSweep(int nx, int ny, double dxm, double kInfC, double d0, double d1
                                         ? (lo + f)
                                         : 0.5 * (ax + ay +
                                                  std::sqrt(2.0 * f * f - dif * dif));
-                if (cand < phibuf[idx]) phibuf[idx] = cand;
+                if (cand < phibuf[idx]) {
+                    phibuf[idx] = cand;
+                    moved = true;
+                }
             }
         }
     }
     seed();   // the last sweep must not be allowed to undercut it either
-
+    return rounds;
 }
 
 // THE GAUGE: |grad phi| / k - 1 over the wet interior, as a distribution. An eikonal solution is
@@ -665,6 +690,7 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
     // was walked 32 times in a row on one thread (4.5 s). Under --wave-map the components run in
     // order on one thread so eta's sum is the sum it always was, to the bit.
     const int compGrain = cfg.mapPath.empty() ? 1 : nc;
+    std::atomic<int> roundsMin{INT_MAX}, roundsMax{0};   // F28: until still, per component
     Threads().ParallelFor(Lane::Long, "wave.comps", nc, compGrain, [&](int c0, int c1) {
     std::vector<double> phibuf(cells), feik(cells);
     for (int ic = c0; ic < c1; ++ic) {
@@ -703,7 +729,8 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
         //
         // So phi is SOLVED, not integrated: Godunov upwind fast sweeping for |grad phi| = k,
         // seeded on the two INFLOW edges (a 1-D path has no path-dependence, so the boundary
-        // datum is exact) and swept in the four diagonal orders twice. The update's own
+        // datum is exact) and swept in the four diagonal orders until a round moves no cell
+        // (F28; it was "twice", and twice left the inlet a two-round iterate). The update's own
         // quadratic is (phi-a)^2 + (phi-b)^2 = (k dx)^2, which for a plane wave reads
         // (k d0 dx)^2 + (k d1 dx)^2 = (k dx)^2 -- an identity -- so the scheme is EXACT for a
         // plane wave on a uniform k at ANY angle. Deep water is therefore untouched to the
@@ -753,7 +780,9 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
             //
             // Re-applied after every sweep so it stays a boundary condition rather than an
             // initial guess the sweep is free to undercut.
-            EikonalSweep(nx, ny, dxm, (sig * sig) / kGrav, d0, d1, feik, phibuf);
+            const int rounds = EikonalSweep(nx, ny, dxm, (sig * sig) / kGrav, d0, d1, feik, phibuf);
+            for (int cur = roundsMin.load(); rounds < cur && !roundsMin.compare_exchange_weak(cur, rounds);) {}
+            for (int cur = roundsMax.load(); rounds > cur && !roundsMax.compare_exchange_weak(cur, rounds);) {}
         }
 
         double kFieldMax = 0.0;
@@ -888,8 +917,9 @@ void Solve(const Inputs& in, std::vector<uint8_t>& atlas, WaveField::GpuTable& t
         100.0 * double(blockedCells.load()) / (double(nc) * double(cells)), in.level,
         in.currentMs);
     Log("[wave]   the dispersion %.1f s: %zu cells solved, %zu kept from the memo (F25); the phase %.1f s, "
-        "%d components in parallel; the rest %.1f s",
-        secsDisp, cellsSolved.load(), cellsKept.load(), secsEik, nUp, secs - secsDisp - secsEik);
+        "%d components in parallel, %d-%d rounds until still (F28); the rest %.1f s",
+        secsDisp, cellsSolved.load(), cellsKept.load(), secsEik, nUp,
+        nUp ? roundsMin.load() : 0, roundsMax.load(), secs - secsDisp - secsEik);
 }
 
 bool WriteCache(const char* path, uint64_t key, const Inputs& in,
@@ -1280,17 +1310,17 @@ WaveField::Solved WaveField::SolveNow(uint64_t key, double simUnix,
 
 void WaveField::SetSolveAudit(bool on) { wavecore::g_solveAudit = on; }
 
-bool WaveField::RecheckCache(const std::string& path) {
+// F25/F27: a v2 cache entry read back as the question it answered (its input planes) and the
+// answer (atlas, table), for the two offline instruments below.
+static bool ReadEntry(const std::string& path, wavecore::Inputs& in, std::vector<uint8_t>& atlas,
+                      WaveField::GpuTable& table, uint64_t& key, const char* tag) {
     using namespace wavecore;
     FILE* f = fopen(path.c_str(), "rb");
-    if (!f) { Log("[wave-recheck] cannot open %s", path.c_str()); return false; }
+    if (!f) { Log("[%s] cannot open %s", tag, path.c_str()); return false; }
     CacheHead hd;
-    GpuTable table{};
-    std::vector<uint8_t> atlas;
-    Inputs in;
     bool ok = fread(&hd, sizeof(hd), 1, f) == 1 && hd.magic == kCacheMagic &&
               hd.version == kCacheVersion && hd.hasInputs == 1u &&
-              hd.tableBytes == sizeof(GpuTable);
+              hd.tableBytes == sizeof(WaveField::GpuTable);
     if (ok) {
         atlas.resize(size_t(hd.atlasW) * size_t(hd.atlasH) * 4);
         const size_t cells = size_t(hd.nx) * size_t(hd.ny);
@@ -1302,7 +1332,7 @@ bool WaveField::RecheckCache(const std::string& path) {
              fread(in.v.data(), sizeof(float), cells, f) == cells;
     }
     fclose(f);
-    if (!ok) { Log("[wave-recheck] %s is not a v2 entry with input planes", path.c_str()); return false; }
+    if (!ok) { Log("[%s] %s is not a v2 entry with input planes", tag, path.c_str()); return false; }
     in.cfg.nx = int(hd.nx);
     in.cfg.ny = int(hd.ny);
     in.cfg.nComp = int(hd.nComp);
@@ -1319,6 +1349,17 @@ bool WaveField::RecheckCache(const std::string& path) {
     in.hs = hd.hs;
     in.tp = hd.tp;
     in.mwdFromDeg = hd.mwdDeg;
+    key = hd.key;
+    return true;
+}
+
+bool WaveField::RecheckCache(const std::string& path) {
+    using namespace wavecore;
+    Inputs in;
+    GpuTable table{};
+    std::vector<uint8_t> atlas;
+    uint64_t key = 0;
+    if (!ReadEntry(path, in, atlas, table, key, "wave-recheck")) return false;
     std::vector<uint8_t> atlas2;
     GpuTable table2{};
     Solve(in, atlas2, table2, nullptr);
@@ -1328,9 +1369,126 @@ bool WaveField::RecheckCache(const std::string& path) {
     d += (std::max)(atlas.size(), atlas2.size()) - n;
     const bool dT = std::memcmp(&table, &table2, sizeof(GpuTable)) != 0;
     Log("[wave-recheck] %s (key %016llx): this binary's solve of the entry's own planes: %zu of %zu atlas "
-        "bytes differ, the table %s", path.c_str(), static_cast<unsigned long long>(hd.key), d, atlas.size(),
+        "bytes differ, the table %s", path.c_str(), static_cast<unsigned long long>(key), d, atlas.size(),
         dT ? "DIFFERS" : "equal");
     return d == 0 && !dT;
+}
+
+// F27 (the instrument): HOW MANY ROUNDS THE EIKONAL NEEDS. This solves an entry's own planes with
+// the law's sweep, then keeps sweeping each component a round at a time until no cell moves, and
+// says per component how many cells each further round moved and by how much, and how many of
+// the DRAWN phase bytes (cos, sin at 8 bits) the law's phase differs in from the still one. It
+// found the two-round law wrong on 5 % of the drawn cells (the inlet); under F28 (until still) it
+// must report no round moving a cell and no cell drawn differently -- that is its gate.
+bool WaveField::ConvergeCache(const std::string& arg) {
+    using namespace wavecore;
+    // `<entry>[,<png>]`: the picture is where the two rounds' phase draws differently, north up,
+    // land dark, water white, red by how many components are off at the cell.
+    std::string path = arg, png;
+    if (const size_t c = arg.find(','); c != std::string::npos) { path = arg.substr(0, c); png = arg.substr(c + 1); }
+    Inputs in;
+    GpuTable table{};
+    std::vector<uint8_t> atlas;
+    uint64_t key = 0;
+    if (!ReadEntry(path, in, atlas, table, key, "wave-converge")) return false;
+    Memo memo;   // the k planes and each component's (sigma, d0, d1), as the solve found them
+    std::vector<uint8_t> atlas2;
+    GpuTable t2{};
+    Solve(in, atlas2, t2, &memo);
+    const int nx = memo.nx, ny = memo.ny, nc = memo.nc;
+    const size_t cells = size_t(nx) * size_t(ny);
+    if (!cells || !nc) { Log("[wave-converge] nothing solved"); return false; }
+    std::vector<double> h(cells);
+    for (size_t idx = 0; idx < cells; ++idx) h[idx] = (std::max)(in.level - double(in.bed[idx]), 0.0);
+    constexpr int kMaxRounds = 24;
+    struct Row { int rounds = 0; size_t moved[kMaxRounds] = {}; double step[kMaxRounds] = {}; size_t cellsOff = 0; bool on = false; };
+    std::vector<Row> perComp(static_cast<size_t>(nc));
+    std::vector<uint8_t> offAll(cells, 0);   // how many components draw the cell differently
+    std::mutex offMx;
+    Threads().ParallelFor(Lane::Long, "wave.converge", nc, 1, [&](int c0, int c1) {
+        std::vector<double> feik(cells), phi(cells), prev(cells);
+        std::vector<uint8_t> offMine(cells, 0);
+        for (int ic = c0; ic < c1; ++ic) {
+            if (!(t2.kMax[ic] > 0.0f)) continue;   // not uploaded (the fold gate)
+            Row& r = perComp[size_t(ic)];
+            r.on = true;
+            const double sig = memo.sig[ic], d0 = memo.d0[ic], d1 = memo.d1[ic];
+            bool bl = false;
+            const double kShore = SolveDispersion(sig, kDepthFloor, 0.0, bl);
+            const double* kp = memo.k.data() + size_t(ic) * cells;
+            for (size_t idx = 0; idx < cells; ++idx) {
+                feik[idx] = (h[idx] > 0.0) ? kp[idx] : kShore;
+                phi[idx] = 1e30;
+            }
+            EikonalSweep(nx, ny, in.cfg.cellM, (sig * sig) / kGrav, d0, d1, feik, phi);   // the solve's (F28: until still)
+            std::vector<double> phi8 = phi;
+            for (int round = 0; round < kMaxRounds; ++round) {
+                prev = phi;
+                EikonalSweep(nx, ny, in.cfg.cellM, (sig * sig) / kGrav, d0, d1, feik, phi, 4);
+                size_t moved = 0; double mx = 0.0;
+                for (size_t idx = 0; idx < cells; ++idx) {
+                    if (phi[idx] != prev[idx]) { ++moved; mx = (std::max)(mx, std::abs(prev[idx] - phi[idx])); }
+                }
+                r.moved[round] = moved; r.step[round] = mx; r.rounds = round + 1;
+                if (!moved) break;
+            }
+            for (size_t idx = 0; idx < cells; ++idx) {
+                if (h[idx] <= 0.0) continue;   // dry cells draw nothing
+                const uint8_t c8 = Quant8(std::cos(phi8[idx]) * 0.5 + 0.5, 1.0), s8 = Quant8(std::sin(phi8[idx]) * 0.5 + 0.5, 1.0);
+                const uint8_t c = Quant8(std::cos(phi[idx]) * 0.5 + 0.5, 1.0), s = Quant8(std::sin(phi[idx]) * 0.5 + 0.5, 1.0);
+                if (c8 != c || s8 != s) { ++r.cellsOff; ++offMine[idx]; }
+            }
+        }
+        std::lock_guard<std::mutex> lk(offMx);
+        for (size_t idx = 0; idx < cells; ++idx) offAll[idx] = uint8_t(offAll[idx] + offMine[idx]);
+    });
+    size_t wet = 0;
+    for (size_t idx = 0; idx < cells; ++idx) wet += h[idx] > 0.0;
+    int worstRounds = 0; size_t totalOff = 0;
+    for (int ic = 0; ic < nc; ++ic) {
+        const Row& r = perComp[size_t(ic)];
+        if (!r.on) continue;
+        std::string per;
+        char b[64];
+        for (int k = 0; k < r.rounds; ++k) {
+            snprintf(b, sizeof(b), "%s%zu (%.2g rad)", k ? ", " : "", r.moved[k], r.step[k]);
+            per += b;
+        }
+        const int more = r.rounds - (r.moved[r.rounds - 1] ? 0 : 1);
+        const double T = 2.0 * kPiW / memo.sig[ic];
+        Log("[wave-converge] comp %2d (T %.1f s): still after %d more round(s); cells moved by each (max step): %s; "
+            "the 2-round phase draws %zu of %zu wet cells differently (%.2f %%)",
+            ic, T, more, per.c_str(), r.cellsOff, wet, 100.0 * double(r.cellsOff) / double((std::max)(wet, size_t(1))));
+        worstRounds = (std::max)(worstRounds, more);
+        totalOff += r.cellsOff;
+    }
+    Log("[wave-converge] %s (key %016llx): %dx%d, %zu wet cells, %d components; the slowest component is still "
+        "after %d more round(s) beyond the solve's own; drawn-phase cells off, all components: %zu of %zu (%.2f %%)",
+        path.c_str(), static_cast<unsigned long long>(key), nx, ny, wet, nc, worstRounds, totalOff,
+        wet * size_t(nc), 100.0 * double(totalOff) / double((std::max)(wet * size_t(nc), size_t(1))));
+    if (!png.empty()) {
+        std::vector<uint8_t> img(cells * 4);
+        for (int j = 0; j < ny; ++j) {
+            const size_t src = size_t(ny - 1 - j) * size_t(nx);   // row 0 of the solve is SOUTH
+            const size_t dst = size_t(j) * size_t(nx);
+            for (int i = 0; i < nx; ++i) {
+                uint8_t* px = &img[(dst + size_t(i)) * 4];
+                px[3] = 255;
+                if (h[src + size_t(i)] <= 0.0) { px[0] = px[1] = px[2] = 40; continue; }
+                const double f = double(offAll[src + size_t(i)]) / double(nc);   // 0 = all agree
+                px[0] = 255;
+                px[1] = px[2] = uint8_t(255.0 * (1.0 - (std::min)(1.0, 3.0 * f)));
+            }
+        }
+        const std::wstring wp(png.begin(), png.end());
+        if (SavePng(wp, img.data(), uint32_t(nx), uint32_t(ny), uint32_t(nx) * 4, img.size())) {
+            Log("[wave-converge] wrote %s: where the solve's two rounds draw the phase differently (red by how many "
+                "components, saturating at a third of them)", png.c_str());
+        } else {
+            Log("[wave-converge] FAILED to write %s", png.c_str());
+        }
+    }
+    return true;
 }
 
 void WaveField::SolveAsync(uint64_t key, double simUnix, std::vector<PartParam> parts) {
