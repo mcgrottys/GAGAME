@@ -492,6 +492,9 @@ public:
     // entries it ordered and its time by part: statements, candidates, sort + cut, release + forget.
     uint64_t passTurns = 0, passSkipped = 0, passEntries = 0;
     double passMs[4] = {};
+    // ...inside passMs[2]: the sort of the first P not held, its length, and where the loader stopped.
+    double passSortMs = 0.0;
+    uint64_t passNeed = 0, passLoaderStop = 0, passLoaderTurns = 0;
     OrderTurnLedger orderTurn;
     uint64_t letGoTotal = 0, letGoReadTotal = 0, reloadedTotal = 0, rewantedTotal = 0;
     uint64_t releasedTotal = 0, mappedTotal = 0;   // an untraced rail's releases and maps
@@ -1106,6 +1109,16 @@ private:
     void OrderPass(OrderTurnLedger& L);
     std::string TileName(uint64_t key) const;
     void StarveWatch();   // the watchdog's turn (ResidencyOrder.cpp, after the loader)
+    // THE FIRST P NOT HELD, SORTED AS FAR AS IT IS READ. The pass used to sort the whole list (6,877
+    // entries a pass on the drive through the gate, 0.49 ms) for a loader that stops 89 entries in
+    // on average. Now the front is sorted in chunks as a reader reaches it (SortNeedTo): the next
+    // chunk partitioned to the front (nth_element), then sorted. The order is total (the key breaks
+    // every tie), so every entry a reader reaches is the entry the whole sort put there.
+    static constexpr size_t kNeedChunk = 512;
+    size_t m_needSorted = 0;
+    uint16_t m_needUnits = 0;
+    void SortNeedTo(size_t n);
+    static bool NeedBefore(const OrderEntry& a, const OrderEntry& b, uint16_t units);
     size_t m_loaderStop = 0;   // the m_need index the loader stopped at (the queue at capacity)   // "tenant [slice] mip (x,y)" from MakeKey's bits
     // H2 (HIERARCHY 4.19, the law completed): A TILE THAT IS HELD COUNTS FOR THE MARGIN TIMES ITS
     // MEASURE, and so does every tile above a held one (the held set stays closed upward: a parent
