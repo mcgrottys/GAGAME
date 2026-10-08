@@ -2640,6 +2640,25 @@ bool RunSceneSelfTest() {
         const double north[3] = {subj[0], subj[1], subj[2] + 50000.0};   // 50 km north of it
         g.True(mm.Project(north, r, sx, sy) && sy < cy, "[minimap] north is up at home");
 
+        // following: the subject moves and stays at the centre; the wheel zooms on it
+        const double moved[3] = {subj[0] + 4000.0, 0.0, subj[2] - 2500.0};
+        mm.Step(0.016f, moved);
+        g.True(mm.Following() && mm.Project(moved, r, sx, sy) && std::fabs(sx - cx) < 0.05f &&
+                   std::fabs(sy - cy) < 0.05f, "[minimap] it follows its subject");
+        {
+            InputState wh;
+            wh.mouseX = cx + 100.0f;   // off the centre: the follow zooms on the subject anyway
+            wh.mouseY = cy - 80.0f;
+            wh.wheel = 3.0f;
+            mm.Input(wh, W, H);
+            mm.Step(0.016f, moved);
+            g.True(mm.Following() && mm.Altitude() < 0.6 * mp.homeAltM &&
+                       mm.Project(moved, r, sx, sy) && std::fabs(sx - cx) < 0.05f && std::fabs(sy - cy) < 0.05f,
+                   "[minimap] the wheel zooms on the subject it follows");
+        }
+        mm.Reset();
+        for (int i = 0; i < 40; ++i) mm.Step(0.05f, subj);
+
         // a drag: press, then the cursor moves; the grabbed point follows the cursor
         InputState in;
         in.mouseX = cx + 30.0f;
@@ -2672,6 +2691,10 @@ bool RunSceneSelfTest() {
         up.mouseX = cx;
         up.mouseY = cy;
         mm.Input(up, W, H);
+        g.True(!mm.Following(), "[minimap] turning the planet lets the subject go");
+        mm.Step(0.016f, moved);
+        g.True(!mm.Project(moved, r, sx, sy) || std::fabs(sx - cx) > 1.0f || std::fabs(sy - cy) > 1.0f,
+               "[minimap] and the eye stays where the hand put it");
 
         // the wheel: in to the floor, out to the ceiling
         for (int i = 0; i < 300; ++i) {
@@ -2694,9 +2717,13 @@ bool RunSceneSelfTest() {
         }
         g.True(mm.Altitude() <= 8.0 * R + 1.0, "[minimap] the wheel never backs out past eight radii");
 
-        // Reset: the walk ends on home exactly
+        // Reset: the walk STARTS where the eye stands (no jump on its first frame) and ends on home
+        const double before = mm.Altitude();
         mm.Reset();
+        mm.Step(0.001f, subj);
+        g.Near(mm.Altitude(), before, 1e-3 * before + 1.0, "[minimap] the walk home starts where the eye stands");
         for (int i = 0; i < 40; ++i) mm.Step(0.05f, subj);
+        g.True(mm.Following(), "[minimap] Reset follows the subject again");
         g.True(!mm.Resetting(), "[minimap] the walk home ends");
         g.True(mm.Project(subj, r, sx, sy), "[minimap] Reset sees its subject");
         g.Near(sx, cx, 0.05, "[minimap] Reset puts the subject at the centre (x)");

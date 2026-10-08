@@ -256,7 +256,7 @@ struct MinimapProps {
     double size = 0.34;            // the square's side, as a fraction of the target's height
     uint32_t margin = 16;          // px from the bottom-right corner
     double homeAltM = 6.0e6;       // Reset: this far above the followed entity, looking down
-    double minAltM = 2.0;          // the zoom's floor above the sea
+    double minAltM = 8.0;          // the zoom's floor above the sea (over a hull's console)
 };
 struct HudSection {
     bool fps = false;              // the frame rate, top left

@@ -4047,7 +4047,9 @@ bool FrameLoop::Frame() {
         scene::ViewContext v1 = renderer.ViewOf(
             mc, static_cast<float>(simUnix - startUnix), 1, uint32_t(r.x), uint32_t(r.y),
             uint32_t(r.w), uint32_t(r.h), static_cast<float>(m_A.planetR + m_minimap.Altitude()));
-        v1.drawMask = renderer.LayerBit("globe") | (m_minimapSky ? renderer.LayerBit("sky") : 0);
+        // ...and the hulls, from its own eye (VesselLayer: the ones standing in its world).
+        v1.drawMask = renderer.LayerBit("globe") | renderer.LayerBit("vessels") |
+                      (m_minimapSky ? renderer.LayerBit("sky") : 0);
         v1.surface = &m_minimapSurface;
         viewSet.views.push_back(v1);
     }
@@ -5053,9 +5055,19 @@ void FrameLoop::DrawGlass(float dt) {
                   {0.85f, 0.9f, 1.0f, 0.85f}, 2.0f);
         float mx = 0.0f, my = 0.0f;
         if (m_minimapHasSubject && m_minimap.Project(m_minimapSubject, r, mx, my)) {
-            hud->Rect(mx - 9.0f, my - 9.0f, 18.0f, 18.0f, HudLayer::Ring, {0.0f, 0.0f, 0.0f, 0.6f}, 4.5f);
-            hud->Rect(mx - 8.0f, my - 8.0f, 16.0f, 16.0f, HudLayer::Ring, {1.0f, 0.45f, 0.1f, 1.0f}, 2.5f);
-            hud->Rect(mx - 2.5f, my - 2.5f, 5.0f, 5.0f, HudLayer::Ring, {1.0f, 0.45f, 0.1f, 1.0f});
+            // The marker stands in for a hull too small to see, and steps aside as the hull itself
+            // grows: full while it spans under ~12 px, gone by ~40 (a 7 m hull at the eye's range).
+            const Camera& mc = m_minimap.Cam();
+            const double dx = m_minimapSubject[0] - mc.px, dy = m_minimapSubject[1] - mc.py,
+                         dz = m_minimapSubject[2] - mc.pz;
+            const double hullPx = 7.0 / ((std::max)(std::sqrt(dx * dx + dy * dy + dz * dz), 1.0) *
+                                         2.0 * std::tan(0.5 * mc.fovY)) * r.h;
+            const float a = static_cast<float>(std::clamp((40.0 - hullPx) / 28.0, 0.0, 1.0));
+            if (a > 0.0f) {
+                hud->Rect(mx - 9.0f, my - 9.0f, 18.0f, 18.0f, HudLayer::Ring, {0.0f, 0.0f, 0.0f, 0.6f * a}, 4.5f);
+                hud->Rect(mx - 8.0f, my - 8.0f, 16.0f, 16.0f, HudLayer::Ring, {1.0f, 0.45f, 0.1f, a}, 2.5f);
+                hud->Rect(mx - 2.5f, my - 2.5f, 5.0f, 5.0f, HudLayer::Ring, {1.0f, 0.45f, 0.1f, a});
+            }
         }
         const double alt = m_minimap.Altitude();
         char a[32];

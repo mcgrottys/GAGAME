@@ -13,9 +13,12 @@
 //      wheel   a translator along the ray through the cursor, closing a fixed fraction of the
 //              distance per notch: every approach is exponential, so the wheel crosses the
 //              decades from orbit to the water at one rate (the floor is minAltM above the sea).
+//      follow  until the hand turns the planet, the eye stands straight above the followed
+//              entity, north up, at the follow altitude, every frame; the wheel then changes that
+//              altitude (it zooms on the entity), and a grab that turns the planet lets go.
 //      Reset   the screw from the pose to the home pose (homeAltM straight above the followed
 //              entity, north up), walked at constant twist (Motor::Slerp) with a smoothstep in
-//              time: rotation and translation arrive together.
+//              time: rotation and translation arrive together, and the eye follows again.
 //
 //  The rasterizer gets a Camera at the last moment (BuildCamera), with the motor's own up as the
 //  roll reference -- so looking straight down is an ordinary view, neither clamped nor blended
@@ -63,8 +66,12 @@ public:
     // Once a frame, before it is drawn: the followed entity's point in the root frame (null when
     // there is none), and the frame's wall time for the reset's walk.
     void Step(float dt, const double* subject);
-    void Reset() { m_resetT = 0.0f; }
+    void Reset() {
+        m_resetFrom = m_pose;   // the walk starts where the eye stands
+        m_resetT = 0.0f;
+    }
     bool Resetting() const { return m_resetT >= 0.0f; }
+    bool Following() const { return m_following; }
 
     // The rasterizer's camera, built from the motor.
     const Camera& Cam() const { return m_cam; }
@@ -81,7 +88,7 @@ public:
     }
 
 private:
-    Motor Home(const double s[3]) const;
+    Motor Home(const double s[3], double alt) const;
     void BuildCamera();
     void Ray(const Rect& r, float px, float py, double d[3]) const;
     bool HitSphere(const double d[3], double out[3]) const;
@@ -92,6 +99,8 @@ private:
     Motor m_pose = Motor::Identity();
     Camera m_cam;
     bool m_placed = false;
+    bool m_following = true;   // the eye stands above the subject until the hand turns the planet
+    double m_followAlt = 0.0;  // the altitude it follows at (set at Configure, moved by the wheel)
     bool m_dragging = false;
     bool m_lmbWas = false;
     double m_grab[3] = {};

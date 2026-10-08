@@ -255,7 +255,7 @@
       { "key": "size", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 0.34, "reload": "restart", "doc": "the square's side as a fraction of the target's height" },
       { "key": "margin", "type": "number", "field": "u32", "quantity": "1", "unit": "px", "default": 16, "reload": "restart", "doc": "the gap to the bottom-right corner" },
       { "key": "homeAltM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 6000000, "reload": "restart", "doc": "Reset: the eye this far above the followed entity" },
-      { "key": "minAltM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 2, "reload": "restart", "doc": "the zoom's floor above the sea" }
+      { "key": "minAltM", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 8, "reload": "restart", "doc": "the zoom's floor above the sea" }
     ] },
     { "type": "view", "keys": [
       { "key": "name", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the view's name" },

@@ -29,6 +29,7 @@ void Minimap::Configure(const MinimapProps& p, double planetR, const double pole
     for (int i = 0; i < 3; ++i) m_pole[i] = poleFlat[i];
     Unit(m_pole);
     m_cam.fovY = kFovY;
+    m_followAlt = p.homeAltM;
 }
 
 Minimap::Rect Minimap::Place(uint32_t W, uint32_t H) const {
@@ -115,8 +116,18 @@ bool Minimap::Input(InputState& in, uint32_t W, uint32_t H) {
             Unit(ax);
             const double ctr[3] = {0.0, -m_R, 0.0};
             m_pose = Motor::Rotation(ctr, ax, std::atan2(s, Dot(a, b))) * m_pose;
+            m_following = false;   // the hand turned the planet: the eye stays where it is put
             BuildCamera();
         }
+    }
+    if (over && in.wheel != 0.0f && m_following && !Resetting()) {
+        // Following: the wheel is the follow altitude, so the entity stays at the centre.
+        m_followAlt = std::clamp(m_followAlt * std::pow(kWheelStep, double(in.wheel)), m_p.minAltM,
+                                 8.0 * m_R);
+        m_pose = Home(m_subject, m_followAlt);
+        BuildCamera();
+        in.wheel = 0.0f;
+        took = true;
     }
     if (over && in.wheel != 0.0f) {
         // The translator along the cursor's ray: each notch keeps kWheelStep of the distance to
@@ -153,12 +164,11 @@ bool Minimap::Input(InputState& in, uint32_t W, uint32_t H) {
     return took;
 }
 
-Motor Minimap::Home(const double s[3]) const {
+Motor Minimap::Home(const double s[3], double alt) const {
     double n[3] = {s[0], s[1] + m_R, s[2]};   // the radial at the subject
     const double rs = std::sqrt(Dot(n, n));
     Unit(n);
-    const double eye[3] = {n[0] * (rs + m_p.homeAltM), n[1] * (rs + m_p.homeAltM) - m_R,
-                           n[2] * (rs + m_p.homeAltM)};
+    const double eye[3] = {n[0] * (rs + alt), n[1] * (rs + alt) - m_R, n[2] * (rs + alt)};
     const double f[3] = {-n[0], -n[1], -n[2]};
     // north up: the pole's part across the radial (at a pole, the frame's east)
     double u[3];
@@ -179,14 +189,21 @@ void Minimap::Step(float dt, const double* subject) {
         m_hasSubject = true;
     }
     if (!m_placed) {
-        m_pose = Home(m_subject);   // the anchor until there is a subject
+        m_pose = Home(m_subject, m_followAlt);   // the anchor until there is a subject
         m_placed = true;
     }
     if (m_resetT >= 0.0f) {
+        // the walk home ends on the moving subject, and the eye follows it from there
         m_resetT += dt;
         const double u = std::clamp(double(m_resetT) / kResetSec, 0.0, 1.0);
-        m_pose = Motor::Slerp(m_resetFrom, Home(m_subject), u * u * (3.0 - 2.0 * u));
-        if (u >= 1.0) m_resetT = -1.0f;
+        m_pose = Motor::Slerp(m_resetFrom, Home(m_subject, m_p.homeAltM), u * u * (3.0 - 2.0 * u));
+        if (u >= 1.0) {
+            m_resetT = -1.0f;
+            m_following = true;
+            m_followAlt = m_p.homeAltM;
+        }
+    } else if (m_following) {
+        m_pose = Home(m_subject, m_followAlt);
     }
     BuildCamera();
 }
