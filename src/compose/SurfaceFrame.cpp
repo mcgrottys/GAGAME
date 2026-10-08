@@ -160,6 +160,12 @@ int SurfaceFrame::RanksAt(const double eye[3], double R, double pixAng, uint32_t
 }
 
 void SurfaceFrame::Assign(uint32_t n, const double eyes[][3], double pixAng) {
+    double pix[kWindowSlots];
+    for (uint32_t s = 0; s < kWindowSlots; ++s) pix[s] = pixAng;
+    Assign(n, eyes, pix);
+}
+
+void SurfaceFrame::Assign(uint32_t n, const double eyes[][3], const double pixAngs[]) {
     n = (std::min)(n, kWindowSlots);
     slotsLive = n;
     uint32_t prev[kWindowSlots];
@@ -176,7 +182,7 @@ void SurfaceFrame::Assign(uint32_t n, const double eyes[][3], double pixAng) {
         const double rE = std::sqrt(eyes[s][0] * eyes[s][0] + eyes[s][1] * eyes[s][1] + eyes[s][2] * eyes[s][2]);
         const double d[3] = {eyes[s][0] / rE, eyes[s][1] / rE, eyes[s][2] / rE};
         uint32_t face = 0;
-        const uint32_t K = uint32_t(RanksAt(eyes[s], planetR, pixAng, &face));
+        const uint32_t K = uint32_t(RanksAt(eyes[s], planetR, pixAngs[s], &face));
         for (uint32_t w = 0; w < kWindowSlots; ++w) {
             int holds = 0;
             for (uint32_t k = 0; k < (std::min)(K, bound[w].K); ++k) {

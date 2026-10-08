@@ -3482,6 +3482,7 @@ bool FrameLoop::Frame() {
         // (hal::Tenant::Move: the slots whose tile changed are told, every other keeps its tile);
         // the rows draw the boxes of the frame before (SurfaceFrame::drawn), by when the turn has
         // told the map. A slot past the table holds no rank.
+        MinimapStep(dt);   // the second eye's pose this frame, before it claims a set
         {
             SurfaceFrame& sf = m_A.surface;
             const double pixAng = double(cam.fovY) / (std::max)(double(viewH), 1.0);
@@ -3498,9 +3499,24 @@ bool FrameLoop::Frame() {
                 for (int k = 0; k < 3; ++k) eyes[s][k] = sf.up[k] * ry + sf.east[k] * c[0] + sf.north[k] * c[2];
                 n = s + 1;
             }
+            // ANOTHER EYE CLAIMS TOO (the minimap): one more slot past the first eye's table, at its
+            // own pixel, so a window set follows it and the ground under it is as sharp as under the
+            // first eye. A table that fills every slot (a seven-window corridor) leaves it none.
+            double pixAngs[SurfaceFrame::kWindowSlots];
+            for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) pixAngs[s] = pixAng;
+            m_minimapSlot = SurfaceFrame::kNoSet;
+            if (m_minimapDrawn && n < SurfaceFrame::kWindowSlots) {
+                const Camera& mc = m_minimap.Cam();
+                const double ry = sf.planetR + mc.py;
+                for (int k = 0; k < 3; ++k) eyes[n][k] = sf.up[k] * ry + sf.east[k] * mc.px + sf.north[k] * mc.pz;
+                const scene::Minimap::Rect mr = m_minimap.Place(renderer.Width(), renderer.Height());
+                pixAngs[n] = double(mc.fovY) / (std::max)(double(mr.h), 1.0);
+                m_minimapSlot = n;
+                ++n;
+            }
             uint32_t was[SurfaceFrame::kWindowSlots];
             for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) was[s] = sf.slotSet[s];
-            sf.Assign(n, eyes, pixAng);
+            sf.Assign(n, eyes, pixAngs);
             for (uint32_t s = 0; s < n; ++s) {
                 if (sf.slotSet[s] != was[s]) {
                     Log("[eye-windows] frame %llu: slot %u claims set %d (it read %d)",
@@ -3510,11 +3526,15 @@ bool FrameLoop::Frame() {
             }
             for (uint32_t w = 0; w < SurfaceFrame::kWindowSlots; ++w) {
                 const double* e = nullptr;
+                double pixW = pixAng;
                 for (uint32_t s = 0; s < n; ++s) {
-                    if (sf.slotSet[s] == w) e = eyes[s];
+                    if (sf.slotSet[s] == w) {
+                        e = eyes[s];
+                        pixW = pixAngs[s];
+                    }
                 }
                 const uint32_t K0 = sf.bound[w].K;
-                sf.Follow(w, e, pixAng, moved);
+                sf.Follow(w, e, pixW, moved);
                 if (sf.bound[w].K != K0) {
                     Log("[eye-windows] frame %llu: set %u holds %u rank(s) (was %u)",
                         static_cast<unsigned long long>(frame), w, sf.bound[w].K, K0);
@@ -5252,7 +5272,7 @@ void FrameLoop::DrawGlass(float dt) {
 // there. The globe walks the planet again from this eye (GlobeLayer::SetOtherView: same tiles,
 // same pool, its own sampler), and the surface rows are filled about this eye -- the records and
 // the rows share one origin to the double, as the first eye's do.
-void FrameLoop::MinimapFrame(float dt) {
+void FrameLoop::MinimapStep(float dt) {
     m_minimapDrawn = false;
     GlobeLayer* globe = m_A.globe;
     if (!m_S.hud.minimap.enabled || !globe || !globe->enabled) return;
@@ -5264,21 +5284,30 @@ void FrameLoop::MinimapFrame(float dt) {
         m_minimapReady = true;
     }
     m_minimapHasSubject = false;
-    for (const auto& e : m_entities) {
-        if (!e || !e->Hull() || e->Name() != m_S.hud.minimap.follow) continue;
+    for (const auto& ent : m_entities) {
+        if (!ent || !ent->Hull() || ent->Name() != m_S.hud.minimap.follow) continue;
         double p[3] = {0.0, 0.0, 0.0};
-        e->Hull()->Body().pose.TransformPoint(p[0], p[1], p[2]);
-        e->DrawFrame().TransformPoint(p[0], p[1], p[2]);
+        ent->Hull()->Body().pose.TransformPoint(p[0], p[1], p[2]);
+        ent->DrawFrame().TransformPoint(p[0], p[1], p[2]);
         for (int i = 0; i < 3; ++i) m_minimapSubject[i] = p[i];
         m_minimapHasSubject = true;
         break;
     }
     m_minimap.Step(dt, m_minimapHasSubject ? m_minimapSubject : nullptr);
+    const scene::Minimap::Rect r = m_minimap.Place(m_A.renderer.Width(), m_A.renderer.Height());
+    m_minimapDrawn = r.w >= 8.0f && r.h >= 8.0f;   // it will be drawn: it may claim a set
+}
 
+void FrameLoop::MinimapFrame(float dt) {
+    (void)dt;   // (the motor stepped in MinimapStep, before the claims)
+    GlobeLayer* globe = m_A.globe;
+    if (!m_minimapDrawn || !globe || !globe->enabled) {
+        m_minimapDrawn = false;
+        return;
+    }
     const Camera& mc = m_minimap.Cam();
     const uint32_t W = m_A.renderer.Width(), H = m_A.renderer.Height();
     const scene::Minimap::Rect r = m_minimap.Place(W, H);
-    if (r.w < 8.0f || r.h < 8.0f) return;
     // THE EYE LAWS, as the first eye asks them: its sky, its walk, its surface rows.
     const Eye eye{1, &mc, r.w, r.h, 0};
     float sunRoot[3];
@@ -5326,8 +5355,23 @@ void FrameLoop::MinimapFrame(float dt) {
             ringsOf ? "stands its own rings" : "reads the first eye's rings", alt,
             std::sqrt(ddx * ddx + ddz * ddz));
     }
+    // ITS SLOTS, for its walk and its rows: slot 0 reads the set it claimed (none if the table left
+    // it no slot); its window worlds read no set -- the first eye's are taken about other eyes, and
+    // rows taken about another eye are the misaddressing the slot-eye fix removed -- so they read
+    // the cube. The table's own claims are put back.
+    SurfaceFrame& sf = m_A.surface;
+    uint32_t slotSet0[SurfaceFrame::kWindowSlots];
+    for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) slotSet0[s] = sf.slotSet[s];
+    const uint32_t slotsLive0 = sf.slotsLive;
+    const uint32_t own = m_minimapSlot < SurfaceFrame::kWindowSlots ? sf.slotSet[m_minimapSlot]
+                                                                    : SurfaceFrame::kNoSet;
+    for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) sf.slotSet[s] = SurfaceFrame::kNoSet;
+    sf.slotSet[0] = own;
+    sf.slotsLive = (std::min)(uint32_t(1 + win.n), SurfaceFrame::kWindowSlots);
     WalkEye(eye, exagg, es, m_minimapSky, &win, ringsOf);
     SurfaceFor(eye, m_minimapSurface);
+    for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) sf.slotSet[s] = slotSet0[s];
+    sf.slotsLive = slotsLive0;
     m_minimapDrawn = true;
 }
 

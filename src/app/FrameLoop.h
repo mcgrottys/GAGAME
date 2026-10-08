@@ -362,6 +362,10 @@ private:
     // THE SECOND EYE (scene hud.minimap, scene/Minimap.h): stepped and walked once a frame after
     // the first eye has settled, and appended to the frame's views as view 1.
     void MinimapFrame(float dt);
+    // Its motor steps (and its subject is read) before the frame's window sets are claimed, so the
+    // set it claims follows the eye it is this frame.
+    void MinimapStep(float dt);
+    uint32_t m_minimapSlot = 0xFFFFFFFFu;   // the level-table slot it claimed sets as (none: ~0)
     scene::Minimap m_minimap;
     bool m_minimapReady = false;     // configured (the planet and its pole are known)
     bool m_minimapDrawn = false;     // walked this frame: the views get a second element
