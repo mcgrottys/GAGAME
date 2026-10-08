@@ -21,12 +21,14 @@ uint32_t TexelBytes(DXGI_FORMAT fmt) {
 
 void RegionReadback::Init(Gpu& gpu, uint64_t bytesPerSlot, const wchar_t* name) {
     m_gpu = &gpu;
-    m_bytesPerSlot = bytesPerSlot;
+    // Every slot starts on the placement alignment (CopyRegion aligns within the slot).
+    m_bytesPerSlot = (bytesPerSlot + D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1u) &
+                     ~uint64_t(D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT - 1u);
     D3D12_HEAP_PROPERTIES hp{};
     hp.Type = D3D12_HEAP_TYPE_READBACK;
     D3D12_RESOURCE_DESC rd{};
     rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    rd.Width = bytesPerSlot * Gpu::kFrameCount;
+    rd.Width = m_bytesPerSlot * Gpu::kFrameCount;
     rd.Height = 1;
     rd.DepthOrArraySize = 1;
     rd.MipLevels = 1;
@@ -92,7 +94,12 @@ bool RegionReadback::CopyRegion(CommandContext& cmd, Resource src, uint32_t sub,
     D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp{};
     UINT64 total = 0;
     m_gpu->Device()->GetCopyableFootprints(&td, 0, 1, 0, &fp, nullptr, nullptr, &total);
-    const uint64_t at = (s.used + 7u) & ~uint64_t(7u);   // 8-byte aligned inside the slot
+    // A placed footprint's offset is a multiple of D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT (512) --
+    // D3D12's baseline rule; only an adapter reporting the unrestricted-pitch option relaxes it, and
+    // nothing asks. 8 was invalid on the rest (the solver queues its eta and uv copies back to back).
+    // The slots' stride is a multiple of 512 too (Init), so the absolute offset is.
+    constexpr uint64_t kPlace = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+    const uint64_t at = (s.used + kPlace - 1u) & ~(kPlace - 1u);
     if (at + total > m_bytesPerSlot) return false;
 
     D3D12_TEXTURE_COPY_LOCATION dst{}, from{};

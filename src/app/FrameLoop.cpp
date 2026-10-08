@@ -3989,6 +3989,7 @@ bool FrameLoop::Frame() {
         railPreMs.push_back(preMs);
         railPool.push_back(PoolCommittedBytes());
         resMgr.railMaps.push_back(resMgr.turn.direct + resMgr.turn.ring);   // H5: this frame's maps
+        resMgr.PushMapLedger();
         railInMs.push_back(inMs);
     } else if (!S.railDirW.empty() && frame >= 150u) {
         if (recPipe.Open()) {
@@ -4010,6 +4011,7 @@ bool FrameLoop::Frame() {
         railPreMs.push_back(preMs);
         railPool.push_back(PoolCommittedBytes());
         resMgr.railMaps.push_back(resMgr.turn.direct + resMgr.turn.ring);   // H5: this frame's maps
+        resMgr.PushMapLedger();
         railInMs.push_back(inMs);
     }
 
@@ -4485,7 +4487,8 @@ bool FrameLoop::Frame() {
                 fprintf(f, "frame,render_ms,render_fps,loop_ms,pool_bytes,pre_ms,resq_ms,"
                            "resq_retire,resq_dsland,resq_sortseen,resq_loads,"
                            "resq_sortload,resq_gather,resq_map,resq_dsenq,resq_ring,"
-                           "resq_resmap,bank_list_ms,meshlet_copy_ms,resq_maps\n");
+                           "resq_resmap,bank_list_ms,meshlet_copy_ms,resq_maps,"
+                           "map_heaps,map_heap_ms,map_calls,map_call_ms\n");
                 for (size_t i = 0; i < railMs.size(); ++i) {
                     fprintf(f, "%zu,%.4f,%.2f,%.4f,%llu,%.4f", i, double(railMs[i]),
                             railMs[i] > 0.0f ? 1000.0 / double(railMs[i]) : 0.0,
@@ -4498,9 +4501,12 @@ bool FrameLoop::Frame() {
                         i < railInMs.size() ? railInMs[i] : zero;
                     fprintf(f, ",%.4f", double(in[kInResTurn]));
                     for (int k = 0; k < kInPhases; ++k) fprintf(f, ",%.4f", double(in[k]));
-                    fprintf(f, ",%.4f,%.4f,%u\n", double(in[kInBankList]),
+                    fprintf(f, ",%.4f,%.4f,%u", double(in[kInBankList]),
                             double(in[kInMeshCopy]),
                             i < resMgr.railMaps.size() ? resMgr.railMaps[i] : 0u);
+                    const ResidencyManager::MapLedger ml =
+                        i < resMgr.railMapLedger.size() ? resMgr.railMapLedger[i] : ResidencyManager::MapLedger{};
+                    fprintf(f, ",%u,%.4f,%u,%.4f\n", ml.heaps, double(ml.heapMs), ml.calls, double(ml.callMs));
                 }
                 fclose(f);
                 Log("[rail] per-frame series -> %s", csv.c_str());

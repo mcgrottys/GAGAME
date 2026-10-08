@@ -118,12 +118,14 @@ void ResidencyManager::BirthMap(Gpu& gpu, int tenant) {
     // an upload that waits, so the first reader of any frame reads what the CPU's copy says.
     const uint32_t rdim = t.resMap.width;
     const uint32_t pitch = (rdim + 255u) & ~255u;
-    GpuBuffer stage = gpu.CreateUploadBuffer(static_cast<uint64_t>(pitch) * rdim * t.faces,
-                                             L"residency map at birth");
+    // Each face on D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT (512), whatever rdim is.
+    constexpr uint64_t kPlace = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+    const uint64_t faceBytes = (static_cast<uint64_t>(pitch) * rdim + kPlace - 1u) & ~(kPlace - 1u);
+    GpuBuffer stage = gpu.CreateUploadBuffer(faceBytes * t.faces, L"residency map at birth");
     auto* cl = gpu.BeginUpload();
     for (uint32_t f = 0; f < t.faces; ++f) {
         for (uint32_t y = 0; y < rdim; ++y) {
-            memcpy(stage.cpu + (static_cast<uint64_t>(f) * rdim + y) * pitch,
+            memcpy(stage.cpu + static_cast<uint64_t>(f) * faceBytes + static_cast<uint64_t>(y) * pitch,
                    &t.resCpu[f][size_t(y) * rdim], rdim);
         }
         D3D12_TEXTURE_COPY_LOCATION dl{}, sl{};
@@ -132,7 +134,7 @@ void ResidencyManager::BirthMap(Gpu& gpu, int tenant) {
         dl.SubresourceIndex = f;
         sl.pResource = stage.res.Get();
         sl.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        sl.PlacedFootprint.Offset = static_cast<uint64_t>(f) * rdim * pitch;
+        sl.PlacedFootprint.Offset = static_cast<uint64_t>(f) * faceBytes;
         sl.PlacedFootprint.Footprint = {DXGI_FORMAT_R8_UNORM, rdim, rdim, 1, pitch};
         cl->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
     }
