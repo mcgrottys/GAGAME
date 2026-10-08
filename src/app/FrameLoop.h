@@ -323,6 +323,17 @@ private:
     };
     // sunRoot: the root's sun; sunCam: the sun of the eye's own level (the root's outside a tower).
     EyeSky SkyOf(const Eye& e, const float sunRoot[3], const float sunCam[3]) const;
+    // Its dome handed to the sky layer: the first eye's into the layer's own frame, another's into
+    // its view's slot.
+    void HandSky(const Eye& e, const EyeSky& es);
+    // THE WALK OF AN EYE: the display exaggeration its altitude calls for, the globe's walk of the
+    // planet from it (the first eye's into the layer's working set, another's into its slot; another
+    // eye's backdrop is the sky layer's dome when `dome`, the globe's own pass otherwise), and the
+    // surface rows (b2) about it -- the first eye's into the renderer's own buffer, kept as the
+    // frame's eye; another's into `out`, with both eyes the rows are taken about put back.
+    float ReliefOf(const Eye& e) const;
+    void WalkEye(const Eye& e, float exagg, const EyeSky& es, bool dome);
+    void SurfaceFor(const Eye& e, ComposedSurfaceCb& out);
 
     // THE SECOND EYE (scene hud.minimap, scene/Minimap.h): stepped and walked once a frame after
     // the first eye has settled, and appended to the frame's views as view 1.

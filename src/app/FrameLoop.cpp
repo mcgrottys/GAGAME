@@ -2864,7 +2864,7 @@ bool FrameLoop::Frame() {
         // (The law is SkyOf; here is where the first eye's answer is handed over.)
         const float* rows = eyeSky0.rows;
         const float* skySun = eyeSky0.sun;
-        sky->SetSkyFrame(rows, skySun);
+        HandSky(Eye{0, &cam, 1.0f, 1.0f, camLevel}, eyeSky0);
         // M13: AND THE AIR ITSELF. The planet's air (its rows, scene/Air.h), the air's one table
         // (the same for every ray on the planet) and this eye's distance from the planet's
         // centre: the sky is the one integral along each ray from max(the eye, the air's entry)
@@ -3373,8 +3373,7 @@ bool FrameLoop::Frame() {
         cam.upHint[2] = 0.0f;
     }
     if (mode == 1 && globe) {
-        globe->reliefExagg =
-            static_cast<float>(std::clamp(altV / 250000.0, 1.0, 20.0));
+        globe->reliefExagg = ReliefOf(Eye{0, &cam, 1.0f, 1.0f, camLevel});
         PROF_BEGIN();
         const double g = groundAt(cam.px, cam.pz);
         PROF_END(6);
@@ -3382,8 +3381,9 @@ bool FrameLoop::Frame() {
         const float viewH = S.capture.headless ? static_cast<float>(S.capture.height)
                                          : static_cast<float>(
                                                std::max(1u, window.Height()));
-        const float aspect =
-            (S.capture.headless ? static_cast<float>(S.capture.width) : window.Width()) / viewH;
+        const float viewW = S.capture.headless ? static_cast<float>(S.capture.width)
+                                               : static_cast<float>(window.Width());
+        const float aspect = viewW / viewH;
         globe->WalkReset();
         resMgr.WantStatsReset();
         resMgr.wantProfile = S.capture.headless;   // F19: a headless run is a measurement
@@ -3672,7 +3672,7 @@ bool FrameLoop::Frame() {
             for (uint32_t w = 0; w < SurfaceFrame::kWindowSlots; ++w) m_ngK += sf.bound[w].K;
         }
         PROF_BEGIN();
-        globe->SetView(cam, aspect, viewH, simUnix - startUnix);
+        WalkEye(Eye{0, &cam, viewW, viewH, camLevel}, globe->reliefExagg, eyeSky0, true);
         PROF_END(7);
         // WHAT EACH WORLD COSTS: this walk's records per slot, when the corridor's depth changes and
         // every ten seconds of frames -- a window is walked only along its own rays, and a place's
@@ -3750,14 +3750,7 @@ bool FrameLoop::Frame() {
         // HIERARCHY 4.17 commit 3: the eye the standing blocks' rows are taken about -- the
         // globe walk's own formula on the same camera (GlobeLayer::CaptureWalk), so the rows and
         // the mesh records' eye-relative points share one origin, to the double.
-        {
-            SurfaceFrame& sf = m_A.surface;
-            const double ry = sf.planetR + cam.py;
-            for (int k = 0; k < 3; ++k) {
-                sf.eye[k] = sf.up[k] * ry + sf.east[k] * cam.px + sf.north[k] * cam.pz;
-            }
-        }
-        m_A.surface.Fill(renderer.surfaceCb, resMgr);
+        SurfaceFor(Eye{0, &cam, 1.0f, 1.0f, camLevel}, renderer.surfaceCb);
         // F9: the fingerprint carries the eye, so "when it changes" is every frame; it prints under
         // --cb-trace, with the kernels' (the M12 step 4b gate, whole, when asked for).
         static uint64_t sLastSurface = 0;
@@ -4971,6 +4964,69 @@ int FrameLoop::Finish() {
 #undef PROF_BEGIN
 #undef PROF_END
 
+// ---- THE EYE LAWS (step 3): one function each, every eye asks them ------------------------------
+void FrameLoop::HandSky(const Eye& e, const EyeSky& es) {
+    if (!m_A.sky) return;
+    if (e.view == 0) m_A.sky->SetSkyFrame(es.rows, es.sun);
+    else m_A.sky->SetOtherFrame(e.view, es.rows, es.sun);
+}
+
+// The display exaggeration of the relief: continuous in the eye's altitude, 1 at the helm and 20
+// from orbit (a display choice, M6g; the physics never sees it).
+float FrameLoop::ReliefOf(const Eye& e) const {
+    return static_cast<float>(std::clamp(m_altOf(*e.cam) / 250000.0, 1.0, 20.0));
+}
+
+void FrameLoop::WalkEye(const Eye& e, float exagg, const EyeSky& es, bool dome) {
+    GlobeLayer* globe = m_A.globe;
+    if (!globe) return;
+    const double t = m_simUnix - m_startUnix;
+    const float aspect = e.viewW / e.viewH;
+    if (e.view == 0) {
+        // The first eye's exaggeration is the layer's own (the camera's ground clamp reads it
+        // before the walk); its sky and levels were handed over above.
+        (void)exagg;
+        (void)es;
+        (void)dome;
+        globe->SetView(*e.cam, aspect, e.viewH, t);
+    } else {
+        globe->SetOtherView(m_A.gpu, e.view, *e.cam, aspect, e.viewH, t, exagg, es.camUp, !dome);
+    }
+}
+
+void FrameLoop::SurfaceFor(const Eye& e, ComposedSurfaceCb& out) {
+    // HIERARCHY 4.17 commit 3: the eye the standing blocks' rows are taken about -- the globe
+    // walk's own formula on the same camera (GlobeLayer::CaptureWalk), so the rows and the mesh
+    // records' eye-relative points share one origin, to the double.
+    SurfaceFrame& sf = m_A.surface;
+    const Camera& c = *e.cam;
+    const double ry = sf.planetR + c.py;
+    double eye[3];
+    for (int k = 0; k < 3; ++k) eye[k] = sf.up[k] * ry + sf.east[k] * c.px + sf.north[k] * c.pz;
+    if (e.view == 0) {
+        for (int k = 0; k < 3; ++k) sf.eye[k] = eye[k];   // the frame's eye, kept
+        sf.Fill(out, m_A.resMgr);
+        return;
+    }
+    // Another eye: BOTH eyes the rows are taken about move -- the surface's (the cube's rows) and
+    // slot 0's, the eye the windows' rows are taken about (SurfaceFrame::slotEye, RowsOf); moving
+    // only the first left the fine windows addressed from the first eye, sliding with the other
+    // eye's screen (Mark's catch, 2026-10-07). The windows themselves -- what is resident, and
+    // where -- stay the first eye's; only their rows move. Both are put back.
+    double eye0[3], slot0[3];
+    for (int k = 0; k < 3; ++k) {
+        eye0[k] = sf.eye[k];
+        slot0[k] = sf.slotEye[0][k];
+        sf.eye[k] = eye[k];
+        sf.slotEye[0][k] = eye[k];
+    }
+    sf.Fill(out, m_A.resMgr);
+    for (int k = 0; k < 3; ++k) {
+        sf.eye[k] = eye0[k];
+        sf.slotEye[0][k] = slot0[k];
+    }
+}
+
 // THE SKY OF AN EYE (step 3). Moved verbatim from the first eye's two blocks in Frame -- the
 // globe's slot-0 sky and the dome -- so the first eye's numbers are the ones it always had; every
 // other eye now asks the same law. M10: WHOSE SKY. Identity and the eye's own sun reproduce the old
@@ -5159,45 +5215,16 @@ void FrameLoop::MinimapFrame(float dt) {
     const uint32_t W = m_A.renderer.Width(), H = m_A.renderer.Height();
     const scene::Minimap::Rect r = m_minimap.Place(W, H);
     if (r.w < 8.0f || r.h < 8.0f) return;
-    const double alt = m_minimap.Altitude();
-    // THE SKY OF THIS EYE: the same law as the first eye's (SkyOf), at the root's level.
+    // THE EYE LAWS, as the first eye asks them: its sky, its walk, its surface rows.
+    const Eye eye{1, &mc, r.w, r.h, 0};
     float sunRoot[3];
     m_A.renderer.SunDir(sunRoot);
-    const EyeSky es = SkyOf(Eye{1, &mc, r.w, r.h, 0}, sunRoot, sunRoot);
+    const EyeSky es = SkyOf(eye, sunRoot, sunRoot);
     m_minimapEyeRadius = es.EyeRadius(m_A.planetR);
-    const float exagg = static_cast<float>(std::clamp(alt / 250000.0, 1.0, 20.0));
-    // ONE BACKDROP, ONE INTEGRAL, as the first eye has it: the sky layer's dome on this eye's own
-    // zenith (core/Dome.h, the root's sun carried onto it), marched from this eye's radius (b0),
-    // and the globe's backdrop pass off.
-    bool skyDome = false;
-    if (SkyLayer* sky = m_A.sky; sky && sky->enabled) {
-        sky->SetOtherFrame(1, es.rows, es.sun);
-        skyDome = true;
-    }
-    globe->SetOtherView(m_A.gpu, 1, mc, r.w / r.h, r.h, m_simUnix - m_startUnix, exagg, es.camUp,
-                        !skyDome);
-    m_minimapSky = skyDome;
-    // b2 about this eye: the frame's rows with the eye moved and put back (Fill is const). BOTH
-    // eyes the rows are taken about move: the surface's (the cube's rows) and slot 0's -- the eye
-    // the windows' rows are taken about (SurfaceFrame::slotEye, RowsOf). Moving only the first left
-    // the fine windows addressed from the first eye: they slid with the minimap's screen while the
-    // cube, the water and the marker panned under it (Mark's catch, 2026-10-07). The windows
-    // themselves -- what is resident, and where -- stay the first eye's; only their rows move.
-    double eye0[3], slot0[3];
-    for (int k = 0; k < 3; ++k) {
-        eye0[k] = sf.eye[k];
-        slot0[k] = sf.slotEye[0][k];
-    }
-    const double ry = sf.planetR + mc.py;
-    for (int k = 0; k < 3; ++k) {
-        sf.eye[k] = sf.up[k] * ry + sf.east[k] * mc.px + sf.north[k] * mc.pz;
-        sf.slotEye[0][k] = sf.eye[k];
-    }
-    sf.Fill(m_minimapSurface, m_A.resMgr);
-    for (int k = 0; k < 3; ++k) {
-        sf.eye[k] = eye0[k];
-        sf.slotEye[0][k] = slot0[k];
-    }
+    m_minimapSky = m_A.sky && m_A.sky->enabled;   // one backdrop, one integral, as the first eye's
+    if (m_minimapSky) HandSky(eye, es);
+    WalkEye(eye, ReliefOf(eye), es, m_minimapSky);
+    SurfaceFor(eye, m_minimapSurface);
     m_minimapDrawn = true;
 }
 
