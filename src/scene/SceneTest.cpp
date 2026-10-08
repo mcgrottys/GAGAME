@@ -2696,6 +2696,45 @@ bool RunSceneSelfTest() {
         g.True(!mm.Project(moved, r, sx, sy) || std::fabs(sx - cx) > 1.0f || std::fabs(sy - cy) > 1.0f,
                "[minimap] and the eye stays where the hand put it");
 
+        // THE GRAB AT EVERY HEIGHT (Mark, 2026-10-07: "when zoomed in a lot the panning breaks"): the
+        // same drag from orbit to the floor, over the anchor and 2,000 km from it, in the small
+        // steps a hand makes (3 px a frame) -- the grabbed point must stay under the cursor.
+        for (const double offM : {0.0, 2.0e6}) {
+            for (const double alt : {6.0e6, 2.0e4, 200.0, 20.0, 8.0}) {
+                MinimapProps hp = mp;
+                hp.homeAltM = alt;
+                Minimap hm;
+                hm.Configure(hp, R, pole);
+                const double th = offM / R;   // on the sea-level sphere, offM along it
+                const double hs[3] = {120.0 + R * std::sin(th), R * std::cos(th) - R, -10.0};
+                hm.Step(0.0f, hs);
+                InputState pr;
+                pr.mouseX = cx - 40.0f;
+                pr.mouseY = cy + 25.0f;
+                pr.lmb = true;
+                double hg[3];
+                hm.Pick(r, pr.mouseX, pr.mouseY, hg);
+                hm.Input(pr, W, H);
+                double hw = 0.0;
+                for (int k = 1; k <= 40; ++k) {
+                    InputState mv;
+                    mv.mouseX = pr.mouseX + 3.0f * k;
+                    mv.mouseY = pr.mouseY - 1.5f * k;
+                    mv.lmb = true;
+                    hm.Input(mv, W, H);
+                    hm.Step(0.016f, hs);
+                    float gx = 0.0f, gy = 0.0f;
+                    hw = hm.Project(hg, r, gx, gy)
+                             ? (std::max)(hw, double(std::hypot(gx - mv.mouseX, gy - mv.mouseY)))
+                             : 1e30;
+                }
+                Log("[minimap] grab at %.0f m, %.0f km from the anchor: %.4f px from the cursor "
+                    "over 40 hand steps (eye %.3f m up)",
+                    alt, offM * 1e-3, hw, hm.Altitude());
+                g.True(hw < 0.05, "[minimap] the grab holds at every height");
+            }
+        }
+
         // the wheel: in to the floor, out to the ceiling
         for (int i = 0; i < 300; ++i) {
             InputState wh;

@@ -5139,13 +5139,27 @@ void FrameLoop::MinimapFrame(float dt) {
     globe->SetOtherView(m_A.gpu, 1, mc, r.w / r.h, r.h, m_simUnix - m_startUnix, exagg, up,
                         !skyDome);
     m_minimapSky = skyDome;
-    // b2 about this eye: the frame's rows, with the eye moved and put back (Fill is const)
-    double eye0[3];
-    for (int k = 0; k < 3; ++k) eye0[k] = sf.eye[k];
+    // b2 about this eye: the frame's rows with the eye moved and put back (Fill is const). BOTH
+    // eyes the rows are taken about move: the surface's (the cube's rows) and slot 0's -- the eye
+    // the windows' rows are taken about (SurfaceFrame::slotEye, RowsOf). Moving only the first left
+    // the fine windows addressed from the first eye: they slid with the minimap's screen while the
+    // cube, the water and the marker panned under it (Mark's catch, 2026-10-07). The windows
+    // themselves -- what is resident, and where -- stay the first eye's; only their rows move.
+    double eye0[3], slot0[3];
+    for (int k = 0; k < 3; ++k) {
+        eye0[k] = sf.eye[k];
+        slot0[k] = sf.slotEye[0][k];
+    }
     const double ry = sf.planetR + mc.py;
-    for (int k = 0; k < 3; ++k) sf.eye[k] = sf.up[k] * ry + sf.east[k] * mc.px + sf.north[k] * mc.pz;
+    for (int k = 0; k < 3; ++k) {
+        sf.eye[k] = sf.up[k] * ry + sf.east[k] * mc.px + sf.north[k] * mc.pz;
+        sf.slotEye[0][k] = sf.eye[k];
+    }
     sf.Fill(m_minimapSurface, m_A.resMgr);
-    for (int k = 0; k < 3; ++k) sf.eye[k] = eye0[k];
+    for (int k = 0; k < 3; ++k) {
+        sf.eye[k] = eye0[k];
+        sf.slotEye[0][k] = slot0[k];
+    }
     m_minimapDrawn = true;
 }
 
