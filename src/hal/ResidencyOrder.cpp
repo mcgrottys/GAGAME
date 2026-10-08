@@ -943,7 +943,15 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
     uint32_t kept = 0;   // of the straddling bucket
     const uint16_t units = UnitTenants();   // F18: the tenants whose planes are one tile
     uint32_t unitPlanes = 0;
+    auto sub0 = std::chrono::steady_clock::now();
+    const auto subLap = [&](int k) {
+        const auto c = std::chrono::steady_clock::now();
+        passSub[k] += std::chrono::duration<double, std::milli>(c - sub0).count();
+        sub0 = c;
+    };
     const uint32_t s = CutOrder(m_rec, count, cut, mid, kept, units, &unitPlanes);
+    passMid += mid.size();
+    subLap(0);
     if (unitPlanes) {
         ++loader.unitCuts;
         loader.unitPlanes += unitPlanes;
@@ -978,6 +986,7 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
     } else {
         m_cutRung = kNoBucket;
     }
+    subLap(1);
     const bool motion = traceTurn || auditEvery != 0;   // the instrument rides the traced runs only
     for (OrdRec& r : m_rec) {
         if (!motion) break;
@@ -1055,19 +1064,22 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
         ++m_motion.passesCrossed;
         m_motion.lastCrossFrame = now;
     }
+    sub0 = std::chrono::steady_clock::now();   // (the motion walk rides traced runs only)
     // The first P not held, in the order: the loader's list and the gather's.
     m_need.clear();
     for (const OrdRec& r : m_rec) {
         // F13: a held tile whose bytes went stale (the version law) is in the loader's list at
         // its own measure: its refill competes with every other load as a want does.
-        if (!(r.flags & kInPBit) || ((r.flags & kHeldBit) && !r.tile->stale)) continue;
+        if (!(r.flags & kInPBit) || ((r.flags & kHeldBit) && (m_staleCount == 0 || !r.tile->stale))) continue;
         m_need.push_back({r.bucket, r.meas, r.key, r.tile});
         r.tile->firstP = now;
     }
+    subLap(2);
     passNeed += m_need.size();
     m_needSorted = 0;
     m_needUnits = units;
     SortNeedTo(kNeedChunk);   // the front; the readers sort on as they reach past it
+    sub0 = std::chrono::steady_clock::now();
     // The want's tail past this cut, by tenant and rung ([order-tail]).
     for (uint32_t i = 0; i < 16; ++i) m_tailTenant[i] = 0;
     for (uint32_t i = 0; i < kRungs; ++i) m_tailRung[i] = 0;
@@ -1080,6 +1092,7 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
         ++m_tailTenant[(r.key >> 56) & 15u];
         ++m_tailRung[r.bucket % kRungs];
     }
+    subLap(3);
     passLap(2);
     // ---- (d) THE EVICTOR: every held tile past the first P is released, in two steps, and may be
     // taken back while its slot retires (1b). A tile whose bytes are in flight is not held yet.
@@ -1275,7 +1288,7 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
             continue;
         }
         if (!stillHeld) {   // released by the cut or dropped meanwhile: nothing to swap
-            h->stale = false;
+            SetStale(h, false);
             h->refill.reset();
             m_refresh.erase(m_refresh.begin() + static_cast<std::ptrdiff_t>(i));
             continue;

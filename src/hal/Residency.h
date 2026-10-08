@@ -494,6 +494,15 @@ public:
     double passMs[4] = {};
     // ...inside passMs[2]: the sort of the first P not held, its length, and where the loader stopped.
     double passSortMs = 0.0;
+    // HOW MANY TILES ARE STALE, at most (the version law's held tiles whose bytes are old): every
+    // change of Tracked::stale goes through SetStale; a tile let go while stale leaves the count
+    // high, never low, so 0 means none -- and the pass then needs no tile's own word for it.
+    int64_t m_staleCount = 0;
+    // (SetStale, below the forward declaration of Tracked.)
+    // ...and the rest of passMs[2], by step: the cut (CutOrder), the cut's boundary stats, the list
+    // of the first P not held, the tail's count; and the straddling bucket's size.
+    double passSub[4] = {};
+    uint64_t passMid = 0;
     uint64_t passNeed = 0, passLoaderStop = 0, passLoaderTurns = 0;
     OrderTurnLedger orderTurn;
     uint64_t letGoTotal = 0, letGoReadTotal = 0, reloadedTotal = 0, rewantedTotal = 0;
@@ -616,6 +625,7 @@ public:
 
 private:
     struct Tracked;
+    void SetStale(Tracked* t, bool v);   // every change of Tracked::stale (m_staleCount)
     struct Tenant {
         std::wstring name;
         Com<ID3D12Resource> res;

@@ -4436,6 +4436,11 @@ bool FrameLoop::Frame() {
                         "a pass over %.0f entries; the loader stopped %.0f entries in, on average",
                         resMgr.passSortMs / pt, double(resMgr.passNeed) / pt,
                         double(resMgr.passLoaderStop) / double((std::max)(resMgr.passLoaderTurns, uint64_t(1))));
+                    Log("[rail]     order: the rest by step, a pass: the cut %.3f ms (its straddling bucket %.0f "
+                        "records), its boundary stats %.3f ms, the list of the first P not held %.3f ms, the "
+                        "tail's count %.3f ms",
+                        resMgr.passSub[0] / pt, double(resMgr.passMid) / pt, resMgr.passSub[1] / pt,
+                        resMgr.passSub[2] / pt, resMgr.passSub[3] / pt);
                 }
                 Log("[jobs] %llu jobs submitted, stream FNV-1a %016llx%s",
                     static_cast<unsigned long long>(ga::Threads().JobsSubmitted()),

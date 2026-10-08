@@ -891,6 +891,12 @@ void ResidencyManager::KeepPoolAhead(Gpu& gpu) {
     });
 }
 
+void ResidencyManager::SetStale(Tracked* t, bool v) {
+    if (t->stale == v) return;
+    t->stale = v;
+    m_staleCount += v ? 1 : -1;
+}
+
 uint32_t ResidencyManager::AcquirePoolTile(Gpu& gpu) {
     if (m_freePool.empty()) AdoptReadyHeaps();
     if (m_freePool.empty()) {
@@ -1042,7 +1048,7 @@ void ResidencyManager::Reload(int tenant) {
         const std::shared_ptr<Tracked> tr = t.tracked[i];
         if (tr->state == TileState::Mapped && tr->landed && !tr->dropped) {
             if (!tr->stale || !tr->refill) {
-                tr->stale = true;
+                SetStale(tr.get(), true);
                 auto job = std::make_shared<Tracked>();
                 job->tenant = tr->tenant;
                 job->req = tr->req;
@@ -1149,7 +1155,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             // B11: NOT when the slot's ground moved (a window's step): the held bytes are another
             // place's, and a reader addressing the slot would draw them there. Let go now.
             if (!inv.moved && tr->state == TileState::Mapped && tr->landed && !tr->dropped) {
-                tr->stale = true;
+                SetStale(tr, true);
                 bool asked = false;
                 for (Refresh& f : m_refresh) {
                     if (f.held.get() == tr) {
@@ -1667,7 +1673,7 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
                       D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE);
         off += 65536;
         ++m_ringTiles;
-        held->stale = false;
+        SetStale(held.get(), false);
         ++refreshedTotal;
         job->data.clear();
         job->data.shrink_to_fit();
