@@ -27,6 +27,8 @@
 //                                                googleZoom: the Google source's finest zoom)
 //      capture    {headless, width, height, frames, dump, hdr, mp4, railDir,
 //                  settle{sync, hold, exact, clearChurn}, residencyAudit}
+//      hud        {fps, minimap{enabled, follow, size, margin, homeAltM, minAltM}}
+//                                                    -- the windshield (scene/HudLayer.h)
 //      views      [{name, at, fovY, gauge, nearZ, reversedZ, target, viewport{}, follow{}}]
 //                                                    -- `at` in the placement sugar; absent
 //                                                       means the engine's default for the mode.
@@ -246,6 +248,20 @@ struct CaptureSection {
     // branch a turn. What the run records about its residency, beside what it records on screen.
     uint32_t residencyAudit = 0;
 };
+// THE WINDSHIELD (scene/HudLayer.h): what is drawn on the glass over the picture. A scene that
+// says nothing draws nothing there, and records what it recorded before the glass existed.
+struct MinimapProps {
+    bool enabled = false;
+    std::string follow = "boat";   // the entity the marker stands on and Reset centres over
+    double size = 0.34;            // the square's side, as a fraction of the target's height
+    uint32_t margin = 16;          // px from the bottom-right corner
+    double homeAltM = 6.0e6;       // Reset: this far above the followed entity, looking down
+    double minAltM = 8.0;          // the zoom's floor above the sea (over a hull's console)
+};
+struct HudSection {
+    bool fps = false;              // the frame rate, top left
+    MinimapProps minimap;          // the second eye, bottom right
+};
 // M12 step 5b: the rectangle of the target a view records into. Zero width or height = the
 // whole target, which is what every recorded frame means; an OFFSET is declarable and the
 // renderer reports that it cannot honour one yet (it needs a hal::CommandContext overload).
@@ -409,6 +425,7 @@ struct SceneDocument {
     WaterSection water;
     StreamingSection streaming;
     CaptureSection capture;
+    HudSection hud;
     RailsSection rails;
     PruneSection prune;
 };

@@ -170,6 +170,8 @@ struct SurfaceFrame {
     static uint32_t WindowSlice(uint32_t w, uint32_t rank) { return 6u + w * kMaxRanks + rank - 1u; }
     // The claim: slots 0..n-1 with their eyes (planet frame) take their sets; the other slots none.
     void Assign(uint32_t n, const double eyes[][3], double pixAng);
+    // ...each eye at its own pixel (a second eye's rectangle is not the first's).
+    void Assign(uint32_t n, const double eyes[][3], const double pixAngs[]);
     static uint32_t WindowSlices() { return 6u + kWindowSlots * kMaxRanks + 1u; }   // + the standing
     // THE MEASURE: the ranks an eye (planet frame, metres) wants on a planet of radius R at a
     // pixel of angle pixAng; its face and L are handed back for the log.

@@ -174,11 +174,24 @@ public:
     void ClearDepth(D3D12_CPU_DESCRIPTOR_HANDLE dsv, float depth = 0.0f) {
         m_cl->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, depth, 0, 0, nullptr);
     }
-    void Viewport(uint32_t w, uint32_t h) {
-        const D3D12_VIEWPORT vp{0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h), 0.0f, 1.0f};
-        const D3D12_RECT sc{0, 0, static_cast<LONG>(w), static_cast<LONG>(h)};
+    void Viewport(uint32_t w, uint32_t h) { Viewport(0, 0, w, h); }
+    // A rectangle of the target: the viewport maps clip space onto it and the scissor keeps every
+    // pixel inside it, so a view drawn into a corner cannot spill out of its corner.
+    void Viewport(uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+        const D3D12_VIEWPORT vp{static_cast<float>(x), static_cast<float>(y), static_cast<float>(w),
+                                static_cast<float>(h), 0.0f, 1.0f};
+        const D3D12_RECT sc{static_cast<LONG>(x), static_cast<LONG>(y), static_cast<LONG>(x + w),
+                            static_cast<LONG>(y + h)};
         m_cl->RSSetViewports(1, &vp);
         m_cl->RSSetScissorRects(1, &sc);
+    }
+    // The clears of one rectangle: a second view starts from far depth and black in its own
+    // rectangle and leaves the rest of the target as the views before it drew it.
+    void ClearColor(D3D12_CPU_DESCRIPTOR_HANDLE rtv, const float rgba[4], const D3D12_RECT& r) {
+        m_cl->ClearRenderTargetView(rtv, rgba, 1, &r);
+    }
+    void ClearDepth(D3D12_CPU_DESCRIPTOR_HANDLE dsv, float depth, const D3D12_RECT& r) {
+        m_cl->ClearDepthStencilView(dsv, D3D12_CLEAR_FLAG_DEPTH, depth, 0, 1, &r);
     }
 
     // ---- copies -----------------------------------------------------------------------------

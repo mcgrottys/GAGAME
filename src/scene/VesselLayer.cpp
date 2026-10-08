@@ -166,20 +166,29 @@ void VesselLayer::Render(const FrameContext& ctx) {
     // (The shader no longer subtracts the eye -- it receives the eye-relative position directly.)
     const Motor toEye = ctx.camera ? Motor::Translation(-ctx.camera->px, -ctx.camera->py, -ctx.camera->pz)
                                    : Motor::Identity();
-    m_parts.resize(m_cpu.size());
+    // ANOTHER EYE (the minimap's): the chain of windows is the first eye's, so it draws the hulls
+    // that stand in its own world -- depth 0, each in the place it really is -- and no window.
+    const bool firstEye = ctx.viewIndex == 0;
+    const int winN = firstEye ? m_winN : 0;
+    m_parts.clear();
+    m_parts.reserve(m_cpu.size());
     for (size_t k = 0; k < m_cpu.size(); ++k) {
+        if (!firstEye && m_cpu[k].depth != 0.0f) continue;
+        m_parts.emplace_back();
+        const size_t n = m_parts.size() - 1;
         const Motor rel = toEye * m_cpu[k].world;
         double re[4], du[4];
         rel.Real(re);
         rel.Dual(du);
         for (int i = 0; i < 4; ++i) {
-            m_parts[k].re[i] = static_cast<float>(re[i]);
-            m_parts[k].du[i] = static_cast<float>(du[i]);
-            m_parts[k].half[i] = m_cpu[k].half[i];
-            m_parts[k].opt[i] = 0.0f;
+            m_parts[n].re[i] = static_cast<float>(re[i]);
+            m_parts[n].du[i] = static_cast<float>(du[i]);
+            m_parts[n].half[i] = m_cpu[k].half[i];
+            m_parts[n].opt[i] = 0.0f;
         }
-        m_parts[k].opt[0] = m_cpu[k].depth;
+        m_parts[n].opt[0] = m_cpu[k].depth;
     }
+    if (m_parts.empty()) return;
     PixScope scope(ctx.cmd->Native(), "vessels (spec -> boxes, motor sandwich on the GPU)");
     // The constants: the part count and brightness as before, then the view's chain of windows
     // (M13) -- how deep it goes, each box packed as WindowBox.h says, and the one light as seen
@@ -192,8 +201,8 @@ void VesselLayer::Render(const FrameContext& ctx) {
     } cb{};
     cb.params[0] = static_cast<float>(m_parts.size());
     cb.params[1] = 1.0f;
-    cb.winA[0] = static_cast<float>(m_winN);
-    for (int k = 0; k < m_winN; ++k) {
+    cb.winA[0] = static_cast<float>(winN);
+    for (int k = 0; k < winN; ++k) {
         m_winBoxes[k].Pack(cb.box + k * 16);
         for (int i = 0; i < 3; ++i) cb.sun[k * 4 + i] = m_winSun[k * 3 + i];
     }

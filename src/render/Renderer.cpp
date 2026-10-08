@@ -8,7 +8,9 @@
 #include "scene/FieldSet.h"
 #include "scene/ViewContext.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 
 using namespace DirectX;
 
@@ -169,6 +171,11 @@ void Renderer::AddLayer(std::unique_ptr<Layer> layer) {
     m_layers.push_back(std::move(layer));
 }
 
+void Renderer::AddOverlay(std::unique_ptr<Layer> layer) {
+    Log("[renderer] + overlay '%s'", layer->Name());
+    m_overlays.push_back(std::move(layer));
+}
+
 Layer* Renderer::FindLayer(const char* name) {
     for (auto& l : m_layers) {
         if (strcmp(l->Name(), name) == 0) return l.get();
@@ -187,6 +194,7 @@ void Renderer::ReloadShaders() {
     Log("[renderer] reloading shaders");
     CreateTonemapPso();
     for (auto& l : m_layers) l->ReloadShaders(*m_gpu, m_shaders);
+    for (auto& o : m_overlays) o->ReloadShaders(*m_gpu, m_shaders);
 }
 
 // ================================================================================================
@@ -316,9 +324,36 @@ scene::ViewSet Renderer::OneView(const Camera& cam, float timeSec) const {
     FillSceneConstants(FillInputs(cam, timeSec), v.constants);
     v.target = "main";
     v.viewport = {0, 0, m_width, m_height};
+    v.drawMask = 0;
+    for (size_t i = 0; i < m_layers.size() && i < 64; ++i) {
+        if (m_layers[i]->enabled) v.drawMask |= 1ull << i;
+    }
     v.legacy.camera = &cam;
     v.legacy.timeSec = timeSec;
     return set;
+}
+
+scene::ViewContext Renderer::ViewOf(const Camera& cam, float timeSec, uint32_t index, uint32_t x,
+                                    uint32_t y, uint32_t w, uint32_t h, float eyeRadius) const {
+    scene::ViewContext v;
+    v.index = index;
+    SceneFill f = FillInputs(cam, timeSec);
+    f.width = w;
+    f.height = h;
+    f.eyeRadiusM = eyeRadius;
+    FillSceneConstants(f, v.constants);
+    v.target = "main";
+    v.viewport = {x, y, w, h};
+    v.legacy.camera = &cam;
+    v.legacy.timeSec = timeSec;
+    return v;
+}
+
+uint64_t Renderer::LayerBit(const char* name) const {
+    for (size_t i = 0; i < m_layers.size() && i < 64; ++i) {
+        if (strcmp(m_layers[i]->Name(), name) == 0) return 1ull << i;
+    }
+    return 0;
 }
 
 void Renderer::RenderFrame(const Camera& cam, float timeSec, float dt) {
@@ -400,16 +435,10 @@ void Renderer::RenderFrame(const scene::ViewSet& set) {
         // the legacy FrameContext that are the FRAME's (the device, the profiler, this view's
         // b0 address and its index), and the caller owns the ones that are the VIEW's.
         scene::ViewContext v = set.views[i];
-        const uint32_t vw = v.viewport.w ? v.viewport.w : m_width;
-        const uint32_t vh = v.viewport.h ? v.viewport.h : m_height;
-        if (v.viewport.x || v.viewport.y) {
-            // Reported, not guessed: an offset viewport needs one more overload on
-            // hal::CommandContext, which the seam step does not add.
-            Log("[renderer] view %u asks for a viewport at (%u, %u): an offset needs "
-                "hal::CommandContext::Viewport(x, y, w, h), which does not exist yet -- "
-                "recording the whole target instead",
-                v.index, v.viewport.x, v.viewport.y);
-        }
+        const uint32_t vx = v.viewport.x < m_width ? v.viewport.x : 0;
+        const uint32_t vy = v.viewport.y < m_height ? v.viewport.y : 0;
+        const uint32_t vw = v.viewport.w ? (std::min)(v.viewport.w, m_width - vx) : m_width;
+        const uint32_t vh = v.viewport.h ? (std::min)(v.viewport.h, m_height - vy) : m_height;
         v.cmd = &cmd;
         v.legacy.gpu = m_gpu;
         v.legacy.cmd = &cmd;
@@ -419,16 +448,24 @@ void Renderer::RenderFrame(const scene::ViewSet& set) {
         v.legacy.prof = prof;
         v.legacy.viewIndex = v.index;
 
-        cmd.Viewport(vw, vh);
+        cmd.Viewport(vx, vy, vw, vh);
+        if (i > 0) {
+            // A later view starts from far depth and black in its own rectangle; the frame's
+            // clear above was the first view's.
+            const D3D12_RECT r{LONG(vx), LONG(vy), LONG(vx + vw), LONG(vy + vh)};
+            cmd.ClearColor(colorRtv, clearColor, r);
+            cmd.ClearDepth(depthDsv, 0.0f, r);
+        }
 
         cmd.GraphicsRoot(m_rootSig.Get());
         cmd.GraphicsConstantsAt(0, sceneCbs[i]);
-        cmd.GraphicsConstantsAt(4, surfaceVa);   // b2: the surface, once, for every layer (4g)
+        cmd.GraphicsConstantsAt(4, v.surface ? cmd.Push(*v.surface) : surfaceVa);   // b2 (4g)
         if (m_fieldTableVa) cmd.GraphicsSrvAt(2, m_fieldTableVa);
         cmd.GraphicsBindless(3);
 
-        for (auto& l : m_layers) {
-            if (!l->declared || !l->enabled) continue;
+        for (size_t li = 0; li < m_layers.size(); ++li) {
+            auto& l = m_layers[li];
+            if (!l->declared || (li < 64 && !(v.drawMask >> li & 1ull))) continue;
             PixScope scope(cl, l->Name());
             GpuScope gscope(prof, cl, l->Name());
             if (beforeLayer) beforeLayer(l->Name());   // step 5: where each layer reads, in the frame
@@ -444,6 +481,7 @@ void Renderer::RenderFrame(const scene::ViewSet& set) {
         cmd.Barrier(m_ldrTarget, D3D12_RESOURCE_STATE_RENDER_TARGET);
         const auto ldrRtv = m_gpu->RtvHeap().Cpu(m_ldrRtv);
         cmd.Targets(ldrRtv, nullptr);
+        cmd.Viewport(m_width, m_height);   // the whole frame, whichever view recorded last
         cmd.Pipeline(m_tonemapPso.Get());
         cmd.GraphicsConstantsAt(0, sceneCbs[0]);   // the frame's exposure: view 0's rows
         if (m_fieldTableVa) cmd.GraphicsSrvAt(2, m_fieldTableVa);
@@ -451,6 +489,22 @@ void Renderer::RenderFrame(const scene::ViewSet& set) {
         struct { uint32_t srv; uint32_t pad[3]; } tm{m_sceneColor.srv, {0, 0, 0}};
         cmd.GraphicsConstants(1, tm);
         cmd.DrawFullscreen();   // fullscreen triangle from SV_VertexID, no vertex buffer
+    }
+
+    // ---- the windshield: over the whole display-referred frame, after the curve.
+    for (auto& o : m_overlays) {
+        if (!o->enabled) continue;
+        PixScope scope(cl, o->Name());
+        GpuScope gscope(prof, cl, o->Name());
+        FrameContext oc = set.views[0].legacy;
+        oc.gpu = m_gpu;
+        oc.cmd = &cmd;
+        oc.sceneCb = sceneCbs[0];
+        oc.width = m_width;
+        oc.height = m_height;
+        oc.prof = prof;
+        oc.viewIndex = set.views[0].index;
+        o->Render(oc);
     }
 
     // ---- to the swapchain, when there is one

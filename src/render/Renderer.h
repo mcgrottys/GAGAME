@@ -93,6 +93,7 @@ struct SceneFill {
 
 namespace scene {
 struct ViewSet;
+struct ViewContext;
 }
 
 struct RendererDesc {
@@ -121,6 +122,10 @@ public:
     void AddLayer(std::unique_ptr<Layer> layer);
     Layer* FindLayer(const char* name);
     const std::vector<std::unique_ptr<Layer>>& Layers() const { return m_layers; }
+    // THE WINDSHIELD: layers recorded AFTER the tonemap, into the display-referred target, over
+    // the whole frame whatever views it holds (scene/HudLayer.h). Not in the `layers` list: the
+    // glass is not part of any view's world, and a scene without one records what it did.
+    void AddOverlay(std::unique_ptr<Layer> layer);
 
     void OnResize(uint32_t width, uint32_t height);
     // The tonemap's scale (gParams1.w): the scene's air.exposure, or by default its law -- 1 / the
@@ -141,6 +146,13 @@ public:
     void RenderFrame(const Camera& cam, float timeSec, float dt);
     // That one view, built from a camera exactly as RenderFrame built its constants.
     scene::ViewSet OneView(const Camera& cam, float timeSec) const;
+    // Another eye: its camera, its rectangle of the target, the radius it stands at (the sky is
+    // marched from there) and its index in the set. It draws every declared layer until its
+    // owner says otherwise in drawMask.
+    scene::ViewContext ViewOf(const Camera& cam, float timeSec, uint32_t index, uint32_t x,
+                              uint32_t y, uint32_t w, uint32_t h, float eyeRadius) const;
+    // The bit of drawMask the layer named `name` answers to; 0 for a name not registered.
+    uint64_t LayerBit(const char* name) const;
     // THE FILL, static so it can read nothing but its inputs -- the gate's other half.
     static void FillSceneConstants(const SceneFill& f, SceneConstants& out);
     // This renderer's own inputs for one view (its target size, optics, sun, water).
@@ -241,6 +253,7 @@ private:
     uint32_t m_ldrRtv = UINT32_MAX;
 
     std::vector<std::unique_ptr<Layer>> m_layers;
+    std::vector<std::unique_ptr<Layer>> m_overlays;
     D3D12_GPU_VIRTUAL_ADDRESS m_fieldTableVa = 0;
     uint32_t m_width = 0, m_height = 0;
     std::unique_ptr<GpuProfiler> m_prof;

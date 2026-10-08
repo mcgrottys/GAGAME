@@ -71,6 +71,7 @@
 // trusted (priors 22). The three checks of block 11 were seen to fail with BOTH step 5d fixes
 // reverted (the unnamed list appended, `"base": ""` refused) before they were trusted.
 #include "app/Options.h"
+#include "core/Window.h"
 #include "scene/Gateway.h"
 #include "core/Dome.h"
 #include "sim/Ephemeris.h"
@@ -86,6 +87,7 @@
 #include "scene/Component.h"
 #include "scene/Entity.h"
 #include "scene/GlobeLayer.h"
+#include "scene/Minimap.h"
 #include "scene/Node.h"
 #include "scene/Portal.h"
 #include "scene/Rail.h"
@@ -2613,6 +2615,173 @@ bool RunSceneSelfTest() {
         g.Has(badWhy, "water.nope", "[reload] and the refusal names the path");
     }
 
+    // ---- 11. [minimap] the second eye's hand (scene/Minimap.h) ----------------------------------
+    // Headless runs never move a mouse, so the laws are pinned here: home puts the subject at the
+    // rectangle's centre at homeAltM; a drag keeps the grabbed point under the cursor; the wheel
+    // never crosses the floor or the ceiling; Reset walks back to home exactly; a point behind the
+    // limb is hidden; and what the minimap took never reaches the first eye.
+    {
+        const double R = 6371000.0, lat = kTestLat * 3.14159265358979323846 / 180.0;
+        const double pole[3] = {0.0, std::sin(lat), std::cos(lat)};
+        MinimapProps mp;
+        mp.enabled = true;
+        Minimap mm;
+        mm.Configure(mp, R, pole);
+        const uint32_t W = 1600, H = 900;
+        const Minimap::Rect r = mm.Place(W, H);
+        const double subj[3] = {120.0, 0.0, -10.0};
+        mm.Step(0.0f, subj);
+        float sx = 0.0f, sy = 0.0f;
+        const float cx = r.x + 0.5f * r.w, cy = r.y + 0.5f * r.h;
+        g.True(mm.Project(subj, r, sx, sy), "[minimap] home sees its subject");
+        g.Near(sx, cx, 0.05, "[minimap] home puts the subject at the centre (x)");
+        g.Near(sy, cy, 0.05, "[minimap] home puts the subject at the centre (y)");
+        g.Near(mm.Altitude(), mp.homeAltM, 1e-2, "[minimap] home stands homeAltM up");
+        const double north[3] = {subj[0], subj[1], subj[2] + 50000.0};   // 50 km north of it
+        g.True(mm.Project(north, r, sx, sy) && sy < cy, "[minimap] north is up at home");
+
+        // following: the subject moves and stays at the centre; the wheel zooms on it
+        const double moved[3] = {subj[0] + 4000.0, 0.0, subj[2] - 2500.0};
+        mm.Step(0.016f, moved);
+        g.True(mm.Following() && mm.Project(moved, r, sx, sy) && std::fabs(sx - cx) < 0.05f &&
+                   std::fabs(sy - cy) < 0.05f, "[minimap] it follows its subject");
+        {
+            InputState wh;
+            wh.mouseX = cx + 100.0f;   // off the centre: the follow zooms on the subject anyway
+            wh.mouseY = cy - 80.0f;
+            wh.wheel = 3.0f;
+            mm.Input(wh, W, H);
+            mm.Step(0.016f, moved);
+            g.True(mm.Following() && mm.Altitude() < 0.6 * mp.homeAltM &&
+                       mm.Project(moved, r, sx, sy) && std::fabs(sx - cx) < 0.05f && std::fabs(sy - cy) < 0.05f,
+                   "[minimap] the wheel zooms on the subject it follows");
+        }
+        mm.Reset();
+        for (int i = 0; i < 40; ++i) mm.Step(0.05f, subj);
+
+        // a drag: press, then the cursor moves; the grabbed point follows the cursor
+        InputState in;
+        in.mouseX = cx + 30.0f;
+        in.mouseY = cy + 20.0f;
+        in.lmb = true;
+        double grab[3];
+        mm.Pick(r, in.mouseX, in.mouseY, grab);
+        mm.Input(in, W, H);
+        g.True(!in.lmb, "[minimap] the press is the minimap's, not the first eye's");
+        double worst = 0.0;
+        const float path[4][2] = {{80.0f, -10.0f}, {-60.0f, 70.0f}, {140.0f, 120.0f}, {-130.0f, -140.0f}};
+        for (const auto& step : path) {
+            InputState mv;
+            mv.mouseX = cx + step[0];
+            mv.mouseY = cy + step[1];
+            mv.lmb = true;
+            mv.mouseDx = 5.0f;
+            mm.Input(mv, W, H);
+            g.True(mv.mouseDx == 0.0f && !mv.lmb, "[minimap] a drag never reaches the first eye");
+            float gx = 0.0f, gy = 0.0f;
+            if (mm.Project(grab, r, gx, gy)) {
+                worst = (std::max)(worst, double(std::hypot(gx - mv.mouseX, gy - mv.mouseY)));
+            } else {
+                worst = 1e30;
+            }
+        }
+        Log("[minimap] grab: the grabbed point stays %.4f px from the cursor over a 4-step drag", worst);
+        g.True(worst < 0.05, "[minimap] the grabbed point stays under the cursor");
+        InputState up;
+        up.mouseX = cx;
+        up.mouseY = cy;
+        mm.Input(up, W, H);
+        g.True(!mm.Following(), "[minimap] turning the planet lets the subject go");
+        mm.Step(0.016f, moved);
+        g.True(!mm.Project(moved, r, sx, sy) || std::fabs(sx - cx) > 1.0f || std::fabs(sy - cy) > 1.0f,
+               "[minimap] and the eye stays where the hand put it");
+
+        // THE GRAB AT EVERY HEIGHT (Mark, 2026-10-07: "when zoomed in a lot the panning breaks"): the
+        // same drag from orbit to the floor, over the anchor and 2,000 km from it, in the small
+        // steps a hand makes (3 px a frame) -- the grabbed point must stay under the cursor.
+        for (const double offM : {0.0, 2.0e6}) {
+            for (const double alt : {6.0e6, 2.0e4, 200.0, 20.0, 8.0}) {
+                MinimapProps hp = mp;
+                hp.homeAltM = alt;
+                Minimap hm;
+                hm.Configure(hp, R, pole);
+                const double th = offM / R;   // on the sea-level sphere, offM along it
+                const double hs[3] = {120.0 + R * std::sin(th), R * std::cos(th) - R, -10.0};
+                hm.Step(0.0f, hs);
+                InputState pr;
+                pr.mouseX = cx - 40.0f;
+                pr.mouseY = cy + 25.0f;
+                pr.lmb = true;
+                double hg[3];
+                hm.Pick(r, pr.mouseX, pr.mouseY, hg);
+                hm.Input(pr, W, H);
+                double hw = 0.0;
+                for (int k = 1; k <= 40; ++k) {
+                    InputState mv;
+                    mv.mouseX = pr.mouseX + 3.0f * k;
+                    mv.mouseY = pr.mouseY - 1.5f * k;
+                    mv.lmb = true;
+                    hm.Input(mv, W, H);
+                    hm.Step(0.016f, hs);
+                    float gx = 0.0f, gy = 0.0f;
+                    hw = hm.Project(hg, r, gx, gy)
+                             ? (std::max)(hw, double(std::hypot(gx - mv.mouseX, gy - mv.mouseY)))
+                             : 1e30;
+                }
+                Log("[minimap] grab at %.0f m, %.0f km from the anchor: %.4f px from the cursor "
+                    "over 40 hand steps (eye %.3f m up)",
+                    alt, offM * 1e-3, hw, hm.Altitude());
+                g.True(hw < 0.05, "[minimap] the grab holds at every height");
+            }
+        }
+
+        // the wheel: in to the floor, out to the ceiling
+        for (int i = 0; i < 300; ++i) {
+            InputState wh;
+            wh.mouseX = cx;
+            wh.mouseY = cy;
+            wh.wheel = 1.0f;
+            mm.Input(wh, W, H);
+            if (i == 0) g.True(wh.wheel == 0.0f, "[minimap] the wheel is the minimap's");
+        }
+        const double low = mm.Altitude();
+        Log("[minimap] wheel in x300: %.4f m above the sea (floor %.2f m)", low, mp.minAltM);
+        g.True(low >= mp.minAltM - 1e-6 && low < mp.minAltM + 0.5, "[minimap] the wheel reaches the floor and never crosses it");
+        for (int i = 0; i < 300; ++i) {
+            InputState wh;
+            wh.mouseX = cx;
+            wh.mouseY = cy;
+            wh.wheel = -1.0f;
+            mm.Input(wh, W, H);
+        }
+        g.True(mm.Altitude() <= 8.0 * R + 1.0, "[minimap] the wheel never backs out past eight radii");
+
+        // Reset: the walk STARTS where the eye stands (no jump on its first frame) and ends on home
+        const double before = mm.Altitude();
+        mm.Reset();
+        mm.Step(0.001f, subj);
+        g.Near(mm.Altitude(), before, 1e-3 * before + 1.0, "[minimap] the walk home starts where the eye stands");
+        for (int i = 0; i < 40; ++i) mm.Step(0.05f, subj);
+        g.True(mm.Following(), "[minimap] Reset follows the subject again");
+        g.True(!mm.Resetting(), "[minimap] the walk home ends");
+        g.True(mm.Project(subj, r, sx, sy), "[minimap] Reset sees its subject");
+        g.Near(sx, cx, 0.05, "[minimap] Reset puts the subject at the centre (x)");
+        g.Near(sy, cy, 0.05, "[minimap] Reset puts the subject at the centre (y)");
+        g.Near(mm.Altitude(), mp.homeAltM, 1e-2, "[minimap] Reset stands homeAltM up");
+
+        // the far side of the planet is behind the limb
+        const double antipode[3] = {0.0, -2.0 * R, 0.0};
+        g.True(!mm.Project(antipode, r, sx, sy), "[minimap] the antipode is hidden behind the limb");
+        // the button is the minimap's, and pressing it starts the walk
+        const Minimap::Rect b = Minimap::Button(r);
+        InputState bp;
+        bp.mouseX = b.x + 0.5f * b.w;
+        bp.mouseY = b.y + 0.5f * b.h;
+        bp.lmb = true;
+        mm.Input(bp, W, H);
+        g.True(mm.Resetting() && !bp.lmb, "[minimap] the button starts Reset and keeps its press");
+    }
+
     if (g.ok) {
         Log("[scene] ---- PASS (%d checks): Registry<T> == VesselRegistry / LoaderRegistry on the "
             "built-in kinds, the property table (defaults, units through GaUnits, the Velocity-"
@@ -2633,8 +2802,9 @@ bool RunSceneSelfTest() {
             "whole scene of 5f (the address and the pick, a Hot key applied, a Restart key "
             "reported and not applied, a removed key back to its declared default, a named-array "
             "remove named by the residue, a list under a target as a value -- hot where consumed, "
-            "reported where not --, idempotence, and an unknown key refusing the candidate whole) "
-            "----",
+            "reported where not --, idempotence, and an unknown key refusing the candidate whole), "
+            "and [minimap] the second eye's hand (home, the grab, the wheel's floor and ceiling, "
+            "Reset, the limb, what it keeps from the first eye) ----",
             g.checks);
     } else {
         Log("[scene] ---- FAIL (%d checks) ----", g.checks);

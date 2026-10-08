@@ -62,6 +62,10 @@
       "dir": 95
     }
   },
+  "hud": {
+    "fps": true,
+    "minimap": {"enabled": true, "follow": "boat"}
+  },
   "views": [
     {
       "name": "sea",

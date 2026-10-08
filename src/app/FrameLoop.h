@@ -84,6 +84,7 @@
 #include "scene/Entity.h"   // M12 step 5e: the hull as a node (its step state, its water)
 #include "scene/Portal.h"   // M12 step 5e: the Droste link and its cycle as a node
 #include "scene/Gateway.h"     // the cuboid gates to other places on the planet
+#include "scene/Minimap.h"     // the second eye in the corner of the glass (scene hud.minimap)
 #include "scene/Rail.h"     // M12 step 5e: the rails as data
 #include "sim/VesselSpec.h"
 #include "sim/WaveField.h"
@@ -293,6 +294,95 @@ private:
     // windows shows -- pulled back through the windows, so a boat is seen wherever a window shows
     // its place, its own reflection down the corridor included.
     void PublishHulls();
+    // THE WINDSHIELD (scene `hud`): the readouts on the glass, rebuilt each frame.
+    void DrawGlass(float dt);
+    // ---- AN EYE (step 3 of the HUD pass): one view of the frame -- the session's camera (view 0),
+    // the minimap, a second player's -- as the per-eye laws below take it. Each law is ONE function
+    // every eye calls; what differs between eyes is only where its answer is handed (the first
+    // eye's into the layers' own state, another's into that layer's slot for its view).
+    struct Eye {
+        uint32_t view = 0;                 // its index in the frame's views (0 = the session's)
+        const Camera* cam = nullptr;       // its pose this frame, in the root's tangent frame
+        float viewW = 1.0f, viewH = 1.0f;  // its rectangle of the target, px
+        int level = 0;                     // its gauge in the Droste tower (camLevel for view 0)
+    };
+    // THE SKY OF AN EYE: the dome it stands under and where in the air it stands.
+    struct EyeSky {
+        float camUp[3] = {0.0f, 1.0f, 0.0f};   // the globe's slot-0 sky: its zenith (SetCamSky)
+        float camDay = -1.0f;                  // ...and the day it is lit by (-1 = its own)
+        float rows[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};   // eye -> dome
+        float sun[3] = {0.0f, 1.0f, 0.0f};     // the sun in the dome's frame
+        float spaceSun[3] = {0.0f, 1.0f, 0.0f};   // the space backdrop's sun (SetSpaceSun)
+        int domeRel = 0;                       // whose dome, in levels from the eye's
+        double air[3] = {0.0, 0.0, 0.0};       // the eye in the dome's frame: the air is marched
+                                               // from here (its radius is the b0 eye radius)
+        float EyeRadius(double planetR) const {
+            const double gy = air[1] + planetR;
+            return static_cast<float>(std::sqrt(air[0] * air[0] + gy * gy + air[2] * air[2]));
+        }
+    };
+    // sunRoot: the root's sun; sunCam: the sun of the eye's own level (the root's outside a tower).
+    EyeSky SkyOf(const Eye& e, const float sunRoot[3], const float sunCam[3]) const;
+    // THE WALK OF AN EYE: the display exaggeration its altitude calls for, the globe's walk of the
+    // planet from it (the first eye's into the layer's working set, another's into its slot; another
+    // eye's backdrop is the sky layer's dome when `dome`, the globe's own pass otherwise), and the
+    // surface rows (b2) about it -- the first eye's into the renderer's own buffer, kept as the
+    // frame's eye; another's into `out`, with both eyes the rows are taken about put back.
+    float ReliefOf(const Eye& e) const;
+    // THE WINDOWS OF AN EYE: the gate worlds it reaches, built for the walk, the sky and the hulls.
+    struct EyeWindows {
+        int n = 0;
+        GlobeLayer::DrosteLevel levels[kMaxWindowChain];
+        WindowBox boxes[kMaxWindowChain];
+        float upWin[kMaxWindowChain * 4] = {};
+        float sunWin[kMaxWindowChain * 3] = {};
+        double viewHole[5][4] = {};
+        int viewHoleN = 0;
+        double eye[3] = {};                                       // the eye they were built about
+        double zE1[3] = {0.0, 1.0, 0.0}, sunE1[3] = {0.0, 1.0, 0.0};   // the first window's place
+    };
+    EyeWindows WindowsOf(const Eye& e, const std::vector<scene::WindowLink>& chain,
+                         const scene::ViewCone& view, float exagg, const float sunRoot[3]);
+    // The chain of gate windows an eye looks through, from its own cone (the first eye's begins with
+    // the windows its subject owes it; another eye owes nothing yet).
+    std::vector<scene::WindowLink> ChainOf(const Eye& e) const;
+    // Its dome (and another eye's windows) handed to the sky layer: the first eye's into the layer's
+    // own frame, another's into its view's slot.
+    void HandSky(const Eye& e, const EyeSky& es, const EyeWindows* win = nullptr);
+    void WalkEye(const Eye& e, float exagg, const EyeSky& es, bool dome,
+                 const EyeWindows* win = nullptr, const GlobeLayer::EyeRings* rings = nullptr);
+    void SurfaceFor(const Eye& e, ComposedSurfaceCb& out);
+    // THE RINGS OF AN EYE: a bank's ladder anchored about a point, standing in the windows whose rows
+    // are given (taken about rowsEye), wanting the bed each ring reads at its own grain; `orgs` gets
+    // the rings' origins for the globe. And the cascade sea's plane at an eye (sim/WaveChart.h).
+    void StandRings(WaterBankLayer* bank, const double at[3], const SurfaceFrame::ChainRows& rows,
+                    const double rowsEye[3], float orgs[12]);
+    bool ChartOf(const Eye& e, WaveChart::Frame& out) const;
+
+    // THE SECOND EYE (scene hud.minimap, scene/Minimap.h): stepped and walked once a frame after
+    // the first eye has settled, and appended to the frame's views as view 1.
+    void MinimapFrame(float dt);
+    // Its motor steps (and its subject is read) before the frame's window sets are claimed, so the
+    // set it claims follows the eye it is this frame.
+    void MinimapStep(float dt);
+    uint32_t m_minimapSlot = 0xFFFFFFFFu;   // the level-table slot it claimed sets as (none: ~0)
+    scene::Minimap m_minimap;
+    bool m_minimapReady = false;     // configured (the planet and its pole are known)
+    bool m_minimapDrawn = false;     // walked this frame: the views get a second element
+    bool m_minimapSky = false;       // its own dome is set: the sky layer draws in it
+    float m_minimapEyeRadius = 0.0f; // where in the air it stands (SkyOf), for its b0
+    int m_minimapWindowsSaid = 0;    // its window depth as last logged (on a change only)
+    bool m_minimapOwnRings = false;  // it stood its own rings last frame (logged on a change)
+    // Its own rings stand below this altitude (the sea's own band, M6g) and further than this from
+    // the first eye; nearer, the first eye's rings already stand where it looks.
+    static constexpr double kEyeRingsAltM = 60000.0;
+    static constexpr double kEyeRingsShareM = 1000.0;
+    ComposedSurfaceCb m_minimapSurface{};   // b2 about the minimap's eye
+    double m_minimapSubject[3] = {};
+    bool m_minimapHasSubject = false;
+    float m_glassMs = 0.0f;    // the frame time, smoothed over ~0.5 s
+    float m_glassAge = 0.0f;   // seconds since the readout was last reprinted
+    std::string m_glassText;
     scene::Entity* m_followed = nullptr;
     // ---- THE EYE'S OWN CROSSING (M13). A chase eye does not teleport with its subject. When the
     // hull goes through a window, the eye keeps standing on this side and chases the hull's

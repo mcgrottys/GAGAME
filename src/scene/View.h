@@ -144,6 +144,9 @@ public:
 
     // ---- THE RE-LEVELLING. Pure: no member is read or written.
     static Motor Level(const Motor& pose, const double up[3]);
+    // The motor of the frame at p looking along unit f with unit up u (u perpendicular to f):
+    // the rotor Level builds, for a caller that already holds the frame (a minimap's eye).
+    static Motor Frame(const double p[3], const double f[3], const double u[3]);
     static void Basis(const Motor& pose, const double up[3], double fwd[3], double right[3],
                       double upOut[3]);
 

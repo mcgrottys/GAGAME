@@ -32,6 +32,7 @@
 #include "scene/FieldSet.h"
 #include "scene/GisLayer.h"
 #include "scene/GlobeLayer.h"
+#include "scene/HudLayer.h"
 #include "scene/MarkerLayer.h"
 #include "scene/GulfLayer.h"
 #include "scene/SeaLayer.h"
@@ -214,6 +215,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     auto& sceneWatch = A->sceneWatch;
     auto& waterBank = A->waterBank;
     auto& waterBankB = A->waterBankB;
+    auto& waterBankEye = A->waterBankEye;
     auto& globe = A->globe;
     auto& vesselLayer = A->vesselLayer;
     auto& planetR = A->planetR;
@@ -236,6 +238,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     auto& srcGisMask = A->srcGisMask;
     auto& vectors = A->vectors;
     auto& gisLayer = A->gisLayer;
+    auto& hud = A->hud;
     auto& exchange = A->exchange;
     auto& colorCubeT = A->colorCubeT;
     auto& hgtTenant = A->hgtTenant;
@@ -740,6 +743,21 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             waterBankB->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             waterBankB->enabled = false;   // until the camera has a level above it
             renderer.AddLayer(std::move(wbB));
+        }
+        // ANOTHER EYE'S RINGS (scene hud.minimap): the same ladder anchored at the second eye, so
+        // the sea it looks down on has the waves the first eye's has, wherever it looks. The same
+        // stateless fill, run only in a frame that eye stands low enough to read it.
+        if (S.hud.minimap.enabled) {
+            auto wbE = std::make_unique<WaterBankLayer>();
+            waterBankEye = wbE.get();
+            waterBankEye->Configure(shaderDir, sea, &swe, &waterAtlas, &compositor, hgtCh, &globeModel);
+            waterBankEye->SetBaseTexel(waterScene.bankTexelM);
+            waterBankEye->SetSurface(&surface);
+            waterBankEye->flatBed = S.water.bank.flatBed;
+            waterBankEye->flatBedNavd = S.water.bank.flatBedNavd;
+            waterBankEye->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
+            waterBankEye->enabled = false;   // until that eye stands low enough to read it
+            renderer.AddLayer(std::move(wbE));
         }
     }
 
@@ -1484,6 +1502,13 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             mkOwned->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             mkOwned->enabled = !opt.albedo;   // the lens shows textures, nothing else
             renderer.AddLayer(std::move(mkOwned));
+        }
+        if (S.hud.fps || S.hud.minimap.enabled) {
+            auto hudOwned = std::make_unique<HudLayer>();
+            hudOwned->Configure(shaderDir);
+            hudOwned->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
+            hud = hudOwned.get();
+            renderer.AddOverlay(std::move(hudOwned));
         }
         globe->SetResidency(&resMgr, surf, norm, marsMode);
         globe->SetSurface(&surface);   // M12 step 4a: its radius, frame, lattices and tenants
