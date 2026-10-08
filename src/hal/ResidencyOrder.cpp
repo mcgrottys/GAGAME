@@ -118,12 +118,14 @@ void ResidencyManager::BirthMap(Gpu& gpu, int tenant) {
     // an upload that waits, so the first reader of any frame reads what the CPU's copy says.
     const uint32_t rdim = t.resMap.width;
     const uint32_t pitch = (rdim + 255u) & ~255u;
-    GpuBuffer stage = gpu.CreateUploadBuffer(static_cast<uint64_t>(pitch) * rdim * t.faces,
-                                             L"residency map at birth");
+    // Each face on D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT (512), whatever rdim is.
+    constexpr uint64_t kPlace = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+    const uint64_t faceBytes = (static_cast<uint64_t>(pitch) * rdim + kPlace - 1u) & ~(kPlace - 1u);
+    GpuBuffer stage = gpu.CreateUploadBuffer(faceBytes * t.faces, L"residency map at birth");
     auto* cl = gpu.BeginUpload();
     for (uint32_t f = 0; f < t.faces; ++f) {
         for (uint32_t y = 0; y < rdim; ++y) {
-            memcpy(stage.cpu + (static_cast<uint64_t>(f) * rdim + y) * pitch,
+            memcpy(stage.cpu + static_cast<uint64_t>(f) * faceBytes + static_cast<uint64_t>(y) * pitch,
                    &t.resCpu[f][size_t(y) * rdim], rdim);
         }
         D3D12_TEXTURE_COPY_LOCATION dl{}, sl{};
@@ -132,7 +134,7 @@ void ResidencyManager::BirthMap(Gpu& gpu, int tenant) {
         dl.SubresourceIndex = f;
         sl.pResource = stage.res.Get();
         sl.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-        sl.PlacedFootprint.Offset = static_cast<uint64_t>(f) * rdim * pitch;
+        sl.PlacedFootprint.Offset = static_cast<uint64_t>(f) * faceBytes;
         sl.PlacedFootprint.Footprint = {DXGI_FORMAT_R8_UNORM, rdim, rdim, 1, pitch};
         cl->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
     }
@@ -764,6 +766,29 @@ bool ResidencyManager::OrderSelfTest() {
     return ok;
 }
 
+// THE ORDER of the first P not held: the bucket, then the measure (the larger the sooner), then a
+// tile's planes together (F18). Total: no two entries are equal.
+bool ResidencyManager::NeedBefore(const OrderEntry& a, const OrderEntry& b, uint16_t units) {
+    if (a.bucket != b.bucket) return a.bucket < b.bucket;
+    if (a.weight != b.weight) return a.weight > b.weight;
+    const uint32_t ma = uint32_t(a.key >> 42) & 0x3Fu, mb = uint32_t(b.key >> 42) & 0x3Fu;
+    return ma != mb ? ma > mb : TieKey(a.key, units) < TieKey(b.key, units);
+}
+
+void ResidencyManager::SortNeedTo(size_t n) {
+    n = (std::min)(n, m_need.size());
+    if (n <= m_needSorted) return;
+    const auto sort0 = std::chrono::steady_clock::now();
+    const uint16_t units = m_needUnits;
+    const auto before = [units](const OrderEntry& a, const OrderEntry& b) { return NeedBefore(a, b, units); };
+    const auto first = m_need.begin() + static_cast<std::ptrdiff_t>(m_needSorted);
+    const auto last = m_need.begin() + static_cast<std::ptrdiff_t>(n);
+    if (last != m_need.end()) std::nth_element(first, last, m_need.end(), before);
+    std::sort(first, last, before);
+    m_needSorted = n;
+    passSortMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - sort0).count();
+}
+
 void ResidencyManager::OrderPass(OrderTurnLedger& L) {
     const auto p0 = std::chrono::steady_clock::now();
     auto pc = p0;
@@ -918,7 +943,15 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
     uint32_t kept = 0;   // of the straddling bucket
     const uint16_t units = UnitTenants();   // F18: the tenants whose planes are one tile
     uint32_t unitPlanes = 0;
+    auto sub0 = std::chrono::steady_clock::now();
+    const auto subLap = [&](int k) {
+        const auto c = std::chrono::steady_clock::now();
+        passSub[k] += std::chrono::duration<double, std::milli>(c - sub0).count();
+        sub0 = c;
+    };
     const uint32_t s = CutOrder(m_rec, count, cut, mid, kept, units, &unitPlanes);
+    passMid += mid.size();
+    subLap(0);
     if (unitPlanes) {
         ++loader.unitCuts;
         loader.unitPlanes += unitPlanes;
@@ -953,6 +986,7 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
     } else {
         m_cutRung = kNoBucket;
     }
+    subLap(1);
     const bool motion = traceTurn || auditEvery != 0;   // the instrument rides the traced runs only
     for (OrdRec& r : m_rec) {
         if (!motion) break;
@@ -1030,21 +1064,22 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
         ++m_motion.passesCrossed;
         m_motion.lastCrossFrame = now;
     }
+    sub0 = std::chrono::steady_clock::now();   // (the motion walk rides traced runs only)
     // The first P not held, in the order: the loader's list and the gather's.
     m_need.clear();
     for (const OrdRec& r : m_rec) {
         // F13: a held tile whose bytes went stale (the version law) is in the loader's list at
         // its own measure: its refill competes with every other load as a want does.
-        if (!(r.flags & kInPBit) || ((r.flags & kHeldBit) && !r.tile->stale)) continue;
+        if (!(r.flags & kInPBit) || ((r.flags & kHeldBit) && (m_staleCount == 0 || !r.tile->stale))) continue;
         m_need.push_back({r.bucket, r.meas, r.key, r.tile});
         r.tile->firstP = now;
     }
-    std::sort(m_need.begin(), m_need.end(), [units](const OrderEntry& a, const OrderEntry& b) {
-        if (a.bucket != b.bucket) return a.bucket < b.bucket;
-        if (a.weight != b.weight) return a.weight > b.weight;   // the measure, the larger the sooner
-        const uint32_t ma = uint32_t(a.key >> 42) & 0x3Fu, mb = uint32_t(b.key >> 42) & 0x3Fu;
-        return ma != mb ? ma > mb : TieKey(a.key, units) < TieKey(b.key, units);   // F18: a tile's planes together
-    });
+    subLap(2);
+    passNeed += m_need.size();
+    m_needSorted = 0;
+    m_needUnits = units;
+    SortNeedTo(kNeedChunk);   // the front; the readers sort on as they reach past it
+    sub0 = std::chrono::steady_clock::now();
     // The want's tail past this cut, by tenant and rung ([order-tail]).
     for (uint32_t i = 0; i < 16; ++i) m_tailTenant[i] = 0;
     for (uint32_t i = 0; i < kRungs; ++i) m_tailRung[i] = 0;
@@ -1057,6 +1092,7 @@ void ResidencyManager::OrderPass(OrderTurnLedger& L) {
         ++m_tailTenant[(r.key >> 56) & 15u];
         ++m_tailRung[r.bucket % kRungs];
     }
+    subLap(3);
     passLap(2);
     // ---- (d) THE EVICTOR: every held tile past the first P is released, in two steps, and may be
     // taken back while its slot retires (1b). A tile whose bytes are in flight is not held yet.
@@ -1252,7 +1288,7 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
             continue;
         }
         if (!stillHeld) {   // released by the cut or dropped meanwhile: nothing to swap
-            h->stale = false;
+            SetStale(h, false);
             h->refill.reset();
             m_refresh.erase(m_refresh.begin() + static_cast<std::ptrdiff_t>(i));
             continue;
@@ -1293,6 +1329,7 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
     loader.inFlightAtTurn += static_cast<uint64_t>((std::max)(m_inFlight.load(), 0));
     const auto issuedAt = std::chrono::steady_clock::now();
     for (size_t ni = 0; ni < m_need.size(); ++ni) {
+        if (ni >= m_needSorted) SortNeedTo(ni + kNeedChunk);
         const OrderEntry& e = m_need[ni];
         Tracked* tr = e.tile;
         if (tr->state == TileState::Mapped && tr->landed) {
@@ -1398,6 +1435,8 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
     m_orderPending = pending;
     L.pending = pending;
     L.atCap = m_loaderStop < m_need.size();
+    passLoaderStop += (std::min)(m_loaderStop, m_need.size());
+    ++passLoaderTurns;
     loader.turnsAtCap += L.atCap ? 1u : 0u;
     loader.pendingAtTurn += pending;
     loader.reads += L.issued;
@@ -1416,8 +1455,22 @@ void ResidencyManager::OrderTurn(std::vector<std::shared_ptr<Tracked>>& toLoad,
     const size_t slots = settleExact ? SIZE_MAX
                                      : m_freePool.size() + (made < kPoolCapTiles ? kPoolCapTiles - made : 0u);
     const size_t maxBatch = (std::min)(static_cast<size_t>(kMaxMapsPerFrame) - refills.size() / 2, slots);
+    // The loaded tiles of the first P, in the order: the few that are loaded are picked out of the
+    // list and only they are sorted (the list itself is sorted only as far as the loader read it).
+    std::vector<const OrderEntry*> ready;
     for (const OrderEntry& e : m_need) {
+        if (e.tile->state == TileState::Loaded && e.tile->pos != UINT32_MAX) ready.push_back(&e);
+    }
+    {
+        const uint16_t units = m_needUnits;
+        const size_t keep = (std::min)(ready.size(), maxBatch);
+        const auto before = [units](const OrderEntry* a, const OrderEntry* b) { return NeedBefore(*a, *b, units); };
+        std::partial_sort(ready.begin(), ready.begin() + static_cast<std::ptrdiff_t>(keep), ready.end(), before);
+        ready.resize(keep);
+    }
+    for (const OrderEntry* pe : ready) {
         if (batch.size() >= maxBatch) break;
+        const OrderEntry& e = *pe;
         Tracked* tr = e.tile;
         if (tr->state != TileState::Loaded || tr->pos == UINT32_MAX) continue;
         batch.push_back(m_tenants[tr->tenant].tracked[tr->pos]);

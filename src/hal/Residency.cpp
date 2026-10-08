@@ -38,7 +38,7 @@ void ResidencyManager::Shutdown() {
     // pool joined its own threads here, which had the same effect for free.)
     m_quit = true;
     std::unique_lock<std::mutex> lk(m_mx);
-    m_drainCv.wait(lk, [this] { return m_inFlight.load() == 0; });
+    m_drainCv.wait(lk, [this] { return m_inFlight.load() == 0 && m_heapJobs.load() == 0; });
 }
 
 void ResidencyManager::RunLoad(const std::shared_ptr<Tracked>& job) {
@@ -834,20 +834,78 @@ Motor ResidencyManager::PredictNextPose(const Motor& current, double aheadFrames
     return pred;
 }
 
+namespace {
+Com<ID3D12Heap> MakePoolChunk(ID3D12Device* device, uint32_t tiles) {
+    D3D12_HEAP_DESC hd{};
+    hd.SizeInBytes = static_cast<uint64_t>(tiles) * 65536;
+    hd.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+    hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
+    Com<ID3D12Heap> heap;
+    GA_CHECK(device->CreateHeap(&hd, IID_PPV_ARGS(&heap)));
+    heap->SetName(L"residency pool chunk");
+    return heap;
+}
+}  // namespace
+
+void ResidencyManager::AddChunk(Com<ID3D12Heap> heap) {
+    const uint32_t chunk = static_cast<uint32_t>(m_heaps.size());
+    m_heaps.push_back(std::move(heap));
+    // The new chunk's slots go UNDER the free list's top, so the slots of the chunks already made
+    // are handed out first, in the order they always were.
+    std::vector<uint32_t> fresh;
+    fresh.reserve(kPoolChunkTiles);
+    for (uint32_t i = 0; i < kPoolChunkTiles; ++i) fresh.push_back((chunk << 16) | (kPoolChunkTiles - 1 - i));
+    m_freePool.insert(m_freePool.begin(), fresh.begin(), fresh.end());
+}
+
+void ResidencyManager::AdoptReadyHeaps() {
+    std::vector<Com<ID3D12Heap>> ready;
+    {
+        std::lock_guard<std::mutex> lk(m_mx);
+        ready.swap(m_heapsReady);
+    }
+    for (auto& h : ready) {
+        AddChunk(std::move(h));
+        ++mapHeapsAhead;
+    }
+}
+
+void ResidencyManager::KeepPoolAhead(Gpu& gpu) {
+    if (m_quit.load() || m_freePool.size() >= kPoolReserveTiles || m_heapJobs.load() != 0) return;
+    size_t ready = 0;
+    {
+        std::lock_guard<std::mutex> lk(m_mx);
+        ready = m_heapsReady.size();
+    }
+    // Never past the budget: the chunks made and ready stay under the cap (the exact hold, which
+    // lifts the cap, grows inline as it always did).
+    if ((m_heaps.size() + ready + 1) * kPoolChunkTiles > kPoolCapTiles) return;
+    ++m_heapJobs;
+    ID3D12Device* device = gpu.Device();
+    Threads().Submit(Lane::Long, "residency.chunk", [this, device] {
+        Com<ID3D12Heap> heap = MakePoolChunk(device, kPoolChunkTiles);
+        std::lock_guard<std::mutex> lk(m_mx);
+        m_heapsReady.push_back(std::move(heap));
+        --m_heapJobs;
+        m_drainCv.notify_all();
+    });
+}
+
+void ResidencyManager::SetStale(Tracked* t, bool v) {
+    if (t->stale == v) return;
+    t->stale = v;
+    m_staleCount += v ? 1 : -1;
+}
+
 uint32_t ResidencyManager::AcquirePoolTile(Gpu& gpu) {
+    if (m_freePool.empty()) AdoptReadyHeaps();
     if (m_freePool.empty()) {
-        D3D12_HEAP_DESC hd{};
-        hd.SizeInBytes = static_cast<uint64_t>(kPoolChunkTiles) * 65536;
-        hd.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
-        hd.Flags = D3D12_HEAP_FLAG_ALLOW_ONLY_NON_RT_DS_TEXTURES;
-        Com<ID3D12Heap> heap;
-        GA_CHECK(gpu.Device()->CreateHeap(&hd, IID_PPV_ARGS(&heap)));
-        heap->SetName(L"residency pool chunk");
-        const uint32_t chunk = static_cast<uint32_t>(m_heaps.size());
-        m_heaps.push_back(heap);
-        for (uint32_t i = 0; i < kPoolChunkTiles; ++i) {
-            m_freePool.push_back((chunk << 16) | (kPoolChunkTiles - 1 - i));
-        }
+        // Dry before the worker's chunk was ready: made here, on the turn (the ledger counts it).
+        const auto h0 = std::chrono::steady_clock::now();
+        Com<ID3D12Heap> heap = MakePoolChunk(gpu.Device(), kPoolChunkTiles);
+        AddChunk(std::move(heap));
+        ++mapHeaps;
+        mapHeapMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - h0).count();
     }
     const uint32_t slot = m_freePool.back();
     m_freePool.pop_back();
@@ -990,7 +1048,7 @@ void ResidencyManager::Reload(int tenant) {
         const std::shared_ptr<Tracked> tr = t.tracked[i];
         if (tr->state == TileState::Mapped && tr->landed && !tr->dropped) {
             if (!tr->stale || !tr->refill) {
-                tr->stale = true;
+                SetStale(tr.get(), true);
                 auto job = std::make_shared<Tracked>();
                 job->tenant = tr->tenant;
                 job->req = tr->req;
@@ -1064,6 +1122,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
     auto lap0 = turn0;
     for (double& p : phaseMs) p = 0.0;
     turn = TurnLedger{};   // step 28: the landing ledger, this turn's
+    AdoptReadyHeaps();     // the chunks a worker made since the last turn (KeepPoolAhead)
     auto lap = [&](int k) {
         const auto t = Clock::now();
         phaseMs[k] += std::chrono::duration<double, std::milli>(t - lap0).count();
@@ -1096,7 +1155,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             // B11: NOT when the slot's ground moved (a window's step): the held bytes are another
             // place's, and a reader addressing the slot would draw them there. Let go now.
             if (!inv.moved && tr->state == TileState::Mapped && tr->landed && !tr->dropped) {
-                tr->stale = true;
+                SetStale(tr, true);
                 bool asked = false;
                 for (Refresh& f : m_refresh) {
                     if (f.held.get() == tr) {
@@ -1346,7 +1405,13 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         t.resDirty = false;
         const uint32_t rdim = t.resMap.width;
         const uint32_t pitch = (rdim + 255u) & ~255u;
-        const uint64_t bytes = static_cast<uint64_t>(pitch) * rdim * t.faces;
+        // Every face's placed footprint starts on D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT (512): the
+        // face stride and the stage's own offset are aligned, whatever rdim is (an odd one put every
+        // other face 256 bytes off).
+        constexpr uint64_t kPlace = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
+        const uint64_t faceBytes = (static_cast<uint64_t>(pitch) * rdim + kPlace - 1u) & ~(kPlace - 1u);
+        mapStage = (mapStage + kPlace - 1u) & ~(kPlace - 1u);
+        const uint64_t bytes = faceBytes * t.faces;
         GpuBuffer& ring = m_uploadRing[gpu.FrameIndex()];
         if (mapStage + bytes > static_cast<uint64_t>(kMaxMapsPerFrame) * 65536 + kMapStageBytes) {
             t.resDirty = true;   // no room this frame: keep it dirty, it goes next frame
@@ -1358,7 +1423,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
         gpu.Transition(cl, t.resMap, D3D12_RESOURCE_STATE_COPY_DEST);
         for (uint32_t f = 0; f < t.faces; ++f) {
             for (uint32_t y = 0; y < rdim; ++y) {
-                memcpy(dst + (static_cast<uint64_t>(f) * rdim + y) * pitch,
+                memcpy(dst + static_cast<uint64_t>(f) * faceBytes + static_cast<uint64_t>(y) * pitch,
                        &t.resCpu[f][y * rdim], rdim);
             }
             D3D12_TEXTURE_COPY_LOCATION dl{}, sl{};
@@ -1367,7 +1432,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
             dl.SubresourceIndex = f;
             sl.pResource = ring.res.Get();
             sl.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-            sl.PlacedFootprint.Offset = tail + static_cast<uint64_t>(f) * rdim * pitch;
+            sl.PlacedFootprint.Offset = tail + static_cast<uint64_t>(f) * faceBytes;
             sl.PlacedFootprint.Footprint = {DXGI_FORMAT_R8_UNORM, rdim, rdim, 1, pitch};
             cl->CopyTextureRegion(&dl, 0, 0, 0, &sl, nullptr);
         }
@@ -1407,6 +1472,7 @@ void ResidencyManager::ProcessQueues(Gpu& gpu, ID3D12GraphicsCommandList* cl) {
                  f.bytes() / 1048576.0);
         stats += fs;
     }
+    KeepPoolAhead(gpu);    // the next chunk, off the turn, before the free list runs dry
     turnMs = std::chrono::duration<double, std::milli>(Clock::now() - turn0).count();
     // The residency audit (ResidencyAudit.cpp): the turn's bytes against its tiles, outside turnMs.
     if (auditEvery && (m_frame % auditEvery) == 0u) LogAudit();
@@ -1494,13 +1560,16 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
     }
 
     // Queue-side mapping updates land before this frame's list executes.
+    const auto u0 = Clock::now();
     for (auto& [key, c] : calls) {
+        ++mapCalls;
         gpu.Queue()->UpdateTileMappings(
             m_tenants[key.first].res.Get(), static_cast<UINT>(c.coords.size()), c.coords.data(),
             c.sizes.data(), key.second == UINT32_MAX ? nullptr : m_heaps[key.second].Get(),
             static_cast<UINT>(c.flags.size()), c.flags.data(), c.offsets.data(), c.counts.data(),
             D3D12_TILE_MAPPING_FLAG_NONE);
     }
+    mapCallMs += std::chrono::duration<double, std::milli>(Clock::now() - u0).count();
 
     // Fill through the frame-indexed upload ring: linear 64KB blobs -> swizzled tiles.
     GpuBuffer& ring = m_uploadRing[gpu.FrameIndex()];
@@ -1604,7 +1673,7 @@ void ResidencyManager::MapAndFill(Gpu& gpu, ID3D12GraphicsCommandList* cl,
                       D3D12_TILE_COPY_FLAG_LINEAR_BUFFER_TO_SWIZZLED_TILED_RESOURCE);
         off += 65536;
         ++m_ringTiles;
-        held->stale = false;
+        SetStale(held.get(), false);
         ++refreshedTotal;
         job->data.clear();
         job->data.shrink_to_fit();

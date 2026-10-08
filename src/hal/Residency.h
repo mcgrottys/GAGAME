@@ -394,6 +394,10 @@ public:
         return (k >= 0 && k < kPhases) ? kNames[k] : "?";
     }
     double phaseMs[kPhases] = {};
+    // THE MAP PHASE'S LEDGER (phase 6), cumulative: pool chunks created (CreateHeap, 8 MB each) and
+    // their wall time, UpdateTileMappings calls and theirs. The caller differences them per turn.
+    uint64_t mapHeaps = 0, mapCalls = 0, mapHeapsAhead = 0;   // inline creations; worker-made adopted
+    double mapHeapMs = 0.0, mapCallMs = 0.0;
     double turnMs = 0.0;   // the whole ProcessQueues call (phases + the untimed stats string)
     // DirectStorage batches whose fence has not signalled: mapped, not yet claimed. Together
     // with PendingCount() this is "nothing is still landing" -- what --settle-sync waits for.
@@ -488,6 +492,18 @@ public:
     // entries it ordered and its time by part: statements, candidates, sort + cut, release + forget.
     uint64_t passTurns = 0, passSkipped = 0, passEntries = 0;
     double passMs[4] = {};
+    // ...inside passMs[2]: the sort of the first P not held, its length, and where the loader stopped.
+    double passSortMs = 0.0;
+    // HOW MANY TILES ARE STALE, at most (the version law's held tiles whose bytes are old): every
+    // change of Tracked::stale goes through SetStale; a tile let go while stale leaves the count
+    // high, never low, so 0 means none -- and the pass then needs no tile's own word for it.
+    int64_t m_staleCount = 0;
+    // (SetStale, below the forward declaration of Tracked.)
+    // ...and the rest of passMs[2], by step: the cut (CutOrder), the cut's boundary stats, the list
+    // of the first P not held, the tail's count; and the straddling bucket's size.
+    double passSub[4] = {};
+    uint64_t passMid = 0;
+    uint64_t passNeed = 0, passLoaderStop = 0, passLoaderTurns = 0;
     OrderTurnLedger orderTurn;
     uint64_t letGoTotal = 0, letGoReadTotal = 0, reloadedTotal = 0, rewantedTotal = 0;
     uint64_t releasedTotal = 0, mappedTotal = 0;   // an untraced rail's releases and maps
@@ -498,6 +514,23 @@ public:
         uint32_t cut = 0, cutNamed = 0, invalidated = 0, invalidatedNamed = 0;
     } releaseLedger;
     std::vector<uint32_t> railMaps;   // H5: the tiles each recorded frame's turn mapped (the frame loop)
+    // ...and that turn's map-phase ledger: pool chunks created and their ms, UpdateTileMappings calls
+    // and their ms (PushMapLedger takes the difference since the last push).
+    struct MapLedger {
+        uint32_t heaps = 0, calls = 0;
+        float heapMs = 0.0f, callMs = 0.0f;
+    };
+    std::vector<MapLedger> railMapLedger;
+    void PushMapLedger() {
+        railMapLedger.push_back({uint32_t(mapHeaps - m_mlHeaps), uint32_t(mapCalls - m_mlCalls),
+                                 float(mapHeapMs - m_mlHeapMs), float(mapCallMs - m_mlCallMs)});
+        m_mlHeaps = mapHeaps;
+        m_mlCalls = mapCalls;
+        m_mlHeapMs = mapHeapMs;
+        m_mlCallMs = mapCallMs;
+    }
+    uint64_t m_mlHeaps = 0, m_mlCalls = 0;
+    double m_mlHeapMs = 0.0, m_mlCallMs = 0.0;
     bool traceTurn = false;        // print this turn's ledger (main: --res-trace-frames)
     uint32_t traceRecFrame = 0;    // the recorded frame main labels it with
 
@@ -592,6 +625,7 @@ public:
 
 private:
     struct Tracked;
+    void SetStale(Tracked* t, bool v);   // every change of Tracked::stale (m_staleCount)
     struct Tenant {
         std::wstring name;
         Com<ID3D12Resource> res;
@@ -920,6 +954,19 @@ private:
     std::condition_variable m_drainCv;
     std::atomic<bool> m_quit{false};
     std::atomic<int> m_inFlight{0};
+    // THE POOL AHEAD OF ITS DEMAND. A pool chunk is a CreateHeap, and inside the turn it cost
+    // 1-24 ms (the drive: 228 chunks, 262 ms, every one on the render thread). So the pool is kept
+    // ahead: when the free list falls under kPoolReserveTiles a worker creates the next chunk
+    // (CreateHeap is free-threaded on the device), the turn adopts what is ready at its head, and
+    // only a turn that runs dry before one is ready creates inline (counted: mapHeapsInline). The
+    // heaps a worker made wait under m_mx in m_heapsReady; Shutdown waits for m_heapJobs as for the
+    // loads. Which pool slot a tile lands in may differ from run to run; what any slot holds cannot.
+    static constexpr uint32_t kPoolReserveTiles = 2 * kPoolChunkTiles;
+    std::vector<Com<ID3D12Heap>> m_heapsReady;   // made by the worker, not yet adopted (m_mx)
+    std::atomic<int> m_heapJobs{0};
+    void AdoptReadyHeaps();
+    void KeepPoolAhead(Gpu& gpu);
+    void AddChunk(Com<ID3D12Heap> heap);
     uint32_t m_failedLoads = 0;   // M7w: terminal load failures (tiles left honestly NULL)
 
     std::vector<FieldAdapter> m_fields;
@@ -1072,6 +1119,16 @@ private:
     void OrderPass(OrderTurnLedger& L);
     std::string TileName(uint64_t key) const;
     void StarveWatch();   // the watchdog's turn (ResidencyOrder.cpp, after the loader)
+    // THE FIRST P NOT HELD, SORTED AS FAR AS IT IS READ. The pass used to sort the whole list (6,877
+    // entries a pass on the drive through the gate, 0.49 ms) for a loader that stops 89 entries in
+    // on average. Now the front is sorted in chunks as a reader reaches it (SortNeedTo): the next
+    // chunk partitioned to the front (nth_element), then sorted. The order is total (the key breaks
+    // every tie), so every entry a reader reaches is the entry the whole sort put there.
+    static constexpr size_t kNeedChunk = 512;
+    size_t m_needSorted = 0;
+    uint16_t m_needUnits = 0;
+    void SortNeedTo(size_t n);
+    static bool NeedBefore(const OrderEntry& a, const OrderEntry& b, uint16_t units);
     size_t m_loaderStop = 0;   // the m_need index the loader stopped at (the queue at capacity)   // "tenant [slice] mip (x,y)" from MakeKey's bits
     // H2 (HIERARCHY 4.19, the law completed): A TILE THAT IS HELD COUNTS FOR THE MARGIN TIMES ITS
     // MEASURE, and so does every tile above a held one (the held set stays closed upward: a parent
