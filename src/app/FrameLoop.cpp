@@ -5363,8 +5363,19 @@ void FrameLoop::MinimapFrame(float dt) {
     uint32_t slotSet0[SurfaceFrame::kWindowSlots];
     for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) slotSet0[s] = sf.slotSet[s];
     const uint32_t slotsLive0 = sf.slotsLive;
-    const uint32_t own = m_minimapSlot < SurfaceFrame::kWindowSlots ? sf.slotSet[m_minimapSlot]
-                                                                    : SurfaceFrame::kNoSet;
+    uint32_t own = m_minimapSlot < SurfaceFrame::kWindowSlots ? sf.slotSet[m_minimapSlot]
+                                                              : SurfaceFrame::kNoSet;
+    if (own == SurfaceFrame::kNoSet) {
+        // NO SET OF ITS OWN (the first eye's table took every slot -- a corridor of windows in view):
+        // it reads the set of the claimant whose eye stands nearest, within a window's reach -- the
+        // law the rings stand by (SlotNear) -- with the rows still taken about its own eye. Reading
+        // nothing left it the cube alone: Mark's coarse minimap over the boat, 2026-10-07.
+        const double ry = sf.planetR + mc.py;
+        double E[3];
+        for (int k = 0; k < 3; ++k) E[k] = sf.up[k] * ry + sf.east[k] * mc.px + sf.north[k] * mc.pz;
+        const uint32_t nearest = sf.SlotNear(E, kWindowReachM);
+        if (nearest != UINT32_MAX) own = sf.slotSet[nearest];
+    }
     for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) sf.slotSet[s] = SurfaceFrame::kNoSet;
     sf.slotSet[0] = own;
     sf.slotsLive = (std::min)(uint32_t(1 + win.n), SurfaceFrame::kWindowSlots);
