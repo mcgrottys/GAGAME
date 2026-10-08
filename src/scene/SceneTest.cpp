@@ -88,6 +88,7 @@
 #include "scene/Entity.h"
 #include "scene/GlobeLayer.h"
 #include "scene/Minimap.h"
+#include "compose/SurfaceFrame.h"
 #include "scene/Node.h"
 #include "scene/Portal.h"
 #include "scene/Rail.h"
@@ -2782,6 +2783,51 @@ bool RunSceneSelfTest() {
         g.True(mm.Resetting() && !bp.lmb, "[minimap] the button starts Reset and keeps its press");
     }
 
+    // ---- 12. [claim] a window set belongs to a place, not to a table slot -------------------------
+    // The corridor's worlds standing at one place read one set; the world seen through a window wants
+    // the ranks of the window's distance (without that it wants rank 5's 306 m box and cannot join);
+    // a world at another place takes its own set; the first frame (no boxes yet) leads everywhere.
+    {
+        const double R = 6371000.0, kD = 3.14159265358979323846 / 180.0;
+        auto at = [&](double latDeg, double lonDeg, double eastM, double alt, double out[3]) {
+            const double la = latDeg * kD, lo = lonDeg * kD;
+            const double up[3] = {std::cos(la) * std::cos(lo), std::sin(la), std::cos(la) * std::sin(lo)};
+            const double yl = std::sqrt(up[0] * up[0] + up[2] * up[2]);
+            const double east[3] = {-up[2] / yl, 0.0, up[0] / yl};
+            for (int i = 0; i < 3; ++i) out[i] = up[i] * (R + alt) + east[i] * eastM;
+        };
+        SurfaceFrame sf;
+        sf.planetR = R;
+        SurfaceFrame::Claimant cl[3];
+        at(42.8165, -70.8114, 0.0, 3.0, cl[0].eye);     // the eye, 3 m over the mouth
+        at(42.8165, -70.8114, 200.0, 3.0, cl[1].eye);   // a corridor world 200 m east, home again
+        cl[1].nearM = 150.0;                            // ...seen through a window 150 m off
+        at(25.8997, -80.1239, 0.0, 3.0, cl[2].eye);     // another eye, at Haulover
+        g.True(SurfaceFrame::RanksAt(cl[0].eye, R, 1.0e-3) == 5 &&
+                   SurfaceFrame::RanksAt(cl[1].eye, R, 1.0e-3, nullptr, nullptr, 150.0) == 4,
+               "[claim] a world seen through a window 150 m off wants rank 4, not its altitude's 5");
+        uint32_t got[3];
+        std::vector<SurfaceFrame::Moved> moved;
+        sf.Claim(2, 3, cl, got);   // frame 1: no set holds boxes yet -- everyone leads
+        g.True(got[0] != got[1] && got[1] != got[2] && got[0] != got[2],
+               "[claim] the first frame: no boxes to join, three leaders");
+        sf.FollowAll(moved);
+        sf.Claim(2, 3, cl, got);   // frame 2: the home world joins the eye's set
+        sf.FollowAll(moved);
+        uint32_t live = 0;
+        for (uint32_t w = 0; w < SurfaceFrame::kWindowSlots; ++w) live += sf.setLeader[w] != SurfaceFrame::kNoSet;
+        g.True(got[1] == got[0] && sf.slotSet[1] == sf.slotSet[0],
+               "[claim] the world at the eye's place reads the eye's set");
+        g.True(got[2] != got[0] && sf.OtherSet(0) == got[2], "[claim] the eye at Haulover takes its own");
+        g.True(live == 2 && sf.setReaders[got[0]] == 2, "[claim] three claimants, two sets");
+        g.True(sf.setLeader[got[0]] == 0, "[claim] the set follows its leader, the lowest claimant");
+        // ...and the instrument sees the failure: asked by its own altitude (5 ranks), the world 200 m
+        // off is outside the eye's 306 m rank-5 box, and takes a set of its own.
+        cl[1].nearM = 0.0;
+        sf.Claim(2, 3, cl, got);
+        g.True(got[1] != got[0], "[claim] without the window's distance the home world cannot join");
+    }
+
     if (g.ok) {
         Log("[scene] ---- PASS (%d checks): Registry<T> == VesselRegistry / LoaderRegistry on the "
             "built-in kinds, the property table (defaults, units through GaUnits, the Velocity-"
@@ -2804,7 +2850,8 @@ bool RunSceneSelfTest() {
             "remove named by the residue, a list under a target as a value -- hot where consumed, "
             "reported where not --, idempotence, and an unknown key refusing the candidate whole), "
             "and [minimap] the second eye's hand (home, the grab, the wheel's floor and ceiling, "
-            "Reset, the limb, what it keeps from the first eye) ----",
+            "Reset, the limb, what it keeps from the first eye), and [claim] a window set is a "
+            "place's (the corridor's home worlds share one, the window's distance, the leader) ----",
             g.checks);
     } else {
         Log("[scene] ---- FAIL (%d checks) ----", g.checks);
