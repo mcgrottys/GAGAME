@@ -2793,28 +2793,16 @@ bool FrameLoop::Frame() {
         }
         ProbeDrosteTable(probeRows, probeN, sc2, sc, frame);   // (the portal's, the read)
     }
+    // THE FIRST EYE'S SKY (SkyOf: the one law every eye's sky is). Taken here, where the pose has
+    // stepped through the tower and the sun has been placed; nothing below moves the eye before
+    // the dome and the air read it.
+    const EyeSky eyeSky0 = SkyOf(Eye{0, &cam, 1.0f, 1.0f, camLevel}, sunRootF, sunCamF);
     if (globe) {
         globe->SetSun(sunCamF);
         // The camera level's own sky (slot 0): the root's, turned, under realistic
         // lighting inside the tower; its own everywhere else -- and its own zenith is the
         // planet's radial AT THE EYE (ZenithAt), which +y is only at the tangent origin.
-        {
-            float upC[3] = {0.0f, 1.0f, 0.0f};
-            float dayC = -1.0f;
-            if (portal.Valid() && mode == 1 && portalDecl.lighting == 0 && camLevel > 0) {
-                const double upR[3] = {0.0, 1.0, 0.0};
-                double su[3];
-                portal.ApplyDir(-double(camLevel), upR, su);
-                for (int i = 0; i < 3; ++i) upC[i] = static_cast<float>(su[i]);
-                dayC = static_cast<float>(std::clamp(double(sunRootF[1]) * 3.0 + 0.12, 0.0, 1.0));
-            } else if (mode == 1) {
-                const double C[3] = {cam.px, cam.py, cam.pz};
-                double z[3];
-                ZenithAt(C, planetR, z);
-                for (int i = 0; i < 3; ++i) upC[i] = static_cast<float>(z[i]);
-            }
-            globe->SetCamSky(upC, dayC);
-        }
+        globe->SetCamSky(eyeSky0.camUp, eyeSky0.camDay);
         if (portal.Valid() && mode == 1) {
             globe->SetDroste(drosteLv.data(), static_cast<int>(drosteLv.size()),
                              portalDecl.lighting, portal.centre, portal.radius, camLevel);
@@ -2873,60 +2861,16 @@ bool FrameLoop::Frame() {
     // the camera's frame it swung 60 deg at the re-root. The space backdrop's sun is
     // likewise the sun of the level whose orbit calls for space (spaceRel).
     {
-        float rows[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
-        const float* skySun = sunCamF;
-        float spaceSun[3] = {sunCamF[0], sunCamF[1], sunCamF[2]};
-        int domeRel = 0;
-        if (portal.Valid() && mode == 1) {
-            if (portalDecl.lighting == 0) {
-                domeRel = -camLevel;   // the root's
-            } else {
-                const double C[3] = {cam.px, cam.py, cam.pz};
-                const droste::GroundField gf = droste::Grounds(portal, camLevel, C);
-                domeRel = gf.domeRel;
-                double m[3][3], sv[3];
-                const double sr[3] = {sunRootF[0], sunRootF[1], sunRootF[2]};
-                portal.Rot(double(gf.spaceRel), m);   // that level -> the camera's frame
-                droste::MatVec(m, sr, sv);
-                for (int i = 0; i < 3; ++i) spaceSun[i] = static_cast<float>(sv[i]);
-            }
-            if (domeRel != 0) {
-                double m[3][3];
-                portal.Rot(double(-domeRel), m);   // the camera's frame -> the dome's
-                for (int r = 0; r < 3; ++r) {
-                    for (int c = 0; c < 3; ++c) rows[r * 3 + c] = static_cast<float>(m[r][c]);
-                }
-                skySun = sunRootF;   // every level's own sun has the root's numbers
-            }
-        }
-        // THE CAMERA'S OWN DOME stands on the zenith at the eye (DomeFrame, above): the rows carry
-        // that zenith onto +y and the sun rides the same rotor. The identity at the tangent origin;
-        // 18.5 degrees for a camera the gate carried to Haulover, whose dome stood on the
-        // Merrimack's zenith -- a slab of below-horizon grey over the sea.
-        float zenSun[3];
-        if (domeRel == 0 && mode == 1) {
-            const double C[3] = {cam.px, cam.py, cam.pz};
-            double u[3];
-            ZenithAt(C, planetR, u);
-            DomeFrame(u, skySun, rows, zenSun);
-            skySun = zenSun;
-        }
+        // (The law is SkyOf; here is where the first eye's answer is handed over.)
+        const float* rows = eyeSky0.rows;
+        const float* skySun = eyeSky0.sun;
         sky->SetSkyFrame(rows, skySun);
         // M13: AND THE AIR ITSELF. The planet's air (its rows, scene/Air.h), the air's one table
         // (the same for every ray on the planet) and this eye's distance from the planet's
         // centre: the sky is the one integral along each ray from max(the eye, the air's entry)
         // to the exit or the ground (Atmosphere.hlsli AtmRay), wherever the eye is.
         {
-            // The eye in the DOME's frame: the dome is the sky of level camLevel + domeRel (the
-            // root's under realistic Droste lighting), so its integral starts where the eye stands
-            // in THAT level -- a few hundred metres up in the root's air, not ~3e6 m out in the
-            // camera level's own units (S^k: Droste.h Portal::Apply, the same map the rows'
-            // rotation is the turning part of). Without Droste domeRel = 0 and this is the eye.
-            double C[3] = {cam.px, cam.py, cam.pz};
-            if (domeRel != 0) {
-                const double c0[3] = {cam.px, cam.py, cam.pz};
-                portal.Apply(double(-domeRel), c0, C);
-            }
+            const double* C = eyeSky0.air;   // the eye in the dome's frame (SkyOf)
             const double gy = C[1] + planetR;
             sky->SetPlanetRadius(planetR);
             // the planet's air on the scene's day (air.aod550): the table's and the rows'
@@ -2934,7 +2878,7 @@ bool FrameLoop::Frame() {
             renderer.air = AirOf(S.scene.planet, S.air.aod550, S.air.angstrom);
             renderer.skyMsSrv = sky->MultiScatterSrv();
             renderer.planetRadiusM = static_cast<float>(planetR);
-            renderer.eyeRadiusM = static_cast<float>(std::sqrt(C[0] * C[0] + gy * gy + C[2] * C[2]));
+            renderer.eyeRadiusM = eyeSky0.EyeRadius(planetR);
             // --sky-probe: the eye's radius as each consumer receives it -- the scene constants'
             // (above), the globe level row's (GlobeLayer fillLevel: each component summed in
             // doubles and cast, the length taken in float as Globe.hlsl LoadLevel takes it), and
@@ -2960,7 +2904,7 @@ bool FrameLoop::Frame() {
                 sky->SetProbeEye(m_skyAtR, sl);
             }
         }
-        if (globe) globe->SetSpaceSun(spaceSun);
+        if (globe) globe->SetSpaceSun(eyeSky0.spaceSun);
     }
 
     // M6g world housekeeping, all continuous in altitude: gravity-up for the view
@@ -4046,7 +3990,7 @@ bool FrameLoop::Frame() {
         const Camera& mc = m_minimap.Cam();
         scene::ViewContext v1 = renderer.ViewOf(
             mc, static_cast<float>(simUnix - startUnix), 1, uint32_t(r.x), uint32_t(r.y),
-            uint32_t(r.w), uint32_t(r.h), static_cast<float>(m_A.planetR + m_minimap.Altitude()));
+            uint32_t(r.w), uint32_t(r.h), m_minimapEyeRadius);
         // ...and the hulls, from its own eye (VesselLayer: the ones standing in its world).
         v1.drawMask = renderer.LayerBit("globe") | renderer.LayerBit("vessels") |
                       (m_minimapSky ? renderer.LayerBit("sky") : 0);
@@ -5027,6 +4971,102 @@ int FrameLoop::Finish() {
 #undef PROF_BEGIN
 #undef PROF_END
 
+// THE SKY OF AN EYE (step 3). Moved verbatim from the first eye's two blocks in Frame -- the
+// globe's slot-0 sky and the dome -- so the first eye's numbers are the ones it always had; every
+// other eye now asks the same law. M10: WHOSE SKY. Identity and the eye's own sun reproduce the old
+// dome; under REALISTIC lighting inside the tower the backdrop is the ROOT's sky turned into the
+// eye's frame by Q^L, with the root's sun; under APPEALING lighting the dome is the one whose ground
+// calls for a dome the loudest (Droste.h Grounds, domeRel), and the space backdrop's sun is the sun
+// of the level whose orbit calls for space (spaceRel). Outside a tower, the eye's own dome stands on
+// the zenith AT THE EYE (core/Dome.h DomeFrame) and the sun rides the same rotor.
+FrameLoop::EyeSky FrameLoop::SkyOf(const Eye& e, const float sunRoot[3], const float sunCam[3]) const {
+    const droste::Portal& portal = m_portalNode.Link();
+    const auto& portalDecl = m_portalDecl.p;
+    const int mode = m_mode;
+    const double planetR = m_A.planetR;
+    const Camera& cam = *e.cam;
+    const int camLevel = e.level;
+    const float* sunRootF = sunRoot;
+    const float* sunCamF = sunCam;
+    EyeSky o;
+    // The camera level's own sky (slot 0): the root's, turned, under realistic lighting inside the
+    // tower; its own everywhere else -- and its own zenith is the planet's radial AT THE EYE.
+    {
+        float upC[3] = {0.0f, 1.0f, 0.0f};
+        float dayC = -1.0f;
+        if (portal.Valid() && mode == 1 && portalDecl.lighting == 0 && camLevel > 0) {
+            const double upR[3] = {0.0, 1.0, 0.0};
+            double su[3];
+            portal.ApplyDir(-double(camLevel), upR, su);
+            for (int i = 0; i < 3; ++i) upC[i] = static_cast<float>(su[i]);
+            dayC = static_cast<float>(std::clamp(double(sunRootF[1]) * 3.0 + 0.12, 0.0, 1.0));
+        } else if (mode == 1) {
+            const double C[3] = {cam.px, cam.py, cam.pz};
+            double z[3];
+            ZenithAt(C, planetR, z);
+            for (int i = 0; i < 3; ++i) upC[i] = static_cast<float>(z[i]);
+        }
+        for (int i = 0; i < 3; ++i) o.camUp[i] = upC[i];
+        o.camDay = dayC;
+    }
+    float rows[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
+    const float* skySun = sunCamF;
+    float spaceSun[3] = {sunCamF[0], sunCamF[1], sunCamF[2]};
+    int domeRel = 0;
+    if (portal.Valid() && mode == 1) {
+        if (portalDecl.lighting == 0) {
+            domeRel = -camLevel;   // the root's
+        } else {
+            const double C[3] = {cam.px, cam.py, cam.pz};
+            const droste::GroundField gf = droste::Grounds(portal, camLevel, C);
+            domeRel = gf.domeRel;
+            double m[3][3], sv[3];
+            const double sr[3] = {sunRootF[0], sunRootF[1], sunRootF[2]};
+            portal.Rot(double(gf.spaceRel), m);   // that level -> the camera's frame
+            droste::MatVec(m, sr, sv);
+            for (int i = 0; i < 3; ++i) spaceSun[i] = static_cast<float>(sv[i]);
+        }
+        if (domeRel != 0) {
+            double m[3][3];
+            portal.Rot(double(-domeRel), m);   // the camera's frame -> the dome's
+            for (int r = 0; r < 3; ++r) {
+                for (int c = 0; c < 3; ++c) rows[r * 3 + c] = static_cast<float>(m[r][c]);
+            }
+            skySun = sunRootF;   // every level's own sun has the root's numbers
+        }
+    }
+    // THE CAMERA'S OWN DOME stands on the zenith at the eye (DomeFrame, above): the rows carry
+    // that zenith onto +y and the sun rides the same rotor. The identity at the tangent origin;
+    // 18.5 degrees for a camera the gate carried to Haulover, whose dome stood on the
+    // Merrimack's zenith -- a slab of below-horizon grey over the sea.
+    float zenSun[3];
+    if (domeRel == 0 && mode == 1) {
+        const double C[3] = {cam.px, cam.py, cam.pz};
+        double u[3];
+        ZenithAt(C, planetR, u);
+        DomeFrame(u, skySun, rows, zenSun);
+        skySun = zenSun;
+    }
+    // The eye in the DOME's frame: the dome is the sky of level camLevel + domeRel (the root's under
+    // realistic Droste lighting), so its integral starts where the eye stands in THAT level -- a few
+    // hundred metres up in the root's air, not ~3e6 m out in the camera level's own units (S^k:
+    // Droste.h Portal::Apply, the same map the rows' rotation is the turning part of). Without
+    // Droste domeRel = 0 and this is the eye.
+    double C[3] = {cam.px, cam.py, cam.pz};
+    if (domeRel != 0) {
+        const double c0[3] = {cam.px, cam.py, cam.pz};
+        portal.Apply(double(-domeRel), c0, C);
+    }
+    for (int i = 0; i < 9; ++i) o.rows[i] = rows[i];
+    for (int i = 0; i < 3; ++i) {
+        o.sun[i] = skySun[i];
+        o.spaceSun[i] = spaceSun[i];
+        o.air[i] = C[i];
+    }
+    o.domeRel = domeRel;
+    return o;
+}
+
 // THE WINDSHIELD (scene/HudLayer.h): the glass is rebuilt every frame from what the frame knows.
 // The frame rate is the wall clock's, smoothed over about half a second (the exponential mean of
 // the frame time, not of its inverse, so one slow frame reads as the time it cost) and printed
@@ -5120,23 +5160,21 @@ void FrameLoop::MinimapFrame(float dt) {
     const scene::Minimap::Rect r = m_minimap.Place(W, H);
     if (r.w < 8.0f || r.h < 8.0f) return;
     const double alt = m_minimap.Altitude();
-    double zen[3];
-    const double C[3] = {mc.px, mc.py, mc.pz};
-    ZenithAt(C, m_A.planetR, zen);
-    const float up[3] = {float(zen[0]), float(zen[1]), float(zen[2])};
+    // THE SKY OF THIS EYE: the same law as the first eye's (SkyOf), at the root's level.
+    float sunRoot[3];
+    m_A.renderer.SunDir(sunRoot);
+    const EyeSky es = SkyOf(Eye{1, &mc, r.w, r.h, 0}, sunRoot, sunRoot);
+    m_minimapEyeRadius = es.EyeRadius(m_A.planetR);
     const float exagg = static_cast<float>(std::clamp(alt / 250000.0, 1.0, 20.0));
     // ONE BACKDROP, ONE INTEGRAL, as the first eye has it: the sky layer's dome on this eye's own
     // zenith (core/Dome.h, the root's sun carried onto it), marched from this eye's radius (b0),
     // and the globe's backdrop pass off.
     bool skyDome = false;
     if (SkyLayer* sky = m_A.sky; sky && sky->enabled) {
-        float sunRoot[3], rows[9], zs[3];
-        m_A.renderer.SunDir(sunRoot);
-        DomeFrame(zen, sunRoot, rows, zs);
-        sky->SetOtherFrame(1, rows, zs);
+        sky->SetOtherFrame(1, es.rows, es.sun);
         skyDome = true;
     }
-    globe->SetOtherView(m_A.gpu, 1, mc, r.w / r.h, r.h, m_simUnix - m_startUnix, exagg, up,
+    globe->SetOtherView(m_A.gpu, 1, mc, r.w / r.h, r.h, m_simUnix - m_startUnix, exagg, es.camUp,
                         !skyDome);
     m_minimapSky = skyDome;
     // b2 about this eye: the frame's rows with the eye moved and put back (Fill is const). BOTH

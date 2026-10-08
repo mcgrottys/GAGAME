@@ -296,6 +296,34 @@ private:
     void PublishHulls();
     // THE WINDSHIELD (scene `hud`): the readouts on the glass, rebuilt each frame.
     void DrawGlass(float dt);
+    // ---- AN EYE (step 3 of the HUD pass): one view of the frame -- the session's camera (view 0),
+    // the minimap, a second player's -- as the per-eye laws below take it. Each law is ONE function
+    // every eye calls; what differs between eyes is only where its answer is handed (the first
+    // eye's into the layers' own state, another's into that layer's slot for its view).
+    struct Eye {
+        uint32_t view = 0;                 // its index in the frame's views (0 = the session's)
+        const Camera* cam = nullptr;       // its pose this frame, in the root's tangent frame
+        float viewW = 1.0f, viewH = 1.0f;  // its rectangle of the target, px
+        int level = 0;                     // its gauge in the Droste tower (camLevel for view 0)
+    };
+    // THE SKY OF AN EYE: the dome it stands under and where in the air it stands.
+    struct EyeSky {
+        float camUp[3] = {0.0f, 1.0f, 0.0f};   // the globe's slot-0 sky: its zenith (SetCamSky)
+        float camDay = -1.0f;                  // ...and the day it is lit by (-1 = its own)
+        float rows[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};   // eye -> dome
+        float sun[3] = {0.0f, 1.0f, 0.0f};     // the sun in the dome's frame
+        float spaceSun[3] = {0.0f, 1.0f, 0.0f};   // the space backdrop's sun (SetSpaceSun)
+        int domeRel = 0;                       // whose dome, in levels from the eye's
+        double air[3] = {0.0, 0.0, 0.0};       // the eye in the dome's frame: the air is marched
+                                               // from here (its radius is the b0 eye radius)
+        float EyeRadius(double planetR) const {
+            const double gy = air[1] + planetR;
+            return static_cast<float>(std::sqrt(air[0] * air[0] + gy * gy + air[2] * air[2]));
+        }
+    };
+    // sunRoot: the root's sun; sunCam: the sun of the eye's own level (the root's outside a tower).
+    EyeSky SkyOf(const Eye& e, const float sunRoot[3], const float sunCam[3]) const;
+
     // THE SECOND EYE (scene hud.minimap, scene/Minimap.h): stepped and walked once a frame after
     // the first eye has settled, and appended to the frame's views as view 1.
     void MinimapFrame(float dt);
@@ -303,6 +331,7 @@ private:
     bool m_minimapReady = false;     // configured (the planet and its pole are known)
     bool m_minimapDrawn = false;     // walked this frame: the views get a second element
     bool m_minimapSky = false;       // its own dome is set: the sky layer draws in it
+    float m_minimapEyeRadius = 0.0f; // where in the air it stands (SkyOf), for its b0
     ComposedSurfaceCb m_minimapSurface{};   // b2 about the minimap's eye
     double m_minimapSubject[3] = {};
     bool m_minimapHasSubject = false;
