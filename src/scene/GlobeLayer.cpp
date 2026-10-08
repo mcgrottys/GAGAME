@@ -2483,7 +2483,8 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
 // eye's set is put back -- so nothing the first eye's frame reads afterwards has moved.
 void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float aspect,
                               float viewportH, double simTime, float exagg, const float skyUp[3],
-                              bool skyPass) {
+                              bool skyPass, const DrosteLevel* gates, const WindowBox* boxes, int n,
+                              const double (*hole)[4], int holeN) {
     if (view == 0 || view > kMaxOtherEyes || !m_res) return;
     OtherEye& o = m_other[view - 1];
     if (m_msPath && !o.recBuf[0].res) {
@@ -2518,16 +2519,21 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     const float day0 = m_camSkyDay;
     const bool drosteOn0 = m_drosteOn;
     const int gateFirst0 = m_gateFirst, gateCount0 = m_gateCount;
+    WindowBox gateBoxes0[kMaxWindowChain];
+    for (int k = 0; k < kMaxWindowChain; ++k) gateBoxes0[k] = m_gateBoxes[k];
+    double viewHole0[5][4];
+    memcpy(viewHole0, m_viewHole, sizeof(viewHole0));
+    const int viewHoleN0 = m_viewHoleCount;
     const int sampler0 = m_sampler;
 
-    // ---- this eye: its own exaggeration, zenith and sampler; one world, its own
+    // ---- this eye: its own exaggeration, zenith and sampler; its own world and the worlds its own
+    // windows reach (none of the first eye's tower levels)
     reliefExagg = exagg;
     skyOwnAir = 1.0f;
     for (int i = 0; i < 3; ++i) m_camSkyUp[i] = skyUp[i];
     m_camSkyDay = -1.0f;
     m_drosteOn = false;
-    m_gateFirst = -1;
-    m_gateCount = 0;
+    SetGates(gates, boxes, n, hole, holeN);
     if (o.sampler < 0) o.sampler = m_res->Sampler(("eye" + std::to_string(view)).c_str());
     m_sampler = o.sampler;
     m_borrowed = true;
@@ -2566,6 +2572,9 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     m_drosteOn = drosteOn0;
     m_gateFirst = gateFirst0;
     m_gateCount = gateCount0;
+    for (int k = 0; k < kMaxWindowChain; ++k) m_gateBoxes[k] = gateBoxes0[k];
+    memcpy(m_viewHole, viewHole0, sizeof(viewHole0));
+    m_viewHoleCount = viewHoleN0;
     m_sampler = sampler0;
 }
 

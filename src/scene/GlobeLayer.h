@@ -76,19 +76,6 @@ public:
     void ReloadShaders(Gpu& gpu, ShaderCompiler& sc) override;
     void Render(const FrameContext& ctx) override;
 
-    // ANOTHER EYE: the minimap, a split screen's second player, a remote player's view. It walks
-    // the same planet from its own camera, after the first eye's SetView, with no Droste levels
-    // or gate worlds of its own, under its own exaggeration, zenith and residency sampler
-    // ("eye<view>"), and keeps what it walked for Render at ctx.viewIndex == view. The layer's
-    // working set stays the first eye's, so nothing the first eye reads afterwards has moved.
-    static constexpr uint32_t kMaxOtherEyes = 3;
-    void SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float aspect, float viewportH,
-                      double simTime, float exagg, const float skyUp[3], bool skyPass);
-    // The eye stops drawing (its walk is not refreshed this frame).
-    void DropOtherView(uint32_t view) {
-        if (view > 0 && view <= kMaxOtherEyes) m_other[view - 1].valid = false;
-    }
-
     // Once per frame before RenderFrame: camera in the PLANET frame + projection aspect and
     // viewport height in pixels (the relief-mip selector needs the pixel's angular size).
     void SetView(const Camera& cam, float aspect, float viewportH, double simTime);
@@ -372,6 +359,22 @@ public:
     void SetSpaceSun(const float sun[3]) {
         for (int i = 0; i < 3; ++i) m_spaceSun[i] = sun[i];
     }
+    // ANOTHER EYE: the minimap, a split screen's second player, a remote player's view. It walks
+    // the same planet from its own camera, after the first eye's SetView, with no Droste levels
+    // or gate worlds of its own, under its own exaggeration, zenith and residency sampler
+    // ("eye<view>"), and keeps what it walked for Render at ctx.viewIndex == view. The layer's
+    // working set stays the first eye's, so nothing the first eye reads afterwards has moved.
+    static constexpr uint32_t kMaxOtherEyes = 3;
+    // `gates`/`boxes`/`n`/`hole` are that eye's own windows (SetGates' arguments, from its own cone).
+    void SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float aspect, float viewportH,
+                      double simTime, float exagg, const float skyUp[3], bool skyPass,
+                      const DrosteLevel* gates = nullptr, const WindowBox* boxes = nullptr,
+                      int n = 0, const double (*hole)[4] = nullptr, int holeN = 0);
+    // The eye stops drawing (its walk is not refreshed this frame).
+    void DropOtherView(uint32_t view) {
+        if (view > 0 && view <= kMaxOtherEyes) m_other[view - 1].valid = false;
+    }
+
     // Per frame, BEFORE SetView, when the link is live. `extra` are the levels other than the
     // camera's; the portal (centre, radius) is the next level down in any level's own frame, for
     // the shadow; camLevelAbs is for the title bar.

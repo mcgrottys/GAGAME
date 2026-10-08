@@ -208,7 +208,10 @@ void SkyLayer::Render(const FrameContext& ctx) {
     if (other > kMaxOtherEyes) return;
     const float* rot = other ? m_otherRot[other - 1] : m_rot;
     const float* sun = other ? m_otherSun[other - 1] : m_sun;
-    const int winN = other ? 0 : m_winN;
+    const int winN = other ? m_otherWin[other - 1].n : m_winN;
+    const WindowBox* winBoxes = other ? m_otherWin[other - 1].boxes : m_winBoxes;
+    const float* winUp = other ? m_otherWin[other - 1].up : m_winUp;
+    const float* winSun = other ? m_otherWin[other - 1].sun : m_winSun;
     for (int i = 0; i < 3; ++i) {
         cb.r0[i] = rot[i];
         cb.r1[i] = rot[3 + i];
@@ -217,9 +220,9 @@ void SkyLayer::Render(const FrameContext& ctx) {
     }
     cb.winA[0] = static_cast<float>(winN);   // the one number the shader's walk reads
     for (int k = 0; k < winN; ++k) {
-        m_winBoxes[k].Pack(cb.box + k * 16);
-        for (int i = 0; i < 4; ++i) cb.winUp[k * 4 + i] = m_winUp[k * 4 + i];
-        for (int i = 0; i < 3; ++i) cb.winSun[k * 4 + i] = m_winSun[k * 3 + i];
+        winBoxes[k].Pack(cb.box + k * 16);
+        for (int i = 0; i < 4; ++i) cb.winUp[k * 4 + i] = winUp[k * 4 + i];
+        for (int i = 0; i < 3; ++i) cb.winSun[k * 4 + i] = winSun[k * 3 + i];
     }
     ctx.cmd->Pipeline(m_pso.Get());
     ctx.cmd->GraphicsConstants(1, cb);

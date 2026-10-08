@@ -323,16 +323,34 @@ private:
     };
     // sunRoot: the root's sun; sunCam: the sun of the eye's own level (the root's outside a tower).
     EyeSky SkyOf(const Eye& e, const float sunRoot[3], const float sunCam[3]) const;
-    // Its dome handed to the sky layer: the first eye's into the layer's own frame, another's into
-    // its view's slot.
-    void HandSky(const Eye& e, const EyeSky& es);
     // THE WALK OF AN EYE: the display exaggeration its altitude calls for, the globe's walk of the
     // planet from it (the first eye's into the layer's working set, another's into its slot; another
     // eye's backdrop is the sky layer's dome when `dome`, the globe's own pass otherwise), and the
     // surface rows (b2) about it -- the first eye's into the renderer's own buffer, kept as the
     // frame's eye; another's into `out`, with both eyes the rows are taken about put back.
     float ReliefOf(const Eye& e) const;
-    void WalkEye(const Eye& e, float exagg, const EyeSky& es, bool dome);
+    // THE WINDOWS OF AN EYE: the gate worlds it reaches, built for the walk, the sky and the hulls.
+    struct EyeWindows {
+        int n = 0;
+        GlobeLayer::DrosteLevel levels[kMaxWindowChain];
+        WindowBox boxes[kMaxWindowChain];
+        float upWin[kMaxWindowChain * 4] = {};
+        float sunWin[kMaxWindowChain * 3] = {};
+        double viewHole[5][4] = {};
+        int viewHoleN = 0;
+        double eye[3] = {};                                       // the eye they were built about
+        double zE1[3] = {0.0, 1.0, 0.0}, sunE1[3] = {0.0, 1.0, 0.0};   // the first window's place
+    };
+    EyeWindows WindowsOf(const Eye& e, const std::vector<scene::WindowLink>& chain,
+                         const scene::ViewCone& view, float exagg, const float sunRoot[3]);
+    // The chain of gate windows an eye looks through, from its own cone (the first eye's begins with
+    // the windows its subject owes it; another eye owes nothing yet).
+    std::vector<scene::WindowLink> ChainOf(const Eye& e) const;
+    // Its dome (and another eye's windows) handed to the sky layer: the first eye's into the layer's
+    // own frame, another's into its view's slot.
+    void HandSky(const Eye& e, const EyeSky& es, const EyeWindows* win = nullptr);
+    void WalkEye(const Eye& e, float exagg, const EyeSky& es, bool dome,
+                 const EyeWindows* win = nullptr);
     void SurfaceFor(const Eye& e, ComposedSurfaceCb& out);
 
     // THE SECOND EYE (scene hud.minimap, scene/Minimap.h): stepped and walked once a frame after
@@ -343,6 +361,7 @@ private:
     bool m_minimapDrawn = false;     // walked this frame: the views get a second element
     bool m_minimapSky = false;       // its own dome is set: the sky layer draws in it
     float m_minimapEyeRadius = 0.0f; // where in the air it stands (SkyOf), for its b0
+    int m_minimapWindowsSaid = 0;    // its window depth as last logged (on a change only)
     ComposedSurfaceCb m_minimapSurface{};   // b2 about the minimap's eye
     double m_minimapSubject[3] = {};
     bool m_minimapHasSubject = false;

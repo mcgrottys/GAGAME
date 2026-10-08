@@ -48,6 +48,18 @@ public:
         for (int i = 0; i < 9; ++i) m_otherRot[view - 1][i] = rows[i];
         for (int i = 0; i < 3; ++i) m_otherSun[view - 1][i] = sun[i];
     }
+    // ...and the windows that eye looks through (SetGateWindows' arguments, from its own chain).
+    void SetOtherWindows(uint32_t view, const WindowBox* boxes, const float* up4, const float* suns3,
+                         int n) {
+        if (view == 0 || view > kMaxOtherEyes) return;
+        OtherWin& w = m_otherWin[view - 1];
+        w.n = (boxes && up4 && suns3 && n > 0) ? (n < kMaxWindowChain ? n : kMaxWindowChain) : 0;
+        for (int k = 0; k < w.n; ++k) {
+            w.boxes[k] = boxes[k];
+            for (int i = 0; i < 4; ++i) w.up[k * 4 + i] = up4[k * 4 + i];
+            for (int i = 0; i < 3; ++i) w.sun[k * 3 + i] = suns3[k * 3 + i];
+        }
+    }
 
     // M13: A WINDOW HAS A SKY -- the sky of the place its rays land in. A window is a transform on
     // the whole view, so the backdrop walks the same chain of slab tests the globe clips with, and
@@ -114,6 +126,13 @@ private:
     int m_winN = 0;
     float m_otherRot[kMaxOtherEyes][9] = {};
     float m_otherSun[kMaxOtherEyes][3] = {};
+    struct OtherWin {
+        int n = 0;
+        WindowBox boxes[kMaxWindowChain];
+        float up[kMaxWindowChain * 4] = {};
+        float sun[kMaxWindowChain * 3] = {};
+    };
+    OtherWin m_otherWin[kMaxOtherEyes];
     WindowBox m_winBoxes[kMaxWindowChain];
     float m_winUp[kMaxWindowChain * 4] = {};
     float m_winSun[kMaxWindowChain * 3] = {};
