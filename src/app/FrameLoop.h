@@ -339,6 +339,7 @@ private:
         double viewHole[5][4] = {};
         int viewHoleN = 0;
         double eye[3] = {};                                       // the eye they were built about
+        double nearM[kMaxWindowChain] = {};   // the nearest each world can be seen from: its window
         double zE1[3] = {0.0, 1.0, 0.0}, sunE1[3] = {0.0, 1.0, 0.0};   // the first window's place
     };
     EyeWindows WindowsOf(const Eye& e, const std::vector<scene::WindowLink>& chain,
@@ -352,6 +353,7 @@ private:
     void WalkEye(const Eye& e, float exagg, const EyeSky& es, bool dome,
                  const EyeWindows* win = nullptr, const GlobeLayer::EyeRings* rings = nullptr);
     void SurfaceFor(const Eye& e, ComposedSurfaceCb& out);
+    EyeWindows m_minimapWin;   // the minimap's windows this frame (MinimapStep), for its claims and its walk
     // THE RINGS OF AN EYE: a bank's ladder anchored about a point, standing in the windows whose rows
     // are given (taken about rowsEye), wanting the bed each ring reads at its own grain; `orgs` gets
     // the rings' origins for the globe. And the cascade sea's plane at an eye (sim/WaveChart.h).
@@ -365,7 +367,15 @@ private:
     // Its motor steps (and its subject is read) before the frame's window sets are claimed, so the
     // set it claims follows the eye it is this frame.
     void MinimapStep(float dt);
-    uint32_t m_minimapSlot = 0xFFFFFFFFu;   // the level-table slot it claimed sets as (none: ~0)
+    // Its claims (SurfaceFrame::Claim, as another eye): its own world's set and its window worlds'.
+    uint32_t m_minimapSet = 0xFFFFFFFFu;
+    uint32_t m_minimapWinSets[kMaxWindowChain] = {};
+    // Its windows, found in MinimapStep (from its own cone, before the claim) and drawn in MinimapFrame.
+    std::vector<scene::WindowLink> m_minimapChain;
+    float m_minimapExagg = 1.0f;
+    // The first eye's gate worlds' nearest distances (WindowsOf), for their claims.
+    double m_winNearM[kMaxWindowChain] = {};
+    uint32_t m_liveSetsSaid = 0xFFFFFFFFu, m_claimantsSaid = 0xFFFFFFFFu;   // logged on a change
     scene::Minimap m_minimap;
     bool m_minimapReady = false;     // configured (the planet and its pole are known)
     bool m_minimapDrawn = false;     // walked this frame: the views get a second element

@@ -802,6 +802,9 @@ public:
     // PHASE A2: the frame's level table as SetDroste / SetGates left it, for the windows' step:
     // how many slots (the camera's and the extra levels), and an extra slot's eye in its own frame.
     size_t LevelSlots() const { return 1u + m_levels.size(); }
+    // The first gate world's slot in the table and how many there are (-1, 0: none), as SetGates left it.
+    int GateFirst() const { return m_gateFirst; }
+    int GateCount() const { return m_gateCount; }
     const double* LevelCam(size_t slot) const { return slot ? m_levels[slot - 1].cam : nullptr; }
 private:
     uint64_t m_eyeFrame = 0;

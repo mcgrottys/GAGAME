@@ -3413,6 +3413,7 @@ bool FrameLoop::Frame() {
             if (n > 0) {
                 const EyeWindows ew =
                     WindowsOf(Eye{0, &cam, viewW, viewH, camLevel}, m_windows, view, globe->reliefExagg, sunRootF);
+                for (int k = 0; k < kMaxWindowChain; ++k) m_winNearM[k] = ew.nearM[k];
                 const GlobeLayer::DrosteLevel* levels = ew.levels;
                 const WindowBox* boxes = ew.boxes;
                 const float* upWin = ew.upWin;
@@ -3499,24 +3500,52 @@ bool FrameLoop::Frame() {
                 for (int k = 0; k < 3; ++k) eyes[s][k] = sf.up[k] * ry + sf.east[k] * c[0] + sf.north[k] * c[2];
                 n = s + 1;
             }
-            // ANOTHER EYE CLAIMS TOO (the minimap): one more slot past the first eye's table, at its
-            // own pixel, so a window set follows it and the ground under it is as sharp as under the
-            // first eye. A table that fills every slot (a seven-window corridor) leaves it none.
-            double pixAngs[SurfaceFrame::kWindowSlots];
-            for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) pixAngs[s] = pixAng;
-            m_minimapSlot = SurfaceFrame::kNoSet;
-            if (m_minimapDrawn && n < SurfaceFrame::kWindowSlots) {
+            // THE CLAIMANTS (SurfaceFrame::Claim: a set belongs to a place, not to a table slot). The
+            // first eye's table, each slot at the first eye's pixel and seen from no nearer than it
+            // stands -- a gate world from no nearer than its window -- then every other eye and its own
+            // gate worlds, at its own pixel. A claimant joins a set that already holds it at every rank
+            // it wants, so the worlds standing at one place read one set; a set follows its leader.
+            SurfaceFrame::Claimant cl[SurfaceFrame::kMaxClaimants];
+            uint32_t nc = 0;
+            const int gateFirst = globe->GateFirst(), gateCount = globe->GateCount();
+            for (uint32_t s = 0; s < n; ++s, ++nc) {
+                for (int k = 0; k < 3; ++k) cl[nc].eye[k] = eyes[s][k];
+                cl[nc].pixAng = pixAng;
+                const int g = int(s) - gateFirst;
+                cl[nc].nearM = (gateFirst > 0 && g >= 0 && g < gateCount) ? m_winNearM[g] : 0.0;
+            }
+            const uint32_t miniFirst = nc;
+            if (m_minimapDrawn) {
                 const Camera& mc = m_minimap.Cam();
-                const double ry = sf.planetR + mc.py;
-                for (int k = 0; k < 3; ++k) eyes[n][k] = sf.up[k] * ry + sf.east[k] * mc.px + sf.north[k] * mc.pz;
                 const scene::Minimap::Rect mr = m_minimap.Place(renderer.Width(), renderer.Height());
-                pixAngs[n] = double(mc.fovY) / (std::max)(double(mr.h), 1.0);
-                m_minimapSlot = n;
-                ++n;
+                const double pixM = double(mc.fovY) / (std::max)(double(mr.h), 1.0);
+                const double mE[3] = {mc.px, mc.py, mc.pz};
+                auto planet = [&](const double c[3], double out[3]) {
+                    const double ry = sf.planetR + c[1];
+                    for (int k = 0; k < 3; ++k) out[k] = sf.up[k] * ry + sf.east[k] * c[0] + sf.north[k] * c[2];
+                };
+                planet(mE, cl[nc].eye);
+                cl[nc].pixAng = pixM;
+                cl[nc].nearM = 0.0;
+                ++nc;
+                for (int k = 0; k < m_minimapWin.n && nc < SurfaceFrame::kMaxClaimants; ++k, ++nc) {
+                    planet(m_minimapWin.levels[k].cam, cl[nc].eye);
+                    cl[nc].pixAng = pixM;
+                    cl[nc].nearM = m_minimapWin.nearM[k];
+                }
             }
             uint32_t was[SurfaceFrame::kWindowSlots];
             for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) was[s] = sf.slotSet[s];
-            sf.Assign(n, eyes, pixAngs);
+            uint32_t got[SurfaceFrame::kMaxClaimants];
+            sf.Claim(n, nc, cl, got);
+            m_minimapSet = SurfaceFrame::kNoSet;
+            for (int k = 0; k < kMaxWindowChain; ++k) m_minimapWinSets[k] = SurfaceFrame::kNoSet;
+            if (m_minimapDrawn && miniFirst < nc) {
+                m_minimapSet = got[miniFirst];
+                for (uint32_t c = miniFirst + 1; c < nc && c - miniFirst - 1 < uint32_t(kMaxWindowChain); ++c) {
+                    m_minimapWinSets[c - miniFirst - 1] = got[c];
+                }
+            }
             for (uint32_t s = 0; s < n; ++s) {
                 if (sf.slotSet[s] != was[s]) {
                     Log("[eye-windows] frame %llu: slot %u claims set %d (it read %d)",
@@ -3524,20 +3553,21 @@ bool FrameLoop::Frame() {
                         was[s] == SurfaceFrame::kNoSet ? -1 : int(was[s]));
                 }
             }
+            uint32_t liveSets = 0;
+            for (uint32_t w = 0; w < SurfaceFrame::kWindowSlots; ++w) liveSets += sf.setLeader[w] != SurfaceFrame::kNoSet;
+            if (liveSets != m_liveSetsSaid || nc != m_claimantsSaid) {
+                m_liveSetsSaid = liveSets;
+                m_claimantsSaid = nc;
+                Log("[eye-windows] frame %llu: %u claimant(s) read %u set(s) of %u", static_cast<unsigned long long>(frame),
+                    nc, liveSets, SurfaceFrame::kWindowSlots);
+            }
+            uint32_t K0[SurfaceFrame::kWindowSlots];
+            for (uint32_t w = 0; w < SurfaceFrame::kWindowSlots; ++w) K0[w] = sf.bound[w].K;
+            sf.FollowAll(moved);
             for (uint32_t w = 0; w < SurfaceFrame::kWindowSlots; ++w) {
-                const double* e = nullptr;
-                double pixW = pixAng;
-                for (uint32_t s = 0; s < n; ++s) {
-                    if (sf.slotSet[s] == w) {
-                        e = eyes[s];
-                        pixW = pixAngs[s];
-                    }
-                }
-                const uint32_t K0 = sf.bound[w].K;
-                sf.Follow(w, e, pixW, moved);
-                if (sf.bound[w].K != K0) {
+                if (sf.bound[w].K != K0[w]) {
                     Log("[eye-windows] frame %llu: set %u holds %u rank(s) (was %u)",
-                        static_cast<unsigned long long>(frame), w, sf.bound[w].K, K0);
+                        static_cast<unsigned long long>(frame), w, sf.bound[w].K, K0[w]);
                 }
             }
             // F9: the windows that are one address read one slice; said when the count changes.
@@ -5042,6 +5072,18 @@ FrameLoop::EyeWindows FrameLoop::WindowsOf(const Eye& e, const std::vector<scene
                 sunE1[i] = sunE[i];
             }
         }
+        // THE NEAREST IT CAN BE SEEN FROM: a world seen only through this window is never nearer to
+        // the eye than the window's box (the eye in the box's own frame, outside its half sizes).
+        {
+            double pb[3] = {C[0], C[1], C[2]};
+            W.boxInRoot.Inverse().TransformPoint(pb[0], pb[1], pb[2]);
+            double d2 = 0.0;
+            for (int r = 0; r < 3; ++r) {
+                const double out = std::abs(pb[r]) - 0.5 * W.gate->Declared().size[r];
+                if (out > 0.0) d2 += out * out;
+            }
+            o.nearM[k] = std::sqrt(d2);
+        }
         // THE WINDOW WHERE THE TRUE EYE SEES IT: the chain's pull on its box.
         WindowBox& B = boxes[k];
         double bc[3] = {0.0, 0.0, 0.0};
@@ -5296,6 +5338,18 @@ void FrameLoop::MinimapStep(float dt) {
     m_minimap.Step(dt, m_minimapHasSubject ? m_minimapSubject : nullptr);
     const scene::Minimap::Rect r = m_minimap.Place(m_A.renderer.Width(), m_A.renderer.Height());
     m_minimapDrawn = r.w >= 8.0f && r.h >= 8.0f;   // it will be drawn: it may claim a set
+    m_minimapWin = EyeWindows{};
+    m_minimapChain.clear();
+    if (!m_minimapDrawn) return;
+    // ITS WINDOWS: the gates it looks through from its own cone, found and built as the first eye's
+    // -- here, before the claim, so its window worlds claim their sets as every claimant does.
+    const Camera& mc = m_minimap.Cam();
+    const Eye eye{1, &mc, r.w, r.h, 0};
+    float sunRoot[3];
+    m_A.renderer.SunDir(sunRoot);
+    m_minimapExagg = ReliefOf(eye);
+    m_minimapChain = ChainOf(eye);
+    m_minimapWin = WindowsOf(eye, m_minimapChain, ViewConeOf(mc, r.w / r.h, r.h), m_minimapExagg, sunRoot);
 }
 
 void FrameLoop::MinimapFrame(float dt) {
@@ -5315,10 +5369,9 @@ void FrameLoop::MinimapFrame(float dt) {
     const EyeSky es = SkyOf(eye, sunRoot, sunRoot);
     m_minimapEyeRadius = es.EyeRadius(m_A.planetR);
     m_minimapSky = m_A.sky && m_A.sky->enabled;   // one backdrop, one integral, as the first eye's
-    // ITS WINDOWS: the gates it looks through from its own cone, found and built as the first eye's.
-    const float exagg = ReliefOf(eye);
-    const std::vector<scene::WindowLink> chain = ChainOf(eye);
-    const EyeWindows win = WindowsOf(eye, chain, ViewConeOf(mc, r.w / r.h, r.h), exagg, sunRoot);
+    // ITS WINDOWS: found and built in MinimapStep, before the claim.
+    const float exagg = m_minimapExagg;
+    const EyeWindows& win = m_minimapWin;
     if (win.n != m_minimapWindowsSaid) {
         m_minimapWindowsSaid = win.n;
         Log("[minimap] the eye reaches %d window%s deep", win.n, win.n == 1 ? "" : "s");
@@ -5355,21 +5408,22 @@ void FrameLoop::MinimapFrame(float dt) {
             ringsOf ? "stands its own rings" : "reads the first eye's rings", alt,
             std::sqrt(ddx * ddx + ddz * ddz));
     }
-    // ITS SLOTS, for its walk and its rows: slot 0 reads the set it claimed (none if the table left
-    // it no slot); its window worlds read no set -- the first eye's are taken about other eyes, and
-    // rows taken about another eye are the misaddressing the slot-eye fix removed -- so they read
-    // the cube. The table's own claims are put back.
+    // ITS SLOTS, for its walk and its rows: slot 0 reads the set its own world claimed (Claim, as an
+    // eye of its own: joined where a set already holds it), slot k + 1 its k-th window world's; each
+    // slot's rows are taken about that world's own eye. The table's own claims and eyes are put back.
     SurfaceFrame& sf = m_A.surface;
     uint32_t slotSet0[SurfaceFrame::kWindowSlots];
-    for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) slotSet0[s] = sf.slotSet[s];
+    double slotEye0[SurfaceFrame::kWindowSlots][3];
+    for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) {
+        slotSet0[s] = sf.slotSet[s];
+        for (int k = 0; k < 3; ++k) slotEye0[s][k] = sf.slotEye[s][k];
+    }
     const uint32_t slotsLive0 = sf.slotsLive;
-    uint32_t own = m_minimapSlot < SurfaceFrame::kWindowSlots ? sf.slotSet[m_minimapSlot]
-                                                              : SurfaceFrame::kNoSet;
+    uint32_t own = m_minimapSet;
     if (own == SurfaceFrame::kNoSet) {
-        // NO SET OF ITS OWN (the first eye's table took every slot -- a corridor of windows in view):
-        // it reads the set of the claimant whose eye stands nearest, within a window's reach -- the
-        // law the rings stand by (SlotNear) -- with the rows still taken about its own eye. Reading
-        // nothing left it the cube alone: Mark's coarse minimap over the boat, 2026-10-07.
+        // NO SET AT ALL (every set taken by claimants the sets cannot hold together): it reads the set
+        // of the table's claimant whose eye stands nearest, within a window's reach, rows about its own
+        // eye (Mark's coarse minimap over the boat, 2026-10-07: reading none left it the cube alone).
         const double ry = sf.planetR + mc.py;
         double E[3];
         for (int k = 0; k < 3; ++k) E[k] = sf.up[k] * ry + sf.east[k] * mc.px + sf.north[k] * mc.pz;
@@ -5378,10 +5432,19 @@ void FrameLoop::MinimapFrame(float dt) {
     }
     for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) sf.slotSet[s] = SurfaceFrame::kNoSet;
     sf.slotSet[0] = own;
+    for (int k = 0; k < win.n && k + 1 < int(SurfaceFrame::kWindowSlots); ++k) {
+        sf.slotSet[k + 1] = m_minimapWinSets[k];
+        const double* c = win.levels[k].cam;
+        const double ry = sf.planetR + c[1];
+        for (int i = 0; i < 3; ++i) sf.slotEye[k + 1][i] = sf.up[i] * ry + sf.east[i] * c[0] + sf.north[i] * c[2];
+    }
     sf.slotsLive = (std::min)(uint32_t(1 + win.n), SurfaceFrame::kWindowSlots);
     WalkEye(eye, exagg, es, m_minimapSky, &win, ringsOf);
     SurfaceFor(eye, m_minimapSurface);
-    for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) sf.slotSet[s] = slotSet0[s];
+    for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) {
+        sf.slotSet[s] = slotSet0[s];
+        for (int k = 0; k < 3; ++k) sf.slotEye[s][k] = slotEye0[s][k];
+    }
     sf.slotsLive = slotsLive0;
     m_minimapDrawn = true;
 }

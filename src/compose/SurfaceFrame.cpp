@@ -132,7 +132,7 @@ void SurfaceFrame::BlockRows(const FaceWindow& block, const Placement& own, cons
 }
 
 int SurfaceFrame::RanksAt(const double eye[3], double R, double pixAng, uint32_t* faceOut,
-                          double* Lout) {
+                          double* Lout, double nearM) {
     const double rE = std::sqrt(eye[0] * eye[0] + eye[1] * eye[1] + eye[2] * eye[2]);
     if (!(rE > 0.0)) return 0;
     const double d[3] = {eye[0] / rE, eye[1] / rE, eye[2] / rE};
@@ -152,7 +152,9 @@ int SurfaceFrame::RanksAt(const double eye[3], double R, double pixAng, uint32_t
                           a[0] * b[0] + a[1] * b[1] + a[2] * b[2]);
     };
     const double g3 = R * std::sqrt(ang(d0, dx) * ang(d0, dy));
-    const double alt = (std::max)(rE - R, 0.01);
+    // The pixel's footprint is taken at the nearest the ground can be to it: the eye's altitude, or
+    // for a world seen only through a window, that window's distance (nearM), whichever is farther.
+    const double alt = (std::max)((std::max)(rE - R, 0.01), nearM);
     const double L = std::log2(alt * pixAng / g3);
     if (faceOut) *faceOut = face;
     if (Lout) *Lout = L;
@@ -160,32 +162,45 @@ int SurfaceFrame::RanksAt(const double eye[3], double R, double pixAng, uint32_t
 }
 
 void SurfaceFrame::Assign(uint32_t n, const double eyes[][3], double pixAng) {
-    double pix[kWindowSlots];
-    for (uint32_t s = 0; s < kWindowSlots; ++s) pix[s] = pixAng;
-    Assign(n, eyes, pix);
+    n = (std::min)(n, kWindowSlots);
+    Claimant c[kWindowSlots];
+    for (uint32_t s = 0; s < n; ++s) {
+        for (int i = 0; i < 3; ++i) c[s].eye[i] = eyes[s][i];
+        c[s].pixAng = pixAng;
+    }
+    uint32_t out[kWindowSlots];
+    Claim(n, n, c, out);
 }
 
-void SurfaceFrame::Assign(uint32_t n, const double eyes[][3], const double pixAngs[]) {
-    n = (std::min)(n, kWindowSlots);
-    slotsLive = n;
-    uint32_t prev[kWindowSlots];
-    for (uint32_t s = 0; s < kWindowSlots; ++s) prev[s] = slotSet[s];
+void SurfaceFrame::Claim(uint32_t nTable, uint32_t n, const Claimant* cl, uint32_t* setOut) {
+    nTable = (std::min)(nTable, kWindowSlots);
+    n = (std::min)(n, kMaxClaimants);
+    // What each claimant read the frame before (the table's slots, then the other eyes in order).
+    uint32_t prev[kMaxClaimants];
+    for (uint32_t c = 0; c < n; ++c) {
+        prev[c] = c < nTable ? slotSet[c] : (c - nTable < m_claimedOthers ? m_otherSet[c - nTable] : kNoSet);
+    }
+    slotsLive = nTable;
     const double half = 0.5 * Lattice::kFaceDim;
-    // The score of every (slot, set): the ranks THE SLOT WANTS (its own K, RanksAt) whose box in
-    // the set already holds the slot's eye (4.19's held-set law on the box), then the set the slot
-    // held, then a set nobody holds. A slot that wants no rank claims nothing by ground (the
-    // measured fault without it: the camera's slot at 3,400 km over the Merrimack, K 0, took the
-    // set of the Droste level standing at 71 m there, every other frame).
-    int score[kWindowSlots][kWindowSlots] = {};
-    for (uint32_t s = 0; s < n; ++s) {
-        for (int i = 0; i < 3; ++i) slotEye[s][i] = eyes[s][i];
-        const double rE = std::sqrt(eyes[s][0] * eyes[s][0] + eyes[s][1] * eyes[s][1] + eyes[s][2] * eyes[s][2]);
-        const double d[3] = {eyes[s][0] / rE, eyes[s][1] / rE, eyes[s][2] / rE};
+    // The score of every (claimant, set): the ranks THE CLAIMANT WANTS (its own K, RanksAt) whose box
+    // in the set already holds its eye (4.19's held-set law on the box), then the set it held, then a
+    // set nobody holds. A claimant that wants no rank claims nothing by ground (the measured fault
+    // without it: the camera's slot at 3,400 km over the Merrimack, K 0, took the set of the Droste
+    // level standing at 71 m there, every other frame).
+    int score[kMaxClaimants][kWindowSlots] = {};
+    uint32_t K[kMaxClaimants] = {}, holds[kMaxClaimants][kWindowSlots] = {};
+    for (uint32_t c = 0; c < n; ++c) {
+        const double* e = cl[c].eye;
+        if (c < nTable) {
+            for (int i = 0; i < 3; ++i) slotEye[c][i] = e[i];
+        }
+        const double rE = std::sqrt(e[0] * e[0] + e[1] * e[1] + e[2] * e[2]);
+        const double d[3] = {e[0] / rE, e[1] / rE, e[2] / rE};
         uint32_t face = 0;
-        const uint32_t K = uint32_t(RanksAt(eyes[s], planetR, pixAngs[s], &face));
+        K[c] = uint32_t(RanksAt(e, planetR, cl[c].pixAng, &face, nullptr, cl[c].nearM));
         for (uint32_t w = 0; w < kWindowSlots; ++w) {
-            int holds = 0;
-            for (uint32_t k = 0; k < (std::min)(K, bound[w].K); ++k) {
+            uint32_t h = 0;
+            for (uint32_t k = 0; k < (std::min)(K[c], bound[w].K); ++k) {
                 const hal::BlockBinding& b = bound[w].box[k];
                 if (b.face != face) break;
                 double X = 0.0, Y = 0.0;
@@ -194,34 +209,77 @@ void SurfaceFrame::Assign(uint32_t n, const double eyes[][3], const double pixAn
                     std::abs(Y - (double(b.OrgY()) + half)) > half) {
                     break;
                 }
-                ++holds;
+                ++h;
             }
-            score[s][w] = 4 * holds + (prev[s] == w ? 2 : 0) + (bound[w].K == 0 ? 1 : 0);
+            holds[c][w] = h;
+            score[c][w] = 4 * int(h) + (prev[c] == w ? 2 : 0) + (bound[w].K == 0 ? 1 : 0);
         }
     }
-    // The claims, the best pair first (ties: the lower slot, then the lower set).
-    bool slotDone[kWindowSlots] = {}, setTaken[kWindowSlots] = {};
-    for (uint32_t s = 0; s < kWindowSlots; ++s) slotSet[s] = kNoSet;
-    for (uint32_t c = 0; c < n; ++c) {
+    bool taken[kWindowSlots] = {};
+    uint32_t got[kMaxClaimants];
+    for (uint32_t c = 0; c < n; ++c) got[c] = kNoSet;
+    for (uint32_t w = 0; w < kWindowSlots; ++w) {
+        setLeader[w] = kNoSet;
+        setReaders[w] = 0;
+    }
+    auto bestFree = [&](uint32_t c) {
         int best = -1;
-        uint32_t bs = 0, bw = 0;
-        for (uint32_t s = 0; s < n; ++s) {
-            if (slotDone[s]) continue;
-            for (uint32_t w = 0; w < kWindowSlots; ++w) {
-                if (!setTaken[w] && score[s][w] > best) {
-                    best = score[s][w];
-                    bs = s;
-                    bw = w;
-                }
+        uint32_t bw = kNoSet;
+        for (uint32_t w = 0; w < kWindowSlots; ++w) {
+            if (!taken[w] && score[c][w] > best) {
+                best = score[c][w];
+                bw = w;
             }
         }
-        slotSet[bs] = bw;
-        slotDone[bs] = setTaken[bw] = true;
+        return bw;
+    };
+    // (1) the claimants that want ranks, in order: join a led set that holds them at every rank, or
+    // lead the best free one.
+    for (uint32_t c = 0; c < n; ++c) {
+        if (K[c] == 0) continue;
+        for (uint32_t w = 0; w < kWindowSlots && got[c] == kNoSet; ++w) {
+            if (taken[w] && holds[c][w] >= K[c]) got[c] = w;
+        }
+        if (got[c] == kNoSet) {
+            got[c] = bestFree(c);
+            if (got[c] != kNoSet) {
+                taken[got[c]] = true;
+                setLeader[got[c]] = c;
+                m_leader[got[c]] = cl[c];
+            }
+        }
+    }
+    // (2) the claimants that want none: only what nobody else wanted.
+    for (uint32_t c = 0; c < n; ++c) {
+        if (K[c] != 0) continue;
+        got[c] = bestFree(c);
+        if (got[c] != kNoSet) {
+            taken[got[c]] = true;
+            setLeader[got[c]] = c;
+            m_leader[got[c]] = cl[c];
+        }
+    }
+    for (uint32_t s = 0; s < kWindowSlots; ++s) slotSet[s] = kNoSet;
+    for (uint32_t c = 0; c < n; ++c) {
+        if (c < nTable) slotSet[c] = got[c];
+        else m_otherSet[c - nTable] = got[c];
+        if (got[c] != kNoSet) ++setReaders[got[c]];
+        if (setOut) setOut[c] = got[c];
+    }
+    for (uint32_t c = n - nTable; c < kMaxClaimants; ++c) m_otherSet[c] = kNoSet;
+    m_claimedOthers = n - nTable;
+}
+
+void SurfaceFrame::FollowAll(std::vector<Moved>& moved) {
+    for (uint32_t w = 0; w < kWindowSlots; ++w) {
+        const bool led = setLeader[w] != kNoSet;
+        Follow(w, led ? m_leader[w].eye : nullptr, led ? m_leader[w].pixAng : 1.0e-3, moved,
+               led ? m_leader[w].nearM : 0.0);
     }
 }
 
 void SurfaceFrame::Follow(uint32_t set, const double eye[3], double pixAng,
-                          std::vector<Moved>& moved) {
+                          std::vector<Moved>& moved, double nearM) {
     if (set >= kWindowSlots) return;
     const uint32_t slot = set;   // the slices are the set's
     EyeWindows& w = bound[set];
@@ -231,7 +289,7 @@ void SurfaceFrame::Follow(uint32_t set, const double eye[3], double pixAng,
         return;
     }
     uint32_t face = 0;
-    w.K = uint32_t(RanksAt(eye, planetR, pixAng, &face));
+    w.K = uint32_t(RanksAt(eye, planetR, pixAng, &face, nullptr, nearM));
     const double rE = std::sqrt(eye[0] * eye[0] + eye[1] * eye[1] + eye[2] * eye[2]);
     const double d[3] = {eye[0] / rE, eye[1] / rE, eye[2] / rE};
     // PHASE B2 (D1): the step per axis, a whole tile at the floor of every tenant sharing the windows.
@@ -299,6 +357,9 @@ void SurfaceFrame::Share() {
     bool claimed[kWindowSlots] = {};
     for (uint32_t s = 0; s < slotsLive; ++s) {
         if (slotSet[s] != kNoSet) claimed[slotSet[s]] = true;
+    }
+    for (uint32_t c = 0; c < m_claimedOthers; ++c) {   // and every other eye's
+        if (m_otherSet[c] != kNoSet) claimed[m_otherSet[c]] = true;
     }
     sharedRanks = 0;
     for (uint32_t w = 0; w < kWindowSlots; ++w) {
