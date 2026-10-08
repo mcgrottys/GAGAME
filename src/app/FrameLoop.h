@@ -350,8 +350,14 @@ private:
     // own frame, another's into its view's slot.
     void HandSky(const Eye& e, const EyeSky& es, const EyeWindows* win = nullptr);
     void WalkEye(const Eye& e, float exagg, const EyeSky& es, bool dome,
-                 const EyeWindows* win = nullptr);
+                 const EyeWindows* win = nullptr, const GlobeLayer::EyeRings* rings = nullptr);
     void SurfaceFor(const Eye& e, ComposedSurfaceCb& out);
+    // THE RINGS OF AN EYE: a bank's ladder anchored about a point, standing in the windows whose rows
+    // are given (taken about rowsEye), wanting the bed each ring reads at its own grain; `orgs` gets
+    // the rings' origins for the globe. And the cascade sea's plane at an eye (sim/WaveChart.h).
+    void StandRings(WaterBankLayer* bank, const double at[3], const SurfaceFrame::ChainRows& rows,
+                    const double rowsEye[3], float orgs[12]);
+    bool ChartOf(const Eye& e, WaveChart::Frame& out) const;
 
     // THE SECOND EYE (scene hud.minimap, scene/Minimap.h): stepped and walked once a frame after
     // the first eye has settled, and appended to the frame's views as view 1.
@@ -362,6 +368,11 @@ private:
     bool m_minimapSky = false;       // its own dome is set: the sky layer draws in it
     float m_minimapEyeRadius = 0.0f; // where in the air it stands (SkyOf), for its b0
     int m_minimapWindowsSaid = 0;    // its window depth as last logged (on a change only)
+    bool m_minimapOwnRings = false;  // it stood its own rings last frame (logged on a change)
+    // Its own rings stand below this altitude (the sea's own band, M6g) and further than this from
+    // the first eye; nearer, the first eye's rings already stand where it looks.
+    static constexpr double kEyeRingsAltM = 60000.0;
+    static constexpr double kEyeRingsShareM = 1000.0;
     ComposedSurfaceCb m_minimapSurface{};   // b2 about the minimap's eye
     double m_minimapSubject[3] = {};
     bool m_minimapHasSubject = false;

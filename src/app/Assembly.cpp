@@ -215,6 +215,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     auto& sceneWatch = A->sceneWatch;
     auto& waterBank = A->waterBank;
     auto& waterBankB = A->waterBankB;
+    auto& waterBankEye = A->waterBankEye;
     auto& globe = A->globe;
     auto& vesselLayer = A->vesselLayer;
     auto& planetR = A->planetR;
@@ -742,6 +743,21 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             waterBankB->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             waterBankB->enabled = false;   // until the camera has a level above it
             renderer.AddLayer(std::move(wbB));
+        }
+        // ANOTHER EYE'S RINGS (scene hud.minimap): the same ladder anchored at the second eye, so
+        // the sea it looks down on has the waves the first eye's has, wherever it looks. The same
+        // stateless fill, run only in a frame that eye stands low enough to read it.
+        if (S.hud.minimap.enabled) {
+            auto wbE = std::make_unique<WaterBankLayer>();
+            waterBankEye = wbE.get();
+            waterBankEye->Configure(shaderDir, sea, &swe, &waterAtlas, &compositor, hgtCh, &globeModel);
+            waterBankEye->SetBaseTexel(waterScene.bankTexelM);
+            waterBankEye->SetSurface(&surface);
+            waterBankEye->flatBed = S.water.bank.flatBed;
+            waterBankEye->flatBedNavd = S.water.bank.flatBedNavd;
+            waterBankEye->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
+            waterBankEye->enabled = false;   // until that eye stands low enough to read it
+            renderer.AddLayer(std::move(wbE));
         }
     }
 

@@ -3237,13 +3237,37 @@ bool FrameLoop::Frame() {
                 }
                 waterBank->SetBoats(bA, bB);
                 if (waterBankB) waterBankB->SetBoats(bA, bB);
+                if (m_A.waterBankEye) m_A.waterBankEye->SetBoats(bA, bB);
             }
-            PROF_BEGIN();
-            waterBank->SetFrame(gpu, simUnix, cam.px, cam.pz);
-            PROF_END(3);
+            // THE RINGS OF THE FIRST EYE (StandRings, the one law every eye's rings stand by). PHASE B2:
+            // set A's rings stand about the camera, in its world's (slot 0) rows about its eye; set B's
+            // about the outer level's eye -- or the eye a gate carries -- in the rows of the world whose
+            // eye stands there (none within a kilometre: the cube alone). M10: set B's rings STAND
+            // wherever such an eye is: anchored and mapped here, so the frame a reader arrives in fills
+            // them in place; whether they are FILLED is the readers' to say, once the level table is
+            // final (below, before the tide). A reader wants what it reads: every ring its bed at its
+            // own grain, over its span, about the eye its rings stand at -- A's wants, then B's.
+            const double camP[3] = {cam.px, cam.py, cam.pz};
             float orgs[12];
-            for (int mR = 0; mR < WaterBankLayer::kMips; ++mR) {
-                waterBank->RingOrigin(mR, orgs[mR * 2], orgs[mR * 2 + 1]);
+            PROF_BEGIN();
+            StandRings(waterBank, camP, m_A.surface.SlotRows(0), m_A.surface.slotEye[0], orgs);
+            PROF_END(3);
+            float orgB[12] = {};
+            if (waterBankB) {
+                double EB[3];
+                PlanetOf(m_A.surface, drosteOuterCam, EB);
+                const uint32_t sB = drosteOuter ? m_A.surface.SlotNear(EB, 1000.0) : UINT32_MAX;
+                const SurfaceFrame::ChainRows rowsB =
+                    sB == UINT32_MAX ? SurfaceFrame::ChainRows{} : m_A.surface.SlotRows(sB);
+                const double* eyeB = sB == UINT32_MAX ? EB : m_A.surface.slotEye[sB];
+                if (drosteOuter) {
+                    StandRings(waterBankB, drosteOuterCam, rowsB, eyeB, orgB);
+                } else {
+                    waterBankB->SetWindows(rowsB, eyeB);   // standing nowhere: rows only
+                    if (hgtTenant >= 0) {
+                        waterBankB->SetHeightWindow(resMgr.TextureSrv(hgtTenant), resMgr.ResidencySrv(hgtTenant));
+                    }
+                }
             }
             uint32_t derivS[3];
             float patchS[3], bandKS[3], bandRmsS[3], bandFoldS[3];
@@ -3257,76 +3281,19 @@ bool FrameLoop::Frame() {
                 bandRmsS[c] = sea->BandRms(c);
                 bandFoldS[c] = sea->BandKFold(c);
             }
-            waterBank->injectPattern = opt.inject;
-            // PHASE B2: THE WINDOWS THE RINGS STAND IN. Set A's rings stand about the camera: its
-            // world's (slot 0) rows about its eye; set B's about the outer level's eye: the rows of
-            // the world whose eye stands there (none within a kilometre: the cube alone).
-            waterBank->SetWindows(m_A.surface.SlotRows(0), m_A.surface.slotEye[0]);
-            // PHASE B2: A READER WANTS WHAT IT READS -- every ring its bed at its own grain (the rung
-            // whose texel is at most the ring's), over its span, about the eye its rings stand at.
-            {
-                const int sampB = resMgr.Sampler("bank");
-                auto ringWants = [&](const double c[3]) {
-                    double E[3];
-                    PlanetOf(m_A.surface, c, E);
-                    for (int mR = 0; mR < WaterBankLayer::kMips; ++mR) {
-                        const double texel = waterBank->BaseTexelM() * double(1 << mR);
-                        const int rung = std::clamp(
-                            int(std::ceil(std::log2(m_A.surface.cube.GroundRes(0) / texel))), 0, 15);
-                        WantGround(resMgr, m_A.surface, sampB, hgtTenant, E,
-                                   0.5 * WaterBankLayer::kRingTexels * texel, rung);
-                    }
-                };
-                const double camP[3] = {cam.px, cam.py, cam.pz};
-                ringWants(camP);
-                if (waterBankB && drosteOuter) ringWants(drosteOuterCam);
-            }
-            if (waterBankB) {
-                double EB[3];
-                PlanetOf(m_A.surface, drosteOuterCam, EB);
-                const uint32_t sB = drosteOuter ? m_A.surface.SlotNear(EB, 1000.0) : UINT32_MAX;
-                waterBankB->SetWindows(sB == UINT32_MAX ? SurfaceFrame::ChainRows{} : m_A.surface.SlotRows(sB),
-                                       sB == UINT32_MAX ? EB : m_A.surface.slotEye[sB]);
-            }
-            if (hgtTenant >= 0) {
-                // PHASE B3: the height tenant's array; the rings read its windows by the rows above.
-                waterBank->SetHeightWindow(resMgr.TextureSrv(hgtTenant), resMgr.ResidencySrv(hgtTenant));
-                if (waterBankB) {
-                    waterBankB->SetHeightWindow(resMgr.TextureSrv(hgtTenant), resMgr.ResidencySrv(hgtTenant));
-                }
-            }
             globe->windGateVal = sea->WindGate();
             globe->SetWaterBank(waterBank->DispSrv(), waterBank->ParamSrv(),
                                 waterBank->DetailSrv(), derivS, patchS, bandKS,
                                 bandRmsS, bandFoldS, sea->heightScale,
                                 waterBank->BaseTexelM(), orgs);
             // M13 step 2: the cascade sea's plane AT THE EYE, for the pixel stage's sub-ring
-            // bands -- the same plane the bank's texels were filled from. A chart cell is
-            // hundreds of kilometres across, so one frame's pixels sit inside one.
+            // bands -- the same plane the bank's texels were filled from (ChartOf).
             {
-                WaveChart wcEye;
-                double dEye[3];
-                const bool onEye = m_A.surface.flat.Exact() &&
-                                   m_A.surface.flat.DirOfProjected(cam.px, cam.pz, dEye);
-                globe->SetWaveChartFrame(onEye ? wcEye.CellAt(dEye).f[0] : WaveChart::Frame{},
-                                         onEye);
+                WaveChart::Frame cf;
+                const bool onEye = ChartOf(Eye{0, &cam, 1.0f, 1.0f, camLevel}, cf);
+                globe->SetWaveChartFrame(cf, onEye);
             }
-            // M10: set B follows the OUTER level's eye, S(C) -- the sea the camera's
-            // planet floats in, seen from where the camera really is in that level's
-            // own frame -- or the eye a gate carries (the view's windows, above). Its rings
-            // STAND wherever such an eye is: anchored and mapped here, so the frame a reader
-            // arrives in fills them in place. Whether they are FILLED is the readers' to say,
-            // once the level table is final (below, before the tide).
             if (waterBankB) {
-                float orgB[12] = {};
-                if (drosteOuter) {
-                    waterBankB->injectPattern = opt.inject;
-                    waterBankB->SetFrame(gpu, simUnix, drosteOuterCam[0],
-                                         drosteOuterCam[2]);
-                    for (int mR = 0; mR < WaterBankLayer::kMips; ++mR) {
-                        waterBankB->RingOrigin(mR, orgB[mR * 2], orgB[mR * 2 + 1]);
-                    }
-                }
                 globe->SetWaterBankB(waterBankB->DispSrv(), waterBankB->ParamSrv(),
                                      waterBankB->DetailSrv(), orgB, drosteOuter);
             }
@@ -3677,6 +3644,7 @@ bool FrameLoop::Frame() {
         const double tidePlane = bathy.Ready() ? waterNavd : tide->focusHeight;
         if (waterBank) waterBank->SetTidePlane(tidePlane);
         if (waterBankB) waterBankB->SetTidePlane(tidePlane);
+        if (m_A.waterBankEye) m_A.waterBankEye->SetTidePlane(tidePlane);
     }
     PROF_BEGIN();
     if (swe.Ready()) {
@@ -4889,7 +4857,7 @@ float FrameLoop::ReliefOf(const Eye& e) const {
 }
 
 void FrameLoop::WalkEye(const Eye& e, float exagg, const EyeSky& es, bool dome,
-                        const EyeWindows* win) {
+                        const EyeWindows* win, const GlobeLayer::EyeRings* rings) {
     GlobeLayer* globe = m_A.globe;
     if (!globe) return;
     const double t = m_simUnix - m_startUnix;
@@ -4900,13 +4868,14 @@ void FrameLoop::WalkEye(const Eye& e, float exagg, const EyeSky& es, bool dome,
         (void)exagg;
         (void)es;
         (void)dome;
-        (void)win;   // (the first eye's windows were handed over with SetGates)
+        (void)win;     // (the first eye's windows were handed over with SetGates)
+        (void)rings;   // (and its rings with SetWaterBank)
         globe->SetView(*e.cam, aspect, e.viewH, t);
-    } else if (win && win->n > 0) {
-        globe->SetOtherView(m_A.gpu, e.view, *e.cam, aspect, e.viewH, t, exagg, es.camUp, !dome,
-                            win->levels, win->boxes, win->n, win->viewHole, win->viewHoleN);
     } else {
-        globe->SetOtherView(m_A.gpu, e.view, *e.cam, aspect, e.viewH, t, exagg, es.camUp, !dome);
+        const bool w = win && win->n > 0;
+        globe->SetOtherView(m_A.gpu, e.view, *e.cam, aspect, e.viewH, t, exagg, es.camUp, !dome,
+                            w ? win->levels : nullptr, w ? win->boxes : nullptr, w ? win->n : 0,
+                            w ? win->viewHole : nullptr, w ? win->viewHoleN : 0, rings);
     }
 }
 
@@ -5082,6 +5051,44 @@ FrameLoop::EyeWindows FrameLoop::WindowsOf(const Eye& e, const std::vector<scene
     // The eye's own world need not walk what the first window shows.
     o.viewHoleN = scene::LinkHole(chain.front(), view, o.viewHole) ? 5 : 0;
     return o;
+}
+
+void FrameLoop::StandRings(WaterBankLayer* bank, const double at[3], const SurfaceFrame::ChainRows& rows,
+                           const double rowsEye[3], float orgs[12]) {
+    auto& resMgr = m_A.resMgr;
+    const int hgtTenant = m_A.hgtTenant;
+    bank->SetFrame(m_A.gpu, m_simUnix, at[0], at[2]);   // anchored and mapped: the bank's own tiles
+    for (int mR = 0; mR < WaterBankLayer::kMips; ++mR) {
+        bank->RingOrigin(mR, orgs[mR * 2], orgs[mR * 2 + 1]);
+    }
+    bank->injectPattern = m_opt.inject;
+    bank->SetWindows(rows, rowsEye);
+    // A READER WANTS WHAT IT READS -- every ring its bed at its own grain (the rung whose texel is at
+    // most the ring's), over its span, about the eye its rings stand at.
+    const int sampB = resMgr.Sampler("bank");
+    double E[3];
+    PlanetOf(m_A.surface, at, E);
+    for (int mR = 0; mR < WaterBankLayer::kMips; ++mR) {
+        const double texel = bank->BaseTexelM() * double(1 << mR);
+        const int rung = std::clamp(
+            int(std::ceil(std::log2(m_A.surface.cube.GroundRes(0) / texel))), 0, 15);
+        WantGround(resMgr, m_A.surface, sampB, hgtTenant, E, 0.5 * WaterBankLayer::kRingTexels * texel,
+                   rung);
+    }
+    if (hgtTenant >= 0) {
+        // PHASE B3: the height tenant's array; the rings read its windows by the rows above.
+        bank->SetHeightWindow(resMgr.TextureSrv(hgtTenant), resMgr.ResidencySrv(hgtTenant));
+    }
+}
+
+// The cascade sea's plane AT THE EYE (M13 step 2): a chart cell is hundreds of kilometres across, so
+// one frame's pixels sit inside one.
+bool FrameLoop::ChartOf(const Eye& e, WaveChart::Frame& out) const {
+    WaveChart wcEye;
+    double dEye[3];
+    const bool onEye = m_A.surface.flat.Exact() && m_A.surface.flat.DirOfProjected(e.cam->px, e.cam->pz, dEye);
+    out = onEye ? wcEye.CellAt(dEye).f[0] : WaveChart::Frame{};
+    return onEye;
 }
 
 // THE SKY OF AN EYE (step 3). Moved verbatim from the first eye's two blocks in Frame -- the
@@ -5288,7 +5295,38 @@ void FrameLoop::MinimapFrame(float dt) {
         Log("[minimap] the eye reaches %d window%s deep", win.n, win.n == 1 ? "" : "s");
     }
     if (m_minimapSky) HandSky(eye, es, &win);
-    WalkEye(eye, exagg, es, m_minimapSky, &win);
+    // ITS RINGS (StandRings, the first eye's law): its own ladder when it stands low over the sea
+    // and away from the first eye; the first eye's set A where it stands at the first eye's place
+    // (they stand there already); none from high up, where no ring is finer than a pixel.
+    GlobeLayer::EyeRings rings;
+    const GlobeLayer::EyeRings* ringsOf = nullptr;
+    WaterBankLayer* bankE = m_A.waterBankEye;
+    if (bankE) bankE->enabled = false;
+    const double alt = m_minimap.Altitude();
+    const double ddx = mc.px - m_cam.px, ddz = mc.pz - m_cam.pz;
+    const bool home = ddx * ddx + ddz * ddz < kEyeRingsShareM * kEyeRingsShareM;
+    if (bankE && m_A.sea && alt < kEyeRingsAltM && !home) {
+        const double at[3] = {mc.px, mc.py, mc.pz};
+        double E[3];
+        PlanetOf(m_A.surface, at, E);
+        const uint32_t sE = m_A.surface.SlotNear(E, 1000.0);
+        const SurfaceFrame::ChainRows rowsE =
+            sE == UINT32_MAX ? SurfaceFrame::ChainRows{} : m_A.surface.SlotRows(sE);
+        StandRings(bankE, at, rowsE, sE == UINT32_MAX ? E : m_A.surface.slotEye[sE], rings.org);
+        bankE->enabled = true;
+        rings.disp = bankE->DispSrv();
+        rings.param = bankE->ParamSrv();
+        rings.detail = bankE->DetailSrv();
+        rings.chartOn = ChartOf(eye, rings.chart);
+        ringsOf = &rings;
+    }
+    if (bool(ringsOf) != m_minimapOwnRings) {
+        m_minimapOwnRings = bool(ringsOf);
+        Log("[minimap] the eye %s (%.0f m up, %.0f m from the first eye)",
+            ringsOf ? "stands its own rings" : "reads the first eye's rings", alt,
+            std::sqrt(ddx * ddx + ddz * ddz));
+    }
+    WalkEye(eye, exagg, es, m_minimapSky, &win, ringsOf);
     SurfaceFor(eye, m_minimapSurface);
     m_minimapDrawn = true;
 }

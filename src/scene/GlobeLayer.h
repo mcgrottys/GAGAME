@@ -365,11 +365,20 @@ public:
     // ("eye<view>"), and keeps what it walked for Render at ctx.viewIndex == view. The layer's
     // working set stays the first eye's, so nothing the first eye reads afterwards has moved.
     static constexpr uint32_t kMaxOtherEyes = 3;
-    // `gates`/`boxes`/`n`/`hole` are that eye's own windows (SetGates' arguments, from its own cone).
+    // `gates`/`boxes`/`n`/`hole` are that eye's own windows (SetGates' arguments, from its own cone);
+    // `rings`, when given, is the ring set its own world reads as its set A (its own bank, or the
+    // first eye's where it stands at the first eye's place), with the cascade's plane at the eye.
+    struct EyeRings {
+        uint32_t disp = 0, param = 0, detail = 0;
+        float org[12] = {};
+        WaveChart::Frame chart{};
+        bool chartOn = false;
+    };
     void SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float aspect, float viewportH,
                       double simTime, float exagg, const float skyUp[3], bool skyPass,
                       const DrosteLevel* gates = nullptr, const WindowBox* boxes = nullptr,
-                      int n = 0, const double (*hole)[4] = nullptr, int holeN = 0);
+                      int n = 0, const double (*hole)[4] = nullptr, int holeN = 0,
+                      const EyeRings* rings = nullptr);
     // The eye stops drawing (its walk is not refreshed this frame).
     void DropOtherView(uint32_t view) {
         if (view > 0 && view <= kMaxOtherEyes) m_other[view - 1].valid = false;

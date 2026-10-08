@@ -178,6 +178,7 @@ struct Assembly {
     scene::SlicePlane slice;
     WaterBankLayer* waterBank = nullptr;
     WaterBankLayer* waterBankB = nullptr;   // M10: the outer level's rings (set B)
+    WaterBankLayer* waterBankEye = nullptr; // another eye's own rings (the minimap's: hud.minimap)
     GlobeLayer* globe = nullptr;
     VesselLayer* vesselLayer = nullptr;   // M9bq: the hulls, drawn from their specs
     double planetR = 0.0;

@@ -2484,7 +2484,7 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
 void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float aspect,
                               float viewportH, double simTime, float exagg, const float skyUp[3],
                               bool skyPass, const DrosteLevel* gates, const WindowBox* boxes, int n,
-                              const double (*hole)[4], int holeN) {
+                              const double (*hole)[4], int holeN, const EyeRings* rings) {
     if (view == 0 || view > kMaxOtherEyes || !m_res) return;
     OtherEye& o = m_other[view - 1];
     if (m_msPath && !o.recBuf[0].res) {
@@ -2524,6 +2524,11 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     double viewHole0[5][4];
     memcpy(viewHole0, m_viewHole, sizeof(viewHole0));
     const int viewHoleN0 = m_viewHoleCount;
+    uint32_t bankSrv0[3] = {m_bankSrv[0], m_bankSrv[1], m_bankSrv[2]};
+    float bankOrg0[12];
+    for (int i = 0; i < 12; ++i) bankOrg0[i] = m_bankOrg[i];
+    const WaveChart::Frame chart0 = m_chartFrame;
+    const bool chartOn0 = m_chartOn;
     const int sampler0 = m_sampler;
 
     // ---- this eye: its own exaggeration, zenith and sampler; its own world and the worlds its own
@@ -2534,6 +2539,14 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     m_camSkyDay = -1.0f;
     m_drosteOn = false;
     SetGates(gates, boxes, n, hole, holeN);
+    if (rings) {
+        m_bankSrv[0] = rings->disp;
+        m_bankSrv[1] = rings->param;
+        m_bankSrv[2] = rings->detail;
+        for (int i = 0; i < 12; ++i) m_bankOrg[i] = rings->org[i];
+        m_chartFrame = rings->chart;
+        m_chartOn = rings->chartOn;
+    }
     if (o.sampler < 0) o.sampler = m_res->Sampler(("eye" + std::to_string(view)).c_str());
     m_sampler = o.sampler;
     m_borrowed = true;
@@ -2575,6 +2588,10 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     for (int k = 0; k < kMaxWindowChain; ++k) m_gateBoxes[k] = gateBoxes0[k];
     memcpy(m_viewHole, viewHole0, sizeof(viewHole0));
     m_viewHoleCount = viewHoleN0;
+    for (int i = 0; i < 3; ++i) m_bankSrv[i] = bankSrv0[i];
+    for (int i = 0; i < 12; ++i) m_bankOrg[i] = bankOrg0[i];
+    m_chartFrame = chart0;
+    m_chartOn = chartOn0;
     m_sampler = sampler0;
 }
 
