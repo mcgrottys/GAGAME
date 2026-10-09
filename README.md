@@ -16,6 +16,18 @@ The plan lives in
 [GAMEPLAN.md](GAMEPLAN.md); this README covers what exists today: **M0** (the tiled-resource
 null-tile proof) and **M1** (live analytic tides for the lower Merrimack).
 
+## Data is not included
+
+This repository holds the code only. None of the data the engine draws (tides, waves,
+currents, bathymetry, elevation, weather, aerial and satellite imagery) is checked in, apart from three small hand-surveyed GIS files
+in `data/gis/`, and the
+screenshots above were made from data fetched on the author's machine. Each dataset comes from
+its provider through the harvesters in `harvester/` (the per-milestone sections below give the
+commands), lands in `cache/` and `data/`, and stays under its provider's own terms, not this
+repository's license. Most of it is US public-domain NOAA, USGS and NCEI data. Google Map Tiles
+imagery needs your own API key and is bound by Google's terms. A fresh clone renders nothing
+until those fetches have run.
+
 ## Build
 
 ```bat
