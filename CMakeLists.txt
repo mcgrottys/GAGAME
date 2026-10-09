@@ -71,6 +71,8 @@ add_executable(gagame
   src/compose/TreePruneTest.cpp
   src/compose/TileTreeTest.cpp
   src/compose/Sources.cpp
+  src/compose/BuildingSolids.cpp
+  src/compose/BuildingSolidsTest.cpp
   src/compose/RasterFileSource.cpp
   src/compose/RasterFileTest.cpp
   src/compose/GisMask.cpp
@@ -106,6 +108,7 @@ add_executable(gagame
   src/scene/MarkerLayer.cpp
   src/scene/Minimap.cpp
   src/scene/VesselLayer.cpp
+  src/scene/BuildingLayer.cpp
   src/sim/TideModel.cpp
   src/sim/SeaState.cpp
   src/sim/CurrentModel.cpp

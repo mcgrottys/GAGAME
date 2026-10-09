@@ -2,6 +2,7 @@
 // Moved verbatim from main.cpp (M12 step 1b); declared in app/Tools.h.
 #include "app/Tools.h"
 
+#include "compose/BuildingSolids.h"
 #include "compose/Compositor.h"
 #include "compose/RasterFileSource.h"
 #include "compose/TreePrune.h"
@@ -74,6 +75,7 @@ int RunSelfTest(const Options& opt) {
     ok &= scene::RunSceneSelfTest();   // M12 step 5a: the scene's data structures -- the
                                        // registry template, the property table, the fold with
                                        // override, the placement sugar, the shim
+    ok &= RunBuildingSelfTest();       // the building stack's laws: cover, remove, id, parts, heights
     ok &= RunPruneSelfTest();          // the tree-prune tool's refusals, planted and caught on a
                                        // scratch root under out\prunetest, never the cache
     ok &= RunResidencySelfTest(gpu, sc, opt.shaderDir);   // the floor law: its arithmetic on the

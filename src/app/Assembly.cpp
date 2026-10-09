@@ -47,6 +47,7 @@
 #include "compose/WaterAtlas.h"
 #include "core/Json.h"
 #include "core/GaAst.h"
+#include "scene/BuildingLayer.h"
 #include "scene/VesselLayer.h"
 #include "core/TileProviders.h"
 #include "core/SceneConfig.h"
@@ -218,6 +219,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
     auto& waterBankEye = A->waterBankEye;
     auto& globe = A->globe;
     auto& vesselLayer = A->vesselLayer;
+    auto& buildingLayer = A->buildingLayer;
     auto& planetR = A->planetR;
     auto& resMgr = A->resMgr;
     auto& marsDiff = A->marsDiff;
@@ -290,6 +292,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
         std::vector<RasterEntry> entries;
         for (const scene::SourceProps& s : S.sources) {
             if (s.kind == "seastate") continue;   // PHASE C2: a sea state, not a raster (below)
+            if (s.kind == "buildings") continue;  // solids, not a raster: the buildings layer's (below)
             entries.push_back({s.file, s.folder, s.match, s.manifest, s.name, s.kind, s.crs, s.over,
                                s.feather, s.unit, s.datum, s.offset, s.hasOffset});
         }
@@ -1502,6 +1505,67 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             mkOwned->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
             mkOwned->enabled = !opt.albedo;   // the lens shows textures, nothing else
             renderer.AddLayer(std::move(mkOwned));
+        }
+        // THE BUILDINGS (compose/BuildingSolids.h), registered last (a scene that names them
+        // appends them to its base's list): the scene's sources of kind "buildings", a
+        // stack by `over` like the earth's, composed into solids and drawn by their own layer --
+        // never into earth.height, so the water solver's bed does not see them (2026-10-09).
+        if (!marsMode && S.LayerOn("buildings")) {
+            const SceneLayer* bl = S.Layer("buildings");
+            std::vector<const scene::SourceProps*> order;
+            for (const scene::SourceProps& s : S.sources) {
+                if (s.kind == "buildings") order.push_back(&s);
+            }
+            std::stable_sort(order.begin(), order.end(),
+                             [](const scene::SourceProps* a, const scene::SourceProps* b) { return a->over < b->over; });
+            std::vector<std::vector<BuildingSolid>> stack;
+            std::vector<const scene::SourceProps*> loaded;
+            for (const scene::SourceProps* s : order) {
+                const std::string path = s->manifest.empty() ? s->file : s->manifest;
+                std::vector<BuildingSolid> solids;
+                std::string why;
+                if (!LoadBuildingSource(path, surface.flat.latDeg, surface.flat.lonDeg, bl->radius, solids, &why)) {
+                    Log("[buildings] source '%s' refused: %s", s->name.c_str(), why.c_str());
+                    continue;
+                }
+                Log("[buildings] source '%s' (over %g): %zu solids within %.0f m of the anchor",
+                    s->name.c_str(), s->over, solids.size(), bl->radius);
+                stack.push_back(std::move(solids));
+                loaded.push_back(s);
+            }
+            uint64_t identity = 0;
+            std::vector<size_t> drawn;
+            std::vector<BuildingSolid> solids =
+                ComposeBuildings(std::move(stack), {bl->levelHeight, bl->defaultHeight}, &identity, &drawn);
+            for (size_t k = 0; k < loaded.size(); ++k) {
+                Log("[buildings]   '%s' draws %zu", loaded[k]->name.c_str(), drawn[k]);
+            }
+            Log("[buildings] composed: %zu solids (floor %.2f m, untagged %.2f m) identity %016llx",
+                solids.size(), bl->levelHeight, bl->defaultHeight, static_cast<unsigned long long>(identity));
+            const SurfaceFrame* sf = &surface;
+            const Compositor* comp = &compositor;
+            const int ch = hgtCh;
+            const double R = planetR;
+            auto blOwned = std::make_unique<BuildingLayer>();
+            blOwned->Configure(
+                shaderDir, std::move(solids),
+                // The marker pylons' placement (FrameLoop): the planet point on the sphere of the
+                // globe, rotated into the flat frame whose origin is the anchor on the surface.
+                [sf, R](double lat, double lon, double h, double out[3]) {
+                    double d[3];
+                    GlobeModel::LatLonDir(lat, lon, d);
+                    const double r = R + h;
+                    out[0] = (sf->east[0] * d[0] + sf->east[1] * d[1] + sf->east[2] * d[2]) * r;
+                    out[1] = (sf->up[0] * d[0] + sf->up[1] * d[1] + sf->up[2] * d[2]) * r - R;
+                    out[2] = (sf->north[0] * d[0] + sf->north[1] * d[1] + sf->north[2] * d[2]) * r;
+                },
+                [comp, ch](double lat, double lon) -> double {
+                    constexpr double kRad = 3.14159265358979323846 / 180.0;
+                    return ch >= 0 ? comp->SampleHeightStack(ch, lat * kRad, lon * kRad, 1.0) : 0.0;
+                });
+            blOwned->Init(gpu, renderer.Shaders(), fields, renderer.RootSignature());
+            buildingLayer = blOwned.get();
+            renderer.AddLayer(std::move(blOwned));
         }
         if (S.hud.fps || S.hud.minimap.enabled) {
             auto hudOwned = std::make_unique<HudLayer>();

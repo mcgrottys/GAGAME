@@ -358,6 +358,9 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             r.Str("name", l.p.name);
             r.Bool("enabled", l.p.enabled);
             r.F32("exaggeration", l.exaggeration);   // the tide layer's
+            r.F64("levelHeight", l.levelHeight);     // the buildings layer's three
+            r.F64("defaultHeight", l.defaultHeight);
+            r.F64("radius", l.radius);
             if (!ok) return false;
             out.layers.push_back(std::move(l));
         }

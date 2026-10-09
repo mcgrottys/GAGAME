@@ -1,0 +1,39 @@
+{
+  "_readme": [
+    "NEWBURYPORT'S BUILDINGS -- OSM's footprints as solids, stood on the composed ground (the",
+    "buildings layer, compose/BuildingSolids.h). Downtown from over the river, looking south-west.",
+    "",
+    "Launch from the repo root:  build/bin/gagame.exe scenes/demos/newburyport_buildings.json",
+    "",
+    "The sources are a stack like the earth's: the OSM harvest at over 0 (harvester/",
+    "harvest_buildings.py), Overture's heights above it one source per provenance (harvester/",
+    "harvest_overture.py: Microsoft ML estimates 1, unattributed 2, Esri Community Maps 3, USGS",
+    "lidar 4 -- the order is this file's trust, and deleting a line drops that claim), and anything",
+    "with a higher `over` wins where it stands -- a GeoJSON of",
+    "your own replaces the OSM solids its footprints cover (or the OSM ids it names), and a feature",
+    "with \"remove\": true only clears. A solid no source gives a height stands at the layer's",
+    "DECLARED defaultHeight (levels x levelHeight where floors are tagged). The solids are not in",
+    "earth.height: the water does not see them.",
+    "FLY: W A S D move, Q / E down / up, hold the right mouse button to look."
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {"name": "newburyport-buildings", "mode": "world", "view": "downtown"},
+  "time": {"start": "2026-08-28T19:30:00Z"},
+  "layers": [
+    {"name": "buildings", "enabled": true, "levelHeight": 3.0, "defaultHeight": 7.0, "radius": 9000}
+  ],
+  "sources": [
+    {"name": "massgis.coq2023", "manifest": "data/aerial/aerial.json", "feather": 25},
+    {"name": "user.highlights", "manifest": "data/overlay/overlay.json", "feather": 25, "over": 1},
+    {"name": "osm.massachusetts", "kind": "buildings", "manifest": "D:/DataCache/OSM/buildings/massachusetts-261008.buildings.json"},
+    {"name": "overture.ml", "kind": "buildings", "over": 1, "manifest": "D:/DataCache/Overture/buildings/massachusetts-microsoft_ml_buildings.buildings.json"},
+    {"name": "overture.unattributed", "kind": "buildings", "over": 2, "manifest": "D:/DataCache/Overture/buildings/massachusetts-unattributed.buildings.json"},
+    {"name": "overture.esri", "kind": "buildings", "over": 3, "manifest": "D:/DataCache/Overture/buildings/massachusetts-esri_community_maps.buildings.json"},
+    {"name": "overture.lidar", "kind": "buildings", "over": 4, "manifest": "D:/DataCache/Overture/buildings/massachusetts-usgs_lidar.buildings.json"}
+  ],
+  "views": [
+    {"name": "market", "at": {"x": -4975, "alt": 260, "z": -648, "az": 0, "pitch": -89}, "fovY": 55, "gauge": "root", "nearZ": 0.25},
+    {"name": "street", "at": {"x": -4720, "alt": 55, "z": -330, "az": 235, "pitch": -10}, "fovY": 55, "gauge": "root", "nearZ": 0.25},
+    {"name": "downtown", "at": {"x": -4280, "alt": 140, "z": 20, "az": 230, "pitch": -18}, "fovY": 55, "gauge": "root", "nearZ": 0.25}
+  ]
+}

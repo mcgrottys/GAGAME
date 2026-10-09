@@ -22,6 +22,7 @@ EffectProps kEffect;
 SlicePlaneProps kSlice;
 LayerEntry kLayer;
 TideLayerProps kTide;
+BuildingsLayerProps kBuildings;
 NodeProps kNode;
 ToolProps kTool;
 StationProps kStation;
@@ -656,6 +657,19 @@ const Schema& TideLayerSchema() {
     }();
     return *s;
 }
+const Schema& BuildingsLayerSchema() {
+    static const Schema* s = [] {
+        Schema* sc = new Schema("layer.buildings", &kBuildings);
+        sc->Bind("levelHeight", kBuildings.levelHeight, Q::Length, "m",
+                 "what one tagged floor (building:levels) stands for, where no height is tagged", R)
+            .Bind("defaultHeight", kBuildings.defaultHeight, Q::Length, "m",
+                  "a building with neither height nor floors tagged: the scene's assumption", R)
+            .Bind("radius", kBuildings.radius, Q::Length, "m",
+                  "the solids read about the place's anchor (0 = every solid of every source)", R);
+        return sc;
+    }();
+    return *s;
+}
 const Schema& EmptySchema() {
     static const Schema* s = [] { return new Schema("layer.plain", &kLayer); }();
     return *s;
@@ -784,6 +798,7 @@ void RegisterBuiltinSceneTypes() {
         LayerSchemas().Register(name, [] { return &EmptySchema(); });
     }
     LayerSchemas().Register("tide", [] { return &TideLayerSchema(); });
+    LayerSchemas().Register("buildings", [] { return &BuildingsLayerSchema(); });
 }
 
 JsonValue DefaultDocument() {

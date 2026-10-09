@@ -737,6 +737,8 @@ std::optional<int> FrameLoop::Session() {
             return 1;
         }
     }
+    // The building solids stand in this frame: built now that its rows are real.
+    if (m_A.buildingLayer) m_A.buildingLayer->Build(gpu);
     // M12 step 4d: THE SPACES, DECLARED (core/Space.h). The planet at unit length R --
     // "planet.re" -- and the tangent frame under it, its link the rows just derived: own x, y,
     // z = east, up, north in the planet's frame (Frame() keeps the rows exactly and derives the
