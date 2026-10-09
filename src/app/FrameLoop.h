@@ -331,16 +331,15 @@ private:
     // frame's eye; another's into `out`, with both eyes the rows are taken about put back.
     float ReliefOf(const Eye& e) const;
     // THE WINDOWS OF AN EYE: the gate worlds it reaches, built for the walk, the sky and the hulls.
-    struct EyeWindows {
+    struct EyeWindows {   // as long as the chain
         int n = 0;
-        GlobeLayer::DrosteLevel levels[kMaxWindowChain];
-        WindowBox boxes[kMaxWindowChain];
-        float upWin[kMaxWindowChain * 4] = {};
-        float sunWin[kMaxWindowChain * 3] = {};
+        std::vector<GlobeLayer::DrosteLevel> levels;
+        std::vector<WindowBox> boxes;
+        std::vector<float> upWin, sunWin;   // 4 and 3 a window
         double viewHole[5][4] = {};
         int viewHoleN = 0;
         double eye[3] = {};                                       // the eye they were built about
-        double nearM[kMaxWindowChain] = {};   // the nearest each world can be seen from: its window
+        std::vector<double> nearM;   // the nearest each world can be seen from: its window
         double zE1[3] = {0.0, 1.0, 0.0}, sunE1[3] = {0.0, 1.0, 0.0};   // the first window's place
     };
     EyeWindows WindowsOf(const Eye& e, const std::vector<scene::WindowLink>& chain,
@@ -370,12 +369,12 @@ private:
     void MinimapStep(float dt);
     // Its claims (SurfaceFrame::Claim, as another eye): its own world's set and its window worlds'.
     uint32_t m_minimapSet = 0xFFFFFFFFu;
-    uint32_t m_minimapWinSets[kMaxWindowChain] = {};
+    std::vector<uint32_t> m_minimapWinSets;
     // Its windows, found in MinimapStep (from its own cone, before the claim) and drawn in MinimapFrame.
     std::vector<scene::WindowLink> m_minimapChain;
     float m_minimapExagg = 1.0f;
     // The first eye's gate worlds' nearest distances (WindowsOf), for their claims.
-    double m_winNearM[kMaxWindowChain] = {};
+    std::vector<double> m_winNearM;
     uint32_t m_liveSetsSaid = 0xFFFFFFFFu, m_claimantsSaid = 0xFFFFFFFFu;   // logged on a change
     scene::Minimap m_minimap;
     bool m_minimapReady = false;     // configured (the planet and its pole are known)

@@ -2723,7 +2723,7 @@ bool FrameLoop::Frame() {
         const int nOut = (std::min)(camLevel, 2);
         // M12 step 4d instrument: each level's row from the cycle beside the portal's, compared
         // after the loop (ProbeDrosteTable).
-        DrosteProbeRow probeRows[GlobeLayer::kMaxLevels];
+        DrosteProbeRow probeRows[8];   // the tower's levels: 3 + 2 at most
         int probeN = 0;
         for (int k = 0; k < 3 + nOut; ++k) {
             const int rel = (k < 3) ? k + 1 : -(k - 2);
@@ -3267,7 +3267,7 @@ bool FrameLoop::Frame() {
             const double camP[3] = {cam.px, cam.py, cam.pz};
             float orgs[12];
             PROF_BEGIN();
-            StandRings(waterBank, camP, m_A.surface.SlotRows(0), m_A.surface.slotEye[0], orgs);
+            StandRings(waterBank, camP, m_A.surface.SlotRows(0), m_A.surface.slotEye[0].data(), orgs);
             PROF_END(3);
             float orgB[12] = {};
             if (waterBankB) {
@@ -3276,7 +3276,7 @@ bool FrameLoop::Frame() {
                 const uint32_t sB = drosteOuter ? m_A.surface.SlotNear(EB, 1000.0) : UINT32_MAX;
                 const SurfaceFrame::ChainRows rowsB =
                     sB == UINT32_MAX ? SurfaceFrame::ChainRows{} : m_A.surface.SlotRows(sB);
-                const double* eyeB = sB == UINT32_MAX ? EB : m_A.surface.slotEye[sB];
+                const double* eyeB = sB == UINT32_MAX ? EB : m_A.surface.slotEye[sB].data();
                 if (drosteOuter) {
                     StandRings(waterBankB, drosteOuterCam, rowsB, eyeB, orgB);
                 } else {
@@ -3430,11 +3430,11 @@ bool FrameLoop::Frame() {
             if (n > 0) {
                 const EyeWindows ew =
                     WindowsOf(Eye{0, &cam, viewW, viewH, camLevel}, m_windows, view, globe->reliefExagg, sunRootF);
-                for (int k = 0; k < kMaxWindowChain; ++k) m_winNearM[k] = ew.nearM[k];
-                const GlobeLayer::DrosteLevel* levels = ew.levels;
-                const WindowBox* boxes = ew.boxes;
-                const float* upWin = ew.upWin;
-                const float* sunWin = ew.sunWin;
+                m_winNearM = ew.nearM;
+                const GlobeLayer::DrosteLevel* levels = ew.levels.data();
+                const WindowBox* boxes = ew.boxes.data();
+                const float* upWin = ew.upWin.data();
+                const float* sunWin = ew.sunWin.data();
                 const double* C = ew.eye;
                 const double* zE1 = ew.zE1;
                 const double* sunE1 = ew.sunE1;
@@ -3505,29 +3505,31 @@ bool FrameLoop::Frame() {
             std::vector<SurfaceFrame::Moved> moved;
             // The slots' eyes, then their claims (SurfaceFrame::Assign: a set is the ground's),
             // then every set follows the eye of the slot that claimed it, or holds none.
-            double eyes[SurfaceFrame::kWindowSlots][3] = {};
-            uint32_t n = 0;
-            for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) {
+            std::vector<std::array<double, 3>> eyes;
+            for (uint32_t s = 0;; ++s) {
                 const double camS[3] = {cam.px, cam.py, cam.pz};
                 const double* c = s == 0 ? camS : (s < globe->LevelSlots() ? globe->LevelCam(s) : nullptr);
                 if (!c) break;
                 const double ry = sf.planetR + c[1];
-                for (int k = 0; k < 3; ++k) eyes[s][k] = sf.up[k] * ry + sf.east[k] * c[0] + sf.north[k] * c[2];
-                n = s + 1;
+                std::array<double, 3> e;
+                for (int k = 0; k < 3; ++k) e[k] = sf.up[k] * ry + sf.east[k] * c[0] + sf.north[k] * c[2];
+                eyes.push_back(e);
             }
+            const uint32_t n = uint32_t(eyes.size());
             // THE CLAIMANTS (SurfaceFrame::Claim: a set belongs to a place, not to a table slot). The
             // first eye's table, each slot at the first eye's pixel and seen from no nearer than it
             // stands -- a gate world from no nearer than its window -- then every other eye and its own
             // gate worlds, at its own pixel. A claimant joins a set that already holds it at every rank
             // it wants, so the worlds standing at one place read one set; a set follows its leader.
-            SurfaceFrame::Claimant cl[SurfaceFrame::kMaxClaimants];
+            std::vector<SurfaceFrame::Claimant> cl(n + 1u + size_t(m_minimapWin.n));
             uint32_t nc = 0;
             const int gateFirst = globe->GateFirst(), gateCount = globe->GateCount();
             for (uint32_t s = 0; s < n; ++s, ++nc) {
                 for (int k = 0; k < 3; ++k) cl[nc].eye[k] = eyes[s][k];
                 cl[nc].pixAng = pixAng;
                 const int g = int(s) - gateFirst;
-                cl[nc].nearM = (gateFirst > 0 && g >= 0 && g < gateCount) ? m_winNearM[g] : 0.0;
+                cl[nc].nearM = (gateFirst > 0 && g >= 0 && g < gateCount && size_t(g) < m_winNearM.size())
+                                   ? m_winNearM[size_t(g)] : 0.0;
             }
             const uint32_t miniFirst = nc;
             if (m_minimapDrawn) {
@@ -3543,21 +3545,21 @@ bool FrameLoop::Frame() {
                 cl[nc].pixAng = pixM;
                 cl[nc].nearM = 0.0;
                 ++nc;
-                for (int k = 0; k < m_minimapWin.n && nc < SurfaceFrame::kMaxClaimants; ++k, ++nc) {
+                for (int k = 0; k < m_minimapWin.n; ++k, ++nc) {
                     planet(m_minimapWin.levels[k].cam, cl[nc].eye);
                     cl[nc].pixAng = pixM;
                     cl[nc].nearM = m_minimapWin.nearM[k];
                 }
             }
-            uint32_t was[SurfaceFrame::kWindowSlots];
-            for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) was[s] = sf.slotSet[s];
-            uint32_t got[SurfaceFrame::kMaxClaimants];
-            sf.Claim(n, nc, cl, got);
+            std::vector<uint32_t> was(n, SurfaceFrame::kNoSet);
+            for (uint32_t s = 0; s < n && s < sf.slotSet.size(); ++s) was[s] = sf.slotSet[s];
+            std::vector<uint32_t> got(nc, SurfaceFrame::kNoSet);
+            sf.Claim(n, nc, cl.data(), got.data());
             m_minimapSet = SurfaceFrame::kNoSet;
-            for (int k = 0; k < kMaxWindowChain; ++k) m_minimapWinSets[k] = SurfaceFrame::kNoSet;
+            m_minimapWinSets.assign(size_t(m_minimapWin.n), SurfaceFrame::kNoSet);
             if (m_minimapDrawn && miniFirst < nc) {
                 m_minimapSet = got[miniFirst];
-                for (uint32_t c = miniFirst + 1; c < nc && c - miniFirst - 1 < uint32_t(kMaxWindowChain); ++c) {
+                for (uint32_t c = miniFirst + 1; c < nc && c - miniFirst - 1 < m_minimapWinSets.size(); ++c) {
                     m_minimapWinSets[c - miniFirst - 1] = got[c];
                 }
             }
@@ -3569,17 +3571,17 @@ bool FrameLoop::Frame() {
                 }
             }
             uint32_t liveSets = 0;
-            for (uint32_t w = 0; w < SurfaceFrame::kWindowSlots; ++w) liveSets += sf.setLeader[w] != SurfaceFrame::kNoSet;
+            for (uint32_t w = 0; w < SurfaceFrame::kWindowSets; ++w) liveSets += sf.setLeader[w] != SurfaceFrame::kNoSet;
             if (liveSets != m_liveSetsSaid || nc != m_claimantsSaid) {
                 m_liveSetsSaid = liveSets;
                 m_claimantsSaid = nc;
                 Log("[eye-windows] frame %llu: %u claimant(s) read %u set(s) of %u", static_cast<unsigned long long>(frame),
-                    nc, liveSets, SurfaceFrame::kWindowSlots);
+                    nc, liveSets, SurfaceFrame::kWindowSets);
             }
-            uint32_t K0[SurfaceFrame::kWindowSlots];
-            for (uint32_t w = 0; w < SurfaceFrame::kWindowSlots; ++w) K0[w] = sf.bound[w].K;
+            uint32_t K0[SurfaceFrame::kWindowSets];
+            for (uint32_t w = 0; w < SurfaceFrame::kWindowSets; ++w) K0[w] = sf.bound[w].K;
             sf.FollowAll(moved);
-            for (uint32_t w = 0; w < SurfaceFrame::kWindowSlots; ++w) {
+            for (uint32_t w = 0; w < SurfaceFrame::kWindowSets; ++w) {
                 if (sf.bound[w].K != K0[w]) {
                     Log("[eye-windows] frame %llu: set %u holds %u rank(s) (was %u)",
                         static_cast<unsigned long long>(frame), w, sf.bound[w].K, K0[w]);
@@ -3599,7 +3601,7 @@ bool FrameLoop::Frame() {
             m_ngClaims = 0;
             m_ngK = 0;
             for (uint32_t s = 0; s < n; ++s) m_ngClaims += sf.slotSet[s] != was[s] ? 1u : 0u;
-            for (uint32_t w = 0; w < SurfaceFrame::kWindowSlots; ++w) m_ngK += sf.bound[w].K;
+            for (uint32_t w = 0; w < SurfaceFrame::kWindowSets; ++w) m_ngK += sf.bound[w].K;
         }
         PROF_BEGIN();
         WalkEye(Eye{0, &cam, viewW, viewH, camLevel}, globe->reliefExagg, eyeSky0, true);
@@ -3609,7 +3611,7 @@ bool FrameLoop::Frame() {
         // tiles are chosen once for every world standing there.
         if (!m_windows.empty() && (m_windowRecordsDue || (frame % 600u) == 0u)) {
             std::string per;
-            const size_t n = (std::min)(m_windows.size() + 1u, size_t(GlobeLayer::kMaxLevels));
+            const size_t n = (std::min)(m_windows.size() + 1u, globe->levelRecords.size());
             for (size_t k = 0; k < n; ++k) {
                 per += (k ? " " : "") + std::to_string(globe->levelRecords[k]);
             }
@@ -3728,7 +3730,7 @@ bool FrameLoop::Frame() {
     }
     PROF_BEGIN();
     // PHASE B2: the churn stands in the camera's world: slot 0's windows about its eye.
-    if (sea) sea->SetChurnWindows(m_A.surface.SlotRows(0), m_A.surface.slotEye[0]);
+    if (sea) sea->SetChurnWindows(m_A.surface.SlotRows(0), m_A.surface.slotEye[0].data());
     if (sea) sea->SetTime(simUnix, bathy.Ready() ? waterNavd : tide->focusHeight,
                           cam.px, cam.pz);
     PROF_END(5);
@@ -4684,7 +4686,7 @@ int FrameLoop::Finish() {
         const hal::Tenant* tenants[2] = {&m_A.colorTenant, &m_A.landseaTenant};
         for (const hal::Tenant* tp : tenants) {
             if (!tp->Valid()) continue;
-            for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) {
+            for (uint32_t s = 0; s < SurfaceFrame::kWindowSets; ++s) {
             std::string per;
             uint32_t sum = 0;
             for (uint32_t k = 1; k <= SurfaceFrame::kMaxRanks; ++k) {
@@ -4965,7 +4967,7 @@ std::vector<scene::WindowLink> FrameLoop::ChainOf(const Eye& e) const {
     if (e.level != 0 || m_mode != 1 || !m_A.globe || m_gates.empty()) return {};
     return scene::WindowChain(GateList(), e.view == 0 ? m_eyeOwes : std::vector<const scene::Gateway*>{},
                               ViewConeOf(*e.cam, e.viewW / e.viewH, e.viewH),
-                              (std::max)(1, (std::min)(m_S.scene.windowDepth, kMaxWindowChain)),
+                              m_S.scene.windowDepth > 0 ? m_S.scene.windowDepth : INT_MAX,
                               kWindowReachM);
 }
 
@@ -4993,11 +4995,11 @@ void FrameLoop::WalkEye(const Eye& e, float exagg, const EyeSky& es, bool dome,
     } else {
         const bool w = win && win->n > 0;
         if (e.view < std::size(m_worldTables)) {
-            m_worldTables[e.view].SetChain(w ? win->boxes : nullptr, w ? win->upWin : nullptr,
-                                           w ? win->sunWin : nullptr, w ? win->n : 0);
+            m_worldTables[e.view].SetChain(w ? win->boxes.data() : nullptr, w ? win->upWin.data() : nullptr,
+                                           w ? win->sunWin.data() : nullptr, w ? win->n : 0);
         }
         globe->SetOtherView(m_A.gpu, e.view, *e.cam, aspect, e.viewH, t, exagg, es.camUp, !dome,
-                            w ? win->levels : nullptr, w ? win->n : 0,
+                            w ? win->levels.data() : nullptr, w ? win->n : 0,
                             w ? win->viewHole : nullptr, w ? win->viewHoleN : 0, rings);
     }
 }
@@ -5046,9 +5048,14 @@ FrameLoop::EyeWindows FrameLoop::WindowsOf(const Eye& e, const std::vector<scene
                                            const scene::ViewCone& view, float exagg,
                                            const float sunRoot[3]) {
     EyeWindows o;
-    o.n = static_cast<int>((std::min)(chain.size(), size_t(kMaxWindowChain)));
+    o.n = static_cast<int>(chain.size());
     if (o.n == 0) return o;
     const int n = o.n;
+    o.levels.resize(size_t(n));
+    o.boxes.resize(size_t(n));
+    o.upWin.assign(size_t(n) * 4, 0.0f);
+    o.sunWin.assign(size_t(n) * 3, 0.0f);
+    o.nearM.assign(size_t(n), 0.0);
     const Camera& cam = *e.cam;
     const double planetR = m_A.planetR;
     const float* sunRootF = sunRoot;
@@ -5059,10 +5066,10 @@ FrameLoop::EyeWindows FrameLoop::WindowsOf(const Eye& e, const std::vector<scene
     const auto& east0 = m_A.surface.east;
     const auto& north0 = m_A.surface.north;
     const double C0[3] = {m_cam.px, m_cam.py, m_cam.pz};   // the first eye: whose rings stand
-    GlobeLayer::DrosteLevel* levels = o.levels;
-    WindowBox* boxes = o.boxes;
-    float* upWin = o.upWin;
-    float* sunWin = o.sunWin;
+    GlobeLayer::DrosteLevel* levels = o.levels.data();
+    WindowBox* boxes = o.boxes.data();
+    float* upWin = o.upWin.data();
+    float* sunWin = o.sunWin.data();
     const double C[3] = {cam.px, cam.py, cam.pz};
     for (int i = 0; i < 3; ++i) o.eye[i] = C[i];
     double E1[3] = {C[0], C[1], C[2]};
@@ -5468,7 +5475,7 @@ void FrameLoop::MinimapFrame(float dt) {
         const uint32_t sE = m_A.surface.SlotNear(E, 1000.0);
         const SurfaceFrame::ChainRows rowsE =
             sE == UINT32_MAX ? SurfaceFrame::ChainRows{} : m_A.surface.SlotRows(sE);
-        StandRings(bankE, at, rowsE, sE == UINT32_MAX ? E : m_A.surface.slotEye[sE], rings.org);
+        StandRings(bankE, at, rowsE, sE == UINT32_MAX ? E : m_A.surface.slotEye[sE].data(), rings.org);
         bankE->enabled = true;
         rings.disp = bankE->DispSrv();
         rings.param = bankE->ParamSrv();
@@ -5486,12 +5493,8 @@ void FrameLoop::MinimapFrame(float dt) {
     // eye of its own: joined where a set already holds it), slot k + 1 its k-th window world's; each
     // slot's rows are taken about that world's own eye. The table's own claims and eyes are put back.
     SurfaceFrame& sf = m_A.surface;
-    uint32_t slotSet0[SurfaceFrame::kWindowSlots];
-    double slotEye0[SurfaceFrame::kWindowSlots][3];
-    for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) {
-        slotSet0[s] = sf.slotSet[s];
-        for (int k = 0; k < 3; ++k) slotEye0[s][k] = sf.slotEye[s][k];
-    }
+    const std::vector<uint32_t> slotSet0 = sf.slotSet;
+    const std::vector<std::array<double, 3>> slotEye0 = sf.slotEye;
     const uint32_t slotsLive0 = sf.slotsLive;
     uint32_t own = m_minimapSet;
     if (own == SurfaceFrame::kNoSet) {
@@ -5504,21 +5507,20 @@ void FrameLoop::MinimapFrame(float dt) {
         const uint32_t nearest = sf.SlotNear(E, kWindowReachM);
         if (nearest != UINT32_MAX) own = sf.slotSet[nearest];
     }
-    for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) sf.slotSet[s] = SurfaceFrame::kNoSet;
+    sf.slotSet.assign(size_t(1 + win.n), SurfaceFrame::kNoSet);
+    sf.slotEye.resize(size_t(1 + win.n), std::array<double, 3>{0.0, 0.0, 0.0});
     sf.slotSet[0] = own;
-    for (int k = 0; k < win.n && k + 1 < int(SurfaceFrame::kWindowSlots); ++k) {
-        sf.slotSet[k + 1] = m_minimapWinSets[k];
+    for (int k = 0; k < win.n; ++k) {
+        sf.slotSet[k + 1] = size_t(k) < m_minimapWinSets.size() ? m_minimapWinSets[size_t(k)] : SurfaceFrame::kNoSet;
         const double* c = win.levels[k].cam;
         const double ry = sf.planetR + c[1];
         for (int i = 0; i < 3; ++i) sf.slotEye[k + 1][i] = sf.up[i] * ry + sf.east[i] * c[0] + sf.north[i] * c[2];
     }
-    sf.slotsLive = (std::min)(uint32_t(1 + win.n), SurfaceFrame::kWindowSlots);
+    sf.slotsLive = uint32_t(1 + win.n);
     WalkEye(eye, exagg, es, m_minimapSky, &win, ringsOf);
     SurfaceFor(eye, m_minimapSurface);
-    for (uint32_t s = 0; s < SurfaceFrame::kWindowSlots; ++s) {
-        sf.slotSet[s] = slotSet0[s];
-        for (int k = 0; k < 3; ++k) sf.slotEye[s][k] = slotEye0[s][k];
-    }
+    sf.slotSet = slotSet0;
+    sf.slotEye = slotEye0;
     sf.slotsLive = slotsLive0;
     m_minimapDrawn = true;
 }

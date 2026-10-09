@@ -55,6 +55,7 @@
 
 #include <cstdint>
 #include <string>
+#include <array>
 #include <vector>
 
 namespace ga {
@@ -141,13 +142,14 @@ struct SurfaceFrame {
                       const char* astField) const;
     // The standing window's frame: its centre on the sphere and its east / up / north there.
     Placement StandingFrame() const;
-    // A2: one set a slot of the globe's level table (GlobeLayer::kMaxLevels, held equal there).
-    static constexpr uint32_t kWindowSlots = 8;
+    // THE WINDOW SETS: a set belongs to a place (A3, below), so there are as many as places an
+    // eye's worlds stand at -- not one a world. Eight, each kMaxRanks slices of every tenant.
+    static constexpr uint32_t kWindowSets = 8;
     struct EyeWindows {
         uint32_t K = 0;
         hal::BlockBinding box[kMaxRanks];   // rank k + 1's window (rung 3 (k + 1))
     };
-    // PHASE A3: A WINDOW SET IS THE GROUND'S, NOT THE TABLE'S. There are kWindowSlots sets of K
+    // PHASE A3: A WINDOW SET IS THE GROUND'S, NOT THE TABLE'S. There are kWindowSets sets of K
     // windows, set w at the slices WindowSlice(w, k); each frame every slot of the level table
     // claims a set (Assign) -- the one whose boxes already hold its eye, rank for rank, else the
     // one it held, else a free one -- and the set follows that slot's eye (Follow). A world that
@@ -156,14 +158,14 @@ struct SurfaceFrame {
     // What the tenants are bound to and the walk wants (bound), and what the rows draw (drawn):
     // the bound windows of the frame before, so a reader never sees a box whose leaving tiles the
     // manager has not yet been told of (FrameLoop's step). Indexed by SET.
-    EyeWindows bound[kWindowSlots], drawn[kWindowSlots];
+    EyeWindows bound[kWindowSets], drawn[kWindowSets];
     static constexpr uint32_t kNoSet = 0xFFFFFFFFu;
-    uint32_t slotSet[kWindowSlots] = {0, 1, 2, 3, 4, 5, 6, 7};   // the set each slot reads
+    std::vector<uint32_t> slotSet = {0u};   // the set each slot of the level table reads (any length)
     // F9: THE SLICE SET w's RANK k READS. A window is an address (face, rung, origin); two claimed
     // sets whose boxes at a rank are one address are one window there, and the later reads the
     // earlier's slice (Share, after every Follow). Its own slice is then unread: no want, no
     // mapping, and the order releases what it held. sharedRanks counts the ranks read elsewhere.
-    uint32_t slice[kWindowSlots][kMaxRanks] = {};
+    uint32_t slice[kWindowSets][kMaxRanks] = {};
     uint32_t sharedRanks = 0;
     void Share();
     // The slice of the colour and the mask that holds set `w`'s rank `rank` (1..kMaxRanks).
@@ -180,7 +182,6 @@ struct SurfaceFrame {
     // it held, then a free one); a claimant that wants no rank takes only a set nobody else wanted.
     // A set follows its LEADER (FollowAll); a follower reads it with rows about its own eye (RowsOf),
     // and its chain stops at the first rank that does not hold its point, as every chain does.
-    static constexpr uint32_t kMaxClaimants = 32;
     struct Claimant {
         double eye[3] = {0.0, 0.0, 0.0};
         double pixAng = 1.0e-3;
@@ -189,13 +190,13 @@ struct SurfaceFrame {
     // The first nTable claimants are the table's slots (slotSet, slotEye, slotsLive); the rest are
     // the other eyes', whose sets come back in setOut (setOut[c] for every claimant c; kNoSet = none).
     void Claim(uint32_t nTable, uint32_t n, const Claimant* c, uint32_t* setOut);
-    uint32_t setLeader[kWindowSlots] = {};      // the claimant that leads each set this frame (~0: none)
-    uint32_t setReaders[kWindowSlots] = {};     // how many claimants read it (leader included)
+    uint32_t setLeader[kWindowSets] = {};      // the claimant that leads each set this frame (~0: none)
+    uint32_t setReaders[kWindowSets] = {};     // how many claimants read it (leader included)
     uint32_t OtherSet(uint32_t k) const { return k < m_claimedOthers ? m_otherSet[k] : kNoSet; }
     // The claim of the table alone, each slot at one pixel (no other eyes, nobody seen through glass
     // from farther than it stands): what the frame loop called before the claimants.
     void Assign(uint32_t n, const double eyes[][3], double pixAng);
-    static uint32_t WindowSlices() { return 6u + kWindowSlots * kMaxRanks + 1u; }   // + the standing
+    static uint32_t WindowSlices() { return 6u + kWindowSets * kMaxRanks + 1u; }   // + the standing
     // THE MEASURE: the ranks an eye (planet frame, metres) wants on a planet of radius R at a
     // pixel of angle pixAng; its face and L are handed back for the log.
     static int RanksAt(const double eye[3], double R, double pixAng, uint32_t* face = nullptr,
@@ -214,12 +215,12 @@ struct SurfaceFrame {
     // Every set steps about its leader's eye, or holds no rank when nobody claimed it.
     void FollowAll(std::vector<Moved>& moved);
     // A2: each slot's eye (planet frame, doubles) as Assign took it, for its rows (Fill).
-    double slotEye[kWindowSlots][3] = {};
+    std::vector<std::array<double, 3>> slotEye = {{0.0, 0.0, 0.0}};   // (as slotSet)
     uint32_t slotsLive = 1;
     // The other eyes' claims (Claim): their sets, how many there were, and each set's leader.
-    uint32_t m_otherSet[kMaxClaimants] = {};
+    std::vector<uint32_t> m_otherSet;
     uint32_t m_claimedOthers = 0;
-    Claimant m_leader[kWindowSlots] = {};
+    Claimant m_leader[kWindowSets] = {};
     // A slot's windows as the readers hold them: per rank its planes about the frame `own` (origin
     // the eye, BlockRows: anchored on the multiple of 16384 nearest it), its box's origin less that
     // anchor in 16384s, its slice and its mip-0 ground; and K. What Fill writes, and the selftest.
