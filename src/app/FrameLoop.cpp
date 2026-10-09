@@ -688,7 +688,18 @@ std::optional<int> FrameLoop::Session() {
     // START view (`scene.view`), so that is read first; a scene whose start view is the orbit (or
     // is not written in the compass sugar at all) leaves the `sea` view's own declaration to say
     // where the world camera stands, which is what merrimack.json's jetty tip is.
-    if (!ViewEyeCompass(&startView, camSea)) ViewEyeCompass(S.View("sea"), camSea);
+    // THE START VIEW IN EITHER SPELLING, WHATEVER ITS NAME. A view placed by lat/lon (the orbit
+    // sugar) starts the session there -- before, only the view NAMED `orbit` was read that way, and
+    // any other fell back to the `sea` view's jetty without a word (a `tokyo` view started at the
+    // Merrimack, 2026-10-09). Its camera is its own: camGlobe stays the `orbit` view's bookmark.
+    Camera camStart;
+    const bool startOrbit = ViewEyeOrbit(&startView, planetR, camStart);
+    const bool startCompass = !startOrbit && ViewEyeCompass(&startView, camSea);
+    if (!startCompass) ViewEyeCompass(S.View("sea"), camSea);
+    if (mode == 1 && !startOrbit && !startCompass && !startView.p.name.empty() && startView.p.name != "orbit") {
+        Log("[scene] start view '%s' places no eye this session can stand at (compass or lat/lon); "
+            "the `sea` view's stands in", startView.p.name.c_str());
+    }
     camSea.fovY = cam.fovY;
     camSea.speed = 30.0f;
     // Globe mode: the planet frame (centre at the origin). Start over the North Atlantic
@@ -786,7 +797,14 @@ std::optional<int> FrameLoop::Session() {
     // The camera bookmarks live in the ONE frame now: convert the orbit start pose, and
     // hand the globe its frame + the CUDEM window (for the foundation sink).
     camGlobe = planetToFlatPose(camGlobe);
-    if (mode == 1 && S.scene.view == "orbit") cam = camGlobe;
+    if (mode == 1 && startOrbit) {
+        // The fly speed of the sea's eye; above 6 km the altitude law sets it every frame.
+        cam = planetToFlatPose(camStart);
+        cam.fovY = camSea.fovY;
+        cam.speed = camSea.speed;
+    } else if (mode == 1 && S.scene.view == "orbit") {
+        cam = camGlobe;   // an `orbit` view that declares no eye: the engine's North Atlantic default
+    }
     if (globe) {
         // (M12 step 4a: the rows above went into the surface the globe reads -- SetSurface.)
         if (bathy.Ready()) {   // the survey's own lat/lon extent (PHASE C1: no world.flat)
