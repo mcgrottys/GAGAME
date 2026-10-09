@@ -698,6 +698,11 @@ private:
         uint32_t resMapSrvCube = UINT32_MAX;   // M9ap
         std::vector<std::vector<uint8_t>> resCpu;   // per face/page
         bool resDirty = false;
+        // THE VERSION BIT (the wave roll): a tenant whose bytes are decoded by a table that
+        // changes with its identity says, in the low bit of every map byte, whether the tile the
+        // byte names holds the PREVIOUS identity's bytes (stale, its refill on the way). The
+        // reader decodes those with the previous table. The byte stays finest mip * 16 above it.
+        bool versioned = false;
         D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COPY_DEST;
         // M9af: what this tenant's realization already holds on the NVMe. Borrowed; main owns
         // the indices. Null means "no information", which schedules exactly as before.
@@ -809,6 +814,16 @@ private:
         bool again = false;
     };
     std::vector<Refresh> m_refresh;
+public:
+    // A tenant whose map bytes carry the version bit (Tenant::versioned).
+    void SetVersioned(int tenant) { m_tenants[tenant].versioned = true; }
+    // How many of a tenant's held tiles are stale with their replacement not yet swapped in.
+    uint32_t StaleHeld(int tenant) const {
+        uint32_t n = 0;
+        for (const Refresh& f : m_refresh) n += (f.held && int(f.held->tenant) == tenant) ? 1u : 0u;
+        return n;
+    }
+private:
     struct Retiring {
         std::shared_ptr<Tracked> tile;
         uint32_t frame;

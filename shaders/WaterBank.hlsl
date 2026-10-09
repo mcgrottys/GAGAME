@@ -94,7 +94,15 @@ cbuffer BankCb : register(b0) {
     // level whose eye the rings stand about (bank A: the camera's world; set B: the window's world),
     // its chain found at each texel's own point (BankTile.point*). Appended at the END on both sides.
     HP_WINDOW_ROWS_DECL
-    HP_SOLVER_ROWS_DECL     // the solver's chart about the rings' frame (appended LAST)
+    HP_SOLVER_ROWS_DECL     // the solver's chart about the rings' frame
+    // THE PREVIOUS TABLE (the wave roll): a page still holding the previous solve's bytes (its
+    // map byte's low bit, ResidencyManager's version bit) decodes by the table it was painted
+    // under. Rows packed as gWaveSig/Dir/Scale, all 32 comps in 16; B = (envMax, sumMax, -, -).
+    // Appended at the END on both sides.
+    float4 gWaveSigP[16];
+    float4 gWaveDirP[16];
+    float4 gWaveScaleP[16];
+    float4 gWaveBP;
 };
 
 // M9bl: one component's rows, from whichever half holds it. r = comp >> 1.
@@ -280,13 +288,16 @@ float WavePageHave(float2 uv, uint plane) {
 bool WavePageResident(float2 uv, uint plane) {
     return WavePageHave(uv, plane) <= 7.5f;
 }
-float4 WavePageSample(float2 uv, uint plane) {
+float4 WavePageSample(float2 uv, uint plane, out bool prev) {
     // M9bl: read the finest mip actually RESIDENT here, not mip 0. Same clamp the height
     // pages, the exposure and the churn already use -- the window refines as its levels
     // land instead of appearing whole.
     const float have = WavePageHave(uv, plane);
+    // The byte is mip * 16 + the version bit: 1 where the tile read holds the previous solve.
+    const uint byte = uint(round(have * 16.0f));
+    prev = (byte & 1u) != 0u;
     if (have > 7.5f) return 0.0f;                 // nothing resident: no opinion
-    const float mip = max(round(have), 0.0f);
+    const float mip = float(byte >> 4);
     // The byte's decode CENTRE (the water match, step 2): the solve truncates to bytes, so a byte b stands
     // for [b, b + 1) / 255 and its unbiased value is (b + 0.5) / 255 -- the decode WaveField::ProbeAt has
     // always used. The UNORM read gives b / 255; the half-LSB is added after the filter, which is linear.
@@ -724,11 +735,14 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
         float3 dW = 0.0f;
         float sigW = 0.0f;
         [loop] for (uint s = 0; s < gWaveU.z; ++s) {
-            const float4 sc = WaveScaleRow(s >> 1);
+            bool prev;
+            const float4 t4 = WavePageSample(wuv, s, prev);
+            // The table the page's bytes were painted under: the live one, or the previous one
+            // while this tile's refill is on its way.
+            const float4 sc = prev ? gWaveScaleP[s >> 1] : WaveScaleRow(s >> 1);
             const float aMax = (s & 1) ? sc.z : sc.x;
             if (aMax <= 0.0f) continue;
             const float kMax = (s & 1) ? sc.w : sc.y;
-            const float4 t4 = WavePageSample(wuv, s);
             // The swell shadow shelters the SOLVED bands exactly as it does the
             // cascades (the helm-in-the-lee shot exposed the asymmetry: solved comps
             // sailed through the jetty's lee unsheltered).
@@ -808,17 +822,18 @@ void CsBankFill(uint3 id : SV_DispatchThreadID) {
             const float wFc = wF * coh;
             sigW += (1.0f - wFc) * 0.5f * akS * akS;
             if (wFc <= 0.001f) continue;
-            const float4 rr = WaveSigRow(s >> 1);
+            const float4 rr = prev ? gWaveSigP[s >> 1] : WaveSigRow(s >> 1);
             const float2 rot = (s & 1) ? rr.zw : rr.xy;
             const float cT = sp.x * rot.x + sp.y * rot.y;   // cos(phi - sigma t)
             const float sT = sp.y * rot.x - sp.x * rot.y;   // sin(phi - sigma t)
-            const float4 dd = WaveDirRow(s >> 1);
+            const float4 dd = prev ? gWaveDirP[s >> 1] : WaveDirRow(s >> 1);
             const float2 dir2 = (s & 1) ? dd.zw : dd.xy;
             dW.y += wFc * aW * cT;
             dW.xz -= gWaveB.z * wFc * aW * sT * dir2;
         }
-        const float4 env = WavePageSample(wuv, gWaveU.w);
-        rmsW = env.x * gWaveB.x * expo;   // the solver's envelope, sheltered like its comps
+        bool envPrev;
+        const float4 env = WavePageSample(wuv, gWaveU.w, envPrev);
+        rmsW = env.x * (envPrev ? gWaveBP.x : gWaveB.x) * expo;   // the solver's envelope, sheltered like its comps
         excW = env.y * 2.5f * expo;       // its breaking indicator, rms_raw / rms_limit
         d += dW * wWin;
         // Storm-sea mss ceiling on the solved shed (default ~ hurricane Cox-Munk): past

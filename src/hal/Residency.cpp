@@ -895,6 +895,9 @@ void ResidencyManager::SetStale(Tracked* t, bool v) {
     if (t->stale == v) return;
     t->stale = v;
     m_staleCount += v ? 1 : -1;
+    // The version bit is in the map: a held tile's footprint is rewritten when its bytes' version
+    // changes (the turn's ApplyChanged, after this turn's swaps, before the map goes up).
+    if (m_tenants[t->tenant].versioned) m_changed.push_back({t->tenant, t->req});
 }
 
 uint32_t ResidencyManager::AcquirePoolTile(Gpu& gpu) {

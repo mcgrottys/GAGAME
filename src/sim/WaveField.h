@@ -157,6 +157,9 @@ public:
         float envMax, sumMax, excMax, level;    // env scales + the level it solved at
     };
     const GpuTable& Table() const { return m_table; }
+    // The table before the last Publish: the pages still holding that solve's bytes (the
+    // residency's version bit) decode by it. Until the first roll, the live table.
+    const GpuTable& PrevTable() const { return m_prevTable.nUsed ? m_prevTable : m_table; }
 
     // M9bc: the field is a TREE NODE now (WaveFieldSource) -- the solver keeps the solve on the
     // CPU as an immutable snapshot the painting threads read; there is no GPU atlas here.
@@ -364,6 +367,7 @@ private:
     uint64_t m_waitingKey = 0;                    // a roll noted once while no one reads
 
     GpuTable m_table{};
+    GpuTable m_prevTable{};
     std::shared_ptr<const Solved> m_live;   // M9bc: the adopted solve, swapped atomically
     uint64_t m_liveKey = 0;
     std::shared_ptr<const Solved> m_next;   // a finished solve whose pages are not yet on the GPU

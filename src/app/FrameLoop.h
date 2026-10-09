@@ -546,6 +546,8 @@ private:
     uint32_t m_settleExactQuiet = 0;
     bool m_focusSaid = false;   // step 5 E: the wave want's focus, said once
     bool m_waveReaderSaid = true;   // F8: the wave field's reader state, said on change
+    uint64_t m_waveStaleSince = UINT64_MAX;   // the frame the wave pages went stale (a roll; [wave-table])
+    double m_waveStaleAt = 0.0;
     uint32_t m_sharedRanksSaid = 0;   // F9: ranks reading another set's window, said on change
     static constexpr uint32_t kSettleExactFrames = ResidencyManager::kEvictAgeFrames + 4u;
     FramePipe m_recPipe;
