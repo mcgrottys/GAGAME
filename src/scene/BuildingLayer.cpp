@@ -2,6 +2,7 @@
 
 #include "core/Common.h"
 #include "core/ThreadManager.h"
+#include "hal/GpuProfiler.h"
 #include "hal/PixEvents.h"
 #include "hal/Pipeline.h"
 #include "hal/Shader.h"
@@ -378,6 +379,7 @@ void BuildingLayer::Simulate(const FrameContext& ctx) {
 void BuildingLayer::Render(const FrameContext& ctx) {
     if (!m_pso || m_cells.empty() || !ctx.camera) return;
     PixScope scope(ctx.cmd->Native(), "buildings (solids -> prisms, cell origins about the eye)");
+    GpuScope gscope(ctx.prof, ctx.cmd->Native(), "buildings");
     ctx.cmd->Pipeline(m_pso.Get());
     ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     // Mirrors Buildings.hlsl's cbuffer (priors 22).

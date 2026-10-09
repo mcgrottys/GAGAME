@@ -249,17 +249,32 @@ void BuildingStack::Open(std::vector<BuildingSourceSpec> specs, const BuildingDe
                 why = "not a GABLDG01 manifest" + (err.empty() ? "" : ": " + err);
             } else if (m.Str("datum") != "ground") {   // the only datum a solid here is stood on
                 why = "datum '" + m.Str("datum") + "' (only \"ground\" is read)";
-            } else if (!cells || !(src.cellDeg > 0.0)) {
+            } else if ((!cells && m.Str("cellIndex").empty()) || !(src.cellDeg > 0.0)) {
                 why = "the manifest has no cell index";
             } else if (!f || !f.read(magic, 8) || std::memcmp(magic, "GABLDG01", 8) != 0) {
                 why = "no GABLDG01 data beside the manifest (" + src.bin + ")";
             } else {
                 src.harvest = true;
-                for (const JsonValue& c : cells->arr) {
-                    if (c.arr.size() < 4) continue;
-                    src.cells.push_back({static_cast<int64_t>(c.arr[0].number), static_cast<int64_t>(c.arr[1].number),
-                                         static_cast<int64_t>(c.arr[2].number), static_cast<int64_t>(c.arr[3].number)});
+                if (cells) {
+                    for (const JsonValue& c : cells->arr) {
+                        if (c.arr.size() < 4) continue;
+                        src.cells.push_back({static_cast<int64_t>(c.arr[1].number), static_cast<int64_t>(c.arr[0].number),
+                                             static_cast<int64_t>(c.arr[2].number), static_cast<int64_t>(c.arr[3].number)});
+                    }
+                } else {
+                    // The sidecar beside the manifest: 24 bytes a cell.
+                    const std::string idx = sp.path.substr(0, sp.path.find_last_of("/\\") + 1) + m.Str("cellIndex");
+                    std::ifstream fi(idx, std::ios::binary);
+#pragma pack(push, 1)
+                    struct {
+                        int32_t ix, iy;
+                        int64_t off, n;
+                    } row;
+#pragma pack(pop)
+                    while (fi.read(reinterpret_cast<char*>(&row), sizeof(row))) src.cells.push_back({row.iy, row.ix, row.off, row.n});
+                    if (src.cells.empty()) why = "no cell index at " + idx;
                 }
+                std::sort(src.cells.begin(), src.cells.end());
             }
         } else if (EndsWith(sp.path, ".geojson") || EndsWith(sp.path, ".json")) {
             LoadGeoJson(sp.path, src.whole, &why);
@@ -295,10 +310,14 @@ void BuildingStack::Read(const Source& s, double lon0, double lat0, double lon1,
     const int64_t ix1 = static_cast<int64_t>(std::floor(lon1 / s.cellDeg));
     const int64_t iy0 = static_cast<int64_t>(std::floor(lat0 / s.cellDeg));
     const int64_t iy1 = static_cast<int64_t>(std::floor(lat1 / s.cellDeg));
-    for (const auto& c : s.cells) {   // a state is a few thousand cells: a scan, not a search
-        if (c[0] < ix0 || c[0] > ix1 || c[1] < iy0 || c[1] > iy1) continue;
-        if (!ReadRecords(f, c[2], c[3], lon0, lat0, lon1, lat1, out)) {
-            Log("[buildings] '%s': a truncated cell at offset %lld", s.name.c_str(), static_cast<long long>(c[2]));
+    // A row of the box at a time: the first cell at or after (iy, ix0), then along the row. The
+    // planet is millions of cells; a box is a handful.
+    for (int64_t iy = iy0; iy <= iy1; ++iy) {
+        auto it = std::lower_bound(s.cells.begin(), s.cells.end(), std::array<int64_t, 4>{iy, ix0, INT64_MIN, INT64_MIN});
+        for (; it != s.cells.end() && (*it)[0] == iy && (*it)[1] <= ix1; ++it) {
+            if (!ReadRecords(f, (*it)[2], (*it)[3], lon0, lat0, lon1, lat1, out)) {
+                Log("[buildings] '%s': a truncated cell at offset %lld", s.name.c_str(), static_cast<long long>((*it)[2]));
+            }
         }
     }
 }

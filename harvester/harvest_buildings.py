@@ -127,6 +127,41 @@ def stitch(ways):
     return rings
 
 
+def attrs_of(t, refused, roof_shapes, grow=True):
+    """A building's normalized tags: (roof index, height, min_height, levels, min_level, roof_height),
+    lengths in metres, counts as counts, NaN where untagged or refused (counted in `refused`). A
+    roof shape not yet in `roof_shapes` is appended, or with grow=False is 254 ("other": a fixed
+    vocabulary several processes share)."""
+    def length(k):
+        if k not in t:
+            return NAN
+        v = metres(t[k])
+        if v is None:
+            refused[k] += 1
+            return NAN
+        return v
+
+    def levels(k):
+        if k not in t:
+            return NAN
+        v = count(t[k])
+        if v is None:
+            refused[k] += 1
+            return NAN
+        return v
+    roof = 255
+    if "roof:shape" in t:
+        if t["roof:shape"] in roof_shapes:
+            roof = roof_shapes.index(t["roof:shape"])
+        elif grow:
+            roof_shapes.append(t["roof:shape"])
+            roof = len(roof_shapes) - 1
+        else:
+            roof = 254
+    return (roof, length("height"), length("min_height"), levels("building:levels"),
+            levels("building:min_level"), length("roof:height"))
+
+
 def cell_of(lon_e7, lat_e7):
     return (int(math.floor(lat_e7 * 1e-7 / CELL_DEG)), int(math.floor(lon_e7 * 1e-7 / CELL_DEG)))
 
@@ -197,30 +232,7 @@ def main():
     roof_shapes = []
 
     def normalize(t):
-        def length(k):
-            if k not in t:
-                return NAN
-            v = metres(t[k])
-            if v is None:
-                refused[k] += 1
-                return NAN
-            return v
-
-        def levels(k):
-            if k not in t:
-                return NAN
-            v = count(t[k])
-            if v is None:
-                refused[k] += 1
-                return NAN
-            return v
-        roof = 255
-        if "roof:shape" in t:
-            if t["roof:shape"] not in roof_shapes:
-                roof_shapes.append(t["roof:shape"])
-            roof = roof_shapes.index(t["roof:shape"])
-        return (roof, length("height"), length("min_height"), levels("building:levels"),
-                levels("building:min_level"), length("roof:height"))
+        return attrs_of(t, refused, roof_shapes)
 
     # ---- pass 1: building ways, building multipolygons, and where the node blocks are.
     solids = []          # [id, kind, attrs, [(outer, node id array)]]

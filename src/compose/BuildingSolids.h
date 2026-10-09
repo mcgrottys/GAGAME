@@ -65,8 +65,10 @@ struct BuildingDefaults {
 std::vector<BuildingSolid> ComposeBuildings(std::vector<std::vector<BuildingSolid>> stack,
                                             const BuildingDefaults& d, uint64_t* identity = nullptr);
 
-// THE STACK, OPEN AND READ BY BOX: what streams. A harvest keeps only its manifest's cell index in
-// memory and reads its records by seek; a GeoJSON (an owner's file, small) is read whole once. A
+// THE STACK, OPEN AND READ BY BOX: what streams. A harvest keeps only its cell index in memory (the
+// manifest's "cells", or at planet scale the binary sidecar its "cellIndex" names: int32 ix, int32
+// iy, int64 offset, int64 count) and finds a box's cells by binary search on (iy, ix), then reads
+// their records by seek; a GeoJSON (an owner's file, small) is read whole once. A
 // box is composed from every source's solids in the box grown by `margin` degrees, so a footprint
 // just over the edge still covers, and the box keeps the solids whose outer ring's first point lies
 // inside it: each solid is drawn by exactly one box. Compose is const and opens its own file
@@ -85,7 +87,7 @@ private:
     struct Source {
         std::string name, bin;
         double cellDeg = 0.0;
-        std::vector<std::array<int64_t, 4>> cells;   // ix, iy, offset, count (the manifest's)
+        std::vector<std::array<int64_t, 4>> cells;   // iy, ix, offset, count, sorted by (iy, ix)
         std::vector<BuildingSolid> whole;            // a GeoJSON, read once
         bool harvest = false;
     };
