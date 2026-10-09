@@ -5013,7 +5013,7 @@ void FrameLoop::SurfaceFor(const Eye& e, ComposedSurfaceCb& out) {
     for (int k = 0; k < 3; ++k) eye[k] = sf.up[k] * ry + sf.east[k] * c.px + sf.north[k] * c.pz;
     if (e.view == 0) {
         for (int k = 0; k < 3; ++k) sf.eye[k] = eye[k];   // the frame's eye, kept
-        sf.Fill(out, m_A.resMgr);
+        sf.Fill(out, m_A.resMgr, &m_worldTables[0].winRows);
         return;
     }
     // Another eye: BOTH eyes the rows are taken about move -- the surface's (the cube's rows) and
@@ -5028,7 +5028,8 @@ void FrameLoop::SurfaceFor(const Eye& e, ComposedSurfaceCb& out) {
         sf.eye[k] = eye[k];
         sf.slotEye[0][k] = eye[k];
     }
-    sf.Fill(out, m_A.resMgr);
+    sf.Fill(out, m_A.resMgr,
+            e.view < std::size(m_worldTables) ? &m_worldTables[e.view].winRows : nullptr);
     for (int k = 0; k < 3; ++k) {
         sf.eye[k] = eye0[k];
         sf.slotEye[0][k] = slot0[k];

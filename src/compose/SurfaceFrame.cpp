@@ -640,7 +640,8 @@ void SurfaceFrame::RegisterEdges() const {
     rows(hgtAst, "m NAVD (R16F)");
 }
 
-void SurfaceFrame::Fill(ComposedSurfaceCb& cb, const ResidencyManager& rm) const {
+void SurfaceFrame::Fill(ComposedSurfaceCb& cb, const ResidencyManager& rm,
+                        std::vector<float>* winRows) const {
     // PHASE B3: the pages are the eye's windows alone -- the Mercator pages, their rows (merc, det,
     // u4, the anchor's eyeA/E/N/U and eyePx) and their slices' lanes are deleted.
     const int colorCube = colorT, heightCube = hgtT, maskPages = maskT;
@@ -704,24 +705,28 @@ void SurfaceFrame::Fill(ComposedSurfaceCb& cb, const ResidencyManager& rm) const
     // function -- taken about THAT slot's own eye (its tangent frame's axes, the root's, origin the
     // eye Follow took): the frame its mesh records' geo is relative to (GlobeLayer's records are
     // anchored at each world's own eye). The windows drawn are the step's frame before (Follow).
-    for (uint32_t s = 0; s < kWindowSlots; ++s) {
+    // Into the view's world table (scene/WorldTable.h winRows: 21 float4 a level).
+    static_assert(kMaxRanks == 5, "WorldTable::kWinRows holds five ranks a level");
+    if (winRows) winRows->assign(size_t(kWindowSlots) * 21u * 4u, 0.0f);
+    for (uint32_t s = 0; winRows && s < kWindowSlots; ++s) {
         // Slot s reads the set it claimed (Assign), drawn as the frame before left it.
         const uint32_t set = s < slotsLive ? slotSet[s] : kNoSet;
         const Placement ownS = Placement::Frame(east, up, north, slotEye[s]);
         const ChainRows rows = (pages && set != kNoSet) ? RowsOf(drawn[set], set, ownS, slotEye[s]) : ChainRows{};
-        for (uint32_t k = 0; k < kMaxRanks; ++k) {
-            const uint32_t j = s * kMaxRanks + k;
-            const bool on = k < rows.K;
+        float* w = winRows->data() + size_t(s) * 21u * 4u;
+        const uint32_t K = rows.K;
+        memcpy(w, &K, sizeof(K));
+        for (uint32_t k = 0; k < rows.K && k < kMaxRanks; ++k) {
+            float* r = w + (1u + 4u * k) * 4u;
             for (int c = 0; c < 4; ++c) {
-                cb.winU[4 * j + c] = on ? rows.pl[k].u[c] : 0.0f;
-                cb.winV[4 * j + c] = on ? rows.pl[k].v[c] : 0.0f;
-                cb.winW[4 * j + c] = on ? rows.pl[k].w[c] : 0.0f;
+                r[c] = rows.pl[k].u[c];
+                r[4 + c] = rows.pl[k].v[c];
+                r[8 + c] = rows.pl[k].w[c];
             }
-            cb.winO[2 * j] = on ? rows.off[k][0] : 0.0f;
-            cb.winO[2 * j + 1] = on ? rows.off[k][1] : 0.0f;
-            cb.winS[j] = on ? rows.slice[k] : 0u;
+            r[12] = rows.off[k][0];
+            r[13] = rows.off[k][1];
+            memcpy(&r[14], &rows.slice[k], sizeof(uint32_t));
         }
-        cb.winK[s] = rows.K;
     }
     for (uint32_t k = 0; k < 8; ++k) {
         cb.rankG[k] = k < kMaxRanks ? static_cast<float>(hal::BlockBinding{0u, int(3 * (k + 1)), 0u, 0u}.GroundRes(0))

@@ -298,7 +298,9 @@ struct SurfaceFrame {
     // validator; idempotent, as every registration is.
     void RegisterEdges() const;
     // THE ONE FILL of the composed-surface rows (was FillComposedCb, Compositor.cpp).
-    void Fill(ComposedSurfaceCb& cb, const ResidencyManager& rm) const;
+    // `winRows`: each level's window rows, into the view's world table (scene/WorldTable.h).
+    void Fill(ComposedSurfaceCb& cb, const ResidencyManager& rm,
+              std::vector<float>* winRows = nullptr) const;
     // PHASE C5: the kernels' tangent rows -- the chart's east, up and north in the planet frame
     // (w = R on the up row), for a kernel that turns a flat point into its direction.
     void TangentRows(float e[4], float u[4], float n[4]) const {

@@ -9,8 +9,10 @@
 //  view and says where in b2 (gCsEyeT.w); Common.hlsli's Wt* functions read it.
 //
 //  Packed as float4 rows: row 0 = (levels, windows, first level row, first box row) as uints,
-//  row 1 = (first light row, -, -, -); then kLevelRows a level, kBoxRows a window (WindowBox::Pack),
-//  kLightRows a window (the zenith there with the eye's radius in w; the sun seen from there).
+//  row 1 = (first light row, first window-rows row, levels with window rows, -); then kLevelRows a
+//  level, kBoxRows a window (WindowBox::Pack), kLightRows a window (the zenith there with the eye's
+//  radius in w; the sun seen from there), kWinRows a level (SurfaceFrame::Fill: its K, then per
+//  rank PageTexelUv's planes U, V, W and (the box's offset xy, its slice) -- Compose.hlsli CsWin*).
 // ================================================================================================
 #pragma once
 
@@ -24,9 +26,11 @@ namespace ga::scene {
 
 struct WorldTable {
     static constexpr uint32_t kLevelRows = 6, kBoxRows = 4, kLightRows = 2;
+    static constexpr uint32_t kRanks = 5, kWinRows = 1 + 4 * kRanks;
     std::vector<float> levels;   // kLevelRows float4 a level (GlobeLayer: the level table)
     std::vector<float> boxes;    // kBoxRows float4 a window of the chain
     std::vector<float> light;    // kLightRows float4 a window
+    std::vector<float> winRows;  // kWinRows float4 a level: its windows' rows about its own eye
 
     // The chain: n windows, their boxes, the zenith there (xyz, eye radius in w) and the sun (xyz).
     void SetChain(const WindowBox* b, const float* up4, const float* sun3, int n) {
@@ -42,14 +46,18 @@ struct WorldTable {
     uint32_t Levels() const { return uint32_t(levels.size() / (kLevelRows * 4)); }
     uint32_t Windows() const { return uint32_t(boxes.size() / (kBoxRows * 4)); }
 
+    uint32_t WinLevels() const { return uint32_t(winRows.size() / (kWinRows * 4)); }
+
     void Pack(std::vector<float>& out) const {
         const uint32_t a = 2u, b = a + Levels() * kLevelRows, c = b + Windows() * kBoxRows;
-        out.assign(size_t(c + Windows() * kLightRows) * 4, 0.0f);
-        const uint32_t head[8] = {Levels(), Windows(), a, b, c, 0u, 0u, 0u};
+        const uint32_t d = c + Windows() * kLightRows;
+        out.assign(size_t(d + WinLevels() * kWinRows) * 4, 0.0f);
+        const uint32_t head[8] = {Levels(), Windows(), a, b, c, d, WinLevels(), 0u};
         memcpy(out.data(), head, sizeof(head));
         if (!levels.empty()) memcpy(&out[size_t(a) * 4], levels.data(), levels.size() * sizeof(float));
         if (!boxes.empty()) memcpy(&out[size_t(b) * 4], boxes.data(), boxes.size() * sizeof(float));
         if (!light.empty()) memcpy(&out[size_t(c) * 4], light.data(), light.size() * sizeof(float));
+        if (!winRows.empty()) memcpy(&out[size_t(d) * 4], winRows.data(), winRows.size() * sizeof(float));
     }
 };
 

@@ -354,17 +354,10 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
 // PHASE B3: the Mercator anchor's other rows (eyeA/E/N/U, eyePx) are deleted.
 #define GA_COMPOSED_CB_EYE_ROWS \
     float4 gCsEyeT;  /* the eye in the tangent axes less (0, R, 0): the flat camera; w spare */
-// PHASE A2: THE EYE'S WINDOWS, PER LEVEL (SurfaceFrame::Fill; ComposedSurfaceCb's last rows):
-// slot s's rank k + 1 at row 5 s + k.
+// PHASE A2: THE EYE'S WINDOWS, PER LEVEL: each level's rows are the view's world table's
+// (WtWinRow below; SurfaceFrame::Fill); here rank k + 1's ground texel (m) at mip 0.
 #define GA_COMPOSED_CB_WINDOW_ROWS \
-    float4 gCsWinU[40]; /* PageTexelUv's planes U, V, W about slot s's own eye, anchored on the \
-                           multiple of 16384 texels nearest it */ \
-    float4 gCsWinV[40]; \
-    float4 gCsWinW[40]; \
-    float4 gCsWinO[20]; /* the box's origin less the anchor, in 16384s, two (slot, rank) a row */ \
-    uint4  gCsWinS[10]; /* the slice of the colour and the mask, four a row */ \
-    uint4  gCsWinK[2];  /* K, the ranks live, per slot, four a row */ \
-    float4 gCsRankG[2]; /* rank k + 1's ground texel (m) at mip 0 */
+    float4 gCsRankG[2];
 
 // M12 step 4g: THE ONE SURFACE CONSTANT BUFFER, on the shared layout's b2 (Renderer.h): the
 // frame loop fills ga::ComposedSurfaceCb once a frame through SurfaceFrame::Fill, RenderFrame
@@ -396,6 +389,10 @@ float4 WtLevelRow(uint slot, uint r) { return WtRow(asuint(WtRow(0u).z) + slot *
 float4 WtBoxRow(uint k, uint r) { return WtRow(asuint(WtRow(0u).w) + k * 4u + r); }
 float4 WtWinUp(uint k) { return WtRow(asuint(WtRow(1u).x) + k * 2u); }
 float4 WtWinSun(uint k) { return WtRow(asuint(WtRow(1u).x) + k * 2u + 1u); }
+// Level s's window rows (WorldTable::kWinRows = 21): row 0 = (K, -, -, -), then per rank k the
+// planes U, V, W and (offset xy, slice). A level past the table's has no windows (K = 0).
+uint WtWinLevels() { return asuint(WtRow(1u).z); }
+float4 WtWinRow(uint s, uint r) { return WtRow(asuint(WtRow(1u).y) + s * 21u + r); }
 
 // THE DEPTH OF A POINT: how many windows of the view's chain the segment from the eye to p passes,
 // in order (scene/Gateway.cpp ChainDepth) -- the world p belongs to, 0 being the eye's own. A world
