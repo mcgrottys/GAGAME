@@ -4,13 +4,17 @@ A real-time, data-driven global ocean simulator built around geometric algebra: 
 the state, the GPU carries the phase, and everything stateful lives as sparse exceptions in
 tiled-resource grade banks.
 
-![The planet with today's live GFS weather](docs/globe_live_weather.png)
-*The quad-sphere earth with the day's actual clouds — GFS isobaric cloud fraction ray-cast
-through a sparse 3D volume bank where a NULL tile IS clear air.*
+![The planet with the day's GFS weather](docs/globe_live_weather.png)
+*The quad-sphere earth with the actual clouds of 2026-08-28: GFS isobaric cloud fraction
+ray-cast through a sparse 3D volume bank where a NULL tile IS clear air.*
 
-| ![Helm view in the storm ebb](docs/helm_ebb.png) | ![New England at 15 arc-seconds](docs/new_england_15s.png) |
+| ![Helm view in the storm ebb](docs/helm_ebb.png) | ![New England from 220 km](docs/new_england_15s.png) |
 |---|---|
-| *The Merrimack entrance at mid-ebb, helm height* | *New England from 220 km (ETOPO 15″ ring)* |
+| *The Merrimack entrance at mid-ebb, helm height, on the solved storm sea* | *New England from 220 km: imagery over the elevation tree* |
+
+| ![The Haulover gate corridor from the helm](docs/gate_corridor_helm.png) | ![The Droste boat](docs/droste_boat.png) | ![Skyfall](docs/skyfall_gate.png) |
+|---|---|---|
+| *The Haulover gate at sunset: each window opens on Miami's inlet, and the window inside it opens back here* | *The Droste boat: the RHIB at the helm, and the globe within the globe over the inlet* | *Skyfall: a gate whose far end looks straight down on the Bahama Bank from 100 km* |
 
 The plan lives in
 [GAMEPLAN.md](GAMEPLAN.md); this README covers what exists today: **M0** (the tiled-resource
