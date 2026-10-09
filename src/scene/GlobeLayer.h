@@ -364,6 +364,16 @@ public:
     // or gate worlds of its own, under its own exaggeration, zenith and residency sampler
     // ("eye<view>"), and keeps what it walked for Render at ctx.viewIndex == view. The layer's
     // working set stays the first eye's, so nothing the first eye reads afterwards has moved.
+    // --gate-overdraw (an instrument): on the frame it is raised, the first eye's surface is drawn one
+    // world per dispatch, each in a pipeline-statistics query (primitives into the rasterizer, pixel
+    // shader invocations) and an occlusion query (samples written: past the window test and depth).
+    // ReadOverdraw, after the frame, waits for the GPU and returns a row per world.
+    bool overdrawProbe = false;
+    struct OverdrawRow {
+        uint32_t level = 0, records = 0, culled = 0;
+        uint64_t primitives = 0, clipped = 0, fragments = 0, samples = 0;
+    };
+    std::vector<OverdrawRow> ReadOverdraw(Gpu& gpu);
     static constexpr uint32_t kMaxOtherEyes = 3;
     // `gates`/`boxes`/`n`/`hole` are that eye's own windows (SetGates' arguments, from its own cone);
     // `rings`, when given, is the ring set its own world reads as its set A (its own bank, or the
@@ -660,6 +670,9 @@ private:
     hal::RootSignature m_rootSig = nullptr;
     hal::Pso m_pso, m_skyPso;
     hal::Pso m_limbPso;   // M10: PsLimb, dual-source blend, SV_Depth-tested
+    // The meshlet's own cull (GlobeLayer.cpp): its records marked, after the walk emits a leaf.
+    void CullMeshlets(const WalkParams& wp, int m, size_t base, int face, double u0, double v0,
+                      double size, double arc);
     // M6i: m_relief and m_ne retired -- the composed height cube streams what they carried
     // (and returns ~90 MB of committed equirect memory to the pool).
     GpuTexture m_cloudSrc;
@@ -888,6 +901,11 @@ private:
         GpuBuffer recBuf[Gpu::kFrameCount];
     };
     OtherEye m_other[kMaxOtherEyes];
+    // the probe's queries (made at its first use) and the worlds it measured
+    Com<ID3D12QueryHeap> m_odStats, m_odOccl;
+    Com<ID3D12Resource> m_odReadback;
+    uint32_t m_odLevels = 0;
+    uint32_t m_odRecords[kMaxLevels] = {}, m_odCulled[kMaxLevels] = {};
     bool m_borrowed = false;
     void RenderEye(const FrameContext& ctx, const GlobeCbData& cbData, const SkyCbData& skyCbData,
                    const std::vector<MeshletRec>& meshlets, const std::vector<NodeData>& nodes,

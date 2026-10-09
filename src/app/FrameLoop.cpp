@@ -3906,7 +3906,41 @@ bool FrameLoop::Frame() {
         v1.surface = &m_minimapSurface;
         viewSet.views.push_back(v1);
     }
+    const bool odProbe = globe && opt.gateOverdraw >= 0 && frame == uint32_t(opt.gateOverdraw);
+    if (odProbe) globe->overdrawProbe = true;
     renderer.RenderFrame(viewSet);
+    if (odProbe) {
+        // --gate-overdraw: per world, what the rasterizer was given and what survived the window
+        // test and depth -- beside the window's own area on the screen.
+        globe->overdrawProbe = false;
+        const std::vector<GlobeLayer::OverdrawRow> rows = globe->ReadOverdraw(gpu);
+        const float vh = S.capture.headless ? float(S.capture.height) : float((std::max)(1u, window.Height()));
+        const double pixTan = 2.0 * std::tan(0.5 * double(cam.fovY)) / double(vh);
+        const int gf = globe->GateFirst();
+        Log("[overdraw] frame %u: the first eye's surface, one world a dispatch (%zu worlds; windows %zu deep)",
+            frame, rows.size(), m_windows.size());
+        uint64_t frags = 0, kept = 0;
+        for (const GlobeLayer::OverdrawRow& r : rows) {
+            double areaPx = -1.0;
+            const int w = int(r.level) - gf;
+            if (gf > 0 && w >= 0 && size_t(w) < m_windows.size() && m_windows[size_t(w)].visible) {
+                const scene::WindowLink& Wl = m_windows[size_t(w)];
+                areaPx = (Wl.rect[1] - Wl.rect[0]) * (Wl.rect[3] - Wl.rect[2]) / (pixTan * pixTan);
+            }
+            frags += r.fragments;
+            kept += r.samples;
+            Log("[overdraw]   world %u: %u records (%u culled), %llu primitives in (%llu after clipping), %llu fragments "
+                "shaded, %llu samples written (%.1f%% kept)%s",
+                r.level, r.records, r.culled, static_cast<unsigned long long>(r.primitives),
+                static_cast<unsigned long long>(r.clipped), static_cast<unsigned long long>(r.fragments),
+                static_cast<unsigned long long>(r.samples),
+                r.fragments ? 100.0 * double(r.samples) / double(r.fragments) : 0.0,
+                areaPx >= 0.0 ? (" | its window's rectangle " + std::to_string(int64_t(areaPx)) + " px").c_str() : "");
+        }
+        Log("[overdraw]   all: %llu fragments shaded, %llu written (%.1f%%), the screen %u px",
+            static_cast<unsigned long long>(frags), static_cast<unsigned long long>(kept),
+            frags ? 100.0 * double(kept) / double(frags) : 0.0, uint32_t(renderer.Width() * renderer.Height()));
+    }
     // --sky-probe: the atmosphere's tables, read back once the first one is built and held
     // against published optical depths (SkyLayer::Probe). Reads back and waits: an instrument.
     // THE PICTURE'S WHITE (air.exposure): a scene's own value, or the law -- 1 / the luminance of
