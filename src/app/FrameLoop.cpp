@@ -628,7 +628,7 @@ std::optional<int> FrameLoop::Session() {
     auto& timeScale = m_timeScale;
     auto& windowSec = m_windowSec;
     auto& lastWaterNavd = m_lastWaterNavd;
-    auto& groundAt = m_groundAt;
+    auto& groundClear = m_groundClear;
     auto& pixelRay = m_pixelRay;
     auto& pickGround = m_pickGround;
     auto& pickGlobe = m_pickGlobe;
@@ -1549,39 +1549,30 @@ std::optional<int> FrameLoop::Session() {
     // the moment of grab. Wheel zooms toward the point under the cursor (CTRL+wheel keeps
     // the old fly-speed dial).
 
-    groundAt = [&](double x, double z) -> double {
-        if (mode == 1 && bathy.Ready() && !marsMode) {
-            double gla = 0.0, glo = 0.0;   // PHASE C5: the flat point's place, then the survey
-            m_A.surface.flat.LatLonOf(x, z, gla, glo);
-            const float b = bathy.SampleLatLon(gla, glo);
-            if (b > -9000.0f) {
-                return std::max(static_cast<double>(b), lastWaterNavd);
-            }
+    // THE GROUND AS A RADIUS -- one law round the whole planet. A flat point's place on the planet
+    // is east x + up (y + R) + north z; the ground in its direction stands at R + the elevation
+    // there (the survey's, held at the water's level, where it covers; else the globe's relief), and
+    // the point's CLEARANCE is how far it stands beyond that along its own radial. The old ground
+    // was a flat y over (x, z): it answered only the anchor's hemisphere, since two points of the
+    // sphere share each (x, z), and every frame's clamp lifted an eye 97 degrees away (Tokyo, from
+    // the Merrimack) to its mirror on the near side (2026-10-09). Near the anchor the two agree
+    // but for the curvature the survey's branch had left out (x^2 / 2R: 2 m at 5 km).
+    groundClear = [&](double x, double y, double z) -> double {
+        if (mode != 1) return y;   // chart mode: the ribbon's ground plane at y = 0
+        double p[3];
+        for (int i = 0; i < 3; ++i) p[i] = east0[i] * x + oDir[i] * (y + planetR) + north0[i] * z;
+        const double pr = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+        const double r2d = 180.0 / 3.14159265358979;
+        const double gla = std::asin(std::clamp(p[1] / pr, -1.0, 1.0)) * r2d;
+        const double glo = std::atan2(p[2], p[0]) * r2d;
+        double elev = 0.0;
+        const float b = (bathy.Ready() && !marsMode) ? bathy.SampleLatLon(gla, glo) : -10000.0f;
+        if (b > -9000.0f) {
+            elev = std::max(static_cast<double>(b), lastWaterNavd);
+        } else if (globe && activeGlobe.Ready()) {
+            elev = (std::max)(0.0, activeGlobe.ElevAt(gla, glo)) * globe->reliefExagg;
         }
-        if (mode == 1 && globe) {
-            // M6g: beyond the CUDEM window the ground is the SPHERE (+ relief), in flat
-            // coordinates: y = sqrt(R^2 - x^2 - z^2) - R (limb-clamped past the horizon).
-            const double h2 = x * x + z * z;
-            const double rr = planetR * planetR;
-            const double sy =
-                (h2 < rr * 0.9999) ? std::sqrt(rr - h2) - planetR : -planetR;
-            double elev = 0.0;
-            if (activeGlobe.Ready()) {
-                const double py = sy + planetR;
-                double p[3];
-                for (int i = 0; i < 3; ++i) {
-                    p[i] = oDir[i] * py + east0[i] * x + north0[i] * z;
-                }
-                const double pr = std::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
-                const double r2d = 180.0 / 3.14159265358979;
-                elev = (std::max)(0.0, activeGlobe.ElevAt(
-                                           std::asin(std::clamp(p[1] / pr, -1.0, 1.0)) * r2d,
-                                           std::atan2(p[2], p[0]) * r2d)) *
-                       globe->reliefExagg;
-            }
-            return sy + elev;
-        }
-        return 0.0;   // chart mode: the ribbon's ground plane
+        return pr - planetR - elev;
     };
     // Unit ray through a client pixel, from the camera basis (shared by both pickers).
     pixelRay = [&](float sxPx, float syPx, double d[3]) {
@@ -1610,12 +1601,11 @@ std::optional<int> FrameLoop::Session() {
         for (int i = 0; i < 500 && t < 30000.0; ++i) {
             prevT = t;
             t += std::max(2.0, t * 0.02);
-            if (cam.py + d[1] * t <= groundAt(cam.px + d[0] * t, cam.pz + d[2] * t)) {
+            if (groundClear(cam.px + d[0] * t, cam.py + d[1] * t, cam.pz + d[2] * t) <= 0.0) {
                 double lo = prevT, hi = t;   // bisect the crossing
                 for (int j = 0; j < 18; ++j) {
                     const double mid = 0.5 * (lo + hi);
-                    if (cam.py + d[1] * mid <=
-                        groundAt(cam.px + d[0] * mid, cam.pz + d[2] * mid)) hi = mid;
+                    if (groundClear(cam.px + d[0] * mid, cam.py + d[1] * mid, cam.pz + d[2] * mid) <= 0.0) hi = mid;
                     else lo = mid;
                 }
                 t = hi;
@@ -1623,10 +1613,17 @@ std::optional<int> FrameLoop::Session() {
                 break;
             }
         }
-        if (!hit) {   // above-horizon fallback: the flat plane at the local ground level
-            const double g = groundAt(cam.px, cam.pz);
-            if (d[1] >= -1e-4) return false;
-            t = (g - cam.py) / d[1];
+        if (!hit) {   // above-horizon fallback: the plane of the local ground, across the eye's radial
+            double u[3] = {cam.px, cam.py + planetR, cam.pz};
+            const double ul = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+            const double down = -(d[0] * u[0] + d[1] * u[1] + d[2] * u[2]) / ul;   // descent per metre
+            if (mode != 1) {
+                if (d[1] >= -1e-4) return false;
+                t = -cam.py / d[1];
+            } else {
+                if (down <= 1e-4) return false;
+                t = groundClear(cam.px, cam.py, cam.pz) / down;
+            }
             if (t <= 0.0 || t > 30000.0) return false;
         }
         out[0] = cam.px + d[0] * t;
@@ -2222,7 +2219,7 @@ bool FrameLoop::Frame() {
     auto& lmbWas = m_lmbWas;
     auto& dragPivot = m_dragPivot;
     auto& lastWaterNavd = m_lastWaterNavd;
-    auto& groundAt = m_groundAt;
+    auto& groundClear = m_groundClear;
     auto& pickGround = m_pickGround;
     auto& pickGlobe = m_pickGlobe;
     auto& pickAny = m_pickAny;
@@ -2319,8 +2316,8 @@ bool FrameLoop::Frame() {
             const bool orbital = (mode == 1) && altOf(cam) > 6000.0;
             if (dragMode != 0 && (in.mouseDx != 0.0f || in.mouseDy != 0.0f)) {
                 constexpr double kOrbitRate = 0.006;   // rad per pixel
-                const double minAlt =
-                    orbital ? -1.0e30 : groundAt(cam.px, cam.pz) + 1.2;
+                const double minAlt = -1.0e30;   // the ground is asked after, by clearance
+                const Camera before = cam;
                 if (dragMode == 3) {          // ALT: rotate about the local vertical
                     double up[3] = {0, 1, 0};
                     if (orbital) {            // ...which on a planet is the radial line
@@ -2362,6 +2359,11 @@ bool FrameLoop::Frame() {
                         cam.px += dragPivot[0] - nowPt[0];
                         cam.pz += dragPivot[2] - nowPt[2];
                     }
+                }
+                // The two rotations near the ground: one that took the eye under it is undone (the
+                // old flat-y floor, as a clearance along the eye's own radial).
+                if (!orbital && (dragMode == 2 || dragMode == 3) && groundClear(cam.px, cam.py, cam.pz) < 1.2) {
+                    cam = before;
                 }
             }
             if (in.wheel != 0.0f && !in.keyDown[VK_CONTROL]) {
@@ -3357,9 +3359,16 @@ bool FrameLoop::Frame() {
     if (mode == 1 && globe) {
         globe->reliefExagg = ReliefOf(Eye{0, &cam, 1.0f, 1.0f, camLevel});
         PROF_BEGIN();
-        const double g = groundAt(cam.px, cam.pz);
+        const double c = groundClear(cam.px, cam.py, cam.pz);
         PROF_END(6);
-        if (cam.py < g + 1.2) cam.py = g + 1.2;
+        if (c < 1.2) {   // lifted ALONG ITS RADIAL to 1.2 m clear of the ground
+            const double u[3] = {cam.px, cam.py + planetR, cam.pz};
+            const double ul = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+            const double k = (ul + (1.2 - c)) / ul;
+            cam.px = u[0] * k;
+            cam.py = u[1] * k - planetR;
+            cam.pz = u[2] * k;
+        }
         const float viewH = S.capture.headless ? static_cast<float>(S.capture.height)
                                          : static_cast<float>(
                                                std::max(1u, window.Height()));

@@ -262,12 +262,27 @@ void BuildingLayer::Want(Gpu* gpu, double latDeg, double lonDeg, double h) {
     const double cellM = kCellDeg * 111195.0 * (std::max)(0.2, std::cos(latDeg * kDeg));
     const int span = static_cast<int>(std::ceil(m_radius / cellM)) + 1;
     std::vector<std::pair<double, Key>> want;
+    const uint64_t rewarmed0 = m_rewarmed;
     for (int dy = -span; dy <= span; ++dy) {
         for (int dx = -span; dx <= span; ++dx) {
             const Key k{ex + dx, ey + dy};
             const double r = Reach(k, latDeg, lonDeg, h);
-            if (r <= m_radius && !m_cells.count(k) && !m_pending.count(k)) want.push_back({r, k});
+            if (r > m_radius || m_cells.count(k) || m_pending.count(k)) continue;
+            auto w = m_warm.find(k);
+            if (w != m_warm.end()) {   // back from the warm pool: drawn this frame, nothing built
+                m_warmBytes -= uint64_t(w->second.cell.count) * sizeof(Vertex);
+                m_cells[k] = std::move(w->second.cell);
+                m_warm.erase(w);
+                ++m_rewarmed;
+                continue;
+            }
+            want.push_back({r, k});
         }
+    }
+    if (m_rewarmed != rewarmed0) {
+        Log("[buildings] frame %llu: %llu cells back warm, drawn this frame (%zu resident, %zu warm, %.0f MB warm)",
+            static_cast<unsigned long long>(m_frame), static_cast<unsigned long long>(m_rewarmed - rewarmed0),
+            m_cells.size(), m_warm.size(), m_warmBytes / 1048576.0);
     }
     std::sort(want.begin(), want.end());
     for (const auto& [r, k] : want) {
@@ -344,10 +359,12 @@ void BuildingLayer::Upload(const FrameContext& ctx) {
             tally += (tally.empty() ? "" : ", ") + m_stack->Name(k) + " " + std::to_string(b.drawn[k]);
         }
         m_cells[b.key] = std::move(c);
+        ++m_built;
         const double up = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-        Log("[buildings] cell %d,%d (%.2f, %.2f): %u vertices (%.1f MB), built %.0f ms, frame's upload %.2f ms, %zu "
-            "resident -- %s", b.key.first, b.key.second, b.key.second * kCellDeg, b.key.first * kCellDeg,
+        Log("[buildings] frame %llu cell %d,%d (%.2f, %.2f): %u vertices (%.1f MB), built %.0f ms, frame's upload %.2f ms, %zu "
+            "resident (%llu built, %llu back warm) -- %s", static_cast<unsigned long long>(m_frame), b.key.first, b.key.second, b.key.second * kCellDeg, b.key.first * kCellDeg,
             m_cells[b.key].count, m_cells[b.key].count * sizeof(Vertex) / 1048576.0, b.ms, up, m_cells.size(),
+            static_cast<unsigned long long>(m_built), static_cast<unsigned long long>(m_rewarmed),
             tally.empty() ? "no solids" : tally.c_str());
     }
 }
@@ -362,15 +379,31 @@ void BuildingLayer::Simulate(const FrameContext& ctx) {
     const double eye[3] = {ctx.camera->px, ctx.camera->py, ctx.camera->pz};
     double lat = 0.0, lon = 0.0, h = 0.0;
     m_locate(eye, lat, lon, h);
-    // Drop what has fallen behind kKeep x radius: its buffer waits out the frames in flight.
+    {   // The instrument: where the layer believes the eye is, each time it enters another cell.
+        const Key here{static_cast<int>(std::floor(lon / kCellDeg)), static_cast<int>(std::floor(lat / kCellDeg))};
+        if (here != m_eyeCell) {
+            m_eyeCell = here;
+            Log("[buildings] frame %llu: eye at %.5f, %.5f, %.0f m (flat %.0f, %.0f, %.0f)",
+                static_cast<unsigned long long>(m_frame), lat, lon, h, eye[0], eye[1], eye[2]);
+        }
+    }
+    // Drop what has fallen behind kKeep x radius into the warm pool, and the pool's oldest out past
+    // its budget: a freed buffer waits out the frames in flight.
     for (auto it = m_cells.begin(); it != m_cells.end();) {
         if (Reach(it->first, lat, lon, h) > kKeep * m_radius) {
-            Log("[buildings] cell %d,%d dropped (%zu resident)", it->first.first, it->first.second, m_cells.size() - 1);
-            if (it->second.vb.Valid()) m_retired.push_back({std::move(it->second.vb), m_frame});
+            m_warmBytes += uint64_t(it->second.count) * sizeof(Vertex);
+            m_warm[it->first] = {std::move(it->second), m_frame};
             it = m_cells.erase(it);
         } else {
             ++it;
         }
+    }
+    while (m_warmBytes > kWarmBytes && !m_warm.empty()) {
+        auto old = std::min_element(m_warm.begin(), m_warm.end(),
+                                    [](const auto& a, const auto& b) { return a.second.frame < b.second.frame; });
+        m_warmBytes -= uint64_t(old->second.cell.count) * sizeof(Vertex);
+        if (old->second.cell.vb.Valid()) m_retired.push_back({std::move(old->second.cell.vb), m_frame});
+        m_warm.erase(old);
     }
     Upload(ctx);
     Want(ctx.gpu, lat, lon, h);

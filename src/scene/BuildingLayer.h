@@ -10,8 +10,10 @@
 //  STREAMED BY CELL ABOUT THE EYE. A cell is kCellDeg square (the harvests' own index, ~4 x 5.5 km
 //  at 43 N). A cell is WANTED while its nearest point lies within `radius` of the eye -- the ground
 //  distance and the eye's altitude together, so an eye in orbit wants none -- and DROPPED past
-//  kKeep x radius, so an eye on a cell's edge does not make it flicker. Wanted cells are built
-//  nearest first, at most kInFlight at once, on the thread pool's Io lane: the stack composed for
+//  kKeep x radius, so an eye on a cell's edge does not make it flicker. A dropped cell is not
+//  freed: it goes WARM, its buffer kept (oldest first out past kWarmBytes), and wanted again it is
+//  drawn the same frame -- zooming out and back in rebuilt every cell (Mark saw the pop). Wanted cells
+//  not warm are built nearest first, at most kInFlight at once, on the thread pool's Io lane: the stack composed for
 //  the cell's box (BuildingStack::Compose, its own file handles), the ground asked under every
 //  footprint, the prisms triangulated, and the cell's two buffers MADE THERE too (a staging buffer
 //  filled, the cell's own empty): creating a 12 MB committed resource on the frame cost it up to
@@ -74,7 +76,8 @@ public:
     };
     static constexpr double kCellDeg = 0.05;
     static constexpr double kKeep = 1.25;
-    static constexpr int kInFlight = 2, kUploadsPerFrame = 2;
+    static constexpr int kInFlight = 6, kUploadsPerFrame = 4;
+    static constexpr uint64_t kWarmBytes = 512ull << 20;   // dropped cells' buffers kept for a return
     static constexpr uint64_t kRetireFrames = 4;
 
 private:
@@ -120,9 +123,17 @@ private:
     hal::Pso m_pso;
     std::shared_ptr<Shared> m_shared = std::make_shared<Shared>();
     std::map<Key, Cell> m_cells;
+    struct Warm {
+        Cell cell;
+        uint64_t frame;   // when it went warm: the oldest leaves first
+    };
+    std::map<Key, Warm> m_warm;
+    uint64_t m_warmBytes = 0;
     std::set<Key> m_pending;
     std::vector<Retired> m_retired;
     uint64_t m_frame = 0;
+    uint64_t m_rewarmed = 0, m_built = 0;
+    Key m_eyeCell{INT32_MIN, INT32_MIN};   // the instrument: cells taken back warm vs built
 };
 
 }  // namespace ga
