@@ -1402,33 +1402,95 @@ uint32_t SeamWord(uint32_t rec, uint32_t rel, uint32_t off) {
 // headroom along the up -- the planes of a window are steep, and a box is thin across them. A
 // meshlet outside one of its world's planes, or wholly inside the next window's cone, is marked
 // (cell0 bit 31) and its group emits nothing; its record stays, for the seams that read it.
-void GlobeLayer::CullMeshlets(const WalkParams& wp, int m, size_t base, int face, double u0,
-                              double v0, double size, double arc) {
-    const double (*planes)[4] = wp.frustum;
-    int np = wp.planeCount;
-    const double (*hole)[4] = nullptr;
-    int nh = 0;
-    if (m >= 0) {
-        const WalkParams::World& w = wp.worlds[m];
-        planes = w.planes;
-        np = w.planeCount;
-        hole = w.hole;
-        nh = w.holeCount;
+namespace {
+// THE BOX TEST: a box (centre c, half axes hu, hv, hn, eye-relative) is hidden when it is wholly
+// outside one of the planes, or wholly inside the next window's cone (every hole plane).
+bool BoxHidden(const double (*planes)[4], int np, const double (*hole)[4], int nh, const double c[3],
+               const double hu[3], const double hv[3], const double hn[3]) {
+    auto reach = [&](const double* n) {
+        return std::abs(n[0] * hu[0] + n[1] * hu[1] + n[2] * hu[2]) +
+               std::abs(n[0] * hv[0] + n[1] * hv[1] + n[2] * hv[2]) +
+               std::abs(n[0] * hn[0] + n[1] * hn[1] + n[2] * hn[2]);
+    };
+    for (int p = 0; p < np; ++p) {
+        const double* n = planes[p];
+        if (n[0] * c[0] + n[1] * c[1] + n[2] * c[2] + n[3] < -reach(n)) return true;   // NaN: never
     }
-    if (np == 0 && nh == 0) return;
-    // The leaf's relief headroom, as the walk bounds it (WalkNode), without the horizontal part.
-    double vert = 9000.0 * (std::max)(1.0f, wp.reliefExagg);
+    if (nh == 0) return false;
+    for (int p = 0; p < nh; ++p) {
+        const double* n = hole[p];
+        if (!(n[0] * c[0] + n[1] * c[1] + n[2] * c[2] + n[3] >= reach(n))) return false;
+    }
+    return true;
+}
+}  // namespace
+
+// The leaf's relief headroom, as the walk bounds it (WalkNode), without the horizontal part.
+double GlobeLayer::LeafHeadroom(const WalkParams& wp, int face, double u0, double v0, double size,
+                                double arc) const {
     const GlobeModel* relief = wp.relief ? wp.relief : wp.worldRelief;
-    if (relief && arc < 50000.0) {
-        double d[3];
-        CubeDirD(face, u0 + 0.5 * size, v0 + 0.5 * size, d);
-        const double h = relief->ElevAt(std::asin(std::clamp(d[1], -1.0, 1.0)) * 57.29577951308232,
-                                        std::atan2(d[2], d[0]) * 57.29577951308232);
-        vert = (std::abs(h) + 150.0 + 0.6 * arc + 0.1 * std::abs(h)) * (std::max)(1.0f, wp.reliefExagg);
-    }
+    if (!relief || arc >= 50000.0) return 9000.0 * (std::max)(1.0f, wp.reliefExagg);
+    double d[3];
+    CubeDirD(face, u0 + 0.5 * size, v0 + 0.5 * size, d);
+    const double h = relief->ElevAt(std::asin(std::clamp(d[1], -1.0, 1.0)) * 57.29577951308232,
+                                    std::atan2(d[2], d[0]) * 57.29577951308232);
+    return (std::abs(h) + 150.0 + 0.6 * arc + 0.1 * std::abs(h)) * (std::max)(1.0f, wp.reliefExagg);
+}
+
+bool GlobeLayer::LeafHidden(const WalkParams& wp, int m, int face, double u0, double v0, double size,
+                            double arc, const double eye[3]) const {
+    const double (*planes)[4] = m >= 0 ? wp.worlds[m].planes : wp.frustum;
+    const int np = m >= 0 ? wp.worlds[m].planeCount : wp.planeCount;
+    const double (*hole)[4] = m >= 0 ? wp.worlds[m].hole : nullptr;
+    const int nh = m >= 0 ? wp.worlds[m].holeCount : 0;
+    if (np == 0 && nh == 0) return false;
+    // The leaf's centre and its tangents in the tangent frame, as EmitMeshlets takes a meshlet's.
+    const double R = m_radius;
+    auto tangent = [&](const double d[3], double out[3]) {
+        const double px = d[0] * R, py = d[1] * R, pz = d[2] * R;
+        out[0] = m_surface->east[0] * px + m_surface->east[1] * py + m_surface->east[2] * pz;
+        out[1] = m_surface->up[0] * px + m_surface->up[1] * py + m_surface->up[2] * pz - R;
+        out[2] = m_surface->north[0] * px + m_surface->north[1] * py + m_surface->north[2] * pz;
+    };
+    const double cu = u0 + 0.5 * size, cv = v0 + 0.5 * size, e = (std::max)(size * 0.0625, 1e-7);
+    double dc[3], tc[3], dA[3], dB[3], tA[3], tB[3];
+    CubeDirD(face, cu, cv, dc);
+    tangent(dc, tc);
+    const double c[3] = {tc[0] - eye[0], tc[1] - eye[1], tc[2] - eye[2]};
+    // Half the leaf along each tangent, 10 % over (the cube's map bends across a leaf).
+    const double hs = 0.5 * size * 1.10 / (2.0 * e);
+    double hu[3], hv[3], hn[3];
+    CubeDirD(face, cu + e, cv, dA);
+    CubeDirD(face, cu - e, cv, dB);
+    tangent(dA, tA);
+    tangent(dB, tB);
+    for (int k = 0; k < 3; ++k) hu[k] = (tA[k] - tB[k]) * hs;
+    CubeDirD(face, cu, cv + e, dA);
+    CubeDirD(face, cu, cv - e, dB);
+    tangent(dA, tA);
+    tangent(dB, tB);
+    for (int k = 0; k < 3; ++k) hv[k] = (tA[k] - tB[k]) * hs;
+    // ...and the relief headroom along the up, with the sphere's sag under the leaf.
+    const double half = 0.75 * arc;
+    const double vert = LeafHeadroom(wp, face, u0, v0, size, arc) + half * half / (2.0 * R) + 1.0;
+    const double up[3] = {m_surface->east[0] * dc[0] + m_surface->east[1] * dc[1] + m_surface->east[2] * dc[2],
+                          m_surface->up[0] * dc[0] + m_surface->up[1] * dc[1] + m_surface->up[2] * dc[2],
+                          m_surface->north[0] * dc[0] + m_surface->north[1] * dc[1] + m_surface->north[2] * dc[2]};
+    for (int k = 0; k < 3; ++k) hn[k] = up[k] * vert;
+    return BoxHidden(planes, np, hole, nh, c, hu, hv, hn);
+}
+
+uint32_t GlobeLayer::CullMeshlets(const WalkParams& wp, int m, size_t base, int face, double u0,
+                                  double v0, double size, double arc) {
+    const double (*planes)[4] = m >= 0 ? wp.worlds[m].planes : wp.frustum;
+    const int np = m >= 0 ? wp.worlds[m].planeCount : wp.planeCount;
+    const double (*hole)[4] = m >= 0 ? wp.worlds[m].hole : nullptr;
+    const int nh = m >= 0 ? wp.worlds[m].holeCount : 0;
+    if (np == 0 && nh == 0) return 0u;
+    uint32_t culled = 0;
     // the sag of the sphere under a meshlet's tangent plane, and a metre for the floats
     const double half = 0.75 * arc / 4.0;
-    vert += half * half / (2.0 * m_radius) + 1.0;
+    const double vert = LeafHeadroom(wp, face, u0, v0, size, arc) + half * half / (2.0 * m_radius) + 1.0;
     for (size_t i = base; i < base + 16; ++i) {
         MeshletRec& r = m_meshlets[i];
         const double c[3] = {r.anchorRel[0], r.anchorRel[1], r.anchorRel[2]};
@@ -1439,26 +1501,12 @@ void GlobeLayer::CullMeshlets(const WalkParams& wp, int m, size_t base, int face
             hv[k] = r.dPdv[k] * hs;
             hn[k] = r.upT[k] * vert;
         }
-        auto reach = [&](const double* n) {
-            return std::abs(n[0] * hu[0] + n[1] * hu[1] + n[2] * hu[2]) +
-                   std::abs(n[0] * hv[0] + n[1] * hv[1] + n[2] * hv[2]) +
-                   std::abs(n[0] * hn[0] + n[1] * hn[1] + n[2] * hn[2]);
-        };
-        bool out = false;
-        for (int p = 0; p < np && !out; ++p) {
-            const double* n = planes[p];
-            out = n[0] * c[0] + n[1] * c[1] + n[2] * c[2] + n[3] < -reach(n);   // NaN: never
+        if (BoxHidden(planes, np, hole, nh, c, hu, hv, hn)) {
+            r.cell0 |= 0x80000000u;
+            ++culled;
         }
-        if (!out && nh > 0) {
-            bool hidden = true;
-            for (int p = 0; p < nh && hidden; ++p) {
-                const double* n = hole[p];
-                hidden = n[0] * c[0] + n[1] * c[1] + n[2] * c[2] + n[3] >= reach(n);
-            }
-            out = hidden;
-        }
-        if (out) r.cell0 |= 0x80000000u;
     }
+    return culled;
 }
 
 void GlobeLayer::SeamTable() {
@@ -1769,10 +1817,19 @@ void GlobeLayer::WalkLevel(const WalkParams& wp, uint32_t slot, int sampler) {
                 if (wp.worldCount > 0) {
                     for (int k = 0; k < 3; ++k) eye[k] += wp.worlds[m].off[k];
                 }
+                // None of the leaf seen by this world: no records are made for it (the same box
+                // test the meshlets take below, on the leaf whole).
+                if (LeafHidden(wp, wp.worldCount > 0 ? m : -1, face, u0, v0, size, arc, eye)) continue;
                 const size_t base = m_meshlets.size();
                 EmitMeshlets(face, u0, v0, size, arc, morphStart, morphEnd, eye, ws);
                 if (m_meshlets.size() != base + 16) break;
-                CullMeshlets(wp, wp.worldCount > 0 ? m : -1, base, face, u0, v0, size, arc);
+                // A leaf this world sees none of is not kept: its records would only spend the
+                // budget (a deep window's world walks a long thin cone), and no seam needs a
+                // neighbour nothing draws.
+                if (CullMeshlets(wp, wp.worldCount > 0 ? m : -1, base, face, u0, v0, size, arc) == 16u) {
+                    m_meshlets.resize(base);
+                    continue;
+                }
                 if (first == SIZE_MAX) first = base;
                 if (ws < levelRecords.size()) levelRecords[ws] += 16u;
                 // Step 23: the seam table's key. size is 2^-level and u0, v0 are multiples of
@@ -1823,7 +1880,8 @@ void GlobeLayer::WalkLevel(const WalkParams& wp, uint32_t slot, int sampler) {
     // across binaries, and [gpu] globe.mesh 3.082 -> 2.718 ms whole-rail, 4.981 -> 4.472
     // over the helm phase, p95 5.297 -> 4.801 (fenced; the overlap bench reads the same
     // -0.53 ms helm and takes the shipped loop 4.73 -> 4.30 ms).
-    const uint32_t all = wp.worldCount > 0 ? ((1u << wp.worldCount) - 1u) : 1u;
+    const uint32_t all = wp.worldCount >= 32 ? 0xFFFFFFFFu
+                         : wp.worldCount > 0  ? ((1u << wp.worldCount) - 1u) : 1u;
     for (int i = 0; i < 6; ++i) {
         WalkNode(wp, walkNodes, (wp.camFace + i) % 6, 0, 0.0, 0.0, 1.0, leaf, all);
     }

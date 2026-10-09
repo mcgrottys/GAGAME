@@ -234,7 +234,8 @@ public:
             double margin = -1.0;
             double cosLimit = -1.0;
         };
-        static constexpr int kMaxWorlds = 4;
+        // A world a bit of the walk's masks (live, seen): a place's worlds past these walk again.
+        static constexpr int kMaxWorlds = 32;
         World worlds[kMaxWorlds];
         int worldCount = 0;
         // The local relief bound for the WORLDS' tests when the walk's own bound is the planet's
@@ -669,7 +670,14 @@ private:
     hal::Pso m_pso, m_skyPso;
     hal::Pso m_limbPso;   // M10: PsLimb, dual-source blend, SV_Depth-tested
     // The meshlet's own cull (GlobeLayer.cpp): its records marked, after the walk emits a leaf.
-    void CullMeshlets(const WalkParams& wp, int m, size_t base, int face, double u0, double v0,
+    // The same box test on the LEAF whole, before its records are made: true when none of it can
+    // be seen by world m (-1: the walk's own frustum) from `eye`.
+    bool LeafHidden(const WalkParams& wp, int m, int face, double u0, double v0, double size,
+                    double arc, const double eye[3]) const;
+    double LeafHeadroom(const WalkParams& wp, int face, double u0, double v0, double size,
+                        double arc) const;
+    // Returns how many of the 16 it marked; all 16 and the leaf is not kept at all.
+    uint32_t CullMeshlets(const WalkParams& wp, int m, size_t base, int face, double u0, double v0,
                       double size, double arc);
     // M6i: m_relief and m_ne retired -- the composed height cube streams what they carried
     // (and returns ~90 MB of committed equirect memory to the pool).

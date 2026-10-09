@@ -63,7 +63,7 @@
       { "key": "mode", "type": "enum", "field": "i32", "quantity": "unknown", "unit": "", "default": "world", "names": ["chart", "world", "gulf"], "reload": "restart", "doc": "the layer-enable law: the M1 chart, the one world (estuary + planet), the gulf map" },
       { "key": "planet", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "earth", "reload": "restart", "doc": "earth | mars" },
       { "key": "view", "type": "string", "field": "string", "quantity": "unknown", "unit": "", "default": "sea", "reload": "restart", "doc": "the start camera: a name in views[]" },
-      { "key": "windowDepth", "type": "number", "field": "i32", "quantity": "1", "unit": "1", "default": 7, "reload": "restart", "doc": "how many windows deep the view reaches through facing gates (1..7): each world seen is walked and its tiles wanted, so this is the gates' frame cost" }
+      { "key": "windowDepth", "type": "number", "field": "i32", "quantity": "1", "unit": "1", "default": 0, "reload": "restart", "doc": "how many windows deep the view reaches through facing gates at most (0: as deep as the screen shows, a window under two pixels ending it): each world seen is walked and its tiles wanted, so this is the gates' frame cost" }
     ] },
     { "type": "include", "keys": [
       { "key": "file", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "a scene file overlaid on the base, in order" },

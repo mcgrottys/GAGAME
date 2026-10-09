@@ -85,7 +85,7 @@ struct SceneSection {
     int mode = 1;                     // chart | world | gulf
     std::string planet = "earth";
     std::string view = "sea";         // the start camera: a name in `views`
-    int windowDepth = 7;              // how many windows deep the view reaches through facing gates
+    int windowDepth = 0;              // at most this many windows deep (0: as deep as the screen shows)
 };
 struct IncludeEntry {
     std::string file;
