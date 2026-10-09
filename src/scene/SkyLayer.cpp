@@ -198,31 +198,17 @@ void SkyLayer::Render(const FrameContext& ctx) {
     // (The air's table was built in Simulate, before any view drew.)
     // M10: the sky's frame (Sky.hlsl SkyFrameCb, b1): three rotation rows and the sun.
     struct {
-        float r0[4], r1[4], r2[4], sun[4];
-        float winA[4];                              // M13: the view's windows (Sky.hlsl)
-        float box[kMaxWindowChain * 16];
-        float winUp[kMaxWindowChain * 4];           // ...and the viewpoint each depth lands in
-        float winSun[kMaxWindowChain * 4];
+        float r0[4], r1[4], r2[4], sun[4];   // (the view's windows: its world table)
     } cb{};
     const uint32_t other = ctx.viewIndex;   // 0: the first eye's dome and windows
     if (other > kMaxOtherEyes) return;
     const float* rot = other ? m_otherRot[other - 1] : m_rot;
     const float* sun = other ? m_otherSun[other - 1] : m_sun;
-    const int winN = other ? m_otherWin[other - 1].n : m_winN;
-    const WindowBox* winBoxes = other ? m_otherWin[other - 1].boxes : m_winBoxes;
-    const float* winUp = other ? m_otherWin[other - 1].up : m_winUp;
-    const float* winSun = other ? m_otherWin[other - 1].sun : m_winSun;
     for (int i = 0; i < 3; ++i) {
         cb.r0[i] = rot[i];
         cb.r1[i] = rot[3 + i];
         cb.r2[i] = rot[6 + i];
         cb.sun[i] = sun[i];
-    }
-    cb.winA[0] = static_cast<float>(winN);   // the one number the shader's walk reads
-    for (int k = 0; k < winN; ++k) {
-        winBoxes[k].Pack(cb.box + k * 16);
-        for (int i = 0; i < 4; ++i) cb.winUp[k * 4 + i] = winUp[k * 4 + i];
-        for (int i = 0; i < 3; ++i) cb.winSun[k * 4 + i] = winSun[k * 3 + i];
     }
     ctx.cmd->Pipeline(m_pso.Get());
     ctx.cmd->GraphicsConstants(1, cb);

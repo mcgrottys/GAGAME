@@ -372,7 +372,8 @@ float4 BlockLens(float3 dir, float3 p CS_WC_PARAM, uint lvl, float2 px) {
 float4 PsResidencyLens(VsOut i) : SV_Target {
     LoadLevel(i.lvl);
     if (gGateA.x >= 0.0f) {
-        if (GateDepth(TrueRel(i.rel)) != LevelGateDepth(i.lvl)) discard;
+        const uint depth = LevelGateDepth(i.lvl);
+        if (GateDepth(TrueRel(i.rel), depth + 1u) != depth) discard;
     }
     const float3 up = normalize(i.dir);
     if (gBankA.w > 0.5f) {

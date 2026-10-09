@@ -50,6 +50,7 @@
 
 #include "render/Renderer.h"   // SceneConstants: the b0 rows this view records
 #include "scene/Layer.h"       // FrameContext: what a Layer has always drawn from
+#include "scene/WorldTable.h"
 
 #include <cstdint>
 #include <vector>
@@ -80,6 +81,8 @@ struct ViewContext {
     // eye, and the globe's records and these rows must share it to the double; null = the
     // renderer's own surfaceCb, which is the first eye's.
     const ComposedSurfaceCb* surface = nullptr;
+    // THE WORLDS THIS VIEW REACHES (scene/WorldTable.h): its levels and its chain of windows.
+    const WorldTable* worlds = nullptr;
     FrameContext legacy;
 };
 

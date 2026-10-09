@@ -166,10 +166,10 @@ void VesselLayer::Render(const FrameContext& ctx) {
     // (The shader no longer subtracts the eye -- it receives the eye-relative position directly.)
     const Motor toEye = ctx.camera ? Motor::Translation(-ctx.camera->px, -ctx.camera->py, -ctx.camera->pz)
                                    : Motor::Identity();
-    // ANOTHER EYE (the minimap's): the chain of windows is the first eye's, so it draws the hulls
-    // that stand in its own world -- depth 0, each in the place it really is -- and no window.
+    // ANOTHER EYE (the minimap's): the hulls' depths are the first eye's chain, so it draws the
+    // hulls that stand in its own world -- depth 0, each in the place it really is -- kept by its
+    // own chain of windows (its world table).
     const bool firstEye = ctx.viewIndex == 0;
-    const int winN = firstEye ? m_winN : 0;
     m_parts.clear();
     m_parts.reserve(m_cpu.size());
     for (size_t k = 0; k < m_cpu.size(); ++k) {
@@ -190,22 +190,13 @@ void VesselLayer::Render(const FrameContext& ctx) {
     }
     if (m_parts.empty()) return;
     PixScope scope(ctx.cmd->Native(), "vessels (spec -> boxes, motor sandwich on the GPU)");
-    // The constants: the part count and brightness as before, then the view's chain of windows
-    // (M13) -- how deep it goes, each box packed as WindowBox.h says, and the one light as seen
-    // from each world it reaches. Mirrors Vessel.hlsl's cbuffer (priors 22).
+    // The constants: the part count and brightness (the view's chain of windows and the light in
+    // each world are its world table's). Mirrors Vessel.hlsl's cbuffer (priors 22).
     struct {
         float params[4];
-        float winA[4];                          // x = how many windows deep
-        float box[kMaxWindowChain * 16];
-        float sun[kMaxWindowChain * 4];         // per depth: the light there, in this frame
     } cb{};
     cb.params[0] = static_cast<float>(m_parts.size());
     cb.params[1] = 1.0f;
-    cb.winA[0] = static_cast<float>(winN);
-    for (int k = 0; k < winN; ++k) {
-        m_winBoxes[k].Pack(cb.box + k * 16);
-        for (int i = 0; i < 3; ++i) cb.sun[k * 4 + i] = m_winSun[k * 3 + i];
-    }
     ctx.cmd->Pipeline(m_pso.Get());
     ctx.cmd->Topology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx.cmd->GraphicsConstants(1, cb);

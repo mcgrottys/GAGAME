@@ -79,6 +79,7 @@
 #include "scene/Route.h"
 #include "scene/WaterComponent.h"
 #include "scene/SceneReload.h"
+#include "scene/WorldTable.h"
 #include "sim/Ephemeris.h"   // M13: the one light, kept for every viewpoint
 #include "sim/SimClock.h"
 #include "scene/Entity.h"   // M12 step 5e: the hull as a node (its step state, its water)
@@ -388,6 +389,9 @@ private:
     static constexpr double kEyeRingsAltM = 60000.0;
     static constexpr double kEyeRingsShareM = 1000.0;
     ComposedSurfaceCb m_minimapSurface{};   // b2 about the minimap's eye
+    // THE WORLD TABLES (scene/WorldTable.h), one an eye (0: the first; v: the other eye v): the
+    // levels its globe walk drew and the chain of windows it looks through.
+    scene::WorldTable m_worldTables[4];
     double m_minimapSubject[3] = {};
     bool m_minimapHasSubject = false;
     float m_glassMs = 0.0f;    // the frame time, smoothed over ~0.5 s

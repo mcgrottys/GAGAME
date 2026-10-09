@@ -2276,11 +2276,11 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     // ---- M10: THE LEVEL TABLE. Slot 0 is the camera's own level -- the identity gauge, the
     // scene's sun, set A -- so with no Droste link the table says exactly what the old
     // constants said. Slots 1..n are the extra levels SetDroste handed over.
-    memset(m_cb.droste, 0, sizeof(m_cb.droste));
+    m_levelRows.assign((1 + m_levels.size()) * 24u, 0.0f);
     auto fillLevel = [&](uint32_t slot, const double c[3], double sigma, const double Q[3][3],
                          float exag, const float sun[3], int bank, const float skyUp[3],
                          float skyDay) {
-        float* r = m_cb.droste + slot * 24u;
+        float* r = m_levelRows.data() + slot * 24u;
         r[0] = static_cast<float>(c[0]);
         r[1] = static_cast<float>(c[1] + m_radius);   // sphere-centred, summed in doubles
         r[2] = static_cast<float>(c[2]);
@@ -2315,13 +2315,6 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_cb.gateA[0] = gateOn ? static_cast<float>(m_gateFirst) : -1.0f;
     m_cb.gateA[1] = gateOn ? static_cast<float>(m_gateCount) : 0.0f;
     m_cb.gateA[2] = m_cb.gateA[3] = 0.0f;
-    for (int k = 0; k < kMaxWindowChain; ++k) {
-        if (gateOn && k < m_gateCount) {
-            m_gateBoxes[k].Pack(m_cb.gateBox + k * 16);
-        } else {
-            for (int i = 0; i < 16; ++i) m_cb.gateBox[k * 16 + i] = 0.0f;
-        }
-    }
     // M13 step 2: the cascade sea's plane at the eye, for the pixel stage's sub-ring bands --
     // SAID IN THE TANGENT FRAME, in doubles (REVIEW finding 7). The chart's law is
     // u = (P - org) . e + off with every term in the planet frame (sim/WaveChart.h), and the pixel
@@ -2602,7 +2595,7 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
 // eye's set is put back -- so nothing the first eye's frame reads afterwards has moved.
 void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float aspect,
                               float viewportH, double simTime, float exagg, const float skyUp[3],
-                              bool skyPass, const DrosteLevel* gates, const WindowBox* boxes, int n,
+                              bool skyPass, const DrosteLevel* gates, int n,
                               const double (*hole)[4], int holeN, const EyeRings* rings) {
     if (view == 0 || view > kMaxOtherEyes || !m_res) return;
     OtherEye& o = m_other[view - 1];
@@ -2638,8 +2631,8 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     const float day0 = m_camSkyDay;
     const bool drosteOn0 = m_drosteOn;
     const int gateFirst0 = m_gateFirst, gateCount0 = m_gateCount;
-    WindowBox gateBoxes0[kMaxWindowChain];
-    for (int k = 0; k < kMaxWindowChain; ++k) gateBoxes0[k] = m_gateBoxes[k];
+    std::vector<float> levelRows0;
+    levelRows0.swap(m_levelRows);
     double viewHole0[5][4];
     memcpy(viewHole0, m_viewHole, sizeof(viewHole0));
     const int viewHoleN0 = m_viewHoleCount;
@@ -2657,7 +2650,7 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     for (int i = 0; i < 3; ++i) m_camSkyUp[i] = skyUp[i];
     m_camSkyDay = -1.0f;
     m_drosteOn = false;
-    SetGates(gates, boxes, n, hole, holeN);
+    SetGates(gates, n, hole, holeN);
     if (rings) {
         m_bankSrv[0] = rings->disp;
         m_bankSrv[1] = rings->param;
@@ -2674,6 +2667,7 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
 
     // ---- keep what it walked
     o.cb = m_cb;
+    o.levelRows.swap(m_levelRows);
     o.skyCb = m_skyCb;
     o.meshlets.swap(m_meshlets);
     o.nodes.swap(m_nodes);
@@ -2704,7 +2698,7 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     m_drosteOn = drosteOn0;
     m_gateFirst = gateFirst0;
     m_gateCount = gateCount0;
-    for (int k = 0; k < kMaxWindowChain; ++k) m_gateBoxes[k] = gateBoxes0[k];
+    m_levelRows.swap(levelRows0);
     memcpy(m_viewHole, viewHole0, sizeof(viewHole0));
     m_viewHoleCount = viewHoleN0;
     for (int i = 0; i < 3; ++i) m_bankSrv[i] = bankSrv0[i];

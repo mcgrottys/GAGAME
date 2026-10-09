@@ -20,14 +20,12 @@ cbuffer SkyFrameCb : register(b1) {
     //
     // Not a second camera: a camera would be a frustum placed once, right from one angle and
     // wrong the moment the eye slid along the box. This is per pixel, so it holds from any angle.
-    float4 gWinA;         // x = how many windows deep the view's chain goes (0 = none)
-    float4 gWinBox[28];   // the chain, packed as scene/WindowBox.h packs it (Globe.hlsl's boxes)
+    //
     // THE RAY, CARRIED. A backdrop pixel whose ray passes k windows has gone through them, so its
     // sky is the air marched from where the k-th lands -- that place's zenith, the one sun as seen
     // from there, and its distance from the planet's centre -- all said in this frame, because the
-    // gates draw each far place in this frame's coordinates.
-    float4 gWinUp[7];     // per depth: xyz = the zenith there, in this frame; w = its eye radius (m)
-    float4 gWinSun[7];    // per depth: the one sun as seen from there, in this frame
+    // gates draw each far place in this frame's coordinates. The chain, the zenith and the sun at
+    // each depth are the view's world table's (Common.hlsli Wt*).
 };
 #define GA_SUN_DIR (gSkySun.xyz)
 #include "Common.hlsli"
@@ -50,11 +48,10 @@ float4 PsMain(VsOut i) : SV_Target {
     // Through k windows, the sky is the k-th place's. The walk is the one in Common.hlsli that the
     // globe's surface pixels use, asked along this ray -- a backdrop ray has no end, so it is asked
     // at a point far down it, which is the same statement for finite boxes.
-    const uint k = WindowChainDepth(r * 1e9f, gWinBox, (uint)gWinA.x);
+    const uint k = WindowChainDepth(r * 1e9f, 0xFFFFFFFFu);
     if (k > 0u) {
-        const uint j = k - 1u;
-        return float4(SkyRadianceAt(r, normalize(gWinUp[j].xyz), normalize(gWinSun[j].xyz),
-                                    gWinUp[j].w), 1.0f);
+        const float4 up = WtWinUp(k - 1u);
+        return float4(SkyRadianceAt(r, normalize(up.xyz), normalize(WtWinSun(k - 1u).xyz), up.w), 1.0f);
     }
     const float3 d = float3(dot(gSkyR0.xyz, r), dot(gSkyR1.xyz, r), dot(gSkyR2.xyz, r));
     return float4(SkyRadianceDir(d), 1.0f);

@@ -3440,9 +3440,8 @@ bool FrameLoop::Frame() {
                 const double* sunE1 = ew.sunE1;
                 const auto& viewHole = ew.viewHole;
                 const int viewHoleN = ew.viewHoleN;
-                globe->SetGates(levels, boxes, n, viewHole, viewHoleN);
-                if (m_A.vesselLayer) m_A.vesselLayer->SetGateWindows(boxes, sunWin, n);
-                if (sky) sky->SetGateWindows(boxes, upWin, sunWin, n);
+                globe->SetGates(levels, n, viewHole, viewHoleN);
+                m_worldTables[0].SetChain(boxes, upWin, sunWin, n);
                 if (!m_winSkyLogged) {
                     m_winSkyLogged = true;
                     const double kDeg = 180.0 / 3.14159265358979;
@@ -3484,9 +3483,8 @@ bool FrameLoop::Frame() {
                     m_windowRecordsDue = true;
                 }
             } else if (!m_gates.empty()) {
-                globe->SetGates(nullptr, nullptr, 0, nullptr, 0);
-                if (m_A.vesselLayer) m_A.vesselLayer->SetGateWindows(nullptr, nullptr, 0);
-                if (sky) sky->SetGateWindows(nullptr, nullptr, nullptr, 0);
+                globe->SetGates(nullptr, 0, nullptr, 0);
+                m_worldTables[0].SetChain(nullptr, nullptr, nullptr, 0);
                 if (m_windowDepthLogged > 0) {
                     Log("[gate] the view reaches no window");
                     m_windowDepthLogged = 0;
@@ -3922,6 +3920,13 @@ bool FrameLoop::Frame() {
                       (m_minimapSky ? renderer.LayerBit("sky") : 0);
         v1.surface = &m_minimapSurface;
         viewSet.views.push_back(v1);
+    }
+    // Each view's world table: the levels its globe walk drew this frame, the chain it was handed.
+    for (scene::ViewContext& v : viewSet.views) {
+        if (v.index >= std::size(m_worldTables)) continue;
+        scene::WorldTable& tbl = m_worldTables[v.index];
+        if (globe) tbl.levels = globe->LevelRows(v.index);
+        v.worlds = &tbl;
     }
     const bool odProbe = globe && opt.gateOverdraw >= 0 && frame == uint32_t(opt.gateOverdraw);
     if (odProbe) globe->overdrawProbe = true;
@@ -4950,12 +4955,10 @@ int FrameLoop::Finish() {
 void FrameLoop::HandSky(const Eye& e, const EyeSky& es, const EyeWindows* win) {
     if (!m_A.sky) return;
     if (e.view == 0) {
-        m_A.sky->SetSkyFrame(es.rows, es.sun);   // (the first eye's windows: SetGateWindows)
+        m_A.sky->SetSkyFrame(es.rows, es.sun);   // (the windows: the eye's world table)
         return;
     }
     m_A.sky->SetOtherFrame(e.view, es.rows, es.sun);
-    if (win) m_A.sky->SetOtherWindows(e.view, win->boxes, win->upWin, win->sunWin, win->n);
-    else m_A.sky->SetOtherWindows(e.view, nullptr, nullptr, nullptr, 0);
 }
 
 std::vector<scene::WindowLink> FrameLoop::ChainOf(const Eye& e) const {
@@ -4984,13 +4987,17 @@ void FrameLoop::WalkEye(const Eye& e, float exagg, const EyeSky& es, bool dome,
         (void)exagg;
         (void)es;
         (void)dome;
-        (void)win;     // (the first eye's windows were handed over with SetGates)
+        (void)win;     // (the first eye's windows were handed over with SetGates and its table)
         (void)rings;   // (and its rings with SetWaterBank)
         globe->SetView(*e.cam, aspect, e.viewH, t);
     } else {
         const bool w = win && win->n > 0;
+        if (e.view < std::size(m_worldTables)) {
+            m_worldTables[e.view].SetChain(w ? win->boxes : nullptr, w ? win->upWin : nullptr,
+                                           w ? win->sunWin : nullptr, w ? win->n : 0);
+        }
         globe->SetOtherView(m_A.gpu, e.view, *e.cam, aspect, e.viewH, t, exagg, es.camUp, !dome,
-                            w ? win->levels : nullptr, w ? win->boxes : nullptr, w ? win->n : 0,
+                            w ? win->levels : nullptr, w ? win->n : 0,
                             w ? win->viewHole : nullptr, w ? win->viewHoleN : 0, rings);
     }
 }
