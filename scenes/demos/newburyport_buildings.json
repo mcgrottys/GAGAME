@@ -13,7 +13,8 @@
     "your own replaces the OSM solids its footprints cover (or the OSM ids it names), and a feature",
     "with \"remove\": true only clears. A solid no source gives a height stands at the layer's",
     "DECLARED defaultHeight (levels x levelHeight where floors are tagged). The solids are not in",
-    "earth.height: the water does not see them.",
+    "earth.height: the water does not see them. They stream in by 0.05 deg cell within `radius` of",
+    "the eye as it flies, and drop out behind it.",
     "FLY: W A S D move, Q / E down / up, hold the right mouse button to look."
   ],
   "base": "scenes/merrimack.json",

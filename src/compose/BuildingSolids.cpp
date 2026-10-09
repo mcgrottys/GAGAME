@@ -13,15 +13,6 @@ namespace ga {
 
 namespace {
 
-constexpr double kDeg = 3.14159265358979323846 / 180.0;
-constexpr double kEarthR = 6371008.8;   // the great-circle distance a radius is measured by
-
-double Metres(double lat0, double lon0, double lat1, double lon1) {
-    const double a = std::sin(0.5 * (lat1 - lat0) * kDeg), b = std::sin(0.5 * (lon1 - lon0) * kDeg);
-    const double h = a * a + std::cos(lat0 * kDeg) * std::cos(lat1 * kDeg) * b * b;
-    return 2.0 * kEarthR * std::asin(std::sqrt((std::min)(1.0, h)));
-}
-
 std::string ReadAll(const std::string& path) {
     std::ifstream f(path, std::ios::binary);
     if (!f) return {};
@@ -33,86 +24,48 @@ bool EndsWith(const std::string& s, const char* tail) {
     return s.size() >= n && s.compare(s.size() - n, n, tail) == 0;
 }
 
-// ---- the harvest: <stem>.buildings.json (the manifest and its cell index) + <stem>.buildings.bin
-bool LoadHarvest(const std::string& manifestPath, double lat, double lon, double radiusM,
-                 std::vector<BuildingSolid>& out, std::string* why) {
-    std::string err;
-    const JsonValue m = JsonParser::Parse(ReadAll(manifestPath), &err);
-    if (!err.empty() || m.Str("format") != "GABLDG01") {
-        if (why) *why = "not a GABLDG01 manifest" + (err.empty() ? "" : ": " + err);
-        return false;
-    }
-    if (m.Str("datum") != "ground") {   // the only datum a solid here is stood on
-        if (why) *why = "datum '" + m.Str("datum") + "' (only \"ground\" is read)";
-        return false;
-    }
-    const JsonValue* cells = m.Get("cells");
-    const double cellDeg = m.Get("cellDeg") ? m.Get("cellDeg")->number : 0.0;
-    if (!cells || !(cellDeg > 0.0)) {
-        if (why) *why = "manifest has no cell index";
-        return false;
-    }
-    std::string bin = manifestPath.substr(0, manifestPath.size() - 5) + ".bin";
-    std::ifstream f(bin, std::ios::binary);
-    char magic[8] = {};
-    if (!f || !f.read(magic, 8) || std::memcmp(magic, "GABLDG01", 8) != 0) {
-        if (why) *why = "no GABLDG01 data beside the manifest (" + bin + ")";
-        return false;
-    }
+// ---- the harvest: <stem>.buildings.json (the manifest and its cell index) + <stem>.buildings.bin.
+// One cell's `n` records from `offset`, keeping those whose first point lies in the box.
+bool ReadRecords(std::ifstream& f, int64_t offset, int64_t n, double lon0, double lat0, double lon1,
+                 double lat1, std::vector<BuildingSolid>& out) {
+    f.clear();
+    f.seekg(static_cast<std::streamoff>(offset));
     std::vector<int32_t> xy;
-    for (const JsonValue& c : cells->arr) {
-        if (c.arr.size() < 4) continue;
-        const double cx = c.arr[0].number * cellDeg, cy = c.arr[1].number * cellDeg;
-        if (radiusM > 0.0) {
-            // The nearest point of the cell's box to the centre, held to the box.
-            const double nx = (std::clamp)(lon, cx, cx + cellDeg), ny = (std::clamp)(lat, cy, cy + cellDeg);
-            if (Metres(lat, lon, ny, nx) > radiusM) continue;
-        }
-        f.clear();
-        f.seekg(static_cast<std::streamoff>(c.arr[2].number));
-        const uint32_t n = static_cast<uint32_t>(c.arr[3].number);
-        for (uint32_t i = 0; i < n; ++i) {
+    for (int64_t i = 0; i < n; ++i) {
 #pragma pack(push, 1)
-            struct {
-                int64_t id;
-                uint8_t kind, roof;
-                uint16_t rings;
-                float h, mh, lv, mlv, rh;
-            } rec;
-            struct {
-                uint32_t n;
-                uint8_t outer, pad[3];
-            } ring;
+        struct {
+            int64_t id;
+            uint8_t kind, roof;
+            uint16_t rings;
+            float h, mh, lv, mlv, rh;
+        } rec;
+        struct {
+            uint32_t n;
+            uint8_t outer, pad[3];
+        } ring;
 #pragma pack(pop)
-            static_assert(sizeof(rec) == 32 && sizeof(ring) == 8, "GABLDG01 record layout");
-            if (!f.read(reinterpret_cast<char*>(&rec), sizeof(rec))) {
-                if (why) *why = "truncated record in " + bin;
-                return false;
-            }
-            BuildingSolid s;
-            s.id = rec.id;
-            s.kind = rec.kind;
-            s.height = rec.h;
-            s.minHeight = rec.mh;
-            s.levels = rec.lv;
-            s.minLevel = rec.mlv;
-            for (uint16_t r = 0; r < rec.rings; ++r) {
-                f.read(reinterpret_cast<char*>(&ring), sizeof(ring));
-                xy.resize(2 * size_t(ring.n));
-                f.read(reinterpret_cast<char*>(xy.data()), std::streamsize(xy.size() * 4));
-                std::vector<double> pts(xy.size());
-                for (size_t k = 0; k < xy.size(); ++k) pts[k] = xy[k] * 1e-7;   // the file's own 1e-7 degree
-                s.rings.push_back(std::move(pts));
-                s.outer.push_back(ring.outer);
-            }
-            if (!f) {
-                if (why) *why = "truncated ring in " + bin;
-                return false;
-            }
-            if (s.rings.empty() || s.rings[0].size() < 6) continue;
-            if (radiusM > 0.0 && Metres(lat, lon, s.rings[0][1], s.rings[0][0]) > radiusM) continue;
-            out.push_back(std::move(s));
+        static_assert(sizeof(rec) == 32 && sizeof(ring) == 8, "GABLDG01 record layout");
+        if (!f.read(reinterpret_cast<char*>(&rec), sizeof(rec))) return false;
+        BuildingSolid s;
+        s.id = rec.id;
+        s.kind = rec.kind;
+        s.height = rec.h;
+        s.minHeight = rec.mh;
+        s.levels = rec.lv;
+        s.minLevel = rec.mlv;
+        for (uint16_t r = 0; r < rec.rings; ++r) {
+            f.read(reinterpret_cast<char*>(&ring), sizeof(ring));
+            xy.resize(2 * size_t(ring.n));
+            f.read(reinterpret_cast<char*>(xy.data()), std::streamsize(xy.size() * 4));
+            std::vector<double> pts(xy.size());
+            for (size_t k = 0; k < xy.size(); ++k) pts[k] = xy[k] * 1e-7;   // the file's own 1e-7 degree
+            s.rings.push_back(std::move(pts));
+            s.outer.push_back(ring.outer);
         }
+        if (!f) return false;
+        if (s.rings.empty() || s.rings[0].size() < 6) continue;
+        const double x = s.rings[0][0], y = s.rings[0][1];
+        if (x >= lon0 && x < lon1 && y >= lat0 && y < lat1) out.push_back(std::move(s));
     }
     return true;
 }
@@ -149,8 +102,7 @@ void AddPolygon(const JsonValue& poly, BuildingSolid& s) {
     }
 }
 
-bool LoadGeoJson(const std::string& path, double lat, double lon, double radiusM,
-                 std::vector<BuildingSolid>& out, std::string* why) {
+bool LoadGeoJson(const std::string& path, std::vector<BuildingSolid>& out, std::string* why) {
     std::string err;
     const std::string text = ReadAll(path);
     if (text.empty()) {
@@ -187,7 +139,6 @@ bool LoadGeoJson(const std::string& path, double lat, double lon, double radiusM
             for (const JsonValue& poly : coords->arr) AddPolygon(poly, s);
         }
         if (s.rings.empty()) continue;
-        if (radiusM > 0.0 && Metres(lat, lon, s.rings[0][1], s.rings[0][0]) > radiusM) continue;
         out.push_back(std::move(s));
     }
     return true;
@@ -277,20 +228,98 @@ void RingCentre(const std::vector<double>& p, double& lon, double& lat) {
     }
 }
 
-bool LoadBuildingSource(const std::string& path, double latDeg, double lonDeg, double radiusM,
-                        std::vector<BuildingSolid>& out, std::string* why) {
-    if (EndsWith(path, ".buildings.json")) return LoadHarvest(path, latDeg, lonDeg, radiusM, out, why);
-    if (EndsWith(path, ".geojson") || EndsWith(path, ".json")) {
-        return LoadGeoJson(path, latDeg, lonDeg, radiusM, out, why);
+void BuildingStack::Open(std::vector<BuildingSourceSpec> specs, const BuildingDefaults& d, std::string* log) {
+    m_d = d;
+    m_src.clear();
+    std::stable_sort(specs.begin(), specs.end(),
+                     [](const BuildingSourceSpec& a, const BuildingSourceSpec& b) { return a.over < b.over; });
+    for (const BuildingSourceSpec& sp : specs) {
+        Source src;
+        src.name = sp.name;
+        std::string why;
+        if (EndsWith(sp.path, ".buildings.json")) {
+            std::string err;
+            const JsonValue m = JsonParser::Parse(ReadAll(sp.path), &err);
+            const JsonValue* cells = m.Get("cells");
+            src.cellDeg = m.Get("cellDeg") ? m.Get("cellDeg")->number : 0.0;
+            src.bin = sp.path.substr(0, sp.path.size() - 5) + ".bin";
+            std::ifstream f(src.bin, std::ios::binary);
+            char magic[8] = {};
+            if (!err.empty() || m.Str("format") != "GABLDG01") {
+                why = "not a GABLDG01 manifest" + (err.empty() ? "" : ": " + err);
+            } else if (m.Str("datum") != "ground") {   // the only datum a solid here is stood on
+                why = "datum '" + m.Str("datum") + "' (only \"ground\" is read)";
+            } else if (!cells || !(src.cellDeg > 0.0)) {
+                why = "the manifest has no cell index";
+            } else if (!f || !f.read(magic, 8) || std::memcmp(magic, "GABLDG01", 8) != 0) {
+                why = "no GABLDG01 data beside the manifest (" + src.bin + ")";
+            } else {
+                src.harvest = true;
+                for (const JsonValue& c : cells->arr) {
+                    if (c.arr.size() < 4) continue;
+                    src.cells.push_back({static_cast<int64_t>(c.arr[0].number), static_cast<int64_t>(c.arr[1].number),
+                                         static_cast<int64_t>(c.arr[2].number), static_cast<int64_t>(c.arr[3].number)});
+                }
+            }
+        } else if (EndsWith(sp.path, ".geojson") || EndsWith(sp.path, ".json")) {
+            LoadGeoJson(sp.path, src.whole, &why);
+        } else {
+            why = "neither a .buildings.json harvest nor a .geojson";
+        }
+        char line[512];
+        if (!why.empty()) {
+            snprintf(line, sizeof(line), "source '%s' refused: %s\n", sp.name.c_str(), why.c_str());
+        } else if (src.harvest) {
+            snprintf(line, sizeof(line), "source '%s' (over %g): %zu cells of %.2f deg, read by box\n",
+                     sp.name.c_str(), sp.over, src.cells.size(), src.cellDeg);
+        } else {
+            snprintf(line, sizeof(line), "source '%s' (over %g): %zu solids, read whole\n", sp.name.c_str(),
+                     sp.over, src.whole.size());
+        }
+        if (log) *log += line;
+        if (why.empty()) m_src.push_back(std::move(src));
     }
-    if (why) *why = "neither a .buildings.json harvest nor a .geojson";
-    return false;
+}
+
+void BuildingStack::Read(const Source& s, double lon0, double lat0, double lon1, double lat1,
+                         std::vector<BuildingSolid>& out) const {
+    if (!s.harvest) {
+        for (const BuildingSolid& b : s.whole) {
+            const double x = b.rings[0][0], y = b.rings[0][1];
+            if (x >= lon0 && x < lon1 && y >= lat0 && y < lat1) out.push_back(b);
+        }
+        return;
+    }
+    std::ifstream f(s.bin, std::ios::binary);   // this call's own handle: Compose runs on many threads
+    const int64_t ix0 = static_cast<int64_t>(std::floor(lon0 / s.cellDeg));
+    const int64_t ix1 = static_cast<int64_t>(std::floor(lon1 / s.cellDeg));
+    const int64_t iy0 = static_cast<int64_t>(std::floor(lat0 / s.cellDeg));
+    const int64_t iy1 = static_cast<int64_t>(std::floor(lat1 / s.cellDeg));
+    for (const auto& c : s.cells) {   // a state is a few thousand cells: a scan, not a search
+        if (c[0] < ix0 || c[0] > ix1 || c[1] < iy0 || c[1] > iy1) continue;
+        if (!ReadRecords(f, c[2], c[3], lon0, lat0, lon1, lat1, out)) {
+            Log("[buildings] '%s': a truncated cell at offset %lld", s.name.c_str(), static_cast<long long>(c[2]));
+        }
+    }
+}
+
+std::vector<BuildingSolid> BuildingStack::Compose(double lon0, double lat0, double lon1, double lat1, double margin,
+                                                  uint64_t* identity) const {
+    std::vector<std::vector<BuildingSolid>> stack(m_src.size());
+    for (size_t k = 0; k < m_src.size(); ++k) {
+        Read(m_src[k], lon0 - margin, lat0 - margin, lon1 + margin, lat1 + margin, stack[k]);
+    }
+    std::vector<BuildingSolid> all = ComposeBuildings(std::move(stack), m_d, identity);
+    std::vector<BuildingSolid> mine;
+    for (BuildingSolid& s : all) {
+        const double x = s.rings[0][0], y = s.rings[0][1];
+        if (x >= lon0 && x < lon1 && y >= lat0 && y < lat1) mine.push_back(std::move(s));
+    }
+    return mine;
 }
 
 std::vector<BuildingSolid> ComposeBuildings(std::vector<std::vector<BuildingSolid>> stack,
-                                            const BuildingDefaults& d, uint64_t* identity,
-                                            std::vector<size_t>* drawnPer) {
-    if (drawnPer) drawnPer->assign(stack.size(), 0);
+                                            const BuildingDefaults& d, uint64_t* identity) {
     uint64_t h = 14695981039346656037ull;
     auto mix = [&h](const void* p, size_t n) {
         for (size_t i = 0; i < n; ++i) h = (h ^ static_cast<const uint8_t*>(p)[i]) * 1099511628211ull;
@@ -336,7 +365,7 @@ std::vector<BuildingSolid> ComposeBuildings(std::vector<std::vector<BuildingSoli
             mix(&s.id, sizeof(s.id));
             mix(&s.top, sizeof(s.top));
             mix(&s.bottom, sizeof(s.bottom));
-            if (drawnPer) ++(*drawnPer)[k];
+            s.source = static_cast<int>(k);
             for (const auto& r : s.rings) mix(r.data(), r.size() * sizeof(double));
             out.push_back(std::move(s));
         }

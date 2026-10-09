@@ -665,7 +665,8 @@ const Schema& BuildingsLayerSchema() {
             .Bind("defaultHeight", kBuildings.defaultHeight, Q::Length, "m",
                   "a building with neither height nor floors tagged: the scene's assumption", R)
             .Bind("radius", kBuildings.radius, Q::Length, "m",
-                  "the solids read about the place's anchor (0 = every solid of every source)", R);
+                  "cells of solids are streamed in within this distance of the eye (its altitude counted) and "
+                  "dropped beyond 1.25 times it", R);
         return sc;
     }();
     return *s;

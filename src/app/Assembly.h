@@ -182,7 +182,7 @@ struct Assembly {
     WaterBankLayer* waterBankEye = nullptr; // another eye's own rings (the minimap's: hud.minimap)
     GlobeLayer* globe = nullptr;
     VesselLayer* vesselLayer = nullptr;   // M9bq: the hulls, drawn from their specs
-    BuildingLayer* buildingLayer = nullptr;   // the building solids (built once the frame is)
+    BuildingLayer* buildingLayer = nullptr;   // the building solids, streamed by cell about the eye
     double planetR = 0.0;
     ResidencyManager resMgr;
     ExitMark exitResMgr{"assembly: ~ResidencyManager -- Shutdown again (waits for any load still "
