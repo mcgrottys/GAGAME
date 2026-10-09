@@ -250,6 +250,7 @@ Options ParseArgs(int argc, char** argv) {
         else if (a == "--gis-dump") o.gisDump = next("gis_gate.pgm");
         // M9al: the ring gate and its instrument. Instrument first, gate second, both off.
         else if (a == "--res-trace") o.resTrace = true;
+        else if (a == "--gate-overdraw") o.gateOverdraw = atoi(next("250").c_str());
         else if (a == "--wave-audit") o.waveAudit = true;   // F25
         else if (a == "--cb-trace") o.cbTrace = true;
         // M13 step 0: count the water tiles the walk would want on the planet's own lattice.

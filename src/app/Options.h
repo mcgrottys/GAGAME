@@ -65,7 +65,8 @@ struct Options {
     bool railZoom = false;            // --rail-zoom DIR: orbit -> inlet imagery zoom -> estuary
     bool framesSet = false;           // an explicit --frames beats a rail default
     uint32_t predictEvery = 3;        // --predict-every N: prefetch-walk cadence (1 = old)
-    bool predictInline = false;       // --predict-inline: the prefetch walk on the main thread
+    bool predictInline = false;
+    int gateOverdraw = -1;            // --gate-overdraw F: the per-world fragment probe at frame F       // --predict-inline: the prefetch walk on the main thread
                                       // where it used to run (step 5's A/B: the same FNV-1a)
     bool packTiles = false;           // --pack-tiles: pack the composed cache, then exit
     bool directStorage = true;        // --no-direct-storage: the upload ring, for the A/B (M9ao)

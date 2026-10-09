@@ -1559,7 +1559,32 @@ void WaveField::Offer(Solved&& s, const char* how) {
 void WaveField::Publish() {
     std::shared_ptr<const Solved> n = Next();
     if (!n) return;
+    const GpuTable was = m_table;
+    m_prevTable = was;
     AdoptTable(n->table);
+    if (was.nUsed > 0) {
+        // [wave-table] (the roll's table mismatch): what a page painted under the table before decodes
+        // as under this one, per component -- the amplitude and wavenumber scales' ratios, the
+        // frequencies' and directions' change, and the envelope's and level's.
+        double aLo = 1e30, aHi = 0.0, kLo = 1e30, kHi = 0.0, dSig = 0.0, dDir = 0.0;
+        int nC = 0;
+        for (uint32_t c = 0; c < uint32_t(kMaxComp); ++c) {
+            if (!(was.aMax[c] > 0.0f) || !(m_table.aMax[c] > 0.0f)) continue;
+            const double ra = double(m_table.aMax[c]) / double(was.aMax[c]);
+            const double rk = double(m_table.kMax[c]) / (std::max)(double(was.kMax[c]), 1e-12);
+            aLo = (std::min)(aLo, ra); aHi = (std::max)(aHi, ra);
+            kLo = (std::min)(kLo, rk); kHi = (std::max)(kHi, rk);
+            dSig = (std::max)(dSig, std::abs(double(m_table.sigma[c]) - double(was.sigma[c])));
+            dDir = (std::max)(dDir, std::hypot(double(m_table.dirX[c]) - double(was.dirX[c]),
+                                               double(m_table.dirZ[c]) - double(was.dirZ[c])));
+            ++nC;
+        }
+        Log("[wave-table] publish %016llx: %d comps | aMax new/old %.3f..%.3f | kMax new/old %.3f..%.3f | "
+            "|d sigma| %.2e rad/s | |d dir| %.2e | envMax %.3f -> %.3f, sumMax %.3f -> %.3f, level %+.3f -> %+.3f m",
+            static_cast<unsigned long long>(n->key), nC, aLo, aHi, kLo, kHi, dSig, dDir, double(was.envMax),
+            double(m_table.envMax), double(was.sumMax), double(m_table.sumMax), double(was.level),
+            double(m_table.level));
+    }
     m_liveKey = n->key;
     std::atomic_store(&m_live, n);
     std::atomic_store(&m_next, std::shared_ptr<const Solved>());

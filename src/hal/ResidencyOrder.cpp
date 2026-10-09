@@ -46,6 +46,15 @@ void ResidencyManager::WriteHeldFootprint(Tenant& t, const TileRequest& r, HeldF
         return bh / (std::max)(1u, static_cast<uint32_t>(t.tilings[p0 + m].HeightInTiles));
     };
     std::vector<uint8_t>& bytes = t.resCpu[face];
+    // THE VERSION BIT (Tenant::versioned): 1 where the finest held tile over a cell holds the
+    // previous identity's bytes. Only the engine's own predicate knows a tile's bytes; the audit's
+    // constructed held sets carry none, and their bytes stay the mip alone.
+    const bool ver = t.versioned && held == &HeldInSlots;
+    const auto stale = [&](uint32_t m, uint32_t x, uint32_t y) -> uint8_t {
+        if (!ver) return 0;
+        const Tracked* p = t.slot[StampIndex(t, face, m, x, y)];
+        return (p && p->stale) ? uint8_t(1) : uint8_t(0);
+    };
     const auto fill = [&](uint32_t m, uint32_t x, uint32_t y, uint8_t v) {
         const uint32_t x0 = x * cw(m), x1 = (std::min)((x + 1) * cw(m), bw);
         const uint32_t y0 = y * ch(m), y1 = (std::min)((y + 1) * ch(m), bh);
@@ -56,15 +65,18 @@ void ResidencyManager::WriteHeldFootprint(Tenant& t, const TileRequest& r, HeldF
             }
         }
     };
-    // Under a tile at m that is not held, over a whole chain: the level above it, or nothing.
-    const auto below = [&](uint32_t m) -> uint8_t {
-        return m >= top ? uint8_t(255) : static_cast<uint8_t>((m + 1) * 16);
+    // Under a tile (m, x, y) that is not held, over a whole chain: the level above it -- its
+    // parent, whose version the bit carries -- or nothing.
+    const auto below = [&](uint32_t m, uint32_t x, uint32_t y) -> uint8_t {
+        if (m >= top) return uint8_t(255);
+        const uint32_t px = (x * cw(m)) / cw(m + 1), py = (y * ch(m)) / ch(m + 1);
+        return static_cast<uint8_t>((m + 1) * 16 + stale(m + 1, px, py));
     };
     // The chain above r, from the coarsest down: the first tile not held decides r's footprint.
     for (uint32_t m = top; m > r.mip; --m) {
         const uint32_t ax = (r.x * cw(r.mip)) / cw(m), ay = (r.y * ch(r.mip)) / ch(m);
         if (!held(ctx, face, m, ax, ay)) {
-            fill(r.mip, r.x, r.y, below(m));
+            fill(r.mip, r.x, r.y, below(m, ax, ay));
             return;
         }
     }
@@ -78,11 +90,11 @@ void ResidencyManager::WriteHeldFootprint(Tenant& t, const TileRequest& r, HeldF
     while (n) {
         const uint32_t y = stk[--n], x = stk[--n], m = stk[--n];
         if (!held(ctx, face, m, x, y)) {
-            fill(m, x, y, below(m));
+            fill(m, x, y, below(m, x, y));
             continue;
         }
         if (m == 0) {
-            fill(0, x, y, 0);
+            fill(0, x, y, stale(0, x, y));
             continue;
         }
         const auto& ti = t.tilings[p0 + m - 1];

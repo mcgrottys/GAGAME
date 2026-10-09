@@ -722,7 +722,10 @@ bool GlobeLayer::BuildMeshPso(Gpu& gpu, ShaderCompiler& sc) {
     d.ms = sc.Compile(path, L"MsMain", L"ms_6_5");
     d.ps = sc.Compile(m_shaderDir + L"/Globe.hlsl", L"PsMain", L"ps_6_5");
     if (!d.ms.Valid() || !d.ps.Valid()) return false;
-    // cull stays NONE: cube faces mix winding
+    // Back faces culled: MsMain winds every triangle, bands included, one way about the surface's
+    // outward normal, whichever way the cube face orients its uv (the VS fallback above still mixes
+    // winding and stays NONE). The wireframe twins inherit it and show what is rasterized.
+    d.cull = D3D12_CULL_MODE_BACK;
     d.depthClip = TRUE;
     d.depthTest = true;
     d.depthWrite = true;   // reversed-Z GREATER, the default comparison
@@ -1391,6 +1394,72 @@ uint32_t SeamWord(uint32_t rec, uint32_t rel, uint32_t off) {
 }
 }  // namespace
 
+// THE MESHLET'S OWN CULL. The walk bounds a leaf by a sphere of 1.35 arcs and more (its relief
+// headroom, its slope over the whole node), so a world seen through a small window draws whole
+// leaves of which one meshlet in sixteen is inside it. Here each of the leaf's 16 meshlets is held
+// to the same test as a BOX: its own quarter of the leaf along the two tangents, the leaf's relief
+// headroom along the up -- the planes of a window are steep, and a box is thin across them. A
+// meshlet outside one of its world's planes, or wholly inside the next window's cone, is marked
+// (cell0 bit 31) and its group emits nothing; its record stays, for the seams that read it.
+void GlobeLayer::CullMeshlets(const WalkParams& wp, int m, size_t base, int face, double u0,
+                              double v0, double size, double arc) {
+    const double (*planes)[4] = wp.frustum;
+    int np = wp.planeCount;
+    const double (*hole)[4] = nullptr;
+    int nh = 0;
+    if (m >= 0) {
+        const WalkParams::World& w = wp.worlds[m];
+        planes = w.planes;
+        np = w.planeCount;
+        hole = w.hole;
+        nh = w.holeCount;
+    }
+    if (np == 0 && nh == 0) return;
+    // The leaf's relief headroom, as the walk bounds it (WalkNode), without the horizontal part.
+    double vert = 9000.0 * (std::max)(1.0f, wp.reliefExagg);
+    const GlobeModel* relief = wp.relief ? wp.relief : wp.worldRelief;
+    if (relief && arc < 50000.0) {
+        double d[3];
+        CubeDirD(face, u0 + 0.5 * size, v0 + 0.5 * size, d);
+        const double h = relief->ElevAt(std::asin(std::clamp(d[1], -1.0, 1.0)) * 57.29577951308232,
+                                        std::atan2(d[2], d[0]) * 57.29577951308232);
+        vert = (std::abs(h) + 150.0 + 0.6 * arc + 0.1 * std::abs(h)) * (std::max)(1.0f, wp.reliefExagg);
+    }
+    // the sag of the sphere under a meshlet's tangent plane, and a metre for the floats
+    const double half = 0.75 * arc / 4.0;
+    vert += half * half / (2.0 * m_radius) + 1.0;
+    for (size_t i = base; i < base + 16; ++i) {
+        MeshletRec& r = m_meshlets[i];
+        const double c[3] = {r.anchorRel[0], r.anchorRel[1], r.anchorRel[2]};
+        const double hs = 4.0 * r.uvStepCell[0] * 1.02;   // half a meshlet, in face uv, and 2 %
+        double hu[3], hv[3], hn[3];
+        for (int k = 0; k < 3; ++k) {
+            hu[k] = r.dPdu[k] * hs;
+            hv[k] = r.dPdv[k] * hs;
+            hn[k] = r.upT[k] * vert;
+        }
+        auto reach = [&](const double* n) {
+            return std::abs(n[0] * hu[0] + n[1] * hu[1] + n[2] * hu[2]) +
+                   std::abs(n[0] * hv[0] + n[1] * hv[1] + n[2] * hv[2]) +
+                   std::abs(n[0] * hn[0] + n[1] * hn[1] + n[2] * hn[2]);
+        };
+        bool out = false;
+        for (int p = 0; p < np && !out; ++p) {
+            const double* n = planes[p];
+            out = n[0] * c[0] + n[1] * c[1] + n[2] * c[2] + n[3] < -reach(n);   // NaN: never
+        }
+        if (!out && nh > 0) {
+            bool hidden = true;
+            for (int p = 0; p < nh && hidden; ++p) {
+                const double* n = hole[p];
+                hidden = n[0] * c[0] + n[1] * c[1] + n[2] * c[2] + n[3] >= reach(n);
+            }
+            out = hidden;
+        }
+        if (out) r.cell0 |= 0x80000000u;
+    }
+}
+
 void GlobeLayer::SeamTable() {
     constexpr uint32_t kCoarser = 1u;
     std::sort(m_leafKeys.begin(), m_leafKeys.end(),
@@ -1707,6 +1776,7 @@ void GlobeLayer::WalkLevel(const WalkParams& wp, uint32_t slot, int sampler) {
                 const size_t base = m_meshlets.size();
                 EmitMeshlets(face, u0, v0, size, arc, morphStart, morphEnd, eye, ws);
                 if (m_meshlets.size() != base + 16) break;
+                CullMeshlets(wp, wp.worldCount > 0 ? m : -1, base, face, u0, v0, size, arc);
                 if (first == SIZE_MAX) first = base;
                 levelRecords[ws] += 16u;
                 // Step 23: the seam table's key. size is 2^-level and u0, v0 are multiples of
@@ -2442,7 +2512,56 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
         ctx.cmd->GraphicsSrvAt(2, rec.res->GetGPUVirtualAddress());
         // M10: 2-D, because one dimension caps at 65535 groups (GlobeMesh.hlsl folds y*65535+x).
         const UINT n = static_cast<UINT>(meshlets.size());
-        ctx.cmd->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
+        if (overdrawProbe && ctx.viewIndex == 0) {
+            // --gate-overdraw: the same records, one world a dispatch, each measured.
+            ID3D12Device* dev = ctx.gpu->Device();
+            if (!m_odStats) {
+                D3D12_QUERY_HEAP_DESC qd{};
+                qd.Type = D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS;
+                qd.Count = kMaxLevels;
+                GA_CHECK(dev->CreateQueryHeap(&qd, IID_PPV_ARGS(&m_odStats)));
+                qd.Type = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
+                GA_CHECK(dev->CreateQueryHeap(&qd, IID_PPV_ARGS(&m_odOccl)));
+                D3D12_HEAP_PROPERTIES hp{};
+                hp.Type = D3D12_HEAP_TYPE_READBACK;
+                D3D12_RESOURCE_DESC rd{};
+                rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+                rd.Width = kMaxLevels * (sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS) + sizeof(uint64_t));
+                rd.Height = 1;
+                rd.DepthOrArraySize = 1;
+                rd.MipLevels = 1;
+                rd.SampleDesc.Count = 1;
+                rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+                GA_CHECK(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+                                                      D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                      IID_PPV_ARGS(&m_odReadback)));
+            }
+            ID3D12GraphicsCommandList* cl = ctx.cmd->Native();
+            m_odLevels = (std::min)(static_cast<uint32_t>(cbData.drosteA[0]), uint32_t(kMaxLevels));
+            if (m_odLevels == 0) m_odLevels = 1;
+            for (uint32_t k = 0; k < m_odLevels; ++k) {
+                m_odRecords[k] = m_odCulled[k] = 0;
+                for (const MeshletRec& mr : meshlets) {
+                    m_odRecords[k] += mr.level == k ? 1u : 0u;
+                    m_odCulled[k] += (mr.level == k && (mr.cell0 >> 31)) ? 1u : 0u;
+                }
+                GlobeCbData one = cbData;
+                one.optB[3] = static_cast<float>(k + 1u);
+                ctx.cmd->GraphicsConstantsAt(1, ctx.gpu->PushConstants(&one, sizeof(one)));
+                cl->BeginQuery(m_odStats.Get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, k);
+                cl->BeginQuery(m_odOccl.Get(), D3D12_QUERY_TYPE_OCCLUSION, k);
+                ctx.cmd->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
+                cl->EndQuery(m_odOccl.Get(), D3D12_QUERY_TYPE_OCCLUSION, k);
+                cl->EndQuery(m_odStats.Get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, k);
+            }
+            cl->ResolveQueryData(m_odStats.Get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, 0, m_odLevels,
+                                 m_odReadback.Get(), 0);
+            cl->ResolveQueryData(m_odOccl.Get(), D3D12_QUERY_TYPE_OCCLUSION, 0, m_odLevels, m_odReadback.Get(),
+                                 kMaxLevels * sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS));
+            ctx.cmd->GraphicsConstantsAt(1, cbVa);
+        } else {
+            ctx.cmd->DispatchMesh((std::min)(n, 65535u), (n + 65534u) / 65535u, 1);
+        }
 
         // 3) M10: the limbs of every planet whose air the eye is outside of, over the surface
         // just drawn (SetView chose the slots, farthest first).
@@ -2593,6 +2712,32 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     m_chartFrame = chart0;
     m_chartOn = chartOn0;
     m_sampler = sampler0;
+}
+
+std::vector<GlobeLayer::OverdrawRow> GlobeLayer::ReadOverdraw(Gpu& gpu) {
+    std::vector<OverdrawRow> rows;
+    if (!m_odReadback || m_odLevels == 0) return rows;
+    gpu.WaitIdle();
+    void* p = nullptr;
+    const D3D12_RANGE range{0, kMaxLevels * (sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS) + sizeof(uint64_t))};
+    if (FAILED(m_odReadback->Map(0, &range, &p)) || !p) return rows;
+    const auto* st = static_cast<const D3D12_QUERY_DATA_PIPELINE_STATISTICS*>(p);
+    const auto* oc = reinterpret_cast<const uint64_t*>(static_cast<const uint8_t*>(p) +
+                                                       kMaxLevels * sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS));
+    for (uint32_t k = 0; k < m_odLevels; ++k) {
+        OverdrawRow r;
+        r.level = k;
+        r.records = m_odRecords[k];
+        r.culled = m_odCulled[k];
+        r.primitives = st[k].CInvocations;
+        r.clipped = st[k].CPrimitives;
+        r.fragments = st[k].PSInvocations;
+        r.samples = oc[k];
+        rows.push_back(r);
+    }
+    const D3D12_RANGE none{0, 0};
+    m_odReadback->Unmap(0, &none);
+    return rows;
 }
 
 // ---- Phase A0 (plan_eye_windows.md): THE INSTRUMENTS, no behaviour changed. -------------------

@@ -767,6 +767,21 @@ void WaterBankLayer::Render(const FrameContext& ctx) {
             scl[r4] = wt.aMax[c2];
             scl[r4 + 1] = wt.kMax[c2];
         }
+        // THE PREVIOUS TABLE: the pages still holding the previous solve decode by it (the
+        // version bit). Before any roll it is the live one.
+        const WaveField::GpuTable& pt = m_wave->PrevTable();
+        for (int c2 = 0; c2 < WaveField::kMaxComp; ++c2) {
+            const double ang = std::fmod(static_cast<double>(pt.sigma[c2]) * m_simUnix, 2.0 * kPiD);
+            const int r = (c2 >> 1) * 4 + (c2 & 1) * 2;
+            cb.waveSigP[r] = static_cast<float>(std::cos(ang));
+            cb.waveSigP[r + 1] = static_cast<float>(std::sin(ang));
+            cb.waveDirP[r] = pt.dirX[c2];
+            cb.waveDirP[r + 1] = pt.dirZ[c2];
+            cb.waveScaleP[r] = pt.aMax[c2];
+            cb.waveScaleP[r + 1] = pt.kMax[c2];
+        }
+        cb.waveBP[0] = pt.envMax;
+        cb.waveBP[1] = pt.sumMax;
     }
 
     GpuScope gscope(ctx.prof, ctx.cmd->Native(), "waterbank.fill");   // barriers + the one dispatch

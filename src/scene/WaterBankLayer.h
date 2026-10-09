@@ -239,6 +239,8 @@ private:
         // PHASE C1: THE SOLVER'S CHART about the rings' frame (SweDomain::KernelRows): a texel reads
         // the solver where its ground lies in the domain's cells. Appended at the END on both sides.
         float svU[4], svV[4], svW[4], svO[4];
+        // THE PREVIOUS TABLE (the wave roll; WaterBank.hlsl gWaveSigP..): appended at the END.
+        float waveSigP[64], waveDirP[64], waveScaleP[64], waveBP[4];
     };
     struct BankTile {
         float orgXZ[2];

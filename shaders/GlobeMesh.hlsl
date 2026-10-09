@@ -24,7 +24,8 @@ struct MeshletRec {
     float2 uv0;          // node face-uv origin
     float2 uvStepCell;   // face-uv per node CELL (node size / 32)
     uint face;
-    uint cell0;          // (cellY0 << 8) | cellX0 -- this meshlet's 8x8 window in node cells
+    uint cell0;          // (cellY0 << 8) | cellX0 -- this meshlet's 8x8 window in node cells;
+                         // bit 31: culled (GlobeLayer::CullMeshlets) -- the group emits nothing
     float morphStart;    // the node's CDLOD cross-fade band (camera distance, m)
     float morphEnd;
     float3 anchorRel;    // camera-relative meshlet centre at the geoid (CPU doubles)
@@ -58,7 +59,7 @@ static const float kLatFoldFloor = 0.35f;
 // neighbour's own record (the same doubles the neighbour amplifies from), not an estimate.
 VsOut SurfaceVertex(const MeshletRec rec, uint gid, float2 g) {
     const float cx0 = float(rec.cell0 & 0xFFu);
-    const float cy0 = float(rec.cell0 >> 8);
+    const float cy0 = float((rec.cell0 >> 8) & 0xFFu);
     const bool fine = rec.arc <= 650.0f;
 
     // Pre-morph distance estimate for the CDLOD ramp.
@@ -269,7 +270,7 @@ struct Band {
 // The four potential bands of a meshlet, in edge order W, E, N, S.
 void SeamBands(const MeshletRec rec, out Band b[4], out uint nv, out uint nt) {
     const uint mx = (rec.cell0 & 0xFFu) >> 3;
-    const uint my = (rec.cell0 >> 8) >> 3;
+    const uint my = ((rec.cell0 >> 8) & 0xFFu) >> 3;
     const bool fine = rec.arc <= 650.0f;
     uint kind[4] = {kBandNone, kBandNone, kBandNone, kBandNone};
     uint nb[4] = {0u, 0u, 0u, 0u};
@@ -339,7 +340,7 @@ VsOut BandMoved(VsOut o, float3 nudge) {
 VsOut CoarseBandVertex(uint gid, uint e, const Band bd, uint i) {
     const MeshletRec nr = gMeshlets[bd.nb];
     const float ncx0 = float(nr.cell0 & 0xFFu);
-    const float ncy0 = float(nr.cell0 >> 8);
+    const float ncy0 = float((nr.cell0 >> 8) & 0xFFu);
     // The coarse record's seam edge faces ours: its E edge for our W seam, and so on.
     const float fixedN = (e == 0u) ? ncx0 + 8.0f : (e == 1u) ? ncx0
                        : (e == 2u) ? ncy0 + 8.0f : ncy0;
@@ -380,8 +381,10 @@ void MsMain(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
     // clamped in bounds (a root SRV has no bounds check).
     const uint count = (uint)gGlo.z;
     const uint gid = gid3.y * 65535u + gid3.x;
-    const bool live = gid < count;
     const MeshletRec rec = gMeshlets[min(gid, max(count, 1u) - 1u)];
+    // --gate-overdraw: one world per dispatch (gOptB.w = its slot + 1; 0, the default, draws all).
+    const uint only = (uint)gOptB.w;
+    const bool live = gid < count && (rec.cell0 >> 31) == 0u && (only == 0u || rec.level + 1u == only);
     // M10: this record's Droste level -- its eye, sun, exaggeration, bank set and the gauge's
     // outward map. A seam band's coarse neighbour is always a record of the SAME level (the
     // seam table keys on it), so one load serves every vertex this group writes.
@@ -392,7 +395,7 @@ void MsMain(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
     SetMeshOutputCounts(live ? 81u + nv : 0u, live ? 128u + nt : 0u);
     if (!live) return;
     const float cx0 = float(rec.cell0 & 0xFFu);
-    const float cy0 = float(rec.cell0 >> 8);
+    const float cy0 = float((rec.cell0 >> 8) & 0xFFu);
 
     if (gtid < 81u) {
         // Node-grid coordinates (0..32): the morph operates here, so shared edges between
@@ -417,12 +420,19 @@ void MsMain(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
         }
     }
 
+    // ONE WINDING: every triangle is wound so that, read in its index order, it turns about the
+    // surface's outward normal the same way, and the pipeline culls back faces. The grid's turn is
+    // about dPdu x dPdv, which the cube's faces orient either way about up: the record says which.
+    // A band's turn, in its own (along the seam, out of the record) frame, is the same on every
+    // edge; that frame keeps the grid's turn on E and N and mirrors it on W and S.
+    const bool mirror = dot(cross(rec.dPdu, rec.dPdv), rec.upT) < 0.0f;
     if (gtid < 128u) {
         const uint cell = gtid / 2u;
         const uint x = cell % 8u, y = cell / 8u;
         const uint v0 = y * 9u + x;
-        tris[gtid] = (gtid & 1u) ? uint3(v0 + 1u, v0 + 10u, v0 + 9u)
-                                 : uint3(v0, v0 + 1u, v0 + 9u);
+        const uint3 t = (gtid & 1u) ? uint3(v0 + 1u, v0 + 10u, v0 + 9u)
+                                    : uint3(v0, v0 + 1u, v0 + 9u);
+        tris[gtid] = mirror ? t.xzy : t;
     }
 
     // Step 23: the coarse vertices of the level bands (five per band, threads 0..19 at most)
@@ -443,6 +453,7 @@ void MsMain(uint gtid : SV_GroupThreadID, uint3 gid3 : SV_GroupID,
         [unroll] for (uint q = 1u; q < 4u; ++q) {
             if (bands[q].kind != kBandNone && gtid >= bands[q].tbase) e = q;
         }
-        tris[128u + gtid] = BandTri(bands[e], gtid - bands[e].tbase);
+        const uint3 t = BandTri(bands[e], gtid - bands[e].tbase);
+        tris[128u + gtid] = (mirror != (e == 0u || e == 3u)) ? t.xzy : t;
     }
 }
