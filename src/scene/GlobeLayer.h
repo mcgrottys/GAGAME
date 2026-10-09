@@ -327,24 +327,27 @@ public:
         int bankSet = -1;             // 0 = the camera's rings, 1 = set B, -1 = none (far)
         float skyUp[3] = {0.0f, 1.0f, 0.0f};   // the zenith of the sky this level SEES, own frame
         float skyDay = -1.0f;         // that sky's daylight; < 0 = the level's own local day
-        // M13: WHICH SAMPLER this level's wants are charged to (ResidencyManager::Sampler).
-        // A Droste level and a gate's window read the same cache the camera does, and each
-        // answers for what it asked for; -1 means the view's own.
-        int sampler = -1;
-        // M13: THE LEVEL'S OWN CULL. A world seen through windows is seen only along the rays that
-        // pass them, so it is walked only there: planes in the TRUE camera frame, eye-relative, in
-        // the frame's axes (a x + b y + c z + d >= 0 inside), pulled through the gauge exactly as
-        // the camera's are. A cull and nothing else -- what the level shows is decided per pixel.
-        // 0 = the camera's own frustum (every Droste level).
-        double planes[6][4] = {};
-        int planeCount = 0;
-        // ...and what it need not walk: the cone of the next window it shows (a deeper world's),
-        // same frame and convention, inside = hidden (scene/Gateway.h LinkHole).
+    };
+    // A WORLD SEEN THROUGH THE VIEW'S WINDOWS (scene/Gateway.h WindowChain). Not a Droste level:
+    // the same planet at scale 1, the eye's own exaggeration, its own local day -- what is its own
+    // is the eye carried through its k + 1 windows, the rotation its geometry is drawn back by, the
+    // sun and the zenith at that eye, and its cull. Its depth is its place in the chain; nothing
+    // else about it counts. It shares the walk of any world whose eye stands near its own (the
+    // same place, its tiles chosen once).
+    struct GateWorld {
+        double cam[3] = {0.0, 0.0, 0.0};   // the eye carried this far, in the root's tangent frame
+        double Q[3][3] = {{1.0, 0.0, 0.0}, {0.0, 1.0, 0.0}, {0.0, 0.0, 1.0}};   // own -> true
+        Placement gauge;                   // the same rotation, which its planes are pulled through
+        float sun[3] = {0.0f, 1.0f, 0.0f};     // the sun at its eye
+        float skyUp[3] = {0.0f, 1.0f, 0.0f};   // the zenith at its eye
+        int bankSet = -1;             // 0 = the camera's rings, 1 = set B, -1 = none (far)
+        int sampler = -1;             // its gate's sampler (ResidencyManager::Sampler); -1 the view's
+        // ITS CULL: walked only along the rays through its windows -- planes in the TRUE camera
+        // frame, eye-relative (a x + b y + c z + d >= 0 inside) -- and not where the next window
+        // shows a deeper world (that cone, inside = hidden; scene/Gateway.h LinkHole).
+        double planes[5][4] = {};
         double hole[5][4] = {};
         int holeCount = 0;
-        // A gate's world: drawn in the camera's own frame at sigma 1, so it may share the walk of
-        // any world whose eye stands near its own -- the same place, its tiles chosen once.
-        bool share = false;
     };
     // Per frame, BEFORE SetView: the scene's sun as the renderer will write it (the level
     // table's slot 0 carries it -- the globe's shading reads the table, not gSunDir).
@@ -389,7 +392,7 @@ public:
     };
     void SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float aspect, float viewportH,
                       double simTime, float exagg, const float skyUp[3], bool skyPass,
-                      const DrosteLevel* gates = nullptr,
+                      const GateWorld* gates = nullptr,
                       int n = 0, const double (*hole)[4] = nullptr, int holeN = 0,
                       const EyeRings* rings = nullptr);
     // The eye stops drawing (its walk is not refreshed this frame).
@@ -415,29 +418,23 @@ public:
         m_drosteOn = true;
     }
     // THE VIEW'S WINDOWS (scene/Gateway.h WindowChain), per frame before SetView; n = 0 clears
-    // them. levels[k] is the world seen through k + 1 windows, drawn as one more level of the walk --
-    // its eye the eye carried that far, sigma 1, Q the chain's rotation back, its cull the rays
-    // through the windows. A pixel of level k + 1 is kept where its ray passes exactly k + 1
+    // them. gates[k] is the world seen through k + 1 windows (GateWorld), its slot in the level
+    // table after the Droste levels'. A pixel of it is kept where its ray passes exactly k + 1
     // windows of the view's chain (the boxes are the view's world table's), in order; every other
-    // level keeps the pixels that pass none. Appended after any Droste levels; the Droste switches
-    // are not touched. `viewHole` is what the eye's own world need not walk: the first window's
-    // cone (LinkHole).
-    void SetGates(const DrosteLevel* levels, int n, const double viewHole[5][4], int viewHoleCount) {
+    // level keeps the pixels that pass none. The Droste switches are not touched. `viewHole` is
+    // what the eye's own world need not walk: the first window's cone (LinkHole).
+    void SetGates(const GateWorld* gates, int n, const double viewHole[5][4], int viewHoleCount) {
         if (!m_drosteOn) m_levels.clear();
-        m_gateFirst = -1;
-        m_gateCount = 0;
+        m_gates.clear();
         m_viewHoleCount = (viewHole && viewHoleCount > 0) ? (std::min)(viewHoleCount, 5) : 0;
         for (int p = 0; p < m_viewHoleCount; ++p) {
             for (int j = 0; j < 4; ++j) m_viewHole[p][j] = viewHole[p][j];
         }
-        if (!levels || n <= 0) {
+        if (!gates || n <= 0) {
             m_viewHoleCount = 0;
             return;
         }
-        const int take = n;
-        m_gateFirst = static_cast<int>(m_levels.size()) + 1;
-        for (int k = 0; k < take; ++k) m_levels.push_back(levels[k]);
-        m_gateCount = take;
+        m_gates.assign(gates, gates + n);
     }
     // Set B: the rings anchored at the OUTER level's eye (a second WaterBankLayer).
     // M13 step 2: the cascade sea's plane at the eye (sim/WaveChart.h), for the pixel stage's
@@ -453,6 +450,9 @@ public:
     bool ReadsBankSet(int set) const {
         for (const DrosteLevel& L : m_levels) {
             if (L.bankSet == set) return true;
+        }
+        for (const GateWorld& G : m_gates) {
+            if (G.bankSet == set) return true;
         }
         return false;
     }
@@ -820,16 +820,19 @@ private:
 public:
     // PHASE A2: the frame's level table as SetDroste / SetGates left it, for the windows' step:
     // how many slots (the camera's and the extra levels), and an extra slot's eye in its own frame.
-    size_t LevelSlots() const { return 1u + m_levels.size(); }
+    size_t LevelSlots() const { return 1u + m_levels.size() + m_gates.size(); }
     // The first gate world's slot in the table and how many there are (-1, 0: none), as SetGates left it.
-    int GateFirst() const { return m_gateFirst; }
-    int GateCount() const { return m_gateCount; }
-    const double* LevelCam(size_t slot) const { return slot ? m_levels[slot - 1].cam : nullptr; }
+    // The gate worlds' slots follow the Droste levels' (none: -1).
+    int GateFirst() const { return m_gates.empty() ? -1 : static_cast<int>(1u + m_levels.size()); }
+    int GateCount() const { return static_cast<int>(m_gates.size()); }
+    const double* LevelCam(size_t slot) const {
+        if (slot == 0) return nullptr;
+        return slot <= m_levels.size() ? m_levels[slot - 1].cam : m_gates[slot - 1 - m_levels.size()].cam;
+    }
 private:
     uint64_t m_eyeFrame = 0;
     std::string m_eyeLast;
-    int m_gateFirst = -1;                      // the first window level's slot in the table
-    int m_gateCount = 0;                       // how many windows deep the view's chain goes
+    std::vector<GateWorld> m_gates;            // the view's chain's worlds (SetGates)
     double m_viewHole[5][4] = {};              // the first window's cone: the eye's world skips it
     int m_viewHoleCount = 0;
 
