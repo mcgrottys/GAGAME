@@ -2815,7 +2815,7 @@ bool RunSceneSelfTest() {
         sf.Claim(2, 3, cl, got);   // frame 2: the home world joins the eye's set
         sf.FollowAll(moved);
         uint32_t live = 0;
-        for (uint32_t w = 0; w < SurfaceFrame::kWindowSlots; ++w) live += sf.setLeader[w] != SurfaceFrame::kNoSet;
+        for (uint32_t w = 0; w < SurfaceFrame::kWindowSets; ++w) live += sf.setLeader[w] != SurfaceFrame::kNoSet;
         g.True(got[1] == got[0] && sf.slotSet[1] == sf.slotSet[0],
                "[claim] the world at the eye's place reads the eye's set");
         g.True(got[2] != got[0] && sf.OtherSet(0) == got[2], "[claim] the eye at Haulover takes its own");

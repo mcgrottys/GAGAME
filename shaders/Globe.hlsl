@@ -104,11 +104,9 @@ cbuffer GlobeCb : register(b1) {
     float4 gBankBOrg01;   // set B ring origins, as gBankOrg01..45
     float4 gBankBOrg23;
     float4 gBankBOrg45;
-    float4 gDroste[48];   // 8 levels x 6 rows -- see LoadLevel
     // THE VIEW'S WINDOWS (scene/Gateway.h WindowChain): x = the first window level's slot (-1
-    // none), y = how many windows deep; the chain, packed as scene/WindowBox.h packs it.
+    // none), y = how many windows deep. The boxes are the view's world table's (Common.hlsli Wt*).
     float4 gGateA;
-    float4 gGateBox[28];
     // M13 step 2: the cascade sea's plane at the eye (sim/WaveChart.h) -- see GlobeLayer.h.
     // Said in the TANGENT frame about the tangent point, per cascade (ChartUOf below).
     float4 gChartOrg;   // xyz = the constant along east, wrapped to cascade 0 / 1 / 2's patch;
@@ -158,9 +156,10 @@ static int sLvlBank = 0;
 static float sLvlSkyDay = -1.0f;
 
 void LoadLevel(uint slot) {
-    const uint b = min(slot, 7u) * 6u;
-    const float4 r0 = gDroste[b], r1 = gDroste[b + 1u], r2 = gDroste[b + 2u];
-    const float4 r3 = gDroste[b + 3u], r4 = gDroste[b + 4u], r5 = gDroste[b + 5u];
+    // The view's world table (Common.hlsli Wt*): as many levels as the view reaches.
+    const uint s = min(slot, max(WtLevels(), 1u) - 1u);
+    const float4 r0 = WtLevelRow(s, 0u), r1 = WtLevelRow(s, 1u), r2 = WtLevelRow(s, 2u);
+    const float4 r3 = WtLevelRow(s, 3u), r4 = WtLevelRow(s, 4u), r5 = WtLevelRow(s, 5u);
     sLvlCamAbs = r0.xyz;
     sLvlSigma = r0.w;
     sLvlQ = float3x3(r1.xyz, r2.xyz, r3.xyz);
@@ -194,17 +193,18 @@ uint LevelGateDepth(uint lvl) {
     const uint n = (uint)gGateA.y;
     return (lvl >= first && lvl < first + n) ? lvl - first + 1u : 0u;
 }
-uint GateDepth(float3 p) { return WindowChainDepth(p, gGateBox, (uint)gGateA.y); }
+// The depth p's ray reaches, asked no further than `upTo` windows (a world of depth k needs k + 1).
+uint GateDepth(float3 p, uint upTo) { return WindowChainDepth(p, min(upTo, (uint)gGateA.y)); }
 
 // THE RIM: how near the ray's entry into window k lies to an EDGE of the face it enters through,
 // 1 on the edge falling to 0 a rim-width in. A window between two open seas is otherwise hard to
 // find; the rim is drawn on the pixels seen through that window only, so its far side never
 // shows it -- and down a corridor of windows every frame has its own.
 float GateRim(float3 p, uint k) {
-    const uint b = min(k, kWindowChain - 1u) * 4u;
-    const float3x3 R = float3x3(gGateBox[b].xyz, gGateBox[b + 1u].xyz, gGateBox[b + 2u].xyz);
-    const float3 h = float3(gGateBox[b].w, gGateBox[b + 1u].w, gGateBox[b + 2u].w);
-    const float3 e = mul(R, -gGateBox[b + 3u].xyz);
+    const float4 b0 = WtBoxRow(k, 0u), b1 = WtBoxRow(k, 1u), b2 = WtBoxRow(k, 2u);
+    const float3x3 R = float3x3(b0.xyz, b1.xyz, b2.xyz);
+    const float3 h = float3(b0.w, b1.w, b2.w);
+    const float3 e = mul(R, -WtBoxRow(k, 3u).xyz);
     float3 d = mul(R, p);
     d = lerp(d, float3(1e-12f, 1e-12f, 1e-12f), float3(abs(d) < 1e-12f));
     const float3 t1 = (-h - e) / d;
@@ -1186,7 +1186,8 @@ float4 PsMain(VsOut i) : SV_Target {
     // THE VIEW'S WINDOWS: seen through k boxes is the level of depth k, and only that; every
     // other level is everything else. The same test from every eye, so every view agrees.
     if (gGateA.x >= 0.0f) {
-        if (GateDepth(TrueRel(i.rel)) != LevelGateDepth(i.lvl)) discard;
+        const uint depth = LevelGateDepth(i.lvl);
+        if (GateDepth(TrueRel(i.rel), depth + 1u) != depth) discard;
     }
     const float3 up = normalize(i.dir);   // PLANET frame: lat/lon + every texture fetch
     // THE ADDRESS (plan_address.md): every Mercator read below is addressed by this pixel's

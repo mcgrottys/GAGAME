@@ -12,9 +12,8 @@
 
 namespace ga {
 
-// How deep a view's chain of windows may go: the globe's level table has eight slots and the eye's
-// own world takes the first.
-static constexpr int kMaxWindowChain = 7;
+// (How deep a view's chain of windows goes is the screen's to say -- scene/Gateway.cpp WindowChain
+// stops at a window under two pixels -- and the scene's windowDepth, when it caps it.)
 
 struct WindowBox {
     float rows[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};

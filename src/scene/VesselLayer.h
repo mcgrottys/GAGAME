@@ -49,16 +49,8 @@ public:
     // every window that shows its place, and never through one that shows another.
     void SetVessels(const Vessel* const* vessels, const Motor* frames, const uint8_t* depth,
                     int count);
-    // The view's chain of windows in the true camera frame (GlobeLayer::SetGates' own boxes), and
-    // the one light as seen from each world it reaches, in this frame: a hull is lit where it is.
-    // n = 0 is the shipped pass: no test, no window, byte for byte.
-    void SetGateWindows(const WindowBox* boxes, const float* suns3, int n) {
-        m_winN = (boxes && suns3) ? (n < kMaxWindowChain ? (n > 0 ? n : 0) : kMaxWindowChain) : 0;
-        for (int k = 0; k < m_winN; ++k) {
-            m_winBoxes[k] = boxes[k];
-            for (int i = 0; i < 3; ++i) m_winSun[k * 3 + i] = suns3[k * 3 + i];
-        }
-    }
+    // (The view's chain of windows and the light seen from each world it reaches are the view's
+    // world table's, scene/WorldTable.h: a hull is lit where it is.)
 
     uint32_t PartCount() const { return static_cast<uint32_t>(m_cpu.size()); }
     // Whether a world point lies inside any drawn box, grown by `margin` metres -- the water
@@ -96,9 +88,6 @@ private:
     hal::Pso m_pso;
     std::vector<PartCpu> m_cpu;
     std::vector<PartGpu> m_parts;   // built from m_cpu at Render, relative to that view's eye
-    int m_winN = 0;
-    WindowBox m_winBoxes[kMaxWindowChain];
-    float m_winSun[kMaxWindowChain * 3] = {};
 };
 
 }  // namespace ga

@@ -174,23 +174,6 @@ bool GateSlabFrom(float3 p, float4 r0, float4 r1, float4 r2, float4 c, float tSt
     return tEnter <= tExit && tEnter <= 1.0f;
 }
 
-// THE DEPTH OF A POINT: how many windows of the view's chain the segment from the eye to p passes,
-// in order (scene/Gateway.cpp ChainDepth) -- the world p belongs to, 0 being the eye's own. A world
-// keeps exactly the pixels of its own depth, so the windows within windows are one rule, and the
-// view through each is the world behind glass: rasterized from the true eye, never a picture.
-static const uint kWindowChain = 7u;
-uint WindowChainDepth(float3 p, float4 boxes[28], uint n) {
-    float t = 0.0f;
-    uint k = 0u;
-    const uint m = min(n, kWindowChain);
-    [loop] for (; k < m; ++k) {
-        const uint b = k * 4u;
-        float tIn;
-        if (!GateSlabFrom(p, boxes[b], boxes[b + 1u], boxes[b + 2u], boxes[b + 3u], t, tIn)) break;
-        t = tIn;
-    }
-    return k;
-}
 
 // ---- THE SKY, ONCE (M13; one integral since 2026-10-05) ------------------------------------------
 // Defined here so the sky layer, the globe's backdrop and every reflection cannot disagree. The
@@ -371,17 +354,10 @@ float3 AerialPerspective(float3 col, float3 viewDir, float range) {
 // PHASE B3: the Mercator anchor's other rows (eyeA/E/N/U, eyePx) are deleted.
 #define GA_COMPOSED_CB_EYE_ROWS \
     float4 gCsEyeT;  /* the eye in the tangent axes less (0, R, 0): the flat camera; w spare */
-// PHASE A2: THE EYE'S WINDOWS, PER LEVEL (SurfaceFrame::Fill; ComposedSurfaceCb's last rows):
-// slot s's rank k + 1 at row 5 s + k.
+// PHASE A2: THE EYE'S WINDOWS, PER LEVEL: each level's rows are the view's world table's
+// (WtWinRow below; SurfaceFrame::Fill); here rank k + 1's ground texel (m) at mip 0.
 #define GA_COMPOSED_CB_WINDOW_ROWS \
-    float4 gCsWinU[40]; /* PageTexelUv's planes U, V, W about slot s's own eye, anchored on the \
-                           multiple of 16384 texels nearest it */ \
-    float4 gCsWinV[40]; \
-    float4 gCsWinW[40]; \
-    float4 gCsWinO[20]; /* the box's origin less the anchor, in 16384s, two (slot, rank) a row */ \
-    uint4  gCsWinS[10]; /* the slice of the colour and the mask, four a row */ \
-    uint4  gCsWinK[2];  /* K, the ranks live, per slot, four a row */ \
-    float4 gCsRankG[2]; /* rank k + 1's ground texel (m) at mip 0 */
+    float4 gCsRankG[2];
 
 // M12 step 4g: THE ONE SURFACE CONSTANT BUFFER, on the shared layout's b2 (Renderer.h): the
 // frame loop fills ga::ComposedSurfaceCb once a frame through SurfaceFrame::Fill, RenderFrame
@@ -399,5 +375,41 @@ cbuffer SurfaceCb : register(b2) {
 // grad(eta) is identically zero because curl(grad(f)) == 0 -- the algebra pays on CURRENT
 // fields, which is exactly where M3 spends it.
 #include "GA.hlsli"
+
+// ---- THE WORLD TABLE (scene/WorldTable.h): every world this view reaches, by index ----------------
+// One a view, uploaded by the renderer; its heap slot rides in b2 (gCsEyeT.w). Row 0 = (levels,
+// windows, first level row, first box row), row 1 = (first light row, -, -, -); a level is 6 rows
+// (Globe.hlsl LoadLevel), a window 4 (its box, WindowBox.h) and 2 more (the zenith there with the
+// eye's radius in w; the sun seen from there). As long as the chain the screen allows.
+StructuredBuffer<float4> gWorlds[] : register(t0, space7);
+float4 WtRow(uint i) { return gWorlds[asuint(gCsEyeT.w)][i]; }
+uint WtLevels() { return asuint(WtRow(0u).x); }
+uint WtWindows() { return asuint(WtRow(0u).y); }
+float4 WtLevelRow(uint slot, uint r) { return WtRow(asuint(WtRow(0u).z) + slot * 6u + r); }
+float4 WtBoxRow(uint k, uint r) { return WtRow(asuint(WtRow(0u).w) + k * 4u + r); }
+float4 WtWinUp(uint k) { return WtRow(asuint(WtRow(1u).x) + k * 2u); }
+float4 WtWinSun(uint k) { return WtRow(asuint(WtRow(1u).x) + k * 2u + 1u); }
+// Level s's window rows (WorldTable::kWinRows = 21): row 0 = (K, -, -, -), then per rank k the
+// planes U, V, W and (offset xy, slice). A level past the table's has no windows (K = 0).
+uint WtWinLevels() { return asuint(WtRow(1u).z); }
+float4 WtWinRow(uint s, uint r) { return WtRow(asuint(WtRow(1u).y) + s * 21u + r); }
+
+// THE DEPTH OF A POINT: how many windows of the view's chain the segment from the eye to p passes,
+// in order (scene/Gateway.cpp ChainDepth) -- the world p belongs to, 0 being the eye's own. A world
+// keeps exactly the pixels of its own depth, so the windows within windows are one rule, and the
+// view through each is the world behind glass: rasterized from the true eye, never a picture. The
+// walk stops at the first window the segment does not pass, or after `n` (a world of depth k need
+// ask no further than k + 1).
+uint WindowChainDepth(float3 p, uint n) {
+    float t = 0.0f;
+    uint k = 0u;
+    const uint m = min(n, WtWindows());
+    [loop] for (; k < m; ++k) {
+        float tIn;
+        if (!GateSlabFrom(p, WtBoxRow(k, 0u), WtBoxRow(k, 1u), WtBoxRow(k, 2u), WtBoxRow(k, 3u), t, tIn)) break;
+        t = tIn;
+    }
+    return k;
+}
 
 #endif  // GA_COMMON_HLSLI

@@ -109,27 +109,21 @@ float CsBlockGround(uint k) {   // the rank's ground at mip 0, the pyramid's: by
     return (c == 0u) ? g.x : (c == 1u) ? g.y : (c == 2u) ? g.z : g.w;
 }
 float2 CsWinUv(uint s, uint k, float3 p) {
-    const uint j = 5u * s + k;
-    return PageTexelUv(p, gCsWinU[j], gCsWinV[j], gCsWinW[j]);
+    const uint r = 1u + 4u * k;
+    return PageTexelUv(p, WtWinRow(s, r), WtWinRow(s, r + 1u), WtWinRow(s, r + 2u));
 }
-float2 CsWinOff(uint s, uint k) {
-    const uint j = 5u * s + k;
-    const float4 o = gCsWinO[j >> 1];
-    return (j & 1u) != 0u ? o.zw : o.xy;
-}
-uint CsWinSlice(uint s, uint k) {
-    const uint j = 5u * s + k;
-    return gCsWinS[j >> 2][j & 3u];
-}
+float2 CsWinOff(uint s, uint k) { return WtWinRow(s, 4u + 4u * k).xy; }
+uint CsWinSlice(uint s, uint k) { return asuint(WtWinRow(s, 4u + 4u * k).z); }
+uint CsWinK(uint s) { return s < WtWinLevels() ? asuint(WtWinRow(s, 0u).x) : 0u; }
 // THE CHAIN, ARITHMETIC (Window.hlsli, one body with the selftest's): one ratio and one compare a
 // rank, the ranks from 1 up to the first whose box does not hold p.
 #define WIN_UV(s, i, p) CsWinUv(s, i, p)
 #define WIN_OFF(s, i) CsWinOff(s, i)
 #define WIN_SLICE(s, i) CsWinSlice(s, i)
-#define WIN_K(s) gCsWinK[(s) >> 2][(s) & 3u]
+#define WIN_K(s) CsWinK(s)
 #include "Window.hlsli"
 // The level's chain at its own point: p relative to slot s's eye, in the tangent axes.
-WalkChain CsChain(float3 p, uint s) { return WindowChain(p, min(s, 7u)); }
+WalkChain CsChain(float3 p, uint s) { return WindowChain(p, s); }
 // A rank's residency floor at an address: the gather wraps as the sample does.
 float CsHaveWindow(uint mapSrv, float2 uv, uint slice) {
     return PageHave(gTexArr[mapSrv], sLinearWrap, uv, slice);

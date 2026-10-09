@@ -53,8 +53,9 @@ const Schema& SceneSchema_() {
             .Bind("planet", p.planet, "earth | mars", R)
             .Bind("view", p.view, "the start camera: a name in views[]", R)
             .Bind("windowDepth", p.windowDepth, Q::Dimensionless, "1",
-                  "how many windows deep the view reaches through facing gates (1..7): each world seen "
-                  "is walked and its tiles wanted, so this is the gates' frame cost", R);
+                  "how many windows deep the view reaches through facing gates at most (0: as deep as "
+                  "the screen shows, a window under two pixels ending it): each world seen is walked and "
+                  "its tiles wanted, so this is the gates' frame cost", R);
         return sc;
     }();
     return *s;

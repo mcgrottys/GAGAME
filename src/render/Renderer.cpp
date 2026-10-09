@@ -7,6 +7,7 @@
 #include "hal/Views.h"
 #include "scene/FieldSet.h"
 #include "scene/ViewContext.h"
+#include "scene/WorldTable.h"
 
 #include <algorithm>
 #include <cmath>
@@ -62,7 +63,9 @@ hal::RootLayout Renderer::SharedGraphicsLayout() {
         .Srv(0)   // t0, space0: the FieldDesc table
         .Table({hal::SrvRange(0, hal::kUnbounded, 1), hal::SrvRange(0, hal::kUnbounded, 2),
                 hal::SrvRange(0, hal::kUnbounded, 3), hal::SrvRange(0, hal::kUnbounded, 4),
-                hal::SrvRange(0, hal::kUnbounded, 5), hal::SrvRange(0, hal::kUnbounded, 6)})
+                hal::SrvRange(0, hal::kUnbounded, 5), hal::SrvRange(0, hal::kUnbounded, 6),
+                // t0, space7: the heap as StructuredBuffer<float4> -- the views' world tables
+                hal::SrvRange(0, hal::kUnbounded, 7)})
         // b2: THE SURFACE constants (Common.hlsli's SurfaceCb, ga::ComposedSurfaceCb) --
         // vqview's mechanism for letting later layers evaluate one surface, finally bound
         // (M12 step 4g): the frame loop fills the rows once through SurfaceFrame::Fill,
@@ -459,7 +462,12 @@ void Renderer::RenderFrame(const scene::ViewSet& set) {
 
         cmd.GraphicsRoot(m_rootSig.Get());
         cmd.GraphicsConstantsAt(0, sceneCbs[i]);
-        cmd.GraphicsConstantsAt(4, v.surface ? cmd.Push(*v.surface) : surfaceVa);   // b2 (4g)
+        {   // b2 (4g): the view's surface rows, carrying where its world table is (gCsEyeT.w)
+            ComposedSurfaceCb s = v.surface ? *v.surface : surfaceCb;
+            const uint32_t worlds = UploadWorlds(v.worlds, i);
+            memcpy(&s.eyeT[3], &worlds, sizeof(worlds));
+            cmd.GraphicsConstantsAt(4, cmd.Push(s));
+        }
         if (m_fieldTableVa) cmd.GraphicsSrvAt(2, m_fieldTableVa);
         cmd.GraphicsBindless(3);
 
@@ -595,6 +603,32 @@ bool Renderer::DumpHdr(const std::wstring& path) {
     Log("[renderer] dump-hdr %S : %s (%ux%u RGBA16F, exposure %.4g, sidecar %S)", path.c_str(),
         ok ? "ok" : "FAILED", m_width, m_height, double(m_desc.exposure), side.c_str());
     return ok;
+}
+
+
+uint32_t Renderer::UploadWorlds(const scene::WorldTable* t, size_t view) {
+    static const scene::WorldTable kNone{};
+    (t ? t : &kNone)->Pack(m_worldPack);
+    std::vector<WorldBuf>& bufs = m_worldBuf[m_gpu->FrameIndex()];
+    if (bufs.size() <= view) bufs.resize(view + 1);
+    WorldBuf& w = bufs[view];
+    const uint64_t bytes = m_worldPack.size() * sizeof(float);
+    if (!w.buf.Valid() || w.buf.size < bytes) {
+        // This frame index's last use is fenced (BeginFrame), so the old buffer may go now.
+        uint64_t cap = 4096;
+        while (cap < bytes) cap *= 2;
+        w.buf = m_gpu->CreateUploadBuffer(cap, L"world table (a view's, a frame in flight's)");
+        D3D12_SHADER_RESOURCE_VIEW_DESC d{};
+        d.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        d.Format = DXGI_FORMAT_UNKNOWN;
+        d.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        d.Buffer.NumElements = static_cast<UINT>(cap / 16u);
+        d.Buffer.StructureByteStride = 16u;
+        if (w.srv == UINT32_MAX) w.srv = m_gpu->SrvHeap().Alloc();
+        m_gpu->Device()->CreateShaderResourceView(w.buf.res.Get(), &d, m_gpu->SrvHeap().Cpu(w.srv));
+    }
+    memcpy(w.buf.cpu, m_worldPack.data(), bytes);
+    return w.srv;
 }
 
 }  // namespace ga

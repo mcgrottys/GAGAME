@@ -32,6 +32,7 @@
 #include <vector>
 
 namespace ga {
+namespace scene { struct WorldTable; }
 namespace hal {
 class CommandContext;   // hal/Context.h: the frame's list, the frame-head hook's argument
 }
@@ -188,6 +189,16 @@ public:
     // read one buffer where each carried a copy of these rows inside its own cbuffer. Zero
     // until filled: every composed channel reads "off".
     ComposedSurfaceCb surfaceCb{};
+    // THE WORLD TABLES (scene/WorldTable.h): each view's, uploaded per frame into a buffer of its
+    // own (per frame in flight, grown on demand), its structured view kept in one heap slot and
+    // rewritten in place when the buffer grows. Its slot rides in the view's b2 (gCsEyeT.w).
+    uint32_t UploadWorlds(const scene::WorldTable* t, size_t view);
+    struct WorldBuf {
+        GpuBuffer buf;
+        uint32_t srv = UINT32_MAX;
+    };
+    std::vector<WorldBuf> m_worldBuf[Gpu::kFrameCount];
+    std::vector<float> m_worldPack;
     // Water level in metres above datum -- in M1 this is the tide at the focus station, published
     // scene-wide because anything that sits in or on the water will need it.
     float waterLevel = 0.0f;

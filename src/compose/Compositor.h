@@ -304,20 +304,9 @@ struct ComposedSurfaceCb {
     // (0, R, 0), from doubles (SurfaceFrame::eye) -- CsPointOfDir's. PHASE B3: the Mercator
     // anchor's other rows (eyeA, eyeE, eyeN, eyeU, eyePx) and merc, u4, det are deleted.
     float eyeT[4];
-    // PHASE A2 (out/integration/plan_eye_windows.md): THE EYE'S WINDOWS, PER LEVEL, appended at the
-    // END (the standing blocks' 35 rows above are gone, both sides at once). Slot s of the frame's
-    // level table (0 the camera, then the Droste levels and the gate worlds), rank k + 1, at row
-    // 5 s + k: winU / winV / winW PageTexelUv's planes about THAT slot's own eye (its tangent
-    // frame's axes, origin its eye: the frame its mesh records' geo lives in), anchored on the
-    // multiple of 16384 texels nearest it; winO the box's origin less that anchor in 16384s, two
-    // (slot, rank) a row; winS its slice of the colour and the mask, four a row; winK the ranks
-    // live per slot, four a row; rankG rank k + 1's ground (m) at mip 0, the pyramid's own.
-    float winU[160];
-    float winV[160];
-    float winW[160];
-    float winO[80];
-    uint32_t winS[40];
-    uint32_t winK[8];
+    // PHASE A2 (out/integration/plan_eye_windows.md): THE EYE'S WINDOWS, PER LEVEL: each level's rows
+    // are the view's world table's (scene/WorldTable.h winRows, SurfaceFrame::Fill); here only
+    // rankG, rank k + 1's ground (m) at mip 0, the pyramid's own -- appended at the END.
     float rankG[8];
 };
 

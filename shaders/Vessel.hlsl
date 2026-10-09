@@ -26,10 +26,8 @@ cbuffer VesselCb : register(b1) {
     // through the gates -- at the pose that world's geometry is drawn by (its windows' motors,
     // inverted) -- and each copy keeps only the pixels of its own depth. So a boat that has gone
     // through a gate the eye has not is seen through that window, and a boat whose place a window
-    // shows again, further down the corridor, is seen there too.
-    float4 gVsWinA;       // x = how many windows deep the view's chain goes (0 = none)
-    float4 gVsBox[28];    // the chain, packed as scene/WindowBox.h packs it
-    float4 gVsWinSun[7];  // per depth: the one light as seen from that world, in this frame
+    // shows again, further down the corridor, is seen there too. The chain and the light at each
+    // depth are the view's world table's (Common.hlsli Wt*).
 };
 
 struct VesselPart {
@@ -107,9 +105,9 @@ float4 PsMain(VsOut i) : SV_Target {
     // portal would be visible through it, which is the one thing a window must never do. With no
     // chain every ray is at depth 0: what is through a window cannot be seen at all.
     const uint depth = (uint)round(i.depth);
-    if (WindowChainDepth(i.rel, gVsBox, (uint)gVsWinA.x) != depth) discard;
+    if (WindowChainDepth(i.rel, depth + 1u) != depth) discard;
     const float3 n = normalize(i.n);
-    const float3 sunHere = (depth > 0u) ? normalize(gVsWinSun[depth - 1u].xyz) : gSunDir.xyz;
+    const float3 sunHere = (depth > 0u) ? normalize(WtWinSun(depth - 1u).xyz) : gSunDir.xyz;
     const float ndl = saturate(dot(n, sunHere));
     const float sky = 0.5f + 0.5f * n.y;
     // The sky term is generous on purpose. A hull read against bright water with only a sun

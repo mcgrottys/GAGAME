@@ -48,33 +48,11 @@ public:
         for (int i = 0; i < 9; ++i) m_otherRot[view - 1][i] = rows[i];
         for (int i = 0; i < 3; ++i) m_otherSun[view - 1][i] = sun[i];
     }
-    // ...and the windows that eye looks through (SetGateWindows' arguments, from its own chain).
-    void SetOtherWindows(uint32_t view, const WindowBox* boxes, const float* up4, const float* suns3,
-                         int n) {
-        if (view == 0 || view > kMaxOtherEyes) return;
-        OtherWin& w = m_otherWin[view - 1];
-        w.n = (boxes && up4 && suns3 && n > 0) ? (n < kMaxWindowChain ? n : kMaxWindowChain) : 0;
-        for (int k = 0; k < w.n; ++k) {
-            w.boxes[k] = boxes[k];
-            for (int i = 0; i < 4; ++i) w.up[k * 4 + i] = up4[k * 4 + i];
-            for (int i = 0; i < 3; ++i) w.sun[k * 3 + i] = suns3[k * 3 + i];
-        }
-    }
-
     // M13: A WINDOW HAS A SKY -- the sky of the place its rays land in. A window is a transform on
     // the whole view, so the backdrop walks the same chain of slab tests the globe clips with, and
     // a pixel k windows deep marches the air from the k-th place: its zenith, the one sun as seen
-    // from there, and its distance from the planet's centre (up4[k*4+3]), all said in this frame.
-    // n = 0 is the shipped pass, byte for byte.
-    void SetGateWindows(const WindowBox* boxes, const float* up4, const float* suns3, int n) {
-        const bool any = boxes && up4 && suns3 && n > 0;
-        m_winN = any ? (n < kMaxWindowChain ? n : kMaxWindowChain) : 0;
-        for (int k = 0; k < m_winN; ++k) {
-            m_winBoxes[k] = boxes[k];
-            for (int i = 0; i < 4; ++i) m_winUp[k * 4 + i] = up4[k * 4 + i];
-            for (int i = 0; i < 3; ++i) m_winSun[k * 3 + i] = suns3[k * 3 + i];
-        }
-    }
+    // from there, and its distance from the planet's centre -- the view's world table's
+    // (scene/WorldTable.h), whatever eye it is.
 
     // ---- THE AIR'S TABLE (M13, Atmosphere.hlsli / SkyLut.hlsl) -----------------------------
     // A property of the atmosphere alone -- what the scattering orders past the first add at a
@@ -123,19 +101,8 @@ private:
     hal::Pso m_pso;
     float m_rot[9] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f};
     float m_sun[3] = {0.0f, 1.0f, 0.0f};
-    int m_winN = 0;
     float m_otherRot[kMaxOtherEyes][9] = {};
     float m_otherSun[kMaxOtherEyes][3] = {};
-    struct OtherWin {
-        int n = 0;
-        WindowBox boxes[kMaxWindowChain];
-        float up[kMaxWindowChain * 4] = {};
-        float sun[kMaxWindowChain * 3] = {};
-    };
-    OtherWin m_otherWin[kMaxOtherEyes];
-    WindowBox m_winBoxes[kMaxWindowChain];
-    float m_winUp[kMaxWindowChain * 4] = {};
-    float m_winSun[kMaxWindowChain * 3] = {};
 
     // The table, its UAV, and the kernel that fills it -- and, under --sky-probe only, the two
     // transmittance tables (float32, so the comparison is not the storage's).

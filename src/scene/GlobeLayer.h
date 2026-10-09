@@ -181,13 +181,16 @@ public:
         // SurfaceFrame::WindowSlice(s, i + 1) of the colour and the mask: its face, its rung and
         // its box's origin in texels of the rung; wnK[s] is the slot's K. walkSlot is the slot
         // this walk draws for when it walks no shared worlds.
-        static constexpr uint32_t kBlocks = 5, kSlots = 8;
+        // PHASE A3: the windows are a SET's (a place's: SurfaceFrame::kWindowSets of them), and each
+        // slot of the level table reads the set it claimed (wnSetOf; ~0 = none) -- as many slots as
+        // the table has.
+        static constexpr uint32_t kBlocks = 5, kSets = 8;
         uint32_t walkSlot = 0;
-        uint32_t wnSet[kSlots] = {};   // PHASE A3: the window set each slot claimed
-        uint32_t wnK[kSlots] = {}, wnFace[kSlots][kBlocks] = {};
-        int wnRung[kSlots][kBlocks] = {};
-        long long wnAx[kSlots][kBlocks] = {}, wnAy[kSlots][kBlocks] = {};
-        uint32_t wnSlice[kSlots][kBlocks] = {};   // F9: the slice each rank reads (shared or its own)
+        std::vector<uint32_t> wnSetOf;
+        uint32_t wnK[kSets] = {}, wnFace[kSets][kBlocks] = {};
+        int wnRung[kSets][kBlocks] = {};
+        long long wnAx[kSets][kBlocks] = {}, wnAy[kSets][kBlocks] = {};
+        uint32_t wnSlice[kSets][kBlocks] = {};   // F9: the slice each rank reads (shared or its own)
         bool probeCullFar = false;   // step 23 probe
         // M10: an OCCLUDING SPHERE in this walk's own frame (centre, radius; radius 0 = none).
         // For a level the camera's planet floats in, that planet hides most of it: a node whose
@@ -231,7 +234,8 @@ public:
             double margin = -1.0;
             double cosLimit = -1.0;
         };
-        static constexpr int kMaxWorlds = 4;
+        // A world a bit of the walk's masks (live, seen): a place's worlds past these walk again.
+        static constexpr int kMaxWorlds = 32;
         World worlds[kMaxWorlds];
         int worldCount = 0;
         // The local relief bound for the WORLDS' tests when the walk's own bound is the planet's
@@ -306,7 +310,6 @@ public:
     // records are drawn through the gauge: shaded in the level's own frame, rasterized at
     // s^k Q^k of it. A level whose globe is under a pixel emits nothing; that is where the
     // recursion stops, and it is the screen that stops it.
-    static constexpr int kMaxLevels = 8;
     // M13: worlds whose eyes stand this near each other are one place, and share one walk.
     static constexpr double kShareReachM = 2.0e4;
     struct DrosteLevel {
@@ -386,10 +389,15 @@ public:
     };
     void SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float aspect, float viewportH,
                       double simTime, float exagg, const float skyUp[3], bool skyPass,
-                      const DrosteLevel* gates = nullptr, const WindowBox* boxes = nullptr,
+                      const DrosteLevel* gates = nullptr,
                       int n = 0, const double (*hole)[4] = nullptr, int holeN = 0,
                       const EyeRings* rings = nullptr);
     // The eye stops drawing (its walk is not refreshed this frame).
+    // THE LEVEL TABLE an eye drew this frame: 6 float4 a level (Globe.hlsl LoadLevel), for the
+    // view's world table (scene/WorldTable.h). View 0 is the first eye.
+    const std::vector<float>& LevelRows(uint32_t view) const {
+        return (view == 0 || view > kMaxOtherEyes) ? m_levelRows : m_other[view - 1].levelRows;
+    }
     void DropOtherView(uint32_t view) {
         if (view > 0 && view <= kMaxOtherEyes) m_other[view - 1].valid = false;
     }
@@ -399,7 +407,7 @@ public:
     // the shadow; camLevelAbs is for the title bar.
     void SetDroste(const DrosteLevel* extra, int n, int lighting, const double portalCentre[3],
                    double portalRadius, int camLevelAbs) {
-        m_levels.assign(extra, extra + (std::min)(n, kMaxLevels - 1));
+        m_levels.assign(extra, extra + (n > 0 ? n : 0));
         for (int i = 0; i < 3; ++i) m_portal[i] = portalCentre[i];
         m_portal[3] = portalRadius;
         m_lighting = lighting;
@@ -409,13 +417,12 @@ public:
     // THE VIEW'S WINDOWS (scene/Gateway.h WindowChain), per frame before SetView; n = 0 clears
     // them. levels[k] is the world seen through k + 1 windows, drawn as one more level of the walk --
     // its eye the eye carried that far, sigma 1, Q the chain's rotation back, its cull the rays
-    // through the windows -- and boxes[k] is the (k + 1)-th window in the TRUE camera frame, where
-    // the true eye sees it. A pixel of level k + 1 is kept where its ray passes exactly k + 1
-    // windows, in order; every other level keeps the pixels that pass none. Appended after any
-    // Droste levels, as many as the table holds; the Droste switches are not touched.
-    // `viewHole` is what the eye's own world need not walk: the first window's cone (LinkHole).
-    void SetGates(const DrosteLevel* levels, const WindowBox* boxes, int n,
-                  const double viewHole[5][4], int viewHoleCount) {
+    // through the windows. A pixel of level k + 1 is kept where its ray passes exactly k + 1
+    // windows of the view's chain (the boxes are the view's world table's), in order; every other
+    // level keeps the pixels that pass none. Appended after any Droste levels; the Droste switches
+    // are not touched. `viewHole` is what the eye's own world need not walk: the first window's
+    // cone (LinkHole).
+    void SetGates(const DrosteLevel* levels, int n, const double viewHole[5][4], int viewHoleCount) {
         if (!m_drosteOn) m_levels.clear();
         m_gateFirst = -1;
         m_gateCount = 0;
@@ -423,18 +430,13 @@ public:
         for (int p = 0; p < m_viewHoleCount; ++p) {
             for (int j = 0; j < 4; ++j) m_viewHole[p][j] = viewHole[p][j];
         }
-        if (!levels || !boxes || n <= 0) {
+        if (!levels || n <= 0) {
             m_viewHoleCount = 0;
             return;
         }
-        const int room = kMaxLevels - 1 - static_cast<int>(m_levels.size());
-        const int take = (std::min)((std::min)(n, room), kMaxWindowChain);
-        if (take <= 0) return;
+        const int take = n;
         m_gateFirst = static_cast<int>(m_levels.size()) + 1;
-        for (int k = 0; k < take; ++k) {
-            m_levels.push_back(levels[k]);
-            m_gateBoxes[k] = boxes[k];
-        }
+        for (int k = 0; k < take; ++k) m_levels.push_back(levels[k]);
         m_gateCount = take;
     }
     // Set B: the rings anchored at the OUTER level's eye (a second WaterBankLayer).
@@ -466,7 +468,7 @@ public:
     // unit direction at a leaf's centre, and the leaf at `level` that holds a direction.
     static void LeafDir(int face, int level, uint32_t ix, uint32_t iy, double out[3]);
     static void LeafOf(const double dir[3], int level, int& face, uint32_t& ix, uint32_t& iy);
-    uint32_t levelRecords[kMaxLevels] = {};   // records emitted per slot, last frame
+    std::vector<uint32_t> levelRecords;   // records emitted per slot, last frame
     void LogDrosteProbe() const;   // M12 step 4d instrument: the transport comparison's totals
 
     float foamOpacity = 0.72f;      // M8: peak foam opacity (data/wave_scene.json)
@@ -531,7 +533,8 @@ private:
     static_assert(sizeof(MeshletRec) == 96, "MeshletRec mirrors GlobeMesh.hlsl: 96 B");
     // Step 23: one emitted leaf, keyed for the seam table (SeamTable): face, level and the
     // node's integer grid position, and its first record.
-    struct LeafKey {
+    struct LeafKey {   // a leaf's world slot, then its place on the cube (face, level, ix, iy)
+        uint32_t slot;
         uint64_t key;
         uint32_t base;
     };
@@ -581,10 +584,9 @@ private:
         float bankBOrg01[4];
         float bankBOrg23[4];
         float bankBOrg45[4];
-        float droste[192];    // 8 levels x 6 rows (Globe.hlsl LoadLevel)
-        // THE VIEW'S WINDOWS (scene/Gateway.h) -- both sides changed together (priors 22).
+        // THE VIEW'S WINDOWS (scene/Gateway.h) -- both sides changed together (priors 22). The
+        // level rows and the boxes are the view's world table's (scene/WorldTable.h).
         float gateA[4];       // x = the first window level's slot (-1 = none), y = how many
-        float gateBox[112];   // 7 windows x 16: the chain, packed as scene/WindowBox.h packs it
         // M13 step 2: THE CASCADE SEA'S PLANE AT THE EYE (sim/WaveChart.h) -- appended at the END
         // on both sides (priors 22). The pixel stage adds the bands a ring texel cannot carry by
         // reading the cascade DERIVATIVE textures directly, and those reads have to happen in the
@@ -609,9 +611,6 @@ private:
         // the exposure windows' floor mip (~0 = that tenant has no windows).
         uint32_t probeX[4];
     };
-    // (dxtest reads the rows' sizes as written, so the chain's is a literal; this holds it.)
-    static_assert(sizeof(GlobeCbData::gateBox) == sizeof(float) * 16 * kMaxWindowChain,
-                  "GlobeCbData::gateBox holds kMaxWindowChain windows of 16 floats");
     // Mirrors WindCb in GlobeWind.hlsl.
     struct WindCbData {
         uint32_t nx, ny, listCount, tilesX;
@@ -671,7 +670,14 @@ private:
     hal::Pso m_pso, m_skyPso;
     hal::Pso m_limbPso;   // M10: PsLimb, dual-source blend, SV_Depth-tested
     // The meshlet's own cull (GlobeLayer.cpp): its records marked, after the walk emits a leaf.
-    void CullMeshlets(const WalkParams& wp, int m, size_t base, int face, double u0, double v0,
+    // The same box test on the LEAF whole, before its records are made: true when none of it can
+    // be seen by world m (-1: the walk's own frustum) from `eye`.
+    bool LeafHidden(const WalkParams& wp, int m, int face, double u0, double v0, double size,
+                    double arc, const double eye[3]) const;
+    double LeafHeadroom(const WalkParams& wp, int face, double u0, double v0, double size,
+                        double arc) const;
+    // Returns how many of the 16 it marked; all 16 and the leaf is not kept at all.
+    uint32_t CullMeshlets(const WalkParams& wp, int m, size_t base, int face, double u0, double v0,
                       double size, double arc);
     // M6i: m_relief and m_ne retired -- the composed height cube streams what they carried
     // (and returns ~90 MB of committed equirect memory to the pool).
@@ -824,7 +830,6 @@ private:
     std::string m_eyeLast;
     int m_gateFirst = -1;                      // the first window level's slot in the table
     int m_gateCount = 0;                       // how many windows deep the view's chain goes
-    WindowBox m_gateBoxes[kMaxWindowChain];
     double m_viewHole[5][4] = {};              // the first window's cone: the eye's world skips it
     int m_viewHoleCount = 0;
 
@@ -848,7 +853,7 @@ private:
     uint64_t m_probeFp = 0, m_probeWalks = 0, m_probeDumps = 0;
     // M10: the level slots whose limb PsLimb draws this frame, farthest first (each dims what is
     // behind it, so the nearer limb must composite last).
-    uint32_t m_limbSlots[kMaxLevels] = {};
+    std::vector<uint32_t> m_limbSlots;
     int m_limbCount = 0;
     WaveChart::Frame m_chartFrame;   // M13 step 2: the plane at the eye
     bool m_chartOn = false;
@@ -889,10 +894,11 @@ private:
     // first eye's instruments and title out of it.
     struct OtherEye {
         GlobeCbData cb{};
+        std::vector<float> levelRows;   // its level table (WorldTable::levels)
         SkyCbData skyCb{};
         std::vector<MeshletRec> meshlets;
         std::vector<NodeData> nodes;
-        uint32_t limbSlots[kMaxLevels] = {};
+        std::vector<uint32_t> limbSlots;
         int limbCount = 0;
         bool skyPass = true;
         float skyWeight = 1.0f;
@@ -901,11 +907,13 @@ private:
         GpuBuffer recBuf[Gpu::kFrameCount];
     };
     OtherEye m_other[kMaxOtherEyes];
+    std::vector<float> m_levelRows;   // the first eye's level table (LevelRows)
     // the probe's queries (made at its first use) and the worlds it measured
     Com<ID3D12QueryHeap> m_odStats, m_odOccl;
     Com<ID3D12Resource> m_odReadback;
     uint32_t m_odLevels = 0;
-    uint32_t m_odRecords[kMaxLevels] = {}, m_odCulled[kMaxLevels] = {};
+    uint32_t m_odCap = 0;   // the query heaps' length
+    std::vector<uint32_t> m_odRecords, m_odCulled;
     bool m_borrowed = false;
     void RenderEye(const FrameContext& ctx, const GlobeCbData& cbData, const SkyCbData& skyCbData,
                    const std::vector<MeshletRec>& meshlets, const std::vector<NodeData>& nodes,
