@@ -421,6 +421,9 @@ The engine after M12 — `docs/ARCHITECTURE.md` is the map, this is the index.
 [0BSD](LICENSE) — use, copy, modify and distribute for any purpose, with or without fee, with
 no attribution required.
 
+A note from the author: while not required, I would welcome it if you used this license on
+your forks too.
+
 The one exception is third-party data checked in alongside the code:
 `data/gis/osm_structures.json` is OpenStreetMap data and stays under the
 [ODbL](https://opendatacommons.org/licenses/odbl/) (© OpenStreetMap contributors). Data the
