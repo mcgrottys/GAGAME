@@ -79,6 +79,7 @@ struct SceneEffect {
 struct SceneLayer {
     scene::LayerEntry p;
     float exaggeration = 60.0f;   // the tide layer's, its one typed key
+    double levelHeight = 3.0, defaultHeight = 6.0, radius = 3000.0;   // the buildings layer's
 };
 struct SceneTool {
     std::string name, args;

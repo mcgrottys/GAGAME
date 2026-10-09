@@ -78,6 +78,7 @@
 #include "compose/RasterFileSource.h"
 #include "compose/VectorPack.h"
 #include "compose/WaterAtlas.h"
+#include "scene/BuildingLayer.h"
 #include "scene/VesselLayer.h"
 #include "core/TileProviders.h"
 #include "core/SceneConfig.h"
@@ -181,6 +182,7 @@ struct Assembly {
     WaterBankLayer* waterBankEye = nullptr; // another eye's own rings (the minimap's: hud.minimap)
     GlobeLayer* globe = nullptr;
     VesselLayer* vesselLayer = nullptr;   // M9bq: the hulls, drawn from their specs
+    BuildingLayer* buildingLayer = nullptr;   // the building solids (built once the frame is)
     double planetR = 0.0;
     ResidencyManager resMgr;
     ExitMark exitResMgr{"assembly: ~ResidencyManager -- Shutdown again (waits for any load still "

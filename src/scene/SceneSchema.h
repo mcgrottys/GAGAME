@@ -386,6 +386,11 @@ struct LayerEntry {
 struct TideLayerProps {
     float exaggeration = 60.0f;
 };
+// The buildings layer's DECLARED assumptions (compose/BuildingSolids.h): what a floor and an
+// untagged building stand for, and how far about the place its solids are read.
+struct BuildingsLayerProps {
+    double levelHeight = 3.0, defaultHeight = 6.0, radius = 3000.0;
+};
 struct NodeProps {
     std::string name;
     std::string type;

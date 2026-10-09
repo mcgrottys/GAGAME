@@ -373,6 +373,11 @@
     { "type": "slice.plane", "keys": [
       { "key": "d", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0, "reload": "hot", "doc": "the cutaway plane's offset, world z (--slice)" }
     ] },
+    { "type": "layer.buildings", "keys": [
+      { "key": "levelHeight", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 3, "reload": "restart", "doc": "what one tagged floor (building:levels) stands for, where no height is tagged" },
+      { "key": "defaultHeight", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 6, "reload": "restart", "doc": "a building with neither height nor floors tagged: the scene's assumption" },
+      { "key": "radius", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 3000, "reload": "restart", "doc": "the solids read about the place's anchor (0 = every solid of every source)" }
+    ] },
     { "type": "layer.plain", "keys": [
     ] },
     { "type": "layer.tide", "keys": [
