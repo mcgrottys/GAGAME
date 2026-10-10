@@ -183,6 +183,42 @@ float3 ComposedColor(float3 dir, float3 p CS_WC_PARAM) {
 }
 bool ComposedColorOn() { return gCsF.x > 0.5f; }
 
+// THE BUILDINGS UNDER A PIXEL (compose/BuildingField.h): lambda_p and the frontal index under the
+// pixel, read by ComposedColorPages's ladder at the pixel's own footprint -- the cube, then the eye's
+// windows coarsest rank first. Every channel is a sum over area, so the filter between texels and
+// mips is the sum's average. A level read coarser than the footprint (the finer not resident yet)
+// holds buildings the pixel draws as solids; THE SIZE LAW cuts them: f (r)^beta, r the footprint over
+// the texel read, beta = log2(f / f-under-half) the texel's own (BuildingField.h). No tenant: zero.
+bool CsBuildingFieldOn() { return gCsU5.z != 0xFFFFFFFFu; }
+float2 CsBuildingField(float3 dir, float3 p CS_WC_PARAM) {
+    if (gCsU5.z == 0xFFFFFFFFu) return float2(0.0f, 0.0f);
+    const float haveC = CsHaveCubeArr(gCsU6.w, dir);
+    float4 b = PageSampleCube(gTexCubeArr[gCsU6.z], sAniso, dir, haveC);
+    // log2 of the footprint over the texel read: <= 0, and 0 where the wanted level is resident.
+    float lr = min(0.0f, gTexCubeArr[gCsU6.z].CalculateLevelOfDetail(sAniso, dir) - haveC);
+    float ground = PageGroundM(CsGroundM().x, haveC);
+    [unroll] for (uint k = 0; k < GA_BLOCK_RANKS; ++k) {
+        if (k >= wc.n) break;
+        const uint sl = WalkSlice(wc, k);
+        const float2 buv = WalkUv(wc, k);
+        const float lodB = gTexArr[gCsU5.z].CalculateLevelOfDetail(sAnisoWrap, buv);
+        if (lodB > kCsWindowFloor) break;
+        const float haveB = CsHaveWindow(gCsU5.w, buv, sl);
+        if (haveB > kCsWindowFloor) continue;
+        const float gB = PageGroundM(CsBlockGround(k), haveB);
+        if (PageWins(gB, ground)) {
+            b = PageSample(gTexArr[gCsU5.z], sAnisoWrap, buv, sl, haveB);
+            lr = min(0.0f, lodB - haveB);
+            ground = gB;
+        }
+    }
+    // MIRRORS BuildingFieldSource::kFrontal. The size law: (r)^beta = exp2(lr beta).
+    const float f = b.b * 4.0f, fHalf = b.g * 4.0f;
+    const float beta = clamp(log2(max(f, 1e-5f) / max(fHalf, 1e-6f)), 0.0f, 8.0f);
+    const float cut = exp2(lr * beta);
+    return float2(b.r * cut, f * cut);
+}
+
 // M9av: the luminance of the seafloor's dry sediment ramp. The megatexture's ocean texels are
 // DRY seafloor albedo (synth.seafloor.relief: the bathymetry's hillshade times this ramp, keyed
 // on datum depth).

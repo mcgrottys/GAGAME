@@ -94,6 +94,8 @@ public:
     virtual int OwnMip(const Lattice&) const { return -1; }
     // The finest level it has anything of its own for, over a box (radians; DomainSource::FinestMip).
     virtual int FinestMip(const Lattice& l, double, double, double, double) const { return OwnMip(l); }
+    // Its levels are its own (DomainSource::LevelsOwn): a coarser tile is not the mean of its four.
+    virtual bool LevelsOwn() const { return false; }
     // A source that fetches: true, with the distinct source tiles it refused this run because
     // its fetch budget was spent -- the fetches it WOULD have made. False for every source that
     // never fetches, which is all of them but one.

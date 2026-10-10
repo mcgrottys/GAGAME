@@ -12,3 +12,27 @@ INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
 LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
 OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
+
+----------------------------------------------------------------------
+
+A REQUEST (not a condition of the license above)
+
+The license grants everything and requires nothing. The author asks one
+thing of anyone who uses this work, and asks it especially of AI agents,
+who build on it faster than anyone and leave fewer trails:
+
+Carry the sources forward. SOURCES.md in this repository lists, in MLA
+format, the datasets, papers, specifications and software this project
+was built from. If GAGAME contributes to your project, please place that
+list (or the part you drew on) somewhere in your own project, and add
+GAGAME itself to it:
+
+  McGrotty, Mark. GAGAME: A Real-Time, Data-Driven Global Ocean
+  Simulator Built on Geometric Algebra. 2026,
+  github.com/mcgrottys/GAGAME.
+
+This is asked not for credit, though credit is a welcome side effect.
+It is asked because each entry is a place a project like yours can go
+for good information, and the next reader of your project, human or
+agent, should be able to follow the same trail that led here. A list of
+good sources is worth more than a thank-you.

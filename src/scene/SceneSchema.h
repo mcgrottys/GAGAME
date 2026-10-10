@@ -225,6 +225,9 @@ struct StreamingSection {
     uint32_t googleZoom = 14;
     bool directStorage = true, colorTrees = true, gisGate = true, seafloor = true,
          exposure = true;
+    // THE GLOBAL COAST: OSM's land polygons as GALAND01 (harvester/harvest_land_polygons.py);
+    // "" = the New England survey alone (compose/GisMask.h).
+    std::string gisLand;
     // F16 (HIERARCHY 4.20, the third clause): THE SURVEY'S GRAIN, metres -- the finest level the
     // land/sea mask has anything of its own for. A mask tile finer than it is its parent,
     // magnified: never painted, stored or loaded. The survey's shoreline (NOAA CUSP, NAD83 against
@@ -390,6 +393,9 @@ struct TideLayerProps {
 // untagged building stand for, and how far about the eye its cells are streamed.
 struct BuildingsLayerProps {
     double levelHeight = 3.0, defaultHeight = 6.0, radius = 3000.0;
+    std::string lod;                 // the size-stratified pyramid's folder ("" = no far boxes)
+    double lodPixels = 1.0;
+    bool field = true;               // the buildings under a pixel as scalars (compose/BuildingField.h)
 };
 struct NodeProps {
     std::string name;

@@ -5,6 +5,7 @@
 #include "hal/GpuProfiler.h"
 
 #include "compose/DomainSource.h"
+#include "compose/BuildingField.h"
 #include "sim/BathyModel.h"
 
 #include "hal/PixEvents.h"
@@ -1160,6 +1161,7 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
     if (wp.colorT >= 0) emit(wp.colorT, f, m, tu0, tv0, tu1, tv1, nearW);
     if (wp.hgtT >= 0) emit(wp.hgtT, f, m, tu0, tv0, tu1, tv1, nearW);
     if (wp.maskT >= 0) emit(wp.maskT, f, m, tu0, tv0, tu1, tv1, nearW);
+    if (wp.bldT >= 0) emit(wp.bldT, f, m, tu0, tv0, tu1, tv1, nearW);
     if (st) st->cube += (wp.surfT >= 0) + (wp.normT >= 0) + (wp.colorT >= 0) + (wp.hgtT >= 0) + (wp.maskT >= 0);
     // PHASE A2: EVERY WORLD THAT SEES THE LEAF ASKS IT OF ITS OWN WINDOWS (D5): the walk's worlds
     // whose bit is in `seen`, each its slot's slices; a walk of no shared worlds asks for its own.
@@ -1281,6 +1283,12 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
                 if (wp.colorT >= 0) emit(wp.colorT, slice, bm, r0, q0, r1, q1, nearW);
                 if (wp.maskT >= 0) emit(wp.maskT, slice, bm, r0, q0, r1, q1, nearW);
                 if (st) st->win += (wp.colorT >= 0) + (wp.maskT >= 0);
+                // The buildings under a pixel: the same mip, but never finer than the smallest
+                // building (BuildingFieldSource::FloorRungs) -- finer, the field is zero.
+                if (wp.bldT >= 0) {
+                    const int fm = (std::max)(int(bm), wp.wnRung[wset][b] - wp.bldFloorRungs);
+                    if (fm <= 3) emit(wp.bldT, slice, uint32_t(fm), r0, q0, r1, q1, nearW);
+                }
                 // PHASE B2: the height on the same windows, at the same mip but never finer than its
                 // finest read (kCsHeightLodFloor: rung 9), and none past the floor.
                 if (wp.hgtT >= 0 && wp.hgtWindows) {
@@ -1583,6 +1591,7 @@ void GlobeLayer::SetSurface(const SurfaceFrame* s) {
     m_surface = s;
     m_radius = s->planetR;
     m_maskT = s->maskT;   // M9ay: the survey mask pages (same slices as the colour)
+    m_bldT = s->bldT;
     m_colorT = s->colorT;
     m_hgtT = s->hgtT;
 }
@@ -1631,6 +1640,8 @@ GlobeLayer::WalkParams GlobeLayer::CaptureWalk(const Camera& cam, float viewport
     wp.hgtT = m_hgtT;
     wp.hgtWindows = m_surface && m_surface->hgtWindows;
     wp.maskT = m_maskT;
+    wp.bldT = m_bldT;
+    wp.bldFloorRungs = BuildingFieldSource::FloorRungs(1.5707963267948966 * m_radius / double(Lattice::kFaceDim));
     static_assert(WalkParams::kBlocks == SurfaceFrame::kMaxRanks, "a node asks of every rank");
     static_assert(WalkParams::kSets == SurfaceFrame::kWindowSets, "the walk reads every window set");
     // PHASE A3: the set each slot claimed this frame (SurfaceFrame::Claim), as many as the table has.
@@ -1977,7 +1988,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     m_meshlets.clear();
     m_leafKeys.clear();
     m_meshletDrops = 0;
-    levelRecords.assign(1u + m_levels.size(), 0u);
+    levelRecords.assign(LevelSlots(), 0u);
 
     // ---- M13: A PLACE'S TILES ARE CHOSEN ONCE. A gate's world is the camera's own frame at sigma
     // 1, so it is the same planet at the same address as any other world whose eye stands at its
@@ -1988,18 +1999,20 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     // planes pulled through its gauge.
     std::vector<TransportProbeRow> probeRows((1u + m_levels.size()) * 6u);   // M12 step 4d (ProbeTransport)
     int probeN = 0;
-    const bool windowsOn = m_gateFirst > 0 && m_gateCount > 0 && m_msPath;
+    const bool windowsOn = !m_gates.empty() && m_msPath;
     const size_t nLv = m_msPath ? m_levels.size() : 0u;
-    std::vector<int> drawnBy(nLv, -1);   // the slot of the walk that draws each extra level
+    const size_t nGt = m_msPath ? m_gates.size() : 0u;
+    const uint32_t gateFirst = static_cast<uint32_t>(1u + m_levels.size());
+    std::vector<int> drawnBy(nGt, -1);   // the slot of the walk that draws each gate world
     auto within = [](const double a[3], const double b[3]) {
         const double d[3] = {a[0] - b[0], a[1] - b[1], a[2] - b[2]};
         return d[0] * d[0] + d[1] * d[1] + d[2] * d[2] < kShareReachM * kShareReachM;
     };
     // ...and only a world whose own walk would split and bound a node as this walk does: the wave
-    // grain and the relief exaggeration are the walk's, not the world's.
-    auto sameRules = [&](const DrosteLevel& M, const WalkParams& walk) {
-        const float grain = M.bankSet < 0 ? 0.0f : m_wp.waveGrainM;
-        return grain == walk.waveGrainM && M.reliefExagg == walk.reliefExagg;
+    // grain is the walk's, not the world's (a gate world's exaggeration is the eye's own).
+    auto sameRules = [&](const GateWorld& G, const WalkParams& walk) {
+        const float grain = G.bankSet < 0 ? 0.0f : m_wp.waveGrainM;
+        return grain == walk.waveGrainM;
     };
     // A level's eye in the planet frame (the walk's camPlanet for an extra level).
     auto planetOf = [&](const double cam[3], double out[3]) {
@@ -2009,44 +2022,46 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
                      m_surface->north[i] * cam[2];
         }
     };
-    auto pullWorld = [&](const DrosteLevel& L, uint32_t slot, const double eye[3],
-                         WalkParams::World& w) {
+    // A world as a walk takes it: its slot, its eye from the walk's, its horizon from its own eye
+    // (past it at any altitude, as every extra level culls), and `planes`, pulled through the
+    // gauge placement (M12 step 4d-2, core/Space.h PullPlane: n' = R^T n, d' = (d - n . t) / s with
+    // t = 0 -- the linear part, the eye-to-eye translation the gauge identity cancels exactly).
+    auto pullWorld = [&](const double cam[3], const Placement& gauge, const double (*planes)[4],
+                         int planeCount, const double (*hole)[4], int holeCount, uint32_t slot,
+                         const double eye[3], WalkParams::World& w) {
         w = WalkParams::World{};
         w.slot = slot;
-        for (int i = 0; i < 3; ++i) w.off[i] = L.cam[i] - eye[i];
-        // Its horizon, from its own eye: past it at any altitude, as every extra level culls.
+        for (int i = 0; i < 3; ++i) w.off[i] = cam[i] - eye[i];
         double planet[3];
-        planetOf(L.cam, planet);
+        planetOf(cam, planet);
         HorizonOf(planet, m_wp.R, true, w);
-        // A world seen through windows is walked only along the rays through them (its own
-        // cull); every other level along the camera's.
-        const bool ownCull = L.planeCount > 0;
-        w.planeCount = ownCull ? (std::min)(L.planeCount, 6) : m_wp.planeCount;
+        w.planeCount = (std::min)(planeCount, 6);
         for (int p = 0; p < w.planeCount; ++p) {
-            const double* n = ownCull ? L.planes[p] : m_wp.frustum[p];
-            // M12 step 4d-2: THE PLANE, PULLED through the level's gauge placement (core/Space.h
-            // PullPlane: n' = R^T n, d' = (d - n . t) / s with t = 0 -- the linear part of
-            // Level(rel), the eye-to-eye translation the gauge identity cancels exactly). The
-            // hand transport it replaces -- n -> Q^T n, d -> d / sigma from the portal's Q and
-            // sigma -- is computed beside it for the record only (ProbeTransport).
-            L.gauge.PullPlane(n, n[3], w.planes[p], w.planes[p][3]);
-            if (probeN < int(probeRows.size())) {
-                TransportProbeRow& pr = probeRows[probeN++];
-                pr.slot = slot;
-                pr.rel = L.rel;
-                pr.plane = p;
-                for (int j = 0; j < 3; ++j) {
-                    pr.hand[j] = L.Q[0][j] * n[0] + L.Q[1][j] * n[1] + L.Q[2][j] * n[2];
-                }
-                pr.hand[3] = n[3] / L.sigma;
-                for (int j = 0; j < 4; ++j) pr.pulled[j] = w.planes[p][j];
-            }
+            gauge.PullPlane(planes[p], planes[p][3], w.planes[p], w.planes[p][3]);
         }
-        // ...and what it need not walk: the next window's cone, pulled the same way.
-        w.holeCount = (std::min)(L.holeCount, 5);
+        w.holeCount = (std::min)(holeCount, 5);
         for (int p = 0; p < w.holeCount; ++p) {
-            L.gauge.PullPlane(L.hole[p], L.hole[p][3], w.hole[p], w.hole[p][3]);
+            gauge.PullPlane(hole[p], hole[p][3], w.hole[p], w.hole[p][3]);
         }
+    };
+    // A gate world: walked only along the rays through its windows, not where the next shows.
+    auto pullGate = [&](const GateWorld& G, uint32_t slot, const double eye[3], WalkParams::World& w) {
+        pullWorld(G.cam, G.gauge, G.planes, 5, G.hole, G.holeCount, slot, eye, w);
+    };
+    // A walk that stands at an extra level's eye: its eye, its planet point and its first face.
+    auto standAt = [&](WalkParams& wp, const double cam[3], uint32_t slot) {
+        wp.worldCount = 0;
+        wp.walkSlot = slot;
+        for (int i = 0; i < 3; ++i) wp.camPos[i] = cam[i];
+        planetOf(cam, wp.camPlanet);
+        const double ax = std::abs(wp.camPlanet[0]), ay = std::abs(wp.camPlanet[1]),
+                     az = std::abs(wp.camPlanet[2]);
+        const int axis = (ax >= ay && ax >= az) ? 0 : (ay >= az ? 1 : 2);
+        wp.camFace = axis * 2 + (wp.camPlanet[axis] < 0.0 ? 1 : 0);
+        // Every extra level culls with its LOCAL relief, and past its own horizon at any altitude
+        // (the step-23 far test: nothing seen from under 10 km lies 0.1 rad beyond it).
+        wp.relief = m_globe;
+        wp.probeCullFar = true;
     };
 
     // The camera's own level: slot 0, the identity gauge -- exactly the walk this always was, and
@@ -2066,12 +2081,12 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
             for (int j = 0; j < 4; ++j) w0.hole[p][j] = m_viewHole[p][j];
         }
         m_wp.worldCount = 1;
-        for (size_t li = 0; li < nLv && m_wp.worldCount < WalkParams::kMaxWorlds; ++li) {
-            const DrosteLevel& L = m_levels[li];
-            if (!L.share || !within(L.cam, m_camPos) || !sameRules(L, m_wp)) continue;
+        for (size_t gi = 0; gi < nGt && m_wp.worldCount < WalkParams::kMaxWorlds; ++gi) {
+            const GateWorld& G = m_gates[gi];
+            if (!within(G.cam, m_camPos) || !sameRules(G, m_wp)) continue;
             WalkParams::World& w = m_wp.worlds[m_wp.worldCount++];
-            pullWorld(L, static_cast<uint32_t>(li + 1), m_camPos, w);
-            drawnBy[li] = 0;
+            pullGate(G, gateFirst + uint32_t(gi), m_camPos, w);
+            drawnBy[gi] = 0;
         }
         m_wp.worldRelief = m_globe;
     }
@@ -2085,7 +2100,6 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     // the root already holds. Its records carry their slot, so the mesh stage knows which
     // gauge to rasterize them through.
     for (size_t li = 0; li < nLv; ++li) {
-        if (drawnBy[li] >= 0) continue;   // another world's walk draws it
         const DrosteLevel& L = m_levels[li];
         const uint32_t slot = static_cast<uint32_t>(li + 1);
         // WHERE THE RECURSION STOPS: a globe under half a pixel has nothing to walk. The
@@ -2096,16 +2110,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         const double angR = std::asin((std::min)(m_radius / (std::max)(dC, 1.0), 1.0));
         if (angR < double(m_wp.pixAng) * 0.5) continue;
         WalkParams wp = m_wp;
-        wp.worldCount = 0;
-        wp.walkSlot = slot;
-        for (int i = 0; i < 3; ++i) wp.camPos[i] = L.cam[i];
-        planetOf(L.cam, wp.camPlanet);
-        {
-            const double ax = std::abs(wp.camPlanet[0]), ay = std::abs(wp.camPlanet[1]),
-                         az = std::abs(wp.camPlanet[2]);
-            const int axis = (ax >= ay && ax >= az) ? 0 : (ay >= az ? 1 : 2);
-            wp.camFace = axis * 2 + (wp.camPlanet[axis] < 0.0 ? 1 : 0);
-        }
+        standAt(wp, L.cam, slot);
         wp.reliefExagg = L.reliefExagg;
         // The wave-grain rule refines toward the bank's fine rings; a level with no ring set
         // is seen from beyond them, so the rule has nothing to reach for there.
@@ -2115,35 +2120,50 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         if (L.rel < 0) {
             for (int i = 0; i < 4; ++i) wp.occ[i] = m_portal[i];
         }
-        // Every extra level culls with its LOCAL relief, and past its own horizon at any
-        // altitude (the step-23 far test: nothing seen from under 10 km lies 0.1 rad beyond it).
-        wp.relief = m_globe;
-        wp.probeCullFar = true;
-        if (L.share) {
-            // A gate's world, and every later one standing at its place: one walk from here.
-            pullWorld(L, slot, L.cam, wp.worlds[0]);
-            wp.worldCount = 1;
-            for (size_t lj = li + 1; lj < nLv && wp.worldCount < WalkParams::kMaxWorlds; ++lj) {
-                const DrosteLevel& M = m_levels[lj];
-                if (drawnBy[lj] >= 0 || !M.share || !within(M.cam, L.cam) ||
-                    !sameRules(M, wp)) {
-                    continue;
+        // Its frustum: the camera's, pulled through its gauge (and the hand transport from the
+        // portal's Q and sigma beside it, for the record only: ProbeTransport).
+        WalkParams::World w;
+        pullWorld(L.cam, L.gauge, m_wp.frustum, m_wp.planeCount, nullptr, 0, slot, L.cam, w);
+        wp.planeCount = w.planeCount;
+        for (int p = 0; p < w.planeCount; ++p) {
+            for (int j = 0; j < 4; ++j) wp.frustum[p][j] = w.planes[p][j];
+            if (probeN < int(probeRows.size())) {
+                const double* n = m_wp.frustum[p];
+                TransportProbeRow& pr = probeRows[probeN++];
+                pr.slot = slot;
+                pr.rel = L.rel;
+                pr.plane = p;
+                for (int j = 0; j < 3; ++j) {
+                    pr.hand[j] = L.Q[0][j] * n[0] + L.Q[1][j] * n[1] + L.Q[2][j] * n[2];
                 }
-                WalkParams::World& w = wp.worlds[wp.worldCount++];
-                pullWorld(M, static_cast<uint32_t>(lj + 1), L.cam, w);
-                drawnBy[lj] = static_cast<int>(slot);
-            }
-        } else {
-            WalkParams::World w;
-            pullWorld(L, slot, L.cam, w);
-            wp.planeCount = w.planeCount;
-            for (int p = 0; p < w.planeCount; ++p) {
-                for (int j = 0; j < 4; ++j) wp.frustum[p][j] = w.planes[p][j];
+                pr.hand[3] = n[3] / L.sigma;
+                for (int j = 0; j < 4; ++j) pr.pulled[j] = w.planes[p][j];
             }
         }
-        // M13: an extra level answers for its own tiles on the shared cache when it names a
-        // sampler (a gate's window does); one that does not is part of this view's reading.
-        WalkLevel(wp, slot, L.sampler >= 0 ? L.sampler : m_sampler);
+        WalkLevel(wp, slot, m_sampler);
+    }
+    // ---- M13: THE WORLDS SEEN THROUGH THE WINDOWS. A gate world the camera's walk did not take
+    // leads a walk from its own eye, and every later one standing at its place joins it: one walk,
+    // its tiles chosen once, each world taking the leaves its own eye stops at.
+    for (size_t gi = 0; gi < nGt; ++gi) {
+        if (drawnBy[gi] >= 0) continue;   // another world's walk draws it
+        const GateWorld& G = m_gates[gi];
+        const uint32_t slot = gateFirst + uint32_t(gi);
+        WalkParams wp = m_wp;
+        standAt(wp, G.cam, slot);
+        wp.reliefExagg = reliefExagg;
+        if (G.bankSet < 0) wp.waveGrainM = 0.0f;
+        pullGate(G, slot, G.cam, wp.worlds[0]);
+        wp.worldCount = 1;
+        for (size_t gj = gi + 1; gj < nGt && wp.worldCount < WalkParams::kMaxWorlds; ++gj) {
+            const GateWorld& M = m_gates[gj];
+            if (drawnBy[gj] >= 0 || !within(M.cam, G.cam) || !sameRules(M, wp)) continue;
+            WalkParams::World& w = wp.worlds[wp.worldCount++];
+            pullGate(M, gateFirst + uint32_t(gj), G.cam, w);
+            drawnBy[gj] = static_cast<int>(slot);
+        }
+        // M13: a gate's world answers for its own tiles on the shared cache (its gate's sampler).
+        WalkLevel(wp, slot, G.sampler >= 0 ? G.sampler : m_sampler);
     }
     if (!m_borrowed) ProbeTransport(probeRows.data(), probeN);
     if (m_msPath) SeamTable();
@@ -2330,7 +2350,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     // ---- M10: THE LEVEL TABLE. Slot 0 is the camera's own level -- the identity gauge, the
     // scene's sun, set A -- so with no Droste link the table says exactly what the old
     // constants said. Slots 1..n are the extra levels SetDroste handed over.
-    m_levelRows.assign((1 + m_levels.size()) * 24u, 0.0f);
+    m_levelRows.assign(LevelSlots() * 24u, 0.0f);
     auto fillLevel = [&](uint32_t slot, const double c[3], double sigma, const double Q[3][3],
                          float exag, const float sun[3], int bank, const float skyUp[3],
                          float skyDay) {
@@ -2361,13 +2381,19 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
             fillLevel(static_cast<uint32_t>(li + 1), L.cam, L.sigma, L.Q, L.reliefExagg, L.sun,
                       L.bankSet, L.skyUp, L.skyDay);
         }
+        // The gate worlds: scale 1, the eye's own exaggeration and its own local day.
+        for (size_t gi = 0; gi < m_gates.size(); ++gi) {
+            const GateWorld& G = m_gates[gi];
+            fillLevel(static_cast<uint32_t>(1u + m_levels.size() + gi), G.cam, 1.0, G.Q, reliefExagg,
+                      G.sun, G.bankSet, G.skyUp, -1.0f);
+        }
         if (!m_borrowed) EyeInstruments();   // Phase A0: the levels' blocks logged, the probe's rows
     }
     // THE VIEW'S WINDOWS: only where their levels are walked (the mesh path); on the fallback a
     // window with no world behind it would be a hole, so there are none.
-    const bool gateOn = m_gateFirst > 0 && m_gateCount > 0 && m_msPath;
-    m_cb.gateA[0] = gateOn ? static_cast<float>(m_gateFirst) : -1.0f;
-    m_cb.gateA[1] = gateOn ? static_cast<float>(m_gateCount) : 0.0f;
+    const bool gateOn = !m_gates.empty() && m_msPath;
+    m_cb.gateA[0] = gateOn ? static_cast<float>(GateFirst()) : -1.0f;
+    m_cb.gateA[1] = gateOn ? static_cast<float>(GateCount()) : 0.0f;
     m_cb.gateA[2] = m_cb.gateA[3] = 0.0f;
     // M13 step 2: the cascade sea's plane at the eye, for the pixel stage's sub-ring bands --
     // SAID IN THE TANGENT FRAME, in doubles (REVIEW finding 7). The chart's law is
@@ -2389,7 +2415,9 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
             return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
         };
         double fromOrg[3];   // A - org, planet frame
-        for (int i = 0; i < 3; ++i) fromOrg[i] = m_radius * m_surface->up[i] - f.org[i];
+        // ...about the rings' chart's tangent point (its up; the root's until the chart floats).
+        const double* upA = m_bankChartUpSet ? m_bankChartUp : m_surface->up;
+        for (int i = 0; i < 3; ++i) fromOrg[i] = m_radius * upA[i] - f.org[i];
         const double ce = dot3(fromOrg, f.e) + f.off[0];
         const double cn = dot3(fromOrg, f.n) + f.off[1];
         // Into [0, L), as WaterBankLayer wraps the kernel's own rows.
@@ -2408,7 +2436,7 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
         m_cb.chartCn[0] = wrapped(cn, 2);
         m_cb.chartCn[1] = m_cb.chartCn[2] = m_cb.chartCn[3] = 0.0f;
     }
-    m_cb.drosteA[0] = static_cast<float>(1 + m_levels.size());
+    m_cb.drosteA[0] = static_cast<float>(LevelSlots());
     m_cb.drosteA[1] = static_cast<float>(m_camLevelAbs);
     m_cb.drosteA[2] = static_cast<float>(m_lighting);
     m_cb.drosteA[3] = (m_drosteOn && m_portal[3] > 0.0) ? 1.0f : 0.0f;
@@ -2421,6 +2449,28 @@ void GlobeLayer::SetView(const Camera& cam, float aspect, float viewportH, doubl
     memcpy(m_cb.bankBOrg01, &m_bankBOrg[0], 16);
     memcpy(m_cb.bankBOrg23, &m_bankBOrg[4], 16);
     memcpy(m_cb.bankBOrg45, &m_bankBOrg[8], 16);
+    // THE RINGS' CHARTS, and the eye each set stands at as the level table holds it: set A at the
+    // camera's own level (slot 0), set B at the first level whose bank it is. A reader at that
+    // level then subtracts the very floats it holds, and its offset from the eye is exact.
+    // A set no bank ever stood (rows all zero) reads the root's chart about its level's eye: the
+    // identity axes and that eye's own coordinates -- what every reader read before charts floated.
+    auto chartRows = [&](float* dst, const float* src, const float* eye) {
+        memcpy(dst, src, 16 * sizeof(float));
+        if (src[0] == 0.0f && src[1] == 0.0f && src[2] == 0.0f) {
+            const float id[12] = {1.0f, 0.0f, 0.0f, eye[0], 0.0f, 0.0f, 1.0f, eye[2], 0.0f, 1.0f, 0.0f, 0.0f};
+            memcpy(dst, id, sizeof(id));
+        }
+        for (int i = 0; i < 3; ++i) dst[12 + i] = eye[i];
+        dst[15] = 0.0f;
+    };
+    chartRows(m_cb.bankChart, &m_bankOrg[12], &m_levelRows[0]);
+    const float* eyeB = &m_levelRows[0];
+    for (size_t li = 0; li < m_levels.size(); ++li) {
+        if (m_levels[li].bankSet != 1) continue;
+        eyeB = &m_levelRows[(li + 1) * 24u];
+        break;
+    }
+    chartRows(m_cb.bankBChart, &m_bankBOrg[12], eyeB);
 
     // The sky pass rebuilds pixel rays from this basis (b2). M6j: the ONE render basis --
     // the shell can no longer roll apart from the surface it wraps.
@@ -2653,7 +2703,7 @@ void GlobeLayer::RenderEye(const FrameContext& ctx, const GlobeCbData& cbData,
 // eye's set is put back -- so nothing the first eye's frame reads afterwards has moved.
 void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float aspect,
                               float viewportH, double simTime, float exagg, const float skyUp[3],
-                              bool skyPass, const DrosteLevel* gates, int n,
+                              bool skyPass, const GateWorld* gates, int n,
                               const double (*hole)[4], int holeN, const EyeRings* rings) {
     if (view == 0 || view > kMaxOtherEyes || !m_res) return;
     OtherEye& o = m_other[view - 1];
@@ -2686,16 +2736,18 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     const float up0[3] = {m_camSkyUp[0], m_camSkyUp[1], m_camSkyUp[2]};
     const float day0 = m_camSkyDay;
     const bool drosteOn0 = m_drosteOn;
-    const int gateFirst0 = m_gateFirst, gateCount0 = m_gateCount;
+    std::vector<GateWorld> gates0;
+    gates0.swap(m_gates);
     std::vector<float> levelRows0;
     levelRows0.swap(m_levelRows);
     double viewHole0[5][4];
     memcpy(viewHole0, m_viewHole, sizeof(viewHole0));
     const int viewHoleN0 = m_viewHoleCount;
     uint32_t bankSrv0[3] = {m_bankSrv[0], m_bankSrv[1], m_bankSrv[2]};
-    float bankOrg0[12];
-    for (int i = 0; i < 12; ++i) bankOrg0[i] = m_bankOrg[i];
+    float bankOrg0[kBankRows];
+    for (int i = 0; i < kBankRows; ++i) bankOrg0[i] = m_bankOrg[i];
     const WaveChart::Frame chart0 = m_chartFrame;
+    double chartUp0[3] = {m_bankChartUp[0], m_bankChartUp[1], m_bankChartUp[2]};
     const bool chartOn0 = m_chartOn;
     const int sampler0 = m_sampler;
 
@@ -2711,9 +2763,10 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
         m_bankSrv[0] = rings->disp;
         m_bankSrv[1] = rings->param;
         m_bankSrv[2] = rings->detail;
-        for (int i = 0; i < 12; ++i) m_bankOrg[i] = rings->org[i];
+        for (int i = 0; i < kBankRows; ++i) m_bankOrg[i] = rings->org[i];
         m_chartFrame = rings->chart;
         m_chartOn = rings->chartOn;
+        for (int i = 0; i < 3; ++i) m_bankChartUp[i] = rings->chartUp[i];
     }
     if (o.sampler < 0) o.sampler = m_res->Sampler(("eye" + std::to_string(view)).c_str());
     m_sampler = o.sampler;
@@ -2752,15 +2805,15 @@ void GlobeLayer::SetOtherView(Gpu& gpu, uint32_t view, const Camera& cam, float 
     for (int i = 0; i < 3; ++i) m_camSkyUp[i] = up0[i];
     m_camSkyDay = day0;
     m_drosteOn = drosteOn0;
-    m_gateFirst = gateFirst0;
-    m_gateCount = gateCount0;
+    m_gates.swap(gates0);
     m_levelRows.swap(levelRows0);
     memcpy(m_viewHole, viewHole0, sizeof(viewHole0));
     m_viewHoleCount = viewHoleN0;
     for (int i = 0; i < 3; ++i) m_bankSrv[i] = bankSrv0[i];
-    for (int i = 0; i < 12; ++i) m_bankOrg[i] = bankOrg0[i];
+    for (int i = 0; i < kBankRows; ++i) m_bankOrg[i] = bankOrg0[i];
     m_chartFrame = chart0;
     m_chartOn = chartOn0;
+    for (int i = 0; i < 3; ++i) m_bankChartUp[i] = chartUp0[i];
     m_sampler = sampler0;
 }
 
@@ -2811,8 +2864,8 @@ void GlobeLayer::EyeInstruments() {
         const double ry = R + c[1];
         for (int i = 0; i < 3; ++i) out[i] = sf.up[i] * ry + sf.east[i] * c[0] + sf.north[i] * c[2];
     };
-    const size_t slots = 1u + m_levels.size();
-    auto camOf = [&](size_t s) -> const double* { return s == 0 ? m_camPos : m_levels[s - 1].cam; };
+    const size_t slots = LevelSlots();
+    auto camOf = [&](size_t s) -> const double* { return s == 0 ? m_camPos : LevelCam(s); };
     ++m_eyeFrame;
     std::string text, key;   // key: the cells and the binding only, so a moving eye logs when they change
     char buf[256];
@@ -2827,7 +2880,8 @@ void GlobeLayer::EyeInstruments() {
         const int K = SurfaceFrame::RanksAt(E, R, double(m_wp.pixAng), &face, &Lm);
         const double alt = rE - R;
         snprintf(buf, sizeof(buf), "\n[eye-blocks]   slot %zu rel %d: face %u, alt %.0f m, K %d (L %.2f) --",
-                 s, s == 0 ? 0 : m_levels[s - 1].rel, face, alt, K, Lm);
+                 s, s == 0 ? 0 : (s <= m_levels.size() ? m_levels[s - 1].rel : int(s - m_levels.size())),
+                 face, alt, K, Lm);
         text += buf;
         key += "|";
         for (int k = 1; k <= K; ++k) {

@@ -1,0 +1,30 @@
+{
+  "_readme": [
+    "TOKYO -- the planet's buildings over the bay. The scene says what is in it and where the eye",
+    "starts; it names no place for the world to stand about: the wave bank's chart floats to the",
+    "ground under the eye (WaterBankLayer::Chart), so the same scene can fly on to anywhere.",
+    "",
+    "Launch from the repo root:  build/bin/gagame.exe scenes/demos/tokyo.json",
+    "FLY: W A S D move, Q / E down / up, hold the right mouse button to look.",
+    "",
+    "Still inherited from the base until they float too: the tide station, the sea-state box and",
+    "the solver's domain (all the Merrimack's)."
+  ],
+  "base": "scenes/merrimack.json",
+  "scene": {"name": "tokyo", "mode": "world", "view": "city"},
+  "streaming": {"gisLand": "D:/DataCache/OSM/coastline/land.galand"},
+  "layers": [
+    {"name": "buildings", "enabled": true, "levelHeight": 3.0, "defaultHeight": 7.0, "radius": 9000,
+     "lod": "D:/DataCache/OSM/buildings/planet-261010.tree"}
+  ],
+  "sources": [
+    {"name": "osm.planet", "kind": "buildings", "manifest": "D:/DataCache/OSM/buildings/planet-261005.buildings.json"},
+    {"name": "noaa.etopo15s.n45e135", "kind": "height", "file": "D:/DataCache/ETOPO/15s/ETOPO_2022_v1_15s_N45E135_surface.tif",
+     "unit": "m", "datum": "EGM2008", "offset": -0.092}
+  ],
+  "views": [
+    {"name": "city", "at": {"lat": 35.6812, "lon": 139.7671, "alt": 0, "heading": 200, "tilt": 70, "range": 9000}, "fovY": 55, "gauge": "root", "nearZ": 0.25},
+    {"name": "harbour", "at": {"lat": 35.6400, "lon": 139.7700, "alt": 0, "heading": 300, "tilt": 72, "range": 1500}, "fovY": 55, "gauge": "root", "nearZ": 0.25},
+    {"name": "bay", "at": {"lat": 35.6450, "lon": 139.7600, "alt": 0, "heading": 270, "tilt": 86, "range": 120}, "fovY": 55, "gauge": "root", "nearZ": 0.25}
+  ]
+}

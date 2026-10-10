@@ -101,6 +101,7 @@
 #include <optional>
 #include <utility>
 #include <set>
+#include <unordered_map>
 #include <vector>
 
 namespace ga::app {
@@ -333,7 +334,7 @@ private:
     // THE WINDOWS OF AN EYE: the gate worlds it reaches, built for the walk, the sky and the hulls.
     struct EyeWindows {   // as long as the chain
         int n = 0;
-        std::vector<GlobeLayer::DrosteLevel> levels;
+        std::vector<GlobeLayer::GateWorld> gates;
         std::vector<WindowBox> boxes;
         std::vector<float> upWin, sunWin;   // 4 and 3 a window
         double viewHole[5][4] = {};
@@ -343,7 +344,9 @@ private:
         double zE1[3] = {0.0, 1.0, 0.0}, sunE1[3] = {0.0, 1.0, 0.0};   // the first window's place
     };
     EyeWindows WindowsOf(const Eye& e, const std::vector<scene::WindowLink>& chain,
-                         const scene::ViewCone& view, float exagg, const float sunRoot[3]);
+                         const scene::ViewCone& view, const float sunRoot[3]);
+    // Each gate's sampler (ResidencyManager::Sampler, "gate.<name>"), asked once.
+    std::unordered_map<const scene::Gateway*, int> m_gateSampler;
     // The chain of gate windows an eye looks through, from its own cone (the first eye's begins with
     // the windows its subject owes it; another eye owes nothing yet).
     std::vector<scene::WindowLink> ChainOf(const Eye& e) const;
@@ -358,7 +361,7 @@ private:
     // are given (taken about rowsEye), wanting the bed each ring reads at its own grain; `orgs` gets
     // the rings' origins for the globe. And the cascade sea's plane at an eye (sim/WaveChart.h).
     void StandRings(WaterBankLayer* bank, const double at[3], const SurfaceFrame::ChainRows& rows,
-                    const double rowsEye[3], float orgs[12]);
+                    const double rowsEye[3], float* orgs);   // GlobeLayer::kBankRows
     bool ChartOf(const Eye& e, WaveChart::Frame& out) const;
 
     // THE SECOND EYE (scene hud.minimap, scene/Minimap.h): stepped and walked once a frame after

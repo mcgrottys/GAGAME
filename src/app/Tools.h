@@ -54,6 +54,10 @@ struct WindowLink;
 }
 }  // namespace ga
 
+namespace ga::app {
+struct Scene;
+}
+
 namespace ga::app::tools {
 
 // ---- Before the scene exists (no device, or a 64x64 device of the tool's own).
@@ -65,6 +69,9 @@ int RunPackTiles(const Options& opt, const SurfaceFrame& surface);
 // or purged only when the scene's prune.confirm names the root (compose/TreePrune.h). 0 listed
 // or done, 2 refused with nothing changed, 1 stopped at a failed move or delete.
 int RunTreePrune(const scene::PruneSection& prune);
+// --tool building-lod[:lon0,lat0,lon1,lat1]: the scene's building stack boxed into the size-
+// stratified pyramid at layers.buildings.lod (compose/BuildingLod.h); 0 written, 2 refused.
+int RunBuildingLod(const Scene& S, const std::string& args);
 // --load-field PATH: a file through the loader plugin into a sparse bank; report; exit.
 int RunLoadField(const Options& opt);
 // --tool roads-probe:at=LAT,LON;km=R;roads=PATH;bridges=PATH: one box of the road and clearance

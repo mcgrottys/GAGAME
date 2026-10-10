@@ -75,7 +75,7 @@ struct SurfaceFrame {
     Lattice cube;    // the 16k quad-sphere, 128x128 tiles
     Lattice cubeH;   // the same cube, 256x128 tiles
     // The tenants realized on them (-1 = none).
-    int colorT = -1, hgtT = -1, maskT = -1;
+    int colorT = -1, hgtT = -1, maskT = -1, bldT = -1;   // bldT: the buildings under a pixel
     bool hgtWindows = false;   // PHASE B2: the height tenant declares the eye's windows
     // HIERARCHY 4.17 commit 2: THE STANDING BLOCKS -- aligned blocks of the pyramid, each a
     // face-plane window anchored on a multiple of 16384 texels of its rung (FaceWindow,
@@ -293,7 +293,8 @@ struct SurfaceFrame {
     static SurfaceFrame About(double planetR, bool stencil, double latDeg, double lonDeg);
     // The tenants, once they exist: ids read off the declarations. An empty Tenant (never
     // declared) leaves -1.
-    void Declare(const hal::Tenant& color, const hal::Tenant& height, const hal::Tenant& mask);
+    void Declare(const hal::Tenant& color, const hal::Tenant& height, const hal::Tenant& mask,
+                 const hal::Tenant& buildings = hal::Tenant());
     // M12 step 4c: the compose pillar's paint rows, registered from the declaration (the
     // banner). Called by the Assembly after Declare() and before the AST's hand table and its
     // validator; idempotent, as every registration is.

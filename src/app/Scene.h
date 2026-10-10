@@ -80,6 +80,9 @@ struct SceneLayer {
     scene::LayerEntry p;
     float exaggeration = 60.0f;   // the tide layer's, its one typed key
     double levelHeight = 3.0, defaultHeight = 6.0, radius = 3000.0;   // the buildings layer's
+    std::string lod;                                                  // ...and its far boxes'
+    double lodPixels = 1.0;
+    bool field = true;                                                // ...and the field under a pixel
 };
 struct SceneTool {
     std::string name, args;

@@ -126,6 +126,19 @@ void GpuProfiler::ReadSlot(uint32_t slot) {
     }
     D3D12_RANGE none{0, 0};
     m_readback->Unmap(0, &none);
+    // A frame near the device's timeout (Windows resets the GPU at ~2 s) is named as it happens,
+    // with the passes that spent it: the run that ends in a TDR never reaches Report().
+    if (!s.spans.empty() && row.ms[s.spans[0].pass] > 100.0f) {
+        std::string passes;
+        char buf[96];
+        for (uint32_t i = 0; i < m_names.size() && i < kMaxPasses; ++i) {
+            if (i == s.spans[0].pass || row.ms[i] < 5.0f || m_names[i] == "gpu.gap") continue;
+            std::snprintf(buf, sizeof(buf), " %s %.1f", m_names[i].c_str(), row.ms[i]);
+            passes += buf;
+        }
+        Log("[gpu-slow] frame %lld: %.1f ms on the GPU;%s", static_cast<long long>(row.label),
+            row.ms[s.spans[0].pass], passes.c_str());
+    }
     m_rows.push_back(std::move(row));
 }
 

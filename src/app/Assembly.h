@@ -52,6 +52,7 @@
 #include "compose/HeightPage.h"
 #include "compose/ExposureSource.h"
 #include "compose/GisMask.h"
+#include "compose/BuildingField.h"
 #include "compose/TileTree.h"
 #include "compose/TileIndex.h"
 #include "hal/TileStream.h"
@@ -219,6 +220,12 @@ struct Assembly {
     // tenants that hold providers into them, so they cannot die first.
     std::vector<std::shared_ptr<DomainSource>> megaKeep;
     std::unique_ptr<TileTree> megaTree;
+    // THE BUILDINGS UNDER A PIXEL (compose/BuildingField.h): the folded tree read as three additive
+    // scalars a texel, its own sparse tree on the colour's addresses, and the tenant below.
+    std::shared_ptr<BuildingLodFile> bldLod;
+    std::unique_ptr<BuildingFieldSource> srcBldField;
+    std::shared_ptr<DomainSource> bldFieldLeaf;
+    std::unique_ptr<TileTree> bldFieldTree;
     // M9as: THE HEIGHT GRAPH AND ITS DISK TREE. BuildHeightStack's six layers, each its own
     // sparse tree on the NVMe (FloatW: value + coverage), composed LayeredOver into ONE root
     // whose tiles are the R16F pages the height tenant reads. Inputs are ordered by
@@ -244,7 +251,7 @@ struct Assembly {
     // dispatcher shares, so destroying one here releases nothing the manager still reads. The
     // int ids above keep the values Tenant::Id() gave them, so no consumer changed. (The wave's
     // lives in the frame loop beside its tree.)
-    hal::Tenant heightTenant, exposureTenant, colorTenant, landseaTenant;
+    hal::Tenant heightTenant, exposureTenant, colorTenant, landseaTenant, buildingTenant;
     // THE SWELL SHADOW A HULL READS (the water match, step 3): the exposure page's texels at the
     // kernel's floor, evaluated from the node on the CPU (compose/ExposurePage) -- the numbers the
     // page holds, without the page's residency timing.

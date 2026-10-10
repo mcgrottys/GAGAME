@@ -336,6 +336,9 @@ const Schema& StreamingSchema() {
             .Bind("directStorage", p.directStorage, "NVMe -> GPU tile reads (--no-direct-storage)", R)
             .Bind("colorTrees", p.colorTrees, "colour and height pages from the trees (--no-color-trees)", R)
             .Bind("gisGate", p.gisGate, "the vector land/sea gate on the bed (--no-gis-gate)", R)
+            .BindPath("gisLand", p.gisLand,
+                      "the global coast: OSM's land polygons as GALAND01 (harvester/harvest_land_polygons.py); "
+                      "\"\" = the New England survey alone", R)
             .Bind("gisGrainM", p.gisGrainM, Q::Length, "m",
                   "the survey's grain: the finest level the land/sea mask has anything of its own "
                   "for; a mask tile finer than it is its parent, magnified -- never painted, stored "
@@ -666,7 +669,14 @@ const Schema& BuildingsLayerSchema() {
                   "a building with neither height nor floors tagged: the scene's assumption", R)
             .Bind("radius", kBuildings.radius, Q::Length, "m",
                   "cells of solids are streamed in within this distance of the eye (its altitude counted) and "
-                  "dropped beyond 1.25 times it", R);
+                  "dropped beyond 1.25 times it", R)
+            .BindPath("lod", kBuildings.lod,
+                      "the folded tree of buildings (docs/BUILDING_LOD.md), built by --tool building-lod; \"\" = none", R)
+            .Bind("lodPixels", kBuildings.lodPixels, Q::Dimensionless, "px",
+                  "a building is drawn on its own from this many pixels across (faded in to twice that); narrower ones are the field's", R)
+            .Bind("field", kBuildings.field,
+                  "the buildings narrower than a pixel as scalars on the ground (compose/BuildingField.h): their walls "
+                  "seen at an angle; needs `lod`", R);
         return sc;
     }();
     return *s;

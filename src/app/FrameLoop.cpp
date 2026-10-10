@@ -2028,8 +2028,8 @@ void FrameLoop::ApplyWindowSteps(const std::vector<SurfaceFrame::Moved>& moved) 
     }
     if (moved.empty()) return;
     // PHASE B2: the four tenants that share the windows (slice i the same ground in all).
-    const hal::Tenant* tenants[4] = {&m_A.colorTenant, &m_A.landseaTenant, &m_A.heightTenant,
-                                     &m_A.exposureTenant};
+    const hal::Tenant* tenants[5] = {&m_A.colorTenant, &m_A.landseaTenant, &m_A.heightTenant,
+                                     &m_A.exposureTenant, &m_A.buildingTenant};
     for (const SurfaceFrame::Moved& mv : moved) {
         for (const hal::Tenant* tp : tenants) {
             hal::Tenant& t = *const_cast<hal::Tenant*>(tp);
@@ -3288,11 +3288,11 @@ bool FrameLoop::Frame() {
             // final (below, before the tide). A reader wants what it reads: every ring its bed at its
             // own grain, over its span, about the eye its rings stand at -- A's wants, then B's.
             const double camP[3] = {cam.px, cam.py, cam.pz};
-            float orgs[12];
+            float orgs[GlobeLayer::kBankRows];
             PROF_BEGIN();
             StandRings(waterBank, camP, m_A.surface.SlotRows(0), m_A.surface.slotEye[0].data(), orgs);
             PROF_END(3);
-            float orgB[12] = {};
+            float orgB[GlobeLayer::kBankRows] = {};
             if (waterBankB) {
                 double EB[3];
                 PlanetOf(m_A.surface, drosteOuterCam, EB);
@@ -3326,6 +3326,7 @@ bool FrameLoop::Frame() {
                                 waterBank->DetailSrv(), derivS, patchS, bandKS,
                                 bandRmsS, bandFoldS, sea->heightScale,
                                 waterBank->BaseTexelM(), orgs);
+            globe->SetBankChartUp(waterBank->Chart().up);
             // M13 step 2: the cascade sea's plane AT THE EYE, for the pixel stage's sub-ring
             // bands -- the same plane the bank's texels were filled from (ChartOf).
             {
@@ -3459,9 +3460,9 @@ bool FrameLoop::Frame() {
             const int n = static_cast<int>(m_windows.size());
             if (n > 0) {
                 const EyeWindows ew =
-                    WindowsOf(Eye{0, &cam, viewW, viewH, camLevel}, m_windows, view, globe->reliefExagg, sunRootF);
+                    WindowsOf(Eye{0, &cam, viewW, viewH, camLevel}, m_windows, view, sunRootF);
                 m_winNearM = ew.nearM;
-                const GlobeLayer::DrosteLevel* levels = ew.levels.data();
+                const GlobeLayer::GateWorld* gates = ew.gates.data();
                 const WindowBox* boxes = ew.boxes.data();
                 const float* upWin = ew.upWin.data();
                 const float* sunWin = ew.sunWin.data();
@@ -3470,7 +3471,7 @@ bool FrameLoop::Frame() {
                 const double* sunE1 = ew.sunE1;
                 const auto& viewHole = ew.viewHole;
                 const int viewHoleN = ew.viewHoleN;
-                globe->SetGates(levels, n, viewHole, viewHoleN);
+                globe->SetGates(gates, n, viewHole, viewHoleN);
                 m_worldTables[0].SetChain(boxes, upWin, sunWin, n);
                 if (!m_winSkyLogged) {
                     m_winSkyLogged = true;
@@ -3576,7 +3577,7 @@ bool FrameLoop::Frame() {
                 cl[nc].nearM = 0.0;
                 ++nc;
                 for (int k = 0; k < m_minimapWin.n; ++k, ++nc) {
-                    planet(m_minimapWin.levels[k].cam, cl[nc].eye);
+                    planet(m_minimapWin.gates[k].cam, cl[nc].eye);
                     cl[nc].pixAng = pixM;
                     cl[nc].nearM = m_minimapWin.nearM[k];
                 }
@@ -4745,6 +4746,7 @@ int FrameLoop::Finish() {
             static_cast<unsigned long long>(m_windowLeft), static_cast<unsigned long long>(m_windowKept),
             static_cast<unsigned long long>(m_windowKeptMoved));
         if (m_A.megaTree) Log("[eye-windows] the colour tree this run:\n%s", m_A.megaTree->Stats().c_str());
+        if (m_A.bldFieldTree) Log("[buildings] the field's tree this run:\n%s", m_A.bldFieldTree->Stats().c_str());
     }
     // THE SHUTDOWN TRAIL (core/ExitTrail.h): a flushed line before every phase from here to the
     // last destructor, so a death in teardown names its phase.
@@ -5029,7 +5031,7 @@ void FrameLoop::WalkEye(const Eye& e, float exagg, const EyeSky& es, bool dome,
                                            w ? win->sunWin.data() : nullptr, w ? win->n : 0);
         }
         globe->SetOtherView(m_A.gpu, e.view, *e.cam, aspect, e.viewH, t, exagg, es.camUp, !dome,
-                            w ? win->levels.data() : nullptr, w ? win->n : 0,
+                            w ? win->gates.data() : nullptr, w ? win->n : 0,
                             w ? win->viewHole : nullptr, w ? win->viewHoleN : 0, rings);
     }
 }
@@ -5075,13 +5077,12 @@ void FrameLoop::SurfaceFor(const Eye& e, ComposedSurfaceCb& out) {
 // the box where the true eye sees it; the place's zenith and the one sun as seen from there, turned
 // into this frame. Every number is the eye's own: the boxes are relative to it, the cull is its cone.
 FrameLoop::EyeWindows FrameLoop::WindowsOf(const Eye& e, const std::vector<scene::WindowLink>& chain,
-                                           const scene::ViewCone& view, float exagg,
-                                           const float sunRoot[3]) {
+                                           const scene::ViewCone& view, const float sunRoot[3]) {
     EyeWindows o;
     o.n = static_cast<int>(chain.size());
     if (o.n == 0) return o;
     const int n = o.n;
-    o.levels.resize(size_t(n));
+    o.gates.resize(size_t(n));
     o.boxes.resize(size_t(n));
     o.upWin.assign(size_t(n) * 4, 0.0f);
     o.sunWin.assign(size_t(n) * 3, 0.0f);
@@ -5096,7 +5097,7 @@ FrameLoop::EyeWindows FrameLoop::WindowsOf(const Eye& e, const std::vector<scene
     const auto& east0 = m_A.surface.east;
     const auto& north0 = m_A.surface.north;
     const double C0[3] = {m_cam.px, m_cam.py, m_cam.pz};   // the first eye: whose rings stand
-    GlobeLayer::DrosteLevel* levels = o.levels.data();
+    GlobeLayer::GateWorld* gates = o.gates.data();
     WindowBox* boxes = o.boxes.data();
     float* upWin = o.upWin.data();
     float* sunWin = o.sunWin.data();
@@ -5113,12 +5114,10 @@ FrameLoop::EyeWindows FrameLoop::WindowsOf(const Eye& e, const std::vector<scene
     for (int k = 0; k < n; ++k) {
         const scene::WindowLink& W = chain[size_t(k)];
         const Motor& Gm = W.pull;   // this world -> the true frame
-        GlobeLayer::DrosteLevel& L = levels[k];
-        L.rel = k + 1;
+        GlobeLayer::GateWorld& L = gates[k];
         double E[3] = {C[0], C[1], C[2]};
         W.carry.TransformPoint(E[0], E[1], E[2]);   // the eye, carried this far
         for (int i = 0; i < 3; ++i) L.cam[i] = E[i];
-        L.sigma = 1.0;
         for (int c = 0; c < 3; ++c) {
             double v[3] = {c == 0 ? 1.0 : 0.0, c == 1 ? 1.0 : 0.0, c == 2 ? 1.0 : 0.0};
             Gm.TransformDir(v[0], v[1], v[2]);
@@ -5126,10 +5125,13 @@ FrameLoop::EyeWindows FrameLoop::WindowsOf(const Eye& e, const std::vector<scene
         }
         L.gauge = Placement::Rigid(Gm);
         L.gauge.t[0] = L.gauge.t[1] = L.gauge.t[2] = 0.0;
-        L.reliefExagg = exagg;
         // M13: THE GATE IS ITS OWN SAMPLER. What a window shows is read from the same
         // earth cache the camera reads, and the gate it is seen through answers for it.
-        L.sampler = resMgr.Sampler(("gate." + W.gate->Declared().name).c_str());
+        auto smp = m_gateSampler.find(W.gate);
+        if (smp == m_gateSampler.end()) {
+            smp = m_gateSampler.emplace(W.gate, resMgr.Sampler(("gate." + W.gate->Declared().name).c_str())).first;
+        }
+        L.sampler = smp->second;
         // WALKED ONLY ALONG THE RAYS THROUGH ITS WINDOWS -- the cull, not the picture --
         // and not where the next window shows a deeper world. Its tiles are the tiles
         // of its place, chosen once for every world standing there (GlobeLayer).
@@ -5138,14 +5140,12 @@ FrameLoop::EyeWindows FrameLoop::WindowsOf(const Eye& e, const std::vector<scene
         for (int p = 0; p < 5; ++p) {
             for (int j = 0; j < 4; ++j) L.planes[p][j] = pl[p][j];
         }
-        L.planeCount = 5;
         if (k + 1 < n && scene::LinkHole(chain[size_t(k + 1)], view, pl)) {
             for (int p = 0; p < 5; ++p) {
                 for (int j = 0; j < 4; ++j) L.hole[p][j] = pl[p][j];
             }
             L.holeCount = 5;
         }
-        L.share = true;
         // THE PLACE'S VIEWPOINT, LIT BY THE ONE LIGHT. The carried eye stands at the
         // place; the sun as seen from THERE is asked of the solar system at that place's
         // own planet point (the light at 0,0,0 does the rest) and said in the root frame,
@@ -5176,7 +5176,6 @@ FrameLoop::EyeWindows FrameLoop::WindowsOf(const Eye& e, const std::vector<scene
         double zE[3];
         ZenithAt(E, planetR, zE);   // the place's own zenith, at the carried eye
         for (int i = 0; i < 3; ++i) L.skyUp[i] = static_cast<float>(zE[i]);
-        L.skyDay = -1.0f;
         if (k == 0) {
             for (int i = 0; i < 3; ++i) {
                 zE1[i] = zE[i];
@@ -5227,13 +5226,14 @@ FrameLoop::EyeWindows FrameLoop::WindowsOf(const Eye& e, const std::vector<scene
 }
 
 void FrameLoop::StandRings(WaterBankLayer* bank, const double at[3], const SurfaceFrame::ChainRows& rows,
-                           const double rowsEye[3], float orgs[12]) {
+                           const double rowsEye[3], float* orgs) {
     auto& resMgr = m_A.resMgr;
     const int hgtTenant = m_A.hgtTenant;
-    bank->SetFrame(m_A.gpu, m_simUnix, at[0], at[2]);   // anchored and mapped: the bank's own tiles
+    bank->SetFrame(m_A.gpu, m_simUnix, at);   // anchored and mapped: the bank's own tiles
     for (int mR = 0; mR < WaterBankLayer::kMips; ++mR) {
         bank->RingOrigin(mR, orgs[mR * 2], orgs[mR * 2 + 1]);
     }
+    bank->ChartRows(orgs + 12);   // the rings' chart, after their origins (GlobeLayer::kBankRows)
     bank->injectPattern = m_opt.inject;
     bank->SetWindows(rows, rowsEye);
     // A READER WANTS WHAT IT READS -- every ring its bed at its own grain (the rung whose texel is at
@@ -5460,7 +5460,7 @@ void FrameLoop::MinimapStep(float dt) {
     m_A.renderer.SunDir(sunRoot);
     m_minimapExagg = ReliefOf(eye);
     m_minimapChain = ChainOf(eye);
-    m_minimapWin = WindowsOf(eye, m_minimapChain, ViewConeOf(mc, r.w / r.h, r.h), m_minimapExagg, sunRoot);
+    m_minimapWin = WindowsOf(eye, m_minimapChain, ViewConeOf(mc, r.w / r.h, r.h), sunRoot);
 }
 
 void FrameLoop::MinimapFrame(float dt) {
@@ -5506,6 +5506,7 @@ void FrameLoop::MinimapFrame(float dt) {
         const SurfaceFrame::ChainRows rowsE =
             sE == UINT32_MAX ? SurfaceFrame::ChainRows{} : m_A.surface.SlotRows(sE);
         StandRings(bankE, at, rowsE, sE == UINT32_MAX ? E : m_A.surface.slotEye[sE].data(), rings.org);
+        for (int i = 0; i < 3; ++i) rings.chartUp[i] = bankE->Chart().up[i];
         bankE->enabled = true;
         rings.disp = bankE->DispSrv();
         rings.param = bankE->ParamSrv();
@@ -5542,7 +5543,7 @@ void FrameLoop::MinimapFrame(float dt) {
     sf.slotSet[0] = own;
     for (int k = 0; k < win.n; ++k) {
         sf.slotSet[k + 1] = size_t(k) < m_minimapWinSets.size() ? m_minimapWinSets[size_t(k)] : SurfaceFrame::kNoSet;
-        const double* c = win.levels[k].cam;
+        const double* c = win.gates[k].cam;
         const double ry = sf.planetR + c[1];
         for (int i = 0; i < 3; ++i) sf.slotEye[k + 1][i] = sf.up[i] * ry + sf.east[i] * c[0] + sf.north[i] * c[2];
     }
