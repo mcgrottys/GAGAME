@@ -1474,7 +1474,7 @@ std::unique_ptr<Assembly> Assemble(const Options& opt, const Scene& S, int& exit
             extra.push_back({"tool", "a one-shot mode in `tools[]` (--tool name[:args])",
                              {"bathy-map", "dump-water-state", "export", "fidelity-map",
                               "gis-dump", "gis-sweep-test", "ingest", "load-field", "ocean-probe", "pack-tiles",
-                              "pack-trees", "rastertest", "sea-verify", "selftest", "swe-cycle",
+                              "pack-trees", "rastertest", "roads-probe", "sea-verify", "selftest", "swe-cycle",
                               "swe-uv", "trace",
                               "tree-audit", "tree-prune", "twin-surface", "warm-inlet", "warm-trees",
                               "water-map", "wave-converge", "wave-map", "wave-recheck"}});

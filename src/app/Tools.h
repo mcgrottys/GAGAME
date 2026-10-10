@@ -67,6 +67,9 @@ int RunPackTiles(const Options& opt, const SurfaceFrame& surface);
 int RunTreePrune(const scene::PruneSection& prune);
 // --load-field PATH: a file through the loader plugin into a sparse bank; report; exit.
 int RunLoadField(const Options& opt);
+// --tool roads-probe:at=LAT,LON;km=R;roads=PATH;bridges=PATH: one box of the road and clearance
+// harvests (compose/RoadWays.h) described; no device. 0 read, 2 refused or a bad argument.
+int RunRoadsProbe(const std::string& args);
 // --selftest: the twelve gates; exit 0 (pass) / 1 (fail).
 int RunSelfTest(const Options& opt);
 
