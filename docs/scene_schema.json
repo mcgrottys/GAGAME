@@ -380,7 +380,11 @@
       { "key": "radius", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 3000, "reload": "restart", "doc": "cells of solids are streamed in within this distance of the eye (its altitude counted) and dropped beyond 1.25 times it" },
       { "key": "lod", "type": "path", "field": "string", "quantity": "unknown", "unit": "", "default": "", "reload": "restart", "doc": "the folded tree of buildings (docs/BUILDING_LOD.md), built by --tool building-lod; \"\" = none" },
       { "key": "lodPixels", "type": "number", "field": "f64", "quantity": "1", "unit": "px", "default": 1, "reload": "restart", "doc": "a building is drawn on its own from this many pixels across (faded in to twice that); narrower ones are the field's" },
-      { "key": "field", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the buildings narrower than a pixel as scalars on the ground (compose/BuildingField.h): their walls seen at an angle; needs `lod`" }
+      { "key": "field", "type": "bool", "field": "bool", "quantity": "unknown", "unit": "", "default": true, "reload": "restart", "doc": "the buildings narrower than a pixel as scalars on the ground (compose/BuildingField.h): their walls seen at an angle; needs `lod`" },
+      { "key": "laneWidth", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 3.5, "reload": "restart", "doc": "a road in the tree (sources of kind \"roads\", docs/ROADS.md) is as wide as its file says, else its lanes times this" },
+      { "key": "defaultLanes", "type": "number", "field": "f64", "quantity": "1", "unit": "1", "default": 2, "reload": "restart", "doc": "a road with neither width nor lanes tagged: the scene's assumption" },
+      { "key": "pathWidth", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 2, "reload": "restart", "doc": "a footway, path, cycleway, track or steps with no width tagged" },
+      { "key": "kerb", "type": "number", "field": "f64", "quantity": "length", "unit": "m", "default": 0.12, "reload": "restart", "doc": "a road's surface stands this much over the composed ground, and its mass as much under it" }
     ] },
     { "type": "layer.plain", "keys": [
     ] },

@@ -396,6 +396,9 @@ struct BuildingsLayerProps {
     std::string lod;                 // the size-stratified pyramid's folder ("" = no far boxes)
     double lodPixels = 1.0;
     bool field = true;               // the buildings under a pixel as scalars (compose/BuildingField.h)
+    // THE ROADS IN THE SAME TREE (compose/BuildingLod.h RoadRibbonDefaults): the scene's assumptions
+    // where a way's file is silent.
+    double laneWidth = 3.5, defaultLanes = 2.0, pathWidth = 2.0, kerb = 0.12;
 };
 struct NodeProps {
     std::string name;

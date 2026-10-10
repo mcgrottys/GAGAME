@@ -676,7 +676,16 @@ const Schema& BuildingsLayerSchema() {
                   "a building is drawn on its own from this many pixels across (faded in to twice that); narrower ones are the field's", R)
             .Bind("field", kBuildings.field,
                   "the buildings narrower than a pixel as scalars on the ground (compose/BuildingField.h): their walls "
-                  "seen at an angle; needs `lod`", R);
+                  "seen at an angle; needs `lod`", R)
+            .Bind("laneWidth", kBuildings.laneWidth, Q::Length, "m",
+                  "a road in the tree (sources of kind \"roads\", docs/ROADS.md) is as wide as its file says, else its "
+                  "lanes times this", R)
+            .Bind("defaultLanes", kBuildings.defaultLanes, Q::Dimensionless, "1",
+                  "a road with neither width nor lanes tagged: the scene's assumption", R)
+            .Bind("pathWidth", kBuildings.pathWidth, Q::Length, "m",
+                  "a footway, path, cycleway, track or steps with no width tagged", R)
+            .Bind("kerb", kBuildings.kerb, Q::Length, "m",
+                  "a road's surface stands this much over the composed ground, and its mass as much under it", R);
         return sc;
     }();
     return *s;

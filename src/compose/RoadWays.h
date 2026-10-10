@@ -112,6 +112,7 @@
 #include <cstdint>
 #include <utility>
 #include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -219,6 +220,25 @@ bool LoadRoadSource(const std::string& manifestPath, double lon0, double lat0, d
                     std::vector<RoadWay>& out, std::string* why);
 bool LoadBridgeSource(const std::string& manifestPath, double lon0, double lat0, double lon1, double lat1,
                       std::vector<BridgeSpan>& out, std::string* why);
+
+// A harvest HELD OPEN: the manifest, its vocabularies and the cell index read once; then any box
+// read on a handle of the call's own, so several threads may read cells of one file at once (the
+// tree builder, a cell at a time). LoadRoadSource above is Open then Read.
+class RoadFile {
+public:
+    bool Open(const std::string& manifestPath, std::string* why);
+    bool Read(double lon0, double lat0, double lon1, double lat1, std::vector<RoadWay>& out) const;
+    // The harvest's cells as (ix, iy) of its own cellDeg (kRoadCellDeg).
+    std::vector<std::pair<int, int>> Cells() const;
+    double CellDeg() const;
+    bool Valid() const { return m_impl != nullptr; }
+    const std::string& Path() const { return m_path; }
+
+private:
+    struct Impl;
+    std::shared_ptr<const Impl> m_impl;
+    std::string m_path;
+};
 
 // The junction table of a set of ways: every node id two or more ways share, or a way's end.
 std::vector<RoadNode> JunctionsOf(const std::vector<RoadWay>& ways);

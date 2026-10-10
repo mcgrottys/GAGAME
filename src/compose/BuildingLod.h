@@ -23,6 +23,7 @@
 #pragma once
 
 #include "compose/BuildingSolids.h"
+#include "compose/RoadWays.h"
 
 #include <cstdint>
 #include <string>
@@ -77,12 +78,25 @@ int LevelOf(double rho);
 
 struct LodBuildStats {
     uint64_t cells = 0, solids = 0, kept = 0, nodes[lod::kLevels] = {}, owned[lod::kLevels] = {};
+    uint64_t ways = 0, ribbons = 0, tunnels = 0;   // the roads: ways read, pieces filed, tunnels left out
     double seconds = 0.0;
 };
+// THE ROADS IN THE SAME TREE (docs/ROADS.md): a way of a roads harvest (compose/RoadWays.h) is
+// filed as RIBBON pieces beside the buildings -- each piece's mass the sum of its segments' slabs
+// (a rectangle of the road's width, from `kerb` under the ground to `kerb` over it, through the
+// prisms' own PrismMoments), so it folds into a node exactly as a building does and sits at the
+// level its length puts it; its record the polyline (BuildingShape.h EncodeRibbon). The width is
+// the file's where tagged, else lanes x laneWidth, else defaultLanes x laneWidth; a path class
+// (rank 255: footway, path, cycleway, track, steps) is pathWidth. A tunnel is not filed: nothing of
+// it stands on the ground. Every number here is the scene's declared assumption (layer.buildings).
+struct RoadRibbonDefaults {
+    double laneWidth = 3.5, defaultLanes = 2.0, pathWidth = 2.0, kerb = 0.12;
+};
 // THE PASS: every cell of the stack (inside lon0..lon1 x lat0..lat1 when given), composed and boxed
-// on `threads` workers, root band by root band, into `dir`. False (with `log`) on a refusal.
-bool BuildBuildingLod(const BuildingStack& stack, const std::string& dir, const double* box, int threads,
-                      LodBuildStats* stats, std::string* log);
+// on `threads` workers, root band by root band, into `dir`, the roads' pieces beside them. False
+// (with `log`) on a refusal.
+bool BuildBuildingLod(const BuildingStack& stack, const std::vector<RoadFile>& roads, const RoadRibbonDefaults& rd,
+                      const std::string& dir, const double* box, int threads, LodBuildStats* stats, std::string* log);
 
 // The tree open for reading: each level's page index in memory, a page's nodes and buildings read
 // by seek (const, its own handle: pool threads read pages at once).

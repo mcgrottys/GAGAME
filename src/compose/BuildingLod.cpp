@@ -18,6 +18,7 @@
 #include <mutex>
 #include <sstream>
 #include <thread>
+#include <set>
 #include <tuple>
 
 namespace ga {
@@ -41,22 +42,9 @@ struct Item {
     uint64_t off = 0;
 };
 
-// One solid's moment box and its record; false for a solid with no volume.
-bool BoxItem(const BuildingSolid& s, int cx, int cy, Item& it) {
-    if (s.rings.empty() || s.rings[0].size() < 6) return false;
-    const double lon0 = s.rings[0][0], lat0 = s.rings[0][1];
-    const double mx = std::cos(lat0 * kDeg) * kR * kDeg, my = kR * kDeg;
-    std::vector<std::vector<double>> xy(s.rings.size());
-    for (size_t k = 0; k < s.rings.size(); ++k) {
-        const std::vector<double>& g = s.rings[k];
-        for (size_t i = 0; i + 1 < g.size(); i += 2) {
-            xy[k].push_back((g[i] - lon0) * mx);
-            xy[k].push_back((g[i + 1] - lat0) * my);
-        }
-    }
-    const Moments m = PrismMoments(xy, s.bottom, s.top, &s.outer);
-    if (m.Empty()) return false;
-    const MomentBox b = BoxOf(m);
+// A moment box in a local frame about (lon0, lat0) placed as an item: its level by its radius, its
+// quad by its centroid, its record. Shared by the buildings' prisms and the roads' ribbons.
+void PlaceItem(const MomentBox& b, double lon0, double lat0, double mx, double my, int cx, int cy, Item& it) {
     const double lat = lat0 + b.c[1] / my, lon = lon0 + b.c[0] / mx;
     it.rho = static_cast<float>(b.Radius());
     it.L = lod::LevelOf(b.Radius());
@@ -74,7 +62,86 @@ bool BoxItem(const BuildingSolid& s, int cx, int cy, Item& it) {
     const int ccx = static_cast<int>(std::floor(lon / lod::kDetailDeg)), ccy = static_cast<int>(std::floor(lat / lod::kDetailDeg));
     r.dcx = static_cast<int8_t>(std::clamp(cx - ccx, -127, 127));
     r.dcy = static_cast<int8_t>(std::clamp(cy - ccy, -127, 127));
+}
+
+// One solid's moment box and its record; false for a solid with no volume.
+bool BoxItem(const BuildingSolid& s, int cx, int cy, Item& it) {
+    if (s.rings.empty() || s.rings[0].size() < 6) return false;
+    const double lon0 = s.rings[0][0], lat0 = s.rings[0][1];
+    const double mx = std::cos(lat0 * kDeg) * kR * kDeg, my = kR * kDeg;
+    std::vector<std::vector<double>> xy(s.rings.size());
+    for (size_t k = 0; k < s.rings.size(); ++k) {
+        const std::vector<double>& g = s.rings[k];
+        for (size_t i = 0; i + 1 < g.size(); i += 2) {
+            xy[k].push_back((g[i] - lon0) * mx);
+            xy[k].push_back((g[i + 1] - lat0) * my);
+        }
+    }
+    const Moments m = PrismMoments(xy, s.bottom, s.top, &s.outer);
+    if (m.Empty()) return false;
+    PlaceItem(BoxOf(m), lon0, lat0, mx, my, cx, cy, it);
     return true;
+}
+
+// ---- the roads (BuildingLod.h: RoadRibbonDefaults) --------------------------------------------
+double RoadWidth(const RoadWay& w, const RoadRibbonDefaults& d) {
+    if (w.widthM == w.widthM && w.widthM > 0.0 && w.widthM < 1e4) return w.widthM;
+    if (w.rank == 255) return d.pathWidth;
+    if (w.lanes == w.lanes && w.lanes > 0.0 && w.lanes < 1e3) return w.lanes * d.laneWidth;
+    return d.defaultLanes * d.laneWidth;
+}
+constexpr double kPieceM = 2500.0;   // a piece fits a decimetre record (3.2 km from its centroid)
+
+// A way as ribbon pieces, each at most kPieceM long (sharing its end point with the next, so no
+// gap): the piece's mass is a slab a segment -- the segment's rectangle of the road's width from
+// kerb under the ground to kerb over it -- summed; its record the polyline about the box's centroid.
+void RibbonItems(const RoadWay& w, const RoadRibbonDefaults& d, int cx, int cy, uint32_t arenaIdx,
+                 std::vector<uint8_t>& arena, std::vector<Item>& out) {
+    const size_t n = w.points.size();
+    if (n < 2) return;
+    const double width = RoadWidth(w, d), hw = 0.5 * width;
+    const bool path = w.rank == 255;
+    const double lon0 = w.points[0].lon, lat0 = w.points[0].lat;
+    const double mx = std::cos(lat0 * kDeg) * kR * kDeg, my = kR * kDeg;
+    std::vector<double> xy(2 * n);
+    for (size_t i = 0; i < n; ++i) {
+        xy[2 * i] = (w.points[i].lon - lon0) * mx;
+        xy[2 * i + 1] = (w.points[i].lat - lat0) * my;
+    }
+    auto seg = [&](size_t i) { return std::hypot(xy[2 * i + 2] - xy[2 * i], xy[2 * i + 3] - xy[2 * i + 1]); };
+    size_t a = 0;
+    while (a + 1 < n) {
+        size_t b = a + 1;
+        double len = seg(a);
+        while (b + 1 < n && len + seg(b) <= kPieceM) {
+            len += seg(b);
+            ++b;
+        }
+        Moments m;
+        for (size_t i = a; i < b; ++i) {
+            const double dx = xy[2 * i + 2] - xy[2 * i], dy = xy[2 * i + 3] - xy[2 * i + 1], l = std::hypot(dx, dy);
+            if (!(l > 1e-3)) continue;
+            const double nx = dy / l * hw, ny = -dx / l * hw;
+            std::vector<std::vector<double>> ring{{xy[2 * i] + nx, xy[2 * i + 1] + ny, xy[2 * i + 2] + nx, xy[2 * i + 3] + ny,
+                                                   xy[2 * i + 2] - nx, xy[2 * i + 3] - ny, xy[2 * i] - nx, xy[2 * i + 1] - ny}};
+            m += PrismMoments(ring, -d.kerb, d.kerb);
+        }
+        if (!m.Empty()) {
+            const MomentBox box = BoxOf(m);
+            Item it{};
+            PlaceItem(box, lon0, lat0, mx, my, cx, cy, it);
+            std::vector<double> local(2 * (b - a + 1));
+            for (size_t i = a; i <= b; ++i) {
+                local[2 * (i - a)] = xy[2 * i] - box.c[0];
+                local[2 * (i - a) + 1] = xy[2 * i + 1] - box.c[1];
+            }
+            it.arena = arenaIdx;
+            it.off = arena.size();
+            if (EncodeRibbon(local, width, d.kerb, d.kerb, path, arena)) it.len = static_cast<uint32_t>(arena.size() - it.off);
+            out.push_back(it);
+        }
+        a = b;
+    }
 }
 
 LodBox ToBox(const Moments& m, double latc, double lonc) {
@@ -137,14 +204,27 @@ Moments LodBoxMoments(double lat, double lon, double zc, double hz, double a1, d
     return m;
 }
 
-bool BuildBuildingLod(const BuildingStack& stack, const std::string& dir, const double* box, int threads,
-                      LodBuildStats* stats, std::string* log) {
+bool BuildBuildingLod(const BuildingStack& stack, const std::vector<RoadFile>& roads, const RoadRibbonDefaults& rd,
+                      const std::string& dir, const double* box, int threads, LodBuildStats* stats, std::string* log) {
     const auto t0 = std::chrono::steady_clock::now();
     LodBuildStats st;
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
     std::filesystem::remove(dir + "/lod.json", ec);   // the manifest last: a half tree is no tree
     std::vector<std::pair<int, int>> cells = stack.Cells(lod::kDetailDeg);
+    // The roads' cells too: a way lives in its first point's cell of the same 0.05 degree grid.
+    if (!roads.empty()) {
+        std::vector<RoadWay> probe;
+        std::set<std::pair<int, int>> have(cells.begin(), cells.end());
+        for (const RoadFile& rf : roads) {
+            for (const std::pair<int, int>& c : rf.Cells()) {
+                if (have.insert(c).second) cells.push_back(c);
+            }
+        }
+        std::sort(cells.begin(), cells.end(), [](const std::pair<int, int>& p, const std::pair<int, int>& q) {
+            return std::tie(p.second, p.first) < std::tie(q.second, q.first);
+        });
+    }
     if (box) {
         cells.erase(std::remove_if(cells.begin(), cells.end(),
                                    [box](const std::pair<int, int>& c) {
@@ -178,7 +258,7 @@ bool BuildBuildingLod(const BuildingStack& stack, const std::string& dir, const 
         while (b < cells.size() && FloorDiv(cells[b].second, cellsPerRoot) == band) ++b;
         // 1. Every solid of the band's cells, boxed and placed.
         std::atomic<size_t> next{a};
-        std::atomic<uint64_t> solids{0};
+        std::atomic<uint64_t> solids{0}, waysN{0}, ribbonsN{0}, tunnelsN{0};
         std::mutex mx;
         std::vector<Item> items;
         std::vector<std::thread> pool;
@@ -207,6 +287,25 @@ bool BuildBuildingLod(const BuildingStack& stack, const std::string& dir, const 
                         it.y = std::clamp(it.y, band * rows, (band + 1) * rows - 1);
                         mine.push_back(it);
                     }
+                    // The roads of the cell (by first point, as the harvest files them), as ribbons.
+                    if (!roads.empty()) {
+                        std::vector<RoadWay> ways;
+                        for (const RoadFile& rf : roads) rf.Read(x0, y0, x0 + lod::kDetailDeg, y0 + lod::kDetailDeg, ways);
+                        waysN += ways.size();
+                        const size_t first = mine.size();
+                        for (const RoadWay& w : ways) {
+                            if (w.structure == RoadStructure::Tunnel) {
+                                ++tunnelsN;
+                                continue;
+                            }
+                            RibbonItems(w, rd, cx, cy, static_cast<uint32_t>(t), arena, mine);
+                        }
+                        for (size_t k = first; k < mine.size(); ++k) {
+                            const int rows = 1 << (lod::kLmax - mine[k].L);
+                            mine[k].y = std::clamp(mine[k].y, band * rows, (band + 1) * rows - 1);
+                        }
+                        ribbonsN += mine.size() - first;
+                    }
                 }
                 std::lock_guard<std::mutex> lk(mx);
                 items.insert(items.end(), mine.begin(), mine.end());
@@ -214,6 +313,9 @@ bool BuildBuildingLod(const BuildingStack& stack, const std::string& dir, const 
         }
         for (std::thread& t : pool) t.join();
         st.solids += solids.load();
+        st.ways += waysN.load();
+        st.ribbons += ribbonsN.load();
+        st.tunnels += tunnelsN.load();
         st.cells += b - a;
         st.kept += items.size();
         // By node, and within a node the largest first: the walk stops at the first under a pixel.
@@ -342,7 +444,12 @@ bool BuildBuildingLod(const BuildingStack& stack, const std::string& dir, const 
     m << "{\n  \"format\": \"GALOD04\",\n  \"lmin\": " << lod::kLmin << ",\n  \"lmax\": " << lod::kLmax
       << ",\n  \"detailDeg\": " << lod::kDetailDeg << ",\n  \"sources\": [";
     for (size_t k = 0; k < stack.Sources(); ++k) m << (k ? ", " : "") << "\"" << stack.Name(k) << "\"";
-    m << "],\n  \"cells\": " << st.cells << ",\n  \"solids\": " << st.solids << ",\n  \"kept\": " << st.kept << "\n}\n";
+    m << "],\n  \"roads\": [";
+    for (size_t k = 0; k < roads.size(); ++k) m << (k ? ", " : "") << "\"" << roads[k].Path() << "\"";
+    m << "],\n  \"ways\": " << st.ways << ",\n  \"ribbons\": " << st.ribbons << ",\n  \"tunnels\": " << st.tunnels
+      << ",\n  \"laneWidth\": " << rd.laneWidth << ",\n  \"defaultLanes\": " << rd.defaultLanes << ",\n  \"pathWidth\": " << rd.pathWidth
+      << ",\n  \"kerb\": " << rd.kerb
+      << ",\n  \"cells\": " << st.cells << ",\n  \"solids\": " << st.solids << ",\n  \"kept\": " << st.kept << "\n}\n";
     std::ofstream(dir + "/lod.json", std::ios::binary | std::ios::trunc) << m.str();
     st.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     if (stats) *stats = st;

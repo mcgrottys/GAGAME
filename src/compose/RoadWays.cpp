@@ -253,18 +253,49 @@ bool ReadSpans(std::ifstream& f, int64_t offset, int64_t n, double lon0, double 
 
 }  // namespace
 
-bool LoadRoadSource(const std::string& manifestPath, double lon0, double lat0, double lon1, double lat1,
-                    std::vector<RoadWay>& out, std::string* why) {
+struct RoadFile::Impl {
     Harvest h;
-    if (!OpenHarvest(manifestPath, "GAROAD01", ".roads.json", h, why)) return false;
-    const std::vector<std::string> highways = Vocabulary(h.manifest, "highway");
-    const std::vector<std::string> surfaces = Vocabulary(h.manifest, "surface");
-    std::ifstream f(h.bin, std::ios::binary);   // this call's own handle
-    ForCells(h, lon0, lat0, lon1, lat1, [&](int64_t off, int64_t n) {
-        if (!ReadRoads(f, off, n, lon0, lat0, lon1, lat1, highways, surfaces, out)) {
-            Log("[roads] '%s': a truncated cell at offset %lld", manifestPath.c_str(), static_cast<long long>(off));
+    std::vector<std::string> highways, surfaces;
+};
+
+bool RoadFile::Open(const std::string& manifestPath, std::string* why) {
+    auto impl = std::make_shared<Impl>();
+    if (!OpenHarvest(manifestPath, "GAROAD01", ".roads.json", impl->h, why)) return false;
+    impl->highways = Vocabulary(impl->h.manifest, "highway");
+    impl->surfaces = Vocabulary(impl->h.manifest, "surface");
+    m_impl = std::move(impl);
+    m_path = manifestPath;
+    return true;
+}
+
+bool RoadFile::Read(double lon0, double lat0, double lon1, double lat1, std::vector<RoadWay>& out) const {
+    if (!m_impl) return false;
+    const Impl& im = *m_impl;
+    std::ifstream f(im.h.bin, std::ios::binary);   // this call's own handle: const, so threads may share the file
+    bool ok = true;
+    ForCells(im.h, lon0, lat0, lon1, lat1, [&](int64_t off, int64_t n) {
+        if (!ReadRoads(f, off, n, lon0, lat0, lon1, lat1, im.highways, im.surfaces, out)) {
+            Log("[roads] '%s': a truncated cell at offset %lld", m_path.c_str(), static_cast<long long>(off));
+            ok = false;
         }
     });
+    return ok;
+}
+
+std::vector<std::pair<int, int>> RoadFile::Cells() const {
+    std::vector<std::pair<int, int>> out;
+    if (!m_impl) return out;
+    out.reserve(m_impl->h.cells.size());
+    for (const std::array<int64_t, 4>& c : m_impl->h.cells) out.push_back({static_cast<int>(c[1]), static_cast<int>(c[0])});
+    return out;
+}
+double RoadFile::CellDeg() const { return m_impl ? m_impl->h.cellDeg : 0.0; }
+
+bool LoadRoadSource(const std::string& manifestPath, double lon0, double lat0, double lon1, double lat1,
+                    std::vector<RoadWay>& out, std::string* why) {
+    RoadFile rf;
+    if (!rf.Open(manifestPath, why)) return false;
+    rf.Read(lon0, lat0, lon1, lat1, out);
     return true;
 }
 
