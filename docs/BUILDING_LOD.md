@@ -136,9 +136,27 @@ together; it is not done here. The folded `M` per tile waits for step 4, its onl
 | Boston, range 100 km | 51 km up | 16 | 310 | < 0.01 ms |
 | Boston, range 300 km | 216 km up | 0 | 0 | 0 |
 
+### Measured (the planet pyramid, Tokyo Station, 1600×900, frozen clock)
+
+The planet: 712.7 M solids, 1.33 M cells, 35 min on 16 threads; 41.4 M boxes kept, 1.5 GB.
+Levels 2–8 hold 33.0 M, 7.2 M, 1.05 M, 108 k, 8,276, 428 and 98 boxes.
+
+| range | eye | detail cells | far tiles | boxes loaded | buildings GPU |
+|---|---|---|---|---|---|
+| 9 km | 3.1 km up | 16 | 162 | 104,446 | 7.1 ms (4.4 ms without the air) |
+| 27 km | 9.3 km up | 0 | 145 | 47,043 | 0.51 ms |
+| 100 km | 51 km up | 0 | 54 | 1,636 | < 0.01 ms |
+| 400 km | 311 km up | 0 | 1 | 2 | 0 |
+
+Before the boxes, Tokyo at 27 km never finished streaming: its full prisms were tens of millions
+of vertices. ![Tokyo at four ranges](building_lod_tokyo.png)
+
 At 300 km nothing in Massachusetts covers a pixel: its largest structures are under 512 m, so
-level 7 is empty. The air costs 0.77 ms downtown, the overdrawn prisms each marching it. Taken per
-vertex instead it cost 1.87 ms, so it stays per pixel.
+level 7 is empty. The air costs 0.77 ms downtown and 2.7 ms over central Tokyo: every overdrawn
+prism pixel marches it (likely because the window chain's `discard` keeps the depth test late:
+unmeasured). Taken per
+vertex instead it cost 1.87 ms downtown, so it stays per pixel. The fix to try next is the
+overdraw itself: draw near to far, with an early-depth PSO wherever no window is open.
 
 ## 8. Open for the owner
 
