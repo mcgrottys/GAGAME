@@ -162,7 +162,8 @@ public:
         return m_layer->Footprint(a, b, c, d);
     }
     std::string Identity() const override {
-        return "gate2|(" + m_layer->Identity() + ")<(" + m_gate->Identity() + ")";   // M9ay value gate
+        // gate3 (2026-10-10): the tree's tile gate became the value gate too (TileTree GateTile).
+        return "gate3|(" + m_layer->Identity() + ")<(" + m_gate->Identity() + ")";
     }
     bool SampleAt(const DomainQuery& q, DomainValue& out) const override {
         if (!m_layer->SampleAt(q, out) || out.weight <= 0.0f) return false;

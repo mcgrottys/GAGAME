@@ -1804,8 +1804,17 @@ private:
         }
         out = std::move(lt);
         bool any = false;
+        // THE VALUE GATE, the per-sample law of GateSource::SampleAt said per texel: the gate tile's
+        // alpha is its OPINION (surveyed), its red the VALUE (the survey's water coverage), and the
+        // factor is (1 - opinion) + opinion x value -- no opinion passes the layer, an opinion's
+        // value decides. This multiplied by the alpha alone until 2026-10-10, so the mask blocked
+        // only where it had no tile and passed the seafloor's sand over surveyed LAND wherever the
+        // height said "under water" -- unseen in New England, whose heights are exact; at Tokyo
+        // Bay, over the 4.9 km ETOPO, the reclaimed shore came out sand (Mark).
         for (size_t i = 3; i < out.size(); i += 4) {
-            const uint32_t a = (uint32_t(out[i]) * uint32_t(gt[i]) + 127u) / 255u;
+            const uint32_t op = gt[i], val = gt[i - 3];
+            const uint32_t f = ((255u - op) * 255u + op * val + 127u) / 255u;
+            const uint32_t a = (uint32_t(out[i]) * f + 127u) / 255u;
             out[i] = static_cast<uint8_t>(a);
             any |= a != 0;
         }
