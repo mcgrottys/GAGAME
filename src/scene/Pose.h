@@ -27,9 +27,21 @@ namespace ga::scene {
 Motor FromCamera(const Camera& c);
 // motorPose: the motor back into a camera; any interpolated roll is dropped (horizon level).
 void ToCamera(const Motor& m, Camera& c);
+// THE LAT/LON SPELLING, ONE FUNCTION (it stood in three places): with lookAt, stand at the site and
+// aim at a second place; else the SITE MOTOR CHAIN, said in the camera's own axes (forward +x, up
+// +y, right -z) --
+//     M = T(site) R_site R_heading R_tilt R_roll T(-range along the forward)
+// R_site turns the forward onto the site's down and the own up onto its north; heading turns about
+// the site's up (clockwise from north, as a compass), tilt about the own right (0 looks at the
+// planet's centre, 90 at the horizon -- KML's tilt), roll about the forward, and range stands the
+// eye back along it, so (lat, lon, alt) is the point looked at. All zero: at the site, looking at
+// the centre, north up the screen. Planet frame; PlanetToFlatPose takes it into the session's.
+Camera LatLonPose(double lat, double lon, double altM, bool lookAt, double tLat, double tLon,
+                  double headingDeg, double tiltDeg, double rollDeg, double rangeM, double planetR);
 // orbPose: stand at (lat, lon, altM) on a planet of radius planetR, aim at a surface target.
 Camera OrbitPose(double lat, double lon, double altM, double tLat, double tLon, double planetR);
-// The globe start camera: at (lat, lon, altM), aimed at the planet's centre (--globe-cam).
+// The globe start camera: at (lat, lon, altM), aimed at the planet's centre (--globe-cam): the
+// site chain with every angle zero, north up the screen.
 Camera GlobeCamera(double lat, double lon, double altM, double planetR);
 // The one-frame conversions: a planet-frame pose into the tangent (flat) frame and back.
 Camera PlanetToFlatPose(const Camera& g, const double east0[3], const double up0[3],

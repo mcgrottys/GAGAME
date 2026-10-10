@@ -102,7 +102,7 @@ const Schema& Rail::PoseSchema() {
                   "below this twist the eye stands at fixedPoint + standOff instead (M10: an untwisted tower dives from above); 0 = never", R)
             .Bind("standOff", kPose.standOff, Q::Length, "m", "the stand-off from the fixed point", R)
             .Bind("turnOf", kPose.turnOf, "the pose this one is turned from about the local vertical", R)
-            .Bind("turnYaw", kPose.turnYaw, Q::Angle, "rad", "the turn (added to the yaw, as the camera's float)", R)
+            .Bind("turnYaw", kPose.turnYaw, Q::Angle, "rad", "the turn about the up, from the base's compass yaw", R)
             .Bind("turnPitch", kPose.turnPitch, Q::Angle, "rad", "the pitch the turned pose takes", R);
         return sc;
     }();
@@ -259,8 +259,11 @@ bool Rail::ResolvePose(const PoseDecl& d, const RailFrame& frame, RailPose& out,
         if (!b) return Refuse(why, m_path + ".poses." + d.name + ".turnOf: no pose '" + d.turnOf + "' before it");
         out = *b;
         out.name = d.name;
-        out.cam.yaw = b->cam.yaw + static_cast<float>(d.turnYaw);
-        out.cam.pitch = static_cast<float>(d.turnPitch);
+        // Said as before in the world's own axes: the base's compass yaw turned, the pitch set.
+        const DirectX::XMFLOAT3 bf = b->cam.Forward();
+        const double yaw = std::atan2(double(bf.z), double(bf.x)) + d.turnYaw, pitch = d.turnPitch;
+        const double f[3] = {std::cos(yaw) * std::cos(pitch), std::sin(pitch), std::sin(yaw) * std::cos(pitch)};
+        out.cam.Aim(f);
     } else {
         PoseSugar s;
         if (!ReadPoseSugar(d.at, m_path + ".poses." + d.name + ".at", s, why)) return false;
@@ -270,8 +273,8 @@ bool Rail::ResolvePose(const PoseDecl& d, const RailFrame& frame, RailPose& out,
                 c.SetFromCompass(s.x, s.alt, s.z, static_cast<float>(s.az), static_cast<float>(s.pitch));
                 break;
             case PoseSugar::Kind::Orbit: {
-                const Camera g = s.lookAt ? OrbitPose(s.lat, s.lon, s.alt, s.tLat, s.tLon, frame.frame.planetR)
-                                          : GlobeCamera(s.lat, s.lon, s.alt, frame.frame.planetR);
+                const Camera g = LatLonPose(s.lat, s.lon, s.alt, s.lookAt, s.tLat, s.tLon, s.heading, s.tilt,
+                                            s.roll, s.range, frame.frame.planetR);
                 c = PlanetToFlatPose(g, frame.frame.east, frame.frame.up, frame.frame.north,
                                      frame.frame.planetR);
                 break;
@@ -295,12 +298,9 @@ bool Rail::ResolvePose(const PoseDecl& d, const RailFrame& frame, RailPose& out,
                 c.pz = frame.portal->p[2] + d.standOff[2];
             }
             if (portalOk) {
+                const double radial[3] = {c.px, c.py + frame.frame.planetR, c.pz};
+                c.SetUp(radial);   // the up first: LookAt levels against it
                 c.LookAt(frame.portal->p[0], frame.portal->p[1], frame.portal->p[2]);
-                const double gy = c.py + frame.frame.planetR;
-                const double gl = std::sqrt(c.px * c.px + gy * gy + c.pz * c.pz);
-                c.upHint[0] = static_cast<float>(c.px / gl);
-                c.upHint[1] = static_cast<float>(gy / gl);
-                c.upHint[2] = static_cast<float>(c.pz / gl);
                 DirectX::XMFLOAT3 hf, hr, hu;
                 c.ViewBasis(hf, hr, hu);   // the helm's TRUE up: the roll the spiral carries
                 out.up0[0] = hu.x;
@@ -444,11 +444,7 @@ void Rail::AimCamera(const RailSample& s, Camera& cam) {
     cam.px = s.eye[0];
     cam.py = s.eye[1];
     cam.pz = s.eye[2];
-    cam.yaw = static_cast<float>(std::atan2(s.fwd[2], s.fwd[0]));
-    const float lim = 3.14159265f / 2.0f - 0.0017f;
-    cam.pitch = std::clamp(
-        static_cast<float>(std::atan2(s.fwd[1], std::sqrt(s.fwd[0] * s.fwd[0] + s.fwd[2] * s.fwd[2]))),
-        -lim, lim);
+    cam.Aim(s.fwd);
 }
 
 // ---- the evaluation ---------------------------------------------------------------------------------

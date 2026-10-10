@@ -332,8 +332,8 @@ bool ViewEyeCompass(const SceneView* v, Camera& cam) {
 bool ViewEyeOrbit(const SceneView* v, double planetR, Camera& cam) {
     scene::PoseSugar s;
     if (!ReadEye(v, s) || s.kind != scene::PoseSugar::Kind::Orbit) return false;
-    cam = s.lookAt ? scene::OrbitPose(s.lat, s.lon, s.alt, s.tLat, s.tLon, planetR)
-                   : scene::GlobeCamera(s.lat, s.lon, s.alt, planetR);
+    cam = scene::LatLonPose(s.lat, s.lon, s.alt, s.lookAt, s.tLat, s.tLon, s.heading, s.tilt, s.roll,
+                            s.range, planetR);
     return true;
 }
 
@@ -2336,29 +2336,35 @@ bool FrameLoop::Frame() {
                 constexpr double kOrbitRate = 0.006;   // rad per pixel
                 const double minAlt = -1.0e30;   // the ground is asked after, by clearance
                 const Camera before = cam;
+                // THE LOCAL VERTICAL AT THE PIVOT: on the planet (mode 1) the radial from its centre
+                // (0,-R,0), at every altitude and every place -- not the anchor's +y, which at Tokyo
+                // stands 97 degrees off and drove the gestures into the ground. A flat world keeps +y.
+                double up[3] = {0, 1, 0};
+                if (mode == 1) {
+                    up[0] = dragPivot[0];
+                    up[1] = dragPivot[1] + planetR;
+                    up[2] = dragPivot[2];
+                    const double pr = std::sqrt(up[0] * up[0] + up[1] * up[1] + up[2] * up[2]);
+                    up[0] /= pr; up[1] /= pr; up[2] /= pr;
+                }
                 if (dragMode == 3) {          // ALT: rotate about the local vertical
-                    double up[3] = {0, 1, 0};
-                    if (orbital) {            // ...which on a planet is the radial line
-                        up[0] = dragPivot[0];
-                        up[1] = dragPivot[1] + planetR;   // sphere centre (0,-R,0)
-                        up[2] = dragPivot[2];
-                        const double pr = std::sqrt(up[0] * up[0] + up[1] * up[1] +
-                                                    up[2] * up[2]);
-                        up[0] /= pr; up[1] /= pr; up[2] /= pr;
-                    }
                     cam.OrbitAboutLine(dragPivot, up, in.mouseDx * kOrbitRate, minAlt);
                 } else if (dragMode == 2) {   // SHIFT: tilt about the horizontal line
-                    const DirectX::XMFLOAT3 r = cam.Right();
-                    const double ax[3] = {r.x, 0.0, r.z};
+                    const DirectX::XMFLOAT3 r = cam.Right();   // the right, with its vertical part off
+                    const double rd = r.x * up[0] + r.y * up[1] + r.z * up[2];
+                    const double ax[3] = {r.x - rd * up[0], r.y - rd * up[1], r.z - rd * up[2]};
                     cam.OrbitAboutLine(dragPivot, ax, -in.mouseDy * kOrbitRate, minAlt);
-                } else if (orbital) {         // grab the GLOBE: one motor about the
-                                              // planet-centre line takes now -> grabbed
+                } else {                      // grab: the grabbed point stays under the cursor
                     double nowPt[3];
-                    if (pickGlobe(in.mouseX, in.mouseY, nowPt)) {
+                    const bool got = orbital ? pickGlobe(in.mouseX, in.mouseY, nowPt)
+                                             : pickGround(in.mouseX, in.mouseY, nowPt);
+                    if (got && mode == 1) {
+                        // One motor about the planet-centre line takes now -> grabbed (the globe's
+                        // own law, at every altitude: a pan over the ground is the same turn of
+                        // the planet, small).
                         const double R = planetR;
-                        double a[3] = {nowPt[0] / R, (nowPt[1] + R) / R, nowPt[2] / R};
-                        double b[3] = {dragPivot[0] / R, (dragPivot[1] + R) / R,
-                                       dragPivot[2] / R};
+                        double a[3] = {nowPt[0], nowPt[1] + R, nowPt[2]};
+                        double b[3] = {dragPivot[0], dragPivot[1] + R, dragPivot[2]};
                         double ax[3] = {a[1] * b[2] - a[2] * b[1],
                                         a[2] * b[0] - a[0] * b[2],
                                         a[0] * b[1] - a[1] * b[0]};
@@ -2367,20 +2373,16 @@ bool FrameLoop::Frame() {
                         const double cdot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
                         if (s > 1e-9) {
                             const double ctr[3] = {0, -planetR, 0};
-                            cam.OrbitAboutLine(ctr, ax,
-                                               std::atan2(s, cdot), -1.0e30);
+                            cam.OrbitAboutLine(ctr, ax, std::atan2(s, cdot), -1.0e30);
                         }
-                    }
-                } else {                      // grab-pan: the point stays under the cursor
-                    double nowPt[3];
-                    if (pickGround(in.mouseX, in.mouseY, nowPt)) {
+                    } else if (got) {         // a flat world: slide in its plane
                         cam.px += dragPivot[0] - nowPt[0];
                         cam.pz += dragPivot[2] - nowPt[2];
                     }
                 }
-                // The two rotations near the ground: one that took the eye under it is undone (the
-                // old flat-y floor, as a clearance along the eye's own radial).
-                if (!orbital && (dragMode == 2 || dragMode == 3) && groundClear(cam.px, cam.py, cam.pz) < 1.2) {
+                // A gesture that took the eye under the ground is undone (a clearance along the
+                // eye's own radial).
+                if (groundClear(cam.px, cam.py, cam.pz) < 1.2) {
                     cam = before;
                 }
             }
@@ -2401,9 +2403,8 @@ bool FrameLoop::Frame() {
             // SAVE THIS CAMERA. The five numbers SetFromCompass takes, inverted from
             // the live pose, appended to data/views.json under a generated name (rename
             // it in the file) and logged as the flags that reproduce it directly.
-            float az = 90.0f - cam.yaw * 180.0f / 3.14159265f;
-            az = std::fmod(std::fmod(az, 360.0f) + 360.0f, 360.0f);
-            const float pitchDeg = cam.pitch * 180.0f / 3.14159265f;
+            float az = 0.0f, pitchDeg = 0.0f;
+            cam.CompassOf(az, pitchDeg);
             std::vector<std::string> kept;
             {
                 std::ifstream vf("data/views.json", std::ios::binary);
@@ -2691,14 +2692,18 @@ bool FrameLoop::Frame() {
             fw[2] = f.z;
             portal.ApplyDir(-double(step), fw, fn);
             portal.ApplyDir(-double(step), drosteUp, un);
+            // The whole attitude through the step (its own up beside the forward), and the up it is
+            // held to: the similarity carries the frame, the pose does not change.
+            DirectX::XMFLOAT3 bf, br, bu;
+            cam.ViewBasis(bf, br, bu);
+            double cu[3] = {bu.x, bu.y, bu.z}, cun[3], gu[3];
+            portal.ApplyDir(-double(step), cu, cun);
+            portal.ApplyDir(-double(step), cam.upRef, gu);
             cam.px = Cn[0];
             cam.py = Cn[1];
             cam.pz = Cn[2];
-            cam.yaw = static_cast<float>(std::atan2(fn[2], fn[0]));
-            const float lim = 3.14159265f / 2.0f - 0.0017f;
-            cam.pitch = std::clamp(
-                static_cast<float>(std::atan2(fn[1], std::sqrt(fn[0] * fn[0] + fn[2] * fn[2]))),
-                -lim, lim);
+            cam.Orient(fn, cun);
+            cam.SetUp(gu);
             for (int i = 0; i < 3; ++i) drosteUp[i] = un[i];
             // Speed is a length per second: the new frame's metres are s^-step old ones.
             cam.speed = static_cast<float>(
@@ -2932,11 +2937,9 @@ bool FrameLoop::Frame() {
     // set sheds by altitude the way residency sheds by distance.
     const double altV = altOf(cam);
     if (mode == 1) {
-        const double gy = cam.py + planetR;   // anti-gravity = radial from (0,-R,0)
-        const double gl = std::sqrt(cam.px * cam.px + gy * gy + cam.pz * cam.pz);
-        cam.upHint[0] = static_cast<float>(cam.px / gl);
-        cam.upHint[1] = static_cast<float>(gy / gl);
-        cam.upHint[2] = static_cast<float>(cam.pz / gl);
+        // THE LOCAL UP, carried (Camera.h): anti-gravity = radial from (0,-R,0), and the M10 field
+        // below may turn it toward another ground. Transport once, at the end of this block.
+        double camUp[3] = {cam.px, cam.py + planetR, cam.pz};
         if (altV > 6000.0) {
             cam.speed = static_cast<float>(std::clamp(altV * 0.45, 60.0, 2.5e6));
         }
@@ -2961,7 +2964,7 @@ bool FrameLoop::Frame() {
             // grounds around the EYE, which beside the inner globe tipped the horizon ~30 degrees
             // while the hull ran level on its own sea (the Haulover portal demo's chase A/B).
             if (gn > 1e-30 && !helming()) {
-                for (int i = 0; i < 3; ++i) cam.upHint[i] = static_cast<float>(gU[i] / gn);
+                for (int i = 0; i < 3; ++i) camUp[i] = gU[i] / gn;
             }
             const double lam = gf.lambda;
             if (!drosteRailUp) {
@@ -3369,10 +3372,10 @@ bool FrameLoop::Frame() {
             // the root's low sky was standing in for the inner globe's black).
             globe->skyOwnAir = static_cast<float>(gf.ownShare);
         }
+        cam.Transport(camUp);
     } else {
-        cam.upHint[0] = 0.0f;
-        cam.upHint[1] = 1.0f;
-        cam.upHint[2] = 0.0f;
+        const double y[3] = {0.0, 1.0, 0.0};
+        cam.Transport(y);
     }
     if (mode == 1 && globe) {
         globe->reliefExagg = ReliefOf(Eye{0, &cam, 1.0f, 1.0f, camLevel});

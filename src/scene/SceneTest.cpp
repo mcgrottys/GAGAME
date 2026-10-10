@@ -94,6 +94,9 @@
 #include "scene/Rail.h"
 #include "scene/effects/SlicePlane.h"
 #include "scene/Pose.h"
+#include "sim/GlobeModel.h"
+
+#include <array>
 #include "scene/Props.h"
 #include "scene/SceneBuilder.h"
 #include "scene/SceneSchema.h"
@@ -777,35 +780,25 @@ bool RunSceneSelfTest() {
             while (a < -kPi) a += 2.0 * kPi;
             return a;
         };
-        // THE FINDING THIS GATE TURNED UP, and the reference the strict half needs.
-        // scene::FromCamera -- the session's poseMotor, moved verbatim in 5a -- writes
-        //     const double rAxis[3] = {std::sin(c.yaw), 0.0, -std::cos(c.yaw)};
-        // and c.yaw is a FLOAT, so std::sin resolves to the float overload: the roll axis is
-        // float-rounded, |rAxis| is 1 +- 1.2e-7, and the motor that comes back is not a unit
-        // rotor. Two consequences, both measured below and both pre-existing: the pose carries
-        // ~1e-7 rad of spurious ROLL (the axis is not quite perpendicular to the aim), and
-        // TransformPoint scales the eye by |r|^2, which moves the position by up to 1e-5 m at
-        // the bird pose's 1500 m altitude on one poseMotor/motorPose round trip. Nothing on the
-        // render path reads that motor today (the rasterizer takes yaw and pitch), so this step
-        // does NOT touch it -- the camera path is moved, not rewritten. The lambda below is the
-        // same construction with the axis in double: the pose the session means, and what the
-        // strict half of the gate holds View::Level against.
-        auto poseMotorExact = [kPi](const Camera& c) {
-            (void)kPi;
-            const double org[3] = {0.0, 0.0, 0.0};
-            const double yAxis[3] = {0.0, 1.0, 0.0};
-            const double y = static_cast<double>(c.yaw);
-            const double rAxis[3] = {std::sin(y), 0.0, -std::cos(y)};
-            return Motor::Translation(c.px, c.py, c.pz) *
-                   Motor::Rotation(org, rAxis, -static_cast<double>(c.pitch)) *
-                   Motor::Rotation(org, yAxis, -y);
+        // THE FINDING THIS GATE ONCE TURNED UP is retired with the angles: scene::FromCamera built
+        // its roll axis from a FLOAT yaw, so the motor was not a unit rotor (1e-7 rad of spurious
+        // roll, 1e-5 m on a round trip at 1500 m). The camera's attitude is now the rotor itself,
+        // in double (render/Camera.h), and FromCamera is T(p) R: the exact pose is the pose.
+        // (B) now asks what it always meant: the compass construction (two turns) IS the levelling
+        // law at the world's up -- a camera built by SetFromCompass at this pose's own aim.
+        auto poseMotorExact = [](const Camera& c) {
+            float az = 0.0f, pitch = 0.0f;
+            c.CompassOf(az, pitch);
+            Camera k;
+            k.SetFromCompass(c.px, c.py, c.pz, az, pitch);
+            return scene::FromCamera(k);
         };
         double maxAout = 0.0, maxAband = 0.0, maxAeye = 0.0, maxArel = 0.0;
         double maxB = 0.0, maxBeye = 0.0, maxBrel = 0.0, maxBfloat = 0.0;
         double maxC = 0.0, maxCeye = 0.0, maxCrel = 0.0, maxD = 0.0;
         int nA = 0, nB = 0, nBand = 0;
         auto probe = [&](const Camera& cam, double rollDeg) {
-            const double up[3] = {cam.upHint[0], cam.upHint[1], cam.upHint[2]};
+            const double up[3] = {cam.upRef[0], cam.upRef[1], cam.upRef[2]};
             const Motor base = scene::FromCamera(cam);
             const double org[3] = {0.0, 0.0, 0.0}, ex[3] = {1.0, 0.0, 0.0};
             // A BODY-FRAME roll about the aim: the thing the levelling must not be able to see.
@@ -885,11 +878,9 @@ bool RunSceneSelfTest() {
             c.SetFromCompass(e, alt, n, az, pitch);
             c.fovY = 55.0f * 3.14159265f / 180.0f;
             c.nearZ = 0.25f;
-            const double R = 6371000.0, gy = c.py + R;
-            const double gl = std::sqrt(c.px * c.px + gy * gy + c.pz * c.pz);
-            c.upHint[0] = static_cast<float>(c.px / gl);
-            c.upHint[1] = static_cast<float>(gy / gl);
-            c.upHint[2] = static_cast<float>(c.pz / gl);
+            const double R = 6371000.0;
+            const double radial[3] = {c.px, c.py + R, c.pz};
+            c.Transport(radial);   // the frame loop's own step: a compass pose is levelled to it
             return c;
         };
         for (const VP& vp : poses) {
@@ -911,13 +902,14 @@ bool RunSceneSelfTest() {
             c.px = (next01() * 2.0 - 1.0) * scale;
             c.py = (next01() * 2.0 - 1.0) * scale;
             c.pz = (next01() * 2.0 - 1.0) * scale;
-            c.yaw = static_cast<float>((next01() * 2.0 - 1.0) * kPi);
-            c.pitch = static_cast<float>((next01() * 2.0 - 1.0) * 89.0 * kPi / 180.0);
+            const double px = c.px, py = c.py, pz = c.pz;
+            c.SetFromCompass(px, py, pz, static_cast<float>((next01() * 2.0 - 1.0) * 180.0),
+                             static_cast<float>((next01() * 2.0 - 1.0) * 89.0));
             c.fovY = 55.0f * 3.14159265f / 180.0f;
             double u[3] = {next01() * 2.0 - 1.0, next01() * 2.0 - 1.0, next01() * 2.0 - 1.0};
             const double un = std::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
             if (un < 1e-6) continue;
-            for (int k = 0; k < 3; ++k) c.upHint[k] = static_cast<float>(u[k] / un);
+            c.SetUp(u);
             probe(c, (next01() * 2.0 - 1.0) * 30.0);
         }
         // (E) MotorOf inverts Placement::Rigid -- the sugar's road from a file to a pose. The
@@ -946,15 +938,56 @@ bool RunSceneSelfTest() {
             Camera back = c;
             v.ToCamera(back);
             opticsExact = opticsExact && back.fovY == c.fovY && back.nearZ == c.nearZ;
-            maxFang = (std::max)(maxFang,
-                                 std::fabs(wrapPi(static_cast<double>(back.yaw) - c.yaw)));
-            maxFang = (std::max)(maxFang,
-                                 std::fabs(wrapPi(static_cast<double>(back.pitch) - c.pitch)));
+            {   // the aim's angle across the boundary: atan2(|a x b|, a . b) of the rotors' forwards,
+                // in double (acos of a float dot turned a 1e-7 rounding into 2e-4 rad)
+                double fa[3] = {1, 0, 0}, fb[3] = {1, 0, 0};
+                back.rot.TransformDir(fa[0], fa[1], fa[2]);
+                c.rot.TransformDir(fb[0], fb[1], fb[2]);
+                const double cx = fa[1] * fb[2] - fa[2] * fb[1], cy = fa[2] * fb[0] - fa[0] * fb[2],
+                             cz = fa[0] * fb[1] - fa[1] * fb[0];
+                maxFang = (std::max)(maxFang, std::fabs(wrapPi(std::atan2(std::sqrt(cx * cx + cy * cy + cz * cz),
+                                                                         fa[0] * fb[0] + fa[1] * fb[1] + fa[2] * fb[2]))));
+            }
             const double a[3] = {back.px, back.py, back.pz};
             const double b[3] = {c.px, c.py, c.pz};
             const double df = maxAbs3(a, b);
             maxFeye = (std::max)(maxFeye, df);
             maxFrel = (std::max)(maxFrel, df / mag3(b));
+        }
+        {   // THE SITE CHAIN'S CONVENTIONS (Pose.h LatLonPose), held at a site and at its antipode-side
+            // twin 97 degrees round (Tokyo from the Merrimack): tilt 0 looks at the centre with north up
+            // the screen; tilt 90 looks at the horizon along the heading (0 north, 90 east); range
+            // stands the eye back along the forward; the eye's up is its radial.
+            for (const double* site : {std::array<double, 2>{42.8, -70.8}.data(), std::array<double, 2>{35.64, 139.79}.data()}) {
+                const double R = 6371000.0, d2r = kPi / 180.0;
+                double upS[3], eS[3], nS[3];
+                GlobeModel::LatLonDir(site[0], site[1], upS);
+                const double yl = std::sqrt(upS[0] * upS[0] + upS[2] * upS[2]);
+                eS[0] = -upS[2] / yl; eS[1] = 0.0; eS[2] = upS[0] / yl;
+                nS[0] = eS[1] * upS[2] - eS[2] * upS[1];
+                nS[1] = eS[2] * upS[0] - eS[0] * upS[2];
+                nS[2] = eS[0] * upS[1] - eS[1] * upS[0];
+                auto dot = [](const DirectX::XMFLOAT3& a, const double* b) { return double(a.x) * b[0] + double(a.y) * b[1] + double(a.z) * b[2]; };
+                DirectX::XMFLOAT3 f, r, u;
+                const Camera c0 = LatLonPose(site[0], site[1], 500.0, false, 0, 0, 0, 0, 0, 0, R);
+                c0.ViewBasis(f, r, u);
+                g.True(dot(f, upS) < -0.999999 && dot(u, nS) > 0.999999, "[view] site chain: all zero looks at the centre, north up");
+                const Camera cN = LatLonPose(site[0], site[1], 500.0, false, 0, 0, 0.0, 90.0, 0, 0, R);
+                const Camera cE = LatLonPose(site[0], site[1], 500.0, false, 0, 0, 90.0, 90.0, 0, 0, R);
+                g.True(dot(cN.Forward(), nS) > 0.999999 && dot(cE.Forward(), eS) > 0.999999,
+                       "[view] site chain: tilt 90 looks along the heading (0 north, 90 east)");
+                const Camera cR = LatLonPose(site[0], site[1], 0.0, false, 0, 0, 0.0, 45.0, 0, 1000.0, R);
+                double fr[3] = {1.0, 0.0, 0.0};   // the rotor's own forward, in double
+                cR.rot.TransformDir(fr[0], fr[1], fr[2]);
+                const double back = std::sqrt(std::pow(cR.px + fr[0] * 1000.0 - upS[0] * R, 2) +
+                                              std::pow(cR.py + fr[1] * 1000.0 - upS[1] * R, 2) +
+                                              std::pow(cR.pz + fr[2] * 1000.0 - upS[2] * R, 2));
+                g.True(back < 1e-6, "[view] site chain: range stands the eye back along the forward");
+                const Camera cL = LatLonPose(site[0], site[1], 500.0, false, 0, 0, 0.0, 30.0, 20.0, 0, R);
+                cL.ViewBasis(f, r, u);
+                (void)d2r;
+                g.True(std::fabs(dot(r, upS)) > 0.1, "[view] site chain: a roll is kept, not levelled away");
+            }
         }
         const View probeView("probe");
         Log("[view] Level over %d poses (%d random, %d strict, %d inside ViewBasis's blend):",
@@ -1240,11 +1273,7 @@ bool RunSceneSelfTest() {
                 out.px = c[0];
                 out.py = c[1];
                 out.pz = c[2];
-                out.yaw = static_cast<float>(std::atan2(fw[2], fw[0]));
-                const float lim = 3.14159265f / 2.0f - 0.0017f;
-                out.pitch = std::clamp(
-                    static_cast<float>(std::atan2(fw[1], std::sqrt(fw[0] * fw[0] + fw[2] * fw[2]))),
-                    -lim, lim);
+                out.Aim(fw);   // Rail::AimCamera's own step
                 level = static_cast<int>(n);
             }
             void diveAt(double u, Camera& out, int& level, double up[3]) const {
@@ -1425,13 +1454,9 @@ bool RunSceneSelfTest() {
                 drosteHelmUp[1] = 1.0;
                 drosteHelmUp[2] = 0.0;
                 if (portal->Valid()) {
+                    const double radial[3] = {drosteHelm.px, drosteHelm.py + planetR, drosteHelm.pz};
+                    drosteHelm.SetUp(radial);   // the up first: LookAt levels against it
                     drosteHelm.LookAt(portal->p[0], portal->p[1], portal->p[2]);
-                    const double gy = drosteHelm.py + planetR;
-                    const double gl = std::sqrt(drosteHelm.px * drosteHelm.px + gy * gy +
-                                                drosteHelm.pz * drosteHelm.pz);
-                    drosteHelm.upHint[0] = static_cast<float>(drosteHelm.px / gl);
-                    drosteHelm.upHint[1] = static_cast<float>(gy / gl);
-                    drosteHelm.upHint[2] = static_cast<float>(drosteHelm.pz / gl);
                     DirectX::XMFLOAT3 hf, hr, hu;
                     drosteHelm.ViewBasis(hf, hr, hu);   // the helm's TRUE up: the roll the spiral carries
                     drosteHelmUp[0] = hu.x;
@@ -1442,8 +1467,12 @@ bool RunSceneSelfTest() {
                     }
                 }
                 drosteHelmBack = drosteHelm;
-                drosteHelmBack.yaw = drosteHelm.yaw + 3.14159265f;
-                drosteHelmBack.pitch = -0.07f;
+                {   // Rail::ResolvePose's turnOf, the file's numbers
+                    const DirectX::XMFLOAT3 bf = drosteHelm.Forward();
+                    const double yaw = std::atan2(double(bf.z), double(bf.x)) + 3.14159265, pitch = -0.07;
+                    const double f[3] = {std::cos(yaw) * std::cos(pitch), std::sin(pitch), std::sin(yaw) * std::cos(pitch)};
+                    drosteHelmBack.Aim(f);
+                }
                 if (portal->Valid() && railDrosteOut) {
                     Camera cRise;   // rising over the harbor, looking back east at the entrance
                     cRise.SetFromCompass(-900.0, 450.0, -60.0, 84.0f, -17.0f);
@@ -1755,10 +1784,10 @@ bool RunSceneSelfTest() {
                 g.True(rail.Tower() == rc.tower, "[rail] the file says whether it is a tower rail");
                 const bool tower = rail.Tower() && portal.Valid();
                 auto sameCam = [&](const Camera& a, const Camera& b) {
-                    return a.px == b.px && a.py == b.py && a.pz == b.pz && a.yaw == b.yaw &&
-                           a.pitch == b.pitch && a.fovY == b.fovY && a.nearZ == b.nearZ &&
-                           a.speed == b.speed && a.upHint[0] == b.upHint[0] &&
-                           a.upHint[1] == b.upHint[1] && a.upHint[2] == b.upHint[2];
+                    return a.px == b.px && a.py == b.py && a.pz == b.pz && a.rot.s == b.rot.s &&
+                           a.rot.r23 == b.rot.r23 && a.rot.r31 == b.rot.r31 && a.rot.r12 == b.rot.r12 &&
+                           a.fovY == b.fovY && a.nearZ == b.nearZ && a.speed == b.speed &&
+                           a.upRef[0] == b.upRef[0] && a.upRef[1] == b.upRef[1] && a.upRef[2] == b.upRef[2];
                 };
                 uint64_t bad = 0, n = 0;
                 auto probeAt = [&](double t) {

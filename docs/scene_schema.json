@@ -25,7 +25,7 @@
   ],
   "placement": [
     { "spelling": "compass", "keys": ["x", "alt", "z", "az", "pitch"], "doc": "the flat world frame in metres and compass degrees: Camera::SetFromCompass, then FromCamera" },
-    { "spelling": "orbit", "keys": ["lat", "lon", "alt", "lookAt"], "doc": "the orbit key: degrees and metres above the planet; lookAt aims at a second lat/lon" },
+    { "spelling": "orbit", "keys": ["lat", "lon", "alt", "lookAt" | "heading", "tilt", "roll", "range"], "doc": "a place on the planet in degrees and metres: lookAt aims at a second lat/lon, or the site's own frame turns the camera (scene::LatLonPose: all zero looks at the planet's centre, north up; heading clockwise from north, tilt 90 = the horizon, range stands the eye back from the place)" },
     { "spelling": "motor", "keys": ["motor.re", "motor.du"], "doc": "the PGA motor outright (core/Pga.h), for a pose no sugar spells" },
     { "spelling": "similarity", "keys": ["similarity.p", "similarity.s", "similarity.axis", "similarity.twistDeg"], "doc": "the Cl(4,1) similarity (core/Space.h Placement), the Droste link's own spelling" }
   ],

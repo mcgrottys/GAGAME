@@ -264,6 +264,9 @@ struct PoseSugar {
     double x = 0.0, alt = 0.0, z = 0.0, az = 90.0, pitch = 0.0;   // {x, alt, z, az, pitch}
     double lat = 0.0, lon = 0.0, tLat = 0.0, tLon = 0.0;          // {lat, lon, alt[, lookAt]}
     bool lookAt = false;
+    // ...or the site's own frame (Pose.h LatLonPose): degrees and metres, all zero = at the site,
+    // looking at the planet's centre, north up the screen.
+    double heading = 0.0, tilt = 0.0, roll = 0.0, range = 0.0;
 };
 bool ReadPoseSugar(const JsonValue& sugar, const std::string& path, PoseSugar& out,
                    std::string* why);
