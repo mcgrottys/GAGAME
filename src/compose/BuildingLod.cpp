@@ -81,9 +81,10 @@ LodBox ToBox(const Moments& m, double latc, double lonc) {
     o.lon7 = static_cast<int32_t>(std::lround((lonc + b.c[0] / mx) * 1e7));
     o.zc = static_cast<float>(b.c[2]);
     o.hz = static_cast<float>(b.half[2]);
-    o.a1 = static_cast<float>(b.half[0]);
-    o.a2 = static_cast<float>(b.half[1]);
+    o.a1 = static_cast<float>(b.spread[0]);
+    o.a2 = static_cast<float>(b.spread[1]);
     o.heading = static_cast<float>(b.heading);
+    o.cover = static_cast<float>(b.cover);
     return o;
 }
 
@@ -114,11 +115,11 @@ void LodUnpack(const LodBuilding& b, double& lat, double& lon, double& zc, doubl
 }
 
 Moments LodBoxMoments(double lat, double lon, double zc, double hz, double a1, double a2, double heading,
-                      double latc, double lonc) {
+                      double latc, double lonc, double cover) {
     // The box's own law (BuildingMoments: a uniform box of half-width a has variance a^2/3), set
     // at its centroid in the frame about (latc, lonc).
     Moments m;
-    m.m = 8.0 * a1 * a2 * hz;
+    m.m = 8.0 * a1 * a2 * hz * cover;
     if (!(m.m > 0.0)) return Moments{};
     const double mx = std::cos(latc * kDeg) * kR * kDeg, my = kR * kDeg;
     const double c[3] = {(lon - lonc) * mx, (lat - latc) * my, zc};
@@ -311,7 +312,7 @@ bool BuildBuildingLod(const BuildingStack& stack, const std::string& dir, const 
         }
     }
     std::ostringstream m;
-    m << "{\n  \"format\": \"GALOD02\",\n  \"lmin\": " << lod::kLmin << ",\n  \"lmax\": " << lod::kLmax
+    m << "{\n  \"format\": \"GALOD03\",\n  \"lmin\": " << lod::kLmin << ",\n  \"lmax\": " << lod::kLmax
       << ",\n  \"detailDeg\": " << lod::kDetailDeg << ",\n  \"sources\": [";
     for (size_t k = 0; k < stack.Sources(); ++k) m << (k ? ", " : "") << "\"" << stack.Name(k) << "\"";
     m << "],\n  \"cells\": " << st.cells << ",\n  \"solids\": " << st.solids << ",\n  \"kept\": " << st.kept << "\n}\n";
@@ -333,8 +334,8 @@ bool BuildingLodFile::Open(const std::string& dir, std::string* why) {
     ss << f.rdbuf();
     std::string err;
     const JsonValue m = JsonParser::Parse(ss.str(), &err);
-    if (!err.empty() || m.Str("format") != "GALOD02") {
-        if (why) *why = "not a GALOD02 manifest (rebuild it: --tool building-lod)" + (err.empty() ? "" : ": " + err);
+    if (!err.empty() || m.Str("format") != "GALOD03") {
+        if (why) *why = "not a GALOD03 manifest (rebuild it: --tool building-lod)" + (err.empty() ? "" : ": " + err);
         return false;
     }
     for (int L = lod::kLmin; L <= lod::kLmax; ++L) {

@@ -31,11 +31,13 @@
 namespace ga {
 
 #pragma pack(push, 1)
-struct LodBox {             // 28 bytes: a moment box placed on the planet
+struct LodBox {             // 32 bytes: a FOLD placed on the planet -- the spread of its mass, and
+                            // how much of the spread's rectangle its footprints cover
     int32_t lat7, lon7;     // centroid, degrees x 1e7
     float zc;               // centroid height above the ground (m)
-    float hz, a1, a2;       // half-extents: up, long, short (m)
+    float hz, a1, a2;       // half-extents: up, and the spread's long and short, sqrt(3 lambda) (m)
     float heading;          // radians, the long axis from east toward north
+    float cover;            // footprint area / (4 a1 a2): the volume is 8 a1 a2 hz cover
 };
 struct LodBuilding {        // 20 bytes: one building's own box
     int32_t lat7, lon7;
@@ -44,7 +46,7 @@ struct LodBuilding {        // 20 bytes: one building's own box
     int8_t dcx, dcy;        // its detail cell (the streaming's 0.05 deg cell, by its first point) minus
                             // the centroid's cell
 };
-struct LodNode {            // 80 bytes
+struct LodNode {            // 88 bytes
     int32_t x, y;           // the quad: [x, x+1) x [y, y+1) of QuadDeg(L)
     int64_t ownFirst;       // its own buildings in B<L>.bin
     uint32_t ownCount;
@@ -100,9 +102,11 @@ private:
 // Decoding, shared by the reader and the gate.
 void LodUnpack(const LodBuilding& b, double& lat, double& lon, double& zc, double& hz, double& a1, double& a2,
                double& heading, int& cx, int& cy);
-// A box's own moments in a frame about (latc, lonc): x east, y north (metres), z up.
+// A box's own moments in a frame about (latc, lonc): x east, y north (metres), z up. A FOLD's (a1, a2
+// its spread, `cover` below 1) is the mass of its footprints spread so: volume 8 a1 a2 hz cover,
+// variance a^2/3 -- exact, where the area-kept box would fold a narrower mass than the real one.
 struct Moments;
 Moments LodBoxMoments(double lat, double lon, double zc, double hz, double a1, double a2, double heading,
-                      double latc, double lonc);
+                      double latc, double lonc, double cover = 1.0);
 
 }  // namespace ga

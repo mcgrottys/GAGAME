@@ -96,12 +96,19 @@ public:
     static constexpr uint64_t kRetireFrames = 4;
     static constexpr int kPageInFlight = 6;
     static constexpr double kQuadPixels = 4.0;          // a node's fold is drawn below this width
+    // A fold is drawn over its mass's spread, its footprints' coverage c shrinking it by c^kFoldShrink:
+    // 1/2 keeps the footprint's area (a lattice of gaps in a dense city, which aliases), 0 fills the
+    // spread as one mass at its roof height (what a dense block is, seen from far and low).
+    static constexpr double kFoldShrink = 0.0;
+    // ...and it is drawn with its coverage as its alpha, far to near: a fold shows roof over the share
+    // of its spread its footprints cover and the ground through the rest, so its colour is the patch's
+    // own average, not a slab of roof.
     static constexpr uint64_t kPageBytes = 1024ull << 20;   // the loaded pages' budget (CPU)
     static constexpr uint32_t kMaxBoxes = 2000000;
 
     // Mirrors `struct BuildingBox` in shaders/Buildings.hlsl: a moment box about the walk's origin.
     struct Box {
-        float c[3], pad0;   // centre, metres from the walk's origin, flat frame
+        float c[3], alpha;  // centre, metres from the walk's origin, flat frame; the share it covers
         float u[3], pad1;   // the long half-axis (direction x half-extent)
         float v[3], pad2;   // the short half-axis
         float w[3], pad3;   // the up half-axis
@@ -123,6 +130,7 @@ private:
     struct RtBox {
         double p[3];                    // centre, flat frame
         float u[3], v[3], w[3];         // half-axes
+        float alpha = 1.0f;             // a fold's coverage: 1 for a building
         bool valid = false;
     };
     struct RtNode {

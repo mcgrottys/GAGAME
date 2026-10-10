@@ -56,7 +56,9 @@ Moments PrismMoments(const std::vector<std::vector<double>>& ringsXY, double bot
 struct MomentBox {
     double c[3] = {0, 0, 0};   // centroid
     double heading = 0.0;      // radians, of the long axis from +x toward +y
-    double half[3] = {0, 0, 0};   // half-extents along (long, short, up)
+    double half[3] = {0, 0, 0};   // half-extents along (long, short, up), the footprint's area kept
+    double spread[2] = {0, 0};    // the horizontal half-extents of the mass's own spread, sqrt(3 lambda)
+    double cover = 1.0;           // the footprint's share of the spread's rectangle: half = spread sqrt(cover)
     double Radius() const;     // circumscribed: the size that picks the level
 };
 MomentBox BoxOf(const Moments& mo);

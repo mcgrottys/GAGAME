@@ -107,9 +107,12 @@ MomentBox BoxOf(const Moments& mo) {
     const double l1 = std::max(mid + dev, 0.0), l2 = std::max(mid - dev, 0.0);
     b.half[2] = std::sqrt(3.0 * std::max(czz, 0.0));
     double a1 = std::sqrt(3.0 * l1), a2 = std::sqrt(3.0 * l2);
+    b.spread[0] = a1;
+    b.spread[1] = a2;
     // The footprint keeps its area: volume = 8 a1 a2 hz.
     if (a1 * a2 > 0.0 && b.half[2] > 0.0) {
         const double k = std::sqrt(mo.m / (8.0 * a1 * a2 * b.half[2]));
+        b.cover = k * k;
         a1 *= k;
         a2 *= k;
     }

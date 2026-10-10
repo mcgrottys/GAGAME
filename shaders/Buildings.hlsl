@@ -29,6 +29,7 @@ struct VsOut {
     float3 col : COLOR0;
     float3 n : NORMAL0;
     float3 rel : TEXCOORD0;   // eye-relative: the window chain's slab test
+    float alpha : TEXCOORD1;  // a fold's coverage (1 for a building)
 };
 
 static const float3 kPalette[4] = {
@@ -45,6 +46,7 @@ VsOut VsMain(uint vid : SV_VertexID) {
     o.pos = mul(float4(o.rel, 1.0f), gViewProj);
     o.n = v.n;
     o.col = kPalette[uint(v.kind) & 3u] * gBdOrigin.w;
+    o.alpha = 1.0f;
     return o;
 }
 
@@ -52,7 +54,7 @@ VsOut VsMain(uint vid : SV_VertexID) {
 // half-axes about a centre (metres from its TILE's origin), 36 vertices a box from SV_VertexID. The
 // buffer is bound at the same slot as the prisms' (one draw reads one of them).
 struct BuildingBox {
-    float3 c; float pad0;
+    float3 c; float alpha;  // the share of its spread a fold's footprints cover (1 for a building)
     float3 u; float pad1;   // long half-axis
     float3 v; float pad2;   // short half-axis
     float3 w; float pad3;   // up half-axis
@@ -75,6 +77,7 @@ VsOut VsBox(uint vid : SV_VertexID) {
     o.n = s * A / max(length(A), 1e-6f);   // a box with no width keeps a finite normal
     const bool roof = ax == 2u && s > 0.0f;
     o.col = kPalette[roof ? 1u : 0u] * gBdOrigin.w;
+    o.alpha = b.alpha;
     return o;
 }
 
@@ -96,5 +99,5 @@ float4 PsMain(VsOut i) : SV_Target {
     // ...and seen through THE AIR IN FRONT OF IT, the ground's own law: a box 60 km off fades into
     // the same haze as the land under it, where it stood out at full contrast.
     const float range = length(i.rel);
-    return float4(AerialPerspective(lit, i.rel / max(range, 1e-3f), range), 1.0f);
+    return float4(AerialPerspective(lit, i.rel / max(range, 1e-3f), range), i.alpha);
 }

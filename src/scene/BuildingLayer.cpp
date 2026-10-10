@@ -60,7 +60,10 @@ bool BuildingLayer::BuildPso(Gpu& gpu, ShaderCompiler& sc) {
     d.depthTest = true;
     d.depthWrite = true;   // reversed-Z GREATER, the default comparison
     const bool ok = hal::Reload(m_pso, [&] { return hal::BuildGraphics(gpu, d, "buildings"); }, "buildings");
-    d.vs = sc.Compile(path, L"VsBox", L"vs_6_0");   // the far boxes: the same light, the same depth
+    d.vs = sc.Compile(path, L"VsBox", L"vs_6_0");   // the tree's boxes: the same light, the same depth,
+    d.blend = true;                                  // a fold's coverage as its alpha
+    d.srcBlend = D3D12_BLEND_SRC_ALPHA;
+    d.dstBlend = D3D12_BLEND_INV_SRC_ALPHA;
     return hal::Reload(m_psoBox, [&] { return hal::BuildGraphics(gpu, d, "buildings.boxes"); }, "buildings.boxes") && ok;
 }
 
@@ -431,7 +434,9 @@ void BuildingLayer::LoadPage(const PageKey& k) {
         if (!shared->cancel.load() && lodf->Read(L, lp, nodes, blds)) {
             page->L = L;
             // A box stood on the composed ground at its centroid, on the prisms' own axes.
-            auto stand = [&](double lat, double lon, double zc, double hz, double a1, double a2, double hd, RtBox& o) {
+            auto stand = [&](double lat, double lon, double zc, double hz, double a1, double a2, double hd, RtBox& o,
+                             double alpha = 1.0) {
+                o.alpha = static_cast<float>(std::clamp(alpha, 0.0, 1.0));
                 if (!(hz > 0.0)) return;
                 double p[3], e[3], n[3], u[3];
                 PointFrame(place, lat, lon, ground(lat, lon) + zc, p, e, n, u);
@@ -472,9 +477,10 @@ void BuildingLayer::LoadPage(const PageKey& k) {
                 auto fold = [&](const LodBox& b, RtBox& o, Key& cell) {
                     if (!(b.hz > 0.0f)) return;
                     const double lat = b.lat7 * 1e-7, lon = b.lon7 * 1e-7;
-                    stand(lat, lon, b.zc, b.hz, b.a1, b.a2, b.heading, o);
+                    const double s = std::pow((std::max)(double(b.cover), 1e-6), kFoldShrink);
+                    stand(lat, lon, b.zc, b.hz, b.a1 * s, b.a2 * s, b.heading, o, b.cover / (s * s));
                     cell = CellOf(lat, lon);
-                    all += LodBoxMoments(lat, lon, b.zc, b.hz, b.a1, b.a2, b.heading, latc, lonc);
+                    all += LodBoxMoments(lat, lon, b.zc, b.hz, b.a1, b.a2, b.heading, latc, lonc, b.cover);
                 };
                 fold(n.own, r.own, r.ownCell);
                 fold(n.desc, r.desc, r.descCell);
@@ -484,7 +490,8 @@ void BuildingLayer::LoadPage(const PageKey& k) {
                     constexpr double kDeg = 3.14159265358979323846 / 180.0;
                     const double mx = std::cos(latc * kDeg) * 6371008.8 * kDeg, my = 6371008.8 * kDeg;
                     const double lat = latc + mb.c[1] / my, lon = lonc + mb.c[0] / mx;
-                    stand(lat, lon, mb.c[2], mb.half[2], mb.half[0], mb.half[1], mb.heading, r.all);
+                    const double s = std::pow((std::max)(mb.cover, 1e-6), kFoldShrink);
+                    stand(lat, lon, mb.c[2], mb.half[2], mb.spread[0] * s, mb.spread[1] * s, mb.heading, r.all, mb.cover / (s * s));
                     r.allCell = CellOf(lat, lon);
                     top = static_cast<float>(mb.c[2] + mb.half[2]);
                 }
@@ -618,6 +625,7 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
             Box x{};
             for (int i = 0; i < 3; ++i) {
                 x.c[i] = static_cast<float>(b.p[i] - in.eye[i]);
+                x.alpha = b.alpha;
                 x.u[i] = b.u[i];
                 x.v[i] = b.v[i];
                 x.w[i] = b.w[i];
@@ -725,6 +733,10 @@ void BuildingLayer::TreeFrame(const FrameContext& ctx, double latDeg, double lon
                 }
             }
         }
+        // Far to near: the folds blend over what stands behind them (painter's order, depth still tested).
+        std::sort(out.begin(), out.end(), [](const Box& a, const Box& b) {
+            return a.c[0] * a.c[0] + a.c[1] * a.c[1] + a.c[2] * a.c[2] > b.c[0] * b.c[0] + b.c[1] * b.c[1] + b.c[2] * b.c[2];
+        });
         w.count = static_cast<uint32_t>(out.size());
         if (w.count && !shared->cancel.load()) {
             const uint64_t bytes = out.size() * sizeof(Box);
