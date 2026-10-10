@@ -137,7 +137,6 @@ built the same evening by the same tool over the planet harvest
 63.6 GB, harvested in 15 min): 2,530,247 cells, 712,436,745 solids and 277,476,474 ribbon pieces
 (1,118,583 tunnels left out) in 59 min, 120 GB; the market still from it is pixel for pixel the
 test tree's.
-268,036,135 ways in 2,437,980 cells, 63.6 GB, harvested in 15 min).
 
 ## 6. What is derived, and not yet built
 
