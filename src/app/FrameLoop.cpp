@@ -1659,7 +1659,20 @@ std::optional<int> FrameLoop::Session() {
         const double b = cam.px * d[0] + oy * d[1] + cam.pz * d[2];
         const double c = cam.px * cam.px + oy * oy + cam.pz * cam.pz - planetR * planetR;
         const double disc = b * b - c;
-        if (disc < 0.0) return false;
+        if (disc < 0.0) {
+            // Past the limb: the sphere's point nearest the ray (the ray's closest approach to the
+            // centre, pushed out to the surface), so a drag that leaves the disc keeps spinning the
+            // planet instead of stopping dead at its edge.
+            const double t = -b;
+            if (t <= 0.0) return false;
+            double q[3] = {cam.px + d[0] * t, cam.py + planetR + d[1] * t, cam.pz + d[2] * t};
+            const double n = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
+            if (n < 1e-9) return false;
+            out[0] = q[0] / n * planetR;
+            out[1] = q[1] / n * planetR - planetR;
+            out[2] = q[2] / n * planetR;
+            return true;
+        }
         const double t = -b - std::sqrt(disc);
         if (t <= 0.0) return false;
         out[0] = cam.px + d[0] * t;
