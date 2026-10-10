@@ -71,6 +71,7 @@ add_executable(gagame
   src/compose/TreePruneTest.cpp
   src/compose/TileTreeTest.cpp
   src/compose/Sources.cpp
+  src/compose/BuildingMoments.cpp
   src/compose/BuildingSolids.cpp
   src/compose/BuildingSolidsTest.cpp
   src/compose/RasterFileSource.cpp
