@@ -5,6 +5,7 @@
 #include "hal/GpuProfiler.h"
 
 #include "compose/DomainSource.h"
+#include "compose/BuildingField.h"
 #include "sim/BathyModel.h"
 
 #include "hal/PixEvents.h"
@@ -1160,6 +1161,7 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
     if (wp.colorT >= 0) emit(wp.colorT, f, m, tu0, tv0, tu1, tv1, nearW);
     if (wp.hgtT >= 0) emit(wp.hgtT, f, m, tu0, tv0, tu1, tv1, nearW);
     if (wp.maskT >= 0) emit(wp.maskT, f, m, tu0, tv0, tu1, tv1, nearW);
+    if (wp.bldT >= 0) emit(wp.bldT, f, m, tu0, tv0, tu1, tv1, nearW);
     if (st) st->cube += (wp.surfT >= 0) + (wp.normT >= 0) + (wp.colorT >= 0) + (wp.hgtT >= 0) + (wp.maskT >= 0);
     // PHASE A2: EVERY WORLD THAT SEES THE LEAF ASKS IT OF ITS OWN WINDOWS (D5): the walk's worlds
     // whose bit is in `seen`, each its slot's slices; a walk of no shared worlds asks for its own.
@@ -1281,6 +1283,12 @@ void LeafWants(const WalkParams& wp, int face, double u0, double v0, double size
                 if (wp.colorT >= 0) emit(wp.colorT, slice, bm, r0, q0, r1, q1, nearW);
                 if (wp.maskT >= 0) emit(wp.maskT, slice, bm, r0, q0, r1, q1, nearW);
                 if (st) st->win += (wp.colorT >= 0) + (wp.maskT >= 0);
+                // The buildings under a pixel: the same mip, but never finer than the smallest
+                // building (BuildingFieldSource::FloorRungs) -- finer, the field is zero.
+                if (wp.bldT >= 0) {
+                    const int fm = (std::max)(int(bm), wp.wnRung[wset][b] - wp.bldFloorRungs);
+                    if (fm <= 3) emit(wp.bldT, slice, uint32_t(fm), r0, q0, r1, q1, nearW);
+                }
                 // PHASE B2: the height on the same windows, at the same mip but never finer than its
                 // finest read (kCsHeightLodFloor: rung 9), and none past the floor.
                 if (wp.hgtT >= 0 && wp.hgtWindows) {
@@ -1583,6 +1591,7 @@ void GlobeLayer::SetSurface(const SurfaceFrame* s) {
     m_surface = s;
     m_radius = s->planetR;
     m_maskT = s->maskT;   // M9ay: the survey mask pages (same slices as the colour)
+    m_bldT = s->bldT;
     m_colorT = s->colorT;
     m_hgtT = s->hgtT;
 }
@@ -1631,6 +1640,8 @@ GlobeLayer::WalkParams GlobeLayer::CaptureWalk(const Camera& cam, float viewport
     wp.hgtT = m_hgtT;
     wp.hgtWindows = m_surface && m_surface->hgtWindows;
     wp.maskT = m_maskT;
+    wp.bldT = m_bldT;
+    wp.bldFloorRungs = BuildingFieldSource::FloorRungs(1.5707963267948966 * m_radius / double(Lattice::kFaceDim));
     static_assert(WalkParams::kBlocks == SurfaceFrame::kMaxRanks, "a node asks of every rank");
     static_assert(WalkParams::kSets == SurfaceFrame::kWindowSets, "the walk reads every window set");
     // PHASE A3: the set each slot claimed this frame (SurfaceFrame::Claim), as many as the table has.

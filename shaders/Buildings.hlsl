@@ -14,6 +14,9 @@
 
 cbuffer BuildingCb : register(b1) {
     float4 gBdOrigin;   // xyz = the cell's origin relative to the eye (m), w = brightness
+    float4 gBdTime;     // x = the layer's now (s), y = a page's fade-in (s); the boxes' and shapes' draws
+    uint4 gBdMesh;      // the shapes' draw: x first instance, y first task (float4 rows of the walk
+                        // buffer), z tasks, w the shape pool's heap slot (compose/BuildingShape.h)
 };
 
 struct BuildingVertex {
@@ -29,7 +32,7 @@ struct VsOut {
     float3 col : COLOR0;
     float3 n : NORMAL0;
     float3 rel : TEXCOORD0;   // eye-relative: the window chain's slab test
-    float alpha : TEXCOORD1;  // a fold's coverage (1 for a building)
+    float alpha : TEXCOORD1;  // a far box fading in (1 for a prism)
 };
 
 static const float3 kPalette[4] = {
@@ -50,12 +53,12 @@ VsOut VsMain(uint vid : SV_VertexID) {
     return o;
 }
 
-// THE FAR BOXES (docs/BUILDING_LOD.md): a building past the detail cells as its moment box, three
+// THE FAR BOXES (docs/BUILDING_LOD.md): a building past the detail cells as its own box, three
 // half-axes about a centre (metres from its TILE's origin), 36 vertices a box from SV_VertexID. The
 // buffer is bound at the same slot as the prisms' (one draw reads one of them).
 struct BuildingBox {
-    float3 c; float alpha;  // the share of its spread a fold's footprints cover (1 for a building)
-    float3 u; float pad1;   // long half-axis
+    float3 c; float alpha;  // its fade-in: (pixels - lodPixels) / lodPixels, up to 1
+    float3 u; float landed; // long half-axis; its page's landing on the layer's clock (s)
     float3 v; float pad2;   // short half-axis
     float3 w; float pad3;   // up half-axis
 };
@@ -77,8 +80,99 @@ VsOut VsBox(uint vid : SV_VertexID) {
     o.n = s * A / max(length(A), 1e-6f);   // a box with no width keeps a finite normal
     const bool roof = ax == 2u && s > 0.0f;
     o.col = kPalette[roof ? 1u : 0u] * gBdOrigin.w;
-    o.alpha = b.alpha;
+    // A page arrives whole; its buildings come in over gBdTime.y from its landing, not in one frame.
+    o.alpha = b.alpha * saturate((gBdTime.x - b.landed) / max(gBdTime.y, 1e-3f));
     return o;
+}
+
+// THE BUILDINGS' OWN FORMS (compose/BuildingShape.h, GALOD04): one group a TASK of the walk's --
+// up to 32 edges of a building's walls, or up to 64 of its roof's triangles -- extruded here from the
+// footprint the shape pool holds, so a building is the solid it is at every distance, never a box.
+// The walk buffer (t0): instances of 4 rows (c ground under the centroid, alpha | east, landed |
+// north, shape address | up, -) about the walk's origin, then the tasks two a row (instance, code:
+// bit 31 roof, the rest the chunk).
+// Both read as INTEGERS: a word of two small 16-bit numbers is a denormal as a float, and a float
+// load may flush it to zero -- a roof triangle on vertex 0 collapsed, an instance index lost.
+StructuredBuffer<uint4> gWalk : register(t0, space0);
+StructuredBuffer<uint4> gShapePool[] : register(t0, space7);   // the heap's buffers (gWorlds' range)
+uint ShapeU32(uint b) {
+    const uint4 q = gShapePool[gBdMesh.w][b >> 4];
+    const uint k = (b >> 2) & 3u;
+    return k == 0u ? q.x : (k == 1u ? q.y : (k == 2u ? q.z : q.w));
+}
+uint ShapeU16(uint b) {
+    const uint w = ShapeU32(b & ~3u);
+    return (b & 2u) ? (w >> 16) : (w & 0xFFFFu);
+}
+float ShapeI16(uint b) { return float(int(ShapeU16(b) << 16) >> 16); }
+
+static const uint kTaskEdges = 32u, kTaskTris = 64u;   // MIRRORS BuildingLayer::kTaskEdges, kTaskTris
+[outputtopology("triangle")]
+[numthreads(64, 1, 1)]
+void MsShape(uint gi : SV_GroupIndex, uint3 gid : SV_GroupID, out vertices VsOut verts[192],
+             out indices uint3 tris[64]) {
+    const uint t = gid.x + gid.y * 65535u;
+    const bool live = t < gBdMesh.z;
+    const uint4 tk = gWalk[gBdMesh.y + (min(t, max(gBdMesh.z, 1u) - 1u) >> 1)];
+    const uint inst = (t & 1u) ? tk.z : tk.x, code = (t & 1u) ? tk.w : tk.y;
+    const uint ib = gBdMesh.x + inst * 4u;
+    const float4 r0 = asfloat(gWalk[ib]), r1 = asfloat(gWalk[ib + 1u]), r2 = asfloat(gWalk[ib + 2u]),
+                 r3 = asfloat(gWalk[ib + 3u]);
+    const float3 c = r0.xyz, E = r1.xyz, N = r2.xyz, U = r3.xyz;
+    const uint addr = gWalk[ib + 2u].w;
+    const uint w0 = ShapeU32(addr), w1 = ShapeU32(addr + 4u);
+    const uint nVerts = w0 & 0xFFFFu, nTris = w0 >> 16, nRings = w1 & 0xFFu, flags = (w1 >> 8) & 0xFFu;
+    const float bottom = asfloat(ShapeU32(addr + 8u)), top = asfloat(ShapeU32(addr + 12u));
+    const uint ringAt = addr + 16u, xyAt = ringAt + 2u * nRings, triAt = xyAt + 4u * nVerts;
+    const float unit = (flags & 2u) ? 1.0f : 0.1f;
+    const float part = (flags & 1u) ? 2.0f : 0.0f;
+    const bool roof = (code >> 31) != 0u;
+    const uint first = (code & 0x7FFFFFFFu) * (roof ? kTaskTris : kTaskEdges);
+    const uint total = roof ? nTris : nVerts;
+    const uint n = live && first < total ? min(roof ? kTaskTris : kTaskEdges, total - first) : 0u;
+    // One count for the group, set before any output (the validator's rule): 4 vertices and 2
+    // triangles an edge, or 3 and 1 a roof triangle.
+    SetMeshOutputCounts(roof ? n * 3u : n * 4u, roof ? n : n * 2u);
+    if (gi >= n) return;
+    VsOut o;
+    o.alpha = r0.w * saturate((gBdTime.x - r1.w) / max(gBdTime.y, 1e-3f));   // the page's fade-in, as VsBox
+    if (!roof) {   // the walls: edge e from its vertex to its ring's next
+        const uint e = first + gi;
+        uint start = 0u, len = 0u;
+        for (uint r = 0u; r < nRings; ++r) {
+            len = ShapeU16(ringAt + 2u * r);
+            if (e < start + len) break;
+            start += len;
+        }
+        const uint f = (e + 1u < start + len) ? e + 1u : start;
+        const float2 a = float2(ShapeI16(xyAt + 4u * e), ShapeI16(xyAt + 4u * e + 2u)) * unit;
+        const float2 b = float2(ShapeI16(xyAt + 4u * f), ShapeI16(xyAt + 4u * f + 2u)) * unit;
+        const float2 d = b - a;
+        const float l = length(d);
+        const float2 out2 = l > 1e-4f ? float2(d.y, -d.x) / l : float2(0.0f, 0.0f);   // the edge's right: out
+        o.n = out2.x * E + out2.y * N;
+        o.col = kPalette[uint(part)] * gBdOrigin.w;
+        const float2 xy[4] = {a, b, b, a};
+        const float zz[4] = {bottom, bottom, top, top};
+        [unroll] for (uint k = 0u; k < 4u; ++k) {
+            o.rel = gBdOrigin.xyz + c + xy[k].x * E + xy[k].y * N + zz[k] * U;
+            o.pos = mul(float4(o.rel, 1.0f), gViewProj);
+            verts[gi * 4u + k] = o;
+        }
+        tris[gi * 2u] = uint3(gi * 4u, gi * 4u + 1u, gi * 4u + 2u);
+        tris[gi * 2u + 1u] = uint3(gi * 4u, gi * 4u + 2u, gi * 4u + 3u);
+    } else {       // the roof: its triangle at the top
+        o.n = U;
+        o.col = kPalette[uint(part) + 1u] * gBdOrigin.w;
+        [unroll] for (uint k = 0u; k < 3u; ++k) {
+            const uint v = ShapeU16(triAt + 6u * (first + gi) + 2u * k);
+            const float2 q = float2(ShapeI16(xyAt + 4u * v), ShapeI16(xyAt + 4u * v + 2u)) * unit;
+            o.rel = gBdOrigin.xyz + c + q.x * E + q.y * N + top * U;
+            o.pos = mul(float4(o.rel, 1.0f), gViewProj);
+            verts[gi * 3u + k] = o;
+        }
+        tris[gi] = uint3(gi * 3u, gi * 3u + 1u, gi * 3u + 2u);
+    }
 }
 
 float4 PsMain(VsOut i) : SV_Target {

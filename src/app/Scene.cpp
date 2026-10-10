@@ -363,6 +363,7 @@ bool ReadScene(const JsonValue& doc, Scene& out, std::string* why) {
             r.F64("radius", l.radius);
             r.Str("lod", l.lod);
             r.F64("lodPixels", l.lodPixels);
+            r.Bool("field", l.field);
             if (!ok) return false;
             out.layers.push_back(std::move(l));
         }

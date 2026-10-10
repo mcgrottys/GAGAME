@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <mutex>
+#include <map>
 
 namespace ga {
 
@@ -71,6 +73,16 @@ void Gpu::Init(HWND hwnd, uint32_t width, uint32_t height, bool wantDebugLayer,
         }
     }
 
+    // DRED, before the device: on a lost device it names the last op each list finished and
+    // the allocation a fault touched. Cheap (auto-breadcrumbs), and needs no debug layer.
+    {
+        Com<ID3D12DeviceRemovedExtendedDataSettings> dred;
+        if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred)))) {
+            dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+        }
+    }
+
     GA_CHECK(CreateDXGIFactory2(factoryFlags, IID_PPV_ARGS(&m_factory)));
 
     // Highest-performance adapter that can actually make a device. Iterating rather than taking
@@ -88,6 +100,29 @@ void Gpu::Init(HWND hwnd, uint32_t width, uint32_t height, bool wantDebugLayer,
         if (SUCCEEDED(D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0,
                                         IID_PPV_ARGS(&m_device)))) {
             m_dedicatedVram = ad.DedicatedVideoMemory;
+            adapter.As(&m_adapter3);
+            // The debug layer's own words into OUR log (a debugger is not attached in a run):
+            // warnings and up, each distinct message id at most 20 times.
+            if (wantDebugLayer) {
+                Com<ID3D12InfoQueue1> iq;
+                if (SUCCEEDED(m_device.As(&iq))) {
+                    DWORD cookie = 0;
+                    iq->RegisterMessageCallback(
+                        [](D3D12_MESSAGE_CATEGORY, D3D12_MESSAGE_SEVERITY sev, D3D12_MESSAGE_ID id, LPCSTR text, void*) {
+                            if (sev > D3D12_MESSAGE_SEVERITY_WARNING) return;
+                            static std::mutex mx;
+                            static std::map<int, int> seen;
+                            std::lock_guard<std::mutex> lk(mx);
+                            if (++seen[static_cast<int>(id)] > 20) return;
+                            static const char* kSev[] = {"CORRUPTION", "ERROR", "WARNING"};
+                            Log("[d3d12] %s #%d: %s", kSev[sev], static_cast<int>(id), text);
+                        },
+                        D3D12_MESSAGE_CALLBACK_FLAG_NONE, nullptr, &cookie);
+                    Log("[gpu] debug layer messages routed to the log (cookie %lu)", static_cast<unsigned long>(cookie));
+                } else {
+                    Log("[gpu] ID3D12InfoQueue1 unavailable: debug messages go to the debugger only");
+                }
+            }
             chosen = ad;
             chosenRank = i;
             Log("[gpu] adapter: %S  (%llu MB dedicated)", ad.Description,
@@ -912,6 +947,84 @@ std::vector<uint8_t> Gpu::ReadbackBuffer(ID3D12Resource* buf, uint64_t bytes,
     D3D12_RANGE none{0, 0};
     rb->Unmap(0, &none);
     return out;
+}
+
+namespace {
+const char* BreadcrumbOpName(D3D12_AUTO_BREADCRUMB_OP op) {
+    switch (op) {
+    case D3D12_AUTO_BREADCRUMB_OP_DRAWINSTANCED: return "DrawInstanced";
+    case D3D12_AUTO_BREADCRUMB_OP_DRAWINDEXEDINSTANCED: return "DrawIndexedInstanced";
+    case D3D12_AUTO_BREADCRUMB_OP_EXECUTEINDIRECT: return "ExecuteIndirect";
+    case D3D12_AUTO_BREADCRUMB_OP_DISPATCH: return "Dispatch";
+    case D3D12_AUTO_BREADCRUMB_OP_DISPATCHMESH: return "DispatchMesh";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYBUFFERREGION: return "CopyBufferRegion";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYTEXTUREREGION: return "CopyTextureRegion";
+    case D3D12_AUTO_BREADCRUMB_OP_COPYTILES: return "CopyTiles";
+    case D3D12_AUTO_BREADCRUMB_OP_RESOURCEBARRIER: return "ResourceBarrier";
+    case D3D12_AUTO_BREADCRUMB_OP_CLEARRENDERTARGETVIEW: return "ClearRTV";
+    case D3D12_AUTO_BREADCRUMB_OP_CLEARDEPTHSTENCILVIEW: return "ClearDSV";
+    case D3D12_AUTO_BREADCRUMB_OP_CLEARUNORDEREDACCESSVIEW: return "ClearUAV";
+    case D3D12_AUTO_BREADCRUMB_OP_PRESENT: return "Present";
+    default: return nullptr;
+    }
+}
+}  // namespace
+
+void Gpu::ReportDeviceLost() const {
+    if (m_adapter3) {
+        DXGI_QUERY_VIDEO_MEMORY_INFO loc{}, non{};
+        m_adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &loc);
+        m_adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL, &non);
+        Log("[crash] VRAM: local %llu of %llu MB budget, non-local %llu of %llu MB",
+            static_cast<unsigned long long>(loc.CurrentUsage >> 20), static_cast<unsigned long long>(loc.Budget >> 20),
+            static_cast<unsigned long long>(non.CurrentUsage >> 20), static_cast<unsigned long long>(non.Budget >> 20));
+    }
+    if (!m_device) return;
+    Com<ID3D12DeviceRemovedExtendedData> dred;
+    if (FAILED(m_device.As(&dred))) {
+        Log("[crash] DRED unavailable on this device");
+        return;
+    }
+    D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT bc{};
+    if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput(&bc))) {
+        int lists = 0;
+        for (const D3D12_AUTO_BREADCRUMB_NODE* n = bc.pHeadAutoBreadcrumbNode; n && lists < 64; n = n->pNext, ++lists) {
+            const uint32_t count = n->BreadcrumbCount;
+            const uint32_t done = n->pLastBreadcrumbValue ? *n->pLastBreadcrumbValue : 0u;
+            if (done >= count) continue;   // this list finished: not where the GPU stopped
+            Log("[crash] DRED list '%s' on queue '%s': %u of %u ops done",
+                n->pCommandListDebugNameA ? n->pCommandListDebugNameA : "?",
+                n->pCommandQueueDebugNameA ? n->pCommandQueueDebugNameA : "?", done, count);
+            // The dispatch it stopped in, counted within its scope: DispatchMeshes since the last BeginEvent.
+            if (done < count && n->pCommandHistory[done] == D3D12_AUTO_BREADCRUMB_OP_DISPATCHMESH) {
+                uint32_t k = 0;
+                for (uint32_t i = done; i-- > 0;) {
+                    if (n->pCommandHistory[i] == D3D12_AUTO_BREADCRUMB_OP_BEGINEVENT) break;
+                    if (n->pCommandHistory[i] == D3D12_AUTO_BREADCRUMB_OP_DISPATCHMESH) ++k;
+                }
+                Log("[crash] the GPU stopped in DispatchMesh #%u of its scope", k);
+                if (onLostDispatch) onLostDispatch(k);
+            }
+            const uint32_t lo = done > 6u ? done - 6u : 0u, hi = (std::min)(count, done + 3u);
+            for (uint32_t i = lo; i < hi; ++i) {
+                const char* name = BreadcrumbOpName(n->pCommandHistory[i]);
+                Log("[crash]   %s op %u: %s (%d)", i == done ? ">>" : "  ", i, name ? name : "other",
+                    static_cast<int>(n->pCommandHistory[i]));
+            }
+        }
+    }
+    D3D12_DRED_PAGE_FAULT_OUTPUT pf{};
+    if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&pf)) && pf.PageFaultVA) {
+        Log("[crash] DRED page fault at VA 0x%llx", static_cast<unsigned long long>(pf.PageFaultVA));
+        int k = 0;
+        for (const D3D12_DRED_ALLOCATION_NODE* a = pf.pHeadExistingAllocationNode; a && k < 16; a = a->pNext, ++k)
+            Log("[crash]   live near it: %S", a->ObjectNameW ? a->ObjectNameW : L"?");
+        k = 0;
+        for (const D3D12_DRED_ALLOCATION_NODE* a = pf.pHeadRecentFreedAllocationNode; a && k < 16; a = a->pNext, ++k)
+            Log("[crash]   freed near it: %S", a->ObjectNameW ? a->ObjectNameW : L"?");
+    } else {
+        Log("[crash] DRED: no page fault recorded (a timeout, not a bad address)");
+    }
 }
 
 }  // namespace ga

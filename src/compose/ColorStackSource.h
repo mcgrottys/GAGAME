@@ -85,6 +85,7 @@ public:
         return true;
     }
     int OwnMip(const Lattice& l) const override { return m_src ? m_src->OwnMip(l) : -1; }
+    bool LevelsOwn() const override { return m_src && m_src->LevelsOwn(); }
     int FinestMip(const Lattice& l, double a, double b, double c, double d) const override {
         return m_src ? m_src->FinestMip(l, a, b, c, d) : -1;
     }

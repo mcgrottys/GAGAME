@@ -1,6 +1,7 @@
 #include "compose/BuildingLod.h"
 
 #include "compose/BuildingMoments.h"
+#include "compose/BuildingShape.h"
 #include "core/Common.h"
 #include "core/Json.h"
 
@@ -10,6 +11,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -34,6 +36,9 @@ struct Item {
     int L, x, y;
     LodBuilding rec;
     float rho;
+    uint32_t arena = 0;           // its shape: arenas[arena][off, off + len); len 0 = none
+    uint32_t len = 0;
+    uint64_t off = 0;
 };
 
 // One solid's moment box and its record; false for a solid with no volume.
@@ -152,13 +157,14 @@ bool BuildBuildingLod(const BuildingStack& stack, const std::string& dir, const 
         if (log) *log += "no cells to box\n";
         return false;
     }
-    std::ofstream nf[lod::kLevels], bf[lod::kLevels];
+    std::ofstream nf[lod::kLevels], bf[lod::kLevels], sf[lod::kLevels];
     std::vector<LodPage> pages[lod::kLevels];
-    int64_t nodesOut[lod::kLevels] = {}, bldsOut[lod::kLevels] = {};
+    int64_t nodesOut[lod::kLevels] = {}, bldsOut[lod::kLevels] = {}, shapesOut[lod::kLevels] = {};
     for (int L = lod::kLmin; L <= lod::kLmax; ++L) {
         nf[Idx(L)].open(LevelPath(dir, 'N', L, ".bin"), std::ios::binary | std::ios::trunc);
         bf[Idx(L)].open(LevelPath(dir, 'B', L, ".bin"), std::ios::binary | std::ios::trunc);
-        if (!nf[Idx(L)] || !bf[Idx(L)]) {
+        sf[Idx(L)].open(LevelPath(dir, 'S', L, ".bin"), std::ios::binary | std::ios::trunc);
+        if (!nf[Idx(L)] || !bf[Idx(L)] || !sf[Idx(L)]) {
             if (log) *log += "cannot write in " + dir + "\n";
             return false;
         }
@@ -176,9 +182,11 @@ bool BuildBuildingLod(const BuildingStack& stack, const std::string& dir, const 
         std::mutex mx;
         std::vector<Item> items;
         std::vector<std::thread> pool;
+        std::vector<std::vector<uint8_t>> arenas(threads);   // each thread's shapes, kept to the band's end
         for (int t = 0; t < threads; ++t) {
-            pool.emplace_back([&] {
+            pool.emplace_back([&, t] {
                 std::vector<Item> mine;
+                std::vector<uint8_t>& arena = arenas[t];
                 for (size_t i; (i = next.fetch_add(1)) < b;) {
                     const int cx = cells[i].first, cy = cells[i].second;
                     const double x0 = cx * lod::kDetailDeg, y0 = cy * lod::kDetailDeg;
@@ -188,6 +196,12 @@ bool BuildBuildingLod(const BuildingStack& stack, const std::string& dir, const 
                     for (const BuildingSolid& s : ss) {
                         Item it{};
                         if (!BoxItem(s, cx, cy, it)) continue;
+                        // Its own form about the centroid its record carries (BuildingShape.h).
+                        it.arena = static_cast<uint32_t>(t);
+                        it.off = arena.size();
+                        if (EncodeShape(s, it.rec.lat7 * 1e-7, it.rec.lon7 * 1e-7, arena)) {
+                            it.len = static_cast<uint32_t>(arena.size() - it.off);
+                        }
                         // A centroid just over the band's edge stays in the band (the tree is loose).
                         const int rows = 1 << (lod::kLmax - it.L);
                         it.y = std::clamp(it.y, band * rows, (band + 1) * rows - 1);
@@ -202,8 +216,10 @@ bool BuildBuildingLod(const BuildingStack& stack, const std::string& dir, const 
         st.solids += solids.load();
         st.cells += b - a;
         st.kept += items.size();
-        std::sort(items.begin(), items.end(),
-                  [](const Item& p, const Item& q) { return std::tie(p.L, p.y, p.x) < std::tie(q.L, q.y, q.x); });
+        // By node, and within a node the largest first: the walk stops at the first under a pixel.
+        std::sort(items.begin(), items.end(), [](const Item& p, const Item& q) {
+            return std::make_tuple(p.L, p.y, p.x, -p.rho) < std::make_tuple(q.L, q.y, q.x, -q.rho);
+        });
         // 2. The tree, finest level first: a node's own fold from its items, its descendants' from
         // its children's (own + desc) moved into its frame -- FOLD and FRAME.
         struct Acc {
@@ -277,11 +293,20 @@ bool BuildBuildingLod(const BuildingStack& stack, const std::string& dir, const 
             std::sort(v.begin(), v.end(), [&](const Acc& p, const Acc& q) { return key(p) < key(q); });
             for (size_t i = 0; i < v.size();) {
                 const int py = FloorDiv(v[i].y, PY), px = FloorDiv(v[i].x, lod::kPageX);
-                LodPage pg{py, px, nodesOut[Idx(L)], 0, bldsOut[Idx(L)], 0};
+                LodPage pg{py, px, nodesOut[Idx(L)], 0, bldsOut[Idx(L)], 0, shapesOut[Idx(L)], 0};
                 for (; i < v.size() && FloorDiv(v[i].y, PY) == py && FloorDiv(v[i].x, lod::kPageX) == px; ++i) {
                     v[i].node.ownFirst = bldsOut[Idx(L)];
                     for (size_t k = v[i].i0; k < v[i].i1; ++k) {
                         bf[Idx(L)].write(reinterpret_cast<const char*>(&items[k].rec), sizeof(LodBuilding));
+                        // One shape record a building: its own, or an empty head (it keeps its box).
+                        static const ShapeHead kNone{};
+                        if (items[k].len) {
+                            sf[Idx(L)].write(reinterpret_cast<const char*>(arenas[items[k].arena].data() + items[k].off), items[k].len);
+                            shapesOut[Idx(L)] += items[k].len;
+                        } else {
+                            sf[Idx(L)].write(reinterpret_cast<const char*>(&kNone), sizeof(kNone));
+                            shapesOut[Idx(L)] += sizeof(kNone);
+                        }
                     }
                     bldsOut[Idx(L)] += v[i].i1 - v[i].i0;
                     nf[Idx(L)].write(reinterpret_cast<const char*>(&v[i].node), sizeof(LodNode));
@@ -290,6 +315,7 @@ bool BuildBuildingLod(const BuildingStack& stack, const std::string& dir, const 
                 }
                 pg.nodeCount = nodesOut[Idx(L)] - pg.nodeFirst;
                 pg.bldCount = bldsOut[Idx(L)] - pg.bldFirst;
+                pg.shapeBytes = shapesOut[Idx(L)] - pg.shapeFirst;
                 pages[Idx(L)].push_back(pg);
             }
             st.nodes[Idx(L)] += v.size();
@@ -303,6 +329,7 @@ bool BuildBuildingLod(const BuildingStack& stack, const std::string& dir, const 
     for (int L = lod::kLmin; L <= lod::kLmax; ++L) {
         nf[Idx(L)].close();
         bf[Idx(L)].close();
+        sf[Idx(L)].close();
         std::ofstream fi(LevelPath(dir, 'P', L, ".idx"), std::ios::binary | std::ios::trunc);
         fi.write(reinterpret_cast<const char*>(pages[Idx(L)].data()),
                  static_cast<std::streamsize>(pages[Idx(L)].size() * sizeof(LodPage)));
@@ -312,7 +339,7 @@ bool BuildBuildingLod(const BuildingStack& stack, const std::string& dir, const 
         }
     }
     std::ostringstream m;
-    m << "{\n  \"format\": \"GALOD03\",\n  \"lmin\": " << lod::kLmin << ",\n  \"lmax\": " << lod::kLmax
+    m << "{\n  \"format\": \"GALOD04\",\n  \"lmin\": " << lod::kLmin << ",\n  \"lmax\": " << lod::kLmax
       << ",\n  \"detailDeg\": " << lod::kDetailDeg << ",\n  \"sources\": [";
     for (size_t k = 0; k < stack.Sources(); ++k) m << (k ? ", " : "") << "\"" << stack.Name(k) << "\"";
     m << "],\n  \"cells\": " << st.cells << ",\n  \"solids\": " << st.solids << ",\n  \"kept\": " << st.kept << "\n}\n";
@@ -334,15 +361,19 @@ bool BuildingLodFile::Open(const std::string& dir, std::string* why) {
     ss << f.rdbuf();
     std::string err;
     const JsonValue m = JsonParser::Parse(ss.str(), &err);
-    if (!err.empty() || m.Str("format") != "GALOD03") {
-        if (why) *why = "not a GALOD03 manifest (rebuild it: --tool building-lod)" + (err.empty() ? "" : ": " + err);
+    const std::string fmt = m.Str("format");
+    m_format = fmt == "GALOD04" ? 4 : fmt == "GALOD03" ? 3 : 0;
+    if (!err.empty() || !m_format) {
+        if (why) *why = "not a GALOD03/04 manifest (rebuild it: --tool building-lod)" + (err.empty() ? "" : ": " + err);
         return false;
     }
+    // A GALOD03 page is a GALOD04 page's first 40 bytes: read as such, it has no shapes.
+    const size_t rec = m_format >= 4 ? sizeof(LodPage) : offsetof(LodPage, shapeFirst);
     for (int L = lod::kLmin; L <= lod::kLmax; ++L) {
         std::ifstream fi(LevelPath(dir, 'P', L, ".idx"), std::ios::binary);
         LodPage p{};
         m_idx[Idx(L)].clear();
-        while (fi.read(reinterpret_cast<char*>(&p), sizeof(p))) m_idx[Idx(L)].push_back(p);
+        while (fi.read(reinterpret_cast<char*>(&p), static_cast<std::streamsize>(rec))) m_idx[Idx(L)].push_back(p);
     }
     m_ok = true;
     return true;
@@ -365,6 +396,15 @@ bool BuildingLodFile::Read(int L, const LodPage& p, std::vector<LodNode>& nodes,
     fb.seekg(static_cast<std::streamoff>(p.bldFirst * sizeof(LodBuilding)));
     return fn.read(reinterpret_cast<char*>(nodes.data()), static_cast<std::streamsize>(nodes.size() * sizeof(LodNode))) &&
            (blds.empty() || fb.read(reinterpret_cast<char*>(blds.data()), static_cast<std::streamsize>(blds.size() * sizeof(LodBuilding))));
+}
+
+bool BuildingLodFile::ReadShapes(int L, const LodPage& p, std::vector<uint8_t>& shapes) const {
+    shapes.clear();
+    if (m_format < 4 || p.shapeBytes <= 0) return m_format >= 4;
+    shapes.resize(static_cast<size_t>(p.shapeBytes));
+    std::ifstream fs(LevelPath(m_dir, 'S', L, ".bin"), std::ios::binary);
+    fs.seekg(static_cast<std::streamoff>(p.shapeFirst));
+    return static_cast<bool>(fs.read(reinterpret_cast<char*>(shapes.data()), static_cast<std::streamsize>(shapes.size())));
 }
 
 }  // namespace ga

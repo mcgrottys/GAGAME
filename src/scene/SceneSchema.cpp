@@ -673,7 +673,10 @@ const Schema& BuildingsLayerSchema() {
             .BindPath("lod", kBuildings.lod,
                       "the folded tree of buildings (docs/BUILDING_LOD.md), built by --tool building-lod; \"\" = none", R)
             .Bind("lodPixels", kBuildings.lodPixels, Q::Dimensionless, "px",
-                  "a building is drawn on its own while it covers this many pixels; smaller ones are folded into their node's box", R);
+                  "a building is drawn on its own from this many pixels across (faded in to twice that); narrower ones are the field's", R)
+            .Bind("field", kBuildings.field,
+                  "the buildings narrower than a pixel as scalars on the ground (compose/BuildingField.h): their walls "
+                  "seen at an angle; needs `lod`", R);
         return sc;
     }();
     return *s;

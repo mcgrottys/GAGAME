@@ -1,4 +1,5 @@
 #include "core/ThreadManager.h"
+#include "core/CrashTrace.h"
 
 #include <algorithm>
 
@@ -85,6 +86,7 @@ void ThreadManager::Submit(Lane lane, const char* tag, std::function<void()> fn)
 }
 
 void ThreadManager::Worker() {
+    ga::InstallThreadCrashTrace();
     // Every pool thread is a COM apartment for the life of the pool. GoogleTileProvider decodes
     // PNGs with WIC on whatever thread runs the provider, and used to do a thread_local
     // CoInitializeEx it never unwound (TileProviders.cpp). One init here, one uninit at exit,

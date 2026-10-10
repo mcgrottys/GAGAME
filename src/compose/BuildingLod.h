@@ -54,10 +54,11 @@ struct LodNode {            // 88 bytes
     LodBox own;             // the fold of its own buildings (hz 0 = none)
     LodBox desc;            // the fold of every descendant's (hz 0 = none)
 };
-struct LodPage {            // 40 bytes
+struct LodPage {            // 56 bytes (GALOD04; a GALOD03 page is the first 40, with no shapes)
     int32_t py, px;
     int64_t nodeFirst, nodeCount;
     int64_t bldFirst, bldCount;
+    int64_t shapeFirst, shapeBytes;   // its buildings' shapes in S<L>.bin, one record each, in order
 };
 #pragma pack(pop)
 
@@ -91,10 +92,14 @@ public:
     bool Valid() const { return m_ok; }
     const LodPage* Find(int L, int px, int py) const;
     bool Read(int L, const LodPage& p, std::vector<LodNode>& nodes, std::vector<LodBuilding>& blds) const;
+    // GALOD04: the page's shape records (compose/BuildingShape.h), one a building in B order.
+    bool ReadShapes(int L, const LodPage& p, std::vector<uint8_t>& shapes) const;
+    bool HasShapes() const { return m_format >= 4; }
     size_t Pages(int L) const { return m_idx[L - lod::kLmin].size(); }
 
 private:
     bool m_ok = false;
+    int m_format = 0;
     std::string m_dir;
     std::vector<LodPage> m_idx[lod::kLevels];
 };

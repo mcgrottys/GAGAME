@@ -2028,8 +2028,8 @@ void FrameLoop::ApplyWindowSteps(const std::vector<SurfaceFrame::Moved>& moved) 
     }
     if (moved.empty()) return;
     // PHASE B2: the four tenants that share the windows (slice i the same ground in all).
-    const hal::Tenant* tenants[4] = {&m_A.colorTenant, &m_A.landseaTenant, &m_A.heightTenant,
-                                     &m_A.exposureTenant};
+    const hal::Tenant* tenants[5] = {&m_A.colorTenant, &m_A.landseaTenant, &m_A.heightTenant,
+                                     &m_A.exposureTenant, &m_A.buildingTenant};
     for (const SurfaceFrame::Moved& mv : moved) {
         for (const hal::Tenant* tp : tenants) {
             hal::Tenant& t = *const_cast<hal::Tenant*>(tp);
@@ -4745,6 +4745,7 @@ int FrameLoop::Finish() {
             static_cast<unsigned long long>(m_windowLeft), static_cast<unsigned long long>(m_windowKept),
             static_cast<unsigned long long>(m_windowKeptMoved));
         if (m_A.megaTree) Log("[eye-windows] the colour tree this run:\n%s", m_A.megaTree->Stats().c_str());
+        if (m_A.bldFieldTree) Log("[buildings] the field's tree this run:\n%s", m_A.bldFieldTree->Stats().c_str());
     }
     // THE SHUTDOWN TRAIL (core/ExitTrail.h): a flushed line before every phase from here to the
     // last destructor, so a death in teardown names its phase.

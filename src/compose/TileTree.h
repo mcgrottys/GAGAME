@@ -1116,7 +1116,7 @@ private:
         lap(usPublish, nPublish);
         // Outside the stripe: FoldUp takes the PARENT's. A node with an own mip folds nothing
         // upward: its parents are folded whole, when asked (above).
-        if (ownMip < 0) FoldUp(frame, tag, r, out);
+        if (ownMip < 0 && !m_node->LevelsOwn()) FoldUp(frame, tag, r, out);
         lap(usFoldUp, nFoldUp);
         return Status::Content;
     }

@@ -29,16 +29,17 @@
 //  Drawn with no culling: a footprint's winding is the file's, and a solid's inside is occluded by
 //  its own walls anyway. Procedural fetch by SV_VertexID, as every layer here (no input assembler).
 //
-//  THE FOLDED TREE (docs/BUILDING_LOD.md, compose/BuildingLod.h): everything past what the detail
-//  cells draw. Its pages stream on the pool (each node's and building's box stood on the composed
-//  ground there, once), and a WALK of the loaded tree -- on the pool, again whenever the eye has
-//  moved, the view turned, a page landed or a detail cell came or went -- writes the boxes to draw:
-//  a node under kQuadPixels across draws its fold; else its own buildings one by one where each
-//  covers lodPixels (their fold where they do not) and its children are walked, or, where a child's
-//  page is not loaded yet, the fold of its descendants while the page is asked for, the largest on
-//  screen first. Every choice is per node at its own distance: no ring and no tile edge. A box
-//  whose detail cell is resident is not drawn (the cell's prisms are the building). The walk's
-//  boxes are one buffer and one draw, about the eye the walk stood at.
+//  THE RANKED TREE (docs/BUILDING_LOD.md, compose/BuildingLod.h): everything past what the detail
+//  cells draw. The tree files a building by its size (level L holds radii in (Q/8, Q/4] of its quad
+//  Q), so its levels ARE the rank: the coarse pages carry the largest buildings and stream first,
+//  the smaller ones fill in between. Its pages stream on the pool (each building's box stood on the
+//  composed ground there, once), and a WALK of the loaded tree -- on the pool, again whenever the
+//  eye has moved, the view turned, a page landed or a detail cell came or went -- writes the boxes:
+//  ONE LAW PER BUILDING, at its own distance: its diameter in pixels s against lodPixels t, drawn
+//  with alpha (s - t) / t up to 1 (it fades in, it does not pop). A node whose largest possible
+//  building is under t is not walked (nor anything under it: all smaller). No fold, no ring, no
+//  tile edge. A box whose detail cell is resident is not drawn (the cell's prisms are the
+//  building). The walk's boxes are one buffer and one draw, about the eye the walk stood at.
 // ================================================================================================
 #pragma once
 
@@ -47,6 +48,8 @@
 #include "scene/Layer.h"
 
 #include <atomic>
+#include <chrono>
+#include <unordered_map>
 #include <functional>
 #include <map>
 #include <memory>
@@ -99,23 +102,27 @@ public:
     // queue ahead of it; the FINE one sends every other wanted page, the largest on screen first,
     // beside it (the detail cells are the fine stream's too, on their own kInFlight).
     static constexpr int kCoarseInFlight = 4, kFineInFlight = 4;
-    static constexpr double kQuadPixels = 4.0;          // a node's fold is drawn below this width
-    // A fold is drawn over its mass's spread, its footprints' coverage c shrinking it by c^kFoldShrink:
-    // 1/2 keeps the footprint's area (a lattice of gaps in a dense city, which aliases), 0 fills the
-    // spread as one mass at its roof height (what a dense block is, seen from far and low).
-    static constexpr double kFoldShrink = 0.0;
-    // ...and it is drawn with its coverage as its alpha, far to near: a fold shows roof over the share
-    // of its spread its footprints cover and the ground through the rest, so its colour is the patch's
-    // own average, not a slab of roof.
     static constexpr uint64_t kPageBytes = 1024ull << 20;   // the loaded pages' budget (CPU)
     static constexpr uint32_t kMaxBoxes = 2000000;
+    // THE SHAPES (GALOD04, compose/BuildingShape.h): a loaded page's footprints in one GPU pool,
+    // extruded by Buildings.hlsl MsShape one TASK at a time -- kTaskEdges walls or kTaskTris roof
+    // triangles of one building (MIRRORED there).
+    static constexpr uint64_t kPoolBytes = 768ull << 20;
+    // THE POOL IS SLOTS OF ONE SIZE: a page takes whole slots, so "does it fit" is a count of free
+    // slots and freeing can never fragment. A slot holds the largest record many times over (the
+    // Tokyo tree's largest is 5.3 KB); a record over a slot keeps its box, and is counted.
+    static constexpr uint32_t kSlotBytes = 64u << 10;
+    static constexpr uint32_t kSlots = static_cast<uint32_t>(kPoolBytes / kSlotBytes);
+    static constexpr uint32_t kTaskEdges = 32, kTaskTris = 64;
 
     // Mirrors `struct BuildingBox` in shaders/Buildings.hlsl: a moment box about the walk's origin.
     struct Box {
-        float c[3], alpha;  // centre, metres from the walk's origin, flat frame; the share it covers
-        float u[3], pad1;   // the long half-axis (direction x half-extent)
+        float c[3], alpha;  // centre, metres from the walk's origin, flat frame; its fade-in
+        float u[3], pad1;   // the long half-axis (direction x half-extent); pad1 its page's landing
         float v[3], pad2;   // the short half-axis
         float w[3], pad3;   // the up half-axis
+        // A SHAPED instance is the same 64 bytes: c the ground under the centroid, u v w the unit
+        // east, north and up there, pad2 its record's byte address in the shape pool.
     };
 
 private:
@@ -134,38 +141,67 @@ private:
     struct RtBox {
         double p[3];                    // centre, flat frame
         float u[3], v[3], w[3];         // half-axes
-        float alpha = 1.0f;             // a fold's coverage: 1 for a building
         bool valid = false;
     };
     struct RtNode {
         int x, y;
         uint32_t own0, ownN;            // its own buildings in the page's list
-        float rhoMin;
         double c[3];                    // the quad's centre on the ground, flat frame
         float rad;                      // a sphere about it holding the quad and its solids
-        RtBox own, desc, all;
-        Key ownCell, descCell, allCell; // the detail cell each fold's centroid stands in
+        bool kids;                      // anything stands under it
+        // THE DESCENDANTS' FOLD: the spread of everything under it, drawn at its coverage while the
+        // children's page is on its way -- what stands there is never a hole, only coarser.
+        RtBox desc;
+        float descCover = 0.0f;
+        Key descCell{INT32_MIN, INT32_MIN};   // the detail cell its centroid stands in
     };
     struct RtBld {
         RtBox box;
         Key cell;
         float rho;
+        // Its shape: the record's PACKED address -- its slot's ordinal in the page times kSlotBytes,
+        // plus its offset inside that slot (UINT32_MAX: none, the box is drawn) -- its counts, and the
+        // ground frame it stands in (the ground under the centroid).
+        uint32_t shapeOff = UINT32_MAX;
+        uint16_t nV = 0, nT = 0;
+        double g[3] = {};
+        float e[3] = {}, n[3] = {}, up[3] = {};
     };
     struct Page {
         int L = 0;
         std::vector<RtNode> nodes;
-        std::map<std::pair<int, int>, uint32_t> at;   // (x, y) -> node
+        std::unordered_map<uint64_t, uint32_t> at;   // QuadKey(x, y) -> node
+        static uint64_t QuadKey(int x, int y) { return (uint64_t(uint32_t(x)) << 32) | uint32_t(y); }
+        // The finest level's pages: per PARENT quad, the largest radius among its four children's own
+        // buildings -- so a parent skips them all with one lookup when even that is under a pixel.
+        std::unordered_map<uint64_t, float> parentRho;
         std::vector<RtBld> blds;
         uint64_t bytes = 0;
+        GpuBuffer shapeStaging;         // its shape records packed into whole slots, staged on the pool thread
+        std::vector<uint32_t> slotUsed; // bytes used in each of its slots (no record crosses a slot)
+        std::vector<uint32_t> slots;    // the pool slots holding them once it landed (empty: no shapes drawn)
+        std::vector<uint8_t> packed;    // the same bytes on the CPU: what a lost device's report reads back
+        uint32_t tooBig = 0;            // records larger than a slot: those buildings keep their boxes
+        float landed = 0.0f;            // the layer's clock (s) when it joined the tree: its boxes fade in from here
     };
     using PageKey = std::tuple<int, int, int>;   // (level, px, py)
+    struct DrawCpu {                    // a walk's shaped instances and tasks, as the GPU got them
+        std::vector<Box> inst;
+        std::vector<uint32_t> tasks;    // two uints a task: instance, code
+    };
     struct Walked {                     // a walk's answer
         double origin[3];
-        uint32_t count = 0;
+        uint32_t count = 0;             // boxes, then insts shaped instances, then tasks (one buffer)
+        uint32_t insts = 0, tasks = 0;
         GpuBuffer staging, vb;
         std::vector<std::pair<double, PageKey>> wants;   // pages asked for, by pixels (largest first)
         std::vector<PageKey> used;
-        uint64_t nodes = 0, folds = 0, singles = 0;
+        std::vector<std::shared_ptr<const Page>> hold;   // its pages: their pool ranges stay while it is drawn
+        std::shared_ptr<const DrawCpu> cpu;
+        uint64_t nodes = 0, singles = 0, fading = 0;
+        uint64_t cellsVersion = 0;      // the detail cells it skipped were these
+        double msVisit = 0.0, msSort = 0.0, msBuf = 0.0;   // the walk's three phases, for its log line
+
         double ms = 0.0;
     };
     struct Shared {                     // what a pool job and the layer both hold
@@ -174,6 +210,8 @@ private:
         std::vector<std::pair<PageKey, std::shared_ptr<Page>>> pagesDone;
         std::vector<Walked> walked;
         std::atomic<int> inflight{0}, pageInflight{0}, walking{0};
+        // THE WALK'S BUFFERS, REUSED: a walk takes a retired one at least its size before it makes one.
+        std::vector<GpuBuffer> freeStaging, freeBoxes;
         std::atomic<bool> cancel{false};
     };
     struct Cell {
@@ -184,6 +222,7 @@ private:
     struct Retired {
         GpuBuffer buf;
         uint64_t frame;
+        int pool = 0;   // 0 freed; 1, 2: back to the walk's staging / box free list (Shared)
     };
     // Distance (m) from a point to the cell's box over the sphere's surface, the eye's height
     // folded in: the one measure that both wants and drops.
@@ -208,6 +247,9 @@ private:
     struct Warm {
         Cell cell;
         uint64_t frame;   // when it went warm: the oldest leaves first
+        // THE HAND-OFF: the cells version its leaving made. Until a walk at least that new is on
+        // screen (m_drawnCells), the boxes drawn still skip this cell, so its prisms stay drawn.
+        uint64_t leftAt = 0;
     };
     std::map<Key, Warm> m_warm;
     uint64_t m_warmBytes = 0;
@@ -227,8 +269,39 @@ private:
     struct Drawn {
         double origin[3];
         GpuBuffer vb;
-        uint32_t count = 0;
+        uint32_t count = 0, insts = 0, tasks = 0;
+        std::shared_ptr<const DrawCpu> cpu;   // its instances and tasks, kept for a lost device's report
     } m_drawn;
+    // THE SHAPES' DRAW IN CHUNKS of kChunkGroups mesh groups, one DispatchMesh each: DRED then names
+    // the chunk the GPU stopped in, and DumpChunk names its buildings from the CPU's copy.
+    static constexpr uint32_t kChunkGroups = 16384;
+    struct DrawLog { uint64_t frame = 0; std::shared_ptr<const DrawCpu> cpu; };
+    DrawLog m_drawLog[3];
+    void DumpChunk(uint32_t k) const;
+    std::set<PageKey> m_drawnUsed;      // the pages the drawn walk reads: not evicted under it
+    // THE SHAPE POOL: one buffer, a heap SRV (StructuredBuffer<float4>), its free ranges.
+    Gpu* m_gpu = nullptr;
+    GpuBuffer m_pool;
+    uint32_t m_poolSrv = UINT32_MAX;
+    std::vector<uint32_t> m_freeSlots;   // the pool's free slots (a stack)
+    struct SlotsRetired {   // a dropped page's slots: free once no walk holds the page, then kRetireFrames on
+        std::vector<uint32_t> slots;
+        uint64_t frame;
+        std::weak_ptr<const Page> page;
+    };
+    std::vector<SlotsRetired> m_slotsRetired;
+    // Pages read and staged but waiting for slots: they land in order as room comes, and while any
+    // waits, no new page is asked for -- nothing is loaded that cannot land.
+    std::vector<std::pair<PageKey, std::shared_ptr<Page>>> m_roomWait;
+    uint64_t m_roomWaitFrames = 0, m_tooBig = 0;
+    uint32_t m_walkTasksMax = 0;   // the largest walk's mesh tasks so far (each new largest is logged)
+    std::vector<std::shared_ptr<const Page>> m_drawnHold;   // the drawn walk's pages (their slots wait on them)
+    hal::Pso m_psoShape;
+    uint64_t m_drawnCells = 0;          // the cells version the drawn boxes were walked against
+    // THE LAYER'S CLOCK (s): a page's landing and the frame's now, for the boxes' fade-in.
+    std::chrono::steady_clock::time_point m_t0 = std::chrono::steady_clock::now();
+    float Now() const { return std::chrono::duration<float>(std::chrono::steady_clock::now() - m_t0).count(); }
+    static constexpr float kPageFadeS = 0.6f;   // a page's buildings come in over this, not in one frame
     // The last walk's inputs: a new one starts when they have moved.
     double m_walkEye[3] = {1e30, 1e30, 1e30}, m_walkFwd[3] = {0, 0, 0};
     uint64_t m_walkCells = ~0ull, m_walkPages = ~0ull;

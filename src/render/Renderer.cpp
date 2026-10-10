@@ -39,6 +39,7 @@ void Renderer::EnableGpuProfiler() {
     if (m_prof) return;
     m_prof = std::make_unique<GpuProfiler>();
     m_prof->Init(*m_gpu);
+    Log("[gpu] --gpu-time: timestamps around every pass; a frame over 100 ms on the GPU is logged as [gpu-slow]");
 }
 
 hal::RootLayout Renderer::SharedGraphicsLayout() {

@@ -13,6 +13,9 @@
 #include <dbghelp.h>
 
 #include <cstdio>
+#include <cstdlib>
+#include <csignal>
+#include <exception>
 
 #include "core/Common.h"
 
@@ -21,15 +24,11 @@
 namespace ga {
 namespace {
 
-LONG WINAPI OnCrash(EXCEPTION_POINTERS* ep) {
-    const DWORD code = ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionCode : 0;
-    Log("[crash] unhandled exception 0x%08lx -- stack:", static_cast<unsigned long>(code));
-
+void LogStack(CONTEXT ctx) {
     const HANDLE proc = GetCurrentProcess();
     SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
     SymInitialize(proc, nullptr, TRUE);
 
-    CONTEXT ctx = *ep->ContextRecord;
     STACKFRAME64 frame{};
     frame.AddrPC.Offset = ctx.Rip;
     frame.AddrPC.Mode = AddrModeFlat;
@@ -78,14 +77,65 @@ LONG WINAPI OnCrash(EXCEPTION_POINTERS* ep) {
                 static_cast<unsigned long long>(pc - modBase));
         }
     }
-    Log("[crash] end of stack (exit)");
+    Log("[crash] end of stack");
+}
+
+LONG WINAPI OnCrash(EXCEPTION_POINTERS* ep) {
+    const DWORD code = ep && ep->ExceptionRecord ? ep->ExceptionRecord->ExceptionCode : 0;
+    Log("[crash] unhandled exception 0x%08lx -- stack:", static_cast<unsigned long>(code));
+    LogStack(*ep->ContextRecord);
     return EXCEPTION_EXECUTE_HANDLER;   // terminate after reporting, no WER dialog stall
 }
 
 }  // namespace
 
+// An exception no one catches (a pool job's throw) ends in std::terminate -> abort, a fail-fast
+// (0xC0000409) the filter above never sees: name the exception before the process goes.
+[[noreturn]] void OnTerminate() {
+    const char* what = "(no exception in flight)";
+    try {
+        if (std::exception_ptr e = std::current_exception()) std::rethrow_exception(e);
+    } catch (const std::exception& ex) {
+        what = ex.what();
+    } catch (...) {
+        what = "(not a std::exception)";
+    }
+    Log("[crash] std::terminate on thread %lu: %s", static_cast<unsigned long>(GetCurrentThreadId()), what);
+    std::abort();
+}
+
+// The CRT's other fail-fasts (0xC0000409 again): an invalid parameter and abort() itself. Each is
+// named before the process goes, since neither passes the filter above.
+void OnInvalidParameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned, uintptr_t) {
+    Log("[crash] CRT invalid parameter on thread %lu", static_cast<unsigned long>(GetCurrentThreadId()));
+    std::abort();
+}
+
+// MSVC keeps the terminate handler PER THREAD: a pool worker's escaping exception ends in the
+// default terminate -> abort(), past OnTerminate. So abort() names the exception in flight on
+// its own thread, if any, and walks the stack it was called from.
+void OnAbort(int) {
+    const char* what = "(no exception in flight)";
+    try {
+        if (std::exception_ptr e = std::current_exception()) std::rethrow_exception(e);
+    } catch (const std::exception& ex) {
+        what = ex.what();
+    } catch (...) {
+        what = "(not a std::exception)";
+    }
+    Log("[crash] abort() on thread %lu: %s -- stack:", static_cast<unsigned long>(GetCurrentThreadId()), what);
+    CONTEXT ctx{};
+    RtlCaptureContext(&ctx);
+    LogStack(ctx);
+}
+
+void InstallThreadCrashTrace() { std::set_terminate(OnTerminate); }
+
 void InstallCrashTrace() {
     SetUnhandledExceptionFilter(OnCrash);
+    std::set_terminate(OnTerminate);
+    _set_invalid_parameter_handler(OnInvalidParameter);
+    std::signal(SIGABRT, OnAbort);
 }
 
 }  // namespace ga

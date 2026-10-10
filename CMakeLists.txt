@@ -73,6 +73,8 @@ add_executable(gagame
   src/compose/TileTreeTest.cpp
   src/compose/Sources.cpp
   src/compose/BuildingLod.cpp
+  src/compose/BuildingField.cpp
+  src/compose/BuildingShape.cpp
   src/compose/BuildingMoments.cpp
   src/compose/BuildingSolids.cpp
   src/compose/BuildingSolidsTest.cpp
